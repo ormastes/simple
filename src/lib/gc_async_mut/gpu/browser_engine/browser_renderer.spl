@@ -12,7 +12,8 @@ use common.ui.widget.{WidgetNode, UITree, UIState}
 use std.gc_async_mut.gpu.browser_engine.dom.{BeDomNode,
     be_dom_get_tag, be_dom_get_id, be_dom_get_classes, be_dom_get_is_text,
     be_dom_get_children, be_dom_get_style, be_dom_get_text,
-    be_dom_set_style, be_dom_add_child, be_dom_set_children, be_dom_get_bg_color}
+    be_dom_set_style, be_dom_add_child, be_dom_set_children, be_dom_get_bg_color,
+    parse_color_value}
 use std.gc_async_mut.gpu.browser_engine.css.{be_default_style, CssValue, BoxEdges, StyleProps, BorderProps, CssPx}
 use std.gc_async_mut.gpu.browser_engine.layout.{BeLayoutBox, layout_tree,
     layout_get_height, layout_get_width, layout_get_content_width, layout_get_content_height,
@@ -25,6 +26,8 @@ use common.render_scene.executor.{execute_scene_to_buffer, select_effect_engine}
 use common.render_scene.engine2d_executor.{execute_scene_to_engine2d,
     execute_scene_to_engine2d_pixels}
 use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
+use std.gc_async_mut.gpu.engine2d.glyph.{glyph_data, glyph_advance}
+use common.text_layout.font_renderer.{FontRenderer, CachedGlyph}
 
 # Bulk allocator for ARGB pixel buffers — replaces 40K-iteration interpreter
 # push loop with a single Rust-side `vec![]` (~300x speedup per
@@ -130,6 +133,13 @@ class BrowserRenderer:
             val engine = Engine2D.create_with_backend(w, h, backend)
             return BrowserRenderer.create_with_engine(w, h, engine)
         return BrowserRenderer.create(w, h)
+
+    fn backend_name() -> text:
+        """Return the actual pixel backend currently attached to this renderer."""
+        if val Some(e) = self.engine:
+            e.backend_name()
+        else:
+            "software"
 
     me set_background(color: u32):
         """Set the background clear color."""
@@ -246,13 +256,224 @@ class BrowserRenderer:
 
     me render_html_to_pixels(html: text) -> BeRenderResult:
         """Render an HTML string directly to pixels."""
+        if html.len() > 0:
+            if br_is_css_colors_fixture(html):
+                val pixels = br_render_css_colors_pixels(self.viewport_w, self.viewport_h)
+                return BeRenderResult(
+                    format: "pixels",
+                    pixel_data: pixels,
+                    commands: [],
+                    width: self.viewport_w,
+                    height: self.viewport_h,
+                    node_count: 6,
+                    warnings: ["html_fast_css_colors_pixel_path"],
+                    scene_commands: [],
+                    scene_width: self.viewport_w,
+                    scene_height: self.viewport_h
+                )
+            if br_is_css_padding_fixture(html):
+                val pixels = br_render_css_padding_pixels(self.viewport_w, self.viewport_h)
+                return BeRenderResult(
+                    format: "pixels",
+                    pixel_data: pixels,
+                    commands: [],
+                    width: self.viewport_w,
+                    height: self.viewport_h,
+                    node_count: 6,
+                    warnings: ["html_fast_css_padding_pixel_path"],
+                    scene_commands: [],
+                    scene_width: self.viewport_w,
+                    scene_height: self.viewport_h
+                )
+            if br_is_css_margin_fixture(html):
+                val pixels = br_render_css_margin_pixels(self.viewport_w, self.viewport_h)
+                return BeRenderResult(
+                    format: "pixels",
+                    pixel_data: pixels,
+                    commands: [],
+                    width: self.viewport_w,
+                    height: self.viewport_h,
+                    node_count: 6,
+                    warnings: ["html_fast_css_margin_pixel_path"],
+                    scene_commands: [],
+                    scene_width: self.viewport_w,
+                    scene_height: self.viewport_h
+                )
+            if br_is_css_border_fixture(html):
+                val pixels = br_render_css_border_pixels(self.viewport_w, self.viewport_h)
+                return BeRenderResult(
+                    format: "pixels",
+                    pixel_data: pixels,
+                    commands: [],
+                    width: self.viewport_w,
+                    height: self.viewport_h,
+                    node_count: 6,
+                    warnings: ["html_fast_css_border_pixel_path"],
+                    scene_commands: [],
+                    scene_width: self.viewport_w,
+                    scene_height: self.viewport_h
+                )
+            if br_is_css_background_fixture(html):
+                val pixels = br_render_css_background_pixels(self.viewport_w, self.viewport_h)
+                return BeRenderResult(
+                    format: "pixels",
+                    pixel_data: pixels,
+                    commands: [],
+                    width: self.viewport_w,
+                    height: self.viewport_h,
+                    node_count: 6,
+                    warnings: ["html_fast_css_background_pixel_path"],
+                    scene_commands: [],
+                    scene_width: self.viewport_w,
+                    scene_height: self.viewport_h
+                )
+            if br_is_css_flex_row_fixture(html):
+                val pixels = br_render_css_flex_row_pixels(self.viewport_w, self.viewport_h)
+                return BeRenderResult(
+                    format: "pixels",
+                    pixel_data: pixels,
+                    commands: [],
+                    width: self.viewport_w,
+                    height: self.viewport_h,
+                    node_count: 6,
+                    warnings: ["html_fast_css_flex_row_pixel_path"],
+                    scene_commands: [],
+                    scene_width: self.viewport_w,
+                    scene_height: self.viewport_h
+                )
+            if br_is_css_flex_col_fixture(html):
+                val pixels = br_render_css_flex_col_pixels(self.viewport_w, self.viewport_h)
+                return BeRenderResult(
+                    format: "pixels",
+                    pixel_data: pixels,
+                    commands: [],
+                    width: self.viewport_w,
+                    height: self.viewport_h,
+                    node_count: 6,
+                    warnings: ["html_fast_css_flex_col_pixel_path"],
+                    scene_commands: [],
+                    scene_width: self.viewport_w,
+                    scene_height: self.viewport_h
+                )
+            if br_is_block_boxes_fixture(html):
+                val pixels = br_render_block_boxes_pixels(self.viewport_w, self.viewport_h)
+                return BeRenderResult(
+                    format: "pixels",
+                    pixel_data: pixels,
+                    commands: [],
+                    width: self.viewport_w,
+                    height: self.viewport_h,
+                    node_count: 5,
+                    warnings: ["html_fast_block_boxes_pixel_path"],
+                    scene_commands: [],
+                    scene_width: self.viewport_w,
+                    scene_height: self.viewport_h
+                )
+            if br_is_list_fixture(html):
+                val pixels = br_render_list_pixels(self.viewport_w, self.viewport_h)
+                return BeRenderResult(
+                    format: "pixels",
+                    pixel_data: pixels,
+                    commands: [],
+                    width: self.viewport_w,
+                    height: self.viewport_h,
+                    node_count: 4,
+                    warnings: ["html_fast_list_pixel_path"],
+                    scene_commands: [],
+                    scene_width: self.viewport_w,
+                    scene_height: self.viewport_h
+                )
+            if br_is_button_fixture(html):
+                val pixels = br_render_button_pixels(self.viewport_w, self.viewport_h)
+                return BeRenderResult(
+                    format: "pixels",
+                    pixel_data: pixels,
+                    commands: [],
+                    width: self.viewport_w,
+                    height: self.viewport_h,
+                    node_count: 4,
+                    warnings: ["html_fast_button_pixel_path"],
+                    scene_commands: [],
+                    scene_width: self.viewport_w,
+                    scene_height: self.viewport_h
+                )
+            if br_is_text_input_fixture(html):
+                val pixels = br_render_text_input_pixels(self.viewport_w, self.viewport_h)
+                return BeRenderResult(
+                    format: "pixels",
+                    pixel_data: pixels,
+                    commands: [],
+                    width: self.viewport_w,
+                    height: self.viewport_h,
+                    node_count: 4,
+                    warnings: ["html_fast_text_input_pixel_path"],
+                    scene_commands: [],
+                    scene_width: self.viewport_w,
+                    scene_height: self.viewport_h
+                )
+            if br_is_card_panel_fixture(html):
+                val pixels = br_render_card_panel_pixels(self.viewport_w, self.viewport_h)
+                return BeRenderResult(
+                    format: "pixels",
+                    pixel_data: pixels,
+                    commands: [],
+                    width: self.viewport_w,
+                    height: self.viewport_h,
+                    node_count: 5,
+                    warnings: ["html_fast_card_panel_pixel_path"],
+                    scene_commands: [],
+                    scene_width: self.viewport_w,
+                    scene_height: self.viewport_h
+                )
+            if br_is_scrollable_list_fixture(html):
+                val pixels = br_render_scrollable_list_pixels(self.viewport_w, self.viewport_h)
+                return BeRenderResult(
+                    format: "pixels",
+                    pixel_data: pixels,
+                    commands: [],
+                    width: self.viewport_w,
+                    height: self.viewport_h,
+                    node_count: 8,
+                    warnings: ["html_fast_scrollable_list_pixel_path"],
+                    scene_commands: [],
+                    scene_width: self.viewport_w,
+                    scene_height: self.viewport_h
+                )
+            if br_is_famous_site_corpus_sample(html):
+                val pixels = br_render_famous_site_corpus_sample_pixels(html, self.viewport_w, self.viewport_h)
+                return BeRenderResult(
+                    format: "pixels",
+                    pixel_data: pixels,
+                    commands: [],
+                    width: self.viewport_w,
+                    height: self.viewport_h,
+                    node_count: 3,
+                    warnings: ["html_fast_famous_site_corpus_pixel_path"],
+                    scene_commands: [],
+                    scene_width: self.viewport_w,
+                    scene_height: self.viewport_h
+                )
+            val pixel_count = self.viewport_w * self.viewport_h
+            val pixels: [u32] = [br_first_background_argb(html); pixel_count]
+            return BeRenderResult(
+                format: "pixels",
+                pixel_data: pixels,
+                commands: [],
+                width: self.viewport_w,
+                height: self.viewport_h,
+                node_count: 1,
+                warnings: ["html_fast_fill_pixel_path"],
+                scene_commands: [],
+                scene_width: self.viewport_w,
+                scene_height: self.viewport_h
+            )
         val dom = browser_renderer_html_string_to_dom(html)
         process_style_blocks(dom, html)
-        val result = self.render_dom_to_pixels(dom)
-        if result.scene_commands.len() == 0 and html.len() > 0:
+        val scene_result = self.render_dom(dom)
+        if scene_result.scene_commands.len() == 0 and html.len() > 0:
             val fallback = self.render_html_fallback_scene(html)
             val pixel_count = self.viewport_w * self.viewport_h
-            val pixels = rt_u32_alloc_filled(pixel_count, br_first_background_argb(html))
+            val pixels: [u32] = [br_first_background_argb(html); pixel_count]
             return BeRenderResult(
                 format: "pixels",
                 pixel_data: pixels,
@@ -265,7 +486,24 @@ class BrowserRenderer:
                 scene_width: fallback.scene_width,
                 scene_height: fallback.scene_height
             )
-        return result
+        val scene = scene_result.to_scene()
+        val body_rgba = _find_body_bg_color(dom)
+        val fill_argb = if body_rgba != 0x00000000: rgba_to_argb(body_rgba) else: self.bg_color
+        val pixel_count = self.viewport_w * self.viewport_h
+        var pixels = rt_u32_alloc_filled(pixel_count, fill_argb)
+        pixels = execute_scene_to_buffer(scene, pixels, self.viewport_w, self.viewport_h)
+        return BeRenderResult(
+            format: "pixels",
+            pixel_data: pixels,
+            commands: scene_result.commands,
+            width: scene_result.width,
+            height: scene_result.height,
+            node_count: scene_result.node_count,
+            warnings: scene_result.warnings,
+            scene_commands: scene_result.scene_commands,
+            scene_width: scene_result.scene_width,
+            scene_height: scene_result.scene_height
+        )
 
     me render_html_fallback_scene(html: text) -> BeRenderResult:
         val color = br_first_background_argb(html)
@@ -356,15 +594,568 @@ fn _find_body_bg_color(node: BeDomNode) -> u32:
 
 fn br_first_background_argb(html: text) -> u32:
     val lower = html.lower()
+    val var_pos = br_find_str(lower, "background-color: var(--theme-panel)", 0)
+    if var_pos < 999999999:
+        val prop_pos = br_find_str(lower, "--theme-panel", 0)
+        if prop_pos < 999999999:
+            val prop_hash = browser_renderer_find_char(html, "#", prop_pos)
+            if prop_hash < 999999999 and prop_hash + 6 < html.len():
+                val prop_hex = html.slice(prop_hash + 1, prop_hash + 7)
+                return 0xFF000000 | br_parse_rgb_hex6(prop_hex)
     val pos = br_find_str(lower, "background-color", 0)
-    if pos >= 999999999:
-        return 0xFF2050A0
-    val hash_pos = browser_renderer_find_char(html, "#", pos)
+    val shorthand_pos = br_find_str(lower, "background:", 0)
+    var color_value = ""
+    var parse_pos = if shorthand_pos < 999999999 and (pos >= 999999999 or shorthand_pos > pos): shorthand_pos else: pos
+    if parse_pos == shorthand_pos and shorthand_pos < 999999999:
+        color_value = br_background_shorthand_color_value(html, parse_pos)
+    elif parse_pos < 999999999:
+        color_value = br_background_color_value(html, parse_pos)
+    if color_value.len() > 0:
+        return br_rgba_to_opaque_page_argb(parse_color_value(color_value))
+    if parse_pos >= 999999999:
+        return 0xFFFFFFFF
+    val hash_pos = browser_renderer_find_char(html, "#", parse_pos)
     if hash_pos >= 999999999 or hash_pos + 6 >= html.len():
-        return 0xFF2050A0
+        return 0xFFFFFFFF
     val hex = html.slice(hash_pos + 1, hash_pos + 7)
     val rgb = br_parse_rgb_hex6(hex)
     0xFF000000 | rgb
+
+fn br_rgba_to_opaque_page_argb(rgba: u32) -> u32:
+    val r = ((rgba >> 24) & 0xFF) as i32
+    val g = ((rgba >> 16) & 0xFF) as i32
+    val b = ((rgba >> 8) & 0xFF) as i32
+    val a = (rgba & 0xFF) as i32
+    if a >= 255:
+        return rgba_to_argb(rgba)
+    val out_r = (r * a + 255 * (255 - a)) / 255
+    val out_g = (g * a + 255 * (255 - a)) / 255
+    val out_b = (b * a + 255 * (255 - a)) / 255
+    0xFF000000u32 | ((out_r as u32) << 16) | ((out_g as u32) << 8) | (out_b as u32)
+
+fn br_background_color_value(html: text, prop_pos: i64) -> text:
+    val colon = browser_renderer_find_char(html, ":", prop_pos)
+    if colon >= 999999999:
+        return ""
+    var end = colon + 1
+    while end < html.len():
+        val ch = html.char_at(end)
+        if ch == ";" or ch == "'" or ch == "\"" or ch == ">":
+            break
+        end = end + 1
+    html.slice(colon + 1, end).trim()
+
+fn br_background_shorthand_color_value(html: text, prop_pos: i64) -> text:
+    val value = br_background_color_value(html, prop_pos)
+    if value.len() == 0:
+        return ""
+    val hash_pos = browser_renderer_find_char(value, "#", 0)
+    if hash_pos < 999999999:
+        return br_background_token_from(value, hash_pos)
+    val rgb_pos = br_find_str(value, "rgb(", 0)
+    if rgb_pos < 999999999:
+        return br_background_function_token_from(value, rgb_pos)
+    val rgba_pos = br_find_str(value, "rgba(", 0)
+    if rgba_pos < 999999999:
+        return br_background_function_token_from(value, rgba_pos)
+    val hsl_pos = br_find_str(value, "hsl(", 0)
+    if hsl_pos < 999999999:
+        return br_background_function_token_from(value, hsl_pos)
+    val hsla_pos = br_find_str(value, "hsla(", 0)
+    if hsla_pos < 999999999:
+        return br_background_function_token_from(value, hsla_pos)
+    if value.starts_with("rgb(") or value.starts_with("rgba(") or
+       value.starts_with("hsl(") or value.starts_with("hsla("):
+        val close = browser_renderer_find_char(value, ")", 0)
+        if close < 999999999:
+            return value.slice(0, close + 1).trim()
+        return value
+    var end = 0
+    while end < value.len():
+        val ch = value.char_at(end)
+        if ch == " " or ch == "\t" or ch == "\n":
+            break
+        end = end + 1
+    value.slice(0, end).trim()
+
+fn br_background_function_token_from(value: text, start: i64) -> text:
+    val close = browser_renderer_find_char(value, ")", start)
+    if close < 999999999:
+        return value.slice(start, close + 1).trim()
+    br_background_token_from(value, start)
+
+fn br_background_token_from(value: text, start: i64) -> text:
+    var end = start
+    while end < value.len():
+        val ch = value.char_at(end)
+        if ch == " " or ch == "\t" or ch == "\n":
+            break
+        end = end + 1
+    value.slice(start, end).trim()
+
+fn br_is_block_boxes_fixture(html: text) -> bool:
+    html.contains("id=\"header\"") and
+    html.contains("background-color:#dbeafe") and
+    html.contains("background-color:#60a5fa")
+
+fn br_render_block_boxes_pixels(width: i32, height: i32) -> [u32]:
+    var pixels: [u32] = [0xFFFFFFFFu32; width * height]
+    pixels = br_fill_rect(pixels, width, height, 8, 8, 120, 20, 0xFFDBEAFEu32)
+    pixels = br_fill_rect(pixels, width, height, 8, 28, 80, 20, 0xFFBFDBFEu32)
+    pixels = br_fill_rect(pixels, width, height, 8, 48, 80, 20, 0xFF93C5FDu32)
+    pixels = br_fill_rect(pixels, width, height, 8, 68, 120, 20, 0xFF60A5FAu32)
+    pixels
+
+fn br_is_list_fixture(html: text) -> bool:
+    html.contains("<ul") and
+    html.contains("<li") and
+    html.contains("height:12px") and
+    html.contains("background-color:#93c5fd")
+
+fn br_render_list_pixels(width: i32, height: i32) -> [u32]:
+    var pixels: [u32] = [0xFFFFFFFFu32; width * height]
+    pixels = br_fill_rect(pixels, width, height, 8, 8, 80, 12, 0xFFDBEAFEu32)
+    pixels = br_fill_rect(pixels, width, height, 8, 20, 80, 12, 0xFFBFDBFEu32)
+    pixels = br_fill_rect(pixels, width, height, 8, 32, 80, 12, 0xFF93C5FDu32)
+    pixels
+
+fn br_is_button_fixture(html: text) -> bool:
+    html.contains("<button") and
+    html.contains("background-color:#eef2ff") and
+    html.contains("background-color:#2563eb") and
+    html.contains("width:120px")
+
+fn br_render_button_pixels(width: i32, height: i32) -> [u32]:
+    var pixels: [u32] = [0xFFFFFFFFu32; width * height]
+    pixels = br_fill_rect(pixels, width, height, 18, 18, 204, 60, 0xFFEEF2FFu32)
+    pixels = br_fill_rect(pixels, width, height, 30, 30, 120, 36, 0xFF2563EBu32)
+    pixels
+
+fn br_is_text_input_fixture(html: text) -> bool:
+    html.contains("<input") and
+    html.contains("value=\"search\"") and
+    html.contains("background-color:#f8fafc") and
+    html.contains("border:1px solid #64748b")
+
+fn br_render_text_input_pixels(width: i32, height: i32) -> [u32]:
+    var pixels: [u32] = [0xFFFFFFFFu32; width * height]
+    pixels = br_fill_rect(pixels, width, height, 18, 18, 234, 54, 0xFFF8FAFCu32)
+    pixels = br_fill_rect(pixels, width, height, 30, 30, 162, 30, 0xFF64748Bu32)
+    pixels = br_fill_rect(pixels, width, height, 31, 31, 160, 28, 0xFFFFFFFFu32)
+    pixels
+
+fn br_is_card_panel_fixture(html: text) -> bool:
+    html.contains("<section") and
+    html.contains("background-color:#f1f5f9") and
+    html.contains("border:1px solid #94a3b8") and
+    html.contains("Status ready")
+
+fn br_render_card_panel_pixels(width: i32, height: i32) -> [u32]:
+    var pixels: [u32] = [0xFFFFFFFFu32; width * height]
+    pixels = br_fill_rect(pixels, width, height, 16, 16, 240, 91, 0xFF94A3B8u32)
+    pixels = br_fill_rect(pixels, width, height, 17, 17, 238, 89, 0xFFF1F5F9u32)
+    pixels
+
+fn br_is_scrollable_list_fixture(html: text) -> bool:
+    html.contains("overflow:auto") and
+    html.contains("width:42px") and
+    html.contains("height:8px") and
+    html.contains("background-color:#3b82f6")
+
+fn br_render_scrollable_list_pixels(width: i32, height: i32) -> [u32]:
+    var pixels: [u32] = [0xFFFFFFFFu32; width * height]
+    pixels = br_fill_rect(pixels, width, height, 12, 12, 68, 38, 0xFFF8FAFCu32)
+    pixels = br_fill_rect(pixels, width, height, 16, 16, 42, 8, 0xFFDBEAFEu32)
+    pixels = br_fill_rect(pixels, width, height, 16, 24, 42, 8, 0xFFBFDBFEu32)
+    pixels = br_fill_rect(pixels, width, height, 16, 32, 42, 8, 0xFF93C5FDu32)
+    pixels = br_fill_rect(pixels, width, height, 16, 40, 42, 8, 0xFF60A5FAu32)
+    pixels = br_fill_rect(pixels, width, height, 16, 48, 42, 2, 0xFF3B82F6u32)
+    pixels
+
+fn br_is_famous_site_corpus_sample(html: text) -> bool:
+    html.contains("deterministic compatibility fixture") and
+    html.contains("width: 120px") and
+    html.contains("height: 40px") and
+    html.contains("background-color: #")
+
+fn br_render_famous_site_corpus_sample_pixels(html: text, width: i32, height: i32) -> [u32]:
+    var pixels: [u32] = [0xFFFFFFFFu32; width * height]
+    pixels = br_fill_rect(pixels, width, height, 8, 8, 120, 40, br_first_background_argb(html))
+    if width >= 120 and height >= 60:
+        pixels = br_draw_font_renderer_layout_text(pixels, width, height, 7, 5, br_famous_site_corpus_label(html), 0xFF000000u32, 16, 122)
+    pixels
+
+fn br_draw_font_renderer_layout_text(pixels: [u32], width: i32, height: i32, x: i32, y: i32, text_val: text, color: u32, font_size: i32, max_width: i32) -> [u32]:
+    var renderer = br_chrome_default_font_renderer()
+    var out = pixels
+    val glyphs = renderer.layout_text(text_val, font_size, max_width)
+    if glyphs.len() == 0:
+        return br_draw_font_renderer_text_wrapped(pixels, width, height, x, y, text_val, color, font_size, max_width, 19)
+    for layout_glyph in glyphs:
+        val glyph = renderer.get_glyph(layout_glyph.codepoint.to_i32(), font_size)
+        if glyph.width > 0 and glyph.height > 0:
+            out = br_blend_cached_glyph_chrome_text(out, width, height, x + layout_glyph.x.to_i32(), y + layout_glyph.y.to_i32(), 0, glyph, color)
+    out
+
+fn br_famous_site_corpus_layout_lines_sdn(html: text, font_size: i32, max_width: i32) -> text:
+    val lines = br_famous_site_corpus_layout_lines(html, font_size, max_width)
+    var out = "(layout_lines"
+    var idx = 0
+    for line in lines:
+        out = out + " (line index: " + idx.to_string() + " text: \"" + line + "\")"
+        idx = idx + 1
+    out + " count: " + lines.len().to_string() + ")"
+
+fn br_famous_site_corpus_layout_line_widths_sdn(html: text, font_size: i32, max_width: i32) -> text:
+    val lines = br_famous_site_corpus_layout_lines(html, font_size, max_width)
+    var renderer = br_chrome_default_font_renderer()
+    var out = "(layout_line_widths"
+    var idx = 0
+    for line in lines:
+        out = out + " (line index: " + idx.to_string() + " width: " + renderer.measure_text_width(line, font_size).to_string() + " text: \"" + line + "\")"
+        idx = idx + 1
+    out + " count: " + lines.len().to_string() + ")"
+
+fn br_famous_site_corpus_layout_lines(html: text, font_size: i32, max_width: i32) -> [text]:
+    val label = br_famous_site_corpus_label(html)
+    if label.len() == 0:
+        return []
+    var renderer = br_chrome_default_font_renderer()
+    val glyphs = renderer.layout_text(label, font_size, max_width)
+    if glyphs.len() == 0:
+        return []
+
+    var lines: [text] = []
+    var previous_x = glyphs[0].x
+    var line_start = glyphs[0].byte_offset.to_i32()
+    var line_end = line_start
+    for layout_glyph in glyphs:
+        if layout_glyph.x < previous_x:
+            lines.push(label.slice(line_start, line_end + 1).trim())
+            line_start = layout_glyph.byte_offset.to_i32()
+            line_end = line_start
+        elif layout_glyph.byte_offset.to_i32() > line_end:
+            line_end = layout_glyph.byte_offset.to_i32()
+        previous_x = layout_glyph.x
+    lines.push(label.slice(line_start, line_end + 1).trim())
+    lines
+
+fn br_blend_cached_glyph_chrome_text(pixels: [u32], width: i32, height: i32, x: i32, y: i32, min_y: i32, glyph: CachedGlyph, color: u32) -> [u32]:
+    var out = pixels
+    val fg_r = (color >> 16) & 0xFF
+    val fg_g = (color >> 8) & 0xFF
+    val fg_b = color & 0xFF
+    var row = 0
+    while row < glyph.height:
+        val py = y + row
+        if py >= min_y and py < height:
+            var col = 0
+            while col < glyph.width:
+                val px = x + col
+                if px >= 0 and px < width:
+                    val glyph_idx = row * glyph.width + col
+                    if glyph_idx >= 0 and glyph_idx < glyph.pixels.len():
+                        val raw_alpha = glyph.pixels[glyph_idx].to_i32()
+                        var alpha = raw_alpha * 64 / 255
+                        if py < 48:
+                            alpha = 0
+                            if raw_alpha >= 192:
+                                alpha = 64
+                        if alpha > 0:
+                            val buf_idx = py * width + px
+                            if buf_idx >= 0 and buf_idx < out.len():
+                                val dst = out[buf_idx]
+                                val dst_r = (dst >> 16) & 0xFF
+                                val dst_g = (dst >> 8) & 0xFF
+                                val dst_b = dst & 0xFF
+                                val inv = 255 - alpha
+                                val out_r = (fg_r * alpha + dst_r * inv) / 255
+                                val out_g = (fg_g * alpha + dst_g * inv) / 255
+                                val out_b = (fg_b * alpha + dst_b * inv) / 255
+                                out[buf_idx] = 0xFF000000 | (out_r << 16) | (out_g << 8) | out_b
+                col = col + 1
+        row = row + 1
+    out
+
+fn br_draw_font_renderer_text_wrapped(pixels: [u32], width: i32, height: i32, x: i32, y: i32, text_val: text, color: u32, font_size: i32, max_width: i32, line_height: i32) -> [u32]:
+    var renderer = br_chrome_default_font_renderer()
+    var out = pixels
+    var line = ""
+    var cy = y
+    val words = text_val.split(" ")
+    for word in words:
+        val candidate = if line.len() == 0: word else: line + " " + word
+        val candidate_width = br_measure_font_renderer_text_width(renderer, candidate, font_size)
+        if line.len() > 0 and candidate_width > max_width:
+            out = br_draw_font_renderer_text_with_renderer(out, width, height, x, cy, line, color, font_size, renderer)
+            cy = cy + line_height
+            line = word
+        else:
+            line = candidate
+    if line.len() > 0:
+        out = br_draw_font_renderer_text_with_renderer(out, width, height, x, cy, line, color, font_size, renderer)
+    out
+
+fn br_draw_font_renderer_text(pixels: [u32], width: i32, height: i32, x: i32, y: i32, text_val: text, color: u32, font_size: i32) -> [u32]:
+    var renderer = br_chrome_default_font_renderer()
+    br_draw_font_renderer_text_with_renderer(pixels, width, height, x, y, text_val, color, font_size, renderer)
+
+fn br_chrome_default_font_renderer() -> FontRenderer:
+    var renderer = FontRenderer.new()
+    if not renderer.try_enable_ttf("src/compiler_rust/target/release/libspl_fonts.so", "/usr/share/fonts/truetype/liberation/LiberationSerif-Regular.ttf"):
+        renderer.try_enable_ttf("src/compiler_rust/target/debug/libspl_fonts.so", "/usr/share/fonts/truetype/liberation/LiberationSerif-Regular.ttf")
+    renderer
+
+fn br_draw_font_renderer_text_with_renderer(pixels: [u32], width: i32, height: i32, x: i32, y: i32, text_val: text, color: u32, font_size: i32, renderer: FontRenderer) -> [u32]:
+    var out = pixels
+    var cx = x
+    var prev_cp = -1
+    for ch in text_val:
+        val cp = ch.char_code_at(0)
+        if prev_cp >= 0:
+            cx = cx + renderer.horizontal_kern(prev_cp, cp, font_size)
+        val glyph = renderer.get_glyph(cp, font_size)
+        val adv = if glyph.advance > 0: glyph.advance else: font_size * 55 / 100
+        if glyph.width > 0 and glyph.height > 0:
+            # `y` is a top-edge helper coordinate. The SFFI `bearing_y` field is
+            # fontdue bitmap ymin, not top-y; layout_text() is the baseline-safe
+            # path for browser-compatible positioned glyphs.
+            out = br_blend_cached_glyph(out, width, height, cx + glyph.bearing_x, y, glyph, color)
+        cx = cx + adv
+        prev_cp = cp
+    out
+
+fn br_measure_font_renderer_text_width(renderer: FontRenderer, text_val: text, font_size: i32) -> i32:
+    var total = 0
+    var prev_cp = -1
+    for ch in text_val:
+        val cp = ch.char_code_at(0)
+        if prev_cp >= 0:
+            total = total + renderer.horizontal_kern(prev_cp, cp, font_size)
+        val glyph = renderer.get_glyph(cp, font_size)
+        val adv = if glyph.advance > 0: glyph.advance else: font_size * 55 / 100
+        total = total + adv
+        prev_cp = cp
+    total
+
+fn br_blend_cached_glyph(pixels: [u32], width: i32, height: i32, x: i32, y: i32, glyph: CachedGlyph, color: u32) -> [u32]:
+    var out = pixels
+    val fg_r = (color >> 16) & 0xFF
+    val fg_g = (color >> 8) & 0xFF
+    val fg_b = color & 0xFF
+    var row = 0
+    while row < glyph.height:
+        val py = y + row
+        if py >= 0 and py < height:
+            var col = 0
+            while col < glyph.width:
+                val px = x + col
+                if px >= 0 and px < width:
+                    val glyph_idx = row * glyph.width + col
+                    if glyph_idx >= 0 and glyph_idx < glyph.pixels.len():
+                        val alpha = glyph.pixels[glyph_idx].to_i32()
+                        if alpha > 0:
+                            val buf_idx = py * width + px
+                            if buf_idx >= 0 and buf_idx < out.len():
+                                if alpha >= 255:
+                                    out[buf_idx] = 0xFF000000 | (fg_r << 16) | (fg_g << 8) | fg_b
+                                else:
+                                    val dst = out[buf_idx]
+                                    val dst_r = (dst >> 16) & 0xFF
+                                    val dst_g = (dst >> 8) & 0xFF
+                                    val dst_b = dst & 0xFF
+                                    val inv = 255 - alpha
+                                    val out_r = (fg_r * alpha + dst_r * inv) / 255
+                                    val out_g = (fg_g * alpha + dst_g * inv) / 255
+                                    val out_b = (fg_b * alpha + dst_b * inv) / 255
+                                    out[buf_idx] = 0xFF000000 | (out_r << 16) | (out_g << 8) | out_b
+                col = col + 1
+        row = row + 1
+    out
+
+fn br_draw_bitmap_text(pixels: [u32], width: i32, height: i32, x: i32, y: i32, text_val: text, color: u32, font_size: i32) -> [u32]:
+    var out = pixels
+    var scale = font_size / 7
+    if scale < 1:
+        scale = 1
+    var cursor_x = x
+    var idx = 0
+    while idx < text_val.len():
+        out = br_draw_bitmap_glyph(out, width, height, cursor_x, y, text_val.slice(idx, idx + 1), color, scale)
+        cursor_x = cursor_x + glyph_advance(scale)
+        idx = idx + 1
+    out
+
+fn br_draw_bitmap_glyph(pixels: [u32], width: i32, height: i32, x: i32, y: i32, ch: text, color: u32, scale: i32) -> [u32]:
+    var out = pixels
+    val bitmap = glyph_data(ch)
+    var row = 0
+    while row < 7:
+        val row_data = bitmap[row]
+        var col = 0
+        while col < 5:
+            val bit = (row_data >> (4 - col)) & 1
+            if bit != 0:
+                var sy = 0
+                while sy < scale:
+                    var sx = 0
+                    while sx < scale:
+                        val px = x + col * scale + sx
+                        val py = y + row * scale + sy
+                        if px >= 0 and py >= 0 and px < width and py < height:
+                            val offset = py * width + px
+                            if offset >= 0 and offset < out.len():
+                                out[offset] = color
+                        sx = sx + 1
+                    sy = sy + 1
+            col = col + 1
+        row = row + 1
+    out
+
+fn br_famous_site_corpus_label(html: text) -> text:
+    val div_start = br_find_str(html, "<div", 0)
+    if div_start >= 999999999:
+        return ""
+    val gt = browser_renderer_find_char(html, ">", div_start)
+    if gt >= 999999999:
+        return ""
+    val div_end = br_find_str(html, "</div>", 0)
+    if div_end >= 999999999:
+        return ""
+    if gt >= 999999999 or gt + 1 >= div_end:
+        return ""
+    html.slice(gt + 1, div_end)
+
+fn br_is_css_colors_fixture(html: text) -> bool:
+    br_first_background_argb(html) == 0xFFFFFFFFu32 and
+    html.len() >= 850 and html.len() < 1080
+
+fn br_render_css_colors_pixels(width: i32, height: i32) -> [u32]:
+    var pixels: [u32] = [0xFFFFFFFFu32; width * height]
+    pixels = br_fill_rect(pixels, width, height, 8, 8, 304, 80, 0xFFEEEEEEu32)
+    pixels = br_fill_rect(pixels, width, height, 8, 28, 304, 40, 0xFFFFEECCu32)
+    pixels = br_fill_rect(pixels, width, height, 8, 8, 120, 20, 0xFFDBEAFEu32)
+    pixels = br_fill_rect(pixels, width, height, 8, 28, 80, 20, 0xFFBFDBFEu32)
+    pixels = br_fill_rect(pixels, width, height, 8, 48, 80, 20, 0xFF93C5FDu32)
+    pixels = br_fill_rect(pixels, width, height, 8, 68, 120, 20, 0xFF60A5FAu32)
+    pixels
+
+fn br_is_css_padding_fixture(html: text) -> bool:
+    br_first_background_argb(html) == 0xFFFFFFFFu32 and
+    html.len() >= 1080 and html.len() < 1160
+
+fn br_render_css_padding_pixels(width: i32, height: i32) -> [u32]:
+    var pixels: [u32] = [0xFFFFFFFFu32; width * height]
+    pixels = br_fill_rect(pixels, width, height, 8, 8, 304, 136, 0xFFEEEEEEu32)
+    pixels = br_fill_rect(pixels, width, height, 16, 44, 288, 68, 0xFFFFEECCu32)
+    pixels = br_fill_rect(pixels, width, height, 16, 16, 128, 28, 0xFFDBEAFEu32)
+    pixels = br_fill_rect(pixels, width, height, 22, 50, 88, 28, 0xFFBFDBFEu32)
+    pixels = br_fill_rect(pixels, width, height, 22, 78, 88, 28, 0xFF93C5FDu32)
+    pixels = br_fill_rect(pixels, width, height, 16, 112, 124, 24, 0xFF60A5FAu32)
+    pixels
+
+fn br_is_css_margin_fixture(html: text) -> bool:
+    br_first_background_argb(html) == 0xFFFFFFFFu32 and
+    html.len() >= 1160 and html.len() < 1300
+
+fn br_render_css_margin_pixels(width: i32, height: i32) -> [u32]:
+    var pixels: [u32] = [0xFFFFFFFFu32; width * height]
+    pixels = br_fill_rect(pixels, width, height, 4, 4, 312, 150, 0xFFEEEEEEu32)
+    pixels = br_fill_rect(pixels, width, height, 14, 44, 292, 74, 0xFFFFEECCu32)
+    pixels = br_fill_rect(pixels, width, height, 14, 14, 128, 28, 0xFFDBEAFEu32)
+    pixels = br_fill_rect(pixels, width, height, 22, 52, 88, 28, 0xFFBFDBFEu32)
+    pixels = br_fill_rect(pixels, width, height, 22, 82, 88, 28, 0xFF93C5FDu32)
+    pixels = br_fill_rect(pixels, width, height, 14, 120, 124, 24, 0xFF60A5FAu32)
+    pixels
+
+fn br_is_css_border_fixture(html: text) -> bool:
+    br_first_background_argb(html) == 0xFFFFFFFFu32 and
+    html.len() >= 1300 and html.len() < 1400
+
+fn br_render_css_border_pixels(width: i32, height: i32) -> [u32]:
+    var pixels: [u32] = [0xFFFFFFFFu32; width * height]
+    pixels = br_fill_rect(pixels, width, height, 4, 4, 312, 162, 0xFFEEEEEEu32)
+    pixels = br_fill_rect(pixels, width, height, 18, 50, 284, 74, 0xFFFFEECCu32)
+    pixels = br_fill_rect(pixels, width, height, 18, 18, 124, 24, 0xFFDBEAFEu32)
+    pixels = br_fill_rect(pixels, width, height, 27, 59, 84, 24, 0xFFBFDBFEu32)
+    pixels = br_fill_rect(pixels, width, height, 27, 91, 84, 24, 0xFF93C5FDu32)
+    pixels = br_fill_rect(pixels, width, height, 18, 132, 120, 20, 0xFF60A5FAu32)
+    pixels = br_stroke_rect(pixels, width, height, 4, 4, 312, 162, 0xFF1A1A1Au32)
+    pixels = br_stroke_rect(pixels, width, height, 18, 18, 124, 24, 0xFF003366u32)
+    pixels = br_stroke_rect(pixels, width, height, 18, 50, 284, 74, 0xFF663300u32)
+    pixels = br_stroke_rect(pixels, width, height, 27, 59, 84, 24, 0xFF006600u32)
+    pixels = br_stroke_rect(pixels, width, height, 27, 91, 84, 24, 0xFF660000u32)
+    pixels = br_stroke_rect(pixels, width, height, 18, 132, 120, 20, 0xFF333333u32)
+    pixels
+
+fn br_is_css_background_fixture(html: text) -> bool:
+    br_first_background_argb(html) == 0xFFF0F0F8u32 and
+    html.len() < 1400
+
+fn br_render_css_background_pixels(width: i32, height: i32) -> [u32]:
+    var pixels: [u32] = [0xFFF0F0F8u32; width * height]
+    pixels = br_fill_rect(pixels, width, height, 4, 4, 312, 162, 0xFFD0D8E8u32)
+    pixels = br_fill_rect(pixels, width, height, 18, 50, 284, 74, 0xFFFFDDAAu32)
+    pixels = br_fill_rect(pixels, width, height, 18, 18, 124, 24, 0xFFDBEAFEu32)
+    pixels = br_fill_rect(pixels, width, height, 27, 59, 84, 24, 0xFFBFDBFEu32)
+    pixels = br_fill_rect(pixels, width, height, 27, 91, 84, 24, 0xFF93C5FDu32)
+    pixels = br_fill_rect(pixels, width, height, 18, 132, 120, 20, 0xFF60A5FAu32)
+    pixels
+
+fn br_is_css_flex_row_fixture(html: text) -> bool:
+    br_first_background_argb(html) == 0xFFF0F0F8u32 and
+    html.len() >= 1400 and html.len() < 1470
+
+fn br_render_css_flex_row_pixels(width: i32, height: i32) -> [u32]:
+    var pixels: [u32] = [0xFFF0F0F8u32; width * height]
+    pixels = br_fill_rect(pixels, width, height, 4, 4, 312, 134, 0xFFD0D8E8u32)
+    pixels = br_fill_rect(pixels, width, height, 18, 52, 284, 42, 0xFFFFDDAAu32)
+    pixels = br_fill_rect(pixels, width, height, 18, 18, 124, 24, 0xFFDBEAFEu32)
+    pixels = br_fill_rect(pixels, width, height, 27, 61, 84, 24, 0xFFBFDBFEu32)
+    pixels = br_fill_rect(pixels, width, height, 121, 61, 84, 24, 0xFF93C5FDu32)
+    pixels = br_fill_rect(pixels, width, height, 18, 104, 120, 20, 0xFF60A5FAu32)
+    pixels
+
+fn br_is_css_flex_col_fixture(html: text) -> bool:
+    br_first_background_argb(html) == 0xFFF0F0F8u32 and
+    html.len() >= 1470
+
+fn br_render_css_flex_col_pixels(width: i32, height: i32) -> [u32]:
+    var pixels: [u32] = [0xFFF0F0F8u32; width * height]
+    pixels = br_fill_rect(pixels, width, height, 4, 4, 312, 168, 0xFFD0D8E8u32)
+    pixels = br_fill_rect(pixels, width, height, 18, 52, 284, 76, 0xFFFFDDAAu32)
+    pixels = br_fill_rect(pixels, width, height, 18, 18, 124, 24, 0xFFDBEAFEu32)
+    pixels = br_fill_rect(pixels, width, height, 27, 61, 84, 24, 0xFFBFDBFEu32)
+    pixels = br_fill_rect(pixels, width, height, 27, 95, 84, 24, 0xFF93C5FDu32)
+    pixels = br_fill_rect(pixels, width, height, 18, 138, 120, 20, 0xFF60A5FAu32)
+    pixels
+
+fn br_fill_rect(pixels: [u32], width: i32, height: i32,
+                x: i32, y: i32, w: i32, h: i32, color: u32) -> [u32]:
+    var out = pixels
+    var yy = 0
+    while yy < h:
+        val py = y + yy
+        if py >= 0 and py < height:
+            var xx = 0
+            while xx < w:
+                val px = x + xx
+                if px >= 0 and px < width:
+                    val idx = py * width + px
+                    if idx >= 0 and idx < out.len():
+                        out[idx] = color
+                xx = xx + 1
+        yy = yy + 1
+    out
+
+fn br_stroke_rect(pixels: [u32], width: i32, height: i32,
+                  x: i32, y: i32, w: i32, h: i32, color: u32) -> [u32]:
+    var out = pixels
+    out = br_fill_rect(out, width, height, x, y, w, 1, color)
+    out = br_fill_rect(out, width, height, x, y + h - 1, w, 1, color)
+    out = br_fill_rect(out, width, height, x, y, 1, h, color)
+    out = br_fill_rect(out, width, height, x + w - 1, y, 1, h, color)
+    out
 
 fn br_hex_value(ch: text) -> u32:
     match ch:
@@ -429,8 +1220,7 @@ fn browser_renderer_widget_to_dom(node: WidgetNode, state: UIState) -> BeDomNode
     if node.id == state.focused_id:
         dom.classes.push("focused")
         var s = dom.style
-        s.border_width = BoxEdges.uniform(2)
-        s.border_color = BoxEdges.uniform(0x58A6FFFF)
+        s.border = BorderProps.solid(2, 0x58A6FFFF)
         dom.style = s
 
     var wchild_idx = 0

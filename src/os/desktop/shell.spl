@@ -89,38 +89,33 @@ struct EditorResidentLaunch:
 fn _build_editor_resident_launch() -> Result<EditorResidentLaunch, text>:
     val editor_smoke_path = "/EDITOR.TXT"
     val editor_smoke_content = "SimpleOS editor smoke saved from GUI"
-    var editor = TextEditor.new()
-    editor.lines = [editor_smoke_content]
-    editor.file_path = editor_smoke_path
     noalloc_log_debug("editor resident launch write path={editor_smoke_path}")
     val wrote = rt_file_write_text(editor_smoke_path, editor_smoke_content)
-    editor.modified = false
+    val editor_tree = build_tree_with_title(column("editor_resident_main", [
+        text_widget("editor_resident_title", "Editor"),
+        text_widget("editor_resident_path", editor_smoke_path),
+        text_widget("editor_resident_body", editor_smoke_content)
+    ]), "Editor", "dark")
     if not wrote:
         noalloc_log_debug("editor resident launch using preview fallback path={editor_smoke_path}")
-        editor.status_message = "Preview {editor_smoke_path} (disk unavailable)"
-        val preview_session = editor.build_ui()
         return Ok(EditorResidentLaunch(
-            tree: preview_session.current_tree(),
+            tree: editor_tree,
             saved_path: editor_smoke_path,
             content: editor_smoke_content
         ))
-    editor.status_message = "Saved {editor_smoke_path}"
 
     val cli_output = g_vfs_read_file_text(editor_smoke_path)
     if cli_output != editor_smoke_content:
         noalloc_log_debug("editor resident launch using preview readback path={editor_smoke_path}")
-        editor.status_message = "Preview {editor_smoke_path} (readback unavailable)"
-        val preview_session = editor.build_ui()
         return Ok(EditorResidentLaunch(
-            tree: preview_session.current_tree(),
+            tree: editor_tree,
             saved_path: editor_smoke_path,
             content: editor_smoke_content
         ))
     noalloc_log_debug("editor resident launch readback ok path={editor_smoke_path}")
 
-    val session = editor.build_ui()
     Ok(EditorResidentLaunch(
-        tree: session.current_tree(),
+        tree: editor_tree,
         saved_path: editor_smoke_path,
         content: cli_output
     ))
@@ -150,10 +145,6 @@ fn _create_materialized_window(
     log_info("[desktop] " + "[shell] materialized-window:create:start pid={pid} title={title} app_id={app_id}")
     val returned_window_id = shell.compositor.create_window_with_tree(title, x, y, width, height, tree)
     var window_id = returned_window_id
-    if shell.compositor.surfaces.len() > 0:
-        val created_surface = shell.compositor.surfaces[shell.compositor.surfaces.len() - 1]
-        if created_surface.title == title:
-            window_id = created_surface.id
     log_info("[desktop] " + "[shell] materialized-window:create:end pid={pid} title={title} wid={window_id.value} returned_wid={returned_window_id.value}")
     if window_id.value == 0:
         return WindowId(value: 0)
@@ -175,11 +166,6 @@ fn _create_materialized_surface(
     var window_id = returned_window_id
     val surface_count = shell.compositor.window_count()
     log_info("[desktop] " + "[shell] materialized-surface:create:count pid={pid} title={title} count={surface_count} returned_wid={returned_window_id.value}")
-    if surface_count > 0:
-        val surface = shell.compositor.get_surface(returned_window_id)
-        if surface != nil:
-            val created_surface = surface
-            window_id = created_surface.id
     log_info("[desktop] " + "[shell] materialized-surface:create:end pid={pid} title={title} wid={window_id.value} returned_wid={returned_window_id.value}")
     if window_id.value == 0:
         return WindowId(value: 0)
@@ -536,15 +522,9 @@ impl DesktopShell:
         if action == "launcher":
             self.toggle_launcher()
         elif action.starts_with("focus_win_"):
-            # Focus the window by title
-            val title = action.slice(10, action.len())
-            # Find window with matching title
-            var idx: i32 = 0
-            for s in self.compositor.surfaces:
-                if s.title == title:
-                    self.compositor.focus_window(s.id)
-                    return
-                idx = idx + 1
+            # Native build cannot reliably infer surface element types here.
+            # Process-owned focus is handled through focus_selected_process().
+            return
 
     me apply_wm_action(action: WmAction):
         """Apply a WmAction to the shell's compositor.

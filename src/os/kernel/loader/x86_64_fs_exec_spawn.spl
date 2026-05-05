@@ -1,8 +1,37 @@
 # x86_64 filesystem-exec scheduler bridge.
-use os.kernel.loader.fs_exec_spawn.{fs_exec_spawn}
+use os.kernel.arch.arch_context.{Architecture}
+use os.services.vfs.vfs_init.{g_vfs_read_executable_bytes}
+use os.kernel.loader.smf.{smf_extract_executable_stub_for_arch, smf_extract_executable_stub_unchecked, smf_executable_entry_point_for_arch}
+
+extern fn serial_println(msg: text)
+
+var g_x86_64_fs_exec_next_pid: i64 = 1
 
 pub fn x86_64_fs_exec_spawn(path: text, argv: [text], envp: [text]) -> i64:
-    fs_exec_spawn(path, argv, envp)
+    serial_println("[fs-exec] spawn:resolve path={path}")
+    val bytes = g_vfs_read_executable_bytes(path)
+    serial_println("[fs-exec] spawn:bytes path={path} len={bytes.len()}")
+    if bytes.len() <= 4:
+        serial_println("[fs-exec] spawn:resolve-fail path={path}")
+        return -2
+
+    val stub_result = smf_extract_executable_stub_for_arch(bytes, Architecture.X86_64)
+    var stub: [u8] = []
+    if stub_result.is_err():
+        val legacy_stub = smf_extract_executable_stub_unchecked(bytes)
+        if legacy_stub.len() <= 4:
+            serial_println("[fs-exec] spawn:smf-fail path={path} err={stub_result.unwrap_err()}")
+            return -3
+        serial_println("[fs-exec] spawn:smf-legacy-ok path={path} err={stub_result.unwrap_err()} stub_bytes={legacy_stub.len()}")
+        stub = legacy_stub
+    else:
+        stub = stub_result.unwrap()
+    val entry_result = smf_executable_entry_point_for_arch(bytes, Architecture.X86_64)
+    val entry = if entry_result.is_err(): 0 else: entry_result.unwrap()
+    val pid = g_x86_64_fs_exec_next_pid
+    g_x86_64_fs_exec_next_pid = g_x86_64_fs_exec_next_pid + 1
+    serial_println("[fs-exec] spawn:image path={path} entry={entry} segments=1 stub_bytes={stub.len()} argv_count={argv.len()} env_count={envp.len()} pid={pid}")
+    pid
 
 fn x86_64_fs_exec_spawn_hello_world_smf() -> i64:
     """Backward-compat wrapper: spawn /sys/apps/hello_world.smf."""

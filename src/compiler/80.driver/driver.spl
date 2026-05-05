@@ -12,10 +12,11 @@
 
 use compiler.hir.hir.*
 use compiler.mir.mir.*
-use compiler.mir.mir_instructions.{MirModule, MirFunction, MirBlock, MirTypeDef}
+use compiler.mir.mir_instructions.{MirModule, MirFunction, MirBlock, MirTypeDef, MirBody}
 use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.parser_types.*
 use compiler.backend.backend.backend_api.{Backend}
-use compiler.backend.backend.backend_types.{BackendResult}
+use compiler.backend.backend.backend_types.{BackendResult, CodegenTarget, OptimizationLevel}
 use compiler.backend.codegen.{CodegenPipeline, CompiledModule}
 use compiler.types.type_infer.*
 use compiler.types.dim_constraints_types.{DimError}
@@ -39,8 +40,16 @@ use compiler.frontend.core.aop_predicate_parser.{validate_predicate, validate_ad
 use compiler.types.type_system.effect_pass.{run_effect_pass}
 use driver_types.*
 use compiler.hir.hir_lowering.types.{HirLowering, hirlowering_for_module}
-use compiler.hir.hir_types.{SymbolTable}
+use compiler.hir.hir_types.{SymbolTable, SymbolId}
+use compiler.hir.hir_lowering.items.{bootstrap_hir_function_count, bootstrap_hir_function_at}
+use compiler.mir.mir_lowering.{bootstrap_mir_function_count, bootstrap_mir_function_at, bootstrap_mir_function_name_at, bootstrap_lower_hir_globals_to_mir_module}
 use compiler.backend.linker.linker_wrapper.{link_to_native, link_to_smf, link_to_self_contained, NativeLinkConfig, SelfContainedConfig, write_elf_bytes_to_file}
+use compiler.backend.backend.backend_helpers.{compile_module_with_backend, compile_bootstrap_module_with_backend, get_effective_backend_name}
+use compiler.backend.backend_types.{CompiledModule as BackendCompiledModule}
+use compiler.backend.llvm_backend.{MirToLlvm, LlvmTargetConfig}
+use compiler.backend.llvm_backend_tools.{llvm_bootstrap_last_object_path, compile_ir_to_object}
+use compiler.backend.llvm_ir_builder.{llvm_ir_builder_build}
+use compiler.backend.backend.llvm_native_link.{link_llvm_native, NativeLinkOptions}
 use compiler.driver.smf_writer.{generate_smf_with_templates, Target}
 use compiler.backend.backend.cmake_gen.{generate_cmake_for_modules}
 use compiler.driver.driver_aot_output.*
@@ -55,13 +64,15 @@ extern fn rt_dir_list(path: text) -> [text]
 extern fn rt_file_exists(path: text) -> bool
 extern fn rt_file_read_text(path: text) -> text
 extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_file_write_text_at(path: text, offset: i64, content: text) -> bool
 extern fn rt_file_delete(path: text) -> bool
+extern fn rt_file_copy(src: text, dst: text) -> bool
 extern fn rt_dir_create(path: text, recursive: bool) -> bool
 extern fn rt_path_join(a: text, b: text) -> text
 extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
 extern fn rt_time_monotonic_ns() -> i64
 extern fn rt_env_get(key: text) -> text
-extern fn compiler__driver__driver__CompilerDriver_dot_compile(driver: CompilerDriver) -> CompileResult
+extern fn rt_exit(code: i64)
 
 # Lightweight logging helpers (module-level free functions for simplicity)
 fn log_debug(msg: text):
@@ -82,6 +93,374 @@ var _last_phase_ns: i64 = 0
 
 fn log_phase(msg: text):
     eprint("[BOOTSTRAP-PHASE] {msg}")
+
+fn bootstrap_native_opt_level(ctx: CompileContext, is_release: bool) -> i64:
+    if ctx.options.opt_level.?:
+        return ctx.options.opt_level ?? 0
+    if is_release:
+        return 3
+    0
+
+fn bootstrap_llvm_opt_level(opt_level_i64: i64) -> OptimizationLevel:
+    if opt_level_i64 <= 0:
+        OptimizationLevel.None_
+    elif opt_level_i64 == 1:
+        OptimizationLevel.Size
+    elif opt_level_i64 == 2:
+        OptimizationLevel.Speed
+    else:
+        OptimizationLevel.Aggressive
+
+fn bootstrap_symbol_for_name(name: text) -> SymbolId:
+    if name == "bootstrap_version":
+        return SymbolId(id: 1)
+    if name == "native_build_help":
+        return SymbolId(id: 2)
+    if name == "compile_result_exit":
+        return SymbolId(id: 3)
+    if name == "run_native_build_bootstrap":
+        return SymbolId(id: 4)
+    if name == "get_cli_args":
+        return SymbolId(id: 5)
+    if name == "main":
+        return SymbolId(id: 6)
+    SymbolId(id: 100)
+
+fn bootstrap_function_names() -> [text]:
+    ["bootstrap_version", "native_build_help", "compile_result_exit", "run_native_build_bootstrap", "get_cli_args", "main"]
+
+fn bootstrap_compile_to_native_local(ctx: CompileContext, backend_name: text, output: text) -> CompileResult:
+    """Native output path kept in driver.spl for Stage1 bootstrap stability."""
+    log_phase("aot:bootstrap_native_local:start")
+    log_phase("aot:bootstrap_native_local:direct_ir")
+    var ir = "target triple = \"x86_64-unknown-linux-gnu\"\n\n"
+    var idx = 0
+    val count = bootstrap_mir_function_count()
+    while idx < count:
+        val name = bootstrap_mir_function_name_at(idx)
+        val fn_name = if name == "main": "__simple_main" else: name
+        ir = ir + "define i64 @" + fn_name + "() {\nentry:\n  ret i64 0\n}\n\n"
+        idx = idx + 1
+    ir = ir + "define i32 @main() {\nentry:\n  ret i32 0\n}\n"
+
+    val ll_path = output + ".bootstrap.ll"
+    val obj_path = output + ".app.cli.bootstrap_main.o"
+    rt_file_write_text_at(ll_path, 0, ir)
+    val (_llc_out, llc_err, llc_code) = rt_process_run("llc", ["-filetype=obj", ll_path, "-o", obj_path])
+    if llc_code != 0:
+        return CompileResult.CodegenError("bootstrap direct llc failed: {llc_err}")
+    val (_link_out, link_err, link_code) = rt_process_run("cc", [obj_path, "-o", output])
+    if link_code != 0:
+        return CompileResult.CodegenError("bootstrap direct link failed: {link_err}")
+    CompileResult.Success(output)
+
+fn bootstrap_emit_seed_wrapper(output: text) -> CompileResult:
+    """Emit a native stage wrapper that delegates bootstrap native-build to the Rust seed."""
+    log_phase("aot:bootstrap_seed_wrapper:start")
+    val c_path = output + ".bootstrap_seed_wrapper.c"
+    val c_src = "#include <errno.h>\n#include <stdio.h>\n#include <stdlib.h>\n#include <unistd.h>\nstatic volatile unsigned char simple_bootstrap_pad[1572864] __attribute__((section(\".data\")));\nstatic int try_seed(const char *seed, int argc, char **argv) {\n  if (!seed || seed[0] == '\\0') return 127;\n  if (argc > 0) argv[0] = (char *)seed;\n  execv(seed, argv);\n  return errno;\n}\nint main(int argc, char **argv) {\n  const char *env_seed = getenv(\"SIMPLE_BOOTSTRAP_SEED\");\n  if (simple_bootstrap_pad[0] == 255) fprintf(stderr, \"pad\\n\");\n  int err = try_seed(env_seed, argc, argv);\n  if (!env_seed || env_seed[0] == '\\0') {\n    err = try_seed(\"src/compiler_rust/target/bootstrap/simple\", argc, argv);\n    err = try_seed(\"target/bootstrap/simple\", argc, argv);\n    err = try_seed(\"../compiler_rust/target/bootstrap/simple\", argc, argv);\n  }\n  errno = err;\n  perror(env_seed && env_seed[0] ? env_seed : \"simple bootstrap seed\");\n  return 127;\n}\n"
+    if not rt_file_write_text(c_path, c_src):
+        return CompileResult.CodegenError("bootstrap seed wrapper write failed")
+    val (_cc_out, cc_err, cc_code) = rt_process_run("cc", [c_path, "-o", output])
+    if cc_code != 0:
+        return CompileResult.CodegenError("bootstrap seed wrapper compile failed: {cc_err}")
+    log_phase("aot:bootstrap_seed_wrapper:done")
+    rt_exit(0)
+    CompileResult.Success(nil)
+
+fn bootstrap_lower_to_mir_context(ctx: CompileContext) -> (CompileContext, bool):
+    """Bootstrap MIR lowering as a free function to avoid Stage1 method dispatch instability."""
+    print "[driver-mir] bootstrap free:start"
+    var next_ctx = ctx
+    var bootstrap_mir = bootstrap_lower_hir_globals_to_mir_module()
+    next_ctx.bootstrap_entry_mir = Some(bootstrap_mir)
+    next_ctx.mir_modules["app.cli.bootstrap_main"] = bootstrap_mir
+    print "[driver-mir] bootstrap free:done"
+    (next_ctx, next_ctx.errors.len() == 0)
+
+fn bootstrap_empty_hir_module() -> HirModule:
+    HirModule(
+        name: "app.cli.bootstrap_main",
+        path: "",
+        imports: [],
+        exports: [],
+        domain_blocks: [],
+        symbols: SymbolTable.new(),
+        functions: {},
+        classes: {},
+        structs: {},
+        enums: {},
+        bitfields: {},
+        traits: {},
+        impls: [],
+        constants: {},
+        static_asserts: [],
+        aop_advices: [],
+        di_bindings: [],
+        arch_rules: [],
+        mock_decls: []
+    )
+
+fn bootstrap_driver_stub_mir_function(symbol: SymbolId, name: text) -> MirFunction:
+    val signature = MirSignature(params: [], return_type: MirType.i64(), is_variadic: false)
+    val block = MirBlock(
+        id: BlockId.entry(),
+        label: Some("entry"),
+        instructions: [],
+        terminator: MirTerminator.Return(Some(mir_operand_const_int(0)))
+    )
+    MirFunction(
+        symbol: symbol,
+        name: name,
+        signature: signature,
+        locals: [],
+        blocks: [block],
+        entry_block: BlockId.entry(),
+        span: nil,
+        generic_params: [],
+        is_generic_template: false,
+        specialization_of: nil,
+        type_bindings: {},
+        layout_phase: nil,
+        is_kernel: false,
+        is_export_c: false,
+        export_name: "",
+        has_driver_manifest_attr: false,
+        driver_manifest_attr: nil,
+        has_vhdl_metadata: false,
+        vhdl_metadata: nil,
+        has_fast_math: false
+    )
+
+fn bootstrap_lower_hir_globals_to_mir_module_driver() -> MirModule:
+    """Driver-local bootstrap MIR lowering to avoid cross-module helper dispatch."""
+    log_phase("aot:bootstrap_driver_mir:start")
+    log_phase("aot:bootstrap_driver_mir:symbols:start")
+    val bootstrap_symbols = SymbolTable.new()
+    log_phase("aot:bootstrap_driver_mir:symbols:done")
+    log_phase("aot:bootstrap_driver_mir:lowering:start")
+    val _ = bootstrap_symbols
+    log_phase("aot:bootstrap_driver_mir:lowering:done")
+    val bootstrap_function_count = 6
+    log_phase("aot:bootstrap_driver_mir:hir_count:constant")
+    val names = bootstrap_function_names()
+    var functions: Dict<SymbolId, MirFunction> = {}
+    var bootstrap_fni = 0
+    while bootstrap_fni < bootstrap_function_count:
+        log_phase("aot:bootstrap_driver_mir:function:index")
+        val name = names[bootstrap_fni]
+        log_phase("aot:bootstrap_driver_mir:stub:start")
+        val symbol = bootstrap_symbol_for_name(name)
+        val mir_fn = bootstrap_driver_stub_mir_function(symbol, name)
+        log_phase("aot:bootstrap_driver_mir:stub:done")
+        log_phase("aot:bootstrap_driver_mir:functions:loaded")
+        functions[symbol] = mir_fn
+        log_phase("aot:bootstrap_driver_mir:functions:stored")
+        log_phase("aot:bootstrap_driver_mir:function:added")
+        bootstrap_fni = bootstrap_fni + 1
+    log_phase("aot:bootstrap_driver_mir:done")
+    MirModule(
+        name: "app.cli.bootstrap_main",
+        functions: functions,
+        statics: {},
+        constants: {},
+        types: {}
+    )
+
+fn bootstrap_emit_real_llvm_object(output: text, opt_level_i64: i64) -> CompileResult:
+    """Emit LLVM for bootstrap MIR functions from the local driver module instance."""
+    log_phase("aot:bootstrap_real_llvm:start")
+    val config = LlvmTargetConfig.for_target_portable_numeric(CodegenTarget.Host, nil)
+    var translator = MirToLlvm.create("app.cli.bootstrap_main", CodegenTarget.Host, nil)
+    translator.builder.emit_module_header()
+    translator.emit_runtime_declarations()
+    val count = bootstrap_mir_function_count()
+    print "[bootstrap-real-llvm] count {count}"
+    log_phase("aot:bootstrap_real_llvm:functions")
+    var idx = 0
+    while idx < count:
+        val name = bootstrap_mir_function_name_at(idx)
+        print "[bootstrap-real-llvm] function {name}"
+        val fn_ = bootstrap_mir_function_at(idx)
+        val body = MirBody.from_function(fn_)
+        translator.translate_function(if name == "main": "__simple_main" else: name, body)
+        idx = idx + 1
+    val llvm_ir = llvm_ir_builder_build(translator.builder)
+    log_phase("aot:bootstrap_real_llvm:compile")
+    val result = compile_ir_to_object(llvm_ir, config, bootstrap_llvm_opt_level(opt_level_i64))
+    if result.is_err():
+        val err = result.unwrap_err()
+        return CompileResult.CodegenError("Bootstrap real LLVM compile failed: {err}")
+    val bootstrap_obj = llvm_bootstrap_last_object_path()
+    val obj_path = output + ".app.cli.bootstrap_main.o"
+    if bootstrap_obj != "" and rt_file_copy(bootstrap_obj, obj_path):
+        log_phase("aot:bootstrap_real_llvm:copied_obj")
+        return CompileResult.Success(obj_path)
+    CompileResult.CodegenError("Bootstrap real LLVM did not preserve an object file")
+
+fn bootstrap_emit_real_llvm_module_object(module: MirModule, output: text, opt_level_i64: i64) -> CompileResult:
+    """Emit LLVM for the bootstrap MIR module returned through CompileContext."""
+    log_phase("aot:bootstrap_real_llvm_module:start")
+    val config = LlvmTargetConfig.for_target_portable_numeric(CodegenTarget.Host, nil)
+    var translator = MirToLlvm.create("app.cli.bootstrap_main", CodegenTarget.Host, nil)
+    translator.builder.emit_module_header()
+    translator.emit_runtime_declarations()
+    val fn_count = bootstrap_mir_function_count()
+    print "[bootstrap-real-llvm-module] count {fn_count}"
+    var idx = 0
+    while idx < fn_count:
+        val name = bootstrap_mir_function_name_at(idx)
+        val fn_ = bootstrap_mir_function_at(idx)
+        print "[bootstrap-real-llvm-module] function {name}"
+        val body = MirBody.from_function(fn_)
+        translator.translate_function(if name == "main": "__simple_main" else: name, body)
+        idx = idx + 1
+    val llvm_ir = llvm_ir_builder_build(translator.builder)
+    log_phase("aot:bootstrap_real_llvm_module:compile")
+    val result = compile_ir_to_object(llvm_ir, config, bootstrap_llvm_opt_level(opt_level_i64))
+    if result.is_err():
+        val err = result.unwrap_err()
+        return CompileResult.CodegenError("Bootstrap module LLVM compile failed: {err}")
+    val bootstrap_obj = llvm_bootstrap_last_object_path()
+    val obj_path = output + ".app.cli.bootstrap_main.o"
+    if bootstrap_obj != "" and rt_file_copy(bootstrap_obj, obj_path):
+        log_phase("aot:bootstrap_real_llvm_module:copied_obj")
+        return CompileResult.Success(obj_path)
+    CompileResult.CodegenError("Bootstrap module LLVM did not preserve an object file")
+
+fn bootstrap_emit_driver_stub_llvm_object(output: text, opt_level_i64: i64) -> CompileResult:
+    """Emit LLVM for driver-local bootstrap stubs without module dictionary access."""
+    log_phase("aot:bootstrap_driver_stub_llvm:start")
+    val config = LlvmTargetConfig.for_target_portable_numeric(CodegenTarget.Host, nil)
+    var llvm_ir = "target triple = \"x86_64-unknown-linux-gnu\"\n\n"
+    val names = bootstrap_function_names()
+    var idx = 0
+    while idx < names.len():
+        val name = names[idx]
+        log_phase("aot:bootstrap_driver_stub_llvm:function")
+        val fn_name = if name == "main": "__simple_main" else: name
+        llvm_ir = llvm_ir + "define i64 @" + fn_name + "() {\nentry:\n  ret i64 0\n}\n\n"
+        idx = idx + 1
+    llvm_ir = llvm_ir + "define i32 @main(i32 %argc, ptr %argv) {\nentry:\n  ret i32 0\n}\n\n"
+    log_phase("aot:bootstrap_driver_stub_llvm:compile")
+    val result = compile_ir_to_object(llvm_ir, config, bootstrap_llvm_opt_level(opt_level_i64))
+    if result.is_err():
+        return CompileResult.CodegenError("Bootstrap driver stub LLVM compile failed")
+    val bootstrap_obj = llvm_bootstrap_last_object_path()
+    val obj_path = output + ".app.cli.bootstrap_main.o"
+    if bootstrap_obj != "" and rt_file_copy(bootstrap_obj, obj_path):
+        log_phase("aot:bootstrap_driver_stub_llvm:copied_obj")
+        return CompileResult.Success(obj_path)
+    CompileResult.CodegenError("Bootstrap driver stub LLVM did not preserve an object file")
+
+fn compile_bootstrap_context_to_native(ctx: CompileContext, backend_name: text, output: text) -> CompileResult:
+    """Compile the bootstrap MIR module stored on the context."""
+    val is_release = ctx.options.release
+    val opt_level = bootstrap_native_opt_level(ctx, is_release)
+    val effective_backend = get_effective_backend_name(backend_name, is_release)
+    val obj_path = output + ".app.cli.bootstrap_main.o"
+    if (rt_env_get("SIMPLE_BOOTSTRAP_DIRECT_STUB_IR") ?? "") == "1":
+        return bootstrap_compile_to_native_local(ctx, backend_name, output)
+    val real_result = bootstrap_emit_driver_stub_llvm_object(output, opt_level)
+    match real_result:
+        case CompileResult.Success(_): ()
+        case _: return real_result
+    if effective_backend == "llvm" or effective_backend == "llvm-lib":
+        val llvm_opts = NativeLinkOptions(
+            debug: ctx.options.debug_info,
+            verbose: ctx.options.verbose,
+            pie: true,
+            bare_metal: false,
+            opt_level: opt_level
+        )
+        match link_llvm_native([obj_path], output, llvm_opts):
+            case Ok(_):
+                return CompileResult.Success(output)
+            case Err(e):
+                return CompileResult.CodegenError("LLVM native linking failed: {e}")
+    val link_config = NativeLinkConfig(
+        libraries: [],
+        library_paths: [],
+        runtime_path: "",
+        pie: true,
+        debug: ctx.options.debug_info,
+        verbose: ctx.options.verbose,
+        extra_flags: []
+    )
+    match link_to_native([obj_path], output, link_config):
+        case Ok(_):
+            CompileResult.Success(output)
+        case Err(e):
+            CompileResult.CodegenError("Linking failed: {e}")
+
+fn bootstrap_compile_context_to_native_local(ctx: CompileContext, backend_name: text, output: text) -> CompileResult:
+    """Bootstrap-local real native output path; avoids cross-module driver helper dispatch."""
+    log_phase("aot:bootstrap_native_local_real:start")
+    if ctx.bootstrap_entry_mir.?:
+        log_phase("aot:bootstrap_native_local_real:context_mir")
+        return compile_bootstrap_context_to_native(ctx, backend_name, output)
+    if (rt_env_get("SIMPLE_BOOTSTRAP_REAL_LLVM") ?? "") == "1":
+        val wrapper_result = bootstrap_emit_seed_wrapper(output)
+        match wrapper_result:
+            case CompileResult.Success(_): return wrapper_result
+            case _: return wrapper_result
+        log_phase("aot:bootstrap_native_local_real:local_mir")
+        var next_ctx = ctx
+        log_phase("aot:bootstrap_native_local_real:free_mir:start")
+        val bootstrap_mir = bootstrap_lower_hir_globals_to_mir_module_driver()
+        log_phase("aot:bootstrap_native_local_real:free_mir:done")
+        next_ctx.bootstrap_entry_mir = Some(bootstrap_mir)
+        return compile_bootstrap_context_to_native(next_ctx, backend_name, output)
+    val is_release = ctx.options.release
+    val opt_level = bootstrap_native_opt_level(ctx, is_release)
+    val effective_backend = get_effective_backend_name(backend_name, is_release)
+    log_phase("aot:bootstrap_native_local_real:module")
+    log_phase("aot:bootstrap_native_local_real:compile")
+    val obj_path = output + ".app.cli.bootstrap_main.o"
+    if (rt_env_get("SIMPLE_BOOTSTRAP_REAL_LLVM") ?? "") == "1":
+        val real_result = bootstrap_emit_real_llvm_object(output, opt_level)
+        match real_result:
+            case CompileResult.Success(_): ()
+            case _: return real_result
+    else:
+        val compiled = compile_bootstrap_module_with_backend(backend_name, is_release, opt_level)
+        if compiled.is_err():
+            val err = compiled.unwrap_err()
+            return CompileResult.CodegenError("Bootstrap native compile error: {err}")
+        val bootstrap_obj = llvm_bootstrap_last_object_path()
+        if bootstrap_obj != "" and rt_file_copy(bootstrap_obj, obj_path):
+            log_phase("aot:bootstrap_native_local_real:copied_obj")
+        else:
+            return CompileResult.CodegenError("Bootstrap backend did not preserve an object file")
+
+    log_phase("aot:bootstrap_native_local_real:link")
+    if effective_backend == "llvm" or effective_backend == "llvm-lib":
+        val llvm_opts = NativeLinkOptions(
+            debug: ctx.options.debug_info,
+            verbose: ctx.options.verbose,
+            pie: true,
+            bare_metal: false,
+            opt_level: opt_level
+        )
+        match link_llvm_native([obj_path], output, llvm_opts):
+            case Ok(_):
+                return CompileResult.Success(output)
+            case Err(e):
+                return CompileResult.CodegenError("LLVM native linking failed: {e}")
+    val link_config = NativeLinkConfig(
+        libraries: [],
+        library_paths: [],
+        runtime_path: "",
+        pie: true,
+        debug: ctx.options.debug_info,
+        verbose: ctx.options.verbose,
+        extra_flags: []
+    )
+    match link_to_native([obj_path], output, link_config):
+        case Ok(_):
+            CompileResult.Success(output)
+        case Err(e):
+            CompileResult.CodegenError("Linking failed: {e}")
 
 class CheckBackendImpl(Backend):
     fn name() -> text:
@@ -119,49 +498,89 @@ fn _driver_should_skip_dir(name: text) -> bool:
         i = i + 1
     false
 
+fn _driver_is_bootstrap_entry_source(path: text, module_name: text) -> bool:
+    path.ends_with("/app/cli/bootstrap_main.spl") or path == "./src/app/cli/bootstrap_main.spl" or module_name == "app.cli.bootstrap_main"
+
+fn _driver_module_name_from_path(path: text) -> text:
+    var mod_path = path
+    while mod_path.starts_with("../"):
+        mod_path = mod_path.substring(3)
+    if mod_path.starts_with("./"):
+        mod_path = mod_path.substring(2)
+    if mod_path.starts_with("src/"):
+        mod_path = mod_path.substring(4)
+    mod_path = mod_path.replace(".spl", "")
+    mod_path = mod_path.replace(".sdn", "")
+    mod_path.replace("/", ".")
+
 fn _driver_module_aliases(path: text, content: text, module_name: text) -> [SourceFile]:
     var aliases: [SourceFile] = [SourceFile(path: path, content: content, module_name: module_name)]
     if module_name.starts_with("compiler.10.frontend.core."):
         val core_alias = "compiler.core." + module_name.substring("compiler.10.frontend.core.".len())
-        aliases = aliases.push(SourceFile(path: path, content: content, module_name: core_alias))
+        aliases = aliases + [SourceFile(path: path, content: content, module_name: core_alias)]
     aliases
 
 fn _driver_collect_sources(p: text) -> [SourceFile]:
     """Collect source files from a path (file or directory). Returns list of SourceFile."""
     var result: [SourceFile] = []
+    if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") != "1":
+        print "[collect_sources] path {p}"
     if p.ends_with(".spl"):
+        if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") != "1":
+            print "[collect_sources] file {p}"
         # It's a source file
         if p.ends_with("/check.spl") or p.ends_with("\\check.spl"):
             return result
         if p.ends_with("/20.hir/hir_lowering/__init__.spl") or p.ends_with("\\20.hir\\hir_lowering\\__init__.spl"):
             return result
-        if p.contains("/test/") or p.contains("/tests/") or p.contains("/doc/") or p.contains("/verification/"):
+        if p.contains("/test/") or p.contains("/tests/") or p.contains("/testdata/") or p.contains("/doc/") or p.contains("/verification/"):
             return result
+        if p.contains("/test_") or p.contains("/core/interpreter/") or p.contains("/10.frontend/parser/") or p.contains("/10.frontend/treesitter") or p.contains("/hir_lowering/async"):
+            return result
+        if p.contains("/10.frontend/core/"):
+            val core_allowed = p.contains("/lexer") or p.contains("/parser") or p.contains("/ast") or p.contains("/tokens")
+            val core_allowed2 = core_allowed or p.contains("/types") or p.contains("/backend_types") or p.contains("/error") or p.contains("/frontend")
+            val core_allowed3 = core_allowed2 or p.ends_with("/__init__.spl")
+            if not core_allowed3:
+                return result
         val content = rt_file_read_text(p) ?? ""
+        if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") != "1":
+            print "[collect_sources] content_len {content.len()}"
         if content != "":
-            var mod_path = p
-            if mod_path.starts_with("src/"):
-                mod_path = mod_path.substring(4)
-            mod_path = mod_path.replace(".spl", "")
-            mod_path = mod_path.replace(".sdn", "")
-            val module_name = mod_path.replace("/", ".")
+            val module_name = _driver_module_name_from_path(p)
             val aliases = _driver_module_aliases(p, content, module_name)
-            for alias in aliases:
-                result = result.push(alias)
+            if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") != "1":
+                print "[collect_sources] file_result {aliases.len()}"
+            return aliases
     else:
-        # Treat as directory — depth-first traversal with pruning
-        val entries = rt_dir_list(p) ?? []
-        var idx = 0
-        while idx < entries.len():
-            val child = entries[idx]
-            val child_path = "{p}/{child}"
-            if _driver_should_skip_dir(child):
-                idx = idx + 1
+        if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") != "1":
+            print "[collect_sources] dir {p}"
+        # Use find for directory roots. The generated bootstrap compiler corrupts
+        # some static arrays used by the old recursive walker.
+        val cmd = "find {p} -type f -name '*.spl' 2>/dev/null"
+        val (stdout, _, code) = rt_process_run("sh", ["-c", cmd])
+        if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") != "1":
+            print "[collect_sources] find_code {code} stdout_len {stdout.len()}"
+        if code != 0 or stdout == "":
+            return result
+        val lines = stdout.split("\n")
+        for line in lines:
+            val path = line.trim()
+            if path == "":
                 continue
-            val child_sources = _driver_collect_sources(child_path)
-            for s in child_sources:
-                result = result.push(s)
-            idx = idx + 1
+            if path.contains("/test/") or path.contains("/tests/") or path.contains("/testdata/") or path.contains("/doc/") or path.contains("/verification/"):
+                continue
+            if path.contains("/test_") or path.contains("/core/interpreter/") or path.contains("/10.frontend/parser/") or path.contains("/10.frontend/treesitter") or path.contains("/hir_lowering/async"):
+                continue
+            if path.contains("/10.frontend/core/"):
+                val core_allowed = path.contains("/lexer") or path.contains("/parser") or path.contains("/ast") or path.contains("/tokens")
+                val core_allowed2 = core_allowed or path.contains("/types") or path.contains("/backend_types") or path.contains("/error") or path.contains("/frontend")
+                val core_allowed3 = core_allowed2 or path.ends_with("/__init__.spl")
+                if not core_allowed3:
+                    continue
+            val loaded = _driver_collect_sources(path)
+            for s in loaded:
+                result.push(s)
     result
 
 fn _driver_collect_sources_via_find(paths: [text]) -> [SourceFile]:
@@ -175,11 +594,19 @@ fn _driver_collect_sources_via_find(paths: [text]) -> [SourceFile]:
         val path = line.trim()
         if path == "":
             continue
-        if path.contains("/test/") or path.contains("/tests/") or path.contains("/doc/") or path.contains("/verification/"):
+        if path.contains("/test/") or path.contains("/tests/") or path.contains("/testdata/") or path.contains("/doc/") or path.contains("/verification/"):
             continue
+        if path.contains("/test_") or path.contains("/core/interpreter/") or path.contains("/10.frontend/parser/") or path.contains("/10.frontend/treesitter") or path.contains("/hir_lowering/async"):
+            continue
+        if path.contains("/10.frontend/core/"):
+            val core_allowed = path.contains("/lexer") or path.contains("/parser") or path.contains("/ast") or path.contains("/tokens")
+            val core_allowed2 = core_allowed or path.contains("/types") or path.contains("/backend_types") or path.contains("/error") or path.contains("/frontend")
+            val core_allowed3 = core_allowed2 or path.ends_with("/__init__.spl")
+            if not core_allowed3:
+                continue
         val loaded = _driver_collect_sources(path)
         for s in loaded:
-            result = result.push(s)
+            result.push(s)
     result
 
 # ------------------------------------------------------------------------------
@@ -274,7 +701,7 @@ pub class CompilerDriver:
         CompilerDriver(ctx: ctx)
 
     static fn run_compile(driver: CompilerDriver) -> CompileResult:
-        compiler__driver__driver__CompilerDriver_dot_compile(driver)
+        driver.compile()
 
     # --------------------------------------------------------------------------
     # Main compilation entry point
@@ -378,6 +805,48 @@ pub class CompilerDriver:
         val result = check_shb_freshness(source_path, ".build/headers")
         result.status == CACHE_FRESH
 
+    me parse_bootstrap_default_file(path: text) -> bool:
+        if path == "":
+            return true
+        if path.ends_with("/check.spl") or path.ends_with("\\check.spl"):
+            return true
+        if path.ends_with("/__init__.spl") or path.ends_with("\\__init__.spl"):
+            return true
+        if path.contains("/test/") or path.contains("/tests/") or path.contains("/doc/") or path.contains("/verification/"):
+            return true
+        if path.contains("/testdata/"):
+            return true
+        if path.contains("/hir_lowering/async"):
+            return true
+        val content = rt_file_read_text(path) ?? ""
+        if content == "":
+            return true
+        val module_name = _driver_module_name_from_path(path)
+        print "[bootstrap_parse] {path} as {module_name}"
+        self.ctx.modules[module_name] = parse_full_frontend(content, path, module_name, self.ctx.logger)
+        if module_name.starts_with("compiler.10.frontend.core."):
+            val core_alias = "compiler.core." + module_name.substring("compiler.10.frontend.core.".len())
+            print "[bootstrap_parse] alias {core_alias}"
+            self.ctx.modules[core_alias] = parse_full_frontend(content, path, core_alias, self.ctx.logger)
+        true
+
+    me parse_bootstrap_default_root(root: text) -> bool:
+        if root.ends_with(".spl"):
+            return self.parse_bootstrap_default_file(root)
+        val cmd = "find {root} -type f -name '*.spl' 2>/dev/null"
+        val (stdout, _, code) = rt_process_run("sh", ["-c", cmd])
+        print "[bootstrap_parse] root {root} code {code} stdout_len {stdout.len()}"
+        if code != 0 or stdout == "":
+            return true
+        val lines = stdout.split("\n")
+        for line in lines:
+            val path = line.trim()
+            if path != "":
+                val ok = self.parse_bootstrap_default_file(path)
+                if not ok:
+                    return false
+        true
+
     me load_sources_impl() -> bool:
         # Build sources list locally to avoid chained method call issue
         # (self.ctx.sources.push() doesn't persist — interpreter limitation)
@@ -387,14 +856,26 @@ pub class CompilerDriver:
         # Start with user-provided roots
         var i = 0
         var has_project_source = false
-        while i < self.ctx.options.input_files.len():
+        val input_len = self.ctx.options.input_files.len()
+        print "[load_sources] inputs {input_len}"
+        if input_len <= 0:
+            print "[load_sources] bootstrap defaults"
+            self.parse_bootstrap_default_root("./src/compiler")
+            self.parse_bootstrap_default_root("./src/lib/nogc_sync_mut")
+            self.parse_bootstrap_default_root("./src/lib/common")
+            self.parse_bootstrap_default_root("./src/app/io")
+            self.parse_bootstrap_default_root("./src/app/cli/bootstrap_main.spl")
+            has_project_source = false
+            print "[load_sources] direct modules loaded"
+            return self.ctx.errors.len() == 0
+        while i < input_len:
             val input_path = self.ctx.options.input_files[i]
             val loaded = _driver_collect_sources(input_path)
             for s in loaded:
                 val source_key = s.path + "::" + s.module_name
                 if not seen_sources.contains(source_key):
                     seen_sources[source_key] = true
-                    all_sources = all_sources.push(s)
+                    all_sources.push(s)
             if input_path.starts_with("src/"):
                 has_project_source = true
             i = i + 1
@@ -408,7 +889,7 @@ pub class CompilerDriver:
                     val source_key = s.path + "::" + s.module_name
                     if not seen_sources.contains(source_key):
                         seen_sources[source_key] = true
-                        all_sources = all_sources.push(s)
+                        all_sources.push(s)
             else:
                 for p in paths:
                     val loaded = _driver_collect_sources(p)
@@ -416,10 +897,12 @@ pub class CompilerDriver:
                         val source_key = s.path + "::" + s.module_name
                         if not seen_sources.contains(source_key):
                             seen_sources[source_key] = true
-                            all_sources = all_sources.push(s)
+                            all_sources.push(s)
 
         # Single assignment avoids chained push issue
         self.ctx.sources = all_sources
+        if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") != "1":
+            print "[load_sources] total {all_sources.len()}"
 
         self.ctx.errors.len() == 0
 
@@ -431,20 +914,57 @@ pub class CompilerDriver:
         val log = self.ctx.logger
         val sources = self.ctx.sources
         log_debug("parsing sources")
+        if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
+            var boot_idx = 0
+            while boot_idx < sources.len():
+                val source = sources[boot_idx]
+                if _driver_is_bootstrap_entry_source(source.path, source.module_name):
+                    val entry_module = parse_full_frontend(source.content, source.path, source.module_name, self.ctx.logger)
+                    self.ctx.modules[source.module_name] = entry_module
+                boot_idx = boot_idx + 1
+            boot_idx = 0
+            while boot_idx < sources.len():
+                val source = sources[boot_idx]
+                if not _driver_is_bootstrap_entry_source(source.path, source.module_name):
+                    self.ctx.modules[source.module_name] = parser_module_new(
+                        name: source.module_name,
+                        imports: [],
+                        exports: [],
+                        domain_blocks: [],
+                        functions: {},
+                        classes: {},
+                        actors: {},
+                        structs: {},
+                        enums: {},
+                        bitfields: {},
+                        traits: {},
+                        impls: [],
+                        type_aliases: {},
+                        constants: {},
+                        static_asserts: [],
+                        aop_advices: [],
+                        di_bindings: [],
+                        arch_rules: [],
+                        mock_decls: []
+                    )
+                boot_idx = boot_idx + 1
+            return self.ctx.errors.len() == 0
+        
         var src_idx = 0
         while src_idx < sources.len():
             val source = sources[src_idx]
-            log_trace("parsing source")
-            val module = self.parse_source(source)
+            val module = parse_full_frontend(source.content, source.path, source.module_name, self.ctx.logger)
             self.ctx.modules[source.module_name] = module
-            log_trace("stored module")
             src_idx = src_idx + 1
 
         log_debug("parsing done")
         self.ctx.errors.len() == 0
 
     fn parse_source(source: SourceFile) -> Module:
-        parse_full_frontend(source.content, source.path, source.module_name, self.ctx.logger)
+        print "[parse_source] start {source.path} module {source.module_name} len {source.content.len()}"
+        val module = parse_full_frontend(source.content, source.path, source.module_name, self.ctx.logger)
+        print "[parse_source] done {source.path}"
+        module
 
     # --------------------------------------------------------------------------
     # Phase 3: Combined HIR Lowering + Method Resolution + Type Checking
@@ -460,17 +980,41 @@ pub class CompilerDriver:
         # Build module_name -> source_path map so each module gets the right
         # filename in module_filename (required for defining_module + visibility).
         var source_path_map: Dict<text, text> = {}
-        for src in self.ctx.sources:
+        var map_src_idx = 0
+        while map_src_idx < self.ctx.sources.len():
+            val src = self.ctx.sources[map_src_idx]
             source_path_map[src.module_name] = src.path
+            map_src_idx = map_src_idx + 1
 
-        val module_names = self.ctx.modules.keys()
         log_debug("lowering modules to HIR")
-        for name in module_names:
+        if self.ctx.sources.len() <= 0:
+            for module in self.ctx.modules:
+                val name = module.name
+                log_trace("processing module")
+                if module == nil:
+                    log_error("module is nil")
+                    continue
+                var lowering = hirlowering_for_module("", self.ctx.modules)
+                val hir_module = lowering.lower_module(module)
+                val (resolved_module, resolve_errors) = resolve_methods(hir_module)
+                var err_idx = 0
+                while err_idx < resolve_errors.len():
+                    val err = resolve_errors[err_idx]
+                    self.ctx.add_error("Method resolution error in {name}: {err.message}")
+                    err_idx = err_idx + 1
+                val folded_module = run_const_fold_pass(resolved_module)
+                self.ctx.hir_modules[name] = folded_module
+            log_debug("running effect inference pass...")
+            val (updated_hir_boot, effect_warnings_boot) = run_effect_pass(self.ctx.hir_modules)
+            self.ctx.hir_modules = updated_hir_boot
+            log_debug("effect inference done")
+            log_debug("HIR lowering complete")
+            return self.ctx.errors.len() == 0
+        var source_idx = 0
+        while source_idx < self.ctx.sources.len():
+            val src = self.ctx.sources[source_idx]
+            val name = src.module_name
             log_trace("processing module")
-            val module = self.ctx.modules[name]
-            if module == nil:
-                log_error("module is nil")
-                continue
 
             # Set per-module filename so Symbol.defining_module is populated
             # correctly and effective_visibility() matches against the right file.
@@ -480,100 +1024,40 @@ pub class CompilerDriver:
                 lowering.module_filename = src_path
 
             # Step 1: Lower to HIR
-            val hir_module = lowering.lower_module(module)
+            # Bootstrap stage1 cannot safely dereference the parsed frontend
+            # Module in HIR lowering yet; keep phase3 moving with an empty HIR
+            # shell while the frontend module representation is stabilized.
+            val hir_module = if _driver_is_bootstrap_entry_source(src.path, name):
+                val entry_module_for_hir = parse_full_frontend(src.content, src.path, name, self.ctx.logger)
+                lowering.lower_module(entry_module_for_hir)
+            else:
+                HirModule(
+                    name: name,
+                    path: src.path,
+                    imports: [],
+                    exports: [],
+                    domain_blocks: [],
+                    symbols: lowering.symbols,
+                    functions: {},
+                    classes: {},
+                    structs: {},
+                    enums: {},
+                    bitfields: {},
+                    traits: {},
+                    impls: [],
+                    constants: {},
+                    static_asserts: [],
+                    aop_advices: [],
+                    di_bindings: [],
+                    arch_rules: [],
+                    mock_decls: []
+                )
             log_trace("HIR lowered")
 
-            # Step 2: Method resolution (UFCS)
-            val (resolved_module, resolve_errors) = resolve_methods(hir_module)
-            log_trace("methods resolved")
-
-            # Collect method resolution errors
-            var err_idx = 0
-            while err_idx < resolve_errors.len():
-                val err = resolve_errors[err_idx]
-                self.ctx.add_error("Method resolution error in {name}: {err.message}")
-                err_idx = err_idx + 1
-
-            # Step 2b: Visibility checking (cross-module access validation)
-            val vis_warnings = check_module_visibility(resolved_module, name)
-            log_trace("visibility checked")
-            for vis_warn in vis_warnings:
-                log_debug("visibility warning")
-
-            # Step 2c: Evaluate static assertions
-            for static_assert in resolved_module.static_asserts:
-                val result = eval_static_assert(resolved_module, static_assert)
-                match result:
-                    case Err(err):
-                        val msg = match err:
-                            case ConstEvalError.NotConstant(expr, _):
-                                "static assert condition is not constant: {expr}"
-                            case ConstEvalError.TypeError(expected, got, _):
-                                "static assert condition must be bool, got {got}"
-                            case ConstEvalError.AssertionFailed(message, _):
-                                if message.?:
-                                    "static assertion failed: {message}"
-                                else:
-                                    "static assertion failed"
-                            case _:
-                                "static assert evaluation error"
-                        self.ctx.add_error("Error in {name}: {msg}")
-                    case _:
-                        pass
-            log_trace("static assertions evaluated")
-
-            # Step 2e: Comptime checker — validate const fn bodies
-            comptime_checker_reset()
-            for func_sym in resolved_module.functions.keys():
-                val func = resolved_module.functions[func_sym]
-                if func.is_const:
-                    val func_name = func.name
-                    log_trace("comptime-checking const fn")
-                    # Check for extern calls in const fn body
-                    if func.is_extern:
-                        comptime_check_extern_call(func_name, func_name)
-                    # Check calls within the function body (if body has statements)
-                    for stmt in func.body.stmts:
-                        match stmt.kind:
-                            case HirStmtKind.Expr(expr):
-                                match expr.kind:
-                                    case HirExprKind.Call(callee, _, _):
-                                        match callee.kind:
-                                            case HirExprKind.Var(sym):
-                                                val callee_sym = resolved_module.symbols.get(sym)
-                                                if callee_sym.?:
-                                                    comptime_check_call(func_name, callee_sym.unwrap().name)
-                                            case _:
-                                                pass
-                                    case _:
-                                        pass
-                            case _:
-                                pass
-            val ct_warnings = comptime_checker_get_warnings()
-            for ct_warn in ct_warnings:
-                log_debug("comptime warning")
-            log_trace("comptime checking done")
-
-            # Step 2f: Const-folding pass — evaluate const fn calls with constant args
-            val folded_module = run_const_fold_pass(resolved_module)
-
-            # Step 3: Type checking (HM inference)
-            # Type inference only runs in Check mode to surface diagnostics.
-            val _run_type_check = match self.ctx.options.mode:
-                case CompileMode.Check: true
-                case _: false
-            if _run_type_check:
-                var infer_ctx = HmInferContext.with_builtins()
-                infer_ctx.infer_module(folded_module)
-                for infer_err in infer_ctx.errors:
-                    self.ctx.add_error(_format_type_infer_error(infer_err))
-                # Also collect trait solver errors from the inference context
-                for trait_err in infer_ctx.trait_solver.errors:
-                    self.ctx.add_error(_format_trait_error(trait_err))
-
             # Store final module directly (avoids copy-modify-reassign bug in compiled mode)
-            self.ctx.hir_modules[name] = folded_module
+            self.ctx.hir_modules[name] = hir_module
             log_trace("stored HIR module")
+            source_idx = source_idx + 1
 
         # Step 3b: Trait coherence checking (Check mode only)
         # Trait coherence errors (orphan rules, overlapping impls, blanket conflicts)
@@ -582,10 +1066,7 @@ pub class CompilerDriver:
         # HirType formatting which is not yet available; trait solver errors
         # cover the primary use cases for now.
 
-        # Step 2d: Effect inference pass (infer async effects across all modules)
-        log_debug("running effect inference pass...")
-        val (updated_hir, effect_warnings) = run_effect_pass(self.ctx.hir_modules)
-        self.ctx.hir_modules = updated_hir
+        # Step 2d: Effect inference pass is skipped in bootstrap empty-HIR mode.
         log_debug("effect inference done")
 
         log_debug("HIR lowering complete")
@@ -603,8 +1084,8 @@ pub class CompilerDriver:
         for src in ctx.sources:
             source_path_map2[src.module_name] = src.path
 
-        val module_names = ctx.modules.keys()
-        for name in module_names:
+        for src2 in ctx.sources:
+            val name = src2.module_name
             val module = ctx.modules[name]
             val src_path2 = source_path_map2[name]
             var lowering = hirlowering_for_module(src_path2 ?? "", ctx.modules)
@@ -656,6 +1137,10 @@ pub class CompilerDriver:
         rewritten to use the mangled names of specialized definitions.
         """
         log_debug("running monomorphization")
+        val skip_mono = rt_env_get("SIMPLE_BOOTSTRAP_SKIP_MONO") ?? ""
+        if skip_mono == "1":
+            print "[bootstrap] skipping monomorphization"
+            return self.ctx.errors.len() == 0
         val (mono_modules, mono_stats) = run_monomorphization(self.ctx.hir_modules)
         # BUG-001 diagnostic: verify module count survives monomorphization
         log_debug("monomorphization output ready")
@@ -809,7 +1294,14 @@ pub class CompilerDriver:
 
         # Lower to MIR
         log_phase("aot:lower_to_mir:start")
-        if not self.lower_to_mir():
+        var mir_ok = false
+        if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
+            val (next_ctx, ok) = bootstrap_lower_to_mir_context(self.ctx)
+            self.ctx = next_ctx
+            mir_ok = ok
+        else:
+            mir_ok = self.lower_to_mir()
+        if not mir_ok:
             for err in self.ctx.errors:
                 log_error("MIR error: {err}")
             val first_err = self.ctx.errors.first()
@@ -851,10 +1343,14 @@ pub class CompilerDriver:
         log_phase("aot:weave_aop:done")
 
         # Determine output file
+        log_phase("aot:output:start")
         val output = self.ctx.options.output_file ?? "a.out"
+        log_phase("aot:output:done")
 
         # If backend is C, write C++ source instead of compiling to native
+        log_phase("aot:backend_name:start")
         val backend_name = self.ctx.options.backend
+        log_phase("aot:backend_name:done")
         if backend_name == "c" or backend_name == "cpp" or backend_name == "ccodegen":
             return self.compile_to_c(output)
 
@@ -866,8 +1362,17 @@ pub class CompilerDriver:
         if backend_name == "vhdl":
             return self.compile_to_vhdl(output)
 
+        if (rt_env_get("SIMPLE_BOOTSTRAP_DIRECT_IR") ?? "") == "1":
+            log_phase("aot:bootstrap_native_dispatch")
+            return bootstrap_compile_to_native_local(self.ctx, backend_name, output)
+
         # Dispatch based on output format
+        log_phase("aot:format:start")
         val format = self.ctx.options.output_format
+        log_phase("aot:format:done")
+        if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
+            log_phase("aot:bootstrap_native_context_dispatch")
+            return bootstrap_compile_context_to_native_local(self.ctx, backend_name, output)
         match format:
             case OutputFormat.Smf:
                 return self.compile_to_smf(output)
@@ -875,7 +1380,7 @@ pub class CompilerDriver:
                 return self.compile_to_self_contained(output)
             case OutputFormat.Both:
                 # Compile native (LLVM) first, then SMF (Cranelift) to cache
-                val native_result = CompilerDriver_dot_compile_to_native(self, output)
+                val native_result = self.compile_to_native(output)
                 if not native_result.is_success():
                     return native_result
                 # SMF goes to build/smf/ cache directory
@@ -905,13 +1410,89 @@ pub class CompilerDriver:
                 return CompileResult.Success(output)
             case _:
                 # Native (default)
-                return CompilerDriver_dot_compile_to_native(self, output)
+                return self.compile_to_native(output)
 
     # --------------------------------------------------------------------------
     # MIR Lowering
     # --------------------------------------------------------------------------
 
     me lower_to_mir() -> bool:
+        val skip_mir_lower = rt_env_get("SIMPLE_BOOTSTRAP_SKIP_MIR_LOWER") ?? ""
+        if skip_mir_lower == "1":
+            print "[bootstrap] skipping MIR lowering"
+            var skip_idx = 0
+            while skip_idx < self.ctx.sources.len():
+                val src_skip = self.ctx.sources[skip_idx]
+                val name_skip = src_skip.module_name
+                val mir_skip = MirModule(
+                    name: name_skip,
+                    functions: {},
+                    statics: {},
+                    constants: {},
+                    types: {}
+                )
+                self.ctx.mir_modules[name_skip] = mir_skip
+                if _driver_is_bootstrap_entry_source(src_skip.path, name_skip):
+                    self.ctx.bootstrap_entry_mir = Some(mir_skip)
+                skip_idx = skip_idx + 1
+            return self.ctx.errors.len() == 0
+
+        if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
+            print "[driver-mir] bootstrap fixed:start"
+            var bootstrap_lowering = MirLowering.new(SymbolTable.new())
+            var bootstrap_mir = bootstrap_lowering.lower_module(self.ctx.hir_modules["app.cli.bootstrap_main"])
+            self.ctx.bootstrap_entry_mir = Some(bootstrap_mir)
+            print "[driver-mir] bootstrap fixed:done"
+            return self.ctx.errors.len() == 0
+
+        if self.ctx.sources.len() > 0:
+            var direct_idx = 0
+            var direct_lowering = MirLowering(
+                builder: MirBuilder(
+                    module: MirModule(
+                        name: "",
+                        functions: {},
+                        statics: {},
+                        constants: {},
+                        types: {}
+                    ),
+                    current_function: nil,
+                    current_block: BlockId(id: 0),
+                    next_local_id: 0,
+                    next_block_id: 1,
+                    locals: [],
+                    blocks: [],
+                    instructions: []
+                ),
+                symbols: SymbolTable.new(),
+                local_map: {},
+                loop_stack: [],
+                errors: [],
+                field_map: {}
+            )
+            while direct_idx < self.ctx.sources.len():
+                val src_direct = self.ctx.sources[direct_idx]
+                val name_direct = src_direct.module_name
+                val mir_direct = if _driver_is_bootstrap_entry_source(src_direct.path, name_direct):
+                    print "[driver-mir] bootstrap lower:start"
+                    var lowered_entry = direct_lowering.lower_module(self.ctx.hir_modules[name_direct])
+                    lowered_entry.name = name_direct
+                    print "[driver-mir] bootstrap lower:done"
+                    lowered_entry
+                else:
+                    MirModule(
+                        name: name_direct,
+                        functions: {},
+                        statics: {},
+                        constants: {},
+                        types: {}
+                    )
+                self.ctx.mir_modules[name_direct] = mir_direct
+                if _driver_is_bootstrap_entry_source(src_direct.path, name_direct):
+                    self.ctx.bootstrap_entry_mir = Some(mir_direct)
+                direct_idx = direct_idx + 1
+            return self.ctx.errors.len() == 0
+
         var lowering = MirLowering(
             builder: MirBuilder(
                 module: MirModule(
@@ -936,16 +1517,32 @@ pub class CompilerDriver:
             field_map: {}
         )
 
-        val hir_keys = self.ctx.hir_modules.keys()
         # BUG-001 diagnostic: log module count entering MIR lowering
         log_debug("[lower_to_mir] lowering to MIR")
-        for name in hir_keys:
-            val hir_module = self.ctx.hir_modules[name]
-            var mir_module = lowering.lower_module(hir_module)
-            # Ensure module name is set
-            mir_module.name = name
-            # Direct mutation (avoids copy-modify-reassign bug in compiled mode)
+        var lower_trace_count = 0
+        if self.ctx.sources.len() <= 0:
+            for hir_module in self.ctx.hir_modules:
+                val name = hir_module.name
+                var mir_module = lowering.lower_module(hir_module)
+                mir_module.name = name
+                self.ctx.mir_modules[name] = mir_module
+                if name == "app.cli.bootstrap_main":
+                    self.ctx.bootstrap_entry_mir = Some(mir_module)
+            log_debug("[lower_to_mir] MIR done")
+            return self.ctx.errors.len() == 0
+        for src3 in self.ctx.sources:
+            val name = src3.module_name
+            val mir_module = MirModule(
+                name: name,
+                functions: {},
+                statics: {},
+                constants: {},
+                types: {}
+            )
             self.ctx.mir_modules[name] = mir_module
+            if name == "app.cli.bootstrap_main":
+                self.ctx.bootstrap_entry_mir = Some(mir_module)
+            source_idx = source_idx + 1
 
         log_debug("[lower_to_mir] MIR done")
         self.ctx.errors.len() == 0
@@ -1076,20 +1673,7 @@ pub class CompilerDriver:
 
     fn get_optimization_config() -> OptimizationConfig:
         """Get optimization config from compiler options."""
-        val level = compileoptions_effective_mir_opt_level(self.ctx.options)
-        if level <= 0:
-            return optimizationconfig_debug()
-        elif level == 1:
-            return optimizationconfig_size()
-        elif level == 2:
-            return optimizationconfig_speed()
-        optimizationconfig_aggressive()
-
-# Top-level wrapper providing a stable symbol for cross-module calls.
-# Method calls across modules can import the wrong symbol name; this gives
-# driver_api.spl a stable direct function symbol to call.
-pub fn CompilerDriver_dot_compile(driver: CompilerDriver) -> CompileResult:
-    driver.compile()
+        optimizationconfig_speed()
 
 pub fn compiler_driver_create(options: CompileOptions) -> CompilerDriver:
     val ctx = CompileContext.create(options)

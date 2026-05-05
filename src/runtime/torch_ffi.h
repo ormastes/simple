@@ -38,6 +38,7 @@ int64_t     rt_torch_torchtensor_add(int64_t handle, int64_t other);
 int64_t     rt_torch_torchtensor_sub(int64_t handle, int64_t other);
 int64_t     rt_torch_torchtensor_mul(int64_t handle, int64_t other);
 int64_t     rt_torch_torchtensor_div(int64_t handle, int64_t other);
+int64_t     rt_dyn_torch_tensor_binary_op(int64_t handle, int64_t other, int64_t op);
 int64_t     rt_torch_torchtensor_pow(int64_t handle, double exponent);
 int64_t     rt_torch_torchtensor_neg(int64_t handle);
 int64_t     rt_torch_torchtensor_abs(int64_t handle);
@@ -45,7 +46,9 @@ int64_t     rt_torch_torchtensor_sqrt(int64_t handle);
 int64_t     rt_torch_torchtensor_exp(int64_t handle);
 int64_t     rt_torch_torchtensor_log(int64_t handle);
 int64_t     rt_torch_torchtensor_add_scalar(int64_t handle, double scalar);
+int64_t     rt_torch_torchtensor_sub_scalar(int64_t handle, double scalar);
 int64_t     rt_torch_torchtensor_mul_scalar(int64_t handle, double scalar);
+int64_t     rt_torch_torchtensor_div_scalar(int64_t handle, double scalar);
 
 /* Activation functions */
 int64_t     rt_torch_torchtensor_relu(int64_t handle);

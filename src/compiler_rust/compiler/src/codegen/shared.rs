@@ -125,7 +125,11 @@ pub fn build_mir_signature(func: &MirFunction) -> Signature {
     if func.name == "main" {
         sig.returns.push(AbiParam::new(types::I32));
     } else if func.return_type != TypeId::VOID {
-        sig.returns.push(AbiParam::new(types::I64));
+        let runtime_return = crate::codegen::runtime_ffi::RUNTIME_FUNCS
+            .iter()
+            .find(|spec| spec.name == func.name)
+            .and_then(|spec| spec.returns.first().copied());
+        sig.returns.push(AbiParam::new(runtime_return.unwrap_or(types::I64)));
     }
 
     sig

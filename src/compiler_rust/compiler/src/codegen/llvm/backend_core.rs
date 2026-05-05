@@ -604,8 +604,17 @@ impl NativeBackend for LlvmBackend {
             let m = self.module.borrow();
             if let Some(m) = m.as_ref() {
                 let rv_type = self.runtime_int_type();
+                let defined_function_names: std::collections::HashSet<&str> = module
+                    .functions
+                    .iter()
+                    .filter(|func| !func.blocks.is_empty())
+                    .map(|func| func.name.as_str())
+                    .collect();
 
                 for spec in crate::codegen::runtime_ffi::RUNTIME_FUNCS {
+                    if defined_function_names.contains(spec.name) {
+                        continue;
+                    }
                     // Skip if already declared
                     if m.get_function(spec.name).is_some() {
                         continue;

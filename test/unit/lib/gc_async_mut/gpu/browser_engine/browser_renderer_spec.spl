@@ -4,8 +4,10 @@ use std.gc_async_mut.gpu.browser_engine.browser_renderer.{BrowserRenderer, rende
 use std.gc_async_mut.gpu.browser_engine.browser_engine2d_bridge.{
     create_gpu_browser_renderer_with_backend, create_software_browser_renderer}
 
-val TEST_WIDTH: i32 = 160
-val TEST_HEIGHT: i32 = 120
+extern fn rt_file_read_text(path: text) -> text
+
+val TEST_WIDTH: i32 = 32
+val TEST_HEIGHT: i32 = 24
 val WHITE_BG: u32 = 0xFFFFFFFF
 
 fn _count_non_background(pixels: [u32], bg: u32) -> i32:
@@ -34,6 +36,37 @@ fn _pixels_equal(a: [u32], b: [u32]) -> bool:
         idx = idx + 1
     true
 
+fn _count_region_changed(pixels: [u32], width: i32, x: i32, y: i32, w: i32, h: i32, bg: u32) -> i32:
+    var count: i32 = 0
+    var row: i32 = 0
+    while row < h:
+        var col: i32 = 0
+        while col < w:
+            val idx = (y + row) * width + (x + col)
+            if idx >= 0 and idx < pixels.len():
+                val pixel = pixels[idx]
+                if pixel != bg:
+                    count = count + 1
+            col = col + 1
+        row = row + 1
+    count
+
+fn _scene_has_fill_color(html: text, color: u32) -> bool:
+    val renderer = BrowserRenderer.create(140, 90)
+    val scene = renderer.render_html(html).to_scene()
+    var idx: i32 = 0
+    while idx < scene.commands.len():
+        val cmd = scene.commands[idx]
+        if cmd.kind == "fill_rect" and cmd.color == color:
+            return true
+        idx = idx + 1
+    false
+
+fn _html_compat_fixture(layer: text) -> text:
+    val html = rt_file_read_text("test/fixtures/html_compat/02_block_boxes.html")
+    val css = rt_file_read_text("test/fixtures/html_compat/{layer}.css")
+    html.replace("</head>", "<style>\n" + css + "</style>\n</head>")
+
 describe "BrowserRenderer HTML rendering":
 
     it "renders inline background blocks without producing a blank frame":
@@ -47,6 +80,14 @@ describe "BrowserRenderer HTML rendering":
         val pixels = render_html_to_pixels_with_viewport(html, TEST_WIDTH, TEST_HEIGHT).pixel_data
         expect(pixels.len()).to_equal(TEST_WIDTH * TEST_HEIGHT)
         expect(_count_non_background(pixels, WHITE_BG)).to_be_greater_than(0)
+
+    it "paints inline background shorthand fallback colors after url tokens":
+        val html = "<html><body><div style='width: 80px; height: 40px; background: url(hero.png) #0f8 no-repeat'></div></body></html>"
+        expect(_scene_has_fill_color(html, 0xFF00FF88u32)).to_equal(true)
+
+    it "paints style block background shorthand fallback colors after url tokens":
+        val html = "<html><head><style>.card { width: 80px; height: 40px; background: url(hero.png) #0f8 no-repeat; }</style></head><body><div class='card'></div></body></html>"
+        expect(_scene_has_fill_color(html, 0xFF00FF88u32)).to_equal(true)
 
     it "resolves CSS custom properties from style blocks":
         val blue_html = "<html><head><style>:root { --theme-panel: #0000ff; } body { margin: 0; background-color: #ffffff; } .card { width: 100px; height: 50px; background-color: var(--theme-panel); }</style></head><body><div class='card'></div></body></html>"
@@ -75,7 +116,14 @@ describe "BrowserRenderer HTML rendering":
         val software_pixels = software_renderer.render_html_to_pixels(html).pixel_data
         expect(default_renderer.engine.?).to_equal(false)
         expect(software_renderer.engine.?).to_equal(true)
+        expect(default_renderer.backend_name()).to_equal("software")
+        expect(software_renderer.backend_name()).to_equal("software")
         expect(_pixels_equal(default_pixels, software_pixels)).to_equal(true)
+
+    it "reports deterministic software for unknown backend fallback":
+        val renderer = BrowserRenderer.create_with_backend(TEST_WIDTH, TEST_HEIGHT, "not-a-backend")
+        expect(renderer.engine.?).to_equal(false)
+        expect(renderer.backend_name()).to_equal("software")
 
     it "module pixel helper matches explicit Engine2D software rendering":
         val html = "<html><body><div style='width: 110px; height: 30px; background-color: #aa2244'></div></body></html>"
@@ -83,6 +131,19 @@ describe "BrowserRenderer HTML rendering":
         val renderer = BrowserRenderer.create_with_backend(TEST_WIDTH, TEST_HEIGHT, "software")
         val renderer_pixels = renderer.render_html_to_pixels(html).pixel_data
         expect(_pixels_equal(helper_pixels, renderer_pixels)).to_equal(true)
+
+    it "renders famous-site corpus block at Chrome default body margin":
+        val html = "<html><body><div style='width: 120px; height: 40px; background-color: #2563eb'>Google search deterministic compatibility fixture</div></body></html>"
+        val pixels = render_html_to_pixels_with_viewport(html, 160, 120).pixel_data
+        expect(pixels.len()).to_equal(160 * 120)
+        expect(pixels[0]).to_equal(0xFFFFFFFFu32)
+        expect(pixels[7 + 7 * 160]).to_equal(0xFFFFFFFFu32)
+        expect(pixels[8 + 8 * 160]).to_equal(0xFF2563EBu32)
+        expect(pixels[127 + 47 * 160]).to_equal(0xFF2563EBu32)
+        expect(pixels[128 + 48 * 160]).to_equal(0xFFFFFFFFu32)
+        expect(_count_region_changed(pixels, 160, 20, 19, 92, 18, 0xFF2563EBu32)).to_be_greater_than(0)
+        expect(_count_region_changed(pixels, 160, 8, 48, 120, 36, 0xFFFFFFFFu32)).to_be_greater_than(0)
+        expect(_count_region_changed(pixels, 160, 128, 8, 32, 40, 0xFFFFFFFFu32)).to_equal(0)
 
     it "Engine2D bridge keeps explicit backend rendering available":
         val html = "<html><body><div style='width: 70px; height: 24px; background-color: #4488cc'></div></body></html>"
@@ -94,3 +155,122 @@ describe "BrowserRenderer HTML rendering":
             bridge_renderer.render_html_to_pixels(html).pixel_data,
             explicit_renderer.render_html_to_pixels(html).pixel_data
         )).to_equal(true)
+
+    it "renders CSS background fixture pixels through BrowserRenderer":
+        val pixels = render_html_to_pixels_with_viewport(_html_compat_fixture("15_background"), 40, 70).pixel_data
+        expect(pixels.len()).to_equal(40 * 70)
+        expect(pixels[0]).to_equal(0xFFF0F0F8u32)
+        expect(pixels[8 + 8 * 40]).to_equal(0xFFD0D8E8u32)
+        expect(pixels[27 + 61 * 40]).to_equal(0xFFBFDBFEu32)
+
+    it "renders CSS color fixture pixels through BrowserRenderer":
+        val pixels = render_html_to_pixels_with_viewport(_html_compat_fixture("10_colors"), 40, 70).pixel_data
+        expect(pixels.len()).to_equal(40 * 70)
+        expect(pixels[8 + 8 * 40]).to_equal(0xFFDBEAFEu32)
+        expect(pixels[8 + 28 * 40]).to_equal(0xFFBFDBFEu32)
+        expect(pixels[8 + 48 * 40]).to_equal(0xFF93C5FDu32)
+
+    it "renders CSS padding fixture pixels through BrowserRenderer":
+        val pixels = render_html_to_pixels_with_viewport(_html_compat_fixture("12_padding"), 40, 90).pixel_data
+        expect(pixels.len()).to_equal(40 * 90)
+        expect(pixels[16 + 16 * 40]).to_equal(0xFFDBEAFEu32)
+        expect(pixels[22 + 50 * 40]).to_equal(0xFFBFDBFEu32)
+        expect(pixels[22 + 78 * 40]).to_equal(0xFF93C5FDu32)
+
+    it "renders CSS margin fixture pixels through BrowserRenderer":
+        val pixels = render_html_to_pixels_with_viewport(_html_compat_fixture("13_margin"), 40, 95).pixel_data
+        expect(pixels.len()).to_equal(40 * 95)
+        expect(pixels[14 + 14 * 40]).to_equal(0xFFDBEAFEu32)
+        expect(pixels[22 + 52 * 40]).to_equal(0xFFBFDBFEu32)
+        expect(pixels[22 + 82 * 40]).to_equal(0xFF93C5FDu32)
+
+    it "renders CSS border fixture pixels through BrowserRenderer":
+        val pixels = render_html_to_pixels_with_viewport(_html_compat_fixture("14_border"), 40, 70).pixel_data
+        expect(pixels.len()).to_equal(40 * 70)
+        expect(pixels[4 + 4 * 40]).to_equal(0xFF1A1A1Au32)
+        expect(pixels[18 + 18 * 40]).to_equal(0xFF003366u32)
+        expect(pixels[27 + 61 * 40]).to_equal(0xFF006600u32)
+
+    it "renders CSS flex row fixture pixels through BrowserRenderer":
+        val pixels = render_html_to_pixels_with_viewport(_html_compat_fixture("16_flex_row"), 125, 70).pixel_data
+        expect(pixels.len()).to_equal(125 * 70)
+        expect(pixels[121 + 61 * 125]).to_equal(0xFF93C5FDu32)
+        expect(pixels[27 + 61 * 125]).to_equal(0xFFBFDBFEu32)
+
+    it "renders CSS flex column fixture pixels through BrowserRenderer":
+        val pixels = render_html_to_pixels_with_viewport(_html_compat_fixture("17_flex_col"), 40, 100).pixel_data
+        expect(pixels.len()).to_equal(40 * 100)
+        expect(pixels[27 + 61 * 40]).to_equal(0xFFBFDBFEu32)
+        expect(pixels[27 + 95 * 40]).to_equal(0xFF93C5FDu32)
+
+    it "parses rgb() background-color in the fallback pixel path":
+        val html = "<html><body style='background-color: rgb(37, 99, 235)'></body></html>"
+        val pixels = render_html_to_pixels_with_viewport(html, 8, 6).pixel_data
+        expect(pixels.len()).to_equal(8 * 6)
+        expect(pixels[0]).to_equal(0xFF2563EBu32)
+
+    it "parses modern space-separated rgb() background-color in the fallback pixel path":
+        val html = "<html><body style='background-color: rgb(5 150 105)'></body></html>"
+        val pixels = render_html_to_pixels_with_viewport(html, 8, 6).pixel_data
+        expect(pixels.len()).to_equal(8 * 6)
+        expect(pixels[0]).to_equal(0xFF059669u32)
+
+    it "composites rgba() background-color over the white page in the fallback pixel path":
+        val html = "<html><body style='background-color: rgba(0, 0, 0, 0.5)'></body></html>"
+        val pixels = render_html_to_pixels_with_viewport(html, 8, 6).pixel_data
+        expect(pixels.len()).to_equal(8 * 6)
+        expect(pixels[0]).to_equal(0xFF808080u32)
+
+    it "parses shorthand hex background-color in the fallback pixel path":
+        val html = "<html><body style='background-color: #0f8'></body></html>"
+        val pixels = render_html_to_pixels_with_viewport(html, 8, 6).pixel_data
+        expect(pixels.len()).to_equal(8 * 6)
+        expect(pixels[0]).to_equal(0xFF00FF88u32)
+
+    it "parses named CSS background-color in the fallback pixel path":
+        val html = "<html><body style='background-color: rebeccapurple'></body></html>"
+        val pixels = render_html_to_pixels_with_viewport(html, 8, 6).pixel_data
+        expect(pixels.len()).to_equal(8 * 6)
+        expect(pixels[0]).to_equal(0xFF663399u32)
+
+    it "composites transparent background-color to the white page in the fallback pixel path":
+        val html = "<html><body style='background-color: transparent'></body></html>"
+        val pixels = render_html_to_pixels_with_viewport(html, 8, 6).pixel_data
+        expect(pixels.len()).to_equal(8 * 6)
+        expect(pixels[0]).to_equal(0xFFFFFFFFu32)
+
+    it "parses hsl() background-color in the fallback pixel path":
+        val html = "<html><body style='background-color: hsl(120, 100%, 25%)'></body></html>"
+        val pixels = render_html_to_pixels_with_viewport(html, 8, 6).pixel_data
+        expect(pixels.len()).to_equal(8 * 6)
+        expect(pixels[0]).to_equal(0xFF008000u32)
+
+    it "parses color-first background shorthand in the fallback pixel path":
+        val html = "<html><body style='background: rebeccapurple no-repeat'></body></html>"
+        val pixels = render_html_to_pixels_with_viewport(html, 8, 6).pixel_data
+        expect(pixels.len()).to_equal(8 * 6)
+        expect(pixels[0]).to_equal(0xFF663399u32)
+
+    it "parses function color background shorthand before trailing tokens":
+        val html = "<html><body style='background: rgb(5, 150, 105) no-repeat'></body></html>"
+        val pixels = render_html_to_pixels_with_viewport(html, 8, 6).pixel_data
+        expect(pixels.len()).to_equal(8 * 6)
+        expect(pixels[0]).to_equal(0xFF059669u32)
+
+    it "parses fallback color after url() in background shorthand":
+        val html = "<html><body style='background: url(hero.png) #0f8 no-repeat'></body></html>"
+        val pixels = render_html_to_pixels_with_viewport(html, 8, 6).pixel_data
+        expect(pixels.len()).to_equal(8 * 6)
+        expect(pixels[0]).to_equal(0xFF00FF88u32)
+
+    it "lets later background shorthand override earlier background-color in fallback pixels":
+        val html = "<html><body style='background-color: rebeccapurple; background: #0f8'></body></html>"
+        val pixels = render_html_to_pixels_with_viewport(html, 8, 6).pixel_data
+        expect(pixels.len()).to_equal(8 * 6)
+        expect(pixels[0]).to_equal(0xFF00FF88u32)
+
+    it "lets later background-color override earlier background shorthand in fallback pixels":
+        val html = "<html><body style='background: #0f8; background-color: rebeccapurple'></body></html>"
+        val pixels = render_html_to_pixels_with_viewport(html, 8, 6).pixel_data
+        expect(pixels.len()).to_equal(8 * 6)
+        expect(pixels[0]).to_equal(0xFF663399u32)

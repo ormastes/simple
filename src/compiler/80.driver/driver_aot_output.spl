@@ -10,6 +10,7 @@
 
 # Backend helpers for module compilation and backend resolution
 use compiler.backend.backend.backend_helpers.{compile_module_with_backend, get_effective_backend_name}
+use compiler.backend.llvm_backend_tools.{llvm_bootstrap_last_object_path}
 use compiler.backend.backend_types.{CompiledModule}
 use compiler.backend.linker.linker_wrapper.{link_to_native, link_to_smf, link_to_self_contained, NativeLinkConfig, SelfContainedConfig, write_elf_bytes_to_file}
 use compiler.backend.backend.llvm_native_link.{link_llvm_native, NativeLinkOptions}
@@ -29,6 +30,9 @@ extern fn rt_file_exists(path: text) -> bool
 extern fn rt_dir_create(path: text, recursive: bool) -> bool
 extern fn rt_path_join(a: text, b: text) -> text
 extern fn rt_path_parent(path: text) -> text
+extern fn rt_env_get(key: text) -> text
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+extern fn rt_file_copy(src: text, dst: text) -> bool
 
 fn driver_log_debug(log: Logger, message: text):
     if log.level >= 10:
@@ -55,6 +59,52 @@ fn driver_effective_mir_opt_level(ctx: CompileContext) -> i64:
 fn _extract_driver_ctx(driver: CompilerDriver) -> CompileContext:
     driver.ctx
 
+pub fn compile_bootstrap_context_to_native(ctx: CompileContext, backend_name: text, output: text) -> CompileResult:
+    """Bootstrap-stable native output path.
+
+    Stage1-generated compilers can crash dispatching the cross-module
+    `CompilerDriver.compile_to_native` extension method. Keep the bootstrap lane
+    on a plain function that takes the already-available context.
+    """
+    val is_release = ctx.options.release
+    val driver_opt_level = driver_effective_native_opt_level(ctx, is_release)
+    print "[NATIVE] bootstrap direct backend_name={backend_name}, is_release={is_release}"
+    val effective_backend = get_effective_backend_name(backend_name, is_release)
+    print "[NATIVE] bootstrap direct effective_backend={effective_backend}"
+
+    val direct_result = _compile_one_module(ctx, backend_name, is_release, driver_opt_level, output, "app.cli.bootstrap_main")
+    match direct_result:
+        case Ok(obj_path):
+            if effective_backend == "llvm" or effective_backend == "llvm-lib":
+                val llvm_opts = NativeLinkOptions(
+                    debug: ctx.options.debug_info,
+                    verbose: ctx.options.verbose,
+                    pie: true,
+                    bare_metal: false,
+                    opt_level: driver_opt_level
+                )
+                match link_llvm_native([obj_path], output, llvm_opts):
+                    case Ok(_):
+                        return CompileResult.Success(output)
+                    case Err(e):
+                        return CompileResult.CodegenError("LLVM native linking failed: {e}")
+            val direct_config = NativeLinkConfig(
+                libraries: [],
+                library_paths: [],
+                runtime_path: "",
+                pie: true,
+                debug: ctx.options.debug_info,
+                verbose: ctx.options.verbose,
+                extra_flags: []
+            )
+            match link_to_native([obj_path], output, direct_config):
+                case Ok(_):
+                    return CompileResult.Success(output)
+                case Err(e):
+                    return CompileResult.CodegenError("Linking failed: {e}")
+        case Err(e):
+            return CompileResult.CodegenError(e)
+
 impl CompilerDriver:
     me compile_to_native(output: text) -> CompileResult:
         val ctx: CompileContext = _extract_driver_ctx(self)
@@ -79,6 +129,41 @@ impl CompilerDriver:
         val module_names = ctx.mir_modules.keys()
         val total_modules = module_names.len()
         print "[NATIVE] compiling {total_modules} modules..."
+
+        if total_modules <= 0 or total_modules > 1000000:
+            print "[NATIVE] bootstrap fallback: compiling app.cli.bootstrap_main"
+            val direct_result = _compile_one_module(ctx, backend_name, is_release, driver_opt_level, output, "app.cli.bootstrap_main")
+            match direct_result:
+                case Ok(obj_path):
+                    if effective_backend == "llvm" or effective_backend == "llvm-lib":
+                        val llvm_opts = NativeLinkOptions(
+                            debug: ctx.options.debug_info,
+                            verbose: ctx.options.verbose,
+                            pie: true,
+                            bare_metal: false,
+                            opt_level: driver_opt_level
+                        )
+                        match link_llvm_native([obj_path], output, llvm_opts):
+                            case Ok(_):
+                                return CompileResult.Success(output)
+                            case Err(e):
+                                return CompileResult.CodegenError("LLVM native linking failed: {e}")
+                    val direct_config = NativeLinkConfig(
+                        libraries: [],
+                        library_paths: [],
+                        runtime_path: "",
+                        pie: true,
+                        debug: ctx.options.debug_info,
+                        verbose: ctx.options.verbose,
+                        extra_flags: []
+                    )
+                    match link_to_native([obj_path], output, direct_config):
+                        case Ok(_):
+                            return CompileResult.Success(output)
+                        case Err(e):
+                            return CompileResult.CodegenError("Linking failed: {e}")
+                case Err(e):
+                    return CompileResult.CodegenError(e)
 
         # Phase 1: Check cache, collect cached objects, identify uncached modules
         var uncached_names: [text] = []
@@ -125,9 +210,17 @@ impl CompilerDriver:
                 val first_err = build_result.errors[0]
                 return CompileResult.CodegenError(first_err[1])
 
-            # Post-process: update cache and collect object paths
-            for obj_path in build_result.outputs:
-                object_files = object_files.push(obj_path)
+            # Post-process: update cache and collect object paths. Do not rely
+            # on BuildResult.outputs here: stage1-generated compilers can lose
+            # pushes into arrays that start empty. _compile_one_module writes
+            # objects at this stable path, so reconstruct from uncached_names.
+            var reconstructed_outputs: [text] = []
+            for name in uncached_names:
+                val obj_path = "{output}.{name}.o"
+                if rt_file_exists(obj_path):
+                    reconstructed_outputs = reconstructed_outputs.push(obj_path)
+            object_files = reconstructed_outputs
+            for obj_path in reconstructed_outputs:
                 val obj_fp = FileFingerprint.from_file(obj_path)
                 if obj_fp.?:
                     # Extract module name from obj_path: "{output}.{name}.o"
@@ -148,6 +241,15 @@ impl CompilerDriver:
             print "[NATIVE] cache: {cache_hit_count} hits, {cache_miss_count} misses"
 
         # Link object files into final executable
+        if object_files.len() == 0 and (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
+            print "[NATIVE] bootstrap late fallback: compiling app.cli.bootstrap_main"
+            val direct_result = _compile_one_module(ctx, backend_name, is_release, driver_opt_level, output, "app.cli.bootstrap_main")
+            match direct_result:
+                case Ok(obj_path):
+                    object_files = [obj_path]
+                case Err(e):
+                    return CompileResult.CodegenError(e)
+
         print "[NATIVE] linking {object_files.len()} object files..."
         if effective_backend == "llvm" or effective_backend == "llvm-lib":
             # LLVM path: compile C runtime and link with entry point
@@ -180,9 +282,6 @@ impl CompilerDriver:
                 case Err(e):
                     CompileResult.CodegenError("Linking failed: {e}")
 
-fn CompilerDriver_dot_compile_to_native(driver: CompilerDriver, output: text) -> CompileResult:
-    driver.compile_to_native(output)
-
     me compile_to_c(output: text) -> CompileResult:
         """Compile all MIR modules to C++20 source. Routes to single-file or directory mode."""
         if output.ends_with(".cpp") or output.ends_with(".c") or output.ends_with(".cxx"):
@@ -206,7 +305,7 @@ fn CompilerDriver_dot_compile_to_native(driver: CompilerDriver, output: text) ->
             if compiled.is_err():
                 val err = compiled.unwrap_err()
                 return CompileResult.CodegenError("C codegen error in {name}: {err}")
-            val module = compiled.unwrap()
+            val module: CompiledModule = compiled.unwrap()
             all_c_source = all_c_source + module.assembly
 
         # Write C++ source to output file
@@ -236,7 +335,7 @@ fn CompilerDriver_dot_compile_to_native(driver: CompilerDriver, output: text) ->
             if compiled.is_err():
                 val err = compiled.unwrap_err()
                 return CompileResult.CodegenError("C codegen error in {name}: {err}")
-            val module = compiled.unwrap()
+            val module: CompiledModule = compiled.unwrap()
 
             # Convert module name to relative file path: "compiler.core.parser" -> "compiler/core/parser.cpp"
             val rel_path = name.replace(".", "/") + ".cpp"
@@ -287,7 +386,7 @@ fn CompilerDriver_dot_compile_to_native(driver: CompilerDriver, output: text) ->
             if compiled.is_err():
                 val err = compiled.unwrap_err()
                 return CompileResult.CodegenError("CUDA compile error in {name}: {err}")
-            val module_result = compiled.unwrap()
+            val module_result: CompiledModule = compiled.unwrap()
             val asm = module_result.assembly ?? ""
             all_ptx = all_ptx + asm
 
@@ -313,7 +412,7 @@ fn CompilerDriver_dot_compile_to_native(driver: CompilerDriver, output: text) ->
             if compiled.is_err():
                 val err = compiled.unwrap_err()
                 return CompileResult.CodegenError("VHDL compile error in {name}: {err}")
-            val module_result = compiled.unwrap()
+            val module_result: CompiledModule = compiled.unwrap()
             val vhdl = module_result.assembly ?? ""
             if all_vhdl != "" and vhdl != "":
                 all_vhdl = all_vhdl + "\n\n"
@@ -434,7 +533,31 @@ fn CompilerDriver_dot_compile_to_native(driver: CompilerDriver, output: text) ->
 fn _compile_one_module(ctx: any, backend_name: text, is_release: bool, opt_level: i64, output_base: text, name: text) -> Result<text, text>:
     """Compile a single module by name, write object file, return path."""
     print "[NATIVE] compiling module: {name}"
+    print "[NATIVE] select module:start"
+    if name == "app.cli.bootstrap_main":
+        print "[NATIVE] select module:bootstrap check"
+        if ctx.bootstrap_entry_mir.?:
+            print "[NATIVE] select module:bootstrap field"
+            val direct_mir = ctx.bootstrap_entry_mir.unwrap()
+            return _compile_selected_module(backend_name, is_release, opt_level, output_base, name, direct_mir)
+    print "[NATIVE] select module:dict"
     val mir_module = ctx.mir_modules[name]
+    return _compile_selected_module(backend_name, is_release, opt_level, output_base, name, mir_module)
+
+fn _compile_selected_module(backend_name: text, is_release: bool, opt_level: i64, output_base: text, name: text, mir_module: MirModule) -> Result<text, text>:
+    print "[NATIVE] select module:done"
+    val empty_native_obj = rt_env_get("SIMPLE_BOOTSTRAP_EMPTY_NATIVE_OBJ") ?? ""
+    if empty_native_obj == "1":
+        val c_path = "{output_base}.{name}.bootstrap_empty.c"
+        val obj_path = "{output_base}.{name}.o"
+        val c_ok = rt_file_write_text(c_path, "int main(int argc, char **argv) { (void)argc; (void)argv; return 0; }\n")
+        if not c_ok:
+            return Err("Failed to write bootstrap empty C file {c_path}")
+        val (_cc_out, cc_err, cc_code) = rt_process_run("cc", ["-c", c_path, "-o", obj_path])
+        if cc_code != 0:
+            return Err("Bootstrap empty object compile failed: {cc_err}")
+        return Ok(obj_path)
+
     val compiled = compile_module_with_backend(backend_name, mir_module, is_release, opt_level)
 
     if compiled.is_err():
@@ -444,6 +567,10 @@ fn _compile_one_module(ctx: any, backend_name: text, is_release: bool, opt_level
     val module: CompiledModule = compiled.unwrap()
     if module.object_code.?:
         val obj_path = "{output_base}.{name}.o"
+        if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
+            val bootstrap_obj = llvm_bootstrap_last_object_path()
+            if bootstrap_obj != "" and rt_file_copy(bootstrap_obj, obj_path):
+                return Ok(obj_path)
         match write_elf_bytes_to_file(obj_path, module.object_code.unwrap()):
             case Ok(_):
                 Ok(obj_path)

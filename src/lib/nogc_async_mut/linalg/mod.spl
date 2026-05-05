@@ -1,11 +1,1053 @@
 use std.ndarray.*
+use std.simd.{Vec4d, Vec4f, simd_fma_f32x4, simd_fma_f64x4, simd_mul_f32x4, simd_mul_f64x4}
+use std.common.torch.dyn_ffi_ops.{dyn_torch_available, dyn_torch_tensor_abs, dyn_torch_tensor_add_scalar, dyn_torch_tensor_arange, dyn_torch_tensor_argmax, dyn_torch_tensor_argmin, dyn_torch_tensor_clone, dyn_torch_tensor_contiguous, dyn_torch_tensor_det, dyn_torch_tensor_div_scalar, dyn_torch_tensor_dot, dyn_torch_tensor_exp, dyn_torch_tensor_eye, dyn_torch_tensor_free, dyn_torch_tensor_gelu, dyn_torch_tensor_inverse, dyn_torch_tensor_leaky_relu, dyn_torch_tensor_linalg_solve, dyn_torch_tensor_linspace, dyn_torch_tensor_log, dyn_torch_tensor_log_softmax, dyn_torch_tensor_matmul, dyn_torch_tensor_max, dyn_torch_tensor_max_dim, dyn_torch_tensor_mean, dyn_torch_tensor_mean_dim, dyn_torch_tensor_min, dyn_torch_tensor_min_dim, dyn_torch_tensor_mul_scalar, dyn_torch_tensor_neg, dyn_torch_tensor_norm, dyn_torch_tensor_pow, dyn_torch_tensor_relu, dyn_torch_tensor_sigmoid, dyn_torch_tensor_slice, dyn_torch_tensor_softmax, dyn_torch_tensor_sqrt, dyn_torch_tensor_squeeze_dim, dyn_torch_tensor_std, dyn_torch_tensor_sub_scalar, dyn_torch_tensor_sum, dyn_torch_tensor_sum_dim, dyn_torch_tensor_tanh, dyn_torch_tensor_unsqueeze, dyn_torch_tensor_var}
+use std.common.torch.dyn_ffi_tensor_ops.{dyn_torch_tensor_acos, dyn_torch_tensor_asin, dyn_torch_tensor_atan2, dyn_torch_tensor_binary_op, dyn_torch_tensor_cat_2, dyn_torch_tensor_cat_3, dyn_torch_tensor_cat_4, dyn_torch_tensor_copy_values, dyn_torch_tensor_cos, dyn_torch_tensor_empty_1d, dyn_torch_tensor_empty_2d, dyn_torch_tensor_empty_3d, dyn_torch_tensor_empty_4d, dyn_torch_tensor_from_values_1d, dyn_torch_tensor_from_values_2d, dyn_torch_tensor_full_1d, dyn_torch_tensor_full_2d, dyn_torch_tensor_full_3d, dyn_torch_tensor_full_4d, dyn_torch_tensor_ones_1d, dyn_torch_tensor_ones_2d, dyn_torch_tensor_ones_3d, dyn_torch_tensor_ones_4d, dyn_torch_tensor_permute_2d, dyn_torch_tensor_permute_3d, dyn_torch_tensor_permute_4d, dyn_torch_tensor_rand_1d, dyn_torch_tensor_rand_2d, dyn_torch_tensor_rand_3d, dyn_torch_tensor_rand_4d, dyn_torch_tensor_randn_1d, dyn_torch_tensor_randn_2d, dyn_torch_tensor_randn_3d, dyn_torch_tensor_randn_4d, dyn_torch_tensor_reshape_1d, dyn_torch_tensor_reshape_2d, dyn_torch_tensor_reshape_3d, dyn_torch_tensor_reshape_4d, dyn_torch_tensor_sin, dyn_torch_tensor_stack_2, dyn_torch_tensor_stack_3, dyn_torch_tensor_stack_4, dyn_torch_tensor_tan, dyn_torch_tensor_to_float, dyn_torch_tensor_zeros_1d, dyn_torch_tensor_zeros_2d, dyn_torch_tensor_zeros_3d, dyn_torch_tensor_zeros_4d}
+use std.ffi.dynamic.{DynLoader, sffi_lib_path}
+
+extern fn rt_env_get(key: text) -> text
+extern fn rt_alloc(size: i64) -> i64
+extern fn rt_free(ptr: i64, size: i64)
+extern fn rt_ptr_read_i64(addr: i64, offset: i64) -> i64
+extern fn rt_ptr_write_i64(addr: i64, offset: i64, value: i64)
+extern fn spl_f64_to_bits(value: f64) -> i64
+extern fn spl_bits_to_f64(bits: i64) -> f64
+
+val SCILIB_LIB_PATH = sffi_lib_path("scilib")
 
 enum LinalgError:
     DimensionMismatch
     Singular
 
+enum BackendError:
+    BackendUnavailable(text)
+    MissingRuntimeSymbol(text)
+    UnsupportedBackend(text)
+    BackendExecutionFailed(text)
+
+class LinalgBackendStatus:
+    requested: text
+    selected: text
+    available: bool
+    real_native: bool
+    diagnostic: text
+
+class TorchNDArray:
+    handle: i64
+    shape: Shape
+    dtype: DType
+    device: text
+
+    static fn zeros_f64(shape: Shape) -> Result<TorchNDArray, BackendError>:
+        TorchNDArray.fill_f64(shape, Float64.new(0.0), "zeros")
+
+    static fn ones_f64(shape: Shape) -> Result<TorchNDArray, BackendError>:
+        TorchNDArray.fill_f64(shape, Float64.new(1.0), "ones")
+
+    static fn full_f64(shape: Shape, value: Float64) -> Result<TorchNDArray, BackendError>:
+        TorchNDArray.fill_f64(shape, value, "full")
+
+    static fn empty_f64(shape: Shape) -> Result<TorchNDArray, BackendError>:
+        TorchNDArray.create_f64(shape, "empty")
+
+    static fn random_uniform_f64(shape: Shape) -> Result<TorchNDArray, BackendError>:
+        TorchNDArray.create_f64(shape, "rand")
+
+    static fn random_normal_f64(shape: Shape) -> Result<TorchNDArray, BackendError>:
+        TorchNDArray.create_f64(shape, "randn")
+
+    static fn arange_f64(start: Float64, end_value: Float64, step: Float64) -> Result<TorchNDArray, BackendError>:
+        if step.value == 0.0:
+            return Err(BackendError.BackendExecutionFailed("pytorch arange step must be non-zero"))
+        val count = TorchNDArray.arange_count(start.value, end_value.value, step.value)
+        if not dyn_torch_available():
+            return Err(BackendError.BackendUnavailable("pytorch"))
+        val handle = dyn_torch_tensor_arange(start.value, end_value.value, step.value)
+        TorchNDArray.from_raw_f64_handle(handle, Shape.new([Index.new(count)]), "rt_torch_tensor_arange_bits")
+
+    static fn linspace_f64(start: Float64, end_value: Float64, steps: Index) -> Result<TorchNDArray, BackendError>:
+        if steps.value < 0:
+            return Err(BackendError.BackendExecutionFailed("pytorch linspace steps must be non-negative"))
+        if not dyn_torch_available():
+            return Err(BackendError.BackendUnavailable("pytorch"))
+        val handle = dyn_torch_tensor_linspace(start.value, end_value.value, steps.value)
+        TorchNDArray.from_raw_f64_handle(handle, Shape.new([steps]), "rt_torch_tensor_linspace_bits")
+
+    static fn eye_f64(size: Index) -> Result<TorchNDArray, BackendError>:
+        if size.value < 0:
+            return Err(BackendError.BackendExecutionFailed("pytorch eye size must be non-negative"))
+        if not dyn_torch_available():
+            return Err(BackendError.BackendUnavailable("pytorch"))
+        val handle = dyn_torch_tensor_eye(size.value)
+        TorchNDArray.from_raw_f64_handle(handle, Shape.new([size, size]), "rt_torch_tensor_eye")
+
+    static fn arange_count(start: f64, end_value: f64, step: f64) -> i64:
+        var count = 0
+        var current = start
+        if step > 0.0:
+            while current < end_value:
+                count = count + 1
+                current = current + step
+        else:
+            while current > end_value:
+                count = count + 1
+                current = current + step
+        count
+
+    static fn from_raw_f64_handle(handle: i64, shape: Shape, symbol: text) -> Result<TorchNDArray, BackendError>:
+        if handle == 0:
+            return Err(BackendError.MissingRuntimeSymbol(symbol))
+        val float_handle = dyn_torch_tensor_to_float(handle)
+        dyn_torch_tensor_free(handle)
+        if float_handle == 0:
+            return Err(BackendError.MissingRuntimeSymbol("rt_torch_torchtensor_to_float"))
+        Ok(TorchNDArray(
+            handle: float_handle,
+            shape: shape,
+            dtype: DType.F64,
+            device: "pytorch:cpu"
+        ))
+
+    static fn fill_f64(shape: Shape, value: Float64, op: text) -> Result<TorchNDArray, BackendError>:
+        if shape.dims.len() < 1 or shape.dims.len() > 4:
+            return Err(BackendError.BackendExecutionFailed("pytorch tensor owner constructors currently support 1-D through 4-D Float64 shapes"))
+        var i = 0
+        while i < shape.dims.len():
+            if shape.dims[i].value < 0:
+                return Err(BackendError.BackendExecutionFailed("pytorch tensor owner constructor dimensions must be non-negative"))
+            i = i + 1
+        if not dyn_torch_available():
+            return Err(BackendError.BackendUnavailable("pytorch"))
+        var handle = 0
+        if shape.dims.len() == 1:
+            if op == "zeros":
+                handle = dyn_torch_tensor_zeros_1d(shape.dims[0].value)
+            elif op == "ones":
+                handle = dyn_torch_tensor_ones_1d(shape.dims[0].value)
+            else:
+                handle = dyn_torch_tensor_full_1d(shape.dims[0].value, value.value)
+        elif shape.dims.len() == 2:
+            if op == "zeros":
+                handle = dyn_torch_tensor_zeros_2d(shape.dims[0].value, shape.dims[1].value)
+            elif op == "ones":
+                handle = dyn_torch_tensor_ones_2d(shape.dims[0].value, shape.dims[1].value)
+            else:
+                handle = dyn_torch_tensor_full_2d(shape.dims[0].value, shape.dims[1].value, value.value)
+        elif shape.dims.len() == 3:
+            if op == "zeros":
+                handle = dyn_torch_tensor_zeros_3d(shape.dims[0].value, shape.dims[1].value, shape.dims[2].value)
+            elif op == "ones":
+                handle = dyn_torch_tensor_ones_3d(shape.dims[0].value, shape.dims[1].value, shape.dims[2].value)
+            else:
+                handle = dyn_torch_tensor_full_3d(shape.dims[0].value, shape.dims[1].value, shape.dims[2].value, value.value)
+        else:
+            if op == "zeros":
+                handle = dyn_torch_tensor_zeros_4d(shape.dims[0].value, shape.dims[1].value, shape.dims[2].value, shape.dims[3].value)
+            elif op == "ones":
+                handle = dyn_torch_tensor_ones_4d(shape.dims[0].value, shape.dims[1].value, shape.dims[2].value, shape.dims[3].value)
+            else:
+                handle = dyn_torch_tensor_full_4d(shape.dims[0].value, shape.dims[1].value, shape.dims[2].value, shape.dims[3].value, value.value)
+        if handle == 0:
+            return Err(BackendError.MissingRuntimeSymbol("rt_torch_tensor_constructor"))
+        TorchNDArray.from_raw_f64_handle(handle, shape, "rt_torch_tensor_constructor")
+
+    static fn create_f64(shape: Shape, op: text) -> Result<TorchNDArray, BackendError>:
+        if shape.dims.len() < 1 or shape.dims.len() > 4:
+            return Err(BackendError.BackendExecutionFailed("pytorch tensor owner constructors currently support 1-D through 4-D Float64 shapes"))
+        var i = 0
+        while i < shape.dims.len():
+            if shape.dims[i].value < 0:
+                return Err(BackendError.BackendExecutionFailed("pytorch tensor owner constructor dimensions must be non-negative"))
+            i = i + 1
+        if not dyn_torch_available():
+            return Err(BackendError.BackendUnavailable("pytorch"))
+        var handle = 0
+        if shape.dims.len() == 1:
+            if op == "empty":
+                handle = dyn_torch_tensor_empty_1d(shape.dims[0].value)
+            elif op == "rand":
+                handle = dyn_torch_tensor_rand_1d(shape.dims[0].value)
+            else:
+                handle = dyn_torch_tensor_randn_1d(shape.dims[0].value)
+        elif shape.dims.len() == 2:
+            if op == "empty":
+                handle = dyn_torch_tensor_empty_2d(shape.dims[0].value, shape.dims[1].value)
+            elif op == "rand":
+                handle = dyn_torch_tensor_rand_2d(shape.dims[0].value, shape.dims[1].value)
+            else:
+                handle = dyn_torch_tensor_randn_2d(shape.dims[0].value, shape.dims[1].value)
+        elif shape.dims.len() == 3:
+            if op == "empty":
+                handle = dyn_torch_tensor_empty_3d(shape.dims[0].value, shape.dims[1].value, shape.dims[2].value)
+            elif op == "rand":
+                handle = dyn_torch_tensor_rand_3d(shape.dims[0].value, shape.dims[1].value, shape.dims[2].value)
+            else:
+                handle = dyn_torch_tensor_randn_3d(shape.dims[0].value, shape.dims[1].value, shape.dims[2].value)
+        else:
+            if op == "empty":
+                handle = dyn_torch_tensor_empty_4d(shape.dims[0].value, shape.dims[1].value, shape.dims[2].value, shape.dims[3].value)
+            elif op == "rand":
+                handle = dyn_torch_tensor_rand_4d(shape.dims[0].value, shape.dims[1].value, shape.dims[2].value, shape.dims[3].value)
+            else:
+                handle = dyn_torch_tensor_randn_4d(shape.dims[0].value, shape.dims[1].value, shape.dims[2].value, shape.dims[3].value)
+        if handle == 0:
+            return Err(BackendError.MissingRuntimeSymbol("rt_torch_tensor_constructor"))
+        TorchNDArray.from_raw_f64_handle(handle, shape, "rt_torch_tensor_constructor")
+
+    static fn from_f64_array(host: NDArray) -> Result<TorchNDArray, BackendError>:
+        if host.dtype != DType.F64 or not host.is_contiguous():
+            return Err(BackendError.BackendExecutionFailed("pytorch tensor owner requires contiguous Float64 NDArray input"))
+        if host.shape.dims.len() != 1 and host.shape.dims.len() != 2:
+            return Err(BackendError.BackendExecutionFailed("pytorch tensor owner currently supports 1-D and 2-D Float64 NDArrays"))
+        if not dyn_torch_available():
+            return Err(BackendError.BackendUnavailable("pytorch"))
+        var handle = 0
+        if host.shape.dims.len() == 1:
+            var values: [Float64] = []
+            var i = 0
+            while i < host.len().value:
+                values.push(host.get_f64(Index.new(i)))
+                i = i + 1
+            handle = dyn_torch_tensor_from_values_1d(float64_values_to_f64(values))
+            if handle == 0:
+                return Err(BackendError.MissingRuntimeSymbol("rt_dyn_torch_tensor_from_bits_1d"))
+        else:
+            val rows = host.rows().value
+            val cols = host.cols().value
+            handle = dyn_torch_tensor_from_values_2d(float64_matrix_to_f64(host, rows, cols), rows, cols)
+            if handle == 0:
+                return Err(BackendError.MissingRuntimeSymbol("rt_dyn_torch_tensor_from_bits_2d"))
+        Ok(TorchNDArray(
+            handle: handle,
+            shape: host.shape,
+            dtype: DType.F64,
+            device: "pytorch:cpu"
+        ))
+
+    fn to_host_f64() -> Result<NDArray, BackendError>:
+        if self.dtype != DType.F64:
+            return Err(BackendError.BackendExecutionFailed("pytorch tensor owner only supports Float64 host copies"))
+        val count = self.shape.numel().value
+        val values = dyn_torch_tensor_copy_values(self.handle, count)
+        if values.len() != count:
+            return Err(BackendError.MissingRuntimeSymbol("rt_dyn_torch_tensor_copy_bits"))
+        var out: [Float64] = []
+        var i = 0
+        while i < values.len():
+            out.push(Float64.new(values[i]))
+            i = i + 1
+        Ok(make_f64_array(out, self.shape))
+
+    fn add_f64(other: TorchNDArray) -> Result<TorchNDArray, BackendError>:
+        self.binary_f64(other, "add")
+
+    fn sub_f64(other: TorchNDArray) -> Result<TorchNDArray, BackendError>:
+        self.binary_f64(other, "sub")
+
+    fn mul_f64(other: TorchNDArray) -> Result<TorchNDArray, BackendError>:
+        self.binary_f64(other, "mul")
+
+    fn div_f64(other: TorchNDArray) -> Result<TorchNDArray, BackendError>:
+        self.binary_f64(other, "div")
+
+    fn atan2_f64(other: TorchNDArray) -> Result<TorchNDArray, BackendError>:
+        self.binary_f64(other, "atan2")
+
+    fn matmul_f64(other: TorchNDArray) -> Result<TorchNDArray, BackendError>:
+        if self.dtype != DType.F64 or other.dtype != DType.F64:
+            return Err(BackendError.BackendExecutionFailed("pytorch tensor owner matmul requires Float64 inputs"))
+        if self.shape.dims.len() != 2 or other.shape.dims.len() != 2:
+            return Err(BackendError.BackendExecutionFailed("pytorch tensor owner matmul requires 2-D inputs"))
+        if self.shape.dims[1] != other.shape.dims[0]:
+            return Err(BackendError.BackendExecutionFailed("pytorch tensor owner matmul requires compatible inner dimensions"))
+        if self.device != other.device:
+            return Err(BackendError.BackendExecutionFailed("pytorch tensor owner matmul requires matching devices"))
+        val handle = dyn_torch_tensor_matmul(self.handle, other.handle)
+        if handle == 0:
+            return Err(BackendError.MissingRuntimeSymbol("rt_torch_torchtensor_matmul"))
+        Ok(TorchNDArray(
+            handle: handle,
+            shape: Shape.new([self.shape.dims[0], other.shape.dims[1]]),
+            dtype: DType.F64,
+            device: self.device
+        ))
+
+    fn abs_f64() -> Result<TorchNDArray, BackendError>:
+        self.unary_f64("abs")
+
+    fn neg_f64() -> Result<TorchNDArray, BackendError>:
+        self.unary_f64("neg")
+
+    fn square_f64() -> Result<TorchNDArray, BackendError>:
+        self.unary_f64("square")
+
+    fn sqrt_f64() -> Result<TorchNDArray, BackendError>:
+        self.unary_f64("sqrt")
+
+    fn relu_f64() -> Result<TorchNDArray, BackendError>:
+        self.unary_f64("relu")
+
+    fn leaky_relu_f64(negative_slope: Float64) -> Result<TorchNDArray, BackendError>:
+        if self.dtype != DType.F64:
+            return Err(BackendError.BackendExecutionFailed("pytorch tensor owner only supports Float64 leaky_relu"))
+        val handle = dyn_torch_tensor_leaky_relu(self.handle, negative_slope.value)
+        if handle == 0:
+            return Err(BackendError.MissingRuntimeSymbol("rt_torch_torchtensor_leaky_relu_bits"))
+        Ok(TorchNDArray(
+            handle: handle,
+            shape: self.shape,
+            dtype: DType.F64,
+            device: self.device
+        ))
+
+    fn gelu_f64() -> Result<TorchNDArray, BackendError>:
+        self.unary_f64("gelu")
+
+    fn exp_f64() -> Result<TorchNDArray, BackendError>:
+        self.unary_f64("exp")
+
+    fn log_f64() -> Result<TorchNDArray, BackendError>:
+        self.unary_f64("log")
+
+    fn sigmoid_f64() -> Result<TorchNDArray, BackendError>:
+        self.unary_f64("sigmoid")
+
+    fn tanh_f64() -> Result<TorchNDArray, BackendError>:
+        self.unary_f64("tanh")
+
+    fn sin_f64() -> Result<TorchNDArray, BackendError>:
+        self.unary_f64("sin")
+
+    fn cos_f64() -> Result<TorchNDArray, BackendError>:
+        self.unary_f64("cos")
+
+    fn tan_f64() -> Result<TorchNDArray, BackendError>:
+        self.unary_f64("tan")
+
+    fn asin_f64() -> Result<TorchNDArray, BackendError>:
+        self.unary_f64("asin")
+
+    fn acos_f64() -> Result<TorchNDArray, BackendError>:
+        self.unary_f64("acos")
+
+    fn add_scalar_f64(scalar: Float64) -> Result<TorchNDArray, BackendError>:
+        self.scalar_f64(scalar, "add")
+
+    fn sub_scalar_f64(scalar: Float64) -> Result<TorchNDArray, BackendError>:
+        self.scalar_f64(scalar, "sub")
+
+    fn mul_scalar_f64(scalar: Float64) -> Result<TorchNDArray, BackendError>:
+        self.scalar_f64(scalar, "mul")
+
+    fn div_scalar_f64(scalar: Float64) -> Result<TorchNDArray, BackendError>:
+        self.scalar_f64(scalar, "div")
+
+    fn pow_scalar_f64(exponent: Float64) -> Result<TorchNDArray, BackendError>:
+        self.scalar_f64(exponent, "pow")
+
+    fn softmax_axis_f64(axis: i64) -> Result<TorchNDArray, BackendError>:
+        self.softmax_like_axis_f64(axis, "softmax")
+
+    fn log_softmax_axis_f64(axis: i64) -> Result<TorchNDArray, BackendError>:
+        self.softmax_like_axis_f64(axis, "log_softmax")
+
+    fn clone_f64() -> Result<TorchNDArray, BackendError>:
+        if self.dtype != DType.F64:
+            return Err(BackendError.BackendExecutionFailed("pytorch tensor owner only supports Float64 clone"))
+        val handle = dyn_torch_tensor_clone(self.handle)
+        if handle == 0:
+            return Err(BackendError.MissingRuntimeSymbol("rt_torch_torchtensor_clone"))
+        Ok(TorchNDArray(
+            handle: handle,
+            shape: self.shape,
+            dtype: DType.F64,
+            device: self.device
+        ))
+
+    fn unsqueeze_f64(axis: i64) -> Result<TorchNDArray, BackendError>:
+        if self.dtype != DType.F64 or self.shape.dims.len() != 1:
+            return Err(BackendError.BackendExecutionFailed("pytorch tensor owner unsqueeze currently supports rank-1 Float64 input"))
+        var normalized = axis
+        if normalized < 0:
+            normalized = self.shape.dims.len() + 1 + normalized
+        if normalized < 0 or normalized > self.shape.dims.len():
+            return Err(BackendError.BackendExecutionFailed("pytorch tensor owner unsqueeze received invalid axis"))
+        val handle = dyn_torch_tensor_unsqueeze(self.handle, normalized)
+        if handle == 0:
+            return Err(BackendError.MissingRuntimeSymbol("rt_torch_torchtensor_unsqueeze"))
+        var out_shape = Shape.new([Index.new(1), self.shape.dims[0]])
+        if normalized == 1:
+            out_shape = Shape.new([self.shape.dims[0], Index.new(1)])
+        Ok(TorchNDArray(
+            handle: handle,
+            shape: out_shape,
+            dtype: DType.F64,
+            device: self.device
+        ))
+
+    fn squeeze_f64(axis: i64) -> Result<TorchNDArray, BackendError>:
+        if self.dtype != DType.F64 or self.shape.dims.len() != 2:
+            return Err(BackendError.BackendExecutionFailed("pytorch tensor owner squeeze currently supports rank-2 Float64 input"))
+        var normalized = axis
+        if normalized < 0:
+            normalized = self.shape.dims.len() + normalized
+        if normalized < 0 or normalized >= self.shape.dims.len():
+            return Err(BackendError.BackendExecutionFailed("pytorch tensor owner squeeze received invalid axis"))
+        if self.shape.dims[normalized].value != 1:
+            return Err(BackendError.BackendExecutionFailed("pytorch tensor owner squeeze axis must have size one"))
+        val handle = dyn_torch_tensor_squeeze_dim(self.handle, normalized)
+        if handle == 0:
+            return Err(BackendError.MissingRuntimeSymbol("rt_torch_torchtensor_squeeze_dim"))
+        var out_len = self.shape.dims[1].value
+        if normalized == 1:
+            out_len = self.shape.dims[0].value
+        Ok(TorchNDArray(
+            handle: handle,
+            shape: Shape.new([Index.new(out_len)]),
+            dtype: DType.F64,
+            device: self.device
+        ))
+
+    fn reshape_f64(shape: Shape) -> Result<TorchNDArray, BackendError>:
+        if self.dtype != DType.F64:
+            return Err(BackendError.BackendExecutionFailed("pytorch tensor owner reshape requires Float64 input"))
+        if shape.dims.len() < 1 or shape.dims.len() > 4:
+            return Err(BackendError.BackendExecutionFailed("pytorch tensor owner reshape currently supports rank 1 through 4"))
+        var i = 0
+        while i < shape.dims.len():
+            if shape.dims[i].value < 0:
+                return Err(BackendError.BackendExecutionFailed("pytorch tensor owner reshape dimensions must be non-negative"))
+            i = i + 1
+        if shape.numel() != self.shape.numel():
+            return Err(BackendError.BackendExecutionFailed("pytorch tensor owner reshape requires matching element count"))
+        var handle = 0
+        if shape.dims.len() == 1:
+            handle = dyn_torch_tensor_reshape_1d(self.handle, shape.dims[0].value)
+        elif shape.dims.len() == 2:
+            handle = dyn_torch_tensor_reshape_2d(self.handle, shape.dims[0].value, shape.dims[1].value)
+        elif shape.dims.len() == 3:
+            handle = dyn_torch_tensor_reshape_3d(self.handle, shape.dims[0].value, shape.dims[1].value, shape.dims[2].value)
+        else:
+            handle = dyn_torch_tensor_reshape_4d(self.handle, shape.dims[0].value, shape.dims[1].value, shape.dims[2].value, shape.dims[3].value)
+        if handle == 0:
+            return Err(BackendError.MissingRuntimeSymbol("rt_torch_torchtensor_reshape"))
+        Ok(TorchNDArray(
+            handle: handle,
+            shape: shape,
+            dtype: DType.F64,
+            device: self.device
+        ))
+
+    fn flatten_f64() -> Result<TorchNDArray, BackendError>:
+        self.reshape_f64(Shape.new([self.shape.numel()]))
+
+    fn transpose_2d_f64() -> Result<TorchNDArray, BackendError>:
+        if self.dtype != DType.F64 or self.shape.dims.len() != 2:
+            return Err(BackendError.BackendExecutionFailed("pytorch tensor owner transpose requires a 2-D Float64 input"))
+        val handle = dyn_torch_tensor_permute_2d(self.handle, 1, 0)
+        if handle == 0:
+            return Err(BackendError.MissingRuntimeSymbol("rt_torch_torchtensor_permute_2d"))
+        Ok(TorchNDArray(
+            handle: handle,
+            shape: Shape.new([self.shape.dims[1], self.shape.dims[0]]),
+            dtype: DType.F64,
+            device: self.device
+        ))
+
+    fn permute_f64(axes: [i64]) -> Result<TorchNDArray, BackendError>:
+        if self.dtype != DType.F64:
+            return Err(BackendError.BackendExecutionFailed("pytorch tensor owner permute requires Float64 input"))
+        val rank = self.shape.dims.len()
+        if rank < 2 or rank > 4:
+            return Err(BackendError.BackendExecutionFailed("pytorch tensor owner permute currently supports rank 2 through 4"))
+        if axes.len() != rank:
+            return Err(BackendError.BackendExecutionFailed("pytorch tensor owner permute requires one axis per input dimension"))
+        var seen: [bool] = []
+        var i = 0
+        while i < rank:
+            seen.push(false)
+            i = i + 1
+        var out_dims: [Index] = []
+        i = 0
+        while i < axes.len():
+            val axis = axes[i]
+            if axis < 0 or axis >= rank:
+                return Err(BackendError.BackendExecutionFailed("pytorch tensor owner permute received an out-of-range axis"))
+            if seen[axis]:
+                return Err(BackendError.BackendExecutionFailed("pytorch tensor owner permute received duplicate axes"))
+            seen[axis] = true
+            out_dims.push(self.shape.dims[axis])
+            i = i + 1
+        var handle = 0
+        if rank == 2:
+            handle = dyn_torch_tensor_permute_2d(self.handle, axes[0], axes[1])
+        elif rank == 3:
+            handle = dyn_torch_tensor_permute_3d(self.handle, axes[0], axes[1], axes[2])
+        else:
+            handle = dyn_torch_tensor_permute_4d(self.handle, axes[0], axes[1], axes[2], axes[3])
+        if handle == 0:
+            return Err(BackendError.MissingRuntimeSymbol("rt_torch_torchtensor_permute"))
+        Ok(TorchNDArray(
+            handle: handle,
+            shape: Shape.new(out_dims),
+            dtype: DType.F64,
+            device: self.device
+        ))
+
+    fn contiguous_f64() -> Result<TorchNDArray, BackendError>:
+        if self.dtype != DType.F64:
+            return Err(BackendError.BackendExecutionFailed("pytorch tensor owner contiguous requires Float64 input"))
+        val handle = dyn_torch_tensor_contiguous(self.handle)
+        if handle == 0:
+            return Err(BackendError.MissingRuntimeSymbol("rt_torch_torchtensor_contiguous"))
+        Ok(TorchNDArray(
+            handle: handle,
+            shape: self.shape,
+            dtype: DType.F64,
+            device: self.device
+        ))
+
+    fn slice_1d_f64(spec: Slice) -> Result<TorchNDArray, BackendError>:
+        if self.dtype != DType.F64 or self.shape.dims.len() != 1:
+            return Err(BackendError.BackendExecutionFailed("pytorch tensor owner slice requires rank-1 Float64 input"))
+        if spec.step.value <= 0:
+            return Err(BackendError.BackendExecutionFailed("pytorch tensor owner slice currently requires a positive step"))
+        val size = self.shape.dims[0].value
+        var start = spec.start.value
+        var stop = spec.stop.value
+        if start < 0:
+            return Err(BackendError.BackendExecutionFailed("pytorch tensor owner slice start is below zero"))
+        if start > size:
+            return Err(BackendError.BackendExecutionFailed("pytorch tensor owner slice start is above input size"))
+        if stop < 0:
+            return Err(BackendError.BackendExecutionFailed("pytorch tensor owner slice stop is below zero"))
+        if stop > size:
+            return Err(BackendError.BackendExecutionFailed("pytorch tensor owner slice stop is above input size"))
+        if stop < start:
+            return Err(BackendError.BackendExecutionFailed("pytorch tensor owner slice stop is before start"))
+        val length = torch_positive_slice_length(start, stop, spec.step.value)
+        val handle = dyn_torch_tensor_slice(self.handle, 0, start, stop, spec.step.value)
+        if handle == 0:
+            return Err(BackendError.MissingRuntimeSymbol("rt_torch_torchtensor_slice"))
+        Ok(TorchNDArray(
+            handle: handle,
+            shape: Shape.new([Index.new(length)]),
+            dtype: DType.F64,
+            device: self.device
+        ))
+
+    fn slice_2d_f64(rows: Slice, cols: Slice) -> Result<TorchNDArray, BackendError>:
+        if self.dtype != DType.F64 or self.shape.dims.len() != 2:
+            return Err(BackendError.BackendExecutionFailed("pytorch tensor owner slice requires rank-2 Float64 input"))
+        if rows.step.value <= 0 or cols.step.value <= 0:
+            return Err(BackendError.BackendExecutionFailed("pytorch tensor owner slice currently requires positive steps"))
+        val row_size = self.shape.dims[0].value
+        val col_size = self.shape.dims[1].value
+        var row_start = rows.start.value
+        var row_stop = rows.stop.value
+        var col_start = cols.start.value
+        var col_stop = cols.stop.value
+        if row_start < 0 or row_start > row_size or row_stop < 0 or row_stop > row_size or row_stop < row_start:
+            return Err(BackendError.BackendExecutionFailed("pytorch tensor owner row slice received invalid bounds"))
+        if col_start < 0 or col_start > col_size or col_stop < 0 or col_stop > col_size or col_stop < col_start:
+            return Err(BackendError.BackendExecutionFailed("pytorch tensor owner column slice received invalid bounds"))
+        val row_count = torch_positive_slice_length(row_start, row_stop, rows.step.value)
+        val col_count = torch_positive_slice_length(col_start, col_stop, cols.step.value)
+        val row_handle = dyn_torch_tensor_slice(self.handle, 0, row_start, row_stop, rows.step.value)
+        if row_handle == 0:
+            return Err(BackendError.MissingRuntimeSymbol("rt_torch_torchtensor_slice"))
+        val handle = dyn_torch_tensor_slice(row_handle, 1, col_start, col_stop, cols.step.value)
+        dyn_torch_tensor_free(row_handle)
+        if handle == 0:
+            return Err(BackendError.MissingRuntimeSymbol("rt_torch_torchtensor_slice"))
+        Ok(TorchNDArray(
+            handle: handle,
+            shape: Shape.new([Index.new(row_count), Index.new(col_count)]),
+            dtype: DType.F64,
+            device: self.device
+        ))
+
+    static fn concatenate_1d_f64(arrays: [TorchNDArray]) -> Result<TorchNDArray, BackendError>:
+        if arrays.len() < 2 or arrays.len() > 4:
+            return Err(BackendError.BackendExecutionFailed("pytorch tensor owner concatenate supports two to four inputs"))
+        val first = arrays[0]
+        if first.dtype != DType.F64 or first.shape.dims.len() != 1:
+            return Err(BackendError.BackendExecutionFailed("pytorch tensor owner concatenate requires 1-D Float64 inputs"))
+        var total = 0
+        var i = 0
+        while i < arrays.len():
+            val current = arrays[i]
+            if current.dtype != DType.F64 or current.shape.dims.len() != 1 or current.device != first.device:
+                return Err(BackendError.BackendExecutionFailed("pytorch tensor owner concatenate requires matching 1-D Float64 devices"))
+            total = total + current.shape.dims[0].value
+            i = i + 1
+        var handle = 0
+        if arrays.len() == 2:
+            handle = dyn_torch_tensor_cat_2(arrays[0].handle, arrays[1].handle, 0)
+        elif arrays.len() == 3:
+            handle = dyn_torch_tensor_cat_3(arrays[0].handle, arrays[1].handle, arrays[2].handle, 0)
+        else:
+            handle = dyn_torch_tensor_cat_4(arrays[0].handle, arrays[1].handle, arrays[2].handle, arrays[3].handle, 0)
+        if handle == 0:
+            return Err(BackendError.MissingRuntimeSymbol("rt_torch_torchtensor_cat"))
+        Ok(TorchNDArray(
+            handle: handle,
+            shape: Shape.new([Index.new(total)]),
+            dtype: DType.F64,
+            device: first.device
+        ))
+
+    static fn stack_1d_f64(arrays: [TorchNDArray]) -> Result<TorchNDArray, BackendError>:
+        if arrays.len() < 2 or arrays.len() > 4:
+            return Err(BackendError.BackendExecutionFailed("pytorch tensor owner stack supports two to four inputs"))
+        val first = arrays[0]
+        if first.dtype != DType.F64 or first.shape.dims.len() != 1:
+            return Err(BackendError.BackendExecutionFailed("pytorch tensor owner stack requires 1-D Float64 inputs"))
+        val width = first.shape.dims[0].value
+        var i = 0
+        while i < arrays.len():
+            val current = arrays[i]
+            if current.dtype != DType.F64 or current.shape.dims.len() != 1 or current.shape.dims[0].value != width or current.device != first.device:
+                return Err(BackendError.BackendExecutionFailed("pytorch tensor owner stack requires matching 1-D Float64 shapes and devices"))
+            i = i + 1
+        var handle = 0
+        if arrays.len() == 2:
+            handle = dyn_torch_tensor_stack_2(arrays[0].handle, arrays[1].handle, 0)
+        elif arrays.len() == 3:
+            handle = dyn_torch_tensor_stack_3(arrays[0].handle, arrays[1].handle, arrays[2].handle, 0)
+        else:
+            handle = dyn_torch_tensor_stack_4(arrays[0].handle, arrays[1].handle, arrays[2].handle, arrays[3].handle, 0)
+        if handle == 0:
+            return Err(BackendError.MissingRuntimeSymbol("rt_torch_torchtensor_stack"))
+        Ok(TorchNDArray(
+            handle: handle,
+            shape: Shape.new([Index.new(arrays.len()), Index.new(width)]),
+            dtype: DType.F64,
+            device: first.device
+        ))
+
+    fn sum_f64() -> Result<Float64, BackendError>:
+        if self.dtype != DType.F64:
+            return Err(BackendError.BackendExecutionFailed("pytorch tensor owner only supports Float64 reductions"))
+        Ok(Float64.new(dyn_torch_tensor_sum(self.handle)))
+
+    fn mean_f64() -> Result<Float64, BackendError>:
+        if self.dtype != DType.F64 or self.shape.numel().value == 0:
+            return Err(BackendError.BackendExecutionFailed("pytorch tensor owner requires non-empty Float64 input for mean"))
+        Ok(Float64.new(dyn_torch_tensor_mean(self.handle)))
+
+    fn min_f64() -> Result<Float64, BackendError>:
+        if self.dtype != DType.F64 or self.shape.numel().value == 0:
+            return Err(BackendError.BackendExecutionFailed("pytorch tensor owner requires non-empty Float64 input for min"))
+        Ok(Float64.new(dyn_torch_tensor_min(self.handle)))
+
+    fn max_f64() -> Result<Float64, BackendError>:
+        if self.dtype != DType.F64 or self.shape.numel().value == 0:
+            return Err(BackendError.BackendExecutionFailed("pytorch tensor owner requires non-empty Float64 input for max"))
+        Ok(Float64.new(dyn_torch_tensor_max(self.handle)))
+
+    fn norm_f64() -> Result<Float64, BackendError>:
+        if self.dtype != DType.F64 or self.shape.numel().value == 0:
+            return Err(BackendError.BackendExecutionFailed("pytorch tensor owner requires non-empty Float64 input for norm"))
+        Ok(Float64.new(dyn_torch_tensor_norm(self.handle)))
+
+    fn std_f64() -> Result<Float64, BackendError>:
+        if self.dtype != DType.F64 or self.shape.numel().value < 2:
+            return Err(BackendError.BackendExecutionFailed("pytorch tensor owner requires at least two Float64 values for std"))
+        Ok(Float64.new(dyn_torch_tensor_std(self.handle)))
+
+    fn var_f64() -> Result<Float64, BackendError>:
+        if self.dtype != DType.F64 or self.shape.numel().value < 2:
+            return Err(BackendError.BackendExecutionFailed("pytorch tensor owner requires at least two Float64 values for var"))
+        Ok(Float64.new(dyn_torch_tensor_var(self.handle)))
+
+    fn det_f64() -> Result<Float64, BackendError>:
+        if self.dtype != DType.F64 or self.shape.dims.len() != 2:
+            return Err(BackendError.BackendExecutionFailed("pytorch tensor owner determinant requires a 2-D Float64 input"))
+        if self.shape.dims[0].value != self.shape.dims[1].value:
+            return Err(BackendError.BackendExecutionFailed("pytorch tensor owner determinant requires a square matrix"))
+        Ok(Float64.new(dyn_torch_tensor_det(self.handle)))
+
+    fn inverse_f64() -> Result<TorchNDArray, BackendError>:
+        if self.dtype != DType.F64 or self.shape.dims.len() != 2:
+            return Err(BackendError.BackendExecutionFailed("pytorch tensor owner inverse requires a 2-D Float64 input"))
+        if self.shape.dims[0].value != self.shape.dims[1].value:
+            return Err(BackendError.BackendExecutionFailed("pytorch tensor owner inverse requires a square matrix"))
+        val handle = dyn_torch_tensor_inverse(self.handle)
+        if handle == 0:
+            return Err(BackendError.MissingRuntimeSymbol("rt_torch_torchtensor_inverse"))
+        Ok(TorchNDArray(
+            handle: handle,
+            shape: self.shape,
+            dtype: DType.F64,
+            device: self.device
+        ))
+
+    fn solve_f64(rhs: TorchNDArray) -> Result<TorchNDArray, BackendError>:
+        if self.dtype != DType.F64 or rhs.dtype != DType.F64:
+            return Err(BackendError.BackendExecutionFailed("pytorch tensor owner solve requires Float64 inputs"))
+        if self.shape.dims.len() != 2 or rhs.shape.dims.len() != 1:
+            return Err(BackendError.BackendExecutionFailed("pytorch tensor owner solve requires a 2-D matrix and 1-D right-hand side"))
+        if self.shape.dims[0].value != self.shape.dims[1].value:
+            return Err(BackendError.BackendExecutionFailed("pytorch tensor owner solve requires a square matrix"))
+        if rhs.shape.dims[0].value != self.shape.dims[0].value:
+            return Err(BackendError.BackendExecutionFailed("pytorch tensor owner solve requires matching right-hand side length"))
+        if self.device != rhs.device:
+            return Err(BackendError.BackendExecutionFailed("pytorch tensor owner solve requires matching devices"))
+        val handle = dyn_torch_tensor_linalg_solve(self.handle, rhs.handle)
+        if handle == 0:
+            return Err(BackendError.MissingRuntimeSymbol("rt_torch_torchtensor_linalg_solve"))
+        Ok(TorchNDArray(
+            handle: handle,
+            shape: rhs.shape,
+            dtype: DType.F64,
+            device: self.device
+        ))
+
+    fn sum_axis_f64(axis: i64) -> Result<TorchNDArray, BackendError>:
+        self.reduce_axis_f64(axis, "sum")
+
+    fn mean_axis_f64(axis: i64) -> Result<TorchNDArray, BackendError>:
+        if self.shape.numel().value == 0:
+            return Err(BackendError.BackendExecutionFailed("pytorch tensor owner requires non-empty input for axis mean"))
+        self.reduce_axis_f64(axis, "mean")
+
+    fn min_axis_f64(axis: i64) -> Result<TorchNDArray, BackendError>:
+        if self.shape.numel().value == 0:
+            return Err(BackendError.BackendExecutionFailed("pytorch tensor owner requires non-empty input for axis min"))
+        self.reduce_axis_f64(axis, "min")
+
+    fn max_axis_f64(axis: i64) -> Result<TorchNDArray, BackendError>:
+        if self.shape.numel().value == 0:
+            return Err(BackendError.BackendExecutionFailed("pytorch tensor owner requires non-empty input for axis max"))
+        self.reduce_axis_f64(axis, "max")
+
+    fn argmin_axis_f64(axis: i64) -> Result<TorchNDArray, BackendError>:
+        if self.shape.numel().value == 0:
+            return Err(BackendError.BackendExecutionFailed("pytorch tensor owner requires non-empty input for axis argmin"))
+        self.reduce_axis_f64(axis, "argmin")
+
+    fn argmax_axis_f64(axis: i64) -> Result<TorchNDArray, BackendError>:
+        if self.shape.numel().value == 0:
+            return Err(BackendError.BackendExecutionFailed("pytorch tensor owner requires non-empty input for axis argmax"))
+        self.reduce_axis_f64(axis, "argmax")
+
+    fn reduce_axis_f64(axis: i64, op: text) -> Result<TorchNDArray, BackendError>:
+        if self.dtype != DType.F64 or self.shape.dims.len() != 2:
+            return Err(BackendError.BackendExecutionFailed("pytorch tensor owner axis reduction requires a 2-D Float64 input"))
+        var normalized = axis
+        if normalized < 0:
+            normalized = self.shape.dims.len() + normalized
+        if normalized < 0 or normalized >= self.shape.dims.len():
+            return Err(BackendError.BackendExecutionFailed("pytorch tensor owner axis reduction received invalid axis"))
+        var handle = 0
+        if op == "sum":
+            handle = dyn_torch_tensor_sum_dim(self.handle, normalized, 0)
+        elif op == "mean":
+            handle = dyn_torch_tensor_mean_dim(self.handle, normalized, 0)
+        elif op == "min":
+            handle = dyn_torch_tensor_min_dim(self.handle, normalized, 0)
+        elif op == "max":
+            handle = dyn_torch_tensor_max_dim(self.handle, normalized, 0)
+        elif op == "argmin":
+            val index_handle = dyn_torch_tensor_argmin(self.handle, normalized, 0)
+            if index_handle == 0:
+                return Err(BackendError.MissingRuntimeSymbol("rt_torch_torchtensor_argmin"))
+            handle = dyn_torch_tensor_to_float(index_handle)
+            dyn_torch_tensor_free(index_handle)
+        elif op == "argmax":
+            val index_handle = dyn_torch_tensor_argmax(self.handle, normalized, 0)
+            if index_handle == 0:
+                return Err(BackendError.MissingRuntimeSymbol("rt_torch_torchtensor_argmax"))
+            handle = dyn_torch_tensor_to_float(index_handle)
+            dyn_torch_tensor_free(index_handle)
+        else:
+            return Err(BackendError.BackendExecutionFailed("unsupported pytorch tensor owner axis reduction op"))
+        if handle == 0:
+            return Err(BackendError.MissingRuntimeSymbol("rt_torch_torchtensor_reduction_dim"))
+        var out_len = self.shape.dims[1].value
+        if normalized == 1:
+            out_len = self.shape.dims[0].value
+        Ok(TorchNDArray(
+            handle: handle,
+            shape: Shape.new([Index.new(out_len)]),
+            dtype: DType.F64,
+            device: self.device
+        ))
+
+    fn softmax_like_axis_f64(axis: i64, op: text) -> Result<TorchNDArray, BackendError>:
+        if self.dtype != DType.F64 or self.shape.dims.len() == 0 or self.shape.dims.len() > 2:
+            return Err(BackendError.BackendExecutionFailed("pytorch tensor owner softmax requires rank 1 or 2 Float64 input"))
+        var normalized = axis
+        if normalized < 0:
+            normalized = self.shape.dims.len() + normalized
+        if normalized < 0 or normalized >= self.shape.dims.len():
+            return Err(BackendError.BackendExecutionFailed("pytorch tensor owner softmax received invalid axis"))
+        var handle = 0
+        if op == "softmax":
+            handle = dyn_torch_tensor_softmax(self.handle, normalized)
+        elif op == "log_softmax":
+            handle = dyn_torch_tensor_log_softmax(self.handle, normalized)
+        else:
+            return Err(BackendError.BackendExecutionFailed("unsupported pytorch tensor owner softmax op"))
+        if handle == 0:
+            return Err(BackendError.MissingRuntimeSymbol("rt_torch_torchtensor_softmax"))
+        Ok(TorchNDArray(
+            handle: handle,
+            shape: self.shape,
+            dtype: DType.F64,
+            device: self.device
+        ))
+
+    fn binary_f64(other: TorchNDArray, op: text) -> Result<TorchNDArray, BackendError>:
+        if self.dtype != DType.F64 or other.dtype != DType.F64:
+            return Err(BackendError.BackendExecutionFailed("pytorch tensor owner only supports Float64 arithmetic"))
+        if self.shape != other.shape:
+            return Err(BackendError.BackendExecutionFailed("pytorch tensor owner arithmetic requires matching shapes"))
+        var op_id = -1
+        if op == "add":
+            op_id = 0
+        elif op == "sub":
+            op_id = 1
+        elif op == "mul":
+            op_id = 2
+        elif op == "div":
+            op_id = 3
+        elif op == "atan2":
+            val handle = dyn_torch_tensor_atan2(self.handle, other.handle)
+            if handle == 0:
+                return Err(BackendError.MissingRuntimeSymbol("rt_torch_torchtensor_atan2"))
+            return Ok(TorchNDArray(
+                handle: handle,
+                shape: self.shape,
+                dtype: DType.F64,
+                device: self.device
+            ))
+        else:
+            return Err(BackendError.BackendExecutionFailed("unsupported pytorch tensor owner arithmetic op"))
+        val handle = dyn_torch_tensor_binary_op(self.handle, other.handle, op_id)
+        if handle == 0:
+            return Err(BackendError.MissingRuntimeSymbol("rt_dyn_torch_tensor_binary_op"))
+        Ok(TorchNDArray(
+            handle: handle,
+            shape: self.shape,
+            dtype: DType.F64,
+            device: self.device
+        ))
+
+    fn unary_f64(op: text) -> Result<TorchNDArray, BackendError>:
+        if self.dtype != DType.F64:
+            return Err(BackendError.BackendExecutionFailed("pytorch tensor owner only supports Float64 unary operations"))
+        var handle = 0
+        if op == "abs":
+            handle = dyn_torch_tensor_abs(self.handle)
+        elif op == "neg":
+            handle = dyn_torch_tensor_neg(self.handle)
+        elif op == "square":
+            handle = dyn_torch_tensor_pow(self.handle, 2.0)
+        elif op == "sqrt":
+            handle = dyn_torch_tensor_sqrt(self.handle)
+        elif op == "relu":
+            handle = dyn_torch_tensor_relu(self.handle)
+        elif op == "gelu":
+            handle = dyn_torch_tensor_gelu(self.handle)
+        elif op == "exp":
+            handle = dyn_torch_tensor_exp(self.handle)
+        elif op == "log":
+            handle = dyn_torch_tensor_log(self.handle)
+        elif op == "sigmoid":
+            handle = dyn_torch_tensor_sigmoid(self.handle)
+        elif op == "tanh":
+            handle = dyn_torch_tensor_tanh(self.handle)
+        elif op == "sin":
+            handle = dyn_torch_tensor_sin(self.handle)
+        elif op == "cos":
+            handle = dyn_torch_tensor_cos(self.handle)
+        elif op == "tan":
+            handle = dyn_torch_tensor_tan(self.handle)
+        elif op == "asin":
+            handle = dyn_torch_tensor_asin(self.handle)
+        elif op == "acos":
+            handle = dyn_torch_tensor_acos(self.handle)
+        else:
+            return Err(BackendError.BackendExecutionFailed("unsupported pytorch tensor owner unary op"))
+        if handle == 0:
+            return Err(BackendError.MissingRuntimeSymbol("rt_torch_torchtensor_unary"))
+        Ok(TorchNDArray(
+            handle: handle,
+            shape: self.shape,
+            dtype: DType.F64,
+            device: self.device
+        ))
+
+    fn scalar_f64(scalar: Float64, op: text) -> Result<TorchNDArray, BackendError>:
+        if self.dtype != DType.F64:
+            return Err(BackendError.BackendExecutionFailed("pytorch tensor owner only supports Float64 scalar operations"))
+        var handle = 0
+        if op == "add":
+            handle = dyn_torch_tensor_add_scalar(self.handle, scalar.value)
+        elif op == "sub":
+            handle = dyn_torch_tensor_sub_scalar(self.handle, scalar.value)
+        elif op == "mul":
+            handle = dyn_torch_tensor_mul_scalar(self.handle, scalar.value)
+        elif op == "div":
+            handle = dyn_torch_tensor_div_scalar(self.handle, scalar.value)
+        elif op == "pow":
+            handle = dyn_torch_tensor_pow(self.handle, scalar.value)
+        else:
+            return Err(BackendError.BackendExecutionFailed("unsupported pytorch tensor owner scalar op"))
+        if handle == 0:
+            return Err(BackendError.MissingRuntimeSymbol("rt_torch_torchtensor_scalar"))
+        Ok(TorchNDArray(
+            handle: handle,
+            shape: self.shape,
+            dtype: DType.F64,
+            device: self.device
+        ))
+
+    fn free() -> i64:
+        dyn_torch_tensor_free(self.handle)
+        0
+
+fn _scilib_call0(name: text) -> i64:
+    var loader = DynLoader.instance()
+    loader.call0(SCILIB_LIB_PATH, name)
+
+fn _scilib_call3(name: text, a0: i64, a1: i64, a2: i64) -> i64:
+    var loader = DynLoader.instance()
+    loader.call3(SCILIB_LIB_PATH, name, a0, a1, a2)
+
+fn _scilib_call_n(name: text, args: [i64]) -> i64:
+    var loader = DynLoader.instance()
+    loader.call(SCILIB_LIB_PATH, name, args)
+
+fn dyn_cuda_available() -> bool:
+    _scilib_call0("rt_scilib_cuda_available") != 0
+
+fn dyn_openblas_available() -> bool:
+    _scilib_call0("rt_scilib_openblas_available") != 0
+
+fn _configured_linalg_backend() -> text:
+    val configured = rt_env_get("SIMPLE_BLAS_BACKEND") ?? ""
+    if configured == "":
+        return "auto"
+    configured
+
+fn _backend_status(requested: text) -> LinalgBackendStatus:
+    if requested == "mock":
+        return LinalgBackendStatus(
+            requested: requested,
+            selected: "mock",
+            available: true,
+            real_native: false,
+            diagnostic: "mock backend selected for deterministic verification"
+        )
+    if requested == "scalar" or requested == "auto":
+        return LinalgBackendStatus(
+            requested: requested,
+            selected: "scalar",
+            available: true,
+            real_native: false,
+            diagnostic: "portable scalar backend selected"
+        )
+    if requested == "openblas":
+        if dyn_openblas_available():
+            return LinalgBackendStatus(
+                requested: requested,
+                selected: "openblas",
+                available: true,
+                real_native: true,
+                diagnostic: "openblas dynamic linalg backend available"
+            )
+        return LinalgBackendStatus(
+            requested: requested,
+            selected: "scalar",
+            available: false,
+            real_native: false,
+            diagnostic: "openblas backend unavailable: native OpenBLAS/LAPACKE shim is not linked into this interpreter path"
+        )
+    if requested == "simd":
+        return LinalgBackendStatus(
+            requested: requested,
+            selected: "scalar",
+            available: false,
+            real_native: false,
+            diagnostic: "simd backend unavailable: future accelerator backend is not enabled"
+        )
+    if requested == "cuda":
+        if dyn_cuda_available():
+            return LinalgBackendStatus(
+                requested: requested,
+                selected: "cuda",
+                available: true,
+                real_native: true,
+                diagnostic: "cuda dynamic linalg backend available"
+            )
+        return LinalgBackendStatus(
+            requested: requested,
+            selected: "scalar",
+            available: false,
+            real_native: false,
+            diagnostic: "cuda backend unavailable: future accelerator backend is not enabled"
+        )
+    if requested == "torch" or requested == "pytorch":
+        if dyn_torch_available():
+            return LinalgBackendStatus(
+                requested: requested,
+                selected: "pytorch",
+                available: true,
+                real_native: true,
+                diagnostic: "pytorch dynamic linalg backend available"
+            )
+        return LinalgBackendStatus(
+            requested: requested,
+            selected: "scalar",
+            available: false,
+            real_native: false,
+            diagnostic: "pytorch backend unavailable: future accelerator backend is not enabled"
+        )
+    LinalgBackendStatus(
+        requested: requested,
+        selected: "scalar",
+        available: false,
+        real_native: false,
+        diagnostic: "unsupported linalg backend: " + requested
+    )
+
+fn linalg_backend_status() -> LinalgBackendStatus:
+    _backend_status(_configured_linalg_backend())
+
+fn torch_positive_slice_length(start: i64, stop: i64, step: i64) -> i64:
+    if step <= 0 or stop <= start:
+        return 0
+    ((stop - start + step - 1) / step)
+
+fn require_linalg_backend(name: text) -> Result<LinalgBackendStatus, BackendError>:
+    val status = _backend_status(name)
+    if status.available:
+        return Ok(status)
+    if status.diagnostic.starts_with("unsupported"):
+        return Err(BackendError.UnsupportedBackend(name))
+    Err(BackendError.BackendUnavailable(name))
+
+fn require_linalg_symbol(backend: text, symbol: text) -> Result<text, BackendError>:
+    val status = require_linalg_backend(backend)?
+    if status.real_native:
+        return Ok(symbol)
+    if backend == "mock" or backend == "scalar" or backend == "auto":
+        return Ok(symbol)
+    Err(BackendError.MissingRuntimeSymbol(symbol))
+
+fn check_linalg_symbol(backend: text, symbol: text, present: bool) -> Result<text, BackendError>:
+    require_linalg_backend(backend)?
+    if not present:
+        return Err(BackendError.MissingRuntimeSymbol(symbol))
+    Ok(symbol)
+
 fn vector_from(values: [Float64]) -> NDArray:
     make_f64_array(values, Shape.new([Index.new(values.len())]))
+
+fn vector_from_f32(values: [Float32]) -> NDArray:
+    make_f32_array(values, Shape.new([Index.new(values.len())]))
 
 fn matrix_from_rows(rows) -> NDArray:
     val row_count = rows.len()
@@ -38,6 +1080,34 @@ fn eye_matrix(size: Index) -> NDArray:
 fn dot(left: NDArray, right: NDArray) -> Result<Float64, LinalgError>:
     if left.len() != right.len():
         return Err(LinalgError.DimensionMismatch)
+    val backend = _configured_linalg_backend()
+    if backend == "openblas":
+        match openblas_dot(left, right):
+            case Ok(value):
+                return Ok(value)
+            case Err(_):
+                pass
+    if backend == "cuda":
+        match cuda_dot(left, right):
+            case Ok(value):
+                return Ok(value)
+            case Err(_):
+                pass
+    if backend == "torch" or backend == "pytorch":
+        match torch_dot(left, right):
+            case Ok(value):
+                return Ok(value)
+            case Err(_):
+                pass
+    if left.shape.dims.len() == 1 and left.len().value >= 4 and left.is_contiguous() and right.is_contiguous():
+        var left_values: [Float64] = []
+        var right_values: [Float64] = []
+        var i = 0
+        while i < left.len().value:
+            left_values.push(left.get_f64(Index.new(i)))
+            right_values.push(right.get_f64(Index.new(i)))
+            i = i + 1
+        return simd_dot_values(left_values, right_values)
     var total = 0.0
     var i = 0
     while i < left.len().value:
@@ -45,17 +1115,999 @@ fn dot(left: NDArray, right: NDArray) -> Result<Float64, LinalgError>:
         i = i + 1
     Ok(Float64.new(total))
 
+fn simd_dot_values(left: [Float64], right: [Float64]) -> Result<Float64, LinalgError>:
+    if left.len() != right.len():
+        return Err(LinalgError.DimensionMismatch)
+    var total = 0.0
+    var i = 0
+    while i + 3 < left.len():
+        val chunk = simd_dot4_values(
+            [left[i], left[i + 1], left[i + 2], left[i + 3]],
+            [right[i], right[i + 1], right[i + 2], right[i + 3]]
+        )?
+        total = total + chunk.value
+        i = i + 4
+    while i < left.len():
+        total = total + left[i].value * right[i].value
+        i = i + 1
+    Ok(Float64.new(total))
+
+fn simd_dot4_values(left: [Float64], right: [Float64]) -> Result<Float64, LinalgError>:
+    if left.len() != 4 or right.len() != 4:
+        return Err(LinalgError.DimensionMismatch)
+    val left_vec = Vec4d(
+        x: left[0].value,
+        y: left[1].value,
+        z: left[2].value,
+        w: left[3].value
+    )
+    val right_vec = Vec4d(
+        x: right[0].value,
+        y: right[1].value,
+        z: right[2].value,
+        w: right[3].value
+    )
+    val product = simd_mul_f64x4(left_vec, right_vec)
+    Ok(Float64.new(product.x + product.y + product.z + product.w))
+
+fn simd_axpy4_values(alpha: Float64, x: [Float64], y: [Float64]) -> Result<[Float64], LinalgError>:
+    if x.len() != 4 or y.len() != 4:
+        return Err(LinalgError.DimensionMismatch)
+    val alpha_vec = Vec4d(
+        x: alpha.value,
+        y: alpha.value,
+        z: alpha.value,
+        w: alpha.value
+    )
+    val x_vec = Vec4d(
+        x: x[0].value,
+        y: x[1].value,
+        z: x[2].value,
+        w: x[3].value
+    )
+    val y_vec = Vec4d(
+        x: y[0].value,
+        y: y[1].value,
+        z: y[2].value,
+        w: y[3].value
+    )
+    val result = simd_fma_f64x4(alpha_vec, x_vec, y_vec)
+    Ok([
+        Float64.new(result.x),
+        Float64.new(result.y),
+        Float64.new(result.z),
+        Float64.new(result.w)
+    ])
+
+fn simd_axpy_values(alpha: Float64, x: [Float64], y: [Float64]) -> Result<[Float64], LinalgError>:
+    if x.len() != y.len():
+        return Err(LinalgError.DimensionMismatch)
+    var out: [Float64] = []
+    var i = 0
+    while i + 3 < x.len():
+        val chunk = simd_axpy4_values(
+            alpha,
+            [x[i], x[i + 1], x[i + 2], x[i + 3]],
+            [y[i], y[i + 1], y[i + 2], y[i + 3]]
+        )?
+        out.push(chunk[0])
+        out.push(chunk[1])
+        out.push(chunk[2])
+        out.push(chunk[3])
+        i = i + 4
+    while i < x.len():
+        out.push(Float64.new(alpha.value * x[i].value + y[i].value))
+        i = i + 1
+    Ok(out)
+
+fn dot_f32(left: NDArray, right: NDArray) -> Result<Float32, LinalgError>:
+    if left.dtype != DType.F32 or right.dtype != DType.F32 or left.len() != right.len():
+        return Err(LinalgError.DimensionMismatch)
+    if left.shape.dims.len() == 1 and left.len().value >= 4 and left.is_contiguous() and right.is_contiguous():
+        var left_values: [Float32] = []
+        var right_values: [Float32] = []
+        var i = 0
+        while i < left.len().value:
+            left_values.push(left.get_f32(Index.new(i)))
+            right_values.push(right.get_f32(Index.new(i)))
+            i = i + 1
+        return simd_dot_f32_values(left_values, right_values)
+    var total: f32 = 0.0
+    var i = 0
+    while i < left.len().value:
+        total = total + left.flat_f32(i).value * right.flat_f32(i).value
+        i = i + 1
+    Ok(Float32.new(total))
+
+fn simd_dot_f32_values(left: [Float32], right: [Float32]) -> Result<Float32, LinalgError>:
+    if left.len() != right.len():
+        return Err(LinalgError.DimensionMismatch)
+    var total: f32 = 0.0
+    var i = 0
+    while i + 3 < left.len():
+        val chunk = simd_dot4_f32_values(
+            [left[i], left[i + 1], left[i + 2], left[i + 3]],
+            [right[i], right[i + 1], right[i + 2], right[i + 3]]
+        )?
+        total = total + chunk.value
+        i = i + 4
+    while i < left.len():
+        total = total + left[i].value * right[i].value
+        i = i + 1
+    Ok(Float32.new(total))
+
+fn simd_dot4_f32_values(left: [Float32], right: [Float32]) -> Result<Float32, LinalgError>:
+    if left.len() != 4 or right.len() != 4:
+        return Err(LinalgError.DimensionMismatch)
+    val left_vec = Vec4f(
+        x: left[0].value,
+        y: left[1].value,
+        z: left[2].value,
+        w: left[3].value
+    )
+    val right_vec = Vec4f(
+        x: right[0].value,
+        y: right[1].value,
+        z: right[2].value,
+        w: right[3].value
+    )
+    val product = simd_mul_f32x4(left_vec, right_vec)
+    Ok(Float32.new(product.x + product.y + product.z + product.w))
+
+fn simd_axpy4_f32_values(alpha: Float32, x: [Float32], y: [Float32]) -> Result<[Float32], LinalgError>:
+    if x.len() != 4 or y.len() != 4:
+        return Err(LinalgError.DimensionMismatch)
+    val alpha_vec = Vec4f(
+        x: alpha.value,
+        y: alpha.value,
+        z: alpha.value,
+        w: alpha.value
+    )
+    val x_vec = Vec4f(
+        x: x[0].value,
+        y: x[1].value,
+        z: x[2].value,
+        w: x[3].value
+    )
+    val y_vec = Vec4f(
+        x: y[0].value,
+        y: y[1].value,
+        z: y[2].value,
+        w: y[3].value
+    )
+    val result = simd_fma_f32x4(alpha_vec, x_vec, y_vec)
+    Ok([
+        Float32.new(result.x),
+        Float32.new(result.y),
+        Float32.new(result.z),
+        Float32.new(result.w)
+    ])
+
+fn simd_axpy_f32_values(alpha: Float32, x: [Float32], y: [Float32]) -> Result<[Float32], LinalgError>:
+    if x.len() != y.len():
+        return Err(LinalgError.DimensionMismatch)
+    var out: [Float32] = []
+    var i = 0
+    while i + 3 < x.len():
+        val chunk = simd_axpy4_f32_values(
+            alpha,
+            [x[i], x[i + 1], x[i + 2], x[i + 3]],
+            [y[i], y[i + 1], y[i + 2], y[i + 3]]
+        )?
+        out.push(chunk[0])
+        out.push(chunk[1])
+        out.push(chunk[2])
+        out.push(chunk[3])
+        i = i + 4
+    while i < x.len():
+        out.push(Float32.new(alpha.value * x[i].value + y[i].value))
+        i = i + 1
+    Ok(out)
+
+fn openblas_dot(left: NDArray, right: NDArray) -> Result<Float64, BackendError>:
+    if left.dtype != DType.F64 or right.dtype != DType.F64 or left.len() != right.len():
+        return Err(BackendError.BackendExecutionFailed("openblas dot requires same-length Float64 vectors"))
+    var left_values: [Float64] = []
+    var right_values: [Float64] = []
+    var i = 0
+    while i < left.len().value:
+        left_values.push(left.get_f64(Index.new(i)))
+        right_values.push(right.get_f64(Index.new(i)))
+        i = i + 1
+    openblas_dot_values(left_values, right_values)
+
+fn openblas_dot_values(left: [Float64], right: [Float64]) -> Result<Float64, BackendError>:
+    if left.len() != right.len():
+        return Err(BackendError.BackendExecutionFailed("openblas dot requires same-length vectors"))
+    if not dyn_openblas_available():
+        return Err(BackendError.BackendUnavailable("openblas"))
+    if left.len() == 0:
+        return Ok(Float64.new(0.0))
+    val bytes = left.len() * 8
+    val left_buf = rt_alloc(bytes)
+    if left_buf == 0:
+        return Err(BackendError.BackendExecutionFailed("openblas dot failed to allocate host staging buffer"))
+    val right_buf = rt_alloc(bytes)
+    if right_buf == 0:
+        rt_free(left_buf, bytes)
+        return Err(BackendError.BackendExecutionFailed("openblas dot failed to allocate host staging buffer"))
+    var i = 0
+    while i < left.len():
+        rt_ptr_write_i64(left_buf, i * 8, spl_f64_to_bits(left[i].value))
+        rt_ptr_write_i64(right_buf, i * 8, spl_f64_to_bits(right[i].value))
+        i = i + 1
+    val result_bits = _scilib_call3("rt_scilib_openblas_ddot_bits", left_buf, left.len(), right_buf)
+    rt_free(left_buf, bytes)
+    rt_free(right_buf, bytes)
+    Ok(Float64.new(spl_bits_to_f64(result_bits)))
+
+fn openblas_axpy(alpha: Float64, x: NDArray, y: NDArray) -> Result<NDArray, BackendError>:
+    if x.dtype != DType.F64 or y.dtype != DType.F64 or x.shape != y.shape:
+        return Err(BackendError.BackendExecutionFailed("openblas axpy requires equal-shape Float64 vectors"))
+    var x_values: [Float64] = []
+    var y_values: [Float64] = []
+    var i = 0
+    while i < x.len().value:
+        x_values.push(x.get_f64(Index.new(i)))
+        y_values.push(y.get_f64(Index.new(i)))
+        i = i + 1
+    Ok(vector_from(openblas_axpy_values(alpha, x_values, y_values)?))
+
+fn openblas_axpy_values(alpha: Float64, x: [Float64], y: [Float64]) -> Result<[Float64], BackendError>:
+    if x.len() != y.len():
+        return Err(BackendError.BackendExecutionFailed("openblas axpy requires same-length vectors"))
+    if not dyn_openblas_available():
+        return Err(BackendError.BackendUnavailable("openblas"))
+    val bytes = x.len() * 8
+    val params_buf = rt_alloc(16)
+    if params_buf == 0:
+        return Err(BackendError.BackendExecutionFailed("openblas axpy failed to allocate host staging buffer"))
+    val x_buf = rt_alloc(bytes)
+    if x_buf == 0:
+        rt_free(params_buf, 16)
+        return Err(BackendError.BackendExecutionFailed("openblas axpy failed to allocate host staging buffer"))
+    val y_buf = rt_alloc(bytes)
+    if y_buf == 0:
+        rt_free(params_buf, 16)
+        rt_free(x_buf, bytes)
+        return Err(BackendError.BackendExecutionFailed("openblas axpy failed to allocate host staging buffer"))
+    val out_buf = rt_alloc(bytes)
+    if out_buf == 0:
+        rt_free(params_buf, 16)
+        rt_free(x_buf, bytes)
+        rt_free(y_buf, bytes)
+        return Err(BackendError.BackendExecutionFailed("openblas axpy failed to allocate host staging buffer"))
+    rt_ptr_write_i64(params_buf, 0, x.len())
+    rt_ptr_write_i64(params_buf, 8, spl_f64_to_bits(alpha.value))
+    var i = 0
+    while i < x.len():
+        rt_ptr_write_i64(x_buf, i * 8, spl_f64_to_bits(x[i].value))
+        rt_ptr_write_i64(y_buf, i * 8, spl_f64_to_bits(y[i].value))
+        i = i + 1
+    val ok = _scilib_call_n("rt_scilib_openblas_daxpy_bits", [params_buf, x_buf, y_buf, out_buf])
+    var out: [Float64] = []
+    if ok != 0:
+        i = 0
+        while i < x.len():
+            out.push(Float64.new(spl_bits_to_f64(rt_ptr_read_i64(out_buf, i * 8))))
+            i = i + 1
+    rt_free(params_buf, 16)
+    rt_free(x_buf, bytes)
+    rt_free(y_buf, bytes)
+    rt_free(out_buf, bytes)
+    if ok == 0:
+        return Err(BackendError.BackendExecutionFailed("openblas axpy backend execution failed"))
+    Ok(out)
+
+fn openblas_gemm(alpha: Float64, a: NDArray, b: NDArray, beta: Float64, c_in: NDArray) -> Result<NDArray, BackendError>:
+    if a.dtype != DType.F64 or b.dtype != DType.F64 or c_in.dtype != DType.F64:
+        return Err(BackendError.BackendExecutionFailed("openblas gemm requires Float64 matrices"))
+    if a.cols() != b.rows() or c_in.rows() != a.rows() or c_in.cols() != b.cols():
+        return Err(BackendError.BackendExecutionFailed("openblas gemm requires compatible matrix shapes"))
+    if not dyn_openblas_available():
+        return Err(BackendError.BackendUnavailable("openblas"))
+    val rows = a.rows().value
+    val cols = b.cols().value
+    val inner = a.cols().value
+    val a_count = rows * inner
+    val b_count = inner * cols
+    val c_count = rows * cols
+    val a_buf = rt_alloc(a_count * 8)
+    if a_buf == 0:
+        return Err(BackendError.BackendExecutionFailed("openblas gemm failed to allocate host staging buffer"))
+    val b_buf = rt_alloc(b_count * 8)
+    if b_buf == 0:
+        rt_free(a_buf, a_count * 8)
+        return Err(BackendError.BackendExecutionFailed("openblas gemm failed to allocate host staging buffer"))
+    val c_buf = rt_alloc(c_count * 8)
+    if c_buf == 0:
+        rt_free(a_buf, a_count * 8)
+        rt_free(b_buf, b_count * 8)
+        return Err(BackendError.BackendExecutionFailed("openblas gemm failed to allocate host staging buffer"))
+    val out_buf = rt_alloc(c_count * 8)
+    if out_buf == 0:
+        rt_free(a_buf, a_count * 8)
+        rt_free(b_buf, b_count * 8)
+        rt_free(c_buf, c_count * 8)
+        return Err(BackendError.BackendExecutionFailed("openblas gemm failed to allocate host staging buffer"))
+    val params_buf = rt_alloc(40)
+    if params_buf == 0:
+        rt_free(a_buf, a_count * 8)
+        rt_free(b_buf, b_count * 8)
+        rt_free(c_buf, c_count * 8)
+        rt_free(out_buf, c_count * 8)
+        return Err(BackendError.BackendExecutionFailed("openblas gemm failed to allocate host staging buffer"))
+    var row = 0
+    while row < rows:
+        var col = 0
+        while col < inner:
+            rt_ptr_write_i64(a_buf, (row * inner + col) * 8, spl_f64_to_bits(a.get_f64_at([Index.new(row), Index.new(col)]).value))
+            col = col + 1
+        row = row + 1
+    row = 0
+    while row < inner:
+        var col = 0
+        while col < cols:
+            rt_ptr_write_i64(b_buf, (row * cols + col) * 8, spl_f64_to_bits(b.get_f64_at([Index.new(row), Index.new(col)]).value))
+            col = col + 1
+        row = row + 1
+    row = 0
+    while row < rows:
+        var col = 0
+        while col < cols:
+            rt_ptr_write_i64(c_buf, (row * cols + col) * 8, spl_f64_to_bits(c_in.get_f64_at([Index.new(row), Index.new(col)]).value))
+            col = col + 1
+        row = row + 1
+    rt_ptr_write_i64(params_buf, 0, rows)
+    rt_ptr_write_i64(params_buf, 8, cols)
+    rt_ptr_write_i64(params_buf, 16, inner)
+    rt_ptr_write_i64(params_buf, 24, spl_f64_to_bits(alpha.value))
+    rt_ptr_write_i64(params_buf, 32, spl_f64_to_bits(beta.value))
+    val ok = _scilib_call_n("rt_scilib_openblas_dgemm_bits", [
+        params_buf,
+        a_buf,
+        b_buf,
+        c_buf,
+        out_buf
+    ])
+    var out: [Float64] = []
+    if ok != 0:
+        var i = 0
+        while i < c_count:
+            out.push(Float64.new(spl_bits_to_f64(rt_ptr_read_i64(out_buf, i * 8))))
+            i = i + 1
+    rt_free(a_buf, a_count * 8)
+    rt_free(b_buf, b_count * 8)
+    rt_free(c_buf, c_count * 8)
+    rt_free(out_buf, c_count * 8)
+    rt_free(params_buf, 40)
+    if ok == 0:
+        return Err(BackendError.BackendExecutionFailed("openblas gemm backend execution failed"))
+    Ok(make_f64_array(out, Shape.new([a.rows(), b.cols()])))
+
+fn openblas_gemv(alpha: Float64, matrix: NDArray, vector: NDArray, beta: Float64, y_in: NDArray) -> Result<NDArray, BackendError>:
+    if matrix.dtype != DType.F64 or vector.dtype != DType.F64 or y_in.dtype != DType.F64:
+        return Err(BackendError.BackendExecutionFailed("openblas gemv requires Float64 inputs"))
+    if matrix.cols() != vector.len() or matrix.rows() != y_in.len():
+        return Err(BackendError.BackendExecutionFailed("openblas gemv requires compatible matrix/vector shapes"))
+    val b = column_matrix_from_vector(vector)
+    val c = column_matrix_from_vector(y_in)
+    val result = openblas_gemm(alpha, matrix, b, beta, c)?
+    vector_from_column_matrix(result)
+
+fn openblas_solve(a: NDArray, b: NDArray) -> Result<NDArray, BackendError>:
+    if a.dtype != DType.F64 or b.dtype != DType.F64 or a.rows() != a.cols() or b.len() != a.rows():
+        return Err(BackendError.BackendExecutionFailed("openblas solve requires a square Float64 matrix and matching vector"))
+    if not dyn_openblas_available():
+        return Err(BackendError.BackendUnavailable("openblas"))
+    val n = a.rows().value
+    val a_count = n * n
+    val b_count = n
+    val params_buf = rt_alloc(16)
+    if params_buf == 0:
+        return Err(BackendError.BackendExecutionFailed("openblas solve failed to allocate host staging buffer"))
+    val a_buf = rt_alloc(a_count * 8)
+    if a_buf == 0:
+        rt_free(params_buf, 16)
+        return Err(BackendError.BackendExecutionFailed("openblas solve failed to allocate host staging buffer"))
+    val b_buf = rt_alloc(b_count * 8)
+    if b_buf == 0:
+        rt_free(params_buf, 16)
+        rt_free(a_buf, a_count * 8)
+        return Err(BackendError.BackendExecutionFailed("openblas solve failed to allocate host staging buffer"))
+    val out_buf = rt_alloc(b_count * 8)
+    if out_buf == 0:
+        rt_free(params_buf, 16)
+        rt_free(a_buf, a_count * 8)
+        rt_free(b_buf, b_count * 8)
+        return Err(BackendError.BackendExecutionFailed("openblas solve failed to allocate host staging buffer"))
+    rt_ptr_write_i64(params_buf, 0, n)
+    rt_ptr_write_i64(params_buf, 8, 1)
+    var row = 0
+    while row < n:
+        var col = 0
+        while col < n:
+            rt_ptr_write_i64(a_buf, (row * n + col) * 8, spl_f64_to_bits(a.get_f64_at([Index.new(row), Index.new(col)]).value))
+            col = col + 1
+        rt_ptr_write_i64(b_buf, row * 8, spl_f64_to_bits(b.get_f64(Index.new(row)).value))
+        row = row + 1
+    val info = _scilib_call_n("rt_scilib_openblas_dgesv_bits", [params_buf, a_buf, b_buf, out_buf])
+    var out: [Float64] = []
+    if info == 0:
+        var i = 0
+        while i < b_count:
+            out.push(Float64.new(spl_bits_to_f64(rt_ptr_read_i64(out_buf, i * 8))))
+            i = i + 1
+    rt_free(params_buf, 16)
+    rt_free(a_buf, a_count * 8)
+    rt_free(b_buf, b_count * 8)
+    rt_free(out_buf, b_count * 8)
+    if info > 0:
+        return Err(BackendError.BackendExecutionFailed("openblas solve detected a singular matrix"))
+    if info != 0:
+        return Err(BackendError.BackendExecutionFailed("openblas solve backend execution failed"))
+    Ok(make_f64_array(out, Shape.new([a.rows()])))
+
+fn torch_dot(left: NDArray, right: NDArray) -> Result<Float64, BackendError>:
+    if left.dtype != DType.F64 or right.dtype != DType.F64 or left.len() != right.len():
+        return Err(BackendError.BackendExecutionFailed("pytorch dot requires same-length Float64 vectors"))
+    var left_values: [Float64] = []
+    var right_values: [Float64] = []
+    var i = 0
+    while i < left.len().value:
+        left_values.push(left.get_f64(Index.new(i)))
+        right_values.push(right.get_f64(Index.new(i)))
+        i = i + 1
+    torch_dot_values(left_values, right_values)
+
+fn torch_dot_values(left: [Float64], right: [Float64]) -> Result<Float64, BackendError>:
+    if left.len() != right.len():
+        return Err(BackendError.BackendExecutionFailed("pytorch dot requires same-length vectors"))
+    if not dyn_torch_available():
+        return Err(BackendError.BackendUnavailable("pytorch"))
+    val left_handle = dyn_torch_tensor_from_values_1d(float64_values_to_f64(left))
+    if left_handle == 0:
+        return Err(BackendError.MissingRuntimeSymbol("rt_dyn_torch_tensor_from_bits_1d"))
+    val right_handle = dyn_torch_tensor_from_values_1d(float64_values_to_f64(right))
+    if right_handle == 0:
+        dyn_torch_tensor_free(left_handle)
+        return Err(BackendError.MissingRuntimeSymbol("rt_dyn_torch_tensor_from_bits_1d"))
+    val dot_handle = dyn_torch_tensor_dot(left_handle, right_handle)
+    if dot_handle == 0:
+        dyn_torch_tensor_free(left_handle)
+        dyn_torch_tensor_free(right_handle)
+        return Err(BackendError.MissingRuntimeSymbol("rt_torch_torchtensor_dot"))
+    val result = dyn_torch_tensor_sum(dot_handle)
+    dyn_torch_tensor_free(dot_handle)
+    dyn_torch_tensor_free(left_handle)
+    dyn_torch_tensor_free(right_handle)
+    Ok(Float64.new(result))
+
+fn torch_gemm(alpha: Float64, a: NDArray, b: NDArray, beta: Float64, c_in: NDArray) -> Result<NDArray, BackendError>:
+    if a.dtype != DType.F64 or b.dtype != DType.F64 or c_in.dtype != DType.F64:
+        return Err(BackendError.BackendExecutionFailed("pytorch gemm requires Float64 matrices"))
+    if a.cols() != b.rows() or c_in.rows() != a.rows() or c_in.cols() != b.cols():
+        return Err(BackendError.BackendExecutionFailed("pytorch gemm requires compatible matrix shapes"))
+    if not dyn_torch_available():
+        return Err(BackendError.BackendUnavailable("pytorch"))
+    val rows = a.rows().value
+    val cols = b.cols().value
+    val inner = a.cols().value
+    val a_handle = dyn_torch_tensor_from_values_2d(float64_matrix_to_f64(a, rows, inner), rows, inner)
+    if a_handle == 0:
+        return Err(BackendError.MissingRuntimeSymbol("rt_dyn_torch_tensor_from_bits_2d"))
+    val b_handle = dyn_torch_tensor_from_values_2d(float64_matrix_to_f64(b, inner, cols), inner, cols)
+    if b_handle == 0:
+        dyn_torch_tensor_free(a_handle)
+        return Err(BackendError.MissingRuntimeSymbol("rt_dyn_torch_tensor_from_bits_2d"))
+    val product_handle = dyn_torch_tensor_matmul(a_handle, b_handle)
+    if product_handle == 0:
+        dyn_torch_tensor_free(a_handle)
+        dyn_torch_tensor_free(b_handle)
+        return Err(BackendError.MissingRuntimeSymbol("rt_torch_torchtensor_matmul"))
+    val values = dyn_torch_tensor_copy_values(product_handle, rows * cols)
+    dyn_torch_tensor_free(product_handle)
+    dyn_torch_tensor_free(a_handle)
+    dyn_torch_tensor_free(b_handle)
+    if values.len() != rows * cols:
+        return Err(BackendError.MissingRuntimeSymbol("rt_dyn_torch_tensor_copy_bits"))
+    var out: [Float64] = []
+    var row = 0
+    while row < rows:
+        var col = 0
+        while col < cols:
+            val idx = row * cols + col
+            val c_val = c_in.get_f64_at([Index.new(row), Index.new(col)]).value
+            out.push(Float64.new(alpha.value * values[idx] + beta.value * c_val))
+            col = col + 1
+        row = row + 1
+    Ok(make_f64_array(out, Shape.new([a.rows(), b.cols()])))
+
+fn torch_gemv(alpha: Float64, matrix: NDArray, vector: NDArray, beta: Float64, y_in: NDArray) -> Result<NDArray, BackendError>:
+    if matrix.dtype != DType.F64 or vector.dtype != DType.F64 or y_in.dtype != DType.F64:
+        return Err(BackendError.BackendExecutionFailed("pytorch gemv requires Float64 inputs"))
+    if matrix.cols() != vector.len() or matrix.rows() != y_in.len():
+        return Err(BackendError.BackendExecutionFailed("pytorch gemv requires compatible matrix/vector shapes"))
+    val b = column_matrix_from_vector(vector)
+    val c = column_matrix_from_vector(y_in)
+    val result = torch_gemm(alpha, matrix, b, beta, c)?
+    vector_from_column_matrix(result)
+
+fn torch_solve(a: NDArray, b: NDArray) -> Result<NDArray, BackendError>:
+    if a.dtype != DType.F64 or b.dtype != DType.F64 or a.rows() != a.cols() or b.len() != a.rows():
+        return Err(BackendError.BackendExecutionFailed("pytorch solve requires a square Float64 matrix and matching vector"))
+    if not dyn_torch_available():
+        return Err(BackendError.BackendUnavailable("pytorch"))
+    val n = a.rows().value
+    val a_handle = dyn_torch_tensor_from_values_2d(float64_matrix_to_f64(a, n, n), n, n)
+    if a_handle == 0:
+        return Err(BackendError.MissingRuntimeSymbol("rt_dyn_torch_tensor_from_bits_2d"))
+    var rhs_values: [Float64] = []
+    var rhs_i = 0
+    while rhs_i < b.len().value:
+        rhs_values.push(b.get_f64(Index.new(rhs_i)))
+        rhs_i = rhs_i + 1
+    val b_handle = dyn_torch_tensor_from_values_1d(float64_values_to_f64(rhs_values))
+    if b_handle == 0:
+        dyn_torch_tensor_free(a_handle)
+        return Err(BackendError.MissingRuntimeSymbol("rt_dyn_torch_tensor_from_bits_1d"))
+    val out_handle = dyn_torch_tensor_linalg_solve(a_handle, b_handle)
+    dyn_torch_tensor_free(a_handle)
+    dyn_torch_tensor_free(b_handle)
+    if out_handle == 0:
+        return Err(BackendError.BackendExecutionFailed("pytorch solve backend execution failed"))
+    val values = dyn_torch_tensor_copy_values(out_handle, n)
+    dyn_torch_tensor_free(out_handle)
+    if values.len() != n:
+        return Err(BackendError.MissingRuntimeSymbol("rt_dyn_torch_tensor_copy_bits"))
+    var out: [Float64] = []
+    var i = 0
+    while i < values.len():
+        out.push(Float64.new(values[i]))
+        i = i + 1
+    Ok(make_f64_array(out, Shape.new([a.rows()])))
+
+fn torch_inv(a: NDArray) -> Result<NDArray, BackendError>:
+    if a.dtype != DType.F64 or a.rows() != a.cols():
+        return Err(BackendError.BackendExecutionFailed("pytorch inv requires a square Float64 matrix"))
+    if not dyn_torch_available():
+        return Err(BackendError.BackendUnavailable("pytorch"))
+    val n = a.rows().value
+    val a_handle = dyn_torch_tensor_from_values_2d(float64_matrix_to_f64(a, n, n), n, n)
+    if a_handle == 0:
+        return Err(BackendError.MissingRuntimeSymbol("rt_dyn_torch_tensor_from_bits_2d"))
+    val out_handle = dyn_torch_tensor_inverse(a_handle)
+    dyn_torch_tensor_free(a_handle)
+    if out_handle == 0:
+        return Err(BackendError.BackendExecutionFailed("pytorch inv backend execution failed"))
+    val values = dyn_torch_tensor_copy_values(out_handle, n * n)
+    dyn_torch_tensor_free(out_handle)
+    if values.len() != n * n:
+        return Err(BackendError.MissingRuntimeSymbol("rt_dyn_torch_tensor_copy_bits"))
+    var out: [Float64] = []
+    var i = 0
+    while i < values.len():
+        out.push(Float64.new(values[i]))
+        i = i + 1
+    Ok(make_f64_array(out, Shape.new([a.rows(), a.cols()])))
+
+fn cuda_dot(left: NDArray, right: NDArray) -> Result<Float64, BackendError>:
+    if left.dtype != DType.F64 or right.dtype != DType.F64 or left.len() != right.len():
+        return Err(BackendError.BackendExecutionFailed("cuda dot requires same-length Float64 vectors"))
+    var left_values: [Float64] = []
+    var right_values: [Float64] = []
+    var i = 0
+    while i < left.len().value:
+        left_values.push(left.get_f64(Index.new(i)))
+        right_values.push(right.get_f64(Index.new(i)))
+        i = i + 1
+    cuda_dot_values(left_values, right_values)
+
+fn cuda_dot_values(left: [Float64], right: [Float64]) -> Result<Float64, BackendError>:
+    if left.len() != right.len():
+        return Err(BackendError.BackendExecutionFailed("cuda dot requires same-length vectors"))
+    if not dyn_cuda_available():
+        return Err(BackendError.BackendUnavailable("cuda"))
+    if left.len() == 0:
+        return Ok(Float64.new(0.0))
+    val bytes = left.len() * 8
+    val left_buf = rt_alloc(bytes)
+    if left_buf == 0:
+        return Err(BackendError.BackendExecutionFailed("cuda dot failed to allocate host staging buffer"))
+    val right_buf = rt_alloc(bytes)
+    if right_buf == 0:
+        rt_free(left_buf, bytes)
+        return Err(BackendError.BackendExecutionFailed("cuda dot failed to allocate host staging buffer"))
+    var i = 0
+    while i < left.len():
+        rt_ptr_write_i64(left_buf, i * 8, spl_f64_to_bits(left[i].value))
+        rt_ptr_write_i64(right_buf, i * 8, spl_f64_to_bits(right[i].value))
+        i = i + 1
+    val result_bits = _scilib_call3("rt_scilib_cuda_ddot_bits", left_buf, left.len(), right_buf)
+    rt_free(left_buf, bytes)
+    rt_free(right_buf, bytes)
+    Ok(Float64.new(spl_bits_to_f64(result_bits)))
+
+fn cuda_gemm(alpha: Float64, a: NDArray, b: NDArray, beta: Float64, c_in: NDArray) -> Result<NDArray, BackendError>:
+    if a.dtype != DType.F64 or b.dtype != DType.F64 or c_in.dtype != DType.F64:
+        return Err(BackendError.BackendExecutionFailed("cuda gemm requires Float64 matrices"))
+    if a.cols() != b.rows() or c_in.rows() != a.rows() or c_in.cols() != b.cols():
+        return Err(BackendError.BackendExecutionFailed("cuda gemm requires compatible matrix shapes"))
+    if not dyn_cuda_available():
+        return Err(BackendError.BackendUnavailable("cuda"))
+    val rows = a.rows().value
+    val cols = b.cols().value
+    val inner = a.cols().value
+    val a_count = rows * inner
+    val b_count = inner * cols
+    val c_count = rows * cols
+    val a_buf = rt_alloc(a_count * 8)
+    if a_buf == 0:
+        return Err(BackendError.BackendExecutionFailed("cuda gemm failed to allocate host staging buffer"))
+    val b_buf = rt_alloc(b_count * 8)
+    if b_buf == 0:
+        rt_free(a_buf, a_count * 8)
+        return Err(BackendError.BackendExecutionFailed("cuda gemm failed to allocate host staging buffer"))
+    val c_buf = rt_alloc(c_count * 8)
+    if c_buf == 0:
+        rt_free(a_buf, a_count * 8)
+        rt_free(b_buf, b_count * 8)
+        return Err(BackendError.BackendExecutionFailed("cuda gemm failed to allocate host staging buffer"))
+    val out_buf = rt_alloc(c_count * 8)
+    if out_buf == 0:
+        rt_free(a_buf, a_count * 8)
+        rt_free(b_buf, b_count * 8)
+        rt_free(c_buf, c_count * 8)
+        return Err(BackendError.BackendExecutionFailed("cuda gemm failed to allocate host staging buffer"))
+    val params_buf = rt_alloc(40)
+    if params_buf == 0:
+        rt_free(a_buf, a_count * 8)
+        rt_free(b_buf, b_count * 8)
+        rt_free(c_buf, c_count * 8)
+        rt_free(out_buf, c_count * 8)
+        return Err(BackendError.BackendExecutionFailed("cuda gemm failed to allocate host staging buffer"))
+    var row = 0
+    while row < rows:
+        var col = 0
+        while col < inner:
+            rt_ptr_write_i64(a_buf, (row * inner + col) * 8, spl_f64_to_bits(a.get_f64_at([Index.new(row), Index.new(col)]).value))
+            col = col + 1
+        row = row + 1
+    row = 0
+    while row < inner:
+        var col = 0
+        while col < cols:
+            rt_ptr_write_i64(b_buf, (row * cols + col) * 8, spl_f64_to_bits(b.get_f64_at([Index.new(row), Index.new(col)]).value))
+            col = col + 1
+        row = row + 1
+    row = 0
+    while row < rows:
+        var col = 0
+        while col < cols:
+            rt_ptr_write_i64(c_buf, (row * cols + col) * 8, spl_f64_to_bits(c_in.get_f64_at([Index.new(row), Index.new(col)]).value))
+            col = col + 1
+        row = row + 1
+    rt_ptr_write_i64(params_buf, 0, rows)
+    rt_ptr_write_i64(params_buf, 8, cols)
+    rt_ptr_write_i64(params_buf, 16, inner)
+    rt_ptr_write_i64(params_buf, 24, spl_f64_to_bits(alpha.value))
+    rt_ptr_write_i64(params_buf, 32, spl_f64_to_bits(beta.value))
+    val ok = _scilib_call_n("rt_scilib_cuda_dgemm_bits", [
+        params_buf,
+        a_buf,
+        b_buf,
+        c_buf,
+        out_buf
+    ])
+    var out: [Float64] = []
+    if ok != 0:
+        var i = 0
+        while i < c_count:
+            out.push(Float64.new(spl_bits_to_f64(rt_ptr_read_i64(out_buf, i * 8))))
+            i = i + 1
+    rt_free(a_buf, a_count * 8)
+    rt_free(b_buf, b_count * 8)
+    rt_free(c_buf, c_count * 8)
+    rt_free(out_buf, c_count * 8)
+    rt_free(params_buf, 40)
+    if ok == 0:
+        return Err(BackendError.BackendExecutionFailed("cuda gemm backend execution failed"))
+    Ok(make_f64_array(out, Shape.new([a.rows(), b.cols()])))
+
+fn cuda_gemv(alpha: Float64, matrix: NDArray, vector: NDArray, beta: Float64, y_in: NDArray) -> Result<NDArray, BackendError>:
+    if matrix.dtype != DType.F64 or vector.dtype != DType.F64 or y_in.dtype != DType.F64:
+        return Err(BackendError.BackendExecutionFailed("cuda gemv requires Float64 inputs"))
+    if matrix.cols() != vector.len() or matrix.rows() != y_in.len():
+        return Err(BackendError.BackendExecutionFailed("cuda gemv requires compatible matrix/vector shapes"))
+    if not dyn_cuda_available():
+        return Err(BackendError.BackendUnavailable("cuda"))
+    val rows = matrix.rows().value
+    val cols = matrix.cols().value
+    val a_count = rows * cols
+    val x_count = cols
+    val y_count = rows
+    val a_buf = rt_alloc(a_count * 8)
+    if a_buf == 0:
+        return Err(BackendError.BackendExecutionFailed("cuda gemv failed to allocate host staging buffer"))
+    val x_buf = rt_alloc(x_count * 8)
+    if x_buf == 0:
+        rt_free(a_buf, a_count * 8)
+        return Err(BackendError.BackendExecutionFailed("cuda gemv failed to allocate host staging buffer"))
+    val y_buf = rt_alloc(y_count * 8)
+    if y_buf == 0:
+        rt_free(a_buf, a_count * 8)
+        rt_free(x_buf, x_count * 8)
+        return Err(BackendError.BackendExecutionFailed("cuda gemv failed to allocate host staging buffer"))
+    val out_buf = rt_alloc(y_count * 8)
+    if out_buf == 0:
+        rt_free(a_buf, a_count * 8)
+        rt_free(x_buf, x_count * 8)
+        rt_free(y_buf, y_count * 8)
+        return Err(BackendError.BackendExecutionFailed("cuda gemv failed to allocate host staging buffer"))
+    val params_buf = rt_alloc(32)
+    if params_buf == 0:
+        rt_free(a_buf, a_count * 8)
+        rt_free(x_buf, x_count * 8)
+        rt_free(y_buf, y_count * 8)
+        rt_free(out_buf, y_count * 8)
+        return Err(BackendError.BackendExecutionFailed("cuda gemv failed to allocate host staging buffer"))
+    var row = 0
+    while row < rows:
+        var col = 0
+        while col < cols:
+            rt_ptr_write_i64(a_buf, (row * cols + col) * 8, spl_f64_to_bits(matrix.get_f64_at([Index.new(row), Index.new(col)]).value))
+            col = col + 1
+        row = row + 1
+    var i = 0
+    while i < cols:
+        rt_ptr_write_i64(x_buf, i * 8, spl_f64_to_bits(vector.get_f64(Index.new(i)).value))
+        i = i + 1
+    i = 0
+    while i < rows:
+        rt_ptr_write_i64(y_buf, i * 8, spl_f64_to_bits(y_in.get_f64(Index.new(i)).value))
+        i = i + 1
+    rt_ptr_write_i64(params_buf, 0, rows)
+    rt_ptr_write_i64(params_buf, 8, cols)
+    rt_ptr_write_i64(params_buf, 16, spl_f64_to_bits(alpha.value))
+    rt_ptr_write_i64(params_buf, 24, spl_f64_to_bits(beta.value))
+    val ok = _scilib_call_n("rt_scilib_cuda_dgemv_bits", [
+        params_buf,
+        a_buf,
+        x_buf,
+        y_buf,
+        out_buf
+    ])
+    var out: [Float64] = []
+    if ok != 0:
+        i = 0
+        while i < rows:
+            out.push(Float64.new(spl_bits_to_f64(rt_ptr_read_i64(out_buf, i * 8))))
+            i = i + 1
+    rt_free(a_buf, a_count * 8)
+    rt_free(x_buf, x_count * 8)
+    rt_free(y_buf, y_count * 8)
+    rt_free(out_buf, y_count * 8)
+    rt_free(params_buf, 32)
+    if ok == 0:
+        return Err(BackendError.BackendExecutionFailed("cuda gemv backend execution failed"))
+    Ok(make_f64_array(out, Shape.new([matrix.rows()])))
+
+fn cuda_solve(a: NDArray, b: NDArray) -> Result<NDArray, BackendError>:
+    if a.dtype != DType.F64 or b.dtype != DType.F64 or a.rows() != a.cols() or b.len() != a.rows():
+        return Err(BackendError.BackendExecutionFailed("cuda solve requires a square Float64 matrix and matching vector"))
+    if not dyn_cuda_available():
+        return Err(BackendError.BackendUnavailable("cuda"))
+    val n = a.rows().value
+    val a_count = n * n
+    val b_count = n
+    val params_buf = rt_alloc(16)
+    if params_buf == 0:
+        return Err(BackendError.BackendExecutionFailed("cuda solve failed to allocate host staging buffer"))
+    val a_buf = rt_alloc(a_count * 8)
+    if a_buf == 0:
+        rt_free(params_buf, 16)
+        return Err(BackendError.BackendExecutionFailed("cuda solve failed to allocate host staging buffer"))
+    val b_buf = rt_alloc(b_count * 8)
+    if b_buf == 0:
+        rt_free(params_buf, 16)
+        rt_free(a_buf, a_count * 8)
+        return Err(BackendError.BackendExecutionFailed("cuda solve failed to allocate host staging buffer"))
+    val out_buf = rt_alloc(b_count * 8)
+    if out_buf == 0:
+        rt_free(params_buf, 16)
+        rt_free(a_buf, a_count * 8)
+        rt_free(b_buf, b_count * 8)
+        return Err(BackendError.BackendExecutionFailed("cuda solve failed to allocate host staging buffer"))
+    rt_ptr_write_i64(params_buf, 0, n)
+    rt_ptr_write_i64(params_buf, 8, 1)
+    var row = 0
+    while row < n:
+        var col = 0
+        while col < n:
+            rt_ptr_write_i64(a_buf, (row * n + col) * 8, spl_f64_to_bits(a.get_f64_at([Index.new(row), Index.new(col)]).value))
+            col = col + 1
+        rt_ptr_write_i64(b_buf, row * 8, spl_f64_to_bits(b.get_f64(Index.new(row)).value))
+        row = row + 1
+    val info = _scilib_call_n("rt_scilib_cuda_dgesv_bits", [params_buf, a_buf, b_buf, out_buf])
+    var out: [Float64] = []
+    if info == 0:
+        var i = 0
+        while i < b_count:
+            out.push(Float64.new(spl_bits_to_f64(rt_ptr_read_i64(out_buf, i * 8))))
+            i = i + 1
+    rt_free(params_buf, 16)
+    rt_free(a_buf, a_count * 8)
+    rt_free(b_buf, b_count * 8)
+    rt_free(out_buf, b_count * 8)
+    if info > 0:
+        return Err(BackendError.BackendExecutionFailed("cuda solve detected a singular matrix"))
+    if info != 0:
+        return Err(BackendError.BackendExecutionFailed("cuda solve backend execution failed"))
+    Ok(make_f64_array(out, Shape.new([a.rows()])))
+
+fn cuda_inv(a: NDArray) -> Result<NDArray, BackendError>:
+    if a.dtype != DType.F64 or a.rows() != a.cols():
+        return Err(BackendError.BackendExecutionFailed("cuda inv requires a square Float64 matrix"))
+    if not dyn_cuda_available():
+        return Err(BackendError.BackendUnavailable("cuda"))
+    val n = a.rows().value
+    val a_count = n * n
+    val b_count = n * n
+    val params_buf = rt_alloc(16)
+    if params_buf == 0:
+        return Err(BackendError.BackendExecutionFailed("cuda inv failed to allocate host staging buffer"))
+    val a_buf = rt_alloc(a_count * 8)
+    if a_buf == 0:
+        rt_free(params_buf, 16)
+        return Err(BackendError.BackendExecutionFailed("cuda inv failed to allocate host staging buffer"))
+    val b_buf = rt_alloc(b_count * 8)
+    if b_buf == 0:
+        rt_free(params_buf, 16)
+        rt_free(a_buf, a_count * 8)
+        return Err(BackendError.BackendExecutionFailed("cuda inv failed to allocate host staging buffer"))
+    val out_buf = rt_alloc(b_count * 8)
+    if out_buf == 0:
+        rt_free(params_buf, 16)
+        rt_free(a_buf, a_count * 8)
+        rt_free(b_buf, b_count * 8)
+        return Err(BackendError.BackendExecutionFailed("cuda inv failed to allocate host staging buffer"))
+    rt_ptr_write_i64(params_buf, 0, n)
+    rt_ptr_write_i64(params_buf, 8, n)
+    var row = 0
+    while row < n:
+        var col = 0
+        while col < n:
+            rt_ptr_write_i64(a_buf, (row * n + col) * 8, spl_f64_to_bits(a.get_f64_at([Index.new(row), Index.new(col)]).value))
+            if row == col:
+                rt_ptr_write_i64(b_buf, (row * n + col) * 8, spl_f64_to_bits(1.0))
+            else:
+                rt_ptr_write_i64(b_buf, (row * n + col) * 8, spl_f64_to_bits(0.0))
+            col = col + 1
+        row = row + 1
+    val info = _scilib_call_n("rt_scilib_cuda_dgesv_bits", [params_buf, a_buf, b_buf, out_buf])
+    var out: [Float64] = []
+    if info == 0:
+        var i = 0
+        while i < b_count:
+            out.push(Float64.new(spl_bits_to_f64(rt_ptr_read_i64(out_buf, i * 8))))
+            i = i + 1
+    rt_free(params_buf, 16)
+    rt_free(a_buf, a_count * 8)
+    rt_free(b_buf, b_count * 8)
+    rt_free(out_buf, b_count * 8)
+    if info > 0:
+        return Err(BackendError.BackendExecutionFailed("cuda inv detected a singular matrix"))
+    if info != 0:
+        return Err(BackendError.BackendExecutionFailed("cuda inv backend execution failed"))
+    Ok(make_f64_array(out, Shape.new([a.rows(), a.cols()])))
+
+fn float64_values_to_f64(values: [Float64]) -> [f64]:
+    var out: [f64] = []
+    var i = 0
+    while i < values.len():
+        out.push(values[i].value)
+        i = i + 1
+    out
+
+fn float64_matrix_to_f64(matrix: NDArray, rows: i64, cols: i64) -> [f64]:
+    var out: [f64] = []
+    var row = 0
+    while row < rows:
+        var col = 0
+        while col < cols:
+            out.push(matrix.get_f64_at([Index.new(row), Index.new(col)]).value)
+            col = col + 1
+        row = row + 1
+    out
+
+fn column_matrix_from_vector(vector: NDArray) -> NDArray:
+    var values: [Float64] = []
+    var i = 0
+    while i < vector.len().value:
+        values.push(vector.get_f64(Index.new(i)))
+        i = i + 1
+    make_f64_array(values, Shape.new([vector.len(), Index.new(1)]))
+
+fn vector_from_column_matrix(matrix: NDArray) -> Result<NDArray, BackendError>:
+    if matrix.cols().value != 1:
+        return Err(BackendError.BackendExecutionFailed("column matrix expected for gemv result"))
+    var values: [Float64] = []
+    var row = 0
+    while row < matrix.rows().value:
+        values.push(matrix.get_f64_at([Index.new(row), Index.new(0)]))
+        row = row + 1
+    Ok(vector_from(values))
+
 fn axpy(alpha: Float64, x: NDArray, y: NDArray) -> NDArray:
     try_axpy(alpha, x, y).unwrap()
 
 fn try_axpy(alpha: Float64, x: NDArray, y: NDArray) -> Result<NDArray, LinalgError>:
     if x.shape != y.shape:
         return Err(LinalgError.DimensionMismatch)
+    if _configured_linalg_backend() == "openblas":
+        match openblas_axpy(alpha, x, y):
+            case Ok(value):
+                return Ok(value)
+            case Err(_):
+                pass
+    if x.shape.dims.len() == 1 and x.len().value >= 4 and x.is_contiguous() and y.is_contiguous():
+        var x_values: [Float64] = []
+        var y_values: [Float64] = []
+        var i = 0
+        while i < x.len().value:
+            x_values.push(x.get_f64(Index.new(i)))
+            y_values.push(y.get_f64(Index.new(i)))
+            i = i + 1
+        return Ok(vector_from(simd_axpy_values(alpha, x_values, y_values)?))
     Ok(x.mul_scalar(alpha).add(y))
+
+fn axpy_f32(alpha: Float32, x: NDArray, y: NDArray) -> NDArray:
+    try_axpy_f32(alpha, x, y).unwrap()
+
+fn try_axpy_f32(alpha: Float32, x: NDArray, y: NDArray) -> Result<NDArray, LinalgError>:
+    if x.dtype != DType.F32 or y.dtype != DType.F32 or x.shape != y.shape:
+        return Err(LinalgError.DimensionMismatch)
+    if x.shape.dims.len() == 1 and x.len().value >= 4 and x.is_contiguous() and y.is_contiguous():
+        var x_values: [Float32] = []
+        var y_values: [Float32] = []
+        var i = 0
+        while i < x.len().value:
+            x_values.push(x.get_f32(Index.new(i)))
+            y_values.push(y.get_f32(Index.new(i)))
+            i = i + 1
+        return Ok(vector_from_f32(simd_axpy_f32_values(alpha, x_values, y_values)?))
+    var out: [Float32] = []
+    var i = 0
+    while i < x.len().value:
+        out.push(Float32.new(alpha.value * x.flat_f32(i).value + y.flat_f32(i).value))
+        i = i + 1
+    Ok(make_f32_array(out, x.shape))
 
 fn gemv(matrix: NDArray, vector: NDArray) -> Result<NDArray, LinalgError>:
     if matrix.cols() != vector.len():
         return Err(LinalgError.DimensionMismatch)
+    val backend = _configured_linalg_backend()
+    if backend == "openblas":
+        val y_in = zeros(Shape.new([matrix.rows()]))
+        match openblas_gemv(Float64.new(1.0), matrix, vector, Float64.new(0.0), y_in):
+            case Ok(value):
+                return Ok(value)
+            case Err(_):
+                pass
+    if backend == "cuda":
+        val y_in = zeros(Shape.new([matrix.rows()]))
+        match cuda_gemv(Float64.new(1.0), matrix, vector, Float64.new(0.0), y_in):
+            case Ok(value):
+                return Ok(value)
+            case Err(_):
+                pass
+    if backend == "torch" or backend == "pytorch":
+        val y_in = zeros(Shape.new([matrix.rows()]))
+        match torch_gemv(Float64.new(1.0), matrix, vector, Float64.new(0.0), y_in):
+            case Ok(value):
+                return Ok(value)
+            case Err(_):
+                pass
     var out: [Float64] = []
     var row = 0
     while row < matrix.rows().value:
@@ -76,6 +2128,25 @@ fn try_gemm(alpha: Float64, a: NDArray, b: NDArray, beta: Float64, c_in: NDArray
         return Err(LinalgError.DimensionMismatch)
     if c_in.rows() != a.rows() or c_in.cols() != b.cols():
         return Err(LinalgError.DimensionMismatch)
+    val backend = _configured_linalg_backend()
+    if backend == "openblas":
+        match openblas_gemm(alpha, a, b, beta, c_in):
+            case Ok(value):
+                return Ok(value)
+            case Err(_):
+                pass
+    if backend == "cuda":
+        match cuda_gemm(alpha, a, b, beta, c_in):
+            case Ok(value):
+                return Ok(value)
+            case Err(_):
+                pass
+    if backend == "torch" or backend == "pytorch":
+        match torch_gemm(alpha, a, b, beta, c_in):
+            case Ok(value):
+                return Ok(value)
+            case Err(_):
+                pass
     val rows = a.rows().value
     val cols = b.cols().value
     val inner = a.cols().value
@@ -101,7 +2172,127 @@ fn try_gemm(alpha: Float64, a: NDArray, b: NDArray, beta: Float64, c_in: NDArray
     Ok(make_f64_array(out, Shape.new([a.rows(), b.cols()])))
 
 fn norm(input: NDArray) -> Float64:
-    Float64.new(dot(input, input).unwrap().value)
+    val squared = dot(input, input).unwrap()
+    Float64.new(sqrt_f64(squared.value))
+
+fn trace(matrix: NDArray) -> Result<Float64, LinalgError>:
+    if matrix.dtype != DType.F64 or matrix.shape.dims.len() != 2:
+        return Err(LinalgError.DimensionMismatch)
+    var diagonal = matrix.rows().value
+    if matrix.cols().value < diagonal:
+        diagonal = matrix.cols().value
+    var total = 0.0
+    var i = 0
+    while i < diagonal:
+        total = total + matrix.get_f64_at([Index.new(i), Index.new(i)]).value
+        i = i + 1
+    Ok(Float64.new(total))
+
+fn sqrt_f64(value: f64) -> f64:
+    if value <= 0.0:
+        return 0.0
+    var estimate = value
+    if estimate < 1.0:
+        estimate = 1.0
+    var i = 0
+    while i < 20:
+        estimate = 0.5 * (estimate + value / estimate)
+        i = i + 1
+    estimate
+
+fn inv(a: NDArray) -> Result<NDArray, LinalgError>:
+    if a.rows() != a.cols():
+        return Err(LinalgError.DimensionMismatch)
+    val n = a.rows().value
+    if _configured_linalg_backend() == "cuda" and n >= 16:
+        match cuda_inv(a):
+            case Ok(value):
+                return Ok(value)
+            case Err(_):
+                pass
+    if (_configured_linalg_backend() == "torch" or _configured_linalg_backend() == "pytorch") and n >= 16:
+        match torch_inv(a):
+            case Ok(value):
+                return Ok(value)
+            case Err(_):
+                pass
+    var out: [Float64] = []
+    var i = 0
+    while i < n * n:
+        out.push(Float64.new(0.0))
+        i = i + 1
+    var col = 0
+    while col < n:
+        var rhs: [Float64] = []
+        var row = 0
+        while row < n:
+            if row == col:
+                rhs.push(Float64.new(1.0))
+            else:
+                rhs.push(Float64.new(0.0))
+            row = row + 1
+        val solution = solve(a, make_f64_array(rhs, Shape.new([Index.new(n)])))?
+        row = 0
+        while row < n:
+            out[row * n + col] = solution.get_f64(Index.new(row))
+            row = row + 1
+        col = col + 1
+    Ok(make_f64_array(out, Shape.new([Index.new(n), Index.new(n)])))
+
+fn det(a: NDArray) -> Result<Float64, LinalgError>:
+    val n = a.rows().value
+    if a.rows() != a.cols():
+        return Err(LinalgError.DimensionMismatch)
+    var mat: [f64] = []
+    var row = 0
+    while row < n:
+        var col = 0
+        while col < n:
+            mat.push(a.get_f64_at([Index.new(row), Index.new(col)]).value)
+            col = col + 1
+        row = row + 1
+    var sign = 1.0
+    var product = 1.0
+    var pivot = 0
+    while pivot < n:
+        var pivot_row = pivot
+        var max_abs = abs_f64(mat[pivot * n + pivot])
+        var probe = pivot + 1
+        while probe < n:
+            val candidate_abs = abs_f64(mat[probe * n + pivot])
+            if candidate_abs > max_abs:
+                max_abs = candidate_abs
+                pivot_row = probe
+            probe = probe + 1
+        if max_abs == 0.0:
+            return Ok(Float64.new(0.0))
+        if pivot_row != pivot:
+            var swap_col = 0
+            while swap_col < n:
+                val pivot_idx = pivot * n + swap_col
+                val pivot_row_idx = pivot_row * n + swap_col
+                val tmp = mat[pivot_idx]
+                mat[pivot_idx] = mat[pivot_row_idx]
+                mat[pivot_row_idx] = tmp
+                swap_col = swap_col + 1
+            sign = -sign
+        val pivot_value = mat[pivot * n + pivot]
+        product = product * pivot_value
+        var lower = pivot + 1
+        while lower < n:
+            val factor = mat[lower * n + pivot] / pivot_value
+            var col = pivot
+            while col < n:
+                mat[lower * n + col] = mat[lower * n + col] - factor * mat[pivot * n + col]
+                col = col + 1
+            lower = lower + 1
+        pivot = pivot + 1
+    Ok(Float64.new(sign * product))
+
+fn abs_f64(value: f64) -> f64:
+    if value < 0.0:
+        return -value
+    value
 
 fn solve(a: NDArray, b: NDArray) -> Result<NDArray, LinalgError>:
     val n = a.rows().value
@@ -109,6 +2300,24 @@ fn solve(a: NDArray, b: NDArray) -> Result<NDArray, LinalgError>:
         return Err(LinalgError.DimensionMismatch)
     if b.len().value != n:
         return Err(LinalgError.DimensionMismatch)
+    if _configured_linalg_backend() == "openblas" and n >= 16:
+        match openblas_solve(a, b):
+            case Ok(value):
+                return Ok(value)
+            case Err(_):
+                pass
+    if _configured_linalg_backend() == "cuda" and n >= 16:
+        match cuda_solve(a, b):
+            case Ok(value):
+                return Ok(value)
+            case Err(_):
+                pass
+    if (_configured_linalg_backend() == "torch" or _configured_linalg_backend() == "pytorch") and n >= 16:
+        match torch_solve(a, b):
+            case Ok(value):
+                return Ok(value)
+            case Err(_):
+                pass
     var mat: [f64] = []
     var rhs: [f64] = []
     var row = 0

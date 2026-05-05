@@ -55,7 +55,7 @@ struct SmfHeader:
 # ============================================================================
 
 fn _smf_byte_at(data: [u8], off: i64) -> u8:
-    rt_bytes_u8_at(data, off).to_u8()
+    data[off]
 
 fn _smf_read_u64_le(data: [u8], off: i64) -> i64:
     val b0 = _smf_byte_at(data, off)     as i64
@@ -180,7 +180,22 @@ fn smf_extract_executable_stub(bytes: [u8]) -> Result<[u8], text>:
     around a normal executable. Only ELF stubs are accepted; native SMF
     code-section mapping remains owned by a later mapper implementation.
     """
-    smf_extract_executable_stub_for_arch(bytes, Architecture.Unknown)
+    val hdr_opt = smf_parse_header(bytes)
+    if hdr_opt == nil:
+        return Err(SMF_ERR_MALFORMED)
+    val hdr = hdr_opt.unwrap()
+    if hdr.role != 0 and hdr.role != 1:
+        return Err(SMF_ERR_WRONG_ROLE)
+    if hdr.abi != 0 and hdr.abi != 1:
+        return Err(SMF_ERR_ABI_MISMATCH)
+    if hdr.stub_size <= 0:
+        return Err(SMF_ERR_MISSING_ELF)
+    if hdr.stub_size > hdr.header_offset:
+        return Err(SMF_ERR_MALFORMED)
+    val stub = _smf_copy_range(bytes, 0, hdr.stub_size)
+    if not _smf_has_elf_magic(stub):
+        return Err(SMF_ERR_MISSING_ELF)
+    Ok(stub)
 
 fn smf_extract_executable_stub_for_arch(bytes: [u8], arch: Architecture) -> Result<[u8], text>:
     """Return the embedded ELF stub after validating executable SMF metadata."""
@@ -190,7 +205,7 @@ fn smf_extract_executable_stub_for_arch(bytes: [u8], arch: Architecture) -> Resu
     val hdr = hdr_opt.unwrap()
     if hdr.role != 0 and hdr.role != 1:
         return Err(SMF_ERR_WRONG_ROLE)
-    if arch != Architecture.Unknown and not _smf_header_accepts_arch(hdr, arch):
+    if not _smf_header_accepts_arch(hdr, arch):
         return Err(SMF_ERR_WRONG_ARCH)
     if hdr.abi != 0 and hdr.abi != 1:
         return Err(SMF_ERR_ABI_MISMATCH)
@@ -203,6 +218,20 @@ fn smf_extract_executable_stub_for_arch(bytes: [u8], arch: Architecture) -> Resu
         return Err(SMF_ERR_MISSING_ELF)
     Ok(stub)
 
+fn smf_executable_entry_point_for_arch(bytes: [u8], arch: Architecture) -> Result<i64, text>:
+    """Return the SMF executable entry point after validating envelope metadata."""
+    val hdr_opt = smf_parse_header(bytes)
+    if hdr_opt == nil:
+        return Err(SMF_ERR_MALFORMED)
+    val hdr: SmfHeader = hdr_opt.unwrap()
+    if hdr.role != 0 and hdr.role != 1:
+        return Err(SMF_ERR_WRONG_ROLE)
+    if not _smf_header_accepts_arch(hdr, arch):
+        return Err(SMF_ERR_WRONG_ARCH)
+    if hdr.abi != 0 and hdr.abi != 1:
+        return Err(SMF_ERR_ABI_MISMATCH)
+    Ok(hdr.entry_point)
+
 fn smf_extract_executable_stub_unchecked(bytes: [u8]) -> [u8]:
     """ARM-safe scalar SMF stub extraction without Result/unwrap."""
     val hdr_opt = smf_parse_header(bytes)
@@ -214,11 +243,17 @@ fn smf_extract_executable_stub_unchecked(bytes: [u8]) -> [u8]:
     if hdr.abi != 0 and hdr.abi != 1:
         return []
     if hdr.stub_size <= 0:
+        if hdr.header_offset > 0 and _smf_has_elf_magic(bytes):
+            return _smf_copy_range(bytes, 0, hdr.header_offset)
         return []
     if hdr.stub_size > hdr.header_offset:
+        if hdr.header_offset > 0 and _smf_has_elf_magic(bytes):
+            return _smf_copy_range(bytes, 0, hdr.header_offset)
         return []
     val stub = _smf_copy_range(bytes, 0, hdr.stub_size)
     if not _smf_has_elf_magic(stub):
+        if hdr.header_offset > 0 and _smf_has_elf_magic(bytes):
+            return _smf_copy_range(bytes, 0, hdr.header_offset)
         return []
     stub
 

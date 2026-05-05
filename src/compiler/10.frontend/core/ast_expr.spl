@@ -5,59 +5,61 @@
 #
 # See ast.spl for the full AST module documentation.
 
+use std.string_core.{char_code}
+
 # ===== Expression Kind Tags =====
-val EXPR_INT_LIT = 1
-val EXPR_FLOAT_LIT = 2
-val EXPR_STRING_LIT = 3
-val EXPR_BOOL_LIT = 4
-val EXPR_NIL_LIT = 5
-val EXPR_IDENT = 6
-val EXPR_BINARY = 7
-val EXPR_UNARY = 8
-val EXPR_CALL = 9
-val EXPR_INDEX = 10
-val EXPR_FIELD_ACCESS = 11
-val EXPR_METHOD_CALL = 12
-val EXPR_ARRAY_LIT = 13
-val EXPR_IF = 14
-val EXPR_MATCH = 15
-val EXPR_FOR = 16
-val EXPR_WHILE = 17
-val EXPR_BLOCK = 18
-val EXPR_RETURN = 19
-val EXPR_BREAK = 20
-val EXPR_CONTINUE = 21
-val EXPR_RANGE = 22
-val EXPR_ASSIGN = 23
-val EXPR_COMPOUND_ASSIGN = 24
-val EXPR_DICT_LIT = 25
-val EXPR_LAMBDA = 26
-val EXPR_STRUCT_LIT = 27
-val EXPR_TUPLE = 28
-val EXPR_SLICE = 29
-val EXPR_NULL_COALESCE = 30
-val EXPR_OPTIONAL_CHAIN = 31
-val EXPR_CAST = 32
-val EXPR_UNIT = 33
-val EXPR_INTERPOLATED_STRING = 34
-val EXPR_PASS = 35
-val EXPR_PASS_TODO = 40
-val EXPR_PASS_DO_NOTHING = 41
-val EXPR_PASS_DN = 43
-val EXPR_SUFFIXED_LIT = 36
-val EXPR_AWAIT = 37       # await future_expr
-val EXPR_YIELD = 38       # yield value
-val EXPR_SPAWN = 39       # spawn fn_call
-val EXPR_ASYNC_BLOCK = 42 # async { ... }
-val EXPR_DO_BLOCK = 44   # do: block expression (returns last value)
-val EXPR_ATOM = 45       # `symbol atom literal (interned text, identity comparison)
-val EXPR_SPREAD = 46     # ..expr spread in struct update syntax
-val EXPR_ASM = 47        # asm text block/string (lowered by backend)
-val EXPR_ASM_MATCH = 48  # asm match: multi-target dispatch
-val EXPR_EXISTS_CHECK = 49  # .? existence check (returns T? — value if present, nil if absent)
-val EXPR_NEW = 50            # new allocation: new expr, new() expr, new(alloc) expr
-val EXPR_LIST_COMP = 51      # [for x in items if cond: expr]
-val EXPR_DICT_COMP = 52      # {for k in items if cond: (k_expr, v_expr)}
+const EXPR_INT_LIT = 1
+const EXPR_FLOAT_LIT = 2
+const EXPR_STRING_LIT = 3
+const EXPR_BOOL_LIT = 4
+const EXPR_NIL_LIT = 5
+const EXPR_IDENT = 6
+const EXPR_BINARY = 7
+const EXPR_UNARY = 8
+const EXPR_CALL = 9
+const EXPR_INDEX = 10
+const EXPR_FIELD_ACCESS = 11
+const EXPR_METHOD_CALL = 12
+const EXPR_ARRAY_LIT = 13
+const EXPR_IF = 14
+const EXPR_MATCH = 15
+const EXPR_FOR = 16
+const EXPR_WHILE = 17
+const EXPR_BLOCK = 18
+const EXPR_RETURN = 19
+const EXPR_BREAK = 20
+const EXPR_CONTINUE = 21
+const EXPR_RANGE = 22
+const EXPR_ASSIGN = 23
+const EXPR_COMPOUND_ASSIGN = 24
+const EXPR_DICT_LIT = 25
+const EXPR_LAMBDA = 26
+const EXPR_STRUCT_LIT = 27
+const EXPR_TUPLE = 28
+const EXPR_SLICE = 29
+const EXPR_NULL_COALESCE = 30
+const EXPR_OPTIONAL_CHAIN = 31
+const EXPR_CAST = 32
+const EXPR_UNIT = 33
+const EXPR_INTERPOLATED_STRING = 34
+const EXPR_PASS = 35
+const EXPR_PASS_TODO = 40
+const EXPR_PASS_DO_NOTHING = 41
+const EXPR_PASS_DN = 43
+const EXPR_SUFFIXED_LIT = 36
+const EXPR_AWAIT = 37       # await future_expr
+const EXPR_YIELD = 38       # yield value
+const EXPR_SPAWN = 39       # spawn fn_call
+const EXPR_ASYNC_BLOCK = 42 # async { ... }
+const EXPR_DO_BLOCK = 44   # do: block expression (returns last value)
+const EXPR_ATOM = 45       # `symbol atom literal (interned text, identity comparison)
+const EXPR_SPREAD = 46     # ..expr spread in struct update syntax
+const EXPR_ASM = 47        # asm text block/string (lowered by backend)
+const EXPR_ASM_MATCH = 48  # asm match: multi-target dispatch
+const EXPR_EXISTS_CHECK = 49  # .? existence check (returns T? — value if present, nil if absent)
+const EXPR_NEW = 50            # new allocation: new expr, new() expr, new(alloc) expr
+const EXPR_LIST_COMP = 51      # [for x in items if cond: expr]
+const EXPR_DICT_COMP = 52      # {for k in items if cond: (k_expr, v_expr)}
 
 # ===== Expression Arena Pools =====
 # Each expression has:
@@ -83,7 +85,73 @@ var expr_extra: [i64] = []
 var expr_args: [[i64]] = []
 var expr_stmts: [[i64]] = []
 
+extern fn rt_env_get(key: text) -> text
+extern fn rt_env_set(key: text, value: text) -> bool
+
+fn expr_parse_i64(raw: text) -> i64:
+    if raw == "":
+        return 0
+    var value: i64 = 0
+    var i: i64 = 0
+    var neg: bool = false
+    if raw.len() > 0 and raw[0:1] == "-":
+        neg = true
+        i = 1
+    while i < raw.len():
+        val code = char_code(raw[i:i + 1])
+        if code < 48 or code > 57:
+            break
+        value = value * 10 + (code - 48)
+        i = i + 1
+    if neg: return 0 - value
+    value
+
+fn expr_i64_list_join(values: [i64]) -> text:
+    var parts: [text] = []
+    for value in values:
+        parts.push(int_to_str(value))
+    parts.join(",")
+
+fn expr_i64_list_split(raw: text) -> [i64]:
+    if raw == "":
+        return []
+    var result: [i64] = []
+    for part in raw.split(","):
+        if part != "":
+            result.push(expr_parse_i64(part))
+    result
+
+fn expr_count_env() -> i64:
+    expr_parse_i64(rt_env_get("SIMPLE_BOOTSTRAP_EXPR_COUNT") ?? "")
+
+fn expr_count_set(value: i64):
+    rt_env_set("SIMPLE_BOOTSTRAP_EXPR_COUNT", int_to_str(value))
+
+fn expr_key(idx: i64, field: text) -> text:
+    "SIMPLE_BOOTSTRAP_EXPR_" + int_to_str(idx) + "_" + field
+
+fn expr_i64_set(idx: i64, field: text, value: i64):
+    rt_env_set(expr_key(idx, field), int_to_str(value))
+
+fn expr_i64_get(idx: i64, field: text) -> i64:
+    expr_parse_i64(rt_env_get(expr_key(idx, field)) ?? "")
+
+fn expr_text_set(idx: i64, field: text, value: text):
+    rt_env_set(expr_key(idx, field), value)
+
+fn expr_text_get(idx: i64, field: text) -> text:
+    rt_env_get(expr_key(idx, field)) ?? ""
+
+fn expr_list_set(idx: i64, field: text, values: [i64]):
+    rt_env_set(expr_key(idx, field), expr_i64_list_join(values))
+
+fn expr_list_get(idx: i64, field: text) -> [i64]:
+    expr_i64_list_split(rt_env_get(expr_key(idx, field)) ?? "")
+
 fn expr_count() -> i64:
+    val env_count = expr_count_env()
+    if env_count > 0:
+        return env_count
     expr_tag.len()
 
 fn expr_reset():
@@ -149,10 +217,12 @@ fn expr_reset():
     asm_arm_is_compile_error.clear()
     asm_arm_error_msg.clear()
     asm_arm_is_wildcard.clear()
+    expr_count_set(0)
 
 # Allocate a new expression node, returns its index
 fn expr_alloc(tag: i64, span_id: i64) -> i64:
-    val idx = expr_tag.len()
+    val idx = expr_count_env()
+    expr_count_set(idx + 1)
     expr_tag.push(tag)
     expr_span.push(span_id)
     expr_i_val.push(0)
@@ -163,6 +233,19 @@ fn expr_alloc(tag: i64, span_id: i64) -> i64:
     expr_extra.push(-1)
     expr_args.push([])
     expr_stmts.push([])
+    expr_i64_set(idx, "TAG", tag)
+    expr_i64_set(idx, "SPAN", span_id)
+    expr_i64_set(idx, "I", 0)
+    expr_text_set(idx, "F", "")
+    expr_text_set(idx, "S", "")
+    expr_i64_set(idx, "LEFT", -1)
+    expr_i64_set(idx, "RIGHT", -1)
+    expr_i64_set(idx, "EXTRA", -1)
+    expr_list_set(idx, "ARGS", [])
+    expr_list_set(idx, "STMTS", [])
+    val trace_expr_tags = rt_env_get("SIMPLE_TRACE_EXPR_TAGS") ?? ""
+    if trace_expr_tags != "" and (idx < 8 or tag <= 0):
+        print "[expr_alloc] idx={idx} tag={tag} span={span_id}"
     idx
 
 # ===== Expression Constructors =====
@@ -170,21 +253,25 @@ fn expr_alloc(tag: i64, span_id: i64) -> i64:
 fn expr_int_lit(value: i64, span_id: i64) -> i64:
     val idx = expr_alloc(EXPR_INT_LIT, span_id)
     expr_i_val[idx] = value
+    expr_i64_set(idx, "I", value)
     idx
 
 fn expr_float_lit(value: text, span_id: i64) -> i64:
     val idx = expr_alloc(EXPR_FLOAT_LIT, span_id)
     expr_f_val[idx] = value
+    expr_text_set(idx, "F", value)
     idx
 
 fn expr_string_lit(value: text, span_id: i64) -> i64:
     val idx = expr_alloc(EXPR_STRING_LIT, span_id)
     expr_s_val[idx] = value
+    expr_text_set(idx, "S", value)
     idx
 
 fn expr_bool_lit(value: i64, span_id: i64) -> i64:
     val idx = expr_alloc(EXPR_BOOL_LIT, span_id)
     expr_i_val[idx] = value
+    expr_i64_set(idx, "I", value)
     idx
 
 fn expr_nil_lit(span_id: i64) -> i64:
@@ -193,88 +280,119 @@ fn expr_nil_lit(span_id: i64) -> i64:
 fn expr_ident(name: text, span_id: i64) -> i64:
     val idx = expr_alloc(EXPR_IDENT, span_id)
     expr_s_val[idx] = name
+    expr_text_set(idx, "S", name)
     expr_i_val[idx] = -1
+    expr_i64_set(idx, "I", -1)
     idx
 
 fn expr_binary(op: i64, left_idx: i64, right_idx: i64, span_id: i64) -> i64:
     val idx = expr_alloc(EXPR_BINARY, span_id)
     expr_i_val[idx] = op
+    expr_i64_set(idx, "I", op)
     expr_left[idx] = left_idx
+    expr_i64_set(idx, "LEFT", left_idx)
     expr_right[idx] = right_idx
+    expr_i64_set(idx, "RIGHT", right_idx)
     idx
 
 fn expr_unary(op: i64, operand: i64, span_id: i64) -> i64:
     val idx = expr_alloc(EXPR_UNARY, span_id)
     expr_i_val[idx] = op
+    expr_i64_set(idx, "I", op)
     expr_left[idx] = operand
+    expr_i64_set(idx, "LEFT", operand)
     idx
 
 fn expr_call(callee: i64, call_args: [i64], span_id: i64) -> i64:
     val idx = expr_alloc(EXPR_CALL, span_id)
     expr_left[idx] = callee
+    expr_i64_set(idx, "LEFT", callee)
     expr_args[idx] = call_args
+    expr_list_set(idx, "ARGS", call_args)
     idx
 
 fn expr_index(base: i64, index_expr: i64, span_id: i64) -> i64:
     val idx = expr_alloc(EXPR_INDEX, span_id)
     expr_left[idx] = base
+    expr_i64_set(idx, "LEFT", base)
     expr_right[idx] = index_expr
+    expr_i64_set(idx, "RIGHT", index_expr)
     idx
 
 fn expr_field_access(base: i64, field_name: text, span_id: i64) -> i64:
     val idx = expr_alloc(EXPR_FIELD_ACCESS, span_id)
     expr_left[idx] = base
+    expr_i64_set(idx, "LEFT", base)
     expr_s_val[idx] = field_name
+    expr_text_set(idx, "S", field_name)
     expr_i_val[idx] = -1
+    expr_i64_set(idx, "I", -1)
     idx
 
 fn expr_method_call(receiver: i64, method_name: text, call_args: [i64], span_id: i64) -> i64:
     val idx = expr_alloc(EXPR_METHOD_CALL, span_id)
     expr_left[idx] = receiver
+    expr_i64_set(idx, "LEFT", receiver)
     expr_s_val[idx] = method_name
+    expr_text_set(idx, "S", method_name)
     expr_args[idx] = call_args
+    expr_list_set(idx, "ARGS", call_args)
     idx
 
 fn expr_array_lit(elements: [i64], span_id: i64) -> i64:
     val idx = expr_alloc(EXPR_ARRAY_LIT, span_id)
     expr_args[idx] = elements
+    expr_list_set(idx, "ARGS", elements)
     idx
 
 fn expr_if_expr(cond: i64, then_branch: i64, else_branch: i64, span_id: i64) -> i64:
     val idx = expr_alloc(EXPR_IF, span_id)
     expr_left[idx] = cond
+    expr_i64_set(idx, "LEFT", cond)
     expr_right[idx] = then_branch
+    expr_i64_set(idx, "RIGHT", then_branch)
     expr_extra[idx] = else_branch
+    expr_i64_set(idx, "EXTRA", else_branch)
     idx
 
 fn expr_match_expr(scrutinee: i64, arms: [i64], span_id: i64) -> i64:
     val idx = expr_alloc(EXPR_MATCH, span_id)
     expr_left[idx] = scrutinee
+    expr_i64_set(idx, "LEFT", scrutinee)
     expr_args[idx] = arms
+    expr_list_set(idx, "ARGS", arms)
     idx
 
 fn expr_for_expr(iter_var: text, iterable: i64, body_stmts: [i64], span_id: i64) -> i64:
     val idx = expr_alloc(EXPR_FOR, span_id)
     expr_s_val[idx] = iter_var
+    expr_text_set(idx, "S", iter_var)
     expr_left[idx] = iterable
+    expr_i64_set(idx, "LEFT", iterable)
     expr_stmts[idx] = body_stmts
+    expr_list_set(idx, "STMTS", body_stmts)
     idx
 
 fn expr_while_expr(cond: i64, body_stmts: [i64], span_id: i64) -> i64:
     val idx = expr_alloc(EXPR_WHILE, span_id)
     expr_left[idx] = cond
+    expr_i64_set(idx, "LEFT", cond)
     expr_stmts[idx] = body_stmts
+    expr_list_set(idx, "STMTS", body_stmts)
     idx
 
 fn expr_block(body_stmts: [i64], value_expr: i64, span_id: i64) -> i64:
     val idx = expr_alloc(EXPR_BLOCK, span_id)
     expr_stmts[idx] = body_stmts
+    expr_list_set(idx, "STMTS", body_stmts)
     expr_left[idx] = value_expr
+    expr_i64_set(idx, "LEFT", value_expr)
     idx
 
 fn expr_return_expr(value: i64, span_id: i64) -> i64:
     val idx = expr_alloc(EXPR_RETURN, span_id)
     expr_left[idx] = value
+    expr_i64_set(idx, "LEFT", value)
     idx
 
 fn expr_break_expr(span_id: i64) -> i64:
@@ -286,36 +404,43 @@ fn expr_continue_expr(span_id: i64) -> i64:
 fn expr_await(future_expr: i64, span_id: i64) -> i64:
     val idx = expr_alloc(EXPR_AWAIT, span_id)
     expr_left[idx] = future_expr
+    expr_i64_set(idx, "LEFT", future_expr)
     idx
 
 fn expr_yield(value_expr: i64, span_id: i64) -> i64:
     val idx = expr_alloc(EXPR_YIELD, span_id)
     expr_left[idx] = value_expr
+    expr_i64_set(idx, "LEFT", value_expr)
     idx
 
 fn expr_spawn(call_expr: i64, span_id: i64) -> i64:
     val idx = expr_alloc(EXPR_SPAWN, span_id)
     expr_left[idx] = call_expr
+    expr_i64_set(idx, "LEFT", call_expr)
     idx
 
 fn expr_do_block(body_stmts: [i64], span_id: i64) -> i64:
     val idx = expr_alloc(EXPR_DO_BLOCK, span_id)
     expr_stmts[idx] = body_stmts
+    expr_list_set(idx, "STMTS", body_stmts)
     idx
 
 fn expr_atom(name: text, span_id: i64) -> i64:
     val idx = expr_alloc(EXPR_ATOM, span_id)
     expr_s_val[idx] = name
+    expr_text_set(idx, "S", name)
     idx
 
 fn expr_spread(inner: i64, span_id: i64) -> i64:
     val idx = expr_alloc(EXPR_SPREAD, span_id)
     expr_left[idx] = inner
+    expr_i64_set(idx, "LEFT", inner)
     idx
 
 fn expr_asm(text_value: text, span_id: i64) -> i64:
     val idx = expr_alloc(EXPR_ASM, span_id)
     expr_s_val[idx] = text_value
+    expr_text_set(idx, "S", text_value)
     idx
 
 # ===== Asm Match Arm Arena =====
@@ -352,6 +477,7 @@ fn expr_asm_match(arm_indices: [i64], span_id: i64) -> i64:
     """Create asm match expression. arm_indices are indices into asm_arm_* arrays."""
     val idx = expr_alloc(EXPR_ASM_MATCH, span_id)
     expr_args[idx] = arm_indices
+    expr_list_set(idx, "ARGS", arm_indices)
     idx
 
 fn expr_asm_assert(arm_idx: i64, span_id: i64) -> i64:
@@ -360,106 +486,145 @@ fn expr_asm_assert(arm_idx: i64, span_id: i64) -> i64:
     """
     val idx = expr_alloc(EXPR_ASM_MATCH, span_id)
     expr_args[idx] = [arm_idx]
+    expr_list_set(idx, "ARGS", [arm_idx])
     expr_i_val[idx] = 1
+    expr_i64_set(idx, "I", 1)
     idx
 
 fn expr_range(start_expr: i64, end_expr: i64, inclusive: i64, span_id: i64) -> i64:
     val idx = expr_alloc(EXPR_RANGE, span_id)
     expr_left[idx] = start_expr
+    expr_i64_set(idx, "LEFT", start_expr)
     expr_right[idx] = end_expr
+    expr_i64_set(idx, "RIGHT", end_expr)
     expr_i_val[idx] = inclusive
+    expr_i64_set(idx, "I", inclusive)
     idx
 
 fn expr_assign(target: i64, value: i64, span_id: i64) -> i64:
     val idx = expr_alloc(EXPR_ASSIGN, span_id)
     expr_left[idx] = target
+    expr_i64_set(idx, "LEFT", target)
     expr_right[idx] = value
+    expr_i64_set(idx, "RIGHT", value)
     idx
 
 fn expr_compound_assign(op: i64, target: i64, value: i64, span_id: i64) -> i64:
     val idx = expr_alloc(EXPR_COMPOUND_ASSIGN, span_id)
     expr_i_val[idx] = op
+    expr_i64_set(idx, "I", op)
     expr_left[idx] = target
+    expr_i64_set(idx, "LEFT", target)
     expr_right[idx] = value
+    expr_i64_set(idx, "RIGHT", value)
     idx
 
 fn expr_dict_lit(key_exprs: [i64], value_exprs: [i64], span_id: i64) -> i64:
     val idx = expr_alloc(EXPR_DICT_LIT, span_id)
     expr_args[idx] = key_exprs
+    expr_list_set(idx, "ARGS", key_exprs)
     expr_stmts[idx] = value_exprs
+    expr_list_set(idx, "STMTS", value_exprs)
     idx
 
 fn expr_lambda(param_names: [i64], body_stmts: [i64], span_id: i64) -> i64:
     val idx = expr_alloc(EXPR_LAMBDA, span_id)
     expr_args[idx] = param_names
+    expr_list_set(idx, "ARGS", param_names)
     expr_stmts[idx] = body_stmts
+    expr_list_set(idx, "STMTS", body_stmts)
     idx
 
 fn expr_struct_lit(type_name: text, field_names: [i64], field_values: [i64], span_id: i64) -> i64:
     val idx = expr_alloc(EXPR_STRUCT_LIT, span_id)
     expr_s_val[idx] = type_name
+    expr_text_set(idx, "S", type_name)
     expr_args[idx] = field_names
+    expr_list_set(idx, "ARGS", field_names)
     expr_stmts[idx] = field_values
+    expr_list_set(idx, "STMTS", field_values)
     idx
 
 fn expr_tuple(elements: [i64], span_id: i64) -> i64:
     val idx = expr_alloc(EXPR_TUPLE, span_id)
     expr_args[idx] = elements
+    expr_list_set(idx, "ARGS", elements)
     idx
 
 fn expr_slice(base: i64, start_expr: i64, end_expr: i64, span_id: i64) -> i64:
     val idx = expr_alloc(EXPR_SLICE, span_id)
     expr_left[idx] = base
+    expr_i64_set(idx, "LEFT", base)
     expr_right[idx] = start_expr
+    expr_i64_set(idx, "RIGHT", start_expr)
     expr_extra[idx] = end_expr
+    expr_i64_set(idx, "EXTRA", end_expr)
     idx
 
 fn expr_null_coalesce(left_idx: i64, right_idx: i64, span_id: i64) -> i64:
     val idx = expr_alloc(EXPR_NULL_COALESCE, span_id)
     expr_left[idx] = left_idx
+    expr_i64_set(idx, "LEFT", left_idx)
     expr_right[idx] = right_idx
+    expr_i64_set(idx, "RIGHT", right_idx)
     idx
 
 fn expr_exists_check(base: i64, span_id: i64) -> i64:
     val idx = expr_alloc(EXPR_EXISTS_CHECK, span_id)
     expr_left[idx] = base
+    expr_i64_set(idx, "LEFT", base)
     idx
 
 fn expr_new_alloc(alloc_kind: i64, alloc_expr: i64, inner_expr: i64, span_id: i64) -> i64:
     val idx = expr_alloc(EXPR_NEW, span_id)
     expr_i_val[idx] = alloc_kind
+    expr_i64_set(idx, "I", alloc_kind)
     expr_left[idx] = alloc_expr
+    expr_i64_set(idx, "LEFT", alloc_expr)
     expr_right[idx] = inner_expr
+    expr_i64_set(idx, "RIGHT", inner_expr)
     idx
 
 fn expr_list_comp(iter_var: text, iterable: i64, body: i64, cond: i64, span_id: i64) -> i64:
     # s_val=iter_var, left=iterable, right=body, extra=cond (-1 if none)
     val idx = expr_alloc(EXPR_LIST_COMP, span_id)
     expr_s_val[idx] = iter_var
+    expr_text_set(idx, "S", iter_var)
     expr_left[idx] = iterable
+    expr_i64_set(idx, "LEFT", iterable)
     expr_right[idx] = body
+    expr_i64_set(idx, "RIGHT", body)
     expr_extra[idx] = cond
+    expr_i64_set(idx, "EXTRA", cond)
     idx
 
 fn expr_dict_comp(iter_var: text, iterable: i64, key_body: i64, val_body: i64, cond: i64, span_id: i64) -> i64:
     # s_val=iter_var, left=iterable, extra=cond, args=[key_body, val_body]
     val idx = expr_alloc(EXPR_DICT_COMP, span_id)
     expr_s_val[idx] = iter_var
+    expr_text_set(idx, "S", iter_var)
     expr_left[idx] = iterable
+    expr_i64_set(idx, "LEFT", iterable)
     expr_extra[idx] = cond
+    expr_i64_set(idx, "EXTRA", cond)
     expr_args[idx] = [key_body, val_body]
+    expr_list_set(idx, "ARGS", [key_body, val_body])
     idx
 
 fn expr_optional_chain(base: i64, field_name: text, span_id: i64) -> i64:
     val idx = expr_alloc(EXPR_OPTIONAL_CHAIN, span_id)
     expr_left[idx] = base
+    expr_i64_set(idx, "LEFT", base)
     expr_s_val[idx] = field_name
+    expr_text_set(idx, "S", field_name)
     idx
 
 fn expr_cast(value: i64, type_tag: i64, span_id: i64) -> i64:
     val idx = expr_alloc(EXPR_CAST, span_id)
     expr_left[idx] = value
+    expr_i64_set(idx, "LEFT", value)
     expr_i_val[idx] = type_tag
+    expr_i64_set(idx, "I", type_tag)
     idx
 
 fn expr_unit(span_id: i64) -> i64:
@@ -468,6 +633,7 @@ fn expr_unit(span_id: i64) -> i64:
 fn expr_interpolated_string(parts: [i64], span_id: i64) -> i64:
     val idx = expr_alloc(EXPR_INTERPOLATED_STRING, span_id)
     expr_args[idx] = parts
+    expr_list_set(idx, "ARGS", parts)
     idx
 
 fn expr_pass(span_id: i64) -> i64:
@@ -476,72 +642,121 @@ fn expr_pass(span_id: i64) -> i64:
 fn expr_pass_with_msg(msg: text, span_id: i64) -> i64:
     val idx = expr_alloc(EXPR_PASS, span_id)
     expr_s_val[idx] = msg
+    expr_text_set(idx, "S", msg)
     idx
 
 fn expr_pass_todo(msg: text, span_id: i64) -> i64:
     val idx = expr_alloc(EXPR_PASS_TODO, span_id)
     expr_s_val[idx] = msg
+    expr_text_set(idx, "S", msg)
     idx
 
 fn expr_pass_do_nothing(msg: text, span_id: i64) -> i64:
     val idx = expr_alloc(EXPR_PASS_DO_NOTHING, span_id)
     expr_s_val[idx] = msg
+    expr_text_set(idx, "S", msg)
     idx
 
 fn expr_pass_dn(msg: text, span_id: i64) -> i64:
     val idx = expr_alloc(EXPR_PASS_DN, span_id)
     expr_s_val[idx] = msg
+    expr_text_set(idx, "S", msg)
     idx
 
 fn expr_suffixed_int(value: i64, suffix: text, span_id: i64) -> i64:
     val idx = expr_alloc(EXPR_SUFFIXED_LIT, span_id)
     expr_i_val[idx] = value
+    expr_i64_set(idx, "I", value)
     expr_s_val[idx] = suffix
+    expr_text_set(idx, "S", suffix)
     idx
 
 fn expr_suffixed_float(value: text, suffix: text, span_id: i64) -> i64:
     val idx = expr_alloc(EXPR_SUFFIXED_LIT, span_id)
     expr_f_val[idx] = value
+    expr_text_set(idx, "F", value)
     expr_s_val[idx] = suffix
+    expr_text_set(idx, "S", suffix)
     idx
 
 fn expr_suffixed_bool(value: i64, suffix: text, span_id: i64) -> i64:
     val idx = expr_alloc(EXPR_SUFFIXED_LIT, span_id)
     expr_i_val[idx] = value
+    expr_i64_set(idx, "I", value)
     expr_extra[idx] = 1
+    expr_i64_set(idx, "EXTRA", 1)
     expr_s_val[idx] = suffix
+    expr_text_set(idx, "S", suffix)
     idx
 
 # ===== Expression Accessors =====
 
 fn expr_get_tag(idx: i64) -> i64:
-    expr_tag[idx]
+    val direct = rt_env_get(expr_key(idx, "TAG")) ?? ""
+    if direct != "":
+        val parsed = expr_parse_i64(direct)
+        val trace_expr_tags = rt_env_get("SIMPLE_TRACE_EXPR_TAGS") ?? ""
+        if trace_expr_tags != "" and (idx < 8 or parsed <= 0):
+            print "[expr_get_tag] idx={idx} env={direct} parsed={parsed}"
+        return parsed
+    val fallback = expr_tag[idx]
+    val trace_expr_tags = rt_env_get("SIMPLE_TRACE_EXPR_TAGS") ?? ""
+    if trace_expr_tags != "" and (idx < 8 or fallback <= 0):
+        print "[expr_get_tag] idx={idx} env=<missing> fallback={fallback}"
+    fallback
 
 fn expr_get_span(idx: i64) -> i64:
+    val direct = rt_env_get(expr_key(idx, "SPAN")) ?? ""
+    if direct != "":
+        return expr_parse_i64(direct)
     expr_span[idx]
 
 fn expr_get_int(idx: i64) -> i64:
+    val direct = rt_env_get(expr_key(idx, "I")) ?? ""
+    if direct != "":
+        return expr_parse_i64(direct)
     expr_i_val[idx]
 
 fn expr_get_float(idx: i64) -> text:
+    val direct = rt_env_get(expr_key(idx, "F")) ?? ""
+    if direct != "":
+        return direct
     expr_f_val[idx]
 
 fn expr_get_str(idx: i64) -> text:
+    val direct = rt_env_get(expr_key(idx, "S")) ?? ""
+    if direct != "":
+        return direct
     expr_s_val[idx]
 
 fn expr_get_left(idx: i64) -> i64:
+    val direct = rt_env_get(expr_key(idx, "LEFT")) ?? ""
+    if direct != "":
+        return expr_parse_i64(direct)
     expr_left[idx]
 
 fn expr_get_right(idx: i64) -> i64:
+    val direct = rt_env_get(expr_key(idx, "RIGHT")) ?? ""
+    if direct != "":
+        return expr_parse_i64(direct)
     expr_right[idx]
 
 fn expr_get_extra(idx: i64) -> i64:
+    val direct = rt_env_get(expr_key(idx, "EXTRA")) ?? ""
+    if direct != "":
+        return expr_parse_i64(direct)
     expr_extra[idx]
 
 fn expr_get_args(idx: i64) -> [i64]:
+    val direct = rt_env_get(expr_key(idx, "ARGS")) ?? ""
+    if direct != "":
+        return expr_i64_list_split(direct)
     expr_args[idx]
 
 fn expr_get_stmts(idx: i64) -> [i64]:
+    val direct = rt_env_get(expr_key(idx, "STMTS")) ?? ""
+    if direct != "":
+        return expr_i64_list_split(direct)
     expr_stmts[idx]
 
 # ===== Expression Kind Names (for debugging) =====
@@ -596,4 +811,3 @@ fn expr_kind_name(tag: i64) -> text:
     if tag == EXPR_LIST_COMP: return "ListComp"
     if tag == EXPR_DICT_COMP: return "DictComp"
     "Unknown({tag})"
-

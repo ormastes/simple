@@ -18,6 +18,7 @@
 //!   --no-mangle         Disable name mangling (enabled by default for symbol collision avoidance)
 //!   --backend <name>    Compilation backend (cranelift, llvm)
 //!   --runtime-bundle <mode> Runtime lane to link (auto, simple-core, core-c-bootstrap, rust-hosted)
+//!   --emit-archive      Emit a static archive from Simple objects instead of linking an executable
 //!   --entry-closure     Compile only modules reachable from --entry
 //!   --help              Show help
 
@@ -60,6 +61,7 @@ pub fn handle_native_build(args: &[String]) -> i32 {
     let mut runtime_path: Option<PathBuf> = None;
     let mut runtime_bundle = String::from("auto");
     let mut entry_closure = false;
+    let mut emit_archive = false;
     let mut target_triple: Option<String> = None;
     let mut linker_script: Option<PathBuf> = None;
     let mut opt_level = NativeOptimizationLevel::default_for_native_executable();
@@ -207,6 +209,10 @@ pub fn handle_native_build(args: &[String]) -> i32 {
                 entry_closure = true;
                 i += 1;
             }
+            "--emit-archive" => {
+                emit_archive = true;
+                i += 1;
+            }
             "--target" => {
                 if i + 1 < args.len() {
                     target_triple = Some(args[i + 1].clone());
@@ -325,6 +331,7 @@ pub fn handle_native_build(args: &[String]) -> i32 {
         }
         eprintln!("  Runtime bundle: {}", runtime_bundle);
         eprintln!("  Entry closure: {}", entry_closure);
+        eprintln!("  Emit archive: {}", emit_archive);
         eprintln!("  Opt level: {}", opt_level.as_str());
     }
 
@@ -372,6 +379,7 @@ pub fn handle_native_build(args: &[String]) -> i32 {
         target,
         linker_script,
         opt_level,
+        emit_archive,
         ..Default::default()
     };
     if !backend.is_empty() {
@@ -407,7 +415,12 @@ pub fn handle_native_build(args: &[String]) -> i32 {
                 result.compiled, result.cached, result.failed
             );
             println!(
-                "  Binary: {} ({} KB)",
+                "  {}: {} ({} KB)",
+                if result.output.extension().and_then(|ext| ext.to_str()) == Some("a") {
+                    "Archive"
+                } else {
+                    "Binary"
+                },
                 result.output.display(),
                 result.binary_size / 1024
             );
@@ -460,6 +473,7 @@ fn print_help() {
     println!("  --opt-level=<level> Optimization level: none, basic, standard, aggressive");
     println!("  --list-optimizations Print implemented optimization groups and levels");
     println!("  --runtime-bundle <mode> Runtime lane to link (auto, simple-core, core-c-bootstrap, rust-hosted)");
+    println!("  --emit-archive     Emit a static archive from Simple objects instead of linking an executable");
     println!("  --entry-closure     Compile only modules reachable from --entry");
     println!("  --help, -h          Show this help");
     println!();

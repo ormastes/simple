@@ -342,8 +342,8 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     // Value creation/conversion
     // =========================================================================
     RuntimeFuncSpec::new("rt_value_int", &[I64], &[I64]),
-    RuntimeFuncSpec::new("rt_value_float", &[F64], &[I64]),
-    RuntimeFuncSpec::new("rt_value_bool", &[I8], &[I64]),
+    RuntimeFuncSpec::new("rt_value_float", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_value_bool", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_value_nil", &[], &[I64]),
     RuntimeFuncSpec::new("rt_value_as_int", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_raw_u64_to_string", &[I64], &[I64]),
@@ -415,7 +415,7 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     // Raw memory allocation (zero-cost struct support)
     // =========================================================================
     RuntimeFuncSpec::new("rt_alloc", &[I64], &[I64]),
-    RuntimeFuncSpec::new("rt_free", &[I64, I64], &[]),
+    RuntimeFuncSpec::new("rt_free", &[I64], &[]),
     RuntimeFuncSpec::new("rt_ptr_to_value", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_value_to_ptr", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_dyn_torch_tensor_from_bits_1d", &[I64, I64], &[I64]),
@@ -1143,11 +1143,14 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_env_remove", &[I64, I64], &[I8]), // name_ptr, name_len -> bool
     RuntimeFuncSpec::new("rt_env_home", &[], &[I64]),        // () -> RuntimeValue
     RuntimeFuncSpec::new("rt_env_temp", &[], &[I64]),        // () -> RuntimeValue
-    RuntimeFuncSpec::new("rt_exit", &[I32], &[]),            // code -> ! (never returns)
-    RuntimeFuncSpec::new("rt_get_args", &[], &[I64]),        // () -> RuntimeValue (array of args)
-    RuntimeFuncSpec::new("rt_platform_name", &[], &[I64]),   // () -> RuntimeValue
+    RuntimeFuncSpec::new("rt_exit", &[I64], &[]),            // code -> ! (never returns)
+    RuntimeFuncSpec::new("rt_time_now_unix", &[], &[I64]),
+    RuntimeFuncSpec::new("rt_sleep_ms", &[I64], &[]),
+    RuntimeFuncSpec::new("rt_panic", &[I64], &[]),
+    RuntimeFuncSpec::new("rt_get_args", &[], &[I64]), // () -> RuntimeValue (array of args)
+    RuntimeFuncSpec::new("rt_platform_name", &[], &[I64]), // () -> RuntimeValue
     RuntimeFuncSpec::new("rt_term_enable_ansi", &[], &[I64]), // () -> RuntimeValue (bool)
-    RuntimeFuncSpec::new("rt_term_get_size", &[], &[I64]),   // () -> RuntimeValue (tuple of i32, i32)
+    RuntimeFuncSpec::new("rt_term_get_size", &[], &[I64]), // () -> RuntimeValue (tuple of i32, i32)
     RuntimeFuncSpec::new("rt_ssh_userauth_password_only_failure_payload", &[], &[I64]),
     // =========================================================================
     // File I/O Metadata Operations
@@ -1161,6 +1164,7 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_file_read_text", &[I64, I64], &[I64]),    // path_ptr, path_len -> RuntimeValue
     RuntimeFuncSpec::new("rt_file_read_text_rv", &[I64], &[I64]),      // RuntimeValue(string) -> RuntimeValue
     RuntimeFuncSpec::new("rt_file_write_text", &[I64, I64, I64, I64], &[I8]), // path, content -> bool
+    RuntimeFuncSpec::new("rt_file_write_text_at", &[I64, I64, I64], &[I64]), // path RuntimeValue, offset, data RuntimeValue -> bytes written
     RuntimeFuncSpec::new("rt_file_copy", &[I64, I64, I64, I64], &[I8]), // src, dest -> bool
     RuntimeFuncSpec::new("rt_file_remove", &[I64, I64], &[I8]),        // path -> bool
     RuntimeFuncSpec::new("rt_file_size", &[I64, I64], &[I64]),         // path -> i64

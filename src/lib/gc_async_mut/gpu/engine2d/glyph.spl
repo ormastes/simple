@@ -1,14 +1,19 @@
 #![allow(unnamed_duplicate_typed_args)]
-# 2D Engine — Shared 5x7 Bitmap Font Glyph Data
+# 2D Engine — Shared Font Glyph Data
 #
 # Provides a reusable glyph lookup table and rendering functions for the
-# 5x7 bitmap font used across all 2D engine backends (CPU, software, CUDA).
+# 2D engine backends (CPU, software, CUDA). Text rendering uses the shared
+# FontRenderer so Engine2D and BrowserRenderer converge on the same glyph
+# metrics, with the 5x7 bitmap data retained for draw_text_bg coverage and
+# fallback paths.
 #
 # Each glyph is stored as 7 rows of 5-bit integers (MSB = leftmost pixel).
 # Supports: A-Z, a-z, 0-9, space, and common punctuation.
 #
 # Usage:
 #   use std.gpu.engine2d.glyph.{glyph_data, render_glyph_to_buffer, render_text_to_buffer}
+
+use common.text_layout.font_renderer.{FontRenderer}
 
 # ============================================================================
 # Glyph Constants
@@ -283,17 +288,12 @@ fn render_glyph_to_buffer(buf: [u32], buf_w: i32, x: i32, y: i32, ch: text, colo
 fn render_text_to_buffer(buf: [u32], buf_w: i32, buf_h: i32, x: i32, y: i32, text_val: text, color: u32, font_size: i32):
     """Render a full text string into a u32 ARGB pixel buffer.
 
-    Characters are rendered left-to-right with a horizontal advance of
-    6 * scale pixels (5px glyph + 1px spacing, scaled). Scale is derived
-    from font_size / 7 (minimum 1).
+    Uses the shared FontRenderer and opts into the same Liberation Serif TTF
+    path used by the browser renderer when the local spl_fonts dylib is
+    available. FontRenderer falls back to vector/bitmap glyphs if TTF loading
+    fails, preserving standalone Engine2D behavior.
     """
-    var scale = font_size / 7
-    if scale < 1:
-        scale = 1
-    var cursor_x = x
-    var idx = 0
-    while idx < text_val.len():
-        val ch = text_val.slice(idx, idx + 1)
-        render_glyph_to_buffer(buf, buf_w, cursor_x, y, ch, color, scale)
-        cursor_x = cursor_x + glyph_advance(scale)
-        idx = idx + 1
+    var renderer = FontRenderer.new()
+    if not renderer.try_enable_ttf("src/compiler_rust/target/release/libspl_fonts.so", "/usr/share/fonts/truetype/liberation/LiberationSerif-Regular.ttf"):
+        renderer.try_enable_ttf("src/compiler_rust/target/debug/libspl_fonts.so", "/usr/share/fonts/truetype/liberation/LiberationSerif-Regular.ttf")
+    renderer.render_text(buf, buf_w, buf_h, x, y, text_val, color, font_size)

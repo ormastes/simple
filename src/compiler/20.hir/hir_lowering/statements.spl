@@ -8,45 +8,78 @@ use compiler.frontend.parser_types.*
 use compiler.frontend.parser_types_expr.*
 use compiler.common.diagnostics.span.{Span}
 use compiler.hir.hir_lowering.types.HirLowering
+use compiler.hir.hir_lowering.expressions.*
+use std.nogc_sync_mut.io.process_ops.{eprint}
+
+extern fn rt_env_get(key: text) -> text
 
 # Statement Lowering
 # ============================================================================
 
 impl HirLowering:
-    me lower_stmt(s: Stmt) -> HirStmt:
-        """Lower statement to HIR."""
-        val kind = match s.kind:
+    me lower_hir_stmt(s: Stmt) -> HirStmt:
+        if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
+            eprint("[hir-lower] lower_stmt:start")
+        val stmt_kind_value = match s:
+            case Stmt(k, _): k
+        if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
+            eprint("[hir-lower] lower_stmt:kind")
+        val kind = match stmt_kind_value:
             case StmtKind.Expr(expr):
-                HirStmtKind.Expr(self.lower_expr(expr))
+                if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
+                    eprint("[hir-lower] lower_stmt:expr")
+                HirStmtKind.Expr(self.lower_hir_expr(expr))
 
             case StmtKind.Val(name, type_, init):
-                val hir_type = type_.map(\t: self.lower_type(t))
-                val hir_init = self.lower_expr(init)
+                if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
+                    eprint("[hir-lower] lower_stmt:val {name}")
+                val hir_type = if type_.?:
+                    Some(self.lower_type(type_.unwrap()))
+                else:
+                    nil
+                val hir_init = self.lower_hir_expr(init)
                 val symbol = self.symbols.define(name, SymbolKind.Variable, hir_type, s.span, false, false, nil)
                 HirStmtKind.Let(symbol, hir_type, hir_init)
 
             case StmtKind.Var(name, type_, init):
-                val hir_type = type_.map(\t: self.lower_type(t))
-                val hir_init = init.map(\i: self.lower_expr(i)) ?? HirExpr(kind: HirExprKind.NilLit, type_: nil, span: s.span)
+                if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
+                    eprint("[hir-lower] lower_stmt:var {name}")
+                val hir_type = if type_.?:
+                    Some(self.lower_type(type_.unwrap()))
+                else:
+                    nil
+                if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
+                    eprint("[hir-lower] lower_stmt:var:type {name}")
+                val hir_init = if init.?:
+                    if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
+                        eprint("[hir-lower] lower_stmt:var:init {name}")
+                    self.lower_hir_expr(init.unwrap())
+                else:
+                    HirExpr(kind: HirExprKind.NilLit, type_: nil, span: s.span)
+                if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
+                    eprint("[hir-lower] lower_stmt:var:init-done {name}")
                 val symbol = self.symbols.define(name, SymbolKind.Variable, hir_type, s.span, false, true, nil)
                 HirStmtKind.Let(symbol, hir_type, hir_init)
 
             case StmtKind.Assign(target, op, value):
-                val hir_op = op.map(\o: match o:
-                    case AssignOp.Add: HirAssignOp.Add
-                    case AssignOp.Sub: HirAssignOp.Sub
-                    case AssignOp.Mul: HirAssignOp.Mul
-                    case AssignOp.Div: HirAssignOp.Div
-                    case AssignOp.Mod: HirAssignOp.Mod
-                )
-                HirStmtKind.Assign(self.lower_expr(target), hir_op, self.lower_expr(value))
+                var hir_op: HirAssignOp? = nil
+                if op.?:
+                    val assign_op = op.unwrap()
+                    hir_op = Some(match assign_op:
+                        case AssignOp.Add: HirAssignOp.Add
+                        case AssignOp.Sub: HirAssignOp.Sub
+                        case AssignOp.Mul: HirAssignOp.Mul
+                        case AssignOp.Div: HirAssignOp.Div
+                        case AssignOp.Mod: HirAssignOp.Mod
+                    )
+                HirStmtKind.Assign(self.lower_hir_expr(target), hir_op, self.lower_hir_expr(value))
 
             case StmtKind.For(var_, iter, body):
                 self.symbols.push_scope(ScopeKind.Loop)
                 self.loop_depth = self.loop_depth + 1
                 val symbol = self.symbols.define(var_, SymbolKind.Variable, nil, s.span, false, false, nil)
-                val hir_iter = self.lower_expr(iter)
-                val hir_body = self.lower_block(body)
+                val hir_iter = self.lower_hir_expr(iter)
+                val hir_body = self.lower_hir_block(body)
                 self.loop_depth = self.loop_depth - 1
                 self.symbols.pop_scope()
                 # Desugar to loop
@@ -58,8 +91,8 @@ impl HirLowering:
 
             case StmtKind.While(cond, body):
                 self.loop_depth = self.loop_depth + 1
-                val hir_cond = self.lower_expr(cond)
-                val hir_body = self.lower_block(body)
+                val hir_cond = self.lower_hir_expr(cond)
+                val hir_body = self.lower_hir_block(body)
                 self.loop_depth = self.loop_depth - 1
                 HirStmtKind.Expr(HirExpr(
                     kind: HirExprKind.While(hir_cond, hir_body, nil),
@@ -69,7 +102,7 @@ impl HirLowering:
 
             case StmtKind.Loop(body):
                 self.loop_depth = self.loop_depth + 1
-                val hir_body = self.lower_block(body)
+                val hir_body = self.lower_hir_block(body)
                 self.loop_depth = self.loop_depth - 1
                 HirStmtKind.Expr(HirExpr(
                     kind: HirExprKind.Loop(hir_body, nil),
@@ -78,8 +111,12 @@ impl HirLowering:
                 ))
 
             case StmtKind.Return(value):
+                val return_value = if value.?:
+                    Some(self.lower_hir_expr(value.unwrap()))
+                else:
+                    nil
                 HirStmtKind.Expr(HirExpr(
-                    kind: HirExprKind.Return(value.map(\v: self.lower_expr(v))),
+                    kind: HirExprKind.Return(return_value),
                     type_: nil,
                     span: s.span
                 ))
@@ -99,15 +136,19 @@ impl HirLowering:
                 ))
 
             case StmtKind.Yield(value):
+                val yield_value = if value.?:
+                    Some(self.lower_hir_expr(value.unwrap()))
+                else:
+                    nil
                 HirStmtKind.Expr(HirExpr(
-                    kind: HirExprKind.Yield(value.map(\v: self.lower_expr(v))),
+                    kind: HirExprKind.Yield(yield_value),
                     type_: nil,
                     span: s.span
                 ))
 
             case StmtKind.Throw(value):
                 HirStmtKind.Expr(HirExpr(
-                    kind: HirExprKind.Throw(self.lower_expr(value)),
+                    kind: HirExprKind.Throw(self.lower_hir_expr(value)),
                     type_: nil,
                     span: s.span
                 ))
@@ -120,7 +161,7 @@ impl HirLowering:
                 var hir_items: [HirWithItem] = []
                 for item in items:
                     # Lower context expression
-                    val hir_context = self.lower_expr(item.context_expr)
+                    val hir_context = self.lower_hir_expr(item.context_expr)
 
                     # Handle optional variable binding
                     var hir_target: SymbolId? = nil
@@ -138,7 +179,7 @@ impl HirLowering:
                     hir_items = hir_items.push(hir_item)
 
                 # Lower body
-                val hir_body = self.lower_block(body)
+                val hir_body = self.lower_hir_block(body)
 
                 # Create With expression
                 HirStmtKind.Expr(HirExpr(

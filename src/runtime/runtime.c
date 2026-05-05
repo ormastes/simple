@@ -418,38 +418,42 @@ static void spl_array_grow(SplArray* a) {
     a->cap = new_cap;
 }
 
+static int spl_array_is_nil(SplArray* a) {
+    return !a || (uintptr_t)a < 4096;
+}
+
 SplArray* spl_array_push(SplArray* a, SplValue v) {
-    if (!a) return NULL;
+    if (spl_array_is_nil(a)) a = spl_array_new();
     if (a->len >= a->cap) spl_array_grow(a);
     a->items[a->len++] = v;
     return a;
 }
 
 SplValue spl_array_get(SplArray* a, int64_t idx) {
-    if (!a) return spl_nil();
+    if (spl_array_is_nil(a)) return spl_nil();
     if (idx < 0) idx = a->len + idx;
     if (idx < 0 || idx >= a->len) return spl_nil();
     return a->items[idx];
 }
 
 void spl_array_set(SplArray* a, int64_t idx, SplValue v) {
-    if (!a) return;
+    if (spl_array_is_nil(a)) return;
     if (idx < 0) idx = a->len + idx;
     if (idx < 0 || idx >= a->len) return;
     a->items[idx] = v;
 }
 
 int64_t spl_array_len(SplArray* a) {
-    return a ? a->len : 0;
+    return spl_array_is_nil(a) ? 0 : a->len;
 }
 
 SplValue spl_array_pop(SplArray* a) {
-    if (!a || a->len == 0) return spl_nil();
+    if (spl_array_is_nil(a) || a->len == 0) return spl_nil();
     return a->items[--a->len];
 }
 
 SplArray* spl_array_slice(SplArray* a, int64_t start, int64_t end) {
-    if (!a) return spl_array_new();
+    if (spl_array_is_nil(a)) return spl_array_new();
     if (start < 0) start = a->len + start;
     if (end < 0)   end = a->len + end;
     if (start < 0) start = 0;
@@ -465,8 +469,8 @@ SplArray* spl_array_slice(SplArray* a, int64_t start, int64_t end) {
 }
 
 SplArray* spl_array_concat(SplArray* a, SplArray* b) {
-    int64_t alen = a ? a->len : 0;
-    int64_t blen = b ? b->len : 0;
+    int64_t alen = spl_array_is_nil(a) ? 0 : a->len;
+    int64_t blen = spl_array_is_nil(b) ? 0 : b->len;
     SplArray* result = spl_array_new_cap(alen + blen + 1);
     for (int64_t i = 0; i < alen; i++) {
         result->items[i] = a->items[i];
@@ -479,7 +483,7 @@ SplArray* spl_array_concat(SplArray* a, SplArray* b) {
 }
 
 void spl_array_free(SplArray* a) {
-    if (!a) return;
+    if (spl_array_is_nil(a)) return;
     for (int64_t i = 0; i < a->len; i++) {
         spl_free_value(a->items[i]);
     }
@@ -500,7 +504,7 @@ const char* spl_array_get_text(SplArray* a, int64_t idx) { return spl_as_str(spl
 
 /* String array utilities */
 int spl_array_contains_str(SplArray* arr, const char* needle) {
-    if (!arr || !needle) return 0;
+    if (spl_array_is_nil(arr) || !needle) return 0;
     for (int64_t i = 0; i < arr->len; i++) {
         if (arr->items[i].tag == SPL_STRING && arr->items[i].as_str &&
             strcmp(arr->items[i].as_str, needle) == 0) return 1;

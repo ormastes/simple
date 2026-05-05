@@ -1,0 +1,116 @@
+enum WindowMode:
+    FullScreen
+    SplitLeft
+    SplitRight
+    SlideOver
+    PictureInPicture
+    StageManager
+    Minimized
+
+class WindowLayout:
+    x: i64
+    y: i64
+    width: i64
+    height: i64
+
+class SplitConfig:
+    left_id: i64
+    right_id: i64
+    ratio: f64
+
+val _MODE_FULLSCREEN: i64 = 0
+val _MODE_SPLIT_LEFT: i64 = 1
+val _MODE_SPLIT_RIGHT: i64 = 2
+val _MODE_SLIDE_OVER: i64 = 3
+val _MODE_PIP: i64 = 4
+val _MODE_STAGE: i64 = 5
+val _MODE_MINIMIZED: i64 = 6
+
+var _layout_modes: Dict<i64, i64> = {}
+var _layout_stage_positions: Dict<i64, WindowLayout> = {}
+var _layout_split_left_id: i64 = -1
+var _layout_split_right_id: i64 = -1
+var _layout_split_ratio: f64 = 0.5
+
+fn _mode_code(mode: WindowMode) -> i64:
+    if mode == WindowMode.SplitLeft:
+        return _MODE_SPLIT_LEFT
+    if mode == WindowMode.SplitRight:
+        return _MODE_SPLIT_RIGHT
+    if mode == WindowMode.SlideOver:
+        return _MODE_SLIDE_OVER
+    if mode == WindowMode.PictureInPicture:
+        return _MODE_PIP
+    if mode == WindowMode.StageManager:
+        return _MODE_STAGE
+    if mode == WindowMode.Minimized:
+        return _MODE_MINIMIZED
+    _MODE_FULLSCREEN
+
+class LayoutManager:
+    screen_width: i64
+    screen_height: i64
+    taskbar_height: i64
+    modes: Dict<i64, WindowMode>
+    split_config: SplitConfig?
+    slide_over_id: i64
+    pip_id: i64
+    stage_positions: Dict<i64, WindowLayout>
+
+    me set_mode(window_id: i64, mode: WindowMode):
+        self.modes[window_id] = mode
+        _layout_modes[window_id] = _mode_code(mode)
+
+    me apply_split_view(left_id: i64, right_id: i64, ratio: f64):
+        self.split_config = SplitConfig(left_id: left_id, right_id: right_id, ratio: ratio)
+        self.modes[left_id] = WindowMode.SplitLeft
+        self.modes[right_id] = WindowMode.SplitRight
+        _layout_split_left_id = left_id
+        _layout_split_right_id = right_id
+        _layout_split_ratio = ratio
+        _layout_modes[left_id] = _MODE_SPLIT_LEFT
+        _layout_modes[right_id] = _MODE_SPLIT_RIGHT
+
+    me set_slide_over(window_id: i64):
+        self.slide_over_id = window_id
+        self.modes[window_id] = WindowMode.SlideOver
+        _layout_modes[window_id] = _MODE_SLIDE_OVER
+
+    fn get_slide_over_id() -> i64:
+        self.slide_over_id
+
+    me set_pip(window_id: i64):
+        self.pip_id = window_id
+        self.modes[window_id] = WindowMode.PictureInPicture
+        _layout_modes[window_id] = _MODE_PIP
+
+    fn get_pip_id() -> i64:
+        self.pip_id
+
+    me set_stage_position(window_id: i64, layout: WindowLayout):
+        self.stage_positions[window_id] = layout
+        self.modes[window_id] = WindowMode.StageManager
+        _layout_stage_positions[window_id] = layout
+        _layout_modes[window_id] = _MODE_STAGE
+
+    fn compute_layout(window_id: i64) -> WindowLayout:
+        val mode = _layout_modes.get(window_id) ?? _MODE_FULLSCREEN
+        val usable_h = self.screen_height - self.taskbar_height
+        if mode == _MODE_MINIMIZED:
+            return WindowLayout(x: 0, y: self.screen_height, width: 0, height: 0)
+        if mode == _MODE_SLIDE_OVER:
+            return WindowLayout(x: self.screen_width - 330, y: 20, width: 320, height: usable_h - 40)
+        if mode == _MODE_PIP:
+            return WindowLayout(x: self.screen_width - 280, y: usable_h - 180, width: 260, height: 160)
+        if mode == _MODE_STAGE:
+            val stored = _layout_stage_positions.get(window_id)
+            if stored != nil:
+                return stored
+            val offset = (window_id % 5) * 40
+            return WindowLayout(x: 60 + offset, y: 30 + offset, width: 960, height: 640)
+        if mode == _MODE_SPLIT_LEFT or mode == _MODE_SPLIT_RIGHT:
+            val left_w = (self.screen_width.to_f64() * _layout_split_ratio).to_i64()
+            if mode == _MODE_SPLIT_LEFT:
+                return WindowLayout(x: 0, y: 0, width: left_w, height: usable_h)
+            return WindowLayout(x: left_w, y: 0, width: self.screen_width - left_w, height: usable_h)
+        WindowLayout(x: 0, y: 0, width: self.screen_width, height: usable_h)

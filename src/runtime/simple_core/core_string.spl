@@ -1,0 +1,379 @@
+# Pure-Simple `simple-core` string and string-backed stdio ABI.
+
+extern fn malloc(size: i64) -> i64
+extern fn memcpy(dst: i64, src: i64, n: i64) -> i64
+extern fn memcmp(left: i64, right: i64, n: i64) -> i64
+extern fn strtoll(ptr: i64, endptr: i64, base: i64) -> i64
+extern fn write(fd: i64, ptr: i64, count: i64) -> i64
+extern fn read(fd: i64, ptr: i64, count: i64) -> i64
+extern fn spl_load_i64(ptr: i64, offset: i64) -> i64
+extern fn spl_store_i64(ptr: i64, offset: i64, value: i64)
+extern fn spl_load_u8(ptr: i64, offset: i64) -> i64
+extern fn spl_store_u8(ptr: i64, offset: i64, value: i64)
+extern fn rt_array_len(array: i64) -> i64
+
+fn string_ptr(value: i64) -> i64:
+    if (value & 7) < 1 or (value & 7) > 1:
+        return 0
+    val ptr = value & -8
+    if ptr < 1:
+        return 0
+    val kind = spl_load_i64(ptr, 0) & 4294967295
+    if kind < 1398034993 or kind > 1398034993:
+        return 0
+    return ptr
+
+fn string_data_ptr_value(ptr: i64) -> i64:
+    return ptr + 16
+
+fn string_len_ptr(ptr: i64) -> i64:
+    return spl_load_i64(ptr, 8)
+
+fn write_string_to_fd(fd: i64, value: i64) -> i64:
+    val ptr = string_ptr(value)
+    if ptr < 1:
+        return 0
+    val len = string_len_ptr(ptr)
+    if len < 1:
+        return 0
+    return write(fd, string_data_ptr_value(ptr), len)
+
+fn is_space_byte(ch: i64) -> i64:
+    if ch > 31 and ch < 33:
+        return 1
+    if ch > 8 and ch < 11:
+        return 1
+    if ch > 12 and ch < 14:
+        return 1
+    return 0
+
+fn alloc_string(len: i64) -> i64:
+    val ptr = malloc(17 + len)
+    if ptr < 1:
+        return 3
+    spl_store_i64(ptr, 0, 1398034993)
+    spl_store_i64(ptr, 8, len)
+    spl_store_u8(ptr, 16 + len, 0)
+    return ptr | 1
+
+pub fn rt_string_new(bytes: i64, len: i64) -> i64:
+    if bytes < 1 and len > 0:
+        return 3
+    val out = alloc_string(len)
+    val ptr = string_ptr(out)
+    if ptr < 1:
+        return 3
+    if len > 0:
+        memcpy(ptr + 16, bytes, len)
+    return out
+
+pub fn rt_string_len(value: i64) -> i64:
+    val ptr = string_ptr(value)
+    if ptr < 1:
+        return -1
+    return string_len_ptr(ptr)
+
+pub fn rt_string_data(value: i64) -> i64:
+    val ptr = string_ptr(value)
+    if ptr < 1:
+        return 0
+    return string_data_ptr_value(ptr)
+
+pub fn rt_string_concat(left: i64, right: i64) -> i64:
+    val left_ptr = string_ptr(left)
+    val right_ptr = string_ptr(right)
+    if left_ptr < 1 or right_ptr < 1:
+        return 3
+    val left_len = string_len_ptr(left_ptr)
+    val right_len = string_len_ptr(right_ptr)
+    val out_len = left_len + right_len
+    val out = alloc_string(out_len)
+    val out_ptr = string_ptr(out)
+    if out_ptr < 1:
+        return 3
+    if left_len > 0:
+        memcpy(string_data_ptr_value(out_ptr), string_data_ptr_value(left_ptr), left_len)
+    if right_len > 0:
+        memcpy(string_data_ptr_value(out_ptr) + left_len, string_data_ptr_value(right_ptr), right_len)
+    return out
+
+pub fn rt_len(value: i64) -> i64:
+    val ptr = string_ptr(value)
+    if ptr > 0:
+        return string_len_ptr(ptr)
+    if (value & 7) < 1 and value > 4095:
+        return rt_array_len(value)
+    return 0
+
+pub fn rt_native_eq(left: i64, right: i64) -> i64:
+    val left_ptr = string_ptr(left)
+    val right_ptr = string_ptr(right)
+    if left_ptr > 0 or right_ptr > 0:
+        if left_ptr < 1 or right_ptr < 1:
+            return 0
+        val len = string_len_ptr(left_ptr)
+        val right_len = string_len_ptr(right_ptr)
+        if len < right_len or len > right_len:
+            return 0
+        if len < 1:
+            return 1
+        val cmp = memcmp(string_data_ptr_value(left_ptr), string_data_ptr_value(right_ptr), len)
+        if cmp < 0 or cmp > 0:
+            return 0
+        return 1
+    if left < right or left > right:
+        return 0
+    return 1
+
+pub fn rt_native_neq(left: i64, right: i64) -> i64:
+    val eq = rt_native_eq(left, right)
+    if eq < 1:
+        return 1
+    return 0
+
+pub fn rt_slice(value: i64, start: i64, end: i64, step: i64) -> i64:
+    val ptr = string_ptr(value)
+    if ptr < 1:
+        return 3
+    val len = string_len_ptr(ptr)
+    var begin = start
+    var finish = end
+    var stride = step
+    if stride < 1:
+        stride = 1
+    if begin < 0:
+        begin = len + begin
+    if finish < 0:
+        finish = len + finish
+    if begin < 0:
+        begin = 0
+    if finish < begin:
+        finish = begin
+    if begin > len:
+        begin = len
+    if finish > len:
+        finish = len
+    if stride > 1:
+        var out_len = 0
+        var i = begin
+        while i < finish:
+            out_len = out_len + 1
+            i = i + stride
+        val out = alloc_string(out_len)
+        val out_ptr = string_ptr(out)
+        if out_ptr < 1:
+            return 3
+        var out_i = 0
+        i = begin
+        while i < finish:
+            spl_store_u8(string_data_ptr_value(out_ptr), out_i, spl_load_u8(string_data_ptr_value(ptr), i))
+            out_i = out_i + 1
+            i = i + stride
+        return out
+    return rt_string_new(string_data_ptr_value(ptr) + begin, finish - begin)
+
+pub fn rt_string_starts_with(value: i64, prefix: i64) -> i64:
+    val ptr = string_ptr(value)
+    val prefix_ptr = string_ptr(prefix)
+    if ptr < 1 or prefix_ptr < 1:
+        return 0
+    val prefix_len = string_len_ptr(prefix_ptr)
+    if prefix_len > string_len_ptr(ptr):
+        return 0
+    if prefix_len < 1:
+        return 1
+    val cmp = memcmp(string_data_ptr_value(ptr), string_data_ptr_value(prefix_ptr), prefix_len)
+    if cmp < 0 or cmp > 0:
+        return 0
+    return 1
+
+pub fn rt_string_ends_with(value: i64, suffix: i64) -> i64:
+    val ptr = string_ptr(value)
+    val suffix_ptr = string_ptr(suffix)
+    if ptr < 1 or suffix_ptr < 1:
+        return 0
+    val len = string_len_ptr(ptr)
+    val suffix_len = string_len_ptr(suffix_ptr)
+    if suffix_len > len:
+        return 0
+    if suffix_len < 1:
+        return 1
+    val cmp = memcmp(string_data_ptr_value(ptr) + len - suffix_len, string_data_ptr_value(suffix_ptr), suffix_len)
+    if cmp < 0 or cmp > 0:
+        return 0
+    return 1
+
+pub fn rt_string_trim(value: i64) -> i64:
+    val ptr = string_ptr(value)
+    if ptr < 1:
+        return value
+    var begin = 0
+    var finish = string_len_ptr(ptr)
+    while begin < finish and is_space_byte(spl_load_u8(string_data_ptr_value(ptr), begin)) > 0:
+        begin = begin + 1
+    while finish > begin and is_space_byte(spl_load_u8(string_data_ptr_value(ptr), finish - 1)) > 0:
+        finish = finish - 1
+    return rt_string_new(string_data_ptr_value(ptr) + begin, finish - begin)
+
+pub fn rt_string_to_int(value: i64) -> i64:
+    val ptr = string_ptr(value)
+    if ptr < 1:
+        return 0
+    return strtoll(string_data_ptr_value(ptr), 0, 10)
+
+pub fn rt_to_string(value: i64) -> i64:
+    val ptr = string_ptr(value)
+    if ptr > 0:
+        return value
+    if value > 2 and value < 4:
+        return rt_string_new(0, 0)
+    if value > 10 and value < 12:
+        val out = alloc_string(4)
+        val out_ptr = string_ptr(out)
+        if out_ptr < 1:
+            return 3
+        spl_store_u8(string_data_ptr_value(out_ptr), 0, 116)
+        spl_store_u8(string_data_ptr_value(out_ptr), 1, 114)
+        spl_store_u8(string_data_ptr_value(out_ptr), 2, 117)
+        spl_store_u8(string_data_ptr_value(out_ptr), 3, 101)
+        return out
+    if value > 18 and value < 20:
+        val out = alloc_string(5)
+        val out_ptr = string_ptr(out)
+        if out_ptr < 1:
+            return 3
+        spl_store_u8(string_data_ptr_value(out_ptr), 0, 102)
+        spl_store_u8(string_data_ptr_value(out_ptr), 1, 97)
+        spl_store_u8(string_data_ptr_value(out_ptr), 2, 108)
+        spl_store_u8(string_data_ptr_value(out_ptr), 3, 115)
+        spl_store_u8(string_data_ptr_value(out_ptr), 4, 101)
+        return out
+    if (value & 7) > 0:
+        return rt_string_new(0, 0)
+
+    var n = value >> 3
+    val buf = malloc(32)
+    if buf < 1:
+        return 3
+    if n < 1 and n > -1:
+        spl_store_u8(buf, 0, 48)
+        return rt_string_new(buf, 1)
+
+    var negative = 0
+    if n < 0:
+        negative = 1
+        n = 0 - n
+
+    var len = 0
+    while n > 0:
+        val digit = n % 10
+        spl_store_u8(buf, len, 48 + digit)
+        len = len + 1
+        n = n / 10
+
+    val out = alloc_string(len + negative)
+    val out_ptr = string_ptr(out)
+    if out_ptr < 1:
+        return 3
+    var out_i = 0
+    if negative > 0:
+        spl_store_u8(string_data_ptr_value(out_ptr), 0, 45)
+        out_i = 1
+    var i = len - 1
+    while i >= 0:
+        spl_store_u8(string_data_ptr_value(out_ptr), out_i, spl_load_u8(buf, i))
+        out_i = out_i + 1
+        i = i - 1
+    return out
+
+pub fn rt_string_replace(value: i64, old_value: i64, new_value: i64) -> i64:
+    val ptr = string_ptr(value)
+    val old_ptr = string_ptr(old_value)
+    val new_ptr = string_ptr(new_value)
+    if ptr < 1 or old_ptr < 1 or new_ptr < 1:
+        return value
+    val len = string_len_ptr(ptr)
+    val old_len = string_len_ptr(old_ptr)
+    val new_len = string_len_ptr(new_ptr)
+    if old_len < 1:
+        return value
+
+    var count = 0
+    var i = 0
+    while i + old_len <= len:
+        val cmp = memcmp(string_data_ptr_value(ptr) + i, string_data_ptr_value(old_ptr), old_len)
+        if cmp > -1 and cmp < 1:
+            count = count + 1
+            i = i + old_len
+        else:
+            i = i + 1
+    if count < 1:
+        return value
+
+    var out_len = len
+    if new_len >= old_len:
+        out_len = out_len + count * (new_len - old_len)
+    else:
+        out_len = out_len - count * (old_len - new_len)
+    val out = alloc_string(out_len)
+    val out_ptr = string_ptr(out)
+    if out_ptr < 1:
+        return 3
+
+    var in_i = 0
+    var out_i = 0
+    while in_i < len:
+        var matched = 0
+        if in_i + old_len <= len:
+            val cmp = memcmp(string_data_ptr_value(ptr) + in_i, string_data_ptr_value(old_ptr), old_len)
+            if cmp > -1 and cmp < 1:
+                matched = 1
+        if matched > 0:
+            if new_len > 0:
+                memcpy(string_data_ptr_value(out_ptr) + out_i, string_data_ptr_value(new_ptr), new_len)
+            out_i = out_i + new_len
+            in_i = in_i + old_len
+        else:
+            spl_store_u8(string_data_ptr_value(out_ptr), out_i, spl_load_u8(string_data_ptr_value(ptr), in_i))
+            out_i = out_i + 1
+            in_i = in_i + 1
+    return out
+
+pub fn rt_stdout_write(value: i64) -> i64:
+    return write_string_to_fd(1, value)
+
+pub fn rt_stderr_write(value: i64) -> i64:
+    return write_string_to_fd(2, value)
+
+pub fn print_raw(value: i64) -> i64:
+    write_string_to_fd(1, value)
+    return 0
+
+pub fn rt_print_value(value: i64):
+    write_string_to_fd(1, value)
+
+pub fn rt_println_value(value: i64):
+    write_string_to_fd(1, value)
+    val nl = malloc(1)
+    if nl > 0:
+        spl_store_u8(nl, 0, 10)
+        write(1, nl, 1)
+
+pub fn rt_eprint_value(value: i64):
+    write_string_to_fd(2, value)
+
+pub fn rt_eprintln_value(value: i64):
+    write_string_to_fd(2, value)
+    val nl = malloc(1)
+    if nl > 0:
+        spl_store_u8(nl, 0, 10)
+        write(2, nl, 1)
+
+pub fn stdin_read_char() -> i64:
+    val byte = malloc(1)
+    if byte < 1:
+        return rt_string_new(0, 0)
+    val count = read(0, byte, 1)
+    if count < 1:
+        return rt_string_new(0, 0)
+    return rt_string_new(byte, 1)

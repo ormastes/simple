@@ -1,0 +1,326 @@
+# Chrome/Simple screenshot comparison runner for the deterministic famous-site corpus.
+
+use std.nogc_sync_mut.ffi.io.{dir_create_all, file_write_text}
+use common.string_builder.{StringBuilder}
+use app.wm_compare.site_corpus.{
+    SiteSample, build_famous_site_sample_corpus,
+    famous_site_sample_baseline_dir,
+    famous_site_sample_chrome_ppm_path,
+    famous_site_sample_simple_ppm_path,
+    famous_site_sample_report_sdn_path}
+use app.wm_compare.html_compat.{
+    CaptureResult, capture_chrome, compare_exact, compare_perceptual,
+    load_ppm_capture, write_ppm_local}
+use std.gc_async_mut.gpu.browser_engine.simple_web_renderer.{simple_web_render_html_to_pixels}
+
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_exists(path: text) -> bool
+
+struct SiteCorpusCompatOpts:
+    only: text
+    limit: i32
+    update_baseline: bool
+    skip_simple: bool
+    simple_timeout_ms: i64
+    width: i32
+    height: i32
+    continue_on_fail: bool
+    stale_only: bool
+    help: bool
+
+struct SiteCorpusPair:
+    sample_id: text
+    chrome_ok: bool
+    chrome_error: text
+    simple_ok: bool
+    simple_error: text
+    exact: bool
+    different_pixels: i64
+    match_pct_10000: i64
+    perceptual_pct_10000: i64
+    max_channel_diff: i32
+    accepted: bool
+
+fn default_site_corpus_compat_opts() -> SiteCorpusCompatOpts:
+    SiteCorpusCompatOpts(
+        only: "",
+        limit: 0,
+        update_baseline: false,
+        skip_simple: false,
+        simple_timeout_ms: 20000,
+        width: 160,
+        height: 120,
+        continue_on_fail: false,
+        stale_only: false,
+        help: false
+    )
+
+fn _parse_kv(arg: text, key: text) -> text:
+    val prefix = key + "="
+    if arg.starts_with(prefix):
+        return arg.substring(prefix.len())
+    ""
+
+fn parse_site_corpus_compat_opts(args: [text]) -> SiteCorpusCompatOpts:
+    var opts = default_site_corpus_compat_opts()
+    for arg in args:
+        if arg == "-h" or arg == "--help":
+            opts.help = true
+        elif arg == "--update-baseline":
+            opts.update_baseline = true
+        elif arg == "--skip-simple":
+            opts.skip_simple = true
+        elif arg == "--continue-on-fail":
+            opts.continue_on_fail = true
+        elif arg == "--stale-only":
+            opts.stale_only = true
+        else:
+            val v_only = _parse_kv(arg, "--only")
+            if v_only != "":
+                opts.only = v_only
+            else:
+                val v_limit = _parse_kv(arg, "--limit")
+                if v_limit != "":
+                    opts.limit = v_limit.to_i32()
+                else:
+                    val v_w = _parse_kv(arg, "--width")
+                    if v_w != "":
+                        opts.width = v_w.to_i32()
+                    else:
+                        val v_h = _parse_kv(arg, "--height")
+                        if v_h != "":
+                            opts.height = v_h.to_i32()
+                        else:
+                            val v_timeout = _parse_kv(arg, "--simple-timeout-ms")
+                            if v_timeout != "":
+                                opts.simple_timeout_ms = v_timeout.to_i64()
+    opts
+
+fn print_site_corpus_compat_help():
+    print "Usage: simple run src/app/wm_compare/site_corpus_compat.spl [options]"
+    print ""
+    print "Chrome <-> Simple pixel comparison for the offline famous-site corpus."
+    print ""
+    print "Options:"
+    print "  --only=<sample_id>       Run one corpus sample"
+    print "  --limit=<n>              Stop after n selected samples (0 means all)"
+    print "  --update-baseline        Capture Chrome and overwrite chrome.ppm"
+    print "  --skip-simple            With --update-baseline, regenerate Chrome only"
+    print "  --continue-on-fail       Write reports for every selected sample"
+    print "  --stale-only             Run only report.sdn files above 10000 differing pixels"
+    print "  --simple-timeout-ms=<n>  Bound Simple source-B render (default 20000)"
+    print "  --width=<n>              Capture width (default 160)"
+    print "  --height=<n>             Capture height (default 120)"
+    print "  -h, --help               Show this help"
+
+fn _bool_text(b: bool) -> text:
+    if b: "true" else: "false"
+
+fn _capture_chrome_for_sample(sample: SiteSample, opts: SiteCorpusCompatOpts) -> CaptureResult:
+    if opts.update_baseline:
+        val chrome = capture_chrome(sample.html, opts.width, opts.height)
+        if chrome.success:
+            dir_create_all(famous_site_sample_baseline_dir(sample.id))
+            write_ppm_local(chrome.pixels, chrome.width, chrome.height, famous_site_sample_chrome_ppm_path(sample.id))
+        return chrome
+    load_ppm_capture(famous_site_sample_chrome_ppm_path(sample.id), "famous_site_chromium_golden", opts.width, opts.height)
+
+fn _capture_simple_for_sample(sample: SiteSample, opts: SiteCorpusCompatOpts) -> CaptureResult:
+    if opts.skip_simple:
+        return CaptureResult(
+            pixels: [],
+            width: opts.width,
+            height: opts.height,
+            backend_name: "simple_browser_engine",
+            success: false,
+            error: "skipped via --skip-simple"
+        )
+    val pixels = simple_web_render_html_to_pixels(sample.html, opts.width, opts.height)
+    if pixels.len() != opts.width * opts.height:
+        return CaptureResult(
+            pixels: pixels,
+            width: opts.width,
+            height: opts.height,
+            backend_name: "simple_browser_engine",
+            success: false,
+            error: "in-process render returned {pixels.len()} pixels"
+        )
+    val simple = CaptureResult(
+        pixels: pixels,
+        width: opts.width,
+        height: opts.height,
+        backend_name: "simple_browser_engine",
+        success: true,
+        error: ""
+    )
+    if simple.success:
+        dir_create_all(famous_site_sample_baseline_dir(sample.id))
+        write_site_sample_simple_ppm(sample, simple.pixels, opts)
+    simple
+
+fn _repeat_text_site(s: text, count: i32) -> text:
+    var sb = StringBuilder.new()
+    var i = 0
+    while i < count:
+        sb.push(s)
+        i = i + 1
+    sb.to_text()
+
+fn _rgb_text(color: u32) -> text:
+    ((color >> 16) & 0xFF).to_string() + " " + ((color >> 8) & 0xFF).to_string() + " " + (color & 0xFF).to_string() + "\n"
+
+fn write_site_sample_simple_ppm(sample: SiteSample, pixels: [u32], opts: SiteCorpusCompatOpts) -> bool:
+    val path = famous_site_sample_simple_ppm_path(sample.id)
+    if opts.width == 160 and opts.height == 120 and pixels.len() == opts.width * opts.height:
+        var sb = StringBuilder.new()
+        sb.push("P3\n160 120\n255\n")
+        var y = 0
+        while y < opts.height:
+            var x = 0
+            while x < opts.width:
+                sb.push(_rgb_text(pixels[y * opts.width + x]))
+                x = x + 1
+            y = y + 1
+        return file_write_text(path, sb.to_text())
+    write_ppm_local(pixels, opts.width, opts.height, path)
+
+fn compare_site_sample(sample: SiteSample, chrome: CaptureResult, simple: CaptureResult,
+                       opts: SiteCorpusCompatOpts) -> SiteCorpusPair:
+    if not chrome.success:
+        return SiteCorpusPair(
+            sample_id: sample.id,
+            chrome_ok: false, chrome_error: chrome.error,
+            simple_ok: simple.success, simple_error: simple.error,
+            exact: false, different_pixels: 0, match_pct_10000: 0,
+            perceptual_pct_10000: 0, max_channel_diff: 0, accepted: false
+        )
+    if not simple.success:
+        return SiteCorpusPair(
+            sample_id: sample.id,
+            chrome_ok: true, chrome_error: "",
+            simple_ok: false, simple_error: simple.error,
+            exact: false, different_pixels: 0, match_pct_10000: 0,
+            perceptual_pct_10000: 0, max_channel_diff: 0, accepted: false
+        )
+    val exact = compare_exact(chrome.pixels, simple.pixels, opts.width, opts.height)
+    if exact.different_pixels == 0:
+        return SiteCorpusPair(
+            sample_id: sample.id,
+            chrome_ok: true, chrome_error: "",
+            simple_ok: true, simple_error: "",
+            exact: true, different_pixels: 0, match_pct_10000: 10000,
+            perceptual_pct_10000: 10000, max_channel_diff: 0, accepted: true
+        )
+    val perceptual = compare_perceptual(chrome.pixels, simple.pixels, opts.width, opts.height, 16, true)
+    val ok = perceptual.match_percentage >= 9900
+    SiteCorpusPair(
+        sample_id: sample.id,
+        chrome_ok: true, chrome_error: "",
+        simple_ok: true, simple_error: "",
+        exact: false,
+        different_pixels: exact.different_pixels,
+        match_pct_10000: exact.match_percentage,
+        perceptual_pct_10000: perceptual.match_percentage,
+        max_channel_diff: exact.max_channel_diff,
+        accepted: ok
+    )
+
+fn write_site_corpus_report(sample: SiteSample, chrome: CaptureResult, simple: CaptureResult,
+                            pair: SiteCorpusPair, opts: SiteCorpusCompatOpts) -> bool:
+    var body = "(famous_site_corpus_report\n"
+    body = body + "  sample: \"{sample.id}\"\n"
+    body = body + "  name: \"{sample.name}\"\n"
+    body = body + "  category: \"{sample.category}\"\n"
+    body = body + "  viewport: (width: {opts.width} height: {opts.height})\n"
+    body = body + "  chrome_ppm: \"{famous_site_sample_chrome_ppm_path(sample.id)}\"\n"
+    body = body + "  simple_ppm: \"{famous_site_sample_simple_ppm_path(sample.id)}\"\n"
+    body = body + "  chrome: (success: {_bool_text(chrome.success)} error: \"{chrome.error}\")\n"
+    body = body + "  simple: (success: {_bool_text(simple.success)} error: \"{simple.error}\")\n"
+    body = body + "  compare: (exact: {_bool_text(pair.exact)} accepted: {_bool_text(pair.accepted)} different_pixels: {pair.different_pixels} match_pct_10000: {pair.match_pct_10000} perceptual_pct_10000: {pair.perceptual_pct_10000} max_channel_diff: {pair.max_channel_diff})\n"
+    body = body + ")\n"
+    dir_create_all(famous_site_sample_baseline_dir(sample.id))
+    file_write_text(famous_site_sample_report_sdn_path(sample.id), body)
+
+fn _matches_selected(sample: SiteSample, opts: SiteCorpusCompatOpts) -> bool:
+    opts.only == "" or sample.id == opts.only
+
+fn _report_different_pixels(report: text) -> i64:
+    val marker = "different_pixels: "
+    val idx = report.index_of(marker)
+    if idx == -1:
+        return 0
+    val rest = report.substring(idx + marker.len())
+    var end = 0
+    while end < rest.len():
+        val c = rest.char_at(end)
+        if c < "0" or c > "9":
+            break
+        end = end + 1
+    if end == 0:
+        return 0
+    rest.substring(0, end).parse_int() ?? 0
+
+fn _matches_stale_filter(sample: SiteSample, opts: SiteCorpusCompatOpts) -> bool:
+    if not opts.stale_only:
+        return true
+    val path = famous_site_sample_report_sdn_path(sample.id)
+    if not rt_file_exists(path):
+        return true
+    _report_different_pixels(rt_file_read_text(path) ?? "") > 10000
+
+fn run_site_sample(sample: SiteSample, opts: SiteCorpusCompatOpts) -> SiteCorpusPair:
+    print "[site_corpus_compat] Sample: {sample.id} ({sample.name})"
+    val chrome = _capture_chrome_for_sample(sample, opts)
+    val simple = _capture_simple_for_sample(sample, opts)
+    val pair = compare_site_sample(sample, chrome, simple, opts)
+    write_site_corpus_report(sample, chrome, simple, pair, opts)
+    if not pair.chrome_ok:
+        print "[site_corpus_compat]   RESULT: missing or failed Chrome baseline"
+    elif not pair.simple_ok:
+        print "[site_corpus_compat]   RESULT: Simple capture failed"
+    elif pair.exact:
+        print "[site_corpus_compat]   RESULT: EXACT match"
+    elif pair.accepted:
+        print "[site_corpus_compat]   RESULT: perceptual pass"
+    else:
+        print "[site_corpus_compat]   RESULT: divergent"
+    pair
+
+fn main() -> i64:
+    val args = get_cli_args()
+    if args.len() > 0 and args[0] == "test":
+        return 0
+    val opts = parse_site_corpus_compat_opts(args)
+    if opts.help:
+        print_site_corpus_compat_help()
+        return 0
+
+    val samples = build_famous_site_sample_corpus()
+    var ran_count = 0
+    var first_failed = ""
+    for sample in samples:
+        if not _matches_selected(sample, opts):
+            continue
+        if not _matches_stale_filter(sample, opts):
+            continue
+        if opts.limit > 0 and ran_count >= opts.limit:
+            break
+        ran_count = ran_count + 1
+        val pair = run_site_sample(sample, opts)
+        if opts.update_baseline and opts.skip_simple:
+            if not pair.chrome_ok:
+                first_failed = sample.id
+                break
+            continue
+        if not pair.accepted:
+            if first_failed == "":
+                first_failed = sample.id
+            if not opts.continue_on_fail:
+                break
+
+    print "[site_corpus_compat] Summary: ran {ran_count} sample(s)"
+    if first_failed == "":
+        print "[site_corpus_compat] All selected samples accepted."
+        return 0
+    print "[site_corpus_compat] First failed sample: {first_failed}"
+    1

@@ -16,7 +16,8 @@
 
 use std.gc_async_mut.gpu.browser_engine.dom.{BeDomNode,
     be_dom_get_tag, be_dom_get_id, be_dom_get_classes, be_dom_get_children,
-    be_dom_get_is_text, be_dom_set_style, be_dom_set_children, be_dom_get_bg_color}
+    be_dom_get_is_text, be_dom_set_style, be_dom_set_children, be_dom_get_bg_color,
+    parse_color_value}
 use std.gc_async_mut.gpu.browser_engine.css.{parse_css_value, BoxEdges,
     BorderProps, CssValue}
 use common.string_builder.{StringBuilder}
@@ -278,11 +279,53 @@ fn expand_border(value: text) -> [CssDecl]:
     ]
 
 fn expand_background(value: text) -> [CssDecl]:
-    # Simple: treat single-value background as background-color
     val trimmed = value.trim()
-    if not trimmed.starts_with("url(") and not trimmed.starts_with("linear-gradient") and not trimmed.starts_with("radial-gradient"):
-        return [CssDecl(property: "background-color", value: trimmed)]
+    if not trimmed.starts_with("linear-gradient") and not trimmed.starts_with("radial-gradient"):
+        val color = sb_background_shorthand_color_value(trimmed)
+        if color.len() > 0:
+            return [CssDecl(property: "background-color", value: color)]
     [CssDecl(property: "background", value: value)]
+
+fn sb_background_shorthand_color_value(value: text) -> text:
+    val trimmed = value.trim()
+    if trimmed.len() == 0:
+        return ""
+    var pos = 0
+    while pos < trimmed.len():
+        while pos < trimmed.len() and trimmed.char_at(pos) == " ":
+            pos = pos + 1
+        if pos >= trimmed.len():
+            break
+        val token = sb_background_token_from(trimmed, pos)
+        if token.len() == 0:
+            break
+        val lower = token.lower()
+        if lower.starts_with("url(") or lower.starts_with("linear-gradient") or lower.starts_with("radial-gradient"):
+            pos = pos + token.len()
+            continue
+        if token.starts_with("#") or lower.starts_with("rgb(") or lower.starts_with("rgba(") or lower.starts_with("hsl(") or lower.starts_with("hsla(") or lower == "transparent" or lower == "currentcolor":
+            return token
+        val parsed = parse_color_value(token)
+        if parsed != 0x000000FF or lower == "black":
+            return token
+        pos = pos + token.len()
+    ""
+
+fn sb_background_token_from(value: text, start: i32) -> text:
+    var end = start
+    var depth: i32 = 0
+    while end < value.len():
+        val ch = value.char_at(end)
+        if ch == "(":
+            depth = depth + 1
+        elif ch == ")":
+            if depth > 0:
+                depth = depth - 1
+        elif ch == " " and depth == 0:
+            break
+        end = end + 1
+    val raw = value.slice(start, end)
+    raw.trim()
 
 fn expand_box_shorthand(prop: text, value: text) -> [CssDecl]:
     val parts = sb_split_ws(value)

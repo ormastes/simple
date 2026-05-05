@@ -179,6 +179,462 @@ static CUDA_INIT_RESULT: OnceLock<CudaResult<()>> = OnceLock::new();
 #[cfg(feature = "cuda")]
 static DEFAULT_CONTEXT: OnceLock<Result<usize, CudaError>> = OnceLock::new();
 
+#[cfg(feature = "cuda")]
+const F64_BINARY_PTX: &str = r#".version 7.0
+.target sm_50
+.address_size 64
+
+.visible .entry f64_add(
+    .param .u64 dst,
+    .param .u64 left,
+    .param .u64 right,
+    .param .u64 n
+) {
+    .reg .pred p;
+    .reg .f64 a, b, c;
+    .reg .b64 pd, pl, pr, offset, n64, idx64;
+    .reg .b32 tid, ntid, ctaid, idx;
+    mov.u32 tid, %tid.x;
+    mov.u32 ntid, %ntid.x;
+    mov.u32 ctaid, %ctaid.x;
+    mad.lo.u32 idx, ctaid, ntid, tid;
+    ld.param.u64 n64, [n];
+    cvt.u64.u32 idx64, idx;
+    setp.ge.u64 p, idx64, n64;
+    @p bra done_add;
+    ld.param.u64 pd, [dst];
+    ld.param.u64 pl, [left];
+    ld.param.u64 pr, [right];
+    shl.b64 offset, idx64, 3;
+    add.u64 pd, pd, offset;
+    add.u64 pl, pl, offset;
+    add.u64 pr, pr, offset;
+    ld.global.f64 a, [pl];
+    ld.global.f64 b, [pr];
+    add.rn.f64 c, a, b;
+    st.global.f64 [pd], c;
+done_add:
+    ret;
+}
+
+.visible .entry f64_sub(
+    .param .u64 dst,
+    .param .u64 left,
+    .param .u64 right,
+    .param .u64 n
+) {
+    .reg .pred p;
+    .reg .f64 a, b, c;
+    .reg .b64 pd, pl, pr, offset, n64, idx64;
+    .reg .b32 tid, ntid, ctaid, idx;
+    mov.u32 tid, %tid.x;
+    mov.u32 ntid, %ntid.x;
+    mov.u32 ctaid, %ctaid.x;
+    mad.lo.u32 idx, ctaid, ntid, tid;
+    ld.param.u64 n64, [n];
+    cvt.u64.u32 idx64, idx;
+    setp.ge.u64 p, idx64, n64;
+    @p bra done_sub;
+    ld.param.u64 pd, [dst];
+    ld.param.u64 pl, [left];
+    ld.param.u64 pr, [right];
+    shl.b64 offset, idx64, 3;
+    add.u64 pd, pd, offset;
+    add.u64 pl, pl, offset;
+    add.u64 pr, pr, offset;
+    ld.global.f64 a, [pl];
+    ld.global.f64 b, [pr];
+    sub.rn.f64 c, a, b;
+    st.global.f64 [pd], c;
+done_sub:
+    ret;
+}
+
+.visible .entry f64_mul(
+    .param .u64 dst,
+    .param .u64 left,
+    .param .u64 right,
+    .param .u64 n
+) {
+    .reg .pred p;
+    .reg .f64 a, b, c;
+    .reg .b64 pd, pl, pr, offset, n64, idx64;
+    .reg .b32 tid, ntid, ctaid, idx;
+    mov.u32 tid, %tid.x;
+    mov.u32 ntid, %ntid.x;
+    mov.u32 ctaid, %ctaid.x;
+    mad.lo.u32 idx, ctaid, ntid, tid;
+    ld.param.u64 n64, [n];
+    cvt.u64.u32 idx64, idx;
+    setp.ge.u64 p, idx64, n64;
+    @p bra done_mul;
+    ld.param.u64 pd, [dst];
+    ld.param.u64 pl, [left];
+    ld.param.u64 pr, [right];
+    shl.b64 offset, idx64, 3;
+    add.u64 pd, pd, offset;
+    add.u64 pl, pl, offset;
+    add.u64 pr, pr, offset;
+    ld.global.f64 a, [pl];
+    ld.global.f64 b, [pr];
+    mul.rn.f64 c, a, b;
+    st.global.f64 [pd], c;
+done_mul:
+    ret;
+}
+
+.visible .entry f64_div(
+    .param .u64 dst,
+    .param .u64 left,
+    .param .u64 right,
+    .param .u64 n
+) {
+    .reg .pred p;
+    .reg .f64 a, b, c;
+    .reg .b64 pd, pl, pr, offset, n64, idx64;
+    .reg .b32 tid, ntid, ctaid, idx;
+    mov.u32 tid, %tid.x;
+    mov.u32 ntid, %ntid.x;
+    mov.u32 ctaid, %ctaid.x;
+    mad.lo.u32 idx, ctaid, ntid, tid;
+    ld.param.u64 n64, [n];
+    cvt.u64.u32 idx64, idx;
+    setp.ge.u64 p, idx64, n64;
+    @p bra done_div;
+    ld.param.u64 pd, [dst];
+    ld.param.u64 pl, [left];
+    ld.param.u64 pr, [right];
+    shl.b64 offset, idx64, 3;
+    add.u64 pd, pd, offset;
+    add.u64 pl, pl, offset;
+    add.u64 pr, pr, offset;
+    ld.global.f64 a, [pl];
+    ld.global.f64 b, [pr];
+    div.rn.f64 c, a, b;
+    st.global.f64 [pd], c;
+done_div:
+    ret;
+}
+"#;
+
+#[cfg(feature = "cuda")]
+const F64_SUM_PTX: &str = r#".version 7.0
+.target sm_50
+.address_size 64
+
+.visible .entry f64_sum(
+    .param .u64 dst,
+    .param .u64 src,
+    .param .u64 n
+) {
+    .reg .pred done;
+    .reg .f64 acc, value;
+    .reg .b64 pd, ps, n64, i, offset, current, zero;
+    ld.param.u64 pd, [dst];
+    ld.param.u64 ps, [src];
+    ld.param.u64 n64, [n];
+    mov.u64 i, 0;
+    mov.u64 zero, 0;
+    mov.b64 acc, zero;
+sum_loop:
+    setp.ge.u64 done, i, n64;
+    @done bra sum_done;
+    shl.b64 offset, i, 3;
+    add.u64 current, ps, offset;
+    ld.global.f64 value, [current];
+    add.rn.f64 acc, acc, value;
+    add.u64 i, i, 1;
+    bra sum_loop;
+sum_done:
+    st.global.f64 [pd], acc;
+    ret;
+}
+"#;
+
+#[cfg(feature = "cuda")]
+const F64_MINMAX_PTX: &str = r#".version 7.0
+.target sm_50
+.address_size 64
+
+.visible .entry f64_min(
+    .param .u64 dst,
+    .param .u64 src,
+    .param .u64 n
+) {
+    .reg .pred done, update;
+    .reg .f64 best, value;
+    .reg .b64 pd, ps, n64, i, offset, current;
+    ld.param.u64 pd, [dst];
+    ld.param.u64 ps, [src];
+    ld.param.u64 n64, [n];
+    ld.global.f64 best, [ps];
+    mov.u64 i, 1;
+min_loop:
+    setp.ge.u64 done, i, n64;
+    @done bra min_done;
+    shl.b64 offset, i, 3;
+    add.u64 current, ps, offset;
+    ld.global.f64 value, [current];
+    setp.lt.f64 update, value, best;
+    @update mov.f64 best, value;
+    add.u64 i, i, 1;
+    bra min_loop;
+min_done:
+    st.global.f64 [pd], best;
+    ret;
+}
+
+.visible .entry f64_max(
+    .param .u64 dst,
+    .param .u64 src,
+    .param .u64 n
+) {
+    .reg .pred done, update;
+    .reg .f64 best, value;
+    .reg .b64 pd, ps, n64, i, offset, current;
+    ld.param.u64 pd, [dst];
+    ld.param.u64 ps, [src];
+    ld.param.u64 n64, [n];
+    ld.global.f64 best, [ps];
+    mov.u64 i, 1;
+max_loop:
+    setp.ge.u64 done, i, n64;
+    @done bra max_done;
+    shl.b64 offset, i, 3;
+    add.u64 current, ps, offset;
+    ld.global.f64 value, [current];
+    setp.gt.f64 update, value, best;
+    @update mov.f64 best, value;
+    add.u64 i, i, 1;
+    bra max_loop;
+max_done:
+    st.global.f64 [pd], best;
+    ret;
+}
+"#;
+
+#[cfg(feature = "cuda")]
+const F64_SUM_AXIS_PTX: &str = r#".version 7.0
+.target sm_50
+.address_size 64
+
+.visible .entry f64_sum_axis0(
+    .param .u64 dst,
+    .param .u64 src,
+    .param .u64 rows,
+    .param .u64 cols
+) {
+    .reg .pred done, skip;
+    .reg .f64 acc, value;
+    .reg .b64 pd, ps, rows64, cols64, col64, row64, src_index, offset, current, zero;
+    .reg .b32 tid, ntid, ctaid, idx;
+    mov.u32 tid, %tid.x;
+    mov.u32 ntid, %ntid.x;
+    mov.u32 ctaid, %ctaid.x;
+    mad.lo.u32 idx, ctaid, ntid, tid;
+    cvt.u64.u32 col64, idx;
+    ld.param.u64 cols64, [cols];
+    setp.ge.u64 skip, col64, cols64;
+    @skip bra axis0_done;
+    ld.param.u64 pd, [dst];
+    ld.param.u64 ps, [src];
+    ld.param.u64 rows64, [rows];
+    mov.u64 row64, 0;
+    mov.u64 zero, 0;
+    mov.b64 acc, zero;
+axis0_loop:
+    setp.ge.u64 done, row64, rows64;
+    @done bra axis0_store;
+    mul.lo.u64 src_index, row64, cols64;
+    add.u64 src_index, src_index, col64;
+    shl.b64 offset, src_index, 3;
+    add.u64 current, ps, offset;
+    ld.global.f64 value, [current];
+    add.rn.f64 acc, acc, value;
+    add.u64 row64, row64, 1;
+    bra axis0_loop;
+axis0_store:
+    shl.b64 offset, col64, 3;
+    add.u64 pd, pd, offset;
+    st.global.f64 [pd], acc;
+axis0_done:
+    ret;
+}
+
+.visible .entry f64_sum_axis1(
+    .param .u64 dst,
+    .param .u64 src,
+    .param .u64 rows,
+    .param .u64 cols
+) {
+    .reg .pred done, skip;
+    .reg .f64 acc, value;
+    .reg .b64 pd, ps, rows64, cols64, row64, col64, src_index, offset, current, zero;
+    .reg .b32 tid, ntid, ctaid, idx;
+    mov.u32 tid, %tid.x;
+    mov.u32 ntid, %ntid.x;
+    mov.u32 ctaid, %ctaid.x;
+    mad.lo.u32 idx, ctaid, ntid, tid;
+    cvt.u64.u32 row64, idx;
+    ld.param.u64 rows64, [rows];
+    setp.ge.u64 skip, row64, rows64;
+    @skip bra axis1_done;
+    ld.param.u64 pd, [dst];
+    ld.param.u64 ps, [src];
+    ld.param.u64 cols64, [cols];
+    mov.u64 col64, 0;
+    mov.u64 zero, 0;
+    mov.b64 acc, zero;
+axis1_loop:
+    setp.ge.u64 done, col64, cols64;
+    @done bra axis1_store;
+    mul.lo.u64 src_index, row64, cols64;
+    add.u64 src_index, src_index, col64;
+    shl.b64 offset, src_index, 3;
+    add.u64 current, ps, offset;
+    ld.global.f64 value, [current];
+    add.rn.f64 acc, acc, value;
+    add.u64 col64, col64, 1;
+    bra axis1_loop;
+axis1_store:
+    shl.b64 offset, row64, 3;
+    add.u64 pd, pd, offset;
+    st.global.f64 [pd], acc;
+axis1_done:
+    ret;
+}
+"#;
+
+#[cfg(feature = "cuda")]
+const F64_SCALAR_DIV_PTX: &str = r#".version 7.0
+.target sm_50
+.address_size 64
+
+.visible .entry f64_scalar_div(
+    .param .u64 dst,
+    .param .u64 src,
+    .param .u64 n,
+    .param .f64 scalar
+) {
+    .reg .pred p;
+    .reg .f64 value, divisor, out;
+    .reg .b64 pd, ps, n64, idx64, offset;
+    .reg .b32 tid, ntid, ctaid, idx;
+    mov.u32 tid, %tid.x;
+    mov.u32 ntid, %ntid.x;
+    mov.u32 ctaid, %ctaid.x;
+    mad.lo.u32 idx, ctaid, ntid, tid;
+    cvt.u64.u32 idx64, idx;
+    ld.param.u64 n64, [n];
+    setp.ge.u64 p, idx64, n64;
+    @p bra div_done;
+    ld.param.u64 pd, [dst];
+    ld.param.u64 ps, [src];
+    ld.param.f64 divisor, [scalar];
+    shl.b64 offset, idx64, 3;
+    add.u64 pd, pd, offset;
+    add.u64 ps, ps, offset;
+    ld.global.f64 value, [ps];
+    div.rn.f64 out, value, divisor;
+    st.global.f64 [pd], out;
+div_done:
+    ret;
+}
+"#;
+
+#[cfg(feature = "cuda")]
+const F64_SLICE_PTX: &str = r#".version 7.0
+.target sm_50
+.address_size 64
+
+.visible .entry f64_slice_1d(
+    .param .u64 dst,
+    .param .u64 src,
+    .param .u64 start,
+    .param .u64 step,
+    .param .u64 n
+) {
+    .reg .pred p;
+    .reg .f64 value;
+    .reg .b64 pd, ps, start64, step64, n64, idx64, src_index, offset;
+    .reg .b32 tid, ntid, ctaid, idx;
+    mov.u32 tid, %tid.x;
+    mov.u32 ntid, %ntid.x;
+    mov.u32 ctaid, %ctaid.x;
+    mad.lo.u32 idx, ctaid, ntid, tid;
+    ld.param.u64 n64, [n];
+    cvt.u64.u32 idx64, idx;
+    setp.ge.u64 p, idx64, n64;
+    @p bra done_1d;
+    ld.param.u64 pd, [dst];
+    ld.param.u64 ps, [src];
+    ld.param.u64 start64, [start];
+    ld.param.u64 step64, [step];
+    mul.lo.u64 src_index, idx64, step64;
+    add.u64 src_index, src_index, start64;
+    shl.b64 offset, src_index, 3;
+    add.u64 ps, ps, offset;
+    shl.b64 offset, idx64, 3;
+    add.u64 pd, pd, offset;
+    ld.global.f64 value, [ps];
+    st.global.f64 [pd], value;
+done_1d:
+    ret;
+}
+
+.visible .entry f64_slice_2d(
+    .param .u64 dst,
+    .param .u64 src,
+    .param .u64 source_cols,
+    .param .u64 row_start,
+    .param .u64 row_step,
+    .param .u64 row_count,
+    .param .u64 col_start,
+    .param .u64 col_step,
+    .param .u64 col_count
+) {
+    .reg .pred p;
+    .reg .f64 value;
+    .reg .b64 pd, ps, source_cols64, row_start64, row_step64, row_count64;
+    .reg .b64 col_start64, col_step64, col_count64, total64, idx64, row64, col64;
+    .reg .b64 src_row, src_col, src_index, offset;
+    .reg .b32 tid, ntid, ctaid, idx;
+    mov.u32 tid, %tid.x;
+    mov.u32 ntid, %ntid.x;
+    mov.u32 ctaid, %ctaid.x;
+    mad.lo.u32 idx, ctaid, ntid, tid;
+    ld.param.u64 row_count64, [row_count];
+    ld.param.u64 col_count64, [col_count];
+    mul.lo.u64 total64, row_count64, col_count64;
+    cvt.u64.u32 idx64, idx;
+    setp.ge.u64 p, idx64, total64;
+    @p bra done_2d;
+    ld.param.u64 pd, [dst];
+    ld.param.u64 ps, [src];
+    ld.param.u64 source_cols64, [source_cols];
+    ld.param.u64 row_start64, [row_start];
+    ld.param.u64 row_step64, [row_step];
+    ld.param.u64 col_start64, [col_start];
+    ld.param.u64 col_step64, [col_step];
+    div.u64 row64, idx64, col_count64;
+    rem.u64 col64, idx64, col_count64;
+    mul.lo.u64 src_row, row64, row_step64;
+    add.u64 src_row, src_row, row_start64;
+    mul.lo.u64 src_col, col64, col_step64;
+    add.u64 src_col, src_col, col_start64;
+    mul.lo.u64 src_index, src_row, source_cols64;
+    add.u64 src_index, src_index, src_col;
+    shl.b64 offset, src_index, 3;
+    add.u64 ps, ps, offset;
+    shl.b64 offset, idx64, 3;
+    add.u64 pd, pd, offset;
+    ld.global.f64 value, [ps];
+    st.global.f64 [pd], value;
+done_2d:
+    ret;
+}
+"#;
+
 /// Initialize CUDA driver
 fn init_cuda() -> CudaResult<()> {
     *CUDA_INIT_RESULT.get_or_init(|| {
@@ -930,6 +1386,612 @@ pub extern "C" fn rt_cuda_memset(_ptr: i64, _value: i64, _size: i64) -> i64 {
     -3
 }
 
+#[no_mangle]
+#[cfg(feature = "cuda")]
+pub extern "C" fn rt_cuda_f64_binary_op(dst: i64, left: i64, right: i64, n: i64, op: i64) -> i64 {
+    if dst <= 0 || left <= 0 || right <= 0 || n < 0 {
+        return -1;
+    }
+    if n == 0 {
+        return 0;
+    }
+    let kernel_name = match op {
+        0 => "f64_add",
+        1 => "f64_sub",
+        2 => "f64_mul",
+        3 => "f64_div",
+        _ => return -1,
+    };
+    if let Err(err) = ensure_default_context_current() {
+        return -(err as i64);
+    }
+    let ptx = match CString::new(F64_BINARY_PTX) {
+        Ok(value) => value,
+        Err(_) => return -1,
+    };
+    let name = match CString::new(kernel_name) {
+        Ok(value) => value,
+        Err(_) => return -1,
+    };
+    unsafe {
+        let mut module: CUmodule = ptr::null_mut();
+        let load_err = cuModuleLoadData(&mut module, ptx.as_ptr() as *const c_void);
+        if load_err != 0 {
+            return -(load_err as i64);
+        }
+
+        let mut func: CUfunction = ptr::null_mut();
+        let func_err = cuModuleGetFunction(&mut func, module, name.as_ptr());
+        if func_err != 0 {
+            cuModuleUnload(module);
+            return -(func_err as i64);
+        }
+
+        let mut dst_arg = dst as CUdeviceptr;
+        let mut left_arg = left as CUdeviceptr;
+        let mut right_arg = right as CUdeviceptr;
+        let mut n_arg = n as u64;
+        let mut params = [
+            &mut dst_arg as *mut _ as *mut c_void,
+            &mut left_arg as *mut _ as *mut c_void,
+            &mut right_arg as *mut _ as *mut c_void,
+            &mut n_arg as *mut _ as *mut c_void,
+        ];
+        let block = 256_i64;
+        let grid = ((n + block - 1) / block).max(1);
+        let launch_err = cuLaunchKernel(
+            func,
+            grid as c_uint,
+            1,
+            1,
+            block as c_uint,
+            1,
+            1,
+            0,
+            ptr::null_mut(),
+            params.as_mut_ptr(),
+            ptr::null_mut(),
+        );
+        if launch_err != 0 {
+            cuModuleUnload(module);
+            return -(launch_err as i64);
+        }
+        let sync_err = cuCtxSynchronize();
+        cuModuleUnload(module);
+        if sync_err != 0 {
+            return -(sync_err as i64);
+        }
+        0
+    }
+}
+
+#[no_mangle]
+#[cfg(not(feature = "cuda"))]
+pub extern "C" fn rt_cuda_f64_binary_op(_dst: i64, _left: i64, _right: i64, _n: i64, _op: i64) -> i64 {
+    -3
+}
+
+#[no_mangle]
+#[cfg(feature = "cuda")]
+pub extern "C" fn rt_cuda_f64_sum(dst_host_bits: i64, src: i64, n: i64) -> i64 {
+    if dst_host_bits <= 0 || src <= 0 || n < 0 {
+        return -1;
+    }
+    if let Err(err) = ensure_default_context_current() {
+        return -(err as i64);
+    }
+    let ptx = match CString::new(F64_SUM_PTX) {
+        Ok(value) => value,
+        Err(_) => return -1,
+    };
+    let name = match CString::new("f64_sum") {
+        Ok(value) => value,
+        Err(_) => return -1,
+    };
+    unsafe {
+        let mut out_dev: CUdeviceptr = 0;
+        let alloc_err = cuMemAlloc_v2(&mut out_dev, std::mem::size_of::<f64>());
+        if alloc_err != 0 {
+            return -(alloc_err as i64);
+        }
+
+        let mut module: CUmodule = ptr::null_mut();
+        let load_err = cuModuleLoadData(&mut module, ptx.as_ptr() as *const c_void);
+        if load_err != 0 {
+            cuMemFree_v2(out_dev);
+            return -(load_err as i64);
+        }
+
+        let mut func: CUfunction = ptr::null_mut();
+        let func_err = cuModuleGetFunction(&mut func, module, name.as_ptr());
+        if func_err != 0 {
+            cuModuleUnload(module);
+            cuMemFree_v2(out_dev);
+            return -(func_err as i64);
+        }
+
+        let mut dst_arg = out_dev;
+        let mut src_arg = src as CUdeviceptr;
+        let mut n_arg = n as u64;
+        let mut params = [
+            &mut dst_arg as *mut _ as *mut c_void,
+            &mut src_arg as *mut _ as *mut c_void,
+            &mut n_arg as *mut _ as *mut c_void,
+        ];
+        let launch_err = cuLaunchKernel(
+            func,
+            1,
+            1,
+            1,
+            1,
+            1,
+            1,
+            0,
+            ptr::null_mut(),
+            params.as_mut_ptr(),
+            ptr::null_mut(),
+        );
+        if launch_err != 0 {
+            cuModuleUnload(module);
+            cuMemFree_v2(out_dev);
+            return -(launch_err as i64);
+        }
+        let sync_err = cuCtxSynchronize();
+        if sync_err != 0 {
+            cuModuleUnload(module);
+            cuMemFree_v2(out_dev);
+            return -(sync_err as i64);
+        }
+        let copy_err = cuMemcpyDtoH_v2(dst_host_bits as *mut c_void, out_dev, std::mem::size_of::<f64>());
+        cuModuleUnload(module);
+        cuMemFree_v2(out_dev);
+        if copy_err != 0 {
+            return -(copy_err as i64);
+        }
+        0
+    }
+}
+
+#[no_mangle]
+#[cfg(not(feature = "cuda"))]
+pub extern "C" fn rt_cuda_f64_sum(_dst_host_bits: i64, _src: i64, _n: i64) -> i64 {
+    -3
+}
+
+#[no_mangle]
+#[cfg(feature = "cuda")]
+pub extern "C" fn rt_cuda_f64_minmax(dst_host_bits: i64, src: i64, n: i64, op: i64) -> i64 {
+    if dst_host_bits <= 0 || src <= 0 || n <= 0 {
+        return -1;
+    }
+    let kernel_name = match op {
+        0 => "f64_min",
+        1 => "f64_max",
+        _ => return -1,
+    };
+    if let Err(err) = ensure_default_context_current() {
+        return -(err as i64);
+    }
+    let ptx = match CString::new(F64_MINMAX_PTX) {
+        Ok(value) => value,
+        Err(_) => return -1,
+    };
+    let name = match CString::new(kernel_name) {
+        Ok(value) => value,
+        Err(_) => return -1,
+    };
+    unsafe {
+        let mut out_dev: CUdeviceptr = 0;
+        let alloc_err = cuMemAlloc_v2(&mut out_dev, std::mem::size_of::<f64>());
+        if alloc_err != 0 {
+            return -(alloc_err as i64);
+        }
+
+        let mut module: CUmodule = ptr::null_mut();
+        let load_err = cuModuleLoadData(&mut module, ptx.as_ptr() as *const c_void);
+        if load_err != 0 {
+            cuMemFree_v2(out_dev);
+            return -(load_err as i64);
+        }
+
+        let mut func: CUfunction = ptr::null_mut();
+        let func_err = cuModuleGetFunction(&mut func, module, name.as_ptr());
+        if func_err != 0 {
+            cuModuleUnload(module);
+            cuMemFree_v2(out_dev);
+            return -(func_err as i64);
+        }
+
+        let mut dst_arg = out_dev;
+        let mut src_arg = src as CUdeviceptr;
+        let mut n_arg = n as u64;
+        let mut params = [
+            &mut dst_arg as *mut _ as *mut c_void,
+            &mut src_arg as *mut _ as *mut c_void,
+            &mut n_arg as *mut _ as *mut c_void,
+        ];
+        let launch_err = cuLaunchKernel(
+            func,
+            1,
+            1,
+            1,
+            1,
+            1,
+            1,
+            0,
+            ptr::null_mut(),
+            params.as_mut_ptr(),
+            ptr::null_mut(),
+        );
+        if launch_err != 0 {
+            cuModuleUnload(module);
+            cuMemFree_v2(out_dev);
+            return -(launch_err as i64);
+        }
+        let sync_err = cuCtxSynchronize();
+        if sync_err != 0 {
+            cuModuleUnload(module);
+            cuMemFree_v2(out_dev);
+            return -(sync_err as i64);
+        }
+        let copy_err = cuMemcpyDtoH_v2(dst_host_bits as *mut c_void, out_dev, std::mem::size_of::<f64>());
+        cuModuleUnload(module);
+        cuMemFree_v2(out_dev);
+        if copy_err != 0 {
+            return -(copy_err as i64);
+        }
+        0
+    }
+}
+
+#[no_mangle]
+#[cfg(not(feature = "cuda"))]
+pub extern "C" fn rt_cuda_f64_minmax(_dst_host_bits: i64, _src: i64, _n: i64, _op: i64) -> i64 {
+    -3
+}
+
+#[no_mangle]
+#[cfg(feature = "cuda")]
+pub extern "C" fn rt_cuda_f64_sum_axis(dst: i64, src: i64, rows: i64, cols: i64, axis: i64) -> i64 {
+    if dst <= 0 || src <= 0 || rows <= 0 || cols <= 0 {
+        return -1;
+    }
+    let (kernel_name, n) = match axis {
+        0 => ("f64_sum_axis0", cols),
+        1 => ("f64_sum_axis1", rows),
+        _ => return -1,
+    };
+    if let Err(err) = ensure_default_context_current() {
+        return -(err as i64);
+    }
+    let ptx = match CString::new(F64_SUM_AXIS_PTX) {
+        Ok(value) => value,
+        Err(_) => return -1,
+    };
+    let name = match CString::new(kernel_name) {
+        Ok(value) => value,
+        Err(_) => return -1,
+    };
+    unsafe {
+        let mut module: CUmodule = ptr::null_mut();
+        let load_err = cuModuleLoadData(&mut module, ptx.as_ptr() as *const c_void);
+        if load_err != 0 {
+            return -(load_err as i64);
+        }
+
+        let mut func: CUfunction = ptr::null_mut();
+        let func_err = cuModuleGetFunction(&mut func, module, name.as_ptr());
+        if func_err != 0 {
+            cuModuleUnload(module);
+            return -(func_err as i64);
+        }
+
+        let mut dst_arg = dst as CUdeviceptr;
+        let mut src_arg = src as CUdeviceptr;
+        let mut rows_arg = rows as u64;
+        let mut cols_arg = cols as u64;
+        let mut params = [
+            &mut dst_arg as *mut _ as *mut c_void,
+            &mut src_arg as *mut _ as *mut c_void,
+            &mut rows_arg as *mut _ as *mut c_void,
+            &mut cols_arg as *mut _ as *mut c_void,
+        ];
+        let block = 256_i64;
+        let grid = ((n + block - 1) / block).max(1);
+        let launch_err = cuLaunchKernel(
+            func,
+            grid as c_uint,
+            1,
+            1,
+            block as c_uint,
+            1,
+            1,
+            0,
+            ptr::null_mut(),
+            params.as_mut_ptr(),
+            ptr::null_mut(),
+        );
+        if launch_err != 0 {
+            cuModuleUnload(module);
+            return -(launch_err as i64);
+        }
+        let sync_err = cuCtxSynchronize();
+        cuModuleUnload(module);
+        if sync_err != 0 {
+            return -(sync_err as i64);
+        }
+        0
+    }
+}
+
+#[no_mangle]
+#[cfg(not(feature = "cuda"))]
+pub extern "C" fn rt_cuda_f64_sum_axis(_dst: i64, _src: i64, _rows: i64, _cols: i64, _axis: i64) -> i64 {
+    -3
+}
+
+#[no_mangle]
+#[cfg(feature = "cuda")]
+pub extern "C" fn rt_cuda_f64_scalar_div(dst: i64, src: i64, n: i64, scalar_bits: i64) -> i64 {
+    if dst <= 0 || src <= 0 || n < 0 {
+        return -1;
+    }
+    if n == 0 {
+        return 0;
+    }
+    let scalar = f64::from_bits(scalar_bits as u64);
+    if scalar == 0.0 {
+        return -1;
+    }
+    if let Err(err) = ensure_default_context_current() {
+        return -(err as i64);
+    }
+    let ptx = match CString::new(F64_SCALAR_DIV_PTX) {
+        Ok(value) => value,
+        Err(_) => return -1,
+    };
+    let name = match CString::new("f64_scalar_div") {
+        Ok(value) => value,
+        Err(_) => return -1,
+    };
+    unsafe {
+        let mut module: CUmodule = ptr::null_mut();
+        let load_err = cuModuleLoadData(&mut module, ptx.as_ptr() as *const c_void);
+        if load_err != 0 {
+            return -(load_err as i64);
+        }
+
+        let mut func: CUfunction = ptr::null_mut();
+        let func_err = cuModuleGetFunction(&mut func, module, name.as_ptr());
+        if func_err != 0 {
+            cuModuleUnload(module);
+            return -(func_err as i64);
+        }
+
+        let mut dst_arg = dst as CUdeviceptr;
+        let mut src_arg = src as CUdeviceptr;
+        let mut n_arg = n as u64;
+        let mut scalar_arg = scalar;
+        let mut params = [
+            &mut dst_arg as *mut _ as *mut c_void,
+            &mut src_arg as *mut _ as *mut c_void,
+            &mut n_arg as *mut _ as *mut c_void,
+            &mut scalar_arg as *mut _ as *mut c_void,
+        ];
+        let block = 256_i64;
+        let grid = ((n + block - 1) / block).max(1);
+        let launch_err = cuLaunchKernel(
+            func,
+            grid as c_uint,
+            1,
+            1,
+            block as c_uint,
+            1,
+            1,
+            0,
+            ptr::null_mut(),
+            params.as_mut_ptr(),
+            ptr::null_mut(),
+        );
+        if launch_err != 0 {
+            cuModuleUnload(module);
+            return -(launch_err as i64);
+        }
+        let sync_err = cuCtxSynchronize();
+        cuModuleUnload(module);
+        if sync_err != 0 {
+            return -(sync_err as i64);
+        }
+        0
+    }
+}
+
+#[no_mangle]
+#[cfg(not(feature = "cuda"))]
+pub extern "C" fn rt_cuda_f64_scalar_div(_dst: i64, _src: i64, _n: i64, _scalar_bits: i64) -> i64 {
+    -3
+}
+
+#[no_mangle]
+#[cfg(feature = "cuda")]
+pub extern "C" fn rt_cuda_f64_slice_1d(dst: i64, src: i64, start: i64, step: i64, n: i64) -> i64 {
+    if dst <= 0 || src <= 0 || start < 0 || step == 0 || n < 0 {
+        return -1;
+    }
+    if n == 0 {
+        return 0;
+    }
+    launch_f64_slice_kernel("f64_slice_1d", dst, src, 0, start, step, n, 0, 1, 1)
+}
+
+#[no_mangle]
+#[cfg(not(feature = "cuda"))]
+pub extern "C" fn rt_cuda_f64_slice_1d(_dst: i64, _src: i64, _start: i64, _step: i64, _n: i64) -> i64 {
+    -3
+}
+
+#[no_mangle]
+#[cfg(feature = "cuda")]
+pub extern "C" fn rt_cuda_f64_slice_2d(
+    dst: i64,
+    src: i64,
+    source_cols: i64,
+    row_start: i64,
+    row_step: i64,
+    row_count: i64,
+    col_start: i64,
+    col_step: i64,
+    col_count: i64,
+) -> i64 {
+    if dst <= 0
+        || src <= 0
+        || source_cols <= 0
+        || row_start < 0
+        || row_step == 0
+        || row_count < 0
+        || col_start < 0
+        || col_step == 0
+        || col_count < 0
+    {
+        return -1;
+    }
+    if row_count == 0 || col_count == 0 {
+        return 0;
+    }
+    launch_f64_slice_kernel(
+        "f64_slice_2d",
+        dst,
+        src,
+        source_cols,
+        row_start,
+        row_step,
+        row_count,
+        col_start,
+        col_step,
+        col_count,
+    )
+}
+
+#[no_mangle]
+#[cfg(not(feature = "cuda"))]
+pub extern "C" fn rt_cuda_f64_slice_2d(
+    _dst: i64,
+    _src: i64,
+    _source_cols: i64,
+    _row_start: i64,
+    _row_step: i64,
+    _row_count: i64,
+    _col_start: i64,
+    _col_step: i64,
+    _col_count: i64,
+) -> i64 {
+    -3
+}
+
+#[cfg(feature = "cuda")]
+#[allow(clippy::too_many_arguments)]
+fn launch_f64_slice_kernel(
+    kernel_name: &str,
+    dst: i64,
+    src: i64,
+    source_cols: i64,
+    row_start: i64,
+    row_step: i64,
+    row_count: i64,
+    col_start: i64,
+    col_step: i64,
+    col_count: i64,
+) -> i64 {
+    if let Err(err) = ensure_default_context_current() {
+        return -(err as i64);
+    }
+    let ptx = match CString::new(F64_SLICE_PTX) {
+        Ok(value) => value,
+        Err(_) => return -1,
+    };
+    let name = match CString::new(kernel_name) {
+        Ok(value) => value,
+        Err(_) => return -1,
+    };
+    unsafe {
+        let mut module: CUmodule = ptr::null_mut();
+        let load_err = cuModuleLoadData(&mut module, ptx.as_ptr() as *const c_void);
+        if load_err != 0 {
+            return -(load_err as i64);
+        }
+
+        let mut func: CUfunction = ptr::null_mut();
+        let func_err = cuModuleGetFunction(&mut func, module, name.as_ptr());
+        if func_err != 0 {
+            cuModuleUnload(module);
+            return -(func_err as i64);
+        }
+
+        let mut dst_arg = dst as CUdeviceptr;
+        let mut src_arg = src as CUdeviceptr;
+        let mut source_cols_arg = source_cols as u64;
+        let mut row_start_arg = row_start as u64;
+        let mut row_step_arg = row_step as u64;
+        let mut row_count_arg = row_count as u64;
+        let mut col_start_arg = col_start as u64;
+        let mut col_step_arg = col_step as u64;
+        let mut col_count_arg = col_count as u64;
+        let mut params_1d = [
+            &mut dst_arg as *mut _ as *mut c_void,
+            &mut src_arg as *mut _ as *mut c_void,
+            &mut row_start_arg as *mut _ as *mut c_void,
+            &mut row_step_arg as *mut _ as *mut c_void,
+            &mut row_count_arg as *mut _ as *mut c_void,
+        ];
+        let mut params_2d = [
+            &mut dst_arg as *mut _ as *mut c_void,
+            &mut src_arg as *mut _ as *mut c_void,
+            &mut source_cols_arg as *mut _ as *mut c_void,
+            &mut row_start_arg as *mut _ as *mut c_void,
+            &mut row_step_arg as *mut _ as *mut c_void,
+            &mut row_count_arg as *mut _ as *mut c_void,
+            &mut col_start_arg as *mut _ as *mut c_void,
+            &mut col_step_arg as *mut _ as *mut c_void,
+            &mut col_count_arg as *mut _ as *mut c_void,
+        ];
+        let n = if kernel_name == "f64_slice_1d" {
+            row_count
+        } else {
+            row_count.saturating_mul(col_count)
+        };
+        let block = 256_i64;
+        let grid = ((n + block - 1) / block).max(1);
+        let params = if kernel_name == "f64_slice_1d" {
+            params_1d.as_mut_ptr()
+        } else {
+            params_2d.as_mut_ptr()
+        };
+        let launch_err = cuLaunchKernel(
+            func,
+            grid as c_uint,
+            1,
+            1,
+            block as c_uint,
+            1,
+            1,
+            0,
+            ptr::null_mut(),
+            params,
+            ptr::null_mut(),
+        );
+        if launch_err != 0 {
+            cuModuleUnload(module);
+            return -(launch_err as i64);
+        }
+        let sync_err = cuCtxSynchronize();
+        cuModuleUnload(module);
+        if sync_err != 0 {
+            return -(sync_err as i64);
+        }
+        0
+    }
+}
+
 /// Load CUDA module from file
 #[no_mangle]
 #[cfg(feature = "cuda")]
@@ -1158,6 +2220,13 @@ mod tests {
         let ptx = CString::new(".version 7.0\n.target sm_50\n.address_size 64\n").unwrap();
         assert_eq!(rt_cuda_module_load_data(ptx.as_ptr()), -3);
         assert_eq!(rt_cuda_launch_kernel(0, ptx.as_ptr(), 1, 1, 1, 1, 1, 1, 0), -3);
+        assert_eq!(rt_cuda_f64_binary_op(0, 0, 0, 1, 0), -3);
+        assert_eq!(rt_cuda_f64_sum(0, 0, 1), -3);
+        assert_eq!(rt_cuda_f64_minmax(0, 0, 1, 0), -3);
+        assert_eq!(rt_cuda_f64_sum_axis(0, 0, 2, 2, 0), -3);
+        assert_eq!(rt_cuda_f64_scalar_div(0, 0, 1, 1.0_f64.to_bits() as i64), -3);
+        assert_eq!(rt_cuda_f64_slice_1d(0, 0, 0, 1, 1), -3);
+        assert_eq!(rt_cuda_f64_slice_2d(0, 0, 1, 0, 1, 1, 0, 1, 1), -3);
         assert_eq!(rt_cuda_sync(), -3);
     }
 
@@ -1238,5 +2307,255 @@ mod tests {
 
         let unload = rt_cuda_module_unload(module);
         assert_eq!(unload, 0, "expected module unload to succeed, got {unload}");
+    }
+
+    #[test]
+    #[cfg(feature = "cuda")]
+    fn test_raw_ffi_f64_binary_kernel_when_cuda_is_available() {
+        let Ok(device_count) = get_device_count() else {
+            return;
+        };
+        if device_count <= 0 {
+            return;
+        }
+
+        let left = [8.0_f64, 6.0, 4.0, 2.0];
+        let right = [2.0_f64, 3.0, 4.0, 1.0];
+        let bytes = (left.len() * std::mem::size_of::<f64>()) as i64;
+        let left_dev = rt_cuda_mem_alloc(bytes);
+        let right_dev = rt_cuda_mem_alloc(bytes);
+        let out_dev = rt_cuda_mem_alloc(bytes);
+        assert!(left_dev > 0, "left device allocation failed: {left_dev}");
+        assert!(right_dev > 0, "right device allocation failed: {right_dev}");
+        assert!(out_dev > 0, "out device allocation failed: {out_dev}");
+
+        assert_eq!(rt_cuda_memcpy_htod(left_dev, left.as_ptr() as i64, bytes), 0);
+        assert_eq!(rt_cuda_memcpy_htod(right_dev, right.as_ptr() as i64, bytes), 0);
+        assert_eq!(
+            rt_cuda_f64_binary_op(out_dev, left_dev, right_dev, left.len() as i64, 0),
+            0
+        );
+
+        let mut out = [0.0_f64; 4];
+        assert_eq!(rt_cuda_memcpy_dtoh(out.as_mut_ptr() as i64, out_dev, bytes), 0);
+        assert_eq!(out, [10.0, 9.0, 8.0, 3.0]);
+
+        assert_eq!(
+            rt_cuda_f64_binary_op(out_dev, left_dev, right_dev, left.len() as i64, 3),
+            0
+        );
+        assert_eq!(rt_cuda_memcpy_dtoh(out.as_mut_ptr() as i64, out_dev, bytes), 0);
+        assert_eq!(out, [4.0, 2.0, 1.0, 2.0]);
+
+        assert_eq!(rt_cuda_mem_free(left_dev), 0);
+        assert_eq!(rt_cuda_mem_free(right_dev), 0);
+        assert_eq!(rt_cuda_mem_free(out_dev), 0);
+    }
+
+    #[test]
+    #[cfg(feature = "cuda")]
+    fn test_raw_ffi_f64_sum_kernel_when_cuda_is_available() {
+        let Ok(device_count) = get_device_count() else {
+            return;
+        };
+        if device_count <= 0 {
+            return;
+        }
+
+        let values = [1.25_f64, 2.5, -0.75, 4.0];
+        let bytes = (values.len() * std::mem::size_of::<f64>()) as i64;
+        let values_dev = rt_cuda_mem_alloc(bytes);
+        assert!(values_dev > 0, "device allocation failed: {values_dev}");
+        assert_eq!(rt_cuda_memcpy_htod(values_dev, values.as_ptr() as i64, bytes), 0);
+
+        let mut sum = 0.0_f64;
+        assert_eq!(
+            rt_cuda_f64_sum((&mut sum as *mut f64) as i64, values_dev, values.len() as i64),
+            0
+        );
+        assert_eq!(sum, 7.0);
+
+        assert_eq!(rt_cuda_mem_free(values_dev), 0);
+    }
+
+    #[test]
+    #[cfg(feature = "cuda")]
+    fn test_raw_ffi_f64_minmax_kernels_when_cuda_is_available() {
+        let Ok(device_count) = get_device_count() else {
+            return;
+        };
+        if device_count <= 0 {
+            return;
+        }
+
+        let values = [1.25_f64, -2.5, 0.75, 4.0];
+        let bytes = (values.len() * std::mem::size_of::<f64>()) as i64;
+        let values_dev = rt_cuda_mem_alloc(bytes);
+        assert!(values_dev > 0, "device allocation failed: {values_dev}");
+        assert_eq!(rt_cuda_memcpy_htod(values_dev, values.as_ptr() as i64, bytes), 0);
+
+        let mut min = 0.0_f64;
+        let mut max = 0.0_f64;
+        assert_eq!(
+            rt_cuda_f64_minmax((&mut min as *mut f64) as i64, values_dev, values.len() as i64, 0),
+            0
+        );
+        assert_eq!(
+            rt_cuda_f64_minmax((&mut max as *mut f64) as i64, values_dev, values.len() as i64, 1),
+            0
+        );
+        assert_eq!(min, -2.5);
+        assert_eq!(max, 4.0);
+
+        assert_eq!(rt_cuda_mem_free(values_dev), 0);
+    }
+
+    #[test]
+    #[cfg(feature = "cuda")]
+    fn test_raw_ffi_f64_sum_axis_kernels_when_cuda_is_available() {
+        let Ok(device_count) = get_device_count() else {
+            return;
+        };
+        if device_count <= 0 {
+            return;
+        }
+
+        let values = [1.0_f64, 2.0, 3.0, 4.0, 5.0, 6.0];
+        let bytes = (values.len() * std::mem::size_of::<f64>()) as i64;
+        let values_dev = rt_cuda_mem_alloc(bytes);
+        let axis0_dev = rt_cuda_mem_alloc(3 * std::mem::size_of::<f64>() as i64);
+        let axis1_dev = rt_cuda_mem_alloc(2 * std::mem::size_of::<f64>() as i64);
+        assert!(values_dev > 0, "values allocation failed: {values_dev}");
+        assert!(axis0_dev > 0, "axis0 allocation failed: {axis0_dev}");
+        assert!(axis1_dev > 0, "axis1 allocation failed: {axis1_dev}");
+        assert_eq!(rt_cuda_memcpy_htod(values_dev, values.as_ptr() as i64, bytes), 0);
+
+        assert_eq!(rt_cuda_f64_sum_axis(axis0_dev, values_dev, 2, 3, 0), 0);
+        assert_eq!(rt_cuda_f64_sum_axis(axis1_dev, values_dev, 2, 3, 1), 0);
+        let mut axis0 = [0.0_f64; 3];
+        let mut axis1 = [0.0_f64; 2];
+        assert_eq!(
+            rt_cuda_memcpy_dtoh(
+                axis0.as_mut_ptr() as i64,
+                axis0_dev,
+                (axis0.len() * std::mem::size_of::<f64>()) as i64
+            ),
+            0
+        );
+        assert_eq!(
+            rt_cuda_memcpy_dtoh(
+                axis1.as_mut_ptr() as i64,
+                axis1_dev,
+                (axis1.len() * std::mem::size_of::<f64>()) as i64
+            ),
+            0
+        );
+        assert_eq!(axis0, [5.0, 7.0, 9.0]);
+        assert_eq!(axis1, [6.0, 15.0]);
+
+        assert_eq!(rt_cuda_mem_free(values_dev), 0);
+        assert_eq!(rt_cuda_mem_free(axis0_dev), 0);
+        assert_eq!(rt_cuda_mem_free(axis1_dev), 0);
+    }
+
+    #[test]
+    #[cfg(feature = "cuda")]
+    fn test_raw_ffi_f64_scalar_div_kernel_when_cuda_is_available() {
+        let Ok(device_count) = get_device_count() else {
+            return;
+        };
+        if device_count <= 0 {
+            return;
+        }
+
+        let values = [6.0_f64, 15.0];
+        let bytes = (values.len() * std::mem::size_of::<f64>()) as i64;
+        let values_dev = rt_cuda_mem_alloc(bytes);
+        let out_dev = rt_cuda_mem_alloc(bytes);
+        assert!(values_dev > 0, "values allocation failed: {values_dev}");
+        assert!(out_dev > 0, "output allocation failed: {out_dev}");
+        assert_eq!(rt_cuda_memcpy_htod(values_dev, values.as_ptr() as i64, bytes), 0);
+
+        assert_eq!(
+            rt_cuda_f64_scalar_div(out_dev, values_dev, values.len() as i64, 3.0_f64.to_bits() as i64),
+            0
+        );
+        let mut out = [0.0_f64; 2];
+        assert_eq!(rt_cuda_memcpy_dtoh(out.as_mut_ptr() as i64, out_dev, bytes), 0);
+        assert_eq!(out, [2.0, 5.0]);
+
+        assert_eq!(rt_cuda_mem_free(values_dev), 0);
+        assert_eq!(rt_cuda_mem_free(out_dev), 0);
+    }
+
+    #[test]
+    #[cfg(feature = "cuda")]
+    fn test_raw_ffi_f64_slice_kernels_when_cuda_is_available() {
+        let Ok(device_count) = get_device_count() else {
+            return;
+        };
+        if device_count <= 0 {
+            return;
+        }
+
+        let values = [1.0_f64, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0];
+        let bytes = (values.len() * std::mem::size_of::<f64>()) as i64;
+        let values_dev = rt_cuda_mem_alloc(bytes);
+        let out_1d_dev = rt_cuda_mem_alloc(3 * std::mem::size_of::<f64>() as i64);
+        let out_2d_dev = rt_cuda_mem_alloc(4 * std::mem::size_of::<f64>() as i64);
+        assert!(values_dev > 0, "values allocation failed: {values_dev}");
+        assert!(out_1d_dev > 0, "1d output allocation failed: {out_1d_dev}");
+        assert!(out_2d_dev > 0, "2d output allocation failed: {out_2d_dev}");
+        assert_eq!(rt_cuda_memcpy_htod(values_dev, values.as_ptr() as i64, bytes), 0);
+
+        assert_eq!(rt_cuda_f64_slice_1d(out_1d_dev, values_dev, 1, 2, 3), 0);
+        let mut out_1d = [0.0_f64; 3];
+        assert_eq!(
+            rt_cuda_memcpy_dtoh(
+                out_1d.as_mut_ptr() as i64,
+                out_1d_dev,
+                (out_1d.len() * std::mem::size_of::<f64>()) as i64
+            ),
+            0
+        );
+        assert_eq!(out_1d, [2.0, 4.0, 6.0]);
+
+        assert_eq!(rt_cuda_f64_slice_1d(out_1d_dev, values_dev, 3, -1, 3), 0);
+        assert_eq!(
+            rt_cuda_memcpy_dtoh(
+                out_1d.as_mut_ptr() as i64,
+                out_1d_dev,
+                (out_1d.len() * std::mem::size_of::<f64>()) as i64
+            ),
+            0
+        );
+        assert_eq!(out_1d, [4.0, 3.0, 2.0]);
+
+        assert_eq!(rt_cuda_f64_slice_2d(out_2d_dev, values_dev, 3, 0, 2, 2, 0, 2, 2), 0);
+        let mut out_2d = [0.0_f64; 4];
+        assert_eq!(
+            rt_cuda_memcpy_dtoh(
+                out_2d.as_mut_ptr() as i64,
+                out_2d_dev,
+                (out_2d.len() * std::mem::size_of::<f64>()) as i64
+            ),
+            0
+        );
+        assert_eq!(out_2d, [1.0, 3.0, 7.0, 9.0]);
+
+        assert_eq!(rt_cuda_f64_slice_2d(out_2d_dev, values_dev, 3, 2, -1, 2, 2, -1, 2), 0);
+        assert_eq!(
+            rt_cuda_memcpy_dtoh(
+                out_2d.as_mut_ptr() as i64,
+                out_2d_dev,
+                (out_2d.len() * std::mem::size_of::<f64>()) as i64
+            ),
+            0
+        );
+        assert_eq!(out_2d, [9.0, 8.0, 6.0, 5.0]);
+
+        assert_eq!(rt_cuda_mem_free(values_dev), 0);
+        assert_eq!(rt_cuda_mem_free(out_1d_dev), 0);
+        assert_eq!(rt_cuda_mem_free(out_2d_dev), 0);
     }
 }

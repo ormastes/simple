@@ -91,6 +91,14 @@ static inline RtCoreString* rt_core_as_string(int64_t value) {
     return s;
 }
 
+static inline SplArray* rt_core_as_array(int64_t value) {
+    uintptr_t raw = (uintptr_t)value;
+    if (raw < 4096 || (raw & RT_VALUE_TAG_MASK) != 0) return NULL;
+    SplArray* a = (SplArray*)raw;
+    if (a->len < 0 || a->cap < 0 || a->len > a->cap || a->cap > 100000000) return NULL;
+    return a;
+}
+
 static void rt_core_write_bytes(FILE* stream, const uint8_t* ptr, uint64_t len) {
     if (!ptr || len == 0) return;
     fwrite(ptr, 1, (size_t)len, stream);
@@ -280,7 +288,9 @@ int64_t rt_string_concat(int64_t left, int64_t right) {
 
 int64_t rt_len(int64_t value) {
     RtCoreString* s = rt_core_as_string(value);
-    return s ? (int64_t)s->len : 0;
+    if (s) return (int64_t)s->len;
+    SplArray* a = rt_core_as_array(value);
+    return a ? a->len : 0;
 }
 
 int64_t rt_to_string(int64_t value) {
@@ -659,30 +669,55 @@ int64_t rt_array_len(SplArray* a) {
     return spl_array_len(a);
 }
 
-SplValue* rt_array_get(SplArray* a, int64_t idx) {
-    /* Return pointer to value (LLVM IR uses ptr for values) */
-    static SplValue tmp;
-    tmp = spl_array_get(a, idx);
-    return &tmp;
+int64_t rt_array_get(SplArray* a, int64_t idx) {
+    if (!a) return 3;
+    idx = rt_core_numeric_arg(idx);
+    if (idx < 0) idx = a->len + idx;
+    if (idx < 0 || idx >= a->len) return 3;
+    return ((int64_t*)a->items)[idx];
 }
 
-void rt_array_set(SplArray* a, int64_t idx, SplValue* val) {
-    if (val) {
-        spl_array_set(a, idx, *val);
-    }
+void rt_array_set(SplArray* a, int64_t idx, int64_t val) {
+    if (!a) return;
+    idx = rt_core_numeric_arg(idx);
+    if (idx < 0) idx = a->len + idx;
+    if (idx < 0 || idx >= a->len) return;
+    ((int64_t*)a->items)[idx] = val;
 }
 
-SplArray* rt_array_push(SplArray* a, SplValue* val) {
-    if (val) {
-        return spl_array_push(a, *val);
+int8_t rt_array_push(SplArray* a, int64_t val) {
+    if (!a) return 0;
+    if (a->len >= a->cap) {
+        int64_t new_cap = a->cap > 0 ? a->cap * 2 : 4;
+        a->items = (SplValue*)realloc(a->items, (size_t)new_cap * sizeof(SplValue));
+        if (!a->items) {
+            a->len = 0;
+            a->cap = 0;
+            return 0;
+        }
+        a->cap = new_cap;
     }
-    return a;
+    ((int64_t*)a->items)[a->len++] = val;
+    return 1;
 }
 
 SplValue* rt_array_pop(SplArray* a) {
     static SplValue tmp;
     tmp = spl_array_pop(a);
     return &tmp;
+}
+
+int64_t rt_index_get(int64_t collection, int64_t idx) {
+    SplArray* a = rt_core_as_array(collection);
+    if (a) return rt_array_get(a, idx);
+    return 3;
+}
+
+int8_t rt_index_set(int64_t collection, int64_t idx, int64_t val) {
+    SplArray* a = rt_core_as_array(collection);
+    if (!a) return 0;
+    rt_array_set(a, idx, val);
+    return 1;
 }
 
 /* ================================================================
@@ -737,6 +772,20 @@ int rt_file_move(const char* src, const char* dst) {
 
 char* rt_env_cwd(void) {
     return rt_getcwd();
+}
+
+const char* rt_platform_name(void) {
+#if defined(_WIN32)
+    return "windows";
+#elif defined(__APPLE__)
+    return "macos";
+#elif defined(__FreeBSD__)
+    return "freebsd";
+#elif defined(__linux__)
+    return "linux";
+#else
+    return "unknown";
+#endif
 }
 
 int rt_file_write_text(const char* path, const char* content) {

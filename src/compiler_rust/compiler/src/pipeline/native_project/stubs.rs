@@ -599,6 +599,12 @@ pub(crate) fn generate_stub_object(
         "Generating {} stub functions for unresolved symbols...",
         needs_stub.len()
     );
+    let preview = needs_stub.iter().take(80).cloned().collect::<Vec<_>>().join(", ");
+    eprintln!(
+        "Unresolved symbol preview: {}{}",
+        preview,
+        if needs_stub.len() > 80 { " ..." } else { "" }
+    );
 
     let forbidden_enum_ctors: Vec<&str> = needs_stub
         .iter()

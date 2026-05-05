@@ -178,24 +178,27 @@ fn bake(out_disk: text, out_initramfs: text) -> Result<(), text>:
     print "bake: added BROWSMF.SMF stand-in (mirrors hello_rs ELF)"
 
     # --- Step 3a/3b: optionally bake clang_static + rustc_static ---
-    # Skipped if either marker file is absent (default-off mode keeps bake fast).
+    # Strict once enabled: the marker means the image must contain the real
+    # guest compiler payloads, not a silently skipped placeholder.
     # To enable: `touch build/os/.bake_include_toolchain` before running bake.
     # 100+ MB binaries through interpreter take 5+ min (BUG-INTERPRETER-PERF).
     if io.file_exists("build/os/.bake_include_toolchain"):
-        if io.file_exists(clang_static_path):
-            match _load_payload(clang_static_path, "CLANGSTCSMF"):
-                case Ok(e):
-                    print "bake: loaded clang_static (" + io.file_size(clang_static_path).to_text() + " bytes)"
-                    payloads.push(e)
-                case Err(_):
-                    print "bake: clang_static load failed (skipped)"
-        if io.file_exists(rustc_static_path):
-            match _load_payload(rustc_static_path, "RUSTCSTCSMF"):
-                case Ok(e):
-                    print "bake: loaded rustc_static (" + io.file_size(rustc_static_path).to_text() + " bytes)"
-                    payloads.push(e)
-                case Err(_):
-                    print "bake: rustc_static load failed (skipped)"
+        if not io.file_exists(clang_static_path):
+            return Err("bake: toolchain marker set but clang_static missing: " + clang_static_path)
+        match _load_payload(clang_static_path, "CLANGSTCSMF"):
+            case Ok(e):
+                print "bake: loaded clang_static (" + io.file_size(clang_static_path).to_text() + " bytes)"
+                payloads.push(e)
+            case Err(e):
+                return Err(e)
+        if not io.file_exists(rustc_static_path):
+            return Err("bake: toolchain marker set but rustc_static missing: " + rustc_static_path)
+        match _load_payload(rustc_static_path, "RUSTCSTCSMF"):
+            case Ok(e):
+                print "bake: loaded rustc_static (" + io.file_size(rustc_static_path).to_text() + " bytes)"
+                payloads.push(e)
+            case Err(e):
+                return Err(e)
         if io.file_exists(simple_path):
             val simple_size = io.file_size(simple_path)
             # Root entry /SIMPLSTC.SMF — vfs_init reader reads this path at boot.

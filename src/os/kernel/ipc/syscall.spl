@@ -15,7 +15,7 @@ use os.kernel.types.capability_types.{CapabilityToken, CapabilityKind, Capabilit
 use os.kernel.types.notification_types.{Notification}
 use os.kernel.types.vmspace_types.{ProcessVmSpace, VmArea, VMA_READ, VMA_WRITE, VMA_ANON, VMA_SHARED}
 use os.kernel.memory.vmm.{vmm_mmap, vmm_munmap, vmm_new_process_space}
-use os.kernel.scheduler.scheduler.{Scheduler, g_scheduler_next_task_id}
+use os.kernel.scheduler.scheduler.{Scheduler, g_scheduler_next_task_id, wait_collect_result_pid, wait_collect_result_status, wait_collect_result_error, task_control_pid, task_control_parent_pid, task_control_memory_pages, task_control_name, task_control_state_code, task_control_priority_code, task_control_ticks_remaining}
 use os.kernel.ipc.ipc.{IpcManager}
 use os.kernel.ipc.notification.{NotificationTable, notification_create, notification_signal, notification_wait, notification_poll, notification_destroy, notification_wait_any, notification_register_multi_waiter, notification_drain_signaled_waiters}
 use os.kernel.ipc.notif_global.{g_notification_table}
@@ -26,7 +26,7 @@ use os.kernel.loader.process_image.{build_user_process_image}
 use os.kernel.loader.dylib_registry.{dylib_registry_register, dylib_registry_symbol, dylib_registry_close}
 use os.kernel.arch.arch_context.{Architecture}
 use os.kernel.arch.hal.{hal_system_reset}
-use os.kernel.memory.vmm.{vmm_map_page, vmm_unmap_page, vmm_verify_user_write, vmm_copyin_string_vector, vmm_copyin_bytes_from_space, vmm_read_pte, PAGE_SIZE, PTE_ADDR_MASK}
+use os.kernel.memory.vmm.{vmm_map_page, vmm_unmap_page, vmm_verify_user_write, vmm_copyin_string_vector, vmm_copyin_bytes_from_space, vmm_copy_bytes_result_ok, vmm_copy_string_vector_result_ok, vmm_copy_string_vector_result_errno, vmm_copy_string_vector_result_values, vmm_read_pte, VmmCopyBytesResult, PAGE_SIZE, PTE_ADDR_MASK}
 use os.kernel.memory.pmm.{pmm_alloc_page, pmm_free_page}
 use os.kernel.types.memory_types.{PhysAddr, VirtAddr, PageFrame, VmFlags, VM_PRESENT, VM_WRITABLE, VM_USER, VM_NO_EXECUTE, VM_CACHE_DISABLE}
 use os.drivers.pci.pci.{pci_read_config, pci_read_vendor, pci_read_device_id, pci_read_class, pci_read_header_type, pci_read_irq, pci_read_bar, pci_write_config}
@@ -39,11 +39,11 @@ use os.kernel.types.capability_types.{PrivilegeMask, Grant, PRIVCTL_SET_MASK, PR
 use os.drivers.rtc.rtc.{rtc_get_seconds, rtc_get_minutes, rtc_get_hours}
 use os.kernel.ipc.spm_port.{spm_port_send, spm_port_listen, spm_port_is_registered}
 use os.kernel.ipc.spm_claim.{spm_claim_for_task}
-use os.kernel.ipc.shared_dataset.{shared_dataset_create, shared_dataset_write, shared_dataset_seal, shared_dataset_close, shared_dataset_read, shared_dataset_is_sealed}
-use os.kernel.ipc.process_queue.{PROCESS_QUEUE_NO_HANDLE, process_queue_create, process_queue_send, process_queue_recv, process_queue_poll, process_queue_close}
+use os.kernel.ipc.shared_dataset.{SharedDatasetRead, shared_dataset_create, shared_dataset_write, shared_dataset_seal, shared_dataset_close, shared_dataset_read, shared_dataset_is_sealed}
+use os.kernel.ipc.process_queue.{ProcessQueueRecv, PROCESS_QUEUE_NO_HANDLE, process_queue_create, process_queue_send, process_queue_recv, process_queue_poll, process_queue_close}
 use os.kernel.privilege.privilege_bridge.{bridge_lookup, two_gate_check}
 use os.posix.pipe_compat.{posix_pipe}
-use os.posix.fd_io.{posix_close, posix_dup, posix_dup2, posix_read, posix_write, posix_pread_exact_bytes}
+use os.posix.fd_io.{PosixPreadExactBytes, posix_close, posix_dup, posix_dup2, posix_read, posix_write, posix_pread_exact_bytes}
 use os.posix.fd_table.{fd_activate_task, fd_prepare_fork_to_task, fd_dup_from, fd_is_valid, fd_get_cloexec, fd_set_cloexec, fd_get_status_flags, fd_set_status_flags, fd_get_object_id, fd_poll_ready, fd_poll_notification, MAX_FDS, POLLERR, POLLHUP, POLLNVAL}
 use os.posix.errno.{EFAULT, EIO, EINVAL, ENAMETOOLONG}
 use os.kernel.log.klog_api.{log_raw_println}
@@ -775,23 +775,23 @@ fn _handle_exec(args: SyscallArgs, scheduler: Scheduler) -> SyscallResult:
         MAX_EXEC_STRING_LEN,
         MAX_EXEC_TOTAL_STRING_BYTES
     )
-    if not argv_result.status.ok:
-        return SyscallResult(value: 0 - argv_result.status.errno as i64)
+    if not vmm_copy_string_vector_result_ok(argv_result):
+        return SyscallResult(value: 0 - vmm_copy_string_vector_result_errno(argv_result) as i64)
     val envp_result = vmm_copyin_string_vector(
         args.arg3,
         MAX_EXEC_ENV_COUNT,
         MAX_EXEC_STRING_LEN,
         MAX_EXEC_TOTAL_STRING_BYTES
     )
-    if not envp_result.status.ok:
-        return SyscallResult(value: 0 - envp_result.status.errno as i64)
+    if not vmm_copy_string_vector_result_ok(envp_result):
+        return SyscallResult(value: 0 - vmm_copy_string_vector_result_errno(envp_result) as i64)
 
     val image_result = build_user_process_image(
         path,
         bytes_result.unwrap(),
         CURRENT_EXEC_ARCH,
-        argv_result.values,
-        envp_result.values
+        vmm_copy_string_vector_result_values(argv_result),
+        vmm_copy_string_vector_result_values(envp_result)
     )
     if image_result.is_err():
         return SyscallResult(value: -8)
@@ -845,15 +845,16 @@ fn _handle_waitpid(args: SyscallArgs, scheduler: Scheduler) -> SyscallResult:
     if status_ptr_check < 0:
         return SyscallResult(value: status_ptr_check)
     val result = sched.wait_for_collect(current, selector, not nohang)
-    if result.error == -11:
+    val result_error = wait_collect_result_error(result)
+    if result_error == -11:
         return SyscallResult(value: 0)
-    if result.error < 0:
-        return SyscallResult(value: result.error.to_i64())
+    if result_error < 0:
+        return SyscallResult(value: result_error.to_i64())
 
-    val status_write = _write_wait_status(args.arg1, result.status)
+    val status_write = _write_wait_status(args.arg1, wait_collect_result_status(result))
     if status_write < 0:
         return SyscallResult(value: status_write)
-    SyscallResult(value: result.pid.to_i64())
+    SyscallResult(value: wait_collect_result_pid(result).to_i64())
 
 fn _handle_pipe(args: SyscallArgs) -> SyscallResult:
     """Create a POSIX pipe and copy fd[0]/fd[1] to the user array."""
@@ -1613,17 +1614,17 @@ fn _handle_get_task_info(args: SyscallArgs, scheduler: Scheduler) -> SyscallResu
         if not vmm_verify_user_write(args.arg1, 44):
             return SyscallResult(value: -14)
         val task = tcb
-        val parent_pid = if task.parent == nil: 0 else: task.parent.unwrap().id
-        val memory_pages = if task.address_space == 0: 0 else: 1
-        val name_bytes = rt_text_to_bytes(task.name)
+        val parent_pid = task_control_parent_pid(task)
+        val memory_pages = task_control_memory_pages(task)
+        val name_bytes = rt_text_to_bytes(task_control_name(task))
         val name_len = name_bytes.len() as u32
         val name_len_u64 = name_len as u64
-        mmio_write64(args.arg1, task.id.id)
+        mmio_write64(args.arg1, task_control_pid(task))
         mmio_write64(args.arg1 + 8, parent_pid)
-        mmio_write8(args.arg1 + 16, _task_state_code(task.state))
-        mmio_write8(args.arg1 + 17, _task_priority_code(task.priority))
+        mmio_write8(args.arg1 + 16, task_control_state_code(task))
+        mmio_write8(args.arg1 + 17, task_control_priority_code(task))
         mmio_write64(args.arg1 + 24, memory_pages)
-        mmio_write64(args.arg1 + 32, task.ticks_remaining)
+        mmio_write64(args.arg1 + 32, task_control_ticks_remaining(task))
         mmio_write32(args.arg1 + 40, name_len)
         if args.arg2 != 0 and args.arg3 > 0 and name_len > 0:
             val max = if name_len_u64 < args.arg3: name_len_u64 else: args.arg3
@@ -3555,7 +3556,7 @@ fn _handle_dataset_create_from_file(args: SyscallArgs) -> SyscallResult:
     dataset. The fd open-file-description offset is restored by the POSIX read
     helper on every success and failure path.
     """
-    val read_result = posix_pread_exact_bytes(args.arg0 as i32, args.arg1, args.arg2)
+    val read_result: PosixPreadExactBytes = posix_pread_exact_bytes(args.arg0 as i32, args.arg1, args.arg2)
     if read_result.status < 0:
         return SyscallResult(value: read_result.status)
 
@@ -3588,7 +3589,7 @@ fn _handle_dataset_seal(args: SyscallArgs) -> SyscallResult:
 
 fn _handle_dataset_map(args: SyscallArgs) -> SyscallResult:
     """dataset_map(handle, addr_hint, offset, len) -> mapped vaddr."""
-    val probe = shared_dataset_read(args.arg0, args.arg2, args.arg3)
+    val probe: SharedDatasetRead = shared_dataset_read(args.arg0, args.arg2, args.arg3)
     if probe.status < 0:
         return SyscallResult(value: probe.status)
     val rc = vmm_mmap(g_current_vmspace, args.arg1, args.arg3, VMA_READ, VMA_SHARED, args.arg0, args.arg2)
@@ -3619,7 +3620,7 @@ fn _handle_queue_send(args: SyscallArgs) -> SyscallResult:
 
 fn _handle_queue_recv(args: SyscallArgs) -> SyscallResult:
     """queue_recv(queue, out_ptr, out_len, out_attached_ptr)."""
-    val recv = process_queue_recv(args.arg0)
+    val recv: ProcessQueueRecv = process_queue_recv(args.arg0)
     if recv.status <= 0:
         return SyscallResult(value: recv.status)
     var copied: u64 = 0
@@ -3673,8 +3674,8 @@ fn _copy_in_bytes(ptr: u64, len: u64) -> [u8]:
         if not _vma_range_readable(g_current_vmspace, ptr, len):
             return []
     if g_current_vmspace.pml4 != 0 as u64:
-        val copied = vmm_copyin_bytes_from_space(g_current_vmspace, ptr, len)
-        if not copied.status.ok:
+        val copied: VmmCopyBytesResult = vmm_copyin_bytes_from_space(g_current_vmspace, ptr, len)
+        if not vmm_copy_bytes_result_ok(copied):
             return []
         return copied.bytes
     # Bytewise copy through the identity-mapped user pointer. Mirrors the

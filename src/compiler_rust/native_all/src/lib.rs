@@ -86,6 +86,7 @@ pub extern "C" fn rt_native_build(args: RuntimeValue) -> i64 {
     let mut runtime_path: Option<PathBuf> = None;
     let mut runtime_bundle = "auto".to_string();
     let mut entry_closure = false;
+    let mut emit_archive = false;
     let mut target_triple: Option<String> = None;
     let mut linker_script: Option<PathBuf> = None;
     let mut log_mode = "on".to_string();
@@ -129,6 +130,9 @@ pub extern "C" fn rt_native_build(args: RuntimeValue) -> i64 {
                 );
                 println!("  --runtime-path <dir> Directory containing libsimple_runtime.a");
                 println!("  --entry-closure     Compile only modules reachable from --entry");
+                println!(
+                    "  --emit-archive      Emit a static archive from Simple objects instead of linking an executable"
+                );
                 println!("  --target <triple>   Cross-compilation target (e.g. x86_64-unknown-none)");
                 println!("  --linker-script <f> Linker script for freestanding/OS targets");
                 println!("  --log <on|off>      Compile normal SimpleOS logging in or out");
@@ -255,6 +259,10 @@ pub extern "C" fn rt_native_build(args: RuntimeValue) -> i64 {
             }
             "--entry-closure" => {
                 entry_closure = true;
+                i += 1;
+            }
+            "--emit-archive" => {
+                emit_archive = true;
                 i += 1;
             }
             "--target" => {
@@ -422,6 +430,7 @@ pub extern "C" fn rt_native_build(args: RuntimeValue) -> i64 {
             eprintln!("  Runtime path: {}", rp.display());
         }
         eprintln!("  Entry closure: {}", entry_closure);
+        eprintln!("  Emit archive: {}", emit_archive);
         if let Some(ref t) = target_triple {
             eprintln!("  Target: {}", t);
         }
@@ -457,6 +466,7 @@ pub extern "C" fn rt_native_build(args: RuntimeValue) -> i64 {
         runtime_path,
         runtime_bundle,
         entry_closure,
+        emit_archive,
         linker_script,
         opt_level,
         ..Default::default()
@@ -507,7 +517,12 @@ pub extern "C" fn rt_native_build(args: RuntimeValue) -> i64 {
                 result.compiled, result.cached, result.failed
             );
             println!(
-                "  Binary: {} ({} KB)",
+                "  {}: {} ({} KB)",
+                if result.output.extension().and_then(|ext| ext.to_str()) == Some("a") {
+                    "Archive"
+                } else {
+                    "Binary"
+                },
                 result.output.display(),
                 result.binary_size / 1024
             );

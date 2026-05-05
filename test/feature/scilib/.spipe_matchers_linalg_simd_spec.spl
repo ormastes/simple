@@ -1,0 +1,169 @@
+use std.linalg.*
+use std.ndarray.*
+
+describe "linalg SIMD helpers":
+    it "computes a four-lane f64 dot product":
+        val result = simd_dot4_values(
+            [Float64.new(1.0), Float64.new(2.0), Float64.new(3.0), Float64.new(4.0)],
+            [Float64.new(5.0), Float64.new(6.0), Float64.new(7.0), Float64.new(8.0)]
+        ).unwrap()
+        expect result.value == 70.0
+
+    it "matches the scalar lane calculation for four f64 values":
+        val left_values = [Float64.new(1.5), Float64.new(-2.0), Float64.new(0.5), Float64.new(4.0)]
+        val right_values = [Float64.new(2.0), Float64.new(3.0), Float64.new(-8.0), Float64.new(0.25)]
+        val simd_result = simd_dot4_values(left_values, right_values).unwrap()
+        val scalar_result = left_values[0].value * right_values[0].value
+            + left_values[1].value * right_values[1].value
+            + left_values[2].value * right_values[2].value
+            + left_values[3].value * right_values[3].value
+        expect simd_result.value == scalar_result
+
+    it "dispatches public dot through the four-lane f64 path":
+        val result = dot(
+            vector_from([Float64.new(1.0), Float64.new(2.0), Float64.new(3.0), Float64.new(4.0)]),
+            vector_from([Float64.new(5.0), Float64.new(6.0), Float64.new(7.0), Float64.new(8.0)])
+        ).unwrap()
+        expect result.value == 70.0
+
+    it "dispatches public dot through SIMD chunks with a scalar tail":
+        val result = dot(
+            vector_from([Float64.new(1.0), Float64.new(2.0), Float64.new(3.0), Float64.new(4.0), Float64.new(5.0), Float64.new(6.0)]),
+            vector_from([Float64.new(10.0), Float64.new(20.0), Float64.new(30.0), Float64.new(40.0), Float64.new(50.0), Float64.new(60.0)])
+        ).unwrap()
+        expect result.value == 910.0
+
+    it "computes a tail-handled f64 dot helper":
+        val result = simd_dot_values(
+            [Float64.new(1.0), Float64.new(2.0), Float64.new(3.0), Float64.new(4.0), Float64.new(5.0)],
+            [Float64.new(5.0), Float64.new(4.0), Float64.new(3.0), Float64.new(2.0), Float64.new(1.0)]
+        ).unwrap()
+        expect result.value == 35.0
+
+    it "rejects non-four-lane inputs":
+        val result = simd_dot4_values(
+            [Float64.new(1.0), Float64.new(2.0), Float64.new(3.0)],
+            [Float64.new(4.0), Float64.new(5.0), Float64.new(6.0)]
+        )
+        expect result.is_err() == true
+
+    it "computes a four-lane f64 axpy":
+        val result = simd_axpy4_values(
+            Float64.new(2.0),
+            [Float64.new(1.0), Float64.new(2.0), Float64.new(3.0), Float64.new(4.0)],
+            [Float64.new(5.0), Float64.new(6.0), Float64.new(7.0), Float64.new(8.0)]
+        ).unwrap()
+        expect result[0].value == 7.0
+        expect result[1].value == 10.0
+        expect result[2].value == 13.0
+        expect result[3].value == 16.0
+
+    it "dispatches public axpy through the four-lane f64 path":
+        val result = try_axpy(
+            Float64.new(2.0),
+            vector_from([Float64.new(1.0), Float64.new(2.0), Float64.new(3.0), Float64.new(4.0)]),
+            vector_from([Float64.new(5.0), Float64.new(6.0), Float64.new(7.0), Float64.new(8.0)])
+        ).unwrap()
+        expect result.shape == Shape.new([Index.new(4)])
+        expect result.get_f64(Index.new(0)).value == 7.0
+        expect result.get_f64(Index.new(1)).value == 10.0
+        expect result.get_f64(Index.new(2)).value == 13.0
+        expect result.get_f64(Index.new(3)).value == 16.0
+
+    it "dispatches public axpy through SIMD chunks with a scalar tail":
+        val result = try_axpy(
+            Float64.new(2.0),
+            vector_from([Float64.new(1.0), Float64.new(2.0), Float64.new(3.0), Float64.new(4.0), Float64.new(5.0), Float64.new(6.0)]),
+            vector_from([Float64.new(10.0), Float64.new(20.0), Float64.new(30.0), Float64.new(40.0), Float64.new(50.0), Float64.new(60.0)])
+        ).unwrap()
+        expect result.shape == Shape.new([Index.new(6)])
+        expect result.get_f64(Index.new(0)).value == 12.0
+        expect result.get_f64(Index.new(3)).value == 48.0
+        expect result.get_f64(Index.new(4)).value == 60.0
+        expect result.get_f64(Index.new(5)).value == 72.0
+
+    it "computes a tail-handled f64 axpy helper":
+        val result = simd_axpy_values(
+            Float64.new(-1.0),
+            [Float64.new(1.0), Float64.new(2.0), Float64.new(3.0), Float64.new(4.0), Float64.new(5.0)],
+            [Float64.new(10.0), Float64.new(20.0), Float64.new(30.0), Float64.new(40.0), Float64.new(50.0)]
+        ).unwrap()
+        expect result[0].value == 9.0
+        expect result[3].value == 36.0
+        expect result[4].value == 45.0
+
+    it "matches scalar fma lane results for mixed-sign axpy":
+        val result = simd_axpy4_values(
+            Float64.new(-1.5),
+            [Float64.new(2.0), Float64.new(-4.0), Float64.new(0.5), Float64.new(8.0)],
+            [Float64.new(10.0), Float64.new(1.0), Float64.new(-2.0), Float64.new(3.0)]
+        ).unwrap()
+        expect result[0].value == 7.0
+        expect result[1].value == 7.0
+        expect result[2].value == -2.75
+        expect result[3].value == -9.0
+
+    it "rejects non-four-lane axpy inputs":
+        val result = simd_axpy4_values(
+            Float64.new(2.0),
+            [Float64.new(1.0), Float64.new(2.0), Float64.new(3.0), Float64.new(4.0)],
+            [Float64.new(5.0), Float64.new(6.0), Float64.new(7.0)]
+        )
+        expect result.is_err() == true
+
+    it "computes a four-lane f32 dot product":
+        val result = simd_dot4_f32_values(
+            [Float32.new(1.0), Float32.new(2.0), Float32.new(3.0), Float32.new(4.0)],
+            [Float32.new(5.0), Float32.new(6.0), Float32.new(7.0), Float32.new(8.0)]
+        ).unwrap()
+        expect result.value == 70.0
+
+    it "dispatches public f32 dot through SIMD chunks with a scalar tail":
+        val result = dot_f32(
+            vector_from_f32([Float32.new(1.0), Float32.new(2.0), Float32.new(3.0), Float32.new(4.0), Float32.new(5.0), Float32.new(6.0)]),
+            vector_from_f32([Float32.new(10.0), Float32.new(20.0), Float32.new(30.0), Float32.new(40.0), Float32.new(50.0), Float32.new(60.0)])
+        ).unwrap()
+        expect result.value == 910.0
+
+    it "computes a tail-handled f32 dot helper":
+        val result = simd_dot_f32_values(
+            [Float32.new(1.0), Float32.new(2.0), Float32.new(3.0), Float32.new(4.0), Float32.new(5.0)],
+            [Float32.new(5.0), Float32.new(4.0), Float32.new(3.0), Float32.new(2.0), Float32.new(1.0)]
+        ).unwrap()
+        expect result.value == 35.0
+
+    it "computes a four-lane f32 axpy":
+        val result = simd_axpy4_f32_values(
+            Float32.new(2.0),
+            [Float32.new(1.0), Float32.new(2.0), Float32.new(3.0), Float32.new(4.0)],
+            [Float32.new(5.0), Float32.new(6.0), Float32.new(7.0), Float32.new(8.0)]
+        ).unwrap()
+        expect result[0].value == 7.0
+        expect result[1].value == 10.0
+        expect result[2].value == 13.0
+        expect result[3].value == 16.0
+
+    it "dispatches public f32 axpy through SIMD chunks with a scalar tail":
+        val result = try_axpy_f32(
+            Float32.new(2.0),
+            vector_from_f32([Float32.new(1.0), Float32.new(2.0), Float32.new(3.0), Float32.new(4.0), Float32.new(5.0), Float32.new(6.0)]),
+            vector_from_f32([Float32.new(10.0), Float32.new(20.0), Float32.new(30.0), Float32.new(40.0), Float32.new(50.0), Float32.new(60.0)])
+        ).unwrap()
+        expect result.shape == Shape.new([Index.new(6)])
+        expect result.get_f32(Index.new(0)).value == 12.0
+        expect result.get_f32(Index.new(3)).value == 48.0
+        expect result.get_f32(Index.new(4)).value == 60.0
+        expect result.get_f32(Index.new(5)).value == 72.0
+
+    it "rejects mismatched f32 linalg inputs":
+        val dot_result = dot_f32(
+            vector_from_f32([Float32.new(1.0), Float32.new(2.0)]),
+            vector_from_f32([Float32.new(3.0)])
+        )
+        val axpy_result = try_axpy_f32(
+            Float32.new(2.0),
+            vector_from_f32([Float32.new(1.0), Float32.new(2.0)]),
+            vector_from_f32([Float32.new(3.0)])
+        )
+        expect dot_result.is_err() == true
+        expect axpy_result.is_err() == true

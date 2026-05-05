@@ -12,7 +12,7 @@
 
 use std.spec.{describe, context, it, expect}
 use os.compositor.qemu_capture.{
-    capture_qemu_inprocess, capture_qemu_vm}
+    capture_qemu_inprocess, capture_qemu_vm, decode_qemu_screendump_ppm}
 use os.compositor.electron_capture.{CaptureResult, capture_error}
 use os.compositor.wm_scene.{WmSceneSpec, standard_wm_scene}
 
@@ -162,3 +162,26 @@ describe "QemuCapture PPM — result consistency":
             val vm_has_error = vm.error.len() > 0
             expect inprocess_no_error == true
             expect vm_has_error == true
+
+describe "QemuCapture PPM — screendump decode":
+
+    context "valid P6 data":
+
+        it "AC-3: decodes QMP screendump PPM bytes into qemu_vm CaptureResult":
+            val data: [u8] = [80u8, 54u8, 10u8, 50u8, 32u8, 49u8, 10u8, 50u8, 53u8, 53u8, 10u8, 255u8, 0u8, 0u8, 0u8, 255u8, 0u8]
+            val result = decode_qemu_screendump_ppm(data)
+            expect result.success == true
+            expect result.backend_name == "qemu_vm"
+            expect result.width == 2
+            expect result.height == 1
+            expect result.pixels.len() == 2
+            expect result.pixels[0] == 0xFFFF0000u32
+            expect result.pixels[1] == 0xFF00FF00u32
+
+    context "invalid PPM data":
+
+        it "AC-3: reports decode failure without crashing":
+            val result = decode_qemu_screendump_ppm([80u8, 51u8, 10u8])
+            expect result.success == false
+            expect result.backend_name == "qemu_vm"
+            expect (result.error).contains("PPM")

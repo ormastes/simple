@@ -1,0 +1,76 @@
+#![allow(unnamed_duplicate_typed_args)]
+
+class PerceptualResult:
+    total_pixels: i32
+    mismatched_pixels: i32
+    aa_pixels: i32
+    match_percentage: i32
+
+fn _abs_f64(v: f64) -> f64:
+    if v < 0.0: -v else: v
+
+fn _chan(pixel: u32, shift: i32) -> f64:
+    (((pixel >> shift) & 0xFFu32).to_i32()).to_f64() / 255.0
+
+fn yiq_distance(a: u32, b: u32) -> f64:
+    val ar = _chan(a, 16)
+    val ag = _chan(a, 8)
+    val ab = _chan(a, 0)
+    val br = _chan(b, 16)
+    val bg = _chan(b, 8)
+    val bb = _chan(b, 0)
+    val y1 = ar * 0.29889531 + ag * 0.58662247 + ab * 0.11448223
+    val i1 = ar * 0.59597799 - ag * 0.27417610 - ab * 0.32180189
+    val q1 = ar * 0.21147017 - ag * 0.52261711 + ab * 0.31114694
+    val y2 = br * 0.29889531 + bg * 0.58662247 + bb * 0.11448223
+    val i2 = br * 0.59597799 - bg * 0.27417610 - bb * 0.32180189
+    val q2 = br * 0.21147017 - bg * 0.52261711 + bb * 0.31114694
+    _abs_f64(y1 - y2) * 0.5053 + _abs_f64(i1 - i2) * 0.299 + _abs_f64(q1 - q2) * 0.1957
+
+fn _gray_value(pixel: u32) -> i32:
+    ((((pixel >> 16) & 0xFFu32) + ((pixel >> 8) & 0xFFu32) + (pixel & 0xFFu32)) / 3u32).to_i32()
+
+fn is_antialiased(pixels: [u32], x: i32, y: i32, width: i32, height: i32) -> bool:
+    if x <= 0 or y <= 0 or x >= width - 1 or y >= height - 1:
+        return false
+    val idx = y * width + x
+    if idx < 0 or idx >= pixels.len():
+        return false
+    val center = _gray_value(pixels[idx])
+    var min_v = center
+    var max_v = center
+    var dy = -1
+    while dy <= 1:
+        var dx = -1
+        while dx <= 1:
+            if dx != 0 or dy != 0:
+                val nidx = (y + dy) * width + (x + dx)
+                if nidx >= 0 and nidx < pixels.len():
+                    val v = _gray_value(pixels[nidx])
+                    if v < min_v:
+                        min_v = v
+                    if v > max_v:
+                        max_v = v
+            dx = dx + 1
+        dy = dy + 1
+    center > min_v and center < max_v and max_v - min_v > 96
+
+fn compare_perceptual(a: [u32], b: [u32], width: i32, height: i32, threshold: f64, include_aa: bool) -> PerceptualResult:
+    val total = if width > 0 and height > 0: width * height else: 0
+    if a.len() != b.len() or a.len() != total:
+        return PerceptualResult(total_pixels: total, mismatched_pixels: total, aa_pixels: 0, match_percentage: 0)
+    var mismatched = 0
+    var aa_count = 0
+    var idx = 0
+    while idx < total:
+        val x = idx % width
+        val y = idx / width
+        val is_aa = is_antialiased(a, x, y, width, height) or is_antialiased(b, x, y, width, height)
+        if is_aa:
+            aa_count = aa_count + 1
+        if yiq_distance(a[idx], b[idx]) > threshold:
+            if include_aa or not is_aa:
+                mismatched = mismatched + 1
+        idx = idx + 1
+    val pct = if total > 0: ((total - mismatched) * 10000) / total else: 10000
+    PerceptualResult(total_pixels: total, mismatched_pixels: mismatched, aa_pixels: aa_count, match_percentage: pct)

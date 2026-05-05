@@ -39,6 +39,7 @@ use compiler.core.ast.{expr_await, expr_yield, expr_spawn, expr_do_block, expr_a
 use compiler.core.ast.{expr_list_comp, expr_dict_comp}
 use compiler.core.ast.{expr_asm, expr_asm_match, expr_asm_assert}
 use compiler.core.ast.{asm_arm_new, asm_arm_is_compile_error, asm_arm_error_msg, asm_arm_asm_text}
+use compiler.core.ast.{module_get_path}
 use compiler.frontend.core.lexer.{lex_cur_suffix_get}
 use compiler.frontend.core.lexer.{lex_pos_get, lex_pos_set, lex_line_get, lex_line_set, lex_col_get, lex_col_set}
 use compiler.frontend.core.lexer.{lex_source_char_at, lex_source_len, lex_source_slice}
@@ -52,14 +53,14 @@ use compiler.frontend.core.parser_expr.{parse_expr, parse_not, parse_unary}
 
 fn parse_optional_rationale_args() -> text:
     var msg = ""
-    if par_kind_get() == TOK_LPAREN:
+    if par_kind_get() == 140:
         parser_advance()
-        if par_kind_get() == TOK_STRING_LIT:
+        if par_kind_get() == 3:
             msg = par_text_get()
             parser_advance()
-            if par_kind_get() == TOK_COMMA:
+            if par_kind_get() == 160:
                 parser_advance()
-                if par_kind_get() == TOK_STRING_LIT:
+                if par_kind_get() == 3:
                     val hint = par_text_get()
                     parser_advance()
                     if hint != "":
@@ -67,7 +68,7 @@ fn parse_optional_rationale_args() -> text:
                             msg = msg + " | " + hint
                         else:
                             msg = hint
-        parser_expect(TOK_RPAREN)
+        parser_expect(141)
     msg
 
 fn parse_raw_asm_normalize(payload: text) -> text:
@@ -140,23 +141,23 @@ fn parse_raw_asm_braced_payload() -> text:
 
 fn parse_legacy_parenthesized_asm() -> text:
     parser_warn("legacy inline asm syntax; use asm { ... }")
-    parser_expect(TOK_LPAREN)
+    parser_expect(140)
     var depth = 1
     var asm_lines: [text] = []
     for ai in 0..100000:
         if depth <= 0:
             break
-        if par_kind_get() == TOK_EOF:
+        if par_kind_get() == 190:
             break
-        if par_kind_get() == TOK_LPAREN:
+        if par_kind_get() == 140:
             depth = depth + 1
             parser_advance()
             continue
-        if par_kind_get() == TOK_RPAREN:
+        if par_kind_get() == 141:
             depth = depth - 1
             parser_advance()
             continue
-        if par_kind_get() == TOK_STRING_LIT:
+        if par_kind_get() == 3:
             asm_lines.push(par_text_get())
             parser_advance()
             continue
@@ -167,33 +168,33 @@ fn parse_primary_expr() -> i64:
     # @annotation(...) -- compile-time introspection built-ins
     # @traits(query, T, ...) desugars to __traits("query", "T", ...)
     # @file, @line, @function desugar to __builtin_file etc.
-    if par_kind_get() == TOK_AT:
+    if par_kind_get() == 171:
         parser_advance()
         val ann_name = par_text_get()
-        if par_kind_get() == TOK_IDENT:
+        if par_kind_get() == 6:
             parser_advance()
-        if par_kind_get() == TOK_LPAREN:
+        if par_kind_get() == 140:
             parser_advance()
             var at_args: [i64] = []
             # First argument: the annotation name as a string literal
             at_args.push(expr_string_lit(ann_name, 0))
             for at_i in 0..20:
-                if par_kind_get() == TOK_RPAREN:
+                if par_kind_get() == 141:
                     break
-                if par_kind_get() == TOK_COMMA:
+                if par_kind_get() == 160:
                     parser_advance()
                     continue
-                if par_kind_get() == TOK_EOF:
+                if par_kind_get() == 190:
                     break
                 # Identifier args (type names) become string literals
-                if par_kind_get() == TOK_IDENT:
+                if par_kind_get() == 6:
                     val id_arg = par_text_get()
                     parser_advance()
                     at_args.push(expr_string_lit(id_arg, 0))
                 else:
                     val expr_arg = parse_expr()
                     at_args.push(expr_arg)
-            parser_expect(TOK_RPAREN)
+            parser_expect(141)
             val at_callee = expr_ident("__traits", 0)
             return expr_call(at_callee, at_args, 0)
         # Simple @identifier (no parens): @file, @line, @function
@@ -201,10 +202,10 @@ fn parse_primary_expr() -> i64:
         return expr_ident(at_builtin_name, 0)
 
     # keyof T -- compile-time field name list (sugar for @traits("fields", "T"))
-    if par_kind_get() == TOK_KW_KEYOF:
+    if par_kind_get() == 200:
         parser_advance()
         val keyof_type = par_text_get()
-        if par_kind_get() == TOK_IDENT:
+        if par_kind_get() == 6:
             parser_advance()
         var keyof_args: [i64] = []
         keyof_args.push(expr_string_lit("fields", 0))
@@ -214,81 +215,81 @@ fn parse_primary_expr() -> i64:
 
     # mixin(code_text) -- compile-time code generation
     # Desugars to __mixin(code_text) builtin call
-    if par_kind_get() == TOK_KW_MIXIN:
+    if par_kind_get() == 203:
         parser_advance()
-        parser_expect(TOK_LPAREN)
+        parser_expect(140)
         val mixin_arg = parse_expr()
-        parser_expect(TOK_RPAREN)
+        parser_expect(141)
         var mixin_args_list: [i64] = []
         mixin_args_list.push(mixin_arg)
         val mixin_callee = expr_ident("__mixin", 0)
         return expr_call(mixin_callee, mixin_args_list, 0)
 
     # asm "..." | asm: "..." | asm { ... } | asm volatile { ... } | asm match: | asm assert [...]
-    if par_kind_get() == TOK_KW_ASM:
+    if par_kind_get() == 36:
         parser_advance()
 
         # asm match: -- multi-target dispatch
-        if par_kind_get() == TOK_KW_MATCH:
+        if par_kind_get() == 43:
             parser_advance()
-            parser_expect(TOK_COLON)
+            parser_expect(161)
             return parse_asm_match()
 
         # asm assert [...] -- compile-time target guard (parsed as expression, handled as stmt)
-        if par_kind_get() == TOK_IDENT and par_text_get() == "assert":
+        if par_kind_get() == 6 and par_text_get() == "assert":
             parser_advance()
             return parse_asm_assert_expr()
 
-        if par_kind_get() == TOK_IDENT and par_text_get() == "volatile":
+        if par_kind_get() == 6 and par_text_get() == "volatile":
             parser_advance()
 
-        if par_kind_get() == TOK_LPAREN:
+        if par_kind_get() == 140:
             return expr_asm(parse_legacy_parenthesized_asm(), 0)
 
-        if par_kind_get() == TOK_STRING_LIT:
+        if par_kind_get() == 3:
             parser_warn("legacy inline asm syntax; use asm { ... }")
             val inline_asm = par_text_get()
             parser_advance()
             return expr_asm(inline_asm, 0)
 
-        if par_kind_get() == TOK_COLON:
+        if par_kind_get() == 161:
             parser_warn("legacy inline asm syntax; use asm { ... }")
             parser_advance()
             parser_skip_newlines()
-            if par_kind_get() != TOK_INDENT:
+            if par_kind_get() != 181:
                 parser_error("expected indented asm block after 'asm:'")
                 return expr_asm("", 0)
             parser_advance()
             var asm_lines: [text] = []
             for ai in 0..100000:
                 parser_skip_newlines()
-                if par_kind_get() == TOK_DEDENT:
+                if par_kind_get() == 182:
                     parser_advance()
                     break
-                if par_kind_get() == TOK_EOF:
+                if par_kind_get() == 190:
                     break
-                if par_kind_get() == TOK_STRING_LIT:
+                if par_kind_get() == 3:
                     asm_lines.push(par_text_get())
                     parser_advance()
                     continue
                 parser_error("expected string literal in asm block")
                 for aj in 0..10000:
-                    val is_nl = par_kind_get() == TOK_NEWLINE
-                    val is_ded = par_kind_get() == TOK_DEDENT
-                    val is_eof = par_kind_get() == TOK_EOF
+                    val is_nl = par_kind_get() == 180
+                    val is_ded = par_kind_get() == 182
+                    val is_eof = par_kind_get() == 190
                     if is_nl or is_ded or is_eof:
                         break
                     parser_advance()
             return expr_asm(asm_lines.join("\n"), 0)
 
-        if par_kind_get() == TOK_LBRACE:
+        if par_kind_get() == 142:
             val raw_asm = parse_raw_asm_braced_payload()
             return expr_asm(raw_asm, 0)
 
         parser_error("expected string literal, ':' block, or '{...}' after 'asm'")
         return expr_asm("", 0)
 
-    if par_kind_get() == TOK_INT_LIT:
+    if par_kind_get() == 1 or par_kind_get() == 2:
         val int_text = par_text_get()
         parser_advance()
         # Parse integer from text (supporting _ separators and 0x/0b/0o prefixes)
@@ -349,12 +350,12 @@ fn parse_primary_expr() -> i64:
             int_val = int(stripped)
         return expr_int_lit(int_val, 0)
 
-    if par_kind_get() == TOK_FLOAT_LIT:
+    if par_kind_get() == 2:
         val float_text = par_text_get()
         parser_advance()
         return expr_float_lit(float_text, 0)
 
-    if par_kind_get() == TOK_SUFFIXED_INT:
+    if par_kind_get() == 7:
         val suf_text = par_text_get()
         val suf_name = lex_cur_suffix_get()
         parser_advance()
@@ -362,30 +363,30 @@ fn parse_primary_expr() -> i64:
         val int_val = int(suf_text)
         return expr_suffixed_int(int_val, suf_name, 0)
 
-    if par_kind_get() == TOK_SUFFIXED_FLOAT:
+    if par_kind_get() == 8:
         val suf_text = par_text_get()
         val suf_name = lex_cur_suffix_get()
         parser_advance()
         parser_validate_unit_suffix(suf_name)
         return expr_suffixed_float(suf_text, suf_name, 0)
 
-    if par_kind_get() == TOK_STRING_LIT:
+    if par_kind_get() == 3:
         val str_text = par_text_get()
         parser_advance()
         return expr_string_lit(str_text, 0)
 
-    if par_kind_get() == TOK_BOOL_LIT:
+    if par_kind_get() == 4:
         val bool_text = par_text_get()
         parser_advance()
         if bool_text == "true":
             return expr_bool_lit(1, 0)
         return expr_bool_lit(0, 0)
 
-    if par_kind_get() == TOK_NIL_LIT:
+    if par_kind_get() == 5:
         parser_advance()
         return expr_nil_lit(0)
 
-    if par_kind_get() == TOK_IDENT:
+    if par_kind_get() == 6:
         if par_text_get() == "todo":
             parser_advance()
             val msg = parse_optional_rationale_args()
@@ -393,134 +394,134 @@ fn parse_primary_expr() -> i64:
                 parser_warn("REQC003: todo requires two strings: todo(\"what remains\", \"hint or issue\")")
             return expr_pass_todo(msg, 0)
 
-    if par_kind_get() == TOK_IDENT:
+    if par_kind_get() == 6:
         val id_name = par_text_get()
         parser_advance()
         return expr_ident(id_name, 0)
 
-    if par_kind_get() == TOK_KW_SELF:
+    if par_kind_get() == 38:
         parser_advance()
         return expr_ident("self", 0)
 
-    if par_kind_get() == TOK_KW_AWAIT:
+    if par_kind_get() == 54:
         parser_advance()
         val future_expr = parse_expr()
         return expr_await(future_expr, 0)
 
-    if par_kind_get() == TOK_KW_YIELD:
+    if par_kind_get() == 37:
         parser_advance()
         val value_expr = parse_expr()
         return expr_yield(value_expr, 0)
 
     # new expr | new() expr | new(alloc) expr — explicit allocation
-    if par_kind_get() == TOK_KW_NEW:
+    if par_kind_get() == 211:
         parser_advance()
         # alloc_kind: 0 = default, 1 = pool, 2 = explicit allocator
         var alloc_kind = 0
         var alloc_expr_id = -1
         # Check for allocator spec: new() or new(allocator)
-        if par_kind_get() == TOK_LPAREN:
+        if par_kind_get() == 140:
             parser_advance()
-            if par_kind_get() == TOK_RPAREN:
+            if par_kind_get() == 141:
                 # new() — type pool
                 parser_advance()
                 alloc_kind = 1
             else:
                 # new(allocator_expr) — explicit allocator
                 alloc_expr_id = parse_expr()
-                parser_expect(TOK_RPAREN)
+                parser_expect(141)
                 alloc_kind = 2
         val inner = parse_expr()
         return expr_new_alloc(alloc_kind, alloc_expr_id, inner, 0)
 
-    if par_kind_get() == TOK_KW_SPAWN:
+    if par_kind_get() == 197:
         parser_advance()
         val call_expr = parse_expr()
         return expr_spawn(call_expr, 0)
 
-    if par_kind_get() == TOK_KW_DO:
+    if par_kind_get() == 195:
         parser_advance()
-        parser_expect(TOK_COLON)
+        parser_expect(161)
         val do_body = parse_block()
         return expr_do_block(do_body, 0)
 
-    if par_kind_get() == TOK_KW_CE:
+    if par_kind_get() == 205:
         # ce NAME: block as expression -- returns last value like do:
         parser_advance()
         var ce_builder_name = par_text_get()
-        parser_expect(TOK_IDENT)
-        parser_expect(TOK_COLON)
+        parser_expect(6)
+        parser_expect(161)
         val ce_body = parse_block()
         return expr_do_block(ce_body, 0)
 
-    if par_kind_get() == TOK_BACKTICK_IDENT:
+    if par_kind_get() == 193:
         val atom_name = par_text_get()
         parser_advance()
         return expr_atom(atom_name, 0)
 
-    if par_kind_get() == TOK_LPAREN:
+    if par_kind_get() == 140:
         parser_advance()
-        if par_kind_get() == TOK_RPAREN:
+        if par_kind_get() == 141:
             parser_advance()
             return expr_unit(0)
         val inner = parse_expr()
-        parser_expect(TOK_RPAREN)
+        parser_expect(141)
         return inner
 
-    if par_kind_get() == TOK_LBRACKET:
+    if par_kind_get() == 144:
         # Array literal or list comprehension
         parser_advance()
         # Empty array
-        if par_kind_get() == TOK_RBRACKET:
+        if par_kind_get() == 145:
             parser_advance()
             return expr_array_lit([], 0)
         # For-first comprehension: [for x in items if cond: expr]
-        if par_kind_get() == TOK_KW_FOR:
+        if par_kind_get() == 45:
             parser_advance()
             val comp_iter_var = par_text_get()
-            parser_expect(TOK_IDENT)
-            parser_expect(TOK_KW_IN)
+            parser_expect(6)
+            parser_expect(50)
             val comp_iterable = parse_expr()
             var comp_cond = -1
-            if par_kind_get() == TOK_KW_IF:
+            if par_kind_get() == 40:
                 parser_advance()
                 comp_cond = parse_expr()
-            parser_expect(TOK_COLON)
+            parser_expect(161)
             val comp_body = parse_expr()
-            parser_expect(TOK_RBRACKET)
+            parser_expect(145)
             return expr_list_comp(comp_iter_var, comp_iterable, comp_body, comp_cond, 0)
         # Parse first element
         val first_elem = parse_expr()
         # For-last comprehension: [expr for x in items if cond]
-        if par_kind_get() == TOK_KW_FOR:
+        if par_kind_get() == 45:
             parser_advance()
             val comp_iter_var = par_text_get()
-            parser_expect(TOK_IDENT)
-            parser_expect(TOK_KW_IN)
+            parser_expect(6)
+            parser_expect(50)
             val comp_iterable = parse_expr()
             var comp_cond = -1
-            if par_kind_get() == TOK_KW_IF:
+            if par_kind_get() == 40:
                 parser_advance()
                 comp_cond = parse_expr()
-            parser_expect(TOK_RBRACKET)
+            parser_expect(145)
             return expr_list_comp(comp_iter_var, comp_iterable, first_elem, comp_cond, 0)
         # Regular array literal: [first, second, ...]
         var elements: [i64] = [first_elem]
         for i in 0..10000:
-            if par_kind_get() != TOK_COMMA:
+            if par_kind_get() != 160:
                 break
             parser_advance()
-            if par_kind_get() == TOK_RBRACKET:
+            if par_kind_get() == 145:
                 break
             elements.push(parse_expr())
-        parser_expect(TOK_RBRACKET)
+        parser_expect(145)
         return expr_array_lit(elements, 0)
 
-    if par_kind_get() == TOK_KW_RETURN:
+    if par_kind_get() == 49:
         parser_advance()
-        val is_nl = par_kind_get() == TOK_NEWLINE
-        val is_ded = par_kind_get() == TOK_DEDENT
-        val is_eof = par_kind_get() == TOK_EOF
+        val is_nl = par_kind_get() == 180
+        val is_ded = par_kind_get() == 182
+        val is_eof = par_kind_get() == 190
         val no_value = is_nl or is_ded
         val no_val2 = no_value or is_eof
         if no_val2:
@@ -528,56 +529,56 @@ fn parse_primary_expr() -> i64:
         val ret_val = parse_expr()
         return expr_return_expr(ret_val, 0)
 
-    if par_kind_get() == TOK_KW_BREAK:
+    if par_kind_get() == 47:
         parser_advance()
         return expr_break_expr(0)
 
-    if par_kind_get() == TOK_KW_CONTINUE:
+    if par_kind_get() == 48:
         parser_advance()
         return expr_continue_expr(0)
 
-    if par_kind_get() == TOK_KW_PASS:
+    if par_kind_get() == 52:
         parser_advance()
         val msg = parse_optional_rationale_args()
         if msg == "":
             return expr_pass(0)
         return expr_pass_with_msg(msg, 0)
 
-    if par_kind_get() == TOK_KW_PASS_TODO:
+    if par_kind_get() == 183:
         parser_advance()
         val msg = parse_optional_rationale_args()
         if msg == "":
             parser_warn("REQC001: pass_todo requires a comment string: pass_todo(\"what remains\", \"hint or issue\")")
         return expr_pass_todo(msg, 0)
 
-    if par_kind_get() == TOK_KW_PASS_DO_NOTHING:
+    if par_kind_get() == 184:
         parser_advance()
         val msg = parse_optional_rationale_args()
         if msg == "":
             parser_warn("REQC001: pass_do_nothing requires a comment string: pass_do_nothing(\"reason\")")
         return expr_pass_do_nothing(msg, 0)
 
-    if par_kind_get() == TOK_KW_PASS_DN:
+    if par_kind_get() == 185:
         parser_advance()
         val msg = parse_optional_rationale_args()
         if msg == "":
             parser_warn("REQC001: pass_dn requires a comment string: pass_dn(\"reason\")")
         return expr_pass_dn(msg, 0)
 
-    if par_kind_get() == TOK_KW_NOT:
+    if par_kind_get() == 57:
         parser_advance()
         val operand = parse_not()
-        return expr_unary(TOK_NOT, operand, 0)
+        return expr_unary(57, operand, 0)
 
-    if par_kind_get() == TOK_MINUS:
+    if par_kind_get() == 61:
         parser_advance()
         val operand = parse_unary()
-        return expr_unary(TOK_MINUS, operand, 0)
+        return expr_unary(61, operand, 0)
 
     # Method reference: &:method_name → \__p0: __p0.method_name()
-    if par_kind_get() == TOK_AMP_COLON:
+    if par_kind_get() == 210:
         parser_advance()
-        if par_kind_get() != TOK_IDENT:
+        if par_kind_get() != 6:
             parser_error("expected method name after '&:'")
             return expr_nil_lit(0)
         val method_name = par_text_get()
@@ -591,59 +592,59 @@ fn parse_primary_expr() -> i64:
         body_stmts.push(call)
         return expr_lambda(param_names, body_stmts, 0)
 
-    if par_kind_get() == TOK_UNDERSCORE:
+    if par_kind_get() == 169:
         parser_advance()
         return expr_ident("_", 0)
 
     # Dict literal, dict comprehension, or empty {}
-    if par_kind_get() == TOK_LBRACE:
+    if par_kind_get() == 142:
         parser_advance()
         var key_exprs: [i64] = []
         var value_exprs: [i64] = []
 
         # Check for empty dict {}
-        if par_kind_get() == TOK_RBRACE:
+        if par_kind_get() == 143:
             parser_advance()
             return expr_dict_lit(key_exprs, value_exprs, 0)
 
         # Dict comprehension for-first: {for x in items if cond: (key, val)}
-        if par_kind_get() == TOK_KW_FOR:
+        if par_kind_get() == 45:
             parser_advance()
             val dc_iter_var = par_text_get()
-            parser_expect(TOK_IDENT)
-            parser_expect(TOK_KW_IN)
+            parser_expect(6)
+            parser_expect(50)
             val dc_iterable = parse_expr()
             var dc_cond = -1
-            if par_kind_get() == TOK_KW_IF:
+            if par_kind_get() == 40:
                 parser_advance()
                 dc_cond = parse_expr()
-            parser_expect(TOK_COLON)
+            parser_expect(161)
             # Parse (key, value) tuple
-            parser_expect(TOK_LPAREN)
+            parser_expect(140)
             val dc_key = parse_expr()
-            parser_expect(TOK_COMMA)
+            parser_expect(160)
             val dc_val = parse_expr()
-            parser_expect(TOK_RPAREN)
-            parser_expect(TOK_RBRACE)
+            parser_expect(141)
+            parser_expect(143)
             return expr_dict_comp(dc_iter_var, dc_iterable, dc_key, dc_val, dc_cond, 0)
 
         # Parse first key
         val key = parse_expr()
-        parser_expect(TOK_COLON)
+        parser_expect(161)
         val value = parse_expr()
 
         # Dict comprehension for-last: {k: v for x in items if cond}
-        if par_kind_get() == TOK_KW_FOR:
+        if par_kind_get() == 45:
             parser_advance()
             val dc_iter_var = par_text_get()
-            parser_expect(TOK_IDENT)
-            parser_expect(TOK_KW_IN)
+            parser_expect(6)
+            parser_expect(50)
             val dc_iterable = parse_expr()
             var dc_cond = -1
-            if par_kind_get() == TOK_KW_IF:
+            if par_kind_get() == 40:
                 parser_advance()
                 dc_cond = parse_expr()
-            parser_expect(TOK_RBRACE)
+            parser_expect(143)
             return expr_dict_comp(dc_iter_var, dc_iterable, key, value, dc_cond, 0)
 
         # Regular dict literal continues
@@ -653,13 +654,13 @@ fn parse_primary_expr() -> i64:
         # Parse remaining key-value pairs
         for i in 0..10000:
             # Check for comma or closing brace
-            if par_kind_get() == TOK_COMMA:
+            if par_kind_get() == 160:
                 parser_advance()
                 # Allow trailing comma before }
-                if par_kind_get() == TOK_RBRACE:
+                if par_kind_get() == 143:
                     parser_advance()
                     break
-            elif par_kind_get() == TOK_RBRACE:
+            elif par_kind_get() == 143:
                 parser_advance()
                 break
             else:
@@ -669,33 +670,33 @@ fn parse_primary_expr() -> i64:
             # Parse next key-value pair
             val next_key = parse_expr()
             key_exprs.push(next_key)
-            parser_expect(TOK_COLON)
+            parser_expect(161)
             val next_value = parse_expr()
             value_exprs.push(next_value)
 
         return expr_dict_lit(key_exprs, value_exprs, 0)
 
     # Lambda: \x: expr or \x, y: expr
-    if par_kind_get() == TOK_ERROR:
+    if par_kind_get() == 191:
         if par_text_get() == "unexpected character: \\":
             parser_advance()
             # Skip lambda params
             for i in 0..100:
-                if par_kind_get() == TOK_COLON:
+                if par_kind_get() == 161:
                     parser_advance()
                     break
-                if par_kind_get() == TOK_EOF:
+                if par_kind_get() == 190:
                     break
-                if par_kind_get() == TOK_NEWLINE:
+                if par_kind_get() == 180:
                     break
                 parser_advance()
             val lbody = parse_expr()
             return lbody
 
     # Handle keywords that may appear in expression position
-    if par_kind_get() == TOK_KW_MATCH:
+    if par_kind_get() == 43:
         return parse_match_stmt()
-    if par_kind_get() == TOK_KW_IF:
+    if par_kind_get() == 40:
         return parse_if_expr()
 
     parser_error("unexpected token in expression: " + tok_kind_name(par_kind_get()) + " '" + par_text_get() + "'")
@@ -708,17 +709,17 @@ fn parse_asm_target_spec() -> i64:
     """Parse target spec: [arch | arch2, os, abi, backend >= ver]
     Returns index into asm_arm_* arena (as spec, not full arm).
     """
-    parser_expect(TOK_LBRACKET)
+    parser_expect(144)
     # Parse arch(es) with pipe grouping
     var archs: [text] = []
-    if par_kind_get() == TOK_IDENT:
+    if par_kind_get() == 6:
         archs.push(par_text_get())
         parser_advance()
         # Check for pipe groups: arch | arch2
         for pi in 0..20:
-            if par_kind_get() == TOK_PIPE:
+            if par_kind_get() == 121:
                 parser_advance()
-                if par_kind_get() == TOK_IDENT:
+                if par_kind_get() == 6:
                     archs.push(par_text_get())
                     parser_advance()
                 else:
@@ -737,15 +738,15 @@ fn parse_asm_target_spec() -> i64:
     var field_pos = 1  # 1=os, 2=abi, 3=backend
 
     for fi in 0..3:
-        if par_kind_get() != TOK_COMMA:
+        if par_kind_get() != 160:
             break
         parser_advance()
-        if par_kind_get() == TOK_UNDERSCORE:
+        if par_kind_get() == 169:
             # Wildcard _
             parser_advance()
             field_pos = field_pos + 1
             continue
-        if par_kind_get() == TOK_IDENT:
+        if par_kind_get() == 6:
             val field_text = par_text_get()
             parser_advance()
             if field_pos == 1:
@@ -756,36 +757,36 @@ fn parse_asm_target_spec() -> i64:
                 backend_val = field_text
                 # Check for version constraints after backend
                 for vi in 0..4:
-                    if par_kind_get() == TOK_GEQ:
+                    if par_kind_get() == 85:
                         parser_advance()
-                        if par_kind_get() == TOK_INT_LIT:
+                        if par_kind_get() == 1 or par_kind_get() == 2:
                             ver_ops.push(">=")
                             ver_vals.push(parse_int_text(par_text_get()))
                             parser_advance()
                         else:
                             parser_error("expected version number after '>='")
-                    elif par_kind_get() == TOK_EQ:
+                    elif par_kind_get() == 80:
                         # Could be == (two tokens) or a single ==
                         parser_advance()
-                        if par_kind_get() == TOK_EQ:
+                        if par_kind_get() == 80:
                             parser_advance()
-                        if par_kind_get() == TOK_INT_LIT:
+                        if par_kind_get() == 1 or par_kind_get() == 2:
                             ver_ops.push("==")
                             ver_vals.push(parse_int_text(par_text_get()))
                             parser_advance()
                         else:
                             parser_error("expected version number after '=='")
-                    elif par_kind_get() == TOK_LT:
+                    elif par_kind_get() == 82:
                         parser_advance()
-                        if par_kind_get() == TOK_INT_LIT:
+                        if par_kind_get() == 1 or par_kind_get() == 2:
                             ver_ops.push("<")
                             ver_vals.push(parse_int_text(par_text_get()))
                             parser_advance()
                         else:
                             parser_error("expected version number after '<'")
-                    elif par_kind_get() == TOK_IDENT and par_text_get() == "~=":
+                    elif par_kind_get() == 6 and par_text_get() == "~=":
                         parser_advance()
-                        if par_kind_get() == TOK_INT_LIT:
+                        if par_kind_get() == 1 or par_kind_get() == 2:
                             ver_ops.push("~=")
                             ver_vals.push(parse_int_text(par_text_get()))
                             parser_advance()
@@ -798,7 +799,7 @@ fn parse_asm_target_spec() -> i64:
             parser_error("expected identifier or '_' in target spec")
             break
 
-    parser_expect(TOK_RBRACKET)
+    parser_expect(145)
 
     val arm_idx = asm_arm_new(archs, os_val, abi_val, backend_val,
                               ver_ops, ver_vals, "", false, "", false)
@@ -822,7 +823,7 @@ fn parse_asm_match() -> i64:
             case _: compile_error("msg")
     """
     parser_skip_newlines()
-    if par_kind_get() != TOK_INDENT:
+    if par_kind_get() != 181:
         parser_error("expected indented block after 'asm match:'")
         return expr_asm("", 0)
     parser_advance()
@@ -830,14 +831,14 @@ fn parse_asm_match() -> i64:
     var arm_indices: [i64] = []
     for mi in 0..100:
         parser_skip_newlines()
-        if par_kind_get() == TOK_DEDENT:
+        if par_kind_get() == 182:
             parser_advance()
             break
-        if par_kind_get() == TOK_EOF:
+        if par_kind_get() == 190:
             break
 
         # Each arm starts with 'case'
-        if par_kind_get() != TOK_KW_CASE:
+        if par_kind_get() != 44:
             parser_error("expected 'case' in asm match arm")
             parser_advance()
             continue
@@ -845,40 +846,40 @@ fn parse_asm_match() -> i64:
         parser_advance()  # consume 'case'
 
         # Check for wildcard: case _:
-        if par_kind_get() == TOK_UNDERSCORE:
+        if par_kind_get() == 169:
             parser_advance()
-            parser_expect(TOK_COLON)
+            parser_expect(161)
 
             # Parse body: either compile_error("msg") or asm lines
             parser_skip_newlines()
-            if par_kind_get() == TOK_INDENT:
+            if par_kind_get() == 181:
                 parser_advance()
                 parser_skip_newlines()
 
-            if par_kind_get() == TOK_IDENT and par_text_get() == "compile_error":
+            if par_kind_get() == 6 and par_text_get() == "compile_error":
                 parser_advance()
-                parser_expect(TOK_LPAREN)
+                parser_expect(140)
                 var err_msg = ""
-                if par_kind_get() == TOK_STRING_LIT:
+                if par_kind_get() == 3:
                     err_msg = par_text_get()
                     parser_advance()
-                parser_expect(TOK_RPAREN)
+                parser_expect(141)
                 val arm_idx = asm_arm_new([], "", "", "", [], [], "", true, err_msg, true)
                 arm_indices.push(arm_idx)
                 # Skip to end of arm
                 parser_skip_newlines()
-                if par_kind_get() == TOK_DEDENT:
+                if par_kind_get() == 182:
                     parser_advance()
             else:
                 # Wildcard with asm body
                 var asm_lines: [text] = []
                 for ai in 0..10000:
                     parser_skip_newlines()
-                    if par_kind_get() == TOK_DEDENT or par_kind_get() == TOK_EOF:
+                    if par_kind_get() == 182 or par_kind_get() == 190:
                         break
-                    if par_kind_get() == TOK_KW_CASE:
+                    if par_kind_get() == 44:
                         break
-                    if par_kind_get() == TOK_STRING_LIT:
+                    if par_kind_get() == 3:
                         asm_lines.push(par_text_get())
                         parser_advance()
                     else:
@@ -886,45 +887,45 @@ fn parse_asm_match() -> i64:
                 val asm_text = asm_lines.join("\n")
                 val arm_idx = asm_arm_new([], "", "", "", [], [], asm_text, false, "", true)
                 arm_indices.push(arm_idx)
-                if par_kind_get() == TOK_DEDENT:
+                if par_kind_get() == 182:
                     parser_advance()
             continue
 
         # case [spec]:
         val spec_idx = parse_asm_target_spec()
-        parser_expect(TOK_COLON)
+        parser_expect(161)
 
         # Parse body: either compile_error("msg") or asm lines
         parser_skip_newlines()
-        if par_kind_get() == TOK_INDENT:
+        if par_kind_get() == 181:
             parser_advance()
             parser_skip_newlines()
 
-        if par_kind_get() == TOK_IDENT and par_text_get() == "compile_error":
+        if par_kind_get() == 6 and par_text_get() == "compile_error":
             parser_advance()
-            parser_expect(TOK_LPAREN)
+            parser_expect(140)
             var err_msg = ""
-            if par_kind_get() == TOK_STRING_LIT:
+            if par_kind_get() == 3:
                 err_msg = par_text_get()
                 parser_advance()
-            parser_expect(TOK_RPAREN)
+            parser_expect(141)
             # Update the arm to be compile_error
             asm_arm_is_compile_error[spec_idx] = true
             asm_arm_error_msg[spec_idx] = err_msg
             arm_indices.push(spec_idx)
             parser_skip_newlines()
-            if par_kind_get() == TOK_DEDENT:
+            if par_kind_get() == 182:
                 parser_advance()
         else:
             # Collect asm body lines
             var asm_lines: [text] = []
             for ai in 0..10000:
                 parser_skip_newlines()
-                if par_kind_get() == TOK_DEDENT or par_kind_get() == TOK_EOF:
+                if par_kind_get() == 182 or par_kind_get() == 190:
                     break
-                if par_kind_get() == TOK_KW_CASE:
+                if par_kind_get() == 44:
                     break
-                if par_kind_get() == TOK_STRING_LIT:
+                if par_kind_get() == 3:
                     asm_lines.push(par_text_get())
                     parser_advance()
                 else:
@@ -932,7 +933,7 @@ fn parse_asm_match() -> i64:
             val asm_text = asm_lines.join("\n")
             asm_arm_asm_text[spec_idx] = asm_text
             arm_indices.push(spec_idx)
-            if par_kind_get() == TOK_DEDENT:
+            if par_kind_get() == 182:
                 parser_advance()
 
     return expr_asm_match(arm_indices, 0)

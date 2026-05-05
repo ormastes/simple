@@ -236,6 +236,7 @@ pub fn compile_function_body<M: Module>(
     global_ids: &std::collections::BTreeMap<String, cranelift_module::DataId>,
     import_map: &std::sync::Arc<std::collections::HashMap<String, String>>,
     use_map: &std::collections::HashMap<String, String>,
+    data_exports: &std::sync::Arc<std::collections::HashSet<String>>,
     vtable_data_ids: &std::collections::BTreeMap<String, cranelift_module::DataId>,
     vtable_type_ids: &std::collections::BTreeMap<crate::hir::TypeId, cranelift_module::DataId>,
 ) -> InstrResult<()> {
@@ -594,6 +595,7 @@ pub fn compile_function_body<M: Module>(
                     async_state_map: &async_state_map,
                     import_map,
                     use_map,
+                    data_exports,
                     vtable_data_ids,
                     vtable_type_ids,
                     vreg_types: &mut vreg_types,
@@ -622,6 +624,7 @@ pub fn compile_function_body<M: Module>(
                     async_state_map: &async_state_map,
                     import_map,
                     use_map,
+                    data_exports,
                     vtable_data_ids,
                     vtable_type_ids,
                     vreg_types: &mut vreg_types,
@@ -708,8 +711,11 @@ pub fn compile_function_body<M: Module>(
                         let ret_ty = if func.name == "main" {
                             types::I32
                         } else {
-                            // Signature uses I64 for all non-main returns
-                            types::I64
+                            crate::codegen::runtime_ffi::RUNTIME_FUNCS
+                                .iter()
+                                .find(|spec| spec.name == func.name)
+                                .and_then(|spec| spec.returns.first().copied())
+                                .unwrap_or(types::I64)
                         };
                         // Handle missing VReg (can happen in complex control flow)
                         let mut ret_val = if let Some(&rv) = vreg_values.get(v) {

@@ -10,6 +10,10 @@
 use compiler.backend.llvm_target.{LlvmTargetTriple}
 use compiler.common.attributes.FunctionAttr
 
+extern fn rt_env_get(key: text) -> text
+
+var _llvm_bootstrap_ir_text: text = ""
+
 # Re-import from split module for re-export (backward compatibility)
 use compiler.backend.llvm_passes.{LlvmPass, passes_for_level}
 
@@ -43,6 +47,13 @@ class LlvmIRBuilder:
 
     me emit(line: text):
         """Emit an IR line."""
+        if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
+            val current = _llvm_bootstrap_ir_text ?? ""
+            if current == "":
+                _llvm_bootstrap_ir_text = line
+            else:
+                _llvm_bootstrap_ir_text = "{current}\n{line}"
+            return
         self.instructions = self.instructions.push(line)
 
     me emit_module_header():
@@ -442,13 +453,23 @@ class LlvmIRBuilder:
         val tag = self.tbaa_tag_for_type(ty)
         self.emit("  store {ty} {value}, ptr {ptr}, align {alignment}, !tbaa !{tag}")
 
-    fn build() -> text:
+    me build() -> text:
         """Build final IR string."""
+        val bootstrap_ir = _llvm_bootstrap_ir_text ?? ""
+        if bootstrap_ir != "":
+            return bootstrap_ir
         self.instructions.join("\n")
 
 # ============================================================================
 # Helper Functions
 # ============================================================================
+
+fn llvm_ir_builder_build(builder: LlvmIRBuilder) -> text:
+    """Build final IR without relying on receiver-method dispatch."""
+    val bootstrap_ir = _llvm_bootstrap_ir_text ?? ""
+    if bootstrap_ir != "":
+        return bootstrap_ir
+    return builder.instructions.join("\n")
 
 fn natural_alignment(ty: text) -> i64:
     """Return natural alignment in bytes for an LLVM type."""

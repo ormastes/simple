@@ -1,10 +1,17 @@
 use std.common.linalg.ndarray_core.*
+use std.simd.{Vec4d, Vec4f, simd_add_f32x4, simd_add_f64x4, simd_div_f32x4, simd_div_f64x4, simd_mul_f32x4, simd_mul_f64x4, simd_sub_f32x4, simd_sub_f64x4}
 
 struct Float64:
     value: f64
 
     static fn new(value: f64) -> Float64:
         Float64(value: value)
+
+struct Float32:
+    value: f32
+
+    static fn new(value: f32) -> Float32:
+        Float32(value: value)
 
 struct Int64:
     value: i64
@@ -19,11 +26,13 @@ struct Bool:
         Bool(value: value)
 
 enum DType:
+    F32
     F64
     I64
     Bool
 
 struct NDArray:
+    data_f32: [Float32]
     data_f64: [Float64]
     data_i64: [Int64]
     data_bool: [Bool]
@@ -41,6 +50,10 @@ struct Matrix<T>:
 struct Vector<T>:
     inner: NDArray
 
+struct SqueezedMetadata:
+    shape: Shape
+    strides: Stride
+
 struct Slice:
     start: Index
     stop: Index
@@ -49,8 +62,10 @@ struct Slice:
     static fn new(start: Index, stop: Index, step: Index) -> Slice:
         Slice(start: start, stop: stop, step: step)
 
-fn raw_array_len(dtype: DType, data_f64: [Float64], data_i64: [Int64], data_bool: [Bool]) -> i64:
+fn raw_array_len(dtype: DType, data_f32: [Float32], data_f64: [Float64], data_i64: [Int64], data_bool: [Bool]) -> i64:
     match dtype:
+        case DType.F32:
+            data_f32.len()
         case DType.F64:
             data_f64.len()
         case DType.I64:
@@ -58,8 +73,9 @@ fn raw_array_len(dtype: DType, data_f64: [Float64], data_i64: [Int64], data_bool
         case DType.Bool:
             data_bool.len()
 
-fn make_array(data_f64: [Float64], data_i64: [Int64], data_bool: [Bool], shape: Shape, dtype: DType) -> NDArray:
+fn make_array(data_f32: [Float32], data_f64: [Float64], data_i64: [Int64], data_bool: [Bool], shape: Shape, dtype: DType) -> NDArray:
     NDArray(
+        data_f32: data_f32,
         data_f64: data_f64,
         data_i64: data_i64,
         data_bool: data_bool,
@@ -67,25 +83,42 @@ fn make_array(data_f64: [Float64], data_i64: [Int64], data_bool: [Bool], shape: 
         strides: derive_row_major_strides(shape),
         offset: Index.new(0),
         dtype: dtype,
-        device: Device.cpu(),
+        device: Device.CPU,
         layout: Layout.RowMajor,
         kernel_profile: KernelProfile.SimdReady
     )
 
+fn make_f32_array(values: [Float32], shape: Shape) -> NDArray:
+    make_array(values, [], [], [], shape, DType.F32)
+
 fn make_f64_array(values: [Float64], shape: Shape) -> NDArray:
-    make_array(values, [], [], shape, DType.F64)
+    make_array([], values, [], [], shape, DType.F64)
 
 fn make_i64_array(values: [Int64], shape: Shape) -> NDArray:
-    make_array([], values, [], shape, DType.I64)
+    make_array([], [], values, [], shape, DType.I64)
 
 fn make_bool_array(values: [Bool], shape: Shape) -> NDArray:
-    make_array([], [], values, shape, DType.Bool)
+    make_array([], [], [], values, shape, DType.Bool)
+
+fn squeeze_metadata(shape: Shape, strides: Stride) -> SqueezedMetadata:
+    var dims: [Index] = []
+    var stride_dims: [Index] = []
+    var i = 0
+    while i < shape.dims.len():
+        if shape.dims[i].value != 1:
+            dims.push(shape.dims[i])
+            stride_dims.push(strides.dims[i])
+        i = i + 1
+    SqueezedMetadata(shape: Shape.new(dims), strides: Stride.new(stride_dims))
 
 fn array(values: [Float64]) -> NDArray:
     from_seq(values)
 
 fn from_seq(values: [Float64]) -> NDArray:
     make_f64_array(values, Shape.new([Index.new(values.len())]))
+
+fn array_f32(values: [Float32]) -> NDArray:
+    make_f32_array(values, Shape.new([Index.new(values.len())]))
 
 fn array_i64(values: [Int64]) -> NDArray:
     make_i64_array(values, Shape.new([Index.new(values.len())]))
@@ -169,6 +202,624 @@ fn try_linspace(start: Float64, stop: Float64, count: Index) -> Result<NDArray, 
 fn linspace(start: Float64, stop: Float64, count: Index) -> NDArray:
     try_linspace(start, stop, count).unwrap()
 
+fn concatenate(arrays: [NDArray]) -> NDArray:
+    try_concatenate(arrays).unwrap()
+
+fn try_concatenate(arrays: [NDArray]) -> Result<NDArray, NdarrayError>:
+    if arrays.len() == 0:
+        return Err(NdarrayError.InvalidShape)
+    val dtype = arrays[0].dtype
+    var total = 0
+    var i = 0
+    while i < arrays.len():
+        val current = arrays[i]
+        if current.shape.dims.len() != 1:
+            return Err(NdarrayError.InvalidShape)
+        if current.dtype != dtype:
+            return Err(NdarrayError.UnsupportedDType)
+        total = total + current.len().value
+        i = i + 1
+    match dtype:
+        case DType.F32:
+            var out: [Float32] = []
+            i = 0
+            while i < arrays.len():
+                val current = arrays[i]
+                var j = 0
+                while j < current.len().value:
+                    out.push(current.flat_f32(j))
+                    j = j + 1
+                i = i + 1
+            Ok(make_f32_array(out, Shape.new([Index.new(total)])))
+        case DType.F64:
+            var out: [Float64] = []
+            i = 0
+            while i < arrays.len():
+                val current = arrays[i]
+                var j = 0
+                while j < current.len().value:
+                    out.push(current.flat_f64(j))
+                    j = j + 1
+                i = i + 1
+            Ok(make_f64_array(out, Shape.new([Index.new(total)])))
+        case DType.I64:
+            var out: [Int64] = []
+            i = 0
+            while i < arrays.len():
+                val current = arrays[i]
+                var j = 0
+                while j < current.len().value:
+                    out.push(current.flat_i64(j))
+                    j = j + 1
+                i = i + 1
+            Ok(make_i64_array(out, Shape.new([Index.new(total)])))
+        case DType.Bool:
+            var out: [Bool] = []
+            i = 0
+            while i < arrays.len():
+                val current = arrays[i]
+                var j = 0
+                while j < current.len().value:
+                    out.push(current.flat_bool(j))
+                    j = j + 1
+                i = i + 1
+            Ok(make_bool_array(out, Shape.new([Index.new(total)])))
+
+fn stack(arrays: [NDArray]) -> NDArray:
+    try_stack(arrays).unwrap()
+
+fn try_stack(arrays: [NDArray]) -> Result<NDArray, NdarrayError>:
+    if arrays.len() == 0:
+        return Err(NdarrayError.InvalidShape)
+    val dtype = arrays[0].dtype
+    if dtype == DType.Bool:
+        return Err(NdarrayError.UnsupportedDType)
+    val width = arrays[0].len()
+    var i = 0
+    while i < arrays.len():
+        val current = arrays[i]
+        if current.shape.dims.len() != 1:
+            return Err(NdarrayError.InvalidShape)
+        if current.dtype != dtype:
+            return Err(NdarrayError.UnsupportedDType)
+        if current.len() != width:
+            return Err(NdarrayError.ShapeMismatch)
+        i = i + 1
+    val shape = Shape.new([Index.new(arrays.len()), width])
+    match dtype:
+        case DType.F32:
+            var out: [Float32] = []
+            i = 0
+            while i < arrays.len():
+                val current = arrays[i]
+                var j = 0
+                while j < width.value:
+                    out.push(current.flat_f32(j))
+                    j = j + 1
+                i = i + 1
+            Ok(make_f32_array(out, shape))
+        case DType.F64:
+            var out: [Float64] = []
+            i = 0
+            while i < arrays.len():
+                val current = arrays[i]
+                var j = 0
+                while j < width.value:
+                    out.push(current.flat_f64(j))
+                    j = j + 1
+                i = i + 1
+            Ok(make_f64_array(out, shape))
+        case DType.I64:
+            var out: [Int64] = []
+            i = 0
+            while i < arrays.len():
+                val current = arrays[i]
+                var j = 0
+                while j < width.value:
+                    out.push(current.flat_i64(j))
+                    j = j + 1
+                i = i + 1
+            Ok(make_i64_array(out, shape))
+        case DType.Bool:
+            var out: [Bool] = []
+            i = 0
+            while i < arrays.len():
+                val current = arrays[i]
+                var j = 0
+                while j < width.value:
+                    out.push(current.flat_bool(j))
+                    j = j + 1
+                i = i + 1
+            Ok(make_bool_array(out, shape))
+
+fn random_uniform(seed: Int64, count: Index) -> Result<NDArray, NdarrayError>:
+    if count.value < 0:
+        return Err(NdarrayError.InvalidShape)
+    var state = seed.value
+    if state == 0:
+        state = 1
+    var out: [Float64] = []
+    var i = 0
+    while i < count.value:
+        state = next_lcg_state(state)
+        out.push(Float64.new((state % 1000000) as f64 / 1000000.0))
+        i = i + 1
+    Ok(make_f64_array(out, Shape.new([count])))
+
+fn where_bool(mask_values: NDArray, left: NDArray, right: NDArray) -> Result<NDArray, NdarrayError>:
+    if mask_values.dtype != DType.Bool:
+        return Err(NdarrayError.UnsupportedDType)
+    if left.dtype != right.dtype:
+        return Err(NdarrayError.UnsupportedDType)
+    if mask_values.shape != left.shape or left.shape != right.shape:
+        return Err(NdarrayError.ShapeMismatch)
+    if left.dtype == DType.F32:
+        var out: [Float32] = []
+        var i = 0
+        while i < left.len().value:
+            if mask_values.flat_bool(i).value:
+                out.push(left.flat_f32(i))
+            else:
+                out.push(right.flat_f32(i))
+            i = i + 1
+        return Ok(make_f32_array(out, left.shape))
+    if left.dtype == DType.F64:
+        var out: [Float64] = []
+        var i = 0
+        while i < left.len().value:
+            if mask_values.flat_bool(i).value:
+                out.push(left.flat_f64(i))
+            else:
+                out.push(right.flat_f64(i))
+            i = i + 1
+        return Ok(make_f64_array(out, left.shape))
+    if left.dtype == DType.I64:
+        var out: [Int64] = []
+        var i = 0
+        while i < left.len().value:
+            if mask_values.flat_bool(i).value:
+                out.push(left.flat_i64(i))
+            else:
+                out.push(right.flat_i64(i))
+            i = i + 1
+        return Ok(make_i64_array(out, left.shape))
+    var out: [Bool] = []
+    var i = 0
+    while i < left.len().value:
+        if mask_values.flat_bool(i).value:
+            out.push(left.flat_bool(i))
+        else:
+            out.push(right.flat_bool(i))
+        i = i + 1
+    Ok(make_bool_array(out, left.shape))
+
+fn should_use_simd_binary_f64x4(left: NDArray, right: NDArray) -> bool:
+    left.shape == right.shape
+        and left.shape.dims.len() == 1
+        and left.len().value >= 4
+        and left.is_contiguous()
+        and right.is_contiguous()
+
+fn simd_binary_f64x4(left: NDArray, right: NDArray, op: text) -> NDArray:
+    var out: [Float64] = []
+    var i = 0
+    while i + 3 < left.len().value:
+        val left_vec = Vec4d(
+            x: left.flat_f64(i).value,
+            y: left.flat_f64(i + 1).value,
+            z: left.flat_f64(i + 2).value,
+            w: left.flat_f64(i + 3).value
+        )
+        val right_vec = Vec4d(
+            x: right.flat_f64(i).value,
+            y: right.flat_f64(i + 1).value,
+            z: right.flat_f64(i + 2).value,
+            w: right.flat_f64(i + 3).value
+        )
+        val result = if op == "add":
+            simd_add_f64x4(left_vec, right_vec)
+        elif op == "sub":
+            simd_sub_f64x4(left_vec, right_vec)
+        elif op == "mul":
+            simd_mul_f64x4(left_vec, right_vec)
+        else:
+            simd_div_f64x4(left_vec, right_vec)
+        out.push(Float64.new(result.x))
+        out.push(Float64.new(result.y))
+        out.push(Float64.new(result.z))
+        out.push(Float64.new(result.w))
+        i = i + 4
+    while i < left.len().value:
+        val left_value = left.flat_f64(i).value
+        val right_value = right.flat_f64(i).value
+        val next = if op == "add":
+            left_value + right_value
+        elif op == "sub":
+            left_value - right_value
+        elif op == "mul":
+            left_value * right_value
+        else:
+            left_value / right_value
+        out.push(Float64.new(next))
+        i = i + 1
+    make_f64_array(out, left.shape)
+
+fn should_use_simd_binary_f32x4(left: NDArray, right: NDArray) -> bool:
+    left.shape == right.shape
+        and left.shape.dims.len() == 1
+        and left.len().value >= 4
+        and left.is_contiguous()
+        and right.is_contiguous()
+
+fn simd_binary_f32x4(left: NDArray, right: NDArray, op: text) -> NDArray:
+    var out: [Float32] = []
+    var i = 0
+    while i + 3 < left.len().value:
+        val left_vec = Vec4f(
+            x: left.flat_f32(i).value,
+            y: left.flat_f32(i + 1).value,
+            z: left.flat_f32(i + 2).value,
+            w: left.flat_f32(i + 3).value
+        )
+        val right_vec = Vec4f(
+            x: right.flat_f32(i).value,
+            y: right.flat_f32(i + 1).value,
+            z: right.flat_f32(i + 2).value,
+            w: right.flat_f32(i + 3).value
+        )
+        val result = if op == "add":
+            simd_add_f32x4(left_vec, right_vec)
+        elif op == "sub":
+            simd_sub_f32x4(left_vec, right_vec)
+        elif op == "mul":
+            simd_mul_f32x4(left_vec, right_vec)
+        else:
+            simd_div_f32x4(left_vec, right_vec)
+        out.push(Float32.new(result.x))
+        out.push(Float32.new(result.y))
+        out.push(Float32.new(result.z))
+        out.push(Float32.new(result.w))
+        i = i + 4
+    while i < left.len().value:
+        val left_value = left.flat_f32(i).value
+        val right_value = right.flat_f32(i).value
+        val next = if op == "add":
+            left_value + right_value
+        elif op == "sub":
+            left_value - right_value
+        elif op == "mul":
+            left_value * right_value
+        else:
+            left_value / right_value
+        out.push(Float32.new(next))
+        i = i + 1
+    make_f32_array(out, left.shape)
+
+fn should_use_simd_sum_f64x4(array: NDArray) -> bool:
+    array.dtype == DType.F64
+        and array.shape.dims.len() == 1
+        and array.len().value >= 4
+        and array.is_contiguous()
+
+fn simd_sum_f64x4(array: NDArray) -> Float64:
+    var acc = Vec4d(x: 0.0, y: 0.0, z: 0.0, w: 0.0)
+    var i = 0
+    while i + 3 < array.len().value:
+        val next = Vec4d(
+            x: array.flat_f64(i).value,
+            y: array.flat_f64(i + 1).value,
+            z: array.flat_f64(i + 2).value,
+            w: array.flat_f64(i + 3).value
+        )
+        acc = simd_add_f64x4(acc, next)
+        i = i + 4
+    var total = acc.x + acc.y + acc.z + acc.w
+    while i < array.len().value:
+        total = total + array.flat_f64(i).value
+        i = i + 1
+    Float64.new(total)
+
+fn should_use_simd_sum_f32x4(array: NDArray) -> bool:
+    array.dtype == DType.F32
+        and array.shape.dims.len() == 1
+        and array.len().value >= 4
+        and array.is_contiguous()
+
+fn simd_sum_f32x4(array: NDArray) -> Float32:
+    var acc = Vec4f(x: 0.0, y: 0.0, z: 0.0, w: 0.0)
+    var i = 0
+    while i + 3 < array.len().value:
+        val next = Vec4f(
+            x: array.flat_f32(i).value,
+            y: array.flat_f32(i + 1).value,
+            z: array.flat_f32(i + 2).value,
+            w: array.flat_f32(i + 3).value
+        )
+        acc = simd_add_f32x4(acc, next)
+        i = i + 4
+    var total = acc.x + acc.y + acc.z + acc.w
+    while i < array.len().value:
+        total = total + array.flat_f32(i).value
+        i = i + 1
+    Float32.new(total)
+
+fn should_use_simd_unary_f64x4(array: NDArray, op: text) -> bool:
+    (op == "abs" or op == "square" or op == "neg")
+        and array.dtype == DType.F64
+        and array.shape.dims.len() == 1
+        and array.len().value >= 4
+        and array.is_contiguous()
+
+fn simd_unary_f64x4(array: NDArray, op: text) -> NDArray:
+    var out: [Float64] = []
+    var i = 0
+    while i + 3 < array.len().value:
+        val value_vec = Vec4d(
+            x: array.flat_f64(i).value,
+            y: array.flat_f64(i + 1).value,
+            z: array.flat_f64(i + 2).value,
+            w: array.flat_f64(i + 3).value
+        )
+        val result = if op == "abs":
+            val zero = Vec4d(x: 0.0, y: 0.0, z: 0.0, w: 0.0)
+            val negated = simd_sub_f64x4(zero, value_vec)
+            Vec4d(
+                x: if value_vec.x < 0.0: negated.x else: value_vec.x,
+                y: if value_vec.y < 0.0: negated.y else: value_vec.y,
+                z: if value_vec.z < 0.0: negated.z else: value_vec.z,
+                w: if value_vec.w < 0.0: negated.w else: value_vec.w
+            )
+        elif op == "square":
+            simd_mul_f64x4(value_vec, value_vec)
+        else:
+            simd_sub_f64x4(Vec4d(x: 0.0, y: 0.0, z: 0.0, w: 0.0), value_vec)
+        out.push(Float64.new(result.x))
+        out.push(Float64.new(result.y))
+        out.push(Float64.new(result.z))
+        out.push(Float64.new(result.w))
+        i = i + 4
+    while i < array.len().value:
+        val value = array.flat_f64(i).value
+        val next = if op == "abs":
+            if value < 0.0:
+                -value
+            else:
+                value
+        elif op == "square":
+            value * value
+        else:
+            -value
+        out.push(Float64.new(next))
+        i = i + 1
+    make_f64_array(out, array.shape)
+
+fn should_use_simd_unary_f32x4(array: NDArray, op: text) -> bool:
+    (op == "abs" or op == "square" or op == "neg")
+        and array.dtype == DType.F32
+        and array.shape.dims.len() == 1
+        and array.len().value >= 4
+        and array.is_contiguous()
+
+fn simd_unary_f32x4(array: NDArray, op: text) -> NDArray:
+    var out: [Float32] = []
+    var i = 0
+    while i + 3 < array.len().value:
+        val value_vec = Vec4f(
+            x: array.flat_f32(i).value,
+            y: array.flat_f32(i + 1).value,
+            z: array.flat_f32(i + 2).value,
+            w: array.flat_f32(i + 3).value
+        )
+        val result = if op == "abs":
+            val zero = Vec4f(x: 0.0, y: 0.0, z: 0.0, w: 0.0)
+            val negated = simd_sub_f32x4(zero, value_vec)
+            Vec4f(
+                x: if value_vec.x < 0.0: negated.x else: value_vec.x,
+                y: if value_vec.y < 0.0: negated.y else: value_vec.y,
+                z: if value_vec.z < 0.0: negated.z else: value_vec.z,
+                w: if value_vec.w < 0.0: negated.w else: value_vec.w
+            )
+        elif op == "square":
+            simd_mul_f32x4(value_vec, value_vec)
+        else:
+            simd_sub_f32x4(Vec4f(x: 0.0, y: 0.0, z: 0.0, w: 0.0), value_vec)
+        out.push(Float32.new(result.x))
+        out.push(Float32.new(result.y))
+        out.push(Float32.new(result.z))
+        out.push(Float32.new(result.w))
+        i = i + 4
+    while i < array.len().value:
+        val value = array.flat_f32(i).value
+        val next = if op == "abs":
+            if value < 0.0:
+                -value
+            else:
+                value
+        elif op == "square":
+            value * value
+        else:
+            -value
+        out.push(Float32.new(next))
+        i = i + 1
+    make_f32_array(out, array.shape)
+
+fn should_use_simd_scalar_f64x4(array: NDArray) -> bool:
+    array.dtype == DType.F64
+        and array.shape.dims.len() == 1
+        and array.len().value >= 4
+        and array.is_contiguous()
+
+fn simd_scalar_f64x4(array: NDArray, scalar: Float64, op: text) -> NDArray:
+    var out: [Float64] = []
+    val scalar_vec = Vec4d(x: scalar.value, y: scalar.value, z: scalar.value, w: scalar.value)
+    var i = 0
+    while i + 3 < array.len().value:
+        val value_vec = Vec4d(
+            x: array.flat_f64(i).value,
+            y: array.flat_f64(i + 1).value,
+            z: array.flat_f64(i + 2).value,
+            w: array.flat_f64(i + 3).value
+        )
+        val result = if op == "add":
+            simd_add_f64x4(value_vec, scalar_vec)
+        elif op == "sub":
+            simd_sub_f64x4(value_vec, scalar_vec)
+        elif op == "mul":
+            simd_mul_f64x4(value_vec, scalar_vec)
+        else:
+            simd_div_f64x4(value_vec, scalar_vec)
+        out.push(Float64.new(result.x))
+        out.push(Float64.new(result.y))
+        out.push(Float64.new(result.z))
+        out.push(Float64.new(result.w))
+        i = i + 4
+    while i < array.len().value:
+        val value = array.flat_f64(i).value
+        val next = if op == "add":
+            value + scalar.value
+        elif op == "sub":
+            value - scalar.value
+        elif op == "mul":
+            value * scalar.value
+        else:
+            value / scalar.value
+        out.push(Float64.new(next))
+        i = i + 1
+    make_f64_array(out, array.shape)
+
+fn should_use_simd_scalar_f32x4(array: NDArray, op: text) -> bool:
+    (op == "add" or op == "sub" or op == "mul" or op == "div")
+        and array.dtype == DType.F32
+        and array.shape.dims.len() == 1
+        and array.len().value >= 4
+        and array.is_contiguous()
+
+fn simd_scalar_f32x4(array: NDArray, scalar: Float32, op: text) -> NDArray:
+    var out: [Float32] = []
+    val scalar_value = scalar.value
+    val scalar_vec = Vec4f(x: scalar_value, y: scalar_value, z: scalar_value, w: scalar_value)
+    val is_add = op == "add"
+    val is_sub = op == "sub"
+    val is_mul = op == "mul"
+    val chunk_len = (array.len().value / 4) * 4
+    var tail: [Float32] = []
+    var tail_i = chunk_len
+    while tail_i < array.len().value:
+        val value = array.flat_f32(tail_i).value
+        val widened = value as f64
+        val widened_scalar = scalar_value as f64
+        val next = if is_add:
+            widened + widened_scalar
+        elif is_sub:
+            widened - widened_scalar
+        elif is_mul:
+            widened * widened_scalar
+        else:
+            widened / widened_scalar
+        tail.push(Float32.new(next as f32))
+        tail_i = tail_i + 1
+    var i = 0
+    while i < chunk_len:
+        val value_vec = Vec4f(
+            x: array.flat_f32(i).value,
+            y: array.flat_f32(i + 1).value,
+            z: array.flat_f32(i + 2).value,
+            w: array.flat_f32(i + 3).value
+        )
+        val result = if is_add:
+            simd_add_f32x4(value_vec, scalar_vec)
+        elif is_sub:
+            simd_sub_f32x4(value_vec, scalar_vec)
+        elif is_mul:
+            simd_mul_f32x4(value_vec, scalar_vec)
+        else:
+            simd_div_f32x4(value_vec, scalar_vec)
+        out.push(Float32.new(result.x))
+        out.push(Float32.new(result.y))
+        out.push(Float32.new(result.z))
+        out.push(Float32.new(result.w))
+        i = i + 4
+    i = 0
+    while i < tail.len():
+        out.push(tail[i])
+        i = i + 1
+    make_f32_array(out, array.shape)
+
+fn next_lcg_state(state: i64) -> i64:
+    var next = (state * 1103515245 + 12345) % 2147483647
+    if next < 0:
+        next = -next
+    if next == 0:
+        next = 1
+    next
+
+fn array_from_csv_text(payload: text) -> Result<NDArray, NdarrayError>:
+    val cleaned = payload.trim()
+    if cleaned == "":
+        return Err(NdarrayError.InvalidShape)
+    var out_values: [Float64] = []
+    var expected_cols = -1
+    var row_count = 0
+    var current_cols = 0
+    var token: [text] = []
+    var i = 0
+    while i < cleaned.len():
+        val ch = cleaned.substring(i, i + 1)
+        if ch == "," or ch == "\n":
+            if token.len() == 0:
+                return Err(NdarrayError.InvalidShape)
+            val parsed = parse_array_csv_f64(token.join("").trim())?
+            out_values.push(parsed)
+            current_cols = current_cols + 1
+            token = []
+            if ch == "\n":
+                if expected_cols < 0:
+                    expected_cols = current_cols
+                if current_cols != expected_cols:
+                    return Err(NdarrayError.ShapeMismatch)
+                row_count = row_count + 1
+                current_cols = 0
+        else:
+            token.push(ch)
+        i = i + 1
+    if token.len() == 0:
+        return Err(NdarrayError.InvalidShape)
+    val parsed = parse_array_csv_f64(token.join("").trim())?
+    out_values.push(parsed)
+    current_cols = current_cols + 1
+    if expected_cols < 0:
+        expected_cols = current_cols
+    if current_cols != expected_cols:
+        return Err(NdarrayError.ShapeMismatch)
+    row_count = row_count + 1
+    if row_count == 0:
+        return Err(NdarrayError.InvalidShape)
+    if row_count == 1:
+        return Ok(make_f64_array(out_values, Shape.new([Index.new(expected_cols)])))
+    Ok(make_f64_array(out_values, Shape.new([Index.new(row_count), Index.new(expected_cols)])))
+
+fn parse_array_csv_f64(value: String) -> Result<Float64, NdarrayError>:
+    if value == "":
+        return Err(NdarrayError.InvalidShape)
+    val parsed = value.parse_f64()
+    match parsed:
+        case Some(v):
+            Ok(Float64.new(v))
+        case None:
+            Err(NdarrayError.InvalidShape)
+
+fn ndarray_sqrt_f64(value: f64) -> f64:
+    if value <= 0.0:
+        return 0.0
+    var estimate = value
+    if estimate < 1.0:
+        estimate = 1.0
+    var i = 0
+    while i < 20:
+        estimate = 0.5 * (estimate + value / estimate)
+        i = i + 1
+    estimate
+
 impl NDArray:
     fn len(self) -> Index:
         self.shape.numel()
@@ -193,9 +844,37 @@ impl NDArray:
         is_row_major_contiguous(self.shape, self.strides)
 
     fn reshape(self, shape: Shape) -> NDArray:
+        self.try_reshape(shape).unwrap()
+
+    fn try_reshape(self, shape: Shape) -> Result<NDArray, NdarrayError>:
+        var i = 0
+        while i < shape.dims.len():
+            if shape.dims[i].value < 0:
+                return Err(NdarrayError.InvalidShape)
+            i = i + 1
         if shape.numel() != self.shape.numel():
-            panic("called reshape with mismatched element count")
+            return Err(NdarrayError.ShapeMismatch)
+        if not self.is_contiguous():
+            return Ok(self.to_contiguous().reshape(shape))
+        Ok(NDArray(
+            data_f32: self.data_f32,
+            data_f64: self.data_f64,
+            data_i64: self.data_i64,
+            data_bool: self.data_bool,
+            shape: shape,
+            strides: derive_row_major_strides(shape),
+            offset: self.offset,
+            dtype: self.dtype,
+            device: self.device,
+            layout: Layout.RowMajor,
+            kernel_profile: self.kernel_profile
+        ))
+
+    fn reshape_view(self, shape: Shape) -> NDArray:
+        if shape.numel() != self.shape.numel():
+            panic("called reshape_view with mismatched element count")
         NDArray(
+            data_f32: self.data_f32,
             data_f64: self.data_f64,
             data_i64: self.data_i64,
             data_bool: self.data_bool,
@@ -209,15 +888,45 @@ impl NDArray:
         )
 
     fn flatten(self) -> NDArray:
-        self.to_contiguous().reshape(Shape.new([self.len()]))
+        match self.dtype:
+            case DType.F32:
+                var out: [Float32] = []
+                var i = 0
+                while i < self.len().value:
+                    out.push(self.flat_f32(i))
+                    i = i + 1
+                make_f32_array(out, Shape.new([Index.new(out.len())]))
+            case DType.F64:
+                var out: [Float64] = []
+                var i = 0
+                while i < self.len().value:
+                    out.push(self.flat_f64(i))
+                    i = i + 1
+                make_f64_array(out, Shape.new([Index.new(out.len())]))
+            case DType.I64:
+                var out: [Int64] = []
+                var i = 0
+                while i < self.len().value:
+                    out.push(self.flat_i64(i))
+                    i = i + 1
+                make_i64_array(out, Shape.new([Index.new(out.len())]))
+            case DType.Bool:
+                var out: [Bool] = []
+                var i = 0
+                while i < self.len().value:
+                    out.push(self.flat_bool(i))
+                    i = i + 1
+                make_bool_array(out, Shape.new([Index.new(out.len())]))
 
     fn squeeze(self) -> NDArray:
+        val squeezed = squeeze_metadata(self.shape, self.strides)
         NDArray(
+            data_f32: self.data_f32,
             data_f64: self.data_f64,
             data_i64: self.data_i64,
             data_bool: self.data_bool,
-            shape: squeeze_shape(self.shape),
-            strides: self.strides,
+            shape: squeezed.shape,
+            strides: squeezed.strides,
             offset: self.offset,
             dtype: self.dtype,
             device: self.device,
@@ -229,18 +938,22 @@ impl NDArray:
         self.transpose_axes(Axis.new(0), Axis.new(1))
 
     fn transpose_axes(self, left: Axis, right: Axis) -> NDArray:
-        NDArray(
+        self.try_transpose_axes(left, right).unwrap()
+
+    fn try_transpose_axes(self, left: Axis, right: Axis) -> Result<NDArray, NdarrayError>:
+        Ok(NDArray(
+            data_f32: self.data_f32,
             data_f64: self.data_f64,
             data_i64: self.data_i64,
             data_bool: self.data_bool,
-            shape: transpose_shape(self.shape, left, right).unwrap(),
-            strides: transpose_strides(self.strides, left, right).unwrap(),
+            shape: transpose_shape(self.shape, left, right)?,
+            strides: transpose_strides(self.strides, left, right)?,
             offset: self.offset,
             dtype: self.dtype,
             device: self.device,
             layout: Layout.Strided,
             kernel_profile: self.kernel_profile
-        )
+        ))
 
     fn get(self, index: Index) -> Any:
         self.get_at([index])
@@ -256,6 +969,8 @@ impl NDArray:
     fn try_get_at(self, indices: [Index]) -> Result<Any, NdarrayError>:
         val pos = try_resolve_offset(self.shape, self.strides, self.offset, indices)?
         match self.dtype:
+            case DType.F32:
+                Ok(self.data_f32[pos.value])
             case DType.F64:
                 Ok(self.data_f64[pos.value])
             case DType.I64:
@@ -266,14 +981,44 @@ impl NDArray:
     fn get_f64(self, index: Index) -> Float64:
         self.get_f64_at([index])
 
+    fn get_f32(self, index: Index) -> Float32:
+        self.get_f32_at([index])
+
+    fn flat_f32(self, linear: i64) -> Float32:
+        if self.shape.dims.len() <= 1:
+            return self.get_f32(Index.new(linear))
+        self.get_f32_at(unravel_index(linear, self.shape))
+
     fn flat_f64(self, linear: i64) -> Float64:
         if self.shape.dims.len() <= 1:
             return self.get_f64(Index.new(linear))
         self.get_f64_at(unravel_index(linear, self.shape))
 
+    fn get_f32_at(self, indices: [Index]) -> Float32:
+        val pos = resolve_offset(self.shape, self.strides, self.offset, indices)
+        self.data_f32[pos.value]
+
     fn get_f64_at(self, indices: [Index]) -> Float64:
         val pos = resolve_offset(self.shape, self.strides, self.offset, indices)
         self.data_f64[pos.value]
+
+    fn get_i64_at(self, indices: [Index]) -> Int64:
+        val pos = resolve_offset(self.shape, self.strides, self.offset, indices)
+        self.data_i64[pos.value]
+
+    fn get_bool_at(self, indices: [Index]) -> Bool:
+        val pos = resolve_offset(self.shape, self.strides, self.offset, indices)
+        self.data_bool[pos.value]
+
+    fn flat_i64(self, linear: i64) -> Int64:
+        if self.shape.dims.len() <= 1:
+            return self.get_i64_at([Index.new(linear)])
+        self.get_i64_at(unravel_index(linear, self.shape))
+
+    fn flat_bool(self, linear: i64) -> Bool:
+        if self.shape.dims.len() <= 1:
+            return self.get_bool_at([Index.new(linear)])
+        self.get_bool_at(unravel_index(linear, self.shape))
 
     fn to_f64_values(self) -> [Float64]:
         var out: [Float64] = []
@@ -284,14 +1029,49 @@ impl NDArray:
         out
 
     fn to_contiguous(self) -> NDArray:
+        match self.dtype:
+            case DType.F32:
+                var out: [Float32] = []
+                var i = 0
+                while i < self.len().value:
+                    out.push(self.flat_f32(i))
+                    i = i + 1
+                make_f32_array(out, self.shape)
+            case DType.F64:
+                var out: [Float64] = []
+                var i = 0
+                while i < self.len().value:
+                    out.push(self.flat_f64(i))
+                    i = i + 1
+                make_f64_array(out, self.shape)
+            case DType.I64:
+                self
+            case DType.Bool:
+                self
+
+    fn to_csv_text(self) -> Result<text, NdarrayError>:
         if self.dtype != DType.F64:
-            return self
-        var out: [Float64] = []
-        var i = 0
-        while i < self.len().value:
-            out.push(self.flat_f64(i))
-            i = i + 1
-        make_f64_array(out, self.shape)
+            return Err(NdarrayError.UnsupportedDType)
+        if self.shape.dims.len() == 1:
+            var cells: [text] = []
+            var i = 0
+            while i < self.len().value:
+                cells.push("{self.flat_f64(i).value}")
+                i = i + 1
+            return Ok(cells.join(","))
+        if self.shape.dims.len() != 2:
+            return Err(NdarrayError.InvalidShape)
+        var lines: [text] = []
+        var row = 0
+        while row < self.rows().value:
+            var cells: [text] = []
+            var col = 0
+            while col < self.cols().value:
+                cells.push("{self.get_f64_at([Index.new(row), Index.new(col)]).value}")
+                col = col + 1
+            lines.push(cells.join(","))
+            row = row + 1
+        Ok(lines.join("\n"))
 
     fn try_slice(self, spec: Slice) -> Result<NDArray, NdarrayError>:
         if self.shape.dims.len() != 1:
@@ -302,6 +1082,7 @@ impl NDArray:
         if start < 0:
             start = size + start
         Ok(NDArray(
+            data_f32: self.data_f32,
             data_f64: self.data_f64,
             data_i64: self.data_i64,
             data_bool: self.data_bool,
@@ -327,6 +1108,7 @@ impl NDArray:
         if col_start < 0:
             col_start = self.shape.dims[1].value + col_start
         NDArray(
+            data_f32: self.data_f32,
             data_f64: self.data_f64,
             data_i64: self.data_i64,
             data_bool: self.data_bool,
@@ -351,47 +1133,148 @@ impl NDArray:
                       Slice.new(col_index, Index.new(col_index.value + 1), Index.new(1)))
 
     fn try_gather(self, idx: NDArray) -> Result<NDArray, NdarrayError>:
-        var out: [Float64] = []
-        var i = 0
-        while i < idx.data_i64.len():
-            val pos = idx.data_i64[i].value
-            if pos < 0 or pos >= self.len().value:
-                return Err(NdarrayError.IndexOutOfBounds)
-            out.push(self.get_f64(Index.new(pos)))
-            i = i + 1
-        Ok(make_f64_array(out, Shape.new([Index.new(out.len())])))
+        if idx.dtype != DType.I64:
+            return Err(NdarrayError.UnsupportedDType)
+        match self.dtype:
+            case DType.F32:
+                var out: [Float32] = []
+                var i = 0
+                while i < idx.data_i64.len():
+                    val pos = idx.data_i64[i].value
+                    if pos < 0 or pos >= self.len().value:
+                        return Err(NdarrayError.IndexOutOfBounds)
+                    out.push(self.flat_f32(pos))
+                    i = i + 1
+                Ok(make_f32_array(out, Shape.new([Index.new(out.len())])))
+            case DType.F64:
+                var out: [Float64] = []
+                var i = 0
+                while i < idx.data_i64.len():
+                    val pos = idx.data_i64[i].value
+                    if pos < 0 or pos >= self.len().value:
+                        return Err(NdarrayError.IndexOutOfBounds)
+                    out.push(self.flat_f64(pos))
+                    i = i + 1
+                Ok(make_f64_array(out, Shape.new([Index.new(out.len())])))
+            case DType.I64:
+                var out: [Int64] = []
+                var i = 0
+                while i < idx.data_i64.len():
+                    val pos = idx.data_i64[i].value
+                    if pos < 0 or pos >= self.len().value:
+                        return Err(NdarrayError.IndexOutOfBounds)
+                    out.push(self.flat_i64(pos))
+                    i = i + 1
+                Ok(make_i64_array(out, Shape.new([Index.new(out.len())])))
+            case DType.Bool:
+                var out: [Bool] = []
+                var i = 0
+                while i < idx.data_i64.len():
+                    val pos = idx.data_i64[i].value
+                    if pos < 0 or pos >= self.len().value:
+                        return Err(NdarrayError.IndexOutOfBounds)
+                    out.push(self.flat_bool(pos))
+                    i = i + 1
+                Ok(make_bool_array(out, Shape.new([Index.new(out.len())])))
 
     fn gather(self, idx: NDArray) -> NDArray:
         self.try_gather(idx).unwrap()
 
     fn try_mask(self, mask_values: NDArray) -> Result<NDArray, NdarrayError>:
-        if mask_values.data_bool.len() != self.len().value:
+        if mask_values.dtype != DType.Bool or mask_values.len().value != self.len().value:
             return Err(NdarrayError.ShapeMismatch)
-        var out: [Float64] = []
-        var i = 0
-        while i < self.len().value:
-            if mask_values.data_bool[i].value:
-                out.push(self.get_f64(Index.new(i)))
-            i = i + 1
-        Ok(make_f64_array(out, Shape.new([Index.new(out.len())])))
+        match self.dtype:
+            case DType.F32:
+                var out: [Float32] = []
+                var i = 0
+                while i < self.len().value:
+                    if mask_values.flat_bool(i).value:
+                        out.push(self.flat_f32(i))
+                    i = i + 1
+                Ok(make_f32_array(out, Shape.new([Index.new(out.len())])))
+            case DType.F64:
+                var out: [Float64] = []
+                var i = 0
+                while i < self.len().value:
+                    if mask_values.flat_bool(i).value:
+                        out.push(self.flat_f64(i))
+                    i = i + 1
+                Ok(make_f64_array(out, Shape.new([Index.new(out.len())])))
+            case DType.I64:
+                var out: [Int64] = []
+                var i = 0
+                while i < self.len().value:
+                    if mask_values.flat_bool(i).value:
+                        out.push(self.flat_i64(i))
+                    i = i + 1
+                Ok(make_i64_array(out, Shape.new([Index.new(out.len())])))
+            case DType.Bool:
+                var out: [Bool] = []
+                var i = 0
+                while i < self.len().value:
+                    if mask_values.flat_bool(i).value:
+                        out.push(self.flat_bool(i))
+                    i = i + 1
+                Ok(make_bool_array(out, Shape.new([Index.new(out.len())])))
 
     fn mask(self, mask_values: NDArray) -> NDArray:
         self.try_mask(mask_values).unwrap()
 
+    fn sort(self) -> NDArray:
+        self.try_sort().unwrap()
+
+    fn try_sort(self) -> Result<NDArray, NdarrayError>:
+        self.try_gather(self.try_argsort()?)
+
+    fn argsort(self) -> NDArray:
+        self.try_argsort().unwrap()
+
+    fn try_argsort(self) -> Result<NDArray, NdarrayError>:
+        if self.shape.dims.len() != 1:
+            return Err(NdarrayError.InvalidShape)
+        if self.dtype == DType.Bool:
+            return Err(NdarrayError.UnsupportedDType)
+        var indices: [Int64] = []
+        var i = 0
+        while i < self.len().value:
+            indices.push(Int64.new(i))
+            i = i + 1
+        i = 1
+        while i < indices.len():
+            val current = indices[i]
+            var j = i
+            while j > 0 and self.sort_value_less(current.value, indices[j - 1].value):
+                indices[j] = indices[j - 1]
+                j = j - 1
+            indices[j] = current
+            i = i + 1
+        Ok(make_i64_array(indices, Shape.new([Index.new(indices.len())])))
+
+    fn sort_value_less(self, left_index: i64, right_index: i64) -> bool:
+        match self.dtype:
+            case DType.F32:
+                self.flat_f32(left_index).value < self.flat_f32(right_index).value
+            case DType.F64:
+                self.flat_f64(left_index).value < self.flat_f64(right_index).value
+            case DType.I64:
+                self.flat_i64(left_index).value < self.flat_i64(right_index).value
+            case DType.Bool:
+                false
+
     fn add(self, other: NDArray) -> NDArray:
-        self.try_binary_f64(other, "add").unwrap()
+        self.try_binary(other, "add").unwrap()
 
     fn try_add(self, other: NDArray) -> Result<NDArray, NdarrayError>:
-        self.try_binary_f64(other, "add")
+        self.try_binary(other, "add")
 
     fn sub(self, other: NDArray) -> NDArray:
-        self.try_binary_f64(other, "sub").unwrap()
+        self.try_binary(other, "sub").unwrap()
 
     fn mul(self, other: NDArray) -> NDArray:
-        self.try_binary_f64(other, "mul").unwrap()
+        self.try_binary(other, "mul").unwrap()
 
     fn div(self, other: NDArray) -> NDArray:
-        self.try_binary_f64(other, "div").unwrap()
+        self.try_binary(other, "div").unwrap()
 
     fn add_scalar(self, scalar: Float64) -> NDArray:
         self.scalar_f64(scalar, "add")
@@ -405,7 +1288,101 @@ impl NDArray:
     fn div_scalar(self, scalar: Float64) -> NDArray:
         self.scalar_f64(scalar, "div")
 
+    fn add_scalar_f32(self, scalar: Float32) -> NDArray:
+        self.try_add_scalar_f32(scalar).unwrap()
+
+    fn try_add_scalar_f32(self, scalar: Float32) -> Result<NDArray, NdarrayError>:
+        self.try_scalar_f32(scalar, "add")
+
+    fn sub_scalar_f32(self, scalar: Float32) -> NDArray:
+        self.try_sub_scalar_f32(scalar).unwrap()
+
+    fn try_sub_scalar_f32(self, scalar: Float32) -> Result<NDArray, NdarrayError>:
+        self.try_scalar_f32(scalar, "sub")
+
+    fn mul_scalar_f32(self, scalar: Float32) -> NDArray:
+        self.try_mul_scalar_f32(scalar).unwrap()
+
+    fn try_mul_scalar_f32(self, scalar: Float32) -> Result<NDArray, NdarrayError>:
+        self.try_scalar_f32(scalar, "mul")
+
+    fn div_scalar_f32(self, scalar: Float32) -> NDArray:
+        self.try_div_scalar_f32(scalar).unwrap()
+
+    fn try_div_scalar_f32(self, scalar: Float32) -> Result<NDArray, NdarrayError>:
+        self.try_scalar_f32(scalar, "div")
+
+    fn abs(self) -> NDArray:
+        self.try_abs().unwrap()
+
+    fn try_abs(self) -> Result<NDArray, NdarrayError>:
+        self.try_unary_f64("abs")
+
+    fn abs_f32(self) -> NDArray:
+        self.try_abs_f32().unwrap()
+
+    fn try_abs_f32(self) -> Result<NDArray, NdarrayError>:
+        self.try_unary_f32("abs")
+
+    fn square(self) -> NDArray:
+        self.try_square().unwrap()
+
+    fn try_square(self) -> Result<NDArray, NdarrayError>:
+        self.try_unary_f64("square")
+
+    fn square_f32(self) -> NDArray:
+        self.try_square_f32().unwrap()
+
+    fn try_square_f32(self) -> Result<NDArray, NdarrayError>:
+        self.try_unary_f32("square")
+
+    fn neg(self) -> NDArray:
+        self.try_neg().unwrap()
+
+    fn try_neg(self) -> Result<NDArray, NdarrayError>:
+        self.try_unary_f64("neg")
+
+    fn neg_f32(self) -> NDArray:
+        self.try_neg_f32().unwrap()
+
+    fn try_neg_f32(self) -> Result<NDArray, NdarrayError>:
+        self.try_unary_f32("neg")
+
+    fn sqrt(self) -> NDArray:
+        self.try_sqrt().unwrap()
+
+    fn try_sqrt(self) -> Result<NDArray, NdarrayError>:
+        self.try_unary_f64("sqrt")
+
+    fn relu(self) -> NDArray:
+        self.try_relu().unwrap()
+
+    fn try_relu(self) -> Result<NDArray, NdarrayError>:
+        self.try_unary_f64("relu")
+
+    fn clip(self, minimum: Float64, maximum: Float64) -> NDArray:
+        self.try_clip(minimum, maximum).unwrap()
+
+    fn try_clip(self, minimum: Float64, maximum: Float64) -> Result<NDArray, NdarrayError>:
+        if self.dtype != DType.F64:
+            return Err(NdarrayError.UnsupportedDType)
+        if minimum.value > maximum.value:
+            return Err(NdarrayError.InvalidShape)
+        var out: [Float64] = []
+        var i = 0
+        while i < self.len().value:
+            var value = self.flat_f64(i).value
+            if value < minimum.value:
+                value = minimum.value
+            if value > maximum.value:
+                value = maximum.value
+            out.push(Float64.new(value))
+            i = i + 1
+        Ok(make_f64_array(out, self.shape))
+
     fn scalar_f64(self, scalar: Float64, op: text) -> NDArray:
+        if should_use_simd_scalar_f64x4(self):
+            return simd_scalar_f64x4(self, scalar, op)
         var out: [Float64] = []
         var i = 0
         while i < self.len().value:
@@ -422,9 +1399,89 @@ impl NDArray:
             i = i + 1
         make_f64_array(out, self.shape)
 
+    fn try_scalar_f32(self, scalar: Float32, op: text) -> Result<NDArray, NdarrayError>:
+        if self.dtype != DType.F32:
+            return Err(NdarrayError.UnsupportedDType)
+        if should_use_simd_scalar_f32x4(self, op):
+            return Ok(simd_scalar_f32x4(self, scalar, op))
+        val scalar_value = scalar.value
+        val is_add = op == "add"
+        val is_sub = op == "sub"
+        val is_mul = op == "mul"
+        var out: [Float32] = []
+        var i = 0
+        while i < self.len().value:
+            val value = self.flat_f32(i).value
+            val widened = value as f64
+            val widened_scalar = scalar_value as f64
+            val next = if is_add:
+                widened + widened_scalar
+            elif is_sub:
+                widened - widened_scalar
+            elif is_mul:
+                widened * widened_scalar
+            else:
+                widened / widened_scalar
+            out.push(Float32.new(next as f32))
+            i = i + 1
+        Ok(make_f32_array(out, self.shape))
+
+    fn try_unary_f64(self, op: text) -> Result<NDArray, NdarrayError>:
+        if self.dtype != DType.F64:
+            return Err(NdarrayError.UnsupportedDType)
+        if should_use_simd_unary_f64x4(self, op):
+            return Ok(simd_unary_f64x4(self, op))
+        var out: [Float64] = []
+        var i = 0
+        while i < self.len().value:
+            val value = self.flat_f64(i).value
+            val next = if op == "abs":
+                if value < 0.0:
+                    -value
+                else:
+                    value
+            elif op == "square":
+                value * value
+            elif op == "sqrt":
+                ndarray_sqrt_f64(value)
+            elif op == "relu":
+                if value < 0.0:
+                    0.0
+                else:
+                    value
+            else:
+                -value
+            out.push(Float64.new(next))
+            i = i + 1
+        Ok(make_f64_array(out, self.shape))
+
+    fn try_unary_f32(self, op: text) -> Result<NDArray, NdarrayError>:
+        if self.dtype != DType.F32:
+            return Err(NdarrayError.UnsupportedDType)
+        if should_use_simd_unary_f32x4(self, op):
+            return Ok(simd_unary_f32x4(self, op))
+        var out: [Float32] = []
+        var i = 0
+        while i < self.len().value:
+            val value = self.flat_f32(i).value
+            val next = if op == "abs":
+                if value < 0.0:
+                    -value
+                else:
+                    value
+            elif op == "square":
+                value * value
+            else:
+                -value
+            out.push(Float32.new(next))
+            i = i + 1
+        Ok(make_f32_array(out, self.shape))
+
     fn try_binary_f64(self, other: NDArray, op: text) -> Result<NDArray, NdarrayError>:
         if self.dtype != DType.F64 or other.dtype != DType.F64:
             return Err(NdarrayError.UnsupportedDType)
+        if should_use_simd_binary_f64x4(self, other):
+            return Ok(simd_binary_f64x4(self, other, op))
         val plan = make_broadcast_plan(self.shape, self.strides, other.shape, other.strides)?
         var out: [Float64] = []
         var i = 0
@@ -446,18 +1503,148 @@ impl NDArray:
             i = i + 1
         Ok(make_f64_array(out, plan.shape))
 
+    fn try_binary_f32(self, other: NDArray, op: text) -> Result<NDArray, NdarrayError>:
+        if self.dtype != DType.F32 or other.dtype != DType.F32:
+            return Err(NdarrayError.UnsupportedDType)
+        if should_use_simd_binary_f32x4(self, other):
+            return Ok(simd_binary_f32x4(self, other, op))
+        val plan = make_broadcast_plan(self.shape, self.strides, other.shape, other.strides)?
+        var out: [Float32] = []
+        var i = 0
+        while i < plan.shape.numel().value:
+            val coords = unravel_index(i, plan.shape)
+            val left_pos = resolve_offset(plan.shape, plan.left, self.offset, coords)
+            val right_pos = resolve_offset(plan.shape, plan.right, other.offset, coords)
+            val left = self.data_f32[left_pos.value].value
+            val right = other.data_f32[right_pos.value].value
+            val next = if op == "add":
+                left + right
+            elif op == "sub":
+                left - right
+            elif op == "mul":
+                left * right
+            else:
+                left / right
+            out.push(Float32.new(next))
+            i = i + 1
+        Ok(make_f32_array(out, plan.shape))
+
+    fn try_binary(self, other: NDArray, op: text) -> Result<NDArray, NdarrayError>:
+        if self.dtype != other.dtype:
+            return Err(NdarrayError.UnsupportedDType)
+        match self.dtype:
+            case DType.F32:
+                self.try_binary_f32(other, op)
+            case DType.F64:
+                self.try_binary_f64(other, op)
+            case DType.I64:
+                Err(NdarrayError.UnsupportedDType)
+            case DType.Bool:
+                Err(NdarrayError.UnsupportedDType)
+
     fn sum(self) -> Float64:
+        self.try_sum().unwrap()
+
+    fn try_sum(self) -> Result<Float64, NdarrayError>:
+        if self.dtype != DType.F64:
+            return Err(NdarrayError.UnsupportedDType)
+        if should_use_simd_sum_f64x4(self):
+            return Ok(simd_sum_f64x4(self))
         var total = 0.0
         var i = 0
         while i < self.len().value:
             total = total + self.flat_f64(i).value
             i = i + 1
-        Float64.new(total)
+        Ok(Float64.new(total))
+
+    fn sum_f32(self) -> Float32:
+        self.try_sum_f32().unwrap()
+
+    fn try_sum_f32(self) -> Result<Float32, NdarrayError>:
+        if self.dtype != DType.F32:
+            return Err(NdarrayError.UnsupportedDType)
+        if should_use_simd_sum_f32x4(self):
+            return Ok(simd_sum_f32x4(self))
+        var total: f32 = 0.0
+        var i = 0
+        while i < self.len().value:
+            total = total + self.flat_f32(i).value
+            i = i + 1
+        Ok(Float32.new(total))
+
+    fn sum_axis(self, axis: Axis) -> NDArray:
+        self.try_sum_axis(axis).unwrap()
+
+    fn try_sum_axis(self, axis: Axis) -> Result<NDArray, NdarrayError>:
+        if self.dtype != DType.F64:
+            return Err(NdarrayError.UnsupportedDType)
+        if self.shape.dims.len() != 2:
+            return Err(NdarrayError.InvalidShape)
+        val normalized = normalize_axis(axis, self.shape.dims.len())?
+        val rows = self.rows().value
+        val cols = self.cols().value
+        if normalized.value == 0:
+            var out: [Float64] = []
+            var col = 0
+            while col < cols:
+                var total = 0.0
+                var row = 0
+                while row < rows:
+                    total = total + self.get_f64_at([Index.new(row), Index.new(col)]).value
+                    row = row + 1
+                out.push(Float64.new(total))
+                col = col + 1
+            return Ok(make_f64_array(out, Shape.new([Index.new(cols)])))
+        var out: [Float64] = []
+        var row = 0
+        while row < rows:
+            var total = 0.0
+            var col = 0
+            while col < cols:
+                total = total + self.get_f64_at([Index.new(row), Index.new(col)]).value
+                col = col + 1
+            out.push(Float64.new(total))
+            row = row + 1
+        Ok(make_f64_array(out, Shape.new([Index.new(rows)])))
 
     fn mean(self) -> Float64:
-        Float64.new(self.sum().value / self.len().value)
+        self.try_mean().unwrap()
+
+    fn try_mean(self) -> Result<Float64, NdarrayError>:
+        if self.len().value == 0:
+            return Err(NdarrayError.InvalidShape)
+        val total = self.try_sum()?
+        Ok(Float64.new(total.value / self.len().value))
+
+    fn mean_f32(self) -> Float32:
+        self.try_mean_f32().unwrap()
+
+    fn try_mean_f32(self) -> Result<Float32, NdarrayError>:
+        if self.len().value == 0:
+            return Err(NdarrayError.InvalidShape)
+        val total = self.try_sum_f32()?
+        Ok(Float32.new(total.value / (self.len().value as f32)))
+
+    fn mean_axis(self, axis: Axis) -> NDArray:
+        self.try_mean_axis(axis).unwrap()
+
+    fn try_mean_axis(self, axis: Axis) -> Result<NDArray, NdarrayError>:
+        val normalized = normalize_axis(axis, self.shape.dims.len())?
+        val sums = self.try_sum_axis(normalized)?
+        val denom = if normalized.value == 0:
+            self.rows().value
+        else:
+            self.cols().value
+        Ok(sums.div_scalar(Float64.new(denom as f64)))
 
     fn min(self) -> Float64:
+        self.try_min().unwrap()
+
+    fn try_min(self) -> Result<Float64, NdarrayError>:
+        if self.dtype != DType.F64:
+            return Err(NdarrayError.UnsupportedDType)
+        if self.len().value == 0:
+            return Err(NdarrayError.InvalidShape)
         var best = self.flat_f64(0).value
         var i = 1
         while i < self.len().value:
@@ -465,9 +1652,16 @@ impl NDArray:
             if next < best:
                 best = next
             i = i + 1
-        Float64.new(best)
+        Ok(Float64.new(best))
 
     fn max(self) -> Float64:
+        self.try_max().unwrap()
+
+    fn try_max(self) -> Result<Float64, NdarrayError>:
+        if self.dtype != DType.F64:
+            return Err(NdarrayError.UnsupportedDType)
+        if self.len().value == 0:
+            return Err(NdarrayError.InvalidShape)
         var best = self.flat_f64(0).value
         var i = 1
         while i < self.len().value:
@@ -475,9 +1669,16 @@ impl NDArray:
             if next > best:
                 best = next
             i = i + 1
-        Float64.new(best)
+        Ok(Float64.new(best))
 
     fn argmax(self) -> Index:
+        self.try_argmax().unwrap()
+
+    fn try_argmax(self) -> Result<Index, NdarrayError>:
+        if self.dtype != DType.F64:
+            return Err(NdarrayError.UnsupportedDType)
+        if self.len().value == 0:
+            return Err(NdarrayError.InvalidShape)
         var best = self.flat_f64(0).value
         var best_index = 0
         var i = 1
@@ -487,4 +1688,4 @@ impl NDArray:
                 best = next
                 best_index = i
             i = i + 1
-        Index.new(best_index)
+        Ok(Index.new(best_index))

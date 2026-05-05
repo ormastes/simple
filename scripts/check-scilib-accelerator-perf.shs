@@ -1,0 +1,635 @@
+#!/bin/sh
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
+cd "$ROOT_DIR"
+
+BUILD_DIR="${SCILIB_SHIM_BUILD_DIR:-build/scilib}"
+CUDA_HOME="${CUDA_HOME:-/usr/local/cuda-13.0}"
+CXX="${CXX:-g++}"
+CC="${CC:-gcc}"
+REQUIRE_PERF="${SCILIB_REQUIRE_ACCELERATOR_PERF:-0}"
+
+MAX_LOAD_MS="${SCILIB_ACCELERATOR_MAX_LOAD_MS:-10000}"
+MAX_OP_US="${SCILIB_ACCELERATOR_MAX_OP_US:-20000}"
+MAX_RSS_KB="${SCILIB_ACCELERATOR_MAX_RSS_KB:-5000000}"
+SIMD_MAX_SPEC_MS="${SCILIB_SIMD_MAX_SPEC_MS:-5000}"
+SIMD_MAX_OP_NS="${SCILIB_SIMD_MAX_OP_NS:-5000000}"
+
+mkdir -p "$BUILD_DIR"
+
+if [ -r "$CUDA_HOME/targets/x86_64-linux/include/cublas_v2.h" ] && [ -r "$CUDA_HOME/targets/x86_64-linux/include/cusolverDn.h" ]; then
+    "$CC" -shared -fPIC \
+        -I"$CUDA_HOME/targets/x86_64-linux/include" \
+        -Isrc/runtime/scilib \
+        src/runtime/scilib/cublas_shim.c \
+        -o "$BUILD_DIR/libspl_scilib.so" \
+        -L"$CUDA_HOME/targets/x86_64-linux/lib" -lcublas -lcusolver -lcudart \
+        -Wl,-rpath,"$CUDA_HOME/targets/x86_64-linux/lib"
+fi
+
+TORCH_INFO="$(python3 - <<'PY' 2>/dev/null || true
+try:
+    from torch.utils.cpp_extension import include_paths, library_paths
+    print("include=" + " ".join(include_paths()))
+    print("lib=" + " ".join(library_paths()))
+except Exception:
+    pass
+PY
+)"
+
+if printf '%s\n' "$TORCH_INFO" | rg -q '^include='; then
+    TORCH_INC_FLAGS=""
+    TORCH_LIB_FLAGS=""
+    for p in $(printf '%s\n' "$TORCH_INFO" | sed -n 's/^include=//p'); do
+        TORCH_INC_FLAGS="$TORCH_INC_FLAGS -I$p"
+    done
+    for p in $(printf '%s\n' "$TORCH_INFO" | sed -n 's/^lib=//p'); do
+        TORCH_LIB_FLAGS="$TORCH_LIB_FLAGS -L$p -Wl,-rpath,$p"
+    done
+    # shellcheck disable=SC2086
+    "$CXX" -std=c++17 -O2 -fPIC -shared src/runtime/torch_ffi.cpp \
+        -o "$BUILD_DIR/libspl_torch.so" \
+        $TORCH_INC_FLAGS $TORCH_LIB_FLAGS \
+        -ltorch -ltorch_cpu -lc10 -ltorch_cuda -lc10_cuda
+fi
+
+REPORT="$(python3 - "$BUILD_DIR" "$MAX_LOAD_MS" "$MAX_OP_US" "$MAX_RSS_KB" "$SIMD_MAX_SPEC_MS" "$SIMD_MAX_OP_NS" <<'PY'
+import ctypes
+import os
+import resource
+import subprocess
+import sys
+import time
+
+build_dir = sys.argv[1]
+max_load_ms = float(sys.argv[2])
+max_op_us = float(sys.argv[3])
+max_rss_kb = int(sys.argv[4])
+simd_max_spec_ms = float(sys.argv[5])
+simd_max_op_ns = int(sys.argv[6])
+
+def f64_to_bits(value):
+    return ctypes.c_int64.from_buffer_copy(ctypes.c_double(value)).value
+
+def bits_to_f64(bits):
+    return ctypes.c_double.from_buffer_copy(ctypes.c_int64(bits)).value
+
+def check_close(label, got, want, eps=1e-7):
+    if abs(got - want) > eps:
+        raise SystemExit(f"{label}: got {got}, expected {want}")
+
+def time_loop(count, fn):
+    start = time.perf_counter()
+    for _ in range(count):
+        fn()
+    return (time.perf_counter() - start) * 1000000.0 / count
+
+def scalar_dot(x, y):
+    return sum(a * b for a, b in zip(x, y))
+
+def scalar_gemm(a, b, rows, cols, inner):
+    out = [0.0] * (rows * cols)
+    for i in range(rows):
+        for j in range(cols):
+            total = 0.0
+            for k in range(inner):
+                total += a[i * inner + k] * b[k * cols + j]
+            out[i * cols + j] = total
+    return out
+
+def scalar_gemv(a, x, y, rows, cols, alpha=1.0, beta=0.0):
+    out = [0.0] * rows
+    for i in range(rows):
+        total = beta * y[i]
+        for j in range(cols):
+            total += alpha * a[i * cols + j] * x[j]
+        out[i] = total
+    return out
+
+def scalar_solve(a, b, n):
+    mat = list(a)
+    rhs = list(b)
+    for pivot in range(n):
+        pivot_row = max(range(pivot, n), key=lambda r: abs(mat[r * n + pivot]))
+        if abs(mat[pivot_row * n + pivot]) == 0.0:
+            raise SystemExit("singular scalar_solve fixture")
+        if pivot_row != pivot:
+            for col in range(n):
+                mat[pivot * n + col], mat[pivot_row * n + col] = (
+                    mat[pivot_row * n + col],
+                    mat[pivot * n + col],
+                )
+            rhs[pivot], rhs[pivot_row] = rhs[pivot_row], rhs[pivot]
+        for row in range(pivot + 1, n):
+            factor = mat[row * n + pivot] / mat[pivot * n + pivot]
+            for col in range(pivot, n):
+                mat[row * n + col] -= factor * mat[pivot * n + col]
+            rhs[row] -= factor * rhs[pivot]
+    out = [0.0] * n
+    for row in range(n - 1, -1, -1):
+        total = rhs[row]
+        for col in range(row + 1, n):
+            total -= mat[row * n + col] * out[col]
+        out[row] = total / mat[row * n + row]
+    return out
+
+def record(lines, key, value):
+    lines.append(f"{key}={value}")
+
+lines = []
+failures = []
+
+def load_lib(path):
+    start = time.perf_counter()
+    mode = getattr(os, "RTLD_LAZY", 1)
+    lib = ctypes.CDLL(path, mode=mode)
+    return lib, (time.perf_counter() - start) * 1000.0
+
+def scalar_inverse(a, n):
+    out = [0.0] * (n * n)
+    for col in range(n):
+        rhs = [0.0] * n
+        rhs[col] = 1.0
+        solved = scalar_solve(a, rhs, n)
+        for row in range(n):
+            out[row * n + col] = solved[row]
+    return out
+
+def run_scalar_baseline():
+    n = 4096
+    x = [(i % 17 - 8) * 0.25 for i in range(n)]
+    y = [(i % 13 - 6) * 0.5 for i in range(n)]
+    dot_us = time_loop(10, lambda: scalar_dot(x, y))
+
+    gemv_rows = 64
+    gemv_cols = 32
+    gemv_a = [(i % 19 - 9) * 0.0625 for i in range(gemv_rows * gemv_cols)]
+    gemv_x = [(i % 17 - 8) * 0.125 for i in range(gemv_cols)]
+    gemv_y = [(i % 5 - 2) * 0.25 for i in range(gemv_rows)]
+    gemv_us = time_loop(10, lambda: scalar_gemv(gemv_a, gemv_x, gemv_y, gemv_rows, gemv_cols, 2.0, 3.0))
+
+    rows = cols = inner = 32
+    a = [(i % 11 - 5) * 0.125 for i in range(rows * inner)]
+    b = [(i % 7 - 3) * 0.25 for i in range(inner * cols)]
+    gemm_us = time_loop(3, lambda: scalar_gemm(a, b, rows, cols, inner))
+
+    solve_n = 16
+    solve_a = [0.0] * (solve_n * solve_n)
+    for row in range(solve_n):
+        for col in range(solve_n):
+            solve_a[row * solve_n + col] = 2.0 if row == col else 1.0 / (1 + row + col)
+        solve_a[row * solve_n + row] += solve_n
+    solve_b = [(i % 9 - 4) * 0.5 for i in range(solve_n)]
+    solve_us = time_loop(10, lambda: scalar_solve(solve_a, solve_b, solve_n))
+    inv_us = time_loop(3, lambda: scalar_inverse(solve_a, solve_n))
+
+    record(lines, "scalar_fallback_perf_available", "true")
+    record(lines, "scalar_dot_4096_us", f"{dot_us:.3f}")
+    record(lines, "scalar_gemv_64x32_us", f"{gemv_us:.3f}")
+    record(lines, "scalar_gemm_32x32_us", f"{gemm_us:.3f}")
+    record(lines, "scalar_solve_16_us", f"{solve_us:.3f}")
+    record(lines, "scalar_inv_16_us", f"{inv_us:.3f}")
+
+def detect_simd_profile():
+    try:
+        with open("/proc/cpuinfo", "r", encoding="utf-8", errors="ignore") as handle:
+            cpuinfo = handle.read().lower()
+    except OSError:
+        cpuinfo = ""
+    profiles = []
+    for name in ["avx512", "avx2", "sse2", "neon", "asimd", "rvv"]:
+        if name in cpuinfo:
+            profiles.append(name)
+    return profiles
+
+def run_simd():
+    profiles = detect_simd_profile()
+    if not profiles:
+        record(lines, "simd_perf_available", "false")
+        record(lines, "simd_perf_reason", "no known SIMD cpu profile detected")
+        return
+    record(lines, "simd_perf_available", "true")
+    record(lines, "simd_profile", ",".join(profiles))
+    specs = [
+        "test/feature/scilib/linalg_simd_spec.spl",
+        "test/feature/scilib/simd_f32_spec.spl",
+    ]
+    total_ms = 0.0
+    for spec in specs:
+        key = os.path.basename(spec).replace("_spec.spl", "")
+        start = time.perf_counter()
+        result = subprocess.run(
+            ["bin/simple", "test", spec, "--mode=interpreter", "--no-cache"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.STDOUT,
+            check=False,
+        )
+        elapsed_ms = (time.perf_counter() - start) * 1000.0
+        total_ms += elapsed_ms
+        record(lines, f"simd_{key}_spec_ms", f"{elapsed_ms:.3f}")
+        if result.returncode != 0:
+            failures.append(f"simd_{key}_spec_failed")
+    record(lines, "simd_spec_total_ms", f"{total_ms:.3f}")
+    if total_ms > simd_max_spec_ms:
+        failures.append(f"simd_spec_total_ms>{simd_max_spec_ms}")
+
+    probe = "test/perf/scilib_simd_ops_perf_spec.spl"
+    result = subprocess.run(
+        ["bin/simple", "test", probe, "--mode=interpreter", "--no-cache"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        failures.append("simd_ops_perf_spec_failed")
+        return
+    expected = {
+        "simd_f64_dot_avg_ns",
+        "simd_f64_axpy_avg_ns",
+        "simd_f32_dot_avg_ns",
+        "simd_f32_axpy_avg_ns",
+        "simd_ndarray_f64_add_avg_ns",
+        "simd_ndarray_f64_sum_avg_ns",
+        "simd_ndarray_f64_square_avg_ns",
+        "simd_ndarray_f64_abs_avg_ns",
+        "simd_ndarray_f64_scalar_mul_avg_ns",
+        "simd_ndarray_f32_sum_avg_ns",
+        "simd_ndarray_f32_scalar_mul_avg_ns",
+        "simd_ndarray_f32_scalar_div_avg_ns",
+        "simd_ndarray_f32_square_avg_ns",
+        "simd_ndarray_f32_abs_avg_ns",
+    }
+    observed = set()
+    for raw_line in result.stdout.splitlines():
+        line = raw_line.strip()
+        if not line.startswith("simd_") or "_avg_ns=" not in line:
+            continue
+        key, value_text = line.split("=", 1)
+        if key not in expected:
+            continue
+        try:
+            value = int(value_text)
+        except ValueError:
+            failures.append(f"{key}_not_numeric")
+            continue
+        observed.add(key)
+        record(lines, key, str(value))
+        if value <= 0:
+            failures.append(f"{key}<=0")
+        if value > simd_max_op_ns:
+            failures.append(f"{key}>{simd_max_op_ns}")
+    missing = sorted(expected - observed)
+    if missing:
+        failures.append("missing_" + "_".join(missing))
+
+def run_cuda():
+    path = os.path.join(build_dir, "libspl_scilib.so")
+    if not os.path.exists(path):
+        record(lines, "cuda_perf_available", "false")
+        record(lines, "cuda_perf_reason", "libspl_scilib.so not built")
+        return
+    try:
+        lib, load_ms = load_lib(path)
+        lib.rt_scilib_cuda_available.restype = ctypes.c_int64
+        if lib.rt_scilib_cuda_available() == 0:
+            record(lines, "cuda_perf_available", "false")
+            record(lines, "cuda_perf_reason", "rt_scilib_cuda_available returned false")
+            return
+        c_i64 = ctypes.c_int64
+        c_i64_p = ctypes.POINTER(c_i64)
+        lib.rt_scilib_cuda_ddot_bits.argtypes = [c_i64_p, c_i64, c_i64_p]
+        lib.rt_scilib_cuda_ddot_bits.restype = c_i64
+        lib.rt_scilib_cuda_dgemm_bits.argtypes = [c_i64_p, c_i64_p, c_i64_p, c_i64_p, c_i64_p]
+        lib.rt_scilib_cuda_dgemm_bits.restype = c_i64
+        lib.rt_scilib_cuda_dgemv_bits.argtypes = [c_i64_p, c_i64_p, c_i64_p, c_i64_p, c_i64_p]
+        lib.rt_scilib_cuda_dgemv_bits.restype = c_i64
+        lib.rt_scilib_cuda_dgesv_bits.argtypes = [c_i64_p, c_i64_p, c_i64_p, c_i64_p]
+        lib.rt_scilib_cuda_dgesv_bits.restype = c_i64
+        lib.rt_cuda_malloc.argtypes = [c_i64]
+        lib.rt_cuda_malloc.restype = c_i64
+        lib.rt_cuda_free.argtypes = [c_i64]
+        lib.rt_cuda_free.restype = None
+        lib.rt_cuda_memcpy_htod.argtypes = [c_i64, ctypes.c_void_p, c_i64]
+        lib.rt_cuda_memcpy_htod.restype = None
+        lib.rt_cuda_memcpy_dtoh.argtypes = [ctypes.c_void_p, c_i64, c_i64]
+        lib.rt_cuda_memcpy_dtoh.restype = None
+
+        n = 4096
+        x = [(i % 17 - 8) * 0.25 for i in range(n)]
+        y = [(i % 13 - 6) * 0.5 for i in range(n)]
+        x_bits = (c_i64 * n)(*[f64_to_bits(v) for v in x])
+        y_bits = (c_i64 * n)(*[f64_to_bits(v) for v in y])
+        transfer_bytes = ctypes.sizeof(x_bits)
+        transfer_device = lib.rt_cuda_malloc(transfer_bytes)
+        if transfer_device == 0:
+            raise SystemExit("cuda transfer fixture allocation failed")
+        transfer_out = (c_i64 * n)()
+        cuda_htod_us = time_loop(
+            25,
+            lambda: lib.rt_cuda_memcpy_htod(
+                transfer_device,
+                ctypes.cast(x_bits, ctypes.c_void_p),
+                transfer_bytes,
+            ),
+        )
+        cuda_dtoh_us = time_loop(
+            25,
+            lambda: lib.rt_cuda_memcpy_dtoh(
+                ctypes.cast(transfer_out, ctypes.c_void_p),
+                transfer_device,
+                transfer_bytes,
+            ),
+        )
+        lib.rt_cuda_free(transfer_device)
+        dot_expected = scalar_dot(x, y)
+        dot_got = bits_to_f64(lib.rt_scilib_cuda_ddot_bits(x_bits, n, y_bits))
+        check_close("cuda_dot", dot_got, dot_expected, 1e-6)
+        dot_us = time_loop(25, lambda: lib.rt_scilib_cuda_ddot_bits(x_bits, n, y_bits))
+
+        rows = cols = inner = 32
+        a = [(i % 11 - 5) * 0.125 for i in range(rows * inner)]
+        b = [(i % 7 - 3) * 0.25 for i in range(inner * cols)]
+        c = [0.0] * (rows * cols)
+        out = (c_i64 * (rows * cols))()
+        params = (c_i64 * 5)(rows, cols, inner, f64_to_bits(1.0), f64_to_bits(0.0))
+        a_bits = (c_i64 * len(a))(*[f64_to_bits(v) for v in a])
+        b_bits = (c_i64 * len(b))(*[f64_to_bits(v) for v in b])
+        c_bits = (c_i64 * len(c))(*[f64_to_bits(v) for v in c])
+        ok = lib.rt_scilib_cuda_dgemm_bits(params, a_bits, b_bits, c_bits, out)
+        if ok == 0:
+            raise SystemExit("cuda_gemm returned failure")
+        expected = scalar_gemm(a, b, rows, cols, inner)
+        for idx, want in enumerate(expected):
+            check_close(f"cuda_gemm[{idx}]", bits_to_f64(out[idx]), want, 1e-6)
+        gemm_us = time_loop(10, lambda: lib.rt_scilib_cuda_dgemm_bits(params, a_bits, b_bits, c_bits, out))
+
+        gemv_rows = 64
+        gemv_cols = 32
+        gemv_a = [(i % 19 - 9) * 0.0625 for i in range(gemv_rows * gemv_cols)]
+        gemv_x = [(i % 17 - 8) * 0.125 for i in range(gemv_cols)]
+        gemv_y = [(i % 5 - 2) * 0.25 for i in range(gemv_rows)]
+        gemv_out = (c_i64 * gemv_rows)()
+        gemv_params = (c_i64 * 4)(gemv_rows, gemv_cols, f64_to_bits(2.0), f64_to_bits(3.0))
+        gemv_a_bits = (c_i64 * len(gemv_a))(*[f64_to_bits(v) for v in gemv_a])
+        gemv_x_bits = (c_i64 * len(gemv_x))(*[f64_to_bits(v) for v in gemv_x])
+        gemv_y_bits = (c_i64 * len(gemv_y))(*[f64_to_bits(v) for v in gemv_y])
+        ok = lib.rt_scilib_cuda_dgemv_bits(gemv_params, gemv_a_bits, gemv_x_bits, gemv_y_bits, gemv_out)
+        if ok == 0:
+            raise SystemExit("cuda_gemv returned failure")
+        gemv_expected = scalar_gemv(gemv_a, gemv_x, gemv_y, gemv_rows, gemv_cols, 2.0, 3.0)
+        for idx, want in enumerate(gemv_expected):
+            check_close(f"cuda_gemv[{idx}]", bits_to_f64(gemv_out[idx]), want, 1e-6)
+        gemv_us = time_loop(10, lambda: lib.rt_scilib_cuda_dgemv_bits(gemv_params, gemv_a_bits, gemv_x_bits, gemv_y_bits, gemv_out))
+
+        solve_n = 16
+        solve_a = [0.0] * (solve_n * solve_n)
+        for row in range(solve_n):
+            for col in range(solve_n):
+                solve_a[row * solve_n + col] = 2.0 if row == col else 1.0 / (1 + row + col)
+            solve_a[row * solve_n + row] += solve_n
+        solve_b = [(i % 9 - 4) * 0.5 for i in range(solve_n)]
+        solve_out = (c_i64 * solve_n)()
+        solve_params = (c_i64 * 2)(solve_n, 1)
+        solve_a_bits = (c_i64 * len(solve_a))(*[f64_to_bits(v) for v in solve_a])
+        solve_b_bits = (c_i64 * len(solve_b))(*[f64_to_bits(v) for v in solve_b])
+        info = lib.rt_scilib_cuda_dgesv_bits(solve_params, solve_a_bits, solve_b_bits, solve_out)
+        if info != 0:
+            raise SystemExit(f"cuda_solve returned info={info}")
+        solve_expected = scalar_solve(solve_a, solve_b, solve_n)
+        for idx, want in enumerate(solve_expected):
+            check_close(f"cuda_solve[{idx}]", bits_to_f64(solve_out[idx]), want, 1e-6)
+        solve_us = time_loop(10, lambda: lib.rt_scilib_cuda_dgesv_bits(solve_params, solve_a_bits, solve_b_bits, solve_out))
+
+        inv_rhs = [0.0] * (solve_n * solve_n)
+        for row in range(solve_n):
+            inv_rhs[row * solve_n + row] = 1.0
+        inv_out = (c_i64 * (solve_n * solve_n))()
+        inv_params = (c_i64 * 2)(solve_n, solve_n)
+        inv_rhs_bits = (c_i64 * len(inv_rhs))(*[f64_to_bits(v) for v in inv_rhs])
+        info = lib.rt_scilib_cuda_dgesv_bits(inv_params, solve_a_bits, inv_rhs_bits, inv_out)
+        if info != 0:
+            raise SystemExit(f"cuda_inv returned info={info}")
+        for row in range(solve_n):
+            for col in range(solve_n):
+                total = 0.0
+                for k in range(solve_n):
+                    total += solve_a[row * solve_n + k] * bits_to_f64(inv_out[k * solve_n + col])
+                check_close(
+                    f"cuda_inv_identity[{row},{col}]",
+                    total,
+                    1.0 if row == col else 0.0,
+                    1e-5,
+                )
+        inv_us = time_loop(10, lambda: lib.rt_scilib_cuda_dgesv_bits(inv_params, solve_a_bits, inv_rhs_bits, inv_out))
+
+        record(lines, "cuda_perf_available", "true")
+        record(lines, "cuda_load_ms", f"{load_ms:.3f}")
+        record(lines, "cuda_htod_4096_f64_us", f"{cuda_htod_us:.3f}")
+        record(lines, "cuda_dtoh_4096_f64_us", f"{cuda_dtoh_us:.3f}")
+        record(lines, "cuda_dot_4096_us", f"{dot_us:.3f}")
+        record(lines, "cuda_gemv_64x32_us", f"{gemv_us:.3f}")
+        record(lines, "cuda_gemm_32x32_us", f"{gemm_us:.3f}")
+        record(lines, "cuda_solve_16_us", f"{solve_us:.3f}")
+        record(lines, "cuda_inv_16_us", f"{inv_us:.3f}")
+        if load_ms > max_load_ms:
+            failures.append(f"cuda_load_ms>{max_load_ms}")
+        if dot_us > max_op_us:
+            failures.append(f"cuda_dot_4096_us>{max_op_us}")
+        if cuda_htod_us > max_op_us:
+            failures.append(f"cuda_htod_4096_f64_us>{max_op_us}")
+        if cuda_dtoh_us > max_op_us:
+            failures.append(f"cuda_dtoh_4096_f64_us>{max_op_us}")
+        if gemv_us > max_op_us:
+            failures.append(f"cuda_gemv_64x32_us>{max_op_us}")
+        if gemm_us > max_op_us:
+            failures.append(f"cuda_gemm_32x32_us>{max_op_us}")
+        if solve_us > max_op_us:
+            failures.append(f"cuda_solve_16_us>{max_op_us}")
+        if inv_us > max_op_us:
+            failures.append(f"cuda_inv_16_us>{max_op_us}")
+    except Exception as exc:
+        record(lines, "cuda_perf_available", "false")
+        record(lines, "cuda_perf_error", exc.__class__.__name__ + ":" + str(exc).replace("\n", " "))
+
+def run_torch():
+    path = os.path.join(build_dir, "libspl_torch.so")
+    if not os.path.exists(path):
+        record(lines, "pytorch_perf_available", "false")
+        record(lines, "pytorch_perf_reason", "libspl_torch.so not built")
+        return
+    try:
+        lib, load_ms = load_lib(path)
+        lib.rt_torch_available.restype = ctypes.c_bool
+        if not lib.rt_torch_available():
+            record(lines, "pytorch_perf_available", "false")
+            record(lines, "pytorch_perf_reason", "rt_torch_available returned false")
+            return
+        c_i64 = ctypes.c_int64
+        c_i64_p = ctypes.POINTER(c_i64)
+        lib.rt_dyn_torch_tensor_from_bits_1d.argtypes = [c_i64_p, c_i64]
+        lib.rt_dyn_torch_tensor_from_bits_1d.restype = c_i64
+        lib.rt_dyn_torch_tensor_from_bits_2d.argtypes = [c_i64_p, c_i64, c_i64]
+        lib.rt_dyn_torch_tensor_from_bits_2d.restype = c_i64
+        lib.rt_dyn_torch_tensor_copy_bits.argtypes = [c_i64, c_i64_p, c_i64]
+        lib.rt_dyn_torch_tensor_copy_bits.restype = c_i64
+        lib.rt_torch_torchtensor_dot.argtypes = [c_i64, c_i64]
+        lib.rt_torch_torchtensor_dot.restype = c_i64
+        lib.rt_torch_torchtensor_matmul.argtypes = [c_i64, c_i64]
+        lib.rt_torch_torchtensor_matmul.restype = c_i64
+        lib.rt_torch_torchtensor_inverse.argtypes = [c_i64]
+        lib.rt_torch_torchtensor_inverse.restype = c_i64
+        lib.rt_torch_torchtensor_linalg_solve.argtypes = [c_i64, c_i64]
+        lib.rt_torch_torchtensor_linalg_solve.restype = c_i64
+        lib.rt_torch_torchtensor_sum_bits.argtypes = [c_i64]
+        lib.rt_torch_torchtensor_sum_bits.restype = c_i64
+        lib.rt_torch_torchtensor_free.argtypes = [c_i64]
+
+        n = 4096
+        x = [(i % 17 - 8) * 0.25 for i in range(n)]
+        y = [(i % 13 - 6) * 0.5 for i in range(n)]
+        x_bits = (c_i64 * n)(*[f64_to_bits(v) for v in x])
+        y_bits = (c_i64 * n)(*[f64_to_bits(v) for v in y])
+        xh = lib.rt_dyn_torch_tensor_from_bits_1d(x_bits, n)
+        yh = lib.rt_dyn_torch_tensor_from_bits_1d(y_bits, n)
+        torch_transfer_handle = lib.rt_dyn_torch_tensor_from_bits_1d(x_bits, n)
+        if torch_transfer_handle == 0:
+            raise SystemExit("pytorch transfer fixture creation failed")
+        torch_transfer_out = (c_i64 * n)()
+        torch_from_bits_us = time_loop(
+            25,
+            lambda: lib.rt_torch_torchtensor_free(lib.rt_dyn_torch_tensor_from_bits_1d(x_bits, n)),
+        )
+        torch_copy_bits_us = time_loop(
+            25,
+            lambda: lib.rt_dyn_torch_tensor_copy_bits(torch_transfer_handle, torch_transfer_out, n),
+        )
+        lib.rt_torch_torchtensor_free(torch_transfer_handle)
+        dh = lib.rt_torch_torchtensor_dot(xh, yh)
+        dot_got = bits_to_f64(lib.rt_torch_torchtensor_sum_bits(dh))
+        check_close("pytorch_dot", dot_got, scalar_dot(x, y), 1e-6)
+        lib.rt_torch_torchtensor_free(dh)
+        dot_us = time_loop(100, lambda: lib.rt_torch_torchtensor_free(lib.rt_torch_torchtensor_dot(xh, yh)))
+        lib.rt_torch_torchtensor_free(xh)
+        lib.rt_torch_torchtensor_free(yh)
+
+        rows = cols = inner = 32
+        a = [(i % 11 - 5) * 0.125 for i in range(rows * inner)]
+        b = [(i % 7 - 3) * 0.25 for i in range(inner * cols)]
+        a_bits = (c_i64 * len(a))(*[f64_to_bits(v) for v in a])
+        b_bits = (c_i64 * len(b))(*[f64_to_bits(v) for v in b])
+        ah = lib.rt_dyn_torch_tensor_from_bits_2d(a_bits, rows, inner)
+        bh = lib.rt_dyn_torch_tensor_from_bits_2d(b_bits, inner, cols)
+        mh = lib.rt_torch_torchtensor_matmul(ah, bh)
+        out = (c_i64 * (rows * cols))()
+        if lib.rt_dyn_torch_tensor_copy_bits(mh, out, rows * cols) == 0:
+            raise SystemExit("pytorch copy bits failed")
+        expected = scalar_gemm(a, b, rows, cols, inner)
+        for idx, want in enumerate(expected):
+            check_close(f"pytorch_gemm[{idx}]", bits_to_f64(out[idx]), want, 1e-6)
+        lib.rt_torch_torchtensor_free(mh)
+        gemm_us = time_loop(50, lambda: lib.rt_torch_torchtensor_free(lib.rt_torch_torchtensor_matmul(ah, bh)))
+        lib.rt_torch_torchtensor_free(ah)
+        lib.rt_torch_torchtensor_free(bh)
+
+        solve_n = 16
+        solve_a = []
+        solve_b = []
+        for row in range(solve_n):
+            for col in range(solve_n):
+                solve_a.append((2.0 * solve_n if row == col else 0.1 * ((row + col) % 5 + 1)))
+            solve_b.append(float(row + 1))
+        solve_a_bits = (c_i64 * len(solve_a))(*[f64_to_bits(v) for v in solve_a])
+        solve_b_bits = (c_i64 * len(solve_b))(*[f64_to_bits(v) for v in solve_b])
+        sah = lib.rt_dyn_torch_tensor_from_bits_2d(solve_a_bits, solve_n, solve_n)
+        sbh = lib.rt_dyn_torch_tensor_from_bits_1d(solve_b_bits, solve_n)
+        soh = lib.rt_torch_torchtensor_linalg_solve(sah, sbh)
+        solve_out = (c_i64 * solve_n)()
+        if soh == 0 or lib.rt_dyn_torch_tensor_copy_bits(soh, solve_out, solve_n) == 0:
+            raise SystemExit("pytorch solve failed")
+        expected_solve = scalar_solve(solve_a, solve_b, solve_n)
+        for idx, want in enumerate(expected_solve):
+            check_close(f"pytorch_solve[{idx}]", bits_to_f64(solve_out[idx]), want, 1e-6)
+        lib.rt_torch_torchtensor_free(soh)
+        solve_us = time_loop(25, lambda: lib.rt_torch_torchtensor_free(lib.rt_torch_torchtensor_linalg_solve(sah, sbh)))
+
+        ih = lib.rt_torch_torchtensor_inverse(sah)
+        inv_out = (c_i64 * (solve_n * solve_n))()
+        if ih == 0 or lib.rt_dyn_torch_tensor_copy_bits(ih, inv_out, solve_n * solve_n) == 0:
+            raise SystemExit("pytorch inverse failed")
+        for row in range(solve_n):
+            for col in range(solve_n):
+                total = 0.0
+                for k in range(solve_n):
+                    total += solve_a[row * solve_n + k] * bits_to_f64(inv_out[k * solve_n + col])
+                check_close(
+                    f"pytorch_inv_identity[{row},{col}]",
+                    total,
+                    1.0 if row == col else 0.0,
+                    1e-5,
+                )
+        lib.rt_torch_torchtensor_free(ih)
+
+        def time_inverse():
+            handle = lib.rt_torch_torchtensor_inverse(sah)
+            if handle == 0:
+                raise SystemExit("pytorch inverse timed iteration failed")
+            lib.rt_torch_torchtensor_free(handle)
+
+        inv_us = time_loop(25, time_inverse)
+        lib.rt_torch_torchtensor_free(sah)
+        lib.rt_torch_torchtensor_free(sbh)
+
+        record(lines, "pytorch_perf_available", "true")
+        record(lines, "pytorch_load_ms", f"{load_ms:.3f}")
+        record(lines, "pytorch_from_bits_4096_f64_us", f"{torch_from_bits_us:.3f}")
+        record(lines, "pytorch_copy_bits_4096_f64_us", f"{torch_copy_bits_us:.3f}")
+        record(lines, "pytorch_dot_4096_us", f"{dot_us:.3f}")
+        record(lines, "pytorch_gemm_32x32_us", f"{gemm_us:.3f}")
+        record(lines, "pytorch_solve_16_us", f"{solve_us:.3f}")
+        record(lines, "pytorch_inv_16_us", f"{inv_us:.3f}")
+        if load_ms > max_load_ms:
+            failures.append(f"pytorch_load_ms>{max_load_ms}")
+        if dot_us > max_op_us:
+            failures.append(f"pytorch_dot_4096_us>{max_op_us}")
+        if torch_from_bits_us > max_op_us:
+            failures.append(f"pytorch_from_bits_4096_f64_us>{max_op_us}")
+        if torch_copy_bits_us > max_op_us:
+            failures.append(f"pytorch_copy_bits_4096_f64_us>{max_op_us}")
+        if gemm_us > max_op_us:
+            failures.append(f"pytorch_gemm_32x32_us>{max_op_us}")
+        if solve_us > max_op_us:
+            failures.append(f"pytorch_solve_16_us>{max_op_us}")
+        if inv_us > max_op_us:
+            failures.append(f"pytorch_inv_16_us>{max_op_us}")
+    except Exception as exc:
+        record(lines, "pytorch_perf_available", "false")
+        record(lines, "pytorch_perf_error", exc.__class__.__name__ + ":" + str(exc).replace("\n", " "))
+
+run_scalar_baseline()
+run_simd()
+run_cuda()
+run_torch()
+
+rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+record(lines, "accelerator_perf_max_rss_kb", str(rss))
+if rss > max_rss_kb:
+    failures.append(f"accelerator_perf_max_rss_kb>{max_rss_kb}")
+
+if failures:
+    record(lines, "accelerator_perf_status", "fail")
+    record(lines, "accelerator_perf_failures", ",".join(failures))
+else:
+    record(lines, "accelerator_perf_status", "pass")
+
+print("\n".join(lines))
+PY
+)"
+
+printf '%s\n' "$REPORT"
+
+if [ "$REQUIRE_PERF" = "1" ] && ! printf '%s\n' "$REPORT" | rg -q '^accelerator_perf_status=pass$'; then
+    echo "error: SCILIB_REQUIRE_ACCELERATOR_PERF=1 but accelerator performance gate failed" >&2
+    exit 1
+fi

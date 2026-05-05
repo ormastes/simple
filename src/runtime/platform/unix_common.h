@@ -231,10 +231,42 @@ const char* rt_file_read_text_at(const char* path, int64_t offset, int64_t size)
     return buffer;
 }
 
-int64_t rt_file_write_text_at(const char* path, int64_t offset, const char* data) {
-    if (!path || !data || offset < 0) return -1;
+static inline const char* rt_file_text_at_string_data(int64_t value, int64_t* len_out) {
+    const uint64_t tag_mask = 0x7ULL;
+    const uint64_t heap_tag = 0x1ULL;
+    uint64_t raw = (uint64_t)value;
+    if ((raw & tag_mask) == heap_tag) {
+        const uint8_t* data = rt_string_data(value);
+        int64_t len = rt_string_len(value);
+        if (data) {
+            *len_out = len;
+            return (const char*)data;
+        }
+    }
+    if (raw > 4096) {
+        const char* s = (const char*)(uintptr_t)raw;
+        *len_out = (int64_t)strlen(s);
+        return s;
+    }
+    *len_out = 0;
+    return NULL;
+}
 
-    int64_t size = (int64_t)strlen(data);
+static inline int64_t rt_file_text_at_int(int64_t value) {
+    if ((((uint64_t)value) & 0x7ULL) == 0) return value >> 3;
+    return value;
+}
+
+int64_t rt_file_write_text_at(int64_t path_value, int64_t offset_value, int64_t data_value) {
+    int64_t path_len = 0;
+    int64_t data_len = 0;
+    const char* path = rt_file_text_at_string_data(path_value, &path_len);
+    const char* data = rt_file_text_at_string_data(data_value, &data_len);
+    int64_t offset = rt_file_text_at_int(offset_value);
+    (void)path_len;
+    if (!path || !data || offset < 0 || data_len < 0) return -1;
+
+    int64_t size = data_len;
     if (size == 0) return 0;
 
     /* Open or create file, preserve existing content */

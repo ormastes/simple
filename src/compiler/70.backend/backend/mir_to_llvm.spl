@@ -5,11 +5,15 @@
 
 use compiler.mir.mir_data.*
 use compiler.mir.mir_instructions.{MirModule, MirFunction, MirBlock}
+use compiler.mir.mir_lowering.{bootstrap_mir_function_count, bootstrap_mir_function_at, bootstrap_mir_function_name_at}
 use compiler.backend.backend_api.*
 use compiler.backend.llvm_target.{LlvmTargetTriple, LlvmTargetConfig}
 use compiler.backend.llvm_type_mapper.LlvmTypeMapper
-use compiler.backend.llvm_ir_builder.{LlvmIRBuilder, natural_alignment, is_integer_type, is_signed_int_type, is_float_type}
+use compiler.backend.llvm_ir_builder.{LlvmIRBuilder, natural_alignment, is_integer_type, is_signed_int_type, is_float_type,
+    llvm_ir_builder_build}
 use compiler.backend.common.mir_text_codegen.MirTextCodegen
+
+extern fn rt_env_get(key: text) -> text
 
 # ============================================================================
 # MIR to LLVM IR Translation
@@ -73,11 +77,42 @@ impl MirTextCodegen for MirToLlvm:
 
     me translate_module(module: MirModule) -> text:
         """Translate MIR module to LLVM IR."""
+        val bootstrap_debug = (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1"
+        if bootstrap_debug:
+            print "[llvm-translate] header"
         self.builder.emit_module_header()
+        if bootstrap_debug:
+            print "[llvm-translate] runtime"
         self.emit_runtime_declarations()
 
-        for name, body in module.functions:
-            self.translate_function(name, body)
+        if bootstrap_debug:
+            print "[llvm-translate] keys"
+        if bootstrap_debug:
+            print "[llvm-translate] loop"
+        if bootstrap_debug:
+            val real_bootstrap = (rt_env_get("SIMPLE_BOOTSTRAP_REAL_LLVM") ?? "") == "1"
+            val bootstrap_function_count = bootstrap_mir_function_count()
+            var bootstrap_fni = 0
+            while bootstrap_fni < bootstrap_function_count:
+                print "[llvm-translate] body"
+                val name = bootstrap_mir_function_name_at(bootstrap_fni)
+                print "[llvm-translate] function"
+                if real_bootstrap:
+                    val bootstrap_fn = bootstrap_mir_function_at(bootstrap_fni)
+                    val body = MirBody.from_function(bootstrap_fn)
+                    self.translate_function(if name == "main": "__simple_main" else: name, body)
+                else:
+                    val fn_name = if name == "main": "__simple_main" else: name
+                    self.builder.emit("define i64 @{fn_name}() {")
+                    self.builder.emit("entry:")
+                    self.builder.emit("  ret i64 0")
+                    self.builder.emit("}")
+                print "[llvm-translate] function-done"
+                bootstrap_fni = bootstrap_fni + 1
+        else:
+            for fn_ in module.functions.values():
+                val body = MirBody.from_function(fn_)
+                self.translate_function(fn_.name, body)
 
         if self.string_globals.len() > 0:
             self.builder.emit("")
@@ -85,8 +120,9 @@ impl MirTextCodegen for MirToLlvm:
             for global_decl in self.string_globals:
                 self.builder.emit(global_decl)
 
-        self.builder.emit_tbaa_hierarchy()
-        self.builder.build()
+        if not bootstrap_debug:
+            self.builder.emit_tbaa_hierarchy()
+        return llvm_ir_builder_build(self.builder)
 
     me translate_function(name: text, body: MirBody):
         """Translate a MIR function with optimization attributes.
@@ -94,23 +130,41 @@ impl MirTextCodegen for MirToLlvm:
         Renames 'main' to '__simple_main' so the entry point wrapper
         (entry_point.spl) can call it with proper runtime init/shutdown.
         """
+        val bootstrap_debug = (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1"
+        if bootstrap_debug:
+            print "[mir-to-llvm] function:start {name}"
         self.local_types = {}
-        for local in body.locals:
+        var local_i = 0
+        while local_i < body.locals.len():
+            val local = body.locals[local_i]
             val llvm_ty = self.type_mapper.map_type(local.type_)
             self.local_types[local.id.id] = llvm_ty
+            local_i = local_i + 1
+        if bootstrap_debug:
+            print "[mir-to-llvm] function:locals {name}"
 
         var params: [text] = []
-        for i in 0..body.arg_count:
+        var i = 0
+        while i < body.arg_count:
             val param_ty = self.get_local_type(i)
             params = params.push("{param_ty} %arg{i}")
+            i = i + 1
+        if bootstrap_debug:
+            print "[mir-to-llvm] function:params {name}"
 
         val ret_ty = self.type_mapper.map_type(body.return_ty)
+        if bootstrap_debug:
+            print "[mir-to-llvm] function:return {name}"
 
         var has_store = false
         var has_call = false
         var inst_count = 0
-        for block in body.blocks:
-            for inst in block.instructions:
+        var scan_block_i = 0
+        while scan_block_i < body.blocks.len():
+            val block = body.blocks[scan_block_i]
+            var scan_inst_i = 0
+            while scan_inst_i < block.instructions.len():
+                val inst = block.instructions[scan_inst_i]
                 inst_count = inst_count + 1
                 match inst.kind:
                     case Store(_, _): has_store = true
@@ -120,6 +174,10 @@ impl MirTextCodegen for MirToLlvm:
                     case Intrinsic(_, _, _): has_call = true
                     case Send(_, _): has_store = true
                     case _: ()
+                scan_inst_i = scan_inst_i + 1
+            scan_block_i = scan_block_i + 1
+        if bootstrap_debug:
+            print "[mir-to-llvm] function:scan {name}"
 
         val is_readonly = not has_store and not has_call
         val is_small = inst_count < 10
@@ -128,11 +186,18 @@ impl MirTextCodegen for MirToLlvm:
         val fn_name = if name == "main": "__simple_main" else: name
 
         self.builder.start_function_opt(fn_name, params, ret_ty, is_readonly, is_small)
+        if bootstrap_debug:
+            print "[mir-to-llvm] function:started {name}"
 
-        for block in body.blocks:
+        var block_i = 0
+        while block_i < body.blocks.len():
+            val block = body.blocks[block_i]
             self.translate_block(block)
+            block_i = block_i + 1
 
         self.builder.end_function()
+        if bootstrap_debug:
+            print "[mir-to-llvm] function:done {name}"
 
     me translate_block(block: MirBlock):
         """Translate a MIR basic block."""
@@ -146,8 +211,20 @@ impl MirTextCodegen for MirToLlvm:
         match term:
             case Return(value):
                 if value.?:
-                    val val_str = self.translate_operand(value.unwrap())
-                    val ret_ty = self.get_operand_type(value.unwrap())
+                    val ret_operand = value.unwrap()
+                    if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
+                        match ret_operand.kind:
+                            case Const(const_value, const_type):
+                                match const_value:
+                                    case Int(v):
+                                        self.builder.emit_ret(self.type_mapper.map_type(const_type), "{v}")
+                                        return
+                                    case _:
+                                        ()
+                            case _:
+                                ()
+                    val val_str = self.translate_operand(ret_operand)
+                    val ret_ty = self.get_operand_type(ret_operand)
                     self.builder.emit_ret(ret_ty, val_str)
                 else:
                     self.builder.emit_ret_void()

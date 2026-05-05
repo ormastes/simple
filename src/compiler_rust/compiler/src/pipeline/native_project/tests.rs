@@ -562,22 +562,9 @@ fn test_core_lane_runtime_archives_expose_required_abi_symbols() {
 }
 
 #[cfg(target_os = "linux")]
-#[test]
-fn test_core_c_runtime_required_abi_stdout_stderr_and_values() {
-    let _guard = runtime_bundle_env_lock().lock().unwrap();
-    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let repo_root = manifest_dir
-        .parent()
-        .unwrap()
-        .parent()
-        .unwrap()
-        .parent()
-        .unwrap()
-        .to_path_buf();
-    let temp = tempfile::tempdir().unwrap();
-    let runtime = build_core_c_runtime_library(temp.path()).expect("core-c runtime archive should build");
-    let source = temp.path().join("abi_probe.c");
-    let exe = temp.path().join("abi_probe");
+fn run_required_abi_probe(repo_root: &Path, temp_root: &Path, runtime: &Path, label: &str) {
+    let source = temp_root.join(format!("{label}_abi_probe.c"));
+    let exe = temp_root.join(format!("{label}_abi_probe"));
 
     std::fs::write(
         &source,
@@ -608,13 +595,13 @@ int main(void) {
         .arg("-I")
         .arg(repo_root.join("src/runtime"))
         .arg(&source)
-        .arg(&runtime)
+        .arg(runtime)
         .args(["-lpthread", "-ldl", "-lm"])
         .arg("-o")
         .arg(&exe)
         .status()
         .unwrap();
-    assert!(status.success(), "failed to compile core-C ABI probe");
+    assert!(status.success(), "failed to compile {label} ABI probe");
 
     let mut child = std::process::Command::new(&exe)
         .stdin(std::process::Stdio::piped())
@@ -627,9 +614,33 @@ int main(void) {
         child.stdin.as_mut().unwrap().write_all(b"Z").unwrap();
     }
     let output = child.wait_with_output().unwrap();
-    assert!(output.status.success(), "core-C ABI probe exited unsuccessfully");
+    assert!(output.status.success(), "{label} ABI probe exited unsuccessfully");
     assert_eq!(String::from_utf8_lossy(&output.stdout), "out:Z7true");
     assert_eq!(String::from_utf8_lossy(&output.stderr), "err");
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn test_core_lane_runtime_required_abi_stdout_stderr_and_values() {
+    let _guard = runtime_bundle_env_lock().lock().unwrap();
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let repo_root = manifest_dir
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .to_path_buf();
+    let temp = tempfile::tempdir().unwrap();
+    let core_c =
+        build_core_c_runtime_library(&temp.path().join("core_c")).expect("core-c runtime archive should build");
+
+    run_required_abi_probe(&repo_root, temp.path(), &core_c, "core_c");
+
+    if let Some(simple_core) = find_abi_complete_simple_core_runtime_library() {
+        run_required_abi_probe(&repo_root, temp.path(), &simple_core, "simple_core");
+    }
 }
 
 #[test]
@@ -1202,6 +1213,387 @@ fn test_core_c_lane_builds_and_runs_hello_world_small() {
 
 #[cfg(target_os = "linux")]
 #[test]
+fn test_native_project_emit_archive_writes_static_archive() {
+    let temp = tempfile::tempdir().unwrap();
+    let source_dir = temp.path().join("src");
+    std::fs::create_dir_all(&source_dir).unwrap();
+    let module = source_dir.join("runtime_piece.spl");
+    std::fs::write(
+        &module,
+        r#"
+fn simple_core_archive_probe() -> i64:
+    return 42
+
+fn rt_simple_core_archive_probe() -> i64:
+    return 7
+
+fn __simple_core_archive_probe() -> i64:
+    return 9
+
+fn plain_archive_param_probe(value: i64) -> i64:
+    return value + 1
+
+fn rt_archive_param_probe(value: i64) -> i64:
+    return value + 2
+
+fn rt_value_int(value: i64) -> i64:
+    return value << 3
+"#,
+    )
+    .unwrap();
+
+    let archive = temp.path().join("libsimple_runtime.a");
+    let result = NativeProjectBuilder::new(temp.path().to_path_buf(), archive.clone())
+        .config(NativeBuildConfig {
+            emit_archive: true,
+            clean: true,
+            incremental: false,
+            no_mangle: true,
+            ..NativeBuildConfig::default()
+        })
+        .source_dir(source_dir)
+        .build()
+        .unwrap();
+
+    assert_eq!(result.output, archive);
+    assert!(archive.exists());
+    assert!(std::fs::metadata(&archive).unwrap().len() > 0);
+
+    let symbols = std::process::Command::new("nm")
+        .arg("-g")
+        .arg("--defined-only")
+        .arg(&archive)
+        .output()
+        .unwrap();
+    assert!(symbols.status.success());
+    let stdout = String::from_utf8_lossy(&symbols.stdout);
+    assert!(
+        stdout.contains("simple_core_archive_probe"),
+        "archive symbols did not include probe function:\n{}",
+        stdout
+    );
+    assert!(
+        stdout.contains("rt_simple_core_archive_probe"),
+        "archive symbols did not include runtime-style probe function:\n{}",
+        stdout
+    );
+    assert!(
+        stdout.contains("__simple_core_archive_probe"),
+        "archive symbols did not include __simple-style probe function:\n{}",
+        stdout
+    );
+    assert!(
+        stdout.contains("plain_archive_param_probe"),
+        "archive symbols did not include plain parameterized probe function:\n{}",
+        stdout
+    );
+    assert!(
+        stdout.contains("rt_archive_param_probe"),
+        "archive symbols did not include runtime-style parameterized probe function:\n{}",
+        stdout
+    );
+    assert!(
+        stdout.contains("rt_value_int"),
+        "archive symbols did not include known runtime-FFI parameterized function:\n{}",
+        stdout
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn test_simple_runtime_memory_intrinsics_lower_without_helper_symbols() {
+    let temp = tempfile::tempdir().unwrap();
+    let source_dir = temp.path().join("src");
+    std::fs::create_dir_all(&source_dir).unwrap();
+    let module = source_dir.join("memory_intrinsics.spl");
+    std::fs::write(
+        &module,
+        r#"
+extern fn spl_load_i64(ptr: i64, offset: i64) -> i64
+extern fn spl_store_i64(ptr: i64, offset: i64, value: i64)
+extern fn spl_load_u8(ptr: i64, offset: i64) -> i64
+extern fn spl_store_u8(ptr: i64, offset: i64, value: i64)
+
+fn probe_store_i64(ptr: i64, offset: i64, value: i64):
+    spl_store_i64(ptr, offset, value)
+
+fn probe_load_i64(ptr: i64, offset: i64) -> i64:
+    return spl_load_i64(ptr, offset)
+
+fn probe_store_u8(ptr: i64, offset: i64, value: i64):
+    spl_store_u8(ptr, offset, value)
+
+fn probe_load_u8(ptr: i64, offset: i64) -> i64:
+    return spl_load_u8(ptr, offset)
+"#,
+    )
+    .unwrap();
+
+    let archive = temp.path().join("libsimple_runtime.a");
+    let result = NativeProjectBuilder::new(temp.path().to_path_buf(), archive.clone())
+        .config(NativeBuildConfig {
+            emit_archive: true,
+            clean: true,
+            incremental: false,
+            no_mangle: true,
+            ..NativeBuildConfig::default()
+        })
+        .source_dir(source_dir)
+        .build()
+        .unwrap();
+
+    assert_eq!(result.output, archive);
+    assert!(archive.exists());
+
+    let symbols = std::process::Command::new("nm")
+        .arg("-u")
+        .arg(&archive)
+        .output()
+        .unwrap();
+    assert!(symbols.status.success());
+    let undefineds = String::from_utf8_lossy(&symbols.stdout);
+    for helper in ["spl_load_i64", "spl_store_i64", "spl_load_u8", "spl_store_u8"] {
+        assert!(
+            !undefineds.contains(helper),
+            "memory intrinsic {helper} leaked as undefined helper symbol:\n{undefineds}"
+        );
+    }
+
+    let probe_source = temp.path().join("memory_intrinsics_probe.c");
+    let probe_exe = temp.path().join("memory_intrinsics_probe");
+    std::fs::write(
+        &probe_source,
+        r#"
+#include <stdint.h>
+
+void probe_store_i64(int64_t ptr, int64_t offset, int64_t value);
+int64_t probe_load_i64(int64_t ptr, int64_t offset);
+void probe_store_u8(int64_t ptr, int64_t offset, int64_t value);
+int64_t probe_load_u8(int64_t ptr, int64_t offset);
+
+int main(void) {
+    uint8_t bytes[24] = {0};
+    probe_store_i64((int64_t)(uintptr_t)bytes, 8, 0x1122334455667788LL);
+    if (probe_load_i64((int64_t)(uintptr_t)bytes, 8) != 0x1122334455667788LL) return 10;
+    probe_store_u8((int64_t)(uintptr_t)bytes, 3, 0xab);
+    if (probe_load_u8((int64_t)(uintptr_t)bytes, 3) != 0xab) return 11;
+    return 0;
+}
+"#,
+    )
+    .unwrap();
+    let status = std::process::Command::new(find_c_compiler())
+        .arg(&probe_source)
+        .arg(&archive)
+        .arg("-o")
+        .arg(&probe_exe)
+        .status()
+        .unwrap();
+    assert!(status.success(), "failed to compile Simple memory intrinsic probe");
+    let output = std::process::Command::new(&probe_exe).output().unwrap();
+    assert!(
+        output.status.success(),
+        "Simple memory intrinsic probe failed: code={:?} stdout=`{}` stderr=`{}`",
+        output.status.code(),
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn test_simple_core_source_tree_emits_partial_runtime_archive() {
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let repo_root = manifest_dir
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .to_path_buf();
+    let source_dir = repo_root.join("src/runtime/simple_core");
+    let temp = tempfile::tempdir().unwrap();
+    let archive = temp.path().join("libsimple_runtime.a");
+
+    let result = NativeProjectBuilder::new(repo_root.clone(), archive.clone())
+        .config(NativeBuildConfig {
+            emit_archive: true,
+            clean: true,
+            incremental: false,
+            no_mangle: true,
+            ..NativeBuildConfig::default()
+        })
+        .source_dir(source_dir)
+        .build()
+        .unwrap();
+
+    assert_eq!(result.output, archive);
+    assert!(archive.exists());
+    assert!(
+        runtime_archive_has_core_required_symbols(&archive),
+        "pure-Simple source tree must now satisfy the core-required ABI"
+    );
+
+    let symbols = std::process::Command::new("nm")
+        .arg("-g")
+        .arg("--defined-only")
+        .arg(&archive)
+        .output()
+        .unwrap();
+    assert!(symbols.status.success());
+    let stdout = String::from_utf8_lossy(&symbols.stdout);
+    for symbol in [
+        "__simple_runtime_init",
+        "__simple_runtime_shutdown",
+        "rt_value_int",
+        "rt_value_float",
+        "rt_value_bool",
+        "rt_value_nil",
+        "rt_alloc",
+        "rt_realloc",
+        "rt_free",
+        "rt_memcpy",
+        "rt_memset",
+        "rt_exit",
+        "rt_time_now_unix",
+        "rt_sleep_ms",
+        "rt_panic",
+        "rt_stdout_flush",
+        "rt_stderr_flush",
+        "rt_array_new",
+        "rt_array_len",
+        "rt_array_get",
+        "rt_array_set",
+        "rt_array_push",
+        "rt_array_pop",
+        "rt_string_new",
+        "rt_string_len",
+        "rt_string_data",
+        "rt_string_concat",
+        "rt_len",
+        "rt_native_eq",
+        "rt_native_neq",
+        "rt_slice",
+        "rt_string_starts_with",
+        "rt_string_ends_with",
+        "rt_string_trim",
+        "rt_string_to_int",
+        "rt_string_replace",
+        "rt_to_string",
+        "rt_stdout_write",
+        "rt_stderr_write",
+        "stdin_read_char",
+        "print_raw",
+    ] {
+        assert!(
+            stdout.contains(symbol),
+            "pure-Simple runtime archive missing {symbol}:\n{stdout}"
+        );
+    }
+
+    let probe_source = temp.path().join("simple_core_value_memory_probe.c");
+    let probe_exe = temp.path().join("simple_core_value_memory_probe");
+    std::fs::write(
+        &probe_source,
+        r#"
+#include <stdint.h>
+#include <string.h>
+#include "runtime.h"
+
+int main(void) {
+    if (rt_value_int(7) != 56) return 10;
+    if (rt_value_bool(1) != 11) return 11;
+    if (rt_value_bool(0) != 19) return 12;
+    if (rt_value_nil() != 3) return 13;
+    if (rt_value_float(0x123456789LL) != ((0x123456789LL & ~7LL) | 2LL)) return 14;
+
+    uint8_t* p = (uint8_t*)rt_alloc(4);
+    if (!p) return 20;
+    rt_memset(p, 0x5a, 4);
+    if (p[0] != 0x5a || p[3] != 0x5a) return 21;
+    uint8_t* q = (uint8_t*)rt_alloc(4);
+    if (!q) return 22;
+    rt_memset(q, 0x21, 4);
+    rt_memcpy(p, q, 4);
+    if (p[0] != 0x21 || p[3] != 0x21) return 23;
+    p = (uint8_t*)rt_realloc(p, 8);
+    if (!p || p[0] != 0x21) return 24;
+    rt_free(q);
+    rt_free(p);
+    if (rt_time_now_unix() <= 0) return 30;
+    rt_sleep_ms(0);
+    rt_stdout_flush();
+    rt_stderr_flush();
+
+    SplArray* a = rt_array_new(1);
+    if (!a) return 40;
+    if (rt_array_len(a) != 0) return 41;
+    if (!rt_array_push(a, rt_value_int(10))) return 42;
+    if (!rt_array_push(a, rt_value_int(20))) return 43;
+    if (rt_array_len(a) != 2) return 44;
+    if (rt_array_get(a, 0) != rt_value_int(10)) return 45;
+    if (rt_array_get(a, rt_value_int(1)) != rt_value_int(20)) return 46;
+    rt_array_set(a, -1, rt_value_int(30));
+    if (rt_array_get(a, 1) != rt_value_int(30)) return 47;
+    extern int64_t rt_array_pop(SplArray*);
+    if (rt_array_pop(a) != rt_value_int(30)) return 48;
+    if (rt_array_len(a) != 1) return 49;
+    if (rt_array_get(a, 99) != 3) return 50;
+
+    int64_t s = rt_string_new((const uint8_t*)" 123 ", 5);
+    if (rt_string_len(s) != 5) return 60;
+    if (memcmp(rt_string_data(s), " 123 ", 5) != 0) return 61;
+    if (rt_len(s) != 5) return 62;
+    int64_t t = rt_string_new((const uint8_t*)"abc", 3);
+    int64_t u = rt_string_new((const uint8_t*)"def", 3);
+    int64_t c = rt_string_concat(t, u);
+    if (rt_string_len(c) != 6 || memcmp(rt_string_data(c), "abcdef", 6) != 0) return 63;
+    if (!rt_string_starts_with(c, t)) return 64;
+    if (!rt_string_ends_with(c, u)) return 65;
+    if (!rt_native_eq(t, rt_string_new((const uint8_t*)"abc", 3))) return 66;
+    if (!rt_native_neq(t, u)) return 67;
+    int64_t sliced = rt_slice(c, 1, 4, 1);
+    if (rt_string_len(sliced) != 3 || memcmp(rt_string_data(sliced), "bcd", 3) != 0) return 68;
+    int64_t trimmed = rt_string_trim(s);
+    if (rt_string_len(trimmed) != 3 || memcmp(rt_string_data(trimmed), "123", 3) != 0) return 69;
+    if (rt_string_to_int(trimmed) != 123) return 70;
+    int64_t replaced = rt_string_replace(c, rt_string_new((const uint8_t*)"cd", 2), rt_string_new((const uint8_t*)"XY", 2));
+    if (rt_string_len(replaced) != 6 || memcmp(rt_string_data(replaced), "abXYef", 6) != 0) return 71;
+    int64_t int_text = rt_to_string(rt_value_int(42));
+    if (rt_string_len(int_text) != 2 || memcmp(rt_string_data(int_text), "42", 2) != 0) return 72;
+    int64_t true_text = rt_to_string(rt_value_bool(1));
+    if (rt_string_len(true_text) != 4 || memcmp(rt_string_data(true_text), "true", 4) != 0) return 73;
+    if (rt_stdout_write(rt_string_new(NULL, 0)) != 0) return 74;
+    if (rt_stderr_write(rt_string_new(NULL, 0)) != 0) return 75;
+    if (print_raw(rt_string_new(NULL, 0)) != 0) return 76;
+    return 0;
+}
+"#,
+    )
+    .unwrap();
+    let status = std::process::Command::new(find_c_compiler())
+        .arg("-I")
+        .arg(repo_root.join("src/runtime"))
+        .arg(&probe_source)
+        .arg(&archive)
+        .arg("-o")
+        .arg(&probe_exe)
+        .status()
+        .unwrap();
+    assert!(status.success(), "failed to compile pure-Simple value/memory probe");
+    let output = std::process::Command::new(&probe_exe).output().unwrap();
+    assert!(
+        output.status.success(),
+        "pure-Simple value/memory probe failed: code={:?} stdout=`{}` stderr=`{}`",
+        output.status.code(),
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
 fn test_core_c_lane_simple_lsp_mcp_startup_initialize_reduced_source() {
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let repo_root = manifest_dir
@@ -1257,8 +1649,16 @@ fn test_core_c_lane_simple_lsp_mcp_startup_initialize_reduced_source() {
         String::from_utf8_lossy(&run.stderr)
     );
     let stdout = String::from_utf8_lossy(&run.stdout);
-    assert!(stdout.starts_with("Content-Length: "), "missing framed response: `{}`", stdout);
-    assert!(stdout.contains("\"id\":1"), "missing request id in response: `{}`", stdout);
+    assert!(
+        stdout.starts_with("Content-Length: "),
+        "missing framed response: `{}`",
+        stdout
+    );
+    assert!(
+        stdout.contains("\"id\":1"),
+        "missing request id in response: `{}`",
+        stdout
+    );
     assert!(
         stdout.contains("\"serverInfo\":{\"name\":\"simple-lsp-mcp\""),
         "missing serverInfo in response: `{}`",

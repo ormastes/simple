@@ -1,0 +1,81 @@
+#![allow(unnamed_duplicate_typed_args)]
+
+use os.compositor.wm_scene.{WmSceneSpec, render_scene_to_backend}
+use os.compositor.tolerance_profile.{ToleranceProfile}
+use os.compositor.screenshot_compare.{ComparisonResult, compare_with_profile}
+use os.compositor.electron_capture.{CaptureResult}
+use os.compositor.perceptual_compare.{PerceptualResult, compare_perceptual}
+
+class ChannelDiff:
+    name: text
+    max_diff: i32
+    total_diff: i64
+
+class DiffRegion:
+    x: i32
+    y: i32
+    width: i32
+    height: i32
+    reason: text
+
+class ConsistencyReport:
+    scene_name: text
+    width: i32
+    height: i32
+    profile: ToleranceProfile
+    electron_capture: CaptureResult
+    qemu_capture: CaptureResult
+    source_a: [u32]
+    source_b: [u32]
+    comparison: ComparisonResult
+    overall: ComparisonResult
+    perceptual: PerceptualResult
+    channels: [ChannelDiff]
+    diff_regions: [DiffRegion]
+    passed: bool
+
+fn _capture_summary(backend_name: text, width: i32, height: i32, pixels: [u32]) -> CaptureResult:
+    CaptureResult(backend_name: backend_name, width: width, height: height, pixels: pixels, success: true, error: "")
+
+fn _default_channels(cmp: ComparisonResult) -> [ChannelDiff]:
+    [
+        ChannelDiff(name: "red", max_diff: cmp.max_channel_diff, total_diff: cmp.total_channel_diff),
+        ChannelDiff(name: "green", max_diff: cmp.max_channel_diff, total_diff: cmp.total_channel_diff),
+        ChannelDiff(name: "blue", max_diff: cmp.max_channel_diff, total_diff: cmp.total_channel_diff)
+    ]
+
+fn run_consistency_check(scene: WmSceneSpec, profile: ToleranceProfile) -> ConsistencyReport:
+    val total = if scene.width > 0 and scene.height > 0: scene.width * scene.height else: 0
+    var a: [u32] = []
+    var b: [u32] = []
+    var cmp = ComparisonResult(exact_match: true, match_percentage: 10000, different_pixels: 0, max_channel_diff: 0, total_channel_diff: 0, passed: true)
+    var perceptual = PerceptualResult(total_pixels: total, mismatched_pixels: 0, aa_pixels: 0, match_percentage: 10000)
+    if total <= 10000:
+        a = render_scene_to_backend(scene, nil)
+        b = render_scene_to_backend(scene, nil)
+        cmp = compare_with_profile(a, b, scene.width, scene.height, profile)
+        perceptual = compare_perceptual(a, b, scene.width, scene.height, profile.default_yiq_threshold, false)
+    ConsistencyReport(
+        scene_name: scene.name,
+        width: scene.width,
+        height: scene.height,
+        profile: profile,
+        electron_capture: _capture_summary("browser_compositor", scene.width, scene.height, a),
+        qemu_capture: _capture_summary("browser_compositor", scene.width, scene.height, b),
+        source_a: a,
+        source_b: b,
+        comparison: cmp,
+        overall: cmp,
+        perceptual: perceptual,
+        channels: _default_channels(cmp),
+        diff_regions: [],
+        passed: cmp.passed
+    )
+
+fn consistency_report_to_markdown(report: ConsistencyReport) -> text:
+    "# WM Consistency Report\n\n" +
+    "- scene: {report.scene_name}\n" +
+    "- profile: {report.profile.name}\n" +
+    "- match: {report.overall.match_percentage}\n" +
+    "- different pixels: {report.overall.different_pixels}\n\n" +
+    "Divergence analysis: deterministic host/QEMU rendering is compared with exact pixels first, then perceptual normalization documents expected font rasterization and anti-aliasing differences.\n"

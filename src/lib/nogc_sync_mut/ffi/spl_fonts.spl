@@ -1,17 +1,25 @@
 # spl_fonts Typed Wrapper (SFFI — Phase 2)
 #
 # Typed Simple facade over the `libspl_fonts` native dynamic library
-# (see src/compiler_rust/spl_fonts). Wraps four C ABI entry points:
+# (see src/compiler_rust/spl_fonts). Wraps the C ABI entry points:
 #
 #   rt_fonts_init(path_ptr: i64, path_len: i64) -> i64
 #   rt_fonts_rasterize_glyph(codepoint: i64, font_size_px: i64) -> i64
+#   rt_fonts_rasterize_glyph_subpixel(codepoint: i64, font_size_px: i64) -> i64
 #   rt_fonts_glyph_metric(handle: i64, field: i64) -> i64
 #   rt_fonts_glyph_pixel(handle: i64, x: i64, y: i64) -> i64
+#   rt_fonts_glyph_subpixel_pixel(handle: i64, x: i64, y: i64, channel: i64) -> i64
+#   rt_fonts_horizontal_kern(left: i64, right: i64, size_px: i64) -> i64
+#   rt_fonts_horizontal_line_metric(size_px: i64, field: i64) -> i64
+#   rt_fonts_layout_text(text_ptr: i64, text_len: i64, size_px: i64, max_width: i64) -> i64
+#   rt_fonts_layout_glyph_metric(index: i64, field: i64) -> i64
 #
 # Phase 1 invariants (internal model is a single global font slot + single
 # global glyph slot in the Rust dylib):
 #   - rt_fonts_rasterize_glyph always returns handle=1 on success, 0 on failure
-#   - Metric fields: 0=width, 1=height, 2=advance, 3=bearing_x, 4=bearing_y
+#   - Metric fields: 0=width, 1=height, 2=advance, 3=bearing_x,
+#     4=fontdue bitmap ymin/bottom offset. The legacy Simple field is named
+#     bearing_y; layout_text() positions already expose top-y for PositiveYDown.
 #   - Pixel reads return alpha in 0..255
 #
 # Intentionally does NOT depend on DynLib — under the Rust seed interpreter,
@@ -71,6 +79,32 @@ impl GlyphBitmap:
         val idx = y * self.width + x
         self.pixels[idx]
 
+class LayoutGlyph:
+    codepoint: i64
+    x: i64
+    y: i64
+    width: i64
+    height: i64
+    byte_offset: i64
+
+class SubpixelGlyphBitmap:
+    width: i64
+    height: i64
+    advance: i64
+    bearing_x: i64
+    bearing_y: i64
+    handle: i64
+    pixels: [i64]  # RGB triplets, row-major
+
+impl SubpixelGlyphBitmap:
+    fn coverage_at(x: i64, y: i64, channel: i64) -> i64:
+        if x < 0 or y < 0 or channel < 0 or channel > 2:
+            return 0
+        if x >= self.width or y >= self.height:
+            return 0
+        val idx = y * self.width * 3 + x * 3 + channel
+        self.pixels[idx]
+
 # ============================================================================
 # FontRasterizer — holds the dylib handle + cached symbol pointers for a
 # single loaded TTF/OTF file.
@@ -80,8 +114,14 @@ class FontRasterizer:
     lib_handle: i64
     init_fp: i64
     raster_fp: i64
+    subpixel_raster_fp: i64
     metric_fp: i64
     pixel_fp: i64
+    subpixel_pixel_fp: i64
+    kern_fp: i64
+    line_metric_fp: i64
+    layout_fp: i64
+    layout_glyph_metric_fp: i64
     font_path: text
     dylib_path: text
 
@@ -101,8 +141,14 @@ impl FontRasterizer:
             return nil
         val init_fp = spl_dlsym(h, "rt_fonts_init")
         val raster_fp = spl_dlsym(h, "rt_fonts_rasterize_glyph")
+        val subpixel_raster_fp = spl_dlsym(h, "rt_fonts_rasterize_glyph_subpixel")
         val metric_fp = spl_dlsym(h, "rt_fonts_glyph_metric")
         val pixel_fp = spl_dlsym(h, "rt_fonts_glyph_pixel")
+        val subpixel_pixel_fp = spl_dlsym(h, "rt_fonts_glyph_subpixel_pixel")
+        val kern_fp = spl_dlsym(h, "rt_fonts_horizontal_kern")
+        val line_metric_fp = spl_dlsym(h, "rt_fonts_horizontal_line_metric")
+        val layout_fp = spl_dlsym(h, "rt_fonts_layout_text")
+        val layout_glyph_metric_fp = spl_dlsym(h, "rt_fonts_layout_glyph_metric")
         if init_fp == 0 or raster_fp == 0 or metric_fp == 0 or pixel_fp == 0:
             spl_dlclose(h)
             return nil
@@ -119,8 +165,14 @@ impl FontRasterizer:
             lib_handle: h,
             init_fp: init_fp,
             raster_fp: raster_fp,
+            subpixel_raster_fp: subpixel_raster_fp,
             metric_fp: metric_fp,
             pixel_fp: pixel_fp,
+            subpixel_pixel_fp: subpixel_pixel_fp,
+            kern_fp: kern_fp,
+            line_metric_fp: line_metric_fp,
+            layout_fp: layout_fp,
+            layout_glyph_metric_fp: layout_glyph_metric_fp,
             font_path: ttf_path,
             dylib_path: dylib_path,
         )
@@ -180,6 +232,94 @@ impl FontRasterizer:
             pixels: pixels,
         )
 
+    fn rasterize_subpixel(codepoint: i64, size_px: i64) -> SubpixelGlyphBitmap?:
+        if self.subpixel_raster_fp == 0 or self.subpixel_pixel_fp == 0:
+            return nil
+        var args: [i64] = []
+        args.push(codepoint)
+        args.push(size_px)
+        val handle = spl_wffi_call_i64(self.subpixel_raster_fp, args, 2)
+        if handle == 0:
+            return nil
+        val w = self._metric(handle, 0)
+        val h = self._metric(handle, 1)
+        val adv = self._metric(handle, 2)
+        val bx = self._metric(handle, 3)
+        val by = self._metric(handle, 4)
+        var pixels: [i64] = []
+        var y: i64 = 0
+        while y < h:
+            var x: i64 = 0
+            while x < w:
+                var channel: i64 = 0
+                while channel < 3:
+                    var pa: [i64] = []
+                    pa.push(handle)
+                    pa.push(x)
+                    pa.push(y)
+                    pa.push(channel)
+                    pixels.push(spl_wffi_call_i64(self.subpixel_pixel_fp, pa, 4))
+                    channel = channel + 1
+                x = x + 1
+            y = y + 1
+        SubpixelGlyphBitmap(
+            width: w,
+            height: h,
+            advance: adv,
+            bearing_x: bx,
+            bearing_y: by,
+            handle: handle,
+            pixels: pixels,
+        )
+
+    fn horizontal_kern(left_codepoint: i64, right_codepoint: i64, size_px: i64) -> i64:
+        if self.kern_fp == 0:
+            return 0
+        var args: [i64] = []
+        args.push(left_codepoint)
+        args.push(right_codepoint)
+        args.push(size_px)
+        spl_wffi_call_i64(self.kern_fp, args, 3)
+
+    fn horizontal_line_metric(size_px: i64, field: i64) -> i64:
+        if self.line_metric_fp == 0:
+            return 0
+        var args: [i64] = []
+        args.push(size_px)
+        args.push(field)
+        spl_wffi_call_i64(self.line_metric_fp, args, 2)
+
+    fn layout_text(text_val: text, size_px: i64, max_width: i64) -> [LayoutGlyph]:
+        if self.layout_fp == 0 or self.layout_glyph_metric_fp == 0:
+            return []
+        var args: [i64] = []
+        args.push(spl_str_ptr(text_val))
+        args.push(text_val.length())
+        args.push(size_px)
+        args.push(max_width)
+        val count = spl_wffi_call_i64(self.layout_fp, args, 4)
+        if count <= 0:
+            return []
+        var glyphs: [LayoutGlyph] = []
+        var idx: i64 = 0
+        while idx < count:
+            glyphs.push(LayoutGlyph(
+                codepoint: self._layout_metric(idx, 0),
+                x: self._layout_metric(idx, 1),
+                y: self._layout_metric(idx, 2),
+                width: self._layout_metric(idx, 3),
+                height: self._layout_metric(idx, 4),
+                byte_offset: self._layout_metric(idx, 5),
+            ))
+            idx = idx + 1
+        glyphs
+
+    fn _layout_metric(index: i64, field: i64) -> i64:
+        var args: [i64] = []
+        args.push(index)
+        args.push(field)
+        spl_wffi_call_i64(self.layout_glyph_metric_fp, args, 2)
+
     # Release the dynamic library handle. The typed wrapper becomes unusable
     # after this call. Returns 0 on success (matching libc dlclose).
     me close() -> i64:
@@ -187,6 +327,12 @@ impl FontRasterizer:
         self.lib_handle = 0
         self.init_fp = 0
         self.raster_fp = 0
+        self.subpixel_raster_fp = 0
         self.metric_fp = 0
         self.pixel_fp = 0
+        self.subpixel_pixel_fp = 0
+        self.kern_fp = 0
+        self.line_metric_fp = 0
+        self.layout_fp = 0
+        self.layout_glyph_metric_fp = 0
         rc

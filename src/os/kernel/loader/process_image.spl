@@ -51,6 +51,12 @@ extern fn rt_arm_elf64_pt_load_flags(bytes: [u8], idx: u32) -> u32
 @cfg(arm64)
 extern fn rt_arm_elf64_pt_load_align(bytes: [u8], idx: u32) -> u64
 
+@cfg(arm64)
+extern fn rt_arm_smf_elf_stub_size(bytes: [u8]) -> u64
+
+@cfg(arm32)
+extern fn rt_arm_smf_elf_stub_size(bytes: [u8]) -> u32
+
 val X86_64_USER_STACK_TOP: u64 = 0x00007FFFFFFFF000
 val X86_32_USER_STACK_TOP: u64 = 0x00000000BFFFF000
 val ARM64_USER_STACK_TOP: u64 = 0x0000004000000000
@@ -59,7 +65,7 @@ val RV64_USER_STACK_TOP: u64 = 0x0000004000000000
 val RV32_USER_STACK_TOP: u64 = 0x0000000081000000
 
 fn _byte_at(data: [u8], offset: u64) -> u8:
-    rt_bytes_u8_at(data, offset.to_i64()).to_u8()
+    data[offset.to_i64()]
 
 fn _has_elf_magic(data: [u8]) -> bool:
     if data.len() < 4:
@@ -80,6 +86,30 @@ fn _slice_bytes(data: [u8], offset: u64, size: u64) -> [u8]:
 fn _owned_bytes(data: [u8]) -> [u8]:
     """Return a fresh owned copy of `data`."""
     _slice_bytes(data, 0, data.len() as u64)
+
+@cfg(arm64)
+fn _arm_smf_elf_stub_size_unchecked(data: [u8]) -> u64:
+    rt_arm_smf_elf_stub_size(data)
+
+@cfg(arm32)
+fn _arm_smf_elf_stub_size_unchecked(data: [u8]) -> u64:
+    rt_arm_smf_elf_stub_size(data).to_u64()
+
+@cfg(riscv64)
+fn _arm_smf_elf_stub_size_unchecked(data: [u8]) -> u64:
+    0u64
+
+@cfg(riscv32)
+fn _arm_smf_elf_stub_size_unchecked(data: [u8]) -> u64:
+    0u64
+
+@cfg(x86_64)
+fn _arm_smf_elf_stub_size_unchecked(data: [u8]) -> u64:
+    0u64
+
+@cfg(x86)
+fn _arm_smf_elf_stub_size_unchecked(data: [u8]) -> u64:
+    0u64
 
 @cfg(arm64)
 fn _arm64_fallback_user_segments(native_data: [u8]) -> [UserLoadSegment]:
@@ -246,6 +276,9 @@ fn _normalise_executable_bytes(data: [u8], arch: Architecture) -> Result<[u8], t
 
 fn _normalise_executable_bytes_unchecked(data: [u8]) -> [u8]:
     """Unchecked ARM bridge variant used where Result predicates are unreliable."""
+    val arm_stub_size = _arm_smf_elf_stub_size_unchecked(data)
+    if arm_stub_size > 0u64:
+        return _slice_bytes(data, 0, arm_stub_size)
     if smf_has_header(data):
         val stub = smf_extract_executable_stub_unchecked(data)
         if stub.len() > 0:

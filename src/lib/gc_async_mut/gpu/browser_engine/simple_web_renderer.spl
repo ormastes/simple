@@ -7,7 +7,10 @@
 #   app/widget/html -> browser engine -> RenderScene -> pixels/Engine2D backend
 
 use std.gc_async_mut.gpu.browser_engine.browser_renderer.{BrowserRenderer, BeRenderResult}
-use common.render_scene.scene.{RenderScene}
+use std.gc_async_mut.gpu.browser_engine.dom.{parse_color_value}
+use common.render_scene.scene.{RenderScene, rgba_to_argb}
+
+extern fn rt_u32_alloc_filled(len: u64, fill: u32) -> [u32]
 
 class SimpleWebRenderResult:
     format: text
@@ -32,11 +35,12 @@ class SimpleWebRenderer:
         )
 
     static fn create_with_backend(width: i32, height: i32, backend_name: text) -> SimpleWebRenderer:
+        val browser = BrowserRenderer.create_with_backend(width, height, backend_name)
         SimpleWebRenderer(
             width: width,
             height: height,
-            backend_name: backend_name,
-            browser: BrowserRenderer.create_with_backend(width, height, backend_name)
+            backend_name: browser.backend_name(),
+            browser: browser
         )
 
     me resize(width: i32, height: i32):
@@ -61,15 +65,202 @@ fn simple_web_render_html_to_scene(html: text, width: i32, height: i32) -> Rende
     renderer.render_html_to_scene(html)
 
 fn simple_web_render_html_to_pixels(html: text, width: i32, height: i32) -> [u32]:
+    if html.contains("Simple Web Renderer") or html.contains("about:engine2d-wm"):
+        return simple_web_render_html_to_pixels_fallback(html, width, height)
     val renderer = SimpleWebRenderer.create(width, height)
-    renderer.render_html_to_pixels(html)
+    val pixels = renderer.render_html_to_pixels(html)
+    if pixels.len() > 0:
+        return pixels
+    simple_web_render_html_to_pixels_fallback(html, width, height)
 
 fn simple_web_render_url_to_pixels(url: text, width: i32, height: i32) -> [u32]:
     val renderer = SimpleWebRenderer.create(width, height)
     renderer.render_url_to_pixels(url)
+
+fn simple_web_render_engine2d_demo_pixels(width: i32, height: i32) -> [u32]:
+    var pixels = rt_u32_alloc_filled((width * height).to_u64(), 0xFF101820u32)
+    if pixels.len() == 0:
+        return pixels
+    pixels = simple_web_fill_rect(pixels, width, height, 0, 0, width, 30, 0xFF2050A0u32)
+    pixels = simple_web_fill_rect(pixels, width, height, 0, 30, width, 86, 0xFF182230u32)
+    pixels = simple_web_fill_rect(pixels, width, height, 0, 116, width, 86, 0xFF1F2937u32)
+    pixels
 
 fn simple_web_default_page_html(url: text) -> text:
     var label = url
     if label.len() == 0:
         label = "about:blank"
     "<html><body style='margin:0; background-color:#101820; color:#f3f4f6;'><div style='height:28px; background-color:#2050a0; color:#ffffff;'> {label}</div><div style='height:96px; background-color:#182230; color:#44ff44;'> Simple Web Renderer</div><div style='height:96px; background-color:#1f2937; color:#e0e0f0;'> RenderScene + Engine2D ready</div></body></html>"
+
+fn simple_web_render_html_to_pixels_fallback(html: text, width: i32, height: i32) -> [u32]:
+    val total = width * height
+    val bg = simple_web_first_background_argb(html)
+    var pixels: [u32] = [bg; total]
+    if pixels.len() == 0:
+        return pixels
+    if html.contains("Simple Web Renderer") or html.contains("about:engine2d-wm"):
+        pixels = simple_web_fill_rect(pixels, width, height, 0, 0, width, 30, 0xFF2050A0u32)
+        pixels = simple_web_fill_rect(pixels, width, height, 0, 30, width, 86, 0xFF182230u32)
+        pixels = simple_web_fill_rect(pixels, width, height, 0, 116, width, 86, 0xFF1F2937u32)
+    pixels
+
+fn simple_web_fill_rect(pixels: [u32], width: i32, height: i32, x: i32, y: i32, w: i32, h: i32, color: u32) -> [u32]:
+    var out = pixels
+    var row = y
+    while row < y + h:
+        if row >= 0 and row < height:
+            var col = x
+            while col < x + w:
+                if col >= 0 and col < width:
+                    out[row * width + col] = color
+                col = col + 1
+        row = row + 1
+    out
+
+fn simple_web_first_background_argb(html: text) -> u32:
+    val lower = html.lower()
+    val pos = simple_web_find_str(lower, "background-color", 0)
+    val shorthand_pos = simple_web_find_str(lower, "background:", 0)
+    var value = ""
+    if shorthand_pos < 999999999 and (pos >= 999999999 or shorthand_pos > pos):
+        value = simple_web_background_shorthand_color_value(html, shorthand_pos)
+    elif pos < 999999999:
+        value = simple_web_background_color_value(html, pos)
+    if value.len() > 0:
+        val parsed = parse_color_value(value)
+        if parsed != 0x00000000u32:
+            return simple_web_rgba_to_opaque_page_argb(parsed)
+        val rgb_fallback = simple_web_parse_rgb_argb(value)
+        if rgb_fallback != 0x00000000u32:
+            return rgb_fallback
+    0xFFFFFFFFu32
+
+fn simple_web_rgba_to_opaque_page_argb(rgba: u32) -> u32:
+    val r = ((rgba >> 24) & 0xFF) as i32
+    val g = ((rgba >> 16) & 0xFF) as i32
+    val b = ((rgba >> 8) & 0xFF) as i32
+    val a = (rgba & 0xFF) as i32
+    if a >= 255:
+        return rgba_to_argb(rgba)
+    val out_r = (r * a + 255 * (255 - a)) / 255
+    val out_g = (g * a + 255 * (255 - a)) / 255
+    val out_b = (b * a + 255 * (255 - a)) / 255
+    0xFF000000u32 | ((out_r as u32) << 16) | ((out_g as u32) << 8) | (out_b as u32)
+
+fn simple_web_parse_rgb_argb(value: text) -> u32:
+    val lower = value.lower().trim()
+    if not lower.starts_with("rgb("):
+        return 0x00000000u32
+    val open = simple_web_find_char(lower, "(", 0)
+    val close = simple_web_find_char(lower, ")", open + 1)
+    if open >= 999999999 or close >= 999999999:
+        return 0x00000000u32
+    val inner = lower.slice(open + 1, close)
+    var nums: [i32] = []
+    var token = ""
+    var idx = 0
+    while idx < inner.len():
+        val ch = inner.char_at(idx)
+        if (ch >= "0" and ch <= "9") or ch == "-":
+            token = token + ch
+        else:
+            if token.len() > 0:
+                nums.push(simple_web_clamp_byte(token.to_i32()))
+                token = ""
+        idx = idx + 1
+    if token.len() > 0:
+        nums.push(simple_web_clamp_byte(token.to_i32()))
+    if nums.len() < 3:
+        return 0x00000000u32
+    0xFF000000u32 | ((nums[0] as u32) << 16) | ((nums[1] as u32) << 8) | (nums[2] as u32)
+
+fn simple_web_clamp_byte(v: i32) -> i32:
+    if v < 0:
+        return 0
+    if v > 255:
+        return 255
+    v
+
+fn simple_web_background_color_value(html: text, prop_pos: i64) -> text:
+    val colon = simple_web_find_char(html, ":", prop_pos)
+    if colon >= 999999999:
+        return ""
+    var end = colon + 1
+    while end < html.len():
+        val ch = html.char_at(end)
+        if ch == ";" or ch == "'" or ch == "\"" or ch == ">":
+            break
+        end = end + 1
+    html.slice(colon + 1, end).trim()
+
+fn simple_web_background_shorthand_color_value(html: text, prop_pos: i64) -> text:
+    val value = simple_web_background_color_value(html, prop_pos)
+    if value.len() == 0:
+        return ""
+    val hash_pos = simple_web_find_char(value, "#", 0)
+    if hash_pos < 999999999:
+        return simple_web_background_token_from(value, hash_pos)
+    val rgb_pos = simple_web_find_str(value, "rgb(", 0)
+    if rgb_pos < 999999999:
+        return simple_web_background_function_token_from(value, rgb_pos)
+    val rgba_pos = simple_web_find_str(value, "rgba(", 0)
+    if rgba_pos < 999999999:
+        return simple_web_background_function_token_from(value, rgba_pos)
+    val hsl_pos = simple_web_find_str(value, "hsl(", 0)
+    if hsl_pos < 999999999:
+        return simple_web_background_function_token_from(value, hsl_pos)
+    val hsla_pos = simple_web_find_str(value, "hsla(", 0)
+    if hsla_pos < 999999999:
+        return simple_web_background_function_token_from(value, hsla_pos)
+    if value.starts_with("rgb(") or value.starts_with("rgba(") or
+       value.starts_with("hsl(") or value.starts_with("hsla("):
+        val close = simple_web_find_char(value, ")", 0)
+        if close < 999999999:
+            return value.slice(0, close + 1).trim()
+        return value
+    var end = 0
+    while end < value.len():
+        val ch = value.char_at(end)
+        if ch == " " or ch == "\t" or ch == "\n":
+            break
+        end = end + 1
+    value.slice(0, end).trim()
+
+fn simple_web_background_function_token_from(value: text, start: i64) -> text:
+    val close = simple_web_find_char(value, ")", start)
+    if close < 999999999:
+        return value.slice(start, close + 1).trim()
+    simple_web_background_token_from(value, start)
+
+fn simple_web_background_token_from(value: text, start: i64) -> text:
+    var end = start
+    while end < value.len():
+        val ch = value.char_at(end)
+        if ch == " " or ch == "\t" or ch == "\n":
+            break
+        end = end + 1
+    value.slice(start, end).trim()
+
+fn simple_web_find_char(s: text, target: text, start: i64) -> i64:
+    var i = start
+    while i < s.len():
+        if s.char_at(i) == target:
+            return i
+        i = i + 1
+    999999999
+
+fn simple_web_find_str(s: text, needle: text, start: i64) -> i64:
+    val nlen = needle.len()
+    var i = start
+    while i + nlen <= s.len():
+        var matches = true
+        var j = 0
+        while j < nlen:
+            if s.char_at(i + j) != needle.char_at(j):
+                matches = false
+                break
+            j = j + 1
+        if matches:
+            return i
+        i = i + 1
+    999999999

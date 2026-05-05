@@ -25,6 +25,12 @@ impl Lowerer {
                 // Register struct constructor in globals so it can be used as a value
                 self.globals.insert(s.name.clone(), struct_type_id);
                 self.local_globals.insert(s.name.clone());
+                for method in &s.methods {
+                    let ret_ty = self.resolve_type_opt(&method.return_type).unwrap_or(TypeId::ANY);
+                    let qualified = format!("{}.{}", s.name, method.name);
+                    self.globals.insert(qualified.clone(), ret_ty);
+                    self.local_globals.insert(qualified);
+                }
             }
             Node::Function(f) => {
                 let ret_ty = self.resolve_type_opt(&f.return_type)?;
@@ -40,6 +46,12 @@ impl Lowerer {
                 // Register class constructor in globals so it can be used as a value
                 self.globals.insert(c.name.clone(), class_type_id);
                 self.local_globals.insert(c.name.clone());
+                for method in &c.methods {
+                    let ret_ty = self.resolve_type_opt(&method.return_type).unwrap_or(TypeId::ANY);
+                    let qualified = format!("{}.{}", c.name, method.name);
+                    self.globals.insert(qualified.clone(), ret_ty);
+                    self.local_globals.insert(qualified);
+                }
             }
             Node::Enum(e) => {
                 let variants: Vec<_> = e
@@ -81,6 +93,21 @@ impl Lowerer {
             }
             Node::Mixin(m) => {
                 self.register_mixin(m)?;
+            }
+            Node::Impl(impl_block) => {
+                let type_name = match &impl_block.target_type {
+                    simple_parser::ast::Type::Simple(name) => Some(name.clone()),
+                    simple_parser::ast::Type::Generic { name, .. } => Some(name.clone()),
+                    _ => None,
+                };
+                if let Some(type_name) = type_name {
+                    for method in &impl_block.methods {
+                        let ret_ty = self.resolve_type_opt(&method.return_type).unwrap_or(TypeId::ANY);
+                        let qualified = format!("{}.{}", type_name, method.name);
+                        self.globals.insert(qualified.clone(), ret_ty);
+                        self.local_globals.insert(qualified);
+                    }
+                }
             }
             Node::Bitfield(bf) => {
                 let bitfield_type_id = self.register_bitfield(bf)?;

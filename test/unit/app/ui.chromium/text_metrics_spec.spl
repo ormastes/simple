@@ -1,9 +1,15 @@
 use std.spec.{describe, it, expect}
 use std.gc_async_mut.gpu.browser_engine.dom.{BeDomNode}
 use std.gc_async_mut.gpu.browser_engine.css.{be_default_style}
-use std.gc_async_mut.gpu.browser_engine.layout.{BeLayoutBox, layout_text, layout_get_height}
+use std.gc_async_mut.gpu.browser_engine.layout.{BeLayoutBox, layout_node, layout_get_height}
 use std.gc_async_mut.gpu.browser_engine.paint.{paint_layout_box}
-use common.text_layout.font_renderer.{FontRenderer}
+use common.text_layout.font_renderer.{CachedGlyph, FontRenderer}
+
+fn _chrome_test_font_renderer() -> FontRenderer:
+    var renderer = FontRenderer.new()
+    if not renderer.try_enable_ttf("src/compiler_rust/target/release/libspl_fonts.so", "/usr/share/fonts/truetype/liberation/LiberationSerif-Regular.ttf"):
+        renderer.try_enable_ttf("src/compiler_rust/target/debug/libspl_fonts.so", "/usr/share/fonts/truetype/liberation/LiberationSerif-Regular.ttf")
+    renderer
 
 fn _container(content_width: i32, content_height: i32) -> BeLayoutBox:
     BeLayoutBox(
@@ -15,17 +21,69 @@ fn _container(content_width: i32, content_height: i32) -> BeLayoutBox:
     )
 
 describe "browser text metrics":
+    it "cached glyphs carry neutral bearing defaults":
+        val glyph = CachedGlyph.empty(65, 16)
+        expect(glyph.bearing_x).to_equal(0)
+        expect(glyph.bearing_y).to_equal(0)
+
+    it "SFFI TTF renderer exposes horizontal line metrics":
+        var renderer = _chrome_test_font_renderer()
+
+        expect(renderer.horizontal_line_metric(16, 0)).to_be_greater_than(0)
+        expect(renderer.horizontal_line_metric(16, 1)).to_be_less_than(0)
+        expect(renderer.horizontal_line_metric(16, 3)).to_be_greater_than(0)
+        expect(renderer.horizontal_line_metric(0, 0)).to_equal(0)
+
+    it "SFFI TTF renderer exposes wrapped glyph layout positions":
+        var renderer = _chrome_test_font_renderer()
+
+        val glyphs = renderer.layout_text("Google search deterministic compatibility fixture", 16, 112)
+        expect(glyphs.len()).to_be_greater_than(40)
+        expect(glyphs[0].codepoint).to_equal(71)
+        expect(glyphs[0].x).to_equal(0)
+        expect(glyphs[0].y).to_equal(4)
+        expect(glyphs[14].x).to_equal(0)
+        expect(glyphs[14].y).to_be_greater_than(glyphs[0].y)
+
+    it "SFFI TTF glyph bearing_y preserves fontdue bitmap ymin":
+        var renderer = _chrome_test_font_renderer()
+
+        val glyph = renderer.get_glyph(71, 16)
+        expect(glyph.width).to_equal(12)
+        expect(glyph.height).to_equal(12)
+        expect(glyph.bearing_x).to_equal(0)
+        expect(glyph.bearing_y).to_equal(-1)
+
+    it "SFFI TTF renderer exposes RGB subpixel glyph coverage":
+        var renderer = _chrome_test_font_renderer()
+
+        val glyph = renderer.rasterize_subpixel(71, 16)
+        expect(glyph != nil).to_equal(true)
+        if glyph != nil:
+            expect(glyph.width).to_be_greater_than(0)
+            expect(glyph.height).to_be_greater_than(0)
+            expect(glyph.pixels.len()).to_equal(glyph.width * glyph.height * 3)
+
+    it "documents the current corpus line-width mismatch against Chrome metrics":
+        var renderer = _chrome_test_font_renderer()
+
+        expect(renderer.measure_text_width("Google search", 16)).to_be_less_than(121)
+        expect(renderer.measure_text_width("Google Translate", 16)).to_be_greater_than(100)
+        expect(renderer.measure_text_width("Google Translate", 16)).to_be_less_than(121)
+        expect(renderer.measure_text_width("Quora productivity", 16)).to_be_greater_than(100)
+        expect(renderer.measure_text_width("Quora productivity", 16)).to_be_less_than(121)
+
     it "layout_text increases height when narrow width forces wrapping":
         val parent_style = be_default_style()
         parent_style.font_size = 16
         val node = BeDomNode.text("hello world")
 
-        val wide = layout_text(node, _container(200, 40), parent_style)
-        val narrow = layout_text(node, _container(24, 40), parent_style)
+        val wide = layout_node(node, _container(200, 40), parent_style)
+        val narrow = layout_node(node, _container(24, 40), parent_style)
 
         expect(layout_get_height(narrow) > layout_get_height(wide)).to_equal(true)
 
-    it "paint_layout_box uses shared renderer width for text decoration fallback":
+    it "paint_layout_box uses line width for text decoration fallback":
         val node = BeDomNode.text("iii")
         node.set_style("font-size", "16px")
         node.set_style("text-decoration", "underline")
@@ -41,9 +99,7 @@ describe "browser text metrics":
         val cmds = paint_layout_box(box, [])
         expect(cmds.len()).to_equal(2)
 
-        val renderer = FontRenderer.new()
-        val expected_width = renderer.measure_text_width("iii", 16)
-        expect(cmds[1].width).to_equal(expected_width)
+        expect(cmds[1].width).to_equal(24)
 
     it "paint_layout_box emits multiple text commands for wrapped text":
         val node = BeDomNode.text("hello world")

@@ -116,6 +116,9 @@ pub struct InstrContext<'a, M: Module> {
     pub import_map: &'a std::sync::Arc<std::collections::HashMap<String, String>>,
     /// Per-module use map: local imported name → mangled name from `use` statements.
     pub use_map: &'a std::collections::HashMap<String, String>,
+    /// Mangled module-level data exports, used to distinguish imported data from
+    /// imported functions when lowering cross-module GlobalLoad.
+    pub data_exports: &'a std::sync::Arc<std::collections::HashSet<String>>,
     /// Vtable data IDs: struct_name → DataId for trait-impl structs.
     /// Used by compile_struct_init to write vtable_ptr at offset 0.
     pub vtable_data_ids: &'a std::collections::BTreeMap<String, cranelift_module::DataId>,
@@ -187,6 +190,8 @@ impl<'a, M: Module> InstrContext<'a, M> {
             Box::leak(Box::new(std::sync::Arc::new(std::collections::HashMap::new())));
         let use_map: &'static std::collections::HashMap<String, String> =
             Box::leak(Box::new(std::collections::HashMap::new()));
+        let data_exports: &'static std::sync::Arc<std::collections::HashSet<String>> =
+            Box::leak(Box::new(std::sync::Arc::new(std::collections::HashSet::new())));
         let vtable_data_ids: &'static std::collections::BTreeMap<String, cranelift_module::DataId> =
             Box::leak(Box::new(std::collections::BTreeMap::new()));
         let vtable_type_ids: &'static std::collections::BTreeMap<TypeId, cranelift_module::DataId> =
@@ -221,6 +226,7 @@ impl<'a, M: Module> InstrContext<'a, M> {
             async_state_map,
             import_map,
             use_map,
+            data_exports,
             vtable_data_ids,
             vtable_type_ids,
             vreg_types,
@@ -230,6 +236,13 @@ impl<'a, M: Module> InstrContext<'a, M> {
 
 /// Result type for instruction compilation - uses String errors for genericity
 pub type InstrResult<T> = Result<T, String>;
+
+fn looks_like_const_data_name(name: &str) -> bool {
+    !name.is_empty()
+        && name
+            .chars()
+            .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
+}
 
 pub fn compile_instruction<M: Module>(
     ctx: &mut InstrContext<'_, M>,
@@ -297,36 +310,13 @@ pub fn compile_instruction<M: Module>(
                     .ins()
                     .load(type_id_to_cranelift(*ty), MemFlags::new(), global_addr, 0);
                 ctx.vreg_values.insert(*dest, val);
-            } else if let Some(&func_id) = ctx.func_ids.get(global_name) {
-                // Function reference used as a value (e.g., from MIR GlobalLoad of an
-                // imported function). Load the function's address as a pointer value
-                // so that subsequent IndirectCall resolves correctly.
-                let func_ref = ctx.module.declare_func_in_func(func_id, builder.func);
-                let val = builder.ins().func_addr(types::I64, func_ref);
-                ctx.vreg_values.insert(*dest, val);
-            } else if let Some(resolved) = ctx
-                .use_map
-                .get(global_name.as_str())
-                .or_else(|| ctx.import_map.get(global_name.as_str()))
-            {
-                // Cross-module reference: try to declare as a function import first
-                // (functions are far more common than data globals in cross-module refs).
-                // Only fall back to data import if function declaration fails.
-                let symbol = resolved.replace('.', "_dot_");
-                let call_conv = crate::codegen::shared::platform_call_conv();
-                let mut sig = cranelift_codegen::ir::Signature::new(call_conv);
-                sig.params.push(cranelift_codegen::ir::AbiParam::new(types::I64));
-                sig.returns.push(cranelift_codegen::ir::AbiParam::new(types::I64));
-                if let Ok(fid) = ctx
-                    .module
-                    .declare_function(&symbol, cranelift_module::Linkage::Import, &sig)
+            } else if looks_like_const_data_name(global_name) {
+                if let Some(resolved) = ctx
+                    .use_map
+                    .get(global_name.as_str())
+                    .or_else(|| ctx.import_map.get(global_name.as_str()))
                 {
-                    ctx.func_ids.entry(global_name.clone()).or_insert(fid);
-                    let func_ref = ctx.module.declare_func_in_func(fid, builder.func);
-                    let val = builder.ins().func_addr(types::I64, func_ref);
-                    ctx.vreg_values.insert(*dest, val);
-                } else {
-                    // Fall back to data import for actual global variables
+                    let symbol = resolved.replace('.', "_dot_");
                     match ctx
                         .module
                         .declare_data(&symbol, cranelift_module::Linkage::Import, true, false)
@@ -342,6 +332,78 @@ pub fn compile_instruction<M: Module>(
                         Err(_) => {
                             let val = builder.ins().iconst(types::I64, 0);
                             ctx.vreg_values.insert(*dest, val);
+                        }
+                    }
+                } else {
+                    let val = builder.ins().iconst(types::I64, 0);
+                    ctx.vreg_values.insert(*dest, val);
+                }
+            } else if let Some(&func_id) = ctx.func_ids.get(global_name) {
+                // Function reference used as a value (e.g., from MIR GlobalLoad of an
+                // imported function). Load the function's address as a pointer value
+                // so that subsequent IndirectCall resolves correctly.
+                let func_ref = ctx.module.declare_func_in_func(func_id, builder.func);
+                let val = builder.ins().func_addr(types::I64, func_ref);
+                ctx.vreg_values.insert(*dest, val);
+            } else if let Some(resolved) = ctx
+                .use_map
+                .get(global_name.as_str())
+                .or_else(|| ctx.import_map.get(global_name.as_str()))
+            {
+                let symbol = resolved.replace('.', "_dot_");
+                let is_data_export = ctx.data_exports.contains(resolved) || ctx.data_exports.contains(&symbol);
+                if is_data_export {
+                    match ctx
+                        .module
+                        .declare_data(&symbol, cranelift_module::Linkage::Import, true, false)
+                    {
+                        Ok(data_id) => {
+                            let global_ref = ctx.module.declare_data_in_func(data_id, builder.func);
+                            let global_addr = builder.ins().global_value(types::I64, global_ref);
+                            let val = builder
+                                .ins()
+                                .load(type_id_to_cranelift(*ty), MemFlags::new(), global_addr, 0);
+                            ctx.vreg_values.insert(*dest, val);
+                        }
+                        Err(_) => {
+                            let val = builder.ins().iconst(types::I64, 0);
+                            ctx.vreg_values.insert(*dest, val);
+                        }
+                    }
+                } else {
+                    // Cross-module function reference used as a value.
+                    // Data exports are handled above so imported top-level vals do
+                    // not get lowered to function addresses.
+                    let call_conv = crate::codegen::shared::platform_call_conv();
+                    let mut sig = cranelift_codegen::ir::Signature::new(call_conv);
+                    sig.params.push(cranelift_codegen::ir::AbiParam::new(types::I64));
+                    sig.returns.push(cranelift_codegen::ir::AbiParam::new(types::I64));
+                    if let Ok(fid) = ctx
+                        .module
+                        .declare_function(&symbol, cranelift_module::Linkage::Import, &sig)
+                    {
+                        ctx.func_ids.entry(global_name.clone()).or_insert(fid);
+                        let func_ref = ctx.module.declare_func_in_func(fid, builder.func);
+                        let val = builder.ins().func_addr(types::I64, func_ref);
+                        ctx.vreg_values.insert(*dest, val);
+                    } else {
+                        match ctx
+                            .module
+                            .declare_data(&symbol, cranelift_module::Linkage::Import, true, false)
+                        {
+                            Ok(data_id) => {
+                                let global_ref = ctx.module.declare_data_in_func(data_id, builder.func);
+                                let global_addr = builder.ins().global_value(types::I64, global_ref);
+                                let val =
+                                    builder
+                                        .ins()
+                                        .load(type_id_to_cranelift(*ty), MemFlags::new(), global_addr, 0);
+                                ctx.vreg_values.insert(*dest, val);
+                            }
+                            Err(_) => {
+                                let val = builder.ins().iconst(types::I64, 0);
+                                ctx.vreg_values.insert(*dest, val);
+                            }
                         }
                     }
                 }

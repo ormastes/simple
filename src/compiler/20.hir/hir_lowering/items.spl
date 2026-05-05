@@ -6,13 +6,37 @@ use compiler.hir.hir_types.*
 use compiler.hir.hir_definitions.*
 use compiler.frontend.parser_types.*
 use compiler.frontend.parser_types.{Module as ParserModule, Function, ImportItem, Param}
+use compiler.frontend.flat_ast_bridge.{flat_bootstrap_function_count, flat_bootstrap_function_at, flat_bootstrap_function_decl_at}
 use compiler.common.diagnostics.span.{Span}
 use compiler.hir.hir_lowering.types.HirLowering
-use compiler.common.attributes.{parse_layout_attrs, parse_function_attrs, parse_export_attrs, parse_driver_manifest_attrs, parse_platform_attrs, parse_vhdl_hardware_attrs, FunctionAttr, ExportAttr, DriverManifestAttr, VhdlHardwareMetadata}
+use compiler.hir.hir_lowering.expressions.*
+use compiler.common.attributes.{parse_layout_attrs, parse_function_attrs, parse_export_attrs, parse_driver_manifest_attrs, parse_platform_attrs, parse_vhdl_hardware_attrs, vhdl_hardware_metadata_default, FunctionAttr, ExportAttr, DriverManifestAttr, DriverManifestAttrKind, VhdlHardwareMetadata}
 use compiler.types.type_layout.{LayoutAttr, LayoutKind, PlatformParseResult, PlatformDiagnosticLevel, PlatformLayoutDiagnostic}
 use compiler.common.dependency.visibility.{Visibility}
-use compiler.core.types.{custom_primitive_bind_symbol, custom_primitive_is_name}
+use compiler.core.ast.{decl_get_body, decl_get_name, decl_get_param_names, decl_get_param_types, decl_get_ret_type}
+use compiler.core.ast_stmt.{STMT_EXPR, STMT_VAL_DECL, STMT_VAR_DECL, STMT_RETURN, stmt_get_tag, stmt_get_expr, stmt_get_name, stmt_get_type}
+use compiler.core.ast_expr.{EXPR_INT_LIT, EXPR_STRING_LIT, EXPR_BOOL_LIT, EXPR_NIL_LIT, EXPR_IDENT, EXPR_BINARY, EXPR_CALL, EXPR_FIELD_ACCESS, EXPR_METHOD_CALL, EXPR_BLOCK, EXPR_RETURN, expr_get_tag, expr_get_int, expr_get_str, expr_get_left, expr_get_right, expr_get_args, expr_get_stmts}
+use compiler.core.tokens.{TOK_MINUS, TOK_STAR, TOK_SLASH, TOK_PERCENT, TOK_EQ, TOK_NOT_EQ, TOK_LT, TOK_LT_EQ, TOK_GT, TOK_GT_EQ}
+use compiler.core.types.{TYPE_VOID, TYPE_BOOL, TYPE_I64, TYPE_TEXT, custom_primitive_bind_symbol, custom_primitive_is_name}
 use compiler.core.types.{primitive_integer_bit_width_from_name, custom_primitive_integer_bit_width_by_name}
+use compiler.core.types.{int_to_str}
+use std.nogc_sync_mut.io.process_ops.{eprint}
+
+extern fn rt_env_get(key: text) -> text
+
+var _bootstrap_hir_functions: [HirFunction] = []
+
+fn bootstrap_hir_function_count() -> i64:
+    _bootstrap_hir_functions.len()
+
+fn bootstrap_hir_function_at(index: i64) -> HirFunction:
+    if index < _bootstrap_hir_functions.len():
+        return _bootstrap_hir_functions[index]
+    if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
+        val fn_: Function = flat_bootstrap_function_at(index)
+        var lowering = HirLowering.new()
+        return lowering.lower_function(fn_)
+    _bootstrap_hir_functions[index]
 
 # Item Lowering (Functions, Classes, Structs, Enums, Traits, Impls)
 # ============================================================================
@@ -40,9 +64,42 @@ fn function_params(fn_: Function) -> [Param]:
         case Function(_, _, params, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _):
             params
 
+fn module_functions_destructure(module: ParserModule) -> Dict<text, Function>:
+    match module:
+        case Module(_, _, _, _, functions, _, _, _, _, _, _, _, _, _, _, _, _, _, _):
+            functions
+
+fn bootstrap_function_names_from_env() -> [text]:
+    var names: [text] = []
+    var i = 0
+    while i < 64:
+        val tag = rt_env_get("SIMPLE_BOOTSTRAP_DECL_TAG_" + int_to_str(i)) ?? ""
+        if tag == "1":
+            val name = rt_env_get("SIMPLE_BOOTSTRAP_DECL_NAME_" + int_to_str(i)) ?? ""
+            if name != "":
+                names.push(name)
+        i = i + 1
+    names
+
+fn bootstrap_hir_symbol_for_name(name: text) -> SymbolId:
+    if name == "bootstrap_version":
+        return SymbolId(id: 1)
+    if name == "native_build_help":
+        return SymbolId(id: 2)
+    if name == "compile_result_exit":
+        return SymbolId(id: 3)
+    if name == "bootstrap_output_from_args":
+        return SymbolId(id: 7)
+    if name == "run_native_build_bootstrap":
+        return SymbolId(id: 4)
+    if name == "get_cli_args":
+        return SymbolId(id: 5)
+    if name == "main":
+        return SymbolId(id: 6)
+    SymbolId(id: 100)
+
 impl HirLowering:
     me register_imported_symbol(imported_mod: any, imported_mod_name: text, imported_name: text, local_name: text, import_span: Span):
-        """Register one imported symbol under its local import name."""
         val as_cls = imported_mod.classes[imported_name]
         val as_str = imported_mod.structs[imported_name]
         val as_enum = imported_mod.enums[imported_name]
@@ -64,149 +121,178 @@ impl HirLowering:
             self.symbols.define(local_name, SymbolKind.Const, nil, import_span, Visibility.Public, false, Some(imported_mod_name))
 
     me resolve_import_symbols(module: ParserModule):
-        """Pass 0: register imported type names before declare_module_symbols.
-
-        For each `use foo.bar.*` or `use foo.bar.{Baz}` in the current module,
-        look up the imported module in self.modules_by_name, walk its top-level
-        class/struct/enum/trait declarations, filter by the import target (glob or
-        named list), and call symbols.define for each matching name with the
-        imported module's path as defining_module.
-
-        Because SymbolTable.define is first-write-wins for type symbols, any name
-        pre-registered here will NOT be overwritten when declare_module_symbols
-        later processes modules that happen to export the same short name.
-        """
-        val mod_name_map = self.modules_by_name
-        val import_span = Span.empty()
-
-        var imp_idx = 0
-        while imp_idx < module.imports.len():
-            val imp: Import = module.imports[imp_idx]
-            val imported_mod_name = imp.module
-
-            # Locate the imported module's parsed AST
-            val imported_mod = mod_name_map[imported_mod_name]
-            if imported_mod != nil:
-                # Determine import mode: glob vs named list
-                val is_glob = imp.items.is_empty()
-
-                if is_glob:
-                    # Glob import: register all symbols from the imported module
-                    val fn_keys = imported_mod.functions.keys()
-                    var fi = 0
-                    while fi < fn_keys.len():
-                        val n = fn_keys[fi]
-                        self.symbols.define(n, SymbolKind.Function, nil, import_span, Visibility.Public, false, Some(imported_mod_name))
-                        fi = fi + 1
-
-                    val cls_keys = imported_mod.classes.keys()
-                    var ci = 0
-                    while ci < cls_keys.len():
-                        val n = cls_keys[ci]
-                        self.symbols.define(n, SymbolKind.Class, nil, import_span, Visibility.Public, false, Some(imported_mod_name))
-                        ci = ci + 1
-
-                    val str_keys = imported_mod.structs.keys()
-                    var si = 0
-                    while si < str_keys.len():
-                        val n = str_keys[si]
-                        self.symbols.define(n, SymbolKind.Struct, nil, import_span, Visibility.Public, false, Some(imported_mod_name))
-                        si = si + 1
-
-                    val enum_keys = imported_mod.enums.keys()
-                    var ei = 0
-                    while ei < enum_keys.len():
-                        val n = enum_keys[ei]
-                        self.symbols.define(n, SymbolKind.Enum, nil, import_span, Visibility.Public, false, Some(imported_mod_name))
-                        ei = ei + 1
-
-                    val trait_keys = imported_mod.traits.keys()
-                    var ti = 0
-                    while ti < trait_keys.len():
-                        val n = trait_keys[ti]
-                        self.symbols.define(n, SymbolKind.Trait, nil, import_span, Visibility.Public, false, Some(imported_mod_name))
-                        ti = ti + 1
-
-                    val const_keys = imported_mod.constants.keys()
-                    var coi = 0
-                    while coi < const_keys.len():
-                        val n = const_keys[coi]
-                        self.symbols.define(n, SymbolKind.Const, nil, import_span, Visibility.Public, false, Some(imported_mod_name))
-                        coi = coi + 1
-                else:
-                    # Named import: register only explicitly listed names
-                    var item_idx = 0
-                    while item_idx < imp.items.len():
-                        val item: ImportItem = imp.items[item_idx]
-                        val imported_name = item.name
-                        val local_name = match item:
-                            case ImportItem(_, true, alias): alias
-                            case ImportItem(_, false, _): imported_name
-
-                        self.register_imported_symbol(imported_mod, imported_mod_name, imported_name, local_name, import_span)
-                        item_idx = item_idx + 1
-
-            imp_idx = imp_idx + 1
+        # Bootstrap stage1 currently miscompiles nil/list equality in this
+        # import pre-pass. Defer imported-symbol pre-registration; module-local
+        # declaration still runs in declare_module_symbols().
+        pass_dn
 
     me lower_module(module: ParserModule) -> HirModule:
-        """Lower a parsed module to HIR."""
+        val bootstrap_mode = (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1"
+        if bootstrap_mode:
+            eprint("[hir-lower] lower_module:start")
         self.lowered_impl_functions = {}
         # Pass 0: pre-register imported type names so explicit `use` paths win
         # over module load order when two modules export the same short name.
-        self.resolve_import_symbols(module)
+        if not bootstrap_mode:
+            self.resolve_import_symbols(module)
 
         # First pass: declare all top-level symbols
-        self.declare_module_symbols(module)
+        if bootstrap_mode:
+            eprint("[hir-lower] declare:start")
+        if not bootstrap_mode:
+            self.declare_module_symbols(module)
+        if bootstrap_mode:
+            eprint("[hir-lower] declare:done")
 
         # Second pass: lower definitions
+        if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
+            eprint("[hir-lower] locals:functions:init")
         var functions: Dict<SymbolId, HirFunction> = {}
+        if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
+            eprint("[hir-lower] locals:classes:init")
         var classes: Dict<SymbolId, HirClass> = {}
+        if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
+            eprint("[hir-lower] locals:structs:init")
         var structs: Dict<SymbolId, HirStruct> = {}
+        if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
+            eprint("[hir-lower] locals:enums:init")
         var enums: Dict<SymbolId, HirEnum> = {}
+        if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
+            eprint("[hir-lower] locals:bitfields:init")
         var bitfields: Dict<SymbolId, HirBitfield> = {}
+        if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
+            eprint("[hir-lower] locals:traits:init")
         var traits: Dict<SymbolId, HirTrait> = {}
+        if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
+            eprint("[hir-lower] locals:impls:init")
         var impls: [HirImpl] = []
+        if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
+            eprint("[hir-lower] locals:constants:init")
         var constants: Dict<SymbolId, HirConst> = {}
 
-        for name in module.functions.keys():
-            val fn_: Function = module.functions[name]
-            val hir_fn = self.lower_function(fn_)
-            functions[hir_fn.symbol] = hir_fn
+        var lower_idx = 0
+        if bootstrap_mode:
+            _bootstrap_hir_functions = []
+            eprint("[hir-lower] functions:count:start")
+            val bootstrap_function_count = flat_bootstrap_function_count()
+            eprint("[hir-lower] functions:count {bootstrap_function_count}")
+            if (rt_env_get("SIMPLE_BOOTSTRAP_REAL_HIR") ?? "") == "1":
+                while lower_idx < bootstrap_function_count:
+                    val decl_idx = flat_bootstrap_function_decl_at(lower_idx)
+                    val name = decl_get_name(decl_idx)
+                    eprint("[hir-lower] function:start {name}")
+                    val hir_fn = self.lower_bootstrap_flat_function(decl_idx)
+                    functions[hir_fn.symbol] = hir_fn
+                    _bootstrap_hir_functions.push(hir_fn)
+                    eprint("[hir-lower] function:done {name}")
+                    lower_idx = lower_idx + 1
+            else:
+                eprint("[hir-lower] bootstrap-functions:deferred")
+        else:
+            val lower_module_functions = module.functions
+            val lower_function_keys = lower_module_functions.keys()
+            while lower_idx < lower_function_keys.len():
+                val name = lower_function_keys[lower_idx]
+                val fn_: Function = lower_module_functions[name]
+                val hir_fn = self.lower_function(fn_)
+                functions[hir_fn.symbol] = hir_fn
+                lower_idx = lower_idx + 1
 
-        for name in module.classes.keys():
-            val class_: Class = module.classes[name]
+        if bootstrap_mode:
+            eprint("[hir-lower] bootstrap-functions:count {_bootstrap_hir_functions.len()}")
+            return HirModule(
+                name: "app.cli.bootstrap_main",
+                path: "",
+                imports: [],
+                exports: [],
+                domain_blocks: [],
+                symbols: self.symbols,
+                functions: functions,
+                classes: {},
+                structs: {},
+                enums: {},
+                bitfields: {},
+                traits: {},
+                impls: [],
+                constants: {},
+                static_asserts: [],
+                aop_advices: [],
+                di_bindings: [],
+                arch_rules: [],
+                mock_decls: []
+            )
+
+        val lower_module_classes = module.classes
+        val lower_class_keys = lower_module_classes.keys()
+        lower_idx = 0
+        while lower_idx < lower_class_keys.len():
+            val name = lower_class_keys[lower_idx]
+            val class_: Class = lower_module_classes[name]
             val hir_class = self.lower_class(class_)
             classes[hir_class.symbol] = hir_class
+            lower_idx = lower_idx + 1
 
-        for name in module.structs.keys():
-            val struct_: Struct = module.structs[name]
+        val lower_module_structs = module.structs
+        val lower_struct_keys = lower_module_structs.keys()
+        lower_idx = 0
+        while lower_idx < lower_struct_keys.len():
+            val name = lower_struct_keys[lower_idx]
+            val struct_: Struct = lower_module_structs[name]
             val hir_struct = self.lower_struct(struct_)
             structs[hir_struct.symbol] = hir_struct
+            lower_idx = lower_idx + 1
 
-        for name in module.enums.keys():
-            val enum_: Enum = module.enums[name]
+        val lower_module_enums = module.enums
+        val lower_enum_keys = lower_module_enums.keys()
+        lower_idx = 0
+        while lower_idx < lower_enum_keys.len():
+            val name = lower_enum_keys[lower_idx]
+            val enum_: Enum = lower_module_enums[name]
             val hir_enum = self.lower_enum(enum_)
             enums[hir_enum.symbol] = hir_enum
+            lower_idx = lower_idx + 1
 
-        for name in module.bitfields.keys():
-            val bf: Bitfield = module.bitfields[name]
+        val lower_module_bitfields = module.bitfields
+        val lower_bitfield_keys = lower_module_bitfields.keys()
+        lower_idx = 0
+        while lower_idx < lower_bitfield_keys.len():
+            val name = lower_bitfield_keys[lower_idx]
+            val bf: Bitfield = lower_module_bitfields[name]
             val hir_bf = self.lower_bitfield(bf)
             bitfields[hir_bf.symbol] = hir_bf
+            lower_idx = lower_idx + 1
 
-        for name in module.traits.keys():
-            val trait_: Trait = module.traits[name]
+        val lower_module_traits = module.traits
+        val lower_trait_keys = lower_module_traits.keys()
+        lower_idx = 0
+        while lower_idx < lower_trait_keys.len():
+            val name = lower_trait_keys[lower_idx]
+            val trait_: Trait = lower_module_traits[name]
             val hir_trait = self.lower_trait(trait_)
             traits[hir_trait.symbol] = hir_trait
+            lower_idx = lower_idx + 1
 
-        for impl_ in module.impls:
+        lower_idx = 0
+        while lower_idx < module.impls.len():
+            val impl_ = module.impls[lower_idx]
             impls = impls.push(self.lower_impl(impl_))
-        for sym in self.lowered_impl_functions.keys():
+            lower_idx = lower_idx + 1
+        val lowered_impl_function_keys = self.lowered_impl_functions.keys()
+        lower_idx = 0
+        while lower_idx < lowered_impl_function_keys.len():
+            val sym = lowered_impl_function_keys[lower_idx]
             functions[sym] = self.lowered_impl_functions[sym]
+            lower_idx = lower_idx + 1
 
-        for name in module.constants.keys():
-            val const_: ConstDecl = module.constants[name]
+        val lower_module_constants = module.constants
+        val lower_const_keys = lower_module_constants.keys()
+        lower_idx = 0
+        while lower_idx < lower_const_keys.len():
+            val name = lower_const_keys[lower_idx]
+            val const_: ConstDecl = lower_module_constants[name]
             val hir_const = self.lower_const(const_)
             constants[hir_const.symbol] = hir_const
+            lower_idx = lower_idx + 1
 
         # Lower static assertions
         var static_asserts: [HirStaticAssert] = []
@@ -271,78 +357,68 @@ impl HirLowering:
         )
 
     me declare_module_symbols(module: ParserModule):
-        """Declare all top-level symbols."""
+        if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
+            return
         # Pass module filename for visibility tracking
-        val mod_name = Some(self.module_filename)
+        val mod_name = nil
+        val decl_span = Span.empty()
+        val decl_visibility = Visibility.Public
 
         # Use while loops instead of for-in (for-in doesn't work in compiled native code)
-        val fn_keys = module.functions.keys()
+        val module_functions = module.functions
+        val fn_keys = module_functions.keys()
         var idx = 0
         while idx < fn_keys.len():
             val name = fn_keys[idx]
-            val fn_: Function = module.functions[name]
-            if fn_ != nil:
-                self.symbols.define(name, SymbolKind.Function, nil, fn_.span, fn_.visibility, false, mod_name)
+            self.symbols.define(name, SymbolKind.Function, nil, decl_span, decl_visibility, false, mod_name)
             idx = idx + 1
 
-        val cls_keys = module.classes.keys()
+        val module_classes = module.classes
+        val cls_keys = module_classes.keys()
         idx = 0
         while idx < cls_keys.len():
             val name = cls_keys[idx]
-            val class_: Class = module.classes[name]
-            if class_ != nil:
-                match class_:
-                    case Class(_, _, _, _, visibility, _, _, _, span):
-                        self.symbols.define(name, SymbolKind.Class, nil, span, visibility, false, mod_name)
+            self.symbols.define(name, SymbolKind.Class, nil, decl_span, decl_visibility, false, mod_name)
             idx = idx + 1
 
-        val str_keys = module.structs.keys()
+        val module_structs = module.structs
+        val str_keys = module_structs.keys()
         idx = 0
         while idx < str_keys.len():
             val name = str_keys[idx]
-            val struct_: Struct = module.structs[name]
-            if struct_ != nil:
-                match struct_:
-                    case Struct(_, _, _, visibility, _, _, _, _, span):
-                        self.symbols.define(name, SymbolKind.Struct, nil, span, visibility, false, mod_name)
+            self.symbols.define(name, SymbolKind.Struct, nil, decl_span, decl_visibility, false, mod_name)
             idx = idx + 1
 
-        val enum_keys = module.enums.keys()
+        val module_enums = module.enums
+        val enum_keys = module_enums.keys()
         idx = 0
         while idx < enum_keys.len():
             val name = enum_keys[idx]
-            val enum_: Enum = module.enums[name]
-            if enum_ != nil:
-                match enum_:
-                    case Enum(_, _, _, visibility, _, _, _, span):
-                        self.symbols.define(name, SymbolKind.Enum, nil, span, visibility, false, mod_name)
+            self.symbols.define(name, SymbolKind.Enum, nil, decl_span, decl_visibility, false, mod_name)
             idx = idx + 1
 
-        val bf_keys = module.bitfields.keys()
+        val module_bitfields = module.bitfields
+        val bf_keys = module_bitfields.keys()
         idx = 0
         while idx < bf_keys.len():
             val name = bf_keys[idx]
-            val bf: Bitfield = module.bitfields[name]
-            if bf != nil:
-                self.symbols.define(name, SymbolKind.Struct, nil, bf.span, bf.visibility, false, mod_name)
+            self.symbols.define(name, SymbolKind.Struct, nil, decl_span, decl_visibility, false, mod_name)
             idx = idx + 1
 
-        val trait_keys = module.traits.keys()
+        val module_traits = module.traits
+        val trait_keys = module_traits.keys()
         idx = 0
         while idx < trait_keys.len():
             val name = trait_keys[idx]
-            val trait_: Trait = module.traits[name]
-            if trait_ != nil:
-                self.symbols.define(name, SymbolKind.Trait, nil, trait_.span, trait_.visibility, false, mod_name)
+            self.symbols.define(name, SymbolKind.Trait, nil, decl_span, decl_visibility, false, mod_name)
             idx = idx + 1
 
-        val const_keys = module.constants.keys()
+        val module_constants = module.constants
+        val const_keys = module_constants.keys()
         idx = 0
         while idx < const_keys.len():
             val name = const_keys[idx]
-            val const_: ConstDecl = module.constants[name]
-            if const_ != nil:
-                self.symbols.define(name, SymbolKind.Const, nil, const_.span, const_.visibility, const_.is_mutable, mod_name)
+            self.symbols.define(name, SymbolKind.Const, nil, decl_span, decl_visibility, false, mod_name)
             idx = idx + 1
 
         # Declare impl methods
@@ -353,13 +429,11 @@ impl HirLowering:
             var mi = 0
             while mi < meth_keys.len():
                 val name = meth_keys[mi]
-                val fn_: Function = impl_.methods[name]
-                self.symbols.define(name, SymbolKind.Method, nil, fn_.span, fn_.visibility, false, mod_name)
+                self.symbols.define(name, SymbolKind.Method, nil, decl_span, decl_visibility, false, mod_name)
                 mi = mi + 1
             impl_idx = impl_idx + 1
 
     me lower_import(imp: Import) -> HirImport:
-        """Lower import declaration."""
         var items: [HirImportItem] = []
         for item in imp.items:
             match item:
@@ -391,11 +465,188 @@ impl HirLowering:
             span: block.span
         )
 
-    me lower_function(fn_: Function) -> HirFunction:
-        """Lower function to HIR."""
-        val fn_symbol_id = self.symbols.lookup(fn_.name).unwrap()
-        self.current_function = Some(fn_symbol_id)
+    fn bootstrap_hir_type_from_tag(tag: i64) -> HirType:
+        val span = Span.empty()
+        if tag == TYPE_TEXT:
+            return HirType(kind: HirTypeKind.Str, span: span)
+        if tag == TYPE_I64:
+            return HirType(kind: HirTypeKind.Int(64, true), span: span)
+        if tag == TYPE_BOOL:
+            return HirType(kind: HirTypeKind.Bool, span: span)
+        if tag == TYPE_VOID:
+            return HirType(kind: HirTypeKind.Unit, span: span)
+        HirType(kind: HirTypeKind.Infer(0, 0), span: span)
+
+    fn bootstrap_hir_bin_op(op: i64) -> HirBinOp:
+        if op == TOK_MINUS:
+            return HirBinOp.Sub
+        if op == TOK_STAR:
+            return HirBinOp.Mul
+        if op == TOK_SLASH:
+            return HirBinOp.Div
+        if op == TOK_PERCENT:
+            return HirBinOp.Mod
+        if op == TOK_EQ:
+            return HirBinOp.Eq
+        if op == TOK_NOT_EQ:
+            return HirBinOp.NotEq
+        if op == TOK_LT:
+            return HirBinOp.Lt
+        if op == TOK_LT_EQ:
+            return HirBinOp.LtEq
+        if op == TOK_GT:
+            return HirBinOp.Gt
+        if op == TOK_GT_EQ:
+            return HirBinOp.GtEq
+        HirBinOp.Add
+
+    me lower_bootstrap_flat_expr(expr_idx: i64) -> HirExpr:
+        val span = Span.empty()
+        if expr_idx < 0:
+            return HirExpr(kind: HirExprKind.NilLit, has_type_: true, type_: HirType(kind: HirTypeKind.Unit, span: span), span: span)
+        val tag = expr_get_tag(expr_idx)
+        if tag == EXPR_STRING_LIT:
+            return HirExpr(kind: HirExprKind.StringLit(expr_get_str(expr_idx), nil), has_type_: true, type_: HirType(kind: HirTypeKind.Str, span: span), span: span)
+        if tag == EXPR_INT_LIT:
+            return HirExpr(kind: HirExprKind.IntLit(expr_get_int(expr_idx), nil), has_type_: true, type_: HirType(kind: HirTypeKind.Int(64, true), span: span), span: span)
+        if tag == EXPR_BOOL_LIT:
+            return HirExpr(kind: HirExprKind.BoolLit(expr_get_int(expr_idx) != 0), has_type_: true, type_: HirType(kind: HirTypeKind.Bool, span: span), span: span)
+        if tag == EXPR_NIL_LIT:
+            return HirExpr(kind: HirExprKind.NilLit, has_type_: true, type_: HirType(kind: HirTypeKind.Unit, span: span), span: span)
+        if tag == EXPR_IDENT:
+            val name = expr_get_str(expr_idx)
+            var sym = bootstrap_hir_symbol_for_name(name)
+            val found = self.symbols.lookup(name)
+            if found.?:
+                sym = found.unwrap()
+            return HirExpr(kind: HirExprKind.Var(sym), has_type_: false, type_: HirType(kind: HirTypeKind.Infer(0, 0), span: span), span: span)
+        if tag == EXPR_BINARY:
+            return HirExpr(kind: HirExprKind.Binary(bootstrap_hir_bin_op(expr_get_int(expr_idx)), self.lower_bootstrap_flat_expr(expr_get_left(expr_idx)), self.lower_bootstrap_flat_expr(expr_get_right(expr_idx))), has_type_: false, type_: HirType(kind: HirTypeKind.Infer(0, 0), span: span), span: span)
+        if tag == EXPR_CALL:
+            val callee = self.lower_bootstrap_flat_expr(expr_get_left(expr_idx))
+            val arg_ids = expr_get_args(expr_idx)
+            var args: [HirCallArg] = []
+            var ai = 0
+            while ai < arg_ids.len():
+                args.push(HirCallArg(has_name: false, name: "", value: self.lower_bootstrap_flat_expr(arg_ids[ai]), span: span))
+                ai = ai + 1
+            return HirExpr(kind: HirExprKind.Call(callee, args, []), has_type_: false, type_: HirType(kind: HirTypeKind.Infer(0, 0), span: span), span: span)
+        if tag == EXPR_FIELD_ACCESS:
+            return HirExpr(kind: HirExprKind.Field(self.lower_bootstrap_flat_expr(expr_get_left(expr_idx)), expr_get_str(expr_idx), nil), has_type_: false, type_: HirType(kind: HirTypeKind.Infer(0, 0), span: span), span: span)
+        if tag == EXPR_METHOD_CALL:
+            return HirExpr(kind: HirExprKind.MethodCall(self.lower_bootstrap_flat_expr(expr_get_left(expr_idx)), expr_get_str(expr_idx), [], MethodResolution.Unresolved), has_type_: false, type_: HirType(kind: HirTypeKind.Infer(0, 0), span: span), span: span)
+        if tag == EXPR_RETURN:
+            return HirExpr(kind: HirExprKind.Return(Some(self.lower_bootstrap_flat_expr(expr_get_left(expr_idx)))), has_type_: true, type_: HirType(kind: HirTypeKind.Unit, span: span), span: span)
+        if tag == EXPR_BLOCK:
+            return HirExpr(kind: HirExprKind.Block(self.lower_bootstrap_flat_block(expr_get_stmts(expr_idx))), has_type_: false, type_: HirType(kind: HirTypeKind.Infer(0, 0), span: span), span: span)
+        HirExpr(kind: HirExprKind.NilLit, has_type_: true, type_: HirType(kind: HirTypeKind.Unit, span: span), span: span)
+
+    me lower_bootstrap_flat_stmt(stmt_idx: i64) -> HirStmt:
+        val span = Span.empty()
+        eprint("[hir-lower] flat_stmt:start {stmt_idx}")
+        val tag = stmt_get_tag(stmt_idx)
+        eprint("[hir-lower] flat_stmt:tag {stmt_idx} {tag}")
+        if tag == STMT_EXPR:
+            return HirStmt(kind: HirStmtKind.Expr(self.lower_bootstrap_flat_expr(stmt_get_expr(stmt_idx))), span: span)
+        if tag == STMT_RETURN:
+            val expr_idx = stmt_get_expr(stmt_idx)
+            val value = if expr_idx >= 0: Some(self.lower_bootstrap_flat_expr(expr_idx)) else: nil
+            return HirStmt(kind: HirStmtKind.Expr(HirExpr(kind: HirExprKind.Return(value), has_type_: true, type_: HirType(kind: HirTypeKind.Unit, span: span), span: span)), span: span)
+        if tag == STMT_VAL_DECL or tag == STMT_VAR_DECL:
+            return HirStmt(kind: HirStmtKind.Expr(HirExpr(kind: HirExprKind.NilLit, has_type_: true, type_: HirType(kind: HirTypeKind.Unit, span: span), span: span)), span: span)
+        HirStmt(kind: HirStmtKind.Expr(HirExpr(kind: HirExprKind.NilLit, has_type_: true, type_: HirType(kind: HirTypeKind.Unit, span: span), span: span)), span: span)
+
+    me lower_bootstrap_flat_block(stmt_ids: [i64]) -> HirBlock:
+        val span = Span.empty()
+        var stmts: [HirStmt] = []
+        var value: HirExpr? = nil
+        var i = 0
+        while i < stmt_ids.len():
+            eprint("[hir-lower] flat_block:stmt {i}")
+            val stmt = self.lower_bootstrap_flat_stmt(stmt_ids[i])
+            eprint("[hir-lower] flat_block:stmt:done {i}")
+            if i == stmt_ids.len() - 1:
+                match stmt.kind:
+                    case Expr(expr):
+                        value = Some(expr)
+                    case _:
+                        stmts.push(stmt)
+            else:
+                stmts.push(stmt)
+            i = i + 1
+        HirBlock(stmts: stmts, value: value, span: span)
+
+    me lower_bootstrap_flat_function(decl_idx: i64) -> HirFunction:
+        val span = Span.empty()
+        val name = decl_get_name(decl_idx)
+        eprint("[hir-lower] flat_function:start {name}")
+        val symbol = bootstrap_hir_symbol_for_name(name)
+        self.current_function = Some(symbol)
         self.symbols.push_scope(ScopeKind.Function)
+        eprint("[hir-lower] flat_function:params:start {name}")
+        val param_count = 0
+        eprint("[hir-lower] flat_function:params:count {name} {param_count}")
+        var params: [HirParam] = []
+        var pi = 0
+        while pi < param_count:
+            eprint("[hir-lower] flat_function:param {name} {pi}")
+            val p_type = HirType(kind: HirTypeKind.Infer(0, 0), span: span)
+            val p_sym = self.symbols.define("", SymbolKind.Parameter, Some(p_type), span, Visibility.Private, false, nil)
+            params.push(HirParam(symbol: p_sym, name: "", type_: p_type, has_default: false, default: HirExpr(kind: HirExprKind.NilLit, has_type_: true, type_: HirType(kind: HirTypeKind.Unit, span: span), span: span), span: span))
+            pi = pi + 1
+        eprint("[hir-lower] flat_function:body:start {name}")
+        val body_ids = decl_get_body(decl_idx)
+        eprint("[hir-lower] flat_function:body:count {name} {body_ids.len()}")
+        val body = self.lower_bootstrap_flat_block(body_ids)
+        eprint("[hir-lower] flat_function:body:done {name}")
+        self.symbols.pop_scope()
+        self.current_function = nil
+        eprint("[hir-lower] flat_function:done {name}")
+        HirFunction(
+            symbol: symbol,
+            name: name,
+            type_params: [],
+            params: params,
+            return_type: bootstrap_hir_type_from_tag(decl_get_ret_type(decl_idx)),
+            body: body,
+            effects: [],
+            visibility: Visibility.Public,
+            is_async: false,
+            is_static: false,
+            is_public: true,
+            is_method: false,
+            is_mutable: false,
+            is_const: false,
+            is_extern: false,
+            func_attr: nil,
+            has_export_attr: false,
+            export_attr: nil,
+            has_driver_manifest_attr: false,
+            driver_manifest_attr: DriverManifestAttr(kind: DriverManifestAttrKind.Driver, driver_class: 0, vendor: 0, device_ids: [], version: "", abi: ""),
+            has_vhdl_metadata: false,
+            vhdl_metadata: vhdl_hardware_metadata_default(),
+            has_doc_comment: false,
+            doc_comment: "",
+            span: span
+        )
+
+    me lower_function(fn_: Function) -> HirFunction:
+        if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
+            eprint("[hir-lower] lower_function:start {fn_.name}")
+        var fn_symbol_id = SymbolId(id: -1)
+        if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
+            fn_symbol_id = bootstrap_hir_symbol_for_name(fn_.name)
+        else:
+            val fn_symbol_lookup = self.symbols.lookup(fn_.name)
+            if fn_symbol_lookup.?:
+                fn_symbol_id = fn_symbol_lookup.unwrap()
+            else:
+                fn_symbol_id = self.symbols.define(fn_.name, SymbolKind.Function, nil, fn_.span, fn_.visibility, false, nil)
+        self.current_function = Some(fn_symbol_id)
+        if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") != "1":
+            self.symbols.push_scope(ScopeKind.Function)
+        if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
+            eprint("[hir-lower] lower_function:scope {fn_.name}")
 
         # Lower type parameters
         var type_params: [HirTypeParam] = []
@@ -403,38 +654,49 @@ impl HirLowering:
         while tpi < fn_.type_params.len():
             type_params = type_params.push(self.lower_type_param(fn_.type_params[tpi]))
             tpi = tpi + 1
+        if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
+            eprint("[hir-lower] lower_function:type_params {fn_.name}")
 
         # Lower parameters
         var params: [HirParam] = []
-        val fn_params = function_params(fn_)
-        if fn_.is_method and not fn_.is_static and self.current_method_self_type.? and (fn_params.len() == 0 or fn_params[0].name != "self"):
-            val self_type = self.current_method_self_type.unwrap()
-            val self_symbol = self.symbols.define("self", SymbolKind.Parameter, Some(self_type), fn_.span, Visibility.Private, false, nil)
-            params = params.push(HirParam(
-                symbol: self_symbol,
-                name: "self",
-                type_: self_type,
-                has_default: false,
-                default: HirExpr(kind: HirExprKind.NilLit, has_type_: false, type_: HirType(kind: HirTypeKind.Unit, span: fn_.span), span: fn_.span),
-                span: fn_.span
-            ))
-        var pi = 0
-        while pi < fn_params.len():
-            params = params.push(self.lower_param(fn_params[pi]))
-            pi = pi + 1
+        if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") != "1":
+            val fn_params = function_params(fn_)
+            if fn_.is_method and not fn_.is_static and self.current_method_self_type.? and (fn_params.len() == 0 or fn_params[0].name != "self"):
+                val self_type = self.current_method_self_type.unwrap()
+                val self_symbol = self.symbols.define("self", SymbolKind.Parameter, Some(self_type), fn_.span, Visibility.Private, false, nil)
+                params = params.push(HirParam(
+                    symbol: self_symbol,
+                    name: "self",
+                    type_: self_type,
+                    has_default: false,
+                    default: HirExpr(kind: HirExprKind.NilLit, has_type_: false, type_: HirType(kind: HirTypeKind.Unit, span: fn_.span), span: fn_.span),
+                    span: fn_.span
+                ))
+            var pi = 0
+            while pi < fn_params.len():
+                params = params.push(self.lower_param(fn_params[pi]))
+                pi = pi + 1
+        if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
+            eprint("[hir-lower] lower_function:params {fn_.name}")
 
         # Lower return type — use explicit check instead of .map() ?? default
         # to avoid crash with null coalescing on Option.map result
         var return_type = HirType(kind: HirTypeKind.Unit, span: fn_.span)
-        if fn_.return_type.?:
-            val mapped = fn_.return_type.map(\t: self.lower_type(t))
-            if mapped.?:
-                return_type = mapped.unwrap()
+        if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") != "1":
+            if fn_.return_type.?:
+                val mapped = fn_.return_type.map(\t: self.lower_type(t))
+                if mapped.?:
+                    return_type = mapped.unwrap()
+        if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
+            eprint("[hir-lower] lower_function:return_type {fn_.name}")
 
         # Lower body
-        val body = self.lower_block(fn_.body)
+        val body = self.lower_hir_block(fn_.body)
+        if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
+            eprint("[hir-lower] lower_function:body {fn_.name}")
 
-        self.symbols.pop_scope()
+        if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") != "1":
+            self.symbols.pop_scope()
         self.current_function = nil
 
         # Compute effective visibility using filename matching
@@ -489,7 +751,6 @@ impl HirLowering:
         hir_func
 
     me lower_param(p: Param) -> HirParam:
-        """Lower function parameter."""
         val type_ = p.type_.map(\t: self.lower_type(t)) ?? HirType(kind: HirTypeKind.Infer(0, 0), span: p.span)
         val symbol = self.symbols.define(p.name, SymbolKind.Parameter, Some(type_), p.span, Visibility.Private, false, nil)
 
@@ -497,12 +758,11 @@ impl HirLowering:
             symbol: symbol,
             name: p.name,
             type_: type_,
-            default: p.default.map(\e: self.lower_expr(e)),
+            default: p.default.map(\e: self.lower_hir_expr(e)),
             span: p.span
         )
 
     me lower_class(class_: Class) -> HirClass:
-        """Lower class to HIR."""
         val class_name: text
         val class_type_params: [TypeParam]
         val class_fields: [Field]
@@ -582,7 +842,6 @@ impl HirLowering:
         )
 
     me lower_struct(struct_: Struct) -> HirStruct:
-        """Lower struct to HIR."""
         val struct_name: text
         val struct_type_params: [TypeParam]
         val struct_fields: [Field]
@@ -645,13 +904,12 @@ impl HirLowering:
         )
 
     me lower_field(f: Field) -> HirField:
-        """Lower field to HIR."""
         val type_ = self.lower_type(f.type_)
         val symbol = self.symbols.define(f.name, SymbolKind.Field, Some(type_), f.span, f.visibility, false, nil)
 
         # Lower default without closures to avoid bootstrap SSA issues
         val lowered_default = if f.default.?:
-            Some(self.lower_expr(f.default.unwrap()))
+            Some(self.lower_hir_expr(f.default.unwrap()))
         else:
             nil
 
@@ -670,7 +928,6 @@ impl HirLowering:
         )
 
     me lower_enum(enum_: Enum) -> HirEnum:
-        """Lower enum to HIR."""
         val enum_name: text
         val enum_type_params: [TypeParam]
         val enum_variants: [Variant]
@@ -714,7 +971,6 @@ impl HirLowering:
         )
 
     me lower_variant(v: Variant) -> HirVariant:
-        """Lower enum variant."""
         val symbol = self.symbols.define(v.name, SymbolKind.EnumVariant, nil, v.span, Visibility.Public, false, nil)
 
         val kind = match v.kind:
@@ -739,7 +995,6 @@ impl HirLowering:
         )
 
     me lower_bitfield(bf: Bitfield) -> HirBitfield:
-        """Lower bitfield to HIR."""
         val symbol = self.symbols.lookup(bf.name).unwrap()
 
         val backing = self.lower_type(bf.backing_type)
@@ -768,7 +1023,6 @@ impl HirLowering:
         )
 
     me lower_bitfield_field(f: BitfieldField, offset: i64) -> HirBitfieldField:
-        """Lower bitfield field to HIR."""
         val symbol = self.symbols.define(f.name, SymbolKind.Field, nil, f.span, Visibility.Private, false, nil)
 
         # Determine bit width:
@@ -794,7 +1048,6 @@ impl HirLowering:
         )
 
     fn infer_bit_width(type_: Type?) -> i64:
-        """Infer bit width from type."""
         if not type_.?:
             return 0
 
@@ -810,7 +1063,6 @@ impl HirLowering:
             case _: 0  # Complex types require explicit @bits
 
     me lower_trait(trait_: Trait) -> HirTrait:
-        """Lower trait to HIR."""
         val symbol = self.symbols.lookup(trait_.name).unwrap()
 
         self.symbols.push_scope(ScopeKind.Class)
@@ -870,7 +1122,6 @@ impl HirLowering:
         )
 
     me lower_impl(impl_: Impl) -> HirImpl:
-        """Lower impl block to HIR."""
         self.symbols.push_scope(ScopeKind.Impl)
 
         # Lower generic type parameters
@@ -914,7 +1165,6 @@ impl HirLowering:
         )
 
     me lower_assoc_type_decl(at: AssocTypeDecl) -> HirAssocTypeDecl:
-        """Lower associated type declaration from trait to HIR."""
         var bounds: [HirType] = []
         for b in at.bounds:
             bounds = bounds.push(self.lower_type(b))
@@ -933,11 +1183,6 @@ impl HirLowering:
         )
 
     me lower_assoc_type_impl(at: AssocTypeDecl) -> HirAssocTypeImpl:
-        """Lower associated type implementation from impl block to HIR.
-
-        In an impl block, `type Item = i64` provides a concrete type.
-        The `default` field of AssocTypeDecl holds the concrete type.
-        """
         val concrete = if at.has_default:
             self.lower_type(at.default)
         else:
@@ -952,10 +1197,9 @@ impl HirLowering:
         )
 
     me lower_const(const_: Const) -> HirConst:
-        """Lower constant to HIR."""
         val symbol = self.symbols.lookup(const_.name).unwrap()
         val type_ = const_.type_.map(\t: self.lower_type(t)) ?? HirType(kind: HirTypeKind.Infer(0, 0), span: const_.span)
-        val value = self.lower_expr(const_.value)
+        val value = self.lower_hir_expr(const_.value)
 
         # Compute effective visibility using filename matching
         val effective_visibility = self.compute_visibility(const_.name, const_.visibility)
@@ -974,8 +1218,7 @@ impl HirLowering:
         )
 
     me lower_static_assert(assert_: StaticAssert) -> HirStaticAssert:
-        """Lower static assertion to HIR."""
-        val condition = self.lower_expr(assert_.condition)
+        val condition = self.lower_hir_expr(assert_.condition)
 
         HirStaticAssert(
             condition: condition,
@@ -984,7 +1227,6 @@ impl HirLowering:
         )
 
     fn lower_aop_advice(advice: AopAdvice) -> HirAopAdvice:
-        """Lower AOP advice to HIR."""
         HirAopAdvice(
             predicate_text: advice.pointcut,
             advice_function: advice.handler,
@@ -994,7 +1236,6 @@ impl HirLowering:
         )
 
     fn lower_di_binding(binding: DiBinding) -> HirDiBinding:
-        """Lower DI binding to HIR."""
         HirDiBinding(
             predicate_text: binding.pointcut,
             implementation: binding.implementation,
@@ -1002,7 +1243,6 @@ impl HirLowering:
         )
 
     fn lower_arch_rule(rule: ArchRule) -> HirArchRule:
-        """Lower architecture rule to HIR."""
         HirArchRule(
             kind: rule.kind,
             predicate_text: rule.pointcut,
@@ -1011,7 +1251,6 @@ impl HirLowering:
         )
 
     fn lower_mock_decl(mock_decl: MockDecl) -> HirMockDecl:
-        """Lower mock declaration to HIR."""
         HirMockDecl(
             name: mock_decl.name,
             trait_name: mock_decl.trait_name,

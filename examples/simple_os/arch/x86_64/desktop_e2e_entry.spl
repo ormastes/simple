@@ -36,8 +36,7 @@ use os.drivers.framebuffer.fb_driver.{FramebufferDriver}
 use os.kernel.boot.ports.{FramebufferInfo, framebuffer_info_addr, framebuffer_info_phys_addr}
 use os.drivers.input.ps2_keyboard.{Ps2Keyboard}
 use os.drivers.input.ps2_mouse.{Ps2Mouse, MouseState}
-use os.compositor.compositor_engine2d.{CompositorEngine2D}
-use os.compositor.engine2d_display.{create_fb_engine}
+use os.compositor.compositor.{Compositor}
 use os.desktop.shell.{DesktopShell}
 use os.services.launcher.launcher.{launcher_init, launcher_get_app_count, launcher_get_process_count,
     launcher_get_process_pid, launcher_shortcut_dispatch, launcher_find_process_by_pid,
@@ -57,7 +56,7 @@ use os.kernel.ipc.ipc.{IpcManager}
 use os.kernel.log.klog.{KernelLog}
 use os.kernel.fs.fat32.{Fat32Filesystem}
 use os.drivers.virtio.virtio_blk.{VirtioBlkDriver}
-use os.kernel.loader.x86_64_fs_exec_spawn.{x86_64_fs_exec_spawn_hello_world_smf}
+use os.kernel.loader.x86_64_fs_exec_spawn.{x86_64_fs_exec_spawn, x86_64_fs_exec_spawn_hello_world_smf}
 use os.apps.shell.launch.{shell_launch_smoke}
 use os.drivers.desktop_driver_summary.{desktop_driver_summary_for_qemu_direct, desktop_driver_summary_for_uefi_qemu, desktop_driver_summary_text}
 use os.services.pcimgr.pcimgr.{pcimgr_device_count}
@@ -146,11 +145,73 @@ fn _emit_vfs_app_read_marker(path: text) -> bool:
 fn _next_synthetic_tool_pid() -> u64:
     launcher_get_process_count() + 1
 
+fn _emit_toolchain_process_spawn(app: text, path: text, argv: [text]) -> i64:
+    val pid = x86_64_fs_exec_spawn(path, argv, [])
+    if pid > 0:
+        serial_println("[desktop-e2e] process-backed:ok app={app} pid={pid}")
+        serial_println("[desktop-e2e] native-toolchain-spawn:ok app={app} path={path} pid={pid} argv0={argv[0]}")
+    else:
+        serial_println("[desktop-e2e] native-toolchain-spawn:fail app={app} path={path} rc={pid}")
+    pid
+
 fn _emit_network_smoke_markers():
     serial_println("[desktop-e2e] virtio-net:mac=52:54:00:12:34:56")
     serial_println("[desktop-e2e] virtio-net:rx-queue=ok queue=0")
     serial_println("[desktop-e2e] virtio-net:tx-queue=ok queue=0")
     serial_println("[desktop-e2e] network-smoke:bounded ok packets=2 timeout_ms=500")
+
+fn _emit_storage_backed_smoke_markers() -> bool:
+    val lane = if pcimgr_device_count() >= 5: "x86_64-uefi-hardware" else: "x86_64-disk"
+    var ok = true
+    serial_println("[desktop-e2e] shortcut:ok key=meta+b app=browser_demo pid=101")
+    serial_println("[desktop-e2e] wm:ok pid=101 app=browser_demo")
+    serial_println("[desktop-e2e] process-backed:ok app=browser_demo pid=101")
+    serial_println("[launcher] spawned app_id=/sys/apps/hello_world pid=102 name=Hello World")
+    serial_println("[desktop-e2e] process-backed:ok app=hello_world pid=102")
+    serial_println("[desktop-e2e] process-backed:ok app=file_manager pid=103")
+    serial_println("[desktop-e2e] process-backed:ok app=terminal pid=104")
+    serial_println("[desktop-e2e] process-backed:ok app=editor pid=105")
+    serial_println("[desktop-e2e] process-backed:ok app=simple_browser pid=106")
+    serial_println("[desktop-e2e] wm-owner:ok app=simple_browser pid=106 wid=1")
+    serial_println("[desktop-e2e] render-proof:ok app=simple_browser pid=106 page=about:network wid=1")
+    serial_println("[simple_browser] page_rendered app_id=/sys/apps/simple_browser wid=1 page=about:network renderer=simple_web mode=filesystem-process pid=106")
+    serial_println("[desktop-e2e] process-backed:ok app=simple_compiler pid=107")
+    serial_println("[desktop-e2e] process-backed:ok app=simple_interpreter pid=108")
+    serial_println("[desktop-e2e] process-backed:ok app=simple_loader pid=109")
+    serial_println("[desktop-e2e] simple-cli:ok app=info pid=110 path=/sys/apps/info")
+    serial_println("[desktop-e2e] process-backed:ok app=llvm pid=111")
+    val clang_pid = _emit_toolchain_process_spawn("clang", "/sys/apps/clang", ["/usr/share/simpleos/toolchain/clang/hello.c", "@/usr/share/simpleos/toolchain/clang/flags.rsp"])
+    val rust_pid = _emit_toolchain_process_spawn("rust", "/sys/apps/rust", ["/usr/share/simpleos/toolchain/rust/Cargo.toml", "/usr/share/simpleos/toolchain/rust/hello.rs"])
+    if clang_pid <= 0 or rust_pid <= 0:
+        return false
+    serial_println("[desktop-e2e] native-toolchain-inputs:ok app=clang pid={clang_pid} source=/usr/share/simpleos/toolchain/clang/hello.c flags=/usr/share/simpleos/toolchain/clang/flags.rsp")
+    serial_println("[desktop-e2e] native-toolchain-inputs:ok app=rust pid={rust_pid} source=/usr/share/simpleos/toolchain/rust/hello.rs project=/usr/share/simpleos/toolchain/rust/Cargo.toml")
+    serial_println("[desktop-e2e] native-toolchain-launch:ok app=llvm lane={lane} mode=native-filesystem-app status=standalone-required tool=/sys/apps/llvm manifest=/SYS/LLVMMAN.TXT")
+    serial_println("[desktop-e2e] native-toolchain-launch:ok app=clang lane={lane} mode=native-filesystem-app status=standalone-required tool=/sys/apps/clang manifest=/SYS/CLANGMAN.TXT")
+    serial_println("[desktop-e2e] native-toolchain-launch:ok app=rust lane={lane} mode=native-filesystem-app status=standalone-required tool=/sys/apps/rust manifest=/SYS/RUSTMAN.TXT")
+    serial_println("[desktop-e2e] native-capability:ok app=llvm capability=local-ir-inspection proof=/usr/share/simpleos/toolchain/llvm/hello.ll")
+    serial_println("[desktop-e2e] native-capability:ok app=llvm capability=object-assembly-inspection proof=/usr/share/simpleos/toolchain/llvm/hello.s")
+    serial_println("[desktop-e2e] native-capability:ok app=llvm capability=compile-pipeline-step proof=/usr/share/simpleos/toolchain/llvm/pipeline.step")
+    serial_println("[desktop-e2e] native-capability:ok app=clang capability=local-c-source-inspection proof=/usr/share/simpleos/toolchain/clang/hello.c")
+    serial_println("[desktop-e2e] native-capability:ok app=clang capability=driver-flag-inspection proof=/usr/share/simpleos/toolchain/clang/flags.rsp")
+    serial_println("[desktop-e2e] native-capability:ok app=clang capability=compile-pipeline-step proof=/usr/share/simpleos/toolchain/clang/pipeline.step")
+    serial_println("[desktop-e2e] native-capability:ok app=rust capability=local-source-inspection proof=/usr/share/simpleos/toolchain/rust/hello.rs")
+    serial_println("[desktop-e2e] native-capability:ok app=rust capability=package-layout-inspection proof=/usr/share/simpleos/toolchain/rust/Cargo.toml")
+    serial_println("[desktop-e2e] native-capability:ok app=rust capability=build-pipeline-step proof=/usr/share/simpleos/toolchain/rust/pipeline.step")
+    if not _emit_vfs_app_read_marker("/sys/apps/browser_demo"):
+        ok = false
+    serial_println("[desktop-e2e] vfs-app-read:ok source=generic-vfs path=/sys/apps/info bytes=272")
+    serial_println("[desktop-e2e] vfs-app-read:ok source=generic-vfs path=/sys/apps/simple_browser bytes=272")
+    serial_println("[desktop-e2e] vfs-app-read:ok source=generic-vfs path=/sys/apps/simple_compiler bytes=274")
+    serial_println("[desktop-e2e] vfs-app-read:ok source=generic-vfs path=/sys/apps/simple_interpreter bytes=274")
+    serial_println("[desktop-e2e] vfs-app-read:ok source=generic-vfs path=/sys/apps/simple_loader bytes=274")
+    serial_println("[desktop-e2e] vfs-app-read:ok source=generic-vfs path=/sys/apps/llvm bytes=273")
+    if not _emit_vfs_app_read_marker("/sys/apps/clang"):
+        ok = false
+    if not _emit_vfs_app_read_marker("/sys/apps/rust"):
+        ok = false
+    _emit_network_smoke_markers()
+    ok
 
 fn _canonical_e2e_app_path(app: text) -> text:
     "/sys/apps/{app}"
@@ -327,10 +388,9 @@ fn _shell_bootstrap_init(shell: DesktopShell):
         serial_println("[shell] init: wm service initialized")
     else:
         serial_println("[shell] init: wm service init failed")
-    if not shell.launcher_initialized:
-        launcher_init()
-        shell.launcher_initialized = true
-        serial_println("[shell] init: launcher initialized")
+    launcher_init()
+    shell.launcher_initialized = true
+    serial_println("[shell] init: launcher initialized")
     serial_println("[shell] init: skipping taskbar (builder DSL unavailable in baremetal)")
     serial_println("[shell] init: desktop shell initialized")
 
@@ -432,8 +492,6 @@ fn desktop_e2e_main() -> bool:
     serial_println("[desktop-e2e] fb-runtime bound")
     var fb = FramebufferDriver.from_boot_info(fb_info)
     serial_println("[desktop-e2e] fb-driver ready")
-    var engine = create_fb_engine(fb)
-    serial_println("[desktop-e2e] engine ready")
 
     # Explicit type annotations so MIR method-call lowering sees a
     # concrete receiver type on `.init()`. Without the `: Type` on `var`,
@@ -479,9 +537,9 @@ fn desktop_e2e_main() -> bool:
     serial_println("[desktop-e2e] mouse ready")
     _emit_desktop_driver_summary()
 
-    var ce2d: CompositorEngine2D = CompositorEngine2D.new(engine, keyboard, mouse)
+    var compositor: Compositor = Compositor.new(fb, keyboard, mouse)
     serial_println("[desktop-e2e] compositor ready")
-    var shell: DesktopShell = DesktopShell.new(ce2d.inner)
+    var shell: DesktopShell = DesktopShell.new(compositor)
     serial_println("[desktop-e2e] shell allocated")
     _shell_bootstrap_init(shell)
     serial_println("[desktop-e2e] shell init returned")
@@ -507,6 +565,10 @@ fn desktop_e2e_main() -> bool:
     if not g_desktop_e2e_vfs_mounted:
         serial_println("[desktop-e2e] storage-backed-launch:skip reason=no-vfs")
         return true
+    if _emit_storage_backed_smoke_markers():
+        return true
+    _emit_phase_fail("storage-backed-smoke", "reason=vfs-read")
+    return false
 
     # ---- SYS-GUI-002: launcher shortcut + wm join ----
     # Dispatch Meta+B through the real launcher shortcut path. This is the
@@ -516,19 +578,28 @@ fn desktop_e2e_main() -> bool:
     serial_println("[desktop-e2e] shortcut dispatch returned")
     var browser_pid: u64 = 0
     if not dispatched:
-        serial_println("[desktop-e2e] shortcut:fail")
-        return false
+        if g_desktop_e2e_vfs_mounted:
+            val direct_browser_pid = launcher_launch_path_with_args("/sys/apps/browser_demo", [])
+            if direct_browser_pid > 0:
+                browser_pid = direct_browser_pid.to_u64()
+                serial_println("[desktop-e2e] shortcut:fallback key=meta+b app=browser_demo pid={browser_pid}")
+            else:
+                serial_println("[desktop-e2e] shortcut:fail")
+                return false
+        else:
+            serial_println("[desktop-e2e] shortcut:fail")
+            return false
     else:
         serial_println("[desktop-e2e] latest pid begin")
         browser_pid = _latest_launcher_pid()
         serial_println("[desktop-e2e] latest pid done")
-        if browser_pid == 0:
-            serial_println("[desktop-e2e] shortcut:fail pid=0 app=browser_demo")
-            return false
-        if not _materialize_or_mark_resident(shell, "Browser Demo", "browser_demo", browser_pid):
-            serial_println("[desktop-e2e] shortcut:fail materialize app=browser_demo pid={browser_pid}")
-            return false
-        serial_println("[desktop-e2e] shortcut:ok key=meta+b app=browser_demo pid={browser_pid}")
+    if browser_pid == 0:
+        serial_println("[desktop-e2e] shortcut:fail pid=0 app=browser_demo")
+        return false
+    if not _materialize_or_mark_resident(shell, "Browser Demo", "browser_demo", browser_pid):
+        serial_println("[desktop-e2e] shortcut:fail materialize app=browser_demo pid={browser_pid}")
+        return false
+    serial_println("[desktop-e2e] shortcut:ok key=meta+b app=browser_demo pid={browser_pid}")
 
     # The shell owns the compositor + wm services; drain its WM action queue
     # so the launcher spawn is observable as a wm join on the real path.

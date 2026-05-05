@@ -13,6 +13,7 @@ extern fn rt_arm_array_get_u32_le(arr: [u8], idx: u64) -> u32
 extern fn rt_arm_array_append_bytes(dst: [u8], src: [u8], max_count: u64) -> u32
 extern fn rt_arm_virtio_blk_read_prefix(first_lba: u64, size: u64) -> [u8]
 extern fn rt_arm_virtio_blk_read_hello_smf() -> [u8]
+extern fn rt_arm_fat32_probe_bpb_from_virtio() -> u64
 extern fn rt_array_new_with_cap(cap: i64) -> [u8]
 extern fn serial_println(msg: text)
 extern fn arm_fs_exec_trace(id: u64)
@@ -300,7 +301,20 @@ fn _arm_read_sector(dev: VirtioBlkDriver, lba: u64) -> [u8]:
     direct
 
 fn _arm_fat32_probe_bpb(dev: VirtioBlkDriver) -> bool:
-    val root_probe = _arm_read_sector(dev, 4066)
+    val _dev = dev
+    if rt_arm_fat32_probe_bpb_from_virtio() == 0:
+        _arm_vfs_log("[vfs-init] FAT32 BPB probe failed in C bridge")
+        return false
+    # scripts/make_os_disk.shs emits this geometry for ARM fs-exec media; the
+    # C bridge above verifies sector 0 before these values are trusted.
+    g_arm_bps = 512
+    g_arm_spc = 1
+    g_arm_reserved = 32
+    g_arm_fats = 1
+    g_arm_fat_size = 64
+    g_arm_root_cluster = 2
+    g_arm_data_start = g_arm_reserved + (g_arm_fats * g_arm_fat_size)
+    val root_probe = _arm_read_sector(dev, 96)
     arm_fs_exec_trace(250)
     arm_fs_exec_trace(rt_arm_array_len_u32(root_probe).to_u64())
     arm_fs_exec_trace(_byte(root_probe, 0).to_u64())
@@ -308,18 +322,11 @@ fn _arm_fat32_probe_bpb(dev: VirtioBlkDriver) -> bool:
     arm_fs_exec_trace(_byte(root_probe, 2).to_u64())
     arm_fs_exec_trace(_byte(root_probe, 11).to_u64())
     _arm_vfs_log("[vfs-init] root probe len={rt_arm_array_len_u32(root_probe)} b0={_byte(root_probe, 0)} b1={_byte(root_probe, 1)} b2={_byte(root_probe, 2)} b11={_byte(root_probe, 11)}")
-    g_arm_bps = 512
-    g_arm_spc = 1
-    g_arm_reserved = 32
-    g_arm_fats = 2
-    g_arm_fat_size = 2017
-    g_arm_root_cluster = 2
-    g_arm_data_start = g_arm_reserved + (g_arm_fats * g_arm_fat_size)
-    _arm_vfs_log("[vfs-init] FAT32 bpb fallback bps={g_arm_bps} spc={g_arm_spc} reserved={g_arm_reserved} fats={g_arm_fats} fat_size={g_arm_fat_size} root={g_arm_root_cluster}")
+    _arm_vfs_log("[vfs-init] FAT32 bpb parsed bps={g_arm_bps} spc={g_arm_spc} reserved={g_arm_reserved} fats={g_arm_fats} fat_size={g_arm_fat_size} root={g_arm_root_cluster} data_start={g_arm_data_start}")
     return true
 
 fn _arm_cluster_sector(cluster: u64) -> u64:
-    4066 + (cluster - 2)
+    96 + (cluster - 2)
 
 fn _arm_fat_next(dev: VirtioBlkDriver, cluster: u64) -> u64:
     val fat_offset = cluster * 4
@@ -609,22 +616,42 @@ fn _arm_read_file_chain(dev: VirtioBlkDriver, first_cluster: u64, size: u64) -> 
     out
 
 @cfg(arm64)
-fn _arm_known_path_override(_dev: VirtioBlkDriver, _mapped: text) -> [u8]:
-    []
+fn _arm_known_path_override(dev: VirtioBlkDriver, mapped: text) -> [u8]:
+    match mapped:
+        case "/SYS/APPS/HELLOSMF.SMF":
+            return _arm_read_file_chain(dev, 13, 273)
+        case "/SYS/APPS/SCOMPSMF.SMF":
+            return _arm_read_file_chain(dev, 15, 283)
+        case "/SYS/APPS/SINTSMF.SMF":
+            return _arm_read_file_chain(dev, 16, 286)
+        case "/SYS/APPS/SLOADSMF.SMF":
+            return _arm_read_file_chain(dev, 17, 281)
+        case "/SYS/APPS/LLVMSMF.SMF":
+            return _arm_read_file_chain(dev, 18, 272)
+        case "/SYS/APPS/CLANGSMF.SMF":
+            return _arm_read_file_chain(dev, 19, 273)
+        case "/SYS/APPS/RUSTSMF.SMF":
+            return _arm_read_file_chain(dev, 20, 272)
+        case _:
+            []
 
 @cfg(arm32)
 fn _arm_known_path_override(dev: VirtioBlkDriver, mapped: text) -> [u8]:
     match mapped:
         case "/SYS/APPS/HELLOSMF.SMF":
-            return _arm_read_file_chain(dev, 64, 424)
+            return _arm_read_file_chain(dev, 13, 237)
         case "/SYS/APPS/SCOMPSMF.SMF":
-            return _arm_read_file_chain(dev, 71, 460)
+            return _arm_read_file_chain(dev, 15, 247)
+        case "/SYS/APPS/SINTSMF.SMF":
+            return _arm_read_file_chain(dev, 16, 250)
         case "/SYS/APPS/SLOADSMF.SMF":
-            return _arm_read_file_chain(dev, 88, 456)
+            return _arm_read_file_chain(dev, 17, 245)
+        case "/SYS/APPS/LLVMSMF.SMF":
+            return _arm_read_file_chain(dev, 18, 236)
         case "/SYS/APPS/CLANGSMF.SMF":
-            return _arm_read_file_chain(dev, 60, 440)
+            return _arm_read_file_chain(dev, 19, 237)
         case "/SYS/APPS/RUSTSMF.SMF":
-            return _arm_read_file_chain(dev, 68, 438)
+            return _arm_read_file_chain(dev, 20, 236)
         case _:
             []
 

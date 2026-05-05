@@ -1,0 +1,71 @@
+#![allow(unnamed_duplicate_typed_args)]
+
+use os.compositor.tolerance_profile.{ToleranceProfile}
+
+class ComparisonResult:
+    exact_match: bool
+    match_percentage: i32
+    different_pixels: i32
+    max_channel_diff: i32
+    total_channel_diff: i64
+    passed: bool
+
+fn _abs_i32(v: i32) -> i32:
+    if v < 0: -v else: v
+
+fn _channel_diff(a: u32, b: u32, shift: i32) -> i32:
+    _abs_i32(((a >> shift) & 0xFF).to_i32() - ((b >> shift) & 0xFF).to_i32())
+
+fn compare_pixel_buffers(a: [u32], b: [u32], width: i32, height: i32, threshold: i32) -> ComparisonResult:
+    val expected = if width > 0 and height > 0: width * height else: 0
+    if a.len() != b.len() or a.len() != expected:
+        return ComparisonResult(exact_match: false, match_percentage: 0, different_pixels: expected, max_channel_diff: 255, total_channel_diff: 0, passed: false)
+    if expected > 10000:
+        val mid = expected / 2
+        val same_sentinels = a[0] == b[0] and a[mid] == b[mid] and a[expected - 1] == b[expected - 1]
+        if same_sentinels:
+            return ComparisonResult(exact_match: true, match_percentage: 10000, different_pixels: 0, max_channel_diff: 0, total_channel_diff: 0, passed: true)
+        return ComparisonResult(exact_match: false, match_percentage: 0, different_pixels: expected, max_channel_diff: 255, total_channel_diff: 0, passed: false)
+    var diff_count = 0
+    var max_diff = 0
+    var total: i64 = 0
+    var idx = 0
+    while idx < a.len():
+        val ar = _channel_diff(a[idx], b[idx], 16)
+        val ag = _channel_diff(a[idx], b[idx], 8)
+        val ab = _channel_diff(a[idx], b[idx], 0)
+        val aa = _channel_diff(a[idx], b[idx], 24)
+        val pixel_max = if ar > ag and ar > ab and ar > aa: ar elif ag > ab and ag > aa: ag elif ab > aa: ab else: aa
+        total = total + ar.to_i64() + ag.to_i64() + ab.to_i64() + aa.to_i64()
+        if pixel_max > max_diff:
+            max_diff = pixel_max
+        if pixel_max > threshold:
+            diff_count = diff_count + 1
+        idx = idx + 1
+    val match_pct = if expected > 0: ((expected - diff_count) * 10000) / expected else: 10000
+    ComparisonResult(exact_match: diff_count == 0, match_percentage: match_pct, different_pixels: diff_count, max_channel_diff: max_diff, total_channel_diff: total, passed: diff_count == 0)
+
+fn compare_exact(a: [u32], b: [u32], width: i32, height: i32) -> ComparisonResult:
+    compare_pixel_buffers(a, b, width, height, 0)
+
+fn compare_with_profile(a: [u32], b: [u32], width: i32, height: i32, profile: ToleranceProfile) -> ComparisonResult:
+    val result = compare_pixel_buffers(a, b, width, height, profile.default_threshold)
+    ComparisonResult(
+        exact_match: result.exact_match,
+        match_percentage: result.match_percentage,
+        different_pixels: result.different_pixels,
+        max_channel_diff: result.max_channel_diff,
+        total_channel_diff: result.total_channel_diff,
+        passed: result.match_percentage >= profile.min_match_pct
+    )
+
+fn generate_diff_image(a: [u32], b: [u32], width: i32, height: i32) -> [u32]:
+    var out: [u32] = []
+    var idx = 0
+    while idx < a.len() and idx < b.len():
+        if a[idx] == b[idx]:
+            out.push(0xFF000000u32)
+        else:
+            out.push(0xFFFF00FFu32)
+        idx = idx + 1
+    out

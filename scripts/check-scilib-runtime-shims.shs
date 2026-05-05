@@ -1,0 +1,205 @@
+#!/bin/sh
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
+cd "$ROOT_DIR"
+
+BUILD_DIR="${SCILIB_SHIM_BUILD_DIR:-build/scilib}"
+CC="${CC:-gcc}"
+REQUIRE_REAL_OPENBLAS="${SCILIB_REQUIRE_REAL_OPENBLAS:-0}"
+OPENBLAS_CFLAGS="${SCILIB_OPENBLAS_CFLAGS:-}"
+OPENBLAS_LIBS="${SCILIB_OPENBLAS_LIBS:-}"
+OPENBLAS_LD_LIBRARY_PATH="${SCILIB_OPENBLAS_LD_LIBRARY_PATH:-}"
+
+mkdir -p "$BUILD_DIR"
+TMP_SYMBOLS="/tmp/scilib_shim_symbols.$$"
+trap 'rm -f "$TMP_SYMBOLS"' EXIT HUP INT TERM
+
+MOCK_SO="$BUILD_DIR/libspl_scilib_mock.so"
+OPENBLAS_SO="$BUILD_DIR/libspl_scilib_openblas.so"
+OPENBLAS_SFFI_DIR="$BUILD_DIR/openblas"
+OPENBLAS_SFFI_SO="$OPENBLAS_SFFI_DIR/libspl_scilib.so"
+LOCAL_DEP_ROOT="$BUILD_DIR/deps/root"
+
+if [ -z "$OPENBLAS_CFLAGS" ] && [ -f "$LOCAL_DEP_ROOT/usr/include/lapacke.h" ]; then
+    OPENBLAS_CFLAGS="-I$LOCAL_DEP_ROOT/usr/include -I$LOCAL_DEP_ROOT/usr/include/x86_64-linux-gnu/openblas-pthread"
+fi
+
+if [ -z "$OPENBLAS_LIBS" ] && [ -f "$LOCAL_DEP_ROOT/usr/lib/x86_64-linux-gnu/openblas-pthread/libopenblas.so" ]; then
+    OPENBLAS_LIBS="-L$LOCAL_DEP_ROOT/usr/lib/x86_64-linux-gnu -L$LOCAL_DEP_ROOT/usr/lib/x86_64-linux-gnu/openblas-pthread -lopenblas -llapacke"
+fi
+
+if [ -z "$OPENBLAS_LD_LIBRARY_PATH" ] && [ -d "$LOCAL_DEP_ROOT/usr/lib/x86_64-linux-gnu" ]; then
+    OPENBLAS_LD_LIBRARY_PATH="$LOCAL_DEP_ROOT/usr/lib/x86_64-linux-gnu:$LOCAL_DEP_ROOT/usr/lib/x86_64-linux-gnu/openblas-pthread"
+fi
+
+"$CC" -shared -fPIC src/runtime/scilib/mock_shim.c -o "$MOCK_SO"
+"$CC" -shared -fPIC $OPENBLAS_CFLAGS src/runtime/scilib/openblas_shim.c -o "$OPENBLAS_SO" $OPENBLAS_LIBS
+mkdir -p "$OPENBLAS_SFFI_DIR"
+cp "$OPENBLAS_SO" "$OPENBLAS_SFFI_SO"
+
+src/runtime/scilib/verify_symbols.sh "$MOCK_SO" "$OPENBLAS_SO" >"$TMP_SYMBOLS"
+cat "$TMP_SYMBOLS"
+
+OPENBLAS_REAL="unknown"
+if command -v python3 >/dev/null 2>&1; then
+    OPENBLAS_REAL="$(LD_LIBRARY_PATH="${OPENBLAS_LD_LIBRARY_PATH}${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" python3 - "$MOCK_SO" "$OPENBLAS_SO" <<'PY'
+import ctypes
+import resource
+import sys
+import time
+
+def require_close(label, got, expected, eps=1e-9):
+    if abs(got - expected) > eps:
+        raise SystemExit(f"{label}: got {got}, expected {expected}")
+
+def require_array(label, values, expected, eps=1e-9):
+    for index, (got, want) in enumerate(zip(values, expected)):
+        require_close(f"{label}[{index}]", got, want, eps)
+
+def configure(lib):
+    c_i64 = ctypes.c_int64
+    c_double_p = ctypes.POINTER(ctypes.c_double)
+    c_i64_p = ctypes.POINTER(c_i64)
+    lib.rt_scilib_is_real.restype = ctypes.c_int
+    lib.rt_blas_ddot.argtypes = [c_i64, c_double_p, c_i64, c_double_p, c_i64]
+    lib.rt_blas_ddot.restype = ctypes.c_double
+    lib.rt_blas_dgemm.argtypes = [
+        ctypes.c_int, ctypes.c_int, c_i64, c_i64, c_i64, ctypes.c_double,
+        c_double_p, c_i64, c_double_p, c_i64, ctypes.c_double, c_double_p, c_i64
+    ]
+    lib.rt_lapack_dgesv.argtypes = [
+        c_i64, c_i64, c_double_p, c_i64, c_i64_p, c_double_p, c_i64, c_i64_p
+    ]
+
+def compute_once(lib):
+    c_i64 = ctypes.c_int64
+    x = (ctypes.c_double * 3)(1.0, 2.0, 3.0)
+    y = (ctypes.c_double * 3)(4.0, 5.0, 6.0)
+    ddot = lib.rt_blas_ddot(3, x, 1, y, 1)
+
+    a = (ctypes.c_double * 6)(1.0, 2.0, 3.0, 4.0, 5.0, 6.0)
+    b = (ctypes.c_double * 6)(7.0, 8.0, 9.0, 10.0, 11.0, 12.0)
+    c = (ctypes.c_double * 4)(0.0, 0.0, 0.0, 0.0)
+    lib.rt_blas_dgemm(0, 0, 2, 2, 3, 1.0, a, 3, b, 2, 0.0, c, 2)
+
+    lu = (ctypes.c_double * 9)(
+        2.0, 0.0, 0.0,
+        1.0, 2.0, 0.0,
+        1.0, 1.0, 3.0,
+    )
+    rhs = (ctypes.c_double * 3)(2.0, 5.0, 14.0)
+    piv = (c_i64 * 3)(0, 0, 0)
+    info = c_i64(0)
+    lib.rt_lapack_dgesv(3, 1, lu, 3, piv, rhs, 1, ctypes.byref(info))
+    if info.value != 0:
+        raise SystemExit(f"dgesv info={info.value}")
+    return ddot, list(c), list(rhs)
+
+def smoke(mock_path, path):
+    load_start = time.perf_counter()
+    mock = ctypes.CDLL(mock_path)
+    lib = ctypes.CDLL(path)
+    load_ms = (time.perf_counter() - load_start) * 1000.0
+    configure(mock)
+    configure(lib)
+
+    c_i64 = ctypes.c_int64
+    mock_ddot, mock_gemm, mock_gesv = compute_once(mock)
+    lib_ddot, lib_gemm, lib_gesv = compute_once(lib)
+    require_close("parity_ddot", lib_ddot, mock_ddot)
+    require_array("parity_dgemm", lib_gemm, mock_gemm)
+    require_array("parity_dgesv", lib_gesv, mock_gesv)
+
+    x = (ctypes.c_double * 3)(1.0, 2.0, 3.0)
+    y = (ctypes.c_double * 3)(4.0, 5.0, 6.0)
+    require_close("ddot", lib.rt_blas_ddot(3, x, 1, y, 1), 32.0)
+    ddot_start = time.perf_counter()
+    ddot_total = 0.0
+    for _ in range(10000):
+        ddot_total += lib.rt_blas_ddot(3, x, 1, y, 1)
+    ddot_us = (time.perf_counter() - ddot_start) * 1000000.0 / 10000.0
+    require_close("ddot_total", ddot_total, 320000.0, 1e-4)
+
+    a = (ctypes.c_double * 6)(1.0, 2.0, 3.0, 4.0, 5.0, 6.0)
+    b = (ctypes.c_double * 6)(7.0, 8.0, 9.0, 10.0, 11.0, 12.0)
+    c = (ctypes.c_double * 4)(0.0, 0.0, 0.0, 0.0)
+    lib.rt_blas_dgemm(0, 0, 2, 2, 3, 1.0, a, 3, b, 2, 0.0, c, 2)
+    require_array("dgemm", list(c), [58.0, 64.0, 139.0, 154.0])
+    gemm_start = time.perf_counter()
+    for _ in range(5000):
+        c = (ctypes.c_double * 4)(0.0, 0.0, 0.0, 0.0)
+        lib.rt_blas_dgemm(0, 0, 2, 2, 3, 1.0, a, 3, b, 2, 0.0, c, 2)
+    gemm_us = (time.perf_counter() - gemm_start) * 1000000.0 / 5000.0
+
+    lu = (ctypes.c_double * 9)(
+        2.0, 0.0, 0.0,
+        1.0, 2.0, 0.0,
+        1.0, 1.0, 3.0,
+    )
+    rhs = (ctypes.c_double * 3)(2.0, 5.0, 14.0)
+    piv = (c_i64 * 3)(0, 0, 0)
+    info = c_i64(0)
+    lib.rt_lapack_dgesv(3, 1, lu, 3, piv, rhs, 1, ctypes.byref(info))
+    if info.value != 0:
+        raise SystemExit(f"dgesv info={info.value}")
+    require_array("dgesv", list(rhs), [1.0, 2.0, 11.0 / 3.0])
+    gesv_start = time.perf_counter()
+    for _ in range(1000):
+        lu = (ctypes.c_double * 9)(
+            2.0, 0.0, 0.0,
+            1.0, 2.0, 0.0,
+            1.0, 1.0, 3.0,
+        )
+        rhs = (ctypes.c_double * 3)(2.0, 5.0, 14.0)
+        piv = (c_i64 * 3)(0, 0, 0)
+        info = c_i64(0)
+        lib.rt_lapack_dgesv(3, 1, lu, 3, piv, rhs, 1, ctypes.byref(info))
+        if info.value != 0:
+            raise SystemExit(f"dgesv_loop info={info.value}")
+    gesv_us = (time.perf_counter() - gesv_start) * 1000000.0 / 1000.0
+
+    max_rss_kb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    is_real = "true" if lib.rt_scilib_is_real() == 1 else "false"
+    return [
+        f"openblas_real={is_real}",
+        "scilib_parity=mock_vs_openblas",
+        f"scilib_load_ms={load_ms:.3f}",
+        f"scilib_ddot_us={ddot_us:.3f}",
+        f"scilib_dgemm_us={gemm_us:.3f}",
+        f"scilib_dgesv_us={gesv_us:.3f}",
+        f"scilib_max_rss_kb={max_rss_kb}",
+    ]
+
+print("\n".join(smoke(sys.argv[1], sys.argv[2])))
+PY
+)"
+fi
+
+echo "mock_shim=$MOCK_SO"
+echo "openblas_shim=$OPENBLAS_SO"
+echo "openblas_sffi_shim=$OPENBLAS_SFFI_SO"
+if [ -n "$OPENBLAS_CFLAGS" ]; then
+    echo "openblas_cflags=$OPENBLAS_CFLAGS"
+fi
+if [ -n "$OPENBLAS_LIBS" ]; then
+    echo "openblas_libs=$OPENBLAS_LIBS"
+fi
+if [ -n "$OPENBLAS_LD_LIBRARY_PATH" ]; then
+    echo "openblas_ld_library_path=$OPENBLAS_LD_LIBRARY_PATH"
+fi
+printf '%s\n' "$OPENBLAS_REAL"
+
+if [ -x bin/simple ]; then
+    LD_LIBRARY_PATH="${OPENBLAS_LD_LIBRARY_PATH}${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
+        SIMPLE_SFFI_PATH="$OPENBLAS_SFFI_DIR" SIMPLE_BLAS_BACKEND=openblas \
+        bin/simple test test/feature/scilib/linalg_openblas_backend_spec.spl \
+        --mode=interpreter --no-cache >/tmp/scilib_openblas_spec.$$.log
+    echo "openblas_simple_spec=pass"
+    rm -f /tmp/scilib_openblas_spec.$$.log
+fi
+
+if [ "$REQUIRE_REAL_OPENBLAS" = "1" ] && ! printf '%s\n' "$OPENBLAS_REAL" | grep -q '^openblas_real=true$'; then
+    echo "error: SCILIB_REQUIRE_REAL_OPENBLAS=1 but the OpenBLAS/LAPACKE shim built unavailable fallback" >&2
+    exit 1
+fi

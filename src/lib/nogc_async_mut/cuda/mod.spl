@@ -3,12 +3,665 @@
 # Thin, hand-maintained wrapper over the canonical runtime CUDA ABI.
 
 use std.nogc_async_mut.cuda.ffi.*
+use std.ndarray.*
+
+extern fn rt_alloc(size: i64) -> i64
+extern fn rt_free(ptr: i64, size: i64)
+extern fn rt_ptr_read_i64(addr: i64, offset: i64) -> i64
+extern fn rt_ptr_write_i64(addr: i64, offset: i64, value: i64)
+extern fn spl_f64_to_bits(value: f64) -> i64
+extern fn spl_bits_to_f64(bits: i64) -> f64
 
 val CUDA_SUCCESS = 0
 val CUDA_ERROR_INVALID_VALUE = -1
 val CUDA_ERROR_OUT_OF_MEMORY = -2
 val CUDA_ERROR_NOT_INITIALIZED = -3
 val CUDA_ERROR_NO_DEVICE = -100
+val CUDA_F64_ADD = 0
+val CUDA_F64_SUB = 1
+val CUDA_F64_MUL = 2
+val CUDA_F64_DIV = 3
+val CUDA_F64_MIN = 0
+val CUDA_F64_MAX = 1
+
+class CudaBuffer:
+    ptr: i64
+    size: i64
+
+    static fn allocate(size: i64) -> Result<CudaBuffer, i64>:
+        if size <= 0:
+            return Err(CUDA_ERROR_INVALID_VALUE)
+        val ptr = cuda_mem_alloc(size)
+        if ptr <= 0:
+            return Err(ptr)
+        Ok(CudaBuffer(ptr: ptr, size: size))
+
+    fn copy_from_i64_values(values: [i64]) -> Result<i64, i64>:
+        val bytes = values.len() * 8
+        if bytes > self.size:
+            return Err(CUDA_ERROR_INVALID_VALUE)
+        val host = rt_alloc(bytes)
+        if host == 0:
+            return Err(CUDA_ERROR_OUT_OF_MEMORY)
+        var i = 0
+        while i < values.len():
+            rt_ptr_write_i64(host, i * 8, values[i])
+            i = i + 1
+        val rc = cuda_memcpy_htod(self.ptr, host, bytes)
+        rt_free(host, bytes)
+        if rc != CUDA_SUCCESS:
+            return Err(rc)
+        Ok(bytes)
+
+    fn copy_to_i64_values(count: i64) -> Result<[i64], i64>:
+        val bytes = count * 8
+        if count < 0 or bytes > self.size:
+            return Err(CUDA_ERROR_INVALID_VALUE)
+        if count == 0:
+            return Ok([])
+        val host = rt_alloc(bytes)
+        if host == 0:
+            return Err(CUDA_ERROR_OUT_OF_MEMORY)
+        val rc = cuda_memcpy_dtoh(host, self.ptr, bytes)
+        if rc != CUDA_SUCCESS:
+            rt_free(host, bytes)
+            return Err(rc)
+        var out: [i64] = []
+        var i = 0
+        while i < count:
+            out.push(rt_ptr_read_i64(host, i * 8))
+            i = i + 1
+        rt_free(host, bytes)
+        Ok(out)
+
+    fn copy_to(other: CudaBuffer, size: i64) -> Result<i64, i64>:
+        if size < 0 or size > self.size or size > other.size:
+            return Err(CUDA_ERROR_INVALID_VALUE)
+        val rc = cuda_memcpy_dtod(other.ptr, self.ptr, size)
+        if rc != CUDA_SUCCESS:
+            return Err(rc)
+        Ok(size)
+
+    fn memset(value: i64) -> Result<i64, i64>:
+        val rc = cuda_memset(self.ptr, value, self.size)
+        if rc != CUDA_SUCCESS:
+            return Err(rc)
+        Ok(self.size)
+
+    fn free() -> i64:
+        if self.ptr <= 0 or self.size == 0:
+            return CUDA_SUCCESS
+        cuda_mem_free(self.ptr)
+
+class CudaNDArray:
+    buffer: CudaBuffer
+    shape: Shape
+    dtype: DType
+    device: Device
+
+    static fn from_f64_array(host: NDArray, device_id: i64) -> Result<CudaNDArray, i64>:
+        if host.dtype != DType.F64 or not host.is_contiguous():
+            return Err(CUDA_ERROR_INVALID_VALUE)
+        val count = host.len().value
+        if count == 0:
+            if not cuda_available():
+                return Err(CUDA_ERROR_NOT_INITIALIZED)
+            return Ok(CudaNDArray(
+                buffer: CudaBuffer(ptr: 0, size: 0),
+                shape: host.shape,
+                dtype: DType.F64,
+                device: Device.CUDA(index: device_id)
+            ))
+        val buffer = CudaBuffer.allocate(count * 8)?
+        var bits: [i64] = []
+        var i = 0
+        while i < count:
+            bits.push(spl_f64_to_bits(host.get_f64(Index.new(i)).value))
+            i = i + 1
+        match buffer.copy_from_i64_values(bits):
+            case Ok(_):
+                Ok(CudaNDArray(
+                    buffer: buffer,
+                    shape: host.shape,
+                    dtype: DType.F64,
+                    device: Device.CUDA(index: device_id)
+                ))
+            case Err(code):
+                buffer.free()
+                Err(code)
+
+    static fn concatenate_1d_f64(arrays: [CudaNDArray]) -> Result<CudaNDArray, i64>:
+        if arrays.len() == 0:
+            return Err(CUDA_ERROR_INVALID_VALUE)
+        val first = arrays[0]
+        if first.dtype != DType.F64 or first.shape.dims.len() != 1:
+            return Err(CUDA_ERROR_INVALID_VALUE)
+        var total = 0
+        var i = 0
+        while i < arrays.len():
+            val current = arrays[i]
+            if current.dtype != DType.F64 or current.shape.dims.len() != 1 or current.device != first.device:
+                return Err(CUDA_ERROR_INVALID_VALUE)
+            total = total + current.shape.dims[0].value
+            i = i + 1
+        if total < 0:
+            return Err(CUDA_ERROR_INVALID_VALUE)
+        if total == 0:
+            return Ok(CudaNDArray(
+                buffer: CudaBuffer(ptr: 0, size: 0),
+                shape: Shape.new([Index.new(0)]),
+                dtype: DType.F64,
+                device: first.device
+            ))
+        val out_buffer = CudaBuffer.allocate(total * 8)?
+        var dst_offset = 0
+        i = 0
+        while i < arrays.len():
+            val current = arrays[i]
+            val bytes = current.shape.dims[0].value * 8
+            if bytes > 0:
+                val rc = cuda_memcpy_dtod(out_buffer.ptr + dst_offset, current.buffer.ptr, bytes)
+                if rc != CUDA_SUCCESS:
+                    out_buffer.free()
+                    return Err(rc)
+                dst_offset = dst_offset + bytes
+            i = i + 1
+        Ok(CudaNDArray(
+            buffer: out_buffer,
+            shape: Shape.new([Index.new(total)]),
+            dtype: DType.F64,
+            device: first.device
+        ))
+
+    static fn stack_1d_f64(arrays: [CudaNDArray]) -> Result<CudaNDArray, i64>:
+        if arrays.len() == 0:
+            return Err(CUDA_ERROR_INVALID_VALUE)
+        val first = arrays[0]
+        if first.dtype != DType.F64 or first.shape.dims.len() != 1:
+            return Err(CUDA_ERROR_INVALID_VALUE)
+        val width = first.shape.dims[0].value
+        var i = 0
+        while i < arrays.len():
+            val current = arrays[i]
+            if current.dtype != DType.F64 or current.shape.dims.len() != 1 or current.shape.dims[0].value != width or current.device != first.device:
+                return Err(CUDA_ERROR_INVALID_VALUE)
+            i = i + 1
+        val concatenated = CudaNDArray.concatenate_1d_f64(arrays)?
+        Ok(CudaNDArray(
+            buffer: concatenated.buffer,
+            shape: Shape.new([Index.new(arrays.len()), Index.new(width)]),
+            dtype: DType.F64,
+            device: first.device
+        ))
+
+    fn to_host_f64() -> Result<NDArray, i64>:
+        if self.dtype != DType.F64:
+            return Err(CUDA_ERROR_INVALID_VALUE)
+        val count = self.shape.numel().value
+        if count == 0:
+            return Ok(make_f64_array([], self.shape))
+        val bits = self.buffer.copy_to_i64_values(count)?
+        var values: [Float64] = []
+        var i = 0
+        while i < bits.len():
+            values.push(Float64.new(spl_bits_to_f64(bits[i])))
+            i = i + 1
+        Ok(make_f64_array(values, self.shape))
+
+    fn reshape_f64(shape: Shape) -> Result<CudaNDArray, i64>:
+        if self.dtype != DType.F64:
+            return Err(CUDA_ERROR_INVALID_VALUE)
+        var i = 0
+        while i < shape.dims.len():
+            if shape.dims[i].value < 0:
+                return Err(CUDA_ERROR_INVALID_VALUE)
+            i = i + 1
+        if shape.numel() != self.shape.numel():
+            return Err(CUDA_ERROR_INVALID_VALUE)
+        self.copy_with_shape_f64(shape)
+
+    fn flatten_f64() -> Result<CudaNDArray, i64>:
+        self.reshape_f64(Shape.new([self.shape.numel()]))
+
+    fn transpose_2d_f64() -> Result<CudaNDArray, i64>:
+        if self.dtype != DType.F64 or self.shape.dims.len() != 2:
+            return Err(CUDA_ERROR_INVALID_VALUE)
+        val rows = self.shape.dims[0].value
+        val cols = self.shape.dims[1].value
+        if rows < 0 or cols < 0:
+            return Err(CUDA_ERROR_INVALID_VALUE)
+        if rows == 0 or cols == 0:
+            return Ok(CudaNDArray(
+                buffer: CudaBuffer(ptr: 0, size: 0),
+                shape: Shape.new([Index.new(cols), Index.new(rows)]),
+                dtype: DType.F64,
+                device: self.device
+            ))
+        val out_buffer = CudaBuffer.allocate(rows * cols * 8)?
+        var row = 0
+        while row < rows:
+            var col = 0
+            while col < cols:
+                val src_offset = (row * cols + col) * 8
+                val dst_offset = (col * rows + row) * 8
+                val rc = cuda_memcpy_dtod(out_buffer.ptr + dst_offset, self.buffer.ptr + src_offset, 8)
+                if rc != CUDA_SUCCESS:
+                    out_buffer.free()
+                    return Err(rc)
+                col = col + 1
+            row = row + 1
+        Ok(CudaNDArray(
+            buffer: out_buffer,
+            shape: Shape.new([Index.new(cols), Index.new(rows)]),
+            dtype: DType.F64,
+            device: self.device
+        ))
+
+    fn add_f64(other: CudaNDArray) -> Result<CudaNDArray, i64>:
+        self.binary_f64(other, "add")
+
+    fn sub_f64(other: CudaNDArray) -> Result<CudaNDArray, i64>:
+        self.binary_f64(other, "sub")
+
+    fn mul_f64(other: CudaNDArray) -> Result<CudaNDArray, i64>:
+        self.binary_f64(other, "mul")
+
+    fn div_f64(other: CudaNDArray) -> Result<CudaNDArray, i64>:
+        self.binary_f64(other, "div")
+
+    fn add_scalar_f64(value: Float64) -> Result<CudaNDArray, i64>:
+        self.binary_scalar_f64(value, "add")
+
+    fn sub_scalar_f64(value: Float64) -> Result<CudaNDArray, i64>:
+        self.binary_scalar_f64(value, "sub")
+
+    fn mul_scalar_f64(value: Float64) -> Result<CudaNDArray, i64>:
+        self.binary_scalar_f64(value, "mul")
+
+    fn div_scalar_f64(value: Float64) -> Result<CudaNDArray, i64>:
+        if self.dtype != DType.F64:
+            return Err(CUDA_ERROR_INVALID_VALUE)
+        val count = self.shape.numel().value
+        if count == 0:
+            return Ok(CudaNDArray(
+                buffer: CudaBuffer(ptr: 0, size: 0),
+                shape: self.shape,
+                dtype: DType.F64,
+                device: self.device
+            ))
+        val out_buffer = CudaBuffer.allocate(count * 8)?
+        val rc = cuda_f64_scalar_div(out_buffer.ptr, self.buffer.ptr, count, spl_f64_to_bits(value.value))
+        if rc != CUDA_SUCCESS:
+            out_buffer.free()
+            return Err(rc)
+        Ok(CudaNDArray(
+            buffer: out_buffer,
+            shape: self.shape,
+            dtype: DType.F64,
+            device: self.device
+        ))
+
+    fn sum_f64() -> Result<Float64, i64>:
+        if self.dtype != DType.F64:
+            return Err(CUDA_ERROR_INVALID_VALUE)
+        val count = self.shape.numel().value
+        if count == 0:
+            return Ok(Float64.new(0.0))
+        val host_bits = rt_alloc(8)
+        if host_bits == 0:
+            return Err(CUDA_ERROR_OUT_OF_MEMORY)
+        val rc = cuda_f64_sum(host_bits, self.buffer.ptr, count)
+        if rc != CUDA_SUCCESS:
+            rt_free(host_bits, 8)
+            return Err(rc)
+        val bits = rt_ptr_read_i64(host_bits, 0)
+        rt_free(host_bits, 8)
+        Ok(Float64.new(spl_bits_to_f64(bits)))
+
+    fn mean_f64() -> Result<Float64, i64>:
+        if self.dtype != DType.F64 or self.shape.numel().value == 0:
+            return Err(CUDA_ERROR_INVALID_VALUE)
+        val sum = self.sum_f64()?
+        Ok(Float64.new(sum.value / self.shape.numel().value.to_f64()))
+
+    fn min_f64() -> Result<Float64, i64>:
+        self.minmax_f64(CUDA_F64_MIN)
+
+    fn max_f64() -> Result<Float64, i64>:
+        self.minmax_f64(CUDA_F64_MAX)
+
+    fn sum_axis_f64(axis: Axis) -> Result<CudaNDArray, i64>:
+        if self.dtype != DType.F64 or self.shape.dims.len() != 2:
+            return Err(CUDA_ERROR_INVALID_VALUE)
+        val normalized = normalize_cuda_axis(axis, 2)?
+        val rows = self.shape.dims[0].value
+        val cols = self.shape.dims[1].value
+        if rows <= 0 or cols <= 0:
+            return Err(CUDA_ERROR_INVALID_VALUE)
+        val out_len = if normalized == 0:
+            cols
+        else:
+            rows
+        val out_buffer = CudaBuffer.allocate(out_len * 8)?
+        val rc = cuda_f64_sum_axis(out_buffer.ptr, self.buffer.ptr, rows, cols, normalized)
+        if rc != CUDA_SUCCESS:
+            out_buffer.free()
+            return Err(rc)
+        Ok(CudaNDArray(
+            buffer: out_buffer,
+            shape: Shape.new([Index.new(out_len)]),
+            dtype: DType.F64,
+            device: self.device
+        ))
+
+    fn mean_axis_f64(axis: Axis) -> Result<CudaNDArray, i64>:
+        if self.dtype != DType.F64 or self.shape.dims.len() != 2:
+            return Err(CUDA_ERROR_INVALID_VALUE)
+        val normalized = normalize_cuda_axis(axis, 2)?
+        val denom = if normalized == 0:
+            self.shape.dims[0].value
+        else:
+            self.shape.dims[1].value
+        if denom <= 0:
+            return Err(CUDA_ERROR_INVALID_VALUE)
+        val sums = self.sum_axis_f64(Axis.new(normalized))?
+        val out_shape = sums.shape
+        val out_len = out_shape.numel().value
+        val out_buffer = CudaBuffer.allocate(out_len * 8)?
+        val rc = cuda_f64_scalar_div(out_buffer.ptr, sums.buffer.ptr, out_len, spl_f64_to_bits(denom.to_f64()))
+        if rc != CUDA_SUCCESS:
+            out_buffer.free()
+            sums.free()
+            return Err(rc)
+        sums.free()
+        Ok(CudaNDArray(
+            buffer: out_buffer,
+            shape: out_shape,
+            dtype: DType.F64,
+            device: self.device
+        ))
+
+    fn slice_1d_f64(spec: Slice) -> Result<CudaNDArray, i64>:
+        if self.dtype != DType.F64 or self.shape.dims.len() != 1:
+            return Err(CUDA_ERROR_INVALID_VALUE)
+        if spec.step.value == 0:
+            return Err(CUDA_ERROR_INVALID_VALUE)
+        val size = self.shape.dims[0].value
+        var start = spec.start.value
+        var stop = spec.stop.value
+        if start < 0:
+            start = size + start
+        if stop < 0:
+            stop = size + stop
+        if start < 0 or start > size or stop < 0 or stop > size:
+            return Err(CUDA_ERROR_INVALID_VALUE)
+        if spec.step.value > 0 and stop < start:
+            return Err(CUDA_ERROR_INVALID_VALUE)
+        if spec.step.value < 0 and stop > start:
+            return Err(CUDA_ERROR_INVALID_VALUE)
+        if spec.step.value == 1:
+            return self.slice_1d_contiguous_device_f64(start, stop)
+        self.slice_1d_strided_device_f64(start, stop, spec.step.value)
+
+    fn slice_2d_f64(rows: Slice, cols: Slice) -> Result<CudaNDArray, i64>:
+        if self.dtype != DType.F64 or self.shape.dims.len() != 2:
+            return Err(CUDA_ERROR_INVALID_VALUE)
+        if rows.step.value == 0 or cols.step.value == 0:
+            return Err(CUDA_ERROR_INVALID_VALUE)
+        val row_size = self.shape.dims[0].value
+        val col_size = self.shape.dims[1].value
+        var row_start = rows.start.value
+        var row_stop = rows.stop.value
+        var col_start = cols.start.value
+        var col_stop = cols.stop.value
+        if row_start < 0:
+            row_start = row_size + row_start
+        if row_stop < 0:
+            row_stop = row_size + row_stop
+        if col_start < 0:
+            col_start = col_size + col_start
+        if col_stop < 0:
+            col_stop = col_size + col_stop
+        if row_start < 0 or row_start > row_size or row_stop < 0 or row_stop > row_size:
+            return Err(CUDA_ERROR_INVALID_VALUE)
+        if col_start < 0 or col_start > col_size or col_stop < 0 or col_stop > col_size:
+            return Err(CUDA_ERROR_INVALID_VALUE)
+        if rows.step.value > 0 and row_stop < row_start:
+            return Err(CUDA_ERROR_INVALID_VALUE)
+        if rows.step.value < 0 and row_stop > row_start:
+            return Err(CUDA_ERROR_INVALID_VALUE)
+        if cols.step.value > 0 and col_stop < col_start:
+            return Err(CUDA_ERROR_INVALID_VALUE)
+        if cols.step.value < 0 and col_stop > col_start:
+            return Err(CUDA_ERROR_INVALID_VALUE)
+        if rows.step.value == 1 and cols.step.value == 1:
+            return self.slice_2d_contiguous_device_f64(row_start, row_stop, col_start, col_stop)
+        self.slice_2d_strided_device_f64(
+            row_start,
+            row_stop,
+            rows.step.value,
+            col_start,
+            col_stop,
+            cols.step.value
+        )
+
+    fn slice_1d_contiguous_device_f64(start: i64, stop: i64) -> Result<CudaNDArray, i64>:
+        val length = stop - start
+        if length < 0:
+            return Err(CUDA_ERROR_INVALID_VALUE)
+        if length == 0:
+            return Ok(CudaNDArray(
+                buffer: CudaBuffer(ptr: 0, size: 0),
+                shape: Shape.new([Index.new(0)]),
+                dtype: DType.F64,
+                device: self.device
+            ))
+        val out_buffer = CudaBuffer.allocate(length * 8)?
+        val src_ptr = self.buffer.ptr + start * 8
+        val rc = cuda_memcpy_dtod(out_buffer.ptr, src_ptr, length * 8)
+        if rc != CUDA_SUCCESS:
+            out_buffer.free()
+            return Err(rc)
+        Ok(CudaNDArray(
+            buffer: out_buffer,
+            shape: Shape.new([Index.new(length)]),
+            dtype: DType.F64,
+            device: self.device
+        ))
+
+    fn slice_1d_strided_device_f64(start: i64, stop: i64, step: i64) -> Result<CudaNDArray, i64>:
+        val length = slice_length(start, stop, step)
+        if length < 0:
+            return Err(CUDA_ERROR_INVALID_VALUE)
+        if length == 0:
+            return Ok(CudaNDArray(
+                buffer: CudaBuffer(ptr: 0, size: 0),
+                shape: Shape.new([Index.new(0)]),
+                dtype: DType.F64,
+                device: self.device
+            ))
+        val out_buffer = CudaBuffer.allocate(length * 8)?
+        val rc = cuda_f64_slice_1d(out_buffer.ptr, self.buffer.ptr, start, step, length)
+        if rc != CUDA_SUCCESS:
+            out_buffer.free()
+            return Err(rc)
+        Ok(CudaNDArray(
+            buffer: out_buffer,
+            shape: Shape.new([Index.new(length)]),
+            dtype: DType.F64,
+            device: self.device
+        ))
+
+    fn slice_2d_contiguous_device_f64(row_start: i64, row_stop: i64, col_start: i64, col_stop: i64) -> Result<CudaNDArray, i64>:
+        val row_count = row_stop - row_start
+        val col_count = col_stop - col_start
+        if row_count < 0 or col_count < 0:
+            return Err(CUDA_ERROR_INVALID_VALUE)
+        if row_count == 0 or col_count == 0:
+            return Ok(CudaNDArray(
+                buffer: CudaBuffer(ptr: 0, size: 0),
+                shape: Shape.new([Index.new(row_count), Index.new(col_count)]),
+                dtype: DType.F64,
+                device: self.device
+            ))
+        val source_cols = self.shape.dims[1].value
+        val out_buffer = CudaBuffer.allocate(row_count * col_count * 8)?
+        var row = 0
+        while row < row_count:
+            val src_offset = ((row_start + row) * source_cols + col_start) * 8
+            val dst_offset = row * col_count * 8
+            val rc = cuda_memcpy_dtod(out_buffer.ptr + dst_offset, self.buffer.ptr + src_offset, col_count * 8)
+            if rc != CUDA_SUCCESS:
+                out_buffer.free()
+                return Err(rc)
+            row = row + 1
+        Ok(CudaNDArray(
+            buffer: out_buffer,
+            shape: Shape.new([Index.new(row_count), Index.new(col_count)]),
+            dtype: DType.F64,
+            device: self.device
+        ))
+
+    fn slice_2d_strided_device_f64(row_start: i64, row_stop: i64, row_step: i64, col_start: i64, col_stop: i64, col_step: i64) -> Result<CudaNDArray, i64>:
+        val row_count = slice_length(row_start, row_stop, row_step)
+        val col_count = slice_length(col_start, col_stop, col_step)
+        if row_count < 0 or col_count < 0:
+            return Err(CUDA_ERROR_INVALID_VALUE)
+        if row_count == 0 or col_count == 0:
+            return Ok(CudaNDArray(
+                buffer: CudaBuffer(ptr: 0, size: 0),
+                shape: Shape.new([Index.new(row_count), Index.new(col_count)]),
+                dtype: DType.F64,
+                device: self.device
+            ))
+        val source_cols = self.shape.dims[1].value
+        val out_buffer = CudaBuffer.allocate(row_count * col_count * 8)?
+        val rc = cuda_f64_slice_2d(out_buffer.ptr, self.buffer.ptr, source_cols, row_start, row_step, row_count, col_start, col_step, col_count)
+        if rc != CUDA_SUCCESS:
+            out_buffer.free()
+            return Err(rc)
+        Ok(CudaNDArray(
+            buffer: out_buffer,
+            shape: Shape.new([Index.new(row_count), Index.new(col_count)]),
+            dtype: DType.F64,
+            device: self.device
+        ))
+
+    fn binary_f64(other: CudaNDArray, op: text) -> Result<CudaNDArray, i64>:
+        if self.dtype != DType.F64 or other.dtype != DType.F64:
+            return Err(CUDA_ERROR_INVALID_VALUE)
+        if self.shape != other.shape or self.device != other.device:
+            return Err(CUDA_ERROR_INVALID_VALUE)
+        val op_code = if op == "add":
+            CUDA_F64_ADD
+        elif op == "sub":
+            CUDA_F64_SUB
+        elif op == "mul":
+            CUDA_F64_MUL
+        elif op == "div":
+            CUDA_F64_DIV
+        else:
+            return Err(CUDA_ERROR_INVALID_VALUE)
+        val count = self.shape.numel().value
+        if count == 0:
+            return Ok(CudaNDArray(
+                buffer: CudaBuffer(ptr: 0, size: 0),
+                shape: self.shape,
+                dtype: DType.F64,
+                device: self.device
+            ))
+        val out_buffer = CudaBuffer.allocate(count * 8)?
+        val rc = cuda_f64_binary_op(out_buffer.ptr, self.buffer.ptr, other.buffer.ptr, count, op_code)
+        if rc != CUDA_SUCCESS:
+            out_buffer.free()
+            return Err(rc)
+        Ok(CudaNDArray(
+            buffer: out_buffer,
+            shape: self.shape,
+            dtype: DType.F64,
+            device: self.device
+        ))
+
+    fn binary_scalar_f64(value: Float64, op: text) -> Result<CudaNDArray, i64>:
+        if self.dtype != DType.F64:
+            return Err(CUDA_ERROR_INVALID_VALUE)
+        val count = self.shape.numel().value
+        if count == 0:
+            return Ok(CudaNDArray(
+                buffer: CudaBuffer(ptr: 0, size: 0),
+                shape: self.shape,
+                dtype: DType.F64,
+                device: self.device
+            ))
+        val scalar_buffer = CudaBuffer.allocate(count * 8)?
+        var bits: [i64] = []
+        var i = 0
+        val scalar_bits = spl_f64_to_bits(value.value)
+        while i < count:
+            bits.push(scalar_bits)
+            i = i + 1
+        match scalar_buffer.copy_from_i64_values(bits):
+            case Ok(_):
+                val scalar_array = CudaNDArray(
+                    buffer: scalar_buffer,
+                    shape: self.shape,
+                    dtype: DType.F64,
+                    device: self.device
+                )
+                val result = self.binary_f64(scalar_array, op)
+                scalar_array.free()
+                result
+            case Err(code):
+                scalar_buffer.free()
+                Err(code)
+
+    fn copy_with_shape_f64(shape: Shape) -> Result<CudaNDArray, i64>:
+        val count = shape.numel().value
+        if count == 0:
+            return Ok(CudaNDArray(
+                buffer: CudaBuffer(ptr: 0, size: 0),
+                shape: shape,
+                dtype: DType.F64,
+                device: self.device
+            ))
+        val bytes = count * 8
+        if bytes > self.buffer.size:
+            return Err(CUDA_ERROR_INVALID_VALUE)
+        val out_buffer = CudaBuffer.allocate(bytes)?
+        val rc = cuda_memcpy_dtod(out_buffer.ptr, self.buffer.ptr, bytes)
+        if rc != CUDA_SUCCESS:
+            out_buffer.free()
+            return Err(rc)
+        Ok(CudaNDArray(
+            buffer: out_buffer,
+            shape: shape,
+            dtype: DType.F64,
+            device: self.device
+        ))
+
+    fn minmax_f64(op: i64) -> Result<Float64, i64>:
+        if self.dtype != DType.F64 or self.shape.numel().value == 0:
+            return Err(CUDA_ERROR_INVALID_VALUE)
+        val host_bits = rt_alloc(8)
+        if host_bits == 0:
+            return Err(CUDA_ERROR_OUT_OF_MEMORY)
+        val rc = cuda_f64_minmax(host_bits, self.buffer.ptr, self.shape.numel().value, op)
+        if rc != CUDA_SUCCESS:
+            rt_free(host_bits, 8)
+            return Err(rc)
+        val bits = rt_ptr_read_i64(host_bits, 0)
+        rt_free(host_bits, 8)
+        Ok(Float64.new(spl_bits_to_f64(bits)))
+
+    fn cuda_device_id() -> i64:
+        match self.device:
+            case Device.CUDA(id):
+                id
+            case Device.CPU:
+                0
+
+    fn free() -> i64:
+        self.buffer.free()
 
 fn cuda_available() -> bool:
     rt_cuda_available() != 0
@@ -55,6 +708,50 @@ fn cuda_memcpy_dtod(dst: i64, src: i64, size: i64) -> i64:
 fn cuda_memset(ptr: i64, value: i64, size: i64) -> i64:
     rt_cuda_memset(ptr, value, size)
 
+fn cuda_f64_binary_op(dst: i64, left: i64, right: i64, n: i64, op: i64) -> i64:
+    rt_cuda_f64_binary_op(dst, left, right, n, op)
+
+fn cuda_f64_sum(dst_host_bits: i64, src: i64, n: i64) -> i64:
+    rt_cuda_f64_sum(dst_host_bits, src, n)
+
+fn cuda_f64_minmax(dst_host_bits: i64, src: i64, n: i64, op: i64) -> i64:
+    rt_cuda_f64_minmax(dst_host_bits, src, n, op)
+
+fn cuda_f64_sum_axis(dst: i64, src: i64, rows: i64, cols: i64, axis: i64) -> i64:
+    rt_cuda_f64_sum_axis(dst, src, rows, cols, axis)
+
+fn cuda_f64_scalar_div(dst: i64, src: i64, n: i64, scalar_bits: i64) -> i64:
+    rt_cuda_f64_scalar_div(dst, src, n, scalar_bits)
+
+fn cuda_f64_slice_1d(dst: i64, src: i64, start: i64, step: i64, n: i64) -> i64:
+    rt_cuda_f64_slice_1d(dst, src, start, step, n)
+
+fn cuda_f64_slice_2d(dst: i64, src: i64, source_cols: i64, row_start: i64, row_step: i64, row_count: i64, col_start: i64, col_step: i64, col_count: i64) -> i64:
+    rt_cuda_f64_slice_2d(dst, src, source_cols, row_start, row_step, row_count, col_start, col_step, col_count)
+
+fn slice_length(start: i64, stop: i64, step: i64) -> i64:
+    if step == 0:
+        return 0
+    var count = 0
+    var cursor = start
+    if step > 0:
+        while cursor < stop:
+            count = count + 1
+            cursor = cursor + step
+    else:
+        while cursor > stop:
+            count = count + 1
+            cursor = cursor + step
+    count
+
+fn normalize_cuda_axis(axis: Axis, ndim: i64) -> Result<i64, i64>:
+    var value = axis.value
+    if value < 0:
+        value = ndim + value
+    if value < 0 or value >= ndim:
+        return Err(CUDA_ERROR_INVALID_VALUE)
+    Ok(value)
+
 fn cuda_module_load(path: text) -> i64:
     rt_cuda_module_load(path)
 
@@ -75,4 +772,3 @@ fn cuda_sync() -> i64:
 
 fn cuda_get_error_string(error_code: i64) -> text:
     rt_cuda_get_error_string(error_code)
-

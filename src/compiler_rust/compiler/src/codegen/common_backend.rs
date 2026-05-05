@@ -517,7 +517,7 @@ impl<M: Module> CodegenBackend<M> {
         for func in functions {
             // Skip functions that are already declared as runtime functions
             // This handles extern functions from Simple code that match runtime functions
-            if self.runtime_funcs.contains_key(func.name.as_str()) {
+            if self.runtime_funcs.contains_key(func.name.as_str()) && func.blocks.is_empty() {
                 continue;
             }
 
@@ -588,8 +588,31 @@ impl<M: Module> CodegenBackend<M> {
         use super::types_util::type_to_cranelift;
 
         for (name, ty, is_mutable) in globals {
+            let trace_global = std::env::var("SIMPLE_TRACE_DECLARE_GLOBALS").is_ok()
+                && matches!(
+                    name.as_str(),
+                    "decl_tag"
+                        | "frontend__core__ast__decl_tag"
+                        | "module_decl_slots"
+                        | "frontend__core__ast__module_decl_slots"
+                        | "DECL_FN"
+                        | "frontend__core__ast__DECL_FN"
+                );
+            if trace_global {
+                eprintln!(
+                    "[declare-globals] start name={} ty={:?} mut={} local={} module_prefix={:?}",
+                    name,
+                    ty,
+                    is_mutable,
+                    local_globals.contains(name),
+                    self.module_prefix
+                );
+            }
             // Skip globals that are actually runtime functions (extern functions)
             if self.runtime_funcs.contains_key(name.as_str()) {
+                if trace_global {
+                    eprintln!("[declare-globals] skip runtime name={}", name);
+                }
                 continue;
             }
 
@@ -597,6 +620,9 @@ impl<M: Module> CodegenBackend<M> {
             // initialized with the function's import address. This ensures that
             // GlobalLoad + IndirectCall patterns resolve correctly at link time.
             if extern_fn_names.contains(name) {
+                if trace_global {
+                    eprintln!("[declare-globals] skip extern fn name={}", name);
+                }
                 // Skip data slot creation for extern functions — the function
                 // is already declared via declare_functions and can be called directly.
                 // Creating a data slot with define_zeroinit + write_function_addr
@@ -609,6 +635,9 @@ impl<M: Module> CodegenBackend<M> {
             // field or variable). Initialize the BSS slot with the function address
             // so that GlobalLoad + IndirectCall resolves correctly.
             if let Some(&_func_id) = self.func_ids.get(name) {
+                if trace_global {
+                    eprintln!("[declare-globals] skip func_id name={}", name);
+                }
                 // Skip data slot creation for function references — calling through
                 // a data slot (GlobalLoad + IndirectCall) is not needed when the function
                 // can be called directly. Creating data slots with define_zeroinit +
@@ -645,8 +674,12 @@ impl<M: Module> CodegenBackend<M> {
                     // data export, fall through to the data-import path below so
                     // `GlobalLoad` reads the value from memory instead of treating
                     // the symbol as a function pointer.
+                    let looks_like_const_data = !name.is_empty()
+                        && name
+                            .chars()
+                            .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_');
                     let is_data_export = self.data_exports.contains(resolved) || self.data_exports.contains(&sanitized);
-                    if !is_data_export {
+                    if !is_data_export && !looks_like_const_data {
                         let call_conv = super::shared::platform_call_conv();
                         let mut sig = cranelift_codegen::ir::Signature::new(call_conv);
                         sig.params.push(cranelift_codegen::ir::AbiParam::new(types::I64));
@@ -655,6 +688,12 @@ impl<M: Module> CodegenBackend<M> {
                             self.module
                                 .declare_function(&sanitized, cranelift_module::Linkage::Import, &sig)
                         {
+                            if trace_global {
+                                eprintln!(
+                                    "[declare-globals] imported as function name={} resolved={}",
+                                    name, sanitized
+                                );
+                            }
                             self.func_ids.entry(name.clone()).or_insert(fid);
                             continue;
                         }
@@ -662,17 +701,20 @@ impl<M: Module> CodegenBackend<M> {
                 }
             }
 
-            // MIR's local_globals can over-eagerly include type-name references used
-            // as struct field types when those types are imported via `use ...{Name}`.
-            // If the module has an explicit use-clause for this name, trust that over
-            // local_globals — the symbol's defining module is elsewhere.
-            let use_says_imported = self.use_map.contains_key(name.as_str());
-            let is_local = local_globals.contains(name) && !use_says_imported;
+            // If a symbol appears in MIR globals and local_globals for this module,
+            // it must be emitted here. A use-map entry with the same short name can
+            // coexist with local arena state/constants (for example core AST
+            // DECL_* and decl_* globals); treating those as imports leaves only weak
+            // stubs at link time and corrupts bootstrap state.
+            let is_local = local_globals.contains(name);
 
             // Linkage strategy for globals in per-module compilation:
             // - Local globals: Preemptible + initialized data (if available)
             // - Imported globals: Import linkage, resolve symbol via use_map/import_map
             if !is_local {
+                if trace_global {
+                    eprintln!("[declare-globals] import data name={}", name);
+                }
                 // Imported global: resolve the correct mangled name from the defining module
                 // via use_map (per-module imports) or import_map (global unique names).
                 let use_hit = self.use_map.get(name.as_str());
@@ -699,6 +741,12 @@ impl<M: Module> CodegenBackend<M> {
             } else {
                 // Local global: define with Preemptible linkage.
                 let local_symbol = self.mangle_name(name);
+                if trace_global {
+                    eprintln!(
+                        "[declare-globals] define data name={} local_symbol={}",
+                        name, local_symbol
+                    );
+                }
                 let data_id = self
                     .module
                     .declare_data(
@@ -766,6 +814,7 @@ impl<M: Module> CodegenBackend<M> {
                 &self.global_ids,
                 &self.import_map,
                 &self.use_map,
+                &self.data_exports,
                 &self.vtable_data_ids,
                 &self.vtable_type_ids,
             )

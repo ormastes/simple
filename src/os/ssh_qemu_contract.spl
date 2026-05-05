@@ -1,0 +1,52 @@
+# Host-side QEMU contract for the x64 SSH live scenario.
+
+extern fn rt_process_run_timeout(cmd: text, args: [text], timeout_ms: i64) -> (text, text, i32)
+
+pub fn run_x64_ssh_probe(cmd_parts: [text], timeout_ms: u64) -> (text, text, i32):
+    val serial_path = "build/os/x64-ssh-live.serial.log"
+    val banner_path = "build/os/x64-ssh-live.banner.txt"
+    val fail_path = "build/os/x64-ssh-live.auth-fail.txt"
+    val session_fail_path = "build/os/x64-ssh-live.session-fail.txt"
+    val shell_cmd =
+        "rm -f \"" + serial_path + "\" \"" + banner_path + "\" \"" + fail_path + "\" \"" + session_fail_path + "\"; " +
+        cmd_parts.join(" ") + " > \"" + serial_path + "\" 2>&1 & qpid=$!; " +
+        "ready=0; for i in $(seq 1 120); do " +
+        "if grep -a -q '\\[ssh-live\\] ready' \"" + serial_path + "\" 2>/dev/null; then ready=1; break; fi; " +
+        "if ! kill -0 \"$qpid\" 2>/dev/null; then break; fi; sleep 0.25; done; " +
+        "banner_exit=1; if [ \"$ready\" = 1 ]; then " +
+        "timeout 10 bash -lc 'exec 3<>/dev/tcp/127.0.0.1/2222; printf \"SSH-2.0-CodexProbe\\r\\nAUTH root simpleos\\r\\nSESSION shell echo-simpleos\\r\\n\" >&3; IFS= read -r line <&3; printf \"%s\\n\" \"$line\"; IFS= read -r line <&3; printf \"%s\\n\" \"$line\"; IFS= read -r line <&3; printf \"%s\\n\" \"$line\"' > \"" + banner_path + "\" 2>&1; " +
+        "banner_exit=$?; fi; " +
+        "bad_auth_exit=1; if [ \"$ready\" = 1 ]; then " +
+        "timeout 10 bash -lc 'exec 4<>/dev/tcp/127.0.0.1/2222; printf \"SSH-2.0-CodexBadAuth\\r\\nAUTH root wrongpass\\r\\n\" >&4; IFS= read -r line <&4; printf \"%s\\n\" \"$line\"; IFS= read -r line <&4; printf \"%s\\n\" \"$line\"' > \"" + fail_path + "\" 2>&1; " +
+        "bad_auth_exit=$?; fi; " +
+        "session_fail_exit=1; if [ \"$ready\" = 1 ]; then " +
+        "timeout 10 bash -lc 'exec 5<>/dev/tcp/127.0.0.1/2222; printf \"SSH-2.0-CodexBadSession\\r\\nAUTH root simpleos\\r\\nSESSION subsystem sftp\\r\\n\" >&5; IFS= read -r line <&5; printf \"%s\\n\" \"$line\"; IFS= read -r line <&5; printf \"%s\\n\" \"$line\"; IFS= read -r line <&5; printf \"%s\\n\" \"$line\"' > \"" + session_fail_path + "\" 2>&1; " +
+        "session_fail_exit=$?; fi; " +
+        "version_seen=0; if [ \"$banner_exit\" = 0 ]; then " +
+        "for i in $(seq 1 40); do " +
+        "if grep -a -q '\\[ssh-live\\] client-version-ok SSH-2.0-CodexProbe' \"" + serial_path + "\" 2>/dev/null && " +
+        "grep -a -q '\\[ssh-live\\] auth-probe-ok user=root method=password' \"" + serial_path + "\" 2>/dev/null && " +
+        "grep -a -q '\\[ssh-live\\] session-probe-ok kind=shell command=echo-simpleos' \"" + serial_path + "\" 2>/dev/null; then version_seen=1; break; fi; " +
+        "if ! kill -0 \"$qpid\" 2>/dev/null; then break; fi; sleep 0.25; done; fi; " +
+        "bad_auth_seen=0; if [ \"$bad_auth_exit\" = 0 ]; then " +
+        "for i in $(seq 1 40); do " +
+        "if grep -a -q '\\[ssh-live\\] client-version-ok SSH-2.0-CodexBadAuth' \"" + serial_path + "\" 2>/dev/null && " +
+        "grep -a -q '\\[ssh-live\\] auth-probe-fail line=AUTH root wrongpass' \"" + serial_path + "\" 2>/dev/null; then bad_auth_seen=1; break; fi; " +
+        "if ! kill -0 \"$qpid\" 2>/dev/null; then break; fi; sleep 0.25; done; fi; " +
+        "session_fail_seen=0; if [ \"$session_fail_exit\" = 0 ]; then " +
+        "for i in $(seq 1 40); do " +
+        "if grep -a -q '\\[ssh-live\\] client-version-ok SSH-2.0-CodexBadSession' \"" + serial_path + "\" 2>/dev/null && " +
+        "grep -a -q '\\[ssh-live\\] auth-probe-ok user=root method=password' \"" + serial_path + "\" 2>/dev/null && " +
+        "grep -a -q '\\[ssh-live\\] session-probe-fail line=SESSION subsystem sftp' \"" + serial_path + "\" 2>/dev/null; then session_fail_seen=1; break; fi; " +
+        "if ! kill -0 \"$qpid\" 2>/dev/null; then break; fi; sleep 0.25; done; fi; " +
+        "kill \"$qpid\" 2>/dev/null || true; wait \"$qpid\" 2>/dev/null || true; " +
+        "cat \"" + serial_path + "\"; echo '[ssh-host] banner:'; cat \"" + banner_path + "\" 2>/dev/null || true; echo '[ssh-host] bad-auth:'; cat \"" + fail_path + "\" 2>/dev/null || true; echo '[ssh-host] bad-session:'; cat \"" + session_fail_path + "\" 2>/dev/null || true; " +
+        "if [ \"$ready\" = 1 ] && [ \"$banner_exit\" = 0 ] && [ \"$version_seen\" = 1 ] && [ \"$bad_auth_exit\" = 0 ] && [ \"$bad_auth_seen\" = 1 ] && [ \"$session_fail_exit\" = 0 ] && [ \"$session_fail_seen\" = 1 ] && " +
+        "grep -a -q 'SSH-2.0-SimpleOS' \"" + banner_path + "\" && " +
+        "grep -a -q 'AUTH OK root password' \"" + banner_path + "\" && " +
+        "grep -a -q 'SESSION OK shell echo-simpleos' \"" + banner_path + "\" && " +
+        "grep -a -q 'AUTH FAIL' \"" + fail_path + "\" && " +
+        "grep -a -q 'SSH-2.0-SimpleOS' \"" + session_fail_path + "\" && " +
+        "grep -a -q 'AUTH OK root password' \"" + session_fail_path + "\" && " +
+        "grep -a -q 'SESSION FAIL' \"" + session_fail_path + "\"; then echo 'TEST PASSED'; else echo 'TEST FAILED'; exit 2; fi"
+    rt_process_run_timeout("/bin/bash", ["-c", shell_cmd], timeout_ms as i64)

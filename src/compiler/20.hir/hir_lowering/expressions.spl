@@ -8,25 +8,41 @@ use compiler.frontend.parser_types.*
 use compiler.frontend.parser_types_expr.*
 use compiler.common.diagnostics.span.{Span}
 use compiler.hir.hir_lowering.types.HirLowering
+use compiler.hir.hir_lowering.statements.*
+use std.nogc_sync_mut.io.process_ops.{eprint}
+
+extern fn rt_env_get(key: text) -> text
 
 # Expression Lowering
 # ============================================================================
 
 impl HirLowering:
-    me lower_expr(e: Expr) -> HirExpr:
-        """Lower expression to HIR."""
-        val kind = match e.kind:
+    me lower_hir_expr(e: Expr) -> HirExpr:
+        val expr_kind_value = match e:
+            case Expr(k, _): k
+        if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
+            eprint("[hir-lower] lower_expr:kind")
+        val kind = match expr_kind_value:
             case IntLit(value):
+                if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
+                    eprint("[hir-lower] lower_expr:int")
                 HirExprKind.IntLit(value, nil)
 
             case FloatLit(value):
                 HirExprKind.FloatLit(value, nil)
 
             case StringLit(value, interps):
-                val hir_interps = interps.map(\i: self.lower_interpolation_list(i))
+                if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
+                    eprint("[hir-lower] lower_expr:string")
+                val hir_interps = if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
+                    nil
+                else:
+                    interps.map(\i: self.lower_interpolation_list(i))
                 HirExprKind.StringLit(value, hir_interps)
 
             case BoolLit(value):
+                if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
+                    eprint("[hir-lower] lower_expr:bool")
                 HirExprKind.BoolLit(value)
 
             case NilLit:
@@ -55,6 +71,8 @@ impl HirLowering:
                 HirExprKind.SetLit(self.lower_expr_list(elements), nil)
 
             case Ident(name):
+                if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
+                    eprint("[hir-lower] lower_expr:ident {name}")
                 val symbol = self.symbols.lookup(name)
                 if symbol.?:
                     HirExprKind.Var(symbol.unwrap())
@@ -63,53 +81,59 @@ impl HirLowering:
                     HirExprKind.Error
 
             case Field(base, field):
-                HirExprKind.Field(self.lower_expr(base), field, nil)
+                HirExprKind.Field(self.lower_hir_expr(base), field, nil)
 
             case Index(base, index):
-                HirExprKind.Index(self.lower_expr(base), self.lower_expr(index))
+                HirExprKind.Index(self.lower_hir_expr(base), self.lower_hir_expr(index))
 
             case OptionalChain(base, field):
-                HirExprKind.OptionalChain(self.lower_expr(base), field)
+                HirExprKind.OptionalChain(self.lower_hir_expr(base), field)
 
             case NullCoalesce(left, right):
-                HirExprKind.NullCoalesce(self.lower_expr(left), self.lower_expr(right))
+                HirExprKind.NullCoalesce(self.lower_hir_expr(left), self.lower_hir_expr(right))
 
             case ExistsCheck(base):
-                HirExprKind.ExistsCheck(self.lower_expr(base))
+                HirExprKind.ExistsCheck(self.lower_hir_expr(base))
 
             case Binary(op, left, right):
                 val hir_op = self.lower_binop(op)
-                HirExprKind.Binary(hir_op, self.lower_expr(left), self.lower_expr(right))
+                HirExprKind.Binary(hir_op, self.lower_hir_expr(left), self.lower_hir_expr(right))
 
             case Unary(op, operand):
                 val hir_op = self.lower_unaryop(op)
-                HirExprKind.Unary(hir_op, self.lower_expr(operand))
+                HirExprKind.Unary(hir_op, self.lower_hir_expr(operand))
 
             case Call(callee, args):
-                var hir_args: [HirCallArg] = []
-                for arg in args:
-                    hir_args = hir_args.push(HirCallArg(
-                        name: arg.name,
-                        value: self.lower_expr(arg.value),
-                        span: arg.span
-                    ))
-                HirExprKind.Call(self.lower_expr(callee), hir_args, [])
+                if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
+                    HirExprKind.Call(self.lower_hir_expr(callee), [], [])
+                else:
+                    var hir_args: [HirCallArg] = []
+                    for arg in args:
+                        hir_args = hir_args.push(HirCallArg(
+                            name: arg.name,
+                            value: self.lower_hir_expr(arg.value),
+                            span: arg.span
+                        ))
+                    HirExprKind.Call(self.lower_hir_expr(callee), hir_args, [])
 
             case MethodCall(receiver, method, args):
-                var hir_args: [HirCallArg] = []
-                for arg in args:
-                    hir_args = hir_args.push(HirCallArg(
-                        name: arg.name,
-                        value: self.lower_expr(arg.value),
-                        span: arg.span
-                    ))
-                HirExprKind.MethodCall(self.lower_expr(receiver), method, hir_args, MethodResolution.Unresolved)
+                if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
+                    HirExprKind.MethodCall(self.lower_hir_expr(receiver), method, [], MethodResolution.Unresolved)
+                else:
+                    var hir_args: [HirCallArg] = []
+                    for arg in args:
+                        hir_args = hir_args.push(HirCallArg(
+                            name: arg.name,
+                            value: self.lower_hir_expr(arg.value),
+                            span: arg.span
+                        ))
+                    HirExprKind.MethodCall(self.lower_hir_expr(receiver), method, hir_args, MethodResolution.Unresolved)
 
             case If(cond, then_, else_):
                 HirExprKind.If(
-                    self.lower_expr(cond),
-                    self.lower_block(then_),
-                    else_.map(\b: self.lower_block(b))
+                    self.lower_hir_expr(cond),
+                    self.lower_hir_block(then_),
+                    else_.map(\b: self.lower_hir_block(b))
                 )
 
             case MatchCase(scrutinee, arms):
@@ -117,11 +141,11 @@ impl HirLowering:
                 for arm in arms:
                     hir_arms = hir_arms.push(HirMatchArm(
                         pattern: self.lower_pattern(arm.pattern),
-                        guard: arm.guard.map(\g: self.lower_expr(g)),
-                        body: self.lower_block(arm.body),
+                        guard: arm.guard.map(\g: self.lower_hir_expr(g)),
+                        body: self.lower_hir_block(arm.body),
                         span: arm.span
                     ))
-                HirExprKind.MatchCase(self.lower_expr(scrutinee), hir_arms)
+                HirExprKind.MatchCase(self.lower_hir_expr(scrutinee), hir_arms)
 
             case Lambda(params, body):
                 self.symbols.push_scope(ScopeKind.Function)
@@ -136,15 +160,15 @@ impl HirLowering:
                         default: nil,
                         span: p.span
                     ))
-                val hir_body = self.lower_expr(body)
+                val hir_body = self.lower_hir_expr(body)
                 self.symbols.pop_scope()
                 HirExprKind.Lambda(hir_params, hir_body, [])
 
             case Block(block):
-                HirExprKind.Block(self.lower_block(block))
+                HirExprKind.Block(self.lower_hir_block(block))
 
             case Return(value):
-                HirExprKind.Return(value.map(\v: self.lower_expr(v)))
+                HirExprKind.Return(value.map(\v: self.lower_hir_expr(v)))
 
             case Break(label):
                 HirExprKind.Break(label, nil)
@@ -153,23 +177,23 @@ impl HirLowering:
                 HirExprKind.Continue(label)
 
             case Yield(value):
-                HirExprKind.Yield(value.map(\v: self.lower_expr(v)))
+                HirExprKind.Yield(value.map(\v: self.lower_hir_expr(v)))
 
             case Throw(value):
-                HirExprKind.Throw(self.lower_expr(value))
+                HirExprKind.Throw(self.lower_hir_expr(value))
 
             case Await(expr):
-                HirExprKind.Await(self.lower_expr(expr))
+                HirExprKind.Await(self.lower_hir_expr(expr))
 
             case Try(expr):
-                HirExprKind.Try(self.lower_expr(expr))
+                HirExprKind.Try(self.lower_hir_expr(expr))
 
             case Range(start, end, inclusive, step):
                 HirExprKind.Range(
-                    start.map(\s: self.lower_expr(s)),
-                    end.map(\e: self.lower_expr(e)),
+                    start.map(\s: self.lower_hir_expr(s)),
+                    end.map(\e: self.lower_hir_expr(e)),
                     inclusive,
-                    step.map(\s: self.lower_expr(s))
+                    step.map(\s: self.lower_hir_expr(s))
                 )
 
             case ListComprehension(expr, clauses):
@@ -178,16 +202,16 @@ impl HirLowering:
                     val hir_kind = match clause.kind:
                         case For(var_, iter):
                             val symbol = self.symbols.define(var_, SymbolKind.Variable, nil, clause.span, false, false, nil)
-                            HirCompClauseKind.For(symbol, self.lower_expr(iter))
+                            HirCompClauseKind.For(symbol, self.lower_hir_expr(iter))
                         case If(cond):
-                            HirCompClauseKind.If(self.lower_expr(cond))
+                            HirCompClauseKind.If(self.lower_hir_expr(cond))
                     hir_clauses = hir_clauses.push(HirCompClause(kind: hir_kind, span: clause.span))
-                HirExprKind.Comprehension(HirComprehensionKind.List, self.lower_expr(expr), hir_clauses)
+                HirExprKind.Comprehension(HirComprehensionKind.List, self.lower_hir_expr(expr), hir_clauses)
 
             case StructLit(type_, fields):
                 var hir_fields: [(text, HirExpr)] = []
                 for (name, value) in fields:
-                    hir_fields = hir_fields.push((name, self.lower_expr(value)))
+                    hir_fields = hir_fields.push((name, self.lower_hir_expr(value)))
                 val symbol = self.symbols.lookup(type_)
                 val hir_type = if symbol.?:
                     HirType(kind: HirTypeKind.Named(symbol.unwrap(), []), span: e.span)
@@ -205,12 +229,12 @@ impl HirLowering:
                     case Tuple(values):
                         var hir_values: [HirExpr] = []
                         for v in values:
-                            hir_values = hir_values.push(self.lower_expr(v))
+                            hir_values = hir_values.push(self.lower_hir_expr(v))
                         HirEnumPayload.Tuple(hir_values)
                     case Struct(fields):
                         var hir_fields: [(text, HirExpr)] = []
                         for (fname, fvalue) in fields:
-                            hir_fields = hir_fields.push((fname, self.lower_expr(fvalue)))
+                            hir_fields = hir_fields.push((fname, self.lower_hir_expr(fvalue)))
                         HirEnumPayload.Struct(hir_fields)
                 )
                 HirExprKind.EnumLit(hir_type, variant, hir_payload)
@@ -221,14 +245,14 @@ impl HirLowering:
 
             # Math/DL blocks with special semantics
             case LossBlock(body):
-                HirExprKind.LossBlock(self.lower_block(body))
+                HirExprKind.LossBlock(self.lower_hir_block(body))
 
             case NogradBlock(body):
-                HirExprKind.NogradBlock(self.lower_block(body))
+                HirExprKind.NogradBlock(self.lower_hir_block(body))
 
             # Unsafe block for raw pointer ops, FFI, inline assembly
             case UnsafeBlock(body):
-                HirExprKind.UnsafeBlock(self.lower_block(body))
+                HirExprKind.UnsafeBlock(self.lower_hir_block(body))
 
             # Inline assembly
             case AsmBlock(asm):
@@ -249,49 +273,42 @@ impl HirLowering:
         HirExpr(kind: kind, type_: nil, span: e.span)
 
     me lower_expr_list(exprs: [Expr]) -> [HirExpr]:
-        """Lower a list of expressions to HIR."""
         var result: [HirExpr] = []
         for e in exprs:
-            result = result.push(self.lower_expr(e))
+            result = result.push(self.lower_hir_expr(e))
         result
 
     me lower_interpolation_list(interps: [Interpolation]) -> [HirInterpolation]:
-        """Lower a list of interpolations to HIR."""
         var result: [HirInterpolation] = []
         for i in interps:
             result = result.push(HirInterpolation(
-                expr: self.lower_expr(i.expr),
+                expr: self.lower_hir_expr(i.expr),
                 format: i.format,
                 span: i.span
             ))
         result
 
     me lower_dict_entry(entry: (Expr, Expr)) -> (HirExpr, HirExpr):
-        """Lower a single dict entry to HIR."""
         val (key, value) = entry
-        (self.lower_expr(key), self.lower_expr(value))
+        (self.lower_hir_expr(key), self.lower_hir_expr(value))
 
     me lower_dict_entries(entries: [(Expr, Expr)]) -> [(HirExpr, HirExpr)]:
-        """Lower dict entries to HIR."""
         var result: [(HirExpr, HirExpr)] = []
         for entry in entries:
             result = result.push(self.lower_dict_entry(entry))
         result
 
     me lower_struct_field(field: (text, Expr)) -> (text, HirExpr):
-        """Lower a single struct field to HIR."""
         val (name, value) = field
-        (name, self.lower_expr(value))
+        (name, self.lower_hir_expr(value))
 
     me lower_struct_fields(fields: [(text, Expr)]) -> [(text, HirExpr)]:
-        """Lower struct fields to HIR."""
         var result: [(text, HirExpr)] = []
         for field in fields:
             result = result.push(self.lower_struct_field(field))
         result
 
     me lower_binop(op: BinOp) -> HirBinOp:
-        """Lower binary operator."""
         match op:
             case Add: HirBinOp.Add
             case Sub: HirBinOp.Sub
@@ -329,7 +346,6 @@ impl HirLowering:
             case IsNot: HirBinOp.IsNot
 
     me lower_unaryop(op: UnaryOp) -> HirUnaryOp:
-        """Lower unary operator."""
         match op:
             case Neg: HirUnaryOp.Neg
             case Not: HirUnaryOp.Not
@@ -339,13 +355,12 @@ impl HirLowering:
             case Transpose: HirUnaryOp.Transpose
 
     me lower_pattern(p: Pattern) -> HirPattern:
-        """Lower pattern to HIR."""
         val kind = match p.kind:
             case Wildcard:
                 HirPatternKind.Wildcard
 
             case Literal(value):
-                HirPatternKind.Literal(self.lower_expr(value))
+                HirPatternKind.Literal(self.lower_hir_expr(value))
 
             case Binding(name, mutable):
                 val symbol = self.symbols.define(name, SymbolKind.Variable, nil, p.span, false, mutable, nil)
@@ -405,8 +420,8 @@ impl HirLowering:
 
             case Range(start, end, inclusive):
                 HirPatternKind.Range(
-                    start.map(\s: self.lower_expr(s)),
-                    end.map(\e: self.lower_expr(e)),
+                    start.map(\s: self.lower_hir_expr(s)),
+                    end.map(\e: self.lower_hir_expr(e)),
                     inclusive
                 )
 
@@ -419,13 +434,37 @@ impl HirLowering:
 
         HirPattern(kind: kind, type_: nil, span: p.span)
 
-    me lower_block(b: Block) -> HirBlock:
-        """Lower block to HIR."""
+    me lower_hir_block(b: Block) -> HirBlock:
+        if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
+            eprint("[hir-lower] lower_block:start")
+            var boot_stmts: [HirStmt] = []
+            var boot_idx = 0
+            while boot_idx < b.stmts.len():
+                eprint("[hir-lower] lower_block:stmt {boot_idx}")
+                boot_stmts = boot_stmts.push(self.lower_hir_stmt(b.stmts[boot_idx]))
+                boot_idx = boot_idx + 1
+            eprint("[hir-lower] lower_block:done")
+            var boot_value: HirExpr? = nil
+            if boot_stmts.len() > 0:
+                val boot_last = boot_stmts[boot_stmts.len() - 1]
+                match boot_last.kind:
+                    case Expr(expr):
+                        boot_value = Some(expr)
+                        var kept_stmts: [HirStmt] = []
+                        var keep_idx = 0
+                        while keep_idx < boot_stmts.len() - 1:
+                            kept_stmts = kept_stmts.push(boot_stmts[keep_idx])
+                            keep_idx = keep_idx + 1
+                        boot_stmts = kept_stmts
+                    case _:
+                        pass
+            return HirBlock(stmts: boot_stmts, value: boot_value, span: b.span)
+
         self.symbols.push_scope(ScopeKind.Block)
 
         var stmts: [HirStmt] = []
         for s in b.stmts:
-            val lowered = self.lower_stmt(s)
+            val lowered = self.lower_hir_stmt(s)
             stmts = stmts.push(lowered)
 
         self.symbols.pop_scope()
@@ -444,15 +483,10 @@ impl HirLowering:
         HirBlock(stmts: stmts, value: value, span: b.span)
 
     me lower_asm(asm: AsmExpr) -> HirAsm:
-        """Lower inline assembly expression to HIR.
-
-        Converts AST AsmExpr to HIR HirAsm, lowering all constraint
-        expressions from AST to HIR.
-        """
         # Lower all constraint value expressions
         var hir_constraints: [HirAsmConstraint] = []
         for constraint in asm.constraints:
-            val hir_value = self.lower_expr(constraint.value)
+            val hir_value = self.lower_hir_expr(constraint.value)
             val hir_constraint = HirAsmConstraint(
                 name: constraint.name,
                 kind: constraint.kind,
@@ -471,11 +505,6 @@ impl HirLowering:
         )
 
     me lower_asm_match_arms(arms: [AsmMatchArm]) -> [HirAsmMatchArm]:
-        """Lower asm match arms to HIR.
-
-        Target specs are passed through unchanged.
-        Only the asm_body expressions are lowered.
-        """
         var result: [HirAsmMatchArm] = []
         for arm in arms:
             var has_body = arm.has_asm_body

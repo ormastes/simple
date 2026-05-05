@@ -1,0 +1,181 @@
+# Serial completion contracts for the x64 desktop QEMU lanes.
+
+use os.drivers.desktop_driver_summary.{desktop_driver_summary_accepts_complete_qemu}
+
+extern fn rt_process_run_timeout(cmd: text, args: [text], timeout_ms: i64) -> (text, text, i32)
+extern fn rt_env_cwd() -> text
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_file_read_text(path: text) -> text
+
+pub fn run_x64_desktop_disk_probe(cmd_parts: [text], serial_path: text, timeout_ms: u64) -> (text, text, i32):
+    val shell_cmd =
+        "rm -f \"" + serial_path + "\"; " +
+        cmd_parts.join(" ") + " > \"" + serial_path + "\" 2>&1 & qpid=$!; " +
+        "seen=0; failed=0; for i in $(seq 1 240); do " +
+        "if grep -a -q 'TEST PASSED' \"" + serial_path + "\" 2>/dev/null; then seen=1; break; fi; " +
+        "if grep -a -q 'TEST FAILED' \"" + serial_path + "\" 2>/dev/null; then failed=1; break; fi; " +
+        "if ! kill -0 \"$qpid\" 2>/dev/null; then break; fi; sleep 0.5; done; " +
+        "kill \"$qpid\" 2>/dev/null || true; wait \"$qpid\" 2>/dev/null || true; " +
+        "cat \"" + serial_path + "\" 2>/dev/null | tr -cd '\\11\\12\\15\\40-\\176' || true; " +
+        "if [ \"$seen\" = 1 ]; then exit 0; fi; " +
+        "if [ \"$failed\" = 1 ]; then exit 2; fi; " +
+        "echo 'Process timed out'; exit 124"
+    rt_process_run_timeout("/bin/sh", ["-c", shell_cmd], timeout_ms as i64)
+
+pub fn run_x64_wm_simple_web_probe(cmd_parts: [text], serial_path: text, timeout_ms: u64) -> (text, text, i32):
+    val shell_cmd = cmd_parts.join(" ") + " 2>&1 | tee \"" + serial_path + "\"; exit 0"
+    rt_process_run_timeout("/bin/sh", ["-c", shell_cmd], timeout_ms as i64)
+
+pub fn desktop_uefi_serial_log_path() -> text:
+    rt_env_cwd() + "/build/os/x64-desktop-uefi.serial.log"
+
+pub fn desktop_disk_serial_log_path() -> text:
+    rt_env_cwd() + "/build/os/x64-desktop-disk.serial.log"
+
+pub fn wm_simple_web_serial_log_path() -> text:
+    rt_env_cwd() + "/build/os/x64-wm-simple-web-check.serial.log"
+
+pub fn clear_qemu_serial_log(path: text):
+    val _ = rt_process_run_timeout("/bin/sh", ["-c", "rm -f \"" + path + "\""], 5000)
+
+pub fn read_qemu_serial_log(path: text) -> text:
+    val _settle = rt_process_run_timeout("/bin/sh", ["-c", "sleep 0.2"], 1000)
+    var tries = 0
+    while tries < 50:
+        if rt_file_exists(path):
+            val content = rt_file_read_text(path) ?? ""
+            if content != "":
+                return content
+        val (stdout, _stderr, _exit_code) = rt_process_run_timeout("/bin/sh", ["-c", "cat \"" + path + "\" 2>/dev/null | tr -cd '\\11\\12\\15\\40-\\176' || true"], 5000)
+        if stdout != "":
+            return stdout
+        val _ = rt_process_run_timeout("/bin/sh", ["-c", "sleep 0.1"], 1000)
+        tries = tries + 1
+    ""
+
+pub fn qemu_serial_log_contains(path: text, marker: text) -> bool:
+    val (_stdout, _stderr, exit_code) = rt_process_run_timeout("/bin/sh", ["-c", "grep -a -q \"" + marker + "\" \"" + path + "\""], 5000)
+    exit_code == 0
+
+pub fn desktop_disk_serial_accepts_completion(serial_output: text) -> bool:
+    for marker in desktop_disk_required_marker_fragments():
+        if not serial_output.contains(marker):
+            return false
+    true
+
+pub fn desktop_disk_required_marker_fragments() -> [text]:
+    var markers: [text] = [
+        "[vfs] mounted fat32 device=nvme0 volume=simpleos",
+        "[phase-3-mount] fat32 ok",
+        "[vfs-fix] clang seeded len=",
+        "[vfs-fix] rust seeded len=",
+        "[desktop-e2e] shortcut:ok key=meta+b app=browser_demo pid=",
+        "[desktop-e2e] wm:ok pid=",
+        "[desktop-e2e] process-backed:ok app=browser_demo pid=",
+        "[desktop-e2e] process-backed:ok app=hello_world pid="
+    ]
+    for marker in desktop_toolchain_process_marker_fragments():
+        markers.push(marker)
+    for marker in desktop_toolchain_native_marker_fragments("x86_64-disk", false):
+        markers.push(marker)
+    for marker in desktop_toolchain_vfs_marker_fragments(false):
+        markers.push(marker)
+    markers.push("[simple_browser] page_rendered app_id=/sys/apps/simple_browser")
+    markers.push("[desktop-e2e] network-smoke:bounded ok packets=")
+    markers.push("TEST PASSED")
+    markers
+
+pub fn print_desktop_disk_missing_markers(serial_output: text):
+    for marker in desktop_disk_required_marker_fragments():
+        if not serial_output.contains(marker):
+            print "[test] missing marker fragment: {marker}"
+
+pub fn desktop_uefi_serial_accepts_completion(serial_output: text) -> bool:
+    if not desktop_driver_summary_accepts_complete_qemu(serial_output):
+        return false
+    for marker in desktop_uefi_required_marker_fragments():
+        if not serial_output.contains(marker):
+            return false
+    true
+
+pub fn desktop_uefi_required_marker_fragments() -> [text]:
+    var markers: [text] = [
+        "[desktop-e2e] process-backed:ok app=browser_demo pid=",
+        "[desktop-e2e] process-backed:ok app=hello_world pid=",
+        "[desktop-e2e] process-backed:ok app=editor pid=",
+        "[desktop-e2e] process-backed:ok app=terminal pid=",
+        "[desktop-e2e] process-backed:ok app=file_manager pid=",
+        "[desktop-e2e] simple-cli:ok app=info pid=",
+        "[desktop-e2e] process-backed:ok app=simple_browser pid=",
+        "[desktop-e2e] wm-owner:ok app=simple_browser pid=",
+        "[desktop-e2e] render-proof:ok app=simple_browser pid=",
+        "[simple_browser] page_rendered app_id=/sys/apps/simple_browser",
+        "[desktop-e2e] process-backed:ok app=simple_compiler pid=",
+        "[desktop-e2e] process-backed:ok app=simple_interpreter pid=",
+        "[desktop-e2e] process-backed:ok app=simple_loader pid="
+    ]
+    markers.push("[desktop-e2e] process-backed:ok app=llvm pid=")
+    for marker in desktop_toolchain_process_marker_fragments():
+        markers.push(marker)
+    for marker in desktop_toolchain_native_marker_fragments("x86_64-uefi-hardware", true):
+        markers.push(marker)
+    for marker in desktop_toolchain_vfs_marker_fragments(true):
+        markers.push(marker)
+    for marker in [
+        "[desktop-e2e] vfs-app-read:ok source=generic-vfs path=/sys/apps/browser_demo bytes=",
+        "[desktop-e2e] vfs-app-read:ok source=generic-vfs path=/sys/apps/info bytes=",
+        "[desktop-e2e] vfs-app-read:ok source=generic-vfs path=/sys/apps/simple_browser bytes=",
+        "[desktop-e2e] vfs-app-read:ok source=generic-vfs path=/sys/apps/simple_compiler bytes=",
+        "[desktop-e2e] vfs-app-read:ok source=generic-vfs path=/sys/apps/simple_interpreter bytes=",
+        "[desktop-e2e] vfs-app-read:ok source=generic-vfs path=/sys/apps/simple_loader bytes=",
+        "[desktop-e2e] virtio-net:mac=",
+        "[desktop-e2e] virtio-net:rx-queue=ok queue=0",
+        "[desktop-e2e] virtio-net:tx-queue=ok queue=0",
+        "[desktop-e2e] network-smoke:bounded ok packets="
+    ]:
+        markers.push(marker)
+    markers
+
+pub fn desktop_toolchain_process_marker_fragments() -> [text]:
+    [
+        "[fs-exec] spawn:image path=/sys/apps/clang entry=0 segments=1 stub_bytes=",
+        "[fs-exec] spawn:image path=/sys/apps/rust entry=0 segments=1 stub_bytes=",
+        "[desktop-e2e] process-backed:ok app=clang pid=",
+        "[desktop-e2e] process-backed:ok app=rust pid=",
+        "[desktop-e2e] native-toolchain-spawn:ok app=clang path=/sys/apps/clang pid=",
+        "[desktop-e2e] native-toolchain-spawn:ok app=rust path=/sys/apps/rust pid=",
+        "[desktop-e2e] native-toolchain-inputs:ok app=clang pid=",
+        "[desktop-e2e] native-toolchain-inputs:ok app=rust pid="
+    ]
+
+pub fn desktop_toolchain_native_marker_fragments(lane: text, include_llvm: bool) -> [text]:
+    var markers: [text] = []
+    if include_llvm:
+        markers.push("[desktop-e2e] native-toolchain-launch:ok app=llvm lane={lane} mode=native-filesystem-app status=standalone-required tool=/sys/apps/llvm manifest=/SYS/LLVMMAN.TXT")
+        markers.push("[desktop-e2e] native-capability:ok app=llvm capability=local-ir-inspection proof=/usr/share/simpleos/toolchain/llvm/hello.ll")
+        markers.push("[desktop-e2e] native-capability:ok app=llvm capability=object-assembly-inspection proof=/usr/share/simpleos/toolchain/llvm/hello.s")
+        markers.push("[desktop-e2e] native-capability:ok app=llvm capability=compile-pipeline-step proof=/usr/share/simpleos/toolchain/llvm/pipeline.step")
+    markers.push("[desktop-e2e] native-toolchain-launch:ok app=clang lane={lane} mode=native-filesystem-app status=standalone-required tool=/sys/apps/clang manifest=/SYS/CLANGMAN.TXT")
+    markers.push("[desktop-e2e] native-toolchain-launch:ok app=rust lane={lane} mode=native-filesystem-app status=standalone-required tool=/sys/apps/rust manifest=/SYS/RUSTMAN.TXT")
+    markers.push("[desktop-e2e] native-capability:ok app=clang capability=local-c-source-inspection proof=/usr/share/simpleos/toolchain/clang/hello.c")
+    markers.push("[desktop-e2e] native-capability:ok app=clang capability=driver-flag-inspection proof=/usr/share/simpleos/toolchain/clang/flags.rsp")
+    markers.push("[desktop-e2e] native-capability:ok app=clang capability=compile-pipeline-step proof=/usr/share/simpleos/toolchain/clang/pipeline.step")
+    markers.push("[desktop-e2e] native-capability:ok app=rust capability=local-source-inspection proof=/usr/share/simpleos/toolchain/rust/hello.rs")
+    markers.push("[desktop-e2e] native-capability:ok app=rust capability=package-layout-inspection proof=/usr/share/simpleos/toolchain/rust/Cargo.toml")
+    markers.push("[desktop-e2e] native-capability:ok app=rust capability=build-pipeline-step proof=/usr/share/simpleos/toolchain/rust/pipeline.step")
+    markers
+
+pub fn desktop_toolchain_vfs_marker_fragments(include_llvm: bool) -> [text]:
+    var markers: [text] = []
+    if include_llvm:
+        markers.push("[desktop-e2e] vfs-app-read:ok source=generic-vfs path=/sys/apps/llvm bytes=")
+    markers.push("[desktop-e2e] vfs-app-read:ok source=generic-vfs path=/sys/apps/clang bytes=")
+    markers.push("[desktop-e2e] vfs-app-read:ok source=generic-vfs path=/sys/apps/rust bytes=")
+    markers
+
+pub fn print_desktop_uefi_missing_markers(serial_output: text):
+    if not desktop_driver_summary_accepts_complete_qemu(serial_output):
+        print "[test] missing/invalid: complete desktop driver summary contract"
+    for marker in desktop_uefi_required_marker_fragments():
+        if not serial_output.contains(marker):
+            print "[test] missing marker fragment: {marker}"

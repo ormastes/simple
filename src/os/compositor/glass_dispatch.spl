@@ -1,0 +1,100 @@
+#![allow(unnamed_duplicate_typed_args)]
+
+fn _blend_channel(src: u32, dst: u32, alpha: u32) -> u32:
+    (src * alpha + dst * (255u32 - alpha)) / 255u32
+
+fn _lerp_channel(a: u32, b: u32, num: i32, den: i32) -> u32:
+    if den <= 0:
+        return a
+    ((a.to_i32() * (den - num) + b.to_i32() * num) / den).to_u32()
+
+fn cap_read_pixel(backend, x: i32, y: i32) -> u32:
+    if x < 0 or y < 0 or x >= backend.width or y >= backend.height:
+        return 0u32
+    val pixels = backend.get_pixel_buffer()
+    val idx = y * backend.width + x
+    if idx >= 0 and idx < pixels.len():
+        return pixels[idx]
+    0u32
+
+fn cap_blend_rect(backend, x: i32, y: i32, w: i32, h: i32, color: u32, alpha: u8):
+    var pixels = backend.get_pixel_buffer()
+    val a = alpha.to_u32()
+    val sr = (color >> 16) & 0xFFu32
+    val sg = (color >> 8) & 0xFFu32
+    val sb = color & 0xFFu32
+    var row = 0
+    while row < h:
+        var col = 0
+        while col < w:
+            val px = x + col
+            val py = y + row
+            if px >= 0 and py >= 0 and px < backend.width and py < backend.height:
+                val idx = py * backend.width + px
+                val dst = pixels[idx]
+                val dr = (dst >> 16) & 0xFFu32
+                val dg = (dst >> 8) & 0xFFu32
+                val db = dst & 0xFFu32
+                val out = 0xFF000000u32 | (_blend_channel(sr, dr, a) << 16) | (_blend_channel(sg, dg, a) << 8) | _blend_channel(sb, db, a)
+                pixels[idx] = out
+            col = col + 1
+        row = row + 1
+    backend.set_pixel_buffer_override(pixels)
+
+fn cap_gradient_v(backend, x: i32, y: i32, w: i32, h: i32, color_top: u32, color_bottom: u32):
+    var pixels = backend.get_pixel_buffer()
+    val tr = (color_top >> 16) & 0xFFu32
+    val tg = (color_top >> 8) & 0xFFu32
+    val tb = color_top & 0xFFu32
+    val br = (color_bottom >> 16) & 0xFFu32
+    val bg = (color_bottom >> 8) & 0xFFu32
+    val bb = color_bottom & 0xFFu32
+    val den = if h > 1: h - 1 else: 1
+    var row = 0
+    while row < h:
+        val c = 0xFF000000u32 | (_lerp_channel(tr, br, row, den) << 16) | (_lerp_channel(tg, bg, row, den) << 8) | _lerp_channel(tb, bb, row, den)
+        var col = 0
+        while col < w:
+            val px = x + col
+            val py = y + row
+            if px >= 0 and py >= 0 and px < backend.width and py < backend.height:
+                pixels[py * backend.width + px] = c
+            col = col + 1
+        row = row + 1
+    backend.set_pixel_buffer_override(pixels)
+
+fn cap_blur_region(backend, x: i32, y: i32, w: i32, h: i32, radius: u32):
+    if radius == 0u32:
+        return
+    val src = backend.get_pixel_buffer()
+    var out = src
+    var row = 0
+    while row < h:
+        var col = 0
+        while col < w:
+            val px = x + col
+            val py = y + row
+            if px >= 0 and py >= 0 and px < backend.width and py < backend.height:
+                var count: u32 = 0u32
+                var rr: u32 = 0u32
+                var gg: u32 = 0u32
+                var bb: u32 = 0u32
+                var dy = -1
+                while dy <= 1:
+                    var dx = -1
+                    while dx <= 1:
+                        val sx = px + dx
+                        val sy = py + dy
+                        if sx >= 0 and sy >= 0 and sx < backend.width and sy < backend.height:
+                            val sample = src[sy * backend.width + sx]
+                            rr = rr + ((sample >> 16) & 0xFFu32)
+                            gg = gg + ((sample >> 8) & 0xFFu32)
+                            bb = bb + (sample & 0xFFu32)
+                            count = count + 1u32
+                        dx = dx + 1
+                    dy = dy + 1
+                if count > 0u32:
+                    out[py * backend.width + px] = 0xFF000000u32 | ((rr / count) << 16) | ((gg / count) << 8) | (bb / count)
+            col = col + 1
+        row = row + 1
+    backend.set_pixel_buffer_override(out)

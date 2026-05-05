@@ -17,9 +17,14 @@ use compiler.backend.backend.backend_types.{BackendKind, CodegenTarget, BuildMod
     compileerror_backend_error}
 use compiler.mir_opt.mod.{target_opt_context_default}
 use compiler.backend.llvm_backend.{llc_available}
+use compiler.backend.llvm_codegen_adapter.{llvm_compile_module_direct, llvm_compile_module_direct_compiled}
 use compiler.backend.codegen_factory.{CodegenFactory}
+use compiler.backend.llvm_lib_backend.{llvm_lib_compile_module_direct}
+use compiler.backend.cranelift_codegen_adapter.{CraneliftCodegenAdapter, cranelift_compile_module_direct}
 use compiler.backend.llvm_capability.{get_llvm_capabilities, LlvmCapabilityReport}
 use compiler.backend.llvm_support_matrix.{lookup_support, is_combination_usable}
+
+extern fn rt_env_get(key: text) -> text
 use std.ffi.llvm.{llvm_available}
 
 # ============================================================================
@@ -180,6 +185,7 @@ fn compile_module_with_backend(
     Returns:
         CompiledModule with object_code bytes, or CompileError
     """
+    print "[backend-helper] start {backend_name}"
     # Resolve backend kind
     var kind = BackendKind.Llvm
     if backend_name == "llvm":
@@ -202,6 +208,7 @@ fn compile_module_with_backend(
         # Use centralized capability detection
         val caps = get_llvm_capabilities()
         kind = caps.preferred_backend()
+    print "[backend-helper] kind resolved"
 
     # Preserve the driver's explicit optimization level instead of collapsing to build mode defaults.
     val opt = if opt_level_i64 <= 0:
@@ -212,6 +219,7 @@ fn compile_module_with_backend(
         OptimizationLevel.Speed
     else:
         OptimizationLevel.Aggressive
+    print "[backend-helper] opt resolved"
 
     # Create backend options and compile
     val options = CompileOptions(
@@ -224,6 +232,7 @@ fn compile_module_with_backend(
         verify_output: true,
         target_opt_ctx: target_opt_context_default()
     )
+    print "[backend-helper] options ready"
 
     if kind == BackendKind.Llvm and not llc_available():
         return Err(compileerror_backend_error(BackendKind.Llvm,
@@ -232,6 +241,34 @@ fn compile_module_with_backend(
         return Err(compileerror_backend_error(BackendKind.LlvmLib,
             "libLLVM not found. Install LLVM: apt install libllvm-18-dev (Ubuntu) or brew install llvm (macOS)"))
 
+    if kind == BackendKind.Llvm:
+        print "[backend-helper] direct llvm"
+        if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
+            return llvm_compile_module_direct_compiled(options, module)
+        val result = llvm_compile_module_direct(options, module)
+        match result:
+            case Ok(output):
+                return Ok(output.to_compiled_module())
+            case Err(err):
+                return Err(err)
+
+    if kind == BackendKind.LlvmLib:
+        print "[backend-helper] direct llvm-lib"
+        val result = llvm_lib_compile_module_direct(options, module)
+        match result:
+            case Ok(output):
+                return Ok(output.to_compiled_module())
+            case Err(err):
+                return Err(err)
+
+    if kind == BackendKind.Cranelift:
+        val result = cranelift_compile_module_direct(options, module)
+        match result:
+            case Ok(output):
+                return Ok(output.to_compiled_module())
+            case Err(err):
+                return Err(err)
+
     val codegen = CodegenFactory.create(kind, options)
     val result = codegen.compile_module(module)
     match result:
@@ -239,6 +276,44 @@ fn compile_module_with_backend(
             Ok(output.to_compiled_module())
         case Err(err):
             Err(err)
+
+fn compile_bootstrap_module_with_backend(
+    backend_name: text,
+    is_release: bool,
+    opt_level_i64: i64
+) -> Result<CompiledModule, CompileError>:
+    """Compile the bootstrap entry without passing MirModule across module boundaries."""
+    print "[backend-helper] bootstrap start {backend_name}"
+    val opt = if opt_level_i64 <= 0:
+        OptimizationLevel.None_
+    elif opt_level_i64 == 1:
+        OptimizationLevel.Size
+    elif opt_level_i64 == 2:
+        OptimizationLevel.Speed
+    else:
+        OptimizationLevel.Aggressive
+    val options = CompileOptions(
+        target: CodegenTarget.Host,
+        opt_level: opt,
+        debug_info: not is_release,
+        emit_assembly: false,
+        emit_llvm_ir: false,
+        emit_mir: false,
+        verify_output: true,
+        target_opt_ctx: target_opt_context_default()
+    )
+    if not llc_available():
+        return Err(compileerror_backend_error(BackendKind.Llvm,
+            "llc not found. Install LLVM: apt install llvm (Ubuntu) or brew install llvm (macOS)"))
+    val module = MirModule(
+        name: "app.cli.bootstrap_main",
+        functions: {},
+        statics: {},
+        constants: {},
+        types: {}
+    )
+    print "[backend-helper] bootstrap direct llvm"
+    llvm_compile_module_direct_compiled(options, module)
 
 fn get_effective_backend_name(backend_name: text, is_release: bool) -> text:
     """Get the effective backend name after auto-resolution."""

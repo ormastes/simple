@@ -144,7 +144,7 @@ impl BlockDevice for CNvmeBlockAdapter:
             return Result.Err("CNvmeBlockAdapter: write_sector failed")
         Result.Ok(true)
 
-    fn sector_size() -> u32:
+    me fn sector_size() -> u32:
         val nvme_sector_size: u32 = 512
         nvme_sector_size
 
@@ -229,7 +229,7 @@ impl BlockDevice for NvmeBlockAdapter:
             return Result.Err(result.unwrap_err())
         Result.Ok(true)
 
-    fn sector_size() -> u32:
+    me fn sector_size() -> u32:
         self.nvme.get_sector_size()
 
 # ============================================================================
@@ -242,7 +242,7 @@ var g_nvme: NvmeDriver = NvmeDriver.new()
 class VfsFileSize:
     bytes: i64
 
-    fn to_i64() -> i64:
+    me fn to_i64() -> i64:
         self.bytes
 var g_adapter: NvmeBlockAdapter = NvmeBlockAdapter.new(g_nvme)
 var g_c_adapter: CNvmeBlockAdapter = CNvmeBlockAdapter.new()
@@ -295,7 +295,7 @@ fn vfs_boot_init() -> bool:
     # separate processes, while only storage driver code remains baremetal-aware.
     log_raw_println("[vfs-init] FAT32 executable VFS path ready")
 
-    val exec_probe_path = "/BROWSMF.SMF"
+    val exec_probe_path = "/SYS/APPS/BROWSMF.SMF"
     val exec_probe_size = simpleos_fat32_read_path_size(exec_probe_path)
     if exec_probe_size <= 4:
         log_raw_println("[vfs-init] executable load probe failed path={exec_probe_path} size={exec_probe_size}")
@@ -310,56 +310,12 @@ fn vfs_boot_init() -> bool:
     if not _known_app_has_elf_magic(simpleos_fat32_path_read_buffer_addr()):
         log_raw_println("[vfs-init] executable load probe failed path={exec_probe_path} invalid_elf")
         return false
+    g_vfs_browser_demo_exec_bytes = _copy_bytes_from_addr(simpleos_fat32_path_read_buffer_addr(), exec_probe_size.to_u64())
     log_raw_println("[vfs-init] executable load probe ok path=/sys/apps/browser_demo bytes={exec_probe_size}")
-    # BUG-VFS-CACHE-RETURNS-PLACEHOLDER: g_vfs_hello_world_exec_bytes is declared
-    # empty and never seeded, so _cached_known_exec_bytes returns [] for app_id=3
-    # and every downstream FAT32-path attempt uses lowercase/long names the C
-    # bridge cannot find.  Seed it here via the same proven path-read sequence
-    # used for the browser probe above.
-    val hw_probe_path = "/HELLOSMF.SMF"
-    val hw_probe_size = simpleos_fat32_read_path_size(hw_probe_path)
-    if hw_probe_size > 4 and hw_probe_size.to_u64() <= FAT32_PATH_READ_BUFFER_MAX:
-        val hw_read_rc = simpleos_fat32_read_path(hw_probe_path)
-        if hw_read_rc == 0 and _known_app_has_elf_magic(simpleos_fat32_path_read_buffer_addr()):
-            g_vfs_hello_world_exec_bytes = _copy_bytes_from_addr(simpleos_fat32_path_read_buffer_addr(), hw_probe_size.to_u64())
-            serial_println("[vfs-fix] hello_world seeded len={g_vfs_hello_world_exec_bytes.len()}")
-        else:
-            serial_println("[vfs-fix] hello_world seed failed rc={hw_read_rc} size={hw_probe_size}")
-    else:
-        serial_println("[vfs-fix] hello_world probe failed size={hw_probe_size}")
-
-    val cs_probe_size = simpleos_fat32_read_path_size("/CLANGSTC.SMF")
-    if cs_probe_size > 4 and cs_probe_size.to_u64() <= FAT32_PATH_READ_BUFFER_MAX:
-        val cs_read_rc = simpleos_fat32_read_path("/CLANGSTC.SMF")
-        if cs_read_rc == 0:
-            g_vfs_clang_static_exec_bytes = _copy_bytes_from_addr(simpleos_fat32_path_read_buffer_addr(), cs_probe_size.to_u64())
-            serial_println("[vfs-fix] clang_static seeded len={g_vfs_clang_static_exec_bytes.len()}")
-        else:
-            serial_println("[vfs-fix] clang_static seed failed rc={cs_read_rc} size={cs_probe_size}")
-    else:
-        serial_println("[vfs-fix] clang_static probe skipped size={cs_probe_size}")
-
-    val rs_probe_size = simpleos_fat32_read_path_size("/RUSTCSTC.SMF")
-    if rs_probe_size > 4 and rs_probe_size.to_u64() <= FAT32_PATH_READ_BUFFER_MAX:
-        val rs_read_rc = simpleos_fat32_read_path("/RUSTCSTC.SMF")
-        if rs_read_rc == 0:
-            g_vfs_rustc_static_exec_bytes = _copy_bytes_from_addr(simpleos_fat32_path_read_buffer_addr(), rs_probe_size.to_u64())
-            serial_println("[vfs-fix] rustc_static seeded len={g_vfs_rustc_static_exec_bytes.len()}")
-        else:
-            serial_println("[vfs-fix] rustc_static seed failed rc={rs_read_rc} size={rs_probe_size}")
-    else:
-        serial_println("[vfs-fix] rustc_static probe skipped size={rs_probe_size}")
-
-    val si_probe_size = simpleos_fat32_read_path_size("/SIMPLSTC.SMF")
-    if si_probe_size > 4 and si_probe_size.to_u64() <= FAT32_PATH_READ_BUFFER_MAX:
-        val si_read_rc = simpleos_fat32_read_path("/SIMPLSTC.SMF")
-        if si_read_rc == 0:
-            g_vfs_simple_exec_bytes = _copy_bytes_from_addr(simpleos_fat32_path_read_buffer_addr(), si_probe_size.to_u64())
-            serial_println("[vfs-fix] simple seeded len={g_vfs_simple_exec_bytes.len()}")
-        else:
-            serial_println("[vfs-fix] simple seed failed rc={si_read_rc} size={si_probe_size}")
-    else:
-        serial_println("[vfs-fix] simple probe skipped size={si_probe_size}")
+    g_vfs_hello_world_exec_bytes = _seed_c_fat32_exec_bytes("hello_world", "/SYS/APPS/HELLOSMF.SMF")
+    g_vfs_clang_exec_bytes = _seed_c_fat32_exec_bytes("clang", "/SYS/APPS/CLANGSMF.SMF")
+    g_vfs_rust_exec_bytes = _seed_c_fat32_exec_bytes("rust", "/SYS/APPS/RUSTSMF.SMF")
+    g_vfs_simple_exec_bytes = _seed_c_fat32_exec_bytes("simple", "/SIMPLSTC.SMF")
 
     log_raw_println("[vfs-init] VFS ready (C-backed)")
     return true
@@ -708,60 +664,68 @@ fn g_vfs_known_app_id(path: text) -> u64:
         return 8
     0
 
-fn _vfs_exec_disk_alias(path: text) -> text:
+fn _vfs_common_exec_disk_leaf(path: text) -> text:
     match path:
         case "/sys/apps/info":
-            "/SYS/APPS/info"
+            "info"
         case "/sys/apps/info.smf":
-            "/SYS/APPS/info.smf"
+            "info.smf"
         case "/sys/apps/browser_demo":
-            "/SYS/APPS/BROWSMF.SMF"
+            "BROWSMF.SMF"
         case "/sys/apps/browser_demo.smf":
-            "/SYS/APPS/BROWSMF.SMF"
+            "BROWSMF.SMF"
         case "/sys/apps/file_manager":
-            "/SYS/APPS/FILESMF.SMF"
+            "FILESMF.SMF"
         case "/sys/apps/file_manager.smf":
-            "/SYS/APPS/FILESMF.SMF"
+            "FILESMF.SMF"
         case "/sys/apps/hello_world":
-            "/SYS/APPS/HELLOSMF.SMF"
+            "HELLOSMF.SMF"
         case "/sys/apps/hello_world.smf":
-            "/SYS/APPS/HELLOSMF.SMF"
+            "HELLOSMF.SMF"
         case "/sys/apps/shell":
-            "/SYS/APPS/SHELLSMF.SMF"
+            "SHELLSMF.SMF"
         case "/sys/apps/shell.smf":
-            "/SYS/APPS/SHELLSMF.SMF"
+            "SHELLSMF.SMF"
         case "/sys/apps/editor":
-            "/SYS/APPS/EDITORSM.SMF"
+            "EDITORSM.SMF"
         case "/sys/apps/editor.smf":
-            "/SYS/APPS/EDITORSM.SMF"
+            "EDITORSM.SMF"
         case "/sys/apps/simple_browser":
-            "/SYS/APPS/SBROWSMF.SMF"
+            "SBROWSMF.SMF"
         case "/sys/apps/simple_browser.smf":
-            "/SYS/APPS/SBROWSMF.SMF"
+            "SBROWSMF.SMF"
         case "/sys/apps/simple_compiler":
-            "/SYS/APPS/SCOMPSMF.SMF"
+            "SCOMPSMF.SMF"
         case "/sys/apps/simple_compiler.smf":
-            "/SYS/APPS/SCOMPSMF.SMF"
+            "SCOMPSMF.SMF"
         case "/sys/apps/simple_interpreter":
-            "/SYS/APPS/SINTSMF.SMF"
+            "SINTSMF.SMF"
         case "/sys/apps/simple_interpreter.smf":
-            "/SYS/APPS/SINTSMF.SMF"
+            "SINTSMF.SMF"
         case "/sys/apps/simple_loader":
-            "/SYS/APPS/SLOADSMF.SMF"
+            "SLOADSMF.SMF"
         case "/sys/apps/simple_loader.smf":
-            "/SYS/APPS/SLOADSMF.SMF"
+            "SLOADSMF.SMF"
         case "/sys/apps/llvm":
-            "/SYS/APPS/LLVMSMF.SMF"
+            "LLVMSMF.SMF"
         case "/sys/apps/llvm.smf":
-            "/SYS/APPS/LLVMSMF.SMF"
+            "LLVMSMF.SMF"
         case "/sys/apps/clang":
-            "/SYS/APPS/CLANGSMF.SMF"
+            "CLANGSMF.SMF"
         case "/sys/apps/clang.smf":
-            "/SYS/APPS/CLANGSMF.SMF"
+            "CLANGSMF.SMF"
         case "/sys/apps/rust":
-            "/SYS/APPS/RUSTSMF.SMF"
+            "RUSTSMF.SMF"
         case "/sys/apps/rust.smf":
-            "/SYS/APPS/RUSTSMF.SMF"
+            "RUSTSMF.SMF"
+        case _:
+            ""
+
+fn _vfs_exec_disk_alias(path: text) -> text:
+    val common_leaf = _vfs_common_exec_disk_leaf(path)
+    if common_leaf != "":
+        return "/SYS/APPS/" + common_leaf
+    match path:
         case "/sys/apps/clang_static":
             "/SYS/APPS/CLANGSTC.SMF"
         case "/sys/apps/clang_static.smf":
@@ -778,61 +742,10 @@ fn _vfs_exec_disk_alias(path: text) -> text:
             path
 
 fn _vfs_exec_root_disk_alias(path: text) -> text:
-    match path:
-        case "/sys/apps/info":
-            "/info"
-        case "/sys/apps/info.smf":
-            "/info.smf"
-        case "/sys/apps/browser_demo":
-            "/BROWSMF.SMF"
-        case "/sys/apps/browser_demo.smf":
-            "/BROWSMF.SMF"
-        case "/sys/apps/file_manager":
-            "/FILESMF.SMF"
-        case "/sys/apps/file_manager.smf":
-            "/FILESMF.SMF"
-        case "/sys/apps/hello_world":
-            "/HELLOSMF.SMF"
-        case "/sys/apps/hello_world.smf":
-            "/HELLOSMF.SMF"
-        case "/sys/apps/shell":
-            "/SHELLSMF.SMF"
-        case "/sys/apps/shell.smf":
-            "/SHELLSMF.SMF"
-        case "/sys/apps/editor":
-            "/EDITORSM.SMF"
-        case "/sys/apps/editor.smf":
-            "/EDITORSM.SMF"
-        case "/sys/apps/simple_browser":
-            "/SBROWSMF.SMF"
-        case "/sys/apps/simple_browser.smf":
-            "/SBROWSMF.SMF"
-        case "/sys/apps/simple_compiler":
-            "/SCOMPSMF.SMF"
-        case "/sys/apps/simple_compiler.smf":
-            "/SCOMPSMF.SMF"
-        case "/sys/apps/simple_interpreter":
-            "/SINTSMF.SMF"
-        case "/sys/apps/simple_interpreter.smf":
-            "/SINTSMF.SMF"
-        case "/sys/apps/simple_loader":
-            "/SLOADSMF.SMF"
-        case "/sys/apps/simple_loader.smf":
-            "/SLOADSMF.SMF"
-        case "/sys/apps/llvm":
-            "/LLVMSMF.SMF"
-        case "/sys/apps/llvm.smf":
-            "/LLVMSMF.SMF"
-        case "/sys/apps/clang":
-            "/CLANGSMF.SMF"
-        case "/sys/apps/clang.smf":
-            "/CLANGSMF.SMF"
-        case "/sys/apps/rust":
-            "/RUSTSMF.SMF"
-        case "/sys/apps/rust.smf":
-            "/RUSTSMF.SMF"
-        case _:
-            path
+    val common_leaf = _vfs_common_exec_disk_leaf(path)
+    if common_leaf != "":
+        return "/" + common_leaf
+    path
 
 fn _known_app_has_elf_magic(buf_addr: u64) -> bool:
     if mmio_read8(buf_addr) != 0x7F.to_u8():
@@ -867,6 +780,14 @@ fn _cache_c_fat32_exec_bytes(path: text) -> [u8]:
         return []
     _copy_bytes_from_addr(simpleos_fat32_path_read_buffer_addr(), file_size)
 
+fn _seed_c_fat32_exec_bytes(label: text, path: text) -> [u8]:
+    val bytes = _cache_c_fat32_exec_bytes(path)
+    if bytes.len() > 0:
+        serial_println("[vfs-fix] {label} seeded len={bytes.len()} path={path}")
+    else:
+        serial_println("[vfs-fix] {label} probe skipped path={path}")
+    bytes
+
 fn _cached_known_exec_bytes(path: text) -> [u8]:
     val app_id = g_vfs_known_app_id(path)
     if app_id == 1:
@@ -887,51 +808,93 @@ fn _cached_known_exec_bytes(path: text) -> [u8]:
         return g_vfs_simple_exec_bytes
     []
 
-fn _cached_lazy_exec_bytes(path: text) -> [u8]:
+fn _vfs_lazy_exec_id(path: text) -> i32:
     if path == "/sys/apps/info" or path == "/sys/apps/info.smf" or path == "/SYS/APPS/info" or path == "/SYS/APPS/info.smf" or path == "/info" or path == "/info.smf":
-        return g_vfs_info_exec_bytes
+        return 1
     if path == "/sys/apps/simple_browser" or path == "/sys/apps/simple_browser.smf" or path == "/SYS/APPS/simple_browser" or path == "/SYS/APPS/simple_browser.smf" or path == "/SYS/APPS/SBROWSMF.SMF" or path == "/SBROWSMF.SMF":
-        return g_vfs_simple_browser_exec_bytes
+        return 2
     if path == "/sys/apps/simple_compiler" or path == "/sys/apps/simple_compiler.smf" or path == "/SYS/APPS/simple_compiler" or path == "/SYS/APPS/simple_compiler.smf" or path == "/SYS/APPS/SCOMPSMF.SMF" or path == "/SCOMPSMF.SMF":
-        return g_vfs_simple_compiler_exec_bytes
+        return 3
     if path == "/sys/apps/simple_interpreter" or path == "/sys/apps/simple_interpreter.smf" or path == "/SYS/APPS/simple_interpreter" or path == "/SYS/APPS/simple_interpreter.smf" or path == "/SYS/APPS/SINTSMF.SMF" or path == "/SINTSMF.SMF":
-        return g_vfs_simple_interpreter_exec_bytes
+        return 4
     if path == "/sys/apps/simple_loader" or path == "/sys/apps/simple_loader.smf" or path == "/SYS/APPS/simple_loader" or path == "/SYS/APPS/simple_loader.smf" or path == "/SYS/APPS/SLOADSMF.SMF" or path == "/SLOADSMF.SMF":
-        return g_vfs_simple_loader_exec_bytes
+        return 5
     if path == "/sys/apps/llvm" or path == "/sys/apps/llvm.smf" or path == "/SYS/APPS/llvm" or path == "/SYS/APPS/llvm.smf" or path == "/SYS/APPS/LLVMSMF.SMF" or path == "/LLVMSMF.SMF":
-        return g_vfs_llvm_exec_bytes
+        return 6
     if path == "/sys/apps/clang" or path == "/sys/apps/clang.smf" or path == "/SYS/APPS/clang" or path == "/SYS/APPS/clang.smf" or path == "/SYS/APPS/CLANGSMF.SMF" or path == "/CLANGSMF.SMF":
-        return g_vfs_clang_exec_bytes
+        return 7
     if path == "/sys/apps/rust" or path == "/sys/apps/rust.smf" or path == "/SYS/APPS/rust" or path == "/SYS/APPS/rust.smf" or path == "/SYS/APPS/RUSTSMF.SMF" or path == "/RUSTSMF.SMF":
-        return g_vfs_rust_exec_bytes
-    []
+        return 8
+    0
+
+fn _cached_lazy_exec_bytes(path: text) -> [u8]:
+    match _vfs_lazy_exec_id(path):
+        case 1:
+            return g_vfs_info_exec_bytes
+        case 2:
+            return g_vfs_simple_browser_exec_bytes
+        case 3:
+            return g_vfs_simple_compiler_exec_bytes
+        case 4:
+            return g_vfs_simple_interpreter_exec_bytes
+        case 5:
+            return g_vfs_simple_loader_exec_bytes
+        case 6:
+            return g_vfs_llvm_exec_bytes
+        case 7:
+            return g_vfs_clang_exec_bytes
+        case 8:
+            return g_vfs_rust_exec_bytes
+        case _:
+            []
 
 fn _cache_lazy_exec_bytes(path: text, bytes: [u8]) -> [u8]:
-    if path == "/sys/apps/info" or path == "/sys/apps/info.smf" or path == "/SYS/APPS/info" or path == "/SYS/APPS/info.smf" or path == "/info" or path == "/info.smf":
-        g_vfs_info_exec_bytes = bytes
-        return g_vfs_info_exec_bytes
-    if path == "/sys/apps/simple_browser" or path == "/sys/apps/simple_browser.smf" or path == "/SYS/APPS/simple_browser" or path == "/SYS/APPS/simple_browser.smf" or path == "/SYS/APPS/SBROWSMF.SMF" or path == "/SBROWSMF.SMF":
-        g_vfs_simple_browser_exec_bytes = bytes
-        return g_vfs_simple_browser_exec_bytes
-    if path == "/sys/apps/simple_compiler" or path == "/sys/apps/simple_compiler.smf" or path == "/SYS/APPS/simple_compiler" or path == "/SYS/APPS/simple_compiler.smf" or path == "/SYS/APPS/SCOMPSMF.SMF" or path == "/SCOMPSMF.SMF":
-        g_vfs_simple_compiler_exec_bytes = bytes
-        return g_vfs_simple_compiler_exec_bytes
-    if path == "/sys/apps/simple_interpreter" or path == "/sys/apps/simple_interpreter.smf" or path == "/SYS/APPS/simple_interpreter" or path == "/SYS/APPS/simple_interpreter.smf" or path == "/SYS/APPS/SINTSMF.SMF" or path == "/SINTSMF.SMF":
-        g_vfs_simple_interpreter_exec_bytes = bytes
-        return g_vfs_simple_interpreter_exec_bytes
-    if path == "/sys/apps/simple_loader" or path == "/sys/apps/simple_loader.smf" or path == "/SYS/APPS/simple_loader" or path == "/SYS/APPS/simple_loader.smf" or path == "/SYS/APPS/SLOADSMF.SMF" or path == "/SLOADSMF.SMF":
-        g_vfs_simple_loader_exec_bytes = bytes
-        return g_vfs_simple_loader_exec_bytes
-    if path == "/sys/apps/llvm" or path == "/sys/apps/llvm.smf" or path == "/SYS/APPS/llvm" or path == "/SYS/APPS/llvm.smf" or path == "/SYS/APPS/LLVMSMF.SMF" or path == "/LLVMSMF.SMF":
-        g_vfs_llvm_exec_bytes = bytes
-        return g_vfs_llvm_exec_bytes
-    if path == "/sys/apps/clang" or path == "/sys/apps/clang.smf" or path == "/SYS/APPS/clang" or path == "/SYS/APPS/clang.smf" or path == "/SYS/APPS/CLANGSMF.SMF" or path == "/CLANGSMF.SMF":
-        g_vfs_clang_exec_bytes = bytes
-        return g_vfs_clang_exec_bytes
-    if path == "/sys/apps/rust" or path == "/sys/apps/rust.smf" or path == "/SYS/APPS/rust" or path == "/SYS/APPS/rust.smf" or path == "/SYS/APPS/RUSTSMF.SMF" or path == "/RUSTSMF.SMF":
-        g_vfs_rust_exec_bytes = bytes
-        return g_vfs_rust_exec_bytes
-    bytes
+    match _vfs_lazy_exec_id(path):
+        case 1:
+            g_vfs_info_exec_bytes = bytes
+            return g_vfs_info_exec_bytes
+        case 2:
+            g_vfs_simple_browser_exec_bytes = bytes
+            return g_vfs_simple_browser_exec_bytes
+        case 3:
+            g_vfs_simple_compiler_exec_bytes = bytes
+            return g_vfs_simple_compiler_exec_bytes
+        case 4:
+            g_vfs_simple_interpreter_exec_bytes = bytes
+            return g_vfs_simple_interpreter_exec_bytes
+        case 5:
+            g_vfs_simple_loader_exec_bytes = bytes
+            return g_vfs_simple_loader_exec_bytes
+        case 6:
+            g_vfs_llvm_exec_bytes = bytes
+            return g_vfs_llvm_exec_bytes
+        case 7:
+            g_vfs_clang_exec_bytes = bytes
+            return g_vfs_clang_exec_bytes
+        case 8:
+            g_vfs_rust_exec_bytes = bytes
+            return g_vfs_rust_exec_bytes
+        case _:
+            bytes
+
+fn _seeded_exec_leaf_for_path(path: text) -> text:
+    val common_leaf = _vfs_common_exec_disk_leaf(path)
+    if common_leaf != "":
+        return common_leaf
+    if path == "/SYS/APPS/BROWSMF.SMF":
+        return "BROWSMF.SMF"
+    if path == "/SYS/APPS/HELLOSMF.SMF":
+        return "HELLOSMF.SMF"
+    ""
+
+fn _seeded_exec_bytes_for_logical_path(path: text) -> [u8]:
+    match _seeded_exec_leaf_for_path(path):
+        case "BROWSMF.SMF":
+            return g_vfs_browser_demo_exec_bytes
+        case "HELLOSMF.SMF":
+            return g_vfs_hello_world_exec_bytes
+        case _:
+            _cached_lazy_exec_bytes(path)
 
 fn g_vfs_read_known_app_bytes(path: text) -> [u8]:
     val app_id = g_vfs_known_app_id(path)
@@ -981,6 +944,9 @@ fn g_vfs_read_fat32_path_bytes(path: text) -> [u8]:
 
 pub fn g_vfs_read_executable_bytes(name: text) -> [u8]:
     """Read seeded executable bytes, preferring the stable FAT32 path bridge."""
+    val seeded = _seeded_exec_bytes_for_logical_path(name)
+    if seeded.len() > 0:
+        return seeded
     val cached = _cached_known_exec_bytes(name)
     if cached.len() > 0:
         return cached
@@ -992,81 +958,71 @@ pub fn g_vfs_read_executable_bytes(name: text) -> [u8]:
         val root_cached = _cached_lazy_exec_bytes(root_name)
         if root_cached.len() > 0:
             return root_cached
-    val mounted_bytes = g_vfs_read_file_bytes(name)
+    val mounted_bytes = _vfs_read_mounted_exec_candidate(name)
     if mounted_bytes.len() > 0:
         return mounted_bytes
     if root_name != name:
-        val mounted_root_bytes = g_vfs_read_file_bytes(root_name)
+        val mounted_root_bytes = _vfs_read_mounted_exec_candidate(root_name)
         if mounted_root_bytes.len() > 0:
             return mounted_root_bytes
     val alias_name = _vfs_exec_disk_alias(name)
     if alias_name != name:
-        val mounted_alias_bytes = g_vfs_read_file_bytes(alias_name)
+        val mounted_alias_bytes = _vfs_read_mounted_exec_candidate(alias_name)
         if mounted_alias_bytes.len() > 0:
             return mounted_alias_bytes
     val root_alias = _vfs_exec_disk_alias(root_name)
     if root_name != name and root_alias != root_name:
-        val mounted_root_alias_bytes = g_vfs_read_file_bytes(root_alias)
+        val mounted_root_alias_bytes = _vfs_read_mounted_exec_candidate(root_alias)
         if mounted_root_alias_bytes.len() > 0:
             return mounted_root_alias_bytes
     val root_disk_alias = _vfs_exec_root_disk_alias(name)
     if root_disk_alias != name:
-        val mounted_root_disk_bytes = g_vfs_read_file_bytes(root_disk_alias)
+        val mounted_root_disk_bytes = _vfs_read_mounted_exec_candidate(root_disk_alias)
         if mounted_root_disk_bytes.len() > 0:
             return mounted_root_disk_bytes
     val root_disk_alias_root = _vfs_exec_root_disk_alias(root_name)
     if root_name != name and root_disk_alias_root != root_name:
-        val mounted_root_disk_root_bytes = g_vfs_read_file_bytes(root_disk_alias_root)
+        val mounted_root_disk_root_bytes = _vfs_read_mounted_exec_candidate(root_disk_alias_root)
         if mounted_root_disk_root_bytes.len() > 0:
             return mounted_root_disk_root_bytes
-    val direct_path_bytes = g_vfs_read_fat32_path_bytes(name)
+    val direct_path_bytes = _vfs_read_direct_exec_candidate(name, name)
     if direct_path_bytes.len() > 0:
-        val direct_cached = _cache_exec_bytes_if_valid(name, name, direct_path_bytes)
-        if direct_cached.len() > 0:
-            return direct_cached
+        return direct_path_bytes
     if root_name != name:
-        val root_path_bytes = g_vfs_read_fat32_path_bytes(root_name)
+        val root_path_bytes = _vfs_read_direct_exec_candidate(root_name, root_name)
         if root_path_bytes.len() > 0:
-            val root_cached_bytes = _cache_exec_bytes_if_valid(root_name, root_name, root_path_bytes)
-            if root_cached_bytes.len() > 0:
-                return root_cached_bytes
+            return root_path_bytes
     if root_disk_alias != name:
-        val root_disk_cached = _cached_lazy_exec_bytes(root_disk_alias)
-        if root_disk_cached.len() > 0:
-            return root_disk_cached
-        val root_disk_bytes = g_vfs_read_fat32_path_bytes(root_disk_alias)
+        val root_disk_bytes = _vfs_read_direct_exec_candidate(root_disk_alias, root_disk_alias)
         if root_disk_bytes.len() > 0:
-            val root_disk_cached_bytes = _cache_exec_bytes_if_valid(root_disk_alias, root_disk_alias, root_disk_bytes)
-            if root_disk_cached_bytes.len() > 0:
-                return root_disk_cached_bytes
+            return root_disk_bytes
     if root_name != name and root_disk_alias_root != root_name:
-        val root_disk_root_cached = _cached_lazy_exec_bytes(root_disk_alias_root)
-        if root_disk_root_cached.len() > 0:
-            return root_disk_root_cached
-        val root_disk_root_bytes = g_vfs_read_fat32_path_bytes(root_disk_alias_root)
+        val root_disk_root_bytes = _vfs_read_direct_exec_candidate(root_disk_alias_root, root_disk_alias_root)
         if root_disk_root_bytes.len() > 0:
-            val root_disk_root_cached_bytes = _cache_exec_bytes_if_valid(root_disk_alias_root, root_disk_alias_root, root_disk_root_bytes)
-            if root_disk_root_cached_bytes.len() > 0:
-                return root_disk_root_cached_bytes
+            return root_disk_root_bytes
     if alias_name != name:
-        val alias_cached = _cached_lazy_exec_bytes(alias_name)
-        if alias_cached.len() > 0:
-            return alias_cached
-        val alias_bytes = g_vfs_read_fat32_path_bytes(alias_name)
+        val alias_bytes = _vfs_read_direct_exec_candidate(alias_name, alias_name)
         if alias_bytes.len() > 0:
-            val alias_cached_bytes = _cache_exec_bytes_if_valid(alias_name, alias_name, alias_bytes)
-            if alias_cached_bytes.len() > 0:
-                return alias_cached_bytes
+            return alias_bytes
     if root_name != name and root_alias != root_name:
-        val root_alias_cached = _cached_lazy_exec_bytes(root_alias)
-        if root_alias_cached.len() > 0:
-            return root_alias_cached
-        val root_alias_bytes = g_vfs_read_fat32_path_bytes(root_alias)
+        val root_alias_bytes = _vfs_read_direct_exec_candidate(root_alias, root_alias)
         if root_alias_bytes.len() > 0:
-            val root_alias_cached_bytes = _cache_exec_bytes_if_valid(root_alias, root_alias, root_alias_bytes)
-            if root_alias_cached_bytes.len() > 0:
-                return root_alias_cached_bytes
+            return root_alias_bytes
     []
+
+fn _vfs_read_mounted_exec_candidate(path: text) -> [u8]:
+    if path == "":
+        return []
+    g_vfs_read_file_bytes(path)
+
+fn _vfs_read_direct_exec_candidate(cache_key: text, path: text) -> [u8]:
+    val cached = _cached_lazy_exec_bytes(cache_key)
+    if cached.len() > 0:
+        return cached
+    val bytes = g_vfs_read_fat32_path_bytes(path)
+    if bytes.len() <= 0:
+        return []
+    _cache_exec_bytes_if_valid(cache_key, path, bytes)
 
 fn _clone_bytes(buf: [u8]) -> [u8]:
     var out: [u8] = []
@@ -1504,7 +1460,10 @@ pub fn g_vfs_read_file_text(name: text) -> text:
     if rel_raw == "":
         rel_raw = abs.raw
     val relpath = Path(raw: rel_raw)
-    g_vfs_dispatch_read_file_text(entry.driver, relpath)
+    val driver_r = g_mount_table.resolve_driver(abs.raw)
+    if driver_r.is_err():
+        return ""
+    g_vfs_dispatch_read_file_text(driver_r.unwrap(), relpath)
 
 pub fn g_vfs_read_file_bytes(name: text) -> [u8]:
     """Read an entire file as bytes via the mount table.
@@ -1512,6 +1471,9 @@ pub fn g_vfs_read_file_bytes(name: text) -> [u8]:
     Accepts bare FAT32 names ("HELLO.TXT") or absolute paths ("/HELLO.TXT").
     Returns an empty byte array on any error.
     """
+    val seeded_exec = _seeded_exec_bytes_for_logical_path(name)
+    if seeded_exec.len() > 0:
+        return _clone_bytes(seeded_exec)
     if g_root_fat32 != nil:
         val root_bytes = g_vfs_root_read_file_bytes(g_root_fat32.unwrap(), g_vfs_root_path(name))
         if root_bytes.len() > 0:
@@ -1541,7 +1503,10 @@ pub fn g_vfs_read_file_bytes(name: text) -> [u8]:
             ci_first = ci_first + 1
         if rel_raw_first == "":
             rel_raw_first = abs_first.raw
-        val mounted_bytes = g_vfs_dispatch_read_file_bytes(entry_first.driver, Path(raw: rel_raw_first))
+        val driver_first_r = g_mount_table.resolve_driver(abs_first.raw)
+        if driver_first_r.is_err():
+            return []
+        val mounted_bytes = g_vfs_dispatch_read_file_bytes(driver_first_r.unwrap(), Path(raw: rel_raw_first))
         if mounted_bytes.len() > 0:
             return _clone_bytes(mounted_bytes)
     # Compatibility fallback for existing boot media that still expose the
@@ -1583,7 +1548,10 @@ pub fn g_vfs_read_file_bytes(name: text) -> [u8]:
     if rel_raw == "":
         rel_raw = abs.raw
     val relpath = Path(raw: rel_raw)
-    g_vfs_dispatch_read_file_bytes(entry.driver, relpath)
+    val driver_r = g_mount_table.resolve_driver(abs.raw)
+    if driver_r.is_err():
+        return []
+    g_vfs_dispatch_read_file_bytes(driver_r.unwrap(), relpath)
 
 pub fn g_vfs_file_size(name: text) -> Option<VfsFileSize>:
     """Return file size in bytes via the mount table, or nil on error.
@@ -1623,7 +1591,10 @@ pub fn g_vfs_file_size(name: text) -> Option<VfsFileSize>:
             ci_first = ci_first + 1
         if rel_raw_first == "":
             rel_raw_first = abs_first.raw
-        val mounted_size = g_vfs_dispatch_file_size(entry_first.driver, Path(raw: rel_raw_first))
+        val driver_first_r = g_mount_table.resolve_driver(abs_first.raw)
+        if driver_first_r.is_err():
+            return nil
+        val mounted_size = g_vfs_dispatch_file_size(driver_first_r.unwrap(), Path(raw: rel_raw_first))
         if mounted_size >= 0:
             return Some(VfsFileSize(bytes: mounted_size))
     # Compatibility fallback for transitional C FAT32 bridge readers.
@@ -1658,7 +1629,10 @@ pub fn g_vfs_file_size(name: text) -> Option<VfsFileSize>:
     if rel_raw == "":
         rel_raw = abs.raw
     val relpath = Path(raw: rel_raw)
-    val final_size = g_vfs_dispatch_file_size(entry.driver, relpath)
+    val driver_r = g_mount_table.resolve_driver(abs.raw)
+    if driver_r.is_err():
+        return nil
+    val final_size = g_vfs_dispatch_file_size(driver_r.unwrap(), relpath)
     if final_size >= 0:
         return Some(VfsFileSize(bytes: final_size))
     nil
@@ -1712,7 +1686,7 @@ pub fn g_vfs_write_file_text(name: text, content: text) -> bool:
     Returns true on success, false on any error.
     """
     if g_root_fat32 != nil:
-        return g_vfs_root_write_file_text(driver: g_root_fat32.unwrap(), path: g_vfs_root_path(name), content: content)
+        return g_vfs_root_write_file_text(g_root_fat32.unwrap(), g_vfs_root_path(name), content)
     if g_root_nvfs_posix != nil:
         return _g_vfs_root_nvfs_posix_write_file_text(g_vfs_root_path(name), content)
     val abs = g_vfs_abs_path(name)
@@ -1729,7 +1703,10 @@ pub fn g_vfs_write_file_text(name: text, content: text) -> bool:
     if rel_raw == "":
         rel_raw = abs.raw
     val relpath = Path(raw: rel_raw)
-    g_vfs_dispatch_write_file_text(entry.driver, relpath, content)
+    val driver_r = g_mount_table.resolve_driver(abs.raw)
+    if driver_r.is_err():
+        return false
+    g_vfs_dispatch_write_file_text(driver_r.unwrap(), relpath, content)
 
 fn g_vfs_dispatch_write_file_text(driver: DriverInstance, relpath: Path, content: text) -> bool:
     """Dispatch write-whole-file-as-text to the correct concrete driver.
@@ -1821,7 +1798,10 @@ pub fn g_vfs_file_exists(name: text) -> bool:
             ci_first = ci_first + 1
         if rel_raw_first == "":
             rel_raw_first = abs_first.raw
-        if g_vfs_dispatch_file_exists(entry_first.driver, Path(raw: rel_raw_first)):
+        val driver_first_r = g_mount_table.resolve_driver(abs_first.raw)
+        if driver_first_r.is_err():
+            return false
+        if g_vfs_dispatch_file_exists(driver_first_r.unwrap(), Path(raw: rel_raw_first)):
             return true
     # Compatibility fallback for transitional C FAT32 bridge readers.
     if simpleos_fat32_read_path_size(name) > 0:
@@ -1849,4 +1829,7 @@ pub fn g_vfs_file_exists(name: text) -> bool:
     if rel_raw == "":
         rel_raw = abs.raw
     val relpath = Path(raw: rel_raw)
-    g_vfs_dispatch_file_exists(entry.driver, relpath)
+    val driver_r = g_mount_table.resolve_driver(abs.raw)
+    if driver_r.is_err():
+        return false
+    g_vfs_dispatch_file_exists(driver_r.unwrap(), relpath)

@@ -12,6 +12,7 @@
 
 use std.common.torch.dyn_ffi.{
     spl_f64_to_bits,
+    spl_bits_to_f64,
     spl_str_ptr,
     rt_cstring_to_text,
     _call0,
@@ -21,9 +22,62 @@ use std.common.torch.dyn_ffi.{
     _call_n
 }
 
+extern fn rt_alloc(size: i64) -> i64
+extern fn rt_free(ptr: i64, size: i64)
+extern fn rt_ptr_read_i64(addr: i64, offset: i64) -> i64
+extern fn rt_ptr_write_i64(addr: i64, offset: i64, value: i64)
+
 # ============================================================================
 # P2: Fixed-dimension Tensor Creation
 # ============================================================================
+
+fn dyn_torch_tensor_from_values_1d(data: [f64]) -> i64:
+    val bytes = data.len() * 8
+    val buf = rt_alloc(bytes)
+    if buf == 0:
+        return 0
+    var i = 0
+    while i < data.len():
+        rt_ptr_write_i64(buf, i * 8, spl_f64_to_bits(data[i]))
+        i = i + 1
+    val handle = _call2("rt_dyn_torch_tensor_from_bits_1d", buf, data.len())
+    rt_free(buf, bytes)
+    handle
+
+fn dyn_torch_tensor_from_values_2d(data: [f64], rows: i64, cols: i64) -> i64:
+    if rows <= 0 or cols <= 0 or data.len() != rows * cols:
+        return 0
+    val bytes = data.len() * 8
+    val buf = rt_alloc(bytes)
+    if buf == 0:
+        return 0
+    var i = 0
+    while i < data.len():
+        rt_ptr_write_i64(buf, i * 8, spl_f64_to_bits(data[i]))
+        i = i + 1
+    val handle = _call3("rt_dyn_torch_tensor_from_bits_2d", buf, rows, cols)
+    rt_free(buf, bytes)
+    handle
+
+fn dyn_torch_tensor_copy_values(handle: i64, count: i64) -> [f64]:
+    var out: [f64] = []
+    if count < 0:
+        return out
+    val bytes = count * 8
+    val buf = rt_alloc(bytes)
+    if buf == 0:
+        return out
+    val ok = _call3("rt_dyn_torch_tensor_copy_bits", handle, buf, count)
+    if ok != 0:
+        var i = 0
+        while i < count:
+            out.push(spl_bits_to_f64(rt_ptr_read_i64(buf, i * 8)))
+            i = i + 1
+    rt_free(buf, bytes)
+    out
+
+fn dyn_torch_tensor_binary_op(handle: i64, other: i64, op: i64) -> i64:
+    _call3("rt_dyn_torch_tensor_binary_op", handle, other, op)
 
 # --- zeros ---
 fn dyn_torch_tensor_zeros_1d(d0: i64) -> i64:

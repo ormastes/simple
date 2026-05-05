@@ -13,6 +13,8 @@ use compiler.common.visibility.{effective_visibility}
 use compiler.common.dependency.visibility.{Visibility}
 use compiler.core.types.{custom_primitive_bind_symbol, custom_primitive_is_name}
 
+extern fn rt_env_get(key: text) -> text
+
 # Local placeholder for the module resolver port used in FR-COMPILER-003 A2.
 # The actual 85.mdsoc implementation will be wired by the A2 agent at call sites.
 # Kept here (layer 20) to avoid a layer violation (20 must not import 85).
@@ -24,7 +26,6 @@ struct ModuleResolverPort:
 # ============================================================================
 
 class HirLowering:
-    """Lowers AST to HIR."""
     symbols: SymbolTable
     errors: [LoweringError]
     current_function: SymbolId?
@@ -38,12 +39,10 @@ class HirLowering:
     lowered_impl_functions: Dict<SymbolId, HirFunction>
 
 struct LoweringError:
-    """Error during lowering."""
     message: text
     span: Span
     kind: LoweringErrorKind
 
-"""Lowering error kind."""
 enum LoweringErrorKind:
     UnresolvedName
     DuplicateDefinition
@@ -53,7 +52,6 @@ enum LoweringErrorKind:
     Other
 
 fn hirlowering_new() -> HirLowering:
-    """Create a new HirLowering (free function for cross-module bootstrap compatibility)."""
     HirLowering(
         symbols: SymbolTable.new(),
         errors: [],
@@ -69,7 +67,6 @@ fn hirlowering_new() -> HirLowering:
     )
 
 fn hirlowering_for_module(filename: text, modules_by_name: Dict<text, Module>) -> HirLowering:
-    """Create a module-local HIR lowerer with shared parsed-module import context."""
     var lowering = hirlowering_new()
     lowering.module_filename = filename
     lowering.modules_by_name = modules_by_name
@@ -80,7 +77,6 @@ impl HirLowering:
         hirlowering_new()
 
     static fn with_filename(filename: text) -> HirLowering:
-        """Create HIR lowering with filename for visibility matching."""
         HirLowering(
             symbols: SymbolTable.new(),
             errors: [],
@@ -111,7 +107,6 @@ impl HirLowering:
         )
 
     static fn with_resolver(resolver: ModuleResolverPort, filename: text) -> HirLowering:
-        """Create HIR lowering with module resolver for 2-pass import resolution (FR-COMPILER-003 A2)."""
         HirLowering(
             symbols: SymbolTable.new(),
             errors: [],
@@ -127,11 +122,9 @@ impl HirLowering:
         )
 
     me set_type_inference_config(config: TypeInferenceConfig):
-        """Set the type inference configuration."""
         self.type_inference_config = Some(config)
 
     fn get_empty_array_default() -> HirType:
-        """Get the default element type for empty arrays."""
         val default_type = if self.type_inference_config.?:
             self.type_inference_config.unwrap().empty_array_default
         else:
@@ -158,14 +151,12 @@ impl HirLowering:
             case _: HirType(kind: HirTypeKind.Int(32, true), span: span)  # Default to i32
 
     fn is_strict_empty_collections() -> bool:
-        """Check if strict mode is enabled for empty collections."""
         if self.type_inference_config.?:
             self.type_inference_config.unwrap().strict_empty_collections
         else:
             false
 
     me error(message: text, span: Span):
-        """Record a lowering error."""
         self.errors = self.errors.push(LoweringError(
             message: message,
             span: span,
@@ -173,13 +164,8 @@ impl HirLowering:
         ))
 
     fn compute_visibility(type_name: text, declared_visibility: Visibility) -> Visibility:
-        """Compute effective visibility for a declaration.
-
-        Uses filename matching rule:
-        - If explicitly marked with non-private visibility -> preserve it
-        - If type name matches filename -> auto-public
-        - Otherwise -> private
-        """
+        if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
+            return Visibility.Public
         if declared_visibility != Visibility.Private:
             return declared_visibility
         if effective_visibility(type_name, self.module_filename, false):
@@ -187,7 +173,6 @@ impl HirLowering:
         Visibility.Private
 
     me lower_type(t: Type) -> HirType:
-        """Lower type expression."""
         val kind = match t.kind:
             case Named(name, args):
                 val hir_args = self.lower_type_list(args)
@@ -261,14 +246,12 @@ impl HirLowering:
         HirType(kind: kind, span: t.span)
 
     me lower_type_list(types: [Type]) -> [HirType]:
-        """Lower a list of types to HIR."""
         var result: [HirType] = []
         for t in types:
             result = result.push(self.lower_type(t))
         result
 
     me lower_type_param(tp: TypeParam) -> HirTypeParam:
-        """Lower type parameter."""
         val symbol = self.symbols.define(tp.name, SymbolKind.TypeParam, nil, tp.span, false, false, nil)
 
         var bounds: [HirType] = []
@@ -284,10 +267,6 @@ impl HirLowering:
         )
 
     me lower_trait_bound(bound: TraitBound) -> HirTraitBound:
-        """Lower trait bound to HIR.
-
-        Converts AST trait bound (T: Trait) to HIR representation.
-        """
         # Lookup the type parameter symbol
         val type_param_symbol = self.symbols.lookup(bound.type_param).unwrap()
 
@@ -301,7 +280,6 @@ impl HirLowering:
         )
 
     me lower_trait_bounds(bounds: [TraitBound]) -> [HirTraitBound]:
-        """Lower a list of trait bounds to HIR."""
         var result: [HirTraitBound] = []
         for b in bounds:
             result = result.push(self.lower_trait_bound(b))

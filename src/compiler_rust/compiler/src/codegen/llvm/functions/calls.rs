@@ -201,6 +201,98 @@ impl LlvmBackend {
     }
 
     #[cfg(feature = "llvm")]
+    fn compile_simple_runtime_memory_intrinsic(
+        &self,
+        name: &str,
+        dest: Option<crate::mir::VReg>,
+        args: &[crate::mir::VReg],
+        vreg_map: &mut VRegMap,
+        builder: &Builder<'static>,
+    ) -> Result<bool, CompileError> {
+        let intrinsic = name.rsplit_once("__").map(|(_, tail)| tail).unwrap_or(name);
+        if !matches!(
+            intrinsic,
+            "spl_load_i64" | "spl_store_i64" | "spl_load_u8" | "spl_store_u8"
+        ) {
+            return Ok(false);
+        }
+
+        let expected_args = if intrinsic.starts_with("spl_load_") { 2 } else { 3 };
+        if args.len() != expected_args {
+            return Err(crate::error::factory::llvm_build_failed(
+                "simple runtime memory intrinsic",
+                &format!("{intrinsic} expects {expected_args} args, got {}", args.len()),
+            ));
+        }
+
+        let i64_type = self.runtime_int_type();
+        let i8_type = self.context.i8_type();
+        let ptr_type = self.context.ptr_type(inkwell::AddressSpace::default());
+        let base = self.get_vreg(&args[0], vreg_map)?;
+        let base = self
+            .coerce_value_to_type(base, Some(i64_type.into()), builder)?
+            .into_int_value();
+        let offset = self.get_vreg(&args[1], vreg_map)?;
+        let offset = self
+            .coerce_value_to_type(offset, Some(i64_type.into()), builder)?
+            .into_int_value();
+        let base_ptr = builder
+            .build_int_to_ptr(base, ptr_type, "spl_mem_base")
+            .map_err(|e| crate::error::factory::llvm_build_failed("simple runtime memory int_to_ptr", &e))?;
+        let addr = unsafe {
+            builder
+                .build_gep(i8_type, base_ptr, &[offset], "spl_mem_addr")
+                .map_err(|e| crate::error::factory::llvm_build_failed("simple runtime memory gep", &e))?
+        };
+
+        match intrinsic {
+            "spl_load_i64" => {
+                let loaded = builder
+                    .build_load(i64_type, addr, "spl_load_i64")
+                    .map_err(|e| crate::error::factory::llvm_build_failed("simple runtime load_i64", &e))?;
+                if let Some(d) = dest {
+                    vreg_map.insert(d, loaded);
+                }
+            }
+            "spl_load_u8" => {
+                let loaded = builder
+                    .build_load(i8_type, addr, "spl_load_u8")
+                    .map_err(|e| crate::error::factory::llvm_build_failed("simple runtime load_u8", &e))?
+                    .into_int_value();
+                let widened = builder
+                    .build_int_z_extend(loaded, i64_type, "spl_load_u8_zext")
+                    .map_err(|e| crate::error::factory::llvm_build_failed("simple runtime load_u8 zext", &e))?;
+                if let Some(d) = dest {
+                    vreg_map.insert(d, widened.into());
+                }
+            }
+            "spl_store_i64" | "spl_store_u8" => {
+                let value = self.get_vreg(&args[2], vreg_map)?;
+                let value = self
+                    .coerce_value_to_type(value, Some(i64_type.into()), builder)?
+                    .into_int_value();
+                let store_value: inkwell::values::BasicValueEnum = if intrinsic == "spl_store_u8" {
+                    builder
+                        .build_int_truncate(value, i8_type, "spl_store_u8_trunc")
+                        .map_err(|e| crate::error::factory::llvm_build_failed("simple runtime store_u8 trunc", &e))?
+                        .into()
+                } else {
+                    value.into()
+                };
+                builder
+                    .build_store(addr, store_value)
+                    .map_err(|e| crate::error::factory::llvm_build_failed("simple runtime store", &e))?;
+                if let Some(d) = dest {
+                    vreg_map.insert(d, i64_type.const_int(0, false).into());
+                }
+            }
+            _ => unreachable!(),
+        }
+
+        Ok(true)
+    }
+
+    #[cfg(feature = "llvm")]
     pub(in crate::codegen::llvm) fn compile_call(
         &self,
         dest: Option<crate::mir::VReg>,
@@ -213,6 +305,10 @@ impl LlvmBackend {
         let func_name_raw = target.name();
         let ffi_name = map_ffi_name(func_name_raw);
         let i64_type = self.runtime_int_type();
+
+        if self.compile_simple_runtime_memory_intrinsic(func_name_raw, dest, args, vreg_map, builder)? {
+            return Ok(());
+        }
 
         // Built-in I/O: redirect print/println/eprint/eprintln to runtime functions.
         // Accepts both bare names and spl_ prefixed names (safe symbol exports).

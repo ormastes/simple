@@ -184,6 +184,9 @@ pub struct NativeBuildConfig {
     pub linker_script: Option<PathBuf>,
     /// Optimization profile for native executable builds.
     pub opt_level: NativeOptimizationLevel,
+    /// Emit a static archive from compiled Simple objects instead of linking
+    /// an executable.
+    pub emit_archive: bool,
 }
 
 impl Default for NativeBuildConfig {
@@ -206,6 +209,7 @@ impl Default for NativeBuildConfig {
             target: None,
             linker_script: None,
             opt_level: NativeOptimizationLevel::default_for_native_executable(),
+            emit_archive: false,
         }
     }
 }
@@ -728,9 +732,13 @@ impl NativeProjectBuilder {
             }
         }
 
-        // 7. Link
+        // 7. Link or archive
         let link_start = Instant::now();
-        let link_result = self.link_objects(&object_paths, &imports);
+        let link_result = if self.config.emit_archive {
+            self.archive_objects(&object_paths)
+        } else {
+            self.link_objects(&object_paths, &imports)
+        };
         let link_time = link_start.elapsed();
 
         // On link failure, optionally keep objects for debugging
@@ -760,7 +768,8 @@ impl NativeProjectBuilder {
 
         if self.config.verbose {
             eprintln!(
-                "Linked: {} ({} KB) in {:.1}s",
+                "{}: {} ({} KB) in {:.1}s",
+                if self.config.emit_archive { "Archived" } else { "Linked" },
                 self.output.display(),
                 binary_size / 1024,
                 link_time.as_secs_f64()
@@ -777,6 +786,29 @@ impl NativeProjectBuilder {
             binary_size,
             failures,
         })
+    }
+
+    fn archive_objects(&self, object_paths: &[PathBuf]) -> Result<(), String> {
+        if let Some(parent) = self.output.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| format!("create archive output dir: {e}"))?;
+        }
+        if self.output.exists() {
+            std::fs::remove_file(&self.output)
+                .map_err(|e| format!("remove existing archive {}: {e}", self.output.display()))?;
+        }
+        let ar = find_archive_tool();
+        let output = std::process::Command::new(&ar)
+            .arg("rcs")
+            .arg(&self.output)
+            .args(object_paths)
+            .output()
+            .map_err(|e| format!("run archive tool {ar}: {e}"))?;
+        if output.status.success() {
+            Ok(())
+        } else {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            Err(format!("archive failed ({}): {}", ar, stderr))
+        }
     }
 }
 

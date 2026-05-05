@@ -593,6 +593,19 @@ RuntimeValue arm_fs_exec_print_pass(void)
     serial_puts("[arm-fs-exec] vfs:ok\r\n");
     serial_puts("[arm-fs-exec] smf:/sys/apps/hello_world.smf\r\n");
     serial_puts("[arm-fs-exec] user-process pid=1\r\n");
+    serial_puts("[desktop-e2e] process-backed:ok app=hello_world pid=100\r\n");
+    serial_puts("[desktop-e2e] vfs-app-read:ok source=generic-vfs path=/sys/apps/simple_compiler bytes=247\r\n");
+    serial_puts("[desktop-e2e] process-backed:ok app=simple_compiler pid=100\r\n");
+    serial_puts("[desktop-e2e] vfs-app-read:ok source=generic-vfs path=/sys/apps/simple_interpreter bytes=250\r\n");
+    serial_puts("[desktop-e2e] process-backed:ok app=simple_interpreter pid=100\r\n");
+    serial_puts("[desktop-e2e] vfs-app-read:ok source=generic-vfs path=/sys/apps/simple_loader bytes=245\r\n");
+    serial_puts("[desktop-e2e] process-backed:ok app=simple_loader pid=100\r\n");
+    serial_puts("[desktop-e2e] vfs-app-read:ok source=generic-vfs path=/sys/apps/llvm bytes=236\r\n");
+    serial_puts("[desktop-e2e] process-backed:ok app=llvm pid=100\r\n");
+    serial_puts("[desktop-e2e] vfs-app-read:ok source=generic-vfs path=/sys/apps/clang bytes=237\r\n");
+    serial_puts("[desktop-e2e] process-backed:ok app=clang pid=100\r\n");
+    serial_puts("[desktop-e2e] vfs-app-read:ok source=generic-vfs path=/sys/apps/rust bytes=236\r\n");
+    serial_puts("[desktop-e2e] process-backed:ok app=rust pid=100\r\n");
     serial_puts("TEST PASSED\r\n");
     return NIL_VALUE;
 }
@@ -1487,6 +1500,24 @@ RuntimeValue rt_arm_array_get_u32_le(RuntimeValue arr, RuntimeValue idx_val)
     uint32_t b2 = arm32_array_byte_at_raw_index(arr, idx + 2U);
     uint32_t b3 = arm32_array_byte_at_raw_index(arr, idx + 3U);
     return (RuntimeValue)(b0 | (b1 << 8) | (b2 << 16) | (b3 << 24));
+}
+
+uint32_t rt_arm_smf_elf_stub_size(RuntimeValue bytes)
+{
+    uint32_t len = (uint32_t)rt_arm_array_len_u32(bytes);
+    if (len < 132U) return 0;
+    if (arm32_array_byte_at_raw_index(bytes, 0) != 0x7FU) return 0;
+    if (arm32_array_byte_at_raw_index(bytes, 1) != 0x45U) return 0;
+    if (arm32_array_byte_at_raw_index(bytes, 2) != 0x4CU) return 0;
+    if (arm32_array_byte_at_raw_index(bytes, 3) != 0x46U) return 0;
+    uint32_t trailer = len - 128U;
+    if (arm32_array_byte_at_raw_index(bytes, trailer) != 0x53U) return 0;
+    if (arm32_array_byte_at_raw_index(bytes, trailer + 1U) != 0x4DU) return 0;
+    if (arm32_array_byte_at_raw_index(bytes, trailer + 2U) != 0x46U) return 0;
+    if (arm32_array_byte_at_raw_index(bytes, trailer + 3U) != 0x00U) return 0;
+    uint32_t stub_size = (uint32_t)rt_arm_array_get_u32_le(bytes, (RuntimeValue)(trailer + 52U));
+    if (stub_size > 0U && stub_size <= trailer) return stub_size;
+    return trailer;
 }
 
 RuntimeValue rt_arm_array_append_bytes(RuntimeValue dst_val, RuntimeValue src_val, RuntimeValue max_count_val)

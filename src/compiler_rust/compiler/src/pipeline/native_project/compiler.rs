@@ -348,6 +348,88 @@ pub(crate) fn compile_file_to_object(
 
     // MIR
     let mir = crate::mir::lower_to_mir(&hir).map_err(|e| format!("{}: mir: {e}", file_path.display()))?;
+    if std::env::var("SIMPLE_TRACE_MIR_FUNCTIONS").is_ok() {
+        let path_text = file_path.display().to_string();
+        if std::env::var("SIMPLE_TRACE_MIR_FUNCTIONS_FILTER")
+            .map(|filter| path_text.contains(&filter))
+            .unwrap_or(true)
+        {
+            let selected = [
+                "CompilerDriver.lower_and_check_impl",
+                "CompilerDriver.resolve_methods_impl",
+                "resolve_methods",
+                "HirExpr.int_lit",
+                "parser_function_new",
+            ]
+            .iter()
+            .map(|name| {
+                let found = mir.functions.iter().any(|func| func.name == *name);
+                format!("{name}={found}")
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+            let preview = mir
+                .functions
+                .iter()
+                .take(32)
+                .map(|func| func.name.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
+            eprintln!(
+                "[mir-functions] file={} count={} selected=[{}] preview=[{}]",
+                file_path.display(),
+                mir.functions.len(),
+                selected,
+                preview
+            );
+        }
+    }
+    if std::env::var("SIMPLE_TRACE_MIR_GLOBALS").is_ok() {
+        let path_text = file_path.display().to_string();
+        if std::env::var("SIMPLE_TRACE_MIR_GLOBALS_FILTER")
+            .map(|filter| path_text.contains(&filter))
+            .unwrap_or(true)
+        {
+            let globals_preview = mir
+                .globals
+                .iter()
+                .take(24)
+                .map(|(name, ty, is_mut)| format!("{name}:{ty:?}:mut={is_mut}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let local_preview = mir
+                .local_globals
+                .iter()
+                .take(24)
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(", ");
+            let selected = [
+                "decl_tag",
+                "decl_field_names",
+                "module_decl_slots",
+                "DECL_FN",
+                "resolve_methods",
+            ]
+            .iter()
+            .map(|name| {
+                let in_globals = mir.globals.iter().any(|(global_name, _, _)| global_name == *name);
+                let in_local = mir.local_globals.contains(*name);
+                format!("{name}:globals={in_globals}:local={in_local}")
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+            eprintln!(
+                "[mir-globals] file={} globals={} [{}] local_globals={} [{}] selected=[{}]",
+                file_path.display(),
+                mir.globals.len(),
+                globals_preview,
+                mir.local_globals.len(),
+                local_preview,
+                selected
+            );
+        }
+    }
 
     // Codegen -- select backend via SIMPLE_BACKEND env var
     let use_llvm = std::env::var("SIMPLE_BACKEND").as_deref() == Ok("llvm");

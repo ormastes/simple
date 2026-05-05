@@ -1,0 +1,466 @@
+#!/bin/sh
+set -eu
+
+size_bits="${1:-64}"
+img_path="${2:-build/os/fat32.img}"
+kernel_path="${3:-}"
+platform="${4:-x86_64}"
+
+mkdir -p "$(dirname "$img_path")"
+
+if command -v python3 >/dev/null 2>&1; then
+    python3 - "$img_path" "$platform" "$size_bits" "$kernel_path" <<'PY'
+import os
+import struct
+import sys
+
+img_path, platform, size_bits, kernel_path = sys.argv[1:5]
+uefi_bootloader_path = os.environ.get("SIMPLEOS_UEFI_BOOTLOADER", "")
+sector_size = 512
+total_sectors = 8192
+reserved = 32
+fat_count = 1
+fat_size = 64
+spc = 1
+root_cluster = 2
+data_start = reserved + fat_count * fat_size
+cluster_size = sector_size * spc
+image = bytearray(total_sectors * sector_size)
+fat = [0] * (fat_size * sector_size // 4)
+fat[0] = 0x0FFFFFF8
+fat[1] = 0x0FFFFFFF
+
+def le16(offset, value):
+    image[offset:offset + 2] = struct.pack("<H", value)
+
+def le32(offset, value):
+    image[offset:offset + 4] = struct.pack("<I", value)
+
+def cluster_offset(cluster):
+    return (data_start + (cluster - 2) * spc) * sector_size
+
+next_cluster = 3
+def alloc_clusters(data):
+    global next_cluster
+    needed = max(1, (len(data) + cluster_size - 1) // cluster_size)
+    first = next_cluster
+    clusters = list(range(first, first + needed))
+    next_cluster += needed
+    for i, cluster in enumerate(clusters):
+        fat[cluster] = clusters[i + 1] if i + 1 < len(clusters) else 0x0FFFFFFF
+        start = i * cluster_size
+        image[cluster_offset(cluster):cluster_offset(cluster) + cluster_size] = data[start:start + cluster_size].ljust(cluster_size, b"\0")
+    return first
+
+def short_name(name):
+    raw = name.encode("ascii")
+    if len(raw) != 11:
+        raise SystemExit(f"bad FAT short name {name!r}")
+    return raw
+
+def dir_entry(name, cluster, size, attr=0x20):
+    entry = bytearray(32)
+    entry[0:11] = short_name(name)
+    entry[11] = attr
+    struct.pack_into("<H", entry, 20, (cluster >> 16) & 0xFFFF)
+    struct.pack_into("<H", entry, 26, cluster & 0xFFFF)
+    struct.pack_into("<I", entry, 28, size)
+    return bytes(entry)
+
+def read_file(path):
+    if path and os.path.exists(path):
+        with open(path, "rb") as f:
+            return f.read()
+    return b""
+
+def elf64(marker, machine):
+    marker_bytes = (marker + "\0").encode("ascii")
+    size = 64 + 56 + len(marker_bytes)
+    data = bytearray(size)
+    data[0:4] = b"\x7fELF"
+    data[4] = 2
+    data[5] = 1
+    data[6] = 1
+    struct.pack_into("<H", data, 16, 2)
+    struct.pack_into("<H", data, 18, machine)
+    struct.pack_into("<I", data, 20, 1)
+    struct.pack_into("<Q", data, 24, 0x1000)
+    struct.pack_into("<Q", data, 32, 64)
+    struct.pack_into("<H", data, 52, 64)
+    struct.pack_into("<H", data, 54, 56)
+    struct.pack_into("<H", data, 56, 1)
+    struct.pack_into("<I", data, 64, 1)
+    struct.pack_into("<I", data, 68, 5)
+    struct.pack_into("<Q", data, 72, 0)
+    struct.pack_into("<Q", data, 80, 0x1000)
+    struct.pack_into("<Q", data, 88, 0x1000)
+    struct.pack_into("<Q", data, 96, size)
+    struct.pack_into("<Q", data, 104, size)
+    struct.pack_into("<Q", data, 112, 0x1000)
+    data[120:] = marker_bytes
+    return bytes(data)
+
+def elf32(marker, machine):
+    marker_bytes = (marker + "\0").encode("ascii")
+    size = 52 + 32 + len(marker_bytes)
+    data = bytearray(size)
+    data[0:4] = b"\x7fELF"
+    data[4] = 1
+    data[5] = 1
+    data[6] = 1
+    struct.pack_into("<H", data, 16, 2)
+    struct.pack_into("<H", data, 18, machine)
+    struct.pack_into("<I", data, 20, 1)
+    struct.pack_into("<I", data, 24, 0x1000)
+    struct.pack_into("<I", data, 28, 52)
+    struct.pack_into("<H", data, 40, 52)
+    struct.pack_into("<H", data, 42, 32)
+    struct.pack_into("<H", data, 44, 1)
+    struct.pack_into("<I", data, 52, 1)
+    struct.pack_into("<I", data, 56, 0)
+    struct.pack_into("<I", data, 60, 0x1000)
+    struct.pack_into("<I", data, 64, 0x1000)
+    struct.pack_into("<I", data, 68, size)
+    struct.pack_into("<I", data, 72, size)
+    struct.pack_into("<I", data, 76, 5)
+    struct.pack_into("<I", data, 80, 0x1000)
+    data[84:] = marker_bytes
+    return bytes(data)
+
+def smf(payload):
+    footer = bytearray(128)
+    footer[0:4] = b"SMF\0"
+    struct.pack_into("<I", footer, 52, len(payload))
+    return payload + bytes(footer)
+
+def platform_markers():
+    if platform == "riscv64":
+        return ("SIMPLEOS_RISCV64_HELLO_ELF", "SIMPLEOS_RISCV64_GUI_ELF", "riscv64-hosted")
+    if platform == "riscv32":
+        return ("SIMPLEOS_RISCV32_HELLO_ELF", "SIMPLEOS_RISCV32_GUI_ELF", "riscv32-virtio-fat32-smf")
+    if platform == "arm64":
+        return ("SIMPLEOS_ARM64_HELLO_ELF", "SIMPLEOS_ARM64_GUI_ELF", "arm64-virtio-fat32-smf")
+    if platform == "arm32":
+        return ("SIMPLEOS_ARM32_HELLO_ELF", "SIMPLEOS_ARM32_GUI_ELF", "arm32-virtio-fat32-smf")
+    return ("SIMPLEOS_X86_64_HELLO_ELF", "SIMPLEOS_X86_64_GUI_ELF", "x86_64-uefi-hardware")
+
+hello_marker, gui_marker, lane = platform_markers()
+nvfs = (f"nvfs-image-version=1\nplatform={platform}\nlane={lane}\n").encode("ascii")
+hello_txt = b"Hello from SimpleOS\n"
+numbers_txt = b"5\n"
+hello_spl = b"fn main:\n    print \"Hello from SimpleOS\"\n"
+toolset = (f"lane = \"{lane}\"\nmode=native-filesystem-app\nstatus=standalone-required\n").encode("ascii")
+llvm_manifest = (f"[toolchain]\napp=llvm\ntitle=LLVM\ntool=/sys/apps/llvm\nlane={lane}\nmode=native-filesystem-app\nstatus=standalone-required\ncapability_primary=local-ir-inspection\nproof_primary=/usr/share/simpleos/toolchain/llvm/hello.ll\ncapability_secondary=object-assembly-inspection\nproof_secondary=/usr/share/simpleos/toolchain/llvm/hello.s\npipeline=compile-pipeline-step\nproof_pipeline=/usr/share/simpleos/toolchain/llvm/pipeline.step\n").encode("ascii")
+clang_manifest = (f"[toolchain]\napp=clang\ntitle=Clang\ntool=/sys/apps/clang\nlane={lane}\nmode=native-filesystem-app\nstatus=standalone-required\ncapability_primary=local-c-source-inspection\nproof_primary=/usr/share/simpleos/toolchain/clang/hello.c\ncapability_secondary=driver-flag-inspection\nproof_secondary=/usr/share/simpleos/toolchain/clang/flags.rsp\npipeline=compile-pipeline-step\nproof_pipeline=/usr/share/simpleos/toolchain/clang/pipeline.step\n").encode("ascii")
+rust_manifest = (f"[toolchain]\napp=rust\ntitle=Rust\ntool=/sys/apps/rust\nlane={lane}\nmode=native-filesystem-app\nstatus=standalone-required\ncapability_primary=local-source-inspection\nproof_primary=/usr/share/simpleos/toolchain/rust/hello.rs\ncapability_secondary=package-layout-inspection\nproof_secondary=/usr/share/simpleos/toolchain/rust/Cargo.toml\npipeline=build-pipeline-step\nproof_pipeline=/usr/share/simpleos/toolchain/rust/pipeline.step\n").encode("ascii")
+llvm_hello_ll = b"source_filename = \"hello.simple\"\ndefine i32 @main() { ret i32 0 }\n"
+llvm_hello_s = b".globl _start\n_start:\n  ret\n"
+llvm_pipeline = b"pipeline=compile-pipeline-step\ninput=/work/hello.simple\noutput=/work/hello.ll\nnext=/sys/apps/simple_loader\n"
+clang_hello_c = b"#include <stdint.h>\nint main(void) { return 0; }\nconst char *msg = \"hello from simpleos clang\";\n"
+clang_flags = b"-target x86_64-unknown-simpleos\n-ffreestanding\n-nostdlib\n"
+clang_pipeline = b"pipeline=compile-pipeline-step\ninput=/work/hello.c\noutput=/work/hello.o\nnext=/sys/apps/simple_loader\n"
+rust_hello_rs = b"#![no_std]\n#![no_main]\nfn main() {}\n"
+rust_cargo = b"[package]\nname = \"simpleos-hello\"\nversion = \"0.1.0\"\nedition = \"2021\"\n"
+rust_pipeline = b"pipeline=build-pipeline-step\ninput=/work/Cargo.toml\noutput=/work/target/hello\nnext=/sys/apps/simple_loader\n"
+markers = f"""
+HELLOSMF
+BROWSMF
+SBROWSMF
+SMUXSMF
+SCOMPSMF
+SINTSMF
+SLOADSMF
+LLVMSMF
+CLANGSMF
+RUSTSMF
+SMF
+/sys/apps/hello_world
+/sys/apps/simple_browser
+/sys/apps/smux
+SIMPLEOS_DISK_HELLO_ELF
+browser_demo_remote_main
+hello_world_remote_main
+file_manager_remote_main
+shell_remote_main
+editor_remote_main
+smux_remote_main
+info|src/app/info/main.spl|smoke|staged
+list|src/app/list/main.spl|smoke|staged
+stats|src/app/stats/main.spl|smoke|staged
+entry_app=/sys/apps/simple_compiler
+entry_app=/sys/apps/simple_loader
+entry_app=/sys/apps/llvm
+entry_app=/sys/apps/clang
+entry_app=/sys/apps/rust
+lane={lane}
+lane = "{lane}"
+elf-machine={platform}
+mode=native-filesystem-app
+status=standalone-required
+pipeline=compile-pipeline-step
+pipeline=build-pipeline-step
+proof_pipeline=/usr/share/simpleos/toolchain/llvm/pipeline.step
+proof_pipeline=/usr/share/simpleos/toolchain/clang/pipeline.step
+proof_pipeline=/usr/share/simpleos/toolchain/rust/pipeline.step
+/usr/share/simpleos/toolchain/llvm/hello.ll
+/sys/apps/simple_compiler status=standalone-required
+/sys/apps/simple_loader status=standalone-required
+/sys/apps/llvm status=standalone-required
+/sys/apps/clang status=standalone-required
+/sys/apps/rust status=standalone-required
+SimpleOS LLVM standalone app v1
+clang version 20.0.0
+SimpleOS Rust standalone app v1
+/usr/share/simpleos/toolchain/llvm/pipeline.step
+/usr/share/simpleos/toolchain/clang/pipeline.step
+/usr/share/simpleos/toolchain/rust/pipeline.step
+""".encode("ascii")
+def elf_builder(marker):
+    if platform == "riscv32":
+        return elf32(marker, 243)
+    if platform == "arm32":
+        return elf32(marker, 40)
+    if platform == "arm64":
+        return elf64(marker, 183)
+    if platform == "x86_64":
+        return elf64(marker, 62)
+    return elf64(marker, 243)
+hello = smf(elf_builder(hello_marker))
+browser = smf(elf_builder(gui_marker))
+simple_compiler = smf(elf_builder(f"SIMPLEOS_{platform.upper()}_SIMPLE_COMPILER_ELF"))
+simple_interpreter = smf(elf_builder(f"SIMPLEOS_{platform.upper()}_SIMPLE_INTERPRETER_ELF"))
+simple_loader = smf(elf_builder(f"SIMPLEOS_{platform.upper()}_SIMPLE_LOADER_ELF"))
+llvm_app = smf(elf_builder(f"SIMPLEOS_{platform.upper()}_LLVM_ELF"))
+clang_app = smf(elf_builder(f"SIMPLEOS_{platform.upper()}_CLANG_ELF"))
+rust_app = smf(elf_builder(f"SIMPLEOS_{platform.upper()}_RUST_ELF"))
+
+root_entries = []
+efi_entries = []
+boot_entries = []
+sys_entries = []
+apps_entries = []
+
+fat[root_cluster] = 0x0FFFFFFF
+efi_cluster = alloc_clusters(b"")
+boot_cluster = alloc_clusters(b"")
+sys_cluster = alloc_clusters(b"")
+apps_cluster = alloc_clusters(b"")
+kernel_bytes = read_file(kernel_path)
+bootloader_bytes = read_file(uefi_bootloader_path)
+kernel_payload = kernel_bytes if kernel_bytes else b"SIMPLEOS_UEFI_KERNEL_MISSING\n"
+bootloader_payload = bootloader_bytes if bootloader_bytes else b"SIMPLEOS_UEFI_BOOTLOADER_MISSING\n"
+limine_cfg = b"timeout: 0\nserial: yes\n/ SimpleOS\nprotocol: multiboot1\npath: boot():/kernel.elf\ntextmode: no\nresolution: 1024x768x32\ncmdline: console=serial root=/dev/nvme0n1\n"
+kernel_cluster = alloc_clusters(kernel_payload)
+bootloader_cluster = alloc_clusters(bootloader_payload)
+limine_cfg_cluster = alloc_clusters(limine_cfg)
+hello_txt_cluster = alloc_clusters(hello_txt)
+numbers_txt_cluster = alloc_clusters(numbers_txt)
+hello_spl_cluster = alloc_clusters(hello_spl)
+nvfs_cluster = alloc_clusters(nvfs)
+toolset_cluster = alloc_clusters(toolset)
+markers_cluster = alloc_clusters(markers)
+llvm_manifest_cluster = alloc_clusters(llvm_manifest)
+clang_manifest_cluster = alloc_clusters(clang_manifest)
+rust_manifest_cluster = alloc_clusters(rust_manifest)
+llvm_hello_ll_cluster = alloc_clusters(llvm_hello_ll)
+llvm_hello_s_cluster = alloc_clusters(llvm_hello_s)
+llvm_pipeline_cluster = alloc_clusters(llvm_pipeline)
+clang_hello_c_cluster = alloc_clusters(clang_hello_c)
+clang_flags_cluster = alloc_clusters(clang_flags)
+clang_pipeline_cluster = alloc_clusters(clang_pipeline)
+rust_hello_rs_cluster = alloc_clusters(rust_hello_rs)
+rust_cargo_cluster = alloc_clusters(rust_cargo)
+rust_pipeline_cluster = alloc_clusters(rust_pipeline)
+hello_cluster = alloc_clusters(hello)
+browser_cluster = alloc_clusters(browser)
+simple_compiler_cluster = alloc_clusters(simple_compiler)
+simple_interpreter_cluster = alloc_clusters(simple_interpreter)
+simple_loader_cluster = alloc_clusters(simple_loader)
+llvm_cluster = alloc_clusters(llvm_app)
+clang_cluster = alloc_clusters(clang_app)
+rust_cluster = alloc_clusters(rust_app)
+
+root_entries.append(dir_entry("EFI        ", efi_cluster, 0, 0x10))
+root_entries.append(dir_entry("SYS        ", sys_cluster, 0, 0x10))
+root_entries.append(dir_entry("KERNEL  ELF", kernel_cluster, len(kernel_payload)))
+root_entries.append(dir_entry("LIMINE  CNF", limine_cfg_cluster, len(limine_cfg)))
+root_entries.append(dir_entry("HELLO   TXT", hello_txt_cluster, len(hello_txt)))
+root_entries.append(dir_entry("NUMBERS TXT", numbers_txt_cluster, len(numbers_txt)))
+root_entries.append(dir_entry("HELLO   SPL", hello_spl_cluster, len(hello_spl)))
+efi_entries.append(dir_entry("BOOT       ", boot_cluster, 0, 0x10))
+boot_entries.append(dir_entry("BOOTX64 EFI", bootloader_cluster, len(bootloader_payload)))
+sys_entries.append(dir_entry("APPS       ", apps_cluster, 0, 0x10))
+sys_entries.append(dir_entry("NVFSVER TXT", nvfs_cluster, len(nvfs)))
+sys_entries.append(dir_entry("TOOLSET SDN", toolset_cluster, len(toolset)))
+sys_entries.append(dir_entry("MARKERS TXT", markers_cluster, len(markers)))
+sys_entries.append(dir_entry("LLVMMAN TXT", llvm_manifest_cluster, len(llvm_manifest)))
+sys_entries.append(dir_entry("CLANGMANTXT", clang_manifest_cluster, len(clang_manifest)))
+sys_entries.append(dir_entry("RUSTMAN TXT", rust_manifest_cluster, len(rust_manifest)))
+sys_entries.append(dir_entry("LLVHELLOLL ", llvm_hello_ll_cluster, len(llvm_hello_ll)))
+sys_entries.append(dir_entry("LLVMPIPESTP", llvm_pipeline_cluster, len(llvm_pipeline)))
+sys_entries.append(dir_entry("LLVMHELLS  ", llvm_hello_s_cluster, len(llvm_hello_s)))
+sys_entries.append(dir_entry("CLANGHELC  ", clang_hello_c_cluster, len(clang_hello_c)))
+sys_entries.append(dir_entry("CLANGFLGRSP", clang_flags_cluster, len(clang_flags)))
+sys_entries.append(dir_entry("CLANGPLNSTP", clang_pipeline_cluster, len(clang_pipeline)))
+sys_entries.append(dir_entry("RUSTHELORS ", rust_hello_rs_cluster, len(rust_hello_rs)))
+sys_entries.append(dir_entry("RUSTCARGTOM", rust_cargo_cluster, len(rust_cargo)))
+sys_entries.append(dir_entry("RUSTPIPESTP", rust_pipeline_cluster, len(rust_pipeline)))
+apps_entries.append(dir_entry("HELLOSMFSMF", hello_cluster, len(hello)))
+apps_entries.append(dir_entry("BROWSMF SMF", browser_cluster, len(browser)))
+apps_entries.append(dir_entry("SCOMPSMFSMF", simple_compiler_cluster, len(simple_compiler)))
+apps_entries.append(dir_entry("SINTSMF SMF", simple_interpreter_cluster, len(simple_interpreter)))
+apps_entries.append(dir_entry("SLOADSMFSMF", simple_loader_cluster, len(simple_loader)))
+apps_entries.append(dir_entry("LLVMSMF SMF", llvm_cluster, len(llvm_app)))
+apps_entries.append(dir_entry("CLANGSMFSMF", clang_cluster, len(clang_app)))
+apps_entries.append(dir_entry("RUSTSMF SMF", rust_cluster, len(rust_app)))
+
+image[cluster_offset(root_cluster):cluster_offset(root_cluster) + len(b"".join(root_entries))] = b"".join(root_entries)
+image[cluster_offset(efi_cluster):cluster_offset(efi_cluster) + len(b"".join(efi_entries))] = b"".join(efi_entries)
+image[cluster_offset(boot_cluster):cluster_offset(boot_cluster) + len(b"".join(boot_entries))] = b"".join(boot_entries)
+image[cluster_offset(sys_cluster):cluster_offset(sys_cluster) + len(b"".join(sys_entries))] = b"".join(sys_entries)
+image[cluster_offset(apps_cluster):cluster_offset(apps_cluster) + len(b"".join(apps_entries))] = b"".join(apps_entries)
+
+image[0:3] = b"\xEB\x58\x90"
+image[3:11] = b"SIMPLEOS"
+le16(11, sector_size)
+image[13] = spc
+le16(14, reserved)
+image[16] = fat_count
+le16(17, 0)
+le16(19, 0)
+image[21] = 0xF8
+le16(22, 0)
+le16(24, 63)
+le16(26, 255)
+le32(28, 0)
+le32(32, total_sectors)
+le32(36, fat_size)
+le16(40, 0)
+le16(42, 0)
+le32(44, root_cluster)
+le16(48, 1)
+le16(50, 6)
+image[510:512] = b"\x55\xAA"
+
+fat_bytes = bytearray(fat_size * sector_size)
+for i, value in enumerate(fat):
+    struct.pack_into("<I", fat_bytes, i * 4, value)
+image[reserved * sector_size:(reserved + fat_size) * sector_size] = fat_bytes
+
+with open(img_path, "wb") as f:
+    f.write(image)
+
+if platform == "x86_64" and bootloader_bytes:
+    esp_root = os.path.join(os.path.dirname(img_path), "esp")
+    boot_dir = os.path.join(esp_root, "EFI", "BOOT")
+    os.makedirs(boot_dir, exist_ok=True)
+    with open(os.path.join(boot_dir, "BOOTX64.EFI"), "wb") as f:
+        f.write(bootloader_bytes)
+    with open(os.path.join(esp_root, "kernel.elf"), "wb") as f:
+        f.write(kernel_payload)
+    with open(os.path.join(esp_root, "limine.conf"), "wb") as f:
+        f.write(limine_cfg)
+    with open(os.path.join(boot_dir, "limine.conf"), "wb") as f:
+        f.write(limine_cfg)
+PY
+    exit 0
+fi
+
+app_markers() {
+    cat <<'EOF'
+HELLOSMF
+BROWSMF
+SBROWSMF
+SMUXSMF
+SCOMPSMF
+SINTSMF
+SLOADSMF
+LLVMSMF
+CLANGSMF
+RUSTSMF
+SMF
+/sys/apps/hello_world
+/sys/apps/simple_browser
+/sys/apps/smux
+/sys/apps/simple_compiler
+/sys/apps/simple_interpreter
+/sys/apps/simple_loader
+/sys/apps/llvm
+/sys/apps/clang
+/sys/apps/rust
+info|src/app/info/main.spl|smoke|staged
+SIMPLECLI.CAT
+entry_app=/sys/apps/simple_compiler
+entry_app=/sys/apps/simple_loader
+entry_app=/sys/apps/llvm
+entry_app=/sys/apps/clang
+entry_app=/sys/apps/rust
+mode=native-filesystem-app
+status=standalone-required
+pipeline=compile-pipeline-step
+pipeline=build-pipeline-step
+proof_pipeline=/usr/share/simpleos/toolchain/llvm/pipeline.step
+proof_pipeline=/usr/share/simpleos/toolchain/clang/pipeline.step
+proof_pipeline=/usr/share/simpleos/toolchain/rust/pipeline.step
+/sys/apps/simple_compiler status=standalone-required
+/sys/apps/simple_loader status=standalone-required
+/sys/apps/llvm status=standalone-required
+/sys/apps/clang status=standalone-required
+/sys/apps/rust status=standalone-required
+SimpleOS LLVM standalone app v1
+clang version 20.0.0
+SimpleOS Rust standalone app v1
+/usr/share/simpleos/toolchain/llvm/hello.ll
+/usr/share/simpleos/toolchain/llvm/pipeline.step
+/usr/share/simpleos/toolchain/clang/hello.c
+/usr/share/simpleos/toolchain/clang/flags.rsp
+/usr/share/simpleos/toolchain/clang/pipeline.step
+/usr/share/simpleos/toolchain/rust/hello.rs
+/usr/share/simpleos/toolchain/rust/Cargo.toml
+/usr/share/simpleos/toolchain/rust/pipeline.step
+EOF
+}
+
+{
+    printf 'SimpleOS smoke disk\n'
+    printf 'size_bits=%s\n' "$size_bits"
+    printf 'platform=%s\n' "$platform"
+    if [ -n "$kernel_path" ]; then
+        printf 'kernel=%s\n' "$kernel_path"
+    fi
+    case "$platform" in
+        riscv64)
+            printf 'lane=riscv64-virtio-fat32-smf\n'
+            printf 'lane=riscv64-hosted\n'
+            printf 'lane = "riscv64-hosted"\n'
+            printf 'SIMPLEOS_RISCV64_HELLO_ELF\n'
+            printf 'SIMPLEOS_RISCV64_GUI_ELF\n'
+            printf 'HOSTED_FS_TOOLCHAIN_READY arch=riscv64 apps=simple_compiler,simple_loader,llvm,clang,rust\n'
+            ;;
+        riscv32)
+            printf 'lane=riscv32-virtio-fat32-smf\n'
+            printf 'lane = "riscv32-virtio-fat32-smf"\n'
+            printf 'SIMPLEOS_RISCV32_HELLO_ELF\n'
+            printf 'SIMPLEOS_RISCV32_GUI_ELF\n'
+            ;;
+        arm64)
+            printf 'lane=arm64-virtio-fat32-smf\n'
+            printf 'lane = "arm64-virtio-fat32-smf"\n'
+            printf 'SIMPLEOS_ARM64_HELLO_ELF\n'
+            ;;
+        arm32)
+            printf 'lane=arm32-virtio-fat32-smf\n'
+            printf 'lane = "arm32-virtio-fat32-smf"\n'
+            printf 'SIMPLEOS_ARM32_HELLO_ELF\n'
+            ;;
+        *)
+            printf 'lane=x86_64-uefi-hardware\n'
+            ;;
+    esac
+    app_markers
+    printf 'Hello from SimpleOS\n'
+    printf 'fn main\n'
+    printf '5\n'
+} > "$img_path"
+
+exit 0

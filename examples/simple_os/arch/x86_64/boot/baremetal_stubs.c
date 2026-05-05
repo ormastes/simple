@@ -337,6 +337,26 @@ static inline RuntimeValue *runtime_array_items(RuntimeArray *a)
     return a->items ? a->items : runtime_array_inline_items(a);
 }
 
+void *malloc(size_t sz);
+
+RuntimeValue rt_u32_alloc_filled(uint64_t len, uint32_t fill)
+{
+    if (len > 0x400000) return NIL_VALUE;
+    size_t bytes = sizeof(RuntimeArray) + (size_t)len * sizeof(RuntimeValue);
+    RuntimeArray *a = (RuntimeArray *)malloc(bytes);
+    if (!a) return NIL_VALUE;
+    a->hdr.type = HEAP_ARRAY;
+    a->hdr.size = (uint32_t)bytes;
+    a->len = len;
+    a->cap = len;
+    a->items = runtime_array_inline_items(a);
+    RuntimeValue item = ENCODE_INT((int64_t)(uint64_t)fill);
+    for (uint64_t i = 0; i < len; i++) {
+        a->items[i] = item;
+    }
+    return ENCODE_PTR(a);
+}
+
 /* ===================================================================
  * 3a. x86_64 AP startup trampoline support
  * =================================================================== */

@@ -193,7 +193,7 @@ bool     rt_file_unlock(int64_t handle);
 /* ===== Offset-based File I/O ===== */
 
 const char* rt_file_read_text_at(const char* path, int64_t offset, int64_t size);
-int64_t     rt_file_write_text_at(const char* path, int64_t offset, const char* data);
+int64_t     rt_file_write_text_at(int64_t path_value, int64_t offset_value, int64_t data_value);
 
 /* ===== Memory-Mapped File I/O ===== */
 
@@ -239,12 +239,28 @@ int64_t  rt_value_int(int64_t value);
 int64_t  rt_value_float(int64_t raw_bits);
 int64_t  rt_value_bool(int64_t value);
 int64_t  rt_value_nil(void);
+void*    rt_alloc(int64_t size);
+void*    rt_realloc(void* ptr, int64_t size);
+void     rt_free(void* ptr);
+void*    rt_memcpy(void* dst, const void* src, int64_t n);
+void*    rt_memset(void* dst, int8_t val, int64_t n);
+void     rt_exit(int64_t code);
+int64_t  rt_time_now_unix(void);
+void     rt_sleep_ms(int64_t ms);
+void     rt_panic(const char* msg);
 int64_t  rt_string_new(const uint8_t* bytes, uint64_t len);
 int64_t  rt_string_len(int64_t string);
 const uint8_t* rt_string_data(int64_t string);
 int64_t  rt_string_concat(int64_t left, int64_t right);
 int64_t  rt_len(int64_t value);
 int64_t  rt_to_string(int64_t value);
+SplArray* rt_array_new(int64_t cap);
+int64_t  rt_array_len(SplArray* array);
+int64_t  rt_array_get(SplArray* array, int64_t idx);
+void     rt_array_set(SplArray* array, int64_t idx, int64_t value);
+int8_t   rt_array_push(SplArray* array, int64_t value);
+int64_t  rt_index_get(int64_t collection, int64_t idx);
+int8_t   rt_index_set(int64_t collection, int64_t idx, int64_t value);
 int64_t  rt_native_eq(int64_t left, int64_t right);
 int64_t  rt_native_neq(int64_t left, int64_t right);
 int64_t  rt_slice(int64_t value, int64_t start, int64_t end, int64_t step);
@@ -301,6 +317,7 @@ const char* spl_env_get(const char* key);
 const char* rt_env_get(const char* key);
 void        spl_env_set(const char* key, const char* value);
 bool        rt_env_set(const char* key, const char* value);
+const char* rt_platform_name(void);
 
 /* ===== Cross-Platform System Functions ===== */
 

@@ -12,25 +12,41 @@
 
 val _NL = "\n"
 use compiler.core.tokens.{keyword_lookup}
-use compiler.core.tokens.{TOK_INT_LIT, TOK_FLOAT_LIT, TOK_STRING_LIT}
-use compiler.core.tokens.{TOK_BOOL_LIT, TOK_NIL_LIT, TOK_IDENT}
-use compiler.core.tokens.{TOK_KW_FN, TOK_KW_VAL, TOK_KW_VAR}
-use compiler.core.tokens.{TOK_KW_TRUE, TOK_KW_FALSE, TOK_KW_NIL}
-use compiler.core.tokens.{TOK_PLUS, TOK_MINUS, TOK_STAR, TOK_SLASH, TOK_PERCENT}
-use compiler.core.tokens.{TOK_EQ, TOK_NEQ, TOK_LT, TOK_GT, TOK_LEQ, TOK_GEQ}
-use compiler.core.tokens.{TOK_ASSIGN, TOK_PLUS_ASSIGN, TOK_MINUS_ASSIGN}
-use compiler.core.tokens.{TOK_STAR_ASSIGN, TOK_SLASH_ASSIGN}
-use compiler.core.tokens.{TOK_AND, TOK_OR, TOK_NOT}
-use compiler.core.tokens.{TOK_LPAREN, TOK_RPAREN, TOK_LBRACKET, TOK_RBRACKET}
-use compiler.core.tokens.{TOK_LBRACE, TOK_RBRACE}
-use compiler.core.tokens.{TOK_COLON, TOK_COMMA, TOK_DOT, TOK_DOTDOT}
-use compiler.core.tokens.{TOK_ARROW, TOK_FAT_ARROW, TOK_PIPE}
-use compiler.core.tokens.{TOK_QUESTION, TOK_QUESTION_DOT, TOK_DOUBLE_QUESTION, TOK_DOT_QUESTION}
-use compiler.core.tokens.{TOK_NEWLINE, TOK_INDENT, TOK_DEDENT, TOK_EOF, TOK_ERROR}
-use compiler.core.tokens.{TOK_HASH_LBRACKET, TOK_DOTDOTDOT, TOK_DOTDOT_EQ}
-use compiler.core.tokens.{TOK_SEMICOLON, TOK_AT, TOK_UNDERSCORE}
-use compiler.core.tokens.{TOK_PIPE_FORWARD, TOK_DOUBLE_STAR}
 use compiler.core.lexer_chars.{is_digit, is_hex_digit, is_alpha, is_ident_char, is_space}
+use std.string_core.{char_from_code}
+
+extern fn rt_env_get(key: text) -> text
+extern fn rt_env_set(key: text, value: text) -> bool
+
+var core_last_token_text_slot: [text] = [""]
+var core_last_token_line_slot: [i64] = [0]
+var core_last_token_col_slot: [i64] = [0]
+
+fn core_token_capture(tok_text: text, line: i64, col: i64):
+    if core_last_token_text_slot == nil:
+        core_last_token_text_slot = [""]
+    if core_last_token_line_slot == nil:
+        core_last_token_line_slot = [0]
+    if core_last_token_col_slot == nil:
+        core_last_token_col_slot = [0]
+    core_last_token_text_slot[0] = tok_text
+    core_last_token_line_slot[0] = line
+    core_last_token_col_slot[0] = col
+
+fn core_lexer_last_text_get() -> text:
+    if core_last_token_text_slot == nil:
+        return ""
+    core_last_token_text_slot[0]
+
+fn core_lexer_last_line_get() -> i64:
+    if core_last_token_line_slot == nil:
+        return 0
+    core_last_token_line_slot[0]
+
+fn core_lexer_last_col_get() -> i64:
+    if core_last_token_col_slot == nil:
+        return 0
+    core_last_token_col_slot[0]
 
 # ===== CoreLexer Struct =====
 
@@ -47,13 +63,12 @@ struct CoreLexer:
     cur_text: text
     cur_line: i64
     cur_col: i64
+    cur_start: i64
 
 # ===== Constructor (free function) =====
 
 fn make_core_lexer(source: text) -> CoreLexer:
-    var lex: CoreLexer = CoreLexer(source: source, pos: 0, line: 1, col: 1, indent_stack: [], pending_dedents: 0, at_line_start: true, paren_depth: 0, cur_kind: 0, cur_text: "", cur_line: 0, cur_col: 0)
-    lex.indent_stack.push(0)
-    lex
+    CoreLexer(source: source, pos: 0, line: 1, col: 1, indent_stack: [0], pending_dedents: 0, at_line_start: true, paren_depth: 0, cur_kind: 0, cur_text: "", cur_line: 0, cur_col: 0, cur_start: 0)
 
 # ===== CoreLexer Methods =====
 
@@ -119,16 +134,24 @@ impl CoreLexer:
 
     # ----- Token Construction -----
 
-    me make_token(kind: i64, token_text: text, start_line: i64, start_col: i64):
+    me make_token(kind: i64, tok_text: text, start_line: i64, start_col: i64):
         self.cur_kind = kind
-        self.cur_text = token_text
+        self.cur_text = tok_text
         self.cur_line = start_line
         self.cur_col = start_col
+        core_token_capture(tok_text, start_line, start_col)
+        val nul = char_from_code(0)
+        if tok_text.contains(nul):
+            rt_env_set("SIMPLE_BOOTSTRAP_CORE_TOKEN_TEXT", "")
+        else:
+            rt_env_set("SIMPLE_BOOTSTRAP_CORE_TOKEN_TEXT", tok_text)
+        rt_env_set("SIMPLE_BOOTSTRAP_CORE_TOKEN_LINE", "{start_line}")
+        rt_env_set("SIMPLE_BOOTSTRAP_CORE_TOKEN_COL", "{start_col}")
 
-    me make_simple(kind: i64, token_text: text):
+    me make_simple(kind: i64, tok_text: text):
         val sl: i64 = self.line
         val sc: i64 = self.col
-        self.make_token(kind, token_text, sl, sc)
+        self.make_token(kind, tok_text, sl, sc)
 
     # ----- Skip Whitespace (not newlines) -----
 
@@ -148,6 +171,7 @@ impl CoreLexer:
         val start: i64 = self.pos
         val start_line: i64 = self.line
         val start_col: i64 = self.col
+        self.cur_start = start
         var is_float: bool = false
 
         # Check for hex, binary, octal prefix
@@ -168,7 +192,9 @@ impl CoreLexer:
                     else:
                         break
                 val num_text: text = self.source[start:self.pos]
-                self.make_token(TOK_INT_LIT, num_text, start_line, start_col)
+                self.make_token(1, num_text, start_line, start_col)
+                self.cur_text = num_text
+                rt_env_set("SIMPLE_BOOTSTRAP_CORE_TOKEN_TEXT", num_text)
                 return
             if second == "b":
                 # Binary literal
@@ -186,7 +212,9 @@ impl CoreLexer:
                     else:
                         break
                 val num_text: text = self.source[start:self.pos]
-                self.make_token(TOK_INT_LIT, num_text, start_line, start_col)
+                self.make_token(1, num_text, start_line, start_col)
+                self.cur_text = num_text
+                rt_env_set("SIMPLE_BOOTSTRAP_CORE_TOKEN_TEXT", num_text)
                 return
             if second == "o":
                 # Octal literal
@@ -202,7 +230,9 @@ impl CoreLexer:
                     else:
                         break
                 val num_text: text = self.source[start:self.pos]
-                self.make_token(TOK_INT_LIT, num_text, start_line, start_col)
+                self.make_token(1, num_text, start_line, start_col)
+                self.cur_text = num_text
+                rt_env_set("SIMPLE_BOOTSTRAP_CORE_TOKEN_TEXT", num_text)
                 return
 
         # Decimal number
@@ -258,15 +288,18 @@ impl CoreLexer:
 
         val num_text: text = self.source[start:self.pos]
         if is_float:
-            self.make_token(TOK_FLOAT_LIT, num_text, start_line, start_col)
+            self.make_token(2, num_text, start_line, start_col)
         else:
-            self.make_token(TOK_INT_LIT, num_text, start_line, start_col)
+            self.make_token(1, num_text, start_line, start_col)
+        self.cur_text = num_text
+        rt_env_set("SIMPLE_BOOTSTRAP_CORE_TOKEN_TEXT", num_text)
 
     # ----- String Scanning -----
 
     me scan_string():
         val start_line: i64 = self.line
         val start_col: i64 = self.col
+        self.cur_start = self.pos
         val quote: text = self.advance()
         var parts: [text] = []
         var done: bool = false
@@ -275,11 +308,11 @@ impl CoreLexer:
             if done:
                 break
             if self.at_end():
-                self.make_token(TOK_ERROR, "unterminated string", start_line, start_col)
+                self.make_token(191, "unterminated string", start_line, start_col)
                 return
             val c: text = self.peek()
             if c == _NL:
-                self.make_token(TOK_ERROR, "unterminated string", start_line, start_col)
+                self.make_token(191, "unterminated string", start_line, start_col)
                 return
             if c == quote:
                 self.advance()
@@ -308,7 +341,13 @@ impl CoreLexer:
                 parts.push(self.advance())
         val result: text = parts.join("")
 
-        self.make_token(TOK_STRING_LIT, result, start_line, start_col)
+        self.make_token(3, result, start_line, start_col)
+        self.cur_text = result
+        val nul = char_from_code(0)
+        if result.contains(nul):
+            rt_env_set("SIMPLE_BOOTSTRAP_CORE_TOKEN_TEXT", "")
+        else:
+            rt_env_set("SIMPLE_BOOTSTRAP_CORE_TOKEN_TEXT", result)
 
     # ----- Identifier/Keyword Scanning -----
 
@@ -316,6 +355,7 @@ impl CoreLexer:
         val start: i64 = self.pos
         val start_line: i64 = self.line
         val start_col: i64 = self.col
+        self.cur_start = start
 
         for i in 0..1000:
             val c: text = self.peek()
@@ -328,22 +368,34 @@ impl CoreLexer:
 
         # Check for keyword
         val kw_kind: i64 = keyword_lookup(ident_text)
-        if kw_kind != TOK_IDENT:
+        if kw_kind != 6:
             # Special: true/false -> bool literal, nil -> nil literal
-            if kw_kind == TOK_KW_TRUE:
-                self.make_token(TOK_BOOL_LIT, "true", start_line, start_col)
-            elif kw_kind == TOK_KW_FALSE:
-                self.make_token(TOK_BOOL_LIT, "false", start_line, start_col)
-            elif kw_kind == TOK_KW_NIL:
-                self.make_token(TOK_NIL_LIT, "nil", start_line, start_col)
+            if kw_kind == 58:
+                self.make_token(4, "true", start_line, start_col)
+                self.cur_text = "true"
+                rt_env_set("SIMPLE_BOOTSTRAP_CORE_TOKEN_TEXT", "true")
+            elif kw_kind == 59:
+                self.make_token(4, "false", start_line, start_col)
+                self.cur_text = "false"
+                rt_env_set("SIMPLE_BOOTSTRAP_CORE_TOKEN_TEXT", "false")
+            elif kw_kind == 5:
+                self.make_token(5, "nil", start_line, start_col)
+                self.cur_text = "nil"
+                rt_env_set("SIMPLE_BOOTSTRAP_CORE_TOKEN_TEXT", "nil")
             else:
                 self.make_token(kw_kind, ident_text, start_line, start_col)
+                self.cur_text = ident_text
+                rt_env_set("SIMPLE_BOOTSTRAP_CORE_TOKEN_TEXT", ident_text)
         else:
             # Check for underscore-only as special token
             if ident_text == "_":
-                self.make_token(TOK_UNDERSCORE, "_", start_line, start_col)
+                self.make_token(169, "_", start_line, start_col)
+                self.cur_text = "_"
+                rt_env_set("SIMPLE_BOOTSTRAP_CORE_TOKEN_TEXT", "_")
             else:
-                self.make_token(TOK_IDENT, ident_text, start_line, start_col)
+                self.make_token(6, ident_text, start_line, start_col)
+                self.cur_text = ident_text
+                rt_env_set("SIMPLE_BOOTSTRAP_CORE_TOKEN_TEXT", ident_text)
 
     # ----- Indentation Handling -----
 
@@ -399,7 +451,7 @@ impl CoreLexer:
         if indent_level > current_indent:
             self.indent_stack.push(indent_level)
             val tl: i64 = self.line
-            self.make_token(TOK_INDENT, "", tl, 1)
+            self.make_token(181, "", tl, 1)
         elif indent_level < current_indent:
             # Pop indent stack and count dedents
             var dedent_count: i64 = 0
@@ -417,11 +469,11 @@ impl CoreLexer:
             if dedent_count > 0:
                 self.pending_dedents = dedent_count - 1
                 val tl: i64 = self.line
-                self.make_token(TOK_DEDENT, "", tl, 1)
+                self.make_token(182, "", tl, 1)
             else:
                 # Indent level doesn't match any in stack - error
                 val tl: i64 = self.line
-                self.make_token(TOK_ERROR, "inconsistent indentation", tl, 1)
+                self.make_token(191, "inconsistent indentation", tl, 1)
         else:
             # Same indentation - no token needed, continue scanning
             self.scan_token()
@@ -441,16 +493,17 @@ impl CoreLexer:
                 self.pending_dedents = slen - 2
                 val tl: i64 = self.line
                 val tc: i64 = self.col
-                self.make_token(TOK_DEDENT, "", tl, tc)
+                self.make_token(182, "", tl, tc)
                 return
             val tl: i64 = self.line
             val tc: i64 = self.col
-            self.make_token(TOK_EOF, "", tl, tc)
+            self.make_token(190, "", tl, tc)
             return
 
         val start_line: i64 = self.line
         val start_col: i64 = self.col
         val c: text = self.peek()
+        self.cur_start = self.pos
 
         # Newline
         if c == _NL:
@@ -460,7 +513,7 @@ impl CoreLexer:
                 # Inside parens: suppress newline, scan next token
                 self.scan_token()
                 return
-            self.make_token(TOK_NEWLINE, _NL, start_line, start_col)
+            self.make_token(180, _NL, start_line, start_col)
             return
 
         # Handle indentation at line start
@@ -512,68 +565,68 @@ impl CoreLexer:
         # Two+ character operators
         if c == "=":
             if self.match_char("="):
-                self.make_token(TOK_EQ, "==", start_line, start_col)
+                self.make_token(80, "==", start_line, start_col)
             elif self.match_char(">"):
-                self.make_token(TOK_FAT_ARROW, "=>", start_line, start_col)
+                self.make_token(168, "=>", start_line, start_col)
             else:
-                self.make_token(TOK_ASSIGN, "=", start_line, start_col)
+                self.make_token(100, "=", start_line, start_col)
             return
 
         if c == "!":
             if self.match_char("="):
-                self.make_token(TOK_NEQ, "!=", start_line, start_col)
+                self.make_token(81, "!=", start_line, start_col)
             else:
-                self.make_token(TOK_NOT, "!", start_line, start_col)
+                self.make_token(57, "!", start_line, start_col)
             return
 
         if c == "<":
             if self.match_char("="):
-                self.make_token(TOK_LEQ, "<=", start_line, start_col)
+                self.make_token(84, "<=", start_line, start_col)
             else:
-                self.make_token(TOK_LT, "<", start_line, start_col)
+                self.make_token(82, "<", start_line, start_col)
             return
 
         if c == ">":
             if self.match_char("="):
-                self.make_token(TOK_GEQ, ">=", start_line, start_col)
+                self.make_token(85, ">=", start_line, start_col)
             else:
-                self.make_token(TOK_GT, ">", start_line, start_col)
+                self.make_token(83, ">", start_line, start_col)
             return
 
         if c == "+":
             if self.match_char("="):
-                self.make_token(TOK_PLUS_ASSIGN, "+=", start_line, start_col)
+                self.make_token(101, "+=", start_line, start_col)
             else:
-                self.make_token(TOK_PLUS, "+", start_line, start_col)
+                self.make_token(60, "+", start_line, start_col)
             return
 
         if c == "-":
             if self.match_char(">"):
-                self.make_token(TOK_ARROW, "->", start_line, start_col)
+                self.make_token(167, "->", start_line, start_col)
             elif self.match_char("="):
-                self.make_token(TOK_MINUS_ASSIGN, "-=", start_line, start_col)
+                self.make_token(102, "-=", start_line, start_col)
             else:
-                self.make_token(TOK_MINUS, "-", start_line, start_col)
+                self.make_token(61, "-", start_line, start_col)
             return
 
         if c == "*":
             if self.match_char("*"):
-                self.make_token(TOK_DOUBLE_STAR, "**", start_line, start_col)
+                self.make_token(65, "**", start_line, start_col)
             elif self.match_char("="):
-                self.make_token(TOK_STAR_ASSIGN, "*=", start_line, start_col)
+                self.make_token(103, "*=", start_line, start_col)
             else:
-                self.make_token(TOK_STAR, "*", start_line, start_col)
+                self.make_token(62, "*", start_line, start_col)
             return
 
         if c == "/":
             if self.match_char("="):
-                self.make_token(TOK_SLASH_ASSIGN, "/=", start_line, start_col)
+                self.make_token(104, "/=", start_line, start_col)
             else:
-                self.make_token(TOK_SLASH, "/", start_line, start_col)
+                self.make_token(63, "/", start_line, start_col)
             return
 
         if c == "%":
-            self.make_token(TOK_PERCENT, "%", start_line, start_col)
+            self.make_token(64, "%", start_line, start_col)
             return
 
         if c == ".":
@@ -583,91 +636,91 @@ impl CoreLexer:
                 val d2: text = self.peek()
                 if d2 == ".":
                     self.advance()
-                    self.make_token(TOK_DOTDOTDOT, "...", start_line, start_col)
+                    self.make_token(173, "...", start_line, start_col)
                 elif d2 == "=":
                     self.advance()
-                    self.make_token(TOK_DOTDOT_EQ, "..=", start_line, start_col)
+                    self.make_token(166, "..=", start_line, start_col)
                 else:
-                    self.make_token(TOK_DOTDOT, "..", start_line, start_col)
+                    self.make_token(165, "..", start_line, start_col)
             elif d1 == "?":
                 self.advance()
-                self.make_token(TOK_DOT_QUESTION, ".?", start_line, start_col)
+                self.make_token(133, ".?", start_line, start_col)
             else:
-                self.make_token(TOK_DOT, ".", start_line, start_col)
+                self.make_token(164, ".", start_line, start_col)
             return
 
         if c == "?":
             val q1: text = self.peek()
             if q1 == "?":
                 self.advance()
-                self.make_token(TOK_DOUBLE_QUESTION, "??", start_line, start_col)
+                self.make_token(132, "??", start_line, start_col)
             elif q1 == ".":
                 self.advance()
-                self.make_token(TOK_QUESTION_DOT, "?.", start_line, start_col)
+                self.make_token(131, "?.", start_line, start_col)
             else:
-                self.make_token(TOK_QUESTION, "?", start_line, start_col)
+                self.make_token(130, "?", start_line, start_col)
             return
 
         if c == "|":
             if self.match_char(">"):
-                self.make_token(TOK_PIPE_FORWARD, "|>", start_line, start_col)
+                self.make_token(175, "|>", start_line, start_col)
             else:
-                self.make_token(TOK_PIPE, "|", start_line, start_col)
+                self.make_token(121, "|", start_line, start_col)
             return
 
         if c == "@":
-            self.make_token(TOK_AT, "@", start_line, start_col)
+            self.make_token(171, "@", start_line, start_col)
             return
 
         if c == ";":
-            self.make_token(TOK_SEMICOLON, ";", start_line, start_col)
+            self.make_token(163, ";", start_line, start_col)
             return
 
         # Delimiters (track paren depth)
         if c == "(":
             self.paren_depth = self.paren_depth + 1
-            self.make_token(TOK_LPAREN, "(", start_line, start_col)
+            self.make_token(140, "(", start_line, start_col)
             return
 
         if c == ")":
             if self.paren_depth > 0:
                 self.paren_depth = self.paren_depth - 1
-            self.make_token(TOK_RPAREN, ")", start_line, start_col)
+            self.make_token(141, ")", start_line, start_col)
             return
 
         if c == "[":
             self.paren_depth = self.paren_depth + 1
-            self.make_token(TOK_LBRACKET, "[", start_line, start_col)
+            self.make_token(144, "[", start_line, start_col)
             return
 
         if c == "]":
             if self.paren_depth > 0:
                 self.paren_depth = self.paren_depth - 1
-            self.make_token(TOK_RBRACKET, "]", start_line, start_col)
+            self.make_token(145, "]", start_line, start_col)
             return
 
         if c == "{":
             self.paren_depth = self.paren_depth + 1
-            self.make_token(TOK_LBRACE, "{", start_line, start_col)
+            self.make_token(142, "{", start_line, start_col)
             return
 
         if c == "}":
             if self.paren_depth > 0:
                 self.paren_depth = self.paren_depth - 1
-            self.make_token(TOK_RBRACE, "}", start_line, start_col)
+            self.make_token(143, "}", start_line, start_col)
             return
 
         if c == ":":
-            self.make_token(TOK_COLON, ":", start_line, start_col)
+            self.make_token(161, ":", start_line, start_col)
             return
 
         if c == ",":
-            self.make_token(TOK_COMMA, ",", start_line, start_col)
+            self.make_token(160, ",", start_line, start_col)
             return
 
         # Unknown character
         val err_msg: text = "unexpected character: {c}"
-        self.make_token(TOK_ERROR, err_msg, start_line, start_col)
+        self.make_token(191, err_msg, start_line, start_col)
 
     # ----- Public API -----
 
@@ -675,27 +728,22 @@ impl CoreLexer:
         # Check for pending dedents
         if self.pending_dedents > 0:
             self.pending_dedents = self.pending_dedents - 1
-            self.cur_kind = TOK_DEDENT
+            self.cur_kind = 182
             self.cur_text = ""
-            return TOK_DEDENT
+            return 182
 
         self.scan_token()
         return self.cur_kind
 
 fn core_lexer_next_token(lexer: CoreLexer) -> (CoreLexer, i64):
     var next_lexer = lexer
-    print "[core_lexer_next_token] before"
     if next_lexer.pending_dedents > 0:
         next_lexer.pending_dedents = next_lexer.pending_dedents - 1
-        next_lexer.cur_kind = TOK_DEDENT
+        next_lexer.cur_kind = 182
         next_lexer.cur_text = ""
-        print "[core_lexer_next_token] pending-dedent"
-        return (next_lexer, TOK_DEDENT)
-    print "[core_lexer_next_token] before-scan"
+        return (next_lexer, 182)
     next_lexer.scan_token()
-    print "[core_lexer_next_token] after-scan"
     val kind = next_lexer.cur_kind
-    print "[core_lexer_next_token] after"
     (next_lexer, kind)
 
 fn core_lexer_token_text(lexer: CoreLexer) -> text:
@@ -706,3 +754,5 @@ fn core_lexer_token_line(lexer: CoreLexer) -> i64:
 
 fn core_lexer_token_col(lexer: CoreLexer) -> i64:
     lexer.token_col()
+
+export core_lexer_last_text_get, core_lexer_last_line_get, core_lexer_last_col_get

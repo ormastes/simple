@@ -82,3 +82,6 @@ These are needed after startup for normal tool calls. They can be ported after s
 - App-only Simple LSP MCP framed initialize + tools/list smoke passes on `core-c`; `tools/list` includes real LSP tool schemas such as `lsp_definition`.
 - Closure audit for the app-only MCP and Simple LSP MCP core-C binaries found no `libsimple_native_all.a`, `rust-hosted`, or unwind symbols/strings.
 - The native linker still emits its generic `_stubs.o` allowlist, but app-only builds no longer report direct unresolved internal/runtime symbols in the package probes.
+- `scripts/check-mcp-native-smoke.shs` now validates MCP JSON-lines and Simple LSP MCP framed `Content-Length` output; package outputs report `mcp_tools_count=144` and `lsp_tools_count=11` with valid schemas.
+- `scripts/check-simple-core-runtime-smoke.shs` now provides a repeatable explicit `simple-core` gate for hello, the generated standalone TUI wrapper, and the real `run_tui("examples/ui/minimal.ui.sdn")` app path, with closure checks for hosted-runtime and unwind markers.
+- Core C runtime now implements the compiled Simple array ABI used by core-lane entry closures (`rt_array_push` returns success, `rt_array_get`/`rt_index_get` return raw runtime values, and `rt_len` recognizes raw arrays). A native `[text]` probe verifies push/len/index on explicit `simple-core`.

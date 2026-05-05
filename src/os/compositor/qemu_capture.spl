@@ -1,0 +1,49 @@
+#![allow(unnamed_duplicate_typed_args)]
+
+use os.compositor.electron_capture.{CaptureResult, capture_error}
+use os.compositor.wm_scene.{WmSceneSpec, render_scene_to_backend}
+use std.common.image.ppm_decode.{decode_ppm_to_argb}
+
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_file_read_bytes(path: text) -> [u8]
+extern fn rt_process_run_timeout(cmd: text, args: [text], timeout_ms: i64) -> (text, text, i32)
+
+fn capture_qemu_inprocess(scene: WmSceneSpec) -> CaptureResult:
+    val pixels = render_scene_to_backend(scene, nil)
+    CaptureResult(backend_name: "browser_compositor", width: scene.width, height: scene.height, pixels: pixels, success: true, error: "")
+
+fn decode_qemu_screendump_ppm(data: [u8]) -> CaptureResult:
+    match decode_ppm_to_argb(data):
+        Ok(image):
+            CaptureResult(backend_name: "qemu_vm", width: image.width, height: image.height, pixels: image.pixels, success: true, error: "")
+        Err(msg):
+            capture_error("qemu_vm", 0, 0, "QEMU screendump PPM decode failed: {msg}")
+
+fn qemu_screendump_to_file(qmp_socket: text, out_path: text) -> bool:
+    val script = "import json,os,socket,sys,time;" +
+        "sock,out=sys.argv[1],sys.argv[2];" +
+        "s=socket.socket(socket.AF_UNIX);s.settimeout(5);s.connect(sock);" +
+        "f=s.makefile('rwb',buffering=0);" +
+        "f.readline();" +
+        "f.write(json.dumps(dict(execute='qmp_capabilities')).encode()+b'\\n');f.flush();f.readline();" +
+        "f.write(json.dumps(dict(execute='human-monitor-command',arguments=dict([('command-line','screendump '+out)]))).encode()+b'\\n');f.flush();" +
+        "f.readline();" +
+        "ok=any((time.sleep(0.1) or (os.path.exists(out) and os.path.getsize(out)>0)) for _ in range(50));" +
+        "sys.exit(0 if ok else 4)"
+    val result = rt_process_run_timeout("python3", ["-c", script, qmp_socket, out_path], 10000)
+    result[2] == 0 and rt_file_exists(out_path)
+
+fn capture_qemu_vm(qmp_socket: text, out_path: text) -> CaptureResult:
+    if qmp_socket.len() == 0:
+        return capture_error("qemu_vm", 0, 0, "QEMU screendump unavailable: empty QMP socket path")
+    if out_path.len() == 0:
+        return capture_error("qemu_vm", 0, 0, "QEMU screendump unavailable: empty output path")
+    if not rt_file_exists(qmp_socket):
+        return capture_error("qemu_vm", 0, 0, "QEMU screendump unavailable for socket: {qmp_socket}")
+    val dumped = qemu_screendump_to_file(qmp_socket, out_path)
+    if not dumped:
+        return capture_error("qemu_vm", 0, 0, "QEMU screendump command failed for socket: {qmp_socket}")
+    if not rt_file_exists(out_path):
+        return capture_error("qemu_vm", 0, 0, "QEMU screendump did not create output: {out_path}")
+    val data: [u8] = rt_file_read_bytes(out_path) ?? []
+    decode_qemu_screendump_ppm(data)

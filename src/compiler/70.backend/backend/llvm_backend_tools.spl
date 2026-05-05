@@ -17,6 +17,11 @@ use std.nogc_sync_mut.io.time_ops.{time_now_unix_micros}
 # FFI for reading files (object code + optimized IR)
 extern fn rt_file_read_bytes(path: text) -> [u8]
 extern fn rt_file_read_text(path: text) -> text
+extern fn rt_env_get(key: text) -> text
+extern fn rt_file_write_text_at(path: text, offset: i64, data: text) -> i64
+
+fn llvm_bootstrap_last_object_path() -> text:
+    "{_get_temp_dir()}/simple_llvm_{getpid()}.o"
 
 # ============================================================================
 # LLVM IR → Object Code Compilation (via llc CLI)
@@ -113,9 +118,23 @@ fn compile_ir_to_object(llvm_ir: text, config: LlvmTargetConfig, opt_level: Opti
     val tmp_dir = _get_temp_dir()
     val ir_path = "{tmp_dir}/simple_llvm_{pid}.ll"
     val obj_path = "{tmp_dir}/simple_llvm_{pid}.o"
+    if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
+        print "[llvm-tools] ir {ir_path}"
+        print "[llvm-tools] obj {obj_path}"
 
     # Write IR to temp file
-    if not file_write(ir_path, llvm_ir):
+    val bootstrap_io = (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1"
+    var wrote_ir = false
+    if bootstrap_io:
+        print "[llvm-tools] write-at:start"
+        rt_file_write_text_at(ir_path, 0, llvm_ir)
+        print "[llvm-tools] write-at:done"
+        wrote_ir = file_exists(ir_path)
+    else:
+        wrote_ir = file_write(ir_path, llvm_ir)
+    if not wrote_ir:
+        if bootstrap_io:
+            print "[llvm-tools] write-failed"
         return Err("Failed to write LLVM IR to {ir_path}")
 
     # Determine optimization flag
@@ -133,14 +152,25 @@ fn compile_ir_to_object(llvm_ir: text, config: LlvmTargetConfig, opt_level: Opti
     val triple = config.triple.to_text()
     val cpu = config.to_cpu_string()
     val target_flags = llvm_target_flags(config)
-    val cmd = "{llc} --filetype=obj --relocation-model=pic --function-sections --data-sections -mtriple={triple} -mcpu={cpu}{target_flags} {opt_flag} -o {obj_path} {ir_path} 2>&1"
+    val cmd = if bootstrap_io:
+        "{llc} -filetype=obj {ir_path} -o {obj_path} 2>&1"
+    else:
+        "{llc} --filetype=obj --relocation-model=pic --function-sections --data-sections -mtriple={triple} -mcpu={cpu}{target_flags} {opt_flag} -o {obj_path} {ir_path} 2>&1"
     val (llc_out, llc_err, llc_code) = backend_shell_tuple(cmd)
+    if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
+        print "[llvm-tools] llc-done"
 
     # Clean up IR file
-    file_delete(ir_path)
+    if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") != "1":
+        file_delete(ir_path)
 
-    if llc_code.value != 0:
+    if bootstrap_io and file_exists(obj_path):
+        print "[llvm-tools] llc-object"
+    elif llc_code.value != 0:
         file_delete(obj_path)
+        if bootstrap_io:
+            print "[llvm-direct] failed-ir {ir_path}"
+            return Err("llc failed during bootstrap; preserved LLVM IR path printed above")
         return Err("llc failed (exit {llc_code.value}):\n{llc_out}\n\nCommand: {cmd}")
 
     # Extract symbols before deleting the object file
@@ -148,9 +178,14 @@ fn compile_ir_to_object(llvm_ir: text, config: LlvmTargetConfig, opt_level: Opti
 
     # Read object bytes
     val bytes = rt_file_read_bytes(obj_path)
-    file_delete(obj_path)
+    if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
+        print "[llvm-tools] read-bytes"
+    if not bootstrap_io:
+        file_delete(obj_path)
 
     if bytes == nil:
+        if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
+            print "[llvm-tools] bytes-nil"
         return Err("Failed to read compiled object file: {obj_path}")
 
     Ok(LlvmObjectCode(bytes: bytes, symbols: symbols))

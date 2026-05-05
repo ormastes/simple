@@ -421,6 +421,18 @@ fn require_i32_field(name: &str, fields: &HashMap<String, Value>, field: &str) -
     }
 }
 
+fn require_f64_field(name: &str, fields: &HashMap<String, Value>, field: &str) -> Result<f64, CompileError> {
+    match fields.get(field) {
+        Some(Value::Float(n)) => Ok(*n),
+        Some(Value::Int(n)) => Ok(*n as f64),
+        Some(other) => Err(CompileError::runtime(format!(
+            "{name}: field {field} must be a float, got {:?}",
+            other
+        ))),
+        None => Err(CompileError::runtime(format!("{name}: missing field {field}"))),
+    }
+}
+
 fn unpack_vec4i(name: &str, value: &Value) -> Result<[i32; 4], CompileError> {
     match value {
         Value::Object { class, fields } => {
@@ -441,6 +453,46 @@ fn unpack_vec4i(name: &str, value: &Value) -> Result<[i32; 4], CompileError> {
     }
 }
 
+fn unpack_vec4f(name: &str, value: &Value) -> Result<[f32; 4], CompileError> {
+    match value {
+        Value::Object { class, fields } => {
+            if class != "Vec4f" {
+                return Err(CompileError::runtime(format!("{name}: expected Vec4f, got {class}")));
+            }
+            Ok([
+                require_f64_field(name, fields, "x")? as f32,
+                require_f64_field(name, fields, "y")? as f32,
+                require_f64_field(name, fields, "z")? as f32,
+                require_f64_field(name, fields, "w")? as f32,
+            ])
+        }
+        other => Err(CompileError::runtime(format!(
+            "{name}: expected Vec4f Object, got {:?}",
+            other
+        ))),
+    }
+}
+
+fn unpack_vec4d(name: &str, value: &Value) -> Result<[f64; 4], CompileError> {
+    match value {
+        Value::Object { class, fields } => {
+            if class != "Vec4d" {
+                return Err(CompileError::runtime(format!("{name}: expected Vec4d, got {class}")));
+            }
+            Ok([
+                require_f64_field(name, fields, "x")?,
+                require_f64_field(name, fields, "y")?,
+                require_f64_field(name, fields, "z")?,
+                require_f64_field(name, fields, "w")?,
+            ])
+        }
+        other => Err(CompileError::runtime(format!(
+            "{name}: expected Vec4d Object, got {:?}",
+            other
+        ))),
+    }
+}
+
 fn pack_vec4i(lanes: [i32; 4]) -> Value {
     let mut fields = HashMap::with_capacity(4);
     fields.insert("x".to_string(), Value::Int(lanes[0] as i64));
@@ -450,6 +502,54 @@ fn pack_vec4i(lanes: [i32; 4]) -> Value {
     Value::Object {
         class: "Vec4i".to_string(),
         fields: Arc::new(fields),
+    }
+}
+
+fn pack_vec4f(lanes: [f32; 4]) -> Value {
+    let mut fields = HashMap::with_capacity(4);
+    fields.insert("x".to_string(), Value::Float(lanes[0] as f64));
+    fields.insert("y".to_string(), Value::Float(lanes[1] as f64));
+    fields.insert("z".to_string(), Value::Float(lanes[2] as f64));
+    fields.insert("w".to_string(), Value::Float(lanes[3] as f64));
+    Value::Object {
+        class: "Vec4f".to_string(),
+        fields: Arc::new(fields),
+    }
+}
+
+fn pack_vec4d(lanes: [f64; 4]) -> Value {
+    let mut fields = HashMap::with_capacity(4);
+    fields.insert("x".to_string(), Value::Float(lanes[0]));
+    fields.insert("y".to_string(), Value::Float(lanes[1]));
+    fields.insert("z".to_string(), Value::Float(lanes[2]));
+    fields.insert("w".to_string(), Value::Float(lanes[3]));
+    Value::Object {
+        class: "Vec4d".to_string(),
+        fields: Arc::new(fields),
+    }
+}
+
+fn unpack_vec8f(name: &str, value: &Value) -> Result<[f32; 8], CompileError> {
+    match value {
+        Value::Object { class, fields } => {
+            if class != "Vec8f" {
+                return Err(CompileError::runtime(format!("{name}: expected Vec8f, got {class}")));
+            }
+            Ok([
+                require_f64_field(name, fields, "e0")? as f32,
+                require_f64_field(name, fields, "e1")? as f32,
+                require_f64_field(name, fields, "e2")? as f32,
+                require_f64_field(name, fields, "e3")? as f32,
+                require_f64_field(name, fields, "e4")? as f32,
+                require_f64_field(name, fields, "e5")? as f32,
+                require_f64_field(name, fields, "e6")? as f32,
+                require_f64_field(name, fields, "e7")? as f32,
+            ])
+        }
+        other => Err(CompileError::runtime(format!(
+            "{name}: expected Vec8f Object, got {:?}",
+            other
+        ))),
     }
 }
 
@@ -474,6 +574,17 @@ fn unpack_vec8i(name: &str, value: &Value) -> Result<[i32; 8], CompileError> {
             "{name}: expected Vec8i Object, got {:?}",
             other
         ))),
+    }
+}
+
+fn pack_vec8f(lanes: [f32; 8]) -> Value {
+    let mut fields = HashMap::with_capacity(8);
+    for (i, lane) in lanes.iter().enumerate() {
+        fields.insert(format!("e{}", i), Value::Float(*lane as f64));
+    }
+    Value::Object {
+        class: "Vec8f".to_string(),
+        fields: Arc::new(fields),
     }
 }
 
@@ -520,6 +631,110 @@ where
     let a = unpack_vec8i(name, &args[0])?;
     let b = unpack_vec8i(name, &args[1])?;
     Ok(pack_vec8i(op(a, b)))
+}
+
+fn binop_f64x4<F>(name: &str, args: &[Value], op: F) -> Result<Value, CompileError>
+where
+    F: Fn(f64, f64) -> f64,
+{
+    if args.len() != 2 {
+        return Err(CompileError::runtime(format!("{name} expects 2 arguments")));
+    }
+    let a = unpack_vec4d(name, &args[0])?;
+    let b = unpack_vec4d(name, &args[1])?;
+    Ok(pack_vec4d([
+        op(a[0], b[0]),
+        op(a[1], b[1]),
+        op(a[2], b[2]),
+        op(a[3], b[3]),
+    ]))
+}
+
+fn binop_f32x4<F>(name: &str, args: &[Value], op: F) -> Result<Value, CompileError>
+where
+    F: Fn(f32, f32) -> f32,
+{
+    if args.len() != 2 {
+        return Err(CompileError::runtime(format!("{name} expects 2 arguments")));
+    }
+    let a = unpack_vec4f(name, &args[0])?;
+    let b = unpack_vec4f(name, &args[1])?;
+    Ok(pack_vec4f([
+        op(a[0], b[0]),
+        op(a[1], b[1]),
+        op(a[2], b[2]),
+        op(a[3], b[3]),
+    ]))
+}
+
+fn binop_f32x8<F>(name: &str, args: &[Value], op: F) -> Result<Value, CompileError>
+where
+    F: Fn(f32, f32) -> f32,
+{
+    if args.len() != 2 {
+        return Err(CompileError::runtime(format!("{name} expects 2 arguments")));
+    }
+    let a = unpack_vec8f(name, &args[0])?;
+    let b = unpack_vec8f(name, &args[1])?;
+    Ok(pack_vec8f([
+        op(a[0], b[0]),
+        op(a[1], b[1]),
+        op(a[2], b[2]),
+        op(a[3], b[3]),
+        op(a[4], b[4]),
+        op(a[5], b[5]),
+        op(a[6], b[6]),
+        op(a[7], b[7]),
+    ]))
+}
+
+fn fma_f64x4(name: &str, args: &[Value]) -> Result<Value, CompileError> {
+    if args.len() != 3 {
+        return Err(CompileError::runtime(format!("{name} expects 3 arguments")));
+    }
+    let a = unpack_vec4d(name, &args[0])?;
+    let b = unpack_vec4d(name, &args[1])?;
+    let c = unpack_vec4d(name, &args[2])?;
+    Ok(pack_vec4d([
+        a[0].mul_add(b[0], c[0]),
+        a[1].mul_add(b[1], c[1]),
+        a[2].mul_add(b[2], c[2]),
+        a[3].mul_add(b[3], c[3]),
+    ]))
+}
+
+fn fma_f32x4(name: &str, args: &[Value]) -> Result<Value, CompileError> {
+    if args.len() != 3 {
+        return Err(CompileError::runtime(format!("{name} expects 3 arguments")));
+    }
+    let a = unpack_vec4f(name, &args[0])?;
+    let b = unpack_vec4f(name, &args[1])?;
+    let c = unpack_vec4f(name, &args[2])?;
+    Ok(pack_vec4f([
+        a[0].mul_add(b[0], c[0]),
+        a[1].mul_add(b[1], c[1]),
+        a[2].mul_add(b[2], c[2]),
+        a[3].mul_add(b[3], c[3]),
+    ]))
+}
+
+fn fma_f32x8(name: &str, args: &[Value]) -> Result<Value, CompileError> {
+    if args.len() != 3 {
+        return Err(CompileError::runtime(format!("{name} expects 3 arguments")));
+    }
+    let a = unpack_vec8f(name, &args[0])?;
+    let b = unpack_vec8f(name, &args[1])?;
+    let c = unpack_vec8f(name, &args[2])?;
+    Ok(pack_vec8f([
+        a[0].mul_add(b[0], c[0]),
+        a[1].mul_add(b[1], c[1]),
+        a[2].mul_add(b[2], c[2]),
+        a[3].mul_add(b[3], c[3]),
+        a[4].mul_add(b[4], c[4]),
+        a[5].mul_add(b[5], c[5]),
+        a[6].mul_add(b[6], c[6]),
+        a[7].mul_add(b[7], c[7]),
+    ]))
 }
 
 fn shift_i32x4<F>(name: &str, args: &[Value], op: F) -> Result<Value, CompileError>
@@ -608,6 +823,66 @@ pub fn rt_simd_shl_i32x8(args: &[Value]) -> Result<Value, CompileError> {
 
 pub fn rt_simd_shr_i32x8(args: &[Value]) -> Result<Value, CompileError> {
     shift_i32x8("rt_simd_shr_i32x8", args, ffi_shr_i32x8)
+}
+
+pub fn rt_simd_add_f32x4(args: &[Value]) -> Result<Value, CompileError> {
+    binop_f32x4("rt_simd_add_f32x4", args, |a, b| a + b)
+}
+
+pub fn rt_simd_sub_f32x4(args: &[Value]) -> Result<Value, CompileError> {
+    binop_f32x4("rt_simd_sub_f32x4", args, |a, b| a - b)
+}
+
+pub fn rt_simd_mul_f32x4(args: &[Value]) -> Result<Value, CompileError> {
+    binop_f32x4("rt_simd_mul_f32x4", args, |a, b| a * b)
+}
+
+pub fn rt_simd_div_f32x4(args: &[Value]) -> Result<Value, CompileError> {
+    binop_f32x4("rt_simd_div_f32x4", args, |a, b| a / b)
+}
+
+pub fn rt_simd_fma_f32x4(args: &[Value]) -> Result<Value, CompileError> {
+    fma_f32x4("rt_simd_fma_f32x4", args)
+}
+
+pub fn rt_simd_add_f32x8(args: &[Value]) -> Result<Value, CompileError> {
+    binop_f32x8("rt_simd_add_f32x8", args, |a, b| a + b)
+}
+
+pub fn rt_simd_sub_f32x8(args: &[Value]) -> Result<Value, CompileError> {
+    binop_f32x8("rt_simd_sub_f32x8", args, |a, b| a - b)
+}
+
+pub fn rt_simd_mul_f32x8(args: &[Value]) -> Result<Value, CompileError> {
+    binop_f32x8("rt_simd_mul_f32x8", args, |a, b| a * b)
+}
+
+pub fn rt_simd_div_f32x8(args: &[Value]) -> Result<Value, CompileError> {
+    binop_f32x8("rt_simd_div_f32x8", args, |a, b| a / b)
+}
+
+pub fn rt_simd_fma_f32x8(args: &[Value]) -> Result<Value, CompileError> {
+    fma_f32x8("rt_simd_fma_f32x8", args)
+}
+
+pub fn rt_simd_add_f64x4(args: &[Value]) -> Result<Value, CompileError> {
+    binop_f64x4("rt_simd_add_f64x4", args, |a, b| a + b)
+}
+
+pub fn rt_simd_sub_f64x4(args: &[Value]) -> Result<Value, CompileError> {
+    binop_f64x4("rt_simd_sub_f64x4", args, |a, b| a - b)
+}
+
+pub fn rt_simd_mul_f64x4(args: &[Value]) -> Result<Value, CompileError> {
+    binop_f64x4("rt_simd_mul_f64x4", args, |a, b| a * b)
+}
+
+pub fn rt_simd_div_f64x4(args: &[Value]) -> Result<Value, CompileError> {
+    binop_f64x4("rt_simd_div_f64x4", args, |a, b| a / b)
+}
+
+pub fn rt_simd_fma_f64x4(args: &[Value]) -> Result<Value, CompileError> {
+    fma_f64x4("rt_simd_fma_f64x4", args)
 }
 
 // ============================================================================

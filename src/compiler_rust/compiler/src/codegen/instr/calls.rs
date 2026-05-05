@@ -50,6 +50,62 @@ fn emit_profiler_return<M: Module>(ctx: &mut InstrContext<'_, M>, builder: &mut 
     Ok(())
 }
 
+fn compile_simple_runtime_memory_intrinsic<M: Module>(
+    ctx: &mut InstrContext<'_, M>,
+    builder: &mut FunctionBuilder,
+    dest: &Option<VReg>,
+    intrinsic: &str,
+    args: &[VReg],
+) -> InstrResult<bool> {
+    if !matches!(
+        intrinsic,
+        "spl_load_i64" | "spl_store_i64" | "spl_load_u8" | "spl_store_u8"
+    ) {
+        return Ok(false);
+    }
+
+    let expected_args = if intrinsic.starts_with("spl_load_") { 2 } else { 3 };
+    if args.len() != expected_args {
+        return Err(format!("{intrinsic} expects {expected_args} args, got {}", args.len()));
+    }
+
+    let base = get_vreg_or_default(ctx, builder, &args[0]);
+    let offset = get_vreg_or_default(ctx, builder, &args[1]);
+    let addr = builder.ins().iadd(base, offset);
+    let flags = MemFlags::new();
+
+    match intrinsic {
+        "spl_load_i64" => {
+            let loaded = builder.ins().load(types::I64, flags, addr, 0);
+            if let Some(d) = dest {
+                ctx.vreg_values.insert(*d, loaded);
+            }
+        }
+        "spl_load_u8" => {
+            let loaded = builder.ins().load(types::I8, flags, addr, 0);
+            let widened = builder.ins().uextend(types::I64, loaded);
+            if let Some(d) = dest {
+                ctx.vreg_values.insert(*d, widened);
+            }
+        }
+        "spl_store_i64" | "spl_store_u8" => {
+            let value = get_vreg_or_default(ctx, builder, &args[2]);
+            let value = if intrinsic == "spl_store_u8" {
+                builder.ins().ireduce(types::I8, value)
+            } else {
+                value
+            };
+            builder.ins().store(flags, value, addr, 0);
+            if let Some(d) = dest {
+                ctx.vreg_values.insert(*d, builder.ins().iconst(types::I64, 0));
+            }
+        }
+        _ => unreachable!(),
+    }
+
+    Ok(true)
+}
+
 /// Get the return type for a runtime FFI function.
 /// Returns None if the function is not found or has no return value.
 fn get_runtime_return_type(func_name: &str) -> Option<types::Type> {
@@ -398,6 +454,10 @@ pub fn compile_call<M: Module>(
             let result = call_runtime_3(ctx, builder, "rt_enum_new", enum_id_val, disc_val, payload_val);
             ctx.vreg_values.insert(*d, result);
         }
+        return Ok(());
+    }
+
+    if compile_simple_runtime_memory_intrinsic(ctx, builder, dest, func_name_for_ffi, args)? {
         return Ok(());
     }
 

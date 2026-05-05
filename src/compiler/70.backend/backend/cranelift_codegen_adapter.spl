@@ -18,6 +18,8 @@ use compiler.backend.codegen_types.{Codegen, CodegenOutput, CodegenOutputKind}
 use compiler.backend.backend.runtime_compiler.{_get_temp_dir}
 use std.ffi.codegen.*
 
+extern fn rt_file_read_bytes(path: text) -> [u8]
+
 # ============================================================================
 # Cranelift Type Constants (must match cranelift_ffi.rs)
 # ============================================================================
@@ -72,6 +74,49 @@ class CraneliftCodegenAdapter:
     """Adapts Cranelift backend to the Codegen trait interface."""
     options: CompileOptions
 
+fn cranelift_compile_module_direct(options: CompileOptions, module: MirModule) -> Result<CodegenOutput, CompileError>:
+    print "[cranelift-direct] start"
+    val target_code = codegen_target_to_cl(options.target)
+    print "[cranelift-direct] target"
+
+    val cl_module = cranelift_new_aot_module("bootstrap_main", target_code)
+    if cl_module == 0:
+        return Err(compileerror_backend_error(BackendKind.Cranelift,
+            "Failed to create Cranelift AOT module"))
+    print "[cranelift-direct] module"
+
+    var func_handles: Dict<text, i64> = {}
+    for sym_id in module.functions.keys():
+        val func: MirFunction = module.functions[sym_id]
+        print "[cranelift-direct] declare {func.name}"
+        val sig = build_signature(func.signature)
+        val handle = cranelift_declare_function(cl_module, func.name, sig, CL_LINKAGE_EXPORT)
+        func_handles[func.name] = handle
+
+    for sym_id in module.functions.keys():
+        val func: MirFunction = module.functions[sym_id]
+        print "[cranelift-direct] compile {func.name}"
+        val result = compile_function(cl_module, func, func_handles)
+        if not result:
+            cranelift_free_module(cl_module)
+            return Err(compileerror_backend_error(BackendKind.Cranelift,
+                "Failed to compile function: {func.name}"))
+
+    val output_path = "{_get_temp_dir()}/simple_cranelift_{module.name}.o"
+    print "[cranelift-direct] emit {output_path}"
+    val ok = cranelift_emit_object(cl_module, output_path)
+    cranelift_free_module(cl_module)
+
+    if not ok:
+        return Err(compileerror_backend_error(BackendKind.Cranelift,
+            "Failed to emit object file"))
+
+    val object_bytes = rt_file_read_bytes(output_path)
+    if object_bytes.len() == 0:
+        return Err(compileerror_backend_error(BackendKind.Cranelift,
+            "Emitted object file was empty or unreadable: {output_path}"))
+    Ok(CodegenOutput.object(module.name, object_bytes))
+
 impl Codegen for CraneliftCodegenAdapter:
     fn backend_kind() -> BackendKind: BackendKind.Cranelift
     fn backend_name() -> text: "cranelift"
@@ -119,7 +164,11 @@ impl Codegen for CraneliftCodegenAdapter:
             return Err(compileerror_backend_error(BackendKind.Cranelift,
                 "Failed to emit object file"))
 
-        Ok(CodegenOutput.object(module.name, []))
+        val object_bytes = rt_file_read_bytes(output_path)
+        if object_bytes.len() == 0:
+            return Err(compileerror_backend_error(BackendKind.Cranelift,
+                "Emitted object file was empty or unreadable: {output_path}"))
+        Ok(CodegenOutput.object(module.name, object_bytes))
 
 # ============================================================================
 # Target Mapping
@@ -643,6 +692,9 @@ fn translate_call(
         case Const(value, type_):
             match value:
                 case Str(name):
+                    val method = method_leaf_name(name)
+                    if (method == "unwrap" or method == "unwrap_err" or method == "unwrap_or") and arg_vals.len() > 0:
+                        return arg_vals[0]
                     # Named function call
                     if func_handles.has(name):
                         val handle = func_handles[name]
@@ -671,6 +723,12 @@ fn translate_call(
 # ============================================================================
 # Helper Functions
 # ============================================================================
+
+fn method_leaf_name(name: text) -> text:
+    val idx = name.rfind(".")
+    if idx < 0:
+        return name
+    name.substring(idx + 1)
 
 fn local_type(local_id: i64, func: MirFunction) -> MirType:
     for local in func.locals:

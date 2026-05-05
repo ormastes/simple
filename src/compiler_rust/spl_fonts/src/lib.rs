@@ -1,12 +1,13 @@
 // spl_fonts — Phase 1 font rasterization FFI backed by fontdue.
 //
-// Four C ABI entry points, all i64-in / i64-out, using a single global slot
+// C ABI entry points, all i64-in / i64-out, using a single global slot
 // for the loaded font and a single global slot for the most recently
 // rasterized glyph bitmap. This is deliberately minimal — Phase 2 will grow a
 // proper handle table.
 
 use std::sync::Mutex;
 
+use fontdue::layout::{CoordinateSystem, Layout, LayoutSettings, TextStyle};
 use fontdue::{Font, FontSettings, Metrics};
 
 struct GlyphSlot {
@@ -14,8 +15,18 @@ struct GlyphSlot {
     bitmap: Vec<u8>,
 }
 
+struct LayoutGlyphSlot {
+    codepoint: i64,
+    x: i64,
+    y: i64,
+    width: i64,
+    height: i64,
+    byte_offset: i64,
+}
+
 static FONT_SLOT: Mutex<Option<Font>> = Mutex::new(None);
 static GLYPH_SLOT: Mutex<Option<GlyphSlot>> = Mutex::new(None);
+static LAYOUT_SLOT: Mutex<Vec<LayoutGlyphSlot>> = Mutex::new(Vec::new());
 
 /// Load a TTF/OTF from `path_ptr`/`path_len`. Returns 1 on success, 0 on any failure.
 #[no_mangle]
@@ -74,12 +85,43 @@ pub extern "C" fn rt_fonts_rasterize_glyph(codepoint: i64, font_size_px: i64) ->
     }
 }
 
+/// Rasterize a single codepoint using fontdue's RGB subpixel coverage.
+///
+/// The metric width/height remain in whole pixels; the bitmap stores three
+/// coverage samples per pixel in row-major RGB order.
+#[no_mangle]
+pub extern "C" fn rt_fonts_rasterize_glyph_subpixel(codepoint: i64, font_size_px: i64) -> i64 {
+    if font_size_px <= 0 {
+        return 0;
+    }
+    let ch = match char::from_u32(codepoint as u32) {
+        Some(c) => c,
+        None => return 0,
+    };
+    let font_guard = match FONT_SLOT.lock() {
+        Ok(g) => g,
+        Err(_) => return 0,
+    };
+    let font = match font_guard.as_ref() {
+        Some(f) => f,
+        None => return 0,
+    };
+    let (metrics, bitmap) = font.rasterize_subpixel(ch, font_size_px as f32);
+    match GLYPH_SLOT.lock() {
+        Ok(mut slot) => {
+            *slot = Some(GlyphSlot { metrics, bitmap });
+            1
+        }
+        Err(_) => 0,
+    }
+}
+
 /// Return a metric field for the most recent glyph. Fields:
 ///   0 = width (px)
 ///   1 = height (px)
 ///   2 = advance (px, rounded)
 ///   3 = bearing_x (px, rounded)
-///   4 = bearing_y (px, rounded)
+///   4 = bitmap ymin/bottom offset (px, rounded)
 #[no_mangle]
 pub extern "C" fn rt_fonts_glyph_metric(handle: i64, field: i64) -> i64 {
     if handle != 1 {
@@ -99,6 +141,150 @@ pub extern "C" fn rt_fonts_glyph_metric(handle: i64, field: i64) -> i64 {
         2 => glyph.metrics.advance_width.round() as i64,
         3 => glyph.metrics.xmin as i64,
         4 => glyph.metrics.ymin as i64,
+        _ => 0,
+    }
+}
+
+/// Return rounded horizontal kerning in pixels for a left/right codepoint pair.
+#[no_mangle]
+pub extern "C" fn rt_fonts_horizontal_kern(left_codepoint: i64, right_codepoint: i64, font_size_px: i64) -> i64 {
+    if font_size_px <= 0 {
+        return 0;
+    }
+    let left = match char::from_u32(left_codepoint as u32) {
+        Some(c) => c,
+        None => return 0,
+    };
+    let right = match char::from_u32(right_codepoint as u32) {
+        Some(c) => c,
+        None => return 0,
+    };
+    let font_guard = match FONT_SLOT.lock() {
+        Ok(g) => g,
+        Err(_) => return 0,
+    };
+    let font = match font_guard.as_ref() {
+        Some(f) => f,
+        None => return 0,
+    };
+    font.horizontal_kern(left, right, font_size_px as f32)
+        .map(|v| v.round() as i64)
+        .unwrap_or(0)
+}
+
+/// Return rounded horizontal line metrics for the active font.
+///
+/// Fields:
+///   0 = ascent
+///   1 = descent
+///   2 = line gap
+///   3 = new line size
+#[no_mangle]
+pub extern "C" fn rt_fonts_horizontal_line_metric(font_size_px: i64, field: i64) -> i64 {
+    if font_size_px <= 0 {
+        return 0;
+    }
+    let font_guard = match FONT_SLOT.lock() {
+        Ok(g) => g,
+        Err(_) => return 0,
+    };
+    let font = match font_guard.as_ref() {
+        Some(f) => f,
+        None => return 0,
+    };
+    let metrics = match font.horizontal_line_metrics(font_size_px as f32) {
+        Some(m) => m,
+        None => return 0,
+    };
+    match field {
+        0 => metrics.ascent.round() as i64,
+        1 => metrics.descent.round() as i64,
+        2 => metrics.line_gap.round() as i64,
+        3 => metrics.new_line_size.round() as i64,
+        _ => 0,
+    }
+}
+
+/// Layout UTF-8 text with fontdue's layout engine and store positioned glyphs
+/// in a global readback slot. Returns the glyph count, or -1 on invalid input.
+#[no_mangle]
+pub extern "C" fn rt_fonts_layout_text(text_ptr: i64, text_len: i64, font_size_px: i64, max_width_px: i64) -> i64 {
+    if text_ptr == 0 || text_len < 0 || font_size_px <= 0 {
+        return -1;
+    }
+    let slice = unsafe { std::slice::from_raw_parts(text_ptr as *const u8, text_len as usize) };
+    let text = match std::str::from_utf8(slice) {
+        Ok(s) => s,
+        Err(_) => return -1,
+    };
+    let font_guard = match FONT_SLOT.lock() {
+        Ok(g) => g,
+        Err(_) => return -1,
+    };
+    let font = match font_guard.as_ref() {
+        Some(f) => f,
+        None => return -1,
+    };
+    let mut settings = LayoutSettings::default();
+    settings.x = 0.0;
+    settings.y = 0.0;
+    if max_width_px > 0 {
+        settings.max_width = Some(max_width_px as f32);
+    }
+    let mut layout = Layout::new(CoordinateSystem::PositiveYDown);
+    layout.reset(&settings);
+    layout.append(&[font], &TextStyle::new(text, font_size_px as f32, 0));
+
+    let mut out = Vec::new();
+    for glyph in layout.glyphs() {
+        out.push(LayoutGlyphSlot {
+            codepoint: glyph.parent as i64,
+            x: glyph.x.round() as i64,
+            y: glyph.y.round() as i64,
+            width: glyph.width as i64,
+            height: glyph.height as i64,
+            byte_offset: glyph.byte_offset as i64,
+        });
+    }
+    let count = out.len() as i64;
+    match LAYOUT_SLOT.lock() {
+        Ok(mut slot) => {
+            *slot = out;
+            count
+        }
+        Err(_) => -1,
+    }
+}
+
+/// Return a field for a glyph from the most recent layout slot.
+///
+/// Fields:
+///   0 = Unicode codepoint
+///   1 = x
+///   2 = y
+///   3 = width
+///   4 = height
+///   5 = byte offset
+#[no_mangle]
+pub extern "C" fn rt_fonts_layout_glyph_metric(index: i64, field: i64) -> i64 {
+    if index < 0 {
+        return 0;
+    }
+    let guard = match LAYOUT_SLOT.lock() {
+        Ok(g) => g,
+        Err(_) => return 0,
+    };
+    let glyph = match guard.get(index as usize) {
+        Some(g) => g,
+        None => return 0,
+    };
+    match field {
+        0 => glyph.codepoint,
+        1 => glyph.x,
+        2 => glyph.y,
+        3 => glyph.width,
+        4 => glyph.height,
+        5 => glyph.byte_offset,
         _ => 0,
     }
 }
@@ -126,4 +312,123 @@ pub extern "C" fn rt_fonts_glyph_pixel(handle: i64, x: i64, y: i64) -> i64 {
     }
     let idx = yu * w + xu;
     glyph.bitmap.get(idx).copied().map(|b| b as i64).unwrap_or(0)
+}
+
+/// Return RGB subpixel coverage (0..=255) for pixel (x,y), channel 0..2.
+#[no_mangle]
+pub extern "C" fn rt_fonts_glyph_subpixel_pixel(handle: i64, x: i64, y: i64, channel: i64) -> i64 {
+    if handle != 1 || x < 0 || y < 0 || channel < 0 || channel > 2 {
+        return 0;
+    }
+    let guard = match GLYPH_SLOT.lock() {
+        Ok(g) => g,
+        Err(_) => return 0,
+    };
+    let glyph = match guard.as_ref() {
+        Some(g) => g,
+        None => return 0,
+    };
+    let w = glyph.metrics.width;
+    let h = glyph.metrics.height;
+    let (xu, yu) = (x as usize, y as usize);
+    if xu >= w || yu >= h {
+        return 0;
+    }
+    let idx = yu * w * 3 + xu * 3 + channel as usize;
+    glyph.bitmap.get(idx).copied().map(|b| b as i64).unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const LIBERATION_SERIF: &str = "/usr/share/fonts/truetype/liberation/LiberationSerif-Regular.ttf";
+
+    fn init_liberation_serif() -> bool {
+        if !std::path::Path::new(LIBERATION_SERIF).exists() {
+            return false;
+        }
+        rt_fonts_init(LIBERATION_SERIF.as_ptr() as i64, LIBERATION_SERIF.len() as i64) == 1
+    }
+
+    #[test]
+    fn horizontal_kern_rejects_invalid_inputs() {
+        assert_eq!(rt_fonts_horizontal_kern('A' as i64, 'V' as i64, 0), 0);
+        assert_eq!(rt_fonts_horizontal_kern(-1, 'V' as i64, 16), 0);
+    }
+
+    #[test]
+    fn horizontal_kern_returns_font_pair_adjustment_when_available() {
+        if !init_liberation_serif() {
+            return;
+        }
+        let av = rt_fonts_horizontal_kern('A' as i64, 'V' as i64, 16);
+        assert!(av <= 0, "expected AV kerning to be non-positive, got {av}");
+    }
+
+    #[test]
+    fn horizontal_line_metrics_return_scaled_values() {
+        if !init_liberation_serif() {
+            return;
+        }
+        let ascent = rt_fonts_horizontal_line_metric(16, 0);
+        let descent = rt_fonts_horizontal_line_metric(16, 1);
+        let new_line_size = rt_fonts_horizontal_line_metric(16, 3);
+        assert!(ascent > 0, "expected positive ascent, got {ascent}");
+        assert!(descent < 0, "expected negative descent, got {descent}");
+        assert!(new_line_size > 0, "expected positive line size, got {new_line_size}");
+        assert_eq!(rt_fonts_horizontal_line_metric(0, 0), 0);
+        assert_eq!(rt_fonts_horizontal_line_metric(16, 99), 0);
+    }
+
+    #[test]
+    fn layout_text_returns_positioned_glyphs() {
+        if !init_liberation_serif() {
+            return;
+        }
+        let text = "Google search deterministic compatibility fixture";
+        let count = rt_fonts_layout_text(text.as_ptr() as i64, text.len() as i64, 16, 112);
+        assert!(count > 0, "expected positioned glyphs, got {count}");
+        assert_eq!(rt_fonts_layout_glyph_metric(0, 0), 'G' as i64);
+        assert_eq!(rt_fonts_layout_glyph_metric(0, 1), 0);
+        assert!(rt_fonts_layout_glyph_metric(0, 4) > 0);
+        assert_eq!(rt_fonts_layout_text(0, text.len() as i64, 16, 112), -1);
+    }
+
+    #[test]
+    fn subpixel_rasterize_returns_rgb_triplet_coverage() {
+        if !init_liberation_serif() {
+            return;
+        }
+        let handle = rt_fonts_rasterize_glyph_subpixel('G' as i64, 16);
+        assert_eq!(handle, 1);
+        let width = rt_fonts_glyph_metric(handle, 0);
+        let height = rt_fonts_glyph_metric(handle, 1);
+        assert!(width > 0, "expected positive width, got {width}");
+        assert!(height > 0, "expected positive height, got {height}");
+        let mut max_sample = 0;
+        for y in 0..height {
+            for x in 0..width {
+                for channel in 0..3 {
+                    max_sample = max_sample.max(rt_fonts_glyph_subpixel_pixel(handle, x, y, channel));
+                }
+            }
+        }
+        assert!(max_sample > 0, "expected non-empty subpixel coverage");
+        assert_eq!(rt_fonts_glyph_subpixel_pixel(handle, 0, 0, 99), 0);
+    }
+
+    #[test]
+    fn glyph_metric_field_four_is_bitmap_ymin_not_layout_top() {
+        if !init_liberation_serif() {
+            return;
+        }
+        let handle = rt_fonts_rasterize_glyph('G' as i64, 16);
+        assert_eq!(handle, 1);
+        let metric_ymin = rt_fonts_glyph_metric(handle, 4);
+        let font = FONT_SLOT.lock().unwrap();
+        let font = font.as_ref().unwrap();
+        let (metrics, _) = font.rasterize('G', 16.0);
+        assert_eq!(metric_ymin, metrics.ymin as i64);
+    }
 }

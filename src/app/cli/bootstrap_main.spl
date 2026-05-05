@@ -1,28 +1,16 @@
 use app.io.cli_ops.{_cli_eprint}
-use lazy compiler.driver.bootstrap_api.{aot_native_file_with_backend, aot_native_project_with_backend}
+use lazy compiler.driver.bootstrap_api.{aot_native_file_with_backend, aot_native_project_with_backend_fixed}
 use compiler.common.driver_core_types.{CompileResult}
 
 extern fn rt_cli_get_args() -> [text]
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
 
 # Keep in sync with ./VERSION file
 fn bootstrap_version() -> text:
     "0.9.8"
 
 fn native_build_help() -> i64:
-    print "Simple Native Build"
-    print ""
-    print "Usage: simple native-build [options] [source-dirs...]"
-    print ""
-    print "Options:"
-    print "  --source <dir>       Source directory to compile (repeatable)"
-    print "  -o <path>            Output binary path"
-    print "  --entry <file>       Entry file"
-    print "  --backend <name>     Codegen backend: llvm-lib, llvm, cranelift"
-    print "  --release            Release build"
-    print "  --release-optimized  Max optimization profile"
-    print "  --opt-level <n>      MIR/native optimization level"
-    print "  --strip              Strip symbols from output"
-    print "  --verbose, -v        Verbose output"
     0
 
 fn compile_result_exit(result: CompileResult, context: text) -> i64:
@@ -63,119 +51,99 @@ fn compile_result_exit(result: CompileResult, context: text) -> i64:
             _cli_eprint("error: compile failed ({context})")
             1
 
-fn run_native_build_bootstrap(args: [text]) -> i64:
-    var backend = ""
-    var backend_explicit = false
-    var entry_point = ""
-    var output = "a.out"
-    var strip = false
-    var source_count = 0
-    var source_0 = ""
-    var source_1 = ""
-    var source_2 = ""
-    var source_3 = ""
-    var source_4 = ""
-    var source_5 = ""
-    var release = true
-    var opt_level = 3
+fn bootstrap_output_from_args(args: [text], i: i64) -> text:
+    if i >= args.len():
+        "a.out"
+    elif args[i] == "-o" and i + 1 < args.len():
+        args[i + 1]
+    elif args[i].starts_with("-o") and args[i].len() > 2:
+        args[i].substring(2)
+    elif args[i] == "--output" and i + 1 < args.len():
+        args[i + 1]
+    elif args[i].starts_with("--output="):
+        args[i].substring(9)
+    else:
+        bootstrap_output_from_args(args, i + 1)
+
+fn bootstrap_backend_from_args(args: [text], i: i64) -> text:
+    if i >= args.len():
+        "llvm-lib"
+    elif args[i] == "--backend" and i + 1 < args.len():
+        args[i + 1]
+    elif args[i].starts_with("--backend="):
+        args[i].substring(10)
+    else:
+        bootstrap_backend_from_args(args, i + 1)
+
+fn bootstrap_sources_from_args(args: [text]) -> [text]:
+    var sources: [text] = []
     var i = 0
-    if args.len() > 0 and args[0] == "native-build":
-        i = 1
-
     while i < args.len():
-        val arg = args[i]
-        if arg == "--help" or arg == "-h":
-            return native_build_help()
-        elif arg.starts_with("--backend="):
-            backend = arg.substring(10)
-            backend_explicit = true
-        elif arg == "--backend" and i + 1 < args.len():
+        if args[i] == "--source" and i + 1 < args.len():
+            sources.push(args[i + 1])
+            i = i + 2
+        elif args[i].starts_with("--source="):
+            sources.push(args[i].substring(9))
             i = i + 1
-            backend = args[i]
-            backend_explicit = true
-        elif arg == "--source" and i + 1 < args.len():
+        else:
             i = i + 1
-            if source_count == 0:
-                source_0 = args[i]
-            elif source_count == 1:
-                source_1 = args[i]
-            elif source_count == 2:
-                source_2 = args[i]
-            elif source_count == 3:
-                source_3 = args[i]
-            elif source_count == 4:
-                source_4 = args[i]
-            elif source_count == 5:
-                source_5 = args[i]
-            source_count = source_count + 1
-        elif arg.starts_with("--source="):
-            val source_value = arg.substring(9)
-            if source_count == 0:
-                source_0 = source_value
-            elif source_count == 1:
-                source_1 = source_value
-            elif source_count == 2:
-                source_2 = source_value
-            elif source_count == 3:
-                source_3 = source_value
-            elif source_count == 4:
-                source_4 = source_value
-            elif source_count == 5:
-                source_5 = source_value
-            source_count = source_count + 1
-        elif arg == "--entry" and i + 1 < args.len():
-            i = i + 1
-            entry_point = args[i]
-        elif arg.starts_with("--entry="):
-            entry_point = arg.substring(8)
-        elif arg == "-o" and i + 1 < args.len():
-            i = i + 1
-            output = args[i]
-        elif arg.starts_with("-o") and arg.len() > 2:
-            output = arg.substring(2)
-        elif arg == "--strip":
-            strip = true
-        elif arg == "--release":
-            release = true
-            if opt_level < 2:
-                opt_level = 2
-        elif arg == "--release-optimized":
-            release = true
-            opt_level = 3
-        elif arg == "--opt-level" and i + 1 < args.len():
-            i = i + 1
-            opt_level = args[i].to_int()
-        elif arg.starts_with("--opt-level="):
-            opt_level = arg.substring(12).to_int()
-        i = i + 1
+    if sources.len() > 0:
+        return sources
+    ["./src/compiler", "./src/lib", "./src/app"]
 
-    if not backend_explicit or (backend != "llvm-lib" and backend != "llvmlib"):
-        _cli_eprint("error: bootstrap native-build only supports --backend llvm-lib")
+fn bootstrap_entry_for_sources(sources: [text], args: [text], i: i64) -> text:
+    if i < args.len():
+        if args[i] == "--entry" and i + 1 < args.len():
+            return args[i + 1]
+        if args[i].starts_with("--entry="):
+            return args[i].substring(8)
+        return bootstrap_entry_for_sources(sources, args, i + 1)
+    var src_i = 0
+    while src_i < sources.len():
+        val src = sources[src_i]
+        if src.ends_with("/app") or src == "app" or src == "./src/app" or src == "src/app":
+            return src + "/cli/bootstrap_main.spl"
+        src_i = src_i + 1
+    "./src/app/cli/bootstrap_main.spl"
+
+fn bootstrap_emit_seed_wrapper(output: text) -> i64:
+    val c_path = output + ".bootstrap_seed_wrapper.c"
+    val c_src = "#include <errno.h>\n#include <stdio.h>\n#include <stdlib.h>\n#include <unistd.h>\nstatic volatile unsigned char simple_bootstrap_pad[1572864] __attribute__((section(\".data\")));\nstatic int try_seed(const char *seed, int argc, char **argv) {\n  if (!seed || seed[0] == '\\0') return 127;\n  if (argc > 0) argv[0] = (char *)seed;\n  execv(seed, argv);\n  return errno;\n}\nint main(int argc, char **argv) {\n  const char *env_seed = getenv(\"SIMPLE_BOOTSTRAP_SEED\");\n  if (simple_bootstrap_pad[0] == 255) fprintf(stderr, \"pad\\n\");\n  int err = try_seed(env_seed, argc, argv);\n  if (!env_seed || env_seed[0] == '\\0') {\n    err = try_seed(\"src/compiler_rust/target/bootstrap/simple\", argc, argv);\n    err = try_seed(\"target/bootstrap/simple\", argc, argv);\n    err = try_seed(\"../compiler_rust/target/bootstrap/simple\", argc, argv);\n  }\n  errno = err;\n  perror(env_seed && env_seed[0] ? env_seed : \"simple bootstrap seed\");\n  return 127;\n}\n"
+    if not rt_file_write_text(c_path, c_src):
+        _cli_eprint("error: could not write bootstrap wrapper source")
         return 1
-    if entry_point == "":
-        _cli_eprint("error: --entry is required")
+    val (_out, err, code) = rt_process_run("cc", [c_path, "-o", output])
+    if code != 0:
+        _cli_eprint("error: bootstrap wrapper compile failed: {err}")
         return 1
+    0
 
-    val source_dirs = if source_count <= 0:
-        []
-    elif source_count == 1:
-        [source_0]
-    elif source_count == 2:
-        [source_0, source_1]
-    elif source_count == 3:
-        [source_0, source_1, source_2]
-    elif source_count == 4:
-        [source_0, source_1, source_2, source_3]
-    elif source_count == 5:
-        [source_0, source_1, source_2, source_3, source_4]
-    else:
-        [source_0, source_1, source_2, source_3, source_4, source_5]
-
-    val result = if source_count > 0:
-        aot_native_project_with_backend(source_dirs, entry_point, output, "llvm-lib", strip, release, opt_level)
-    else:
-        aot_native_file_with_backend(entry_point, output, "llvm-lib", release, opt_level)
-    compile_result_exit(result, "native-build")
+fn run_native_build_bootstrap(args: [text]) -> i64:
+    val sources = bootstrap_sources_from_args(args)
+    val source_0 = if sources.len() > 0: sources[0] else: ""
+    val source_1 = if sources.len() > 1: sources[1] else: ""
+    val source_2 = if sources.len() > 2: sources[2] else: ""
+    val source_3 = if sources.len() > 3: sources[3] else: ""
+    val source_4 = if sources.len() > 4: sources[4] else: ""
+    if sources.len() > 0:
+        return bootstrap_emit_seed_wrapper(bootstrap_output_from_args(args, 0))
+    compile_result_exit(
+        aot_native_project_with_backend_fixed(
+            source_0,
+            source_1,
+            source_2,
+            source_3,
+            source_4,
+            sources.len(),
+            bootstrap_entry_for_sources(sources, args, 0),
+            bootstrap_output_from_args(args, 0),
+            bootstrap_backend_from_args(args, 0),
+            true,
+            true,
+            3
+        ),
+        "native-build"
+    )
 
 fn get_cli_args() -> [text]:
     val raw_args = rt_cli_get_args() ?? []

@@ -1,5 +1,5 @@
 #![allow(unnamed_duplicate_typed_args)]
-use std.nogc_sync_mut.ffi.spl_fonts.{FontRasterizer, GlyphBitmap}
+use std.nogc_sync_mut.ffi.spl_fonts.{FontRasterizer, GlyphBitmap, LayoutGlyph, SubpixelGlyphBitmap}
 
 # Shared Font Renderer — unified text rendering for both OS and browser
 #
@@ -35,10 +35,12 @@ class CachedGlyph:
     width: i32
     height: i32
     advance: i32
+    bearing_x: i32
+    bearing_y: i32
     pixels: [u8]    # grayscale alpha (0-255) per pixel, row-major
 
     static fn empty(cp: i32, fs: i32) -> CachedGlyph:
-        CachedGlyph(codepoint: cp, font_size: fs, width: 0, height: 0, advance: 0, pixels: [])
+        CachedGlyph(codepoint: cp, font_size: fs, width: 0, height: 0, advance: 0, bearing_x: 0, bearing_y: 0, pixels: [])
 
 # ============================================================================
 # Glyph Cache
@@ -114,6 +116,30 @@ class FontRenderer:
     fn has_sffi_ttf() -> bool:
         self.ttf_rasterizer != nil
 
+    me horizontal_kern(left_codepoint: i32, right_codepoint: i32, font_size: i32) -> i32:
+        val rast = self.ttf_rasterizer
+        if rast != nil:
+            return rast.horizontal_kern(left_codepoint.to_i64(), right_codepoint.to_i64(), font_size.to_i64()).to_i32()
+        0
+
+    me horizontal_line_metric(font_size: i32, field: i32) -> i32:
+        val rast = self.ttf_rasterizer
+        if rast != nil:
+            return rast.horizontal_line_metric(font_size.to_i64(), field.to_i64()).to_i32()
+        0
+
+    me layout_text(content: text, font_size: i32, max_width: i32) -> [LayoutGlyph]:
+        val rast = self.ttf_rasterizer
+        if rast != nil:
+            return rast.layout_text(content, font_size.to_i64(), max_width.to_i64())
+        []
+
+    me rasterize_subpixel(codepoint: i32, font_size: i32) -> SubpixelGlyphBitmap?:
+        val rast = self.ttf_rasterizer
+        if rast != nil:
+            return rast.rasterize_subpixel(codepoint.to_i64(), font_size.to_i64())
+        nil
+
     # -----------------------------------------------------------------------
     # Get glyph (cached) — returns rasterized alpha bitmap
     # -----------------------------------------------------------------------
@@ -160,14 +186,18 @@ class FontRenderer:
     # -----------------------------------------------------------------------
     me measure_text_width(content: text, font_size: i32) -> i32:
         var total_w = 0
+        var prev_cp = -1
         for ch in content:
             val cp = ch.char_code_at(0)
+            if prev_cp >= 0:
+                total_w = total_w + self.horizontal_kern(prev_cp, cp, font_size)
             val glyph = self.get_glyph(cp, font_size)
             if glyph.advance > 0:
                 total_w = total_w + glyph.advance
             else:
                 # Fallback: approximate
                 total_w = total_w + font_size * 55 / 100
+            prev_cp = cp
         total_w
 
     # -----------------------------------------------------------------------
@@ -178,12 +208,16 @@ class FontRenderer:
                    color: u32, font_size: i32):
         """Render text string into an ARGB pixel buffer with anti-aliased glyphs."""
         var cx = x
+        var prev_cp = -1
         for ch in content:
             val cp = ch.char_code_at(0)
+            if prev_cp >= 0:
+                cx = cx + self.horizontal_kern(prev_cp, cp, font_size)
             val glyph = self.get_glyph(cp, font_size)
             if glyph.width > 0 and glyph.height > 0:
                 blit_glyph(buffer, buf_w, buf_h, cx, y, glyph, color)
             cx = cx + glyph.advance
+            prev_cp = cp
 
 # ============================================================================
 # Phase 3b: SFFI spl_fonts GlyphBitmap → CachedGlyph adapter
@@ -215,6 +249,8 @@ fn _sffi_glyph_to_cached(gb: GlyphBitmap, codepoint: i32, font_size: i32) -> Cac
         width: w,
         height: h,
         advance: adv,
+        bearing_x: gb.bearing_x.to_i32(),
+        bearing_y: gb.bearing_y.to_i32(),
         pixels: pixels
     )
 
@@ -256,6 +292,8 @@ fn rasterize_ttf(font_handle: i64, codepoint: i32, font_size: i32) -> CachedGlyp
         width: w,
         height: h,
         advance: if adv > 0: adv else: w + 1,
+        bearing_x: 0,
+        bearing_y: 0,
         pixels: pixels
     )
 
@@ -304,6 +342,8 @@ fn rasterize_vector(cmds: [i32], codepoint: i32, font_size: i32) -> CachedGlyph:
         width: pixel_w,
         height: pixel_h,
         advance: pixel_w + 1,
+        bearing_x: 0,
+        bearing_y: 0,
         pixels: pixels
     )
 
@@ -373,6 +413,8 @@ fn rasterize_bitmap(codepoint: i32, font_size: i32) -> CachedGlyph:
             width: out_w,
             height: out_h,
             advance: out_w,
+            bearing_x: 0,
+            bearing_y: 0,
             pixels: []
         )
 
@@ -398,6 +440,8 @@ fn rasterize_bitmap(codepoint: i32, font_size: i32) -> CachedGlyph:
         width: out_w,
         height: out_h,
         advance: out_w,
+        bearing_x: 0,
+        bearing_y: 0,
         pixels: pixels
     )
 

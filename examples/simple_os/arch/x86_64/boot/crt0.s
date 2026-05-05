@@ -22,13 +22,17 @@
 .align 4
 
 .set MB_MAGIC, 0x1BADB002
-.set MB_FLAGS, 0x00000003
+.set MB_FLAGS, 0x00000007
 
 .global _multiboot_header
 _multiboot_header:
     .long MB_MAGIC
     .long MB_FLAGS
-    .long 0xE4524FFB          /* checksum: -(magic + flags) & 0xFFFFFFFF */
+    .long 0xE4524FF7          /* checksum: -(magic + flags) & 0xFFFFFFFF */
+    .long 0                   /* video mode: linear graphics */
+    .long 1024                /* framebuffer width */
+    .long 768                 /* framebuffer height */
+    .long 32                  /* framebuffer depth */
 
 /* ==================================================================
  * 32-bit entry point

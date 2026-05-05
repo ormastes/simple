@@ -2041,6 +2041,13 @@ static uint8_t g_arm_virtq_storage[8192] __attribute__((aligned(4096)));
 static uint8_t g_arm_virtio_blk_dma_storage[1024] __attribute__((aligned(512)));
 static uint16_t g_arm_virtq_last_used_idx = 0;
 static uint64_t g_arm_virtio_blk_mmio_base = SIMPLEOS_ARM_VIRTIO_BLK_MMIO_BASE_DEFAULT;
+static uint32_t g_arm_virtio_blk_debug_reads = 0;
+static uint64_t g_arm_fat32_bps = 0;
+static uint64_t g_arm_fat32_spc = 0;
+static uint64_t g_arm_fat32_reserved = 0;
+static uint64_t g_arm_fat32_fats = 0;
+static uint64_t g_arm_fat32_fat_size = 0;
+static uint64_t g_arm_fat32_root_cluster = 0;
 
 RuntimeValue rt_arm_array_get_byte_u32(RuntimeValue arr, RuntimeValue idx_val);
 
@@ -2364,6 +2371,17 @@ RuntimeValue rt_arm_virtio_blk_read_sector_direct(RuntimeValue lba_val)
     volatile uint16_t *avail_idx = (volatile uint16_t *)(uintptr_t)(queue_addr + 2048ULL + 2ULL);
     volatile uint16_t *avail_slot;
     uint16_t idx;
+    uint8_t status;
+
+    if (g_arm_virtio_blk_debug_reads < 4U) {
+        serial_puts("[virtio-read] lba=");
+        serial_put_dec((int64_t)lba);
+        serial_puts(" q=");
+        serial_put_hex(queue_addr);
+        serial_puts(" dma=");
+        serial_put_hex(dma_addr);
+        serial_puts("\r\n");
+    }
 
     for (uint64_t i = 0; i < 1024ULL; i++) dma[i] = 0;
     *(volatile uint32_t *)(uintptr_t)(dma_addr + 0ULL) = 0U;
@@ -2407,7 +2425,22 @@ RuntimeValue rt_arm_virtio_blk_read_sector_direct(RuntimeValue lba_val)
         if (used_idx != g_arm_virtq_last_used_idx) {
             g_arm_virtq_last_used_idx = used_idx;
             arm64_invalidate_dcache_range(dma_addr, 1024ULL);
-            return (RuntimeValue)(uint64_t)*(volatile uint8_t *)(uintptr_t)(dma_addr + 528ULL);
+            status = *(volatile uint8_t *)(uintptr_t)(dma_addr + 528ULL);
+            if (g_arm_virtio_blk_debug_reads < 4U) {
+                serial_puts("[virtio-read] done status=");
+                serial_put_dec((int64_t)status);
+                serial_puts(" b0=");
+                serial_put_hex(*(volatile uint8_t *)(uintptr_t)(dma_addr + 16ULL));
+                serial_puts(" b1=");
+                serial_put_hex(*(volatile uint8_t *)(uintptr_t)(dma_addr + 17ULL));
+                serial_puts(" b2=");
+                serial_put_hex(*(volatile uint8_t *)(uintptr_t)(dma_addr + 18ULL));
+                serial_puts(" b11=");
+                serial_put_hex(*(volatile uint8_t *)(uintptr_t)(dma_addr + 27ULL));
+                serial_puts("\r\n");
+                g_arm_virtio_blk_debug_reads++;
+            }
+            return (RuntimeValue)(uint64_t)status;
         }
     }
     return (RuntimeValue)0xffffffffULL;
@@ -2445,6 +2478,43 @@ RuntimeValue rt_arm_virtio_blk_read_hello_smf(void)
 {
     return rt_arm_virtio_blk_read_prefix((RuntimeValue)2063ULL, (RuntimeValue)4264ULL);
 }
+
+RuntimeValue rt_arm_fat32_probe_bpb_from_virtio(void)
+{
+    RuntimeValue status = rt_arm_virtio_blk_read_sector_direct((RuntimeValue)0ULL);
+    uint8_t *b = g_arm_virtio_blk_dma_storage + 16;
+    if (status == (RuntimeValue)0xffffffffULL || status != 0) return (RuntimeValue)0ULL;
+    g_arm_fat32_bps = (uint64_t)b[11] | ((uint64_t)b[12] << 8);
+    g_arm_fat32_spc = (uint64_t)b[13];
+    g_arm_fat32_reserved = (uint64_t)b[14] | ((uint64_t)b[15] << 8);
+    g_arm_fat32_fats = (uint64_t)b[16];
+    g_arm_fat32_fat_size = (uint64_t)b[36] | ((uint64_t)b[37] << 8) | ((uint64_t)b[38] << 16) | ((uint64_t)b[39] << 24);
+    g_arm_fat32_root_cluster = (uint64_t)b[44] | ((uint64_t)b[45] << 8) | ((uint64_t)b[46] << 16) | ((uint64_t)b[47] << 24);
+    serial_puts("[fat32-bpb-c] bps=");
+    serial_put_dec((int64_t)g_arm_fat32_bps);
+    serial_puts(" spc=");
+    serial_put_dec((int64_t)g_arm_fat32_spc);
+    serial_puts(" reserved=");
+    serial_put_dec((int64_t)g_arm_fat32_reserved);
+    serial_puts(" fats=");
+    serial_put_dec((int64_t)g_arm_fat32_fats);
+    serial_puts(" fat_size=");
+    serial_put_dec((int64_t)g_arm_fat32_fat_size);
+    serial_puts(" root=");
+    serial_put_dec((int64_t)g_arm_fat32_root_cluster);
+    serial_puts("\r\n");
+    if (g_arm_fat32_bps == 0 || g_arm_fat32_spc == 0 || g_arm_fat32_fats == 0 || g_arm_fat32_fat_size == 0 || g_arm_fat32_root_cluster < 2ULL) {
+        return (RuntimeValue)0ULL;
+    }
+    return (RuntimeValue)1ULL;
+}
+
+RuntimeValue rt_arm_fat32_bps(void) { return ENCODE_INT(g_arm_fat32_bps); }
+RuntimeValue rt_arm_fat32_spc(void) { return ENCODE_INT(g_arm_fat32_spc); }
+RuntimeValue rt_arm_fat32_reserved(void) { return ENCODE_INT(g_arm_fat32_reserved); }
+RuntimeValue rt_arm_fat32_fats(void) { return ENCODE_INT(g_arm_fat32_fats); }
+RuntimeValue rt_arm_fat32_fat_size(void) { return ENCODE_INT(g_arm_fat32_fat_size); }
+RuntimeValue rt_arm_fat32_root_cluster(void) { return ENCODE_INT(g_arm_fat32_root_cluster); }
 
 int64_t rt_bytes_u8_at(RuntimeValue arr, int64_t idx)
 {
@@ -2554,6 +2624,24 @@ static uint64_t arm64_elf_u64(RuntimeValue bytes, uint64_t off)
 static uint64_t arm64_elf_len(RuntimeValue bytes)
 {
     return (uint64_t)rt_arm_array_len_u32(bytes);
+}
+
+uint64_t rt_arm_smf_elf_stub_size(RuntimeValue bytes)
+{
+    uint64_t len = arm64_elf_len(bytes);
+    if (len < 132ULL) return 0;
+    if (arm64_array_byte_at_raw_index(bytes, 0) != 0x7FULL) return 0;
+    if (arm64_array_byte_at_raw_index(bytes, 1) != 0x45ULL) return 0;
+    if (arm64_array_byte_at_raw_index(bytes, 2) != 0x4CULL) return 0;
+    if (arm64_array_byte_at_raw_index(bytes, 3) != 0x46ULL) return 0;
+    uint64_t trailer = len - 128ULL;
+    if (arm64_array_byte_at_raw_index(bytes, trailer) != 0x53ULL) return 0;
+    if (arm64_array_byte_at_raw_index(bytes, trailer + 1ULL) != 0x4DULL) return 0;
+    if (arm64_array_byte_at_raw_index(bytes, trailer + 2ULL) != 0x46ULL) return 0;
+    if (arm64_array_byte_at_raw_index(bytes, trailer + 3ULL) != 0x00ULL) return 0;
+    uint64_t stub_size = arm64_elf_u32(bytes, trailer + 52ULL);
+    if (stub_size > 0ULL && stub_size <= trailer) return stub_size;
+    return trailer;
 }
 
 static int arm64_elf64_header_ok(RuntimeValue bytes)

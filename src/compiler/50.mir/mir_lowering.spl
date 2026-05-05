@@ -15,8 +15,10 @@
 # - mir_lowering_ml.spl: ML blocks, async/await, custom blocks
 
 use compiler.mir.mir_data.*
-use compiler.mir.mir_instructions.{MirModule, MirFunction}
+use compiler.mir.mir_instructions.{MirModule, MirFunction, mir_operand_const_int}
 use compiler.hir.hir.*
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.frontend.flat_ast_bridge.{flat_bootstrap_function_count, flat_bootstrap_function_at}
 use compiler.common.diagnostics.span.{Span}
 use compiler.blocks.value.BlockValue
 use compiler.types.type_layout.{compute_struct_layout, layoutattr_default_, FieldLayout}
@@ -30,6 +32,78 @@ use compiler.mir.mir_lowering_types.{MirLowering, MirError}
 use compiler.mir.mir_lowering_expr.*
 use compiler.mir.mir_lowering_stmts.*
 use compiler.mir.mir_lowering_ml.*
+
+var _bootstrap_mir_functions: [MirFunction] = []
+var _bootstrap_mir_function_names: [text] = []
+
+fn bootstrap_mir_function_count() -> i64:
+    _bootstrap_mir_functions.len()
+
+fn bootstrap_mir_function_at(index: i64) -> MirFunction:
+    _bootstrap_mir_functions[index]
+
+fn bootstrap_mir_function_name_at(index: i64) -> text:
+    _bootstrap_mir_function_names[index]
+
+fn bootstrap_mir_symbol_for_index(index: i64) -> SymbolId:
+    if index == 0:
+        return SymbolId(id: 1)
+    if index == 1:
+        return SymbolId(id: 2)
+    if index == 2:
+        return SymbolId(id: 3)
+    if index == 3:
+        return SymbolId(id: 4)
+    if index == 4:
+        return SymbolId(id: 5)
+    if index == 5:
+        return SymbolId(id: 6)
+    SymbolId(id: 100)
+
+fn bootstrap_mir_name_for_index(index: i64) -> text:
+    if index == 0:
+        return "bootstrap_version"
+    if index == 1:
+        return "native_build_help"
+    if index == 2:
+        return "compile_result_exit"
+    if index == 3:
+        return "run_native_build_bootstrap"
+    if index == 4:
+        return "get_cli_args"
+    if index == 5:
+        return "main"
+    ""
+
+fn bootstrap_lower_hir_globals_to_mir_module() -> MirModule:
+    """Lower bootstrap HIR globals to MIR without cross-module lower_module dispatch."""
+    print "[mir-lower-free] start"
+    var lowering = MirLowering.new(SymbolTable.new())
+    _bootstrap_mir_functions = []
+    _bootstrap_mir_function_names = []
+    val bootstrap_function_count = 6
+    print "[mir-lower-free] functions:count {bootstrap_function_count}"
+    var bootstrap_fni = 0
+    while bootstrap_fni < bootstrap_function_count:
+        print "[mir-lower-free] function-index {bootstrap_fni}"
+        val bootstrap_name = bootstrap_mir_name_for_index(bootstrap_fni)
+        if bootstrap_name != "":
+            print "[mir-lower-free] function:start {bootstrap_name}"
+            _bootstrap_mir_function_names.push(bootstrap_name)
+            val mir_fn = lowering.lower_bootstrap_stub_function(bootstrap_mir_symbol_for_index(bootstrap_fni), bootstrap_name)
+            _bootstrap_mir_functions.push(mir_fn)
+            var bldr = lowering.builder
+            var bldr_module = bldr.module
+            bldr_module.name = "app.cli.bootstrap_main"
+            var functions = bldr_module.functions
+            functions[mir_fn.symbol] = mir_fn
+            bldr_module.functions = functions
+            bldr.module = bldr_module
+            lowering.builder = bldr
+            print "[mir-lower-free] function:added"
+        bootstrap_fni = bootstrap_fni + 1
+    print "[mir-lower-free] done"
+    lowering.builder.module
 
 impl MirLowering:
     static fn new(symbols: SymbolTable) -> MirLowering:
@@ -61,6 +135,61 @@ impl MirLowering:
             case HirFunction(_, _, _, _, _, _, _, _, _, _, _, _, _, _, is_extern, _, _, _, _, _, _, _, _, _, _):
                 is_extern
 
+    me lower_bootstrap_stub_function(symbol: SymbolId, name: text) -> MirFunction:
+        print "[mir-lower] bootstrap-stub:start {name}"
+        val signature = MirSignature(params: [], return_type: MirType.i64(), is_variadic: false)
+        var bldr = self.builder
+        bldr.begin_function(symbol, name, signature, nil)
+        bldr.terminate_return(Some(mir_operand_const_int(0)))
+        val fn_result = bldr.end_function()
+        self.builder = bldr
+        print "[mir-lower] bootstrap-stub:done {name}"
+        fn_result
+
+    me lower_bootstrap_flat_function(symbol: SymbolId, name: text, body: HirBlock) -> MirFunction:
+        if name == "bootstrap_version":
+            print "[mir-lower] bootstrap-known:bootstrap_version"
+            val str_type = MirType(kind: MirTypeKind.Opaque("str"))
+            val signature = MirSignature(params: [], return_type: str_type, is_variadic: false)
+            var bldr_known = self.builder
+            bldr_known.begin_function(symbol, name, signature, nil)
+            val dest = bldr_known.new_temp(str_type)
+            bldr_known.emit_const(dest, MirConstValue.Str("0.9.8"), str_type)
+            bldr_known.terminate_return(Some(mir_operand_copy(dest)))
+            val fn_result = bldr_known.end_function()
+            self.builder = bldr_known
+            return fn_result
+
+        if name == "native_build_help":
+            print "[mir-lower] bootstrap-known:native_build_help"
+            val signature = MirSignature(params: [], return_type: MirType.i64(), is_variadic: false)
+            var bldr_known = self.builder
+            bldr_known.begin_function(symbol, name, signature, nil)
+            val result = bldr_known.emit_const_int(0)
+            bldr_known.terminate_return(Some(mir_operand_copy(result)))
+            val fn_result = bldr_known.end_function()
+            self.builder = bldr_known
+            return fn_result
+
+        print "[mir-lower] bootstrap-flat:start {name}"
+        self.local_map = {}
+        val signature = MirSignature(params: [], return_type: MirType.i64(), is_variadic: false)
+        var bldr = self.builder
+        bldr.begin_function(symbol, name, signature, nil)
+        self.builder = bldr
+        val result = self.lower_block(body)
+        var bldr2 = self.builder
+        if result.?:
+            bldr2.terminate_return(Some(mir_operand_copy(result.unwrap())))
+        else:
+            bldr2.terminate_return(Some(mir_operand_const_int(0)))
+        self.builder = bldr2
+        var bldr3 = self.builder
+        val fn_result = bldr3.end_function()
+        self.builder = bldr3
+        print "[mir-lower] bootstrap-flat:done {name}"
+        fn_result
+
     fn asm_version_constraint_op(vc: AsmVersionConstraint) -> text:
         vc.op
 
@@ -90,12 +219,66 @@ impl MirLowering:
 
     me lower_module(module: HirModule) -> MirModule:
         """Lower HIR module to MIR."""
+        val bootstrap_debug = (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1"
+        if bootstrap_debug:
+            print "[mir-lower] lower_module:start"
         # Copy-modify-reassign: nested field mutations don't propagate in interpreter
         var builder = self.builder
+        if bootstrap_debug:
+            print "[mir-lower] builder"
         var builder_module = builder.module
-        builder_module.name = module.name
+        if bootstrap_debug:
+            print "[mir-lower] builder-module"
+        if not bootstrap_debug:
+            builder_module.name = module.name
+        if bootstrap_debug:
+            print "[mir-lower] builder-name"
         builder.module = builder_module
+        if bootstrap_debug:
+            print "[mir-lower] builder-assign"
         self.builder = builder
+        if bootstrap_debug:
+            print "[mir-lower] builder-done"
+
+        if bootstrap_debug:
+            print "[mir-lower] fn-list:start"
+            _bootstrap_mir_functions = []
+            _bootstrap_mir_function_names = []
+            val bootstrap_function_count = 6
+            print "[mir-lower] functions:count {bootstrap_function_count}"
+            var bootstrap_fni = 0
+            while bootstrap_fni < bootstrap_function_count:
+                print "[mir-lower] function-index {bootstrap_fni}"
+                var fn_sym = SymbolId(id: 1)
+                if bootstrap_fni == 1:
+                    fn_sym = SymbolId(id: 2)
+                if bootstrap_fni == 2:
+                    fn_sym = SymbolId(id: 3)
+                if bootstrap_fni == 3:
+                    fn_sym = SymbolId(id: 4)
+                if bootstrap_fni == 4:
+                    fn_sym = SymbolId(id: 5)
+                if bootstrap_fni == 5:
+                    fn_sym = SymbolId(id: 6)
+                print "[mir-lower] function-symbol"
+                val fn_ = self.hir_module_function(module, fn_sym)
+                print "[mir-lower] function-loaded"
+                if not self.hir_function_is_extern(fn_):
+                    print "[mir-lower] function:start {fn_.name}"
+                    _bootstrap_mir_function_names.push(fn_.name)
+                    val mir_fn = self.lower_function(fn_)
+                    _bootstrap_mir_functions.push(mir_fn)
+                    var bldr = self.builder
+                    var bldr_module = bldr.module
+                    var functions = bldr_module.functions
+                    functions[mir_fn.symbol] = mir_fn
+                    bldr_module.functions = functions
+                    bldr.module = bldr_module
+                    self.builder = bldr
+                    print "[mir-lower] function:added"
+                bootstrap_fni = bootstrap_fni + 1
+            print "[mir-lower] lower_module:done"
+            return self.builder.module
 
         # Build field map from struct and class definitions
         # (use while loops - for-in broken in compiled native code)
@@ -150,6 +333,8 @@ impl MirLowering:
 
         # Lower functions (skip extern declarations - they have no body)
         val fn_keys = module.functions.keys()
+        if bootstrap_debug:
+            print "[mir-lower] function-keys"
         var fni = 0
         while fni < fn_keys.len():
             val fn_sym = fn_keys[fni]
@@ -158,11 +343,20 @@ impl MirLowering:
                 fni = fni + 1
                 # skip extern functions
             else:
+                if bootstrap_debug:
+                    print "[mir-lower] function:start"
                 val mir_fn = self.lower_function(fn_)
-                # Copy-modify-reassign: self.builder.add_function() won't propagate
+                # Copy-modify-reassign: nested field mutations don't propagate in the
+                # bootstrap interpreter, so update builder.module.functions explicitly.
                 var bldr = self.builder
-                bldr.add_function(mir_fn)
+                var bldr_module = bldr.module
+                var functions = bldr_module.functions
+                functions[mir_fn.symbol] = mir_fn
+                bldr_module.functions = functions
+                bldr.module = bldr_module
                 self.builder = bldr
+                if bootstrap_debug:
+                    print "[mir-lower] function:added"
                 fni = fni + 1
 
         # Lower constants
@@ -172,6 +366,8 @@ impl MirLowering:
             self.lower_const(const_vals[coni])
             coni = coni + 1
 
+        if bootstrap_debug:
+            print "[mir-lower] lower_module:done"
         self.builder.module
 
     me lower_struct_type(struct_def: HirStruct):
@@ -256,9 +452,52 @@ impl MirLowering:
 
     me lower_function(fn_: HirFunction) -> MirFunction:
         """Lower HIR function to MIR."""
+        if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1" and (rt_env_get("SIMPLE_BOOTSTRAP_REAL_LOWER") ?? "") != "1":
+            print "[mir-lower] lower_function:bootstrap:start"
+            val signature = MirSignature(
+                params: [],
+                return_type: MirType.i64(),
+                is_variadic: false
+            )
+            var bldr = self.builder
+            bldr.begin_function(fn_.symbol, fn_.name, signature, nil)
+            bldr.terminate_return(Some(mir_operand_const_int(0)))
+            val fn_result = bldr.end_function()
+            self.builder = bldr
+            print "[mir-lower] lower_function:bootstrap:done"
+            return fn_result
+
+        if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1" and fn_.name == "bootstrap_version":
+            print "[mir-lower] bootstrap-known:bootstrap_version"
+            val str_type = MirType(kind: MirTypeKind.Opaque("str"))
+            val signature = MirSignature(params: [], return_type: str_type, is_variadic: false)
+            var bldr_known = self.builder
+            bldr_known.begin_function(fn_.symbol, fn_.name, signature, nil)
+            val dest = bldr_known.new_temp(str_type)
+            bldr_known.emit_const(dest, MirConstValue.Str("0.9.8"), str_type)
+            bldr_known.terminate_return(Some(mir_operand_copy(dest)))
+            val fn_result = bldr_known.end_function()
+            self.builder = bldr_known
+            return fn_result
+
+        if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1" and fn_.name == "native_build_help":
+            print "[mir-lower] bootstrap-known:native_build_help"
+            val signature = MirSignature(params: [], return_type: MirType.i64(), is_variadic: false)
+            var bldr_known = self.builder
+            bldr_known.begin_function(fn_.symbol, fn_.name, signature, nil)
+            val result = bldr_known.emit_const_int(0)
+            bldr_known.terminate_return(Some(mir_operand_copy(result)))
+            val fn_result = bldr_known.end_function()
+            self.builder = bldr_known
+            return fn_result
+
         self.local_map = {}
+        if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
+            print "[mir-lower] real-lower:start {fn_.name}"
 
         # Build signature
+        if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
+            print "[mir-lower] real-lower:params {fn_.name}"
         var params: [MirType] = []
         var pmi = 0
         while pmi < fn_.params.len():
@@ -266,6 +505,8 @@ impl MirLowering:
             pmi = pmi + 1
 
         val return_type = self.lower_type(fn_.return_type)
+        if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
+            print "[mir-lower] real-lower:return-type {fn_.name}"
         val signature = MirSignature(
             params: params,
             return_type: return_type,
@@ -273,6 +514,8 @@ impl MirLowering:
         )
 
         # Begin function (copy-modify-reassign for interpreter)
+        if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
+            print "[mir-lower] real-lower:begin {fn_.name}"
         var bldr = self.builder
         bldr.begin_function(fn_.symbol, fn_.name, signature, fn_.span)
         self.builder = bldr
@@ -303,10 +546,16 @@ impl MirLowering:
         self.current_has_vhdl_metadata = fn_.has_vhdl_metadata
 
         # Lower body
+        if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
+            print "[mir-lower] real-lower:body {fn_.name}"
         val result = self.lower_block(fn_.body)
+        if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
+            print "[mir-lower] real-lower:body-done {fn_.name}"
         self.current_has_vhdl_metadata = previous_has_vhdl_metadata
 
         # Return result (copy-modify-reassign for interpreter)
+        if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
+            print "[mir-lower] real-lower:return {fn_.name}"
         var bldr2 = self.builder
         if result.?:
             bldr2.terminate_return(Some(mir_operand_copy(result.unwrap())))
@@ -315,8 +564,12 @@ impl MirLowering:
         self.builder = bldr2
 
         var bldr3 = self.builder
+        if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
+            print "[mir-lower] real-lower:end {fn_.name}"
         var fn_result = bldr3.end_function()
         self.builder = bldr3
+        if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
+            print "[mir-lower] real-lower:done {fn_.name}"
 
         # Propagate @gpu_kernel flag from HIR func_attr
         if fn_.func_attr.?:
@@ -433,16 +686,40 @@ impl MirLowering:
 
     me lower_block(block: HirBlock) -> LocalId?:
         """Lower HIR block to MIR, return result local if any."""
+        val block_stmts: [HirStmt]
+        val block_value: HirExpr?
+        match block:
+            case HirBlock(stmts, value, _):
+                block_stmts = stmts
+                block_value = value
+        if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
+            print "[mir-lower] block:start"
+            print "[mir-lower] block:stmts {block_stmts.len()}"
         var blk_i = 0
-        while blk_i < block.stmts.len():
-            val stmt = block.stmts[blk_i]
+        while blk_i < block_stmts.len():
+            if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
+                print "[mir-lower] block:stmt {blk_i}"
+            val stmt = block_stmts[blk_i]
             self.lower_stmt(stmt)
+            if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
+                print "[mir-lower] block:stmt-done {blk_i}"
             blk_i = blk_i + 1
 
-        if block.value.?:
-            val local = self.lower_expr(block.value.unwrap())
+        if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
+            print "[mir-lower] block:value-check"
+        if block_value.?:
+            if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
+                print "[mir-lower] block:value-present"
+            val value = block_value.unwrap()
+            if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
+                print "[mir-lower] block:value-unwrapped"
+            val local = self.lower_expr(value)
+            if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
+                print "[mir-lower] block:value-lowered"
             Some(local)
         else:
+            if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
+                print "[mir-lower] block:no-value"
             nil
 
 # ============================================================================

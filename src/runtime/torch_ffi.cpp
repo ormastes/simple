@@ -165,6 +165,73 @@ int64_t rt_torch_tensor_from_data(SplArray* data, SplArray* dims) {
     return store_tensor(std::move(t));
 }
 
+int64_t rt_dyn_torch_tensor_from_bits_1d(const int64_t* data_bits, int64_t data_len) {
+    if (!data_bits || data_len <= 0) {
+        return 0;
+    }
+    std::vector<double> data(static_cast<size_t>(data_len));
+    for (int64_t i = 0; i < data_len; i++) {
+        double value;
+        std::memcpy(&value, &data_bits[i], sizeof(double));
+        data[static_cast<size_t>(i)] = value;
+    }
+    auto t = torch::from_blob(data.data(), {data_len}, torch::kFloat64).clone();
+    return store_tensor(std::move(t));
+}
+
+int64_t rt_dyn_torch_tensor_from_bits_2d(const int64_t* data_bits, int64_t rows, int64_t cols) {
+    if (!data_bits || rows <= 0 || cols <= 0) {
+        return 0;
+    }
+    int64_t data_len = rows * cols;
+    std::vector<double> data(static_cast<size_t>(data_len));
+    for (int64_t i = 0; i < data_len; i++) {
+        double value;
+        std::memcpy(&value, &data_bits[i], sizeof(double));
+        data[static_cast<size_t>(i)] = value;
+    }
+    auto t = torch::from_blob(data.data(), {rows, cols}, torch::kFloat64).clone();
+    return store_tensor(std::move(t));
+}
+
+int64_t rt_dyn_torch_tensor_copy_bits(const int64_t handle, int64_t* out_bits, int64_t out_len) {
+    if (!out_bits || out_len < 0) {
+        return 0;
+    }
+    at::Tensor t = get_tensor(handle).to(torch::kCPU).contiguous().to(torch::kFloat64);
+    if (t.numel() != out_len) {
+        return 0;
+    }
+    const double* data = t.data_ptr<double>();
+    for (int64_t i = 0; i < out_len; i++) {
+        std::memcpy(&out_bits[i], &data[i], sizeof(double));
+    }
+    return 1;
+}
+
+int64_t rt_dyn_torch_tensor_binary_op(int64_t handle, int64_t other, int64_t op) {
+    try {
+        const at::Tensor& left = get_tensor(handle);
+        const at::Tensor& right = get_tensor(other);
+        if (op == 0) {
+            return store_tensor(left + right);
+        }
+        if (op == 1) {
+            return store_tensor(left - right);
+        }
+        if (op == 2) {
+            return store_tensor(left * right);
+        }
+        if (op == 3) {
+            return store_tensor(left / right);
+        }
+        return 0;
+    } catch (const std::exception& e) {
+        safe_eprintln(e.what());
+        return 0;
+    }
+}
+
 int64_t rt_torch_tensor_arange(double start, double end, double step) {
     return store_tensor(torch::arange(start, end, step));
 }
@@ -229,8 +296,16 @@ int64_t rt_torch_torchtensor_add_scalar(int64_t handle, double scalar) {
     return store_tensor(get_tensor(handle) + scalar);
 }
 
+int64_t rt_torch_torchtensor_sub_scalar(int64_t handle, double scalar) {
+    return store_tensor(get_tensor(handle) - scalar);
+}
+
 int64_t rt_torch_torchtensor_mul_scalar(int64_t handle, double scalar) {
     return store_tensor(get_tensor(handle) * scalar);
+}
+
+int64_t rt_torch_torchtensor_div_scalar(int64_t handle, double scalar) {
+    return store_tensor(get_tensor(handle) / scalar);
 }
 
 /* ----------------------------------------------------------------------------
@@ -295,6 +370,15 @@ double rt_torch_torchtensor_det(int64_t handle) {
 
 int64_t rt_torch_torchtensor_inverse(int64_t handle) {
     return store_tensor(at::linalg_inv(get_tensor(handle)));
+}
+
+int64_t rt_torch_torchtensor_linalg_solve(int64_t handle, int64_t rhs) {
+    try {
+        return store_tensor(at::linalg_solve(get_tensor(handle), get_tensor(rhs)));
+    } catch (const std::exception& e) {
+        safe_eprintln(e.what());
+        return 0;
+    }
 }
 
 int64_t rt_torch_torchtensor_svd(int64_t handle) {
@@ -758,8 +842,14 @@ int64_t rt_torch_torchtensor_pow_bits(int64_t handle, int64_t exponent_bits) {
 int64_t rt_torch_torchtensor_add_scalar_bits(int64_t handle, int64_t scalar_bits) {
     return rt_torch_torchtensor_add_scalar(handle, bits_to_f64(scalar_bits));
 }
+int64_t rt_torch_torchtensor_sub_scalar_bits(int64_t handle, int64_t scalar_bits) {
+    return rt_torch_torchtensor_sub_scalar(handle, bits_to_f64(scalar_bits));
+}
 int64_t rt_torch_torchtensor_mul_scalar_bits(int64_t handle, int64_t scalar_bits) {
     return rt_torch_torchtensor_mul_scalar(handle, bits_to_f64(scalar_bits));
+}
+int64_t rt_torch_torchtensor_div_scalar_bits(int64_t handle, int64_t scalar_bits) {
+    return rt_torch_torchtensor_div_scalar(handle, bits_to_f64(scalar_bits));
 }
 
 /* --- f64-input activations --- */

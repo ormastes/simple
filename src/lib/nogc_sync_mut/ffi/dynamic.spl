@@ -48,6 +48,9 @@ impl DynLib:
         else:
             DynLib(handle: h, path: path)
 
+    static fn open(path: text) -> DynLib:
+        DynLib(handle: spl_dlopen(path), path: path)
+
     # Look up a symbol by name. Returns 0 if not found.
     fn sym(name: text) -> i64:
         spl_dlsym(self.handle, name)
@@ -126,14 +129,12 @@ impl DynLoader:
         if self.libs.contains(path):
             true
         else:
-            val result = DynLib.load(path)
-            if result.?:
-                val lib = result.unwrap()
-                self.libs[path] = lib
-                _dyn_loader_libs[path] = lib
-                true
-            else:
-                false
+            val lib = DynLib.open(path)
+            if lib.handle == 0:
+                return false
+            self.libs[path] = lib
+            _dyn_loader_libs[path] = lib
+            true
 
     # Return the loaded DynLib for path, or nil.
     fn get_lib(path: text) -> DynLib?:
@@ -144,53 +145,38 @@ impl DynLoader:
 
     # Call with 0 arguments, loading the library if needed.
     me call0(path: text, func: text) -> i64:
-        self.ensure_loaded(path)
-        val maybe = self.get_lib(path)
-        if maybe.?:
-            val lib = maybe.unwrap()
-            lib.call0(func)
-        else:
-            0
+        if not self.ensure_loaded(path):
+            return 0
+        val lib = self.libs[path]
+        lib.call0(func)
 
     # Call with 1 argument.
     me call1(path: text, func: text, a0: i64) -> i64:
-        self.ensure_loaded(path)
-        val maybe = self.get_lib(path)
-        if maybe.?:
-            val lib = maybe.unwrap()
-            lib.call1(func, a0)
-        else:
-            0
+        if not self.ensure_loaded(path):
+            return 0
+        val lib = self.libs[path]
+        lib.call1(func, a0)
 
     # Call with 2 arguments.
     me call2(path: text, func: text, a0: i64, a1: i64) -> i64:
-        self.ensure_loaded(path)
-        val maybe = self.get_lib(path)
-        if maybe.?:
-            val lib = maybe.unwrap()
-            lib.call2(func, a0, a1)
-        else:
-            0
+        if not self.ensure_loaded(path):
+            return 0
+        val lib = self.libs[path]
+        lib.call2(func, a0, a1)
 
     # Call with 3 arguments.
     me call3(path: text, func: text, a0: i64, a1: i64, a2: i64) -> i64:
-        self.ensure_loaded(path)
-        val maybe = self.get_lib(path)
-        if maybe.?:
-            val lib = maybe.unwrap()
-            lib.call3(func, a0, a1, a2)
-        else:
-            0
+        if not self.ensure_loaded(path):
+            return 0
+        val lib = self.libs[path]
+        lib.call3(func, a0, a1, a2)
 
     # General dispatch with pre-built args array.
     me call(path: text, func: text, args: [i64]) -> i64:
-        self.ensure_loaded(path)
-        val maybe = self.get_lib(path)
-        if maybe.?:
-            val lib = maybe.unwrap()
-            lib.call_n(func, args)
-        else:
-            0
+        if not self.ensure_loaded(path):
+            return 0
+        val lib = self.libs[path]
+        lib.call_n(func, args)
 
 # ============================================================================
 # Convention helpers
@@ -200,7 +186,7 @@ impl DynLoader:
 # Reads SIMPLE_SFFI_PATH env var; defaults to "build" if empty.
 # On Windows (OS == "Windows_NT") uses .dll extension, otherwise .so.
 fn sffi_lib_path(prefix: text) -> text:
-    var base = rt_env_get("SIMPLE_SFFI_PATH")
+    var base = rt_env_get("SIMPLE_SFFI_PATH") ?? ""
     if base == "":
         base = "build"
     val os = rt_env_get("OS")
@@ -221,4 +207,3 @@ fn sffi_call(func_name: text, args: [i64]) -> i64:
     val lib_path = sffi_lib_path(prefix)
     var loader = DynLoader.instance()
     loader.call(lib_path, func_name, args)
-

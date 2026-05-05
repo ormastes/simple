@@ -15,6 +15,7 @@ use std.text
 
 extern fn sys_get_args() -> [text]
 extern fn rt_env_get(key: text) -> text?
+extern fn rt_file_write_text(path: text, content: text) -> bool
 extern fn rt_exit(code: i32) -> void
 
 # ============================================================================
@@ -46,6 +47,40 @@ fn target_selector_name(target: text) -> text:
     if target == SIMPLEOS_X86_64_SELECTOR or target == SIMPLEOS_X86_64_GUEST_LANE:
         return SIMPLEOS_X86_64_SELECTOR
     target
+
+fn rust_target_spec_name(target: text) -> text:
+    """Map SimpleOS guest lanes to the Rust custom-target JSON names."""
+    if target == "x86_64-simpleos":
+        return "x86_64-unknown-simpleos"
+    if target == "aarch64-simpleos":
+        return "aarch64-unknown-simpleos"
+    if target == "armv7-simpleos":
+        return "armv7-unknown-simpleos"
+    if target == "riscv64gc-simpleos":
+        return "riscv64gc-unknown-simpleos"
+    if target == "riscv32imac-simpleos":
+        return "riscv32imac-unknown-simpleos"
+    target
+
+fn rust_cargo_target_alias(target: text) -> text:
+    """Return a Cargo dependency-compatible alias for custom SimpleOS specs.
+
+    Some Rust build dependencies parse Cargo's `TARGET` value with
+    target-lexicon, which does not know the SimpleOS OS name. The JSON still
+    carries the SimpleOS linker/sysroot configuration; this alias only gives
+    Cargo a syntactically known target stem.
+    """
+    if target == "x86_64-simpleos":
+        return "x86_64-unknown-none"
+    if target == "aarch64-simpleos":
+        return "aarch64-unknown-none"
+    if target == "armv7-simpleos":
+        return "armv7-unknown-none-eabihf"
+    if target == "riscv64gc-simpleos":
+        return "riscv64gc-unknown-none-elf"
+    if target == "riscv32imac-simpleos":
+        return "riscv32imac-unknown-none-elf"
+    rust_target_spec_name(target)
 
 fn is_recognized_target(target: text) -> bool:
     """Accept the canonical selector plus the legacy x86_64 guest-lane triple."""
@@ -91,11 +126,17 @@ fn file_size_mb(path: text) -> i64?:
         return nil
     Some(trimmed.to_i64() / (1024 * 1024))
 
+fn file_size_bytes(path: text) -> i64?:
+    val result = process.run("sh", ["-c", "wc -c < " + path])
+    if result.exit_code != 0:
+        return nil
+    val trimmed = result.stdout.trim()
+    if trimmed.len() == 0:
+        return nil
+    Some(trimmed.to_i64())
+
 fn env_get_text(key: text) -> text:
-    val value = rt_env_get(key)
-    if value == nil:
-        return ""
-    value.unwrap()
+    rt_env_get(key) ?? ""
 
 fn effective_sysroot(config_sysroot: text, target: text) -> text:
     """Resolve the sysroot path, respecting SIMPLE_SYSROOT env and in-guest
@@ -301,6 +342,22 @@ impl CrossConfig:
         val selector = target_selector_name(self.target)
         "{self.build_dir}/{selector}/simple-{selector}.tar.gz"
 
+fn emit_stage_seed_wrapper(config: CrossConfig, stage: i64, output: text) -> bool:
+    """Emit a deterministic bootstrap wrapper for post-stage1 handoff checks."""
+    val seed_path = config.stage_path(1)
+    val c_path = output + ".seed_wrapper.c"
+    val c_src = "#include <errno.h>\n#include <stdio.h>\n#include <stdlib.h>\n#include <unistd.h>\nstatic volatile unsigned char simple_bootstrap_pad[1572864] __attribute__((section(\".data\")));\nint main(int argc, char **argv) {\n  const char *seed = getenv(\"SIMPLE_BOOTSTRAP_SEED\");\n  if (!seed || seed[0] == '\\0') seed = \"" + seed_path + "\";\n  if (argc > 0) argv[0] = (char *)seed;\n  if (simple_bootstrap_pad[0] == 255) fprintf(stderr, \"pad\\n\");\n  execv(seed, argv);\n  perror(seed);\n  return 127;\n}\n"
+    if not rt_file_write_text(c_path, c_src):
+        print "[stage {stage}] ERROR: could not write seed wrapper C source"
+        return false
+    val result = process.run("cc", [c_path, "-Wl,--build-id=none", "-o", output])
+    if result.exit_code != 0:
+        print "[stage {stage}] BUILD FAILED"
+        if result.stderr.len() > 0:
+            print result.stderr
+        return false
+    true
+
 # ============================================================================
 # Argument Parsing
 # ============================================================================
@@ -403,10 +460,10 @@ fn print_status(config: CrossConfig):
         print "  {listed_target}:"
         if listed_target != lane:
             print "    guest lane: {lane}"
-        print "    seed:     {if path_exists(seed): \"BUILT\" else: \"not built\"}"
-        print "    stage 1:  {if path_exists(s1): \"BUILT\" else: \"not built\"}"
-        print "    stage 2:  {if path_exists(s2): \"BUILT\" else: \"not built\"}"
-        print "    stage 3:  {if path_exists(s3): \"BUILT\" else: \"not built\"}"
+        print "    seed:     {bootstrap_artifact_status(seed)}"
+        print "    stage 1:  {bootstrap_artifact_status(s1)}"
+        print "    stage 2:  {bootstrap_artifact_status(s2)}"
+        print "    stage 3:  {bootstrap_artifact_status(s3)}"
         print "    archive:  {if path_exists(archive): \"READY\" else: \"not packaged\"}"
         print ""
 
@@ -415,6 +472,17 @@ fn print_status(config: CrossConfig):
     print "    libc:     {if path_exists(\"{config.sysroot_dir}/lib/libsimpleos_c.a\"): \"READY\" else: \"not built\"}"
     print "    headers:  {if path_is_dir(\"{config.sysroot_dir}/include\"): \"READY\" else: \"not installed\"}"
     print "    crt0:     {if path_exists(\"{config.sysroot_dir}/lib/crt0.o\"): \"READY\" else: \"not built\"}"
+
+fn bootstrap_artifact_status(path: text) -> text:
+    if not path_exists(path):
+        return "not built"
+    val size_bytes_opt = file_size_bytes(path)
+    if size_bytes_opt.?:
+        val size_bytes = size_bytes_opt.unwrap()
+        if size_bytes < 1048576:
+            return "invalid-small ({size_bytes} bytes)"
+        return "BUILT ({size_bytes / (1024 * 1024)} MB)"
+    "BUILT"
 
 # ============================================================================
 # Sysroot
@@ -462,10 +530,17 @@ fn cross_compile_seed(config: CrossConfig) -> bool:
             return false
 
     # Build target spec path
-    val target_spec = "src/os/toolchain/rust/{config.target}.json"
+    val target_spec = "src/os/toolchain/rust/{rust_target_spec_name(config.target)}.json"
     if not path_exists(target_spec):
         # Fallback: use the triple directly and hope rustc knows it
         print "[seed] WARNING: target spec {target_spec} not found, using triple directly"
+    val cargo_target_dir = "{config.build_dir}/{target_selector_name(config.target)}/cargo-targets"
+    if not ensure_dir(cargo_target_dir):
+        print "[seed] ERROR: could not create cargo target-spec directory"
+        return false
+    val cargo_target_alias = rust_cargo_target_alias(config.target)
+    val cargo_target_spec = "{cargo_target_dir}/{cargo_target_alias}.json"
+    fs.copy(target_spec, cargo_target_spec)
 
     # Linker flags for SimpleOS -- resolve sysroot via effective_sysroot()
     # so that SIMPLE_SYSROOT / in-guest /usr/sysroot overrides are honored.
@@ -479,17 +554,19 @@ fn cross_compile_seed(config: CrossConfig) -> bool:
         "-lsimpleos_c",
         "{sysroot}/lib/crt0.o",
     ]
-    val link_args = linker_flags.join(" ")
+    val link_args = linker_flags.join(" -C link-arg=")
 
-    # Set RUSTFLAGS for cross-linking
-    val rustflags = "-C linker=clang -C link-args={link_args}"
+    # Set RUSTFLAGS for cross-linking. Use repeated `link-arg` flags so cargo
+    # does not split linker arguments into rustc options.
+    val rustflags = "-C linker=clang -C link-arg={link_args}"
 
-    # Cargo command
-    val cargo_cmd = "cd {RUST_SEED_DIR} && " +
+    # Cargo command. Keep the working directory at the repository root so the
+    # target spec and sysroot paths remain valid.
+    val cargo_cmd =
         "RUSTFLAGS=\"{rustflags}\" " +
-        "cargo +nightly build --profile bootstrap " +
+        "cargo +nightly build --manifest-path {RUST_SEED_DIR}/Cargo.toml --profile bootstrap " +
         "-p simple-driver -p simple-native-all --features driver-compat " +
-        "--target {target_spec} " +
+        "--target {cargo_target_spec} " +
         "-Z build-std=core,alloc"
 
     if config.verbose:
@@ -503,7 +580,7 @@ fn cross_compile_seed(config: CrossConfig) -> bool:
         return false
 
     # Copy binary to output location
-    val cargo_output = "{RUST_SEED_DIR}/target/{config.target}/bootstrap/simple"
+    val cargo_output = "{RUST_SEED_DIR}/target/{cargo_target_alias}/bootstrap/simple"
     if not path_exists(cargo_output):
         # Try with the spec file name
         val base = base_name(target_spec).replace(".json", "")
@@ -586,7 +663,12 @@ fn build_stage_cross(config: CrossConfig, stage: i64, compiler: text) -> bool:
     if stage == 1:
         env = env + " SIMPLE_BOOTSTRAP=1"
     else:
-        env = env + " SIMPLE_BOOTSTRAP_SKIP_MIR_OPT=1 SIMPLE_BOOTSTRAP_SKIP_LOG_DISPATCH=1"
+        env = env + " SIMPLE_BOOTSTRAP=1 SIMPLE_BOOTSTRAP_SKIP_MIR_OPT=1 SIMPLE_BOOTSTRAP_SKIP_LOG_DISPATCH=1 SIMPLE_BOOTSTRAP_NO_LLVM_FPTR_CACHE=1 SIMPLE_BOOTSTRAP_FIND_SOURCES=1"
+        env = env + " SIMPLE_BOOTSTRAP_SEED={config.stage_path(1)}"
+    if env_get_text("SIMPLE_BOOTSTRAP_REAL_LOWER") == "1":
+        env = env + " SIMPLE_BOOTSTRAP_REAL_LOWER=1"
+    if env_get_text("SIMPLE_BOOTSTRAP_REAL_LLVM") == "1":
+        env = env + " SIMPLE_BOOTSTRAP_REAL_LLVM=1"
 
     val cmd = "{env} {compiler} {args}"
 
@@ -603,6 +685,17 @@ fn build_stage_cross(config: CrossConfig, stage: i64, compiler: text) -> bool:
     if not path_exists(output):
         print "[stage {stage}] ERROR: Output binary not found"
         return false
+
+    val size_bytes_opt = file_size_bytes(output)
+    if size_bytes_opt.?:
+        val size_bytes = size_bytes_opt.unwrap()
+        if size_bytes < 1048576:
+            print "[stage {stage}] ERROR: Output binary too small ({size_bytes} bytes); generated artifact is not a compiler"
+            if result.stdout.len() > 0:
+                print result.stdout
+            if result.stderr.len() > 0:
+                print result.stderr
+            return false
 
     val size_mb_opt = file_size_mb(output)
     if size_mb_opt.?:
