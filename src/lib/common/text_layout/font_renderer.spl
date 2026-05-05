@@ -1,5 +1,7 @@
 #![allow(unnamed_duplicate_typed_args)]
 use std.nogc_sync_mut.ffi.spl_fonts.{FontRasterizer, GlyphBitmap, LayoutGlyph, SubpixelGlyphBitmap}
+use std.nogc_sync_mut.ffi.io.{file_exists}
+use std.nogc_sync_mut.ffi.system.{process_run_timeout}
 
 # Shared Font Renderer — unified text rendering for both OS and browser
 #
@@ -24,6 +26,119 @@ enum FontBackend:
     TrueType
     Vector
     Bitmap
+
+fn browser_font_dylib_candidates() -> [text]:
+    [
+        "src/compiler_rust/target/release/libspl_fonts.so",
+        "src/compiler_rust/target/debug/libspl_fonts.so"
+    ]
+
+fn browser_serif_font_candidates() -> [text]:
+    [
+        "examples/simple_os/fonts/serif/NotoSerif-Regular.ttf",
+        "examples/simple_os/fonts/serif/NotoSerifSC-Regular.otf",
+        "/usr/share/fonts/truetype/liberation/LiberationSerif-Regular.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSerif.ttf",
+        "/usr/share/fonts/opentype/urw-base35/NimbusRoman-Regular.otf"
+    ]
+
+fn browser_provided_font_paths() -> [text]:
+    [
+        "examples/simple_os/fonts/sans/NotoSans-Regular.ttf",
+        "examples/simple_os/fonts/serif/NotoSerif-Regular.ttf",
+        "examples/simple_os/fonts/mono/FiraCodeNerdFontMono-Regular.ttf"
+    ]
+
+fn browser_font_download_script_path() -> text:
+    "examples/simple_os/fonts/download_fonts.shs"
+
+class BrowserFontMaterializeResult:
+    ok: bool
+    attempted_download: bool
+    status: text
+    stdout: text
+    stderr: text
+    exit_code: i32
+
+fn _browser_font_materialize_result(ok: bool, attempted_download: bool, status: text, stdout: text, stderr: text, exit_code: i32) -> BrowserFontMaterializeResult:
+    BrowserFontMaterializeResult(
+        ok: ok,
+        attempted_download: attempted_download,
+        status: status,
+        stdout: stdout,
+        stderr: stderr,
+        exit_code: exit_code
+    )
+
+fn browser_provided_fonts_available() -> bool:
+    for path in browser_provided_font_paths():
+        if not file_exists(path):
+            return false
+    true
+
+fn ensure_browser_provided_fonts(auto_download: bool, timeout_ms: i64) -> BrowserFontMaterializeResult:
+    if browser_provided_fonts_available():
+        return _browser_font_materialize_result(true, false, "available", "", "", 0)
+    if not auto_download:
+        return _browser_font_materialize_result(false, false, "missing", "", "", 0)
+    val script = browser_font_download_script_path()
+    if not file_exists(script):
+        return _browser_font_materialize_result(false, false, "missing_download_script", "", "", 0)
+    val (stdout, stderr, exit_code) = process_run_timeout("sh", [script], timeout_ms)
+    if exit_code != 0:
+        return _browser_font_materialize_result(false, true, "download_failed", stdout, stderr, exit_code)
+    if browser_provided_fonts_available():
+        return _browser_font_materialize_result(true, true, "downloaded", stdout, stderr, exit_code)
+    _browser_font_materialize_result(false, true, "download_incomplete", stdout, stderr, exit_code)
+
+fn browser_font_face_source_urls(css: text) -> [text]:
+    var urls: [text] = []
+    val lower = css.to_lower()
+    var search_start = 0
+    while true:
+        val at_idx_rel = lower.substring(search_start).index_of("@font-face")
+        if at_idx_rel < 0:
+            break
+        val at_idx = search_start + at_idx_rel
+        val open_rel = lower.substring(at_idx).index_of("{")
+        if open_rel < 0:
+            break
+        val open_idx = at_idx + open_rel
+        val close_rel = lower.substring(open_idx + 1).index_of("}")
+        if close_rel < 0:
+            break
+        val close_idx = open_idx + 1 + close_rel
+        val block = css.substring(open_idx + 1, close_idx)
+        urls = urls + _browser_font_face_urls_in_block(block)
+        search_start = close_idx + 1
+    urls
+
+fn _browser_font_face_urls_in_block(block: text) -> [text]:
+    var urls: [text] = []
+    val lower = block.to_lower()
+    var search_start = 0
+    while true:
+        val url_rel = lower.substring(search_start).index_of("url(")
+        if url_rel < 0:
+            break
+        val start = search_start + url_rel + 4
+        val end_rel = block.substring(start).index_of(")")
+        if end_rel < 0:
+            break
+        val raw = block.substring(start, start + end_rel).trim()
+        val cleaned = _strip_font_url_quotes(raw)
+        if cleaned != "":
+            urls.push(cleaned)
+        search_start = start + end_rel + 1
+    urls
+
+fn _strip_font_url_quotes(raw: text) -> text:
+    if raw.len() >= 2:
+        val first = raw.substring(0, 1)
+        val last = raw.substring(raw.len() - 1, raw.len())
+        if (first == "\"" and last == "\"") or (first == "'" and last == "'"):
+            return raw.substring(1, raw.len() - 1)
+    raw
 
 # ============================================================================
 # Glyph Cache Entry
@@ -94,6 +209,11 @@ class FontRenderer:
             ttf_rasterizer: nil
         )
 
+    static fn browser_serif_default() -> FontRenderer:
+        var renderer = FontRenderer.new()
+        renderer.try_enable_browser_serif_default()
+        renderer
+
     fn has_ttf() -> bool:
         self.ttf_handle != 0
 
@@ -111,6 +231,13 @@ class FontRenderer:
         if r != nil:
             self.ttf_rasterizer = r
             return true
+        false
+
+    me try_enable_browser_serif_default() -> bool:
+        for dylib_path in browser_font_dylib_candidates():
+            for font_path in browser_serif_font_candidates():
+                if self.try_enable_ttf(dylib_path, font_path):
+                    return true
         false
 
     fn has_sffi_ttf() -> bool:

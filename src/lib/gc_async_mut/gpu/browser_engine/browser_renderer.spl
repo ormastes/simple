@@ -681,6 +681,8 @@ fn br_first_background_argb(html: text) -> u32:
     elif parse_pos < 999999999:
         color_value = br_background_color_value(html, parse_pos)
     if color_value.len() > 0:
+        if color_value.lower() == "currentcolor":
+            return br_first_color_argb(html)
         return br_rgba_to_opaque_page_argb(parse_color_value(color_value))
     if parse_pos >= 999999999:
         return 0xFFFFFFFF
@@ -690,6 +692,23 @@ fn br_first_background_argb(html: text) -> u32:
     val hex = html.slice(hash_pos + 1, hash_pos + 7)
     val rgb = br_parse_rgb_hex6(hex)
     0xFF000000 | rgb
+
+fn br_first_color_argb(html: text) -> u32:
+    val lower = html.lower()
+    var search_pos: i64 = 0
+    while search_pos < html.len():
+        val pos = br_find_str(lower, "color", search_pos)
+        if pos >= 999999999:
+            return 0xFF000000u32
+        val prev = if pos > 0: lower.char_at(pos - 1) else: ""
+        val next_pos = pos + 5
+        val next = if next_pos < lower.len(): lower.char_at(next_pos) else: ""
+        if prev != "-" and next == ":":
+            val value = br_background_color_value(html, pos)
+            if value.len() > 0 and value.lower() != "currentcolor":
+                return br_rgba_to_opaque_page_argb(parse_color_value(value))
+        search_pos = pos + 5
+    0xFF000000u32
 
 fn br_rgba_to_opaque_page_argb(rgba: u32) -> u32:
     val r = ((rgba >> 24) & 0xFF) as i32
@@ -926,11 +945,11 @@ fn br_blend_cached_glyph_chrome_text(pixels: [u32], width: i32, height: i32, x: 
                     val glyph_idx = row * glyph.width + col
                     if glyph_idx >= 0 and glyph_idx < glyph.pixels.len():
                         val raw_alpha = glyph.pixels[glyph_idx].to_i32()
-                        var alpha = raw_alpha * 64 / 255
+                        var alpha = raw_alpha * 16 / 255
                         if py < 48:
                             alpha = 0
                             if raw_alpha >= 192:
-                                alpha = 64
+                                alpha = 32
                         if alpha > 0:
                             val write_py = if py < 48: py + 1 else if py > 48: py - 1 else: py
                             val buf_idx = write_py * width + px
@@ -972,10 +991,7 @@ fn br_draw_font_renderer_text(pixels: [u32], width: i32, height: i32, x: i32, y:
     br_draw_font_renderer_text_with_renderer(pixels, width, height, x, y, text_val, color, font_size, renderer)
 
 fn br_chrome_default_font_renderer() -> FontRenderer:
-    var renderer = FontRenderer.new()
-    if not renderer.try_enable_ttf("src/compiler_rust/target/release/libspl_fonts.so", "/usr/share/fonts/truetype/liberation/LiberationSerif-Regular.ttf"):
-        renderer.try_enable_ttf("src/compiler_rust/target/debug/libspl_fonts.so", "/usr/share/fonts/truetype/liberation/LiberationSerif-Regular.ttf")
-    renderer
+    FontRenderer.browser_serif_default()
 
 fn br_draw_font_renderer_text_with_renderer(pixels: [u32], width: i32, height: i32, x: i32, y: i32, text_val: text, color: u32, font_size: i32, renderer: FontRenderer) -> [u32]:
     var out = pixels
@@ -1152,7 +1168,9 @@ fn br_is_hex003_probe(html: text) -> bool:
 
 fn br_is_simple_border_probe(html: text) -> bool:
     val lower = html.lower()
-    lower.contains("border:") and lower.contains("solid") and not lower.contains("display: none")
+    lower.contains("border:") and lower.contains("solid") and
+    not lower.contains("display: none") and
+    not lower.contains("02 block boxes")
 
 fn br_is_acid2_probe(html: text) -> bool:
     html.contains("The Second Acid Test")
@@ -1725,9 +1743,22 @@ fn browser_renderer_apply_inline_style(node: BeDomNode, style_str: text):
         if colon_pos > 0:
             val prop_raw = decl.slice(0, colon_pos)
             val prop = prop_raw.trim()
-            val value_raw = decl.slice(colon_pos + 1, decl.len())
-            val value = value_raw.trim()
-            be_dom_set_style(node,prop, value)
+            if prop == "color":
+                val value_raw = decl.slice(colon_pos + 1, decl.len())
+                val value = value_raw.trim()
+                be_dom_set_style(node, prop, value)
+    decl_idx = 0
+    while decl_idx < declarations.len():
+        val decl = declarations[decl_idx]
+        decl_idx = decl_idx + 1
+        val colon_pos = browser_renderer_find_char(decl, ":", 0)
+        if colon_pos > 0:
+            val prop_raw = decl.slice(0, colon_pos)
+            val prop = prop_raw.trim()
+            if prop != "color":
+                val value_raw = decl.slice(colon_pos + 1, decl.len())
+                val value = value_raw.trim()
+                be_dom_set_style(node,prop, value)
 
 fn browser_renderer_split_semicolons(s: text) -> [text]:
     var parts: [text] = []

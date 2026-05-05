@@ -1,0 +1,66 @@
+use std.spec.{describe, it, expect}
+use common.text_layout.font_renderer.{
+    FontRenderer, browser_font_download_script_path, browser_provided_font_paths,
+    browser_serif_font_candidates, ensure_browser_provided_fonts}
+
+fn _count_nonzero_alpha(pixels: [u8]) -> i32:
+    var count = 0
+    for alpha in pixels:
+        if alpha.to_i32() > 0:
+            count = count + 1
+    count
+
+fn _count_full_alpha(pixels: [u8]) -> i32:
+    var count = 0
+    for alpha in pixels:
+        if alpha.to_i32() == 255:
+            count = count + 1
+    count
+
+fn _count_partial_alpha(pixels: [u8]) -> i32:
+    var count = 0
+    for alpha in pixels:
+        val a = alpha.to_i32()
+        if a > 0 and a < 255:
+            count = count + 1
+    count
+
+describe "shared font renderer fallbacks":
+    it "renders vector glyph coverage with antialiasing evidence":
+        var renderer = FontRenderer.new()
+        renderer.use_bitmap = false
+
+        val glyph = renderer.get_glyph(65, 24)
+
+        expect glyph.width > 0
+        expect glyph.height == 24
+        expect _count_nonzero_alpha(glyph.pixels) > 0
+        expect _count_partial_alpha(glyph.pixels) > 0
+
+    it "renders bitmap glyph fallback with exact mask evidence":
+        var renderer = FontRenderer.new()
+        renderer.use_vector = false
+
+        val glyph = renderer.get_glyph(65, 16)
+
+        expect glyph.width == 8
+        expect glyph.height == 16
+        expect _count_nonzero_alpha(glyph.pixels) > 0
+        expect _count_full_alpha(glyph.pixels) > 0
+
+    it "keeps provided browser serif font candidates ahead of host fallbacks":
+        val candidates = browser_serif_font_candidates()
+        expect candidates[0] == "examples/simple_os/fonts/serif/NotoSerif-Regular.ttf"
+        expect candidates[1] == "examples/simple_os/fonts/serif/NotoSerifSC-Regular.otf"
+        expect candidates[2] == "/usr/share/fonts/truetype/liberation/LiberationSerif-Regular.ttf"
+
+    it "exposes an opt-in browser default font materialization surface":
+        val provided = browser_provided_font_paths()
+        expect (provided).contains("examples/simple_os/fonts/sans/NotoSans-Regular.ttf")
+        expect (provided).contains("examples/simple_os/fonts/serif/NotoSerif-Regular.ttf")
+        expect (provided).contains("examples/simple_os/fonts/mono/FiraCodeNerdFontMono-Regular.ttf")
+        expect browser_font_download_script_path() == "examples/simple_os/fonts/download_fonts.shs"
+
+        val result = ensure_browser_provided_fonts(false, 1)
+        expect result.attempted_download == false
+        expect result.status == "available" or result.status == "missing" == true

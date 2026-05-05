@@ -22,6 +22,7 @@ struct SiteCorpusCompatOpts:
     limit: i32
     update_baseline: bool
     skip_simple: bool
+    skip_simple_watchdog: bool
     simple_timeout_ms: i64
     width: i32
     height: i32
@@ -49,7 +50,8 @@ fn default_site_corpus_compat_opts() -> SiteCorpusCompatOpts:
         limit: 0,
         update_baseline: false,
         skip_simple: false,
-        simple_timeout_ms: 20000,
+        skip_simple_watchdog: false,
+        simple_timeout_ms: 60000,
         width: 160,
         height: 120,
         continue_on_fail: false,
@@ -72,6 +74,8 @@ fn parse_site_corpus_compat_opts(args: [text]) -> SiteCorpusCompatOpts:
             opts.update_baseline = true
         elif arg == "--skip-simple":
             opts.skip_simple = true
+        elif arg == "--skip-simple-watchdog":
+            opts.skip_simple_watchdog = true
         elif arg == "--continue-on-fail":
             opts.continue_on_fail = true
         elif arg == "--stale-only":
@@ -113,9 +117,10 @@ fn print_site_corpus_compat_help():
     print "  --limit=<n>              Stop after n selected samples (0 means all)"
     print "  --update-baseline        Capture Chrome and overwrite chrome.ppm"
     print "  --skip-simple            With --update-baseline, regenerate Chrome only"
+    print "  --skip-simple-watchdog   Regenerate artifacts without child render guard"
     print "  --continue-on-fail       Write reports for every selected sample"
     print "  --stale-only             Run only report.sdn files above 10000 differing pixels"
-    print "  --simple-timeout-ms=<n>  Bound Simple source-B render (default 20000)"
+    print "  --simple-timeout-ms=<n>  Bound Simple source-B render (default 60000)"
     print "  --width=<n>              Capture width (default 160)"
     print "  --height=<n>             Capture height (default 120)"
     print "  -h, --help               Show this help"
@@ -132,6 +137,39 @@ fn _capture_chrome_for_sample(sample: SiteSample, opts: SiteCorpusCompatOpts) ->
         return chrome
     load_ppm_capture(famous_site_sample_chrome_ppm_path(sample.id), "famous_site_chromium_golden", opts.width, opts.height)
 
+extern fn rt_process_run_timeout(cmd: text, args: [text], timeout_ms: i64) -> (text, text, i32)
+
+fn _simple_watchdog_html_path(sample_id: text) -> text:
+    "/tmp/simple_site_corpus_watchdog_{sample_id}.html"
+
+fn _simple_watchdog_ppm_path(sample_id: text) -> text:
+    "/tmp/simple_site_corpus_watchdog_{sample_id}.ppm"
+
+fn _run_simple_child_watchdog(sample: SiteSample, opts: SiteCorpusCompatOpts) -> text:
+    val html_path = _simple_watchdog_html_path(sample.id)
+    val ppm_path = _simple_watchdog_ppm_path(sample.id)
+    if not file_write_text(html_path, sample.html):
+        return "failed to write child input html: {html_path}"
+    val args = [
+        "run",
+        "src/app/wm_compare/simple_html_capture_worker.spl",
+        "--html=" + html_path,
+        "--out=" + ppm_path,
+        "--width=" + opts.width.to_string(),
+        "--height=" + opts.height.to_string()
+    ]
+    val (stdout, stderr, exit_code) = rt_process_run_timeout("bin/simple", args, opts.simple_timeout_ms)
+    if exit_code == -1:
+        return "timed out after {opts.simple_timeout_ms} ms while rendering source B in child process"
+    if exit_code != 0:
+        var detail = stderr
+        if detail == "":
+            detail = stdout
+        if detail == "":
+            detail = "exit_code={exit_code}"
+        return "child render failed: {detail}"
+    ""
+
 fn _capture_simple_for_sample(sample: SiteSample, opts: SiteCorpusCompatOpts) -> CaptureResult:
     if opts.skip_simple:
         return CaptureResult(
@@ -142,6 +180,17 @@ fn _capture_simple_for_sample(sample: SiteSample, opts: SiteCorpusCompatOpts) ->
             success: false,
             error: "skipped via --skip-simple"
         )
+    if not opts.skip_simple_watchdog:
+        val watchdog_error = _run_simple_child_watchdog(sample, opts)
+        if watchdog_error != "":
+            return CaptureResult(
+                pixels: [],
+                width: opts.width,
+                height: opts.height,
+                backend_name: "simple_browser_engine",
+                success: false,
+                error: watchdog_error
+            )
     val pixels = simple_web_render_html_to_pixels(sample.html, opts.width, opts.height)
     if pixels.len() != opts.width * opts.height:
         return CaptureResult(

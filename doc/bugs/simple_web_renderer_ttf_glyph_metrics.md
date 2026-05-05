@@ -1,6 +1,6 @@
 # Simple Web Renderer TTF Glyph Metrics Gap
 
-Date: 2026-05-05
+Date: 2026-05-06
 
 ## Summary
 
@@ -8,6 +8,55 @@ The famous-site corpus comparison now wraps the `site_0_google` text with
 browser-like word boundaries, but bitwise parity remains divergent because the
 Simple Web Renderer does not place and blend TTF glyphs with Chrome-compatible
 metrics.
+
+## Current Status
+
+The latest full 132-sample refresh is fresh but still completely divergent:
+`reportCount: 132`, `exact: 0`, `accepted: 0`, `divergent: 132`,
+`staleSuspectCount: 0`, and `staleReportCount: 0`.
+
+Current exact-ranking evidence from
+`tools/electron-shell/summarize_famous_site_corpus_reports.js --limit=5`:
+
+- Worst: `site_44_the_new_york_times` at `3334` differing pixels.
+- Next worst samples: `site_6_wikipedia` `3199`,
+  `site_37_soundcloud` `3194`, `site_60_tripadvisor` `3180`, and
+  `site_104_kaggle` `3175`.
+- Best: `site_4_x` at `2109` differing pixels.
+
+Current focused text/compositing evidence:
+
+- `site_0_google` remains text-dominated at `2495` differing pixels. The
+  analyzer reports `5444` Chrome chromatic non-white pixels versus `685`
+  Simple gray non-white text pixels, absolute RGB channel deltas
+  `{r: 122024, g: 154752, b: 229238}`, and signed expected-minus-actual deltas
+  `{r: 118010, g: 150230, b: 222244}`.
+- The `site_0_google` region split is `1374` differing pixels inside the div
+  box and `1126` in overflow text, with no below-overflow differences.
+- Current `site_0_google` overflow coverage is `963` expected non-white pixels
+  versus `685` actual (`actualPct10000: 7113`).
+- A direct default-font substitution to
+  `/usr/share/fonts/opentype/urw-base35/NimbusRoman-Regular.otf` worsened
+  `site_0_google` from `2495` to `2631` differing pixels, so it was rejected and
+  the renderer stayed on Liberation Serif, which is this host's
+  `fc-match 'Times New Roman'` result.
+- A current full-corpus postprocess sweep rejects scalar/channel darkening,
+  naive expansion, and one-pixel geometry shifts as completion paths: the best
+  exact-count scalar candidate only improves total corpus diffs from `354927`
+  to `353055` while worsening SAD from `70754881` to `71584990`; text expansion
+  is much worse at `418960+` diffs.
+- Current colored-div mask overlap remains low-recall: `site_15_twitch` has
+  `1432` expected ink pixels, `149` actual, `127` overlap, and
+  `recallPct10000: 886`; `site_119_wordpress` is the current worst recall
+  sample at `879`.
+- Current color histograms show Chrome uses hundreds of in-div ink colors
+  (`site_0_google`: `527`, `site_15_twitch`: `591`,
+  `site_44_the_new_york_times`: `371`), while Simple still emits one flat
+  blended ink color per colored background.
+
+Historical measurements below record rejected experiments and older
+intermediate corpus states. Treat this current-status section as the active
+source of truth for the next renderer attempt.
 
 ## Evidence
 
@@ -291,6 +340,16 @@ blend to overflow text, while colored-background text compositing and
 under-strength overflow text remain unresolved. It is not stale-report noise
 and should not be chased as a site-specific layout bug until Chrome-compatible
 text rasterization/compositing is improved.
+
+Later corpus refresh note: after the retained overflow/up and in-div/down
+glyph-row write shifts, the full 132-sample corpus is still `0` exact,
+`0` accepted, and `132` divergent. The current worst remains
+`site_44_the_new_york_times`, now at `3362` differing pixels; the best sample
+is `site_4_x` at `2123`. `site_102_docker_hub` remains the worst overflow
+coverage target at `1608` expected pixels, `1253` actual, `355` missing, and
+`actualPct10000: 7792`. The current worst in-div ink target is
+`site_15_twitch` at `1432` expected ink pixels, `149` actual, and
+`actualPct10000: 1040`.
 
 A current-worst vertical-origin experiment moved the corpus text origin from
 `y=5` to `y=3`. It improved some overflow sub-regions (`site_44` overflow text

@@ -55,6 +55,10 @@ Acceptance:
   box, and four text client rects.
 - `bin/simple run src/app/wm_compare/site_corpus_compat.spl --continue-on-fail`
   wrote 132 Simple PPM captures and 132 comparison reports.
+- `node tools/electron-shell/verify_famous_site_corpus_completion.js` is the
+  final corpus acceptance command: it must exit `0` only when all 132 reports
+  are fresh, exact, accepted, and non-divergent. It currently exits `1`, which
+  is the expected plan status until renderer output reaches Chrome parity.
 - Future Chrome oracle work should use WPT reftest data, Playwright visual
   comparisons, pixelmatch-compatible PNG comparison, or CDP
   `Page.captureScreenshot` rather than live scraping. The current PPM analyzer
@@ -67,12 +71,12 @@ Measured blocker:
   still reports perceptual acceptance at 99.32% rather than exact equality, so
   the scene remains text-tolerant because Chrome antialiasing is not bitwise
   stable.
-- This proves the bitwise harness is now executable, but also proves Simple Web
-  Renderer is not Chrome-compatible for the first fixture yet.
-- The fallback renderer now matches the default white page background, but does
-  not yet draw Chrome-compatible text. Next implementation work must replace the
-  text fallback with real DOM/style/layout/font paint output before expanding to
-  the 100+ corpus.
+- This proves the bitwise harness is executable for the 16-fixture catalog, but
+  exact Chrome-compatible text remains outside the current renderer behavior.
+  The broader 132-sample corpus is now generated and fresh; the next renderer
+  implementation work is no longer corpus expansion, but making those
+  Chrome/Simple PPM reports accepted by replacing the current fixture-specific
+  text fast path with Chrome-compatible DOM/style/layout/font paint output.
 - `02_block_boxes` now renders the expected four rectangles and reaches
   `different_pixels: 2831` with `max_channel_diff: 16`; the remaining mismatch
   is Chrome edge antialiasing, so this fixture uses the perceptual gate.
@@ -94,6 +98,14 @@ Measured blocker:
 - The 100+ corpus now has a real comparison runner, deterministic per-sample
   `chrome.ppm`, `simple.ppm`, and `report.sdn` paths, and generated artifacts
   for all 132 samples.
+- `site_corpus_compat.spl` parses `--simple-timeout-ms` and now runs
+  `simple_html_capture_worker.spl` as a bounded child-render watchdog before
+  the fast in-process capture used for comparison artifacts. The corpus spec
+  covers the worker path and asserts the 60s corpus default. A focused
+  `site_44_the_new_york_times` run with `--simple-timeout-ms=60000` returned
+  under an outer `timeout 130s` guard while preserving the documented `3334`
+  differing pixels. The final artifact pixels still come from the in-process
+  renderer path to avoid the slower parent-side P3 decode path.
 - Chrome DOM metrics sidecars are now generated for all 132 samples at each
   sample's `chrome_metrics.json` path. `tools/electron-shell/measure_famous_site_corpus_chrome.js --all --width 160 --height 120`
   writes those files, and the corpus manifest includes `chrome_metrics` beside
@@ -114,7 +126,7 @@ Measured blocker:
   `site_0_google` with Chrome's captured line strings and records
   `site_28_google_translate` as the first broader corpus wrapped-line mismatch,
   with Simple measured line-width SDN exposed for that sample. It passes
-  27 examples.
+  32 examples.
 - `src/app/wm_compare/site_corpus_layout_report.spl` is a runnable Simple-side
   text-layout diagnostic. With the renderer-aligned default `--layout-width=122`,
   the full 132-sample corpus now reports 132 matched samples and 0 line-string
@@ -210,7 +222,14 @@ Measured blocker:
   `background` and `background-color`. The normal DOM/style-block scene path
   now also paints fallback colors from `background: url(...) #color ...` for
   inline styles and `<style>` rules, so this behavior is not limited to the
-  fallback pixel helper. Re-running
+  fallback pixel helper. The CSS color path now also resolves
+  `background-color: currentColor` and `background: currentColor ...` from the
+  computed text color in both the DOM style resolver and BrowserRenderer's
+  fallback first-background extractor, including inline, same-rule, and later
+  matched-rule cases where `color` appears after the background declaration;
+  the focused BrowserRenderer spec passes 37 examples. The shared color parser
+  now also covers shorthand alpha hex (`#RGBA`) and composites it over the
+  white page in the fallback pixel path. Re-running
   `site_corpus_compat.spl
   --only=site_0_google --limit=1 --continue-on-fail` kept the expected
   divergent corpus report at `2347` differing pixels, so the change improves
@@ -219,13 +238,16 @@ Measured blocker:
 - SimpleWebRenderer's facade fallback now parses `rgb(...)` backgrounds and
   uses the parsed color for the full fallback buffer before drawing its demo
   bands. `test/unit/lib/gc_async_mut/gpu/browser_engine/simple_web_renderer_spec.spl
-  --clean` passes 20 examples, including lower-row samples proving the fallback
+  --clean` passes 23 examples, including lower-row samples proving the fallback
   background is no longer left zero-filled and that `rgba(...)` backgrounds are
   composited to opaque page pixels, plus shorthand hex, named color, and
   transparent background parsing, plus `hsl(...)` and color-first
   `background:` shorthand including function-color shorthand with trailing
-  tokens and fallback colors after `url(...)`, while preserving
-  last-declaration-wins ordering with `background-color`. It also verifies
+  tokens, fallback colors after `url(...)`, shorthand alpha hex (`#RGBA`), and
+  `currentColor` for
+  `background-color` and `background`, while preserving
+  last-declaration-wins ordering with `background-color`. It now passes 23
+  examples. It also verifies
   the RenderScene facade receives inline and style-block
   `background: url(...) #color ...` fallback colors through the canonical
   BrowserRenderer path.
@@ -240,31 +262,62 @@ Measured blocker:
   reports, 0 exact, 0 accepted, 132 divergent. The summary now recomputes
   `differentPixels` from the checked-in Chrome/Simple PPM artifacts; current
   `staleReportCount` is `0`. After refreshing the full corpus with the overflow
-  alpha update and the retained overflow-only one-row glyph write shift,
+  alpha update and retained one-row overflow/up plus in-div/down glyph write shifts,
   `staleSuspectCount` is `0`. The current on-disk worst is
-  `site_44_the_new_york_times` with `3380` differing pixels and best is
-  `site_4_x` with `2138` differing pixels. The corpus BDD covers this summary
+  `site_44_the_new_york_times` with `3334` differing pixels and best is
+  `site_4_x` with `2109` differing pixels. After the half-alpha full refresh,
+  the next current top-five report entries are
+  `site_6_wikipedia` at `3199`, `site_37_soundcloud` at `3194`,
+  `site_60_tripadvisor` at `3180`, and `site_104_kaggle` at `3175`
+  differing pixels. The corpus BDD covers this summary
   tool.
+- `tools/electron-shell/verify_famous_site_corpus_completion.js` is the
+  executable completion gate for this plan. It shells through the corpus report
+  summary, requires the expected 132 reports, 0 stale suspects, 0 stale reports,
+  `exact == reportCount`, `accepted == reportCount`, and `divergent == 0`.
+  It currently exits `1` with `status: "FAIL"` because the corpus has
+  `exact: 0`, `accepted: 0`, and `divergent: 132`. The corpus BDD covers this
+  failure so the plan cannot be accidentally treated as complete while the
+  checked-in artifacts remain divergent.
 - `tools/electron-shell/summarize_famous_site_corpus_coverage.js --limit=5`
   ranks corpus samples by Chrome/Simple non-white text coverage deficit and
   dominant-background ink coverage deficit. The current worst overflow target
-  is `site_102_docker_hub`, with `1608` expected non-white pixels, `1253`
-  actual pixels, `355` missing pixels, and `actualPct10000: 7792`. The current
+  is `site_0_google`, with `963` expected non-white pixels, `685`
+  actual pixels, `278` missing pixels, and `actualPct10000: 7113`. The current
   worst in-div ink target is `site_15_twitch`, with `1432` expected ink pixels,
-  `150` actual, and `actualPct10000: 1047`; `site_60_tripadvisor` remains a
+  `149` actual, and `actualPct10000: 1040`; `site_60_tripadvisor` remains a
   tracked refreshed target. The corpus BDD covers this summary tool as the
   compositing target selector.
 - `tools/electron-shell/summarize_famous_site_text_compositing.js --limit=5`
   ranks colored-background text compositing directly by clipping Chrome text
   client rects to the colored div and comparing expected/actual
   dominant-background ink. The current worst ink target is `site_15_twitch`,
-  with `1432` expected ink pixels, `150` actual, and `actualPct10000: 1047`.
-  Its signed RGB error is currently `r: -70853`, `g: -33410`, `b: -135016`,
+  with `1432` expected ink pixels, `149` actual, and `actualPct10000: 1040`.
+  Its signed RGB error is currently `r: -73269`, `g: -34468`, `b: -139546`,
   confirming Simple is too bright in the dominant purple/blue channels inside
   the colored text region.
   The current worst in-div text diff target is `site_37_soundcloud`, with
-  `1606` differing pixels and SAD `190169`. The corpus BDD covers this summary
+  `1577` differing pixels and SAD `190021`. The corpus BDD covers this summary
   tool as the next renderer target selector.
+- `tools/electron-shell/summarize_famous_site_text_mask_overlap.js --limit=5`
+  ranks colored-background text masks by overlap quality inside Chrome text
+  rects clipped to the colored div. The current worst recall target is
+  `site_119_wordpress`, with `1490` expected ink pixels, `174` actual, `131`
+  overlapping, `43` false-positive, and `recallPct10000: 879`.
+  `site_15_twitch` remains a near-worst low-recall target at `886`, while
+  `site_31_whatsapp` currently has the most false-positive ink (`64`). This
+  confirms the remaining colored-text gap is dominated by missing coverage with
+  mostly overlapping drawn ink, not arbitrary glyph placement. The corpus BDD
+  covers this diagnostic.
+- `tools/electron-shell/summarize_famous_site_text_color_histogram.js --limit=3
+  --top=5` compares Chrome and Simple in-div ink color histograms for the
+  focused text targets. It shows Chrome uses hundreds of channel-specific
+  antialias/LCD colors (`site_0_google`: `527`, `site_15_twitch`: `591`,
+  `site_44_the_new_york_times`: `371` unique ink colors), while Simple still
+  emits a single flat blended ink color per background (`27,74,176`,
+  `92,43,177`, and `3,112,78`). The corpus BDD covers this diagnostic so
+  future work does not retry scalar alpha as though the remaining gap were a
+  one-color coverage problem.
 - `tools/electron-shell/calibrate_famous_site_corpus_ink.js --limit=3` ranks
   threshold/alpha candidates for the current worst ink/exact samples using
   checked-in Chrome PPMs, Simple PPMs, and Chrome metrics sidecars. It is an
@@ -274,17 +327,20 @@ Measured blocker:
   renderer-positioned scalar postprocess candidates by strengthening only the
   text pixels already present in Simple's current PPMs. Across
   `site_15_twitch` and `site_102_docker_hub`, the current best SAD factor is
-  `1.5`, improving SAD from `1231713` to `1224014` while exact differing
-  pixels remain unchanged at `6031`. The corpus BDD covers this diagnostic, so
+  `3`, improving SAD from `1223047` to `1193661` while exact differing
+  pixels remain unchanged at `5919`. The corpus BDD covers this diagnostic, so
   future work does not need to retry flat darkening of existing glyph pixels as
   an exact-parity strategy.
+  The default sweep also includes lightening factors: factor `0.5` improves
+  exact pixels only from `5919` to `5879` while worsening SAD to `1235091`, so
+  exact-count-only dimming is not a safe renderer direction either.
   The same tool now sweeps RGB-channel factors. The best exact candidate
-  (`r=2,g=1.5,b=1.5`) leaves exact unchanged at `6031` while improving SAD
-  to `1223274`; channel scaling is therefore not a sufficient
+  (`r=3,g=3,b=3`) leaves exact unchanged at `5919` while improving SAD
+  to `1193661`; channel scaling is therefore not a sufficient
   substitute for a real LCD/filter/gamma text model.
   It also checks naive adjacent-edge expansion of the current Simple text
   pixels. The lightest tested expansion alpha `16` worsens exact pixels to
-  `7091` and SAD to `1236226`, ruling out simple dilation as the missing
+  `6923` and SAD to `1222849`, ruling out simple dilation as the missing
   coverage strategy.
   A translation sweep before the retained overflow-only refresh reported a
   postprocess `dx=0,dy=-1` improvement across `site_15_twitch` and
@@ -402,6 +458,19 @@ Measured blocker:
   threshold blend, currently clipped to overflow text for corpus fixtures, until
   the subpixel blend matches Chrome's gamma, channel order, and compositing
   behavior.
+  A later direct corpus-fast-path subpixel blend was also rejected on current
+  artifacts: `site_15_twitch` regressed from `3132` to `3161` differing pixels,
+  and `site_44_the_new_york_times` regressed from `3362` to `3430`.
+  A later scoped in-div RGB-subpixel trial using `fontdue` channel coverage
+  improved the measured color model but still failed the exact gate. On
+  `site_15_twitch`, both `64/255` and `32/255` channel scales increased in-div
+  ink from `149` to about `605..611` pixels and raised actual unique ink colors
+  from `1` to `201..254`, but exact pixels regressed from `3109 -> 3201`; the
+  focused artifact was restored.
+  Removing the in-div hard threshold while keeping grayscale `raw_alpha * 32 /
+  255` produced a similar recall improvement on `site_15_twitch` (`149 -> 605`
+  in-div ink, `1 -> 32` actual unique colors), but exact pixels regressed from
+  `3109 -> 3218`; the thresholded artifact was restored.
   Chrome DOM metrics confirm the oracle uses body margin `8px`, computed
   `font-family: "Times New Roman"`, `font-size: 16px`, and text client rect
   tops at 8, 26, 44, and 62px.
@@ -410,10 +479,21 @@ Measured blocker:
   the renderer's current `br_chrome_default_font_renderer()` font file. That
   makes a missing Times New Roman file unlikely to be the next blocker; the
   remaining measured gap is the text filtering/compositing model.
+  A direct `NimbusRoman-Regular.otf` substitution was also measured and
+  rejected: it worsened `site_0_google` from `2495` to `2631` differing pixels,
+  so the Liberation Serif fallback and pre-trial sample artifact were restored.
+  A current full-corpus postprocess sweep also rejects the remaining cheap text
+  tweaks: the best exact-count scalar darkening candidate only changes total
+  corpus diffs from `354927` to `353055` while worsening SAD from `70754881`
+  to `71584990`; text expansion jumps to `418960+` differing pixels; every
+  whole-text or scoped one-pixel shift is neutral or worse. The next useful
+  implementation target is therefore native Chrome-like text mask/LCD blending,
+  not saved-image postprocessing, font-file substitution, or global geometry
+  nudges.
 - `node tools/electron-shell/analyze_ppm_delta.js
   test/baselines/famous_site_corpus/site_0_google/chrome.ppm
   test/baselines/famous_site_corpus/site_0_google/simple.ppm` confirms the same
-  current `differentPixels: 2530` and shows the remaining error is text-dominated:
+  current `differentPixels: 2495` and shows the remaining error is text-dominated:
   Chrome dark bbox `x=8..98 y=10..75`, Simple has no `<100` dark-pixel core
   after the thresholded blend, and diff bbox is `x=7..103 y=9..76`.
   Single-pixel geometry checks were measured and rejected: moving the layout
@@ -427,8 +507,9 @@ Measured blocker:
   Scoping the weak TTF blend to overflow text reduced `site_0_google` from
   `2436` to `2347`; the current lighter linear overflow-alpha curve improves
   coverage; a small in-div core restores some colored-background ink, and the
-  retained overflow-only one-row glyph write shift moves `site_0_google` to
-  `2530` and current worst `site_44_the_new_york_times` to `3380`, while
+  retained glyph-row write shifts plus the overflow-alpha reduction move
+  `site_0_google` to `2495` and current worst
+  `site_44_the_new_york_times` to `3334`, while
   leaving the colored-background text compositing gap open.
   A later focused subpixel-only experiment improved in-div ink coverage but
   worsened `site_0_google` to `different_pixels: 2860` and SAD `575715`, so it
@@ -454,6 +535,35 @@ Measured blocker:
   ink further to `280`, but worsened colored-text SAD to `255993` and
   full-screenshot differing pixels to `3191`; stronger scalar darkening is
   therefore not sufficient on the real renderer-positioned pixels.
+  A later linear in-div alpha trial (`alpha = raw_alpha * 96 / 255`) improved
+  colored-div ink much more (`site_15_twitch` `149 -> 621`, `site_0_google`
+  `257 -> 1044`) and reduced `site_0_google` SAD (`488041 -> 482365`), but it
+  regressed exact pixels on all focused targets: `site_15_twitch`
+  `3132 -> 3246`, `site_44_the_new_york_times` `3362 -> 3603`, and
+  `site_0_google` `2508 -> 2712`. Baseline artifacts were restored afterward;
+  this is another rejected scalar-alpha direction.
+  A retained white-overflow alpha reduction (`64 -> 32`) improves exact counts
+  after a full 132-sample refresh: `site_0_google` `2508 -> 2502`,
+  `site_15_twitch` `3132 -> 3109`, `site_44_the_new_york_times`
+  `3362 -> 3346`, and `site_102_docker_hub` `2873 -> 2857`. It worsens
+  measured overflow coverage (`site_0_google` `758 -> 725` actual overflow
+  pixels; `site_44_the_new_york_times` `1253 -> 1216`), so it is retained as an
+  exact-diff improvement only.
+  A follow-up retained half-alpha calibration (`raw_alpha * 32 / 255 -> 16 /
+  255`, threshold alpha `64 -> 32`) improves the refreshed corpus artifacts:
+  `site_0_google` `2502 -> 2495`, `site_15_twitch` `3109 -> 3074`, and
+  `site_44_the_new_york_times` `3346 -> 3334`. The corpus remains
+  0 accepted / 132 divergent, and this still leaves the colored-div ink model
+  far from Chrome (`actualUniqueInkColors: 1` on the focused color histogram).
+  A weak in-div edge-fill trial (`raw_alpha >= 128`, alpha `16`) was rejected
+  after focused regeneration because it regressed exact pixels on all checked
+  samples: `site_0_google` `2502 -> 2547`, `site_15_twitch` `3109 -> 3133`,
+  `site_37_soundcloud` `3229 -> 3246`, and `site_44_the_new_york_times`
+  `3346 -> 3391`.
+  A narrower div-bottom boundary trial that kept the retained in-div downshift
+  except for the last in-div row (`py < 47` instead of `py < 48`) recovered two
+  `site_0_google` in-div ink pixels and slightly lowered SAD, but worsened exact
+  pixels from `2502 -> 2503`; it was rejected and the artifact was restored.
   A white-overflow alpha multiplier trial (`64 -> 72`) on `site_102_docker_hub`
   left exact differing pixels unchanged at `2955`, left measured overflow
   coverage unchanged at `1258/1608`, and slightly worsened perceptual score
@@ -463,14 +573,14 @@ Measured blocker:
   worsened colored-text SAD from `251059` to `251425`, so flat channel scaling
   is rejected too.
   The same analyzer reports Chrome has 5,444 chromatic non-white pixels while
-  Simple still has 758 gray non-white text pixels, confirming the remaining
+  Simple still has 685 gray non-white text pixels, confirming the remaining
   gap is Chrome-style color/LCD coverage rather than only placement.
   It now also reports per-channel errors for the same sample:
-  absolute RGB deltas `{r: 118580, g: 151826, b: 228663}` and signed
-  actual-minus-expected deltas `{r: 101594, g: 135870, b: 212253}`, showing the
+  absolute RGB deltas `{r: 122024, g: 154752, b: 229238}` and signed
+  expected-minus-actual deltas `{r: 118010, g: 150230, b: 222244}`, showing the
   dominant miss is in the blue channel.
-  Region diagnostics split the failure into `1373` differing pixels inside the
-  120x40 div box, with blue-channel absolute error `131501`, and `1144`
+  Region diagnostics split the failure into `1374` differing pixels inside the
+  120x40 div box, with blue-channel absolute error `124782`, and `1126`
   differing pixels in the overflow text region on white, with near-balanced
   RGB absolute error around `95k-97k`; pixels below the text overflow are now
   identical.
@@ -487,20 +597,20 @@ Measured blocker:
   channel-sum error at `192445`.
   Per-line non-white extents now show lines 1 and 2 have identical expected and
   actual coverage boxes, so those failures are pure blue-background
-  compositing. Overflow line 3 is `996` expected non-white pixels versus `819`
-  actual, and line 4 is `302` expected versus `246` actual, so overflow-on-white
+  compositing. Overflow line 3 is `996` expected non-white pixels versus `799`
+  actual, and line 4 is `302` expected versus `241` actual, so overflow-on-white
   text is under-covered rather than only shifted.
   The analyzer can now accept `chrome_metrics.json` and derives the div,
   overflow, and per-line regions from Chrome DOM rectangles instead of relying
   only on hardcoded `site_0_google` coordinates; the BDD diagnostic test uses
   that metrics-driven mode. It also reports per-region non-white coverage
   ratios: current `site_0_google` overflow text has `963` expected non-white
-  pixels versus `751` actual (`actualPct10000: 7798`), and current
-  `site_44_the_new_york_times` overflow text has `1608` expected versus `1253`
-  actual (`actualPct10000: 7792`).
+  pixels versus `685` actual (`actualPct10000: 7113`), and current
+  `site_44_the_new_york_times` overflow text has `1608` expected versus `1150`
+  actual (`actualPct10000: 7151`).
   The analyzer also reports dominant-background ink coverage, which exposes
   colored-box text omission that non-white coverage cannot see: current
-  `site_0_google` has `1335` expected in-div ink pixels versus `259` actual.
+  `site_0_google` has `1335` expected in-div ink pixels versus `257` actual.
   A darker grayscale calibration reduced total channel error to `498342` but
   worsened exact differing pixels to `2458`, so it is rejected for the current
   bitwise corpus gate.

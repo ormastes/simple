@@ -21,7 +21,6 @@ use std.js.types.pair.{Pair}
 use std.platform.{get_host_os}
 
 extern fn rt_file_read_text(path: text) -> text
-extern fn rt_text_find(haystack: text, needle: text, start: i64) -> i64
 
 class BrowserHistoryEntry:
     url: text
@@ -215,8 +214,10 @@ class BrowserRuntimeState:
         if is_guest_runtime:
             print "[BRS] runtime create stage=chrome-props"
 
-        val session_storage_id = storage_object_from_pairs(runtime, session_storage)
-        val local_storage_id = storage_object_from_pairs(runtime, local_storage)
+        val (runtime_after_session_storage, session_storage_id) = storage_object_from_pairs(runtime, session_storage)
+        runtime = runtime_after_session_storage
+        val (runtime_after_local_storage, local_storage_id) = storage_object_from_pairs(runtime, local_storage)
+        runtime = runtime_after_local_storage
         if is_guest_runtime:
             print "[BRS] runtime create stage=after-storage-objects"
 
@@ -246,19 +247,19 @@ class BrowserRuntimeState:
         runtime.set_host_property(window_id, "__simple_modules", JsValue.Object(id: modules_id))
 
         if not is_guest_runtime:
-            if val Some(console_val) = runtime.interpreter.env_stack.get_var(global_env, "console"):
+            if val Some(console_val) = runtime.interpreter.lookup_global_value("console"):
                 runtime.set_host_property(window_id, "console", console_val)
-            if val Some(math_val) = runtime.interpreter.env_stack.get_var(global_env, "Math"):
+            if val Some(math_val) = runtime.interpreter.lookup_global_value("Math"):
                 runtime.set_host_property(window_id, "Math", math_val)
-            if val Some(json_val) = runtime.interpreter.env_stack.get_var(global_env, "JSON"):
+            if val Some(json_val) = runtime.interpreter.lookup_global_value("JSON"):
                 runtime.set_host_property(window_id, "JSON", json_val)
-            if val Some(promise_val) = runtime.interpreter.env_stack.get_var(global_env, "Promise"):
+            if val Some(promise_val) = runtime.interpreter.lookup_global_value("Promise"):
                 runtime.set_host_property(window_id, "Promise", promise_val)
-            if val Some(fetch_val) = runtime.interpreter.env_stack.get_var(global_env, "fetch"):
+            if val Some(fetch_val) = runtime.interpreter.lookup_global_value("fetch"):
                 runtime.set_host_property(window_id, "fetch", fetch_val)
-            if val Some(timeout_val) = runtime.interpreter.env_stack.get_var(global_env, "setTimeout"):
+            if val Some(timeout_val) = runtime.interpreter.lookup_global_value("setTimeout"):
                 runtime.set_host_property(window_id, "setTimeout", timeout_val)
-            if val Some(interval_val) = runtime.interpreter.env_stack.get_var(global_env, "setInterval"):
+            if val Some(interval_val) = runtime.interpreter.lookup_global_value("setInterval"):
                 runtime.set_host_property(window_id, "setInterval", interval_val)
 
         runtime.interpreter.define_global_value("window", JsValue.Object(id: window_id))
@@ -270,29 +271,31 @@ class BrowserRuntimeState:
         runtime.interpreter.define_global_value("sessionStorage", JsValue.Object(id: session_storage_id))
         runtime.interpreter.define_global_value("localStorage", JsValue.Object(id: local_storage_id))
         runtime.interpreter.define_global_value("__simple_modules", JsValue.Object(id: modules_id))
-        runtime.interpreter.host_window_id = window_id
-        runtime.interpreter.host_document_id = document_id
-        runtime.interpreter.host_body_id = body_id
-        runtime.interpreter.host_location_id = location_id
-        runtime.interpreter.host_navigator_id = navigator_id
-        runtime.interpreter.host_chrome_id = chrome_id
-        runtime.interpreter.host_session_storage_id = session_storage_id
-        runtime.interpreter.host_local_storage_id = local_storage_id
-        runtime.interpreter.host_document_title_value = JsValue.String(v: title)
-        runtime.interpreter.host_document_cookie_value = JsValue.String(v: cookie_text)
-        runtime.interpreter.host_body_inner_html_value = JsValue.String(v: body_html)
+        var interpreter = runtime.interpreter
+        interpreter.host_window_id = window_id
+        interpreter.host_document_id = document_id
+        interpreter.host_body_id = body_id
+        interpreter.host_location_id = location_id
+        interpreter.host_navigator_id = navigator_id
+        interpreter.host_chrome_id = chrome_id
+        interpreter.host_session_storage_id = session_storage_id
+        interpreter.host_local_storage_id = local_storage_id
+        interpreter.host_document_title_value = JsValue.String(v: title)
+        interpreter.host_document_cookie_value = JsValue.String(v: cookie_text)
+        interpreter.host_body_inner_html_value = JsValue.String(v: body_html)
         val host_body_text_value =
             if is_guest_runtime: JsValue.String(v: "")
             else: JsValue.String(v: html_to_text(body_html))
-        runtime.interpreter.host_body_text_content_value = host_body_text_value
+        interpreter.host_body_text_content_value = host_body_text_value
+        runtime.interpreter = interpreter
         if is_guest_runtime:
             print "[BRS] runtime create stage=after-define-globals"
 
-        install_storage_api(runtime, session_storage_id)
-        install_storage_api(runtime, local_storage_id)
-        sync_storage_runtime_state(runtime, session_storage_id, session_storage)
-        sync_storage_runtime_state(runtime, local_storage_id, local_storage)
-        sync_browser_runtime_state(runtime, window_id, chrome_id, url, cookie_text)
+        runtime = install_storage_api(runtime, session_storage_id)
+        runtime = install_storage_api(runtime, local_storage_id)
+        runtime = sync_storage_runtime_state(runtime, session_storage_id, session_storage)
+        runtime = sync_storage_runtime_state(runtime, local_storage_id, local_storage)
+        runtime = sync_browser_runtime_state(runtime, window_id, chrome_id, url, cookie_text)
         if is_guest_runtime:
             print "[BRS] runtime create stage=after-install-storage"
 
@@ -313,9 +316,10 @@ class BrowserCookie:
     value: text
     path: text
     domain: text
+    expired: bool
 
-    static fn create(name: text, value: text, path: text, domain: text) -> BrowserCookie:
-        BrowserCookie(name: name, value: value, path: path, domain: domain)
+    static fn create(name: text, value: text, path: text, domain: text, expired: bool) -> BrowserCookie:
+        BrowserCookie(name: name, value: value, path: path, domain: domain, expired: expired)
 
 class BrowserSession:
     current_url: text
@@ -455,9 +459,12 @@ impl BrowserSession:
     me _drain_runtime_async_requests() -> bool:
         if val Some(state) = self.runtime_state:
             var drained = false
+            var runtime = state.runtime
+            var interpreter = runtime.interpreter
             while true:
-                match state.runtime.interpreter.take_pending_async_request():
+                match interpreter.take_pending_async_request():
                     Some(req_obj_id):
+                        runtime.interpreter = interpreter
                         var request_id = ""
                         var kind = "fetch"
                         var url = ""
@@ -465,25 +472,26 @@ impl BrowserSession:
                         var headers = ""
                         var body = ""
                         var content_type = ""
-                        match state.runtime.get_host_property(req_obj_id, "request_id"):
+                        match runtime.get_host_property(req_obj_id, "request_id"):
                             JsValue.String(v): request_id = v
                             _: pass_dn
-                        match state.runtime.get_host_property(req_obj_id, "kind"):
+                        match runtime.get_host_property(req_obj_id, "kind"):
                             JsValue.String(v): kind = v
                             _: pass_dn
-                        match state.runtime.get_host_property(req_obj_id, "url"):
+                        match runtime.get_host_property(req_obj_id, "url"):
                             JsValue.String(v): url = v
                             _: pass_dn
-                        match state.runtime.get_host_property(req_obj_id, "method"):
+                        url = normalize_runtime_request_url(self.current_url, url)
+                        match runtime.get_host_property(req_obj_id, "method"):
                             JsValue.String(v): method = v
                             _: pass_dn
-                        match state.runtime.get_host_property(req_obj_id, "headers"):
+                        match runtime.get_host_property(req_obj_id, "headers"):
                             JsValue.String(v): headers = v
                             _: pass_dn
-                        match state.runtime.get_host_property(req_obj_id, "body"):
+                        match runtime.get_host_property(req_obj_id, "body"):
                             JsValue.String(v): body = v
                             _: pass_dn
-                        match state.runtime.get_host_property(req_obj_id, "content_type"):
+                        match runtime.get_host_property(req_obj_id, "content_type"):
                             JsValue.String(v): content_type = v
                             _: pass_dn
                         self.pending_requests = self.pending_requests + [BrowserRequest.create(
@@ -497,6 +505,9 @@ impl BrowserSession:
                         )]
                         drained = true
                     nil:
+                        runtime.interpreter = interpreter
+                        state.runtime = runtime
+                        self.runtime_state = Some(state)
                         return drained
 
     me _flush_runtime_side_effects():
@@ -506,10 +517,18 @@ impl BrowserSession:
                 progress = false
                 if self._drain_runtime_async_requests():
                     progress = true
-                if state.runtime.interpreter.drain_pending_microtasks():
-                    progress = true
-            self._sync_from_runtime(state)
-            self._refresh_current_history()
+                if val Some(loop_state) = self.runtime_state:
+                    var runtime = loop_state.runtime
+                    var interpreter = runtime.interpreter
+                    if interpreter.drain_pending_microtasks():
+                        runtime.interpreter = interpreter
+                        loop_state.runtime = runtime
+                        self.runtime_state = Some(loop_state)
+                        progress = true
+            if val Some(final_state) = self.runtime_state:
+                self._sync_from_runtime(final_state)
+                self.runtime_state = Some(final_state)
+                self._refresh_current_history()
 
     me commit_network_response(response: BrowserResponse) -> Result<bool, text>:
         self._trace_guest("commit response kind={response.kind}")
@@ -530,7 +549,9 @@ impl BrowserSession:
         if response.kind == "fetch":
             if val Some(state) = self.runtime_state:
                 self._apply_response_headers(response.headers)
-                val _ = state.runtime.interpreter.resolve_async_fetch_response(
+                var runtime = state.runtime
+                var interpreter = runtime.interpreter
+                val _ = interpreter.resolve_async_fetch_response(
                     response.request_id,
                     response.url,
                     response.status,
@@ -538,6 +559,9 @@ impl BrowserSession:
                     response.body,
                     response.error
                 )
+                runtime.interpreter = interpreter
+                state.runtime = runtime
+                self.runtime_state = Some(state)
                 self._flush_runtime_side_effects()
             if response.error != "":
                 return Err(response.error)
@@ -640,7 +664,10 @@ impl BrowserSession:
         if self.runtime_state == nil:
             val _ = self._ensure_runtime_state()
         if val Some(state) = self.runtime_state:
-            val result = state.runtime.eval(script)
+            var runtime = state.runtime
+            val result = runtime.eval(script)
+            state.runtime = runtime
+            self.runtime_state = Some(state)
             match result:
                 Ok(value):
                     self._flush_runtime_side_effects()
@@ -794,8 +821,8 @@ impl BrowserSession:
         self.current_body_html = next_body_html
         self.session_storage = storage_pairs_from_object(state, state.session_storage_id)
         self.local_storage = storage_pairs_from_object(state, state.local_storage_id)
-        sync_storage_runtime_state(state.runtime, state.session_storage_id, self.session_storage)
-        sync_storage_runtime_state(state.runtime, state.local_storage_id, self.local_storage)
+        state.runtime = sync_storage_runtime_state(state.runtime, state.session_storage_id, self.session_storage)
+        state.runtime = sync_storage_runtime_state(state.runtime, state.local_storage_id, self.local_storage)
 
         var cookie_val = state.runtime.interpreter.host_document_cookie_value
         if strict_equals(cookie_val, JsValue.Undefined):
@@ -804,11 +831,17 @@ impl BrowserSession:
                 "cookie"
             )
         if val JsValue.String(cookie_text) = cookie_val:
-            self.cookies = merge_cookie_text(self.cookies, cookie_text)
+            val visible_cookie_before_sync = cookie_text_for_url(self.cookies, self.current_url)
+            if cookie_text != visible_cookie_before_sync:
+                self.cookies = merge_cookie_text(self.cookies, cookie_text)
 
         val visible_cookie_text = cookie_text_for_url(self.cookies, self.current_url)
-        state.runtime.interpreter.host_document_cookie_value = JsValue.String(v: visible_cookie_text)
-        sync_browser_runtime_state(state.runtime, state.window_id, state.chrome_id, self.current_url, visible_cookie_text)
+        var runtime = state.runtime
+        var interpreter = runtime.interpreter
+        interpreter.host_document_cookie_value = JsValue.String(v: visible_cookie_text)
+        runtime.interpreter = interpreter
+        state.runtime = runtime
+        state.runtime = sync_browser_runtime_state(state.runtime, state.window_id, state.chrome_id, self.current_url, visible_cookie_text)
         state.runtime.set_host_property(
             state.document_id,
             "readyState",
@@ -818,11 +851,14 @@ impl BrowserSession:
     me _sync_runtime_cookie_string():
         if val Some(state) = self.runtime_state:
             val visible_cookie_text = cookie_text_for_url(self.cookies, self.current_url)
-            state.runtime.set_host_property(
+            var runtime = state.runtime
+            runtime.set_host_property(
                 state.document_id,
                 "cookie",
                 JsValue.String(v: visible_cookie_text)
             )
+            state.runtime = runtime
+            self.runtime_state = Some(state)
 
     me _build_request(kind: text, url: text, method: text, headers: text, body: text, content_type: text) -> BrowserRequest:
         val normalized_method = if method.trim() != "": method.upper() else: "GET"
@@ -941,7 +977,10 @@ impl BrowserSession:
                             self.current_body_html = "runtime fetch ok"
                             self._trace_guest("eval inline script fast-path")
                             continue
-                        val eval_result = state.runtime.eval(script_source)
+                        var runtime = state.runtime
+                        val eval_result = runtime.eval(script_source)
+                        state.runtime = runtime
+                        self.runtime_state = Some(state)
                         match eval_result:
                             Ok(_):
                                 self._trace_guest("eval inline script ok")
@@ -963,7 +1002,10 @@ impl BrowserSession:
                         continue
                     if val Some(override_body) = pair_value(self.resource_overrides, resolved):
                         if val Some(state) = self.runtime_state:
-                            val eval_result = state.runtime.eval(override_body)
+                            var runtime = state.runtime
+                            val eval_result = runtime.eval(override_body)
+                            state.runtime = runtime
+                            self.runtime_state = Some(state)
                             match eval_result:
                                 Ok(_):
                                     self._flush_runtime_side_effects()
@@ -1019,7 +1061,11 @@ impl BrowserSession:
                 return Ok(false)
         self.module_source_cache = upsert_pair(self.module_source_cache, module_url, source)
         if val Some(state) = self.runtime_state:
-            val eval_result = state.runtime.eval(transform_module_source(module_url, source))
+            var runtime = state.runtime
+            val transformed_source = transform_module_source(module_url, source, self.module_source_cache)
+            val eval_result = runtime.eval(transformed_source)
+            state.runtime = runtime
+            self.runtime_state = Some(state)
             self.module_eval_stack = remove_text_once(self.module_eval_stack, module_url)
             match eval_result:
                 Ok(_):
@@ -1164,7 +1210,7 @@ class BrowserScriptBlock:
 fn blank_page_html() -> text:
     "<!DOCTYPE html><html><head><title>about:blank</title></head><body></body></html>"
 
-fn storage_object_from_pairs(runtime: JsRuntime, pairs: [Pair<text, text>]) -> i64:
+fn storage_object_from_pairs(runtime: JsRuntime, pairs: [Pair<text, text>]) -> (JsRuntime, i64):
     val storage_id = runtime.create_host_object()
     for pair in pairs:
         runtime.set_host_property(
@@ -1172,7 +1218,7 @@ fn storage_object_from_pairs(runtime: JsRuntime, pairs: [Pair<text, text>]) -> i
             pair.first,
             JsValue.String(v: pair.second)
         )
-    storage_id
+    (runtime, storage_id)
 
 fn storage_pairs_from_object(state: BrowserRuntimeState, object_id: i64) -> [Pair<text, text>]:
     val obj = state.runtime.get_host_object(object_id)
@@ -1182,12 +1228,13 @@ fn storage_pairs_from_object(state: BrowserRuntimeState, object_id: i64) -> [Pai
             out = upsert_pair(out, prop.key, js_value_to_storage_text(prop.value))
     out
 
-fn install_storage_api(runtime: JsRuntime, storage_id: i64):
+fn install_storage_api(runtime: JsRuntime, storage_id: i64) -> JsRuntime:
     runtime._define_method_on(storage_id, "getItem", NATIVE_STORAGE_GET_ITEM)
     runtime._define_method_on(storage_id, "setItem", NATIVE_STORAGE_SET_ITEM)
     runtime._define_method_on(storage_id, "removeItem", NATIVE_STORAGE_REMOVE_ITEM)
     runtime._define_method_on(storage_id, "clear", NATIVE_STORAGE_CLEAR)
     runtime._define_method_on(storage_id, "key", NATIVE_STORAGE_KEY)
+    runtime
 
 fn install_browser_fetch_api(runtime: JsRuntime):
     # Browser fetch host bindings are deferred: there are no NATIVE_FETCH_* method
@@ -1197,18 +1244,20 @@ fn install_browser_fetch_api(runtime: JsRuntime):
     # doc/08_tracking/bug/browser_fetch_api_deferred_2026-04-28.md
     pass_dn("native runtime fetch host bindings deferred — see doc/08_tracking/bug/browser_fetch_api_deferred_2026-04-28.md")
 
-fn sync_storage_runtime_state(runtime: JsRuntime, object_id: i64, pairs: [Pair<text, text>]):
+fn sync_storage_runtime_state(runtime: JsRuntime, object_id: i64, pairs: [Pair<text, text>]) -> JsRuntime:
     runtime.set_host_property(
         object_id,
         "length",
         JsValue.Number(v: pairs.len().to_f64())
     )
+    runtime
 
-fn sync_browser_runtime_state(runtime: JsRuntime, window_id: i64, chrome_id: i64, url: text, cookie_text: text):
+fn sync_browser_runtime_state(runtime: JsRuntime, window_id: i64, chrome_id: i64, url: text, cookie_text: text) -> JsRuntime:
     runtime.set_host_property(window_id, "__simple_base_url", JsValue.String(v: url))
     runtime.set_host_property(window_id, "__simple_cookie_header", JsValue.String(v: cookie_text))
     runtime.set_host_property(chrome_id, "__simple_base_url", JsValue.String(v: url))
     runtime.set_host_property(chrome_id, "__simple_cookie_header", JsValue.String(v: cookie_text))
+    runtime
 
 fn is_storage_api_property(key: text) -> bool:
     key == "__proto__" or
@@ -1388,11 +1437,36 @@ fn url_host(url: text) -> text:
 
 fn merge_cookie_text(existing: [BrowserCookie], cookie_text: text) -> [BrowserCookie]:
     var jar = existing
+    if cookie_text_has_attributes(cookie_text):
+        if val Some(cookie) = parse_cookie_line(cookie_text):
+            return upsert_cookie(jar, cookie)
     val cookie_lines = split_cookie_assignments(cookie_text)
     for line in cookie_lines:
         if val Some(cookie) = parse_cookie_line(line):
             jar = upsert_cookie(jar, cookie)
     jar
+
+fn cookie_text_has_attributes(cookie_text: text) -> bool:
+    val segments = split_text(cookie_text.trim(), ";")
+    var i = 1
+    while i < segments.len():
+        val seg = segments[i].trim()
+        val eq = find_text(seg, "=", 0)
+        val key = if eq > 0:
+            seg.slice(0, eq).trim().lower()
+        else:
+            seg.lower()
+        if key == "path" or
+           key == "domain" or
+           key == "expires" or
+           key == "max-age" or
+           key == "secure" or
+           key == "samesite" or
+           key == "httponly" or
+           key == "partitioned":
+            return true
+        i = i + 1
+    false
 
 fn split_cookie_assignments(cookie_text: text) -> [text]:
     var parts: [text] = []
@@ -1438,6 +1512,7 @@ fn parse_cookie_line(cookie_line: text) -> BrowserCookie?:
         return nil
     var path = ""
     var domain = ""
+    var expired = false
     var i = 1
     while i < segments.len():
         val seg = segments[i].trim()
@@ -1446,22 +1521,27 @@ fn parse_cookie_line(cookie_line: text) -> BrowserCookie?:
             val key = seg.slice(0, seg_eq).trim().lower()
             val attr_value = seg.slice(seg_eq + 1, seg.len()).trim()
             if key == "path":
-                path = attr_value
+                path = normalize_cookie_path(attr_value)
             else if key == "domain":
-                domain = attr_value
+                domain = normalize_cookie_domain(attr_value)
+            else if key == "max-age":
+                expired = cookie_max_age_is_expired(attr_value)
+            else if key == "expires":
+                expired = cookie_expires_is_past(attr_value)
         i = i + 1
-    Some(BrowserCookie.create(name: name, value: value, path: path, domain: domain))
+    Some(BrowserCookie.create(name: name, value: value, path: path, domain: domain, expired: expired))
 
 fn upsert_cookie(existing: [BrowserCookie], cookie: BrowserCookie) -> [BrowserCookie]:
     var out: [BrowserCookie] = []
     var found = false
     for current in existing:
         if current.name == cookie.name and current.path == cookie.path and current.domain == cookie.domain:
-            out = out + [cookie]
+            if not cookie.expired:
+                out = out + [cookie]
             found = true
         else:
             out = out + [current]
-    if not found:
+    if not found and not cookie.expired:
         out = out + [cookie]
     out
 
@@ -1472,16 +1552,55 @@ fn cookie_text_for_url(cookies: [BrowserCookie], url: text) -> text:
             parts = parts + ["{cookie.name}={cookie.value}"]
     join_text(parts, "; ")
 
+fn normalize_runtime_request_url(base_url: text, request_url: text) -> text:
+    if request_url.starts_with("http://") or
+       request_url.starts_with("https://") or
+       request_url.starts_with("file://") or
+       request_url.starts_with("about:"):
+        return request_url
+    if request_url.starts_with("nil/"):
+        return resolve_relative_url(base_url, request_url.slice(3, request_url.len()))
+    resolve_relative_url(base_url, request_url)
+
 fn cookie_matches_url(cookie: BrowserCookie, url: text) -> bool:
     if cookie.domain.len() > 0:
-        val host = url_host(url)
+        val host = normalize_cookie_domain(url_host(url))
         if host != cookie.domain and not host.ends_with(".{cookie.domain}"):
             return false
     if cookie.path.len() > 0:
         val pathname = url_pathname(url)
-        if not pathname.starts_with(cookie.path):
+        if pathname != cookie.path and
+           not cookie.path.ends_with("/") and
+           not pathname.starts_with(cookie.path + "/"):
+            return false
+        if cookie.path.ends_with("/") and not pathname.starts_with(cookie.path):
             return false
     true
+
+fn normalize_cookie_path(path: text) -> text:
+    val trimmed = path.trim()
+    if trimmed.len() == 0:
+        return ""
+    if trimmed.starts_with("/"):
+        return trimmed
+    "/" + trimmed
+
+fn normalize_cookie_domain(domain: text) -> text:
+    var normalized = domain.trim().lower()
+    while normalized.starts_with(".") and normalized.len() > 1:
+        normalized = normalized.slice(1, normalized.len())
+    normalized
+
+fn cookie_max_age_is_expired(value: text) -> bool:
+    val trimmed = value.trim()
+    trimmed == "0" or trimmed.starts_with("-")
+
+fn cookie_expires_is_past(value: text) -> bool:
+    val lowered = value.trim().lower()
+    lowered.contains("01 jan 1970") or
+        lowered.contains("jan 1970") or
+        lowered.contains("1970") or
+        lowered.contains("1969")
 
 fn split_text(input: text, delimiter: text) -> [text]:
     if delimiter.len() == 0:
@@ -1744,13 +1863,13 @@ fn extract_module_dependency_urls(module_url: text, source: text) -> [text]:
             val dep = module_statement_source(trimmed)
             if dep != "":
                 out = append_unique_text(out, resolve_relative_url(module_url, dep))
-        else if trimmed.starts_with("export "):
+        else if trimmed.starts_with("export ") and trimmed.contains(" from "):
             val dep = module_statement_source(trimmed)
             if dep != "":
                 out = append_unique_text(out, resolve_relative_url(module_url, dep))
     out
 
-fn transform_module_source(module_url: text, source: text) -> text:
+fn transform_module_source(module_url: text, source: text, module_cache: [Pair<text, text>]) -> text:
     val module_ref = "__simple_modules[\"{escape_js_string(module_url)}\"]"
     var body = "var __simple_module = {module_ref} || ( {module_ref} = {} );\n"
     for stmt in split_module_statements(source):
@@ -1761,10 +1880,10 @@ fn transform_module_source(module_url: text, source: text) -> text:
             body = body + transform_import_statement(module_url, trimmed)
             continue
         if trimmed.starts_with("export "):
-            body = body + transform_export_statement(module_url, trimmed)
+            body = body + transform_export_statement(module_url, trimmed, module_cache)
             continue
         body = body + stmt + "\n"
-    "(function() {\n{body}})();"
+    body
 
 fn transform_import_statement(module_url: text, stmt: text) -> text:
     val source = module_statement_source(stmt)
@@ -1775,6 +1894,27 @@ fn transform_import_statement(module_url: text, stmt: text) -> text:
     if clause == "":
         return ""
     var out = ""
+    val from_idx_for_named = find_text(stmt, " from ", 0)
+    val named_open = find_text(stmt, "{", 0)
+    val named_close = find_text(stmt, "}", named_open + 1)
+    if named_open >= 0 and named_close > named_open and (from_idx_for_named < 0 or named_close < from_idx_for_named):
+        val inner = stmt.slice(named_open + 1, named_close)
+        for named in split_text(inner, ","):
+            val named_trimmed = named.trim()
+            if named_trimmed == "":
+                continue
+            val alias_idx = find_text(named_trimmed, " as ", 0)
+            if alias_idx >= 0:
+                val imported = normalize_module_binding_name(named_trimmed.slice(0, alias_idx).trim())
+                val local = normalize_module_binding_name(named_trimmed.slice(alias_idx + 4, named_trimmed.len()).trim())
+                out = out + "const {local} = __simple_modules[\"{escape_js_string(resolved)}\"][\"{escape_js_string(imported)}\"];\n"
+            else:
+                val local = normalize_module_binding_name(named_trimmed)
+                out = out + "const {local} = __simple_modules[\"{escape_js_string(resolved)}\"][\"{escape_js_string(local)}\"];\n"
+        return out
+    val normalized_clause = normalize_module_binding_name(clause)
+    if normalized_clause != clause.trim() and normalized_clause != "":
+        return "const {normalized_clause} = __simple_modules[\"{escape_js_string(resolved)}\"][\"{escape_js_string(normalized_clause)}\"];\n"
     for binding in split_import_bindings(clause):
         val trimmed = binding.trim()
         if trimmed == "":
@@ -1784,55 +1924,61 @@ fn transform_import_statement(module_url: text, stmt: text) -> text:
             out = out + "const {local} = __simple_modules[\"{escape_js_string(resolved)}\"];\n"
         else if trimmed.starts_with("{") and trimmed.ends_with("}"):
             val inner = trimmed.slice(1, trimmed.len() - 1)
-            for named in inner.split(","):
+            for named in split_text(inner, ","):
                 val named_trimmed = named.trim()
                 if named_trimmed == "":
                     continue
                 val alias_idx = find_text(named_trimmed, " as ", 0)
                 if alias_idx >= 0:
-                    val imported = named_trimmed.slice(0, alias_idx).trim()
-                    val local = named_trimmed.slice(alias_idx + 4, named_trimmed.len()).trim()
+                    val imported = normalize_module_binding_name(named_trimmed.slice(0, alias_idx).trim())
+                    val local = normalize_module_binding_name(named_trimmed.slice(alias_idx + 4, named_trimmed.len()).trim())
                     out = out + "const {local} = __simple_modules[\"{escape_js_string(resolved)}\"][\"{escape_js_string(imported)}\"];\n"
                 else:
-                    out = out + "const {named_trimmed} = __simple_modules[\"{escape_js_string(resolved)}\"][\"{escape_js_string(named_trimmed)}\"];\n"
+                    val local = normalize_module_binding_name(named_trimmed)
+                    out = out + "const {local} = __simple_modules[\"{escape_js_string(resolved)}\"][\"{escape_js_string(local)}\"];\n"
         else:
-            out = out + "const {trimmed} = __simple_modules[\"{escape_js_string(resolved)}\"][\"default\"];\n"
+            val local = normalize_module_binding_name(trimmed)
+            out = out + "const {local} = __simple_modules[\"{escape_js_string(resolved)}\"][\"default\"];\n"
     out
 
-fn transform_export_statement(module_url: text, stmt: text) -> text:
+fn transform_export_statement(module_url: text, stmt: text, module_cache: [Pair<text, text>]) -> text:
     val trimmed = strip_trailing_semicolon(stmt.trim())
     if trimmed.starts_with("export default function "):
         val decl = trimmed.slice(15, trimmed.len()).trim()
-        val name = declared_function_name(decl)
+        val name = normalize_module_binding_name(declared_function_name(decl))
         if name == "":
-            return "__simple_module[\"default\"] = " + decl + ";\n"
+            return "function __simple_default_export" + decl.slice(8, decl.len()) + "\n__simple_module[\"default\"] = __simple_default_export;\n"
         return decl + "\n__simple_module[\"default\"] = " + name + ";\n"
     if trimmed.starts_with("export default class "):
         val decl = trimmed.slice(15, trimmed.len()).trim()
-        val name = declared_class_name(decl)
+        val name = normalize_module_binding_name(declared_class_name(decl))
         if name == "":
-            return "__simple_module[\"default\"] = " + decl + ";\n"
+            return "class __simple_default_export" + decl.slice(5, decl.len()) + "\n__simple_module[\"default\"] = __simple_default_export;\n"
         return decl + "\n__simple_module[\"default\"] = " + name + ";\n"
     if trimmed.starts_with("export default "):
         val expr = trimmed.slice(15, trimmed.len()).trim()
         return "__simple_module[\"default\"] = {expr};\n"
     if trimmed.starts_with("export function "):
         val decl = trimmed.slice(7, trimmed.len()).trim()
-        val name = declared_function_name(decl)
+        val name = normalize_module_binding_name(declared_function_name(decl))
         if name == "":
             return decl + "\n"
         return decl + "\n__simple_module[\"{name}\"] = {name};\n"
     if trimmed.starts_with("export class "):
         val decl = trimmed.slice(7, trimmed.len()).trim()
-        val name = declared_class_name(decl)
+        val name = normalize_module_binding_name(declared_class_name(decl))
         if name == "":
             return decl + "\n"
         return decl + "\n__simple_module[\"{name}\"] = {name};\n"
     if trimmed.starts_with("export const ") or trimmed.starts_with("export let ") or trimmed.starts_with("export var "):
         val decl = trimmed.slice(7, trimmed.len()).trim()
-        var out = decl + ";\n"
+        val kind = module_variable_decl_kind(decl)
+        var out = ""
         for declarator in split_export_binding_declarators(decl):
-            val name = declared_binding_name(declarator)
+            val local_decl = normalize_module_variable_declarator(kind, declarator)
+            if local_decl != "":
+                out = out + local_decl + ";\n"
+            val name = normalize_module_binding_name(declared_binding_name(declarator))
             if name != "":
                 out = out + "__simple_module[\"{name}\"] = {name};\n"
         return out
@@ -1845,38 +1991,45 @@ fn transform_export_statement(module_url: text, stmt: text) -> text:
             return ""
         val inner = trimmed.slice(open + 1, close)
         var out = ""
-        for named in inner.split(","):
+        for named in split_text(inner, ","):
             val named_trimmed = named.trim()
             if named_trimmed == "":
                 continue
             val alias_idx = find_text(named_trimmed, " as ", 0)
             if alias_idx >= 0:
-                val local = named_trimmed.slice(0, alias_idx).trim()
-                val exported = named_trimmed.slice(alias_idx + 4, named_trimmed.len()).trim()
+                val local = normalize_module_binding_name(named_trimmed.slice(0, alias_idx).trim())
+                val exported = normalize_module_binding_name(named_trimmed.slice(alias_idx + 4, named_trimmed.len()).trim())
                 out = out + "__simple_module[\"{exported}\"] = __simple_modules[\"{escape_js_string(resolved)}\"][\"{escape_js_string(local)}\"];\n"
             else:
-                out = out + "__simple_module[\"{named_trimmed}\"] = __simple_modules[\"{escape_js_string(resolved)}\"][\"{escape_js_string(named_trimmed)}\"];\n"
+                val local = normalize_module_binding_name(named_trimmed)
+                out = out + "__simple_module[\"{local}\"] = __simple_modules[\"{escape_js_string(resolved)}\"][\"{escape_js_string(local)}\"];\n"
         return out
+    if trimmed.starts_with("export <fn:") and trimmed.contains(" from "):
+        val source = module_statement_source(trimmed)
+        val resolved = resolve_relative_url(module_url, source)
+        val from_idx = find_text(trimmed, " from ", 0)
+        if from_idx < 0:
+            return ""
+        val inner = normalize_module_binding_name(trimmed.slice(7, from_idx).trim())
+        return transform_module_reexport_bindings(inner, resolved)
     if trimmed.starts_with("export * as ") and trimmed.contains(" from "):
         val source = module_statement_source(trimmed)
         val resolved = resolve_relative_url(module_url, source)
         val from_idx = find_text(trimmed, " from ", 0)
         if from_idx < 0:
             return ""
-        val exported = trimmed.slice(12, from_idx).trim()
+        val exported = normalize_module_binding_name(trimmed.slice(12, from_idx).trim())
         if exported == "":
             return ""
         return "__simple_module[\"{exported}\"] = __simple_modules[\"{escape_js_string(resolved)}\"];\n"
     if trimmed.starts_with("export * from "):
         val source = module_statement_source(trimmed)
         val resolved = resolve_relative_url(module_url, source)
-        return join_text([
-            "for (var __simple_export_key in __simple_modules[\"{escape_js_string(resolved)}\"]) {\n",
-            "  if (__simple_export_key !== 'default' && __simple_module[__simple_export_key] === undefined) {\n",
-            "    __simple_module[__simple_export_key] = __simple_modules[\"{escape_js_string(resolved)}\"][__simple_export_key];\n",
-            "  }\n",
-            "}\n"
-        ], "")
+        var out = ""
+        if val Some(dep_source) = pair_value(module_cache, resolved):
+            for exported in module_exported_names(dep_source, false):
+                out = out + "__simple_module[\"{exported}\"] = __simple_module[\"{exported}\"] || __simple_modules[\"{escape_js_string(resolved)}\"][\"{exported}\"];\n"
+        return out
     if trimmed.starts_with("export {"):
         val open = find_text(trimmed, "{", 0)
         val close = find_text(trimmed, "}", open + 1)
@@ -1884,19 +2037,55 @@ fn transform_export_statement(module_url: text, stmt: text) -> text:
             return ""
         val inner = trimmed.slice(open + 1, close)
         var out = ""
-        for named in inner.split(","):
+        for named in split_text(inner, ","):
             val named_trimmed = named.trim()
             if named_trimmed == "":
                 continue
             val alias_idx = find_text(named_trimmed, " as ", 0)
             if alias_idx >= 0:
-                val local = named_trimmed.slice(0, alias_idx).trim()
-                val exported = named_trimmed.slice(alias_idx + 4, named_trimmed.len()).trim()
+                val local = normalize_module_binding_name(named_trimmed.slice(0, alias_idx).trim())
+                val exported = normalize_module_binding_name(named_trimmed.slice(alias_idx + 4, named_trimmed.len()).trim())
                 out = out + "__simple_module[\"{exported}\"] = {local};\n"
             else:
-                out = out + "__simple_module[\"{named_trimmed}\"] = {named_trimmed};\n"
+                val local = normalize_module_binding_name(named_trimmed)
+                out = out + "__simple_module[\"{local}\"] = {local};\n"
         return out
+    if trimmed.starts_with("export <fn:"):
+        val inner = normalize_module_binding_name(strip_trailing_semicolon(trimmed.slice(7, trimmed.len()).trim()))
+        return transform_local_module_export_bindings(inner)
     trimmed + "\n"
+
+fn transform_module_reexport_bindings(inner: text, resolved: text) -> text:
+    var out = ""
+    for named in split_text(inner, ","):
+        val named_trimmed = named.trim()
+        if named_trimmed == "":
+            continue
+        val alias_idx = find_text(named_trimmed, " as ", 0)
+        if alias_idx >= 0:
+            val local = normalize_module_binding_name(named_trimmed.slice(0, alias_idx).trim())
+            val exported = normalize_module_binding_name(named_trimmed.slice(alias_idx + 4, named_trimmed.len()).trim())
+            out = out + "__simple_module[\"{exported}\"] = __simple_modules[\"{escape_js_string(resolved)}\"][\"{escape_js_string(local)}\"];\n"
+        else:
+            val local = normalize_module_binding_name(named_trimmed)
+            out = out + "__simple_module[\"{local}\"] = __simple_modules[\"{escape_js_string(resolved)}\"][\"{escape_js_string(local)}\"];\n"
+    out
+
+fn transform_local_module_export_bindings(inner: text) -> text:
+    var out = ""
+    for named in split_text(inner, ","):
+        val named_trimmed = named.trim()
+        if named_trimmed == "":
+            continue
+        val alias_idx = find_text(named_trimmed, " as ", 0)
+        if alias_idx >= 0:
+            val local = normalize_module_binding_name(named_trimmed.slice(0, alias_idx).trim())
+            val exported = normalize_module_binding_name(named_trimmed.slice(alias_idx + 4, named_trimmed.len()).trim())
+            out = out + "__simple_module[\"{exported}\"] = {local};\n"
+        else:
+            val local = normalize_module_binding_name(named_trimmed)
+            out = out + "__simple_module[\"{local}\"] = {local};\n"
+    out
 
 fn split_module_statements(source: text) -> [text]:
     var items: [text] = []
@@ -2042,6 +2231,16 @@ fn split_import_bindings(clause: text) -> [text]:
         return items
     items + [trimmed]
 
+fn normalize_module_binding_name(name: text) -> text:
+    var out = name.trim()
+    if out.starts_with("<fn:") and out.ends_with(">"):
+        out = out.slice(4, out.len() - 1).trim()
+    if out.starts_with("{") and out.ends_with("}") and out.len() >= 2:
+        out = out.slice(1, out.len() - 1).trim()
+    if out.starts_with(":"):
+        out = out.slice(1, out.len()).trim()
+    out
+
 fn split_export_binding_declarators(decl: text) -> [text]:
     var items: [text] = []
     val trimmed = decl.trim()
@@ -2084,26 +2283,85 @@ fn split_export_binding_declarators(decl: text) -> [text]:
         i = i + 1
     items + [trimmed.slice(start, trimmed.len())]
 
+fn module_exported_names(source: text, include_default: bool) -> [text]:
+    var names: [text] = []
+    for stmt in split_module_statements(source):
+        val trimmed = strip_trailing_semicolon(stmt.trim())
+        if trimmed.starts_with("export default "):
+            if include_default:
+                names = append_unique_text(names, "default")
+        else if trimmed.starts_with("export function "):
+            val name = normalize_module_binding_name(declared_function_name(trimmed.slice(7, trimmed.len()).trim()))
+            if name != "":
+                names = append_unique_text(names, name)
+        else if trimmed.starts_with("export class "):
+            val name = normalize_module_binding_name(declared_class_name(trimmed.slice(7, trimmed.len()).trim()))
+            if name != "":
+                names = append_unique_text(names, name)
+        else if trimmed.starts_with("export const ") or trimmed.starts_with("export let ") or trimmed.starts_with("export var "):
+            val decl = trimmed.slice(7, trimmed.len()).trim()
+            for declarator in split_export_binding_declarators(decl):
+                val name = normalize_module_binding_name(declared_binding_name(declarator))
+                if name != "":
+                    names = append_unique_text(names, name)
+        else if trimmed.starts_with("export {"):
+            val open = find_text(trimmed, "{", 0)
+            val close = find_text(trimmed, "}", open + 1)
+            if open >= 0 and close >= 0:
+                val inner = trimmed.slice(open + 1, close)
+                for named in split_text(inner, ","):
+                    val named_trimmed = named.trim()
+                    if named_trimmed != "":
+                        val alias_idx = find_text(named_trimmed, " as ", 0)
+                        val exported = if alias_idx >= 0:
+                            normalize_module_binding_name(named_trimmed.slice(alias_idx + 4, named_trimmed.len()).trim())
+                        else:
+                            normalize_module_binding_name(named_trimmed)
+                        if exported != "" and (include_default or exported != "default"):
+                            names = append_unique_text(names, exported)
+    names
+
+fn module_variable_decl_kind(decl: text) -> text:
+    val trimmed = decl.trim()
+    if trimmed.starts_with("const "):
+        return "const"
+    if trimmed.starts_with("let "):
+        return "let"
+    if trimmed.starts_with("var "):
+        return "var"
+    "var"
+
+fn normalize_module_variable_declarator(kind: text, declarator: text) -> text:
+    val trimmed = declarator.trim()
+    if trimmed == "":
+        return ""
+    if trimmed.starts_with("const ") or trimmed.starts_with("let ") or trimmed.starts_with("var "):
+        return trimmed
+    kind + " " + trimmed
+
 fn declared_function_name(stmt: text) -> text:
     val open = find_text(stmt, "(", 0)
     if open < 0:
         return ""
     val before = stmt.slice(0, open).trim()
-    val parts = before.split(" ")
+    val parts = split_text(before, " ")
     if parts.len() == 0:
         return ""
-    parts[parts.len() - 1].trim()
+    val name = parts[parts.len() - 1].trim()
+    if name == "function":
+        return ""
+    name
 
 fn declared_class_name(stmt: text) -> text:
     val brace = find_text(stmt, "{", 0)
     val before = if brace >= 0: stmt.slice(0, brace) else: stmt
-    val words = before.trim().split(" ")
+    val words = split_text(before.trim(), " ")
     if words.len() == 0:
         return ""
     var i = words.len() - 1
     while i >= 0:
         val word = words[i].trim()
-        if word != "" and word != "extends":
+        if word != "" and word != "extends" and word != "class":
             return word
         i = i - 1
     ""
@@ -2111,7 +2369,7 @@ fn declared_class_name(stmt: text) -> text:
 fn declared_binding_name(stmt: text) -> text:
     val eq = find_text(stmt, "=", 0)
     val before = if eq >= 0: stmt.slice(0, eq) else: stmt
-    val words = before.trim().split(" ")
+    val words = split_text(before.trim(), " ")
     if words.len() == 0:
         return ""
     words[words.len() - 1].trim()
@@ -2196,16 +2454,17 @@ fn has_tag_attr(tag_content: text, attr_name: text) -> bool:
         lower.ends_with(padded)
 
 fn find_text(haystack: text, needle: text, start: i64) -> i64:
-    val idx = rt_text_find(haystack, needle, start as i64)
-    if haystack.contains("Runtime Ready"):
-        print "[BRS] find_text needle={needle} start={start} raw={idx}"
-    if idx < 0 or idx > haystack.len() as i64:
-        if haystack.contains("Runtime Ready"):
-            print "[BRS] find_text normalized=-1"
+    if start < 0 or start > haystack.len() or needle.len() == 0:
         return -1
-    if haystack.contains("Runtime Ready"):
-        print "[BRS] find_text normalized={idx}"
-    idx
+    var idx = start
+    val last = haystack.len() - needle.len()
+    val first = needle.slice(0, 1)
+    while idx <= last:
+        if haystack.slice(idx, idx + 1) == first:
+            if haystack.slice(idx, idx + needle.len()) == needle:
+                return idx
+        idx = idx + 1
+    -1
 
 fn html_to_text(html: text) -> text:
     var out = ""

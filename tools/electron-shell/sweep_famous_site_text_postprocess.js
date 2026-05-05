@@ -7,7 +7,7 @@ const root = path.resolve(__dirname, '..', '..');
 const baselineDir = path.join(root, 'test', 'baselines', 'famous_site_corpus');
 
 function usage() {
-  console.error('Usage: node tools/electron-shell/sweep_famous_site_text_postprocess.js [--samples=a,b] [--factors=1,1.25,1.5,2] [--expansion-alphas=16,32,48,64] [--shifts=-1:0,0:-1] [--limit=N]');
+  console.error('Usage: node tools/electron-shell/sweep_famous_site_text_postprocess.js [--samples=a,b] [--factors=0.5,0.75,1,1.25,1.5,2,3] [--expansion-alphas=16,32,48,64] [--shifts=-1:0,0:-1] [--limit=N]');
   process.exit(2);
 }
 
@@ -175,7 +175,7 @@ for (const arg of process.argv.slice(2)) {
 
 const selected = argValue('--samples', 'site_15_twitch,site_102_docker_hub').split(',').filter(Boolean);
 const ids = selected[0] === 'all' ? sampleIds() : selected;
-const factors = argValue('--factors', '1,1.125,1.25,1.5,2').split(',').filter(Boolean).map(Number);
+const factors = argValue('--factors', '0.5,0.75,1,1.125,1.25,1.5,2,3').split(',').filter(Boolean).map(Number);
 const expansionAlphas = argValue('--expansion-alphas', '16,32,48,64').split(',').filter(Boolean).map(Number);
 const shifts = argValue('--shifts', '-1:-1,0:-1,1:-1,-1:0,0:0,1:0,-1:1,0:1,1:1')
   .split(',')
