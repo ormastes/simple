@@ -114,6 +114,91 @@ fn calculate_specificity(selector: Selector) -> Specificity:
                 pass_dn
     Specificity.create(ids, classes, elements)
 
+fn parse_selector_text(input: text, logger: Logger) -> Selector:
+    val _logger = logger
+    var parts: [SelectorPart] = []
+    var i = 0
+    var saw_space = false
+    while i < input.len():
+        val c = input.char_at(i)
+        if c == " " or c == "\t" or c == "\n":
+            saw_space = true
+            i = i + 1
+        else:
+            if saw_space and parts.len() > 0:
+                parts = parts + [SelectorPart.Combinator(kind: " ")]
+                saw_space = false
+            if c == ".":
+                i = i + 1
+                val name_end = _selector_name_end(input, i)
+                parts = parts + [SelectorPart.Class(name: input.slice(i, name_end))]
+                i = name_end
+            else if c == "#":
+                i = i + 1
+                val name_end = _selector_name_end(input, i)
+                parts = parts + [SelectorPart.Id(name: input.slice(i, name_end))]
+                i = name_end
+            else if c == "*":
+                parts = parts + [SelectorPart.Universal]
+                i = i + 1
+            else:
+                val name_end = _selector_name_end(input, i)
+                if name_end > i:
+                    parts = parts + [SelectorPart.Type(name: input.slice(i, name_end))]
+                    i = name_end
+                else:
+                    i = i + 1
+    Selector(parts: parts)
+
+fn parse_declarations_text(input: text, logger: Logger) -> [CSSDeclaration]:
+    val _logger = logger
+    var declarations: [CSSDeclaration] = []
+    val pieces = input.split(";")
+    var i = 0
+    while i < pieces.len():
+        val piece = pieces[i].trim()
+        val colon = piece.index_of(":")
+        if colon >= 0:
+            val property = piece.slice(0, colon).trim()
+            var raw_value = piece.slice(colon + 1, piece.len()).trim()
+            var important = false
+            if raw_value.ends_with("!important"):
+                important = true
+                raw_value = raw_value.slice(0, raw_value.len() - 10).trim()
+            val value = parse_css_value_text(raw_value)
+            declarations = declarations + [CSSDeclaration(property: property, value: value, important: important)]
+        i = i + 1
+    declarations
+
+fn _selector_name_end(input: text, start: i64) -> i64:
+    var i = start
+    while i < input.len():
+        val c = input.char_at(i)
+        if is_letter(c) or is_digit(c) or c == "-" or c == "_":
+            i = i + 1
+        else:
+            return i
+    i
+
+fn parse_css_value_text(raw: text) -> CSSValue:
+    val value = raw.trim()
+    if value.starts_with("#"):
+        val parsed = parse_hex_color(value.slice(1, value.len()))
+        match parsed:
+            Some(v):
+                return v
+            nil:
+                return CSSValue.Keyword(v: value)
+    if value.ends_with("px"):
+        val number_text = value.slice(0, value.len() - 2)
+        return CSSValue.Length(v: number_text.to_f64(), unit: "px")
+    val named = named_color_to_rgb(value)
+    match named:
+        Some(v):
+            return v
+        nil:
+            CSSValue.Keyword(v: value)
+
 # ---------- Parser class ----------
 
 class CssParser:
