@@ -114,7 +114,7 @@ Measured blocker:
   `site_0_google` with Chrome's captured line strings and records
   `site_28_google_translate` as the first broader corpus wrapped-line mismatch,
   with Simple measured line-width SDN exposed for that sample. It passes
-  22 examples.
+  27 examples.
 - `src/app/wm_compare/site_corpus_layout_report.spl` is a runnable Simple-side
   text-layout diagnostic. With the renderer-aligned default `--layout-width=122`,
   the full 132-sample corpus now reports 132 matched samples and 0 line-string
@@ -237,19 +237,30 @@ Measured blocker:
 - `tools/electron-shell/summarize_famous_site_corpus_reports.js --limit=3`
   parses all 132 `report.sdn` files and reports corpus-level exact/accepted/
   divergent counts plus worst/best ranked samples. Current summary: 132
-  reports, 0 exact, 0 accepted, 132 divergent. After refreshing the full
-  corpus with the overflow alpha update, `staleSuspectCount` is `0`. The
-  current on-disk worst is `site_44_the_new_york_times` with `3445` differing
-  pixels and best is `site_4_x` with `2150` differing pixels. The corpus BDD
-  covers this summary tool.
+  reports, 0 exact, 0 accepted, 132 divergent. The summary now recomputes
+  `differentPixels` from the checked-in Chrome/Simple PPM artifacts; current
+  `staleReportCount` is `0`. After refreshing the full corpus with the overflow
+  alpha update, `staleSuspectCount` is `0`. The current on-disk worst is
+  `site_44_the_new_york_times` with `3445` differing pixels and best is
+  `site_4_x` with `2150` differing pixels. The corpus BDD covers this summary
+  tool.
 - `tools/electron-shell/summarize_famous_site_corpus_coverage.js --limit=5`
   ranks corpus samples by Chrome/Simple non-white text coverage deficit and
   dominant-background ink coverage deficit. The current worst overflow target
   is `site_102_docker_hub`, with `1608` expected non-white pixels, `1258`
   actual pixels, `350` missing pixels, and `actualPct10000: 7823`. The current
-  tracked in-div ink target is `site_60_tripadvisor`, with `1529` expected ink
-  pixels, `166` actual, and `actualPct10000: 1085`. The corpus BDD covers this
-  summary tool as the compositing target selector.
+  worst in-div ink target is `site_15_twitch`, with `1432` expected ink pixels,
+  `150` actual, and `actualPct10000: 1047`; `site_60_tripadvisor` remains a
+  tracked refreshed target. The corpus BDD covers this summary tool as the
+  compositing target selector.
+- `tools/electron-shell/summarize_famous_site_text_compositing.js --limit=5`
+  ranks colored-background text compositing directly by clipping Chrome text
+  client rects to the colored div and comparing expected/actual
+  dominant-background ink. The current worst ink target is `site_15_twitch`,
+  with `1432` expected ink pixels, `150` actual, and `actualPct10000: 1047`.
+  The current worst in-div text diff target is `site_37_soundcloud`, with
+  `1606` differing pixels and SAD `190169`. The corpus BDD covers this summary
+  tool as the next renderer target selector.
 - `tools/electron-shell/calibrate_famous_site_corpus_ink.js --limit=3` ranks
   threshold/alpha candidates for the current worst ink/exact samples using
   checked-in Chrome PPMs, Simple PPMs, and Chrome metrics sidecars. It is an
@@ -396,6 +407,15 @@ Measured blocker:
   worsened `site_0_google` to `different_pixels: 2860` and SAD `575715`, so it
   remains rejected until the renderer can model Chrome's subpixel gamma,
   filtering, and colored-background compositing together.
+  A calibrated colored-div threshold trial (`raw_alpha >= 160`, alpha `128`)
+  was also rejected after regenerating `site_0_google`: it worsened the current
+  oracle from `different_pixels: 2542` / `perceptual_pct_10000: 8892` to
+  `different_pixels: 2572` / `perceptual_pct_10000: 8868`.
+  Applying the current light alpha to every nonzero colored-div glyph pixel was
+  rejected too: `site_0_google` worsened to `different_pixels: 2857` and
+  `perceptual_pct_10000: 8672`.
+  A direct full-glyph-alpha blend on colored backgrounds was also rejected:
+  `site_0_google` worsened to `different_pixels: 2858` and SAD `543489`.
   The same analyzer reports Chrome has 5,444 chromatic non-white pixels while
   Simple still has 758 gray non-white text pixels, confirming the remaining
   gap is Chrome-style color/LCD coverage rather than only placement.
