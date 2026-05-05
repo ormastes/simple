@@ -107,6 +107,8 @@ function countRegion(expected, actual, region, expectedBg, actualBg) {
   let sad = 0;
   let expectedChromaticInk = 0;
   let actualGrayInk = 0;
+  const channelSignedDiff = { r: 0, g: 0, b: 0 };
+  const channelAbsoluteDiff = { r: 0, g: 0, b: 0 };
   const endY = Math.min(expected.height, region.y + region.height);
   const endX = Math.min(expected.width, region.x + region.width);
   for (let y = Math.max(0, region.y); y < endY; y += 1) {
@@ -131,6 +133,12 @@ function countRegion(expected, actual, region, expectedBg, actualBg) {
       const dr = Math.abs(er - ar);
       const dg = Math.abs(eg - ag);
       const db = Math.abs(eb - ab);
+      channelSignedDiff.r += er - ar;
+      channelSignedDiff.g += eg - ag;
+      channelSignedDiff.b += eb - ab;
+      channelAbsoluteDiff.r += dr;
+      channelAbsoluteDiff.g += dg;
+      channelAbsoluteDiff.b += db;
       if (dr + dg + db > 0) differentPixels += 1;
       sad += dr + dg + db;
     }
@@ -144,6 +152,8 @@ function countRegion(expected, actual, region, expectedBg, actualBg) {
     sad,
     expectedChromaticInk,
     actualGrayInk,
+    channelSignedDiff,
+    channelAbsoluteDiff,
   };
 }
 
@@ -178,6 +188,8 @@ function summarizeSample(id) {
     sad: 0,
     expectedChromaticInk: 0,
     actualGrayInk: 0,
+    channelSignedDiff: { r: 0, g: 0, b: 0 },
+    channelAbsoluteDiff: { r: 0, g: 0, b: 0 },
   };
 
   for (const rect of metrics.textClientRects) {
@@ -191,6 +203,12 @@ function summarizeSample(id) {
     total.sad += current.sad;
     total.expectedChromaticInk += current.expectedChromaticInk;
     total.actualGrayInk += current.actualGrayInk;
+    total.channelSignedDiff.r += current.channelSignedDiff.r;
+    total.channelSignedDiff.g += current.channelSignedDiff.g;
+    total.channelSignedDiff.b += current.channelSignedDiff.b;
+    total.channelAbsoluteDiff.r += current.channelAbsoluteDiff.r;
+    total.channelAbsoluteDiff.g += current.channelAbsoluteDiff.g;
+    total.channelAbsoluteDiff.b += current.channelAbsoluteDiff.b;
   }
 
   return {
@@ -206,6 +224,8 @@ function summarizeSample(id) {
     sad: total.sad,
     expectedChromaticInk: total.expectedChromaticInk,
     actualGrayInk: total.actualGrayInk,
+    channelSignedDiff: total.channelSignedDiff,
+    channelAbsoluteDiff: total.channelAbsoluteDiff,
   };
 }
 

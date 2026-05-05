@@ -240,15 +240,16 @@ Measured blocker:
   reports, 0 exact, 0 accepted, 132 divergent. The summary now recomputes
   `differentPixels` from the checked-in Chrome/Simple PPM artifacts; current
   `staleReportCount` is `0`. After refreshing the full corpus with the overflow
-  alpha update, `staleSuspectCount` is `0`. The current on-disk worst is
-  `site_44_the_new_york_times` with `3445` differing pixels and best is
-  `site_4_x` with `2150` differing pixels. The corpus BDD covers this summary
+  alpha update and the retained overflow-only one-row glyph write shift,
+  `staleSuspectCount` is `0`. The current on-disk worst is
+  `site_44_the_new_york_times` with `3380` differing pixels and best is
+  `site_4_x` with `2138` differing pixels. The corpus BDD covers this summary
   tool.
 - `tools/electron-shell/summarize_famous_site_corpus_coverage.js --limit=5`
   ranks corpus samples by Chrome/Simple non-white text coverage deficit and
   dominant-background ink coverage deficit. The current worst overflow target
-  is `site_102_docker_hub`, with `1608` expected non-white pixels, `1258`
-  actual pixels, `350` missing pixels, and `actualPct10000: 7823`. The current
+  is `site_102_docker_hub`, with `1608` expected non-white pixels, `1253`
+  actual pixels, `355` missing pixels, and `actualPct10000: 7792`. The current
   worst in-div ink target is `site_15_twitch`, with `1432` expected ink pixels,
   `150` actual, and `actualPct10000: 1047`; `site_60_tripadvisor` remains a
   tracked refreshed target. The corpus BDD covers this summary tool as the
@@ -258,6 +259,9 @@ Measured blocker:
   client rects to the colored div and comparing expected/actual
   dominant-background ink. The current worst ink target is `site_15_twitch`,
   with `1432` expected ink pixels, `150` actual, and `actualPct10000: 1047`.
+  Its signed RGB error is currently `r: -70853`, `g: -33410`, `b: -135016`,
+  confirming Simple is too bright in the dominant purple/blue channels inside
+  the colored text region.
   The current worst in-div text diff target is `site_37_soundcloud`, with
   `1606` differing pixels and SAD `190169`. The corpus BDD covers this summary
   tool as the next renderer target selector.
@@ -266,6 +270,29 @@ Measured blocker:
   checked-in Chrome PPMs, Simple PPMs, and Chrome metrics sidecars. It is an
   offline diagnostic for choosing the next renderer experiment, not a corpus
   acceptance gate; the BDD only locks the tool contract and default sample set.
+- `tools/electron-shell/sweep_famous_site_text_postprocess.js --limit=3` ranks
+  renderer-positioned scalar postprocess candidates by strengthening only the
+  text pixels already present in Simple's current PPMs. Across
+  `site_15_twitch` and `site_102_docker_hub`, the current best SAD factor is
+  `1.5`, improving SAD from `1231713` to `1224014` while exact differing
+  pixels remain unchanged at `6031`. The corpus BDD covers this diagnostic, so
+  future work does not need to retry flat darkening of existing glyph pixels as
+  an exact-parity strategy.
+  The same tool now sweeps RGB-channel factors. The best exact candidate
+  (`r=2,g=1.5,b=1.5`) leaves exact unchanged at `6031` while improving SAD
+  to `1223274`; channel scaling is therefore not a sufficient
+  substitute for a real LCD/filter/gamma text model.
+  It also checks naive adjacent-edge expansion of the current Simple text
+  pixels. The lightest tested expansion alpha `16` worsens exact pixels to
+  `7091` and SAD to `1236226`, ruling out simple dilation as the missing
+  coverage strategy.
+  A translation sweep before the retained overflow-only refresh reported a
+  postprocess `dx=0,dy=-1` improvement across `site_15_twitch` and
+  `site_102_docker_hub` (`6106 -> 6072`, SAD `1245647 -> 1242168`), but the
+  corresponding real renderer origin trial
+  (`y=5 -> y=4`) worsened `site_15_twitch` to `3158` differing pixels and
+  colored-text SAD `254765`. This rules out a simple global one-pixel origin
+  shift even though the postprocess simulation is useful diagnostic evidence.
 - Corpus-level Chrome parity is not achieved: the full 132-sample comparison
   initially reported 0 accepted samples and 132 divergent samples. After adding
   the corpus block fast path, `site_0_google` improved from
@@ -386,7 +413,7 @@ Measured blocker:
 - `node tools/electron-shell/analyze_ppm_delta.js
   test/baselines/famous_site_corpus/site_0_google/chrome.ppm
   test/baselines/famous_site_corpus/site_0_google/simple.ppm` confirms the same
-  `differentPixels: 2542` and shows the remaining error is text-dominated:
+  current `differentPixels: 2530` and shows the remaining error is text-dominated:
   Chrome dark bbox `x=8..98 y=10..75`, Simple has no `<100` dark-pixel core
   after the thresholded blend, and diff bbox is `x=7..103 y=9..76`.
   Single-pixel geometry checks were measured and rejected: moving the layout
@@ -399,10 +426,10 @@ Measured blocker:
   `3204` differing pixels.
   Scoping the weak TTF blend to overflow text reduced `site_0_google` from
   `2436` to `2347`; the current lighter linear overflow-alpha curve improves
-  coverage; a small in-div core restores some colored-background ink but leaves
-  `site_0_google` at `2542` and current worst
-  `site_44_the_new_york_times` at `3445`, while leaving the colored-background
-  text compositing gap open.
+  coverage; a small in-div core restores some colored-background ink, and the
+  retained overflow-only one-row glyph write shift moves `site_0_google` to
+  `2530` and current worst `site_44_the_new_york_times` to `3380`, while
+  leaving the colored-background text compositing gap open.
   A later focused subpixel-only experiment improved in-div ink coverage but
   worsened `site_0_google` to `different_pixels: 2860` and SAD `575715`, so it
   remains rejected until the renderer can model Chrome's subpixel gamma,
@@ -416,6 +443,25 @@ Measured blocker:
   `perceptual_pct_10000: 8672`.
   A direct full-glyph-alpha blend on colored backgrounds was also rejected:
   `site_0_google` worsened to `different_pixels: 2858` and SAD `543489`.
+  A focused `raw_alpha >= 192` / alpha `96` trial on `site_15_twitch` was
+  rejected because it raised colored-text SAD from `251059` to `251205` without
+  improving actual ink coverage.
+  A broader but lighter `raw_alpha >= 160` / alpha `32` trial on
+  `site_15_twitch` improved actual colored-div ink from `150` to `213`, but it
+  worsened colored-text SAD from `251059` to `251153` and full-screenshot
+  differing pixels from `3151` to `3165`, so it remains rejected.
+  A darker `raw_alpha >= 128` / alpha `160` trial improved actual colored-div
+  ink further to `280`, but worsened colored-text SAD to `255993` and
+  full-screenshot differing pixels to `3191`; stronger scalar darkening is
+  therefore not sufficient on the real renderer-positioned pixels.
+  A white-overflow alpha multiplier trial (`64 -> 72`) on `site_102_docker_hub`
+  left exact differing pixels unchanged at `2955`, left measured overflow
+  coverage unchanged at `1258/1608`, and slightly worsened perceptual score
+  from `8645` to `8639`, so it is rejected.
+  A blue-channel-only in-div darkening trial on `site_15_twitch` kept the same
+  full-screenshot exact count (`3151`) and ink coverage (`150/1432`), but
+  worsened colored-text SAD from `251059` to `251425`, so flat channel scaling
+  is rejected too.
   The same analyzer reports Chrome has 5,444 chromatic non-white pixels while
   Simple still has 758 gray non-white text pixels, confirming the remaining
   gap is Chrome-style color/LCD coverage rather than only placement.
@@ -449,12 +495,12 @@ Measured blocker:
   only on hardcoded `site_0_google` coordinates; the BDD diagnostic test uses
   that metrics-driven mode. It also reports per-region non-white coverage
   ratios: current `site_0_google` overflow text has `963` expected non-white
-  pixels versus `758` actual (`actualPct10000: 7871`), and current
-  `site_44_the_new_york_times` overflow text has `1608` expected versus `1258`
-  actual (`actualPct10000: 7823`).
+  pixels versus `751` actual (`actualPct10000: 7798`), and current
+  `site_44_the_new_york_times` overflow text has `1608` expected versus `1253`
+  actual (`actualPct10000: 7792`).
   The analyzer also reports dominant-background ink coverage, which exposes
   colored-box text omission that non-white coverage cannot see: current
-  `site_0_google` has `1335` expected in-div ink pixels versus `224` actual.
+  `site_0_google` has `1335` expected in-div ink pixels versus `259` actual.
   A darker grayscale calibration reduced total channel error to `498342` but
   worsened exact differing pixels to `2458`, so it is rejected for the current
   bitwise corpus gate.
