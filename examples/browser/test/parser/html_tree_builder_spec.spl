@@ -19,52 +19,52 @@ Tests for html tree builder functionality.
 # Run with: bin/simple test examples/browser/test/parser/html_tree_builder_spec.spl
 
 use std.spec
-use sbp.feature.parser.html_tree_builder.{parse_html, HtmlDocument}
-use sbp.entity.dom.node_types.{DomNode, NodeKind, Element, TextNode, Comment}
+use examples.browser.feature.parser.html_tree_builder.{TreeBuilder}
+use examples.browser.feature.parser.html_tokenizer.{HtmlTokenizer}
+use examples.browser.entity.dom.node_types.{DomNode, NodeKind}
+use examples.browser.shared.logging.{Logger, LogLevel}
 
 # ============================================================================
 # Helpers
 # ============================================================================
 
-fn find_element_by_tag(doc: HtmlDocument, tag: text) -> DomNode?:
+fn parse_html(html: text) -> TreeBuilder:
+    val logger = Logger.new("html-tree-test", LogLevel.Error)
+    val tokenizer = HtmlTokenizer.new(html)
+    var builder = TreeBuilder.new(tokenizer, logger)
+    val parsed = builder.parse()
+    match parsed:
+        Ok(_): builder
+        Err(_): builder
+
+fn find_element_by_tag(doc: TreeBuilder, tag: text) -> DomNode?:
     var i = 0
     while i < doc.nodes.len():
         val node = doc.nodes.get(i)
-        if val elem = doc.get_element(node.id):
-            if elem.tag_name == tag:
+        if node.kind == NodeKind.Element:
+            if doc.get_element_tag(node.id) == tag:
                 return Some(node)
         i = i + 1
     nil
 
-fn count_children(doc: HtmlDocument, node_id: i64) -> i64:
+fn count_children(doc: TreeBuilder, node_id: i64) -> i64:
     val node = doc.get_node(node_id)
-    match node:
-        Some(n): n.children.len()
-        nil: 0
+    node.children.len()
 
-fn get_child_tag(doc: HtmlDocument, parent_id: i64, index: i64) -> text:
+fn get_child_tag(doc: TreeBuilder, parent_id: i64, index: i64) -> text:
     val parent = doc.get_node(parent_id)
-    match parent:
-        Some(p):
-            if index < p.children.len():
-                val child_id = p.children.get(index)
-                val elem = doc.get_element(child_id)
-                match elem:
-                    Some(e): e.tag_name
-                    nil: ""
-            else:
-                ""
-        nil: ""
+    if index < parent.children.len():
+        val child_id = parent.children.get(index)
+        doc.get_element_tag(child_id)
+    else:
+        ""
 
-fn get_text_content(doc: HtmlDocument, node_id: i64) -> text:
+fn get_text_content(doc: TreeBuilder, node_id: i64) -> text:
     val node = doc.get_node(node_id)
-    match node:
-        Some(n):
-            if n.kind == NodeKind.Text:
-                n.data
-            else:
-                ""
-        nil: ""
+    if node.kind == NodeKind.Text:
+        node.data
+    else:
+        ""
 
 # ============================================================================
 # Tree construction basics
@@ -80,8 +80,7 @@ describe "HtmlTreeBuilder":
     context "simple documents":
         it "builds document from simple HTML":
             val doc = parse_html("<html><head></head><body></body></html>")
-            val root = doc.root_node()
-            expect(root.?).to_equal(true)
+            expect(doc.document_node >= 0).to_equal(true)
 
         it "creates html, head, body elements":
             val doc = parse_html("<html><head><title>Test</title></head><body><p>Hello</p></body></html>")
@@ -161,12 +160,9 @@ describe "HtmlTreeBuilder":
                 expect(child_count).to_be_greater_than(0)
                 val child_id = div.children.get(0)
                 val child = doc.get_node(child_id)
-                if val c = child:
-                    val is_comment = c.kind == NodeKind.Comment
-                    expect(is_comment).to_equal(true)
-                    expect(c.data).to_equal(" hello ")
-                else:
-                    expect("comment child should exist").to_equal("")
+                val is_comment = child.kind == NodeKind.Comment
+                expect(is_comment).to_equal(true)
+                expect(child.data).to_equal(" hello ")
             else:
                 expect("div should exist").to_equal("")
 
