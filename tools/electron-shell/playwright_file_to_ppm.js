@@ -15,6 +15,7 @@ const htmlPath = valueAfter('--html');
 const ppmPath = valueAfter('--out');
 const width = Number(valueAfter('--width') || '160');
 const height = Number(valueAfter('--height') || '120');
+const retries = Number(valueAfter('--retries') || '3');
 
 if (!htmlPath || !ppmPath) {
     console.error('Usage: node tools/electron-shell/playwright_file_to_ppm.js --html <file.html> --out <file.ppm> [--width 160] [--height 120]');
@@ -42,14 +43,29 @@ function run(command, commandArgs) {
 }
 
 try {
-    run('npx', [
-        'playwright', 'screenshot',
-        '--browser', 'chromium',
-        `--viewport-size=${width},${height}`,
-        '--timeout', '30000',
-        `file://${absHtml}`,
-        tmpPng
-    ]);
+    let lastError = null;
+    for (let attempt = 1; attempt <= retries; attempt += 1) {
+        try {
+            run('npx', [
+                'playwright', 'screenshot',
+                '--browser', 'chromium',
+                `--viewport-size=${width},${height}`,
+                '--timeout', '30000',
+                `file://${absHtml}`,
+                tmpPng
+            ]);
+            lastError = null;
+            break;
+        } catch (err) {
+            lastError = err;
+            if (attempt < retries) {
+                console.error(`[playwright_file_to_ppm] screenshot attempt ${attempt}/${retries} failed; retrying`);
+            }
+        }
+    }
+    if (lastError) {
+        throw lastError;
+    }
     run('node', [
         'tools/electron-shell/png_to_ppm.js',
         tmpPng,
