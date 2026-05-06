@@ -1,6 +1,6 @@
 #![allow(unnamed_duplicate_typed_args)]
 use std.nogc_sync_mut.ffi.spl_fonts.{FontRasterizer, GlyphBitmap, LayoutGlyph, SubpixelGlyphBitmap}
-use std.nogc_sync_mut.ffi.io.{file_exists}
+use std.nogc_sync_mut.ffi.io.{dir_create_all, file_exists}
 use std.nogc_sync_mut.ffi.system.{process_run_timeout}
 
 # Shared Font Renderer — unified text rendering for both OS and browser
@@ -27,6 +27,8 @@ enum FontBackend:
     Vector
     Bitmap
 
+extern fn rt_http_download(url: text, output_path: text) -> (i64, i64, text)
+
 fn browser_font_dylib_candidates() -> [text]:
     [
         "src/compiler_rust/target/release/libspl_fonts.so",
@@ -35,12 +37,83 @@ fn browser_font_dylib_candidates() -> [text]:
 
 fn browser_serif_font_candidates() -> [text]:
     [
+        "/usr/share/fonts/truetype/liberation/LiberationSerif-Regular.ttf",
         "examples/simple_os/fonts/serif/NotoSerif-Regular.ttf",
         "examples/simple_os/fonts/serif/NotoSerifSC-Regular.otf",
-        "/usr/share/fonts/truetype/liberation/LiberationSerif-Regular.ttf",
         "/usr/share/fonts/truetype/dejavu/DejaVuSerif.ttf",
         "/usr/share/fonts/opentype/urw-base35/NimbusRoman-Regular.otf"
     ]
+
+fn browser_sans_font_candidates() -> [text]:
+    [
+        "examples/simple_os/fonts/sans/NotoSans-Regular.ttf",
+        "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "/usr/share/fonts/opentype/urw-base35/NimbusSans-Regular.otf"
+    ]
+
+fn browser_mono_font_candidates() -> [text]:
+    [
+        "examples/simple_os/fonts/mono/FiraCodeNerdFontMono-Regular.ttf",
+        "/usr/share/fonts/truetype/liberation/LiberationMono-Regular.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
+        "/usr/share/fonts/opentype/urw-base35/NimbusMonoPS-Regular.otf"
+    ]
+
+fn browser_font_candidates_for_family(family: text) -> [text]:
+    val face_source = browser_font_face_source_from_family_value(family)
+    val lower = family.to_lower()
+    if face_source != "":
+        if lower.contains("mono") or lower.contains("courier") or lower.contains("code") or lower.contains("console"):
+            return [face_source] + browser_mono_font_candidates()
+        if lower.contains("sans") or lower.contains("arial") or lower.contains("helvetica") or lower.contains("system"):
+            return [face_source] + browser_sans_font_candidates()
+        return [face_source] + browser_serif_font_candidates()
+    if lower.contains("mono") or lower.contains("courier") or lower.contains("code") or lower.contains("console"):
+        return browser_mono_font_candidates()
+    if lower.contains("sans") or lower.contains("arial") or lower.contains("helvetica") or lower.contains("system"):
+        return browser_sans_font_candidates()
+    browser_serif_font_candidates()
+
+fn browser_font_face_family_value(family: text, source_url: text) -> text:
+    val source = browser_font_face_local_source_path(source_url)
+    if source == "":
+        return family
+    "__simple_font_face__|" + source + "|" + family
+
+fn browser_font_face_source_from_family_value(family: text) -> text:
+    val prefix = "__simple_font_face__|"
+    if not family.starts_with(prefix):
+        return ""
+    val rest = family.slice(prefix.len(), family.len())
+    val pipe = rest.index_of("|")
+    if pipe < 0:
+        return ""
+    rest.slice(0, pipe)
+
+fn browser_font_face_local_source_path(source_url: text) -> text:
+    val trimmed = _strip_font_url_quotes(source_url.trim())
+    val lower = trimmed.to_lower()
+    if lower.starts_with("http://") or lower.starts_with("https://") or lower.starts_with("//"):
+        val cached = browser_font_face_cached_source_path(trimmed)
+        if file_exists(cached):
+            return cached
+        return ""
+    if lower.starts_with("file://"):
+        return trimmed.slice(7, trimmed.len())
+    trimmed
+
+fn browser_font_face_cached_source_path(source_url: text) -> text:
+    browser_font_cache_dir() + "/" + _browser_font_cache_file_name(source_url)
+
+fn browser_chrome_compatible_normal_font_path() -> text:
+    "/usr/share/fonts/truetype/liberation/LiberationSerif-Regular.ttf"
+
+fn browser_chrome_compatible_normal_font_name() -> text:
+    "Liberation Serif Regular"
+
+fn browser_chrome_compatible_vector_font_name() -> text:
+    "Simple Vector Outline"
 
 fn browser_provided_font_paths() -> [text]:
     [
@@ -52,6 +125,9 @@ fn browser_provided_font_paths() -> [text]:
 fn browser_font_download_script_path() -> text:
     "examples/simple_os/fonts/download_fonts.shs"
 
+fn browser_font_cache_dir() -> text:
+    "build/browser-font-cache"
+
 class BrowserFontMaterializeResult:
     ok: bool
     attempted_download: bool
@@ -61,14 +137,7 @@ class BrowserFontMaterializeResult:
     exit_code: i32
 
 fn _browser_font_materialize_result(ok: bool, attempted_download: bool, status: text, stdout: text, stderr: text, exit_code: i32) -> BrowserFontMaterializeResult:
-    BrowserFontMaterializeResult(
-        ok: ok,
-        attempted_download: attempted_download,
-        status: status,
-        stdout: stdout,
-        stderr: stderr,
-        exit_code: exit_code
-    )
+    BrowserFontMaterializeResult(ok: ok, attempted_download: attempted_download, status: status, stdout: stdout, stderr: stderr, exit_code: exit_code)
 
 fn browser_provided_fonts_available() -> bool:
     for path in browser_provided_font_paths():
@@ -91,20 +160,50 @@ fn ensure_browser_provided_fonts(auto_download: bool, timeout_ms: i64) -> Browse
         return _browser_font_materialize_result(true, true, "downloaded", stdout, stderr, exit_code)
     _browser_font_materialize_result(false, true, "download_incomplete", stdout, stderr, exit_code)
 
+fn ensure_browser_font_face_sources(css: text, auto_download: bool) -> BrowserFontMaterializeResult:
+    val urls = browser_font_face_source_urls(css)
+    if urls.len() == 0:
+        return _browser_font_materialize_result(true, false, "no_font_face_sources", "", "", 0)
+    var attempted = false
+    var missing_remote = false
+    for url in urls:
+        if _browser_font_source_is_remote(url):
+            val cached = browser_font_face_cached_source_path(url)
+            if file_exists(cached):
+                continue
+            missing_remote = true
+            if not auto_download:
+                continue
+            attempted = true
+            dir_create_all(browser_font_cache_dir())
+            val result = rt_http_download(url, cached)
+            if result.0 < 200 or result.0 >= 300:
+                return _browser_font_materialize_result(false, true, "remote_download_failed", "", result.2, result.0.to_i32())
+        else:
+            val local = browser_font_face_local_source_path(url)
+            if local != "" and not file_exists(local):
+                return _browser_font_materialize_result(false, attempted, "local_source_missing", "", local, 0)
+    if missing_remote and not auto_download:
+        return _browser_font_materialize_result(false, false, "remote_sources_missing", "", "", 0)
+    _browser_font_materialize_result(true, attempted, if attempted: "font_face_sources_downloaded" else: "font_face_sources_available", "", "", 0)
+
 fn browser_font_face_source_urls(css: text) -> [text]:
     var urls: [text] = []
     val lower = css.to_lower()
     var search_start = 0
     while true:
-        val at_idx_rel = lower.substring(search_start).index_of("@font-face")
+        val at_haystack = lower.substring(search_start)
+        val at_idx_rel = at_haystack.index_of("@font-face")
         if at_idx_rel < 0:
             break
         val at_idx = search_start + at_idx_rel
-        val open_rel = lower.substring(at_idx).index_of("{")
+        val open_haystack = lower.substring(at_idx)
+        val open_rel = open_haystack.index_of("{")
         if open_rel < 0:
             break
         val open_idx = at_idx + open_rel
-        val close_rel = lower.substring(open_idx + 1).index_of("}")
+        val close_haystack = lower.substring(open_idx + 1)
+        val close_rel = close_haystack.index_of("}")
         if close_rel < 0:
             break
         val close_idx = open_idx + 1 + close_rel
@@ -118,11 +217,13 @@ fn _browser_font_face_urls_in_block(block: text) -> [text]:
     val lower = block.to_lower()
     var search_start = 0
     while true:
-        val url_rel = lower.substring(search_start).index_of("url(")
+        val url_haystack = lower.substring(search_start)
+        val url_rel = url_haystack.index_of("url(")
         if url_rel < 0:
             break
         val start = search_start + url_rel + 4
-        val end_rel = block.substring(start).index_of(")")
+        val end_haystack = block.substring(start)
+        val end_rel = end_haystack.index_of(")")
         if end_rel < 0:
             break
         val raw = block.substring(start, start + end_rel).trim()
@@ -140,6 +241,33 @@ fn _strip_font_url_quotes(raw: text) -> text:
             return raw.substring(1, raw.len() - 1)
     raw
 
+fn _browser_font_source_is_remote(source_url: text) -> bool:
+    val lower = source_url.to_lower()
+    lower.starts_with("http://") or lower.starts_with("https://") or lower.starts_with("//")
+
+fn _browser_font_cache_file_name(source_url: text) -> text:
+    var out = ""
+    var idx = 0
+    while idx < source_url.len():
+        val ch = source_url.char_at(idx)
+        if (ch >= "a" and ch <= "z") or (ch >= "A" and ch <= "Z") or (ch >= "0" and ch <= "9"):
+            out = out + ch
+        else:
+            out = out + "_"
+        idx = idx + 1
+    out + _browser_font_source_extension(source_url)
+
+fn _browser_font_source_extension(source_url: text) -> text:
+    val lower = source_url.to_lower()
+    if lower.contains(".woff2"):
+        return ".woff2"
+    if lower.contains(".woff"):
+        return ".woff"
+    if lower.contains(".otf"):
+        return ".otf"
+    if lower.contains(".ttf"):
+        return ".ttf"
+    ".font"
 # ============================================================================
 # Glyph Cache Entry
 # ============================================================================
@@ -210,10 +338,15 @@ class FontRenderer:
         )
 
     static fn browser_serif_default() -> FontRenderer:
-        var renderer = FontRenderer.new()
-        renderer.try_enable_browser_serif_default()
-        renderer
+        FontRenderer.browser_default_for_family("serif")
 
+    static fn browser_default_for_family(family: text) -> FontRenderer:
+        var renderer = FontRenderer.new()
+        for font_path in browser_font_candidates_for_family(family):
+            for dylib_path in browser_font_dylib_candidates():
+                if renderer.try_enable_ttf(dylib_path, font_path):
+                    return renderer
+        renderer
     fn has_ttf() -> bool:
         self.ttf_handle != 0
 

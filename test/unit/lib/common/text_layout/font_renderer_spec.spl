@@ -1,8 +1,15 @@
 use std.spec.{describe, it, expect}
 use common.text_layout.font_renderer.{
+    browser_chrome_compatible_normal_font_name,
+    browser_chrome_compatible_normal_font_path,
+    browser_chrome_compatible_vector_font_name,
     FontRenderer, browser_font_download_script_path, browser_font_face_source_urls,
-    browser_provided_font_paths,
-    browser_serif_font_candidates, ensure_browser_provided_fonts}
+    browser_font_face_family_value, browser_font_face_source_from_family_value,
+    browser_font_cache_dir, browser_font_face_cached_source_path, ensure_browser_font_face_sources,
+    browser_font_candidates_for_family, browser_mono_font_candidates,
+    browser_provided_font_paths, browser_sans_font_candidates,
+    browser_serif_font_candidates,
+    ensure_browser_provided_fonts}
 
 fn _count_nonzero_alpha(pixels: [u8]) -> i32:
     var count = 0
@@ -49,11 +56,38 @@ describe "shared font renderer fallbacks":
         expect(_count_nonzero_alpha(glyph.pixels)).to_be_greater_than(0)
         expect(_count_full_alpha(glyph.pixels)).to_be_greater_than(0)
 
-    it "keeps provided browser serif font candidates ahead of host fallbacks":
+    it "keeps Chrome-compatible serif font candidates ahead of fallback fonts":
         val candidates = browser_serif_font_candidates()
-        expect(candidates[0]).to_equal("examples/simple_os/fonts/serif/NotoSerif-Regular.ttf")
-        expect(candidates[1]).to_equal("examples/simple_os/fonts/serif/NotoSerifSC-Regular.otf")
-        expect(candidates[2]).to_equal("/usr/share/fonts/truetype/liberation/LiberationSerif-Regular.ttf")
+        expect(candidates[0]).to_equal(browser_chrome_compatible_normal_font_path())
+        expect(candidates[1]).to_equal("examples/simple_os/fonts/serif/NotoSerif-Regular.ttf")
+        expect(candidates[2]).to_equal("examples/simple_os/fonts/serif/NotoSerifSC-Regular.otf")
+
+    it "keeps provided browser sans and mono candidates ahead of host fallbacks":
+        val sans = browser_sans_font_candidates()
+        val mono = browser_mono_font_candidates()
+        expect(sans[0]).to_equal("examples/simple_os/fonts/sans/NotoSans-Regular.ttf")
+        expect(sans[1]).to_equal("/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf")
+        expect(mono[0]).to_equal("examples/simple_os/fonts/mono/FiraCodeNerdFontMono-Regular.ttf")
+        expect(mono[1]).to_equal("/usr/share/fonts/truetype/liberation/LiberationMono-Regular.ttf")
+
+    it "maps browser CSS font-family names to provided font lanes":
+        expect(browser_font_candidates_for_family("monospace")[0]).to_equal("examples/simple_os/fonts/mono/FiraCodeNerdFontMono-Regular.ttf")
+        expect(browser_font_candidates_for_family("'Fira Code', monospace")[0]).to_equal("examples/simple_os/fonts/mono/FiraCodeNerdFontMono-Regular.ttf")
+        expect(browser_font_candidates_for_family("Arial, sans-serif")[0]).to_equal("examples/simple_os/fonts/sans/NotoSans-Regular.ttf")
+        expect(browser_font_candidates_for_family("Times New Roman, serif")[0]).to_equal(browser_chrome_compatible_normal_font_path())
+
+    it "selects one Chrome-compatible normal font and one vector fallback":
+        expect(browser_chrome_compatible_normal_font_name()).to_equal("Liberation Serif Regular")
+        expect(browser_chrome_compatible_normal_font_path()).to_equal("/usr/share/fonts/truetype/liberation/LiberationSerif-Regular.ttf")
+        expect(browser_chrome_compatible_vector_font_name()).to_equal("Simple Vector Outline")
+
+    it "builds browser default renderers from selected font lanes":
+        val renderer = FontRenderer.browser_serif_default()
+        expect(renderer.use_vector).to_equal(true)
+        expect(renderer.use_bitmap).to_equal(true)
+        val mono_renderer = FontRenderer.browser_default_for_family("monospace")
+        expect(mono_renderer.use_vector).to_equal(true)
+        expect(mono_renderer.use_bitmap).to_equal(true)
 
     it "exposes an opt-in browser default font materialization surface":
         val provided = browser_provided_font_paths()
@@ -72,3 +106,25 @@ describe "shared font renderer fallbacks":
         expect(urls.len()).to_equal(2)
         expect(urls[0]).to_equal("/fonts/demo.woff2")
         expect(urls[1]).to_equal("https://cdn.example/demo.ttf")
+
+    it "puts resolved local font-face sources ahead of generic fallback candidates":
+        val family = browser_font_face_family_value("Demo Serif, serif", "examples/simple_os/fonts/serif/NotoSerif-Regular.ttf")
+        val candidates = browser_font_candidates_for_family(family)
+        expect(browser_font_face_source_from_family_value(family)).to_equal("examples/simple_os/fonts/serif/NotoSerif-Regular.ttf")
+        expect(candidates[0]).to_equal("examples/simple_os/fonts/serif/NotoSerif-Regular.ttf")
+        expect(candidates[1]).to_equal(browser_chrome_compatible_normal_font_path())
+
+    it "keeps remote font-face sources out of renderer file candidates until fetched":
+        val family = browser_font_face_family_value("Remote Serif, serif", "https://cdn.example/font.ttf")
+        expect(family).to_equal("Remote Serif, serif")
+        expect(browser_font_candidates_for_family(family)[0]).to_equal(browser_chrome_compatible_normal_font_path())
+
+    it "maps remote font-face sources to deterministic cache paths without implicit download":
+        val url = "https://cdn.example/fonts/demo.woff2"
+        expect(browser_font_cache_dir()).to_equal("build/browser-font-cache")
+        expect(browser_font_face_cached_source_path(url)).to_equal("build/browser-font-cache/https___cdn_example_fonts_demo_woff2.woff2")
+
+        val css = "@font-face { font-family: Remote; src: url('https://cdn.example/fonts/demo.woff2') format('woff2'); }"
+        val result = ensure_browser_font_face_sources(css, false)
+        expect(result.attempted_download).to_equal(false)
+        expect(result.status).to_equal("remote_sources_missing")

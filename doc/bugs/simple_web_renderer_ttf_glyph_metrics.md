@@ -229,6 +229,13 @@ coverage, not just glyph placement.
 the matching Chrome DOM metrics: body margin `8px`, computed `font-family:
 "Times New Roman"`, `font-size: 16px`, div rect `x=8 y=8 width=120 height=40`,
 and text client rect tops at 8, 26, 44, and 62px.
+The selected normal/system font for this path is
+`/usr/share/fonts/truetype/liberation/LiberationSerif-Regular.ttf`
+(`Liberation Serif Regular`), matching the host substitute closest to Chrome's
+Times New Roman behavior in current evidence. The selected renderer-native
+vector fallback is `Simple Vector Outline`; it stays a fallback behind the
+normal font because the corpus blocker is measured against Chrome's normal
+serif text, not the limited internal vector glyph set.
 `analyze_ppm_delta.js` now accepts that metrics JSON and derives region and
 line diagnostics from those Chrome DOM rectangles, so future samples can reuse
 the same diagnostic path without hardcoding their text client rects.

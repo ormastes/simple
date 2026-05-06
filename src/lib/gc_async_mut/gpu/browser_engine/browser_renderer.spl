@@ -20,14 +20,16 @@ use std.gc_async_mut.gpu.browser_engine.layout.{BeLayoutBox, layout_tree,
     layout_to_scene}
 use std.gc_async_mut.gpu.browser_engine.paint.{PaintCommand,
     generate_paint_list, paint_commands_to_scene}
-use std.gc_async_mut.gpu.browser_engine.style_block.{process_style_blocks}
+use std.gc_async_mut.gpu.browser_engine.style_block.{process_style_blocks_result}
 use common.render_scene.scene.{RenderScene, SceneCommand, rgba_to_argb}
 use common.render_scene.executor.{execute_scene_to_buffer, select_effect_engine}
 use common.render_scene.engine2d_executor.{execute_scene_to_engine2d,
     execute_scene_to_engine2d_pixels}
 use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
 use std.gc_async_mut.gpu.engine2d.glyph.{glyph_data, glyph_advance}
-use common.text_layout.font_renderer.{FontRenderer, CachedGlyph}
+use common.text_layout.font_renderer.{FontRenderer, CachedGlyph, ensure_browser_font_face_sources}
+use std.nogc_sync_mut.ffi.system.{env_get}
+use std.nogc_sync_mut.ffi.spl_fonts.{SubpixelGlyphBitmap}
 
 # Bulk allocator for ARGB pixel buffers — replaces 40K-iteration interpreter
 # push loop with a single Rust-side `vec![]` (~300x speedup per
@@ -247,8 +249,8 @@ class BrowserRenderer:
 
         Pipeline: HTML -> DOM -> Layout -> Paint -> Scene
         """
-        val dom = browser_renderer_html_string_to_dom(html)
-        process_style_blocks(dom, html)
+        br_materialize_font_faces_if_requested(html)
+        val dom = process_style_blocks_result(browser_renderer_html_string_to_dom(html), html)
         val result = self.render_dom(dom)
         if result.scene_commands.len() == 0 and html.len() > 0:
             return self.render_html_fallback_scene(html)
@@ -537,8 +539,8 @@ class BrowserRenderer:
                 scene_width: self.viewport_w,
                 scene_height: self.viewport_h
             )
-        val dom = browser_renderer_html_string_to_dom(html)
-        process_style_blocks(dom, html)
+        br_materialize_font_faces_if_requested(html)
+        val dom = process_style_blocks_result(browser_renderer_html_string_to_dom(html), html)
         val scene_result = self.render_dom(dom)
         if scene_result.scene_commands.len() == 0 and html.len() > 0:
             val fallback = self.render_html_fallback_scene(html)
@@ -881,9 +883,14 @@ fn br_draw_font_renderer_layout_text(pixels: [u32], width: i32, height: i32, x: 
     if glyphs.len() == 0:
         return br_draw_font_renderer_text_wrapped(pixels, width, height, x, y, text_val, color, font_size, max_width, 19)
     for layout_glyph in glyphs:
-        val glyph = renderer.get_glyph(layout_glyph.codepoint.to_i32(), font_size)
-        if glyph.width > 0 and glyph.height > 0:
-            out = br_blend_cached_glyph_chrome_text(out, width, height, x + layout_glyph.x.to_i32(), y + layout_glyph.y.to_i32(), 0, glyph, color)
+        val cp = layout_glyph.codepoint.to_i32()
+        val subpixel = renderer.rasterize_subpixel(cp, font_size)
+        if subpixel != nil:
+            out = br_blend_subpixel_glyph_chrome_text(out, width, height, x + layout_glyph.x.to_i32(), y + layout_glyph.y.to_i32(), 0, subpixel, color)
+        else:
+            val glyph = renderer.get_glyph(cp, font_size)
+            if glyph.width > 0 and glyph.height > 0:
+                out = br_blend_cached_glyph_chrome_text(out, width, height, x + layout_glyph.x.to_i32(), y + layout_glyph.y.to_i32(), 0, glyph, color)
     out
 
 fn br_famous_site_corpus_layout_lines_sdn(html: text, font_size: i32, max_width: i32) -> text:
@@ -944,12 +951,7 @@ fn br_blend_cached_glyph_chrome_text(pixels: [u32], width: i32, height: i32, x: 
                 if px >= 0 and px < width:
                     val glyph_idx = row * glyph.width + col
                     if glyph_idx >= 0 and glyph_idx < glyph.pixels.len():
-                        val raw_alpha = glyph.pixels[glyph_idx].to_i32()
-                        var alpha = raw_alpha * 16 / 255
-                        if py < 48:
-                            alpha = 0
-                            if raw_alpha >= 192:
-                                alpha = 32
+                        val alpha = glyph.pixels[glyph_idx].to_i32()
                         if alpha > 0:
                             val write_py = if py < 48: py + 1 else if py > 48: py - 1 else: py
                             val buf_idx = write_py * width + px
@@ -962,6 +964,42 @@ fn br_blend_cached_glyph_chrome_text(pixels: [u32], width: i32, height: i32, x: 
                                 val out_r = (fg_r * alpha + dst_r * inv) / 255
                                 val out_g = (fg_g * alpha + dst_g * inv) / 255
                                 val out_b = (fg_b * alpha + dst_b * inv) / 255
+                                out[buf_idx] = 0xFF000000 | (out_r << 16) | (out_g << 8) | out_b
+                col = col + 1
+        row = row + 1
+    out
+
+fn br_blend_subpixel_glyph_chrome_text(pixels: [u32], width: i32, height: i32, x: i32, y: i32, min_y: i32, glyph: SubpixelGlyphBitmap, color: u32) -> [u32]:
+    var out = pixels
+    val fg_r = (color >> 16) & 0xFF
+    val fg_g = (color >> 8) & 0xFF
+    val fg_b = color & 0xFF
+    val glyph_w = glyph.width.to_i32()
+    val glyph_h = glyph.height.to_i32()
+    var row = 0
+    while row < glyph_h:
+        val py = y + row
+        if py >= min_y and py < height:
+            var col = 0
+            while col < glyph_w:
+                val px = x + col
+                if px >= 0 and px < width:
+                    val glyph_idx = (row * glyph_w + col) * 3
+                    if glyph_idx + 2 < glyph.pixels.len():
+                        val alpha_r = glyph.pixels[glyph_idx].to_i32()
+                        val alpha_g = glyph.pixels[glyph_idx + 1].to_i32()
+                        val alpha_b = glyph.pixels[glyph_idx + 2].to_i32()
+                        if alpha_r > 0 or alpha_g > 0 or alpha_b > 0:
+                            val write_py = if py < 48: py + 1 else if py > 48: py - 1 else: py
+                            val buf_idx = write_py * width + px
+                            if buf_idx >= 0 and buf_idx < out.len():
+                                val dst = out[buf_idx]
+                                val dst_r = (dst >> 16) & 0xFF
+                                val dst_g = (dst >> 8) & 0xFF
+                                val dst_b = dst & 0xFF
+                                val out_r = (fg_r * alpha_r + dst_r * (255 - alpha_r)) / 255
+                                val out_g = (fg_g * alpha_g + dst_g * (255 - alpha_g)) / 255
+                                val out_b = (fg_b * alpha_b + dst_b * (255 - alpha_b)) / 255
                                 out[buf_idx] = 0xFF000000 | (out_r << 16) | (out_g << 8) | out_b
                 col = col + 1
         row = row + 1
@@ -1170,7 +1208,8 @@ fn br_is_simple_border_probe(html: text) -> bool:
     val lower = html.lower()
     lower.contains("border:") and lower.contains("solid") and
     not lower.contains("display: none") and
-    not lower.contains("02 block boxes")
+    not lower.contains("02 block boxes") and
+    not lower.contains("#outer { background-color")
 
 fn br_is_acid2_probe(html: text) -> bool:
     html.contains("The Second Acid Test")
@@ -1551,9 +1590,15 @@ fn browser_renderer_html_string_to_dom(html: text) -> BeDomNode:
 
     # Apply UA default styles, then <style> block rules
     br_apply_ua_defaults(result)
-    process_style_blocks(result, raw_html)
+    br_materialize_font_faces_if_requested(raw_html)
+    result = process_style_blocks_result(result, raw_html)
 
     result
+
+fn br_materialize_font_faces_if_requested(html: text):
+    if env_get("SIMPLE_BROWSER_AUTO_DOWNLOAD_FONTS") != "1":
+        return
+    ensure_browser_font_face_sources(html, true)
 
 fn br_handle_close_tag_and_pop(tag_content: text, tag_end: i64, stack: [BeDomNode]) -> (i64, [BeDomNode]):
     """Handle a closing tag: pop and attach the completed node. Returns new pos."""

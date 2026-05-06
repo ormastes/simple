@@ -419,32 +419,59 @@ Current verification evidence:
 - Chrome DOM metrics for `site_0_google` show body margin `8px`, computed
   `font-family: "Times New Roman"`, `font-size: 16px`, a 120x40 div, and text
   client rect tops at 8, 26, 44, and 62px.
-- A direct `NimbusRoman-Regular.otf` default-font trial was rejected because it
-  worsened `site_0_google` from `2495` to `2631` differing pixels; the renderer
-  remains on the host's `Times New Roman`/Liberation Serif fallback.
 - Browser default serif font selection is now centralized in
-  `FontRenderer.browser_serif_default()`. It prefers downloaded repo-provided
-  fonts under `examples/simple_os/fonts/serif/` when present, then falls back to
-  host Liberation Serif, DejaVu Serif, and Nimbus Roman candidates. The hot
-  render path does not shell out or fetch network assets; `download_fonts.shs`
-  remains the explicit font materialization step. BrowserRenderer and
-  Engine2D's shared `render_text_to_buffer()` helper both use this resolver.
-  `bin/simple test
-  test/unit/app/ui.chromium/text_metrics_spec.spl --clean` now covers the
-  provided-font-before-host-fallback candidate ordering, and
+  `FontRenderer.browser_serif_default()`. The selected normal/system font is
+  `/usr/share/fonts/truetype/liberation/LiberationSerif-Regular.ttf`
+  (`Liberation Serif Regular`), because the Chrome oracle reports
+  `"Times New Roman"` and the measured Nimbus substitution regressed exact
+  pixels. Repo-provided Noto Serif plus host DejaVu/Nimbus remain fallback
+  candidates if Liberation Serif is unavailable. The selected renderer-native
+  vector fallback is `Simple Vector Outline`. The same shared font API exposes
+  provided-font-first sans and
+  mono lanes plus CSS-family-name mapping for `sans-serif`, `monospace`, Fira
+  Code/Courier-style stacks, and serif fallback stacks. The hot render path
+  does not shell out or fetch network assets; `download_fonts.shs` is reachable
+  through the opt-in `ensure_browser_provided_fonts()` browser font materializer,
+  and the `simple browser` app can invoke it at startup with
+  `--auto-download-fonts` or `SIMPLE_BROWSER_AUTO_DOWNLOAD_FONTS=1`.
+  BrowserRenderer and Engine2D's shared `render_text_to_buffer()` helper both
+  use this resolver. Browser CSS `font-family` now survives through
+  `StyleProps`, `PaintCommand`, `SceneCommand.font_family`, the software
+  RenderScene executor, and `Engine2D.draw_text_with_family()` so normal
+  browser paint commands can reach the family resolver instead of losing the
+  requested stack at scene conversion. Style block processing now has a
+  result-returning API used by BrowserRenderer, and matching local
+  `@font-face { src: url(...) }` declarations are carried into the renderer as
+  first-priority font candidates for matching `font-family` stacks. Remote
+  `@font-face` URLs map to deterministic files under `build/browser-font-cache`;
+  when `--auto-download-fonts` or `SIMPLE_BROWSER_AUTO_DOWNLOAD_FONTS=1` is
+  active, BrowserRenderer materializes those remote sources through the runtime
+  HTTP download FFI before style-block resolution. Rendering still does not
+  fetch network assets unless this opt-in is enabled.
   `bin/simple test test/unit/lib/common/text_layout/font_renderer_spec.spl
-  --clean` covers vector antialiasing coverage, bitmap mask coverage, and the
-  same provided-font ordering.
-- `node tools/electron-shell/sweep_famous_site_text_postprocess.js
-  --samples=all --limit=5` confirms the current cheap postprocess paths are not
-  sufficient: the best exact-count scalar candidate reduces total corpus diffs
-  only from `354927` to `353055` while worsening SAD from `70754881` to
-  `71584990`, all text expansion candidates jump to `418960+` diffs, and every
-  global or scoped one-pixel shift is neutral or worse.
-- `bin/simple check src/app/wm_compare/site_corpus_compat.spl src/lib/gc_async_mut/gpu/browser_engine/browser_renderer.spl test/sys/wm_compare/famous_site_corpus_spec.spl`
-  passed after the full corpus refresh and spec expectation updates.
-- `bin/simple check test/sys/wm_compare/famous_site_corpus_spec.spl src/app/wm_compare/site_corpus_compat.spl src/lib/gc_async_mut/gpu/browser_engine/browser_renderer.spl`
-  passed again after adding the executable corpus completion gate.
+  --clean` passed 12 examples covering
+  vector antialiasing coverage, bitmap mask coverage, serif/sans/mono
+  provided-font ordering, CSS-family lane mapping, opt-in default-font
+  materialization, `@font-face` source URL scanning for browser
+  materialization, local font-face candidate priority, and current remote
+  cache-path/no-implicit-download behavior. `bin/simple test
+  test/unit/lib/gc_async_mut/gpu/browser_engine/style_block_font_face_spec.spl
+  --clean` passed 3 examples covering result-style rule application, local
+  `@font-face` cascade into renderer candidates, and unmatched-family fallback.
+  `bin/simple test
+  test/unit/app/ui/browser_font_materialization_spec.spl --clean` passed 1
+  example covering the browser startup flag and environment selector.
+  `bin/simple test test/unit/app/ui.chromium/text_metrics_spec.spl --clean`
+  passed 12 examples covering CSS
+  `font-family` preservation through wrapped paint commands and RenderScene
+  text commands.
+- `bin/simple check` on 18 touched source/spec files passed. `bin/simple check
+  src/lib` passed 2625 files. `bin/simple check src/app/ui.browser
+  src/app/ui.chromium test/unit/app/ui/browser_font_materialization_spec.spl
+  test/unit/app/ui.chromium/text_metrics_spec.spl` passed 24 files. Focused
+  regression specs passed for browser renderer (31 examples), Engine2D
+  text-background drawing (3 examples), CSS parser (20 examples), compat tools
+  (2 examples), and the famous-site corpus smoke/diagnostic suite (28 examples).
 
 Uncovered or weak areas:
 
@@ -460,7 +487,11 @@ Uncovered or weak areas:
   path for these in-process 800x600 fixtures; that is not a substitute for a
   full external framebuffer comparator.
 - Full Chrome compatibility is not demonstrated by current tests.
-- The renderer still needs real text shaping/rasterization, border antialiasing, general CSS cascade/layout, and scalable Chrome oracle integration.
+- Remote `@font-face` materialization now fetches to cache only when explicitly
+  enabled, but cached WOFF/WOFF2 files still depend on the current font
+  rasterizer accepting that format; unsupported downloaded formats fall back to
+  the normal font lanes.
+- The renderer still needs fuller text shaping/rasterization, border antialiasing, general CSS cascade/layout, and scalable Chrome oracle integration.
 - Current text-compositing work rejects a false exact-count improvement where
   removing visible overflow gray text lowers differing-pixel counts but worsens
   SAD and violates the visible-overflow BDD guardrail.
