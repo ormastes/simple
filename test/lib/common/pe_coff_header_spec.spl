@@ -1,0 +1,72 @@
+use common.pe_coff_header.{parse_pe_header_summary, pe_section_table_gate, pe_data_directory_gate}
+
+fn _zero_bytes(count: i64) -> [u8]:
+    var out: [u8] = []
+    var i = 0
+    while i < count:
+        out.push(0)
+        i = i + 1
+    out
+
+fn _put_u16_le(data: [u8], offset: i64, value: i64) -> [u8]:
+    data[offset] = (value & 0xff) as u8
+    data[offset + 1] = ((value >> 8) & 0xff) as u8
+    data
+
+fn _put_u32_le(data: [u8], offset: i64, value: i64) -> [u8]:
+    data[offset] = (value & 0xff) as u8
+    data[offset + 1] = ((value >> 8) & 0xff) as u8
+    data[offset + 2] = ((value >> 16) & 0xff) as u8
+    data[offset + 3] = ((value >> 24) & 0xff) as u8
+    data
+
+fn _minimal_pe64_console() -> [u8]:
+    var data = _zero_bytes(512)
+    data[0] = 0x4d
+    data[1] = 0x5a
+    data = _put_u32_le(data, 0x3c, 0x80)
+    data[0x80] = 0x50
+    data[0x81] = 0x45
+    data[0x82] = 0
+    data[0x83] = 0
+    data = _put_u16_le(data, 0x84, 0x8664)
+    data = _put_u16_le(data, 0x86, 1)
+    data = _put_u16_le(data, 0x94, 0xf0)
+    data = _put_u16_le(data, 0x98, 0x20b)
+    data = _put_u16_le(data, 0x98 + 0x5c, 3)
+    data = _put_u32_le(data, 0x98 + 0x6c, 16)
+    data
+
+fn _minimal_pe64_console_with_dirs() -> [u8]:
+    var data = _minimal_pe64_console()
+    data = _put_u32_le(data, 0x98 + 0x70 + 8, 0x2000)
+    data = _put_u32_le(data, 0x98 + 0x70 + 12, 0x40)
+    data = _put_u32_le(data, 0x98 + 0x70 + 40, 0x3000)
+    data = _put_u32_le(data, 0x98 + 0x70 + 44, 0x20)
+    data = _put_u32_le(data, 0x98 + 0x70 + 72, 0x4000)
+    data = _put_u32_le(data, 0x98 + 0x70 + 76, 0x18)
+    data
+
+describe "PE/COFF header classifier":
+    it "rejects too-small inputs":
+        val summary = parse_pe_header_summary([])
+        expect(summary.ok).to_equal(false)
+        expect(summary.error).to_equal("too-small")
+
+    it "rejects non-MZ inputs":
+        val summary = parse_pe_header_summary(_zero_bytes(256))
+        expect(summary.error).to_equal("bad-mz")
+
+    it "classifies a minimal PE32+ x86_64 console header":
+        val summary = parse_pe_header_summary(_minimal_pe64_console())
+        expect(summary.ok).to_equal(true)
+        expect(summary.machine).to_equal("x86_64")
+        expect(summary.optional_header).to_equal("PE32+")
+        expect(summary.subsystem_kind).to_equal("console")
+
+    it "accepts a bounded section table":
+        expect(pe_section_table_gate(_minimal_pe64_console())).to_equal("ready")
+
+    it "requires import, relocation, and TLS data directories":
+        expect(pe_data_directory_gate(_minimal_pe64_console())).to_equal("missing-import-directory")
+        expect(pe_data_directory_gate(_minimal_pe64_console_with_dirs())).to_equal("ready")

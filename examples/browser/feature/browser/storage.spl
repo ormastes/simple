@@ -2,11 +2,12 @@
 #![allow(REQC004)]
 #![allow(unnamed_duplicate_typed_args)]
 # Web storage manager for the Simple Browser Platform.
-# Implements localStorage, sessionStorage, and IndexedDB stubs per origin.
+# Implements localStorage, sessionStorage, and IndexedDB data per origin.
 
 use sbp.shared.error.{BrowserResult, BrowserError, BrowserErrorKind, config_error}
 use sbp.shared.logging.{Logger, LogLevel}
-use sbp.entity.browser.storage_types.{StorageArea, StorageKind, IndexedDbSchema}
+use examples.browser.entity.browser.storage_types.{StorageArea, StorageKind, IndexedDbSchema, IndexedDbObjectStore}
+use std.js.types.pair.{Pair}
 
 class StorageManager:
     local_stores: [StorageArea]
@@ -16,9 +17,9 @@ class StorageManager:
 
     static fn new(logger: Logger) -> StorageManager:
         StorageManager(
-            local_stores: [StorageArea](),
-            session_stores: [StorageArea](),
-            databases: [IndexedDbSchema](),
+            local_stores: [],
+            session_stores: [],
+            databases: [],
             logger: logger
         )
 
@@ -28,7 +29,7 @@ class StorageManager:
         for i in 0..self.local_stores.len():
             if self.local_stores[i].origin == origin:
                 return i
-        val store = StorageArea.create(kind: StorageKind.Local, origin: origin)
+        val store = StorageArea(kind: StorageKind.Local, origin: origin, entries: [])
         self.local_stores.push(store)
         self.local_stores.len() - 1
 
@@ -36,7 +37,7 @@ class StorageManager:
         for i in 0..self.session_stores.len():
             if self.session_stores[i].origin == origin:
                 return i
-        val store = StorageArea.create(kind: StorageKind.Session, origin: origin)
+        val store = StorageArea(kind: StorageKind.Session, origin: origin, entries: [])
         self.session_stores.push(store)
         self.session_stores.len() - 1
 
@@ -138,19 +139,107 @@ class StorageManager:
     # --- IndexedDB ---
 
     me idb_open(origin: text, name: text, version: i64) -> BrowserResult<i64>:
+        if origin == "":
+            return Err(config_error("IndexedDB origin is required"))
+        if name == "":
+            return Err(config_error("IndexedDB database name is required"))
+        if version <= 0:
+            return Err(config_error("IndexedDB version must be positive"))
         # Check if database already exists for this origin+name
         for i in 0..self.databases.len():
-            if self.databases[i].name == name:
+            if self.databases[i].origin == origin and self.databases[i].name == name:
                 if self.databases[i].version < version:
-                    # Upgrade: replace with new version
-                    self.databases[i] = IndexedDbSchema.create(name: name, version: version)
+                    var db = self.databases[i]
+                    db.version = version
+                    self.databases[i] = db
                     self.logger.debug("IndexedDB upgraded: {origin}/{name} v{version}")
                 return Ok(i)
         # Create new database
-        val schema = IndexedDbSchema.create(name: name, version: version)
+        val schema = IndexedDbSchema(origin: origin, name: name, version: version, object_stores: [])
         self.databases.push(schema)
         self.logger.debug("IndexedDB opened: {origin}/{name} v{version}")
         Ok(self.databases.len() - 1)
+
+    me idb_create_object_store(db_id: i64, store_name: text) -> BrowserResult<i64>:
+        if store_name == "":
+            return Err(config_error("IndexedDB object store name is required"))
+        if db_id < 0 or db_id >= self.databases.len():
+            return Err(config_error("IndexedDB database id={db_id} not found"))
+        var db = self.databases[db_id]
+        for i in 0..db.object_stores.len():
+            if db.object_stores[i].name == store_name:
+                return Ok(i)
+        db.object_stores.push(IndexedDbObjectStore(name: store_name, entries: []))
+        self.databases[db_id] = db
+        self.logger.debug("IndexedDB object store created: db={db_id} store={store_name}")
+        Ok(db.object_stores.len() - 1)
+
+    me idb_put(db_id: i64, store_name: text, key: text, value: text) -> BrowserResult<bool>:
+        if key == "":
+            return Err(config_error("IndexedDB key is required"))
+        val store_idx_result = self._idb_object_store_index(db_id, store_name)
+        match store_idx_result:
+            Err(e): return Err(e)
+            Ok(store_idx):
+                var db = self.databases[db_id]
+                var store = db.object_stores[store_idx]
+                for i in 0..store.entries.len():
+                    if store.entries[i].first == key:
+                        store.entries[i] = Pair(first: key, second: value)
+                        db.object_stores[store_idx] = store
+                        self.databases[db_id] = db
+                        return Ok(true)
+                store.entries.push(Pair(first: key, second: value))
+                db.object_stores[store_idx] = store
+                self.databases[db_id] = db
+                Ok(true)
+
+    fn idb_get(db_id: i64, store_name: text, key: text) -> BrowserResult<text?>:
+        val store_idx_result = self._idb_object_store_index(db_id, store_name)
+        match store_idx_result:
+            Err(e): return Err(e)
+            Ok(store_idx):
+                val store = self.databases[db_id].object_stores[store_idx]
+                for pair in store.entries:
+                    if pair.first == key:
+                        return Ok(Some(pair.second))
+                Ok(nil)
+
+    me idb_delete(db_id: i64, store_name: text, key: text) -> BrowserResult<bool>:
+        val store_idx_result = self._idb_object_store_index(db_id, store_name)
+        match store_idx_result:
+            Err(e): return Err(e)
+            Ok(store_idx):
+                var db = self.databases[db_id]
+                var store = db.object_stores[store_idx]
+                for i in 0..store.entries.len():
+                    if store.entries[i].first == key:
+                        store.entries.remove(i)
+                        db.object_stores[store_idx] = store
+                        self.databases[db_id] = db
+                        return Ok(true)
+                Ok(false)
+
+    me idb_clear(db_id: i64, store_name: text) -> BrowserResult<bool>:
+        val store_idx_result = self._idb_object_store_index(db_id, store_name)
+        match store_idx_result:
+            Err(e): return Err(e)
+            Ok(store_idx):
+                var db = self.databases[db_id]
+                var store = db.object_stores[store_idx]
+                store.entries = []
+                db.object_stores[store_idx] = store
+                self.databases[db_id] = db
+                Ok(true)
+
+    fn _idb_object_store_index(db_id: i64, store_name: text) -> BrowserResult<i64>:
+        if db_id < 0 or db_id >= self.databases.len():
+            return Err(config_error("IndexedDB database id={db_id} not found"))
+        val db = self.databases[db_id]
+        for i in 0..db.object_stores.len():
+            if db.object_stores[i].name == store_name:
+                return Ok(i)
+        Err(config_error("IndexedDB object store '{store_name}' not found"))
 
     # --- Cross-storage operations ---
 
@@ -170,4 +259,9 @@ class StorageManager:
             if store.origin == origin:
                 for pair in store.entries:
                     total = total + pair.first.len() + pair.second.len()
+        for db in self.databases:
+            if db.origin == origin:
+                for store in db.object_stores:
+                    for pair in store.entries:
+                        total = total + pair.first.len() + pair.second.len()
         total

@@ -4,14 +4,18 @@
 
 use std.js.types.js_types.*
 use std.js.types.pair.{Pair}
+use std.js.engine.js_error.{script_error}
 
 # --- Public API ---
 
 fn json_parse(input: text) -> BrowserResult<JsValue>:
     val trimmed_pos = skip_whitespace(input, 0)
     if trimmed_pos >= input.len():
-        return Result.Err(parse_error("Unexpected end of JSON input"))
+        return Result.Err(script_error("Unexpected end of JSON input"))
     val result = parse_value(input, trimmed_pos)
+    val end_pos = skip_whitespace(input, result.second)
+    if end_pos != input.len():
+        return Result.Err(script_error("Unexpected token after JSON value"))
     Result.Ok(result.first)
 
 fn json_stringify(value: JsValue, indent: i64) -> text:
@@ -32,14 +36,17 @@ fn parse_value(input: text, pos: i64) -> Pair<JsValue, i64>:
     if ch == "[":
         return parse_array(input, p)
     if ch == "t":
-        # true
-        return Pair(first: JsValue.Boolean(v: true), second: p + 4)
+        if _has_literal(input, p, "true"):
+            return Pair(first: JsValue.Boolean(v: true), second: p + 4)
+        return Pair(first: JsValue.Undefined, second: p)
     if ch == "f":
-        # false
-        return Pair(first: JsValue.Boolean(v: false), second: p + 5)
+        if _has_literal(input, p, "false"):
+            return Pair(first: JsValue.Boolean(v: false), second: p + 5)
+        return Pair(first: JsValue.Undefined, second: p)
     if ch == "n":
-        # null
-        return Pair(first: JsValue.Null, second: p + 4)
+        if _has_literal(input, p, "null"):
+            return Pair(first: JsValue.Null, second: p + 4)
+        return Pair(first: JsValue.Undefined, second: p)
     # Number
     val num_result = parse_number(input, p)
     Pair(first: JsValue.Number(v: num_result.first), second: num_result.second)
@@ -204,6 +211,12 @@ fn skip_whitespace(input: text, pos: i64) -> i64:
         else:
             break
     i
+
+fn _has_literal(input: text, pos: i64, literal: text) -> bool:
+    val end_pos = pos + literal.len()
+    if end_pos > input.len():
+        return false
+    input[pos:end_pos] == literal
 
 # --- Stringify ---
 

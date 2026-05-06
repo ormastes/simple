@@ -5,7 +5,7 @@
 # Exposes document/element methods to JavaScript: getElementById, querySelector,
 # createElement, attribute manipulation, child management, and property accessors.
 
-use browser.shared.logging.Logger
+use std.js.engine.js_error.Logger
 use browser.shared.error.BrowserResult
 use browser.shared.error.BrowserError
 use browser.shared.error.BrowserErrorKind
@@ -18,7 +18,7 @@ use browser.entity.dom.node_types.DomNode
 use browser.entity.dom.node_types.NodeKind
 use browser.entity.dom.node_types.Element
 use browser.entity.dom.node_types.TextNode
-use std.js.engine.runtime.JsRuntime
+use std.js.engine.runtime.{JsRuntime}
 use std.js.engine.interpreter_types.to_string
 use browser.feature.dom.document.Document
 use browser.feature.dom.element.ElementOps
@@ -65,7 +65,7 @@ class DomBindings:
         self.logger.debug("Installing DOM bindings")
 
         # Create the document object in the JS object store
-        val doc_id = runtime.interpreter.object_store.create_object()
+        val doc_id = runtime.interpreter.create_object()
 
         # ── Document methods ────────────────────────────────────────
         runtime._define_method_on(doc_id, "getElementById", NATIVE_GET_ELEMENT_BY_ID)
@@ -77,7 +77,7 @@ class DomBindings:
         runtime._define_method_on(doc_id, "createTextNode", NATIVE_CREATE_TEXT_NODE)
 
         # Store document ref so DOM methods can resolve against the tree
-        runtime.interpreter.object_store.set_property(
+        runtime.interpreter.set_object_property(
             doc_id, "__dom_ref__", JsValue.Number(v: self.document_ref.to_f64()))
 
         # Bind document to global scope
@@ -237,24 +237,7 @@ fn js_innerHTML_get(node_id: i64, doc: Document) -> JsValue:
 fn js_innerHTML_set(node_id: i64, html: text, doc: Document) -> BrowserResult<()>:
     if node_id < 0:
         return Err(dom_error("innerHTML set: invalid node id"))
-    # Remove existing children
-    val node_opt = doc.node_store.get_node(node_id)
-    if val Some(node) = node_opt:
-        var children_copy = [i64]()
-        var ci = 0
-        while ci < node.children.len():
-            children_copy.push(node.children.get(ci))
-            ci = ci + 1
-        var ri = 0
-        while ri < children_copy.len():
-            doc.removeChild(node_id, children_copy.get(ri))
-            ri = ri + 1
-    # Create a text node with the HTML content as placeholder
-    # (full implementation would parse the HTML into a subtree)
-    if html.len() > 0:
-        val text_id = doc.createTextNode(html)
-        doc.appendChild(node_id, text_id)
-    Ok(())
+    doc.set_inner_html(node_id, html)
 
 fn js_textContent_get(node_id: i64, doc: Document) -> JsValue:
     val content = doc.get_inner_text(node_id)
@@ -264,7 +247,7 @@ fn js_textContent_set(node_id: i64, content: text, doc: Document):
     # Remove all children
     val node_opt = doc.node_store.get_node(node_id)
     if val Some(node) = node_opt:
-        var children_copy = [i64]()
+        var children_copy = []
         var ci = 0
         while ci < node.children.len():
             children_copy.push(node.children.get(ci))

@@ -19,31 +19,33 @@ Tests for http cache functionality.
 # Run with: bin/simple test examples/browser/test/net/http_cache_spec.spl
 
 use std.spec
-use sbp.feature.net.cache.{HttpCache, parse_cache_control, is_fresh, should_cache}
-use sbp.entity.net.cache_types.{CacheEntry, CachePolicy, CacheControl, ETag}
-use sbp.shared.logging.Logger
+use examples.browser.feature.net.cache.{HttpCache, parse_cache_control, is_fresh, should_cache}
+use examples.browser.entity.net.cache_types.{CacheEntry, CachePolicy, CacheControl, ETag}
+use examples.browser.shared.logging.{Logger, LogLevel}
+use std.js.types.pair.{Pair}
 
 # ============================================================================
 # Helpers
 # ============================================================================
 
 fn make_logger() -> Logger:
-    Logger.create("test-cache", "warn")
+    Logger.new("test-cache", LogLevel.Warn)
 
 fn make_cache(max_mb: i64) -> HttpCache:
     HttpCache.new(make_logger(), max_mb)
 
-fn make_headers(cc_value: text):
-    var headers: [text] = []
+fn make_headers(cc_value: text) -> [Pair<text, text>]:
+    var headers: [Pair<text, text>] = []
+    headers.push(Pair(first: "cache-control", second: cc_value))
     headers
 
-fn empty_headers():
-    var h: [text] = []
+fn empty_headers() -> [Pair<text, text>]:
+    var h: [Pair<text, text>] = []
     h
 
 fn make_fresh_entry(url: text, max_age: i64, stored_at: i64) -> CacheEntry:
-    var controls = [CacheControl]()
-    controls.push(CacheControl.MaxAge(seconds: max_age))
+    var controls: [CacheControl] = []
+    controls.push(CacheControl.MaxAge(max_age))
     val etag = ETag.strong("")
     val policy = CachePolicy.create(controls, etag, 0)
     CacheEntry(
@@ -116,7 +118,7 @@ describe "parse_cache_control":
         expect(directives.len()).to_equal(1)
         val first = directives.get(0)
         val is_max_age = match first:
-            CacheControl.MaxAge(m): m.seconds == 3600
+            CacheControl.MaxAge(seconds): seconds == 3600
             _: false
         expect(is_max_age).to_equal(true)
 
@@ -148,7 +150,7 @@ describe "parse_cache_control":
         expect(is_public).to_equal(true)
         val d1 = directives.get(1)
         val is_max_age = match d1:
-            CacheControl.MaxAge(m): m.seconds == 600
+            CacheControl.MaxAge(seconds): seconds == 600
             _: false
         expect(is_max_age).to_equal(true)
         val d2 = directives.get(2)
@@ -198,11 +200,15 @@ describe "HttpCache eviction":
         var cache = make_cache(1)
         val headers = make_headers("max-age=3600")
         # Store several entries that together exceed 1 MB
-        var i = 0
-        while i < 5:
-            val url = "https://example.com/evict/{i}"
+        val urls = [
+            "https://example.com/evict/0",
+            "https://example.com/evict/1",
+            "https://example.com/evict/2",
+            "https://example.com/evict/3",
+            "https://example.com/evict/4"
+        ]
+        for url in urls:
             cache.store(url, "x", headers)
-            i = i + 1
         # The cache should have evicted older entries to stay within budget.
         # Depending on entry sizes, not all 5 may remain.
         # At minimum, the last stored entry should be accessible.

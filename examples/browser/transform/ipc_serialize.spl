@@ -6,9 +6,9 @@
 # IPC-1: Full deserialize_msg implementation.
 # IPC-2: Payload serialization/deserialization in wire format.
 
-use sbp.entity.ipc.message_types.{BrowserIpcMsg, BrowserIpcMethod, IpcFlag, IpcPayloadEntry}
-use sbp.entity.ipc.process_types.{ProcessId, ProcessKind}
-use sbp.shared.error.{BrowserResult, ipc_error}
+use examples.browser.entity.ipc.message_types.{BrowserIpcMsg, BrowserIpcMethod, IpcFlag, IpcPayloadEntry}
+use examples.browser.entity.ipc.process_types.{ProcessId, ProcessKind}
+use examples.browser.shared.error.{BrowserResult, ipc_error}
 
 fn serialize_method(method: BrowserIpcMethod) -> text:
     match method:
@@ -28,6 +28,32 @@ fn serialize_method(method: BrowserIpcMethod) -> text:
         BrowserIpcMethod.SubmitFrame: "SubmitFrame"
         BrowserIpcMethod.SwapBuffers: "SwapBuffers"
         BrowserIpcMethod.GpuMemoryReport: "GpuMemoryReport"
+
+fn serialize_process_kind(kind: ProcessKind) -> text:
+    match kind:
+        ProcessKind.Browser: "Browser"
+        ProcessKind.Renderer: "Renderer"
+        ProcessKind.Network: "Network"
+        ProcessKind.Gpu: "Gpu"
+        ProcessKind.Utility: "Utility"
+
+fn deserialize_process_kind(data: text) -> ProcessKind:
+    match data:
+        "Renderer": ProcessKind.Renderer
+        "Network": ProcessKind.Network
+        "Gpu": ProcessKind.Gpu
+        "Utility": ProcessKind.Utility
+        _: ProcessKind.Browser
+
+fn parse_i64_text(s: text) -> i64:
+    var result: i64 = 0
+    var i = 0
+    while i < s.len():
+        val ch = s.slice(i, i + 1)
+        if ch >= "0" and ch <= "9":
+            result = result * 10 + (ch.to_i64() - "0".to_i64())
+        i = i + 1
+    result
 
 fn deserialize_method(data: text) -> BrowserResult<BrowserIpcMethod>:
     match data:
@@ -50,47 +76,63 @@ fn deserialize_method(data: text) -> BrowserResult<BrowserIpcMethod>:
         _: Err(ipc_error("Unknown IPC method: {data}"))
 
 fn serialize_msg(msg: BrowserIpcMsg) -> text:
-    # Wire format: "src_id|dst_id|method|request_id|key=val,key=val,..."
+    # Wire format: "src_id|src_kind|dst_id|dst_kind|method|request_id|key=val,key=val,..."
     # IPC-2: Payload appended as 5th pipe-delimited field.
     val method_str = serialize_method(msg.method)
+    val src_kind = serialize_process_kind(msg.src.kind)
+    val dst_kind = serialize_process_kind(msg.dst.kind)
     val payload_str = serialize_payload(msg.payload)
-    "{msg.src.id}|{msg.dst.id}|{method_str}|{msg.request_id}|{payload_str}"
+    "{msg.src.id}|{src_kind}|{msg.dst.id}|{dst_kind}|{method_str}|{msg.request_id}|{payload_str}"
 
 fn deserialize_msg(data: text) -> BrowserResult<BrowserIpcMsg>:
     # IPC-1: Parse wire format back into a BrowserIpcMsg.
-    # Split on '|' delimiter, parse fields: src_id, dst_id, method, request_id, payload
+    # Split on '|' delimiter, parse fields including process kind. Keep support
+    # for the old id-only format so persisted messages fail soft.
     val parts = data.split("|")
     if parts.len() < 4:
         return Err(ipc_error("Malformed IPC message: expected at least 4 fields, got {parts.len()}"))
 
-    val src_id = parts.get(0).to_i64()
-    val dst_id = parts.get(1).to_i64()
-    val method_str = parts.get(2)
-    val request_id = parts.get(3).to_i64()
+    val src_id = parse_i64_text(parts.get(0))
+    var src_kind = ProcessKind.Browser
+    var dst_id = 0
+    var dst_kind = ProcessKind.Browser
+    var method_str = ""
+    var request_id = 0
+    var payload_index = 4
+    if parts.len() >= 6:
+        src_kind = deserialize_process_kind(parts.get(1))
+        dst_id = parse_i64_text(parts.get(2))
+        dst_kind = deserialize_process_kind(parts.get(3))
+        method_str = parts.get(4)
+        request_id = parse_i64_text(parts.get(5))
+        payload_index = 6
+    else:
+        dst_id = parse_i64_text(parts.get(1))
+        method_str = parts.get(2)
+        request_id = parse_i64_text(parts.get(3))
 
     val method_result = deserialize_method(method_str)
+    var method = BrowserIpcMethod.NavigateTo
     match method_result:
+        Ok(m):
+            method = m
         Err(e):
             return Err(e)
-        _:
-            pass_dn  # Method parsed successfully, continue
-
-    val method = method_result?
 
     # IPC-2: Parse optional payload (5th field)
-    var payload = [IpcPayloadEntry]()
-    if parts.len() > 4:
-        val payload_str = parts.get(4)
+    var payload: [IpcPayloadEntry] = []
+    if parts.len() > payload_index:
+        val payload_str = parts.get(payload_index)
         if payload_str.len() > 0:
             payload = deserialize_payload(payload_str)
 
-    val src = ProcessId.create(src_id, ProcessKind.Browser)
-    val dst = ProcessId.create(dst_id, ProcessKind.Browser)
-    Ok(BrowserIpcMsg.create_with_payload(
+    val src = ProcessId.create(src_id, src_kind)
+    val dst = ProcessId.create(dst_id, dst_kind)
+    Ok(BrowserIpcMsg(
         src: src,
         dst: dst,
         method: method,
-        flags: [IpcFlag](),
+        flags: [],
         request_id: request_id,
         payload: payload
     ))
@@ -111,7 +153,7 @@ fn serialize_payload(payload: [IpcPayloadEntry]) -> text:
 
 fn deserialize_payload(data: text) -> [IpcPayloadEntry]:
     # Parse "key=val,key=val,..." into payload entries.
-    var entries = [IpcPayloadEntry]()
+    var entries: [IpcPayloadEntry] = []
     if data.len() == 0:
         return entries
     val pairs = data.split(",")

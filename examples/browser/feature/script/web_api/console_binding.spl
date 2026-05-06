@@ -4,15 +4,16 @@
 # Console bindings — console.log, error, warn, info, debug, table, time, timeEnd.
 # Provides formatted output, performance timers, and call counters for the JS engine.
 
-use browser.shared.logging.Logger
+use std.js.engine.js_error.Logger
 use browser.shared.error.BrowserResult
 use browser.shared.error.script_error
 use std.js.types.js_types.JsValue
 use std.js.types.js_types.JsObject
 use std.js.types.js_types.JsProperty
-use std.js.engine.runtime.JsRuntime
-use std.js.engine.runtime.format_value
+use std.js.engine.runtime.{JsRuntime}
 use std.js.engine.interpreter_types.to_string
+use std.js.types.pair.{Pair}
+use std.io_runtime.{time_now_unix_micros}
 
 # ── Native function IDs ──────────────────────────────────────────────────
 
@@ -36,8 +37,8 @@ class ConsoleBinding:
 
     static fn new(logger: Logger) -> ConsoleBinding:
         ConsoleBinding(
-            timers: List<Pair<text, i64>>(),
-            counters: List<Pair<text, i64>>(),
+            timers: [],
+            counters: [],
             logger: logger,
         )
 
@@ -46,7 +47,7 @@ class ConsoleBinding:
         self.logger.debug("Installing console bindings")
 
         # Create the console object
-        val console_id = runtime.interpreter.object_store.create_object()
+        val console_id = runtime.interpreter.create_object()
 
         runtime._define_method_on(console_id, "log", NATIVE_CONSOLE_LOG_BIND)
         runtime._define_method_on(console_id, "error", NATIVE_CONSOLE_ERROR_BIND)
@@ -64,6 +65,63 @@ class ConsoleBinding:
             runtime.interpreter.global_env, "console", JsValue.Object(id: console_id))
 
         self.logger.debug("Console bindings installed")
+
+    me time(args: [JsValue]) -> JsValue:
+        val label = _get_label(args)
+        val now = _time_now_ms()
+        self.timers.push(Pair(first: label, second: now))
+        print("timer '{label}' started")
+        JsValue.Undefined
+
+    me timeEnd(args: [JsValue]) -> JsValue:
+        val label = _get_label(args)
+        val now = _time_now_ms()
+        var start_time: i64 = 0
+        var found = false
+        var i = 0
+        while i < self.timers.len():
+            val timer = self.timers.get(i)
+            if timer.first == label:
+                start_time = timer.second
+                self.timers.remove(i)
+                found = true
+                break
+            i = i + 1
+        if found:
+            val elapsed = now - start_time
+            print("{label}: {elapsed}ms")
+        else:
+            print("Timer '{label}' does not exist")
+        JsValue.Undefined
+
+    me count(args: [JsValue]) -> JsValue:
+        val label = _get_label(args)
+        var found = false
+        var i = 0
+        while i < self.counters.len():
+            val counter = self.counters.get(i)
+            if counter.first == label:
+                val new_count = counter.second + 1
+                self._replace_counter(i, Pair(first: label, second: new_count))
+                print("{label}: {new_count}")
+                found = true
+                break
+            i = i + 1
+        if not found:
+            self.counters.push(Pair(first: label, second: 1))
+            print("{label}: 1")
+        JsValue.Undefined
+
+    me _replace_counter(index: i64, replacement: Pair<text, i64>):
+        var updated = []
+        var i = 0
+        while i < self.counters.len():
+            if i == index:
+                updated.push(replacement)
+            else:
+                updated.push(self.counters.get(i))
+            i = i + 1
+        self.counters = updated
 
 # ── Console method implementations ───────────────────────────────────────
 
@@ -117,53 +175,13 @@ fn js_console_table(args: [JsValue]) -> JsValue:
     JsValue.Undefined
 
 fn js_console_time(args: [JsValue], binding: ConsoleBinding) -> JsValue:
-    val label = _get_label(args)
-    val now = _time_now_stub()
-    # Store the timer start time
-    binding.timers.push(Pair(first: label, second: now))
-    print("timer '{label}' started")
-    JsValue.Undefined
+    binding.time(args)
 
 fn js_console_timeEnd(args: [JsValue], binding: ConsoleBinding) -> JsValue:
-    val label = _get_label(args)
-    val now = _time_now_stub()
-    # Find and remove the matching timer
-    var start_time: i64 = 0
-    var found = false
-    var i = 0
-    while i < binding.timers.len():
-        val timer = binding.timers.get(i)
-        if timer.first == label:
-            start_time = timer.second
-            binding.timers.remove(i)
-            found = true
-            break
-        i = i + 1
-    if found:
-        val elapsed = now - start_time
-        print("{label}: {elapsed}ms")
-    else:
-        print("Timer '{label}' does not exist")
-    JsValue.Undefined
+    binding.timeEnd(args)
 
 fn js_console_count(args: [JsValue], binding: ConsoleBinding) -> JsValue:
-    val label = _get_label(args)
-    # Find existing counter or create new one
-    var found = false
-    var i = 0
-    while i < binding.counters.len():
-        val counter = binding.counters.get(i)
-        if counter.first == label:
-            val new_count = counter.second + 1
-            binding.counters.set(i, Pair(first: label, second: new_count))
-            print("{label}: {new_count}")
-            found = true
-            break
-        i = i + 1
-    if not found:
-        binding.counters.push(Pair(first: label, second: 1))
-        print("{label}: 1")
-    JsValue.Undefined
+    binding.count(args)
 
 fn js_console_clear(args: [JsValue]) -> JsValue:
     # Clear the console output.
@@ -174,7 +192,7 @@ fn js_console_clear(args: [JsValue]) -> JsValue:
 
 # Format all arguments into a single space-separated string.
 fn format_args(args: [JsValue]) -> text:
-    var parts = [text]()
+    var parts = []
     var i = 0
     val len = args.len()
     while i < len:
@@ -221,9 +239,10 @@ fn format_value_pretty(value: JsValue, depth: i64) -> text:
 
 fn _get_label(args: [JsValue]) -> text:
     if args.len() >= 1:
-        return to_string(args.get(0))
+        match args.get(0):
+            JsValue.String(v): return v
+            _: return to_string(args.get(0))
     "default"
 
-fn _time_now_stub() -> i64:
-    # Stub — no real clock without FFI.
-    0
+fn _time_now_ms() -> i64:
+    time_now_unix_micros() / 1000

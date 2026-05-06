@@ -5,12 +5,13 @@
 # Manages a list of scheduled timers with callback ids, delays, and cancellation.
 # The event loop calls tick() each frame to collect and fire expired timers.
 
-use browser.shared.logging.Logger
+use std.js.engine.js_error.Logger
 use browser.shared.error.BrowserResult
 use browser.shared.error.script_error
 use std.js.types.js_types.JsValue
-use std.js.engine.runtime.JsRuntime
+use std.js.engine.runtime.{JsRuntime}
 use std.js.engine.interpreter_types.to_number
+use std.io_runtime.{time_now_unix_micros}
 
 # ── Native function IDs ──────────────────────────────────────────────────
 
@@ -51,6 +52,16 @@ class Timer:
             is_cancelled: false,
         )
 
+    static fn cancelled(id: i64) -> Timer:
+        Timer(
+            id: id,
+            callback_id: -1,
+            delay_ms: 0,
+            is_interval: false,
+            scheduled_at: 0,
+            is_cancelled: true,
+        )
+
     fn is_due(current_time_ms: i64) -> bool:
         if self.is_cancelled:
             return false
@@ -63,9 +74,26 @@ class TimerBinding:
     timers: [Timer]
     next_id: i64
     logger: Logger
+    use_runtime_clock: bool
+    test_now_ms: i64
 
     static fn new(logger: Logger) -> TimerBinding:
-        TimerBinding(timers: [Timer](), next_id: 1, logger: logger)
+        TimerBinding(
+            timers: [],
+            next_id: 1,
+            logger: logger,
+            use_runtime_clock: true,
+            test_now_ms: 0,
+        )
+
+    static fn new_at(logger: Logger, now_ms: i64) -> TimerBinding:
+        TimerBinding(
+            timers: [],
+            next_id: 1,
+            logger: logger,
+            use_runtime_clock: false,
+            test_now_ms: now_ms,
+        )
 
     # Install timer functions on the JS runtime global scope.
     me install(runtime: JsRuntime):
@@ -85,7 +113,7 @@ class TimerBinding:
         val delay = _extract_delay(args)
         val timer_id = self.next_id
         self.next_id = self.next_id + 1
-        val now = _current_time_stub()
+        val now = self._current_time_ms()
         val timer = Timer.one_shot(timer_id, callback_id, delay, now)
         self.timers.push(timer)
         self.logger.debug("setTimeout: id={timer_id}, delay={delay}ms")
@@ -96,7 +124,7 @@ class TimerBinding:
         val delay = _extract_delay(args)
         val timer_id = self.next_id
         self.next_id = self.next_id + 1
-        val now = _current_time_stub()
+        val now = self._current_time_ms()
         val timer = Timer.repeating(timer_id, callback_id, delay, now)
         self.timers.push(timer)
         self.logger.debug("setInterval: id={timer_id}, delay={delay}ms")
@@ -122,7 +150,7 @@ class TimerBinding:
         val callback_id = _extract_callback_id(args)
         val timer_id = self.next_id
         self.next_id = self.next_id + 1
-        val now = _current_time_stub()
+        val now = self._current_time_ms()
         # rAF fires before next paint, approximate as ~16ms (60fps)
         val timer = Timer.one_shot(timer_id, callback_id, 16, now)
         self.timers.push(timer)
@@ -139,54 +167,74 @@ class TimerBinding:
 
     # Returns callback ids of timers that are due at the given time.
     me tick(current_time_ms: i64) -> [i64]:
-        var due_callbacks = [i64]()
+        var due_callbacks = []
         var i = 0
         val len = self.timers.len()
         while i < len:
             val timer = self.timers.get(i)
-            if timer.is_due(current_time_ms):
+            if timer.is_due(current_time_ms) and not self._is_cancelled(timer.id) and not self._is_superseded(timer.id, i):
                 due_callbacks.push(timer.callback_id)
             i = i + 1
         due_callbacks
 
     # Collect and return all expired timers, marking one-shot timers as cancelled.
     me fire_timers(current_time_ms: i64) -> [Timer]:
-        var fired = [Timer]()
+        var fired = []
         var i = 0
         val len = self.timers.len()
         while i < len:
             var timer = self.timers.get(i)
-            if timer.is_due(current_time_ms):
+            if timer.is_due(current_time_ms) and not self._is_cancelled(timer.id) and not self._is_superseded(timer.id, i):
                 fired.push(timer)
                 if not timer.is_interval:
-                    timer.is_cancelled = true
+                    self._cancel_timer(timer.id)
             i = i + 1
         fired
 
     # Reschedule interval timers that have fired.
     me reschedule_intervals():
+        val now = self._current_time_ms()
+        self.reschedule_intervals_at(now)
+
+    me reschedule_intervals_at(current_time_ms: i64):
         var i = 0
         val len = self.timers.len()
-        val now = _current_time_stub()
         while i < len:
-            var timer = self.timers.get(i)
-            if timer.is_interval and not timer.is_cancelled:
+            val timer = self.timers.get(i)
+            if timer.is_interval and not self._is_cancelled(timer.id) and not self._is_superseded(timer.id, i):
                 val fire_at = timer.scheduled_at + timer.delay_ms
-                if now >= fire_at:
-                    timer.scheduled_at = now
+                if current_time_ms >= fire_at:
+                    self.timers.push(Timer.repeating(timer.id, timer.callback_id, timer.delay_ms, current_time_ms))
             i = i + 1
 
     # ── Internal ────────────────────────────────────────────────────
 
     me _cancel_timer(timer_id: i64):
-        var i = 0
-        val len = self.timers.len()
-        while i < len:
-            var timer = self.timers.get(i)
-            if timer.id == timer_id:
-                timer.is_cancelled = true
-                return
-            i = i + 1
+        if timer_id >= 0 and not self._is_cancelled(timer_id):
+            self.timers.push(Timer.cancelled(timer_id))
+
+    fn _is_cancelled(timer_id: i64) -> bool:
+        var i = self.timers.len() - 1
+        while i >= 0:
+            val timer = self.timers.get(i)
+            if timer.id == timer_id and timer.is_cancelled:
+                return true
+            i = i - 1
+        false
+
+    fn _is_superseded(timer_id: i64, entry_index: i64) -> bool:
+        var i = self.timers.len() - 1
+        while i > entry_index:
+            val timer = self.timers.get(i)
+            if timer.id == timer_id and not timer.is_cancelled:
+                return true
+            i = i - 1
+        false
+
+    fn _current_time_ms() -> i64:
+        if self.use_runtime_clock:
+            return time_now_unix_micros() / 1000
+        self.test_now_ms
 
 # ── Argument extraction helpers ──────────────────────────────────────────
 
@@ -212,7 +260,3 @@ fn _extract_timer_id(args: [JsValue]) -> i64:
         val id_val = to_number(args.get(0))
         return id_val.to_i64()
     -1
-
-# Stub for current time — full implementation uses runtime clock.
-fn _current_time_stub() -> i64:
-    0

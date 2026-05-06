@@ -39,7 +39,7 @@ class DnsCache:
 
     # Look up a hostname in the cache. Returns nil if not found or expired.
     me lookup(hostname: text, now: i64) -> [text]?:
-        val index = self.find_index(hostname)
+        val index = self.find_index(normalize_hostname(hostname))
         if index >= 0:
             val e = self.entries[index]
             if e.is_expired(now):
@@ -52,8 +52,9 @@ class DnsCache:
     # The TTL is clamped to the cache-wide max_ttl.
     me store(hostname: text, addresses: [text], now: i64, ttl: i64):
         val effective_ttl = if ttl > self.max_ttl: self.max_ttl else: ttl
-        val entry = DnsCacheEntry.create(hostname, addresses, now, effective_ttl)
-        val index = self.find_index(hostname)
+        val key = normalize_hostname(hostname)
+        val entry = DnsCacheEntry.create(key, addresses, now, effective_ttl)
+        val index = self.find_index(key)
         if index >= 0:
             self.entries[index] = entry
         else:
@@ -61,7 +62,7 @@ class DnsCache:
 
     # Remove a specific hostname from the cache.
     me invalidate(hostname: text):
-        val index = self.find_index(hostname)
+        val index = self.find_index(normalize_hostname(hostname))
         if index >= 0:
             self.remove_at(index)
 
@@ -110,9 +111,10 @@ class DnsResolver:
     # Falls back to a system DNS lookup and caches the result.
     me resolve(hostname: text) -> BrowserResult<[text]>:
         self.logger.debug("dns: resolving {hostname}")
+        val key = normalize_hostname(hostname)
 
         # Fast path: check the cache first
-        val cached = self.cache_lookup(hostname)
+        val cached = self.cache_lookup(key)
         if cached.?:
             val addrs = cached.unwrap()
             self.logger.debug("dns: cache hit for {hostname} ({addrs.len()} addresses)")
@@ -120,7 +122,7 @@ class DnsResolver:
 
         # Slow path: perform system DNS lookup
         self.logger.info("dns: cache miss for {hostname}, performing lookup")
-        val result = self.system_lookup(hostname)
+        val result = self.system_lookup(key)
         match result:
             Ok(addresses):
                 if addresses.is_empty():
@@ -128,7 +130,7 @@ class DnsResolver:
                     return Err(network_error("DNS resolution failed: no addresses for {hostname}"))
                 self.logger.debug("dns: resolved {hostname} to {addresses.len()} addresses")
                 val now = self.current_time()
-                self.cache.store(hostname, addresses, now, self.default_ttl)
+                self.cache.store(key, addresses, now, self.default_ttl)
                 Ok(addresses)
             Err(e):
                 self.logger.error("dns: lookup failed for {hostname}: {e.message}")
@@ -160,12 +162,14 @@ class DnsResolver:
         # Handle IP address literals (no lookup needed)
         if self.is_ip_literal(hostname):
             return Ok([hostname])
+        if self.looks_like_ipv4_literal(hostname):
+            return Err(network_error("Invalid IPv4 address literal: {hostname}"))
 
         # Validate hostname before attempting lookup
         if not self.is_valid_hostname(hostname):
             return Err(network_error("Invalid hostname: {hostname}"))
 
-            # No stdlib DNS module available — use a built-in well-known host table.
+        # No stdlib DNS module available — use a built-in well-known host table.
         # This covers common development and testing scenarios.
         val well_known = self.well_known_lookup(hostname)
         if well_known.?:
@@ -181,24 +185,24 @@ class DnsResolver:
     fn well_known_lookup(hostname: text) -> [text]?:
         val h = hostname.to_lower()
         if h == "localhost":
-            return ["127.0.0.1", "::1"]
+            return Some(["127.0.0.1", "::1"])
         if h == "ip6-localhost" or h == "ip6-loopback":
-            return ["::1"]
+            return Some(["::1"])
         if h == "broadcasthost":
-            return ["255.255.255.255"]
+            return Some(["255.255.255.255"])
         # Common well-known domains for testing
         if h == "example.com" or h == "www.example.com":
-            return ["93.184.216.34"]
+            return Some(["93.184.216.34"])
         if h == "example.org" or h == "www.example.org":
-            return ["93.184.216.34"]
+            return Some(["93.184.216.34"])
         if h == "example.net" or h == "www.example.net":
-            return ["93.184.216.34"]
+            return Some(["93.184.216.34"])
         # Check additional entries added at runtime
         var i = 0
         while i < self.extra_hosts.len():
             val entry = self.extra_hosts[i]
             if entry.hostname.to_lower() == h:
-                return entry.addresses
+                return Some(entry.addresses)
             i = i + 1
         nil
 
@@ -206,22 +210,54 @@ class DnsResolver:
     # Use this to add custom entries for testing or development.
     me add_well_known(hostname: text, addresses: [text]):
         self.logger.debug("dns: adding well-known entry: {hostname} -> {addresses.len()} addresses")
-        val entry = DnsCacheEntry.create(hostname, addresses, 0, 0)
-        self.extra_hosts = self.extra_hosts + [entry]
+        val key = normalize_hostname(hostname)
+        val entry = DnsCacheEntry.create(key, addresses, 0, 0)
+        var replaced = false
+        var updated: [DnsCacheEntry] = []
+        var i = 0
+        while i < self.extra_hosts.len():
+            if self.extra_hosts[i].hostname == key:
+                updated = updated + [entry]
+                replaced = true
+            else:
+                updated = updated + [self.extra_hosts[i]]
+            i = i + 1
+        if not replaced:
+            updated = updated + [entry]
+        self.extra_hosts = updated
+        self.cache.invalidate(key)
 
-    # Check whether a string looks like an IPv4 address literal.
+    # Check whether a string is a valid IPv4 address literal.
     fn is_ip_literal(s: text) -> bool:
         val parts = s.split(".")
         if parts.len() != 4:
             return false
-        var all_numeric = true
+        var valid = true
         for part in parts:
             if part.is_empty():
-                all_numeric = false
+                valid = false
             for ch in part.chars():
                 if not ch.is_digit():
-                    all_numeric = false
-        all_numeric
+                    valid = false
+            if valid:
+                val octet = part.to_i64() ?? -1
+                if octet < 0 or octet > 255:
+                    valid = false
+        valid
+
+    # True for dotted numeric input that intended to be IPv4, even if invalid.
+    fn looks_like_ipv4_literal(s: text) -> bool:
+        val parts = s.split(".")
+        if parts.len() != 4:
+            return false
+        var numeric = true
+        for part in parts:
+            if part.is_empty():
+                numeric = false
+            for ch in part.chars():
+                if not ch.is_digit():
+                    numeric = false
+        numeric
 
     # Basic hostname validation: non-empty, no spaces, reasonable length.
     fn is_valid_hostname(hostname: text) -> bool:
@@ -244,3 +280,9 @@ class DnsResolver:
     fn current_time() -> i64:
         # Use runtime wall clock seconds for cache expiration.
         time_now_unix_micros() / 1_000_000
+
+fn normalize_hostname(hostname: text) -> text:
+    var h = hostname.to_lower()
+    while h.ends_with(".") and h.len() > 1:
+        h = h.slice(0, h.len() - 1)
+    h

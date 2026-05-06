@@ -11,6 +11,8 @@ use std.spec
 use std.js.engine.runtime.{JsRuntime}
 use std.js.engine.js_error.{Logger, LogLevel}
 use std.js.types.js_types.{JsValue}
+use std.js.types.ast_types.{JsExpression, JsStatement, JsAstFactory}
+use std.js.engine.interpreter_types.{EnvironmentStack, JsFunction, to_number, js_to_string, to_boolean, is_truthy, typeof_value, strict_equals, abstract_equals, RETURN_SIGNAL, _is_array_method, _is_string_method, _get_obj_id, _get_fn_id, f64_to_i64, _digit_val}
 
 fn _run_js(source: text) -> text:
     val runtime = JsRuntime.new(Logger.new("browser-js-interpreter-spec", LogLevel.Error))
@@ -87,6 +89,90 @@ describe "JsInterpreter":
         it "evaluates array operations":
             expect _run_js("var arr = [10, 20, 30]; arr.length + ':' + arr[1]") == "3:20"
 
+        it "prevents writes to frozen object properties":
+            expect _run_js("var obj = { a: 1 }; Object.freeze(obj); obj.a = 2; obj.a") == "1"
+
+        it "prevents adding properties to frozen objects":
+            expect _run_js("var obj = { a: 1 }; Object.freeze(obj); obj.b = 2; obj.b") == "undefined"
+
+        it "reports frozen object state":
+            expect _run_js("var obj = { a: 1 }; Object.freeze(obj); Object.isFrozen(obj) + ':' + Object.isFrozen({ b: 2 })") == "true:false"
+
+        it "keeps frozen bookkeeping out of enumerable object keys":
+            expect _run_js("var obj = { a: 1 }; Object.freeze(obj); Object.keys(obj).length") == "1"
+
     context "typeof":
         it "typeof returns correct type string":
             expect _run_js("typeof 1 + ':' + typeof 'x' + ':' + typeof true + ':' + typeof missing + ':' + typeof {}") == "number:string:boolean:undefined:object"
+
+    context "Math":
+        it "Math.random returns changing in-range values":
+            expect _run_js("var a = Math.random(); var b = Math.random(); (a < 1) + ':' + (b < 1) + ':' + (a != b)") == "true:true:true"
+
+    context "Timers":
+        it "setTimeout and setInterval return unique positive handles":
+            expect _run_js("var a = setTimeout(function(){}, 10); var b = setInterval(function(){}, 10); (a > 0) + ':' + (b > 0) + ':' + (a != b)") == "true:true:true"
+
+        it "setTimeout callback runs only when due":
+            var runtime = JsRuntime.new(Logger.new("browser-js-timer-timeout-spec", LogLevel.Error))
+            val initial = runtime.eval("var fired = 0; setTimeout(function(){ fired = fired + 1; }, 50); fired")
+            match initial:
+                Ok(value): expect(_display_js(value)).to_equal("0")
+                Err(e): expect("Error: {e.message}").to_equal("ok")
+            expect runtime.drain_due_timers(49) == 0
+            val before_due = runtime.eval("fired")
+            match before_due:
+                Ok(value): expect(_display_js(value)).to_equal("0")
+                Err(e): expect("Error: {e.message}").to_equal("ok")
+            expect runtime.drain_due_timers(50) == 1
+            val after_due = runtime.eval("fired")
+            match after_due:
+                Ok(value): expect(_display_js(value)).to_equal("1")
+                Err(e): expect("Error: {e.message}").to_equal("ok")
+
+        it "clearTimeout cancels pending callback":
+            var runtime = JsRuntime.new(Logger.new("browser-js-timer-clear-spec", LogLevel.Error))
+            val initial = runtime.eval("var fired = 0; var id = setTimeout(function(){ fired = fired + 1; }, 10); clearTimeout(id); fired")
+            match initial:
+                Ok(value): expect(_display_js(value)).to_equal("0")
+                Err(e): expect("Error: {e.message}").to_equal("ok")
+            expect runtime.drain_due_timers(10) == 0
+            val after_due = runtime.eval("fired")
+            match after_due:
+                Ok(value): expect(_display_js(value)).to_equal("0")
+                Err(e): expect("Error: {e.message}").to_equal("ok")
+
+        it "setInterval callback repeats on each interval":
+            var runtime = JsRuntime.new(Logger.new("browser-js-timer-interval-spec", LogLevel.Error))
+            val initial = runtime.eval("var fired = 0; setInterval(function(){ fired = fired + 1; }, 20); fired")
+            match initial:
+                Ok(value): expect(_display_js(value)).to_equal("0")
+                Err(e): expect("Error: {e.message}").to_equal("ok")
+            expect runtime.drain_due_timers(20) == 1
+            val first = runtime.eval("fired")
+            match first:
+                Ok(value): expect(_display_js(value)).to_equal("1")
+                Err(e): expect("Error: {e.message}").to_equal("ok")
+            expect runtime.drain_due_timers(39) == 0
+            expect runtime.drain_due_timers(40) == 1
+            val second = runtime.eval("fired")
+            match second:
+                Ok(value): expect(_display_js(value)).to_equal("2")
+                Err(e): expect("Error: {e.message}").to_equal("ok")
+
+    context "JSON":
+        it "JSON.parse decodes quoted strings instead of echoing source":
+            expect _run_js("JSON.parse('\"hello\"')") == "hello"
+
+        it "JSON.parse returns structured object and array values":
+            expect _run_js("JSON.parse('{\"name\":\"Alice\"}')") == "[object Object]"
+            expect _run_js("JSON.parse('[1,2,3]')") == "[object Array]"
+
+        it "JSON.parse allocates object and array properties":
+            expect _run_js("var data = JSON.parse('{\"name\":\"Alice\",\"scores\":[10,20]}'); data.name + ':' + data.scores[1]") == "Alice:20"
+
+        it "JSON.parse rejects trailing JavaScript after valid JSON":
+            expect (_run_js("JSON.parse('true; Math.random()')")).contains("Error:")
+
+        it "JSON.parse rejects partial JSON literal names":
+            expect (_run_js("JSON.parse('trol')")).contains("Error:")

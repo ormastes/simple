@@ -22,6 +22,56 @@ enum ReadyState:
     Interactive
     Complete
 
+class ExternalAttributeMutation:
+    node_id: i64
+    name: text
+    value: text
+    ns: text
+    active: bool
+
+var external_attribute_mutations: [ExternalAttributeMutation] = []
+
+fn record_external_attribute(node_id: i64, name: text, value: text, ns: text):
+    external_attribute_mutations.push(ExternalAttributeMutation(
+        node_id: node_id, name: name, value: value, ns: ns, active: true
+    ))
+
+fn remove_external_attribute(node_id: i64, name: text):
+    external_attribute_mutations.push(ExternalAttributeMutation(
+        node_id: node_id, name: name, value: "", ns: "", active: false
+    ))
+
+fn external_attribute_value(node_id: i64, name: text) -> text?:
+    var found: text? = nil
+    var i = external_attribute_mutations.len() - 1
+    while i >= 0 and not found.?:
+        val mutation = external_attribute_mutations[i]
+        if mutation.node_id == node_id and mutation.name == name:
+            if mutation.active:
+                found = Some(mutation.value)
+            else:
+                i = -1
+        else:
+            i = i - 1
+    found
+
+fn external_attribute_names(node_id: i64) -> [text]:
+    var result = []
+    var i = 0
+    while i < external_attribute_mutations.len():
+        val mutation = external_attribute_mutations[i]
+        if mutation.node_id == node_id and mutation.active:
+            var exists = false
+            var j = 0
+            while j < result.len():
+                if result[j] == mutation.name:
+                    exists = true
+                j = j + 1
+            if not exists:
+                result.push(mutation.name)
+        i = i + 1
+    result
+
 # --- NodeStore — central node storage ----------------------------------------
 
 class NodeStore:
@@ -50,79 +100,71 @@ class NodeStore:
 
     # Lookup a node by id. Returns nil when not found.
     fn get_node(id: i64) -> DomNode?:
-        var i = 0
-        while i < self.nodes.len():
-            val n = self.nodes.get(i)
+        var found: DomNode? = nil
+        var i = self.nodes.len() - 1
+        while i >= 0:
+            val n = self.nodes[i]
             if n.id == id:
-                return n
-            i = i + 1
-        nil
+                found = Some(n)
+                i = -1
+            else:
+                i = i - 1
+        found
 
     # Replace a node entry in-place.
     me update_node(id: i64, node: DomNode):
-        var i = 0
-        while i < self.nodes.len():
-            if self.nodes.get(i).id == id:
-                self.nodes.set(i, node)
-                return
-            i = i + 1
+        self.nodes.push(node)
 
     # Get the Element data associated with a node id.
     fn get_element(node_id: i64) -> Element?:
-        var i = 0
-        while i < self.elements.len():
-            val el = self.elements.get(i)
+        var found: Element? = nil
+        var i = self.elements.len() - 1
+        while i >= 0:
+            val el = self.elements[i]
             if el.node_id == node_id:
-                return el
-            i = i + 1
-        nil
+                found = Some(el)
+                i = -1
+            else:
+                i = i - 1
+        found
 
     # Get the TextNode data associated with a node id.
     fn get_text(node_id: i64) -> TextNode?:
-        var i = 0
-        while i < self.texts.len():
-            val t = self.texts.get(i)
+        var found: TextNode? = nil
+        var i = self.texts.len() - 1
+        while i >= 0:
+            val t = self.texts[i]
             if t.node_id == node_id:
-                return t
-            i = i + 1
-        nil
+                found = Some(t)
+                i = -1
+            else:
+                i = i - 1
+        found
 
     # Get the Comment data associated with a node id.
     fn get_comment(node_id: i64) -> Comment?:
-        var i = 0
-        while i < self.comments.len():
-            val c = self.comments.get(i)
+        var found: Comment? = nil
+        var i = self.comments.len() - 1
+        while i >= 0:
+            val c = self.comments[i]
             if c.node_id == node_id:
-                return c
-            i = i + 1
-        nil
+                found = Some(c)
+                i = -1
+            else:
+                i = i - 1
+        found
 
     # Update an Element entry in-place by node_id.
     me update_element(node_id: i64, elem: Element):
-        var i = 0
-        while i < self.elements.len():
-            if self.elements.get(i).node_id == node_id:
-                self.elements.set(i, elem)
-                return
-            i = i + 1
+        self.elements.push(elem)
 
     # Update a TextNode entry in-place by node_id.
     me update_text(node_id: i64, t: TextNode):
-        var i = 0
-        while i < self.texts.len():
-            if self.texts.get(i).node_id == node_id:
-                self.texts.set(i, t)
-                return
-            i = i + 1
+        self.texts.push(t)
 
     # Update a Comment entry in-place by node_id.
     me update_comment(node_id: i64, c: Comment):
-        var i = 0
-        while i < self.comments.len():
-            if self.comments.get(i).node_id == node_id:
-                self.comments.set(i, c)
-                return
-            i = i + 1
+        self.comments.push(c)
 
 # --- Document ----------------------------------------------------------------
 
@@ -199,48 +241,104 @@ class Document:
     # --- Node creation --------------------------------------------------------
 
     me createElement(tag_name: text) -> i64:
-        val id = self.node_store.allocate_node(NodeKind.Element, tag_name)
-        self.node_store.elements.push(Element.create(id, tag_name, "http://www.w3.org/1999/xhtml"))
-        self.logger.debug("createElement: <{tag_name}> id={id}")
+        val id = self.node_store.next_id
+        var nodes = self.node_store.nodes
+        var elements = self.node_store.elements
+        nodes.push(DomNode.create(id, NodeKind.Element, -1, tag_name))
+        elements.push(Element.create(id, tag_name, "http://www.w3.org/1999/xhtml"))
+        self.node_store = NodeStore(
+            nodes: nodes,
+            elements: elements,
+            texts: self.node_store.texts,
+            comments: self.node_store.comments,
+            next_id: id + 1
+        )
+        self.logger.debug("createElement: <{tag_name}> id={id} elements={self.node_store.elements.len()}")
         id
 
     me createElementNS(elem_ns: text, tag_name: text) -> i64:
-        val id = self.node_store.allocate_node(NodeKind.Element, tag_name)
-        self.node_store.elements.push(Element.create(id, tag_name, elem_ns))
+        val id = self.node_store.next_id
+        var nodes = self.node_store.nodes
+        var elements = self.node_store.elements
+        nodes.push(DomNode.create(id, NodeKind.Element, -1, tag_name))
+        elements.push(Element.create(id, tag_name, elem_ns))
+        self.node_store = NodeStore(
+            nodes: nodes,
+            elements: elements,
+            texts: self.node_store.texts,
+            comments: self.node_store.comments,
+            next_id: id + 1
+        )
         self.logger.debug("createElementNS: <{tag_name}> ns={elem_ns} id={id}")
         id
 
     me createTextNode(data: text) -> i64:
-        val id = self.node_store.allocate_node(NodeKind.Text, data)
-        self.node_store.texts.push(TextNode.create(id, data))
+        val id = self.node_store.next_id
+        var nodes = self.node_store.nodes
+        var texts = self.node_store.texts
+        nodes.push(DomNode.create(id, NodeKind.Text, -1, data))
+        texts.push(TextNode.create(id, data))
+        self.node_store = NodeStore(
+            nodes: nodes,
+            elements: self.node_store.elements,
+            texts: texts,
+            comments: self.node_store.comments,
+            next_id: id + 1
+        )
         self.logger.debug("createTextNode: id={id}")
         id
 
     me createComment(data: text) -> i64:
-        val id = self.node_store.allocate_node(NodeKind.Comment, data)
-        self.node_store.comments.push(Comment.create(id, data))
+        val id = self.node_store.next_id
+        var nodes = self.node_store.nodes
+        var comments = self.node_store.comments
+        nodes.push(DomNode.create(id, NodeKind.Comment, -1, data))
+        comments.push(Comment.create(id, data))
+        self.node_store = NodeStore(
+            nodes: nodes,
+            elements: self.node_store.elements,
+            texts: self.node_store.texts,
+            comments: comments,
+            next_id: id + 1
+        )
         self.logger.debug("createComment: id={id}")
         id
 
     me createDocumentFragment() -> i64:
-        val id = self.node_store.allocate_node(NodeKind.DocumentFragment, "")
+        val id = self.node_store.next_id
+        var nodes = self.node_store.nodes
+        nodes.push(DomNode.create(id, NodeKind.DocumentFragment, -1, ""))
+        self.node_store = NodeStore(
+            nodes: nodes,
+            elements: self.node_store.elements,
+            texts: self.node_store.texts,
+            comments: self.node_store.comments,
+            next_id: id + 1
+        )
         self.logger.debug("createDocumentFragment: id={id}")
         id
 
     # --- Query methods --------------------------------------------------------
 
     me getElementById(id_attr: text) -> i64?:
+        var found: i64? = nil
         var i = 0
-        while i < self.node_store.elements.len():
+        while i < self.node_store.elements.len() and not found.?:
             val el = self.node_store.elements.get(i)
+            val patched_id = external_attribute_value(el.node_id, "id")
+            if val Some(pid) = patched_id:
+                if pid == id_attr:
+                    found = Some(el.node_id)
             var j = 0
-            while j < el.attributes.len():
+            while j < el.attributes.len() and not found.?:
                 val attr = el.attributes.get(j)
                 if attr.name == "id" and attr.value == id_attr:
-                    return el.node_id
-                j = j + 1
-            i = i + 1
-        nil
+                    found = Some(el.node_id)
+                else:
+                    j = j + 1
+            if not found.?:
+                i = i + 1
+        found
 
     me getElementsByTagName(tag: text) -> [i64]:
         var result: [i64] = []
@@ -276,7 +374,7 @@ class Document:
         # Simple tag-name selector support; full CSS selectors delegated to selector_match
         val matches = self.querySelectorAll(selector)
         if matches.len() > 0:
-            return matches.get(0)
+            return Some(matches.get(0))
         nil
 
     me querySelectorAll(selector: text) -> [i64]:
@@ -444,17 +542,17 @@ class Document:
                     val a = el.attributes.get(ai)
                     new_attrs.push(Attr(name: a.name, value: a.value, ns: a.ns))
                     ai = ai + 1
-                self.node_store.elements.push(Element(node_id: new_id, tag_name: el.tag_name, attributes: new_attrs, ns: el.ns))
+                self.node_store.update_element(new_id, Element(node_id: new_id, tag_name: el.tag_name, attributes: new_attrs, ns: el.ns))
 
             # Clone text data if present
             val text_opt = self.node_store.get_text(node_id)
             if val Some(tn) = text_opt:
-                self.node_store.texts.push(TextNode.create(new_id, tn.content))
+                self.node_store.update_text(new_id, TextNode.create(new_id, tn.content))
 
             # Clone comment data if present
             val comment_opt = self.node_store.get_comment(node_id)
             if val Some(cm) = comment_opt:
-                self.node_store.comments.push(Comment.create(new_id, cm.content))
+                self.node_store.update_comment(new_id, Comment.create(new_id, cm.content))
 
             # Deep clone: recursively clone children
             if deep:
@@ -486,21 +584,21 @@ class Document:
         val n = self.node_store.get_node(node_id)
         if val Some(node) = n:
             if node.parent_id >= 0:
-                return node.parent_id
+                return Some(node.parent_id)
         nil
 
     fn firstChild(node_id: i64) -> i64?:
         val n = self.node_store.get_node(node_id)
         if val Some(node) = n:
             if node.children.len() > 0:
-                return node.children.get(0)
+                return Some(node.children.get(0))
         nil
 
     fn lastChild(node_id: i64) -> i64?:
         val n = self.node_store.get_node(node_id)
         if val Some(node) = n:
             if node.children.len() > 0:
-                return node.children.get(node.children.len() - 1)
+                return Some(node.children.get(node.children.len() - 1))
         nil
 
     fn nextSibling(node_id: i64) -> i64?:
@@ -514,7 +612,7 @@ class Document:
                 while i < p.children.len():
                     if p.children.get(i) == node_id:
                         if i + 1 < p.children.len():
-                            return p.children.get(i + 1)
+                            return Some(p.children.get(i + 1))
                         return nil
                     i = i + 1
         nil
@@ -530,7 +628,7 @@ class Document:
                 while i < p.children.len():
                     if p.children.get(i) == node_id:
                         if i > 0:
-                            return p.children.get(i - 1)
+                            return Some(p.children.get(i - 1))
                         return nil
                     i = i + 1
         nil
@@ -570,6 +668,61 @@ class Document:
                     return result
         ""
 
+    fn get_inner_html(node_id: i64) -> text:
+        val n = self.node_store.get_node(node_id)
+        if val Some(node) = n:
+            var result = ""
+            var i = 0
+            while i < node.children.len():
+                result = result + self.get_outer_html(node.children.get(i))
+                i = i + 1
+            return result
+        ""
+
+    fn get_outer_html(node_id: i64) -> text:
+        val node_opt = self.node_store.get_node(node_id)
+        if val Some(node) = node_opt:
+            match node.kind:
+                NodeKind.Text:
+                    val t = self.node_store.get_text(node_id)
+                    if val Some(tn) = t:
+                        return self._escape_html(tn.content)
+                    return self._escape_html(node.data)
+                NodeKind.Comment:
+                    val c = self.node_store.get_comment(node_id)
+                    if val Some(cm) = c:
+                        return "<!--{cm.content}-->"
+                    return "<!--{node.data}-->"
+                NodeKind.Element:
+                    return self._serialize_element_html(node_id, node)
+                NodeKind.DocumentFragment:
+                    var result = ""
+                    var i = 0
+                    while i < node.children.len():
+                        result = result + self.get_outer_html(node.children.get(i))
+                        i = i + 1
+                    return result
+                _:
+                    return ""
+        ""
+
+    me set_inner_html(node_id: i64, html: text) -> BrowserResult<()>:
+        self.logger.debug("set_inner_html: node={node_id} bytes={html.len()}")
+        val node_opt = self.node_store.get_node(node_id)
+        if val Some(node) = node_opt:
+            var children_copy: [i64] = []
+            var ci = 0
+            while ci < node.children.len():
+                children_copy.push(node.children.get(ci))
+                ci = ci + 1
+            var ri = 0
+            while ri < children_copy.len():
+                self.removeChild(node_id, children_copy.get(ri))
+                ri = ri + 1
+        else:
+            return Err(dom_error("set_inner_html: node {node_id} not found"))
+        self._parse_inner_html_fragment(node_id, html)
+
     me set_title(new_title: text):
         self.title = new_title
         self.logger.debug("Document title set to: {new_title}")
@@ -605,5 +758,233 @@ class Document:
         var i = 0
         while i < ids.len():
             result.push(ids.get(i))
+            i = i + 1
+        result
+
+    fn _serialize_element_html(node_id: i64, node: DomNode) -> text:
+        val el_opt = self.node_store.get_element(node_id)
+        if val Some(el) = el_opt:
+            val tag = el.tag_name
+            var result = "<{tag}"
+            var ai = 0
+            while ai < el.attributes.len():
+                val attr = el.attributes.get(ai)
+                result = result + " {attr.name}=\"" + self._escape_attr(attr.value) + "\""
+                ai = ai + 1
+            if self._is_void_element_name(tag):
+                return result + ">"
+            result = result + ">"
+            var ci = 0
+            while ci < node.children.len():
+                result = result + self.get_outer_html(node.children.get(ci))
+                ci = ci + 1
+            return result + "</{tag}>"
+        ""
+
+    me _parse_inner_html_fragment(parent_id: i64, html: text) -> BrowserResult<()>:
+        var stack: [i64] = []
+        stack.push(parent_id)
+        var pos = 0
+        var text_start = 0
+        while pos < html.len():
+            if html.substring(pos, pos + 1) == "<":
+                if pos > text_start:
+                    self._append_html_text(stack[stack.len() - 1], html.substring(text_start, pos))?
+                if self._starts_with_at(html, pos, "<!--"):
+                    val comment_end = self._find_from(html, "-->", pos + 4)
+                    if comment_end < 0:
+                        return Err(dom_error("set_inner_html: unterminated comment"))
+                    val comment_id = self.createComment(html.substring(pos + 4, comment_end))
+                    self.appendChild(stack[stack.len() - 1], comment_id)?
+                    pos = comment_end + 3
+                    text_start = pos
+                else if self._starts_with_at(html, pos, "</"):
+                    val close_end = self._find_from(html, ">", pos + 2)
+                    if close_end < 0:
+                        return Err(dom_error("set_inner_html: unterminated closing tag"))
+                    if stack.len() > 1:
+                        stack = self._pop_id(stack)
+                    pos = close_end + 1
+                    text_start = pos
+                else:
+                    val tag_end = self._find_from(html, ">", pos + 1)
+                    if tag_end < 0:
+                        return Err(dom_error("set_inner_html: unterminated start tag"))
+                    val raw_tag = html.substring(pos + 1, tag_end).trim()
+                    if raw_tag.len() == 0:
+                        return Err(dom_error("set_inner_html: empty tag"))
+                    val self_closing = raw_tag.ends_with("/")
+                    val tag_name = self._read_tag_name(raw_tag)
+                    if tag_name.len() == 0:
+                        return Err(dom_error("set_inner_html: invalid tag name"))
+                    val element_id = self.createElement(tag_name)
+                    self._apply_html_attributes(element_id, raw_tag, tag_name.len())
+                    self.appendChild(stack[stack.len() - 1], element_id)?
+                    if not self_closing and not self._is_void_element_name(tag_name):
+                        stack.push(element_id)
+                    pos = tag_end + 1
+                    text_start = pos
+            else:
+                pos = pos + 1
+        if text_start < html.len():
+            self._append_html_text(stack[stack.len() - 1], html.substring(text_start, html.len()))?
+        Ok(())
+
+    me _append_html_text(parent_id: i64, text_value: text) -> BrowserResult<()>:
+        if text_value.len() == 0:
+            return Ok(())
+        val text_id = self.createTextNode(self._decode_basic_html_entities(text_value))
+        self.appendChild(parent_id, text_id)
+
+    me _apply_html_attributes(node_id: i64, raw_tag: text, start: i64):
+        var pos = start
+        while pos < raw_tag.len():
+            while pos < raw_tag.len() and self._is_html_space(raw_tag.substring(pos, pos + 1)):
+                pos = pos + 1
+            if pos >= raw_tag.len() or raw_tag.substring(pos, pos + 1) == "/":
+                return
+            val name_start = pos
+            while pos < raw_tag.len():
+                val ch = raw_tag.substring(pos, pos + 1)
+                if self._is_html_space(ch) or ch == "=" or ch == "/":
+                    break
+                pos = pos + 1
+            val attr_name = raw_tag.substring(name_start, pos).to_lower()
+            while pos < raw_tag.len() and self._is_html_space(raw_tag.substring(pos, pos + 1)):
+                pos = pos + 1
+            var attr_value = ""
+            if pos < raw_tag.len() and raw_tag.substring(pos, pos + 1) == "=":
+                pos = pos + 1
+                while pos < raw_tag.len() and self._is_html_space(raw_tag.substring(pos, pos + 1)):
+                    pos = pos + 1
+                if pos < raw_tag.len() and (raw_tag.substring(pos, pos + 1) == "\"" or raw_tag.substring(pos, pos + 1) == "'"):
+                    val quote = raw_tag.substring(pos, pos + 1)
+                    pos = pos + 1
+                    val value_start = pos
+                    while pos < raw_tag.len() and raw_tag.substring(pos, pos + 1) != quote:
+                        pos = pos + 1
+                    attr_value = raw_tag.substring(value_start, pos)
+                    if pos < raw_tag.len():
+                        pos = pos + 1
+                else:
+                    val value_start = pos
+                    while pos < raw_tag.len() and not self._is_html_space(raw_tag.substring(pos, pos + 1)) and raw_tag.substring(pos, pos + 1) != "/":
+                        pos = pos + 1
+                    attr_value = raw_tag.substring(value_start, pos)
+            if attr_name.len() > 0:
+                self._set_element_attribute(node_id, attr_name, self._decode_basic_html_entities(attr_value))
+
+    me _set_element_attribute(node_id: i64, name: text, value: text):
+        val el_opt = self.node_store.get_element(node_id)
+        if val Some(el) = el_opt:
+            var new_attrs: [Attr] = []
+            var found = false
+            var i = 0
+            while i < el.attributes.len():
+                val attr = el.attributes.get(i)
+                if attr.name == name:
+                    new_attrs.push(Attr(name: name, value: value, ns: attr.ns))
+                    found = true
+                else:
+                    new_attrs.push(attr)
+                i = i + 1
+            if not found:
+                new_attrs.push(Attr.create(name, value))
+            self.node_store.update_element(node_id, Element(node_id: el.node_id, tag_name: el.tag_name, attributes: new_attrs, ns: el.ns))
+
+    fn _pop_id(ids: [i64]) -> [i64]:
+        var result: [i64] = []
+        var i = 0
+        while i + 1 < ids.len():
+            result.push(ids.get(i))
+            i = i + 1
+        result
+
+    fn _starts_with_at(s: text, index: i64, needle: text) -> bool:
+        if index < 0:
+            return false
+        if index + needle.len() > s.len():
+            return false
+        s.substring(index, index + needle.len()) == needle
+
+    fn _find_from(s: text, needle: text, start: i64) -> i64:
+        var i = start
+        while i + needle.len() <= s.len():
+            if s.substring(i, i + needle.len()) == needle:
+                return i
+            i = i + 1
+        -1
+
+    fn _read_tag_name(raw_tag: text) -> text:
+        var end = 0
+        while end < raw_tag.len():
+            val ch = raw_tag.substring(end, end + 1)
+            if self._is_html_space(ch) or ch == "/":
+                return raw_tag.substring(0, end).to_lower()
+            end = end + 1
+        raw_tag.to_lower()
+
+    fn _is_void_element_name(tag: text) -> bool:
+        val t = tag.to_lower()
+        t == "area" or t == "base" or t == "br" or t == "col" or t == "embed" or t == "hr" or t == "img" or t == "input" or t == "link" or t == "meta" or t == "param" or t == "source" or t == "track" or t == "wbr"
+
+    fn _is_html_space(ch: text) -> bool:
+        ch == " " or ch == "\n" or ch == "\t" or ch == "\r"
+
+    fn _decode_basic_html_entities(s: text) -> text:
+        var result = ""
+        var pos = 0
+        while pos < s.len():
+            if self._starts_with_at(s, pos, "&amp;"):
+                result = result + "&"
+                pos = pos + 5
+            else if self._starts_with_at(s, pos, "&lt;"):
+                result = result + "<"
+                pos = pos + 4
+            else if self._starts_with_at(s, pos, "&gt;"):
+                result = result + ">"
+                pos = pos + 4
+            else if self._starts_with_at(s, pos, "&quot;"):
+                result = result + "\""
+                pos = pos + 6
+            else if self._starts_with_at(s, pos, "&#39;"):
+                result = result + "'"
+                pos = pos + 5
+            else:
+                result = result + s.substring(pos, pos + 1)
+                pos = pos + 1
+        result
+
+    fn _escape_html(s: text) -> text:
+        var result = ""
+        var i = 0
+        while i < s.len():
+            val ch = s.substring(i, i + 1)
+            if ch == "&":
+                result = result + "&amp;"
+            else if ch == "<":
+                result = result + "&lt;"
+            else if ch == ">":
+                result = result + "&gt;"
+            else:
+                result = result + ch
+            i = i + 1
+        result
+
+    fn _escape_attr(s: text) -> text:
+        var result = ""
+        var i = 0
+        while i < s.len():
+            val ch = s.substring(i, i + 1)
+            if ch == "&":
+                result = result + "&amp;"
+            else if ch == "\"":
+                result = result + "&quot;"
+            else if ch == "<":
+                result = result + "&lt;"
+            else if ch == ">":
+                result = result + "&gt;"
+            else:
+                result = result + ch
             i = i + 1
         result

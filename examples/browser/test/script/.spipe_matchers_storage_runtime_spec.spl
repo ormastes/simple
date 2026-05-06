@@ -1,0 +1,60 @@
+#![allow(REQC001)]
+#![allow(REQC004)]
+#![allow(unnamed_duplicate_typed_args)]
+
+use std.spec
+use std.common.web.browser_session.{BrowserSession}
+use std.js.types.js_types.{JsValue}
+use std.js.types.ast_types.{JsExpression, JsStatement, JsAstFactory}
+use std.js.engine.interpreter_types.{EnvironmentStack, JsFunction, to_number, js_to_string, to_boolean, is_truthy, typeof_value, strict_equals, abstract_equals, RETURN_SIGNAL, _is_array_method, _is_string_method, _get_obj_id, _get_fn_id, f64_to_i64, _digit_val}
+
+fn _value_text(value: JsValue) -> text:
+    match value:
+        JsValue.String(v): v
+        JsValue.Null: "null"
+        JsValue.Undefined: "undefined"
+        JsValue.Number(v): "{v}"
+        JsValue.Boolean(v): if v: "true" else: "false"
+        JsValue.Object(id): "[object Object]"
+        JsValue.Array(id): "[object Array]"
+        JsValue.Function(id): "[Function]"
+        JsValue.Symbol(id): "Symbol()"
+
+describe "Browser storage runtime":
+    it "persists localStorage writes from JavaScript":
+        var session = BrowserSession.new()
+        session.eval_script("localStorage.setItem('theme', 'dark')")
+        val result = session.eval_script("localStorage.getItem('theme')")
+
+        match result:
+            Ok(value): expect(_value_text(value)).to_equal("dark")
+            Err(e): expect(e).to_equal("ok")
+
+        val stored = session.local_storage_item("theme")
+        match stored:
+            Some(v): expect(v).to_equal("dark")
+            None: expect("missing").to_equal("dark")
+
+    it "removes sessionStorage entries from JavaScript":
+        var session = BrowserSession.new()
+        session.eval_script("sessionStorage.setItem('tab', 'one')")
+        session.eval_script("sessionStorage.removeItem('tab')")
+        val result = session.eval_script("sessionStorage.getItem('tab')")
+
+        match result:
+            Ok(value): expect(_value_text(value)).to_equal("null")
+            Err(e): expect(e).to_equal("ok")
+
+        val stored = session.session_storage_item("tab")
+        expect stored.? == false
+
+    it "clears storage keys and updates length":
+        var session = BrowserSession.new()
+        val result = session.eval_script("localStorage.setItem('a', '1'); localStorage.setItem('b', '2'); localStorage.clear(); localStorage.length")
+
+        match result:
+            Ok(value): expect(_value_text(value)).to_equal("0")
+            Err(e): expect(e).to_equal("ok")
+
+        expect session.local_storage_item("a").? == false
+        expect session.local_storage_item("b").? == false

@@ -15,8 +15,8 @@ use browser.shared.error.script_error
 use std.js.types.js_types.JsValue
 use std.js.types.js_types.JsObject
 use std.js.types.js_types.JsProperty
-use std.js.types.ast_types.Expression
-use std.js.types.ast_types.Statement
+use std.js.types.ast_types.JsExpression
+use std.js.types.ast_types.JsStatement
 use std.js.engine.lexer.JsLexer
 use std.js.engine.parser.JsParser
 use std.js.engine.interpreter.JsInterpreter
@@ -25,6 +25,8 @@ use std.js.engine.interpreter_types.to_number
 use std.js.engine.interpreter_types.to_string
 use std.js.engine.interpreter_types.to_boolean
 use std.js.engine.interpreter_types.is_truthy
+use std.js.engine.js_error.{js_nan, js_infinity, js_neg_infinity}
+use examples.browser.feature.script.builtins.json.{json_parse}
 
 # ── Prototype chain ──────────────────────────────────────────────────────
 
@@ -83,6 +85,9 @@ val NATIVE_STRING_SPLIT = -63
 val NATIVE_STRING_TO_UPPER = -64
 val NATIVE_STRING_TO_LOWER = -65
 
+var _math_random_state: i64 = 88172645463393265
+var _timer_id_counter: i64 = 0
+
 # ── Console implementation ───────────────────────────────────────────────
 
 fn format_value(value: JsValue) -> text:
@@ -129,6 +134,16 @@ fn console_warn(args: [JsValue], logger: Logger):
     val msg = parts.join(" ")
     logger.warn(msg)
 
+fn math_random_next() -> f64:
+    _math_random_state = (_math_random_state * 1103515245 + 12345) % 2147483647
+    if _math_random_state < 0:
+        _math_random_state = 0 - _math_random_state
+    _math_random_state.to_f64() / 2147483647.0
+
+fn _next_timer_id() -> i64:
+    _timer_id_counter = _timer_id_counter + 1
+    _timer_id_counter
+
 # ── Error constructors ───────────────────────────────────────────────────
 
 fn create_error(message: text, error_type: text) -> JsValue:
@@ -169,7 +184,7 @@ fn dispatch_native(fn_id: i64, args: [JsValue], logger: Logger) -> JsValue:
             val parsed = s.parse_i64_safe()
             if val Some(n) = parsed:
                 return JsValue.Number(v: n.to_f64())
-        return JsValue.Number(v: 0.0 / 0.0)  # NaN
+        return JsValue.Number(v: js_nan())
 
     if fn_id == NATIVE_PARSE_FLOAT:
         if args.len() > 0:
@@ -177,7 +192,7 @@ fn dispatch_native(fn_id: i64, args: [JsValue], logger: Logger) -> JsValue:
             val parsed = s.parse_f64_safe()
             if val Some(n) = parsed:
                 return JsValue.Number(v: n)
-        return JsValue.Number(v: 0.0 / 0.0)  # NaN
+        return JsValue.Number(v: js_nan())
 
     if fn_id == NATIVE_IS_NAN:
         if args.len() > 0:
@@ -189,8 +204,8 @@ fn dispatch_native(fn_id: i64, args: [JsValue], logger: Logger) -> JsValue:
         if args.len() > 0:
             val n = to_number(args.get(0))
             val is_nan = n != n
-            val is_inf = n == 1.0 / 0.0
-            val is_neg_inf = n == -1.0 / 0.0
+            val is_inf = n == js_infinity()
+            val is_neg_inf = n == js_neg_infinity()
             val not_finite = is_nan or is_inf or is_neg_inf
             return JsValue.Boolean(v: not not_finite)
         return JsValue.Boolean(v: false)
@@ -199,23 +214,22 @@ fn dispatch_native(fn_id: i64, args: [JsValue], logger: Logger) -> JsValue:
         if args.len() > 0:
             val n = to_number(args.get(0))
             return JsValue.Number(v: n.floor())
-        return JsValue.Number(v: 0.0 / 0.0)
+        return JsValue.Number(v: js_nan())
 
     if fn_id == NATIVE_MATH_CEIL:
         if args.len() > 0:
             val n = to_number(args.get(0))
             return JsValue.Number(v: n.ceil())
-        return JsValue.Number(v: 0.0 / 0.0)
+        return JsValue.Number(v: js_nan())
 
     if fn_id == NATIVE_MATH_ROUND:
         if args.len() > 0:
             val n = to_number(args.get(0))
             return JsValue.Number(v: n.round())
-        return JsValue.Number(v: 0.0 / 0.0)
+        return JsValue.Number(v: js_nan())
 
     if fn_id == NATIVE_MATH_RANDOM:
-        # Simple pseudo-random using runtime clock
-        return JsValue.Number(v: 0.5)  # Stub — no true random without FFI
+        return JsValue.Number(v: math_random_next())
 
     if fn_id == NATIVE_MATH_ABS:
         if args.len() > 0:
@@ -223,11 +237,11 @@ fn dispatch_native(fn_id: i64, args: [JsValue], logger: Logger) -> JsValue:
             if n < 0.0:
                 return JsValue.Number(v: 0.0 - n)
             return JsValue.Number(v: n)
-        return JsValue.Number(v: 0.0 / 0.0)
+        return JsValue.Number(v: js_nan())
 
     if fn_id == NATIVE_MATH_MAX:
         if args.len() == 0:
-            return JsValue.Number(v: -1.0 / 0.0)  # -Infinity
+            return JsValue.Number(v: js_neg_infinity())
         var max_val = to_number(args.get(0))
         var i = 1
         while i < args.len():
@@ -239,7 +253,7 @@ fn dispatch_native(fn_id: i64, args: [JsValue], logger: Logger) -> JsValue:
 
     if fn_id == NATIVE_MATH_MIN:
         if args.len() == 0:
-            return JsValue.Number(v: 1.0 / 0.0)  # Infinity
+            return JsValue.Number(v: js_infinity())
         var min_val = to_number(args.get(0))
         var i = 1
         while i < args.len():
@@ -253,14 +267,14 @@ fn dispatch_native(fn_id: i64, args: [JsValue], logger: Logger) -> JsValue:
         if args.len() > 0:
             val n = to_number(args.get(0))
             return JsValue.Number(v: n ** 0.5)
-        return JsValue.Number(v: 0.0 / 0.0)
+        return JsValue.Number(v: js_nan())
 
     if fn_id == NATIVE_MATH_POW:
         if args.len() >= 2:
             val base = to_number(args.get(0))
             val exp = to_number(args.get(1))
             return JsValue.Number(v: base ** exp)
-        return JsValue.Number(v: 0.0 / 0.0)
+        return JsValue.Number(v: js_nan())
 
     if fn_id == NATIVE_JSON_STRINGIFY:
         if args.len() > 0:
@@ -269,26 +283,19 @@ fn dispatch_native(fn_id: i64, args: [JsValue], logger: Logger) -> JsValue:
         return JsValue.String(v: "undefined")
 
     if fn_id == NATIVE_JSON_PARSE:
-        # Stub — full JSON parsing requires its own parser
         if args.len() > 0:
             val s = to_string(args.get(0))
-            val parsed = s.parse_f64_safe()
-            if val Some(n) = parsed:
-                return JsValue.Number(v: n)
-            if s == "true":
-                return JsValue.Boolean(v: true)
-            if s == "false":
-                return JsValue.Boolean(v: false)
-            if s == "null":
-                return JsValue.Null
-            return JsValue.String(v: s)
+            val parsed = json_parse(s)
+            match parsed:
+                Ok(value): return value
+                Err(e): return JsValue.Undefined
         return JsValue.Undefined
 
     # Timer stubs
     if fn_id == NATIVE_SET_TIMEOUT:
-        return JsValue.Number(v: 0.0)  # Stub timer id
+        return JsValue.Number(v: _next_timer_id().to_f64())
     if fn_id == NATIVE_SET_INTERVAL:
-        return JsValue.Number(v: 0.0)
+        return JsValue.Number(v: _next_timer_id().to_f64())
     if fn_id == NATIVE_CLEAR_TIMEOUT:
         return JsValue.Undefined
     if fn_id == NATIVE_CLEAR_INTERVAL:
@@ -298,22 +305,22 @@ fn dispatch_native(fn_id: i64, args: [JsValue], logger: Logger) -> JsValue:
 
 # ── Runtime ──────────────────────────────────────────────────────────────
 
-class JsRuntime:
+class BrowserJsRuntime:
     interpreter: JsInterpreter
     global_object: i64
     prototypes: PrototypeChain
     logger: Logger
     native_functions: [Pair<text, i64>]
 
-    static fn new(logger: Logger) -> JsRuntime:
-        var interp = JsInterpreter.new(logger)
-        val global_obj = interp.object_store.create_object()
-        var rt = JsRuntime(
+    static fn new(logger: Logger) -> BrowserJsRuntime:
+        var interp = JsInterpreter.create(logger)
+        val global_obj = interp.create_object()
+        var rt = BrowserJsRuntime(
             interpreter: interp,
             global_object: global_obj,
             prototypes: PrototypeChain.empty(),
             logger: logger,
-            native_functions: List<Pair<text, i64>>(),
+            native_functions: [],
         )
         rt.initialize()
         rt
@@ -323,12 +330,7 @@ class JsRuntime:
         # Store a JsFunction with empty body — the interpreter will check for
         # negative IDs and dispatch to the native handler.
         val fn_idx = self.interpreter.functions.len()
-        val placeholder = JsFunction(
-            name: name,
-            params: [text](),
-            body: [Statement](),
-            closure_env: -1,
-        )
+        val placeholder = JsFunction.create(name, [], [], -1)
         self.interpreter.functions.push(placeholder)
         self.native_functions.push(Pair(first: name, second: native_id))
         self.interpreter.native_id_map.push(Pair(first: fn_idx, second: native_id))
@@ -344,16 +346,19 @@ class JsRuntime:
     me _define_method_on(obj_id: i64, method_name: text, native_id: i64):
         val fn_idx = self._register_native(method_name, native_id)
         val fn_val = JsValue.Function(id: fn_idx)
-        self.interpreter.object_store.set_property(obj_id, method_name, fn_val)
+        self.interpreter.set_object_property(obj_id, method_name, fn_val)
 
     # Initialize the global environment with all built-in objects and functions
     me initialize():
         self.logger.debug("Initializing JS runtime globals")
+        var interpreter = self.interpreter
+        interpreter.setup_globals()
+        self.interpreter = interpreter
 
         # ── Global values ────────────────────────────────────────────
         self.interpreter.env_stack.define_var(self.interpreter.global_env, "undefined", JsValue.Undefined)
-        self.interpreter.env_stack.define_var(self.interpreter.global_env, "NaN", JsValue.Number(v: 0.0 / 0.0))
-        self.interpreter.env_stack.define_var(self.interpreter.global_env, "Infinity", JsValue.Number(v: 1.0 / 0.0))
+        self.interpreter.env_stack.define_var(self.interpreter.global_env, "NaN", JsValue.Number(v: js_nan()))
+        self.interpreter.env_stack.define_var(self.interpreter.global_env, "Infinity", JsValue.Number(v: js_infinity()))
 
         # ── Global functions ─────────────────────────────────────────
         self._define_global_fn("parseInt", NATIVE_PARSE_INT)
@@ -362,7 +367,7 @@ class JsRuntime:
         self._define_global_fn("isFinite", NATIVE_IS_FINITE)
 
         # ── console object ───────────────────────────────────────────
-        val console_id = self.interpreter.object_store.create_object()
+        val console_id = self.interpreter.create_object()
         self._define_method_on(console_id, "log", NATIVE_CONSOLE_LOG)
         self._define_method_on(console_id, "error", NATIVE_CONSOLE_ERROR)
         self._define_method_on(console_id, "warn", NATIVE_CONSOLE_WARN)
@@ -370,12 +375,12 @@ class JsRuntime:
             self.interpreter.global_env, "console", JsValue.Object(id: console_id))
 
         # ── Math object ──────────────────────────────────────────────
-        val math_id = self.interpreter.object_store.create_object()
-        self.interpreter.object_store.set_property(math_id, "PI", JsValue.Number(v: 3.141592653589793))
-        self.interpreter.object_store.set_property(math_id, "E", JsValue.Number(v: 2.718281828459045))
-        self.interpreter.object_store.set_property(math_id, "LN2", JsValue.Number(v: 0.6931471805599453))
-        self.interpreter.object_store.set_property(math_id, "LN10", JsValue.Number(v: 2.302585092994046))
-        self.interpreter.object_store.set_property(math_id, "SQRT2", JsValue.Number(v: 1.4142135623730951))
+        val math_id = self.interpreter.create_object()
+        self.interpreter.set_object_property(math_id, "PI", JsValue.Number(v: 3.141592653589793))
+        self.interpreter.set_object_property(math_id, "E", JsValue.Number(v: 2.718281828459045))
+        self.interpreter.set_object_property(math_id, "LN2", JsValue.Number(v: 0.6931471805599453))
+        self.interpreter.set_object_property(math_id, "LN10", JsValue.Number(v: 2.302585092994046))
+        self.interpreter.set_object_property(math_id, "SQRT2", JsValue.Number(v: 1.4142135623730951))
         self._define_method_on(math_id, "floor", NATIVE_MATH_FLOOR)
         self._define_method_on(math_id, "ceil", NATIVE_MATH_CEIL)
         self._define_method_on(math_id, "round", NATIVE_MATH_ROUND)
@@ -389,7 +394,7 @@ class JsRuntime:
             self.interpreter.global_env, "Math", JsValue.Object(id: math_id))
 
         # ── JSON object ──────────────────────────────────────────────
-        val json_id = self.interpreter.object_store.create_object()
+        val json_id = self.interpreter.create_object()
         self._define_method_on(json_id, "parse", NATIVE_JSON_PARSE)
         self._define_method_on(json_id, "stringify", NATIVE_JSON_STRINGIFY)
         self.interpreter.env_stack.define_var(
@@ -402,12 +407,12 @@ class JsRuntime:
         self._define_global_fn("clearInterval", NATIVE_CLEAR_INTERVAL)
 
         # ── Prototypes (create empty objects for now) ────────────────
-        self.prototypes.object_proto = self.interpreter.object_store.create_object()
-        self.prototypes.array_proto = self.interpreter.object_store.create_object()
-        self.prototypes.function_proto = self.interpreter.object_store.create_object()
-        self.prototypes.string_proto = self.interpreter.object_store.create_object()
-        self.prototypes.number_proto = self.interpreter.object_store.create_object()
-        self.prototypes.error_proto = self.interpreter.object_store.create_object()
+        self.prototypes.object_proto = self.interpreter.create_object()
+        self.prototypes.array_proto = self.interpreter.create_object()
+        self.prototypes.function_proto = self.interpreter.create_object()
+        self.prototypes.string_proto = self.interpreter.create_object()
+        self.prototypes.number_proto = self.interpreter.create_object()
+        self.prototypes.error_proto = self.interpreter.create_object()
 
         self.logger.debug("JS runtime initialized with {self.interpreter.functions.len()} native functions")
 
@@ -418,7 +423,7 @@ class JsRuntime:
         self.logger.debug("Evaluating JS source ({source.len()} chars)")
 
         # Lex + parse
-        var parser = JsParser.new(source, self.logger)
+        var parser = JsParser.create(source, self.logger)
         val program = parser.parse_program()?
 
         self.logger.debug("Parsed {program.len()} top-level statements")
@@ -428,6 +433,12 @@ class JsRuntime:
 
         self.logger.debug("Execution complete")
         Ok(result)
+
+    me drain_due_timers(current_time_ms: i64) -> i64:
+        var interpreter = self.interpreter
+        val ran_count = interpreter.drain_due_timers(current_time_ms)
+        self.interpreter = interpreter
+        ran_count
 
     # Call a function by its internal ID with given arguments
     me call(function_id: i64, args: [JsValue]) -> BrowserResult<JsValue>:

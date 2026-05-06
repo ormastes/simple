@@ -2,16 +2,22 @@
 #![allow(REQC004)]
 #![allow(unnamed_duplicate_typed_args)]
 # Web Crypto API binding — crypto.getRandomValues, crypto.randomUUID,
-# and honest SubtleCrypto unsupported-method errors.
+# SHA-256 digest, AES-CTR encrypt/decrypt, and HMAC-SHA256 sign/verify.
 
-use browser.shared.logging.Logger
+use std.js.engine.js_error.Logger
 use browser.shared.error.BrowserResult
 use browser.shared.error.script_error
 use std.js.types.js_types.JsValue
 use std.js.types.js_types.JsObject
 use std.js.types.js_types.JsProperty
-use std.js.engine.runtime.JsRuntime
+use std.js.engine.runtime.{JsRuntime}
 use std.js.engine.interpreter_types.to_string
+use std.common.crypto.sha256.{sha256_bytes}
+use std.common.crypto.hmac.{hmac_sha256_bytes}
+use std.common.aes.modes.{aes_ctr_encrypt, aes_ctr_decrypt}
+use std.common.aes.utilities.{bytes_to_hex, hex_to_bytes}
+
+extern fn rt_random_hex(len: i64) -> text
 
 # ── Native function IDs ──────────────────────────────────────────────────
 
@@ -27,23 +33,22 @@ val NATIVE_SUBTLE_VERIFY = -714
 
 class CryptoBinding:
     logger: Logger
-    seed: i64
 
     static fn new(logger: Logger) -> CryptoBinding:
-        CryptoBinding(logger: logger, seed: 42)
+        CryptoBinding(logger: logger)
 
     # Install crypto and crypto.subtle objects on the JS runtime.
     me install(runtime: JsRuntime):
         self.logger.debug("Installing crypto bindings")
 
         # Create the crypto object
-        val crypto_id = runtime.interpreter.object_store.create_object()
+        val crypto_id = runtime.interpreter.create_object()
 
         runtime._define_method_on(crypto_id, "getRandomValues", NATIVE_CRYPTO_GET_RANDOM_VALUES)
         runtime._define_method_on(crypto_id, "randomUUID", NATIVE_CRYPTO_RANDOM_UUID)
 
         # Create the subtle sub-object
-        val subtle_id = runtime.interpreter.object_store.create_object()
+        val subtle_id = runtime.interpreter.create_object()
         runtime._define_method_on(subtle_id, "digest", NATIVE_SUBTLE_DIGEST)
         runtime._define_method_on(subtle_id, "encrypt", NATIVE_SUBTLE_ENCRYPT)
         runtime._define_method_on(subtle_id, "decrypt", NATIVE_SUBTLE_DECRYPT)
@@ -51,7 +56,7 @@ class CryptoBinding:
         runtime._define_method_on(subtle_id, "verify", NATIVE_SUBTLE_VERIFY)
 
         # Attach subtle to crypto
-        runtime.interpreter.object_store.set_property(
+        runtime.interpreter.set_object_property(
             crypto_id, "subtle", JsValue.Object(id: subtle_id))
 
         # Bind crypto to global scope
@@ -67,7 +72,6 @@ fn js_crypto_getRandomValues(args: [JsValue], runtime: JsRuntime) -> BrowserResu
         return Err(script_error("getRandomValues requires 1 argument"))
 
     # The argument should be a typed array (represented as a JS Array/Object).
-    # NOTE: This is NOT cryptographically secure; it uses the existing simple LCG.
     match args.get(0):
         JsValue.Array(arr_id):
             _fill_random_values(arr_id, runtime)?
@@ -89,110 +93,191 @@ fn _fill_random_values(obj_id: i64, runtime: JsRuntime) -> BrowserResult<()>:
         return Err(script_error("getRandomValues: typed array length must be non-negative"))
     if length > 65536:
         return Err(script_error("getRandomValues: quota exceeded"))
+    val random_bytes = _secure_random_bytes(length)
     var i = 0
     while i < length:
-        val random_byte = _lcg_next() % 256
-        runtime.interpreter.object_store.set_property(
+        val random_byte = random_bytes.get(i) & 0xFF
+        runtime.interpreter.set_object_property(
             obj_id, "{i}", JsValue.Number(v: random_byte.to_f64()))
         i = i + 1
-    runtime.interpreter.object_store.set_property(
+    runtime.interpreter.set_object_property(
         obj_id, "length", JsValue.Number(v: length.to_f64()))
     Ok(())
 
 fn _array_like_length(obj_id: i64, runtime: JsRuntime) -> i64:
-    val raw = runtime.interpreter.object_store.get_property(obj_id, "length")
+    val raw = runtime.interpreter.get_object_property(obj_id, "length")
     match raw:
         JsValue.Number(v): v.to_i64()
         _: 0
 
-# ── SubtleCrypto stubs ───────────────────────────────────────────────────
+# ── SubtleCrypto ─────────────────────────────────────────────────────────
 
 fn js_subtle_digest(args: [JsValue]) -> BrowserResult<JsValue>:
-    # digest(algorithm, data) -> Promise<ArrayBuffer>
+    # digest(algorithm, data). This host binding returns lowercase hex until
+    # the browser runtime has an ArrayBuffer/Promise bridge for native methods.
     if args.len() < 2:
         return Err(script_error("SubtleCrypto.digest requires 2 arguments"))
-    Err(script_error("SubtleCrypto.digest not implemented"))
+    val algorithm = _digest_algorithm_name(args.get(0))?
+    if algorithm != "sha-256":
+        return Err(script_error("SubtleCrypto.digest unsupported algorithm: " + algorithm))
+
+    val data = _digest_data_bytes(args.get(1))?
+    val hash = sha256_bytes(data)
+    Ok(JsValue.String(v: _bytes_to_hex(hash)))
+
+fn _digest_algorithm_name(value: JsValue) -> BrowserResult<text>:
+    match value:
+        JsValue.String(v): Ok(v.trim().lower())
+        _:
+            Err(script_error("SubtleCrypto.digest algorithm must be a string"))
+
+fn _digest_data_bytes(value: JsValue) -> BrowserResult<list>:
+    match value:
+        JsValue.String(v): Ok(_text_to_byte_list(v))
+        _:
+            Err(script_error("SubtleCrypto.digest data must be a string"))
+
+fn _text_to_byte_list(value: text) -> list:
+    var bytes = []
+    var i = 0
+    while i < value.len():
+        val ch = value[i:i + 1]
+        bytes.push(ch.ord() & 0xFF)
+        i = i + 1
+    bytes
+
+fn _bytes_to_hex(bytes: list) -> text:
+    val alphabet = "0123456789abcdef"
+    var out = ""
+    var i = 0
+    while i < bytes.len():
+        val b = bytes.get(i)
+        val hi = (b >> 4) & 0x0F
+        val lo = b & 0x0F
+        out = out + alphabet[hi:hi + 1]
+        out = out + alphabet[lo:lo + 1]
+        i = i + 1
+    out
 
 fn js_subtle_encrypt(args: [JsValue]) -> BrowserResult<JsValue>:
-    # encrypt(algorithm, key, data) -> Promise<ArrayBuffer>
+    # encrypt(algorithm, key, data). This binding supports AES-CTR with string
+    # key/data and returns lowercase hex until ArrayBuffer/CryptoKey marshalling
+    # is available.
     if args.len() < 3:
         return Err(script_error("SubtleCrypto.encrypt requires 3 arguments"))
-    Err(script_error("SubtleCrypto.encrypt not implemented"))
+    val algorithm = _aes_ctr_algorithm_name(args.get(0))?
+    if algorithm != "aes-ctr":
+        return Err(script_error("SubtleCrypto.encrypt unsupported algorithm: " + algorithm))
+    val key = _aes_key_bytes(args.get(1))?
+    val data = _digest_data_bytes(args.get(2))?
+    val nonce = _zero_nonce()
+    val encrypted = aes_ctr_encrypt(data, key, nonce)
+    Ok(JsValue.String(v: bytes_to_hex(encrypted)))
 
 fn js_subtle_decrypt(args: [JsValue]) -> BrowserResult<JsValue>:
-    # decrypt(algorithm, key, data) -> Promise<ArrayBuffer>
+    # decrypt(algorithm, key, data). AES-CTR ciphertext is accepted as lowercase
+    # or uppercase hex and returns decoded string data.
     if args.len() < 3:
         return Err(script_error("SubtleCrypto.decrypt requires 3 arguments"))
-    Err(script_error("SubtleCrypto.decrypt not implemented"))
+    val algorithm = _aes_ctr_algorithm_name(args.get(0))?
+    if algorithm != "aes-ctr":
+        return Err(script_error("SubtleCrypto.decrypt unsupported algorithm: " + algorithm))
+    val key = _aes_key_bytes(args.get(1))?
+    val ciphertext = _ciphertext_hex_bytes(args.get(2))?
+    val nonce = _zero_nonce()
+    val decrypted = aes_ctr_decrypt(ciphertext, key, nonce)
+    Ok(JsValue.String(v: _bytes_to_text(decrypted)))
+
+fn _aes_ctr_algorithm_name(value: JsValue) -> BrowserResult<text>:
+    match value:
+        JsValue.String(v):
+            val lower = v.trim().lower()
+            if lower == "aes-ctr" or lower == "aes-ctr-128":
+                return Ok("aes-ctr")
+            Ok(lower)
+        _:
+            Err(script_error("SubtleCrypto AES-CTR algorithm must be a string"))
+
+fn _aes_key_bytes(value: JsValue) -> BrowserResult<list>:
+    val key = _digest_data_bytes(value)?
+    if key.len() == 16 or key.len() == 24 or key.len() == 32:
+        return Ok(key)
+    Err(script_error("SubtleCrypto AES key must be 16, 24, or 32 bytes"))
+
+fn _ciphertext_hex_bytes(value: JsValue) -> BrowserResult<list>:
+    match value:
+        JsValue.String(v):
+            val trimmed = v.trim()
+            if trimmed.len() == 0 or trimmed.len() % 2 != 0:
+                return Err(script_error("SubtleCrypto.decrypt ciphertext must be even-length hex"))
+            Ok(hex_to_bytes(trimmed))
+        _:
+            Err(script_error("SubtleCrypto.decrypt ciphertext must be hex string"))
+
+fn _zero_nonce() -> list:
+    [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+
+fn _bytes_to_text(bytes: list) -> text:
+    var out = ""
+    var i = 0
+    while i < bytes.len():
+        out = out + "{bytes.get(i).chr()}"
+        i = i + 1
+    out
 
 fn js_subtle_sign(args: [JsValue]) -> BrowserResult<JsValue>:
-    # sign(algorithm, key, data) -> Promise<ArrayBuffer>
+    # sign(algorithm, key, data). This host binding returns lowercase hex until
+    # CryptoKey/ArrayBuffer/Promise marshalling exists in the browser runtime.
     if args.len() < 3:
         return Err(script_error("SubtleCrypto.sign requires 3 arguments"))
-    Err(script_error("SubtleCrypto.sign not implemented"))
+    val algorithm = _hmac_algorithm_name(args.get(0))?
+    if algorithm != "hmac-sha-256":
+        return Err(script_error("SubtleCrypto.sign unsupported algorithm: " + algorithm))
+    val key = _digest_data_bytes(args.get(1))?
+    val data = _digest_data_bytes(args.get(2))?
+    val mac = hmac_sha256_bytes(key, data)
+    Ok(JsValue.String(v: _bytes_to_hex(mac)))
 
 fn js_subtle_verify(args: [JsValue]) -> BrowserResult<JsValue>:
-    # verify(algorithm, key, signature, data) -> Promise<Boolean>
+    # verify(algorithm, key, signature, data)
     if args.len() < 4:
         return Err(script_error("SubtleCrypto.verify requires 4 arguments"))
-    Err(script_error("SubtleCrypto.verify not implemented"))
+    val algorithm = _hmac_algorithm_name(args.get(0))?
+    if algorithm != "hmac-sha-256":
+        return Err(script_error("SubtleCrypto.verify unsupported algorithm: " + algorithm))
+    val key = _digest_data_bytes(args.get(1))?
+    val signature = _signature_hex(args.get(2))?
+    val data = _digest_data_bytes(args.get(3))?
+    val mac = hmac_sha256_bytes(key, data)
+    Ok(JsValue.Boolean(v: _bytes_to_hex(mac) == signature.lower()))
+
+fn _hmac_algorithm_name(value: JsValue) -> BrowserResult<text>:
+    match value:
+        JsValue.String(v):
+            val lower = v.trim().lower()
+            if lower == "hmac" or lower == "hmac-sha-256" or lower == "hmac-sha256":
+                return Ok("hmac-sha-256")
+            Ok(lower)
+        _:
+            Err(script_error("SubtleCrypto HMAC algorithm must be a string"))
+
+fn _signature_hex(value: JsValue) -> BrowserResult<text>:
+    match value:
+        JsValue.String(v): Ok(v.trim())
+        _:
+            Err(script_error("SubtleCrypto.verify signature must be a hex string"))
 
 # ── UUID generation ──────────────────────────────────────────────────────
 
 # Generate a UUID v4 string: xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx
-# Uses a simple LCG for pseudo-random bytes. NOT cryptographically secure.
 fn generate_uuid_v4() -> text:
-    # Generate 16 pseudo-random hex nibbles per section.
-    # Format: 8-4-4-4-12
-    var result = ""
+    var bytes = _secure_random_bytes(16)
+    bytes[6] = (bytes.get(6) & 0x0F) | 0x40
+    bytes[8] = (bytes.get(8) & 0x3F) | 0x80
+    val hex = bytes_to_hex(bytes)
+    hex[0:8] + "-" + hex[8:12] + "-" + hex[12:16] + "-" + hex[16:20] + "-" + hex[20:32]
 
-    # Section 1: 8 hex chars
-    result = result + _hex_block(8)
-    result = result + "-"
-
-    # Section 2: 4 hex chars
-    result = result + _hex_block(4)
-    result = result + "-"
-
-    # Section 3: 4xxx (version 4)
-    result = result + "4"
-    result = result + _hex_block(3)
-    result = result + "-"
-
-    # Section 4: yxxx (variant bits: 8, 9, a, or b)
-    result = result + _variant_char()
-    result = result + _hex_block(3)
-    result = result + "-"
-
-    # Section 5: 12 hex chars
-    result = result + _hex_block(12)
-
-    result
-
-# ── Pseudo-random helpers ────────────────────────────────────────────────
-
-# Simple LCG state — NOT cryptographically secure.
-var _lcg_state: i64 = 12345
-
-fn _lcg_next() -> i64:
-    # LCG: state = (a * state + c) mod m
-    _lcg_state = (_lcg_state * 1103515245 + 12345) % 2147483647
-    if _lcg_state < 0:
-        _lcg_state = 0 - _lcg_state
-    _lcg_state
-
-fn _hex_block(count: i64) -> text:
-    val hex_chars = "0123456789abcdef"
-    var result = ""
-    var i = 0
-    while i < count:
-        val r = _lcg_next() % 16
-        result = result + hex_chars[r:r + 1]
-        i = i + 1
-    result
-
-fn _variant_char() -> text:
-    # Variant must be 8, 9, a, or b
-    val variants = "89ab"
-    val r = _lcg_next() % 4
-    variants[r:r + 1]
+fn _secure_random_bytes(length: i64) -> list:
+    if length <= 0:
+        return []
+    hex_to_bytes(rt_random_hex(length))

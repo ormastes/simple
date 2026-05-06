@@ -1,0 +1,122 @@
+"""Small PE/COFF header classifier used before any Wine execution path."""
+
+class PeHeaderSummary:
+    ok: bool
+    error: text
+    machine: text
+    optional_header: text
+    subsystem_kind: text
+    section_count: i64
+    pe_offset: i64
+
+fn _read_u16_le(data: [u8], offset: i64) -> i64:
+    if offset + 1 >= data.len():
+        return 0
+    val lo = data[offset] as i64
+    val hi = data[offset + 1] as i64
+    lo | (hi << 8)
+
+fn _read_u32_le(data: [u8], offset: i64) -> i64:
+    if offset + 3 >= data.len():
+        return 0
+    val b0 = data[offset] as i64
+    val b1 = data[offset + 1] as i64
+    val b2 = data[offset + 2] as i64
+    val b3 = data[offset + 3] as i64
+    b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)
+
+fn _summary_error(code: text) -> PeHeaderSummary:
+    PeHeaderSummary(ok: false, error: code, machine: "", optional_header: "", subsystem_kind: "", section_count: 0, pe_offset: 0)
+
+fn _machine_name(machine: i64) -> text:
+    if machine == 0x8664:
+        return "x86_64"
+    if machine == 0x014c:
+        return "x86"
+    return "unsupported"
+
+fn _optional_header_name(magic: i64) -> text:
+    if magic == 0x20b:
+        return "PE32+"
+    if magic == 0x10b:
+        return "PE32"
+    return "unsupported"
+
+fn _subsystem_name(subsystem: i64) -> text:
+    if subsystem == 3:
+        return "console"
+    if subsystem == 2:
+        return "gui"
+    return "unsupported"
+
+pub fn parse_pe_header_summary(data: [u8]) -> PeHeaderSummary:
+    if data.len() < 0x40:
+        return _summary_error("too-small")
+    if data[0] != 0x4d or data[1] != 0x5a:
+        return _summary_error("bad-mz")
+    val pe_offset = _read_u32_le(data, 0x3c)
+    if pe_offset <= 0 or pe_offset + 0x5c >= data.len():
+        return _summary_error("bad-pe-offset")
+    if data[pe_offset] != 0x50 or data[pe_offset + 1] != 0x45 or data[pe_offset + 2] != 0 or data[pe_offset + 3] != 0:
+        return _summary_error("bad-pe-signature")
+    val machine_raw = _read_u16_le(data, pe_offset + 4)
+    val section_count = _read_u16_le(data, pe_offset + 6)
+    val optional_size = _read_u16_le(data, pe_offset + 20)
+    val optional_offset = pe_offset + 24
+    if optional_size < 0x5e:
+        return _summary_error("optional-header-too-small")
+    if optional_offset + optional_size > data.len():
+        return _summary_error("optional-header-out-of-bounds")
+    val optional_magic = _read_u16_le(data, optional_offset)
+    val subsystem_raw = _read_u16_le(data, optional_offset + 0x5c)
+    val machine = _machine_name(machine_raw)
+    val optional_header = _optional_header_name(optional_magic)
+    val subsystem = _subsystem_name(subsystem_raw)
+    if machine != "x86_64":
+        return PeHeaderSummary(ok: false, error: "unsupported-machine", machine: machine, optional_header: optional_header, subsystem_kind: subsystem, section_count: section_count, pe_offset: pe_offset)
+    if optional_header != "PE32+":
+        return PeHeaderSummary(ok: false, error: "unsupported-optional-header", machine: machine, optional_header: optional_header, subsystem_kind: subsystem, section_count: section_count, pe_offset: pe_offset)
+    if subsystem != "console":
+        return PeHeaderSummary(ok: false, error: "unsupported-subsystem", machine: machine, optional_header: optional_header, subsystem_kind: subsystem, section_count: section_count, pe_offset: pe_offset)
+    PeHeaderSummary(ok: true, error: "", machine: machine, optional_header: optional_header, subsystem_kind: subsystem, section_count: section_count, pe_offset: pe_offset)
+
+pub fn pe_section_table_gate(data: [u8]) -> text:
+    val summary = parse_pe_header_summary(data)
+    if not summary.ok:
+        return summary.error
+    val optional_size = _read_u16_le(data, summary.pe_offset + 20)
+    val section_count = _read_u16_le(data, summary.pe_offset + 6)
+    if section_count <= 0:
+        return "missing-section-table"
+    val section_table_offset = summary.pe_offset + 24 + optional_size
+    val section_table_size = section_count * 40
+    if section_table_offset + section_table_size > data.len():
+        return "section-table-out-of-bounds"
+    return "ready"
+
+fn _data_directory_pair_nonzero(data: [u8], optional_offset: i64, index: i64) -> bool:
+    val dir_offset = optional_offset + 0x70 + (index * 8)
+    if dir_offset + 7 >= data.len():
+        return false
+    val rva = _read_u32_le(data, dir_offset)
+    val size = _read_u32_le(data, dir_offset + 4)
+    rva != 0 and size != 0
+
+pub fn pe_data_directory_gate(data: [u8]) -> text:
+    val summary = parse_pe_header_summary(data)
+    if not summary.ok:
+        return summary.error
+    val optional_offset = summary.pe_offset + 24
+    val optional_size = _read_u16_le(data, summary.pe_offset + 20)
+    if optional_size < 0xf0:
+        return "data-directories-out-of-bounds"
+    val dir_count = _read_u32_le(data, optional_offset + 0x6c)
+    if dir_count < 10:
+        return "missing-data-directories"
+    if not _data_directory_pair_nonzero(data, optional_offset, 1):
+        return "missing-import-directory"
+    if not _data_directory_pair_nonzero(data, optional_offset, 5):
+        return "missing-relocation-directory"
+    if not _data_directory_pair_nonzero(data, optional_offset, 9):
+        return "missing-tls-directory"
+    return "ready"

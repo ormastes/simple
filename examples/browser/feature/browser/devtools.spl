@@ -53,6 +53,24 @@ class NetworkEntry:
             status_code: 0, response_body: ""
         )
 
+class CapturedScreenshot:
+    tab_id: i64
+    data_base64: text
+    format: text
+    width: i64
+    height: i64
+    timestamp: i64
+
+    static fn create(tab_id: i64, data_base64: text, format: text, width: i64, height: i64, timestamp: i64) -> CapturedScreenshot:
+        CapturedScreenshot(
+            tab_id: tab_id,
+            data_base64: data_base64,
+            format: format,
+            width: width,
+            height: height,
+            timestamp: timestamp
+        )
+
 class DevToolsServer:
     is_active: bool
     port: i64
@@ -60,6 +78,7 @@ class DevToolsServer:
     next_session_id: i64
     console_log: [ConsoleEntry]
     network_log: [NetworkEntry]
+    screenshots: [CapturedScreenshot]
     next_timestamp: i64
     logger: Logger
 
@@ -67,10 +86,11 @@ class DevToolsServer:
         DevToolsServer(
             is_active: false,
             port: port,
-            sessions: [DevToolsSession](),
+            sessions: [],
             next_session_id: 1,
-            console_log: [ConsoleEntry](),
-            network_log: [NetworkEntry](),
+            console_log: [],
+            network_log: [],
+            screenshots: [],
             next_timestamp: 1,
             logger: logger
         )
@@ -84,7 +104,7 @@ class DevToolsServer:
 
     me stop():
         self.is_active = false
-        self.sessions = [DevToolsSession]()
+        self.sessions = []
         self.logger.info("DevTools server stopped")
 
     me create_session(tab_id: i64) -> i64:
@@ -253,12 +273,31 @@ class DevToolsServer:
         "{}"
 
     fn page_screenshot(tab_id: i64) -> text:
-        # Returns a base64-encoded placeholder PNG.
-        # In a full implementation, this would capture the compositor's framebuffer.
         self.logger.debug("DevTools screenshot tab={tab_id}")
-        # 1x1 transparent PNG in base64 — minimal valid image
-        val placeholder = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8/5+hHgAHggJ/PchI7wAAAABJRU5ErkJggg=="
-        "{\"data\":\"{placeholder}\"}"
+        var i = self.screenshots.len() - 1
+        while i >= 0:
+            val shot = self.screenshots[i]
+            if shot.tab_id == tab_id:
+                return "{\"data\":\"{shot.data_base64}\",\"format\":\"{shot.format}\",\"width\":{shot.width},\"height\":{shot.height},\"timestamp\":{shot.timestamp}}"
+            i = i - 1
+        "{\"data\":\"\",\"error\":\"screenshot framebuffer unavailable\"}"
+
+    me record_screenshot(tab_id: i64, data_base64: text, format: text, width: i64, height: i64):
+        if data_base64 == "":
+            self.logger.warn("Ignoring empty screenshot for tab={tab_id}")
+            return
+        val ts = self.next_timestamp
+        self.next_timestamp = self.next_timestamp + 1
+        val shot = CapturedScreenshot.create(
+            tab_id: tab_id,
+            data_base64: data_base64,
+            format: if format == "": "png" else: format,
+            width: width,
+            height: height,
+            timestamp: ts
+        )
+        self.screenshots.push(shot)
+        self.logger.debug("Screenshot recorded tab={tab_id} {width}x{height} format={shot.format}")
 
     # --- Console domain ---
 

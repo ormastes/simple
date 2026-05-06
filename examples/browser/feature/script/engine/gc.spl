@@ -70,6 +70,7 @@ class GcHeap:
         if from_id >= 0 and from_id < self.objects.len():
             var obj = self.objects.get(from_id)
             obj.references.push(to_id)
+            self._replace_object(from_id, obj)
             # Write barrier for incremental GC
             self.write_barrier(from_id)
 
@@ -84,6 +85,7 @@ class GcHeap:
                     new_refs.push(ref_id)
                 i = i + 1
             obj.references = new_refs
+            self._replace_object(from_id, obj)
 
     # --- Collection ---
 
@@ -148,11 +150,12 @@ class GcHeap:
             return  # Already black
         # Mark as gray (marked but references not yet processed)
         obj.header.marked = true
+        self._replace_object(obj_id, obj)
         self.mark_stack.push(obj_id)
 
     me process_mark_stack():
         while self.mark_stack.len() > 0:
-            val obj_id = self.mark_stack.pop()
+            val obj_id = self._pop_mark_stack()
             if obj_id >= 0 and obj_id < self.objects.len():
                 val obj = self.objects.get(obj_id)
                 # Process all references (turn gray to black)
@@ -168,7 +171,7 @@ class GcHeap:
         val budget_items = (budget_ms * 100.0).to_i64()  # Approximate items per ms
         var processed = 0
         while self.mark_stack.len() > 0 and processed < budget_items:
-            val obj_id = self.mark_stack.pop()
+            val obj_id = self._pop_mark_stack()
             if obj_id >= 0 and obj_id < self.objects.len():
                 val obj = self.objects.get(obj_id)
                 var i = 0
@@ -181,6 +184,16 @@ class GcHeap:
         if done:
             self.is_marking = false
         done
+
+    fn marked_count() -> i64:
+        var count = 0
+        var i = 0
+        while i < self.objects.len():
+            val obj = self.objects.get(i)
+            if obj.header.marked:
+                count = count + 1
+            i = i + 1
+        count
 
     # --- Sweep phase ---
 
@@ -230,10 +243,12 @@ class GcHeap:
                 var obj = self.objects.get(obj_id)
                 if should_promote(obj):
                     obj.header.generation = Generation.Old
+                    self._replace_object(obj_id, obj)
                     self.old.push(obj_id)
                     self.logger.trace("Promoted object {obj_id} to old generation")
                 else:
                     obj.header.ref_count = obj.header.ref_count + 1
+                    self._replace_object(obj_id, obj)
                     still_young.push(obj_id)
             i = i + 1
         self.young = still_young
@@ -269,6 +284,7 @@ class GcHeap:
             if obj_id >= 0 and obj_id < self.objects.len():
                 var obj = self.objects.get(obj_id)
                 obj.header.marked = false
+                self._replace_object(obj_id, obj)
             i = i + 1
 
     me _reset_all_marks():
@@ -276,6 +292,7 @@ class GcHeap:
         while i < self.objects.len():
             var obj = self.objects.get(i)
             obj.header.marked = false
+            self._replace_object(i, obj)
             i = i + 1
 
     me _mark_cross_generation_roots():
@@ -313,6 +330,28 @@ class GcHeap:
                 return true
             i = i + 1
         false
+
+    me _replace_object(obj_id: i64, replacement: GcObject):
+        var updated = [GcObject]()
+        var i = 0
+        while i < self.objects.len():
+            if i == obj_id:
+                updated.push(replacement)
+            else:
+                updated.push(self.objects.get(i))
+            i = i + 1
+        self.objects = updated
+
+    me _pop_mark_stack() -> i64:
+        val last_idx = self.mark_stack.len() - 1
+        val obj_id = self.mark_stack.get(last_idx)
+        var updated = [i64]()
+        var i = 0
+        while i < last_idx:
+            updated.push(self.mark_stack.get(i))
+            i = i + 1
+        self.mark_stack = updated
+        obj_id
 
 # --- Free functions ---
 

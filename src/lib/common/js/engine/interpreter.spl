@@ -1,5 +1,5 @@
 # JavaScript tree-walking interpreter for the Simple Browser Platform.
-# Evaluates AST nodes (Statement / Expression) against a scope chain.
+# Evaluates AST nodes (JsStatement / JsExpression) against a scope chain.
 # Implements JS type coercion, function calls, closures, and object property access.
 
 use std.js.engine.js_error.{JsError, script_error, Logger, LogLevel, BrowserResult, BrowserError, js_nan, js_infinity, js_neg_infinity, is_nan}
@@ -7,51 +7,83 @@ use std.js.types.pair.{Pair}
 use std.js.types.js_types.JsValue
 use std.js.types.js_types.JsObject
 use std.js.types.js_types.JsProperty
-use std.js.types.ast_types.Expression
-use std.js.types.ast_types.Statement
+use std.js.types.ast_types.JsExpression
+use std.js.types.ast_types.JsStatement
 use std.js.types.ast_types.SwitchCase
-use std.js.engine.runtime.{dispatch_native, NATIVE_FETCH, NATIVE_JSON_PARSE, NATIVE_PROMISE_CATCH, NATIVE_PROMISE_FINALLY, NATIVE_PROMISE_REJECT, NATIVE_PROMISE_RESOLVE, NATIVE_PROMISE_THEN, NATIVE_RESPONSE_JSON, NATIVE_RESPONSE_TEXT, NATIVE_STORAGE_GET_ITEM, NATIVE_STORAGE_SET_ITEM, NATIVE_STORAGE_REMOVE_ITEM, NATIVE_STORAGE_CLEAR, NATIVE_STORAGE_KEY}
+use std.js.engine.runtime.{dispatch_native, NATIVE_BLOB_TEXT, NATIVE_FETCH, NATIVE_JSON_PARSE, NATIVE_PROMISE_CATCH, NATIVE_PROMISE_FINALLY, NATIVE_PROMISE_REJECT, NATIVE_PROMISE_RESOLVE, NATIVE_PROMISE_THEN, NATIVE_RESPONSE_BLOB, NATIVE_RESPONSE_JSON, NATIVE_RESPONSE_TEXT, NATIVE_SET_TIMEOUT, NATIVE_SET_INTERVAL, NATIVE_CLEAR_TIMEOUT, NATIVE_CLEAR_INTERVAL, NATIVE_STORAGE_GET_ITEM, NATIVE_STORAGE_SET_ITEM, NATIVE_STORAGE_REMOVE_ITEM, NATIVE_STORAGE_CLEAR, NATIVE_STORAGE_KEY}
+use std.js.engine.parser.{JsParser}
+use std.js.builtins.json.{json_parse}
 use std.js.builtins.array.{array_map, array_filter, array_reduce, array_forEach, array_find, array_findIndex, array_some, array_every, array_sort_with, array_isArray, array_from_values}
+use std.nogc_sync_mut.http.types.{status_text}
 
 extern fn rt_file_read_text(path: text) -> text
 extern fn rt_http_request(method: text, url: text, headers: text, body: text) -> (i64, text, text)
 
 # ── Types, helpers, coercion (extracted to interpreter_types.spl) ────────
-use std.js.engine.interpreter_types.{Environment, EnvironmentStack, CallFrame, JsFunction, to_number, js_to_string, to_boolean, is_truthy, typeof_value, strict_equals, abstract_equals, RETURN_SIGNAL, _is_array_method, _is_string_method, _get_obj_id, _get_fn_id, f64_to_i64}
+use std.js.engine.interpreter_types.{Environment, EnvironmentStack, CallFrame, JsFunction, to_number, js_to_string, to_boolean, is_truthy, typeof_value, strict_equals, abstract_equals, RETURN_SIGNAL, _is_array_method, _is_string_method, _get_obj_id, _get_fn_id, f64_to_i64, _digit_val}
 
 # ── Object store (imported from vm.spl — single canonical definition) ────
 use std.js.engine.vm.{ObjectStore}
 
 # ── Helper ───────────────────────────────────────────────────────────────
 
-fn _ident_name(expr: Expression) -> text:
-    match expr:
-        Expression.Identifier(name): name
-        _: ""
-
-fn _statement_name(stmt: Statement) -> text:
+fn _statement_name(stmt: JsStatement) -> text:
     match stmt:
-        Statement.VarDecl(_, _): "VarDecl"
-        Statement.ExprStmt(_): "ExprStmt"
-        Statement.Return(_): "Return"
-        Statement.If(_, _, _): "If"
-        Statement.While(_, _): "While"
-        Statement.For(_, _, _, _): "For"
-        Statement.Block(_): "Block"
-        Statement.FnDecl(_, _, _): "FnDecl"
-        Statement.TryCatch(_, _, _, _): "TryCatch"
-        Statement.Switch(_, _): "Switch"
-        Statement.ForIn(_, _, _): "ForIn"
-        Statement.ForOf(_, _, _): "ForOf"
-        Statement.ThrowStmt(_): "ThrowStmt"
-        Statement.BreakStmt: "BreakStmt"
-        Statement.ContinueStmt: "ContinueStmt"
-        Statement.ClassDecl(_, _, _, _): "ClassDecl"
-        Statement.LetDecl(_, _): "LetDecl"
-        Statement.ConstDecl(_, _): "ConstDecl"
-        Statement.DestructVarDecl(_, _, _): "DestructVarDecl"
-        Statement.DoWhile(_, _): "DoWhile"
-        Statement.LabeledStmt(_, _): "LabeledStmt"
+        JsStatement.VarDecl(_, _): "VarDecl"
+        JsStatement.ExprStmt(_): "ExprStmt"
+        JsStatement.Return(_): "Return"
+        JsStatement.If(_, _, _): "If"
+        JsStatement.While(_, _): "While"
+        JsStatement.For(_, _, _, _): "For"
+        JsStatement.Block(_): "Block"
+        JsStatement.FnDecl(_, _, _): "FnDecl"
+        JsStatement.TryCatch(_, _, _, _): "TryCatch"
+        JsStatement.Switch(_, _): "Switch"
+        JsStatement.ForIn(_, _, _): "ForIn"
+        JsStatement.ForOf(_, _, _): "ForOf"
+        JsStatement.ThrowStmt(_): "ThrowStmt"
+        JsStatement.BreakStmt: "BreakStmt"
+        JsStatement.ContinueStmt: "ContinueStmt"
+        JsStatement.ClassDecl(_, _, _, _): "ClassDecl"
+        JsStatement.LetDecl(_, _): "LetDecl"
+        JsStatement.ConstDecl(_, _): "ConstDecl"
+        JsStatement.DestructVarDecl(_, _, _): "DestructVarDecl"
+        JsStatement.DoWhile(_, _): "DoWhile"
+        JsStatement.LabeledStmt(_, _): "LabeledStmt"
+
+fn filter_response_headers_for_script(headers: text) -> text:
+    var visible = ""
+    var removed_cookie = false
+    for line in headers.split("\n"):
+        val trimmed = line.trim()
+        if trimmed == "":
+            continue
+        if trimmed.lower().starts_with("set-cookie:"):
+            removed_cookie = true
+        else:
+            visible = visible + line + if removed_cookie: "\\n" else: "\n"
+    visible
+
+fn parse_non_negative_i64_text(value: text) -> i64:
+    var parsed = 0
+    var i = 0
+    while i < value.len():
+        val ch = value.slice(i, i + 1)
+        val digit = _digit_val(ch)
+        if digit >= 0:
+            parsed = parsed * 10 + digit
+        i = i + 1
+    parsed
+
+fn text_equals_exact(left: text, right: text) -> bool:
+    if left.len() != right.len():
+        return false
+    var i = 0
+    while i < left.len():
+        if left.slice(i, i + 1) != right.slice(i, i + 1):
+            return false
+        i = i + 1
+    true
 
 fn _simple_fetch_marker(obj_id: i64, store: ObjectStore) -> bool:
     match store.get_property(obj_id, "__simple_fetch_host"):
@@ -215,10 +247,44 @@ class PendingAsyncRequest:
         PendingAsyncRequest(request_obj_id: request_obj_id)
 
 class PendingPromiseTask:
-    task_obj_id: i64
+    promise_id: i64
+    handler_id: i64
 
-    static fn create(task_obj_id: i64) -> PendingPromiseTask:
-        PendingPromiseTask(task_obj_id: task_obj_id)
+    static fn create(promise_id: i64, handler_id: i64) -> PendingPromiseTask:
+        PendingPromiseTask(promise_id: promise_id, handler_id: handler_id)
+
+class PromiseHandlerRecord:
+    id: i64
+    on_fulfilled: i64
+    on_rejected: i64
+    next_promise_id: i64
+    kind: text
+
+    static fn create(id: i64, on_fulfilled: i64, on_rejected: i64, next_promise_id: i64, kind: text) -> PromiseHandlerRecord:
+        PromiseHandlerRecord(id: id, on_fulfilled: on_fulfilled, on_rejected: on_rejected, next_promise_id: next_promise_id, kind: kind)
+
+class PromiseHandlerRegistration:
+    promise_id: i64
+    handler_id: i64
+
+    static fn create(promise_id: i64, handler_id: i64) -> PromiseHandlerRegistration:
+        PromiseHandlerRegistration(promise_id: promise_id, handler_id: handler_id)
+
+class PendingTimerTask:
+    id: i64
+    callback_id: i64
+    delay_ms: i64
+    scheduled_at_ms: i64
+    is_interval: bool
+
+    static fn create(id: i64, callback_id: i64, delay_ms: i64, scheduled_at_ms: i64, is_interval: bool) -> PendingTimerTask:
+        PendingTimerTask(
+            id: id,
+            callback_id: callback_id,
+            delay_ms: delay_ms,
+            scheduled_at_ms: scheduled_at_ms,
+            is_interval: is_interval,
+        )
 
 # ── Interpreter ──────────────────────────────────────────────────────────
 
@@ -245,6 +311,11 @@ class JsInterpreter:
     pending_async_requests: [PendingAsyncRequest]
     pending_async_request_registry: [PendingAsyncRequest]
     pending_promise_tasks: [PendingPromiseTask]
+    promise_handlers: [PromiseHandlerRecord]
+    promise_handler_registrations: [PromiseHandlerRegistration]
+    next_promise_handler_id: i64
+    next_timer_id: i64
+    pending_timer_tasks: [PendingTimerTask]
     global_var_names: [text]
     global_var_values: [JsValue]
     host_window_id: i64
@@ -261,12 +332,20 @@ class JsInterpreter:
     host_body_text_content_value: JsValue
 
     static fn new(logger: Logger) -> JsInterpreter:
+        JsInterpreter.create(logger)
+
+    fn ident_name(expr: JsExpression) -> text:
+        match expr:
+            JsExpression.Identifier(name): name
+            _: ""
+
+    static fn create(logger: Logger) -> JsInterpreter:
         var env_stack = EnvironmentStack.new()
         val global_env = 0
         JsInterpreter(
             env_stack: env_stack,
             global_env: global_env,
-            object_store: ObjectStore.new(),
+            object_store: ObjectStore.create(),
             call_stack: [],
             functions: [],
             logger: logger,
@@ -286,6 +365,11 @@ class JsInterpreter:
             pending_async_requests: [],
             pending_async_request_registry: [],
             pending_promise_tasks: [],
+            promise_handlers: [],
+            promise_handler_registrations: [],
+            next_promise_handler_id: 1,
+            next_timer_id: 1,
+            pending_timer_tasks: [],
             global_var_names: [],
             global_var_values: [],
             host_window_id: -1,
@@ -305,7 +389,7 @@ class JsInterpreter:
     # Register a native function placeholder and return its index
     me _register_native(name: text, native_id: i64) -> i64:
         val fn_idx = self.functions.len()
-        val placeholder = JsFunction(name: name, params: [], body: [], closure_env: -1)
+        val placeholder = JsFunction.create(name, [], [], -1)
         var functions: [JsFunction] = self.functions
         functions.push(placeholder)
         self.functions = functions
@@ -329,23 +413,88 @@ class JsInterpreter:
 
     me create_object() -> i64:
         var object_store = self.object_store
-        val id = object_store.create_object()
+        val id = object_store.next_id
+        object_store.next_id = object_store.next_id + 1
+        var obj_proto_ids: [i64] = object_store.obj_proto_ids
+        obj_proto_ids.push(-1)
+        object_store.obj_proto_ids = obj_proto_ids
         self.object_store = object_store
         id
 
     me set_object_property(obj_id: i64, key: text, value: JsValue):
+        if key != "__simple_frozen" and self._is_object_frozen(obj_id):
+            self.logger.debug("Ignoring write to frozen object {obj_id}.{key}")
+            return
+
         var object_store = self.object_store
-        object_store.set_property(obj_id, key, value)
+        var prop_obj_ids: [i64] = object_store.prop_obj_ids
+        var prop_keys: [text] = object_store.prop_keys
+        var prop_values: [JsValue] = object_store.prop_values
+        var prop_ref_tags: [text] = object_store.prop_ref_tags
+        var prop_ref_ids: [text] = object_store.prop_ref_ids
+        var prop_enumerables: [bool] = object_store.prop_enumerables
+        var prop_configurables: [bool] = object_store.prop_configurables
+        prop_obj_ids.push(obj_id)
+        prop_keys.push(key)
+        prop_values.push(value)
+        prop_ref_tags.push("")
+        prop_ref_ids.push("")
+        prop_enumerables.push(true)
+        prop_configurables.push(true)
+        object_store.prop_obj_ids = prop_obj_ids
+        object_store.prop_keys = prop_keys
+        object_store.prop_values = prop_values
+        object_store.prop_ref_tags = prop_ref_tags
+        object_store.prop_ref_ids = prop_ref_ids
+        object_store.prop_enumerables = prop_enumerables
+        object_store.prop_configurables = prop_configurables
         self.object_store = object_store
 
     fn get_object_property(obj_id: i64, key: text) -> JsValue:
         val store = self.object_store
-        store.get_property(obj_id, key)
+        var i = store.prop_keys.len() - 1
+        while i >= 0:
+            if store.prop_obj_ids.get(i) == obj_id and store.prop_keys.get(i) == key:
+                return store.prop_values.get(i)
+            i = i - 1
+        JsValue.Undefined
 
     me set_object_property_direct(obj_id: i64, key: text, value: JsValue):
-        var store = self.object_store
-        store.set_property(obj_id, key, value)
-        self.object_store = store
+        self.set_object_property(obj_id, key, value)
+
+    me _mark_object_frozen(obj_id: i64):
+        if self._is_object_frozen(obj_id):
+            return
+
+        var object_store = self.object_store
+        var prop_obj_ids: [i64] = object_store.prop_obj_ids
+        var prop_keys: [text] = object_store.prop_keys
+        var prop_values: [JsValue] = object_store.prop_values
+        var prop_ref_tags: [text] = object_store.prop_ref_tags
+        var prop_ref_ids: [text] = object_store.prop_ref_ids
+        var prop_enumerables: [bool] = object_store.prop_enumerables
+        var prop_configurables: [bool] = object_store.prop_configurables
+        prop_obj_ids.push(obj_id)
+        prop_keys.push("__simple_frozen")
+        prop_values.push(JsValue.Boolean(v: true))
+        prop_ref_tags.push("")
+        prop_ref_ids.push("")
+        prop_enumerables.push(false)
+        prop_configurables.push(false)
+        object_store.prop_obj_ids = prop_obj_ids
+        object_store.prop_keys = prop_keys
+        object_store.prop_values = prop_values
+        object_store.prop_ref_tags = prop_ref_tags
+        object_store.prop_ref_ids = prop_ref_ids
+        object_store.prop_enumerables = prop_enumerables
+        object_store.prop_configurables = prop_configurables
+        self.object_store = object_store
+
+    fn _is_object_frozen(obj_id: i64) -> bool:
+        match self.get_object_property(obj_id, "__simple_frozen"):
+            JsValue.Boolean(v): v
+            _:
+                false
 
     me lookup_global_value(name: text) -> Option<JsValue>:
         if val Some(found) = self.env_stack.get_var(self.global_env, name):
@@ -360,7 +509,7 @@ class JsInterpreter:
     # Define a native method on an object
     me _define_method_on(obj_id: i64, method_name: text, native_id: i64):
         val fn_idx = self._register_native(method_name, native_id)
-        self.object_store.set_property(obj_id, method_name, JsValue.Function(id: fn_idx))
+        self.set_object_property(obj_id, method_name, JsValue.Function(id: fn_idx))
 
     # Initialize global environment with built-in objects and functions.
     # Must be a `me` method on JsInterpreter — JsRuntime wrapper hits copy-semantics bug.
@@ -378,17 +527,17 @@ class JsInterpreter:
         self._define_global_native("Symbol", -44)
 
         # console object
-        val console_id = self.object_store.create_object()
+        val console_id = self.create_object()
         self._define_method_on(console_id, "log", -1)
         self._define_method_on(console_id, "error", -2)
         self._define_method_on(console_id, "warn", -3)
         self.define_global_value("console", JsValue.Object(id: console_id))
 
         # Math object
-        val math_id = self.object_store.create_object()
-        self.object_store.set_property(math_id, "PI", JsValue.Number(v: 3.141592653589793))
-        self.object_store.set_property(math_id, "E", JsValue.Number(v: 2.718281828459045))
-        self.object_store.set_property(math_id, "SQRT2", JsValue.Number(v: 1.4142135623730951))
+        val math_id = self.create_object()
+        self.set_object_property(math_id, "PI", JsValue.Number(v: 3.141592653589793))
+        self.set_object_property(math_id, "E", JsValue.Number(v: 2.718281828459045))
+        self.set_object_property(math_id, "SQRT2", JsValue.Number(v: 1.4142135623730951))
         self._define_method_on(math_id, "floor", -20)
         self._define_method_on(math_id, "ceil", -21)
         self._define_method_on(math_id, "round", -22)
@@ -401,7 +550,7 @@ class JsInterpreter:
         self.define_global_value("Math", JsValue.Object(id: math_id))
 
         # JSON object
-        val json_id = self.object_store.create_object()
+        val json_id = self.create_object()
         self._define_method_on(json_id, "parse", -30)
         self._define_method_on(json_id, "stringify", -31)
         self.define_global_value("JSON", JsValue.Object(id: json_id))
@@ -414,7 +563,7 @@ class JsInterpreter:
 
         # Error constructors (empty body — new Error('msg') won't crash)
         val error_fn_id = self.functions.len()
-        val error_fn = JsFunction(name: "Error", params: ["message"], body: [], closure_env: -1)
+        val error_fn = JsFunction.create("Error", ["message"], [], -1)
         self.functions.push(error_fn)
         self.define_global_value("Error", JsValue.Function(id: error_fn_id))
         self.define_global_value("TypeError", JsValue.Function(id: error_fn_id))
@@ -436,7 +585,13 @@ class JsInterpreter:
 
     me drain_pending_microtasks() -> bool:
         var ran = false
+        var drain_count = 0
         while self.pending_promise_tasks.len() > 0:
+            drain_count = drain_count + 1
+            if drain_count > 1000:
+                self.logger.warn("Promise microtask drain limit reached")
+                self.pending_promise_tasks = []
+                return ran
             val task = self.pending_promise_tasks[0]
             var rest: [PendingPromiseTask] = []
             var i = 1
@@ -444,9 +599,34 @@ class JsInterpreter:
                 rest = rest + [self.pending_promise_tasks[i]]
                 i = i + 1
             self.pending_promise_tasks = rest
-            self._run_promise_task(task.task_obj_id)
+            self._run_promise_task(task.promise_id, task.handler_id)
             ran = true
         ran
+
+    me drain_due_timers(current_time_ms: i64) -> i64:
+        var ran_count = 0
+        var keep_scanning = true
+        while keep_scanning:
+            keep_scanning = false
+            var rest: [PendingTimerTask] = []
+            var handled = false
+            var i = 0
+            while i < self.pending_timer_tasks.len():
+                val task = self.pending_timer_tasks[i]
+                val due_at = task.scheduled_at_ms + task.delay_ms
+                if not handled and due_at <= current_time_ms:
+                    handled = true
+                    keep_scanning = true
+                    if task.callback_id >= 0:
+                        val ignored = self._invoke_function(task.callback_id, [], self.global_env)
+                        ran_count = ran_count + 1
+                    if task.is_interval:
+                        rest = rest + [PendingTimerTask.create(task.id, task.callback_id, task.delay_ms, due_at, true)]
+                else:
+                    rest = rest + [task]
+                i = i + 1
+            self.pending_timer_tasks = rest
+        ran_count
 
     me resolve_async_fetch_response(
         request_id: text,
@@ -459,7 +639,7 @@ class JsInterpreter:
         var idx = 0
         while idx < self.pending_async_request_registry.len():
             val req = self.pending_async_request_registry[idx]
-            val req_id_val = self.object_store.get_property(req.request_obj_id, "request_id")
+            val req_id_val = self.get_object_property(req.request_obj_id, "request_id")
             if val JsValue.String(req_id) = req_id_val:
                 if req_id == request_id:
                     var rest: [PendingAsyncRequest] = []
@@ -469,10 +649,22 @@ class JsInterpreter:
                             rest = rest + [self.pending_async_request_registry[i]]
                         i = i + 1
                     self.pending_async_request_registry = rest
-                    val promise_id_val = self.object_store.get_property(req.request_obj_id, "promise_id")
+                    val promise_id_val = self.get_object_property(req.request_obj_id, "promise_id")
                     match promise_id_val:
+                        JsValue.String(promise_id_text):
+                            var promise_id = self._promise_id_for_request_id(request_id)
+                            if promise_id < 0:
+                                promise_id = parse_non_negative_i64_text(promise_id_text)
+                            if error != "":
+                                self._settle_promise(promise_id, JsValue.String(v: error), true)
+                                return Ok(true)
+                            val response_id = self._create_response_object(url, status, headers, body, error)
+                            self._settle_promise(promise_id, JsValue.Object(id: response_id), false)
+                            return Ok(true)
                         JsValue.Number(promise_id_num):
-                            val promise_id = f64_to_i64(promise_id_num)
+                            var promise_id = self._promise_id_for_request_id(request_id)
+                            if promise_id < 0:
+                                promise_id = f64_to_i64(promise_id_num)
                             if error != "":
                                 self._settle_promise(promise_id, JsValue.String(v: error), true)
                                 return Ok(true)
@@ -484,103 +676,101 @@ class JsInterpreter:
             idx = idx + 1
         Err("unknown async fetch request: {request_id}")
 
-    fn _create_pending_promise_object() -> i64:
-        val promise_id = self.object_store.create_object()
-        self.object_store.set_property(promise_id, "__proto__", JsValue.Object(id: self.promise_proto_id))
-        self.object_store.set_property(promise_id, "__simple_promise_host", JsValue.Boolean(v: true))
-        self.object_store.set_property(promise_id, "__simple_state", JsValue.String(v: "pending"))
-        self.object_store.set_property(promise_id, "__simple_value", JsValue.Undefined)
-        val handlers_id = self.object_store.create_object()
-        self.object_store.set_property(handlers_id, "length", JsValue.Number(v: 0.0))
-        self.object_store.set_property(promise_id, "__simple_handlers", JsValue.Array(id: handlers_id))
+    me _create_pending_promise_object() -> i64:
+        var promise_id = self.create_object()
+        while _get_obj_id(JsValue.Object(id: promise_id)) != promise_id or promise_id % 10 == 9:
+            promise_id = self.create_object()
+        self.set_object_property(promise_id, "__proto__", JsValue.Object(id: self.promise_proto_id))
+        self.set_object_property(promise_id, "__simple_promise_host", JsValue.Boolean(v: true))
+        self.set_object_property(promise_id, "__simple_state", JsValue.String(v: "pending"))
+        self.set_object_property(promise_id, "__simple_value", JsValue.Undefined)
+        val handlers_id = self.create_object()
+        self.set_object_property(handlers_id, "length", JsValue.Number(v: 0.0))
+        self.set_object_property(promise_id, "__simple_handlers", JsValue.Array(id: handlers_id))
         promise_id
 
-    fn _create_settled_promise_object(value: JsValue, rejected: bool) -> i64:
+    me _create_settled_promise_object(value: JsValue, rejected: bool) -> i64:
         val promise_id = self._create_pending_promise_object()
         if rejected:
-            self.object_store.set_property(promise_id, "__simple_state", JsValue.String(v: "rejected"))
+            self.set_object_property(promise_id, "__simple_state", JsValue.String(v: "rejected"))
         else:
-            self.object_store.set_property(promise_id, "__simple_state", JsValue.String(v: "fulfilled"))
-        self.object_store.set_property(promise_id, "__simple_value", value)
+            self.set_object_property(promise_id, "__simple_state", JsValue.String(v: "fulfilled"))
+        self.set_object_property(promise_id, "__simple_value", value)
         promise_id
 
-    fn _create_response_object(url: text, status: i32, headers: text, body: text, error: text) -> i64:
-        val response_id = self.object_store.create_object()
-        self.object_store.set_property(response_id, "__simple_response_host", JsValue.Boolean(v: true))
-        self.object_store.set_property(response_id, "url", JsValue.String(v: url))
-        self.object_store.set_property(response_id, "status", JsValue.Number(v: status.to_f64()))
-        self.object_store.set_property(response_id, "ok", JsValue.Boolean(v: status >= 200 and status < 300 and error == ""))
-        self.object_store.set_property(response_id, "headersText", JsValue.String(v: headers))
-        self.object_store.set_property(response_id, "body", JsValue.String(v: body))
-        self.object_store.set_property(response_id, "bodyUsed", JsValue.Boolean(v: false))
-        self.object_store.set_property(response_id, "error", JsValue.String(v: error))
+    me _create_response_object(url: text, status: i32, headers: text, body: text, error: text) -> i64:
+        val response_id = self.create_object()
+        self.set_object_property(response_id, "__simple_response_host", JsValue.Boolean(v: true))
+        self.set_object_property(response_id, "url", JsValue.String(v: url))
+        self.set_object_property(response_id, "status", JsValue.Number(v: status.to_f64()))
+        self.set_object_property(response_id, "statusText", JsValue.String(v: status_text(status.to_i64())))
+        self.set_object_property(response_id, "ok", JsValue.Boolean(v: status >= 200 and status < 300 and error == ""))
+        self.set_object_property(response_id, "headersText", JsValue.String(v: filter_response_headers_for_script(headers)))
+        self.set_object_property(response_id, "body", JsValue.String(v: body))
+        self.set_object_property(response_id, "bodyUsed", JsValue.Boolean(v: false))
+        self.set_object_property(response_id, "error", JsValue.String(v: error))
         self._define_method_on(response_id, "text", NATIVE_RESPONSE_TEXT)
         self._define_method_on(response_id, "json", NATIVE_RESPONSE_JSON)
+        self._define_method_on(response_id, "blob", NATIVE_RESPONSE_BLOB)
         response_id
 
-    fn _create_promise_handler(on_fulfilled: i64, on_rejected: i64, next_promise_id: i64, kind: text) -> i64:
-        val handler_id = self.object_store.create_object()
-        self.object_store.set_property(handler_id, "on_fulfilled", JsValue.Number(v: on_fulfilled.to_f64()))
-        self.object_store.set_property(handler_id, "on_rejected", JsValue.Number(v: on_rejected.to_f64()))
-        self.object_store.set_property(handler_id, "next_promise", JsValue.Number(v: next_promise_id.to_f64()))
-        self.object_store.set_property(handler_id, "kind", JsValue.String(v: kind))
+    me _create_promise_handler(on_fulfilled: i64, on_rejected: i64, next_promise_id: i64, kind: text) -> i64:
+        val handler_id = self.next_promise_handler_id
+        self.next_promise_handler_id = self.next_promise_handler_id + 1
+        self.promise_handlers = self.promise_handlers + [PromiseHandlerRecord.create(handler_id, on_fulfilled, on_rejected, next_promise_id, kind)]
         handler_id
 
-    fn _append_handler(promise_id: i64, handler_id: i64):
-        val handlers_id = _simple_fetch_handlers(promise_id, self.object_store)
-        if handlers_id >= 0:
-            val next_index = self.object_store.array_length(handlers_id)
-            self.object_store.set_property(handlers_id, "{next_index}", JsValue.Object(id: handler_id))
-            self.object_store.set_property(handlers_id, "length", JsValue.Number(v: (next_index + 1).to_f64()))
+    me _append_handler(promise_id: i64, handler_id: i64):
+        self.promise_handler_registrations = self.promise_handler_registrations + [PromiseHandlerRegistration.create(promise_id, handler_id)]
 
-    fn _enqueue_promise_task(promise_id: i64, handler_id: i64):
-        val task_id = self.object_store.create_object()
-        self.object_store.set_property(task_id, "promise_id", JsValue.Number(v: promise_id.to_f64()))
-        self.object_store.set_property(task_id, "handler_id", JsValue.Number(v: handler_id.to_f64()))
-        self.pending_promise_tasks = self.pending_promise_tasks + [PendingPromiseTask.create(task_id)]
+    fn _promise_id_for_request_id(request_id: text) -> i64:
+        var obj_id = 0
+        while obj_id < self.object_store.next_id:
+            match self.get_object_property(obj_id, "__simple_request_id"):
+                JsValue.String(v):
+                    if text_equals_exact(v, request_id):
+                        return obj_id
+                _:
+                    pass_dn
+            obj_id = obj_id + 1
+        -1
 
-    fn _settle_promise(promise_id: i64, value: JsValue, rejected: bool):
-        self.object_store.set_property(
+    me _enqueue_promise_task(promise_id: i64, handler_id: i64):
+        self.pending_promise_tasks = self.pending_promise_tasks + [PendingPromiseTask.create(promise_id, handler_id)]
+
+    me _settle_promise(promise_id: i64, value: JsValue, rejected: bool):
+        if _simple_fetch_state(promise_id, self.object_store) != "pending":
+            return
+        self.set_object_property(
             promise_id,
             "__simple_state",
             JsValue.String(v: if rejected: "rejected" else: "fulfilled")
         )
-        self.object_store.set_property(promise_id, "__simple_value", value)
-        val handlers_id = _simple_fetch_handlers(promise_id, self.object_store)
-        if handlers_id >= 0:
-            val count = self.object_store.array_length(handlers_id)
-            var i = 0
-            while i < count:
-                match self.object_store.get_by_index(handlers_id, i):
-                    JsValue.Object(handler_id):
-                        self._enqueue_promise_task(promise_id, handler_id)
-                    _:
-                        pass_dn
-                i = i + 1
+        self.set_object_property(promise_id, "__simple_value", value)
+        var i = 0
+        while i < self.promise_handler_registrations.len():
+            val registration = self.promise_handler_registrations[i]
+            if registration.promise_id == promise_id:
+                self._enqueue_promise_task(promise_id, registration.handler_id)
+            i = i + 1
 
-    fn _run_promise_task(task_id: i64):
-        val promise_id_val = self.object_store.get_property(task_id, "promise_id")
-        val handler_id_val = self.object_store.get_property(task_id, "handler_id")
-        match promise_id_val:
-            JsValue.Number(promise_id_num):
-                match handler_id_val:
-                    JsValue.Number(handler_id_num):
-                        val promise_id = f64_to_i64(promise_id_num)
-                        val handler_id = f64_to_i64(handler_id_num)
+    me _run_promise_task(promise_id: i64, handler_id: i64):
                         val state = _simple_fetch_state(promise_id, self.object_store)
                         val settled_value = _simple_fetch_value(promise_id, self.object_store)
-                        val handler_kind = match self.object_store.get_property(handler_id, "kind"):
-                            JsValue.String(v): v
-                            _: "then"
-                        val on_fulfilled = match self.object_store.get_property(handler_id, "on_fulfilled"):
-                            JsValue.Number(v): f64_to_i64(v)
-                            _: -1
-                        val on_rejected = match self.object_store.get_property(handler_id, "on_rejected"):
-                            JsValue.Number(v): f64_to_i64(v)
-                            _: -1
-                        val next_promise_id = match self.object_store.get_property(handler_id, "next_promise"):
-                            JsValue.Number(v): f64_to_i64(v)
-                            _: -1
+                        var handler_kind = "then"
+                        var on_fulfilled = -1
+                        var on_rejected = -1
+                        var next_promise_id = -1
+                        var hi = 0
+                        while hi < self.promise_handlers.len():
+                            val handler = self.promise_handlers[hi]
+                            if handler.id == handler_id:
+                                handler_kind = handler.kind
+                                on_fulfilled = handler.on_fulfilled
+                                on_rejected = handler.on_rejected
+                                next_promise_id = handler.next_promise_id
+                                hi = self.promise_handlers.len()
+                            hi = hi + 1
 
                         var callback_id = -1
                         var propagate_rejection = false
@@ -612,11 +802,22 @@ class JsInterpreter:
                                 next_value = settled_value
 
                         if next_promise_id >= 0:
-                            self._settle_promise(next_promise_id, next_value, propagate_rejection)
-                    _:
-                        pass_dn
-            _:
-                pass_dn
+                            var adopted_pending = false
+                            match next_value:
+                                JsValue.Object(inner_promise_id):
+                                    if val JsValue.Boolean(true) = self.get_object_property(inner_promise_id, "__simple_promise_host"):
+                                        val inner_state = _simple_fetch_state(inner_promise_id, self.object_store)
+                                        if inner_state == "pending":
+                                            val adopt_handler_id = self._create_promise_handler(-1, -1, next_promise_id, "then")
+                                            self._append_handler(inner_promise_id, adopt_handler_id)
+                                            adopted_pending = true
+                                        else:
+                                            next_value = _simple_fetch_value(inner_promise_id, self.object_store)
+                                            propagate_rejection = inner_state == "rejected"
+                                _:
+                                    pass_dn
+                            if not adopted_pending:
+                                self._settle_promise(next_promise_id, next_value, propagate_rejection)
 
     # Find prototype id for a class constructor
     fn _find_class_proto(fn_id: i64) -> i64:
@@ -627,6 +828,66 @@ class JsInterpreter:
                 return self.class_proto_ids.get(i)
             i = i + 1
         -1
+
+    me _fulfilled_promise_value(value: JsValue) -> JsValue:
+        match value:
+            JsValue.Object(obj_id):
+                match self.get_object_property(obj_id, "__simple_promise_host"):
+                    JsValue.Boolean(is_host):
+                        if is_host:
+                            match self.get_object_property(obj_id, "__simple_state"):
+                                JsValue.String(state):
+                                    if state == "fulfilled":
+                                        return self.get_object_property(obj_id, "__simple_value")
+                                _:
+                                    pass_dn
+                    _:
+                        pass_dn
+            _:
+                pass_dn
+        value
+
+    me _is_stringish(value: JsValue) -> bool:
+        typeof_value(self._fulfilled_promise_value(value)) == "string"
+
+    me _js_to_string(value: JsValue) -> text:
+        val resolved = self._fulfilled_promise_value(value)
+        match resolved:
+            JsValue.Object(obj_id):
+                match self.get_object_property(obj_id, "__simple_string_value"):
+                    JsValue.String(v): return v
+                    _:
+                        pass_dn
+            _:
+                pass_dn
+        js_to_string(resolved)
+
+    me _serialize_fetch_headers(value: JsValue) -> text:
+        match value:
+            JsValue.String(v): return self._filter_request_headers(v)
+            JsValue.Object(obj_id):
+                val obj = self.object_store.get_object(obj_id)
+                var headers: [text] = []
+                var i = 0
+                while i < obj.properties.len():
+                    val prop = obj.properties.get(i)
+                    if prop.key.lower() != "cookie":
+                        headers.push(prop.key + ": " + self._js_to_string(prop.value))
+                    i = i + 1
+                return headers.join("\n")
+            _:
+                return ""
+
+    me _filter_request_headers(headers_text: text) -> text:
+        var kept: [text] = []
+        for line in headers_text.split("\n"):
+            val trimmed = line.trim()
+            if trimmed != "":
+                val lower = trimmed.lower()
+                if not lower.starts_with("cookie:"):
+                    kept.push(trimmed)
+        kept.join("\n")
+        js_to_string(value)
 
     # Recursive JSON serialization (needs object_store access)
     fn _json_stringify(value: JsValue) -> text:
@@ -697,7 +958,7 @@ class JsInterpreter:
         "undefined"
 
     # Execute a full program (list of statements)
-    me execute(program: [Statement]) -> BrowserResult<JsValue>:
+    me execute(program: [JsStatement]) -> BrowserResult<JsValue>:
         var result = JsValue.Undefined
         var i = 0
         val len = program.len()
@@ -710,21 +971,21 @@ class JsInterpreter:
         Ok(result)
 
     # Dispatch a statement
-    me exec_statement(stmt: Statement, env: i64) -> BrowserResult<JsValue>:
+    me exec_statement(stmt: JsStatement, env: i64) -> BrowserResult<JsValue>:
         match stmt:
-            Statement.VarDecl(name, init):
+            JsStatement.VarDecl(name, init):
                 return self.exec_var_decl(name, init, env)
-            Statement.ExprStmt(expr):
+            JsStatement.ExprStmt(expr):
                 return self.eval_expression(expr, env)
-            Statement.Return(value):
+            JsStatement.Return(value):
                 return self.exec_return(value, env)
-            Statement.If(cond, then_body, else_body):
+            JsStatement.If(cond, then_body, else_body):
                 return self.exec_if(cond, then_body, else_body, env)
-            Statement.While(cond, body):
+            JsStatement.While(cond, body):
                 return self.exec_while(cond, body, env)
-            Statement.For(init, cond, update, body):
+            JsStatement.For(init, cond, update, body):
                 return self.exec_for(init, cond, update, body, env)
-            Statement.Block(stmts):
+            JsStatement.Block(stmts):
                 val block_env = self.env_stack.create_env(env)
                 var result = JsValue.Undefined
                 var idx = 0
@@ -735,74 +996,74 @@ class JsInterpreter:
                         break
                     idx = idx + 1
                 return Ok(result)
-            Statement.FnDecl(name, params, body):
+            JsStatement.FnDecl(name, params, body):
                 return self.exec_function_decl(name, params, body, env)
-            Statement.TryCatch(try_body, catch_param, catch_body, finally_body):
+            JsStatement.TryCatch(try_body, catch_param, catch_body, finally_body):
                 return self.exec_try_catch(try_body, catch_param, catch_body, finally_body, env)
-            Statement.Switch(discriminant, cases):
+            JsStatement.Switch(discriminant, cases):
                 return self.exec_switch(discriminant, cases, env)
-            Statement.ForIn(binding, object, body):
+            JsStatement.ForIn(binding, object, body):
                 return self.exec_for_in(binding, object, body, env)
-            Statement.ForOf(binding, iterable, body):
+            JsStatement.ForOf(binding, iterable, body):
                 return self.exec_for_of(binding, iterable, body, env)
-            Statement.ThrowStmt(expr):
+            JsStatement.ThrowStmt(expr):
                 return self.exec_throw(expr, env)
-            Statement.BreakStmt:
+            JsStatement.BreakStmt:
                 self.control_break = true
                 return Ok(JsValue.Undefined)
-            Statement.ContinueStmt:
+            JsStatement.ContinueStmt:
                 self.control_continue = true
                 return Ok(JsValue.Undefined)
-            Statement.ClassDecl(name, parent_name, constructor, methods):
+            JsStatement.ClassDecl(name, parent_name, constructor, methods):
                 return self.exec_class_decl(name, parent_name, constructor, methods, env)
-            Statement.LetDecl(name, init):
+            JsStatement.LetDecl(name, init):
                 return self.exec_var_decl(name, init, env)
-            Statement.ConstDecl(name, init):
+            JsStatement.ConstDecl(name, init):
                 return self.exec_var_decl(name, init, env)
-            Statement.DestructVarDecl(pattern, init, kind):
+            JsStatement.DestructVarDecl(pattern, init, kind):
                 return self.exec_destruct_decl(pattern, init, env)
-            Statement.DoWhile(cond, body):
+            JsStatement.DoWhile(cond, body):
                 return self.exec_do_while(cond, body, env)
-            Statement.LabeledStmt(label, body):
+            JsStatement.LabeledStmt(label, body):
                 return self.exec_statement(body, env)
 
     # Variable declaration
-    me exec_var_decl(name: text, init: Expression, env: i64) -> BrowserResult<JsValue>:
+    me exec_var_decl(name: text, init: JsExpression, env: i64) -> BrowserResult<JsValue>:
         val value = self.eval_expression(init, env)?
         self.env_stack.define_var(env, name, value)
         Ok(value)
 
     # Destructuring declaration: const {a, b} = obj; const [x, y] = arr
-    me exec_destruct_decl(pattern: Expression, init: Expression, env: i64) -> BrowserResult<JsValue>:
+    me exec_destruct_decl(pattern: JsExpression, init: JsExpression, env: i64) -> BrowserResult<JsValue>:
         val value = self.eval_expression(init, env)?
         self._bind_pattern(pattern, value, env)
         Ok(value)
 
-    me _bind_pattern(pattern: Expression, value: JsValue, env: i64):
+    me _bind_pattern(pattern: JsExpression, value: JsValue, env: i64):
         match pattern:
-            Expression.ObjectPattern(props):
+            JsExpression.ObjectPattern(props):
                 match value:
                     JsValue.Object(id):
                         var i = 0
                         while i < props.len():
                             val dp = props.get(i)
-                            val bound_val = self.object_store.get_property(id, dp.key)
+                            val bound_val = self.get_object_property(id, dp.key)
                             match dp.value:
-                                Expression.Identifier(name):
+                                JsExpression.Identifier(name):
                                     self.env_stack.define_var(env, name, bound_val)
                                 _: pass_dn
                             i = i + 1
                     _: pass_dn
-            Expression.ArrayPattern(elements):
+            JsExpression.ArrayPattern(elements):
                 match value:
                     JsValue.Array(id):
                         var i = 0
                         while i < elements.len():
                             val elem = elements.get(i)
                             match elem:
-                                Expression.SpreadElement(arg):
+                                JsExpression.SpreadElement(arg):
                                     match arg:
-                                        Expression.Identifier(name):
+                                        JsExpression.Identifier(name):
                                             var rest: [JsValue] = []
                                             val arr_len = self.object_store.array_length(id)
                                             var ri = i
@@ -812,7 +1073,7 @@ class JsInterpreter:
                                             val rest_id = self.object_store.create_array_from(rest)
                                             self.env_stack.define_var(env, name, JsValue.Array(id: rest_id))
                                         _: pass_dn
-                                Expression.Identifier(name):
+                                JsExpression.Identifier(name):
                                     val elem_val = self.object_store.get_by_index(id, i)
                                     self.env_stack.define_var(env, name, elem_val)
                                 _: pass_dn
@@ -821,7 +1082,7 @@ class JsInterpreter:
             _: pass_dn
 
     # Do-while loop
-    me exec_do_while(cond: Expression, body: [Statement], env: i64) -> BrowserResult<JsValue>:
+    me exec_do_while(cond: JsExpression, body: [JsStatement], env: i64) -> BrowserResult<JsValue>:
         var result = JsValue.Undefined
         var cont = true
         var should_exit = false
@@ -848,7 +1109,7 @@ class JsInterpreter:
         Ok(result)
 
     # If / else
-    me exec_if(cond: Expression, then_body: [Statement], else_body: [Statement], env: i64) -> BrowserResult<JsValue>:
+    me exec_if(cond: JsExpression, then_body: [JsStatement], else_body: [JsStatement], env: i64) -> BrowserResult<JsValue>:
         val cond_val = self.eval_expression(cond, env)?
         var result = JsValue.Undefined
         if is_truthy(cond_val):
@@ -873,7 +1134,7 @@ class JsInterpreter:
         Ok(result)
 
     # While loop
-    me exec_while(cond: Expression, body: [Statement], env: i64) -> BrowserResult<JsValue>:
+    me exec_while(cond: JsExpression, body: [JsStatement], env: i64) -> BrowserResult<JsValue>:
         var result = JsValue.Undefined
         var iteration = 0
         val max_iterations = 100000
@@ -907,7 +1168,7 @@ class JsInterpreter:
 
     # For loop
     # Note: var declarations in init execute in parent env (JS var is function-scoped)
-    me exec_for(init: Statement, cond: Expression, update: Expression, body: [Statement], env: i64) -> BrowserResult<JsValue>:
+    me exec_for(init: JsStatement, cond: JsExpression, update: JsExpression, body: [JsStatement], env: i64) -> BrowserResult<JsValue>:
         self.exec_statement(init, env)?
         val for_env = self.env_stack.create_env(env)
 
@@ -944,23 +1205,23 @@ class JsInterpreter:
         Ok(result)
 
     # Return statement
-    me exec_return(value: Expression, env: i64) -> BrowserResult<JsValue>:
+    me exec_return(value: JsExpression, env: i64) -> BrowserResult<JsValue>:
         val result = self.eval_expression(value, env)?
         self.return_value = result
         self.control_return = true
         Ok(result)
 
     # Function declaration — store in function registry
-    me exec_function_decl(name: text, params: [text], body: [Statement], env: i64) -> BrowserResult<JsValue>:
+    me exec_function_decl(name: text, params: [text], body: [JsStatement], env: i64) -> BrowserResult<JsValue>:
         val fn_id = self.functions.len()
-        val js_fn = JsFunction(name: name, params: params, body: body, closure_env: env)
+        val js_fn = JsFunction.create(name, params, body, env)
         self.functions.push(js_fn)
         val fn_val = JsValue.Function(id: fn_id)
         self.env_stack.define_var(env, name, fn_val)
         Ok(fn_val)
 
     # Try/catch/finally
-    me exec_try_catch(try_body: [Statement], catch_param: text, catch_body: [Statement], finally_body: [Statement], env: i64) -> BrowserResult<JsValue>:
+    me exec_try_catch(try_body: [JsStatement], catch_param: text, catch_body: [JsStatement], finally_body: [JsStatement], env: i64) -> BrowserResult<JsValue>:
         val try_env = self.env_stack.create_env(env)
         var result = JsValue.Undefined
 
@@ -1005,7 +1266,7 @@ class JsInterpreter:
         Ok(result)
 
     # Switch statement
-    me exec_switch(discriminant: Expression, cases: [SwitchCase], env: i64) -> BrowserResult<JsValue>:
+    me exec_switch(discriminant: JsExpression, cases: [SwitchCase], env: i64) -> BrowserResult<JsValue>:
         val disc_val = self.eval_expression(discriminant, env)?
         var result = JsValue.Undefined
         var matched = false
@@ -1048,7 +1309,7 @@ class JsInterpreter:
         Ok(result)
 
     # For-in loop: iterate object keys
-    me exec_for_in(binding: text, object: Expression, body: [Statement], env: i64) -> BrowserResult<JsValue>:
+    me exec_for_in(binding: text, object: JsExpression, body: [JsStatement], env: i64) -> BrowserResult<JsValue>:
         val obj_val = self.eval_expression(object, env)?
         var result = JsValue.Undefined
         var should_exit = false
@@ -1087,7 +1348,7 @@ class JsInterpreter:
         Ok(result)
 
     # For-of loop: iterate array elements
-    me exec_for_of(binding: text, iterable: Expression, body: [Statement], env: i64) -> BrowserResult<JsValue>:
+    me exec_for_of(binding: text, iterable: JsExpression, body: [JsStatement], env: i64) -> BrowserResult<JsValue>:
         val iter_val = self.eval_expression(iterable, env)?
         var result = JsValue.Undefined
         var should_exit = false
@@ -1124,16 +1385,16 @@ class JsInterpreter:
         Ok(result)
 
     # Throw statement
-    me exec_throw(expr: Expression, env: i64) -> BrowserResult<JsValue>:
+    me exec_throw(expr: JsExpression, env: i64) -> BrowserResult<JsValue>:
         val value = self.eval_expression(expr, env)?
         self.thrown_value = value
         self.control_thrown = true
         Ok(value)
 
     # Class declaration — register constructor and methods as functions on a prototype object
-    me exec_class_decl(name: text, parent_name: text, constructor: Statement, methods: [Statement], env: i64) -> BrowserResult<JsValue>:
+    me exec_class_decl(name: text, parent_name: text, constructor: JsStatement, methods: [JsStatement], env: i64) -> BrowserResult<JsValue>:
         # Create the prototype object
-        val proto_id = self.object_store.create_object()
+        val proto_id = self.create_object()
 
         # Set up prototype chain for extends
         if parent_name != "":
@@ -1143,7 +1404,7 @@ class JsInterpreter:
                 if parent_fn_id >= 0:
                     val parent_proto = self._find_class_proto(parent_fn_id)
                     if parent_proto >= 0:
-                        self.object_store.set_property(proto_id, "__proto__", JsValue.Object(id: parent_proto))
+                        self.set_object_property(proto_id, "__proto__", JsValue.Object(id: parent_proto))
 
         # Register methods on the prototype
         var mi = 0
@@ -1151,19 +1412,19 @@ class JsInterpreter:
         while mi < mlen:
             val method = methods.get(mi)
             match method:
-                Statement.FnDecl(mname, mparams, mbody):
+                JsStatement.FnDecl(mname, mparams, mbody):
                     val fn_id = self.functions.len()
-                    val js_fn = JsFunction(name: mname, params: mparams, body: mbody, closure_env: env)
+                    val js_fn = JsFunction.create(mname, mparams, mbody, env)
                     self.functions.push(js_fn)
-                    self.object_store.set_property(proto_id, mname, JsValue.Function(id: fn_id))
+                    self.set_object_property(proto_id, mname, JsValue.Function(id: fn_id))
                 _: pass_dn
             mi = mi + 1
 
         # Register constructor as the class function
         match constructor:
-            Statement.FnDecl(cname, cparams, cbody):
+            JsStatement.FnDecl(cname, cparams, cbody):
                 val ctor_id = self.functions.len()
-                val ctor_fn = JsFunction(name: name, params: cparams, body: cbody, closure_env: env)
+                val ctor_fn = JsFunction.create(name, cparams, cbody, env)
                 self.functions.push(ctor_fn)
                 # Track constructor → prototype mapping for new operator
                 self.class_proto_fns.push(ctor_id)
@@ -1174,36 +1435,36 @@ class JsInterpreter:
             _: pass_dn
         Ok(JsValue.Undefined)
 
-    # ── Expression evaluation ────────────────────────────────────────────
+    # ── JsExpression evaluation ────────────────────────────────────────────
 
-    me eval_expression(expr: Expression, env: i64) -> BrowserResult<JsValue>:
+    me eval_expression(expr: JsExpression, env: i64) -> BrowserResult<JsValue>:
         match expr:
-            Expression.Literal(value):
+            JsExpression.Literal(value):
                 return Ok(value)
-            Expression.Identifier(name):
+            JsExpression.Identifier(name):
                 # Check for 'this' binding
                 if name == "this":
                     if self.call_stack.len() > 0:
                         val frame = self.call_stack.get(self.call_stack.len() - 1)
                         return Ok(frame.this_value)
                     return Ok(JsValue.Undefined)
+                if name == "window" and self.host_window_id >= 0:
+                    return Ok(JsValue.Object(id: self.host_window_id))
+                if name == "self" and self.host_window_id >= 0:
+                    return Ok(JsValue.Object(id: self.host_window_id))
+                if name == "document" and self.host_document_id >= 0:
+                    return Ok(JsValue.Object(id: self.host_document_id))
+                if name == "location" and self.host_location_id >= 0:
+                    return Ok(JsValue.Object(id: self.host_location_id))
+                if name == "navigator" and self.host_navigator_id >= 0:
+                    return Ok(JsValue.Object(id: self.host_navigator_id))
+                if name == "chrome" and self.host_chrome_id >= 0:
+                    return Ok(JsValue.Object(id: self.host_chrome_id))
+                if name == "sessionStorage" and self.host_session_storage_id >= 0:
+                    return Ok(JsValue.Object(id: self.host_session_storage_id))
+                if name == "localStorage" and self.host_local_storage_id >= 0:
+                    return Ok(JsValue.Object(id: self.host_local_storage_id))
                 if env == self.global_env:
-                    if name == "window" and self.host_window_id >= 0:
-                        return Ok(JsValue.Object(id: self.host_window_id))
-                    if name == "self" and self.host_window_id >= 0:
-                        return Ok(JsValue.Object(id: self.host_window_id))
-                    if name == "document" and self.host_document_id >= 0:
-                        return Ok(JsValue.Object(id: self.host_document_id))
-                    if name == "location" and self.host_location_id >= 0:
-                        return Ok(JsValue.Object(id: self.host_location_id))
-                    if name == "navigator" and self.host_navigator_id >= 0:
-                        return Ok(JsValue.Object(id: self.host_navigator_id))
-                    if name == "chrome" and self.host_chrome_id >= 0:
-                        return Ok(JsValue.Object(id: self.host_chrome_id))
-                    if name == "sessionStorage" and self.host_session_storage_id >= 0:
-                        return Ok(JsValue.Object(id: self.host_session_storage_id))
-                    if name == "localStorage" and self.host_local_storage_id >= 0:
-                        return Ok(JsValue.Object(id: self.host_local_storage_id))
                     val cached = self.lookup_global_value(name)
                     if val Some(v) = cached:
                         return Ok(v)
@@ -1216,39 +1477,39 @@ class JsInterpreter:
                     return Ok(v)
                 self.logger.warn("ReferenceError: {name} is not defined")
                 return Ok(JsValue.Undefined)
-            Expression.Binary(op, left, right):
+            JsExpression.Binary(op, left, right):
                 return self.eval_binary(op, left, right, env)
-            Expression.Unary(op, operand):
+            JsExpression.Unary(op, operand):
                 return self.eval_unary(op, operand, env)
-            Expression.Call(callee, args):
+            JsExpression.Call(callee, args):
                 return self.eval_call(callee, args, env)
-            Expression.Member(object, property):
+            JsExpression.Member(object, property):
                 return self.eval_member(object, property, env)
-            Expression.Assignment(target, value):
+            JsExpression.Assignment(target, value):
                 return self.eval_assignment(target, value, env)
-            Expression.Array(elements):
+            JsExpression.Array(elements):
                 return self.eval_array(elements, env)
-            Expression.ObjectExpr(properties):
+            JsExpression.ObjectExpr(properties):
                 return self.eval_object(properties, env)
-            Expression.Ternary(condition, consequent, alternate):
+            JsExpression.Ternary(condition, consequent, alternate):
                 val cond_val = self.eval_expression(condition, env)?
                 if is_truthy(cond_val):
                     return self.eval_expression(consequent, env)
                 return self.eval_expression(alternate, env)
-            Expression.ArrowFunction(params, body):
+            JsExpression.ArrowFunction(params, body):
                 # Register arrow as a function
                 val fn_id = self.functions.len()
-                val js_fn = JsFunction(name: "__arrow__", params: params, body: body, closure_env: env)
+                val js_fn = JsFunction.create("__arrow__", params, body, env)
                 self.functions.push(js_fn)
                 return Ok(JsValue.Function(id: fn_id))
-            Expression.SpreadElement(argument):
+            JsExpression.SpreadElement(argument):
                 # Spread is handled at call sites; evaluate the argument
                 return self.eval_expression(argument, env)
-            Expression.TemplateLiteral(quasis, expressions):
+            JsExpression.TemplateLiteral(quasis, expressions):
                 return self.eval_template_literal(quasis, expressions, env)
-            Expression.Delete(del_expr):
+            JsExpression.Delete(del_expr):
                 return self.eval_delete(del_expr, env)
-            Expression.InstanceOf(left, right):
+            JsExpression.InstanceOf(left, right):
                 # Simplified instanceof: checks if right is a constructor function
                 val lv = self.eval_expression(left, env)?
                 val rv = self.eval_expression(right, env)?
@@ -1258,41 +1519,41 @@ class JsInterpreter:
                         return Ok(JsValue.Boolean(v: true))
                     _:
                         return Ok(JsValue.Boolean(v: false))
-            Expression.InExpr(left, right):
+            JsExpression.InExpr(left, right):
                 val key = self.eval_expression(left, env)?
                 val obj = self.eval_expression(right, env)?
                 val key_str = js_to_string(key)
                 match obj:
                     JsValue.Object(id):
-                        match self.object_store.get_property(id, key_str):
+                        match self.get_object_property(id, key_str):
                             JsValue.Undefined: return Ok(JsValue.Boolean(v: false))
                             _: return Ok(JsValue.Boolean(v: true))
                     JsValue.Array(id):
-                        match self.object_store.get_property(id, key_str):
+                        match self.get_object_property(id, key_str):
                             JsValue.Undefined: return Ok(JsValue.Boolean(v: false))
                             _: return Ok(JsValue.Boolean(v: true))
                     _:
                         return Ok(JsValue.Boolean(v: false))
-            Expression.NewExpr(callee, args):
+            JsExpression.NewExpr(callee, args):
                 return self.eval_new(callee, args, env)
-            Expression.ComputedMember(object, property):
+            JsExpression.ComputedMember(object, property):
                 val obj_val = self.eval_expression(object, env)?
                 val key_val = self.eval_expression(property, env)?
                 val key_str = js_to_string(key_val)
                 match obj_val:
                     JsValue.Object(id):
-                        return Ok(self.object_store.get_property(id, key_str))
+                        return Ok(self.get_object_property(id, key_str))
                     JsValue.Array(id):
-                        return Ok(self.object_store.get_property(id, key_str))
+                        return Ok(self.get_object_property(id, key_str))
                     _:
                         return Ok(JsValue.Undefined)
-            Expression.ObjectPattern(props):
+            JsExpression.ObjectPattern(props):
                 return Ok(JsValue.Undefined)
-            Expression.ArrayPattern(elements):
+            JsExpression.ArrayPattern(elements):
                 return Ok(JsValue.Undefined)
 
     # new operator: new Foo(args)
-    me eval_new(callee: Expression, args: [Expression], env: i64) -> BrowserResult<JsValue>:
+    me eval_new(callee: JsExpression, args: [JsExpression], env: i64) -> BrowserResult<JsValue>:
         val callee_val = self.eval_expression(callee, env)?
         var arg_vals: [JsValue] = []
         var i = 0
@@ -1301,12 +1562,12 @@ class JsInterpreter:
             i = i + 1
         match callee_val:
             JsValue.Function(fn_id):
-                val obj_id = self.object_store.create_object()
+                val obj_id = self.create_object()
                 val this_val = JsValue.Object(id: obj_id)
                 # Set __proto__ to the class prototype for method lookup
                 val proto_id = self._find_class_proto(fn_id)
                 if proto_id >= 0:
-                    self.object_store.set_property(obj_id, "__proto__", JsValue.Object(id: proto_id))
+                    self.set_object_property(obj_id, "__proto__", JsValue.Object(id: proto_id))
                 if fn_id >= 0 and fn_id < self.functions.len():
                     val js_fn = self.functions.get(fn_id)
                     val params = js_fn.params
@@ -1336,7 +1597,7 @@ class JsInterpreter:
                 return Ok(JsValue.Undefined)
 
     # Binary operators
-    me eval_binary(op: text, left: Expression, right: Expression, env: i64) -> BrowserResult<JsValue>:
+    me eval_binary(op: text, left: JsExpression, right: JsExpression, env: i64) -> BrowserResult<JsValue>:
         # Comma operator — evaluate left for side effects, return right
         if op == ",":
             self.eval_expression(left, env)?
@@ -1369,8 +1630,40 @@ class JsInterpreter:
         if op == "+":
             val ls = typeof_value(lv)
             val rs = typeof_value(rv)
-            if ls == "string" or rs == "string":
-                val result = js_to_string(lv) + js_to_string(rv)
+            if ls == "string" or rs == "string" or self._is_stringish(lv) or self._is_stringish(rv):
+                var left_text = js_to_string(lv)
+                var right_text = js_to_string(rv)
+                match lv:
+                    JsValue.Object(obj_id):
+                        match self.get_object_property(obj_id, "__simple_promise_host"):
+                            JsValue.Boolean(is_host):
+                                if is_host:
+                                    match self.get_object_property(obj_id, "__simple_state"):
+                                        JsValue.String(state):
+                                            if state == "fulfilled":
+                                                left_text = js_to_string(self.get_object_property(obj_id, "__simple_value"))
+                                        _:
+                                            pass_dn
+                            _:
+                                pass_dn
+                    _:
+                        pass_dn
+                match rv:
+                    JsValue.Object(obj_id):
+                        match self.get_object_property(obj_id, "__simple_promise_host"):
+                            JsValue.Boolean(is_host):
+                                if is_host:
+                                    match self.get_object_property(obj_id, "__simple_state"):
+                                        JsValue.String(state):
+                                            if state == "fulfilled":
+                                                right_text = js_to_string(self.get_object_property(obj_id, "__simple_value"))
+                                        _:
+                                            pass_dn
+                            _:
+                                pass_dn
+                    _:
+                        pass_dn
+                val result = left_text + right_text
                 return Ok(JsValue.String(v: result))
             val ln = to_number(lv)
             val rn = to_number(rv)
@@ -1433,9 +1726,9 @@ class JsInterpreter:
         if op == "[]":
             match lv:
                 JsValue.Object(id):
-                    return Ok(self.object_store.get_property(id, js_to_string(rv)))
+                    return Ok(self.get_object_property(id, js_to_string(rv)))
                 JsValue.Array(id):
-                    return Ok(self.object_store.get_property(id, js_to_string(rv)))
+                    return Ok(self.get_object_property(id, js_to_string(rv)))
                 JsValue.String(sv):
                     val idx = f64_to_i64(to_number(rv))
                     if idx >= 0 and idx < sv.len():
@@ -1448,10 +1741,10 @@ class JsInterpreter:
         Ok(JsValue.Undefined)
 
     # Unary operators
-    me eval_unary(op: text, operand: Expression, env: i64) -> BrowserResult<JsValue>:
+    me eval_unary(op: text, operand: JsExpression, env: i64) -> BrowserResult<JsValue>:
         if op == "typeof":
             match operand:
-                Expression.Identifier(name):
+                JsExpression.Identifier(name):
                     if env == self.global_env:
                         val cached = self.lookup_global_value(name)
                         if val Some(v) = cached:
@@ -1484,7 +1777,7 @@ class JsInterpreter:
             val n = to_number(v)
             val new_val = JsValue.Number(v: n + 1.0)
             match operand:
-                Expression.Identifier(name):
+                JsExpression.Identifier(name):
                     self.env_stack.set_var(env, name, new_val)
                 _: pass_dn
             if op == "++pre":
@@ -1495,7 +1788,7 @@ class JsInterpreter:
             val n = to_number(v)
             val new_val = JsValue.Number(v: n - 1.0)
             match operand:
-                Expression.Identifier(name):
+                JsExpression.Identifier(name):
                     self.env_stack.set_var(env, name, new_val)
                 _: pass_dn
             if op == "--pre":
@@ -1505,7 +1798,7 @@ class JsInterpreter:
         if op == "new":
             # new Constructor(args) — allocate object, set prototype, call constructor, return
             match operand:
-                Expression.Call(callee, args):
+                JsExpression.Call(callee, args):
                     val callee_val = self.eval_expression(callee, env)?
                     var arg_vals: [JsValue] = []
                     var ai = 0
@@ -1515,14 +1808,14 @@ class JsInterpreter:
                         arg_vals.push(av)
                         ai = ai + 1
                     # Allocate new object
-                    val obj_id = self.object_store.create_object()
+                    val obj_id = self.create_object()
                     val new_obj = JsValue.Object(id: obj_id)
                     # Link prototype chain (for class methods)
                     val ctor_fn_id = _get_fn_id(callee_val)
                     if ctor_fn_id >= 0:
                         val proto_id = self._find_class_proto(ctor_fn_id)
                         if proto_id >= 0:
-                            self.object_store.set_property(obj_id, "__proto__", JsValue.Object(id: proto_id))
+                            self.set_object_property(obj_id, "__proto__", JsValue.Object(id: proto_id))
                     # Call constructor with 'this' bound to new object
                     match callee_val:
                         JsValue.Function(fn_id):
@@ -1557,20 +1850,20 @@ class JsInterpreter:
                     return Ok(new_obj)
                 _:
                     # Simple new without call
-                    val obj_id = self.object_store.create_object()
+                    val obj_id = self.create_object()
                     return Ok(JsValue.Object(id: obj_id))
 
         self.logger.warn("Unknown unary operator: {op}")
         Ok(JsValue.Undefined)
 
     # Function call
-    me eval_call(callee: Expression, args: [Expression], env: i64) -> BrowserResult<JsValue>:
+    me eval_call(callee: JsExpression, args: [JsExpression], env: i64) -> BrowserResult<JsValue>:
         # Array method dispatch — avoid nested match/return (interpreter mode issue)
         var is_member = false
         var member_method = ""
-        var member_obj_expr = Expression.Literal(value: JsValue.Undefined)
+        var member_obj_expr = JsExpression.Literal(value: JsValue.Undefined)
         match callee:
-            Expression.Member(obj_expr, method_name):
+            JsExpression.Member(obj_expr, method_name):
                 is_member = true
                 member_method = method_name
                 member_obj_expr = obj_expr
@@ -1602,66 +1895,66 @@ class JsInterpreter:
 
         # Object.keys / Object.values / Object.entries
         if is_member and member_method == "keys":
-            val callee_obj_name = _ident_name(member_obj_expr)
+            val callee_obj_name = self.ident_name(member_obj_expr)
             if callee_obj_name == "Object":
                 if args.len() > 0:
                     val arg = self.eval_expression(args.get(0), env)?
                     val arg_id = _get_obj_id(arg)
                     if arg_id >= 0:
                         val obj = self.object_store.get_object(arg_id)
-                        val result_id = self.object_store.create_object()
+                        val result_id = self.create_object()
                         var ki = 0
                         while ki < obj.properties.len():
                             val prop = obj.properties.get(ki)
-                            self.object_store.set_property(result_id, "{ki}", JsValue.String(v: prop.key))
+                            self.set_object_property(result_id, "{ki}", JsValue.String(v: prop.key))
                             ki = ki + 1
-                        self.object_store.set_property(result_id, "length", JsValue.Number(v: ki.to_f64()))
+                        self.set_object_property(result_id, "length", JsValue.Number(v: ki.to_f64()))
                         return Ok(JsValue.Array(id: result_id))
-                return Ok(JsValue.Array(id: self.object_store.create_object()))
+                return Ok(JsValue.Array(id: self.create_object()))
 
         if is_member and member_method == "values":
-            val callee_obj_name_v = _ident_name(member_obj_expr)
+            val callee_obj_name_v = self.ident_name(member_obj_expr)
             if callee_obj_name_v == "Object":
                 if args.len() > 0:
                     val arg = self.eval_expression(args.get(0), env)?
                     val arg_id = _get_obj_id(arg)
                     if arg_id >= 0:
                         val obj = self.object_store.get_object(arg_id)
-                        val result_id = self.object_store.create_object()
+                        val result_id = self.create_object()
                         var ki = 0
                         while ki < obj.properties.len():
                             val prop = obj.properties.get(ki)
-                            self.object_store.set_property(result_id, "{ki}", prop.value)
+                            self.set_object_property(result_id, "{ki}", prop.value)
                             ki = ki + 1
-                        self.object_store.set_property(result_id, "length", JsValue.Number(v: ki.to_f64()))
+                        self.set_object_property(result_id, "length", JsValue.Number(v: ki.to_f64()))
                         return Ok(JsValue.Array(id: result_id))
-                return Ok(JsValue.Array(id: self.object_store.create_object()))
+                return Ok(JsValue.Array(id: self.create_object()))
 
         if is_member and member_method == "entries":
-            val callee_obj_name_e = _ident_name(member_obj_expr)
+            val callee_obj_name_e = self.ident_name(member_obj_expr)
             if callee_obj_name_e == "Object":
                 if args.len() > 0:
                     val arg = self.eval_expression(args.get(0), env)?
                     val arg_id = _get_obj_id(arg)
                     if arg_id >= 0:
                         val obj = self.object_store.get_object(arg_id)
-                        val result_id = self.object_store.create_object()
+                        val result_id = self.create_object()
                         var ki = 0
                         while ki < obj.properties.len():
                             val prop = obj.properties.get(ki)
-                            val entry_id = self.object_store.create_object()
-                            self.object_store.set_property(entry_id, "0", JsValue.String(v: prop.key))
-                            self.object_store.set_property(entry_id, "1", prop.value)
-                            self.object_store.set_property(entry_id, "length", JsValue.Number(v: 2.0))
-                            self.object_store.set_property(result_id, "{ki}", JsValue.Array(id: entry_id))
+                            val entry_id = self.create_object()
+                            self.set_object_property(entry_id, "0", JsValue.String(v: prop.key))
+                            self.set_object_property(entry_id, "1", prop.value)
+                            self.set_object_property(entry_id, "length", JsValue.Number(v: 2.0))
+                            self.set_object_property(result_id, "{ki}", JsValue.Array(id: entry_id))
                             ki = ki + 1
-                        self.object_store.set_property(result_id, "length", JsValue.Number(v: ki.to_f64()))
+                        self.set_object_property(result_id, "length", JsValue.Number(v: ki.to_f64()))
                         return Ok(JsValue.Array(id: result_id))
-                return Ok(JsValue.Array(id: self.object_store.create_object()))
+                return Ok(JsValue.Array(id: self.create_object()))
 
         # Object.assign
         if is_member and member_method == "assign":
-            val callee_obj_name_oa = _ident_name(member_obj_expr)
+            val callee_obj_name_oa = self.ident_name(member_obj_expr)
             if callee_obj_name_oa == "Object":
                 if args.len() >= 1:
                     val target = self.eval_expression(args.get(0), env)?
@@ -1676,23 +1969,37 @@ class JsInterpreter:
                                 var pi = 0
                                 while pi < src_obj.properties.len():
                                     val prop = src_obj.properties.get(pi)
-                                    self.object_store.set_property(target_id, prop.key, prop.value)
+                                    self.set_object_property(target_id, prop.key, prop.value)
                                     pi = pi + 1
                             ai = ai + 1
                         return Ok(target)
                 return Ok(JsValue.Undefined)
 
-        # Object.freeze (no-op stub — returns the same object)
+        # Object.freeze prevents future writes through the central property setter.
         if is_member and member_method == "freeze":
-            val callee_obj_name_of = _ident_name(member_obj_expr)
+            val callee_obj_name_of = self.ident_name(member_obj_expr)
             if callee_obj_name_of == "Object":
                 if args.len() > 0:
-                    return Ok(self.eval_expression(args.get(0), env)?)
+                    val frozen_target = self.eval_expression(args.get(0), env)?
+                    val frozen_id = _get_obj_id(frozen_target)
+                    if frozen_id >= 0:
+                        self._mark_object_frozen(frozen_id)
+                    return Ok(frozen_target)
                 return Ok(JsValue.Undefined)
+
+        # Object.isFrozen
+        if is_member and member_method == "isFrozen":
+            val callee_obj_name_oif = self.ident_name(member_obj_expr)
+            if callee_obj_name_oif == "Object":
+                if args.len() > 0:
+                    val frozen_check_target = self.eval_expression(args.get(0), env)?
+                    val frozen_check_id = _get_obj_id(frozen_check_target)
+                    return Ok(JsValue.Boolean(v: frozen_check_id >= 0 and self._is_object_frozen(frozen_check_id)))
+                return Ok(JsValue.Boolean(v: false))
 
         # Number.isInteger / Number.isFinite / Number.isNaN / Number.parseInt / Number.parseFloat
         if is_member and (member_method == "isInteger" or member_method == "isFinite" or member_method == "isNaN" or member_method == "parseInt" or member_method == "parseFloat"):
-            val callee_obj_name_n = _ident_name(member_obj_expr)
+            val callee_obj_name_n = self.ident_name(member_obj_expr)
             if callee_obj_name_n == "Number":
                 if args.len() > 0:
                     val arg = self.eval_expression(args.get(0), env)?
@@ -1723,7 +2030,7 @@ class JsInterpreter:
 
         # JSON.stringify
         if is_member and member_method == "stringify":
-            val callee_obj_name_js = _ident_name(member_obj_expr)
+            val callee_obj_name_js = self.ident_name(member_obj_expr)
             if callee_obj_name_js == "JSON":
                 if args.len() > 0:
                     val arg = self.eval_expression(args.get(0), env)?
@@ -1731,9 +2038,29 @@ class JsInterpreter:
                     return Ok(JsValue.String(v: json_str))
                 return Ok(JsValue.String(v: "undefined"))
 
+        # JSON.parse
+        if is_member and member_method == "parse":
+            val callee_obj_name_jp = self.ident_name(member_obj_expr)
+            if callee_obj_name_jp == "JSON":
+                if args.len() > 0:
+                    val arg = self.eval_expression(args.get(0), env)?
+                    return self._json_parse_allocated(js_to_string(arg), env)
+                return Ok(JsValue.Undefined)
+
+        # Promise.resolve / Promise.reject
+        if is_member and (member_method == "resolve" or member_method == "reject"):
+            val callee_obj_name_p = self.ident_name(member_obj_expr)
+            if callee_obj_name_p == "Promise":
+                var promise_arg_vals: [JsValue] = []
+                if args.len() > 0:
+                    promise_arg_vals.push(self.eval_expression(args.get(0), env)?)
+                if member_method == "resolve":
+                    return Ok(self._native_promise_resolve(promise_arg_vals))
+                return Ok(self._native_promise_reject(promise_arg_vals))
+
         # Array.isArray / Array.from
         if is_member and member_method == "isArray":
-            val callee_obj_name_a = _ident_name(member_obj_expr)
+            val callee_obj_name_a = self.ident_name(member_obj_expr)
             if callee_obj_name_a == "Array":
                 if args.len() > 0:
                     val arg = self.eval_expression(args.get(0), env)?
@@ -1741,24 +2068,34 @@ class JsInterpreter:
                 return Ok(JsValue.Boolean(v: false))
 
         if is_member and member_method == "from":
-            val callee_obj_name_f = _ident_name(member_obj_expr)
+            val callee_obj_name_f = self.ident_name(member_obj_expr)
             if callee_obj_name_f == "Array":
                 if args.len() > 0:
                     val arg = self.eval_expression(args.get(0), env)?
                     val arg_id = _get_obj_id(arg)
                     if arg_id >= 0:
                         val arr_len = self.object_store.array_length(arg_id)
-                        val new_id = self.object_store.create_object()
+                        val new_id = self.create_object()
                         var ai = 0
                         while ai < arr_len:
                             val elem = self.object_store.get_by_index(arg_id, ai)
-                            self.object_store.set_property(new_id, "{ai}", elem)
+                            self.set_object_property(new_id, "{ai}", elem)
                             ai = ai + 1
-                        self.object_store.set_property(new_id, "length", JsValue.Number(v: arr_len.to_f64()))
+                        self.set_object_property(new_id, "length", JsValue.Number(v: arr_len.to_f64()))
                         return Ok(JsValue.Array(id: new_id))
-                return Ok(JsValue.Array(id: self.object_store.create_object()))
+                return Ok(JsValue.Array(id: self.create_object()))
 
-        val callee_val = self.eval_expression(callee, env)?
+        var callee_val = JsValue.Undefined
+        var this_val_for_call = JsValue.Undefined
+        if is_member:
+            this_val_for_call = self.eval_expression(member_obj_expr, env)?
+            val member_obj_id = _get_obj_id(this_val_for_call)
+            if member_obj_id >= 0:
+                callee_val = self._proto_lookup(member_obj_id, member_method)
+            else:
+                callee_val = JsValue.Undefined
+        else:
+            callee_val = self.eval_expression(callee, env)?
 
         # Evaluate arguments
         var arg_vals: [JsValue] = []
@@ -1780,7 +2117,7 @@ class JsInterpreter:
                         if mapping.first == fn_id:
                             var this_val = JsValue.Undefined
                             if is_member:
-                                this_val = self.eval_expression(member_obj_expr, env)?
+                                this_val = this_val_for_call
                             return Ok(self._dispatch_native_with_receiver(mapping.second, this_val, arg_vals, env))
                         ni = ni + 1
                     val js_fn = self.functions.get(fn_id)
@@ -1799,21 +2136,18 @@ class JsInterpreter:
                         pi = pi + 1
 
                     # Bind 'arguments' object
-                    val args_obj_id = self.object_store.create_object()
+                    val args_obj_id = self.create_object()
                     var ai = 0
                     while ai < arg_vals.len():
-                        self.object_store.set_property(args_obj_id, "{ai}", arg_vals.get(ai))
+                        self.set_object_property(args_obj_id, "{ai}", arg_vals.get(ai))
                         ai = ai + 1
-                    self.object_store.set_property(args_obj_id, "length", JsValue.Number(v: arg_vals.len().to_f64()))
+                    self.set_object_property(args_obj_id, "length", JsValue.Number(v: arg_vals.len().to_f64()))
                     self.env_stack.define_var(fn_env, "arguments", JsValue.Object(id: args_obj_id))
 
                     # Bind 'this' — for method calls, the receiver is tracked via callee
                     var this_val = JsValue.Undefined
-                    match callee:
-                        Expression.Member(obj_expr, prop_name):
-                            val obj_val = self.eval_expression(obj_expr, env)?
-                            this_val = obj_val
-                        _: pass_dn
+                    if is_member:
+                        this_val = this_val_for_call
                     self.env_stack.define_var(fn_env, "this", this_val)
 
                     # Push call frame
@@ -1848,24 +2182,35 @@ class JsInterpreter:
     # Member access: obj.prop
     # Look up property on object, with recursive prototype chain fallback
     fn _proto_lookup(obj_id: i64, property: text) -> JsValue:
-        val prop = self.object_store.get_property(obj_id, property)
-        if strict_equals(prop, JsValue.Undefined):
-            # Check __proto__ chain recursively
-            val proto = self.object_store.get_property(obj_id, "__proto__")
+        var current_id = obj_id
+        var depth = 0
+        while current_id >= 0 and depth < 64:
+            val prop = self.get_object_property(current_id, property)
+            if not strict_equals(prop, JsValue.Undefined):
+                return prop
+            val proto = self.get_object_property(current_id, "__proto__")
             val proto_id = _get_obj_id(proto)
-            if proto_id >= 0:
-                return self._proto_lookup(proto_id, property)
-        prop
+            if proto_id < 0 or proto_id == current_id:
+                return JsValue.Undefined
+            current_id = proto_id
+            depth = depth + 1
+        JsValue.Undefined
 
-    me eval_member(object: Expression, property: text, env: i64) -> BrowserResult<JsValue>:
+    me eval_member(object: JsExpression, property: text, env: i64) -> BrowserResult<JsValue>:
         val obj_val = self.eval_expression(object, env)?
         val obj_id = _get_obj_id(obj_val)
         if obj_id >= 0:
             if obj_id == self.host_document_id:
                 if property == "title" and not strict_equals(self.host_document_title_value, JsValue.Undefined):
                     return Ok(self.host_document_title_value)
-                if property == "cookie" and not strict_equals(self.host_document_cookie_value, JsValue.Undefined):
-                    return Ok(self.host_document_cookie_value)
+                if property == "cookie":
+                    if not strict_equals(self.host_document_cookie_value, JsValue.Undefined):
+                        return Ok(self.host_document_cookie_value)
+                    match self.get_object_property(obj_id, "cookie"):
+                        JsValue.String(v):
+                            return Ok(JsValue.String(v: v))
+                        _:
+                            return Ok(JsValue.String(v: ""))
                 if property == "body" and self.host_body_id >= 0:
                     return Ok(JsValue.Object(id: self.host_body_id))
                 if property == "location" and self.host_location_id >= 0:
@@ -1877,7 +2222,7 @@ class JsInterpreter:
                     return Ok(self.host_body_text_content_value)
             # Object or Array — check array length first
             if property == "length":
-                val len_val = self.object_store.get_property(obj_id, "length")
+                val len_val = self.get_object_property(obj_id, "length")
                 if not strict_equals(len_val, JsValue.Undefined):
                     return Ok(len_val)
             return Ok(self._proto_lookup(obj_id, property))
@@ -1895,14 +2240,33 @@ class JsInterpreter:
         Ok(JsValue.Undefined)
 
     # Assignment: target = value
-    me eval_assignment(target: Expression, value: Expression, env: i64) -> BrowserResult<JsValue>:
+    me eval_assignment(target: JsExpression, value: JsExpression, env: i64) -> BrowserResult<JsValue>:
         val rhs = self.eval_expression(value, env)?
 
         match target:
-            Expression.Identifier(name):
+            JsExpression.Identifier(name):
                 self.env_stack.set_var(env, name, rhs)
                 return Ok(rhs)
-            Expression.Member(object, property):
+            JsExpression.Member(object, property):
+                var handled_host_body_assignment = false
+                match object:
+                    JsExpression.Member(parent_object, parent_property):
+                        if parent_property == "body":
+                            match parent_object:
+                                JsExpression.Identifier(parent_name):
+                                    if parent_name == "document":
+                                        if property == "innerHTML":
+                                            self.host_body_inner_html_value = rhs
+                                            handled_host_body_assignment = true
+                                        if property == "textContent":
+                                            self.host_body_text_content_value = rhs
+                                            handled_host_body_assignment = true
+                                _:
+                                    pass_dn
+                    _:
+                        pass_dn
+                if handled_host_body_assignment:
+                    return Ok(rhs)
                 val obj_val = self.eval_expression(object, env)?
                 val obj_id = _get_obj_id(obj_val)
                 if obj_id >= 0:
@@ -1911,7 +2275,13 @@ class JsInterpreter:
                             self.host_document_title_value = rhs
                             return Ok(rhs)
                         if property == "cookie":
-                            self.host_document_cookie_value = rhs
+                            val cookie_text = js_to_string(rhs)
+                            self.host_document_cookie_value = JsValue.String(v: cookie_text)
+                            self.set_object_property(self.host_document_id, "cookie", JsValue.String(v: cookie_text))
+                            if self.host_window_id >= 0:
+                                self.set_object_property(self.host_window_id, "__simple_cookie_header", JsValue.String(v: cookie_text))
+                            if self.host_chrome_id >= 0:
+                                self.set_object_property(self.host_chrome_id, "__simple_cookie_header", JsValue.String(v: cookie_text))
                             return Ok(rhs)
                     if obj_id == self.host_body_id:
                         if property == "innerHTML":
@@ -1927,15 +2297,15 @@ class JsInterpreter:
                 return Ok(rhs)
 
     # Array literal — supports spread: [1, ...arr, 2]
-    me eval_array(elements: [Expression], env: i64) -> BrowserResult<JsValue>:
-        val arr_id = self.object_store.create_object()
+    me eval_array(elements: [JsExpression], env: i64) -> BrowserResult<JsValue>:
+        val arr_id = self.create_object()
         var idx = 0
         var i = 0
         val len = elements.len()
         while i < len:
             val elem_expr = elements.get(i)
             match elem_expr:
-                Expression.SpreadElement(arg):
+                JsExpression.SpreadElement(arg):
                     val spread_val = self.eval_expression(arg, env)?
                     match spread_val:
                         JsValue.Array(src_id):
@@ -1943,34 +2313,34 @@ class JsInterpreter:
                             var si = 0
                             while si < src_len:
                                 val sv = self.object_store.get_by_index(src_id, si)
-                                self.object_store.set_property(arr_id, "{idx}", sv)
+                                self.set_object_property(arr_id, "{idx}", sv)
                                 idx = idx + 1
                                 si = si + 1
                         _:
-                            self.object_store.set_property(arr_id, "{idx}", spread_val)
+                            self.set_object_property(arr_id, "{idx}", spread_val)
                             idx = idx + 1
                 _:
                     val elem = self.eval_expression(elem_expr, env)?
-                    self.object_store.set_property(arr_id, "{idx}", elem)
+                    self.set_object_property(arr_id, "{idx}", elem)
                     idx = idx + 1
             i = i + 1
-        self.object_store.set_property(arr_id, "length", JsValue.Number(v: idx.to_f64()))
+        self.set_object_property(arr_id, "length", JsValue.Number(v: idx.to_f64()))
         Ok(JsValue.Array(id: arr_id))
 
     # Object literal
-    me eval_object(properties: [Pair<text, Expression>], env: i64) -> BrowserResult<JsValue>:
-        val obj_id = self.object_store.create_object()
+    me eval_object(properties: [Pair<text, JsExpression>], env: i64) -> BrowserResult<JsValue>:
+        val obj_id = self.create_object()
         var i = 0
         val len = properties.len()
         while i < len:
             val prop = properties.get(i)
             val pv = self.eval_expression(prop.second, env)?
-            self.object_store.set_property(obj_id, prop.first, pv)
+            self.set_object_property(obj_id, prop.first, pv)
             i = i + 1
         Ok(JsValue.Object(id: obj_id))
 
     # Template literal: `hello ${name}!`
-    me eval_template_literal(quasis: [text], expressions: [Expression], env: i64) -> BrowserResult<JsValue>:
+    me eval_template_literal(quasis: [text], expressions: [JsExpression], env: i64) -> BrowserResult<JsValue>:
         var result = ""
         var i = 0
         val qlen = quasis.len()
@@ -1983,9 +2353,9 @@ class JsInterpreter:
         Ok(JsValue.String(v: result))
 
     # Delete operator: delete obj.prop
-    me eval_delete(expr: Expression, env: i64) -> BrowserResult<JsValue>:
+    me eval_delete(expr: JsExpression, env: i64) -> BrowserResult<JsValue>:
         match expr:
-            Expression.Member(object, property):
+            JsExpression.Member(object, property):
                 val obj_val = self.eval_expression(object, env)?
                 match obj_val:
                     JsValue.Object(id):
@@ -1997,7 +2367,7 @@ class JsInterpreter:
                 return Ok(JsValue.Boolean(v: true))
 
     # ── Array method dispatch ────────────────────────────────────────────
-    me _dispatch_array_method(arr_id: i64, method: text, args: [Expression], env: i64) -> BrowserResult<JsValue>:
+    me _dispatch_array_method(arr_id: i64, method: text, args: [JsExpression], env: i64) -> BrowserResult<JsValue>:
         val arr_len = self.object_store.array_length(arr_id)
 
         # --- Higher-order methods that need a callback ---
@@ -2005,14 +2375,14 @@ class JsInterpreter:
             val cb_val = self.eval_expression(args.get(0), env)?
             match cb_val:
                 JsValue.Function(fn_id):
-                    val result_id = self.object_store.create_object()
+                    val result_id = self.create_object()
                     var i = 0
                     while i < arr_len:
                         val elem = self.object_store.get_by_index(arr_id, i)
                         val mapped = self._invoke_function(fn_id, [elem, JsValue.Number(v: i.to_f64()), JsValue.Array(id: arr_id)], env)?
-                        self.object_store.set_property(result_id, "{i}", mapped)
+                        self.set_object_property(result_id, "{i}", mapped)
                         i = i + 1
-                    self.object_store.set_property(result_id, "length", JsValue.Number(v: arr_len.to_f64()))
+                    self.set_object_property(result_id, "length", JsValue.Number(v: arr_len.to_f64()))
                     return Ok(JsValue.Array(id: result_id))
                 _:
                     return Ok(JsValue.Undefined)
@@ -2021,17 +2391,17 @@ class JsInterpreter:
             val cb_val = self.eval_expression(args.get(0), env)?
             match cb_val:
                 JsValue.Function(fn_id):
-                    val result_id = self.object_store.create_object()
+                    val result_id = self.create_object()
                     var i = 0
                     var out_idx = 0
                     while i < arr_len:
                         val elem = self.object_store.get_by_index(arr_id, i)
                         val keep = self._invoke_function(fn_id, [elem, JsValue.Number(v: i.to_f64()), JsValue.Array(id: arr_id)], env)?
                         if is_truthy(keep):
-                            self.object_store.set_property(result_id, "{out_idx}", elem)
+                            self.set_object_property(result_id, "{out_idx}", elem)
                             out_idx = out_idx + 1
                         i = i + 1
-                    self.object_store.set_property(result_id, "length", JsValue.Number(v: out_idx.to_f64()))
+                    self.set_object_property(result_id, "length", JsValue.Number(v: out_idx.to_f64()))
                     return Ok(JsValue.Array(id: result_id))
                 _:
                     return Ok(JsValue.Undefined)
@@ -2148,10 +2518,10 @@ class JsInterpreter:
             var i = 0
             while i < args.len():
                 val arg_val = self.eval_expression(args.get(i), env)?
-                self.object_store.set_property(arr_id, "{arr_len + i}", arg_val)
+                self.set_object_property(arr_id, "{arr_len + i}", arg_val)
                 i = i + 1
             val new_len = arr_len + args.len()
-            self.object_store.set_property(arr_id, "length", JsValue.Number(v: new_len.to_f64()))
+            self.set_object_property(arr_id, "length", JsValue.Number(v: new_len.to_f64()))
             return Ok(JsValue.Number(v: new_len.to_f64()))
 
         if method == "pop":
@@ -2159,7 +2529,7 @@ class JsInterpreter:
                 return Ok(JsValue.Undefined)
             val last = self.object_store.get_by_index(arr_id, arr_len - 1)
             val new_len = arr_len - 1
-            self.object_store.set_property(arr_id, "length", JsValue.Number(v: new_len.to_f64()))
+            self.set_object_property(arr_id, "length", JsValue.Number(v: new_len.to_f64()))
             return Ok(last)
 
         if method == "indexOf":
@@ -2203,8 +2573,8 @@ class JsInterpreter:
             while i < j:
                 val a = self.object_store.get_by_index(arr_id, i)
                 val b = self.object_store.get_by_index(arr_id, j)
-                self.object_store.set_property(arr_id, "{i}", b)
-                self.object_store.set_property(arr_id, "{j}", a)
+                self.set_object_property(arr_id, "{i}", b)
+                self.set_object_property(arr_id, "{j}", a)
                 i = i + 1
                 j = j - 1
             return Ok(JsValue.Array(id: arr_id))
@@ -2226,25 +2596,25 @@ class JsInterpreter:
                     end = arr_len + end
                 if end > arr_len:
                     end = arr_len
-            val result_id = self.object_store.create_object()
+            val result_id = self.create_object()
             var i = start
             var out = 0
             while i < end:
                 val elem = self.object_store.get_by_index(arr_id, i)
-                self.object_store.set_property(result_id, "{out}", elem)
+                self.set_object_property(result_id, "{out}", elem)
                 out = out + 1
                 i = i + 1
-            self.object_store.set_property(result_id, "length", JsValue.Number(v: out.to_f64()))
+            self.set_object_property(result_id, "length", JsValue.Number(v: out.to_f64()))
             return Ok(JsValue.Array(id: result_id))
 
         if method == "concat":
-            val result_id = self.object_store.create_object()
+            val result_id = self.create_object()
             var out = 0
             # Copy current array
             var i = 0
             while i < arr_len:
                 val elem = self.object_store.get_by_index(arr_id, i)
-                self.object_store.set_property(result_id, "{out}", elem)
+                self.set_object_property(result_id, "{out}", elem)
                 out = out + 1
                 i = i + 1
             # Append each argument (expand arrays)
@@ -2257,14 +2627,14 @@ class JsInterpreter:
                         var si = 0
                         while si < src_len:
                             val sv = self.object_store.get_by_index(src_id, si)
-                            self.object_store.set_property(result_id, "{out}", sv)
+                            self.set_object_property(result_id, "{out}", sv)
                             out = out + 1
                             si = si + 1
                     _:
-                        self.object_store.set_property(result_id, "{out}", arg_val)
+                        self.set_object_property(result_id, "{out}", arg_val)
                         out = out + 1
                 ai = ai + 1
-            self.object_store.set_property(result_id, "length", JsValue.Number(v: out.to_f64()))
+            self.set_object_property(result_id, "length", JsValue.Number(v: out.to_f64()))
             return Ok(JsValue.Array(id: result_id))
 
         if method == "sort":
@@ -2283,8 +2653,8 @@ class JsInterpreter:
                                 val cmp = self._invoke_function(fn_id, [a, b], env)?
                                 val cmp_num = to_number(cmp)
                                 if cmp_num > 0.0:
-                                    self.object_store.set_property(arr_id, "{i}", b)
-                                    self.object_store.set_property(arr_id, "{i + 1}", a)
+                                    self.set_object_property(arr_id, "{i}", b)
+                                    self.set_object_property(arr_id, "{i + 1}", a)
                                     swapped = true
                                 i = i + 1
                     _: pass_dn
@@ -2298,10 +2668,10 @@ class JsInterpreter:
             var i = 1
             while i < arr_len:
                 val elem = self.object_store.get_by_index(arr_id, i)
-                self.object_store.set_property(arr_id, "{i - 1}", elem)
+                self.set_object_property(arr_id, "{i - 1}", elem)
                 i = i + 1
             val new_len = arr_len - 1
-            self.object_store.set_property(arr_id, "length", JsValue.Number(v: new_len.to_f64()))
+            self.set_object_property(arr_id, "length", JsValue.Number(v: new_len.to_f64()))
             return Ok(first)
 
         # unshift — prepend elements
@@ -2311,16 +2681,16 @@ class JsInterpreter:
             var i = arr_len - 1
             while i >= 0:
                 val elem = self.object_store.get_by_index(arr_id, i)
-                self.object_store.set_property(arr_id, "{i + count}", elem)
+                self.set_object_property(arr_id, "{i + count}", elem)
                 i = i - 1
             # Insert new elements at front
             var j = 0
             while j < count:
                 val arg_val = self.eval_expression(args.get(j), env)?
-                self.object_store.set_property(arr_id, "{j}", arg_val)
+                self.set_object_property(arr_id, "{j}", arg_val)
                 j = j + 1
             val new_len = arr_len + count
-            self.object_store.set_property(arr_id, "length", JsValue.Number(v: new_len.to_f64()))
+            self.set_object_property(arr_id, "length", JsValue.Number(v: new_len.to_f64()))
             return Ok(JsValue.Number(v: new_len.to_f64()))
 
         # splice — remove/insert elements
@@ -2338,13 +2708,13 @@ class JsInterpreter:
                 val dc = self.eval_expression(args.get(1), env)?
                 delete_count = f64_to_i64(to_number(dc))
             # Collect removed elements
-            val removed_id = self.object_store.create_object()
+            val removed_id = self.create_object()
             var ri = 0
             while ri < delete_count and (start + ri) < arr_len:
                 val elem = self.object_store.get_by_index(arr_id, start + ri)
-                self.object_store.set_property(removed_id, "{ri}", elem)
+                self.set_object_property(removed_id, "{ri}", elem)
                 ri = ri + 1
-            self.object_store.set_property(removed_id, "length", JsValue.Number(v: ri.to_f64()))
+            self.set_object_property(removed_id, "length", JsValue.Number(v: ri.to_f64()))
             # Collect insert items (args from index 2 onward)
             var inserts: [JsValue] = []
             var ii = 2
@@ -2359,22 +2729,22 @@ class JsInterpreter:
                 var ti = arr_len - 1
                 while ti >= tail_start:
                     val elem = self.object_store.get_by_index(arr_id, ti)
-                    self.object_store.set_property(arr_id, "{ti + shift_amount}", elem)
+                    self.set_object_property(arr_id, "{ti + shift_amount}", elem)
                     ti = ti - 1
             else:
                 if shift_amount < 0:
                     var ti = tail_start
                     while ti < arr_len:
                         val elem = self.object_store.get_by_index(arr_id, ti)
-                        self.object_store.set_property(arr_id, "{ti + shift_amount}", elem)
+                        self.set_object_property(arr_id, "{ti + shift_amount}", elem)
                         ti = ti + 1
             # Insert new elements
             var ki = 0
             while ki < inserts.len():
-                self.object_store.set_property(arr_id, "{start + ki}", inserts.get(ki))
+                self.set_object_property(arr_id, "{start + ki}", inserts.get(ki))
                 ki = ki + 1
             val new_len = arr_len + shift_amount
-            self.object_store.set_property(arr_id, "length", JsValue.Number(v: new_len.to_f64()))
+            self.set_object_property(arr_id, "length", JsValue.Number(v: new_len.to_f64()))
             return Ok(JsValue.Array(id: removed_id))
 
         if method == "at":
@@ -2388,7 +2758,7 @@ class JsInterpreter:
             return Ok(JsValue.Undefined)
 
         if method == "flat":
-            val result_id = self.object_store.create_object()
+            val result_id = self.create_object()
             var out = 0
             var i = 0
             while i < arr_len:
@@ -2404,21 +2774,21 @@ class JsInterpreter:
                     var j = 0
                     while j < inner_len:
                         val inner_elem = self.object_store.get_by_index(elem_arr_id, j)
-                        self.object_store.set_property(result_id, "{out}", inner_elem)
+                        self.set_object_property(result_id, "{out}", inner_elem)
                         out = out + 1
                         j = j + 1
                 else:
-                    self.object_store.set_property(result_id, "{out}", elem)
+                    self.set_object_property(result_id, "{out}", elem)
                     out = out + 1
                 i = i + 1
-            self.object_store.set_property(result_id, "length", JsValue.Number(v: out.to_f64()))
+            self.set_object_property(result_id, "length", JsValue.Number(v: out.to_f64()))
             return Ok(JsValue.Array(id: result_id))
 
         if method == "flatMap":
             val cb_val = self.eval_expression(args.get(0), env)?
             match cb_val:
                 JsValue.Function(fn_id):
-                    val result_id = self.object_store.create_object()
+                    val result_id = self.create_object()
                     var out = 0
                     var i = 0
                     while i < arr_len:
@@ -2435,14 +2805,14 @@ class JsInterpreter:
                             var j = 0
                             while j < inner_len:
                                 val inner = self.object_store.get_by_index(mapped_arr_id, j)
-                                self.object_store.set_property(result_id, "{out}", inner)
+                                self.set_object_property(result_id, "{out}", inner)
                                 out = out + 1
                                 j = j + 1
                         else:
-                            self.object_store.set_property(result_id, "{out}", mapped)
+                            self.set_object_property(result_id, "{out}", mapped)
                             out = out + 1
                         i = i + 1
-                    self.object_store.set_property(result_id, "length", JsValue.Number(v: out.to_f64()))
+                    self.set_object_property(result_id, "length", JsValue.Number(v: out.to_f64()))
                     return Ok(JsValue.Array(id: result_id))
                 _:
                     return Ok(JsValue.Undefined)
@@ -2451,6 +2821,12 @@ class JsInterpreter:
         Ok(JsValue.Undefined)
 
     me _dispatch_native_with_receiver(native_id: i64, this_val: JsValue, arg_vals: [JsValue], env: i64) -> JsValue:
+        if native_id == NATIVE_SET_TIMEOUT:
+            return self._native_set_timer(arg_vals, false)
+        if native_id == NATIVE_SET_INTERVAL:
+            return self._native_set_timer(arg_vals, true)
+        if native_id == NATIVE_CLEAR_TIMEOUT or native_id == NATIVE_CLEAR_INTERVAL:
+            return self._native_clear_timer(arg_vals)
         if native_id == NATIVE_FETCH:
             return self._native_fetch(this_val, arg_vals, env)
         if native_id == NATIVE_PROMISE_THEN:
@@ -2467,6 +2843,10 @@ class JsInterpreter:
             return self._native_response_text(this_val)
         if native_id == NATIVE_RESPONSE_JSON:
             return self._native_response_json(this_val)
+        if native_id == NATIVE_RESPONSE_BLOB:
+            return self._native_response_blob(this_val)
+        if native_id == NATIVE_BLOB_TEXT:
+            return self._native_blob_text(this_val)
         if native_id == NATIVE_STORAGE_GET_ITEM:
             return self._native_storage_get_item(this_val, arg_vals)
         if native_id == NATIVE_STORAGE_SET_ITEM:
@@ -2479,7 +2859,39 @@ class JsInterpreter:
             return self._native_storage_key(this_val, arg_vals)
         dispatch_native(native_id, arg_vals, self.logger)
 
-    fn _native_fetch(this_val: JsValue, arg_vals: [JsValue], env: i64) -> JsValue:
+    me _native_set_timer(arg_vals: [JsValue], is_interval: bool) -> JsValue:
+        val timer_id = self.next_timer_id
+        self.next_timer_id = self.next_timer_id + 1
+        var callback_id = -1
+        if arg_vals.len() > 0:
+            match arg_vals[0]:
+                JsValue.Function(id): callback_id = id
+                _: pass_dn
+        var delay_ms = 0
+        if arg_vals.len() > 1:
+            delay_ms = f64_to_i64(to_number(arg_vals[1]))
+            if delay_ms < 0:
+                delay_ms = 0
+        if is_interval and delay_ms < 1:
+            delay_ms = 1
+        self.pending_timer_tasks = self.pending_timer_tasks + [PendingTimerTask.create(timer_id, callback_id, delay_ms, 0, is_interval)]
+        JsValue.Number(v: (timer_id as f64))
+
+    me _native_clear_timer(arg_vals: [JsValue]) -> JsValue:
+        if arg_vals.len() == 0:
+            return JsValue.Undefined
+        val timer_id = f64_to_i64(to_number(arg_vals[0]))
+        var rest: [PendingTimerTask] = []
+        var i = 0
+        while i < self.pending_timer_tasks.len():
+            val task = self.pending_timer_tasks[i]
+            if task.id != timer_id:
+                rest = rest + [task]
+            i = i + 1
+        self.pending_timer_tasks = rest
+        JsValue.Undefined
+
+    me _native_fetch(this_val: JsValue, arg_vals: [JsValue], env: i64) -> JsValue:
         var host_obj_id = _get_obj_id(this_val)
         if host_obj_id < 0:
             match self.lookup_global_value("window"):
@@ -2503,22 +2915,22 @@ class JsInterpreter:
         if arg_vals.len() > 1:
             match arg_vals.get(1):
                 JsValue.Object(opts_id):
-                    match self.object_store.get_property(opts_id, "method"):
+                    match self.get_object_property(opts_id, "method"):
                         JsValue.String(v):
                             if v.trim() != "":
                                 method = v.trim().upper()
                         JsValue.Number(v):
                             method = "{v}".upper()
                         _: pass_dn
-                    match self.object_store.get_property(opts_id, "headers"):
-                        JsValue.String(v): headers_text = v
-                        _: pass_dn
-                    match self.object_store.get_property(opts_id, "body"):
+                    match self.get_object_property(opts_id, "headers"):
+                        JsValue.Undefined: pass_dn
+                        header_value: headers_text = self._serialize_fetch_headers(header_value)
+                    match self.get_object_property(opts_id, "body"):
                         JsValue.String(v): body = v
                         JsValue.Number(v): body = "{v}"
                         JsValue.Boolean(v): body = if v: "true" else: "false"
                         _: pass_dn
-                    match self.object_store.get_property(opts_id, "contentType"):
+                    match self.get_object_property(opts_id, "contentType"):
                         JsValue.String(v): content_type = v
                         _: pass_dn
                 JsValue.String(v):
@@ -2537,23 +2949,24 @@ class JsInterpreter:
             headers_text = headers_text + "Content-Type: " + content_type
 
         val promise_id = self._create_pending_promise_object()
-        val request_obj_id = self.object_store.create_object()
+        val request_obj_id = self.create_object()
         val request_id = "fetch-{self.next_async_request_seq}"
         self.next_async_request_seq = self.next_async_request_seq + 1
-        self.object_store.set_property(request_obj_id, "request_id", JsValue.String(v: request_id))
-        self.object_store.set_property(request_obj_id, "kind", JsValue.String(v: "fetch"))
-        self.object_store.set_property(request_obj_id, "url", JsValue.String(v: request_url))
-        self.object_store.set_property(request_obj_id, "method", JsValue.String(v: if method.trim() != "": method else: "GET"))
-        self.object_store.set_property(request_obj_id, "headers", JsValue.String(v: headers_text))
-        self.object_store.set_property(request_obj_id, "body", JsValue.String(v: body))
-        self.object_store.set_property(request_obj_id, "content_type", JsValue.String(v: content_type))
-        self.object_store.set_property(request_obj_id, "promise_id", JsValue.Number(v: promise_id.to_f64()))
+        self.set_object_property(promise_id, "__simple_request_id", JsValue.String(v: request_id))
+        self.set_object_property(request_obj_id, "request_id", JsValue.String(v: request_id))
+        self.set_object_property(request_obj_id, "kind", JsValue.String(v: "fetch"))
+        self.set_object_property(request_obj_id, "url", JsValue.String(v: request_url))
+        self.set_object_property(request_obj_id, "method", JsValue.String(v: if method.trim() != "": method else: "GET"))
+        self.set_object_property(request_obj_id, "headers", JsValue.String(v: headers_text))
+        self.set_object_property(request_obj_id, "body", JsValue.String(v: body))
+        self.set_object_property(request_obj_id, "content_type", JsValue.String(v: content_type))
+        self.set_object_property(request_obj_id, "promise_id", JsValue.String(v: "{promise_id}"))
         val request_record = PendingAsyncRequest.create(request_obj_id)
         self.pending_async_requests = self.pending_async_requests + [request_record]
         self.pending_async_request_registry = self.pending_async_request_registry + [request_record]
         JsValue.Object(id: promise_id)
 
-    fn _native_promise_then(this_val: JsValue, arg_vals: [JsValue]) -> JsValue:
+    me _native_promise_then(this_val: JsValue, arg_vals: [JsValue]) -> JsValue:
         val promise_id = _get_obj_id(this_val)
         if promise_id < 0:
             return JsValue.Undefined
@@ -2572,7 +2985,7 @@ class JsInterpreter:
                 self._enqueue_promise_task(promise_id, handler_id)
                 JsValue.Object(id: next_promise_id)
 
-    fn _native_promise_catch(this_val: JsValue, arg_vals: [JsValue]) -> JsValue:
+    me _native_promise_catch(this_val: JsValue, arg_vals: [JsValue]) -> JsValue:
         val promise_id = _get_obj_id(this_val)
         if promise_id < 0:
             return JsValue.Undefined
@@ -2588,7 +3001,7 @@ class JsInterpreter:
                 self._enqueue_promise_task(promise_id, handler_id)
                 JsValue.Object(id: next_promise_id)
 
-    fn _native_promise_finally(this_val: JsValue, arg_vals: [JsValue]) -> JsValue:
+    me _native_promise_finally(this_val: JsValue, arg_vals: [JsValue]) -> JsValue:
         val promise_id = _get_obj_id(this_val)
         if promise_id < 0:
             return JsValue.Undefined
@@ -2604,31 +3017,81 @@ class JsInterpreter:
                 self._enqueue_promise_task(promise_id, handler_id)
                 JsValue.Object(id: next_promise_id)
 
-    fn _native_promise_resolve(arg_vals: [JsValue]) -> JsValue:
+    me _native_promise_resolve(arg_vals: [JsValue]) -> JsValue:
         val value = if arg_vals.len() > 0: arg_vals.get(0) else: JsValue.Undefined
         JsValue.Object(id: self._create_settled_promise_object(value, false))
 
-    fn _native_promise_reject(arg_vals: [JsValue]) -> JsValue:
+    me _native_promise_reject(arg_vals: [JsValue]) -> JsValue:
         val value = if arg_vals.len() > 0: arg_vals.get(0) else: JsValue.Undefined
         JsValue.Object(id: self._create_settled_promise_object(value, true))
 
-    fn _native_response_text(this_val: JsValue) -> JsValue:
+    me _native_response_text(this_val: JsValue) -> JsValue:
         val response_id = _get_obj_id(this_val)
         if response_id < 0:
             return JsValue.Undefined
-        self.object_store.set_property(response_id, "bodyUsed", JsValue.Boolean(v: true))
-        match self.object_store.get_property(response_id, "body"):
-            JsValue.String(v): JsValue.String(v: v)
+        self.set_object_property(response_id, "bodyUsed", JsValue.Boolean(v: true))
+        match self.get_object_property(response_id, "body"):
+            JsValue.String(v): JsValue.Object(id: self._create_settled_promise_object(JsValue.String(v: v), false))
             _: JsValue.Undefined
 
-    fn _native_response_json(this_val: JsValue) -> JsValue:
+    me _native_response_json(this_val: JsValue) -> JsValue:
         val response_id = _get_obj_id(this_val)
         if response_id < 0:
             return JsValue.Undefined
-        self.object_store.set_property(response_id, "bodyUsed", JsValue.Boolean(v: true))
-        match self.object_store.get_property(response_id, "body"):
-            JsValue.String(v): dispatch_native(NATIVE_JSON_PARSE, [JsValue.String(v: v)], self.logger)
+        self.set_object_property(response_id, "bodyUsed", JsValue.Boolean(v: true))
+        match self.get_object_property(response_id, "body"):
+            JsValue.String(v):
+                match self._json_parse_allocated(v, self.global_env):
+                    Ok(value): JsValue.Object(id: self._create_settled_promise_object(value, false))
+                    Err(e): JsValue.Object(id: self._create_settled_promise_object(JsValue.String(v: e.message), true))
             _: JsValue.Undefined
+
+    me _native_response_blob(this_val: JsValue) -> JsValue:
+        val response_id = _get_obj_id(this_val)
+        if response_id < 0:
+            return JsValue.Undefined
+        self.set_object_property(response_id, "bodyUsed", JsValue.Boolean(v: true))
+        var body = ""
+        match self.get_object_property(response_id, "body"):
+            JsValue.String(v): body = v
+            _: pass_dn
+        var blob_type = self._response_content_type(response_id)
+        if blob_type == "":
+            blob_type = "application/octet-stream"
+        val blob_id = self.create_object()
+        self.set_object_property(blob_id, "__simple_blob_host", JsValue.Boolean(v: true))
+        self.set_object_property(blob_id, "size", JsValue.Number(v: body.len().to_f64()))
+        self.set_object_property(blob_id, "type", JsValue.String(v: blob_type))
+        self.set_object_property(blob_id, "__body__", JsValue.String(v: body))
+        self._define_method_on(blob_id, "text", NATIVE_BLOB_TEXT)
+        JsValue.Object(id: self._create_settled_promise_object(JsValue.Object(id: blob_id), false))
+
+    me _native_blob_text(this_val: JsValue) -> JsValue:
+        val blob_id = _get_obj_id(this_val)
+        if blob_id < 0:
+            return JsValue.Undefined
+        match self.get_object_property(blob_id, "__body__"):
+            JsValue.String(v): JsValue.Object(id: self._create_settled_promise_object(JsValue.String(v: v), false))
+            _: JsValue.Object(id: self._create_settled_promise_object(JsValue.String(v: ""), false))
+
+    fn _response_content_type(response_id: i64) -> text:
+        match self.get_object_property(response_id, "headersText"):
+            JsValue.String(headers):
+                for line in headers.split("\n"):
+                    val trimmed = line.trim()
+                    if trimmed.lower().starts_with("content-type:"):
+                        return trimmed.slice(13, trimmed.len()).trim()
+            _: pass_dn
+        ""
+
+    fn _json_parse_allocated(source: text, env: i64) -> BrowserResult<JsValue>:
+        val valid = json_parse(source)
+        match valid:
+            Err(e): return Err(e)
+            Ok(_): pass_dn
+        var parser = JsParser.create(source, self.logger)
+        val expr = parser.parse_assignment()?
+        self.eval_expression(expr, env)
 
     fn _storage_api_property(key: text) -> bool:
         key == "__proto__" or
@@ -2649,17 +3112,19 @@ class JsInterpreter:
 
     fn _sync_storage_length(storage_id: i64):
         val keys = self._storage_keys(storage_id)
-        self.object_store.set_property(storage_id, "length", JsValue.Number(v: keys.len().to_f64()))
+        self.set_object_property(storage_id, "length", JsValue.Number(v: keys.len().to_f64()))
 
     fn _native_storage_get_item(this_val: JsValue, arg_vals: [JsValue]) -> JsValue:
         val storage_id = _get_obj_id(this_val)
         if storage_id < 0:
             return JsValue.Undefined
         val key = if arg_vals.len() > 0: js_to_string(arg_vals.get(0)) else: ""
-        match self.object_store.get_property(storage_id, key):
-            JsValue.Undefined: JsValue.Null
-            JsValue.String(v): JsValue.String(v: v)
-            other: JsValue.String(v: js_to_string(other))
+        val stored = self.get_object_property(storage_id, key)
+        if val JsValue.Undefined = stored:
+            return JsValue.Null
+        if val JsValue.String(v) = stored:
+            return JsValue.String(v: v)
+        JsValue.String(v: js_to_string(stored))
 
     fn _native_storage_set_item(this_val: JsValue, arg_vals: [JsValue]) -> JsValue:
         val storage_id = _get_obj_id(this_val)
@@ -2667,7 +3132,7 @@ class JsInterpreter:
             return JsValue.Undefined
         val key = if arg_vals.len() > 0: js_to_string(arg_vals.get(0)) else: ""
         val value = if arg_vals.len() > 1: js_to_string(arg_vals.get(1)) else: ""
-        self.object_store.set_property(storage_id, key, JsValue.String(v: value))
+        self.set_object_property(storage_id, key, JsValue.String(v: value))
         self._sync_storage_length(storage_id)
         JsValue.Undefined
 
@@ -2700,7 +3165,7 @@ class JsInterpreter:
         JsValue.String(v: keys.get(idx))
 
     # ── String method dispatch ───────────────────────────────────────────
-    me _dispatch_string_method(str_val: text, method: text, args: [Expression], env: i64) -> BrowserResult<JsValue>:
+    me _dispatch_string_method(str_val: text, method: text, args: [JsExpression], env: i64) -> BrowserResult<JsValue>:
         if method == "indexOf":
             if args.len() > 0:
                 val search = self.eval_expression(args.get(0), env)?
@@ -2833,15 +3298,15 @@ class JsInterpreter:
             if args.len() > 0:
                 val sep_val = self.eval_expression(args.get(0), env)?
                 sep = js_to_string(sep_val)
-            val result_id = self.object_store.create_object()
+            val result_id = self.create_object()
             if sep == "":
                 # Split each character
                 var i = 0
                 val slen = str_val.len()
                 while i < slen:
-                    self.object_store.set_property(result_id, "{i}", JsValue.String(v: str_val[i]))
+                    self.set_object_property(result_id, "{i}", JsValue.String(v: str_val[i]))
                     i = i + 1
-                self.object_store.set_property(result_id, "length", JsValue.Number(v: slen.to_f64()))
+                self.set_object_property(result_id, "length", JsValue.Number(v: slen.to_f64()))
             else:
                 # Split by separator
                 var parts = 0
@@ -2863,7 +3328,7 @@ class JsInterpreter:
                         while pi < i:
                             part = part + str_val[pi]
                             pi = pi + 1
-                        self.object_store.set_property(result_id, "{parts}", JsValue.String(v: part))
+                        self.set_object_property(result_id, "{parts}", JsValue.String(v: part))
                         parts = parts + 1
                         start = i + sep_len
                         i = start
@@ -2875,9 +3340,9 @@ class JsInterpreter:
                 while li < slen:
                     last = last + str_val[li]
                     li = li + 1
-                self.object_store.set_property(result_id, "{parts}", JsValue.String(v: last))
+                self.set_object_property(result_id, "{parts}", JsValue.String(v: last))
                 parts = parts + 1
-                self.object_store.set_property(result_id, "length", JsValue.Number(v: parts.to_f64()))
+                self.set_object_property(result_id, "length", JsValue.Number(v: parts.to_f64()))
             return Ok(JsValue.Array(id: result_id))
 
         if method == "slice" or method == "substring":

@@ -113,9 +113,6 @@ fn _char_from_code(code: i64) -> text:
     if code == 126: return "~"
     ""
 
-fn _clone_text(value: text) -> text:
-    value.substring(0, value.len())
-
 # ── Token kinds ──────────────────────────────────────────────────────────
 
 enum JsTokenKind:
@@ -352,15 +349,18 @@ class JsToken:
     line: i64
     col: i64
 
+    static fn create(kind: JsTokenKind, value: text, line: i64, col: i64) -> JsToken:
+        JsToken(kind: kind, value: value, line: line, col: col)
+
     static fn eof(line: i64, col: i64) -> JsToken:
-        JsToken(kind: JsTokenKind.Eof, value: "", line: line, col: col)
+        JsToken.create(JsTokenKind.Eof, "", line, col)
 
     static fn invalid(value: text, line: i64, col: i64) -> JsToken:
-        JsToken(kind: JsTokenKind.Invalid, value: value, line: line, col: col)
+        JsToken.create(JsTokenKind.Invalid, value, line, col)
 
 # ── Keyword table ────────────────────────────────────────────────────────
 
-fn is_keyword(word: text) -> Option<JsTokenKind>:
+fn js_lexer_is_keyword(word: text) -> Option<JsTokenKind>:
     if word == "var":        return Some(JsTokenKind.Var)
     if word == "let":        return Some(JsTokenKind.Let)
     if word == "const":      return Some(JsTokenKind.Const)
@@ -406,48 +406,48 @@ fn is_keyword(word: text) -> Option<JsTokenKind>:
 
 # ── Character predicates ─────────────────────────────────────────────────
 
-fn is_digit(c: text) -> bool:
+fn js_lexer_is_digit(c: text) -> bool:
     if c == "" or c == nil:
         return false
     val code = char_code(c)
     code >= 48 and code <= 57
 
-fn is_hex_digit(c: text) -> bool:
-    val is_d = is_digit(c)
+fn js_lexer_is_hex_digit(c: text) -> bool:
+    val is_d = js_lexer_is_digit(c)
     val is_upper = c == "A" or c == "B" or c == "C" or c == "D" or c == "E" or c == "F"
     val is_lower = c == "a" or c == "b" or c == "c" or c == "d" or c == "e" or c == "f"
     is_d or is_upper or is_lower
 
-fn is_octal_digit(c: text) -> bool:
+fn js_lexer_is_octal_digit(c: text) -> bool:
     c == "0" or c == "1" or c == "2" or c == "3" or c == "4" or c == "5" or c == "6" or c == "7"
 
-fn is_binary_digit(c: text) -> bool:
+fn js_lexer_is_binary_digit(c: text) -> bool:
     c == "0" or c == "1"
 
-fn is_alpha(c: text) -> bool:
+fn js_lexer_is_alpha(c: text) -> bool:
     if c == "" or c == nil:
         return false
     val code = char_code(c)
     (code >= 65 and code <= 90) or (code >= 97 and code <= 122)
 
-fn is_ident_start(c: text) -> bool:
+fn js_lexer_is_ident_start(c: text) -> bool:
     if c == "":
         return false
     val code = char_code(c)
-    val is_a = is_alpha(c)
+    val is_a = js_lexer_is_alpha(c)
     code == 95 or code == 36 or is_a
 
-fn is_ident_part(c: text) -> bool:
+fn js_lexer_is_ident_part(c: text) -> bool:
     if c == "":
         return false
     val code = char_code(c)
-    val is_a = is_alpha(c)
-    val is_d = is_digit(c)
+    val is_a = js_lexer_is_alpha(c)
+    val is_d = js_lexer_is_digit(c)
     code == 95 or code == 36 or is_a or is_d
 
 # ── Escape handling ──────────────────────────────────────────────────────
 
-fn unescape_string(raw: text) -> text:
+fn js_lexer_unescape_string(raw: text) -> text:
     var result = ""
     var i = 0
     val len = raw.len()
@@ -483,7 +483,7 @@ fn unescape_string(raw: text) -> text:
                 # \uXXXX — parse 4 hex digits
                 if i + 5 <= len:
                     val hex = _substr(raw, i + 1, i + 5)
-                    val code_val = parse_hex_int(hex)
+                    val code_val = js_lexer_parse_hex_int(hex)
                     result = result + _char_from_code(code_val)
                     i = i + 4
                 else:
@@ -514,7 +514,7 @@ fn _hex_char_val(c: text) -> i64:
     if c == "F" or c == "f": return 15
     0
 
-fn parse_hex_int(s: text) -> i64:
+fn js_lexer_parse_hex_int(s: text) -> i64:
     var result = 0
     var i = 0
     val len = s.len()
@@ -527,7 +527,7 @@ fn parse_hex_int(s: text) -> i64:
         i = i + 1
     result
 
-fn parse_binary_int(s: text) -> i64:
+fn js_lexer_parse_binary_int(s: text) -> i64:
     var result = 0
     var i = 0
     val len = s.len()
@@ -539,7 +539,7 @@ fn parse_binary_int(s: text) -> i64:
         i = i + 1
     result
 
-fn parse_octal_int(s: text) -> i64:
+fn js_lexer_parse_octal_int(s: text) -> i64:
     var result = 0
     var i = 0
     val len = s.len()
@@ -566,6 +566,9 @@ class JsLexer:
     current_col: i64
 
     static fn new(input: text, logger: Logger) -> JsLexer:
+        JsLexer.create(input, logger)
+
+    static fn create(input: text, logger: Logger) -> JsLexer:
         JsLexer(
             input: input,
             pos: 0,
@@ -579,11 +582,182 @@ class JsLexer:
             current_col: 1,
         )
 
+    fn _is_digit(c: text) -> bool:
+        if c == "" or c == nil:
+            return false
+        val code = char_code(c)
+        code >= 48 and code <= 57
+
+    fn _is_hex_digit(c: text) -> bool:
+        self._is_digit(c) or c == "A" or c == "B" or c == "C" or c == "D" or c == "E" or c == "F" or c == "a" or c == "b" or c == "c" or c == "d" or c == "e" or c == "f"
+
+    fn _is_octal_digit(c: text) -> bool:
+        c == "0" or c == "1" or c == "2" or c == "3" or c == "4" or c == "5" or c == "6" or c == "7"
+
+    fn _is_binary_digit(c: text) -> bool:
+        c == "0" or c == "1"
+
+    fn _is_alpha(c: text) -> bool:
+        if c == "" or c == nil:
+            return false
+        val code = char_code(c)
+        (code >= 65 and code <= 90) or (code >= 97 and code <= 122)
+
+    fn _is_ident_start(c: text) -> bool:
+        if c == "":
+            return false
+        val code = char_code(c)
+        code == 95 or code == 36 or self._is_alpha(c)
+
+    fn _is_ident_part(c: text) -> bool:
+        if c == "":
+            return false
+        val code = char_code(c)
+        code == 95 or code == 36 or self._is_alpha(c) or self._is_digit(c)
+
+    fn _keyword_kind_name(word: text) -> text:
+        if word == "var": return "Var"
+        if word == "let": return "Let"
+        if word == "const": return "Const"
+        if word == "function": return "Function"
+        if word == "return": return "Return"
+        if word == "if": return "If"
+        if word == "else": return "Else"
+        if word == "while": return "While"
+        if word == "for": return "For"
+        if word == "do": return "Do"
+        if word == "break": return "Break"
+        if word == "continue": return "Continue"
+        if word == "switch": return "Switch"
+        if word == "case": return "Case"
+        if word == "default": return "Default"
+        if word == "throw": return "Throw"
+        if word == "try": return "Try"
+        if word == "catch": return "Catch"
+        if word == "finally": return "Finally"
+        if word == "new": return "New"
+        if word == "delete": return "Delete"
+        if word == "typeof": return "Typeof"
+        if word == "instanceof": return "Instanceof"
+        if word == "in": return "In"
+        if word == "of": return "Of"
+        if word == "void": return "Void"
+        if word == "class": return "Class"
+        if word == "extends": return "Extends"
+        if word == "super": return "Super"
+        if word == "this": return "This"
+        if word == "import": return "Import"
+        if word == "export": return "Export"
+        if word == "from": return "From"
+        if word == "as": return "As"
+        if word == "async": return "Async"
+        if word == "await": return "Await"
+        if word == "yield": return "Yield"
+        if word == "true": return "TrueKw"
+        if word == "false": return "FalseKw"
+        if word == "null": return "NullKw"
+        if word == "undefined": return "Undefined"
+        ""
+
+    fn _hex_value(c: text) -> i64:
+        if c == "0": return 0
+        if c == "1": return 1
+        if c == "2": return 2
+        if c == "3": return 3
+        if c == "4": return 4
+        if c == "5": return 5
+        if c == "6": return 6
+        if c == "7": return 7
+        if c == "8": return 8
+        if c == "9": return 9
+        if c == "A" or c == "a": return 10
+        if c == "B" or c == "b": return 11
+        if c == "C" or c == "c": return 12
+        if c == "D" or c == "d": return 13
+        if c == "E" or c == "e": return 14
+        if c == "F" or c == "f": return 15
+        0
+
+    fn _parse_hex_int(s: text) -> i64:
+        var result = 0
+        var i = 0
+        while i < s.len():
+            val c = s[i]
+            if c == nil or c == "":
+                break
+            result = result * 16 + self._hex_value(c)
+            i = i + 1
+        result
+
+    fn _parse_binary_int(s: text) -> i64:
+        var result = 0
+        var i = 0
+        while i < s.len():
+            result = result * 2
+            if s[i] == "1":
+                result = result + 1
+            i = i + 1
+        result
+
+    fn _parse_octal_int(s: text) -> i64:
+        var result = 0
+        var i = 0
+        while i < s.len():
+            val c = s[i]
+            result = result * 8
+            if c >= "0" and c <= "7":
+                result = result + (c.to_i32() - "0".to_i32())
+            i = i + 1
+        result
+
+    fn _unescape_string(raw: text) -> text:
+        var result = ""
+        var i = 0
+        while i < raw.len():
+            val c = raw[i]
+            if c == "\\":
+                i = i + 1
+                if i >= raw.len():
+                    result = result + "\\"
+                    break
+                val next = raw[i]
+                if next == "n":
+                    result = result + "\n"
+                else if next == "t":
+                    result = result + "\t"
+                else if next == "r":
+                    result = result + "\r"
+                else if next == "\\":
+                    result = result + "\\"
+                else if next == "\"":
+                    result = result + "\""
+                else if next == "'":
+                    result = result + "'"
+                else if next == "u":
+                    if i + 5 <= raw.len():
+                        result = result + _char_from_code(self._parse_hex_int(_substr(raw, i + 1, i + 5)))
+                        i = i + 4
+                    else:
+                        result = result + "u"
+                else:
+                    result = result + next
+            else:
+                result = result + c
+            i = i + 1
+        result
+
     me _remember_token(tok: JsToken):
         self.current_kind = token_kind_name(tok.kind)
-        self.current_value = _clone_text(tok.value)
+        self.current_value = tok.value.substring(0, tok.value.len())
         self.current_line = tok.line
         self.current_col = tok.col
+
+    me _remember(kind: text, value: text, line: i64, col: i64) -> text:
+        self.current_kind = kind
+        self.current_value = value.substring(0, value.len())
+        self.current_line = line
+        self.current_col = col
+        kind
 
     # Peek at the current character without consuming
     fn peek() -> text:
@@ -638,7 +812,7 @@ class JsLexer:
                     return
 
     # Read a number literal — integer, float, hex, binary, octal
-    me read_number() -> JsToken:
+    me read_number() -> text:
         val start_line = self.line
         val start_col = self.col
         var num_str = ""
@@ -655,12 +829,12 @@ class JsLexer:
                     if c == "_":
                         self.consume()
                         continue
-                    if not is_hex_digit(c):
+                    if not self._is_hex_digit(c):
                         break
                     num_str = num_str + self.consume()
                 val hex_digits = _substr(num_str, 2, num_str.len())
-                val hex_val = parse_hex_int(hex_digits)
-                return JsToken(kind: JsTokenKind.Number, value: "{hex_val}", line: start_line, col: start_col)
+                val hex_val = self._parse_hex_int(hex_digits)
+                return self._remember("Number", "{hex_val}", start_line, start_col)
             if second == "b" or second == "B":
                 # Binary literal 0b...
                 num_str = num_str + self.consume()
@@ -669,12 +843,12 @@ class JsLexer:
                     if c == "_":
                         self.consume()
                         continue
-                    if not is_binary_digit(c):
+                    if not self._is_binary_digit(c):
                         break
                     num_str = num_str + self.consume()
                 val bin_digits = _substr(num_str, 2, num_str.len())
-                val bin_val = parse_binary_int(bin_digits)
-                return JsToken(kind: JsTokenKind.Number, value: "{bin_val}", line: start_line, col: start_col)
+                val bin_val = self._parse_binary_int(bin_digits)
+                return self._remember("Number", "{bin_val}", start_line, start_col)
             if second == "o" or second == "O":
                 # Octal literal 0o...
                 num_str = num_str + self.consume()
@@ -683,12 +857,12 @@ class JsLexer:
                     if c == "_":
                         self.consume()
                         continue
-                    if not is_octal_digit(c):
+                    if not self._is_octal_digit(c):
                         break
                     num_str = num_str + self.consume()
                 val oct_digits = _substr(num_str, 2, num_str.len())
-                val oct_val = parse_octal_int(oct_digits)
-                return JsToken(kind: JsTokenKind.Number, value: "{oct_val}", line: start_line, col: start_col)
+                val oct_val = self._parse_octal_int(oct_digits)
+                return self._remember("Number", "{oct_val}", start_line, start_col)
 
         # Regular decimal integer or float
         while self.pos < self.input_len:
@@ -696,21 +870,21 @@ class JsLexer:
             if c == "_":
                 self.consume()
                 continue
-            if not is_digit(c):
+            if not self._is_digit(c):
                 break
             num_str = num_str + self.consume()
 
         # Decimal part
         if self.peek() == ".":
             val after_dot = self.peek_at(1)
-            if is_digit(after_dot):
+            if self._is_digit(after_dot):
                 num_str = num_str + self.consume()  # consume '.'
                 while self.pos < self.input_len:
                     val c = self.peek()
                     if c == "_":
                         self.consume()
                         continue
-                    if not is_digit(c):
+                    if not self._is_digit(c):
                         break
                     num_str = num_str + self.consume()
 
@@ -726,14 +900,14 @@ class JsLexer:
                 if c == "_":
                     self.consume()
                     continue
-                if not is_digit(c):
+                if not self._is_digit(c):
                     break
                 num_str = num_str + self.consume()
 
-        JsToken(kind: JsTokenKind.Number, value: num_str, line: start_line, col: start_col)
+        self._remember("Number", num_str, start_line, start_col)
 
     # Read a string literal with given quote character
-    me read_string(quote: text) -> JsToken:
+    me read_string(quote: text) -> text:
         val start_line = self.line
         val start_col = self.col
         self.consume()  # consume opening quote
@@ -742,8 +916,8 @@ class JsLexer:
             val c = self.peek()
             if c == quote:
                 self.consume()  # consume closing quote
-                val unescaped = unescape_string(raw)
-                return JsToken(kind: JsTokenKind.String, value: unescaped, line: start_line, col: start_col)
+                val unescaped = self._unescape_string(raw)
+                return self._remember("String", unescaped, start_line, start_col)
             if c == "\\":
                 raw = raw + self.consume()  # consume backslash
                 if self.pos < self.input_len:
@@ -752,11 +926,11 @@ class JsLexer:
                 raw = raw + self.consume()
         # Unterminated string
         self.logger.warn("Unterminated string literal at line {start_line}")
-        val unescaped = unescape_string(raw)
-        JsToken(kind: JsTokenKind.String, value: unescaped, line: start_line, col: start_col)
+        val unescaped = self._unescape_string(raw)
+        self._remember("String", unescaped, start_line, start_col)
 
     # Read a template literal (backtick)
-    me read_template_string() -> JsToken:
+    me read_template_string() -> text:
         val start_line = self.line
         val start_col = self.col
         self.consume()  # consume opening backtick
@@ -765,7 +939,7 @@ class JsLexer:
             val c = self.peek()
             if c == "`":
                 self.consume()  # consume closing backtick
-                return JsToken(kind: JsTokenKind.TemplateLiteral, value: raw, line: start_line, col: start_col)
+                return self._remember("TemplateLiteral", raw, start_line, start_col)
             if c == "\\":
                 raw = raw + self.consume()
                 if self.pos < self.input_len:
@@ -773,28 +947,28 @@ class JsLexer:
             else:
                 raw = raw + self.consume()
         self.logger.warn("Unterminated template literal at line {start_line}")
-        JsToken(kind: JsTokenKind.TemplateLiteral, value: raw, line: start_line, col: start_col)
+        self._remember("TemplateLiteral", raw, start_line, start_col)
 
     # Read an identifier or keyword
-    me read_identifier() -> JsToken:
+    me read_identifier() -> text:
         val start_line = self.line
         val start_col = self.col
         var ident = ""
         while self.pos < self.input_len:
             val c = self.peek()
-            if not is_ident_part(c):
+            if not self._is_ident_part(c):
                 break
             ident = ident + self.consume()
 
         # Check if it is a keyword
-        val kw = is_keyword(ident)
-        if val Some(kind) = kw:
-            return JsToken(kind: kind, value: ident, line: start_line, col: start_col)
+        val kw = self._keyword_kind_name(ident)
+        if kw != "":
+            return self._remember(kw, ident, start_line, start_col)
 
-        JsToken(kind: JsTokenKind.Identifier, value: ident, line: start_line, col: start_col)
+        self._remember("Identifier", ident, start_line, start_col)
 
     # Read an operator token — handles multi-character operators
-    me read_operator() -> JsToken:
+    me read_operator() -> text:
         val start_line = self.line
         val start_col = self.col
         val c = self.consume()
@@ -807,12 +981,12 @@ class JsLexer:
                 val third = self.peek()
                 if third == "=":
                     self.consume()
-                    return JsToken(kind: JsTokenKind.EqEqEq, value: "===", line: start_line, col: start_col)
-                return JsToken(kind: JsTokenKind.EqEq, value: "==", line: start_line, col: start_col)
+                    return self._remember("EqEqEq", "===", start_line, start_col)
+                return self._remember("EqEq", "==", start_line, start_col)
             if next == ">":
                 self.consume()
-                return JsToken(kind: JsTokenKind.Arrow, value: "=>", line: start_line, col: start_col)
-            return JsToken(kind: JsTokenKind.Eq, value: "=", line: start_line, col: start_col)
+                return self._remember("Arrow", "=>", start_line, start_col)
+            return self._remember("Eq", "=", start_line, start_col)
 
         if c == "!":
             if next == "=":
@@ -820,78 +994,78 @@ class JsLexer:
                 val third = self.peek()
                 if third == "=":
                     self.consume()
-                    return JsToken(kind: JsTokenKind.BangEqEq, value: "!==", line: start_line, col: start_col)
-                return JsToken(kind: JsTokenKind.BangEq, value: "!=", line: start_line, col: start_col)
-            return JsToken(kind: JsTokenKind.Bang, value: "!", line: start_line, col: start_col)
+                    return self._remember("BangEqEq", "!==", start_line, start_col)
+                return self._remember("BangEq", "!=", start_line, start_col)
+            return self._remember("Bang", "!", start_line, start_col)
 
         if c == "<":
             if next == "=":
                 self.consume()
-                return JsToken(kind: JsTokenKind.LtEq, value: "<=", line: start_line, col: start_col)
-            return JsToken(kind: JsTokenKind.Lt, value: "<", line: start_line, col: start_col)
+                return self._remember("LtEq", "<=", start_line, start_col)
+            return self._remember("Lt", "<", start_line, start_col)
 
         if c == ">":
             if next == "=":
                 self.consume()
-                return JsToken(kind: JsTokenKind.GtEq, value: ">=", line: start_line, col: start_col)
-            return JsToken(kind: JsTokenKind.Gt, value: ">", line: start_line, col: start_col)
+                return self._remember("GtEq", ">=", start_line, start_col)
+            return self._remember("Gt", ">", start_line, start_col)
 
         if c == "+":
             if next == "+":
                 self.consume()
-                return JsToken(kind: JsTokenKind.PlusPlus, value: "++", line: start_line, col: start_col)
+                return self._remember("PlusPlus", "++", start_line, start_col)
             if next == "=":
                 self.consume()
-                return JsToken(kind: JsTokenKind.PlusEq, value: "+=", line: start_line, col: start_col)
-            return JsToken(kind: JsTokenKind.Plus, value: "+", line: start_line, col: start_col)
+                return self._remember("PlusEq", "+=", start_line, start_col)
+            return self._remember("Plus", "+", start_line, start_col)
 
         if c == "-":
             if next == "-":
                 self.consume()
-                return JsToken(kind: JsTokenKind.MinusMinus, value: "--", line: start_line, col: start_col)
+                return self._remember("MinusMinus", "--", start_line, start_col)
             if next == "=":
                 self.consume()
-                return JsToken(kind: JsTokenKind.MinusEq, value: "-=", line: start_line, col: start_col)
-            return JsToken(kind: JsTokenKind.Minus, value: "-", line: start_line, col: start_col)
+                return self._remember("MinusEq", "-=", start_line, start_col)
+            return self._remember("Minus", "-", start_line, start_col)
 
         if c == "*":
             if next == "*":
                 self.consume()
-                return JsToken(kind: JsTokenKind.StarStar, value: "**", line: start_line, col: start_col)
+                return self._remember("StarStar", "**", start_line, start_col)
             if next == "=":
                 self.consume()
-                return JsToken(kind: JsTokenKind.StarEq, value: "*=", line: start_line, col: start_col)
-            return JsToken(kind: JsTokenKind.Star, value: "*", line: start_line, col: start_col)
+                return self._remember("StarEq", "*=", start_line, start_col)
+            return self._remember("Star", "*", start_line, start_col)
 
         if c == "/":
             if next == "=":
                 self.consume()
-                return JsToken(kind: JsTokenKind.SlashEq, value: "/=", line: start_line, col: start_col)
-            return JsToken(kind: JsTokenKind.Slash, value: "/", line: start_line, col: start_col)
+                return self._remember("SlashEq", "/=", start_line, start_col)
+            return self._remember("Slash", "/", start_line, start_col)
 
         if c == "%":
-            return JsToken(kind: JsTokenKind.Percent, value: "%", line: start_line, col: start_col)
+            return self._remember("Percent", "%", start_line, start_col)
 
         if c == "&":
             if next == "&":
                 self.consume()
-                return JsToken(kind: JsTokenKind.AmpersandAmpersand, value: "&&", line: start_line, col: start_col)
-            return JsToken(kind: JsTokenKind.Ampersand, value: "&", line: start_line, col: start_col)
+                return self._remember("AmpersandAmpersand", "&&", start_line, start_col)
+            return self._remember("Ampersand", "&", start_line, start_col)
 
         if c == "|":
             if next == "|":
                 self.consume()
-                return JsToken(kind: JsTokenKind.PipePipe, value: "||", line: start_line, col: start_col)
-            return JsToken(kind: JsTokenKind.Pipe, value: "|", line: start_line, col: start_col)
+                return self._remember("PipePipe", "||", start_line, start_col)
+            return self._remember("Pipe", "|", start_line, start_col)
 
         if c == "?":
             if next == "?":
                 self.consume()
-                return JsToken(kind: JsTokenKind.QuestionQuestion, value: "??", line: start_line, col: start_col)
+                return self._remember("QuestionQuestion", "??", start_line, start_col)
             if next == ".":
                 self.consume()
-                return JsToken(kind: JsTokenKind.QuestionDot, value: "?.", line: start_line, col: start_col)
-            return JsToken(kind: JsTokenKind.Question, value: "?", line: start_line, col: start_col)
+                return self._remember("QuestionDot", "?.", start_line, start_col)
+            return self._remember("Question", "?", start_line, start_col)
 
         if c == ".":
             if next == ".":
@@ -899,42 +1073,42 @@ class JsLexer:
                 if third == ".":
                     self.consume()
                     self.consume()
-                    return JsToken(kind: JsTokenKind.DotDotDot, value: "...", line: start_line, col: start_col)
-            return JsToken(kind: JsTokenKind.Dot, value: ".", line: start_line, col: start_col)
+                    return self._remember("DotDotDot", "...", start_line, start_col)
+            return self._remember("Dot", ".", start_line, start_col)
 
         if c == "^":
-            return JsToken(kind: JsTokenKind.Caret, value: "^", line: start_line, col: start_col)
+            return self._remember("Caret", "^", start_line, start_col)
 
         if c == "~":
-            return JsToken(kind: JsTokenKind.Tilde, value: "~", line: start_line, col: start_col)
+            return self._remember("Tilde", "~", start_line, start_col)
 
         # Delimiters
         if c == "(":
-            return JsToken(kind: JsTokenKind.OpenParen, value: "(", line: start_line, col: start_col)
+            return self._remember("OpenParen", "(", start_line, start_col)
         if c == ")":
-            return JsToken(kind: JsTokenKind.CloseParen, value: ")", line: start_line, col: start_col)
+            return self._remember("CloseParen", ")", start_line, start_col)
         if c == "{":
-            return JsToken(kind: JsTokenKind.OpenBrace, value: "{", line: start_line, col: start_col)
+            return self._remember("OpenBrace", "{", start_line, start_col)
         if c == "}":
-            return JsToken(kind: JsTokenKind.CloseBrace, value: "}", line: start_line, col: start_col)
+            return self._remember("CloseBrace", "}", start_line, start_col)
         if c == "[":
-            return JsToken(kind: JsTokenKind.OpenBracket, value: "[", line: start_line, col: start_col)
+            return self._remember("OpenBracket", "[", start_line, start_col)
         if c == "]":
-            return JsToken(kind: JsTokenKind.CloseBracket, value: "]", line: start_line, col: start_col)
+            return self._remember("CloseBracket", "]", start_line, start_col)
 
         # Punctuation
         if c == ";":
-            return JsToken(kind: JsTokenKind.Semicolon, value: ";", line: start_line, col: start_col)
+            return self._remember("Semicolon", ";", start_line, start_col)
         if c == ",":
-            return JsToken(kind: JsTokenKind.Comma, value: ",", line: start_line, col: start_col)
+            return self._remember("Comma", ",", start_line, start_col)
         if c == ":":
-            return JsToken(kind: JsTokenKind.Colon, value: ":", line: start_line, col: start_col)
+            return self._remember("Colon", ":", start_line, start_col)
 
         # Unknown character
-        JsToken.invalid(c, start_line, start_col)
+        self._remember("Invalid", c, start_line, start_col)
 
     # Main tokenizer — returns the next token from the input
-    me next_token() -> JsToken:
+    me next_token() -> text:
         # Skip whitespace and comments
         while self.pos < self.input_len:
             self.skip_whitespace()
@@ -954,45 +1128,31 @@ class JsLexer:
 
         # Check for end of input
         if self.pos >= self.input_len:
-            val tok = JsToken.eof(self.line, self.col)
-            self._remember_token(tok)
-            return tok
+            return self._remember("Eof", "", self.line, self.col)
 
         val c = self.peek()
 
         # Number literal
-        if is_digit(c):
-            val tok = self.read_number()
-            self._remember_token(tok)
-            return tok
+        if self._is_digit(c):
+            return self.read_number()
 
         # String literal — single or double quote
         if c == "\"" or c == "'":
-            val tok = self.read_string(c)
-            self._remember_token(tok)
-            return tok
+            return self.read_string(c)
 
         # Template literal — backtick
         if c == "`":
-            val tok = self.read_template_string()
-            self._remember_token(tok)
-            return tok
+            return self.read_template_string()
 
         # Identifier or keyword
-        if is_ident_start(c):
-            val tok = self.read_identifier()
-            self._remember_token(tok)
-            return tok
+        if self._is_ident_start(c):
+            return self.read_identifier()
 
         # Dot followed by digit is a number (.5 etc.)
         if c == ".":
             val next = self.peek_at(1)
-            if is_digit(next):
-                val tok = self.read_number()
-                self._remember_token(tok)
-                return tok
+            if self._is_digit(next):
+                return self.read_number()
 
         # Operators and punctuation
-        val tok = self.read_operator()
-        self._remember_token(tok)
-        tok
+        self.read_operator()

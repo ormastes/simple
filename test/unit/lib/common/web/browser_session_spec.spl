@@ -85,6 +85,20 @@ describe "BrowserSession page loading":
             Err(e) =>
                 expect(false).to_equal(true)
 
+    it "runs zero-delay timer callbacks after inline scripts":
+        var session = BrowserSession.new()
+        val result = session.open_html(
+            "about:timer",
+            "<html><head><title>Before</title></head><body><p>Old</p><script>setTimeout(function(){ document.title = 'Timer'; document.body.textContent = 'Done'; }, 0);</script></body></html>"
+        )
+        match result:
+            Ok(_) =>
+                expect(session.current_title).to_equal("Timer")
+                expect(session.current_body_html).to_equal("Done")
+                expect(session.warnings.len()).to_equal(0)
+            Err(e) =>
+                expect(false).to_equal(true)
+
     it "loads registered external scripts in source order":
         var session = BrowserSession.new()
         session.register_resource("https://example.com/app.js", "document.body.innerHTML = '<h2>External</h2>'; document.title = 'Loaded';")
@@ -337,18 +351,31 @@ describe "BrowserSession page loading":
             Err(e) =>
                 expect(false).to_equal(true)
 
-    it "warns when async scripts fall back to document order":
+    it "runs async classic scripts after parser-blocking inline scripts":
         var session = BrowserSession.new()
-        session.register_resource("https://example.com/async.js", "document.body.textContent = document.body.textContent + ':async';")
+        session.register_resource("https://example.com/async.js", "document.title = document.title + ':async';")
         val result = session.open_html(
             "https://example.com/index.html",
-            "<html><body>base<script async src='/async.js'></script></body></html>"
+            "<html><head><title>Start</title></head><body><script async src='/async.js'></script><script>document.title = document.title + ':inline';</script></body></html>"
         )
         match result:
             Ok(_) =>
-                expect(session.current_body_html).to_equal("base:async")
-                expect(session.warnings.len()).to_equal(1)
-                expect(session.warnings[0]).to_contain("async script loading is not implemented")
+                expect(session.current_title).to_equal("Start:inline:async")
+                expect(session.warnings.len()).to_equal(0)
+            Err(e) =>
+                expect(false).to_equal(true)
+
+    it "runs defer classic scripts after parser-blocking inline scripts":
+        var session = BrowserSession.new()
+        session.register_resource("https://example.com/defer.js", "document.title = document.title + ':defer';")
+        val result = session.open_html(
+            "https://example.com/index.html",
+            "<html><head><title>Start</title><script defer src='/defer.js'></script></head><body><script>document.title = document.title + ':inline';</script></body></html>"
+        )
+        match result:
+            Ok(_) =>
+                expect(session.current_title).to_equal("Start:inline:defer")
+                expect(session.warnings.len()).to_equal(0)
             Err(e) =>
                 expect(false).to_equal(true)
 
@@ -613,6 +640,37 @@ describe "BrowserSession script bridge":
                         match result:
                             Ok(value) =>
                                 expect(_display_js(value)).to_equal("alpha")
+                            Err(e) =>
+                                expect(false).to_equal(true)
+                    Err(e) =>
+                        expect(false).to_equal(true)
+            nil:
+                expect(false).to_equal(true)
+
+    it "supports fetch response blob metadata and text":
+        var session = BrowserSession.new()
+        session.open_html(
+            "https://example.com/app",
+            "<html><body><script>var out = ''; window.fetch('/data.bin').then(function(r) { return r.blob(); }).then(function(b) { out = b.size + ':' + b.type; return b.text(); }).then(function(t) { out = out + ':' + t; });</script></body></html>"
+        )
+
+        match session.take_pending_request():
+            Some(request) =>
+                val commit_result = session.commit_network_response(BrowserResponse.create(
+                    request_id: request.id,
+                    kind: "fetch",
+                    url: request.url,
+                    status: 200,
+                    headers: "Content-Type: text/plain\n",
+                    body: "alpha",
+                    error: ""
+                ))
+                match commit_result:
+                    Ok(_) =>
+                        val result = session.eval_script("out")
+                        match result:
+                            Ok(value) =>
+                                expect(_display_js(value)).to_equal("5:text/plain:alpha")
                             Err(e) =>
                                 expect(false).to_equal(true)
                     Err(e) =>

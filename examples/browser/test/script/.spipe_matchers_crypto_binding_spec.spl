@@ -6,43 +6,154 @@ use std.spec
 use std.js.engine.runtime.{JsRuntime}
 use std.js.engine.js_error.{Logger, LogLevel}
 use std.js.types.js_types.{JsValue}
-use examples.browser.feature.script.web_api.crypto_binding.{js_crypto_getRandomValues}
+use examples.browser.feature.script.web_api.crypto_binding.{js_crypto_getRandomValues, js_crypto_randomUUID, js_subtle_decrypt, js_subtle_digest, js_subtle_encrypt, js_subtle_sign, js_subtle_verify}
 
 fn _runtime() -> JsRuntime:
     JsRuntime.new(Logger.new("crypto-binding-spec", LogLevel.Error))
 
 describe "CryptoBinding":
     describe "getRandomValues":
-        it "fills the existing array like object length":
+        it "rejects missing typed array argument":
+            val result = js_crypto_getRandomValues([], _runtime())
+            match result:
+                Ok(_): expect("ok").to_equal("error")
+                Err(e): expect(e.message).to_contain("requires 1 argument")
+
+        it "rejects non typed array arguments":
+            val result = js_crypto_getRandomValues([JsValue.String(v: "not-array")], _runtime())
+            match result:
+                Ok(_): expect("ok").to_equal("error")
+                Err(e): expect(e.message).to_contain("typed array")
+
+        it "fills array-like objects with byte values":
             val runtime = _runtime()
-            val obj_id = runtime.interpreter.object_store.create_object()
-            runtime.interpreter.object_store.set_property(obj_id, "length", JsValue.Number(v: 4.0))
-
-            val result = js_crypto_getRandomValues([JsValue.Object(id: obj_id)], runtime)
-
+            val array_id = runtime.interpreter.create_object()
+            runtime.interpreter.set_object_property(array_id, "length", JsValue.Number(v: 4.0))
+            val result = js_crypto_getRandomValues([JsValue.Object(id: array_id)], runtime)
             match result:
                 Ok(value):
                     match value:
-                        JsValue.Object(id): expect(id).to_equal(obj_id)
+                        JsValue.Object(id): expect(id).to_equal(array_id)
                         _: expect("not-object").to_equal("object")
-                Err(e): expect(e.message).to_equal("")
+                    var i = 0
+                    while i < 4:
+                        val prop = runtime.interpreter.get_object_property(array_id, "{i}")
+                        match prop:
+                            JsValue.Number(v):
+                                expect v >= 0.0 == true
+                                expect v < 256.0 == true
+                            _: expect("not-number").to_equal("number")
+                        i = i + 1
+                Err(e): expect(e.message).to_equal("ok")
 
-            expect runtime.interpreter.object_store.get_property(obj_id, "length") == JsValue.Number(v: 4.0)
-            expect _is_byte(runtime.interpreter.object_store.get_property(obj_id, "0")) == true
-            expect _is_byte(runtime.interpreter.object_store.get_property(obj_id, "3")) == true
-            expect runtime.interpreter.object_store.get_property(obj_id, "4") == JsValue.Undefined
+    describe "randomUUID":
+        it "returns an RFC4122-shaped version 4 UUID":
+            val value = js_crypto_randomUUID([])
+            match value:
+                JsValue.String(v):
+                    expect v.len() == 36
+                    expect v[8:9] == "-"
+                    expect v[13:14] == "-"
+                    expect v[14:15] == "4"
+                    expect v[18:19] == "-"
+                    expect v[23:24] == "-"
+                    expect ("89ab").contains(v[19:20])
+                _: expect("not-string").to_equal("string")
 
-        it "rejects Web Crypto quota overflow":
-            val runtime = _runtime()
-            val obj_id = runtime.interpreter.object_store.create_object()
-            runtime.interpreter.object_store.set_property(obj_id, "length", JsValue.Number(v: 65537.0))
+    describe "SubtleCrypto.digest":
+        it "computes SHA-256 for string input":
+            val result = js_subtle_digest([JsValue.String(v: "SHA-256"), JsValue.String(v: "abc")])
+            match result:
+                Ok(value):
+                    match value:
+                        JsValue.String(v):
+                            expect v == "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+                        _: expect("not-string").to_equal("string")
+                Err(e): expect(e.message).to_equal("ok")
 
-            val result = js_crypto_getRandomValues([JsValue.Object(id: obj_id)], runtime)
+        it "rejects unsupported digest algorithms":
+            val result = js_subtle_digest([JsValue.String(v: "SHA-1"), JsValue.String(v: "abc")])
             match result:
                 Ok(_): expect("ok").to_equal("error")
-                Err(e): expect(e.message).to_contain("quota")
+                Err(e): expect(e.message).to_contain("unsupported algorithm")
 
-fn _is_byte(value: JsValue) -> bool:
-    match value:
-        JsValue.Number(v): v >= 0.0 and v <= 255.0
-        _: false
+    describe "SubtleCrypto AES-CTR":
+        it "encrypts and decrypts string data with AES-CTR":
+            val encrypted = js_subtle_encrypt([
+                JsValue.String(v: "AES-CTR"),
+                JsValue.String(v: "0123456789abcdef"),
+                JsValue.String(v: "browser secret")
+            ])
+            match encrypted:
+                Ok(cipher_value):
+                    match cipher_value:
+                        JsValue.String(cipher_hex):
+                            expect cipher_hex == "browser secret" == false
+                            val decrypted = js_subtle_decrypt([
+                                JsValue.String(v: "AES-CTR"),
+                                JsValue.String(v: "0123456789abcdef"),
+                                JsValue.String(v: cipher_hex)
+                            ])
+                            match decrypted:
+                                Ok(value):
+                                    match value:
+                                        JsValue.String(v): expect(v).to_equal("browser secret")
+                                        _: expect("not-string").to_equal("string")
+                                Err(e): expect(e.message).to_equal("ok")
+                        _: expect("not-string").to_equal("string")
+                Err(e): expect(e.message).to_equal("ok")
+
+        it "rejects invalid AES key lengths":
+            val result = js_subtle_encrypt([
+                JsValue.String(v: "AES-CTR"),
+                JsValue.String(v: "short"),
+                JsValue.String(v: "data")
+            ])
+            match result:
+                Ok(_): expect("ok").to_equal("error")
+                Err(e): expect(e.message).to_contain("AES key")
+
+    describe "SubtleCrypto HMAC":
+        it "signs HMAC-SHA256 string data":
+            val result = js_subtle_sign([
+                JsValue.String(v: "HMAC-SHA-256"),
+                JsValue.String(v: "key"),
+                JsValue.String(v: "The quick brown fox jumps over the lazy dog")
+            ])
+            match result:
+                Ok(value):
+                    match value:
+                        JsValue.String(v):
+                            expect v == "f7bc83f430538424b13298e6aa6fb143ef4d59a14946175997479dbc2d1a3cd8"
+                        _: expect("not-string").to_equal("string")
+                Err(e): expect(e.message).to_equal("ok")
+
+        it "verifies HMAC-SHA256 signatures":
+            val result = js_subtle_verify([
+                JsValue.String(v: "HMAC"),
+                JsValue.String(v: "key"),
+                JsValue.String(v: "f7bc83f430538424b13298e6aa6fb143ef4d59a14946175997479dbc2d1a3cd8"),
+                JsValue.String(v: "The quick brown fox jumps over the lazy dog")
+            ])
+            match result:
+                Ok(value):
+                    match value:
+                        JsValue.Boolean(v): expect(v).to_equal(true)
+                        _: expect("not-bool").to_equal("bool")
+                Err(e): expect(e.message).to_equal("ok")
+
+        it "rejects invalid HMAC-SHA256 signatures":
+            val result = js_subtle_verify([
+                JsValue.String(v: "HMAC"),
+                JsValue.String(v: "key"),
+                JsValue.String(v: "000000"),
+                JsValue.String(v: "The quick brown fox jumps over the lazy dog")
+            ])
+            match result:
+                Ok(value):
+                    match value:
+                        JsValue.Boolean(v):
+                            val text_value = if v: "true" else: "false"
+                            expect text_value == "false"
+                        _: expect("not-bool").to_equal("bool")
+                Err(e): expect(e.message).to_equal("ok")

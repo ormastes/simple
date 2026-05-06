@@ -1,0 +1,62 @@
+use common.wine_substrate.{
+    wine_substrate_capability_state,
+    wine_substrate_verify_capability,
+    wine_substrate_check_process_evidence,
+    wine_substrate_vm_gate,
+    wine_substrate_renderer_gate,
+    wine_substrate_hello_exe_gate,
+    wine_substrate_host_gate,
+    wine_substrate_pe_gate,
+    wine_substrate_async_gate
+}
+
+describe "Wine substrate readiness gates":
+    describe "capability state":
+        it "reports completed research without claiming platform readiness":
+            expect(wine_substrate_capability_state("research")).to_equal("verified")
+            expect(wine_substrate_capability_state("pthread")).to_equal("missing")
+            expect(wine_substrate_capability_state("dynload")).to_equal("missing")
+
+        it "does not verify unfinished rows just because evidence text exists":
+            val state = wine_substrate_verify_capability("pthread", "doc/some-evidence.md")
+            expect(state).to_equal("missing")
+
+    describe "process evidence":
+        it "rejects resident fallback markers":
+            val result = wine_substrate_check_process_evidence("[desktop-e2e] process-backed:resident")
+            expect(result).to_equal("resident-fallback")
+
+        it "requires all baseline process-backed app markers":
+            val log = "[desktop-e2e] process-backed:ok app=browser_demo pid=1\n" +
+                "[desktop-e2e] process-backed:ok app=hello_world pid=2\n" +
+                "[desktop-e2e] process-backed:ok app=editor pid=3"
+            expect(wine_substrate_check_process_evidence(log)).to_equal("process-backed")
+
+    describe "VM and renderer gates":
+        it "reports the first missing VM requirement":
+            expect(wine_substrate_vm_gate("reserve commit unmap fixed-map")).to_equal("missing-mprotect")
+
+        it "reports renderer backend gaps in X11-class behavior":
+            val features = "display screen window map-unmap configure surface damage clip expose present input focus cursor"
+            expect(wine_substrate_renderer_gate(features)).to_equal("missing-clipboard")
+
+        it "reports host substrate gaps for all other Wine features":
+            val features = "fd-table stdio pipes sockets poll-wait timers errno cwd-env-argv spawn fs-paths"
+            expect(wine_substrate_host_gate(features)).to_equal("missing-fs-attrs")
+
+        it "reports PE loader preparation gaps before hello.exe":
+            val features = "mz pe-signature machine-x86_64 pe32plus"
+            expect(wine_substrate_pe_gate(features)).to_equal("missing-section-bounds")
+
+        it "requires nogc async primitives for Wine async readiness":
+            val features = "nogc-future poll waker io-driver submit-open submit-read"
+            expect(wine_substrate_async_gate(features)).to_equal("missing-submit-write")
+
+    describe "hello.exe gate":
+        it "blocks hello.exe until substrate gates are verified":
+            val state = wine_substrate_hello_exe_gate("process=verified vm=verified host=verified posix=verified pthread=verified dynload=verified pe_loader=verified")
+            expect(state).to_equal("blocked")
+
+        it "allows hello.exe only after async is verified too":
+            val state = wine_substrate_hello_exe_gate("process=verified vm=verified host=verified posix=verified pthread=verified dynload=verified pe_loader=verified async=verified")
+            expect(state).to_equal("ready")

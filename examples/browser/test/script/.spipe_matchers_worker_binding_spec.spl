@@ -1,0 +1,75 @@
+#![allow(REQC001)]
+#![allow(REQC004)]
+#![allow(unnamed_duplicate_typed_args)]
+
+use std.spec
+use std.js.engine.runtime.{JsRuntime}
+use std.js.engine.js_error.{Logger, LogLevel}
+use std.js.types.js_types.{JsValue}
+use examples.browser.feature.script.web_api.worker_binding.{WorkerBinding, WorkerState}
+
+fn _runtime() -> JsRuntime:
+    JsRuntime.new(Logger.new("worker-binding-spec-runtime", LogLevel.Error))
+
+fn _binding() -> WorkerBinding:
+    WorkerBinding.new(Logger.new("worker-binding-spec", LogLevel.Error))
+
+fn _worker_id(value: JsValue, runtime: JsRuntime) -> i64:
+    match value:
+        JsValue.Object(id):
+            match runtime.interpreter.get_object_property(id, "__worker_id__"):
+                JsValue.Number(v): v.to_i64()
+                _: -1
+        _: -1
+
+describe "WorkerBinding":
+    it "creates a running worker object with stable metadata":
+        val runtime = _runtime()
+        var binding = _binding()
+
+        val worker_value = binding.js_new_worker([JsValue.String(v: "worker.js")], runtime)
+        val worker_id = _worker_id(worker_value, runtime)
+
+        expect worker_id > 0 == true
+        expect binding.workers.len() == 1
+        expect binding.workers.get(0).id == worker_id
+        expect binding.workers.get(0).script_url == "worker.js"
+        expect binding.workers.get(0).state == WorkerState.Running
+
+    it "persists posted messages until they are received":
+        val runtime = _runtime()
+        var binding = _binding()
+        val worker_value = binding.js_new_worker([JsValue.String(v: "worker.js")], runtime)
+
+        binding.js_worker_postMessage([worker_value, JsValue.String(v: "hello")])
+
+        val worker_id = _worker_id(worker_value, runtime)
+        expect binding.workers.get(0).message_queue.len() == 1
+        match binding.receive_from_worker(worker_id):
+            Some(msg): expect(msg).to_equal(JsValue.String(v: "hello"))
+            nil: expect("missing").to_equal("message")
+        expect binding.receive_from_worker(worker_id) == nil
+
+    it "clears and blocks messages after terminate":
+        val runtime = _runtime()
+        var binding = _binding()
+        val worker_value = binding.js_new_worker([JsValue.String(v: "worker.js")], runtime)
+        val worker_id = _worker_id(worker_value, runtime)
+
+        binding.js_worker_postMessage([worker_value, JsValue.String(v: "before")])
+        binding.js_worker_terminate([worker_value])
+        binding.js_worker_postMessage([worker_value, JsValue.String(v: "after")])
+
+        expect binding.workers.get(0).state == WorkerState.Terminated
+        expect binding.receive_from_worker(worker_id) == nil
+
+    it "persists message and error callbacks":
+        val runtime = _runtime()
+        var binding = _binding()
+        val worker_value = binding.js_new_worker([JsValue.String(v: "worker.js")], runtime)
+
+        binding.js_worker_onmessage([worker_value, JsValue.Function(id: 41)])
+        binding.js_worker_onerror([worker_value, JsValue.Function(id: 42)])
+
+        expect binding.workers.get(0).onmessage_callback == 41
+        expect binding.workers.get(0).onerror_callback == 42

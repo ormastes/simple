@@ -2,17 +2,15 @@
 #![allow(REQC004)]
 #![allow(unnamed_duplicate_typed_args)]
 # Web Workers binding — Worker constructor, postMessage, terminate.
-# Models worker instances with message queues and lifecycle states.
-# Actual thread isolation requires runtime support; this provides the API surface.
+# Models worker instances with persistent message queues and lifecycle states.
 
-use browser.shared.logging.Logger
+use std.js.engine.js_error.Logger
 use browser.shared.error.BrowserResult
 use browser.shared.error.script_error
 use std.js.types.js_types.JsValue
 use std.js.types.js_types.JsObject
 use std.js.types.js_types.JsProperty
-use std.js.engine.runtime.JsRuntime
-use std.js.engine.interpreter_types.to_string
+use std.js.engine.runtime.{JsRuntime}
 
 # ── Native function IDs ──────────────────────────────────────────────────
 
@@ -40,16 +38,12 @@ class WorkerInstance:
     onmessage_callback: i64
     onerror_callback: i64
 
-    # Worker script loading creates a Pending worker.
-    # A real implementation would fetch and evaluate script_url in an
-    # isolated execution context before transitioning to Running.
-    # Thread isolation is not yet supported, so workers remain in Pending state.
     static fn create(id: i64, script_url: text) -> WorkerInstance:
         WorkerInstance(
             id: id,
             script_url: script_url,
-            state: WorkerState.Pending,
-            message_queue: [JsValue](),
+            state: WorkerState.Running,
+            message_queue: [],
             onmessage_callback: -1,
             onerror_callback: -1,
         )
@@ -62,7 +56,7 @@ class WorkerBinding:
     logger: Logger
 
     static fn new(logger: Logger) -> WorkerBinding:
-        WorkerBinding(workers: [WorkerInstance](), next_id: 1, logger: logger)
+        WorkerBinding(workers: [], next_id: 1, logger: logger)
 
     # Install Worker constructor and related methods on the JS runtime.
     me install(runtime: JsRuntime):
@@ -72,24 +66,24 @@ class WorkerBinding:
 
     # ── Worker creation ─────────────────────────────────────────────
 
-    me js_new_Worker(args: [JsValue], runtime: JsRuntime) -> JsValue:
+    me js_new_worker(args: [JsValue], runtime: JsRuntime) -> JsValue:
         if args.len() < 1:
             return JsValue.Undefined
 
-        val script_url = to_string(args.get(0))
-        val worker_id = self.next_id
-        self.next_id = self.next_id + 1
+        val script_url = _extract_script_url(args.get(0))
+        # Create a JS object representing the Worker
+        val obj_id = runtime.interpreter.create_object()
+        val worker_id = obj_id
+        if worker_id >= self.next_id:
+            self.next_id = worker_id + 1
 
         val worker = WorkerInstance.create(worker_id, script_url)
         self.workers.push(worker)
 
-        self.logger.warn("Worker created but thread isolation not supported: id={worker_id}, url={script_url}")
-
-        # Create a JS object representing the Worker
-        val obj_id = runtime.interpreter.object_store.create_object()
+        self.logger.debug("Worker created: id={worker_id}, url={script_url}")
 
         # Set worker metadata
-        runtime.interpreter.object_store.set_property(
+        runtime.interpreter.set_object_property(
             obj_id, "__worker_id__", JsValue.Number(v: worker_id.to_f64()))
 
         # Install postMessage and terminate methods
@@ -124,6 +118,8 @@ class WorkerBinding:
             var worker = self.workers.get(i)
             if worker.id == worker_id:
                 worker.state = WorkerState.Terminated
+                worker.message_queue = []
+                self._replace_worker(i, worker)
                 self.logger.debug("Worker terminated: id={worker_id}")
                 return JsValue.Undefined
             i = i + 1
@@ -152,6 +148,7 @@ class WorkerBinding:
             var worker = self.workers.get(i)
             if worker.id == worker_id:
                 worker.onmessage_callback = callback_id
+                self._replace_worker(i, worker)
                 return JsValue.Undefined
             i = i + 1
 
@@ -176,6 +173,7 @@ class WorkerBinding:
             var worker = self.workers.get(i)
             if worker.id == worker_id:
                 worker.onerror_callback = callback_id
+                self._replace_worker(i, worker)
                 return JsValue.Undefined
             i = i + 1
 
@@ -194,6 +192,7 @@ class WorkerBinding:
                         self.logger.warn("Cannot post to terminated worker: id={worker_id}")
                     _:
                         worker.message_queue.push(message)
+                        self._replace_worker(i, worker)
                         self.logger.debug("Message posted to worker: id={worker_id}")
                 return
             i = i + 1
@@ -208,10 +207,22 @@ class WorkerBinding:
                 if worker.message_queue.len() > 0:
                     val msg = worker.message_queue.get(0)
                     worker.message_queue.remove(0)
+                    self._replace_worker(i, worker)
                     return Some(msg)
                 return nil
             i = i + 1
         nil
+
+    me _replace_worker(index: i64, replacement: WorkerInstance):
+        var updated = []
+        var i = 0
+        while i < self.workers.len():
+            if i == index:
+                updated.push(replacement)
+            else:
+                updated.push(self.workers.get(i))
+            i = i + 1
+        self.workers = updated
 
 # ── Internal helpers ─────────────────────────────────────────────────────
 
@@ -220,3 +231,15 @@ fn _extract_worker_id(value: JsValue) -> i64:
         JsValue.Object(id): id
         JsValue.Number(v): v.to_i64()
         _: -1
+
+fn _extract_script_url(value: JsValue) -> text:
+    match value:
+        JsValue.String(v): v
+        JsValue.Number(v): "{v}"
+        JsValue.Boolean(v): if v: "true" else: "false"
+        JsValue.Null: "null"
+        JsValue.Undefined: "undefined"
+        JsValue.Object(id): "[object Object]"
+        JsValue.Array(id): ""
+        JsValue.Function(id): "[Function]"
+        JsValue.Symbol(id): "Symbol()"

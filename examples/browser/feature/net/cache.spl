@@ -9,7 +9,9 @@
 use examples.browser.entity.net.cache_types.{CacheEntry, CachePolicy, CacheControl, ETag}
 use examples.browser.shared.error.{BrowserResult, BrowserError, network_error}
 use examples.browser.shared.logging.Logger
-use std.io_runtime.time
+use std.js.types.pair.{Pair}
+
+extern fn rt_time_now_unix_micros() -> i64
 
 # --- HttpCache ---
 
@@ -21,7 +23,7 @@ class HttpCache:
 
     static fn new(logger: Logger, max_size_mb: i64) -> HttpCache:
         HttpCache(
-            entries: [CacheEntry](),
+            entries: [],
             max_size_bytes: max_size_mb * 1024 * 1024,
             current_size: 0,
             logger: logger
@@ -29,14 +31,14 @@ class HttpCache:
 
     me lookup(url: text) -> CacheEntry?:
         # Find a cached entry for the given URL and check freshness.
-        val now = time.now_seconds()
+        val now = rt_time_now_unix_micros() / 1000000
         var i = 0
         while i < self.entries.len():
             val entry = self.entries.get(i)
             if entry.url == url:
                 if is_fresh(entry, now):
                     self.logger.debug("Cache hit for {url}")
-                    return Some(entry)
+                    return entry
                 else:
                     # Stale entry — remove it
                     self.logger.debug("Cache stale for {url}, removing")
@@ -63,7 +65,7 @@ class HttpCache:
 
         val etag = extract_etag(headers)
         val last_modified = extract_last_modified(headers)
-        val now = time.now_seconds()
+        val now = rt_time_now_unix_micros() / 1000000
         val policy = CachePolicy.create(controls, etag, last_modified)
 
         # Remove existing entry for this URL if present
@@ -118,7 +120,7 @@ class HttpCache:
 fn parse_cache_control(header: text) -> [CacheControl]:
     # Parse a Cache-Control header value into a list of directives.
     # Example: "public, max-age=3600, must-revalidate"
-    var result = [CacheControl]()
+    var result: [CacheControl] = []
     val parts = header.split(",")
     var i = 0
     while i < parts.len():
@@ -140,7 +142,7 @@ fn parse_cache_control(header: text) -> [CacheControl]:
             val seconds = parse_i64(age_str)
             match seconds:
                 Some(s):
-                    result.push(CacheControl.MaxAge(seconds: s))
+                    result.push(CacheControl.MaxAge(s))
                 nil:
                     pass_dn  # Ignore malformed max-age
         # else: ignore unknown directives
@@ -242,7 +244,7 @@ fn extract_cache_controls(headers: [Pair<text, text>]) -> [CacheControl]:
         Some(value):
             parse_cache_control(value)
         nil:
-            [CacheControl]()
+            []
 
 fn extract_etag(headers: [Pair<text, text>]) -> ETag:
     # Extract ETag from headers, default to empty strong tag.
@@ -288,11 +290,11 @@ fn parse_i64(s: text) -> Option<i64>:
     var result: i64 = 0
     var i = 0
     var negative = false
-    if s.get(0) == "-":
+    if s.slice(0, 1) == "-":
         negative = true
         i = 1
     while i < s.len():
-        val ch = s.get(i)
+        val ch = s.slice(i, i + 1)
         if ch >= "0" and ch <= "9":
             val digit = ch.to_i64() - "0".to_i64()
             result = result * 10 + digit

@@ -1,11 +1,11 @@
 # Bytecode compiler for the JS engine.
-# Compiles AST (Statement/Expression trees) into BytecodeChunk opcodes.
+# Compiles AST (JsStatement/JsExpression trees) into BytecodeChunk opcodes.
 
 use std.js.engine.js_error.{JsError, script_error, Logger, LogLevel, BrowserResult, BrowserError}
 use std.js.types.pair.{Pair}
 use std.js.types.bytecode_types.{OpCode, BytecodeChunk, ConstantPool}
 use std.js.types.js_types.{JsValue, JsObject, JsProperty}
-use std.js.types.ast_types.{Expression, Statement, SwitchCase}
+use std.js.types.ast_types.{JsExpression, JsStatement, SwitchCase}
 
 # --- Scope tracking ---
 
@@ -46,7 +46,7 @@ class BytecodeCompiler:
 
     # --- Main entry ---
 
-    me compile(program: [Statement]) -> BrowserResult<BytecodeChunk>:
+    me compile(program: [JsStatement]) -> BrowserResult<BytecodeChunk>:
         self.logger.info("Compiling program with {program.len()} statements")
         var i = 0
         while i < program.len():
@@ -58,32 +58,32 @@ class BytecodeCompiler:
         self.logger.info("Compilation complete: {self.chunk.ops.len()} opcodes, {self.constants.len()} constants")
         Ok(self.chunk)
 
-    # --- Statement compilation ---
+    # --- JsStatement compilation ---
 
-    me compile_statement(stmt: Statement):
+    me compile_statement(stmt: JsStatement):
         match stmt:
-            Statement.VarDecl(name, init):
+            JsStatement.VarDecl(name, init):
                 self.compile_var_decl(name, init)
-            Statement.ExprStmt(expr):
+            JsStatement.ExprStmt(expr):
                 self.compile_expression(expr)
                 self.emit(OpCode.Pop)
-            Statement.Return(value):
+            JsStatement.Return(value):
                 self.compile_return(value)
-            Statement.If(cond, then_body, else_body):
+            JsStatement.If(cond, then_body, else_body):
                 self.compile_if(cond, then_body, else_body)
-            Statement.While(cond, body):
+            JsStatement.While(cond, body):
                 self.compile_while(cond, body)
-            Statement.For(init, cond, update, body):
+            JsStatement.For(init, cond, update, body):
                 self.compile_for(init, cond, update, body)
-            Statement.Block(stmts):
+            JsStatement.Block(stmts):
                 self.compile_block(stmts)
-            Statement.FnDecl(name, params, body):
+            JsStatement.FnDecl(name, params, body):
                 self.compile_function_decl(name, params, body)
-            Statement.TryCatch(try_body, catch_param, catch_body, finally_body):
+            JsStatement.TryCatch(try_body, catch_param, catch_body, finally_body):
                 self.compile_try_catch(try_body, catch_param, catch_body, finally_body)
-            Statement.Switch(discriminant, cases):
+            JsStatement.Switch(discriminant, cases):
                 self.compile_switch(discriminant, cases)
-            Statement.ForIn(binding, object, body):
+            JsStatement.ForIn(binding, object, body):
                 # ForIn compiled as: get keys, iterate
                 self.compile_expression(object)
                 self.emit(OpCode.GetIterator)
@@ -101,7 +101,7 @@ class BytecodeCompiler:
                 self.emit(OpCode.Jump(offset: loop_start))
                 self.patch_jump(exit_jump)
                 self.emit(OpCode.Pop)  # pop iterator
-            Statement.ForOf(binding, iterable, body):
+            JsStatement.ForOf(binding, iterable, body):
                 self.compile_expression(iterable)
                 self.emit(OpCode.GetIterator)
                 val loop_start = self.current_offset()
@@ -118,19 +118,19 @@ class BytecodeCompiler:
                 self.emit(OpCode.Jump(offset: loop_start))
                 self.patch_jump(exit_jump)
                 self.emit(OpCode.Pop)
-            Statement.ThrowStmt(expr):
+            JsStatement.ThrowStmt(expr):
                 self.compile_expression(expr)
                 self.emit(OpCode.Throw)
-            Statement.BreakStmt:
+            JsStatement.BreakStmt:
                 if self.loop_breaks.len() > 0:
                     val break_jump = self.emit_jump(OpCode.Jump(offset: 0))
                     val breaks = self.loop_breaks.get(self.loop_breaks.len() - 1)
                     breaks.push(break_jump)
-            Statement.ContinueStmt:
+            JsStatement.ContinueStmt:
                 if self.loop_starts.len() > 0:
                     val loop_start = self.loop_starts.get(self.loop_starts.len() - 1)
                     self.emit(OpCode.Jump(offset: loop_start))
-            Statement.ClassDecl(name, parent_name, constructor, methods):
+            JsStatement.ClassDecl(name, parent_name, constructor, methods):
                 # Compile class as constructor function + prototype setup
                 self.emit(OpCode.NewObject)  # prototype
                 # Compile each method onto prototype
@@ -143,7 +143,7 @@ class BytecodeCompiler:
                 self.compile_statement(constructor)
                 self.emit(OpCode.StoreGlobal(name: name))
 
-    me compile_var_decl(name: text, init: Expression):
+    me compile_var_decl(name: text, init: JsExpression):
         self.logger.debug("Compiling var declaration: {name}")
         self.compile_expression(init)
         val slot = self.resolve_local(name)
@@ -154,7 +154,7 @@ class BytecodeCompiler:
             val new_slot = self.resolve_local(name)
             self.emit(OpCode.StoreLocal(idx: new_slot))
 
-    me compile_function_decl(name: text, params: [text], body: [Statement]):
+    me compile_function_decl(name: text, params: [text], body: [JsStatement]):
         self.logger.debug("Compiling function: {name} with {params.len()} params")
         # Save current compilation state
         val parent_chunk = self.chunk
@@ -190,11 +190,11 @@ class BytecodeCompiler:
         self.emit(OpCode.LoadConst(idx: fn_id))
         self.emit(OpCode.StoreGlobal(name: name))
 
-    me compile_return(value: Expression):
+    me compile_return(value: JsExpression):
         self.compile_expression(value)
         self.emit(OpCode.Return)
 
-    me compile_if(cond: Expression, then_body: [Statement], else_body: [Statement]):
+    me compile_if(cond: JsExpression, then_body: [JsStatement], else_body: [JsStatement]):
         self.compile_expression(cond)
         val else_jump = self.emit_jump(OpCode.JumpIfFalse(offset: 0))
         # Then branch
@@ -218,7 +218,7 @@ class BytecodeCompiler:
         # Patch end jump
         self.patch_jump(end_jump)
 
-    me compile_while(cond: Expression, body: [Statement]):
+    me compile_while(cond: JsExpression, body: [JsStatement]):
         val loop_start = self.current_offset()
         self.loop_starts.push(loop_start)
         var empty_breaks: [i64] = []
@@ -242,7 +242,7 @@ class BytecodeCompiler:
             b = b + 1
         self.loop_starts.pop()
 
-    me compile_for(init: Statement, cond: Expression, update: Expression, body: [Statement]):
+    me compile_for(init: JsStatement, cond: JsExpression, update: JsExpression, body: [JsStatement]):
         self.begin_scope()
         # Init
         self.compile_statement(init)
@@ -273,7 +273,7 @@ class BytecodeCompiler:
         self.loop_starts.pop()
         self.end_scope()
 
-    me compile_block(stmts: [Statement]):
+    me compile_block(stmts: [JsStatement]):
         self.begin_scope()
         var i = 0
         while i < stmts.len():
@@ -281,7 +281,7 @@ class BytecodeCompiler:
             i = i + 1
         self.end_scope()
 
-    me compile_try_catch(try_body: [Statement], catch_param: text, catch_body: [Statement], finally_body: [Statement]):
+    me compile_try_catch(try_body: [JsStatement], catch_param: text, catch_body: [JsStatement], finally_body: [JsStatement]):
         # Push exception handler pointing to catch block
         val handler_jump = self.emit_jump(OpCode.PushExceptionHandler(catch_offset: 0))
         # Try body
@@ -316,7 +316,7 @@ class BytecodeCompiler:
                 fi = fi + 1
             self.end_scope()
 
-    me compile_switch(discriminant: Expression, cases: [SwitchCase]):
+    me compile_switch(discriminant: JsExpression, cases: [SwitchCase]):
         self.compile_expression(discriminant)
         # Compile as chained comparisons
         var end_jumps: [i64] = []
@@ -353,29 +353,29 @@ class BytecodeCompiler:
             self.patch_jump(end_jumps.get(ei))
             ei = ei + 1
 
-    # --- Expression compilation ---
+    # --- JsExpression compilation ---
 
-    me compile_expression(expr: Expression):
+    me compile_expression(expr: JsExpression):
         match expr:
-            Expression.Literal(value):
+            JsExpression.Literal(value):
                 self.compile_literal(value)
-            Expression.Identifier(name):
+            JsExpression.Identifier(name):
                 self.compile_identifier(name)
-            Expression.Binary(op, left, right):
+            JsExpression.Binary(op, left, right):
                 self.compile_binary(op, left, right)
-            Expression.Unary(op, operand):
+            JsExpression.Unary(op, operand):
                 self.compile_unary(op, operand)
-            Expression.Call(callee, args):
+            JsExpression.Call(callee, args):
                 self.compile_call(callee, args)
-            Expression.Member(object, property):
+            JsExpression.Member(object, property):
                 self.compile_member(object, property)
-            Expression.Assignment(target, value):
+            JsExpression.Assignment(target, value):
                 self.compile_assignment(target, value)
-            Expression.Array(elements):
+            JsExpression.Array(elements):
                 self.compile_array(elements)
-            Expression.ObjectExpr(properties):
+            JsExpression.ObjectExpr(properties):
                 self.compile_object(properties)
-            Expression.Ternary(condition, consequent, alternate):
+            JsExpression.Ternary(condition, consequent, alternate):
                 self.compile_expression(condition)
                 val else_jump = self.emit_jump(OpCode.JumpIfFalse(offset: 0))
                 self.compile_expression(consequent)
@@ -383,7 +383,7 @@ class BytecodeCompiler:
                 self.patch_jump(else_jump)
                 self.compile_expression(alternate)
                 self.patch_jump(end_jump)
-            Expression.ArrowFunction(params, body):
+            JsExpression.ArrowFunction(params, body):
                 # Compile arrow as closure
                 val parent_chunk = self.chunk
                 val parent_constants = self.constants
@@ -409,9 +409,9 @@ class BytecodeCompiler:
                 val fn_id = self.constants.len()
                 self.constants.push(JsValue.Function(id: fn_id))
                 self.emit(OpCode.Closure(fn_idx: fn_id, upvalue_count: 0))
-            Expression.SpreadElement(argument):
+            JsExpression.SpreadElement(argument):
                 self.compile_expression(argument)
-            Expression.TemplateLiteral(quasis, expressions):
+            JsExpression.TemplateLiteral(quasis, expressions):
                 # Compile as string concatenation
                 if quasis.len() > 0:
                     self.emit_constant(JsValue.String(v: quasis.get(0)))
@@ -425,14 +425,14 @@ class BytecodeCompiler:
                         self.emit_constant(JsValue.String(v: quasis.get(i + 1)))
                         self.emit(OpCode.Add)
                     i = i + 1
-            Expression.Delete(del_expr):
+            JsExpression.Delete(del_expr):
                 # Delete: evaluate to true (simplified)
                 self.emit_constant(JsValue.Boolean(v: true))
-            Expression.InstanceOf(left, right):
+            JsExpression.InstanceOf(left, right):
                 self.compile_expression(left)
                 self.compile_expression(right)
                 self.emit(OpCode.InstanceOf)
-            Expression.InExpr(left, right):
+            JsExpression.InExpr(left, right):
                 self.compile_expression(left)
                 self.compile_expression(right)
                 self.emit(OpCode.InOp)
@@ -447,20 +447,20 @@ class BytecodeCompiler:
         else:
             self.emit(OpCode.LoadGlobal(name: name))
 
-    me compile_binary(op: text, left: Expression, right: Expression):
+    me compile_binary(op: text, left: JsExpression, right: JsExpression):
         self.compile_expression(left)
         self.compile_expression(right)
         val opcode = op_for_binary(op)
         self.emit(opcode)
 
-    me compile_unary(op: text, operand: Expression):
+    me compile_unary(op: text, operand: JsExpression):
         self.compile_expression(operand)
         match op:
             "!": self.emit(OpCode.Not)
             "-": self.emit(OpCode.Neg)
             _: self.logger.warn("Unknown unary operator: {op}")
 
-    me compile_call(callee: Expression, args: [Expression]):
+    me compile_call(callee: JsExpression, args: [JsExpression]):
         self.compile_expression(callee)
         var i = 0
         while i < args.len():
@@ -468,14 +468,14 @@ class BytecodeCompiler:
             i = i + 1
         self.emit(OpCode.Call(argc: args.len()))
 
-    me compile_member(object: Expression, property: text):
+    me compile_member(object: JsExpression, property: text):
         self.compile_expression(object)
         self.emit(OpCode.GetProperty(name: property))
 
-    me compile_assignment(target: Expression, value: Expression):
+    me compile_assignment(target: JsExpression, value: JsExpression):
         self.compile_expression(value)
         match target:
-            Expression.Identifier(name):
+            JsExpression.Identifier(name):
                 val slot = self.resolve_local(name)
                 if slot >= 0:
                     self.emit(OpCode.Dup)
@@ -483,20 +483,20 @@ class BytecodeCompiler:
                 else:
                     self.emit(OpCode.Dup)
                     self.emit(OpCode.StoreGlobal(name: name))
-            Expression.Member(object, property):
+            JsExpression.Member(object, property):
                 self.compile_expression(object)
                 self.emit(OpCode.SetProperty(name: property))
             _:
                 self.logger.error("Invalid assignment target")
 
-    me compile_array(elements: [Expression]):
+    me compile_array(elements: [JsExpression]):
         var i = 0
         while i < elements.len():
             self.compile_expression(elements.get(i))
             i = i + 1
         self.emit(OpCode.NewArray(count: elements.len()))
 
-    me compile_object(properties: [Pair<text, Expression>]):
+    me compile_object(properties: [Pair<text, JsExpression>]):
         self.emit(OpCode.NewObject)
         var i = 0
         while i < properties.len():

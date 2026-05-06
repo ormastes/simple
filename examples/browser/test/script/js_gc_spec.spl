@@ -11,6 +11,29 @@ Tests for js gc functionality.
 # statistics tracking, incremental marking, and circular reference handling.
 
 use std.spec
+use std.js.engine.gc.{GcHeap}
+use std.js.engine.js_error.{Logger, LogLevel}
+use std.js.types.js_types.{JsValue}
+
+fn _incremental_mark_probe(total_objects: i64, budget_ms: f64) -> text:
+    var heap = GcHeap.new(Logger.new("js-gc-spec", LogLevel.Error))
+    heap.young_threshold = total_objects + 1
+    heap.gc_threshold_bytes = 999999999
+    var i = 0
+    while i < total_objects:
+        heap.allocate(JsValue.Object(id: i))
+        i = i + 1
+
+    i = 0
+    while i < total_objects - 1:
+        heap.add_reference(i, i + 1)
+        i = i + 1
+
+    var roots: [i64] = []
+    roots.push(0)
+    heap.mark_roots(roots)
+    val done = heap.incremental_mark(budget_ms)
+    "{heap.marked_count()}:{done}:{total_objects}"
 
 describe "JsGarbageCollector":
     """
@@ -101,16 +124,8 @@ describe "JsGarbageCollector":
 
     context "incremental marking":
         it "incremental mark respects time budget":
-            val total_objects = 1000
-            val budget_per_step = 100
-            var marked_count = 0
-            # One incremental step marks up to budget
-            var step_marked = 0
-            while step_marked < budget_per_step:
-                marked_count = marked_count + 1
-                step_marked = step_marked + 1
-            expect(marked_count).to_equal(100)
-            expect(marked_count).to_be_less_than(total_objects)
+            val result = _incremental_mark_probe(120, 1.0)
+            expect(result).to_equal("101:false:120")
 
     context "circular references":
         it "circular references collected":

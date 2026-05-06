@@ -1,0 +1,59 @@
+use common.wine_substrate.{
+    wine_substrate_capability_state,
+    wine_substrate_verify_capability,
+    wine_substrate_check_process_evidence,
+    wine_substrate_vm_gate,
+    wine_substrate_renderer_gate,
+    wine_substrate_hello_exe_gate,
+    wine_substrate_host_gate,
+    wine_substrate_pe_gate,
+    wine_substrate_async_gate
+}
+
+describe "SimpleOS Wine Substrate":
+    describe "REQ-001: capability matrix":
+        it "should classify missing Wine substrate capability rows explicitly":
+            val state = wine_substrate_capability_state("pthread")
+            expect(state).to_equal("missing")
+
+        it "should require evidence before a row can be verified":
+            val state = wine_substrate_verify_capability("pthread", "")
+            expect(state).to_equal("missing")
+
+    describe "REQ-002: process-backed app baseline":
+        it "should reject resident fallback as complete evidence":
+            val result = wine_substrate_check_process_evidence("[desktop-e2e] process-backed:resident")
+            expect(result).to_equal("resident-fallback")
+
+    describe "REQ-005: VM and container support":
+        it "should require fixed mappings, guard pages, and permission changes":
+            val result = wine_substrate_vm_gate("reserve commit unmap fixed-map")
+            expect(result).to_equal("missing-mprotect")
+
+    describe "REQ-006: X11-class renderer and WM backend":
+        it "should require window lifecycle, expose, input, and clipboard coverage":
+            val features = "display screen window map-unmap configure surface damage clip expose present input focus cursor"
+            val result = wine_substrate_renderer_gate(features)
+            expect(result).to_equal("missing-clipboard")
+
+    describe "REQ-003 and REQ-004: host ABI, thread, and dynamic loading":
+        it "should require the remaining Wine host substrate features":
+            val features = "fd-table stdio pipes sockets poll-wait timers errno cwd-env-argv spawn fs-paths"
+            val result = wine_substrate_host_gate(features)
+            expect(result).to_equal("missing-fs-attrs")
+
+    describe "REQ-007: PE/COFF loader preparation":
+        it "should require safe PE validation before execution":
+            val result = wine_substrate_pe_gate("mz pe-signature machine-x86_64 pe32plus")
+            expect(result).to_equal("missing-section-bounds")
+
+    describe "REQ-009: nogc async substrate":
+        it "should require the existing nogc_async_mut completion and event-loop primitives":
+            val features = "nogc-future poll waker io-driver submit-open submit-read"
+            val result = wine_substrate_async_gate(features)
+            expect(result).to_equal("missing-submit-write")
+
+    describe "REQ-008: non-GUI hello.exe milestone":
+        it "should keep hello.exe blocked until substrate gates are verified":
+            val gate_state = wine_substrate_hello_exe_gate("process=verified vm=verified host=verified posix=verified pthread=verified dynload=verified pe_loader=verified")
+            expect(gate_state).to_equal("blocked")

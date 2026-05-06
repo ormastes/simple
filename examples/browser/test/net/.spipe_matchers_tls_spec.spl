@@ -12,7 +12,7 @@ Tests for tls functionality.
 # Status: Active
 #
 # Validates TLS hostname matching (including wildcards), certificate expiration
-# checks, default configuration, and certificate chain verification.
+# checks, default configuration, and certificate trust-anchor verification.
 # Tests operate on pure validation functions; no real TLS handshakes are performed.
 #
 # Run with: bin/simple test examples/browser/test/net/tls_spec.spl
@@ -52,19 +52,8 @@ describe "check_hostname":
 
     it "rejects bare TLD wildcard":
         # *.com should not match example.com when the wildcard base is just "com"
-        # The prefix "example." has label "example" which is valid, but
-        # bare TLD wildcards are a security concern. The implementation
-        # handles this via the dot-count check: *.com yields base "com",
-        # host "example.com" ends with "com", prefix is "example." which
-        # is a single label — the function would return true per the algorithm.
-        # However, a stricter check would reject it. Test the actual behavior.
         val result = check_hostname("*.com", "example.com")
-        # Per the current implementation, *.com would match example.com
-        # because prefix "example." is a single non-dotted label.
-        # Depending on desired strictness, this may change.
-        # We test the current behavior:
-        val is_bool = (result == true) or (result == false)
-        expect is_bool == true
+        expect result == false
 
     it "is case-insensitive":
         val result = check_hostname("Example.COM", "example.com")
@@ -127,13 +116,21 @@ describe "verify_certificate":
             Ok(_): false
         expect is_err == true
 
-    it "rejects unimplemented trust-chain verification":
+    it "rejects chains without a trusted root":
         val chain = CertChain.create(["example.com"], ["Example Root"])
         val result = verify_certificate(chain, "example.com")
         val is_err = match result:
             Err(_): true
             Ok(_): false
         expect is_err == true
+
+    it "accepts chains with a trusted root":
+        val chain = CertChain.create(["example.com"], ["ISRG Root X1"])
+        val result = verify_certificate(chain, "example.com")
+        val is_ok = match result:
+            Ok(_): true
+            Err(_): false
+        expect is_ok == true
 
 describe "TlsManager.handshake":
     it "fails honestly until TLS wiring exists":

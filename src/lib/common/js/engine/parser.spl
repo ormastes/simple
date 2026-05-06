@@ -1,26 +1,12 @@
 # JavaScript parser for the Simple Browser Platform.
 # Recursive-descent parser with Pratt precedence climbing for expressions.
-# Produces AST nodes from the ast_types module (Statement / Expression enums).
+# Produces AST nodes from the ast_types module (JsStatement / JsExpression enums).
 
 use std.js.engine.js_error.{JsError, script_error, Logger, LogLevel, BrowserResult, BrowserError}
 use std.js.types.pair.{Pair}
 use std.js.types.js_types.JsValue
-use std.js.types.ast_types.{Expression, Statement, SwitchCase, FnParam, DestructProp, ImportSpec, ExportSpec}
-use std.js.engine.lexer.{JsLexer, token_kind_name}
-use std.js.engine.lexer.JsTokenKind
-
-# ── Helpers ──────────────────────────────────────────────────────────────
-
-fn _get_ident_name(expr: Expression) -> text:
-    match expr:
-        Expression.Identifier(name): name
-        _: ""
-
-fn _is_token(kind_name: text, kind: JsTokenKind) -> bool:
-    kind_name == token_kind_name(kind)
-
-fn _clone_text(value: text) -> text:
-    value.substring(0, value.len())
+use std.js.types.ast_types.{JsExpression, JsStatement, SwitchCase, FnParam, DestructProp, ImportSpec, ExportSpec, JsAstFactory}
+use std.js.engine.lexer.{JsLexer}
 
 # ── Parser ───────────────────────────────────────────────────────────────
 
@@ -37,12 +23,15 @@ class JsParser:
     logger: Logger
 
     static fn new(input: text, logger: Logger) -> JsParser:
-        var lex = JsLexer.new(input, logger)
+        JsParser.create(input, logger)
+
+    static fn create(input: text, logger: Logger) -> JsParser:
+        var lex = JsLexer.create(input, logger)
         val _ = lex.next_token()
         JsParser(
             lexer: lex,
             current_kind: lex.current_kind,
-            current_value: _clone_text(lex.current_value),
+            current_value: lex.current_value.substring(0, lex.current_value.len()),
             current_line: lex.current_line,
             current_col: lex.current_col,
             previous_kind: "Eof",
@@ -57,33 +46,81 @@ class JsParser:
     # Advance to the next token, returning the consumed one
     me advance():
         self.previous_kind = self.current_kind
-        self.previous_value = _clone_text(self.current_value)
+        self.previous_value = self.current_value.substring(0, self.current_value.len())
         self.previous_line = self.current_line
         self.previous_col = self.current_col
         val _ = self.lexer.next_token()
         self.current_kind = self.lexer.current_kind
-        self.current_value = _clone_text(self.lexer.current_value)
+        self.current_value = self.lexer.current_value.substring(0, self.lexer.current_value.len())
         self.current_line = self.lexer.current_line
         self.current_col = self.lexer.current_col
 
     # Check if the current token matches a given kind
-    fn check(kind: JsTokenKind) -> bool:
-        self.current_kind == token_kind_name(kind)
+    fn check(kind: text) -> bool:
+        self.current_kind == kind
+
+    fn ident_name(expr: JsExpression) -> text:
+        match expr:
+            JsExpression.Identifier(name): name
+            _: ""
 
     # Consume the current token if it matches, return true; otherwise false
-    me match_token(kind: JsTokenKind) -> bool:
-        if self.current_kind == token_kind_name(kind):
+    me match_token(kind: text) -> bool:
+        if self.current_kind == kind:
             self.advance()
             return true
         false
 
     # Expect the current token to be a given kind; consume and return it, or error
-    me expect(kind: JsTokenKind) -> BrowserResult<text>:
-        if self.current_kind == token_kind_name(kind):
-            val value = _clone_text(self.current_value)
+    me expect(kind: text) -> BrowserResult<text>:
+        if self.current_kind == kind:
+            val value = self.current_value.substring(0, self.current_value.len())
             self.advance()
             return Ok(value)
         val msg = "Expected token kind {kind} but got {self.current_kind} ('{self.current_value}') at line {self.current_line}:{self.current_col}"
+        self.logger.error(msg)
+        Err(script_error(msg))
+
+    me expect_member_property_name() -> BrowserResult<text>:
+        val kind = self.current_kind
+        if kind == "Identifier" or
+           kind == "Catch" or
+           kind == "Finally" or
+           kind == "Default" or
+           kind == "Function" or
+           kind == "Return" or
+           kind == "If" or
+           kind == "Else" or
+           kind == "While" or
+           kind == "For" or
+           kind == "Do" or
+           kind == "Break" or
+           kind == "Continue" or
+           kind == "Switch" or
+           kind == "Case" or
+           kind == "Throw" or
+           kind == "Try" or
+           kind == "New" or
+           kind == "Delete" or
+           kind == "Typeof" or
+           kind == "Instanceof" or
+           kind == "In" or
+           kind == "Of" or
+           kind == "Void" or
+           kind == "Class" or
+           kind == "Extends" or
+           kind == "Super" or
+           kind == "This" or
+           kind == "Import" or
+           kind == "Export" or
+           kind == "From" or
+           kind == "As" or
+           kind == "Async" or
+           kind == "Await":
+            val value = self.current_value.substring(0, self.current_value.len())
+            self.advance()
+            return Ok(value)
+        val msg = "Expected member property name but got {self.current_kind} ('{self.current_value}') at line {self.current_line}:{self.current_col}"
         self.logger.error(msg)
         Err(script_error(msg))
 
@@ -93,8 +130,8 @@ class JsParser:
 
     # ── Program ──────────────────────────────────────────────────────────
 
-    me parse_program() -> BrowserResult<[Statement]>:
-        var stmts: [Statement] = []
+    me parse_program() -> BrowserResult<[JsStatement]>:
+        var stmts: [JsStatement] = []
         while not self.is_at_end():
             val stmt = self.parse_statement()?
             stmts.push(stmt)
@@ -102,421 +139,421 @@ class JsParser:
 
     # ── Statements ───────────────────────────────────────────────────────
 
-    me parse_statement() -> BrowserResult<Statement>:
+    me parse_statement() -> BrowserResult<JsStatement>:
         val kind = self.current_kind
 
-        if _is_token(kind, JsTokenKind.Var) or _is_token(kind, JsTokenKind.Let) or _is_token(kind, JsTokenKind.Const):
+        if kind == "Var" or kind == "Let" or kind == "Const":
             return self.parse_var_declaration(self.current_value)
 
-        if _is_token(kind, JsTokenKind.Function):
+        if kind == "Function":
             return self.parse_function_declaration()
 
-        if _is_token(kind, JsTokenKind.Return):
+        if kind == "Return":
             return self.parse_return_statement()
 
-        if _is_token(kind, JsTokenKind.If):
+        if kind == "If":
             return self.parse_if_statement()
 
-        if _is_token(kind, JsTokenKind.While):
+        if kind == "While":
             return self.parse_while_statement()
 
-        if _is_token(kind, JsTokenKind.For):
+        if kind == "For":
             return self.parse_for_statement()
 
-        if _is_token(kind, JsTokenKind.OpenBrace):
+        if kind == "OpenBrace":
             val block = self.parse_block()?
-            return Ok(Statement.Block(stmts: block))
+            return Ok(JsAstFactory.block(stmts: block))
 
-        if _is_token(kind, JsTokenKind.Try):
+        if kind == "Try":
             return self.parse_try_statement()
 
-        if _is_token(kind, JsTokenKind.Switch):
+        if kind == "Switch":
             return self.parse_switch_statement()
 
-        if _is_token(kind, JsTokenKind.Throw):
+        if kind == "Throw":
             return self.parse_throw_statement()
 
-        if _is_token(kind, JsTokenKind.Class):
+        if kind == "Class":
             return self.parse_class_declaration()
 
-        if _is_token(kind, JsTokenKind.Break):
+        if kind == "Break":
             self.advance()
-            self.match_token(JsTokenKind.Semicolon)
-            return Ok(Statement.BreakStmt)
+            self.match_token("Semicolon")
+            return Ok(JsAstFactory.break_stmt())
 
-        if _is_token(kind, JsTokenKind.Continue):
+        if kind == "Continue":
             self.advance()
-            self.match_token(JsTokenKind.Semicolon)
-            return Ok(Statement.ContinueStmt)
+            self.match_token("Semicolon")
+            return Ok(JsAstFactory.continue_stmt())
 
-        if _is_token(kind, JsTokenKind.Do):
+        if kind == "Do":
             return self.parse_do_while_statement()
 
         self.parse_expression_statement()
 
     # var/let/const declaration
-    me parse_var_declaration(kind: text) -> BrowserResult<Statement>:
+    me parse_var_declaration(kind: text) -> BrowserResult<JsStatement>:
         self.advance()  # consume var/let/const
 
         # Check for destructuring pattern
-        if self.check(JsTokenKind.OpenBrace) or self.check(JsTokenKind.OpenBracket):
+        if self.check("OpenBrace") or self.check("OpenBracket"):
             val pattern = self._parse_destruct_pattern()?
-            self.match_token(JsTokenKind.Eq)
+            self.match_token("Eq")
             val init_expr = self.parse_expression()?
-            self.match_token(JsTokenKind.Semicolon)
-            return Ok(Statement.DestructVarDecl(pattern: pattern, init: init_expr, kind: kind))
+            self.match_token("Semicolon")
+            return Ok(JsAstFactory.destruct_var_decl(pattern: pattern, init: init_expr, kind: kind))
 
-        val name = self.expect(JsTokenKind.Identifier)?
+        val name = self.expect("Identifier")?
 
-        var init_expr = Expression.Literal(value: JsValue.Undefined)
-        if self.match_token(JsTokenKind.Eq):
+        var init_expr = JsAstFactory.literal(value: JsValue.Undefined)
+        if self.match_token("Eq"):
             init_expr = self.parse_expression()?
 
-        self.match_token(JsTokenKind.Semicolon)
+        self.match_token("Semicolon")
         # Use LetDecl/ConstDecl for let/const to enable block scoping
         if kind == "let":
-            return Ok(Statement.LetDecl(name: name, init: init_expr))
+            return Ok(JsAstFactory.let_decl(name: name, init: init_expr))
         if kind == "const":
-            return Ok(Statement.ConstDecl(name: name, init: init_expr))
-        Ok(Statement.VarDecl(name: name, init: init_expr))
+            return Ok(JsAstFactory.const_decl(name: name, init: init_expr))
+        Ok(JsAstFactory.var_decl(name: name, init: init_expr))
 
     # Parse destructuring pattern: { a, b: c, d = 5 } or [a, b, ...rest]
-    me _parse_destruct_pattern() -> BrowserResult<Expression>:
-        if self.check(JsTokenKind.OpenBrace):
+    me _parse_destruct_pattern() -> BrowserResult<JsExpression>:
+        if self.check("OpenBrace"):
             self.advance()  # consume '{'
             var props: [DestructProp] = []
-            if not self.check(JsTokenKind.CloseBrace):
+            if not self.check("CloseBrace"):
                 val first = self._parse_destruct_prop()?
                 props.push(first)
-                while self.match_token(JsTokenKind.Comma):
-                    if self.check(JsTokenKind.CloseBrace):
+                while self.match_token("Comma"):
+                    if self.check("CloseBrace"):
                         break
                     val prop = self._parse_destruct_prop()?
                     props.push(prop)
-            self.expect(JsTokenKind.CloseBrace)?
-            return Ok(Expression.ObjectPattern(props: props))
+            self.expect("CloseBrace")?
+            return Ok(JsAstFactory.object_pattern(props: props))
         else:
             self.advance()  # consume '['
-            var elements: [Expression] = []
-            if not self.check(JsTokenKind.CloseBracket):
+            var elements: [JsExpression] = []
+            if not self.check("CloseBracket"):
                 # Check for rest element
-                if self.check(JsTokenKind.DotDotDot):
+                if self.check("DotDotDot"):
                     self.advance()
-                    val name = self.expect(JsTokenKind.Identifier)?
-                    elements.push(Expression.SpreadElement(argument: Expression.Identifier(name: name)))
+                    val name = self.expect("Identifier")?
+                    elements.push(JsAstFactory.spread_element(argument: JsAstFactory.identifier(name: name)))
                 else:
                     val first = self.parse_assignment()?
                     elements.push(first)
-                while self.match_token(JsTokenKind.Comma):
-                    if self.check(JsTokenKind.CloseBracket):
+                while self.match_token("Comma"):
+                    if self.check("CloseBracket"):
                         break
-                    if self.check(JsTokenKind.DotDotDot):
+                    if self.check("DotDotDot"):
                         self.advance()
-                        val name = self.expect(JsTokenKind.Identifier)?
-                        elements.push(Expression.SpreadElement(argument: Expression.Identifier(name: name)))
+                        val name = self.expect("Identifier")?
+                        elements.push(JsAstFactory.spread_element(argument: JsAstFactory.identifier(name: name)))
                     else:
                         val elem = self.parse_assignment()?
                         elements.push(elem)
-            self.expect(JsTokenKind.CloseBracket)?
-            return Ok(Expression.ArrayPattern(elements: elements))
+            self.expect("CloseBracket")?
+            return Ok(JsAstFactory.array_pattern(elements: elements))
 
     me _parse_destruct_prop() -> BrowserResult<DestructProp>:
-        val key = self.expect(JsTokenKind.Identifier)?
+        val key = self.expect("Identifier")?
         # Check for rename: { key: local_name }
-        if self.match_token(JsTokenKind.Colon):
-            val local_name = self.expect(JsTokenKind.Identifier)?
-            var rename_default: Expression? = nil
-            if self.match_token(JsTokenKind.Eq):
+        if self.match_token("Colon"):
+            val local_name = self.expect("Identifier")?
+            var rename_default: JsExpression? = nil
+            if self.match_token("Eq"):
                 val dv = self.parse_assignment()?
                 rename_default = Some(dv)
-            return Ok(DestructProp(key: key, value: Expression.Identifier(name: local_name), default_value: rename_default, is_computed: false))
+            return Ok(DestructProp(key: key, value: JsAstFactory.identifier(name: local_name), default_value: rename_default, is_computed: false))
         # Check for default value: { key = default }
-        var default_val: Expression? = nil
-        if self.match_token(JsTokenKind.Eq):
+        var default_val: JsExpression? = nil
+        if self.match_token("Eq"):
             val dv = self.parse_assignment()?
             default_val = Some(dv)
-        Ok(DestructProp(key: key, value: Expression.Identifier(name: key), default_value: default_val, is_computed: false))
+        Ok(DestructProp(key: key, value: JsAstFactory.identifier(name: key), default_value: default_val, is_computed: false))
 
     # function declaration
-    me parse_function_declaration() -> BrowserResult<Statement>:
+    me parse_function_declaration() -> BrowserResult<JsStatement>:
         self.advance()  # consume 'function'
-        val name = self.expect(JsTokenKind.Identifier)?
-        self.expect(JsTokenKind.OpenParen)?
+        val name = self.expect("Identifier")?
+        self.expect("OpenParen")?
 
         var params: [text] = []
-        if not self.check(JsTokenKind.CloseParen):
-            val first = self.expect(JsTokenKind.Identifier)?
+        if not self.check("CloseParen"):
+            val first = self.expect("Identifier")?
             params.push(first)
-            while self.match_token(JsTokenKind.Comma):
-                val param = self.expect(JsTokenKind.Identifier)?
+            while self.match_token("Comma"):
+                val param = self.expect("Identifier")?
                 params.push(param)
 
-        self.expect(JsTokenKind.CloseParen)?
+        self.expect("CloseParen")?
         val body = self.parse_block()?
-        Ok(Statement.FnDecl(name: name, params: params, body: body))
+        Ok(JsAstFactory.fn_decl(name: name, params: params, body: body))
 
     # return statement
-    me parse_return_statement() -> BrowserResult<Statement>:
+    me parse_return_statement() -> BrowserResult<JsStatement>:
         self.advance()  # consume 'return'
-        var value = Expression.Literal(value: JsValue.Undefined)
-        val is_end = self.check(JsTokenKind.Semicolon) or self.check(JsTokenKind.CloseBrace) or self.is_at_end()
+        var value = JsAstFactory.literal(value: JsValue.Undefined)
+        val is_end = self.check("Semicolon") or self.check("CloseBrace") or self.is_at_end()
         if not is_end:
             value = self.parse_expression()?
-        self.match_token(JsTokenKind.Semicolon)
-        Ok(Statement.Return(value: value))
+        self.match_token("Semicolon")
+        Ok(JsAstFactory.return_stmt(value: value))
 
     # if / else if / else
-    me parse_if_statement() -> BrowserResult<Statement>:
+    me parse_if_statement() -> BrowserResult<JsStatement>:
         self.advance()  # consume 'if'
-        self.expect(JsTokenKind.OpenParen)?
+        self.expect("OpenParen")?
         val cond = self.parse_expression()?
-        self.expect(JsTokenKind.CloseParen)?
+        self.expect("CloseParen")?
 
-        var then_body: [Statement] = []
-        if self.check(JsTokenKind.OpenBrace):
+        var then_body: [JsStatement] = []
+        if self.check("OpenBrace"):
             then_body = self.parse_block()?
         else:
             val single = self.parse_statement()?
             then_body.push(single)
 
-        var else_body: [Statement] = []
-        if self.match_token(JsTokenKind.Else):
-            if self.check(JsTokenKind.If):
+        var else_body: [JsStatement] = []
+        if self.match_token("Else"):
+            if self.check("If"):
                 val else_if = self.parse_if_statement()?
                 else_body.push(else_if)
-            else if self.check(JsTokenKind.OpenBrace):
+            else if self.check("OpenBrace"):
                 else_body = self.parse_block()?
             else:
                 val single = self.parse_statement()?
                 else_body.push(single)
 
-        Ok(Statement.If(cond: cond, then_body: then_body, else_body: else_body))
+        Ok(JsAstFactory.if_stmt(cond: cond, then_body: then_body, else_body: else_body))
 
     # while loop
-    me parse_while_statement() -> BrowserResult<Statement>:
+    me parse_while_statement() -> BrowserResult<JsStatement>:
         self.advance()  # consume 'while'
-        self.expect(JsTokenKind.OpenParen)?
+        self.expect("OpenParen")?
         val cond = self.parse_expression()?
-        self.expect(JsTokenKind.CloseParen)?
+        self.expect("CloseParen")?
 
-        var body: [Statement] = []
-        if self.check(JsTokenKind.OpenBrace):
+        var body: [JsStatement] = []
+        if self.check("OpenBrace"):
             body = self.parse_block()?
         else:
             val single = self.parse_statement()?
             body.push(single)
 
-        Ok(Statement.While(cond: cond, body: body))
+        Ok(JsAstFactory.while_stmt(cond: cond, body: body))
 
     # do...while loop
-    me parse_do_while_statement() -> BrowserResult<Statement>:
+    me parse_do_while_statement() -> BrowserResult<JsStatement>:
         self.advance()  # consume 'do'
-        var body: [Statement] = []
-        if self.check(JsTokenKind.OpenBrace):
+        var body: [JsStatement] = []
+        if self.check("OpenBrace"):
             body = self.parse_block()?
         else:
             body.push(self.parse_statement()?)
-        self.expect(JsTokenKind.While)?
-        self.expect(JsTokenKind.OpenParen)?
+        self.expect("While")?
+        self.expect("OpenParen")?
         val cond = self.parse_expression()?
-        self.expect(JsTokenKind.CloseParen)?
-        self.match_token(JsTokenKind.Semicolon)
-        Ok(Statement.DoWhile(cond: cond, body: body))
+        self.expect("CloseParen")?
+        self.match_token("Semicolon")
+        Ok(JsAstFactory.do_while(cond: cond, body: body))
 
     # for loop — C-style, for-in, for-of
-    me parse_for_statement() -> BrowserResult<Statement>:
+    me parse_for_statement() -> BrowserResult<JsStatement>:
         self.advance()  # consume 'for'
-        self.expect(JsTokenKind.OpenParen)?
+        self.expect("OpenParen")?
 
         # Check for for-in / for-of
         val kind = self.current_kind
-        if _is_token(kind, JsTokenKind.Var) or _is_token(kind, JsTokenKind.Let) or _is_token(kind, JsTokenKind.Const):
+        if kind == "Var" or kind == "Let" or kind == "Const":
             val decl_kind = self.current_value
             self.advance()  # consume var/let/const
-            val binding = self.expect(JsTokenKind.Identifier)?
+            val binding = self.expect("Identifier")?
 
-            if self.check(JsTokenKind.In):
+            if self.check("In"):
                 # for (var k in obj) { ... }
                 self.advance()  # consume 'in'
                 val obj_expr = self.parse_expression()?
-                self.expect(JsTokenKind.CloseParen)?
-                var body: [Statement] = []
-                if self.check(JsTokenKind.OpenBrace):
+                self.expect("CloseParen")?
+                var body: [JsStatement] = []
+                if self.check("OpenBrace"):
                     body = self.parse_block()?
                 else:
                     body.push(self.parse_statement()?)
-                return Ok(Statement.ForIn(binding: binding, object: obj_expr, body: body))
+                return Ok(JsAstFactory.for_in(binding: binding, object: obj_expr, body: body))
 
-            if self.check(JsTokenKind.Of):
+            if self.check("Of"):
                 # for (var x of arr) { ... }
                 self.advance()  # consume 'of'
                 val iter_expr = self.parse_expression()?
-                self.expect(JsTokenKind.CloseParen)?
-                var body: [Statement] = []
-                if self.check(JsTokenKind.OpenBrace):
+                self.expect("CloseParen")?
+                var body: [JsStatement] = []
+                if self.check("OpenBrace"):
                     body = self.parse_block()?
                 else:
                     body.push(self.parse_statement()?)
-                return Ok(Statement.ForOf(binding: binding, iterable: iter_expr, body: body))
+                return Ok(JsAstFactory.for_of(binding: binding, iterable: iter_expr, body: body))
 
             # C-style for: var x = init; cond; update
             # We already consumed "var x", now need "= expr;"
-            var init_expr = Expression.Literal(value: JsValue.Undefined)
-            if self.match_token(JsTokenKind.Eq):
+            var init_expr = JsAstFactory.literal(value: JsValue.Undefined)
+            if self.match_token("Eq"):
                 init_expr = self.parse_expression()?
-            val init_stmt = Statement.VarDecl(name: binding, init: init_expr)
-            self.match_token(JsTokenKind.Semicolon)
+            val init_stmt = JsAstFactory.var_decl(name: binding, init: init_expr)
+            self.match_token("Semicolon")
 
             # Condition
-            var cond = Expression.Literal(value: JsValue.Boolean(v: true))
-            if not self.check(JsTokenKind.Semicolon):
+            var cond = JsAstFactory.literal(value: JsValue.Boolean(v: true))
+            if not self.check("Semicolon"):
                 cond = self.parse_expression()?
-            self.expect(JsTokenKind.Semicolon)?
+            self.expect("Semicolon")?
 
             # Update
-            var update = Expression.Literal(value: JsValue.Undefined)
-            if not self.check(JsTokenKind.CloseParen):
+            var update = JsAstFactory.literal(value: JsValue.Undefined)
+            if not self.check("CloseParen"):
                 update = self.parse_expression()?
-            self.expect(JsTokenKind.CloseParen)?
+            self.expect("CloseParen")?
 
-            var body: [Statement] = []
-            if self.check(JsTokenKind.OpenBrace):
+            var body: [JsStatement] = []
+            if self.check("OpenBrace"):
                 body = self.parse_block()?
             else:
                 body.push(self.parse_statement()?)
-            return Ok(Statement.For(init: init_stmt, cond: cond, update: update, body: body))
+            return Ok(JsAstFactory.for_stmt(init: init_stmt, cond: cond, update: update, body: body))
 
         # Non-var init
-        var init_stmt = Statement.ExprStmt(expr: Expression.Literal(value: JsValue.Undefined))
-        if not self.check(JsTokenKind.Semicolon):
+        var init_stmt = JsAstFactory.expr_stmt(expr: JsAstFactory.literal(value: JsValue.Undefined))
+        if not self.check("Semicolon"):
             val expr = self.parse_expression()?
-            init_stmt = Statement.ExprStmt(expr: expr)
-            self.match_token(JsTokenKind.Semicolon)
+            init_stmt = JsAstFactory.expr_stmt(expr: expr)
+            self.match_token("Semicolon")
         else:
-            self.match_token(JsTokenKind.Semicolon)
+            self.match_token("Semicolon")
 
-        var cond = Expression.Literal(value: JsValue.Boolean(v: true))
-        if not self.check(JsTokenKind.Semicolon):
+        var cond = JsAstFactory.literal(value: JsValue.Boolean(v: true))
+        if not self.check("Semicolon"):
             cond = self.parse_expression()?
-        self.expect(JsTokenKind.Semicolon)?
+        self.expect("Semicolon")?
 
-        var update = Expression.Literal(value: JsValue.Undefined)
-        if not self.check(JsTokenKind.CloseParen):
+        var update = JsAstFactory.literal(value: JsValue.Undefined)
+        if not self.check("CloseParen"):
             update = self.parse_expression()?
-        self.expect(JsTokenKind.CloseParen)?
+        self.expect("CloseParen")?
 
-        var body: [Statement] = []
-        if self.check(JsTokenKind.OpenBrace):
+        var body: [JsStatement] = []
+        if self.check("OpenBrace"):
             body = self.parse_block()?
         else:
             body.push(self.parse_statement()?)
-        Ok(Statement.For(init: init_stmt, cond: cond, update: update, body: body))
+        Ok(JsAstFactory.for_stmt(init: init_stmt, cond: cond, update: update, body: body))
 
     # Block { ... }
-    me parse_block() -> BrowserResult<[Statement]>:
-        self.expect(JsTokenKind.OpenBrace)?
-        var stmts: [Statement] = []
-        while not self.check(JsTokenKind.CloseBrace) and not self.is_at_end():
+    me parse_block() -> BrowserResult<[JsStatement]>:
+        self.expect("OpenBrace")?
+        var stmts: [JsStatement] = []
+        while not self.check("CloseBrace") and not self.is_at_end():
             val stmt = self.parse_statement()?
             stmts.push(stmt)
-        self.expect(JsTokenKind.CloseBrace)?
+        self.expect("CloseBrace")?
         Ok(stmts)
 
-    # Expression statement
-    me parse_expression_statement() -> BrowserResult<Statement>:
+    # JsExpression statement
+    me parse_expression_statement() -> BrowserResult<JsStatement>:
         val expr = self.parse_expression()?
         # Check for labeled statement: Identifier followed by Colon
-        val ident_name = _get_ident_name(expr)
-        if ident_name != "" and self.check(JsTokenKind.Colon):
+        val ident_name = self.ident_name(expr)
+        if ident_name != "" and self.check("Colon"):
             self.advance()
             val body = self.parse_statement()?
-            return Ok(Statement.LabeledStmt(label: ident_name, body: body))
-        self.match_token(JsTokenKind.Semicolon)
-        Ok(Statement.ExprStmt(expr: expr))
+            return Ok(JsAstFactory.labeled_stmt(label: ident_name, body: body))
+        self.match_token("Semicolon")
+        Ok(JsAstFactory.expr_stmt(expr: expr))
 
     # try / catch / finally
-    me parse_try_statement() -> BrowserResult<Statement>:
+    me parse_try_statement() -> BrowserResult<JsStatement>:
         self.advance()  # consume 'try'
         val try_body = self.parse_block()?
 
-        var catch_body: [Statement] = []
+        var catch_body: [JsStatement] = []
         var catch_param = ""
-        if self.match_token(JsTokenKind.Catch):
-            if self.match_token(JsTokenKind.OpenParen):
-                val param = self.expect(JsTokenKind.Identifier)?
+        if self.match_token("Catch"):
+            if self.match_token("OpenParen"):
+                val param = self.expect("Identifier")?
                 catch_param = param
-                self.expect(JsTokenKind.CloseParen)?
+                self.expect("CloseParen")?
             catch_body = self.parse_block()?
 
-        var finally_body: [Statement] = []
-        if self.match_token(JsTokenKind.Finally):
+        var finally_body: [JsStatement] = []
+        if self.match_token("Finally"):
             finally_body = self.parse_block()?
 
-        Ok(Statement.TryCatch(try_body: try_body, catch_param: catch_param, catch_body: catch_body, finally_body: finally_body))
+        Ok(JsAstFactory.try_catch(try_body: try_body, catch_param: catch_param, catch_body: catch_body, finally_body: finally_body))
 
     # switch statement with proper SwitchCase nodes
-    me parse_switch_statement() -> BrowserResult<Statement>:
+    me parse_switch_statement() -> BrowserResult<JsStatement>:
         self.advance()  # consume 'switch'
-        self.expect(JsTokenKind.OpenParen)?
+        self.expect("OpenParen")?
         val discriminant = self.parse_expression()?
-        self.expect(JsTokenKind.CloseParen)?
-        self.expect(JsTokenKind.OpenBrace)?
+        self.expect("CloseParen")?
+        self.expect("OpenBrace")?
 
         var cases: [SwitchCase] = []
-        while not self.check(JsTokenKind.CloseBrace) and not self.is_at_end():
-            if self.match_token(JsTokenKind.Case):
+        while not self.check("CloseBrace") and not self.is_at_end():
+            if self.match_token("Case"):
                 val test_expr = self.parse_expression()?
-                self.expect(JsTokenKind.Colon)?
-                var case_body: [Statement] = []
-                while not self.check(JsTokenKind.Case) and not self.check(JsTokenKind.Default) and not self.check(JsTokenKind.CloseBrace):
+                self.expect("Colon")?
+                var case_body: [JsStatement] = []
+                while not self.check("Case") and not self.check("Default") and not self.check("CloseBrace"):
                     val s = self.parse_statement()?
                     case_body.push(s)
                 cases.push(SwitchCase.case_clause(test_expr, case_body))
-            else if self.match_token(JsTokenKind.Default):
-                self.expect(JsTokenKind.Colon)?
-                var default_body: [Statement] = []
-                while not self.check(JsTokenKind.Case) and not self.check(JsTokenKind.CloseBrace):
+            else if self.match_token("Default"):
+                self.expect("Colon")?
+                var default_body: [JsStatement] = []
+                while not self.check("Case") and not self.check("CloseBrace"):
                     val s = self.parse_statement()?
                     default_body.push(s)
                 cases.push(SwitchCase.default_clause(default_body))
             else:
                 self.advance()  # skip unexpected token
 
-        self.expect(JsTokenKind.CloseBrace)?
-        Ok(Statement.Switch(discriminant: discriminant, cases: cases))
+        self.expect("CloseBrace")?
+        Ok(JsAstFactory.switch_stmt(discriminant: discriminant, cases: cases))
 
     # throw statement
-    me parse_throw_statement() -> BrowserResult<Statement>:
+    me parse_throw_statement() -> BrowserResult<JsStatement>:
         self.advance()  # consume 'throw'
         val expr = self.parse_expression()?
-        self.match_token(JsTokenKind.Semicolon)
-        Ok(Statement.ThrowStmt(expr: expr))
+        self.match_token("Semicolon")
+        Ok(JsAstFactory.throw_stmt(expr: expr))
 
     # class declaration: class Name [extends Parent] { constructor(...) {...} method(...) {...} }
-    me parse_class_declaration() -> BrowserResult<Statement>:
+    me parse_class_declaration() -> BrowserResult<JsStatement>:
         self.advance()  # consume 'class'
         var class_name = ""
-        if self.check(JsTokenKind.Identifier):
+        if self.check("Identifier"):
             class_name = self.current_value
             self.advance()
 
         var parent_name = ""
-        if self.match_token(JsTokenKind.Extends):
-            if self.check(JsTokenKind.Identifier):
+        if self.match_token("Extends"):
+            if self.check("Identifier"):
                 parent_name = self.current_value
                 self.advance()
 
-        self.expect(JsTokenKind.OpenBrace)?
+        self.expect("OpenBrace")?
 
         var empty_params: [text] = []
-        var empty_body: [Statement] = []
-        var constructor_decl = Statement.FnDecl(name: "constructor", params: empty_params, body: empty_body)
-        var methods: [Statement] = []
+        var empty_body: [JsStatement] = []
+        var constructor_decl = JsAstFactory.fn_decl(name: "constructor", params: empty_params, body: empty_body)
+        var methods: [JsStatement] = []
 
-        while not self.check(JsTokenKind.CloseBrace) and not self.is_at_end():
+        while not self.check("CloseBrace") and not self.is_at_end():
             # Parse method name
             var method_name = ""
-            if self.check(JsTokenKind.Identifier):
+            if self.check("Identifier"):
                 method_name = self.current_value
                 self.advance()
             else:
@@ -524,337 +561,337 @@ class JsParser:
                 continue
 
             # Parse method params
-            self.expect(JsTokenKind.OpenParen)?
+            self.expect("OpenParen")?
             var params: [text] = []
-            if not self.check(JsTokenKind.CloseParen):
-                val first = self.expect(JsTokenKind.Identifier)?
+            if not self.check("CloseParen"):
+                val first = self.expect("Identifier")?
                 params.push(first)
-                while self.match_token(JsTokenKind.Comma):
-                    val param = self.expect(JsTokenKind.Identifier)?
+                while self.match_token("Comma"):
+                    val param = self.expect("Identifier")?
                     params.push(param)
-            self.expect(JsTokenKind.CloseParen)?
+            self.expect("CloseParen")?
 
             # Parse method body
             val body = self.parse_block()?
-            val fn_decl = Statement.FnDecl(name: method_name, params: params, body: body)
+            val fn_decl = JsAstFactory.fn_decl(name: method_name, params: params, body: body)
 
             if method_name == "constructor":
                 constructor_decl = fn_decl
             else:
                 methods.push(fn_decl)
 
-        self.expect(JsTokenKind.CloseBrace)?
-        Ok(Statement.ClassDecl(name: class_name, parent_name: parent_name, constructor: constructor_decl, methods: methods))
+        self.expect("CloseBrace")?
+        Ok(JsAstFactory.class_decl(name: class_name, parent_name: parent_name, constructor: constructor_decl, methods: methods))
 
     # ── Expressions (precedence climbing) ────────────────────────────────
 
-    me parse_expression() -> BrowserResult<Expression>:
+    me parse_expression() -> BrowserResult<JsExpression>:
         self.parse_assignment()
 
     # Assignment: x = expr, x += expr, etc.
-    me parse_assignment() -> BrowserResult<Expression>:
+    me parse_assignment() -> BrowserResult<JsExpression>:
         val left = self.parse_ternary()?
 
         val kind = self.current_kind
-        if _is_token(kind, JsTokenKind.Eq):
+        if kind == "Eq":
             self.advance()
             val right = self.parse_assignment()?
-            return Ok(Expression.Assignment(target: left, value: right))
+            return Ok(JsAstFactory.assignment(target: left, value: right))
 
-        if _is_token(kind, JsTokenKind.PlusEq):
+        if kind == "PlusEq":
             self.advance()
             val right = self.parse_assignment()?
-            val sum = Expression.Binary(op: "+", left: left, right: right)
-            return Ok(Expression.Assignment(target: left, value: sum))
+            val sum = JsAstFactory.binary(op: "+", left: left, right: right)
+            return Ok(JsAstFactory.assignment(target: left, value: sum))
 
-        if _is_token(kind, JsTokenKind.MinusEq):
+        if kind == "MinusEq":
             self.advance()
             val right = self.parse_assignment()?
-            val diff = Expression.Binary(op: "-", left: left, right: right)
-            return Ok(Expression.Assignment(target: left, value: diff))
+            val diff = JsAstFactory.binary(op: "-", left: left, right: right)
+            return Ok(JsAstFactory.assignment(target: left, value: diff))
 
-        if _is_token(kind, JsTokenKind.StarEq):
+        if kind == "StarEq":
             self.advance()
             val right = self.parse_assignment()?
-            val prod = Expression.Binary(op: "*", left: left, right: right)
-            return Ok(Expression.Assignment(target: left, value: prod))
+            val prod = JsAstFactory.binary(op: "*", left: left, right: right)
+            return Ok(JsAstFactory.assignment(target: left, value: prod))
 
-        if _is_token(kind, JsTokenKind.SlashEq):
+        if kind == "SlashEq":
             self.advance()
             val right = self.parse_assignment()?
-            val quot = Expression.Binary(op: "/", left: left, right: right)
-            return Ok(Expression.Assignment(target: left, value: quot))
+            val quot = JsAstFactory.binary(op: "/", left: left, right: right)
+            return Ok(JsAstFactory.assignment(target: left, value: quot))
 
         Ok(left)
 
     # Ternary: cond ? then : else
-    me parse_ternary() -> BrowserResult<Expression>:
+    me parse_ternary() -> BrowserResult<JsExpression>:
         var expr = self.parse_nullish_coalescing()?
 
-        if self.match_token(JsTokenKind.Question):
+        if self.match_token("Question"):
             val then_expr = self.parse_assignment()?
-            self.expect(JsTokenKind.Colon)?
+            self.expect("Colon")?
             val else_expr = self.parse_assignment()?
-            expr = Expression.Ternary(condition: expr, consequent: then_expr, alternate: else_expr)
+            expr = JsAstFactory.ternary(condition: expr, consequent: then_expr, alternate: else_expr)
 
         Ok(expr)
 
     # Nullish coalescing: a ?? b
-    me parse_nullish_coalescing() -> BrowserResult<Expression>:
+    me parse_nullish_coalescing() -> BrowserResult<JsExpression>:
         var left = self.parse_or()?
-        while self.match_token(JsTokenKind.QuestionQuestion):
+        while self.match_token("QuestionQuestion"):
             val right = self.parse_or()?
-            left = Expression.Binary(op: "??", left: left, right: right)
+            left = JsAstFactory.binary(op: "??", left: left, right: right)
         Ok(left)
 
     # Logical OR: a || b
-    me parse_or() -> BrowserResult<Expression>:
+    me parse_or() -> BrowserResult<JsExpression>:
         var left = self.parse_and()?
-        while self.match_token(JsTokenKind.PipePipe):
+        while self.match_token("PipePipe"):
             val right = self.parse_and()?
-            left = Expression.Binary(op: "||", left: left, right: right)
+            left = JsAstFactory.binary(op: "||", left: left, right: right)
         Ok(left)
 
     # Logical AND: a && b
-    me parse_and() -> BrowserResult<Expression>:
+    me parse_and() -> BrowserResult<JsExpression>:
         var left = self.parse_bitwise_or()?
-        while self.match_token(JsTokenKind.AmpersandAmpersand):
+        while self.match_token("AmpersandAmpersand"):
             val right = self.parse_bitwise_or()?
-            left = Expression.Binary(op: "&&", left: left, right: right)
+            left = JsAstFactory.binary(op: "&&", left: left, right: right)
         Ok(left)
 
     # Bitwise OR: a | b
-    me parse_bitwise_or() -> BrowserResult<Expression>:
+    me parse_bitwise_or() -> BrowserResult<JsExpression>:
         var left = self.parse_bitwise_xor()?
-        while self.match_token(JsTokenKind.Pipe):
+        while self.match_token("Pipe"):
             val right = self.parse_bitwise_xor()?
-            left = Expression.Binary(op: "|", left: left, right: right)
+            left = JsAstFactory.binary(op: "|", left: left, right: right)
         Ok(left)
 
     # Bitwise XOR: a ^ b
-    me parse_bitwise_xor() -> BrowserResult<Expression>:
+    me parse_bitwise_xor() -> BrowserResult<JsExpression>:
         var left = self.parse_bitwise_and()?
-        while self.match_token(JsTokenKind.Caret):
+        while self.match_token("Caret"):
             val right = self.parse_bitwise_and()?
-            left = Expression.Binary(op: "^", left: left, right: right)
+            left = JsAstFactory.binary(op: "^", left: left, right: right)
         Ok(left)
 
     # Bitwise AND: a & b
-    me parse_bitwise_and() -> BrowserResult<Expression>:
+    me parse_bitwise_and() -> BrowserResult<JsExpression>:
         var left = self.parse_equality()?
-        while self.match_token(JsTokenKind.Ampersand):
+        while self.match_token("Ampersand"):
             val right = self.parse_equality()?
-            left = Expression.Binary(op: "&", left: left, right: right)
+            left = JsAstFactory.binary(op: "&", left: left, right: right)
         Ok(left)
 
     # Equality: == === != !==
-    me parse_equality() -> BrowserResult<Expression>:
+    me parse_equality() -> BrowserResult<JsExpression>:
         var left = self.parse_comparison()?
         while true:
             val kind = self.current_kind
-            if _is_token(kind, JsTokenKind.EqEq):
+            if kind == "EqEq":
                 self.advance()
                 val right = self.parse_comparison()?
-                left = Expression.Binary(op: "==", left: left, right: right)
-            else if _is_token(kind, JsTokenKind.EqEqEq):
+                left = JsAstFactory.binary(op: "==", left: left, right: right)
+            else if kind == "EqEqEq":
                 self.advance()
                 val right = self.parse_comparison()?
-                left = Expression.Binary(op: "===", left: left, right: right)
-            else if _is_token(kind, JsTokenKind.BangEq):
+                left = JsAstFactory.binary(op: "===", left: left, right: right)
+            else if kind == "BangEq":
                 self.advance()
                 val right = self.parse_comparison()?
-                left = Expression.Binary(op: "!=", left: left, right: right)
-            else if _is_token(kind, JsTokenKind.BangEqEq):
+                left = JsAstFactory.binary(op: "!=", left: left, right: right)
+            else if kind == "BangEqEq":
                 self.advance()
                 val right = self.parse_comparison()?
-                left = Expression.Binary(op: "!==", left: left, right: right)
+                left = JsAstFactory.binary(op: "!==", left: left, right: right)
             else:
                 break
         Ok(left)
 
     # Comparison: < > <= >= instanceof in
-    me parse_comparison() -> BrowserResult<Expression>:
+    me parse_comparison() -> BrowserResult<JsExpression>:
         var left = self.parse_addition()?
         while true:
             val kind = self.current_kind
-            if _is_token(kind, JsTokenKind.Lt):
+            if kind == "Lt":
                 self.advance()
                 val right = self.parse_addition()?
-                left = Expression.Binary(op: "<", left: left, right: right)
-            else if _is_token(kind, JsTokenKind.Gt):
+                left = JsAstFactory.binary(op: "<", left: left, right: right)
+            else if kind == "Gt":
                 self.advance()
                 val right = self.parse_addition()?
-                left = Expression.Binary(op: ">", left: left, right: right)
-            else if _is_token(kind, JsTokenKind.LtEq):
+                left = JsAstFactory.binary(op: ">", left: left, right: right)
+            else if kind == "LtEq":
                 self.advance()
                 val right = self.parse_addition()?
-                left = Expression.Binary(op: "<=", left: left, right: right)
-            else if _is_token(kind, JsTokenKind.GtEq):
+                left = JsAstFactory.binary(op: "<=", left: left, right: right)
+            else if kind == "GtEq":
                 self.advance()
                 val right = self.parse_addition()?
-                left = Expression.Binary(op: ">=", left: left, right: right)
-            else if _is_token(kind, JsTokenKind.Instanceof):
+                left = JsAstFactory.binary(op: ">=", left: left, right: right)
+            else if kind == "Instanceof":
                 self.advance()
                 val right = self.parse_addition()?
-                left = Expression.InstanceOf(left: left, right: right)
-            else if _is_token(kind, JsTokenKind.In):
+                left = JsAstFactory.instance_of(left: left, right: right)
+            else if kind == "In":
                 self.advance()
                 val right = self.parse_addition()?
-                left = Expression.InExpr(left: left, right: right)
+                left = JsAstFactory.in_expr(left: left, right: right)
             else:
                 break
         Ok(left)
 
     # Addition / subtraction: + -
-    me parse_addition() -> BrowserResult<Expression>:
+    me parse_addition() -> BrowserResult<JsExpression>:
         var left = self.parse_multiplication()?
         while true:
             val kind = self.current_kind
-            if _is_token(kind, JsTokenKind.Plus):
+            if kind == "Plus":
                 self.advance()
                 val right = self.parse_multiplication()?
-                left = Expression.Binary(op: "+", left: left, right: right)
-            else if _is_token(kind, JsTokenKind.Minus):
+                left = JsAstFactory.binary(op: "+", left: left, right: right)
+            else if kind == "Minus":
                 self.advance()
                 val right = self.parse_multiplication()?
-                left = Expression.Binary(op: "-", left: left, right: right)
+                left = JsAstFactory.binary(op: "-", left: left, right: right)
             else:
                 break
         Ok(left)
 
     # Multiplication / division / modulo: * / %
-    me parse_multiplication() -> BrowserResult<Expression>:
+    me parse_multiplication() -> BrowserResult<JsExpression>:
         var left = self.parse_exponentiation()?
         while true:
             val kind = self.current_kind
-            if _is_token(kind, JsTokenKind.Star):
+            if kind == "Star":
                 self.advance()
                 val right = self.parse_exponentiation()?
-                left = Expression.Binary(op: "*", left: left, right: right)
-            else if _is_token(kind, JsTokenKind.Slash):
+                left = JsAstFactory.binary(op: "*", left: left, right: right)
+            else if kind == "Slash":
                 self.advance()
                 val right = self.parse_exponentiation()?
-                left = Expression.Binary(op: "/", left: left, right: right)
-            else if _is_token(kind, JsTokenKind.Percent):
+                left = JsAstFactory.binary(op: "/", left: left, right: right)
+            else if kind == "Percent":
                 self.advance()
                 val right = self.parse_exponentiation()?
-                left = Expression.Binary(op: "%", left: left, right: right)
+                left = JsAstFactory.binary(op: "%", left: left, right: right)
             else:
                 break
         Ok(left)
 
     # Exponentiation: ** (right-associative)
-    me parse_exponentiation() -> BrowserResult<Expression>:
+    me parse_exponentiation() -> BrowserResult<JsExpression>:
         val base = self.parse_unary()?
-        if self.match_token(JsTokenKind.StarStar):
+        if self.match_token("StarStar"):
             val exp = self.parse_exponentiation()?  # right-assoc recursion
-            return Ok(Expression.Binary(op: "**", left: base, right: exp))
+            return Ok(JsAstFactory.binary(op: "**", left: base, right: exp))
         Ok(base)
 
     # Unary: ! - + typeof void delete ~ ++x --x
-    me parse_unary() -> BrowserResult<Expression>:
+    me parse_unary() -> BrowserResult<JsExpression>:
         val kind = self.current_kind
 
-        if _is_token(kind, JsTokenKind.Bang):
+        if kind == "Bang":
             self.advance()
             val operand = self.parse_unary()?
-            return Ok(Expression.Unary(op: "!", operand: operand))
+            return Ok(JsAstFactory.unary(op: "!", operand: operand))
 
-        if _is_token(kind, JsTokenKind.Minus):
+        if kind == "Minus":
             self.advance()
             val operand = self.parse_unary()?
-            return Ok(Expression.Unary(op: "-", operand: operand))
+            return Ok(JsAstFactory.unary(op: "-", operand: operand))
 
-        if _is_token(kind, JsTokenKind.Plus):
+        if kind == "Plus":
             self.advance()
             val operand = self.parse_unary()?
-            return Ok(Expression.Unary(op: "+", operand: operand))
+            return Ok(JsAstFactory.unary(op: "+", operand: operand))
 
-        if _is_token(kind, JsTokenKind.Typeof):
+        if kind == "Typeof":
             self.advance()
             val operand = self.parse_unary()?
-            return Ok(Expression.Unary(op: "typeof", operand: operand))
+            return Ok(JsAstFactory.unary(op: "typeof", operand: operand))
 
-        if _is_token(kind, JsTokenKind.Void):
+        if kind == "Void":
             self.advance()
             val operand = self.parse_unary()?
-            return Ok(Expression.Unary(op: "void", operand: operand))
+            return Ok(JsAstFactory.unary(op: "void", operand: operand))
 
-        if _is_token(kind, JsTokenKind.Delete):
+        if kind == "Delete":
             self.advance()
             val operand = self.parse_unary()?
-            return Ok(Expression.Delete(expr: operand))
+            return Ok(JsAstFactory.delete_expr(expr: operand))
 
-        if _is_token(kind, JsTokenKind.Tilde):
+        if kind == "Tilde":
             self.advance()
             val operand = self.parse_unary()?
-            return Ok(Expression.Unary(op: "~", operand: operand))
+            return Ok(JsAstFactory.unary(op: "~", operand: operand))
 
-        if _is_token(kind, JsTokenKind.PlusPlus):
+        if kind == "PlusPlus":
             self.advance()
             val operand = self.parse_unary()?
-            return Ok(Expression.Unary(op: "++pre", operand: operand))
+            return Ok(JsAstFactory.unary(op: "++pre", operand: operand))
 
-        if _is_token(kind, JsTokenKind.MinusMinus):
+        if kind == "MinusMinus":
             self.advance()
             val operand = self.parse_unary()?
-            return Ok(Expression.Unary(op: "--pre", operand: operand))
+            return Ok(JsAstFactory.unary(op: "--pre", operand: operand))
 
         self.parse_postfix()
 
     # Postfix: x++ x--
-    me parse_postfix() -> BrowserResult<Expression>:
+    me parse_postfix() -> BrowserResult<JsExpression>:
         var expr = self.parse_call_expression()?
 
-        if _is_token(self.current_kind, JsTokenKind.PlusPlus):
+        if self.current_kind == "PlusPlus":
             self.advance()
-            expr = Expression.Unary(op: "++post", operand: expr)
+            expr = JsAstFactory.unary(op: "++post", operand: expr)
 
-        if _is_token(self.current_kind, JsTokenKind.MinusMinus):
+        if self.current_kind == "MinusMinus":
             self.advance()
-            expr = Expression.Unary(op: "--post", operand: expr)
+            expr = JsAstFactory.unary(op: "--post", operand: expr)
 
         Ok(expr)
 
     # Call / member / index: f(args), obj.prop, arr[idx], obj?.prop
-    me parse_call_expression() -> BrowserResult<Expression>:
+    me parse_call_expression() -> BrowserResult<JsExpression>:
         var expr = self.parse_primary()?
 
         while true:
             val kind = self.current_kind
 
-            if _is_token(kind, JsTokenKind.OpenParen):
+            if kind == "OpenParen":
                 # Function call
                 self.advance()
-                var args: [Expression] = []
-                if not self.check(JsTokenKind.CloseParen):
+                var args: [JsExpression] = []
+                if not self.check("CloseParen"):
                     val first_arg = self.parse_assignment()?
                     args.push(first_arg)
-                    while self.match_token(JsTokenKind.Comma):
+                    while self.match_token("Comma"):
                         val arg = self.parse_assignment()?
                         args.push(arg)
-                self.expect(JsTokenKind.CloseParen)?
-                expr = Expression.Call(callee: expr, args: args)
+                self.expect("CloseParen")?
+                expr = JsAstFactory.call(callee: expr, args: args)
 
-            else if _is_token(kind, JsTokenKind.Dot):
+            else if kind == "Dot":
                 # Member access
                 self.advance()
-                val prop = self.expect(JsTokenKind.Identifier)?
-                expr = Expression.Member(object: expr, property: prop)
+                val prop = self.expect_member_property_name()?
+                expr = JsAstFactory.member(object: expr, property: prop)
 
-            else if _is_token(kind, JsTokenKind.QuestionDot):
+            else if kind == "QuestionDot":
                 # Optional chaining
                 self.advance()
-                val prop = self.expect(JsTokenKind.Identifier)?
-                expr = Expression.Member(object: expr, property: prop)
+                val prop = self.expect_member_property_name()?
+                expr = JsAstFactory.member(object: expr, property: prop)
 
-            else if _is_token(kind, JsTokenKind.OpenBracket):
+            else if kind == "OpenBracket":
                 # Index access: obj[expr]
                 self.advance()
                 val index_expr = self.parse_expression()?
-                self.expect(JsTokenKind.CloseBracket)?
+                self.expect("CloseBracket")?
                 # Encode computed member access as Call with special callee
-                expr = Expression.Binary(op: "[]", left: expr, right: index_expr)
+                expr = JsAstFactory.binary(op: "[]", left: expr, right: index_expr)
 
             else:
                 break
@@ -862,84 +899,84 @@ class JsParser:
         Ok(expr)
 
     # Primary: literals, identifiers, grouped, arrays, objects, arrow functions
-    me parse_primary() -> BrowserResult<Expression>:
+    me parse_primary() -> BrowserResult<JsExpression>:
         val kind = self.current_kind
 
         # Number literal
-        if _is_token(kind, JsTokenKind.Number):
+        if kind == "Number":
             val value = self.current_value
             self.advance()
             val num = value.parse_float() ?? 0.0
-            return Ok(Expression.Literal(value: JsValue.Number(v: num)))
+            return Ok(JsAstFactory.literal(value: JsValue.Number(v: num)))
 
         # String literal
-        if _is_token(kind, JsTokenKind.String):
+        if kind == "String":
             val value = self.current_value
             self.advance()
-            return Ok(Expression.Literal(value: JsValue.String(v: value)))
+            return Ok(JsAstFactory.literal(value: JsValue.String(v: value)))
 
         # Template literal
-        if _is_token(kind, JsTokenKind.TemplateLiteral):
+        if kind == "TemplateLiteral":
             val value = self.current_value
             self.advance()
             return self._parse_template_parts(value)
 
         # Boolean true
-        if _is_token(kind, JsTokenKind.TrueKw):
+        if kind == "TrueKw":
             self.advance()
-            return Ok(Expression.Literal(value: JsValue.Boolean(v: true)))
+            return Ok(JsAstFactory.literal(value: JsValue.Boolean(v: true)))
 
         # Boolean false
-        if _is_token(kind, JsTokenKind.FalseKw):
+        if kind == "FalseKw":
             self.advance()
-            return Ok(Expression.Literal(value: JsValue.Boolean(v: false)))
+            return Ok(JsAstFactory.literal(value: JsValue.Boolean(v: false)))
 
         # null
-        if _is_token(kind, JsTokenKind.NullKw):
+        if kind == "NullKw":
             self.advance()
-            return Ok(Expression.Literal(value: JsValue.Null))
+            return Ok(JsAstFactory.literal(value: JsValue.Null))
 
         # undefined
-        if _is_token(kind, JsTokenKind.Undefined):
+        if kind == "Undefined":
             self.advance()
-            return Ok(Expression.Literal(value: JsValue.Undefined))
+            return Ok(JsAstFactory.literal(value: JsValue.Undefined))
 
         # this
-        if _is_token(kind, JsTokenKind.This):
+        if kind == "This":
             self.advance()
-            return Ok(Expression.Identifier(name: "this"))
+            return Ok(JsAstFactory.identifier(name: "this"))
 
         # new — e.g., new Foo(args)
-        if _is_token(kind, JsTokenKind.New):
+        if kind == "New":
             self.advance()
             val callee = self.parse_call_expression()?
-            return Ok(Expression.Unary(op: "new", operand: callee))
+            return Ok(JsAstFactory.unary(op: "new", operand: callee))
 
         # Identifier (or arrow function)
-        if _is_token(kind, JsTokenKind.Identifier):
+        if kind == "Identifier":
             # Check for single-param arrow: ident => expr
             val ident_name = self.current_value
             self.advance()
-            if self.check(JsTokenKind.Arrow):
+            if self.check("Arrow"):
                 var single_param: [text] = []
                 single_param.push(ident_name)
                 return self.parse_arrow_body(single_param)
-            return Ok(Expression.Identifier(name: ident_name))
+            return Ok(JsAstFactory.identifier(name: ident_name))
 
         # Grouped expression or arrow function params
-        if _is_token(kind, JsTokenKind.OpenParen):
+        if kind == "OpenParen":
             return self.parse_grouped_or_arrow()
 
         # Array literal [...]
-        if _is_token(kind, JsTokenKind.OpenBracket):
+        if kind == "OpenBracket":
             return self.parse_array_literal()
 
         # Object literal {...}
-        if _is_token(kind, JsTokenKind.OpenBrace):
+        if kind == "OpenBrace":
             return self.parse_object_literal()
 
         # function expression
-        if _is_token(kind, JsTokenKind.Function):
+        if kind == "Function":
             return self.parse_function_expression()
 
         # Fallthrough — unexpected token
@@ -950,34 +987,34 @@ class JsParser:
         Err(script_error(msg))
 
     # Grouped expression (a + b) or arrow function (a, b) => ...
-    me parse_grouped_or_arrow() -> BrowserResult<Expression>:
+    me parse_grouped_or_arrow() -> BrowserResult<JsExpression>:
         self.advance()  # consume '('
 
         # Empty parens => arrow with no params
-        if self.check(JsTokenKind.CloseParen):
+        if self.check("CloseParen"):
             self.advance()
-            if self.check(JsTokenKind.Arrow):
+            if self.check("Arrow"):
                 var no_params: [text] = []
                 return self.parse_arrow_body(no_params)
-            return Ok(Expression.Literal(value: JsValue.Undefined))
+            return Ok(JsAstFactory.literal(value: JsValue.Undefined))
 
         # Parse first item as assignment (not full expression, to not consume commas)
         val first = self.parse_assignment()?
 
         # If comma follows, could be arrow params OR comma expression
-        if self.check(JsTokenKind.Comma):
-            var items: [Expression] = []
+        if self.check("Comma"):
+            var items: [JsExpression] = []
             items.push(first)
-            while self.match_token(JsTokenKind.Comma):
+            while self.match_token("Comma"):
                 val item = self.parse_assignment()?
                 items.push(item)
-            self.expect(JsTokenKind.CloseParen)?
+            self.expect("CloseParen")?
             # Check for arrow after close paren
-            if self.check(JsTokenKind.Arrow):
+            if self.check("Arrow"):
                 var params: [text] = []
                 var pi = 0
                 while pi < items.len():
-                    val pname = _get_ident_name(items.get(pi))
+                    val pname = self.ident_name(items.get(pi))
                     if pname != "":
                         params.push(pname)
                     pi = pi + 1
@@ -986,15 +1023,15 @@ class JsParser:
             var result = items.get(0)
             var ci = 1
             while ci < items.len():
-                result = Expression.Binary(op: ",", left: result, right: items.get(ci))
+                result = JsAstFactory.binary(op: ",", left: result, right: items.get(ci))
                 ci = ci + 1
             return Ok(result)
 
-        self.expect(JsTokenKind.CloseParen)?
+        self.expect("CloseParen")?
 
         # Check for arrow after single-param parens: (x) => ...
-        val ident_name = _get_ident_name(first)
-        if ident_name != "" and self.check(JsTokenKind.Arrow):
+        val ident_name = self.ident_name(first)
+        if ident_name != "" and self.check("Arrow"):
             var single_param: [text] = []
             single_param.push(ident_name)
             return self.parse_arrow_body(single_param)
@@ -1002,9 +1039,9 @@ class JsParser:
         Ok(first)
 
     # Parse template literal parts — split raw string into quasis and ${...} expressions
-    me _parse_template_parts(raw: text) -> BrowserResult<Expression>:
+    me _parse_template_parts(raw: text) -> BrowserResult<JsExpression>:
         var quasis: [text] = []
-        var exprs: [Expression] = []
+        var exprs: [JsExpression] = []
         var current = ""
         var i = 0
         val len = raw.len()
@@ -1030,7 +1067,7 @@ class JsParser:
                         expr_text = expr_text + ec
                     i = i + 1
                 # Parse the expression
-                var sub_parser = JsParser.new(expr_text, self.logger)
+                var sub_parser = JsParser.create(expr_text, self.logger)
                 val expr = sub_parser.parse_expression()?
                 exprs.push(expr)
             else:
@@ -1038,74 +1075,74 @@ class JsParser:
                 i = i + 1
         quasis.push(current)
         if exprs.len() == 0:
-            return Ok(Expression.Literal(value: JsValue.String(v: raw)))
-        Ok(Expression.TemplateLiteral(quasis: quasis, expressions: exprs))
+            return Ok(JsAstFactory.literal(value: JsValue.String(v: raw)))
+        Ok(JsAstFactory.template_literal(quasis: quasis, expressions: exprs))
 
     # Parse arrow function body: => expr or => { stmts }
-    me parse_arrow_body(params: [text]) -> BrowserResult<Expression>:
-        self.expect(JsTokenKind.Arrow)?
+    me parse_arrow_body(params: [text]) -> BrowserResult<JsExpression>:
+        self.expect("Arrow")?
 
-        if self.check(JsTokenKind.OpenBrace):
+        if self.check("OpenBrace"):
             val body = self.parse_block()?
-            return Ok(Expression.ArrowFunction(params: params, body: body))
+            return Ok(JsAstFactory.arrow_function(params: params, body: body))
         else:
             val body_expr = self.parse_assignment()?
             # Wrap expression body as implicit return
-            var body: [Statement] = []
-            body.push(Statement.Return(value: body_expr))
-            return Ok(Expression.ArrowFunction(params: params, body: body))
+            var body: [JsStatement] = []
+            body.push(JsAstFactory.return_stmt(value: body_expr))
+            return Ok(JsAstFactory.arrow_function(params: params, body: body))
 
     # Array literal: [1, 2, 3] with spread support: [1, ...arr, 3]
-    me parse_array_literal() -> BrowserResult<Expression>:
+    me parse_array_literal() -> BrowserResult<JsExpression>:
         self.advance()  # consume '['
-        var elements: [Expression] = []
-        if not self.check(JsTokenKind.CloseBracket):
-            if self.check(JsTokenKind.DotDotDot):
+        var elements: [JsExpression] = []
+        if not self.check("CloseBracket"):
+            if self.check("DotDotDot"):
                 self.advance()
                 val spread_expr = self.parse_assignment()?
-                elements.push(Expression.SpreadElement(argument: spread_expr))
+                elements.push(JsAstFactory.spread_element(argument: spread_expr))
             else:
                 val first = self.parse_assignment()?
                 elements.push(first)
-            while self.match_token(JsTokenKind.Comma):
-                if self.check(JsTokenKind.CloseBracket):
+            while self.match_token("Comma"):
+                if self.check("CloseBracket"):
                     break  # trailing comma
-                if self.check(JsTokenKind.DotDotDot):
+                if self.check("DotDotDot"):
                     self.advance()
                     val spread_expr = self.parse_assignment()?
-                    elements.push(Expression.SpreadElement(argument: spread_expr))
+                    elements.push(JsAstFactory.spread_element(argument: spread_expr))
                 else:
                     val elem = self.parse_assignment()?
                     elements.push(elem)
-        self.expect(JsTokenKind.CloseBracket)?
-        Ok(Expression.Array(elements: elements))
+        self.expect("CloseBracket")?
+        Ok(JsAstFactory.array(elements: elements))
 
     # Object literal: { key: value, ... }
-    me parse_object_literal() -> BrowserResult<Expression>:
+    me parse_object_literal() -> BrowserResult<JsExpression>:
         self.advance()  # consume '{'
-        var properties: [Pair<text, Expression>] = []
-        if not self.check(JsTokenKind.CloseBrace):
+        var properties: [Pair<text, JsExpression>] = []
+        if not self.check("CloseBrace"):
             val first = self._parse_object_property()?
             properties.push(first)
-            while self.match_token(JsTokenKind.Comma):
-                if self.check(JsTokenKind.CloseBrace):
+            while self.match_token("Comma"):
+                if self.check("CloseBrace"):
                     break  # trailing comma
                 val prop = self._parse_object_property()?
                 properties.push(prop)
-        self.expect(JsTokenKind.CloseBrace)?
-        Ok(Expression.ObjectExpr(properties: properties))
+        self.expect("CloseBrace")?
+        Ok(JsAstFactory.object_expr(properties: properties))
 
     # Parse a single object property: key: value
-    me _parse_object_property() -> BrowserResult<Pair<text, Expression>>:
+    me _parse_object_property() -> BrowserResult<Pair<text, JsExpression>>:
         var key = ""
         val kind = self.current_kind
-        if _is_token(kind, JsTokenKind.Identifier):
+        if kind == "Identifier":
             key = self.current_value
             self.advance()
-        else if _is_token(kind, JsTokenKind.String):
+        else if kind == "String":
             key = self.current_value
             self.advance()
-        else if _is_token(kind, JsTokenKind.Number):
+        else if kind == "Number":
             key = self.current_value
             self.advance()
         else:
@@ -1113,35 +1150,35 @@ class JsParser:
             self.advance()
 
         # Shorthand: { x } means { x: x }
-        if not self.check(JsTokenKind.Colon):
-            val shorthand = Expression.Identifier(name: key)
+        if not self.check("Colon"):
+            val shorthand = JsAstFactory.identifier(name: key)
             return Ok(Pair(first: key, second: shorthand))
 
-        self.expect(JsTokenKind.Colon)?
+        self.expect("Colon")?
         val value = self.parse_assignment()?
         Ok(Pair(first: key, second: value))
 
     # Function expression: function(params) { body }
     # Reuses ArrowFunction AST node — interpreter handles both the same way
-    me parse_function_expression() -> BrowserResult<Expression>:
+    me parse_function_expression() -> BrowserResult<JsExpression>:
         self.advance()  # consume 'function'
 
         var name = ""
-        if self.check(JsTokenKind.Identifier):
+        if self.check("Identifier"):
             name = self.current_value
             self.advance()
 
-        self.expect(JsTokenKind.OpenParen)?
+        self.expect("OpenParen")?
         var params: [text] = []
-        if not self.check(JsTokenKind.CloseParen):
-            val first = self.expect(JsTokenKind.Identifier)?
+        if not self.check("CloseParen"):
+            val first = self.expect("Identifier")?
             params.push(first)
-            while self.match_token(JsTokenKind.Comma):
-                val param = self.expect(JsTokenKind.Identifier)?
+            while self.match_token("Comma"):
+                val param = self.expect("Identifier")?
                 params.push(param)
-        self.expect(JsTokenKind.CloseParen)?
+        self.expect("CloseParen")?
 
         val body = self.parse_block()?
 
         # Use ArrowFunction node — interpreter registers it as a closure
-        Ok(Expression.ArrowFunction(params: params, body: body))
+        Ok(JsAstFactory.arrow_function(params: params, body: body))

@@ -56,7 +56,7 @@ class ImageDecoder:
     logger: Logger
 
     static fn new(logger: Logger) -> ImageDecoder:
-        ImageDecoder(cache: [DecodedImage](), logger: logger)
+        ImageDecoder(cache: [], logger: logger)
 
     # Decode raw image data into an ImageData structure.
     # Decodes raw image data into pixel arrays by format.
@@ -89,10 +89,11 @@ class ImageDecoder:
             ImageFormat.Png:
                 decoded_data = decode_png(raw_data)
             ImageFormat.Jpeg:
-                # JPEG DCT is too complex for pure Simple — return gray placeholder
-                decoded_data = create_placeholder(100, 100)
+                decoded_data = decode_jpeg(raw_data)
             ImageFormat.Bmp:
-                decoded_data = create_placeholder(100, 100)
+                decoded_data = decode_bmp(raw_data)
+            ImageFormat.Gif:
+                decoded_data = decode_gif(raw_data)
             _:
                 decoded_data = create_placeholder(100, 100)
         val result = DecodedImage.ready(image_id, "", decoded_data)
@@ -138,24 +139,24 @@ fn detect_format(data: text) -> ImageFormat:
 
     # Check PNG signature
     if len >= 4:
-        val b0 = data.byte_at(0)
-        val b1 = data.byte_at(1)
-        val b2 = data.byte_at(2)
-        val b3 = data.byte_at(3)
+        val b0 = _byte_at(data, 0)
+        val b1 = _byte_at(data, 1)
+        val b2 = _byte_at(data, 2)
+        val b3 = _byte_at(data, 3)
         if b0 == 137 and b1 == 80 and b2 == 78 and b3 == 71:
             return ImageFormat.Png
 
     # Check JPEG signature
-    val j0 = data.byte_at(0)
-    val j1 = data.byte_at(1)
+    val j0 = _byte_at(data, 0)
+    val j1 = _byte_at(data, 1)
     if j0 == 255 and j1 == 216:
         return ImageFormat.Jpeg
 
     # Check GIF signature
     if len >= 3:
-        val g0 = data.byte_at(0)
-        val g1 = data.byte_at(1)
-        val g2 = data.byte_at(2)
+        val g0 = _byte_at(data, 0)
+        val g1 = _byte_at(data, 1)
+        val g2 = _byte_at(data, 2)
         if g0 == 71 and g1 == 73 and g2 == 70:
             return ImageFormat.Gif
 
@@ -177,7 +178,7 @@ fn scale_image(image: ImageData, target_width: i64, target_height: i64) -> Image
     if image.width <= 0 or image.height <= 0:
         return ImageData.create(target_width, target_height, image.format)
 
-    var data = [i64]()
+    var data = []
     val src_w = image.width
     val src_h = image.height
 
@@ -226,17 +227,19 @@ fn scale_image(image: ImageData, target_width: i64, target_height: i64) -> Image
 
 # Create a gray placeholder image for loading states.
 fn create_placeholder(width: i64, height: i64) -> ImageData:
-    var data = [i64]()
+    create_placeholder_format(width, height, ImageFormat.Png)
+
+fn create_placeholder_format(width: i64, height: i64, format: ImageFormat) -> ImageData:
+    var data = []
     # Fill with mid-gray RGBA (128, 128, 128, 255)
-    var i = 0
-    val total = width * height
-    while i < total:
-        data.push(128)  # R
-        data.push(128)  # G
-        data.push(128)  # B
-        data.push(255)  # A
-        i = i + 1
-    ImageData(width: width, height: height, format: ImageFormat.Png, data: data)
+    var y = 0
+    while y < height:
+        var x = 0
+        while x < width:
+            data = data + [128, 128, 128, 255]
+            x = x + 1
+        y = y + 1
+    ImageData(width: width, height: height, format: format, data: data)
 
 # Helper — format name for logging.
 fn format_name(format: ImageFormat) -> text:
@@ -269,7 +272,7 @@ fn decode_png(raw_data: text) -> ImageData:
     var height = 0
     var bit_depth = 8
     var color_type = 6  # default RGBA
-    var compressed_data = [i64]()
+    var compressed_data = []
     var offset = 8  # skip signature
 
     while offset + 12 <= data_len:
@@ -280,13 +283,13 @@ fn decode_png(raw_data: text) -> ImageData:
         if chunk_type == "IHDR":
             width = _read_u32_be(raw_data, offset + 8)
             height = _read_u32_be(raw_data, offset + 12)
-            bit_depth = raw_data.byte_at(offset + 16)
-            color_type = raw_data.byte_at(offset + 17)
+            bit_depth = _byte_at(raw_data, offset + 16)
+            color_type = _byte_at(raw_data, offset + 17)
         else if chunk_type == "IDAT":
             # Collect compressed data bytes
             var i = 0
             while i < chunk_len:
-                compressed_data.push(raw_data.byte_at(offset + 8 + i))
+                compressed_data.push(_byte_at(raw_data, offset + 8 + i))
                 i = i + 1
         else if chunk_type == "IEND":
             offset = data_len  # stop parsing
@@ -311,34 +314,191 @@ fn decode_png(raw_data: text) -> ImageData:
 
     ImageData(width: width, height: height, format: ImageFormat.Png, data: rgba)
 
+# Decode uncompressed Windows BMP data into RGBA pixels.
+fn decode_bmp(raw_data: text) -> ImageData:
+    val data_len = raw_data.len()
+    if data_len < 54:
+        return create_placeholder(1, 1)
+    if _byte_at(raw_data, 0) != 66 or _byte_at(raw_data, 1) != 77:
+        return create_placeholder(1, 1)
+
+    val pixel_offset = _read_u32_le(raw_data, 10)
+    val dib_size = _read_u32_le(raw_data, 14)
+    if dib_size < 40:
+        return create_placeholder(1, 1)
+
+    val width = _read_i32_le(raw_data, 18)
+    var height = _read_i32_le(raw_data, 22)
+    val planes = _read_u16_le(raw_data, 26)
+    val bits_per_pixel = _read_u16_le(raw_data, 28)
+    val compression = _read_u32_le(raw_data, 30)
+
+    if width <= 0 or height == 0 or planes != 1 or compression != 0:
+        return create_placeholder(1, 1)
+    if bits_per_pixel != 24 and bits_per_pixel != 32:
+        return create_placeholder(1, 1)
+
+    var top_down = false
+    if height < 0:
+        top_down = true
+        height = 0 - height
+
+    val bytes_per_pixel = bits_per_pixel / 8
+    val row_stride = ((width * bytes_per_pixel + 3) / 4) * 4
+    if pixel_offset + row_stride * height > data_len:
+        return create_placeholder(1, 1)
+
+    var rgba = []
+    var y = 0
+    while y < height:
+        val source_y = if top_down: y else: height - 1 - y
+        val row_offset = pixel_offset + source_y * row_stride
+        var x = 0
+        while x < width:
+            val pixel = row_offset + x * bytes_per_pixel
+            val b = _byte_at(raw_data, pixel)
+            val g = _byte_at(raw_data, pixel + 1)
+            val r = _byte_at(raw_data, pixel + 2)
+            val a = if bits_per_pixel == 32: _byte_at(raw_data, pixel + 3) else: 255
+            rgba.push(r)
+            rgba.push(g)
+            rgba.push(b)
+            rgba.push(a)
+            x = x + 1
+        y = y + 1
+
+    ImageData(width: width, height: height, format: ImageFormat.Bmp, data: rgba)
+
+# Decode GIF metadata and preserve intrinsic dimensions.
+fn decode_gif(raw_data: text) -> ImageData:
+    if raw_data.len() < 10:
+        return create_placeholder_format(1, 1, ImageFormat.Gif)
+    val signature = _byte_at(raw_data, 0) == 71 and _byte_at(raw_data, 1) == 73 and _byte_at(raw_data, 2) == 70
+    val version = _byte_at(raw_data, 3) == 56 and (_byte_at(raw_data, 4) == 55 or _byte_at(raw_data, 4) == 57) and _byte_at(raw_data, 5) == 97
+    if not signature or not version:
+        return create_placeholder_format(1, 1, ImageFormat.Gif)
+    val width = _read_u16_le(raw_data, 6)
+    val height = _read_u16_le(raw_data, 8)
+    if width <= 0 or height <= 0:
+        return create_placeholder_format(1, 1, ImageFormat.Gif)
+    create_placeholder_format(width, height, ImageFormat.Gif)
+
+# Decode JPEG metadata and preserve intrinsic dimensions.
+# Full entropy/DCT pixel decode is outside this pure-Simple path; dimensions are
+# still required for layout, responsive sizing, and avoiding fixed placeholders.
+fn decode_jpeg(raw_data: text) -> ImageData:
+    if raw_data.len() < 4:
+        return create_placeholder_format(1, 1, ImageFormat.Jpeg)
+    if _byte_at(raw_data, 0) != 255 or _byte_at(raw_data, 1) != 216:
+        return create_placeholder_format(1, 1, ImageFormat.Jpeg)
+
+    var offset = 2
+    while offset + 3 < raw_data.len():
+        while offset < raw_data.len() and _byte_at(raw_data, offset) != 255:
+            offset = offset + 1
+        while offset < raw_data.len() and _byte_at(raw_data, offset) == 255:
+            offset = offset + 1
+        if offset >= raw_data.len():
+            return create_placeholder_format(1, 1, ImageFormat.Jpeg)
+
+        val marker = _byte_at(raw_data, offset)
+        offset = offset + 1
+        if marker == 217 or marker == 218:
+            return create_placeholder_format(1, 1, ImageFormat.Jpeg)
+        if _jpeg_marker_has_no_length(marker):
+            pass_dn
+        else:
+            if offset + 1 >= raw_data.len():
+                return create_placeholder_format(1, 1, ImageFormat.Jpeg)
+            val segment_len = _read_u16_be(raw_data, offset)
+            if segment_len < 2 or offset + segment_len > raw_data.len():
+                return create_placeholder_format(1, 1, ImageFormat.Jpeg)
+            if _jpeg_is_sof_marker(marker):
+                if segment_len >= 7:
+                    val height = _read_u16_be(raw_data, offset + 3)
+                    val width = _read_u16_be(raw_data, offset + 5)
+                    if width > 0 and height > 0:
+                        return create_placeholder_format(width, height, ImageFormat.Jpeg)
+                return create_placeholder_format(1, 1, ImageFormat.Jpeg)
+            offset = offset + segment_len
+
+    create_placeholder_format(1, 1, ImageFormat.Jpeg)
+
 # Check the 8-byte PNG signature.
 fn _check_png_signature(data: text) -> bool:
-    val b0 = data.byte_at(0) == 137
-    val b1 = data.byte_at(1) == 80
-    val b2 = data.byte_at(2) == 78
-    val b3 = data.byte_at(3) == 71
-    val b4 = data.byte_at(4) == 13
-    val b5 = data.byte_at(5) == 10
-    val b6 = data.byte_at(6) == 26
-    val b7 = data.byte_at(7) == 10
+    val b0 = _byte_at(data, 0) == 137
+    val b1 = _byte_at(data, 1) == 80
+    val b2 = _byte_at(data, 2) == 78
+    val b3 = _byte_at(data, 3) == 71
+    val b4 = _byte_at(data, 4) == 13
+    val b5 = _byte_at(data, 5) == 10
+    val b6 = _byte_at(data, 6) == 26
+    val b7 = _byte_at(data, 7) == 10
     val first_four = b0 and b1 and b2 and b3
     val last_four = b4 and b5 and b6 and b7
     first_four and last_four
 
+fn _byte_at(data: text, offset: i64) -> i64:
+    if offset < 0 or offset >= data.len():
+        return 0
+    data[offset:offset + 1].char_code_at(0)
+
 # Read a 4-byte big-endian unsigned integer.
 fn _read_u32_be(data: text, offset: i64) -> i64:
-    val b0 = data.byte_at(offset)
-    val b1 = data.byte_at(offset + 1)
-    val b2 = data.byte_at(offset + 2)
-    val b3 = data.byte_at(offset + 3)
+    val b0 = _byte_at(data, offset)
+    val b1 = _byte_at(data, offset + 1)
+    val b2 = _byte_at(data, offset + 2)
+    val b3 = _byte_at(data, offset + 3)
     b0 * 16777216 + b1 * 65536 + b2 * 256 + b3
+
+fn _read_u16_le(data: text, offset: i64) -> i64:
+    val b0 = _byte_at(data, offset)
+    val b1 = _byte_at(data, offset + 1)
+    b0 + b1 * 256
+
+fn _read_u16_be(data: text, offset: i64) -> i64:
+    val b0 = _byte_at(data, offset)
+    val b1 = _byte_at(data, offset + 1)
+    b0 * 256 + b1
+
+fn _jpeg_marker_has_no_length(marker: i64) -> bool:
+    marker == 1 or (marker >= 208 and marker <= 215)
+
+fn _jpeg_is_sof_marker(marker: i64) -> bool:
+    if marker == 192: return true
+    if marker == 193: return true
+    if marker == 194: return true
+    if marker == 195: return true
+    if marker == 197: return true
+    if marker == 198: return true
+    if marker == 199: return true
+    if marker == 201: return true
+    if marker == 202: return true
+    if marker == 203: return true
+    if marker == 205: return true
+    if marker == 206: return true
+    if marker == 207: return true
+    false
+
+fn _read_u32_le(data: text, offset: i64) -> i64:
+    val b0 = _byte_at(data, offset)
+    val b1 = _byte_at(data, offset + 1)
+    val b2 = _byte_at(data, offset + 2)
+    val b3 = _byte_at(data, offset + 3)
+    b0 + b1 * 256 + b2 * 65536 + b3 * 16777216
+
+fn _read_i32_le(data: text, offset: i64) -> i64:
+    val unsigned = _read_u32_le(data, offset)
+    if unsigned >= 2147483648:
+        return unsigned - 4294967296
+    unsigned
 
 # Read a 4-byte ASCII chunk type.
 fn _read_chunk_type(data: text, offset: i64) -> text:
     var result = ""
     var i = 0
     while i < 4:
-        val ch = data.byte_at(offset + i)
+        val ch = _byte_at(data, offset + i)
         result = result + _byte_to_char(ch)
         i = i + 1
     result
@@ -374,7 +534,7 @@ fn _bytes_per_pixel(color_type: i64, bit_depth: i64) -> i64:
 # Minimal DEFLATE inflater — handles uncompressed and fixed Huffman blocks.
 # skip_bytes: number of header bytes to skip (e.g. 2 for zlib header).
 fn _inflate(compressed: [i64], skip_bytes: i64) -> [i64]:
-    var output = [i64]()
+    var output = []
     var bit_pos = skip_bytes * 8  # current bit position
     val total_bits = compressed.len() * 8
 
@@ -649,8 +809,8 @@ fn _distance_base(code: i64) -> i64:
 # Reconstruct pixels from filtered scanlines.
 # Each scanline is prefixed with a 1-byte filter type.
 fn _reconstruct_scanlines(data: [i64], width: i64, height: i64, bpp: i64, stride: i64) -> [i64]:
-    var pixels = [i64]()
-    var prev_row = [i64]()
+    var pixels = []
+    var prev_row = []
     # Initialize previous row to zeros
     var init = 0
     while init < stride:
@@ -664,7 +824,7 @@ fn _reconstruct_scanlines(data: [i64], width: i64, height: i64, bpp: i64, stride
         val filter_type = _safe_get_list(data, data_pos)
         data_pos = data_pos + 1
 
-        var current_row = [i64]()
+        var current_row = []
         var col = 0
         while col < stride:
             val raw_byte = _safe_get_list(data, data_pos)
@@ -721,7 +881,7 @@ fn _paeth_predictor(a: i64, b: i64, c: i64) -> i64:
 
 # Convert decoded pixel data to RGBA format.
 fn _to_rgba(pixels: [i64], width: i64, height: i64, color_type: i64, bpp: i64) -> [i64]:
-    var rgba = [i64]()
+    var rgba = []
     val total = width * height
     var i = 0
     match color_type:
