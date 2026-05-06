@@ -1,0 +1,345 @@
+use std.spec.*
+
+use std.gc_async_mut.gpu.browser_engine.dom.{BeDomNode,
+    be_dom_apply_default_action, be_dom_create_event, be_dom_dispatch_event,
+    be_dom_dispatch_event_actions, be_dom_dispatch_event_apply_default,
+    be_dom_dispatch_event_path, be_dom_dispatch_event_to_id,
+    be_dom_dispatch_keyboard_activation_apply_default, be_dom_find_path_to_id,
+    be_dom_get_attr, be_dom_get_event_listener_count, be_dom_has_attr,
+    be_dom_keyboard_activation_event_for_target}
+
+describe "Browser renderer DOM event basics":
+
+    it "registers target event listeners with normalized event names":
+        var button = BeDomNode.element("button")
+        button.add_event_listener("click", "listener-a")
+        button.add_event_listener("onclick", "listener-b")
+
+        expect(be_dom_get_event_listener_count(button, "click")).to_equal(2)
+        expect(be_dom_get_event_listener_count(button, "onclick")).to_equal(2)
+
+    it "dispatches inline handlers before registered target listeners":
+        var button = BeDomNode.element("button")
+        button.set_attr("onclick", "inline-click")
+        button.add_event_listener("click", "listener-a")
+        button.add_event_listener("click", "listener-b")
+
+        val actions = be_dom_dispatch_event_actions(button, "click")
+        expect(actions.len()).to_equal(3)
+        expect(actions[0]).to_equal("inline-click")
+        expect(actions[1]).to_equal("listener-a")
+        expect(actions[2]).to_equal("listener-b")
+
+    it "keeps unrelated event types isolated":
+        var input = BeDomNode.element("input")
+        input.add_event_listener("input", "input-listener")
+        input.add_event_listener("change", "change-listener")
+
+        val input_actions = be_dom_dispatch_event_actions(input, "input")
+        val change_actions = be_dom_dispatch_event_actions(input, "change")
+
+        expect(input_actions.len()).to_equal(1)
+        expect(input_actions[0]).to_equal("input-listener")
+        expect(change_actions.len()).to_equal(1)
+        expect(change_actions[0]).to_equal("change-listener")
+
+    it "creates cancelable event objects with target and current target state":
+        var button = BeDomNode.element("button")
+        button.set_attr("id", "save")
+
+        var event = be_dom_create_event(button, "onclick", true, true)
+        expect(event.event_type).to_equal("click")
+        expect(event.target_tag).to_equal("button")
+        expect(event.target_id).to_equal("save")
+        expect(event.current_target_tag).to_equal("button")
+        expect(event.current_target_id).to_equal("save")
+        expect(event.bubbles).to_equal(true)
+        expect(event.cancelable).to_equal(true)
+        expect(event.default_prevented).to_equal(false)
+
+        event.prevent_default()
+        expect(event.default_prevented).to_equal(true)
+
+    it "leaves non-cancelable events unprevented":
+        var link = BeDomNode.element("a")
+        var event = be_dom_create_event(link, "click", true, false)
+
+        event.prevent_default()
+
+        expect(event.default_prevented).to_equal(false)
+
+    it "dispatches actions with event object state":
+        var button = BeDomNode.element("button")
+        button.set_attr("id", "save")
+        button.set_attr("onclick", "inline-click")
+        button.add_event_listener("click", "listener-a")
+
+        val dispatch = be_dom_dispatch_event(button, "onclick", true, true)
+
+        expect(dispatch.event.event_type).to_equal("click")
+        expect(dispatch.event.target_id).to_equal("save")
+        expect(dispatch.event.current_target_id).to_equal("save")
+        expect(dispatch.actions.len()).to_equal(2)
+        expect(dispatch.actions[0]).to_equal("inline-click")
+        expect(dispatch.actions[1]).to_equal("listener-a")
+
+    it "reports default actions for focused interactive element events":
+        var link = BeDomNode.element("a")
+        link.set_attr("href", "/next")
+        val link_dispatch = be_dom_dispatch_event(link, "click", true, true)
+        expect(link_dispatch.default_action).to_equal("navigate:/next")
+        expect(link_dispatch.default_action_allowed).to_equal(true)
+
+        var checkbox = BeDomNode.element("input")
+        checkbox.set_attr("type", "checkbox")
+        val checkbox_dispatch = be_dom_dispatch_event(checkbox, "click", true, true)
+        expect(checkbox_dispatch.default_action).to_equal("input-checkbox-toggle")
+        expect(checkbox_dispatch.default_action_allowed).to_equal(true)
+
+        var form = BeDomNode.element("form")
+        val form_dispatch = be_dom_dispatch_event(form, "submit", true, true)
+        expect(form_dispatch.default_action).to_equal("form-submit")
+        expect(form_dispatch.default_action_allowed).to_equal(true)
+
+    it "suppresses cancelable default actions when a listener prevents default":
+        var link = BeDomNode.element("a")
+        link.set_attr("href", "/blocked")
+        link.add_event_listener("click", "prevent-default")
+
+        val dispatch = be_dom_dispatch_event(link, "click", true, true)
+
+        expect(dispatch.event.default_prevented).to_equal(true)
+        expect(dispatch.default_action).to_equal("navigate:/blocked")
+        expect(dispatch.default_action_allowed).to_equal(false)
+
+    it "keeps non-cancelable default actions allowed despite prevent-default token":
+        var button = BeDomNode.element("button")
+        button.add_event_listener("click", "prevent-default")
+
+        val dispatch = be_dom_dispatch_event(button, "click", true, false)
+
+        expect(dispatch.event.default_prevented).to_equal(false)
+        expect(dispatch.default_action).to_equal("button-activate")
+        expect(dispatch.default_action_allowed).to_equal(true)
+
+    it "applies allowed checkbox and radio default actions to returned nodes":
+        var checkbox = BeDomNode.element("input")
+        checkbox.set_attr("type", "checkbox")
+
+        val checked = be_dom_dispatch_event_apply_default(checkbox, "click", true, true)
+        expect(be_dom_has_attr(checked, "checked")).to_equal(true)
+
+        val unchecked = be_dom_dispatch_event_apply_default(checked, "click", true, true)
+        expect(be_dom_has_attr(unchecked, "checked")).to_equal(false)
+
+        var radio = BeDomNode.element("input")
+        radio.set_attr("type", "radio")
+        val selected = be_dom_dispatch_event_apply_default(radio, "click", true, true)
+        expect(be_dom_has_attr(selected, "checked")).to_equal(true)
+
+    it "does not apply prevented or disabled control default actions":
+        var prevented = BeDomNode.element("input")
+        prevented.set_attr("type", "checkbox")
+        prevented.add_event_listener("click", "prevent-default")
+
+        val still_unchecked = be_dom_dispatch_event_apply_default(prevented, "click", true, true)
+        expect(be_dom_has_attr(still_unchecked, "checked")).to_equal(false)
+
+        var disabled = BeDomNode.element("button")
+        disabled.set_attr("disabled", "disabled")
+        val dispatch = be_dom_dispatch_event(disabled, "click", true, true)
+        expect(dispatch.default_action).to_equal("")
+        expect(dispatch.default_action_allowed).to_equal(false)
+
+    it "applies focus submit button and navigation default action tokens":
+        var input = BeDomNode.element("input")
+        val focused = be_dom_apply_default_action(input, "focus-element")
+        expect(be_dom_get_attr(focused, "data-focused")).to_equal("true")
+
+        var button = BeDomNode.element("button")
+        val activated = be_dom_apply_default_action(button, "button-activate")
+        expect(be_dom_get_attr(activated, "data-activated")).to_equal("true")
+
+        var form = BeDomNode.element("form")
+        val submitted = be_dom_apply_default_action(form, "form-submit")
+        expect(be_dom_get_attr(submitted, "data-submitted")).to_equal("true")
+
+        var link = BeDomNode.element("a")
+        val navigated = be_dom_apply_default_action(link, "navigate:/next")
+        expect(be_dom_get_attr(navigated, "data-navigation")).to_equal("/next")
+
+    it "maps focused keyboard activation keys to synthesized click events":
+        var link = BeDomNode.element("a")
+        link.set_attr("href", "/next")
+        expect(be_dom_keyboard_activation_event_for_target(link, "Enter")).to_equal("click")
+        expect(be_dom_keyboard_activation_event_for_target(link, "Space")).to_equal("")
+
+        var button = BeDomNode.element("button")
+        expect(be_dom_keyboard_activation_event_for_target(button, "Return")).to_equal("click")
+        expect(be_dom_keyboard_activation_event_for_target(button, " ")).to_equal("click")
+
+        var checkbox = BeDomNode.element("input")
+        checkbox.set_attr("type", "checkbox")
+        expect(be_dom_keyboard_activation_event_for_target(checkbox, "spacebar")).to_equal("click")
+
+        var disabled = BeDomNode.element("button")
+        disabled.set_attr("disabled", "disabled")
+        expect(be_dom_keyboard_activation_event_for_target(disabled, "Enter")).to_equal("")
+
+    it "applies keyboard activation defaults to returned nodes":
+        var checkbox = BeDomNode.element("input")
+        checkbox.set_attr("type", "checkbox")
+
+        val checked = be_dom_dispatch_keyboard_activation_apply_default(checkbox, "Space")
+        expect(be_dom_has_attr(checked, "checked")).to_equal(true)
+
+        var link = BeDomNode.element("a")
+        link.set_attr("href", "/next")
+        val navigated = be_dom_dispatch_keyboard_activation_apply_default(link, "Enter")
+        expect(be_dom_get_attr(navigated, "data-navigation")).to_equal("/next")
+
+    it "stops same-target listener dispatch immediately":
+        var button = BeDomNode.element("button")
+        button.add_event_listener("click", "listener-before")
+        button.add_event_listener("click", "stop-immediate-propagation")
+        button.add_event_listener("click", "listener-after")
+
+        val dispatch = be_dom_dispatch_event(button, "click", true, true)
+
+        expect(dispatch.event.propagation_stopped).to_equal(true)
+        expect(dispatch.event.immediate_propagation_stopped).to_equal(true)
+        expect(dispatch.actions.len()).to_equal(2)
+        expect(dispatch.actions[0]).to_equal("listener-before")
+        expect(dispatch.actions[1]).to_equal("stop-immediate-propagation")
+
+    it "dispatches capture target and bubble phases along an explicit event path":
+        var root = BeDomNode.element("main")
+        root.set_attr("id", "root")
+        root.add_event_listener_with_capture("click", "root-capture", true)
+        root.add_event_listener("click", "root-bubble")
+        var section = BeDomNode.element("section")
+        section.set_attr("id", "section")
+        section.add_event_listener_with_capture("click", "section-capture", true)
+        section.add_event_listener("click", "section-bubble")
+        var button = BeDomNode.element("button")
+        button.set_attr("id", "save")
+        button.set_attr("onclick", "inline-click")
+        button.add_event_listener("click", "target-listener")
+
+        val dispatch = be_dom_dispatch_event_path([root, section, button], "click", true, true)
+
+        expect(dispatch.event.target_id).to_equal("save")
+        expect(dispatch.actions.len()).to_equal(6)
+        expect(dispatch.actions[0]).to_equal("root-capture")
+        expect(dispatch.phases[0]).to_equal("capture")
+        expect(dispatch.current_target_ids[0]).to_equal("root")
+        expect(dispatch.actions[1]).to_equal("section-capture")
+        expect(dispatch.phases[1]).to_equal("capture")
+        expect(dispatch.current_target_ids[1]).to_equal("section")
+        expect(dispatch.actions[2]).to_equal("inline-click")
+        expect(dispatch.phases[2]).to_equal("target")
+        expect(dispatch.current_target_ids[2]).to_equal("save")
+        expect(dispatch.actions[3]).to_equal("target-listener")
+        expect(dispatch.phases[3]).to_equal("target")
+        expect(dispatch.current_target_ids[3]).to_equal("save")
+        expect(dispatch.actions[4]).to_equal("section-bubble")
+        expect(dispatch.phases[4]).to_equal("bubble")
+        expect(dispatch.current_target_ids[4]).to_equal("section")
+        expect(dispatch.actions[5]).to_equal("root-bubble")
+        expect(dispatch.phases[5]).to_equal("bubble")
+        expect(dispatch.current_target_ids[5]).to_equal("root")
+
+    it "stops propagation from capture before reaching target or bubble listeners":
+        var root = BeDomNode.element("main")
+        root.set_attr("id", "root")
+        root.add_event_listener_with_capture("click", "root-capture", true)
+        var section = BeDomNode.element("section")
+        section.set_attr("id", "section")
+        section.add_event_listener_with_capture("click", "section-capture", true)
+        section.add_event_listener_with_capture("click", "stop-propagation", true)
+        section.add_event_listener_with_capture("click", "section-capture-after", true)
+        section.add_event_listener("click", "section-bubble")
+        var button = BeDomNode.element("button")
+        button.set_attr("id", "save")
+        button.add_event_listener("click", "target-listener")
+
+        val dispatch = be_dom_dispatch_event_path([root, section, button], "click", true, true)
+
+        expect(dispatch.event.propagation_stopped).to_equal(true)
+        expect(dispatch.event.immediate_propagation_stopped).to_equal(false)
+        expect(dispatch.actions.len()).to_equal(4)
+        expect(dispatch.actions[0]).to_equal("root-capture")
+        expect(dispatch.actions[1]).to_equal("section-capture")
+        expect(dispatch.actions[2]).to_equal("stop-propagation")
+        expect(dispatch.actions[3]).to_equal("section-capture-after")
+
+    it "does not run ancestor bubble listeners for non-bubbling events":
+        var root = BeDomNode.element("main")
+        root.set_attr("id", "root")
+        root.add_event_listener_with_capture("focus", "root-capture", true)
+        root.add_event_listener("focus", "root-bubble")
+        var input = BeDomNode.element("input")
+        input.set_attr("id", "name")
+        input.add_event_listener("focus", "target-focus")
+
+        val dispatch = be_dom_dispatch_event_path([root, input], "focus", false, false)
+
+        expect(dispatch.actions.len()).to_equal(2)
+        expect(dispatch.actions[0]).to_equal("root-capture")
+        expect(dispatch.phases[0]).to_equal("capture")
+        expect(dispatch.actions[1]).to_equal("target-focus")
+        expect(dispatch.phases[1]).to_equal("target")
+
+    it "finds a root to target path by element id":
+        var button = BeDomNode.element("button")
+        button.set_attr("id", "save")
+        var section = BeDomNode.element("section")
+        section.set_attr("id", "section")
+        section.add_child(button)
+        var root = BeDomNode.element("main")
+        root.set_attr("id", "root")
+        root.add_child(section)
+
+        val path = be_dom_find_path_to_id(root, "save")
+
+        expect(path.len()).to_equal(3)
+        expect(path[0].id).to_equal("root")
+        expect(path[1].id).to_equal("section")
+        expect(path[2].id).to_equal("save")
+
+    it "dispatches capture target and bubble phases by target id":
+        var button = BeDomNode.element("button")
+        button.set_attr("id", "save")
+        button.set_attr("onclick", "inline-click")
+        button.add_event_listener("click", "target-listener")
+        var section = BeDomNode.element("section")
+        section.set_attr("id", "section")
+        section.add_event_listener_with_capture("click", "section-capture", true)
+        section.add_event_listener("click", "section-bubble")
+        section.add_child(button)
+        var root = BeDomNode.element("main")
+        root.set_attr("id", "root")
+        root.add_event_listener_with_capture("click", "root-capture", true)
+        root.add_event_listener("click", "root-bubble")
+        root.add_child(section)
+
+        val dispatch = be_dom_dispatch_event_to_id(root, "save", "onclick", true, true)
+
+        expect(dispatch.event.target_id).to_equal("save")
+        expect(dispatch.actions.len()).to_equal(6)
+        expect(dispatch.actions[0]).to_equal("root-capture")
+        expect(dispatch.actions[1]).to_equal("section-capture")
+        expect(dispatch.actions[2]).to_equal("inline-click")
+        expect(dispatch.actions[3]).to_equal("target-listener")
+        expect(dispatch.actions[4]).to_equal("section-bubble")
+        expect(dispatch.actions[5]).to_equal("root-bubble")
+
+    it "returns an empty dispatch when target id is not found":
+        var root = BeDomNode.element("main")
+        root.set_attr("id", "root")
+        root.add_event_listener_with_capture("click", "root-capture", true)
+
+        val dispatch = be_dom_dispatch_event_to_id(root, "missing", "click", true, true)
+
+        expect(dispatch.event.target_id).to_equal("")
+        expect(dispatch.actions.len()).to_equal(0)

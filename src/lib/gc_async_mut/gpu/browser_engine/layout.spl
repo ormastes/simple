@@ -19,7 +19,7 @@ use std.gc_async_mut.gpu.browser_engine.dom.{BeDomNode, be_dom_get_style,
     be_dom_get_has_gradient, be_dom_get_gradient_c1, be_dom_get_gradient_c2,
     be_dom_get_text, be_dom_get_tag, be_dom_get_children, be_dom_get_is_text,
     be_dom_get_box_shadows, be_dom_get_backdrop_blur, be_dom_get_gradient_angle,
-    be_dom_get_text_decoration}
+    be_dom_get_text_decoration, BeDomEventDispatch, be_dom_dispatch_event_path}
 use std.gc_async_mut.gpu.browser_engine.css.{StyleProps, CssValue, BoxEdges, BoxShadow,
     be_default_style, CssPx, CssColor, CssOpacity}
 use common.text_layout.text_layout.{measure_text, text_char_width, text_line_height}
@@ -66,6 +66,22 @@ class BeLayoutBox:
             node: node, children: []
         )
 
+class BePointerActivationDispatch:
+    """Simplified pointer activation sequence result for hit-tested input."""
+    down: BeDomEventDispatch
+    up: BeDomEventDispatch
+    click: BeDomEventDispatch
+    click_synthesized: bool
+
+    static fn create(down: BeDomEventDispatch, up: BeDomEventDispatch,
+                     click: BeDomEventDispatch, click_synthesized: bool) -> BePointerActivationDispatch:
+        BePointerActivationDispatch(
+            down: down,
+            up: up,
+            click: click,
+            click_synthesized: click_synthesized
+        )
+
 # =========================================================================
 # Main Layout Entry Point
 # =========================================================================
@@ -101,7 +117,7 @@ pub fn layout_get_node(box: BeLayoutBox) -> BeDomNode:
 pub fn layout_get_children(box: BeLayoutBox) -> [BeLayoutBox]:
     box.children
 
-fn layout_tree(root: BeDomNode, viewport_w: i32, viewport_h: i32) -> BeLayoutBox:
+pub fn layout_tree(root: BeDomNode, viewport_w: i32, viewport_h: i32) -> BeLayoutBox:
     """Lay out the entire DOM tree within the given viewport dimensions."""
     var container = BeLayoutBox(
         x: 0, y: 0,
@@ -679,7 +695,7 @@ fn layout_text_node(node: BeDomNode, container: BeLayoutBox, parent_style: Style
 # Hit Testing
 # =========================================================================
 
-fn hit_test(layout: BeLayoutBox, x: i32, y: i32) -> text:
+pub fn hit_test(layout: BeLayoutBox, x: i32, y: i32) -> text:
     """Walk the layout tree and find the deepest box containing (x, y).
 
     Returns the DOM node's id, or "" if no box contains the point.
@@ -699,6 +715,48 @@ fn hit_test(layout: BeLayoutBox, x: i32, y: i32) -> text:
         return layout.node.id
 
     return ""
+
+pub fn hit_test_path(layout: BeLayoutBox, x: i32, y: i32) -> [BeDomNode]:
+    """Return the root-to-target DOM path for the deepest layout box containing a point."""
+    if not layout_contains_point(layout, x, y):
+        return []
+    var child_index = 0
+    while child_index < layout.children.len():
+        val child = layout.children[child_index]
+        child_index = child_index + 1
+        val child_path = hit_test_path(child, x, y)
+        if child_path.len() > 0:
+            var path: [BeDomNode] = [layout.node]
+            var path_index = 0
+            while path_index < child_path.len():
+                path.push(child_path[path_index])
+                path_index = path_index + 1
+            return path
+    [layout.node]
+
+pub fn hit_test_dispatch_click(layout: BeLayoutBox, x: i32, y: i32) -> BeDomEventDispatch:
+    """Dispatch a bubbling, cancelable click to the deepest layout box at a point."""
+    be_dom_dispatch_event_path(hit_test_path(layout, x, y), "click", true, true)
+
+pub fn hit_test_dispatch_pointer_event(layout: BeLayoutBox, x: i32, y: i32, event_type: text) -> BeDomEventDispatch:
+    """Dispatch a bubbling, cancelable pointer-derived event at a layout point."""
+    be_dom_dispatch_event_path(hit_test_path(layout, x, y), event_type, true, true)
+
+pub fn hit_test_dispatch_pointer_activation(layout: BeLayoutBox,
+                                            down_x: i32, down_y: i32,
+                                            up_x: i32, up_y: i32) -> BePointerActivationDispatch:
+    """Dispatch mousedown/up and synthesize click only when both hit the same target."""
+    val down = hit_test_dispatch_pointer_event(layout, down_x, down_y, "mousedown")
+    val up = hit_test_dispatch_pointer_event(layout, up_x, up_y, "mouseup")
+    var click = be_dom_dispatch_event_path([], "click", true, true)
+    var synthesized = false
+    if down.event.target_id != "" and down.event.target_id == up.event.target_id:
+        click = hit_test_dispatch_click(layout, up_x, up_y)
+        synthesized = true
+    BePointerActivationDispatch.create(down, up, click, synthesized)
+
+fn layout_contains_point(layout: BeLayoutBox, x: i32, y: i32) -> bool:
+    x >= layout.x and x < layout.x + layout.width and y >= layout.y and y < layout.y + layout.height
 
 # =========================================================================
 # Inline Paint → Scene Generation (avoids cross-module FieldGet bug)

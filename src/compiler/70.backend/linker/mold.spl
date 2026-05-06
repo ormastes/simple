@@ -9,9 +9,9 @@
 # Fallback chain: mold -> lld -> ld
 #
 # Pure Simple implementation - no Rust FFI required.
-# Uses bin/mold/mold (locally bundled) or system linkers.
+# Uses locally bundled mold binaries or system linkers.
 
-use std.io_runtime.{ShellResult, shell, shell_output, shell_bool, process_run, file_exists, file_write, file_delete, file_size_raw, cwd, host_os, host_arch}
+use std.io_runtime.{ShellResult, shell, shell_output, shell_bool, process_run, file_exists, file_write, file_delete, file_size_raw, cwd, host_os, host_arch, env_get}
 use std.string_builder.{StringBuilder}
 
 use compiler.backend.linker.obj_taker (SymbolType)
@@ -22,10 +22,21 @@ use compiler.backend.linker.link.{LinkConfig}
 # ============================================================================
 
 fn find_mold_path() -> text?:
-    """Find mold executable. Checks local bin/mold/mold first, then PATH."""
-    val local_mold = cwd() + "/bin/mold/mold"
-    if file_exists(local_mold):
-        return Some(local_mold)
+    """Find mold executable. Checks local bundled names first, then PATH."""
+    val root = cwd()
+    val bundled_name = mold_platform_binary_name()
+    val local_candidates = [
+        root + "/bin/mold/mold",
+        root + "/bin/mold/" + bundled_name,
+        root + "/bin/" + bundled_name,
+        root + "/bin/mold",
+        root + "/lib/simple/mold",
+        root + "/lib/simple/" + bundled_name
+    ]
+    for candidate in local_candidates:
+        if file_exists(candidate):
+            return Some(candidate)
+
     # Check PATH
     val which_result = shell_output("which mold 2>/dev/null")
     if which_result.len() > 0:
@@ -33,11 +44,38 @@ fn find_mold_path() -> text?:
     else:
         nil
 
+fn mold_platform_binary_name() -> text:
+    """Return the bundled mold filename used by the Rust FFI path."""
+    val os = host_os()
+    val arch = host_arch()
+
+    if os == "linux":
+        if arch == "x86_64":
+            return "mold-linux-x86_64"
+        if arch == "aarch64":
+            return "mold-linux-aarch64"
+    elif os == "macos" or os == "darwin":
+        if arch == "x86_64":
+            return "mold-macos-x86_64"
+        if arch == "aarch64":
+            return "mold-macos-aarch64"
+    elif os == "freebsd":
+        if arch == "x86_64":
+            return "mold-freebsd-x86_64"
+        if arch == "aarch64":
+            return "mold-freebsd-aarch64"
+
+    "mold"
+
 fn find_lld_path() -> text?:
-    """Find lld executable in PATH."""
-    val which_result = shell_output("which lld 2>/dev/null")
-    if which_result.len() > 0:
-        Some(which_result)
+    """Find LLD executable in PATH, preferring the GNU-compatible ld.lld frontend."""
+    val ld_lld_result = shell_output("which ld.lld 2>/dev/null")
+    if ld_lld_result.len() > 0:
+        return Some(ld_lld_result)
+
+    val lld_result = shell_output("which lld 2>/dev/null")
+    if lld_result.len() > 0:
+        Some(lld_result)
     else:
         nil
 
@@ -48,6 +86,32 @@ fn find_ld_path() -> text?:
         Some(which_result)
     else:
         nil
+
+fn find_requested_linker(name: text) -> Result<(text, LinkerType), text>:
+    """Resolve SIMPLE_LINKER override names using the same aliases as the Rust path."""
+    val requested = name.trim().lower()
+    if requested == "":
+        return Err("empty SIMPLE_LINKER override")
+
+    if requested == "mold":
+        val mold_path = find_mold_path()
+        if mold_path.?:
+            return Ok((mold_path.unwrap(), LinkerType.Mold))
+        return Err("SIMPLE_LINKER=mold requested but mold was not found")
+
+    if requested == "lld" or requested == "ld.lld" or requested == "lld-link":
+        val lld_path = find_lld_path()
+        if lld_path.?:
+            return Ok((lld_path.unwrap(), LinkerType.Lld))
+        return Err("SIMPLE_LINKER={name} requested but LLD was not found")
+
+    if requested == "ld" or requested == "gnu" or requested == "bfd":
+        val ld_path = find_ld_path()
+        if ld_path.?:
+            return Ok((ld_path.unwrap(), LinkerType.Ld))
+        return Err("SIMPLE_LINKER={name} requested but ld was not found")
+
+    Err("Unsupported SIMPLE_LINKER value: {name}")
 
 fn execute_linker(linker_path: text, args: [text]) -> Result<i64, text>:
     """Execute linker with arguments. Returns exit code."""
@@ -488,6 +552,10 @@ impl MoldBackend:
 
 fn find_linker() -> Result<(text, LinkerType), text>:
     """Find an available linker in order of preference."""
+    val requested_linker = env_get("SIMPLE_LINKER") ?? ""
+    if requested_linker.trim() != "":
+        return find_requested_linker(requested_linker)
+
     # Try mold first
     val mold_path = find_mold_path()
     if mold_path.?:

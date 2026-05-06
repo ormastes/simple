@@ -146,7 +146,7 @@ fn _map_heap_region(base: u64, size: u64):
 # Heap Allocation
 # ============================================================================
 
-fn heap_alloc(size: u64) -> VirtAddr?:
+fn heap_alloc(size: usize) -> VirtAddr?:
     """Allocate memory from the kernel heap via mimalloc.
 
     Delegates to mi_malloc_raw which uses the pre-mapped bump region.
@@ -158,13 +158,14 @@ fn heap_alloc(size: u64) -> VirtAddr?:
     if size == 0:
         return nil
 
-    val addr = mi_malloc_raw(size as usize)
+    val addr = mi_malloc_raw(size)
     if addr == 0:
         return nil
 
-    g_heap.total_allocated = g_heap.total_allocated + size
-    if g_heap.total_free >= size:
-        g_heap.total_free = g_heap.total_free - size
+    val tracked_size = size as u64
+    g_heap.total_allocated = g_heap.total_allocated + tracked_size
+    if g_heap.total_free >= tracked_size:
+        g_heap.total_free = g_heap.total_free - tracked_size
     g_heap.alloc_count = g_heap.alloc_count + 1
 
     Some(VirtAddr(addr: addr as u64))
@@ -176,12 +177,21 @@ fn heap_alloc(size: u64) -> VirtAddr?:
 fn heap_free(addr: VirtAddr):
     """Free a heap allocation.
 
-    Delegates to mi_free_raw. Page reclaim is not yet implemented in
-    mi_free_raw — the bump region is not reclaimed. This is acceptable
-    until sub-page bucketing lands (AC-6 follow-up).
+    Delegates to heap_free_size with size 0. Without allocation metadata,
+    this can only update allocation count; use heap_free_size when the caller
+    knows the original size and wants byte counters to stay accurate.
 
     Args:
         addr: Virtual address previously returned by heap_alloc
+    """
+    heap_free_size(addr, 0)
+
+fn heap_free_size(addr: VirtAddr, size: usize):
+    """Free a heap allocation when the original allocation size is known.
+
+    mi_free_raw can then update mimalloc raw accounting. Page reclaim is not
+    yet implemented in mi_free_raw, so this only updates logical counters and
+    mimalloc bookkeeping.
     """
     if addr.addr == 0:
         return
@@ -194,10 +204,17 @@ fn heap_free(addr: VirtAddr):
         log_raw_println("[HEAP] WARNING: free() on address above heap")
         return
 
-    mi_free_raw(addr.addr as usize, 0)
+    mi_free_raw(addr.addr as usize, size)
 
     if g_heap.alloc_count > 0:
         g_heap.alloc_count = g_heap.alloc_count - 1
+    val tracked_size = size as u64
+    if tracked_size > 0:
+        if g_heap.total_allocated >= tracked_size:
+            g_heap.total_allocated = g_heap.total_allocated - tracked_size
+        val new_free = g_heap.total_free + tracked_size
+        if new_free <= g_heap.size:
+            g_heap.total_free = new_free
 
 # ============================================================================
 # Heap Query Interface

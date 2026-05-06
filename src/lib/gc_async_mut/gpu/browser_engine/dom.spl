@@ -11,6 +11,67 @@ use std.gc_async_mut.gpu.browser_engine.css.{StyleProps, CssValue, BorderProps, 
 use app.ui.chromium.css_ext.{parse_float_keyword, parse_clear_keyword, parse_outline_style}
 use common.string_builder.{StringBuilder}
 
+class BeDomEvent:
+    """Simplified DOM Event object for browser-engine dispatch."""
+    event_type: text
+    target_tag: text
+    target_id: text
+    current_target_tag: text
+    current_target_id: text
+    bubbles: bool
+    cancelable: bool
+    default_prevented: bool
+    propagation_stopped: bool
+    immediate_propagation_stopped: bool
+
+    static fn create(event_type: text, target_tag: text, target_id: text,
+                     current_target_tag: text, current_target_id: text,
+                     bubbles: bool, cancelable: bool) -> BeDomEvent:
+        BeDomEvent(
+            event_type: normalize_dom_event_type(event_type),
+            target_tag: target_tag,
+            target_id: target_id,
+            current_target_tag: current_target_tag,
+            current_target_id: current_target_id,
+            bubbles: bubbles,
+            cancelable: cancelable,
+            default_prevented: false,
+            propagation_stopped: false,
+            immediate_propagation_stopped: false
+        )
+
+    me prevent_default():
+        if self.cancelable:
+            self.default_prevented = true
+
+    me stop_propagation():
+        self.propagation_stopped = true
+
+    me stop_immediate_propagation():
+        self.immediate_propagation_stopped = true
+        self.propagation_stopped = true
+
+class BeDomEventDispatch:
+    """Result of simplified DOM event dispatch."""
+    event: BeDomEvent
+    actions: [text]
+    phases: [text]
+    current_target_ids: [text]
+    default_action: text
+    default_action_allowed: bool
+
+    static fn create(event: BeDomEvent, actions: [text], phases: [text],
+                     current_target_ids: [text], default_action: text,
+                     default_action_allowed: bool) -> BeDomEventDispatch:
+        BeDomEventDispatch(
+            event: event,
+            actions: actions,
+            phases: phases,
+            current_target_ids: current_target_ids,
+            default_action: default_action,
+            default_action_allowed: default_action_allowed
+        )
+
 class BeDomNode:
     """A DOM node in the browser engine's simplified tree.
 
@@ -22,6 +83,8 @@ class BeDomNode:
         children     - child nodes (direct references, not IDs)
         text_content - text content for text nodes
         attributes   - key-value attribute pairs stored as flat [key, value, key, value, ...]
+        event_listener_types/actions - event listener records.
+        event_listener_capture - true for capture-phase listener records.
     """
     tag: text
     id: text
@@ -30,6 +93,9 @@ class BeDomNode:
     children: [BeDomNode]
     text_content: text
     attributes: [text]
+    event_listener_types: [text]
+    event_listener_actions: [text]
+    event_listener_capture: [bool]
 
     static fn element(tag: text) -> BeDomNode:
         """Create an element node with the given tag name."""
@@ -40,7 +106,10 @@ class BeDomNode:
             style: be_default_style(),
             children: [],
             text_content: "",
-            attributes: []
+            attributes: [],
+            event_listener_types: [],
+            event_listener_actions: [],
+            event_listener_capture: []
         )
 
     static fn text(content: text) -> BeDomNode:
@@ -52,7 +121,10 @@ class BeDomNode:
             style: be_default_style(),
             children: [],
             text_content: content,
-            attributes: []
+            attributes: [],
+            event_listener_types: [],
+            event_listener_actions: [],
+            event_listener_capture: []
         )
 
     me add_child(child: BeDomNode):
@@ -343,6 +415,8 @@ class BeDomNode:
 
     me set_attr(key: text, value: text):
         """Set an attribute key-value pair."""
+        if key == "id":
+            self.id = value
         # Check if key already exists and update it
         var new_attrs: [text] = []
         var found = false
@@ -369,6 +443,113 @@ class BeDomNode:
                 return self.attributes[i + 1]
             i = i + 2
         return ""
+
+    fn has_attr(key: text) -> bool:
+        """Return true when an attribute key is present, even with an empty value."""
+        var i = 0
+        while i + 1 < self.attributes.len():
+            if self.attributes[i] == key:
+                return true
+            i = i + 2
+        false
+
+    me remove_attr(key: text):
+        """Remove every attribute pair with the given key."""
+        var new_attrs: [text] = []
+        var i = 0
+        while i + 1 < self.attributes.len():
+            if self.attributes[i] != key:
+                new_attrs.push(self.attributes[i])
+                new_attrs.push(self.attributes[i + 1])
+            i = i + 2
+        self.attributes = new_attrs
+        if key == "id":
+            self.id = ""
+
+    me add_event_listener(event_type: text, action: text):
+        """Record a target/bubble DOM event listener token for this node."""
+        self.add_event_listener_with_capture(event_type, action, false)
+
+    me add_event_listener_with_capture(event_type: text, action: text, capture: bool):
+        """Record a DOM event listener token for target/bubble or capture dispatch."""
+        val normalized = normalize_dom_event_type(event_type)
+        if normalized == "" or action == "":
+            return
+        var types = self.event_listener_types
+        var actions = self.event_listener_actions
+        var captures = self.event_listener_capture
+        types.push(normalized)
+        actions.push(action)
+        captures.push(capture)
+        self.event_listener_types = types
+        self.event_listener_actions = actions
+        self.event_listener_capture = captures
+
+    fn event_listener_count(event_type: text) -> i32:
+        val normalized = normalize_dom_event_type(event_type)
+        var count = 0
+        var i = 0
+        while i < self.event_listener_types.len():
+            if self.event_listener_types[i] == normalized:
+                count = count + 1
+            i = i + 1
+        count
+
+    fn dispatch_event_actions(event_type: text) -> [text]:
+        """Return target-phase inline and registered listener actions in dispatch order."""
+        self.dispatch_event_actions_for_phase(event_type, "target")
+
+    fn dispatch_event_actions_for_phase(event_type: text, phase: text) -> [text]:
+        """Return listener actions for a simplified capture, target, or bubble phase."""
+        val normalized = normalize_dom_event_type(event_type)
+        var actions: [text] = []
+        if normalized == "":
+            return actions
+        if phase == "target":
+            val inline_action = self.get_attr("on" + normalized)
+            if inline_action != "":
+                actions.push(inline_action)
+        var i = 0
+        while i < self.event_listener_types.len() and i < self.event_listener_actions.len():
+            var is_capture = false
+            if i < self.event_listener_capture.len():
+                is_capture = self.event_listener_capture[i]
+            if self.event_listener_types[i] == normalized:
+                if phase == "capture" and is_capture:
+                    actions.push(self.event_listener_actions[i])
+                elif phase == "target" and not is_capture:
+                    actions.push(self.event_listener_actions[i])
+                elif phase == "bubble" and not is_capture:
+                    actions.push(self.event_listener_actions[i])
+            i = i + 1
+        actions
+
+    fn dispatch_event(event_type: text, bubbles: bool, cancelable: bool) -> BeDomEventDispatch:
+        """Return a simplified Event object with target-phase dispatch actions."""
+        var event = BeDomEvent.create(event_type, self.tag, self.id, self.tag, self.id, bubbles, cancelable)
+        val source_actions = self.dispatch_event_actions(event.event_type)
+        var actions: [text] = []
+        var phases: [text] = []
+        var ids: [text] = []
+        var propagation_stopped = false
+        var immediate_stopped = false
+        var i = 0
+        while i < source_actions.len() and not immediate_stopped:
+            actions.push(source_actions[i])
+            phases.push("target")
+            ids.push(self.id)
+            if source_actions[i] == "prevent-default":
+                event.prevent_default()
+            elif source_actions[i] == "stop-propagation":
+                propagation_stopped = true
+            elif source_actions[i] == "stop-immediate-propagation":
+                immediate_stopped = true
+                propagation_stopped = true
+            i = i + 1
+        event.propagation_stopped = propagation_stopped
+        event.immediate_propagation_stopped = immediate_stopped
+        val default_action = be_dom_default_action_for_target(self, event.event_type)
+        BeDomEventDispatch.create(event, actions, phases, ids, default_action, default_action != "" and not event.default_prevented)
 
     fn is_text_node() -> bool:
         """True if this is a text node (tag == '#text')."""
@@ -464,6 +645,195 @@ pub fn be_dom_get_attributes(node: BeDomNode) -> [text]:
 pub fn be_dom_get_attr(node: BeDomNode, key: text) -> text:
     node.get_attr(key)
 
+pub fn be_dom_has_attr(node: BeDomNode, key: text) -> bool:
+    node.has_attr(key)
+
+pub fn be_dom_get_event_listener_count(node: BeDomNode, event_type: text) -> i32:
+    node.event_listener_count(event_type)
+
+pub fn be_dom_dispatch_event_actions(node: BeDomNode, event_type: text) -> [text]:
+    node.dispatch_event_actions(event_type)
+
+pub fn be_dom_create_event(node: BeDomNode, event_type: text, bubbles: bool, cancelable: bool) -> BeDomEvent:
+    BeDomEvent.create(event_type, node.tag, node.id, node.tag, node.id, bubbles, cancelable)
+
+pub fn be_dom_dispatch_event(node: BeDomNode, event_type: text, bubbles: bool, cancelable: bool) -> BeDomEventDispatch:
+    node.dispatch_event(event_type, bubbles, cancelable)
+
+pub fn be_dom_dispatch_event_apply_default(node: BeDomNode, event_type: text, bubbles: bool, cancelable: bool) -> BeDomNode:
+    """Dispatch an event and return the node after any allowed default action."""
+    val dispatch = node.dispatch_event(event_type, bubbles, cancelable)
+    if dispatch.default_action_allowed:
+        return be_dom_apply_default_action(node, dispatch.default_action)
+    node
+
+pub fn be_dom_keyboard_activation_event_for_target(target: BeDomNode, key: text) -> text:
+    """Map a focused key press to the browser activation event it should synthesize."""
+    if target.has_attr("disabled"):
+        return ""
+    val normalized_key = normalize_dom_key(key)
+    if normalized_key == "enter":
+        if target.tag == "a":
+            return "click"
+        if target.tag == "button":
+            return "click"
+        if target.tag == "input":
+            val input_type = target.get_attr("type").lower()
+            if input_type == "checkbox" or input_type == "radio" or input_type == "submit" or input_type == "button":
+                return "click"
+    elif normalized_key == "space":
+        if target.tag == "button":
+            return "click"
+        if target.tag == "input":
+            val input_type = target.get_attr("type").lower()
+            if input_type == "checkbox" or input_type == "radio" or input_type == "button":
+                return "click"
+    ""
+
+pub fn be_dom_dispatch_keyboard_activation_apply_default(node: BeDomNode, key: text) -> BeDomNode:
+    """Apply the click default action synthesized by a focused keyboard activation."""
+    val activation_event = be_dom_keyboard_activation_event_for_target(node, key)
+    if activation_event == "":
+        return node
+    be_dom_dispatch_event_apply_default(node, activation_event, true, true)
+
+pub fn be_dom_dispatch_event_path(path: [BeDomNode], event_type: text, bubbles: bool, cancelable: bool) -> BeDomEventDispatch:
+    """Dispatch over an explicit root-to-target path with capture, target, and bubble phases."""
+    if path.len() == 0:
+        val empty_event = BeDomEvent.create(event_type, "", "", "", "", bubbles, cancelable)
+        return BeDomEventDispatch.create(empty_event, [], [], [], "", false)
+    val target = path[path.len() - 1]
+    var event = BeDomEvent.create(event_type, target.tag, target.id, target.tag, target.id, bubbles, cancelable)
+    var actions: [text] = []
+    var phases: [text] = []
+    var current_ids: [text] = []
+    var propagation_stopped = false
+    var immediate_stopped = false
+    var capture_index = 0
+    while capture_index + 1 < path.len() and not propagation_stopped:
+        val capture_actions = path[capture_index].dispatch_event_actions_for_phase(event.event_type, "capture")
+        var capture_action_index = 0
+        while capture_action_index < capture_actions.len() and not immediate_stopped:
+            actions.push(capture_actions[capture_action_index])
+            phases.push("capture")
+            current_ids.push(path[capture_index].id)
+            if capture_actions[capture_action_index] == "prevent-default":
+                event.prevent_default()
+            elif capture_actions[capture_action_index] == "stop-propagation":
+                propagation_stopped = true
+            elif capture_actions[capture_action_index] == "stop-immediate-propagation":
+                immediate_stopped = true
+                propagation_stopped = true
+            capture_action_index = capture_action_index + 1
+        capture_index = capture_index + 1
+    if not propagation_stopped:
+        val target_actions = target.dispatch_event_actions_for_phase(event.event_type, "target")
+        var target_action_index = 0
+        while target_action_index < target_actions.len() and not immediate_stopped:
+            actions.push(target_actions[target_action_index])
+            phases.push("target")
+            current_ids.push(target.id)
+            if target_actions[target_action_index] == "prevent-default":
+                event.prevent_default()
+            elif target_actions[target_action_index] == "stop-propagation":
+                propagation_stopped = true
+            elif target_actions[target_action_index] == "stop-immediate-propagation":
+                immediate_stopped = true
+                propagation_stopped = true
+            target_action_index = target_action_index + 1
+    if bubbles and not propagation_stopped:
+        var bubble_index = path.len() - 1
+        while bubble_index > 0 and not propagation_stopped:
+            bubble_index = bubble_index - 1
+            val bubble_actions = path[bubble_index].dispatch_event_actions_for_phase(event.event_type, "bubble")
+            var bubble_action_index = 0
+            while bubble_action_index < bubble_actions.len() and not immediate_stopped:
+                actions.push(bubble_actions[bubble_action_index])
+                phases.push("bubble")
+                current_ids.push(path[bubble_index].id)
+                if bubble_actions[bubble_action_index] == "prevent-default":
+                    event.prevent_default()
+                elif bubble_actions[bubble_action_index] == "stop-propagation":
+                    propagation_stopped = true
+                elif bubble_actions[bubble_action_index] == "stop-immediate-propagation":
+                    immediate_stopped = true
+                    propagation_stopped = true
+                bubble_action_index = bubble_action_index + 1
+    event.propagation_stopped = propagation_stopped
+    event.immediate_propagation_stopped = immediate_stopped
+    val default_action = be_dom_default_action_for_target(target, event.event_type)
+    BeDomEventDispatch.create(event, actions, phases, current_ids, default_action, default_action != "" and not event.default_prevented)
+
+pub fn be_dom_find_path_to_id(root: BeDomNode, target_id: text) -> [BeDomNode]:
+    """Return the first root-to-target path for an element id, or an empty path."""
+    if target_id == "":
+        return []
+    if root.id == target_id:
+        return [root]
+    var child_index = 0
+    while child_index < root.children.len():
+        val child_path = be_dom_find_path_to_id(root.children[child_index], target_id)
+        if child_path.len() > 0:
+            var path: [BeDomNode] = [root]
+            var i = 0
+            while i < child_path.len():
+                path.push(child_path[i])
+                i = i + 1
+            return path
+        child_index = child_index + 1
+    []
+
+pub fn be_dom_dispatch_event_to_id(root: BeDomNode, target_id: text, event_type: text, bubbles: bool, cancelable: bool) -> BeDomEventDispatch:
+    """Find a target by id and dispatch using the discovered root-to-target path."""
+    be_dom_dispatch_event_path(be_dom_find_path_to_id(root, target_id), event_type, bubbles, cancelable)
+
+pub fn be_dom_default_action_for_target(target: BeDomNode, event_type: text) -> text:
+    """Return a deterministic token for focused browser default actions."""
+    val normalized = normalize_dom_event_type(event_type)
+    if normalized == "click":
+        if target.tag == "a":
+            val href = target.get_attr("href")
+            if href != "":
+                return "navigate:" + href
+        if target.tag == "button":
+            if target.has_attr("disabled"):
+                return ""
+            return "button-activate"
+        if target.tag == "input":
+            if target.has_attr("disabled"):
+                return ""
+            val input_type = target.get_attr("type").lower()
+            if input_type == "checkbox":
+                return "input-checkbox-toggle"
+            if input_type == "radio":
+                return "input-radio-select"
+    if normalized == "submit" and target.tag == "form":
+        return "form-submit"
+    if normalized == "focus":
+        if target.tag == "input" or target.tag == "button" or target.tag == "select" or target.tag == "textarea" or target.tag == "a":
+            return "focus-element"
+    ""
+
+pub fn be_dom_apply_default_action(target: BeDomNode, default_action: text) -> BeDomNode:
+    """Return a target node with the simplified browser default action applied."""
+    var updated = target
+    if default_action == "input-checkbox-toggle":
+        if updated.has_attr("checked"):
+            updated.remove_attr("checked")
+        else:
+            updated.set_attr("checked", "checked")
+    elif default_action == "input-radio-select":
+        updated.set_attr("checked", "checked")
+    elif default_action == "focus-element":
+        updated.set_attr("data-focused", "true")
+    elif default_action == "button-activate":
+        updated.set_attr("data-activated", "true")
+    elif default_action == "form-submit":
+        updated.set_attr("data-submitted", "true")
+    elif default_action.starts_with("navigate:"):
+        updated.set_attr("data-navigation", default_action.slice(9, default_action.len()))
+    updated
+
 pub fn be_dom_get_box_shadows(node: BeDomNode) -> [BoxShadow]:
     node.style.box_shadows
 
@@ -477,15 +847,23 @@ pub fn be_dom_get_text_decoration(node: BeDomNode) -> text:
     node.style.text_decoration
 
 pub fn be_dom_set_style(node: BeDomNode, prop: text, value: text):
-    """Standalone wrapper for node.set_style() — avoids cross-module method call stub."""
+    """Standalone wrapper for node.set_style() across module boundaries."""
     node.set_style(prop, value)
 
 pub fn be_dom_set_attr(node: BeDomNode, key: text, value: text):
-    """Standalone wrapper for node.set_attr() — avoids cross-module method call stub."""
+    """Standalone wrapper for node.set_attr() across module boundaries."""
     node.set_attr(key, value)
 
+pub fn be_dom_add_event_listener(node: BeDomNode, event_type: text, action: text):
+    """Standalone wrapper for target/bubble DOM event listener registration."""
+    node.add_event_listener(event_type, action)
+
+pub fn be_dom_add_event_listener_with_capture(node: BeDomNode, event_type: text, action: text, capture: bool):
+    """Standalone wrapper for capture or target/bubble DOM event listener registration."""
+    node.add_event_listener_with_capture(event_type, action, capture)
+
 pub fn be_dom_add_child(parent: BeDomNode, child: BeDomNode):
-    """Standalone wrapper for parent.add_child() — avoids cross-module method call stub."""
+    """Standalone wrapper for parent.add_child() across module boundaries."""
     parent.add_child(child)
 
 pub fn be_dom_set_children(node: BeDomNode, new_children: [BeDomNode]):
@@ -504,6 +882,29 @@ pub fn BeDomNode__set_style(node: BeDomNode, prop: text, value: text):
 
 pub fn BeDomNode__add_child(parent: BeDomNode, child: BeDomNode):
     parent.add_child(child)
+
+pub fn BeDomNode__add_event_listener(node: BeDomNode, event_type: text, action: text):
+    node.add_event_listener(event_type, action)
+
+pub fn BeDomNode__add_event_listener_with_capture(node: BeDomNode, event_type: text, action: text, capture: bool):
+    node.add_event_listener_with_capture(event_type, action, capture)
+
+pub fn normalize_dom_event_type(event_type: text) -> text:
+    val trimmed = event_type.trim().lower()
+    if trimmed.starts_with("on") and trimmed.len() > 2:
+        trimmed.slice(2, trimmed.len())
+    else:
+        trimmed
+
+pub fn normalize_dom_key(key: text) -> text:
+    if key == " ":
+        return "space"
+    val trimmed = key.trim().lower()
+    if trimmed == "spacebar":
+        return "space"
+    if trimmed == "return":
+        return "enter"
+    trimmed
 
 class BeDomFactory:
     static fn element(tag: text) -> BeDomNode:

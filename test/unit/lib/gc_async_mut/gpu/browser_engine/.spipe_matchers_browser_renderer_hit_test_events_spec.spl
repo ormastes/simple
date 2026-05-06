@@ -1,0 +1,132 @@
+use std.spec.*
+
+use std.gc_async_mut.gpu.browser_engine.dom.{BeDomNode}
+use std.gc_async_mut.gpu.browser_engine.layout.{BeLayoutBox,
+    hit_test, hit_test_dispatch_click, hit_test_dispatch_pointer_activation,
+    hit_test_dispatch_pointer_event, hit_test_path}
+
+fn _box(node: BeDomNode, x: i32, y: i32, w: i32, h: i32, children: [BeLayoutBox]) -> BeLayoutBox:
+    BeLayoutBox(
+        x: x,
+        y: y,
+        width: w,
+        height: h,
+        content_x: x,
+        content_y: y,
+        content_width: w,
+        content_height: h,
+        node: node,
+        children: children
+    )
+
+fn _interactive_layout() -> BeLayoutBox:
+    var button = BeDomNode.element("button")
+    button.set_attr("id", "save")
+    button.set_attr("onclick", "inline-click")
+    button.add_event_listener("mousedown", "target-down")
+    button.add_event_listener("mouseup", "target-up")
+    button.add_event_listener("click", "target-listener")
+
+    var section = BeDomNode.element("section")
+    section.set_attr("id", "panel")
+    section.add_event_listener_with_capture("click", "panel-capture", true)
+    section.add_event_listener("click", "panel-bubble")
+
+    var root = BeDomNode.element("main")
+    root.set_attr("id", "root")
+    root.add_event_listener_with_capture("mousedown", "root-down-capture", true)
+    root.add_event_listener_with_capture("click", "root-capture", true)
+    root.add_event_listener("click", "root-bubble")
+
+    val button_box = _box(button, 20, 20, 40, 20, [])
+    val section_box = _box(section, 10, 10, 80, 60, [button_box])
+    _box(root, 0, 0, 120, 100, [section_box])
+
+describe "Browser renderer hit-test event routing":
+
+    it "keeps id hit testing for the deepest layout box":
+        val layout = _interactive_layout()
+
+        expect hit_test(layout, 25, 25) == "save"
+        expect hit_test(layout, 15, 15) == "panel"
+        expect hit_test(layout, 200, 200) == ""
+
+    it "returns a root to target path for pointer coordinates":
+        val layout = _interactive_layout()
+
+        val path = hit_test_path(layout, 25, 25)
+
+        expect path.len() == 3
+        expect path[0].id == "root"
+        expect path[1].id == "panel"
+        expect path[2].id == "save"
+
+    it "dispatches click through capture target and bubble phases from hit test":
+        val layout = _interactive_layout()
+
+        val dispatch = hit_test_dispatch_click(layout, 25, 25)
+
+        expect dispatch.event.target_id == "save"
+        expect dispatch.default_action == "button-activate"
+        expect dispatch.default_action_allowed == true
+        expect dispatch.actions.len() == 6
+        expect dispatch.actions[0] == "root-capture"
+        expect dispatch.phases[0] == "capture"
+        expect dispatch.actions[1] == "panel-capture"
+        expect dispatch.phases[1] == "capture"
+        expect dispatch.actions[2] == "inline-click"
+        expect dispatch.phases[2] == "target"
+        expect dispatch.actions[3] == "target-listener"
+        expect dispatch.phases[3] == "target"
+        expect dispatch.actions[4] == "panel-bubble"
+        expect dispatch.phases[4] == "bubble"
+        expect dispatch.actions[5] == "root-bubble"
+        expect dispatch.phases[5] == "bubble"
+
+    it "dispatches raw pointer-derived events through hit-tested paths":
+        val layout = _interactive_layout()
+
+        val dispatch = hit_test_dispatch_pointer_event(layout, 25, 25, "mousedown")
+
+        expect dispatch.event.event_type == "mousedown"
+        expect dispatch.event.target_id == "save"
+        expect dispatch.actions.len() == 2
+        expect dispatch.actions[0] == "root-down-capture"
+        expect dispatch.phases[0] == "capture"
+        expect dispatch.actions[1] == "target-down"
+        expect dispatch.phases[1] == "target"
+        expect dispatch.default_action_allowed == false
+
+    it "synthesizes click after pointer down and up on the same target":
+        val layout = _interactive_layout()
+
+        val activation = hit_test_dispatch_pointer_activation(layout, 25, 25, 30, 30)
+
+        expect activation.down.event.event_type == "mousedown"
+        expect activation.down.event.target_id == "save"
+        expect activation.up.event.event_type == "mouseup"
+        expect activation.up.event.target_id == "save"
+        expect activation.click_synthesized == true
+        expect activation.click.event.event_type == "click"
+        expect activation.click.default_action == "button-activate"
+        expect activation.click.actions[2] == "inline-click"
+
+    it "does not synthesize click when pointer up lands on a different target":
+        val layout = _interactive_layout()
+
+        val activation = hit_test_dispatch_pointer_activation(layout, 25, 25, 15, 15)
+
+        expect activation.down.event.target_id == "save"
+        expect activation.up.event.target_id == "panel"
+        expect activation.click_synthesized == false
+        expect activation.click.event.target_id == ""
+        expect activation.click.actions.len() == 0
+
+    it "returns an empty dispatch for pointer misses":
+        val layout = _interactive_layout()
+
+        val dispatch = hit_test_dispatch_click(layout, 200, 200)
+
+        expect dispatch.event.target_id == ""
+        expect dispatch.actions.len() == 0
+        expect dispatch.default_action_allowed == false
