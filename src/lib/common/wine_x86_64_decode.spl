@@ -1,0 +1,109 @@
+"""Tiny x86_64 decoder gate for the known hello.exe milestone sequence."""
+
+use common.pe_coff_header.{pe_entry_point_rva, pe_rva_to_file_offset}
+
+class WineHelloInstructionPlan:
+    ok: bool
+    error: text
+    entry_rva: i64
+    get_std_handle_rva: i64
+    stdout_payload_rva: i64
+    write_file_rva: i64
+    exit_process_rva: i64
+
+fn _plan_error(error: text, entry_rva: i64) -> WineHelloInstructionPlan:
+    WineHelloInstructionPlan(ok: false, error: error, entry_rva: entry_rva, get_std_handle_rva: 0, stdout_payload_rva: 0, write_file_rva: 0, exit_process_rva: 0)
+
+fn _plan_ready(entry_rva: i64, get_std_handle_rva: i64, stdout_payload_rva: i64, write_file_rva: i64, exit_process_rva: i64) -> WineHelloInstructionPlan:
+    WineHelloInstructionPlan(ok: true, error: "", entry_rva: entry_rva, get_std_handle_rva: get_std_handle_rva, stdout_payload_rva: stdout_payload_rva, write_file_rva: write_file_rva, exit_process_rva: exit_process_rva)
+
+fn _byte(data: [u8], offset: i64) -> i64:
+    if offset < 0 or offset >= data.len():
+        return -1
+    data[offset] as i64
+
+fn _u32_le(data: [u8], offset: i64) -> i64:
+    if offset < 0 or offset + 3 >= data.len():
+        return -1
+    (_byte(data, offset)) |
+    (_byte(data, offset + 1) << 8) |
+    (_byte(data, offset + 2) << 16) |
+    (_byte(data, offset + 3) << 24)
+
+fn _relative_target_rva(data: [u8], entry_rva: i64, displacement_offset: i64, next_instruction_delta: i64) -> i64:
+    val displacement = _u32_le(data, displacement_offset)
+    if displacement < 0:
+        return -1
+    entry_rva + next_instruction_delta + displacement
+
+pub fn wine_x86_64_instruction_at(data: [u8], offset: i64) -> text:
+    val b0 = _byte(data, offset)
+    if b0 < 0:
+        return "instruction-out-of-bounds"
+    if b0 == 0xe8:
+        if _u32_le(data, offset + 1) < 0:
+            return "truncated-call-rel32"
+        return "call-rel32"
+    if b0 == 0x31:
+        if _byte(data, offset + 1) < 0:
+            return "truncated-xor-r32-r32"
+        if _byte(data, offset + 1) == 0xc9:
+            return "xor-ecx-ecx"
+        return "unsupported-xor-r32-r32"
+    if b0 == 0x48:
+        val b1 = _byte(data, offset + 1)
+        val b2 = _byte(data, offset + 2)
+        if b1 < 0 or b2 < 0:
+            return "truncated-rex-instruction"
+        if b1 == 0x31 and b2 == 0xc9:
+            return "xor-rcx-rcx"
+        if b1 == 0x31:
+            return "unsupported-rex-xor"
+        if b1 == 0x8d and b2 == 0x15:
+            if _u32_le(data, offset + 3) < 0:
+                return "truncated-lea-rip-rel32"
+            return "lea-rdx-rip-rel32"
+        if b1 == 0x8d:
+            return "unsupported-rex-lea"
+        return "unsupported-rex-instruction"
+    "unsupported-opcode"
+
+pub fn wine_x86_64_hello_decode_plan(data: [u8]) -> WineHelloInstructionPlan:
+    val entry_rva = pe_entry_point_rva(data)
+    val entry_offset = pe_rva_to_file_offset(data, entry_rva)
+    if entry_offset < 0:
+        return _plan_error("entrypoint-unmapped", entry_rva)
+    if entry_offset + 23 >= data.len():
+        return _plan_error("hello-instruction-sequence-out-of-bounds", entry_rva)
+    val entry_instruction = wine_x86_64_instruction_at(data, entry_offset)
+    if entry_instruction != "xor-rcx-rcx":
+        return _plan_error("unsupported-entry-instruction:" + entry_instruction, entry_rva)
+    if _byte(data, entry_offset + 3) != 0xe8:
+        return _plan_error("missing-get-std-handle-call", entry_rva)
+    val get_std_handle_rva = _relative_target_rva(data, entry_rva, entry_offset + 4, 8)
+    if get_std_handle_rva != 0x2080:
+        return _plan_error("get-std-handle-call-target-mismatch", entry_rva)
+    if _byte(data, entry_offset + 8) != 0x48 or _byte(data, entry_offset + 9) != 0x8d or _byte(data, entry_offset + 10) != 0x15:
+        return _plan_error("missing-stdout-buffer-load", entry_rva)
+    val stdout_payload_rva = _relative_target_rva(data, entry_rva, entry_offset + 11, 15)
+    if stdout_payload_rva != 0x2120:
+        return _plan_error("stdout-buffer-target-mismatch", entry_rva)
+    if _byte(data, entry_offset + 15) != 0xe8:
+        return _plan_error("missing-write-file-call", entry_rva)
+    val write_file_rva = _relative_target_rva(data, entry_rva, entry_offset + 16, 20)
+    if write_file_rva != 0x20a0:
+        return _plan_error("write-file-call-target-mismatch", entry_rva)
+    if _byte(data, entry_offset + 20) != 0x31 or _byte(data, entry_offset + 21) != 0xc9:
+        return _plan_error("missing-exit-code-zero", entry_rva)
+    if _byte(data, entry_offset + 22) != 0xe8:
+        return _plan_error("missing-exit-process-call", entry_rva)
+    val exit_process_rva = _relative_target_rva(data, entry_rva, entry_offset + 23, 27)
+    if exit_process_rva != 0x20c0:
+        return _plan_error("exit-process-call-target-mismatch", entry_rva)
+    _plan_ready(entry_rva, get_std_handle_rva, stdout_payload_rva, write_file_rva, exit_process_rva)
+
+pub fn wine_x86_64_hello_decode_gate(data: [u8]) -> text:
+    val plan = wine_x86_64_hello_decode_plan(data)
+    if not plan.ok:
+        return plan.error
+    "ready"

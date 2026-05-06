@@ -1,0 +1,144 @@
+"""Known-fixture program-body bridge for the first hello.exe milestone."""
+
+use common.pe_coff_header.{pe_rva_to_file_offset}
+use common.wine_cpu_exec.{WineCpuHelloExecutionPlan}
+use common.wine_nt_bridge.{
+    WineNtBridgeExecutionResult,
+    wine_nt_bridge_exit_code_zero,
+    wine_nt_bridge_execute_hello_stdout,
+    wine_nt_bridge_stdout_handle,
+    wine_nt_bridge_write_file
+}
+
+fn _matches_hello_marker_at(data: [u8], offset: i64) -> bool:
+    if offset < 0 or offset + 16 >= data.len():
+        return false
+    data[offset] == 0x53 and
+    data[offset + 1] == 0x49 and
+    data[offset + 2] == 0x4d and
+    data[offset + 3] == 0x50 and
+    data[offset + 4] == 0x4c and
+    data[offset + 5] == 0x45 and
+    data[offset + 6] == 0x5f and
+    data[offset + 7] == 0x57 and
+    data[offset + 8] == 0x49 and
+    data[offset + 9] == 0x4e and
+    data[offset + 10] == 0x45 and
+    data[offset + 11] == 0x5f and
+    data[offset + 12] == 0x48 and
+    data[offset + 13] == 0x45 and
+    data[offset + 14] == 0x4c and
+    data[offset + 15] == 0x4c and
+    data[offset + 16] == 0x4f
+
+fn _find_hello_marker(data: [u8]) -> i64:
+    var i = 0
+    while i < data.len():
+        if _matches_hello_marker_at(data, i):
+            return i
+        i = i + 1
+    -1
+
+fn _matches_stdout_marker_at(data: [u8], offset: i64) -> bool:
+    if offset < 0 or offset + 18 >= data.len():
+        return false
+    data[offset] == 0x53 and
+    data[offset + 1] == 0x49 and
+    data[offset + 2] == 0x4d and
+    data[offset + 3] == 0x50 and
+    data[offset + 4] == 0x4c and
+    data[offset + 5] == 0x45 and
+    data[offset + 6] == 0x5f and
+    data[offset + 7] == 0x57 and
+    data[offset + 8] == 0x49 and
+    data[offset + 9] == 0x4e and
+    data[offset + 10] == 0x45 and
+    data[offset + 11] == 0x5f and
+    data[offset + 12] == 0x53 and
+    data[offset + 13] == 0x54 and
+    data[offset + 14] == 0x44 and
+    data[offset + 15] == 0x4f and
+    data[offset + 16] == 0x55 and
+    data[offset + 17] == 0x54 and
+    data[offset + 18] == 0x3a
+
+fn _find_stdout_marker(data: [u8]) -> i64:
+    var i = 0
+    while i < data.len():
+        if _matches_stdout_marker_at(data, i):
+            return i
+        i = i + 1
+    -1
+
+fn _read_nul_terminated_ascii(data: [u8], offset: i64, max_len: i64) -> text:
+    if offset < 0 or offset >= data.len():
+        return ""
+    var out = ""
+    var i = offset
+    var count = 0
+    while i < data.len() and count < max_len:
+        if data[i] == 0:
+            return out
+        out = out + (data[i] as i64).chr()
+        i = i + 1
+        count = count + 1
+    ""
+
+pub fn wine_known_hello_stdout_payload(data: [u8]) -> text:
+    val marker = _find_stdout_marker(data)
+    if marker < 0:
+        return ""
+    _read_nul_terminated_ascii(data, marker + 19, 128)
+
+pub fn wine_known_hello_stdout_payload_at_rva(data: [u8], payload_rva: i64) -> text:
+    val payload_offset = pe_rva_to_file_offset(data, payload_rva)
+    if payload_offset < 0:
+        return ""
+    if not _matches_stdout_marker_at(data, payload_offset):
+        return ""
+    _read_nul_terminated_ascii(data, payload_offset + 19, 128)
+
+pub fn wine_known_hello_fixture_gate(data: [u8]) -> text:
+    if _find_hello_marker(data) < 0:
+        return "hello-fixture-marker-missing"
+    if wine_known_hello_stdout_payload(data) == "":
+        return "hello-stdout-payload-missing"
+    "ready"
+
+pub fn wine_known_hello_fixture_gate_at_rva(data: [u8], payload_rva: i64) -> text:
+    if _find_hello_marker(data) < 0:
+        return "hello-fixture-marker-missing"
+    if wine_known_hello_stdout_payload_at_rva(data, payload_rva) == "":
+        return "hello-stdout-payload-rva-mismatch"
+    "ready"
+
+pub fn wine_known_hello_stdout(data: [u8]) -> text:
+    if wine_known_hello_fixture_gate(data) != "ready":
+        return ""
+    if wine_nt_bridge_stdout_handle() != -11:
+        return ""
+    if wine_nt_bridge_exit_code_zero() != 0:
+        return ""
+    val payload = wine_known_hello_stdout_payload(data)
+    wine_nt_bridge_write_file(wine_nt_bridge_stdout_handle(), payload, payload.len())
+
+pub fn wine_known_hello_stdout_at_rva(data: [u8], payload_rva: i64) -> text:
+    if wine_known_hello_fixture_gate_at_rva(data, payload_rva) != "ready":
+        return ""
+    if wine_nt_bridge_stdout_handle() != -11:
+        return ""
+    if wine_nt_bridge_exit_code_zero() != 0:
+        return ""
+    val payload = wine_known_hello_stdout_payload_at_rva(data, payload_rva)
+    wine_nt_bridge_write_file(wine_nt_bridge_stdout_handle(), payload, payload.len())
+
+pub fn wine_known_hello_execute_at_rva(data: [u8], payload_rva: i64) -> WineNtBridgeExecutionResult:
+    val payload = wine_known_hello_stdout_payload_at_rva(data, payload_rva)
+    wine_nt_bridge_execute_hello_stdout(payload)
+
+pub fn wine_known_hello_execute_plan(data: [u8], plan: WineCpuHelloExecutionPlan) -> WineNtBridgeExecutionResult:
+    if not plan.ok:
+        return wine_nt_bridge_execute_hello_stdout("")
+    if plan.call_sequence != "GetStdHandle WriteFile ExitProcess" or plan.call_count != 3:
+        return wine_nt_bridge_execute_hello_stdout("")
+    wine_known_hello_execute_at_rva(data, plan.stdout_payload_rva)

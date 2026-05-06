@@ -1,0 +1,61 @@
+use common.wine_nt_file_io.{wine_nt_file_table_add_file, wine_nt_file_table_new}
+use common.wine_nt_heap.{wine_nt_process_heap_new}
+use common.wine_ntdll_bridge.{
+    wine_ntdll_allocate_virtual_memory,
+    wine_ntdll_close,
+    wine_ntdll_create_file,
+    wine_ntdll_free_virtual_memory,
+    wine_ntdll_protect_virtual_memory,
+    wine_ntdll_read_file,
+    wine_ntdll_required_calls,
+    wine_rtl_allocate_heap,
+    wine_rtl_free_heap
+}
+use common.wine_vm_adapter.{wine_vm_access_gate, wine_vm_space_new}
+
+fn _all_adapter_apis() -> text:
+    "fd-open fd-read fd-write fd-close fd-dup fd-inherit stdio pipe socket timer poll-wait " +
+        "cwd env argv spawn path-normalize path-attrs path-locks errno-map"
+
+fn _all_async_features() -> text:
+    "io-driver submit-open submit-read submit-write submit-close submit-timeout poll-completion " +
+        "event-loop register-fd deregister-fd waker wake"
+
+describe "Wine ntdll and Rtl bridge":
+    it "lists the modeled ntdll and Rtl calls":
+        val calls = wine_ntdll_required_calls()
+        expect(calls.len()).to_equal(8)
+        expect(calls[0]).to_equal("NtAllocateVirtualMemory")
+        expect(calls[6]).to_equal("RtlAllocateHeap")
+
+    it "wraps ntdll virtual-memory calls over the VM bridge":
+        val allocated = wine_ntdll_allocate_virtual_memory(wine_vm_space_new(), 0x500000, 0x1000, "rw")
+        val protected = wine_ntdll_protect_virtual_memory(allocated.space, 0x500000, "rx")
+        val freed = wine_ntdll_free_virtual_memory(protected.space, 0x500000)
+        expect(allocated.ok).to_equal(true)
+        expect(protected.old_perms).to_equal("rw")
+        expect(wine_vm_access_gate(protected.space, 0x500000, "execute")).to_equal("ready")
+        expect(freed.state).to_equal("freed")
+
+    it "wraps ntdll file calls over the file I/O bridge":
+        val table = wine_nt_file_table_add_file(wine_nt_file_table_new(_all_adapter_apis(), _all_async_features()), "C:\\hello.txt", "hello")
+        val opened = wine_ntdll_create_file(table, "C:\\hello.txt")
+        val read = wine_ntdll_read_file(opened.table, opened.handle, 5)
+        val closed = wine_ntdll_close(read.table, opened.handle)
+        expect(opened.ok).to_equal(true)
+        expect(read.data).to_equal("hello")
+        expect(closed.state).to_equal("closed")
+
+    it "wraps Rtl heap calls over the process heap bridge":
+        val heap = wine_nt_process_heap_new(wine_vm_space_new(), true)
+        val allocated = wine_rtl_allocate_heap(heap, heap.handle, 24)
+        val freed = wine_rtl_free_heap(allocated.heap, heap.handle, allocated.ptr)
+        expect(allocated.ok).to_equal(true)
+        expect(allocated.ptr).to_equal(0x71000000)
+        expect(freed.state).to_equal("freed")
+
+    it "preserves underlying precondition errors":
+        val table = wine_nt_file_table_new("fd-open fd-read", _all_async_features())
+        val heap = wine_nt_process_heap_new(wine_vm_space_new(), false)
+        expect(wine_ntdll_create_file(table, "C:\\hello.txt").state).to_equal("missing-api-fd-write")
+        expect(wine_rtl_allocate_heap(heap, 0x70000000, 8).state).to_equal("missing-process-heap")

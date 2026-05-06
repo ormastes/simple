@@ -1,0 +1,46 @@
+use common.wine_dynload_adapter.{
+    wine_dynload_adapter_feature_string,
+    wine_dynload_adapter_gate,
+    wine_dynload_adapter_missing_apis,
+    wine_dynload_adapter_native_binding,
+    wine_dynload_adapter_required_apis
+}
+
+fn _current_native_loader_apis() -> text:
+    "native-module-open native-module-close native-self-handle native-symbol-lookup"
+
+fn _all_dynload_apis() -> text:
+    _current_native_loader_apis() + " search-path dependency-list link-namespace relocation-apply " +
+        "import-bind tls-callback pe-loader-boundary structured-loader-error"
+
+describe "Wine dynamic loader adapter contract":
+    it "lists native loader, dependency, namespace, relocation, import, TLS, and error APIs":
+        val apis = wine_dynload_adapter_required_apis()
+        expect(apis.len()).to_be_greater_than(10)
+        expect(apis[0]).to_equal("native-module-open")
+
+    it "reports the first missing dynamic loader API":
+        val missing = wine_dynload_adapter_missing_apis(_current_native_loader_apis())
+        expect(missing[0]).to_equal("search-path")
+
+    it "maps existing native dynamic loader bindings":
+        expect(wine_dynload_adapter_native_binding("native-module-open")).to_equal("spl_dlopen")
+        expect(wine_dynload_adapter_native_binding("native-symbol-lookup")).to_equal("spl_dlsym")
+        expect(wine_dynload_adapter_native_binding("native-self-handle")).to_equal("dlopen(NULL)")
+
+    it "does not treat native dlopen alone as Wine dynamic-loader readiness":
+        val result = wine_dynload_adapter_gate(_current_native_loader_apis())
+        expect(result.ready).to_equal(false)
+        expect(result.state).to_equal("missing-api-search-path")
+        expect(result.dynload_features).to_contain("dynload")
+
+    it "derives Wine dynamic gate features from the full coexistence surface":
+        val features = wine_dynload_adapter_feature_string(_all_dynload_apis())
+        expect(features).to_contain("dynload")
+        expect(features).to_contain("symbol-lookup")
+        expect(features).to_contain("loader-errors")
+
+    it "accepts the full dynamic loading coexistence API set":
+        val result = wine_dynload_adapter_gate(_all_dynload_apis())
+        expect(result.ready).to_equal(true)
+        expect(result.state).to_equal("ready")

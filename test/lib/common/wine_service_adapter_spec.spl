@@ -1,0 +1,51 @@
+use common.wine_service_adapter.{
+    wine_service_adapter_add,
+    wine_service_adapter_feature_string,
+    wine_service_adapter_gate,
+    wine_service_adapter_missing_services,
+    wine_service_adapter_new,
+    wine_service_adapter_ready,
+    wine_service_adapter_required_services
+}
+
+fn _base_host_features() -> text:
+    "fd-table stdio pipes sockets poll-wait timers errno cwd-env-argv spawn fs-paths fs-attrs fs-locks " +
+        "pthread tls mutex condvar semaphore event dynload"
+
+fn _all_services() -> text:
+    "ipc-server handle-table audio-device audio-buffer font-discovery font-raster " +
+        "crypto-random crypto-hash hid-keyboard hid-pointer printer-spool multimedia-timer"
+
+describe "Wine host service adapter":
+    it "lists IPC, handle, audio, font, crypto, HID, printing, and multimedia services":
+        val services = wine_service_adapter_required_services()
+        expect(services.len()).to_be_greater_than(10)
+        expect(services[0]).to_equal("ipc-server")
+
+    it "reports the first missing service":
+        val missing = wine_service_adapter_missing_services("ipc-server handle-table")
+        expect(missing[0]).to_equal("audio-device")
+
+    it "rejects unknown service declarations":
+        val result = wine_service_adapter_add(wine_service_adapter_new(_base_host_features()), "unknown")
+        expect(result.ok).to_equal(false)
+        expect(result.state).to_equal("unknown-service")
+
+    it "derives host features only from complete service pairs":
+        val partial = wine_service_adapter_feature_string("audio-device font-discovery crypto-random hid-keyboard", _base_host_features())
+        expect(partial).to_equal(_base_host_features())
+
+        val full = wine_service_adapter_feature_string(_all_services(), _base_host_features())
+        expect(full).to_contain("audio")
+        expect(full).to_contain("fonts")
+        expect(full).to_contain("crypto")
+        expect(full).to_contain("hid")
+
+    it "blocks on missing service coverage before host readiness":
+        val adapter = wine_service_adapter_new(_base_host_features())
+        val added = wine_service_adapter_add(adapter, "ipc-server")
+        expect(wine_service_adapter_gate(added.adapter)).to_equal("missing-service-handle-table")
+
+    it "reaches the existing host gate when all service and base features are present":
+        val adapter = wine_service_adapter_ready(_base_host_features())
+        expect(wine_service_adapter_gate(adapter)).to_equal("ready")

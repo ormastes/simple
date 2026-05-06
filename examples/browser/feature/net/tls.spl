@@ -10,6 +10,12 @@ use examples.browser.entity.net.tls_types.{TlsConfig, CertChain, TlsVersion}
 use examples.browser.shared.error.{BrowserResult, BrowserError, network_error}
 use examples.browser.shared.logging.Logger
 
+extern fn rt_tls_client_connect_with_sni(host: text, port: i64, server_name: text) -> i64
+extern fn rt_tls_client_write(conn: i64, data: text) -> i64
+extern fn rt_tls_client_read(conn: i64, max_bytes: i64) -> text
+extern fn rt_tls_client_close(conn: i64) -> bool
+extern fn rt_tls_get_protocol_version(conn: i64) -> text
+
 # --- TlsConnection ---
 
 class TlsConnection:
@@ -17,15 +23,25 @@ class TlsConnection:
     port: i64
     version: TlsVersion
     cipher: text
+    handle: i64
 
-    static fn create(host: text, port: i64, version: TlsVersion, cipher: text) -> TlsConnection:
-        TlsConnection(host: host, port: port, version: version, cipher: cipher)
+    static fn create(host: text, port: i64, version: TlsVersion, cipher: text, handle: i64) -> TlsConnection:
+        TlsConnection(host: host, port: port, version: version, cipher: cipher, handle: handle)
 
     fn description() -> text:
         val ver = match self.version:
             TlsVersion.Tls12: "TLS 1.2"
             TlsVersion.Tls13: "TLS 1.3"
         "{ver} connection to {self.host}:{self.port} (cipher: {self.cipher})"
+
+    fn write_text(data: text) -> i64:
+        rt_tls_client_write(self.handle, data)
+
+    fn read_text(max_bytes: i64) -> text:
+        rt_tls_client_read(self.handle, max_bytes)
+
+    fn close() -> bool:
+        rt_tls_client_close(self.handle)
 
 # --- TlsManager ---
 
@@ -63,8 +79,14 @@ class TlsManager:
         val version_name = format_version(version)
         val cipher = default_cipher(version)
 
-        self.logger.warn("TLS: refusing simulated handshake for {host}:{port} ({version_name}, cipher: {cipher}); real TLS requires crypto FFI")
-        Err(network_error("TLS handshake requires real crypto verification"))
+        val handle = rt_tls_client_connect_with_sni(host, port, host)
+        if handle < 0:
+            return Err(network_error("TLS handshake failed for {host}:{port}: runtime TLS transport unavailable or certificate verification failed"))
+
+        val negotiated = rt_tls_get_protocol_version(handle)
+        val actual_version = if negotiated == "TLSv1.2": TlsVersion.Tls12 else: TlsVersion.Tls13
+        self.logger.info("TLS handshake complete for {host}:{port} ({negotiated})")
+        Ok(TlsConnection.create(host, port, actual_version, cipher, handle))
 
 # --- Certificate verification ---
 

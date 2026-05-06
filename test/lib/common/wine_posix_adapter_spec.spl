@@ -1,0 +1,53 @@
+use common.wine_posix_adapter.{
+    wine_posix_adapter_async_binding,
+    wine_posix_adapter_errno_name,
+    wine_posix_adapter_feature_string,
+    wine_posix_adapter_gate,
+    wine_posix_adapter_missing_apis,
+    wine_posix_adapter_required_apis
+}
+
+fn _all_adapter_apis() -> text:
+    "fd-open fd-read fd-write fd-close fd-dup fd-inherit stdio pipe socket timer poll-wait " +
+        "cwd env argv spawn path-normalize path-attrs path-locks errno-map"
+
+fn _all_async_features() -> text:
+    "io-driver submit-open submit-read submit-write submit-close submit-timeout poll-completion " +
+        "event-loop register-fd deregister-fd waker wake"
+
+describe "Wine POSIX adapter contract":
+    it "lists fd, process, stdio, wait, timer, socket, path, and errno APIs":
+        val apis = wine_posix_adapter_required_apis()
+        expect(apis.len()).to_be_greater_than(15)
+        expect(apis[0]).to_equal("fd-open")
+
+    it "reports the first missing adapter API":
+        val missing = wine_posix_adapter_missing_apis("fd-open fd-read fd-write fd-close")
+        expect(missing[0]).to_equal("fd-dup")
+
+    it "maps blocking-compatible adapter APIs onto nogc async primitives":
+        expect(wine_posix_adapter_async_binding("fd-read")).to_equal("submit-read")
+        expect(wine_posix_adapter_async_binding("poll-wait")).to_contain("register-fd")
+        expect(wine_posix_adapter_async_binding("socket")).to_contain("event-loop")
+
+    it "derives POSIX gate features from concrete adapter APIs":
+        val features = wine_posix_adapter_feature_string(_all_adapter_apis())
+        expect(features).to_contain("fd-table")
+        expect(features).to_contain("cwd-env-argv")
+        expect(features).to_contain("spawn")
+
+    it "blocks readiness when async completion polling is missing":
+        val result = wine_posix_adapter_gate(_all_adapter_apis(), "io-driver submit-open submit-read submit-write submit-close submit-timeout")
+        expect(result.ready).to_equal(false)
+        expect(result.state).to_equal("blocked-async-io:missing-poll-completion")
+
+    it "accepts the full adapter API set on a nogc async backend":
+        val result = wine_posix_adapter_gate(_all_adapter_apis(), _all_async_features())
+        expect(result.ready).to_equal(true)
+        expect(result.state).to_equal("ready")
+        expect(result.async_state).to_equal("ready")
+
+    it "normalizes host errno values used by Wine compatibility shims":
+        expect(wine_posix_adapter_errno_name(2)).to_equal("ENOENT")
+        expect(wine_posix_adapter_errno_name(11)).to_equal("EAGAIN")
+        expect(wine_posix_adapter_errno_name(9999)).to_equal("EUNKNOWN")

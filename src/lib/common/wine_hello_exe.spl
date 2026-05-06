@@ -1,0 +1,127 @@
+"""Safe non-GUI hello.exe milestone probe.
+
+This module deliberately does not execute PE code. It proves the staged
+preconditions, validates the PE envelope, then stops at a structured import
+boundary until the NT/Wine import layer exists.
+"""
+
+use common.pe_coff_header.{
+    parse_pe_header_summary,
+    pe_section_table_gate,
+    pe_data_directory_gate,
+    pe_import_directory_gate,
+    pe_relocation_directory_gate,
+    pe_tls_directory_gate,
+    pe_first_import_dll_name,
+    pe_first_import_symbol_names,
+    pe_first_import_symbol_bindings
+}
+use common.wine_image_map.{wine_image_map_gate}
+use common.wine_cpu_exec.{wine_cpu_hello_execution_plan}
+use common.wine_cpu_exec.{WineCpuExecutionEvidence, wine_cpu_execution_evidence_text}
+use common.wine_hello_dispatch.{wine_known_hello_execute_plan, wine_known_hello_fixture_gate_at_rva}
+use common.wine_nt_bridge.{wine_nt_bridge_gate}
+use common.wine_nt_import.{wine_nt_import_hello_gate, wine_nt_import_hello_binding_plan}
+use common.wine_precondition_manifest.{WinePreconditionManifest}
+use common.wine_substrate.{wine_substrate_hello_exe_gate}
+
+class WineHelloExeProbeResult:
+    status: text
+    error: text
+    stdout: text
+    stdout_handle: i64
+    bytes_written: i64
+    exit_code: i64
+
+fn _probe_result(status: text, error: text, stdout: text, stdout_handle: i64, bytes_written: i64, exit_code: i64) -> WineHelloExeProbeResult:
+    WineHelloExeProbeResult(status: status, error: error, stdout: stdout, stdout_handle: stdout_handle, bytes_written: bytes_written, exit_code: exit_code)
+
+fn _blocked_result(status: text, error: text) -> WineHelloExeProbeResult:
+    _probe_result(status, error, "", 0, 0, -1)
+
+pub fn wine_hello_exe_probe(data: [u8], gates: text) -> WineHelloExeProbeResult:
+    val gate_state = wine_substrate_hello_exe_gate(gates)
+    if gate_state != "ready":
+        return _blocked_result("blocked", gate_state)
+
+    val summary = parse_pe_header_summary(data)
+    if not summary.ok:
+        return _blocked_result("rejected", summary.error)
+
+    val section_state = pe_section_table_gate(data)
+    if section_state != "ready":
+        return _blocked_result("rejected", section_state)
+
+    val directory_state = pe_data_directory_gate(data)
+    if directory_state != "ready":
+        return _blocked_result("rejected", directory_state)
+
+    val import_state = pe_import_directory_gate(data)
+    if import_state != "ready":
+        return _blocked_result("rejected", import_state)
+
+    val relocation_state = pe_relocation_directory_gate(data)
+    if relocation_state != "ready":
+        return _blocked_result("rejected", relocation_state)
+
+    val tls_state = pe_tls_directory_gate(data)
+    if tls_state != "ready":
+        return _blocked_result("rejected", tls_state)
+
+    val dll_name = pe_first_import_dll_name(data)
+    if dll_name == "":
+        return _blocked_result("rejected", "missing-import-name")
+
+    val import_symbols = pe_first_import_symbol_names(data, 32)
+    val resolver_state = wine_nt_import_hello_gate(dll_name, import_symbols)
+    if resolver_state != "ready":
+        return _blocked_result("unsupported-import", resolver_state)
+
+    val binding_plan = wine_nt_import_hello_binding_plan(dll_name, pe_first_import_symbol_bindings(data, 32))
+    if not binding_plan.ok:
+        return _blocked_result("unsupported-import", binding_plan.error)
+
+    val image_state = wine_image_map_gate(data)
+    if image_state != "ready":
+        return _blocked_result("blocked", image_state)
+
+    val execution_plan = wine_cpu_hello_execution_plan(data, gates)
+    if not execution_plan.ok:
+        return _blocked_result("blocked", execution_plan.error)
+    if binding_plan.get_std_handle_rva != execution_plan.get_std_handle_rva or
+       binding_plan.write_file_rva != execution_plan.write_file_rva or
+       binding_plan.exit_process_rva != execution_plan.exit_process_rva:
+        return _blocked_result("blocked", "import-plan-cpu-plan-mismatch")
+
+    val bridge_state = wine_nt_bridge_gate(import_symbols)
+    if bridge_state != "ready":
+        return _blocked_result("blocked", bridge_state)
+
+    val fixture_state = wine_known_hello_fixture_gate_at_rva(data, execution_plan.stdout_payload_rva)
+    if fixture_state != "ready":
+        return _blocked_result("blocked", fixture_state)
+
+    val execution = wine_known_hello_execute_plan(data, execution_plan)
+    if not execution.ok:
+        return _blocked_result("blocked", execution.error)
+    return _probe_result("executed", "", execution.stdout, execution.stdout_handle, execution.bytes_written, execution.exit_code)
+
+pub fn wine_hello_exe_can_execute(data: [u8], gates: text) -> bool:
+    val result = wine_hello_exe_probe(data, gates)
+    result.status == "executed"
+
+pub fn wine_hello_exe_probe_manifest(data: [u8], manifest: WinePreconditionManifest, execution_evidence: text) -> WineHelloExeProbeResult:
+    if not manifest.ready:
+        return _blocked_result("blocked", manifest.state)
+    wine_hello_exe_probe(data, manifest.gates + " " + execution_evidence)
+
+pub fn wine_hello_exe_probe_manifest_evidence(data: [u8], manifest: WinePreconditionManifest, execution_evidence: WineCpuExecutionEvidence) -> WineHelloExeProbeResult:
+    wine_hello_exe_probe_manifest(data, manifest, wine_cpu_execution_evidence_text(execution_evidence))
+
+pub fn wine_hello_exe_manifest_can_execute(data: [u8], manifest: WinePreconditionManifest, execution_evidence: text) -> bool:
+    val result = wine_hello_exe_probe_manifest(data, manifest, execution_evidence)
+    result.status == "executed"
+
+pub fn wine_hello_exe_manifest_evidence_can_execute(data: [u8], manifest: WinePreconditionManifest, execution_evidence: WineCpuExecutionEvidence) -> bool:
+    val result = wine_hello_exe_probe_manifest_evidence(data, manifest, execution_evidence)
+    result.status == "executed"

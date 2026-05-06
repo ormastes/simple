@@ -1,0 +1,66 @@
+use common.wine_nt_bridge.{
+    wine_nt_bridge_call_exit_process,
+    wine_nt_bridge_call_get_std_handle,
+    wine_nt_bridge_call_write_file,
+    wine_nt_bridge_dispatch_call,
+    wine_nt_bridge_exit_code_zero,
+    wine_nt_bridge_execute_hello_stdout,
+    wine_nt_bridge_gate,
+    wine_nt_bridge_stdout_handle,
+    wine_nt_bridge_write_file,
+    wine_nt_bridge_write_stdout
+}
+
+describe "Wine NT bridge":
+    it "requires the known console bridge calls":
+        expect wine_nt_bridge_gate(["GetStdHandle", "WriteFile"]) == "bridge-missing:ExitProcess"
+
+    it "accepts the known hello bridge table":
+        expect wine_nt_bridge_gate(["GetStdHandle", "WriteFile", "ExitProcess"]) == "ready"
+
+    it "models the stdout handle and exit code for the milestone":
+        expect wine_nt_bridge_stdout_handle() == -11
+        expect wine_nt_bridge_exit_code_zero() == 0
+
+    it "writes only through the bridge helper":
+        expect wine_nt_bridge_write_stdout("Hello from SimpleOS Wine\n") == "Hello from SimpleOS Wine\n"
+
+    it "requires stdout handle and byte count for WriteFile":
+        expect wine_nt_bridge_write_file(-11, "Hello from SimpleOS Wine\n", 25) == "Hello from SimpleOS Wine\n"
+        expect wine_nt_bridge_write_file(-12, "Hello from SimpleOS Wine\n", 25) == ""
+        expect wine_nt_bridge_write_file(-11, "Hello from SimpleOS Wine\n", 5) == ""
+
+    it "dispatches the modeled hello NT calls with structured results":
+        val handle = wine_nt_bridge_call_get_std_handle(-11)
+        expect handle.ok == true
+        expect handle.symbol == "GetStdHandle"
+        expect handle.i64_value == -11
+
+        val write = wine_nt_bridge_call_write_file(handle.i64_value, "Hello from SimpleOS Wine\n", 25)
+        expect write.ok == true
+        expect write.symbol == "WriteFile"
+        expect write.i64_value == 25
+        expect write.text_value == "Hello from SimpleOS Wine\n"
+
+        val exit = wine_nt_bridge_call_exit_process(0)
+        expect exit.ok == true
+        expect exit.symbol == "ExitProcess"
+        expect exit.i64_value == 0
+
+    it "rejects unsupported dispatch calls and invalid modeled arguments":
+        expect wine_nt_bridge_dispatch_call("VirtualAlloc", -11, "", 0).error == "bridge-unsupported:VirtualAlloc"
+        expect wine_nt_bridge_call_get_std_handle(-12).error == "unsupported-std-handle"
+        expect wine_nt_bridge_call_exit_process(5).error == "unsupported-exit-code"
+
+    it "returns structured execution evidence for the hello stdout bridge":
+        val result = wine_nt_bridge_execute_hello_stdout("Hello from SimpleOS Wine\n")
+        expect result.ok == true
+        expect result.stdout_handle == -11
+        expect result.bytes_written == 25
+        expect result.exit_code == 0
+        expect result.stdout == "Hello from SimpleOS Wine\n"
+
+    it "rejects empty bridge payload execution":
+        val result = wine_nt_bridge_execute_hello_stdout("")
+        expect result.ok == false
+        expect result.error == "empty-payload"

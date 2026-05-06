@@ -1,0 +1,53 @@
+use common.wine_nt_api_catalog.{
+    wine_nt_api_catalogued_future_symbols,
+    wine_nt_api_dispatch_gate,
+    wine_nt_api_dll_gate,
+    wine_nt_api_implemented_symbols_for_hello,
+    wine_nt_api_import_gate,
+    wine_nt_api_modeled_precondition_symbols,
+    wine_nt_api_symbol_state
+}
+
+describe "Wine NT API catalog":
+    it "keeps the executable hello surface to the implemented console/process calls":
+        val symbols = wine_nt_api_implemented_symbols_for_hello()
+        expect(symbols.len()).to_equal(3)
+        expect(symbols[0]).to_equal("GetStdHandle")
+        expect(wine_nt_api_import_gate("KERNEL32.dll", symbols)).to_equal("ready")
+
+    it "catalogs broader NT and Win32 prerequisites without marking them implemented":
+        val future = wine_nt_api_catalogued_future_symbols()
+        expect(future.len()).to_be_greater_than(20)
+        val entry = wine_nt_api_symbol_state("kernel32.dll", "VirtualAlloc")
+        expect(entry.category).to_equal("virtual-memory")
+        expect(entry.state).to_equal("catalogued")
+
+    it "records modeled precondition calls that are still not import-dispatchable":
+        val modeled = wine_nt_api_modeled_precondition_symbols()
+        expect(modeled.len()).to_equal(21)
+        expect(modeled[0]).to_equal("VirtualAlloc")
+        expect(modeled[3]).to_equal("CreateFileW")
+        expect(modeled[6]).to_equal("CreateThread")
+        expect(modeled[9]).to_equal("GetCommandLineW")
+        expect(modeled[11]).to_equal("HeapAlloc")
+        expect(modeled[13]).to_equal("NtAllocateVirtualMemory")
+        expect(modeled[19]).to_equal("RtlAllocateHeap")
+        expect(wine_nt_api_import_gate("kernel32.dll", ["GetStdHandle", "WriteFile", "ExitProcess", "VirtualAlloc"])).to_equal("catalogued-symbol:VirtualAlloc")
+        expect(wine_nt_api_import_gate("kernel32.dll", ["GetStdHandle", "WriteFile", "ExitProcess", "CreateFileW"])).to_equal("catalogued-symbol:CreateFileW")
+        expect(wine_nt_api_import_gate("kernel32.dll", ["GetStdHandle", "WriteFile", "ExitProcess", "CreateThread"])).to_equal("catalogued-symbol:CreateThread")
+        expect(wine_nt_api_import_gate("kernel32.dll", ["GetStdHandle", "WriteFile", "ExitProcess", "GetCommandLineW"])).to_equal("catalogued-symbol:GetCommandLineW")
+        expect(wine_nt_api_import_gate("kernel32.dll", ["GetStdHandle", "WriteFile", "ExitProcess", "HeapAlloc"])).to_equal("catalogued-symbol:HeapAlloc")
+
+    it "keeps ntdll as catalogued but not import-ready for the hello milestone":
+        expect(wine_nt_api_dll_gate("ntdll.dll")).to_equal("catalogued-dll:ntdll.dll")
+        expect(wine_nt_api_import_gate("ntdll.dll", ["NtAllocateVirtualMemory"])).to_equal("catalogued-dll:ntdll.dll")
+
+    it "blocks unknown imports before dispatch can pretend they exist":
+        expect(wine_nt_api_import_gate("kernel32.dll", ["GetStdHandle", "WriteFile", "ExitProcess", "UnknownApi"])).to_equal("unsupported-symbol:UnknownApi")
+
+    it "reports catalogued symbols distinctly from implemented bridge calls":
+        expect(wine_nt_api_import_gate("kernel32.dll", ["GetStdHandle", "WriteFile", "ExitProcess", "VirtualAlloc"])).to_equal("catalogued-symbol:VirtualAlloc")
+        expect(wine_nt_api_dispatch_gate(["GetStdHandle", "WriteFile", "ExitProcess", "VirtualAlloc"])).to_equal("bridge-unsupported:VirtualAlloc")
+
+    it "preserves the bridge missing-symbol order for the known hello call table":
+        expect(wine_nt_api_dispatch_gate(["GetStdHandle"])).to_equal("bridge-missing:WriteFile")

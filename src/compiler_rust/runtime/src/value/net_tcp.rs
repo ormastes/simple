@@ -357,6 +357,30 @@ pub extern "C" fn rt_io_tcp_connect_timeout(addr: crate::value::RuntimeValue, ms
 }
 
 #[no_mangle]
+pub extern "C" fn rt_dns_lookup(hostname: crate::value::RuntimeValue) -> crate::value::RuntimeValue {
+    let Some((ptr, len)) = runtime_text_ptr_len(hostname) else {
+        return crate::value::collections::rt_string_new(std::ptr::null(), 0);
+    };
+    let bytes = unsafe { std::slice::from_raw_parts(ptr as *const u8, len as usize) };
+    let Ok(host) = std::str::from_utf8(bytes) else {
+        return crate::value::collections::rt_string_new(std::ptr::null(), 0);
+    };
+    let Ok(iter) = (host, 0).to_socket_addrs() else {
+        return crate::value::collections::rt_string_new(std::ptr::null(), 0);
+    };
+
+    let mut addresses: Vec<String> = Vec::new();
+    for addr in iter {
+        let ip = addr.ip().to_string();
+        if !addresses.iter().any(|existing| existing == &ip) {
+            addresses.push(ip);
+        }
+    }
+    let joined = addresses.join(",");
+    crate::value::collections::rt_string_new(joined.as_ptr(), joined.len() as u64)
+}
+
+#[no_mangle]
 pub extern "C" fn rt_io_tcp_read(handle: i64, size: i64) -> crate::value::RuntimeValue {
     if size <= 0 {
         return crate::value::collections::rt_array_new(0);

@@ -1,4 +1,17 @@
-use common.pe_coff_header.{parse_pe_header_summary, pe_section_table_gate, pe_data_directory_gate}
+use common.pe_coff_header.{
+    parse_pe_header_summary,
+    pe_section_table_gate,
+    pe_data_directory_gate,
+    pe_section_bounds_gate,
+    pe_entry_section_executable_gate,
+    pe_rva_to_file_offset,
+    pe_import_directory_gate,
+    pe_relocation_directory_gate,
+    pe_tls_directory_gate,
+    pe_first_import_dll_name,
+    pe_first_import_symbol_names,
+    pe_first_import_symbol_bindings
+}
 
 fn _zero_bytes(count: i64) -> [u8]:
     var out: [u8] = []
@@ -20,8 +33,39 @@ fn _put_u32_le(data: [u8], offset: i64, value: i64) -> [u8]:
     data[offset + 3] = ((value >> 24) & 0xff) as u8
     data
 
+fn _put_kernel32_name(data: [u8], offset: i64) -> [u8]:
+    data[offset] = 0x4b
+    data[offset + 1] = 0x45
+    data[offset + 2] = 0x52
+    data[offset + 3] = 0x4e
+    data[offset + 4] = 0x45
+    data[offset + 5] = 0x4c
+    data[offset + 6] = 0x33
+    data[offset + 7] = 0x32
+    data[offset + 8] = 0x2e
+    data[offset + 9] = 0x64
+    data[offset + 10] = 0x6c
+    data[offset + 11] = 0x6c
+    data[offset + 12] = 0
+    data
+
+fn _put_write_file_name(data: [u8], offset: i64) -> [u8]:
+    data[offset] = 0
+    data[offset + 1] = 0
+    data[offset + 2] = 0x57
+    data[offset + 3] = 0x72
+    data[offset + 4] = 0x69
+    data[offset + 5] = 0x74
+    data[offset + 6] = 0x65
+    data[offset + 7] = 0x46
+    data[offset + 8] = 0x69
+    data[offset + 9] = 0x6c
+    data[offset + 10] = 0x65
+    data[offset + 11] = 0
+    data
+
 fn _minimal_pe64_console() -> [u8]:
-    var data = _zero_bytes(512)
+    var data = _zero_bytes(1024)
     data[0] = 0x4d
     data[1] = 0x5a
     data = _put_u32_le(data, 0x3c, 0x80)
@@ -33,18 +77,45 @@ fn _minimal_pe64_console() -> [u8]:
     data = _put_u16_le(data, 0x86, 1)
     data = _put_u16_le(data, 0x94, 0xf0)
     data = _put_u16_le(data, 0x98, 0x20b)
+    data = _put_u32_le(data, 0x98 + 0x10, 0x2010)
+    data = _put_u32_le(data, 0x98 + 0x38, 0x5000)
+    data = _put_u32_le(data, 0x98 + 0x3c, 0x200)
     data = _put_u16_le(data, 0x98 + 0x5c, 3)
     data = _put_u32_le(data, 0x98 + 0x6c, 16)
     data
 
 fn _minimal_pe64_console_with_dirs() -> [u8]:
     var data = _minimal_pe64_console()
-    data = _put_u32_le(data, 0x98 + 0x70 + 8, 0x2000)
+    data = _put_u32_le(data, 0x98 + 0x70 + 8, 0x2020)
     data = _put_u32_le(data, 0x98 + 0x70 + 12, 0x40)
-    data = _put_u32_le(data, 0x98 + 0x70 + 40, 0x3000)
-    data = _put_u32_le(data, 0x98 + 0x70 + 44, 0x20)
-    data = _put_u32_le(data, 0x98 + 0x70 + 72, 0x4000)
+    data = _put_u32_le(data, 0x98 + 0x70 + 40, 0x2160)
+    data = _put_u32_le(data, 0x98 + 0x70 + 44, 0x08)
+    data = _put_u32_le(data, 0x98 + 0x70 + 72, 0x2170)
     data = _put_u32_le(data, 0x98 + 0x70 + 76, 0x18)
+    data
+
+fn _minimal_pe64_console_with_import_descriptor() -> [u8]:
+    var data = _minimal_pe64_console_with_dirs()
+    val section_offset = 0x98 + 0xf0
+    data = _put_u32_le(data, section_offset + 8, 0x300)
+    data = _put_u32_le(data, section_offset + 12, 0x2000)
+    data = _put_u32_le(data, section_offset + 16, 0x200)
+    data = _put_u32_le(data, section_offset + 20, 0x200)
+    data = _put_u32_le(data, section_offset + 36, 0x60000020)
+    data = _put_u32_le(data, 0x220, 0x2060)
+    data = _put_u32_le(data, 0x220 + 12, 0x2050)
+    data = _put_u32_le(data, 0x220 + 16, 0x2070)
+    data = _put_kernel32_name(data, 0x250)
+    data = _put_u32_le(data, 0x260, 0x2080)
+    data = _put_u32_le(data, 0x270, 0x2080)
+    data = _put_write_file_name(data, 0x280)
+    data = _put_u32_le(data, 0x360, 0x2000)
+    data = _put_u32_le(data, 0x364, 0x08)
+    data
+
+fn _minimal_pe64_console_with_unterminated_import_descriptor() -> [u8]:
+    var data = _minimal_pe64_console_with_import_descriptor()
+    data = _put_u32_le(data, 0x220 + 20, 0x2060)
     data
 
 describe "PE/COFF header classifier":
@@ -70,3 +141,38 @@ describe "PE/COFF header classifier":
     it "requires import, relocation, and TLS data directories":
         expect(pe_data_directory_gate(_minimal_pe64_console())).to_equal("missing-import-directory")
         expect(pe_data_directory_gate(_minimal_pe64_console_with_dirs())).to_equal("ready")
+
+    it "maps RVAs through section table bounds":
+        expect(pe_rva_to_file_offset(_minimal_pe64_console_with_import_descriptor(), 0x2040)).to_equal(0x240)
+        expect(pe_rva_to_file_offset(_minimal_pe64_console_with_import_descriptor(), 0x9000)).to_equal(-1)
+
+    it "validates section raw/virtual bounds and entry execute permission":
+        expect(pe_section_bounds_gate(_minimal_pe64_console_with_import_descriptor())).to_equal("ready")
+        expect(pe_entry_section_executable_gate(_minimal_pe64_console_with_import_descriptor())).to_equal("ready")
+
+    it "validates the first import descriptor name":
+        expect(pe_import_directory_gate(_minimal_pe64_console_with_dirs())).to_equal("import-directory-out-of-bounds")
+        expect(pe_import_directory_gate(_minimal_pe64_console_with_import_descriptor())).to_equal("ready")
+
+    it "requires a null import descriptor terminator after the first descriptor":
+        expect(pe_import_directory_gate(_minimal_pe64_console_with_unterminated_import_descriptor())).to_equal("import-descriptor-unterminated")
+
+    it "validates relocation and TLS directories through mapped section bounds":
+        expect(pe_relocation_directory_gate(_minimal_pe64_console_with_dirs())).to_equal("relocation-directory-unmapped")
+        expect(pe_relocation_directory_gate(_minimal_pe64_console_with_import_descriptor())).to_equal("ready")
+        expect(pe_tls_directory_gate(_minimal_pe64_console_with_import_descriptor())).to_equal("ready")
+
+    it "extracts the first import DLL name without executing code":
+        expect(pe_first_import_dll_name(_minimal_pe64_console_with_dirs())).to_equal("")
+        expect(pe_first_import_dll_name(_minimal_pe64_console_with_import_descriptor())).to_equal("KERNEL32.dll")
+
+    it "extracts imported symbol names from the first thunk table":
+        val symbols = pe_first_import_symbol_names(_minimal_pe64_console_with_import_descriptor(), 8)
+        expect(symbols.len()).to_equal(1)
+        expect(symbols[0]).to_equal("WriteFile")
+
+    it "extracts imported symbol name RVAs from the first thunk table":
+        val bindings = pe_first_import_symbol_bindings(_minimal_pe64_console_with_import_descriptor(), 8)
+        expect(bindings.len()).to_equal(1)
+        expect(bindings[0].symbol).to_equal("WriteFile")
+        expect(bindings[0].name_rva).to_equal(0x2080)

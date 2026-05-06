@@ -11,7 +11,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::collections::HashMap as StdHashMap;
 use std::io::{ErrorKind, Read, Write};
-use std::net::{SocketAddr, TcpListener, TcpStream, UdpSocket};
+use std::net::{SocketAddr, TcpListener, TcpStream, ToSocketAddrs, UdpSocket};
 use std::time::Duration;
 
 // Import shared helper functions from interpreter_native_io
@@ -511,6 +511,25 @@ pub fn rt_io_tcp_connect_timeout_interp(args: &[Value]) -> Result<Value, Compile
         Ok(stream) => Ok(Value::Int(allocate_socket(SocketHandle::TcpStream(stream)))),
         Err(_) => Ok(Value::Int(-1)),
     }
+}
+
+pub fn rt_dns_lookup_interp(args: &[Value]) -> Result<Value, CompileError> {
+    let host = match args.get(0) {
+        Some(Value::Str(s)) => s.as_str(),
+        _ => return Ok(Value::Str(String::new())),
+    };
+    let iter = match (host, 0).to_socket_addrs() {
+        Ok(iter) => iter,
+        Err(_) => return Ok(Value::Str(String::new())),
+    };
+    let mut addresses: Vec<String> = Vec::new();
+    for addr in iter {
+        let ip = addr.ip().to_string();
+        if !addresses.iter().any(|existing| existing == &ip) {
+            addresses.push(ip);
+        }
+    }
+    Ok(Value::Str(addresses.join(",")))
 }
 
 pub fn rt_io_tcp_read_interp(args: &[Value]) -> Result<Value, CompileError> {

@@ -1,0 +1,53 @@
+use common.pe_coff_header.{PeImportSymbolBinding}
+use common.wine_nt_import.{
+    wine_nt_import_hello_binding_gate,
+    wine_nt_import_hello_binding_plan,
+    wine_nt_import_dll_gate,
+    wine_nt_import_hello_gate,
+    wine_nt_import_required_symbols_for_hello
+}
+
+describe "Wine NT import resolver gate":
+    it "recognizes the minimal hello.exe KERNEL32 import set":
+        expect wine_nt_import_required_symbols_for_hello().len() == 3
+        expect wine_nt_import_dll_gate("KERNEL32.dll") == "ready"
+
+    it "rejects unsupported DLLs before symbol checks":
+        expect wine_nt_import_hello_gate("USER32.dll", ["GetStdHandle", "WriteFile", "ExitProcess"]) == "unsupported-dll:USER32.dll"
+
+    it "reports the first missing minimal console symbol":
+        expect wine_nt_import_hello_gate("KERNEL32.dll", ["GetStdHandle"]) == "missing-symbol:WriteFile"
+
+    it "accepts the minimal console symbol set":
+        expect wine_nt_import_hello_gate("kernel32.dll", ["GetStdHandle", "WriteFile", "ExitProcess"]) == "ready"
+
+    it "requires the known hello import bindings to target expected name RVAs":
+        val bindings = [
+            PeImportSymbolBinding(symbol: "GetStdHandle", name_rva: 0x2080),
+            PeImportSymbolBinding(symbol: "WriteFile", name_rva: 0x20a0),
+            PeImportSymbolBinding(symbol: "ExitProcess", name_rva: 0x20c0)
+        ]
+        expect wine_nt_import_hello_binding_gate("KERNEL32.dll", bindings) == "ready"
+
+    it "returns a structured hello binding plan":
+        val bindings = [
+            PeImportSymbolBinding(symbol: "GetStdHandle", name_rva: 0x2080),
+            PeImportSymbolBinding(symbol: "WriteFile", name_rva: 0x20a0),
+            PeImportSymbolBinding(symbol: "ExitProcess", name_rva: 0x20c0)
+        ]
+        val plan = wine_nt_import_hello_binding_plan("KERNEL32.dll", bindings)
+        expect plan.ok == true
+        expect plan.dll == "kernel32.dll"
+        expect plan.call_sequence == "GetStdHandle WriteFile ExitProcess"
+        expect plan.binding_count == 3
+        expect plan.get_std_handle_rva == 0x2080
+        expect plan.write_file_rva == 0x20a0
+        expect plan.exit_process_rva == 0x20c0
+
+    it "rejects mismatched hello import binding targets":
+        val bindings = [
+            PeImportSymbolBinding(symbol: "GetStdHandle", name_rva: 0x2080),
+            PeImportSymbolBinding(symbol: "WriteFile", name_rva: 0x2080),
+            PeImportSymbolBinding(symbol: "ExitProcess", name_rva: 0x20c0)
+        ]
+        expect wine_nt_import_hello_binding_gate("KERNEL32.dll", bindings) == "binding-target-mismatch:WriteFile"

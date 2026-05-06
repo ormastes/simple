@@ -526,27 +526,13 @@ class BrowserRenderer:
                     scene_width: self.viewport_w,
                     scene_height: self.viewport_h
                 )
-            val pixel_count = self.viewport_w * self.viewport_h
-            val pixels: [u32] = [br_first_background_argb(html); pixel_count]
-            return BeRenderResult(
-                format: "pixels",
-                pixel_data: pixels,
-                commands: [],
-                width: self.viewport_w,
-                height: self.viewport_h,
-                node_count: 1,
-                warnings: ["html_fast_fill_pixel_path"],
-                scene_commands: [],
-                scene_width: self.viewport_w,
-                scene_height: self.viewport_h
-            )
         br_materialize_font_faces_if_requested(html)
         val dom = process_style_blocks_result(browser_renderer_html_string_to_dom(html), html)
         val scene_result = self.render_dom(dom)
         if scene_result.scene_commands.len() == 0 and html.len() > 0:
             val fallback = self.render_html_fallback_scene(html)
             val pixel_count = self.viewport_w * self.viewport_h
-            val pixels: [u32] = [br_first_background_argb(html); pixel_count]
+            val pixels = br_render_simple_block_fallback_pixels(html, self.viewport_w, self.viewport_h)
             return BeRenderResult(
                 format: "pixels",
                 pixel_data: pixels,
@@ -615,6 +601,473 @@ class BrowserRenderer:
         """Resize the viewport."""
         self.viewport_w = w
         self.viewport_h = h
+
+fn br_render_simple_block_fallback_pixels(html: text, width: i32, height: i32) -> [u32]:
+    val fill = br_body_background_argb_or_default(html, 0xFFFFFFFFu32)
+    var pixels: [u32] = [fill; width * height]
+    val lower = html.lower()
+    val margin = br_body_margin_px(html)
+    var cursor_y = margin
+    var search_pos: i64 = 0
+    while search_pos < html.len():
+        val div_pos = br_find_str(lower, "<div", search_pos)
+        if div_pos >= 999999999:
+            return pixels
+        val tag_end = browser_renderer_find_char(html, ">", div_pos)
+        if tag_end >= 999999999:
+            return pixels
+        val tag_content = html.slice(div_pos + 1, tag_end)
+        val inline_style = br_tag_attr_value(tag_content, "style")
+        val tag_style = br_style_block_rule_for_tag(html, "div")
+        val class_value = br_tag_attr_value(tag_content, "class")
+        val class_style = br_style_block_rule_for_class(html, class_value)
+        val compound_class_style = br_style_block_rule_for_tag_class(html, "div", class_value)
+        val multi_class_style = br_style_block_rule_for_multi_class(html, class_value)
+        val id_value = br_tag_attr_value(tag_content, "id")
+        val id_style = br_style_block_rule_for_id(html, id_value)
+        val tag_id_style = br_style_block_rule_for_tag_id(html, "div", id_value)
+        val style = br_merge_style_text(br_merge_style_text(br_merge_style_text(br_merge_style_text(br_merge_style_text(br_merge_style_text(tag_style, class_style), compound_class_style), multi_class_style), id_style), tag_id_style), inline_style)
+        val block_w = br_style_px_or_default(style, "width", width - margin * 2)
+        val text_val = br_div_fallback_text(html, tag_end + 1)
+        var block_h = br_style_px_or_default(style, "height", 0)
+        if block_h <= 0 and text_val.len() > 0:
+            block_h = br_style_px_or_default(style, "font-size", br_body_font_size_px(html)) + 4
+        val block_bg = br_style_background_argb(html, style)
+        if block_w > 0 and block_h > 0 and block_bg != 0x00000000u32:
+            pixels = br_fill_rect(pixels, width, height, margin, cursor_y, block_w, block_h, block_bg)
+        if text_val.len() > 0:
+            val text_style = br_merge_style_text(style, br_first_span_style_before_div_close(html, tag_end + 1, tag_content))
+            val text_color = br_style_color_argb(html, text_style, br_body_color_argb(html))
+            val font_size = br_style_px_or_default(text_style, "font-size", br_body_font_size_px(html))
+            pixels = br_draw_font_renderer_text(pixels, width, height, margin, cursor_y, text_val, text_color, font_size)
+        if block_h > 0:
+            cursor_y = cursor_y + block_h
+        search_pos = tag_end + 1
+    pixels
+
+fn br_body_background_argb_or_default(html: text, fallback: u32) -> u32:
+    val body_style = br_combined_body_style(html)
+    val bg = br_style_background_argb(html, body_style)
+    if bg != 0x00000000u32:
+        return bg
+    fallback
+
+fn br_body_margin_px(html: text) -> i32:
+    val body_style = br_combined_body_style(html)
+    val margin = br_style_px_or_default(body_style, "margin", 8)
+    if margin < 0:
+        return 0
+    margin
+
+fn br_body_color_argb(html: text) -> u32:
+    br_style_color_argb(html, br_combined_body_style(html), 0xFF000000u32)
+
+fn br_body_font_size_px(html: text) -> i32:
+    br_style_px_or_default(br_combined_body_style(html), "font-size", 16)
+
+fn br_combined_body_style(html: text) -> text:
+    br_merge_style_text(br_style_block_rule_for_tag(html, "body"), br_first_tag_attr_value(html, "body", "style"))
+
+fn br_merge_style_text(base_style: text, override_style: text) -> text:
+    if base_style.len() == 0:
+        return override_style
+    if override_style.len() == 0:
+        return base_style
+    base_style + ";" + override_style
+
+fn br_style_block_rule_for_class(html: text, class_value: text) -> text:
+    val classes = browser_renderer_split_spaces(class_value)
+    if classes.len() == 0:
+        return ""
+    var out = ""
+    var idx = 0
+    while idx < classes.len():
+        out = br_merge_style_text(out, br_style_block_rule_for_selector(html, "." + classes[idx]))
+        idx = idx + 1
+    out
+
+fn br_style_block_rule_for_id(html: text, id_value: text) -> text:
+    val trimmed = id_value.trim()
+    if trimmed.len() == 0:
+        return ""
+    br_style_block_rule_for_selector(html, "#" + trimmed)
+
+fn br_style_block_rule_for_tag(html: text, tag: text) -> text:
+    br_style_block_rule_for_selector(html, tag)
+
+fn br_style_block_rule_for_tag_class(html: text, tag: text, class_value: text) -> text:
+    val classes = browser_renderer_split_spaces(class_value)
+    if classes.len() == 0:
+        return ""
+    var out = ""
+    var idx = 0
+    while idx < classes.len():
+        out = br_merge_style_text(out, br_style_block_rule_for_selector(html, tag + "." + classes[idx]))
+        idx = idx + 1
+    out
+
+fn br_style_block_rule_for_tag_id(html: text, tag: text, id_value: text) -> text:
+    val trimmed = id_value.trim()
+    if trimmed.len() == 0:
+        return ""
+    br_style_block_rule_for_selector(html, tag + "#" + trimmed)
+
+fn br_style_block_rule_for_descendant(html: text, ancestor_selector: text, descendant_selector: text) -> text:
+    val ancestor = ancestor_selector.trim()
+    val descendant = descendant_selector.trim()
+    if ancestor.len() == 0 or descendant.len() == 0:
+        return ""
+    br_style_block_rule_for_selector(html, ancestor + " " + descendant)
+
+fn br_style_block_rule_for_child(html: text, ancestor_selector: text, child_selector: text) -> text:
+    val ancestor = ancestor_selector.trim()
+    val child = child_selector.trim()
+    if ancestor.len() == 0 or child.len() == 0:
+        return ""
+    br_style_block_rule_for_selector(html, ancestor + " > " + child)
+
+fn br_style_block_rule_for_multi_class(html: text, class_value: text) -> text:
+    val classes = browser_renderer_split_spaces(class_value)
+    if classes.len() < 2:
+        return ""
+    val lower = html.lower()
+    var out = ""
+    var search_pos: i64 = 0
+    while search_pos < html.len():
+        val style_pos = br_find_str(lower, "<style", search_pos)
+        if style_pos >= 999999999:
+            return out
+        val style_open_end = browser_renderer_find_char(html, ">", style_pos)
+        if style_open_end >= 999999999:
+            return out
+        val style_close = br_find_str(lower, "</style", style_open_end + 1)
+        if style_close >= 999999999:
+            return out
+        val css = html.slice(style_open_end + 1, style_close)
+        var rule_start: i64 = 0
+        while rule_start < css.len():
+            val open = browser_renderer_find_char(css, "{", rule_start)
+            if open >= 999999999:
+                break
+            val close = browser_renderer_find_char(css, "}", open + 1)
+            if close >= 999999999:
+                break
+            val selector_list = css.slice(rule_start, open)
+            if br_selector_list_contains_multi_class(selector_list, classes):
+                out = br_merge_style_text(out, css.slice(open + 1, close).trim())
+            rule_start = close + 1
+        search_pos = style_close + 1
+    out
+
+fn br_style_block_rule_for_selector(html: text, selector: text) -> text:
+    val wanted = selector.trim().lower()
+    if wanted.len() == 0:
+        return ""
+    val lower = html.lower()
+    var out = ""
+    var search_pos: i64 = 0
+    while search_pos < html.len():
+        val style_pos = br_find_str(lower, "<style", search_pos)
+        if style_pos >= 999999999:
+            return out
+        val style_open_end = browser_renderer_find_char(html, ">", style_pos)
+        if style_open_end >= 999999999:
+            return out
+        val style_close = br_find_str(lower, "</style", style_open_end + 1)
+        if style_close >= 999999999:
+            return out
+        val css = html.slice(style_open_end + 1, style_close)
+        var rule_start: i64 = 0
+        while rule_start < css.len():
+            val open = browser_renderer_find_char(css, "{", rule_start)
+            if open >= 999999999:
+                break
+            val close = browser_renderer_find_char(css, "}", open + 1)
+            if close >= 999999999:
+                break
+            val selector_list = css.slice(rule_start, open)
+            if br_selector_list_contains_simple(selector_list, wanted):
+                out = br_merge_style_text(out, css.slice(open + 1, close).trim())
+            rule_start = close + 1
+        search_pos = style_close + 1
+    out
+
+fn br_selector_list_contains_simple(selector_list: text, wanted: text) -> bool:
+    var segment_start: i64 = 0
+    var idx: i64 = 0
+    var paren_depth = 0
+    while idx <= selector_list.len():
+        if idx < selector_list.len():
+            val ch = selector_list.char_at(idx)
+            if ch == "(":
+                paren_depth = paren_depth + 1
+            elif ch == ")" and paren_depth > 0:
+                paren_depth = paren_depth - 1
+        if idx == selector_list.len() or (selector_list.char_at(idx) == "," and paren_depth == 0):
+            val part = selector_list.slice(segment_start, idx).trim().lower()
+            if part == wanted or br_functional_selector_contains(part, wanted):
+                return true
+            segment_start = idx + 1
+        idx = idx + 1
+    false
+
+fn br_functional_selector_contains(selector: text, wanted: text) -> bool:
+    val is_pos = br_find_str(selector, ":is(", 0)
+    val where_pos = br_find_str(selector, ":where(", 0)
+    var fn_pos = is_pos
+    if where_pos < fn_pos:
+        fn_pos = where_pos
+    if fn_pos >= 999999999:
+        return false
+    val prefix = selector.slice(0, fn_pos).trim()
+    if prefix.len() > 0 and prefix != "*" and prefix != wanted and not wanted.starts_with(prefix):
+        return false
+    val open = browser_renderer_find_char(selector, "(", fn_pos)
+    val close = browser_renderer_find_char(selector, ")", open + 1)
+    if open >= 999999999 or close >= 999999999:
+        return false
+    var segment_start: i64 = open + 1
+    var idx: i64 = open + 1
+    while idx <= close:
+        if idx == close or selector.char_at(idx) == ",":
+            val option = selector.slice(segment_start, idx).trim()
+            if option == wanted or (prefix.len() > 0 and prefix + option == wanted):
+                return true
+            segment_start = idx + 1
+        idx = idx + 1
+    false
+
+fn br_selector_list_contains_multi_class(selector_list: text, classes: [text]) -> bool:
+    var segment_start: i64 = 0
+    var idx: i64 = 0
+    while idx <= selector_list.len():
+        if idx == selector_list.len() or selector_list.char_at(idx) == ",":
+            val part = selector_list.slice(segment_start, idx).trim().lower()
+            if br_selector_matches_multi_class(part, classes):
+                return true
+            segment_start = idx + 1
+        idx = idx + 1
+    false
+
+fn br_selector_matches_multi_class(selector: text, classes: [text]) -> bool:
+    if not selector.starts_with("."):
+        return false
+    var match_count = 0
+    var segment_start: i64 = 1
+    var idx: i64 = 1
+    while idx <= selector.len():
+        if idx == selector.len() or selector.char_at(idx) == ".":
+            val token = selector.slice(segment_start, idx).trim()
+            if token.len() == 0 or not br_class_list_contains(classes, token):
+                return false
+            match_count = match_count + 1
+            segment_start = idx + 1
+        idx = idx + 1
+    match_count >= 2
+
+fn br_class_list_contains(classes: [text], token: text) -> bool:
+    val wanted = token.lower()
+    var idx = 0
+    while idx < classes.len():
+        if classes[idx].lower() == wanted:
+            return true
+        idx = idx + 1
+    false
+
+fn br_first_tag_attr_value(html: text, tag: text, attr: text) -> text:
+    val lower = html.lower()
+    val pos = br_find_str(lower, "<" + tag, 0)
+    if pos >= 999999999:
+        return ""
+    val tag_end = browser_renderer_find_char(html, ">", pos)
+    if tag_end >= 999999999:
+        return ""
+    br_tag_attr_value(html.slice(pos + 1, tag_end), attr)
+
+fn br_tag_attr_value(tag_content: text, attr: text) -> text:
+    val parts = browser_renderer_split_tag_parts(tag_content)
+    var idx = 1
+    while idx < parts.len():
+        val part = parts[idx]
+        val eq_pos = browser_renderer_find_char(part, "=", 0)
+        if eq_pos > 0:
+            val key = part.slice(0, eq_pos).trim().lower()
+            var value = part.slice(eq_pos + 1, part.len()).trim()
+            if value.starts_with("\"") and value.ends_with("\""):
+                value = value.slice(1, value.len() - 1)
+            elif value.starts_with("'") and value.ends_with("'"):
+                value = value.slice(1, value.len() - 1)
+            if key == attr:
+                return value
+        idx = idx + 1
+    ""
+
+fn br_style_background_argb(html: text, style: text) -> u32:
+    val declarations = browser_renderer_split_semicolons(style)
+    var idx = declarations.len() - 1
+    while idx >= 0:
+        val decl = declarations[idx]
+        val colon = browser_renderer_find_char(decl, ":", 0)
+        if colon > 0:
+            val key = decl.slice(0, colon).trim().lower()
+            var value = decl.slice(colon + 1, decl.len()).trim()
+            value = br_resolve_css_var(html, value)
+            if key == "background-color":
+                val parsed = parse_color_value(value)
+                if parsed != 0x00000000u32:
+                    return br_rgba_to_opaque_page_argb(parsed)
+            elif key == "background":
+                val color_value = br_background_shorthand_color_value("background:" + value, 0)
+                if color_value.len() > 0:
+                    val parsed = parse_color_value(color_value)
+                    if parsed != 0x00000000u32:
+                        return br_rgba_to_opaque_page_argb(parsed)
+        idx = idx - 1
+    0x00000000u32
+
+fn br_style_color_argb(html: text, style: text, fallback: u32) -> u32:
+    val raw = br_style_property_value(style, "color")
+    if raw.len() == 0:
+        return fallback
+    val value = br_resolve_css_var(html, raw)
+    val parsed = parse_color_value(value)
+    if parsed != 0x00000000u32:
+        return br_rgba_to_opaque_page_argb(parsed)
+    fallback
+
+fn br_resolve_css_var(html: text, value: text) -> text:
+    val trimmed = value.trim()
+    val lower = trimmed.lower()
+    if not lower.starts_with("var("):
+        return trimmed
+    val open = browser_renderer_find_char(trimmed, "(", 0)
+    val close = browser_renderer_find_char(trimmed, ")", open + 1)
+    if open >= 999999999 or close >= 999999999:
+        return trimmed
+    val name = trimmed.slice(open + 1, close).trim()
+    val root_style = br_style_block_rule_for_selector(html, ":root")
+    val resolved = br_style_property_value(root_style, name)
+    if resolved.len() > 0:
+        return resolved
+    trimmed
+
+fn br_style_px_or_default(style: text, prop: text, fallback: i32) -> i32:
+    val value = br_style_property_value(style, prop)
+    if value.len() == 0:
+        return fallback
+    br_parse_px_i32(value, fallback)
+
+fn br_style_property_value(style: text, prop: text) -> text:
+    val declarations = browser_renderer_split_semicolons(style)
+    var idx = declarations.len() - 1
+    while idx >= 0:
+        val decl = declarations[idx]
+        val colon = browser_renderer_find_char(decl, ":", 0)
+        if colon > 0:
+            val key = decl.slice(0, colon).trim().lower()
+            if key == prop:
+                return decl.slice(colon + 1, decl.len()).trim()
+        idx = idx - 1
+    ""
+
+fn br_parse_px_i32(value: text, fallback: i32) -> i32:
+    val lower = value.trim().lower()
+    var numeric = ""
+    var idx = 0
+    while idx < lower.len():
+        val ch = lower.char_at(idx)
+        if (ch >= "0" and ch <= "9") or ch == "-":
+            numeric = numeric + ch
+        elif ch == ".":
+            return if numeric.len() > 0: numeric.to_i32() else: fallback
+        elif numeric.len() > 0:
+            return numeric.to_i32()
+        idx = idx + 1
+    if numeric.len() > 0:
+        return numeric.to_i32()
+    fallback
+
+fn br_div_direct_text(html: text, content_start: i64) -> text:
+    val lower = html.lower()
+    val close_pos = br_find_str(lower, "</div", content_start)
+    if close_pos >= 999999999:
+        return ""
+    val raw = html.slice(content_start, close_pos)
+    if raw.contains("<"):
+        return ""
+    raw.trim()
+
+fn br_div_fallback_text(html: text, content_start: i64) -> text:
+    val direct = br_div_direct_text(html, content_start)
+    if direct.len() > 0:
+        return direct
+    br_first_span_text_before_div_close(html, content_start)
+
+fn br_first_span_text_before_div_close(html: text, content_start: i64) -> text:
+    val span_bounds = br_first_span_bounds_before_div_close(html, content_start)
+    val span_open_end = span_bounds.0
+    val span_close = span_bounds.1
+    if span_open_end < 0 or span_close < 0:
+        return ""
+    val raw = html.slice(span_open_end + 1, span_close)
+    if raw.contains("<"):
+        return ""
+    raw.trim()
+
+fn br_first_span_style_before_div_close(html: text, content_start: i64, parent_tag_content: text) -> text:
+    val span_bounds = br_first_span_bounds_before_div_close(html, content_start)
+    val span_open = span_bounds.2
+    val span_open_end = span_bounds.0
+    if span_open < 0 or span_open_end < 0:
+        return ""
+    val tag_content = html.slice(span_open + 1, span_open_end)
+    val inline_style = br_tag_attr_value(tag_content, "style")
+    val tag_style = br_style_block_rule_for_tag(html, "span")
+    val class_value = br_tag_attr_value(tag_content, "class")
+    val class_style = br_style_block_rule_for_class(html, class_value)
+    val compound_class_style = br_style_block_rule_for_tag_class(html, "span", class_value)
+    val multi_class_style = br_style_block_rule_for_multi_class(html, class_value)
+    val id_value = br_tag_attr_value(tag_content, "id")
+    val id_style = br_style_block_rule_for_id(html, id_value)
+    val tag_id_style = br_style_block_rule_for_tag_id(html, "span", id_value)
+    val descendant_style = br_span_descendant_style(html, parent_tag_content)
+    br_merge_style_text(br_merge_style_text(br_merge_style_text(br_merge_style_text(br_merge_style_text(br_merge_style_text(br_merge_style_text(tag_style, class_style), compound_class_style), multi_class_style), descendant_style), id_style), tag_id_style), inline_style)
+
+fn br_span_descendant_style(html: text, parent_tag_content: text) -> text:
+    var out = br_style_block_rule_for_descendant(html, "div", "span")
+    out = br_merge_style_text(out, br_style_block_rule_for_child(html, "div", "span"))
+    val parent_class = br_tag_attr_value(parent_tag_content, "class")
+    val classes = browser_renderer_split_spaces(parent_class)
+    var idx = 0
+    while idx < classes.len():
+        out = br_merge_style_text(out, br_style_block_rule_for_descendant(html, "." + classes[idx], "span"))
+        out = br_merge_style_text(out, br_style_block_rule_for_descendant(html, "div." + classes[idx], "span"))
+        out = br_merge_style_text(out, br_style_block_rule_for_child(html, "." + classes[idx], "span"))
+        out = br_merge_style_text(out, br_style_block_rule_for_child(html, "div." + classes[idx], "span"))
+        idx = idx + 1
+    val parent_id = br_tag_attr_value(parent_tag_content, "id").trim()
+    if parent_id.len() > 0:
+        out = br_merge_style_text(out, br_style_block_rule_for_descendant(html, "#" + parent_id, "span"))
+        out = br_merge_style_text(out, br_style_block_rule_for_descendant(html, "div#" + parent_id, "span"))
+        out = br_merge_style_text(out, br_style_block_rule_for_child(html, "#" + parent_id, "span"))
+        out = br_merge_style_text(out, br_style_block_rule_for_child(html, "div#" + parent_id, "span"))
+    out
+
+fn br_first_span_bounds_before_div_close(html: text, content_start: i64) -> (i64, i64, i64):
+    val lower = html.lower()
+    val div_close = br_find_str(lower, "</div", content_start)
+    if div_close >= 999999999:
+        return (-1, -1, -1)
+    val span_open = br_find_str(lower, "<span", content_start)
+    if span_open >= div_close:
+        return (-1, -1, -1)
+    val span_open_end = browser_renderer_find_char(html, ">", span_open)
+    if span_open_end >= 999999999 or span_open_end >= div_close:
+        return (-1, -1, -1)
+    val span_close = br_find_str(lower, "</span", span_open_end + 1)
+    if span_close >= div_close:
+        return (-1, -1, -1)
+    (span_open_end, span_close, span_open)
 
 # =========================================================================
 # Effect Engine Configuration

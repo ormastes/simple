@@ -12,7 +12,7 @@
 use examples.browser.entity.dom.css_types.Selector
 use examples.browser.entity.dom.css_types.SelectorPart
 use examples.browser.feature.parser.css_tokenizer.CssToken
-use examples.browser.shared.logging
+use examples.browser.shared.logging.Logger
 
 impl CssParser:
 
@@ -58,7 +58,7 @@ impl CssParser:
             for p in compound:
                 parts.push(p)
 
-        Selector.create(parts)
+        return Selector.create(parts)
 
     me _parse_compound_selector() -> [SelectorPart]:
         var parts = [SelectorPart]()
@@ -212,24 +212,79 @@ impl CssParser:
                 return SelectorPart.PseudoClass(name: name)
             CssToken.Function(fn_name):
                 self.advance()
-                # Consume function arguments (simplified: skip until closing paren)
+                var arg_text = ""
                 var depth = 1
                 while depth > 0:
                     match self.current:
                         CssToken.OpenParen:
                             depth = depth + 1
+                            arg_text = arg_text + "("
                             self.advance()
                         CssToken.CloseParen:
                             depth = depth - 1
+                            if depth > 0:
+                                arg_text = arg_text + ")"
                             self.advance()
                         CssToken.Eof:
                             break
                         _:
+                            arg_text = arg_text + self._selector_arg_token_text(self.current)
                             self.advance()
-                return SelectorPart.PseudoClass(name: fn_name)
+                return SelectorPart.FunctionalPseudo(name: fn_name, arg_text: arg_text.trim())
             _:
                 self.logger.warn("Expected pseudo-class name")
                 return nil
+
+    fn _selector_arg_token_text(tok: CssToken) -> text:
+        match tok:
+            CssToken.Ident(v):
+                v
+            CssToken.Function(name):
+                name + "("
+            CssToken.AtKeyword(v):
+                "@" + v
+            CssToken.Hash(v, _):
+                "#" + v
+            CssToken.String(v):
+                "\"" + v + "\""
+            CssToken.Url(v):
+                "url(" + v + ")"
+            CssToken.Delim(v):
+                v
+            CssToken.Number(v, _):
+                self._selector_number_text(v)
+            CssToken.Percentage(v):
+                self._selector_number_text(v) + "%"
+            CssToken.Dimension(v, unit):
+                self._selector_number_text(v) + unit
+            CssToken.Whitespace:
+                " "
+            CssToken.Colon:
+                ":"
+            CssToken.Semicolon:
+                ";"
+            CssToken.Comma:
+                ","
+            CssToken.OpenParen:
+                "("
+            CssToken.CloseParen:
+                ")"
+            CssToken.OpenBracket:
+                "["
+            CssToken.CloseBracket:
+                "]"
+            CssToken.OpenBrace:
+                "{"
+            CssToken.CloseBrace:
+                "}"
+            _:
+                ""
+
+    fn _selector_number_text(v: f64) -> text:
+        val int_v = v.to_i64()
+        if int_v.to_f64() == v:
+            return "{int_v}"
+        "{v}"
 
     me parse_combinator() -> text:
         # Check for whitespace (descendant combinator)

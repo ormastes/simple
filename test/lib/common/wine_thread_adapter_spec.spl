@@ -1,0 +1,50 @@
+use common.wine_thread_adapter.{
+    wine_thread_adapter_feature_string,
+    wine_thread_adapter_gate,
+    wine_thread_adapter_missing_apis,
+    wine_thread_adapter_required_apis,
+    wine_thread_adapter_sffi_binding
+}
+
+fn _existing_thread_sffi_apis() -> text:
+    "thread-create thread-join thread-detach thread-current-id thread-yield " +
+        "mutex-create mutex-lock mutex-try-lock mutex-unlock " +
+        "condvar-create condvar-wait condvar-wait-timeout condvar-signal condvar-broadcast"
+
+fn _all_thread_apis() -> text:
+    _existing_thread_sffi_apis() + " tls-key-create tls-get tls-set tls-delete " +
+        "semaphore-create semaphore-wait semaphore-post " +
+        "event-create event-wait event-signal event-reset thread-fault-record"
+
+describe "Wine thread adapter contract":
+    it "lists pthread, TLS, synchronization, wait-object, and fault APIs":
+        val apis = wine_thread_adapter_required_apis()
+        expect(apis.len()).to_be_greater_than(20)
+        expect(apis[0]).to_equal("thread-create")
+
+    it "reports the first missing thread adapter API":
+        val missing = wine_thread_adapter_missing_apis("thread-create thread-join")
+        expect(missing[0]).to_equal("thread-detach")
+
+    it "maps currently available thread SFFI calls to their runtime symbols":
+        expect(wine_thread_adapter_sffi_binding("thread-create")).to_equal("spl_thread_create")
+        expect(wine_thread_adapter_sffi_binding("mutex-try-lock")).to_equal("spl_mutex_try_lock")
+        expect(wine_thread_adapter_sffi_binding("condvar-wait-timeout")).to_equal("spl_condvar_wait_timeout")
+
+    it "shows existing thread SFFI still lacks Wine TLS and wait objects":
+        val result = wine_thread_adapter_gate(_existing_thread_sffi_apis())
+        expect(result.ready).to_equal(false)
+        expect(result.state).to_equal("missing-api-tls-key-create")
+        expect(result.thread_features).to_contain("pthread")
+        expect(result.thread_features).to_contain("mutex")
+
+    it "derives a ready Wine thread gate from the full adapter surface":
+        val features = wine_thread_adapter_feature_string(_all_thread_apis())
+        expect(features).to_contain("pthread")
+        expect(features).to_contain("tls")
+        expect(features).to_contain("thread-fault")
+
+    it "accepts the full thread/TLS/wait-object adapter API set":
+        val result = wine_thread_adapter_gate(_all_thread_apis())
+        expect(result.ready).to_equal(true)
+        expect(result.state).to_equal("ready")

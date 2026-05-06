@@ -1,0 +1,109 @@
+"""Wine-facing thread, TLS, and wait-object adapter contract."""
+
+use common.wine_host_gate.{wine_thread_gate}
+
+class WineThreadAdapterResult:
+    ready: bool
+    state: text
+    thread_features: text
+
+fn _thread_result(ready: bool, state: text, thread_features: text) -> WineThreadAdapterResult:
+    WineThreadAdapterResult(ready: ready, state: state, thread_features: thread_features)
+
+pub fn wine_thread_adapter_required_apis() -> [text]:
+    [
+        "thread-create",
+        "thread-join",
+        "thread-detach",
+        "thread-current-id",
+        "thread-yield",
+        "tls-key-create",
+        "tls-get",
+        "tls-set",
+        "tls-delete",
+        "mutex-create",
+        "mutex-lock",
+        "mutex-try-lock",
+        "mutex-unlock",
+        "condvar-create",
+        "condvar-wait",
+        "condvar-wait-timeout",
+        "condvar-signal",
+        "condvar-broadcast",
+        "semaphore-create",
+        "semaphore-wait",
+        "semaphore-post",
+        "event-create",
+        "event-wait",
+        "event-signal",
+        "event-reset",
+        "thread-fault-record"
+    ]
+
+pub fn wine_thread_adapter_missing_apis(apis: text) -> [text]:
+    var missing: [text] = []
+    for api in wine_thread_adapter_required_apis():
+        if not apis.contains(api):
+            missing.push(api)
+    missing
+
+pub fn wine_thread_adapter_sffi_binding(api: text) -> text:
+    if api == "thread-create":
+        return "spl_thread_create"
+    if api == "thread-join":
+        return "spl_thread_join"
+    if api == "thread-detach":
+        return "spl_thread_detach"
+    if api == "thread-current-id":
+        return "spl_thread_current_id"
+    if api == "thread-yield":
+        return "spl_thread_yield"
+    if api == "mutex-create":
+        return "spl_mutex_create"
+    if api == "mutex-lock":
+        return "spl_mutex_lock"
+    if api == "mutex-try-lock":
+        return "spl_mutex_try_lock"
+    if api == "mutex-unlock":
+        return "spl_mutex_unlock"
+    if api == "condvar-create":
+        return "spl_condvar_create"
+    if api == "condvar-wait":
+        return "spl_condvar_wait"
+    if api == "condvar-wait-timeout":
+        return "spl_condvar_wait_timeout"
+    if api == "condvar-signal":
+        return "spl_condvar_signal"
+    if api == "condvar-broadcast":
+        return "spl_condvar_broadcast"
+    ""
+
+pub fn wine_thread_adapter_feature_string(apis: text) -> text:
+    var features = ""
+    if apis.contains("thread-create") and apis.contains("thread-join") and apis.contains("thread-detach"):
+        features = features + " pthread"
+    if apis.contains("tls-key-create") and apis.contains("tls-get") and apis.contains("tls-set") and apis.contains("tls-delete"):
+        features = features + " tls"
+    if apis.contains("mutex-create") and apis.contains("mutex-lock") and apis.contains("mutex-unlock"):
+        features = features + " mutex"
+    if apis.contains("condvar-create") and apis.contains("condvar-wait") and apis.contains("condvar-wait-timeout") and apis.contains("condvar-signal"):
+        features = features + " condvar"
+    if apis.contains("semaphore-create") and apis.contains("semaphore-wait") and apis.contains("semaphore-post"):
+        features = features + " semaphore"
+    if apis.contains("event-create") and apis.contains("event-wait") and apis.contains("event-signal") and apis.contains("event-reset"):
+        features = features + " event"
+    if apis.contains("thread-fault-record"):
+        features = features + " thread-fault"
+    features
+
+pub fn wine_thread_adapter_gate(apis: text) -> WineThreadAdapterResult:
+    val missing = wine_thread_adapter_missing_apis(apis)
+    val features = wine_thread_adapter_feature_string(apis)
+    if missing.len() > 0:
+        return _thread_result(false, "missing-api-" + missing[0], features)
+
+    val state = wine_thread_gate(features)
+    if state != "ready":
+        return _thread_result(false, state, features)
+
+    _thread_result(true, "ready", features)

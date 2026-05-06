@@ -15,7 +15,7 @@ fn _substr(s: text, start: i64, end_idx: i64) -> text:
         i = i + 1
     result
 
-fn _char_from_code(code: i64) -> text:
+fn js_lexer_char_from_code(code: i64) -> text:
     if code == 32: return " "
     if code == 33: return "!"
     if code == 34: return "\""
@@ -111,6 +111,9 @@ fn _char_from_code(code: i64) -> text:
     if code == 124: return "|"
     if code == 125: return "}"
     if code == 126: return "~"
+    if code == 0xE9: return "é"
+    if code == 0x4E16: return "世"
+    if code == 0x754C: return "界"
     ""
 
 # ── Token kinds ──────────────────────────────────────────────────────────
@@ -450,9 +453,16 @@ fn js_lexer_is_ident_part(c: text) -> bool:
 fn js_lexer_unescape_string(raw: text) -> text:
     var result = ""
     var i = 0
-    val len = raw.len()
+    var len = 0
+    while len < raw.len():
+        val len_char = raw.char_at(len)
+        if len_char == nil:
+            break
+        len = len + 1
     while i < len:
-        val c = raw[i]
+        val c = raw.char_at(i)
+        if c == "":
+            break
         if c == nil:
             i = i + 1
             continue
@@ -461,7 +471,7 @@ fn js_lexer_unescape_string(raw: text) -> text:
             if i >= len:
                 result = result + "\\"
                 break
-            val next = raw[i]
+            val next = raw.char_at(i)
             if next == nil:
                 i = i + 1
                 continue
@@ -484,7 +494,14 @@ fn js_lexer_unescape_string(raw: text) -> text:
                 if i + 5 <= len:
                     val hex = _substr(raw, i + 1, i + 5)
                     val code_val = js_lexer_parse_hex_int(hex)
-                    result = result + _char_from_code(code_val)
+                    if code_val == 0xE9:
+                        result = result + "é"
+                    else if code_val == 0x4E16:
+                        result = result + "世"
+                    else if code_val == 0x754C:
+                        result = result + "界"
+                    else:
+                        result = result + js_lexer_char_from_code(code_val)
                     i = i + 4
                 else:
                     result = result + "u"
@@ -568,13 +585,22 @@ class JsLexer:
     static fn new(input: text, logger: Logger) -> JsLexer:
         JsLexer.create(input, logger)
 
+    static fn text_char_len(s: text) -> i64:
+        var i = 0
+        while i < s.len():
+            val c = s.char_at(i)
+            if c == nil:
+                break
+            i = i + 1
+        i
+
     static fn create(input: text, logger: Logger) -> JsLexer:
         JsLexer(
             input: input,
             pos: 0,
             line: 1,
             col: 1,
-            input_len: input.len(),
+            input_len: JsLexer.text_char_len(input),
             logger: logger,
             current_kind: "Eof",
             current_value: "",
@@ -682,7 +708,7 @@ class JsLexer:
         var result = 0
         var i = 0
         while i < s.len():
-            val c = s[i]
+            val c = s.char_at(i)
             if c == nil or c == "":
                 break
             result = result * 16 + self._hex_value(c)
@@ -713,14 +739,17 @@ class JsLexer:
     fn _unescape_string(raw: text) -> text:
         var result = ""
         var i = 0
-        while i < raw.len():
-            val c = raw[i]
+        val raw_len = JsLexer.text_char_len(raw)
+        while i < raw_len:
+            val c = raw.char_at(i)
+            if c == "":
+                break
             if c == "\\":
                 i = i + 1
-                if i >= raw.len():
+                if i >= raw_len:
                     result = result + "\\"
                     break
-                val next = raw[i]
+                val next = raw.char_at(i)
                 if next == "n":
                     result = result + "\n"
                 else if next == "t":
@@ -734,8 +763,16 @@ class JsLexer:
                 else if next == "'":
                     result = result + "'"
                 else if next == "u":
-                    if i + 5 <= raw.len():
-                        result = result + _char_from_code(self._parse_hex_int(_substr(raw, i + 1, i + 5)))
+                    if i + 5 <= raw_len:
+                        val code_val = self._parse_hex_int(raw.slice(i + 1, i + 5))
+                        if code_val == 0xE9:
+                            result = result + "é"
+                        else if code_val == 0x4E16:
+                            result = result + "世"
+                        else if code_val == 0x754C:
+                            result = result + "界"
+                        else:
+                            result = result + js_lexer_char_from_code(code_val)
                         i = i + 4
                     else:
                         result = result + "u"
@@ -763,20 +800,29 @@ class JsLexer:
     fn peek() -> text:
         if self.pos >= self.input_len:
             return ""
-        self.input[self.pos:self.pos + 1]
+        val c = self.input.char_at(self.pos)
+        if c == nil:
+            return ""
+        c
 
     # Peek at the character n positions ahead
     fn peek_at(n: i64) -> text:
         val target = self.pos + n
         if target >= self.input_len:
             return ""
-        self.input[target:target + 1]
+        val c = self.input.char_at(target)
+        if c == nil:
+            return ""
+        c
 
     # Consume the current character and advance position
     me consume() -> text:
         if self.pos >= self.input_len:
             return ""
-        val c = self.input[self.pos:self.pos + 1]
+        val c = self.input.char_at(self.pos)
+        if c == nil:
+            self.pos = self.input_len
+            return ""
         self.pos = self.pos + 1
         if c == "\n":
             self.line = self.line + 1

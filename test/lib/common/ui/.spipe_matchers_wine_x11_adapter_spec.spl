@@ -1,0 +1,74 @@
+use common.ui.wine_x11_adapter.{
+    wine_x11_backend_event_state,
+    wine_x11_backend_feature_gate,
+    wine_x11_backend_new,
+    wine_x11_backend_pixel_state,
+    wine_x11_backend_ready,
+    wine_x11_configure_window,
+    wine_x11_create_window,
+    wine_x11_damage_window,
+    wine_x11_destroy_window,
+    wine_x11_fill_window,
+    wine_x11_focus_window,
+    wine_x11_map_window,
+    wine_x11_set_clipboard,
+    wine_x11_set_cursor,
+    wine_x11_text_window
+}
+
+fn _ready_backend():
+    val created = wine_x11_create_window(wine_x11_backend_new(), "w1")
+    val mapped = wine_x11_map_window(created.backend, "w1")
+    val configured = wine_x11_configure_window(mapped.backend, "w1", 640, 480)
+    val focused = wine_x11_focus_window(configured.backend, "w1")
+    val damaged = wine_x11_damage_window(focused.backend, "w1")
+    val filled = wine_x11_fill_window(damaged.backend, "w1")
+    val texted = wine_x11_text_window(filled.backend, "w1", "hello")
+    val cursor = wine_x11_set_cursor(texted.backend, "arrow")
+    val clipboard = wine_x11_set_clipboard(cursor.backend, "clip")
+    wine_x11_destroy_window(clipboard.backend, "w1")
+
+describe "Wine X11-class backend adapter":
+    it "starts with only display and screen discovery":
+        val backend = wine_x11_backend_new()
+        expect wine_x11_backend_feature_gate(backend) == "missing-window"
+        expect wine_x11_backend_event_state(backend) == "missing-create"
+
+    it "creates, maps, configures, and focuses windows":
+        val created = wine_x11_create_window(wine_x11_backend_new(), "w1")
+        expect created.state == "created"
+        val mapped = wine_x11_map_window(created.backend, "w1")
+        val configured = wine_x11_configure_window(mapped.backend, "w1", 800, 600)
+        val focused = wine_x11_focus_window(configured.backend, "w1")
+        expect focused.backend.focused_window == "w1"
+        expect wine_x11_backend_event_state(focused.backend) == "missing-expose"
+
+    it "rejects operations on missing windows":
+        val damaged = wine_x11_damage_window(wine_x11_backend_new(), "missing")
+        expect damaged.ok == false
+        expect damaged.state == "missing-window"
+
+    it "records damage, present, text, glyph, fill, and cursor pixel evidence":
+        val created = wine_x11_create_window(wine_x11_backend_new(), "w1")
+        val mapped = wine_x11_map_window(created.backend, "w1")
+        val damaged = wine_x11_damage_window(mapped.backend, "w1")
+        val filled = wine_x11_fill_window(damaged.backend, "w1")
+        val texted = wine_x11_text_window(filled.backend, "w1", "abc")
+        val cursor = wine_x11_set_cursor(texted.backend, "ibeam")
+        expect (cursor.backend.features).contains("glyph")
+        expect wine_x11_backend_pixel_state(cursor.backend) == "ready"
+
+    it "records clipboard and destroy events":
+        val created = wine_x11_create_window(wine_x11_backend_new(), "w1")
+        val clip = wine_x11_set_clipboard(created.backend, "hello")
+        val destroyed = wine_x11_destroy_window(clip.backend, "w1")
+        expect destroyed.backend.clipboard_text == "hello"
+        expect destroyed.backend.mapped_windows.len() == 0
+
+    it "reaches the existing X11-class feature, event, and pixel gates":
+        val result = _ready_backend()
+        expect result.ok == true
+        expect wine_x11_backend_feature_gate(result.backend) == "ready"
+        expect wine_x11_backend_event_state(result.backend) == "ready"
+        expect wine_x11_backend_pixel_state(result.backend) == "ready"
+        expect wine_x11_backend_ready(result.backend) == "ready"

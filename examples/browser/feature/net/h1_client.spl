@@ -4,7 +4,7 @@
 # HTTP/1.1 client for the Simple Browser Platform.
 # Implements connection pooling, request serialization, and response parsing
 # including chunked transfer encoding and keep-alive management.
-# Actual socket I/O delegates to platform primitives (returns Err until wired).
+# Plain HTTP socket I/O delegates to hosted TCP primitives.
 
 use examples.browser.entity.net.request_types.{FetchRequest, FetchResponse, HttpMethod}
 use examples.browser.entity.net.url_types.Url
@@ -13,11 +13,22 @@ use examples.browser.feature.net.tls.{TlsManager, TlsConnection}
 use examples.browser.feature.net.dns.DnsResolver
 use examples.browser.shared.error.{BrowserResult, BrowserError, network_error, parse_error}
 use examples.browser.shared.logging.{Logger, LogLevel}
+use std.js.types.pair.{Pair}
+
+extern fn rt_io_tcp_connect_timeout(addr: text, ms: i64) -> i64
+extern fn rt_io_tcp_read(fd: i64, size: i64) -> [u8]
+extern fn rt_io_tcp_write_text(fd: i64, data: text) -> i64
+extern fn rt_io_tcp_flush(fd: i64) -> bool
+extern fn rt_io_tcp_close(fd: i64) -> bool
+extern fn rt_io_tcp_set_nodelay(fd: i64, enabled: bool) -> bool
+extern fn rt_io_tcp_set_read_timeout(fd: i64, ms: i64?) -> bool
+extern fn rt_io_tcp_set_write_timeout(fd: i64, ms: i64?) -> bool
+extern fn rt_bytes_to_text(data: [u8]) -> text
 
 # --- MockResponseRegistry ---
 # Provides canned HTTP responses for testing without real socket I/O.
 # Register URL patterns and their responses; the H1 client checks this
-# before attempting (simulated) network access.
+# before attempting network access.
 
 class MockResponseEntry:
     url_pattern: text
@@ -31,7 +42,7 @@ class MockResponseEntry:
             url_pattern: url_pattern,
             status: status,
             status_text: status_text_for_code(status),
-            headers: List<Pair<text, text>>(),
+            headers: [],
             body: body
         )
 
@@ -39,7 +50,7 @@ class MockResponseRegistry:
     entries: [MockResponseEntry]
 
     static fn create() -> MockResponseRegistry:
-        MockResponseRegistry(entries: [MockResponseEntry]())
+        MockResponseRegistry(entries: [])
 
     me register(url_pattern: text, status: i64, body: text):
         val entry = MockResponseEntry.create(url_pattern, status, body)
@@ -54,7 +65,7 @@ class MockResponseRegistry:
         for entry in self.entries:
             if url.contains(entry.url_pattern):
                 return entry
-        nil
+        return nil
 
     fn size() -> i64:
         self.entries.len()
@@ -67,7 +78,7 @@ fn get_mock_registry() -> MockResponseRegistry:
         return _global_mock_registry.unwrap()
     var reg = MockResponseRegistry.create()
     _global_mock_registry = reg
-    reg
+    return reg
 
 fn set_mock_registry(registry: MockResponseRegistry):
     _global_mock_registry = registry
@@ -79,6 +90,7 @@ class H1Connection:
     port: i64
     is_tls: bool
     tls_conn: TlsConnection?
+    tcp_fd: i64
     is_keep_alive: bool
     logger: Logger
 
@@ -88,6 +100,7 @@ class H1Connection:
             port: port,
             is_tls: is_tls,
             tls_conn: nil,
+            tcp_fd: -1,
             is_keep_alive: true,
             logger: logger
         )
@@ -114,7 +127,7 @@ class H1Client:
             logger: logger,
             dns: dns,
             tls: tls,
-            connections: [H1Connection](),
+            connections: [],
             max_connections_per_host: 6
         )
 
@@ -142,17 +155,17 @@ class H1Client:
         # Step 4: Check mock registry for a canned response
         val mock_reg = get_mock_registry()
         val url_text = req.url.to_text()
-        val mock_entry = mock_reg.lookup(url_text)
-        if val entry = mock_entry:
+        if mock_reg.size() > 0 and mock_reg.lookup(url_text).?:
+            val entry = mock_reg.lookup(url_text).unwrap()
             self.logger.debug("h1: mock response for {url_text} -> {entry.status}")
             var mock_headers: [Pair<text, text>] = []
             for mh in entry.headers:
                 mock_headers.push(mh)
             if find_header(mock_headers, "content-type").? == false:
-                mock_headers.push(Pair(first: "Content-Type", second: "text/html; charset=utf-8"))
-            mock_headers.push(Pair(first: "Content-Length", second: "{entry.body.len()}"))
-            mock_headers.push(Pair(first: "Connection", second: "keep-alive"))
-            mock_headers.push(Pair(first: "X-Simple-Browser", second: "mock-response"))
+                mock_headers.push(Pair("Content-Type", "text/html; charset=utf-8"))
+            mock_headers.push(Pair("Content-Length", "{entry.body.len()}"))
+            mock_headers.push(Pair("Connection", "keep-alive"))
+            mock_headers.push(Pair("X-Simple-Browser", "mock-response"))
             return Ok(FetchResponse(
                 status: entry.status,
                 status_text: entry.status_text,
@@ -162,26 +175,10 @@ class H1Client:
                 redirected: false
             ))
 
-        # Step 5: No mock — generate a simulated response based on URL pattern.
-        # Real socket I/O requires stdlib net module with TCP send/recv.
-        self.logger.warn("h1: no real socket I/O available — returning simulated response for {url_text}")
-        val sim_body = simulated_response_body(req.url)
-        val sim_status = 200
-        var sim_headers: [Pair<text, text>] = []
-        sim_headers.push(Pair(first: "Content-Type", second: "text/html; charset=utf-8"))
-        sim_headers.push(Pair(first: "Content-Length", second: "{sim_body.len()}"))
-        sim_headers.push(Pair(first: "Connection", second: "keep-alive"))
-        sim_headers.push(Pair(first: "Server", second: "SimpleBrowser/1.0 (simulated)"))
-        sim_headers.push(Pair(first: "X-Simple-Browser", second: "simulated-response"))
-
-        Ok(FetchResponse(
-            status: sim_status,
-            status_text: "OK",
-            headers: sim_headers,
-            body: sim_body,
-            url: req.url,
-            redirected: false
-        ))
+        # Step 5: No mock — use real transport.
+        if is_tls:
+            return self.execute_tls_http(req, conn, request_bytes)
+        return self.execute_plain_http(req, conn, request_bytes)
 
     # Look up an existing pooled connection or create a new one.
     me get_connection(host: text, port: i64, is_tls: bool) -> BrowserResult<H1Connection>:
@@ -206,17 +203,75 @@ class H1Client:
 
         self.logger.debug("h1: resolved {host} to {addresses.get(0)}")
 
-        # Create new connection (simulated — no real TCP socket)
-        val conn = H1Connection.create(host, port, is_tls, self.logger)
-
-        # Simulated TCP connection: in absence of real socket FFI, we treat the
-        # connection as established. Actual data transport uses mock/simulated responses.
-        self.logger.warn("h1: simulated TCP connect to {host}:{port} (real sockets require stdlib net module)")
+        var conn = H1Connection.create(host, port, is_tls, self.logger)
+        if not is_tls:
+            val connect_addr = "{addresses.get(0)}:{port}"
+            self.logger.debug("h1: opening TCP stream to {connect_addr} for host {host}")
+            val fd = rt_io_tcp_connect_timeout(connect_addr, 5000)
+            if fd < 0:
+                return Err(network_error("h1: TCP connect failed for {host}:{port}"))
+            val _ = rt_io_tcp_set_nodelay(fd, true)
+            val _ = rt_io_tcp_set_read_timeout(fd, Some(5000))
+            val _ = rt_io_tcp_set_write_timeout(fd, Some(5000))
+            conn.tcp_fd = fd
+        else:
+            self.logger.debug("h1: deferring socket encryption to TLS transport for {host}:{port}")
 
         self.connections.push(conn)
         self.logger.info("h1: new connection to {host}:{port} (pool size: {self.connections.len()})")
 
         Ok(conn)
+
+    me execute_plain_http(req: FetchRequest, conn: H1Connection, request_bytes: text) -> BrowserResult<FetchResponse>:
+        if conn.tcp_fd < 0:
+            return Err(network_error("h1: missing TCP stream for {conn.host}:{conn.port}"))
+        val written = rt_io_tcp_write_text(conn.tcp_fd, request_bytes)
+        if written <= 0:
+            val _ = rt_io_tcp_close(conn.tcp_fd)
+            return Err(network_error("h1: TCP write failed for {conn.host}:{conn.port}"))
+        val flushed = rt_io_tcp_flush(conn.tcp_fd)
+        if not flushed:
+            val _ = rt_io_tcp_close(conn.tcp_fd)
+            return Err(network_error("h1: TCP flush failed for {conn.host}:{conn.port}"))
+        val raw_response = read_tcp_response_text(conn.tcp_fd)
+        val _ = rt_io_tcp_close(conn.tcp_fd)
+        conn.is_keep_alive = false
+        if raw_response.len() == 0:
+            return Err(network_error("h1: TCP read returned no response for {conn.host}:{conn.port}"))
+        val parsed = parse_http_response(raw_response)?
+        return Ok(FetchResponse(
+            status: parsed.status,
+            status_text: parsed.status_text,
+            headers: parsed.headers,
+            body: parsed.body,
+            url: req.url,
+            redirected: parsed.redirected
+        ))
+
+    me execute_tls_http(req: FetchRequest, conn: H1Connection, request_bytes: text) -> BrowserResult<FetchResponse>:
+        if val tls_conn = conn.tls_conn:
+            val written = tls_conn.write_text(request_bytes)
+            if written <= 0:
+                val _ = tls_conn.close()
+                return Err(network_error("h1: TLS write failed for {conn.host}:{conn.port}"))
+            val raw_response = read_tls_response_text(tls_conn)
+            val _ = tls_conn.close()
+            conn.is_keep_alive = false
+            if raw_response.len() == 0:
+                return Err(network_error("h1: TLS read returned no response for {conn.host}:{conn.port}"))
+            match parse_http_response(raw_response):
+                Ok(parsed):
+                    return Ok(FetchResponse(
+                        status: parsed.status,
+                        status_text: parsed.status_text,
+                        headers: parsed.headers,
+                        body: parsed.body,
+                        url: req.url,
+                        redirected: parsed.redirected
+                    ))
+                Err(e):
+                    return Err(e)
+        Err(network_error("h1: missing TLS connection for {conn.host}:{conn.port}"))
 
     # Count active connections to a specific host:port.
     fn count_connections(host: text, port: i64) -> i64:
@@ -228,7 +283,7 @@ class H1Client:
 
     # Remove a connection from the pool.
     me remove_connection(host: text, port: i64, is_tls: bool):
-        var new_conns = [H1Connection]()
+        var new_conns: [H1Connection] = []
         var removed = false
         for conn in self.connections:
             if not removed and conn.matches(host, port, is_tls):
@@ -241,7 +296,7 @@ class H1Client:
     # Close all pooled connections.
     me close_all():
         self.logger.info("h1: closing all {self.connections.len()} pooled connections")
-        self.connections = [H1Connection]()
+        self.connections = []
 
 # --- Request serialization ---
 
@@ -266,7 +321,7 @@ fn build_request_bytes(req: FetchRequest) -> text:
     var has_accept = false
     var has_connection = false
     for header in req.headers:
-        val name_lower = header.first.to_lower()
+        val name_lower = h1_ascii_lower("{header.first}")
         if name_lower == "content-length":
             has_content_length = true
         if name_lower == "user-agent":
@@ -283,7 +338,7 @@ fn build_request_bytes(req: FetchRequest) -> text:
     if not has_accept:
         result = result + "Accept: */*\r\n"
     if not has_connection:
-        result = result + "Connection: keep-alive\r\n"
+        result = result + "Connection: close\r\n"
 
     # Add Content-Length for methods with bodies
     if req.body.len() > 0 and not has_content_length:
@@ -300,6 +355,46 @@ fn build_request_bytes(req: FetchRequest) -> text:
 
 # --- Response parsing ---
 
+fn read_tcp_response_text(fd: i64) -> text:
+    var bytes: [u8] = []
+    while true:
+        val chunk = rt_io_tcp_read(fd, 8192)
+        if chunk.len() == 0:
+            break
+        bytes = bytes + chunk
+    rt_bytes_to_text(bytes)
+
+fn read_tls_response_text(conn: TlsConnection) -> text:
+    var response = ""
+    while true:
+        val chunk = conn.read_text(8192)
+        if chunk.len() == 0:
+            break
+        response = response + chunk
+    response
+
+fn parse_http_response(raw: text) -> BrowserResult<FetchResponse>:
+    val parts = split_header_body(raw)
+    val header_lines = split_lines(parts.first)
+    if header_lines.len() == 0:
+        return Err(parse_error("h1: empty HTTP response"))
+    val status = parse_status_line(header_lines[0])?
+    var raw_headers = ""
+    var i = 1
+    while i < header_lines.len():
+        raw_headers = raw_headers + header_lines[i] + "\r\n"
+        i = i + 1
+    val headers = parse_headers(raw_headers)
+    val body = read_response_body(parts.second, headers)
+    return Ok(FetchResponse(
+        status: status.first,
+        status_text: status.second,
+        headers: headers,
+        body: body,
+        url: Url.create("http", "", 0, ""),
+        redirected: false
+    ))
+
 fn parse_status_line(line: text) -> BrowserResult<Pair<i64, text>>:
     # Parse an HTTP/1.1 status line: "HTTP/1.1 200 OK"
     # Returns (status_code, status_text).
@@ -307,12 +402,12 @@ fn parse_status_line(line: text) -> BrowserResult<Pair<i64, text>>:
         return Err(parse_error("h1: status line too short: '{line}'"))
 
     # Validate HTTP version prefix
-    val version_prefix = line.slice(0, 9)
+    val version_prefix = h1_substring(line, 0, 9)
     if version_prefix != "HTTP/1.1 " and version_prefix != "HTTP/1.0 ":
         return Err(parse_error("h1: invalid HTTP version in status line: '{line}'"))
 
     # Extract status code (3 digits at position 9)
-    val code_str = line.slice(9, 12)
+    val code_str = h1_substring(line, 9, 12)
     val code = parse_int(code_str)
     if code < 100 or code > 599:
         return Err(parse_error("h1: invalid status code: '{code_str}'"))
@@ -320,28 +415,28 @@ fn parse_status_line(line: text) -> BrowserResult<Pair<i64, text>>:
     # Extract status text (everything after "HTTP/1.1 NNN ")
     var status_text = ""
     if line.len() > 13:
-        status_text = line.slice(13, line.len())
+        status_text = h1_substring(line, 13, line.len())
     else:
         status_text = status_text_for_code(code)
 
-    Ok(Pair(first: code, second: status_text))
+    Ok(Pair(code, status_text))
 
 fn parse_header_line(line: text) -> Pair<text, text>?:
     # Parse a single header line: "Content-Type: text/html"
     # Returns nil for malformed lines.
-    val colon_pos = find_char(line, ":")
+    val colon_pos = h1_find_char(line, ":")
     if colon_pos < 0:
         return nil
 
-    val name = line.slice(0, colon_pos).trim()
+    val name = h1_substring(line, 0, colon_pos).trim()
     var value = ""
     if colon_pos + 1 < line.len():
-        value = line.slice(colon_pos + 1, line.len()).trim()
+        value = h1_substring(line, colon_pos + 1, line.len()).trim()
 
     if name.len() == 0:
         return nil
 
-    Pair(first: name, second: value)
+    Pair(name, value)
 
 fn parse_headers(raw: text) -> [Pair<text, text>]:
     # Parse a block of HTTP headers (separated by \r\n).
@@ -359,14 +454,14 @@ fn read_response_body(raw_body: text, headers: [Pair<text, text>]) -> text:
     # Supports Content-Length and chunked transfer encoding.
     val transfer_encoding = find_header(headers, "transfer-encoding")
     if val te = transfer_encoding:
-        if te.to_lower().contains("chunked"):
+        if h1_ascii_lower("{te}").contains("chunked"):
             return parse_chunked_body(raw_body)
 
     val content_length_str = find_header(headers, "content-length")
     if val cl_str = content_length_str:
         val cl = parse_int(cl_str)
         if cl >= 0 and cl <= raw_body.len():
-            return raw_body.slice(0, cl)
+            return h1_substring(raw_body, 0, cl)
 
     # Fall back to returning the entire body
     raw_body
@@ -384,12 +479,12 @@ fn parse_chunked_body(raw: text) -> text:
 
     while pos < raw.len():
         # Find end of chunk size line
-        val line_end = find_crlf(raw, pos)
+        val line_end = h1_find_crlf(raw, pos)
         if line_end < 0:
             break
 
         # Parse chunk size (hex)
-        val size_str = raw.slice(pos, line_end).trim()
+        val size_str = h1_substring(raw, pos, line_end).trim()
         if size_str.len() == 0:
             break
 
@@ -404,10 +499,10 @@ fn parse_chunked_body(raw: text) -> text:
 
         if data_end > raw.len():
             # Incomplete chunk, take what we have
-            result = result + raw.slice(data_start, raw.len())
+            result = result + h1_substring(raw, data_start, raw.len())
             break
 
-        result = result + raw.slice(data_start, data_end)
+        result = result + h1_substring(raw, data_start, data_end)
 
         # Skip \r\n after chunk data
         pos = data_end + 2
@@ -427,9 +522,10 @@ fn get_port(url: Url) -> i64:
 
 fn find_header(headers: [Pair<text, text>], name: text) -> text?:
     # Find the first header value matching the given name (case-insensitive).
-    val name_lower = name.to_lower()
+    val name_lower = h1_ascii_lower("{name}")
     for header in headers:
-        if header.first.to_lower() == name_lower:
+        val header_name = h1_ascii_lower("{header.first}")
+        if header_name == name_lower:
             return header.second
     nil
 
@@ -471,53 +567,98 @@ fn status_text_for_code(code: i64) -> text:
 
 # --- String utility helpers ---
 
-fn find_char(s: text, ch: text) -> i64:
+fn h1_find_char(s: text, ch: text) -> i64:
     # Find the index of the first occurrence of ch in s. Returns -1 if not found.
     var i = 0
     while i < s.len():
-        if s.get(i) == ch:
+        if s[i] == ch:
             return i
         i = i + 1
     -1
 
-fn find_crlf(s: text, start: i64) -> i64:
+fn h1_find_crlf(s: text, start: i64) -> i64:
     # Find the index of "\r\n" in s starting from the given position.
     # Returns the index of '\r', or -1 if not found.
     var i = start
     while i < s.len() - 1:
-        if s.get(i) == "\r" and s.get(i + 1) == "\n":
+        if s[i] == "\r" and s[i + 1] == "\n":
             return i
         i = i + 1
     -1
+
+fn h1_substring(s: text, start: i64, end: i64) -> text:
+    var result = ""
+    var i = start
+    while i < end and i < s.len():
+        result = result + s[i]
+        i = i + 1
+    result
+
+fn h1_ascii_lower(s: text) -> text:
+    var result = ""
+    var i = 0
+    while i < s.len():
+        result = result + h1_ascii_lower_char(s[i])
+        i = i + 1
+    result
+
+fn h1_ascii_lower_char(ch: text) -> text:
+    if ch == "A": return "a"
+    if ch == "B": return "b"
+    if ch == "C": return "c"
+    if ch == "D": return "d"
+    if ch == "E": return "e"
+    if ch == "F": return "f"
+    if ch == "G": return "g"
+    if ch == "H": return "h"
+    if ch == "I": return "i"
+    if ch == "J": return "j"
+    if ch == "K": return "k"
+    if ch == "L": return "l"
+    if ch == "M": return "m"
+    if ch == "N": return "n"
+    if ch == "O": return "o"
+    if ch == "P": return "p"
+    if ch == "Q": return "q"
+    if ch == "R": return "r"
+    if ch == "S": return "s"
+    if ch == "T": return "t"
+    if ch == "U": return "u"
+    if ch == "V": return "v"
+    if ch == "W": return "w"
+    if ch == "X": return "x"
+    if ch == "Y": return "y"
+    if ch == "Z": return "z"
+    ch
 
 fn split_header_body(raw: text) -> Pair<text, text>:
     # Split an HTTP response into header section and body, separated by \r\n\r\n.
     var i = 0
     while i < raw.len() - 3:
-        if (s.get(i) == "\r" and s.get(i + 1) == "\n"
-            and s.get(i + 2) == "\r" and s.get(i + 3) == "\n"):
-            val headers = raw.slice(0, i)
-            val body = raw.slice(i + 4, raw.len())
-            return Pair(first: headers, second: body)
+        if (raw[i] == "\r" and raw[i + 1] == "\n"
+            and raw[i + 2] == "\r" and raw[i + 3] == "\n"):
+            val headers = h1_substring(raw, 0, i)
+            val body = h1_substring(raw, i + 4, raw.len())
+            return Pair(headers, body)
         i = i + 1
     # No separator found — treat entire response as headers with empty body
-    Pair(first: raw, second: "")
+    Pair(raw, "")
 
 fn split_lines(s: text) -> [text]:
     # Split a string by \r\n line endings.
-    var lines = [text]()
+    var lines: [text] = []
     var start = 0
     var i = 0
     while i < s.len() - 1:
-        if s.get(i) == "\r" and s.get(i + 1) == "\n":
-            lines.push(s.slice(start, i))
+        if s[i] == "\r" and s[i + 1] == "\n":
+            lines.push(h1_substring(s, start, i))
             start = i + 2
             i = i + 2
         else:
             i = i + 1
     # Add remaining text after last \r\n
     if start < s.len():
-        lines.push(s.slice(start, s.len()))
+        lines.push(h1_substring(s, start, s.len()))
     lines
 
 fn parse_int(s: text) -> i64:
@@ -526,12 +667,12 @@ fn parse_int(s: text) -> i64:
     var negative = false
     var i = 0
 
-    if s.len() > 0 and s.get(0) == "-":
+    if s.len() > 0 and s[0] == "-":
         negative = true
         i = 1
 
     while i < s.len():
-        val ch = s.get(i)
+        val ch = s[i]
         val digit = char_to_digit(ch)
         if digit < 0:
             return 0
@@ -546,11 +687,11 @@ fn parse_hex(s: text) -> i64:
     var i = 0
 
     # Skip optional "0x" prefix
-    if s.len() >= 2 and s.get(0) == "0" and (s.get(1) == "x" or s.get(1) == "X"):
+    if s.len() >= 2 and s[0] == "0" and (s[1] == "x" or s[1] == "X"):
         i = 2
 
     while i < s.len():
-        val ch = s.get(i).to_lower()
+        val ch = h1_ascii_lower(s[i])
         val digit = hex_char_to_digit(ch)
         if digit < 0:
             return result  # Stop at first non-hex character
@@ -583,12 +724,3 @@ fn hex_char_to_digit(ch: text) -> i64:
     if ch == "e": return 14
     if ch == "f": return 15
     -1
-
-# --- Simulated response generation ---
-
-fn simulated_response_body(url: Url) -> text:
-    # Generate a simple HTML response body based on URL characteristics.
-    # Used when no mock registry entry matches and real socket I/O is unavailable.
-    val host = url.host
-    val path = if url.path.len() > 0: url.path else: "/"
-    "<html><head><title>SimpleBrowser - {host}</title></head><body><h1>Simulated Response</h1><p>Host: {host}</p><p>Path: {path}</p><p>This is a simulated response. Real HTTP transport requires the stdlib net module with TCP socket support.</p></body></html>"

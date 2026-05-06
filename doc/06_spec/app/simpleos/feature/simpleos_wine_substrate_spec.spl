@@ -9,6 +9,15 @@ use common.wine_substrate.{
     wine_substrate_pe_gate,
     wine_substrate_async_gate
 }
+use common.wine_hello_exe.{wine_hello_exe_probe}
+
+fn _zero_pe_bytes(count: i64) -> [u8]:
+    var out: [u8] = []
+    var i = 0
+    while i < count:
+        out.push(0)
+        i = i + 1
+    out
 
 describe "SimpleOS Wine Substrate":
     describe "REQ-001: capability matrix":
@@ -24,6 +33,12 @@ describe "SimpleOS Wine Substrate":
         it "should reject resident fallback as complete evidence":
             val result = wine_substrate_check_process_evidence("[desktop-e2e] process-backed:resident")
             expect(result).to_equal("resident-fallback")
+
+        it "should require Browser Demo, Hello World, Editor, Terminal, and File Manager process markers":
+            val partial = "[desktop-e2e] process-backed:ok app=browser_demo pid=1\n" +
+                "[desktop-e2e] process-backed:ok app=hello_world pid=2\n" +
+                "[desktop-e2e] process-backed:ok app=editor pid=3"
+            expect(wine_substrate_check_process_evidence(partial)).to_equal("insufficient-evidence")
 
     describe "REQ-005: VM and container support":
         it "should require fixed mappings, guard pages, and permission changes":
@@ -57,3 +72,13 @@ describe "SimpleOS Wine Substrate":
         it "should keep hello.exe blocked until substrate gates are verified":
             val gate_state = wine_substrate_hello_exe_gate("process=verified vm=verified host=verified posix=verified pthread=verified dynload=verified pe_loader=verified")
             expect(gate_state).to_equal("blocked")
+
+        it "should keep hello.exe blocked until the modeled NT bridge is verified":
+            val gate_state = wine_substrate_hello_exe_gate("process=verified vm=verified host=verified posix=verified pthread=verified dynload=verified pe_loader=verified async=verified")
+            expect(gate_state).to_equal("blocked")
+
+        it "should not execute malformed hello.exe bytes even when gates are declared verified":
+            val gates = "process=verified vm=verified host=verified posix=verified pthread=verified dynload=verified pe_loader=verified async=verified nt_bridge=verified"
+            val result = wine_hello_exe_probe(_zero_pe_bytes(0), gates)
+            expect(result.status).to_equal("rejected")
+            expect(result.error).to_equal("too-small")

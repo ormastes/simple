@@ -36,7 +36,10 @@ fn css_logger() -> Logger:
 fn tokenize_css(input: text) -> [CssToken]:
     css_tokenize(input, css_logger())
 
-fn parse_selector(input: text) -> Selector:
+fn parse_selector_basic(input: text) -> Selector:
+    parse_selector_text(input, css_logger())
+
+fn parse_selector_full(input: text) -> Selector:
     parse_selector_text(input, css_logger())
 
 fn parse_declarations(input: text) -> [CSSDeclaration]:
@@ -82,6 +85,7 @@ fn selector_part_kind(part: SelectorPart) -> text:
         SelectorPart.Universal: "universal"
         SelectorPart.Attribute(_, _, _): "attribute"
         SelectorPart.PseudoClass(_): "pseudo_class"
+        SelectorPart.FunctionalPseudo(_, _): "functional_pseudo"
         SelectorPart.PseudoElement(_): "pseudo_element"
         SelectorPart.Combinator(_): "combinator"
 
@@ -93,8 +97,14 @@ fn selector_part_name(part: SelectorPart) -> text:
         SelectorPart.Universal: "*"
         SelectorPart.Attribute(name, _, _): name
         SelectorPart.PseudoClass(name): name
+        SelectorPart.FunctionalPseudo(name, _): name
         SelectorPart.PseudoElement(name): name
         SelectorPart.Combinator(kind): kind
+
+fn selector_part_arg(part: SelectorPart) -> text:
+    match part:
+        SelectorPart.FunctionalPseudo(_, arg_text): arg_text
+        _: ""
 
 # ============================================================================
 # CSS Tokenizer
@@ -143,26 +153,26 @@ describe "CSSTokenizer":
 describe "CSS Selector Parser":
     context "simple selectors":
         it "parses simple type selector":
-            val sel = parse_selector("div")
+            val sel = parse_selector_basic("div")
             expect sel.parts.len() == 1
             expect selector_part_kind(sel.parts.get(0)) == "type"
             expect selector_part_name(sel.parts.get(0)) == "div"
 
         it "parses class selector":
-            val sel = parse_selector(".main")
+            val sel = parse_selector_basic(".main")
             expect sel.parts.len() == 1
             expect selector_part_kind(sel.parts.get(0)) == "class"
             expect selector_part_name(sel.parts.get(0)) == "main"
 
         it "parses ID selector":
-            val sel = parse_selector("#header")
+            val sel = parse_selector_basic("#header")
             expect sel.parts.len() == 1
             expect selector_part_kind(sel.parts.get(0)) == "id"
             expect selector_part_name(sel.parts.get(0)) == "header"
 
     context "compound selectors":
         it "parses compound selector":
-            val sel = parse_selector("div.main#content")
+            val sel = parse_selector_basic("div.main#content")
             expect sel.parts.len() == 3
             expect selector_part_kind(sel.parts.get(0)) == "type"
             expect selector_part_name(sel.parts.get(0)) == "div"
@@ -171,9 +181,24 @@ describe "CSS Selector Parser":
             expect selector_part_kind(sel.parts.get(2)) == "id"
             expect selector_part_name(sel.parts.get(2)) == "content"
 
+    context "functional pseudo-classes":
+        it "parses nth-child arguments":
+            val sel = parse_selector_full("li:nth-child(2n+1)")
+            expect sel.parts.len() == 2
+            expect selector_part_kind(sel.parts.get(1)) == "functional_pseudo"
+            expect selector_part_name(sel.parts.get(1)) == "nth-child"
+            expect selector_part_arg(sel.parts.get(1)) == "2n+1"
+
+        it "parses not selector arguments":
+            val sel = parse_selector_full("button:not(.primary)")
+            expect sel.parts.len() == 2
+            expect selector_part_kind(sel.parts.get(1)) == "functional_pseudo"
+            expect selector_part_name(sel.parts.get(1)) == "not"
+            expect selector_part_arg(sel.parts.get(1)) == ".primary"
+
     context "combinators":
         it "parses descendant combinator":
-            val sel = parse_selector("div p")
+            val sel = parse_selector_basic("div p")
             # Should produce: Type("div"), Combinator(" "), Type("p")
             expect sel.parts.len() == 3
             expect selector_part_kind(sel.parts.get(0)) == "type"
@@ -218,21 +243,21 @@ describe "CSS Declaration Parser":
 
 describe "CSS Specificity":
     it "calculates specificity for type selector":
-        val sel = parse_selector("div")
+        val sel = parse_selector_basic("div")
         val spec = calculate_specificity(sel)
         expect spec.ids == 0
         expect spec.classes == 0
         expect spec.elements == 1
 
     it "calculates specificity for class selector":
-        val sel = parse_selector(".main")
+        val sel = parse_selector_basic(".main")
         val spec = calculate_specificity(sel)
         expect spec.ids == 0
         expect spec.classes == 1
         expect spec.elements == 0
 
     it "calculates specificity for ID selector":
-        val sel = parse_selector("#header")
+        val sel = parse_selector_basic("#header")
         val spec = calculate_specificity(sel)
         expect spec.ids == 1
         expect spec.classes == 0
@@ -240,7 +265,7 @@ describe "CSS Specificity":
 
     it "calculates specificity for compound selector":
         # div.main#content => (1 id, 1 class, 1 element)
-        val sel = parse_selector("div.main#content")
+        val sel = parse_selector_basic("div.main#content")
         val spec = calculate_specificity(sel)
         expect spec.ids == 1
         expect spec.classes == 1

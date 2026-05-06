@@ -1,0 +1,118 @@
+"""Modeled NT file I/O bridge over the Wine POSIX adapter contract."""
+
+use common.wine_posix_adapter.{wine_posix_adapter_gate}
+
+class WineNtModeledFile:
+    path: text
+    content: text
+
+class WineNtFileHandle:
+    handle: i64
+    path: text
+    cursor: i64
+    open: bool
+
+class WineNtFileTable:
+    files: [WineNtModeledFile]
+    handles: [WineNtFileHandle]
+    next_handle: i64
+    ready: bool
+    state: text
+
+class WineNtFileIoResult:
+    ok: bool
+    state: text
+    table: WineNtFileTable
+    handle: i64
+    data: text
+    bytes_read: i64
+
+fn _file(path: text, content: text) -> WineNtModeledFile:
+    WineNtModeledFile(path: path, content: content)
+
+fn _handle(handle: i64, path: text, cursor: i64, open: bool) -> WineNtFileHandle:
+    WineNtFileHandle(handle: handle, path: path, cursor: cursor, open: open)
+
+fn _table(files: [WineNtModeledFile], handles: [WineNtFileHandle], next_handle: i64, ready: bool, state: text) -> WineNtFileTable:
+    WineNtFileTable(files: files, handles: handles, next_handle: next_handle, ready: ready, state: state)
+
+fn _result(ok: bool, state: text, table: WineNtFileTable, handle: i64, data: text, bytes_read: i64) -> WineNtFileIoResult:
+    WineNtFileIoResult(ok: ok, state: state, table: table, handle: handle, data: data, bytes_read: bytes_read)
+
+fn _find_file(files: [WineNtModeledFile], path: text) -> WineNtModeledFile:
+    for file in files:
+        if file.path == path:
+            return file
+    _file("", "")
+
+fn _find_handle(handles: [WineNtFileHandle], handle: i64) -> WineNtFileHandle:
+    for item in handles:
+        if item.handle == handle:
+            return item
+    _handle(0, "", 0, false)
+
+fn _replace_handle(table: WineNtFileTable, replacement: WineNtFileHandle) -> WineNtFileTable:
+    var handles: [WineNtFileHandle] = []
+    for item in table.handles:
+        if item.handle == replacement.handle:
+            handles.push(replacement)
+        else:
+            handles.push(item)
+    _table(table.files, handles, table.next_handle, table.ready, table.state)
+
+pub fn wine_nt_file_io_required_calls() -> [text]:
+    [
+        "CreateFileW",
+        "ReadFile",
+        "CloseHandle"
+    ]
+
+pub fn wine_nt_file_table_new(posix_apis: text, async_features: text) -> WineNtFileTable:
+    val gate = wine_posix_adapter_gate(posix_apis, async_features)
+    if not gate.ready:
+        return _table([], [], 0x40, false, gate.state)
+    _table([], [], 0x40, true, "ready")
+
+pub fn wine_nt_file_table_add_file(table: WineNtFileTable, path: text, content: text) -> WineNtFileTable:
+    var files = table.files
+    files.push(_file(path, content))
+    _table(files, table.handles, table.next_handle, table.ready, table.state)
+
+pub fn wine_nt_file_create_w(table: WineNtFileTable, path: text) -> WineNtFileIoResult:
+    if not table.ready:
+        return _result(false, table.state, table, 0, "", 0)
+    if path == "":
+        return _result(false, "invalid-path", table, 0, "", 0)
+    val file = _find_file(table.files, path)
+    if file.path == "":
+        return _result(false, "file-not-found", table, 0, "", 0)
+    val handle = table.next_handle
+    var handles = table.handles
+    handles.push(_handle(handle, path, 0, true))
+    _result(true, "opened", _table(table.files, handles, handle + 1, table.ready, table.state), handle, "", 0)
+
+pub fn wine_nt_file_read(table: WineNtFileTable, handle: i64, requested_len: i64) -> WineNtFileIoResult:
+    if requested_len < 0:
+        return _result(false, "invalid-read-size", table, handle, "", 0)
+    val opened = _find_handle(table.handles, handle)
+    if not opened.open:
+        return _result(false, "invalid-handle", table, handle, "", 0)
+    val file = _find_file(table.files, opened.path)
+    if file.path == "":
+        return _result(false, "file-not-found", table, handle, "", 0)
+    var out = ""
+    var i = opened.cursor
+    var count = 0
+    while i < file.content.len() and count < requested_len:
+        out = out + file.content[i]
+        i = i + 1
+        count = count + 1
+    val updated = _replace_handle(table, _handle(opened.handle, opened.path, opened.cursor + count, true))
+    _result(true, "read", updated, handle, out, count)
+
+pub fn wine_nt_file_close(table: WineNtFileTable, handle: i64) -> WineNtFileIoResult:
+    val opened = _find_handle(table.handles, handle)
+    if not opened.open:
+        return _result(false, "invalid-handle", table, handle, "", 0)
+    val updated = _replace_handle(table, _handle(opened.handle, opened.path, opened.cursor, false))
+    _result(true, "closed", updated, handle, "", 0)

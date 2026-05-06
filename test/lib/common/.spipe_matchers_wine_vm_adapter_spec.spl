@@ -1,0 +1,80 @@
+use common.wine_vm_adapter.{
+    WineVmFault,
+    wine_vm_access_gate,
+    wine_vm_adapter_feature_string,
+    wine_vm_adapter_gate,
+    wine_vm_commit,
+    wine_vm_fault_evidence,
+    wine_vm_mark_guard,
+    wine_vm_protect,
+    wine_vm_region_contains,
+    wine_vm_regions_overlap,
+    wine_vm_reserve,
+    wine_vm_reserve_fixed,
+    wine_vm_space_find,
+    wine_vm_space_new,
+    wine_vm_unmap
+}
+
+fn _fault() -> WineVmFault:
+    WineVmFault(process_id: 10, thread_id: 20, address: 0x10000000, access: "read", policy: "deliver-seh")
+
+describe "Wine VM adapter model":
+    it "detects interval overlap for fixed mappings":
+        expect wine_vm_regions_overlap(100, 20, 110, 20) == true
+        expect wine_vm_regions_overlap(100, 20, 120, 20) == false
+
+    it "reserves automatic and fixed ranges":
+        val auto_res = wine_vm_reserve(wine_vm_space_new(), 0x2000)
+        expect auto_res.ok == true
+        expect auto_res.region.base == 0x10000000
+
+        val fixed = wine_vm_reserve_fixed(auto_res.space, 0x20000000, 0x1000)
+        expect fixed.ok == true
+        expect fixed.region.base == 0x20000000
+
+    it "rejects overlapping fixed mappings":
+        val first = wine_vm_reserve_fixed(wine_vm_space_new(), 0x400000, 0x2000)
+        val second = wine_vm_reserve_fixed(first.space, 0x401000, 0x2000)
+        expect second.ok == false
+        expect second.state == "fixed-map-conflict"
+
+    it "commits and protects reserved regions":
+        val reserved = wine_vm_reserve_fixed(wine_vm_space_new(), 0x500000, 0x1000)
+        val committed = wine_vm_commit(reserved.space, 0x500000, "rw")
+        expect committed.state == "committed"
+        val protected = wine_vm_protect(committed.space, 0x500000, "rx")
+        expect protected.state == "protected"
+        expect wine_vm_access_gate(protected.space, 0x500000, "execute") == "ready"
+        expect wine_vm_access_gate(protected.space, 0x500000, "write") == "page-fault-write"
+
+    it "reports guard and uncommitted faults":
+        val reserved = wine_vm_reserve_fixed(wine_vm_space_new(), 0x600000, 0x1000)
+        expect wine_vm_access_gate(reserved.space, 0x600000, "read") == "page-fault-uncommitted"
+        val committed = wine_vm_commit(reserved.space, 0x600000, "rw")
+        val guarded = wine_vm_mark_guard(committed.space, 0x600000)
+        expect wine_vm_access_gate(guarded.space, 0x600000, "read") == "page-fault-guard"
+
+    it "unmaps regions and validates user pointer lookup":
+        val reserved = wine_vm_reserve_fixed(wine_vm_space_new(), 0x700000, 0x1000)
+        expect wine_vm_region_contains(wine_vm_space_find(reserved.space, 0x700100), 0x700100) == true
+        val unmapped = wine_vm_unmap(reserved.space, 0x700000)
+        expect unmapped.state == "unmapped"
+        expect wine_vm_access_gate(unmapped.space, 0x700100, "read") == "page-fault-unmapped"
+
+    it "builds fault evidence accepted by the VM fault gate":
+        val evidence = wine_vm_fault_evidence(_fault())
+        expect (evidence).contains("process=10")
+        expect (evidence).contains("thread=20")
+        expect (evidence).contains("policy=deliver-seh")
+
+    it "derives ready VM features when mappings, guard, exec, namespaces, and fault evidence exist":
+        val reserved = wine_vm_reserve_fixed(wine_vm_space_new(), 0x800000, 0x1000)
+        val committed = wine_vm_commit(reserved.space, 0x800000, "rx")
+        val guarded = wine_vm_mark_guard(committed.space, 0x800000)
+        val container = "pid fs ipc net capability"
+        val features = wine_vm_adapter_feature_string(guarded.space, container)
+        expect (features).contains("exec-perm")
+        expect (features).contains("guard-page")
+        expect (features).contains("cap-namespace")
+        expect wine_vm_adapter_gate(guarded.space, container, _fault()) == "ready"

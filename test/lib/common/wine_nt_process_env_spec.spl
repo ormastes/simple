@@ -1,0 +1,52 @@
+use common.wine_nt_process_env.{
+    wine_nt_get_command_line_w,
+    wine_nt_get_environment_strings_w,
+    wine_nt_process_env_add,
+    wine_nt_process_env_new,
+    wine_nt_process_env_required_calls
+}
+
+fn _all_adapter_apis() -> text:
+    "fd-open fd-read fd-write fd-close fd-dup fd-inherit stdio pipe socket timer poll-wait " +
+        "cwd env argv spawn path-normalize path-attrs path-locks errno-map"
+
+fn _all_async_features() -> text:
+    "io-driver submit-open submit-read submit-write submit-close submit-timeout poll-completion " +
+        "event-loop register-fd deregister-fd waker wake"
+
+describe "Wine NT process environment bridge":
+    it "lists the modeled GetCommandLineW and GetEnvironmentStringsW calls":
+        val calls = wine_nt_process_env_required_calls()
+        expect(calls.len()).to_equal(2)
+        expect(calls[0]).to_equal("GetCommandLineW")
+
+    it "blocks environment readiness until POSIX argv/env prerequisites pass":
+        val env = wine_nt_process_env_new("fd-open fd-read", _all_async_features(), ["hello.exe"])
+        expect(env.ready).to_equal(false)
+        expect(env.state).to_equal("missing-api-fd-write")
+
+    it "requires argv0 before exposing a process command line":
+        val env = wine_nt_process_env_new(_all_adapter_apis(), _all_async_features(), [])
+        expect(env.ready).to_equal(false)
+        expect(wine_nt_get_command_line_w(env).state).to_equal("missing-argv0")
+
+    it "formats a modeled command line with simple Windows-style quoting":
+        val env = wine_nt_process_env_new(_all_adapter_apis(), _all_async_features(), ["C:\\Program Files\\hello.exe", "--flag", "plain"])
+        val result = wine_nt_get_command_line_w(env)
+        expect(result.ok).to_equal(true)
+        expect(result.command_line).to_equal("\"C:\\Program Files\\hello.exe\" --flag plain")
+
+    it "formats environment strings as a deterministic block":
+        var env = wine_nt_process_env_new(_all_adapter_apis(), _all_async_features(), ["hello.exe"])
+        env = wine_nt_process_env_add(env, "PATH", "C:\\Windows")
+        env = wine_nt_process_env_add(env, "TEMP", "C:\\Temp")
+        val result = wine_nt_get_environment_strings_w(env)
+        expect(result.ok).to_equal(true)
+        expect(result.environment_block).to_equal("PATH=C:\\Windows\nTEMP=C:\\Temp\n")
+
+    it "rejects invalid environment keys":
+        var env = wine_nt_process_env_new(_all_adapter_apis(), _all_async_features(), ["hello.exe"])
+        env = wine_nt_process_env_add(env, "", "bad")
+        val result = wine_nt_get_environment_strings_w(env)
+        expect(result.ok).to_equal(false)
+        expect(result.state).to_equal("invalid-env-key")

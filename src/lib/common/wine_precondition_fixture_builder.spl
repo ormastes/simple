@@ -1,0 +1,169 @@
+"""Build the hello.exe fixture manifest from the Wine adapter contracts."""
+
+use common.ui.wine_x11_adapter.{
+    wine_x11_backend_new,
+    wine_x11_backend_ready,
+    wine_x11_configure_window,
+    wine_x11_create_window,
+    wine_x11_damage_window,
+    wine_x11_destroy_window,
+    wine_x11_fill_window,
+    wine_x11_focus_window,
+    wine_x11_map_window,
+    wine_x11_set_clipboard,
+    wine_x11_set_cursor,
+    wine_x11_text_window
+}
+use common.wine_async_gate.{wine_async_gate}
+use common.wine_dynload_adapter.{wine_dynload_adapter_gate}
+use common.wine_host_gate.{wine_host_gate}
+use common.wine_nt_api_catalog.{wine_nt_api_catalogued_future_symbols, wine_nt_api_modeled_precondition_symbols}
+use common.wine_nt_file_io.{wine_nt_file_table_add_file, wine_nt_file_table_new}
+use common.wine_nt_heap.{wine_nt_process_heap_new}
+use common.wine_nt_process_env.{wine_nt_get_command_line_w, wine_nt_get_environment_strings_w, wine_nt_process_env_add, wine_nt_process_env_new}
+use common.wine_nt_thread_wait.{wine_nt_create_thread, wine_nt_thread_table_new, wine_nt_wait_for_single_object}
+use common.wine_ntdll_bridge.{
+    wine_ntdll_allocate_virtual_memory,
+    wine_ntdll_close,
+    wine_ntdll_create_file,
+    wine_ntdll_free_virtual_memory,
+    wine_ntdll_protect_virtual_memory,
+    wine_ntdll_read_file,
+    wine_rtl_allocate_heap,
+    wine_rtl_free_heap
+}
+use common.wine_pe_gate.{wine_pe_gate}
+use common.wine_posix_adapter.{wine_posix_adapter_gate}
+use common.wine_precondition_manifest.{WinePreconditionManifest, wine_precondition_manifest, wine_precondition_required_process_log}
+use common.wine_service_adapter.{wine_service_adapter_ready, wine_service_adapter_gate}
+use common.wine_thread_adapter.{wine_thread_adapter_gate}
+use common.wine_vm_adapter.{WineVmFault, wine_vm_adapter_gate, wine_vm_commit, wine_vm_mark_guard, wine_vm_reserve_fixed, wine_vm_space_new}
+
+pub fn wine_precondition_fixture_async_features() -> text:
+    "nogc-future poll waker io-driver submit-open submit-read submit-write submit-close " +
+        "submit-timeout poll-completion event-loop register-fd deregister-fd wake noalloc-capability"
+
+pub fn wine_precondition_fixture_posix_apis() -> text:
+    "fd-open fd-read fd-write fd-close fd-dup fd-inherit stdio pipe socket timer poll-wait " +
+        "cwd env argv spawn path-normalize path-attrs path-locks errno-map"
+
+pub fn wine_precondition_fixture_thread_apis() -> text:
+    "thread-create thread-join thread-detach thread-current-id thread-yield " +
+        "tls-key-create tls-get tls-set tls-delete mutex-create mutex-lock mutex-try-lock mutex-unlock " +
+        "condvar-create condvar-wait condvar-wait-timeout condvar-signal condvar-broadcast " +
+        "semaphore-create semaphore-wait semaphore-post event-create event-wait event-signal event-reset thread-fault-record"
+
+pub fn wine_precondition_fixture_dynload_apis() -> text:
+    "native-module-open native-module-close native-self-handle native-symbol-lookup search-path " +
+        "dependency-list link-namespace relocation-apply import-bind tls-callback pe-loader-boundary structured-loader-error"
+
+pub fn wine_precondition_fixture_pe_features() -> text:
+    "mz pe-signature machine-x86_64 pe32plus section-bounds console-subsystem imports relocations " +
+        "tls-directory structured-errors safe-map no-exec-before-gates"
+
+pub fn wine_precondition_fixture_base_host_features() -> text:
+    "fd-table stdio pipes sockets poll-wait timers errno cwd-env-argv spawn fs-paths fs-attrs fs-locks " +
+        "pthread tls mutex condvar semaphore event dynload"
+
+pub fn wine_precondition_fixture_vm_state() -> text:
+    val reserved = wine_vm_reserve_fixed(wine_vm_space_new(), 0x800000, 0x1000)
+    val committed = wine_vm_commit(reserved.space, 0x800000, "rx")
+    val guarded = wine_vm_mark_guard(committed.space, 0x800000)
+    val fault = WineVmFault(process_id: 1, thread_id: 1, address: 0x800000, access: "execute", policy: "deliver-seh")
+    wine_vm_adapter_gate(guarded.space, "pid fs ipc net capability", fault)
+
+pub fn wine_precondition_fixture_renderer_state() -> text:
+    val created = wine_x11_create_window(wine_x11_backend_new(), "w1")
+    val mapped = wine_x11_map_window(created.backend, "w1")
+    val configured = wine_x11_configure_window(mapped.backend, "w1", 640, 480)
+    val focused = wine_x11_focus_window(configured.backend, "w1")
+    val damaged = wine_x11_damage_window(focused.backend, "w1")
+    val filled = wine_x11_fill_window(damaged.backend, "w1")
+    val texted = wine_x11_text_window(filled.backend, "w1", "hello")
+    val cursor = wine_x11_set_cursor(texted.backend, "arrow")
+    val clipboard = wine_x11_set_clipboard(cursor.backend, "clip")
+    val destroyed = wine_x11_destroy_window(clipboard.backend, "w1")
+    wine_x11_backend_ready(destroyed.backend)
+
+pub fn wine_precondition_fixture_posix_state() -> text:
+    wine_posix_adapter_gate(wine_precondition_fixture_posix_apis(), wine_precondition_fixture_async_features()).state
+
+pub fn wine_precondition_fixture_pthread_state() -> text:
+    wine_thread_adapter_gate(wine_precondition_fixture_thread_apis()).state
+
+pub fn wine_precondition_fixture_dynload_state() -> text:
+    wine_dynload_adapter_gate(wine_precondition_fixture_dynload_apis()).state
+
+pub fn wine_precondition_fixture_async_state() -> text:
+    wine_async_gate(wine_precondition_fixture_async_features())
+
+pub fn wine_precondition_fixture_host_state() -> text:
+    val services = wine_service_adapter_ready(wine_precondition_fixture_base_host_features())
+    wine_service_adapter_gate(services)
+
+pub fn wine_precondition_fixture_pe_loader_state() -> text:
+    wine_pe_gate(wine_precondition_fixture_pe_features())
+
+pub fn wine_precondition_fixture_nt_bridge_state() -> text:
+    if wine_nt_api_modeled_precondition_symbols().len() != wine_nt_api_catalogued_future_symbols().len():
+        return "missing-modeled-catalog-entry"
+    val allocated = wine_ntdll_allocate_virtual_memory(wine_vm_space_new(), 0x900000, 0x1000, "rw")
+    if not allocated.ok:
+        return "vm-" + allocated.state
+    val protected = wine_ntdll_protect_virtual_memory(allocated.space, 0x900000, "rx")
+    if not protected.ok:
+        return "vm-" + protected.state
+    val freed_vm = wine_ntdll_free_virtual_memory(protected.space, 0x900000)
+    if not freed_vm.ok:
+        return "vm-" + freed_vm.state
+
+    val file_table = wine_nt_file_table_add_file(wine_nt_file_table_new(wine_precondition_fixture_posix_apis(), wine_precondition_fixture_async_features()), "C:\\hello.txt", "hello")
+    val opened = wine_ntdll_create_file(file_table, "C:\\hello.txt")
+    if not opened.ok:
+        return "file-" + opened.state
+    val read = wine_ntdll_read_file(opened.table, opened.handle, 5)
+    if not read.ok or read.data != "hello":
+        return "file-" + read.state
+    val closed = wine_ntdll_close(read.table, opened.handle)
+    if not closed.ok:
+        return "file-" + closed.state
+
+    val thread_table = wine_nt_thread_table_new(wine_precondition_fixture_thread_apis())
+    val created = wine_nt_create_thread(thread_table, "hello_entry", 0)
+    if not created.ok:
+        return "thread-" + created.state
+    val waited = wine_nt_wait_for_single_object(created.table, created.handle, 0)
+    if not waited.ok:
+        return "thread-" + waited.state
+
+    var env = wine_nt_process_env_new(wine_precondition_fixture_posix_apis(), wine_precondition_fixture_async_features(), ["hello.exe"])
+    env = wine_nt_process_env_add(env, "PATH", "C:\\Windows")
+    val command_line = wine_nt_get_command_line_w(env)
+    if not command_line.ok:
+        return "env-" + command_line.state
+    val env_block = wine_nt_get_environment_strings_w(env)
+    if not env_block.ok:
+        return "env-" + env_block.state
+
+    val heap = wine_nt_process_heap_new(freed_vm.space, true)
+    val heap_alloc = wine_rtl_allocate_heap(heap, heap.handle, 32)
+    if not heap_alloc.ok:
+        return "heap-" + heap_alloc.state
+    val heap_free = wine_rtl_free_heap(heap_alloc.heap, heap.handle, heap_alloc.ptr)
+    if not heap_free.ok:
+        return "heap-" + heap_free.state
+    "ready"
+
+pub fn wine_precondition_fixture_manifest() -> WinePreconditionManifest:
+    wine_precondition_manifest(
+        wine_precondition_required_process_log(),
+        wine_precondition_fixture_vm_state(),
+        wine_precondition_fixture_renderer_state(),
+        wine_precondition_fixture_host_state(),
+        wine_precondition_fixture_posix_state(),
+        wine_precondition_fixture_pthread_state(),
+        wine_precondition_fixture_dynload_state(),
+        wine_precondition_fixture_async_state(),
+        wine_precondition_fixture_pe_loader_state(),
+        wine_precondition_fixture_nt_bridge_state()
+    )

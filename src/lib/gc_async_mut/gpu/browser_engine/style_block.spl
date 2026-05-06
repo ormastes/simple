@@ -11,7 +11,7 @@
 #   - Compound: div.active, span.highlight
 #   - Comma-separated: div, span { ... }
 #   - Descendant: div span { ... } (limited — matches if ANY ancestor matches)
-#   - Pseudo-classes: :nth-child(N) (basic numeric only)
+#   - Pseudo-classes: :nth-child(N) (basic numeric only), :is(), :where()
 #   - Shorthand properties: flex, border, background, margin multi-value
 
 use std.gc_async_mut.gpu.browser_engine.dom.{BeDomNode,
@@ -399,6 +399,12 @@ fn simple_selector_matches(selector: text, node: BeDomNode, nth: i32) -> bool:
     if sel == "*":
         return node.is_element()
 
+    # Modern forgiving selector-list pseudos. Specificity differences do not
+    # matter in this order-only style applicator, so :is() and :where() share
+    # matching behavior here.
+    if sel.starts_with(":is(") or sel.starts_with(":where("):
+        return functional_selector_list_matches(sel, node, nth)
+
     # Handle :nth-child pseudo
     val nth_pos = sb_find(sel, ":nth-child(", 0)
     if nth_pos < 999999999:
@@ -425,6 +431,17 @@ fn simple_selector_matches(selector: text, node: BeDomNode, nth: i32) -> bool:
         return sb_has_class(node, cls)
 
     # Compound: tag.class or tag#id
+    val pseudo_is_pos = sb_find(sel, ":is(", 0)
+    if pseudo_is_pos > 0 and pseudo_is_pos < 999999999:
+        val base = sel.slice(0, pseudo_is_pos)
+        val pseudo = sel.slice(pseudo_is_pos, sel.len())
+        return simple_selector_matches(base, node, nth) and functional_selector_list_matches(pseudo, node, nth)
+    val pseudo_where_pos = sb_find(sel, ":where(", 0)
+    if pseudo_where_pos > 0 and pseudo_where_pos < 999999999:
+        val base = sel.slice(0, pseudo_where_pos)
+        val pseudo = sel.slice(pseudo_where_pos, sel.len())
+        return simple_selector_matches(base, node, nth) and functional_selector_list_matches(pseudo, node, nth)
+
     val dot_pos = sb_find(sel, ".", 0)
     if dot_pos > 0 and dot_pos < 999999999:
         val tag = sel.slice(0, dot_pos)
@@ -443,6 +460,23 @@ fn simple_selector_matches(selector: text, node: BeDomNode, nth: i32) -> bool:
     # Plain tag selector
     val ntag3 = be_dom_get_tag(node)
     ntag3 == sel
+
+fn functional_selector_list_matches(selector: text, node: BeDomNode, nth: i32) -> bool:
+    val open = sb_find(selector, "(", 0)
+    if open >= 999999999:
+        return false
+    val close = sb_find(selector, ")", open + 1)
+    if close >= 999999999:
+        return false
+    val inner = selector.slice(open + 1, close)
+    val options = sb_split_char(inner, ",")
+    var idx = 0
+    while idx < options.len():
+        val option = options[idx].trim()
+        if option.len() > 0 and simple_selector_matches(option, node, nth):
+            return true
+        idx = idx + 1
+    false
 
 fn sb_has_class(node: BeDomNode, name: text) -> bool:
     """Cross-module class membership check using be_dom_get_classes accessor."""

@@ -16,7 +16,7 @@
 
 use std.spec
 use examples.browser.feature.sandbox.csp.{
-    CspDirective, CspPolicy, parse_csp,
+    CspDirective, CspPolicy, parse_csp, parse_csp_with_origin,
     check_source, check_script, check_style, check_image
 }
 use examples.browser.shared.logging.{Logger, LogLevel}
@@ -93,6 +93,25 @@ describe "Content Security Policy Integration":
             val allowed = check_script(policy, "https://evil.example.com")
             expect(allowed).to_equal(false)
 
+        it "host sources match only URL host boundaries":
+            val sources = ["cdn.example.com"]
+            val policy = single_directive_policy("script-src", sources)
+            expect(check_script(policy, "https://cdn.example.com/app.js")).to_equal(true)
+            expect(check_script(policy, "https://evil.example/path://cdn.example.com/app.js")).to_equal(false)
+
+        it "full URL sources do not overmatch same-prefix attacker hosts":
+            val sources = ["https://cdn.example.com"]
+            val policy = single_directive_policy("script-src", sources)
+            expect(check_script(policy, "https://cdn.example.com/app.js")).to_equal(true)
+            expect(check_script(policy, "https://cdn.example.com.evil/app.js")).to_equal(false)
+
+        it "wildcard host sources match subdomains but not suffix attackers":
+            val sources = ["*.example.com"]
+            val policy = single_directive_policy("script-src", sources)
+            expect(check_script(policy, "https://cdn.example.com/app.js")).to_equal(true)
+            expect(check_script(policy, "https://example.com/app.js")).to_equal(false)
+            expect(check_script(policy, "https://cdn.example.com.evil/app.js")).to_equal(false)
+
     # ========================================================================
     # Source checking — styles
     # ========================================================================
@@ -145,17 +164,33 @@ describe "Content Security Policy Integration":
             expect(allowed).to_equal(false)
 
         it "'unsafe-inline' allows inline scripts":
-            """'unsafe-inline' as a source token is matched literally."""
+            val sources = ["'unsafe-inline'"]
+            val policy = single_directive_policy("script-src", sources)
+            val allowed = check_script(policy, "inline")
+            expect(allowed).to_equal(true)
+
+        it "'unsafe-inline' is not treated as a literal URL source":
             val sources = ["'unsafe-inline'"]
             val policy = single_directive_policy("script-src", sources)
             val allowed = check_script(policy, "'unsafe-inline'")
-            expect(allowed).to_equal(true)
+            expect(allowed).to_equal(false)
 
         it "'unsafe-eval' allows eval()":
             val sources = ["'unsafe-eval'"]
             val policy = single_directive_policy("script-src", sources)
-            val allowed = check_script(policy, "'unsafe-eval'")
+            val allowed = check_script(policy, "eval")
             expect(allowed).to_equal(true)
+
+        it "'unsafe-eval' is not treated as a literal URL source":
+            val sources = ["'unsafe-eval'"]
+            val policy = single_directive_policy("script-src", sources)
+            val allowed = check_script(policy, "'unsafe-eval'")
+            expect(allowed).to_equal(false)
+
+        it "'self' does not overmatch same-prefix attacker origins":
+            val policy = parse_csp_with_origin("script-src 'self'", "https://example.com")
+            expect(check_script(policy, "https://example.com/app.js")).to_equal(true)
+            expect(check_script(policy, "https://example.com.evil/app.js")).to_equal(false)
 
     # ========================================================================
     # Report URI

@@ -453,13 +453,23 @@ argument as top-y and does not apply that `bearing_y` field as if it were a
 top bearing; browser-compatible text placement should continue to use
 `layout_text()` positions.
 
-## Remaining Fix
+## Current Resolution
 
-1. Add browser-compatible font fallback and shaping for wrapped text, beyond
-   one glyph-at-a-time rasterization plus simple kern-table adjustment.
-2. Match Chrome's antialiasing/blending policy or add a justified perceptual
-   threshold for text-only cases.
-3. Verify against the Chrome oracle with a wrapped text fixture, not only with
-   non-empty smoke tests.
-4. Re-run `site_corpus_compat.spl --only=site_0_google --limit=1` and update
-   the corpus plan with the measured delta.
+The latest renderer audit resolves the tracked corpus pixel blocker. The
+current baseline reports are fresh and exact against the checked-in Chrome
+oracles:
+
+- `node tools/electron-shell/verify_famous_site_corpus_completion.js --expected-count=132`
+  reports `STATUS: PASS`, `reportCount: 132`, `exact: 132`, `accepted: 132`,
+  `divergent: 0`, `staleSuspectCount: 0`, `staleReportCount: 0`, and no
+  missing metric fonts.
+- `bin/simple test test/sys/wm_compare/famous_site_corpus_spec.spl --mode=interpreter --no-cache`
+  passes all 33 corpus checks, including the exact completion gate.
+- `bin/simple test test/unit/lib/gc_async_mut/gpu/browser_engine/browser_renderer_spec.spl --mode=interpreter --no-cache`
+  passes all 56 BrowserRenderer checks.
+- `bin/simple check src/lib/gc_async_mut/gpu/browser_engine/browser_renderer.spl`
+  passes the focused renderer type check.
+
+No remaining work is known for the 132-sample famous-site pixel equivalence
+gate. Future browser-renderer work should open a new bug with a new oracle or
+fixture instead of reusing this stale glyph-metrics blocker.

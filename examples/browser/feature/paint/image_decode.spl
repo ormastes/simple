@@ -94,6 +94,12 @@ class ImageDecoder:
                 decoded_data = decode_bmp(raw_data)
             ImageFormat.Gif:
                 decoded_data = decode_gif(raw_data)
+            ImageFormat.Webp:
+                decoded_data = decode_webp(raw_data)
+            ImageFormat.Ico:
+                decoded_data = decode_ico(raw_data)
+            ImageFormat.Svg:
+                decoded_data = decode_svg(raw_data)
             _:
                 decoded_data = create_placeholder(100, 100)
         val result = DecodedImage.ready(image_id, "", decoded_data)
@@ -132,10 +138,16 @@ class ImageDecoder:
 # JPEG: 255 216      (0xFF 0xD8)
 # GIF:  71 73 70     (G I F)
 # BMP:  66 77        (B M)
+# WebP: RIFF....WEBP
+# ICO:  00 00 01 00
+# SVG:  <svg or XML text containing an <svg root
 fn detect_format(data: text) -> ImageFormat:
     val len = data.len()
     if len < 2:
         return ImageFormat.Png  # Default fallback
+
+    if _is_svg_data(data):
+        return ImageFormat.Svg
 
     # Check PNG signature
     if len >= 4:
@@ -145,6 +157,12 @@ fn detect_format(data: text) -> ImageFormat:
         val b3 = _byte_at(data, 3)
         if b0 == 137 and b1 == 80 and b2 == 78 and b3 == 71:
             return ImageFormat.Png
+        if b0 == 0 and b1 == 0 and b2 == 1 and b3 == 0:
+            return ImageFormat.Ico
+
+    if len >= 12:
+        if data.starts_with("RIFF") and data.contains("WEBP"):
+            return ImageFormat.Webp
 
     # Check JPEG signature
     val j0 = _byte_at(data, 0)
@@ -273,6 +291,8 @@ fn decode_png(raw_data: text) -> ImageData:
     var bit_depth = 8
     var color_type = 6  # default RGBA
     var compressed_data = []
+    var palette: [i64] = []
+    var palette_alpha: [i64] = []
     var offset = 8  # skip signature
 
     while offset + 12 <= data_len:
@@ -290,6 +310,16 @@ fn decode_png(raw_data: text) -> ImageData:
             var i = 0
             while i < chunk_len:
                 compressed_data.push(_byte_at(raw_data, offset + 8 + i))
+                i = i + 1
+        else if chunk_type == "PLTE":
+            var i = 0
+            while i < chunk_len:
+                palette.push(_byte_at(raw_data, offset + 8 + i))
+                i = i + 1
+        else if chunk_type == "tRNS":
+            var i = 0
+            while i < chunk_len:
+                palette_alpha.push(_byte_at(raw_data, offset + 8 + i))
                 i = i + 1
         else if chunk_type == "IEND":
             offset = data_len  # stop parsing
@@ -310,7 +340,7 @@ fn decode_png(raw_data: text) -> ImageData:
     val pixels = _reconstruct_scanlines(decompressed, width, height, bpp, stride)
 
     # Convert to RGBA if not already
-    val rgba = _to_rgba(pixels, width, height, color_type, bpp)
+    val rgba = _to_rgba(pixels, width, height, color_type, bpp, palette, palette_alpha)
 
     ImageData(width: width, height: height, format: ImageFormat.Png, data: rgba)
 
@@ -369,7 +399,7 @@ fn decode_bmp(raw_data: text) -> ImageData:
 
     ImageData(width: width, height: height, format: ImageFormat.Bmp, data: rgba)
 
-# Decode GIF metadata and preserve intrinsic dimensions.
+# Decode the first GIF image into RGBA pixels.
 fn decode_gif(raw_data: text) -> ImageData:
     if raw_data.len() < 10:
         return create_placeholder_format(1, 1, ImageFormat.Gif)
@@ -381,6 +411,64 @@ fn decode_gif(raw_data: text) -> ImageData:
     val height = _read_u16_le(raw_data, 8)
     if width <= 0 or height <= 0:
         return create_placeholder_format(1, 1, ImageFormat.Gif)
+
+    val packed = _byte_at(raw_data, 10)
+    val has_global_palette = (packed / 128) % 2 == 1
+    val global_palette_size = _pow2((packed % 8) + 1)
+    var offset = 13
+    var palette: [i64] = []
+    if has_global_palette:
+        if offset + global_palette_size * 3 > raw_data.len():
+            return create_placeholder_format(width, height, ImageFormat.Gif)
+        palette = _read_gif_palette(raw_data, offset, global_palette_size)
+        offset = offset + global_palette_size * 3
+
+    var transparent_index = -1
+    while offset < raw_data.len():
+        val marker = _byte_at(raw_data, offset)
+        if marker == 59:
+            return create_placeholder_format(width, height, ImageFormat.Gif)
+        if marker == 33:
+            val label = _byte_at(raw_data, offset + 1)
+            if label == 249 and offset + 7 < raw_data.len():
+                val block_size = _byte_at(raw_data, offset + 2)
+                if block_size == 4:
+                    val gce_packed = _byte_at(raw_data, offset + 3)
+                    if (gce_packed % 2) == 1:
+                        transparent_index = _byte_at(raw_data, offset + 6)
+                offset = offset + 3 + block_size + 1
+            else:
+                offset = _skip_gif_extension(raw_data, offset + 2)
+        else if marker == 44:
+            if offset + 9 >= raw_data.len():
+                return create_placeholder_format(width, height, ImageFormat.Gif)
+            val image_width = _read_u16_le(raw_data, offset + 5)
+            val image_height = _read_u16_le(raw_data, offset + 7)
+            val image_packed = _byte_at(raw_data, offset + 9)
+            val has_local_palette = (image_packed / 128) % 2 == 1
+            val interlaced = (image_packed / 64) % 2 == 1
+            offset = offset + 10
+            if has_local_palette:
+                val local_palette_size = _pow2((image_packed % 8) + 1)
+                if offset + local_palette_size * 3 > raw_data.len():
+                    return create_placeholder_format(width, height, ImageFormat.Gif)
+                palette = _read_gif_palette(raw_data, offset, local_palette_size)
+                offset = offset + local_palette_size * 3
+            if interlaced:
+                return create_placeholder_format(width, height, ImageFormat.Gif)
+            if offset >= raw_data.len() or palette.len() == 0:
+                return create_placeholder_format(width, height, ImageFormat.Gif)
+            val min_code_size = _byte_at(raw_data, offset)
+            offset = offset + 1
+            val image_data = _read_gif_sub_blocks(raw_data, offset)
+            val indices = _gif_lzw_decode(image_data, min_code_size, image_width * image_height)
+            if indices.len() < image_width * image_height:
+                return create_placeholder_format(width, height, ImageFormat.Gif)
+            val rgba = _gif_indices_to_rgba(indices, palette, image_width * image_height, transparent_index)
+            return ImageData(width: image_width, height: image_height, format: ImageFormat.Gif, data: rgba)
+        else:
+            return create_placeholder_format(width, height, ImageFormat.Gif)
+
     create_placeholder_format(width, height, ImageFormat.Gif)
 
 # Decode JPEG metadata and preserve intrinsic dimensions.
@@ -424,6 +512,265 @@ fn decode_jpeg(raw_data: text) -> ImageData:
 
     create_placeholder_format(1, 1, ImageFormat.Jpeg)
 
+# Decode WebP container metadata into an intrinsic-size placeholder.
+fn decode_webp(raw_data: text) -> ImageData:
+    if raw_data.len() < 20:
+        return create_placeholder_format(1, 1, ImageFormat.Webp)
+    if not raw_data.starts_with("RIFF") or not raw_data.contains("WEBP"):
+        return create_placeholder_format(1, 1, ImageFormat.Webp)
+
+    val chunk_type = _read_chunk_type(raw_data, 12)
+    if chunk_type == "VP8X" and raw_data.len() >= 30:
+        val width = _read_u24_le(raw_data, 24) + 1
+        val height = _read_u24_le(raw_data, 27) + 1
+        if width > 0 and height > 0:
+            return create_placeholder_format(width, height, ImageFormat.Webp)
+    else if chunk_type == "VP8L" and raw_data.len() >= 25:
+        if _byte_at(raw_data, 20) == 47:
+            val b1 = _byte_at(raw_data, 21)
+            val b2 = _byte_at(raw_data, 22)
+            val b3 = _byte_at(raw_data, 23)
+            val b4 = _byte_at(raw_data, 24)
+            val width = 1 + b1 + (b2 % 64) * 256
+            val height = 1 + (b2 / 64) + b3 * 4 + (b4 % 16) * 1024
+            if width > 0 and height > 0:
+                return create_placeholder_format(width, height, ImageFormat.Webp)
+    else if chunk_type == "VP8 " and raw_data.len() >= 30:
+        if _byte_at(raw_data, 23) == 157 and _byte_at(raw_data, 24) == 1 and _byte_at(raw_data, 25) == 42:
+            val width = _read_u16_le(raw_data, 26) % 16384
+            val height = _read_u16_le(raw_data, 28) % 16384
+            if width > 0 and height > 0:
+                return create_placeholder_format(width, height, ImageFormat.Webp)
+
+    create_placeholder_format(1, 1, ImageFormat.Webp)
+
+# Decode ICO directory metadata and BMP-backed icon pixels.
+fn decode_ico(raw_data: text) -> ImageData:
+    if raw_data.len() < 22:
+        return create_placeholder_format(1, 1, ImageFormat.Ico)
+    if _byte_at(raw_data, 0) != 0 or _byte_at(raw_data, 1) != 0:
+        return create_placeholder_format(1, 1, ImageFormat.Ico)
+    if _byte_at(raw_data, 2) != 1 or _byte_at(raw_data, 3) != 0:
+        return create_placeholder_format(1, 1, ImageFormat.Ico)
+    if _read_u16_le(raw_data, 4) <= 0:
+        return create_placeholder_format(1, 1, ImageFormat.Ico)
+
+    var width = _byte_at(raw_data, 6)
+    var height = _byte_at(raw_data, 7)
+    if width == 0:
+        width = 256
+    if height == 0:
+        height = 256
+
+    val bytes_in_resource = _read_u32_le(raw_data, 14)
+    val image_offset = _read_u32_le(raw_data, 18)
+    val decoded = _decode_ico_bmp(raw_data, image_offset, bytes_in_resource, width, height)
+    match decoded:
+        Some(image):
+            image
+        nil:
+            create_placeholder_format(width, height, ImageFormat.Ico)
+
+fn _decode_ico_bmp(raw_data: text, image_offset: i64, bytes_in_resource: i64, entry_width: i64, entry_height: i64) -> ImageData?:
+    if image_offset <= 0:
+        return nil
+    if image_offset + 40 > raw_data.len():
+        return nil
+    if bytes_in_resource > 0 and image_offset + bytes_in_resource > raw_data.len():
+        return nil
+
+    val dib_size = _read_u32_le(raw_data, image_offset)
+    if dib_size < 40:
+        return nil
+    val dib_width = _read_i32_le(raw_data, image_offset + 4)
+    val dib_height_with_mask = _read_i32_le(raw_data, image_offset + 8)
+    val planes = _read_u16_le(raw_data, image_offset + 12)
+    val bits_per_pixel = _read_u16_le(raw_data, image_offset + 14)
+    val compression = _read_u32_le(raw_data, image_offset + 16)
+    if planes != 1 or compression != 0:
+        return nil
+    if bits_per_pixel != 32 and bits_per_pixel != 24:
+        return nil
+
+    var width = dib_width
+    var height = dib_height_with_mask / 2
+    if width <= 0:
+        width = entry_width
+    if height <= 0:
+        height = entry_height
+    if width <= 0 or height <= 0:
+        return nil
+
+    val bytes_per_pixel = bits_per_pixel / 8
+    val xor_offset = image_offset + dib_size
+    val xor_stride = ((width * bytes_per_pixel + 3) / 4) * 4
+    val xor_bytes = xor_stride * height
+    if xor_offset + xor_bytes > raw_data.len():
+        return nil
+
+    val mask_stride = ((width + 31) / 32) * 4
+    val mask_offset = xor_offset + xor_bytes
+    var rgba: [i64] = []
+    var y = 0
+    while y < height:
+        val source_y = height - 1 - y
+        val row_offset = xor_offset + source_y * xor_stride
+        var x = 0
+        while x < width:
+            val pixel = row_offset + x * bytes_per_pixel
+            val b = _byte_at(raw_data, pixel)
+            val g = _byte_at(raw_data, pixel + 1)
+            val r = _byte_at(raw_data, pixel + 2)
+            var a = if bits_per_pixel == 32: _byte_at(raw_data, pixel + 3) else: 255
+            if bits_per_pixel == 24 and mask_offset + mask_stride * height <= raw_data.len():
+                val mask_row = mask_offset + source_y * mask_stride
+                val mask_byte = _byte_at(raw_data, mask_row + x / 8)
+                val mask_bit = (mask_byte / _pow2(7 - (x % 8))) % 2
+                if mask_bit == 1:
+                    a = 0
+            rgba.push(r)
+            rgba.push(g)
+            rgba.push(b)
+            rgba.push(a)
+            x = x + 1
+        y = y + 1
+
+    Some(ImageData(width: width, height: height, format: ImageFormat.Ico, data: rgba))
+
+# SVG is vector content; rasterization belongs to a later rendering stage.
+fn decode_svg(raw_data: text) -> ImageData:
+    if not _is_svg_data(raw_data):
+        return create_placeholder_format(1, 1, ImageFormat.Svg)
+    val width = _svg_dimension(raw_data, "width", 300)
+    val height = _svg_dimension(raw_data, "height", 150)
+    create_placeholder_format(width, height, ImageFormat.Svg)
+
+fn _read_gif_palette(data: text, offset: i64, color_count: i64) -> [i64]:
+    var palette: [i64] = []
+    var i = 0
+    while i < color_count:
+        val base = offset + i * 3
+        palette.push(_byte_at(data, base))
+        palette.push(_byte_at(data, base + 1))
+        palette.push(_byte_at(data, base + 2))
+        i = i + 1
+    palette
+
+fn _skip_gif_extension(data: text, offset: i64) -> i64:
+    var pos = offset
+    while pos < data.len():
+        val size = _byte_at(data, pos)
+        pos = pos + 1
+        if size == 0:
+            return pos
+        pos = pos + size
+    pos
+
+fn _read_gif_sub_blocks(data: text, offset: i64) -> [i64]:
+    var out: [i64] = []
+    var pos = offset
+    while pos < data.len():
+        val size = _byte_at(data, pos)
+        pos = pos + 1
+        if size == 0:
+            return out
+        var i = 0
+        while i < size and pos + i < data.len():
+            out.push(_byte_at(data, pos + i))
+            i = i + 1
+        pos = pos + size
+    out
+
+fn _gif_lzw_decode(data: [i64], min_code_size: i64, expected_pixels: i64) -> [i64]:
+    if min_code_size < 2 or min_code_size > 8:
+        return []
+
+    val clear_code = _pow2(min_code_size)
+    val end_code = clear_code + 1
+    var code_size = min_code_size + 1
+    var next_code = end_code + 1
+    var dict = _gif_initial_dictionary(clear_code)
+    var output: [i64] = []
+    var previous: [i64] = []
+    var bit_pos = 0
+    val total_bits = data.len() * 8
+    var done = false
+
+    while not done and bit_pos + code_size <= total_bits and output.len() < expected_pixels:
+        val code = _read_bits(data, bit_pos, code_size)
+        bit_pos = bit_pos + code_size
+
+        if code == clear_code:
+            dict = _gif_initial_dictionary(clear_code)
+            code_size = min_code_size + 1
+            next_code = end_code + 1
+            previous = []
+        else if code == end_code:
+            done = true
+        else:
+            var entry: [i64] = []
+            if code < dict.len():
+                entry = _gif_dict_get(dict, code)
+            else if code == next_code and previous.len() > 0:
+                entry = previous + [_safe_get_list(previous, 0)]
+            else:
+                return output
+
+            var i = 0
+            while i < entry.len() and output.len() < expected_pixels:
+                output.push(_safe_get_list(entry, i))
+                i = i + 1
+
+            if previous.len() > 0 and entry.len() > 0:
+                dict.push(previous + [_safe_get_list(entry, 0)])
+                next_code = next_code + 1
+                if next_code == _pow2(code_size) and code_size < 12:
+                    code_size = code_size + 1
+            previous = entry
+
+    output
+
+fn _gif_initial_dictionary(clear_code: i64) -> [[i64]]:
+    var dict: [[i64]] = []
+    var i = 0
+    while i < clear_code:
+        dict.push([i])
+        i = i + 1
+    dict.push([])
+    dict.push([])
+    dict
+
+fn _gif_dict_get(dict: [[i64]], index: i64) -> [i64]:
+    if index >= 0 and index < dict.len():
+        val entry = dict.get(index)
+        if val e = entry:
+            return e
+    []
+
+fn _gif_indices_to_rgba(indices: [i64], palette: [i64], pixel_count: i64, transparent_index: i64) -> [i64]:
+    var rgba: [i64] = []
+    var i = 0
+    while i < pixel_count:
+        val index = _safe_get_list(indices, i)
+        val base = index * 3
+        if index == transparent_index:
+            rgba.push(0)
+            rgba.push(0)
+            rgba.push(0)
+            rgba.push(0)
+        else if base + 2 < palette.len():
+            rgba.push(_safe_get_list(palette, base))
+            rgba.push(_safe_get_list(palette, base + 1))
+            rgba.push(_safe_get_list(palette, base + 2))
+            rgba.push(255)
+        else:
+            rgba.push(0)
+            rgba.push(0)
+            rgba.push(0)
+            rgba.push(255)
+        i = i + 1
+    rgba
+
 # Check the 8-byte PNG signature.
 fn _check_png_signature(data: text) -> bool:
     val b0 = _byte_at(data, 0) == 137
@@ -460,6 +807,12 @@ fn _read_u16_be(data: text, offset: i64) -> i64:
     val b0 = _byte_at(data, offset)
     val b1 = _byte_at(data, offset + 1)
     b0 * 256 + b1
+
+fn _read_u24_le(data: text, offset: i64) -> i64:
+    val b0 = _byte_at(data, offset)
+    val b1 = _byte_at(data, offset + 1)
+    val b2 = _byte_at(data, offset + 2)
+    b0 + b1 * 256 + b2 * 65536
 
 fn _jpeg_marker_has_no_length(marker: i64) -> bool:
     marker == 1 or (marker >= 208 and marker <= 215)
@@ -514,7 +867,82 @@ fn _byte_to_char(b: i64) -> text:
         # Lowercase a-z
         val chars = "abcdefghijklmnopqrstuvwxyz"
         return chars.slice(b - 97, b - 97 + 1)
+    if b >= 48 and b <= 57:
+        val chars = "0123456789"
+        return chars.slice(b - 48, b - 48 + 1)
+    if b == 32:
+        return " "
     "?"
+
+fn _has_ascii_at(data: text, offset: i64, expected: text) -> bool:
+    if offset < 0 or offset + expected.len() > data.len():
+        return false
+    if expected.len() == 4:
+        return _read_chunk_type(data, offset) == expected
+    data.slice(offset, offset + expected.len()) == expected
+
+fn _is_svg_data(data: text) -> bool:
+    var start = 0
+    while start < data.len() and _is_ascii_ws(_byte_at(data, start)):
+        start = start + 1
+    if start + 4 <= data.len() and data.slice(start, start + 4).to_lower() == "<svg":
+        return true
+    if start + 5 <= data.len() and data.slice(start, start + 5).to_lower() == "<?xml":
+        val sample_end = if data.len() < 256: data.len() else: 256
+        val sample = data.slice(start, sample_end).to_lower()
+        return sample.contains("<svg")
+    false
+
+fn _is_ascii_ws(byte: i64) -> bool:
+    byte == 32 or byte == 9 or byte == 10 or byte == 13
+
+fn _svg_dimension(data: text, name: text, fallback: i64) -> i64:
+    val lower = data.to_lower()
+    val svg_pos = lower.index_of("<svg")
+    if svg_pos < 0:
+        return fallback
+    val root_tail = lower.slice(svg_pos, lower.len())
+    val root_end = root_tail.index_of(">")
+    val search_end = if root_end >= 0: svg_pos + root_end else: data.len()
+    val attr_pos = lower.index_of(name, svg_pos)
+    if attr_pos < 0 or attr_pos > search_end:
+        return fallback
+
+    var pos = attr_pos + name.len()
+    while pos < search_end and _is_ascii_ws(_byte_at(data, pos)):
+        pos = pos + 1
+    if pos >= search_end or _byte_at(data, pos) != 61:
+        return fallback
+    pos = pos + 1
+    while pos < search_end and _is_ascii_ws(_byte_at(data, pos)):
+        pos = pos + 1
+
+    var quote = 0
+    if pos < search_end:
+        val q = _byte_at(data, pos)
+        if q == 34 or q == 39:
+            quote = q
+            pos = pos + 1
+
+    val number_start = pos
+    while pos < search_end and _is_svg_number_byte(_byte_at(data, pos)):
+        pos = pos + 1
+    if pos <= number_start:
+        return fallback
+    val number_end = pos
+    if quote != 0 and (pos >= search_end or _byte_at(data, pos) != quote):
+        # Unit suffixes such as px are allowed before the closing quote.
+        while pos < search_end and _byte_at(data, pos) != quote and not _is_ascii_ws(_byte_at(data, pos)):
+            pos = pos + 1
+
+    val number_text = data.slice(number_start, number_end)
+    val parsed = number_text.to_f64()
+    if parsed <= 0.0:
+        return fallback
+    parsed.to_i64()
+
+fn _is_svg_number_byte(byte: i64) -> bool:
+    (byte >= 48 and byte <= 57) or byte == 46
 
 # Determine bytes per pixel from PNG color type and bit depth.
 fn _bytes_per_pixel(color_type: i64, bit_depth: i64) -> i64:
@@ -880,7 +1308,7 @@ fn _paeth_predictor(a: i64, b: i64, c: i64) -> i64:
     c
 
 # Convert decoded pixel data to RGBA format.
-fn _to_rgba(pixels: [i64], width: i64, height: i64, color_type: i64, bpp: i64) -> [i64]:
+fn _to_rgba(pixels: [i64], width: i64, height: i64, color_type: i64, bpp: i64, palette: [i64], palette_alpha: [i64]) -> [i64]:
     var rgba = []
     val total = width * height
     var i = 0
@@ -902,6 +1330,25 @@ fn _to_rgba(pixels: [i64], width: i64, height: i64, color_type: i64, bpp: i64) -
                 rgba.push(_safe_get_list(pixels, idx + 1))
                 rgba.push(_safe_get_list(pixels, idx + 2))
                 rgba.push(255)
+                i = i + 1
+        3:
+            # Indexed color -> RGBA using PLTE and optional tRNS alpha.
+            while i < total:
+                val palette_index = _safe_get_list(pixels, i)
+                val palette_base = palette_index * 3
+                if palette_base + 2 < palette.len():
+                    rgba.push(_safe_get_list(palette, palette_base))
+                    rgba.push(_safe_get_list(palette, palette_base + 1))
+                    rgba.push(_safe_get_list(palette, palette_base + 2))
+                    if palette_index < palette_alpha.len():
+                        rgba.push(_safe_get_list(palette_alpha, palette_index))
+                    else:
+                        rgba.push(255)
+                else:
+                    rgba.push(0)
+                    rgba.push(0)
+                    rgba.push(0)
+                    rgba.push(255)
                 i = i + 1
         4:
             # Grayscale+Alpha -> RGBA

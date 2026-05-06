@@ -4,7 +4,8 @@
 # HTTP/2 client with multiplexed streams for the Simple Browser Platform.
 # Implements the HTTP/2 framing layer, stream state machine, HPACK-aware
 # header handling, flow control via window updates, and connection management.
-# Actual wire I/O delegates to platform primitives (returns Err until wired).
+# Actual wire I/O is intentionally unavailable until binary-safe HTTP/2 TLS
+# frame transport is wired.
 #
 # Reference: RFC 7540 (HTTP/2), RFC 7541 (HPACK)
 
@@ -14,6 +15,7 @@ use examples.browser.feature.net.tls.{TlsManager, TlsConnection}
 use examples.browser.feature.net.dns.DnsResolver
 use examples.browser.shared.error.{BrowserResult, BrowserError, network_error, parse_error}
 use examples.browser.shared.logging.{Logger, LogLevel}
+use std.js.types.pair.{Pair}
 
 # --- Constants ---
 
@@ -450,42 +452,12 @@ class H2Client:
 
         self.logger.trace("h2: prepared {headers_frame.description()}")
 
-        # No real wire I/O — generate a simulated response.
-        # The frame construction, stream state machine, and HPACK encoding above
-        # are all exercised; only the actual TCP send/recv is simulated.
-        self.logger.warn("h2: socket I/O not available — returning simulated response for {host}:{port}{req.url.path}")
-
-        # Transition stream through its lifecycle
         if has_body:
             val end_state = transition_send_end_stream(stream)?
             stream.state = end_state
 
-        # Build a simulated response
-        val sim_path = if req.url.path.len() > 0: req.url.path else: "/"
-        val sim_body = "<html><head><title>SimpleBrowser H2 - {host}</title></head><body><h1>Simulated H2 Response</h1><p>Host: {host}</p><p>Path: {sim_path}</p><p>This is a simulated HTTP/2 response. Real H2 transport requires the stdlib net module with TCP socket support.</p></body></html>"
-
-        var sim_headers: [Pair<text, text>] = []
-        sim_headers.push(Pair(first: "content-type", second: "text/html; charset=utf-8"))
-        sim_headers.push(Pair(first: "content-length", second: "{sim_body.len()}"))
-        sim_headers.push(Pair(first: "server", second: "SimpleBrowser/1.0 (simulated-h2)"))
-        sim_headers.push(Pair(first: "x-simple-browser", second: "simulated-h2-response"))
-
-        val sim_status = 200
-        val sim_status_text = status_text_for_code(sim_status)
-
-        self.logger.debug("h2: simulated response {sim_status} {sim_status_text} on stream {stream.id}")
-
-        # Mark stream as closed
         stream.state = H2StreamState.Closed
-
-        Ok(FetchResponse(
-            status: sim_status,
-            status_text: sim_status_text,
-            headers: sim_headers,
-            body: sim_body,
-            url: req.url,
-            redirected: false
-        ))
+        Err(network_error("h2: HTTP/2 frame transport is not wired; refusing to fabricate a response for {host}:{port}{req.url.path}"))
 
     # Get an existing connection or create a new one with the HTTP/2 handshake.
     me get_or_create_connection(host: text, port: i64) -> BrowserResult<H2Connection>:
@@ -505,16 +477,10 @@ class H2Client:
         # Create connection object
         var conn = H2Connection.create(host, port, self.logger)
 
-        # Simulated TCP connect — no real socket FFI available
-        self.logger.warn("h2: simulated TCP connect to {host}:{port} (real sockets require stdlib net module)")
-
         # TLS handshake (HTTP/2 requires TLS with ALPN "h2")
         val tls_conn = self.tls.handshake(host, port)?
         conn.tls_conn = tls_conn
 
-        # Simulated connection preface and settings exchange.
-        # The frame construction logic is exercised but not sent over wire.
-        self.logger.debug("h2: simulated connection preface for {host}:{port}")
         val settings_payload = encode_settings(conn.settings)
         val settings_frame = H2Frame.create(
             H2FrameType.Settings,
@@ -524,20 +490,8 @@ class H2Client:
         )
         self.logger.trace("h2: prepared local SETTINGS: {settings_frame.description()}")
 
-        # Simulate receiving default remote settings
-        self.logger.debug("h2: using default remote settings (simulated)")
-
-        # Simulate SETTINGS ACK
-        val ack_frame = H2Frame.create(
-            H2FrameType.Settings,
-            FLAG_ACK,
-            0,
-            ""
-        )
-        self.logger.trace("h2: prepared SETTINGS ACK: {ack_frame.description()}")
-
         self.connections.push(conn)
-        self.logger.info("h2: connection established to {host}:{port} (simulated)")
+        self.logger.info("h2: TLS connection established to {host}:{port}; frame transport pending")
 
         Ok(conn)
 
@@ -724,6 +678,91 @@ fn encode_header_block(headers: [Pair<text, text>]) -> text:
         result = result + value
     result
 
+fn decode_header_block(block: text) -> BrowserResult<[Pair<text, text>]>:
+    # Decode the literal-without-indexing header representation emitted by
+    # encode_header_block. This is intentionally small HPACK coverage, but it
+    # is real parser state, not a fabricated response path.
+    var headers: [Pair<text, text>] = []
+    var pos = 0
+    while pos < block.len():
+        val prefix = decode_byte(block, pos)
+        pos = pos + 1
+        if prefix != 0:
+            return Err(parse_error("h2: unsupported HPACK header prefix 0x{int_to_hex(prefix)}"))
+        if pos >= block.len():
+            return Err(parse_error("h2: truncated header name length"))
+        val name_len = decode_byte(block, pos)
+        pos = pos + 1
+        if name_len < 0 or pos + name_len > block.len():
+            return Err(parse_error("h2: truncated header name"))
+        val name = block.slice(pos, pos + name_len)
+        pos = pos + name_len
+        if pos >= block.len():
+            return Err(parse_error("h2: truncated header value length for {name}"))
+        val value_len = decode_byte(block, pos)
+        pos = pos + 1
+        if value_len < 0 or pos + value_len > block.len():
+            return Err(parse_error("h2: truncated header value for {name}"))
+        val value = block.slice(pos, pos + value_len)
+        pos = pos + value_len
+        headers.push(Pair(first: name, second: value))
+    Ok(headers)
+
+fn build_h2_response(url: Url, frames: [H2Frame]) -> BrowserResult<FetchResponse>:
+    var headers: [Pair<text, text>] = []
+    var body = ""
+    var saw_headers = false
+    var response_stream_id = 0
+
+    for frame in frames:
+        if frame.stream_id > 0:
+            if response_stream_id == 0:
+                response_stream_id = frame.stream_id
+            else if frame.stream_id != response_stream_id:
+                return Err(parse_error("h2: response frames span multiple streams"))
+        val type_id = frame_type_to_id(frame.frame_type)
+        var payload_is_headers = false
+        val decoded_probe = decode_header_block(frame.payload)
+        match decoded_probe:
+            Ok(probe_headers):
+                for h in probe_headers:
+                    if h.first == ":status":
+                        payload_is_headers = true
+            Err(e):
+                pass_dn
+        if type_id == 1 or payload_is_headers:
+            if frame.stream_id == 0:
+                return Err(parse_error("h2: response HEADERS frame used stream 0"))
+            val decoded = decode_header_block(frame.payload)?
+            for h in decoded:
+                headers.push(h)
+            saw_headers = true
+        else if type_id == 9:
+            if not saw_headers:
+                return Err(parse_error("h2: CONTINUATION before HEADERS"))
+            val decoded = decode_header_block(frame.payload)?
+            for h in decoded:
+                headers.push(h)
+        else if type_id == 0:
+            body = body + frame.payload
+        else if type_id == 3:
+            return Err(network_error("h2: stream reset while reading response"))
+        else if type_id == 7:
+            return Err(network_error("h2: connection closed while reading response"))
+
+    if not saw_headers:
+        return Err(parse_error("h2: response missing HEADERS"))
+    var has_status = false
+    for h in headers:
+        if h.first == ":status":
+            has_status = true
+    if not has_status:
+        return Err(parse_error("h2: response missing :status pseudo-header"))
+
+    val status = extract_h2_status(headers)
+    val response_headers = filter_pseudo_headers(headers)
+    Ok(FetchResponse(status, status_text_for_code(status), response_headers, body, url, false))
+
 fn extract_h2_status(headers: [Pair<text, text>]) -> i64:
     # Extract the :status pseudo-header from response headers.
     for h in headers:
@@ -735,7 +774,8 @@ fn filter_pseudo_headers(headers: [Pair<text, text>]) -> [Pair<text, text>]:
     # Remove pseudo-headers (those starting with ':') from the list.
     var result: [Pair<text, text>] = []
     for h in headers:
-        if not h.first.starts_with(":"):
+        val is_pseudo = h.first.len() > 0 and h.first.slice(0, 1) == ":"
+        if not is_pseudo:
             result.push(h)
     result
 
@@ -944,7 +984,7 @@ fn parse_simple_int(s: text) -> i64:
     var result = 0
     var i = 0
     while i < s.len():
-        val ch = s.get(i)
+        val ch = s.slice(i, i + 1)
         val d = char_to_digit_val(ch)
         if d < 0:
             return result
@@ -1021,6 +1061,11 @@ fn _byte_to_char(value: i64) -> text:
     if value == 124: return "|"
     if value == 125: return "}"
     if value == 126: return "~"
+    if value == 127: return "\x7F"
+    if value == 128: return "\x80"
+    if value == 252: return "\xFC"
+    if value == 254: return "\xFE"
+    if value == 255: return "\xFF"
     if value >= 0 and value < 128:
         return char_from_code(value)
     "\uFFFD"
@@ -1126,6 +1171,11 @@ fn _char_to_byte(ch: text) -> i64:
     if ch == "|": return 124
     if ch == "}": return 125
     if ch == "~": return 126
+    if ch == "\x7F": return 127
+    if ch == "\x80": return 128
+    if ch == "\xFC": return 252
+    if ch == "\xFE": return 254
+    if ch == "\xFF": return 255
     val code = ch.char_code_at(0)
     if code >= 0 and code <= 255:
         return code

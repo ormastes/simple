@@ -4,11 +4,13 @@
 # DNS resolver with caching for the Simple Browser Platform.
 # Provides hostname-to-address resolution with a TTL-based cache layer.
 # Cache entries expire after a configurable TTL to ensure freshness.
-# The actual system DNS lookup is stubbed for platform portability.
+# System DNS lookup delegates to the hosted runtime.
 
 use examples.browser.shared.error {BrowserError, BrowserResult, network_error}
 use examples.browser.shared.logging {Logger, LogLevel}
 use std.io_runtime.{time_now_unix_micros}
+
+extern fn rt_dns_lookup(hostname: text) -> text
 
 # A single cached DNS entry: resolved addresses plus a timestamp and TTL.
 class DnsCacheEntry:
@@ -169,16 +171,25 @@ class DnsResolver:
         if not self.is_valid_hostname(hostname):
             return Err(network_error("Invalid hostname: {hostname}"))
 
-        # No stdlib DNS module available — use a built-in well-known host table.
-        # This covers common development and testing scenarios.
+        val configured = self.configured_hosts_lookup(hostname)
+        if configured.?:
+            val addrs = configured.unwrap()
+            self.logger.debug("dns: resolved {hostname} via configured hosts ({addrs.len()} addresses)")
+            return Ok(addrs)
+
+        val system_addrs = parse_system_dns_addresses(rt_dns_lookup(hostname))
+        if not system_addrs.is_empty():
+            self.logger.debug("dns: resolved {hostname} via system DNS ({system_addrs.len()} addresses)")
+            return Ok(system_addrs)
+
         val well_known = self.well_known_lookup(hostname)
         if well_known.?:
             val addrs = well_known.unwrap()
-            self.logger.debug("dns: resolved {hostname} via well-known table ({addrs.len()} addresses)")
+            self.logger.debug("dns: resolved {hostname} via fallback host table ({addrs.len()} addresses)")
             return Ok(addrs)
 
-        self.logger.warn("dns: no well-known entry for {hostname} — real DNS resolution requires stdlib net module")
-        Err(network_error("DNS resolution for '{hostname}' unavailable: no stdlib net module. Add entry via dns.add_well_known() or use a known host."))
+        self.logger.warn("dns: system lookup returned no addresses for {hostname}")
+        Err(network_error("DNS resolution failed for '{hostname}': system lookup returned no addresses"))
 
     # Look up a hostname in the built-in well-known host table.
     # Returns addresses for common hosts used in development and testing.
@@ -197,7 +208,10 @@ class DnsResolver:
             return Some(["93.184.216.34"])
         if h == "example.net" or h == "www.example.net":
             return Some(["93.184.216.34"])
-        # Check additional entries added at runtime
+        nil
+
+    fn configured_hosts_lookup(hostname: text) -> [text]?:
+        val h = hostname.to_lower()
         var i = 0
         while i < self.extra_hosts.len():
             val entry = self.extra_hosts[i]
@@ -286,3 +300,17 @@ fn normalize_hostname(hostname: text) -> text:
     while h.ends_with(".") and h.len() > 1:
         h = h.slice(0, h.len() - 1)
     h
+
+fn parse_system_dns_addresses(raw: text) -> [text]:
+    var result: [text] = []
+    for part in raw.split(","):
+        val addr = part.trim()
+        if not addr.is_empty() and not text_array_contains(result, addr):
+            result = result + [addr]
+    result
+
+fn text_array_contains(items: [text], needle: text) -> bool:
+    for item in items:
+        if item == needle:
+            return true
+    false

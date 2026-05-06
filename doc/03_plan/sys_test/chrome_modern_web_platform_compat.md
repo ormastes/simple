@@ -1,0 +1,107 @@
+# Chrome Modern Web Platform Compatibility System Test Plan
+
+Date: 2026-05-06
+
+## Scope
+
+This system test plan covers the acceptance tests for `doc/03_plan/chrome_modern_web_platform_compat_plan.md`.
+
+In scope:
+
+- Plan completeness for current Chrome-era HTML/CSS/JS compatibility work.
+- BDD/SSpec traceability for the initial implementation slice.
+- Verification gates for WPT-subset, Test262-subset, and pixel comparison work.
+- Explicit handling of unsupported or partial compatibility claims.
+
+Out of scope:
+
+- Claiming full Chrome compatibility.
+- Importing the complete WPT or Test262 suites.
+- Implementing all missing HTML, CSS, DOM, or JavaScript features.
+
+## Test Environment
+
+- Repository root: `/home/ormastes/dev/pub/simple`
+- Test runner: `bin/simple test`
+- Primary SSpec: `doc/06_spec/app/lib/feature/chrome_modern_web_platform_compat_spec.spl`
+- Focused renderer SSpec: `test/unit/lib/gc_async_mut/gpu/browser_engine/browser_renderer_spec.spl`
+
+## Traceability Matrix
+
+| Requirement | Description | Test File | Test Cases | Coverage |
+| --- | --- | --- | --- | --- |
+| REQ-001 | Compatibility matrix | `chrome_modern_web_platform_compat_spec.spl` | 3 | Full |
+| REQ-002 | WPT subset path | `chrome_modern_web_platform_compat_spec.spl` | 3 | Full |
+| REQ-003 | Test262 subset path | `chrome_modern_web_platform_compat_spec.spl` | 3 | Full |
+| REQ-004 | Supported feature evidence | `chrome_modern_web_platform_compat_spec.spl` | 3 | Full |
+| REQ-005 | Unsupported feature tracking | `chrome_modern_web_platform_compat_spec.spl` | 3 | Full |
+| REQ-006 | Verification gate | `chrome_modern_web_platform_compat_spec.spl` | 3 | Full |
+| REQ-007 | Initial modern CSS BDD slice | `chrome_modern_web_platform_compat_spec.spl`, `browser_renderer_spec.spl` | 3 | Full |
+
+## BDD Scenarios
+
+REQ-001: Compatibility Matrix
+
+- Given the plan exists, when it is inspected, then it should require HTML, CSS, DOM/rendering, and JavaScript matrix coverage.
+- Given the matrix requirement, when statuses are inspected, then it should require `supported`, `partial`, `missing`, and `not-applicable`.
+- Given the matrix exit gate, when migration readiness is inspected, then it should require selecting first WPT/Test262 subsets.
+
+REQ-002: WPT Subset Path
+
+- Given browser compatibility depends on WPT, when the plan is inspected, then it should create a WPT subset path.
+- Given WPT migration, when the initial subset is inspected, then it should cover CSS selectors, CSS colors, HTML parser basics, and rendering basics.
+- Given WPT execution, when the exit gate is inspected, then it should require at least 25 WPT-derived SSpec cases.
+
+REQ-003: Test262 Subset Path
+
+- Given JavaScript compatibility depends on Test262, when the plan is inspected, then it should create a Test262 subset path.
+- Given Test262 migration, when classification is inspected, then it should require expected-pass, expected-fail, and unsupported-host states.
+- Given Test262 execution, when the exit gate is inspected, then it should require at least 50 stable Test262-derived cases.
+
+REQ-004: Supported Feature Evidence
+
+- Given a feature is marked supported, when evidence is inspected, then it should require SSpec or external-suite mapping.
+- Given the current modern CSS slice, when renderer SSpec is inspected, then it should include `:is()` coverage.
+- Given the current modern CSS slice, when renderer SSpec is inspected, then it should include `:where()` coverage.
+
+REQ-005: Unsupported Feature Tracking
+
+- Given full Chrome compatibility is not complete, when the report is inspected, then it should explicitly say Simple is not full Chrome-compatible.
+- Given unsupported features, when the plan is inspected, then it should require owner-ready gap tracking with priority and acceptance criteria.
+- Given unsupported high-value areas, when the report is inspected, then it should list WPT, Test262, HTML semantics, and CSS layout gaps.
+
+REQ-006: Verification Gate
+
+- Given compatibility verification, when gates are inspected, then PASS/WARN/FAIL states should be defined.
+- Given local verification, when commands are inspected, then `bin/simple check src/lib` should be required.
+- Given no manual-only success, when criteria are inspected, then visual inspection should not be the only signal.
+
+REQ-007: Initial Modern CSS BDD Slice
+
+- Given modern CSS selector-list pseudos, when source is inspected, then `:is()` and `:where()` matching should be implemented.
+- Given fallback renderer extraction, when source is inspected, then commas inside functional selectors should not split selector lists.
+- Given BDD coverage, when renderer SSpec is run, then the `:is()` and `:where()` examples should pass.
+
+## Execution Order
+
+1. Run the plan acceptance SSpec.
+2. Run the focused browser renderer SSpec.
+3. Run `bin/simple check src/lib` after implementation changes.
+
+## Pass/Fail Criteria
+
+PASS:
+
+- The plan acceptance SSpec passes.
+- The focused renderer SSpec passes.
+- `bin/simple check src/lib` passes.
+
+WARN:
+
+- The plan and focused slice pass, but broad WPT/Test262 import remains incomplete and documented.
+
+FAIL:
+
+- Any supported feature lacks test evidence.
+- Any unsupported high-value feature is unclassified.
+- Any required verification command fails.

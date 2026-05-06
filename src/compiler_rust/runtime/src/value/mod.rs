@@ -772,6 +772,7 @@ pub use net::{
     native_tcp_set_write_timeout,
     native_tcp_shutdown,
     native_tcp_write,
+    rt_dns_lookup,
     rt_io_tcp_accept,
     rt_io_tcp_accept_timeout,
     rt_io_tcp_bind,

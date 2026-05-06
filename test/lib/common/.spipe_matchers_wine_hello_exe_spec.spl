@@ -1,0 +1,285 @@
+use common.wine_cpu_exec.{wine_cpu_execution_evidence_all_ready}
+use common.wine_hello_exe.{
+    wine_hello_exe_probe,
+    wine_hello_exe_can_execute,
+    wine_hello_exe_probe_manifest,
+    wine_hello_exe_manifest_can_execute,
+    wine_hello_exe_probe_manifest_evidence,
+    wine_hello_exe_manifest_evidence_can_execute
+}
+use common.wine_precondition_manifest.{wine_precondition_manifest, wine_precondition_required_process_log}
+
+fn _zero_bytes(count: i64) -> [u8]:
+    var out: [u8] = []
+    var i = 0
+    while i < count:
+        out.push(0)
+        i = i + 1
+    out
+
+fn _put_u16_le(data: [u8], offset: i64, value: i64) -> [u8]:
+    data[offset] = (value & 0xff) as u8
+    data[offset + 1] = ((value >> 8) & 0xff) as u8
+    data
+
+fn _put_u32_le(data: [u8], offset: i64, value: i64) -> [u8]:
+    data[offset] = (value & 0xff) as u8
+    data[offset + 1] = ((value >> 8) & 0xff) as u8
+    data[offset + 2] = ((value >> 16) & 0xff) as u8
+    data[offset + 3] = ((value >> 24) & 0xff) as u8
+    data
+
+fn _put_kernel32_name(data: [u8], offset: i64) -> [u8]:
+    data[offset] = 0x4b
+    data[offset + 1] = 0x45
+    data[offset + 2] = 0x52
+    data[offset + 3] = 0x4e
+    data[offset + 4] = 0x45
+    data[offset + 5] = 0x4c
+    data[offset + 6] = 0x33
+    data[offset + 7] = 0x32
+    data[offset + 8] = 0x2e
+    data[offset + 9] = 0x64
+    data[offset + 10] = 0x6c
+    data[offset + 11] = 0x6c
+    data[offset + 12] = 0
+    data
+
+fn _put_import_name(data: [u8], offset: i64, name: text) -> [u8]:
+    data[offset] = 0
+    data[offset + 1] = 0
+    var i = 0
+    while i < name.len():
+        data[offset + 2 + i] = name[i] as u8
+        i = i + 1
+    data[offset + 2 + name.len()] = 0
+    data
+
+fn _put_hello_marker(data: [u8], offset: i64) -> [u8]:
+    data[offset] = 0x53
+    data[offset + 1] = 0x49
+    data[offset + 2] = 0x4d
+    data[offset + 3] = 0x50
+    data[offset + 4] = 0x4c
+    data[offset + 5] = 0x45
+    data[offset + 6] = 0x5f
+    data[offset + 7] = 0x57
+    data[offset + 8] = 0x49
+    data[offset + 9] = 0x4e
+    data[offset + 10] = 0x45
+    data[offset + 11] = 0x5f
+    data[offset + 12] = 0x48
+    data[offset + 13] = 0x45
+    data[offset + 14] = 0x4c
+    data[offset + 15] = 0x4c
+    data[offset + 16] = 0x4f
+    data
+
+fn _put_hello_stdout_payload(data: [u8], offset: i64) -> [u8]:
+    val marker = "SIMPLE_WINE_STDOUT:"
+    var i = 0
+    while i < marker.len():
+        data[offset + i] = marker[i] as u8
+        i = i + 1
+    val payload = "Hello from SimpleOS Wine\n"
+    var j = 0
+    while j < payload.len():
+        data[offset + marker.len() + j] = payload[j] as u8
+        j = j + 1
+    data[offset + marker.len() + payload.len()] = 0
+    data
+
+fn _put_hello_code(data: [u8], offset: i64) -> [u8]:
+    data[offset] = 0x48
+    data[offset + 1] = 0x31
+    data[offset + 2] = 0xc9
+    data[offset + 3] = 0xe8
+    data = _put_u32_le(data, offset + 4, 0x78)
+    data[offset + 8] = 0x48
+    data[offset + 9] = 0x8d
+    data[offset + 10] = 0x15
+    data = _put_u32_le(data, offset + 11, 0x111)
+    data[offset + 15] = 0xe8
+    data = _put_u32_le(data, offset + 16, 0x8c)
+    data[offset + 20] = 0x31
+    data[offset + 21] = 0xc9
+    data[offset + 22] = 0xe8
+    data = _put_u32_le(data, offset + 23, 0xa5)
+    data
+
+fn _minimal_pe64_console_with_dirs() -> [u8]:
+    var data = _zero_bytes(1024)
+    data[0] = 0x4d
+    data[1] = 0x5a
+    data = _put_u32_le(data, 0x3c, 0x80)
+    data[0x80] = 0x50
+    data[0x81] = 0x45
+    data[0x82] = 0
+    data[0x83] = 0
+    data = _put_u16_le(data, 0x84, 0x8664)
+    data = _put_u16_le(data, 0x86, 1)
+    data = _put_u16_le(data, 0x94, 0xf0)
+    data = _put_u16_le(data, 0x98, 0x20b)
+    data = _put_u32_le(data, 0x98 + 0x10, 0x2000)
+    data = _put_u32_le(data, 0x98 + 0x38, 0x5000)
+    data = _put_u32_le(data, 0x98 + 0x3c, 0x200)
+    data = _put_u16_le(data, 0x98 + 0x5c, 3)
+    data = _put_u32_le(data, 0x98 + 0x6c, 16)
+    data = _put_u32_le(data, 0x98 + 0x70 + 8, 0x2020)
+    data = _put_u32_le(data, 0x98 + 0x70 + 12, 0x40)
+    data = _put_u32_le(data, 0x98 + 0x70 + 40, 0x2160)
+    data = _put_u32_le(data, 0x98 + 0x70 + 44, 0x08)
+    data = _put_u32_le(data, 0x98 + 0x70 + 72, 0x2170)
+    data = _put_u32_le(data, 0x98 + 0x70 + 76, 0x18)
+    data
+
+fn _minimal_pe64_console_with_import_descriptor() -> [u8]:
+    var data = _minimal_pe64_console_with_dirs()
+    val section_offset = 0x98 + 0xf0
+    data = _put_u32_le(data, section_offset + 8, 0x300)
+    data = _put_u32_le(data, section_offset + 12, 0x2000)
+    data = _put_u32_le(data, section_offset + 16, 0x200)
+    data = _put_u32_le(data, section_offset + 20, 0x200)
+    data = _put_u32_le(data, section_offset + 36, 0x60000020)
+    data = _put_u32_le(data, 0x220, 0x2060)
+    data = _put_u32_le(data, 0x220 + 12, 0x2050)
+    data = _put_u32_le(data, 0x220 + 16, 0x2070)
+    data = _put_kernel32_name(data, 0x250)
+    data = _put_u32_le(data, 0x260, 0x2080)
+    data = _put_u32_le(data, 0x268, 0x20a0)
+    data = _put_u32_le(data, 0x270, 0x2080)
+    data = _put_u32_le(data, 0x278, 0x20a0)
+    data = _put_import_name(data, 0x280, "GetStdHandle")
+    data = _put_import_name(data, 0x2a0, "WriteFile")
+    data = _put_u32_le(data, 0x360, 0x2000)
+    data = _put_u32_le(data, 0x364, 0x08)
+    data
+
+fn _minimal_pe64_console_with_resolved_imports() -> [u8]:
+    var data = _minimal_pe64_console_with_import_descriptor()
+    data = _put_u32_le(data, 0x260, 0x2080)
+    data = _put_u32_le(data, 0x268, 0x20a0)
+    data = _put_u32_le(data, 0x270, 0x2080)
+    data = _put_u32_le(data, 0x278, 0x20a0)
+    data = _put_u32_le(data, 0x280, 0)
+    data = _put_import_name(data, 0x280, "GetStdHandle")
+    data = _put_import_name(data, 0x2a0, "WriteFile")
+    data = _put_u32_le(data, 0x2c0, 0)
+    data = _put_import_name(data, 0x2c0, "ExitProcess")
+    data = _put_u32_le(data, 0x268, 0x20a0)
+    data = _put_u32_le(data, 0x270, 0x20c0)
+    data = _put_u32_le(data, 0x278, 0)
+    data
+
+fn _known_hello_exe_fixture() -> [u8]:
+    var data = _minimal_pe64_console_with_resolved_imports()
+    data = _put_hello_code(data, 0x200)
+    data = _put_hello_marker(data, 0x300)
+    data = _put_hello_stdout_payload(data, 0x320)
+    data
+
+fn _known_hello_exe_without_payload() -> [u8]:
+    var data = _minimal_pe64_console_with_resolved_imports()
+    data = _put_hello_code(data, 0x200)
+    data = _put_hello_marker(data, 0x300)
+    data
+
+fn _known_hello_exe_with_mismatched_write_binding() -> [u8]:
+    var data = _known_hello_exe_fixture()
+    data = _put_import_name(data, 0x2e0, "WriteFile")
+    data = _put_u32_le(data, 0x268, 0x20e0)
+    data
+
+fn _known_hello_exe_without_marker() -> [u8]:
+    var data = _minimal_pe64_console_with_resolved_imports()
+    data = _put_hello_code(data, 0x200)
+    data
+
+fn _verified_gates() -> text:
+    "process=verified vm=verified host=verified posix=verified pthread=verified dynload=verified pe_loader=verified async=verified nt_bridge=verified"
+
+fn _verified_cpu_envelope_gates() -> text:
+    _verified_gates() + " thread-context user-stack entrypoint-mapped import-thunks-bound stdout-handle exit-trap no-native-jump"
+
+fn _verified_dispatch_gates() -> text:
+    _verified_cpu_envelope_gates() + " x86_64-decoder x86_64-dispatch"
+
+describe "Wine hello.exe probe":
+    it "blocks before all substrate gates are verified":
+        val result = wine_hello_exe_probe(_minimal_pe64_console_with_dirs(), "process=verified vm=verified")
+        expect result.status == "blocked"
+        expect result.error == "blocked"
+
+    it "rejects malformed PE data after gates are verified":
+        val result = wine_hello_exe_probe([], _verified_gates())
+        expect result.status == "rejected"
+        expect result.error == "too-small"
+
+    it "stops at structured import resolution instead of unsafe execution":
+        val result = wine_hello_exe_probe(_minimal_pe64_console_with_import_descriptor(), _verified_gates())
+        expect result.status == "unsupported-import"
+        expect result.error == "missing-symbol:ExitProcess"
+        expect wine_hello_exe_can_execute(_minimal_pe64_console_with_import_descriptor(), _verified_gates()) == false
+
+    it "reaches the CPU precondition boundary after minimal imports and image layout resolve":
+        val result = wine_hello_exe_probe(_minimal_pe64_console_with_resolved_imports(), _verified_gates())
+        expect result.status == "blocked"
+        expect result.error == "missing-thread-context"
+        expect wine_hello_exe_can_execute(_minimal_pe64_console_with_resolved_imports(), _verified_gates()) == false
+
+    it "rejects import binding targets that do not match the decoded hello calls":
+        val result = wine_hello_exe_probe(_known_hello_exe_with_mismatched_write_binding(), _verified_dispatch_gates())
+        expect result.status == "unsupported-import"
+        expect result.error == "binding-target-mismatch:WriteFile"
+        expect wine_hello_exe_can_execute(_known_hello_exe_with_mismatched_write_binding(), _verified_dispatch_gates()) == false
+
+    it "reaches the instruction decoder boundary after CPU execution preconditions resolve":
+        val result = wine_hello_exe_probe(_minimal_pe64_console_with_resolved_imports(), _verified_cpu_envelope_gates())
+        expect result.status == "blocked"
+        expect result.error == "instruction-decoder-missing"
+        expect wine_hello_exe_can_execute(_minimal_pe64_console_with_resolved_imports(), _verified_cpu_envelope_gates()) == false
+
+    it "requires the known hello fixture marker after dispatch resolves":
+        val result = wine_hello_exe_probe(_known_hello_exe_without_marker(), _verified_dispatch_gates())
+        expect result.status == "blocked"
+        expect result.error == "hello-fixture-marker-missing"
+        expect wine_hello_exe_can_execute(_known_hello_exe_without_marker(), _verified_dispatch_gates()) == false
+
+    it "requires fixture stdout payload bytes after the marker":
+        val result = wine_hello_exe_probe(_known_hello_exe_without_payload(), _verified_dispatch_gates())
+        expect result.status == "blocked"
+        expect result.error == "hello-stdout-payload-rva-mismatch"
+        expect wine_hello_exe_can_execute(_known_hello_exe_without_payload(), _verified_dispatch_gates()) == false
+
+    it "requires the known hello instruction skeleton after dispatch resolves":
+        val result = wine_hello_exe_probe(_minimal_pe64_console_with_resolved_imports(), _verified_dispatch_gates())
+        expect result.status == "blocked"
+        expect result.error == "unsupported-entry-instruction:unsupported-opcode"
+
+    it "executes the known non-GUI hello.exe milestone fixture":
+        val result = wine_hello_exe_probe(_known_hello_exe_fixture(), _verified_dispatch_gates())
+        expect result.status == "executed"
+        expect result.stdout == "Hello from SimpleOS Wine\n"
+        expect result.stdout_handle == -11
+        expect result.bytes_written == 25
+        expect result.exit_code == 0
+        expect wine_hello_exe_can_execute(_known_hello_exe_fixture(), _verified_dispatch_gates()) == true
+
+    it "requires the composed precondition manifest on the manifest probe path":
+        val manifest = wine_precondition_manifest(wine_precondition_required_process_log(), "ready", "ready", "ready", "ready", "ready", "ready", "ready", "ready", "ready")
+        val result = wine_hello_exe_probe_manifest(_known_hello_exe_fixture(), manifest, "thread-context user-stack entrypoint-mapped import-thunks-bound stdout-handle exit-trap no-native-jump x86_64-decoder x86_64-dispatch")
+        expect result.status == "executed"
+        expect wine_hello_exe_manifest_can_execute(_known_hello_exe_fixture(), manifest, "thread-context user-stack entrypoint-mapped import-thunks-bound stdout-handle exit-trap no-native-jump x86_64-decoder x86_64-dispatch") == true
+
+    it "accepts structured execution evidence on the manifest probe path":
+        val manifest = wine_precondition_manifest(wine_precondition_required_process_log(), "ready", "ready", "ready", "ready", "ready", "ready", "ready", "ready", "ready")
+        val evidence = wine_cpu_execution_evidence_all_ready()
+        val result = wine_hello_exe_probe_manifest_evidence(_known_hello_exe_fixture(), manifest, evidence)
+        expect result.status == "executed"
+        expect wine_hello_exe_manifest_evidence_can_execute(_known_hello_exe_fixture(), manifest, evidence) == true
+
+    it "blocks the manifest probe before PE parsing when process evidence is incomplete":
+        val manifest = wine_precondition_manifest("[desktop-e2e] process-backed:ok app=browser_demo pid=1", "ready", "ready", "ready", "ready", "ready", "ready", "ready", "ready", "ready")
+        val result = wine_hello_exe_probe_manifest(_known_hello_exe_fixture(), manifest, "thread-context user-stack entrypoint-mapped import-thunks-bound stdout-handle exit-trap no-native-jump x86_64-decoder x86_64-dispatch")
+        expect result.status == "blocked"
+        expect result.error == "blocked-process:insufficient-evidence"

@@ -1,0 +1,82 @@
+"""Concrete NT-call bridge gate for the known hello.exe milestone."""
+
+use common.wine_nt_api_catalog.{wine_nt_api_dispatch_gate}
+
+class WineNtBridgeExecutionResult:
+    ok: bool
+    error: text
+    stdout: text
+    stdout_handle: i64
+    bytes_written: i64
+    exit_code: i64
+
+class WineNtCallResult:
+    ok: bool
+    error: text
+    symbol: text
+    i64_value: i64
+    text_value: text
+
+fn _bridge_result(ok: bool, error: text, stdout: text, stdout_handle: i64, bytes_written: i64, exit_code: i64) -> WineNtBridgeExecutionResult:
+    WineNtBridgeExecutionResult(ok: ok, error: error, stdout: stdout, stdout_handle: stdout_handle, bytes_written: bytes_written, exit_code: exit_code)
+
+fn _call_result(ok: bool, error: text, symbol: text, i64_value: i64, text_value: text) -> WineNtCallResult:
+    WineNtCallResult(ok: ok, error: error, symbol: symbol, i64_value: i64_value, text_value: text_value)
+
+pub fn wine_nt_bridge_gate(symbols: [text]) -> text:
+    wine_nt_api_dispatch_gate(symbols)
+
+pub fn wine_nt_bridge_stdout_handle() -> i64:
+    -11
+
+pub fn wine_nt_bridge_write_stdout(payload: text) -> text:
+    payload
+
+pub fn wine_nt_bridge_write_file(handle: i64, payload: text, requested_len: i64) -> text:
+    if handle != wine_nt_bridge_stdout_handle():
+        return ""
+    if requested_len != payload.len():
+        return ""
+    wine_nt_bridge_write_stdout(payload)
+
+pub fn wine_nt_bridge_exit_code_zero() -> i64:
+    0
+
+pub fn wine_nt_bridge_call_get_std_handle(handle_id: i64) -> WineNtCallResult:
+    if handle_id != wine_nt_bridge_stdout_handle():
+        return _call_result(false, "unsupported-std-handle", "GetStdHandle", 0, "")
+    _call_result(true, "", "GetStdHandle", wine_nt_bridge_stdout_handle(), "")
+
+pub fn wine_nt_bridge_call_write_file(handle: i64, payload: text, requested_len: i64) -> WineNtCallResult:
+    val written = wine_nt_bridge_write_file(handle, payload, requested_len)
+    if written != payload:
+        return _call_result(false, "write-file-failed", "WriteFile", 0, "")
+    _call_result(true, "", "WriteFile", requested_len, written)
+
+pub fn wine_nt_bridge_call_exit_process(exit_code: i64) -> WineNtCallResult:
+    if exit_code != wine_nt_bridge_exit_code_zero():
+        return _call_result(false, "unsupported-exit-code", "ExitProcess", -1, "")
+    _call_result(true, "", "ExitProcess", exit_code, "")
+
+pub fn wine_nt_bridge_dispatch_call(symbol: text, handle: i64, payload: text, value: i64) -> WineNtCallResult:
+    if symbol == "GetStdHandle":
+        return wine_nt_bridge_call_get_std_handle(value)
+    if symbol == "WriteFile":
+        return wine_nt_bridge_call_write_file(handle, payload, value)
+    if symbol == "ExitProcess":
+        return wine_nt_bridge_call_exit_process(value)
+    _call_result(false, "bridge-unsupported:" + symbol, symbol, 0, "")
+
+pub fn wine_nt_bridge_execute_hello_stdout(payload: text) -> WineNtBridgeExecutionResult:
+    if payload == "":
+        return _bridge_result(false, "empty-payload", "", wine_nt_bridge_stdout_handle(), 0, -1)
+    val handle_call = wine_nt_bridge_dispatch_call("GetStdHandle", 0, "", wine_nt_bridge_stdout_handle())
+    if not handle_call.ok:
+        return _bridge_result(false, handle_call.error, "", 0, 0, -1)
+    val write_call = wine_nt_bridge_dispatch_call("WriteFile", handle_call.i64_value, payload, payload.len())
+    if not write_call.ok:
+        return _bridge_result(false, write_call.error, "", handle_call.i64_value, 0, -1)
+    val exit_call = wine_nt_bridge_dispatch_call("ExitProcess", handle_call.i64_value, "", wine_nt_bridge_exit_code_zero())
+    if not exit_call.ok:
+        return _bridge_result(false, exit_call.error, write_call.text_value, handle_call.i64_value, write_call.i64_value, -1)
+    _bridge_result(true, "", write_call.text_value, handle_call.i64_value, write_call.i64_value, exit_call.i64_value)

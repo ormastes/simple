@@ -1,0 +1,68 @@
+"""Narrow NT import resolver gate for the first non-GUI hello.exe milestone."""
+
+use common.pe_coff_header.{PeImportSymbolBinding}
+use common.wine_nt_api_catalog.{wine_nt_api_dll_gate, wine_nt_api_implemented_symbols_for_hello, wine_nt_api_import_gate}
+
+class WineNtHelloImportBindingPlan:
+    ok: bool
+    error: text
+    dll: text
+    call_sequence: text
+    binding_count: i64
+    get_std_handle_rva: i64
+    write_file_rva: i64
+    exit_process_rva: i64
+
+fn _binding_plan_error(error: text, dll: text) -> WineNtHelloImportBindingPlan:
+    WineNtHelloImportBindingPlan(ok: false, error: error, dll: dll, call_sequence: "", binding_count: 0, get_std_handle_rva: 0, write_file_rva: 0, exit_process_rva: 0)
+
+fn _binding_plan_ready(dll: text, get_std_handle_rva: i64, write_file_rva: i64, exit_process_rva: i64) -> WineNtHelloImportBindingPlan:
+    WineNtHelloImportBindingPlan(
+        ok: true,
+        error: "",
+        dll: dll,
+        call_sequence: "GetStdHandle WriteFile ExitProcess",
+        binding_count: 3,
+        get_std_handle_rva: get_std_handle_rva,
+        write_file_rva: write_file_rva,
+        exit_process_rva: exit_process_rva
+    )
+
+pub fn wine_nt_import_required_symbols_for_hello() -> [text]:
+    wine_nt_api_implemented_symbols_for_hello()
+
+pub fn wine_nt_import_dll_gate(dll_name: text) -> text:
+    val state = wine_nt_api_dll_gate(dll_name)
+    if state == "catalogued-dll:ntdll.dll":
+        return "unsupported-dll:" + dll_name
+    state
+
+pub fn wine_nt_import_hello_gate(dll_name: text, symbols: [text]) -> text:
+    wine_nt_api_import_gate(dll_name, symbols)
+
+fn _binding_rva(bindings: [PeImportSymbolBinding], symbol: text) -> i64:
+    for binding in bindings:
+        if binding.symbol == symbol:
+            return binding.name_rva
+    -1
+
+pub fn wine_nt_import_hello_binding_gate(dll_name: text, bindings: [PeImportSymbolBinding]) -> text:
+    val plan = wine_nt_import_hello_binding_plan(dll_name, bindings)
+    if not plan.ok:
+        return plan.error
+    "ready"
+
+pub fn wine_nt_import_hello_binding_plan(dll_name: text, bindings: [PeImportSymbolBinding]) -> WineNtHelloImportBindingPlan:
+    val dll_state = wine_nt_import_dll_gate(dll_name)
+    if dll_state != "ready":
+        return _binding_plan_error(dll_state, dll_name)
+    val get_std_handle_rva = _binding_rva(bindings, "GetStdHandle")
+    val write_file_rva = _binding_rva(bindings, "WriteFile")
+    val exit_process_rva = _binding_rva(bindings, "ExitProcess")
+    if get_std_handle_rva != 0x2080:
+        return _binding_plan_error("binding-target-mismatch:GetStdHandle", dll_name)
+    if write_file_rva != 0x20a0:
+        return _binding_plan_error("binding-target-mismatch:WriteFile", dll_name)
+    if exit_process_rva != 0x20c0:
+        return _binding_plan_error("binding-target-mismatch:ExitProcess", dll_name)
+    _binding_plan_ready(dll_name.lower(), get_std_handle_rva, write_file_rva, exit_process_rva)

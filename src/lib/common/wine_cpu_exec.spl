@@ -1,0 +1,133 @@
+"""CPU/thread execution readiness gates for the hello.exe milestone."""
+
+use common.wine_x86_64_decode.{wine_x86_64_hello_decode_plan}
+
+class WineCpuHelloExecutionPlan:
+    ok: bool
+    error: text
+    entry_rva: i64
+    call_sequence: text
+    call_count: i64
+    get_std_handle_rva: i64
+    stdout_payload_rva: i64
+    write_file_rva: i64
+    exit_process_rva: i64
+
+class WineCpuExecutionEvidence:
+    thread_context: bool
+    user_stack: bool
+    entrypoint_mapped: bool
+    import_thunks_bound: bool
+    stdout_handle: bool
+    exit_trap: bool
+    no_native_jump: bool
+    x86_64_decoder: bool
+    x86_64_dispatch: bool
+
+fn _hello_plan_error(error: text) -> WineCpuHelloExecutionPlan:
+    WineCpuHelloExecutionPlan(ok: false, error: error, entry_rva: 0, call_sequence: "", call_count: 0, get_std_handle_rva: 0, stdout_payload_rva: 0, write_file_rva: 0, exit_process_rva: 0)
+
+fn _hello_plan_ready(entry_rva: i64, get_std_handle_rva: i64, stdout_payload_rva: i64, write_file_rva: i64, exit_process_rva: i64) -> WineCpuHelloExecutionPlan:
+    WineCpuHelloExecutionPlan(
+        ok: true,
+        error: "",
+        entry_rva: entry_rva,
+        call_sequence: "GetStdHandle WriteFile ExitProcess",
+        call_count: 3,
+        get_std_handle_rva: get_std_handle_rva,
+        stdout_payload_rva: stdout_payload_rva,
+        write_file_rva: write_file_rva,
+        exit_process_rva: exit_process_rva
+    )
+
+pub fn wine_cpu_execution_evidence(
+    thread_context: bool,
+    user_stack: bool,
+    entrypoint_mapped: bool,
+    import_thunks_bound: bool,
+    stdout_handle: bool,
+    exit_trap: bool,
+    no_native_jump: bool,
+    x86_64_decoder: bool,
+    x86_64_dispatch: bool
+) -> WineCpuExecutionEvidence:
+    WineCpuExecutionEvidence(
+        thread_context: thread_context,
+        user_stack: user_stack,
+        entrypoint_mapped: entrypoint_mapped,
+        import_thunks_bound: import_thunks_bound,
+        stdout_handle: stdout_handle,
+        exit_trap: exit_trap,
+        no_native_jump: no_native_jump,
+        x86_64_decoder: x86_64_decoder,
+        x86_64_dispatch: x86_64_dispatch
+    )
+
+pub fn wine_cpu_execution_evidence_all_ready() -> WineCpuExecutionEvidence:
+    wine_cpu_execution_evidence(true, true, true, true, true, true, true, true, true)
+
+pub fn wine_cpu_execution_evidence_text(evidence: WineCpuExecutionEvidence) -> text:
+    var out = ""
+    if evidence.thread_context:
+        out = out + " thread-context"
+    if evidence.user_stack:
+        out = out + " user-stack"
+    if evidence.entrypoint_mapped:
+        out = out + " entrypoint-mapped"
+    if evidence.import_thunks_bound:
+        out = out + " import-thunks-bound"
+    if evidence.stdout_handle:
+        out = out + " stdout-handle"
+    if evidence.exit_trap:
+        out = out + " exit-trap"
+    if evidence.no_native_jump:
+        out = out + " no-native-jump"
+    if evidence.x86_64_decoder:
+        out = out + " x86_64-decoder"
+    if evidence.x86_64_dispatch:
+        out = out + " x86_64-dispatch"
+    out
+
+pub fn wine_cpu_execution_required_features() -> [text]:
+    [
+        "thread-context",
+        "user-stack",
+        "entrypoint-mapped",
+        "import-thunks-bound",
+        "stdout-handle",
+        "exit-trap",
+        "no-native-jump"
+    ]
+
+pub fn wine_cpu_execution_gate(evidence: text) -> text:
+    for feature in wine_cpu_execution_required_features():
+        if not evidence.contains(feature):
+            return "missing-" + feature
+    "ready"
+
+pub fn wine_instruction_dispatch_gate(evidence: text) -> text:
+    if not evidence.contains("x86_64-decoder"):
+        return "instruction-decoder-missing"
+    if not evidence.contains("x86_64-dispatch"):
+        return "instruction-dispatch-missing"
+    "ready"
+
+pub fn wine_cpu_hello_execution_plan(data: [u8], evidence: text) -> WineCpuHelloExecutionPlan:
+    val cpu_state = wine_cpu_execution_gate(evidence)
+    if cpu_state != "ready":
+        return _hello_plan_error(cpu_state)
+    val dispatch_state = wine_instruction_dispatch_gate(evidence)
+    if dispatch_state != "ready":
+        return _hello_plan_error(dispatch_state)
+    val decode_plan = wine_x86_64_hello_decode_plan(data)
+    if not decode_plan.ok:
+        return _hello_plan_error(decode_plan.error)
+    if decode_plan.get_std_handle_rva != 0x2080 or
+       decode_plan.stdout_payload_rva != 0x2120 or
+       decode_plan.write_file_rva != 0x20a0 or
+       decode_plan.exit_process_rva != 0x20c0:
+        return _hello_plan_error("instruction-plan-target-mismatch")
+    _hello_plan_ready(decode_plan.entry_rva, decode_plan.get_std_handle_rva, decode_plan.stdout_payload_rva, decode_plan.write_file_rva, decode_plan.exit_process_rva)
+
+pub fn wine_cpu_hello_execution_plan_from_evidence(data: [u8], evidence: WineCpuExecutionEvidence) -> WineCpuHelloExecutionPlan:
+    wine_cpu_hello_execution_plan(data, wine_cpu_execution_evidence_text(evidence))

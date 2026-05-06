@@ -1,0 +1,62 @@
+use common.wine_nt_file_io.{
+    wine_nt_file_close,
+    wine_nt_file_create_w,
+    wine_nt_file_io_required_calls,
+    wine_nt_file_read,
+    wine_nt_file_table_add_file,
+    wine_nt_file_table_new
+}
+
+fn _all_adapter_apis() -> text:
+    "fd-open fd-read fd-write fd-close fd-dup fd-inherit stdio pipe socket timer poll-wait " +
+        "cwd env argv spawn path-normalize path-attrs path-locks errno-map"
+
+fn _all_async_features() -> text:
+    "io-driver submit-open submit-read submit-write submit-close submit-timeout poll-completion " +
+        "event-loop register-fd deregister-fd waker wake"
+
+describe "Wine NT file I/O bridge":
+    it "lists the modeled CreateFileW, ReadFile, and CloseHandle calls":
+        val calls = wine_nt_file_io_required_calls()
+        expect(calls.len()).to_equal(3)
+        expect(calls[0]).to_equal("CreateFileW")
+
+    it "blocks file table readiness until POSIX and async prerequisites pass":
+        val table = wine_nt_file_table_new("fd-open fd-read", _all_async_features())
+        expect(table.ready).to_equal(false)
+        expect(table.state).to_equal("missing-api-fd-write")
+
+    it "opens a modeled file and reads requested bytes":
+        val table = wine_nt_file_table_add_file(wine_nt_file_table_new(_all_adapter_apis(), _all_async_features()), "C:\\hello.txt", "hello wine")
+        val opened = wine_nt_file_create_w(table, "C:\\hello.txt")
+        expect(opened.ok).to_equal(true)
+        expect(opened.handle).to_equal(0x40)
+        val read = wine_nt_file_read(opened.table, opened.handle, 5)
+        expect(read.ok).to_equal(true)
+        expect(read.data).to_equal("hello")
+        expect(read.bytes_read).to_equal(5)
+
+    it "advances the read cursor across ReadFile calls":
+        val table = wine_nt_file_table_add_file(wine_nt_file_table_new(_all_adapter_apis(), _all_async_features()), "C:\\hello.txt", "hello wine")
+        val opened = wine_nt_file_create_w(table, "C:\\hello.txt")
+        val first = wine_nt_file_read(opened.table, opened.handle, 6)
+        val second = wine_nt_file_read(first.table, opened.handle, 4)
+        expect(first.data).to_equal("hello ")
+        expect(second.data).to_equal("wine")
+
+    it "closes handles and rejects reads after CloseHandle":
+        val table = wine_nt_file_table_add_file(wine_nt_file_table_new(_all_adapter_apis(), _all_async_features()), "C:\\hello.txt", "hello")
+        val opened = wine_nt_file_create_w(table, "C:\\hello.txt")
+        val closed = wine_nt_file_close(opened.table, opened.handle)
+        expect(closed.ok).to_equal(true)
+        expect(closed.state).to_equal("closed")
+        expect(wine_nt_file_read(closed.table, opened.handle, 1).state).to_equal("invalid-handle")
+
+    it "rejects invalid paths, missing files, invalid handles, and invalid read sizes":
+        val table = wine_nt_file_table_new(_all_adapter_apis(), _all_async_features())
+        expect(wine_nt_file_create_w(table, "").state).to_equal("invalid-path")
+        expect(wine_nt_file_create_w(table, "C:\\missing.txt").state).to_equal("file-not-found")
+        expect(wine_nt_file_read(table, 0x40, 1).state).to_equal("invalid-handle")
+        val with_file = wine_nt_file_table_add_file(table, "C:\\hello.txt", "hello")
+        val opened = wine_nt_file_create_w(with_file, "C:\\hello.txt")
+        expect(wine_nt_file_read(opened.table, opened.handle, -1).state).to_equal("invalid-read-size")

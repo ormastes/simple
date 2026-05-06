@@ -1,0 +1,99 @@
+use common.wine_x86_64_decode.{wine_x86_64_hello_decode_gate, wine_x86_64_hello_decode_plan, wine_x86_64_instruction_at}
+
+fn _zero_bytes(count: i64) -> [u8]:
+    var out: [u8] = []
+    var i = 0
+    while i < count:
+        out.push(0)
+        i = i + 1
+    out
+
+fn _put_u16_le(data: [u8], offset: i64, value: i64) -> [u8]:
+    data[offset] = (value & 0xff) as u8
+    data[offset + 1] = ((value >> 8) & 0xff) as u8
+    data
+
+fn _put_u32_le(data: [u8], offset: i64, value: i64) -> [u8]:
+    data[offset] = (value & 0xff) as u8
+    data[offset + 1] = ((value >> 8) & 0xff) as u8
+    data[offset + 2] = ((value >> 16) & 0xff) as u8
+    data[offset + 3] = ((value >> 24) & 0xff) as u8
+    data
+
+fn _minimal_image() -> [u8]:
+    var data = _zero_bytes(1024)
+    data[0] = 0x4d
+    data[1] = 0x5a
+    data = _put_u32_le(data, 0x3c, 0x80)
+    data[0x80] = 0x50
+    data[0x81] = 0x45
+    data = _put_u16_le(data, 0x84, 0x8664)
+    data = _put_u16_le(data, 0x86, 1)
+    data = _put_u16_le(data, 0x94, 0xf0)
+    data = _put_u16_le(data, 0x98, 0x20b)
+    data = _put_u32_le(data, 0x98 + 0x10, 0x2010)
+    data = _put_u32_le(data, 0x98 + 0x38, 0x5000)
+    data = _put_u32_le(data, 0x98 + 0x3c, 0x200)
+    data = _put_u16_le(data, 0x98 + 0x5c, 3)
+    data = _put_u32_le(data, 0x98 + 0x6c, 16)
+    val section_offset = 0x98 + 0xf0
+    data = _put_u32_le(data, section_offset + 8, 0x300)
+    data = _put_u32_le(data, section_offset + 12, 0x2000)
+    data = _put_u32_le(data, section_offset + 16, 0x200)
+    data = _put_u32_le(data, section_offset + 20, 0x200)
+    data
+
+fn _put_hello_code(data: [u8], offset: i64) -> [u8]:
+    data[offset] = 0x48
+    data[offset + 1] = 0x31
+    data[offset + 2] = 0xc9
+    data[offset + 3] = 0xe8
+    data = _put_u32_le(data, offset + 4, 0x68)
+    data[offset + 8] = 0x48
+    data[offset + 9] = 0x8d
+    data[offset + 10] = 0x15
+    data = _put_u32_le(data, offset + 11, 0x101)
+    data[offset + 15] = 0xe8
+    data = _put_u32_le(data, offset + 16, 0x7c)
+    data[offset + 20] = 0x31
+    data[offset + 21] = 0xc9
+    data[offset + 22] = 0xe8
+    data = _put_u32_le(data, offset + 23, 0x95)
+    data
+
+fn _put_hello_code_with_bad_write_target(data: [u8], offset: i64) -> [u8]:
+    var out = _put_hello_code(data, offset)
+    out = _put_u32_le(out, offset + 16, 0)
+    out
+
+describe "Wine x86_64 hello decoder gate":
+    it "rejects missing entrypoint instruction sequence":
+        expect(wine_x86_64_hello_decode_gate(_minimal_image())).to_equal("unsupported-entry-instruction:unsupported-opcode")
+
+    it "classifies supported and unsupported tiny instruction forms":
+        val data = _put_hello_code(_minimal_image(), 0x210)
+        expect(wine_x86_64_instruction_at(data, 0x210)).to_equal("xor-rcx-rcx")
+        expect(wine_x86_64_instruction_at(data, 0x213)).to_equal("call-rel32")
+        expect(wine_x86_64_instruction_at(data, 0x218)).to_equal("lea-rdx-rip-rel32")
+        expect(wine_x86_64_instruction_at(data, 0x224)).to_equal("xor-ecx-ecx")
+        expect(wine_x86_64_instruction_at(data, 0x22c)).to_equal("unsupported-opcode")
+
+    it "classifies truncated near-call bytes":
+        var data = _zero_bytes(4)
+        data[0] = 0xe8
+        expect(wine_x86_64_instruction_at(data, 0)).to_equal("truncated-call-rel32")
+
+    it "rejects known opcodes when relative calls do not target the expected import payloads":
+        expect(wine_x86_64_hello_decode_gate(_put_hello_code_with_bad_write_target(_minimal_image(), 0x210))).to_equal("write-file-call-target-mismatch")
+
+    it "recognizes the known hello call skeleton at the PE entrypoint":
+        expect(wine_x86_64_hello_decode_gate(_put_hello_code(_minimal_image(), 0x210))).to_equal("ready")
+
+    it "returns a structured hello execution plan from the decoded entrypoint":
+        val plan = wine_x86_64_hello_decode_plan(_put_hello_code(_minimal_image(), 0x210))
+        expect(plan.ok).to_equal(true)
+        expect(plan.entry_rva).to_equal(0x2010)
+        expect(plan.get_std_handle_rva).to_equal(0x2080)
+        expect(plan.stdout_payload_rva).to_equal(0x2120)
+        expect(plan.write_file_rva).to_equal(0x20a0)
+        expect(plan.exit_process_rva).to_equal(0x20c0)

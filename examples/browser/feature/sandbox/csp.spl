@@ -132,17 +132,16 @@ fn source_matches(directive: CspDirective, source: text, page_origin: text) -> b
         if allowed == "'self'":
             # 'self' matches the page's own origin
             if page_origin.len() > 0:
-                if source.starts_with(page_origin):
-                    return true
-                # Also match if source is the origin itself
-                if source == page_origin:
+                if _source_is_same_origin(source, page_origin):
                     return true
             else if source == "'self'":
                 return true
+        else if _is_csp_keyword(allowed):
+            pass_dn
         else if allowed.starts_with("*."):
             # Host wildcard: *.example.com matches sub.example.com
             val wildcard_suffix = allowed.substring(1, allowed.len())
-            if source.contains(wildcard_suffix):
+            if _source_host_matches_wildcard(source, wildcard_suffix):
                 return true
         else if allowed.ends_with(":"):
             # Scheme source: "https:" matches any https URL
@@ -151,13 +150,50 @@ fn source_matches(directive: CspDirective, source: text, page_origin: text) -> b
             if source.starts_with(allowed.substring(0, allowed.len() - 1) + "://"):
                 return true
         else:
-            if allowed == source:
-                return true
-            # Also check if the source URL starts with the allowed host
-            if source.contains("://" + allowed):
+            if _source_matches_host_source(source, allowed):
                 return true
         i = i + 1
     false
+
+fn _source_is_same_origin(source: text, page_origin: text) -> bool:
+    if source == page_origin:
+        return true
+    if source.starts_with(page_origin + "/"):
+        return true
+    if source.starts_with(page_origin + "?"):
+        return true
+    if source.starts_with(page_origin + "#"):
+        return true
+    false
+
+fn _is_csp_keyword(source: text) -> bool:
+    source == "'self'" or source == "'none'" or source == "'unsafe-inline'" or source == "'unsafe-eval'"
+
+fn _source_matches_host_source(source: text, allowed: text) -> bool:
+    if allowed == source:
+        return true
+    if allowed.contains("://"):
+        return _source_is_same_origin(source, allowed)
+    _url_host(source) == allowed
+
+fn _source_host_matches_wildcard(source: text, wildcard_suffix: text) -> bool:
+    val host = _url_host(source)
+    if host.len() == 0:
+        return false
+    host.ends_with(wildcard_suffix)
+
+fn _url_host(source: text) -> text:
+    val scheme_pos = source.index_of("://")
+    if scheme_pos < 0:
+        return ""
+    var pos = scheme_pos + 3
+    val start = pos
+    while pos < source.len():
+        val ch = source.substring(pos, pos + 1)
+        if ch == "/" or ch == "?" or ch == "#":
+            return source.substring(start, pos)
+        pos = pos + 1
+    source.substring(start, pos)
 
 fn filter_non_empty(parts: [text]) -> [text]:
     var result: [text] = []

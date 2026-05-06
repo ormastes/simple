@@ -23,6 +23,9 @@ use examples.browser.entity.dom.attribute_types.{Attr}
 use examples.browser.entity.dom.css_types.{SelectorPart, Selector}
 use examples.browser.feature.dom.document.{Document}
 use examples.browser.feature.dom.element.{ElementOps}
+use examples.browser.feature.dom.selector_match
+use examples.browser.feature.dom.selector_match.{SelectorMatcher, selector_matches_direct}
+use examples.browser.feature.parser.css_parser.{parse_selector_text}
 use examples.browser.shared.logging.{Logger, LogLevel}
 
 # ============================================================================
@@ -93,6 +96,9 @@ fn match_selector(doc: Document, node_id: i64, selector: Selector) -> bool:
             return false
         i = i + 1
     true
+
+fn real_match_selector(doc: Document, node_id: i64, selector: Selector) -> bool:
+    selector_matches_direct(selector, node_id, doc.node_store.nodes, doc.node_store.elements)
 
 # Query all element nodes in the document that match a selector.
 fn query_all(doc: Document, selector: Selector) -> [i64]:
@@ -245,6 +251,38 @@ describe "Selector Matching":
             val sel = Selector.create([SelectorPart.PseudoClass(name: "last-child")])
             expect(match_selector(doc, first, sel)).to_equal(false)
             expect(match_selector(doc, second, sel)).to_equal(true)
+
+    context "functional pseudo-class selectors":
+        it "matches nth-child formula selectors":
+            var doc = make_doc()
+            val first = doc.createElement("li")
+            val second = doc.createElement("li")
+            val third = doc.createElement("li")
+            doc.appendChild(doc.body_id, first)
+            doc.appendChild(doc.body_id, second)
+            doc.appendChild(doc.body_id, third)
+            val sel = Selector.create([
+                SelectorPart.Type(name: "li"),
+                SelectorPart.FunctionalPseudo("nth-child", "2n+1")
+            ])
+            expect(sel.parts.len()).to_equal(2)
+            expect(real_match_selector(doc, first, sel)).to_equal(true)
+            expect(real_match_selector(doc, third, sel)).to_equal(true)
+
+        it "matches not selector arguments that do not apply":
+            var doc = make_doc()
+            val primary = doc.createElement("button")
+            val secondary = doc.createElement("button")
+            ElementOps.setAttribute(doc, primary, "class", "primary")
+            doc.appendChild(doc.body_id, primary)
+            doc.appendChild(doc.body_id, secondary)
+            val sel = Selector.create([
+                SelectorPart.Type(name: "button"),
+                SelectorPart.FunctionalPseudo("not", ".missing")
+            ])
+            expect(sel.parts.len()).to_equal(2)
+            expect(real_match_selector(doc, primary, sel)).to_equal(true)
+            expect(real_match_selector(doc, secondary, sel)).to_equal(true)
 
     context "querySelectorAll":
         it "querySelectorAll returns all matches":

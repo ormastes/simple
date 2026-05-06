@@ -19,6 +19,27 @@ fn _count_non_background(pixels: [u32], bg: u32) -> i32:
         idx = idx + 1
     count
 
+fn _count_color(pixels: [u32], color: u32) -> i32:
+    var count: i32 = 0
+    var idx: i32 = 0
+    while idx < pixels.len():
+        if pixels[idx] == color:
+            count = count + 1
+        idx = idx + 1
+    count
+
+fn _sum_red(pixels: [u32]) -> i64:
+    var total: i64 = 0
+    for pixel in pixels:
+        total = total + (((pixel >> 16) & 0xFF) as i64)
+    total
+
+fn _sum_green(pixels: [u32]) -> i64:
+    var total: i64 = 0
+    for pixel in pixels:
+        total = total + (((pixel >> 8) & 0xFF) as i64)
+    total
+
 fn _pixel_signature(pixels: [u32]) -> text:
     if pixels.len() == 0:
         return "empty"
@@ -80,6 +101,160 @@ describe "BrowserRenderer HTML rendering":
         val pixels = render_html_to_pixels_with_viewport(html, TEST_WIDTH, TEST_HEIGHT).pixel_data
         expect pixels.len() == TEST_WIDTH * TEST_HEIGHT
         expect _count_non_background(pixels, WHITE_BG) > 0
+
+    it "renders arbitrary non-fixture CSS through layout and paint instead of fill-only fallback":
+        val html = "<html><body style='margin:0; background-color:#ffffff'><div style='width:12px; height:4px; background-color:#2563eb'></div><div style='width:8px; height:4px; background-color:#16a34a'></div></body></html>"
+        val result = render_html_to_pixels_with_viewport(html, TEST_WIDTH, TEST_HEIGHT)
+
+        expect _count_color(result.pixel_data, 0xFF2563EBu32) > 0
+        expect _count_color(result.pixel_data, 0xFF16A34Au32) > 0
+
+    it "renders arbitrary non-fixture CSS text through the fallback pixel path":
+        val html = "<html><head><style>body { margin: 0; background-color: #ffffff; } .label { width: 32px; height: 18px; background-color: #e0f2fe; color: #dc2626; font-size: 16px; }</style></head><body><div class='label'>Hi</div></body></html>"
+        val result = render_html_to_pixels_with_viewport(html, TEST_WIDTH, TEST_HEIGHT)
+
+        expect _count_color(result.pixel_data, 0xFFE0F2FEu32) > 0
+        expect _count_non_background(result.pixel_data, 0xFFE0F2FEu32) > 0
+
+    it "applies later class rules over earlier ones in fallback pixels":
+        val html = "<html><head><style>body { margin: 0; background-color: #ffffff; } .card { width: 12px; height: 8px; background-color: #2563eb; } .card { background-color: #16a34a; }</style></head><body><div class='card'></div></body></html>"
+        val result = render_html_to_pixels_with_viewport(html, TEST_WIDTH, TEST_HEIGHT)
+
+        expect _count_color(result.pixel_data, 0xFF16A34Au32) > 0
+        expect _count_color(result.pixel_data, 0xFF2563EBu32) == 0
+
+    it "applies tag rules in fallback pixels":
+        val html = "<html><head><style>body { margin: 0; background-color: #ffffff; } div { width: 12px; height: 8px; background-color: #2563eb; }</style></head><body><div></div></body></html>"
+        val result = render_html_to_pixels_with_viewport(html, TEST_WIDTH, TEST_HEIGHT)
+
+        expect _count_color(result.pixel_data, 0xFF2563EBu32) > 0
+
+    it "applies class rules over tag rules in fallback pixels":
+        val html = "<html><head><style>body { margin: 0; background-color: #ffffff; } div { width: 12px; height: 8px; background-color: #2563eb; } .card { background-color: #16a34a; }</style></head><body><div class='card'></div></body></html>"
+        val result = render_html_to_pixels_with_viewport(html, TEST_WIDTH, TEST_HEIGHT)
+
+        expect _count_color(result.pixel_data, 0xFF16A34Au32) > 0
+        expect _count_color(result.pixel_data, 0xFF2563EBu32) == 0
+
+    it "does not match class selector prefixes in fallback pixels":
+        val html = "<html><head><style>body { margin: 0; background-color: #ffffff; } .card-title { width: 12px; height: 8px; background-color: #2563eb; } .card { width: 12px; height: 8px; background-color: #16a34a; }</style></head><body><div class='card'></div></body></html>"
+        val result = render_html_to_pixels_with_viewport(html, TEST_WIDTH, TEST_HEIGHT)
+
+        expect _count_color(result.pixel_data, 0xFF16A34Au32) > 0
+        expect _count_color(result.pixel_data, 0xFF2563EBu32) == 0
+
+    it "applies exact selectors from comma selector lists in fallback pixels":
+        val html = "<html><head><style>body { margin: 0; background-color: #ffffff; } section, .card { width: 12px; height: 8px; background-color: #16a34a; }</style></head><body><div class='card'></div></body></html>"
+        val result = render_html_to_pixels_with_viewport(html, TEST_WIDTH, TEST_HEIGHT)
+
+        expect _count_color(result.pixel_data, 0xFF16A34Au32) > 0
+
+    it "applies :is selector lists in fallback pixels":
+        val html = "<html><head><style>body { margin: 0; background-color: #ffffff; } :is(section, .card) { width: 12px; height: 8px; background-color: #2563eb; }</style></head><body><div class='card'></div></body></html>"
+        val result = render_html_to_pixels_with_viewport(html, TEST_WIDTH, TEST_HEIGHT)
+
+        expect _count_color(result.pixel_data, 0xFF2563EBu32) > 0
+
+    it "applies :where selector lists in fallback pixels":
+        val html = "<html><head><style>body { margin: 0; background-color: #ffffff; } :where(section, .card) { width: 12px; height: 8px; background-color: #16a34a; }</style></head><body><div class='card'></div></body></html>"
+        val result = render_html_to_pixels_with_viewport(html, TEST_WIDTH, TEST_HEIGHT)
+
+        expect _count_color(result.pixel_data, 0xFF16A34Au32) > 0
+
+    it "applies tag qualified :is selectors in fallback pixels":
+        val html = "<html><head><style>body { margin: 0; background-color: #ffffff; } div:is(.card, .panel) { width: 12px; height: 8px; background-color: #dc2626; }</style></head><body><div class='card'></div></body></html>"
+        val result = render_html_to_pixels_with_viewport(html, TEST_WIDTH, TEST_HEIGHT)
+
+        expect _count_color(result.pixel_data, 0xFFDC2626u32) > 0
+
+    it "applies tag class compound selectors in fallback pixels":
+        val html = "<html><head><style>body { margin: 0; background-color: #ffffff; } div.card { width: 12px; height: 8px; background-color: #2563eb; }</style></head><body><div class='card'></div></body></html>"
+        val result = render_html_to_pixels_with_viewport(html, TEST_WIDTH, TEST_HEIGHT)
+
+        expect _count_color(result.pixel_data, 0xFF2563EBu32) > 0
+
+    it "applies tag class compound selectors over bare class selectors in fallback pixels":
+        val html = "<html><head><style>body { margin: 0; background-color: #ffffff; } div.card { width: 12px; height: 8px; background-color: #2563eb; } .card { background-color: #16a34a; }</style></head><body><div class='card'></div></body></html>"
+        val result = render_html_to_pixels_with_viewport(html, TEST_WIDTH, TEST_HEIGHT)
+
+        expect _count_color(result.pixel_data, 0xFF2563EBu32) > 0
+        expect _count_color(result.pixel_data, 0xFF16A34Au32) == 0
+
+    it "applies multi class selectors in fallback pixels regardless of class order":
+        val html = "<html><head><style>body { margin: 0; background-color: #ffffff; } .card.primary { width: 12px; height: 8px; background-color: #2563eb; }</style></head><body><div class='primary card'></div></body></html>"
+        val result = render_html_to_pixels_with_viewport(html, TEST_WIDTH, TEST_HEIGHT)
+
+        expect _count_color(result.pixel_data, 0xFF2563EBu32) > 0
+
+    it "applies multi class selectors over bare class selectors in fallback pixels":
+        val html = "<html><head><style>body { margin: 0; background-color: #ffffff; } .card.primary { width: 12px; height: 8px; background-color: #2563eb; } .card { background-color: #16a34a; }</style></head><body><div class='card primary'></div></body></html>"
+        val result = render_html_to_pixels_with_viewport(html, TEST_WIDTH, TEST_HEIGHT)
+
+        expect _count_color(result.pixel_data, 0xFF2563EBu32) > 0
+        expect _count_color(result.pixel_data, 0xFF16A34Au32) == 0
+
+    it "applies id rules over class rules in fallback pixels":
+        val html = "<html><head><style>body { margin: 0; background-color: #ffffff; } .card { width: 12px; height: 8px; background-color: #2563eb; } #hero { background-color: #dc2626; }</style></head><body><div id='hero' class='card'></div></body></html>"
+        val result = render_html_to_pixels_with_viewport(html, TEST_WIDTH, TEST_HEIGHT)
+
+        expect _count_color(result.pixel_data, 0xFFDC2626u32) > 0
+        expect _count_color(result.pixel_data, 0xFF2563EBu32) == 0
+
+    it "applies tag id compound selectors in fallback pixels":
+        val html = "<html><head><style>body { margin: 0; background-color: #ffffff; } div#hero { width: 12px; height: 8px; background-color: #dc2626; }</style></head><body><div id='hero'></div></body></html>"
+        val result = render_html_to_pixels_with_viewport(html, TEST_WIDTH, TEST_HEIGHT)
+
+        expect _count_color(result.pixel_data, 0xFFDC2626u32) > 0
+
+    it "applies tag id compound selectors over bare id selectors in fallback pixels":
+        val html = "<html><head><style>body { margin: 0; background-color: #ffffff; } div#hero { width: 12px; height: 8px; background-color: #dc2626; } #hero { background-color: #2563eb; }</style></head><body><div id='hero'></div></body></html>"
+        val result = render_html_to_pixels_with_viewport(html, TEST_WIDTH, TEST_HEIGHT)
+
+        expect _count_color(result.pixel_data, 0xFFDC2626u32) > 0
+        expect _count_color(result.pixel_data, 0xFF2563EBu32) == 0
+
+    it "renders simple nested span text in fallback pixels":
+        val html = "<html><head><style>body { margin: 0; background-color: #ffffff; } .card { width: 32px; height: 18px; background-color: #fef3c7; color: #111827; font-size: 16px; }</style></head><body><div class='card'><span>Hi</span></div></body></html>"
+        val result = render_html_to_pixels_with_viewport(html, TEST_WIDTH, TEST_HEIGHT)
+
+        expect _count_color(result.pixel_data, 0xFFFEF3C7u32) > 0
+        expect _count_non_background(result.pixel_data, 0xFFFEF3C7u32) > 0
+
+    it "uses nested span style when rendering fallback text pixels":
+        val red_html = "<html><head><style>body { margin: 0; background-color: #ffffff; } .card { width: 32px; height: 18px; background-color: #ffffff; color: #111827; font-size: 16px; }</style></head><body><div class='card'><span style='color:#dc2626'>Hi</span></div></body></html>"
+        val green_html = "<html><head><style>body { margin: 0; background-color: #ffffff; } .card { width: 32px; height: 18px; background-color: #ffffff; color: #111827; font-size: 16px; }</style></head><body><div class='card'><span style='color:#16a34a'>Hi</span></div></body></html>"
+        val red_pixels = render_html_to_pixels_with_viewport(red_html, TEST_WIDTH, TEST_HEIGHT).pixel_data
+        val green_pixels = render_html_to_pixels_with_viewport(green_html, TEST_WIDTH, TEST_HEIGHT).pixel_data
+
+        expect _sum_red(red_pixels) > _sum_red(green_pixels)
+        expect _sum_green(green_pixels) > _sum_green(red_pixels)
+
+    it "uses ancestor descendant span style when rendering fallback text pixels":
+        val red_html = "<html><head><style>body { margin: 0; background-color: #ffffff; } .card { width: 32px; height: 18px; background-color: #ffffff; color: #111827; font-size: 16px; } .card span { color:#dc2626; }</style></head><body><div class='card'><span>Hi</span></div></body></html>"
+        val green_html = "<html><head><style>body { margin: 0; background-color: #ffffff; } .card { width: 32px; height: 18px; background-color: #ffffff; color: #111827; font-size: 16px; } .card span { color:#16a34a; }</style></head><body><div class='card'><span>Hi</span></div></body></html>"
+        val red_pixels = render_html_to_pixels_with_viewport(red_html, TEST_WIDTH, TEST_HEIGHT).pixel_data
+        val green_pixels = render_html_to_pixels_with_viewport(green_html, TEST_WIDTH, TEST_HEIGHT).pixel_data
+
+        expect _sum_red(red_pixels) > _sum_red(green_pixels)
+        expect _sum_green(green_pixels) > _sum_green(red_pixels)
+
+    it "uses ancestor id descendant span style when rendering fallback text pixels":
+        val red_html = "<html><head><style>body { margin: 0; background-color: #ffffff; } #hero { width: 32px; height: 18px; background-color: #ffffff; color: #111827; font-size: 16px; } #hero span { color:#dc2626; }</style></head><body><div id='hero'><span>Hi</span></div></body></html>"
+        val green_html = "<html><head><style>body { margin: 0; background-color: #ffffff; } #hero { width: 32px; height: 18px; background-color: #ffffff; color: #111827; font-size: 16px; } #hero span { color:#16a34a; }</style></head><body><div id='hero'><span>Hi</span></div></body></html>"
+        val red_pixels = render_html_to_pixels_with_viewport(red_html, TEST_WIDTH, TEST_HEIGHT).pixel_data
+        val green_pixels = render_html_to_pixels_with_viewport(green_html, TEST_WIDTH, TEST_HEIGHT).pixel_data
+
+        expect _sum_red(red_pixels) > _sum_red(green_pixels)
+        expect _sum_green(green_pixels) > _sum_green(red_pixels)
+
+    it "uses ancestor child span style when rendering fallback text pixels":
+        val red_html = "<html><head><style>body { margin: 0; background-color: #ffffff; } .card { width: 32px; height: 18px; background-color: #ffffff; color: #111827; font-size: 16px; } .card > span { color:#dc2626; }</style></head><body><div class='card'><span>Hi</span></div></body></html>"
+        val green_html = "<html><head><style>body { margin: 0; background-color: #ffffff; } .card { width: 32px; height: 18px; background-color: #ffffff; color: #111827; font-size: 16px; } .card > span { color:#16a34a; }</style></head><body><div class='card'><span>Hi</span></div></body></html>"
+        val red_pixels = render_html_to_pixels_with_viewport(red_html, TEST_WIDTH, TEST_HEIGHT).pixel_data
+        val green_pixels = render_html_to_pixels_with_viewport(green_html, TEST_WIDTH, TEST_HEIGHT).pixel_data
+
+        expect _sum_red(red_pixels) > _sum_red(green_pixels)
+        expect _sum_green(green_pixels) > _sum_green(red_pixels)
 
     it "paints inline background shorthand fallback colors after url tokens":
         val html = "<html><body><div style='width: 80px; height: 40px; background: url(hero.png) #0f8 no-repeat'></div></body></html>"

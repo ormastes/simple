@@ -1,0 +1,125 @@
+"""Wine-facing POSIX adapter contract over the nogc_async_mut substrate."""
+
+use common.wine_async_gate.{wine_async_event_loop_gate, wine_async_io_gate}
+use common.wine_host_gate.{wine_posix_gate}
+
+class WinePosixAdapterResult:
+    ready: bool
+    state: text
+    posix_features: text
+    async_state: text
+
+fn _adapter_result(ready: bool, state: text, posix_features: text, async_state: text) -> WinePosixAdapterResult:
+    WinePosixAdapterResult(ready: ready, state: state, posix_features: posix_features, async_state: async_state)
+
+pub fn wine_posix_adapter_required_apis() -> [text]:
+    [
+        "fd-open",
+        "fd-read",
+        "fd-write",
+        "fd-close",
+        "fd-dup",
+        "fd-inherit",
+        "stdio",
+        "pipe",
+        "socket",
+        "timer",
+        "poll-wait",
+        "cwd",
+        "env",
+        "argv",
+        "spawn",
+        "path-normalize",
+        "path-attrs",
+        "path-locks",
+        "errno-map"
+    ]
+
+pub fn wine_posix_adapter_missing_apis(apis: text) -> [text]:
+    var missing: [text] = []
+    for api in wine_posix_adapter_required_apis():
+        if not apis.contains(api):
+            missing.push(api)
+    missing
+
+pub fn wine_posix_adapter_async_binding(api: text) -> text:
+    if api == "fd-open":
+        return "submit-open"
+    if api == "fd-read":
+        return "submit-read"
+    if api == "fd-write":
+        return "submit-write"
+    if api == "fd-close":
+        return "submit-close"
+    if api == "timer":
+        return "submit-timeout"
+    if api == "poll-wait":
+        return "event-loop register-fd deregister-fd wake poll-completion"
+    if api == "socket":
+        return "event-loop register-fd deregister-fd wake"
+    if api == "pipe":
+        return "io-driver poll-completion"
+    ""
+
+pub fn wine_posix_adapter_errno_name(code: i64) -> text:
+    if code == 0:
+        return "OK"
+    if code == 2:
+        return "ENOENT"
+    if code == 9:
+        return "EBADF"
+    if code == 11:
+        return "EAGAIN"
+    if code == 13:
+        return "EACCES"
+    if code == 17:
+        return "EEXIST"
+    if code == 22:
+        return "EINVAL"
+    if code == 32:
+        return "EPIPE"
+    if code == 110:
+        return "ETIMEDOUT"
+    "EUNKNOWN"
+
+pub fn wine_posix_adapter_feature_string(apis: text) -> text:
+    var features = ""
+    if apis.contains("fd-open") and apis.contains("fd-read") and apis.contains("fd-write") and apis.contains("fd-close"):
+        features = features + " fd-table"
+    if apis.contains("stdio"):
+        features = features + " stdio"
+    if apis.contains("pipe"):
+        features = features + " pipes"
+    if apis.contains("socket"):
+        features = features + " sockets"
+    if apis.contains("poll-wait"):
+        features = features + " poll-wait"
+    if apis.contains("timer"):
+        features = features + " timers"
+    if apis.contains("errno-map"):
+        features = features + " errno"
+    if apis.contains("cwd") and apis.contains("env") and apis.contains("argv"):
+        features = features + " cwd-env-argv"
+    if apis.contains("spawn"):
+        features = features + " spawn"
+    features
+
+pub fn wine_posix_adapter_gate(apis: text, async_features: text) -> WinePosixAdapterResult:
+    val missing = wine_posix_adapter_missing_apis(apis)
+    val posix_features = wine_posix_adapter_feature_string(apis)
+    if missing.len() > 0:
+        return _adapter_result(false, "missing-api-" + missing[0], posix_features, "not-checked")
+
+    val io_state = wine_async_io_gate(async_features)
+    if io_state != "ready":
+        return _adapter_result(false, "blocked-async-io:" + io_state, posix_features, io_state)
+
+    val event_state = wine_async_event_loop_gate(async_features)
+    if event_state != "ready":
+        return _adapter_result(false, "blocked-async-event-loop:" + event_state, posix_features, event_state)
+
+    val posix_state = wine_posix_gate(posix_features)
+    if posix_state != "ready":
+        return _adapter_result(false, posix_state, posix_features, "ready")
+
+    _adapter_result(true, "ready", posix_features, "ready")

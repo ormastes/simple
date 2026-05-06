@@ -1,0 +1,88 @@
+"""Modeled NT process-heap bridge for Wine precondition tracking."""
+
+use common.wine_vm_adapter.{WineVmSpace, wine_vm_reserve}
+
+class WineNtHeapBlock:
+    ptr: i64
+    size: i64
+    freed: bool
+
+class WineNtHeap:
+    ready: bool
+    state: text
+    handle: i64
+    next_ptr: i64
+    blocks: [WineNtHeapBlock]
+    space: WineVmSpace
+
+class WineNtHeapResult:
+    ok: bool
+    state: text
+    heap: WineNtHeap
+    ptr: i64
+    size: i64
+
+fn _block(ptr: i64, size: i64, freed: bool) -> WineNtHeapBlock:
+    WineNtHeapBlock(ptr: ptr, size: size, freed: freed)
+
+fn _heap(ready: bool, state: text, handle: i64, next_ptr: i64, blocks: [WineNtHeapBlock], space: WineVmSpace) -> WineNtHeap:
+    WineNtHeap(ready: ready, state: state, handle: handle, next_ptr: next_ptr, blocks: blocks, space: space)
+
+fn _result(ok: bool, state: text, heap: WineNtHeap, ptr: i64, size: i64) -> WineNtHeapResult:
+    WineNtHeapResult(ok: ok, state: state, heap: heap, ptr: ptr, size: size)
+
+fn _find_block(heap: WineNtHeap, ptr: i64) -> WineNtHeapBlock:
+    for block in heap.blocks:
+        if block.ptr == ptr:
+            return block
+    _block(0, 0, true)
+
+fn _replace_block(heap: WineNtHeap, replacement: WineNtHeapBlock) -> [WineNtHeapBlock]:
+    var blocks: [WineNtHeapBlock] = []
+    for block in heap.blocks:
+        if block.ptr == replacement.ptr:
+            blocks.push(replacement)
+        else:
+            blocks.push(block)
+    blocks
+
+pub fn wine_nt_heap_required_calls() -> [text]:
+    [
+        "HeapAlloc",
+        "HeapFree"
+    ]
+
+pub fn wine_nt_process_heap_new(space: WineVmSpace, ready: bool) -> WineNtHeap:
+    if not ready:
+        return _heap(false, "missing-process-heap", 0, 0, [], space)
+    _heap(true, "ready", 0x70000000, 0x71000000, [], space)
+
+pub fn wine_nt_heap_alloc(heap: WineNtHeap, handle: i64, size: i64) -> WineNtHeapResult:
+    if not heap.ready:
+        return _result(false, heap.state, heap, 0, 0)
+    if handle != heap.handle:
+        return _result(false, "invalid-heap-handle", heap, 0, 0)
+    if size <= 0:
+        return _result(false, "invalid-size", heap, 0, 0)
+    val reserved = wine_vm_reserve(heap.space, size)
+    if not reserved.ok:
+        return _result(false, reserved.state, _heap(heap.ready, heap.state, heap.handle, heap.next_ptr, heap.blocks, reserved.space), 0, 0)
+    var blocks = heap.blocks
+    val ptr = heap.next_ptr
+    blocks.push(_block(ptr, size, false))
+    val next = ptr + size
+    _result(true, "allocated", _heap(true, "ready", heap.handle, next, blocks, reserved.space), ptr, size)
+
+pub fn wine_nt_heap_free(heap: WineNtHeap, handle: i64, ptr: i64) -> WineNtHeapResult:
+    if not heap.ready:
+        return _result(false, heap.state, heap, 0, 0)
+    if handle != heap.handle:
+        return _result(false, "invalid-heap-handle", heap, 0, 0)
+    val existing = _find_block(heap, ptr)
+    if existing.ptr == 0:
+        return _result(false, "invalid-pointer", heap, 0, 0)
+    if existing.freed:
+        return _result(false, "double-free", heap, ptr, existing.size)
+    val freed = _block(existing.ptr, existing.size, true)
+    val next_heap = _heap(heap.ready, heap.state, heap.handle, heap.next_ptr, _replace_block(heap, freed), heap.space)
+    _result(true, "freed", next_heap, ptr, existing.size)

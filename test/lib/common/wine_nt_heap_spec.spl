@@ -1,0 +1,52 @@
+use common.wine_nt_heap.{
+    wine_nt_heap_alloc,
+    wine_nt_heap_free,
+    wine_nt_heap_required_calls,
+    wine_nt_process_heap_new
+}
+use common.wine_vm_adapter.{wine_vm_space_new}
+
+describe "Wine NT heap bridge":
+    it "lists the modeled HeapAlloc and HeapFree calls":
+        val calls = wine_nt_heap_required_calls()
+        expect(calls.len()).to_equal(2)
+        expect(calls[0]).to_equal("HeapAlloc")
+        expect(calls[1]).to_equal("HeapFree")
+
+    it "blocks heap use until the process heap exists":
+        val heap = wine_nt_process_heap_new(wine_vm_space_new(), false)
+        val result = wine_nt_heap_alloc(heap, 0x70000000, 16)
+        expect(heap.ready).to_equal(false)
+        expect(result.ok).to_equal(false)
+        expect(result.state).to_equal("missing-process-heap")
+
+    it "allocates deterministic process heap blocks":
+        val heap = wine_nt_process_heap_new(wine_vm_space_new(), true)
+        val first = wine_nt_heap_alloc(heap, heap.handle, 32)
+        val second = wine_nt_heap_alloc(first.heap, heap.handle, 16)
+        expect(first.ok).to_equal(true)
+        expect(first.ptr).to_equal(0x71000000)
+        expect(second.ok).to_equal(true)
+        expect(second.ptr).to_equal(0x71000020)
+        expect(second.heap.blocks.len()).to_equal(2)
+
+    it "rejects invalid heap handles and sizes":
+        val heap = wine_nt_process_heap_new(wine_vm_space_new(), true)
+        expect(wine_nt_heap_alloc(heap, 99, 16).state).to_equal("invalid-heap-handle")
+        expect(wine_nt_heap_alloc(heap, heap.handle, 0).state).to_equal("invalid-size")
+
+    it "frees allocated blocks and records double frees":
+        val heap = wine_nt_process_heap_new(wine_vm_space_new(), true)
+        val allocated = wine_nt_heap_alloc(heap, heap.handle, 64)
+        val freed = wine_nt_heap_free(allocated.heap, heap.handle, allocated.ptr)
+        val again = wine_nt_heap_free(freed.heap, heap.handle, allocated.ptr)
+        expect(freed.ok).to_equal(true)
+        expect(freed.state).to_equal("freed")
+        expect(again.ok).to_equal(false)
+        expect(again.state).to_equal("double-free")
+
+    it "rejects frees for unknown pointers":
+        val heap = wine_nt_process_heap_new(wine_vm_space_new(), true)
+        val result = wine_nt_heap_free(heap, heap.handle, 0x72000000)
+        expect(result.ok).to_equal(false)
+        expect(result.state).to_equal("invalid-pointer")

@@ -3,7 +3,9 @@
 #![allow(unnamed_duplicate_typed_args)]
 
 use std.spec
-use examples.browser.feature.net.h2_client.{decode_byte, encode_byte}
+use std.js.types.pair.{Pair}
+use examples.browser.entity.net.url_types.{Url}
+use examples.browser.feature.net.h2_client.{H2Frame, H2FrameType, FLAG_END_HEADERS, FLAG_END_STREAM, apply_remote_settings, build_h2_response, decode_byte, decode_header_block, default_settings, encode_byte, encode_header_block, encode_settings}
 
 describe "HTTP/2 byte codec":
     it "round trips ASCII control bytes without question mark placeholders":
@@ -19,3 +21,70 @@ describe "HTTP/2 byte codec":
         expect(decode_byte(encode_byte(13), 0)).to_equal(13)
         expect(decode_byte(encode_byte(65), 0)).to_equal(65)
         expect(decode_byte(encode_byte(126), 0)).to_equal(126)
+
+    it "round trips high bytes used by HTTP/2 settings and frame values":
+        expect(decode_byte(encode_byte(127), 0)).to_equal(127)
+        expect(decode_byte(encode_byte(128), 0)).to_equal(128)
+        expect(decode_byte(encode_byte(252), 0)).to_equal(252)
+        expect(decode_byte(encode_byte(254), 0)).to_equal(254)
+        expect(decode_byte(encode_byte(255), 0)).to_equal(255)
+
+    it "preserves default SETTINGS values containing 0xff bytes":
+        val settings = default_settings()
+        val payload = encode_settings(settings)
+        val decoded = apply_remote_settings(default_settings(), payload)
+        expect(decoded.initial_window_size).to_equal(65535)
+        expect(decoded.max_frame_size).to_equal(16384)
+        expect(decoded.header_table_size).to_equal(4096)
+
+    it "round trips simplified HPACK literal response headers":
+        val encoded = encode_header_block([
+            Pair(first: ":status", second: "204"),
+            Pair(first: "content-type", second: "text/plain")
+        ])
+        val decoded = decode_header_block(encoded)
+        match decoded:
+            Ok(headers):
+                expect(headers.len()).to_equal(2)
+                expect(headers[0].first).to_equal(":status")
+                expect(headers[0].second).to_equal("204")
+                expect(headers[1].first).to_equal("content-type")
+                expect(headers[1].second).to_equal("text/plain")
+            Err(e):
+                expect(e.message).to_equal("ok")
+
+    it "assembles FetchResponse from HEADERS and DATA frames":
+        val url = Url.create("https", "example.com", 443, "/index.html")
+        val headers = H2Frame.create(
+            H2FrameType.Headers,
+            FLAG_END_HEADERS,
+            1,
+            encode_header_block([
+                Pair(first: ":status", second: "200"),
+                Pair(first: "content-type", second: "text/html")
+            ])
+        )
+        val data = H2Frame.create(H2FrameType.Data, FLAG_END_STREAM, 1, "<h1>ok</h1>")
+        var frames: [H2Frame] = []
+        frames.push(headers)
+        frames.push(data)
+        val response = build_h2_response(url, frames)
+        match response:
+            Ok(resp):
+                expect(resp.status).to_equal(200)
+                expect(resp.status_text).to_equal("OK")
+                expect(resp.body).to_equal("<h1>ok</h1>")
+                expect(resp.headers.len()).to_equal(1)
+                expect(resp.headers[0].first).to_equal("content-type")
+            Err(e):
+                expect(e.message).to_equal("ok")
+
+    it "rejects response data without HEADERS":
+        val url = Url.create("https", "example.com", 443, "/index.html")
+        val data = H2Frame.create(H2FrameType.Data, FLAG_END_STREAM, 1, "body")
+        val response = build_h2_response(url, [data])
+        match response:
+            Ok(resp):
+                expect(resp.status).to_equal(0)
+            Err(e):
+                expect(e.message).to_contain("response missing HEADERS")

@@ -1,0 +1,144 @@
+"""NT/Win32 API catalog for the Wine hello.exe milestone and next gates."""
+
+class WineNtApiCatalogEntry:
+    dll: text
+    symbol: text
+    category: text
+    state: text
+
+fn _entry(dll: text, symbol: text, category: text, state: text) -> WineNtApiCatalogEntry:
+    WineNtApiCatalogEntry(dll: dll, symbol: symbol, category: category, state: state)
+
+fn _normalized_dll(dll: text) -> text:
+    dll.lower()
+
+fn _is_kernel32(dll: text) -> bool:
+    _normalized_dll(dll) == "kernel32.dll"
+
+fn _is_ntdll(dll: text) -> bool:
+    _normalized_dll(dll) == "ntdll.dll"
+
+fn _contains_symbol(symbols: [text], required: text) -> bool:
+    for symbol in symbols:
+        if symbol == required:
+            return true
+    false
+
+fn _catalog_entry(dll: text, symbol: text) -> WineNtApiCatalogEntry:
+    if _is_kernel32(dll):
+        if symbol == "GetStdHandle":
+            return _entry("kernel32.dll", symbol, "console", "implemented")
+        if symbol == "WriteFile":
+            return _entry("kernel32.dll", symbol, "console", "implemented")
+        if symbol == "ExitProcess":
+            return _entry("kernel32.dll", symbol, "process", "implemented")
+        if symbol == "VirtualAlloc" or symbol == "VirtualProtect" or symbol == "VirtualFree":
+            return _entry("kernel32.dll", symbol, "virtual-memory", "catalogued")
+        if symbol == "CreateFileW" or symbol == "ReadFile" or symbol == "CloseHandle":
+            return _entry("kernel32.dll", symbol, "file-io", "catalogued")
+        if symbol == "CreateThread" or symbol == "WaitForSingleObject" or symbol == "GetLastError":
+            return _entry("kernel32.dll", symbol, "thread-wait", "catalogued")
+        if symbol == "GetCommandLineW" or symbol == "GetEnvironmentStringsW":
+            return _entry("kernel32.dll", symbol, "process-env", "catalogued")
+        if symbol == "HeapAlloc" or symbol == "HeapFree":
+            return _entry("kernel32.dll", symbol, "heap", "catalogued")
+    if _is_ntdll(dll):
+        if symbol == "NtAllocateVirtualMemory" or symbol == "NtProtectVirtualMemory" or symbol == "NtFreeVirtualMemory":
+            return _entry("ntdll.dll", symbol, "nt-virtual-memory", "catalogued")
+        if symbol == "NtCreateFile" or symbol == "NtReadFile" or symbol == "NtClose":
+            return _entry("ntdll.dll", symbol, "nt-file-io", "catalogued")
+        if symbol == "RtlAllocateHeap" or symbol == "RtlFreeHeap":
+            return _entry("ntdll.dll", symbol, "rtl-heap", "catalogued")
+    _entry(_normalized_dll(dll), symbol, "unknown", "unsupported")
+
+pub fn wine_nt_api_implemented_symbols_for_hello() -> [text]:
+    [
+        "GetStdHandle",
+        "WriteFile",
+        "ExitProcess"
+    ]
+
+pub fn wine_nt_api_catalogued_future_symbols() -> [text]:
+    [
+        "VirtualAlloc",
+        "VirtualProtect",
+        "VirtualFree",
+        "CreateFileW",
+        "ReadFile",
+        "CloseHandle",
+        "CreateThread",
+        "WaitForSingleObject",
+        "GetLastError",
+        "GetCommandLineW",
+        "GetEnvironmentStringsW",
+        "HeapAlloc",
+        "HeapFree",
+        "NtAllocateVirtualMemory",
+        "NtProtectVirtualMemory",
+        "NtFreeVirtualMemory",
+        "NtCreateFile",
+        "NtReadFile",
+        "NtClose",
+        "RtlAllocateHeap",
+        "RtlFreeHeap"
+    ]
+
+pub fn wine_nt_api_modeled_precondition_symbols() -> [text]:
+    [
+        "VirtualAlloc",
+        "VirtualProtect",
+        "VirtualFree",
+        "CreateFileW",
+        "ReadFile",
+        "CloseHandle",
+        "CreateThread",
+        "WaitForSingleObject",
+        "GetLastError",
+        "GetCommandLineW",
+        "GetEnvironmentStringsW",
+        "HeapAlloc",
+        "HeapFree",
+        "NtAllocateVirtualMemory",
+        "NtProtectVirtualMemory",
+        "NtFreeVirtualMemory",
+        "NtCreateFile",
+        "NtReadFile",
+        "NtClose",
+        "RtlAllocateHeap",
+        "RtlFreeHeap"
+    ]
+
+pub fn wine_nt_api_dll_gate(dll: text) -> text:
+    if _is_kernel32(dll):
+        return "ready"
+    if _is_ntdll(dll):
+        return "catalogued-dll:ntdll.dll"
+    "unsupported-dll:" + dll
+
+pub fn wine_nt_api_symbol_state(dll: text, symbol: text) -> WineNtApiCatalogEntry:
+    _catalog_entry(dll, symbol)
+
+pub fn wine_nt_api_import_gate(dll: text, symbols: [text]) -> text:
+    val dll_state = wine_nt_api_dll_gate(dll)
+    if dll_state != "ready":
+        return dll_state
+    for required in wine_nt_api_implemented_symbols_for_hello():
+        if not _contains_symbol(symbols, required):
+            return "missing-symbol:" + required
+    for symbol in symbols:
+        val entry = wine_nt_api_symbol_state(dll, symbol)
+        if entry.state == "unsupported":
+            return "unsupported-symbol:" + symbol
+        if entry.state == "catalogued":
+            return "catalogued-symbol:" + symbol
+    "ready"
+
+pub fn wine_nt_api_dispatch_gate(symbols: [text]) -> text:
+    for required in wine_nt_api_implemented_symbols_for_hello():
+        if not _contains_symbol(symbols, required):
+            return "bridge-missing:" + required
+    for symbol in symbols:
+        val entry = wine_nt_api_symbol_state("kernel32.dll", symbol)
+        if entry.state != "implemented":
+            return "bridge-unsupported:" + symbol
+    "ready"

@@ -8,7 +8,7 @@ use lazy_static::lazy_static;
 use socket2::Socket;
 use std::collections::HashMap;
 use std::io::{Read, Write};
-use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, TcpListener, TcpStream, UdpSocket};
+use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, TcpListener, TcpStream, ToSocketAddrs, UdpSocket};
 use std::os::unix::io::AsRawFd;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::sync::atomic::{AtomicI64, Ordering};

@@ -1,0 +1,94 @@
+"""Wine host-service adapter contract for IPC, handles, and peripheral services."""
+
+use common.wine_host_gate.{wine_host_gate}
+
+class WineServiceAdapterState:
+    services: text
+    features: text
+
+class WineServiceAdapterResult:
+    ok: bool
+    state: text
+    adapter: WineServiceAdapterState
+
+fn _adapter(services: text, features: text) -> WineServiceAdapterState:
+    WineServiceAdapterState(services: services, features: features)
+
+fn _result(ok: bool, state: text, adapter: WineServiceAdapterState) -> WineServiceAdapterResult:
+    WineServiceAdapterResult(ok: ok, state: state, adapter: adapter)
+
+fn _append_once(items: text, item: text) -> text:
+    if items.contains(item):
+        return items
+    if items == "":
+        return item
+    items + " " + item
+
+pub fn wine_service_adapter_required_services() -> [text]:
+    [
+        "ipc-server",
+        "handle-table",
+        "audio-device",
+        "audio-buffer",
+        "font-discovery",
+        "font-raster",
+        "crypto-random",
+        "crypto-hash",
+        "hid-keyboard",
+        "hid-pointer",
+        "printer-spool",
+        "multimedia-timer"
+    ]
+
+pub fn wine_service_adapter_new(base_features: text) -> WineServiceAdapterState:
+    _adapter("", base_features)
+
+pub fn wine_service_adapter_missing_services(services: text) -> [text]:
+    var missing: [text] = []
+    for service in wine_service_adapter_required_services():
+        if not services.contains(service):
+            missing.push(service)
+    missing
+
+pub fn wine_service_adapter_add(adapter: WineServiceAdapterState, service: text) -> WineServiceAdapterResult:
+    if service == "":
+        return _result(false, "invalid-service", adapter)
+    val known = wine_service_adapter_required_services()
+    var allowed = false
+    for item in known:
+        if item == service:
+            allowed = true
+    if not allowed:
+        return _result(false, "unknown-service", adapter)
+    _result(true, "added", _adapter(_append_once(adapter.services, service), wine_service_adapter_feature_string(_append_once(adapter.services, service), adapter.features)))
+
+pub fn wine_service_adapter_feature_string(services: text, base_features: text) -> text:
+    var features = base_features
+    if services.contains("ipc-server"):
+        features = _append_once(features, "ipc-server")
+    if services.contains("handle-table"):
+        features = _append_once(features, "handle-table")
+    if services.contains("audio-device") and services.contains("audio-buffer"):
+        features = _append_once(features, "audio")
+    if services.contains("font-discovery") and services.contains("font-raster"):
+        features = _append_once(features, "fonts")
+    if services.contains("crypto-random") and services.contains("crypto-hash"):
+        features = _append_once(features, "crypto")
+    if services.contains("hid-keyboard") and services.contains("hid-pointer"):
+        features = _append_once(features, "hid")
+    if services.contains("printer-spool"):
+        features = _append_once(features, "printing")
+    if services.contains("multimedia-timer"):
+        features = _append_once(features, "multimedia")
+    features
+
+pub fn wine_service_adapter_gate(adapter: WineServiceAdapterState) -> text:
+    val missing = wine_service_adapter_missing_services(adapter.services)
+    if missing.len() > 0:
+        return "missing-service-" + missing[0]
+    wine_host_gate(adapter.features)
+
+pub fn wine_service_adapter_ready(base_features: text) -> WineServiceAdapterState:
+    val services = "ipc-server handle-table audio-device audio-buffer font-discovery font-raster " +
+        "crypto-random crypto-hash hid-keyboard hid-pointer printer-spool multimedia-timer"
+    _adapter(services, wine_service_adapter_feature_string(services, base_features))

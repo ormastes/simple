@@ -607,6 +607,7 @@ pub(crate) fn call_extern_function(
         "rt_io_tcp_accept_timeout" => interpreter_native_net::rt_io_tcp_accept_timeout_interp(&evaluated),
         "rt_io_tcp_connect" => interpreter_native_net::rt_io_tcp_connect_interp(&evaluated),
         "rt_io_tcp_connect_timeout" => interpreter_native_net::rt_io_tcp_connect_timeout_interp(&evaluated),
+        "rt_dns_lookup" => interpreter_native_net::rt_dns_lookup_interp(&evaluated),
         "rt_io_tcp_read" => interpreter_native_net::rt_io_tcp_read_interp(&evaluated),
         "rt_io_tcp_read_line" => interpreter_native_net::rt_io_tcp_read_line_interp(&evaluated),
         "rt_io_tcp_write" => interpreter_native_net::rt_io_tcp_write_interp(&evaluated),
@@ -621,6 +622,11 @@ pub(crate) fn call_extern_function(
         "rt_io_tcp_set_read_timeout" => interpreter_native_net::rt_io_tcp_set_read_timeout_interp(&evaluated),
         "rt_io_tcp_set_write_timeout" => interpreter_native_net::rt_io_tcp_set_write_timeout_interp(&evaluated),
         "rt_io_tcp_shutdown" => interpreter_native_net::rt_io_tcp_shutdown_interp(&evaluated),
+        "rt_tls_client_connect" | "rt_tls_client_connect_with_sni" => Ok(Value::Int(-1)),
+        "rt_tls_client_write" => Ok(Value::Int(-1)),
+        "rt_tls_client_read" => Ok(Value::Str(String::new())),
+        "rt_tls_client_close" => Ok(Value::Bool(false)),
+        "rt_tls_get_protocol_version" => Ok(Value::Str(String::new())),
 
         // ====================================================================
         // UDP Operations (18 functions)
