@@ -1,0 +1,48 @@
+#![allow(REQC001)]
+#![allow(REQC004)]
+#![allow(unnamed_duplicate_typed_args)]
+
+use std.spec
+use std.js.engine.runtime.{JsRuntime}
+use std.js.engine.js_error.{Logger, LogLevel}
+use std.js.types.js_types.{JsValue}
+use examples.browser.feature.script.web_api.crypto_binding.{js_crypto_getRandomValues}
+
+fn _runtime() -> JsRuntime:
+    JsRuntime.new(Logger.new("crypto-binding-spec", LogLevel.Error))
+
+describe "CryptoBinding":
+    describe "getRandomValues":
+        it "fills the existing array like object length":
+            val runtime = _runtime()
+            val obj_id = runtime.interpreter.object_store.create_object()
+            runtime.interpreter.object_store.set_property(obj_id, "length", JsValue.Number(v: 4.0))
+
+            val result = js_crypto_getRandomValues([JsValue.Object(id: obj_id)], runtime)
+
+            match result:
+                Ok(value):
+                    match value:
+                        JsValue.Object(id): expect(id).to_equal(obj_id)
+                        _: expect("not-object").to_equal("object")
+                Err(e): expect(e.message).to_equal("")
+
+            expect(runtime.interpreter.object_store.get_property(obj_id, "length")).to_equal(JsValue.Number(v: 4.0))
+            expect(_is_byte(runtime.interpreter.object_store.get_property(obj_id, "0"))).to_equal(true)
+            expect(_is_byte(runtime.interpreter.object_store.get_property(obj_id, "3"))).to_equal(true)
+            expect(runtime.interpreter.object_store.get_property(obj_id, "4")).to_equal(JsValue.Undefined)
+
+        it "rejects Web Crypto quota overflow":
+            val runtime = _runtime()
+            val obj_id = runtime.interpreter.object_store.create_object()
+            runtime.interpreter.object_store.set_property(obj_id, "length", JsValue.Number(v: 65537.0))
+
+            val result = js_crypto_getRandomValues([JsValue.Object(id: obj_id)], runtime)
+            match result:
+                Ok(_): expect("ok").to_equal("error")
+                Err(e): expect(e.message).to_contain("quota")
+
+fn _is_byte(value: JsValue) -> bool:
+    match value:
+        JsValue.Number(v): v >= 0.0 and v <= 255.0
+        _: false

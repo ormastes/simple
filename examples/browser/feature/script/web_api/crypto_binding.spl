@@ -2,7 +2,7 @@
 #![allow(REQC004)]
 #![allow(unnamed_duplicate_typed_args)]
 # Web Crypto API binding — crypto.getRandomValues, crypto.randomUUID,
-# and SubtleCrypto stubs (digest, encrypt, decrypt, sign, verify).
+# and honest SubtleCrypto unsupported-method errors.
 
 use browser.shared.logging.Logger
 use browser.shared.error.BrowserResult
@@ -66,34 +66,14 @@ fn js_crypto_getRandomValues(args: [JsValue], runtime: JsRuntime) -> BrowserResu
     if args.len() < 1:
         return Err(script_error("getRandomValues requires 1 argument"))
 
-    # The argument should be a typed array (represented as a JS Array).
-    # We fill it with pseudo-random bytes using the LCG.
-    # NOTE: This is NOT cryptographically secure; it uses a simple LCG.
+    # The argument should be a typed array (represented as a JS Array/Object).
+    # NOTE: This is NOT cryptographically secure; it uses the existing simple LCG.
     match args.get(0):
         JsValue.Array(arr_id):
-            # Fill the array with random values (0-255 range for Uint8Array)
-            # Since we can't directly modify array contents without a proper
-            # typed array implementation, create a new array with random values.
-            val result_id = runtime.interpreter.object_store.create_object()
-            var i = 0
-            while i < 32:
-                val random_byte = _lcg_next() % 256
-                runtime.interpreter.object_store.set_property(
-                    result_id, "{i}", JsValue.Number(v: random_byte.to_f64()))
-                i = i + 1
-            runtime.interpreter.object_store.set_property(
-                result_id, "length", JsValue.Number(v: 32.0))
-            return Ok(JsValue.Object(id: result_id))
+            _fill_random_values(arr_id, runtime)?
+            return Ok(args.get(0))
         JsValue.Object(obj_id):
-            # Same approach for object-based typed arrays
-            var i = 0
-            while i < 32:
-                val random_byte = _lcg_next() % 256
-                runtime.interpreter.object_store.set_property(
-                    obj_id, "{i}", JsValue.Number(v: random_byte.to_f64()))
-                i = i + 1
-            runtime.interpreter.object_store.set_property(
-                obj_id, "length", JsValue.Number(v: 32.0))
+            _fill_random_values(obj_id, runtime)?
             return Ok(args.get(0))
         _:
             return Err(script_error("getRandomValues: argument must be a typed array"))
@@ -102,6 +82,28 @@ fn js_crypto_randomUUID(args: [JsValue]) -> JsValue:
     # Generate a v4 UUID: xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx
     val uuid = generate_uuid_v4()
     JsValue.String(v: uuid)
+
+fn _fill_random_values(obj_id: i64, runtime: JsRuntime) -> BrowserResult<()>:
+    val length = _array_like_length(obj_id, runtime)
+    if length < 0:
+        return Err(script_error("getRandomValues: typed array length must be non-negative"))
+    if length > 65536:
+        return Err(script_error("getRandomValues: quota exceeded"))
+    var i = 0
+    while i < length:
+        val random_byte = _lcg_next() % 256
+        runtime.interpreter.object_store.set_property(
+            obj_id, "{i}", JsValue.Number(v: random_byte.to_f64()))
+        i = i + 1
+    runtime.interpreter.object_store.set_property(
+        obj_id, "length", JsValue.Number(v: length.to_f64()))
+    Ok(())
+
+fn _array_like_length(obj_id: i64, runtime: JsRuntime) -> i64:
+    val raw = runtime.interpreter.object_store.get_property(obj_id, "length")
+    match raw:
+        JsValue.Number(v): v.to_i64()
+        _: 0
 
 # ── SubtleCrypto stubs ───────────────────────────────────────────────────
 
