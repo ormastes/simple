@@ -190,6 +190,11 @@ fn _known_hello_exe_with_mismatched_write_binding() -> [u8]:
     data = _put_u32_le(data, 0x268, 0x20e0)
     data
 
+fn _known_hello_exe_with_unmapped_import_name() -> [u8]:
+    var data = _known_hello_exe_fixture()
+    data = _put_u32_le(data, 0x268, 0x9000)
+    data
+
 fn _known_hello_exe_without_marker() -> [u8]:
     var data = _minimal_pe64_console_with_resolved_imports()
     data = _put_hello_code(data, 0x200)
@@ -199,10 +204,10 @@ fn _verified_gates() -> text:
     "process=verified vm=verified host=verified posix=verified pthread=verified dynload=verified pe_loader=verified async=verified nt_bridge=verified"
 
 fn _verified_cpu_envelope_gates() -> text:
-    _verified_gates() + " thread-context user-stack entrypoint-mapped import-thunks-bound stdout-handle exit-trap no-native-jump"
+    _verified_gates() + " thread-context thread-context-rip thread-context-rsp thread-context-registers-zeroed thread-context-teb-bound user-stack user-stack-allocated user-stack-committed user-stack-guard-page user-stack-aligned entrypoint-mapped entrypoint-rva-valid entrypoint-section-executable entrypoint-window-readable import-thunks-bound import-thunk-table-valid import-thunk-symbols-resolved import-thunk-bindings-match import-thunk-iat-guarded stdout-handle stdout-handle-std-output stdout-handle-writable stdout-byte-count-checked stdout-write-guarded exit-trap exit-trap-process-exit exit-trap-status-code exit-trap-no-fallthrough no-native-jump no-native-jump-import-targets no-native-jump-entry-bounds no-native-jump-host-code-blocked win64-abi win64-abi-register-args win64-abi-shadow-space win64-abi-stack-align win64-abi-return-value win64-abi-guarded-call"
 
 fn _verified_dispatch_gates() -> text:
-    _verified_cpu_envelope_gates() + " x86_64-decoder x86_64-dispatch"
+    _verified_cpu_envelope_gates() + " x86_64-decoder x86_64-decode-window-mapped x86_64-decode-window-bounded x86_64-decode-supported-ops x86_64-decode-call-targets x86_64-dispatch x86_64-dispatch-no-native-jump x86_64-dispatch-import-calls-only x86_64-dispatch-exit-trap x86_64-dispatch-stdout-sequence"
 
 describe "Wine hello.exe probe":
     it "blocks before all substrate gates are verified":
@@ -218,7 +223,7 @@ describe "Wine hello.exe probe":
     it "stops at structured import resolution instead of unsafe execution":
         val result = wine_hello_exe_probe(_minimal_pe64_console_with_import_descriptor(), _verified_gates())
         expect result.status == "unsupported-import"
-        expect result.error == "missing-symbol:ExitProcess"
+        expect result.error == "import-thunk-ordinal-unsupported"
         expect wine_hello_exe_can_execute(_minimal_pe64_console_with_import_descriptor(), _verified_gates()) == false
 
     it "reaches the CPU precondition boundary after minimal imports and image layout resolve":
@@ -232,6 +237,11 @@ describe "Wine hello.exe probe":
         expect result.status == "unsupported-import"
         expect result.error == "binding-target-mismatch:WriteFile"
         expect wine_hello_exe_can_execute(_known_hello_exe_with_mismatched_write_binding(), _verified_dispatch_gates()) == false
+
+    it "rejects malformed import thunk name RVAs before resolver checks":
+        val result = wine_hello_exe_probe(_known_hello_exe_with_unmapped_import_name(), _verified_dispatch_gates())
+        expect result.status == "unsupported-import"
+        expect result.error == "import-symbol-name-unmapped"
 
     it "reaches the instruction decoder boundary after CPU execution preconditions resolve":
         val result = wine_hello_exe_probe(_minimal_pe64_console_with_resolved_imports(), _verified_cpu_envelope_gates())
@@ -267,9 +277,9 @@ describe "Wine hello.exe probe":
 
     it "requires the composed precondition manifest on the manifest probe path":
         val manifest = wine_precondition_manifest(wine_precondition_required_process_log(), "ready", "ready", "ready", "ready", "ready", "ready", "ready", "ready", "ready")
-        val result = wine_hello_exe_probe_manifest(_known_hello_exe_fixture(), manifest, "thread-context user-stack entrypoint-mapped import-thunks-bound stdout-handle exit-trap no-native-jump x86_64-decoder x86_64-dispatch")
+        val result = wine_hello_exe_probe_manifest(_known_hello_exe_fixture(), manifest, _verified_dispatch_gates())
         expect result.status == "executed"
-        expect wine_hello_exe_manifest_can_execute(_known_hello_exe_fixture(), manifest, "thread-context user-stack entrypoint-mapped import-thunks-bound stdout-handle exit-trap no-native-jump x86_64-decoder x86_64-dispatch") == true
+        expect wine_hello_exe_manifest_can_execute(_known_hello_exe_fixture(), manifest, _verified_dispatch_gates()) == true
 
     it "accepts structured execution evidence on the manifest probe path":
         val manifest = wine_precondition_manifest(wine_precondition_required_process_log(), "ready", "ready", "ready", "ready", "ready", "ready", "ready", "ready", "ready")
@@ -280,6 +290,6 @@ describe "Wine hello.exe probe":
 
     it "blocks the manifest probe before PE parsing when process evidence is incomplete":
         val manifest = wine_precondition_manifest("[desktop-e2e] process-backed:ok app=browser_demo pid=1", "ready", "ready", "ready", "ready", "ready", "ready", "ready", "ready", "ready")
-        val result = wine_hello_exe_probe_manifest(_known_hello_exe_fixture(), manifest, "thread-context user-stack entrypoint-mapped import-thunks-bound stdout-handle exit-trap no-native-jump x86_64-decoder x86_64-dispatch")
+        val result = wine_hello_exe_probe_manifest(_known_hello_exe_fixture(), manifest, _verified_dispatch_gates())
         expect result.status == "blocked"
         expect result.error == "blocked-process:insufficient-evidence"

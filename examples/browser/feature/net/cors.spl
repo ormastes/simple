@@ -14,7 +14,7 @@ use examples.browser.shared.logging {Logger, LogLevel}
 
 # The set of CORS-safelisted request headers (lowercase).
 # These headers never trigger a preflight request.
-val SIMPLE_HEADERS = ["accept", "accept-language", "content-language", "content-type"]
+val SIMPLE_HEADERS = ["accept", "accept-language", "content-language", "content-type", "origin"]
 
 # Content-Type values that are considered simple (no preflight needed).
 val SIMPLE_CONTENT_TYPES = [
@@ -36,8 +36,7 @@ class CorsChecker:
     # Checks Access-Control-Allow-Origin against the request origin and
     # ensures credentials mode is respected.
     fn check(request: FetchRequest, response_headers: [Pair<text, text>]) -> BrowserResult<()>:
-        val request_origin = Origin.from_url(request.url)
-        val origin_str = request_origin.to_text()
+        val origin_str = self.request_origin_text(request)
         self.logger.debug("cors: checking response headers for origin {origin_str}")
 
         # Extract the Access-Control-Allow-Origin header value
@@ -119,8 +118,7 @@ class CorsChecker:
         var preflight_headers: [Pair<text, text>] = []
 
         # Origin header
-        val origin = Origin.from_url(request.url)
-        preflight_headers.push(Pair("Origin", origin.to_text()))
+        preflight_headers.push(Pair("Origin", self.request_origin_text(request)))
 
         # Access-Control-Request-Method
         preflight_headers.push(Pair("Access-Control-Request-Method", method_name))
@@ -195,7 +193,7 @@ class CorsChecker:
         # Check Access-Control-Allow-Origin (reuse the main check logic)
         val allow_origin = self.get_header(response.headers, "access-control-allow-origin")
         if val ao = allow_origin:
-            val request_origin = Origin.from_url(original.url).to_text()
+            val request_origin = self.request_origin_text(original)
             if ao != "*" and ao != request_origin:
                 return PreflightResult.Denied(
                     reason: "Origin '{request_origin}' not allowed by preflight Access-Control-Allow-Origin: {ao}"
@@ -208,7 +206,7 @@ class CorsChecker:
 
     # Collect header names from the request that are not in the CORS safelist.
     fn collect_non_simple_headers(headers: [Pair<text, text>]) -> [text]:
-        var result = [text]()
+        var result: [text] = []
         for header in headers:
             val name = header.first.to_lowercase()
             if not is_simple_header(name):
@@ -230,6 +228,12 @@ class CorsChecker:
             if header.first.to_lowercase() == lower_name:
                 return header.second
         nil
+
+    fn request_origin_text(request: FetchRequest) -> text:
+        val origin = self.get_header(request.headers, "origin")
+        if val origin_text = origin:
+            return origin_text.trim()
+        Origin.from_url(request.url).to_text()
 
 # -- Module-level functions --
 
@@ -257,7 +261,7 @@ fn parse_allow_origin(header: text) -> [text]:
         return ["*"]
     # The spec says Allow-Origin is a single origin or "*", but some servers
     # return space-separated values. Handle both cases.
-    var result = [text]()
+    var result: [text] = []
     val parts = trimmed.split(" ")
     for part in parts:
         val p = part.trim()
@@ -270,7 +274,7 @@ fn parse_allow_origin(header: text) -> [text]:
 # Parse the Access-Control-Allow-Methods header value.
 # Comma-separated list of HTTP method names.
 fn parse_allow_methods(header: text) -> [text]:
-    var result = [text]()
+    var result: [text] = []
     val parts = header.split(",")
     for part in parts:
         val trimmed = part.trim()
@@ -281,7 +285,7 @@ fn parse_allow_methods(header: text) -> [text]:
 # Parse the Access-Control-Allow-Headers header value.
 # Comma-separated list of header names.
 fn parse_allow_headers(header: text) -> [text]:
-    var result = [text]()
+    var result: [text] = []
     val parts = header.split(",")
     for part in parts:
         val trimmed = part.trim()

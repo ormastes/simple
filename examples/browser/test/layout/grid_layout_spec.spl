@@ -1,166 +1,148 @@
-#![allow(spipe_placeholder_tests)]
 #![allow(REQC001)]
 #![allow(REQC004)]
 #![allow(unnamed_duplicate_typed_args)]
 """
 # Grid Layout
 
-Tests for grid layout functionality.
+Production-backed tests for CSS Grid parsing, track sizing, auto placement,
+and child positioning.
 """
-#![allow(unnamed_duplicate_typed_args)]
+
 use std.spec
+use examples.browser.entity.dom.box_types.{LayoutBox, BoxKind}
+use examples.browser.feature.layout.block.{LayoutContext}
+use examples.browser.feature.layout.grid.{
+    GridFormatter, GridItem, GridTrack, GridTrackDef,
+    auto_place_items, distribute_fr_space, expand_repeat,
+    get_track_position, get_track_span_size, parse_track_list,
+    resolve_track_sizes
+}
+use examples.browser.feature.style.computed.{ComputedStyle}
+use examples.browser.shared.logging.{Logger, LogLevel}
 
-# Grid track definition
-enum TrackSize:
-    Fixed(px: f64)
-    Fr(value: f64)
-    Auto
-    MinMax(min_px: f64, max_px: f64)
+fn logger() -> Logger:
+    Logger.new("grid-layout-spec", LogLevel.Error)
 
-# Resolve grid tracks into concrete pixel sizes
-fn resolve_tracks(tracks: [TrackSize], container_size: f64, gap: f64) -> [f64]:
-    var total_gap = gap * (tracks.len() - 1).to_f64()
-    var available = container_size - total_gap
-    # First pass: fixed and auto
-    var remaining = available
-    var total_fr = 0.0
-    var sizes: [f64] = []
-    for track in tracks:
-        match track:
-            Fixed(px):
-                sizes.push(px)
-                remaining = remaining - px
-            Fr(v):
-                sizes.push(0.0)
-                total_fr = total_fr + v
-            Auto:
-                # Auto: allocate 0 initially, size to content later
-                sizes.push(0.0)
-            MinMax(min_px, max_px):
-                sizes.push(min_px)
-                remaining = remaining - min_px
-    # Second pass: distribute fr units
-    if total_fr > 0.0:
-        var i = 0
-        for track in tracks:
-            match track:
-                Fr(v):
-                    sizes[i] = remaining * v / total_fr
-                _: pass_dn
-            i = i + 1
-    sizes
+fn make_box(node_id: i64, width: f64, height: f64) -> LayoutBox:
+    var box = LayoutBox.create(node_id, BoxKind.Block)
+    box.width = width
+    box.height = height
+    box
 
-# Compute positions from sizes and gap
-fn track_positions(sizes: [f64], gap: f64, start: f64) -> [f64]:
-    var positions: [f64] = []
-    var cursor = start
-    for s in sizes:
-        positions.push(cursor)
-        cursor = cursor + s + gap
-    positions
+fn make_container(width: f64, height: f64, children: [LayoutBox]) -> LayoutBox:
+    var box = LayoutBox.create(1, BoxKind.Grid)
+    box.width = width
+    box.height = height
+    box.children = children
+    box
 
-# Place an item that spans multiple tracks
-fn span_size(sizes: [f64], start_track: i64, span: i64, gap: f64) -> f64:
-    var total = 0.0
-    var i = 0
-    while i < span:
-        total = total + sizes[start_track + i]
-        if i < span - 1:
-            total = total + gap
-        i = i + 1
-    total
+fn grid_style(cols: text, rows: text) -> ComputedStyle:
+    var style = ComputedStyle.default_style()
+    style.display = "grid"
+    style.grid_template_columns = cols
+    style.grid_template_rows = rows
+    style
 
-# Auto placement: assign items to next available cell
-fn auto_place(num_items: i64, num_cols: i64) -> [[i64]]:
-    var placements: [[i64]] = []
-    var i = 0
-    while i < num_items:
-        var row = i / num_cols
-        var col = i % num_cols
-        placements.push([row, col])
-        i = i + 1
-    placements
+describe "Grid layout":
+    context "track parsing":
+        it "parses fixed fraction auto and minmax tracks":
+            val defs = parse_track_list("100px 1fr auto minmax(50px, 200px)")
 
-describe "GridLayout":
-    """
-    ## Gridlayout Tests
+            expect(defs.len()).to_equal(4)
+            match defs[0]:
+                GridTrackDef.Fixed(size): expect(size).to_equal(100.0)
+                _: expect(false).to_equal(true)
+            match defs[1]:
+                GridTrackDef.Fraction(fr): expect(fr).to_equal(1.0)
+                _: expect(false).to_equal(true)
+            match defs[2]:
+                GridTrackDef.Auto: expect(true).to_equal(true)
+                _: expect(false).to_equal(true)
+            match defs[3]:
+                GridTrackDef.MinMax(min_val, max_val):
+                    expect(min_val).to_equal(50.0)
+                    expect(max_val).to_equal(200.0)
+                _: expect(false).to_equal(true)
 
-    Validates GridLayout functionality.
-    """
+        it "expands repeat definitions":
+            val expanded = expand_repeat(GridTrackDef.Repeat(
+                count: 3,
+                tracks: [GridTrackDef.Fraction(fr: 1.0)]
+            ))
 
-    describe "track sizing":
-        it "fixed track sizes respected":
-            var tracks = [TrackSize.Fixed(px: 100.0), TrackSize.Fixed(px: 200.0)]
-            var sizes = resolve_tracks(tracks, 400.0, 0.0)
-            expect(sizes[0]).to_equal(100.0)
-            expect(sizes[1]).to_equal(200.0)
+            expect(expanded.len()).to_equal(3)
+            match expanded[2]:
+                GridTrackDef.Fraction(fr): expect(fr).to_equal(1.0)
+                _: expect(false).to_equal(true)
 
-        it "fr unit distributes remaining space":
-            var tracks = [TrackSize.Fr(value: 1.0), TrackSize.Fr(value: 1.0)]
-            var sizes = resolve_tracks(tracks, 400.0, 0.0)
-            expect(sizes[0]).to_equal(200.0)
-            expect(sizes[1]).to_equal(200.0)
+    context "track sizing":
+        it "resolves fixed tracks without growing past their fixed limit":
+            val tracks = [
+                GridTrack.from_def(0, GridTrackDef.Fixed(size: 100.0)),
+                GridTrack.from_def(1, GridTrackDef.Fixed(size: 200.0))
+            ]
+            val resolved = resolve_track_sizes(tracks, 500.0)
 
-        it "mixed fixed and fr tracks":
-            var tracks = [TrackSize.Fixed(px: 100.0), TrackSize.Fr(value: 1.0)]
-            var sizes = resolve_tracks(tracks, 400.0, 0.0)
-            expect(sizes[0]).to_equal(100.0)
-            expect(sizes[1]).to_equal(300.0)
+            expect(resolved[0].base_size).to_equal(100.0)
+            expect(resolved[1].base_size).to_equal(200.0)
 
-        it "minmax track respects min and max":
-            var tracks = [TrackSize.MinMax(min_px: 50.0, max_px: 200.0)]
-            var sizes = resolve_tracks(tracks, 400.0, 0.0)
-            # MinMax initially gets min; for a single track with no fr, stays at min
-            expect(sizes[0]).to_be_greater_than(49.0)
-            expect(sizes[0]).to_be_less_than(201.0)
+        it "distributes free space across fr tracks by flex factor":
+            val tracks = [
+                GridTrack.from_def(0, GridTrackDef.Fraction(fr: 1.0)),
+                GridTrack.from_def(1, GridTrackDef.Fraction(fr: 3.0))
+            ]
+            val resolved = distribute_fr_space(tracks, 400.0)
 
-        it "auto track sizes to content":
-            var tracks = [TrackSize.Auto]
-            var sizes = resolve_tracks(tracks, 400.0, 0.0)
-            # Auto starts at 0, would be sized to content in full impl
-            expect(sizes[0]).to_equal(0.0)
+            expect(resolved[0].base_size).to_equal(100.0)
+            expect(resolved[1].base_size).to_equal(300.0)
 
-    describe "gaps":
-        it "column gap adds space between tracks":
-            var tracks = [TrackSize.Fr(value: 1.0), TrackSize.Fr(value: 1.0)]
-            var sizes = resolve_tracks(tracks, 400.0, 20.0)
-            # available = 400 - 20 = 380, each gets 190
-            expect(sizes[0]).to_equal(190.0)
-            expect(sizes[1]).to_equal(190.0)
-            var positions = track_positions(sizes, 20.0, 0.0)
-            expect(positions[0]).to_equal(0.0)
-            expect(positions[1]).to_equal(210.0)
+        it "computes track positions and span sizes with gaps":
+            val tracks = [
+                GridTrack.from_def(0, GridTrackDef.Fixed(size: 100.0)),
+                GridTrack.from_def(1, GridTrackDef.Fixed(size: 100.0)),
+                GridTrack.from_def(2, GridTrackDef.Fixed(size: 100.0))
+            ]
 
-        it "row gap adds space between rows":
-            var row_tracks = [TrackSize.Fixed(px: 50.0), TrackSize.Fixed(px: 50.0)]
-            var sizes = resolve_tracks(row_tracks, 120.0, 10.0)
-            var positions = track_positions(sizes, 10.0, 0.0)
-            expect(positions[0]).to_equal(0.0)
-            expect(positions[1]).to_equal(60.0)
+            expect(get_track_position(2, tracks, 10.0)).to_equal(220.0)
+            expect(get_track_span_size(0, 2, tracks, 10.0)).to_equal(210.0)
 
-    describe "spanning":
-        it "item spans multiple columns":
-            var col_sizes = [100.0, 100.0, 100.0]
-            var span_w = span_size(col_sizes, 0, 2, 10.0)
-            # 100 + 100 + 10 (one gap) = 210
-            expect(span_w).to_equal(210.0)
+    context "auto placement":
+        it "places unpositioned items row major":
+            val items = [
+                GridItem.from_box(make_box(10, 0.0, 0.0)),
+                GridItem.from_box(make_box(11, 0.0, 0.0)),
+                GridItem.from_box(make_box(12, 0.0, 0.0)),
+                GridItem.from_box(make_box(13, 0.0, 0.0))
+            ]
 
-        it "item spans multiple rows":
-            var row_sizes = [50.0, 50.0, 50.0]
-            var span_h = span_size(row_sizes, 0, 3, 5.0)
-            # 50 + 50 + 50 + 5 + 5 (two gaps) = 160
-            expect(span_h).to_equal(160.0)
+            val placed = auto_place_items(items, 3, 2)
 
-    describe "auto placement":
-        it "auto placement fills grid":
-            var placements = auto_place(6, 3)
-            expect(placements.len()).to_equal(6)
-            # First row: (0,0), (0,1), (0,2)
-            expect(placements[0][0]).to_equal(0)
-            expect(placements[0][1]).to_equal(0)
-            expect(placements[2][1]).to_equal(2)
-            # Second row: (1,0), (1,1), (1,2)
-            expect(placements[3][0]).to_equal(1)
-            expect(placements[3][1]).to_equal(0)
-            expect(placements[5][0]).to_equal(1)
-            expect(placements[5][1]).to_equal(2)
+            expect(placed[0].area.row_start).to_equal(0)
+            expect(placed[0].area.col_start).to_equal(0)
+            expect(placed[2].area.col_start).to_equal(2)
+            expect(placed[3].area.row_start).to_equal(1)
+            expect(placed[3].area.col_start).to_equal(0)
+
+    context "formatter integration":
+        it "positions children using production grid tracks":
+            val children = [
+                make_box(10, 0.0, 0.0),
+                make_box(11, 0.0, 0.0),
+                make_box(12, 0.0, 0.0)
+            ]
+            val container = make_container(400.0, 100.0, children)
+            val style = grid_style("100px 1fr", "50px 50px")
+            val ctx = LayoutContext.create(400.0, 100.0, logger())
+            val formatter = GridFormatter.new(logger())
+
+            val laid_out = formatter.layout_grid(container, style, ctx)
+
+            expect(laid_out.children.len()).to_equal(3)
+            expect(laid_out.children[0].x).to_equal(0.0)
+            expect(laid_out.children[0].y).to_equal(0.0)
+            expect(laid_out.children[0].width).to_equal(100.0)
+            expect(laid_out.children[0].height).to_equal(50.0)
+            expect(laid_out.children[1].x).to_equal(100.0)
+            expect(laid_out.children[1].width).to_equal(300.0)
+            expect(laid_out.children[2].x).to_equal(0.0)
+            expect(laid_out.children[2].y).to_equal(50.0)

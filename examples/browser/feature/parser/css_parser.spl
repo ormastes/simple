@@ -293,7 +293,7 @@ class CssParser:
     # ---------- Stylesheet parsing ----------
 
     me parse_stylesheet() -> [CSSRule]:
-        var rules = [CSSRule]()
+        var rules: [CSSRule] = []
         self.skip_whitespace()
         while true:
             match self.current:
@@ -306,9 +306,7 @@ class CssParser:
                         for r in inner_rules:
                             rules.push(r)
                     else if lower_at == "supports":
-                        # @supports: parse condition, include inner rules if supported
-                        # For now, include all @supports rules (assume all features supported)
-                        val inner_rules = self._parse_conditional_rule()
+                        val inner_rules = self._parse_supports_rule()
                         for r in inner_rules:
                             rules.push(r)
                     else if lower_at == "container":
@@ -341,12 +339,11 @@ class CssParser:
         rules
 
     me _parse_media_rule() -> [CSSRule]:
-        """Parse @media rule: skip condition, parse inner rules.
-        For now, we include all @media rules unconditionally.
-        Media query evaluation will be added later with viewport info.
+        """Parse @media rule and include inner rules only when the default
+        browsing context matches the media query.
         """
         self.advance()  # skip @media keyword
-        # Skip media condition until open brace
+        var condition_text = ""
         while true:
             match self.current:
                 CssToken.OpenBrace:
@@ -354,11 +351,12 @@ class CssParser:
                 CssToken.Eof:
                     return []
                 _:
+                    condition_text = condition_text + self._media_condition_token_text(self.current)
                     self.advance()
 
         # Parse inner rules (same as stylesheet but stop at matching close brace)
         self.advance()  # consume open brace
-        var inner_rules = [CSSRule]()
+        var inner_rules: [CSSRule] = []
         while true:
             self.skip_whitespace()
             match self.current:
@@ -373,7 +371,174 @@ class CssParser:
                     val rule = self.parse_rule()
                     if val Some(r) = rule:
                         inner_rules.push(r)
-        inner_rules
+        if self._media_query_matches(condition_text):
+            return inner_rules
+        []
+
+    me _media_query_matches(query_text: text) -> bool:
+        var remaining = query_text.trim()
+        while remaining.len() > 0:
+            val comma_pos = remaining.find(",")
+            var part = remaining
+            if comma_pos >= 0:
+                part = remaining.slice(0, comma_pos)
+                remaining = remaining.slice(comma_pos + 1, remaining.len()).trim()
+            else:
+                remaining = ""
+            if self._single_media_query_matches(part.trim()):
+                return true
+        false
+
+    me _single_media_query_matches(query_text: text) -> bool:
+        var query = query_text.trim().to_lower()
+        var negate = false
+        if query.starts_with("not "):
+            negate = true
+            query = query.slice(4, query.len()).trim()
+
+        val result = self._single_media_query_matches_positive(query)
+        if negate:
+            return not result
+        result
+
+    me _single_media_query_matches_positive(query_text: text) -> bool:
+        var query = query_text.trim()
+        if query == "" or query == "all":
+            return true
+        if query == "screen":
+            return true
+        if query == "print":
+            return false
+        if query.starts_with("screen and "):
+            query = query.slice(11, query.len()).trim()
+        else if query.starts_with("all and "):
+            query = query.slice(8, query.len()).trim()
+        else if query.starts_with("print and "):
+            return false
+        self._media_expression_group_matches(query)
+
+    me _media_expression_group_matches(query: text) -> bool:
+        if query.contains(" or "):
+            var remaining = query
+            while remaining.len() > 0:
+                val or_pos = remaining.find(" or ")
+                var part = remaining
+                if or_pos >= 0:
+                    part = remaining.slice(0, or_pos)
+                    remaining = remaining.slice(or_pos + 4, remaining.len()).trim()
+                else:
+                    remaining = ""
+                if self._media_expression_group_matches(part.trim()):
+                    return true
+            return false
+
+        var remaining = query
+        while remaining.len() > 0:
+            val and_pos = remaining.find(" and ")
+            var part = remaining
+            if and_pos >= 0:
+                part = remaining.slice(0, and_pos)
+                remaining = remaining.slice(and_pos + 5, remaining.len()).trim()
+            else:
+                remaining = ""
+            if not self._media_expression_matches(part.trim()):
+                return false
+        true
+
+    me _media_expression_matches(raw: text) -> bool:
+        var expr = raw.trim()
+        if expr.starts_with("(") and expr.ends_with(")"):
+            expr = expr.slice(1, expr.len() - 1).trim()
+        val colon_pos = expr.find(":")
+        if colon_pos < 0:
+            return self._media_boolean_feature_matches(expr)
+
+        val feature = expr.slice(0, colon_pos).trim()
+        val value = expr.slice(colon_pos + 1, expr.len()).trim()
+        if feature == "min-width":
+            return 1280.0 >= self._media_numeric_value(value)
+        if feature == "max-width":
+            return 1280.0 <= self._media_numeric_value(value)
+        if feature == "width":
+            return self._media_number_equals(1280.0, self._media_numeric_value(value))
+        if feature == "min-height":
+            return 720.0 >= self._media_numeric_value(value)
+        if feature == "max-height":
+            return 720.0 <= self._media_numeric_value(value)
+        if feature == "height":
+            return self._media_number_equals(720.0, self._media_numeric_value(value))
+        if feature == "min-device-pixel-ratio":
+            return 1.0 >= self._media_numeric_value(value)
+        if feature == "max-device-pixel-ratio":
+            return 1.0 <= self._media_numeric_value(value)
+        if feature == "device-pixel-ratio":
+            return self._media_number_equals(1.0, self._media_numeric_value(value))
+        if feature == "orientation":
+            return value == "landscape"
+        if feature == "prefers-color-scheme":
+            return value == "light"
+        if feature == "prefers-reduced-motion":
+            return value == "no-preference"
+        if feature == "hover" or feature == "any-hover":
+            return value == "hover"
+        if feature == "pointer" or feature == "any-pointer":
+            return value == "fine"
+        false
+
+    me _media_boolean_feature_matches(feature: text) -> bool:
+        if feature == "hover" or feature == "any-hover":
+            return true
+        if feature == "pointer" or feature == "any-pointer":
+            return true
+        false
+
+    me _media_numeric_value(raw: text) -> f64:
+        var value = raw.trim()
+        if value.ends_with("dppx"):
+            value = value.slice(0, value.len() - 4).trim()
+        else if value.ends_with("px"):
+            value = value.slice(0, value.len() - 2).trim()
+        value.to_f64()
+
+    me _media_number_equals(left: f64, right: f64) -> bool:
+        val diff = left - right
+        val abs_diff = if diff < 0.0: 0.0 - diff else: diff
+        abs_diff < 0.001
+
+    me _media_condition_token_text(tok: CssToken) -> text:
+        match tok:
+            CssToken.Ident(v):
+                v
+            CssToken.Function(name):
+                name + "("
+            CssToken.Dimension(v, unit):
+                self._format_media_number(v) + unit
+            CssToken.Number(v, _):
+                self._format_media_number(v)
+            CssToken.Percentage(v):
+                self._format_media_number(v) + "%"
+            CssToken.String(v):
+                "\"" + v + "\""
+            CssToken.Delim(v):
+                v
+            CssToken.Colon:
+                ":"
+            CssToken.Comma:
+                ","
+            CssToken.OpenParen:
+                "("
+            CssToken.CloseParen:
+                ")"
+            CssToken.Whitespace:
+                " "
+            _:
+                ""
+
+    me _format_media_number(value: f64) -> text:
+        val whole = value.to_i64()
+        if whole.to_f64() == value:
+            return "{whole}"
+        "{value}"
 
     me _parse_conditional_rule() -> [CSSRule]:
         """Parse a conditional at-rule (@supports, @container, @layer).
@@ -391,7 +556,7 @@ class CssParser:
                     self.advance()
         # Parse inner rules
         self.advance()  # consume open brace
-        var inner_rules = [CSSRule]()
+        var inner_rules: [CSSRule] = []
         while true:
             self.skip_whitespace()
             match self.current:
@@ -407,6 +572,182 @@ class CssParser:
                     if val Some(r) = rule:
                         inner_rules.push(r)
         inner_rules
+
+    me _parse_supports_rule() -> [CSSRule]:
+        """Parse @supports and include inner rules only for matched feature
+        queries. This intentionally covers declaration-based supports queries
+        first; unsupported or unknown feature probes must not leak rules into
+        the stylesheet.
+        """
+        self.advance()  # skip @supports keyword
+        var condition_text = ""
+        while true:
+            match self.current:
+                CssToken.OpenBrace:
+                    break
+                CssToken.Eof:
+                    return []
+                _:
+                    condition_text = condition_text + self._stylesheet_token_text(self.current)
+                    self.advance()
+
+        self.advance()  # consume open brace
+        var inner_rules: [CSSRule] = []
+        while true:
+            self.skip_whitespace()
+            match self.current:
+                CssToken.CloseBrace:
+                    self.advance()
+                    break
+                CssToken.Eof:
+                    break
+                CssToken.AtKeyword(_):
+                    self._skip_at_rule()
+                _:
+                    val rule = self.parse_rule()
+                    if val Some(r) = rule:
+                        inner_rules.push(r)
+
+        if self._supports_condition_matches(condition_text):
+            return inner_rules
+        []
+
+    me _supports_condition_matches(condition_text: text) -> bool:
+        var condition = condition_text.trim().to_lower()
+        if condition == "":
+            return false
+        if condition.starts_with("not "):
+            return not self._supports_condition_matches(condition.slice(4, condition.len()).trim())
+        condition = self._strip_wrapping_parens(condition)
+        if condition.contains(" or "):
+            var remaining = condition
+            while remaining.len() > 0:
+                val or_pos = remaining.find(" or ")
+                var part = remaining
+                if or_pos >= 0:
+                    part = remaining.slice(0, or_pos)
+                    remaining = remaining.slice(or_pos + 4, remaining.len()).trim()
+                else:
+                    remaining = ""
+                if self._supports_condition_matches(part.trim()):
+                    return true
+            return false
+        if condition.contains(" and "):
+            var remaining = condition
+            while remaining.len() > 0:
+                val and_pos = remaining.find(" and ")
+                var part = remaining
+                if and_pos >= 0:
+                    part = remaining.slice(0, and_pos)
+                    remaining = remaining.slice(and_pos + 5, remaining.len()).trim()
+                else:
+                    remaining = ""
+                if not self._supports_condition_matches(part.trim()):
+                    return false
+            return true
+        self._supports_declaration_matches(condition)
+
+    me _strip_wrapping_parens(value: text) -> text:
+        var result = value.trim()
+        while result.starts_with("(") and result.ends_with(")") and self._outer_parens_wrap_all(result):
+            result = result.slice(1, result.len() - 1).trim()
+        result
+
+    me _outer_parens_wrap_all(value: text) -> bool:
+        var depth = 0
+        var index = 0
+        while index < value.len():
+            val ch = value.char_at(index)
+            if ch == "(":
+                depth = depth + 1
+            else if ch == ")":
+                depth = depth - 1
+                if depth == 0 and index < value.len() - 1:
+                    return false
+            if depth < 0:
+                return false
+            index = index + 1
+        depth == 0
+
+    me _supports_declaration_matches(condition: text) -> bool:
+        val colon_pos = condition.find(":")
+        if colon_pos < 0:
+            return false
+        val property = condition.slice(0, colon_pos).trim()
+        val value_text = condition.slice(colon_pos + 1, condition.len()).trim()
+        if property == "" or value_text == "":
+            return false
+        if not self._supports_property_known(property):
+            return false
+        val declarations = parse_declarations_text(property + ": " + value_text + ";", self.logger)
+        if declarations.len() == 0:
+            return false
+        self._supports_value_known(property, declarations.get(0).value)
+
+    me _supports_property_known(property: text) -> bool:
+        if property.starts_with("--"):
+            return true
+        val known = [
+            "display", "position", "float", "top", "right", "bottom", "left",
+            "width", "height", "min-width", "max-width", "min-height", "max-height",
+            "margin", "margin-top", "margin-right", "margin-bottom", "margin-left",
+            "padding", "padding-top", "padding-right", "padding-bottom", "padding-left",
+            "border", "border-top-width", "border-right-width", "border-bottom-width", "border-left-width",
+            "border-top-color", "border-right-color", "border-bottom-color", "border-left-color",
+            "border-top-style", "border-right-style", "border-bottom-style", "border-left-style",
+            "border-radius", "border-top-left-radius", "border-top-right-radius",
+            "border-bottom-right-radius", "border-bottom-left-radius",
+            "color", "background", "background-color", "background-image",
+            "font-family", "font-size", "font-weight", "font-style",
+            "line-height", "text-align", "text-decoration",
+            "text-indent", "text-transform", "letter-spacing", "word-spacing", "white-space",
+            "overflow", "overflow-x", "overflow-y", "scroll-behavior",
+            "opacity", "visibility", "z-index",
+            "flex-direction", "flex-wrap", "justify-content", "align-items", "align-content",
+            "flex-grow", "flex-shrink", "flex-basis", "row-gap", "column-gap",
+            "grid-template-columns", "grid-template-rows",
+            "grid-column", "grid-row", "grid-auto-flow", "grid-auto-columns", "grid-auto-rows",
+            "animation-name", "animation-duration", "animation-timing-function",
+            "animation-delay", "animation-iteration-count", "animation-direction", "animation-fill-mode",
+            "content", "transform", "transform-origin", "perspective", "perspective-origin",
+            "box-shadow", "text-shadow", "filter", "backdrop-filter", "mix-blend-mode", "isolation",
+            "transition-property", "transition-duration", "transition-timing-function", "transition-delay",
+            "aspect-ratio", "clear", "text-overflow", "word-break", "overflow-wrap", "vertical-align",
+            "background-position", "background-size", "background-repeat",
+            "background-attachment", "background-clip", "background-origin",
+            "align-self", "order", "outline-width", "outline-style", "outline-color", "outline-offset",
+            "contain", "container-type", "container-name", "writing-mode", "direction",
+            "cursor", "pointer-events", "user-select"
+        ]
+        for p in known:
+            if p == property:
+                return true
+        false
+
+    me _supports_value_known(property: text, value: CSSValue) -> bool:
+        match value:
+            CSSValue.Keyword(v):
+                val lower = v.to_lower()
+                if lower == "unknown":
+                    return false
+                if property == "display":
+                    return self._supports_display_value(lower)
+                if property == "color" or property == "background-color" or property.ends_with("-color"):
+                    return lower == "currentcolor" or lower == "transparent"
+                return true
+            _:
+                true
+
+    me _supports_display_value(value: text) -> bool:
+        val supported = [
+            "none", "block", "inline", "inline-block", "list-item",
+            "table", "table-row", "table-cell", "flex", "inline-flex",
+            "grid", "inline-grid", "contents", "flow-root"
+        ]
+        for v in supported:
+            if v == value:
+                return true
+        false
 
     me _skip_at_rule():
         self.advance()  # skip the at-keyword
@@ -440,16 +781,80 @@ class CssParser:
                     self.advance()
 
     me parse_rule() -> CSSRule?:
-        val selectors = self.parse_selector_list()
-        if selectors.len() == 0:
-            # Error recovery: skip to next rule
+        var selector_text = ""
+        while true:
+            match self.current:
+                CssToken.OpenBrace:
+                    break
+                CssToken.Eof:
+                    return nil
+                CssToken.CloseBrace:
+                    return nil
+                _:
+                    selector_text = selector_text + self._stylesheet_token_text(self.current)
+                    self.advance()
+
+        if selector_text.trim().len() == 0:
             self._skip_to_next_rule()
             return nil
-        self.skip_whitespace()
-        val declarations = self.parse_declaration_block()
-        # Use first selector for simplicity; full impl would store list
-        val selector = selectors.get(0)
-        CSSRule.create(selector, declarations)
+
+        self.advance()  # consume open brace
+        var declaration_text = ""
+        while true:
+            match self.current:
+                CssToken.CloseBrace:
+                    self.advance()
+                    break
+                CssToken.Eof:
+                    break
+                _:
+                    declaration_text = declaration_text + self._stylesheet_token_text(self.current)
+                    self.advance()
+
+        val selector = parse_selector_text(selector_text.trim(), self.logger)
+        val declarations = parse_declarations_text(declaration_text, self.logger)
+        Some(CSSRule.create(selector, declarations))
+
+    me _stylesheet_token_text(tok: CssToken) -> text:
+        match tok:
+            CssToken.Ident(v):
+                v
+            CssToken.Function(name):
+                name + "("
+            CssToken.AtKeyword(v):
+                "@" + v
+            CssToken.Hash(v, _):
+                "#" + v
+            CssToken.String(v):
+                "\"" + v + "\""
+            CssToken.Url(v):
+                "url(" + v + ")"
+            CssToken.Dimension(v, unit):
+                self._format_media_number(v) + unit
+            CssToken.Number(v, _):
+                self._format_media_number(v)
+            CssToken.Percentage(v):
+                self._format_media_number(v) + "%"
+            CssToken.Delim(v):
+                v
+            CssToken.Colon:
+                ":"
+            CssToken.Semicolon:
+                ";"
+            CssToken.Comma:
+                ","
+            CssToken.OpenParen:
+                "("
+            CssToken.CloseParen:
+                ")"
+            CssToken.OpenBracket:
+                "["
+            CssToken.CloseBracket:
+                "]"
+            CssToken.Whitespace:
+                " "
+            _:
+                ""
 
     me _skip_to_next_rule():
         while true:

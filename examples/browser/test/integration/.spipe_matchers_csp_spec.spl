@@ -19,6 +19,10 @@ use examples.browser.feature.sandbox.csp.{
     CspDirective, CspPolicy, parse_csp, parse_csp_with_origin,
     check_source, check_script, check_style, check_image
 }
+use examples.browser.entity.dom.node_types.{Element}
+use examples.browser.feature.parser.html_tokenizer.{HtmlTokenizer}
+use examples.browser.feature.parser.html_tree_builder.{TreeBuilder}
+use examples.browser.transform.csp_from_dom.{extract_meta_csp, script_element_allowed, script_element_allowed_by_meta}
 use examples.browser.shared.logging.{Logger, LogLevel}
 
 # ============================================================================
@@ -41,6 +45,20 @@ fn single_directive_policy(name: text, sources: [text]) -> CspPolicy:
     var directives: [CspDirective] = []
     directives = directives + [make_directive(name, sources)]
     make_policy(directives)
+
+fn build_tree(html: text) -> TreeBuilder:
+    val logger = make_logger()
+    val tokenizer = HtmlTokenizer.new(html, logger)
+    TreeBuilder.new(tokenizer, logger)
+
+fn first_element(builder: TreeBuilder, tag: text) -> Element?:
+    var i = 0
+    while i < builder.elements.len():
+        val elem = builder.elements[i]
+        if elem.tag_name == tag:
+            return Some(elem)
+        i = i + 1
+    None
 
 # ============================================================================
 # Tests
@@ -141,6 +159,11 @@ describe "Content Security Policy Integration":
     # ========================================================================
 
     context "default-src fallback":
+        it "empty policy allows sources when no CSP was delivered":
+            val policy = CspPolicy.empty()
+            expect check_script(policy, "https://any.example.com/app.js") == true
+            expect check_style(policy, "inline") == true
+
         it "default-src applies when specific directive missing":
             """When script-src is not present, check_script falls back
             to default-src."""
@@ -151,6 +174,16 @@ describe "Content Security Policy Integration":
             expect allowed == true
             val blocked = check_script(policy, "https://blocked.example.com")
             expect blocked == false
+
+        it "script-src-elem falls back to script-src before default-src":
+            val policy = parse_csp("default-src 'none'; script-src https://cdn.example.com")
+            expect check_source(policy, "script-src-elem", "https://cdn.example.com/app.js") == true
+            expect check_source(policy, "script-src-elem", "https://evil.example.com/app.js") == false
+
+        it "style-src-attr falls back to style-src before default-src":
+            val policy = parse_csp("default-src 'none'; style-src 'unsafe-inline'")
+            expect check_source(policy, "style-src-attr", "inline") == true
+            expect check_source(policy, "style-src-attr", "https://evil.example.com/style.css") == false
 
     # ========================================================================
     # Special tokens
@@ -201,3 +234,73 @@ describe "Content Security Policy Integration":
             val directives = [make_directive("default-src", ["'self'"])]
             val policy = make_policy_with_report(directives, "https://report.example.com/csp")
             expect policy.report_uri == "https://report.example.com/csp"
+
+    # ========================================================================
+    # DOM integration
+    # ========================================================================
+
+    context "DOM integration":
+        it "extracts meta CSP from parsed HTML":
+            var builder = build_tree("<html><head><meta http-equiv=\"Content-Security-Policy\" content=\"script-src 'none'\"></head><body></body></html>")
+            val result = builder.parse()
+            match result:
+                Ok(doc_id):
+                    val policy = extract_meta_csp(builder.elements)
+                    expect policy.directives.len() == 1
+                    expect policy.directives[0].name == "script-src"
+                Err(e):
+                    expect "parse should succeed" == ""
+
+        it "blocks inline script elements from meta CSP":
+            var builder = build_tree("<html><head><meta http-equiv=\"Content-Security-Policy\" content=\"script-src 'none'\"></head><body><script>window.x = 1;</script></body></html>")
+            val result = builder.parse()
+            match result:
+                Ok(doc_id):
+                    val policy = extract_meta_csp(builder.elements)
+                    val script = first_element(builder, "script")
+                    if val Some(elem) = script:
+                        expect script_element_allowed(policy, elem) == false
+                    else:
+                        expect "script element should exist" == ""
+                Err(e):
+                    expect "parse should succeed" == ""
+
+        it "allows whitelisted external script elements from meta CSP":
+            var builder = build_tree("<html><head><meta http-equiv=\"Content-Security-Policy\" content=\"default-src 'none'; script-src https://cdn.example.com\"></head><body><script src=\"https://cdn.example.com/app.js\"></script></body></html>")
+            val result = builder.parse()
+            match result:
+                Ok(doc_id):
+                    val policy = extract_meta_csp(builder.elements)
+                    val script = first_element(builder, "script")
+                    if val Some(elem) = script:
+                        expect script_element_allowed(policy, elem) == true
+                    else:
+                        expect "script element should exist" == ""
+                Err(e):
+                    expect "parse should succeed" == ""
+
+        it "applies multiple meta CSP policies cumulatively to script elements":
+            var builder = build_tree("<html><head><meta http-equiv=\"Content-Security-Policy\" content=\"script-src 'unsafe-inline'\"><meta http-equiv=\"Content-Security-Policy\" content=\"script-src 'none'\"></head><body><script>window.x = 1;</script></body></html>")
+            val result = builder.parse()
+            match result:
+                Ok(doc_id):
+                    val script = first_element(builder, "script")
+                    if val Some(elem) = script:
+                        expect script_element_allowed_by_meta(builder.elements, elem) == false
+                    else:
+                        expect "script element should exist" == ""
+                Err(e):
+                    expect "parse should succeed" == ""
+
+        it "allows scripts when no meta CSP policy is present":
+            var builder = build_tree("<html><body><script>window.x = 1;</script></body></html>")
+            val result = builder.parse()
+            match result:
+                Ok(doc_id):
+                    val script = first_element(builder, "script")
+                    if val Some(elem) = script:
+                        expect script_element_allowed_by_meta(builder.elements, elem) == true
+                    else:
+                        expect "script element should exist" == ""
+                Err(e):
+                    expect "parse should succeed" == ""

@@ -1,4 +1,4 @@
-use common.wine_x86_64_decode.{wine_x86_64_hello_decode_gate, wine_x86_64_hello_decode_plan, wine_x86_64_instruction_at}
+use common.wine_x86_64_decode.{wine_x86_64_hello_decode_gate, wine_x86_64_hello_decode_plan, wine_x86_64_instruction_at, wine_x86_64_instruction_len_at, wine_x86_64_scan_window}
 
 fn _zero_bytes(count: i64) -> [u8]:
     var out: [u8] = []
@@ -73,15 +73,118 @@ describe "Wine x86_64 hello decoder gate":
     it "classifies supported and unsupported tiny instruction forms":
         val data = _put_hello_code(_minimal_image(), 0x210)
         expect wine_x86_64_instruction_at(data, 0x210) == "xor-rcx-rcx"
+        expect wine_x86_64_instruction_len_at(data, 0x210) == 3
         expect wine_x86_64_instruction_at(data, 0x213) == "call-rel32"
+        expect wine_x86_64_instruction_len_at(data, 0x213) == 5
         expect wine_x86_64_instruction_at(data, 0x218) == "lea-rdx-rip-rel32"
+        expect wine_x86_64_instruction_len_at(data, 0x218) == 7
         expect wine_x86_64_instruction_at(data, 0x224) == "xor-ecx-ecx"
+        expect wine_x86_64_instruction_len_at(data, 0x224) == 2
         expect wine_x86_64_instruction_at(data, 0x22c) == "unsupported-opcode"
+        expect wine_x86_64_instruction_len_at(data, 0x22c) == 0
+
+    it "classifies common safe prologue and epilogue forms":
+        var data = _zero_bytes(16)
+        data[0] = 0x48
+        data[1] = 0x83
+        data[2] = 0xec
+        data[3] = 0x28
+        data[4] = 0x90
+        data[5] = 0x48
+        data[6] = 0x83
+        data[7] = 0xc4
+        data[8] = 0x28
+        data[9] = 0xc3
+        expect wine_x86_64_instruction_at(data, 0) == "sub-rsp-imm8"
+        expect wine_x86_64_instruction_len_at(data, 0) == 4
+        expect wine_x86_64_instruction_at(data, 4) == "nop"
+        expect wine_x86_64_instruction_len_at(data, 4) == 1
+        expect wine_x86_64_instruction_at(data, 5) == "add-rsp-imm8"
+        expect wine_x86_64_instruction_len_at(data, 5) == 4
+        expect wine_x86_64_instruction_at(data, 9) == "ret"
+        expect wine_x86_64_instruction_len_at(data, 9) == 1
 
     it "classifies truncated near-call bytes":
         var data = _zero_bytes(4)
         data[0] = 0xe8
         expect wine_x86_64_instruction_at(data, 0) == "truncated-call-rel32"
+        expect wine_x86_64_instruction_len_at(data, 0) == 0
+
+    it "classifies truncated and unsupported rex imm8 arithmetic forms":
+        var truncated = _zero_bytes(3)
+        truncated[0] = 0x48
+        truncated[1] = 0x83
+        truncated[2] = 0xec
+        expect wine_x86_64_instruction_at(truncated, 0) == "truncated-rex-alu-imm8"
+        var unsupported = _zero_bytes(4)
+        unsupported[0] = 0x48
+        unsupported[1] = 0x83
+        unsupported[2] = 0xc0
+        unsupported[3] = 0x01
+        expect wine_x86_64_instruction_at(unsupported, 0) == "unsupported-rex-alu-imm8"
+
+
+    it "scans a bounded safe prologue and epilogue window":
+        var data = _zero_bytes(16)
+        data[0] = 0x48
+        data[1] = 0x83
+        data[2] = 0xec
+        data[3] = 0x28
+        data[4] = 0x90
+        data[5] = 0x48
+        data[6] = 0x83
+        data[7] = 0xc4
+        data[8] = 0x28
+        data[9] = 0xc3
+        val scan = wine_x86_64_scan_window(data, 0, 10, 8)
+        expect scan.ok == true
+        expect scan.state == "ready"
+        expect scan.end_offset == 10
+        expect scan.instruction_count == 4
+        expect scan.last_offset == 9
+        expect scan.last_instruction == "ret"
+
+    it "rejects unsupported opcodes while scanning":
+        var data = _zero_bytes(4)
+        data[0] = 0xff
+        val scan = wine_x86_64_scan_window(data, 0, 4, 8)
+        expect scan.ok == false
+        expect scan.state == "unsupported-opcode"
+        expect scan.last_offset == 0
+        expect scan.last_instruction == "unsupported-opcode"
+
+    it "rejects truncated near calls while scanning":
+        var data = _zero_bytes(4)
+        data[0] = 0xe8
+        val scan = wine_x86_64_scan_window(data, 0, 4, 8)
+        expect scan.ok == false
+        expect scan.state == "truncated-call-rel32"
+        expect scan.last_offset == 0
+        expect scan.last_instruction == "truncated-call-rel32"
+
+    it "rejects instructions that cross the scan byte window":
+        var data = _zero_bytes(8)
+        data[0] = 0x48
+        data[1] = 0x83
+        data[2] = 0xec
+        data[3] = 0x28
+        val scan = wine_x86_64_scan_window(data, 0, 3, 8)
+        expect scan.ok == false
+        expect scan.state == "instruction-window-overrun:sub-rsp-imm8"
+        expect scan.last_offset == 0
+        expect scan.last_instruction == "sub-rsp-imm8"
+
+    it "rejects scan windows that exceed the instruction limit":
+        var data = _zero_bytes(8)
+        data[0] = 0x90
+        data[1] = 0x90
+        data[2] = 0xc3
+        val scan = wine_x86_64_scan_window(data, 0, 3, 2)
+        expect scan.ok == false
+        expect scan.state == "instruction-limit"
+        expect scan.instruction_count == 2
+        expect scan.last_offset == 1
+        expect scan.last_instruction == "nop"
 
     it "rejects known opcodes when relative calls do not target the expected import payloads":
         expect wine_x86_64_hello_decode_gate(_put_hello_code_with_bad_write_target(_minimal_image(), 0x210)) == "write-file-call-target-mismatch"

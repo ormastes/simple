@@ -68,20 +68,29 @@ fn check_csp(policy: CspPolicy, directive: text, url: text) -> bool:
 
 fn check_source(policy: CspPolicy, directive: text, source: text) -> bool:
     # Check if source is allowed by the named directive.
-    # Falls back to default-src if specific directive not found.
+    # Falls back through CSP fetch-directive chains, then to default-src.
+    # An empty policy means no CSP was delivered, so the load is allowed.
+    if policy.directives.len() == 0:
+        return true
     val specific = find_directive(policy, directive)
     match specific:
         Some(d):
             source_matches(d, source, policy.page_origin)
         nil:
-            # Fall back to default-src
+            val fallback = fallback_directive_name(directive)
+            if fallback.len() > 0:
+                val fallback_d = find_directive(policy, fallback)
+                match fallback_d:
+                    Some(d):
+                        return source_matches(d, source, policy.page_origin)
+                    nil:
+                        pass_dn
             val default_d = find_directive(policy, "default-src")
             match default_d:
                 Some(d):
-                    source_matches(d, source, policy.page_origin)
+                    return source_matches(d, source, policy.page_origin)
                 nil:
-                    # No policy — block by default
-                    false
+                    return true
 
 fn check_script(policy: CspPolicy, source: text) -> bool:
     check_source(policy, "script-src", source)
@@ -110,6 +119,17 @@ fn find_directive(policy: CspPolicy, name: text) -> Option<CspDirective>:
             return Some(d)
         i = i + 1
     nil
+
+fn fallback_directive_name(name: text) -> text:
+    if name == "script-src-elem" or name == "script-src-attr":
+        return "script-src"
+    if name == "style-src-elem" or name == "style-src-attr":
+        return "style-src"
+    if name == "worker-src":
+        return "script-src"
+    if name == "frame-src":
+        return "child-src"
+    ""
 
 fn source_matches(directive: CspDirective, source: text, page_origin: text) -> bool:
     # Check if source matches any entry in the directive's source list.

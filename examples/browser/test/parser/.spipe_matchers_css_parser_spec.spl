@@ -19,11 +19,11 @@ Tests for css parser functionality.
 
 use std.spec
 use examples.browser.feature.parser.css_tokenizer.{css_tokenize, CssToken}
-use examples.browser.feature.parser.css_parser.{parse_selector_text, parse_declarations_text, calculate_specificity}
+use examples.browser.feature.parser.css_parser.{CssParser, parse_selector_text, parse_declarations_text, calculate_specificity}
 use examples.browser.feature.parser.css_parser_selectors
 use examples.browser.feature.parser.css_parser_declarations
 use examples.browser.feature.parser.css_parser_media
-use examples.browser.entity.dom.css_types.{CSSValue, CSSDeclaration, SelectorPart, Selector, Specificity}
+use examples.browser.entity.dom.css_types.{CSSValue, CSSDeclaration, CSSRule, SelectorPart, Selector, Specificity}
 use examples.browser.shared.logging.{Logger, LogLevel}
 
 # ============================================================================
@@ -44,6 +44,10 @@ fn parse_selector_full(input: text) -> Selector:
 
 fn parse_declarations(input: text) -> [CSSDeclaration]:
     parse_declarations_text(input, css_logger())
+
+fn parse_stylesheet_rules(input: text) -> [CSSRule]:
+    var parser = CssParser.new(input, css_logger())
+    parser.parse_stylesheet()
 
 fn tok_kind(tok: CssToken) -> text:
     match tok:
@@ -236,6 +240,49 @@ describe "CSS Declaration Parser":
         val decls = parse_declarations("color: red !important;")
         expect decls.len() == 1
         expect decls.get(0).important == true
+
+# ============================================================================
+# CSS Stylesheet At-Rules
+# ============================================================================
+
+describe "CSS Stylesheet Parser":
+    context "@media":
+        it "includes matching screen width media rules":
+            val rules = parse_stylesheet_rules("@media screen and (min-width: 1000px) { .wide { color: red; } }")
+
+            expect rules.len() == 1
+            expect selector_part_name(rules.get(0).selector.parts.get(0)) == "wide"
+
+        it "excludes non-matching max-width media rules":
+            val rules = parse_stylesheet_rules("@media (max-width: 400px) { .mobile { color: red; } } .base { color: blue; }")
+
+            expect rules.len() == 1
+            expect selector_part_name(rules.get(0).selector.parts.get(0)) == "base"
+
+        it "excludes print media rules in the default screen viewport":
+            val rules = parse_stylesheet_rules("@media print { .print { color: red; } } .screen { color: blue; }")
+
+            expect rules.len() == 1
+            expect selector_part_name(rules.get(0).selector.parts.get(0)) == "screen"
+
+    context "@supports":
+        it "includes supported declaration rules":
+            val rules = parse_stylesheet_rules("@supports (display: grid) { .grid { display: grid; } }")
+
+            expect rules.len() == 1
+            expect selector_part_name(rules.get(0).selector.parts.get(0)) == "grid"
+
+        it "excludes unsupported declaration rules":
+            val rules = parse_stylesheet_rules("@supports (display: made-up-layout) { .bad { color: red; } } .base { color: blue; }")
+
+            expect rules.len() == 1
+            expect selector_part_name(rules.get(0).selector.parts.get(0)) == "base"
+
+        it "honors not conditions for unsupported declarations":
+            val rules = parse_stylesheet_rules("@supports not (display: made-up-layout) { .fallback { display: block; } }")
+
+            expect rules.len() == 1
+            expect selector_part_name(rules.get(0).selector.parts.get(0)) == "fallback"
 
 # ============================================================================
 # Specificity Calculation

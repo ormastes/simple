@@ -626,8 +626,15 @@ class OptimizingCompiler:
 
     fn optimize(ir: [JitIR], type_observations: [JitTypeTag]) -> [JitIR]:
         var optimized = self._type_specialize(ir, type_observations)
-        optimized = self._constant_fold(optimized)
-        optimized = self._dead_code_eliminate(optimized)
+        var pass_idx = 0
+        var previous_len = -1
+        while pass_idx < 4:
+            if optimized.len() == previous_len:
+                break
+            previous_len = optimized.len()
+            optimized = self._constant_fold(optimized)
+            optimized = self._dead_code_eliminate(optimized)
+            pass_idx = pass_idx + 1
         optimized
 
     # --- Type specialization ---
@@ -679,139 +686,233 @@ class OptimizingCompiler:
 
     fn _constant_fold(ir: [JitIR]) -> [JitIR]:
         var result = [JitIR]()
-        # Track which registers hold known constants
-        var known_const_regs = [i64]()
-        var known_const_vals = [JsValue]()
+        var known_regs = [i64]()
+        var known_vals = [f64]()
         var i = 0
         while i < ir.len():
             val instr = ir.get(i)
             match instr:
                 JitIR.LoadConst(reg, value):
-                    self._record_const(known_const_regs, known_const_vals, reg, value)
+                    match value:
+                        JsValue.Number(n):
+                            self._record_number_const(known_regs, known_vals, reg, n)
+                        _:
+                            self._invalidate_number_const(known_regs, known_vals, reg)
                     result.push(instr)
                 JitIR.IntAdd(dst, lhs, rhs):
-                    val lhs_val = self._lookup_const(known_const_regs, known_const_vals, lhs)
-                    val rhs_val = self._lookup_const(known_const_regs, known_const_vals, rhs)
-                    val folded = self._try_fold_add(lhs_val, rhs_val, dst)
-                    if val Some(folded_instr) = folded:
-                        self._record_const_from_instr(known_const_regs, known_const_vals, folded_instr)
-                        result.push(folded_instr)
+                    val lhs_idx = self._number_const_index(known_regs, lhs)
+                    val rhs_idx = self._number_const_index(known_regs, rhs)
+                    if lhs_idx >= 0 and rhs_idx >= 0:
+                        val n = known_vals.get(lhs_idx) + known_vals.get(rhs_idx)
+                        self._record_number_const(known_regs, known_vals, dst, n)
+                        result.push(JitIR.LoadConst(reg: dst, value: JsValue.Number(v: n)))
                     else:
-                        self._invalidate_const(known_const_regs, known_const_vals, dst)
+                        self._invalidate_number_const(known_regs, known_vals, dst)
                         result.push(instr)
                 JitIR.IntSub(dst, lhs, rhs):
-                    val lhs_val = self._lookup_const(known_const_regs, known_const_vals, lhs)
-                    val rhs_val = self._lookup_const(known_const_regs, known_const_vals, rhs)
-                    val folded = self._try_fold_sub(lhs_val, rhs_val, dst)
-                    if val Some(folded_instr) = folded:
-                        self._record_const_from_instr(known_const_regs, known_const_vals, folded_instr)
-                        result.push(folded_instr)
+                    val lhs_idx = self._number_const_index(known_regs, lhs)
+                    val rhs_idx = self._number_const_index(known_regs, rhs)
+                    if lhs_idx >= 0 and rhs_idx >= 0:
+                        val n = known_vals.get(lhs_idx) - known_vals.get(rhs_idx)
+                        self._record_number_const(known_regs, known_vals, dst, n)
+                        result.push(JitIR.LoadConst(reg: dst, value: JsValue.Number(v: n)))
                     else:
-                        self._invalidate_const(known_const_regs, known_const_vals, dst)
+                        self._invalidate_number_const(known_regs, known_vals, dst)
                         result.push(instr)
                 JitIR.IntMul(dst, lhs, rhs):
-                    val lhs_val = self._lookup_const(known_const_regs, known_const_vals, lhs)
-                    val rhs_val = self._lookup_const(known_const_regs, known_const_vals, rhs)
-                    val folded = self._try_fold_mul(lhs_val, rhs_val, dst)
-                    if val Some(folded_instr) = folded:
-                        self._record_const_from_instr(known_const_regs, known_const_vals, folded_instr)
-                        result.push(folded_instr)
+                    val lhs_idx = self._number_const_index(known_regs, lhs)
+                    val rhs_idx = self._number_const_index(known_regs, rhs)
+                    if lhs_idx >= 0 and rhs_idx >= 0:
+                        val n = known_vals.get(lhs_idx) * known_vals.get(rhs_idx)
+                        self._record_number_const(known_regs, known_vals, dst, n)
+                        result.push(JitIR.LoadConst(reg: dst, value: JsValue.Number(v: n)))
                     else:
-                        self._invalidate_const(known_const_regs, known_const_vals, dst)
+                        self._invalidate_number_const(known_regs, known_vals, dst)
                         result.push(instr)
                 _:
+                    val defined_reg = self._defined_register_or_negative(instr)
+                    if defined_reg >= 0:
+                        self._invalidate_number_const(known_regs, known_vals, defined_reg)
                     result.push(instr)
             i = i + 1
         result
 
-    fn _record_const(regs: [i64], vals: [JsValue], reg: i64, value: JsValue):
-        # Check if already tracked
+    fn _number_const_index(regs: [i64], reg: i64) -> i64:
         var i = 0
         while i < regs.len():
             if regs.get(i) == reg:
-                vals.set(i, value)
-                return ()
+                return i
             i = i + 1
-        regs.push(reg)
-        vals.push(value)
+        -1
 
-    fn _lookup_const(regs: [i64], vals: [JsValue], reg: i64) -> Option<JsValue>:
-        var i = 0
-        while i < regs.len():
-            if regs.get(i) == reg:
-                return Some(vals.get(i))
-            i = i + 1
-        nil
+    fn _record_number_const(regs: mut [i64], vals: mut [f64], reg: i64, value: f64):
+        val idx = self._number_const_index(regs, reg)
+        if idx >= 0:
+            vals[idx] = value
+        else:
+            regs.push(reg)
+            vals.push(value)
 
-    fn _invalidate_const(regs: [i64], vals: [JsValue], reg: i64):
-        var i = 0
-        while i < regs.len():
-            if regs.get(i) == reg:
-                # Remove by swapping with last
-                val last_idx = regs.len() - 1
-                regs.set(i, regs.get(last_idx))
-                vals.set(i, vals.get(last_idx))
-                regs.pop()
-                vals.pop()
-                return ()
-            i = i + 1
-
-    fn _record_const_from_instr(regs: [i64], vals: [JsValue], instr: JitIR):
-        match instr:
-            JitIR.LoadConst(reg, value):
-                self._record_const(regs, vals, reg, value)
-            _: pass_dn
-
-    fn _try_fold_add(a: Option<JsValue>, b: Option<JsValue>, dst: i64) -> Option<JitIR>:
-        if val Some(av) = a:
-            if val Some(bv) = b:
-                match av:
-                    JsValue.Number(va):
-                        match bv:
-                            JsValue.Number(vb):
-                                return Some(JitIR.LoadConst(reg: dst, value: JsValue.Number(v: va + vb)))
-                            _: pass_dn
-                    _: pass_dn
-        nil
-
-    fn _try_fold_sub(a: Option<JsValue>, b: Option<JsValue>, dst: i64) -> Option<JitIR>:
-        if val Some(av) = a:
-            if val Some(bv) = b:
-                match av:
-                    JsValue.Number(va):
-                        match bv:
-                            JsValue.Number(vb):
-                                return Some(JitIR.LoadConst(reg: dst, value: JsValue.Number(v: va - vb)))
-                            _: pass_dn
-                    _: pass_dn
-        nil
-
-    fn _try_fold_mul(a: Option<JsValue>, b: Option<JsValue>, dst: i64) -> Option<JitIR>:
-        if val Some(av) = a:
-            if val Some(bv) = b:
-                match av:
-                    JsValue.Number(va):
-                        match bv:
-                            JsValue.Number(vb):
-                                return Some(JitIR.LoadConst(reg: dst, value: JsValue.Number(v: va * vb)))
-                            _: pass_dn
-                    _: pass_dn
-        nil
+    fn _invalidate_number_const(regs: mut [i64], vals: mut [f64], reg: i64):
+        val idx = self._number_const_index(regs, reg)
+        if idx >= 0:
+            val last_idx = regs.len() - 1
+            regs[idx] = regs.get(last_idx)
+            vals[idx] = vals.get(last_idx)
+            regs.pop()
+            vals.pop()
 
     # --- Dead code elimination ---
-    # Remove Nop instructions and LoadConst/StoreLocal whose destination
-    # is never read before being overwritten.
+    # Remove Nop instructions and pure register writes whose destination is
+    # never read after later optimization passes fold their consumers.
 
     fn _dead_code_eliminate(ir: [JitIR]) -> [JitIR]:
-        var result = [JitIR]()
-        var i = 0
-        while i < ir.len():
+        var reversed = [JitIR]()
+        var live_regs = [i64]()
+        var i = ir.len() - 1
+        while i >= 0:
             val instr = ir.get(i)
             match instr:
-                JitIR.Nop: pass_dn  # Skip Nops entirely
-                _: result.push(instr)
+                JitIR.Nop:
+                    pass_dn
+                JitIR.Guard(reg, expected_type):
+                    if self._live_contains(live_regs, reg):
+                        reversed.push(instr)
+                        self._live_add(live_regs, reg)
+                _:
+                    val reg = self._defined_register_or_negative(instr)
+                    if reg >= 0:
+                        if self._pure_definition(instr) and not self._live_contains(live_regs, reg):
+                            pass_dn
+                        else:
+                            self._live_remove(live_regs, reg)
+                            self._mark_inputs_live(live_regs, instr)
+                            reversed.push(instr)
+                    else:
+                        self._mark_inputs_live(live_regs, instr)
+                        reversed.push(instr)
+            i = i - 1
+        reversed.reverse()
+        reversed
+
+    fn _defined_register_or_negative(instr: JitIR) -> i64:
+        match instr:
+            JitIR.LoadConst(reg, _): reg
+            JitIR.LoadLocal(reg, _): reg
+            JitIR.LoadGlobal(reg, _): reg
+            JitIR.Add(dst, _, _): dst
+            JitIR.Sub(dst, _, _): dst
+            JitIR.Mul(dst, _, _): dst
+            JitIR.Div(dst, _, _): dst
+            JitIR.Mod(dst, _, _): dst
+            JitIR.IntAdd(dst, _, _): dst
+            JitIR.IntSub(dst, _, _): dst
+            JitIR.IntMul(dst, _, _): dst
+            JitIR.Compare(dst, _, _, _): dst
+            JitIR.Negate(dst, _): dst
+            JitIR.LogicalNot(dst, _): dst
+            JitIR.Call(dst, _, _): dst
+            JitIR.Dup(dst, _): dst
+            JitIR.GetProperty(dst, _, _): dst
+            JitIR.NewObject(dst): dst
+            JitIR.NewArray(dst, _): dst
+            _: -1
+
+    fn _pure_definition(instr: JitIR) -> bool:
+        match instr:
+            JitIR.LoadConst(_, _): true
+            JitIR.LoadLocal(_, _): true
+            JitIR.Add(_, _, _): true
+            JitIR.Sub(_, _, _): true
+            JitIR.Mul(_, _, _): true
+            JitIR.Div(_, _, _): true
+            JitIR.Mod(_, _, _): true
+            JitIR.IntAdd(_, _, _): true
+            JitIR.IntSub(_, _, _): true
+            JitIR.IntMul(_, _, _): true
+            JitIR.Compare(_, _, _, _): true
+            JitIR.Negate(_, _): true
+            JitIR.LogicalNot(_, _): true
+            JitIR.Dup(_, _): true
+            _: false
+
+    fn _mark_inputs_live(live_regs: mut [i64], instr: JitIR):
+        match instr:
+            JitIR.StoreLocal(_, reg):
+                self._live_add(live_regs, reg)
+            JitIR.StoreGlobal(_, reg):
+                self._live_add(live_regs, reg)
+            JitIR.Add(_, lhs, rhs):
+                self._live_add(live_regs, lhs)
+                self._live_add(live_regs, rhs)
+            JitIR.Sub(_, lhs, rhs):
+                self._live_add(live_regs, lhs)
+                self._live_add(live_regs, rhs)
+            JitIR.Mul(_, lhs, rhs):
+                self._live_add(live_regs, lhs)
+                self._live_add(live_regs, rhs)
+            JitIR.Div(_, lhs, rhs):
+                self._live_add(live_regs, lhs)
+                self._live_add(live_regs, rhs)
+            JitIR.Mod(_, lhs, rhs):
+                self._live_add(live_regs, lhs)
+                self._live_add(live_regs, rhs)
+            JitIR.IntAdd(_, lhs, rhs):
+                self._live_add(live_regs, lhs)
+                self._live_add(live_regs, rhs)
+            JitIR.IntSub(_, lhs, rhs):
+                self._live_add(live_regs, lhs)
+                self._live_add(live_regs, rhs)
+            JitIR.IntMul(_, lhs, rhs):
+                self._live_add(live_regs, lhs)
+                self._live_add(live_regs, rhs)
+            JitIR.Compare(_, lhs, rhs, _):
+                self._live_add(live_regs, lhs)
+                self._live_add(live_regs, rhs)
+            JitIR.Negate(_, src):
+                self._live_add(live_regs, src)
+            JitIR.LogicalNot(_, src):
+                self._live_add(live_regs, src)
+            JitIR.JumpIfFalse(reg, _):
+                self._live_add(live_regs, reg)
+            JitIR.Call(_, func_reg, _):
+                self._live_add(live_regs, func_reg)
+            JitIR.Return(reg):
+                self._live_add(live_regs, reg)
+            JitIR.Guard(reg, _):
+                self._live_add(live_regs, reg)
+            JitIR.Pop(reg):
+                self._live_add(live_regs, reg)
+            JitIR.Dup(_, src):
+                self._live_add(live_regs, src)
+            JitIR.GetProperty(_, obj_reg, _):
+                self._live_add(live_regs, obj_reg)
+            JitIR.SetProperty(obj_reg, _, val_reg):
+                self._live_add(live_regs, obj_reg)
+                self._live_add(live_regs, val_reg)
+            _: pass_dn
+
+    fn _live_contains(live_regs: [i64], reg: i64) -> bool:
+        var i = 0
+        while i < live_regs.len():
+            if live_regs.get(i) == reg:
+                return true
             i = i + 1
-        result
+        false
+
+    fn _live_add(live_regs: mut [i64], reg: i64):
+        if not self._live_contains(live_regs, reg):
+            live_regs.push(reg)
+
+    fn _live_remove(live_regs: mut [i64], reg: i64):
+        var i = 0
+        while i < live_regs.len():
+            if live_regs.get(i) == reg:
+                val last_idx = live_regs.len() - 1
+                live_regs[i] = live_regs.get(last_idx)
+                live_regs.pop()
+                return ()
+            i = i + 1
 
 # --- JIT compiler (main entry point) ---
 

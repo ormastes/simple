@@ -1,6 +1,8 @@
 """CPU/thread execution readiness gates for the hello.exe milestone."""
 
-use common.wine_x86_64_decode.{wine_x86_64_hello_decode_plan}
+use common.pe_coff_header.{pe_entry_point_rva, pe_rva_to_file_offset}
+use common.wine_image_map.{wine_image_entry_window_gate}
+use common.wine_x86_64_decode.{wine_x86_64_hello_decode_plan, wine_x86_64_scan_window}
 
 class WineCpuHelloExecutionPlan:
     ok: bool
@@ -21,6 +23,7 @@ class WineCpuExecutionEvidence:
     stdout_handle: bool
     exit_trap: bool
     no_native_jump: bool
+    win64_abi: bool
     x86_64_decoder: bool
     x86_64_dispatch: bool
 
@@ -48,6 +51,7 @@ pub fn wine_cpu_execution_evidence(
     stdout_handle: bool,
     exit_trap: bool,
     no_native_jump: bool,
+    win64_abi: bool,
     x86_64_decoder: bool,
     x86_64_dispatch: bool
 ) -> WineCpuExecutionEvidence:
@@ -59,34 +63,195 @@ pub fn wine_cpu_execution_evidence(
         stdout_handle: stdout_handle,
         exit_trap: exit_trap,
         no_native_jump: no_native_jump,
+        win64_abi: win64_abi,
         x86_64_decoder: x86_64_decoder,
         x86_64_dispatch: x86_64_dispatch
     )
 
 pub fn wine_cpu_execution_evidence_all_ready() -> WineCpuExecutionEvidence:
-    wine_cpu_execution_evidence(true, true, true, true, true, true, true, true, true)
+    wine_cpu_execution_evidence(true, true, true, true, true, true, true, true, true, true)
 
 pub fn wine_cpu_execution_evidence_text(evidence: WineCpuExecutionEvidence) -> text:
     var out = ""
     if evidence.thread_context:
-        out = out + " thread-context"
+        out = out + " thread-context thread-context-rip thread-context-rsp thread-context-registers-zeroed thread-context-teb-bound"
     if evidence.user_stack:
-        out = out + " user-stack"
+        out = out + " user-stack user-stack-allocated user-stack-committed user-stack-guard-page user-stack-aligned"
     if evidence.entrypoint_mapped:
-        out = out + " entrypoint-mapped"
+        out = out + " entrypoint-mapped entrypoint-rva-valid entrypoint-section-executable entrypoint-window-readable"
     if evidence.import_thunks_bound:
-        out = out + " import-thunks-bound"
+        out = out + " import-thunks-bound import-thunk-table-valid import-thunk-symbols-resolved import-thunk-bindings-match import-thunk-iat-guarded"
     if evidence.stdout_handle:
-        out = out + " stdout-handle"
+        out = out + " stdout-handle stdout-handle-std-output stdout-handle-writable stdout-byte-count-checked stdout-write-guarded"
     if evidence.exit_trap:
-        out = out + " exit-trap"
+        out = out + " exit-trap exit-trap-process-exit exit-trap-status-code exit-trap-no-fallthrough"
     if evidence.no_native_jump:
-        out = out + " no-native-jump"
+        out = out + " no-native-jump no-native-jump-import-targets no-native-jump-entry-bounds no-native-jump-host-code-blocked"
+    if evidence.win64_abi:
+        out = out + " win64-abi win64-abi-register-args win64-abi-shadow-space win64-abi-stack-align win64-abi-return-value win64-abi-guarded-call"
     if evidence.x86_64_decoder:
-        out = out + " x86_64-decoder"
+        out = out + " x86_64-decoder x86_64-decode-window-mapped x86_64-decode-window-bounded x86_64-decode-supported-ops x86_64-decode-call-targets"
     if evidence.x86_64_dispatch:
-        out = out + " x86_64-dispatch"
+        out = out + " x86_64-dispatch x86_64-dispatch-no-native-jump x86_64-dispatch-import-calls-only x86_64-dispatch-exit-trap x86_64-dispatch-stdout-sequence"
     out
+
+pub fn wine_win64_abi_required_features() -> [text]:
+    [
+        "win64-abi-register-args",
+        "win64-abi-shadow-space",
+        "win64-abi-stack-align",
+        "win64-abi-return-value",
+        "win64-abi-guarded-call"
+    ]
+
+pub fn wine_win64_abi_gate(evidence: text) -> text:
+    if not evidence.contains("win64-abi"):
+        return "missing-win64-abi"
+    for feature in wine_win64_abi_required_features():
+        if not evidence.contains(feature):
+            return "missing-" + feature
+    "ready"
+
+pub fn wine_import_thunk_binding_required_features() -> [text]:
+    [
+        "import-thunk-table-valid",
+        "import-thunk-symbols-resolved",
+        "import-thunk-bindings-match",
+        "import-thunk-iat-guarded"
+    ]
+
+pub fn wine_import_thunk_binding_gate(evidence: text) -> text:
+    if not evidence.contains("import-thunks-bound"):
+        return "missing-import-thunks-bound"
+    for feature in wine_import_thunk_binding_required_features():
+        if not evidence.contains(feature):
+            return "missing-" + feature
+    "ready"
+
+pub fn wine_stdout_handle_required_features() -> [text]:
+    [
+        "stdout-handle-std-output",
+        "stdout-handle-writable",
+        "stdout-byte-count-checked",
+        "stdout-write-guarded"
+    ]
+
+pub fn wine_stdout_handle_gate(evidence: text) -> text:
+    if not evidence.contains("stdout-handle"):
+        return "missing-stdout-handle"
+    for feature in wine_stdout_handle_required_features():
+        if not evidence.contains(feature):
+            return "missing-" + feature
+    "ready"
+
+pub fn wine_thread_context_required_features() -> [text]:
+    [
+        "thread-context-rip",
+        "thread-context-rsp",
+        "thread-context-registers-zeroed",
+        "thread-context-teb-bound"
+    ]
+
+pub fn wine_thread_context_gate(evidence: text) -> text:
+    if not evidence.contains("thread-context"):
+        return "missing-thread-context"
+    for feature in wine_thread_context_required_features():
+        if not evidence.contains(feature):
+            return "missing-" + feature
+    "ready"
+
+pub fn wine_user_stack_required_features() -> [text]:
+    [
+        "user-stack-allocated",
+        "user-stack-committed",
+        "user-stack-guard-page",
+        "user-stack-aligned"
+    ]
+
+pub fn wine_user_stack_gate(evidence: text) -> text:
+    if not evidence.contains("user-stack"):
+        return "missing-user-stack"
+    for feature in wine_user_stack_required_features():
+        if not evidence.contains(feature):
+            return "missing-" + feature
+    "ready"
+
+pub fn wine_entrypoint_mapping_required_features() -> [text]:
+    [
+        "entrypoint-rva-valid",
+        "entrypoint-section-executable",
+        "entrypoint-window-readable"
+    ]
+
+pub fn wine_entrypoint_mapping_gate(evidence: text) -> text:
+    if not evidence.contains("entrypoint-mapped"):
+        return "missing-entrypoint-mapped"
+    for feature in wine_entrypoint_mapping_required_features():
+        if not evidence.contains(feature):
+            return "missing-" + feature
+    "ready"
+
+pub fn wine_exit_trap_required_features() -> [text]:
+    [
+        "exit-trap-process-exit",
+        "exit-trap-status-code",
+        "exit-trap-no-fallthrough"
+    ]
+
+pub fn wine_exit_trap_gate(evidence: text) -> text:
+    if not evidence.contains("exit-trap"):
+        return "missing-exit-trap"
+    for feature in wine_exit_trap_required_features():
+        if not evidence.contains(feature):
+            return "missing-" + feature
+    "ready"
+
+pub fn wine_no_native_jump_required_features() -> [text]:
+    [
+        "no-native-jump-import-targets",
+        "no-native-jump-entry-bounds",
+        "no-native-jump-host-code-blocked"
+    ]
+
+pub fn wine_no_native_jump_gate(evidence: text) -> text:
+    if not evidence.contains("no-native-jump"):
+        return "missing-no-native-jump"
+    for feature in wine_no_native_jump_required_features():
+        if not evidence.contains(feature):
+            return "missing-" + feature
+    "ready"
+
+pub fn wine_x86_64_decoder_required_features() -> [text]:
+    [
+        "x86_64-decode-window-mapped",
+        "x86_64-decode-window-bounded",
+        "x86_64-decode-supported-ops",
+        "x86_64-decode-call-targets"
+    ]
+
+pub fn wine_x86_64_decoder_gate(evidence: text) -> text:
+    if not evidence.contains("x86_64-decoder"):
+        return "instruction-decoder-missing"
+    for feature in wine_x86_64_decoder_required_features():
+        if not evidence.contains(feature):
+            return "missing-" + feature
+    "ready"
+
+pub fn wine_x86_64_dispatch_required_features() -> [text]:
+    [
+        "x86_64-dispatch-no-native-jump",
+        "x86_64-dispatch-import-calls-only",
+        "x86_64-dispatch-exit-trap",
+        "x86_64-dispatch-stdout-sequence"
+    ]
+
+pub fn wine_x86_64_dispatch_gate(evidence: text) -> text:
+    if not evidence.contains("x86_64-dispatch"):
+        return "instruction-dispatch-missing"
+    for feature in wine_x86_64_dispatch_required_features():
+        if not evidence.contains(feature):
+            return "missing-" + feature
+    "ready"
 
 pub fn wine_cpu_execution_required_features() -> [text]:
     [
@@ -96,20 +261,60 @@ pub fn wine_cpu_execution_required_features() -> [text]:
         "import-thunks-bound",
         "stdout-handle",
         "exit-trap",
-        "no-native-jump"
+        "no-native-jump",
+        "win64-abi"
     ]
 
 pub fn wine_cpu_execution_gate(evidence: text) -> text:
     for feature in wine_cpu_execution_required_features():
         if not evidence.contains(feature):
             return "missing-" + feature
+    val thread_state = wine_thread_context_gate(evidence)
+    if thread_state != "ready":
+        return thread_state
+    val stack_state = wine_user_stack_gate(evidence)
+    if stack_state != "ready":
+        return stack_state
+    val entrypoint_state = wine_entrypoint_mapping_gate(evidence)
+    if entrypoint_state != "ready":
+        return entrypoint_state
+    val import_state = wine_import_thunk_binding_gate(evidence)
+    if import_state != "ready":
+        return import_state
+    val stdout_state = wine_stdout_handle_gate(evidence)
+    if stdout_state != "ready":
+        return stdout_state
+    val exit_state = wine_exit_trap_gate(evidence)
+    if exit_state != "ready":
+        return exit_state
+    val native_jump_state = wine_no_native_jump_gate(evidence)
+    if native_jump_state != "ready":
+        return native_jump_state
+    val abi_state = wine_win64_abi_gate(evidence)
+    if abi_state != "ready":
+        return abi_state
     "ready"
 
 pub fn wine_instruction_dispatch_gate(evidence: text) -> text:
-    if not evidence.contains("x86_64-decoder"):
-        return "instruction-decoder-missing"
-    if not evidence.contains("x86_64-dispatch"):
-        return "instruction-dispatch-missing"
+    val decoder_state = wine_x86_64_decoder_gate(evidence)
+    if decoder_state != "ready":
+        return decoder_state
+    val dispatch_state = wine_x86_64_dispatch_gate(evidence)
+    if dispatch_state != "ready":
+        return dispatch_state
+    "ready"
+
+pub fn wine_cpu_entry_scan_gate(data: [u8], max_bytes: i64, max_instructions: i64) -> text:
+    val window_state = wine_image_entry_window_gate(data, max_bytes)
+    if window_state != "ready":
+        return window_state
+    val entry_rva = pe_entry_point_rva(data)
+    val entry_offset = pe_rva_to_file_offset(data, entry_rva)
+    if entry_offset < 0:
+        return "entrypoint-unmapped"
+    val scan = wine_x86_64_scan_window(data, entry_offset, max_bytes, max_instructions)
+    if not scan.ok:
+        return scan.state
     "ready"
 
 pub fn wine_cpu_hello_execution_plan(data: [u8], evidence: text) -> WineCpuHelloExecutionPlan:
@@ -122,6 +327,9 @@ pub fn wine_cpu_hello_execution_plan(data: [u8], evidence: text) -> WineCpuHello
     val decode_plan = wine_x86_64_hello_decode_plan(data)
     if not decode_plan.ok:
         return _hello_plan_error(decode_plan.error)
+    val scan_state = wine_cpu_entry_scan_gate(data, 27, 16)
+    if scan_state != "ready":
+        return _hello_plan_error("instruction-scan-" + scan_state)
     if decode_plan.get_std_handle_rva != 0x2080 or
        decode_plan.stdout_payload_rva != 0x2120 or
        decode_plan.write_file_rva != 0x20a0 or

@@ -152,20 +152,24 @@ class ChromeCompareResult:
     metrics: ComparisonMetrics
     simple_ppm: text
     verdict: text
+    has_chrome_reference: bool
 
 class ChromeCompareSuite:
     results: [ChromeCompareResult]
     total: i64
     pass_count: i64
     fail_count: i64
+    unverified_count: i64
 
     static fn empty() -> ChromeCompareSuite:
-        ChromeCompareSuite(results: [], total: 0, pass_count: 0, fail_count: 0)
+        ChromeCompareSuite(results: [], total: 0, pass_count: 0, fail_count: 0, unverified_count: 0)
 
     me add(result: ChromeCompareResult):
         self.results = self.results + [result]
         self.total = self.total + 1
-        if result.metrics.match_percentage >= 90.0:
+        if not result.has_chrome_reference:
+            self.unverified_count = self.unverified_count + 1
+        else if result.metrics.match_percentage >= 90.0:
             self.pass_count = self.pass_count + 1
         else:
             self.fail_count = self.fail_count + 1
@@ -184,6 +188,7 @@ class ChromeCompareSuite:
         r = "{r}- Tests: {self.total}\n"
         r = "{r}- Pass (>=90%): {self.pass_count}\n"
         r = "{r}- Fail (<90%): {self.fail_count}\n"
+        r = "{r}- Unverified (no Chrome reference): {self.unverified_count}\n"
         r = "{r}- Overall match: {self.overall_match_pct()}%\n\n"
 
         r = "{r}## Per-Test Results\n\n"
@@ -250,16 +255,23 @@ class ChromeCompare:
             val pixels = render_fn(page.html, self.viewport_width, self.viewport_height)
             val ppm = export_ppm_text("", pixels, self.viewport_width, self.viewport_height)
 
-            # Self-compare (always 100% match) — real comparison needs Chrome pixels
-            val metrics = compare_pixel_buffers(pixels, pixels,
-                                               self.viewport_width, self.viewport_height)
+            val metrics = ComparisonMetrics(
+                total_pixels: pixels.len().to_i64(),
+                matching_pixels: 0,
+                different_pixels: 0,
+                match_percentage: 0.0,
+                rmse: 0.0,
+                max_channel_diff: 0,
+                avg_channel_diff: 0.0
+            )
 
             val result = ChromeCompareResult(
                 test_name: page.name,
                 category: page.category,
                 metrics: metrics,
                 simple_ppm: ppm,
-                verdict: "RENDERED (no Chrome reference)"
+                verdict: "UNVERIFIED (no Chrome reference)",
+                has_chrome_reference: false
             )
             suite.add(result)
             self.logger.info("  {page.name}: rendered {pixels.len()} pixels")
@@ -300,7 +312,8 @@ class ChromeCompare:
                 category: page.category,
                 metrics: metrics,
                 simple_ppm: ppm,
-                verdict: verdict
+                verdict: verdict,
+                has_chrome_reference: true
             )
             suite.add(result)
             self.logger.info("  {page.name}: {metrics.match_percentage}% match — {verdict}")

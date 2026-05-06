@@ -1,6 +1,10 @@
 """Concrete NT-call bridge gate for the known hello.exe milestone."""
 
-use common.wine_nt_api_catalog.{wine_nt_api_dispatch_gate}
+use common.wine_nt_api_catalog.{
+    wine_nt_api_dispatch_gate,
+    wine_nt_api_modeled_precondition_symbols,
+    wine_nt_api_symbol_state
+}
 
 class WineNtBridgeExecutionResult:
     ok: bool
@@ -17,14 +21,40 @@ class WineNtCallResult:
     i64_value: i64
     text_value: text
 
+class WineNtPreconditionBridgeResult:
+    ok: bool
+    state: text
+    dll: text
+    symbol: text
+    category: text
+
 fn _bridge_result(ok: bool, error: text, stdout: text, stdout_handle: i64, bytes_written: i64, exit_code: i64) -> WineNtBridgeExecutionResult:
     WineNtBridgeExecutionResult(ok: ok, error: error, stdout: stdout, stdout_handle: stdout_handle, bytes_written: bytes_written, exit_code: exit_code)
 
 fn _call_result(ok: bool, error: text, symbol: text, i64_value: i64, text_value: text) -> WineNtCallResult:
     WineNtCallResult(ok: ok, error: error, symbol: symbol, i64_value: i64_value, text_value: text_value)
 
+fn _precondition_result(ok: bool, state: text, dll: text, symbol: text, category: text) -> WineNtPreconditionBridgeResult:
+    WineNtPreconditionBridgeResult(ok: ok, state: state, dll: dll, symbol: symbol, category: category)
+
+fn _is_modeled_precondition_symbol(symbol: text) -> bool:
+    for modeled in wine_nt_api_modeled_precondition_symbols():
+        if modeled == symbol:
+            return true
+    false
+
 pub fn wine_nt_bridge_gate(symbols: [text]) -> text:
     wine_nt_api_dispatch_gate(symbols)
+
+pub fn wine_nt_bridge_modeled_precondition_gate(dll: text, symbol: text) -> WineNtPreconditionBridgeResult:
+    val entry = wine_nt_api_symbol_state(dll, symbol)
+    if entry.state == "implemented":
+        return _precondition_result(true, "implemented", entry.dll, symbol, entry.category)
+    if entry.state != "catalogued":
+        return _precondition_result(false, "unsupported-symbol:" + symbol, entry.dll, symbol, entry.category)
+    if not _is_modeled_precondition_symbol(symbol):
+        return _precondition_result(false, "unmodeled-catalogued-symbol:" + symbol, entry.dll, symbol, entry.category)
+    _precondition_result(true, "modeled-precondition", entry.dll, symbol, entry.category)
 
 pub fn wine_nt_bridge_stdout_handle() -> i64:
     -11
@@ -67,16 +97,33 @@ pub fn wine_nt_bridge_dispatch_call(symbol: text, handle: i64, payload: text, va
         return wine_nt_bridge_call_exit_process(value)
     _call_result(false, "bridge-unsupported:" + symbol, symbol, 0, "")
 
-pub fn wine_nt_bridge_execute_hello_stdout(payload: text) -> WineNtBridgeExecutionResult:
+fn _stdout_sequence_gate(symbols: [text]) -> text:
+    if symbols.len() != 3:
+        return "bridge-sequence-count-mismatch"
+    if symbols[0] != "GetStdHandle":
+        return "bridge-sequence-expected:GetStdHandle"
+    if symbols[1] != "WriteFile":
+        return "bridge-sequence-expected:WriteFile"
+    if symbols[2] != "ExitProcess":
+        return "bridge-sequence-expected:ExitProcess"
+    "ready"
+
+pub fn wine_nt_bridge_execute_stdout_sequence(symbols: [text], payload: text) -> WineNtBridgeExecutionResult:
+    val sequence_state = _stdout_sequence_gate(symbols)
+    if sequence_state != "ready":
+        return _bridge_result(false, sequence_state, "", wine_nt_bridge_stdout_handle(), 0, -1)
     if payload == "":
         return _bridge_result(false, "empty-payload", "", wine_nt_bridge_stdout_handle(), 0, -1)
-    val handle_call = wine_nt_bridge_dispatch_call("GetStdHandle", 0, "", wine_nt_bridge_stdout_handle())
+    val handle_call = wine_nt_bridge_dispatch_call(symbols[0], 0, "", wine_nt_bridge_stdout_handle())
     if not handle_call.ok:
         return _bridge_result(false, handle_call.error, "", 0, 0, -1)
-    val write_call = wine_nt_bridge_dispatch_call("WriteFile", handle_call.i64_value, payload, payload.len())
+    val write_call = wine_nt_bridge_dispatch_call(symbols[1], handle_call.i64_value, payload, payload.len())
     if not write_call.ok:
         return _bridge_result(false, write_call.error, "", handle_call.i64_value, 0, -1)
-    val exit_call = wine_nt_bridge_dispatch_call("ExitProcess", handle_call.i64_value, "", wine_nt_bridge_exit_code_zero())
+    val exit_call = wine_nt_bridge_dispatch_call(symbols[2], handle_call.i64_value, "", wine_nt_bridge_exit_code_zero())
     if not exit_call.ok:
         return _bridge_result(false, exit_call.error, write_call.text_value, handle_call.i64_value, write_call.i64_value, -1)
     _bridge_result(true, "", write_call.text_value, handle_call.i64_value, write_call.i64_value, exit_call.i64_value)
+
+pub fn wine_nt_bridge_execute_hello_stdout(payload: text) -> WineNtBridgeExecutionResult:
+    wine_nt_bridge_execute_stdout_sequence(["GetStdHandle", "WriteFile", "ExitProcess"], payload)

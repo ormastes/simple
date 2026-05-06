@@ -1,0 +1,57 @@
+#![allow(REQC001)]
+#![allow(REQC004)]
+# DOM-to-CSP bridge for page-level policy extraction and script checks.
+
+use examples.browser.entity.dom.node_types.{Element}
+use examples.browser.feature.sandbox.csp.{CspPolicy, parse_csp, check_source}
+
+fn extract_meta_csp(elements: [Element]) -> CspPolicy:
+    var i = 0
+    while i < elements.len():
+        val elem = elements[i]
+        if elem.tag_name == "meta":
+            val equiv = attr_value(elem, "http-equiv").to_lower()
+            if equiv == "content-security-policy":
+                val content = attr_value(elem, "content")
+                if content.trim().len() > 0:
+                    return parse_csp(content)
+        i = i + 1
+    CspPolicy.empty()
+
+fn script_element_source(elem: Element) -> text:
+    val src = attr_value(elem, "src")
+    if src.trim().len() > 0:
+        return src
+    "inline"
+
+fn script_element_allowed(policy: CspPolicy, elem: Element) -> bool:
+    check_source(policy, "script-src-elem", script_element_source(elem))
+
+fn script_element_allowed_by_meta(elements: [Element], elem: Element) -> bool:
+    var saw_policy = false
+    var i = 0
+    while i < elements.len():
+        val candidate = elements[i]
+        if candidate.tag_name == "meta":
+            val equiv = attr_value(candidate, "http-equiv").to_lower()
+            if equiv == "content-security-policy":
+                val content = attr_value(candidate, "content")
+                if content.trim().len() > 0:
+                    saw_policy = true
+                    val policy = parse_csp(content)
+                    if not script_element_allowed(policy, elem):
+                        return false
+        i = i + 1
+    if not saw_policy:
+        return true
+    true
+
+fn attr_value(elem: Element, name: text) -> text:
+    var i = 0
+    val wanted = name.to_lower()
+    while i < elem.attributes.len():
+        val attr = elem.attributes[i]
+        if attr.name.to_lower() == wanted:
+            return attr.value
+        i = i + 1
+    ""

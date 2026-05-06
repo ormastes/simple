@@ -1,4 +1,3 @@
-#![allow(spipe_placeholder_tests)]
 #![allow(REQC001)]
 #![allow(REQC004)]
 #![allow(unnamed_duplicate_typed_args)]
@@ -15,63 +14,46 @@ Tests for fetch cors functionality.
 #
 # Validates CORS simple-request classification, preflight necessity,
 # preflight validation, origin parsing, redirect detection, and cacheability.
-# Helper functions are defined inline since the feature layer is not yet
-# implemented; they mirror the logic the feature layer will provide.
+# Exercises the production CORS checker rather than local mirror helpers.
 #
 # Run with: bin/simple test examples/browser/test/net/fetch_cors_spec.spl
 
 use std.spec
-use examples.browser.entity.net.cors_types.{CorsPolicy, PreflightResult}
+use examples.browser.entity.net.request_types.{FetchRequest, FetchResponse, HttpMethod, RequestMode, RequestCredentials}
+use examples.browser.entity.net.cors_types.{PreflightResult}
+use examples.browser.entity.net.url_types.{Url}
+use examples.browser.feature.net.cors.{CorsChecker, is_simple_method, is_simple_header, parse_allow_origin}
+use examples.browser.feature.net.fetch.{should_redirect, is_cacheable}
+use examples.browser.shared.error.{BrowserResult}
+use examples.browser.shared.logging.{Logger, LogLevel}
 
-# ============================================================================
-# Helpers — CORS classification functions
-# ============================================================================
+fn cors_checker() -> CorsChecker:
+    CorsChecker.new(Logger.new("fetch-cors-spec", LogLevel.Error))
 
-# A simple method is GET, HEAD, or POST per the Fetch specification.
-fn is_simple_method(method: text) -> bool:
-    method == "GET" or method == "HEAD" or method == "POST"
+fn request(method: HttpMethod, headers: [Pair<text, text>]) -> FetchRequest:
+    FetchRequest(
+        url: Url.parse("https://api.example.com/data"),
+        method: method,
+        headers: headers,
+        body: "",
+        mode: RequestMode.Cors,
+        credentials: RequestCredentials.SameOrigin
+    )
 
-# A simple header is one of the CORS-safelisted request headers.
-fn is_simple_header(name: text) -> bool:
-    val lower = name.to_lower()
-    lower == "accept" or lower == "accept-language" or lower == "content-language" or lower == "content-type"
+fn response(status: i64, headers: [Pair<text, text>]) -> FetchResponse:
+    FetchResponse(
+        status: status,
+        status_text: "OK",
+        headers: headers,
+        body: "",
+        url: Url.parse("https://api.example.com/data"),
+        redirected: false
+    )
 
-# A preflight is needed when the request uses a non-simple method or
-# includes non-simple headers.
-fn needs_preflight(method: text, headers: [text]) -> bool:
-    if not is_simple_method(method):
-        return true
-    for h in headers:
-        if not is_simple_header(h):
-            return true
-    false
-
-# Validate a preflight response: check that the request origin appears in
-# the policy's allowed_origins list (or that the list is empty, meaning
-# permissive/wildcard).
-fn validate_preflight(policy: CorsPolicy, request_origin: text) -> PreflightResult:
-    if policy.allowed_origins.is_empty():
-        return PreflightResult.Allowed
-    for origin in policy.allowed_origins:
-        if origin == request_origin:
-            return PreflightResult.Allowed
-    PreflightResult.Denied(reason: "Origin {request_origin} not allowed")
-
-# Parse the Access-Control-Allow-Origin header value.
-# Returns the origin string or "*" for wildcard.
-fn parse_allow_origin(header_value: text) -> text:
-    val trimmed = header_value.trim()
-    if trimmed == "*":
-        return "*"
-    trimmed
-
-# HTTP redirect status codes.
-fn should_redirect(status: i64) -> bool:
-    status == 301 or status == 302 or status == 303 or status == 307 or status == 308
-
-# A response is cacheable if it has a 200, 203, 204, 206, 300, or 301 status.
-fn is_cacheable(status: i64) -> bool:
-    status == 200 or status == 203 or status == 204 or status == 206 or status == 300 or status == 301
+fn result_is_ok(result: BrowserResult<()>) -> bool:
+    match result:
+        Ok(_): true
+        Err(_): false
 
 # ============================================================================
 # CORS Simple Request Classification
@@ -86,16 +68,16 @@ describe "CORS Simple Request Classification":
 
     context "is_simple_method":
         it "is_simple_method returns true for GET":
-            expect is_simple_method("GET") == true
+            expect is_simple_method(HttpMethod.Get) == true
 
         it "is_simple_method returns true for HEAD":
-            expect is_simple_method("HEAD") == true
+            expect is_simple_method(HttpMethod.Head) == true
 
         it "is_simple_method returns true for POST":
-            expect is_simple_method("POST") == true
+            expect is_simple_method(HttpMethod.Post) == true
 
         it "is_simple_method returns false for PUT":
-            expect is_simple_method("PUT") == false
+            expect is_simple_method(HttpMethod.Put) == false
 
     context "is_simple_header":
         it "is_simple_header returns true for Accept":
@@ -111,17 +93,21 @@ describe "CORS Simple Request Classification":
 describe "CORS Preflight Determination":
     context "needs_preflight":
         it "needs_preflight returns false for simple GET":
-            val headers: [text] = ["Accept", "Content-Type"]
-            expect needs_preflight("GET", headers) == false
+            val headers = [Pair("Origin", "https://app.example.com"), Pair("Accept", "text/html")]
+            expect cors_checker().needs_preflight(request(HttpMethod.Get, headers)) == false
 
         it "needs_preflight returns true for PUT request":
-            val headers: [text] = ["Accept"]
-            expect needs_preflight("PUT", headers) == true
+            val headers = [Pair("Origin", "https://app.example.com"), Pair("Accept", "text/html")]
+            expect cors_checker().needs_preflight(request(HttpMethod.Put, headers)) == true
 
     context "needs_preflight with non-simple headers":
         it "needs_preflight returns true for non-simple header":
-            val headers: [text] = ["Authorization"]
-            expect needs_preflight("GET", headers) == true
+            val headers = [Pair("Origin", "https://app.example.com"), Pair("Authorization", "Bearer x")]
+            expect cors_checker().needs_preflight(request(HttpMethod.Get, headers)) == true
+
+        it "needs_preflight returns true for JSON content-type":
+            val headers = [Pair("Origin", "https://app.example.com"), Pair("Content-Type", "application/json")]
+            expect cors_checker().needs_preflight(request(HttpMethod.Post, headers)) == true
 
 # ============================================================================
 # Preflight Validation
@@ -129,35 +115,60 @@ describe "CORS Preflight Determination":
 
 describe "CORS Preflight Validation":
     context "validate_preflight":
-        it "validate_preflight allows matching origin":
-            val policy = CorsPolicy.create(
-                allowed_origins: ["https://example.com", "https://app.example.com"],
-                allowed_methods: ["GET", "POST"],
-                allowed_headers: ["Accept"],
-                max_age: 3600,
-                allow_credentials: false
+        it "validate_preflight allows matching request Origin header":
+            val original = request(
+                HttpMethod.Put,
+                [Pair("Origin", "https://app.example.com"), Pair("Authorization", "Bearer x")]
             )
-            val result = validate_preflight(policy, "https://example.com")
+            val preflight = response(204, [
+                Pair("Access-Control-Allow-Origin", "https://app.example.com"),
+                Pair("Access-Control-Allow-Methods", "PUT"),
+                Pair("Access-Control-Allow-Headers", "Authorization")
+            ])
+            val result = cors_checker().validate_preflight(preflight, original)
             match result:
                 PreflightResult.Allowed:
                     expect true == true
                 PreflightResult.Denied(reason):
                     expect "should be allowed" == ""
 
-        it "validate_preflight denies mismatched origin":
-            val policy = CorsPolicy.create(
-                allowed_origins: ["https://example.com"],
-                allowed_methods: ["GET"],
-                allowed_headers: ["Accept"],
-                max_age: 3600,
-                allow_credentials: false
+        it "validate_preflight denies mismatched request Origin header":
+            val original = request(
+                HttpMethod.Put,
+                [Pair("Origin", "https://app.example.com"), Pair("Authorization", "Bearer x")]
             )
-            val result = validate_preflight(policy, "https://evil.com")
+            val preflight = response(204, [
+                Pair("Access-Control-Allow-Origin", "https://other.example.com"),
+                Pair("Access-Control-Allow-Methods", "PUT"),
+                Pair("Access-Control-Allow-Headers", "Authorization")
+            ])
+            val result = cors_checker().validate_preflight(preflight, original)
             match result:
                 PreflightResult.Allowed:
                     expect "should be denied" == ""
                 PreflightResult.Denied(reason):
-                    expect (reason).contains("not allowed")
+                    expect (reason).contains("not allowed by preflight")
+
+        it "create_preflight preserves the caller Origin header":
+            val original = request(
+                HttpMethod.Put,
+                [Pair("Origin", "https://app.example.com"), Pair("Authorization", "Bearer x")]
+            )
+            val preflight = cors_checker().create_preflight(original)
+            expect preflight.headers[0].first == "Origin"
+            expect preflight.headers[0].second == "https://app.example.com"
+
+describe "CORS Response Validation":
+    context "check":
+        it "allows response when allow-origin matches caller Origin header":
+            val req = request(HttpMethod.Get, [Pair("Origin", "https://app.example.com")])
+            val headers = [Pair("Access-Control-Allow-Origin", "https://app.example.com")]
+            expect result_is_ok(cors_checker().check(req, headers)) == true
+
+        it "denies response when allow-origin matches target but not caller":
+            val req = request(HttpMethod.Get, [Pair("Origin", "https://app.example.com")])
+            val headers = [Pair("Access-Control-Allow-Origin", "https://api.example.com")]
+            expect result_is_ok(cors_checker().check(req, headers)) == false
 
 # ============================================================================
 # Allow-Origin Parsing
@@ -166,10 +177,10 @@ describe "CORS Preflight Validation":
 describe "CORS Allow-Origin Parsing":
     context "parse_allow_origin":
         it "parse_allow_origin handles wildcard":
-            expect parse_allow_origin("*") == "*"
+            expect parse_allow_origin("*")[0] == "*"
 
         it "parse_allow_origin handles specific origin":
-            expect parse_allow_origin("https://example.com") == "https://example.com"
+            expect parse_allow_origin("https://example.com")[0] == "https://example.com"
 
 # ============================================================================
 # Redirect Detection
@@ -193,7 +204,7 @@ describe "Fetch Redirect Detection":
 describe "Fetch Response Cacheability":
     context "is_cacheable":
         it "is_cacheable returns true for 200 response":
-            expect is_cacheable(200) == true
+            expect is_cacheable(response(200, [])) == true
 
         it "is_cacheable returns false for 404 response":
-            expect is_cacheable(404) == false
+            expect is_cacheable(response(404, [])) == false

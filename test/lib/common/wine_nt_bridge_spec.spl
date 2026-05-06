@@ -5,7 +5,9 @@ use common.wine_nt_bridge.{
     wine_nt_bridge_dispatch_call,
     wine_nt_bridge_exit_code_zero,
     wine_nt_bridge_execute_hello_stdout,
+    wine_nt_bridge_execute_stdout_sequence,
     wine_nt_bridge_gate,
+    wine_nt_bridge_modeled_precondition_gate,
     wine_nt_bridge_stdout_handle,
     wine_nt_bridge_write_file,
     wine_nt_bridge_write_stdout
@@ -17,6 +19,22 @@ describe "Wine NT bridge":
 
     it "accepts the known hello bridge table":
         expect(wine_nt_bridge_gate(["GetStdHandle", "WriteFile", "ExitProcess"])).to_equal("ready")
+
+    it "separates modeled precondition routing from arbitrary import dispatch":
+        val vm = wine_nt_bridge_modeled_precondition_gate("kernel32.dll", "VirtualAlloc")
+        val heap = wine_nt_bridge_modeled_precondition_gate("kernel32.dll", "HeapAlloc")
+        val ntdll = wine_nt_bridge_modeled_precondition_gate("ntdll.dll", "NtAllocateVirtualMemory")
+        expect(vm.ok).to_equal(true)
+        expect(vm.state).to_equal("modeled-precondition")
+        expect(heap.category).to_equal("heap")
+        expect(ntdll.ok).to_equal(true)
+        expect(ntdll.category).to_equal("nt-virtual-memory")
+        expect(wine_nt_bridge_gate(["GetStdHandle", "WriteFile", "ExitProcess", "VirtualAlloc"])).to_equal("bridge-unsupported:VirtualAlloc")
+
+    it "rejects unknown precondition routing symbols":
+        val result = wine_nt_bridge_modeled_precondition_gate("kernel32.dll", "UnknownApi")
+        expect(result.ok).to_equal(false)
+        expect(result.state).to_equal("unsupported-symbol:UnknownApi")
 
     it "models the stdout handle and exit code for the milestone":
         expect(wine_nt_bridge_stdout_handle()).to_equal(-11)
@@ -59,6 +77,13 @@ describe "Wine NT bridge":
         expect(result.bytes_written).to_equal(25)
         expect(result.exit_code).to_equal(0)
         expect(result.stdout).to_equal("Hello from SimpleOS Wine\n")
+
+    it "executes stdout only through the ordered NT call sequence":
+        val result = wine_nt_bridge_execute_stdout_sequence(["GetStdHandle", "WriteFile", "ExitProcess"], "Hello from SimpleOS Wine\n")
+        expect(result.ok).to_equal(true)
+        expect(result.bytes_written).to_equal(25)
+        expect(wine_nt_bridge_execute_stdout_sequence(["WriteFile", "GetStdHandle", "ExitProcess"], "Hello from SimpleOS Wine\n").error).to_equal("bridge-sequence-expected:GetStdHandle")
+        expect(wine_nt_bridge_execute_stdout_sequence(["GetStdHandle", "WriteFile"], "Hello from SimpleOS Wine\n").error).to_equal("bridge-sequence-count-mismatch")
 
     it "rejects empty bridge payload execution":
         val result = wine_nt_bridge_execute_hello_stdout("")

@@ -71,6 +71,35 @@ fn has_element(builder: TreeBuilder, tag: text) -> bool:
         i = i + 1
     false
 
+fn element_attr(builder: TreeBuilder, tag: text, attr_name: text) -> text?:
+    var i = 0
+    while i < builder.elements.len():
+        val elem = builder.elements[i]
+        if elem.tag_name == tag:
+            var ai = 0
+            while ai < elem.attributes.len():
+                val attr = elem.attributes[ai]
+                if attr.name == attr_name:
+                    return Some(attr.value)
+                ai = ai + 1
+        i = i + 1
+    None
+
+fn child_text_of(builder: TreeBuilder, tag: text) -> text:
+    var i = 0
+    while i < builder.elements.len():
+        val elem = builder.elements[i]
+        if elem.tag_name == tag:
+            val node = builder.get_node(elem.node_id)
+            var ci = 0
+            while ci < node.children.len():
+                val child = builder.get_node(node.children[ci])
+                if child.kind == NodeKind.Text:
+                    return child.data
+                ci = ci + 1
+        i = i + 1
+    ""
+
 # ============================================================================
 # Tests
 # ============================================================================
@@ -109,16 +138,17 @@ describe "Page Loading Integration":
                     expect "parse should succeed" == ""
 
         it "inline scripts execute during parse":
-            """Script tags with inline content are recognized by the tree builder."""
+            """Script tags preserve inline source as raw text for later execution/CSP checks."""
             var builder = build_tree("<html><body><script>var x = 1;</script></body></html>")
             val result = builder.parse()
             match result:
                 Ok(doc_id):
                     expect has_element(builder, "script") == true
+                    expect child_text_of(builder, "script") == "var x = 1;"
                 Err(e):
                     expect "parse should succeed" == ""
 
-        it "external script blocks parsing":
+        it "external script preserves src for resource and CSP checks":
             """A script tag with src attribute is created as a void-like element that
             would block the parser waiting for the network fetch."""
             var builder = build_tree("<html><body><script src=\"app.js\"></script><p>after</p></body></html>")
@@ -126,16 +156,18 @@ describe "Page Loading Integration":
             match result:
                 Ok(doc_id):
                     expect has_element(builder, "script") == true
+                    expect element_attr(builder, "script", "src") == Some("app.js")
                 Err(e):
                     expect "parse should succeed" == ""
 
-        it "deferred script executes after parse":
+        it "deferred script preserves boolean defer attribute":
             """A script tag with defer attribute should still be created as a node."""
             var builder = build_tree("<html><body><script defer src=\"app.js\"></script></body></html>")
             val result = builder.parse()
             match result:
                 Ok(doc_id):
                     expect has_element(builder, "script") == true
+                    expect element_attr(builder, "script", "defer") == Some("")
                 Err(e):
                     expect "parse should succeed" == ""
 

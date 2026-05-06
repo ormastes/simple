@@ -17,10 +17,67 @@ class Url:
         Url(scheme: scheme, host: host, port: port, path: path, query: "", fragment: "", raw: "")
 
     static fn parse(raw: text) -> Url:
-        Url(scheme: "", host: "", port: 0, path: "", query: "", fragment: "", raw: raw)
+        val input = raw.trim()
+        var scheme = ""
+        var host = ""
+        var port: i64 = 0
+        var path = "/"
+        var query = ""
+        var fragment = ""
+        var rest = input
+
+        val scheme_idx = rest.index_of("://")
+        if scheme_idx >= 0:
+            scheme = rest.substring(0, scheme_idx).to_lower()
+            rest = rest.substring(scheme_idx + 3, rest.len())
+            port = default_port_for_scheme(scheme)
+
+        val fragment_idx = rest.index_of("#")
+        if fragment_idx >= 0:
+            fragment = rest.substring(fragment_idx + 1, rest.len())
+            rest = rest.substring(0, fragment_idx)
+
+        val query_idx = rest.index_of("?")
+        if query_idx >= 0:
+            query = rest.substring(query_idx + 1, rest.len())
+            rest = rest.substring(0, query_idx)
+
+        var authority = ""
+        if rest.starts_with("/"):
+            path = if rest == "": "/" else: rest
+        else:
+            val slash_idx = rest.index_of("/")
+            if slash_idx >= 0:
+                authority = rest.substring(0, slash_idx)
+                path = rest.substring(slash_idx, rest.len())
+            else:
+                authority = rest
+                path = "/"
+
+        val at_idx = authority.index_of("@")
+        if at_idx >= 0:
+            authority = authority.substring(at_idx + 1, authority.len())
+
+        if authority.starts_with("["):
+            val close_idx = authority.index_of("]")
+            if close_idx > 0:
+                host = authority.substring(0, close_idx + 1).to_lower()
+                if close_idx + 1 < authority.len() and authority.substring(close_idx + 1, close_idx + 2) == ":":
+                    port = parse_port(authority.substring(close_idx + 2, authority.len()), port)
+            else:
+                host = authority.to_lower()
+        else:
+            val colon_idx = authority.last_index_of(":")
+            if colon_idx > 0:
+                host = authority.substring(0, colon_idx).to_lower()
+                port = parse_port(authority.substring(colon_idx + 1, authority.len()), port)
+            else:
+                host = authority.to_lower()
+
+        Url(scheme: scheme, host: host, port: port, path: path, query: query, fragment: fragment, raw: raw)
 
     fn to_text() -> text:
-        val port_str = if self.port > 0: ":{self.port}" else: ""
+        val port_str = if should_render_port(self.scheme, self.port): ":{self.port}" else: ""
         val query_str = if self.query != "": "?{self.query}" else: ""
         val frag_str = if self.fragment != "": "#{self.fragment}" else: ""
         "{self.scheme}://{self.host}{port_str}{self.path}{query_str}{frag_str}"
@@ -34,14 +91,46 @@ class Origin:
         Origin(scheme: url.scheme, host: url.host, port: url.port)
 
     fn to_text() -> text:
-        val port_str = if self.port > 0: ":{self.port}" else: ""
+        val port_str = if should_render_port(self.scheme, self.port): ":{self.port}" else: ""
         "{self.scheme}://{self.host}{port_str}"
 
 class UrlSearchParams:
     params: [Pair<text, text>]
 
     static fn empty() -> UrlSearchParams:
-        UrlSearchParams(params: List<Pair<text, text>>())
+        UrlSearchParams(params: [])
 
 fn is_same_origin(a: Origin, b: Origin) -> bool:
-    a.scheme == b.scheme and a.host == b.host and a.port == b.port
+    a.scheme == b.scheme and a.host == b.host and effective_port(a.scheme, a.port) == effective_port(b.scheme, b.port)
+
+fn default_port_for_scheme(scheme: text) -> i64:
+    match scheme.to_lower():
+        "http": 80
+        "ws": 80
+        "https": 443
+        "wss": 443
+        _: 0
+
+fn effective_port(scheme: text, port: i64) -> i64:
+    if port > 0:
+        return port
+    default_port_for_scheme(scheme)
+
+fn should_render_port(scheme: text, port: i64) -> bool:
+    port > 0 and port != default_port_for_scheme(scheme)
+
+fn parse_port(raw: text, fallback: i64) -> i64:
+    val trimmed = raw.trim()
+    if trimmed == "":
+        return fallback
+    var result: i64 = 0
+    var i = 0
+    while i < trimmed.len():
+        val ch = trimmed.substring(i, i + 1)
+        if ch < "0" or ch > "9":
+            return fallback
+        result = result * 10 + (ch.to_i64() - "0".to_i64())
+        i = i + 1
+    if result <= 0:
+        return fallback
+    result

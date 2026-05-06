@@ -11,11 +11,23 @@ class WineHelloInstructionPlan:
     write_file_rva: i64
     exit_process_rva: i64
 
+class WineX86_64ScanResult:
+    ok: bool
+    state: text
+    start_offset: i64
+    end_offset: i64
+    instruction_count: i64
+    last_offset: i64
+    last_instruction: text
+
 fn _plan_error(error: text, entry_rva: i64) -> WineHelloInstructionPlan:
     WineHelloInstructionPlan(ok: false, error: error, entry_rva: entry_rva, get_std_handle_rva: 0, stdout_payload_rva: 0, write_file_rva: 0, exit_process_rva: 0)
 
 fn _plan_ready(entry_rva: i64, get_std_handle_rva: i64, stdout_payload_rva: i64, write_file_rva: i64, exit_process_rva: i64) -> WineHelloInstructionPlan:
     WineHelloInstructionPlan(ok: true, error: "", entry_rva: entry_rva, get_std_handle_rva: get_std_handle_rva, stdout_payload_rva: stdout_payload_rva, write_file_rva: write_file_rva, exit_process_rva: exit_process_rva)
+
+fn _scan_result(ok: bool, state: text, start_offset: i64, end_offset: i64, instruction_count: i64, last_offset: i64, last_instruction: text) -> WineX86_64ScanResult:
+    WineX86_64ScanResult(ok: ok, state: state, start_offset: start_offset, end_offset: end_offset, instruction_count: instruction_count, last_offset: last_offset, last_instruction: last_instruction)
 
 fn _byte(data: [u8], offset: i64) -> i64:
     if offset < 0 or offset >= data.len():
@@ -40,6 +52,10 @@ pub fn wine_x86_64_instruction_at(data: [u8], offset: i64) -> text:
     val b0 = _byte(data, offset)
     if b0 < 0:
         return "instruction-out-of-bounds"
+    if b0 == 0x90:
+        return "nop"
+    if b0 == 0xc3:
+        return "ret"
     if b0 == 0xe8:
         if _u32_le(data, offset + 1) < 0:
             return "truncated-call-rel32"
@@ -59,6 +75,15 @@ pub fn wine_x86_64_instruction_at(data: [u8], offset: i64) -> text:
             return "xor-rcx-rcx"
         if b1 == 0x31:
             return "unsupported-rex-xor"
+        if b1 == 0x83:
+            val b3 = _byte(data, offset + 3)
+            if b3 < 0:
+                return "truncated-rex-alu-imm8"
+            if b2 == 0xec:
+                return "sub-rsp-imm8"
+            if b2 == 0xc4:
+                return "add-rsp-imm8"
+            return "unsupported-rex-alu-imm8"
         if b1 == 0x8d and b2 == 0x15:
             if _u32_le(data, offset + 3) < 0:
                 return "truncated-lea-rip-rel32"
@@ -67,6 +92,65 @@ pub fn wine_x86_64_instruction_at(data: [u8], offset: i64) -> text:
             return "unsupported-rex-lea"
         return "unsupported-rex-instruction"
     "unsupported-opcode"
+
+pub fn wine_x86_64_instruction_len_at(data: [u8], offset: i64) -> i64:
+    val kind = wine_x86_64_instruction_at(data, offset)
+    if kind == "nop" or kind == "ret":
+        return 1
+    if kind == "xor-ecx-ecx" or kind == "unsupported-xor-r32-r32":
+        return 2
+    if kind == "xor-rcx-rcx" or kind == "unsupported-rex-xor":
+        return 3
+    if kind == "sub-rsp-imm8" or kind == "add-rsp-imm8" or kind == "unsupported-rex-alu-imm8":
+        return 4
+    if kind == "call-rel32":
+        return 5
+    if kind == "lea-rdx-rip-rel32":
+        return 7
+    0
+
+fn _wine_x86_64_instruction_supported(kind: text) -> bool:
+    kind == "nop" or
+    kind == "ret" or
+    kind == "xor-ecx-ecx" or
+    kind == "xor-rcx-rcx" or
+    kind == "sub-rsp-imm8" or
+    kind == "add-rsp-imm8" or
+    kind == "call-rel32" or
+    kind == "lea-rdx-rip-rel32"
+
+pub fn wine_x86_64_scan_window(data: [u8], start_offset: i64, max_bytes: i64, max_instructions: i64) -> WineX86_64ScanResult:
+    if start_offset < 0:
+        return _scan_result(false, "invalid-start-offset", start_offset, start_offset, 0, start_offset, "")
+    if max_bytes <= 0:
+        return _scan_result(false, "invalid-byte-window", start_offset, start_offset, 0, start_offset, "")
+    if max_instructions <= 0:
+        return _scan_result(false, "invalid-instruction-limit", start_offset, start_offset + max_bytes, 0, start_offset, "")
+    val end_offset = start_offset + max_bytes
+    if end_offset > data.len():
+        return _scan_result(false, "byte-window-out-of-bounds", start_offset, end_offset, 0, start_offset, "")
+    var cursor = start_offset
+    var count = 0
+    var last_offset = start_offset
+    var last_instruction = ""
+    while cursor < end_offset:
+        if count >= max_instructions:
+            return _scan_result(false, "instruction-limit", start_offset, end_offset, count, last_offset, last_instruction)
+        val kind = wine_x86_64_instruction_at(data, cursor)
+        val length = wine_x86_64_instruction_len_at(data, cursor)
+        if not _wine_x86_64_instruction_supported(kind):
+            return _scan_result(false, kind, start_offset, end_offset, count, cursor, kind)
+        if length <= 0:
+            return _scan_result(false, kind, start_offset, end_offset, count, cursor, kind)
+        if cursor + length > end_offset:
+            return _scan_result(false, "instruction-window-overrun:" + kind, start_offset, end_offset, count, cursor, kind)
+        count = count + 1
+        last_offset = cursor
+        last_instruction = kind
+        cursor = cursor + length
+        if kind == "ret":
+            return _scan_result(true, "ready", start_offset, cursor, count, last_offset, last_instruction)
+    _scan_result(true, "ready", start_offset, cursor, count, last_offset, last_instruction)
 
 pub fn wine_x86_64_hello_decode_plan(data: [u8]) -> WineHelloInstructionPlan:
     val entry_rva = pe_entry_point_rva(data)

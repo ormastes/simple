@@ -507,11 +507,23 @@ class TreeBuilder:
                         val self_closing = raw.substring(raw.len() - 1, raw.len()) == "/"
                         val clean = if self_closing: raw.substring(0, raw.len() - 1).trim() else: raw
                         val tag = self.first_word(clean).to_lower()
+                        val attrs = self.parse_tag_attributes(clean)
                         if tag == "div" and self.get_element_tag(self.current_node()) == "p":
                             self.pop_current()
-                        self.insert_element(tag, [])
+                        self.insert_element(tag, attrs)
                         if self_closing or self.is_void_element(tag):
                             self.pop_current()
+                        else if tag == "script" or tag == "style":
+                            val close_tag = "</" + tag + ">"
+                            val close_pos = self.find_from(html.to_lower(), close_tag, gt + 1)
+                            if close_pos < 0:
+                                self.insert_text(html.substring(gt + 1, html.len()))
+                                self.pop_current()
+                                return
+                            self.insert_text(html.substring(gt + 1, close_pos))
+                            self.pop_current()
+                            pos = close_pos + close_tag.len()
+                            continue
                 pos = gt + 1
 
     me first_word(raw: text) -> text:
@@ -522,6 +534,47 @@ class TreeBuilder:
                 return raw.substring(0, i)
             i = i + 1
         raw
+
+    me parse_tag_attributes(raw: text) -> [Attr]:
+        var attrs: [Attr] = []
+        var i = self.first_word(raw).len()
+        while i < raw.len():
+            while i < raw.len() and self.is_whitespace(raw.substring(i, i + 1)):
+                i = i + 1
+            if i >= raw.len():
+                return attrs
+            val name_start = i
+            while i < raw.len():
+                val ch = raw.substring(i, i + 1)
+                if self.is_whitespace(ch) or ch == "=":
+                    break
+                i = i + 1
+            val name = raw.substring(name_start, i).to_lower()
+            while i < raw.len() and self.is_whitespace(raw.substring(i, i + 1)):
+                i = i + 1
+            var value = ""
+            if i < raw.len() and raw.substring(i, i + 1) == "=":
+                i = i + 1
+                while i < raw.len() and self.is_whitespace(raw.substring(i, i + 1)):
+                    i = i + 1
+                if i < raw.len():
+                    val quote = raw.substring(i, i + 1)
+                    if quote == "\"" or quote == "'":
+                        i = i + 1
+                        val value_start = i
+                        while i < raw.len() and raw.substring(i, i + 1) != quote:
+                            i = i + 1
+                        value = raw.substring(value_start, i)
+                        if i < raw.len():
+                            i = i + 1
+                    else:
+                        val value_start = i
+                        while i < raw.len() and not self.is_whitespace(raw.substring(i, i + 1)):
+                            i = i + 1
+                        value = raw.substring(value_start, i)
+            if name.len() > 0:
+                attrs.push(Attr.create(name, value))
+        attrs
 
     me find_from(haystack: text, needle: text, start: i64) -> i64:
         var i = start

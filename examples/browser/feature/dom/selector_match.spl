@@ -29,14 +29,15 @@ class AnBFormula:
         if self.a == 0:
             # 0n+B means only position B matches
             return pos == self.b
-        # An+B: pos = a*n + b for some non-negative integer n
-        # => n = (pos - b) / a, and n must be >= 0 and integer
-        val diff = pos - self.b
-        # Check divisibility
-        if diff % self.a != 0:
-            return false
-        val n = diff / self.a
-        n >= 0
+        if self.a > 0:
+            var current = self.b
+            while current < pos:
+                current = current + self.a
+            return current == pos
+        var current = self.b
+        while current > pos:
+            current = current + self.a
+        current == pos and current > 0
 
 # Parse An+B syntax from a text argument.
 # Handles: "odd", "even", "3", "2n+1", "-n+3", "n", "3n", "-2n-1", etc.
@@ -148,12 +149,14 @@ fn selector_matches_direct(selector: Selector, node_id: i64, doc_nodes: [DomNode
     var i = 0
     while i < selector.parts.len():
         val part = selector.parts.get(i)
+        var part_matches = false
         match part:
             SelectorPart.Combinator(_):
-                return false
+                part_matches = false
             _:
-                if not matches_simple_selector_part_direct(part, node_id, doc_nodes, elements):
-                    return false
+                part_matches = matches_simple_selector_part_direct(part, node_id, doc_nodes, elements)
+        if not part_matches:
+            return false
         i = i + 1
     true
 
@@ -743,11 +746,15 @@ fn walk_subtree(root_id: i64, doc_nodes: [DomNode]) -> [i64]:
 fn an_b_formula_matches_position(formula: AnBFormula, pos: i64) -> bool:
     if formula.a == 0:
         return pos == formula.b
-    val diff = pos - formula.b
-    if diff % formula.a != 0:
-        return false
-    val n = diff / formula.a
-    n >= 0
+    if formula.a > 0:
+        var current = formula.b
+        while current < pos:
+            current = current + formula.a
+        return current == pos
+    var current = formula.b
+    while current > pos:
+        current = current + formula.a
+    current == pos and current > 0
 
 fn matches_functional_pseudo_direct(name: text, arg_text: text, node_id: i64, doc_nodes: [DomNode], elements: [Element]) -> bool:
     if name == "nth-child":
@@ -826,28 +833,29 @@ fn matches_functional_pseudo_direct(name: text, arg_text: text, node_id: i64, do
     false
 
 fn matches_simple_selector_part_direct(part: SelectorPart, node_id: i64, doc_nodes: [DomNode], elements: [Element]) -> bool:
+    var result = false
     match part:
         SelectorPart.Type(name):
             val elem = get_element_for_node(node_id, elements)
             match elem:
-                Some(e): e.tag_name.to_lower() == name.to_lower()
-                nil: false
+                Some(e): result = e.tag_name.to_lower() == name.to_lower()
+                nil: result = false
         SelectorPart.Class(name):
             val elem = get_element_for_node(node_id, elements)
             match elem:
-                Some(e): selector_element_has_class(e, name)
-                nil: false
+                Some(e): result = selector_element_has_class(e, name)
+                nil: result = false
         SelectorPart.Id(name):
             val elem = get_element_for_node(node_id, elements)
             match elem:
                 Some(e):
                     val id_attr = get_attribute_value(e, "id")
                     match id_attr:
-                        Some(v): v == name
-                        nil: false
-                nil: false
+                        Some(v): result = v == name
+                        nil: result = false
+                nil: result = false
         SelectorPart.Universal:
-            get_element_for_node(node_id, elements).?
+            result = get_element_for_node(node_id, elements).?
         SelectorPart.Attribute(attr_name, op, attr_value):
             val elem = get_element_for_node(node_id, elements)
             match elem:
@@ -856,54 +864,56 @@ fn matches_simple_selector_part_direct(part: SelectorPart, node_id: i64, doc_nod
                     match actual:
                         Some(v):
                             if op == "":
-                                return true
-                            if op == "=":
-                                return v == attr_value
-                            if op == "^=":
-                                return v.starts_with(attr_value)
-                            if op == "$=":
-                                return v.ends_with(attr_value)
-                            if op == "*=":
-                                return v.contains(attr_value)
-                            false
+                                result = true
+                            else if op == "=":
+                                result = v == attr_value
+                            else if op == "^=":
+                                result = v.starts_with(attr_value)
+                            else if op == "$=":
+                                result = v.ends_with(attr_value)
+                            else if op == "*=":
+                                result = v.contains(attr_value)
+                            else:
+                                result = false
                         nil:
-                            false
+                            result = false
                 nil:
-                    false
+                    result = false
         SelectorPart.PseudoClass(name):
             if name == "first-child":
                 val parent = get_parent(node_id, doc_nodes)
                 match parent:
                     Some(pid):
                         val siblings = get_siblings(node_id, doc_nodes)
-                        siblings.len() > 0 and siblings.get(0) == node_id
+                        result = siblings.len() > 0 and siblings.get(0) == node_id
                     nil:
-                        false
+                        result = false
             else if name == "last-child":
                 val parent = get_parent(node_id, doc_nodes)
                 match parent:
                     Some(pid):
                         val siblings = get_siblings(node_id, doc_nodes)
-                        siblings.len() > 0 and siblings.get(siblings.len() - 1) == node_id
+                        result = siblings.len() > 0 and siblings.get(siblings.len() - 1) == node_id
                     nil:
-                        false
+                        result = false
             else:
-                false
+                result = false
         SelectorPart.FunctionalPseudo(name, arg_text):
-            matches_functional_pseudo_direct(name, arg_text, node_id, doc_nodes, elements)
+            result = matches_functional_pseudo_direct(name, arg_text, node_id, doc_nodes, elements)
         _:
-            false
+            result = false
+    result
 
 # Get the parent node ID of a given node.
 fn get_parent(node_id: i64, doc_nodes: [DomNode]) -> i64?:
-    var i = 0
-    while i < doc_nodes.len():
-        val node = doc_nodes.get(i)
+    var i = doc_nodes.len() - 1
+    while i >= 0:
+        val node = doc_nodes[i]
         if node.id == node_id:
             if node.parent_id >= 0 and node.parent_id != node_id:
-                return node.parent_id
+                return Some(node.parent_id)
             return nil
-        i = i + 1
+        i = i - 1
     nil
 
 # Get the sibling node IDs (children of the same parent).
@@ -911,15 +921,15 @@ fn get_siblings(node_id: i64, doc_nodes: [DomNode]) -> [i64]:
     val parent = get_parent(node_id, doc_nodes)
     match parent:
         Some(pid):
-            var i = 0
-            while i < doc_nodes.len():
-                val node = doc_nodes.get(i)
+            var i = doc_nodes.len() - 1
+            while i >= 0:
+                val node = doc_nodes[i]
                 if node.id == pid:
                     return node.children
-                i = i + 1
-            []
+                i = i - 1
+            return []
         nil:
-            []
+            return []
 
 # Get the index of a child within its parent's children list.
 fn get_child_index(node_id: i64, doc_nodes: [DomNode]) -> i64:
@@ -941,12 +951,15 @@ fn get_element_for_node(node_id: i64, elements: [Element]) -> Element?:
     while i < elements.len():
         val elem = elements.get(i)
         if elem.node_id == node_id:
-            return elem
+            return Some(elem)
         i = i + 1
     nil
 
 # Get an attribute value from an element by name.
 fn get_attribute_value(elem: Element, name: text) -> text?:
+    val patched = external_attribute_value(elem.node_id, name)
+    if val Some(v) = patched:
+        return Some(v)
     var i = 0
     while i < elem.attributes.len():
         val attr = elem.attributes.get(i)
@@ -973,26 +986,6 @@ fn selector_element_has_class(elem: Element, class_name: text) -> bool:
 
 # Get element siblings (only element nodes) from the parent's children.
 fn get_element_siblings(node_id: i64, doc_nodes: [DomNode], elements: [Element]) -> [i64]:
-    val parent = get_parent(node_id, doc_nodes)
-    match parent:
-        Some(pid):
-            var by_parent: [i64] = []
-            var e_i = 0
-            while e_i < elements.len():
-                val candidate = elements.get(e_i)
-                val candidate_parent = get_parent(candidate.node_id, doc_nodes)
-                match candidate_parent:
-                    Some(cpid):
-                        if cpid == pid:
-                            by_parent.push(candidate.node_id)
-                    nil:
-                        pass_dn
-                e_i = e_i + 1
-            if by_parent.len() > 0:
-                return by_parent
-        nil:
-            pass_dn
-
     val all_siblings = get_siblings(node_id, doc_nodes)
     var result: [i64] = []
     var i = 0
@@ -1037,34 +1030,34 @@ fn parse_simple_selector(arg: text) -> SelectorPart?:
     if s.len() == 0:
         return nil
 
-    val first = s.slice(0, 1)
+    val first = s.substring(0, 1)
 
     # .class
     if first == ".":
-        val class_name = s.slice(1, s.len())
-        return SelectorPart.Class(name: class_name)
+        val class_name = s.substring(1, s.len())
+        return Some(SelectorPart.Class(name: class_name))
 
     # #id
     if first == "#":
-        val id_name = s.slice(1, s.len())
-        return SelectorPart.Id(name: id_name)
+        val id_name = s.substring(1, s.len())
+        return Some(SelectorPart.Id(name: id_name))
 
     # :pseudo-class
     if first == ":":
-        val pseudo_name = s.slice(1, s.len())
-        return SelectorPart.PseudoClass(name: pseudo_name)
+        val pseudo_name = s.substring(1, s.len())
+        return Some(SelectorPart.PseudoClass(name: pseudo_name))
 
     # [attr] or [attr=value]
     if first == "[" and s.ends_with("]"):
         val inner = s.substring(1, s.len() - 1)
-        return parse_attribute_selector(inner)
+        return Some(parse_attribute_selector(inner))
 
     # * universal
     if s == "*":
-        return SelectorPart.Universal
+        return Some(SelectorPart.Universal)
 
     # Tag name
-    SelectorPart.Type(name: s)
+    Some(SelectorPart.Type(name: s))
 
 # Parse an attribute selector inner text (without brackets).
 fn parse_attribute_selector(inner: text) -> SelectorPart:

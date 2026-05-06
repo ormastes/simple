@@ -21,6 +21,7 @@ use common.wine_nt_api_catalog.{wine_nt_api_catalogued_future_symbols, wine_nt_a
 use common.wine_nt_file_io.{wine_nt_file_table_add_file, wine_nt_file_table_new}
 use common.wine_nt_heap.{wine_nt_process_heap_new}
 use common.wine_nt_process_env.{wine_nt_get_command_line_w, wine_nt_get_environment_strings_w, wine_nt_process_env_add, wine_nt_process_env_new}
+use common.wine_nt_bridge.{wine_nt_bridge_modeled_precondition_gate}
 use common.wine_nt_thread_wait.{wine_nt_create_thread, wine_nt_thread_table_new, wine_nt_wait_for_single_object}
 use common.wine_ntdll_bridge.{
     wine_ntdll_allocate_virtual_memory,
@@ -104,9 +105,22 @@ pub fn wine_precondition_fixture_host_state() -> text:
 pub fn wine_precondition_fixture_pe_loader_state() -> text:
     wine_pe_gate(wine_precondition_fixture_pe_features())
 
+fn _precondition_symbol_dll(symbol: text) -> text:
+    if symbol == "NtAllocateVirtualMemory" or symbol == "NtProtectVirtualMemory" or symbol == "NtFreeVirtualMemory":
+        return "ntdll.dll"
+    if symbol == "NtCreateFile" or symbol == "NtReadFile" or symbol == "NtClose":
+        return "ntdll.dll"
+    if symbol == "RtlAllocateHeap" or symbol == "RtlFreeHeap":
+        return "ntdll.dll"
+    "kernel32.dll"
+
 pub fn wine_precondition_fixture_nt_bridge_state() -> text:
     if wine_nt_api_modeled_precondition_symbols().len() != wine_nt_api_catalogued_future_symbols().len():
         return "missing-modeled-catalog-entry"
+    for symbol in wine_nt_api_catalogued_future_symbols():
+        val routed = wine_nt_bridge_modeled_precondition_gate(_precondition_symbol_dll(symbol), symbol)
+        if not routed.ok:
+            return routed.state
     val allocated = wine_ntdll_allocate_virtual_memory(wine_vm_space_new(), 0x900000, 0x1000, "rw")
     if not allocated.ok:
         return "vm-" + allocated.state

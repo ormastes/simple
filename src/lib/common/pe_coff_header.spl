@@ -379,6 +379,46 @@ pub fn pe_first_import_symbol_names(data: [u8], limit: i64) -> [text]:
         i = i + 1
     names
 
+pub fn pe_first_import_thunk_gate(data: [u8], limit: i64) -> text:
+    val import_state = pe_import_directory_gate(data)
+    if import_state != "ready":
+        return import_state
+    if limit <= 0:
+        return "invalid-import-thunk-limit"
+    val summary = parse_pe_header_summary(data)
+    val optional_offset = summary.pe_offset + 24
+    val import_rva = _read_u32_le(data, optional_offset + 0x70 + 8)
+    val import_offset = pe_rva_to_file_offset(data, import_rva)
+    var thunk_rva = _read_u32_le(data, import_offset)
+    if thunk_rva == 0:
+        thunk_rva = _read_u32_le(data, import_offset + 16)
+    if thunk_rva == 0:
+        return "missing-import-thunk"
+    var i = 0
+    var symbol_count = 0
+    while i < limit:
+        val entry_rva = thunk_rva + (i * 8)
+        val entry_offset = pe_rva_to_file_offset(data, entry_rva)
+        if entry_offset < 0 or entry_offset + 7 >= data.len():
+            return "import-thunk-entry-unmapped"
+        val name_rva = _read_u32_le(data, entry_offset)
+        val entry_high = _read_u32_le(data, entry_offset + 4)
+        if name_rva == 0 and entry_high == 0:
+            if symbol_count == 0:
+                return "import-thunk-empty"
+            return "ready"
+        if entry_high != 0:
+            return "import-thunk-ordinal-unsupported"
+        val name_offset = pe_rva_to_file_offset(data, name_rva)
+        if name_offset < 0 or name_offset + 2 >= data.len():
+            return "import-symbol-name-unmapped"
+        val symbol = _read_ascii_z(data, name_offset + 2, 128)
+        if symbol == "":
+            return "import-symbol-name-invalid"
+        symbol_count = symbol_count + 1
+        i = i + 1
+    "import-thunk-limit-exceeded"
+
 pub fn pe_first_import_symbol_bindings(data: [u8], limit: i64) -> [PeImportSymbolBinding]:
     var bindings: [PeImportSymbolBinding] = []
     val import_state = pe_import_directory_gate(data)

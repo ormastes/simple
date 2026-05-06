@@ -6,6 +6,59 @@ use common.wine_host_gate.{wine_host_gate}
 use common.wine_pe_gate.{wine_pe_gate}
 use common.wine_async_gate.{wine_async_gate}
 
+class WineSubstrateCapabilityRow:
+    capability: text
+    state: text
+    implementation_path: text
+    evidence_command: text
+    notes: text
+
+fn _capability_row(capability: text, state: text, implementation_path: text, evidence_command: text, notes: text) -> WineSubstrateCapabilityRow:
+    WineSubstrateCapabilityRow(capability: capability, state: state, implementation_path: implementation_path, evidence_command: evidence_command, notes: notes)
+
+fn _verified_gate(gates: text, capability: text) -> bool:
+    gates.contains(capability + "=verified")
+
+fn _capability_path(capability: text) -> text:
+    if capability == "process":
+        return "src/lib/common/wine_substrate.spl"
+    if capability == "vm":
+        return "src/lib/common/wine_vm_adapter.spl"
+    if capability == "renderer2d" or capability == "wm_backend":
+        return "src/lib/common/ui/wine_x11_adapter.spl"
+    if capability == "posix_fd":
+        return "src/lib/common/wine_posix_adapter.spl"
+    if capability == "fs_semantics":
+        return "src/lib/common/wine_posix_adapter.spl"
+    if capability == "ipc_wait":
+        return "src/lib/common/wine_service_adapter.spl"
+    if capability == "pthread":
+        return "src/lib/common/wine_thread_adapter.spl"
+    if capability == "dynload":
+        return "src/lib/common/wine_dynload_adapter.spl"
+    if capability == "audio" or capability == "fonts" or capability == "input":
+        return "src/lib/common/wine_service_adapter.spl"
+    if capability == "async":
+        return "src/lib/common/wine_async_gate.spl"
+    if capability == "pe_loader":
+        return "src/lib/common/pe_coff_header.spl"
+    if capability == "nt_bridge":
+        return "src/lib/common/wine_nt_bridge.spl"
+    if capability == "hello_exe":
+        return "src/app/wine_hello/main.spl"
+    "doc/02_requirements/feature/simpleos_wine_substrate.md"
+
+fn _capability_evidence(capability: text) -> text:
+    if capability == "hello_exe":
+        return "bin/simple run src/app/wine_hello/main.spl"
+    if capability == "nt_bridge":
+        return "bin/simple test test/lib/common/wine_nt_bridge_spec.spl --mode=interpreter --clean"
+    if capability == "audio" or capability == "fonts" or capability == "input" or capability == "ipc_wait":
+        return "bin/simple test test/lib/common/wine_service_adapter_spec.spl --mode=interpreter --clean"
+    if capability == "fs_semantics" or capability == "posix_fd":
+        return "bin/simple test test/lib/common/wine_posix_adapter_spec.spl --mode=interpreter --clean"
+    "bin/simple test test/lib/common/wine_substrate_spec.spl --mode=interpreter --clean"
+
 pub fn wine_substrate_capability_state(capability: text) -> text:
     if capability == "research":
         return "verified"
@@ -15,10 +68,20 @@ pub fn wine_substrate_capability_state(capability: text) -> text:
         return "partial"
     if capability == "posix_fd":
         return "partial"
+    if capability == "fs_semantics":
+        return "partial"
+    if capability == "ipc_wait":
+        return "partial"
     if capability == "renderer2d":
         return "partial"
     if capability == "wm_backend":
         return "partial"
+    if capability == "audio":
+        return "missing"
+    if capability == "fonts":
+        return "missing"
+    if capability == "input":
+        return "missing"
     if capability == "pthread":
         return "missing"
     if capability == "dynload":
@@ -30,6 +93,61 @@ pub fn wine_substrate_capability_state(capability: text) -> text:
     if capability == "hello_exe":
         return "blocked"
     return "missing"
+
+pub fn wine_substrate_capability_state_from_gates(capability: text, gates: text) -> text:
+    if capability == "research":
+        return "verified"
+    if capability == "renderer2d" or capability == "wm_backend":
+        if _verified_gate(gates, "renderer"):
+            return "verified"
+        return wine_substrate_capability_state(capability)
+    if capability == "posix_fd":
+        if _verified_gate(gates, "posix"):
+            return "verified"
+        return wine_substrate_capability_state(capability)
+    if capability == "fs_semantics":
+        if _verified_gate(gates, "posix"):
+            return "verified"
+        return wine_substrate_capability_state(capability)
+    if capability == "ipc_wait" or capability == "audio" or capability == "fonts" or capability == "input":
+        if _verified_gate(gates, "host"):
+            return "verified"
+        return wine_substrate_capability_state(capability)
+    if capability == "hello_exe":
+        if wine_substrate_hello_exe_gate(gates) == "ready":
+            return "verified"
+        return wine_substrate_capability_state(capability)
+    if _verified_gate(gates, capability):
+        return "verified"
+    wine_substrate_capability_state(capability)
+
+pub fn wine_substrate_capability_row(capability: text, gates: text) -> WineSubstrateCapabilityRow:
+    val state = wine_substrate_capability_state_from_gates(capability, gates)
+    val notes = if state == "verified":
+        "verified by modeled Wine precondition evidence"
+    else:
+        "default capability state without complete gate evidence"
+    _capability_row(capability, state, _capability_path(capability), _capability_evidence(capability), notes)
+
+pub fn wine_substrate_capability_matrix(gates: text) -> [WineSubstrateCapabilityRow]:
+    [
+        wine_substrate_capability_row("process", gates),
+        wine_substrate_capability_row("vm", gates),
+        wine_substrate_capability_row("renderer2d", gates),
+        wine_substrate_capability_row("wm_backend", gates),
+        wine_substrate_capability_row("posix_fd", gates),
+        wine_substrate_capability_row("fs_semantics", gates),
+        wine_substrate_capability_row("ipc_wait", gates),
+        wine_substrate_capability_row("pthread", gates),
+        wine_substrate_capability_row("dynload", gates),
+        wine_substrate_capability_row("audio", gates),
+        wine_substrate_capability_row("fonts", gates),
+        wine_substrate_capability_row("input", gates),
+        wine_substrate_capability_row("async", gates),
+        wine_substrate_capability_row("pe_loader", gates),
+        wine_substrate_capability_row("nt_bridge", gates),
+        wine_substrate_capability_row("hello_exe", gates)
+    ]
 
 pub fn wine_substrate_verify_capability(capability: text, evidence_path: text) -> text:
     val current = wine_substrate_capability_state(capability)
