@@ -95,6 +95,35 @@ class FontMetrics:
             em_size: em_size
         )
 
+fn text_to_codepoints(s: text) -> [i64]:
+    val bytes = s.bytes()
+    var codepoints: [i64] = []
+    var i = 0
+    while i < bytes.len():
+        val b0 = bytes[i].to_i64() & 0xFF
+        if b0 < 0x80:
+            codepoints.push(b0)
+            i = i + 1
+        else if (b0 & 0xE0) == 0xC0 and i + 1 < bytes.len():
+            val b1 = bytes[i + 1].to_i64() & 0x3F
+            codepoints.push(((b0 & 0x1F) << 6) | b1)
+            i = i + 2
+        else if (b0 & 0xF0) == 0xE0 and i + 2 < bytes.len():
+            val b1 = bytes[i + 1].to_i64() & 0x3F
+            val b2 = bytes[i + 2].to_i64() & 0x3F
+            codepoints.push(((b0 & 0x0F) << 12) | (b1 << 6) | b2)
+            i = i + 3
+        else if (b0 & 0xF8) == 0xF0 and i + 3 < bytes.len():
+            val b1 = bytes[i + 1].to_i64() & 0x3F
+            val b2 = bytes[i + 2].to_i64() & 0x3F
+            val b3 = bytes[i + 3].to_i64() & 0x3F
+            codepoints.push(((b0 & 0x07) << 18) | (b1 << 12) | (b2 << 6) | b3)
+            i = i + 4
+        else:
+            codepoints.push(0xFFFD)
+            i = i + 1
+    codepoints
+
 # ---------------------------------------------------------------------------
 # TextShaper — shapes text runs into positioned glyphs.
 # ---------------------------------------------------------------------------
@@ -110,30 +139,24 @@ class TextShaper:
     # This is a simplified shaper — a real implementation would use
     # HarfBuzz or similar. We approximate with per-character advances.
     # -------------------------------------------------------------------
-    fn shape(run: TextRun) -> [ShapedGlyph]:
+    me shape(run: TextRun) -> [ShapedGlyph]:
         self.logger.trace("shaping text run: len={run.text_content.len()} font_size={run.font_size}")
-        var glyphs = [ShapedGlyph]()
+        var glyphs: [ShapedGlyph] = []
         val base_advance = measure_char_advance(run.font_size, run.font_family)
 
-        for ch in run.text_content:
-            val cp = char_to_codepoint(ch)
+        val codepoints = text_to_codepoints(run.text_content)
+        for cp in codepoints:
             var advance = base_advance + run.letter_spacing
 
             # Adjust advance for whitespace (word spacing)
-            if ch == " ":
+            if cp == 32:
                 advance = advance + run.word_spacing
 
             # Wider characters (CJK) get double advance
-            if is_cjk_char(ch):
+            if is_cjk_codepoint(cp):
                 advance = advance * 2.0
 
-            val glyph = ShapedGlyph(
-                codepoint: cp,
-                x_advance: advance,
-                y_advance: 0.0,
-                x_offset: 0.0,
-                y_offset: 0.0
-            )
+            val glyph = ShapedGlyph.create(cp, advance)
             glyphs.push(glyph)
 
         glyphs
@@ -147,17 +170,18 @@ fn find_break_opportunities(text_content: text) -> [BreakOpportunity]:
     var prev_ch = ""
     var idx = 0
 
-    for ch in text_content:
-        if ch == "\n":
+    val codepoints = text_to_codepoints(text_content)
+    for cp in codepoints:
+        if cp == 10:
             # Newline is a mandatory break
             result.push(BreakOpportunity.Mandatory)
-        else if ch == " " or ch == "\t":
+        else if cp == 32 or cp == 9:
             # Whitespace allows a break after it
             result.push(BreakOpportunity.Allowed)
-        else if ch == "-":
+        else if cp == 45:
             # Hyphen allows a break after it
             result.push(BreakOpportunity.Allowed)
-        else if is_cjk_char(ch):
+        else if is_cjk_codepoint(cp):
             # CJK characters allow breaks before and after
             result.push(BreakOpportunity.Allowed)
         else if is_breakable_whitespace(prev_ch):
@@ -166,7 +190,7 @@ fn find_break_opportunities(text_content: text) -> [BreakOpportunity]:
         else:
             result.push(BreakOpportunity.Prohibited)
 
-        prev_ch = ch
+        prev_ch = if cp == 32: " " else: if cp == 9: "\t" else: if cp == 10: "\n" else: ""
         idx = idx + 1
 
     result
@@ -254,11 +278,12 @@ fn measure_run(run: TextRun) -> f64:
     var total = 0.0
     val base_advance = measure_char_advance(run.font_size, run.font_family)
 
-    for ch in run.text_content:
+    val codepoints = text_to_codepoints(run.text_content)
+    for cp in codepoints:
         var advance = base_advance + run.letter_spacing
-        if ch == " ":
+        if cp == 32:
             advance = advance + run.word_spacing
-        if is_cjk_char(ch):
+        if is_cjk_codepoint(cp):
             advance = advance * 2.0
         total = total + advance
 
@@ -416,14 +441,10 @@ fn is_breakable_whitespace(c: text) -> bool:
     c == " " or c == "\t" or c == "\n" or c == "\r"
 
 fn is_cjk_char(c: text) -> bool:
-    # Simplified CJK detection based on common Unicode ranges.
-    # A real implementation would check codepoint ranges:
-    # U+4E00..U+9FFF (CJK Unified Ideographs)
-    # U+3400..U+4DBF (CJK Extension A)
-    # U+3000..U+303F (CJK Symbols and Punctuation)
-    # U+FF00..U+FFEF (Fullwidth Forms)
-    # For now, we use a heuristic: if the character is multibyte, treat it as CJK.
     val cp = char_to_codepoint(c)
+    is_cjk_codepoint(cp)
+
+fn is_cjk_codepoint(cp: i64) -> bool:
     (cp >= 0x4E00 and cp <= 0x9FFF) or (cp >= 0x3400 and cp <= 0x4DBF) or (cp >= 0x3000 and cp <= 0x303F) or (cp >= 0xFF00 and cp <= 0xFFEF) or (cp >= 0xAC00 and cp <= 0xD7AF)
 
 # ---------------------------------------------------------------------------
@@ -448,17 +469,30 @@ fn split_on_whitespace(text_content: text) -> [text]:
     words
 
 # ---------------------------------------------------------------------------
-# Utility — character to codepoint (placeholder; real impl uses runtime FFI).
+# Utility — decode a single UTF-8 character into a Unicode codepoint.
 # ---------------------------------------------------------------------------
 
 fn char_to_codepoint(c: text) -> i64:
-    # In a full implementation, this would return the Unicode codepoint.
-    # For now, return a simple ASCII-range approximation.
     if c.len() == 0:
         return 0
-    # The runtime provides char_code_at or similar
     val bytes = c.bytes()
-    if bytes.len() > 0:
-        bytes[0].to_i64()
-    else:
+    if bytes.len() == 0:
         0
+    else:
+        val b0 = bytes[0].to_i64() & 0xFF
+        if b0 < 0x80:
+            b0
+        else if (b0 & 0xE0) == 0xC0 and bytes.len() >= 2:
+            val b1 = bytes[1].to_i64() & 0x3F
+            ((b0 & 0x1F) << 6) | b1
+        else if (b0 & 0xF0) == 0xE0 and bytes.len() >= 3:
+            val b1 = bytes[1].to_i64() & 0x3F
+            val b2 = bytes[2].to_i64() & 0x3F
+            ((b0 & 0x0F) << 12) | (b1 << 6) | b2
+        else if (b0 & 0xF8) == 0xF0 and bytes.len() >= 4:
+            val b1 = bytes[1].to_i64() & 0x3F
+            val b2 = bytes[2].to_i64() & 0x3F
+            val b3 = bytes[3].to_i64() & 0x3F
+            ((b0 & 0x07) << 18) | (b1 << 12) | (b2 << 6) | b3
+        else:
+            0xFFFD

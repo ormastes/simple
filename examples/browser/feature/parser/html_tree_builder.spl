@@ -139,19 +139,19 @@ class TreeBuilder:
         TreeBuilder(
             tokenizer: tokenizer,
             insertion_mode: InsertionMode.Initial,
-            open_elements: [i64](),
-            active_formatting: [i64](),
+            open_elements: [],
+            active_formatting: [],
             head_element: -1,
             body_element: -1,
             document_node: -1,
-            nodes: [DomNode](),
-            elements: [Element](),
+            nodes: [],
+            elements: [],
             next_node_id: 0,
             foster_parenting: false,
             frameset_ok: true,
             scripting: false,
             original_insertion_mode: InsertionMode.Initial,
-            template_modes: [InsertionMode](),
+            template_modes: [],
             pending_table_text: "",
             pending_table_text_mode: InsertionMode.Initial,
             logger: logger
@@ -230,3 +230,243 @@ class TreeBuilder:
                 self.process_after_after_body(token)
             InsertionMode.AfterAfterFrameset:
                 self.process_after_after_frameset(token)
+
+    me process_initial(token: HtmlToken):
+        self.insertion_mode = InsertionMode.BeforeHtml
+        self.process_before_html(token)
+
+    me process_before_html(token: HtmlToken):
+        match token:
+            HtmlToken.StartTag(name, attributes, self_closing):
+                if name == "html":
+                    val html_id = self.insert_element("html", attributes)
+                    self.insertion_mode = InsertionMode.BeforeHead
+                else:
+                    self.ensure_html()
+                    self.insertion_mode = InsertionMode.BeforeHead
+                    self.process_before_head(token)
+            HtmlToken.Character(data):
+                if not self.is_whitespace(data):
+                    self.ensure_html()
+                    self.insertion_mode = InsertionMode.BeforeHead
+                    self.process_before_head(token)
+            _:
+                self.ensure_html()
+                self.insertion_mode = InsertionMode.BeforeHead
+                self.process_before_head(token)
+
+    me process_before_head(token: HtmlToken):
+        match token:
+            HtmlToken.StartTag(name, attributes, self_closing):
+                if name == "head":
+                    self.head_element = self.insert_element("head", attributes)
+                    self.insertion_mode = InsertionMode.InHead
+                else:
+                    self.head_element = self.insert_element("head", [])
+                    self.insertion_mode = InsertionMode.InHead
+                    self.process_in_head(token)
+            HtmlToken.Character(data):
+                if not self.is_whitespace(data):
+                    self.head_element = self.insert_element("head", [])
+                    self.insertion_mode = InsertionMode.InHead
+                    self.process_in_head(token)
+            _:
+                self.head_element = self.insert_element("head", [])
+                self.insertion_mode = InsertionMode.InHead
+                self.process_in_head(token)
+
+    me process_in_head(token: HtmlToken):
+        match token:
+            HtmlToken.EndTag(name):
+                if name == "head":
+                    self.pop_current()
+                    self.insertion_mode = InsertionMode.AfterHead
+                else:
+                    self.process_after_head(token)
+            HtmlToken.StartTag(name, attributes, self_closing):
+                if name == "body":
+                    self.pop_current()
+                    self.insertion_mode = InsertionMode.AfterHead
+                    self.process_after_head(token)
+                else:
+                    val id = self.insert_element(name, attributes)
+                    if self_closing or self.is_void_element(name):
+                        self.pop_current()
+            HtmlToken.Character(data):
+                if not self.is_whitespace(data):
+                    self.insert_text(data)
+            _:
+                pass_do_nothing
+
+    me process_after_head(token: HtmlToken):
+        match token:
+            HtmlToken.StartTag(name, attributes, self_closing):
+                if name == "body":
+                    self.body_element = self.insert_element("body", attributes)
+                    self.insertion_mode = InsertionMode.InBody
+                else:
+                    self.ensure_body()
+                    self.insertion_mode = InsertionMode.InBody
+                    self.process_in_body(token)
+            HtmlToken.Character(data):
+                if not self.is_whitespace(data):
+                    self.ensure_body()
+                    self.insertion_mode = InsertionMode.InBody
+                    self.process_in_body(token)
+            _:
+                self.ensure_body()
+                self.insertion_mode = InsertionMode.InBody
+                self.process_in_body(token)
+
+    me process_in_body(token: HtmlToken):
+        match token:
+            HtmlToken.StartTag(name, attributes, self_closing):
+                val id = self.insert_element(name, attributes)
+                if self_closing or self.is_void_element(name):
+                    self.pop_current()
+            HtmlToken.EndTag(name):
+                self.pop_until(name)
+            HtmlToken.Character(data):
+                self.insert_text(data)
+            HtmlToken.CommentToken(data):
+                self.insert_comment(data)
+            _:
+                pass_do_nothing
+
+    me process_text(token: HtmlToken):
+        self.process_in_body(token)
+
+    me process_in_head_noscript(token: HtmlToken):
+        self.process_in_head(token)
+
+    me process_in_table(token: HtmlToken):
+        self.process_in_body(token)
+
+    me process_in_table_text(token: HtmlToken):
+        self.process_in_body(token)
+
+    me process_in_caption(token: HtmlToken):
+        self.process_in_body(token)
+
+    me process_in_column_group(token: HtmlToken):
+        self.process_in_body(token)
+
+    me process_in_table_body(token: HtmlToken):
+        self.process_in_body(token)
+
+    me process_in_row(token: HtmlToken):
+        self.process_in_body(token)
+
+    me process_in_cell(token: HtmlToken):
+        self.process_in_body(token)
+
+    me process_in_select(token: HtmlToken):
+        self.process_in_body(token)
+
+    me process_in_select_in_table(token: HtmlToken):
+        self.process_in_body(token)
+
+    me process_in_template(token: HtmlToken):
+        self.process_in_body(token)
+
+    me process_after_body(token: HtmlToken):
+        pass_do_nothing
+
+    me process_in_frameset(token: HtmlToken):
+        pass_do_nothing
+
+    me process_after_frameset(token: HtmlToken):
+        pass_do_nothing
+
+    me process_after_after_body(token: HtmlToken):
+        pass_do_nothing
+
+    me process_after_after_frameset(token: HtmlToken):
+        pass_do_nothing
+
+    me ensure_html():
+        if self.open_elements.len() == 0:
+            self.insert_element("html", [])
+
+    me ensure_body():
+        if self.body_element < 0:
+            self.body_element = self.insert_element("body", [])
+
+    me create_node(kind: NodeKind, data: text) -> i64:
+        val id = self.next_node_id
+        self.next_node_id = self.next_node_id + 1
+        self.nodes.push(DomNode.create(id, kind, -1, data))
+        id
+
+    me create_element(tag: text, attrs: [Attr]) -> i64:
+        val id = self.create_node(NodeKind.Element, tag)
+        self.elements.push(Element(node_id: id, tag_name: tag, attributes: attrs, ns: "http://www.w3.org/1999/xhtml"))
+        id
+
+    me insert_element(tag: text, attrs: [Attr]) -> i64:
+        val id = self.create_element(tag, attrs)
+        val parent_id = self.current_node()
+        if parent_id >= 0:
+            self.append_child(parent_id, id)
+        else if id != self.document_node:
+            self.append_child(self.document_node, id)
+        self.open_elements.push(id)
+        id
+
+    me insert_text(data: text):
+        if data.len() == 0:
+            return
+        val id = self.create_node(NodeKind.Text, data)
+        val parent_id = self.current_node()
+        if parent_id >= 0:
+            self.append_child(parent_id, id)
+
+    me insert_comment(data: text):
+        val id = self.create_node(NodeKind.Comment, data)
+        val parent_id = self.current_node()
+        if parent_id >= 0:
+            self.append_child(parent_id, id)
+
+    me append_child(parent_id: i64, child_id: i64):
+        var i = 0
+        while i < self.nodes.len():
+            var node = self.nodes[i]
+            if node.id == parent_id:
+                node.children.push(child_id)
+                self.nodes[i] = node
+            else if node.id == child_id:
+                node.parent_id = parent_id
+                self.nodes[i] = node
+            i = i + 1
+
+    me current_node() -> i64:
+        if self.open_elements.len() == 0:
+            return self.document_node
+        self.open_elements[self.open_elements.len() - 1]
+
+    me pop_current():
+        if self.open_elements.len() > 0:
+            self.open_elements.pop()
+
+    me pop_until(tag: text):
+        while self.open_elements.len() > 0:
+            val top = self.current_node()
+            val top_tag = self.get_element_tag(top)
+            self.open_elements.pop()
+            if top_tag == tag:
+                return
+
+    me get_element_tag(node_id: i64) -> text:
+        var i = 0
+        while i < self.elements.len():
+            val elem = self.elements[i]
+            if elem.node_id == node_id:
+                return elem.tag_name
+            i = i + 1
+        ""
+
+    me is_whitespace(data: text) -> bool:
+        data == " " or data == "\n" or data == "\t" or data == "\r"
+
+    me is_void_element(name: text) -> bool:
+        name == "area" or name == "base" or name == "br" or name == "col" or name == "embed" or name == "hr" or name == "img" or name == "input" or name == "link" or name == "meta" or name == "param" or name == "source" or name == "track" or name == "wbr"
