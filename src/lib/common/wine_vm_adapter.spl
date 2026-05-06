@@ -1,6 +1,6 @@
 """Modeled Wine virtual-memory adapter for PE image mapping prerequisites."""
 
-use common.wine_vm_gate.{wine_vm_fault_gate, wine_vm_gate}
+use common.wine_vm_gate.{wine_container_gate, wine_vm_fault_gate, wine_vm_gate}
 
 class WineVmRegion:
     base: i64
@@ -8,10 +8,16 @@ class WineVmRegion:
     committed: bool
     perms: text
     guard: bool
+    backing: text
+    kind: text
 
 class WineVmSpace:
     regions: [WineVmRegion]
     next_base: i64
+    process_id: i64
+    address_space_id: i64
+    container_evidence: text
+    host_jump_policy: text
 
 class WineVmOpResult:
     ok: bool
@@ -26,20 +32,28 @@ class WineVmFault:
     access: text
     policy: text
 
-fn _region(base: i64, size: i64, committed: bool, perms: text, guard: bool) -> WineVmRegion:
-    WineVmRegion(base: base, size: size, committed: committed, perms: perms, guard: guard)
+fn _region(base: i64, size: i64, committed: bool, perms: text, guard: bool, backing: text, kind: text) -> WineVmRegion:
+    WineVmRegion(base: base, size: size, committed: committed, perms: perms, guard: guard, backing: backing, kind: kind)
 
 fn _empty_region() -> WineVmRegion:
-    _region(0, 0, false, "", false)
+    _region(0, 0, false, "", false, "", "")
 
-fn _space(regions: [WineVmRegion], next_base: i64) -> WineVmSpace:
-    WineVmSpace(regions: regions, next_base: next_base)
+fn _space(regions: [WineVmRegion], next_base: i64, process_id: i64, address_space_id: i64, container_evidence: text, host_jump_policy: text) -> WineVmSpace:
+    WineVmSpace(regions: regions, next_base: next_base, process_id: process_id, address_space_id: address_space_id, container_evidence: container_evidence, host_jump_policy: host_jump_policy)
+
+fn _region_backing(space: WineVmSpace) -> text:
+    if space.process_id > 0 and space.address_space_id > 0:
+        return "os-vma"
+    "modeled-vma"
 
 fn _result(ok: bool, state: text, space: WineVmSpace, region: WineVmRegion) -> WineVmOpResult:
     WineVmOpResult(ok: ok, state: state, space: space, region: region)
 
 pub fn wine_vm_space_new() -> WineVmSpace:
-    _space([], 0x10000000)
+    _space([], 0x10000000, 0, 0, "", "")
+
+pub fn wine_vm_process_space_new(process_id: i64, address_space_id: i64, container_evidence: text) -> WineVmSpace:
+    _space([], 0x10000000, process_id, address_space_id, container_evidence, "no-host-code-jump")
 
 pub fn wine_vm_region_end(region: WineVmRegion) -> i64:
     region.base + region.size
@@ -73,19 +87,19 @@ pub fn wine_vm_reserve_fixed(space: WineVmSpace, base: i64, size: i64) -> WineVm
         return _result(false, "invalid-size", space, _empty_region())
     if wine_vm_space_has_overlap(space, base, size):
         return _result(false, "fixed-map-conflict", space, _empty_region())
-    val region = _region(base, size, false, "none", false)
+    val region = _region(base, size, false, "none", false, _region_backing(space), "private")
     var regions = space.regions
     regions.push(region)
-    _result(true, "reserved", _space(regions, space.next_base), region)
+    _result(true, "reserved", _space(regions, space.next_base, space.process_id, space.address_space_id, space.container_evidence, space.host_jump_policy), region)
 
 pub fn wine_vm_reserve(space: WineVmSpace, size: i64) -> WineVmOpResult:
     if size <= 0:
         return _result(false, "invalid-size", space, _empty_region())
     val base = space.next_base
-    val region = _region(base, size, false, "none", false)
+    val region = _region(base, size, false, "none", false, _region_backing(space), "private")
     var regions = space.regions
     regions.push(region)
-    _result(true, "reserved", _space(regions, base + size + 0x10000), region)
+    _result(true, "reserved", _space(regions, base + size + 0x10000, space.process_id, space.address_space_id, space.container_evidence, space.host_jump_policy), region)
 
 fn _replace_region(space: WineVmSpace, replacement: WineVmRegion) -> WineVmSpace:
     var regions: [WineVmRegion] = []
@@ -94,13 +108,13 @@ fn _replace_region(space: WineVmSpace, replacement: WineVmRegion) -> WineVmSpace
             regions.push(replacement)
         else:
             regions.push(region)
-    _space(regions, space.next_base)
+    _space(regions, space.next_base, space.process_id, space.address_space_id, space.container_evidence, space.host_jump_policy)
 
 pub fn wine_vm_commit(space: WineVmSpace, base: i64, perms: text) -> WineVmOpResult:
     val region = wine_vm_space_find(space, base)
     if region.size == 0:
         return _result(false, "missing-reservation", space, _empty_region())
-    val committed = _region(region.base, region.size, true, perms, region.guard)
+    val committed = _region(region.base, region.size, true, perms, region.guard, region.backing, region.kind)
     _result(true, "committed", _replace_region(space, committed), committed)
 
 pub fn wine_vm_protect(space: WineVmSpace, base: i64, perms: text) -> WineVmOpResult:
@@ -109,14 +123,14 @@ pub fn wine_vm_protect(space: WineVmSpace, base: i64, perms: text) -> WineVmOpRe
         return _result(false, "missing-region", space, _empty_region())
     if not region.committed:
         return _result(false, "uncommitted-region", space, region)
-    val protected = _region(region.base, region.size, region.committed, perms, region.guard)
+    val protected = _region(region.base, region.size, region.committed, perms, region.guard, region.backing, region.kind)
     _result(true, "protected", _replace_region(space, protected), protected)
 
 pub fn wine_vm_mark_guard(space: WineVmSpace, base: i64) -> WineVmOpResult:
     val region = wine_vm_space_find(space, base)
     if region.size == 0:
         return _result(false, "missing-region", space, _empty_region())
-    val guarded = _region(region.base, region.size, region.committed, region.perms, true)
+    val guarded = _region(region.base, region.size, region.committed, region.perms, true, region.backing, region.kind)
     _result(true, "guarded", _replace_region(space, guarded), guarded)
 
 pub fn wine_vm_unmap(space: WineVmSpace, base: i64) -> WineVmOpResult:
@@ -127,7 +141,28 @@ pub fn wine_vm_unmap(space: WineVmSpace, base: i64) -> WineVmOpResult:
     for item in space.regions:
         if item.base != region.base:
             regions.push(item)
-    _result(true, "unmapped", _space(regions, space.next_base), region)
+    _result(true, "unmapped", _space(regions, space.next_base, space.process_id, space.address_space_id, space.container_evidence, space.host_jump_policy), region)
+
+pub fn wine_vm_map_executable_image(space: WineVmSpace, base: i64, size: i64) -> WineVmOpResult:
+    val reserved = wine_vm_reserve_fixed(space, base, size)
+    if not reserved.ok:
+        return reserved
+    val image = _region(reserved.region.base, reserved.region.size, true, "rx", false, reserved.region.backing, "image")
+    _result(true, "image-mapped", _replace_region(reserved.space, image), image)
+
+pub fn wine_vm_allocate_thread_stack(space: WineVmSpace, stack_base: i64, stack_size: i64, guard_size: i64) -> WineVmOpResult:
+    if guard_size <= 0:
+        return _result(false, "invalid-guard-size", space, _empty_region())
+    val guard = wine_vm_reserve_fixed(space, stack_base, guard_size)
+    if not guard.ok:
+        return guard
+    val guarded = _region(guard.region.base, guard.region.size, false, "none", true, guard.region.backing, "guard")
+    val guarded_space = _replace_region(guard.space, guarded)
+    val stack = wine_vm_reserve_fixed(guarded_space, stack_base + guard_size, stack_size)
+    if not stack.ok:
+        return stack
+    val committed = _region(stack.region.base, stack.region.size, true, "rw", false, stack.region.backing, "stack")
+    _result(true, "stack-allocated", _replace_region(stack.space, committed), committed)
 
 pub fn wine_vm_access_gate(space: WineVmSpace, address: i64, access: text) -> text:
     val region = wine_vm_space_find(space, address)
@@ -150,7 +185,19 @@ pub fn wine_vm_fault_evidence(fault: WineVmFault) -> text:
 
 pub fn wine_vm_adapter_feature_string(space: WineVmSpace, container_evidence: text) -> text:
     var features = "reserve commit unmap fixed-map mprotect page-fault user-pointer"
+    if space.process_id > 0:
+        features = features + " os-process"
+    if space.address_space_id > 0:
+        features = features + " os-address-space"
+    if space.host_jump_policy == "no-host-code-jump":
+        features = features + " no-host-code-jump"
     for region in space.regions:
+        if region.backing == "os-vma":
+            features = features + " os-vma"
+        if region.kind == "image":
+            features = features + " image-map"
+        if region.kind == "stack":
+            features = features + " thread-stack stack-growth"
         if region.perms.contains("x"):
             features = features + " exec-perm"
         if region.guard:
@@ -172,3 +219,43 @@ pub fn wine_vm_adapter_gate(space: WineVmSpace, container_evidence: text, fault:
     if fault_state != "ready":
         return "blocked-fault:" + fault_state
     wine_vm_gate(wine_vm_adapter_feature_string(space, container_evidence))
+
+pub fn wine_vm_no_host_code_jump_gate(space: WineVmSpace, target: i64) -> text:
+    if space.host_jump_policy != "no-host-code-jump":
+        return "missing-no-host-code-jump"
+    val region = wine_vm_space_find(space, target)
+    if region.size == 0:
+        return "host-code-jump-blocked"
+    if region.kind != "image":
+        return "host-code-jump-blocked"
+    if region.backing != "os-vma":
+        return "host-code-jump-blocked"
+    if not region.committed or not region.perms.contains("x"):
+        return "host-code-jump-blocked"
+    "ready"
+
+pub fn wine_vm_production_gate(space: WineVmSpace, fault: WineVmFault) -> text:
+    if space.process_id <= 0:
+        return "missing-os-process"
+    if space.address_space_id <= 0:
+        return "missing-os-address-space"
+    val container_state = wine_container_gate(space.container_evidence)
+    if container_state != "ready":
+        return container_state
+    val fault_state = wine_vm_fault_gate(wine_vm_fault_evidence(fault))
+    if fault_state != "ready":
+        return "blocked-fault:" + fault_state
+    val features = wine_vm_adapter_feature_string(space, space.container_evidence)
+    val required = [
+        "os-vma",
+        "image-map",
+        "thread-stack",
+        "exec-perm",
+        "guard-page",
+        "stack-growth",
+        "no-host-code-jump"
+    ]
+    for item in required:
+        if not features.contains(item):
+            return "missing-" + item
+    wine_vm_gate(features)

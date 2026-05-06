@@ -18,6 +18,7 @@ use common.pe_coff_header.{
     pe_first_import_symbol_bindings
 }
 use common.wine_image_map.{wine_image_map_gate}
+use common.wine_image_vm_map.{wine_image_map_into_vm_process}
 use common.wine_cpu_exec.{wine_cpu_hello_execution_plan}
 use common.wine_cpu_exec.{WineCpuExecutionEvidence, wine_cpu_execution_evidence_text}
 use common.wine_hello_dispatch.{wine_known_hello_execute_plan, wine_hello_stdout_payload_gate_at_rva}
@@ -25,6 +26,7 @@ use common.wine_nt_bridge.{wine_nt_bridge_gate}
 use common.wine_nt_import.{wine_nt_import_hello_gate, wine_nt_import_hello_binding_plan}
 use common.wine_precondition_manifest.{WinePreconditionManifest}
 use common.wine_substrate.{wine_substrate_hello_exe_gate}
+use common.wine_vm_adapter.{WineVmFault, WineVmSpace, wine_vm_production_gate}
 
 class WineHelloExeProbeResult:
     status: text
@@ -122,6 +124,25 @@ pub fn wine_hello_exe_probe_manifest(data: [u8], manifest: WinePreconditionManif
 
 pub fn wine_hello_exe_probe_manifest_evidence(data: [u8], manifest: WinePreconditionManifest, execution_evidence: WineCpuExecutionEvidence) -> WineHelloExeProbeResult:
     wine_hello_exe_probe_manifest(data, manifest, wine_cpu_execution_evidence_text(execution_evidence))
+
+pub fn wine_hello_exe_probe_vm(data: [u8], gates: text, space: WineVmSpace, image_base: i64, stack_base: i64, stack_size: i64, guard_size: i64) -> WineHelloExeProbeResult:
+    if space.process_id <= 0:
+        return _blocked_result("blocked", "missing-os-process")
+    if space.address_space_id <= 0:
+        return _blocked_result("blocked", "missing-os-address-space")
+    val mapped = wine_image_map_into_vm_process(data, space, image_base, stack_base, stack_size, guard_size)
+    if not mapped.ok:
+        return _blocked_result("blocked", mapped.state)
+    val fault = WineVmFault(process_id: mapped.space.process_id, thread_id: 1, address: mapped.entry_address, access: "execute", policy: "deliver-seh")
+    val production_state = wine_vm_production_gate(mapped.space, fault)
+    if production_state != "ready":
+        return _blocked_result("blocked", production_state)
+    wine_hello_exe_probe(data, gates)
+
+pub fn wine_hello_exe_probe_manifest_evidence_vm(data: [u8], manifest: WinePreconditionManifest, execution_evidence: WineCpuExecutionEvidence, space: WineVmSpace, image_base: i64, stack_base: i64, stack_size: i64, guard_size: i64) -> WineHelloExeProbeResult:
+    if not manifest.ready:
+        return _blocked_result("blocked", manifest.state)
+    wine_hello_exe_probe_vm(data, manifest.gates + " " + wine_cpu_execution_evidence_text(execution_evidence), space, image_base, stack_base, stack_size, guard_size)
 
 pub fn wine_hello_exe_manifest_can_execute(data: [u8], manifest: WinePreconditionManifest, execution_evidence: text) -> bool:
     val result = wine_hello_exe_probe_manifest(data, manifest, execution_evidence)

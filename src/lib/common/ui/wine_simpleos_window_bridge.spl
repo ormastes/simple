@@ -1,0 +1,144 @@
+"""SimpleOS window-record bridge for Wine-facing X11 production evidence."""
+
+use lib.common.privilege.id_path.{id_path_intern}
+use lib.common.win_fs.window_record.{WindowRecord, WindowState, Rect, BufferRef, window_mark_destroyed}
+
+class WineSimpleOsWindowBridge:
+    records: [WindowRecord]
+    operations: text
+    present_count: i64
+    checksum: i64
+    cursor_name: text
+    clipboard_text: text
+
+class WineSimpleOsWindowResult:
+    ok: bool
+    state: text
+    bridge: WineSimpleOsWindowBridge
+    record: WindowRecord
+
+fn _bridge(records: [WindowRecord], operations: text, present_count: i64, checksum: i64, cursor_name: text, clipboard_text: text) -> WineSimpleOsWindowBridge:
+    WineSimpleOsWindowBridge(records: records, operations: operations, present_count: present_count, checksum: checksum, cursor_name: cursor_name, clipboard_text: clipboard_text)
+
+fn _empty_record() -> WindowRecord:
+    WindowRecord(
+        wid: 0,
+        generation: 0,
+        app: "",
+        title: "",
+        state: WindowState.Hidden,
+        geometry: Rect(x: 0, y: 0, w: 0, h: 0),
+        buffer_ref: BufferRef(kind: "", handle: 0, bytes: 0),
+        acl_id_path: id_path_intern("id.user.wine"))
+
+fn _result(ok: bool, state: text, bridge: WineSimpleOsWindowBridge, record: WindowRecord) -> WineSimpleOsWindowResult:
+    WineSimpleOsWindowResult(ok: ok, state: state, bridge: bridge, record: record)
+
+fn _append_once(items: text, item: text) -> text:
+    if items.contains(item):
+        return items
+    if items == "":
+        return item
+    items + " " + item
+
+fn _find_record(bridge: WineSimpleOsWindowBridge, wid: u64) -> WindowRecord:
+    for record in bridge.records:
+        if record.wid == wid:
+            return record
+    _empty_record()
+
+fn _replace_record(bridge: WineSimpleOsWindowBridge, replacement: WindowRecord, op: text) -> WineSimpleOsWindowBridge:
+    var records: [WindowRecord] = []
+    for record in bridge.records:
+        if record.wid == replacement.wid:
+            records.push(replacement)
+        else:
+            records.push(record)
+    _bridge(records, _append_once(bridge.operations, op), bridge.present_count, bridge.checksum, bridge.cursor_name, bridge.clipboard_text)
+
+pub fn wine_simpleos_window_bridge_new() -> WineSimpleOsWindowBridge:
+    _bridge([], "simpleos-winfs", 0, 0, "", "")
+
+pub fn wine_simpleos_create_window(bridge: WineSimpleOsWindowBridge, wid: u64, app: text, title: text, width: u32, height: u32) -> WineSimpleOsWindowResult:
+    if wid == 0:
+        return _result(false, "invalid-window", bridge, _empty_record())
+    if width == 0 or height == 0:
+        return _result(false, "invalid-size", bridge, _empty_record())
+    if _find_record(bridge, wid).wid != 0:
+        return _result(false, "window-exists", bridge, _empty_record())
+    val bytes = (width as u64) * (height as u64) * 4
+    val record = WindowRecord(
+        wid: wid,
+        generation: 1,
+        app: app,
+        title: title,
+        state: WindowState.Hidden,
+        geometry: Rect(x: 0, y: 0, w: width, h: height),
+        buffer_ref: BufferRef(kind: "simpleos-framebuffer", handle: wid, bytes: bytes),
+        acl_id_path: id_path_intern("id.user.wine"))
+    var records = bridge.records
+    records.push(record)
+    _result(true, "created", _bridge(records, _append_once(_append_once(bridge.operations, "simpleos-window-record"), "create"), bridge.present_count, bridge.checksum, bridge.cursor_name, bridge.clipboard_text), record)
+
+pub fn wine_simpleos_map_window(bridge: WineSimpleOsWindowBridge, wid: u64) -> WineSimpleOsWindowResult:
+    val record = _find_record(bridge, wid)
+    if record.wid == 0:
+        return _result(false, "missing-window", bridge, _empty_record())
+    val mapped = WindowRecord(wid: record.wid, generation: record.generation + (1 as u32), app: record.app, title: record.title, state: WindowState.Normal, geometry: record.geometry, buffer_ref: record.buffer_ref, acl_id_path: record.acl_id_path)
+    _result(true, "mapped", _replace_record(bridge, mapped, "map"), mapped)
+
+pub fn wine_simpleos_configure_window(bridge: WineSimpleOsWindowBridge, wid: u64, x: i32, y: i32, width: u32, height: u32) -> WineSimpleOsWindowResult:
+    val record = _find_record(bridge, wid)
+    if record.wid == 0:
+        return _result(false, "missing-window", bridge, _empty_record())
+    if width == 0 or height == 0:
+        return _result(false, "invalid-size", bridge, record)
+    val configured = WindowRecord(wid: record.wid, generation: record.generation + (1 as u32), app: record.app, title: record.title, state: record.state, geometry: Rect(x: x, y: y, w: width, h: height), buffer_ref: BufferRef(kind: "simpleos-framebuffer", handle: wid, bytes: (width as u64) * (height as u64) * 4), acl_id_path: record.acl_id_path)
+    _result(true, "configured", _replace_record(bridge, configured, "configure"), configured)
+
+pub fn wine_simpleos_focus_window(bridge: WineSimpleOsWindowBridge, wid: u64) -> WineSimpleOsWindowResult:
+    val record = _find_record(bridge, wid)
+    if record.wid == 0:
+        return _result(false, "missing-window", bridge, _empty_record())
+    _result(true, "focused", _bridge(bridge.records, _append_once(bridge.operations, "focus"), bridge.present_count, bridge.checksum, bridge.cursor_name, bridge.clipboard_text), record)
+
+pub fn wine_simpleos_present_window(bridge: WineSimpleOsWindowBridge, wid: u64, frame_seed: i64) -> WineSimpleOsWindowResult:
+    val record = _find_record(bridge, wid)
+    if record.wid == 0:
+        return _result(false, "missing-window", bridge, _empty_record())
+    val checksum = bridge.checksum + frame_seed + (record.buffer_ref.bytes as i64) + (wid as i64)
+    val ops = _append_once(_append_once(bridge.operations, "simpleos-framebuffer"), "simpleos-framebuffer-present")
+    _result(true, "presented", _bridge(bridge.records, ops, bridge.present_count + 1, checksum, bridge.cursor_name, bridge.clipboard_text), record)
+
+pub fn wine_simpleos_set_cursor(bridge: WineSimpleOsWindowBridge, name: text) -> WineSimpleOsWindowResult:
+    if name == "":
+        return _result(false, "invalid-cursor", bridge, _empty_record())
+    _result(true, "cursor", _bridge(bridge.records, _append_once(bridge.operations, "cursor"), bridge.present_count, bridge.checksum, name, bridge.clipboard_text), _empty_record())
+
+pub fn wine_simpleos_set_clipboard(bridge: WineSimpleOsWindowBridge, value: text) -> WineSimpleOsWindowResult:
+    _result(true, "clipboard", _bridge(bridge.records, _append_once(bridge.operations, "clipboard"), bridge.present_count, bridge.checksum, bridge.cursor_name, value), _empty_record())
+
+pub fn wine_simpleos_destroy_window(bridge: WineSimpleOsWindowBridge, wid: u64) -> WineSimpleOsWindowResult:
+    val record = _find_record(bridge, wid)
+    if record.wid == 0:
+        return _result(false, "missing-window", bridge, _empty_record())
+    val destroyed = window_mark_destroyed(record)
+    _result(true, "destroyed", _replace_record(bridge, destroyed, "destroy"), destroyed)
+
+pub fn wine_simpleos_window_evidence(bridge: WineSimpleOsWindowBridge) -> text:
+    var evidence = bridge.operations
+    if bridge.present_count > 0:
+        evidence = evidence + " framebuffer-checksum"
+    if bridge.cursor_name != "":
+        evidence = evidence + " cursor"
+    if bridge.clipboard_text != "":
+        evidence = evidence + " clipboard"
+    evidence
+
+pub fn wine_simpleos_window_bridge_gate(bridge: WineSimpleOsWindowBridge) -> text:
+    val evidence = wine_simpleos_window_evidence(bridge)
+    val required = ["simpleos-winfs", "simpleos-window-record", "simpleos-framebuffer", "simpleos-framebuffer-present", "framebuffer-checksum", "create", "map", "configure", "focus", "destroy"]
+    for item in required:
+        if not evidence.contains(item):
+            return "missing-" + item
+    "ready"

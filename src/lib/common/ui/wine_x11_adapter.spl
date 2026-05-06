@@ -1,6 +1,7 @@
 """Modeled X11-class native backend contract for future Wine graphics work."""
 
 use common.ui.x11_backend_gate.{x11_backend_event_gate, x11_backend_gate, x11_backend_pixel_gate}
+use common.ui.wine_simpleos_window_bridge.{WineSimpleOsWindowBridge, wine_simpleos_window_bridge_gate, wine_simpleos_window_evidence}
 
 class WineX11BackendState:
     features: text
@@ -10,14 +11,15 @@ class WineX11BackendState:
     focused_window: text
     clipboard_text: text
     cursor_name: text
+    os_evidence: text
 
 class WineX11OpResult:
     ok: bool
     state: text
     backend: WineX11BackendState
 
-fn _backend(features: text, events: text, pixels: text, mapped_windows: [text], focused_window: text, clipboard_text: text, cursor_name: text) -> WineX11BackendState:
-    WineX11BackendState(features: features, events: events, pixels: pixels, mapped_windows: mapped_windows, focused_window: focused_window, clipboard_text: clipboard_text, cursor_name: cursor_name)
+fn _backend(features: text, events: text, pixels: text, mapped_windows: [text], focused_window: text, clipboard_text: text, cursor_name: text, os_evidence: text) -> WineX11BackendState:
+    WineX11BackendState(features: features, events: events, pixels: pixels, mapped_windows: mapped_windows, focused_window: focused_window, clipboard_text: clipboard_text, cursor_name: cursor_name, os_evidence: os_evidence)
 
 fn _result(ok: bool, state: text, backend: WineX11BackendState) -> WineX11OpResult:
     WineX11OpResult(ok: ok, state: state, backend: backend)
@@ -36,7 +38,13 @@ fn _contains_window(windows: [text], id: text) -> bool:
     false
 
 pub fn wine_x11_backend_new() -> WineX11BackendState:
-    _backend("display screen", "", "", [], "", "", "")
+    _backend("display screen", "", "", [], "", "", "", "")
+
+pub fn wine_x11_backend_bind_simpleos(backend: WineX11BackendState, bridge: WineSimpleOsWindowBridge) -> WineX11OpResult:
+    val bridge_state = wine_simpleos_window_bridge_gate(bridge)
+    if bridge_state != "ready":
+        return _result(false, bridge_state, backend)
+    _result(true, "bound", _backend(backend.features, backend.events, backend.pixels, backend.mapped_windows, backend.focused_window, backend.clipboard_text, backend.cursor_name, wine_simpleos_window_evidence(bridge)))
 
 pub fn wine_x11_create_window(backend: WineX11BackendState, id: text) -> WineX11OpResult:
     if id == "":
@@ -47,14 +55,14 @@ pub fn wine_x11_create_window(backend: WineX11BackendState, id: text) -> WineX11
     windows.push(id)
     val features = _append_once(_append_once(_append_once(backend.features, "window"), "surface"), "configure")
     val events = _append_once(backend.events, "create")
-    _result(true, "created", _backend(features, events, backend.pixels, windows, backend.focused_window, backend.clipboard_text, backend.cursor_name))
+    _result(true, "created", _backend(features, events, backend.pixels, windows, backend.focused_window, backend.clipboard_text, backend.cursor_name, backend.os_evidence))
 
 pub fn wine_x11_map_window(backend: WineX11BackendState, id: text) -> WineX11OpResult:
     if not _contains_window(backend.mapped_windows, id):
         return _result(false, "missing-window", backend)
     val features = _append_once(backend.features, "map-unmap")
     val events = _append_once(backend.events, "map")
-    _result(true, "mapped", _backend(features, events, backend.pixels, backend.mapped_windows, backend.focused_window, backend.clipboard_text, backend.cursor_name))
+    _result(true, "mapped", _backend(features, events, backend.pixels, backend.mapped_windows, backend.focused_window, backend.clipboard_text, backend.cursor_name, backend.os_evidence))
 
 pub fn wine_x11_configure_window(backend: WineX11BackendState, id: text, width: i64, height: i64) -> WineX11OpResult:
     if not _contains_window(backend.mapped_windows, id):
@@ -62,7 +70,7 @@ pub fn wine_x11_configure_window(backend: WineX11BackendState, id: text, width: 
     if width <= 0 or height <= 0:
         return _result(false, "invalid-size", backend)
     val events = _append_once(backend.events, "configure")
-    _result(true, "configured", _backend(backend.features, events, backend.pixels, backend.mapped_windows, backend.focused_window, backend.clipboard_text, backend.cursor_name))
+    _result(true, "configured", _backend(backend.features, events, backend.pixels, backend.mapped_windows, backend.focused_window, backend.clipboard_text, backend.cursor_name, backend.os_evidence))
 
 pub fn wine_x11_damage_window(backend: WineX11BackendState, id: text) -> WineX11OpResult:
     if not _contains_window(backend.mapped_windows, id):
@@ -70,13 +78,13 @@ pub fn wine_x11_damage_window(backend: WineX11BackendState, id: text) -> WineX11
     val features = _append_once(_append_once(_append_once(_append_once(_append_once(backend.features, "damage"), "clip"), "expose"), "present"), "blit")
     val events = _append_once(backend.events, "expose")
     val pixels = _append_once(_append_once(_append_once(backend.pixels, "golden"), "damage"), "present")
-    _result(true, "damaged", _backend(features, events, pixels, backend.mapped_windows, backend.focused_window, backend.clipboard_text, backend.cursor_name))
+    _result(true, "damaged", _backend(features, events, pixels, backend.mapped_windows, backend.focused_window, backend.clipboard_text, backend.cursor_name, backend.os_evidence))
 
 pub fn wine_x11_fill_window(backend: WineX11BackendState, id: text) -> WineX11OpResult:
     if not _contains_window(backend.mapped_windows, id):
         return _result(false, "missing-window", backend)
     val features = _append_once(backend.features, "fill")
-    _result(true, "filled", _backend(features, backend.events, backend.pixels, backend.mapped_windows, backend.focused_window, backend.clipboard_text, backend.cursor_name))
+    _result(true, "filled", _backend(features, backend.events, backend.pixels, backend.mapped_windows, backend.focused_window, backend.clipboard_text, backend.cursor_name, backend.os_evidence))
 
 pub fn wine_x11_text_window(backend: WineX11BackendState, id: text, text: text) -> WineX11OpResult:
     if not _contains_window(backend.mapped_windows, id):
@@ -85,26 +93,26 @@ pub fn wine_x11_text_window(backend: WineX11BackendState, id: text, text: text) 
         return _result(false, "empty-text", backend)
     val features = _append_once(_append_once(backend.features, "text"), "glyph")
     val pixels = _append_once(backend.pixels, "text")
-    _result(true, "text", _backend(features, backend.events, pixels, backend.mapped_windows, backend.focused_window, backend.clipboard_text, backend.cursor_name))
+    _result(true, "text", _backend(features, backend.events, pixels, backend.mapped_windows, backend.focused_window, backend.clipboard_text, backend.cursor_name, backend.os_evidence))
 
 pub fn wine_x11_focus_window(backend: WineX11BackendState, id: text) -> WineX11OpResult:
     if not _contains_window(backend.mapped_windows, id):
         return _result(false, "missing-window", backend)
     val features = _append_once(_append_once(backend.features, "input"), "focus")
     val events = _append_once(_append_once(backend.events, "focus"), "input")
-    _result(true, "focused", _backend(features, events, backend.pixels, backend.mapped_windows, id, backend.clipboard_text, backend.cursor_name))
+    _result(true, "focused", _backend(features, events, backend.pixels, backend.mapped_windows, id, backend.clipboard_text, backend.cursor_name, backend.os_evidence))
 
 pub fn wine_x11_set_cursor(backend: WineX11BackendState, name: text) -> WineX11OpResult:
     if name == "":
         return _result(false, "invalid-cursor", backend)
     val features = _append_once(backend.features, "cursor")
     val pixels = _append_once(backend.pixels, "cursor")
-    _result(true, "cursor", _backend(features, backend.events, pixels, backend.mapped_windows, backend.focused_window, backend.clipboard_text, name))
+    _result(true, "cursor", _backend(features, backend.events, pixels, backend.mapped_windows, backend.focused_window, backend.clipboard_text, name, backend.os_evidence))
 
 pub fn wine_x11_set_clipboard(backend: WineX11BackendState, value: text) -> WineX11OpResult:
     val features = _append_once(backend.features, "clipboard")
     val events = _append_once(backend.events, "clipboard")
-    _result(true, "clipboard", _backend(features, events, backend.pixels, backend.mapped_windows, backend.focused_window, value, backend.cursor_name))
+    _result(true, "clipboard", _backend(features, events, backend.pixels, backend.mapped_windows, backend.focused_window, value, backend.cursor_name, backend.os_evidence))
 
 pub fn wine_x11_destroy_window(backend: WineX11BackendState, id: text) -> WineX11OpResult:
     if not _contains_window(backend.mapped_windows, id):
@@ -117,7 +125,7 @@ pub fn wine_x11_destroy_window(backend: WineX11BackendState, id: text) -> WineX1
     if focus == id:
         focus = ""
     val events = _append_once(backend.events, "destroy")
-    _result(true, "destroyed", _backend(backend.features, events, backend.pixels, windows, focus, backend.clipboard_text, backend.cursor_name))
+    _result(true, "destroyed", _backend(backend.features, events, backend.pixels, windows, focus, backend.clipboard_text, backend.cursor_name, backend.os_evidence))
 
 pub fn wine_x11_backend_feature_gate(backend: WineX11BackendState) -> text:
     x11_backend_gate(backend.features)
@@ -138,4 +146,16 @@ pub fn wine_x11_backend_ready(backend: WineX11BackendState) -> text:
     val pixel_state = wine_x11_backend_pixel_state(backend)
     if pixel_state != "ready":
         return "blocked-pixel:" + pixel_state
+    "ready"
+
+pub fn wine_x11_backend_production_ready(backend: WineX11BackendState) -> text:
+    val ready_state = wine_x11_backend_ready(backend)
+    if ready_state != "ready":
+        return ready_state
+    if not backend.os_evidence.contains("simpleos-window-record"):
+        return "missing-simpleos-window-record"
+    if not backend.os_evidence.contains("simpleos-framebuffer-present"):
+        return "missing-simpleos-framebuffer-present"
+    if not backend.os_evidence.contains("framebuffer-checksum"):
+        return "missing-framebuffer-checksum"
     "ready"

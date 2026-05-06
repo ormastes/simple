@@ -92,6 +92,32 @@ fn _put_hello_code(data: [u8], offset: i64) -> [u8]:
     data = _put_u32_le(data, offset + 23, 0x95)
     data
 
+fn _put_hello_code_at_rva(data: [u8], offset: i64, code_rva: i64) -> [u8]:
+    data[offset] = 0x48
+    data[offset + 1] = 0x31
+    data[offset + 2] = 0xc9
+    data[offset + 3] = 0xe8
+    data = _put_u32_le(data, offset + 4, 0x2080 - (code_rva + 8))
+    data[offset + 8] = 0x48
+    data[offset + 9] = 0x8d
+    data[offset + 10] = 0x15
+    data = _put_u32_le(data, offset + 11, 0x2120 - (code_rva + 15))
+    data[offset + 15] = 0xe8
+    data = _put_u32_le(data, offset + 16, 0x20a0 - (code_rva + 20))
+    data[offset + 20] = 0x31
+    data[offset + 21] = 0xc9
+    data[offset + 22] = 0xe8
+    data = _put_u32_le(data, offset + 23, 0x20c0 - (code_rva + 27))
+    data
+
+fn _put_hello_code_with_safe_prologue(data: [u8], offset: i64) -> [u8]:
+    data[offset] = 0x48
+    data[offset + 1] = 0x83
+    data[offset + 2] = 0xec
+    data[offset + 3] = 0x28
+    data[offset + 4] = 0x90
+    _put_hello_code_at_rva(data, offset + 5, 0x2015)
+
 fn _verified_dispatch_gates() -> text:
     "thread-context thread-context-rip thread-context-rsp thread-context-registers-zeroed thread-context-teb-bound user-stack user-stack-allocated user-stack-committed user-stack-guard-page user-stack-aligned entrypoint-mapped entrypoint-rva-valid entrypoint-section-executable entrypoint-window-readable import-thunks-bound import-thunk-table-valid import-thunk-symbols-resolved import-thunk-bindings-match import-thunk-iat-guarded stdout-handle stdout-handle-std-output stdout-handle-writable stdout-byte-count-checked stdout-write-guarded exit-trap exit-trap-process-exit exit-trap-status-code exit-trap-no-fallthrough no-native-jump no-native-jump-import-targets no-native-jump-entry-bounds no-native-jump-host-code-blocked win64-abi win64-abi-register-args win64-abi-shadow-space win64-abi-stack-align win64-abi-return-value win64-abi-guarded-call x86_64-decoder x86_64-decode-window-mapped x86_64-decode-window-bounded x86_64-decode-supported-ops x86_64-decode-call-targets x86_64-dispatch x86_64-dispatch-no-native-jump x86_64-dispatch-import-calls-only x86_64-dispatch-exit-trap x86_64-dispatch-stdout-sequence"
 
@@ -175,6 +201,12 @@ describe "Wine CPU execution gates":
         expect plan.ok == true
         expect plan.call_sequence == "GetStdHandle WriteFile ExitProcess"
         expect plan.call_count == 3
+        expect plan.stdout_payload_rva == 0x2120
+
+    it "accepts a bounded safe prologue before the CPU-level hello plan":
+        val plan = wine_cpu_hello_execution_plan(_put_hello_code_with_safe_prologue(_minimal_image(), 0x210), _verified_dispatch_gates())
+        expect plan.ok == true
+        expect plan.call_sequence == "GetStdHandle WriteFile ExitProcess"
         expect plan.stdout_payload_rva == 0x2120
 
     it "accepts structured evidence for the CPU-level hello plan":

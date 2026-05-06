@@ -5,9 +5,12 @@ use common.wine_hello_exe.{
     wine_hello_exe_probe_manifest,
     wine_hello_exe_manifest_can_execute,
     wine_hello_exe_probe_manifest_evidence,
-    wine_hello_exe_manifest_evidence_can_execute
+    wine_hello_exe_manifest_evidence_can_execute,
+    wine_hello_exe_probe_vm,
+    wine_hello_exe_probe_manifest_evidence_vm
 }
 use common.wine_precondition_manifest.{wine_precondition_manifest, wine_precondition_required_process_log}
+use common.wine_vm_adapter.{wine_vm_process_space_new}
 
 fn _zero_bytes(count: i64) -> [u8]:
     var out: [u8] = []
@@ -106,6 +109,32 @@ fn _put_hello_code(data: [u8], offset: i64) -> [u8]:
     data[offset + 22] = 0xe8
     data = _put_u32_le(data, offset + 23, 0xa5)
     data
+
+fn _put_hello_code_at_rva(data: [u8], offset: i64, code_rva: i64) -> [u8]:
+    data[offset] = 0x48
+    data[offset + 1] = 0x31
+    data[offset + 2] = 0xc9
+    data[offset + 3] = 0xe8
+    data = _put_u32_le(data, offset + 4, 0x2080 - (code_rva + 8))
+    data[offset + 8] = 0x48
+    data[offset + 9] = 0x8d
+    data[offset + 10] = 0x15
+    data = _put_u32_le(data, offset + 11, 0x2120 - (code_rva + 15))
+    data[offset + 15] = 0xe8
+    data = _put_u32_le(data, offset + 16, 0x20a0 - (code_rva + 20))
+    data[offset + 20] = 0x31
+    data[offset + 21] = 0xc9
+    data[offset + 22] = 0xe8
+    data = _put_u32_le(data, offset + 23, 0x20c0 - (code_rva + 27))
+    data
+
+fn _put_hello_code_with_safe_prologue(data: [u8], offset: i64) -> [u8]:
+    data[offset] = 0x48
+    data[offset + 1] = 0x83
+    data[offset + 2] = 0xec
+    data[offset + 3] = 0x28
+    data[offset + 4] = 0x90
+    _put_hello_code_at_rva(data, offset + 5, 0x2005)
 
 fn _minimal_pe64_console_with_dirs() -> [u8]:
     var data = _zero_bytes(1024)
@@ -206,6 +235,12 @@ fn _known_hello_exe_with_payload_without_marker() -> [u8]:
     data = _put_hello_stdout_payload(data, 0x320)
     data
 
+fn _known_hello_exe_with_safe_prologue() -> [u8]:
+    var data = _minimal_pe64_console_with_resolved_imports()
+    data = _put_hello_code_with_safe_prologue(data, 0x200)
+    data = _put_hello_stdout_payload(data, 0x320)
+    data
+
 fn _verified_gates() -> text:
     "process=verified vm=verified host=verified posix=verified pthread=verified dynload=verified pe_loader=verified async=verified nt_bridge=verified"
 
@@ -266,6 +301,11 @@ describe "Wine hello.exe probe":
         expect result.status == "executed"
         expect result.stdout == "Hello from SimpleOS Wine\n"
 
+    it "executes the decoded hello stdout payload after a safe entry prologue":
+        val result = wine_hello_exe_probe(_known_hello_exe_with_safe_prologue(), _verified_dispatch_gates())
+        expect result.status == "executed"
+        expect result.stdout == "Hello from SimpleOS Wine\n"
+
     it "requires fixture stdout payload bytes after the marker":
         val result = wine_hello_exe_probe(_known_hello_exe_without_payload(), _verified_dispatch_gates())
         expect result.status == "blocked"
@@ -298,6 +338,25 @@ describe "Wine hello.exe probe":
         val result = wine_hello_exe_probe_manifest_evidence(_known_hello_exe_fixture(), manifest, evidence)
         expect result.status == "executed"
         expect wine_hello_exe_manifest_evidence_can_execute(_known_hello_exe_fixture(), manifest, evidence) == true
+
+    it "executes only after the PE image is mapped into an OS-backed VM process":
+        val space = wine_vm_process_space_new(10, 9000, "pid fs ipc net capability")
+        val result = wine_hello_exe_probe_vm(_known_hello_exe_fixture(), _verified_dispatch_gates(), space, 0x400000, 0x700000, 0x2000, 0x1000)
+        expect result.status == "executed"
+        expect result.stdout == "Hello from SimpleOS Wine\n"
+
+    it "blocks the VM probe when process/container evidence is only modeled":
+        val space = wine_vm_process_space_new(0, 0, "")
+        val result = wine_hello_exe_probe_vm(_known_hello_exe_fixture(), _verified_dispatch_gates(), space, 0x400000, 0x700000, 0x2000, 0x1000)
+        expect result.status == "blocked"
+        expect result.error == "missing-os-process"
+
+    it "executes the manifest path through OS-backed VM mapping":
+        val manifest = wine_precondition_manifest(wine_precondition_required_process_log(), "ready", "ready", "ready", "ready", "ready", "ready", "ready", "ready", "ready")
+        val evidence = wine_cpu_execution_evidence_all_ready()
+        val space = wine_vm_process_space_new(10, 9000, "pid fs ipc net capability")
+        val result = wine_hello_exe_probe_manifest_evidence_vm(_known_hello_exe_fixture(), manifest, evidence, space, 0x400000, 0x700000, 0x2000, 0x1000)
+        expect result.status == "executed"
 
     it "blocks the manifest probe before PE parsing when process evidence is incomplete":
         val manifest = wine_precondition_manifest("[desktop-e2e] process-backed:ok app=browser_demo pid=1", "ready", "ready", "ready", "ready", "ready", "ready", "ready", "ready", "ready")

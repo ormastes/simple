@@ -6,6 +6,8 @@ class WineHelloInstructionPlan:
     ok: bool
     error: text
     entry_rva: i64
+    call_sequence: text
+    call_count: i64
     get_std_handle_rva: i64
     stdout_payload_rva: i64
     write_file_rva: i64
@@ -21,10 +23,10 @@ class WineX86_64ScanResult:
     last_instruction: text
 
 fn _plan_error(error: text, entry_rva: i64) -> WineHelloInstructionPlan:
-    WineHelloInstructionPlan(ok: false, error: error, entry_rva: entry_rva, get_std_handle_rva: 0, stdout_payload_rva: 0, write_file_rva: 0, exit_process_rva: 0)
+    WineHelloInstructionPlan(ok: false, error: error, entry_rva: entry_rva, call_sequence: "", call_count: 0, get_std_handle_rva: 0, stdout_payload_rva: 0, write_file_rva: 0, exit_process_rva: 0)
 
 fn _plan_ready(entry_rva: i64, get_std_handle_rva: i64, stdout_payload_rva: i64, write_file_rva: i64, exit_process_rva: i64) -> WineHelloInstructionPlan:
-    WineHelloInstructionPlan(ok: true, error: "", entry_rva: entry_rva, get_std_handle_rva: get_std_handle_rva, stdout_payload_rva: stdout_payload_rva, write_file_rva: write_file_rva, exit_process_rva: exit_process_rva)
+    WineHelloInstructionPlan(ok: true, error: "", entry_rva: entry_rva, call_sequence: "GetStdHandle WriteFile ExitProcess", call_count: 3, get_std_handle_rva: get_std_handle_rva, stdout_payload_rva: stdout_payload_rva, write_file_rva: write_file_rva, exit_process_rva: exit_process_rva)
 
 fn _scan_result(ok: bool, state: text, start_offset: i64, end_offset: i64, instruction_count: i64, last_offset: i64, last_instruction: text) -> WineX86_64ScanResult:
     WineX86_64ScanResult(ok: ok, state: state, start_offset: start_offset, end_offset: end_offset, instruction_count: instruction_count, last_offset: last_offset, last_instruction: last_instruction)
@@ -47,6 +49,9 @@ fn _relative_target_rva(data: [u8], entry_rva: i64, displacement_offset: i64, ne
     if displacement < 0:
         return -1
     entry_rva + next_instruction_delta + displacement
+
+fn _safe_entry_prefix_instruction(kind: text) -> bool:
+    kind == "nop" or kind == "sub-rsp-imm8"
 
 pub fn wine_x86_64_instruction_at(data: [u8], offset: i64) -> text:
     val b0 = _byte(data, offset)
@@ -76,8 +81,7 @@ pub fn wine_x86_64_instruction_at(data: [u8], offset: i64) -> text:
         if b1 == 0x31:
             return "unsupported-rex-xor"
         if b1 == 0x83:
-            val b3 = _byte(data, offset + 3)
-            if b3 < 0:
+            if _byte(data, offset + 3) < 0:
                 return "truncated-rex-alu-imm8"
             if b2 == 0xec:
                 return "sub-rsp-imm8"
@@ -131,6 +135,7 @@ pub fn wine_x86_64_scan_window(data: [u8], start_offset: i64, max_bytes: i64, ma
         return _scan_result(false, "byte-window-out-of-bounds", start_offset, end_offset, 0, start_offset, "")
     var cursor = start_offset
     var count = 0
+    var call_count = 0
     var last_offset = start_offset
     var last_instruction = ""
     while cursor < end_offset:
@@ -145,46 +150,61 @@ pub fn wine_x86_64_scan_window(data: [u8], start_offset: i64, max_bytes: i64, ma
         if cursor + length > end_offset:
             return _scan_result(false, "instruction-window-overrun:" + kind, start_offset, end_offset, count, cursor, kind)
         count = count + 1
+        if kind == "call-rel32":
+            call_count = call_count + 1
         last_offset = cursor
         last_instruction = kind
         cursor = cursor + length
+        if call_count >= 3:
+            return _scan_result(true, "ready", start_offset, cursor, count, last_offset, last_instruction)
         if kind == "ret":
             return _scan_result(true, "ready", start_offset, cursor, count, last_offset, last_instruction)
     _scan_result(true, "ready", start_offset, cursor, count, last_offset, last_instruction)
+
+fn _hello_decode_plan_at(data: [u8], plan_entry_rva: i64, sequence_rva: i64, sequence_offset: i64) -> WineHelloInstructionPlan:
+    if sequence_offset + 23 >= data.len():
+        return _plan_error("hello-instruction-sequence-out-of-bounds", plan_entry_rva)
+    val entry_instruction = wine_x86_64_instruction_at(data, sequence_offset)
+    if entry_instruction != "xor-rcx-rcx":
+        return _plan_error("unsupported-entry-instruction:" + entry_instruction, plan_entry_rva)
+    if _byte(data, sequence_offset + 3) != 0xe8:
+        return _plan_error("missing-get-std-handle-call", plan_entry_rva)
+    val get_std_handle_rva = _relative_target_rva(data, sequence_rva, sequence_offset + 4, 8)
+    if _byte(data, sequence_offset + 8) != 0x48 or _byte(data, sequence_offset + 9) != 0x8d or _byte(data, sequence_offset + 10) != 0x15:
+        return _plan_error("missing-stdout-buffer-load", plan_entry_rva)
+    val stdout_payload_rva = _relative_target_rva(data, sequence_rva, sequence_offset + 11, 15)
+    if _byte(data, sequence_offset + 15) != 0xe8:
+        return _plan_error("missing-write-file-call", plan_entry_rva)
+    val write_file_rva = _relative_target_rva(data, sequence_rva, sequence_offset + 16, 20)
+    if _byte(data, sequence_offset + 20) != 0x31 or _byte(data, sequence_offset + 21) != 0xc9:
+        return _plan_error("missing-exit-code-zero", plan_entry_rva)
+    if _byte(data, sequence_offset + 22) != 0xe8:
+        return _plan_error("missing-exit-process-call", plan_entry_rva)
+    val exit_process_rva = _relative_target_rva(data, sequence_rva, sequence_offset + 23, 27)
+    _plan_ready(plan_entry_rva, get_std_handle_rva, stdout_payload_rva, write_file_rva, exit_process_rva)
 
 pub fn wine_x86_64_hello_decode_plan(data: [u8]) -> WineHelloInstructionPlan:
     val entry_rva = pe_entry_point_rva(data)
     val entry_offset = pe_rva_to_file_offset(data, entry_rva)
     if entry_offset < 0:
         return _plan_error("entrypoint-unmapped", entry_rva)
-    if entry_offset + 23 >= data.len():
-        return _plan_error("hello-instruction-sequence-out-of-bounds", entry_rva)
-    val entry_instruction = wine_x86_64_instruction_at(data, entry_offset)
-    if entry_instruction != "xor-rcx-rcx":
-        return _plan_error("unsupported-entry-instruction:" + entry_instruction, entry_rva)
-    if _byte(data, entry_offset + 3) != 0xe8:
-        return _plan_error("missing-get-std-handle-call", entry_rva)
-    val get_std_handle_rva = _relative_target_rva(data, entry_rva, entry_offset + 4, 8)
-    if get_std_handle_rva != 0x2080:
-        return _plan_error("get-std-handle-call-target-mismatch", entry_rva)
-    if _byte(data, entry_offset + 8) != 0x48 or _byte(data, entry_offset + 9) != 0x8d or _byte(data, entry_offset + 10) != 0x15:
-        return _plan_error("missing-stdout-buffer-load", entry_rva)
-    val stdout_payload_rva = _relative_target_rva(data, entry_rva, entry_offset + 11, 15)
-    if stdout_payload_rva != 0x2120:
-        return _plan_error("stdout-buffer-target-mismatch", entry_rva)
-    if _byte(data, entry_offset + 15) != 0xe8:
-        return _plan_error("missing-write-file-call", entry_rva)
-    val write_file_rva = _relative_target_rva(data, entry_rva, entry_offset + 16, 20)
-    if write_file_rva != 0x20a0:
-        return _plan_error("write-file-call-target-mismatch", entry_rva)
-    if _byte(data, entry_offset + 20) != 0x31 or _byte(data, entry_offset + 21) != 0xc9:
-        return _plan_error("missing-exit-code-zero", entry_rva)
-    if _byte(data, entry_offset + 22) != 0xe8:
-        return _plan_error("missing-exit-process-call", entry_rva)
-    val exit_process_rva = _relative_target_rva(data, entry_rva, entry_offset + 23, 27)
-    if exit_process_rva != 0x20c0:
-        return _plan_error("exit-process-call-target-mismatch", entry_rva)
-    _plan_ready(entry_rva, get_std_handle_rva, stdout_payload_rva, write_file_rva, exit_process_rva)
+    var cursor = entry_offset
+    var cursor_rva = entry_rva
+    var prefix_count = 0
+    while prefix_count <= 8:
+        val plan = _hello_decode_plan_at(data, entry_rva, cursor_rva, cursor)
+        if plan.ok:
+            return plan
+        val kind = wine_x86_64_instruction_at(data, cursor)
+        if not _safe_entry_prefix_instruction(kind):
+            return plan
+        val length = wine_x86_64_instruction_len_at(data, cursor)
+        if length <= 0:
+            return _plan_error(kind, entry_rva)
+        cursor = cursor + length
+        cursor_rva = cursor_rva + length
+        prefix_count = prefix_count + 1
+    _plan_error("hello-entry-prefix-limit", entry_rva)
 
 pub fn wine_x86_64_hello_decode_gate(data: [u8]) -> text:
     val plan = wine_x86_64_hello_decode_plan(data)
