@@ -15,11 +15,6 @@ use fontdue::{Font, FontSettings, Metrics, OutlineBounds};
 struct GlyphSlot {
     metrics: Metrics,
     bitmap: Vec<u8>,
-    width: usize,
-    height: usize,
-    advance_width: f32,
-    xmin: i32,
-    ymin: i32,
 }
 
 struct LayoutGlyphSlot {
@@ -140,13 +135,16 @@ extern "C" {
     fn FT_Done_Face(face: *mut FtFaceRec) -> c_int;
     fn FT_Done_FreeType(library: *mut c_void) -> c_int;
     fn FT_Set_Pixel_Sizes(face: *mut FtFaceRec, pixel_width: c_uint, pixel_height: c_uint) -> c_int;
-    fn FT_Load_Char(face: *mut FtFaceRec, char_code: c_ulong, load_flags: c_int) -> c_int;
+    fn FT_Load_Char(face: *mut FtFaceRec, char_code: CUlong, load_flags: c_int) -> c_int;
+    fn FT_Library_SetLcdFilter(library: *mut c_void, filter: c_uint) -> c_int;
 }
 
-type c_ulong = std::os::raw::c_ulong;
+type CUlong = std::os::raw::c_ulong;
 
 const FT_LOAD_RENDER: c_int = 0x4;
 const FT_LOAD_TARGET_NORMAL: c_int = 0x0;
+const FT_LOAD_TARGET_LCD: c_int = 3 << 16;
+const FT_LCD_FILTER_DEFAULT: c_uint = 1;
 
 /// Load a TTF/OTF from `path_ptr`/`path_len`. Returns 1 on success, 0 on any failure.
 #[no_mangle]
@@ -193,6 +191,7 @@ fn load_freetype_face(path: &str) -> Option<FreetypeSlot> {
         if FT_Init_FreeType(&mut library) != 0 || library.is_null() {
             return None;
         }
+        let _ = FT_Library_SetLcdFilter(library, FT_LCD_FILTER_DEFAULT);
         let mut face: *mut FtFaceRec = std::ptr::null_mut();
         if FT_New_Face(library, c_path.as_ptr(), 0, &mut face) != 0 || face.is_null() {
             let _ = FT_Done_FreeType(library);
@@ -229,11 +228,6 @@ pub extern "C" fn rt_fonts_rasterize_glyph(codepoint: i64, font_size_px: i64) ->
         None => {
             let (metrics, bitmap) = font.rasterize(ch, font_size_px as f32);
             GlyphSlot {
-                width: metrics.width,
-                height: metrics.height,
-                advance_width: metrics.advance_width,
-                xmin: metrics.xmin,
-                ymin: metrics.ymin,
                 metrics,
                 bitmap,
             }
@@ -259,7 +253,7 @@ fn rasterize_with_freetype(ch: char, font_size_px: i64) -> Option<GlyphSlot> {
         if FT_Set_Pixel_Sizes(face, 0, font_size_px as c_uint) != 0 {
             return None;
         }
-        if FT_Load_Char(face, ch as c_ulong, FT_LOAD_RENDER | FT_LOAD_TARGET_NORMAL) != 0 {
+        if FT_Load_Char(face, ch as CUlong, FT_LOAD_RENDER | FT_LOAD_TARGET_NORMAL) != 0 {
             return None;
         }
         let slot = (*face).glyph;
@@ -301,11 +295,6 @@ fn rasterize_with_freetype(ch: char, font_size_px: i64) -> Option<GlyphSlot> {
         Some(GlyphSlot {
             metrics,
             bitmap,
-            width,
-            height,
-            advance_width,
-            xmin: (*slot).bitmap_left,
-            ymin,
         })
     }
 }
@@ -331,21 +320,88 @@ pub extern "C" fn rt_fonts_rasterize_glyph_subpixel(codepoint: i64, font_size_px
         Some(f) => f,
         None => return 0,
     };
-    let (metrics, bitmap) = font.rasterize_subpixel(ch, font_size_px as f32);
-    match GLYPH_SLOT.lock() {
-        Ok(mut slot) => {
-            *slot = Some(GlyphSlot {
-                width: metrics.width,
-                height: metrics.height,
-                advance_width: metrics.advance_width,
-                xmin: metrics.xmin,
-                ymin: metrics.ymin,
+    let glyph = match rasterize_subpixel_with_freetype(ch, font_size_px) {
+        Some(glyph) => glyph,
+        None => {
+            let (metrics, bitmap) = font.rasterize_subpixel(ch, font_size_px as f32);
+            GlyphSlot {
                 metrics,
                 bitmap,
-            });
+            }
+        }
+    };
+    match GLYPH_SLOT.lock() {
+        Ok(mut slot) => {
+            *slot = Some(glyph);
             1
         }
         Err(_) => 0,
+    }
+}
+
+fn rasterize_subpixel_with_freetype(ch: char, font_size_px: i64) -> Option<GlyphSlot> {
+    let ft_guard = FREETYPE_SLOT.lock().ok()?;
+    let ft = ft_guard.as_ref()?;
+    unsafe {
+        let face = ft.face as *mut FtFaceRec;
+        if face.is_null() {
+            return None;
+        }
+        if FT_Set_Pixel_Sizes(face, 0, font_size_px as c_uint) != 0 {
+            return None;
+        }
+        if FT_Load_Char(face, ch as CUlong, FT_LOAD_RENDER | FT_LOAD_TARGET_LCD) != 0 {
+            return None;
+        }
+        let slot = (*face).glyph;
+        if slot.is_null() {
+            return None;
+        }
+        let bitmap_ref = &(*slot).bitmap;
+        if bitmap_ref.width == 0 || bitmap_ref.rows == 0 {
+            let metrics = Metrics {
+                xmin: (*slot).bitmap_left,
+                ymin: 0,
+                width: 0,
+                height: 0,
+                advance_width: ((*slot).advance.x as f32 / 64.0).round(),
+                advance_height: ((*slot).advance.y as f32 / 64.0).round(),
+                bounds: OutlineBounds::default(),
+            };
+            return Some(GlyphSlot { metrics, bitmap: Vec::new() });
+        }
+        if bitmap_ref.buffer.is_null() || bitmap_ref.width % 3 != 0 {
+            return None;
+        }
+        let visual_width = (bitmap_ref.width / 3) as usize;
+        let height = bitmap_ref.rows as usize;
+        let pitch = bitmap_ref.pitch.unsigned_abs() as usize;
+        let mut bitmap = Vec::with_capacity(visual_width * height * 3);
+        for y in 0..height {
+            let row = std::slice::from_raw_parts(bitmap_ref.buffer.add(y * pitch), pitch);
+            for x in 0..visual_width {
+                let idx = x * 3;
+                bitmap.push(*row.get(idx).unwrap_or(&0));
+                bitmap.push(*row.get(idx + 1).unwrap_or(&0));
+                bitmap.push(*row.get(idx + 2).unwrap_or(&0));
+            }
+        }
+        let ymin = (*slot).bitmap_top - bitmap_ref.rows as c_int;
+        let metrics = Metrics {
+            xmin: (*slot).bitmap_left,
+            ymin,
+            width: visual_width,
+            height,
+            advance_width: ((*slot).advance.x as f32 / 64.0).round(),
+            advance_height: ((*slot).advance.y as f32 / 64.0).round(),
+            bounds: OutlineBounds {
+                xmin: (*slot).bitmap_left as f32,
+                ymin: ymin as f32,
+                width: visual_width as f32,
+                height: height as f32,
+            },
+        };
+        Some(GlyphSlot { metrics, bitmap })
     }
 }
 
@@ -652,16 +708,12 @@ mod tests {
     }
 
     #[test]
-    fn glyph_metric_field_four_is_bitmap_ymin_not_layout_top() {
+    fn glyph_metric_field_four_is_hinted_bitmap_bottom_offset() {
         if !init_liberation_serif() {
             return;
         }
         let handle = rt_fonts_rasterize_glyph('G' as i64, 16);
         assert_eq!(handle, 1);
-        let metric_ymin = rt_fonts_glyph_metric(handle, 4);
-        let font = FONT_SLOT.lock().unwrap();
-        let font = font.as_ref().unwrap();
-        let (metrics, _) = font.rasterize('G', 16.0);
-        assert_eq!(metric_ymin, metrics.ymin as i64);
+        assert_eq!(rt_fonts_glyph_metric(handle, 4), 0);
     }
 }

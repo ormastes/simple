@@ -19,18 +19,21 @@ use examples.browser.shared.logging.{Logger, LogLevel}
 # ClipStack — manages nested clip rectangles.
 # ---------------------------------------------------------------------------
 
+class RasterRect:
+    x: i64
+    y: i64
+    w: i64
+    h: i64
+
 class ClipStack:
-    clips: [Pair<Pair<i64, i64>, Pair<i64, i64>>]
+    clips: [RasterRect]
 
     static fn empty() -> ClipStack:
         ClipStack(clips: [])
 
     # Push a new clip rectangle onto the stack.
     me push_clip(x: i64, y: i64, w: i64, h: i64):
-        val top_left = Pair(first: x, second: y)
-        val size = Pair(first: w, second: h)
-        val clip = Pair(first: top_left, second: size)
-        self.clips.push(clip)
+        self.clips.push(RasterRect(x: x, y: y, w: w, h: h))
 
     # Pop the topmost clip rectangle from the stack.
     me pop_clip():
@@ -38,7 +41,7 @@ class ClipStack:
             self.clips.pop()
 
     # Get the current (topmost) clip rectangle.
-    fn current_clip() -> Pair<Pair<i64, i64>, Pair<i64, i64>>?:
+    me current_clip() -> RasterRect?:
         if self.clips.len() == 0:
             return nil
         self.clips.get(self.clips.len() - 1)
@@ -49,7 +52,7 @@ class ClipStack:
 
 # Compute the intersection of two axis-aligned rectangles.
 # Returns nil if no intersection exists.
-fn clip_rect(x: i64, y: i64, w: i64, h: i64, clip_x: i64, clip_y: i64, clip_w: i64, clip_h: i64) -> Pair<Pair<i64, i64>, Pair<i64, i64>>?:
+fn clip_rect(x: i64, y: i64, w: i64, h: i64, clip_x: i64, clip_y: i64, clip_w: i64, clip_h: i64) -> RasterRect?:
     val left = if x > clip_x: x else: clip_x
     val top = if y > clip_y: y else: clip_y
 
@@ -67,9 +70,7 @@ fn clip_rect(x: i64, y: i64, w: i64, h: i64, clip_x: i64, clip_y: i64, clip_w: i
     if cw <= 0 or ch <= 0:
         return nil
 
-    val pos = Pair(first: left, second: top)
-    val sz = Pair(first: cw, second: ch)
-    Pair(first: pos, second: sz)
+    RasterRect(x: left, y: top, w: cw, h: ch)
 
 # ---------------------------------------------------------------------------
 # Color utility functions
@@ -117,17 +118,39 @@ fn premultiply_alpha(color: Color) -> Color:
 # Rasterizer — software rasterizer for display list items.
 # ---------------------------------------------------------------------------
 
+class RasterImageEntry:
+    image_id: i64
+    image: ImageData
+
 class Rasterizer:
     logger: Logger
     clip_stack: ClipStack
     opacity_stack: [f64]
+    images: [RasterImageEntry]
 
     static fn new(logger: Logger) -> Rasterizer:
         Rasterizer(
             logger: logger,
             clip_stack: ClipStack.empty(),
-            opacity_stack: [f64]()
+            opacity_stack: [],
+            images: []
         )
+
+    me register_image(image_id: i64, image: ImageData):
+        var idx = 0
+        while idx < self.images.len():
+            if self.images[idx].image_id == image_id:
+                self.images[idx] = RasterImageEntry(image_id: image_id, image: image)
+                return
+            idx = idx + 1
+        self.images.push(RasterImageEntry(image_id: image_id, image: image))
+
+    me draw_registered_image(target: GpuSurface, image_id: i64, dst_x: i64, dst_y: i64, dst_w: i64, dst_h: i64) -> bool:
+        for entry in self.images:
+            if entry.image_id == image_id:
+                self.raster_draw_image(target, entry.image, dst_x, dst_y, dst_w, dst_h)
+                return true
+        false
 
     # Rasterize a list of display items onto a target surface.
     me rasterize(items: [DisplayItem], target: GpuSurface) -> BrowserResult<()>:
@@ -153,8 +176,9 @@ class Rasterizer:
             PaintOp.DrawText(x, y, text_content, font_size, color):
                 self.raster_draw_text(target, x.to_i64(), y.to_i64(), text_content, font_size, color)
             PaintOp.DrawImage(x, y, w, h, image_id, _):
-                # Image drawing requires an ImageData lookup; skip placeholder
-                self.logger.trace("draw_image: image_id={image_id} at ({x},{y}) {w}x{h}")
+                val did_draw = self.draw_registered_image(target, image_id, x.to_i64(), y.to_i64(), w.to_i64(), h.to_i64())
+                if not did_draw:
+                    self.logger.warn("draw_image: image_id={image_id} has no registered decoded image")
             PaintOp.DrawBorder(x, y, w, h, widths, colors):
                 self._rasterize_border(target, x.to_i64(), y.to_i64(), w.to_i64(), h.to_i64(), widths, colors)
             PaintOp.PushClip(x, y, w, h):
@@ -172,10 +196,10 @@ class Rasterizer:
         # Apply clip rectangle if any
         val clipped = self._apply_clip(x, y, w, h)
         if val cr = clipped:
-            val cx = cr.first.first
-            val cy = cr.first.second
-            val cw = cr.second.first
-            val ch = cr.second.second
+            val cx = cr.x
+            val cy = cr.y
+            val cw = cr.w
+            val ch = cr.h
 
             val alpha = self._current_opacity()
             val effective_color = if alpha < 1.0:
@@ -291,10 +315,10 @@ class Rasterizer:
     me raster_draw_image(target: GpuSurface, image: ImageData, dst_x: i64, dst_y: i64, dst_w: i64, dst_h: i64):
         val clipped = self._apply_clip(dst_x, dst_y, dst_w, dst_h)
         if val cr = clipped:
-            val cx = cr.first.first
-            val cy = cr.first.second
-            val cw = cr.second.first
-            val ch = cr.second.second
+            val cx = cr.x
+            val cy = cr.y
+            val cw = cr.w
+            val ch = cr.h
             self.logger.trace("draw_image: {image.width}x{image.height} -> ({cx},{cy}) {cw}x{ch}")
             # Software path: copy source ImageData pixels to target with bilinear scaling.
             # Scale factors map destination pixels back to source coordinates.
@@ -384,17 +408,15 @@ class Rasterizer:
             self.raster_fill_rect(target, x + w - right_w, y + top_w, right_w, h - top_w - bottom_w, right_color)
 
     # Apply the current clip stack to a rectangle, returning the clipped result.
-    fn _apply_clip(x: i64, y: i64, w: i64, h: i64) -> Pair<Pair<i64, i64>, Pair<i64, i64>>?:
-        val current = self.clip_stack.current_clip()
-        if val c = current:
-            return clip_rect(x, y, w, h, c.first.first, c.first.second, c.second.first, c.second.second)
+    me _apply_clip(x: i64, y: i64, w: i64, h: i64) -> RasterRect?:
+        if self.clip_stack.clips.len() > 0:
+            val c = self.clip_stack.clips[self.clip_stack.clips.len() - 1]
+            return clip_rect(x, y, w, h, c.x, c.y, c.w, c.h)
         # No clip — return original rect
-        val pos = Pair(first: x, second: y)
-        val sz = Pair(first: w, second: h)
-        Pair(first: pos, second: sz)
+        RasterRect(x: x, y: y, w: w, h: h)
 
     # Get the combined opacity from the opacity stack.
-    fn _current_opacity() -> f64:
+    me _current_opacity() -> f64:
         var combined = 1.0
         for alpha in self.opacity_stack:
             combined = combined * alpha
@@ -407,7 +429,7 @@ class Rasterizer:
 # Sort display items by z-index (ascending — low z paints first).
 fn sort_by_z_index(items: [DisplayItem]) -> [DisplayItem]:
     # Simple insertion sort for display lists (typically small)
-    var sorted = [DisplayItem]()
+    var sorted: [DisplayItem] = []
     for item in items:
         sorted.push(item)
 
@@ -421,13 +443,13 @@ fn sort_by_z_index(items: [DisplayItem]) -> [DisplayItem]:
                 val prev = sorted.get(j)
                 if val p = prev:
                     if p.z_index > k.z_index:
-                        sorted.set(j + 1, p)
+                        sorted[j + 1] = p
                         j = j - 1
                     else:
                         j = -1  # break
                 else:
                     j = -1
-            sorted.set(j + 1, k)
+            sorted[j + 1] = k
         i = i + 1
     sorted
 

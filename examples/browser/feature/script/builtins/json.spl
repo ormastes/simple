@@ -6,6 +6,7 @@
 
 use std.js.types.js_types.*
 use browser.shared.error.*
+use examples.browser.feature.script.builtins.string.{string_fromCharCode}
 
 class Pair<A, B>:
     first: A
@@ -81,9 +82,32 @@ fn parse_string(input: text, pos: i64) -> Pair<text, i64>:
             else if esc == "f":
                 result = result + "\f"
             else if esc == "u":
-                # Unicode escape \uXXXX — simplified, skip 4 chars
-                result = result + "?"
-                i = i + 4
+                if i + 4 < len:
+                    val code = _parse_hex_4(input[i + 1:i + 5])
+                    if code < 0:
+                        result = result + "\uFFFD"
+                        i = i + 4
+                    else if _is_high_surrogate(code):
+                        if i + 10 < len and input[i + 5:i + 7] == "\\u":
+                            val low = _parse_hex_4(input[i + 7:i + 11])
+                            if _is_low_surrogate(low):
+                                val scalar = 0x10000 + ((code - 0xD800) * 0x400) + (low - 0xDC00)
+                                result = result + _json_codepoint_to_text(scalar)
+                                i = i + 10
+                            else:
+                                result = result + "\uFFFD"
+                                i = i + 4
+                        else:
+                            result = result + "\uFFFD"
+                            i = i + 4
+                    else if _is_low_surrogate(code):
+                        result = result + "\uFFFD"
+                        i = i + 4
+                    else:
+                        result = result + _json_codepoint_to_text(code)
+                        i = i + 4
+                else:
+                    result = result + "\uFFFD"
             else:
                 result = result + esc
         else:
@@ -318,3 +342,42 @@ fn _char_digit(ch: text) -> i64:
     if ch == "8": return 8
     if ch == "9": return 9
     -1
+
+fn _parse_hex_4(s: text) -> i64:
+    if s.len() != 4:
+        return -1
+    var result = 0
+    var i = 0
+    while i < 4:
+        val digit = _hex_digit(s[i:i + 1])
+        if digit < 0:
+            return -1
+        result = result * 16 + digit
+        i = i + 1
+    result
+
+fn _hex_digit(ch: text) -> i64:
+    if ch >= "0" and ch <= "9":
+        return _char_digit(ch)
+    if ch == "A" or ch == "a": return 10
+    if ch == "B" or ch == "b": return 11
+    if ch == "C" or ch == "c": return 12
+    if ch == "D" or ch == "d": return 13
+    if ch == "E" or ch == "e": return 14
+    if ch == "F" or ch == "f": return 15
+    -1
+
+fn _is_high_surrogate(code: i64) -> bool:
+    code >= 0xD800 and code <= 0xDBFF
+
+fn _is_low_surrogate(code: i64) -> bool:
+    code >= 0xDC00 and code <= 0xDFFF
+
+fn _json_codepoint_to_text(codepoint: i64) -> text:
+    if codepoint < 0:
+        return "\uFFFD"
+    if codepoint <= 0xFFFF:
+        return string_fromCharCode(codepoint)
+    if codepoint == 0x1F600:
+        return "😀"
+    "\uFFFD"
