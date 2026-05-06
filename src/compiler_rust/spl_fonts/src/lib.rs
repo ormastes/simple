@@ -10,7 +10,7 @@ use std::os::raw::{c_char, c_int, c_long, c_uint, c_void};
 use std::sync::Mutex;
 
 use fontdue::layout::{CoordinateSystem, Layout, LayoutSettings, TextStyle};
-use fontdue::{Font, FontSettings, Metrics};
+use fontdue::{Font, FontSettings, Metrics, OutlineBounds};
 
 struct GlyphSlot {
     metrics: Metrics,
@@ -291,7 +291,7 @@ fn rasterize_with_freetype(ch: char, font_size_px: i64) -> Option<GlyphSlot> {
             height,
             advance_width,
             advance_height: ((*slot).advance.y as f32 / 64.0).round(),
-            bounds: fontdue::math::Rect {
+            bounds: OutlineBounds {
                 xmin: (*slot).bitmap_left as f32,
                 ymin: ymin as f32,
                 width: width as f32,
@@ -334,7 +334,15 @@ pub extern "C" fn rt_fonts_rasterize_glyph_subpixel(codepoint: i64, font_size_px
     let (metrics, bitmap) = font.rasterize_subpixel(ch, font_size_px as f32);
     match GLYPH_SLOT.lock() {
         Ok(mut slot) => {
-            *slot = Some(GlyphSlot { metrics, bitmap });
+            *slot = Some(GlyphSlot {
+                width: metrics.width,
+                height: metrics.height,
+                advance_width: metrics.advance_width,
+                xmin: metrics.xmin,
+                ymin: metrics.ymin,
+                metrics,
+                bitmap,
+            });
             1
         }
         Err(_) => 0,
