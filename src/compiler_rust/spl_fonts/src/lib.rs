@@ -5,6 +5,8 @@
 // rasterized glyph bitmap. This is deliberately minimal — Phase 2 will grow a
 // proper handle table.
 
+use std::ffi::CString;
+use std::os::raw::{c_char, c_int, c_long, c_uint, c_void};
 use std::sync::Mutex;
 
 use fontdue::layout::{CoordinateSystem, Layout, LayoutSettings, TextStyle};
@@ -13,6 +15,11 @@ use fontdue::{Font, FontSettings, Metrics};
 struct GlyphSlot {
     metrics: Metrics,
     bitmap: Vec<u8>,
+    width: usize,
+    height: usize,
+    advance_width: f32,
+    xmin: i32,
+    ymin: i32,
 }
 
 struct LayoutGlyphSlot {
@@ -25,8 +32,121 @@ struct LayoutGlyphSlot {
 }
 
 static FONT_SLOT: Mutex<Option<Font>> = Mutex::new(None);
+static FREETYPE_SLOT: Mutex<Option<FreetypeSlot>> = Mutex::new(None);
 static GLYPH_SLOT: Mutex<Option<GlyphSlot>> = Mutex::new(None);
 static LAYOUT_SLOT: Mutex<Vec<LayoutGlyphSlot>> = Mutex::new(Vec::new());
+
+struct FreetypeSlot {
+    library: usize,
+    face: usize,
+}
+
+#[repr(C)]
+#[derive(Copy, Clone)]
+struct FtVector {
+    x: c_long,
+    y: c_long,
+}
+
+#[repr(C)]
+#[derive(Copy, Clone)]
+struct FtGeneric {
+    data: *mut c_void,
+    finalizer: Option<unsafe extern "C" fn(*mut c_void)>,
+}
+
+#[repr(C)]
+#[derive(Copy, Clone)]
+struct FtBBox {
+    x_min: c_long,
+    y_min: c_long,
+    x_max: c_long,
+    y_max: c_long,
+}
+
+#[repr(C)]
+#[derive(Copy, Clone)]
+struct FtBitmap {
+    rows: c_uint,
+    width: c_uint,
+    pitch: c_int,
+    buffer: *mut u8,
+    num_grays: u16,
+    pixel_mode: u8,
+    palette_mode: u8,
+    palette: *mut c_void,
+}
+
+#[repr(C)]
+#[derive(Copy, Clone)]
+struct FtGlyphMetrics {
+    width: c_long,
+    height: c_long,
+    hori_bearing_x: c_long,
+    hori_bearing_y: c_long,
+    hori_advance: c_long,
+    vert_bearing_x: c_long,
+    vert_bearing_y: c_long,
+    vert_advance: c_long,
+}
+
+#[repr(C)]
+struct FtGlyphSlotRec {
+    library: *mut c_void,
+    face: *mut c_void,
+    next: *mut c_void,
+    glyph_index: c_uint,
+    generic: FtGeneric,
+    metrics: FtGlyphMetrics,
+    linear_hori_advance: c_long,
+    linear_vert_advance: c_long,
+    advance: FtVector,
+    format: c_uint,
+    bitmap: FtBitmap,
+    bitmap_left: c_int,
+    bitmap_top: c_int,
+}
+
+#[repr(C)]
+struct FtFaceRec {
+    num_faces: c_long,
+    face_index: c_long,
+    face_flags: c_long,
+    style_flags: c_long,
+    num_glyphs: c_long,
+    family_name: *mut c_char,
+    style_name: *mut c_char,
+    num_fixed_sizes: c_int,
+    available_sizes: *mut c_void,
+    num_charmaps: c_int,
+    charmaps: *mut c_void,
+    generic: FtGeneric,
+    bbox: FtBBox,
+    units_per_em: u16,
+    ascender: i16,
+    descender: i16,
+    height: i16,
+    max_advance_width: i16,
+    max_advance_height: i16,
+    underline_position: i16,
+    underline_thickness: i16,
+    glyph: *mut FtGlyphSlotRec,
+}
+
+#[link(name = "freetype")]
+extern "C" {
+    fn FT_Init_FreeType(alibrary: *mut *mut c_void) -> c_int;
+    fn FT_New_Face(library: *mut c_void, filepathname: *const c_char, face_index: c_long, aface: *mut *mut FtFaceRec) -> c_int;
+    fn FT_Done_Face(face: *mut FtFaceRec) -> c_int;
+    fn FT_Done_FreeType(library: *mut c_void) -> c_int;
+    fn FT_Set_Pixel_Sizes(face: *mut FtFaceRec, pixel_width: c_uint, pixel_height: c_uint) -> c_int;
+    fn FT_Load_Char(face: *mut FtFaceRec, char_code: c_ulong, load_flags: c_int) -> c_int;
+}
+
+type c_ulong = std::os::raw::c_ulong;
+
+const FT_LOAD_RENDER: c_int = 0x4;
+const FT_LOAD_TARGET_NORMAL: c_int = 0x0;
 
 /// Load a TTF/OTF from `path_ptr`/`path_len`. Returns 1 on success, 0 on any failure.
 #[no_mangle]
@@ -47,12 +167,41 @@ pub extern "C" fn rt_fonts_init(path_ptr: i64, path_len: i64) -> i64 {
         Ok(f) => f,
         Err(_) => return 0,
     };
+    let freetype = load_freetype_face(path);
     match FONT_SLOT.lock() {
         Ok(mut slot) => {
             *slot = Some(font);
+            if let Ok(mut ft_slot) = FREETYPE_SLOT.lock() {
+                if let Some(old) = ft_slot.take() {
+                    unsafe {
+                        let _ = FT_Done_Face(old.face as *mut FtFaceRec);
+                        let _ = FT_Done_FreeType(old.library as *mut c_void);
+                    }
+                }
+                *ft_slot = freetype;
+            }
             1
         }
         Err(_) => 0,
+    }
+}
+
+fn load_freetype_face(path: &str) -> Option<FreetypeSlot> {
+    let c_path = CString::new(path).ok()?;
+    unsafe {
+        let mut library: *mut c_void = std::ptr::null_mut();
+        if FT_Init_FreeType(&mut library) != 0 || library.is_null() {
+            return None;
+        }
+        let mut face: *mut FtFaceRec = std::ptr::null_mut();
+        if FT_New_Face(library, c_path.as_ptr(), 0, &mut face) != 0 || face.is_null() {
+            let _ = FT_Done_FreeType(library);
+            return None;
+        }
+        Some(FreetypeSlot {
+            library: library as usize,
+            face: face as usize,
+        })
     }
 }
 
@@ -75,13 +224,89 @@ pub extern "C" fn rt_fonts_rasterize_glyph(codepoint: i64, font_size_px: i64) ->
         Some(f) => f,
         None => return 0,
     };
-    let (metrics, bitmap) = font.rasterize(ch, font_size_px as f32);
+    let glyph = match rasterize_with_freetype(ch, font_size_px) {
+        Some(glyph) => glyph,
+        None => {
+            let (metrics, bitmap) = font.rasterize(ch, font_size_px as f32);
+            GlyphSlot {
+                width: metrics.width,
+                height: metrics.height,
+                advance_width: metrics.advance_width,
+                xmin: metrics.xmin,
+                ymin: metrics.ymin,
+                metrics,
+                bitmap,
+            }
+        }
+    };
     match GLYPH_SLOT.lock() {
         Ok(mut slot) => {
-            *slot = Some(GlyphSlot { metrics, bitmap });
+            *slot = Some(glyph);
             1
         }
         Err(_) => 0,
+    }
+}
+
+fn rasterize_with_freetype(ch: char, font_size_px: i64) -> Option<GlyphSlot> {
+    let ft_guard = FREETYPE_SLOT.lock().ok()?;
+    let ft = ft_guard.as_ref()?;
+    unsafe {
+        let face = ft.face as *mut FtFaceRec;
+        if face.is_null() {
+            return None;
+        }
+        if FT_Set_Pixel_Sizes(face, 0, font_size_px as c_uint) != 0 {
+            return None;
+        }
+        if FT_Load_Char(face, ch as c_ulong, FT_LOAD_RENDER | FT_LOAD_TARGET_NORMAL) != 0 {
+            return None;
+        }
+        let slot = (*face).glyph;
+        if slot.is_null() {
+            return None;
+        }
+        let bitmap_ref = &(*slot).bitmap;
+        let width = bitmap_ref.width as usize;
+        let height = bitmap_ref.rows as usize;
+        let pitch = bitmap_ref.pitch.unsigned_abs() as usize;
+        let mut bitmap = Vec::with_capacity(width * height);
+        if width > 0 && height > 0 {
+            if bitmap_ref.buffer.is_null() {
+                return None;
+            }
+            for y in 0..height {
+                let row = std::slice::from_raw_parts(bitmap_ref.buffer.add(y * pitch), pitch);
+                for x in 0..width {
+                    bitmap.push(*row.get(x).unwrap_or(&0));
+                }
+            }
+        }
+        let advance_width = ((*slot).advance.x as f32 / 64.0).round();
+        let ymin = (*slot).bitmap_top - bitmap_ref.rows as c_int;
+        let metrics = Metrics {
+            xmin: (*slot).bitmap_left,
+            ymin,
+            width,
+            height,
+            advance_width,
+            advance_height: ((*slot).advance.y as f32 / 64.0).round(),
+            bounds: fontdue::math::Rect {
+                xmin: (*slot).bitmap_left as f32,
+                ymin: ymin as f32,
+                width: width as f32,
+                height: height as f32,
+            },
+        };
+        Some(GlyphSlot {
+            metrics,
+            bitmap,
+            width,
+            height,
+            advance_width,
+            xmin: (*slot).bitmap_left,
+            ymin,
+        })
     }
 }
 
