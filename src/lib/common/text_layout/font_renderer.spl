@@ -463,10 +463,11 @@ class FontRenderer:
     # -----------------------------------------------------------------------
     # Render text into a pixel buffer (ARGB u32)
     # -----------------------------------------------------------------------
-    me render_text(buffer: mut [u32], buf_w: i32, buf_h: i32,
+    me render_text(buffer: [u32], buf_w: i32, buf_h: i32,
                    x: i32, y: i32, content: text,
-                   color: u32, font_size: i32):
+                   color: u32, font_size: i32) -> [u32]:
         """Render text string into an ARGB pixel buffer with anti-aliased glyphs."""
+        var out = buffer
         var cx = x
         var prev_cp = -1
         for ch in content:
@@ -475,9 +476,10 @@ class FontRenderer:
                 cx = cx + self.horizontal_kern(prev_cp, cp, font_size)
             val glyph = self.get_glyph(cp, font_size)
             if glyph.width > 0 and glyph.height > 0:
-                blit_glyph(buffer, buf_w, buf_h, cx, y, glyph, color)
+                out = blit_glyph(out, buf_w, buf_h, cx, y, glyph, color)
             cx = cx + glyph.advance
             prev_cp = cp
+        out
 
 # ============================================================================
 # Phase 3b: SFFI spl_fonts GlyphBitmap → CachedGlyph adapter
@@ -709,9 +711,10 @@ fn rasterize_bitmap(codepoint: i32, font_size: i32) -> CachedGlyph:
 # Glyph Blitting (alpha-blend into ARGB buffer)
 # ============================================================================
 
-fn blit_glyph(buffer: mut [u32], buf_w: i32, buf_h: i32,
-              x: i32, y: i32, glyph: CachedGlyph, color: u32):
+fn blit_glyph(buffer: [u32], buf_w: i32, buf_h: i32,
+              x: i32, y: i32, glyph: CachedGlyph, color: u32) -> [u32]:
     """Alpha-blend a rasterized glyph into an ARGB pixel buffer."""
+    var out = buffer
     val fg_r = (color >> 16) & 0xFF
     val fg_g = (color >> 8) & 0xFF
     val fg_b = color & 0xFF
@@ -729,12 +732,12 @@ fn blit_glyph(buffer: mut [u32], buf_w: i32, buf_h: i32,
                         val alpha = glyph.pixels[glyph_idx].to_i32()
                         if alpha > 0:
                             val buf_idx = py * buf_w + px
-                            if buf_idx >= 0 and buf_idx < buffer.len():
+                            if buf_idx >= 0 and buf_idx < out.len():
                                 if alpha >= 255:
-                                    buffer[buf_idx] = 0xFF000000 | (fg_r << 16) | (fg_g << 8) | fg_b
+                                    out[buf_idx] = 0xFF000000 | (fg_r << 16) | (fg_g << 8) | fg_b
                                 else:
                                     # Alpha blend
-                                    val dst = buffer[buf_idx]
+                                    val dst = out[buf_idx]
                                     val dst_r = (dst >> 16) & 0xFF
                                     val dst_g = (dst >> 8) & 0xFF
                                     val dst_b = dst & 0xFF
@@ -742,9 +745,10 @@ fn blit_glyph(buffer: mut [u32], buf_w: i32, buf_h: i32,
                                     val out_r = (fg_r * alpha + dst_r * inv) / 255
                                     val out_g = (fg_g * alpha + dst_g * inv) / 255
                                     val out_b = (fg_b * alpha + dst_b * inv) / 255
-                                    buffer[buf_idx] = 0xFF000000 | (out_r << 16) | (out_g << 8) | out_b
+                                    out[buf_idx] = 0xFF000000 | (out_r << 16) | (out_g << 8) | out_b
                 col = col + 1
         row = row + 1
+    out
 
 # ============================================================================
 # Vector Font Glyph Data (design space: 24 units)
