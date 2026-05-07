@@ -1260,3 +1260,14 @@ Fresh evidence:
 
 - `bin/simple test test/lib/common/wine_dll_view_startup_fault_spec.spl --mode=interpreter --clean`: covers layout-gated startup rollback and layout rejection.
 - `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_dll_view_startup_fault_spec.spl --mode=interpreter --clean`: covers the SimpleOS system-level startup rollback path requiring the PEB/TEB layout handoff.
+
+## 2026-05-07 PEB/TEB Layout Byte-Payload Update
+
+`wine_peb_teb_layout_byte_writes(...)` now materializes the six PEB/TEB x64
+layout records as bounded little-endian 8-byte payloads. This is still modeled
+payload evidence only; it does not claim live VM memory mutation.
+
+Fresh evidence:
+
+- `bin/simple test test/lib/common/wine_peb_teb_spec.spl --mode=interpreter --clean`: covers successful layout byte payload generation and layout rejection.
+- `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_peb_teb_spec.spl --mode=interpreter --clean`: covers the SimpleOS system-level layout byte payload handoff.

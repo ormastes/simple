@@ -428,7 +428,11 @@ memory-write gate then requires writable SimpleOS VM pages for PEB, TEB, TLS
 vector, and process-parameter startup fields before reporting modeled mutation
 readiness. `wine_peb_teb_layout_write_plan(...)` converts that readiness into
 bounded x64 layout write records for TEB stack bounds, TEB TLS/PEB pointers,
-and PEB image-base/process-parameter pointers. `wine_ntdll_execute_process_info_with_peb_teb_writes(...)` composes
+and PEB image-base/process-parameter pointers.
+`wine_peb_teb_layout_byte_writes(...)` materializes those six records as
+little-endian 8-byte payloads for downstream modeled handoffs while still
+leaving live VM mutation outside the verified boundary.
+`wine_ntdll_execute_process_info_with_peb_teb_writes(...)` composes
 that write readiness before the NTDLL process/thread information bridge reports
 PEB/TEB addresses, and
 `wine_ntdll_execute_process_info_with_peb_teb_layout(...)` requires the

@@ -1,5 +1,5 @@
 use common.wine_kernel32_critical_section.{wine_kernel32_critical_section_table_new}
-use common.wine_peb_teb.{WinePebTebInitEvidence, wine_peb_teb_init_default, wine_peb_teb_init_gate, wine_peb_teb_init_with_loader_lock, wine_peb_teb_layout_write_plan, wine_peb_teb_memory_write_gate, wine_peb_teb_required_evidence}
+use common.wine_peb_teb.{WinePebTebInitEvidence, wine_peb_teb_init_default, wine_peb_teb_init_gate, wine_peb_teb_init_with_loader_lock, wine_peb_teb_layout_byte_writes, wine_peb_teb_layout_write_plan, wine_peb_teb_memory_write_gate, wine_peb_teb_required_evidence}
 use common.wine_vm_adapter.{WineVmSpace, wine_vm_commit, wine_vm_process_space_new, wine_vm_reserve_fixed}
 
 fn _loader_lock_symbols() -> [text]:
@@ -150,3 +150,35 @@ describe "Wine PEB/TEB initialization gate":
         expect(plan.ok).to_equal(false)
         expect(plan.state).to_equal("write:peb-write:page-fault-unmapped")
         expect(plan.record_count).to_equal(0)
+
+    it "materializes PEB/TEB layout records as little-endian byte writes":
+        val init = wine_peb_teb_init_default()
+        val writes = wine_peb_teb_memory_write_gate(init, _peb_teb_write_space())
+        val plan = wine_peb_teb_layout_write_plan(init, writes)
+        val bytes = wine_peb_teb_layout_byte_writes(plan)
+
+        expect(bytes.ok).to_equal(true)
+        expect(bytes.state).to_equal("ready")
+        expect(bytes.write_count).to_equal(6)
+        expect(bytes.byte_count).to_equal(48)
+        expect(bytes.writes[0].field_name).to_equal("NtTib.StackBase")
+        expect(bytes.writes[0].address).to_equal(0x7ffde008)
+        expect(bytes.writes[0].bytes[0]).to_equal(0x00)
+        expect(bytes.writes[0].bytes[1]).to_equal(0xf0)
+        expect(bytes.writes[0].bytes[2]).to_equal(0xfe)
+        expect(bytes.writes[0].bytes[3]).to_equal(0x7f)
+        expect(bytes.writes[4].field_name).to_equal("ImageBaseAddress")
+        expect(bytes.writes[4].bytes[0]).to_equal(0x00)
+        expect(bytes.writes[4].bytes[1]).to_equal(0x00)
+        expect(bytes.writes[4].bytes[2]).to_equal(0x40)
+        expect(bytes.operations).to_contain("PEBTEBLayoutBytesWritten")
+
+    it "blocks byte writes when PEB/TEB layout planning failed":
+        val init = wine_peb_teb_init_default()
+        val writes = wine_peb_teb_memory_write_gate(init, wine_vm_process_space_new(10, 30, "pid fs ipc net capability"))
+        val plan = wine_peb_teb_layout_write_plan(init, writes)
+        val bytes = wine_peb_teb_layout_byte_writes(plan)
+
+        expect(bytes.ok).to_equal(false)
+        expect(bytes.state).to_equal("layout:write:peb-write:page-fault-unmapped")
+        expect(bytes.write_count).to_equal(0)

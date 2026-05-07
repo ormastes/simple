@@ -54,6 +54,22 @@ class WinePebTebLayoutWritePlan:
     operations: text
     records: [WinePebTebLayoutWriteRecord]
 
+class WinePebTebLayoutByteWrite:
+    area: text
+    field_name: text
+    address: i64
+    bytes: [u8]
+
+class WinePebTebLayoutByteWriteResult:
+    ok: bool
+    state: text
+    process_id: i64
+    thread_id: i64
+    write_count: i64
+    byte_count: i64
+    operations: text
+    writes: [WinePebTebLayoutByteWrite]
+
 fn _init(process_id: i64, thread_id: i64, peb_address: i64, teb_address: i64, image_base: i64, stack_base: i64, stack_limit: i64, tls_vector_address: i64, process_parameters_address: i64, evidence: text) -> WinePebTebInitEvidence:
     WinePebTebInitEvidence(process_id: process_id, thread_id: thread_id, peb_address: peb_address, teb_address: teb_address, image_base: image_base, stack_base: stack_base, stack_limit: stack_limit, tls_vector_address: tls_vector_address, process_parameters_address: process_parameters_address, evidence: evidence)
 
@@ -68,6 +84,25 @@ fn _layout_record(area: text, field_name: text, base: i64, offset: i64, width: i
 
 fn _layout_plan(ok: bool, state: text, init: WinePebTebInitEvidence, operations: text, records: [WinePebTebLayoutWriteRecord]) -> WinePebTebLayoutWritePlan:
     WinePebTebLayoutWritePlan(ok: ok, state: state, process_id: init.process_id, thread_id: init.thread_id, record_count: records.len(), operations: operations, records: records)
+
+fn _layout_byte_result(ok: bool, state: text, plan: WinePebTebLayoutWritePlan, operations: text, writes: [WinePebTebLayoutByteWrite]) -> WinePebTebLayoutByteWriteResult:
+    var byte_count = 0
+    for write in writes:
+        byte_count = byte_count + write.bytes.len()
+    WinePebTebLayoutByteWriteResult(ok: ok, state: state, process_id: plan.process_id, thread_id: plan.thread_id, write_count: writes.len(), byte_count: byte_count, operations: operations, writes: writes)
+
+fn _u64_le_bytes(value: i64) -> [u8]:
+    var out: [u8] = []
+    var remaining = value
+    var i = 0
+    while i < 8:
+        out.push((remaining % 256) as u8)
+        remaining = remaining / 256
+        i = i + 1
+    out
+
+fn _layout_byte_write(record: WinePebTebLayoutWriteRecord) -> WinePebTebLayoutByteWrite:
+    WinePebTebLayoutByteWrite(area: record.area, field_name: record.field_name, address: record.address, bytes: _u64_le_bytes(record.value))
 
 pub fn wine_peb_teb_required_evidence() -> [text]:
     [
@@ -172,3 +207,16 @@ pub fn wine_peb_teb_layout_write_plan(init: WinePebTebInitEvidence, writes: Wine
         _layout_record("PEB", "ProcessParameters", init.peb_address, 0x20, 8, init.process_parameters_address)
     ]
     _layout_plan(true, "ready", init, writes.operations + " PEBTEBLayoutWritePlan", records)
+
+pub fn wine_peb_teb_layout_byte_writes(plan: WinePebTebLayoutWritePlan) -> WinePebTebLayoutByteWriteResult:
+    if not plan.ok:
+        return _layout_byte_result(false, "layout:" + plan.state, plan, plan.operations, [])
+    if plan.record_count != 6:
+        return _layout_byte_result(false, "layout-count-mismatch", plan, plan.operations, [])
+
+    var writes: [WinePebTebLayoutByteWrite] = []
+    for record in plan.records:
+        if record.width != 8:
+            return _layout_byte_result(false, "unsupported-layout-width:" + record.field_name, plan, plan.operations, writes)
+        writes.push(_layout_byte_write(record))
+    _layout_byte_result(true, "ready", plan, plan.operations + " PEBTEBLayoutBytesWritten", writes)
