@@ -148,10 +148,14 @@ before any future arbitrary process dispatch can be attempted. It checks
 non-import CPU prerequisites before the heavier import-record planning path, so
 missing thread/stack/dispatch evidence is rejected without running the PE loader
 chain.
+`wine_process_prepare_known_console_image(...)` is the shared preflight for
+known-console dispatch and execution: it applies the bounded copied-image thunk
+patches and returns the patched image plus the composed CPU evidence.
 `wine_process_plan_known_console_dispatch(...)` then decodes the bounded known
-console call sequence into a dispatch plan, still without running instructions.
-`wine_process_execute_known_console(...)` runs only that decoded known-console
-plan through the existing modeled NT bridge and returns stdout plus exit code.
+console call sequence from that patched image, still without running arbitrary
+instructions. `wine_process_execute_known_console(...)` runs only that decoded
+known-console plan through the existing modeled NT bridge and returns stdout
+plus exit code.
 `wine_process_resolve_known_kernel32_module(...)` and
 `wine_process_resolve_known_kernel32_module_ex(...)` run bounded KERNEL32
 `GetModuleHandleW`/`LoadLibraryW` or `LoadLibraryExW`/`GetProcAddress`/

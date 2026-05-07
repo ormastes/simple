@@ -626,6 +626,9 @@ records and writes modeled KERNEL32 procedure addresses into a copied PE image
 for the same three known thunk slots. This remains bounded fixture image
 mutation; writable OS VMA mutation, multi-DLL import-table patching, rollback,
 and arbitrary process execution are still outside the completed surface.
+`wine_process_prepare_known_console_image(...)` now makes that patched image the
+handoff into known-console dispatch and execution, so the bounded decoder and
+modeled NT bridge no longer run from the unpatched fixture bytes.
 
 Fresh evidence:
 
