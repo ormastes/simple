@@ -206,6 +206,9 @@ is mapped inside the process image, and records a loader-owned TLS callback
 dispatch. The record is still non-executing preflight: it does not step callback
 instructions, run user code, load DLLs, or cross the arbitrary PE execution
 boundary.
+`wine_process_record_tls_callback_dispatch_with_peb_teb_vm_writes(...)`
+requires the VM-readback-gated relocation path before recording the same
+non-executing TLS callback dispatch evidence.
 `wine_process_bind_known_kernel32_imports(...)`
 then plans the currently supported KERNEL32 console binding sequence and
 rejects unsupported or incomplete import sets; it still does not patch thunks or

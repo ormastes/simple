@@ -1376,3 +1376,15 @@ Fresh evidence:
 
 - `bin/simple test test/lib/common/wine_process_session_vma_relocation_spec.spl --mode=interpreter --clean`: covers VM-write/readback-gated loader relocation mutation and failure propagation.
 - `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_process_vma_relocation_spec.spl --mode=interpreter --clean`: covers the SimpleOS system-level relocation mutation path requiring PEB/TEB VM write/readback evidence.
+
+## 2026-05-07 TLS Callback Dispatch VM-Write Update
+
+`wine_process_record_tls_callback_dispatch_with_peb_teb_vm_writes(...)` now
+requires the PEB/TEB VM byte-write/readback-gated relocation path before
+recording loader-owned TLS callback dispatch evidence. Failed VM byte-write
+composition blocks dispatch evidence before TLS callback handoff is reported.
+
+Fresh evidence:
+
+- `bin/simple test test/lib/common/wine_process_session_tls_dispatch_spec.spl --mode=interpreter --clean`: covers VM-write/readback-gated TLS callback dispatch and failure propagation.
+- `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_process_tls_dispatch_spec.spl --mode=interpreter --clean`: covers the SimpleOS system-level TLS callback dispatch path requiring PEB/TEB VM write/readback evidence.
