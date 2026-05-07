@@ -1,9 +1,16 @@
 use common.wine_thread_adapter.{
     wine_thread_adapter_feature_string,
     wine_thread_adapter_gate,
+    wine_thread_adapter_gate_with_wait_result,
     wine_thread_adapter_missing_apis,
     wine_thread_adapter_required_apis,
     wine_thread_adapter_sffi_binding
+}
+use common.wine_nt_thread_wait.{
+    wine_nt_create_pending_thread,
+    wine_nt_create_thread,
+    wine_nt_thread_table_new,
+    wine_nt_wait_for_single_object
 }
 
 fn _existing_thread_sffi_apis() -> text:
@@ -48,3 +55,23 @@ describe "Wine thread adapter contract":
         val result = wine_thread_adapter_gate(_all_thread_apis())
         expect(result.ready).to_equal(true)
         expect(result.state).to_equal("ready")
+
+    it "requires modeled NT thread wait completion before full adapter readiness":
+        val created = wine_nt_create_thread(wine_nt_thread_table_new(_all_thread_apis()), "main", 7)
+        val waited = wine_nt_wait_for_single_object(created.table, created.handle, 1000)
+        val result = wine_thread_adapter_gate_with_wait_result(_all_thread_apis(), waited)
+        expect(result.ready).to_equal(true)
+        expect(result.state).to_equal("ready")
+        expect(result.thread_features).to_contain("nt-thread-wait")
+
+    it "keeps thread adapter readiness blocked on timeout or invalid wait evidence":
+        val pending = wine_nt_create_pending_thread(wine_nt_thread_table_new(_all_thread_apis()), "worker")
+        val timeout = wine_nt_wait_for_single_object(pending.table, pending.handle, 0)
+        val timed = wine_thread_adapter_gate_with_wait_result(_all_thread_apis(), timeout)
+        expect(timed.ready).to_equal(false)
+        expect(timed.state).to_equal("thread-wait-not-signaled:WAIT_TIMEOUT")
+
+        val invalid = wine_nt_wait_for_single_object(wine_nt_thread_table_new(_all_thread_apis()), 0x999, 0)
+        val errored = wine_thread_adapter_gate_with_wait_result(_all_thread_apis(), invalid)
+        expect(errored.ready).to_equal(false)
+        expect(errored.state).to_equal("thread-wait-invalid-handle")
