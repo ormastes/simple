@@ -1309,3 +1309,15 @@ Fresh evidence:
 
 - `bin/simple test test/lib/common/wine_dll_view_dllmain_handoff_spec.spl --mode=interpreter --clean`: covers VM-write/readback-gated DllMain handoff and failure propagation.
 - `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_dll_view_dllmain_handoff_spec.spl --mode=interpreter --clean`: covers the SimpleOS system-level DllMain VM-write/readback handoff.
+
+## 2026-05-07 DllMain Startup-Fault VM-Write Handoff Update
+
+`wine_dll_record_file_view_startup_fault_with_peb_teb_vm_writes(...)` now
+carries the VM byte-write/readback-gated DllMain handoff into the modeled SEH
+rollback path. Startup rollback is recorded only after loader-lock readiness
+and PEB/TEB VM write/readback evidence are ready.
+
+Fresh evidence:
+
+- `bin/simple test test/lib/common/wine_dll_view_startup_fault_spec.spl --mode=interpreter --clean`: covers VM-write/readback-gated startup rollback and failure propagation.
+- `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_dll_view_startup_fault_spec.spl --mode=interpreter --clean`: covers the SimpleOS system-level startup rollback path requiring PEB/TEB VM write/readback evidence.
