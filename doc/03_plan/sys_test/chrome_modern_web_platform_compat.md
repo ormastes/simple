@@ -98,7 +98,7 @@ REQ-007: Initial Modern CSS BDD Slice
 - Given modern CSS structural pseudos, when source is inspected, then partial `:first-child` matching should be implemented for first element content.
 - Given modern CSS structural pseudos, when source is inspected, then partial `:last-child` matching should be implemented for last element content.
 - Given modern CSS structural pseudos, when source is inspected, then partial `:only-child` matching should be implemented for sole element content.
-- Given modern CSS structural pseudos, when source is inspected, then bounded `:nth-child(N/odd/even)` matching should be implemented for ordered element content.
+- Given modern CSS structural pseudos, when source is inspected, then bounded `:nth-child(N/odd/even/common an+b forms)` matching should be implemented for ordered element content.
 - Given modern CSS at-rules, when source is inspected, then simple CSS `@layer` wrappers should be flattened before existing rule scans.
 - Given modern CSS selectors, when source is inspected, then simple `&` parent-selector nested rules should be flattened before existing rule scans.
 - Given modern CSS selectors, when source is inspected, then basic `[attr]` and `[attr=value]` matching should be implemented.
@@ -107,7 +107,7 @@ REQ-007: Initial Modern CSS BDD Slice
 - Given modern CSS selectors, when source is inspected, then bounded `[attr=value i]` matching should be implemented with the unflagged path remaining case-sensitive.
 - Given modern CSS selectors, when source is inspected, then bounded `[attr=value s]` syntax should be accepted and remain case-sensitive.
 - Given fallback renderer extraction, when source is inspected, then commas inside functional selectors should not split selector lists.
-- Given BDD coverage, when renderer SSpec is run, then the `:is()`, `:where()`, `:not()`, simple descendant/direct-child `:has()`, simple CSS `@layer`, simple CSS nesting, attribute selector/operator, `:empty`, `:first-child`, `:last-child`, `:only-child`, and bounded `:nth-child(N/odd/even)` examples should pass.
+- Given BDD coverage, when renderer SSpec is run, then the `:is()`, `:where()`, `:not()`, simple descendant/direct-child `:has()`, simple CSS `@layer`, simple CSS nesting, attribute selector/operator, `:empty`, `:first-child`, `:last-child`, `:only-child`, and bounded `:nth-child(N/odd/even/common an+b forms)` examples should pass.
 
 ## Execution Order
 
