@@ -165,6 +165,13 @@ modeled resolution into descriptor-qualified patch records carrying DLL name,
 symbol, descriptor index, thunk index/RVA, import-name RVA, and modeled
 procedure address. This is the multi-DLL analogue of the older known-KERNEL32
 record plan, but it still stops before VMA permission changes or IAT writes.
+`wine_process_apply_import_descriptor_thunk_patches_in_vma(...)` consumes those
+records through the modeled SimpleOS process VMA path: it maps the PE image,
+opens a bounded `rw` write window, writes the modeled procedure addresses into
+descriptor-qualified thunk slots, restores `rx`, and rechecks the no-host-code
+jump policy. This is still a modeled multi-DLL thunk application over covered
+DLL families, not real DLL loading, relocation, TLS callback execution, or
+arbitrary PE instruction dispatch.
 `wine_process_bind_known_kernel32_imports(...)`
 then plans the currently supported KERNEL32 console binding sequence and
 rejects unsupported or incomplete import sets; it still does not patch thunks or
@@ -221,8 +228,8 @@ then records symbol names, thunk indexes, thunk RVAs, and name RVAs.
 `wine_process_apply_known_kernel32_thunk_patches(...)` consumes those records
 and writes modeled KERNEL32 procedure addresses into a copied PE image for the
 same three known slots. This is still bounded fixture image mutation, not
-arbitrary DLL loading, multi-DLL import-table patching, writable OS VMA mutation,
-or rollback-capable process memory patching.
+arbitrary DLL loading, full import-table patching, real OS memory mutation, or
+rollback-complete process memory patching.
 `wine_process_plan_import_thunk_patches(...)` consumes those explicit records,
 so thunk patch evidence now carries module-loader, record-planning, and
 import-thunk preconditions before CPU dispatch preflight can pass.

@@ -690,6 +690,13 @@ resolution, and patch-record files to keep each full-image validation run below
 the Simple test watchdog. This completes REQ-033 as record planning only; it
 still performs no VMA permission transition, no IAT write, and no arbitrary PE
 execution.
+`wine_process_apply_import_descriptor_thunk_patches_in_vma(...)` now consumes
+those descriptor-qualified records through the modeled process VMA path. It maps
+the validated image shape, opens a bounded write window, writes the modeled
+procedure addresses for covered `KERNEL32`/`USER32`/`GDI32` imports, restores
+`rx`, and rechecks no-host-code-jump before reporting success. This completes
+REQ-034 as modeled multi-DLL thunk application only; it still performs no real
+DLL loading, relocation, TLS initialization, or arbitrary PE execution.
 
 Fresh evidence:
 
@@ -720,6 +727,8 @@ Fresh evidence:
 - `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_process_import_resolution_spec.spl --mode=interpreter --clean`: includes REQ-032 system coverage for modeled module/procedure resolution without IAT patching.
 - `bin/simple test test/lib/common/wine_process_session_import_patch_records_spec.spl --mode=interpreter --clean`: covers REQ-033 descriptor-qualified thunk patch record planning and missing-export rejection without IAT writes.
 - `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_process_import_patch_records_spec.spl --mode=interpreter --clean`: includes REQ-033 system coverage for multi-DLL patch record planning.
+- `bin/simple test test/lib/common/wine_process_session_import_vma_patch_spec.spl --mode=interpreter --clean`: covers REQ-034 modeled multi-DLL VMA thunk patching and missing-export rejection.
+- `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_process_import_vma_patch_spec.spl --mode=interpreter --clean`: includes REQ-034 system coverage for the bounded process VMA write window.
 - `bin/simple test test/lib/common/wine_x86_64_decode_spec.spl --mode=interpreter --clean`: covers RIP-relative indirect call decoding and thunk-RVA target extraction.
 - `bin/simple test test/lib/common/wine_hello_exe_spec.spl --mode=interpreter --clean`: covers import-binding agreement against thunk RVAs.
 - `bin/simple test test/lib/common/wine_process_session_known_console_spec.spl --mode=interpreter --clean`: keeps known-console process execution on the patched-image path.
@@ -733,8 +742,8 @@ Fresh evidence:
 Conservative boundary: this is a curated KERNEL32 table and bounded loader
 sequence. It is not arbitrary DLL loading, host DLL mapping, Windows DLL search
 order, arbitrary import-table binding, writable arbitrary OS VMA mutation beyond
-the three known thunk slots, PE DLL relocation, reference-count-complete loader
-state, or broad Win32/NT behavior.
+the currently modeled thunk slots, PE DLL relocation, TLS initialization,
+reference-count-complete loader state, or broad Win32/NT behavior.
 
 ## Completion Decision
 
