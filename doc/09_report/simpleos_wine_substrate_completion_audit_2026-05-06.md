@@ -20,6 +20,7 @@ Deliver the production-quality prerequisites for a controlled SimpleOS Wine path
 | Wine research | `doc/01_research/local/simpleos_wine_support.md`, `doc/01_research/domain/simpleos_wine_support.md`, `doc/09_report/simpleos_wine_support_research_2026-05-06.md` | Done |
 | Requirements/design/test artifacts | `doc/02_requirements/feature/simpleos_wine_substrate.md`, `doc/02_requirements/nfr/simpleos_wine_substrate.md`, `doc/04_architecture/simpleos_wine_substrate.md`, `doc/04_architecture/simpleos_wine_wm_vm.md`, `doc/05_design/simpleos_wine_substrate.md`, `doc/03_plan/sys_test/simpleos_wine_substrate.md`, `doc/06_spec/app/simpleos/feature/simpleos_wine_substrate_spec.spl` | Done |
 | SimpleOS executable environment gate | `src/lib/common/wine_simpleos_exec_env_gate.spl` requires QEMU VM, full OS boot, user process, VM space, filesystem, window system, network, container namespace, and container rootfs evidence; `src/lib/common/wine_substrate.spl` exposes this as the `exec_env` matrix row/gate | Implemented prerequisite |
+| Dynamic loading prerequisite | `src/lib/common/wine_dynload_adapter.spl` requires native loader APIs, search path/dependency/namespace coverage, relocation/import/TLS surfaces, structured loader errors, and bounded NTDLL `LdrLoadDll`/`LdrGetProcedureAddress`/`LdrUnloadDll` evidence before dynload readiness | Implemented prerequisite |
 | WM/graphics production prerequisite | `src/lib/common/ui/wine_simpleos_window_bridge.spl` creates SimpleOS `/win` `WindowRecord` state and framebuffer present evidence; `src/lib/common/ui/wine_x11_adapter.spl` requires that bridge through `wine_x11_backend_production_ready` | Implemented prerequisite |
 | VM/container production prerequisite | `src/lib/common/wine_vm_adapter.spl` distinguishes modeled spaces from OS process/address-space/container-backed spaces; `src/lib/common/wine_image_vm_map.spl` maps validated PE images plus stack/guard before execution | Implemented prerequisite |
 | PE/COFF and CPU preparation | `src/lib/common/wine_pe_gate.spl`, `src/lib/common/pe_coff_header.spl`, `src/lib/common/wine_pe_loader_runtime.spl`, `src/lib/common/wine_image_map.spl`, `src/lib/common/wine_x86_64_decode.spl`, and `src/lib/common/wine_cpu_exec.spl` validate image layout, entry windows, imports, relocation/TLS readiness, decoded call targets, safe prologues, and dispatch evidence before controlled execution | Verified for controlled hello path |
@@ -86,6 +87,20 @@ Fresh evidence:
 - `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_substrate_spec.spl`: 14 examples, 0 failures.
 
 Conservative boundary: this verifies a bounded PE readiness gate for the controlled Wine path. It is still not an arbitrary PE loader, full relocation engine, full TLS callback dispatcher, or full Wine loader.
+
+## 2026-05-07 Dynamic-Loader Evidence Update
+
+The dynamic-loader adapter now requires bounded NTDLL loader-resolution evidence before full adapter readiness. `wine_dynload_adapter_gate_with_loader_result` composes the existing coexistence API gate with `LdrLoadDll`, `LdrGetProcedureAddress`, and `LdrUnloadDll` results, and keeps failed module/procedure resolution blocked with structured errors.
+
+Fresh evidence:
+
+- `bin/simple check src/lib/common/wine_dynload_adapter.spl src/lib/common/wine_substrate.spl test/lib/common/wine_dynload_adapter_spec.spl test/lib/common/wine_substrate_spec.spl`: all checks passed.
+- `bin/simple test test/lib/common/wine_dynload_adapter_spec.spl`: 8 examples, 0 failures.
+- `bin/simple test test/lib/common/wine_ntdll_loader_spec.spl`: 3 examples, 0 failures.
+- `bin/simple test test/lib/common/wine_substrate_spec.spl`: 16 examples, 0 failures.
+- `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_substrate_spec.spl`: 14 examples, 0 failures.
+
+Conservative boundary: this is bounded loader-resolution evidence for the Wine substrate. It does not provide a general Unix dynamic loader, arbitrary DLL loading, or full Wine loader behavior.
 
 ## Completion Decision
 

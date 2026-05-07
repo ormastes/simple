@@ -1,10 +1,12 @@
 use common.wine_dynload_adapter.{
     wine_dynload_adapter_feature_string,
     wine_dynload_adapter_gate,
+    wine_dynload_adapter_gate_with_loader_result,
     wine_dynload_adapter_missing_apis,
     wine_dynload_adapter_native_binding,
     wine_dynload_adapter_required_apis
 }
+use common.wine_ntdll_loader.{wine_ntdll_execute_loader_resolution, wine_ntdll_loader_table_new}
 
 fn _current_native_loader_apis() -> text:
     "native-module-open native-module-close native-self-handle native-symbol-lookup"
@@ -44,3 +46,26 @@ describe "Wine dynamic loader adapter contract":
         val result = wine_dynload_adapter_gate(_all_dynload_apis())
         expect result.ready == true
         expect result.state == "ready"
+
+    it "requires bounded NTDLL loader resolution evidence before full adapter readiness":
+        val loader = wine_ntdll_execute_loader_resolution(
+            ["LdrLoadDll", "LdrGetProcedureAddress", "LdrUnloadDll"],
+            wine_ntdll_loader_table_new(),
+            "KERNEL32.dll",
+            "GetProcAddress"
+        )
+        val result = wine_dynload_adapter_gate_with_loader_result(_all_dynload_apis(), loader)
+        expect result.ready == true
+        expect result.state == "ready"
+        expect (result.dynload_features).contains("ntdll-loader-resolution")
+
+    it "keeps dynamic-loader readiness blocked on failed loader resolution":
+        val loader = wine_ntdll_execute_loader_resolution(
+            ["LdrLoadDll", "LdrGetProcedureAddress", "LdrUnloadDll"],
+            wine_ntdll_loader_table_new(),
+            "advapi32.dll",
+            "RegOpenKeyExW"
+        )
+        val result = wine_dynload_adapter_gate_with_loader_result(_all_dynload_apis(), loader)
+        expect result.ready == false
+        expect result.state == "loader-resolution-LdrLoadDll:module-not-found"
