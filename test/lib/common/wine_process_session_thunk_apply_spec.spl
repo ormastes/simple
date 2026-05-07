@@ -45,7 +45,11 @@ describe "Wine process session thunk patch apply":
         val result = wine_process_apply_known_kernel32_thunk_patches(plan, wine_known_hello_exe_fixture_bytes(), 0)
         expect(result.ok).to_equal(false)
         expect(result.error).to_equal("invalid-symbol-limit")
+        expect(result.patched_image.len()).to_equal(0)
         expect(result.patched_count).to_equal(0)
+        expect(result.evidence).to_contain("thunk-patches-blocked")
+        expect(result.evidence).to_contain("no-thunk-bytes-written")
+        expect(result.evidence).to_contain("no-arbitrary-execution")
         expect(result.status).to_equal("blocked")
 
     it "prepares a patched image before known-console dispatch":
@@ -57,3 +61,27 @@ describe "Wine process session thunk patch apply":
         expect(result.evidence).to_contain("import-thunk-bytes-written")
         expect(result.evidence).to_contain("import-thunks-bound")
         expect(result.status).to_equal("patched-image-preflight-ready")
+
+    it "blocks patched image preflight without image bytes before CPU evidence is complete":
+        val plan = wine_process_session_plan(wine_process_session_request_new("game.exe", [], "C:\\Games"), _full_gates())
+        val result = wine_process_prepare_known_console_image(plan, wine_known_hello_exe_fixture_bytes(), 8, "")
+
+        expect(result.ok).to_equal(false)
+        expect(result.error).to_equal("missing-thread-context")
+        expect(result.patched_image.len()).to_equal(0)
+        expect(result.evidence).to_contain("patched-image-preflight-blocked")
+        expect(result.evidence).to_contain("no-thunk-bytes-written")
+        expect(result.evidence).to_contain("no-arbitrary-execution")
+        expect(result.status).to_equal("blocked")
+
+    it "blocks patched image preflight without image bytes when record planning rejects":
+        val plan = wine_process_session_plan(wine_process_session_request_new("game.exe", [], "C:\\Games"), _full_gates())
+        val result = wine_process_prepare_known_console_image(plan, wine_known_hello_exe_fixture_bytes(), 0, wine_cpu_execution_evidence_text(wine_cpu_execution_evidence_all_ready()))
+
+        expect(result.ok).to_equal(false)
+        expect(result.error).to_equal("invalid-symbol-limit")
+        expect(result.patched_image.len()).to_equal(0)
+        expect(result.evidence).to_contain("patched-image-preflight-blocked")
+        expect(result.evidence).to_contain("no-thunk-bytes-written")
+        expect(result.evidence).to_contain("no-arbitrary-execution")
+        expect(result.status).to_equal("blocked")

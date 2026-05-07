@@ -229,7 +229,9 @@ chain.
 VM-readback-gated mapped-image path before reporting CPU dispatch preflight.
 `wine_process_prepare_known_console_image(...)` is the shared preflight for
 known-console dispatch and execution: it applies the bounded copied-image thunk
-patches and returns the patched image plus the composed CPU evidence.
+patches and returns the patched image plus the composed CPU evidence. Missing
+CPU evidence or failed thunk-record planning returns no patched image and no
+thunk byte writes.
 `wine_process_map_known_console_image(...)` then maps that patched image into a
 modeled SimpleOS process address space with OS VMA backing, image-map evidence,
 and a no-host-code-jump check at the PE entrypoint. This is still a bounded

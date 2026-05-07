@@ -1014,7 +1014,9 @@ mutation; writable OS VMA mutation, multi-DLL import-table patching, rollback,
 and arbitrary process execution are still outside the completed surface.
 `wine_process_prepare_known_console_image(...)` now makes that patched image the
 handoff into known-console dispatch and execution, so the bounded decoder and
-modeled NT bridge no longer run from the unpatched fixture bytes.
+modeled NT bridge no longer run from the unpatched fixture bytes. Missing CPU
+evidence or failed thunk-record planning now returns no patched image and
+explicit no-thunk-write evidence before copied-image handoff.
 The controlled hello CPU skeleton now uses RIP-relative indirect calls through
 the patched KERNEL32 thunk RVAs (`0x2060`, `0x2068`, and `0x2070`) instead of
 direct calls to import-name RVAs. This keeps known-console dispatch tied to the
@@ -1134,8 +1136,8 @@ Fresh evidence:
 - `bin/simple test test/lib/common/wine_process_session_thunk_records_spec.spl --mode=interpreter --clean`: covers bounded known KERNEL32 thunk patch record planning.
 - `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_process_thunk_records_spec.spl --mode=interpreter --clean`: includes REQ-024 thunk patch record coverage.
 - `bin/simple test test/lib/common/pe_coff_header_spec.spl --mode=interpreter --clean`: covers extraction of import lookup thunk RVAs separately from import symbol name RVAs.
-- `bin/simple test test/lib/common/wine_process_session_thunk_apply_spec.spl --mode=interpreter --clean`: covers bounded copied-image byte patching for the known KERNEL32 thunk slots.
-- `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_process_thunk_apply_spec.spl --mode=interpreter --clean`: includes REQ-025 bounded import thunk byte patching coverage.
+- `bin/simple test test/lib/common/wine_process_session_thunk_apply_spec.spl --mode=interpreter --clean`: covers bounded copied-image byte patching for the known KERNEL32 thunk slots plus no-patched-image rejection before thunk bytes are written.
+- `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_process_thunk_apply_spec.spl --mode=interpreter --clean`: includes REQ-025 bounded import thunk byte patching coverage and no-image rejection before copied-image handoff.
 - `bin/simple test test/lib/common/wine_kernel32_module_loader_spec.spl --mode=interpreter --clean`: keeps the lower KERNEL32 module-loader bridge covered.
 - `bin/simple test test/lib/common/pe_coff_header_spec.spl --mode=interpreter --clean`: covers bounded multi-descriptor import table validation and descriptor summaries.
 - `bin/simple test test/lib/common/wine_process_session_import_descriptor_table_spec.spl --mode=interpreter --clean`: covers full-Wine process-session import descriptor table inspection and descriptor-limit rejection.
