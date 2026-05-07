@@ -64,6 +64,10 @@ Extend current VMM/process work with:
 - page fault records;
 - container namespaces for pid, fs, ipc, net, and capabilities.
 
+The executable-environment serial-log gate also requires MDSOC+ evidence for
+the owning capsule, public port/facade, and resident ECS state owner before
+VM/full-OS/container markers can be used as compatibility readiness evidence.
+
 The Phase 1 readiness contract lives in `src/lib/common/wine_vm_gate.spl`.
 It checks Wine-level VM and namespace prerequisites before any PE execution
 milestone can advance.

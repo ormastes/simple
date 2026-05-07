@@ -236,6 +236,24 @@ Fresh evidence:
 - `bin/simple check src/lib`: 2706 files, all checks passed.
 - SEH frame-chain changed-file `git diff --check` and stub scan: pass.
 
+## 2026-05-07 Executable-Environment MDSOC Gate Update
+
+The SimpleOS executable-environment gate now requires explicit MDSOC+ ownership
+markers before VM/full-OS/container/X11 serial-log evidence can become readiness
+evidence. The gate requires an owning capsule, public port/facade, and resident
+ECS state owner marker in addition to QEMU, full OS boot, process, VM space,
+filesystem, window system, network, namespace facets, and NVFS rootfs evidence.
+
+Fresh evidence:
+
+- `bin/simple check` on executable-environment gate source/spec files: all checks passed.
+- `bin/simple test test/lib/common/wine_simpleos_exec_env_gate_spec.spl --mode=interpreter --clean`: 7 examples, 0 failures.
+- `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_exec_env_mdsoc_spec.spl --mode=interpreter --clean`: 1 example, 0 failures.
+- `bin/simple check` on generated executable-environment matcher specs: all checks passed.
+- `bin/simple check src/lib`: 2706 files, all checks passed.
+- Executable-environment changed-file `git diff --check` and stub scan: pass.
+- Aggregate `simpleos_wine_substrate_spec` still reaches its known process-dispatch watchdog later in the file; the executable-environment assertion passed before that timeout.
+
 ## 2026-05-07 Executable-Environment Matrix Update
 
 The top-level Wine substrate matrix now exposes the SimpleOS executable-environment gate directly through `wine_substrate_exec_env_gate` and the `exec_env` capability row. This makes VM/full-OS/container evidence a first-class Wine readiness prerequisite instead of an implicit side gate.
