@@ -278,6 +278,10 @@ with bounded import descriptor inventory and the modeled KERNEL32/USER32/GDI32
 module table. It opens a second modeled write window, patches supported IAT
 slots with modeled procedure addresses, restores `rx`, and keeps real DLL
 loads, TLS callbacks, DllMain, and arbitrary PE dispatch blocked.
+`wine_dll_record_file_view_tls_dispatch(...)` composes the import-bound retained
+view with TLS callback-table planning and records loader-lock/TLS-before-DllMain
+dispatch evidence. The callback target must map inside the DLL image, but
+callback instructions, DllMain, and arbitrary PE code are still not executed.
 `wine_process_resolve_first_import_module(...)` composes the PE first-import
 inspection gate with that module resolver, so validated full-Wine process
 images can resolve a requested procedure against their first imported KERNEL32

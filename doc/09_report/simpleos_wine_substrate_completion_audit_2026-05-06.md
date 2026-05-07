@@ -175,6 +175,18 @@ Fresh evidence:
 - `bin/simple check src/lib`: 2701 files, all checks passed.
 - Wine DLL view import-binding changed-file stub scan: pass.
 
+## 2026-05-07 DLL View TLS-Dispatch Update
+
+The DLL view TLS-dispatch layer now composes import-bound retained DLL views with TLS callback-table planning and records loader-lock/TLS-before-DllMain dispatch evidence. It verifies the callback target maps inside the DLL image while still blocking callback instruction execution, DllMain, and arbitrary PE execution.
+
+Fresh evidence:
+
+- `bin/simple check` on changed DLL view TLS-dispatch source/spec files: all checks passed.
+- `bin/simple test test/lib/common/wine_dll_view_tls_dispatch_spec.spl`: 2 examples, 0 failures.
+- `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_dll_view_tls_dispatch_spec.spl`: 1 example, 0 failures.
+- `bin/simple check src/lib`: 2702 files, all checks passed.
+- Wine DLL view TLS-dispatch changed-file stub scan: pass.
+
 ## 2026-05-07 Executable-Environment Matrix Update
 
 The top-level Wine substrate matrix now exposes the SimpleOS executable-environment gate directly through `wine_substrate_exec_env_gate` and the `exec_env` capability row. This makes VM/full-OS/container evidence a first-class Wine readiness prerequisite instead of an implicit side gate.

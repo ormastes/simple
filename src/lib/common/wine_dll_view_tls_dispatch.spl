@@ -1,0 +1,40 @@
+"""Non-executing TLS callback dispatch records for retained Wine DLL views."""
+
+use common.pe_coff_header.{pe_rva_to_file_offset}
+use common.wine_dll_file_probe.{WineDllProbeFile}
+use common.wine_dll_view_import_binding.{wine_dll_bind_file_view_imports}
+use common.wine_pe_loader_runtime.{wine_pe_tls_callback_plan}
+
+class WineDllViewTlsDispatchResult:
+    ok: bool
+    error: text
+    dll_name: text
+    selected_path: text
+    mapped_base: i64
+    mapped_size: i64
+    callback_count: i64
+    first_callback_rva: i64
+    dispatch_count: i64
+    evidence: text
+    status: text
+
+fn _result(ok: bool, error: text, dll_name: text, selected_path: text, mapped_base: i64, mapped_size: i64, callback_count: i64, first_callback_rva: i64, dispatch_count: i64, evidence: text, status: text) -> WineDllViewTlsDispatchResult:
+    WineDllViewTlsDispatchResult(ok: ok, error: error, dll_name: dll_name.lower(), selected_path: selected_path, mapped_base: mapped_base, mapped_size: mapped_size, callback_count: callback_count, first_callback_rva: first_callback_rva, dispatch_count: dispatch_count, evidence: evidence, status: status)
+
+pub fn wine_dll_record_file_view_tls_dispatch(dll_name: text, application_directory: text, working_directory: text, path_dirs: [text], known_dlls: [text], files: [WineDllProbeFile], data: [u8], preferred_base: i64, load_base: i64, process_id: i64, address_space_id: i64, container_evidence: text, descriptor_limit: i64, symbol_limit: i64, dynload_apis: text) -> WineDllViewTlsDispatchResult:
+    val bound = wine_dll_bind_file_view_imports(dll_name, application_directory, working_directory, path_dirs, known_dlls, files, data, preferred_base, load_base, process_id, address_space_id, container_evidence, descriptor_limit, symbol_limit)
+    if not bound.ok:
+        return _result(false, "dll-view-import-binding:" + bound.error, bound.dll_name, bound.selected_path, bound.mapped_base, bound.mapped_size, 0, 0, 0, bound.evidence, bound.status)
+
+    val tls = wine_pe_tls_callback_plan(bound.patched_image, dynload_apis)
+    if not tls.ok:
+        return _result(false, "dll-tls:" + tls.error, bound.dll_name, bound.selected_path, bound.mapped_base, bound.mapped_size, tls.callback_count, tls.first_callback_rva, 0, bound.evidence + " " + tls.operations + " dll-tls-dispatch-blocked no-tls-callback-executed", "rejected")
+
+    var dispatch_count = 0
+    if tls.callback_count > 0:
+        if pe_rva_to_file_offset(bound.patched_image, tls.first_callback_rva) < 0:
+            return _result(false, "dll-tls-callback-unmapped", bound.dll_name, bound.selected_path, bound.mapped_base, bound.mapped_size, tls.callback_count, tls.first_callback_rva, 0, bound.evidence + " " + tls.operations + " dll-tls-dispatch-blocked no-tls-callback-executed", "rejected")
+        dispatch_count = 1
+
+    val evidence = bound.evidence + " " + tls.operations + " dll-tls-callback-dispatch-recorded dll-tls-callback-target-mapped loader-lock-held tls-before-dllmain no-tls-callback-executed no-dllmain-executed no-arbitrary-execution"
+    _result(true, "", bound.dll_name, bound.selected_path, bound.mapped_base, bound.mapped_size, tls.callback_count, tls.first_callback_rva, dispatch_count, evidence, "dll-view-tls-dispatch-recorded")
