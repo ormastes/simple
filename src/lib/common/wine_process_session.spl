@@ -1,6 +1,7 @@
 """Wine process-session planning over SimpleOS substrate gates."""
 
 use common.pe_coff_header.{
+    PeImportSymbolBinding,
     parse_pe_header_summary,
     pe_data_directory_gate,
     pe_first_import_dll_name,
@@ -133,6 +134,20 @@ class WineProcessLoadBindingResult:
     binding_count: i64
     status: text
 
+class WineProcessThunkPatchRecord:
+    symbol: text
+    thunk_index: i64
+    name_rva: i64
+
+class WineProcessThunkPatchRecordPlan:
+    ok: bool
+    error: text
+    command: text
+    dll_name: text
+    records: [WineProcessThunkPatchRecord]
+    evidence: text
+    status: text
+
 fn _wine_process_session_request(executable_path: text, argv: [text], working_directory: text) -> WineProcessSessionRequest:
     WineProcessSessionRequest(executable_path: executable_path, argv: argv, working_directory: working_directory)
 
@@ -169,8 +184,20 @@ fn _wine_process_module_resolution_result(ok: bool, error: text, command: text, 
 fn _wine_process_load_binding_result(ok: bool, error: text, command: text, dll_name: text, module_handle: i64, loader_operations: text, call_sequence: text, binding_count: i64, status: text) -> WineProcessLoadBindingResult:
     WineProcessLoadBindingResult(ok: ok, error: error, command: command, dll_name: dll_name, module_handle: module_handle, loader_operations: loader_operations, call_sequence: call_sequence, binding_count: binding_count, status: status)
 
+fn _wine_process_thunk_patch_record(symbol: text, thunk_index: i64, name_rva: i64) -> WineProcessThunkPatchRecord:
+    WineProcessThunkPatchRecord(symbol: symbol, thunk_index: thunk_index, name_rva: name_rva)
+
+fn _wine_process_thunk_patch_record_plan(ok: bool, error: text, command: text, dll_name: text, records: [WineProcessThunkPatchRecord], evidence: text, status: text) -> WineProcessThunkPatchRecordPlan:
+    WineProcessThunkPatchRecordPlan(ok: ok, error: error, command: command, dll_name: dll_name, records: records, evidence: evidence, status: status)
+
 fn _wine_process_kernel32_module_table():
     wine_kernel32_module_table_add_module(wine_kernel32_module_table_new(), "kernel32.dll", ["LoadLibraryW", "LoadLibraryExW", "GetProcAddress", "FreeLibrary"])
+
+fn _wine_process_binding_rva(bindings: [PeImportSymbolBinding], symbol: text) -> i64:
+    for binding in bindings:
+        if binding.symbol == symbol:
+            return binding.name_rva
+    -1
 
 fn _wine_process_image_gate(data: [u8]) -> text:
     val summary = parse_pe_header_summary(data)
@@ -401,3 +428,18 @@ pub fn wine_process_load_and_bind_known_kernel32_imports(plan: WineProcessSessio
     if not bindings.ok:
         return _wine_process_load_binding_result(false, bindings.error, plan.command, bindings.dll_name, module.handle, module.operations, bindings.call_sequence, bindings.binding_count, bindings.status)
     _wine_process_load_binding_result(true, "", plan.command, bindings.dll_name, module.handle, module.operations, bindings.call_sequence, bindings.binding_count, "imports-loaded-bound")
+
+pub fn wine_process_plan_known_kernel32_thunk_patch_records(plan: WineProcessSessionPlan, data: [u8], symbol_limit: i64) -> WineProcessThunkPatchRecordPlan:
+    val loaded = wine_process_load_and_bind_known_kernel32_imports(plan, data, symbol_limit)
+    if not loaded.ok:
+        return _wine_process_thunk_patch_record_plan(false, loaded.error, plan.command, loaded.dll_name, [], "", loaded.status)
+    val bindings = pe_first_import_symbol_bindings(data, symbol_limit)
+    var records: [WineProcessThunkPatchRecord] = []
+    records.push(_wine_process_thunk_patch_record("GetStdHandle", 0, _wine_process_binding_rva(bindings, "GetStdHandle")))
+    records.push(_wine_process_thunk_patch_record("WriteFile", 1, _wine_process_binding_rva(bindings, "WriteFile")))
+    records.push(_wine_process_thunk_patch_record("ExitProcess", 2, _wine_process_binding_rva(bindings, "ExitProcess")))
+    for record in records:
+        if record.name_rva <= 0:
+            return _wine_process_thunk_patch_record_plan(false, "missing-patch-record:" + record.symbol, plan.command, loaded.dll_name, [], "", "rejected")
+    val evidence = "import-module-loaded import-module-handle-valid import-module-loader-sequence import-thunk-records-planned import-thunk-records-match import-thunk-records-bounded"
+    _wine_process_thunk_patch_record_plan(true, "", plan.command, loaded.dll_name, records, evidence, "thunk-records-planned")

@@ -171,6 +171,10 @@ preconditions before CPU dispatch preflight can pass.
 `import-module-loaded`, `import-module-handle-valid`, and
 `import-module-loader-sequence`, so callers cannot bypass the process-session
 load-and-bind gate by supplying only the older thunk-binding tokens.
+`wine_process_plan_known_kernel32_thunk_patch_records(...)` expands the known
+KERNEL32 binding plan into bounded patch records for the three modeled import
+slots. It records symbol names, thunk indexes, and name RVAs, but still does not
+mutate mapped image bytes.
 
 `src/app/wine_process_session_plan/main.spl` exposes the controlled hello
 process-session handoff as a command. It prints command, substrate readiness,

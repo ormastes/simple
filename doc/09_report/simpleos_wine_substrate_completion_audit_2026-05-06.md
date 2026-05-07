@@ -612,6 +612,9 @@ dispatch preflight can pass.
 `wine_import_thunk_binding_gate(...)` now requires those module-loader evidence
 tokens too, preventing direct CPU preflight callers from reusing the older
 thunk-only evidence envelope.
+`wine_process_plan_known_kernel32_thunk_patch_records(...)` expands the
+loaded-and-bound known KERNEL32 imports into concrete bounded records for the
+three modeled thunk slots, including symbol names, thunk indexes, and name RVAs.
 
 Fresh evidence:
 
@@ -624,11 +627,13 @@ Fresh evidence:
 - `bin/simple test test/lib/common/wine_process_session_thunk_load_bind_spec.spl --mode=interpreter --clean`: covers thunk planning over loaded-and-bound import evidence.
 - `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_process_thunk_load_bind_spec.spl --mode=interpreter --clean`: includes REQ-023 thunk planning with module-loaded binding coverage.
 - `bin/simple test test/lib/common/wine_cpu_exec_spec.spl --mode=interpreter --clean`: covers the tightened CPU import-thunk gate requiring module-loader evidence.
+- `bin/simple test test/lib/common/wine_process_session_thunk_records_spec.spl --mode=interpreter --clean`: covers bounded known KERNEL32 thunk patch record planning.
+- `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_process_thunk_records_spec.spl --mode=interpreter --clean`: includes REQ-024 thunk patch record coverage.
 - `bin/simple test test/lib/common/wine_kernel32_module_loader_spec.spl --mode=interpreter --clean`: keeps the lower KERNEL32 module-loader bridge covered.
 
 Conservative boundary: this is a curated KERNEL32 table and bounded loader
 sequence. It is not arbitrary DLL loading, host DLL mapping, Windows DLL search
-order, arbitrary import-table binding, PE DLL relocation,
+order, arbitrary import-table binding, image-byte mutation, PE DLL relocation,
 reference-count-complete loader state, or broad Win32/NT behavior.
 
 ## Completion Decision
