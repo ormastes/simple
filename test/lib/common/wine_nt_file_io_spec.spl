@@ -3,6 +3,7 @@ use common.wine_nt_file_io.{
     wine_nt_file_create_w,
     wine_nt_file_get_attributes_w,
     wine_nt_file_get_size,
+    wine_nt_file_get_type,
     wine_nt_file_io_required_calls,
     wine_nt_file_read,
     wine_nt_file_set_pointer,
@@ -19,12 +20,13 @@ fn _all_async_features() -> text:
         "event-loop register-fd deregister-fd waker wake"
 
 describe "Wine NT file I/O bridge":
-    it "lists the modeled CreateFileW, ReadFile, and CloseHandle calls":
+    it "lists the modeled CreateFileW, ReadFile, GetFileType, and CloseHandle calls":
         val calls = wine_nt_file_io_required_calls()
-        expect(calls.len()).to_equal(6)
+        expect(calls.len()).to_equal(7)
         expect(calls[0]).to_equal("CreateFileW")
-        expect(calls[3]).to_equal("GetFileAttributesW")
-        expect(calls[5]).to_equal("SetFilePointer")
+        expect(calls[2]).to_equal("GetFileType")
+        expect(calls[4]).to_equal("GetFileAttributesW")
+        expect(calls[6]).to_equal("SetFilePointer")
 
     it "blocks file table readiness until POSIX and async prerequisites pass":
         val table = wine_nt_file_table_new("fd-open fd-read", _all_async_features())
@@ -66,14 +68,17 @@ describe "Wine NT file I/O bridge":
         val opened = wine_nt_file_create_w(with_file, "C:\\hello.txt")
         expect(wine_nt_file_read(opened.table, opened.handle, -1).state).to_equal("invalid-read-size")
 
-    it "returns deterministic file attributes, file size, and pointer movement":
+    it "returns deterministic file type, attributes, file size, and pointer movement":
         val table = wine_nt_file_table_add_file(wine_nt_file_table_new(_all_adapter_apis(), _all_async_features()), "C:\\hello.txt", "hello wine")
         val attrs = wine_nt_file_get_attributes_w(table, "C:\\hello.txt")
         val opened = wine_nt_file_create_w(table, "C:\\hello.txt")
+        val file_type = wine_nt_file_get_type(opened.table, opened.handle)
         val size = wine_nt_file_get_size(opened.table, opened.handle)
         val moved = wine_nt_file_set_pointer(size.table, opened.handle, 6)
         val read = wine_nt_file_read(moved.table, opened.handle, 4)
 
+        expect(file_type.ok).to_equal(true)
+        expect(file_type.value).to_equal(1)
         expect(attrs.ok).to_equal(true)
         expect(attrs.value).to_equal(0x80)
         expect(size.ok).to_equal(true)
@@ -86,6 +91,7 @@ describe "Wine NT file I/O bridge":
         val table = wine_nt_file_table_add_file(wine_nt_file_table_new(_all_adapter_apis(), _all_async_features()), "C:\\hello.txt", "hello")
         val opened = wine_nt_file_create_w(table, "C:\\hello.txt")
         expect(wine_nt_file_get_attributes_w(table, "C:\\missing.txt").state).to_equal("file-not-found")
+        expect(wine_nt_file_get_type(table, 0x99).state).to_equal("invalid-handle")
         expect(wine_nt_file_get_size(table, 0x99).state).to_equal("invalid-handle")
         expect(wine_nt_file_set_pointer(opened.table, opened.handle, -1).state).to_equal("invalid-file-pointer")
         expect(wine_nt_file_set_pointer(opened.table, opened.handle, 99).state).to_equal("file-pointer-past-eof")

@@ -13,35 +13,36 @@ fn _table_with_file() -> WineNtFileTable:
     wine_nt_file_table_add_file(wine_nt_file_table_new(_all_adapter_apis(), _all_async_features()), "C:\\hello.txt", "hello wine")
 
 describe "Wine KERNEL32 file I/O bridge":
-    it "executes a bounded CreateFileW, ReadFile, and CloseHandle sequence":
-        val result = wine_kernel32_execute_file_io(["CreateFileW", "ReadFile", "CloseHandle"], _table_with_file(), "C:\\hello.txt", 5)
+    it "executes a bounded CreateFileW, ReadFile, GetFileType, and CloseHandle sequence":
+        val result = wine_kernel32_execute_file_io(["CreateFileW", "ReadFile", "GetFileType", "CloseHandle"], _table_with_file(), "C:\\hello.txt", 5)
 
         expect result.ok == true
         expect result.handle == 0x40
         expect result.data == "hello"
         expect result.bytes_read == 5
-        expect result.operations == "CreateFileW ReadFile CloseHandle"
+        expect result.file_type == 1
+        expect result.operations == "CreateFileW ReadFile GetFileType CloseHandle"
         expect wine_nt_file_read(result.table, result.handle, 1).state == "invalid-handle"
 
     it "keeps file I/O dispatch ordered and bounded":
-        val out_of_order = wine_kernel32_execute_file_io(["ReadFile", "CreateFileW", "CloseHandle"], _table_with_file(), "C:\\hello.txt", 5)
+        val out_of_order = wine_kernel32_execute_file_io(["ReadFile", "CreateFileW", "GetFileType", "CloseHandle"], _table_with_file(), "C:\\hello.txt", 5)
         expect out_of_order.ok == false
         expect out_of_order.error == "kernel32-file-io-sequence-expected:CreateFileW"
 
-        val wrong_family = wine_kernel32_execute_file_io(["CreateFileW", "ReadFile", "HeapFree"], _table_with_file(), "C:\\hello.txt", 5)
+        val wrong_family = wine_kernel32_execute_file_io(["CreateFileW", "ReadFile", "GetFileType", "HeapFree"], _table_with_file(), "C:\\hello.txt", 5)
         expect wrong_family.ok == false
         expect wrong_family.error == "bridge-wrong-category:HeapFree"
 
-        val missing_file = wine_kernel32_execute_file_io(["CreateFileW", "ReadFile", "CloseHandle"], _table_with_file(), "C:\\missing.txt", 5)
+        val missing_file = wine_kernel32_execute_file_io(["CreateFileW", "ReadFile", "GetFileType", "CloseHandle"], _table_with_file(), "C:\\missing.txt", 5)
         expect missing_file.ok == false
         expect missing_file.error == "CreateFileW:file-not-found"
 
     it "propagates NT file-table readiness and read errors":
         val blocked = wine_nt_file_table_new("fd-open fd-read", _all_async_features())
-        val not_ready = wine_kernel32_execute_file_io(["CreateFileW", "ReadFile", "CloseHandle"], blocked, "C:\\hello.txt", 5)
+        val not_ready = wine_kernel32_execute_file_io(["CreateFileW", "ReadFile", "GetFileType", "CloseHandle"], blocked, "C:\\hello.txt", 5)
         expect not_ready.ok == false
         expect not_ready.error == "CreateFileW:missing-api-fd-write"
 
-        val invalid_read = wine_kernel32_execute_file_io(["CreateFileW", "ReadFile", "CloseHandle"], _table_with_file(), "C:\\hello.txt", -1)
+        val invalid_read = wine_kernel32_execute_file_io(["CreateFileW", "ReadFile", "GetFileType", "CloseHandle"], _table_with_file(), "C:\\hello.txt", -1)
         expect invalid_read.ok == false
         expect invalid_read.error == "ReadFile:invalid-read-size"
