@@ -374,8 +374,8 @@ execute TLS callbacks, patch the IAT, or transfer control to arbitrary PE code.
 `wine_process_apply_import_loader_transaction_in_vma(...)` composes that loader
 state accounting with descriptor-qualified VMA import patching. The transaction
 requires released loader refcounts before the process VMA write window is
-accepted, carries the loader counts beside patch counts, and aborts before VMA
-patching when modeled module resolution rolls back.
+accepted, carries the loader counts beside patch counts, and aborts with no
+patched image or VMA thunk writes when modeled module resolution rolls back.
 `wine_process_apply_import_descriptor_thunk_patches_in_vma_with_peb_teb_vm_writes(...)`
 rejects failed PEB/TEB VM byte-write/readback evidence and descriptor planning
 failures with no patched image, no mapped region, and no VMA thunk writes.

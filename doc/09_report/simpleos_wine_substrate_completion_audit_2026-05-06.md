@@ -1517,6 +1517,8 @@ Fresh evidence:
 
 - `bin/simple test test/lib/common/wine_process_session_import_descriptor_vma_vm_write_spec.spl --mode=interpreter --clean`: covers VM-write and descriptor-planning rejection returning no patched image, no mapped region, and no VMA thunk-write evidence.
 - `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_process_import_descriptor_vma_vm_write_spec.spl --mode=interpreter --clean`: covers the SimpleOS system-level descriptor VMA VM-write and descriptor-planning rejection before VMA thunk writes.
+- `bin/simple test test/lib/common/wine_process_session_import_loader_transaction_rejection_spec.spl --mode=interpreter --clean`: covers import-loader transaction aborts returning no patched image and no VMA thunk-write evidence.
+- `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_process_import_loader_transaction_rejection_spec.spl --mode=interpreter --clean`: covers the SimpleOS system-level transaction abort boundary before patched image exposure.
 - `bin/simple test test/lib/common/wine_process_session_import_transaction_vm_write_spec.spl --mode=interpreter --clean`: verifies the transaction path still composes the VM-readback-gated descriptor patch path.
 - `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_process_import_loader_transaction_vm_write_spec.spl --mode=interpreter --clean`: verifies the SimpleOS transaction path still composes the VM-readback-gated descriptor patch path.
 
