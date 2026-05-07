@@ -82,7 +82,7 @@ REQ-004: Supported Feature Evidence
 - Given the current modern CSS slice, when renderer SSpec is inspected, then it should include dash-match attribute selector operator coverage.
 - Given the current modern CSS slice, when renderer SSpec is inspected, then it should include ASCII case-insensitive attribute selector flag coverage.
 - Given the current modern CSS slice, when renderer SSpec is inspected, then it should include explicit case-sensitive attribute selector flag coverage.
-- Given the current modern CSS slice, when the WPT selector/color subset is inspected, then it should include CSS custom property fallback color coverage.
+- Given the current modern CSS slice, when the WPT selector/color subset is inspected, then it should include CSS custom property fallback color coverage for `background-color` and `background` shorthand.
 
 REQ-005: Unsupported Feature Tracking
 
