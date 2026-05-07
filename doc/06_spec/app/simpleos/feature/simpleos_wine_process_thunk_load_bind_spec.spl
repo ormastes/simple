@@ -1,0 +1,30 @@
+use common.wine_hello_fixture.{wine_known_hello_exe_fixture_bytes}
+use common.wine_process_session.{
+    wine_process_plan_import_thunk_patches,
+    wine_process_session_plan,
+    wine_process_session_request_new
+}
+
+fn _full_gates() -> text:
+    "process=verified exec_env=verified vm=verified renderer=verified user32=verified " +
+        "gdi32=verified kernel32_core=verified host=verified posix=verified registry=verified " +
+        "pthread=verified dynload=verified audio=verified fonts=verified input=verified " +
+        "pe_loader=verified async=verified nt_bridge=verified"
+
+describe "SimpleOS Wine thunk load binding":
+    describe "REQ-023: thunk planning requires module-loaded bindings":
+        it "should include module-load evidence in import thunk patch planning":
+            val plan = wine_process_session_plan(wine_process_session_request_new("game.exe", [], "C:\\Games"), _full_gates())
+            val result = wine_process_plan_import_thunk_patches(plan, wine_known_hello_exe_fixture_bytes(), 8)
+            expect(result.ok).to_equal(true)
+            expect(result.patch_count).to_equal(3)
+            expect(result.evidence).to_contain("import-module-loaded")
+            expect(result.evidence).to_contain("import-thunks-bound")
+            expect(result.status).to_equal("thunk-patch-planned")
+
+        it "should block thunk planning before load-and-bind passes":
+            val plan = wine_process_session_plan(wine_process_session_request_new("game.exe", [], "C:\\Games"), _full_gates())
+            val result = wine_process_plan_import_thunk_patches(plan, wine_known_hello_exe_fixture_bytes(), 0)
+            expect(result.ok).to_equal(false)
+            expect(result.error).to_equal("invalid-symbol-limit")
+            expect(result.status).to_equal("blocked")

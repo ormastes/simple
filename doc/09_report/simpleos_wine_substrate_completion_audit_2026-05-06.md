@@ -606,6 +606,9 @@ curated zero-flags `LoadLibraryExW` loader table.
 module-resolution evidence before accepting the known KERNEL32 import binding
 plan and returns the loader operations, module handle, call sequence, and
 binding count as one process-session result.
+`wine_process_plan_import_thunk_patches(...)` now consumes that loaded-and-bound
+result, so thunk patch evidence carries module-loader preconditions before CPU
+dispatch preflight can pass.
 
 Fresh evidence:
 
@@ -615,6 +618,8 @@ Fresh evidence:
 - `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_process_first_import_module_spec.spl --mode=interpreter --clean`: includes REQ-021 first-import module-loader bridge coverage.
 - `bin/simple test test/lib/common/wine_process_session_load_bind_spec.spl --mode=interpreter --clean`: covers load-before-bind composition and module-resolution rejection propagation.
 - `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_process_load_bind_spec.spl --mode=interpreter --clean`: includes REQ-022 load-then-bind coverage.
+- `bin/simple test test/lib/common/wine_process_session_thunk_load_bind_spec.spl --mode=interpreter --clean`: covers thunk planning over loaded-and-bound import evidence.
+- `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_process_thunk_load_bind_spec.spl --mode=interpreter --clean`: includes REQ-023 thunk planning with module-loaded binding coverage.
 - `bin/simple test test/lib/common/wine_kernel32_module_loader_spec.spl --mode=interpreter --clean`: keeps the lower KERNEL32 module-loader bridge covered.
 
 Conservative boundary: this is a curated KERNEL32 table and bounded loader
