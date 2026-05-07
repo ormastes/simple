@@ -1,5 +1,5 @@
-use common.wine_kernel32_file_metadata.{wine_kernel32_execute_file_metadata}
-use common.wine_nt_file_io.{WineNtFileTable, wine_nt_file_read, wine_nt_file_table_add_file, wine_nt_file_table_new}
+use common.wine_kernel32_file_metadata.{wine_kernel32_execute_file_attributes, wine_kernel32_execute_file_metadata}
+use common.wine_nt_file_io.{WineNtFileTable, wine_nt_file_read, wine_nt_file_table_add_directory, wine_nt_file_table_add_file, wine_nt_file_table_new}
 
 fn _all_adapter_apis() -> text:
     "fd-open fd-read fd-write fd-close fd-dup fd-inherit stdio pipe socket timer poll-wait " +
@@ -12,7 +12,21 @@ fn _all_async_features() -> text:
 fn _table_with_file() -> WineNtFileTable:
     wine_nt_file_table_add_file(wine_nt_file_table_new(_all_adapter_apis(), _all_async_features()), "C:\\hello.txt", "hello wine")
 
+fn _table_with_directory() -> WineNtFileTable:
+    wine_nt_file_table_add_directory(wine_nt_file_table_new(_all_adapter_apis(), _all_async_features()), "C:\\TempDir")
+
 describe "Wine KERNEL32 file metadata bridge":
+    it "executes standalone GetFileAttributesW for files and directories":
+        val file_attrs = wine_kernel32_execute_file_attributes(["GetFileAttributesW"], _table_with_file(), "C:\\hello.txt")
+        expect file_attrs.ok == true
+        expect file_attrs.attributes == 0x80
+        expect file_attrs.operations == "GetFileAttributesW"
+
+        val dir_attrs = wine_kernel32_execute_file_attributes(["GetFileAttributesW"], _table_with_directory(), "C:\\TempDir")
+        expect dir_attrs.ok == true
+        expect dir_attrs.attributes == 0x10
+        expect dir_attrs.operations == "GetFileAttributesW"
+
     it "executes a bounded attributes, open, size, information, seek, and close sequence":
         val result = wine_kernel32_execute_file_metadata(
             ["GetFileAttributesW", "CreateFileW", "GetFileSize", "GetFileInformationByHandle", "SetFilePointer", "CloseHandle"],
@@ -49,6 +63,10 @@ describe "Wine KERNEL32 file metadata bridge":
         expect wrong_family.ok == false
         expect wrong_family.error == "bridge-wrong-category:HeapAlloc"
 
+        val attributes_extra = wine_kernel32_execute_file_attributes(["GetFileAttributesW", "CloseHandle"], _table_with_file(), "C:\\hello.txt")
+        expect attributes_extra.ok == false
+        expect attributes_extra.error == "kernel32-file-metadata-sequence-count-mismatch"
+
     it "propagates metadata and pointer failures":
         val missing = wine_kernel32_execute_file_metadata(
             ["GetFileAttributesW", "CreateFileW", "GetFileSize", "GetFileInformationByHandle", "SetFilePointer", "CloseHandle"],
@@ -58,6 +76,10 @@ describe "Wine KERNEL32 file metadata bridge":
         )
         expect missing.ok == false
         expect missing.error == "GetFileAttributesW:file-not-found"
+
+        val missing_attributes = wine_kernel32_execute_file_attributes(["GetFileAttributesW"], _table_with_file(), "C:\\missing.txt")
+        expect missing_attributes.ok == false
+        expect missing_attributes.error == "GetFileAttributesW:file-not-found"
 
         val past_eof = wine_kernel32_execute_file_metadata(
             ["GetFileAttributesW", "CreateFileW", "GetFileSize", "GetFileInformationByHandle", "SetFilePointer", "CloseHandle"],
