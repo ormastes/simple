@@ -27,6 +27,13 @@ class WineNtFileIoResult:
     data: text
     bytes_read: i64
 
+class WineNtFileMetadataResult:
+    ok: bool
+    state: text
+    table: WineNtFileTable
+    handle: i64
+    value: i64
+
 fn _file(path: text, content: text) -> WineNtModeledFile:
     WineNtModeledFile(path: path, content: content)
 
@@ -38,6 +45,9 @@ fn _table(files: [WineNtModeledFile], handles: [WineNtFileHandle], next_handle: 
 
 fn _result(ok: bool, state: text, table: WineNtFileTable, handle: i64, data: text, bytes_read: i64) -> WineNtFileIoResult:
     WineNtFileIoResult(ok: ok, state: state, table: table, handle: handle, data: data, bytes_read: bytes_read)
+
+fn _metadata_result(ok: bool, state: text, table: WineNtFileTable, handle: i64, value: i64) -> WineNtFileMetadataResult:
+    WineNtFileMetadataResult(ok: ok, state: state, table: table, handle: handle, value: value)
 
 fn _find_file(files: [WineNtModeledFile], path: text) -> WineNtModeledFile:
     for file in files:
@@ -64,7 +74,10 @@ pub fn wine_nt_file_io_required_calls() -> [text]:
     [
         "CreateFileW",
         "ReadFile",
-        "CloseHandle"
+        "CloseHandle",
+        "GetFileAttributesW",
+        "GetFileSize",
+        "SetFilePointer"
     ]
 
 pub fn wine_nt_file_table_new(posix_apis: text, async_features: text) -> WineNtFileTable:
@@ -116,3 +129,36 @@ pub fn wine_nt_file_close(table: WineNtFileTable, handle: i64) -> WineNtFileIoRe
         return _result(false, "invalid-handle", table, handle, "", 0)
     val updated = _replace_handle(table, _handle(opened.handle, opened.path, opened.cursor, false))
     _result(true, "closed", updated, handle, "", 0)
+
+pub fn wine_nt_file_get_attributes_w(table: WineNtFileTable, path: text) -> WineNtFileMetadataResult:
+    if not table.ready:
+        return _metadata_result(false, table.state, table, 0, -1)
+    if path == "":
+        return _metadata_result(false, "invalid-path", table, 0, -1)
+    val file = _find_file(table.files, path)
+    if file.path == "":
+        return _metadata_result(false, "file-not-found", table, 0, -1)
+    _metadata_result(true, "attributes", table, 0, 0x80)
+
+pub fn wine_nt_file_get_size(table: WineNtFileTable, handle: i64) -> WineNtFileMetadataResult:
+    val opened = _find_handle(table.handles, handle)
+    if not opened.open:
+        return _metadata_result(false, "invalid-handle", table, handle, 0)
+    val file = _find_file(table.files, opened.path)
+    if file.path == "":
+        return _metadata_result(false, "file-not-found", table, handle, 0)
+    _metadata_result(true, "size", table, handle, file.content.len())
+
+pub fn wine_nt_file_set_pointer(table: WineNtFileTable, handle: i64, cursor: i64) -> WineNtFileMetadataResult:
+    if cursor < 0:
+        return _metadata_result(false, "invalid-file-pointer", table, handle, 0)
+    val opened = _find_handle(table.handles, handle)
+    if not opened.open:
+        return _metadata_result(false, "invalid-handle", table, handle, 0)
+    val file = _find_file(table.files, opened.path)
+    if file.path == "":
+        return _metadata_result(false, "file-not-found", table, handle, 0)
+    if cursor > file.content.len():
+        return _metadata_result(false, "file-pointer-past-eof", table, handle, opened.cursor)
+    val updated = _replace_handle(table, _handle(opened.handle, opened.path, cursor, true))
+    _metadata_result(true, "pointer", updated, handle, cursor)

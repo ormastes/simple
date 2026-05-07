@@ -1,0 +1,73 @@
+"""Bounded KERNEL32 file metadata bridge for Wine startup probes."""
+
+use common.wine_nt_api_catalog.{wine_nt_api_kernel32_file_metadata_dispatch_gate}
+use common.wine_nt_file_io.{
+    WineNtFileMetadataResult,
+    WineNtFileTable,
+    wine_nt_file_close,
+    wine_nt_file_create_w,
+    wine_nt_file_get_attributes_w,
+    wine_nt_file_get_size,
+    wine_nt_file_set_pointer
+}
+
+class WineKernel32FileMetadataResult:
+    ok: bool
+    error: text
+    table: WineNtFileTable
+    handle: i64
+    attributes: i64
+    size: i64
+    pointer: i64
+    operations: text
+
+fn _result(ok: bool, error: text, table: WineNtFileTable, handle: i64, attributes: i64, size: i64, pointer: i64, operations: text) -> WineKernel32FileMetadataResult:
+    WineKernel32FileMetadataResult(ok: ok, error: error, table: table, handle: handle, attributes: attributes, size: size, pointer: pointer, operations: operations)
+
+fn _sequence_gate(symbols: [text]) -> text:
+    val dispatch_state = wine_nt_api_kernel32_file_metadata_dispatch_gate(symbols)
+    if dispatch_state != "ready":
+        return dispatch_state
+    if symbols.len() != 5:
+        return "kernel32-file-metadata-sequence-count-mismatch"
+    if symbols[0] != "GetFileAttributesW":
+        return "kernel32-file-metadata-sequence-expected:GetFileAttributesW"
+    if symbols[1] != "CreateFileW":
+        return "kernel32-file-metadata-sequence-expected:CreateFileW"
+    if symbols[2] != "GetFileSize":
+        return "kernel32-file-metadata-sequence-expected:GetFileSize"
+    if symbols[3] != "SetFilePointer":
+        return "kernel32-file-metadata-sequence-expected:SetFilePointer"
+    if symbols[4] != "CloseHandle":
+        return "kernel32-file-metadata-sequence-expected:CloseHandle"
+    "ready"
+
+fn _metadata_failure(symbol: text, step: WineNtFileMetadataResult, operations: text) -> WineKernel32FileMetadataResult:
+    _result(false, symbol + ":" + step.state, step.table, step.handle, 0, 0, step.value, operations)
+
+pub fn wine_kernel32_execute_file_metadata(symbols: [text], table: WineNtFileTable, path: text, pointer: i64) -> WineKernel32FileMetadataResult:
+    val sequence_state = _sequence_gate(symbols)
+    if sequence_state != "ready":
+        return _result(false, sequence_state, table, 0, 0, 0, 0, "")
+
+    val attrs = wine_nt_file_get_attributes_w(table, path)
+    if not attrs.ok:
+        return _metadata_failure("GetFileAttributesW", attrs, "")
+
+    val opened = wine_nt_file_create_w(attrs.table, path)
+    if not opened.ok:
+        return _result(false, "CreateFileW:" + opened.state, opened.table, opened.handle, attrs.value, 0, 0, "GetFileAttributesW")
+
+    val size = wine_nt_file_get_size(opened.table, opened.handle)
+    if not size.ok:
+        return _metadata_failure("GetFileSize", size, "GetFileAttributesW CreateFileW")
+
+    val moved = wine_nt_file_set_pointer(size.table, opened.handle, pointer)
+    if not moved.ok:
+        return _metadata_failure("SetFilePointer", moved, "GetFileAttributesW CreateFileW GetFileSize")
+
+    val closed = wine_nt_file_close(moved.table, opened.handle)
+    if not closed.ok:
+        return _result(false, "CloseHandle:" + closed.state, closed.table, opened.handle, attrs.value, size.value, moved.value, "GetFileAttributesW CreateFileW GetFileSize SetFilePointer")
+
+    _result(true, "", closed.table, opened.handle, attrs.value, size.value, moved.value, "GetFileAttributesW CreateFileW GetFileSize SetFilePointer CloseHandle")

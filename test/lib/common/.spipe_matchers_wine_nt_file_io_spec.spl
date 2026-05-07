@@ -1,8 +1,11 @@
 use common.wine_nt_file_io.{
     wine_nt_file_close,
     wine_nt_file_create_w,
+    wine_nt_file_get_attributes_w,
+    wine_nt_file_get_size,
     wine_nt_file_io_required_calls,
     wine_nt_file_read,
+    wine_nt_file_set_pointer,
     wine_nt_file_table_add_file,
     wine_nt_file_table_new
 }
@@ -18,8 +21,10 @@ fn _all_async_features() -> text:
 describe "Wine NT file I/O bridge":
     it "lists the modeled CreateFileW, ReadFile, and CloseHandle calls":
         val calls = wine_nt_file_io_required_calls()
-        expect calls.len() == 3
+        expect calls.len() == 6
         expect calls[0] == "CreateFileW"
+        expect calls[3] == "GetFileAttributesW"
+        expect calls[5] == "SetFilePointer"
 
     it "blocks file table readiness until POSIX and async prerequisites pass":
         val table = wine_nt_file_table_new("fd-open fd-read", _all_async_features())
@@ -60,3 +65,27 @@ describe "Wine NT file I/O bridge":
         val with_file = wine_nt_file_table_add_file(table, "C:\\hello.txt", "hello")
         val opened = wine_nt_file_create_w(with_file, "C:\\hello.txt")
         expect wine_nt_file_read(opened.table, opened.handle, -1).state == "invalid-read-size"
+
+    it "returns deterministic file attributes, file size, and pointer movement":
+        val table = wine_nt_file_table_add_file(wine_nt_file_table_new(_all_adapter_apis(), _all_async_features()), "C:\\hello.txt", "hello wine")
+        val attrs = wine_nt_file_get_attributes_w(table, "C:\\hello.txt")
+        val opened = wine_nt_file_create_w(table, "C:\\hello.txt")
+        val size = wine_nt_file_get_size(opened.table, opened.handle)
+        val moved = wine_nt_file_set_pointer(size.table, opened.handle, 6)
+        val read = wine_nt_file_read(moved.table, opened.handle, 4)
+
+        expect attrs.ok == true
+        expect attrs.value == 0x80
+        expect size.ok == true
+        expect size.value == 10
+        expect moved.ok == true
+        expect moved.value == 6
+        expect read.data == "wine"
+
+    it "rejects invalid metadata and pointer requests":
+        val table = wine_nt_file_table_add_file(wine_nt_file_table_new(_all_adapter_apis(), _all_async_features()), "C:\\hello.txt", "hello")
+        val opened = wine_nt_file_create_w(table, "C:\\hello.txt")
+        expect wine_nt_file_get_attributes_w(table, "C:\\missing.txt").state == "file-not-found"
+        expect wine_nt_file_get_size(table, 0x99).state == "invalid-handle"
+        expect wine_nt_file_set_pointer(opened.table, opened.handle, -1).state == "invalid-file-pointer"
+        expect wine_nt_file_set_pointer(opened.table, opened.handle, 99).state == "file-pointer-past-eof"
