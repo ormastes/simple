@@ -1,4 +1,4 @@
-use common.wine_kernel32_file_management.{wine_kernel32_execute_file_delete}
+use common.wine_kernel32_file_management.{wine_kernel32_execute_file_copy, wine_kernel32_execute_file_delete, wine_kernel32_execute_file_move}
 use common.wine_nt_file_io.{WineNtFileTable, wine_nt_file_create_w, wine_nt_file_get_attributes_w, wine_nt_file_table_add_file, wine_nt_file_table_new}
 
 fn _all_adapter_apis() -> text:
@@ -20,6 +20,19 @@ describe "Wine KERNEL32 file-management bridge":
         expect(result.operations).to_equal("DeleteFileW")
         expect(wine_nt_file_get_attributes_w(result.table, "C:\\temp.tmp").state).to_equal("file-not-found")
 
+    it "executes bounded CopyFileW and MoveFileW sequences":
+        val copied = wine_kernel32_execute_file_copy(["CopyFileW"], _table_with_file(), "C:\\temp.tmp", "C:\\copy.tmp", true)
+        expect(copied.ok).to_equal(true)
+        expect(copied.operations).to_equal("CopyFileW")
+        expect(wine_nt_file_get_attributes_w(copied.table, "C:\\temp.tmp").ok).to_equal(true)
+        expect(wine_nt_file_get_attributes_w(copied.table, "C:\\copy.tmp").ok).to_equal(true)
+
+        val moved = wine_kernel32_execute_file_move(["MoveFileW"], copied.table, "C:\\copy.tmp", "C:\\moved.tmp")
+        expect(moved.ok).to_equal(true)
+        expect(moved.operations).to_equal("MoveFileW")
+        expect(wine_nt_file_get_attributes_w(moved.table, "C:\\copy.tmp").state).to_equal("file-not-found")
+        expect(wine_nt_file_get_attributes_w(moved.table, "C:\\moved.tmp").ok).to_equal(true)
+
     it "keeps file-management dispatch ordered and bounded":
         val extra = wine_kernel32_execute_file_delete(["DeleteFileW", "CloseHandle"], _table_with_file(), "C:\\temp.tmp")
         expect(extra.ok).to_equal(false)
@@ -28,6 +41,14 @@ describe "Wine KERNEL32 file-management bridge":
         val wrong_family = wine_kernel32_execute_file_delete(["HeapAlloc"], _table_with_file(), "C:\\temp.tmp")
         expect(wrong_family.ok).to_equal(false)
         expect(wrong_family.error).to_equal("bridge-wrong-category:HeapAlloc")
+
+        val wrong_copy = wine_kernel32_execute_file_copy(["DeleteFileW"], _table_with_file(), "C:\\temp.tmp", "C:\\copy.tmp", true)
+        expect(wrong_copy.ok).to_equal(false)
+        expect(wrong_copy.error).to_equal("kernel32-file-management-sequence-expected:CopyFileW")
+
+        val wrong_move = wine_kernel32_execute_file_move(["CopyFileW"], _table_with_file(), "C:\\temp.tmp", "C:\\moved.tmp")
+        expect(wrong_move.ok).to_equal(false)
+        expect(wrong_move.error).to_equal("kernel32-file-management-sequence-expected:MoveFileW")
 
     it "propagates readiness, missing-file, and sharing-violation errors":
         val blocked = wine_nt_file_table_new("fd-open fd-read", _all_async_features())
@@ -44,3 +65,11 @@ describe "Wine KERNEL32 file-management bridge":
         val sharing = wine_kernel32_execute_file_delete(["DeleteFileW"], opened.table, "C:\\temp.tmp")
         expect(sharing.ok).to_equal(false)
         expect(sharing.error).to_equal("DeleteFileW:sharing-violation")
+
+        val copy_exists = wine_kernel32_execute_file_copy(["CopyFileW"], _table_with_file(), "C:\\temp.tmp", "C:\\temp.tmp", true)
+        expect(copy_exists.ok).to_equal(false)
+        expect(copy_exists.error).to_equal("CopyFileW:file-exists")
+
+        val move_missing = wine_kernel32_execute_file_move(["MoveFileW"], _table_with_file(), "C:\\missing.tmp", "C:\\moved.tmp")
+        expect(move_missing.ok).to_equal(false)
+        expect(move_missing.error).to_equal("MoveFileW:file-not-found")

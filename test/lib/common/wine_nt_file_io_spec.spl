@@ -1,5 +1,6 @@
 use common.wine_nt_file_io.{
     wine_nt_file_close,
+    wine_nt_file_copy_w,
     wine_nt_file_create_w,
     wine_nt_file_delete_w,
     wine_nt_file_get_attributes_w,
@@ -7,6 +8,7 @@ use common.wine_nt_file_io.{
     wine_nt_file_get_size,
     wine_nt_file_get_type,
     wine_nt_file_io_required_calls,
+    wine_nt_file_move_w,
     wine_nt_file_read,
     wine_nt_file_set_pointer,
     wine_nt_file_table_add_file,
@@ -24,13 +26,15 @@ fn _all_async_features() -> text:
 describe "Wine NT file I/O bridge":
     it "lists the modeled CreateFileW, ReadFile, GetFileType, and metadata calls":
         val calls = wine_nt_file_io_required_calls()
-        expect(calls.len()).to_equal(9)
+        expect(calls.len()).to_equal(11)
         expect(calls[0]).to_equal("CreateFileW")
         expect(calls[2]).to_equal("GetFileType")
         expect(calls[4]).to_equal("GetFileAttributesW")
         expect(calls[6]).to_equal("GetFileInformationByHandle")
         expect(calls[7]).to_equal("SetFilePointer")
         expect(calls[8]).to_equal("DeleteFileW")
+        expect(calls[9]).to_equal("CopyFileW")
+        expect(calls[10]).to_equal("MoveFileW")
 
     it "blocks file table readiness until POSIX and async prerequisites pass":
         val table = wine_nt_file_table_new("fd-open fd-read", _all_async_features())
@@ -117,3 +121,36 @@ describe "Wine NT file I/O bridge":
         expect(deleted.state).to_equal("deleted")
         expect(wine_nt_file_get_attributes_w(deleted.table, "C:\\temp.tmp").state).to_equal("file-not-found")
         expect(wine_nt_file_delete_w(deleted.table, "C:\\missing.tmp").state).to_equal("file-not-found")
+
+    it "copies files with existing-destination and open-destination guards":
+        val table = wine_nt_file_table_add_file(wine_nt_file_table_new(_all_adapter_apis(), _all_async_features()), "C:\\source.txt", "copy me")
+        val copied = wine_nt_file_copy_w(table, "C:\\source.txt", "C:\\dest.txt", true)
+        expect(copied.ok).to_equal(true)
+        expect(copied.state).to_equal("copied")
+        expect(copied.bytes_read).to_equal(7)
+        expect(wine_nt_file_get_attributes_w(copied.table, "C:\\source.txt").ok).to_equal(true)
+        expect(wine_nt_file_get_attributes_w(copied.table, "C:\\dest.txt").ok).to_equal(true)
+
+        val already_there = wine_nt_file_copy_w(copied.table, "C:\\source.txt", "C:\\dest.txt", true)
+        expect(already_there.state).to_equal("file-exists")
+        val overwrite = wine_nt_file_copy_w(copied.table, "C:\\source.txt", "C:\\dest.txt", false)
+        expect(overwrite.ok).to_equal(true)
+
+        val opened_dest = wine_nt_file_create_w(copied.table, "C:\\dest.txt")
+        val sharing = wine_nt_file_copy_w(opened_dest.table, "C:\\source.txt", "C:\\dest.txt", false)
+        val missing = wine_nt_file_copy_w(table, "C:\\missing.txt", "C:\\dest.txt", true)
+        expect(sharing.state).to_equal("sharing-violation")
+        expect(missing.state).to_equal("file-not-found")
+
+    it "moves files and removes the source path":
+        val table = wine_nt_file_table_add_file(wine_nt_file_table_new(_all_adapter_apis(), _all_async_features()), "C:\\source.txt", "move me")
+        val moved = wine_nt_file_move_w(table, "C:\\source.txt", "C:\\dest.txt")
+        expect(moved.ok).to_equal(true)
+        expect(moved.state).to_equal("moved")
+        expect(moved.bytes_read).to_equal(7)
+        expect(wine_nt_file_get_attributes_w(moved.table, "C:\\source.txt").state).to_equal("file-not-found")
+        expect(wine_nt_file_get_attributes_w(moved.table, "C:\\dest.txt").ok).to_equal(true)
+
+        val opened = wine_nt_file_create_w(table, "C:\\source.txt")
+        expect(wine_nt_file_move_w(opened.table, "C:\\source.txt", "C:\\dest.txt").state).to_equal("sharing-violation")
+        expect(wine_nt_file_move_w(table, "C:\\missing.txt", "C:\\dest.txt").state).to_equal("file-not-found")

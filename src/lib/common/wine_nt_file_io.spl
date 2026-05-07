@@ -83,6 +83,19 @@ fn _remove_file(table: WineNtFileTable, path: text) -> WineNtFileTable:
             files.push(item)
     _table(files, table.handles, table.next_handle, table.ready, table.state)
 
+fn _upsert_file(table: WineNtFileTable, path: text, content: text) -> WineNtFileTable:
+    var files: [WineNtModeledFile] = []
+    var replaced = false
+    for item in table.files:
+        if item.path == path:
+            files.push(_file(path, content))
+            replaced = true
+        else:
+            files.push(item)
+    if not replaced:
+        files.push(_file(path, content))
+    _table(files, table.handles, table.next_handle, table.ready, table.state)
+
 pub fn wine_nt_file_io_required_calls() -> [text]:
     [
         "CreateFileW",
@@ -93,7 +106,9 @@ pub fn wine_nt_file_io_required_calls() -> [text]:
         "GetFileSize",
         "GetFileInformationByHandle",
         "SetFilePointer",
-        "DeleteFileW"
+        "DeleteFileW",
+        "CopyFileW",
+        "MoveFileW"
     ]
 
 pub fn wine_nt_file_table_new(posix_apis: text, async_features: text) -> WineNtFileTable:
@@ -173,6 +188,34 @@ pub fn wine_nt_file_delete_w(table: WineNtFileTable, path: text) -> WineNtFileIo
     if _has_open_handle(table, path):
         return _result(false, "sharing-violation", table, 0, "", 0)
     _result(true, "deleted", _remove_file(table, path), 0, "", 0)
+
+pub fn wine_nt_file_copy_w(table: WineNtFileTable, source_path: text, dest_path: text, fail_if_exists: bool) -> WineNtFileIoResult:
+    if not table.ready:
+        return _result(false, table.state, table, 0, "", 0)
+    if source_path == "" or dest_path == "":
+        return _result(false, "invalid-path", table, 0, "", 0)
+    val source = _find_file(table.files, source_path)
+    if source.path == "":
+        return _result(false, "file-not-found", table, 0, "", 0)
+    val dest = _find_file(table.files, dest_path)
+    if fail_if_exists and dest.path != "":
+        return _result(false, "file-exists", table, 0, "", 0)
+    if _has_open_handle(table, dest_path):
+        return _result(false, "sharing-violation", table, 0, "", 0)
+    _result(true, "copied", _upsert_file(table, dest_path, source.content), 0, "", source.content.len())
+
+pub fn wine_nt_file_move_w(table: WineNtFileTable, source_path: text, dest_path: text) -> WineNtFileIoResult:
+    if not table.ready:
+        return _result(false, table.state, table, 0, "", 0)
+    if source_path == "" or dest_path == "":
+        return _result(false, "invalid-path", table, 0, "", 0)
+    val source = _find_file(table.files, source_path)
+    if source.path == "":
+        return _result(false, "file-not-found", table, 0, "", 0)
+    if _has_open_handle(table, source_path) or _has_open_handle(table, dest_path):
+        return _result(false, "sharing-violation", table, 0, "", 0)
+    val without_source = _remove_file(table, source_path)
+    _result(true, "moved", _upsert_file(without_source, dest_path, source.content), 0, "", source.content.len())
 
 pub fn wine_nt_file_get_size(table: WineNtFileTable, handle: i64) -> WineNtFileMetadataResult:
     val opened = _find_handle(table.handles, handle)
