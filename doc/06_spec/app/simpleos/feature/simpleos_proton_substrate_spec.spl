@@ -1,0 +1,41 @@
+use common.wine_proton_gate.{
+    wine_proton_feature_gate,
+    wine_proton_fixture_features,
+    wine_proton_fixture_wine_gates,
+    wine_proton_readiness_gate
+}
+
+describe "SimpleOS Proton Substrate":
+    describe "REQ-PROTON-001: full Wine dependency":
+        it "should block Proton readiness until full Wine readiness is complete":
+            val state = wine_proton_readiness_gate(
+                "process=verified exec_env=verified vm=verified renderer=verified",
+                wine_proton_fixture_features()
+            )
+            expect(state).to_equal("blocked-wine-blocked-missing-user32")
+
+    describe "REQ-PROTON-002: Steam runtime and container":
+        it "should require the Proton launcher, Steam runtime, and pressure-vessel style container evidence":
+            expect(wine_proton_feature_gate("")).to_equal("missing-steam-runtime")
+            expect(wine_proton_feature_gate("steam-runtime")).to_equal("missing-pressure-vessel-container")
+            expect(wine_proton_feature_gate("steam-runtime pressure-vessel-container")).to_equal("missing-proton-launcher")
+
+    describe "REQ-PROTON-003: graphics translation":
+        it "should require Vulkan, DXVK, and VKD3D-Proton evidence":
+            val features = "steam-runtime pressure-vessel-container proton-launcher wine-full"
+            expect(wine_proton_feature_gate(features)).to_equal("missing-vulkan-loader")
+            expect(wine_proton_feature_gate(features + " vulkan-loader vulkan-device")).to_equal("missing-dxvk")
+            expect(wine_proton_feature_gate(features + " vulkan-loader vulkan-device dxvk")).to_equal("missing-vkd3d-proton")
+
+    describe "REQ-PROTON-004: Steam/game runtime integration":
+        it "should require Steamworks, controller input, shader cache, and sync primitive evidence":
+            val features = "steam-runtime pressure-vessel-container proton-launcher wine-full " +
+                "vulkan-loader vulkan-device dxvk vkd3d-proton"
+            expect(wine_proton_feature_gate(features)).to_equal("missing-steamworks-bridge")
+            expect(wine_proton_feature_gate(features + " steamworks-bridge")).to_equal("missing-controller-input")
+            expect(wine_proton_feature_gate(features + " steamworks-bridge controller-input")).to_equal("missing-shader-cache")
+            expect(wine_proton_feature_gate(features + " steamworks-bridge controller-input shader-cache")).to_equal("missing-esync-or-fsync")
+
+    describe "REQ-PROTON-005: readiness boundary":
+        it "should mark Proton ready only when full Wine and all Proton features are present":
+            expect(wine_proton_readiness_gate(wine_proton_fixture_wine_gates(), wine_proton_fixture_features())).to_equal("ready")

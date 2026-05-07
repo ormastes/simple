@@ -268,6 +268,25 @@ Conservative boundary: this is an architecture constraint and documentation
 alignment. It does not make full Wine, a complete X server, kernel page-table
 enforcement, or arbitrary containerized PE execution complete.
 
+## 2026-05-07 Proton Readiness Boundary
+
+The repo now has a first-class Proton readiness gate above the Wine substrate.
+`src/lib/common/wine_proton_gate.spl` requires full Wine readiness first, then
+Steam runtime, pressure-vessel style container, Proton launcher, Vulkan, DXVK,
+VKD3D-Proton, Steamworks bridge, controller input, shader cache, and
+esync-or-fsync evidence.
+
+Fresh evidence:
+
+- `bin/simple check src/lib/common/wine_proton_gate.spl test/lib/common/wine_proton_gate_spec.spl doc/06_spec/app/simpleos/feature/simpleos_proton_substrate_spec.spl`: all checks passed.
+- `bin/simple test test/lib/common/wine_proton_gate_spec.spl --mode=interpreter --clean`: 5 examples, 0 failures.
+- `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_proton_substrate_spec.spl --mode=interpreter --clean`: 5 examples, 0 failures.
+
+Conservative boundary: this is a Proton readiness classifier, not Proton
+itself. It does not implement upstream Proton, Steam client integration, a
+Linux ABI, Vulkan driver support, DXVK, VKD3D-Proton, or arbitrary Windows game
+compatibility.
+
 ## Completion Decision
 
 The WM/VM prerequisite plan in `doc/03_plan/agent_tasks/simpleos_wine_wm_vm_execution_plan_2026-05-06.md` is implemented at the Wine-facing SimpleOS contract level. Modeled X11/VM gates are no longer accepted as production evidence, and the new production gates require SimpleOS window records, framebuffer presents, OS process/address-space identity, container namespace evidence, OS VMA image mapping, thread stack/guard setup, fault evidence, and no-host-code-jump policy.
