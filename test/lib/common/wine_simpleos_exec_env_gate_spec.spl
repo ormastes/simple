@@ -10,11 +10,12 @@ use common.wine_simpleos_exec_env_gate.{
 describe "Wine SimpleOS executable environment gate":
     it "lists VM, full-OS, and container evidence required before Wine readiness claims":
         val required = wine_simpleos_exec_env_required_evidence()
-        expect(required.len()).to_equal(9)
+        expect(required.len()).to_equal(15)
         expect(required[0]).to_equal("simpleos-qemu-vm")
         expect(required[1]).to_equal("simpleos-full-os-boot")
         expect(required[7]).to_equal("simpleos-container-namespace")
-        expect(required[8]).to_equal("simpleos-container-rootfs")
+        expect(required[8]).to_equal("simpleos-container-pid-namespace")
+        expect(required[14]).to_equal("simpleos-container-rootfs-nvfs")
 
     it "reports the first missing executable-environment prerequisite":
         val state = wine_simpleos_exec_env_gate("simpleos-qemu-vm simpleos-full-os-boot simpleos-user-process")
@@ -30,10 +31,29 @@ describe "Wine SimpleOS executable environment gate":
         expect(evidence).to_contain("simpleos-user-process")
         expect(evidence).to_contain("simpleos-vmspace")
         expect(evidence).to_contain("simpleos-container-namespace")
+        expect(evidence).to_contain("simpleos-container-pid-namespace")
+        expect(evidence).to_contain("simpleos-container-fs-namespace")
+        expect(evidence).to_contain("simpleos-container-ipc-namespace")
+        expect(evidence).to_contain("simpleos-container-net-namespace")
+        expect(evidence).to_contain("simpleos-container-capability-boundary")
         expect(evidence).to_contain("simpleos-container-rootfs")
+        expect(evidence).to_contain("simpleos-container-rootfs-nvfs")
         expect(wine_simpleos_exec_env_gate_from_serial_log(wine_simpleos_exec_env_fixture_serial_log())).to_equal("ready")
 
-    it "keeps QEMU desktop evidence blocked until container rootfs proof appears":
+    it "keeps QEMU desktop evidence blocked until container namespace facets appear":
+        val serial_log = "QEMU x86_64 desktop lane\n" +
+            "[phase-3-mount] fat32 ok\n" +
+            "[vfs] mounted fat32 device=nvme0 volume=simpleos\n" +
+            "[fs-exec] spawn:image path=/sys/apps/wine_hello entry=0 segments=1 stub_bytes=128\n" +
+            "[desktop-e2e] process-backed:ok app=wine_hello pid=42\n" +
+            "[desktop-e2e] wm:ok pid=42 wid=1001\n" +
+            "[desktop-e2e] network-smoke:bounded ok packets=1\n" +
+            "[desktop-e2e] container-namespace:ok\n" +
+            "[desktop-e2e] container-rootfs:ok rootfs=/containers/wine rootfs_backend=nvfs\n" +
+            "TEST PASSED"
+        expect(wine_simpleos_exec_env_gate_from_serial_log(serial_log)).to_equal("missing-simpleos-container-pid-namespace")
+
+    it "keeps QEMU desktop evidence blocked until container rootfs backend is nvfs":
         val serial_log = "QEMU x86_64 desktop lane\n" +
             "[phase-3-mount] fat32 ok\n" +
             "[vfs] mounted fat32 device=nvme0 volume=simpleos\n" +
@@ -42,5 +62,6 @@ describe "Wine SimpleOS executable environment gate":
             "[desktop-e2e] wm:ok pid=42 wid=1001\n" +
             "[desktop-e2e] network-smoke:bounded ok packets=1\n" +
             "[desktop-e2e] container-namespace:ok pid fs ipc net capability\n" +
+            "[desktop-e2e] container-rootfs:ok rootfs=/containers/wine rootfs_backend=tmpfs\n" +
             "TEST PASSED"
-        expect(wine_simpleos_exec_env_gate_from_serial_log(serial_log)).to_equal("missing-simpleos-container-rootfs")
+        expect(wine_simpleos_exec_env_gate_from_serial_log(serial_log)).to_equal("missing-simpleos-container-rootfs-nvfs")

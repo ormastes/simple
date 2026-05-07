@@ -19,12 +19,12 @@ Deliver the production-quality prerequisites for a controlled SimpleOS Wine path
 | --- | --- | --- |
 | Wine research | `doc/01_research/local/simpleos_wine_support.md`, `doc/01_research/domain/simpleos_wine_support.md`, `doc/09_report/simpleos_wine_support_research_2026-05-06.md` | Done |
 | Requirements/design/test artifacts | `doc/02_requirements/feature/simpleos_wine_substrate.md`, `doc/02_requirements/nfr/simpleos_wine_substrate.md`, `doc/04_architecture/simpleos_wine_substrate.md`, `doc/04_architecture/simpleos_wine_wm_vm.md`, `doc/05_design/simpleos_wine_substrate.md`, `doc/03_plan/sys_test/simpleos_wine_substrate.md`, `doc/06_spec/app/simpleos/feature/simpleos_wine_substrate_spec.spl` | Done |
-| SimpleOS executable environment gate | `src/lib/common/wine_simpleos_exec_env_gate.spl` requires QEMU VM, full OS boot, user process, VM space, filesystem, window system, network, container namespace, and container rootfs evidence; `src/lib/common/wine_substrate.spl` exposes this as the `exec_env` matrix row/gate | Implemented prerequisite |
+| SimpleOS executable environment gate | `src/lib/common/wine_simpleos_exec_env_gate.spl` requires QEMU VM, full OS boot, user process, VM space, filesystem, window system, network, separate pid/fs/ipc/net/capability container namespace facets, container rootfs evidence, and NVFS rootfs backend evidence; `src/lib/common/wine_substrate.spl` exposes this as the `exec_env` matrix row/gate | Implemented prerequisite |
 | Dynamic loading prerequisite | `src/lib/common/wine_dynload_adapter.spl` requires native loader APIs, search path/dependency/namespace coverage, relocation/import/TLS surfaces, structured loader errors, and bounded NTDLL `LdrLoadDll`/`LdrGetProcedureAddress`/`LdrUnloadDll` evidence before dynload readiness | Implemented prerequisite |
 | Thread/TLS/wait prerequisite | `src/lib/common/wine_thread_adapter.spl` requires thread/TLS/synchronization/wait/fault APIs and bounded NT `CreateThread`/`WaitForSingleObject` evidence before pthread readiness | Implemented prerequisite |
 | POSIX/file-I/O prerequisite | `src/lib/common/wine_posix_adapter.spl` requires fd/process/stdio/wait/timer/socket/path/errno APIs over `nogc_async_mut`, and bounded KERNEL32 `CreateFileW`/`ReadFile`/`GetFileType`/`CloseHandle` evidence before POSIX readiness | Implemented prerequisite |
 | Service-control prerequisite | `src/lib/common/wine_service_adapter.spl` requires complete IPC, handle, audio, font, crypto, HID, printing, and multimedia service declarations plus bounded ADVAPI32 `OpenSCManagerW`/`CreateServiceW`/`OpenServiceW`/`StartServiceW`/`CloseServiceHandle` evidence before service readiness | Implemented prerequisite |
-| WM/graphics production prerequisite | `src/lib/common/ui/wine_simpleos_window_bridge.spl` creates SimpleOS `/win` `WindowRecord` state and framebuffer present evidence; `src/lib/common/ui/wine_x11_adapter.spl` requires that bridge through `wine_x11_backend_production_ready` | Implemented prerequisite |
+| WM/graphics production prerequisite | `src/lib/common/ui/wine_simpleos_window_bridge.spl` creates SimpleOS `/win` `WindowRecord` state, framebuffer present evidence, cursor evidence, and clipboard evidence; `src/lib/common/ui/wine_x11_adapter.spl` requires that bridge through `wine_x11_backend_production_ready` | Implemented prerequisite |
 | VM/container production prerequisite | `src/lib/common/wine_vm_adapter.spl` distinguishes modeled spaces from OS process/address-space/container-backed spaces; `src/lib/common/wine_image_vm_map.spl` maps validated PE images plus stack/guard before execution | Implemented prerequisite |
 | PE/COFF and CPU preparation | `src/lib/common/wine_pe_gate.spl`, `src/lib/common/pe_coff_header.spl`, `src/lib/common/wine_pe_loader_runtime.spl`, `src/lib/common/wine_image_map.spl`, `src/lib/common/wine_x86_64_decode.spl`, and `src/lib/common/wine_cpu_exec.spl` validate image layout, entry windows, imports, relocation/TLS readiness, decoded call targets, safe prologues, and dispatch evidence before controlled execution | Verified for controlled hello path |
 | NT bridge and dispatch sequence | `src/lib/common/wine_nt_bridge.spl` and `src/lib/common/wine_hello_dispatch.spl` execute only the decoded-plan `GetStdHandle`, `WriteFile`, `ExitProcess` sequence with stdout handle, byte-count, payload RVA, and exit-code evidence | Verified for controlled hello path |
@@ -75,6 +75,20 @@ Fresh evidence:
 - `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_substrate_spec.spl`: 14 examples, 0 failures.
 
 Conservative boundary: `exec_env=verified` means the controlled Wine path has explicit SimpleOS VM/full-OS/container evidence. It does not by itself imply a complete Wine port or arbitrary PE compatibility.
+
+## 2026-05-07 WM X11 And Container Evidence Tightening
+
+The Wine-facing WM bridge now keeps X11 production binding blocked until SimpleOS-side cursor and clipboard evidence exist alongside window records and framebuffer presents. The executable-environment gate now requires container namespace facets for pid, fs, ipc, net, and capability isolation separately, plus an NVFS-backed container rootfs marker.
+
+Fresh evidence:
+
+- `bin/simple check src/lib/common/ui/wine_simpleos_window_bridge.spl src/lib/common/ui/wine_x11_adapter.spl src/lib/common/wine_simpleos_exec_env_gate.spl test/lib/common/ui/wine_simpleos_window_bridge_spec.spl test/lib/common/ui/wine_x11_adapter_spec.spl test/lib/common/wine_simpleos_exec_env_gate_spec.spl`: all checks passed.
+- `bin/simple test test/lib/common/ui/wine_simpleos_window_bridge_spec.spl`: 7 examples, 0 failures.
+- `bin/simple test test/lib/common/ui/wine_x11_adapter_spec.spl`: 11 examples, 0 failures.
+- `bin/simple test test/lib/common/wine_simpleos_exec_env_gate_spec.spl`: 6 examples, 0 failures.
+- `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_substrate_spec.spl`: 14 examples, 0 failures.
+
+Conservative boundary: this is sharper X11-class and container/VM executable-environment evidence. It is still not a live full X server, complete container runtime, or arbitrary Wine/PE execution environment.
 
 ## 2026-05-07 Data-Backed PE Gate Update
 
