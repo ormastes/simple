@@ -257,6 +257,11 @@ refcounts, releases every loaded handle after successful import resolution, and
 rolls back loaded handles when procedure resolution fails. This records loader
 lifetime evidence only; it still does not load host DLLs, run DLL entrypoints,
 execute TLS callbacks, patch the IAT, or transfer control to arbitrary PE code.
+`wine_process_apply_import_loader_transaction_in_vma(...)` composes that loader
+state accounting with descriptor-qualified VMA import patching. The transaction
+requires released loader refcounts before the process VMA write window is
+accepted, carries the loader counts beside patch counts, and aborts before VMA
+patching when modeled module resolution rolls back.
 `wine_process_plan_import_thunk_patches(...)` consumes those explicit records,
 so thunk patch evidence now carries module-loader, record-planning, and
 import-thunk preconditions before CPU dispatch preflight can pass.

@@ -321,6 +321,21 @@ class WineProcessImportDescriptorVmaPatchResult:
     evidence: text
     status: text
 
+class WineProcessImportLoaderVmaPatchTransactionResult:
+    ok: bool
+    error: text
+    command: text
+    patched_image: [u8]
+    mapped_base: i64
+    mapped_size: i64
+    module_count: i64
+    loaded_count: i64
+    released_count: i64
+    rollback_count: i64
+    patched_count: i64
+    evidence: text
+    status: text
+
 class WineProcessVmaRelocationApplyResult:
     ok: bool
     error: text
@@ -427,6 +442,9 @@ fn _wine_process_vma_thunk_patch_result(ok: bool, error: text, command: text, dl
 
 fn _wine_process_import_descriptor_vma_patch_result(ok: bool, error: text, command: text, patched_image: [u8], mapped_base: i64, mapped_size: i64, patched_count: i64, evidence: text, status: text) -> WineProcessImportDescriptorVmaPatchResult:
     WineProcessImportDescriptorVmaPatchResult(ok: ok, error: error, command: command, patched_image: patched_image, mapped_base: mapped_base, mapped_size: mapped_size, patched_count: patched_count, evidence: evidence, status: status)
+
+fn _wine_process_import_loader_vma_patch_transaction_result(ok: bool, error: text, command: text, patched_image: [u8], mapped_base: i64, mapped_size: i64, module_count: i64, loaded_count: i64, released_count: i64, rollback_count: i64, patched_count: i64, evidence: text, status: text) -> WineProcessImportLoaderVmaPatchTransactionResult:
+    WineProcessImportLoaderVmaPatchTransactionResult(ok: ok, error: error, command: command, patched_image: patched_image, mapped_base: mapped_base, mapped_size: mapped_size, module_count: module_count, loaded_count: loaded_count, released_count: released_count, rollback_count: rollback_count, patched_count: patched_count, evidence: evidence, status: status)
 
 fn _wine_process_vma_relocation_apply_result(ok: bool, error: text, command: text, patched_image: [u8], mapped_base: i64, mapped_size: i64, relocation_count: i64, target_rva: i64, evidence: text, status: text) -> WineProcessVmaRelocationApplyResult:
     WineProcessVmaRelocationApplyResult(ok: ok, error: error, command: command, patched_image: patched_image, mapped_base: mapped_base, mapped_size: mapped_size, relocation_count: relocation_count, target_rva: target_rva, evidence: evidence, status: status)
@@ -1189,3 +1207,15 @@ pub fn wine_process_apply_import_descriptor_thunk_patches_in_vma(plan: WineProce
         return _wine_process_import_descriptor_vma_patch_result(false, host_jump_state, plan.command, patched.patched_image, mapped.region.base, mapped.region.size, patched.patched_count, patched.evidence, "blocked")
     val evidence = patched.evidence + " process-image-mapped os-process os-address-space os-vma image-map process-vma-write-window process-vma-write-enabled process-vma-rx-restored exec-perm no-host-code-jump multi-dll-import-thunks-applied no-real-dll-loaded no-arbitrary-execution"
     _wine_process_import_descriptor_vma_patch_result(true, "", plan.command, patched.patched_image, mapped.region.base, mapped.region.size, patched.patched_count, evidence, "import-descriptor-vma-thunk-patches-applied")
+
+pub fn wine_process_apply_import_loader_transaction_in_vma(plan: WineProcessSessionPlan, data: [u8], descriptor_limit: i64, symbol_limit: i64) -> WineProcessImportLoaderVmaPatchTransactionResult:
+    val loader = wine_process_plan_import_loader_state(plan, data, descriptor_limit, symbol_limit)
+    if not loader.ok:
+        val evidence = loader.evidence + " import-loader-vma-transaction-aborted no-real-dll-loaded no-arbitrary-execution"
+        return _wine_process_import_loader_vma_patch_transaction_result(false, loader.error, plan.command, data, 0, 0, loader.module_count, loader.loaded_count, loader.released_count, loader.rollback_count, 0, evidence, loader.status)
+    val patched = wine_process_apply_import_descriptor_thunk_patches_in_vma(plan, data, descriptor_limit, symbol_limit)
+    if not patched.ok:
+        val evidence = loader.evidence + " " + patched.evidence + " import-loader-state-before-vma-patch import-loader-vma-transaction-aborted no-real-dll-loaded no-arbitrary-execution"
+        return _wine_process_import_loader_vma_patch_transaction_result(false, patched.error, plan.command, patched.patched_image, patched.mapped_base, patched.mapped_size, loader.module_count, loader.loaded_count, loader.released_count, loader.rollback_count, patched.patched_count, evidence, patched.status)
+    val evidence = loader.evidence + " " + patched.evidence + " import-loader-state-before-vma-patch import-loader-vma-transaction-complete no-real-dll-loaded no-arbitrary-execution"
+    _wine_process_import_loader_vma_patch_transaction_result(true, "", plan.command, patched.patched_image, patched.mapped_base, patched.mapped_size, loader.module_count, loader.loaded_count, loader.released_count, loader.rollback_count, patched.patched_count, evidence, "import-loader-vma-transaction-complete")

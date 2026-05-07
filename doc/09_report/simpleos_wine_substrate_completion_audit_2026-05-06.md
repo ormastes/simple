@@ -722,6 +722,14 @@ and rolls loaded handles back when procedure resolution fails. This completes
 REQ-038 as modeled loader state accounting only; it still does not load host
 DLLs, execute DLL entrypoints, run TLS callback instructions, patch the IAT, or
 allow arbitrary PE execution.
+`wine_process_apply_import_loader_transaction_in_vma(...)` now composes modeled
+loader state with descriptor-qualified process VMA import patching. It records
+module load/release/rollback counts next to patch counts, requires restored
+loader refcount evidence before the VMA patch path completes, and aborts before
+VMA patching when loader-state resolution rolls back. This completes REQ-039 as
+a modeled loader-state-gated import patch transaction only; it still does not
+load host DLLs, execute DLL entrypoints, run TLS callback instructions, or allow
+arbitrary PE execution.
 
 Fresh evidence:
 
@@ -762,6 +770,9 @@ Fresh evidence:
 - `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_process_tls_dispatch_spec.spl --mode=interpreter --clean`: includes REQ-037 system coverage for mapped TLS callback dispatch recording without PE execution.
 - `bin/simple test test/lib/common/wine_process_session_loader_state_spec.spl --mode=interpreter --clean`: covers REQ-038 modeled import-loader refcount release and missing-export rollback.
 - `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_process_loader_state_spec.spl --mode=interpreter --clean`: includes REQ-038 system coverage for modeled loader state without host DLL loading or PE execution.
+- `bin/simple test test/lib/common/wine_process_session_import_transaction_spec.spl --mode=interpreter --clean`: covers REQ-039 loader-state-gated VMA import patch transactions.
+- `bin/simple test test/lib/common/wine_process_session_import_transaction_rollback_spec.spl --mode=interpreter --clean`: covers REQ-039 rollback-before-patch rejection without crossing into the VMA write path.
+- `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_process_import_transaction_spec.spl --mode=interpreter --clean`: includes REQ-039 system coverage for composed loader state plus VMA patch evidence without host DLL loading or PE execution.
 - `bin/simple test test/lib/common/wine_x86_64_decode_spec.spl --mode=interpreter --clean`: covers RIP-relative indirect call decoding and thunk-RVA target extraction.
 - `bin/simple test test/lib/common/wine_hello_exe_spec.spl --mode=interpreter --clean`: covers import-binding agreement against thunk RVAs.
 - `bin/simple test test/lib/common/wine_process_session_known_console_spec.spl --mode=interpreter --clean`: keeps known-console process execution on the patched-image path.
