@@ -22,7 +22,7 @@ Deliver the production-quality prerequisites for a controlled SimpleOS Wine path
 | WM/graphics production prerequisite | `src/lib/common/ui/wine_simpleos_window_bridge.spl` creates SimpleOS `/win` `WindowRecord` state and framebuffer present evidence; `src/lib/common/ui/wine_x11_adapter.spl` requires that bridge through `wine_x11_backend_production_ready` | Implemented prerequisite |
 | VM/container production prerequisite | `src/lib/common/wine_vm_adapter.spl` distinguishes modeled spaces from OS process/address-space/container-backed spaces; `src/lib/common/wine_image_vm_map.spl` maps validated PE images plus stack/guard before execution | Implemented prerequisite |
 | PE/COFF and CPU preparation | `src/lib/common/wine_image_map.spl`, `src/lib/common/wine_x86_64_decode.spl`, and `src/lib/common/wine_cpu_exec.spl` validate image layout, entry windows, decoded call targets, safe prologues, and dispatch evidence before controlled execution | Verified for controlled hello path |
-| NT bridge and dispatch sequence | `src/lib/common/wine_nt_bridge.spl` and `src/lib/common/wine_hello_dispatch.spl` execute only the ordered `GetStdHandle`, `WriteFile`, `ExitProcess` sequence with stdout handle, byte-count, payload RVA, and exit-code evidence | Verified for controlled hello path |
+| NT bridge and dispatch sequence | `src/lib/common/wine_nt_bridge.spl` and `src/lib/common/wine_hello_dispatch.spl` execute only the decoded-plan `GetStdHandle`, `WriteFile`, `ExitProcess` sequence with stdout handle, byte-count, payload RVA, and exit-code evidence | Verified for controlled hello path |
 | Known non-GUI `hello.exe` command | `src/app/wine_hello/main.spl` prints `Hello from SimpleOS Wine` through OS-backed VM image mapping, composed manifest, PE validation, import binding, CPU plan, NT bridge, and decoded stdout payload path | Verified |
 | Controlled GUI hello milestone | `src/lib/common/wine_gui_hello.spl` and `src/app/wine_gui_hello/main.spl` require the VM-backed PE hello path, then bind Wine-facing X11 state to SimpleOS `/win` framebuffer evidence before reporting window title/text/checksum | Verified |
 | Unsupported programs stay blocked | Tests cover malformed PE, missing gates, unsupported imports, import/CPU target mismatch, missing stdout payload, missing decoder/dispatch evidence, reordered/missing/extra bridge calls, and unsupported/truncated x86_64 instructions | Verified for listed blockers |
@@ -40,6 +40,23 @@ Deliver the production-quality prerequisites for a controlled SimpleOS Wine path
 - `bin/simple test test/lib/common/wine_gui_hello_spec.spl --mode=interpreter --clean`: 2 examples, 0 failures.
 - `bin/simple test test/integration/app/wine_gui_hello_command_spec.spl --mode=interpreter --clean`: 1 example, 0 failures.
 - Wine-scope source/test stub scan: pass.
+
+## 2026-05-07 Execution-Metadata Update
+
+The controlled non-GUI hello path now carries decoded x86_64 sequence metadata from `wine_x86_64_decode.spl` into `WineCpuHelloExecutionPlan` and dispatches stdout execution through the plan's call sequence/count rather than reconstructing a local fixed sequence in `wine_hello_dispatch.spl`.
+
+Fresh evidence:
+
+- `bin/simple check` on 8 impacted source/spec files: all checks passed.
+- `bin/simple test test/lib/common/wine_x86_64_decode_spec.spl`: 14 examples, 0 failures.
+- `bin/simple test test/lib/common/wine_cpu_exec_spec.spl`: 16 examples, 0 failures.
+- `bin/simple test test/lib/common/wine_nt_bridge_spec.spl`: 14 examples, 0 failures.
+- `bin/simple test test/lib/common/wine_hello_dispatch_spec.spl`: 11 examples, 0 failures.
+- `bin/simple test test/lib/common/wine_hello_exe_spec.spl`: 13 examples, 0 failures.
+- `bin/simple test test/integration/app/wine_hello_command_spec.spl`: 1 example, 0 failures.
+- Wine-scope changed-file stub scan: pass.
+
+Conservative boundary: this remains a controlled hello-path executor, not a general x86_64 CPU, arbitrary PE loader, or full Wine NT/Win32 dispatcher.
 
 ## Completion Decision
 

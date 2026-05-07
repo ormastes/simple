@@ -9,7 +9,7 @@ use common.wine_hello_dispatch.{
     wine_known_hello_stdout_payload,
     wine_known_hello_stdout_payload_at_rva
 }
-use common.wine_cpu_exec.{wine_cpu_hello_execution_plan}
+use common.wine_cpu_exec.{WineCpuHelloExecutionPlan, wine_cpu_hello_execution_plan}
 
 fn _zero_bytes(count: i64) -> [u8]:
     var out: [u8] = []
@@ -152,3 +152,10 @@ describe "Wine known hello fixture bridge":
         val result = wine_known_hello_execute_plan(data, plan)
         expect(result.ok).to_equal(true)
         expect(result.stdout).to_equal("Hello from SimpleOS Wine\n")
+
+    it "rejects CPU hello plans with reordered or mismatched decoded call metadata":
+        val data = _put_stdout_payload(_put_marker(_put_pe_mapping(_zero_bytes(1024)), 0x300), 0x320, "Hello from SimpleOS Wine\n")
+        val reordered = WineCpuHelloExecutionPlan(ok: true, error: "", entry_rva: 0x2000, sequence_rva: 0x2000, sequence_end_rva: 0x201b, instruction_sequence: "xor-rcx-rcx call-rel32 lea-rdx-rip-rel32 call-rel32 xor-ecx-ecx call-rel32", instruction_count: 6, call_sequence: "WriteFile GetStdHandle ExitProcess", call_count: 3, get_std_handle_rva: 0x2080, stdout_payload_rva: 0x2120, write_file_rva: 0x20a0, exit_process_rva: 0x20c0)
+        val count_mismatch = WineCpuHelloExecutionPlan(ok: true, error: "", entry_rva: 0x2000, sequence_rva: 0x2000, sequence_end_rva: 0x201b, instruction_sequence: "xor-rcx-rcx call-rel32", instruction_count: 2, call_sequence: "GetStdHandle WriteFile ExitProcess", call_count: 2, get_std_handle_rva: 0x2080, stdout_payload_rva: 0x2120, write_file_rva: 0x20a0, exit_process_rva: 0x20c0)
+        expect(wine_known_hello_execute_plan(data, reordered).error).to_equal("bridge-sequence-expected:GetStdHandle")
+        expect(wine_known_hello_execute_plan(data, count_mismatch).error).to_equal("bridge-sequence-count-mismatch")
