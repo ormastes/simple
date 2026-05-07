@@ -1,0 +1,41 @@
+use common.wine_process_session.{
+    wine_process_resolve_known_kernel32_module,
+    wine_process_session_plan,
+    wine_process_session_request_new
+}
+
+fn _full_gates() -> text:
+    "process=verified exec_env=verified vm=verified renderer=verified user32=verified " +
+        "gdi32=verified kernel32_core=verified host=verified posix=verified registry=verified " +
+        "pthread=verified dynload=verified audio=verified fonts=verified input=verified " +
+        "pe_loader=verified async=verified nt_bridge=verified"
+
+fn _hello_gates() -> text:
+    "process=verified exec_env=verified vm=verified host=verified posix=verified " +
+        "pthread=verified dynload=verified pe_loader=verified async=verified nt_bridge=verified"
+
+describe "Wine process session module loader":
+    it "resolves a bounded KERNEL32 module procedure for full Wine plans":
+        val plan = wine_process_session_plan(wine_process_session_request_new("game.exe", [], "C:\\Games"), _full_gates())
+        val result = wine_process_resolve_known_kernel32_module(plan, "kernel32.dll", "GetProcAddress")
+        expect result.ok == true
+        expect result.command == "game.exe"
+        expect result.module_name == "kernel32.dll"
+        expect result.proc_name == "GetProcAddress"
+        expect result.handle == 0x120
+        expect result.proc_address == 0x120000 + 3
+        expect result.operations == "GetModuleHandleW LoadLibraryW GetProcAddress FreeLibrary"
+        expect result.status == "module-resolved"
+
+    it "rejects unsupported modules and non-full-Wine sessions":
+        val plan = wine_process_session_plan(wine_process_session_request_new("game.exe", [], "C:\\Games"), _full_gates())
+        val missing = wine_process_resolve_known_kernel32_module(plan, "user32.dll", "MessageBoxW")
+        expect missing.ok == false
+        expect missing.error == "GetModuleHandleW:module-not-loaded"
+        expect missing.status == "rejected"
+
+        val hello = wine_process_session_plan(wine_process_session_request_new("hello.exe", [], "C:\\Games"), _hello_gates())
+        val blocked = wine_process_resolve_known_kernel32_module(hello, "kernel32.dll", "GetProcAddress")
+        expect blocked.ok == false
+        expect blocked.error == "unsupported-process-session"
+        expect blocked.status == "blocked"

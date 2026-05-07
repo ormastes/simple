@@ -589,6 +589,25 @@ Conservative boundary: this executes only the decoded known-console sequence.
 It is not arbitrary PE execution, arbitrary DLL loading, general x86_64
 instruction stepping, or game compatibility.
 
+## 2026-05-07 Bounded Process Module Resolution
+
+`src/lib/common/wine_process_session.spl` now exposes
+`wine_process_resolve_known_kernel32_module(...)`. It requires a full-Wine
+process-session plan, then routes the request through the existing KERNEL32
+module-loader bridge to return module handle, procedure address, ordered loader
+operations, and rejected/blocked status evidence.
+
+Fresh evidence:
+
+- `bin/simple test test/lib/common/wine_process_session_module_loader_spec.spl --mode=interpreter --clean`: covers successful KERNEL32 procedure resolution, unsupported module rejection, and controlled-session blocking.
+- `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_process_module_loader_spec.spl --mode=interpreter --clean`: includes REQ-020 process module-resolution coverage.
+- `bin/simple test test/lib/common/wine_kernel32_module_loader_spec.spl --mode=interpreter --clean`: keeps the lower KERNEL32 module-loader bridge covered.
+
+Conservative boundary: this is a curated KERNEL32 table and bounded loader
+sequence. It is not arbitrary DLL loading, host DLL mapping, Windows DLL search
+order, PE DLL relocation, reference-count-complete loader state, or broad
+Win32/NT behavior.
+
 ## Completion Decision
 
 The WM/VM prerequisite plan in `doc/03_plan/agent_tasks/simpleos_wine_wm_vm_execution_plan_2026-05-06.md` is implemented at the Wine-facing SimpleOS contract level. Modeled X11/VM gates are no longer accepted as production evidence, and the new production gates require SimpleOS window records, framebuffer presents, OS process/address-space identity, container namespace evidence, OS VMA image mapping, thread stack/guard setup, fault evidence, and no-host-code-jump policy.
