@@ -2,11 +2,13 @@ use common.wine_service_adapter.{
     wine_service_adapter_add,
     wine_service_adapter_feature_string,
     wine_service_adapter_gate,
+    wine_service_adapter_gate_with_service_result,
     wine_service_adapter_missing_services,
     wine_service_adapter_new,
     wine_service_adapter_ready,
     wine_service_adapter_required_services
 }
+use common.wine_advapi32_service.{wine_advapi32_execute_service_start}
 
 fn _base_host_features() -> text:
     "fd-table stdio pipes sockets poll-wait timers errno cwd-env-argv spawn fs-paths fs-attrs fs-locks " +
@@ -49,3 +51,21 @@ describe "Wine host service adapter":
     it "reaches the existing host gate when all service and base features are present":
         val adapter = wine_service_adapter_ready(_base_host_features())
         expect(wine_service_adapter_gate(adapter)).to_equal("ready")
+
+    it "requires bounded ADVAPI32 service-control evidence before service readiness":
+        val adapter = wine_service_adapter_ready(_base_host_features())
+        val service = wine_advapi32_execute_service_start(
+            ["OpenSCManagerW", "CreateServiceW", "OpenServiceW", "StartServiceW", "CloseServiceHandle"],
+            "SimpleOSSCM",
+            "WineEventLog"
+        )
+        expect(wine_service_adapter_gate_with_service_result(adapter, service)).to_equal("ready")
+
+    it "keeps service readiness blocked on failed service-control evidence":
+        val adapter = wine_service_adapter_ready(_base_host_features())
+        val service = wine_advapi32_execute_service_start(
+            ["OpenSCManagerW", "CreateServiceW", "OpenServiceW", "StartServiceW", "CloseServiceHandle"],
+            "SimpleOSSCM",
+            ""
+        )
+        expect(wine_service_adapter_gate_with_service_result(adapter, service)).to_equal("service-control-empty-service")

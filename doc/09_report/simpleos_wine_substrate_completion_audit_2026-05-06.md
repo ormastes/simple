@@ -23,6 +23,7 @@ Deliver the production-quality prerequisites for a controlled SimpleOS Wine path
 | Dynamic loading prerequisite | `src/lib/common/wine_dynload_adapter.spl` requires native loader APIs, search path/dependency/namespace coverage, relocation/import/TLS surfaces, structured loader errors, and bounded NTDLL `LdrLoadDll`/`LdrGetProcedureAddress`/`LdrUnloadDll` evidence before dynload readiness | Implemented prerequisite |
 | Thread/TLS/wait prerequisite | `src/lib/common/wine_thread_adapter.spl` requires thread/TLS/synchronization/wait/fault APIs and bounded NT `CreateThread`/`WaitForSingleObject` evidence before pthread readiness | Implemented prerequisite |
 | POSIX/file-I/O prerequisite | `src/lib/common/wine_posix_adapter.spl` requires fd/process/stdio/wait/timer/socket/path/errno APIs over `nogc_async_mut`, and bounded KERNEL32 `CreateFileW`/`ReadFile`/`GetFileType`/`CloseHandle` evidence before POSIX readiness | Implemented prerequisite |
+| Service-control prerequisite | `src/lib/common/wine_service_adapter.spl` requires complete IPC, handle, audio, font, crypto, HID, printing, and multimedia service declarations plus bounded ADVAPI32 `OpenSCManagerW`/`CreateServiceW`/`OpenServiceW`/`StartServiceW`/`CloseServiceHandle` evidence before service readiness | Implemented prerequisite |
 | WM/graphics production prerequisite | `src/lib/common/ui/wine_simpleos_window_bridge.spl` creates SimpleOS `/win` `WindowRecord` state and framebuffer present evidence; `src/lib/common/ui/wine_x11_adapter.spl` requires that bridge through `wine_x11_backend_production_ready` | Implemented prerequisite |
 | VM/container production prerequisite | `src/lib/common/wine_vm_adapter.spl` distinguishes modeled spaces from OS process/address-space/container-backed spaces; `src/lib/common/wine_image_vm_map.spl` maps validated PE images plus stack/guard before execution | Implemented prerequisite |
 | PE/COFF and CPU preparation | `src/lib/common/wine_pe_gate.spl`, `src/lib/common/pe_coff_header.spl`, `src/lib/common/wine_pe_loader_runtime.spl`, `src/lib/common/wine_image_map.spl`, `src/lib/common/wine_x86_64_decode.spl`, and `src/lib/common/wine_cpu_exec.spl` validate image layout, entry windows, imports, relocation/TLS readiness, decoded call targets, safe prologues, and dispatch evidence before controlled execution | Verified for controlled hello path |
@@ -131,6 +132,20 @@ Fresh evidence:
 - `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_substrate_spec.spl`: 14 examples, 0 failures.
 
 Conservative boundary: this is bounded file-I/O evidence for the Wine substrate. It does not provide complete POSIX semantics, sockets, poll/select, locking/sharing, async cancellation, or arbitrary filesystem behavior.
+
+## 2026-05-07 Service-Control Evidence Update
+
+The service adapter now requires bounded ADVAPI32 service-control evidence before full adapter readiness. `wine_service_adapter_gate_with_service_result` composes the existing IPC, handle, audio, font, crypto, HID, printing, multimedia, and host-feature gate with an ordered service manager open/create/open/start/close result, and keeps failed service-control paths blocked with structured errors.
+
+Fresh evidence:
+
+- `bin/simple check src/lib/common/wine_service_adapter.spl src/lib/common/wine_substrate.spl test/lib/common/wine_service_adapter_spec.spl test/lib/common/wine_substrate_spec.spl`: all checks passed.
+- `bin/simple test test/lib/common/wine_service_adapter_spec.spl`: 8 examples, 0 failures.
+- `bin/simple test test/lib/common/wine_advapi32_service_spec.spl`: 2 examples, 0 failures.
+- `bin/simple test test/lib/common/wine_substrate_spec.spl`: 16 examples, 0 failures.
+- `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_substrate_spec.spl`: 14 examples, 0 failures.
+
+Conservative boundary: this is bounded service-control evidence for the Wine substrate. It does not provide a real Windows service control manager, service process lifetime, service accounts, dependency ordering, recovery actions, or arbitrary service-host behavior.
 
 ## Completion Decision
 
