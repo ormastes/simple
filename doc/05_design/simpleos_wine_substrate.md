@@ -167,6 +167,10 @@ status for imports that are both loaded and bound.
 `wine_process_plan_import_thunk_patches(...)` consumes that loaded-and-bound
 result, so thunk patch evidence now carries both module-loader and import-thunk
 preconditions before CPU dispatch preflight can pass.
+`wine_import_thunk_binding_gate(...)` also requires
+`import-module-loaded`, `import-module-handle-valid`, and
+`import-module-loader-sequence`, so callers cannot bypass the process-session
+load-and-bind gate by supplying only the older thunk-binding tokens.
 
 `src/app/wine_process_session_plan/main.spl` exposes the controlled hello
 process-session handoff as a command. It prints command, substrate readiness,
