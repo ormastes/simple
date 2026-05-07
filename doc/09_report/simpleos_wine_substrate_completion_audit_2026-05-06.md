@@ -1328,12 +1328,14 @@ Fresh evidence:
 now requires PEB/TEB VM byte-write/readback evidence before the imported
 process-entrypoint startup rollback path can record non-executing SEH rollback
 evidence. Failed VM byte-write composition propagates as a hard handoff
-rejection before rollback is recorded.
+rejection before rollback is recorded. The prebuilt-handoff overload now clears
+mapped base, mapped size, entrypoint, and module counts on VM-write rejection so
+startup-fault handling cannot carry stale mapped-state evidence.
 
 Fresh evidence:
 
-- `bin/simple test test/lib/common/wine_process_entrypoint_startup_fault_spec.spl --mode=interpreter --clean`: covers VM-write/readback-gated imported entrypoint rollback and failure propagation.
-- `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_process_entrypoint_startup_fault_spec.spl --mode=interpreter --clean`: covers the SimpleOS system-level imported entrypoint rollback path requiring PEB/TEB VM write/readback evidence.
+- `bin/simple test test/lib/common/wine_process_entrypoint_startup_fault_spec.spl --mode=interpreter --clean`: covers VM-write/readback-gated imported entrypoint rollback, failure propagation, and stale mapped-state clearing.
+- `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_process_entrypoint_startup_fault_spec.spl --mode=interpreter --clean`: covers the SimpleOS system-level imported entrypoint rollback path requiring PEB/TEB VM write/readback evidence before carrying mapped state.
 
 Performance follow-up: the imported-entrypoint startup fault specs remain near
 the 60s interpreter watchdog because the import-binding fixture is expensive;

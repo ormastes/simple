@@ -395,7 +395,9 @@ rollback boundary. The accepted fault must target the imported entrypoint with
 blocked before rollback evidence is claimed.
 `wine_process_record_imported_entrypoint_startup_fault_with_peb_teb_vm_writes(...)`
 uses that VM-readback-gated handoff path before recording the same non-executing
-process-entrypoint rollback.
+process-entrypoint rollback; when a caller supplies a prebuilt handoff, failed
+VM write/readback evidence clears mapped-image, entrypoint, and module counts
+before returning the rollback-blocked result.
 `wine_seh_dispatch_fault(...)` models the first SEH frame-chain gate below that
 rollback boundary. It requires a thread-local active frame, a frame address
 inside the modeled stack, and a handler address inside the mapped image before
