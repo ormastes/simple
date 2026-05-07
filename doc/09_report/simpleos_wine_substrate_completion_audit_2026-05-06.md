@@ -67,6 +67,25 @@ Fresh evidence:
 
 Conservative boundary: this remains a controlled hello-path executor, not a general x86_64 CPU, arbitrary PE loader, or full Wine NT/Win32 dispatcher.
 
+## 2026-05-07 x86_64 Frame-Prologue Decode Update
+
+The bounded x86_64 decoder now recognizes frame-pointer prologue and epilogue
+forms (`push rbp`, `mov rbp,rsp`, `pop rbp`) as structured scan-only evidence.
+The known-console hello skeleton can be accepted after `push rbp; mov rbp,rsp;
+sub rsp,imm8` without treating other REX MOV encodings as supported.
+
+Fresh evidence:
+
+- `bin/simple check` on x86_64 decoder source/spec files: all checks passed.
+- `bin/simple test test/lib/common/wine_x86_64_decode_spec.spl --mode=interpreter --clean`: 16 examples, 0 failures.
+- `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_x86_64_frame_prologue_spec.spl --mode=interpreter --clean`: 1 example, 0 failures.
+- `bin/simple check` on generated matcher specs: all checks passed.
+- `bin/simple check src/lib`: 2706 files, all checks passed.
+
+Conservative boundary: this is still scan and planning evidence only. It does
+not add arbitrary x86_64 execution, broad REX MOV support, stack-frame mutation
+semantics, or host CPU execution.
+
 ## 2026-05-07 DLL Search-Order Modeling Update
 
 The KERNEL32 module-loader layer now models a basename-only DLL search order before any real module-load behavior can be widened. It records KnownDlls, application directory, Windows system directories, current directory, and PATH-derived candidate paths while explicitly blocking host filesystem reads, real DLL loading, DLL entrypoint execution, and arbitrary PE execution.
