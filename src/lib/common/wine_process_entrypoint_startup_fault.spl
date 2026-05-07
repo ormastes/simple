@@ -5,6 +5,7 @@ use common.wine_process_session.{
     WineProcessSessionPlan,
     wine_process_prepare_imported_entrypoint_handoff
 }
+use common.wine_seh_frame.{WineSehFrame, wine_seh_dispatch_fault}
 use common.wine_vm_adapter.{WineVmFault, wine_vm_fault_evidence}
 use common.wine_vm_gate.{wine_vm_fault_gate}
 
@@ -44,3 +45,17 @@ pub fn wine_process_record_imported_entrypoint_handoff_startup_fault(handoff: Wi
 
     val evidence = handoff.evidence + " " + wine_vm_fault_evidence(fault) + " process-entrypoint-startup-fault-recorded fault-policy-deliver-seh seh-dispatch-recorded imported-entrypoint-startup-rollback-recorded process-loader-lock-released import-loader-refcounts-released process-vma-rx-restored no-real-dll-loaded no-arbitrary-execution"
     _result(true, "", handoff.command, handoff.mapped_base, handoff.mapped_size, handoff.entry_address, fault.address, handoff.module_count, handoff.module_count, evidence, "imported-entrypoint-startup-fault-rollback-recorded")
+
+pub fn wine_process_record_imported_entrypoint_startup_fault_with_seh(plan: WineProcessSessionPlan, data: [u8], descriptor_limit: i64, symbol_limit: i64, fault: WineVmFault, frames: [WineSehFrame]) -> WineProcessEntrypointStartupFaultResult:
+    val handoff = wine_process_prepare_imported_entrypoint_handoff(plan, data, descriptor_limit, symbol_limit)
+    wine_process_record_imported_entrypoint_handoff_startup_fault_with_seh(handoff, fault, frames)
+
+pub fn wine_process_record_imported_entrypoint_handoff_startup_fault_with_seh(handoff: WineProcessImportedEntrypointHandoff, fault: WineVmFault, frames: [WineSehFrame]) -> WineProcessEntrypointStartupFaultResult:
+    val recorded = wine_process_record_imported_entrypoint_handoff_startup_fault(handoff, fault)
+    if not recorded.ok:
+        return recorded
+    val seh = wine_seh_dispatch_fault(fault, frames, handoff.mapped_base, handoff.mapped_size)
+    if not seh.ok:
+        return _result(false, "seh-dispatch:" + seh.error, handoff.command, handoff.mapped_base, handoff.mapped_size, handoff.entry_address, fault.address, handoff.module_count, 0, recorded.evidence + " " + seh.evidence + " process-entrypoint-seh-frame-blocked no-arbitrary-execution", seh.status)
+    val evidence = recorded.evidence + " " + seh.evidence + " process-entrypoint-seh-frame-validated seh-handler-handoff-ready no-seh-handler-executed no-arbitrary-execution"
+    _result(true, "", handoff.command, handoff.mapped_base, handoff.mapped_size, handoff.entry_address, fault.address, handoff.module_count, recorded.rollback_count, evidence, "imported-entrypoint-startup-fault-seh-ready")

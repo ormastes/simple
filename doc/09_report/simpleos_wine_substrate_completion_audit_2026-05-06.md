@@ -223,6 +223,19 @@ Fresh evidence:
 - `bin/simple check src/lib`: 2705 files, all checks passed.
 - Wine process entrypoint startup-fault changed-file stub scan: pass.
 
+## 2026-05-07 SEH Frame-Chain Dispatch Update
+
+The SEH frame-chain planner now requires an active thread-local frame, stack-contained frame address, mapped handler address, and `deliver-seh` fault policy before SEH dispatch handoff evidence is emitted. The process entrypoint startup-fault layer has a `with_seh` path that composes this frame-chain gate before reporting `seh-ready`, while still blocking handler execution and arbitrary PE dispatch.
+
+Fresh evidence:
+
+- `bin/simple check` on changed SEH frame-chain source/spec files plus generated matcher specs: all checks passed.
+- `bin/simple test test/lib/common/wine_seh_frame_spec.spl --mode=interpreter --clean`: 3 examples, 0 failures.
+- `bin/simple test test/lib/common/wine_process_entrypoint_startup_fault_spec.spl --mode=interpreter --clean`: 5 examples, 0 failures.
+- `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_seh_frame_spec.spl --mode=interpreter --clean`: 1 example, 0 failures.
+- `bin/simple check src/lib`: 2706 files, all checks passed.
+- SEH frame-chain changed-file `git diff --check` and stub scan: pass.
+
 ## 2026-05-07 Executable-Environment Matrix Update
 
 The top-level Wine substrate matrix now exposes the SimpleOS executable-environment gate directly through `wine_substrate_exec_env_gate` and the `exec_env` capability row. This makes VM/full-OS/container evidence a first-class Wine readiness prerequisite instead of an implicit side gate.

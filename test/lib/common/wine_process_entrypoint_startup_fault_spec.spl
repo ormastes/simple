@@ -1,6 +1,7 @@
 use common.wine_hello_fixture.{wine_known_hello_exe_fixture_bytes}
 use common.wine_process_entrypoint_startup_fault.{
     wine_process_record_imported_entrypoint_handoff_startup_fault,
+    wine_process_record_imported_entrypoint_handoff_startup_fault_with_seh,
     wine_process_record_imported_entrypoint_startup_fault
 }
 use common.wine_process_session.{
@@ -8,6 +9,7 @@ use common.wine_process_session.{
     wine_process_session_plan,
     wine_process_session_request_new
 }
+use common.wine_seh_frame.{wine_seh_frame_new}
 use common.wine_vm_adapter.{WineVmFault}
 
 fn _put_u32_le(data: [u8], offset: i64, value: i64) -> [u8]:
@@ -104,3 +106,21 @@ describe "Wine process imported entrypoint startup fault rollback":
         expect(result.error).to_equal("startup-fault-policy:terminate-process")
         expect(result.rollback_count).to_equal(0)
         expect(result.evidence).to_contain("process-entrypoint-startup-fault-blocked")
+
+    it "requires a mapped SEH frame handler before SEH-ready process rollback":
+        val fault = WineVmFault(process_id: 77, thread_id: 12, address: 0x402000, access: "execute", policy: "deliver-seh")
+        val frame = wine_seh_frame_new(77, 12, 0x701000, 0x403000, 0x700000, 0x710000)
+        val result = wine_process_record_imported_entrypoint_handoff_startup_fault_with_seh(_ready_handoff(), fault, [frame])
+        expect(result.ok).to_equal(true)
+        expect(result.status).to_equal("imported-entrypoint-startup-fault-seh-ready")
+        expect(result.evidence).to_contain("seh-frame-chain-present")
+        expect(result.evidence).to_contain("seh-handler-handoff-ready")
+        expect(result.evidence).to_contain("no-seh-handler-executed")
+
+    it "blocks SEH-ready process rollback when the handler is unmapped":
+        val fault = WineVmFault(process_id: 77, thread_id: 12, address: 0x402000, access: "execute", policy: "deliver-seh")
+        val frame = wine_seh_frame_new(77, 12, 0x701000, 0x500000, 0x700000, 0x710000)
+        val result = wine_process_record_imported_entrypoint_handoff_startup_fault_with_seh(_ready_handoff(), fault, [frame])
+        expect(result.ok).to_equal(false)
+        expect(result.error).to_equal("seh-dispatch:seh-handler-unmapped")
+        expect(result.evidence).to_contain("process-entrypoint-seh-frame-blocked")
