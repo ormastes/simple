@@ -36,6 +36,7 @@ use std.nogc_sync_mut.mimalloc.{
     MiPage,
     MiSegment,
     MiHeap,
+    MiOption,
     MimallocAllocator,
     mimalloc_init,
     mi_heap_new,
@@ -58,6 +59,15 @@ use std.nogc_sync_mut.mimalloc.{
     mi_rezalloc,
     mi_realloc_aligned,
     mi_rezalloc_aligned,
+    mi_stats_current,
+    mi_stats_reset,
+    mi_collect,
+    mi_heap_collect,
+    mi_version,
+    mi_option_is_enabled,
+    mi_option_enable,
+    mi_option_disable,
+    mi_option_set_enabled,
     mi_size_class_index,
     default_allocator,
 }
@@ -377,6 +387,47 @@ describe "MimallocAllocator":
         alloc.allocate(64, 8)
         val after = alloc.total_allocated()
         expect(after).to_be_greater_than(before)
+
+    it "stats snapshot tracks allocation and free counters":
+        val heap = mi_heap_new()
+        mimalloc_init(heap)
+        val ptr = mi_mallocn(2, 16).unwrap()
+        val after_alloc = mi_stats_current()
+        expect(after_alloc.allocated).to_equal(32)
+        expect(after_alloc.peak_allocated).to_equal(32)
+        expect(after_alloc.allocation_count).to_equal(1)
+        mi_free_size(ptr, 32)
+        val after_free = mi_stats_current()
+        expect(after_free.allocated).to_equal(0)
+        expect(after_free.free_count).to_equal(1)
+
+    it "stats reset keeps allocated bytes but clears event counters":
+        val heap = mi_heap_new()
+        mimalloc_init(heap)
+        mi_mallocn(2, 16)
+        mi_stats_reset()
+        val stats = mi_stats_current()
+        expect(stats.allocated).to_equal(32)
+        expect(stats.peak_allocated).to_equal(32)
+        expect(stats.allocation_count).to_equal(0)
+        expect(stats.free_count).to_equal(0)
+
+    it "collect hooks and version string expose compatibility surface":
+        val heap = mi_heap_new()
+        mimalloc_init(heap)
+        mi_collect(true)
+        mi_heap_collect(heap, false)
+        expect(mi_version()).to_equal("simple-mimalloc-compat")
+
+    it "option toggles round-trip modeled option state":
+        mimalloc_init(mi_heap_new())
+        expect(mi_option_is_enabled(MiOption.Verbose)).to_equal(false)
+        mi_option_enable(MiOption.Verbose)
+        expect(mi_option_is_enabled(MiOption.Verbose)).to_equal(true)
+        mi_option_disable(MiOption.Verbose)
+        expect(mi_option_is_enabled(MiOption.Verbose)).to_equal(false)
+        mi_option_set_enabled(MiOption.ShowStats, true)
+        expect(mi_option_is_enabled(MiOption.ShowStats)).to_equal(true)
 
 # ============================================================================
 # Test Group 5: Stress — 10k alloc/free cycle
