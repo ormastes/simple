@@ -19,7 +19,7 @@ Deliver the production-quality prerequisites for a controlled SimpleOS Wine path
 | --- | --- | --- |
 | Wine research | `doc/01_research/local/simpleos_wine_support.md`, `doc/01_research/domain/simpleos_wine_support.md`, `doc/09_report/simpleos_wine_support_research_2026-05-06.md` | Done |
 | Requirements/design/test artifacts | `doc/02_requirements/feature/simpleos_wine_substrate.md`, `doc/02_requirements/nfr/simpleos_wine_substrate.md`, `doc/04_architecture/simpleos_wine_substrate.md`, `doc/04_architecture/simpleos_wine_wm_vm.md`, `doc/05_design/simpleos_wine_substrate.md`, `doc/03_plan/sys_test/simpleos_wine_substrate.md`, `doc/06_spec/app/simpleos/feature/simpleos_wine_substrate_spec.spl` | Done |
-| SimpleOS executable environment gate | `src/lib/common/wine_simpleos_exec_env_gate.spl` requires QEMU VM, full OS boot, user process, VM space, filesystem, window system, network, separate pid/fs/ipc/net/capability container namespace facets, container rootfs evidence, and NVFS rootfs backend evidence; `src/lib/common/wine_substrate.spl` exposes this as the `exec_env` matrix row/gate | Implemented prerequisite |
+| SimpleOS executable environment gate | `src/lib/common/wine_simpleos_exec_env_gate.spl` requires QEMU VM, full OS boot, kernel syscall ABI, scheduler and VFS service evidence, user process, VM space, filesystem, window system, network, separate pid/fs/ipc/net/capability container namespace facets, container rootfs evidence, and NVFS rootfs backend evidence; `src/lib/common/wine_substrate.spl` exposes this as the `exec_env` matrix row/gate | Implemented prerequisite |
 | Dynamic loading prerequisite | `src/lib/common/wine_dynload_adapter.spl` requires native loader APIs, search path/dependency/namespace coverage, relocation/import/TLS surfaces, structured loader errors, and bounded NTDLL `LdrLoadDll`/`LdrGetProcedureAddress`/`LdrUnloadDll` evidence before dynload readiness | Implemented prerequisite |
 | Registry prerequisite | `src/lib/common/wine_advapi32_registry.spl` and `src/lib/common/wine_ntdll_registry.spl` provide bounded create/open/set/query/close registry evidence; `src/lib/common/wine_substrate.spl` exposes this as the `registry` matrix row/gate | Implemented prerequisite |
 | Thread/TLS/wait prerequisite | `src/lib/common/wine_thread_adapter.spl` requires thread/TLS/synchronization/wait/fault APIs and bounded NT `CreateThread`/`WaitForSingleObject` evidence before pthread readiness | Implemented prerequisite |
@@ -260,8 +260,9 @@ Fresh evidence:
 The SimpleOS executable-environment gate now requires explicit MDSOC+ ownership
 markers before VM/full-OS/container/X11 serial-log evidence can become readiness
 evidence. The gate requires an owning capsule, public port/facade, and resident
-ECS state owner marker in addition to QEMU, full OS boot, process, VM space,
-filesystem, window system, network, namespace facets, and NVFS rootfs evidence.
+ECS state owner marker in addition to QEMU, full OS boot, kernel service,
+process, VM space, filesystem, window system, network, namespace facets, and
+NVFS rootfs evidence.
 
 Fresh evidence:
 
@@ -272,6 +273,26 @@ Fresh evidence:
 - `bin/simple check src/lib`: 2706 files, all checks passed.
 - Executable-environment changed-file `git diff --check` and stub scan: pass.
 - Aggregate `simpleos_wine_substrate_spec` now completes under the watchdog after moving REQ-018 dispatch-plan coverage to the focused `simpleos_wine_known_console_dispatch_spec.spl`.
+
+## 2026-05-07 Executable-Environment OS Service Update
+
+The SimpleOS executable-environment gate now keeps `full-os-boot` separate from
+concrete kernel service evidence. Wine-facing readiness requires syscall ABI,
+scheduler, and VFS service markers before process, VM, filesystem, window,
+network, container, and MDSOC+ evidence can make the executable environment
+ready.
+
+Fresh evidence:
+
+- `bin/simple check` on executable-environment gate source/spec/system files: all checks passed.
+- `bin/simple test test/lib/common/wine_simpleos_exec_env_gate_spec.spl --mode=interpreter --clean`: 8 examples, 0 failures.
+- `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_exec_env_mdsoc_spec.spl --mode=interpreter --clean`: 1 example, 0 failures.
+- Generated matcher specs changed with the executable-environment specs and are included in this slice.
+- `bin/simple check src/lib`: 2706 files, all checks passed.
+
+Conservative boundary: this is readiness evidence for OS-backed execution
+services. It does not create a full container runtime, live VM enforcement path,
+or arbitrary Wine/PE execution environment.
 
 ## 2026-05-07 Wine Aggregate Watchdog Split
 

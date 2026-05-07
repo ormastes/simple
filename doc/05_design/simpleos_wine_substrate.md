@@ -62,6 +62,7 @@ Extend current VMM/process work with:
 - executable and non-executable page permissions;
 - guard pages and stack growth policy;
 - page fault records;
+- concrete syscall ABI, scheduler, and VFS service markers from the kernel;
 - container namespaces for pid, fs, ipc, net, and capabilities.
 
 The executable-environment serial-log gate also requires MDSOC+ evidence for
