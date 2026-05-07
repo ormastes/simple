@@ -53,6 +53,7 @@ CSS nesting support is also intentionally partial: bounded simple `&` parent-sel
 Structural pseudo support is still bounded: `:nth-child()` now covers numeric, `odd`, `even`, and common `an+b` arguments in the current style scanner/fallback renderer, but arbitrary formula parsing, `of <selector>` filters, generated content, comments, shadow DOM, and full Selectors Level 4 parity are not claimed.
 Attribute selector support now includes exact quoted values with spaces and bounded suffix matching through `[attr$=value]` alongside exact, prefix, substring, token, dash, and ASCII case-flag paths; full escaping, namespaces, non-ASCII folding, and selector specificity parity are still not claimed.
 Child combinator support now includes bounded fallback pixel matching for direct `body > div/.class/#id` rules with nested descendant rejection; arbitrary ancestor chains, sibling combinators, DOM style-block parity, and specificity parity are still not claimed.
+Adjacent sibling support now includes bounded fallback pixel matching for adjacent direct body-child `div` siblings with class/id-qualified previous and current selector forms and non-adjacent rejection; general sibling `~`, arbitrary parent sibling matching, non-`div` target rendering, DOM style-block parity, and specificity parity are still not claimed.
 
 ## Remaining Gaps
 
