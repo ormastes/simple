@@ -245,7 +245,8 @@ KERNEL32 thunk records, restores `rx` permissions, and rechecks the
 no-host-code-jump policy before dispatch evidence can pass.
 `wine_process_apply_known_kernel32_thunk_patches_in_vma_with_peb_teb_vm_writes(...)`
 requires the same VM-readback-gated TLS dispatch preflight before opening that
-modeled import-thunk VMA write window.
+modeled import-thunk VMA write window; TLS preflight or record-planning
+rejection returns no patched image, no mapped region, and no VMA thunk writes.
 `wine_process_plan_known_console_dispatch(...)` then decodes the bounded known
 console call sequence from that patched image. The sequence now models
 RIP-relative indirect calls through the patched thunk RVAs, so the decoded

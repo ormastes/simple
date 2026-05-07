@@ -1412,12 +1412,13 @@ Fresh evidence:
 now requires the PEB/TEB VM byte-write/readback-gated TLS dispatch path before
 opening the modeled KERNEL32 import-thunk VMA write window. Failed VM
 byte-write composition blocks VMA thunk mutation before copied image bytes are
-patched.
+patched. TLS preflight and record-planning rejection now return no patched
+image, no mapped region, and explicit no-VMA-write evidence.
 
 Fresh evidence:
 
-- `bin/simple test test/lib/common/wine_process_session_vma_thunk_write_spec.spl --mode=interpreter --clean`: covers VM-write/readback-gated VMA import thunk mutation and failure propagation.
-- `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_process_vma_thunk_write_spec.spl --mode=interpreter --clean`: covers the SimpleOS system-level VMA import thunk write path requiring PEB/TEB VM write/readback evidence.
+- `bin/simple test test/lib/common/wine_process_session_vma_thunk_write_spec.spl --mode=interpreter --clean`: covers VM-write/readback-gated VMA import thunk mutation plus no-patched-image rejection before VMA thunk writes.
+- `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_process_vma_thunk_write_spec.spl --mode=interpreter --clean`: covers the SimpleOS system-level VMA import thunk write path requiring PEB/TEB VM write/readback evidence and no-image rejection before VMA thunk writes.
 
 ## 2026-05-07 Mapped Image VM-Write Update
 

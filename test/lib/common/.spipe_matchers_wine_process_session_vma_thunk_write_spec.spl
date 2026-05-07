@@ -39,6 +39,13 @@ fn _startup_write_space() -> WineVmSpace:
     space = _commit_fixed(space, 0x7ffde000, 0x1000, "rw")
     _commit_fixed(space, 0x7ffdf000, 0x1000, "rw")
 
+fn _ready_vm_writes():
+    val init = wine_peb_teb_init_default()
+    val writes = wine_peb_teb_memory_write_gate(init, _startup_write_space())
+    val layout = wine_peb_teb_layout_write_plan(init, writes)
+    val bytes = wine_peb_teb_layout_byte_writes(layout)
+    wine_peb_teb_apply_layout_byte_writes(_startup_write_space(), bytes)
+
 describe "Wine process session VMA thunk writes":
     it "opens a bounded process VMA write window for known thunk patches":
         val plan = wine_process_session_plan(wine_process_session_request_new("game.exe", [], "C:\\Games"), _full_gates())
@@ -65,7 +72,13 @@ describe "Wine process session VMA thunk writes":
         val result = wine_process_apply_known_kernel32_thunk_patches_in_vma(plan, wine_known_hello_exe_fixture_bytes(), 0)
         expect result.ok == false
         expect result.error == "invalid-symbol-limit"
+        expect result.patched_image.len() == 0
+        expect result.mapped_base == 0
+        expect result.mapped_size == 0
         expect result.patched_count == 0
+        expect (result.evidence).contains("vma-thunk-patches-blocked")
+        expect (result.evidence).contains("no-vma-thunk-written")
+        expect (result.evidence).contains("no-arbitrary-execution")
         expect result.status == "blocked"
 
     it "opens VMA thunk writes only after PEB/TEB VM byte-write readback":
@@ -96,5 +109,28 @@ describe "Wine process session VMA thunk writes":
 
         expect result.ok == false
         expect result.error == "peb-teb-vm-write:vm-write:NtTib.StackBase:page-fault-unmapped"
+        expect result.patched_image.len() == 0
+        expect result.mapped_base == 0
+        expect result.mapped_size == 0
+        expect result.patched_count == 0
+        expect (result.evidence).contains("vma-thunk-patches-blocked")
+        expect (result.evidence).contains("no-vma-thunk-written")
+        expect (result.evidence).contains("no-arbitrary-execution")
         expect result.status == "rejected"
         expect (result.evidence).contains("full-image-handoff-blocked")
+
+    it "blocks VM-gated VMA thunk writes without patched image when record planning rejects":
+        val plan = wine_process_session_plan(wine_process_session_request_new("game.exe", [], "C:\\Games"), _full_gates())
+        val result = wine_process_apply_known_kernel32_thunk_patches_in_vma_with_peb_teb_vm_writes(plan, wine_known_hello_exe_fixture_bytes(), 0x400000, 0x400000, "native-module-open tls-callback", 0, _ready_vm_writes())
+
+        expect result.ok == false
+        expect result.error == "invalid-symbol-limit"
+        expect result.patched_image.len() == 0
+        expect result.mapped_base == 0
+        expect result.mapped_size == 0
+        expect result.patched_count == 0
+        expect (result.evidence).contains("peb-teb-vm-writes-ready")
+        expect (result.evidence).contains("vma-thunk-patches-blocked")
+        expect (result.evidence).contains("no-vma-thunk-written")
+        expect (result.evidence).contains("no-arbitrary-execution")
+        expect result.status == "blocked"
