@@ -236,6 +236,12 @@ directory, Windows system directories, current directory, and PATH-derived
 directories. It returns candidate paths and selected modeled source evidence
 without reading host files, mapping DLL images, running DLL entrypoints, or
 executing arbitrary PE code.
+`wine_dll_prepare_image_map_handoff(...)` composes that search plan with
+SimpleOS VM process-space map/unmap primitives while recording the modeled
+`NtCreateSection`/`NtMapViewOfSection`/`NtUnmapViewOfSection` lifecycle.
+It returns selected DLL path, mapped base, and mapped size, but still does not
+read host DLL bytes, keep a real DLL loaded, run DllMain, execute TLS callbacks,
+or dispatch arbitrary PE instructions.
 `wine_process_resolve_first_import_module(...)` composes the PE first-import
 inspection gate with that module resolver, so validated full-Wine process
 images can resolve a requested procedure against their first imported KERNEL32

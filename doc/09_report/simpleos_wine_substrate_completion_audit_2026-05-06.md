@@ -79,6 +79,18 @@ Fresh evidence:
 - `bin/simple check src/lib`: 2693 files, all checks passed.
 - Wine DLL-search changed-file stub scan: pass.
 
+## 2026-05-07 DLL Image-Map Handoff Update
+
+The DLL image-loader handoff now composes modeled DLL search order with SimpleOS VM process-space map/unmap evidence while recording the modeled `NtCreateSection`/`NtMapViewOfSection`/`NtUnmapViewOfSection` lifecycle. It records a selected DLL path, mapped base, mapped size, and section handle while keeping host DLL file reads, persistent real DLL loading, DllMain, TLS callbacks, and arbitrary PE execution blocked.
+
+Fresh evidence:
+
+- `bin/simple check` on changed DLL image-map source/spec files: all checks passed.
+- `bin/simple test test/lib/common/wine_dll_image_loader_spec.spl`: 3 examples, 0 failures.
+- `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_dll_image_map_spec.spl`: 1 example, 0 failures.
+- `bin/simple check src/lib`: 2694 files, all checks passed.
+- Wine DLL image-map changed-file stub scan: pass.
+
 ## 2026-05-07 Executable-Environment Matrix Update
 
 The top-level Wine substrate matrix now exposes the SimpleOS executable-environment gate directly through `wine_substrate_exec_env_gate` and the `exec_env` capability row. This makes VM/full-OS/container evidence a first-class Wine readiness prerequisite instead of an implicit side gate.

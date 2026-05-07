@@ -1,0 +1,38 @@
+"""Modeled Wine DLL image mapping handoff over SimpleOS VM primitives."""
+
+use common.wine_kernel32_module_loader.{wine_kernel32_plan_dll_search_order}
+use common.wine_vm_adapter.{wine_vm_map_executable_image, wine_vm_process_space_new, wine_vm_unmap}
+
+class WineDllImageMapHandoff:
+    ok: bool
+    error: text
+    dll_name: text
+    selected_path: text
+    mapped_base: i64
+    mapped_size: i64
+    section_handle: i64
+    evidence: text
+    status: text
+
+fn _handoff(ok: bool, error: text, dll_name: text, selected_path: text, mapped_base: i64, mapped_size: i64, section_handle: i64, evidence: text, status: text) -> WineDllImageMapHandoff:
+    WineDllImageMapHandoff(ok: ok, error: error, dll_name: dll_name, selected_path: selected_path, mapped_base: mapped_base, mapped_size: mapped_size, section_handle: section_handle, evidence: evidence, status: status)
+
+pub fn wine_dll_prepare_image_map_handoff(dll_name: text, application_directory: text, working_directory: text, path_dirs: [text], known_dlls: [text], image_size: i64, image_base: i64) -> WineDllImageMapHandoff:
+    val search = wine_kernel32_plan_dll_search_order(dll_name, application_directory, working_directory, path_dirs, known_dlls)
+    if not search.ok:
+        return _handoff(false, "dll-search:" + search.error, dll_name, "", 0, 0, 0, search.evidence, "rejected")
+    if image_size <= 0:
+        return _handoff(false, "invalid-image-size", search.dll_name, search.selected_path, 0, 0, 0, search.evidence, "rejected")
+    if image_base <= 0:
+        return _handoff(false, "invalid-image-base", search.dll_name, search.selected_path, 0, image_size, 0, search.evidence, "rejected")
+
+    val process_space = wine_vm_process_space_new(1, 1, "pid fs ipc net capability")
+    val mapped = wine_vm_map_executable_image(process_space, image_base, image_size)
+    if not mapped.ok:
+        return _handoff(false, "NtMapViewOfSection:" + mapped.state, search.dll_name, search.selected_path, 0, image_size, 0x400, search.evidence + " NtCreateSection", "blocked")
+    val unmapped = wine_vm_unmap(mapped.space, mapped.region.base)
+    if not unmapped.ok:
+        return _handoff(false, "NtUnmapViewOfSection:" + unmapped.state, search.dll_name, search.selected_path, mapped.region.base, image_size, 0x400, search.evidence + " NtCreateSection NtMapViewOfSection", "blocked")
+
+    val evidence = search.evidence + " NtCreateSection NtMapViewOfSection NtUnmapViewOfSection dll-image-map-handoff-ready os-process os-address-space os-vma dll-section-created dll-view-mapped dll-view-unmapped no-host-filesystem-access no-real-dll-loaded no-dll-entrypoint-executed no-tls-callback-executed no-arbitrary-execution"
+    _handoff(true, "", search.dll_name, search.selected_path, mapped.region.base, image_size, 0x400, evidence, "dll-image-map-handoff-ready")
