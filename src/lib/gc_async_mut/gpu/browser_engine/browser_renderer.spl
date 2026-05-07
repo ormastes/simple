@@ -646,6 +646,7 @@ fn br_render_simple_block_fallback_pixels(html: text, width: i32, height: i32) -
         val id_value = br_tag_attr_value(tag_content, "id")
         val id_style = br_style_block_rule_for_id(html, id_value)
         val tag_id_style = br_style_block_rule_for_tag_id(html, "div", id_value)
+        val body_child_style = br_style_block_rule_for_body_child_div(html, div_pos, class_value, id_value)
         val has_style = br_style_block_rule_for_has_descendant(html, "div", tag_end + 1)
         val not_style = br_style_block_rule_for_not_self(html, "div", tag_content)
         val attr_style = br_style_block_rule_for_attr_self(html, "div", tag_content)
@@ -654,7 +655,7 @@ fn br_render_simple_block_fallback_pixels(html: text, width: i32, height: i32) -
         val last_child_style = br_style_block_rule_for_last_child_self(html, "div", tag_content, div_count > 0 and div_index == div_count - 1)
         val only_child_style = br_style_block_rule_for_only_child_self(html, "div", tag_content, div_count == 1 and div_index == 0)
         val nth_child_style = br_style_block_rule_for_nth_child_self(html, "div", tag_content, div_index + 1)
-        val matched_style = br_merge_style_text(br_merge_style_text(br_merge_style_text(br_merge_style_text(br_merge_style_text(br_merge_style_text(br_merge_style_text(br_merge_style_text(br_merge_style_text(br_merge_style_text(br_merge_style_text(br_merge_style_text(br_merge_style_text(tag_style, class_style), compound_class_style), multi_class_style), id_style), tag_id_style), attr_style), empty_style), first_child_style), last_child_style), only_child_style), nth_child_style), has_style), not_style)
+        val matched_style = br_merge_style_text(br_merge_style_text(br_merge_style_text(br_merge_style_text(br_merge_style_text(br_merge_style_text(br_merge_style_text(br_merge_style_text(br_merge_style_text(br_merge_style_text(br_merge_style_text(br_merge_style_text(br_merge_style_text(br_merge_style_text(tag_style, class_style), compound_class_style), multi_class_style), id_style), tag_id_style), body_child_style), attr_style), empty_style), first_child_style), last_child_style), only_child_style), nth_child_style), has_style), not_style)
         val style = br_merge_style_text(matched_style, inline_style)
         val block_w = br_style_px_or_default(style, "width", width - margin * 2)
         val text_val = br_div_fallback_text(html, tag_end + 1)
@@ -766,6 +767,57 @@ fn br_style_block_rule_for_child(html: text, ancestor_selector: text, child_sele
     if ancestor.len() == 0 or child.len() == 0:
         return ""
     br_style_block_rule_for_selector(html, ancestor + " > " + child)
+
+fn br_style_block_rule_for_body_child_div(html: text, div_pos: i64, class_value: text, id_value: text) -> text:
+    if not br_is_direct_body_child(html, div_pos):
+        return ""
+    var out = br_style_block_rule_for_child(html, "body", "div")
+    val classes = browser_renderer_split_spaces(class_value)
+    var idx = 0
+    while idx < classes.len():
+        out = br_merge_style_text(out, br_style_block_rule_for_child(html, "body", "." + classes[idx]))
+        out = br_merge_style_text(out, br_style_block_rule_for_child(html, "body", "div." + classes[idx]))
+        idx = idx + 1
+    val trimmed_id = id_value.trim()
+    if trimmed_id.len() > 0:
+        out = br_merge_style_text(out, br_style_block_rule_for_child(html, "body", "#" + trimmed_id))
+        out = br_merge_style_text(out, br_style_block_rule_for_child(html, "body", "div#" + trimmed_id))
+    out
+
+fn br_is_direct_body_child(html: text, tag_pos: i64) -> bool:
+    val lower = html.lower()
+    val body_pos = br_find_str(lower, "<body", 0)
+    if body_pos >= 999999999:
+        return false
+    val body_open_end = browser_renderer_find_char(html, ">", body_pos)
+    if body_open_end >= 999999999 or tag_pos <= body_open_end:
+        return false
+    val body_close = br_find_str(lower, "</body", body_open_end + 1)
+    if body_close < 999999999 and tag_pos >= body_close:
+        return false
+    var depth = 0
+    var pos = body_open_end + 1
+    while pos < tag_pos:
+        val open = br_find_str(lower, "<", pos)
+        if open >= 999999999 or open >= tag_pos:
+            return depth == 0
+        val close = browser_renderer_find_char(html, ">", open)
+        if close >= 999999999 or close >= tag_pos:
+            return depth == 0
+        val content = lower.slice(open + 1, close).trim()
+        if content.starts_with("!") or content.starts_with("?"):
+            pos = close + 1
+            continue
+        if content.starts_with("/"):
+            if depth > 0:
+                depth = depth - 1
+            pos = close + 1
+            continue
+        val tag = br_tag_name_from_content(content)
+        if not browser_renderer_is_void_element(tag) and not content.ends_with("/"):
+            depth = depth + 1
+        pos = close + 1
+    depth == 0
 
 fn br_style_block_rule_for_has_descendant(html: text, subject_selector: text, content_start: i64) -> text:
     val subject = subject_selector.trim().lower()
