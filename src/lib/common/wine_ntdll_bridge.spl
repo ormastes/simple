@@ -11,7 +11,8 @@ use common.wine_nt_file_io.{
     wine_nt_file_delete_w,
     wine_nt_file_get_information_by_handle,
     wine_nt_file_read,
-    wine_nt_file_remove_directory_w
+    wine_nt_file_remove_directory_w,
+    wine_nt_file_write
 }
 use common.wine_nt_heap.{WineNtHeap, WineNtHeapResult, wine_nt_heap_alloc, wine_nt_heap_free}
 use common.wine_nt_virtual_memory.{
@@ -88,6 +89,20 @@ fn _ntdll_file_sequence_gate(symbols: [text]) -> text:
         return "ntdll-file-io-sequence-expected:NtClose"
     "ready"
 
+fn _ntdll_file_write_sequence_gate(symbols: [text]) -> text:
+    val dispatch_state = wine_nt_api_ntdll_file_io_dispatch_gate(symbols)
+    if dispatch_state != "ready":
+        return dispatch_state
+    if symbols.len() != 3:
+        return "ntdll-file-io-sequence-count-mismatch"
+    if symbols[0] != "NtCreateFile":
+        return "ntdll-file-io-sequence-expected:NtCreateFile"
+    if symbols[1] != "NtWriteFile":
+        return "ntdll-file-io-sequence-expected:NtWriteFile"
+    if symbols[2] != "NtClose":
+        return "ntdll-file-io-sequence-expected:NtClose"
+    "ready"
+
 fn _ntdll_file_information_sequence_gate(symbols: [text]) -> text:
     val dispatch_state = wine_nt_api_ntdll_file_io_dispatch_gate(symbols)
     if dispatch_state != "ready":
@@ -160,6 +175,7 @@ pub fn wine_ntdll_required_calls() -> [text]:
         "NtFreeVirtualMemory",
         "NtCreateFile",
         "NtReadFile",
+        "NtWriteFile",
         "NtClose",
         "NtQueryInformationFile",
         "NtSetInformationFile",
@@ -213,6 +229,9 @@ pub fn wine_ntdll_query_information_file(table: WineNtFileTable, handle: i64) ->
 pub fn wine_ntdll_read_file(table: WineNtFileTable, handle: i64, requested_len: i64) -> WineNtFileIoResult:
     wine_nt_file_read(table, handle, requested_len)
 
+pub fn wine_ntdll_write_file(table: WineNtFileTable, handle: i64, data: text) -> WineNtFileIoResult:
+    wine_nt_file_write(table, handle, data)
+
 pub fn wine_ntdll_close(table: WineNtFileTable, handle: i64) -> WineNtFileIoResult:
     wine_nt_file_close(table, handle)
 
@@ -234,6 +253,25 @@ pub fn wine_ntdll_execute_file_io(symbols: [text], table: WineNtFileTable, path:
         return _ntdll_file_failure("NtClose", closed, "NtCreateFile NtReadFile")
 
     _file_sequence_result(true, "", closed.table, opened.handle, read.data, read.bytes_read, "NtCreateFile NtReadFile NtClose")
+
+pub fn wine_ntdll_execute_file_write(symbols: [text], table: WineNtFileTable, path: text, data: text) -> WineNtdllFileIoSequenceResult:
+    val sequence_state = _ntdll_file_write_sequence_gate(symbols)
+    if sequence_state != "ready":
+        return _file_sequence_result(false, sequence_state, table, 0, "", 0, "")
+
+    val opened = wine_ntdll_create_file(table, path)
+    if not opened.ok:
+        return _ntdll_file_failure("NtCreateFile", opened, "")
+
+    val written = wine_ntdll_write_file(opened.table, opened.handle, data)
+    if not written.ok:
+        return _ntdll_file_failure("NtWriteFile", written, "NtCreateFile")
+
+    val closed = wine_ntdll_close(written.table, opened.handle)
+    if not closed.ok:
+        return _ntdll_file_failure("NtClose", closed, "NtCreateFile NtWriteFile")
+
+    _file_sequence_result(true, "", closed.table, opened.handle, written.data, written.bytes_read, "NtCreateFile NtWriteFile NtClose")
 
 pub fn wine_ntdll_execute_file_information(symbols: [text], table: WineNtFileTable, path: text) -> WineNtdllFileIoSequenceResult:
     val sequence_state = _ntdll_file_information_sequence_gate(symbols)

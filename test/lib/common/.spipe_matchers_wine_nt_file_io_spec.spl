@@ -15,7 +15,8 @@ use common.wine_nt_file_io.{
     wine_nt_file_set_pointer,
     wine_nt_file_table_add_directory,
     wine_nt_file_table_add_file,
-    wine_nt_file_table_new
+    wine_nt_file_table_new,
+    wine_nt_file_write
 }
 
 fn _all_adapter_apis() -> text:
@@ -64,6 +65,19 @@ describe "Wine NT file I/O bridge":
         expect first.data == "hello "
         expect second.data == "wine"
 
+    it "writes modeled file bytes at the current handle cursor":
+        val table = wine_nt_file_table_add_file(wine_nt_file_table_new(_all_adapter_apis(), _all_async_features()), "C:\\hello.txt", "hello wine")
+        val opened = wine_nt_file_create_w(table, "C:\\hello.txt")
+        val moved = wine_nt_file_set_pointer(opened.table, opened.handle, 6)
+        val written = wine_nt_file_write(moved.table, opened.handle, "Simple")
+        val reset = wine_nt_file_set_pointer(written.table, opened.handle, 0)
+        val read = wine_nt_file_read(reset.table, opened.handle, 12)
+
+        expect written.ok == true
+        expect written.state == "written"
+        expect written.bytes_read == 6
+        expect read.data == "hello Simple"
+
     it "closes handles and rejects reads after CloseHandle":
         val table = wine_nt_file_table_add_file(wine_nt_file_table_new(_all_adapter_apis(), _all_async_features()), "C:\\hello.txt", "hello")
         val opened = wine_nt_file_create_w(table, "C:\\hello.txt")
@@ -77,6 +91,7 @@ describe "Wine NT file I/O bridge":
         expect wine_nt_file_create_w(table, "").state == "invalid-path"
         expect wine_nt_file_create_w(table, "C:\\missing.txt").state == "file-not-found"
         expect wine_nt_file_read(table, 0x40, 1).state == "invalid-handle"
+        expect wine_nt_file_write(table, 0x40, "x").state == "invalid-handle"
         val with_file = wine_nt_file_table_add_file(table, "C:\\hello.txt", "hello")
         val opened = wine_nt_file_create_w(with_file, "C:\\hello.txt")
         expect wine_nt_file_read(opened.table, opened.handle, -1).state == "invalid-read-size"
