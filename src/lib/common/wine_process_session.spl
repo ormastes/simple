@@ -13,7 +13,18 @@ use common.pe_coff_header.{
     pe_section_table_gate,
     pe_tls_directory_gate
 }
-use common.wine_cpu_exec.{wine_cpu_execution_gate, wine_cpu_hello_execution_plan, wine_instruction_dispatch_gate}
+use common.wine_cpu_exec.{
+    wine_cpu_execution_gate,
+    wine_cpu_hello_execution_plan,
+    wine_entrypoint_mapping_gate,
+    wine_exit_trap_gate,
+    wine_instruction_dispatch_gate,
+    wine_no_native_jump_gate,
+    wine_stdout_handle_gate,
+    wine_thread_context_gate,
+    wine_user_stack_gate,
+    wine_win64_abi_gate
+}
 use common.wine_hello_exe.{wine_hello_exe_probe_manifest_evidence_vm}
 use common.wine_hello_dispatch.{wine_known_hello_execute_plan}
 use common.wine_hello_fixture.{
@@ -339,15 +350,39 @@ pub fn wine_process_bind_known_kernel32_imports(plan: WineProcessSessionPlan, da
     _wine_process_import_binding_result(true, "", plan.command, binding_plan.dll, binding_plan.call_sequence, binding_plan.binding_count, "imports-bound")
 
 pub fn wine_process_plan_import_thunk_patches(plan: WineProcessSessionPlan, data: [u8], symbol_limit: i64) -> WineProcessThunkPatchPlanResult:
-    val loaded = wine_process_load_and_bind_known_kernel32_imports(plan, data, symbol_limit)
-    if not loaded.ok:
-        return _wine_process_thunk_patch_plan_result(false, loaded.error, plan.command, loaded.dll_name, 0, "", loaded.status)
-    if loaded.binding_count <= 0:
-        return _wine_process_thunk_patch_plan_result(false, "missing-bindings", plan.command, loaded.dll_name, 0, "", "rejected")
-    val evidence = "import-module-loaded import-module-handle-valid import-module-loader-sequence import-thunks-bound import-thunk-table-valid import-thunk-symbols-resolved import-thunk-bindings-match import-thunk-iat-guarded"
-    _wine_process_thunk_patch_plan_result(true, "", plan.command, loaded.dll_name, loaded.binding_count, evidence, "thunk-patch-planned")
+    val records = wine_process_plan_known_kernel32_thunk_patch_records(plan, data, symbol_limit)
+    if not records.ok:
+        return _wine_process_thunk_patch_plan_result(false, records.error, plan.command, records.dll_name, 0, "", records.status)
+    if records.records.len() <= 0:
+        return _wine_process_thunk_patch_plan_result(false, "missing-patch-records", plan.command, records.dll_name, 0, "", "rejected")
+    val evidence = records.evidence + " import-thunks-bound import-thunk-table-valid import-thunk-symbols-resolved import-thunk-bindings-match import-thunk-iat-guarded"
+    _wine_process_thunk_patch_plan_result(true, "", plan.command, records.dll_name, records.records.len(), evidence, "thunk-patch-planned")
 
 pub fn wine_process_cpu_dispatch_preflight(plan: WineProcessSessionPlan, data: [u8], symbol_limit: i64, cpu_evidence: text) -> WineProcessCpuPreflightResult:
+    val thread_state = wine_thread_context_gate(cpu_evidence)
+    if thread_state != "ready":
+        return _wine_process_cpu_preflight_result(false, thread_state, plan.command, cpu_evidence, "blocked")
+    val stack_state = wine_user_stack_gate(cpu_evidence)
+    if stack_state != "ready":
+        return _wine_process_cpu_preflight_result(false, stack_state, plan.command, cpu_evidence, "blocked")
+    val entrypoint_state = wine_entrypoint_mapping_gate(cpu_evidence)
+    if entrypoint_state != "ready":
+        return _wine_process_cpu_preflight_result(false, entrypoint_state, plan.command, cpu_evidence, "blocked")
+    val stdout_state = wine_stdout_handle_gate(cpu_evidence)
+    if stdout_state != "ready":
+        return _wine_process_cpu_preflight_result(false, stdout_state, plan.command, cpu_evidence, "blocked")
+    val exit_state = wine_exit_trap_gate(cpu_evidence)
+    if exit_state != "ready":
+        return _wine_process_cpu_preflight_result(false, exit_state, plan.command, cpu_evidence, "blocked")
+    val native_jump_state = wine_no_native_jump_gate(cpu_evidence)
+    if native_jump_state != "ready":
+        return _wine_process_cpu_preflight_result(false, native_jump_state, plan.command, cpu_evidence, "blocked")
+    val abi_state = wine_win64_abi_gate(cpu_evidence)
+    if abi_state != "ready":
+        return _wine_process_cpu_preflight_result(false, abi_state, plan.command, cpu_evidence, "blocked")
+    val cpu_dispatch_state = wine_instruction_dispatch_gate(cpu_evidence)
+    if cpu_dispatch_state != "ready":
+        return _wine_process_cpu_preflight_result(false, cpu_dispatch_state, plan.command, cpu_evidence, "blocked")
     val patches = wine_process_plan_import_thunk_patches(plan, data, symbol_limit)
     if not patches.ok:
         return _wine_process_cpu_preflight_result(false, patches.error, plan.command, "", patches.status)
@@ -421,13 +456,17 @@ pub fn wine_process_resolve_first_import_module(plan: WineProcessSessionPlan, da
     wine_process_resolve_known_kernel32_module_ex(plan, imports.dll_name, proc_name, 0)
 
 pub fn wine_process_load_and_bind_known_kernel32_imports(plan: WineProcessSessionPlan, data: [u8], symbol_limit: i64) -> WineProcessLoadBindingResult:
-    val module = wine_process_resolve_first_import_module(plan, data, symbol_limit, "GetProcAddress")
+    val imports = wine_process_inspect_full_imports(plan, data, symbol_limit)
+    if not imports.ok:
+        return _wine_process_load_binding_result(false, imports.error, plan.command, imports.dll_name, 0, "", "", 0, imports.status)
+    val module = wine_process_resolve_known_kernel32_module_ex(plan, imports.dll_name, "GetProcAddress", 0)
     if not module.ok:
         return _wine_process_load_binding_result(false, module.error, plan.command, module.module_name, module.handle, module.operations, "", 0, module.status)
-    val bindings = wine_process_bind_known_kernel32_imports(plan, data, symbol_limit)
-    if not bindings.ok:
-        return _wine_process_load_binding_result(false, bindings.error, plan.command, bindings.dll_name, module.handle, module.operations, bindings.call_sequence, bindings.binding_count, bindings.status)
-    _wine_process_load_binding_result(true, "", plan.command, bindings.dll_name, module.handle, module.operations, bindings.call_sequence, bindings.binding_count, "imports-loaded-bound")
+    val bindings = pe_first_import_symbol_bindings(data, symbol_limit)
+    val binding_plan = wine_nt_import_hello_binding_plan(imports.dll_name, bindings)
+    if not binding_plan.ok:
+        return _wine_process_load_binding_result(false, binding_plan.error, plan.command, imports.dll_name, module.handle, module.operations, "", 0, "rejected")
+    _wine_process_load_binding_result(true, "", plan.command, binding_plan.dll, module.handle, module.operations, binding_plan.call_sequence, binding_plan.binding_count, "imports-loaded-bound")
 
 pub fn wine_process_plan_known_kernel32_thunk_patch_records(plan: WineProcessSessionPlan, data: [u8], symbol_limit: i64) -> WineProcessThunkPatchRecordPlan:
     val loaded = wine_process_load_and_bind_known_kernel32_imports(plan, data, symbol_limit)

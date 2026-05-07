@@ -605,10 +605,15 @@ curated zero-flags `LoadLibraryExW` loader table.
 `wine_process_load_and_bind_known_kernel32_imports(...)` requires that
 module-resolution evidence before accepting the known KERNEL32 import binding
 plan and returns the loader operations, module handle, call sequence, and
-binding count as one process-session result.
-`wine_process_plan_import_thunk_patches(...)` now consumes that loaded-and-bound
-result, so thunk patch evidence carries module-loader preconditions before CPU
-dispatch preflight can pass.
+binding count as one process-session result. It now reuses one bounded import
+inspection for module resolution and binding rather than inspecting the same
+first import table twice.
+`wine_process_plan_import_thunk_patches(...)` now consumes the explicit bounded
+record plan, so thunk patch evidence carries module-loader and patch-record
+preconditions before CPU dispatch preflight can pass.
+`wine_process_cpu_dispatch_preflight(...)` now rejects missing non-import CPU
+evidence before running the heavier import-record planning path, preserving the
+same blocked status while avoiding aggregate-spec watchdog timeouts.
 `wine_import_thunk_binding_gate(...)` now requires those module-loader evidence
 tokens too, preventing direct CPU preflight callers from reusing the older
 thunk-only evidence envelope.

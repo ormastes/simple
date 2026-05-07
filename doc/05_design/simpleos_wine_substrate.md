@@ -144,7 +144,10 @@ turns a supported binding plan into explicit guarded import-thunk evidence for
 the CPU execution gate, without mutating image bytes.
 `wine_process_cpu_dispatch_preflight(...)` composes that loader evidence with
 caller-provided CPU evidence and runs the CPU and instruction-dispatch gates
-before any future arbitrary process dispatch can be attempted.
+before any future arbitrary process dispatch can be attempted. It checks
+non-import CPU prerequisites before the heavier import-record planning path, so
+missing thread/stack/dispatch evidence is rejected without running the PE loader
+chain.
 `wine_process_plan_known_console_dispatch(...)` then decodes the bounded known
 console call sequence into a dispatch plan, still without running instructions.
 `wine_process_execute_known_console(...)` runs only that decoded known-console
@@ -163,18 +166,20 @@ future import-table-wide loader pass is added.
 `wine_process_load_and_bind_known_kernel32_imports(...)` then requires that
 module-resolution evidence before accepting the known KERNEL32
 `GetStdHandle`/`WriteFile`/`ExitProcess` binding plan, preserving a separate
-status for imports that are both loaded and bound.
-`wine_process_plan_import_thunk_patches(...)` consumes that loaded-and-bound
-result, so thunk patch evidence now carries both module-loader and import-thunk
-preconditions before CPU dispatch preflight can pass.
-`wine_import_thunk_binding_gate(...)` also requires
-`import-module-loaded`, `import-module-handle-valid`, and
-`import-module-loader-sequence`, so callers cannot bypass the process-session
-load-and-bind gate by supplying only the older thunk-binding tokens.
+status for imports that are both loaded and bound. It reuses one bounded import
+inspection for module resolution and binding so the process-session aggregate
+specs do not repeatedly traverse the same PE import table.
 `wine_process_plan_known_kernel32_thunk_patch_records(...)` expands the known
 KERNEL32 binding plan into bounded patch records for the three modeled import
 slots. It records symbol names, thunk indexes, and name RVAs, but still does not
 mutate mapped image bytes.
+`wine_process_plan_import_thunk_patches(...)` consumes those explicit records,
+so thunk patch evidence now carries module-loader, record-planning, and
+import-thunk preconditions before CPU dispatch preflight can pass.
+`wine_import_thunk_binding_gate(...)` also requires
+`import-module-loaded`, `import-module-handle-valid`, and
+`import-module-loader-sequence`, so callers cannot bypass the process-session
+load-and-bind gate by supplying only the older thunk-binding tokens.
 
 `src/app/wine_process_session_plan/main.spl` exposes the controlled hello
 process-session handoff as a command. It prints command, substrate readiness,
