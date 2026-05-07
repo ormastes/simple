@@ -12,9 +12,11 @@ use common.wine_ntdll_bridge.{
     wine_ntdll_execute_file_attributes,
     wine_ntdll_execute_file_information,
     wine_ntdll_execute_file_io,
+    wine_ntdll_execute_file_open,
     wine_ntdll_execute_file_write,
     wine_ntdll_execute_virtual_memory,
     wine_ntdll_free_virtual_memory,
+    wine_ntdll_open_file,
     wine_ntdll_protect_virtual_memory,
     wine_ntdll_query_attributes_file,
     wine_ntdll_query_information_file,
@@ -39,13 +41,14 @@ fn _all_async_features() -> text:
 describe "Wine ntdll and Rtl bridge":
     it "lists the modeled ntdll and Rtl calls":
         val calls = wine_ntdll_required_calls()
-        expect calls.len() == 12
+        expect calls.len() == 13
         expect calls[0] == "NtAllocateVirtualMemory"
-        expect calls[6] == "NtClose"
-        expect calls[7] == "NtQueryInformationFile"
-        expect calls[8] == "NtQueryAttributesFile"
-        expect calls[9] == "NtSetInformationFile"
-        expect calls[10] == "RtlAllocateHeap"
+        expect calls[4] == "NtOpenFile"
+        expect calls[7] == "NtClose"
+        expect calls[8] == "NtQueryInformationFile"
+        expect calls[9] == "NtQueryAttributesFile"
+        expect calls[10] == "NtSetInformationFile"
+        expect calls[11] == "RtlAllocateHeap"
 
     it "wraps ntdll virtual-memory calls over the VM bridge":
         val allocated = wine_ntdll_allocate_virtual_memory(wine_vm_space_new(), 0x500000, 0x1000, "rw")
@@ -123,6 +126,25 @@ describe "Wine ntdll and Rtl bridge":
         val missing = wine_ntdll_execute_file_io(["NtCreateFile", "NtReadFile", "NtClose"], table, "C:\\missing.txt", 5)
         expect missing.ok == false
         expect missing.error == "NtCreateFile:file-not-found"
+
+    it "wraps bounded ntdll open-existing file reads through NtOpenFile":
+        val table = wine_nt_file_table_add_file(wine_nt_file_table_new(_all_adapter_apis(), _all_async_features()), "C:\\hello.txt", "hello")
+        val opened = wine_ntdll_open_file(table, "C:\\hello.txt")
+        expect opened.ok == true
+        expect opened.handle == 0x40
+
+        val result = wine_ntdll_execute_file_open(["NtOpenFile", "NtReadFile", "NtClose"], table, "C:\\hello.txt", 5)
+        expect result.ok == true
+        expect result.data == "hello"
+        expect result.operations == "NtOpenFile NtReadFile NtClose"
+
+        val missing = wine_ntdll_execute_file_open(["NtOpenFile", "NtReadFile", "NtClose"], table, "C:\\missing.txt", 5)
+        expect missing.ok == false
+        expect missing.error == "NtOpenFile:file-not-found"
+
+        val wrong = wine_ntdll_execute_file_open(["NtCreateFile", "NtReadFile", "NtClose"], table, "C:\\hello.txt", 5)
+        expect wrong.ok == false
+        expect wrong.error == "ntdll-file-io-sequence-expected:NtOpenFile"
 
     it "wraps bounded ntdll file writes through NtWriteFile":
         val table = wine_nt_file_table_add_file(wine_nt_file_table_new(_all_adapter_apis(), _all_async_features()), "C:\\write.txt", "hello wine")
