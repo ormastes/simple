@@ -668,6 +668,13 @@ the MDSOC boundary between PE table parsing, process-session planning, and any
 future loader/binder layer. This completes REQ-030 as data-backed inventory
 only; it still performs no module resolution, DLL loading, IAT patching, or
 arbitrary execution.
+`wine_process_plan_import_dependencies(...)` now turns the descriptor DLL list
+into a bounded dependency preflight. It accepts the currently modeled substrate
+DLL families (`KERNEL32`, `USER32`, and `GDI32`), deduplicates module names, and
+rejects unsupported modules such as `ADVAPI32.dll` before any loader,
+resolver, binder, thunk patcher, or instruction-dispatch path runs. This
+completes REQ-031 as dependency classification only; it still produces no
+module handles, export addresses, or executable state.
 
 Fresh evidence:
 
@@ -692,6 +699,8 @@ Fresh evidence:
 - `bin/simple test test/lib/common/pe_coff_header_spec.spl --mode=interpreter --clean`: covers descriptor-qualified import thunk binding extraction.
 - `bin/simple test test/lib/common/wine_process_session_import_descriptor_table_spec.spl --mode=interpreter --clean`: covers REQ-030 process-session thunk inventory without DLL loading.
 - `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_process_import_descriptor_table_spec.spl --mode=interpreter --clean`: includes REQ-030 system coverage for descriptor-qualified thunk inventory.
+- `bin/simple test test/lib/common/wine_process_session_import_descriptor_table_spec.spl --mode=interpreter --clean`: covers REQ-031 supported dependency planning and unsupported dependency rejection.
+- `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_process_import_descriptor_table_spec.spl --mode=interpreter --clean`: includes REQ-031 system coverage for import dependency preflight without DLL loading.
 - `bin/simple test test/lib/common/wine_x86_64_decode_spec.spl --mode=interpreter --clean`: covers RIP-relative indirect call decoding and thunk-RVA target extraction.
 - `bin/simple test test/lib/common/wine_hello_exe_spec.spl --mode=interpreter --clean`: covers import-binding agreement against thunk RVAs.
 - `bin/simple test test/lib/common/wine_process_session_known_console_spec.spl --mode=interpreter --clean`: keeps known-console process execution on the patched-image path.

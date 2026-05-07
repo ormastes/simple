@@ -124,6 +124,18 @@ class WineProcessImportDescriptorThunkInventoryResult:
     evidence: text
     status: text
 
+class WineProcessImportDependencyPlanResult:
+    ok: bool
+    error: text
+    command: text
+    module_count: i64
+    supported_count: i64
+    unsupported_count: i64
+    modules: [text]
+    unsupported_modules: [text]
+    evidence: text
+    status: text
+
 class WineProcessImportBindingResult:
     ok: bool
     error: text
@@ -270,6 +282,9 @@ fn _wine_process_import_descriptor_table_result(ok: bool, error: text, command: 
 fn _wine_process_import_descriptor_thunk_inventory_result(ok: bool, error: text, command: text, binding_count: i64, dll_names: [text], symbols: [text], evidence: text, status: text) -> WineProcessImportDescriptorThunkInventoryResult:
     WineProcessImportDescriptorThunkInventoryResult(ok: ok, error: error, command: command, binding_count: binding_count, dll_names: dll_names, symbols: symbols, evidence: evidence, status: status)
 
+fn _wine_process_import_dependency_plan_result(ok: bool, error: text, command: text, module_count: i64, supported_count: i64, unsupported_count: i64, modules: [text], unsupported_modules: [text], evidence: text, status: text) -> WineProcessImportDependencyPlanResult:
+    WineProcessImportDependencyPlanResult(ok: ok, error: error, command: command, module_count: module_count, supported_count: supported_count, unsupported_count: unsupported_count, modules: modules, unsupported_modules: unsupported_modules, evidence: evidence, status: status)
+
 fn _wine_process_import_binding_result(ok: bool, error: text, command: text, dll_name: text, call_sequence: text, binding_count: i64, status: text) -> WineProcessImportBindingResult:
     WineProcessImportBindingResult(ok: ok, error: error, command: command, dll_name: dll_name, call_sequence: call_sequence, binding_count: binding_count, status: status)
 
@@ -325,6 +340,17 @@ fn _wine_process_kernel32_export_address(symbol: text) -> i64:
     if not proc.ok:
         return 0
     proc.proc_address
+
+fn _wine_process_import_dependency_supported(module_name: text) -> bool:
+    val normalized = module_name.lower()
+    normalized == "kernel32.dll" or normalized == "user32.dll" or normalized == "gdi32.dll"
+
+fn _wine_process_text_seen(items: [text], value: text) -> bool:
+    val normalized = value.lower()
+    for item in items:
+        if item.lower() == normalized:
+            return true
+    false
 
 fn _wine_process_patch_u64_le(data: [u8], offset: i64, value: i64) -> [u8]:
     var patched = data
@@ -551,6 +577,22 @@ pub fn wine_process_inventory_import_descriptor_thunks(plan: WineProcessSessionP
         symbols.push(binding.symbol)
     val evidence = table.evidence + " import-descriptor-thunk-bindings-data-backed import-descriptor-thunk-rvas-recorded import-descriptor-symbol-names-recorded"
     _wine_process_import_descriptor_thunk_inventory_result(true, "", plan.command, bindings.len(), dll_names, symbols, evidence, "import-descriptor-thunks-inventoried")
+
+pub fn wine_process_plan_import_dependencies(plan: WineProcessSessionPlan, data: [u8], descriptor_limit: i64, symbol_limit: i64) -> WineProcessImportDependencyPlanResult:
+    val table = wine_process_inspect_import_descriptor_table(plan, data, descriptor_limit, symbol_limit)
+    if not table.ok:
+        return _wine_process_import_dependency_plan_result(false, table.error, plan.command, 0, 0, 0, [], [], table.evidence, table.status)
+    var modules: [text] = []
+    var unsupported_modules: [text] = []
+    for dll_name in table.dll_names:
+        if not _wine_process_text_seen(modules, dll_name):
+            modules.push(dll_name)
+            if not _wine_process_import_dependency_supported(dll_name):
+                unsupported_modules.push(dll_name)
+    if unsupported_modules.len() > 0:
+        return _wine_process_import_dependency_plan_result(false, "unsupported-import-module:" + unsupported_modules[0], plan.command, modules.len(), modules.len() - unsupported_modules.len(), unsupported_modules.len(), modules, unsupported_modules, table.evidence + " import-dependency-modules-enumerated import-dependency-unsupported-blocked", "rejected")
+    val evidence = table.evidence + " import-dependency-modules-enumerated import-dependency-modules-supported import-dependency-plan-bounded no-dll-loaded no-import-bound"
+    _wine_process_import_dependency_plan_result(true, "", plan.command, modules.len(), modules.len(), 0, modules, [], evidence, "import-dependencies-planned")
 
 pub fn wine_process_bind_known_kernel32_imports(plan: WineProcessSessionPlan, data: [u8], symbol_limit: i64) -> WineProcessImportBindingResult:
     val imports = wine_process_inspect_full_imports(plan, data, symbol_limit)

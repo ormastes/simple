@@ -2,6 +2,7 @@ use common.wine_hello_fixture.{wine_known_hello_exe_fixture_bytes}
 use common.wine_process_session.{
     wine_process_inspect_import_descriptor_table,
     wine_process_inventory_import_descriptor_thunks,
+    wine_process_plan_import_dependencies,
     wine_process_session_plan,
     wine_process_session_request_new
 }
@@ -53,6 +54,12 @@ fn _known_hello_with_second_import_descriptor() -> [u8]:
     data = _put_import_name(data, 0x3f0, "MessageBoxW")
     data
 
+fn _known_hello_with_unsupported_import_descriptor() -> [u8]:
+    var data = _known_hello_with_second_import_descriptor()
+    data = _put_ascii_z(data, 0x3e0, "ADVAPI32.dll")
+    data = _put_import_name(data, 0x3f0, "RegOpenKeyW")
+    data
+
 describe "SimpleOS Wine import descriptor table":
     describe "REQ-029: bounded multi-DLL import descriptor inspection":
         it "should inspect multiple full-Wine import descriptors before arbitrary execution":
@@ -80,3 +87,24 @@ describe "SimpleOS Wine import descriptor table":
             expect (result.evidence).contains("import-descriptor-thunk-bindings-data-backed")
             expect (result.evidence).contains("import-descriptor-symbol-names-recorded")
             expect result.status == "import-descriptor-thunks-inventoried"
+
+        it "should plan supported import dependencies without loading DLLs":
+            val plan = wine_process_session_plan(wine_process_session_request_new("game.exe", [], "C:\\Games"), _full_gates())
+            val result = wine_process_plan_import_dependencies(plan, _known_hello_with_second_import_descriptor(), 4, 8)
+            expect result.ok == true
+            expect result.module_count == 2
+            expect result.supported_count == 2
+            expect result.modules[0] == "KERNEL32.dll"
+            expect result.modules[1] == "USER32.dll"
+            expect (result.evidence).contains("import-dependency-plan-bounded")
+            expect (result.evidence).contains("no-dll-loaded")
+            expect result.status == "import-dependencies-planned"
+
+        it "should reject unsupported import dependencies before loading DLLs":
+            val plan = wine_process_session_plan(wine_process_session_request_new("game.exe", [], "C:\\Games"), _full_gates())
+            val result = wine_process_plan_import_dependencies(plan, _known_hello_with_unsupported_import_descriptor(), 4, 8)
+            expect result.ok == false
+            expect result.error == "unsupported-import-module:ADVAPI32.dll"
+            expect result.unsupported_modules[0] == "ADVAPI32.dll"
+            expect (result.evidence).contains("import-dependency-unsupported-blocked")
+            expect result.status == "rejected"
