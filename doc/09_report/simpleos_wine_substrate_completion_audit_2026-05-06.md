@@ -33,6 +33,7 @@ Deliver the production-quality prerequisites for a controlled SimpleOS Wine path
 | Known non-GUI `hello.exe` command | `src/app/wine_hello/main.spl` prints `Hello from SimpleOS Wine` through OS-backed VM image mapping, composed manifest, PE validation, import binding, CPU plan, NT bridge, and decoded stdout payload path | Verified |
 | Controlled GUI hello milestone | `src/lib/common/wine_gui_hello.spl` and `src/app/wine_gui_hello/main.spl` require the VM-backed PE hello path, then bind Wine-facing X11 state to SimpleOS `/win` framebuffer evidence before reporting window title/text/checksum | Verified |
 | Unsupported programs stay blocked | Tests cover malformed PE, missing gates, unsupported imports, import/CPU target mismatch, missing stdout payload, missing decoder/dispatch evidence, reordered/missing/extra bridge calls, and unsupported/truncated x86_64 instructions | Verified for listed blockers |
+| Full Wine readiness boundary | `src/lib/common/wine_substrate.spl` exposes `wine_substrate_full_wine_gate`, which requires every tracked substrate row and remains separate from the controlled `hello.exe` gate | Implemented boundary |
 | Stub scan | Wine-scope source/test scan for stub markers returned no matches | Done |
 
 ## Verification Evidence
@@ -203,6 +204,18 @@ Fresh evidence:
 - `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_substrate_spec.spl`: 14 examples, 0 failures.
 
 Conservative boundary: this is bounded USER32/GDI32 bridge evidence for controlled GUI probes. It does not provide a full USER32 window manager, complete message pump, menus/dialogs/controls, GDI object lifetime, region/clipping semantics, printer DCs, or arbitrary GUI application compatibility.
+
+## 2026-05-07 Full Wine Gate Boundary
+
+The substrate now has a separate `wine_substrate_full_wine_gate` in addition to `wine_substrate_hello_exe_gate`. The full gate requires every tracked Wine substrate row: process, executable environment, VM, renderer, USER32, GDI32, host, POSIX, registry, pthread, dynamic loading, audio, fonts, input, PE loader, async, and NT bridge. This keeps the controlled hello milestone from being used as proof of full Wine readiness.
+
+Fresh evidence:
+
+- `bin/simple check src/lib/common/wine_substrate.spl test/lib/common/wine_substrate_spec.spl doc/06_spec/app/simpleos/feature/simpleos_wine_substrate_spec.spl`: all checks passed.
+- `bin/simple test test/lib/common/wine_substrate_spec.spl`: 18 examples, 0 failures.
+- `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_substrate_spec.spl`: 16 examples, 0 failures.
+
+Conservative boundary: this is a readiness classifier, not the missing implementations themselves. It makes incomplete full-Wine readiness explicit until every tracked row has concrete evidence.
 
 ## Completion Decision
 
