@@ -180,6 +180,12 @@ any arbitrary process execution boundary. It returns relocation and TLS runtime
 evidence while preserving the no-host-code-jump and no-arbitrary-execution
 boundary; it does not mutate VM relocation targets, dispatch TLS callbacks,
 load real DLLs, or transfer control to PE code.
+`wine_process_apply_loader_relocations_in_vma(...)` then opens a modeled
+process VMA write window for the validated image, applies the bounded DIR64
+relocation target in the copied image bytes, restores `rx`, and rechecks the
+no-host-code-jump policy. This is loader-owned relocation mutation evidence for
+the process image, but it still does not dispatch TLS callbacks, load real DLLs,
+or execute arbitrary PE instructions.
 `wine_process_bind_known_kernel32_imports(...)`
 then plans the currently supported KERNEL32 console binding sequence and
 rejects unsupported or incomplete import sets; it still does not patch thunks or

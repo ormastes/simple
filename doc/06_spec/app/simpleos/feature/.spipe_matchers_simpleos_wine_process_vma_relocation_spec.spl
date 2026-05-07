@@ -1,0 +1,68 @@
+use common.pe_coff_header.{pe_rva_to_file_offset}
+use common.wine_hello_fixture.{wine_known_hello_exe_fixture_bytes}
+use common.wine_process_session.{
+    wine_process_apply_loader_relocations_in_vma,
+    wine_process_session_plan,
+    wine_process_session_request_new
+}
+
+fn _put_u16_le(data: [u8], offset: i64, value: i64) -> [u8]:
+    data[offset] = (value & 0xff) as u8
+    data[offset + 1] = ((value >> 8) & 0xff) as u8
+    data
+
+fn _put_u32_le(data: [u8], offset: i64, value: i64) -> [u8]:
+    data[offset] = (value & 0xff) as u8
+    data[offset + 1] = ((value >> 8) & 0xff) as u8
+    data[offset + 2] = ((value >> 16) & 0xff) as u8
+    data[offset + 3] = ((value >> 24) & 0xff) as u8
+    data
+
+fn _put_u64_le(data: [u8], offset: i64, value: i64) -> [u8]:
+    var remaining = value
+    var i = 0
+    while i < 8:
+        data[offset + i] = remaining % 256
+        remaining = remaining / 256
+        i = i + 1
+    data
+
+fn _read_u64_le(data: [u8], offset: i64) -> i64:
+    var value = 0
+    var shift = 0
+    var i = 0
+    while i < 8:
+        value = value | ((data[offset + i] as i64) << shift)
+        shift = shift + 8
+        i = i + 1
+    value
+
+fn _full_gates() -> text:
+    "process=verified exec_env=verified vm=verified renderer=verified user32=verified " +
+        "gdi32=verified kernel32_core=verified host=verified posix=verified registry=verified " +
+        "pthread=verified dynload=verified audio=verified fonts=verified input=verified " +
+        "pe_loader=verified async=verified nt_bridge=verified"
+
+fn _known_hello_with_dir64_relocation() -> [u8]:
+    var data = wine_known_hello_exe_fixture_bytes()
+    data = _put_u32_le(data, 0x98 + 0x70 + 44, 0x0c)
+    data = _put_u32_le(data, 0x364, 0x0c)
+    data = _put_u16_le(data, 0x368, 0xa018)
+    data = _put_u64_le(data, pe_rva_to_file_offset(data, 0x2018), 0x402018)
+    data
+
+describe "SimpleOS Wine VMA relocation application":
+    describe "REQ-036: loader-owned relocation mutation through process VMA":
+        it "should apply a bounded relocation in the mapped process image without executing PE code":
+            val plan = wine_process_session_plan(wine_process_session_request_new("game.exe", [], "C:\\Games"), _full_gates())
+            val data = _known_hello_with_dir64_relocation()
+            val target_offset = pe_rva_to_file_offset(data, 0x2018)
+            val result = wine_process_apply_loader_relocations_in_vma(plan, data, 0x400000, 0x500000, "native-module-open tls-callback")
+            expect result.ok == true
+            expect result.relocation_count == 1
+            expect result.target_rva == 0x2018
+            expect _read_u64_le(result.patched_image, target_offset) == 0x502018
+            expect (result.evidence).contains("loader-relocations-vma-applied")
+            expect (result.evidence).contains("process-vma-rx-restored")
+            expect (result.evidence).contains("no-arbitrary-execution")
+            expect result.status == "loader-relocations-vma-applied"

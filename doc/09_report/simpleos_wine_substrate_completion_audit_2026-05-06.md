@@ -703,6 +703,12 @@ VM handoff with relocation and TLS callback runtime preflight evidence before
 any arbitrary process execution boundary. This completes REQ-035 as loader
 runtime preflight only; it still performs no VM relocation mutation, no TLS
 callback dispatch, no real DLL loading, and no arbitrary PE execution.
+`wine_process_apply_loader_relocations_in_vma(...)` now applies the bounded
+DIR64 relocation target through a modeled process VMA write window, restores
+`rx`, and preserves no-host-code-jump evidence. This completes REQ-036 as
+loader-owned relocation mutation for the copied process image only; it still
+performs no TLS callback dispatch, no real DLL loading, no import-table-wide
+execution handoff, and no arbitrary PE execution.
 
 Fresh evidence:
 
@@ -737,6 +743,8 @@ Fresh evidence:
 - `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_process_import_vma_patch_spec.spl --mode=interpreter --clean`: includes REQ-034 system coverage for the bounded process VMA write window.
 - `bin/simple test test/lib/common/wine_process_session_loader_runtime_spec.spl --mode=interpreter --clean`: covers REQ-035 full-image loader runtime preflight and TLS support rejection.
 - `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_process_loader_runtime_spec.spl --mode=interpreter --clean`: includes REQ-035 system coverage for composed image handoff, relocation, and TLS runtime evidence.
+- `bin/simple test test/lib/common/wine_process_session_vma_relocation_spec.spl --mode=interpreter --clean`: covers REQ-036 bounded DIR64 relocation mutation through a process VMA write window.
+- `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_process_vma_relocation_spec.spl --mode=interpreter --clean`: includes REQ-036 system coverage for loader-owned process-image relocation mutation without PE execution.
 - `bin/simple test test/lib/common/wine_x86_64_decode_spec.spl --mode=interpreter --clean`: covers RIP-relative indirect call decoding and thunk-RVA target extraction.
 - `bin/simple test test/lib/common/wine_hello_exe_spec.spl --mode=interpreter --clean`: covers import-binding agreement against thunk RVAs.
 - `bin/simple test test/lib/common/wine_process_session_known_console_spec.spl --mode=interpreter --clean`: keeps known-console process execution on the patched-image path.
