@@ -5,6 +5,8 @@ use common.wine_substrate.{
     wine_substrate_capability_state_from_gates,
     wine_substrate_verify_capability,
     wine_substrate_check_process_evidence,
+    wine_substrate_exec_env_gate,
+    wine_substrate_exec_env_gate_from_serial_log,
     wine_substrate_vm_gate,
     wine_substrate_renderer_gate,
     wine_substrate_hello_exe_gate,
@@ -17,6 +19,7 @@ describe "Wine substrate readiness gates":
     describe "capability state":
         it "reports completed research without claiming platform readiness":
             expect wine_substrate_capability_state("research") == "verified"
+            expect wine_substrate_capability_state("exec_env") == "partial"
             expect wine_substrate_capability_state("pthread") == "missing"
             expect wine_substrate_capability_state("dynload") == "missing"
             expect wine_substrate_capability_state("audio") == "missing"
@@ -35,6 +38,9 @@ describe "Wine substrate readiness gates":
             expect row.state == "verified"
             expect row.implementation_path == "src/lib/common/wine_nt_bridge.spl"
             expect row.evidence_command == "bin/simple test test/lib/common/wine_nt_bridge_spec.spl --mode=interpreter --clean"
+            val exec_env = wine_substrate_capability_row("exec_env", gates)
+            expect exec_env.state == "verified"
+            expect exec_env.evidence_command == "bin/simple test test/lib/common/wine_simpleos_exec_env_gate_spec.spl --mode=interpreter --clean"
 
         it "lists explicit matrix rows for modeled Wine preconditions":
             val matrix = wine_substrate_capability_matrix("process=verified exec_env=verified vm=verified renderer=verified host=verified posix=verified pthread=verified dynload=verified pe_loader=verified async=verified nt_bridge=verified")
@@ -67,6 +73,21 @@ describe "Wine substrate readiness gates":
             expect wine_substrate_check_process_evidence(log) == "insufficient-evidence"
 
     describe "VM and renderer gates":
+        it "reports full-OS executable environment gaps before Wine readiness":
+            val partial = "simpleos-qemu-vm simpleos-full-os-boot simpleos-user-process"
+            expect wine_substrate_exec_env_gate(partial) == "missing-simpleos-vmspace"
+            val serial_log = "QEMU x86_64 desktop lane\n" +
+                "[phase-3-mount] fat32 ok\n" +
+                "[vfs] mounted fat32 device=nvme0 volume=simpleos\n" +
+                "[fs-exec] spawn:image path=/sys/apps/wine_hello entry=0 segments=1 stub_bytes=128\n" +
+                "[desktop-e2e] process-backed:ok app=wine_hello pid=42\n" +
+                "[desktop-e2e] wm:ok pid=42 wid=1001\n" +
+                "[desktop-e2e] network-smoke:bounded ok packets=1\n" +
+                "[desktop-e2e] container-namespace:ok pid fs ipc net capability\n" +
+                "[desktop-e2e] container-rootfs:ok rootfs=/containers/wine rootfs_backend=nvfs\n" +
+                "TEST PASSED"
+            expect wine_substrate_exec_env_gate_from_serial_log(serial_log) == "ready"
+
         it "reports the first missing VM requirement":
             expect wine_substrate_vm_gate("reserve commit unmap fixed-map") == "missing-mprotect"
 

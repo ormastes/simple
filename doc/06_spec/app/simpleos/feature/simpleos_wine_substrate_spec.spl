@@ -4,6 +4,8 @@ use common.wine_substrate.{
     wine_substrate_capability_state,
     wine_substrate_verify_capability,
     wine_substrate_check_process_evidence,
+    wine_substrate_exec_env_gate,
+    wine_substrate_exec_env_gate_from_serial_log,
     wine_substrate_vm_gate,
     wine_substrate_renderer_gate,
     wine_substrate_hello_exe_gate,
@@ -40,12 +42,16 @@ describe "SimpleOS Wine Substrate":
             expect(row.state).to_equal("verified")
             expect(row.implementation_path).to_equal("src/lib/common/wine_nt_bridge.spl")
             expect(row.evidence_command).to_contain("wine_nt_bridge_spec")
+            val exec_env = wine_substrate_capability_row("exec_env", gates + " exec_env=verified")
+            expect(exec_env.state).to_equal("verified")
+            expect(exec_env.evidence_command).to_contain("wine_simpleos_exec_env_gate_spec")
             val matrix = wine_substrate_capability_matrix(gates)
-            expect(matrix.len()).to_equal(16)
-            expect(matrix[5].capability).to_equal("fs_semantics")
-            expect(matrix[6].capability).to_equal("ipc_wait")
-            expect(matrix[10].capability).to_equal("fonts")
-            expect(matrix[15].capability).to_equal("hello_exe")
+            expect(matrix.len()).to_equal(17)
+            expect(matrix[1].capability).to_equal("exec_env")
+            expect(matrix[6].capability).to_equal("fs_semantics")
+            expect(matrix[7].capability).to_equal("ipc_wait")
+            expect(matrix[11].capability).to_equal("fonts")
+            expect(matrix[16].capability).to_equal("hello_exe")
 
     describe "REQ-002: process-backed app baseline":
         it "should reject resident fallback as complete evidence":
@@ -59,6 +65,21 @@ describe "SimpleOS Wine Substrate":
             expect(wine_substrate_check_process_evidence(partial)).to_equal("insufficient-evidence")
 
     describe "REQ-005: VM and container support":
+        it "should require full SimpleOS executable-environment evidence":
+            val partial = "simpleos-qemu-vm simpleos-full-os-boot simpleos-user-process"
+            expect(wine_substrate_exec_env_gate(partial)).to_equal("missing-simpleos-vmspace")
+            val serial_log = "QEMU x86_64 desktop lane\n" +
+                "[phase-3-mount] fat32 ok\n" +
+                "[vfs] mounted fat32 device=nvme0 volume=simpleos\n" +
+                "[fs-exec] spawn:image path=/sys/apps/wine_hello entry=0 segments=1 stub_bytes=128\n" +
+                "[desktop-e2e] process-backed:ok app=wine_hello pid=42\n" +
+                "[desktop-e2e] wm:ok pid=42 wid=1001\n" +
+                "[desktop-e2e] network-smoke:bounded ok packets=1\n" +
+                "[desktop-e2e] container-namespace:ok pid fs ipc net capability\n" +
+                "[desktop-e2e] container-rootfs:ok rootfs=/containers/wine rootfs_backend=nvfs\n" +
+                "TEST PASSED"
+            expect(wine_substrate_exec_env_gate_from_serial_log(serial_log)).to_equal("ready")
+
         it "should require fixed mappings, guard pages, and permission changes":
             val result = wine_substrate_vm_gate("reserve commit unmap fixed-map")
             expect(result).to_equal("missing-mprotect")
@@ -67,7 +88,7 @@ describe "SimpleOS Wine Substrate":
         it "should require window lifecycle, expose, input, and clipboard coverage":
             val features = "display screen window map-unmap configure surface damage clip expose present input focus cursor"
             val result = wine_substrate_renderer_gate(features)
-            expect(result).to_equal("missing-clipboard")
+            expect(result).to_equal("missing-atom")
 
     describe "REQ-003 and REQ-004: host ABI, thread, and dynamic loading":
         it "should require the remaining Wine host substrate features":
@@ -88,15 +109,15 @@ describe "SimpleOS Wine Substrate":
 
     describe "REQ-008: non-GUI hello.exe milestone":
         it "should keep hello.exe blocked until substrate gates are verified":
-            val gate_state = wine_substrate_hello_exe_gate("process=verified vm=verified host=verified posix=verified pthread=verified dynload=verified pe_loader=verified")
+            val gate_state = wine_substrate_hello_exe_gate("process=verified exec_env=verified vm=verified host=verified posix=verified pthread=verified dynload=verified pe_loader=verified")
             expect(gate_state).to_equal("blocked")
 
         it "should keep hello.exe blocked until the modeled NT bridge is verified":
-            val gate_state = wine_substrate_hello_exe_gate("process=verified vm=verified host=verified posix=verified pthread=verified dynload=verified pe_loader=verified async=verified")
+            val gate_state = wine_substrate_hello_exe_gate("process=verified exec_env=verified vm=verified host=verified posix=verified pthread=verified dynload=verified pe_loader=verified async=verified")
             expect(gate_state).to_equal("blocked")
 
         it "should not execute malformed hello.exe bytes even when gates are declared verified":
-            val gates = "process=verified vm=verified host=verified posix=verified pthread=verified dynload=verified pe_loader=verified async=verified nt_bridge=verified"
+            val gates = "process=verified exec_env=verified vm=verified host=verified posix=verified pthread=verified dynload=verified pe_loader=verified async=verified nt_bridge=verified"
             val result = wine_hello_exe_probe(_zero_pe_bytes(0), gates)
             expect(result.status).to_equal("rejected")
             expect(result.error).to_equal("too-small")
