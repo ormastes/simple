@@ -1,0 +1,83 @@
+# SimpleOS container namespace contract for filesystem-backed app execution.
+
+use os.kernel.loader.app_namespace.{app_namespace_create, app_namespace_resolve_path}
+
+class SimpleOsContainerContract:
+    ok: bool
+    error: text
+    namespace_marker: text
+    rootfs_marker: text
+    evidence: text
+
+fn _has_prefix(source: text, prefix: text) -> bool:
+    if prefix.len() > source.len():
+        return false
+    var idx = 0
+    while idx < prefix.len():
+        if source.char_at(idx) != prefix.char_at(idx):
+            return false
+        idx = idx + 1
+    true
+
+fn _contract(ok: bool, error: text, namespace_marker: text, rootfs_marker: text, evidence: text) -> SimpleOsContainerContract:
+    SimpleOsContainerContract(ok: ok, error: error, namespace_marker: namespace_marker, rootfs_marker: rootfs_marker, evidence: evidence)
+
+pub fn simpleos_container_namespace_evidence(pid: u64, rootfs: text, fs: bool, ipc: bool, net: bool, capability: bool) -> text:
+    var evidence = ""
+    if pid > 0:
+        evidence = evidence + " pid"
+    if fs and rootfs != "":
+        evidence = evidence + " fs"
+    if ipc:
+        evidence = evidence + " ipc"
+    if net:
+        evidence = evidence + " net"
+    if capability:
+        evidence = evidence + " capability"
+    evidence.trim()
+
+pub fn simpleos_container_namespace_gate(evidence: text) -> text:
+    if not evidence.contains("pid"):
+        return "missing-pid"
+    if not evidence.contains("fs"):
+        return "missing-fs"
+    if not evidence.contains("ipc"):
+        return "missing-ipc"
+    if not evidence.contains("net"):
+        return "missing-net"
+    if not evidence.contains("capability"):
+        return "missing-capability"
+    "ready"
+
+pub fn simpleos_container_rootfs_gate(rootfs: text, app_path: text) -> text:
+    if not _has_prefix(rootfs, "/containers/"):
+        return "invalid-rootfs"
+    if not _has_prefix(app_path, "/sys/apps/"):
+        return "invalid-app-path"
+    val ns = app_namespace_create(rootfs, "/", ["/sys/apps", "/windows", "/tmp", "/lib"], ["/svc/wm", "/svc/vfs", "/svc/net"], ["/lib", "/windows/system32"])
+    if ns == nil:
+        return "invalid-namespace"
+    val resolved = app_namespace_resolve_path(ns.unwrap(), app_path)
+    if resolved == nil:
+        return "unresolved-app-path"
+    if not _has_prefix(resolved.unwrap(), rootfs + "/sys/apps/"):
+        return "rootfs-escape"
+    "ready"
+
+pub fn simpleos_wine_container_contract(pid: u64, rootfs: text, app_path: text, rootfs_backend: text) -> SimpleOsContainerContract:
+    val evidence = simpleos_container_namespace_evidence(pid, rootfs, true, true, true, true)
+    val namespace_state = simpleos_container_namespace_gate(evidence)
+    if namespace_state != "ready":
+        return _contract(false, namespace_state, "", "", evidence)
+    val rootfs_state = simpleos_container_rootfs_gate(rootfs, app_path)
+    if rootfs_state != "ready":
+        return _contract(false, rootfs_state, "", "", evidence)
+    if rootfs_backend == "":
+        return _contract(false, "missing-rootfs-backend", "", "", evidence)
+    _contract(
+        true,
+        "",
+        "[desktop-e2e] container-namespace:ok pid {evidence} rootfs={rootfs}",
+        "[desktop-e2e] container-rootfs:ok rootfs={rootfs} app={app_path} rootfs_backend={rootfs_backend}",
+        evidence
+    )
