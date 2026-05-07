@@ -319,6 +319,9 @@ requires TLS planning, a byte-mapped DLL entrypoint, and a no-host-code-jump
 check, while requests to actually execute DllMain remain hard-blocked. The
 PEB/TEB variant composes this handoff with the bounded loader-lock PEB/TEB/TLS
 startup gate before reporting DllMain handoff readiness.
+`wine_dll_prepare_file_view_dllmain_handoff_with_peb_teb_vm_writes(...)` now
+requires that retained-view DllMain handoff to pass the PEB/TEB VM
+byte-write/readback gate before the handoff can report readiness.
 `wine_dll_record_file_view_startup_fault(...)` composes that DllMain handoff
 with modeled VM fault evidence and records the loader-lock release, SEH
 dispatch, and startup rollback boundary. Only `deliver-seh` startup faults are
@@ -487,8 +490,8 @@ recorded after the write-gated DllMain handoff is ready.
 rollback path to the layout-gated DllMain handoff before recording the same
 non-executing SEH rollback evidence.
 `wine_dll_record_file_view_startup_fault_with_peb_teb_vm_writes(...)` further
-requires VM byte-write/readback evidence before rollback can be recorded for
-that retained DllMain handoff.
+uses the VM-readback-gated retained DllMain handoff before rollback can be
+recorded.
 `src/lib/common/wine_nt_heap.spl` models `HeapAlloc` and `HeapFree` with a
 deterministic process-heap handle and VM-reservation-backed block tracking.
 `src/lib/common/wine_ntdll_bridge.spl` maps the catalogued ntdll/Rtl forms onto
