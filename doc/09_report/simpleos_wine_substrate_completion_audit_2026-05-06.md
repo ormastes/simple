@@ -287,6 +287,26 @@ itself. It does not implement upstream Proton, Steam client integration, a
 Linux ABI, Vulkan driver support, DXVK, VKD3D-Proton, or arbitrary Windows game
 compatibility.
 
+## 2026-05-07 KERNEL32 File And Loader Evidence Expansion
+
+The `kernel32_core` substrate evidence row now includes all currently passing
+bounded KERNEL32 bridge specs, including file I/O, file metadata,
+file-management, thread wait, critical section, local/global memory, module
+loader, path, and process identity coverage.
+
+Fresh evidence:
+
+- `bin/simple check src/lib/common/wine_kernel32_file_management.spl src/lib/common/wine_kernel32_file_metadata.spl test/lib/common/wine_kernel32_file_management_spec.spl test/lib/common/wine_kernel32_file_metadata_spec.spl`: all checks passed.
+- `bin/simple test test/lib/common/wine_kernel32_file_management_spec.spl --mode=interpreter --clean`: 5 examples, 0 failures.
+- `bin/simple test test/lib/common/wine_kernel32_file_metadata_spec.spl --mode=interpreter --clean`: 4 examples, 0 failures.
+- Individual `bin/simple test` runs for every `test/lib/common/wine_kernel32_*_spec.spl`: all passing after the file-management and file-metadata helper fixes.
+- `bin/simple test test/lib/common/wine_substrate_spec.spl --mode=interpreter --clean`: 18 examples, 0 failures.
+
+Conservative boundary: this expands tracked bounded KERNEL32 startup evidence.
+It does not provide the full KERNEL32 export set, complete object lifetime,
+true Windows file sharing semantics, complete loader behavior, or arbitrary PE
+execution.
+
 ## Completion Decision
 
 The WM/VM prerequisite plan in `doc/03_plan/agent_tasks/simpleos_wine_wm_vm_execution_plan_2026-05-06.md` is implemented at the Wine-facing SimpleOS contract level. Modeled X11/VM gates are no longer accepted as production evidence, and the new production gates require SimpleOS window records, framebuffer presents, OS process/address-space identity, container namespace evidence, OS VMA image mapping, thread stack/guard setup, fault evidence, and no-host-code-jump policy.
