@@ -147,6 +147,8 @@ caller-provided CPU evidence and runs the CPU and instruction-dispatch gates
 before any future arbitrary process dispatch can be attempted.
 `wine_process_plan_known_console_dispatch(...)` then decodes the bounded known
 console call sequence into a dispatch plan, still without running instructions.
+`wine_process_execute_known_console(...)` runs only that decoded known-console
+plan through the existing modeled NT bridge and returns stdout plus exit code.
 
 `src/app/wine_process_session_plan/main.spl` exposes the controlled hello
 process-session handoff as a command. It prints command, substrate readiness,

@@ -571,6 +571,24 @@ Fresh evidence:
 Conservative boundary: this is a decoded dispatch plan only. It does not step
 instructions, call imported functions, or execute arbitrary PE images.
 
+## 2026-05-07 Bounded Known-Console Process Execution
+
+`src/lib/common/wine_process_session.spl` now exposes
+`wine_process_execute_known_console(...)`. It requires the full-Wine
+process-session gates, image validation, import inspection, KERNEL32 binding,
+guarded thunk evidence, CPU dispatch preflight, and bounded known-console
+dispatch plan before running the existing modeled NT bridge path.
+
+Fresh evidence:
+
+- `bin/simple test test/lib/common/wine_process_session_known_console_spec.spl --mode=interpreter --clean`: covers successful known-console process execution and missing-CPU-evidence rejection.
+- `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_known_console_execution_spec.spl --mode=interpreter --clean`: includes REQ-019 known-console process execution coverage.
+- `bin/simple test test/lib/common/wine_hello_dispatch_spec.spl --mode=interpreter --clean`: keeps the modeled NT bridge dispatch path covered.
+
+Conservative boundary: this executes only the decoded known-console sequence.
+It is not arbitrary PE execution, arbitrary DLL loading, general x86_64
+instruction stepping, or game compatibility.
+
 ## Completion Decision
 
 The WM/VM prerequisite plan in `doc/03_plan/agent_tasks/simpleos_wine_wm_vm_execution_plan_2026-05-06.md` is implemented at the Wine-facing SimpleOS contract level. Modeled X11/VM gates are no longer accepted as production evidence, and the new production gates require SimpleOS window records, framebuffer presents, OS process/address-space identity, container namespace evidence, OS VMA image mapping, thread stack/guard setup, fault evidence, and no-host-code-jump policy.
