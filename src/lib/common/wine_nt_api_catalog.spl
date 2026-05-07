@@ -18,6 +18,12 @@ fn _is_kernel32(dll: text) -> bool:
 fn _is_ntdll(dll: text) -> bool:
     _normalized_dll(dll) == "ntdll.dll"
 
+fn _is_user32(dll: text) -> bool:
+    _normalized_dll(dll) == "user32.dll"
+
+fn _is_gdi32(dll: text) -> bool:
+    _normalized_dll(dll) == "gdi32.dll"
+
 fn _contains_symbol(symbols: [text], required: text) -> bool:
     for symbol in symbols:
         if symbol == required:
@@ -49,6 +55,16 @@ fn _catalog_entry(dll: text, symbol: text) -> WineNtApiCatalogEntry:
             return _entry("ntdll.dll", symbol, "nt-file-io", "catalogued")
         if symbol == "RtlAllocateHeap" or symbol == "RtlFreeHeap":
             return _entry("ntdll.dll", symbol, "rtl-heap", "catalogued")
+    if _is_user32(dll):
+        if symbol == "MessageBoxW":
+            return _entry("user32.dll", symbol, "gui-dialog", "implemented")
+        if symbol == "CreateWindowExW" or symbol == "ShowWindow" or symbol == "UpdateWindow" or symbol == "DefWindowProcW":
+            return _entry("user32.dll", symbol, "window-lifecycle", "catalogued")
+        if symbol == "GetMessageW" or symbol == "TranslateMessage" or symbol == "DispatchMessageW" or symbol == "PeekMessageW":
+            return _entry("user32.dll", symbol, "message-loop", "catalogued")
+    if _is_gdi32(dll):
+        if symbol == "TextOutW" or symbol == "BitBlt" or symbol == "CreateCompatibleDC" or symbol == "DeleteDC":
+            return _entry("gdi32.dll", symbol, "gdi-drawing", "catalogued")
     _entry(_normalized_dll(dll), symbol, "unknown", "unsupported")
 
 pub fn wine_nt_api_implemented_symbols_for_hello() -> [text]:
@@ -80,7 +96,19 @@ pub fn wine_nt_api_catalogued_future_symbols() -> [text]:
         "NtReadFile",
         "NtClose",
         "RtlAllocateHeap",
-        "RtlFreeHeap"
+        "RtlFreeHeap",
+        "CreateWindowExW",
+        "ShowWindow",
+        "UpdateWindow",
+        "DefWindowProcW",
+        "GetMessageW",
+        "TranslateMessage",
+        "DispatchMessageW",
+        "PeekMessageW",
+        "TextOutW",
+        "BitBlt",
+        "CreateCompatibleDC",
+        "DeleteDC"
     ]
 
 pub fn wine_nt_api_modeled_precondition_symbols() -> [text]:
@@ -105,14 +133,35 @@ pub fn wine_nt_api_modeled_precondition_symbols() -> [text]:
         "NtReadFile",
         "NtClose",
         "RtlAllocateHeap",
-        "RtlFreeHeap"
+        "RtlFreeHeap",
+        "CreateWindowExW",
+        "ShowWindow",
+        "UpdateWindow",
+        "DefWindowProcW",
+        "GetMessageW",
+        "TranslateMessage",
+        "DispatchMessageW",
+        "PeekMessageW",
+        "TextOutW",
+        "BitBlt",
+        "CreateCompatibleDC",
+        "DeleteDC"
+    ]
+
+pub fn wine_nt_api_implemented_symbols_for_gui_hello() -> [text]:
+    [
+        "MessageBoxW"
     ]
 
 pub fn wine_nt_api_dll_gate(dll: text) -> text:
     if _is_kernel32(dll):
         return "ready"
+    if _is_user32(dll):
+        return "ready"
     if _is_ntdll(dll):
         return "catalogued-dll:ntdll.dll"
+    if _is_gdi32(dll):
+        return "catalogued-dll:gdi32.dll"
     "unsupported-dll:" + dll
 
 pub fn wine_nt_api_symbol_state(dll: text, symbol: text) -> WineNtApiCatalogEntry:
@@ -139,6 +188,30 @@ pub fn wine_nt_api_dispatch_gate(symbols: [text]) -> text:
             return "bridge-missing:" + required
     for symbol in symbols:
         val entry = wine_nt_api_symbol_state("kernel32.dll", symbol)
+        if entry.state != "implemented":
+            return "bridge-unsupported:" + symbol
+    "ready"
+
+pub fn wine_nt_api_gui_import_gate(dll: text, symbols: [text]) -> text:
+    if not _is_user32(dll):
+        return wine_nt_api_dll_gate(dll)
+    for required in wine_nt_api_implemented_symbols_for_gui_hello():
+        if not _contains_symbol(symbols, required):
+            return "missing-symbol:" + required
+    for symbol in symbols:
+        val entry = wine_nt_api_symbol_state(dll, symbol)
+        if entry.state == "unsupported":
+            return "unsupported-symbol:" + symbol
+        if entry.state == "catalogued":
+            return "catalogued-symbol:" + symbol
+    "ready"
+
+pub fn wine_nt_api_gui_dispatch_gate(symbols: [text]) -> text:
+    for required in wine_nt_api_implemented_symbols_for_gui_hello():
+        if not _contains_symbol(symbols, required):
+            return "bridge-missing:" + required
+    for symbol in symbols:
+        val entry = wine_nt_api_symbol_state("user32.dll", symbol)
         if entry.state != "implemented":
             return "bridge-unsupported:" + symbol
     "ready"

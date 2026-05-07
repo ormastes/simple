@@ -2,6 +2,7 @@
 
 use common.wine_nt_api_catalog.{
     wine_nt_api_dispatch_gate,
+    wine_nt_api_gui_dispatch_gate,
     wine_nt_api_modeled_precondition_symbols,
     wine_nt_api_symbol_state
 }
@@ -21,6 +22,14 @@ class WineNtCallResult:
     i64_value: i64
     text_value: text
 
+class WineNtGuiBridgeResult:
+    ok: bool
+    error: text
+    symbol: text
+    title: text
+    message: text
+    result_code: i64
+
 class WineNtPreconditionBridgeResult:
     ok: bool
     state: text
@@ -33,6 +42,9 @@ fn _bridge_result(ok: bool, error: text, stdout: text, stdout_handle: i64, bytes
 
 fn _call_result(ok: bool, error: text, symbol: text, i64_value: i64, text_value: text) -> WineNtCallResult:
     WineNtCallResult(ok: ok, error: error, symbol: symbol, i64_value: i64_value, text_value: text_value)
+
+fn _gui_result(ok: bool, error: text, symbol: text, title: text, message: text, result_code: i64) -> WineNtGuiBridgeResult:
+    WineNtGuiBridgeResult(ok: ok, error: error, symbol: symbol, title: title, message: message, result_code: result_code)
 
 fn _precondition_result(ok: bool, state: text, dll: text, symbol: text, category: text) -> WineNtPreconditionBridgeResult:
     WineNtPreconditionBridgeResult(ok: ok, state: state, dll: dll, symbol: symbol, category: category)
@@ -97,6 +109,13 @@ pub fn wine_nt_bridge_dispatch_call(symbol: text, handle: i64, payload: text, va
         return wine_nt_bridge_call_exit_process(value)
     _call_result(false, "bridge-unsupported:" + symbol, symbol, 0, "")
 
+pub fn wine_nt_bridge_call_message_box(title: text, message: text) -> WineNtGuiBridgeResult:
+    if title == "":
+        return _gui_result(false, "empty-title", "MessageBoxW", title, message, 0)
+    if message == "":
+        return _gui_result(false, "empty-message", "MessageBoxW", title, message, 0)
+    _gui_result(true, "", "MessageBoxW", title, message, 1)
+
 fn _stdout_sequence_gate(symbols: [text]) -> text:
     if symbols.len() != 3:
         return "bridge-sequence-count-mismatch"
@@ -127,3 +146,9 @@ pub fn wine_nt_bridge_execute_stdout_sequence(symbols: [text], payload: text) ->
 
 pub fn wine_nt_bridge_execute_hello_stdout(payload: text) -> WineNtBridgeExecutionResult:
     wine_nt_bridge_execute_stdout_sequence(["GetStdHandle", "WriteFile", "ExitProcess"], payload)
+
+pub fn wine_nt_bridge_execute_message_box_sequence(symbols: [text], title: text, message: text) -> WineNtGuiBridgeResult:
+    val sequence_state = wine_nt_api_gui_dispatch_gate(symbols)
+    if sequence_state != "ready":
+        return _gui_result(false, sequence_state, "", title, message, 0)
+    wine_nt_bridge_call_message_box(title, message)

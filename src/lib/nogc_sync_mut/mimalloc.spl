@@ -116,6 +116,8 @@ fn mimalloc_init(heap: MiHeap):
     """Initialize the global heap. Must be called before mi_malloc/mi_free."""
     _g_heap = heap
     _g_total_allocated = 0
+    _g_raw_allocated = 0
+    _g_os_page_alloc = _default_os_page_alloc
     # If no pages_by_class provided, build empty lists for each size class
     if _g_heap.pages_by_class.len() == 0:
         var pbc: [[MiPage]] = []
@@ -451,11 +453,12 @@ fn mi_malloc_raw(size: usize) -> usize:
     # Ensure size-class slot exists in the global heap table
     _ensure_class_slot(class_idx)
 
-    # Update raw allocation counter (bookkeeping only; no [u8] slices)
-    _g_raw_allocated = _g_raw_allocated + actual_size
-
     # Delegate page backing to the OS page provider
-    _g_os_page_alloc(actual_size)
+    val page_alloc = _g_os_page_alloc
+    val addr = page_alloc(actual_size)
+    if addr != 0:
+        _g_raw_allocated = _g_raw_allocated + actual_size
+    addr
 
 fn mi_free_raw(addr: usize, size: usize):
     """Kernel-facing free. Decrements raw allocation counter.

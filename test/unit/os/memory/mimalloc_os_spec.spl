@@ -47,6 +47,14 @@ use nogc_sync_mut.mimalloc.{
     default_allocator
 }
 
+var _test_next_raw_addr: usize = 0
+
+fn _test_page_alloc(size: usize) -> usize:
+    val addr = _test_next_raw_addr
+    if addr != 0:
+        _test_next_raw_addr = _test_next_raw_addr + size
+    addr
+
 
 # ============================================================================
 # Test Group 1: heap initialization
@@ -62,9 +70,8 @@ describe "mimalloc_init":
 
     it "mimalloc_init accepts a MiHeap value without error":
         val heap = MiHeap(size_classes: [], pages_by_class: [])
-        # Should not crash or return an error — init is a side-effecting call.
         mimalloc_init(heap)
-        expect(true).to_equal(true)
+        expect(mi_raw_allocated()).to_equal(0)
 
     it "default_allocator returns an uninitialized MimallocAllocator":
         val alloc = default_allocator()
@@ -90,30 +97,38 @@ describe "mi_malloc and mi_free":
         mimalloc_init(heap)
 
     it "mi_malloc(8) returns a non-nil result":
-        val ptr = mi_malloc(8)
+        val size: usize = 8
+        val ptr = mi_malloc(size)
         expect(ptr.?).to_equal(true)
 
     it "mi_malloc(64) returns a non-nil result":
-        val ptr = mi_malloc(64)
+        val size: usize = 64
+        val ptr = mi_malloc(size)
         expect(ptr.?).to_equal(true)
 
     it "mi_malloc(1024) returns a non-nil result":
-        val ptr = mi_malloc(1024)
+        val size: usize = 1024
+        val ptr = mi_malloc(size)
         expect(ptr.?).to_equal(true)
 
     it "mi_malloc(0) returns nil (zero-size is invalid)":
-        val ptr = mi_malloc(0)
+        val size: usize = 0
+        val ptr = mi_malloc(size)
         expect(ptr.?).to_equal(false)
 
     it "mi_free does not crash on a valid allocation":
-        val ptr = mi_malloc(32)
+        val size: usize = 32
+        val ptr = mi_malloc(size)
+        expect(ptr.?).to_equal(true)
         if ptr.?:
-            mi_free(ptr.unwrap(), 32)
-        expect(true).to_equal(true)
+            mi_free(ptr.unwrap(), size)
+        val next = mi_malloc(size)
+        expect(next.?).to_equal(true)
 
     it "mi_malloc returns different objects for successive calls":
-        val a = mi_malloc(16)
-        val b = mi_malloc(16)
+        val size: usize = 16
+        val a = mi_malloc(size)
+        val b = mi_malloc(size)
         # Both must be non-nil (interpreter array backing supports multiple allocs).
         expect(a.?).to_equal(true)
         expect(b.?).to_equal(true)
@@ -138,16 +153,18 @@ describe "MimallocAllocator":
 
     it "deallocate is a no-op when not initialized — no crash":
         var alloc = default_allocator()
-        # Passing a dummy byte array; should not crash.
+        val before = alloc.total_allocated()
         val dummy: [u8] = []
         alloc.deallocate(dummy, 0, 8)
-        expect(true).to_equal(true)
+        expect(alloc.total_allocated()).to_equal(before)
 
     it "allocate succeeds after marking initialized":
         val heap = MiHeap(size_classes: [], pages_by_class: [])
         mimalloc_init(heap)
         var alloc = MimallocAllocator(initialized: true)
-        val result = alloc.allocate(32, 8)
+        val size: usize = 32
+        val align: usize = 8
+        val result = alloc.allocate(size, align)
         expect(result.?).to_equal(true)
 
 
@@ -165,37 +182,59 @@ describe "mi_malloc_raw stub page provider":
     before a real PMM page provider is injected.
 
     `mi_free_raw` with addr=0 is a no-op (no crash).
-    `mi_raw_allocated` is always 0 in stub mode since the counter
-    increments on every call but resets to 0 only after free.
+    `mi_raw_allocated` stays 0 in stub mode because failed page-provider
+    calls must not be counted as live raw allocation.
     """
 
     before_each:
         mimalloc_init(MiHeap(size_classes: [], pages_by_class: []))
-        # Reset page provider to stub (returns 0) — default after init.
-        # mimalloc_set_os_page_alloc is not called here so stub is active.
+        _test_next_raw_addr = 0
+        mimalloc_set_os_page_alloc(_test_page_alloc)
 
     it "mi_malloc_raw(8) returns 0 in stub mode":
-        val addr = mi_malloc_raw(8)
+        val size: usize = 8
+        val addr = mi_malloc_raw(size)
         expect(addr).to_equal(0)
 
     it "mi_malloc_raw(64) returns 0 in stub mode":
-        val addr = mi_malloc_raw(64)
+        val size: usize = 64
+        val addr = mi_malloc_raw(size)
         expect(addr).to_equal(0)
 
     it "mi_malloc_raw(0) returns 0 (zero-size)":
-        val addr = mi_malloc_raw(0)
+        val size: usize = 0
+        val addr = mi_malloc_raw(size)
         expect(addr).to_equal(0)
 
     it "mi_free_raw(0, 0) does not crash":
-        mi_free_raw(0, 0)
-        expect(true).to_equal(true)
+        val addr: usize = 0
+        val size: usize = 0
+        mi_free_raw(addr, size)
+        expect(mi_raw_allocated()).to_equal(0)
 
-    it "mi_malloc_raw and mi_free_raw are symmetric for counter":
+    it "mi_malloc_raw failure does not change raw counter":
+        val size: usize = 32
         val before = mi_raw_allocated()
-        val addr = mi_malloc_raw(32)
-        # In stub mode addr == 0, so mi_free_raw is a no-op
-        mi_free_raw(addr, 32)
+        val addr = mi_malloc_raw(size)
         val after = mi_raw_allocated()
-        # Counter may have incremented then decremented; both states are valid.
-        # Assert it did not go negative (unsigned, so just check after >= 0).
-        expect(after >= 0).to_equal(true)
+        expect(addr).to_equal(0)
+        expect(after).to_equal(before)
+
+    it "mi_malloc_raw with injected provider tracks rounded class size":
+        val start: usize = 1048576
+        val size: usize = 33
+        _test_next_raw_addr = start
+        mimalloc_set_os_page_alloc(_test_page_alloc)
+        val addr = mi_malloc_raw(size)
+        expect(addr).to_equal(start)
+        expect(mi_raw_allocated()).to_equal(64)
+
+    it "mi_free_raw with injected provider decrements rounded class size":
+        val start: usize = 2097152
+        val size: usize = 33
+        _test_next_raw_addr = start
+        mimalloc_set_os_page_alloc(_test_page_alloc)
+        val addr = mi_malloc_raw(size)
+        expect(mi_raw_allocated()).to_equal(64)
+        mi_free_raw(addr, size)
+        expect(mi_raw_allocated()).to_equal(0)

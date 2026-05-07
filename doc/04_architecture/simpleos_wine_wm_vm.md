@@ -19,6 +19,8 @@ Modeled compatibility gates remain valid for early diagnostics, but production r
 
 The bridge writes SimpleOS `/win` records through `WindowRecord`, `WindowState`, `Rect`, and `BufferRef`, then records create, map, configure, focus, present, cursor, clipboard, and destroy evidence. Framebuffer presents produce deterministic checksum evidence so tests can distinguish a real SimpleOS window-record path from a modeled X11 string.
 
+`src/lib/common/wine_gui_hello.spl` composes this boundary with the controlled PE hello path: the executable must first pass OS-backed VM image mapping and controlled NT stdout execution, then the GUI milestone creates Wine-facing X11 state and binds it to SimpleOS `/win` framebuffer evidence before reporting execution.
+
 ## VM / Container Boundary
 
 `src/lib/common/wine_vm_adapter.spl` distinguishes modeled VM spaces from OS-backed VM process spaces. Production VM readiness requires:
@@ -35,4 +37,4 @@ The bridge writes SimpleOS `/win` records through `WindowRecord`, `WindowState`,
 
 ## Current Limits
 
-This is not a complete upstream Wine port. The implemented contract proves auditable SimpleOS-backed WM and VM prerequisite surfaces for controlled fixtures. General Wine GUI drivers, arbitrary PE execution, broad NT/Win32 dispatch, kernel page-table enforcement, and full compositor event loops still require later implementation.
+This is not a complete upstream Wine port. The implemented contract proves auditable SimpleOS-backed WM and VM prerequisite surfaces for controlled fixtures, including a controlled GUI hello milestone. General Wine GUI drivers, arbitrary PE execution, broad NT/Win32 dispatch, kernel page-table enforcement, and full compositor event loops still require later implementation.
