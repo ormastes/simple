@@ -13,6 +13,7 @@
 #   - Comma-separated: div, span { ... }
 #   - Descendant: div span { ... } (limited — matches if ANY ancestor matches)
 #   - Pseudo-classes: :nth-child(N) (basic numeric only), :first-child, :last-child, :only-child, :empty, :is(), :where(), :not(), :has()
+#     :has() supports simple descendant options and bounded relative child options (`> .class`, `> tag`, `> #id`).
 #   - Shorthand properties: flex, border, background, margin multi-value
 
 use std.gc_async_mut.gpu.browser_engine.dom.{BeDomNode,
@@ -81,7 +82,7 @@ fn extract_style_blocks(html: text) -> [text]:
 fn parse_css_rules(css_text: text) -> [CssRule]:
     var rules: [CssRule] = []
     var pos = 0
-    val normalized_css = flatten_layer_blocks(css_text)
+    val normalized_css = flatten_simple_nested_rules(flatten_layer_blocks(css_text))
     val len = normalized_css.len()
 
     while pos < len:
@@ -138,6 +139,70 @@ fn flatten_layer_blocks(css_text: text) -> text:
             out = out + "\n" + inner + "\n"
         pos = close + 1
     out
+
+fn flatten_simple_nested_rules(css_text: text) -> text:
+    """Expose bounded parent-referencing CSS nesting to the flat rule parser."""
+    var out = ""
+    var pos = 0
+    while pos < css_text.len():
+        val open = sb_find(css_text, "{", pos)
+        if open >= 999999999:
+            out = out + css_text.slice(pos, css_text.len())
+            break
+        val close = find_matching_brace(css_text, open)
+        if close >= 999999999:
+            out = out + css_text.slice(pos, css_text.len())
+            break
+        val selector = css_text.slice(pos, open).trim()
+        val body = css_text.slice(open + 1, close)
+        if selector.len() > 0 and not selector.starts_with("@") and body.contains("&"):
+            out = out + flatten_one_nested_rule(selector, body)
+        else:
+            out = out + css_text.slice(pos, close + 1)
+        pos = close + 1
+    out
+
+fn flatten_one_nested_rule(selector: text, body: text) -> text:
+    var direct_body = ""
+    var nested_rules = ""
+    var pos = 0
+    while pos < body.len():
+        val open = sb_find(body, "{", pos)
+        if open >= 999999999:
+            direct_body = direct_body + body.slice(pos, body.len())
+            break
+        val nested_start = last_nested_selector_start(body, pos, open)
+        val close = find_matching_brace(body, open)
+        if close >= 999999999:
+            direct_body = direct_body + body.slice(pos, body.len())
+            break
+        val nested_selector = body.slice(nested_start, open).trim()
+        val nested_body = body.slice(open + 1, close).trim()
+        val combined = combine_nested_selector(selector, nested_selector)
+        direct_body = direct_body + body.slice(pos, nested_start)
+        if combined.len() > 0 and nested_body.len() > 0:
+            nested_rules = nested_rules + "\n" + combined + " " + 123.chr() + " " + nested_body + " " + 125.chr() + "\n"
+        pos = close + 1
+    val direct = direct_body.trim()
+    var out = ""
+    if direct.len() > 0:
+        out = selector + " " + 123.chr() + " " + direct + " " + 125.chr() + "\n"
+    out + nested_rules
+
+fn last_nested_selector_start(body: text, start: i32, nested_open: i32) -> i32:
+    var pos = nested_open - 1
+    while pos >= start:
+        val ch = body.char_at(pos)
+        if ch == ";" or ch == "}":
+            return pos + 1
+        pos = pos - 1
+    start
+
+fn combine_nested_selector(parent: text, nested_selector: text) -> text:
+    val nested = nested_selector.trim()
+    if nested.len() == 0 or nested.starts_with("@") or not nested.contains("&"):
+        return ""
+    nested.replace("&", parent.trim()).trim()
 
 fn find_matching_brace(text_val: text, open: i32) -> i32:
     var depth = 0
@@ -507,8 +572,7 @@ fn simple_selector_matches(selector: text, node: BeDomNode, nth: i32, sibling_co
 
     # Class selector: .foo
     if sel.starts_with("."):
-        val cls = sel.slice(1, sel.len())
-        return sb_has_class(node, cls)
+        return selector_class_chain_matches(sel, node)
 
     # Compound: tag.class or tag#id
     val pseudo_is_pos = sb_find(sel, ":is(", 0)
@@ -535,9 +599,8 @@ fn simple_selector_matches(selector: text, node: BeDomNode, nth: i32, sibling_co
     val dot_pos = sb_find(sel, ".", 0)
     if dot_pos > 0 and dot_pos < 999999999:
         val tag = sel.slice(0, dot_pos)
-        val cls = sel.slice(dot_pos + 1, sel.len())
         val ntag = be_dom_get_tag(node)
-        return ntag == tag and sb_has_class(node, cls)
+        return ntag == tag and selector_class_chain_matches(sel.slice(dot_pos, sel.len()), node)
 
     val hash_pos = sb_find(sel, "#", 0)
     if hash_pos > 0 and hash_pos < 999999999:
@@ -550,6 +613,23 @@ fn simple_selector_matches(selector: text, node: BeDomNode, nth: i32, sibling_co
     # Plain tag selector
     val ntag3 = be_dom_get_tag(node)
     ntag3 == sel
+
+fn selector_class_chain_matches(selector: text, node: BeDomNode) -> bool:
+    val trimmed = selector.trim()
+    if not trimmed.starts_with("."):
+        return false
+    var saw_class = false
+    var segment_start = 1
+    var idx = 1
+    while idx <= trimmed.len():
+        if idx == trimmed.len() or trimmed.char_at(idx) == ".":
+            val cls = trimmed.slice(segment_start, idx).trim()
+            if cls.len() == 0 or not sb_has_class(node, cls):
+                return false
+            saw_class = true
+            segment_start = idx + 1
+        idx = idx + 1
+    saw_class
 
 fn node_is_empty(node: BeDomNode) -> bool:
     val children = be_dom_get_children(node)
@@ -694,8 +774,36 @@ fn has_descendant_selector_list_match(selector: text, node: BeDomNode) -> bool:
     var idx = 0
     while idx < options.len():
         val option = options[idx].trim()
-        if option.len() > 0 and node_has_descendant_matching(node, option):
+        if option.len() > 0 and node_has_relative_has_option_matching(node, option):
             return true
+        idx = idx + 1
+    false
+
+fn node_has_relative_has_option_matching(node: BeDomNode, selector: text) -> bool:
+    val trimmed = selector.trim()
+    if trimmed.starts_with(">"):
+        val child_selector = trimmed.slice(1, trimmed.len()).trim()
+        if child_selector.len() == 0:
+            return false
+        return node_has_direct_child_matching(node, child_selector)
+    node_has_descendant_matching(node, trimmed)
+
+fn node_has_direct_child_matching(node: BeDomNode, selector: text) -> bool:
+    val children = be_dom_get_children(node)
+    var sibling_count = 0
+    var count_idx = 0
+    while count_idx < children.len():
+        if not be_dom_get_is_text(children[count_idx]):
+            sibling_count = sibling_count + 1
+        count_idx = count_idx + 1
+    var idx = 0
+    var nth = 1
+    while idx < children.len():
+        val child = children[idx]
+        if not be_dom_get_is_text(child):
+            if simple_selector_matches(selector, child, nth, sibling_count):
+                return true
+            nth = nth + 1
         idx = idx + 1
     false
 

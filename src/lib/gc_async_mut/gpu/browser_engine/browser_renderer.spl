@@ -250,11 +250,12 @@ class BrowserRenderer:
 
         Pipeline: HTML -> DOM -> Layout -> Paint -> Scene
         """
-        br_materialize_font_faces_if_requested(html)
-        val dom = process_style_blocks_result(browser_renderer_html_string_to_dom(html), html)
+        val normalized_html = br_normalize_style_blocks_in_html(html)
+        br_materialize_font_faces_if_requested(normalized_html)
+        val dom = process_style_blocks_result(browser_renderer_html_string_to_dom(normalized_html), normalized_html)
         val result = self.render_dom(dom)
-        if result.scene_commands.len() == 0 and html.len() > 0:
-            return self.render_html_fallback_scene(html)
+        if result.scene_commands.len() == 0 and normalized_html.len() > 0:
+            return self.render_html_fallback_scene(normalized_html)
         return result
 
     me render_html_to_pixels(html: text) -> BeRenderResult:
@@ -526,13 +527,30 @@ class BrowserRenderer:
                     scene_width: self.viewport_w,
                     scene_height: self.viewport_h
                 )
-        br_materialize_font_faces_if_requested(html)
-        val dom = process_style_blocks_result(browser_renderer_html_string_to_dom(html), html)
+            if br_html_style_contains_parent_nesting(html):
+                val nested_html = br_normalize_style_blocks_in_html(html)
+                val fallback = self.render_html_fallback_scene(nested_html)
+                val pixels = br_render_simple_block_fallback_pixels(nested_html, self.viewport_w, self.viewport_h)
+                return BeRenderResult(
+                    format: "pixels",
+                    pixel_data: pixels,
+                    commands: fallback.commands,
+                    width: self.viewport_w,
+                    height: self.viewport_h,
+                    node_count: fallback.node_count,
+                    warnings: ["html_parent_nesting_fallback_pixel_path"],
+                    scene_commands: fallback.scene_commands,
+                    scene_width: fallback.scene_width,
+                    scene_height: fallback.scene_height
+                )
+        val normalized_html = br_normalize_style_blocks_in_html(html)
+        br_materialize_font_faces_if_requested(normalized_html)
+        val dom = process_style_blocks_result(browser_renderer_html_string_to_dom(normalized_html), normalized_html)
         val scene_result = self.render_dom(dom)
-        if scene_result.scene_commands.len() == 0 and html.len() > 0:
-            val fallback = self.render_html_fallback_scene(html)
+        if scene_result.scene_commands.len() == 0 and normalized_html.len() > 0:
+            val fallback = self.render_html_fallback_scene(normalized_html)
             val pixel_count = self.viewport_w * self.viewport_h
-            val pixels = br_render_simple_block_fallback_pixels(html, self.viewport_w, self.viewport_h)
+            val pixels = br_render_simple_block_fallback_pixels(normalized_html, self.viewport_w, self.viewport_h)
             return BeRenderResult(
                 format: "pixels",
                 pixel_data: pixels,
@@ -1402,11 +1420,20 @@ fn br_selector_matches_has_descendant(selector: text, subject: text, subtree: te
     while idx <= close:
         if idx == close or selector.char_at(idx) == ",":
             val option = selector.slice(segment_start, idx).trim()
-            if br_simple_descendant_option_in_subtree(option, subtree):
+            if br_relative_has_option_in_subtree(option, subtree):
                 return true
             segment_start = idx + 1
         idx = idx + 1
     false
+
+fn br_relative_has_option_in_subtree(option: text, subtree: text) -> bool:
+    val trimmed = option.trim()
+    if trimmed.starts_with(">"):
+        val child_option = trimmed.slice(1, trimmed.len()).trim()
+        if child_option.len() == 0:
+            return false
+        return br_simple_direct_child_option_in_subtree(child_option, subtree)
+    br_simple_descendant_option_in_subtree(trimmed, subtree)
 
 fn br_selector_matches_not_self(selector: text, subject: text, tag_content: text) -> bool:
     val not_pos = br_find_str(selector, ":not(", 0)
@@ -1466,6 +1493,42 @@ fn br_simple_descendant_option_in_subtree(option: text, subtree: text) -> bool:
     if trimmed.contains(".") or trimmed.contains("#") or trimmed.contains(":"):
         return false
     subtree.contains("<" + trimmed)
+
+fn br_simple_direct_child_option_in_subtree(option: text, subtree: text) -> bool:
+    val trimmed = option.trim().lower()
+    if trimmed.len() == 0:
+        return false
+    var depth = 0
+    var pos: i64 = 0
+    while pos < subtree.len():
+        val open = browser_renderer_find_char(subtree, "<", pos)
+        if open >= 999999999:
+            return false
+        if open + 1 >= subtree.len():
+            return false
+        val close = browser_renderer_find_char(subtree, ">", open + 1)
+        if close >= 999999999:
+            return false
+        val next_ch = subtree.char_at(open + 1)
+        if next_ch == "/" or next_ch == "!":
+            if next_ch == "/" and depth > 0:
+                depth = depth - 1
+            pos = close + 1
+            continue
+        val tag_content = subtree.slice(open + 1, close)
+        val tag = br_tag_name_from_content(tag_content)
+        if depth == 0 and br_attr_prefix_matches(trimmed, tag, tag_content):
+            return true
+        if not tag_content.trim().ends_with("/"):
+            depth = depth + 1
+        pos = close + 1
+    false
+
+fn br_tag_name_from_content(tag_content: text) -> text:
+    val parts = browser_renderer_split_tag_parts(tag_content)
+    if parts.len() == 0:
+        return ""
+    parts[0].trim().lower()
 
 fn br_subtree_contains_class(subtree: text, cls: text) -> bool:
     subtree.contains("class='" + cls + "'") or subtree.contains("class=\"" + cls + "\"") or subtree.contains("class='" + cls + " ") or subtree.contains("class=\"" + cls + " ") or subtree.contains(" " + cls + " ") or subtree.contains(" " + cls + "'") or subtree.contains(" " + cls + "\"")
@@ -2737,7 +2800,7 @@ fn browser_renderer_apply_widget_props(dom: BeDomNode, node: WidgetNode, kind: t
 pub fn render_html_to_pixels_with_viewport(html: text, width: i32, height: i32) -> BeRenderResult:
     """Convenience wrapper for callers that work with viewport pixel counts."""
     val renderer = BrowserRenderer.create(width, height)
-    renderer.render_html_to_pixels(html)
+    renderer.render_html_to_pixels(br_normalize_style_blocks_in_html(html))
 
 fn br_stack_pop_and_add(stack: [BeDomNode]) -> [BeDomNode]:
     """Pop last element from stack, add it as child to new top. Returns new stack."""
@@ -3097,7 +3160,7 @@ fn br_find_str(s: text, needle: text, start: i64) -> i64:
     999999999
 
 fn br_flatten_layer_blocks(css_text: text) -> text:
-    """Expose simple @layer wrapper contents to the existing flat rule scanner."""
+    """Expose simple @layer wrappers and bounded nesting to flat rule scans."""
     val lower = css_text.lower()
     var out = ""
     var pos: i64 = 0
@@ -3119,7 +3182,116 @@ fn br_flatten_layer_blocks(css_text: text) -> text:
         if inner.len() > 0:
             out = out + "\n" + inner + "\n"
         pos = close + 1
+    br_flatten_simple_nested_rules(out)
+
+pub fn browser_renderer_normalize_style_rules(css_text: text) -> text:
+    br_flatten_layer_blocks(css_text)
+
+pub fn browser_renderer_normalize_style_blocks(html: text) -> text:
+    br_normalize_style_blocks_in_html(html)
+
+fn br_normalize_style_blocks_in_html(html: text) -> text:
+    val lower = html.lower()
+    var out = ""
+    var pos: i64 = 0
+    while pos < html.len():
+        val style_pos = br_find_str(lower, "<style", pos)
+        if style_pos >= 999999999:
+            out = out + html.slice(pos, html.len())
+            break
+        val style_open_end = browser_renderer_find_char(html, ">", style_pos)
+        if style_open_end >= 999999999:
+            out = out + html.slice(pos, html.len())
+            break
+        val style_close = br_find_str(lower, "</style", style_open_end + 1)
+        if style_close >= 999999999:
+            out = out + html.slice(pos, html.len())
+            break
+        out = out + html.slice(pos, style_open_end + 1)
+        out = out + br_flatten_layer_blocks(html.slice(style_open_end + 1, style_close))
+        pos = style_close
     out
+
+fn br_html_style_contains_parent_nesting(html: text) -> bool:
+    val lower = html.lower()
+    var pos: i64 = 0
+    while pos < html.len():
+        val style_pos = br_find_str(lower, "<style", pos)
+        if style_pos >= 999999999:
+            return false
+        val style_open_end = browser_renderer_find_char(html, ">", style_pos)
+        if style_open_end >= 999999999:
+            return false
+        val style_close = br_find_str(lower, "</style", style_open_end + 1)
+        if style_close >= 999999999:
+            return false
+        if html.slice(style_open_end + 1, style_close).contains("&"):
+            return true
+        pos = style_close + 1
+    false
+
+fn br_flatten_simple_nested_rules(css_text: text) -> text:
+    var out = ""
+    var pos: i64 = 0
+    while pos < css_text.len():
+        val open = browser_renderer_find_char(css_text, "{", pos)
+        if open >= 999999999:
+            out = out + css_text.slice(pos, css_text.len())
+            break
+        val close = br_find_matching_brace(css_text, open)
+        if close >= 999999999:
+            out = out + css_text.slice(pos, css_text.len())
+            break
+        val selector = css_text.slice(pos, open).trim()
+        val body = css_text.slice(open + 1, close)
+        if selector.len() > 0 and not selector.starts_with("@") and body.contains("&"):
+            out = out + br_flatten_one_nested_rule(selector, body)
+        else:
+            out = out + css_text.slice(pos, close + 1)
+        pos = close + 1
+    out
+
+fn br_flatten_one_nested_rule(selector: text, body: text) -> text:
+    var direct_body = ""
+    var nested_rules = ""
+    var pos: i64 = 0
+    while pos < body.len():
+        val open = browser_renderer_find_char(body, "{", pos)
+        if open >= 999999999:
+            direct_body = direct_body + body.slice(pos, body.len())
+            break
+        val nested_start = br_last_nested_selector_start(body, pos, open)
+        val close = br_find_matching_brace(body, open)
+        if close >= 999999999:
+            direct_body = direct_body + body.slice(pos, body.len())
+            break
+        val nested_selector = body.slice(nested_start, open).trim()
+        val nested_body = body.slice(open + 1, close).trim()
+        val combined = br_combine_nested_selector(selector, nested_selector)
+        direct_body = direct_body + body.slice(pos, nested_start)
+        if combined.len() > 0 and nested_body.len() > 0:
+            nested_rules = nested_rules + "\n" + combined + " " + 123.chr() + " " + nested_body + " " + 125.chr() + "\n"
+        pos = close + 1
+    val direct = direct_body.trim()
+    var out = ""
+    if direct.len() > 0:
+        out = selector + " " + 123.chr() + " " + direct + " " + 125.chr() + "\n"
+    out + nested_rules
+
+fn br_last_nested_selector_start(body: text, start: i64, nested_open: i64) -> i64:
+    var pos = nested_open - 1
+    while pos >= start:
+        val ch = body.char_at(pos)
+        if ch == ";" or ch == "}":
+            return pos + 1
+        pos = pos - 1
+    start
+
+fn br_combine_nested_selector(parent: text, nested_selector: text) -> text:
+    val nested = nested_selector.trim()
+    if nested.len() == 0 or nested.starts_with("@") or not nested.contains("&"):
+        return ""
+    nested.replace("&", parent.trim()).trim()
 
 fn br_find_matching_brace(text_val: text, open: i64) -> i64:
     var depth = 0
