@@ -9,10 +9,12 @@ use common.wine_ntdll_bridge.{
     wine_ntdll_execute_directory_create,
     wine_ntdll_execute_directory_remove,
     wine_ntdll_execute_file_delete,
+    wine_ntdll_execute_file_information,
     wine_ntdll_execute_file_io,
     wine_ntdll_execute_virtual_memory,
     wine_ntdll_free_virtual_memory,
     wine_ntdll_protect_virtual_memory,
+    wine_ntdll_query_information_file,
     wine_ntdll_read_file,
     wine_ntdll_remove_directory,
     wine_ntdll_required_calls,
@@ -33,10 +35,11 @@ fn _all_async_features() -> text:
 describe "Wine ntdll and Rtl bridge":
     it "lists the modeled ntdll and Rtl calls":
         val calls = wine_ntdll_required_calls()
-        expect(calls.len()).to_equal(9)
+        expect(calls.len()).to_equal(10)
         expect(calls[0]).to_equal("NtAllocateVirtualMemory")
-        expect(calls[6]).to_equal("NtSetInformationFile")
-        expect(calls[7]).to_equal("RtlAllocateHeap")
+        expect(calls[6]).to_equal("NtQueryInformationFile")
+        expect(calls[7]).to_equal("NtSetInformationFile")
+        expect(calls[8]).to_equal("RtlAllocateHeap")
 
     it "wraps ntdll virtual-memory calls over the VM bridge":
         val allocated = wine_ntdll_allocate_virtual_memory(wine_vm_space_new(), 0x500000, 0x1000, "rw")
@@ -114,6 +117,27 @@ describe "Wine ntdll and Rtl bridge":
         val missing = wine_ntdll_execute_file_io(["NtCreateFile", "NtReadFile", "NtClose"], table, "C:\\missing.txt", 5)
         expect(missing.ok).to_equal(false)
         expect(missing.error).to_equal("NtCreateFile:file-not-found")
+
+    it "wraps bounded ntdll file information through NtQueryInformationFile":
+        val table = wine_nt_file_table_add_file(wine_nt_file_table_new(_all_adapter_apis(), _all_async_features()), "C:\\hello.txt", "hello")
+        val opened = wine_ntdll_create_file(table, "C:\\hello.txt")
+        val info = wine_ntdll_query_information_file(opened.table, opened.handle)
+        expect(info.ok).to_equal(true)
+        expect(info.value).to_equal(0x100000 + 5)
+
+        val sequence = wine_ntdll_execute_file_information(["NtCreateFile", "NtQueryInformationFile", "NtClose"], table, "C:\\hello.txt")
+        expect(sequence.ok).to_equal(true)
+        expect(sequence.bytes_read).to_equal(0x100000 + 5)
+        expect(sequence.operations).to_equal("NtCreateFile NtQueryInformationFile NtClose")
+        expect(wine_ntdll_read_file(sequence.table, sequence.handle, 1).state).to_equal("invalid-handle")
+
+        val missing = wine_ntdll_execute_file_information(["NtCreateFile", "NtQueryInformationFile", "NtClose"], table, "C:\\missing.txt")
+        expect(missing.ok).to_equal(false)
+        expect(missing.error).to_equal("NtCreateFile:file-not-found")
+
+        val wrong = wine_ntdll_execute_file_information(["NtCreateFile", "NtReadFile", "NtClose"], table, "C:\\hello.txt")
+        expect(wrong.ok).to_equal(false)
+        expect(wrong.error).to_equal("ntdll-file-io-sequence-expected:NtQueryInformationFile")
 
     it "wraps bounded ntdll directory create and remove operations":
         val table = wine_nt_file_table_new(_all_adapter_apis(), _all_async_features())
