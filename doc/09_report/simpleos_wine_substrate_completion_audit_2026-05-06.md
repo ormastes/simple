@@ -1303,12 +1303,13 @@ Fresh evidence:
 `wine_dllmain_handoff_require_peb_teb_vm_writes(...)` now requires PEB/TEB VM
 byte-write/readback evidence before a retained DLL view can report
 non-executing DllMain process-attach handoff readiness. Failed VM byte-write
-composition blocks the handoff before any DllMain execution claim.
+composition blocks the handoff before any DllMain execution claim and clears
+mapped base, mapped size, entrypoint, callback, and dispatch counts.
 
 Fresh evidence:
 
-- `bin/simple test test/lib/common/wine_dll_view_dllmain_handoff_spec.spl --mode=interpreter --clean`: covers VM-write/readback-gated DllMain handoff and failure propagation.
-- `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_dll_view_dllmain_handoff_spec.spl --mode=interpreter --clean`: covers the SimpleOS system-level DllMain VM-write/readback handoff.
+- `bin/simple test test/lib/common/wine_dll_view_dllmain_handoff_spec.spl --mode=interpreter --clean`: covers VM-write/readback-gated DllMain handoff, failure propagation, and stale mapped-state clearing.
+- `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_dll_view_dllmain_handoff_spec.spl --mode=interpreter --clean`: covers the SimpleOS system-level DllMain VM-write/readback handoff before carrying mapped state.
 
 ## 2026-05-07 DllMain Startup-Fault VM-Write Handoff Update
 
