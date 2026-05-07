@@ -1457,3 +1457,16 @@ Fresh evidence:
 
 - `bin/simple test test/lib/common/wine_process_session_known_console_dispatch_spec.spl --mode=interpreter --clean`: covers VM-write/readback-gated known-console dispatch planning and failure propagation.
 - `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_known_console_dispatch_spec.spl --mode=interpreter --clean`: covers the SimpleOS system-level known-console dispatch path requiring PEB/TEB VM write/readback evidence.
+
+## 2026-05-07 Known-Console Execution VM-Write Update
+
+`wine_process_execute_known_console_with_peb_teb_vm_writes(...)` now requires
+the PEB/TEB VM byte-write/readback-gated mapped-image path before the bounded
+known-console execution helper can run the modeled NT bridge plan. Failed VM
+byte-write composition blocks known-console execution before stdout/exit-code
+evidence is reported.
+
+Fresh evidence:
+
+- `bin/simple test test/lib/common/wine_process_session_known_console_spec.spl --mode=interpreter --clean`: covers VM-write/readback-gated known-console execution and failure propagation.
+- `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_known_console_execution_spec.spl --mode=interpreter --clean`: covers the SimpleOS system-level known-console execution path requiring PEB/TEB VM write/readback evidence.

@@ -252,9 +252,9 @@ targets are the IAT slots rather than direct import-name RVAs, still without
 running arbitrary instructions.
 `wine_process_plan_known_console_dispatch_with_peb_teb_vm_writes(...)` requires
 the VM-readback-gated mapped-image path before decoding that same bounded
-dispatch plan. `wine_process_execute_known_console(...)` runs
-only that decoded known-console plan through the existing modeled NT bridge and
-returns stdout plus exit code.
+dispatch plan. `wine_process_execute_known_console_with_peb_teb_vm_writes(...)`
+requires the VM-readback-gated mapped-image path before running the same bounded
+modeled NT bridge plan.
 `wine_process_resolve_known_kernel32_module(...)` and
 `wine_process_resolve_known_kernel32_module_ex(...)` run bounded KERNEL32
 `GetModuleHandleW`/`LoadLibraryW` or `LoadLibraryExW`/`GetProcAddress`/
