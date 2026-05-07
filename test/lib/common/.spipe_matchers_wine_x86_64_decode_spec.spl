@@ -44,39 +44,27 @@ fn _minimal_image() -> [u8]:
     data
 
 fn _put_hello_code(data: [u8], offset: i64) -> [u8]:
-    data[offset] = 0x48
-    data[offset + 1] = 0x31
-    data[offset + 2] = 0xc9
-    data[offset + 3] = 0xe8
-    data = _put_u32_le(data, offset + 4, 0x68)
-    data[offset + 8] = 0x48
-    data[offset + 9] = 0x8d
-    data[offset + 10] = 0x15
-    data = _put_u32_le(data, offset + 11, 0x101)
-    data[offset + 15] = 0xe8
-    data = _put_u32_le(data, offset + 16, 0x7c)
-    data[offset + 20] = 0x31
-    data[offset + 21] = 0xc9
-    data[offset + 22] = 0xe8
-    data = _put_u32_le(data, offset + 23, 0x95)
-    data
+    _put_hello_code_at_rva(data, offset, 0x2010)
 
 fn _put_hello_code_at_rva(data: [u8], offset: i64, code_rva: i64) -> [u8]:
     data[offset] = 0x48
     data[offset + 1] = 0x31
     data[offset + 2] = 0xc9
-    data[offset + 3] = 0xe8
-    data = _put_u32_le(data, offset + 4, 0x2080 - (code_rva + 8))
-    data[offset + 8] = 0x48
-    data[offset + 9] = 0x8d
-    data[offset + 10] = 0x15
-    data = _put_u32_le(data, offset + 11, 0x2120 - (code_rva + 15))
-    data[offset + 15] = 0xe8
-    data = _put_u32_le(data, offset + 16, 0x20a0 - (code_rva + 20))
-    data[offset + 20] = 0x31
-    data[offset + 21] = 0xc9
-    data[offset + 22] = 0xe8
-    data = _put_u32_le(data, offset + 23, 0x20c0 - (code_rva + 27))
+    data[offset + 3] = 0xff
+    data[offset + 4] = 0x15
+    data = _put_u32_le(data, offset + 5, 0x2060 - (code_rva + 9))
+    data[offset + 9] = 0x48
+    data[offset + 10] = 0x8d
+    data[offset + 11] = 0x15
+    data = _put_u32_le(data, offset + 12, 0x2120 - (code_rva + 16))
+    data[offset + 16] = 0xff
+    data[offset + 17] = 0x15
+    data = _put_u32_le(data, offset + 18, 0x2068 - (code_rva + 22))
+    data[offset + 22] = 0x31
+    data[offset + 23] = 0xc9
+    data[offset + 24] = 0xff
+    data[offset + 25] = 0x15
+    data = _put_u32_le(data, offset + 26, 0x2070 - (code_rva + 30))
     data
 
 fn _put_hello_code_with_safe_prologue(data: [u8], offset: i64) -> [u8]:
@@ -89,7 +77,7 @@ fn _put_hello_code_with_safe_prologue(data: [u8], offset: i64) -> [u8]:
 
 fn _put_hello_code_with_bad_write_target(data: [u8], offset: i64) -> [u8]:
     var out = _put_hello_code(data, offset)
-    out = _put_u32_le(out, offset + 16, 0)
+    out = _put_u32_le(out, offset + 18, 0)
     out
 
 describe "Wine x86_64 hello decoder gate":
@@ -100,14 +88,14 @@ describe "Wine x86_64 hello decoder gate":
         val data = _put_hello_code(_minimal_image(), 0x210)
         expect wine_x86_64_instruction_at(data, 0x210) == "xor-rcx-rcx"
         expect wine_x86_64_instruction_len_at(data, 0x210) == 3
-        expect wine_x86_64_instruction_at(data, 0x213) == "call-rel32"
-        expect wine_x86_64_instruction_len_at(data, 0x213) == 5
-        expect wine_x86_64_instruction_at(data, 0x218) == "lea-rdx-rip-rel32"
-        expect wine_x86_64_instruction_len_at(data, 0x218) == 7
-        expect wine_x86_64_instruction_at(data, 0x224) == "xor-ecx-ecx"
-        expect wine_x86_64_instruction_len_at(data, 0x224) == 2
-        expect wine_x86_64_instruction_at(data, 0x22c) == "unsupported-opcode"
-        expect wine_x86_64_instruction_len_at(data, 0x22c) == 0
+        expect wine_x86_64_instruction_at(data, 0x213) == "call-rip-indirect"
+        expect wine_x86_64_instruction_len_at(data, 0x213) == 6
+        expect wine_x86_64_instruction_at(data, 0x219) == "lea-rdx-rip-rel32"
+        expect wine_x86_64_instruction_len_at(data, 0x219) == 7
+        expect wine_x86_64_instruction_at(data, 0x226) == "xor-ecx-ecx"
+        expect wine_x86_64_instruction_len_at(data, 0x226) == 2
+        expect wine_x86_64_instruction_at(data, 0x22e) == "unsupported-opcode"
+        expect wine_x86_64_instruction_len_at(data, 0x22e) == 0
 
     it "classifies common safe prologue and epilogue forms":
         var data = _zero_bytes(16)
@@ -175,9 +163,9 @@ describe "Wine x86_64 hello decoder gate":
         data[0] = 0xff
         val scan = wine_x86_64_scan_window(data, 0, 4, 8)
         expect scan.ok == false
-        expect scan.state == "unsupported-opcode"
+        expect scan.state == "unsupported-ff-instruction"
         expect scan.last_offset == 0
-        expect scan.last_instruction == "unsupported-opcode"
+        expect scan.last_instruction == "unsupported-ff-instruction"
 
     it "rejects truncated near calls while scanning":
         var data = _zero_bytes(4)
@@ -215,10 +203,10 @@ describe "Wine x86_64 hello decoder gate":
     it "reports relative call targets for the import layer to validate":
         val plan = wine_x86_64_hello_decode_plan(_put_hello_code_with_bad_write_target(_minimal_image(), 0x210))
         expect plan.ok == true
-        expect plan.get_std_handle_rva == 0x2080
+        expect plan.get_std_handle_rva == 0x2060
         expect plan.stdout_payload_rva == 0x2120
-        expect plan.write_file_rva == 0x2024
-        expect plan.exit_process_rva == 0x20c0
+        expect plan.write_file_rva == 0x2026
+        expect plan.exit_process_rva == 0x2070
 
     it "recognizes the known hello call skeleton at the PE entrypoint":
         expect wine_x86_64_hello_decode_gate(_put_hello_code(_minimal_image(), 0x210)) == "ready"
@@ -228,23 +216,23 @@ describe "Wine x86_64 hello decoder gate":
         expect plan.ok == true
         expect plan.entry_rva == 0x2010
         expect plan.sequence_rva == 0x2015
-        expect plan.sequence_end_rva == 0x2030
-        expect plan.get_std_handle_rva == 0x2080
+        expect plan.sequence_end_rva == 0x2033
+        expect plan.get_std_handle_rva == 0x2060
         expect plan.stdout_payload_rva == 0x2120
-        expect plan.write_file_rva == 0x20a0
-        expect plan.exit_process_rva == 0x20c0
+        expect plan.write_file_rva == 0x2068
+        expect plan.exit_process_rva == 0x2070
 
     it "returns a structured hello execution plan from the decoded entrypoint":
         val plan = wine_x86_64_hello_decode_plan(_put_hello_code(_minimal_image(), 0x210))
         expect plan.ok == true
         expect plan.entry_rva == 0x2010
         expect plan.sequence_rva == 0x2010
-        expect plan.sequence_end_rva == 0x202b
-        expect plan.instruction_sequence == "xor-rcx-rcx call-rel32 lea-rdx-rip-rel32 call-rel32 xor-ecx-ecx call-rel32"
+        expect plan.sequence_end_rva == 0x202e
+        expect plan.instruction_sequence == "xor-rcx-rcx call-rip-indirect lea-rdx-rip-rel32 call-rip-indirect xor-ecx-ecx call-rip-indirect"
         expect plan.instruction_count == 6
         expect plan.call_sequence == "GetStdHandle WriteFile ExitProcess"
         expect plan.call_count == 3
-        expect plan.get_std_handle_rva == 0x2080
+        expect plan.get_std_handle_rva == 0x2060
         expect plan.stdout_payload_rva == 0x2120
-        expect plan.write_file_rva == 0x20a0
-        expect plan.exit_process_rva == 0x20c0
+        expect plan.write_file_rva == 0x2068
+        expect plan.exit_process_rva == 0x2070

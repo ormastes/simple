@@ -152,10 +152,12 @@ chain.
 known-console dispatch and execution: it applies the bounded copied-image thunk
 patches and returns the patched image plus the composed CPU evidence.
 `wine_process_plan_known_console_dispatch(...)` then decodes the bounded known
-console call sequence from that patched image, still without running arbitrary
-instructions. `wine_process_execute_known_console(...)` runs only that decoded
-known-console plan through the existing modeled NT bridge and returns stdout
-plus exit code.
+console call sequence from that patched image. The sequence now models
+RIP-relative indirect calls through the patched thunk RVAs, so the decoded
+targets are the IAT slots rather than direct import-name RVAs, still without
+running arbitrary instructions. `wine_process_execute_known_console(...)` runs
+only that decoded known-console plan through the existing modeled NT bridge and
+returns stdout plus exit code.
 `wine_process_resolve_known_kernel32_module(...)` and
 `wine_process_resolve_known_kernel32_module_ex(...)` run bounded KERNEL32
 `GetModuleHandleW`/`LoadLibraryW` or `LoadLibraryExW`/`GetProcAddress`/
@@ -269,8 +271,9 @@ plus an executable entry section, and asks `src/lib/common/wine_cpu_exec.spl`
 for a CPU-level hello execution plan. That CPU plan combines the non-native-jump
 CPU/thread envelope, instruction-dispatch evidence, and a tiny x86_64 hello
 call skeleton decoded by `src/lib/common/wine_x86_64_decode.spl`, including
-relative call targets for the known import payloads and stdout buffer. The
-hello probe verifies the import binding plan and CPU execution plan agree, then
+RIP-relative indirect call targets for the known patched thunk slots and the
+stdout buffer. The hello probe verifies the import binding plan and CPU
+execution plan agree on those thunk RVAs, then
 passes the CPU plan to the fixture dispatcher before bridging any output. It resolves the concrete
 milestone NT calls through `src/lib/common/wine_nt_api_catalog.spl` and
 `src/lib/common/wine_nt_bridge.spl`, including stdout handle and byte-count

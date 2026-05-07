@@ -75,39 +75,27 @@ fn _minimal_image() -> [u8]:
     data
 
 fn _put_hello_code(data: [u8], offset: i64) -> [u8]:
-    data[offset] = 0x48
-    data[offset + 1] = 0x31
-    data[offset + 2] = 0xc9
-    data[offset + 3] = 0xe8
-    data = _put_u32_le(data, offset + 4, 0x68)
-    data[offset + 8] = 0x48
-    data[offset + 9] = 0x8d
-    data[offset + 10] = 0x15
-    data = _put_u32_le(data, offset + 11, 0x101)
-    data[offset + 15] = 0xe8
-    data = _put_u32_le(data, offset + 16, 0x7c)
-    data[offset + 20] = 0x31
-    data[offset + 21] = 0xc9
-    data[offset + 22] = 0xe8
-    data = _put_u32_le(data, offset + 23, 0x95)
-    data
+    _put_hello_code_at_rva(data, offset, 0x2010)
 
 fn _put_hello_code_at_rva(data: [u8], offset: i64, code_rva: i64) -> [u8]:
     data[offset] = 0x48
     data[offset + 1] = 0x31
     data[offset + 2] = 0xc9
-    data[offset + 3] = 0xe8
-    data = _put_u32_le(data, offset + 4, 0x2080 - (code_rva + 8))
-    data[offset + 8] = 0x48
-    data[offset + 9] = 0x8d
-    data[offset + 10] = 0x15
-    data = _put_u32_le(data, offset + 11, 0x2120 - (code_rva + 15))
-    data[offset + 15] = 0xe8
-    data = _put_u32_le(data, offset + 16, 0x20a0 - (code_rva + 20))
-    data[offset + 20] = 0x31
-    data[offset + 21] = 0xc9
-    data[offset + 22] = 0xe8
-    data = _put_u32_le(data, offset + 23, 0x20c0 - (code_rva + 27))
+    data[offset + 3] = 0xff
+    data[offset + 4] = 0x15
+    data = _put_u32_le(data, offset + 5, 0x2060 - (code_rva + 9))
+    data[offset + 9] = 0x48
+    data[offset + 10] = 0x8d
+    data[offset + 11] = 0x15
+    data = _put_u32_le(data, offset + 12, 0x2120 - (code_rva + 16))
+    data[offset + 16] = 0xff
+    data[offset + 17] = 0x15
+    data = _put_u32_le(data, offset + 18, 0x2068 - (code_rva + 22))
+    data[offset + 22] = 0x31
+    data[offset + 23] = 0xc9
+    data[offset + 24] = 0xff
+    data[offset + 25] = 0x15
+    data = _put_u32_le(data, offset + 26, 0x2070 - (code_rva + 30))
     data
 
 fn _put_hello_code_with_safe_prologue(data: [u8], offset: i64) -> [u8]:
@@ -184,9 +172,9 @@ describe "Wine CPU execution gates":
         expect wine_x86_64_dispatch_gate("x86_64-dispatch x86_64-dispatch-no-native-jump") == "missing-x86_64-dispatch-import-calls-only"
 
     it "gates CPU entry scanning with bounded x86_64 decode evidence":
-        expect wine_cpu_entry_scan_gate(_put_hello_code(_minimal_image(), 0x210), 27, 16) == "ready"
-        expect wine_cpu_entry_scan_gate(_put_hello_code(_minimal_image(), 0x210), 27, 3) == "instruction-limit"
-        expect wine_cpu_entry_scan_gate(_put_hello_code(_minimal_image(), 0x210), 4, 16) == "instruction-window-overrun:call-rel32"
+        expect wine_cpu_entry_scan_gate(_put_hello_code(_minimal_image(), 0x210), 30, 16) == "ready"
+        expect wine_cpu_entry_scan_gate(_put_hello_code(_minimal_image(), 0x210), 30, 3) == "instruction-limit"
+        expect wine_cpu_entry_scan_gate(_put_hello_code(_minimal_image(), 0x210), 4, 16) == "instruction-window-overrun:call-rip-indirect"
 
     it "serializes structured execution evidence for the hello gate":
         val partial = wine_cpu_execution_evidence(true, true, false, false, false, false, false, false, false, false)
@@ -201,8 +189,8 @@ describe "Wine CPU execution gates":
         val plan = wine_cpu_hello_execution_plan(_put_hello_code(_minimal_image(), 0x210), _verified_dispatch_gates())
         expect plan.ok == true
         expect plan.sequence_rva == 0x2010
-        expect plan.sequence_end_rva == 0x202b
-        expect plan.instruction_sequence == "xor-rcx-rcx call-rel32 lea-rdx-rip-rel32 call-rel32 xor-ecx-ecx call-rel32"
+        expect plan.sequence_end_rva == 0x202e
+        expect plan.instruction_sequence == "xor-rcx-rcx call-rip-indirect lea-rdx-rip-rel32 call-rip-indirect xor-ecx-ecx call-rip-indirect"
         expect plan.instruction_count == 6
         expect plan.call_sequence == "GetStdHandle WriteFile ExitProcess"
         expect plan.call_count == 3
@@ -218,4 +206,4 @@ describe "Wine CPU execution gates":
     it "accepts structured evidence for the CPU-level hello plan":
         val plan = wine_cpu_hello_execution_plan_from_evidence(_put_hello_code(_minimal_image(), 0x210), wine_cpu_execution_evidence_all_ready())
         expect plan.ok == true
-        expect plan.exit_process_rva == 0x20c0
+        expect plan.exit_process_rva == 0x2070

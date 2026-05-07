@@ -629,6 +629,10 @@ and arbitrary process execution are still outside the completed surface.
 `wine_process_prepare_known_console_image(...)` now makes that patched image the
 handoff into known-console dispatch and execution, so the bounded decoder and
 modeled NT bridge no longer run from the unpatched fixture bytes.
+The controlled hello CPU skeleton now uses RIP-relative indirect calls through
+the patched KERNEL32 thunk RVAs (`0x2060`, `0x2068`, and `0x2070`) instead of
+direct calls to import-name RVAs. This keeps known-console dispatch tied to the
+bounded IAT patch records while preserving the arbitrary-instruction block.
 
 Fresh evidence:
 
@@ -646,6 +650,9 @@ Fresh evidence:
 - `bin/simple test test/lib/common/wine_process_session_thunk_apply_spec.spl --mode=interpreter --clean`: covers bounded copied-image byte patching for the known KERNEL32 thunk slots.
 - `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_process_thunk_apply_spec.spl --mode=interpreter --clean`: includes REQ-025 bounded import thunk byte patching coverage.
 - `bin/simple test test/lib/common/wine_kernel32_module_loader_spec.spl --mode=interpreter --clean`: keeps the lower KERNEL32 module-loader bridge covered.
+- `bin/simple test test/lib/common/wine_x86_64_decode_spec.spl --mode=interpreter --clean`: covers RIP-relative indirect call decoding and thunk-RVA target extraction.
+- `bin/simple test test/lib/common/wine_hello_exe_spec.spl --mode=interpreter --clean`: covers import-binding agreement against thunk RVAs.
+- `bin/simple test test/lib/common/wine_process_session_known_console_spec.spl --mode=interpreter --clean`: keeps known-console process execution on the patched-image path.
 
 Conservative boundary: this is a curated KERNEL32 table and bounded loader
 sequence. It is not arbitrary DLL loading, host DLL mapping, Windows DLL search

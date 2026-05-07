@@ -69,6 +69,14 @@ pub fn wine_x86_64_instruction_at(data: [u8], offset: i64) -> text:
         if _u32_le(data, offset + 1) < 0:
             return "truncated-call-rel32"
         return "call-rel32"
+    if b0 == 0xff:
+        if _byte(data, offset + 1) < 0:
+            return "truncated-ff-instruction"
+        if _byte(data, offset + 1) == 0x15:
+            if _u32_le(data, offset + 2) < 0:
+                return "truncated-call-rip-indirect"
+            return "call-rip-indirect"
+        return "unsupported-ff-instruction"
     if b0 == 0x31:
         if _byte(data, offset + 1) < 0:
             return "truncated-xor-r32-r32"
@@ -113,6 +121,8 @@ pub fn wine_x86_64_instruction_len_at(data: [u8], offset: i64) -> i64:
         return 4
     if kind == "call-rel32":
         return 5
+    if kind == "call-rip-indirect":
+        return 6
     if kind == "lea-rdx-rip-rel32":
         return 7
     0
@@ -125,6 +135,7 @@ fn _wine_x86_64_instruction_supported(kind: text) -> bool:
     kind == "sub-rsp-imm8" or
     kind == "add-rsp-imm8" or
     kind == "call-rel32" or
+    kind == "call-rip-indirect" or
     kind == "lea-rdx-rip-rel32"
 
 pub fn wine_x86_64_scan_window(data: [u8], start_offset: i64, max_bytes: i64, max_instructions: i64) -> WineX86_64ScanResult:
@@ -154,7 +165,7 @@ pub fn wine_x86_64_scan_window(data: [u8], start_offset: i64, max_bytes: i64, ma
         if cursor + length > end_offset:
             return _scan_result(false, "instruction-window-overrun:" + kind, start_offset, end_offset, count, cursor, kind)
         count = count + 1
-        if kind == "call-rel32":
+        if kind == "call-rel32" or kind == "call-rip-indirect":
             call_count = call_count + 1
         last_offset = cursor
         last_instruction = kind
@@ -171,25 +182,25 @@ fn _hello_decode_plan_at(data: [u8], plan_entry_rva: i64, sequence_rva: i64, seq
     val entry_instruction = wine_x86_64_instruction_at(data, sequence_offset)
     if entry_instruction != "xor-rcx-rcx":
         return _plan_error("unsupported-entry-instruction:" + entry_instruction, plan_entry_rva)
-    if _byte(data, sequence_offset + 3) != 0xe8:
+    if _byte(data, sequence_offset + 3) != 0xff or _byte(data, sequence_offset + 4) != 0x15:
         return _plan_error("missing-get-std-handle-call", plan_entry_rva)
-    val get_std_handle_rva = _relative_target_rva(data, sequence_rva, sequence_offset + 4, 8)
-    if _byte(data, sequence_offset + 8) != 0x48 or _byte(data, sequence_offset + 9) != 0x8d or _byte(data, sequence_offset + 10) != 0x15:
+    val get_std_handle_rva = _relative_target_rva(data, sequence_rva, sequence_offset + 5, 9)
+    if _byte(data, sequence_offset + 9) != 0x48 or _byte(data, sequence_offset + 10) != 0x8d or _byte(data, sequence_offset + 11) != 0x15:
         return _plan_error("missing-stdout-buffer-load", plan_entry_rva)
-    val stdout_payload_rva = _relative_target_rva(data, sequence_rva, sequence_offset + 11, 15)
-    if _byte(data, sequence_offset + 15) != 0xe8:
+    val stdout_payload_rva = _relative_target_rva(data, sequence_rva, sequence_offset + 12, 16)
+    if _byte(data, sequence_offset + 16) != 0xff or _byte(data, sequence_offset + 17) != 0x15:
         return _plan_error("missing-write-file-call", plan_entry_rva)
-    val write_file_rva = _relative_target_rva(data, sequence_rva, sequence_offset + 16, 20)
-    if _byte(data, sequence_offset + 20) != 0x31 or _byte(data, sequence_offset + 21) != 0xc9:
+    val write_file_rva = _relative_target_rva(data, sequence_rva, sequence_offset + 18, 22)
+    if _byte(data, sequence_offset + 22) != 0x31 or _byte(data, sequence_offset + 23) != 0xc9:
         return _plan_error("missing-exit-code-zero", plan_entry_rva)
-    if _byte(data, sequence_offset + 22) != 0xe8:
+    if _byte(data, sequence_offset + 24) != 0xff or _byte(data, sequence_offset + 25) != 0x15:
         return _plan_error("missing-exit-process-call", plan_entry_rva)
-    val exit_process_rva = _relative_target_rva(data, sequence_rva, sequence_offset + 23, 27)
+    val exit_process_rva = _relative_target_rva(data, sequence_rva, sequence_offset + 26, 30)
     _plan_ready(
         plan_entry_rva,
         sequence_rva,
-        sequence_rva + 27,
-        "xor-rcx-rcx call-rel32 lea-rdx-rip-rel32 call-rel32 xor-ecx-ecx call-rel32",
+        sequence_rva + 30,
+        "xor-rcx-rcx call-rip-indirect lea-rdx-rip-rel32 call-rip-indirect xor-ecx-ecx call-rip-indirect",
         6,
         "GetStdHandle WriteFile ExitProcess",
         3,
