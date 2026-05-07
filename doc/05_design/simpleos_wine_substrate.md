@@ -335,8 +335,9 @@ check, while requests to actually execute DllMain remain hard-blocked. The
 PEB/TEB variant composes this handoff with the bounded loader-lock PEB/TEB/TLS
 startup gate before reporting DllMain handoff readiness.
 `wine_dll_prepare_file_view_dllmain_handoff_with_peb_teb_vm_writes(...)` now
-requires that retained-view DllMain handoff to pass the PEB/TEB VM
-byte-write/readback gate before the handoff can report readiness.
+routes through the VM-readback import-binding record before DllMain handoff
+planning, then requires the bounded loader-lock PEB/TEB/TLS startup gate before
+the handoff can report readiness.
 `wine_dll_record_file_view_startup_fault(...)` composes that DllMain handoff
 with modeled VM fault evidence and records the loader-lock release, SEH
 dispatch, and startup rollback boundary. Only `deliver-seh` startup faults are

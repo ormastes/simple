@@ -2,7 +2,7 @@
 
 use common.pe_coff_header.{pe_entry_point_rva, pe_rva_to_file_offset}
 use common.wine_dll_file_probe.{WineDllProbeFile}
-use common.wine_dll_view_import_binding.{wine_dll_bind_file_view_imports}
+use common.wine_dll_view_import_binding.{WineDllViewImportBindingResult, wine_dll_bind_file_view_imports, wine_dll_bind_file_view_imports_with_peb_teb_vm_writes}
 use common.wine_peb_teb.{WinePebTebLayoutWritePlan, WinePebTebMemoryWriteResult, WinePebTebVmWriteResult}
 use common.wine_pe_loader_runtime.{wine_pe_tls_callback_plan}
 use common.wine_vm_adapter.{wine_vm_no_host_code_jump_gate}
@@ -26,6 +26,9 @@ fn _dllmain_handoff_result(ok: bool, error: text, dll_name: text, selected_path:
 
 pub fn wine_dll_prepare_file_view_dllmain_handoff(dll_name: text, application_directory: text, working_directory: text, path_dirs: [text], known_dlls: [text], files: [WineDllProbeFile], data: [u8], preferred_base: i64, load_base: i64, process_id: i64, address_space_id: i64, container_evidence: text, descriptor_limit: i64, symbol_limit: i64, dynload_apis: text, allow_execution: bool) -> WineDllViewDllMainHandoffResult:
     val bound = wine_dll_bind_file_view_imports(dll_name, application_directory, working_directory, path_dirs, known_dlls, files, data, preferred_base, load_base, process_id, address_space_id, container_evidence, descriptor_limit, symbol_limit)
+    _prepare_file_view_dllmain_handoff_from_bound(bound, dynload_apis, allow_execution)
+
+fn _prepare_file_view_dllmain_handoff_from_bound(bound: WineDllViewImportBindingResult, dynload_apis: text, allow_execution: bool) -> WineDllViewDllMainHandoffResult:
     if not bound.ok:
         return _dllmain_handoff_result(false, "dll-view-import-binding:" + bound.error, bound.dll_name, bound.selected_path, bound.mapped_base, bound.mapped_size, 0, 0, 0, 0, bound.evidence, bound.status)
 
@@ -55,8 +58,9 @@ pub fn wine_dll_prepare_file_view_dllmain_handoff(dll_name: text, application_di
     _dllmain_handoff_result(true, "", bound.dll_name, bound.selected_path, bound.mapped_base, bound.mapped_size, entry_rva, entry_address, tls.callback_count, dispatch_count, evidence, "dllmain-handoff-ready")
 
 pub fn wine_dll_prepare_file_view_dllmain_handoff_with_peb_teb_vm_writes(dll_name: text, application_directory: text, working_directory: text, path_dirs: [text], known_dlls: [text], files: [WineDllProbeFile], data: [u8], preferred_base: i64, load_base: i64, process_id: i64, address_space_id: i64, container_evidence: text, descriptor_limit: i64, symbol_limit: i64, dynload_apis: text, allow_execution: bool, startup_ok: bool, startup_state: text, startup_operations: text, vm_writes: WinePebTebVmWriteResult) -> WineDllViewDllMainHandoffResult:
-    val handoff = wine_dll_prepare_file_view_dllmain_handoff(dll_name, application_directory, working_directory, path_dirs, known_dlls, files, data, preferred_base, load_base, process_id, address_space_id, container_evidence, descriptor_limit, symbol_limit, dynload_apis, allow_execution)
-    wine_dllmain_handoff_require_peb_teb_vm_writes(handoff, startup_ok, startup_state, startup_operations, vm_writes)
+    val bound = wine_dll_bind_file_view_imports_with_peb_teb_vm_writes(dll_name, application_directory, working_directory, path_dirs, known_dlls, files, data, preferred_base, load_base, process_id, address_space_id, container_evidence, descriptor_limit, symbol_limit, vm_writes)
+    val handoff = _prepare_file_view_dllmain_handoff_from_bound(bound, dynload_apis, allow_execution)
+    wine_dllmain_handoff_require_peb_teb_loader_lock(handoff, startup_ok, startup_state, startup_operations)
 
 pub fn wine_dllmain_handoff_require_peb_teb_loader_lock(handoff: WineDllViewDllMainHandoffResult, startup_ok: bool, startup_state: text, startup_operations: text) -> WineDllViewDllMainHandoffResult:
     if not startup_ok:

@@ -1489,15 +1489,15 @@ Fresh evidence:
 ## 2026-05-07 DllMain Prepare VM-Write Handoff Update
 
 `wine_dll_prepare_file_view_dllmain_handoff_with_peb_teb_vm_writes(...)` now
-requires PEB/TEB VM byte-write/readback evidence before exposing retained DLL
-view DllMain process-attach handoff readiness. The DllMain startup-fault
-VM-write wrapper now consumes that gated handoff path before non-executing SEH
-rollback can be recorded.
+routes retained DllMain process-attach handoff preparation through the
+VM-readback import-binding record before exposing handoff readiness. The
+DllMain startup-fault VM-write wrapper now consumes that gated handoff path
+before non-executing SEH rollback can be recorded.
 
 Fresh evidence:
 
-- `bin/simple test test/lib/common/wine_dll_view_dllmain_handoff_vm_write_spec.spl --mode=interpreter --clean`: covers VM-write/readback-gated retained DllMain handoff preparation.
-- `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_dll_view_dllmain_handoff_vm_write_spec.spl --mode=interpreter --clean`: covers the SimpleOS system-level retained DllMain handoff requiring PEB/TEB VM write/readback evidence.
+- `bin/simple test test/lib/common/wine_dll_view_dllmain_handoff_vm_write_spec.spl --mode=interpreter --clean`: covers retained DllMain handoff preparation consuming the VM-readback import-binding record.
+- `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_dll_view_dllmain_handoff_vm_write_spec.spl --mode=interpreter --clean`: covers the SimpleOS system-level retained DllMain handoff consuming VM-readback import binding evidence.
 
 ## 2026-05-07 Import-Loader Transaction VM-Write Update
 
