@@ -28,7 +28,7 @@ The high-value focused compatibility slice migrated into SSpec is modern CSS sel
 - `:is(section, .card)` selector-list matching
 - `:where(section, .card)` selector-list matching
 - `div:is(.card, .panel)` tag-qualified matching
-- Simplified DOM event registration, cancelation, propagation, default-action metadata, keyboard activation, id path dispatch, and basic mouse/pointer payload fields
+- Simplified DOM event registration, cancelation, propagation, default-action metadata, keyboard activation, id path dispatch, and basic mouse/pointer payload fields including modifier-key state
 - Layout-coordinate hit testing through pointer-derived `mousedown`/`mouseup`/`click` dispatch
 
 Coverage lives in:
@@ -43,8 +43,8 @@ Implemented modern selector-list pseudo matching for:
 
 - Style-block DOM matching in `src/lib/gc_async_mut/gpu/browser_engine/style_block.spl`
 - Fallback pixel renderer style-block extraction in `src/lib/gc_async_mut/gpu/browser_engine/browser_renderer.spl`
-- Browser-engine DOM listener storage, deterministic capture/target/bubble dispatch, default-action metadata, and basic pointer event payload fields in `src/lib/gc_async_mut/gpu/browser_engine/dom.spl`
-- Browser-engine layout hit-test event routing, coordinate/button payload propagation, and same-target pointer click synthesis in `src/lib/gc_async_mut/gpu/browser_engine/layout.spl`
+- Browser-engine DOM listener storage, deterministic capture/target/bubble dispatch, default-action metadata, and basic pointer event payload fields with modifier keys in `src/lib/gc_async_mut/gpu/browser_engine/dom.spl`
+- Browser-engine layout hit-test event routing, coordinate/button/modifier payload propagation, and same-target pointer click synthesis in `src/lib/gc_async_mut/gpu/browser_engine/layout.spl`
 
 The fallback CSS scanner now avoids splitting commas inside functional selector pseudos.
 
@@ -53,5 +53,5 @@ The fallback CSS scanner now avoids splitting commas inside functional selector 
 - No complete WPT migration yet. A practical next step is a small fixture importer for selected WPT CSS selector/rendering cases.
 - No complete Test262 migration yet. A practical next step is a Simple-compatible Test262 subset runner for parser-only and interpreter-supported ES2025 cases.
 - HTML modern element semantics such as popover, dialog modal behavior, inert, declarative shadow DOM, and full form validation are not claimed.
-- DOM Events support is still partial: no executable JavaScript callbacks, composed/shadow paths, retargeting, trusted events, async event-loop delivery, pointer capture, pressure/tilt/tangential pointer data, modifier keys, related targets, or full `MouseEvent`/`PointerEvent` parity are claimed.
+- DOM Events support is still partial: no executable JavaScript callbacks, composed/shadow paths, retargeting, trusted events, async event-loop delivery, pointer capture, pressure/tilt/tangential pointer data, related targets, or full `MouseEvent`/`PointerEvent` parity are claimed.
 - CSS modern layout systems such as container queries, subgrid, cascade layers, and nesting are not claimed complete.

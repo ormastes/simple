@@ -42,6 +42,20 @@ struct MiHeap:
     size_classes: [usize]
     pages_by_class: [[MiPage]]
 
+struct MiStats:
+    """Small statistics snapshot for the Simple mimalloc compatibility layer."""
+    allocated: usize
+    peak_allocated: usize
+    raw_allocated: usize
+    allocation_count: usize
+    free_count: usize
+
+enum MiOption:
+    ShowStats
+    Verbose
+    EagerCommit
+    Secure
+
 # ============================================================================
 # OS page provider hook (kernel sets this; default stub returns 0 = failure)
 # ============================================================================
@@ -63,6 +77,13 @@ fn mimalloc_set_os_page_alloc(f: fn(usize) -> usize):
 var _g_heap: MiHeap = MiHeap(size_classes: [], pages_by_class: [])
 var _g_total_allocated: usize = 0
 var _g_raw_allocated: usize = 0
+var _g_peak_allocated: usize = 0
+var _g_allocation_count: usize = 0
+var _g_free_count: usize = 0
+var _g_option_show_stats: bool = false
+var _g_option_verbose: bool = false
+var _g_option_eager_commit: bool = false
+var _g_option_secure: bool = false
 
 # ============================================================================
 # Size-class lookup (no >> — D-2 Cranelift workaround)
@@ -117,6 +138,9 @@ fn mimalloc_init(heap: MiHeap):
     _g_heap = heap
     _g_total_allocated = 0
     _g_raw_allocated = 0
+    _g_peak_allocated = 0
+    _g_allocation_count = 0
+    _g_free_count = 0
     _g_os_page_alloc = _default_os_page_alloc
     # If no pages_by_class provided, build empty lists for each size class
     if _g_heap.pages_by_class.len() == 0:
@@ -165,6 +189,17 @@ fn _ensure_class_slot(class_idx: usize):
     while pbc.len() <= class_idx:
         pbc = pbc.push([])
     _g_heap = MiHeap(size_classes: _g_heap.size_classes, pages_by_class: pbc)
+
+fn _record_allocation(size: usize):
+    _g_total_allocated = _g_total_allocated + size
+    _g_allocation_count = _g_allocation_count + 1
+    if _g_total_allocated > _g_peak_allocated:
+        _g_peak_allocated = _g_total_allocated
+
+fn _record_free(size: usize):
+    if _g_total_allocated >= size:
+        _g_total_allocated = _g_total_allocated - size
+    _g_free_count = _g_free_count + 1
 
 # ============================================================================
 # Page operations
@@ -262,7 +297,7 @@ fn mi_malloc(size: usize) -> [u8]?:
                 class_pages[page_idx] = updated_page
                 new_pages[class_idx] = class_pages
                 _g_heap = MiHeap(size_classes: _g_heap.size_classes, pages_by_class: new_pages)
-                _g_total_allocated = _g_total_allocated + actual_size
+                _record_allocation(actual_size)
                 found_ptr = ptr_opt
                 found = true
         page_idx = page_idx + 1
@@ -285,7 +320,7 @@ fn mi_malloc(size: usize) -> [u8]?:
     _g_heap = MiHeap(size_classes: _g_heap.size_classes, pages_by_class: new_pages2)
 
     if ptr_opt2.?:
-        _g_total_allocated = _g_total_allocated + actual_size
+        _record_allocation(actual_size)
 
     ptr_opt2
 
@@ -392,8 +427,7 @@ fn mi_free(ptr: [u8], size: usize):
             new_pages[class_idx] = class_pages
             _g_heap = MiHeap(size_classes: _g_heap.size_classes, pages_by_class: new_pages)
             val actual_size = _class_size(class_idx)
-            if _g_total_allocated >= actual_size:
-                _g_total_allocated = _g_total_allocated - actual_size
+            _record_free(actual_size)
             freed = true
         page_idx = page_idx + 1
 
@@ -511,6 +545,66 @@ fn mi_free_raw(addr: usize, size: usize):
 fn mi_raw_allocated() -> usize:
     """Total bytes tracked by mi_malloc_raw (for diagnostics)."""
     _g_raw_allocated
+
+# ============================================================================
+# Stats, collection, and options compatibility shims
+# ============================================================================
+
+fn mi_stats_current() -> MiStats:
+    """Return a snapshot of modeled allocator statistics."""
+    MiStats(
+        allocated: _g_total_allocated,
+        peak_allocated: _g_peak_allocated,
+        raw_allocated: _g_raw_allocated,
+        allocation_count: _g_allocation_count,
+        free_count: _g_free_count,
+    )
+
+fn mi_stats_reset():
+    """Reset modeled statistics without changing allocated heap contents."""
+    _g_peak_allocated = _g_total_allocated
+    _g_allocation_count = 0
+    _g_free_count = 0
+
+fn mi_collect(_force: bool):
+    """Collection hook.
+
+    The structural port has no abandoned segments yet; collection is a no-op
+    compatibility entrypoint.
+    """
+    return
+
+fn mi_heap_collect(_heap: MiHeap, force: bool):
+    """Heap-specific collection hook over the current single global heap."""
+    mi_collect(force)
+
+fn mi_version() -> text:
+    """Return a Simple compatibility-layer version string."""
+    "simple-mimalloc-compat"
+
+fn mi_option_is_enabled(option: MiOption) -> bool:
+    match option:
+        case MiOption.ShowStats: _g_option_show_stats
+        case MiOption.Verbose: _g_option_verbose
+        case MiOption.EagerCommit: _g_option_eager_commit
+        case MiOption.Secure: _g_option_secure
+
+fn mi_option_enable(option: MiOption):
+    mi_option_set_enabled(option, true)
+
+fn mi_option_disable(option: MiOption):
+    mi_option_set_enabled(option, false)
+
+fn mi_option_set_enabled(option: MiOption, enabled: bool):
+    match option:
+        case MiOption.ShowStats:
+            _g_option_show_stats = enabled
+        case MiOption.Verbose:
+            _g_option_verbose = enabled
+        case MiOption.EagerCommit:
+            _g_option_eager_commit = enabled
+        case MiOption.Secure:
+            _g_option_secure = enabled
 
 # ============================================================================
 # MimallocAllocator — implements Allocator trait
