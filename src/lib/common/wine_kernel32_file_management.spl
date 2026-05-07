@@ -1,0 +1,41 @@
+"""Bounded KERNEL32 file-management bridge for Wine startup probes."""
+
+use common.wine_nt_api_catalog.{wine_nt_api_kernel32_file_management_dispatch_gate}
+use common.wine_nt_file_io.{
+    WineNtFileIoResult,
+    WineNtFileTable,
+    wine_nt_file_delete_w
+}
+
+class WineKernel32FileManagementResult:
+    ok: bool
+    error: text
+    table: WineNtFileTable
+    operations: text
+
+fn _result(ok: bool, error: text, table: WineNtFileTable, operations: text) -> WineKernel32FileManagementResult:
+    WineKernel32FileManagementResult(ok: ok, error: error, table: table, operations: operations)
+
+fn _sequence_gate(symbols: [text]) -> text:
+    val dispatch_state = wine_nt_api_kernel32_file_management_dispatch_gate(symbols)
+    if dispatch_state != "ready":
+        return dispatch_state
+    if symbols.len() != 1:
+        return "kernel32-file-management-sequence-count-mismatch"
+    if symbols[0] != "DeleteFileW":
+        return "kernel32-file-management-sequence-expected:DeleteFileW"
+    "ready"
+
+fn _failure(symbol: text, step: WineNtFileIoResult, operations: text) -> WineKernel32FileManagementResult:
+    _result(false, symbol + ":" + step.state, step.table, operations)
+
+pub fn wine_kernel32_execute_file_delete(symbols: [text], table: WineNtFileTable, path: text) -> WineKernel32FileManagementResult:
+    val sequence_state = _sequence_gate(symbols)
+    if sequence_state != "ready":
+        return _result(false, sequence_state, table, "")
+
+    val deleted = wine_nt_file_delete_w(table, path)
+    if not deleted.ok:
+        return _failure("DeleteFileW", deleted, "")
+
+    _result(true, "", deleted.table, "DeleteFileW")

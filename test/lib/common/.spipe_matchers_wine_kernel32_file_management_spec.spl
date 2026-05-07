@@ -1,0 +1,46 @@
+use common.wine_kernel32_file_management.{wine_kernel32_execute_file_delete}
+use common.wine_nt_file_io.{WineNtFileTable, wine_nt_file_create_w, wine_nt_file_get_attributes_w, wine_nt_file_table_add_file, wine_nt_file_table_new}
+
+fn _all_adapter_apis() -> text:
+    "fd-open fd-read fd-write fd-close fd-dup fd-inherit stdio pipe socket timer poll-wait " +
+        "cwd env argv spawn path-normalize path-attrs path-locks errno-map"
+
+fn _all_async_features() -> text:
+    "io-driver submit-open submit-read submit-write submit-close submit-timeout poll-completion " +
+        "event-loop register-fd deregister-fd waker wake"
+
+fn _table_with_file() -> WineNtFileTable:
+    wine_nt_file_table_add_file(wine_nt_file_table_new(_all_adapter_apis(), _all_async_features()), "C:\\temp.tmp", "temp")
+
+describe "Wine KERNEL32 file-management bridge":
+    it "executes a bounded DeleteFileW sequence":
+        val result = wine_kernel32_execute_file_delete(["DeleteFileW"], _table_with_file(), "C:\\temp.tmp")
+
+        expect result.ok == true
+        expect result.operations == "DeleteFileW"
+        expect wine_nt_file_get_attributes_w(result.table, "C:\\temp.tmp").state == "file-not-found"
+
+    it "keeps file-management dispatch ordered and bounded":
+        val extra = wine_kernel32_execute_file_delete(["DeleteFileW", "CloseHandle"], _table_with_file(), "C:\\temp.tmp")
+        expect extra.ok == false
+        expect extra.error == "bridge-wrong-category:CloseHandle"
+
+        val wrong_family = wine_kernel32_execute_file_delete(["HeapAlloc"], _table_with_file(), "C:\\temp.tmp")
+        expect wrong_family.ok == false
+        expect wrong_family.error == "bridge-wrong-category:HeapAlloc"
+
+    it "propagates readiness, missing-file, and sharing-violation errors":
+        val blocked = wine_nt_file_table_new("fd-open fd-read", _all_async_features())
+        val not_ready = wine_kernel32_execute_file_delete(["DeleteFileW"], blocked, "C:\\temp.tmp")
+        expect not_ready.ok == false
+        expect not_ready.error == "DeleteFileW:missing-api-fd-write"
+
+        val missing = wine_kernel32_execute_file_delete(["DeleteFileW"], _table_with_file(), "C:\\missing.tmp")
+        expect missing.ok == false
+        expect missing.error == "DeleteFileW:file-not-found"
+
+        val table = _table_with_file()
+        val opened = wine_nt_file_create_w(table, "C:\\temp.tmp")
+        val sharing = wine_kernel32_execute_file_delete(["DeleteFileW"], opened.table, "C:\\temp.tmp")
+        expect sharing.ok == false
+        expect sharing.error == "DeleteFileW:sharing-violation"

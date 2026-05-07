@@ -61,6 +61,12 @@ fn _find_handle(handles: [WineNtFileHandle], handle: i64) -> WineNtFileHandle:
             return item
     _handle(0, "", 0, false)
 
+fn _has_open_handle(table: WineNtFileTable, path: text) -> bool:
+    for item in table.handles:
+        if item.path == path and item.open:
+            return true
+    false
+
 fn _replace_handle(table: WineNtFileTable, replacement: WineNtFileHandle) -> WineNtFileTable:
     var handles: [WineNtFileHandle] = []
     for item in table.handles:
@@ -69,6 +75,13 @@ fn _replace_handle(table: WineNtFileTable, replacement: WineNtFileHandle) -> Win
         else:
             handles.push(item)
     _table(table.files, handles, table.next_handle, table.ready, table.state)
+
+fn _remove_file(table: WineNtFileTable, path: text) -> WineNtFileTable:
+    var files: [WineNtModeledFile] = []
+    for item in table.files:
+        if item.path != path:
+            files.push(item)
+    _table(files, table.handles, table.next_handle, table.ready, table.state)
 
 pub fn wine_nt_file_io_required_calls() -> [text]:
     [
@@ -79,7 +92,8 @@ pub fn wine_nt_file_io_required_calls() -> [text]:
         "GetFileAttributesW",
         "GetFileSize",
         "GetFileInformationByHandle",
-        "SetFilePointer"
+        "SetFilePointer",
+        "DeleteFileW"
     ]
 
 pub fn wine_nt_file_table_new(posix_apis: text, async_features: text) -> WineNtFileTable:
@@ -147,6 +161,18 @@ pub fn wine_nt_file_get_attributes_w(table: WineNtFileTable, path: text) -> Wine
     if file.path == "":
         return _metadata_result(false, "file-not-found", table, 0, -1)
     _metadata_result(true, "attributes", table, 0, 0x80)
+
+pub fn wine_nt_file_delete_w(table: WineNtFileTable, path: text) -> WineNtFileIoResult:
+    if not table.ready:
+        return _result(false, table.state, table, 0, "", 0)
+    if path == "":
+        return _result(false, "invalid-path", table, 0, "", 0)
+    val file = _find_file(table.files, path)
+    if file.path == "":
+        return _result(false, "file-not-found", table, 0, "", 0)
+    if _has_open_handle(table, path):
+        return _result(false, "sharing-violation", table, 0, "", 0)
+    _result(true, "deleted", _remove_file(table, path), 0, "", 0)
 
 pub fn wine_nt_file_get_size(table: WineNtFileTable, handle: i64) -> WineNtFileMetadataResult:
     val opened = _find_handle(table.handles, handle)
