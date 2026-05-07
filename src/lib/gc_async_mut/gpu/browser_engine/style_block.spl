@@ -8,7 +8,7 @@
 #   - Tag selectors: div, span, p, h1-h6, etc.
 #   - Class selectors: .container, .active
 #   - ID selectors: #main, #header
-#   - Attribute selectors: [data-state], div[data-state="active"] (basic exact/presence)
+#   - Attribute selectors: [data-state], div[data-state="active"], prefix/substring/token operators (partial)
 #   - Compound: div.active, span.highlight
 #   - Comma-separated: div, span { ... }
 #   - Descendant: div span { ... } (limited — matches if ANY ancestor matches)
@@ -534,11 +534,44 @@ fn attribute_selector_matches(selector: text, node: BeDomNode, nth: i32) -> bool
     val eq_pos = sb_find(body, "=", 0)
     if eq_pos >= 999999999:
         return be_dom_has_attr(node, body.lower())
-    val key = body.slice(0, eq_pos).trim().lower()
+    val op = sb_attr_operator(body, eq_pos)
+    var key_end = eq_pos
+    if op != "=":
+        key_end = eq_pos - 1
+    val key = body.slice(0, key_end).trim().lower()
     val expected = sb_unquote_attr_value(body.slice(eq_pos + 1, body.len()).trim())
     if key.len() == 0:
         return false
-    be_dom_has_attr(node, key) and be_dom_get_attr(node, key) == expected
+    if not be_dom_has_attr(node, key):
+        return false
+    sb_attr_value_matches(be_dom_get_attr(node, key), op, expected)
+
+fn sb_attr_operator(body: text, eq_pos: i32) -> text:
+    if eq_pos > 0:
+        val marker = body.char_at(eq_pos - 1)
+        if marker == "^" or marker == "*" or marker == "~":
+            return marker + "="
+    "="
+
+fn sb_attr_value_matches(actual: text, op: text, expected: text) -> bool:
+    if op == "=":
+        return actual == expected
+    if op == "^=":
+        return actual.starts_with(expected)
+    if op == "*=":
+        return actual.contains(expected)
+    if op == "~=":
+        return sb_attr_token_contains(actual, expected)
+    false
+
+fn sb_attr_token_contains(actual: text, expected: text) -> bool:
+    val parts = sb_split_ws(actual)
+    var idx = 0
+    while idx < parts.len():
+        if parts[idx] == expected:
+            return true
+        idx = idx + 1
+    false
 
 fn sb_unquote_attr_value(value: text) -> text:
     if value.len() >= 2:
