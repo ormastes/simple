@@ -598,17 +598,23 @@ process-session plan, then route the request through the existing KERNEL32
 module-loader bridge to return module handle, procedure address, ordered loader
 operations, and rejected/blocked status evidence. The `LoadLibraryExW` process
 path accepts the modeled zero-flags case and rejects unsupported flags.
+`wine_process_resolve_first_import_module(...)` composes PE import inspection
+with the same resolver, allowing a validated full-Wine process image to resolve
+a requested procedure against its first imported KERNEL32 module through the
+curated zero-flags `LoadLibraryExW` loader table.
 
 Fresh evidence:
 
 - `bin/simple test test/lib/common/wine_process_session_module_loader_spec.spl --mode=interpreter --clean`: covers successful KERNEL32 procedure resolution through `LoadLibraryW` and `LoadLibraryExW`, unsupported module rejection, unsupported flag rejection, and controlled-session blocking.
 - `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_process_module_loader_spec.spl --mode=interpreter --clean`: includes REQ-020 process module-resolution coverage for both loader calls and rejection paths.
+- `bin/simple test test/lib/common/wine_process_session_first_import_module_spec.spl --mode=interpreter --clean`: covers first-import-module resolution and import-inspection gating.
+- `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_process_first_import_module_spec.spl --mode=interpreter --clean`: includes REQ-021 first-import module-loader bridge coverage.
 - `bin/simple test test/lib/common/wine_kernel32_module_loader_spec.spl --mode=interpreter --clean`: keeps the lower KERNEL32 module-loader bridge covered.
 
 Conservative boundary: this is a curated KERNEL32 table and bounded loader
 sequence. It is not arbitrary DLL loading, host DLL mapping, Windows DLL search
-order, PE DLL relocation, reference-count-complete loader state, or broad
-Win32/NT behavior.
+order, import-table-wide binding, PE DLL relocation, reference-count-complete
+loader state, or broad Win32/NT behavior.
 
 ## Completion Decision
 

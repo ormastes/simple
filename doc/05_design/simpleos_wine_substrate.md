@@ -155,6 +155,11 @@ plan through the existing modeled NT bridge and returns stdout plus exit code.
 `FreeLibrary` sequences for full-Wine process plans and return
 handle/procedure evidence without arbitrary DLL loading. The `LoadLibraryExW`
 path currently accepts only the modeled zero-flags case.
+`wine_process_resolve_first_import_module(...)` composes the PE first-import
+inspection gate with that module resolver, so validated full-Wine process
+images can resolve a requested procedure against their first imported KERNEL32
+module through the same bounded zero-flags `LoadLibraryExW` table before any
+future import-table-wide loader pass is added.
 
 `src/app/wine_process_session_plan/main.spl` exposes the controlled hello
 process-session handoff as a command. It prints command, substrate readiness,
