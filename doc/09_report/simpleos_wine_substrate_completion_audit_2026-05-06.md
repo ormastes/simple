@@ -1445,3 +1445,15 @@ passes after moving known-console dispatch coverage into a focused spec, but it
 still runs near the 60s interpreter watchdog. Split the remaining import and
 CPU preflight examples into focused specs before adding more coverage to the
 aggregate session-planning spec.
+
+## 2026-05-07 Known-Console Dispatch VM-Write Update
+
+`wine_process_plan_known_console_dispatch_with_peb_teb_vm_writes(...)` now
+requires the PEB/TEB VM byte-write/readback-gated mapped-image path before a
+known-console dispatch plan can be decoded. Failed VM byte-write composition
+blocks dispatch planning before instruction decoding is reported.
+
+Fresh evidence:
+
+- `bin/simple test test/lib/common/wine_process_session_known_console_dispatch_spec.spl --mode=interpreter --clean`: covers VM-write/readback-gated known-console dispatch planning and failure propagation.
+- `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_known_console_dispatch_spec.spl --mode=interpreter --clean`: covers the SimpleOS system-level known-console dispatch path requiring PEB/TEB VM write/readback evidence.
