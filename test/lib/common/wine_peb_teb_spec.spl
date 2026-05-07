@@ -1,5 +1,5 @@
 use common.wine_kernel32_critical_section.{wine_kernel32_critical_section_table_new}
-use common.wine_peb_teb.{WinePebTebInitEvidence, wine_peb_teb_init_default, wine_peb_teb_init_gate, wine_peb_teb_init_with_loader_lock, wine_peb_teb_layout_byte_writes, wine_peb_teb_layout_write_plan, wine_peb_teb_memory_write_gate, wine_peb_teb_required_evidence}
+use common.wine_peb_teb.{WinePebTebInitEvidence, wine_peb_teb_apply_layout_byte_writes, wine_peb_teb_init_default, wine_peb_teb_init_gate, wine_peb_teb_init_with_loader_lock, wine_peb_teb_layout_byte_writes, wine_peb_teb_layout_write_plan, wine_peb_teb_memory_write_gate, wine_peb_teb_required_evidence}
 use common.wine_vm_adapter.{WineVmSpace, wine_vm_commit, wine_vm_process_space_new, wine_vm_reserve_fixed}
 
 fn _loader_lock_symbols() -> [text]:
@@ -182,3 +182,29 @@ describe "Wine PEB/TEB initialization gate":
         expect(bytes.ok).to_equal(false)
         expect(bytes.state).to_equal("layout:write:peb-write:page-fault-unmapped")
         expect(bytes.write_count).to_equal(0)
+
+    it "applies PEB/TEB byte writes to VM memory and verifies readback":
+        val init = wine_peb_teb_init_default()
+        val writes = wine_peb_teb_memory_write_gate(init, _peb_teb_write_space())
+        val plan = wine_peb_teb_layout_write_plan(init, writes)
+        val bytes = wine_peb_teb_layout_byte_writes(plan)
+        val applied = wine_peb_teb_apply_layout_byte_writes(_peb_teb_write_space(), bytes)
+
+        expect(applied.ok).to_equal(true)
+        expect(applied.state).to_equal("ready")
+        expect(applied.write_count).to_equal(6)
+        expect(applied.byte_count).to_equal(48)
+        expect(applied.operations).to_contain("PEBTEBLayoutVMBytesWritten")
+        expect(applied.operations).to_contain("PEBTEBLayoutVMReadback")
+
+    it "blocks PEB/TEB VM byte writes on read-only startup memory":
+        val init = wine_peb_teb_init_default()
+        val writes = wine_peb_teb_memory_write_gate(init, _peb_teb_write_space())
+        val plan = wine_peb_teb_layout_write_plan(init, writes)
+        val bytes = wine_peb_teb_layout_byte_writes(plan)
+        val read_only = _commit_fixed(wine_vm_process_space_new(10, 30, "pid fs ipc net capability"), 0x7ffde000, 0x1000, "r")
+        val applied = wine_peb_teb_apply_layout_byte_writes(read_only, bytes)
+
+        expect(applied.ok).to_equal(false)
+        expect(applied.state).to_equal("vm-write:NtTib.StackBase:page-fault-write")
+        expect(applied.write_count).to_equal(0)

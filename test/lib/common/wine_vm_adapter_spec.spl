@@ -11,9 +11,11 @@ use common.wine_vm_adapter.{
     wine_vm_regions_overlap,
     wine_vm_reserve,
     wine_vm_reserve_fixed,
+    wine_vm_read_bytes,
     wine_vm_space_find,
     wine_vm_space_new,
-    wine_vm_unmap
+    wine_vm_unmap,
+    wine_vm_write_bytes
 }
 
 fn _fault() -> WineVmFault:
@@ -47,6 +49,31 @@ describe "Wine VM adapter model":
         expect(protected.state).to_equal("protected")
         expect(wine_vm_access_gate(protected.space, 0x500000, "execute")).to_equal("ready")
         expect(wine_vm_access_gate(protected.space, 0x500000, "write")).to_equal("page-fault-write")
+
+    it "writes and reads modeled bytes from committed writable VM memory":
+        val reserved = wine_vm_reserve_fixed(wine_vm_space_new(), 0x510000, 0x1000)
+        val committed = wine_vm_commit(reserved.space, 0x510000, "rw")
+        val written = wine_vm_write_bytes(committed.space, 0x510008, [1, 2, 3, 4])
+        expect(written.ok).to_equal(true)
+        expect(written.operations).to_equal("VMBytesWritten")
+
+        val read = wine_vm_read_bytes(written.space, 0x510008, 4)
+        expect(read.ok).to_equal(true)
+        expect(read.operations).to_equal("VMBytesRead")
+        expect(read.bytes[0]).to_equal(1)
+        expect(read.bytes[3]).to_equal(4)
+
+    it "rejects modeled byte writes that cross region bounds or write-protected pages":
+        val reserved = wine_vm_reserve_fixed(wine_vm_space_new(), 0x520000, 0x10)
+        val committed = wine_vm_commit(reserved.space, 0x520000, "r")
+        val protected = wine_vm_write_bytes(committed.space, 0x520000, [1])
+        expect(protected.ok).to_equal(false)
+        expect(protected.state).to_equal("page-fault-write")
+
+        val rw = wine_vm_protect(committed.space, 0x520000, "rw")
+        val boundary = wine_vm_write_bytes(rw.space, 0x52000f, [1, 2])
+        expect(boundary.ok).to_equal(false)
+        expect(boundary.state).to_equal("page-fault-boundary")
 
     it "reports guard and uncommitted faults":
         val reserved = wine_vm_reserve_fixed(wine_vm_space_new(), 0x600000, 0x1000)

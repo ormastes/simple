@@ -1271,3 +1271,17 @@ Fresh evidence:
 
 - `bin/simple test test/lib/common/wine_peb_teb_spec.spl --mode=interpreter --clean`: covers successful layout byte payload generation and layout rejection.
 - `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_peb_teb_spec.spl --mode=interpreter --clean`: covers the SimpleOS system-level layout byte payload handoff.
+
+## 2026-05-07 PEB/TEB VM Byte-Write Readback Update
+
+`wine_vm_write_bytes(...)` and `wine_vm_read_bytes(...)` now model committed
+VM byte writes and readback with permission and region-boundary checks.
+`wine_peb_teb_apply_layout_byte_writes(...)` composes the PEB/TEB layout
+payloads through that VM byte ledger and verifies readback before reporting
+VM-backed startup mutation evidence.
+
+Fresh evidence:
+
+- `bin/simple test test/lib/common/wine_vm_adapter_spec.spl --mode=interpreter --clean`: covers modeled VM byte write/readback and write rejection.
+- `bin/simple test test/lib/common/wine_peb_teb_spec.spl --mode=interpreter --clean`: covers PEB/TEB layout byte application plus read-only startup-memory rejection.
+- `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_peb_teb_spec.spl --mode=interpreter --clean`: covers the SimpleOS system-level PEB/TEB VM byte-write/readback path.

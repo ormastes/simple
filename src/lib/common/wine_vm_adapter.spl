@@ -11,8 +11,13 @@ class WineVmRegion:
     backing: text
     kind: text
 
+class WineVmMemoryWrite:
+    address: i64
+    bytes: [u8]
+
 class WineVmSpace:
     regions: [WineVmRegion]
+    memory_writes: [WineVmMemoryWrite]
     next_base: i64
     process_id: i64
     address_space_id: i64
@@ -32,14 +37,25 @@ class WineVmFault:
     access: text
     policy: text
 
+class WineVmByteIoResult:
+    ok: bool
+    state: text
+    space: WineVmSpace
+    address: i64
+    bytes: [u8]
+    operations: text
+
 fn _region(base: i64, size: i64, committed: bool, perms: text, guard: bool, backing: text, kind: text) -> WineVmRegion:
     WineVmRegion(base: base, size: size, committed: committed, perms: perms, guard: guard, backing: backing, kind: kind)
+
+fn _memory_write(address: i64, bytes: [u8]) -> WineVmMemoryWrite:
+    WineVmMemoryWrite(address: address, bytes: bytes)
 
 fn _empty_region() -> WineVmRegion:
     _region(0, 0, false, "", false, "", "")
 
-fn _space(regions: [WineVmRegion], next_base: i64, process_id: i64, address_space_id: i64, container_evidence: text, host_jump_policy: text) -> WineVmSpace:
-    WineVmSpace(regions: regions, next_base: next_base, process_id: process_id, address_space_id: address_space_id, container_evidence: container_evidence, host_jump_policy: host_jump_policy)
+fn _space(regions: [WineVmRegion], memory_writes: [WineVmMemoryWrite], next_base: i64, process_id: i64, address_space_id: i64, container_evidence: text, host_jump_policy: text) -> WineVmSpace:
+    WineVmSpace(regions: regions, memory_writes: memory_writes, next_base: next_base, process_id: process_id, address_space_id: address_space_id, container_evidence: container_evidence, host_jump_policy: host_jump_policy)
 
 fn _region_backing(space: WineVmSpace) -> text:
     if space.process_id > 0 and space.address_space_id > 0:
@@ -49,11 +65,14 @@ fn _region_backing(space: WineVmSpace) -> text:
 fn _result(ok: bool, state: text, space: WineVmSpace, region: WineVmRegion) -> WineVmOpResult:
     WineVmOpResult(ok: ok, state: state, space: space, region: region)
 
+fn _byte_result(ok: bool, state: text, space: WineVmSpace, address: i64, bytes: [u8], operations: text) -> WineVmByteIoResult:
+    WineVmByteIoResult(ok: ok, state: state, space: space, address: address, bytes: bytes, operations: operations)
+
 pub fn wine_vm_space_new() -> WineVmSpace:
-    _space([], 0x10000000, 0, 0, "", "")
+    _space([], [], 0x10000000, 0, 0, "", "")
 
 pub fn wine_vm_process_space_new(process_id: i64, address_space_id: i64, container_evidence: text) -> WineVmSpace:
-    _space([], 0x10000000, process_id, address_space_id, container_evidence, "no-host-code-jump")
+    _space([], [], 0x10000000, process_id, address_space_id, container_evidence, "no-host-code-jump")
 
 pub fn wine_vm_region_end(region: WineVmRegion) -> i64:
     region.base + region.size
@@ -90,7 +109,7 @@ pub fn wine_vm_reserve_fixed(space: WineVmSpace, base: i64, size: i64) -> WineVm
     val region = _region(base, size, false, "none", false, _region_backing(space), "private")
     var regions = space.regions
     regions.push(region)
-    _result(true, "reserved", _space(regions, space.next_base, space.process_id, space.address_space_id, space.container_evidence, space.host_jump_policy), region)
+    _result(true, "reserved", _space(regions, space.memory_writes, space.next_base, space.process_id, space.address_space_id, space.container_evidence, space.host_jump_policy), region)
 
 pub fn wine_vm_reserve(space: WineVmSpace, size: i64) -> WineVmOpResult:
     if size <= 0:
@@ -99,7 +118,7 @@ pub fn wine_vm_reserve(space: WineVmSpace, size: i64) -> WineVmOpResult:
     val region = _region(base, size, false, "none", false, _region_backing(space), "private")
     var regions = space.regions
     regions.push(region)
-    _result(true, "reserved", _space(regions, base + size + 0x10000, space.process_id, space.address_space_id, space.container_evidence, space.host_jump_policy), region)
+    _result(true, "reserved", _space(regions, space.memory_writes, base + size + 0x10000, space.process_id, space.address_space_id, space.container_evidence, space.host_jump_policy), region)
 
 fn _replace_region(space: WineVmSpace, replacement: WineVmRegion) -> WineVmSpace:
     var regions: [WineVmRegion] = []
@@ -108,7 +127,7 @@ fn _replace_region(space: WineVmSpace, replacement: WineVmRegion) -> WineVmSpace
             regions.push(replacement)
         else:
             regions.push(region)
-    _space(regions, space.next_base, space.process_id, space.address_space_id, space.container_evidence, space.host_jump_policy)
+    _space(regions, space.memory_writes, space.next_base, space.process_id, space.address_space_id, space.container_evidence, space.host_jump_policy)
 
 pub fn wine_vm_commit(space: WineVmSpace, base: i64, perms: text) -> WineVmOpResult:
     val region = wine_vm_space_find(space, base)
@@ -141,7 +160,7 @@ pub fn wine_vm_unmap(space: WineVmSpace, base: i64) -> WineVmOpResult:
     for item in space.regions:
         if item.base != region.base:
             regions.push(item)
-    _result(true, "unmapped", _space(regions, space.next_base, space.process_id, space.address_space_id, space.container_evidence, space.host_jump_policy), region)
+    _result(true, "unmapped", _space(regions, space.memory_writes, space.next_base, space.process_id, space.address_space_id, space.container_evidence, space.host_jump_policy), region)
 
 pub fn wine_vm_map_executable_image(space: WineVmSpace, base: i64, size: i64) -> WineVmOpResult:
     val reserved = wine_vm_reserve_fixed(space, base, size)
@@ -179,6 +198,48 @@ pub fn wine_vm_access_gate(space: WineVmSpace, address: i64, access: text) -> te
     if access == "read" and not region.perms.contains("r"):
         return "page-fault-read"
     "ready"
+
+pub fn wine_vm_write_bytes(space: WineVmSpace, address: i64, bytes: [u8]) -> WineVmByteIoResult:
+    if bytes.len() <= 0:
+        return _byte_result(false, "invalid-byte-count", space, address, [], "")
+    val region = wine_vm_space_find(space, address)
+    if region.size == 0:
+        return _byte_result(false, "page-fault-unmapped", space, address, [], "")
+    if address + bytes.len() > wine_vm_region_end(region):
+        return _byte_result(false, "page-fault-boundary", space, address, [], "")
+    val state = wine_vm_access_gate(space, address, "write")
+    if state != "ready":
+        return _byte_result(false, state, space, address, [], "")
+
+    var memory_writes = space.memory_writes
+    memory_writes.push(_memory_write(address, bytes))
+    val written_space = _space(space.regions, memory_writes, space.next_base, space.process_id, space.address_space_id, space.container_evidence, space.host_jump_policy)
+    _byte_result(true, "ready", written_space, address, bytes, "VMBytesWritten")
+
+pub fn wine_vm_read_bytes(space: WineVmSpace, address: i64, count: i64) -> WineVmByteIoResult:
+    if count <= 0:
+        return _byte_result(false, "invalid-byte-count", space, address, [], "")
+    val region = wine_vm_space_find(space, address)
+    if region.size == 0:
+        return _byte_result(false, "page-fault-unmapped", space, address, [], "")
+    if address + count > wine_vm_region_end(region):
+        return _byte_result(false, "page-fault-boundary", space, address, [], "")
+    val state = wine_vm_access_gate(space, address, "read")
+    if state != "ready":
+        return _byte_result(false, state, space, address, [], "")
+
+    var i = space.memory_writes.len() - 1
+    while i >= 0:
+        val written = space.memory_writes[i]
+        if written.address == address and written.bytes.len() >= count:
+            var out: [u8] = []
+            var j = 0
+            while j < count:
+                out.push(written.bytes[j])
+                j = j + 1
+            return _byte_result(true, "ready", space, address, out, "VMBytesRead")
+        i = i - 1
+    _byte_result(false, "missing-memory-write", space, address, [], "")
 
 pub fn wine_vm_fault_evidence(fault: WineVmFault) -> text:
     "process={fault.process_id} thread={fault.thread_id} address={fault.address} access={fault.access} policy={fault.policy}"

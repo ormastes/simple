@@ -432,6 +432,9 @@ and PEB image-base/process-parameter pointers.
 `wine_peb_teb_layout_byte_writes(...)` materializes those six records as
 little-endian 8-byte payloads for downstream modeled handoffs while still
 leaving live VM mutation outside the verified boundary.
+`wine_peb_teb_apply_layout_byte_writes(...)` then writes those payloads through
+the Wine VM adapter's committed-page byte ledger and verifies readback before
+reporting VM-backed startup mutation evidence.
 `wine_ntdll_execute_process_info_with_peb_teb_writes(...)` composes
 that write readiness before the NTDLL process/thread information bridge reports
 PEB/TEB addresses, and

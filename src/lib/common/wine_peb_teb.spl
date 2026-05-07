@@ -1,7 +1,7 @@
 """Bounded PEB/TEB initialization evidence for Wine NT startup probes."""
 
 use common.wine_kernel32_critical_section.{WineKernel32CriticalSectionTable, wine_kernel32_execute_critical_section}
-use common.wine_vm_adapter.{WineVmSpace, wine_vm_access_gate}
+use common.wine_vm_adapter.{WineVmSpace, wine_vm_access_gate, wine_vm_read_bytes, wine_vm_write_bytes}
 
 class WinePebTebInitEvidence:
     process_id: i64
@@ -70,6 +70,16 @@ class WinePebTebLayoutByteWriteResult:
     operations: text
     writes: [WinePebTebLayoutByteWrite]
 
+class WinePebTebVmWriteResult:
+    ok: bool
+    state: text
+    process_id: i64
+    thread_id: i64
+    write_count: i64
+    byte_count: i64
+    operations: text
+    space: WineVmSpace
+
 fn _init(process_id: i64, thread_id: i64, peb_address: i64, teb_address: i64, image_base: i64, stack_base: i64, stack_limit: i64, tls_vector_address: i64, process_parameters_address: i64, evidence: text) -> WinePebTebInitEvidence:
     WinePebTebInitEvidence(process_id: process_id, thread_id: thread_id, peb_address: peb_address, teb_address: teb_address, image_base: image_base, stack_base: stack_base, stack_limit: stack_limit, tls_vector_address: tls_vector_address, process_parameters_address: process_parameters_address, evidence: evidence)
 
@@ -90,6 +100,9 @@ fn _layout_byte_result(ok: bool, state: text, plan: WinePebTebLayoutWritePlan, o
     for write in writes:
         byte_count = byte_count + write.bytes.len()
     WinePebTebLayoutByteWriteResult(ok: ok, state: state, process_id: plan.process_id, thread_id: plan.thread_id, write_count: writes.len(), byte_count: byte_count, operations: operations, writes: writes)
+
+fn _vm_write_result(ok: bool, state: text, bytes: WinePebTebLayoutByteWriteResult, write_count: i64, byte_count: i64, operations: text, space: WineVmSpace) -> WinePebTebVmWriteResult:
+    WinePebTebVmWriteResult(ok: ok, state: state, process_id: bytes.process_id, thread_id: bytes.thread_id, write_count: write_count, byte_count: byte_count, operations: operations, space: space)
 
 fn _u64_le_bytes(value: i64) -> [u8]:
     var out: [u8] = []
@@ -220,3 +233,29 @@ pub fn wine_peb_teb_layout_byte_writes(plan: WinePebTebLayoutWritePlan) -> WineP
             return _layout_byte_result(false, "unsupported-layout-width:" + record.field_name, plan, plan.operations, writes)
         writes.push(_layout_byte_write(record))
     _layout_byte_result(true, "ready", plan, plan.operations + " PEBTEBLayoutBytesWritten", writes)
+
+pub fn wine_peb_teb_apply_layout_byte_writes(space: WineVmSpace, bytes: WinePebTebLayoutByteWriteResult) -> WinePebTebVmWriteResult:
+    if not bytes.ok:
+        return _vm_write_result(false, "bytes:" + bytes.state, bytes, 0, 0, bytes.operations, space)
+    if bytes.write_count != 6:
+        return _vm_write_result(false, "byte-write-count-mismatch", bytes, 0, 0, bytes.operations, space)
+
+    var current = space
+    var write_count = 0
+    var byte_count = 0
+    for write in bytes.writes:
+        val written = wine_vm_write_bytes(current, write.address, write.bytes)
+        if not written.ok:
+            return _vm_write_result(false, "vm-write:" + write.field_name + ":" + written.state, bytes, write_count, byte_count, bytes.operations + " " + written.operations, current)
+        val read = wine_vm_read_bytes(written.space, write.address, write.bytes.len())
+        if not read.ok:
+            return _vm_write_result(false, "vm-readback:" + write.field_name + ":" + read.state, bytes, write_count, byte_count, bytes.operations + " " + written.operations + " " + read.operations, written.space)
+        var i = 0
+        while i < write.bytes.len():
+            if read.bytes[i] != write.bytes[i]:
+                return _vm_write_result(false, "vm-readback-mismatch:" + write.field_name, bytes, write_count, byte_count, bytes.operations + " " + written.operations + " " + read.operations, written.space)
+            i = i + 1
+        current = written.space
+        write_count = write_count + 1
+        byte_count = byte_count + write.bytes.len()
+    _vm_write_result(true, "ready", bytes, write_count, byte_count, bytes.operations + " PEBTEBLayoutVMBytesWritten PEBTEBLayoutVMReadback", current)
