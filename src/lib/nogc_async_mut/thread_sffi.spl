@@ -271,6 +271,182 @@ fn condvar_create() -> CondVarHandle:
     CondVarHandle(handle: handle)
 
 # ============================================================================
+# TLS Key Extensions (M1, REQ-3)
+# ============================================================================
+#
+# Per-thread TLS key allocation. In interpreter mode: module-level storage
+# simulates per-thread values (single-threaded context).
+
+var _tls_key_counter: i64 = 0
+var _tls_key_values:  [i64] = []
+var _tls_key_init:    bool = false
+
+fn _tls_ensure():
+    if not _tls_key_init:
+        var j: i64 = 0
+        while j < 1024:
+            _tls_key_values.push(0)
+            j = j + 1
+        _tls_key_init = true
+
+fn tls_key_alloc(destructor: fn()) -> i64:
+    """Allocate a new TLS key.
+
+    Args:
+        destructor: function called on thread exit with the stored value (ignored in sim)
+
+    Returns:
+        Positive TLS key > 0.
+    """
+    _tls_ensure()
+    _tls_key_counter = _tls_key_counter + 1
+    _tls_key_counter
+
+fn tls_key_set(key: i64, value: i64):
+    """Store value in TLS slot for key.
+
+    Args:
+        key:   TLS key allocated via tls_key_alloc()
+        value: value to store
+    """
+    _tls_ensure()
+    if key > 0 and key < 1024:
+        _tls_key_values[key] = value
+
+fn tls_key_get(key: i64) -> i64:
+    """Read value from TLS slot for key.
+
+    Returns 0 for keys that have not been set.
+
+    Args:
+        key: TLS key
+
+    Returns:
+        Stored value or 0.
+    """
+    _tls_ensure()
+    if key <= 0 or key >= 1024:
+        return 0
+    _tls_key_values[key]
+
+# ============================================================================
+# Semaphore Extensions (M1, REQ-3)
+# ============================================================================
+
+var _sem_count:   i64  = 0
+var _sem_counts:  [i64] = []
+
+fn semaphore_create(initial: i64) -> i64:
+    """Create a semaphore with the given initial count.
+
+    Args:
+        initial: starting count (>= 0)
+
+    Returns:
+        Positive semaphore handle > 0.
+    """
+    _sem_count = _sem_count + 1
+    _sem_counts.push(initial)
+    _sem_count
+
+fn semaphore_post(handle: i64):
+    """Increment semaphore count (signal one waiter).
+
+    Args:
+        handle: semaphore handle
+    """
+    val idx = handle - 1
+    if idx >= 0 and idx < _sem_counts.len():
+        _sem_counts[idx] = _sem_counts[idx] + 1
+
+fn semaphore_wait(handle: i64, timeout_ns: i64) -> text:
+    """Decrement semaphore if count > 0; otherwise return timeout.
+
+    With timeout_ns=0, returns immediately:
+      "signaled" — decremented successfully
+      "timeout"  — count was 0
+
+    Args:
+        handle:     semaphore handle
+        timeout_ns: 0 for non-blocking
+
+    Returns:
+        "signaled" | "timeout"
+    """
+    val idx = handle - 1
+    if idx < 0 or idx >= _sem_counts.len():
+        return "timeout"
+    if _sem_counts[idx] > 0:
+        _sem_counts[idx] = _sem_counts[idx] - 1
+        return "signaled"
+    "timeout"
+
+# ============================================================================
+# Event-Wait Extensions (M1, REQ-3)
+# ============================================================================
+
+var _ew_count:        i64   = 0
+var _ew_signaled:     [bool] = []
+var _ew_manual_reset: [bool] = []
+
+fn event_wait_create(manual_reset: bool) -> i64:
+    """Create an event-wait object.
+
+    Args:
+        manual_reset: if true, event stays set until explicitly reset
+
+    Returns:
+        Positive event handle > 0.
+    """
+    _ew_count = _ew_count + 1
+    _ew_signaled.push(false)
+    _ew_manual_reset.push(manual_reset)
+    _ew_count
+
+fn event_wait_set(handle: i64):
+    """Signal the event.
+
+    Args:
+        handle: event handle
+    """
+    val idx = handle - 1
+    if idx >= 0 and idx < _ew_signaled.len():
+        _ew_signaled[idx] = true
+
+fn event_wait_reset(handle: i64):
+    """Reset the event to non-signaled state.
+
+    Args:
+        handle: event handle
+    """
+    val idx = handle - 1
+    if idx >= 0 and idx < _ew_signaled.len():
+        _ew_signaled[idx] = false
+
+fn event_wait_wait(handle: i64, timeout_ns: i64) -> text:
+    """Wait for the event to become signaled.
+
+    With timeout_ns=0, returns immediately:
+      "signaled" — event was set (auto-reset: clears it)
+      "timeout"  — event was not set
+
+    Args:
+        handle:     event handle
+        timeout_ns: 0 for non-blocking
+
+    Returns:
+        "signaled" | "timeout"
+    """
+    val idx = handle - 1
+    if idx < 0 or idx >= _ew_signaled.len():
+        return "timeout"
+    if _ew_signaled[idx]:
+        if not _ew_manual_reset[idx]:
+            _ew_signaled[idx] = false
+        return "signaled"
+    "timeout"
+
+# ============================================================================
 # Exports
 # ============================================================================
 

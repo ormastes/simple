@@ -1585,3 +1585,33 @@ Fresh evidence:
 - `bin/simple test test/lib/common/wine_dll_file_view_spec.spl --mode=interpreter --clean`: covers VM-write/readback-gated retained DLL file-view mapping alongside existing file-view behavior.
 - `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_dll_file_view_spec.spl --mode=interpreter --clean`: covers the SimpleOS system-level retained DLL file view requiring PEB/TEB VM write/readback evidence.
 - `bin/simple test test/lib/common/wine_dll_view_relocation_spec.spl --mode=interpreter --clean`: verifies retained DLL relocation still passes through the gated file-view mapping record.
+
+## 2026-05-07 Remaining Execution Plan Completion
+
+The five-phase remaining execution plan
+(`doc/03_plan/agent_tasks/simpleos_wine_remaining_execution_plan_2026-05-06.md`)
+is now verified complete. All stop conditions are met:
+
+1. All phase verification commands pass (check + test for each phase).
+2. `bin/simple run src/app/wine_hello/main.spl` prints `Hello from SimpleOS Wine`.
+3. Structured errors cover malformed PE, unsupported imports, import/CPU target
+   mismatch, reordered NT calls, missing stdout payloads, and malformed import
+   thunk name RVAs.
+4. Wine-scope stub scan is clean.
+
+Fresh evidence:
+
+- `wine_x86_64_decode_spec.spl`: passed (Phase 1 — decoder plan metadata).
+- `wine_cpu_exec_spec.spl`: passed (Phase 2 — CPU consumes decoder metadata).
+- `wine_hello_dispatch_spec.spl`: 11 examples, 0 failures (Phase 3 — dispatch through plan sequence).
+- `wine_nt_bridge_spec.spl`: 14 examples, 0 failures (Phase 3 — ordered NT call sequence).
+- `wine_hello_exe_spec.spl`: 12 examples, 0 failures (Phase 4 — end-to-end probe boundary).
+- `wine_hello_command_spec.spl`: 1 example, 0 failures (Phase 4 — integration).
+- `wine_gui_hello_command_spec.spl`: 1 example, 0 failures (GUI milestone).
+- `wine_process_session_plan_command_spec.spl`: 1 example, 0 failures (session plan).
+- Stub scan (`pass_todo|pass_do_nothing|pass_dn|todo(`): no matches.
+
+Conservative boundary unchanged: this is a controlled PE dispatch substrate for
+the known hello path. Full Wine compatibility, arbitrary PE execution, broad
+x86_64 instruction support, and general NT/Win32 dispatch remain intentionally
+blocked.

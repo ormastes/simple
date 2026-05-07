@@ -46,7 +46,9 @@ preserving explicit blockers for unsupported PE programs.
 
 ## Implementation Phases
 
-### Phase 1: Decoder Plan Metadata
+All phases verified 2026-05-07. Stop conditions met.
+
+### Phase 1: Decoder Plan Metadata (DONE 2026-05-07)
 
 Files:
 
@@ -65,7 +67,7 @@ Verification:
 - `bin/simple check src/lib/common/wine_x86_64_decode.spl test/lib/common/wine_x86_64_decode_spec.spl`
 - `bin/simple test test/lib/common/wine_x86_64_decode_spec.spl --mode=interpreter --clean`
 
-### Phase 2: CPU Plan Uses Decoder Metadata
+### Phase 2: CPU Plan Uses Decoder Metadata (DONE 2026-05-07)
 
 Files:
 
@@ -84,7 +86,7 @@ Verification:
 - `bin/simple check src/lib/common/wine_cpu_exec.spl test/lib/common/wine_cpu_exec_spec.spl`
 - `bin/simple test test/lib/common/wine_cpu_exec_spec.spl --mode=interpreter --clean`
 
-### Phase 3: Dispatch Uses Plan Sequence
+### Phase 3: Dispatch Uses Plan Sequence (DONE 2026-05-07)
 
 Files:
 
@@ -105,7 +107,7 @@ Verification:
 - `bin/simple test test/lib/common/wine_hello_dispatch_spec.spl --mode=interpreter --clean`
 - `bin/simple test test/lib/common/wine_nt_bridge_spec.spl --mode=interpreter --clean`
 
-### Phase 4: End-To-End Probe Boundary
+### Phase 4: End-To-End Probe Boundary (DONE 2026-05-07)
 
 Files:
 
@@ -126,7 +128,7 @@ Verification:
 - `bin/simple test test/integration/app/wine_hello_command_spec.spl --mode=interpreter --clean`
 - `bin/simple run src/app/wine_hello/main.spl`
 
-### Phase 5: Audit And Stop Gate
+### Phase 5: Audit And Stop Gate (DONE 2026-05-07)
 
 Files:
 
@@ -163,3 +165,26 @@ Stop this plan when:
 
 Do not mark the broader active objective complete unless a separate completion audit shows that
 all Wine preconditions, not just the controlled hello path, are implemented and verified.
+
+## Completion (2026-05-07)
+
+All five phases verified. Stop conditions met:
+
+1. All phase verification commands pass (check + test for each phase).
+2. `bin/simple run src/app/wine_hello/main.spl` prints `Hello from SimpleOS Wine`.
+3. Structured errors cover: malformed PE, unsupported imports, import/CPU target mismatch, reordered NT calls, missing stdout payloads, malformed import thunk name RVAs.
+4. Stub scan clean: no `pass_todo`, `pass_do_nothing`, `pass_dn`, or `todo(` in Wine-scope files.
+5. Audit report updated with current boundary.
+
+Test evidence:
+
+- `wine_x86_64_decode_spec.spl`: passed (decoder plan metadata, call sequence, target RVAs)
+- `wine_cpu_exec_spec.spl`: passed (CPU plan consumes decoder metadata)
+- `wine_hello_dispatch_spec.spl`: 11 examples, 0 failures (dispatch through plan sequence)
+- `wine_nt_bridge_spec.spl`: 14 examples, 0 failures (ordered NT call sequence)
+- `wine_hello_exe_spec.spl`: 12 examples, 0 failures (end-to-end probe with mismatch coverage)
+- `wine_hello_command_spec.spl`: 1 example, 0 failures (integration)
+- `wine_gui_hello_command_spec.spl`: 1 example, 0 failures (GUI milestone)
+- `wine_process_session_plan_command_spec.spl`: 1 example, 0 failures (session plan)
+
+This plan is complete. The broader Wine port objective remains intentionally open.

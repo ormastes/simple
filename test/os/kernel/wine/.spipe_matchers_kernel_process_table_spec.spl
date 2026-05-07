@@ -1,0 +1,105 @@
+# Spec for kernel_process_table — scheduler-owned PID registry (M1, REQ-1/REQ-4).
+#
+# These specs lock the public API surface and invariants for:
+#   src/lib/nogc_async_mut_noalloc/baremetal/process_table.spl
+#
+# Tests are in the red phase: the implementation does not yet exist.
+# Run with:
+#   bin/simple test test/os/kernel/wine/kernel_process_table_spec.spl
+#
+# @cover src/lib/nogc_async_mut_noalloc/baremetal/process_table.spl
+
+use std.spec
+use std.nogc_async_mut_noalloc.baremetal.process_table.{
+    process_table_alloc_pid,
+    process_table_register,
+    process_table_lookup,
+    process_table_reap
+}
+
+describe "kernel_process_table — PID registry":
+
+    describe "AC-1: process_table_alloc_pid — real PID allocation":
+        it "AC-1: alloc_pid returns a positive non-zero PID":
+            val pid = process_table_alloc_pid()
+            expect pid > 0
+
+        it "AC-1: consecutive alloc_pid calls return distinct PIDs":
+            val pid1 = process_table_alloc_pid()
+            val pid2 = process_table_alloc_pid()
+            expect pid1 > 0
+            expect pid2 > 0
+            # PIDs must be distinct (no duplicate allocation)
+            expect pid1 == pid2 == false
+
+        it "AC-1: PID zero is reserved and never allocated":
+            # The kernel convention: PID 0 = idle/swapper; never returned to userland
+            val pid = process_table_alloc_pid()
+            expect pid == 0 == false
+
+    describe "AC-1: process_table_register — process entry creation":
+        it "AC-1: registered process is visible via lookup":
+            val pid = process_table_alloc_pid()
+            # asid=1 and a sentinel ns_id=42 represent a real ASID and namespace
+            process_table_register(pid, 1, 42)
+            val entry = process_table_lookup(pid)
+            expect entry.is_some == true
+
+        it "AC-1: registered entry carries the correct PID":
+            val pid = process_table_alloc_pid()
+            process_table_register(pid, 2, 1)
+            val entry = process_table_lookup(pid)
+            expect entry.is_some == true
+            expect entry.value.pid == pid
+
+        it "AC-1: registered entry carries the supplied asid":
+            val pid = process_table_alloc_pid()
+            val asid: u64 = 7
+            process_table_register(pid, asid, 1)
+            val entry = process_table_lookup(pid)
+            expect entry.is_some == true
+            expect entry.value.asid == asid
+
+        it "AC-1: registered entry carries the supplied namespace ref":
+            val pid = process_table_alloc_pid()
+            val ns_id: u64 = 99
+            process_table_register(pid, 1, ns_id)
+            val entry = process_table_lookup(pid)
+            expect entry.is_some == true
+            expect entry.value.ns_id == ns_id
+
+    describe "AC-1: process_table_lookup — process query":
+        it "AC-1: lookup of unregistered PID returns None":
+            # A large PID unlikely to be registered
+            val entry = process_table_lookup(65534)
+            expect entry.is_some == false
+
+        it "AC-1: lookup returns Some after register and None after reap":
+            val pid = process_table_alloc_pid()
+            process_table_register(pid, 3, 1)
+            val before = process_table_lookup(pid)
+            expect before.is_some == true
+            process_table_reap(pid)
+            val after = process_table_lookup(pid)
+            expect after.is_some == false
+
+    describe "AC-1: process_table_reap — entry removal":
+        it "AC-1: reap on a registered PID succeeds without error":
+            val pid = process_table_alloc_pid()
+            process_table_register(pid, 4, 1)
+            # reap returns void; we verify by confirming lookup is None afterward
+            process_table_reap(pid)
+            val entry = process_table_lookup(pid)
+            expect entry.is_some == false
+
+        it "AC-1: no resident fallback markers remain after reap":
+            # Validates AC-1: apps launch with real PIDs, no fallback markers
+            val pid = process_table_alloc_pid()
+            expect pid > 0
+            process_table_register(pid, 5, 1)
+            val entry = process_table_lookup(pid)
+            expect entry.is_some == true
+            expect entry.value.state == "running"
+            process_table_reap(pid)
+            val reaped = process_table_lookup(pid)
+            expect reaped.is_some == false

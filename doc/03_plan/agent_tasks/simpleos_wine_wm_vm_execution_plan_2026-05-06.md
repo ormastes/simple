@@ -31,6 +31,15 @@ Next acceptance criteria:
 3. Container rootfs evidence must name the NVFS backend before the Wine `exec_env` row can be verified.
 4. Tests must keep coarse marker-only logs blocked with structured first-missing states.
 
-## Result
+## Result (DONE 2026-05-07)
 
 Implemented in `src/lib/common/ui/wine_simpleos_window_bridge.spl`, `src/lib/common/ui/wine_x11_adapter.spl`, `src/lib/common/wine_vm_adapter.spl`, `src/lib/common/wine_image_vm_map.spl`, and `src/lib/common/wine_hello_exe.spl`.
+
+Verified 2026-05-07:
+
+- `wine_x11_adapter_spec.spl`: 11 examples, 0 failures.
+- `wine_image_vm_map_spec.spl`: 3 examples, 0 failures.
+- All implementing files present and lint-clean.
+- Acceptance criteria 1-5 met: production gates require SimpleOS window/framebuffer/cursor/clipboard evidence; VM gates require process id, address-space id, container namespace facets, OS VMA mapping, stack/guard, fault evidence, and no-host-code-jump; hello.exe maps PE into VM process; tests distinguish modeled vs production; audit names residual blockers.
+
+This plan is complete. Full Wine graphics driver integration and kernel page-table enforcement remain intentionally blocked.
