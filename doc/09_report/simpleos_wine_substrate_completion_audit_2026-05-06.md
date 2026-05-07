@@ -1426,12 +1426,14 @@ Fresh evidence:
 the PEB/TEB VM byte-write/readback-gated import-thunk VMA write path before a
 known-console image can report mapped-image preflight readiness. Failed VM
 byte-write composition blocks mapped-image readiness before CPU dispatch
-preflight is reported.
+preflight is reported. Missing CPU evidence now returns no mapped image, no
+mapped region, and explicit no-arbitrary-execution evidence before VM-gated or
+plain mapped-image preflight can proceed.
 
 Fresh evidence:
 
-- `bin/simple test test/lib/common/wine_process_session_mapped_image_spec.spl --mode=interpreter --clean`: covers VM-write/readback-gated mapped-image preflight and failure propagation.
-- `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_process_mapped_image_spec.spl --mode=interpreter --clean`: covers the SimpleOS system-level mapped-image path requiring PEB/TEB VM write/readback evidence.
+- `bin/simple test test/lib/common/wine_process_session_mapped_image_spec.spl --mode=interpreter --clean`: covers VM-write/readback-gated mapped-image preflight, failure propagation, and no-mapped-image CPU evidence rejection.
+- `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_process_mapped_image_spec.spl --mode=interpreter --clean`: covers the SimpleOS system-level mapped-image path requiring PEB/TEB VM write/readback evidence and rejecting missing CPU evidence without mapped image state.
 
 ## 2026-05-07 CPU Dispatch Preflight VM-Write Update
 
