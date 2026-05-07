@@ -149,10 +149,12 @@ before any future arbitrary process dispatch can be attempted.
 console call sequence into a dispatch plan, still without running instructions.
 `wine_process_execute_known_console(...)` runs only that decoded known-console
 plan through the existing modeled NT bridge and returns stdout plus exit code.
-`wine_process_resolve_known_kernel32_module(...)` runs a bounded KERNEL32
-`GetModuleHandleW`/`LoadLibraryW`/`GetProcAddress`/`FreeLibrary` sequence for
-full-Wine process plans and returns handle/procedure evidence without arbitrary
-DLL loading.
+`wine_process_resolve_known_kernel32_module(...)` and
+`wine_process_resolve_known_kernel32_module_ex(...)` run bounded KERNEL32
+`GetModuleHandleW`/`LoadLibraryW` or `LoadLibraryExW`/`GetProcAddress`/
+`FreeLibrary` sequences for full-Wine process plans and return
+handle/procedure evidence without arbitrary DLL loading. The `LoadLibraryExW`
+path currently accepts only the modeled zero-flags case.
 
 `src/app/wine_process_session_plan/main.spl` exposes the controlled hello
 process-session handoff as a command. It prints command, substrate readiness,

@@ -1,5 +1,6 @@
 use common.wine_process_session.{
     wine_process_resolve_known_kernel32_module,
+    wine_process_resolve_known_kernel32_module_ex,
     wine_process_session_plan,
     wine_process_session_request_new
 }
@@ -27,6 +28,16 @@ describe "Wine process session module loader":
         expect(result.operations).to_equal("GetModuleHandleW LoadLibraryW GetProcAddress FreeLibrary")
         expect(result.status).to_equal("module-resolved")
 
+    it "resolves a bounded KERNEL32 module procedure through LoadLibraryExW":
+        val plan = wine_process_session_plan(wine_process_session_request_new("game.exe", [], "C:\\Games"), _full_gates())
+        val result = wine_process_resolve_known_kernel32_module_ex(plan, "kernel32.dll", "GetProcAddress", 0)
+        expect(result.ok).to_equal(true)
+        expect(result.command).to_equal("game.exe")
+        expect(result.handle).to_equal(0x120)
+        expect(result.proc_address).to_equal(0x120000 + 3)
+        expect(result.operations).to_equal("GetModuleHandleW LoadLibraryExW GetProcAddress FreeLibrary")
+        expect(result.status).to_equal("module-resolved")
+
     it "rejects unsupported modules and non-full-Wine sessions":
         val plan = wine_process_session_plan(wine_process_session_request_new("game.exe", [], "C:\\Games"), _full_gates())
         val missing = wine_process_resolve_known_kernel32_module(plan, "user32.dll", "MessageBoxW")
@@ -39,3 +50,11 @@ describe "Wine process session module loader":
         expect(blocked.ok).to_equal(false)
         expect(blocked.error).to_equal("unsupported-process-session")
         expect(blocked.status).to_equal("blocked")
+
+    it "rejects unsupported LoadLibraryExW flags":
+        val plan = wine_process_session_plan(wine_process_session_request_new("game.exe", [], "C:\\Games"), _full_gates())
+        val result = wine_process_resolve_known_kernel32_module_ex(plan, "kernel32.dll", "GetProcAddress", 8)
+        expect(result.ok).to_equal(false)
+        expect(result.error).to_equal("LoadLibraryExW:unsupported-load-flags")
+        expect(result.operations).to_equal("GetModuleHandleW")
+        expect(result.status).to_equal("rejected")

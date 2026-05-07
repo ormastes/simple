@@ -592,15 +592,17 @@ instruction stepping, or game compatibility.
 ## 2026-05-07 Bounded Process Module Resolution
 
 `src/lib/common/wine_process_session.spl` now exposes
-`wine_process_resolve_known_kernel32_module(...)`. It requires a full-Wine
-process-session plan, then routes the request through the existing KERNEL32
+`wine_process_resolve_known_kernel32_module(...)` and
+`wine_process_resolve_known_kernel32_module_ex(...)`. They require a full-Wine
+process-session plan, then route the request through the existing KERNEL32
 module-loader bridge to return module handle, procedure address, ordered loader
-operations, and rejected/blocked status evidence.
+operations, and rejected/blocked status evidence. The `LoadLibraryExW` process
+path accepts the modeled zero-flags case and rejects unsupported flags.
 
 Fresh evidence:
 
-- `bin/simple test test/lib/common/wine_process_session_module_loader_spec.spl --mode=interpreter --clean`: covers successful KERNEL32 procedure resolution, unsupported module rejection, and controlled-session blocking.
-- `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_process_module_loader_spec.spl --mode=interpreter --clean`: includes REQ-020 process module-resolution coverage.
+- `bin/simple test test/lib/common/wine_process_session_module_loader_spec.spl --mode=interpreter --clean`: covers successful KERNEL32 procedure resolution through `LoadLibraryW` and `LoadLibraryExW`, unsupported module rejection, unsupported flag rejection, and controlled-session blocking.
+- `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_process_module_loader_spec.spl --mode=interpreter --clean`: includes REQ-020 process module-resolution coverage for both loader calls and rejection paths.
 - `bin/simple test test/lib/common/wine_kernel32_module_loader_spec.spl --mode=interpreter --clean`: keeps the lower KERNEL32 module-loader bridge covered.
 
 Conservative boundary: this is a curated KERNEL32 table and bounded loader
