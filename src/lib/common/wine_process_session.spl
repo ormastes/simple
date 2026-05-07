@@ -12,7 +12,7 @@ use common.pe_coff_header.{
     pe_section_table_gate,
     pe_tls_directory_gate
 }
-use common.wine_cpu_exec.{wine_cpu_execution_gate, wine_instruction_dispatch_gate}
+use common.wine_cpu_exec.{wine_cpu_execution_gate, wine_cpu_hello_execution_plan, wine_instruction_dispatch_gate}
 use common.wine_hello_exe.{wine_hello_exe_probe_manifest_evidence_vm}
 use common.wine_hello_fixture.{
     wine_known_hello_exe_fixture_bytes,
@@ -94,6 +94,16 @@ class WineProcessCpuPreflightResult:
     evidence: text
     status: text
 
+class WineProcessDispatchPlanResult:
+    ok: bool
+    error: text
+    command: text
+    instruction_sequence: text
+    instruction_count: i64
+    call_sequence: text
+    call_count: i64
+    status: text
+
 fn _wine_process_session_request(executable_path: text, argv: [text], working_directory: text) -> WineProcessSessionRequest:
     WineProcessSessionRequest(executable_path: executable_path, argv: argv, working_directory: working_directory)
 
@@ -120,6 +130,9 @@ fn _wine_process_thunk_patch_plan_result(ok: bool, error: text, command: text, d
 
 fn _wine_process_cpu_preflight_result(ok: bool, error: text, command: text, evidence: text, status: text) -> WineProcessCpuPreflightResult:
     WineProcessCpuPreflightResult(ok: ok, error: error, command: command, evidence: evidence, status: status)
+
+fn _wine_process_dispatch_plan_result(ok: bool, error: text, command: text, instruction_sequence: text, instruction_count: i64, call_sequence: text, call_count: i64, status: text) -> WineProcessDispatchPlanResult:
+    WineProcessDispatchPlanResult(ok: ok, error: error, command: command, instruction_sequence: instruction_sequence, instruction_count: instruction_count, call_sequence: call_sequence, call_count: call_count, status: status)
 
 fn _wine_process_image_gate(data: [u8]) -> text:
     val summary = parse_pe_header_summary(data)
@@ -281,3 +294,12 @@ pub fn wine_process_cpu_dispatch_preflight(plan: WineProcessSessionPlan, data: [
     if dispatch_state != "ready":
         return _wine_process_cpu_preflight_result(false, dispatch_state, plan.command, evidence, "blocked")
     _wine_process_cpu_preflight_result(true, "", plan.command, evidence, "cpu-preflight-ready")
+
+pub fn wine_process_plan_known_console_dispatch(plan: WineProcessSessionPlan, data: [u8], symbol_limit: i64, cpu_evidence: text) -> WineProcessDispatchPlanResult:
+    val preflight = wine_process_cpu_dispatch_preflight(plan, data, symbol_limit, cpu_evidence)
+    if not preflight.ok:
+        return _wine_process_dispatch_plan_result(false, preflight.error, plan.command, "", 0, "", 0, preflight.status)
+    val cpu_plan = wine_cpu_hello_execution_plan(data, preflight.evidence)
+    if not cpu_plan.ok:
+        return _wine_process_dispatch_plan_result(false, cpu_plan.error, plan.command, "", 0, "", 0, "rejected")
+    _wine_process_dispatch_plan_result(true, "", plan.command, cpu_plan.instruction_sequence, cpu_plan.instruction_count, cpu_plan.call_sequence, cpu_plan.call_count, "dispatch-planned")

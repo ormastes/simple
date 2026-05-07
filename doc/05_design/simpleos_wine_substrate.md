@@ -145,6 +145,8 @@ the CPU execution gate, without mutating image bytes.
 `wine_process_cpu_dispatch_preflight(...)` composes that loader evidence with
 caller-provided CPU evidence and runs the CPU and instruction-dispatch gates
 before any future arbitrary process dispatch can be attempted.
+`wine_process_plan_known_console_dispatch(...)` then decodes the bounded known
+console call sequence into a dispatch plan, still without running instructions.
 
 `src/app/wine_process_session_plan/main.spl` exposes the controlled hello
 process-session handoff as a command. It prints command, substrate readiness,

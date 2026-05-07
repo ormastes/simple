@@ -555,6 +555,22 @@ Fresh evidence:
 Conservative boundary: this is a preflight gate only. It does not dispatch
 instructions, call imported functions, or execute arbitrary PE images.
 
+## 2026-05-07 Bounded Known-Console Dispatch Plan
+
+`src/lib/common/wine_process_session.spl` now exposes
+`wine_process_plan_known_console_dispatch(...)`. It requires the process CPU
+preflight to pass, then decodes the known console instruction sequence and
+returns the planned imported-call sequence and counts.
+
+Fresh evidence:
+
+- `bin/simple test test/lib/common/wine_process_session_spec.spl --mode=interpreter --clean`: includes known-console dispatch planning and CPU-preflight rejection coverage.
+- `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_substrate_spec.spl --mode=interpreter --clean`: includes REQ-018 known-console dispatch plan coverage.
+- `bin/simple test test/lib/common/wine_hello_dispatch_spec.spl --mode=interpreter --clean`: keeps the downstream known-dispatch path covered.
+
+Conservative boundary: this is a decoded dispatch plan only. It does not step
+instructions, call imported functions, or execute arbitrary PE images.
+
 ## Completion Decision
 
 The WM/VM prerequisite plan in `doc/03_plan/agent_tasks/simpleos_wine_wm_vm_execution_plan_2026-05-06.md` is implemented at the Wine-facing SimpleOS contract level. Modeled X11/VM gates are no longer accepted as production evidence, and the new production gates require SimpleOS window records, framebuffer presents, OS process/address-space identity, container namespace evidence, OS VMA image mapping, thread stack/guard setup, fault evidence, and no-host-code-jump policy.
