@@ -638,6 +638,10 @@ the modeled SimpleOS process VM adapter before CPU dispatch preflight reports
 ready. The evidence records process image mapping, OS process/address-space
 identity, OS VMA backing, executable image-map state, and no-host-code-jump
 policy at the mapped PE entrypoint.
+`wine_process_apply_known_kernel32_thunk_patches_in_vma(...)` now performs the
+known thunk writes inside that modeled process image: it opens a bounded VMA
+write window, writes the three planned KERNEL32 thunk records, restores `rx`,
+and rechecks no-host-code-jump before the mapped-image preflight can pass.
 
 Fresh evidence:
 
@@ -660,12 +664,14 @@ Fresh evidence:
 - `bin/simple test test/lib/common/wine_process_session_known_console_spec.spl --mode=interpreter --clean`: keeps known-console process execution on the patched-image path.
 - `bin/simple test test/lib/common/wine_process_session_mapped_image_spec.spl --mode=interpreter --clean`: covers the mapped patched-image preflight and missing CPU evidence rejection.
 - `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_process_mapped_image_spec.spl --mode=interpreter --clean`: includes REQ-026 mapped patched process image coverage.
+- `bin/simple test test/lib/common/wine_process_session_vma_thunk_write_spec.spl --mode=interpreter --clean`: covers the bounded process VMA write window for known thunk records.
+- `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_process_vma_thunk_write_spec.spl --mode=interpreter --clean`: includes REQ-027 bounded process VMA thunk patch window coverage.
 
 Conservative boundary: this is a curated KERNEL32 table and bounded loader
 sequence. It is not arbitrary DLL loading, host DLL mapping, Windows DLL search
-order, arbitrary import-table binding, writable arbitrary OS VMA mutation, PE
-DLL relocation, reference-count-complete loader state, or broad Win32/NT
-behavior.
+order, arbitrary import-table binding, writable arbitrary OS VMA mutation beyond
+the three known thunk slots, PE DLL relocation, reference-count-complete loader
+state, or broad Win32/NT behavior.
 
 ## Completion Decision
 

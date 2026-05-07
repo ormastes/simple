@@ -1,0 +1,50 @@
+use common.pe_coff_header.{pe_rva_to_file_offset}
+use common.wine_hello_fixture.{wine_known_hello_exe_fixture_bytes}
+use common.wine_process_session.{
+    wine_process_apply_known_kernel32_thunk_patches_in_vma,
+    wine_process_session_plan,
+    wine_process_session_request_new
+}
+
+fn _full_gates() -> text:
+    "process=verified exec_env=verified vm=verified renderer=verified user32=verified " +
+        "gdi32=verified kernel32_core=verified host=verified posix=verified registry=verified " +
+        "pthread=verified dynload=verified audio=verified fonts=verified input=verified " +
+        "pe_loader=verified async=verified nt_bridge=verified"
+
+fn _read_u64_le(data: [u8], offset: i64) -> i64:
+    var value = 0
+    var multiplier = 1
+    var i = 0
+    while i < 8:
+        value = value + (data[offset + i] * multiplier)
+        multiplier = multiplier * 256
+        i = i + 1
+    value
+
+describe "SimpleOS Wine VMA thunk writes":
+    describe "REQ-027: bounded process VMA thunk patch window":
+        it "should patch known thunk slots through a bounded process VMA write window":
+            val plan = wine_process_session_plan(wine_process_session_request_new("game.exe", [], "C:\\Games"), _full_gates())
+            val result = wine_process_apply_known_kernel32_thunk_patches_in_vma(plan, wine_known_hello_exe_fixture_bytes(), 8)
+            val get_std_handle_offset = pe_rva_to_file_offset(result.patched_image, 0x2060)
+            val write_file_offset = pe_rva_to_file_offset(result.patched_image, 0x2068)
+            val exit_process_offset = pe_rva_to_file_offset(result.patched_image, 0x2070)
+            expect(result.ok).to_equal(true)
+            expect(result.patched_count).to_equal(3)
+            expect(_read_u64_le(result.patched_image, get_std_handle_offset)).to_equal(0x120000 + 5)
+            expect(_read_u64_le(result.patched_image, write_file_offset)).to_equal(0x120000 + 6)
+            expect(_read_u64_le(result.patched_image, exit_process_offset)).to_equal(0x120000 + 7)
+            expect(result.evidence).to_contain("process-image-mapped")
+            expect(result.evidence).to_contain("process-vma-write-window")
+            expect(result.evidence).to_contain("process-vma-write-enabled")
+            expect(result.evidence).to_contain("process-vma-rx-restored")
+            expect(result.evidence).to_contain("no-host-code-jump")
+            expect(result.status).to_equal("vma-thunk-patches-applied")
+
+        it "should reject VMA thunk writes before record planning passes":
+            val plan = wine_process_session_plan(wine_process_session_request_new("game.exe", [], "C:\\Games"), _full_gates())
+            val result = wine_process_apply_known_kernel32_thunk_patches_in_vma(plan, wine_known_hello_exe_fixture_bytes(), 0)
+            expect(result.ok).to_equal(false)
+            expect(result.error).to_equal("invalid-symbol-limit")
+            expect(result.patched_count).to_equal(0)

@@ -45,7 +45,7 @@ use common.wine_kernel32_module_loader.{
 }
 use common.wine_nt_import.{wine_nt_import_hello_binding_plan}
 use common.wine_substrate.{wine_substrate_full_wine_gate, wine_substrate_hello_exe_gate}
-use common.wine_vm_adapter.{wine_vm_map_executable_image, wine_vm_no_host_code_jump_gate, wine_vm_process_space_new}
+use common.wine_vm_adapter.{wine_vm_map_executable_image, wine_vm_no_host_code_jump_gate, wine_vm_process_space_new, wine_vm_protect}
 
 class WineProcessSessionRequest:
     executable_path: text
@@ -192,6 +192,18 @@ class WineProcessMappedImagePreflightResult:
     evidence: text
     status: text
 
+class WineProcessVmaThunkPatchResult:
+    ok: bool
+    error: text
+    command: text
+    dll_name: text
+    patched_image: [u8]
+    mapped_base: i64
+    mapped_size: i64
+    patched_count: i64
+    evidence: text
+    status: text
+
 fn _wine_process_session_request(executable_path: text, argv: [text], working_directory: text) -> WineProcessSessionRequest:
     WineProcessSessionRequest(executable_path: executable_path, argv: argv, working_directory: working_directory)
 
@@ -242,6 +254,9 @@ fn _wine_process_patched_image_preflight_result(ok: bool, error: text, command: 
 
 fn _wine_process_mapped_image_preflight_result(ok: bool, error: text, command: text, mapped_image: [u8], mapped_base: i64, mapped_size: i64, evidence: text, status: text) -> WineProcessMappedImagePreflightResult:
     WineProcessMappedImagePreflightResult(ok: ok, error: error, command: command, mapped_image: mapped_image, mapped_base: mapped_base, mapped_size: mapped_size, evidence: evidence, status: status)
+
+fn _wine_process_vma_thunk_patch_result(ok: bool, error: text, command: text, dll_name: text, patched_image: [u8], mapped_base: i64, mapped_size: i64, patched_count: i64, evidence: text, status: text) -> WineProcessVmaThunkPatchResult:
+    WineProcessVmaThunkPatchResult(ok: ok, error: error, command: command, dll_name: dll_name, patched_image: patched_image, mapped_base: mapped_base, mapped_size: mapped_size, patched_count: patched_count, evidence: evidence, status: status)
 
 fn _wine_process_kernel32_module_table():
     wine_kernel32_module_table_add_module(
@@ -465,22 +480,20 @@ pub fn wine_process_prepare_known_console_image(plan: WineProcessSessionPlan, da
     _wine_process_patched_image_preflight_result(true, "", plan.command, patches.patched_image, evidence, "patched-image-preflight-ready")
 
 pub fn wine_process_map_known_console_image(plan: WineProcessSessionPlan, data: [u8], symbol_limit: i64, cpu_evidence: text) -> WineProcessMappedImagePreflightResult:
-    val prepared = wine_process_prepare_known_console_image(plan, data, symbol_limit, cpu_evidence)
-    if not prepared.ok:
-        return _wine_process_mapped_image_preflight_result(false, prepared.error, plan.command, prepared.patched_image, 0, 0, prepared.evidence, prepared.status)
-    val image_size = pe_size_of_image(prepared.patched_image)
-    if image_size <= 0:
-        return _wine_process_mapped_image_preflight_result(false, "missing-image-size", plan.command, prepared.patched_image, 0, 0, prepared.evidence, "rejected")
-    val mapped_base = 0x400000
-    val mapped = wine_vm_map_executable_image(wine_vm_process_space_new(1, 1, "pid fs ipc net capability"), mapped_base, image_size)
-    if not mapped.ok:
-        return _wine_process_mapped_image_preflight_result(false, "process-image-map:" + mapped.state, plan.command, prepared.patched_image, 0, 0, prepared.evidence, "blocked")
-    val entry_rva = pe_entry_point_rva(prepared.patched_image)
-    val host_jump_state = wine_vm_no_host_code_jump_gate(mapped.space, mapped_base + entry_rva)
-    if host_jump_state != "ready":
-        return _wine_process_mapped_image_preflight_result(false, host_jump_state, plan.command, prepared.patched_image, mapped.region.base, mapped.region.size, prepared.evidence, "blocked")
-    val evidence = prepared.evidence + " process-image-mapped os-process os-address-space os-vma image-map exec-perm no-host-code-jump"
-    _wine_process_mapped_image_preflight_result(true, "", plan.command, prepared.patched_image, mapped.region.base, mapped.region.size, evidence, "mapped-image-preflight-ready")
+    val cpu_evidence_state = _wine_process_non_import_cpu_evidence_gate(cpu_evidence)
+    if cpu_evidence_state != "ready":
+        return _wine_process_mapped_image_preflight_result(false, cpu_evidence_state, plan.command, data, 0, 0, cpu_evidence, "blocked")
+    val patched = wine_process_apply_known_kernel32_thunk_patches_in_vma(plan, data, symbol_limit)
+    if not patched.ok:
+        return _wine_process_mapped_image_preflight_result(false, patched.error, plan.command, patched.patched_image, patched.mapped_base, patched.mapped_size, patched.evidence, patched.status)
+    val evidence = patched.evidence + " import-thunks-bound import-thunk-table-valid import-thunk-symbols-resolved import-thunk-bindings-match import-thunk-iat-guarded " + cpu_evidence
+    val cpu_state = wine_cpu_execution_gate(evidence)
+    if cpu_state != "ready":
+        return _wine_process_mapped_image_preflight_result(false, cpu_state, plan.command, patched.patched_image, patched.mapped_base, patched.mapped_size, evidence, "blocked")
+    val dispatch_state = wine_instruction_dispatch_gate(evidence)
+    if dispatch_state != "ready":
+        return _wine_process_mapped_image_preflight_result(false, dispatch_state, plan.command, patched.patched_image, patched.mapped_base, patched.mapped_size, evidence, "blocked")
+    _wine_process_mapped_image_preflight_result(true, "", plan.command, patched.patched_image, patched.mapped_base, patched.mapped_size, evidence, "mapped-image-preflight-ready")
 
 pub fn wine_process_plan_known_console_dispatch(plan: WineProcessSessionPlan, data: [u8], symbol_limit: i64, cpu_evidence: text) -> WineProcessDispatchPlanResult:
     val mapped = wine_process_map_known_console_image(plan, data, symbol_limit, cpu_evidence)
@@ -575,16 +588,46 @@ pub fn wine_process_apply_known_kernel32_thunk_patches(plan: WineProcessSessionP
     val records = wine_process_plan_known_kernel32_thunk_patch_records(plan, data, symbol_limit)
     if not records.ok:
         return _wine_process_thunk_patch_apply_result(false, records.error, plan.command, records.dll_name, data, 0, "", records.status)
+    _wine_process_apply_known_kernel32_thunk_patch_records(plan.command, records.dll_name, data, records.records, records.evidence)
+
+fn _wine_process_apply_known_kernel32_thunk_patch_records(command: text, dll_name: text, data: [u8], records: [WineProcessThunkPatchRecord], record_evidence: text) -> WineProcessThunkPatchApplyResult:
     var patched = data
     var patched_count = 0
-    for record in records.records:
+    for record in records:
         val thunk_offset = pe_rva_to_file_offset(data, record.thunk_rva)
         if thunk_offset < 0 or thunk_offset + 7 >= data.len():
-            return _wine_process_thunk_patch_apply_result(false, "thunk-patch-offset-unmapped:" + record.symbol, plan.command, records.dll_name, data, 0, "", "rejected")
+            return _wine_process_thunk_patch_apply_result(false, "thunk-patch-offset-unmapped:" + record.symbol, command, dll_name, data, 0, "", "rejected")
         val proc_address = _wine_process_kernel32_export_address(record.symbol)
         if proc_address <= 0:
-            return _wine_process_thunk_patch_apply_result(false, "missing-proc-address:" + record.symbol, plan.command, records.dll_name, data, 0, "", "rejected")
+            return _wine_process_thunk_patch_apply_result(false, "missing-proc-address:" + record.symbol, command, dll_name, data, 0, "", "rejected")
         patched = _wine_process_patch_u64_le(patched, thunk_offset, proc_address)
         patched_count = patched_count + 1
-    val evidence = records.evidence + " import-thunk-bytes-written import-thunk-write-checked import-thunk-patch-bounded"
-    _wine_process_thunk_patch_apply_result(true, "", plan.command, records.dll_name, patched, patched_count, evidence, "thunk-patches-applied")
+    val evidence = record_evidence + " import-thunk-bytes-written import-thunk-write-checked import-thunk-patch-bounded"
+    _wine_process_thunk_patch_apply_result(true, "", command, dll_name, patched, patched_count, evidence, "thunk-patches-applied")
+
+pub fn wine_process_apply_known_kernel32_thunk_patches_in_vma(plan: WineProcessSessionPlan, data: [u8], symbol_limit: i64) -> WineProcessVmaThunkPatchResult:
+    val records = wine_process_plan_known_kernel32_thunk_patch_records(plan, data, symbol_limit)
+    if not records.ok:
+        return _wine_process_vma_thunk_patch_result(false, records.error, plan.command, records.dll_name, data, 0, 0, 0, "", records.status)
+    val image_size = pe_size_of_image(data)
+    if image_size <= 0:
+        return _wine_process_vma_thunk_patch_result(false, "missing-image-size", plan.command, records.dll_name, data, 0, 0, 0, records.evidence, "rejected")
+    val mapped_base = 0x400000
+    val mapped = wine_vm_map_executable_image(wine_vm_process_space_new(1, 1, "pid fs ipc net capability"), mapped_base, image_size)
+    if not mapped.ok:
+        return _wine_process_vma_thunk_patch_result(false, "process-image-map:" + mapped.state, plan.command, records.dll_name, data, 0, 0, 0, records.evidence, "blocked")
+    val writeable = wine_vm_protect(mapped.space, mapped.region.base, "rw")
+    if not writeable.ok:
+        return _wine_process_vma_thunk_patch_result(false, "process-image-write-window:" + writeable.state, plan.command, records.dll_name, data, mapped.region.base, mapped.region.size, 0, records.evidence, "blocked")
+    val patched = _wine_process_apply_known_kernel32_thunk_patch_records(plan.command, records.dll_name, data, records.records, records.evidence)
+    if not patched.ok:
+        return _wine_process_vma_thunk_patch_result(false, patched.error, plan.command, records.dll_name, data, mapped.region.base, mapped.region.size, 0, records.evidence, patched.status)
+    val executable = wine_vm_protect(writeable.space, mapped.region.base, "rx")
+    if not executable.ok:
+        return _wine_process_vma_thunk_patch_result(false, "process-image-rx-restore:" + executable.state, plan.command, records.dll_name, patched.patched_image, mapped.region.base, mapped.region.size, patched.patched_count, patched.evidence, "blocked")
+    val entry_rva = pe_entry_point_rva(patched.patched_image)
+    val host_jump_state = wine_vm_no_host_code_jump_gate(executable.space, mapped.region.base + entry_rva)
+    if host_jump_state != "ready":
+        return _wine_process_vma_thunk_patch_result(false, host_jump_state, plan.command, records.dll_name, patched.patched_image, mapped.region.base, mapped.region.size, patched.patched_count, patched.evidence, "blocked")
+    val evidence = patched.evidence + " process-image-mapped os-process os-address-space os-vma image-map process-vma-write-window process-vma-write-enabled process-vma-rx-restored exec-perm no-host-code-jump"
+    _wine_process_vma_thunk_patch_result(true, "", plan.command, records.dll_name, patched.patched_image, mapped.region.base, mapped.region.size, patched.patched_count, evidence, "vma-thunk-patches-applied")
