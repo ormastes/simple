@@ -1,0 +1,75 @@
+use common.wine_ntdll_loader.{
+    WineNtdllLoaderTable,
+    wine_ntdll_execute_loader_resolution,
+    wine_ntdll_ldr_get_procedure_address,
+    wine_ntdll_loader_table_new
+}
+
+fn _table() -> WineNtdllLoaderTable:
+    wine_ntdll_loader_table_new()
+
+describe "Wine NTDLL loader bridge":
+    it "executes a bounded Ldr module and procedure resolution sequence":
+        val result = wine_ntdll_execute_loader_resolution(
+            ["LdrLoadDll", "LdrGetProcedureAddress", "LdrUnloadDll"],
+            _table(),
+            "KERNEL32.dll",
+            "GetProcAddress"
+        )
+
+        expect result.ok == true
+        expect result.handle == 0x701
+        expect result.proc == "kernel32.dll!GetProcAddress"
+        expect result.operations == "LdrLoadDll LdrGetProcedureAddress LdrUnloadDll"
+        expect result.table.next_handle == 0x703
+
+    it "keeps NTDLL loader dispatch ordered and bounded":
+        val out_of_order = wine_ntdll_execute_loader_resolution(
+            ["LdrGetProcedureAddress", "LdrLoadDll", "LdrUnloadDll"],
+            _table(),
+            "kernel32.dll",
+            "GetProcAddress"
+        )
+        expect out_of_order.ok == false
+        expect out_of_order.error == "ntdll-loader-sequence-expected:LdrLoadDll"
+
+        val wrong_family = wine_ntdll_execute_loader_resolution(
+            ["LdrLoadDll", "NtCreateFile", "LdrUnloadDll"],
+            _table(),
+            "kernel32.dll",
+            "GetProcAddress"
+        )
+        expect wrong_family.ok == false
+        expect wrong_family.error == "bridge-wrong-category:NtCreateFile"
+
+        val wrong_count = wine_ntdll_execute_loader_resolution(
+            ["LdrLoadDll", "LdrGetProcedureAddress"],
+            _table(),
+            "kernel32.dll",
+            "GetProcAddress"
+        )
+        expect wrong_count.ok == false
+        expect wrong_count.error == "ntdll-loader-sequence-count-mismatch"
+
+    it "reports missing modules, missing procedures, and invalid handles":
+        val missing_module = wine_ntdll_execute_loader_resolution(
+            ["LdrLoadDll", "LdrGetProcedureAddress", "LdrUnloadDll"],
+            _table(),
+            "advapi32.dll",
+            "RegOpenKeyExW"
+        )
+        expect missing_module.ok == false
+        expect missing_module.error == "LdrLoadDll:module-not-found"
+
+        val missing_proc = wine_ntdll_execute_loader_resolution(
+            ["LdrLoadDll", "LdrGetProcedureAddress", "LdrUnloadDll"],
+            _table(),
+            "kernel32.dll",
+            "UnknownProc"
+        )
+        expect missing_proc.ok == false
+        expect missing_proc.error == "LdrGetProcedureAddress:proc-not-found"
+
+        val invalid_handle = wine_ntdll_ldr_get_procedure_address(_table(), 0x999, "kernel32.dll", "GetProcAddress")
+        expect invalid_handle.ok == false
+        expect invalid_handle.error == "invalid-module-handle"
