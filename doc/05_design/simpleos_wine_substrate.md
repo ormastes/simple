@@ -446,6 +446,8 @@ VM byte-write/readback result before reporting those addresses.
 compatibility gate, while `wine_dllmain_handoff_require_peb_teb_layout(...)`
 requires the six-record PEB/TEB layout plan before a retained DLL view can
 report non-executing DllMain process-attach handoff readiness.
+`wine_dllmain_handoff_require_peb_teb_vm_writes(...)` further requires the
+VM byte-write/readback result before reporting the same readiness.
 `wine_dll_record_file_view_startup_fault_with_peb_teb_writes(...)` carries
 that gate into the modeled SEH rollback path so startup-fault rollback is only
 recorded after the write-gated DllMain handoff is ready.

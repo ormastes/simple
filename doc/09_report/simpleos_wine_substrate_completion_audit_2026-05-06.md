@@ -1297,3 +1297,15 @@ Fresh evidence:
 
 - `bin/simple test test/lib/common/wine_ntdll_process_info_spec.spl --mode=interpreter --clean`: covers VM-write/readback-gated process-info handoff and failure propagation.
 - `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_peb_teb_spec.spl --mode=interpreter --clean`: covers the SimpleOS system-level VM-write/readback-to-NTDLL handoff.
+
+## 2026-05-07 DllMain PEB/TEB VM-Write Handoff Update
+
+`wine_dllmain_handoff_require_peb_teb_vm_writes(...)` now requires PEB/TEB VM
+byte-write/readback evidence before a retained DLL view can report
+non-executing DllMain process-attach handoff readiness. Failed VM byte-write
+composition blocks the handoff before any DllMain execution claim.
+
+Fresh evidence:
+
+- `bin/simple test test/lib/common/wine_dll_view_dllmain_handoff_spec.spl --mode=interpreter --clean`: covers VM-write/readback-gated DllMain handoff and failure propagation.
+- `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_dll_view_dllmain_handoff_spec.spl --mode=interpreter --clean`: covers the SimpleOS system-level DllMain VM-write/readback handoff.

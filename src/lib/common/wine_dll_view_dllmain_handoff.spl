@@ -3,7 +3,7 @@
 use common.pe_coff_header.{pe_entry_point_rva, pe_rva_to_file_offset}
 use common.wine_dll_file_probe.{WineDllProbeFile}
 use common.wine_dll_view_import_binding.{wine_dll_bind_file_view_imports}
-use common.wine_peb_teb.{WinePebTebLayoutWritePlan, WinePebTebMemoryWriteResult}
+use common.wine_peb_teb.{WinePebTebLayoutWritePlan, WinePebTebMemoryWriteResult, WinePebTebVmWriteResult}
 use common.wine_pe_loader_runtime.{wine_pe_tls_callback_plan}
 use common.wine_vm_adapter.{wine_vm_no_host_code_jump_gate}
 
@@ -103,4 +103,30 @@ pub fn wine_dllmain_handoff_require_peb_teb_layout(handoff: WineDllViewDllMainHa
         return locked
 
     locked.evidence = layout.operations + " peb-teb-layout-ready " + locked.evidence
+    locked
+
+pub fn wine_dllmain_handoff_require_peb_teb_vm_writes(handoff: WineDllViewDllMainHandoffResult, startup_ok: bool, startup_state: text, startup_operations: text, vm_writes: WinePebTebVmWriteResult) -> WineDllViewDllMainHandoffResult:
+    val locked = wine_dllmain_handoff_require_peb_teb_loader_lock(handoff, startup_ok, startup_state, startup_operations)
+    if not locked.ok:
+        return locked
+    if not vm_writes.ok:
+        locked.ok = false
+        locked.error = "peb-teb-vm-write:" + vm_writes.state
+        locked.evidence = vm_writes.operations + " dllmain-handoff-blocked"
+        locked.status = "rejected"
+        return locked
+    if vm_writes.write_count != 6:
+        locked.ok = false
+        locked.error = "peb-teb-vm-write-count-mismatch"
+        locked.evidence = vm_writes.operations + " dllmain-handoff-blocked"
+        locked.status = "rejected"
+        return locked
+    if vm_writes.byte_count != 48:
+        locked.ok = false
+        locked.error = "peb-teb-vm-byte-count-mismatch"
+        locked.evidence = vm_writes.operations + " dllmain-handoff-blocked"
+        locked.status = "rejected"
+        return locked
+
+    locked.evidence = vm_writes.operations + " peb-teb-vm-writes-ready " + locked.evidence
     locked
