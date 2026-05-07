@@ -14,6 +14,7 @@ class WineNtFileHandle:
 
 class WineNtFileTable:
     files: [WineNtModeledFile]
+    directories: [text]
     handles: [WineNtFileHandle]
     next_handle: i64
     ready: bool
@@ -40,8 +41,8 @@ fn _file(path: text, content: text) -> WineNtModeledFile:
 fn _handle(handle: i64, path: text, cursor: i64, open: bool) -> WineNtFileHandle:
     WineNtFileHandle(handle: handle, path: path, cursor: cursor, open: open)
 
-fn _table(files: [WineNtModeledFile], handles: [WineNtFileHandle], next_handle: i64, ready: bool, state: text) -> WineNtFileTable:
-    WineNtFileTable(files: files, handles: handles, next_handle: next_handle, ready: ready, state: state)
+fn _table(files: [WineNtModeledFile], directories: [text], handles: [WineNtFileHandle], next_handle: i64, ready: bool, state: text) -> WineNtFileTable:
+    WineNtFileTable(files: files, directories: directories, handles: handles, next_handle: next_handle, ready: ready, state: state)
 
 fn _result(ok: bool, state: text, table: WineNtFileTable, handle: i64, data: text, bytes_read: i64) -> WineNtFileIoResult:
     WineNtFileIoResult(ok: ok, state: state, table: table, handle: handle, data: data, bytes_read: bytes_read)
@@ -54,6 +55,24 @@ fn _find_file(files: [WineNtModeledFile], path: text) -> WineNtModeledFile:
         if file.path == path:
             return file
     _file("", "")
+
+fn _has_directory(table: WineNtFileTable, path: text) -> bool:
+    for directory in table.directories:
+        if directory == path:
+            return true
+    false
+
+fn _is_child_path(parent: text, child: text) -> bool:
+    child.starts_with(parent + "\\")
+
+fn _directory_not_empty(table: WineNtFileTable, path: text) -> bool:
+    for file in table.files:
+        if _is_child_path(path, file.path):
+            return true
+    for directory in table.directories:
+        if directory != path and _is_child_path(path, directory):
+            return true
+    false
 
 fn _find_handle(handles: [WineNtFileHandle], handle: i64) -> WineNtFileHandle:
     for item in handles:
@@ -74,14 +93,26 @@ fn _replace_handle(table: WineNtFileTable, replacement: WineNtFileHandle) -> Win
             handles.push(replacement)
         else:
             handles.push(item)
-    _table(table.files, handles, table.next_handle, table.ready, table.state)
+    _table(table.files, table.directories, handles, table.next_handle, table.ready, table.state)
 
 fn _remove_file(table: WineNtFileTable, path: text) -> WineNtFileTable:
     var files: [WineNtModeledFile] = []
     for item in table.files:
         if item.path != path:
             files.push(item)
-    _table(files, table.handles, table.next_handle, table.ready, table.state)
+    _table(files, table.directories, table.handles, table.next_handle, table.ready, table.state)
+
+fn _add_directory(table: WineNtFileTable, path: text) -> WineNtFileTable:
+    var directories = table.directories
+    directories.push(path)
+    _table(table.files, directories, table.handles, table.next_handle, table.ready, table.state)
+
+fn _remove_directory(table: WineNtFileTable, path: text) -> WineNtFileTable:
+    var directories: [text] = []
+    for directory in table.directories:
+        if directory != path:
+            directories.push(directory)
+    _table(table.files, directories, table.handles, table.next_handle, table.ready, table.state)
 
 fn _upsert_file(table: WineNtFileTable, path: text, content: text) -> WineNtFileTable:
     var files: [WineNtModeledFile] = []
@@ -94,7 +125,7 @@ fn _upsert_file(table: WineNtFileTable, path: text, content: text) -> WineNtFile
             files.push(item)
     if not replaced:
         files.push(_file(path, content))
-    _table(files, table.handles, table.next_handle, table.ready, table.state)
+    _table(files, table.directories, table.handles, table.next_handle, table.ready, table.state)
 
 pub fn wine_nt_file_io_required_calls() -> [text]:
     [
@@ -108,19 +139,26 @@ pub fn wine_nt_file_io_required_calls() -> [text]:
         "SetFilePointer",
         "DeleteFileW",
         "CopyFileW",
-        "MoveFileW"
+        "MoveFileW",
+        "CreateDirectoryW",
+        "RemoveDirectoryW"
     ]
 
 pub fn wine_nt_file_table_new(posix_apis: text, async_features: text) -> WineNtFileTable:
     val gate = wine_posix_adapter_gate(posix_apis, async_features)
     if not gate.ready:
-        return _table([], [], 0x40, false, gate.state)
-    _table([], [], 0x40, true, "ready")
+        return _table([], [], [], 0x40, false, gate.state)
+    _table([], [], [], 0x40, true, "ready")
 
 pub fn wine_nt_file_table_add_file(table: WineNtFileTable, path: text, content: text) -> WineNtFileTable:
     var files = table.files
     files.push(_file(path, content))
-    _table(files, table.handles, table.next_handle, table.ready, table.state)
+    _table(files, table.directories, table.handles, table.next_handle, table.ready, table.state)
+
+pub fn wine_nt_file_table_add_directory(table: WineNtFileTable, path: text) -> WineNtFileTable:
+    if _has_directory(table, path):
+        return table
+    _add_directory(table, path)
 
 pub fn wine_nt_file_create_w(table: WineNtFileTable, path: text) -> WineNtFileIoResult:
     if not table.ready:
@@ -133,7 +171,7 @@ pub fn wine_nt_file_create_w(table: WineNtFileTable, path: text) -> WineNtFileIo
     val handle = table.next_handle
     var handles = table.handles
     handles.push(_handle(handle, path, 0, true))
-    _result(true, "opened", _table(table.files, handles, handle + 1, table.ready, table.state), handle, "", 0)
+    _result(true, "opened", _table(table.files, table.directories, handles, handle + 1, table.ready, table.state), handle, "", 0)
 
 pub fn wine_nt_file_read(table: WineNtFileTable, handle: i64, requested_len: i64) -> WineNtFileIoResult:
     if requested_len < 0:
@@ -188,6 +226,29 @@ pub fn wine_nt_file_delete_w(table: WineNtFileTable, path: text) -> WineNtFileIo
     if _has_open_handle(table, path):
         return _result(false, "sharing-violation", table, 0, "", 0)
     _result(true, "deleted", _remove_file(table, path), 0, "", 0)
+
+pub fn wine_nt_file_create_directory_w(table: WineNtFileTable, path: text) -> WineNtFileIoResult:
+    if not table.ready:
+        return _result(false, table.state, table, 0, "", 0)
+    if path == "":
+        return _result(false, "invalid-path", table, 0, "", 0)
+    if _has_directory(table, path):
+        return _result(false, "directory-exists", table, 0, "", 0)
+    val file = _find_file(table.files, path)
+    if file.path != "":
+        return _result(false, "file-exists", table, 0, "", 0)
+    _result(true, "directory-created", _add_directory(table, path), 0, "", 0)
+
+pub fn wine_nt_file_remove_directory_w(table: WineNtFileTable, path: text) -> WineNtFileIoResult:
+    if not table.ready:
+        return _result(false, table.state, table, 0, "", 0)
+    if path == "":
+        return _result(false, "invalid-path", table, 0, "", 0)
+    if not _has_directory(table, path):
+        return _result(false, "directory-not-found", table, 0, "", 0)
+    if _directory_not_empty(table, path):
+        return _result(false, "directory-not-empty", table, 0, "", 0)
+    _result(true, "directory-removed", _remove_directory(table, path), 0, "", 0)
 
 pub fn wine_nt_file_copy_w(table: WineNtFileTable, source_path: text, dest_path: text, fail_if_exists: bool) -> WineNtFileIoResult:
     if not table.ready:
