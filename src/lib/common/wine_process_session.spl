@@ -215,6 +215,7 @@ class WineProcessImportDescriptorPatchRecord:
     descriptor_index: i64
     thunk_index: i64
     thunk_rva: i64
+    iat_rva: i64
     name_rva: i64
     proc_address: i64
 
@@ -347,8 +348,8 @@ fn _wine_process_load_binding_result(ok: bool, error: text, command: text, dll_n
 fn _wine_process_thunk_patch_record(symbol: text, thunk_index: i64, thunk_rva: i64, name_rva: i64) -> WineProcessThunkPatchRecord:
     WineProcessThunkPatchRecord(symbol: symbol, thunk_index: thunk_index, thunk_rva: thunk_rva, name_rva: name_rva)
 
-fn _wine_process_import_descriptor_patch_record(dll_name: text, symbol: text, descriptor_index: i64, thunk_index: i64, thunk_rva: i64, name_rva: i64, proc_address: i64) -> WineProcessImportDescriptorPatchRecord:
-    WineProcessImportDescriptorPatchRecord(dll_name: dll_name, symbol: symbol, descriptor_index: descriptor_index, thunk_index: thunk_index, thunk_rva: thunk_rva, name_rva: name_rva, proc_address: proc_address)
+fn _wine_process_import_descriptor_patch_record(dll_name: text, symbol: text, descriptor_index: i64, thunk_index: i64, thunk_rva: i64, iat_rva: i64, name_rva: i64, proc_address: i64) -> WineProcessImportDescriptorPatchRecord:
+    WineProcessImportDescriptorPatchRecord(dll_name: dll_name, symbol: symbol, descriptor_index: descriptor_index, thunk_index: thunk_index, thunk_rva: thunk_rva, iat_rva: iat_rva, name_rva: name_rva, proc_address: proc_address)
 
 fn _wine_process_thunk_patch_record_plan(ok: bool, error: text, command: text, dll_name: text, records: [WineProcessThunkPatchRecord], evidence: text, status: text) -> WineProcessThunkPatchRecordPlan:
     WineProcessThunkPatchRecordPlan(ok: ok, error: error, command: command, dll_name: dll_name, records: records, evidence: evidence, status: status)
@@ -706,8 +707,8 @@ pub fn wine_process_plan_import_descriptor_thunk_patch_records(plan: WineProcess
         val proc = wine_kernel32_get_proc_address(module.table, module.handle, binding.symbol)
         if not proc.ok:
             return _wine_process_import_descriptor_patch_record_plan(false, "import-proc-address:" + binding.dll_name + "!" + binding.symbol + ":" + proc.error, plan.command, [], resolution.evidence, "rejected")
-        records.push(_wine_process_import_descriptor_patch_record(binding.dll_name, binding.symbol, binding.descriptor_index, binding.thunk_index, binding.thunk_rva, binding.name_rva, proc.proc_address))
-    val evidence = resolution.evidence + " import-descriptor-patch-records-planned import-descriptor-patch-records-data-backed import-descriptor-proc-addresses-recorded no-iat-written no-vma-written"
+        records.push(_wine_process_import_descriptor_patch_record(binding.dll_name, binding.symbol, binding.descriptor_index, binding.thunk_index, binding.thunk_rva, binding.iat_rva, binding.name_rva, proc.proc_address))
+    val evidence = resolution.evidence + " import-descriptor-patch-records-planned import-descriptor-patch-records-data-backed import-descriptor-proc-addresses-recorded import-descriptor-iat-rvas-recorded no-iat-written no-vma-written"
     _wine_process_import_descriptor_patch_record_plan(true, "", plan.command, records, evidence, "import-descriptor-patch-records-planned")
 
 pub fn wine_process_bind_known_kernel32_imports(plan: WineProcessSessionPlan, data: [u8], symbol_limit: i64) -> WineProcessImportBindingResult:
@@ -901,7 +902,7 @@ fn _wine_process_apply_import_descriptor_thunk_patch_records(command: text, data
     var patched = data
     var patched_count = 0
     for record in records:
-        val thunk_offset = pe_rva_to_file_offset(data, record.thunk_rva)
+        val thunk_offset = pe_rva_to_file_offset(data, record.iat_rva)
         if thunk_offset < 0 or thunk_offset + 7 >= data.len():
             return _wine_process_import_descriptor_vma_patch_result(false, "import-descriptor-thunk-patch-offset-unmapped:" + record.dll_name + "!" + record.symbol, command, data, 0, 0, 0, record_evidence + " process-vma-write-rollback", "rejected")
         if record.proc_address <= 0:

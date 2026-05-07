@@ -684,8 +684,8 @@ resolution evidence only; it still performs no real DLL loading, no IAT writes,
 and no arbitrary PE execution.
 `wine_process_plan_import_descriptor_thunk_patch_records(...)` now converts the
 modeled resolution result into multi-DLL thunk patch records that include DLL
-name, symbol, descriptor index, thunk index/RVA, import-name RVA, and modeled
-procedure address. The specs are split between descriptor-table, import
+name, symbol, descriptor index, lookup thunk RVA, IAT RVA, import-name RVA, and
+modeled procedure address. The specs are split between descriptor-table, import
 resolution, and patch-record files to keep each full-image validation run below
 the Simple test watchdog. This completes REQ-033 as record planning only; it
 still performs no VMA permission transition, no IAT write, and no arbitrary PE
@@ -693,7 +693,8 @@ execution.
 `wine_process_apply_import_descriptor_thunk_patches_in_vma(...)` now consumes
 those descriptor-qualified records through the modeled process VMA path. It maps
 the validated image shape, opens a bounded write window, writes the modeled
-procedure addresses for covered `KERNEL32`/`USER32`/`GDI32` imports, restores
+procedure addresses for covered `KERNEL32`/`USER32`/`GDI32` imports into
+descriptor `FirstThunk` IAT slots rather than lookup thunk metadata, restores
 `rx`, and rechecks no-host-code-jump before reporting success. This completes
 REQ-034 as modeled multi-DLL thunk application only; it still performs no real
 DLL loading, relocation, TLS initialization, or arbitrary PE execution.
