@@ -160,6 +160,10 @@ inspection gate with that module resolver, so validated full-Wine process
 images can resolve a requested procedure against their first imported KERNEL32
 module through the same bounded zero-flags `LoadLibraryExW` table before any
 future import-table-wide loader pass is added.
+`wine_process_load_and_bind_known_kernel32_imports(...)` then requires that
+module-resolution evidence before accepting the known KERNEL32
+`GetStdHandle`/`WriteFile`/`ExitProcess` binding plan, preserving a separate
+status for imports that are both loaded and bound.
 
 `src/app/wine_process_session_plan/main.spl` exposes the controlled hello
 process-session handoff as a command. It prints command, substrate readiness,

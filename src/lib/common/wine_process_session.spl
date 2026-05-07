@@ -122,6 +122,17 @@ class WineProcessModuleResolutionResult:
     operations: text
     status: text
 
+class WineProcessLoadBindingResult:
+    ok: bool
+    error: text
+    command: text
+    dll_name: text
+    module_handle: i64
+    loader_operations: text
+    call_sequence: text
+    binding_count: i64
+    status: text
+
 fn _wine_process_session_request(executable_path: text, argv: [text], working_directory: text) -> WineProcessSessionRequest:
     WineProcessSessionRequest(executable_path: executable_path, argv: argv, working_directory: working_directory)
 
@@ -154,6 +165,9 @@ fn _wine_process_dispatch_plan_result(ok: bool, error: text, command: text, inst
 
 fn _wine_process_module_resolution_result(ok: bool, error: text, command: text, module_name: text, proc_name: text, handle: i64, proc_address: i64, operations: text, status: text) -> WineProcessModuleResolutionResult:
     WineProcessModuleResolutionResult(ok: ok, error: error, command: command, module_name: module_name, proc_name: proc_name, handle: handle, proc_address: proc_address, operations: operations, status: status)
+
+fn _wine_process_load_binding_result(ok: bool, error: text, command: text, dll_name: text, module_handle: i64, loader_operations: text, call_sequence: text, binding_count: i64, status: text) -> WineProcessLoadBindingResult:
+    WineProcessLoadBindingResult(ok: ok, error: error, command: command, dll_name: dll_name, module_handle: module_handle, loader_operations: loader_operations, call_sequence: call_sequence, binding_count: binding_count, status: status)
 
 fn _wine_process_kernel32_module_table():
     wine_kernel32_module_table_add_module(wine_kernel32_module_table_new(), "kernel32.dll", ["LoadLibraryW", "LoadLibraryExW", "GetProcAddress", "FreeLibrary"])
@@ -378,3 +392,12 @@ pub fn wine_process_resolve_first_import_module(plan: WineProcessSessionPlan, da
     if not imports.ok:
         return _wine_process_module_resolution_result(false, imports.error, plan.command, imports.dll_name, proc_name, 0, 0, "", imports.status)
     wine_process_resolve_known_kernel32_module_ex(plan, imports.dll_name, proc_name, 0)
+
+pub fn wine_process_load_and_bind_known_kernel32_imports(plan: WineProcessSessionPlan, data: [u8], symbol_limit: i64) -> WineProcessLoadBindingResult:
+    val module = wine_process_resolve_first_import_module(plan, data, symbol_limit, "GetProcAddress")
+    if not module.ok:
+        return _wine_process_load_binding_result(false, module.error, plan.command, module.module_name, module.handle, module.operations, "", 0, module.status)
+    val bindings = wine_process_bind_known_kernel32_imports(plan, data, symbol_limit)
+    if not bindings.ok:
+        return _wine_process_load_binding_result(false, bindings.error, plan.command, bindings.dll_name, module.handle, module.operations, bindings.call_sequence, bindings.binding_count, bindings.status)
+    _wine_process_load_binding_result(true, "", plan.command, bindings.dll_name, module.handle, module.operations, bindings.call_sequence, bindings.binding_count, "imports-loaded-bound")

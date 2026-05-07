@@ -602,6 +602,10 @@ path accepts the modeled zero-flags case and rejects unsupported flags.
 with the same resolver, allowing a validated full-Wine process image to resolve
 a requested procedure against its first imported KERNEL32 module through the
 curated zero-flags `LoadLibraryExW` loader table.
+`wine_process_load_and_bind_known_kernel32_imports(...)` requires that
+module-resolution evidence before accepting the known KERNEL32 import binding
+plan and returns the loader operations, module handle, call sequence, and
+binding count as one process-session result.
 
 Fresh evidence:
 
@@ -609,12 +613,14 @@ Fresh evidence:
 - `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_process_module_loader_spec.spl --mode=interpreter --clean`: includes REQ-020 process module-resolution coverage for both loader calls and rejection paths.
 - `bin/simple test test/lib/common/wine_process_session_first_import_module_spec.spl --mode=interpreter --clean`: covers first-import-module resolution and import-inspection gating.
 - `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_process_first_import_module_spec.spl --mode=interpreter --clean`: includes REQ-021 first-import module-loader bridge coverage.
+- `bin/simple test test/lib/common/wine_process_session_load_bind_spec.spl --mode=interpreter --clean`: covers load-before-bind composition and module-resolution rejection propagation.
+- `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_process_load_bind_spec.spl --mode=interpreter --clean`: includes REQ-022 load-then-bind coverage.
 - `bin/simple test test/lib/common/wine_kernel32_module_loader_spec.spl --mode=interpreter --clean`: keeps the lower KERNEL32 module-loader bridge covered.
 
 Conservative boundary: this is a curated KERNEL32 table and bounded loader
 sequence. It is not arbitrary DLL loading, host DLL mapping, Windows DLL search
-order, import-table-wide binding, PE DLL relocation, reference-count-complete
-loader state, or broad Win32/NT behavior.
+order, arbitrary import-table binding, PE DLL relocation,
+reference-count-complete loader state, or broad Win32/NT behavior.
 
 ## Completion Decision
 
