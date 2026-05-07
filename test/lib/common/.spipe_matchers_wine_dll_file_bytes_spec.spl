@@ -1,0 +1,70 @@
+use common.wine_dll_file_bytes.{wine_dll_validate_file_bytes}
+
+fn _zero_bytes(count: i64) -> [u8]:
+    var out: [u8] = []
+    var i = 0
+    while i < count:
+        out.push(0)
+        i = i + 1
+    out
+
+fn _put_u16_le(data: [u8], offset: i64, value: i64) -> [u8]:
+    data[offset] = (value & 0xff) as u8
+    data[offset + 1] = ((value >> 8) & 0xff) as u8
+    data
+
+fn _put_u32_le(data: [u8], offset: i64, value: i64) -> [u8]:
+    data[offset] = (value & 0xff) as u8
+    data[offset + 1] = ((value >> 8) & 0xff) as u8
+    data[offset + 2] = ((value >> 16) & 0xff) as u8
+    data[offset + 3] = ((value >> 24) & 0xff) as u8
+    data
+
+fn _minimal_dll_bytes() -> [u8]:
+    var data = _zero_bytes(1024)
+    data[0] = 0x4d
+    data[1] = 0x5a
+    data = _put_u32_le(data, 0x3c, 0x80)
+    data[0x80] = 0x50
+    data[0x81] = 0x45
+    data = _put_u16_le(data, 0x84, 0x8664)
+    data = _put_u16_le(data, 0x86, 1)
+    data = _put_u16_le(data, 0x94, 0xf0)
+    data = _put_u16_le(data, 0x96, 0x2022)
+    data = _put_u16_le(data, 0x98, 0x20b)
+    data = _put_u32_le(data, 0x98 + 0x10, 0x1200)
+    data = _put_u32_le(data, 0x98 + 0x38, 0x5000)
+    data = _put_u32_le(data, 0x98 + 0x3c, 0x200)
+    data
+
+describe "wine dll file bytes":
+    it "validates supplied file-backed PE DLL bytes before persistent mapping":
+        val result = wine_dll_validate_file_bytes("kernel32.dll", "\\KnownDlls\\kernel32.dll", _minimal_dll_bytes())
+        expect result.ok == true
+        expect result.dll_name == "kernel32.dll"
+        expect result.selected_path == "\\KnownDlls\\kernel32.dll"
+        expect result.byte_count == 1024
+        expect result.image_size == 0x5000
+        expect result.entrypoint_rva == 0x1200
+        expect result.status == "dll-file-bytes-validated"
+        expect (result.evidence).contains("file-backed-dll-bytes")
+        expect (result.evidence).contains("pe-dll-characteristic")
+        expect (result.evidence).contains("no-persistent-dll-view")
+        expect (result.evidence).contains("no-dll-entrypoint-executed")
+
+    it "rejects non-DLL PE images and malformed byte buffers":
+        var exe = _minimal_dll_bytes()
+        exe = _put_u16_le(exe, 0x96, 0x0022)
+        val non_dll = wine_dll_validate_file_bytes("kernel32.dll", "\\KnownDlls\\kernel32.dll", exe)
+        expect non_dll.ok == false
+        expect non_dll.error == "pe-image-is-not-dll"
+        val bad = wine_dll_validate_file_bytes("kernel32.dll", "\\KnownDlls\\kernel32.dll", [1, 2, 3])
+        expect bad.error == "dll-bytes-too-small"
+
+    it "requires selected path and DLL entrypoint metadata":
+        val missing_path = wine_dll_validate_file_bytes("kernel32.dll", "", _minimal_dll_bytes())
+        expect missing_path.error == "missing-selected-path"
+        var missing_entry = _minimal_dll_bytes()
+        missing_entry = _put_u32_le(missing_entry, 0x98 + 0x10, 0)
+        val result = wine_dll_validate_file_bytes("kernel32.dll", "\\KnownDlls\\kernel32.dll", missing_entry)
+        expect result.error == "missing-dll-entrypoint"

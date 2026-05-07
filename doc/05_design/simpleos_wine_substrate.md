@@ -254,6 +254,11 @@ loaded-image evidence, records loader-lock acquisition, TLS-callback planning,
 and DllMain process-attach planning, and returns a hard block if a caller asks
 to execute DLL startup code before the real host/file-backed execution gates
 exist.
+`wine_dll_validate_file_bytes(...)` validates supplied file-backed PE DLL bytes
+for the selected DLL path. It checks MZ/PE signatures, x86_64 PE32+ headers,
+the DLL characteristic, image size, and a DLL entrypoint RVA, then records that
+bytes are present while still blocking persistent DLL views, TLS callbacks,
+DllMain, and arbitrary execution.
 `wine_process_resolve_first_import_module(...)` composes the PE first-import
 inspection gate with that module resolver, so validated full-Wine process
 images can resolve a requested procedure against their first imported KERNEL32
