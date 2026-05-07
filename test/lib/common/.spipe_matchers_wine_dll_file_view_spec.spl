@@ -1,0 +1,66 @@
+use common.wine_dll_file_probe.{wine_dll_probe_file}
+use common.wine_dll_file_view.{wine_dll_map_file_backed_view}
+use common.wine_vm_adapter.{wine_vm_space_find}
+
+fn _zero_bytes(count: i64) -> [u8]:
+    var out: [u8] = []
+    var i = 0
+    while i < count:
+        out.push(0)
+        i = i + 1
+    out
+
+fn _put_u16_le(data: [u8], offset: i64, value: i64) -> [u8]:
+    data[offset] = (value & 0xff) as u8
+    data[offset + 1] = ((value >> 8) & 0xff) as u8
+    data
+
+fn _put_u32_le(data: [u8], offset: i64, value: i64) -> [u8]:
+    data[offset] = (value & 0xff) as u8
+    data[offset + 1] = ((value >> 8) & 0xff) as u8
+    data[offset + 2] = ((value >> 16) & 0xff) as u8
+    data[offset + 3] = ((value >> 24) & 0xff) as u8
+    data
+
+fn _dll_bytes() -> [u8]:
+    var data = _zero_bytes(1024)
+    data[0] = 0x4d
+    data[1] = 0x5a
+    data = _put_u32_le(data, 0x3c, 0x80)
+    data[0x80] = 0x50
+    data[0x81] = 0x45
+    data = _put_u16_le(data, 0x84, 0x8664)
+    data = _put_u16_le(data, 0x86, 1)
+    data = _put_u16_le(data, 0x94, 0xf0)
+    data = _put_u16_le(data, 0x96, 0x2022)
+    data = _put_u16_le(data, 0x98, 0x20b)
+    data = _put_u32_le(data, 0x98 + 0x10, 0x1200)
+    data = _put_u32_le(data, 0x98 + 0x38, 0x5000)
+    data = _put_u32_le(data, 0x98 + 0x3c, 0x200)
+    data
+
+describe "wine dll file view":
+    it "maps a validated DLL file probe into a persistent process image view":
+        val files = [wine_dll_probe_file("\\KnownDlls\\kernel32.dll", _dll_bytes())]
+        val result = wine_dll_map_file_backed_view("kernel32.dll", "C:\\Games", "C:\\Users\\Player", [], ["kernel32.dll"], files, 33, 44, "pid fs ipc net capability", 0x79000000)
+        expect result.ok == true
+        expect result.selected_path == "\\KnownDlls\\kernel32.dll"
+        expect result.mapped_base == 0x79000000
+        expect result.mapped_size == 0x5000
+        expect result.entrypoint_rva == 0x1200
+        expect result.status == "dll-file-backed-view-mapped"
+        val region = wine_vm_space_find(result.space, 0x79000000)
+        expect region.kind == "image"
+        expect region.perms == "rx"
+        expect (result.evidence).contains("dll-file-probe-validated")
+        expect (result.evidence).contains("file-backed-dll-view-persistent")
+        expect (result.evidence).contains("os-vma")
+        expect (result.evidence).contains("no-dll-entrypoint-executed")
+
+    it "rejects invalid probe or mapping inputs":
+        val invalid_base = wine_dll_map_file_backed_view("kernel32.dll", "C:\\Games", "C:\\Users\\Player", [], ["kernel32.dll"], [], 33, 44, "pid fs ipc net capability", 0)
+        expect invalid_base.ok == false
+        expect invalid_base.error == "invalid-image-base"
+        val missing = wine_dll_map_file_backed_view("gameaudio.dll", "C:\\Games", "C:\\Users\\Player", [], [], [], 33, 44, "pid fs ipc net capability", 0x79000000)
+        expect missing.ok == false
+        expect missing.error == "dll-file-probe:dll-file-not-found"

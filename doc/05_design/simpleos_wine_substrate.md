@@ -264,6 +264,11 @@ a modeled byte-file table, selects the first candidate that has bytes, and then
 passes those bytes through the PE DLL byte-validation gate. It provides
 search-plus-file-probe evidence without opening real host files, retaining DLL
 views, or executing DLL startup code.
+`wine_dll_map_file_backed_view(...)` maps validated DLL file-probe bytes into a
+retained SimpleOS process image view. It records the selected path, mapped base,
+image size, and entrypoint RVA on an OS-backed VMA, but still does not perform
+relocations, import binding, TLS callback execution, DllMain, or arbitrary PE
+dispatch.
 `wine_process_resolve_first_import_module(...)` composes the PE first-import
 inspection gate with that module resolver, so validated full-Wine process
 images can resolve a requested procedure against their first imported KERNEL32

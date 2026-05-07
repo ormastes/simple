@@ -139,6 +139,18 @@ Fresh evidence:
 - `bin/simple check src/lib`: 2698 files, all checks passed.
 - Wine DLL file-probe changed-file stub scan: pass.
 
+## 2026-05-07 DLL File-Backed View Update
+
+The DLL file-backed view layer now maps validated DLL file-probe bytes into a retained SimpleOS process image view. It records selected path, mapped base, image size, entrypoint RVA, and OS-VMA evidence while still blocking relocations, import binding, TLS callbacks, DllMain, and arbitrary PE execution.
+
+Fresh evidence:
+
+- `bin/simple check` on changed DLL file-view source/spec files: all checks passed.
+- `bin/simple test test/lib/common/wine_dll_file_view_spec.spl`: 2 examples, 0 failures.
+- `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_dll_file_view_spec.spl`: 1 example, 0 failures.
+- `bin/simple check src/lib`: 2699 files, all checks passed.
+- Wine DLL file-view changed-file stub scan: pass.
+
 ## 2026-05-07 Executable-Environment Matrix Update
 
 The top-level Wine substrate matrix now exposes the SimpleOS executable-environment gate directly through `wine_substrate_exec_env_gate` and the `exec_env` capability row. This makes VM/full-OS/container evidence a first-class Wine readiness prerequisite instead of an implicit side gate.
