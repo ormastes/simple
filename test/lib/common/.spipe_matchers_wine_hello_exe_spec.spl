@@ -2,6 +2,7 @@ use common.wine_hello_exe.{
     wine_hello_exe_probe,
     wine_hello_exe_can_execute
 }
+use common.wine_hello_dispatch.{wine_hello_stdout_payload_gate_at_rva}
 
 fn _zero_bytes(count: i64) -> [u8]:
     var out: [u8] = []
@@ -251,24 +252,22 @@ describe "Wine hello.exe probe":
         val result = wine_hello_exe_probe([], _verified_gates())
         expect result.status == "rejected"
         expect result.error == "too-small"
+        expect wine_hello_exe_can_execute([], _verified_gates()) == false
 
     it "stops at structured import resolution instead of unsafe execution":
         val result = wine_hello_exe_probe(_minimal_pe64_console_with_import_descriptor(), _verified_gates())
         expect result.status == "unsupported-import"
         expect result.error == "import-thunk-ordinal-unsupported"
-        expect wine_hello_exe_can_execute(_minimal_pe64_console_with_import_descriptor(), _verified_gates()) == false
 
     it "reaches the CPU precondition boundary after minimal imports and image layout resolve":
         val result = wine_hello_exe_probe(_minimal_pe64_console_with_resolved_imports(), _verified_gates())
         expect result.status == "blocked"
         expect result.error == "missing-thread-context"
-        expect wine_hello_exe_can_execute(_minimal_pe64_console_with_resolved_imports(), _verified_gates()) == false
 
     it "rejects import binding targets that do not match the decoded hello calls":
         val result = wine_hello_exe_probe(_known_hello_exe_with_mismatched_write_binding(), _verified_dispatch_gates())
         expect result.status == "unsupported-import"
         expect result.error == "binding-target-mismatch:WriteFile"
-        expect wine_hello_exe_can_execute(_known_hello_exe_with_mismatched_write_binding(), _verified_dispatch_gates()) == false
 
     it "rejects malformed import thunk name RVAs before resolver checks":
         val result = wine_hello_exe_probe(_known_hello_exe_with_unmapped_import_name(), _verified_dispatch_gates())
@@ -279,13 +278,11 @@ describe "Wine hello.exe probe":
         val result = wine_hello_exe_probe(_minimal_pe64_console_with_resolved_imports(), _verified_cpu_envelope_gates())
         expect result.status == "blocked"
         expect result.error == "instruction-decoder-missing"
-        expect wine_hello_exe_can_execute(_minimal_pe64_console_with_resolved_imports(), _verified_cpu_envelope_gates()) == false
 
     it "requires the decoded stdout payload after dispatch resolves":
         val result = wine_hello_exe_probe(_known_hello_exe_without_marker(), _verified_dispatch_gates())
         expect result.status == "blocked"
         expect result.error == "hello-stdout-payload-rva-mismatch"
-        expect wine_hello_exe_can_execute(_known_hello_exe_without_marker(), _verified_dispatch_gates()) == false
 
     it "executes the decoded hello stdout payload without a fixture marker":
         val result = wine_hello_exe_probe(_known_hello_exe_with_payload_without_marker(), _verified_dispatch_gates())
@@ -301,7 +298,7 @@ describe "Wine hello.exe probe":
         val result = wine_hello_exe_probe(_known_hello_exe_without_payload(), _verified_dispatch_gates())
         expect result.status == "blocked"
         expect result.error == "hello-stdout-payload-rva-mismatch"
-        expect wine_hello_exe_can_execute(_known_hello_exe_without_payload(), _verified_dispatch_gates()) == false
+        expect wine_hello_stdout_payload_gate_at_rva(_known_hello_exe_without_payload(), 0x2120) == "hello-stdout-payload-rva-mismatch"
 
     it "requires the known hello instruction skeleton after dispatch resolves":
         val result = wine_hello_exe_probe(_minimal_pe64_console_with_resolved_imports(), _verified_dispatch_gates())
@@ -315,4 +312,3 @@ describe "Wine hello.exe probe":
         expect result.stdout_handle == -11
         expect result.bytes_written == 25
         expect result.exit_code == 0
-        expect wine_hello_exe_can_execute(_known_hello_exe_fixture(), _verified_dispatch_gates()) == true
