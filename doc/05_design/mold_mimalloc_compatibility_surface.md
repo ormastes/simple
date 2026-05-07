@@ -28,6 +28,7 @@ engine parity, and no upstream file/class/struct layout parity.
 | Public allocator structs | `MiBlock`, `MiPage`, `MiSegment`, `MiHeap` | Structural model for pages, segments, and size-class page lists. |
 | Allocator class | `MimallocAllocator` | Implements the repo-local `Allocator` trait over the global mimalloc heap. |
 | Heap initialization | `mimalloc_init` | Initializes one global heap; no TLS or per-thread heaps yet. |
+| Heap-specific APIs | `mi_heap_new`, `mi_heap_delete`, `mi_heap_malloc`, `mi_heap_zalloc`, `mi_heap_calloc`, `mi_heap_realloc`, `mi_heap_free` | Compatibility shims over the current single global heap; no independent per-heap arena ownership yet. |
 | OS page provider | `mimalloc_set_os_page_alloc` | Injection hook for SimpleOS/kernel backing pages. |
 | Basic allocation | `mi_malloc`, `mi_free`, `mi_realloc` | Implemented for the Simple mock array representation. |
 | Zeroing/count APIs | `mi_zalloc`, `mi_mallocn`, `mi_calloc`, `mi_rezalloc` | Implemented as compatibility shims over the existing allocator. |
