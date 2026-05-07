@@ -62,6 +62,7 @@ REQ-003: Test262 Subset Path
 REQ-004: Supported Feature Evidence
 
 - Given a feature is marked supported, when evidence is inspected, then it should require SSpec or external-suite mapping.
+- Given the current modern CSS slice, when the WPT selector subset is inspected, then it should include universal selector coverage.
 - Given the current modern CSS slice, when renderer SSpec is inspected, then it should include `:is()` coverage.
 - Given the current modern CSS slice, when renderer SSpec is inspected, then it should include `:where()` coverage.
 - Given the current modern CSS slice, when renderer SSpec is inspected, then it should include positive and negative `:not()` coverage.
@@ -96,6 +97,7 @@ REQ-006: Verification Gate
 REQ-007: Initial Modern CSS BDD Slice
 
 - Given modern CSS selector-list pseudos, when source is inspected, then `:is()` and `:where()` matching should be implemented.
+- Given modern CSS selectors, when source is inspected, then universal `*` matching should be implemented in the fallback block scanner.
 - Given modern CSS selector-list pseudos, when source is inspected, then partial `:not()`, descendant `:has()`, and bounded direct-child `:has(> ...)` matching should be implemented.
 - Given modern CSS structural pseudos, when source is inspected, then partial `:empty` matching should be implemented for empty element content.
 - Given modern CSS structural pseudos, when source is inspected, then partial `:first-child` matching should be implemented for first element content.
