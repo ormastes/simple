@@ -1186,3 +1186,16 @@ execution, or broad Win32/NT behavior.
 The WM/VM prerequisite plan in `doc/03_plan/agent_tasks/simpleos_wine_wm_vm_execution_plan_2026-05-06.md` is implemented at the Wine-facing SimpleOS contract level. Modeled X11/VM gates are no longer accepted as production evidence, and the new production gates require SimpleOS window records, framebuffer presents, OS process/address-space identity, container namespace evidence, OS VMA image mapping, thread stack/guard setup, fault evidence, and no-host-code-jump policy.
 
 This is still not a complete upstream Wine port. Full Wine graphics driver integration, compositor event-loop delivery, kernel page-table enforcement, broader POSIX/thread/dynload/service/peripheral behavior, arbitrary PE loading, broad x86_64 execution, and general NT/Win32 dispatch remain intentionally blocked outside these controlled prerequisite and GUI milestone slices.
+
+## 2026-05-07 DllMain PEB/TEB Write-Handoff Update
+
+`wine_dllmain_handoff_require_peb_teb_writes(...)` now composes PEB/TEB
+loader-lock startup readiness with PEB, TEB, TLS-vector, and
+process-parameter writable-page evidence before a retained DLL view can report
+non-executing DllMain process-attach handoff readiness. A missing writable
+startup mapping blocks the handoff before any DllMain execution claim.
+
+Fresh evidence:
+
+- `bin/simple test test/lib/common/wine_dll_view_dllmain_handoff_spec.spl --mode=interpreter --clean`: covers loader-lock plus PEB/TEB write readiness and unmapped startup-write rejection.
+- `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_dll_view_dllmain_handoff_spec.spl --mode=interpreter --clean`: covers the SimpleOS system-level DllMain handoff requiring PEB/TEB writes.
