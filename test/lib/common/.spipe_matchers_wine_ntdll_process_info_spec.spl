@@ -2,12 +2,28 @@ use common.wine_ntdll_process_info.{
     WineNtdllProcessThreadInfo,
     wine_ntdll_execute_process_info,
     wine_ntdll_execute_process_info_with_peb_teb,
+    wine_ntdll_execute_process_info_with_peb_teb_writes,
     wine_ntdll_process_thread_info_default
 }
-use common.wine_peb_teb.{WinePebTebInitEvidence, wine_peb_teb_init_default}
+use common.wine_peb_teb.{WinePebTebInitEvidence, wine_peb_teb_init_default, wine_peb_teb_memory_write_gate}
+use common.wine_vm_adapter.{WineVmSpace, wine_vm_commit, wine_vm_process_space_new, wine_vm_reserve_fixed}
 
 fn _classes() -> [text]:
     ["ProcessBasicInformation", "ProcessImageInformation", "ThreadBasicInformation"]
+
+fn _commit_fixed(space: WineVmSpace, base: i64, size: i64, perms: text) -> WineVmSpace:
+    val reserved = wine_vm_reserve_fixed(space, base, size)
+    if not reserved.ok:
+        return reserved.space
+    val committed = wine_vm_commit(reserved.space, reserved.region.base, perms)
+    committed.space
+
+fn _startup_write_space() -> WineVmSpace:
+    var space = wine_vm_process_space_new(10, 30, "pid fs ipc net capability")
+    space = _commit_fixed(space, 0x7ffdc000, 0x1000, "rw")
+    space = _commit_fixed(space, 0x7ffdd000, 0x1000, "rw")
+    space = _commit_fixed(space, 0x7ffde000, 0x1000, "rw")
+    _commit_fixed(space, 0x7ffdf000, 0x1000, "rw")
 
 describe "Wine NTDLL process information bridge":
     it "executes bounded process and thread information queries":
@@ -65,3 +81,18 @@ describe "Wine NTDLL process information bridge":
         val blocked = wine_ntdll_execute_process_info_with_peb_teb(["NtQueryInformationProcess", "NtQueryInformationThread"], _classes(), missing)
         expect blocked.ok == false
         expect blocked.error == "peb-teb:missing-simpleos-address-space"
+
+    it "requires PEB/TEB memory-write readiness before the write-aware process-info handoff":
+        val init = wine_peb_teb_init_default()
+        val writes = wine_peb_teb_memory_write_gate(init, _startup_write_space())
+        val result = wine_ntdll_execute_process_info_with_peb_teb_writes(["NtQueryInformationProcess", "NtQueryInformationThread"], _classes(), init, writes)
+        expect result.ok == true
+        expect result.peb_address == 0x7ffdf000
+        expect result.teb_address == 0x7ffde000
+        expect (result.operations).contains("PEBWrite")
+        expect (result.operations).contains("NtQueryInformationProcess NtQueryInformationThread")
+
+        val blocked_writes = wine_peb_teb_memory_write_gate(init, wine_vm_process_space_new(10, 30, "pid fs ipc net capability"))
+        val blocked = wine_ntdll_execute_process_info_with_peb_teb_writes(["NtQueryInformationProcess", "NtQueryInformationThread"], _classes(), init, blocked_writes)
+        expect blocked.ok == false
+        expect blocked.error == "peb-teb-write:peb-write:page-fault-unmapped"

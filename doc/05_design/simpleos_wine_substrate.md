@@ -426,7 +426,9 @@ addresses. The loader-lock variant composes the bounded KERNEL32 critical
 section sequence around that handoff before reporting startup readiness. The
 memory-write gate then requires writable SimpleOS VM pages for PEB, TEB, TLS
 vector, and process-parameter startup fields before reporting modeled mutation
-readiness.
+readiness. `wine_ntdll_execute_process_info_with_peb_teb_writes(...)` composes
+that write readiness before the NTDLL process/thread information bridge reports
+PEB/TEB addresses.
 `src/lib/common/wine_nt_heap.spl` models `HeapAlloc` and `HeapFree` with a
 deterministic process-heap handle and VM-reservation-backed block tracking.
 `src/lib/common/wine_ntdll_bridge.spl` maps the catalogued ntdll/Rtl forms onto

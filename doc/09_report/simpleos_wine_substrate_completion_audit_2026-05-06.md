@@ -372,6 +372,25 @@ Conservative boundary: this records modeled writable-page readiness only. It
 does not execute arbitrary TLS callbacks, run DllMain, perform byte-accurate
 Windows PEB/TEB layout writes, or transfer control to arbitrary PE code.
 
+## 2026-05-07 PEB/TEB NTDLL Write-Handoff Update
+
+The NTDLL process/thread information bridge now has a write-aware PEB/TEB path.
+It requires the modeled PEB/TEB memory-write readiness result before reporting
+`NtQueryInformationProcess` and `NtQueryInformationThread` PEB/TEB addresses,
+so process-info handoff can no longer rely only on aligned startup addresses.
+
+Fresh evidence:
+
+- `bin/simple check src/lib/common/wine_ntdll_process_info.spl test/lib/common/wine_ntdll_process_info_spec.spl doc/06_spec/app/simpleos/feature/simpleos_wine_peb_teb_spec.spl` passed.
+- `bin/simple test test/lib/common/wine_ntdll_process_info_spec.spl --mode=interpreter --clean`: 5 examples, 0 failures.
+- `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_peb_teb_spec.spl --mode=interpreter --clean`: 4 examples, 0 failures.
+- `bin/simple check` on generated NTDLL process-info and PEB/TEB matcher specs: all checks passed.
+- `bin/simple check src/lib`: 2707 files, all checks passed.
+
+Conservative boundary: this composes modeled write readiness with process-info
+queries. It still does not perform byte-accurate Windows PEB/TEB writes, run TLS
+callbacks, execute DllMain, or transfer control to arbitrary PE code.
+
 ## 2026-05-07 DLL View DllMain PEB/TEB Handoff Update
 
 The retained DLL view DllMain handoff now has a PEB/TEB-aware variant. It

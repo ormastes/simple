@@ -1,7 +1,7 @@
 """Bounded NTDLL process/thread information bridge for Wine startup probes."""
 
 use common.wine_nt_api_catalog.{wine_nt_api_ntdll_process_info_dispatch_gate}
-use common.wine_peb_teb.{WinePebTebInitEvidence, wine_peb_teb_init_gate}
+use common.wine_peb_teb.{WinePebTebInitEvidence, WinePebTebMemoryWriteResult, wine_peb_teb_init_gate}
 
 class WineNtdllProcessThreadInfo:
     process_id: i64
@@ -98,3 +98,16 @@ pub fn wine_ntdll_execute_process_info_with_peb_teb(symbols: [text], classes: [t
         classes,
         _info(peb_teb.process_id, peb_teb.thread_id, peb_teb.peb_address, peb_teb.teb_address, peb_teb.image_base, 8)
     )
+
+pub fn wine_ntdll_execute_process_info_with_peb_teb_writes(symbols: [text], classes: [text], init: WinePebTebInitEvidence, writes: WinePebTebMemoryWriteResult) -> WineNtdllProcessInfoResult:
+    if not writes.ok:
+        return _result(false, "peb-teb-write:" + writes.state, init.process_id, init.thread_id, init.peb_address, init.teb_address, init.image_base, 0, "", writes.operations)
+    if writes.write_count != 4:
+        return _result(false, "peb-teb-write-count-mismatch", init.process_id, init.thread_id, init.peb_address, init.teb_address, init.image_base, 0, "", writes.operations)
+    if writes.process_id != init.process_id or writes.thread_id != init.thread_id:
+        return _result(false, "peb-teb-write-identity-mismatch", init.process_id, init.thread_id, init.peb_address, init.teb_address, init.image_base, 0, "", writes.operations)
+    val result = wine_ntdll_execute_process_info_with_peb_teb(symbols, classes, init)
+    if not result.ok:
+        return result
+    result.operations = writes.operations + " NtQueryInformationProcess NtQueryInformationThread"
+    result
