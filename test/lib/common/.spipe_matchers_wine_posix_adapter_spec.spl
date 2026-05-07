@@ -3,9 +3,12 @@ use common.wine_posix_adapter.{
     wine_posix_adapter_errno_name,
     wine_posix_adapter_feature_string,
     wine_posix_adapter_gate,
+    wine_posix_adapter_gate_with_file_io_result,
     wine_posix_adapter_missing_apis,
     wine_posix_adapter_required_apis
 }
+use common.wine_kernel32_file_io.{wine_kernel32_execute_file_io}
+use common.wine_nt_file_io.{WineNtFileTable, wine_nt_file_table_add_file, wine_nt_file_table_new}
 
 fn _all_adapter_apis() -> text:
     "fd-open fd-read fd-write fd-close fd-dup fd-inherit stdio pipe socket timer poll-wait " +
@@ -14,6 +17,9 @@ fn _all_adapter_apis() -> text:
 fn _all_async_features() -> text:
     "io-driver submit-open submit-read submit-write submit-close submit-timeout poll-completion " +
         "event-loop register-fd deregister-fd waker wake"
+
+fn _table_with_file() -> WineNtFileTable:
+    wine_nt_file_table_add_file(wine_nt_file_table_new(_all_adapter_apis(), _all_async_features()), "C:\\hello.txt", "hello wine")
 
 describe "Wine POSIX adapter contract":
     it "lists fd, process, stdio, wait, timer, socket, path, and errno APIs":
@@ -46,6 +52,19 @@ describe "Wine POSIX adapter contract":
         expect result.ready == true
         expect result.state == "ready"
         expect result.async_state == "ready"
+
+    it "requires bounded KERNEL32 file I/O evidence before full adapter readiness":
+        val file_result = wine_kernel32_execute_file_io(["CreateFileW", "ReadFile", "GetFileType", "CloseHandle"], _table_with_file(), "C:\\hello.txt", 5)
+        val result = wine_posix_adapter_gate_with_file_io_result(_all_adapter_apis(), _all_async_features(), file_result)
+        expect result.ready == true
+        expect result.state == "ready"
+        expect (result.posix_features).contains("kernel32-file-io")
+
+    it "keeps POSIX readiness blocked on failed file I/O bridge evidence":
+        val file_result = wine_kernel32_execute_file_io(["CreateFileW", "ReadFile", "GetFileType", "CloseHandle"], _table_with_file(), "C:\\missing.txt", 5)
+        val result = wine_posix_adapter_gate_with_file_io_result(_all_adapter_apis(), _all_async_features(), file_result)
+        expect result.ready == false
+        expect result.state == "file-io-CreateFileW:file-not-found"
 
     it "normalizes host errno values used by Wine compatibility shims":
         expect wine_posix_adapter_errno_name(2) == "ENOENT"

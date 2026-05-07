@@ -22,6 +22,7 @@ Deliver the production-quality prerequisites for a controlled SimpleOS Wine path
 | SimpleOS executable environment gate | `src/lib/common/wine_simpleos_exec_env_gate.spl` requires QEMU VM, full OS boot, user process, VM space, filesystem, window system, network, container namespace, and container rootfs evidence; `src/lib/common/wine_substrate.spl` exposes this as the `exec_env` matrix row/gate | Implemented prerequisite |
 | Dynamic loading prerequisite | `src/lib/common/wine_dynload_adapter.spl` requires native loader APIs, search path/dependency/namespace coverage, relocation/import/TLS surfaces, structured loader errors, and bounded NTDLL `LdrLoadDll`/`LdrGetProcedureAddress`/`LdrUnloadDll` evidence before dynload readiness | Implemented prerequisite |
 | Thread/TLS/wait prerequisite | `src/lib/common/wine_thread_adapter.spl` requires thread/TLS/synchronization/wait/fault APIs and bounded NT `CreateThread`/`WaitForSingleObject` evidence before pthread readiness | Implemented prerequisite |
+| POSIX/file-I/O prerequisite | `src/lib/common/wine_posix_adapter.spl` requires fd/process/stdio/wait/timer/socket/path/errno APIs over `nogc_async_mut`, and bounded KERNEL32 `CreateFileW`/`ReadFile`/`GetFileType`/`CloseHandle` evidence before POSIX readiness | Implemented prerequisite |
 | WM/graphics production prerequisite | `src/lib/common/ui/wine_simpleos_window_bridge.spl` creates SimpleOS `/win` `WindowRecord` state and framebuffer present evidence; `src/lib/common/ui/wine_x11_adapter.spl` requires that bridge through `wine_x11_backend_production_ready` | Implemented prerequisite |
 | VM/container production prerequisite | `src/lib/common/wine_vm_adapter.spl` distinguishes modeled spaces from OS process/address-space/container-backed spaces; `src/lib/common/wine_image_vm_map.spl` maps validated PE images plus stack/guard before execution | Implemented prerequisite |
 | PE/COFF and CPU preparation | `src/lib/common/wine_pe_gate.spl`, `src/lib/common/pe_coff_header.spl`, `src/lib/common/wine_pe_loader_runtime.spl`, `src/lib/common/wine_image_map.spl`, `src/lib/common/wine_x86_64_decode.spl`, and `src/lib/common/wine_cpu_exec.spl` validate image layout, entry windows, imports, relocation/TLS readiness, decoded call targets, safe prologues, and dispatch evidence before controlled execution | Verified for controlled hello path |
@@ -116,6 +117,20 @@ Fresh evidence:
 - `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_substrate_spec.spl`: 14 examples, 0 failures.
 
 Conservative boundary: this is bounded thread/wait evidence for the Wine substrate. It does not provide real preemptive Windows thread semantics, APCs, fibers, full wait sets, or exception delivery.
+
+## 2026-05-07 POSIX/File-I/O Evidence Update
+
+The POSIX adapter now requires bounded KERNEL32 file-I/O evidence before full adapter readiness. `wine_posix_adapter_gate_with_file_io_result` composes the fd/process/stdio/wait/timer/socket/path/errno adapter gate with `CreateFileW`, `ReadFile`, `GetFileType`, and `CloseHandle` results, and keeps failed file-open/read paths blocked with structured errors.
+
+Fresh evidence:
+
+- `bin/simple check src/lib/common/wine_posix_adapter.spl src/lib/common/wine_substrate.spl test/lib/common/wine_posix_adapter_spec.spl test/lib/common/wine_substrate_spec.spl`: all checks passed.
+- `bin/simple test test/lib/common/wine_posix_adapter_spec.spl`: 9 examples, 0 failures.
+- `bin/simple test test/lib/common/wine_kernel32_file_io_spec.spl`: 3 examples, 0 failures.
+- `bin/simple test test/lib/common/wine_substrate_spec.spl`: 16 examples, 0 failures.
+- `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_substrate_spec.spl`: 14 examples, 0 failures.
+
+Conservative boundary: this is bounded file-I/O evidence for the Wine substrate. It does not provide complete POSIX semantics, sockets, poll/select, locking/sharing, async cancellation, or arbitrary filesystem behavior.
 
 ## Completion Decision
 
