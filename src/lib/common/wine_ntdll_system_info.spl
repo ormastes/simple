@@ -1,0 +1,82 @@
+"""Bounded NtQuerySystemInformation bridge for Wine startup probes."""
+
+use common.wine_nt_api_catalog.{wine_nt_api_ntdll_system_info_dispatch_gate}
+
+class WineNtdllSystemInfo:
+    page_size: i64
+    allocation_granularity: i64
+    processor_count: i64
+    timer_resolution_100ns: i64
+    system_root: text
+
+class WineNtdllSystemInfoResult:
+    ok: bool
+    error: text
+    page_size: i64
+    allocation_granularity: i64
+    processor_count: i64
+    timer_resolution_100ns: i64
+    system_root: text
+    classes: text
+    operations: text
+
+fn _info(page_size: i64, allocation_granularity: i64, processor_count: i64, timer_resolution_100ns: i64, system_root: text) -> WineNtdllSystemInfo:
+    WineNtdllSystemInfo(page_size: page_size, allocation_granularity: allocation_granularity, processor_count: processor_count, timer_resolution_100ns: timer_resolution_100ns, system_root: system_root)
+
+fn _result(ok: bool, error: text, page_size: i64, allocation_granularity: i64, processor_count: i64, timer_resolution_100ns: i64, system_root: text, classes: text, operations: text) -> WineNtdllSystemInfoResult:
+    WineNtdllSystemInfoResult(ok: ok, error: error, page_size: page_size, allocation_granularity: allocation_granularity, processor_count: processor_count, timer_resolution_100ns: timer_resolution_100ns, system_root: system_root, classes: classes, operations: operations)
+
+pub fn wine_ntdll_system_info_default() -> WineNtdllSystemInfo:
+    _info(4096, 65536, 4, 156250, "C:\\windows")
+
+fn _sequence_gate(symbols: [text], classes: [text]) -> text:
+    val dispatch_state = wine_nt_api_ntdll_system_info_dispatch_gate(symbols)
+    if dispatch_state != "ready":
+        return dispatch_state
+    if symbols.len() != 1:
+        return "ntdll-system-info-sequence-count-mismatch"
+    if symbols[0] != "NtQuerySystemInformation":
+        return "ntdll-system-info-sequence-expected:NtQuerySystemInformation"
+    if classes.len() != 3:
+        return "ntdll-system-info-class-count-mismatch"
+    if classes[0] != "SystemBasicInformation":
+        return "ntdll-system-info-class-expected:SystemBasicInformation"
+    if classes[1] != "SystemProcessorInformation":
+        return "ntdll-system-info-class-expected:SystemProcessorInformation"
+    if classes[2] != "SystemTimeOfDayInformation":
+        return "ntdll-system-info-class-expected:SystemTimeOfDayInformation"
+    "ready"
+
+fn _class_text(classes: [text]) -> text:
+    var out = ""
+    var i = 0
+    for item in classes:
+        if i > 0:
+            out = out + " "
+        out = out + item
+        i = i + 1
+    out
+
+pub fn wine_ntdll_execute_system_info(symbols: [text], classes: [text], info: WineNtdllSystemInfo) -> WineNtdllSystemInfoResult:
+    val sequence_state = _sequence_gate(symbols, classes)
+    if sequence_state != "ready":
+        return _result(false, sequence_state, 0, 0, 0, 0, "", "", "")
+    if info.page_size <= 0:
+        return _result(false, "NtQuerySystemInformation:invalid-page-size", 0, 0, 0, 0, "", "", "")
+    if info.allocation_granularity < info.page_size:
+        return _result(false, "NtQuerySystemInformation:invalid-allocation-granularity", info.page_size, 0, 0, 0, "", "SystemBasicInformation", "NtQuerySystemInformation")
+    if info.processor_count <= 0:
+        return _result(false, "NtQuerySystemInformation:invalid-processor-count", info.page_size, info.allocation_granularity, 0, 0, "", "SystemBasicInformation", "NtQuerySystemInformation")
+    if info.timer_resolution_100ns <= 0:
+        return _result(false, "NtQuerySystemInformation:invalid-timer-resolution", info.page_size, info.allocation_granularity, info.processor_count, 0, "", "SystemBasicInformation SystemProcessorInformation", "NtQuerySystemInformation")
+    _result(
+        true,
+        "",
+        info.page_size,
+        info.allocation_granularity,
+        info.processor_count,
+        info.timer_resolution_100ns,
+        info.system_root,
+        _class_text(classes),
+        "NtQuerySystemInformation"
+    )
