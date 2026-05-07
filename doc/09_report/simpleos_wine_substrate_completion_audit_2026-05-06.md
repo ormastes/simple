@@ -435,6 +435,21 @@ Conservative boundary: this adds a process-session/handoff artifact, not a
 general Wine executor. Arbitrary `.exe` execution remains blocked until full
 Wine readiness and an actual process execution boundary are implemented.
 
+## 2026-05-07 Wine Process Session Plan Command
+
+`src/app/wine_process_session_plan/main.spl` now exposes the controlled Wine
+process-session handoff as a command. It reports the command, substrate
+readiness, and dry-run status for the controlled `hello.exe` path.
+
+Fresh evidence:
+
+- `bin/simple check src/app/wine_process_session_plan/main.spl test/integration/app/wine_process_session_plan_command_spec.spl`: all checks passed.
+- `bin/simple run src/app/wine_process_session_plan/main.spl`: emitted `command=hello.exe`, `readiness=controlled-hello-ready`, and `status=dry-run-ready`.
+- `bin/simple test test/integration/app/wine_process_session_plan_command_spec.spl --mode=interpreter --clean`: 1 example, 0 failures.
+
+Conservative boundary: this command reports dry-run handoff evidence only. It
+does not execute Wine or arbitrary Windows programs.
+
 ## Completion Decision
 
 The WM/VM prerequisite plan in `doc/03_plan/agent_tasks/simpleos_wine_wm_vm_execution_plan_2026-05-06.md` is implemented at the Wine-facing SimpleOS contract level. Modeled X11/VM gates are no longer accepted as production evidence, and the new production gates require SimpleOS window records, framebuffer presents, OS process/address-space identity, container namespace evidence, OS VMA image mapping, thread stack/guard setup, fault evidence, and no-host-code-jump policy.
