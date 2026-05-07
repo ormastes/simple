@@ -1,0 +1,78 @@
+"""Bounded relocation application for retained Wine DLL file-backed views."""
+
+use common.pe_coff_header.{pe_rva_to_file_offset}
+use common.wine_dll_file_probe.{WineDllProbeFile}
+use common.wine_dll_file_view.{wine_dll_map_file_backed_view}
+use common.wine_pe_loader_runtime.{wine_pe_apply_relocation_plan}
+use common.wine_vm_adapter.{WineVmSpace, wine_vm_no_host_code_jump_gate, wine_vm_protect}
+
+class WineDllViewRelocationResult:
+    ok: bool
+    error: text
+    dll_name: text
+    selected_path: text
+    patched_image: [u8]
+    mapped_base: i64
+    mapped_size: i64
+    relocation_count: i64
+    target_rva: i64
+    space: WineVmSpace
+    evidence: text
+    status: text
+
+fn _result(ok: bool, error: text, dll_name: text, selected_path: text, patched_image: [u8], mapped_base: i64, mapped_size: i64, relocation_count: i64, target_rva: i64, space: WineVmSpace, evidence: text, status: text) -> WineDllViewRelocationResult:
+    WineDllViewRelocationResult(ok: ok, error: error, dll_name: dll_name.lower(), selected_path: selected_path, patched_image: patched_image, mapped_base: mapped_base, mapped_size: mapped_size, relocation_count: relocation_count, target_rva: target_rva, space: space, evidence: evidence, status: status)
+
+fn _read_u64_le(data: [u8], offset: i64) -> i64:
+    if offset + 7 >= data.len():
+        return 0
+    var value = 0
+    var shift = 0
+    var i = 0
+    while i < 8:
+        value = value | ((data[offset + i] as i64) << shift)
+        shift = shift + 8
+        i = i + 1
+    value
+
+fn _patch_u64_le(data: [u8], offset: i64, value: i64) -> [u8]:
+    var patched = data
+    var remaining = value
+    var i = 0
+    while i < 8:
+        patched[offset + i] = remaining % 256
+        remaining = remaining / 256
+        i = i + 1
+    patched
+
+pub fn wine_dll_apply_file_view_relocations(dll_name: text, application_directory: text, working_directory: text, path_dirs: [text], known_dlls: [text], files: [WineDllProbeFile], data: [u8], preferred_base: i64, load_base: i64, process_id: i64, address_space_id: i64, container_evidence: text) -> WineDllViewRelocationResult:
+    val view = wine_dll_map_file_backed_view(dll_name, application_directory, working_directory, path_dirs, known_dlls, files, process_id, address_space_id, container_evidence, load_base)
+    if not view.ok:
+        return _result(false, "dll-view:" + view.error, view.dll_name, view.selected_path, data, 0, 0, 0, 0, view.space, view.evidence, view.status)
+
+    val relocation = wine_pe_apply_relocation_plan(data, preferred_base, load_base)
+    if not relocation.ok:
+        return _result(false, "relocation:" + relocation.error, view.dll_name, view.selected_path, data, view.mapped_base, view.mapped_size, relocation.relocation_count, relocation.target_rva, view.space, view.evidence + " " + relocation.operations, "rejected")
+
+    val writeable = wine_vm_protect(view.space, view.mapped_base, "rw")
+    if not writeable.ok:
+        return _result(false, "dll-view-write-window:" + writeable.state, view.dll_name, view.selected_path, data, view.mapped_base, view.mapped_size, relocation.relocation_count, relocation.target_rva, view.space, view.evidence + " " + relocation.operations, "blocked")
+
+    var patched = data
+    if relocation.relocation_count > 0:
+        val target_offset = pe_rva_to_file_offset(data, relocation.target_rva)
+        if target_offset < 0 or target_offset + 7 >= data.len():
+            val restored = wine_vm_protect(writeable.space, view.mapped_base, "rx")
+            return _result(false, "dll-relocation-target-offset-unmapped", view.dll_name, view.selected_path, data, view.mapped_base, view.mapped_size, relocation.relocation_count, relocation.target_rva, restored.space, view.evidence + " " + relocation.operations + " dll-view-rx-restored", "rejected")
+        val original = _read_u64_le(data, target_offset)
+        patched = _patch_u64_le(patched, target_offset, original + relocation.delta)
+
+    val executable = wine_vm_protect(writeable.space, view.mapped_base, "rx")
+    if not executable.ok:
+        return _result(false, "dll-view-rx-restore:" + executable.state, view.dll_name, view.selected_path, patched, view.mapped_base, view.mapped_size, relocation.relocation_count, relocation.target_rva, writeable.space, view.evidence + " " + relocation.operations, "blocked")
+    val host_jump_state = wine_vm_no_host_code_jump_gate(executable.space, view.mapped_base + view.entrypoint_rva)
+    if host_jump_state != "ready":
+        return _result(false, host_jump_state, view.dll_name, view.selected_path, patched, view.mapped_base, view.mapped_size, relocation.relocation_count, relocation.target_rva, executable.space, view.evidence + " " + relocation.operations, "blocked")
+
+    val evidence = view.evidence + " " + relocation.operations + " dll-view-relocations-applied dll-view-write-window dll-view-write-enabled dll-view-rx-restored no-host-code-jump no-dll-entrypoint-executed no-tls-callback-executed no-arbitrary-execution"
+    _result(true, "", view.dll_name, view.selected_path, patched, view.mapped_base, view.mapped_size, relocation.relocation_count, relocation.target_rva, executable.space, evidence, "dll-view-relocations-applied")

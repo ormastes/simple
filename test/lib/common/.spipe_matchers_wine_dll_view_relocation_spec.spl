@@ -1,0 +1,104 @@
+use common.wine_dll_file_probe.{wine_dll_probe_file}
+use common.wine_dll_view_relocation.{wine_dll_apply_file_view_relocations}
+use common.pe_coff_header.{pe_rva_to_file_offset}
+
+fn _zero_bytes(count: i64) -> [u8]:
+    var out: [u8] = []
+    var i = 0
+    while i < count:
+        out.push(0)
+        i = i + 1
+    out
+
+fn _put_u16_le(data: [u8], offset: i64, value: i64) -> [u8]:
+    data[offset] = (value & 0xff) as u8
+    data[offset + 1] = ((value >> 8) & 0xff) as u8
+    data
+
+fn _put_u32_le(data: [u8], offset: i64, value: i64) -> [u8]:
+    data[offset] = (value & 0xff) as u8
+    data[offset + 1] = ((value >> 8) & 0xff) as u8
+    data[offset + 2] = ((value >> 16) & 0xff) as u8
+    data[offset + 3] = ((value >> 24) & 0xff) as u8
+    data
+
+fn _put_u64_le(data: [u8], offset: i64, value: i64) -> [u8]:
+    var remaining = value
+    var i = 0
+    while i < 8:
+        data[offset + i] = remaining % 256
+        remaining = remaining / 256
+        i = i + 1
+    data
+
+fn _read_u64_le(data: [u8], offset: i64) -> i64:
+    var value = 0
+    var shift = 0
+    var i = 0
+    while i < 8:
+        value = value | ((data[offset + i] as i64) << shift)
+        shift = shift + 8
+        i = i + 1
+    value
+
+fn _dll_with_dir64_relocation() -> [u8]:
+    var data = _zero_bytes(1024)
+    data[0] = 0x4d
+    data[1] = 0x5a
+    data = _put_u32_le(data, 0x3c, 0x80)
+    data[0x80] = 0x50
+    data[0x81] = 0x45
+    data = _put_u16_le(data, 0x84, 0x8664)
+    data = _put_u16_le(data, 0x86, 1)
+    data = _put_u16_le(data, 0x94, 0xf0)
+    data = _put_u16_le(data, 0x96, 0x2022)
+    data = _put_u16_le(data, 0x98, 0x20b)
+    data = _put_u32_le(data, 0x98 + 0x10, 0x1200)
+    data = _put_u32_le(data, 0x98 + 0x38, 0x5000)
+    data = _put_u32_le(data, 0x98 + 0x3c, 0x200)
+    data = _put_u16_le(data, 0x98 + 0x5c, 3)
+    data = _put_u32_le(data, 0x98 + 0x6c, 16)
+    data = _put_u32_le(data, 0x98 + 0x70 + 8, 0x2020)
+    data = _put_u32_le(data, 0x98 + 0x70 + 12, 0x40)
+    data = _put_u32_le(data, 0x98 + 0x70 + 40, 0x2160)
+    data = _put_u32_le(data, 0x98 + 0x70 + 44, 0x0a)
+    data = _put_u32_le(data, 0x98 + 0x70 + 72, 0x2170)
+    data = _put_u32_le(data, 0x98 + 0x70 + 76, 0x28)
+    val section_offset = 0x98 + 0xf0
+    data = _put_u32_le(data, section_offset + 8, 0x300)
+    data = _put_u32_le(data, section_offset + 12, 0x2000)
+    data = _put_u32_le(data, section_offset + 16, 0x200)
+    data = _put_u32_le(data, section_offset + 20, 0x200)
+    data = _put_u32_le(data, section_offset + 36, 0x60000020)
+    data = _put_u32_le(data, 0x360, 0x2000)
+    data = _put_u32_le(data, 0x364, 0x0a)
+    data = _put_u16_le(data, 0x368, 0xa100)
+    data = _put_u64_le(data, pe_rva_to_file_offset(data, 0x2100), 0x401234)
+    data
+
+describe "wine dll view relocation":
+    it "applies a bounded DIR64 relocation through a retained DLL view write window":
+        val data = _dll_with_dir64_relocation()
+        val files = [wine_dll_probe_file("\\KnownDlls\\kernel32.dll", data)]
+        val result = wine_dll_apply_file_view_relocations("kernel32.dll", "C:\\Games", "C:\\Users\\Player", [], ["kernel32.dll"], files, data, 0x400000, 0x500000, 77, 78, "pid fs ipc net capability")
+        expect result.ok == true
+        expect result.mapped_base == 0x500000
+        expect result.mapped_size == 0x5000
+        expect result.relocation_count == 1
+        expect result.target_rva == 0x2100
+        expect _read_u64_le(result.patched_image, pe_rva_to_file_offset(result.patched_image, 0x2100)) == 0x501234
+        expect (result.evidence).contains("file-backed-dll-view-persistent")
+        expect (result.evidence).contains("relocation-dir64")
+        expect (result.evidence).contains("dll-view-relocations-applied")
+        expect (result.evidence).contains("dll-view-rx-restored")
+        expect (result.evidence).contains("no-dll-entrypoint-executed")
+
+    it "rejects missing relocation directories before mutating the DLL image":
+        var data = _dll_with_dir64_relocation()
+        data = _put_u32_le(data, 0x98 + 0x70 + 40, 0)
+        data = _put_u32_le(data, 0x98 + 0x70 + 44, 0)
+        val files = [wine_dll_probe_file("\\KnownDlls\\kernel32.dll", data)]
+        val result = wine_dll_apply_file_view_relocations("kernel32.dll", "C:\\Games", "C:\\Users\\Player", [], ["kernel32.dll"], files, data, 0x400000, 0x500000, 77, 78, "pid fs ipc net capability")
+        expect result.ok == false
+        expect result.error == "relocation:missing-relocation-directory"
+        expect result.status == "rejected"

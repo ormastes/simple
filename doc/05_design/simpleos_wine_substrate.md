@@ -269,6 +269,10 @@ retained SimpleOS process image view. It records the selected path, mapped base,
 image size, and entrypoint RVA on an OS-backed VMA, but still does not perform
 relocations, import binding, TLS callback execution, DllMain, or arbitrary PE
 dispatch.
+`wine_dll_apply_file_view_relocations(...)` opens a modeled write window on the
+retained DLL view, applies bounded DIR64 relocation evidence from
+`wine_pe_apply_relocation_plan`, restores `rx`, and verifies no-host-code-jump;
+still no import binding, TLS callbacks, DllMain, or arbitrary PE dispatch.
 `wine_process_resolve_first_import_module(...)` composes the PE first-import
 inspection gate with that module resolver, so validated full-Wine process
 images can resolve a requested procedure against their first imported KERNEL32
