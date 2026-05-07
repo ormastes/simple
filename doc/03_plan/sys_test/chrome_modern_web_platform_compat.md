@@ -67,6 +67,7 @@ REQ-004: Supported Feature Evidence
 - Given the current modern CSS slice, when renderer SSpec is inspected, then it should include `:where()` coverage.
 - Given the current modern CSS slice, when renderer SSpec is inspected, then it should include positive and negative `:not()` coverage.
 - Given the current modern CSS slice, when renderer SSpec is inspected, then it should include positive and negative simple descendant `:has()` coverage, plus bounded direct-child `:has(> .class)` coverage.
+- Given the current modern CSS slice, when the WPT selector subset is inspected, then it should include bounded positive and sibling-negative descendant combinator coverage.
 - Given the current modern CSS slice, when the WPT selector subset is inspected, then it should include bounded positive and nested-negative direct child combinator coverage.
 - Given the current modern CSS slice, when the WPT selector subset is inspected, then it should include bounded positive and non-adjacent-negative adjacent sibling combinator coverage.
 - Given the current modern CSS slice, when the WPT selector subset is inspected, then it should include bounded positive and preceding-source-negative general sibling combinator coverage.
@@ -99,6 +100,7 @@ REQ-007: Initial Modern CSS BDD Slice
 - Given modern CSS selector-list pseudos, when source is inspected, then `:is()` and `:where()` matching should be implemented.
 - Given modern CSS selectors, when source is inspected, then universal `*` matching should be implemented in the fallback block scanner.
 - Given modern CSS selector-list pseudos, when source is inspected, then partial `:not()`, descendant `:has()`, and bounded direct-child `:has(> ...)` matching should be implemented.
+- Given modern CSS selectors, when source is inspected, then bounded ancestor descendant matching should be implemented in the fallback block scanner.
 - Given modern CSS structural pseudos, when source is inspected, then partial `:empty` matching should be implemented for empty element content.
 - Given modern CSS structural pseudos, when source is inspected, then partial `:first-child` matching should be implemented for first element content.
 - Given modern CSS structural pseudos, when source is inspected, then partial `:last-child` matching should be implemented for last element content.
