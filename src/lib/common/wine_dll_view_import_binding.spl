@@ -1,0 +1,140 @@
+"""Bounded import binding for retained Wine DLL file-backed views."""
+
+use common.pe_coff_header.{pe_entry_point_rva, pe_import_descriptor_table_gate, pe_import_descriptor_thunk_bindings, pe_rva_to_file_offset}
+use common.wine_dll_file_probe.{WineDllProbeFile}
+use common.wine_dll_view_relocation.{wine_dll_apply_file_view_relocations}
+use common.wine_kernel32_module_loader.{
+    wine_kernel32_get_module_handle_w,
+    wine_kernel32_get_proc_address,
+    wine_kernel32_load_library_ex_w,
+    wine_kernel32_module_table_add_module,
+    wine_kernel32_module_table_new
+}
+use common.wine_vm_adapter.{WineVmSpace, wine_vm_no_host_code_jump_gate, wine_vm_protect}
+
+class WineDllViewImportBindingResult:
+    ok: bool
+    error: text
+    dll_name: text
+    selected_path: text
+    patched_image: [u8]
+    mapped_base: i64
+    mapped_size: i64
+    module_count: i64
+    resolved_count: i64
+    patched_count: i64
+    first_iat_rva: i64
+    space: WineVmSpace
+    evidence: text
+    status: text
+
+fn _result(ok: bool, error: text, dll_name: text, selected_path: text, patched_image: [u8], mapped_base: i64, mapped_size: i64, module_count: i64, resolved_count: i64, patched_count: i64, first_iat_rva: i64, space: WineVmSpace, evidence: text, status: text) -> WineDllViewImportBindingResult:
+    WineDllViewImportBindingResult(ok: ok, error: error, dll_name: dll_name.lower(), selected_path: selected_path, patched_image: patched_image, mapped_base: mapped_base, mapped_size: mapped_size, module_count: module_count, resolved_count: resolved_count, patched_count: patched_count, first_iat_rva: first_iat_rva, space: space, evidence: evidence, status: status)
+
+fn _patch_u64_le(data: [u8], offset: i64, value: i64) -> [u8]:
+    var patched = data
+    var remaining = value
+    var i = 0
+    while i < 8:
+        patched[offset + i] = remaining % 256
+        remaining = remaining / 256
+        i = i + 1
+    patched
+
+fn _known_import_module_table():
+    var table = wine_kernel32_module_table_new()
+    table = wine_kernel32_module_table_add_module(
+        table,
+        "kernel32.dll",
+        ["LoadLibraryW", "LoadLibraryExW", "GetProcAddress", "FreeLibrary", "GetStdHandle", "WriteFile", "ExitProcess"]
+    )
+    table = wine_kernel32_module_table_add_module(
+        table,
+        "user32.dll",
+        ["CreateWindowExW", "ShowWindow", "UpdateWindow", "DefWindowProcW", "GetMessageW", "MessageBoxW"]
+    )
+    wine_kernel32_module_table_add_module(
+        table,
+        "gdi32.dll",
+        ["CreateCompatibleDC", "TextOutW", "BitBlt", "DeleteDC"]
+    )
+
+fn _module_supported(module_name: text) -> bool:
+    val normalized = module_name.lower()
+    normalized == "kernel32.dll" or normalized == "user32.dll" or normalized == "gdi32.dll"
+
+fn _text_seen(items: [text], value: text) -> bool:
+    val normalized = value.lower()
+    for item in items:
+        if item.lower() == normalized:
+            return true
+    false
+
+pub fn wine_dll_bind_file_view_imports(dll_name: text, application_directory: text, working_directory: text, path_dirs: [text], known_dlls: [text], files: [WineDllProbeFile], data: [u8], preferred_base: i64, load_base: i64, process_id: i64, address_space_id: i64, container_evidence: text, descriptor_limit: i64, symbol_limit: i64) -> WineDllViewImportBindingResult:
+    val relocated = wine_dll_apply_file_view_relocations(dll_name, application_directory, working_directory, path_dirs, known_dlls, files, data, preferred_base, load_base, process_id, address_space_id, container_evidence)
+    if not relocated.ok:
+        return _result(false, "dll-view-relocation:" + relocated.error, relocated.dll_name, relocated.selected_path, relocated.patched_image, relocated.mapped_base, relocated.mapped_size, 0, 0, 0, 0, relocated.space, relocated.evidence, relocated.status)
+
+    val import_state = pe_import_descriptor_table_gate(relocated.patched_image, descriptor_limit, symbol_limit)
+    if import_state != "ready":
+        return _result(false, "import-descriptor-table:" + import_state, relocated.dll_name, relocated.selected_path, relocated.patched_image, relocated.mapped_base, relocated.mapped_size, 0, 0, 0, 0, relocated.space, relocated.evidence + " dll-import-descriptor-table-rejected", "rejected")
+
+    val bindings = pe_import_descriptor_thunk_bindings(relocated.patched_image, descriptor_limit, symbol_limit)
+    if bindings.len() == 0:
+        return _result(false, "missing-import-descriptor-thunks", relocated.dll_name, relocated.selected_path, relocated.patched_image, relocated.mapped_base, relocated.mapped_size, 0, 0, 0, 0, relocated.space, relocated.evidence + " dll-import-descriptor-table", "rejected")
+
+    var modules: [text] = []
+    for binding in bindings:
+        if not _module_supported(binding.dll_name):
+            return _result(false, "unsupported-import-module:" + binding.dll_name, relocated.dll_name, relocated.selected_path, relocated.patched_image, relocated.mapped_base, relocated.mapped_size, modules.len(), 0, 0, binding.iat_rva, relocated.space, relocated.evidence + " dll-import-dependency-rejected no-dll-iat-written", "rejected")
+        if not _text_seen(modules, binding.dll_name):
+            modules.push(binding.dll_name)
+
+    var table = _known_import_module_table()
+    for module_name in modules:
+        val loaded = wine_kernel32_load_library_ex_w(table, module_name, 0)
+        if not loaded.ok:
+            return _result(false, "import-module-load:" + module_name + ":" + loaded.error, relocated.dll_name, relocated.selected_path, relocated.patched_image, relocated.mapped_base, relocated.mapped_size, modules.len(), 0, 0, 0, relocated.space, relocated.evidence + " dll-import-module-load-rejected no-real-dll-loaded no-dll-iat-written", "rejected")
+        table = loaded.table
+
+    var proc_addresses: [i64] = []
+    for binding in bindings:
+        val module = wine_kernel32_get_module_handle_w(table, binding.dll_name)
+        if not module.ok:
+            return _result(false, "import-module-handle:" + binding.dll_name + ":" + module.error, relocated.dll_name, relocated.selected_path, relocated.patched_image, relocated.mapped_base, relocated.mapped_size, modules.len(), proc_addresses.len(), 0, binding.iat_rva, relocated.space, relocated.evidence + " dll-import-module-handle-rejected no-dll-iat-written", "rejected")
+        val proc = wine_kernel32_get_proc_address(module.table, module.handle, binding.symbol)
+        if not proc.ok:
+            return _result(false, "import-proc-address:" + binding.dll_name + "!" + binding.symbol + ":" + proc.error, relocated.dll_name, relocated.selected_path, relocated.patched_image, relocated.mapped_base, relocated.mapped_size, modules.len(), proc_addresses.len(), 0, binding.iat_rva, relocated.space, relocated.evidence + " dll-import-proc-address-rejected no-dll-iat-written", "rejected")
+        proc_addresses.push(proc.proc_address)
+
+    val writeable = wine_vm_protect(relocated.space, relocated.mapped_base, "rw")
+    if not writeable.ok:
+        return _result(false, "dll-import-write-window:" + writeable.state, relocated.dll_name, relocated.selected_path, relocated.patched_image, relocated.mapped_base, relocated.mapped_size, modules.len(), proc_addresses.len(), 0, 0, relocated.space, relocated.evidence + " dll-import-write-window-blocked", "blocked")
+
+    var patched = relocated.patched_image
+    var patched_count = 0
+    var first_iat_rva = 0
+    var i = 0
+    while i < bindings.len():
+        val thunk_offset = pe_rva_to_file_offset(patched, bindings[i].iat_rva)
+        if thunk_offset < 0 or thunk_offset + 7 >= patched.len():
+            val restored = wine_vm_protect(writeable.space, relocated.mapped_base, "rx")
+            if not restored.ok:
+                return _result(false, "dll-import-rx-restore:" + restored.state, relocated.dll_name, relocated.selected_path, patched, relocated.mapped_base, relocated.mapped_size, modules.len(), proc_addresses.len(), patched_count, bindings[i].iat_rva, writeable.space, relocated.evidence + " dll-import-write-rollback", "blocked")
+            return _result(false, "dll-import-thunk-offset-unmapped:" + bindings[i].dll_name + "!" + bindings[i].symbol, relocated.dll_name, relocated.selected_path, patched, relocated.mapped_base, relocated.mapped_size, modules.len(), proc_addresses.len(), patched_count, bindings[i].iat_rva, restored.space, relocated.evidence + " dll-import-write-rollback dll-view-rx-restored", "rejected")
+        if first_iat_rva == 0:
+            first_iat_rva = bindings[i].iat_rva
+        patched = _patch_u64_le(patched, thunk_offset, proc_addresses[i])
+        patched_count = patched_count + 1
+        i = i + 1
+
+    val executable = wine_vm_protect(writeable.space, relocated.mapped_base, "rx")
+    if not executable.ok:
+        return _result(false, "dll-import-rx-restore:" + executable.state, relocated.dll_name, relocated.selected_path, patched, relocated.mapped_base, relocated.mapped_size, modules.len(), proc_addresses.len(), patched_count, first_iat_rva, writeable.space, relocated.evidence + " dll-import-thunks-written", "blocked")
+    val entry_rva = pe_entry_point_rva(patched)
+    val host_jump_state = wine_vm_no_host_code_jump_gate(executable.space, relocated.mapped_base + entry_rva)
+    if host_jump_state != "ready":
+        return _result(false, host_jump_state, relocated.dll_name, relocated.selected_path, patched, relocated.mapped_base, relocated.mapped_size, modules.len(), proc_addresses.len(), patched_count, first_iat_rva, executable.space, relocated.evidence + " dll-import-thunks-written", "blocked")
+
+    val evidence = relocated.evidence + " dll-import-descriptor-table dll-import-descriptor-thunks-inventoried dll-import-modules-modeled-loaded dll-import-proc-addresses-modeled dll-import-write-window dll-import-write-enabled dll-import-thunk-bytes-written dll-import-thunk-patch-bounded dll-view-rx-restored no-real-dll-loaded no-dll-entrypoint-executed no-tls-callback-executed no-arbitrary-execution"
+    _result(true, "", relocated.dll_name, relocated.selected_path, patched, relocated.mapped_base, relocated.mapped_size, modules.len(), proc_addresses.len(), patched_count, first_iat_rva, executable.space, evidence, "dll-view-imports-bound")

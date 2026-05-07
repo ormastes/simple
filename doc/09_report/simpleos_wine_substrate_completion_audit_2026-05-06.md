@@ -163,6 +163,18 @@ Fresh evidence:
 - `bin/simple check src/lib`: 2700 files, all checks passed.
 - Wine DLL view-relocation changed-file stub scan: pass.
 
+## 2026-05-07 DLL View Import-Binding Update
+
+The DLL view import-binding layer now composes relocated retained DLL views with bounded import descriptor inventory, modeled KERNEL32/USER32/GDI32 module resolution, and IAT byte patching through a modeled VMA write window. It restores rx permissions and keeps real DLL loads, DllMain, TLS callbacks, and arbitrary execution blocked.
+
+Fresh evidence:
+
+- `bin/simple check` on changed DLL view import-binding source/spec files: all checks passed.
+- `bin/simple test test/lib/common/wine_dll_view_import_binding_spec.spl`: 2 examples, 0 failures.
+- `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_dll_view_import_binding_spec.spl`: 1 example, 0 failures.
+- `bin/simple check src/lib`: 2701 files, all checks passed.
+- Wine DLL view import-binding changed-file stub scan: pass.
+
 ## 2026-05-07 Executable-Environment Matrix Update
 
 The top-level Wine substrate matrix now exposes the SimpleOS executable-environment gate directly through `wine_substrate_exec_env_gate` and the `exec_env` capability row. This makes VM/full-OS/container evidence a first-class Wine readiness prerequisite instead of an implicit side gate.

@@ -273,6 +273,11 @@ dispatch.
 retained DLL view, applies bounded DIR64 relocation evidence from
 `wine_pe_apply_relocation_plan`, restores `rx`, and verifies no-host-code-jump;
 still no import binding, TLS callbacks, DllMain, or arbitrary PE dispatch.
+`wine_dll_bind_file_view_imports(...)` composes that relocated retained view
+with bounded import descriptor inventory and the modeled KERNEL32/USER32/GDI32
+module table. It opens a second modeled write window, patches supported IAT
+slots with modeled procedure addresses, restores `rx`, and keeps real DLL
+loads, TLS callbacks, DllMain, and arbitrary PE dispatch blocked.
 `wine_process_resolve_first_import_module(...)` composes the PE first-import
 inspection gate with that module resolver, so validated full-Wine process
 images can resolve a requested procedure against their first imported KERNEL32
