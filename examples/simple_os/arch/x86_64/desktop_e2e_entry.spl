@@ -170,6 +170,15 @@ fn _emit_wine_container_markers(pid: u64) -> bool:
     serial_println(contract.rootfs_marker)
     true
 
+fn _emit_wine_hello_process_spawn() -> i64:
+    val pid = x86_64_fs_exec_spawn("/sys/apps/wine_hello", ["/sys/apps/wine_hello"], [])
+    if pid > 0:
+        serial_println("[desktop-e2e] process-backed:ok app=wine_hello pid={pid}")
+        serial_println("[desktop-e2e] wm:ok pid={pid} app=wine_hello mode=container-rootfs")
+    else:
+        serial_println("[desktop-e2e] wine-hello-spawn:fail path=/sys/apps/wine_hello rc={pid}")
+    pid
+
 fn _emit_storage_backed_smoke_markers() -> bool:
     val lane = if pcimgr_device_count() >= 5: "x86_64-uefi-hardware" else: "x86_64-disk"
     var ok = true
@@ -773,6 +782,9 @@ fn desktop_e2e_main() -> bool:
     if not _emit_vfs_app_read_marker("/sys/apps/rust"):
         _emit_phase_fail("generic-vfs-read", "path=/sys/apps/rust")
         return false
+    if not _emit_vfs_app_read_marker("/sys/apps/wine_hello"):
+        _emit_phase_fail("generic-vfs-read", "path=/sys/apps/wine_hello")
+        return false
     _emit_phase_ok("generic-vfs-read")
 
     _emit_phase_begin("info-cli-smoke")
@@ -787,11 +799,15 @@ fn desktop_e2e_main() -> bool:
     _emit_network_smoke_markers()
     _emit_phase_ok("network-smoke")
 
-    _emit_phase_begin("wine-container-contract")
-    if not _emit_wine_container_markers(112):
-        _emit_phase_fail("wine-container-contract", "app=wine_hello")
+    _emit_phase_begin("wine-exec-env")
+    val wine_pid = _emit_wine_hello_process_spawn()
+    if wine_pid <= 0:
+        _emit_phase_fail("wine-exec-env", "app=wine_hello")
         return false
-    _emit_phase_ok("wine-container-contract")
+    if not _emit_wine_container_markers(wine_pid.to_u64()):
+        _emit_phase_fail("wine-exec-env", "app=wine_hello")
+        return false
+    _emit_phase_ok("wine-exec-env")
 
     # SYS-GUI-001 + SYS-GUI-002 already passed at this point. The
     # remote-grouping join is a deeper-milestone proof; return true so the
