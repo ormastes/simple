@@ -250,6 +250,13 @@ and writes modeled KERNEL32 procedure addresses into a copied PE image for the
 same three known slots. This is still bounded fixture image mutation, not
 arbitrary DLL loading, full import-table patching, real OS memory mutation, or
 rollback-complete process memory patching.
+`wine_process_plan_import_loader_state(...)` owns modeled import-loader module
+state for bounded multi-DLL full-Wine process plans. It loads supported
+`KERNEL32`/`USER32`/`GDI32` modules through the modeled table, tracks maximum
+refcounts, releases every loaded handle after successful import resolution, and
+rolls back loaded handles when procedure resolution fails. This records loader
+lifetime evidence only; it still does not load host DLLs, run DLL entrypoints,
+execute TLS callbacks, patch the IAT, or transfer control to arbitrary PE code.
 `wine_process_plan_import_thunk_patches(...)` consumes those explicit records,
 so thunk patch evidence now carries module-loader, record-planning, and
 import-thunk preconditions before CPU dispatch preflight can pass.

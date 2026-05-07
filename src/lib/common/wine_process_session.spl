@@ -41,10 +41,12 @@ use common.wine_hello_fixture.{
 use common.wine_image_vm_map.{wine_image_map_into_vm_process}
 use common.wine_image_map.{wine_image_map_gate}
 use common.wine_kernel32_module_loader.{
+    WineKernel32ModuleTable,
     wine_kernel32_get_module_handle_w,
     wine_kernel32_get_proc_address,
     wine_kernel32_execute_module_resolution,
     wine_kernel32_execute_module_resolution_ex,
+    wine_kernel32_free_library,
     wine_kernel32_load_library_ex_w,
     wine_kernel32_module_table_add_module,
     wine_kernel32_module_table_new
@@ -144,6 +146,18 @@ class WineProcessImportResolutionPlanResult:
     command: text
     module_count: i64
     resolved_count: i64
+    evidence: text
+    status: text
+
+class WineProcessImportLoaderStateResult:
+    ok: bool
+    error: text
+    command: text
+    module_count: i64
+    loaded_count: i64
+    released_count: i64
+    rollback_count: i64
+    max_ref_count: i64
     evidence: text
     status: text
 
@@ -360,6 +374,9 @@ fn _wine_process_import_dependency_plan_result(ok: bool, error: text, command: t
 fn _wine_process_import_resolution_plan_result(ok: bool, error: text, command: text, module_count: i64, resolved_count: i64, evidence: text, status: text) -> WineProcessImportResolutionPlanResult:
     WineProcessImportResolutionPlanResult(ok: ok, error: error, command: command, module_count: module_count, resolved_count: resolved_count, evidence: evidence, status: status)
 
+fn _wine_process_import_loader_state_result(ok: bool, error: text, command: text, module_count: i64, loaded_count: i64, released_count: i64, rollback_count: i64, max_ref_count: i64, evidence: text, status: text) -> WineProcessImportLoaderStateResult:
+    WineProcessImportLoaderStateResult(ok: ok, error: error, command: command, module_count: module_count, loaded_count: loaded_count, released_count: released_count, rollback_count: rollback_count, max_ref_count: max_ref_count, evidence: evidence, status: status)
+
 fn _wine_process_import_binding_result(ok: bool, error: text, command: text, dll_name: text, call_sequence: text, binding_count: i64, status: text) -> WineProcessImportBindingResult:
     WineProcessImportBindingResult(ok: ok, error: error, command: command, dll_name: dll_name, call_sequence: call_sequence, binding_count: binding_count, status: status)
 
@@ -457,6 +474,13 @@ fn _wine_process_text_seen(items: [text], value: text) -> bool:
         if item.lower() == normalized:
             return true
     false
+
+fn _wine_process_max_module_ref_count(table: WineKernel32ModuleTable) -> i64:
+    var max_ref_count = 0
+    for module in table.modules:
+        if module.ref_count > max_ref_count:
+            max_ref_count = module.ref_count
+    max_ref_count
 
 fn _wine_process_patch_u64_le(data: [u8], offset: i64, value: i64) -> [u8]:
     var patched = data
@@ -804,6 +828,83 @@ pub fn wine_process_plan_import_resolution(plan: WineProcessSessionPlan, data: [
         i = i + 1
     val evidence = inventory.evidence + " import-dependencies-planned import-modules-modeled-loaded import-module-handles-modeled import-proc-addresses-modeled no-real-dll-loaded no-iat-patched no-arbitrary-execution"
     _wine_process_import_resolution_plan_result(true, "", plan.command, dependencies.module_count, resolved_count, evidence, "import-resolution-planned")
+
+pub fn wine_process_plan_import_loader_state(plan: WineProcessSessionPlan, data: [u8], descriptor_limit: i64, symbol_limit: i64) -> WineProcessImportLoaderStateResult:
+    val dependencies = wine_process_plan_import_dependencies(plan, data, descriptor_limit, symbol_limit)
+    if not dependencies.ok:
+        return _wine_process_import_loader_state_result(false, dependencies.error, plan.command, dependencies.module_count, 0, 0, 0, 0, dependencies.evidence, dependencies.status)
+    val inventory = wine_process_inventory_import_descriptor_thunks(plan, data, descriptor_limit, symbol_limit)
+    if not inventory.ok:
+        return _wine_process_import_loader_state_result(false, inventory.error, plan.command, dependencies.module_count, 0, 0, 0, 0, inventory.evidence, inventory.status)
+
+    var table = _wine_process_known_import_module_table()
+    var handles: [i64] = []
+    var loaded_count = 0
+    var max_ref_count = _wine_process_max_module_ref_count(table)
+    for module_name in dependencies.modules:
+        val loaded = wine_kernel32_load_library_ex_w(table, module_name, 0)
+        if not loaded.ok:
+            var rollback_count = 0
+            for handle in handles:
+                val freed = wine_kernel32_free_library(table, handle)
+                if freed.ok:
+                    table = freed.table
+                    rollback_count = rollback_count + 1
+            if _wine_process_max_module_ref_count(table) != 1:
+                val evidence = dependencies.evidence + " import-loader-state-planned import-loader-rollback-incomplete no-real-dll-loaded no-arbitrary-execution"
+                return _wine_process_import_loader_state_result(false, "import-loader-refcount-restore-failed", plan.command, dependencies.module_count, loaded_count, 0, rollback_count, max_ref_count, evidence, "rejected")
+            val evidence = dependencies.evidence + " import-loader-state-planned import-loader-rollback-complete import-loader-refcounts-restored no-real-dll-loaded no-arbitrary-execution"
+            return _wine_process_import_loader_state_result(false, "import-module-load:" + module_name + ":" + loaded.error, plan.command, dependencies.module_count, loaded_count, 0, rollback_count, max_ref_count, evidence, "rejected")
+        table = loaded.table
+        handles.push(loaded.handle)
+        loaded_count = loaded_count + 1
+        max_ref_count = _wine_process_max_module_ref_count(table)
+
+    var resolved_count = 0
+    var i = 0
+    while i < inventory.binding_count:
+        val module = wine_kernel32_get_module_handle_w(table, inventory.dll_names[i])
+        if not module.ok:
+            var rollback_count = 0
+            for handle in handles:
+                val freed = wine_kernel32_free_library(table, handle)
+                if freed.ok:
+                    table = freed.table
+                    rollback_count = rollback_count + 1
+            if _wine_process_max_module_ref_count(table) != 1:
+                val evidence = inventory.evidence + " import-loader-state-planned import-loader-modules-loaded import-loader-rollback-incomplete no-real-dll-loaded no-arbitrary-execution"
+                return _wine_process_import_loader_state_result(false, "import-loader-refcount-restore-failed", plan.command, dependencies.module_count, loaded_count, 0, rollback_count, max_ref_count, evidence, "rejected")
+            val evidence = inventory.evidence + " import-loader-state-planned import-loader-modules-loaded import-loader-rollback-complete import-loader-refcounts-restored no-real-dll-loaded no-arbitrary-execution"
+            return _wine_process_import_loader_state_result(false, "import-module-handle:" + inventory.dll_names[i] + ":" + module.error, plan.command, dependencies.module_count, loaded_count, 0, rollback_count, max_ref_count, evidence, "rejected")
+        val proc = wine_kernel32_get_proc_address(module.table, module.handle, inventory.symbols[i])
+        if not proc.ok:
+            var rollback_count = 0
+            for handle in handles:
+                val freed = wine_kernel32_free_library(table, handle)
+                if freed.ok:
+                    table = freed.table
+                    rollback_count = rollback_count + 1
+            if _wine_process_max_module_ref_count(table) != 1:
+                val evidence = inventory.evidence + " import-loader-state-planned import-loader-modules-loaded import-loader-rollback-incomplete no-real-dll-loaded no-arbitrary-execution"
+                return _wine_process_import_loader_state_result(false, "import-loader-refcount-restore-failed", plan.command, dependencies.module_count, loaded_count, 0, rollback_count, max_ref_count, evidence, "rejected")
+            val evidence = inventory.evidence + " import-loader-state-planned import-loader-modules-loaded import-loader-rollback-complete import-loader-refcounts-restored no-real-dll-loaded no-arbitrary-execution"
+            return _wine_process_import_loader_state_result(false, "import-proc-address:" + inventory.dll_names[i] + "!" + inventory.symbols[i] + ":" + proc.error, plan.command, dependencies.module_count, loaded_count, 0, rollback_count, max_ref_count, evidence, "rejected")
+        resolved_count = resolved_count + 1
+        i = i + 1
+
+    var released_count = 0
+    for handle in handles:
+        val freed = wine_kernel32_free_library(table, handle)
+        if not freed.ok:
+            val evidence = inventory.evidence + " import-loader-state-planned import-loader-modules-loaded import-loader-release-failed no-real-dll-loaded no-arbitrary-execution"
+            return _wine_process_import_loader_state_result(false, "import-module-release:" + freed.error, plan.command, dependencies.module_count, loaded_count, released_count, 0, max_ref_count, evidence, "rejected")
+        table = freed.table
+        released_count = released_count + 1
+    if _wine_process_max_module_ref_count(table) != 1:
+        val evidence = inventory.evidence + " import-loader-state-planned import-loader-modules-loaded import-loader-modules-released import-loader-refcounts-unrestored no-real-dll-loaded no-arbitrary-execution"
+        return _wine_process_import_loader_state_result(false, "import-loader-refcount-restore-failed", plan.command, dependencies.module_count, loaded_count, released_count, 0, max_ref_count, evidence, "rejected")
+    val evidence = inventory.evidence + " import-loader-state-planned import-loader-refcounts-tracked import-loader-modules-loaded import-loader-modules-released import-loader-refcounts-restored no-real-dll-loaded no-arbitrary-execution"
+    _wine_process_import_loader_state_result(true, "", plan.command, dependencies.module_count, loaded_count, released_count, 0, max_ref_count, evidence, "import-loader-state-planned")
 
 pub fn wine_process_plan_import_descriptor_thunk_patch_records(plan: WineProcessSessionPlan, data: [u8], descriptor_limit: i64, symbol_limit: i64) -> WineProcessImportDescriptorPatchRecordPlan:
     val resolution = wine_process_plan_import_resolution(plan, data, descriptor_limit, symbol_limit)
