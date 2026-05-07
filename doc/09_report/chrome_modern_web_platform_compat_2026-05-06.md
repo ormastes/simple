@@ -51,6 +51,7 @@ Implemented modern selector-list pseudo matching for:
 The fallback CSS scanner now avoids splitting commas inside functional selector pseudos. `:not()` and `:has()` support is intentionally partial: it covers simple selector-list exclusion, descendant selector-list matching, and bounded direct-child `:has(> .class/tag/#id)` matching, and does not claim broader relative selectors, sibling combinators, specificity parity, or WPT completeness.
 CSS nesting support is also intentionally partial: bounded simple `&` parent-selector rules are flattened before existing rule scans, but nested at-rules, selector-list specificity adjustment, relative selectors without `&`, media/container interactions, and full CSS Nesting Module parity are not claimed.
 Structural pseudo support is still bounded: `:nth-child()` now covers numeric, `odd`, and `even` arguments in the current style scanner/fallback renderer, but `an+b` formulas, `of <selector>` filters, generated content, comments, shadow DOM, and full Selectors Level 4 parity are not claimed.
+Attribute selector support now includes bounded suffix matching through `[attr$=value]` alongside exact, prefix, substring, token, dash, and ASCII case-flag paths; full escaping, namespaces, non-ASCII folding, and selector specificity parity are still not claimed.
 
 ## Remaining Gaps
 
