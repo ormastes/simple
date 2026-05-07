@@ -1,0 +1,58 @@
+"""Bounded KERNEL32 file-I/O bridge for Wine startup probes."""
+
+use common.wine_nt_api_catalog.{wine_nt_api_kernel32_file_io_dispatch_gate}
+use common.wine_nt_file_io.{
+    WineNtFileIoResult,
+    WineNtFileTable,
+    wine_nt_file_close,
+    wine_nt_file_create_w,
+    wine_nt_file_read
+}
+
+class WineKernel32FileIoResult:
+    ok: bool
+    error: text
+    table: WineNtFileTable
+    handle: i64
+    data: text
+    bytes_read: i64
+    operations: text
+
+fn _result(ok: bool, error: text, table: WineNtFileTable, handle: i64, data: text, bytes_read: i64, operations: text) -> WineKernel32FileIoResult:
+    WineKernel32FileIoResult(ok: ok, error: error, table: table, handle: handle, data: data, bytes_read: bytes_read, operations: operations)
+
+fn _sequence_gate(symbols: [text]) -> text:
+    val dispatch_state = wine_nt_api_kernel32_file_io_dispatch_gate(symbols)
+    if dispatch_state != "ready":
+        return dispatch_state
+    if symbols.len() != 3:
+        return "kernel32-file-io-sequence-count-mismatch"
+    if symbols[0] != "CreateFileW":
+        return "kernel32-file-io-sequence-expected:CreateFileW"
+    if symbols[1] != "ReadFile":
+        return "kernel32-file-io-sequence-expected:ReadFile"
+    if symbols[2] != "CloseHandle":
+        return "kernel32-file-io-sequence-expected:CloseHandle"
+    "ready"
+
+fn _failure(symbol: text, step: WineNtFileIoResult, operations: text) -> WineKernel32FileIoResult:
+    _result(false, symbol + ":" + step.state, step.table, step.handle, step.data, step.bytes_read, operations)
+
+pub fn wine_kernel32_execute_file_io(symbols: [text], table: WineNtFileTable, path: text, requested_len: i64) -> WineKernel32FileIoResult:
+    val sequence_state = _sequence_gate(symbols)
+    if sequence_state != "ready":
+        return _result(false, sequence_state, table, 0, "", 0, "")
+
+    val opened = wine_nt_file_create_w(table, path)
+    if not opened.ok:
+        return _failure("CreateFileW", opened, "")
+
+    val read = wine_nt_file_read(opened.table, opened.handle, requested_len)
+    if not read.ok:
+        return _failure("ReadFile", read, "CreateFileW")
+
+    val closed = wine_nt_file_close(read.table, opened.handle)
+    if not closed.ok:
+        return _failure("CloseHandle", closed, "CreateFileW ReadFile")
+
+    _result(true, "", closed.table, opened.handle, read.data, read.bytes_read, "CreateFileW ReadFile CloseHandle")

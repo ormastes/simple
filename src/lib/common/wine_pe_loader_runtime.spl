@@ -1,0 +1,97 @@
+"""Bounded PE loader runtime evidence for Wine relocations and TLS callbacks."""
+
+use common.pe_coff_header.{
+    pe_relocation_directory_gate,
+    pe_relocation_directory_rva,
+    pe_relocation_directory_size,
+    pe_rva_to_file_offset,
+    pe_tls_directory_gate,
+    pe_tls_directory_rva
+}
+
+class WinePeRelocationResult:
+    ok: bool
+    error: text
+    delta: i64
+    relocation_count: i64
+    target_rva: i64
+    operations: text
+
+class WinePeTlsCallbackResult:
+    ok: bool
+    error: text
+    callback_count: i64
+    first_callback_rva: i64
+    operations: text
+
+fn _relocation_result(ok: bool, error: text, delta: i64, relocation_count: i64, target_rva: i64, operations: text) -> WinePeRelocationResult:
+    WinePeRelocationResult(ok: ok, error: error, delta: delta, relocation_count: relocation_count, target_rva: target_rva, operations: operations)
+
+fn _tls_result(ok: bool, error: text, callback_count: i64, first_callback_rva: i64, operations: text) -> WinePeTlsCallbackResult:
+    WinePeTlsCallbackResult(ok: ok, error: error, callback_count: callback_count, first_callback_rva: first_callback_rva, operations: operations)
+
+fn _read_u16_le(data: [u8], offset: i64) -> i64:
+    if offset + 1 >= data.len():
+        return 0
+    val lo = data[offset] as i64
+    val hi = data[offset + 1] as i64
+    lo | (hi << 8)
+
+fn _read_u32_le(data: [u8], offset: i64) -> i64:
+    if offset + 3 >= data.len():
+        return 0
+    val b0 = data[offset] as i64
+    val b1 = data[offset + 1] as i64
+    val b2 = data[offset + 2] as i64
+    val b3 = data[offset + 3] as i64
+    b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)
+
+pub fn wine_pe_apply_relocation_plan(data: [u8], preferred_base: i64, load_base: i64) -> WinePeRelocationResult:
+    val directory_state = pe_relocation_directory_gate(data)
+    if directory_state != "ready":
+        return _relocation_result(false, directory_state, 0, 0, 0, "")
+
+    val delta = load_base - preferred_base
+    val reloc_rva = pe_relocation_directory_rva(data)
+    val reloc_size = pe_relocation_directory_size(data)
+    val reloc_offset = pe_rva_to_file_offset(data, reloc_rva)
+    val block_rva = _read_u32_le(data, reloc_offset)
+    val block_size = _read_u32_le(data, reloc_offset + 4)
+    if block_size == 8:
+        return _relocation_result(true, "", delta, 0, 0, "relocation-directory relocation-block relocation-no-entries")
+    if block_size < 10 or block_size > reloc_size:
+        return _relocation_result(false, "relocation-block-invalid", delta, 0, 0, "relocation-directory")
+
+    val entry = _read_u16_le(data, reloc_offset + 8)
+    val relocation_type = entry >> 12
+    val relocation_offset = entry & 0x0fff
+    if relocation_type == 0:
+        return _relocation_result(true, "", delta, 0, 0, "relocation-directory relocation-block relocation-absolute-skip")
+    if relocation_type != 10:
+        return _relocation_result(false, "relocation-type-unsupported", delta, 0, 0, "relocation-directory relocation-block")
+    val target_rva = block_rva + relocation_offset
+    if pe_rva_to_file_offset(data, target_rva) < 0:
+        return _relocation_result(false, "relocation-target-unmapped", delta, 0, target_rva, "relocation-directory relocation-block")
+    _relocation_result(true, "", delta, 1, target_rva, "relocation-directory relocation-block relocation-dir64 relocation-applied")
+
+pub fn wine_pe_tls_callback_plan(data: [u8], dynload_apis: text) -> WinePeTlsCallbackResult:
+    val tls_state = pe_tls_directory_gate(data)
+    if tls_state != "ready":
+        return _tls_result(false, tls_state, 0, 0, "")
+    if not dynload_apis.contains("tls-callback"):
+        return _tls_result(false, "missing-api-tls-callback", 0, 0, "tls-directory")
+
+    val tls_rva = pe_tls_directory_rva(data)
+    val tls_offset = pe_rva_to_file_offset(data, tls_rva)
+    val callbacks_rva = _read_u32_le(data, tls_offset + 24)
+    if callbacks_rva == 0:
+        return _tls_result(true, "", 0, 0, "tls-directory tls-callback-table-empty")
+    val callbacks_offset = pe_rva_to_file_offset(data, callbacks_rva)
+    if callbacks_offset < 0:
+        return _tls_result(false, "tls-callback-table-unmapped", 0, callbacks_rva, "tls-directory")
+    val first_callback_rva = _read_u32_le(data, callbacks_offset)
+    if first_callback_rva == 0:
+        return _tls_result(true, "", 0, 0, "tls-directory tls-callback-table-empty")
+    if pe_rva_to_file_offset(data, first_callback_rva) < 0:
+        return _tls_result(false, "tls-callback-unmapped", 0, first_callback_rva, "tls-directory tls-callback-table")
+    _tls_result(true, "", 1, first_callback_rva, "tls-directory tls-callback-table tls-callback-dispatch")

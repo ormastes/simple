@@ -1,0 +1,157 @@
+"""Bounded KERNEL32 module/procedure loader bridge for Wine startup probes."""
+
+use common.wine_nt_api_catalog.{wine_nt_api_kernel32_module_loader_dispatch_gate}
+
+class WineKernel32ModuleExport:
+    name: text
+    address: i64
+
+class WineKernel32Module:
+    handle: i64
+    name: text
+    exports: [WineKernel32ModuleExport]
+    ref_count: i64
+    loaded: bool
+
+class WineKernel32ModuleTable:
+    modules: [WineKernel32Module]
+    next_handle: i64
+
+class WineKernel32ModuleResult:
+    ok: bool
+    error: text
+    table: WineKernel32ModuleTable
+    handle: i64
+    proc_address: i64
+    operations: text
+
+fn _export(name: text, address: i64) -> WineKernel32ModuleExport:
+    WineKernel32ModuleExport(name: name, address: address)
+
+fn _module(handle: i64, name: text, exports: [WineKernel32ModuleExport], ref_count: i64, loaded: bool) -> WineKernel32Module:
+    WineKernel32Module(handle: handle, name: name, exports: exports, ref_count: ref_count, loaded: loaded)
+
+fn _table(modules: [WineKernel32Module], next_handle: i64) -> WineKernel32ModuleTable:
+    WineKernel32ModuleTable(modules: modules, next_handle: next_handle)
+
+fn _result(ok: bool, error: text, table: WineKernel32ModuleTable, handle: i64, proc_address: i64, operations: text) -> WineKernel32ModuleResult:
+    WineKernel32ModuleResult(ok: ok, error: error, table: table, handle: handle, proc_address: proc_address, operations: operations)
+
+fn _normalized_name(name: text) -> text:
+    name.lower()
+
+fn _find_module_by_name(modules: [WineKernel32Module], name: text) -> WineKernel32Module:
+    val normalized = _normalized_name(name)
+    for module in modules:
+        if module.loaded and _normalized_name(module.name) == normalized:
+            return module
+    _module(0, "", [], 0, false)
+
+fn _find_module_by_handle(modules: [WineKernel32Module], handle: i64) -> WineKernel32Module:
+    for module in modules:
+        if module.loaded and module.handle == handle:
+            return module
+    _module(0, "", [], 0, false)
+
+fn _find_export(module: WineKernel32Module, name: text) -> WineKernel32ModuleExport:
+    for item in module.exports:
+        if item.name == name:
+            return item
+    _export("", 0)
+
+fn _replace_module(table: WineKernel32ModuleTable, replacement: WineKernel32Module) -> WineKernel32ModuleTable:
+    var modules: [WineKernel32Module] = []
+    for module in table.modules:
+        if module.handle == replacement.handle:
+            modules.push(replacement)
+        else:
+            modules.push(module)
+    _table(modules, table.next_handle)
+
+fn _exports(names: [text], handle: i64) -> [WineKernel32ModuleExport]:
+    var out: [WineKernel32ModuleExport] = []
+    var index = 1
+    for name in names:
+        out.push(_export(name, handle * 0x1000 + index))
+        index = index + 1
+    out
+
+fn _sequence_gate(symbols: [text]) -> text:
+    val dispatch_state = wine_nt_api_kernel32_module_loader_dispatch_gate(symbols)
+    if dispatch_state != "ready":
+        return dispatch_state
+    if symbols.len() != 4:
+        return "kernel32-module-loader-sequence-count-mismatch"
+    if symbols[0] != "GetModuleHandleW":
+        return "kernel32-module-loader-sequence-expected:GetModuleHandleW"
+    if symbols[1] != "LoadLibraryW":
+        return "kernel32-module-loader-sequence-expected:LoadLibraryW"
+    if symbols[2] != "GetProcAddress":
+        return "kernel32-module-loader-sequence-expected:GetProcAddress"
+    if symbols[3] != "FreeLibrary":
+        return "kernel32-module-loader-sequence-expected:FreeLibrary"
+    "ready"
+
+pub fn wine_kernel32_module_table_new() -> WineKernel32ModuleTable:
+    _table([], 0x120)
+
+pub fn wine_kernel32_module_table_add_module(table: WineKernel32ModuleTable, name: text, exports: [text]) -> WineKernel32ModuleTable:
+    val handle = table.next_handle
+    var modules = table.modules
+    modules.push(_module(handle, name, _exports(exports, handle), 1, true))
+    _table(modules, handle + 1)
+
+pub fn wine_kernel32_get_module_handle_w(table: WineKernel32ModuleTable, name: text) -> WineKernel32ModuleResult:
+    val module = _find_module_by_name(table.modules, name)
+    if not module.loaded:
+        return _result(false, "module-not-loaded", table, 0, 0, "")
+    _result(true, "", table, module.handle, 0, "GetModuleHandleW")
+
+pub fn wine_kernel32_load_library_w(table: WineKernel32ModuleTable, name: text) -> WineKernel32ModuleResult:
+    val module = _find_module_by_name(table.modules, name)
+    if not module.loaded:
+        return _result(false, "module-not-found", table, 0, 0, "")
+    val updated = _replace_module(table, _module(module.handle, module.name, module.exports, module.ref_count + 1, true))
+    _result(true, "", updated, module.handle, 0, "LoadLibraryW")
+
+pub fn wine_kernel32_get_proc_address(table: WineKernel32ModuleTable, handle: i64, name: text) -> WineKernel32ModuleResult:
+    val module = _find_module_by_handle(table.modules, handle)
+    if not module.loaded:
+        return _result(false, "invalid-module-handle", table, handle, 0, "")
+    val item = _find_export(module, name)
+    if item.name == "":
+        return _result(false, "proc-not-found", table, handle, 0, "")
+    _result(true, "", table, handle, item.address, "GetProcAddress")
+
+pub fn wine_kernel32_free_library(table: WineKernel32ModuleTable, handle: i64) -> WineKernel32ModuleResult:
+    val module = _find_module_by_handle(table.modules, handle)
+    if not module.loaded:
+        return _result(false, "invalid-module-handle", table, handle, 0, "")
+    var loaded = true
+    if module.ref_count <= 1:
+        loaded = false
+    val updated = _replace_module(table, _module(module.handle, module.name, module.exports, module.ref_count - 1, loaded))
+    _result(true, "", updated, handle, 0, "FreeLibrary")
+
+pub fn wine_kernel32_execute_module_resolution(symbols: [text], table: WineKernel32ModuleTable, module_name: text, proc_name: text) -> WineKernel32ModuleResult:
+    val sequence_state = _sequence_gate(symbols)
+    if sequence_state != "ready":
+        return _result(false, sequence_state, table, 0, 0, "")
+
+    val current = wine_kernel32_get_module_handle_w(table, module_name)
+    if not current.ok:
+        return _result(false, "GetModuleHandleW:" + current.error, current.table, 0, 0, "")
+
+    val loaded = wine_kernel32_load_library_w(current.table, module_name)
+    if not loaded.ok:
+        return _result(false, "LoadLibraryW:" + loaded.error, loaded.table, current.handle, 0, "GetModuleHandleW")
+
+    val proc = wine_kernel32_get_proc_address(loaded.table, loaded.handle, proc_name)
+    if not proc.ok:
+        return _result(false, "GetProcAddress:" + proc.error, proc.table, loaded.handle, 0, "GetModuleHandleW LoadLibraryW")
+
+    val freed = wine_kernel32_free_library(proc.table, loaded.handle)
+    if not freed.ok:
+        return _result(false, "FreeLibrary:" + freed.error, freed.table, loaded.handle, proc.proc_address, "GetModuleHandleW LoadLibraryW GetProcAddress")
+
+    _result(true, "", freed.table, loaded.handle, proc.proc_address, "GetModuleHandleW LoadLibraryW GetProcAddress FreeLibrary")

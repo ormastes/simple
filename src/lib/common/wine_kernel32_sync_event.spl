@@ -1,0 +1,87 @@
+"""Bounded KERNEL32 event synchronization bridge for Wine startup probes."""
+
+class WineKernel32Event:
+    handle: i64
+    name: text
+    manual_reset: bool
+    signaled: bool
+
+class WineKernel32EventTable:
+    events: [WineKernel32Event]
+    next_handle: i64
+
+class WineKernel32EventResult:
+    ok: bool
+    error: text
+    table: WineKernel32EventTable
+    handle: i64
+    wait_status: text
+    operations: text
+
+fn _event(handle: i64, name: text, manual_reset: bool, signaled: bool) -> WineKernel32Event:
+    WineKernel32Event(handle: handle, name: name, manual_reset: manual_reset, signaled: signaled)
+
+fn _table(events: [WineKernel32Event], next_handle: i64) -> WineKernel32EventTable:
+    WineKernel32EventTable(events: events, next_handle: next_handle)
+
+fn _result(ok: bool, error: text, table: WineKernel32EventTable, handle: i64, wait_status: text, operations: text) -> WineKernel32EventResult:
+    WineKernel32EventResult(ok: ok, error: error, table: table, handle: handle, wait_status: wait_status, operations: operations)
+
+fn _find_event(table: WineKernel32EventTable, handle: i64) -> WineKernel32Event:
+    for event in table.events:
+        if event.handle == handle:
+            return event
+    _event(0, "", false, false)
+
+fn _replace_event(table: WineKernel32EventTable, replacement: WineKernel32Event) -> WineKernel32EventTable:
+    var events: [WineKernel32Event] = []
+    for event in table.events:
+        if event.handle == replacement.handle:
+            events.push(replacement)
+        else:
+            events.push(event)
+    _table(events, table.next_handle)
+
+fn _sequence_gate(symbols: [text]) -> text:
+    if symbols.len() == 0:
+        return "bridge-missing:kernel32-sync-event"
+    for symbol in symbols:
+        if symbol != "CreateEventW" and symbol != "SetEvent" and symbol != "ResetEvent" and symbol != "WaitForSingleObject":
+            return "bridge-wrong-category:" + symbol
+    if symbols.len() != 4:
+        return "kernel32-sync-event-sequence-count-mismatch"
+    if symbols[0] != "CreateEventW":
+        return "kernel32-sync-event-sequence-expected:CreateEventW"
+    if symbols[1] != "SetEvent":
+        return "kernel32-sync-event-sequence-expected:SetEvent"
+    if symbols[2] != "WaitForSingleObject":
+        return "kernel32-sync-event-sequence-expected:WaitForSingleObject"
+    if symbols[3] != "ResetEvent":
+        return "kernel32-sync-event-sequence-expected:ResetEvent"
+    "ready"
+
+pub fn wine_kernel32_event_table_new() -> WineKernel32EventTable:
+    _table([], 0x200)
+
+pub fn wine_kernel32_execute_event_sync(symbols: [text], table: WineKernel32EventTable, name: text, manual_reset: bool, initially_signaled: bool, timeout_ms: i64) -> WineKernel32EventResult:
+    val sequence_state = _sequence_gate(symbols)
+    if sequence_state != "ready":
+        return _result(false, sequence_state, table, 0, "", "")
+    if name == "":
+        return _result(false, "CreateEventW:invalid-name", table, 0, "", "")
+    val handle = table.next_handle
+    var events = table.events
+    events.push(_event(handle, name, manual_reset, initially_signaled))
+    val created = _table(events, handle + 1)
+
+    val event = _find_event(created, handle)
+    if event.handle == 0:
+        return _result(false, "SetEvent:invalid-handle", created, handle, "", "CreateEventW")
+    val signaled = _replace_event(created, _event(event.handle, event.name, event.manual_reset, true))
+    val wait_event = _find_event(signaled, handle)
+    if not wait_event.signaled:
+        if timeout_ms == 0:
+            return _result(true, "", signaled, handle, "WAIT_TIMEOUT", "CreateEventW SetEvent WaitForSingleObject")
+        return _result(false, "WaitForSingleObject:wait-pending", signaled, handle, "", "CreateEventW SetEvent")
+    val reset = _replace_event(signaled, _event(wait_event.handle, wait_event.name, wait_event.manual_reset, false))
+    _result(true, "", reset, handle, "WAIT_OBJECT_0", "CreateEventW SetEvent WaitForSingleObject ResetEvent")

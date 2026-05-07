@@ -1,5 +1,6 @@
 """Modeled ntdll/Rtl precondition wrappers over the NT bridge contracts."""
 
+use common.wine_nt_api_catalog.{wine_nt_api_ntdll_file_io_dispatch_gate, wine_nt_api_ntdll_virtual_memory_dispatch_gate, wine_nt_api_rtl_heap_dispatch_gate}
 use common.wine_nt_file_io.{
     WineNtFileIoResult,
     WineNtFileTable,
@@ -15,6 +16,90 @@ use common.wine_nt_virtual_memory.{
     wine_nt_virtual_memory_protect
 }
 use common.wine_vm_adapter.{WineVmSpace}
+
+class WineNtdllVirtualMemorySequenceResult:
+    ok: bool
+    error: text
+    space: WineVmSpace
+    base: i64
+    size: i64
+    old_perms: text
+    operations: text
+
+class WineNtdllFileIoSequenceResult:
+    ok: bool
+    error: text
+    table: WineNtFileTable
+    handle: i64
+    data: text
+    bytes_read: i64
+    operations: text
+
+class WineRtlHeapSequenceResult:
+    ok: bool
+    error: text
+    heap: WineNtHeap
+    ptr: i64
+    size: i64
+    operations: text
+
+fn _vm_sequence_result(ok: bool, error: text, space: WineVmSpace, base: i64, size: i64, old_perms: text, operations: text) -> WineNtdllVirtualMemorySequenceResult:
+    WineNtdllVirtualMemorySequenceResult(ok: ok, error: error, space: space, base: base, size: size, old_perms: old_perms, operations: operations)
+
+fn _file_sequence_result(ok: bool, error: text, table: WineNtFileTable, handle: i64, data: text, bytes_read: i64, operations: text) -> WineNtdllFileIoSequenceResult:
+    WineNtdllFileIoSequenceResult(ok: ok, error: error, table: table, handle: handle, data: data, bytes_read: bytes_read, operations: operations)
+
+fn _heap_sequence_result(ok: bool, error: text, heap: WineNtHeap, ptr: i64, size: i64, operations: text) -> WineRtlHeapSequenceResult:
+    WineRtlHeapSequenceResult(ok: ok, error: error, heap: heap, ptr: ptr, size: size, operations: operations)
+
+fn _ntdll_vm_sequence_gate(symbols: [text]) -> text:
+    val dispatch_state = wine_nt_api_ntdll_virtual_memory_dispatch_gate(symbols)
+    if dispatch_state != "ready":
+        return dispatch_state
+    if symbols.len() != 3:
+        return "ntdll-virtual-memory-sequence-count-mismatch"
+    if symbols[0] != "NtAllocateVirtualMemory":
+        return "ntdll-virtual-memory-sequence-expected:NtAllocateVirtualMemory"
+    if symbols[1] != "NtProtectVirtualMemory":
+        return "ntdll-virtual-memory-sequence-expected:NtProtectVirtualMemory"
+    if symbols[2] != "NtFreeVirtualMemory":
+        return "ntdll-virtual-memory-sequence-expected:NtFreeVirtualMemory"
+    "ready"
+
+fn _ntdll_vm_failure(symbol: text, step: WineNtVirtualMemoryResult, operations: text) -> WineNtdllVirtualMemorySequenceResult:
+    _vm_sequence_result(false, symbol + ":" + step.state, step.space, step.base, step.size, step.old_perms, operations)
+
+fn _ntdll_file_sequence_gate(symbols: [text]) -> text:
+    val dispatch_state = wine_nt_api_ntdll_file_io_dispatch_gate(symbols)
+    if dispatch_state != "ready":
+        return dispatch_state
+    if symbols.len() != 3:
+        return "ntdll-file-io-sequence-count-mismatch"
+    if symbols[0] != "NtCreateFile":
+        return "ntdll-file-io-sequence-expected:NtCreateFile"
+    if symbols[1] != "NtReadFile":
+        return "ntdll-file-io-sequence-expected:NtReadFile"
+    if symbols[2] != "NtClose":
+        return "ntdll-file-io-sequence-expected:NtClose"
+    "ready"
+
+fn _ntdll_file_failure(symbol: text, step: WineNtFileIoResult, operations: text) -> WineNtdllFileIoSequenceResult:
+    _file_sequence_result(false, symbol + ":" + step.state, step.table, step.handle, step.data, step.bytes_read, operations)
+
+fn _rtl_heap_sequence_gate(symbols: [text]) -> text:
+    val dispatch_state = wine_nt_api_rtl_heap_dispatch_gate(symbols)
+    if dispatch_state != "ready":
+        return dispatch_state
+    if symbols.len() != 2:
+        return "rtl-heap-sequence-count-mismatch"
+    if symbols[0] != "RtlAllocateHeap":
+        return "rtl-heap-sequence-expected:RtlAllocateHeap"
+    if symbols[1] != "RtlFreeHeap":
+        return "rtl-heap-sequence-expected:RtlFreeHeap"
+    "ready"
+
+fn _rtl_heap_failure(symbol: text, step: WineNtHeapResult, operations: text) -> WineRtlHeapSequenceResult:
+    _heap_sequence_result(false, symbol + ":" + step.state, step.heap, step.ptr, step.size, operations)
 
 pub fn wine_ntdll_required_calls() -> [text]:
     [
@@ -37,6 +122,25 @@ pub fn wine_ntdll_protect_virtual_memory(space: WineVmSpace, base: i64, perms: t
 pub fn wine_ntdll_free_virtual_memory(space: WineVmSpace, base: i64) -> WineNtVirtualMemoryResult:
     wine_nt_virtual_memory_free(space, base)
 
+pub fn wine_ntdll_execute_virtual_memory(symbols: [text], space: WineVmSpace, base: i64, size: i64, alloc_perms: text, protect_perms: text) -> WineNtdllVirtualMemorySequenceResult:
+    val sequence_state = _ntdll_vm_sequence_gate(symbols)
+    if sequence_state != "ready":
+        return _vm_sequence_result(false, sequence_state, space, 0, 0, "", "")
+
+    val allocated = wine_ntdll_allocate_virtual_memory(space, base, size, alloc_perms)
+    if not allocated.ok:
+        return _ntdll_vm_failure("NtAllocateVirtualMemory", allocated, "")
+
+    val protected = wine_ntdll_protect_virtual_memory(allocated.space, allocated.base, protect_perms)
+    if not protected.ok:
+        return _ntdll_vm_failure("NtProtectVirtualMemory", protected, "NtAllocateVirtualMemory")
+
+    val freed = wine_ntdll_free_virtual_memory(protected.space, protected.base)
+    if not freed.ok:
+        return _ntdll_vm_failure("NtFreeVirtualMemory", freed, "NtAllocateVirtualMemory NtProtectVirtualMemory")
+
+    _vm_sequence_result(true, "", freed.space, freed.base, freed.size, protected.old_perms, "NtAllocateVirtualMemory NtProtectVirtualMemory NtFreeVirtualMemory")
+
 pub fn wine_ntdll_create_file(table: WineNtFileTable, path: text) -> WineNtFileIoResult:
     wine_nt_file_create_w(table, path)
 
@@ -46,8 +150,42 @@ pub fn wine_ntdll_read_file(table: WineNtFileTable, handle: i64, requested_len: 
 pub fn wine_ntdll_close(table: WineNtFileTable, handle: i64) -> WineNtFileIoResult:
     wine_nt_file_close(table, handle)
 
+pub fn wine_ntdll_execute_file_io(symbols: [text], table: WineNtFileTable, path: text, requested_len: i64) -> WineNtdllFileIoSequenceResult:
+    val sequence_state = _ntdll_file_sequence_gate(symbols)
+    if sequence_state != "ready":
+        return _file_sequence_result(false, sequence_state, table, 0, "", 0, "")
+
+    val opened = wine_ntdll_create_file(table, path)
+    if not opened.ok:
+        return _ntdll_file_failure("NtCreateFile", opened, "")
+
+    val read = wine_ntdll_read_file(opened.table, opened.handle, requested_len)
+    if not read.ok:
+        return _ntdll_file_failure("NtReadFile", read, "NtCreateFile")
+
+    val closed = wine_ntdll_close(read.table, opened.handle)
+    if not closed.ok:
+        return _ntdll_file_failure("NtClose", closed, "NtCreateFile NtReadFile")
+
+    _file_sequence_result(true, "", closed.table, opened.handle, read.data, read.bytes_read, "NtCreateFile NtReadFile NtClose")
+
 pub fn wine_rtl_allocate_heap(heap: WineNtHeap, handle: i64, size: i64) -> WineNtHeapResult:
     wine_nt_heap_alloc(heap, handle, size)
 
 pub fn wine_rtl_free_heap(heap: WineNtHeap, handle: i64, ptr: i64) -> WineNtHeapResult:
     wine_nt_heap_free(heap, handle, ptr)
+
+pub fn wine_rtl_execute_heap(symbols: [text], heap: WineNtHeap, handle: i64, size: i64) -> WineRtlHeapSequenceResult:
+    val sequence_state = _rtl_heap_sequence_gate(symbols)
+    if sequence_state != "ready":
+        return _heap_sequence_result(false, sequence_state, heap, 0, 0, "")
+
+    val allocated = wine_rtl_allocate_heap(heap, handle, size)
+    if not allocated.ok:
+        return _rtl_heap_failure("RtlAllocateHeap", allocated, "")
+
+    val freed = wine_rtl_free_heap(allocated.heap, handle, allocated.ptr)
+    if not freed.ok:
+        return _rtl_heap_failure("RtlFreeHeap", freed, "RtlAllocateHeap")
+
+    _heap_sequence_result(true, "", freed.heap, allocated.ptr, allocated.size, "RtlAllocateHeap RtlFreeHeap")

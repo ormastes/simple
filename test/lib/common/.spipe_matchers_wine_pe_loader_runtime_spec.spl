@@ -1,0 +1,99 @@
+use common.wine_pe_loader_runtime.{wine_pe_apply_relocation_plan, wine_pe_tls_callback_plan}
+
+fn _zero_bytes(count: i64) -> [u8]:
+    var out: [u8] = []
+    var i = 0
+    while i < count:
+        out.push(0)
+        i = i + 1
+    out
+
+fn _put_u16_le(data: [u8], offset: i64, value: i64) -> [u8]:
+    data[offset] = (value & 0xff) as u8
+    data[offset + 1] = ((value >> 8) & 0xff) as u8
+    data
+
+fn _put_u32_le(data: [u8], offset: i64, value: i64) -> [u8]:
+    data[offset] = (value & 0xff) as u8
+    data[offset + 1] = ((value >> 8) & 0xff) as u8
+    data[offset + 2] = ((value >> 16) & 0xff) as u8
+    data[offset + 3] = ((value >> 24) & 0xff) as u8
+    data
+
+fn _image() -> [u8]:
+    var data = _zero_bytes(1024)
+    data[0] = 0x4d
+    data[1] = 0x5a
+    data = _put_u32_le(data, 0x3c, 0x80)
+    data[0x80] = 0x50
+    data[0x81] = 0x45
+    data = _put_u16_le(data, 0x84, 0x8664)
+    data = _put_u16_le(data, 0x86, 1)
+    data = _put_u16_le(data, 0x94, 0xf0)
+    data = _put_u16_le(data, 0x98, 0x20b)
+    data = _put_u32_le(data, 0x98 + 0x10, 0x2010)
+    data = _put_u32_le(data, 0x98 + 0x38, 0x5000)
+    data = _put_u32_le(data, 0x98 + 0x3c, 0x200)
+    data = _put_u16_le(data, 0x98 + 0x5c, 3)
+    data = _put_u32_le(data, 0x98 + 0x6c, 16)
+    data = _put_u32_le(data, 0x98 + 0x70 + 8, 0x2020)
+    data = _put_u32_le(data, 0x98 + 0x70 + 12, 0x40)
+    data = _put_u32_le(data, 0x98 + 0x70 + 40, 0x2160)
+    data = _put_u32_le(data, 0x98 + 0x70 + 44, 0x0c)
+    data = _put_u32_le(data, 0x98 + 0x70 + 72, 0x2170)
+    data = _put_u32_le(data, 0x98 + 0x70 + 76, 0x28)
+    val section_offset = 0x98 + 0xf0
+    data = _put_u32_le(data, section_offset + 8, 0x300)
+    data = _put_u32_le(data, section_offset + 12, 0x2000)
+    data = _put_u32_le(data, section_offset + 16, 0x200)
+    data = _put_u32_le(data, section_offset + 20, 0x200)
+    data = _put_u32_le(data, section_offset + 36, 0x60000020)
+    data = _put_u32_le(data, 0x220 + 12, 0x2050)
+    data = _put_u32_le(data, 0x240, 0)
+    data = _put_u32_le(data, 0x244, 0)
+    data = _put_u32_le(data, 0x248, 0)
+    data = _put_u32_le(data, 0x24c, 0)
+    data = _put_u32_le(data, 0x250, 0x4b)
+    data = _put_u32_le(data, 0x360, 0x2000)
+    data = _put_u32_le(data, 0x364, 0x0c)
+    data = _put_u16_le(data, 0x368, 0xa018)
+    data = _put_u32_le(data, 0x370 + 24, 0x2190)
+    data = _put_u32_le(data, 0x390, 0x2010)
+    data
+
+describe "Wine PE loader runtime evidence":
+    it "plans a bounded DIR64 relocation from a mapped relocation block":
+        val result = wine_pe_apply_relocation_plan(_image(), 0x400000, 0x500000)
+        expect result.ok == true
+        expect result.delta == 0x100000
+        expect result.relocation_count == 1
+        expect result.target_rva == 0x2018
+        expect result.operations == "relocation-directory relocation-block relocation-dir64 relocation-applied"
+
+    it "rejects unsupported relocation types and unmapped targets":
+        var bad_type = _image()
+        bad_type = _put_u16_le(bad_type, 0x368, 0x3018)
+        expect wine_pe_apply_relocation_plan(bad_type, 0x400000, 0x500000).error == "relocation-type-unsupported"
+
+        var unmapped = _image()
+        unmapped = _put_u16_le(unmapped, 0x368, 0xa900)
+        expect wine_pe_apply_relocation_plan(unmapped, 0x400000, 0x500000).error == "relocation-target-unmapped"
+
+    it "plans TLS callback dispatch only with dynamic-loader callback support":
+        val blocked = wine_pe_tls_callback_plan(_image(), "native-module-open")
+        expect blocked.ok == false
+        expect blocked.error == "missing-api-tls-callback"
+
+        val result = wine_pe_tls_callback_plan(_image(), "native-module-open tls-callback")
+        expect result.ok == true
+        expect result.callback_count == 1
+        expect result.first_callback_rva == 0x2010
+        expect result.operations == "tls-directory tls-callback-table tls-callback-dispatch"
+
+    it "accepts an empty TLS callback table as explicit loader evidence":
+        var empty = _image()
+        empty = _put_u32_le(empty, 0x390, 0)
+        val result = wine_pe_tls_callback_plan(empty, "tls-callback")
+        expect result.ok == true
+        expect result.callback_count == 0
+        expect result.operations == "tls-directory tls-callback-table-empty"

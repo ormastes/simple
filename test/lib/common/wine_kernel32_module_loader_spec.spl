@@ -1,0 +1,68 @@
+use common.wine_kernel32_module_loader.{
+    WineKernel32ModuleTable,
+    wine_kernel32_execute_module_resolution,
+    wine_kernel32_get_module_handle_w,
+    wine_kernel32_get_proc_address,
+    wine_kernel32_module_table_add_module,
+    wine_kernel32_module_table_new
+}
+
+fn _table() -> WineKernel32ModuleTable:
+    wine_kernel32_module_table_add_module(wine_kernel32_module_table_new(), "kernel32.dll", ["LoadLibraryW", "GetProcAddress", "FreeLibrary"])
+
+describe "Wine KERNEL32 module loader bridge":
+    it "executes a bounded module and procedure resolution sequence":
+        val result = wine_kernel32_execute_module_resolution(
+            ["GetModuleHandleW", "LoadLibraryW", "GetProcAddress", "FreeLibrary"],
+            _table(),
+            "KERNEL32.dll",
+            "GetProcAddress"
+        )
+
+        expect(result.ok).to_equal(true)
+        expect(result.handle).to_equal(0x120)
+        expect(result.proc_address).to_equal(0x120000 + 2)
+        expect(result.operations).to_equal("GetModuleHandleW LoadLibraryW GetProcAddress FreeLibrary")
+        expect(wine_kernel32_get_module_handle_w(result.table, "kernel32.dll").ok).to_equal(true)
+
+    it "keeps module loader dispatch ordered and bounded":
+        val out_of_order = wine_kernel32_execute_module_resolution(
+            ["LoadLibraryW", "GetModuleHandleW", "GetProcAddress", "FreeLibrary"],
+            _table(),
+            "kernel32.dll",
+            "GetProcAddress"
+        )
+        expect(out_of_order.ok).to_equal(false)
+        expect(out_of_order.error).to_equal("kernel32-module-loader-sequence-expected:GetModuleHandleW")
+
+        val wrong_family = wine_kernel32_execute_module_resolution(
+            ["GetModuleHandleW", "LoadLibraryW", "VirtualAlloc", "FreeLibrary"],
+            _table(),
+            "kernel32.dll",
+            "GetProcAddress"
+        )
+        expect(wrong_family.ok).to_equal(false)
+        expect(wrong_family.error).to_equal("bridge-wrong-category:VirtualAlloc")
+
+    it "reports missing modules, missing procedures, and invalid handles":
+        val missing_module = wine_kernel32_execute_module_resolution(
+            ["GetModuleHandleW", "LoadLibraryW", "GetProcAddress", "FreeLibrary"],
+            _table(),
+            "user32.dll",
+            "MessageBoxW"
+        )
+        expect(missing_module.ok).to_equal(false)
+        expect(missing_module.error).to_equal("GetModuleHandleW:module-not-loaded")
+
+        val missing_proc = wine_kernel32_execute_module_resolution(
+            ["GetModuleHandleW", "LoadLibraryW", "GetProcAddress", "FreeLibrary"],
+            _table(),
+            "kernel32.dll",
+            "UnknownProc"
+        )
+        expect(missing_proc.ok).to_equal(false)
+        expect(missing_proc.error).to_equal("GetProcAddress:proc-not-found")
+
+        val invalid_handle = wine_kernel32_get_proc_address(_table(), 0x999, "GetProcAddress")
+        expect(invalid_handle.ok).to_equal(false)
+        expect(invalid_handle.error).to_equal("invalid-module-handle")

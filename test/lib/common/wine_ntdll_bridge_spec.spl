@@ -4,11 +4,14 @@ use common.wine_ntdll_bridge.{
     wine_ntdll_allocate_virtual_memory,
     wine_ntdll_close,
     wine_ntdll_create_file,
+    wine_ntdll_execute_file_io,
+    wine_ntdll_execute_virtual_memory,
     wine_ntdll_free_virtual_memory,
     wine_ntdll_protect_virtual_memory,
     wine_ntdll_read_file,
     wine_ntdll_required_calls,
     wine_rtl_allocate_heap,
+    wine_rtl_execute_heap,
     wine_rtl_free_heap
 }
 use common.wine_vm_adapter.{wine_vm_access_gate, wine_vm_space_new}
@@ -37,6 +40,43 @@ describe "Wine ntdll and Rtl bridge":
         expect(wine_vm_access_gate(protected.space, 0x500000, "execute")).to_equal("ready")
         expect(freed.state).to_equal("freed")
 
+    it "executes only the bounded ntdll virtual-memory sequence":
+        val result = wine_ntdll_execute_virtual_memory(
+            ["NtAllocateVirtualMemory", "NtProtectVirtualMemory", "NtFreeVirtualMemory"],
+            wine_vm_space_new(),
+            0x510000,
+            0x1000,
+            "rw",
+            "rx"
+        )
+        expect(result.ok).to_equal(true)
+        expect(result.base).to_equal(0x510000)
+        expect(result.old_perms).to_equal("rw")
+        expect(result.operations).to_equal("NtAllocateVirtualMemory NtProtectVirtualMemory NtFreeVirtualMemory")
+        expect(wine_vm_access_gate(result.space, 0x510000, "read")).to_equal("page-fault-unmapped")
+
+        val out_of_order = wine_ntdll_execute_virtual_memory(
+            ["NtProtectVirtualMemory", "NtAllocateVirtualMemory", "NtFreeVirtualMemory"],
+            wine_vm_space_new(),
+            0x520000,
+            0x1000,
+            "rw",
+            "rx"
+        )
+        expect(out_of_order.ok).to_equal(false)
+        expect(out_of_order.error).to_equal("ntdll-virtual-memory-sequence-expected:NtAllocateVirtualMemory")
+
+        val wrong_family = wine_ntdll_execute_virtual_memory(
+            ["NtAllocateVirtualMemory", "NtProtectVirtualMemory", "NtClose"],
+            wine_vm_space_new(),
+            0x530000,
+            0x1000,
+            "rw",
+            "rx"
+        )
+        expect(wrong_family.ok).to_equal(false)
+        expect(wrong_family.error).to_equal("bridge-wrong-category:NtClose")
+
     it "wraps ntdll file calls over the file I/O bridge":
         val table = wine_nt_file_table_add_file(wine_nt_file_table_new(_all_adapter_apis(), _all_async_features()), "C:\\hello.txt", "hello")
         val opened = wine_ntdll_create_file(table, "C:\\hello.txt")
@@ -46,6 +86,28 @@ describe "Wine ntdll and Rtl bridge":
         expect(read.data).to_equal("hello")
         expect(closed.state).to_equal("closed")
 
+    it "executes only the bounded ntdll file I/O sequence":
+        val table = wine_nt_file_table_add_file(wine_nt_file_table_new(_all_adapter_apis(), _all_async_features()), "C:\\hello.txt", "hello")
+        val result = wine_ntdll_execute_file_io(["NtCreateFile", "NtReadFile", "NtClose"], table, "C:\\hello.txt", 5)
+        expect(result.ok).to_equal(true)
+        expect(result.handle).to_equal(0x40)
+        expect(result.data).to_equal("hello")
+        expect(result.bytes_read).to_equal(5)
+        expect(result.operations).to_equal("NtCreateFile NtReadFile NtClose")
+        expect(wine_ntdll_read_file(result.table, result.handle, 1).state).to_equal("invalid-handle")
+
+        val out_of_order = wine_ntdll_execute_file_io(["NtReadFile", "NtCreateFile", "NtClose"], table, "C:\\hello.txt", 5)
+        expect(out_of_order.ok).to_equal(false)
+        expect(out_of_order.error).to_equal("ntdll-file-io-sequence-expected:NtCreateFile")
+
+        val wrong_family = wine_ntdll_execute_file_io(["NtCreateFile", "NtReadFile", "RtlFreeHeap"], table, "C:\\hello.txt", 5)
+        expect(wrong_family.ok).to_equal(false)
+        expect(wrong_family.error).to_equal("bridge-wrong-category:RtlFreeHeap")
+
+        val missing = wine_ntdll_execute_file_io(["NtCreateFile", "NtReadFile", "NtClose"], table, "C:\\missing.txt", 5)
+        expect(missing.ok).to_equal(false)
+        expect(missing.error).to_equal("NtCreateFile:file-not-found")
+
     it "wraps Rtl heap calls over the process heap bridge":
         val heap = wine_nt_process_heap_new(wine_vm_space_new(), true)
         val allocated = wine_rtl_allocate_heap(heap, heap.handle, 24)
@@ -53,6 +115,27 @@ describe "Wine ntdll and Rtl bridge":
         expect(allocated.ok).to_equal(true)
         expect(allocated.ptr).to_equal(0x71000000)
         expect(freed.state).to_equal("freed")
+
+    it "executes only the bounded Rtl heap sequence":
+        val heap = wine_nt_process_heap_new(wine_vm_space_new(), true)
+        val result = wine_rtl_execute_heap(["RtlAllocateHeap", "RtlFreeHeap"], heap, heap.handle, 24)
+        expect(result.ok).to_equal(true)
+        expect(result.ptr).to_equal(0x71000000)
+        expect(result.size).to_equal(24)
+        expect(result.operations).to_equal("RtlAllocateHeap RtlFreeHeap")
+        expect(result.heap.blocks[0].freed).to_equal(true)
+
+        val out_of_order = wine_rtl_execute_heap(["RtlFreeHeap", "RtlAllocateHeap"], heap, heap.handle, 24)
+        expect(out_of_order.ok).to_equal(false)
+        expect(out_of_order.error).to_equal("rtl-heap-sequence-expected:RtlAllocateHeap")
+
+        val wrong_family = wine_rtl_execute_heap(["RtlAllocateHeap", "NtClose"], heap, heap.handle, 24)
+        expect(wrong_family.ok).to_equal(false)
+        expect(wrong_family.error).to_equal("bridge-wrong-category:NtClose")
+
+        val invalid = wine_rtl_execute_heap(["RtlAllocateHeap", "RtlFreeHeap"], heap, 99, 24)
+        expect(invalid.ok).to_equal(false)
+        expect(invalid.error).to_equal("RtlAllocateHeap:invalid-heap-handle")
 
     it "preserves underlying precondition errors":
         val table = wine_nt_file_table_new("fd-open fd-read", _all_async_features())

@@ -1,0 +1,47 @@
+use common.wine_kernel32_process_env.{wine_kernel32_execute_process_env, wine_kernel32_execute_process_parameters}
+use common.wine_nt_process_env.{wine_nt_process_env_add, wine_nt_process_env_new}
+
+fn _all_adapter_apis() -> text:
+    "fd-open fd-read fd-write fd-close fd-dup fd-inherit stdio pipe socket timer poll-wait " +
+        "cwd env argv spawn path-normalize path-attrs path-locks errno-map"
+
+fn _all_async_features() -> text:
+    "io-driver submit-open submit-read submit-write submit-close submit-timeout poll-completion " +
+        "event-loop register-fd deregister-fd waker wake"
+
+describe "Wine KERNEL32 process environment bridge":
+    it "executes a bounded command-line and environment-block sequence":
+        var env = wine_nt_process_env_new(_all_adapter_apis(), _all_async_features(), ["C:\\Program Files\\hello.exe", "--flag"])
+        env = wine_nt_process_env_add(env, "PATH", "C:\\Windows")
+        val result = wine_kernel32_execute_process_env(["GetCommandLineW", "GetEnvironmentStringsW"], env)
+        expect result.ok == true
+        expect result.command_line == "\"C:\\Program Files\\hello.exe\" --flag"
+        expect result.environment_block == "PATH=C:\\Windows\n"
+        expect (result.operations).contains("GetCommandLineW")
+        expect (result.operations).contains("GetEnvironmentStringsW")
+
+    it "keeps process environment dispatch ordered and bounded":
+        val env = wine_nt_process_env_new(_all_adapter_apis(), _all_async_features(), ["hello.exe"])
+        val out_of_order = wine_kernel32_execute_process_env(["GetEnvironmentStringsW", "GetCommandLineW"], env)
+        expect out_of_order.ok == false
+        expect out_of_order.error == "kernel32-process-env-sequence-expected:GetCommandLineW"
+
+        val unsupported = wine_kernel32_execute_process_env(["GetCommandLineW", "WriteFile"], env)
+        expect unsupported.ok == false
+        expect unsupported.error == "bridge-wrong-category:WriteFile"
+
+        val invalid = wine_kernel32_execute_process_env(["GetCommandLineW", "GetEnvironmentStringsW"], wine_nt_process_env_new(_all_adapter_apis(), _all_async_features(), []))
+        expect invalid.ok == false
+        expect invalid.error == "GetCommandLineW:missing-argv0"
+
+    it "executes bounded process parameter calls":
+        val env = wine_nt_process_env_new(_all_adapter_apis(), _all_async_features(), ["C:\\Program Files\\hello.exe"])
+        val result = wine_kernel32_execute_process_parameters(
+            ["GetModuleFileNameW", "GetCurrentDirectoryW", "SetCurrentDirectoryW", "GetCurrentDirectoryW"],
+            env,
+            "C:\\Windows"
+        )
+        expect result.ok == true
+        expect result.module_file_name == "C:\\Program Files\\hello.exe"
+        expect result.current_directory == "C:\\Windows"
+        expect result.operations == "GetModuleFileNameW GetCurrentDirectoryW SetCurrentDirectoryW GetCurrentDirectoryW"

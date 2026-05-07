@@ -1,7 +1,19 @@
 """Narrow NT import resolver gate for the first non-GUI hello.exe milestone."""
 
 use common.pe_coff_header.{PeImportSymbolBinding}
-use common.wine_nt_api_catalog.{wine_nt_api_dll_gate, wine_nt_api_implemented_symbols_for_hello, wine_nt_api_import_gate}
+use common.wine_kernel32_module_loader.{
+    WineKernel32ModuleResult,
+    WineKernel32ModuleTable,
+    wine_kernel32_get_module_handle_w,
+    wine_kernel32_get_proc_address
+}
+use common.wine_nt_api_catalog.{
+    wine_nt_api_dll_gate,
+    wine_nt_api_implemented_kernel32_module_loader_symbols,
+    wine_nt_api_implemented_symbols_for_hello,
+    wine_nt_api_import_gate,
+    wine_nt_api_kernel32_module_loader_import_gate
+}
 
 class WineNtHelloImportBindingPlan:
     ok: bool
@@ -12,6 +24,22 @@ class WineNtHelloImportBindingPlan:
     get_std_handle_rva: i64
     write_file_rva: i64
     exit_process_rva: i64
+
+class WineNtModuleLoaderImportBindingPlan:
+    ok: bool
+    error: text
+    dll: text
+    call_sequence: text
+    binding_count: i64
+    module_handle: i64
+    get_module_handle_name_rva: i64
+    load_library_name_rva: i64
+    get_proc_address_name_rva: i64
+    free_library_name_rva: i64
+    get_module_handle_proc_address: i64
+    load_library_proc_address: i64
+    get_proc_address_proc_address: i64
+    free_library_proc_address: i64
 
 fn _binding_plan_error(error: text, dll: text) -> WineNtHelloImportBindingPlan:
     WineNtHelloImportBindingPlan(ok: false, error: error, dll: dll, call_sequence: "", binding_count: 0, get_std_handle_rva: 0, write_file_rva: 0, exit_process_rva: 0)
@@ -28,16 +56,68 @@ fn _binding_plan_ready(dll: text, get_std_handle_rva: i64, write_file_rva: i64, 
         exit_process_rva: exit_process_rva
     )
 
+fn _module_loader_plan_error(error: text, dll: text) -> WineNtModuleLoaderImportBindingPlan:
+    WineNtModuleLoaderImportBindingPlan(
+        ok: false,
+        error: error,
+        dll: dll,
+        call_sequence: "",
+        binding_count: 0,
+        module_handle: 0,
+        get_module_handle_name_rva: 0,
+        load_library_name_rva: 0,
+        get_proc_address_name_rva: 0,
+        free_library_name_rva: 0,
+        get_module_handle_proc_address: 0,
+        load_library_proc_address: 0,
+        get_proc_address_proc_address: 0,
+        free_library_proc_address: 0
+    )
+
+fn _module_loader_plan_ready(
+    dll: text,
+    module_handle: i64,
+    get_module_handle_name_rva: i64,
+    load_library_name_rva: i64,
+    get_proc_address_name_rva: i64,
+    free_library_name_rva: i64,
+    get_module_handle_proc_address: i64,
+    load_library_proc_address: i64,
+    get_proc_address_proc_address: i64,
+    free_library_proc_address: i64
+) -> WineNtModuleLoaderImportBindingPlan:
+    WineNtModuleLoaderImportBindingPlan(
+        ok: true,
+        error: "",
+        dll: dll,
+        call_sequence: "GetModuleHandleW LoadLibraryW GetProcAddress FreeLibrary",
+        binding_count: 4,
+        module_handle: module_handle,
+        get_module_handle_name_rva: get_module_handle_name_rva,
+        load_library_name_rva: load_library_name_rva,
+        get_proc_address_name_rva: get_proc_address_name_rva,
+        free_library_name_rva: free_library_name_rva,
+        get_module_handle_proc_address: get_module_handle_proc_address,
+        load_library_proc_address: load_library_proc_address,
+        get_proc_address_proc_address: get_proc_address_proc_address,
+        free_library_proc_address: free_library_proc_address
+    )
+
 pub fn wine_nt_import_required_symbols_for_hello() -> [text]:
     wine_nt_api_implemented_symbols_for_hello()
 
 pub fn wine_nt_import_dll_gate(dll_name: text) -> text:
+    if dll_name.lower() != "kernel32.dll":
+        return "unsupported-dll:" + dll_name
     val state = wine_nt_api_dll_gate(dll_name)
     if state == "catalogued-dll:ntdll.dll":
         return "unsupported-dll:" + dll_name
     state
 
 pub fn wine_nt_import_hello_gate(dll_name: text, symbols: [text]) -> text:
+    val dll_state = wine_nt_import_dll_gate(dll_name)
+    if dll_state != "ready":
+        return dll_state
     wine_nt_api_import_gate(dll_name, symbols)
 
 fn _binding_rva(bindings: [PeImportSymbolBinding], symbol: text) -> i64:
@@ -66,3 +146,63 @@ pub fn wine_nt_import_hello_binding_plan(dll_name: text, bindings: [PeImportSymb
     if exit_process_rva != 0x20c0:
         return _binding_plan_error("binding-target-mismatch:ExitProcess", dll_name)
     _binding_plan_ready(dll_name.lower(), get_std_handle_rva, write_file_rva, exit_process_rva)
+
+fn _resolve_export(table: WineKernel32ModuleTable, handle: i64, symbol: text) -> WineKernel32ModuleResult:
+    wine_kernel32_get_proc_address(table, handle, symbol)
+
+pub fn wine_nt_import_kernel32_module_loader_binding_gate(dll_name: text, bindings: [PeImportSymbolBinding], table: WineKernel32ModuleTable) -> text:
+    val plan = wine_nt_import_kernel32_module_loader_binding_plan(dll_name, bindings, table)
+    if not plan.ok:
+        return plan.error
+    "ready"
+
+pub fn wine_nt_import_kernel32_module_loader_binding_plan(dll_name: text, bindings: [PeImportSymbolBinding], table: WineKernel32ModuleTable) -> WineNtModuleLoaderImportBindingPlan:
+    val dll_state = wine_nt_import_dll_gate(dll_name)
+    if dll_state != "ready":
+        return _module_loader_plan_error(dll_state, dll_name)
+    val symbols = wine_nt_api_implemented_kernel32_module_loader_symbols()
+    val gate_state = wine_nt_api_kernel32_module_loader_import_gate(dll_name, symbols)
+    if gate_state != "ready":
+        return _module_loader_plan_error(gate_state, dll_name)
+
+    val get_module_handle_rva = _binding_rva(bindings, "GetModuleHandleW")
+    val load_library_rva = _binding_rva(bindings, "LoadLibraryW")
+    val get_proc_address_rva = _binding_rva(bindings, "GetProcAddress")
+    val free_library_rva = _binding_rva(bindings, "FreeLibrary")
+    if get_module_handle_rva <= 0:
+        return _module_loader_plan_error("missing-binding:GetModuleHandleW", dll_name)
+    if load_library_rva <= 0:
+        return _module_loader_plan_error("missing-binding:LoadLibraryW", dll_name)
+    if get_proc_address_rva <= 0:
+        return _module_loader_plan_error("missing-binding:GetProcAddress", dll_name)
+    if free_library_rva <= 0:
+        return _module_loader_plan_error("missing-binding:FreeLibrary", dll_name)
+
+    val module = wine_kernel32_get_module_handle_w(table, dll_name)
+    if not module.ok:
+        return _module_loader_plan_error("module-loader-handle:" + module.error, dll_name)
+    val get_module_handle_proc = _resolve_export(table, module.handle, "GetModuleHandleW")
+    if not get_module_handle_proc.ok:
+        return _module_loader_plan_error("module-loader-export:GetModuleHandleW", dll_name)
+    val load_library_proc = _resolve_export(table, module.handle, "LoadLibraryW")
+    if not load_library_proc.ok:
+        return _module_loader_plan_error("module-loader-export:LoadLibraryW", dll_name)
+    val get_proc_address_proc = _resolve_export(table, module.handle, "GetProcAddress")
+    if not get_proc_address_proc.ok:
+        return _module_loader_plan_error("module-loader-export:GetProcAddress", dll_name)
+    val free_library_proc = _resolve_export(table, module.handle, "FreeLibrary")
+    if not free_library_proc.ok:
+        return _module_loader_plan_error("module-loader-export:FreeLibrary", dll_name)
+
+    _module_loader_plan_ready(
+        dll_name.lower(),
+        module.handle,
+        get_module_handle_rva,
+        load_library_rva,
+        get_proc_address_rva,
+        free_library_rva,
+        get_module_handle_proc.proc_address,
+        load_library_proc.proc_address,
+        get_proc_address_proc.proc_address,
+        free_library_proc.proc_address
+    )

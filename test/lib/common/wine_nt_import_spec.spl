@@ -1,11 +1,33 @@
 use common.pe_coff_header.{PeImportSymbolBinding}
+use common.wine_kernel32_module_loader.{
+    WineKernel32ModuleTable,
+    wine_kernel32_module_table_add_module,
+    wine_kernel32_module_table_new
+}
 use common.wine_nt_import.{
+    wine_nt_import_kernel32_module_loader_binding_gate,
+    wine_nt_import_kernel32_module_loader_binding_plan,
     wine_nt_import_hello_binding_gate,
     wine_nt_import_hello_binding_plan,
     wine_nt_import_dll_gate,
     wine_nt_import_hello_gate,
     wine_nt_import_required_symbols_for_hello
 }
+
+fn _module_table() -> WineKernel32ModuleTable:
+    wine_kernel32_module_table_add_module(
+        wine_kernel32_module_table_new(),
+        "kernel32.dll",
+        ["GetModuleHandleW", "LoadLibraryW", "GetProcAddress", "FreeLibrary"]
+    )
+
+fn _module_loader_bindings() -> [PeImportSymbolBinding]:
+    [
+        PeImportSymbolBinding(symbol: "GetModuleHandleW", name_rva: 0x2140),
+        PeImportSymbolBinding(symbol: "LoadLibraryW", name_rva: 0x2160),
+        PeImportSymbolBinding(symbol: "GetProcAddress", name_rva: 0x2180),
+        PeImportSymbolBinding(symbol: "FreeLibrary", name_rva: 0x21a0)
+    ]
 
 describe "Wine NT import resolver gate":
     it "recognizes the minimal hello.exe KERNEL32 import set":
@@ -51,3 +73,30 @@ describe "Wine NT import resolver gate":
             PeImportSymbolBinding(symbol: "ExitProcess", name_rva: 0x20c0)
         ]
         expect(wine_nt_import_hello_binding_gate("KERNEL32.dll", bindings)).to_equal("binding-target-mismatch:WriteFile")
+
+    it "binds KERNEL32 module-loader imports to module exports":
+        expect(wine_nt_import_kernel32_module_loader_binding_gate("KERNEL32.dll", _module_loader_bindings(), _module_table())).to_equal("ready")
+
+        val plan = wine_nt_import_kernel32_module_loader_binding_plan("KERNEL32.dll", _module_loader_bindings(), _module_table())
+        expect(plan.ok).to_equal(true)
+        expect(plan.dll).to_equal("kernel32.dll")
+        expect(plan.binding_count).to_equal(4)
+        expect(plan.call_sequence).to_equal("GetModuleHandleW LoadLibraryW GetProcAddress FreeLibrary")
+        expect(plan.module_handle).to_equal(0x120)
+        expect(plan.get_module_handle_name_rva).to_equal(0x2140)
+        expect(plan.get_module_handle_proc_address).to_equal(0x120000 + 1)
+        expect(plan.get_proc_address_proc_address).to_equal(0x120000 + 3)
+
+    it "rejects incomplete or unexported module-loader import bindings":
+        val missing = [
+            PeImportSymbolBinding(symbol: "GetModuleHandleW", name_rva: 0x2140),
+            PeImportSymbolBinding(symbol: "LoadLibraryW", name_rva: 0x2160),
+            PeImportSymbolBinding(symbol: "GetProcAddress", name_rva: 0x2180)
+        ]
+        expect(wine_nt_import_kernel32_module_loader_binding_gate("KERNEL32.dll", missing, _module_table())).to_equal("missing-binding:FreeLibrary")
+
+        val missing_module = wine_nt_import_kernel32_module_loader_binding_gate("USER32.dll", _module_loader_bindings(), _module_table())
+        expect(missing_module).to_equal("unsupported-dll:USER32.dll")
+
+        val incomplete_exports = wine_kernel32_module_table_add_module(wine_kernel32_module_table_new(), "kernel32.dll", ["GetModuleHandleW", "LoadLibraryW", "GetProcAddress"])
+        expect(wine_nt_import_kernel32_module_loader_binding_gate("KERNEL32.dll", _module_loader_bindings(), incomplete_exports)).to_equal("module-loader-export:FreeLibrary")

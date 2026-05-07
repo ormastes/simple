@@ -11,21 +11,25 @@ class WineNtProcessEnv:
     state: text
     argv: [text]
     env: [WineNtEnvVar]
+    current_directory: text
+    module_file_name: text
 
 class WineNtProcessEnvResult:
     ok: bool
     state: text
     command_line: text
     environment_block: text
+    current_directory: text
+    module_file_name: text
 
 fn _env_var(key: text, value: text) -> WineNtEnvVar:
     WineNtEnvVar(key: key, value: value)
 
-fn _process_env(ready: bool, state: text, argv: [text], env: [WineNtEnvVar]) -> WineNtProcessEnv:
-    WineNtProcessEnv(ready: ready, state: state, argv: argv, env: env)
+fn _process_env(ready: bool, state: text, argv: [text], env: [WineNtEnvVar], current_directory: text, module_file_name: text) -> WineNtProcessEnv:
+    WineNtProcessEnv(ready: ready, state: state, argv: argv, env: env, current_directory: current_directory, module_file_name: module_file_name)
 
-fn _result(ok: bool, state: text, command_line: text, environment_block: text) -> WineNtProcessEnvResult:
-    WineNtProcessEnvResult(ok: ok, state: state, command_line: command_line, environment_block: environment_block)
+fn _result(ok: bool, state: text, command_line: text, environment_block: text, current_directory: text, module_file_name: text) -> WineNtProcessEnvResult:
+    WineNtProcessEnvResult(ok: ok, state: state, command_line: command_line, environment_block: environment_block, current_directory: current_directory, module_file_name: module_file_name)
 
 fn _quote_arg(arg: text) -> text:
     if arg.contains(" "):
@@ -35,25 +39,28 @@ fn _quote_arg(arg: text) -> text:
 pub fn wine_nt_process_env_required_calls() -> [text]:
     [
         "GetCommandLineW",
-        "GetEnvironmentStringsW"
+        "GetEnvironmentStringsW",
+        "GetCurrentDirectoryW",
+        "SetCurrentDirectoryW",
+        "GetModuleFileNameW"
     ]
 
 pub fn wine_nt_process_env_new(posix_apis: text, async_features: text, argv: [text]) -> WineNtProcessEnv:
     val gate = wine_posix_adapter_gate(posix_apis, async_features)
     if not gate.ready:
-        return _process_env(false, gate.state, [], [])
+        return _process_env(false, gate.state, [], [], "", "")
     if argv.len() == 0:
-        return _process_env(false, "missing-argv0", [], [])
-    _process_env(true, "ready", argv, [])
+        return _process_env(false, "missing-argv0", [], [], "", "")
+    _process_env(true, "ready", argv, [], "C:\\", argv[0])
 
 pub fn wine_nt_process_env_add(env: WineNtProcessEnv, key: text, value: text) -> WineNtProcessEnv:
     var vars = env.env
     vars.push(_env_var(key, value))
-    _process_env(env.ready, env.state, env.argv, vars)
+    _process_env(env.ready, env.state, env.argv, vars, env.current_directory, env.module_file_name)
 
 pub fn wine_nt_get_command_line_w(env: WineNtProcessEnv) -> WineNtProcessEnvResult:
     if not env.ready:
-        return _result(false, env.state, "", "")
+        return _result(false, env.state, "", "", "", "")
     var out = ""
     var i = 0
     while i < env.argv.len():
@@ -61,14 +68,31 @@ pub fn wine_nt_get_command_line_w(env: WineNtProcessEnv) -> WineNtProcessEnvResu
             out = out + " "
         out = out + _quote_arg(env.argv[i])
         i = i + 1
-    _result(true, "ready", out, "")
+    _result(true, "ready", out, "", "", env.module_file_name)
 
 pub fn wine_nt_get_environment_strings_w(env: WineNtProcessEnv) -> WineNtProcessEnvResult:
     if not env.ready:
-        return _result(false, env.state, "", "")
+        return _result(false, env.state, "", "", "", "")
     var block = ""
     for item in env.env:
         if item.key == "":
-            return _result(false, "invalid-env-key", "", "")
+            return _result(false, "invalid-env-key", "", "", "", "")
         block = block + item.key + "=" + item.value + "\n"
-    _result(true, "ready", "", block)
+    _result(true, "ready", "", block, "", env.module_file_name)
+
+pub fn wine_nt_get_current_directory_w(env: WineNtProcessEnv) -> WineNtProcessEnvResult:
+    if not env.ready:
+        return _result(false, env.state, "", "", "", "")
+    _result(true, "ready", "", "", env.current_directory, env.module_file_name)
+
+pub fn wine_nt_set_current_directory_w(env: WineNtProcessEnv, current_directory: text) -> WineNtProcessEnv:
+    if not env.ready:
+        return env
+    if current_directory == "":
+        return _process_env(false, "invalid-current-directory", env.argv, env.env, env.current_directory, env.module_file_name)
+    _process_env(true, "ready", env.argv, env.env, current_directory, env.module_file_name)
+
+pub fn wine_nt_get_module_file_name_w(env: WineNtProcessEnv) -> WineNtProcessEnvResult:
+    if not env.ready:
+        return _result(false, env.state, "", "", "", "")
+    _result(true, "ready", "", "", env.current_directory, env.module_file_name)

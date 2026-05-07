@@ -1,9 +1,12 @@
 use common.wine_nt_process_env.{
     wine_nt_get_command_line_w,
+    wine_nt_get_current_directory_w,
     wine_nt_get_environment_strings_w,
+    wine_nt_get_module_file_name_w,
     wine_nt_process_env_add,
     wine_nt_process_env_new,
-    wine_nt_process_env_required_calls
+    wine_nt_process_env_required_calls,
+    wine_nt_set_current_directory_w
 }
 
 fn _all_adapter_apis() -> text:
@@ -15,10 +18,12 @@ fn _all_async_features() -> text:
         "event-loop register-fd deregister-fd waker wake"
 
 describe "Wine NT process environment bridge":
-    it "lists the modeled GetCommandLineW and GetEnvironmentStringsW calls":
+    it "lists the modeled process environment and parameter calls":
         val calls = wine_nt_process_env_required_calls()
-        expect(calls.len()).to_equal(2)
+        expect(calls.len()).to_equal(5)
         expect(calls[0]).to_equal("GetCommandLineW")
+        expect(calls[2]).to_equal("GetCurrentDirectoryW")
+        expect(calls[4]).to_equal("GetModuleFileNameW")
 
     it "blocks environment readiness until POSIX argv/env prerequisites pass":
         val env = wine_nt_process_env_new("fd-open fd-read", _all_async_features(), ["hello.exe"])
@@ -50,3 +55,14 @@ describe "Wine NT process environment bridge":
         val result = wine_nt_get_environment_strings_w(env)
         expect(result.ok).to_equal(false)
         expect(result.state).to_equal("invalid-env-key")
+
+    it "tracks current directory and module filename":
+        val env = wine_nt_process_env_new(_all_adapter_apis(), _all_async_features(), ["C:\\Program Files\\hello.exe"])
+        val module_name = wine_nt_get_module_file_name_w(env)
+        val changed = wine_nt_set_current_directory_w(env, "C:\\Windows")
+        val current = wine_nt_get_current_directory_w(changed)
+
+        expect(module_name.ok).to_equal(true)
+        expect(module_name.module_file_name).to_equal("C:\\Program Files\\hello.exe")
+        expect(current.ok).to_equal(true)
+        expect(current.current_directory).to_equal("C:\\Windows")

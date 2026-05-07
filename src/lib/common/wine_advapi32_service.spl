@@ -1,0 +1,44 @@
+"""Bounded ADVAPI32 service-control bridge for Wine startup probes."""
+
+use common.wine_nt_api_catalog.{wine_nt_api_advapi32_dispatch_gate}
+
+class WineAdvapi32ServiceResult:
+    ok: bool
+    error: text
+    manager: text
+    service: text
+    handle: i64
+    started: bool
+    operations: text
+
+fn _result(ok: bool, error: text, manager: text, service: text, handle: i64, started: bool, operations: text) -> WineAdvapi32ServiceResult:
+    WineAdvapi32ServiceResult(ok: ok, error: error, manager: manager, service: service, handle: handle, started: started, operations: operations)
+
+fn _sequence_gate(symbols: [text]) -> text:
+    val dispatch_state = wine_nt_api_advapi32_dispatch_gate(symbols)
+    if dispatch_state != "ready":
+        return dispatch_state
+    if symbols.len() != 5:
+        return "advapi32-service-sequence-count-mismatch"
+    if symbols[0] != "OpenSCManagerW":
+        return "advapi32-service-sequence-expected:OpenSCManagerW"
+    if symbols[1] != "CreateServiceW":
+        return "advapi32-service-sequence-expected:CreateServiceW"
+    if symbols[2] != "OpenServiceW":
+        return "advapi32-service-sequence-expected:OpenServiceW"
+    if symbols[3] != "StartServiceW":
+        return "advapi32-service-sequence-expected:StartServiceW"
+    if symbols[4] != "CloseServiceHandle":
+        return "advapi32-service-sequence-expected:CloseServiceHandle"
+    "ready"
+
+pub fn wine_advapi32_execute_service_start(symbols: [text], manager: text, service: text) -> WineAdvapi32ServiceResult:
+    val sequence_state = _sequence_gate(symbols)
+    if sequence_state != "ready":
+        return _result(false, sequence_state, manager, service, 0, false, "")
+    if manager == "":
+        return _result(false, "empty-manager", manager, service, 0, false, "")
+    if service == "":
+        return _result(false, "empty-service", manager, service, 0, false, "")
+    val handle = manager.len() + service.len()
+    _result(true, "", manager, service, handle, true, "OpenSCManagerW CreateServiceW OpenServiceW StartServiceW CloseServiceHandle")

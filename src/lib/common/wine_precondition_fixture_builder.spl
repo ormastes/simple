@@ -20,7 +20,24 @@ use common.wine_host_gate.{wine_host_gate}
 use common.wine_nt_api_catalog.{wine_nt_api_catalogued_future_symbols, wine_nt_api_modeled_precondition_symbols}
 use common.wine_nt_file_io.{wine_nt_file_table_add_file, wine_nt_file_table_new}
 use common.wine_nt_heap.{wine_nt_process_heap_new}
-use common.wine_nt_process_env.{wine_nt_get_command_line_w, wine_nt_get_environment_strings_w, wine_nt_process_env_add, wine_nt_process_env_new}
+use common.wine_kernel32_heap.{wine_kernel32_execute_heap}
+use common.wine_kernel32_module_loader.{
+    wine_kernel32_free_library,
+    wine_kernel32_get_module_handle_w,
+    wine_kernel32_get_proc_address,
+    wine_kernel32_load_library_w,
+    wine_kernel32_module_table_add_module,
+    wine_kernel32_module_table_new
+}
+use common.wine_nt_process_env.{
+    wine_nt_get_command_line_w,
+    wine_nt_get_current_directory_w,
+    wine_nt_get_environment_strings_w,
+    wine_nt_get_module_file_name_w,
+    wine_nt_process_env_add,
+    wine_nt_process_env_new,
+    wine_nt_set_current_directory_w
+}
 use common.wine_nt_bridge.{wine_nt_bridge_modeled_precondition_gate}
 use common.wine_nt_thread_wait.{wine_nt_create_thread, wine_nt_thread_table_new, wine_nt_wait_for_single_object}
 use common.wine_ntdll_bridge.{
@@ -158,6 +175,33 @@ pub fn wine_precondition_fixture_nt_bridge_state() -> text:
     val env_block = wine_nt_get_environment_strings_w(env)
     if not env_block.ok:
         return "env-" + env_block.state
+    val module_name = wine_nt_get_module_file_name_w(env)
+    if not module_name.ok:
+        return "env-" + module_name.state
+    val changed_env = wine_nt_set_current_directory_w(env, "C:\\Windows")
+    if not changed_env.ready:
+        return "env-" + changed_env.state
+    val current_directory = wine_nt_get_current_directory_w(changed_env)
+    if not current_directory.ok:
+        return "env-" + current_directory.state
+
+    val module_table = wine_kernel32_module_table_add_module(
+        wine_kernel32_module_table_new(),
+        "kernel32.dll",
+        ["GetModuleHandleW", "LoadLibraryW", "GetProcAddress", "FreeLibrary"]
+    )
+    val current_module = wine_kernel32_get_module_handle_w(module_table, "kernel32.dll")
+    if not current_module.ok:
+        return "module-loader-GetModuleHandleW:" + current_module.error
+    val loaded_module = wine_kernel32_load_library_w(current_module.table, "kernel32.dll")
+    if not loaded_module.ok:
+        return "module-loader-LoadLibraryW:" + loaded_module.error
+    val proc_address = wine_kernel32_get_proc_address(loaded_module.table, loaded_module.handle, "GetProcAddress")
+    if not proc_address.ok:
+        return "module-loader-GetProcAddress:" + proc_address.error
+    val freed_module = wine_kernel32_free_library(proc_address.table, loaded_module.handle)
+    if not freed_module.ok:
+        return "module-loader-FreeLibrary:" + freed_module.error
 
     val heap = wine_nt_process_heap_new(freed_vm.space, true)
     val heap_alloc = wine_rtl_allocate_heap(heap, heap.handle, 32)
@@ -166,6 +210,9 @@ pub fn wine_precondition_fixture_nt_bridge_state() -> text:
     val heap_free = wine_rtl_free_heap(heap_alloc.heap, heap.handle, heap_alloc.ptr)
     if not heap_free.ok:
         return "heap-" + heap_free.state
+    val kernel_heap = wine_kernel32_execute_heap(["GetProcessHeap", "HeapAlloc", "HeapFree"], heap_free.heap, 16)
+    if not kernel_heap.ok:
+        return "kernel32-heap-" + kernel_heap.error
     "ready"
 
 pub fn wine_precondition_fixture_manifest() -> WinePreconditionManifest:
