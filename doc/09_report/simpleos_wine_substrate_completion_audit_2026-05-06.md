@@ -353,6 +353,25 @@ Conservative boundary: this models loader-lock ordering only. It still does not
 run live TLS callbacks, execute DllMain, mutate PEB/TEB memory, or transfer
 control to arbitrary PE code.
 
+## 2026-05-07 PEB/TEB Memory-Write Gate Update
+
+The PEB/TEB startup layer now has a bounded memory-write gate. It composes the
+existing PEB/TEB/TLS/process-parameter startup evidence with SimpleOS VM access
+checks and requires writable pages for the PEB, TEB, TLS vector, and process
+parameters before reporting modeled mutation readiness.
+
+Fresh evidence:
+
+- `bin/simple check src/lib/common/wine_peb_teb.spl test/lib/common/wine_peb_teb_spec.spl doc/06_spec/app/simpleos/feature/simpleos_wine_peb_teb_spec.spl` passed.
+- `bin/simple test test/lib/common/wine_peb_teb_spec.spl --mode=interpreter --clean`: 7 examples, 0 failures.
+- `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_peb_teb_spec.spl --mode=interpreter --clean`: 3 examples, 0 failures.
+- `bin/simple check` on generated PEB/TEB matcher specs: all checks passed.
+- `bin/simple check src/lib`: 2707 files, all checks passed.
+
+Conservative boundary: this records modeled writable-page readiness only. It
+does not execute arbitrary TLS callbacks, run DllMain, perform byte-accurate
+Windows PEB/TEB layout writes, or transfer control to arbitrary PE code.
+
 ## 2026-05-07 DLL View DllMain PEB/TEB Handoff Update
 
 The retained DLL view DllMain handoff now has a PEB/TEB-aware variant. It

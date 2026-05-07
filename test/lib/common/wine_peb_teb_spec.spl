@@ -1,8 +1,23 @@
 use common.wine_kernel32_critical_section.{wine_kernel32_critical_section_table_new}
-use common.wine_peb_teb.{WinePebTebInitEvidence, wine_peb_teb_init_default, wine_peb_teb_init_gate, wine_peb_teb_init_with_loader_lock, wine_peb_teb_required_evidence}
+use common.wine_peb_teb.{WinePebTebInitEvidence, wine_peb_teb_init_default, wine_peb_teb_init_gate, wine_peb_teb_init_with_loader_lock, wine_peb_teb_memory_write_gate, wine_peb_teb_required_evidence}
+use common.wine_vm_adapter.{WineVmSpace, wine_vm_commit, wine_vm_process_space_new, wine_vm_reserve_fixed}
 
 fn _loader_lock_symbols() -> [text]:
     ["InitializeCriticalSection", "EnterCriticalSection", "LeaveCriticalSection", "DeleteCriticalSection"]
+
+fn _commit_fixed(space: WineVmSpace, base: i64, size: i64, perms: text) -> WineVmSpace:
+    val reserved = wine_vm_reserve_fixed(space, base, size)
+    if not reserved.ok:
+        return reserved.space
+    val committed = wine_vm_commit(reserved.space, reserved.region.base, perms)
+    committed.space
+
+fn _peb_teb_write_space() -> WineVmSpace:
+    var space = wine_vm_process_space_new(10, 30, "pid fs ipc net capability")
+    space = _commit_fixed(space, 0x7ffdc000, 0x1000, "rw")
+    space = _commit_fixed(space, 0x7ffdd000, 0x1000, "rw")
+    space = _commit_fixed(space, 0x7ffde000, 0x1000, "rw")
+    _commit_fixed(space, 0x7ffdf000, 0x1000, "rw")
 
 describe "Wine PEB/TEB initialization gate":
     it "lists the SimpleOS and MDSOC evidence required before PEB/TEB handoff":
@@ -87,3 +102,22 @@ describe "Wine PEB/TEB initialization gate":
         )
         expect(blocked.ok).to_equal(false)
         expect(blocked.state).to_equal("loader-lock:kernel32-critical-section-sequence-expected:InitializeCriticalSection")
+
+    it "requires writable VM mappings before PEB/TEB startup fields are mutated":
+        val result = wine_peb_teb_memory_write_gate(wine_peb_teb_init_default(), _peb_teb_write_space())
+        expect(result.ok).to_equal(true)
+        expect(result.state).to_equal("ready")
+        expect(result.write_count).to_equal(4)
+        expect(result.operations).to_equal("PEB TEB TLS ProcessParameters PEBWrite TEBWrite TLSVectorWrite ProcessParametersWrite")
+
+    it "blocks PEB/TEB memory writes without mapped writable startup pages":
+        val result = wine_peb_teb_memory_write_gate(wine_peb_teb_init_default(), wine_vm_process_space_new(10, 30, "pid fs ipc net capability"))
+        expect(result.ok).to_equal(false)
+        expect(result.state).to_equal("peb-write:page-fault-unmapped")
+        expect(result.write_count).to_equal(0)
+
+        var read_only = _peb_teb_write_space()
+        read_only = _commit_fixed(wine_vm_process_space_new(10, 30, "pid fs ipc net capability"), 0x7ffdf000, 0x1000, "r")
+        val blocked = wine_peb_teb_memory_write_gate(wine_peb_teb_init_default(), read_only)
+        expect(blocked.ok).to_equal(false)
+        expect(blocked.state).to_equal("peb-write:page-fault-write")

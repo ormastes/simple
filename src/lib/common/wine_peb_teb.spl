@@ -1,6 +1,7 @@
 """Bounded PEB/TEB initialization evidence for Wine NT startup probes."""
 
 use common.wine_kernel32_critical_section.{WineKernel32CriticalSectionTable, wine_kernel32_execute_critical_section}
+use common.wine_vm_adapter.{WineVmSpace, wine_vm_access_gate}
 
 class WinePebTebInitEvidence:
     process_id: i64
@@ -28,11 +29,22 @@ class WinePebTebInitResult:
     process_parameters_address: i64
     operations: text
 
+class WinePebTebMemoryWriteResult:
+    ok: bool
+    state: text
+    process_id: i64
+    thread_id: i64
+    write_count: i64
+    operations: text
+
 fn _init(process_id: i64, thread_id: i64, peb_address: i64, teb_address: i64, image_base: i64, stack_base: i64, stack_limit: i64, tls_vector_address: i64, process_parameters_address: i64, evidence: text) -> WinePebTebInitEvidence:
     WinePebTebInitEvidence(process_id: process_id, thread_id: thread_id, peb_address: peb_address, teb_address: teb_address, image_base: image_base, stack_base: stack_base, stack_limit: stack_limit, tls_vector_address: tls_vector_address, process_parameters_address: process_parameters_address, evidence: evidence)
 
 fn _result(ok: bool, state: text, init: WinePebTebInitEvidence, operations: text) -> WinePebTebInitResult:
     WinePebTebInitResult(ok: ok, state: state, process_id: init.process_id, thread_id: init.thread_id, peb_address: init.peb_address, teb_address: init.teb_address, image_base: init.image_base, stack_base: init.stack_base, stack_limit: init.stack_limit, tls_vector_address: init.tls_vector_address, process_parameters_address: init.process_parameters_address, operations: operations)
+
+fn _write_result(ok: bool, state: text, init: WinePebTebInitEvidence, write_count: i64, operations: text) -> WinePebTebMemoryWriteResult:
+    WinePebTebMemoryWriteResult(ok: ok, state: state, process_id: init.process_id, thread_id: init.thread_id, write_count: write_count, operations: operations)
 
 pub fn wine_peb_teb_required_evidence() -> [text]:
     [
@@ -97,3 +109,21 @@ pub fn wine_peb_teb_init_with_loader_lock(init: WinePebTebInitEvidence, symbols:
     if not initialized.ok:
         return initialized
     _result(true, "ready", init, initialized.operations + " LoaderLock")
+
+pub fn wine_peb_teb_memory_write_gate(init: WinePebTebInitEvidence, space: WineVmSpace) -> WinePebTebMemoryWriteResult:
+    val initialized = wine_peb_teb_init_gate(init)
+    if not initialized.ok:
+        return _write_result(false, "init:" + initialized.state, init, 0, initialized.operations)
+    val peb = wine_vm_access_gate(space, init.peb_address, "write")
+    if peb != "ready":
+        return _write_result(false, "peb-write:" + peb, init, 0, initialized.operations)
+    val teb = wine_vm_access_gate(space, init.teb_address, "write")
+    if teb != "ready":
+        return _write_result(false, "teb-write:" + teb, init, 1, initialized.operations + " PEBWrite")
+    val tls = wine_vm_access_gate(space, init.tls_vector_address, "write")
+    if tls != "ready":
+        return _write_result(false, "tls-vector-write:" + tls, init, 2, initialized.operations + " PEBWrite TEBWrite")
+    val params = wine_vm_access_gate(space, init.process_parameters_address, "write")
+    if params != "ready":
+        return _write_result(false, "process-parameters-write:" + params, init, 3, initialized.operations + " PEBWrite TEBWrite TLSVectorWrite")
+    _write_result(true, "ready", init, 4, initialized.operations + " PEBWrite TEBWrite TLSVectorWrite ProcessParametersWrite")
