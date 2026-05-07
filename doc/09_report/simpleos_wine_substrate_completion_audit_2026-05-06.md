@@ -26,6 +26,7 @@ Deliver the production-quality prerequisites for a controlled SimpleOS Wine path
 | POSIX/file-I/O prerequisite | `src/lib/common/wine_posix_adapter.spl` requires fd/process/stdio/wait/timer/socket/path/errno APIs over `nogc_async_mut`, and bounded KERNEL32 `CreateFileW`/`ReadFile`/`GetFileType`/`CloseHandle` evidence before POSIX readiness | Implemented prerequisite |
 | Service and peripheral prerequisite | `src/lib/common/wine_service_adapter.spl` requires complete IPC, handle, audio, font, crypto, HID, printing, and multimedia service declarations plus bounded ADVAPI32 `OpenSCManagerW`/`CreateServiceW`/`OpenServiceW`/`StartServiceW`/`CloseServiceHandle` evidence before service readiness; audio, font, and input rows require separate waveOut/font/HID evidence gates instead of broad `host=verified` evidence | Implemented prerequisite |
 | WM/graphics production prerequisite | `src/lib/common/ui/wine_simpleos_window_bridge.spl` creates SimpleOS `/win` `WindowRecord` state, framebuffer present evidence, cursor evidence, and clipboard evidence; `src/lib/common/ui/wine_x11_adapter.spl` requires that bridge through `wine_x11_backend_production_ready` | Implemented prerequisite |
+| USER32/GDI32 GUI prerequisite | `src/lib/common/wine_user32_window.spl` and `src/lib/common/wine_gdi32_drawing.spl` provide bounded USER32 window lifecycle/message-loop evidence and GDI32 text blit evidence; `src/lib/common/wine_substrate.spl` exposes these as `user32` and `gdi32` matrix rows/gates | Implemented prerequisite |
 | VM/container production prerequisite | `src/lib/common/wine_vm_adapter.spl` distinguishes modeled spaces from OS process/address-space/container-backed spaces; `src/lib/common/wine_image_vm_map.spl` maps validated PE images plus stack/guard before execution | Implemented prerequisite |
 | PE/COFF and CPU preparation | `src/lib/common/wine_pe_gate.spl`, `src/lib/common/pe_coff_header.spl`, `src/lib/common/wine_pe_loader_runtime.spl`, `src/lib/common/wine_image_map.spl`, `src/lib/common/wine_x86_64_decode.spl`, and `src/lib/common/wine_cpu_exec.spl` validate image layout, entry windows, imports, relocation/TLS readiness, decoded call targets, safe prologues, and dispatch evidence before controlled execution | Verified for controlled hello path |
 | NT bridge and dispatch sequence | `src/lib/common/wine_nt_bridge.spl` and `src/lib/common/wine_hello_dispatch.spl` execute only the decoded-plan `GetStdHandle`, `WriteFile`, `ExitProcess` sequence with stdout handle, byte-count, payload RVA, and exit-code evidence | Verified for controlled hello path |
@@ -188,6 +189,20 @@ Fresh evidence:
 - `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_substrate_spec.spl`: 14 examples, 0 failures.
 
 Conservative boundary: this is bounded registry bridge evidence for startup probes. It does not provide a persistent Windows registry hive, ACL/security semantics, reflection, transactions, notifications, or full registry virtualization.
+
+## 2026-05-07 USER32/GDI32 Matrix Update
+
+The top-level Wine substrate matrix now exposes `user32` and `gdi32` capability rows. `user32` points at the bounded SimpleOS-backed `CreateWindowExW`/`ShowWindow`/`UpdateWindow`/`DefWindowProcW` lifecycle and message-loop bridge tests. `gdi32` points at the bounded `CreateCompatibleDC`/`TextOutW`/`BitBlt`/`DeleteDC` text blit bridge tests.
+
+Fresh evidence:
+
+- `bin/simple check src/lib/common/wine_substrate.spl test/lib/common/wine_substrate_spec.spl doc/06_spec/app/simpleos/feature/simpleos_wine_substrate_spec.spl`: all checks passed.
+- `bin/simple test test/lib/common/wine_user32_window_spec.spl`: 4 examples, 0 failures.
+- `bin/simple test test/lib/common/wine_gdi32_drawing_spec.spl`: 2 examples, 0 failures.
+- `bin/simple test test/lib/common/wine_substrate_spec.spl`: 16 examples, 0 failures.
+- `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_substrate_spec.spl`: 14 examples, 0 failures.
+
+Conservative boundary: this is bounded USER32/GDI32 bridge evidence for controlled GUI probes. It does not provide a full USER32 window manager, complete message pump, menus/dialogs/controls, GDI object lifetime, region/clipping semantics, printer DCs, or arbitrary GUI application compatibility.
 
 ## Completion Decision
 
