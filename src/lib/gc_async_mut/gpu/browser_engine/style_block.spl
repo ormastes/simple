@@ -12,12 +12,12 @@
 #   - Compound: div.active, span.highlight
 #   - Comma-separated: div, span { ... }
 #   - Descendant: div span { ... } (limited — matches if ANY ancestor matches)
-#   - Pseudo-classes: :nth-child(N) (basic numeric only), :is(), :where(), :not(), :has()
+#   - Pseudo-classes: :nth-child(N) (basic numeric only), :empty, :is(), :where(), :not(), :has()
 #   - Shorthand properties: flex, border, background, margin multi-value
 
 use std.gc_async_mut.gpu.browser_engine.dom.{BeDomNode,
     be_dom_get_tag, be_dom_get_id, be_dom_get_classes, be_dom_get_children,
-    be_dom_get_is_text, be_dom_set_children, be_dom_get_bg_color,
+    be_dom_get_is_text, be_dom_get_text, be_dom_set_children, be_dom_get_bg_color,
     be_dom_get_attr, be_dom_has_attr, parse_color_value}
 use std.gc_async_mut.gpu.browser_engine.css.{parse_css_value, BoxEdges,
     BorderProps, CssValue}
@@ -451,6 +451,8 @@ fn simple_selector_matches(selector: text, node: BeDomNode, nth: i32) -> bool:
         return not_selector_list_matches(sel, node, nth)
     if sel.starts_with(":has("):
         return has_descendant_selector_list_match(sel, node)
+    if sel == ":empty":
+        return node_is_empty(node)
 
     # Handle :nth-child pseudo
     val nth_pos = sb_find(sel, ":nth-child(", 0)
@@ -498,6 +500,12 @@ fn simple_selector_matches(selector: text, node: BeDomNode, nth: i32) -> bool:
         val base = sel.slice(0, pseudo_has_pos)
         val pseudo = sel.slice(pseudo_has_pos, sel.len())
         return simple_selector_matches(base, node, nth) and has_descendant_selector_list_match(pseudo, node)
+    val pseudo_empty_pos = sb_find(sel, ":empty", 0)
+    if pseudo_empty_pos > 0 and pseudo_empty_pos < 999999999:
+        if pseudo_empty_pos + 6 != sel.len():
+            return false
+        val base = sel.slice(0, pseudo_empty_pos)
+        return simple_selector_matches(base, node, nth) and node_is_empty(node)
 
     val dot_pos = sb_find(sel, ".", 0)
     if dot_pos > 0 and dot_pos < 999999999:
@@ -517,6 +525,19 @@ fn simple_selector_matches(selector: text, node: BeDomNode, nth: i32) -> bool:
     # Plain tag selector
     val ntag3 = be_dom_get_tag(node)
     ntag3 == sel
+
+fn node_is_empty(node: BeDomNode) -> bool:
+    val children = be_dom_get_children(node)
+    var idx = 0
+    while idx < children.len():
+        val child = children[idx]
+        if be_dom_get_is_text(child):
+            if be_dom_get_text(child).trim().len() > 0:
+                return false
+        else:
+            return false
+        idx = idx + 1
+    true
 
 fn attribute_selector_matches(selector: text, node: BeDomNode, nth: i32) -> bool:
     val open = sb_find(selector, "[", 0)
