@@ -1,5 +1,15 @@
 """PE/COFF loader readiness gate for the non-GUI hello.exe milestone."""
 
+use common.pe_coff_header.{
+    parse_pe_header_summary,
+    pe_section_bounds_gate,
+    pe_import_directory_gate
+}
+use common.wine_pe_loader_runtime.{
+    wine_pe_apply_relocation_plan,
+    wine_pe_tls_callback_plan
+}
+
 pub fn wine_pe_required_features() -> [text]:
     [
         "mz",
@@ -28,6 +38,30 @@ pub fn wine_pe_gate(features: text) -> text:
     if missing.len() == 0:
         return "ready"
     return "missing-" + missing[0]
+
+pub fn wine_pe_gate_from_image(data: [u8], dynload_apis: text, policy_evidence: text) -> text:
+    val summary = parse_pe_header_summary(data)
+    if not summary.ok:
+        return summary.error
+    val section_state = pe_section_bounds_gate(data)
+    if section_state != "ready":
+        return section_state
+    val import_state = pe_import_directory_gate(data)
+    if import_state != "ready":
+        return import_state
+    val relocation_plan = wine_pe_apply_relocation_plan(data, 0x400000, 0x500000)
+    if not relocation_plan.ok:
+        return relocation_plan.error
+    val tls_plan = wine_pe_tls_callback_plan(data, dynload_apis)
+    if not tls_plan.ok:
+        return tls_plan.error
+    if not policy_evidence.contains("structured-errors"):
+        return "missing-structured-errors"
+    if not policy_evidence.contains("safe-map"):
+        return "missing-safe-map"
+    if not policy_evidence.contains("no-exec-before-gates"):
+        return "missing-no-exec-before-gates"
+    wine_pe_gate("mz pe-signature machine-x86_64 pe32plus section-bounds console-subsystem imports relocations tls-directory structured-errors safe-map no-exec-before-gates")
 
 pub fn wine_pe_header_gate(header: text) -> text:
     if not header.contains("MZ"):

@@ -22,7 +22,7 @@ Deliver the production-quality prerequisites for a controlled SimpleOS Wine path
 | SimpleOS executable environment gate | `src/lib/common/wine_simpleos_exec_env_gate.spl` requires QEMU VM, full OS boot, user process, VM space, filesystem, window system, network, container namespace, and container rootfs evidence; `src/lib/common/wine_substrate.spl` exposes this as the `exec_env` matrix row/gate | Implemented prerequisite |
 | WM/graphics production prerequisite | `src/lib/common/ui/wine_simpleos_window_bridge.spl` creates SimpleOS `/win` `WindowRecord` state and framebuffer present evidence; `src/lib/common/ui/wine_x11_adapter.spl` requires that bridge through `wine_x11_backend_production_ready` | Implemented prerequisite |
 | VM/container production prerequisite | `src/lib/common/wine_vm_adapter.spl` distinguishes modeled spaces from OS process/address-space/container-backed spaces; `src/lib/common/wine_image_vm_map.spl` maps validated PE images plus stack/guard before execution | Implemented prerequisite |
-| PE/COFF and CPU preparation | `src/lib/common/wine_image_map.spl`, `src/lib/common/wine_x86_64_decode.spl`, and `src/lib/common/wine_cpu_exec.spl` validate image layout, entry windows, decoded call targets, safe prologues, and dispatch evidence before controlled execution | Verified for controlled hello path |
+| PE/COFF and CPU preparation | `src/lib/common/wine_pe_gate.spl`, `src/lib/common/pe_coff_header.spl`, `src/lib/common/wine_pe_loader_runtime.spl`, `src/lib/common/wine_image_map.spl`, `src/lib/common/wine_x86_64_decode.spl`, and `src/lib/common/wine_cpu_exec.spl` validate image layout, entry windows, imports, relocation/TLS readiness, decoded call targets, safe prologues, and dispatch evidence before controlled execution | Verified for controlled hello path |
 | NT bridge and dispatch sequence | `src/lib/common/wine_nt_bridge.spl` and `src/lib/common/wine_hello_dispatch.spl` execute only the decoded-plan `GetStdHandle`, `WriteFile`, `ExitProcess` sequence with stdout handle, byte-count, payload RVA, and exit-code evidence | Verified for controlled hello path |
 | Known non-GUI `hello.exe` command | `src/app/wine_hello/main.spl` prints `Hello from SimpleOS Wine` through OS-backed VM image mapping, composed manifest, PE validation, import binding, CPU plan, NT bridge, and decoded stdout payload path | Verified |
 | Controlled GUI hello milestone | `src/lib/common/wine_gui_hello.spl` and `src/app/wine_gui_hello/main.spl` require the VM-backed PE hello path, then bind Wine-facing X11 state to SimpleOS `/win` framebuffer evidence before reporting window title/text/checksum | Verified |
@@ -71,6 +71,21 @@ Fresh evidence:
 - `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_substrate_spec.spl`: 14 examples, 0 failures.
 
 Conservative boundary: `exec_env=verified` means the controlled Wine path has explicit SimpleOS VM/full-OS/container evidence. It does not by itself imply a complete Wine port or arbitrary PE compatibility.
+
+## 2026-05-07 Data-Backed PE Gate Update
+
+`wine_pe_gate_from_image` now derives PE loader readiness from actual PE bytes before applying policy evidence. The gate requires a valid PE32+ x86_64 console header, bounded sections, a valid import descriptor, relocation runtime evidence, TLS callback handling evidence, structured loader errors, safe mapping, and no-exec-before-gates policy.
+
+Fresh evidence:
+
+- `bin/simple check src/lib/common/wine_pe_gate.spl src/lib/common/wine_substrate.spl test/lib/common/wine_pe_gate_spec.spl test/lib/common/wine_substrate_spec.spl`: all checks passed.
+- `bin/simple test test/lib/common/wine_pe_gate_spec.spl`: 9 examples, 0 failures.
+- `bin/simple test test/lib/common/pe_coff_header_spec.spl`: 14 examples, 0 failures.
+- `bin/simple test test/lib/common/wine_pe_loader_runtime_spec.spl`: 4 examples, 0 failures.
+- `bin/simple test test/lib/common/wine_substrate_spec.spl`: 16 examples, 0 failures.
+- `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_substrate_spec.spl`: 14 examples, 0 failures.
+
+Conservative boundary: this verifies a bounded PE readiness gate for the controlled Wine path. It is still not an arbitrary PE loader, full relocation engine, full TLS callback dispatcher, or full Wine loader.
 
 ## Completion Decision
 
