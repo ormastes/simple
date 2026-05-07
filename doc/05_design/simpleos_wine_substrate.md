@@ -259,6 +259,11 @@ for the selected DLL path. It checks MZ/PE signatures, x86_64 PE32+ headers,
 the DLL characteristic, image size, and a DLL entrypoint RVA, then records that
 bytes are present while still blocking persistent DLL views, TLS callbacks,
 DllMain, and arbitrary execution.
+`wine_dll_probe_candidate_bytes(...)` composes DLL search-order candidates with
+a modeled byte-file table, selects the first candidate that has bytes, and then
+passes those bytes through the PE DLL byte-validation gate. It provides
+search-plus-file-probe evidence without opening real host files, retaining DLL
+views, or executing DLL startup code.
 `wine_process_resolve_first_import_module(...)` composes the PE first-import
 inspection gate with that module resolver, so validated full-Wine process
 images can resolve a requested procedure against their first imported KERNEL32

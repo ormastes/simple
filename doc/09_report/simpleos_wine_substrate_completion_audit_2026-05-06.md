@@ -127,6 +127,18 @@ Fresh evidence:
 - `bin/simple check src/lib`: 2697 files, all checks passed.
 - Wine DLL file-bytes changed-file stub scan: pass.
 
+## 2026-05-07 DLL File-Probe Update
+
+The DLL file-probe layer now composes search-order candidate paths with a modeled byte-file table, chooses the first candidate with bytes, and validates those bytes through the PE DLL byte gate. It records search-plus-file evidence while still avoiding real host file opens, persistent DLL views, DllMain, TLS callbacks, and arbitrary PE execution.
+
+Fresh evidence:
+
+- `bin/simple check` on changed DLL file-probe source/spec files: all checks passed.
+- `bin/simple test test/lib/common/wine_dll_file_probe_spec.spl`: 3 examples, 0 failures.
+- `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_dll_file_probe_spec.spl`: 1 example, 0 failures.
+- `bin/simple check src/lib`: 2698 files, all checks passed.
+- Wine DLL file-probe changed-file stub scan: pass.
+
 ## 2026-05-07 Executable-Environment Matrix Update
 
 The top-level Wine substrate matrix now exposes the SimpleOS executable-environment gate directly through `wine_substrate_exec_env_gate` and the `exec_env` capability row. This makes VM/full-OS/container evidence a first-class Wine readiness prerequisite instead of an implicit side gate.
