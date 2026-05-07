@@ -1,0 +1,54 @@
+use common.wine_kernel32_atom_table.{
+    wine_kernel32_atom_table_new,
+    wine_kernel32_execute_atom_table,
+    wine_kernel32_global_add_atom_w,
+    wine_kernel32_global_delete_atom,
+    wine_kernel32_global_find_atom_w
+}
+
+describe "Wine KERNEL32 atom table bridge":
+    it "executes a bounded add, find, and delete atom sequence":
+        val result = wine_kernel32_execute_atom_table(
+            ["GlobalAddAtomW", "GlobalFindAtomW", "GlobalDeleteAtom"],
+            wine_kernel32_atom_table_new(),
+            "SimpleOSWindowClass"
+        )
+
+        expect(result.ok).to_equal(true)
+        expect(result.atom).to_equal(0xc000)
+        expect(result.name).to_equal("SimpleOSWindowClass")
+        expect(result.table.atoms.len()).to_equal(0)
+        expect(result.operations).to_equal("GlobalAddAtomW GlobalFindAtomW GlobalDeleteAtom")
+
+    it "exposes direct atom table helpers":
+        val added = wine_kernel32_global_add_atom_w(wine_kernel32_atom_table_new(), "SimpleOSWindowClass")
+        val found = wine_kernel32_global_find_atom_w(added.table, "SimpleOSWindowClass")
+        val deleted = wine_kernel32_global_delete_atom(found.table, found.atom)
+
+        expect(added.ok).to_equal(true)
+        expect(found.atom).to_equal(0xc000)
+        expect(deleted.ok).to_equal(true)
+        expect(deleted.table.atoms.len()).to_equal(0)
+
+    it "keeps atom table dispatch ordered and bounded":
+        val out_of_order = wine_kernel32_execute_atom_table(
+            ["GlobalFindAtomW", "GlobalAddAtomW", "GlobalDeleteAtom"],
+            wine_kernel32_atom_table_new(),
+            "SimpleOSWindowClass"
+        )
+        expect(out_of_order.ok).to_equal(false)
+        expect(out_of_order.error).to_equal("kernel32-atom-table-sequence-expected:GlobalAddAtomW")
+
+        val wrong_family = wine_kernel32_execute_atom_table(
+            ["GlobalAddAtomW", "GlobalFindAtomW", "HeapAlloc"],
+            wine_kernel32_atom_table_new(),
+            "SimpleOSWindowClass"
+        )
+        expect(wrong_family.ok).to_equal(false)
+        expect(wrong_family.error).to_equal("bridge-wrong-category:HeapAlloc")
+
+    it "rejects invalid atom names and ids":
+        val table = wine_kernel32_atom_table_new()
+        expect(wine_kernel32_global_add_atom_w(table, "").error).to_equal("GlobalAddAtomW:invalid-name")
+        expect(wine_kernel32_global_find_atom_w(table, "MissingClass").error).to_equal("GlobalFindAtomW:not-found")
+        expect(wine_kernel32_global_delete_atom(table, 0xc000).error).to_equal("GlobalDeleteAtom:invalid-atom")
