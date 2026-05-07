@@ -232,6 +232,9 @@ modeled SimpleOS process address space with OS VMA backing, image-map evidence,
 and a no-host-code-jump check at the PE entrypoint. This is still a bounded
 preflight record; it does not expose writable arbitrary process memory or step
 general instructions.
+`wine_process_map_known_console_image_with_peb_teb_vm_writes(...)` requires the
+VM-readback-gated import-thunk VMA write path before reporting that mapped-image
+preflight.
 For the mapped known-console path,
 `wine_process_apply_known_kernel32_thunk_patches_in_vma(...)` opens a modeled
 write window only on that bounded process image, applies the three planned
