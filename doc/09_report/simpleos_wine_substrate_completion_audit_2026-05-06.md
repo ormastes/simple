@@ -485,6 +485,23 @@ Conservative boundary: this validates arbitrary process images only. It does
 not load arbitrary DLLs, bind imports beyond existing gate checks, or execute
 arbitrary PE code.
 
+## 2026-05-07 Arbitrary Process Import Inspection Boundary
+
+`src/lib/common/wine_process_session.spl` now exposes
+`wine_process_inspect_full_imports(...)` for image-validated full-Wine process
+plans. It inspects the first import descriptor with a caller-provided symbol
+limit and returns the DLL name plus imported symbols.
+
+Fresh evidence:
+
+- `bin/simple test test/lib/common/wine_process_session_spec.spl --mode=interpreter --clean`: includes first-import inspection and invalid symbol-limit coverage.
+- `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_substrate_spec.spl --mode=interpreter --clean`: includes REQ-014 import inspection coverage.
+- `bin/simple test test/lib/common/pe_coff_header_spec.spl --mode=interpreter --clean`: keeps the underlying import parser covered.
+
+Conservative boundary: this is import inspection only. It does not perform
+arbitrary DLL loading, import binding, thunk patching, or arbitrary PE
+execution.
+
 ## Completion Decision
 
 The WM/VM prerequisite plan in `doc/03_plan/agent_tasks/simpleos_wine_wm_vm_execution_plan_2026-05-06.md` is implemented at the Wine-facing SimpleOS contract level. Modeled X11/VM gates are no longer accepted as production evidence, and the new production gates require SimpleOS window records, framebuffer presents, OS process/address-space identity, container namespace evidence, OS VMA image mapping, thread stack/guard setup, fault evidence, and no-host-code-jump policy.

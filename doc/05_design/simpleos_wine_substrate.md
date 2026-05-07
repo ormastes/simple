@@ -133,7 +133,10 @@ Arbitrary `.exe` sessions require `wine_substrate_full_wine_gate(...) ==
 `unsupported-process-session`. Full-Wine process plans must also pass
 `wine_process_validate_full_image(...)`, which runs PE header, section,
 directory, import, relocation, TLS, and image-map gates before any future
-arbitrary execution boundary can be added.
+arbitrary execution boundary can be added. After image validation,
+`wine_process_inspect_full_imports(...)` exposes a bounded first-import table
+inspection result with DLL name and imported symbols. It does not bind DLLs or
+dispatch imported functions.
 
 `src/app/wine_process_session_plan/main.spl` exposes the controlled hello
 process-session handoff as a command. It prints command, substrate readiness,

@@ -3,6 +3,9 @@
 use common.pe_coff_header.{
     parse_pe_header_summary,
     pe_data_directory_gate,
+    pe_first_import_dll_name,
+    pe_first_import_symbol_names,
+    pe_first_import_thunk_gate,
     pe_import_directory_gate,
     pe_relocation_directory_gate,
     pe_section_table_gate,
@@ -54,6 +57,15 @@ class WineProcessImageValidationResult:
     subsystem: text
     status: text
 
+class WineProcessImportInspectionResult:
+    ok: bool
+    error: text
+    command: text
+    dll_name: text
+    symbol_count: i64
+    symbols: [text]
+    status: text
+
 fn _wine_process_session_request(executable_path: text, argv: [text], working_directory: text) -> WineProcessSessionRequest:
     WineProcessSessionRequest(executable_path: executable_path, argv: argv, working_directory: working_directory)
 
@@ -68,6 +80,9 @@ fn _wine_process_execution_result(ok: bool, error: text, command: text, stdout: 
 
 fn _wine_process_image_validation_result(ok: bool, error: text, command: text, machine: text, subsystem: text, status: text) -> WineProcessImageValidationResult:
     WineProcessImageValidationResult(ok: ok, error: error, command: command, machine: machine, subsystem: subsystem, status: status)
+
+fn _wine_process_import_inspection_result(ok: bool, error: text, command: text, dll_name: text, symbol_count: i64, symbols: [text], status: text) -> WineProcessImportInspectionResult:
+    WineProcessImportInspectionResult(ok: ok, error: error, command: command, dll_name: dll_name, symbol_count: symbol_count, symbols: symbols, status: status)
 
 fn _wine_process_image_gate(data: [u8]) -> text:
     val summary = parse_pe_header_summary(data)
@@ -178,3 +193,21 @@ pub fn wine_process_validate_full_image(plan: WineProcessSessionPlan, data: [u8]
     if image_state != "ready":
         return _wine_process_image_validation_result(false, image_state, plan.command, summary.machine, summary.subsystem_kind, "rejected")
     _wine_process_image_validation_result(true, "", plan.command, summary.machine, summary.subsystem_kind, "image-validated")
+
+pub fn wine_process_inspect_full_imports(plan: WineProcessSessionPlan, data: [u8], symbol_limit: i64) -> WineProcessImportInspectionResult:
+    val image = wine_process_validate_full_image(plan, data)
+    if not image.ok:
+        return _wine_process_import_inspection_result(false, image.error, plan.command, "", 0, [], image.status)
+    if symbol_limit <= 0:
+        return _wine_process_import_inspection_result(false, "invalid-symbol-limit", plan.command, "", 0, [], "blocked")
+
+    val thunk_state = pe_first_import_thunk_gate(data, symbol_limit)
+    if thunk_state != "ready":
+        return _wine_process_import_inspection_result(false, thunk_state, plan.command, "", 0, [], "rejected")
+    val dll_name = pe_first_import_dll_name(data)
+    if dll_name == "":
+        return _wine_process_import_inspection_result(false, "missing-import-name", plan.command, "", 0, [], "rejected")
+    val symbols = pe_first_import_symbol_names(data, symbol_limit)
+    if symbols.len() == 0:
+        return _wine_process_import_inspection_result(false, "missing-import-symbols", plan.command, dll_name, 0, symbols, "rejected")
+    _wine_process_import_inspection_result(true, "", plan.command, dll_name, symbols.len(), symbols, "imports-inspected")
