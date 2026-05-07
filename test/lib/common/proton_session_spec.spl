@@ -4,10 +4,12 @@ use common.proton_runtime_subsystems.{
 }
 use common.proton_session.{
     proton_session_launch_handoff,
+    proton_session_launch_handoff_with_exec_env,
     proton_session_plan,
     proton_session_request_gate,
     proton_session_request_new
 }
+use common.wine_simpleos_exec_env_gate.{wine_simpleos_exec_env_fixture_evidence}
 
 describe "Non-Wine Proton session planning":
     it "rejects incomplete session requests before runtime evidence":
@@ -70,3 +72,15 @@ describe "Non-Wine Proton session planning":
         expect(handoff.runtime_features).to_contain("steam-runtime")
         expect(handoff.runtime_features).to_contain("vkd3d-proton")
         expect(handoff.status).to_equal("dry-run-ready")
+
+    it "requires SimpleOS MDSOC executable-environment evidence before dry-run handoff":
+        val request = proton_session_request_new("480", "steamapps/compatdata/480/pfx", "hl2.exe", ["-novid"])
+        val plan = proton_session_plan(request, proton_fixture_non_wine_runtime_evidence())
+        val missing_exec_env = proton_session_launch_handoff_with_exec_env(plan, true, "simpleos-qemu-vm")
+        expect(missing_exec_env.ok).to_equal(false)
+        expect(missing_exec_env.error).to_equal("exec-env:missing-simpleos-full-os-boot")
+
+        val handoff = proton_session_launch_handoff_with_exec_env(plan, true, wine_simpleos_exec_env_fixture_evidence())
+        expect(handoff.ok).to_equal(true)
+        expect(handoff.status).to_equal("dry-run-ready")
+        expect(handoff.container_profile).to_contain("pressure-vessel")

@@ -604,6 +604,27 @@ Fresh evidence:
 Conservative boundary: this is still non-executing handoff evidence. Real
 Steam/Proton/pressure-vessel/Wine/game process execution remains blocked.
 
+## 2026-05-07 Proton Executable-Environment Composition
+
+`proton_session_launch_handoff_with_exec_env(...)` now composes non-Wine Proton
+runtime evidence with the SimpleOS MDSOC executable-environment gate before any
+dry-run Proton handoff is reported. Missing VM/full-OS/container/MDSOC evidence
+returns `exec-env:<missing-state>` and keeps the handoff blocked.
+
+Fresh evidence:
+
+- `bin/simple check` on Proton session/app/system spec files: all checks passed.
+- `bin/simple test test/lib/common/proton_session_spec.spl --mode=interpreter --clean`: includes MDSOC executable-environment rejection and ready handoff coverage.
+- `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_proton_substrate_spec.spl --mode=interpreter --clean`: includes Proton executable-environment composition coverage.
+- `bin/simple test test/integration/app/proton_session_plan_command_spec.spl --mode=interpreter --clean`: command prints `exec_env=mdsoc-ready`.
+- `bin/simple run src/app/proton_session_plan/main.spl`: emitted `exec_env=mdsoc-ready`.
+- `bin/simple check` on generated Proton matcher specs: all checks passed.
+- `bin/simple check src/lib`: 2706 files, all checks passed.
+- Proton executable-environment changed-file `git diff --check` and stub scan: pass.
+
+Conservative boundary: this still performs no Steam, Proton, pressure-vessel,
+Wine, Vulkan, DXVK/VKD3D, or game process execution.
+
 ## 2026-05-07 Wine Process Session Handoff
 
 `src/lib/common/wine_process_session.spl` now exposes a Wine-side process
