@@ -242,6 +242,12 @@ SimpleOS VM process-space map/unmap primitives while recording the modeled
 It returns selected DLL path, mapped base, and mapped size, but still does not
 read host DLL bytes, keep a real DLL loaded, run DllMain, execute TLS callbacks,
 or dispatch arbitrary PE instructions.
+`wine_dll_load_session_*` records a modeled loaded-DLL session on top of that
+image-map handoff. It tracks DLL name, selected path, mapped base/size, section
+handle, refcount, unload, and rollback evidence, but its loaded state is still a
+contract record: host DLL bytes are not read, no real DLL view is retained,
+DllMain and TLS callbacks are not executed, and arbitrary PE code is not
+dispatched.
 `wine_process_resolve_first_import_module(...)` composes the PE first-import
 inspection gate with that module resolver, so validated full-Wine process
 images can resolve a requested procedure against their first imported KERNEL32

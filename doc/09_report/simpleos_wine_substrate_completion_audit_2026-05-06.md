@@ -91,6 +91,18 @@ Fresh evidence:
 - `bin/simple check src/lib`: 2694 files, all checks passed.
 - Wine DLL image-map changed-file stub scan: pass.
 
+## 2026-05-07 DLL Load-Session State Update
+
+The DLL load-session layer now records modeled loaded-image state on top of the DLL image-map handoff. It tracks selected path, mapped base/size, section handle, refcounted repeated loads, unloads, and rollback evidence while still blocking host DLL filesystem reads, persistent real DLL loading, DllMain, TLS callbacks, and arbitrary PE execution.
+
+Fresh evidence:
+
+- `bin/simple check` on changed DLL load-session source/spec files: all checks passed.
+- `bin/simple test test/lib/common/wine_dll_load_session_spec.spl`: 4 examples, 0 failures.
+- `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_dll_load_session_spec.spl`: 1 example, 0 failures.
+- `bin/simple check src/lib`: 2695 files, all checks passed.
+- Wine DLL load-session changed-file stub scan: pass.
+
 ## 2026-05-07 Executable-Environment Matrix Update
 
 The top-level Wine substrate matrix now exposes the SimpleOS executable-environment gate directly through `wine_substrate_exec_env_gate` and the `exec_env` capability row. This makes VM/full-OS/container evidence a first-class Wine readiness prerequisite instead of an implicit side gate.
