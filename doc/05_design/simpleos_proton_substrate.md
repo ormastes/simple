@@ -42,6 +42,11 @@ non-Wine runtime subsystem evidence. It emits a planned launch command and
 runtime feature evidence, but does not execute Wine or a game process. The
 handoff API emits a `dry-run-ready` container/profile record only when
 `dry_run == true`; real execution returns `execution-not-implemented`.
+The pressure-vessel evidence is token-based and requires `container-rootfs`,
+`container-rootfs-nvfs`, and separate `namespace-pid`, `namespace-fs`,
+`namespace-ipc`, `namespace-net`, and `namespace-capability` facets, so broad
+marker strings or substring collisions cannot satisfy the SimpleOS container
+boundary.
 
 `src/app/proton_session_plan/main.spl` is a narrow command surface for this
 planner. It prints app id, compat prefix, planned command, status, and runtime

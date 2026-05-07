@@ -12,7 +12,8 @@ not as a synonym for the controlled Wine hello milestones.
 The Proton gate requires:
 
 1. `wine_substrate_full_wine_gate(...) == "ready"`;
-2. Steam runtime and pressure-vessel style container evidence;
+2. Steam runtime and pressure-vessel style container evidence, including
+   NVFS-backed rootfs and separate pid/fs/ipc/net/capability namespace facets;
 3. Proton launcher evidence;
 4. Vulkan loader and Vulkan device evidence;
 5. DXVK and VKD3D-Proton graphics translation evidence;
@@ -27,8 +28,8 @@ The Proton layer follows the same MDSOC+ split as the Wine layer:
   readiness vocabulary only, not runtime state.
 - `src/lib/common/proton_runtime_subsystems.spl` is the common non-Wine
   subsystem facade. It owns Steam runtime ABI, pressure-vessel container,
-  graphics translation, Steam integration, shader-cache, and sync evidence
-  gates without depending on Wine internals.
+  NVFS rootfs, namespace-facet, graphics translation, Steam integration,
+  shader-cache, and sync evidence gates without depending on Wine internals.
 - `src/lib/common/proton_session.spl` is the common launch-session planner for
   non-Wine state. It validates app/prefix/executable records and composes
   non-Wine subsystem evidence into a planned launch record without executing
