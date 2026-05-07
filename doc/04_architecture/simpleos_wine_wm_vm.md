@@ -51,7 +51,8 @@ The bridge writes SimpleOS `/win` records through `WindowRecord`, `WindowState`,
 `src/lib/common/wine_vm_adapter.spl` distinguishes modeled VM spaces from OS-backed VM process spaces. Production VM readiness requires:
 
 - non-zero process id and address-space id;
-- container evidence for pid, fs, ipc, net, and capability namespaces;
+- exact-token container evidence for pid, fs, ipc, net, and capability
+  namespace facets;
 - OS-backed VMA regions;
 - executable PE image mapping;
 - thread stack plus guard page;

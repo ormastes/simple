@@ -77,6 +77,8 @@ milestone can advance.
 the PE mapping path. It supports reserve, fixed reserve with overlap rejection,
 commit, protect, unmap, guard pages, user-pointer lookup, access-fault
 classification, and fault evidence that feeds the existing `wine_vm_gate`.
+Container namespace evidence is matched as exact tokens, so substring marker
+collisions cannot satisfy pid, fs, ipc, net, or capability readiness.
 This is still not a kernel VMM replacement; it is the executable contract the
 loader path can depend on while the OS-level VM/container implementation
 continues.
