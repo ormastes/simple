@@ -220,16 +220,35 @@ Conservative boundary: this is a readiness classifier, not the missing implement
 
 ## 2026-05-07 KERNEL32 Core Matrix Update
 
-The top-level Wine substrate matrix now exposes `kernel32_core` as a first-class capability row. Its evidence command covers bounded KERNEL32 virtual memory, heap, TLS/FLS, synchronization event, error state, atom table, time/version, startup info, and interlocked bridge specs.
+The top-level Wine substrate matrix now exposes `kernel32_core` as a first-class capability row. Its evidence command covers bounded KERNEL32 virtual memory, heap, TLS/FLS, synchronization event, error state, atom table, time/version, startup info, interlocked, and process-environment bridge specs.
 
 Fresh evidence:
 
 - `bin/simple check src/lib/common/wine_substrate.spl test/lib/common/wine_substrate_spec.spl doc/06_spec/app/simpleos/feature/simpleos_wine_substrate_spec.spl`: all checks passed.
-- `bin/simple test` on the KERNEL32 core specs listed by the row: virtual memory 2/0, heap 3/0, TLS 4/0, FLS 4/0, sync event 3/0, error state 4/0, atom table 4/0, time/version 3/0, startup info 3/0, interlocked 4/0.
+- `bin/simple test` on the KERNEL32 core specs listed by the row: virtual memory 2/0, heap 3/0, TLS 4/0, FLS 4/0, sync event 3/0, error state 4/0, atom table 4/0, time/version 3/0, startup info 3/0, interlocked 4/0, process environment 5/0.
 - `bin/simple test test/lib/common/wine_substrate_spec.spl`: 18 examples, 0 failures.
 - `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_substrate_spec.spl`: 16 examples, 0 failures.
 
-Conservative boundary: this is bounded KERNEL32 core API evidence. It does not provide every KERNEL32 export, true Windows object lifetime, complete virtual memory semantics, loader integration, process-environment readiness, or arbitrary process execution. `test/lib/common/wine_kernel32_process_env_spec.spl` remains a known failing blocker and is intentionally not used as passing evidence for this row.
+Conservative boundary: this is bounded KERNEL32 core API evidence. It does not provide every KERNEL32 export, true Windows object lifetime, complete virtual memory semantics, loader integration, or arbitrary process execution.
+
+## 2026-05-07 KERNEL32 Process Environment Fix
+
+`src/lib/common/wine_kernel32_process_env.spl` now uses module-unique helper
+names for its bounded symbol-family and sequence gates. This prevents the
+process-environment bridge from resolving a sibling `_sequence_gate` helper and
+incorrectly reporting `GetCommandLineW` as a virtual-memory wrong-category
+symbol.
+
+Fresh evidence:
+
+- `bin/simple check src/lib/common/wine_kernel32_process_env.spl test/lib/common/wine_kernel32_process_env_spec.spl`: all checks passed.
+- `bin/simple test test/lib/common/wine_kernel32_process_env_spec.spl --mode=interpreter --clean`: 5 examples, 0 failures.
+- `bin/simple test test/lib/common/wine_nt_process_env_spec.spl --mode=interpreter --clean`: 9 examples, 0 failures.
+
+Conservative boundary: this makes the bounded KERNEL32 process-environment
+bridge dispatchable for the modeled startup calls. It does not implement the
+full Windows process environment, environment block ownership rules, inherited
+process parameters, locale/codepage behavior, or arbitrary process creation.
 
 ## 2026-05-07 MDSOC+ Architecture Alignment
 

@@ -1,6 +1,5 @@
 """Bounded KERNEL32 process-environment bridge for Wine startup probes."""
 
-use common.wine_nt_api_catalog.{wine_nt_api_kernel32_process_env_dispatch_gate}
 use common.wine_nt_process_env.{
     WineNtProcessEnv,
     wine_nt_expand_environment_strings_w,
@@ -23,11 +22,38 @@ class WineKernel32ProcessEnvResult:
     value: text
     operations: text
 
-fn _result(ok: bool, error: text, command_line: text, environment_block: text, current_directory: text, module_file_name: text, value: text, operations: text) -> WineKernel32ProcessEnvResult:
+fn _kernel32_process_env_result(ok: bool, error: text, command_line: text, environment_block: text, current_directory: text, module_file_name: text, value: text, operations: text) -> WineKernel32ProcessEnvResult:
     WineKernel32ProcessEnvResult(ok: ok, error: error, command_line: command_line, environment_block: environment_block, current_directory: current_directory, module_file_name: module_file_name, value: value, operations: operations)
 
-fn _sequence_gate(symbols: [text]) -> text:
-    val dispatch_state = wine_nt_api_kernel32_process_env_dispatch_gate(symbols)
+fn _kernel32_process_env_is_symbol(symbol: text) -> bool:
+    if symbol == "GetCommandLineW":
+        return true
+    if symbol == "GetEnvironmentStringsW":
+        return true
+    if symbol == "GetCurrentDirectoryW":
+        return true
+    if symbol == "SetCurrentDirectoryW":
+        return true
+    if symbol == "GetModuleFileNameW":
+        return true
+    if symbol == "GetEnvironmentVariableW":
+        return true
+    if symbol == "SetEnvironmentVariableW":
+        return true
+    if symbol == "ExpandEnvironmentStringsW":
+        return true
+    false
+
+fn _kernel32_process_env_symbol_gate(symbols: [text]) -> text:
+    if symbols.len() == 0:
+        return "bridge-missing:kernel32-process-env"
+    for symbol in symbols:
+        if not _kernel32_process_env_is_symbol(symbol):
+            return "bridge-wrong-category:" + symbol
+    "ready"
+
+fn _kernel32_process_env_sequence_gate(symbols: [text]) -> text:
+    val dispatch_state = _kernel32_process_env_symbol_gate(symbols)
     if dispatch_state != "ready":
         return dispatch_state
     if symbols.len() != 2:
@@ -38,8 +64,8 @@ fn _sequence_gate(symbols: [text]) -> text:
         return "kernel32-process-env-sequence-expected:GetEnvironmentStringsW"
     "ready"
 
-fn _parameter_sequence_gate(symbols: [text]) -> text:
-    val dispatch_state = wine_nt_api_kernel32_process_env_dispatch_gate(symbols)
+fn _kernel32_process_parameter_sequence_gate(symbols: [text]) -> text:
+    val dispatch_state = _kernel32_process_env_symbol_gate(symbols)
     if dispatch_state != "ready":
         return dispatch_state
     if symbols.len() != 4:
@@ -54,8 +80,8 @@ fn _parameter_sequence_gate(symbols: [text]) -> text:
         return "kernel32-process-parameter-sequence-expected:GetCurrentDirectoryW"
     "ready"
 
-fn _variable_sequence_gate(symbols: [text]) -> text:
-    val dispatch_state = wine_nt_api_kernel32_process_env_dispatch_gate(symbols)
+fn _kernel32_env_var_sequence_gate(symbols: [text]) -> text:
+    val dispatch_state = _kernel32_process_env_symbol_gate(symbols)
     if dispatch_state != "ready":
         return dispatch_state
     if symbols.len() != 3:
@@ -69,46 +95,46 @@ fn _variable_sequence_gate(symbols: [text]) -> text:
     "ready"
 
 pub fn wine_kernel32_execute_process_env(symbols: [text], env: WineNtProcessEnv) -> WineKernel32ProcessEnvResult:
-    val sequence_state = _sequence_gate(symbols)
+    val sequence_state = _kernel32_process_env_sequence_gate(symbols)
     if sequence_state != "ready":
-        return _result(false, sequence_state, "", "", "", "", "", "")
+        return _kernel32_process_env_result(false, sequence_state, "", "", "", "", "", "")
     val command = wine_nt_get_command_line_w(env)
     if not command.ok:
-        return _result(false, "GetCommandLineW:" + command.state, "", "", "", "", "", "")
+        return _kernel32_process_env_result(false, "GetCommandLineW:" + command.state, "", "", "", "", "", "")
     val block = wine_nt_get_environment_strings_w(env)
     if not block.ok:
-        return _result(false, "GetEnvironmentStringsW:" + block.state, command.command_line, "", "", "", "", "GetCommandLineW")
-    _result(true, "", command.command_line, block.environment_block, "", command.module_file_name, "", "GetCommandLineW GetEnvironmentStringsW")
+        return _kernel32_process_env_result(false, "GetEnvironmentStringsW:" + block.state, command.command_line, "", "", "", "", "GetCommandLineW")
+    _kernel32_process_env_result(true, "", command.command_line, block.environment_block, "", command.module_file_name, "", "GetCommandLineW GetEnvironmentStringsW")
 
 pub fn wine_kernel32_execute_process_parameters(symbols: [text], env: WineNtProcessEnv, new_current_directory: text) -> WineKernel32ProcessEnvResult:
-    val sequence_state = _parameter_sequence_gate(symbols)
+    val sequence_state = _kernel32_process_parameter_sequence_gate(symbols)
     if sequence_state != "ready":
-        return _result(false, sequence_state, "", "", "", "", "", "")
+        return _kernel32_process_env_result(false, sequence_state, "", "", "", "", "", "")
     val module_name = wine_nt_get_module_file_name_w(env)
     if not module_name.ok:
-        return _result(false, "GetModuleFileNameW:" + module_name.state, "", "", "", "", "", "")
+        return _kernel32_process_env_result(false, "GetModuleFileNameW:" + module_name.state, "", "", "", "", "", "")
     val old_directory = wine_nt_get_current_directory_w(env)
     if not old_directory.ok:
-        return _result(false, "GetCurrentDirectoryW:" + old_directory.state, "", "", "", module_name.module_file_name, "", "GetModuleFileNameW")
+        return _kernel32_process_env_result(false, "GetCurrentDirectoryW:" + old_directory.state, "", "", "", module_name.module_file_name, "", "GetModuleFileNameW")
     val changed = wine_nt_set_current_directory_w(env, new_current_directory)
     if not changed.ready:
-        return _result(false, "SetCurrentDirectoryW:" + changed.state, "", "", old_directory.current_directory, module_name.module_file_name, "", "GetModuleFileNameW GetCurrentDirectoryW")
+        return _kernel32_process_env_result(false, "SetCurrentDirectoryW:" + changed.state, "", "", old_directory.current_directory, module_name.module_file_name, "", "GetModuleFileNameW GetCurrentDirectoryW")
     val current_directory = wine_nt_get_current_directory_w(changed)
     if not current_directory.ok:
-        return _result(false, "GetCurrentDirectoryW:" + current_directory.state, "", "", old_directory.current_directory, module_name.module_file_name, "", "GetModuleFileNameW GetCurrentDirectoryW SetCurrentDirectoryW")
-    _result(true, "", "", "", current_directory.current_directory, module_name.module_file_name, "", "GetModuleFileNameW GetCurrentDirectoryW SetCurrentDirectoryW GetCurrentDirectoryW")
+        return _kernel32_process_env_result(false, "GetCurrentDirectoryW:" + current_directory.state, "", "", old_directory.current_directory, module_name.module_file_name, "", "GetModuleFileNameW GetCurrentDirectoryW SetCurrentDirectoryW")
+    _kernel32_process_env_result(true, "", "", "", current_directory.current_directory, module_name.module_file_name, "", "GetModuleFileNameW GetCurrentDirectoryW SetCurrentDirectoryW GetCurrentDirectoryW")
 
 pub fn wine_kernel32_execute_environment_variable(symbols: [text], env: WineNtProcessEnv, key: text, value: text, pattern: text) -> WineKernel32ProcessEnvResult:
-    val sequence_state = _variable_sequence_gate(symbols)
+    val sequence_state = _kernel32_env_var_sequence_gate(symbols)
     if sequence_state != "ready":
-        return _result(false, sequence_state, "", "", "", "", "", "")
+        return _kernel32_process_env_result(false, sequence_state, "", "", "", "", "", "")
     val changed = wine_nt_set_environment_variable_w(env, key, value)
     if not changed.ready:
-        return _result(false, "SetEnvironmentVariableW:" + changed.state, "", "", "", "", "", "")
+        return _kernel32_process_env_result(false, "SetEnvironmentVariableW:" + changed.state, "", "", "", "", "", "")
     val fetched = wine_nt_get_environment_variable_w(changed, key)
     if not fetched.ok:
-        return _result(false, "GetEnvironmentVariableW:" + fetched.state, "", "", "", fetched.module_file_name, "", "SetEnvironmentVariableW")
+        return _kernel32_process_env_result(false, "GetEnvironmentVariableW:" + fetched.state, "", "", "", fetched.module_file_name, "", "SetEnvironmentVariableW")
     val expanded = wine_nt_expand_environment_strings_w(changed, pattern)
     if not expanded.ok:
-        return _result(false, "ExpandEnvironmentStringsW:" + expanded.state, "", "", "", fetched.module_file_name, fetched.value, "SetEnvironmentVariableW GetEnvironmentVariableW")
-    _result(true, "", "", "", "", fetched.module_file_name, expanded.value, "SetEnvironmentVariableW GetEnvironmentVariableW ExpandEnvironmentStringsW")
+        return _kernel32_process_env_result(false, "ExpandEnvironmentStringsW:" + expanded.state, "", "", "", fetched.module_file_name, fetched.value, "SetEnvironmentVariableW GetEnvironmentVariableW")
+    _kernel32_process_env_result(true, "", "", "", "", fetched.module_file_name, expanded.value, "SetEnvironmentVariableW GetEnvironmentVariableW ExpandEnvironmentStringsW")
