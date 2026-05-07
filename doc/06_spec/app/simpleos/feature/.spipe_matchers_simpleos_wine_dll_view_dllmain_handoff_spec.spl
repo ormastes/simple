@@ -1,6 +1,6 @@
 use common.pe_coff_header.{pe_rva_to_file_offset}
 use common.wine_dll_file_probe.{wine_dll_probe_file}
-use common.wine_dll_view_dllmain_handoff.{wine_dll_prepare_file_view_dllmain_handoff}
+use common.wine_dll_view_dllmain_handoff.{wine_dll_prepare_file_view_dllmain_handoff, wine_dllmain_handoff_require_peb_teb_loader_lock}
 
 fn _zero_bytes(count: i64) -> [u8]:
     var out: [u8] = []
@@ -100,4 +100,16 @@ describe "REQ-051 SimpleOS Wine DLL view DllMain handoff":
         expect result.callback_count == 1
         expect (result.evidence).contains("dllmain-process-attach-planned")
         expect (result.evidence).contains("tls-before-dllmain")
+        expect (result.evidence).contains("no-dllmain-executed")
+
+    it "requires PEB/TEB loader-lock readiness before the retained DllMain handoff":
+        val data = _dll_with_import_relocation_tls()
+        val files = [wine_dll_probe_file("\\KnownDlls\\game.dll", data)]
+        val handoff = wine_dll_prepare_file_view_dllmain_handoff("game.dll", "C:\\Games", "C:\\Users\\Player", [], ["game.dll"], files, data, 0x400000, 0x500000, 91, 92, "pid fs ipc net capability", 2, 4, "native-module-open tls-callback", false)
+        val result = wine_dllmain_handoff_require_peb_teb_loader_lock(handoff, true, "ready", "PEB TEB TLS ProcessParameters LoaderLock")
+
+        expect result.ok == true
+        expect result.status == "dllmain-handoff-ready"
+        expect (result.evidence).contains("peb-teb-loader-lock-ready")
+        expect (result.evidence).contains("dllmain-process-attach-planned")
         expect (result.evidence).contains("no-dllmain-executed")

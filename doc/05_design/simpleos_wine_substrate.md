@@ -290,7 +290,9 @@ callback instructions, DllMain, and arbitrary PE code are still not executed.
 `wine_dll_prepare_file_view_dllmain_handoff(...)` then prepares a non-executing
 DllMain process-attach handoff from the same import-bound retained view. It
 requires TLS planning, a byte-mapped DLL entrypoint, and a no-host-code-jump
-check, while requests to actually execute DllMain remain hard-blocked.
+check, while requests to actually execute DllMain remain hard-blocked. The
+PEB/TEB variant composes this handoff with the bounded loader-lock PEB/TEB/TLS
+startup gate before reporting DllMain handoff readiness.
 `wine_dll_record_file_view_startup_fault(...)` composes that DllMain handoff
 with modeled VM fault evidence and records the loader-lock release, SEH
 dispatch, and startup rollback boundary. Only `deliver-seh` startup faults are

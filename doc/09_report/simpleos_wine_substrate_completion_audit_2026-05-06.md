@@ -333,6 +333,26 @@ Conservative boundary: this models loader-lock ordering only. It still does not
 run live TLS callbacks, execute DllMain, mutate PEB/TEB memory, or transfer
 control to arbitrary PE code.
 
+## 2026-05-07 DLL View DllMain PEB/TEB Handoff Update
+
+The retained DLL view DllMain handoff now has a PEB/TEB-aware variant. It
+requires the bounded PEB/TEB/TLS/process-parameter startup gate plus the modeled
+KERNEL32 loader-lock critical-section sequence before reporting DllMain
+process-attach handoff readiness.
+
+Fresh evidence:
+
+- `bin/simple check` on changed DllMain handoff, critical-section, unit, and system spec files: all checks passed.
+- `bin/simple test test/lib/common/wine_dll_view_dllmain_handoff_spec.spl --mode=interpreter --clean`: 4 examples, 0 failures.
+- `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_dll_view_dllmain_handoff_spec.spl --mode=interpreter --clean`: 2 examples, 0 failures.
+- `bin/simple test test/lib/common/wine_kernel32_critical_section_spec.spl --mode=interpreter --clean`: 3 examples, 0 failures.
+- `bin/simple check` on generated DllMain-handoff matcher specs: all checks passed.
+- `bin/simple check src/lib`: 2707 files, all checks passed.
+
+Conservative boundary: this composes startup evidence with a non-executing
+DllMain handoff. It still does not run live TLS callbacks, execute DllMain,
+mutate PEB/TEB memory, or transfer control to arbitrary PE code.
+
 ## 2026-05-07 Wine Aggregate Watchdog Split
 
 REQ-018 known-console dispatch planning now has focused system coverage in
