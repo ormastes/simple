@@ -16,6 +16,8 @@ use os.qemu_runner.{
     desktop_uefi_disk_image_tool_app_validation_command, build_os_with_backend,
     board_bundle_command, ensure_board_bundle, board_lane_test_command, test_board_lane,
     desktop_uefi_required_marker_fragments, riscv64_hosted_required_marker_fragments,
+    desktop_wine_exec_env_marker_contract_accepts,
+    desktop_wine_exec_env_required_marker_fragments,
     arm_fs_exec_required_marker_fragments,
     scenario_lane_kind,
     _simpleos_log_config_source,
@@ -983,6 +985,26 @@ describe "Qemu runner desktop UEFI tool app validator":
         expect(markers).to_contain("[desktop-e2e] native-capability:ok app=clang capability=local-c-source-inspection proof=/usr/share/simpleos/toolchain/clang/hello.c")
         expect(markers).to_contain("[desktop-e2e] native-capability:ok app=clang capability=driver-flag-inspection proof=/usr/share/simpleos/toolchain/clang/flags.rsp")
         expect(markers).to_contain("[desktop-e2e] native-capability:ok app=clang capability=compile-pipeline-step proof=/usr/share/simpleos/toolchain/clang/pipeline.step")
+
+    it "defines the extra Wine executable-environment markers needed before readiness claims":
+        val markers = desktop_wine_exec_env_required_marker_fragments()
+        expect(markers).to_contain("[fs-exec] spawn:image path=/sys/apps/wine_hello")
+        expect(markers).to_contain("[desktop-e2e] process-backed:ok app=wine_hello pid=")
+        expect(markers).to_contain("[desktop-e2e] container-namespace:ok")
+        expect(markers).to_contain("[desktop-e2e] container-rootfs:ok")
+
+        val serial = "QEMU x86_64 desktop lane\n" +
+            "[phase-3-mount] fat32 ok\n" +
+            "[vfs] mounted fat32 device=nvme0 volume=simpleos\n" +
+            "[fs-exec] spawn:image path=/sys/apps/wine_hello entry=0 segments=1 stub_bytes=128 argv_count=1 env_count=0\n" +
+            "[desktop-e2e] process-backed:ok app=wine_hello pid=42\n" +
+            "[desktop-e2e] wm:ok pid=42 wid=1001\n" +
+            "[desktop-e2e] network-smoke:bounded ok packets=1\n" +
+            "[desktop-e2e] container-namespace:ok pid fs ipc net capability\n" +
+            "[desktop-e2e] container-rootfs:ok rootfs=/containers/wine rootfs_backend=nvfs\n" +
+            "TEST PASSED"
+        expect(desktop_wine_exec_env_marker_contract_accepts(serial)).to_equal(true)
+        expect(desktop_wine_exec_env_marker_contract_accepts(serial.replace("[desktop-e2e] container-rootfs:ok", "[desktop-e2e] container-rootfs:missing"))).to_equal(false)
 
     it "requires clang in the riscv64 hosted acceptance marker set":
         val markers = riscv64_hosted_required_marker_fragments()
