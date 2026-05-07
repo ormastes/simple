@@ -400,6 +400,23 @@ Fresh evidence:
 Conservative boundary: this command reports a planned session only. It does
 not execute Steam, Wine, Proton, pressure-vessel, Vulkan, or game code.
 
+## 2026-05-07 Proton Dry-Run Launch Handoff
+
+The non-Wine Proton session planner now emits a bounded launch handoff record.
+`proton_session_launch_handoff(plan, true)` returns `dry-run-ready` with app id,
+compat prefix, launch command, pressure-vessel container profile, and runtime
+feature evidence. Calling it with `dry_run == false` remains blocked with
+`execution-not-implemented`.
+
+Fresh evidence:
+
+- `bin/simple check src/lib/common/proton_session.spl test/lib/common/proton_session_spec.spl src/app/proton_session_plan/main.spl test/integration/app/proton_session_plan_command_spec.spl`: all checks passed.
+- `bin/simple test test/lib/common/proton_session_spec.spl --mode=interpreter --clean`: 4 examples, 0 failures.
+- `bin/simple run src/app/proton_session_plan/main.spl`: emitted `status=dry-run-ready`, a pressure-vessel container profile, and runtime feature evidence.
+
+Conservative boundary: this is still non-executing handoff evidence. Real
+Steam/Proton/pressure-vessel/Wine/game process execution remains blocked.
+
 ## Completion Decision
 
 The WM/VM prerequisite plan in `doc/03_plan/agent_tasks/simpleos_wine_wm_vm_execution_plan_2026-05-06.md` is implemented at the Wine-facing SimpleOS contract level. Modeled X11/VM gates are no longer accepted as production evidence, and the new production gates require SimpleOS window records, framebuffer presents, OS process/address-space identity, container namespace evidence, OS VMA image mapping, thread stack/guard setup, fault evidence, and no-host-code-jump policy.

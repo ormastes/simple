@@ -34,11 +34,14 @@ outer full-Wine dependency plus `wine-full` feature evidence.
 
 - `proton_session_request_new(app_id, compat_prefix, executable_path, args)`;
 - `proton_session_request_gate(request)`;
-- `proton_session_plan(request, evidence)`.
+- `proton_session_plan(request, evidence)`;
+- `proton_session_launch_handoff(plan, dry_run)`.
 
 The session planner validates Steam app id, compat prefix, executable path, and
 non-Wine runtime subsystem evidence. It emits a planned launch command and
-runtime feature evidence, but does not execute Wine or a game process.
+runtime feature evidence, but does not execute Wine or a game process. The
+handoff API emits a `dry-run-ready` container/profile record only when
+`dry_run == true`; real execution returns `execution-not-implemented`.
 
 `src/app/proton_session_plan/main.spl` is a narrow command surface for this
 planner. It prints app id, compat prefix, planned command, status, and runtime
