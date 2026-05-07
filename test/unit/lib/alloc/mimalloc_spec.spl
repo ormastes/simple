@@ -38,6 +38,13 @@ use std.nogc_sync_mut.mimalloc.{
     MiHeap,
     MimallocAllocator,
     mimalloc_init,
+    mi_heap_new,
+    mi_heap_delete,
+    mi_heap_malloc,
+    mi_heap_zalloc,
+    mi_heap_calloc,
+    mi_heap_realloc,
+    mi_heap_free,
     mi_good_size,
     mi_usable_size,
     mi_zalloc,
@@ -337,6 +344,30 @@ describe "MimallocAllocator":
         val ptr2 = mi_mallocn(2, 16).unwrap()
         mi_free_size_aligned(ptr2, 32, 16)
         expect(before_free).to_be_greater_than(after_free)
+
+    it "heap-specific allocation shims delegate to the global heap":
+        val heap = mi_heap_new()
+        mimalloc_init(heap)
+        val ptr = mi_heap_malloc(heap, 16)
+        val zptr = mi_heap_zalloc(heap, 16)
+        val cptr = mi_heap_calloc(heap, 2, 8)
+        expect(ptr.?).to_equal(true)
+        expect(zptr.?).to_equal(true)
+        expect(cptr.?).to_equal(true)
+        mi_heap_free(heap, ptr.unwrap(), 16)
+        mi_heap_delete(heap)
+        expect(mi_good_size(16)).to_equal(16)
+
+    it "heap-specific realloc shim preserves prefix bytes":
+        val heap = mi_heap_new()
+        mimalloc_init(heap)
+        val ptr = mi_heap_zalloc(heap, 8).unwrap()
+        ptr[0] = 9u8
+        val grown = mi_heap_realloc(heap, ptr, 8, 32)
+        expect(grown.?).to_equal(true)
+        val bytes = grown.unwrap()
+        expect(bytes[0]).to_equal(9u8)
+        expect(bytes.len()).to_equal(32)
 
     it "total_allocated increases after each alloc":
         val heap = MiHeap(size_classes: [8, 16, 32, 64, 128, 256, 512, 1024], pages_by_class: [])
