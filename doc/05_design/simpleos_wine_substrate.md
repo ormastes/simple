@@ -309,6 +309,10 @@ with bounded import descriptor inventory and the modeled KERNEL32/USER32/GDI32
 module table. It opens a second modeled write window, patches supported IAT
 slots with modeled procedure addresses, restores `rx`, and keeps real DLL
 loads, TLS callbacks, DllMain, and arbitrary PE dispatch blocked.
+`wine_dll_bind_file_view_imports_with_peb_teb_vm_writes(...)` requires PEB/TEB
+VM byte-write/readback evidence before retained DLL import binding can report
+IAT patch readiness, and the TLS-dispatch VM path consumes this gated import
+binding record.
 `wine_dll_record_file_view_tls_dispatch(...)` composes the import-bound retained
 view with TLS callback-table planning and records loader-lock/TLS-before-DllMain
 dispatch evidence. The callback target must map inside the DLL image, but

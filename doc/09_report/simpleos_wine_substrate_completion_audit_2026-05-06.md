@@ -1528,3 +1528,17 @@ Fresh evidence:
 
 - `bin/simple test test/lib/common/wine_dll_view_tls_dispatch_vm_write_spec.spl --mode=interpreter --clean`: covers VM-write/readback-gated retained DLL TLS dispatch readiness.
 - `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_dll_view_tls_dispatch_vm_write_spec.spl --mode=interpreter --clean`: covers the SimpleOS system-level retained DLL TLS dispatch requiring PEB/TEB VM write/readback evidence.
+
+## 2026-05-07 DLL Import Binding VM-Write Update
+
+`wine_dll_bind_file_view_imports_with_peb_teb_vm_writes(...)` now requires
+PEB/TEB VM byte-write/readback evidence before retained DLL import binding can
+report modeled IAT patch readiness. The retained DLL TLS-dispatch VM-write path
+now consumes this gated import-binding record instead of applying a duplicate
+gate after import binding.
+
+Fresh evidence:
+
+- `bin/simple test test/lib/common/wine_dll_view_import_binding_vm_write_spec.spl --mode=interpreter --clean`: covers VM-write/readback-gated retained DLL import binding readiness.
+- `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_dll_view_import_binding_vm_write_spec.spl --mode=interpreter --clean`: covers the SimpleOS system-level retained DLL import binding requiring PEB/TEB VM write/readback evidence.
+- `bin/simple test test/lib/common/wine_dll_view_tls_dispatch_vm_write_spec.spl --mode=interpreter --clean`: verifies the TLS-dispatch VM path still passes through the gated import-binding record.
