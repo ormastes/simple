@@ -1,5 +1,5 @@
 use common.wine_kernel32_critical_section.{wine_kernel32_critical_section_table_new}
-use common.wine_peb_teb.{WinePebTebInitEvidence, wine_peb_teb_init_default, wine_peb_teb_init_gate, wine_peb_teb_init_with_loader_lock, wine_peb_teb_memory_write_gate, wine_peb_teb_required_evidence}
+use common.wine_peb_teb.{WinePebTebInitEvidence, wine_peb_teb_init_default, wine_peb_teb_init_gate, wine_peb_teb_init_with_loader_lock, wine_peb_teb_layout_write_plan, wine_peb_teb_memory_write_gate, wine_peb_teb_required_evidence}
 use common.wine_vm_adapter.{WineVmSpace, wine_vm_commit, wine_vm_process_space_new, wine_vm_reserve_fixed}
 
 fn _loader_lock_symbols() -> [text]:
@@ -121,3 +121,32 @@ describe "Wine PEB/TEB initialization gate":
         val blocked = wine_peb_teb_memory_write_gate(wine_peb_teb_init_default(), read_only)
         expect(blocked.ok).to_equal(false)
         expect(blocked.state).to_equal("peb-write:page-fault-write")
+
+    it "plans x64 PEB/TEB layout writes after VM write readiness":
+        val init = wine_peb_teb_init_default()
+        val writes = wine_peb_teb_memory_write_gate(init, _peb_teb_write_space())
+        val plan = wine_peb_teb_layout_write_plan(init, writes)
+
+        expect(plan.ok).to_equal(true)
+        expect(plan.state).to_equal("ready")
+        expect(plan.record_count).to_equal(6)
+        expect(plan.records[0].field_name).to_equal("NtTib.StackBase")
+        expect(plan.records[0].address).to_equal(0x7ffde008)
+        expect(plan.records[0].value).to_equal(0x7ffef000)
+        expect(plan.records[3].field_name).to_equal("ProcessEnvironmentBlock")
+        expect(plan.records[3].address).to_equal(0x7ffde060)
+        expect(plan.records[3].value).to_equal(0x7ffdf000)
+        expect(plan.records[4].field_name).to_equal("ImageBaseAddress")
+        expect(plan.records[4].address).to_equal(0x7ffdf010)
+        expect(plan.records[5].field_name).to_equal("ProcessParameters")
+        expect(plan.records[5].value).to_equal(0x7ffdc000)
+        expect(plan.operations).to_contain("PEBTEBLayoutWritePlan")
+
+    it "blocks PEB/TEB layout planning when VM write readiness failed":
+        val init = wine_peb_teb_init_default()
+        val writes = wine_peb_teb_memory_write_gate(init, wine_vm_process_space_new(10, 30, "pid fs ipc net capability"))
+        val plan = wine_peb_teb_layout_write_plan(init, writes)
+
+        expect(plan.ok).to_equal(false)
+        expect(plan.state).to_equal("write:peb-write:page-fault-unmapped")
+        expect(plan.record_count).to_equal(0)

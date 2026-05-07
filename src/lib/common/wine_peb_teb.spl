@@ -37,6 +37,23 @@ class WinePebTebMemoryWriteResult:
     write_count: i64
     operations: text
 
+class WinePebTebLayoutWriteRecord:
+    area: text
+    field_name: text
+    address: i64
+    offset: i64
+    width: i64
+    value: i64
+
+class WinePebTebLayoutWritePlan:
+    ok: bool
+    state: text
+    process_id: i64
+    thread_id: i64
+    record_count: i64
+    operations: text
+    records: [WinePebTebLayoutWriteRecord]
+
 fn _init(process_id: i64, thread_id: i64, peb_address: i64, teb_address: i64, image_base: i64, stack_base: i64, stack_limit: i64, tls_vector_address: i64, process_parameters_address: i64, evidence: text) -> WinePebTebInitEvidence:
     WinePebTebInitEvidence(process_id: process_id, thread_id: thread_id, peb_address: peb_address, teb_address: teb_address, image_base: image_base, stack_base: stack_base, stack_limit: stack_limit, tls_vector_address: tls_vector_address, process_parameters_address: process_parameters_address, evidence: evidence)
 
@@ -45,6 +62,12 @@ fn _result(ok: bool, state: text, init: WinePebTebInitEvidence, operations: text
 
 fn _write_result(ok: bool, state: text, init: WinePebTebInitEvidence, write_count: i64, operations: text) -> WinePebTebMemoryWriteResult:
     WinePebTebMemoryWriteResult(ok: ok, state: state, process_id: init.process_id, thread_id: init.thread_id, write_count: write_count, operations: operations)
+
+fn _layout_record(area: text, field_name: text, base: i64, offset: i64, width: i64, value: i64) -> WinePebTebLayoutWriteRecord:
+    WinePebTebLayoutWriteRecord(area: area, field_name: field_name, address: base + offset, offset: offset, width: width, value: value)
+
+fn _layout_plan(ok: bool, state: text, init: WinePebTebInitEvidence, operations: text, records: [WinePebTebLayoutWriteRecord]) -> WinePebTebLayoutWritePlan:
+    WinePebTebLayoutWritePlan(ok: ok, state: state, process_id: init.process_id, thread_id: init.thread_id, record_count: records.len(), operations: operations, records: records)
 
 pub fn wine_peb_teb_required_evidence() -> [text]:
     [
@@ -127,3 +150,25 @@ pub fn wine_peb_teb_memory_write_gate(init: WinePebTebInitEvidence, space: WineV
     if params != "ready":
         return _write_result(false, "process-parameters-write:" + params, init, 3, initialized.operations + " PEBWrite TEBWrite TLSVectorWrite")
     _write_result(true, "ready", init, 4, initialized.operations + " PEBWrite TEBWrite TLSVectorWrite ProcessParametersWrite")
+
+pub fn wine_peb_teb_layout_write_plan(init: WinePebTebInitEvidence, writes: WinePebTebMemoryWriteResult) -> WinePebTebLayoutWritePlan:
+    if not writes.ok:
+        return _layout_plan(false, "write:" + writes.state, init, writes.operations, [])
+    if writes.write_count != 4:
+        return _layout_plan(false, "write-count-mismatch", init, writes.operations, [])
+    if writes.process_id != init.process_id or writes.thread_id != init.thread_id:
+        return _layout_plan(false, "write-identity-mismatch", init, writes.operations, [])
+
+    val initialized = wine_peb_teb_init_gate(init)
+    if not initialized.ok:
+        return _layout_plan(false, "init:" + initialized.state, init, initialized.operations, [])
+
+    val records = [
+        _layout_record("TEB", "NtTib.StackBase", init.teb_address, 0x08, 8, init.stack_base),
+        _layout_record("TEB", "NtTib.StackLimit", init.teb_address, 0x10, 8, init.stack_limit),
+        _layout_record("TEB", "ThreadLocalStoragePointer", init.teb_address, 0x58, 8, init.tls_vector_address),
+        _layout_record("TEB", "ProcessEnvironmentBlock", init.teb_address, 0x60, 8, init.peb_address),
+        _layout_record("PEB", "ImageBaseAddress", init.peb_address, 0x10, 8, init.image_base),
+        _layout_record("PEB", "ProcessParameters", init.peb_address, 0x20, 8, init.process_parameters_address)
+    ]
+    _layout_plan(true, "ready", init, writes.operations + " PEBTEBLayoutWritePlan", records)

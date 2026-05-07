@@ -1211,3 +1211,16 @@ Fresh evidence:
 
 - `bin/simple test test/lib/common/wine_dll_view_startup_fault_spec.spl --mode=interpreter --clean`: covers write-gated startup rollback and unmapped PEB/TEB write rejection.
 - `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_dll_view_startup_fault_spec.spl --mode=interpreter --clean`: covers the SimpleOS system-level startup rollback path requiring PEB/TEB writes.
+
+## 2026-05-07 PEB/TEB Layout-Write Plan Update
+
+`wine_peb_teb_layout_write_plan(...)` now turns PEB/TEB writable-page readiness
+into bounded x64 startup layout records. The plan covers TEB stack bounds,
+TEB TLS vector and PEB pointers, plus PEB image-base and process-parameter
+pointers. Failed VM write readiness blocks layout planning before any record is
+reported.
+
+Fresh evidence:
+
+- `bin/simple test test/lib/common/wine_peb_teb_spec.spl --mode=interpreter --clean`: covers successful x64 layout record planning and write-readiness rejection.
+- `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_peb_teb_spec.spl --mode=interpreter --clean`: covers the SimpleOS system-level PEB/TEB layout-write plan.
