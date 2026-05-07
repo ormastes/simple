@@ -1,7 +1,7 @@
 use common.pe_coff_header.{pe_rva_to_file_offset}
 use common.wine_dll_file_probe.{wine_dll_probe_file}
-use common.wine_dll_view_dllmain_handoff.{wine_dll_prepare_file_view_dllmain_handoff, wine_dllmain_handoff_require_peb_teb_loader_lock, wine_dllmain_handoff_require_peb_teb_writes}
-use common.wine_peb_teb.{wine_peb_teb_init_default, wine_peb_teb_memory_write_gate}
+use common.wine_dll_view_dllmain_handoff.{wine_dll_prepare_file_view_dllmain_handoff, wine_dllmain_handoff_require_peb_teb_layout, wine_dllmain_handoff_require_peb_teb_loader_lock, wine_dllmain_handoff_require_peb_teb_writes}
+use common.wine_peb_teb.{wine_peb_teb_init_default, wine_peb_teb_layout_write_plan, wine_peb_teb_memory_write_gate}
 use common.wine_vm_adapter.{WineVmSpace, wine_vm_commit, wine_vm_process_space_new, wine_vm_reserve_fixed}
 
 fn _zero_bytes(count: i64) -> [u8]:
@@ -179,5 +179,34 @@ describe "wine dll view DllMain handoff":
 
         expect(result.ok).to_equal(false)
         expect(result.error).to_equal("peb-teb-write:peb-write:page-fault-unmapped")
+        expect(result.evidence).to_contain("dllmain-handoff-blocked")
+        expect(result.status).to_equal("rejected")
+
+    it "requires PEB/TEB layout records before retained DllMain handoff":
+        val data = _dll_with_import_relocation_tls()
+        val files = [wine_dll_probe_file("\\KnownDlls\\game.dll", data)]
+        val handoff = wine_dll_prepare_file_view_dllmain_handoff("game.dll", "C:\\Games", "C:\\Users\\Player", [], ["game.dll"], files, data, 0x400000, 0x500000, 77, 78, "pid fs ipc net capability", 2, 4, "native-module-open tls-callback", false)
+        val init = wine_peb_teb_init_default()
+        val writes = wine_peb_teb_memory_write_gate(init, _startup_write_space())
+        val layout = wine_peb_teb_layout_write_plan(init, writes)
+        val result = wine_dllmain_handoff_require_peb_teb_layout(handoff, true, "ready", "PEB TEB TLS ProcessParameters LoaderLock", layout)
+
+        expect(result.ok).to_equal(true)
+        expect(result.status).to_equal("dllmain-handoff-ready")
+        expect(result.evidence).to_contain("peb-teb-layout-ready")
+        expect(result.evidence).to_contain("PEBTEBLayoutWritePlan")
+        expect(result.evidence).to_contain("dllmain-process-attach-planned")
+
+    it "blocks retained DllMain handoff when PEB/TEB layout records are not ready":
+        val data = _dll_with_import_relocation_tls()
+        val files = [wine_dll_probe_file("\\KnownDlls\\game.dll", data)]
+        val handoff = wine_dll_prepare_file_view_dllmain_handoff("game.dll", "C:\\Games", "C:\\Users\\Player", [], ["game.dll"], files, data, 0x400000, 0x500000, 77, 78, "pid fs ipc net capability", 2, 4, "native-module-open tls-callback", false)
+        val init = wine_peb_teb_init_default()
+        val writes = wine_peb_teb_memory_write_gate(init, wine_vm_process_space_new(10, 30, "pid fs ipc net capability"))
+        val layout = wine_peb_teb_layout_write_plan(init, writes)
+        val result = wine_dllmain_handoff_require_peb_teb_layout(handoff, true, "ready", "PEB TEB TLS ProcessParameters LoaderLock", layout)
+
+        expect(result.ok).to_equal(false)
+        expect(result.error).to_equal("peb-teb-layout:write:peb-write:page-fault-unmapped")
         expect(result.evidence).to_contain("dllmain-handoff-blocked")
         expect(result.status).to_equal("rejected")

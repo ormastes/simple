@@ -432,9 +432,11 @@ and PEB image-base/process-parameter pointers. `wine_ntdll_execute_process_info_
 that write readiness before the NTDLL process/thread information bridge reports
 PEB/TEB addresses, and
 `wine_ntdll_execute_process_info_with_peb_teb_layout(...)` requires the
-layout-write plan before reporting those addresses. `wine_dllmain_handoff_require_peb_teb_writes(...)` also
-requires the same write readiness before a retained DLL view can report
-non-executing DllMain process-attach handoff readiness.
+layout-write plan before reporting those addresses.
+`wine_dllmain_handoff_require_peb_teb_writes(...)` keeps the writable-page
+compatibility gate, while `wine_dllmain_handoff_require_peb_teb_layout(...)`
+requires the six-record PEB/TEB layout plan before a retained DLL view can
+report non-executing DllMain process-attach handoff readiness.
 `wine_dll_record_file_view_startup_fault_with_peb_teb_writes(...)` carries
 that gate into the modeled SEH rollback path so startup-fault rollback is only
 recorded after the write-gated DllMain handoff is ready.
