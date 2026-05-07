@@ -26,6 +26,14 @@ class PeImportDescriptorSummary:
     first_thunk_rva: i64
     symbol_count: i64
 
+class PeImportDescriptorThunkBinding:
+    dll_name: text
+    descriptor_index: i64
+    symbol: text
+    thunk_index: i64
+    thunk_rva: i64
+    name_rva: i64
+
 fn _read_u16_le(data: [u8], offset: i64) -> i64:
     if offset + 1 >= data.len():
         return 0
@@ -423,6 +431,37 @@ pub fn pe_import_descriptor_summaries(data: [u8], descriptor_limit: i64, symbol_
         summaries.push(PeImportDescriptorSummary(dll_name: dll_name, descriptor_index: i, lookup_thunk_rva: lookup_thunk_rva, first_thunk_rva: first_thunk_rva, symbol_count: symbol_count))
         i = i + 1
     summaries
+
+pub fn pe_import_descriptor_thunk_bindings(data: [u8], descriptor_limit: i64, symbol_limit: i64) -> [PeImportDescriptorThunkBinding]:
+    var bindings: [PeImportDescriptorThunkBinding] = []
+    val table_state = pe_import_descriptor_table_gate(data, descriptor_limit, symbol_limit)
+    if table_state != "ready":
+        return bindings
+    val import_offset = _import_directory_offset(data)
+    var descriptor_index = 0
+    while descriptor_index < descriptor_limit:
+        val descriptor_offset = import_offset + (descriptor_index * 20)
+        if _import_descriptor_is_zero(data, descriptor_offset):
+            return bindings
+        val name_rva = _read_u32_le(data, descriptor_offset + 12)
+        val name_offset = pe_rva_to_file_offset(data, name_rva)
+        val dll_name = _read_ascii_z(data, name_offset, 128)
+        var lookup_thunk_rva = _read_u32_le(data, descriptor_offset)
+        if lookup_thunk_rva == 0:
+            lookup_thunk_rva = _read_u32_le(data, descriptor_offset + 16)
+        var thunk_index = 0
+        while thunk_index < symbol_limit:
+            val entry_offset = pe_rva_to_file_offset(data, lookup_thunk_rva + (thunk_index * 8))
+            val symbol_name_rva = _read_u32_le(data, entry_offset)
+            val entry_high = _read_u32_le(data, entry_offset + 4)
+            if symbol_name_rva == 0 and entry_high == 0:
+                break
+            val symbol_name_offset = pe_rva_to_file_offset(data, symbol_name_rva)
+            val symbol = _read_ascii_z(data, symbol_name_offset + 2, 128)
+            bindings.push(PeImportDescriptorThunkBinding(dll_name: dll_name, descriptor_index: descriptor_index, symbol: symbol, thunk_index: thunk_index, thunk_rva: lookup_thunk_rva + (thunk_index * 8), name_rva: symbol_name_rva))
+            thunk_index = thunk_index + 1
+        descriptor_index = descriptor_index + 1
+    bindings
 
 fn _directory_rva(data: [u8], index: i64) -> i64:
     val summary = parse_pe_header_summary(data)

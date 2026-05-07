@@ -11,6 +11,7 @@ use common.pe_coff_header.{
     pe_first_import_thunk_gate,
     pe_import_descriptor_summaries,
     pe_import_descriptor_table_gate,
+    pe_import_descriptor_thunk_bindings,
     pe_import_directory_gate,
     pe_relocation_directory_gate,
     pe_rva_to_file_offset,
@@ -110,6 +111,16 @@ class WineProcessImportDescriptorTableResult:
     descriptor_count: i64
     dll_names: [text]
     import_count: i64
+    evidence: text
+    status: text
+
+class WineProcessImportDescriptorThunkInventoryResult:
+    ok: bool
+    error: text
+    command: text
+    binding_count: i64
+    dll_names: [text]
+    symbols: [text]
     evidence: text
     status: text
 
@@ -255,6 +266,9 @@ fn _wine_process_import_inspection_result(ok: bool, error: text, command: text, 
 
 fn _wine_process_import_descriptor_table_result(ok: bool, error: text, command: text, descriptor_count: i64, dll_names: [text], import_count: i64, evidence: text, status: text) -> WineProcessImportDescriptorTableResult:
     WineProcessImportDescriptorTableResult(ok: ok, error: error, command: command, descriptor_count: descriptor_count, dll_names: dll_names, import_count: import_count, evidence: evidence, status: status)
+
+fn _wine_process_import_descriptor_thunk_inventory_result(ok: bool, error: text, command: text, binding_count: i64, dll_names: [text], symbols: [text], evidence: text, status: text) -> WineProcessImportDescriptorThunkInventoryResult:
+    WineProcessImportDescriptorThunkInventoryResult(ok: ok, error: error, command: command, binding_count: binding_count, dll_names: dll_names, symbols: symbols, evidence: evidence, status: status)
 
 fn _wine_process_import_binding_result(ok: bool, error: text, command: text, dll_name: text, call_sequence: text, binding_count: i64, status: text) -> WineProcessImportBindingResult:
     WineProcessImportBindingResult(ok: ok, error: error, command: command, dll_name: dll_name, call_sequence: call_sequence, binding_count: binding_count, status: status)
@@ -522,6 +536,21 @@ pub fn wine_process_inspect_import_descriptor_table(plan: WineProcessSessionPlan
         import_count = import_count + summary.symbol_count
     val evidence = "full-image-validated import-descriptor-table-valid import-descriptor-table-bounded import-dll-names-resolved import-thunk-tables-bounded import-symbol-counts-bounded"
     _wine_process_import_descriptor_table_result(true, "", plan.command, summaries.len(), dll_names, import_count, evidence, "import-descriptor-table-inspected")
+
+pub fn wine_process_inventory_import_descriptor_thunks(plan: WineProcessSessionPlan, data: [u8], descriptor_limit: i64, symbol_limit: i64) -> WineProcessImportDescriptorThunkInventoryResult:
+    val table = wine_process_inspect_import_descriptor_table(plan, data, descriptor_limit, symbol_limit)
+    if not table.ok:
+        return _wine_process_import_descriptor_thunk_inventory_result(false, table.error, plan.command, 0, [], [], table.evidence, table.status)
+    val bindings = pe_import_descriptor_thunk_bindings(data, descriptor_limit, symbol_limit)
+    if bindings.len() != table.import_count:
+        return _wine_process_import_descriptor_thunk_inventory_result(false, "import-descriptor-thunk-count-mismatch", plan.command, bindings.len(), table.dll_names, [], table.evidence, "rejected")
+    var dll_names: [text] = []
+    var symbols: [text] = []
+    for binding in bindings:
+        dll_names.push(binding.dll_name)
+        symbols.push(binding.symbol)
+    val evidence = table.evidence + " import-descriptor-thunk-bindings-data-backed import-descriptor-thunk-rvas-recorded import-descriptor-symbol-names-recorded"
+    _wine_process_import_descriptor_thunk_inventory_result(true, "", plan.command, bindings.len(), dll_names, symbols, evidence, "import-descriptor-thunks-inventoried")
 
 pub fn wine_process_bind_known_kernel32_imports(plan: WineProcessSessionPlan, data: [u8], symbol_limit: i64) -> WineProcessImportBindingResult:
     val imports = wine_process_inspect_full_imports(plan, data, symbol_limit)

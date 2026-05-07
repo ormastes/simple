@@ -145,7 +145,11 @@ MDSOC-facing full-image inspection layer for arbitrary process preparation: it
 accepts a caller-supplied descriptor bound and per-descriptor symbol bound,
 walks all import descriptors up to the null terminator, resolves DLL names, and
 counts each thunk table without binding DLLs, patching IATs, or executing
-process code. `wine_process_bind_known_kernel32_imports(...)`
+process code. `wine_process_inventory_import_descriptor_thunks(...)` then
+projects that descriptor table into descriptor-qualified thunk records with DLL
+name, symbol name, thunk index, thunk RVA, and import-name RVA. This inventory
+is still read-only preflight data; it is not a loader, resolver, binder, or
+execution path. `wine_process_bind_known_kernel32_imports(...)`
 then plans the currently supported KERNEL32 console binding sequence and
 rejects unsupported or incomplete import sets; it still does not patch thunks or
 execute arbitrary process code. `wine_process_plan_import_thunk_patches(...)`

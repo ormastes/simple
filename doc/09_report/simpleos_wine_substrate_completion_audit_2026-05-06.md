@@ -660,6 +660,14 @@ total thunk-symbol count, and evidence that no DLL binding, thunk patching, or
 arbitrary instruction dispatch has occurred. This completes REQ-029 as
 inspection/preflight only; multi-DLL loading, import binding, and arbitrary PE
 execution remain outside the completed surface.
+`pe_import_descriptor_thunk_bindings(...)` now expands those descriptors into
+descriptor-qualified thunk records carrying DLL name, descriptor index, symbol,
+thunk index, thunk RVA, and import-name RVA. `wine_process_inventory_import_descriptor_thunks(...)`
+exposes the process-session inventory as read-only preflight evidence, preserving
+the MDSOC boundary between PE table parsing, process-session planning, and any
+future loader/binder layer. This completes REQ-030 as data-backed inventory
+only; it still performs no module resolution, DLL loading, IAT patching, or
+arbitrary execution.
 
 Fresh evidence:
 
@@ -681,6 +689,9 @@ Fresh evidence:
 - `bin/simple test test/lib/common/pe_coff_header_spec.spl --mode=interpreter --clean`: covers bounded multi-descriptor import table validation and descriptor summaries.
 - `bin/simple test test/lib/common/wine_process_session_import_descriptor_table_spec.spl --mode=interpreter --clean`: covers full-Wine process-session import descriptor table inspection and descriptor-limit rejection.
 - `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_process_import_descriptor_table_spec.spl --mode=interpreter --clean`: includes REQ-029 bounded multi-DLL import descriptor inspection coverage.
+- `bin/simple test test/lib/common/pe_coff_header_spec.spl --mode=interpreter --clean`: covers descriptor-qualified import thunk binding extraction.
+- `bin/simple test test/lib/common/wine_process_session_import_descriptor_table_spec.spl --mode=interpreter --clean`: covers REQ-030 process-session thunk inventory without DLL loading.
+- `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_process_import_descriptor_table_spec.spl --mode=interpreter --clean`: includes REQ-030 system coverage for descriptor-qualified thunk inventory.
 - `bin/simple test test/lib/common/wine_x86_64_decode_spec.spl --mode=interpreter --clean`: covers RIP-relative indirect call decoding and thunk-RVA target extraction.
 - `bin/simple test test/lib/common/wine_hello_exe_spec.spl --mode=interpreter --clean`: covers import-binding agreement against thunk RVAs.
 - `bin/simple test test/lib/common/wine_process_session_known_console_spec.spl --mode=interpreter --clean`: keeps known-console process execution on the patched-image path.
