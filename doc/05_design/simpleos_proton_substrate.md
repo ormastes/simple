@@ -30,6 +30,16 @@ subsystem gates:
 `wine_proton_runtime_gate` composes these subsystem gates and adds only the
 outer full-Wine dependency plus `wine-full` feature evidence.
 
+`src/lib/common/proton_session.spl` exposes non-Wine launch-session planning:
+
+- `proton_session_request_new(app_id, compat_prefix, executable_path, args)`;
+- `proton_session_request_gate(request)`;
+- `proton_session_plan(request, evidence)`.
+
+The session planner validates Steam app id, compat prefix, executable path, and
+non-Wine runtime subsystem evidence. It emits a planned launch command and
+runtime feature evidence, but does not execute Wine or a game process.
+
 ## Required Proton Features
 
 - `steam-runtime`

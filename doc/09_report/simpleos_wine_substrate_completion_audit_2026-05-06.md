@@ -368,6 +368,22 @@ gates only. It intentionally excludes full Wine itself and does not implement
 actual Steam runtime process execution, pressure-vessel process launch, Vulkan
 driver execution, DXVK/VKD3D shader translation, or game compatibility.
 
+## 2026-05-07 Non-Wine Proton Session Planning
+
+`src/lib/common/proton_session.spl` now models the next non-Wine Proton layer:
+session requests and planned launch records. It validates Steam app id, compat
+prefix, executable path, and non-Wine subsystem evidence before producing a
+planned launch command and runtime feature evidence.
+
+Fresh evidence:
+
+- `bin/simple check src/lib/common/proton_session.spl test/lib/common/proton_session_spec.spl`: all checks passed.
+- `bin/simple test test/lib/common/proton_session_spec.spl --mode=interpreter --clean`: 3 examples, 0 failures.
+- `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_proton_substrate_spec.spl --mode=interpreter --clean`: includes non-Wine launch-session planning coverage.
+
+Conservative boundary: this is a launch-session plan, not execution. It does
+not start Steam, Wine, Proton, pressure-vessel, Vulkan, or any game process.
+
 ## Completion Decision
 
 The WM/VM prerequisite plan in `doc/03_plan/agent_tasks/simpleos_wine_wm_vm_execution_plan_2026-05-06.md` is implemented at the Wine-facing SimpleOS contract level. Modeled X11/VM gates are no longer accepted as production evidence, and the new production gates require SimpleOS window records, framebuffer presents, OS process/address-space identity, container namespace evidence, OS VMA image mapping, thread stack/guard setup, fault evidence, and no-host-code-jump policy.

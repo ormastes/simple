@@ -1,0 +1,69 @@
+"""Non-Wine Proton session planning over structured runtime subsystem evidence."""
+
+use common.proton_runtime_subsystems.{
+    ProtonNonWineRuntimeEvidence,
+    proton_non_wine_feature_evidence,
+    proton_non_wine_runtime_gate
+}
+
+class ProtonSessionRequest:
+    app_id: text
+    compat_prefix: text
+    executable_path: text
+    launch_args: [text]
+
+class ProtonSessionPlan:
+    ok: bool
+    error: text
+    app_id: text
+    compat_prefix: text
+    executable_path: text
+    launch_command: text
+    runtime_features: text
+    status: text
+
+fn _proton_session_request(app_id: text, compat_prefix: text, executable_path: text, launch_args: [text]) -> ProtonSessionRequest:
+    ProtonSessionRequest(app_id: app_id, compat_prefix: compat_prefix, executable_path: executable_path, launch_args: launch_args)
+
+fn _proton_session_plan(ok: bool, error: text, app_id: text, compat_prefix: text, executable_path: text, launch_command: text, runtime_features: text, status: text) -> ProtonSessionPlan:
+    ProtonSessionPlan(ok: ok, error: error, app_id: app_id, compat_prefix: compat_prefix, executable_path: executable_path, launch_command: launch_command, runtime_features: runtime_features, status: status)
+
+fn _join_args(args: [text]) -> text:
+    var joined = ""
+    for arg in args:
+        if joined == "":
+            joined = arg
+        else:
+            joined = joined + " " + arg
+    joined
+
+fn _launch_command(executable_path: text, launch_args: [text]) -> text:
+    val args = _join_args(launch_args)
+    if args == "":
+        return executable_path
+    executable_path + " " + args
+
+pub fn proton_session_request_new(app_id: text, compat_prefix: text, executable_path: text, launch_args: [text]) -> ProtonSessionRequest:
+    _proton_session_request(app_id, compat_prefix, executable_path, launch_args)
+
+pub fn proton_session_request_gate(request: ProtonSessionRequest) -> text:
+    if request.app_id == "":
+        return "missing-app-id"
+    if request.compat_prefix == "":
+        return "missing-compat-prefix"
+    if not request.compat_prefix.contains("steamapps/compatdata"):
+        return "invalid-compat-prefix"
+    if request.executable_path == "":
+        return "missing-executable-path"
+    if not request.executable_path.contains(".exe"):
+        return "unsupported-executable"
+    "ready"
+
+pub fn proton_session_plan(request: ProtonSessionRequest, evidence: ProtonNonWineRuntimeEvidence) -> ProtonSessionPlan:
+    val request_state = proton_session_request_gate(request)
+    if request_state != "ready":
+        return _proton_session_plan(false, request_state, request.app_id, request.compat_prefix, request.executable_path, "", "", "blocked")
+    val runtime_state = proton_non_wine_runtime_gate(evidence)
+    if runtime_state != "ready":
+        return _proton_session_plan(false, runtime_state, request.app_id, request.compat_prefix, request.executable_path, "", proton_non_wine_feature_evidence(evidence), "blocked")
+    _proton_session_plan(true, "", request.app_id, request.compat_prefix, request.executable_path, _launch_command(request.executable_path, request.launch_args), proton_non_wine_feature_evidence(evidence), "planned")

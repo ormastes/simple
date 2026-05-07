@@ -1,0 +1,52 @@
+use common.proton_runtime_subsystems.{
+    proton_fixture_non_wine_runtime_evidence,
+    proton_non_wine_runtime_evidence_new
+}
+use common.proton_session.{
+    proton_session_plan,
+    proton_session_request_gate,
+    proton_session_request_new
+}
+
+describe "Non-Wine Proton session planning":
+    it "rejects incomplete session requests before runtime evidence":
+        val missing_app = proton_session_request_new("", "steamapps/compatdata/480/pfx", "hl2.exe", [])
+        expect proton_session_request_gate(missing_app) == "missing-app-id"
+
+        val missing_prefix = proton_session_request_new("480", "", "hl2.exe", [])
+        expect proton_session_request_gate(missing_prefix) == "missing-compat-prefix"
+
+        val invalid_prefix = proton_session_request_new("480", "tmp/pfx", "hl2.exe", [])
+        expect proton_session_request_gate(invalid_prefix) == "invalid-compat-prefix"
+
+        val unsupported = proton_session_request_new("480", "steamapps/compatdata/480/pfx", "README.txt", [])
+        expect proton_session_request_gate(unsupported) == "unsupported-executable"
+
+    it "blocks session planning on incomplete non-Wine runtime evidence":
+        val request = proton_session_request_new("480", "steamapps/compatdata/480/pfx", "hl2.exe", ["-novid"])
+        val evidence = proton_non_wine_runtime_evidence_new(
+            "steam-runtime abi-x86_64 soldier",
+            "pressure-vessel-container container-rootfs pid fs ipc net capability",
+            "vulkan-loader vulkan-device dxvk",
+            "proton-launcher steamworks-bridge controller-input",
+            "esync-or-fsync"
+        )
+        val plan = proton_session_plan(request, evidence)
+        expect plan.ok == false
+        expect plan.error == "missing-vkd3d-proton"
+        expect plan.status == "blocked"
+
+    it "plans a launch session when every non-Wine Proton subsystem is ready":
+        val request = proton_session_request_new("480", "steamapps/compatdata/480/pfx", "hl2.exe", ["-novid", "-fullscreen"])
+        val plan = proton_session_plan(request, proton_fixture_non_wine_runtime_evidence())
+        expect plan.ok == true
+        expect plan.error == ""
+        expect plan.app_id == "480"
+        expect plan.compat_prefix == "steamapps/compatdata/480/pfx"
+        expect plan.launch_command == "hl2.exe -novid -fullscreen"
+        expect (plan.runtime_features).contains("steam-runtime")
+        expect (plan.runtime_features).contains("pressure-vessel-container")
+        expect (plan.runtime_features).contains("dxvk")
+        expect (plan.runtime_features).contains("vkd3d-proton")
+        expect (plan.runtime_features).contains("esync-or-fsync")
+        expect plan.status == "planned"
