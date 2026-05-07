@@ -67,6 +67,18 @@ Fresh evidence:
 
 Conservative boundary: this remains a controlled hello-path executor, not a general x86_64 CPU, arbitrary PE loader, or full Wine NT/Win32 dispatcher.
 
+## 2026-05-07 DLL Search-Order Modeling Update
+
+The KERNEL32 module-loader layer now models a basename-only DLL search order before any real module-load behavior can be widened. It records KnownDlls, application directory, Windows system directories, current directory, and PATH-derived candidate paths while explicitly blocking host filesystem reads, real DLL loading, DLL entrypoint execution, and arbitrary PE execution.
+
+Fresh evidence:
+
+- `bin/simple check` on changed DLL-search source/spec files: all checks passed.
+- `bin/simple test test/lib/common/wine_kernel32_module_loader_spec.spl`: 7 examples, 0 failures.
+- `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_dll_search_order_spec.spl`: 1 example, 0 failures.
+- `bin/simple check src/lib`: 2693 files, all checks passed.
+- Wine DLL-search changed-file stub scan: pass.
+
 ## 2026-05-07 Executable-Environment Matrix Update
 
 The top-level Wine substrate matrix now exposes the SimpleOS executable-environment gate directly through `wine_substrate_exec_env_gate` and the `exec_env` capability row. This makes VM/full-OS/container evidence a first-class Wine readiness prerequisite instead of an implicit side gate.

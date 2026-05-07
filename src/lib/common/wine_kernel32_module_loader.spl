@@ -25,6 +25,16 @@ class WineKernel32ModuleResult:
     proc_address: i64
     operations: text
 
+class WineKernel32DllSearchOrderPlan:
+    ok: bool
+    error: text
+    dll_name: text
+    search_roots: [text]
+    candidate_paths: [text]
+    selected_path: text
+    evidence: text
+    status: text
+
 fn _export(name: text, address: i64) -> WineKernel32ModuleExport:
     WineKernel32ModuleExport(name: name, address: address)
 
@@ -37,8 +47,23 @@ fn _table(modules: [WineKernel32Module], next_handle: i64) -> WineKernel32Module
 fn _result(ok: bool, error: text, table: WineKernel32ModuleTable, handle: i64, proc_address: i64, operations: text) -> WineKernel32ModuleResult:
     WineKernel32ModuleResult(ok: ok, error: error, table: table, handle: handle, proc_address: proc_address, operations: operations)
 
+fn _search_order_plan(ok: bool, error: text, dll_name: text, search_roots: [text], candidate_paths: [text], selected_path: text, evidence: text, status: text) -> WineKernel32DllSearchOrderPlan:
+    WineKernel32DllSearchOrderPlan(ok: ok, error: error, dll_name: dll_name, search_roots: search_roots, candidate_paths: candidate_paths, selected_path: selected_path, evidence: evidence, status: status)
+
 fn _normalized_name(name: text) -> text:
     name.lower()
+
+fn _is_known_dll(name: text, known_dlls: [text]) -> bool:
+    val normalized = _normalized_name(name)
+    for known in known_dlls:
+        if _normalized_name(known) == normalized:
+            return true
+    false
+
+fn _join_root(root: text, name: text) -> text:
+    if root.ends_with("\\"):
+        return root + name
+    root + "\\" + name
 
 fn _find_module_by_name(modules: [WineKernel32Module], name: text) -> WineKernel32Module:
     val normalized = _normalized_name(name)
@@ -116,6 +141,34 @@ pub fn wine_kernel32_module_table_add_module(table: WineKernel32ModuleTable, nam
     var modules = table.modules
     modules.push(_module(handle, name, _exports(exports, handle), 1, true))
     _table(modules, handle + 1)
+
+pub fn wine_kernel32_plan_dll_search_order(dll_name: text, application_directory: text, working_directory: text, path_dirs: [text], known_dlls: [text]) -> WineKernel32DllSearchOrderPlan:
+    if dll_name == "":
+        return _search_order_plan(false, "missing-dll-name", "", [], [], "", "", "rejected")
+    if dll_name.contains("\\") or dll_name.contains("/") or dll_name.contains(":"):
+        return _search_order_plan(false, "dll-name-must-be-basename", dll_name, [], [], "", "", "rejected")
+    if not dll_name.lower().ends_with(".dll"):
+        return _search_order_plan(false, "dll-name-must-end-with-dll", dll_name, [], [], "", "", "rejected")
+    if application_directory == "":
+        return _search_order_plan(false, "missing-application-directory", dll_name, [], [], "", "", "rejected")
+    if working_directory == "":
+        return _search_order_plan(false, "missing-working-directory", dll_name, [], [], "", "", "rejected")
+
+    var roots: [text] = ["\\KnownDlls", application_directory, "C:\\Windows\\System32", "C:\\Windows\\System", "C:\\Windows", working_directory]
+    for dir in path_dirs:
+        if dir != "":
+            roots.push(dir)
+
+    var candidates: [text] = []
+    for root in roots:
+        candidates.push(_join_root(root, dll_name))
+
+    var selected = candidates[1]
+    if _is_known_dll(dll_name, known_dlls):
+        selected = candidates[0]
+
+    val evidence = "dll-search-order-modeled knowndlls-first application-directory system32-directory system-directory windows-directory current-directory path-directories no-host-filesystem-access no-real-dll-loaded no-dll-entrypoint-executed no-arbitrary-execution"
+    _search_order_plan(true, "", dll_name, roots, candidates, selected, evidence, "dll-search-order-modeled")
 
 pub fn wine_kernel32_get_module_handle_w(table: WineKernel32ModuleTable, name: text) -> WineKernel32ModuleResult:
     val module = _find_module_by_name(table.modules, name)

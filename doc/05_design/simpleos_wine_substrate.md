@@ -230,6 +230,12 @@ returns stdout plus exit code.
 `FreeLibrary` sequences for full-Wine process plans and return
 handle/procedure evidence without arbitrary DLL loading. The `LoadLibraryExW`
 path currently accepts only the modeled zero-flags case.
+`wine_kernel32_plan_dll_search_order(...)` models the DLL basename search lane
+used before a real module load is allowed: KnownDlls first, then application
+directory, Windows system directories, current directory, and PATH-derived
+directories. It returns candidate paths and selected modeled source evidence
+without reading host files, mapping DLL images, running DLL entrypoints, or
+executing arbitrary PE code.
 `wine_process_resolve_first_import_module(...)` composes the PE first-import
 inspection gate with that module resolver, so validated full-Wine process
 images can resolve a requested procedure against their first imported KERNEL32

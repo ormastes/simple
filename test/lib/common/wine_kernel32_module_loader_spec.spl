@@ -6,13 +6,53 @@ use common.wine_kernel32_module_loader.{
     wine_kernel32_get_proc_address,
     wine_kernel32_load_library_ex_w,
     wine_kernel32_module_table_add_module,
-    wine_kernel32_module_table_new
+    wine_kernel32_module_table_new,
+    wine_kernel32_plan_dll_search_order
 }
 
 fn _table() -> WineKernel32ModuleTable:
     wine_kernel32_module_table_add_module(wine_kernel32_module_table_new(), "kernel32.dll", ["LoadLibraryW", "LoadLibraryExW", "GetProcAddress", "FreeLibrary"])
 
 describe "Wine KERNEL32 module loader bridge":
+    it "models DLL search order without host filesystem access or DLL execution":
+        val result = wine_kernel32_plan_dll_search_order(
+            "kernel32.dll",
+            "C:\\Games",
+            "C:\\Users\\Player",
+            ["D:\\GameBin", "E:\\Shared"],
+            ["kernel32.dll", "ntdll.dll"]
+        )
+
+        expect(result.ok).to_equal(true)
+        expect(result.search_roots.len()).to_equal(8)
+        expect(result.search_roots[0]).to_equal("\\KnownDlls")
+        expect(result.search_roots[1]).to_equal("C:\\Games")
+        expect(result.search_roots[6]).to_equal("D:\\GameBin")
+        expect(result.candidate_paths[0]).to_equal("\\KnownDlls\\kernel32.dll")
+        expect(result.candidate_paths[1]).to_equal("C:\\Games\\kernel32.dll")
+        expect(result.selected_path).to_equal("\\KnownDlls\\kernel32.dll")
+        expect(result.evidence).to_contain("dll-search-order-modeled")
+        expect(result.evidence).to_contain("no-host-filesystem-access")
+        expect(result.evidence).to_contain("no-dll-entrypoint-executed")
+        expect(result.status).to_equal("dll-search-order-modeled")
+
+    it "uses application directory first for non-KnownDll basenames":
+        val result = wine_kernel32_plan_dll_search_order("gameaudio.dll", "C:\\Games", "C:\\Users\\Player", [], ["kernel32.dll"])
+
+        expect(result.ok).to_equal(true)
+        expect(result.selected_path).to_equal("C:\\Games\\gameaudio.dll")
+        expect(result.candidate_paths[0]).to_equal("\\KnownDlls\\gameaudio.dll")
+        expect(result.candidate_paths[1]).to_equal("C:\\Games\\gameaudio.dll")
+
+    it "rejects DLL search inputs that would escape the modeled basename lane":
+        val absolute = wine_kernel32_plan_dll_search_order("C:\\Windows\\System32\\kernel32.dll", "C:\\Games", "C:\\Users\\Player", [], ["kernel32.dll"])
+        expect(absolute.ok).to_equal(false)
+        expect(absolute.error).to_equal("dll-name-must-be-basename")
+
+        val missing_suffix = wine_kernel32_plan_dll_search_order("kernel32", "C:\\Games", "C:\\Users\\Player", [], ["kernel32.dll"])
+        expect(missing_suffix.ok).to_equal(false)
+        expect(missing_suffix.error).to_equal("dll-name-must-end-with-dll")
+
     it "executes a bounded module and procedure resolution sequence":
         val result = wine_kernel32_execute_module_resolution(
             ["GetModuleHandleW", "LoadLibraryW", "GetProcAddress", "FreeLibrary"],
