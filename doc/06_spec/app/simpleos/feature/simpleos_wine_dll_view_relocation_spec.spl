@@ -1,5 +1,7 @@
 use common.wine_dll_file_probe.{wine_dll_probe_file}
-use common.wine_dll_view_relocation.{wine_dll_apply_file_view_relocations}
+use common.wine_dll_view_relocation.{wine_dll_apply_file_view_relocations, wine_dll_apply_file_view_relocations_with_peb_teb_vm_writes}
+use common.wine_peb_teb.{wine_peb_teb_apply_layout_byte_writes, wine_peb_teb_init_default, wine_peb_teb_layout_byte_writes, wine_peb_teb_layout_write_plan, wine_peb_teb_memory_write_gate}
+use common.wine_vm_adapter.{WineVmSpace, wine_vm_commit, wine_vm_process_space_new, wine_vm_reserve_fixed}
 
 fn _zero_bytes(count: i64) -> [u8]:
     var out: [u8] = []
@@ -29,6 +31,20 @@ fn _put_u64_le(data: [u8], offset: i64, value: i64) -> [u8]:
         remaining = remaining / 256
         i = i + 1
     data
+
+fn _commit_fixed(space: WineVmSpace, base: i64, size: i64, perms: text) -> WineVmSpace:
+    val reserved = wine_vm_reserve_fixed(space, base, size)
+    if not reserved.ok:
+        return reserved.space
+    val committed = wine_vm_commit(reserved.space, reserved.region.base, perms)
+    committed.space
+
+fn _startup_write_space() -> WineVmSpace:
+    var space = wine_vm_process_space_new(10, 30, "pid fs ipc net capability")
+    space = _commit_fixed(space, 0x7ffdc000, 0x1000, "rw")
+    space = _commit_fixed(space, 0x7ffdd000, 0x1000, "rw")
+    space = _commit_fixed(space, 0x7ffde000, 0x1000, "rw")
+    _commit_fixed(space, 0x7ffdf000, 0x1000, "rw")
 
 fn _dll_with_relocation() -> [u8]:
     var data = _zero_bytes(1024)
@@ -79,3 +95,21 @@ describe "REQ-048 SimpleOS Wine DLL view relocations":
         expect(result.evidence).to_contain("dll-view-write-window")
         expect(result.evidence).to_contain("no-dll-entrypoint-executed")
         expect(result.evidence).to_contain("no-tls-callback-executed")
+
+    it "applies DLL view relocations only after PEB/TEB VM byte-write readback":
+        val data = _dll_with_relocation()
+        val files = [wine_dll_probe_file("\\KnownDlls\\kernel32.dll", data)]
+        val init = wine_peb_teb_init_default()
+        val writes = wine_peb_teb_memory_write_gate(init, _startup_write_space())
+        val layout = wine_peb_teb_layout_write_plan(init, writes)
+        val bytes = wine_peb_teb_layout_byte_writes(layout)
+        val vm_writes = wine_peb_teb_apply_layout_byte_writes(_startup_write_space(), bytes)
+        val result = wine_dll_apply_file_view_relocations_with_peb_teb_vm_writes("kernel32.dll", "C:\\Games", "C:\\Users\\Player", [], ["kernel32.dll"], files, data, 0x400000, 0x500000, 91, 92, "pid fs ipc net capability", vm_writes)
+        expect(result.ok).to_equal(true)
+        expect(result.status).to_equal("dll-view-relocations-applied")
+        expect(result.relocation_count).to_equal(1)
+        expect(result.evidence).to_contain("peb-teb-vm-writes-ready")
+        expect(result.evidence).to_contain("VMWriteReadback:PEBTEBLayoutBytes")
+        expect(result.evidence).to_contain("dll-view-relocations-applied")
+        expect(result.evidence).to_contain("dll-view-write-window")
+        expect(result.evidence).to_contain("no-dll-entrypoint-executed")
