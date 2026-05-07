@@ -86,6 +86,26 @@ Conservative boundary: this is still scan and planning evidence only. It does
 not add arbitrary x86_64 execution, broad REX MOV support, stack-frame mutation
 semantics, or host CPU execution.
 
+## 2026-05-07 x86_64 Wide Stack-Prologue Decode Update
+
+The bounded x86_64 decoder now recognizes common imm32 stack allocation and
+release forms (`sub rsp,imm32`, `add rsp,imm32`) as structured scan-only
+evidence. The known-console hello skeleton can be accepted after a frame
+prologue that uses wider stack allocation without treating other REX ALU forms
+as supported.
+
+Fresh evidence:
+
+- `bin/simple check src/lib/common/wine_x86_64_decode.spl test/lib/common/wine_x86_64_decode_spec.spl doc/06_spec/app/simpleos/feature/simpleos_wine_x86_64_frame_prologue_spec.spl` passed.
+- `bin/simple test test/lib/common/wine_x86_64_decode_spec.spl --mode=interpreter --clean`: 19 examples, 0 failures.
+- `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_x86_64_frame_prologue_spec.spl --mode=interpreter --clean`: 2 examples, 0 failures.
+- `bin/simple check` on generated matcher specs: all checks passed.
+- `bin/simple check src/lib`: 2707 files, all checks passed.
+
+Conservative boundary: this is still scan and planning evidence only. It does
+not add arbitrary x86_64 execution, stack-frame mutation semantics, broad REX
+ALU support, or host CPU execution.
+
 ## 2026-05-07 DLL Search-Order Modeling Update
 
 The KERNEL32 module-loader layer now models a basename-only DLL search order before any real module-load behavior can be widened. It records KnownDlls, application directory, Windows system directories, current directory, and PATH-derived candidate paths while explicitly blocking host filesystem reads, real DLL loading, DLL entrypoint execution, and arbitrary PE execution.

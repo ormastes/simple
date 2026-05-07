@@ -471,10 +471,10 @@ evidence contract.
 it now classifies supported, unsupported, and truncated instruction forms at
 file offsets before the hello skeleton is accepted. The scan-only forms include
 the bounded frame-pointer prologue and epilogue markers `push rbp`,
-`mov rbp,rsp`, and `pop rbp`, so common compiler frame setup can be recognized
-without widening into arbitrary dispatch. This keeps unsupported x86_64
-execution failures structured while broad instruction dispatch remains future
-work.
+`mov rbp,rsp`, `sub/add rsp,imm8`, `sub/add rsp,imm32`, and `pop rbp`, so
+common compiler frame setup can be recognized without widening into arbitrary
+dispatch. This keeps unsupported x86_64 execution failures structured while
+broad instruction dispatch remains future work.
 
 `src/lib/common/wine_hello_fixture.spl` owns the synthetic milestone PE bytes
 and the verified gate list used by tests and the runnable probe, including the
