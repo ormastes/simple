@@ -33,10 +33,10 @@ Out of scope:
 | REQ-001 | Compatibility matrix | `chrome_modern_web_platform_compat_spec.spl` | 3 | Full |
 | REQ-002 | WPT subset path | `chrome_modern_web_platform_compat_spec.spl` | 3 | Full |
 | REQ-003 | Test262 subset path | `chrome_modern_web_platform_compat_spec.spl` | 3 | Full |
-| REQ-004 | Supported feature evidence | `chrome_modern_web_platform_compat_spec.spl` | 3 | Full |
+| REQ-004 | Supported feature evidence | `chrome_modern_web_platform_compat_spec.spl` | 5 | Full |
 | REQ-005 | Unsupported feature tracking | `chrome_modern_web_platform_compat_spec.spl` | 3 | Full |
 | REQ-006 | Verification gate | `chrome_modern_web_platform_compat_spec.spl` | 3 | Full |
-| REQ-007 | Initial modern CSS BDD slice | `chrome_modern_web_platform_compat_spec.spl`, `browser_renderer_spec.spl` | 3 | Full |
+| REQ-007 | Initial modern CSS BDD slice | `chrome_modern_web_platform_compat_spec.spl`, `browser_renderer_spec.spl` | 4 | Full |
 
 ## BDD Scenarios
 
@@ -63,6 +63,8 @@ REQ-004: Supported Feature Evidence
 - Given a feature is marked supported, when evidence is inspected, then it should require SSpec or external-suite mapping.
 - Given the current modern CSS slice, when renderer SSpec is inspected, then it should include `:is()` coverage.
 - Given the current modern CSS slice, when renderer SSpec is inspected, then it should include `:where()` coverage.
+- Given the current modern CSS slice, when renderer SSpec is inspected, then it should include positive and negative `:not()` coverage.
+- Given the current modern CSS slice, when renderer SSpec is inspected, then it should include positive and negative simple descendant `:has()` coverage.
 
 REQ-005: Unsupported Feature Tracking
 
@@ -79,8 +81,9 @@ REQ-006: Verification Gate
 REQ-007: Initial Modern CSS BDD Slice
 
 - Given modern CSS selector-list pseudos, when source is inspected, then `:is()` and `:where()` matching should be implemented.
+- Given modern CSS selector-list pseudos, when source is inspected, then partial `:not()` and descendant `:has()` matching should be implemented.
 - Given fallback renderer extraction, when source is inspected, then commas inside functional selectors should not split selector lists.
-- Given BDD coverage, when renderer SSpec is run, then the `:is()` and `:where()` examples should pass.
+- Given BDD coverage, when renderer SSpec is run, then the `:is()`, `:where()`, `:not()`, and simple descendant `:has()` examples should pass.
 
 ## Execution Order
 

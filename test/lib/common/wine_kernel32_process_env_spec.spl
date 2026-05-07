@@ -1,4 +1,4 @@
-use common.wine_kernel32_process_env.{wine_kernel32_execute_process_env, wine_kernel32_execute_process_parameters}
+use common.wine_kernel32_process_env.{wine_kernel32_execute_environment_variable, wine_kernel32_execute_process_env, wine_kernel32_execute_process_parameters}
 use common.wine_nt_process_env.{wine_nt_process_env_add, wine_nt_process_env_new}
 
 fn _all_adapter_apis() -> text:
@@ -45,3 +45,39 @@ describe "Wine KERNEL32 process environment bridge":
         expect(result.module_file_name).to_equal("C:\\Program Files\\hello.exe")
         expect(result.current_directory).to_equal("C:\\Windows")
         expect(result.operations).to_equal("GetModuleFileNameW GetCurrentDirectoryW SetCurrentDirectoryW GetCurrentDirectoryW")
+
+    it "executes bounded environment variable calls":
+        val env = wine_nt_process_env_new(_all_adapter_apis(), _all_async_features(), ["hello.exe"])
+        val result = wine_kernel32_execute_environment_variable(
+            ["SetEnvironmentVariableW", "GetEnvironmentVariableW", "ExpandEnvironmentStringsW"],
+            env,
+            "WINDIR",
+            "C:\\Windows",
+            "%WINDIR%\\System32"
+        )
+
+        expect(result.ok).to_equal(true)
+        expect(result.value).to_equal("C:\\Windows\\System32")
+        expect(result.operations).to_equal("SetEnvironmentVariableW GetEnvironmentVariableW ExpandEnvironmentStringsW")
+
+    it "keeps environment variable dispatch ordered and bounded":
+        val env = wine_nt_process_env_new(_all_adapter_apis(), _all_async_features(), ["hello.exe"])
+        val out_of_order = wine_kernel32_execute_environment_variable(
+            ["GetEnvironmentVariableW", "SetEnvironmentVariableW", "ExpandEnvironmentStringsW"],
+            env,
+            "WINDIR",
+            "C:\\Windows",
+            "%WINDIR%"
+        )
+        expect(out_of_order.ok).to_equal(false)
+        expect(out_of_order.error).to_equal("kernel32-env-var-sequence-expected:SetEnvironmentVariableW")
+
+        val wrong_family = wine_kernel32_execute_environment_variable(
+            ["SetEnvironmentVariableW", "GetEnvironmentVariableW", "HeapAlloc"],
+            env,
+            "WINDIR",
+            "C:\\Windows",
+            "%WINDIR%"
+        )
+        expect(wrong_family.ok).to_equal(false)
+        expect(wrong_family.error).to_equal("bridge-wrong-category:HeapAlloc")

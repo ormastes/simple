@@ -2,10 +2,13 @@ use common.wine_nt_process_env.{
     wine_nt_get_command_line_w,
     wine_nt_get_current_directory_w,
     wine_nt_get_environment_strings_w,
+    wine_nt_get_environment_variable_w,
     wine_nt_get_module_file_name_w,
+    wine_nt_expand_environment_strings_w,
     wine_nt_process_env_add,
     wine_nt_process_env_new,
     wine_nt_process_env_required_calls,
+    wine_nt_set_environment_variable_w,
     wine_nt_set_current_directory_w
 }
 
@@ -20,10 +23,12 @@ fn _all_async_features() -> text:
 describe "Wine NT process environment bridge":
     it "lists the modeled process environment and parameter calls":
         val calls = wine_nt_process_env_required_calls()
-        expect(calls.len()).to_equal(5)
+        expect(calls.len()).to_equal(8)
         expect(calls[0]).to_equal("GetCommandLineW")
         expect(calls[2]).to_equal("GetCurrentDirectoryW")
         expect(calls[4]).to_equal("GetModuleFileNameW")
+        expect(calls[5]).to_equal("GetEnvironmentVariableW")
+        expect(calls[7]).to_equal("ExpandEnvironmentStringsW")
 
     it "blocks environment readiness until POSIX argv/env prerequisites pass":
         val env = wine_nt_process_env_new("fd-open fd-read", _all_async_features(), ["hello.exe"])
@@ -66,3 +71,25 @@ describe "Wine NT process environment bridge":
         expect(module_name.module_file_name).to_equal("C:\\Program Files\\hello.exe")
         expect(current.ok).to_equal(true)
         expect(current.current_directory).to_equal("C:\\Windows")
+
+    it "gets, sets, and expands environment variables":
+        var env = wine_nt_process_env_new(_all_adapter_apis(), _all_async_features(), ["hello.exe"])
+        env = wine_nt_set_environment_variable_w(env, "WINDIR", "C:\\Windows")
+        env = wine_nt_set_environment_variable_w(env, "TEMP", "C:\\Temp")
+        val windir = wine_nt_get_environment_variable_w(env, "WINDIR")
+        val expanded = wine_nt_expand_environment_strings_w(env, "%WINDIR%\\System32;%TEMP%")
+
+        expect(windir.ok).to_equal(true)
+        expect(windir.value).to_equal("C:\\Windows")
+        expect(expanded.ok).to_equal(true)
+        expect(expanded.value).to_equal("C:\\Windows\\System32;C:\\Temp")
+
+    it "rejects invalid and missing environment variable requests":
+        val env = wine_nt_process_env_new(_all_adapter_apis(), _all_async_features(), ["hello.exe"])
+        val invalid = wine_nt_set_environment_variable_w(env, "", "bad")
+
+        expect(invalid.ready).to_equal(false)
+        expect(invalid.state).to_equal("invalid-env-key")
+        expect(wine_nt_get_environment_variable_w(env, "").state).to_equal("invalid-env-key")
+        expect(wine_nt_get_environment_variable_w(env, "MISSING").state).to_equal("env-var-not-found")
+        expect(wine_nt_expand_environment_strings_w(env, "").state).to_equal("invalid-template")
