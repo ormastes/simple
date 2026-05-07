@@ -5,8 +5,10 @@ use common.wine_ntdll_bridge.{
     wine_ntdll_close,
     wine_ntdll_create_directory,
     wine_ntdll_create_file,
+    wine_ntdll_delete_file,
     wine_ntdll_execute_directory_create,
     wine_ntdll_execute_directory_remove,
+    wine_ntdll_execute_file_delete,
     wine_ntdll_execute_file_io,
     wine_ntdll_execute_virtual_memory,
     wine_ntdll_free_virtual_memory,
@@ -140,6 +142,26 @@ describe "Wine ntdll and Rtl bridge":
         val non_empty = wine_ntdll_execute_directory_remove(["NtSetInformationFile"], with_non_empty_dir, "C:\\TempDir")
         expect(non_empty.ok).to_equal(false)
         expect(non_empty.error).to_equal("NtSetInformationFile:directory-not-empty")
+
+    it "wraps bounded ntdll file deletion through NtSetInformationFile":
+        val table = wine_nt_file_table_add_file(wine_nt_file_table_new(_all_adapter_apis(), _all_async_features()), "C:\\delete.tmp", "delete")
+        val deleted = wine_ntdll_delete_file(table, "C:\\delete.tmp")
+        expect(deleted.ok).to_equal(true)
+        expect(deleted.state).to_equal("deleted")
+
+        val sequence = wine_ntdll_execute_file_delete(["NtSetInformationFile"], table, "C:\\delete.tmp")
+        expect(sequence.ok).to_equal(true)
+        expect(sequence.operations).to_equal("NtSetInformationFile")
+        expect(wine_ntdll_create_file(sequence.table, "C:\\delete.tmp").state).to_equal("file-not-found")
+
+        val opened = wine_ntdll_create_file(table, "C:\\delete.tmp")
+        val sharing = wine_ntdll_execute_file_delete(["NtSetInformationFile"], opened.table, "C:\\delete.tmp")
+        expect(sharing.ok).to_equal(false)
+        expect(sharing.error).to_equal("NtSetInformationFile:sharing-violation")
+
+        val wrong = wine_ntdll_execute_file_delete(["NtCreateFile"], table, "C:\\delete.tmp")
+        expect(wrong.ok).to_equal(false)
+        expect(wrong.error).to_equal("ntdll-file-io-sequence-expected:NtSetInformationFile")
 
     it "wraps Rtl heap calls over the process heap bridge":
         val heap = wine_nt_process_heap_new(wine_vm_space_new(), true)
