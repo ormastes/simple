@@ -450,6 +450,24 @@ Fresh evidence:
 Conservative boundary: this command reports dry-run handoff evidence only. It
 does not execute Wine or arbitrary Windows programs.
 
+## 2026-05-07 Controlled Wine Process Session Execution
+
+`src/lib/common/wine_process_session.spl` now routes the planned controlled
+`hello.exe` session through the existing VM-backed hello executor. The process
+session result reports `execution=executed`, preserves the process command, and
+returns `Hello from SimpleOS Wine` with exit code 0.
+
+Fresh evidence:
+
+- `bin/simple test test/lib/common/wine_process_session_spec.spl --mode=interpreter --clean`: includes controlled session execution and arbitrary-session rejection coverage.
+- `bin/simple run src/app/wine_process_session_plan/main.spl`: emits `command=hello.exe`, `readiness=controlled-hello-ready`, `handoff=dry-run-ready`, `execution=executed`, and hello stdout.
+- `bin/simple test test/integration/app/wine_process_session_plan_command_spec.spl --mode=interpreter --clean`: covers the command output.
+- `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_substrate_spec.spl --mode=interpreter --clean`: includes REQ-012 controlled session execution coverage.
+
+Conservative boundary: this is controlled `hello.exe` execution only. Arbitrary
+PE/DLL loading, full Win32/NT behavior, generic Wine process execution, and
+Steam/Proton game execution remain blocked.
+
 ## Completion Decision
 
 The WM/VM prerequisite plan in `doc/03_plan/agent_tasks/simpleos_wine_wm_vm_execution_plan_2026-05-06.md` is implemented at the Wine-facing SimpleOS contract level. Modeled X11/VM gates are no longer accepted as production evidence, and the new production gates require SimpleOS window records, framebuffer presents, OS process/address-space identity, container namespace evidence, OS VMA image mapping, thread stack/guard setup, fault evidence, and no-host-code-jump policy.

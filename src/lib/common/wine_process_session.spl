@@ -1,6 +1,13 @@
 """Wine process-session planning over SimpleOS substrate gates."""
 
+use common.wine_hello_exe.{wine_hello_exe_probe_manifest_evidence_vm}
+use common.wine_hello_fixture.{
+    wine_known_hello_exe_fixture_bytes,
+    wine_hello_fixture_execution_evidence_struct,
+    wine_hello_fixture_precondition_manifest
+}
 use common.wine_substrate.{wine_substrate_full_wine_gate, wine_substrate_hello_exe_gate}
+use common.wine_vm_adapter.{wine_vm_process_space_new}
 
 class WineProcessSessionRequest:
     executable_path: text
@@ -22,6 +29,14 @@ class WineProcessLaunchHandoff:
     substrate_readiness: text
     status: text
 
+class WineProcessExecutionResult:
+    ok: bool
+    error: text
+    command: text
+    stdout: text
+    exit_code: i64
+    status: text
+
 fn _wine_process_session_request(executable_path: text, argv: [text], working_directory: text) -> WineProcessSessionRequest:
     WineProcessSessionRequest(executable_path: executable_path, argv: argv, working_directory: working_directory)
 
@@ -30,6 +45,9 @@ fn _wine_process_session_plan(ok: bool, error: text, executable_path: text, comm
 
 fn _wine_process_launch_handoff(ok: bool, error: text, command: text, substrate_readiness: text, status: text) -> WineProcessLaunchHandoff:
     WineProcessLaunchHandoff(ok: ok, error: error, command: command, substrate_readiness: substrate_readiness, status: status)
+
+fn _wine_process_execution_result(ok: bool, error: text, command: text, stdout: text, exit_code: i64, status: text) -> WineProcessExecutionResult:
+    WineProcessExecutionResult(ok: ok, error: error, command: command, stdout: stdout, exit_code: exit_code, status: status)
 
 fn _wine_join_args(args: [text]) -> text:
     var joined = ""
@@ -79,3 +97,26 @@ pub fn wine_process_launch_handoff(plan: WineProcessSessionPlan, dry_run: bool) 
     if not dry_run:
         return _wine_process_launch_handoff(false, "execution-not-implemented", plan.command, plan.readiness, "blocked")
     _wine_process_launch_handoff(true, "", plan.command, plan.readiness, "dry-run-ready")
+
+pub fn wine_process_execute_controlled_hello(plan: WineProcessSessionPlan) -> WineProcessExecutionResult:
+    if not plan.ok:
+        return _wine_process_execution_result(false, plan.error, plan.command, "", -1, "blocked")
+    if plan.readiness != "controlled-hello-ready":
+        return _wine_process_execution_result(false, "unsupported-process-session", plan.command, "", -1, "blocked")
+    if not plan.executable_path.contains("hello.exe"):
+        return _wine_process_execution_result(false, "unsupported-executable", plan.command, "", -1, "blocked")
+
+    val space = wine_vm_process_space_new(1, 1001, "pid fs ipc net capability")
+    val result = wine_hello_exe_probe_manifest_evidence_vm(
+        wine_known_hello_exe_fixture_bytes(),
+        wine_hello_fixture_precondition_manifest(),
+        wine_hello_fixture_execution_evidence_struct(),
+        space,
+        0x400000,
+        0x700000,
+        0x2000,
+        0x1000
+    )
+    if result.status != "executed":
+        return _wine_process_execution_result(false, "{result.status}:{result.error}", plan.command, "", -1, "blocked")
+    _wine_process_execution_result(true, "", plan.command, result.stdout, result.exit_code, "executed")

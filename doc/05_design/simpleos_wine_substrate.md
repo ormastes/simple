@@ -121,18 +121,20 @@ accidentally mark the host substrate ready.
 
 ## Wine Process Session Target
 
-`src/lib/common/wine_process_session.spl` models a Wine process request and
-non-executing handoff boundary. It validates executable path and working
-directory, distinguishes the controlled `hello.exe` milestone from full Wine
-readiness, and emits a `dry-run-ready` handoff only when explicitly requested.
+`src/lib/common/wine_process_session.spl` models a Wine process request,
+handoff boundary, and controlled hello execution boundary. It validates
+executable path and working directory, distinguishes the controlled `hello.exe`
+milestone from full Wine readiness, emits a `dry-run-ready` handoff only when
+explicitly requested, and can route that controlled hello plan through the
+VM-backed hello executor.
 
 Arbitrary `.exe` sessions require `wine_substrate_full_wine_gate(...) ==
-"ready"`. Until real execution exists, non-dry-run handoff calls return
-`execution-not-implemented`.
+"ready"` for planning, but the controlled executor still rejects them as
+`unsupported-process-session`.
 
 `src/app/wine_process_session_plan/main.spl` exposes the controlled hello
 process-session handoff as a command. It prints command, substrate readiness,
-and dry-run status for inspection without executing Wine.
+dry-run handoff status, controlled execution status, and hello stdout.
 
 `src/lib/common/wine_precondition_manifest.spl` composes the process baseline,
 VM, renderer, host, POSIX, pthread, dynamic loading, async, PE-loader, and NT bridge gate
