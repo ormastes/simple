@@ -23,7 +23,7 @@ Deliver the production-quality prerequisites for a controlled SimpleOS Wine path
 | Dynamic loading prerequisite | `src/lib/common/wine_dynload_adapter.spl` requires native loader APIs, search path/dependency/namespace coverage, relocation/import/TLS surfaces, structured loader errors, and bounded NTDLL `LdrLoadDll`/`LdrGetProcedureAddress`/`LdrUnloadDll` evidence before dynload readiness | Implemented prerequisite |
 | Thread/TLS/wait prerequisite | `src/lib/common/wine_thread_adapter.spl` requires thread/TLS/synchronization/wait/fault APIs and bounded NT `CreateThread`/`WaitForSingleObject` evidence before pthread readiness | Implemented prerequisite |
 | POSIX/file-I/O prerequisite | `src/lib/common/wine_posix_adapter.spl` requires fd/process/stdio/wait/timer/socket/path/errno APIs over `nogc_async_mut`, and bounded KERNEL32 `CreateFileW`/`ReadFile`/`GetFileType`/`CloseHandle` evidence before POSIX readiness | Implemented prerequisite |
-| Service-control prerequisite | `src/lib/common/wine_service_adapter.spl` requires complete IPC, handle, audio, font, crypto, HID, printing, and multimedia service declarations plus bounded ADVAPI32 `OpenSCManagerW`/`CreateServiceW`/`OpenServiceW`/`StartServiceW`/`CloseServiceHandle` evidence before service readiness | Implemented prerequisite |
+| Service and peripheral prerequisite | `src/lib/common/wine_service_adapter.spl` requires complete IPC, handle, audio, font, crypto, HID, printing, and multimedia service declarations plus bounded ADVAPI32 `OpenSCManagerW`/`CreateServiceW`/`OpenServiceW`/`StartServiceW`/`CloseServiceHandle` evidence before service readiness; audio, font, and input rows require separate waveOut/font/HID evidence gates instead of broad `host=verified` evidence | Implemented prerequisite |
 | WM/graphics production prerequisite | `src/lib/common/ui/wine_simpleos_window_bridge.spl` creates SimpleOS `/win` `WindowRecord` state, framebuffer present evidence, cursor evidence, and clipboard evidence; `src/lib/common/ui/wine_x11_adapter.spl` requires that bridge through `wine_x11_backend_production_ready` | Implemented prerequisite |
 | VM/container production prerequisite | `src/lib/common/wine_vm_adapter.spl` distinguishes modeled spaces from OS process/address-space/container-backed spaces; `src/lib/common/wine_image_vm_map.spl` maps validated PE images plus stack/guard before execution | Implemented prerequisite |
 | PE/COFF and CPU preparation | `src/lib/common/wine_pe_gate.spl`, `src/lib/common/pe_coff_header.spl`, `src/lib/common/wine_pe_loader_runtime.spl`, `src/lib/common/wine_image_map.spl`, `src/lib/common/wine_x86_64_decode.spl`, and `src/lib/common/wine_cpu_exec.spl` validate image layout, entry windows, imports, relocation/TLS readiness, decoded call targets, safe prologues, and dispatch evidence before controlled execution | Verified for controlled hello path |
@@ -161,8 +161,21 @@ Fresh evidence:
 
 Conservative boundary: this is bounded service-control evidence for the Wine substrate. It does not provide a real Windows service control manager, service process lifetime, service accounts, dependency ordering, recovery actions, or arbitrary service-host behavior.
 
+## 2026-05-07 Peripheral Evidence Update
+
+The substrate matrix no longer marks `audio`, `fonts`, or `input` verified from the broad `host=verified` gate. Those rows now require explicit `audio=verified`, `fonts=verified`, and `input=verified` evidence. The service adapter exposes bounded peripheral gates for waveOut buffer submission, font discovery/glyph raster evidence, and keyboard/pointer/message dispatch evidence.
+
+Fresh evidence:
+
+- `bin/simple check src/lib/common/wine_service_adapter.spl src/lib/common/wine_substrate.spl test/lib/common/wine_service_adapter_spec.spl test/lib/common/wine_substrate_spec.spl doc/06_spec/app/simpleos/feature/simpleos_wine_substrate_spec.spl`: all checks passed.
+- `bin/simple test test/lib/common/wine_service_adapter_spec.spl`: 11 examples, 0 failures.
+- `bin/simple test test/lib/common/wine_substrate_spec.spl`: 16 examples, 0 failures.
+- `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_substrate_spec.spl`: 14 examples, 0 failures.
+
+Conservative boundary: this is bounded peripheral evidence for the substrate matrix. It does not provide real DirectSound/MME devices, complete fontconfig/GDI font rendering, raw input, XInput, joystick support, or arbitrary multimedia behavior.
+
 ## Completion Decision
 
 The WM/VM prerequisite plan in `doc/03_plan/agent_tasks/simpleos_wine_wm_vm_execution_plan_2026-05-06.md` is implemented at the Wine-facing SimpleOS contract level. Modeled X11/VM gates are no longer accepted as production evidence, and the new production gates require SimpleOS window records, framebuffer presents, OS process/address-space identity, container namespace evidence, OS VMA image mapping, thread stack/guard setup, fault evidence, and no-host-code-jump policy.
 
-This is still not a complete upstream Wine port. Full Wine graphics driver integration, compositor event-loop delivery, kernel page-table enforcement, broader POSIX/thread/dynload/service behavior, arbitrary PE loading, broad x86_64 execution, and general NT/Win32 dispatch remain intentionally blocked outside these controlled prerequisite and GUI milestone slices.
+This is still not a complete upstream Wine port. Full Wine graphics driver integration, compositor event-loop delivery, kernel page-table enforcement, broader POSIX/thread/dynload/service/peripheral behavior, arbitrary PE loading, broad x86_64 execution, and general NT/Win32 dispatch remain intentionally blocked outside these controlled prerequisite and GUI milestone slices.
