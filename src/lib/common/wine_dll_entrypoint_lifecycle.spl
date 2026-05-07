@@ -1,0 +1,33 @@
+"""Modeled DLL entrypoint/TLS lifecycle gate for Wine load sessions."""
+
+class WineDllEntrypointLifecycleResult:
+    ok: bool
+    error: text
+    dll_name: text
+    entrypoint_rva: i64
+    tls_callback_count: i64
+    evidence: text
+    status: text
+
+fn _result(ok: bool, error: text, dll_name: text, entrypoint_rva: i64, tls_callback_count: i64, evidence: text, status: text) -> WineDllEntrypointLifecycleResult:
+    WineDllEntrypointLifecycleResult(ok: ok, error: error, dll_name: dll_name.lower(), entrypoint_rva: entrypoint_rva, tls_callback_count: tls_callback_count, evidence: evidence, status: status)
+
+fn _load_status_ready(status: text) -> bool:
+    status == "dll-load-session-recorded" or status == "dll-load-existing-refcounted"
+
+pub fn wine_dll_entrypoint_lifecycle_gate(dll_name: text, load_status: text, load_evidence: text, entrypoint_rva: i64, tls_callback_count: i64, allow_execution: bool) -> WineDllEntrypointLifecycleResult:
+    if dll_name == "":
+        return _result(false, "missing-dll-name", "", entrypoint_rva, tls_callback_count, load_evidence, "rejected")
+    if not _load_status_ready(load_status):
+        return _result(false, "dll-load-session-required:" + load_status, dll_name, entrypoint_rva, tls_callback_count, load_evidence, "rejected")
+    if not load_evidence.contains("modeled-loaded-image"):
+        return _result(false, "missing-modeled-loaded-image-evidence", dll_name, entrypoint_rva, tls_callback_count, load_evidence, "rejected")
+    if entrypoint_rva <= 0:
+        return _result(false, "invalid-dll-entrypoint-rva", dll_name, entrypoint_rva, tls_callback_count, load_evidence, "rejected")
+    if tls_callback_count < 0:
+        return _result(false, "invalid-tls-callback-count", dll_name, entrypoint_rva, tls_callback_count, load_evidence, "rejected")
+    if allow_execution:
+        return _result(false, "dll-entrypoint-execution-not-implemented", dll_name, entrypoint_rva, tls_callback_count, load_evidence + " dll-entrypoint-execution-requested loader-lock-required tls-before-dllmain-required", "blocked")
+
+    val evidence = load_evidence + " dll-entrypoint-lifecycle-modeled loader-lock-acquired tls-callbacks-planned DllMain-process-attach-planned loader-lock-release-planned dll-entrypoint-execution-blocked tls-callback-execution-blocked no-host-code-jump no-arbitrary-execution"
+    _result(true, "", dll_name, entrypoint_rva, tls_callback_count, evidence, "dll-entrypoint-lifecycle-modeled")

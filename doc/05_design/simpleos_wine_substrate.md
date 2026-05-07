@@ -248,6 +248,12 @@ handle, refcount, unload, and rollback evidence, but its loaded state is still a
 contract record: host DLL bytes are not read, no real DLL view is retained,
 DllMain and TLS callbacks are not executed, and arbitrary PE code is not
 dispatched.
+`wine_dll_entrypoint_lifecycle_gate(...)` adds an explicit non-executing DLL
+startup lifecycle gate over that modeled load state. It requires modeled
+loaded-image evidence, records loader-lock acquisition, TLS-callback planning,
+and DllMain process-attach planning, and returns a hard block if a caller asks
+to execute DLL startup code before the real host/file-backed execution gates
+exist.
 `wine_process_resolve_first_import_module(...)` composes the PE first-import
 inspection gate with that module resolver, so validated full-Wine process
 images can resolve a requested procedure against their first imported KERNEL32

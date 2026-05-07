@@ -103,6 +103,18 @@ Fresh evidence:
 - `bin/simple check src/lib`: 2695 files, all checks passed.
 - Wine DLL load-session changed-file stub scan: pass.
 
+## 2026-05-07 DLL Entrypoint Lifecycle Gate Update
+
+The DLL entrypoint lifecycle gate now requires modeled loaded-image evidence before recording loader-lock, TLS-before-DllMain, and process-attach ordering. Actual DllMain/TLS execution remains hard-blocked and reports `dll-entrypoint-execution-not-implemented` when requested.
+
+Fresh evidence:
+
+- `bin/simple check` on changed DLL entrypoint lifecycle source/spec files: all checks passed.
+- `bin/simple test test/lib/common/wine_dll_entrypoint_lifecycle_spec.spl`: 3 examples, 0 failures.
+- `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_dll_entrypoint_lifecycle_spec.spl`: 1 example, 0 failures.
+- `bin/simple check src/lib`: 2696 files, all checks passed.
+- Wine DLL entrypoint lifecycle changed-file stub scan: pass.
+
 ## 2026-05-07 Executable-Environment Matrix Update
 
 The top-level Wine substrate matrix now exposes the SimpleOS executable-environment gate directly through `wine_substrate_exec_env_gate` and the `exec_env` capability row. This makes VM/full-OS/container evidence a first-class Wine readiness prerequisite instead of an implicit side gate.
