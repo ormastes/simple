@@ -25,6 +25,10 @@ The Proton layer follows the same MDSOC+ split as the Wine layer:
 
 - `src/lib/common/wine_proton_gate.spl` is a common tree-node facade. It owns
   readiness vocabulary only, not runtime state.
+- `src/lib/common/proton_runtime_subsystems.spl` is the common non-Wine
+  subsystem facade. It owns Steam runtime ABI, pressure-vessel container,
+  graphics translation, Steam integration, shader-cache, and sync evidence
+  gates without depending on Wine internals.
 - A future Steam/Proton userland service is an MDSOC+ capsule: MDSOC
   ports/capabilities outside, ECS world inside for app id, prefix, container,
   runtime, shader-cache, controller, and launch-session records.

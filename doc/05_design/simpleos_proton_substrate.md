@@ -16,6 +16,20 @@ Date: 2026-05-07
 The readiness gate first calls `wine_substrate_full_wine_gate(wine_gates)`.
 Only a full Wine-ready substrate can advance to Proton-specific checks.
 
+`src/lib/common/proton_runtime_subsystems.spl` exposes the non-Wine Proton
+subsystem gates:
+
+- `proton_steam_runtime_gate(evidence)`;
+- `proton_pressure_vessel_gate(evidence)`;
+- `proton_graphics_translation_gate(evidence)`;
+- `proton_steam_integration_gate(evidence)`;
+- `proton_sync_gate(evidence)`;
+- `proton_non_wine_runtime_gate(evidence)`;
+- `proton_non_wine_feature_evidence(evidence)`.
+
+`wine_proton_runtime_gate` composes these subsystem gates and adds only the
+outer full-Wine dependency plus `wine-full` feature evidence.
+
 ## Required Proton Features
 
 - `steam-runtime`

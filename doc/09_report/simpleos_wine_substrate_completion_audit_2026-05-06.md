@@ -347,6 +347,27 @@ runtime evidence path. It does not implement upstream Proton, Steam client
 login, pressure-vessel execution, Linux ABI syscall coverage, Vulkan drivers,
 DXVK/VKD3D shader execution, or arbitrary Windows game compatibility.
 
+## 2026-05-07 Non-Wine Proton Subsystem Completion
+
+The Proton prerequisites outside Wine itself now have their own common facade:
+`src/lib/common/proton_runtime_subsystems.spl`. It independently gates Steam
+runtime ABI, pressure-vessel container/rootfs/namespaces, Vulkan loader/device,
+DXVK, VKD3D-Proton, shader cache, Proton launcher, Steamworks bridge,
+controller input, and esync-or-fsync evidence. `wine_proton_runtime_gate` now
+composes this non-Wine facade and adds only the outer full-Wine dependency.
+
+Fresh evidence:
+
+- `bin/simple check src/lib/common/proton_runtime_subsystems.spl src/lib/common/wine_proton_runtime.spl test/lib/common/proton_runtime_subsystems_spec.spl test/lib/common/wine_proton_runtime_spec.spl doc/06_spec/app/simpleos/feature/simpleos_proton_substrate_spec.spl`: all checks passed.
+- `bin/simple test test/lib/common/proton_runtime_subsystems_spec.spl --mode=interpreter --clean`: 6 examples, 0 failures.
+- `bin/simple test test/lib/common/wine_proton_runtime_spec.spl --mode=interpreter --clean`: 6 examples, 0 failures.
+- `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_proton_substrate_spec.spl --mode=interpreter --clean`: includes non-Wine subsystem evidence coverage.
+
+Conservative boundary: this completes the modeled non-Wine Proton prerequisite
+gates only. It intentionally excludes full Wine itself and does not implement
+actual Steam runtime process execution, pressure-vessel process launch, Vulkan
+driver execution, DXVK/VKD3D shader translation, or game compatibility.
+
 ## Completion Decision
 
 The WM/VM prerequisite plan in `doc/03_plan/agent_tasks/simpleos_wine_wm_vm_execution_plan_2026-05-06.md` is implemented at the Wine-facing SimpleOS contract level. Modeled X11/VM gates are no longer accepted as production evidence, and the new production gates require SimpleOS window records, framebuffer presents, OS process/address-space identity, container namespace evidence, OS VMA image mapping, thread stack/guard setup, fault evidence, and no-host-code-jump policy.
