@@ -139,7 +139,9 @@ inspection result with DLL name and imported symbols. It does not bind DLLs or
 dispatch imported functions. `wine_process_bind_known_kernel32_imports(...)`
 then plans the currently supported KERNEL32 console binding sequence and
 rejects unsupported or incomplete import sets; it still does not patch thunks or
-execute arbitrary process code.
+execute arbitrary process code. `wine_process_plan_import_thunk_patches(...)`
+turns a supported binding plan into explicit guarded import-thunk evidence for
+the CPU execution gate, without mutating image bytes.
 
 `src/app/wine_process_session_plan/main.spl` exposes the controlled hello
 process-session handoff as a command. It prints command, substrate readiness,

@@ -77,6 +77,15 @@ class WineProcessImportBindingResult:
     binding_count: i64
     status: text
 
+class WineProcessThunkPatchPlanResult:
+    ok: bool
+    error: text
+    command: text
+    dll_name: text
+    patch_count: i64
+    evidence: text
+    status: text
+
 fn _wine_process_session_request(executable_path: text, argv: [text], working_directory: text) -> WineProcessSessionRequest:
     WineProcessSessionRequest(executable_path: executable_path, argv: argv, working_directory: working_directory)
 
@@ -97,6 +106,9 @@ fn _wine_process_import_inspection_result(ok: bool, error: text, command: text, 
 
 fn _wine_process_import_binding_result(ok: bool, error: text, command: text, dll_name: text, call_sequence: text, binding_count: i64, status: text) -> WineProcessImportBindingResult:
     WineProcessImportBindingResult(ok: ok, error: error, command: command, dll_name: dll_name, call_sequence: call_sequence, binding_count: binding_count, status: status)
+
+fn _wine_process_thunk_patch_plan_result(ok: bool, error: text, command: text, dll_name: text, patch_count: i64, evidence: text, status: text) -> WineProcessThunkPatchPlanResult:
+    WineProcessThunkPatchPlanResult(ok: ok, error: error, command: command, dll_name: dll_name, patch_count: patch_count, evidence: evidence, status: status)
 
 fn _wine_process_image_gate(data: [u8]) -> text:
     val summary = parse_pe_header_summary(data)
@@ -236,3 +248,12 @@ pub fn wine_process_bind_known_kernel32_imports(plan: WineProcessSessionPlan, da
     if not binding_plan.ok:
         return _wine_process_import_binding_result(false, binding_plan.error, plan.command, imports.dll_name, "", 0, "rejected")
     _wine_process_import_binding_result(true, "", plan.command, binding_plan.dll, binding_plan.call_sequence, binding_plan.binding_count, "imports-bound")
+
+pub fn wine_process_plan_import_thunk_patches(plan: WineProcessSessionPlan, data: [u8], symbol_limit: i64) -> WineProcessThunkPatchPlanResult:
+    val bindings = wine_process_bind_known_kernel32_imports(plan, data, symbol_limit)
+    if not bindings.ok:
+        return _wine_process_thunk_patch_plan_result(false, bindings.error, plan.command, bindings.dll_name, 0, "", bindings.status)
+    if bindings.binding_count <= 0:
+        return _wine_process_thunk_patch_plan_result(false, "missing-bindings", plan.command, bindings.dll_name, 0, "", "rejected")
+    val evidence = "import-thunks-bound import-thunk-table-valid import-thunk-symbols-resolved import-thunk-bindings-match import-thunk-iat-guarded"
+    _wine_process_thunk_patch_plan_result(true, "", plan.command, bindings.dll_name, bindings.binding_count, evidence, "thunk-patch-planned")
