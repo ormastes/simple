@@ -4,6 +4,7 @@ use common.pe_coff_header.{
     parse_pe_header_summary,
     pe_data_directory_gate,
     pe_first_import_dll_name,
+    pe_first_import_symbol_bindings,
     pe_first_import_symbol_names,
     pe_first_import_thunk_gate,
     pe_import_directory_gate,
@@ -18,6 +19,7 @@ use common.wine_hello_fixture.{
     wine_hello_fixture_precondition_manifest
 }
 use common.wine_image_map.{wine_image_map_gate}
+use common.wine_nt_import.{wine_nt_import_hello_binding_plan}
 use common.wine_substrate.{wine_substrate_full_wine_gate, wine_substrate_hello_exe_gate}
 use common.wine_vm_adapter.{wine_vm_process_space_new}
 
@@ -66,6 +68,15 @@ class WineProcessImportInspectionResult:
     symbols: [text]
     status: text
 
+class WineProcessImportBindingResult:
+    ok: bool
+    error: text
+    command: text
+    dll_name: text
+    call_sequence: text
+    binding_count: i64
+    status: text
+
 fn _wine_process_session_request(executable_path: text, argv: [text], working_directory: text) -> WineProcessSessionRequest:
     WineProcessSessionRequest(executable_path: executable_path, argv: argv, working_directory: working_directory)
 
@@ -83,6 +94,9 @@ fn _wine_process_image_validation_result(ok: bool, error: text, command: text, m
 
 fn _wine_process_import_inspection_result(ok: bool, error: text, command: text, dll_name: text, symbol_count: i64, symbols: [text], status: text) -> WineProcessImportInspectionResult:
     WineProcessImportInspectionResult(ok: ok, error: error, command: command, dll_name: dll_name, symbol_count: symbol_count, symbols: symbols, status: status)
+
+fn _wine_process_import_binding_result(ok: bool, error: text, command: text, dll_name: text, call_sequence: text, binding_count: i64, status: text) -> WineProcessImportBindingResult:
+    WineProcessImportBindingResult(ok: ok, error: error, command: command, dll_name: dll_name, call_sequence: call_sequence, binding_count: binding_count, status: status)
 
 fn _wine_process_image_gate(data: [u8]) -> text:
     val summary = parse_pe_header_summary(data)
@@ -211,3 +225,14 @@ pub fn wine_process_inspect_full_imports(plan: WineProcessSessionPlan, data: [u8
     if symbols.len() == 0:
         return _wine_process_import_inspection_result(false, "missing-import-symbols", plan.command, dll_name, 0, symbols, "rejected")
     _wine_process_import_inspection_result(true, "", plan.command, dll_name, symbols.len(), symbols, "imports-inspected")
+
+pub fn wine_process_bind_known_kernel32_imports(plan: WineProcessSessionPlan, data: [u8], symbol_limit: i64) -> WineProcessImportBindingResult:
+    val imports = wine_process_inspect_full_imports(plan, data, symbol_limit)
+    if not imports.ok:
+        return _wine_process_import_binding_result(false, imports.error, plan.command, imports.dll_name, "", 0, imports.status)
+
+    val bindings = pe_first_import_symbol_bindings(data, symbol_limit)
+    val binding_plan = wine_nt_import_hello_binding_plan(imports.dll_name, bindings)
+    if not binding_plan.ok:
+        return _wine_process_import_binding_result(false, binding_plan.error, plan.command, imports.dll_name, "", 0, "rejected")
+    _wine_process_import_binding_result(true, "", plan.command, binding_plan.dll, binding_plan.call_sequence, binding_plan.binding_count, "imports-bound")

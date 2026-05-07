@@ -136,7 +136,10 @@ directory, import, relocation, TLS, and image-map gates before any future
 arbitrary execution boundary can be added. After image validation,
 `wine_process_inspect_full_imports(...)` exposes a bounded first-import table
 inspection result with DLL name and imported symbols. It does not bind DLLs or
-dispatch imported functions.
+dispatch imported functions. `wine_process_bind_known_kernel32_imports(...)`
+then plans the currently supported KERNEL32 console binding sequence and
+rejects unsupported or incomplete import sets; it still does not patch thunks or
+execute arbitrary process code.
 
 `src/app/wine_process_session_plan/main.spl` exposes the controlled hello
 process-session handoff as a command. It prints command, substrate readiness,

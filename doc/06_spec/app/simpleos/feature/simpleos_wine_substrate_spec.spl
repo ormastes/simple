@@ -18,6 +18,7 @@ use common.wine_substrate.{
 use common.wine_hello_exe.{wine_hello_exe_probe}
 use common.wine_hello_fixture.{wine_known_hello_exe_fixture_bytes}
 use common.wine_process_session.{
+    wine_process_bind_known_kernel32_imports,
     wine_process_execute_controlled_hello,
     wine_process_inspect_full_imports,
     wine_process_launch_handoff,
@@ -233,3 +234,21 @@ describe "SimpleOS Wine Substrate":
             val imports = wine_process_inspect_full_imports(plan, wine_known_hello_exe_fixture_bytes(), 0)
             expect(imports.ok).to_equal(false)
             expect(imports.error).to_equal("invalid-symbol-limit")
+
+    describe "REQ-015: bounded process import binding plan":
+        it "should plan supported KERNEL32 import bindings before execution":
+            val full_gates = "process=verified exec_env=verified vm=verified renderer=verified user32=verified gdi32=verified kernel32_core=verified host=verified posix=verified registry=verified pthread=verified dynload=verified audio=verified fonts=verified input=verified pe_loader=verified async=verified nt_bridge=verified"
+            val plan = wine_process_session_plan(wine_process_session_request_new("game.exe", [], "C:\\Games"), full_gates)
+            val bindings = wine_process_bind_known_kernel32_imports(plan, wine_known_hello_exe_fixture_bytes(), 8)
+            expect(bindings.ok).to_equal(true)
+            expect(bindings.dll_name).to_equal("kernel32.dll")
+            expect(bindings.call_sequence).to_equal("GetStdHandle WriteFile ExitProcess")
+            expect(bindings.binding_count).to_equal(3)
+            expect(bindings.status).to_equal("imports-bound")
+
+        it "should reject unbounded or incomplete import binding attempts":
+            val full_gates = "process=verified exec_env=verified vm=verified renderer=verified user32=verified gdi32=verified kernel32_core=verified host=verified posix=verified registry=verified pthread=verified dynload=verified audio=verified fonts=verified input=verified pe_loader=verified async=verified nt_bridge=verified"
+            val plan = wine_process_session_plan(wine_process_session_request_new("game.exe", [], "C:\\Games"), full_gates)
+            val bindings = wine_process_bind_known_kernel32_imports(plan, wine_known_hello_exe_fixture_bytes(), 1)
+            expect(bindings.ok).to_equal(false)
+            expect(bindings.error).to_equal("import-thunk-limit-exceeded")

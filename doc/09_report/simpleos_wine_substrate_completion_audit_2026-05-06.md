@@ -502,6 +502,24 @@ Conservative boundary: this is import inspection only. It does not perform
 arbitrary DLL loading, import binding, thunk patching, or arbitrary PE
 execution.
 
+## 2026-05-07 Bounded Process Import Binding Plan
+
+`src/lib/common/wine_process_session.spl` now exposes
+`wine_process_bind_known_kernel32_imports(...)` for image-validated full-Wine
+process plans. It reuses the bounded first-import inspection result, extracts
+symbol binding RVAs, and returns the supported KERNEL32 console binding
+sequence when the import table matches the existing NT import resolver plan.
+
+Fresh evidence:
+
+- `bin/simple test test/lib/common/wine_process_session_spec.spl --mode=interpreter --clean`: includes KERNEL32 binding-plan and rejected incomplete-binding coverage.
+- `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_substrate_spec.spl --mode=interpreter --clean`: includes REQ-015 process import binding-plan coverage.
+- `bin/simple test test/lib/common/wine_nt_import_spec.spl --mode=interpreter --clean`: keeps the underlying NT import binding planner covered.
+
+Conservative boundary: this is a binding plan only. It does not load arbitrary
+DLLs, patch import thunks, dispatch imported functions for arbitrary code, or
+execute arbitrary PE images.
+
 ## Completion Decision
 
 The WM/VM prerequisite plan in `doc/03_plan/agent_tasks/simpleos_wine_wm_vm_execution_plan_2026-05-06.md` is implemented at the Wine-facing SimpleOS contract level. Modeled X11/VM gates are no longer accepted as production evidence, and the new production gates require SimpleOS window records, framebuffer presents, OS process/address-space identity, container namespace evidence, OS VMA image mapping, thread stack/guard setup, fault evidence, and no-host-code-jump policy.
