@@ -5,8 +5,10 @@ use common.wine_nt_file_io.{
     WineNtFileIoResult,
     WineNtFileTable,
     wine_nt_file_close,
+    wine_nt_file_create_directory_w,
     wine_nt_file_create_w,
-    wine_nt_file_read
+    wine_nt_file_read,
+    wine_nt_file_remove_directory_w
 }
 use common.wine_nt_heap.{WineNtHeap, WineNtHeapResult, wine_nt_heap_alloc, wine_nt_heap_free}
 use common.wine_nt_virtual_memory.{
@@ -83,6 +85,26 @@ fn _ntdll_file_sequence_gate(symbols: [text]) -> text:
         return "ntdll-file-io-sequence-expected:NtClose"
     "ready"
 
+fn _ntdll_directory_create_sequence_gate(symbols: [text]) -> text:
+    val dispatch_state = wine_nt_api_ntdll_file_io_dispatch_gate(symbols)
+    if dispatch_state != "ready":
+        return dispatch_state
+    if symbols.len() != 1:
+        return "ntdll-file-io-sequence-count-mismatch"
+    if symbols[0] != "NtCreateFile":
+        return "ntdll-file-io-sequence-expected:NtCreateFile"
+    "ready"
+
+fn _ntdll_directory_remove_sequence_gate(symbols: [text]) -> text:
+    val dispatch_state = wine_nt_api_ntdll_file_io_dispatch_gate(symbols)
+    if dispatch_state != "ready":
+        return dispatch_state
+    if symbols.len() != 1:
+        return "ntdll-file-io-sequence-count-mismatch"
+    if symbols[0] != "NtSetInformationFile":
+        return "ntdll-file-io-sequence-expected:NtSetInformationFile"
+    "ready"
+
 fn _ntdll_file_failure(symbol: text, step: WineNtFileIoResult, operations: text) -> WineNtdllFileIoSequenceResult:
     _file_sequence_result(false, symbol + ":" + step.state, step.table, step.handle, step.data, step.bytes_read, operations)
 
@@ -109,6 +131,7 @@ pub fn wine_ntdll_required_calls() -> [text]:
         "NtCreateFile",
         "NtReadFile",
         "NtClose",
+        "NtSetInformationFile",
         "RtlAllocateHeap",
         "RtlFreeHeap"
     ]
@@ -144,6 +167,12 @@ pub fn wine_ntdll_execute_virtual_memory(symbols: [text], space: WineVmSpace, ba
 pub fn wine_ntdll_create_file(table: WineNtFileTable, path: text) -> WineNtFileIoResult:
     wine_nt_file_create_w(table, path)
 
+pub fn wine_ntdll_create_directory(table: WineNtFileTable, path: text) -> WineNtFileIoResult:
+    wine_nt_file_create_directory_w(table, path)
+
+pub fn wine_ntdll_remove_directory(table: WineNtFileTable, path: text) -> WineNtFileIoResult:
+    wine_nt_file_remove_directory_w(table, path)
+
 pub fn wine_ntdll_read_file(table: WineNtFileTable, handle: i64, requested_len: i64) -> WineNtFileIoResult:
     wine_nt_file_read(table, handle, requested_len)
 
@@ -168,6 +197,28 @@ pub fn wine_ntdll_execute_file_io(symbols: [text], table: WineNtFileTable, path:
         return _ntdll_file_failure("NtClose", closed, "NtCreateFile NtReadFile")
 
     _file_sequence_result(true, "", closed.table, opened.handle, read.data, read.bytes_read, "NtCreateFile NtReadFile NtClose")
+
+pub fn wine_ntdll_execute_directory_create(symbols: [text], table: WineNtFileTable, path: text) -> WineNtdllFileIoSequenceResult:
+    val sequence_state = _ntdll_directory_create_sequence_gate(symbols)
+    if sequence_state != "ready":
+        return _file_sequence_result(false, sequence_state, table, 0, "", 0, "")
+
+    val created = wine_ntdll_create_directory(table, path)
+    if not created.ok:
+        return _ntdll_file_failure("NtCreateFile", created, "")
+
+    _file_sequence_result(true, "", created.table, 0, "", 0, "NtCreateFile")
+
+pub fn wine_ntdll_execute_directory_remove(symbols: [text], table: WineNtFileTable, path: text) -> WineNtdllFileIoSequenceResult:
+    val sequence_state = _ntdll_directory_remove_sequence_gate(symbols)
+    if sequence_state != "ready":
+        return _file_sequence_result(false, sequence_state, table, 0, "", 0, "")
+
+    val removed = wine_ntdll_remove_directory(table, path)
+    if not removed.ok:
+        return _ntdll_file_failure("NtSetInformationFile", removed, "")
+
+    _file_sequence_result(true, "", removed.table, 0, "", 0, "NtSetInformationFile")
 
 pub fn wine_rtl_allocate_heap(heap: WineNtHeap, handle: i64, size: i64) -> WineNtHeapResult:
     wine_nt_heap_alloc(heap, handle, size)

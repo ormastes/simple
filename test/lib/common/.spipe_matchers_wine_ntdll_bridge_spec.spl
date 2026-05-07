@@ -1,14 +1,18 @@
-use common.wine_nt_file_io.{wine_nt_file_table_add_file, wine_nt_file_table_new}
+use common.wine_nt_file_io.{wine_nt_file_table_add_directory, wine_nt_file_table_add_file, wine_nt_file_table_new}
 use common.wine_nt_heap.{wine_nt_process_heap_new}
 use common.wine_ntdll_bridge.{
     wine_ntdll_allocate_virtual_memory,
     wine_ntdll_close,
+    wine_ntdll_create_directory,
     wine_ntdll_create_file,
+    wine_ntdll_execute_directory_create,
+    wine_ntdll_execute_directory_remove,
     wine_ntdll_execute_file_io,
     wine_ntdll_execute_virtual_memory,
     wine_ntdll_free_virtual_memory,
     wine_ntdll_protect_virtual_memory,
     wine_ntdll_read_file,
+    wine_ntdll_remove_directory,
     wine_ntdll_required_calls,
     wine_rtl_allocate_heap,
     wine_rtl_execute_heap,
@@ -27,9 +31,10 @@ fn _all_async_features() -> text:
 describe "Wine ntdll and Rtl bridge":
     it "lists the modeled ntdll and Rtl calls":
         val calls = wine_ntdll_required_calls()
-        expect calls.len() == 8
+        expect calls.len() == 9
         expect calls[0] == "NtAllocateVirtualMemory"
-        expect calls[6] == "RtlAllocateHeap"
+        expect calls[6] == "NtSetInformationFile"
+        expect calls[7] == "RtlAllocateHeap"
 
     it "wraps ntdll virtual-memory calls over the VM bridge":
         val allocated = wine_ntdll_allocate_virtual_memory(wine_vm_space_new(), 0x500000, 0x1000, "rw")
@@ -107,6 +112,34 @@ describe "Wine ntdll and Rtl bridge":
         val missing = wine_ntdll_execute_file_io(["NtCreateFile", "NtReadFile", "NtClose"], table, "C:\\missing.txt", 5)
         expect missing.ok == false
         expect missing.error == "NtCreateFile:file-not-found"
+
+    it "wraps bounded ntdll directory create and remove operations":
+        val table = wine_nt_file_table_new(_all_adapter_apis(), _all_async_features())
+        val created = wine_ntdll_create_directory(table, "C:\\TempDir")
+        val removed = wine_ntdll_remove_directory(created.table, "C:\\TempDir")
+        expect created.ok == true
+        expect created.state == "directory-created"
+        expect removed.ok == true
+        expect removed.state == "directory-removed"
+
+        val created_sequence = wine_ntdll_execute_directory_create(["NtCreateFile"], table, "C:\\TempDir")
+        expect created_sequence.ok == true
+        expect created_sequence.operations == "NtCreateFile"
+        val removed_sequence = wine_ntdll_execute_directory_remove(["NtSetInformationFile"], created_sequence.table, "C:\\TempDir")
+        expect removed_sequence.ok == true
+        expect removed_sequence.operations == "NtSetInformationFile"
+
+        val wrong_create = wine_ntdll_execute_directory_create(["NtSetInformationFile"], table, "C:\\TempDir")
+        expect wrong_create.ok == false
+        expect wrong_create.error == "ntdll-file-io-sequence-expected:NtCreateFile"
+        val wrong_remove = wine_ntdll_execute_directory_remove(["NtCreateFile"], table, "C:\\TempDir")
+        expect wrong_remove.ok == false
+        expect wrong_remove.error == "ntdll-file-io-sequence-expected:NtSetInformationFile"
+
+        val with_non_empty_dir = wine_nt_file_table_add_file(wine_nt_file_table_add_directory(table, "C:\\TempDir"), "C:\\TempDir\\child.txt", "child")
+        val non_empty = wine_ntdll_execute_directory_remove(["NtSetInformationFile"], with_non_empty_dir, "C:\\TempDir")
+        expect non_empty.ok == false
+        expect non_empty.error == "NtSetInformationFile:directory-not-empty"
 
     it "wraps Rtl heap calls over the process heap bridge":
         val heap = wine_nt_process_heap_new(wine_vm_space_new(), true)
