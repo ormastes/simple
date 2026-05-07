@@ -1343,14 +1343,15 @@ before adding more examples to this spec.
 ## 2026-05-07 Full Image Handoff VM-Write Update
 
 `wine_process_prepare_full_image_handoff_with_peb_teb_vm_writes(...)` now
-requires PEB/TEB VM byte-write/readback evidence before a validated full-Wine
-process image can report full-image handoff readiness. Failed VM byte-write
-composition blocks the handoff before any arbitrary image execution claim.
+requires PEB/TEB VM byte-write/readback evidence before full-image validation,
+mapping, or handoff evidence can be produced. Failed VM byte-write composition
+returns zero mapped/entry addresses and a non-executing rejection; successful
+readback prefixes the handoff evidence before reporting readiness.
 
 Fresh evidence:
 
-- `bin/simple test test/lib/common/wine_process_session_full_image_handoff_spec.spl --mode=interpreter --clean`: covers VM-write/readback-gated full-image handoff and failure propagation.
-- `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_process_full_image_handoff_spec.spl --mode=interpreter --clean`: covers the SimpleOS system-level full-image handoff path requiring PEB/TEB VM write/readback evidence.
+- `bin/simple test test/lib/common/wine_process_session_full_image_handoff_spec.spl --mode=interpreter --clean`: covers VM-write/readback-gated full-image handoff and pre-mapping rejection with zero mapped/entry addresses.
+- `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_process_full_image_handoff_spec.spl --mode=interpreter --clean`: covers the SimpleOS system-level full-image handoff path requiring PEB/TEB VM write/readback evidence before image mapping.
 
 ## 2026-05-07 Full Image Loader Runtime VM-Write Update
 

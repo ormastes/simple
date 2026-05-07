@@ -81,3 +81,20 @@ describe "SimpleOS Wine full image handoff":
             expect(handoff.evidence).to_contain("peb-teb-vm-writes-ready")
             expect(handoff.evidence).to_contain("VMWriteReadback:PEBTEBLayoutBytes")
             expect(handoff.evidence).to_contain("arbitrary-process-image-handoff")
+
+        it "should block full image handoff before image mapping when PEB/TEB VM byte writes fail":
+            val plan = wine_process_session_plan(wine_process_session_request_new("game.exe", [], "C:\\Games"), _full_gates())
+            val init = wine_peb_teb_init_default()
+            val writes = wine_peb_teb_memory_write_gate(init, _startup_write_space())
+            val layout = wine_peb_teb_layout_write_plan(init, writes)
+            val bytes = wine_peb_teb_layout_byte_writes(layout)
+            val vm_writes = wine_peb_teb_apply_layout_byte_writes(wine_vm_process_space_new(10, 30, "pid fs ipc net capability"), bytes)
+            val handoff = wine_process_prepare_full_image_handoff_with_peb_teb_vm_writes(plan, wine_known_hello_exe_fixture_bytes(), vm_writes)
+
+            expect(handoff.ok).to_equal(false)
+            expect(handoff.error).to_equal("peb-teb-vm-write:vm-write:NtTib.StackBase:page-fault-unmapped")
+            expect(handoff.status).to_equal("rejected")
+            expect(handoff.mapped_base).to_equal(0)
+            expect(handoff.entry_address).to_equal(0)
+            expect(handoff.evidence).to_contain("full-image-handoff-blocked")
+            expect(handoff.evidence).to_contain("no-arbitrary-execution")

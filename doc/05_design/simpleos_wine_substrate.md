@@ -143,8 +143,9 @@ then maps that validated full-Wine image plus stack/guard regions into a
 SimpleOS OS-backed VM process and returns entrypoint, mapped-size, and
 no-host-code-jump evidence without executing arbitrary instructions.
 `wine_process_prepare_full_image_handoff_with_peb_teb_vm_writes(...)` requires
-PEB/TEB VM byte-write/readback evidence before reporting the same full-image
-handoff readiness. After
+PEB/TEB VM byte-write/readback evidence before full-image validation, mapping,
+or handoff evidence can be reported; successful handoff readiness is prefixed
+with the VM write/readback evidence. After
 image validation,
 `wine_process_inspect_full_imports(...)` exposes a bounded first-import table
 inspection result with DLL name and imported symbols for the known-console
