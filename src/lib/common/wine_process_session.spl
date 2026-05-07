@@ -1359,3 +1359,31 @@ pub fn wine_process_prepare_imported_entrypoint_handoff(plan: WineProcessSession
     val entry_address = transaction.mapped_base + entry_rva
     val evidence = transaction.evidence + " imported-entrypoint-handoff-ready entrypoint-mapped entrypoint-rva-valid entrypoint-section-executable entrypoint-window-readable no-host-code-jump no-arbitrary-execution"
     _wine_process_imported_entrypoint_handoff(true, "", plan.command, transaction.patched_image, transaction.mapped_base, transaction.mapped_size, entry_address, transaction.module_count, transaction.patched_count, evidence, "imported-entrypoint-handoff-ready")
+
+pub fn wine_process_prepare_imported_entrypoint_handoff_with_peb_teb_vm_writes(plan: WineProcessSessionPlan, data: [u8], descriptor_limit: i64, symbol_limit: i64, vm_writes: WinePebTebVmWriteResult) -> WineProcessImportedEntrypointHandoff:
+    val handoff = wine_process_prepare_imported_entrypoint_handoff(plan, data, descriptor_limit, symbol_limit)
+    _wine_process_require_imported_entrypoint_peb_teb_vm_writes(handoff, vm_writes)
+
+fn _wine_process_require_imported_entrypoint_peb_teb_vm_writes(handoff: WineProcessImportedEntrypointHandoff, vm_writes: WinePebTebVmWriteResult) -> WineProcessImportedEntrypointHandoff:
+    if not handoff.ok:
+        return handoff
+    if not vm_writes.ok:
+        handoff.ok = false
+        handoff.error = "peb-teb-vm-write:" + vm_writes.state
+        handoff.evidence = vm_writes.operations + " imported-entrypoint-handoff-blocked"
+        handoff.status = "rejected"
+        return handoff
+    if vm_writes.write_count != 6:
+        handoff.ok = false
+        handoff.error = "peb-teb-vm-write-count-mismatch"
+        handoff.evidence = vm_writes.operations + " imported-entrypoint-handoff-blocked"
+        handoff.status = "rejected"
+        return handoff
+    if vm_writes.byte_count != 48:
+        handoff.ok = false
+        handoff.error = "peb-teb-vm-byte-count-mismatch"
+        handoff.evidence = vm_writes.operations + " imported-entrypoint-handoff-blocked"
+        handoff.status = "rejected"
+        return handoff
+    handoff.evidence = vm_writes.operations + " peb-teb-vm-writes-ready " + handoff.evidence
+    handoff

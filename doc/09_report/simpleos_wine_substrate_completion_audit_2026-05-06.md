@@ -1470,3 +1470,18 @@ Fresh evidence:
 
 - `bin/simple test test/lib/common/wine_process_session_known_console_spec.spl --mode=interpreter --clean`: covers VM-write/readback-gated known-console execution and failure propagation.
 - `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_known_console_execution_spec.spl --mode=interpreter --clean`: covers the SimpleOS system-level known-console execution path requiring PEB/TEB VM write/readback evidence.
+
+## 2026-05-07 Imported Entrypoint Handoff VM-Write Update
+
+`wine_process_prepare_imported_entrypoint_handoff_with_peb_teb_vm_writes(...)`
+now requires PEB/TEB VM byte-write/readback evidence before exposing the
+imported process-entrypoint handoff. The process startup-fault VM-write wrapper
+now consumes that gated handoff path before non-executing SEH rollback can be
+recorded. Failed VM byte-write composition rejects the handoff before startup
+fault evidence is considered.
+
+Fresh evidence:
+
+- `bin/simple test test/lib/common/wine_process_session_import_entrypoint_handoff_vm_write_spec.spl --mode=interpreter --clean`: covers VM-write/readback-gated imported entrypoint handoff.
+- `bin/simple test test/lib/common/wine_process_session_import_entrypoint_handoff_vm_write_failure_spec.spl --mode=interpreter --clean`: covers VM-write/readback failure propagation before imported entrypoint handoff readiness.
+- `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_process_import_entrypoint_handoff_vm_write_spec.spl --mode=interpreter --clean`: covers the SimpleOS system-level imported entrypoint handoff requiring PEB/TEB VM write/readback evidence.

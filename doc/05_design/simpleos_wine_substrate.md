@@ -361,14 +361,17 @@ loader transaction and exposes the patched process image entrypoint address with
 entrypoint mapping evidence. This is still a handoff record only; it does not
 execute the entrypoint, dispatch arbitrary PE instructions, load host DLLs, or
 run DLL/TLS entrypoints.
+`wine_process_prepare_imported_entrypoint_handoff_with_peb_teb_vm_writes(...)`
+requires PEB/TEB VM byte-write/readback evidence before exposing that imported
+entrypoint handoff.
 `wine_process_record_imported_entrypoint_startup_fault(...)` then composes that
 handoff with modeled VM fault evidence and records the process-entrypoint SEH
 rollback boundary. The accepted fault must target the imported entrypoint with
 `execute` access and `deliver-seh` policy; other policies or addresses stay
 blocked before rollback evidence is claimed.
 `wine_process_record_imported_entrypoint_startup_fault_with_peb_teb_vm_writes(...)`
-requires PEB/TEB VM byte-write/readback evidence before recording the same
-non-executing process-entrypoint rollback.
+uses that VM-readback-gated handoff path before recording the same non-executing
+process-entrypoint rollback.
 `wine_seh_dispatch_fault(...)` models the first SEH frame-chain gate below that
 rollback boundary. It requires a thread-local active frame, a frame address
 inside the modeled stack, and a handler address inside the mapped image before
