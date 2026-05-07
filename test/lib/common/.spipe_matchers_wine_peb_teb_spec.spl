@@ -1,0 +1,72 @@
+use common.wine_peb_teb.{WinePebTebInitEvidence, wine_peb_teb_init_default, wine_peb_teb_init_gate, wine_peb_teb_required_evidence}
+
+describe "Wine PEB/TEB initialization gate":
+    it "lists the SimpleOS and MDSOC evidence required before PEB/TEB handoff":
+        val required = wine_peb_teb_required_evidence()
+        expect required.len() == 8
+        expect required[0] == "simpleos-process-identity"
+        expect required[1] == "simpleos-thread-identity"
+        expect required[2] == "simpleos-address-space"
+        expect required[3] == "simpleos-stack-bounds"
+        expect required[4] == "simpleos-process-parameters"
+        expect required[5] == "simpleos-tls-vector"
+        expect required[6] == "simpleos-mdsoc-process-port"
+        expect required[7] == "simpleos-mdsoc-thread-port"
+
+    it "accepts bounded aligned PEB, TEB, TLS, process-parameter, and stack evidence":
+        val result = wine_peb_teb_init_gate(wine_peb_teb_init_default())
+        expect result.ok == true
+        expect result.state == "ready"
+        expect result.peb_address == 0x7ffdf000
+        expect result.teb_address == 0x7ffde000
+        expect result.stack_base == 0x7ffef000
+        expect result.stack_limit == 0x7ffee000
+        expect result.tls_vector_address == 0x7ffdd000
+        expect result.process_parameters_address == 0x7ffdc000
+        expect result.operations == "PEB TEB TLS ProcessParameters"
+
+    it "rejects missing MDSOC ownership evidence":
+        val init = WinePebTebInitEvidence(
+            process_id: 10,
+            thread_id: 20,
+            peb_address: 0x7ffdf000,
+            teb_address: 0x7ffde000,
+            image_base: 0x400000,
+            stack_base: 0x7ffef000,
+            stack_limit: 0x7ffee000,
+            tls_vector_address: 0x7ffdd000,
+            process_parameters_address: 0x7ffdc000,
+            evidence: "simpleos-process-identity simpleos-thread-identity simpleos-address-space simpleos-stack-bounds simpleos-process-parameters simpleos-tls-vector"
+        )
+        val result = wine_peb_teb_init_gate(init)
+        expect result.ok == false
+        expect result.state == "missing-simpleos-mdsoc-process-port"
+
+    it "rejects invalid stack ordering and unaligned PEB addresses":
+        val bad_stack = WinePebTebInitEvidence(
+            process_id: 10,
+            thread_id: 20,
+            peb_address: 0x7ffdf000,
+            teb_address: 0x7ffde000,
+            image_base: 0x400000,
+            stack_base: 0x7ffee000,
+            stack_limit: 0x7ffef000,
+            tls_vector_address: 0x7ffdd000,
+            process_parameters_address: 0x7ffdc000,
+            evidence: "simpleos-process-identity simpleos-thread-identity simpleos-address-space simpleos-stack-bounds simpleos-process-parameters simpleos-tls-vector simpleos-mdsoc-process-port simpleos-mdsoc-thread-port"
+        )
+        expect wine_peb_teb_init_gate(bad_stack).state == "invalid-stack-bounds"
+
+        val unaligned = WinePebTebInitEvidence(
+            process_id: 10,
+            thread_id: 20,
+            peb_address: 0x7ffdf008,
+            teb_address: 0x7ffde000,
+            image_base: 0x400000,
+            stack_base: 0x7ffef000,
+            stack_limit: 0x7ffee000,
+            tls_vector_address: 0x7ffdd000,
+            process_parameters_address: 0x7ffdc000,
+            evidence: "simpleos-process-identity simpleos-thread-identity simpleos-address-space simpleos-stack-bounds simpleos-process-parameters simpleos-tls-vector simpleos-mdsoc-process-port simpleos-mdsoc-thread-port"
+        )
+        expect wine_peb_teb_init_gate(unaligned).state == "invalid-peb-address"

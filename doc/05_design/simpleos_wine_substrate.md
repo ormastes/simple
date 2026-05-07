@@ -417,6 +417,10 @@ adapter. `src/lib/common/wine_nt_thread_wait.spl` models `CreateThread`,
 `WaitForSingleObject`, and `GetLastError` over the thread/TLS/wait-object
 adapter. `src/lib/common/wine_nt_process_env.spl` models `GetCommandLineW` and
 `GetEnvironmentStringsW` over the POSIX/`nogc_async_mut` argv/env contract.
+`src/lib/common/wine_peb_teb.spl` models the bounded PEB/TEB/TLS/process
+parameter handoff from SimpleOS process, thread, address-space, stack, and
+MDSOC port evidence before NTDLL process/thread information can report those
+addresses.
 `src/lib/common/wine_nt_heap.spl` models `HeapAlloc` and `HeapFree` with a
 deterministic process-heap handle and VM-reservation-backed block tracking.
 `src/lib/common/wine_ntdll_bridge.spl` maps the catalogued ntdll/Rtl forms onto

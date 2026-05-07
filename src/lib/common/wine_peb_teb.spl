@@ -1,0 +1,88 @@
+"""Bounded PEB/TEB initialization evidence for Wine NT startup probes."""
+
+class WinePebTebInitEvidence:
+    process_id: i64
+    thread_id: i64
+    peb_address: i64
+    teb_address: i64
+    image_base: i64
+    stack_base: i64
+    stack_limit: i64
+    tls_vector_address: i64
+    process_parameters_address: i64
+    evidence: text
+
+class WinePebTebInitResult:
+    ok: bool
+    state: text
+    process_id: i64
+    thread_id: i64
+    peb_address: i64
+    teb_address: i64
+    image_base: i64
+    stack_base: i64
+    stack_limit: i64
+    tls_vector_address: i64
+    process_parameters_address: i64
+    operations: text
+
+fn _init(process_id: i64, thread_id: i64, peb_address: i64, teb_address: i64, image_base: i64, stack_base: i64, stack_limit: i64, tls_vector_address: i64, process_parameters_address: i64, evidence: text) -> WinePebTebInitEvidence:
+    WinePebTebInitEvidence(process_id: process_id, thread_id: thread_id, peb_address: peb_address, teb_address: teb_address, image_base: image_base, stack_base: stack_base, stack_limit: stack_limit, tls_vector_address: tls_vector_address, process_parameters_address: process_parameters_address, evidence: evidence)
+
+fn _result(ok: bool, state: text, init: WinePebTebInitEvidence, operations: text) -> WinePebTebInitResult:
+    WinePebTebInitResult(ok: ok, state: state, process_id: init.process_id, thread_id: init.thread_id, peb_address: init.peb_address, teb_address: init.teb_address, image_base: init.image_base, stack_base: init.stack_base, stack_limit: init.stack_limit, tls_vector_address: init.tls_vector_address, process_parameters_address: init.process_parameters_address, operations: operations)
+
+pub fn wine_peb_teb_required_evidence() -> [text]:
+    [
+        "simpleos-process-identity",
+        "simpleos-thread-identity",
+        "simpleos-address-space",
+        "simpleos-stack-bounds",
+        "simpleos-process-parameters",
+        "simpleos-tls-vector",
+        "simpleos-mdsoc-process-port",
+        "simpleos-mdsoc-thread-port"
+    ]
+
+pub fn wine_peb_teb_fixture_evidence() -> text:
+    "simpleos-process-identity simpleos-thread-identity simpleos-address-space " +
+        "simpleos-stack-bounds simpleos-process-parameters simpleos-tls-vector " +
+        "simpleos-mdsoc-process-port simpleos-mdsoc-thread-port"
+
+pub fn wine_peb_teb_init_default() -> WinePebTebInitEvidence:
+    _init(10, 20, 0x7ffdf000, 0x7ffde000, 0x400000, 0x7ffef000, 0x7ffee000, 0x7ffdd000, 0x7ffdc000, wine_peb_teb_fixture_evidence())
+
+fn _aligned_pointer(address: i64) -> bool:
+    address > 0 and address % 16 == 0
+
+fn _required_evidence_gate(evidence: text) -> text:
+    for item in wine_peb_teb_required_evidence():
+        if not evidence.contains(item):
+            return "missing-" + item
+    "ready"
+
+pub fn wine_peb_teb_init_gate(init: WinePebTebInitEvidence) -> WinePebTebInitResult:
+    val evidence_state = _required_evidence_gate(init.evidence)
+    if evidence_state != "ready":
+        return _result(false, evidence_state, init, "")
+    if init.process_id <= 0:
+        return _result(false, "invalid-process-id", init, "")
+    if init.thread_id <= 0:
+        return _result(false, "invalid-thread-id", init, "")
+    if not _aligned_pointer(init.peb_address):
+        return _result(false, "invalid-peb-address", init, "")
+    if not _aligned_pointer(init.teb_address):
+        return _result(false, "invalid-teb-address", init, "")
+    if not _aligned_pointer(init.image_base):
+        return _result(false, "invalid-image-base", init, "")
+    if not _aligned_pointer(init.stack_base):
+        return _result(false, "invalid-stack-base", init, "")
+    if not _aligned_pointer(init.stack_limit):
+        return _result(false, "invalid-stack-limit", init, "")
+    if init.stack_limit >= init.stack_base:
+        return _result(false, "invalid-stack-bounds", init, "")
+    if not _aligned_pointer(init.tls_vector_address):
+        return _result(false, "invalid-tls-vector", init, "")
+    if not _aligned_pointer(init.process_parameters_address):
+        return _result(false, "invalid-process-parameters", init, "")
+    _result(true, "ready", init, "PEB TEB TLS ProcessParameters")

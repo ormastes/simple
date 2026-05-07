@@ -294,6 +294,26 @@ Conservative boundary: this is readiness evidence for OS-backed execution
 services. It does not create a full container runtime, live VM enforcement path,
 or arbitrary Wine/PE execution environment.
 
+## 2026-05-07 PEB/TEB Startup Evidence Update
+
+The NT startup substrate now has a bounded PEB/TEB initialization gate. It
+requires SimpleOS process/thread identity, address-space, stack-bounds, process
+parameters, TLS vector, and MDSOC process/thread port evidence before
+`NtQueryInformationProcess` and `NtQueryInformationThread` can report PEB/TEB
+addresses through the modeled NTDLL process-info bridge.
+
+Fresh evidence:
+
+- `bin/simple check` on PEB/TEB and NTDLL process-info source/spec/system files: all checks passed.
+- `bin/simple test test/lib/common/wine_peb_teb_spec.spl --mode=interpreter --clean`: 4 examples, 0 failures.
+- `bin/simple test test/lib/common/wine_ntdll_process_info_spec.spl --mode=interpreter --clean`: 4 examples, 0 failures.
+- `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_peb_teb_spec.spl --mode=interpreter --clean`: 1 example, 0 failures.
+- `bin/simple check` on generated matcher specs: all checks passed.
+- `bin/simple check src/lib`: 2707 files, all checks passed.
+
+Conservative boundary: this validates startup evidence only. It does not execute
+arbitrary TLS callbacks, mutate a live PEB/TEB, or run general PE code.
+
 ## 2026-05-07 Wine Aggregate Watchdog Split
 
 REQ-018 known-console dispatch planning now has focused system coverage in

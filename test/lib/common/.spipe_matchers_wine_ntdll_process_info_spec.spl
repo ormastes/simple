@@ -1,8 +1,10 @@
 use common.wine_ntdll_process_info.{
     WineNtdllProcessThreadInfo,
     wine_ntdll_execute_process_info,
+    wine_ntdll_execute_process_info_with_peb_teb,
     wine_ntdll_process_thread_info_default
 }
+use common.wine_peb_teb.{WinePebTebInitEvidence, wine_peb_teb_init_default}
 
 fn _classes() -> [text]:
     ["ProcessBasicInformation", "ProcessImageInformation", "ThreadBasicInformation"]
@@ -41,3 +43,25 @@ describe "Wine NTDLL process information bridge":
         val result = wine_ntdll_execute_process_info(["NtQueryInformationProcess", "NtQueryInformationThread"], _classes(), invalid)
         expect result.ok == false
         expect result.error == "NtQueryInformationThread:invalid-thread-id"
+
+    it "requires PEB/TEB initialization evidence before process-info handoff":
+        val result = wine_ntdll_execute_process_info_with_peb_teb(["NtQueryInformationProcess", "NtQueryInformationThread"], _classes(), wine_peb_teb_init_default())
+        expect result.ok == true
+        expect result.peb_address == 0x7ffdf000
+        expect result.teb_address == 0x7ffde000
+
+        val missing = WinePebTebInitEvidence(
+            process_id: 10,
+            thread_id: 20,
+            peb_address: 0x7ffdf000,
+            teb_address: 0x7ffde000,
+            image_base: 0x400000,
+            stack_base: 0x7ffef000,
+            stack_limit: 0x7ffee000,
+            tls_vector_address: 0x7ffdd000,
+            process_parameters_address: 0x7ffdc000,
+            evidence: "simpleos-process-identity simpleos-thread-identity"
+        )
+        val blocked = wine_ntdll_execute_process_info_with_peb_teb(["NtQueryInformationProcess", "NtQueryInformationThread"], _classes(), missing)
+        expect blocked.ok == false
+        expect blocked.error == "peb-teb:missing-simpleos-address-space"
