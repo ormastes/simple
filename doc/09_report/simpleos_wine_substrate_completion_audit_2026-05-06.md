@@ -1498,3 +1498,21 @@ Fresh evidence:
 
 - `bin/simple test test/lib/common/wine_dll_view_dllmain_handoff_vm_write_spec.spl --mode=interpreter --clean`: covers VM-write/readback-gated retained DllMain handoff preparation.
 - `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_dll_view_dllmain_handoff_vm_write_spec.spl --mode=interpreter --clean`: covers the SimpleOS system-level retained DllMain handoff requiring PEB/TEB VM write/readback evidence.
+
+## 2026-05-07 Import-Loader Transaction VM-Write Update
+
+`wine_process_apply_import_loader_transaction_in_vma_with_peb_teb_vm_writes(...)`
+now requires PEB/TEB VM byte-write/readback evidence before descriptor-qualified
+import-loader VMA patching can complete. The imported-entrypoint VM-write
+handoff now consumes this gated import-loader transaction path instead of
+gating only after transaction readiness was already reported.
+
+Fresh evidence:
+
+- `bin/simple test test/lib/common/wine_process_session_import_transaction_vm_write_spec.spl --mode=interpreter --clean`: covers VM-write/readback-gated import-loader transaction completion.
+- `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_process_import_loader_transaction_vm_write_spec.spl --mode=interpreter --clean`: covers the SimpleOS system-level import-loader transaction requiring PEB/TEB VM write/readback evidence.
+
+Performance follow-up: the focused import-loader transaction and imported
+entrypoint VM-write specs pass but run close to the 60s interpreter watchdog.
+Split or optimize the shared multi-DLL PE fixture path before adding more
+examples to these specs.

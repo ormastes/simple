@@ -359,14 +359,18 @@ state accounting with descriptor-qualified VMA import patching. The transaction
 requires released loader refcounts before the process VMA write window is
 accepted, carries the loader counts beside patch counts, and aborts before VMA
 patching when modeled module resolution rolls back.
+`wine_process_apply_import_loader_transaction_in_vma_with_peb_teb_vm_writes(...)`
+routes the descriptor-qualified VMA import patching through the PEB/TEB VM
+byte-write/readback-gated loader preflight before transaction completion can be
+reported.
 `wine_process_prepare_imported_entrypoint_handoff(...)` consumes the import
 loader transaction and exposes the patched process image entrypoint address with
 entrypoint mapping evidence. This is still a handoff record only; it does not
 execute the entrypoint, dispatch arbitrary PE instructions, load host DLLs, or
 run DLL/TLS entrypoints.
 `wine_process_prepare_imported_entrypoint_handoff_with_peb_teb_vm_writes(...)`
-requires PEB/TEB VM byte-write/readback evidence before exposing that imported
-entrypoint handoff.
+now consumes that VM-readback-gated import-loader transaction before exposing
+that imported entrypoint handoff.
 `wine_process_record_imported_entrypoint_startup_fault(...)` then composes that
 handoff with modeled VM fault evidence and records the process-entrypoint SEH
 rollback boundary. The accepted fault must target the imported entrypoint with
