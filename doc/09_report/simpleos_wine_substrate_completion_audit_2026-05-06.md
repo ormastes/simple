@@ -1401,3 +1401,16 @@ Fresh evidence:
 
 - `bin/simple test test/lib/common/wine_process_session_thunk_load_bind_spec.spl --mode=interpreter --clean`: covers VM-write/readback-gated import thunk planning and failure propagation.
 - `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_process_thunk_load_bind_spec.spl --mode=interpreter --clean`: covers the SimpleOS system-level import thunk planning path requiring PEB/TEB VM write/readback evidence.
+
+## 2026-05-07 Import Thunk VMA VM-Write Update
+
+`wine_process_apply_known_kernel32_thunk_patches_in_vma_with_peb_teb_vm_writes(...)`
+now requires the PEB/TEB VM byte-write/readback-gated TLS dispatch path before
+opening the modeled KERNEL32 import-thunk VMA write window. Failed VM
+byte-write composition blocks VMA thunk mutation before copied image bytes are
+patched.
+
+Fresh evidence:
+
+- `bin/simple test test/lib/common/wine_process_session_vma_thunk_write_spec.spl --mode=interpreter --clean`: covers VM-write/readback-gated VMA import thunk mutation and failure propagation.
+- `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_process_vma_thunk_write_spec.spl --mode=interpreter --clean`: covers the SimpleOS system-level VMA import thunk write path requiring PEB/TEB VM write/readback evidence.

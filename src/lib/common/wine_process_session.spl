@@ -1233,19 +1233,34 @@ pub fn wine_process_apply_known_kernel32_thunk_patches_in_vma(plan: WineProcessS
     val records = wine_process_plan_known_kernel32_thunk_patch_records(plan, data, symbol_limit)
     if not records.ok:
         return _wine_process_vma_thunk_patch_result(false, records.error, plan.command, records.dll_name, data, 0, 0, 0, "", records.status)
+    _wine_process_apply_known_kernel32_thunk_patches_in_vma_from_records(plan, data, records, "")
+
+pub fn wine_process_apply_known_kernel32_thunk_patches_in_vma_with_peb_teb_vm_writes(plan: WineProcessSessionPlan, data: [u8], preferred_base: i64, load_base: i64, dynload_apis: text, symbol_limit: i64, vm_writes: WinePebTebVmWriteResult) -> WineProcessVmaThunkPatchResult:
+    val tls = wine_process_record_tls_callback_dispatch_with_peb_teb_vm_writes(plan, data, preferred_base, load_base, dynload_apis, vm_writes)
+    if not tls.ok:
+        return _wine_process_vma_thunk_patch_result(false, tls.error, plan.command, "", data, 0, 0, 0, tls.evidence, tls.status)
+    val records = wine_process_plan_known_kernel32_thunk_patch_records(plan, data, symbol_limit)
+    if not records.ok:
+        return _wine_process_vma_thunk_patch_result(false, records.error, plan.command, records.dll_name, data, 0, 0, 0, tls.evidence + " " + records.evidence, records.status)
+    _wine_process_apply_known_kernel32_thunk_patches_in_vma_from_records(plan, data, records, tls.evidence)
+
+fn _wine_process_apply_known_kernel32_thunk_patches_in_vma_from_records(plan: WineProcessSessionPlan, data: [u8], records: WineProcessThunkPatchRecordPlan, preflight_evidence: text) -> WineProcessVmaThunkPatchResult:
+    var record_evidence = records.evidence
+    if preflight_evidence != "":
+        record_evidence = preflight_evidence + " " + records.evidence
     val image_size = pe_size_of_image(data)
     if image_size <= 0:
-        return _wine_process_vma_thunk_patch_result(false, "missing-image-size", plan.command, records.dll_name, data, 0, 0, 0, records.evidence, "rejected")
+        return _wine_process_vma_thunk_patch_result(false, "missing-image-size", plan.command, records.dll_name, data, 0, 0, 0, record_evidence, "rejected")
     val mapped_base = 0x400000
     val mapped = wine_vm_map_executable_image(wine_vm_process_space_new(1, 1, "pid fs ipc net capability"), mapped_base, image_size)
     if not mapped.ok:
-        return _wine_process_vma_thunk_patch_result(false, "process-image-map:" + mapped.state, plan.command, records.dll_name, data, 0, 0, 0, records.evidence, "blocked")
+        return _wine_process_vma_thunk_patch_result(false, "process-image-map:" + mapped.state, plan.command, records.dll_name, data, 0, 0, 0, record_evidence, "blocked")
     val writeable = wine_vm_protect(mapped.space, mapped.region.base, "rw")
     if not writeable.ok:
-        return _wine_process_vma_thunk_patch_result(false, "process-image-write-window:" + writeable.state, plan.command, records.dll_name, data, mapped.region.base, mapped.region.size, 0, records.evidence, "blocked")
-    val patched = _wine_process_apply_known_kernel32_thunk_patch_records(plan.command, records.dll_name, data, records.records, records.evidence)
+        return _wine_process_vma_thunk_patch_result(false, "process-image-write-window:" + writeable.state, plan.command, records.dll_name, data, mapped.region.base, mapped.region.size, 0, record_evidence, "blocked")
+    val patched = _wine_process_apply_known_kernel32_thunk_patch_records(plan.command, records.dll_name, data, records.records, record_evidence)
     if not patched.ok:
-        return _wine_process_vma_thunk_patch_result(false, patched.error, plan.command, records.dll_name, data, mapped.region.base, mapped.region.size, 0, records.evidence, patched.status)
+        return _wine_process_vma_thunk_patch_result(false, patched.error, plan.command, records.dll_name, data, mapped.region.base, mapped.region.size, 0, record_evidence, patched.status)
     val executable = wine_vm_protect(writeable.space, mapped.region.base, "rx")
     if not executable.ok:
         return _wine_process_vma_thunk_patch_result(false, "process-image-rx-restore:" + executable.state, plan.command, records.dll_name, patched.patched_image, mapped.region.base, mapped.region.size, patched.patched_count, patched.evidence, "blocked")
