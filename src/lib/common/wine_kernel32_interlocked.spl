@@ -1,0 +1,72 @@
+"""Bounded KERNEL32 interlocked operation bridge for Wine startup probes."""
+
+use common.wine_nt_api_catalog.{wine_nt_api_kernel32_interlocked_dispatch_gate}
+
+class WineKernel32InterlockedCell:
+    value: i64
+
+class WineKernel32InterlockedResult:
+    ok: bool
+    error: text
+    cell: WineKernel32InterlockedCell
+    previous: i64
+    current: i64
+    operations: text
+
+fn _cell(value: i64) -> WineKernel32InterlockedCell:
+    WineKernel32InterlockedCell(value: value)
+
+fn _result(ok: bool, error: text, cell: WineKernel32InterlockedCell, previous: i64, current: i64, operations: text) -> WineKernel32InterlockedResult:
+    WineKernel32InterlockedResult(ok: ok, error: error, cell: cell, previous: previous, current: current, operations: operations)
+
+fn _sequence_gate(symbols: [text]) -> text:
+    val dispatch_state = wine_nt_api_kernel32_interlocked_dispatch_gate(symbols)
+    if dispatch_state != "ready":
+        return dispatch_state
+    if symbols.len() != 5:
+        return "kernel32-interlocked-sequence-count-mismatch"
+    if symbols[0] != "InterlockedIncrement":
+        return "kernel32-interlocked-sequence-expected:InterlockedIncrement"
+    if symbols[1] != "InterlockedDecrement":
+        return "kernel32-interlocked-sequence-expected:InterlockedDecrement"
+    if symbols[2] != "InterlockedExchange":
+        return "kernel32-interlocked-sequence-expected:InterlockedExchange"
+    if symbols[3] != "InterlockedCompareExchange":
+        return "kernel32-interlocked-sequence-expected:InterlockedCompareExchange"
+    if symbols[4] != "InterlockedExchangeAdd":
+        return "kernel32-interlocked-sequence-expected:InterlockedExchangeAdd"
+    "ready"
+
+pub fn wine_kernel32_interlocked_cell_new(value: i64) -> WineKernel32InterlockedCell:
+    _cell(value)
+
+pub fn wine_kernel32_interlocked_increment(cell: WineKernel32InterlockedCell) -> WineKernel32InterlockedResult:
+    val current = cell.value + 1
+    _result(true, "", _cell(current), cell.value, current, "InterlockedIncrement")
+
+pub fn wine_kernel32_interlocked_decrement(cell: WineKernel32InterlockedCell) -> WineKernel32InterlockedResult:
+    val current = cell.value - 1
+    _result(true, "", _cell(current), cell.value, current, "InterlockedDecrement")
+
+pub fn wine_kernel32_interlocked_exchange(cell: WineKernel32InterlockedCell, value: i64) -> WineKernel32InterlockedResult:
+    _result(true, "", _cell(value), cell.value, value, "InterlockedExchange")
+
+pub fn wine_kernel32_interlocked_compare_exchange(cell: WineKernel32InterlockedCell, exchange: i64, comparand: i64) -> WineKernel32InterlockedResult:
+    if cell.value == comparand:
+        return _result(true, "", _cell(exchange), cell.value, exchange, "InterlockedCompareExchange")
+    _result(true, "", cell, cell.value, cell.value, "InterlockedCompareExchange")
+
+pub fn wine_kernel32_interlocked_exchange_add(cell: WineKernel32InterlockedCell, value: i64) -> WineKernel32InterlockedResult:
+    val current = cell.value + value
+    _result(true, "", _cell(current), cell.value, current, "InterlockedExchangeAdd")
+
+pub fn wine_kernel32_execute_interlocked(symbols: [text], cell: WineKernel32InterlockedCell, exchange_value: i64, add_value: i64) -> WineKernel32InterlockedResult:
+    val sequence_state = _sequence_gate(symbols)
+    if sequence_state != "ready":
+        return _result(false, sequence_state, cell, cell.value, cell.value, "")
+    val incremented = wine_kernel32_interlocked_increment(cell)
+    val decremented = wine_kernel32_interlocked_decrement(incremented.cell)
+    val exchanged = wine_kernel32_interlocked_exchange(decremented.cell, exchange_value)
+    val compared = wine_kernel32_interlocked_compare_exchange(exchanged.cell, exchange_value + 1, exchange_value)
+    val added = wine_kernel32_interlocked_exchange_add(compared.cell, add_value)
+    _result(true, "", added.cell, added.previous, added.current, "InterlockedIncrement InterlockedDecrement InterlockedExchange InterlockedCompareExchange InterlockedExchangeAdd")
