@@ -160,6 +160,11 @@ currently covered DLL families, and descriptor-qualified thunk inventory to
 prove that each imported symbol has a modeled module handle and procedure
 address. The result is still evidence only: no real DLL is loaded, no IAT is
 patched, and no arbitrary process code is executed.
+`wine_process_plan_import_descriptor_thunk_patch_records(...)` converts that
+modeled resolution into descriptor-qualified patch records carrying DLL name,
+symbol, descriptor index, thunk index/RVA, import-name RVA, and modeled
+procedure address. This is the multi-DLL analogue of the older known-KERNEL32
+record plan, but it still stops before VMA permission changes or IAT writes.
 `wine_process_bind_known_kernel32_imports(...)`
 then plans the currently supported KERNEL32 console binding sequence and
 rejects unsupported or incomplete import sets; it still does not patch thunks or

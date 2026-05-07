@@ -682,6 +682,14 @@ procedure addresses for every imported thunk and rejects missing exports such as
 `USER32!DialogBoxW` before any IAT patching. This completes REQ-032 as modeled
 resolution evidence only; it still performs no real DLL loading, no IAT writes,
 and no arbitrary PE execution.
+`wine_process_plan_import_descriptor_thunk_patch_records(...)` now converts the
+modeled resolution result into multi-DLL thunk patch records that include DLL
+name, symbol, descriptor index, thunk index/RVA, import-name RVA, and modeled
+procedure address. The specs are split between descriptor-table, import
+resolution, and patch-record files to keep each full-image validation run below
+the Simple test watchdog. This completes REQ-033 as record planning only; it
+still performs no VMA permission transition, no IAT write, and no arbitrary PE
+execution.
 
 Fresh evidence:
 
@@ -708,8 +716,10 @@ Fresh evidence:
 - `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_process_import_descriptor_table_spec.spl --mode=interpreter --clean`: includes REQ-030 system coverage for descriptor-qualified thunk inventory.
 - `bin/simple test test/lib/common/wine_process_session_import_descriptor_table_spec.spl --mode=interpreter --clean`: covers REQ-031 supported dependency planning and unsupported dependency rejection.
 - `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_process_import_descriptor_table_spec.spl --mode=interpreter --clean`: includes REQ-031 system coverage for import dependency preflight without DLL loading.
-- `bin/simple test test/lib/common/wine_process_session_import_descriptor_table_spec.spl --mode=interpreter --clean`: covers REQ-032 modeled import resolution and missing-export rejection.
-- `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_process_import_descriptor_table_spec.spl --mode=interpreter --clean`: includes REQ-032 system coverage for modeled module/procedure resolution without IAT patching.
+- `bin/simple test test/lib/common/wine_process_session_import_resolution_spec.spl --mode=interpreter --clean`: covers REQ-032 modeled import resolution and missing-export rejection.
+- `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_process_import_resolution_spec.spl --mode=interpreter --clean`: includes REQ-032 system coverage for modeled module/procedure resolution without IAT patching.
+- `bin/simple test test/lib/common/wine_process_session_import_patch_records_spec.spl --mode=interpreter --clean`: covers REQ-033 descriptor-qualified thunk patch record planning and missing-export rejection without IAT writes.
+- `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_process_import_patch_records_spec.spl --mode=interpreter --clean`: includes REQ-033 system coverage for multi-DLL patch record planning.
 - `bin/simple test test/lib/common/wine_x86_64_decode_spec.spl --mode=interpreter --clean`: covers RIP-relative indirect call decoding and thunk-RVA target extraction.
 - `bin/simple test test/lib/common/wine_hello_exe_spec.spl --mode=interpreter --clean`: covers import-binding agreement against thunk RVAs.
 - `bin/simple test test/lib/common/wine_process_session_known_console_spec.spl --mode=interpreter --clean`: keeps known-console process execution on the patched-image path.

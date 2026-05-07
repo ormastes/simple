@@ -209,12 +209,29 @@ class WineProcessThunkPatchRecord:
     thunk_rva: i64
     name_rva: i64
 
+class WineProcessImportDescriptorPatchRecord:
+    dll_name: text
+    symbol: text
+    descriptor_index: i64
+    thunk_index: i64
+    thunk_rva: i64
+    name_rva: i64
+    proc_address: i64
+
 class WineProcessThunkPatchRecordPlan:
     ok: bool
     error: text
     command: text
     dll_name: text
     records: [WineProcessThunkPatchRecord]
+    evidence: text
+    status: text
+
+class WineProcessImportDescriptorPatchRecordPlan:
+    ok: bool
+    error: text
+    command: text
+    records: [WineProcessImportDescriptorPatchRecord]
     evidence: text
     status: text
 
@@ -319,8 +336,14 @@ fn _wine_process_load_binding_result(ok: bool, error: text, command: text, dll_n
 fn _wine_process_thunk_patch_record(symbol: text, thunk_index: i64, thunk_rva: i64, name_rva: i64) -> WineProcessThunkPatchRecord:
     WineProcessThunkPatchRecord(symbol: symbol, thunk_index: thunk_index, thunk_rva: thunk_rva, name_rva: name_rva)
 
+fn _wine_process_import_descriptor_patch_record(dll_name: text, symbol: text, descriptor_index: i64, thunk_index: i64, thunk_rva: i64, name_rva: i64, proc_address: i64) -> WineProcessImportDescriptorPatchRecord:
+    WineProcessImportDescriptorPatchRecord(dll_name: dll_name, symbol: symbol, descriptor_index: descriptor_index, thunk_index: thunk_index, thunk_rva: thunk_rva, name_rva: name_rva, proc_address: proc_address)
+
 fn _wine_process_thunk_patch_record_plan(ok: bool, error: text, command: text, dll_name: text, records: [WineProcessThunkPatchRecord], evidence: text, status: text) -> WineProcessThunkPatchRecordPlan:
     WineProcessThunkPatchRecordPlan(ok: ok, error: error, command: command, dll_name: dll_name, records: records, evidence: evidence, status: status)
+
+fn _wine_process_import_descriptor_patch_record_plan(ok: bool, error: text, command: text, records: [WineProcessImportDescriptorPatchRecord], evidence: text, status: text) -> WineProcessImportDescriptorPatchRecordPlan:
+    WineProcessImportDescriptorPatchRecordPlan(ok: ok, error: error, command: command, records: records, evidence: evidence, status: status)
 
 fn _wine_process_thunk_patch_apply_result(ok: bool, error: text, command: text, dll_name: text, patched_image: [u8], patched_count: i64, evidence: text, status: text) -> WineProcessThunkPatchApplyResult:
     WineProcessThunkPatchApplyResult(ok: ok, error: error, command: command, dll_name: dll_name, patched_image: patched_image, patched_count: patched_count, evidence: evidence, status: status)
@@ -646,6 +669,32 @@ pub fn wine_process_plan_import_resolution(plan: WineProcessSessionPlan, data: [
         i = i + 1
     val evidence = inventory.evidence + " import-dependencies-planned import-modules-modeled-loaded import-module-handles-modeled import-proc-addresses-modeled no-real-dll-loaded no-iat-patched no-arbitrary-execution"
     _wine_process_import_resolution_plan_result(true, "", plan.command, dependencies.module_count, resolved_count, evidence, "import-resolution-planned")
+
+pub fn wine_process_plan_import_descriptor_thunk_patch_records(plan: WineProcessSessionPlan, data: [u8], descriptor_limit: i64, symbol_limit: i64) -> WineProcessImportDescriptorPatchRecordPlan:
+    val resolution = wine_process_plan_import_resolution(plan, data, descriptor_limit, symbol_limit)
+    if not resolution.ok:
+        return _wine_process_import_descriptor_patch_record_plan(false, resolution.error, plan.command, [], resolution.evidence, resolution.status)
+    val bindings = pe_import_descriptor_thunk_bindings(data, descriptor_limit, symbol_limit)
+    if bindings.len() != resolution.resolved_count:
+        return _wine_process_import_descriptor_patch_record_plan(false, "import-descriptor-patch-record-count-mismatch", plan.command, [], resolution.evidence, "rejected")
+    var table = _wine_process_known_import_module_table()
+    val dependencies = wine_process_plan_import_dependencies(plan, data, descriptor_limit, symbol_limit)
+    for module_name in dependencies.modules:
+        val loaded = wine_kernel32_load_library_ex_w(table, module_name, 0)
+        if not loaded.ok:
+            return _wine_process_import_descriptor_patch_record_plan(false, "import-module-load:" + module_name + ":" + loaded.error, plan.command, [], resolution.evidence, "rejected")
+        table = loaded.table
+    var records: [WineProcessImportDescriptorPatchRecord] = []
+    for binding in bindings:
+        val module = wine_kernel32_get_module_handle_w(table, binding.dll_name)
+        if not module.ok:
+            return _wine_process_import_descriptor_patch_record_plan(false, "import-module-handle:" + binding.dll_name + ":" + module.error, plan.command, [], resolution.evidence, "rejected")
+        val proc = wine_kernel32_get_proc_address(module.table, module.handle, binding.symbol)
+        if not proc.ok:
+            return _wine_process_import_descriptor_patch_record_plan(false, "import-proc-address:" + binding.dll_name + "!" + binding.symbol + ":" + proc.error, plan.command, [], resolution.evidence, "rejected")
+        records.push(_wine_process_import_descriptor_patch_record(binding.dll_name, binding.symbol, binding.descriptor_index, binding.thunk_index, binding.thunk_rva, binding.name_rva, proc.proc_address))
+    val evidence = resolution.evidence + " import-descriptor-patch-records-planned import-descriptor-patch-records-data-backed import-descriptor-proc-addresses-recorded no-iat-written no-vma-written"
+    _wine_process_import_descriptor_patch_record_plan(true, "", plan.command, records, evidence, "import-descriptor-patch-records-planned")
 
 pub fn wine_process_bind_known_kernel32_imports(plan: WineProcessSessionPlan, data: [u8], symbol_limit: i64) -> WineProcessImportBindingResult:
     val imports = wine_process_inspect_full_imports(plan, data, symbol_limit)
