@@ -1509,12 +1509,16 @@ Fresh evidence:
 now requires PEB/TEB VM byte-write/readback evidence before descriptor-qualified
 import-loader VMA patching can complete. The imported-entrypoint VM-write
 handoff now consumes this gated import-loader transaction path instead of
-gating only after transaction readiness was already reported.
+gating only after transaction readiness was already reported. Failed VM-write
+evidence returns no patched image, no mapped region, and explicit no-VMA-write
+evidence.
 
 Fresh evidence:
 
-- `bin/simple test test/lib/common/wine_process_session_import_transaction_vm_write_spec.spl --mode=interpreter --clean`: covers VM-write/readback-gated import-loader transaction completion.
-- `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_process_import_loader_transaction_vm_write_spec.spl --mode=interpreter --clean`: covers the SimpleOS system-level import-loader transaction requiring PEB/TEB VM write/readback evidence.
+- `bin/simple test test/lib/common/wine_process_session_import_descriptor_vma_vm_write_spec.spl --mode=interpreter --clean`: covers VM-write rejection returning no patched image, no mapped region, and no VMA thunk-write evidence.
+- `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_process_import_descriptor_vma_vm_write_spec.spl --mode=interpreter --clean`: covers the SimpleOS system-level descriptor VMA VM-write rejection before VMA thunk writes.
+- `bin/simple test test/lib/common/wine_process_session_import_transaction_vm_write_spec.spl --mode=interpreter --clean`: verifies the transaction path still composes the VM-readback-gated descriptor patch path.
+- `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_process_import_loader_transaction_vm_write_spec.spl --mode=interpreter --clean`: verifies the SimpleOS transaction path still composes the VM-readback-gated descriptor patch path.
 
 Performance follow-up: the focused import-loader transaction and imported
 entrypoint VM-write specs pass but run close to the 60s interpreter watchdog.

@@ -376,10 +376,12 @@ state accounting with descriptor-qualified VMA import patching. The transaction
 requires released loader refcounts before the process VMA write window is
 accepted, carries the loader counts beside patch counts, and aborts before VMA
 patching when modeled module resolution rolls back.
+`wine_process_apply_import_descriptor_thunk_patches_in_vma_with_peb_teb_vm_writes(...)`
+rejects failed PEB/TEB VM byte-write/readback evidence with no patched image, no
+mapped region, and no VMA thunk writes.
 `wine_process_apply_import_loader_transaction_in_vma_with_peb_teb_vm_writes(...)`
-routes the descriptor-qualified VMA import patching through the PEB/TEB VM
-byte-write/readback-gated loader preflight before transaction completion can be
-reported.
+routes the descriptor-qualified VMA import patching through that gated loader
+preflight before transaction completion can be reported.
 `wine_process_prepare_imported_entrypoint_handoff(...)` consumes the import
 loader transaction and exposes the patched process image entrypoint address with
 entrypoint mapping evidence. This is still a handoff record only; it does not
