@@ -34,19 +34,21 @@ engine parity, and no upstream file/class/struct layout parity.
 | Zeroing/count APIs | `mi_zalloc`, `mi_mallocn`, `mi_calloc`, `mi_rezalloc` | Implemented as compatibility shims over the existing allocator. |
 | Size query APIs | `mi_good_size`, `mi_usable_size` | Implemented for size classes and the Simple mock pointer representation. |
 | Sized/aligned APIs | `mi_malloc_aligned`, `mi_zalloc_aligned`, `mi_calloc_aligned`, `mi_realloc_aligned`, `mi_rezalloc_aligned`, `mi_free_size`, `mi_free_size_aligned` | Alignment input is validated; actual address alignment cannot be verified until allocation returns raw pointer metadata instead of `[u8]`. |
+| Stats and options APIs | `MiStats`, `MiOption`, `mi_stats_current`, `mi_stats_reset`, `mi_collect`, `mi_heap_collect`, `mi_version`, `mi_option_*` | Modeled over current global allocator counters and boolean options; collect hooks are no-ops until abandoned segments exist. |
 | Raw kernel API | `mi_malloc_raw`, `mi_free_raw`, `mi_raw_allocated` | Address-returning kernel-facing allocation with provider-backed pages. |
 | SimpleOS kernel heap | `src/os/kernel/memory/heap.spl` | `heap_init` initializes mimalloc and injects a kernel page provider; `heap_alloc`, `heap_free`, and `heap_free_size` route through `mi_malloc_raw` and `mi_free_raw`. `heap_free_size` is the accurate byte-accounting path until allocation metadata exists. |
 
 Remaining mimalloc gaps: no upstream ABI parity, no thread-local heaps, no
 delayed/xthread free semantics, no page commit/decommit policy, no abandon/
-collect/heap APIs, no secure/guarded allocation mode, no aligned allocation
-address metadata, and no upstream file/class/struct layout parity.
+full collect/abandon semantics, no secure/guarded allocation mode, no aligned
+allocation address metadata, and no upstream file/class/struct layout parity.
 
 ## Validation Checkpoints
 
 - `test/unit/lib/alloc/mimalloc_spec.spl` covers size classes, allocator trait
   behavior, zeroing/count APIs, size-query APIs, aligned API validation, sized
-  free APIs, and a 10k alloc/free stress loop.
+  free APIs, heap-specific shims, modeled stats/options APIs, and a 10k
+  alloc/free stress loop.
 - `test/unit/os/kernel/memory/heap_mimalloc_spec.spl` covers the SimpleOS
   kernel heap pre-init contract and locks the `heap_alloc` to `mi_malloc_raw`
   type boundary plus sized-free null safety.
