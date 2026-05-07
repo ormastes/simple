@@ -1,0 +1,100 @@
+"""Bounded KERNEL32 global-memory bridge for Wine startup probes."""
+
+use common.wine_nt_api_catalog.{wine_nt_api_kernel32_global_memory_dispatch_gate}
+use common.wine_nt_heap.{WineNtHeap, WineNtHeapBlock, WineNtHeapResult, wine_nt_get_process_heap, wine_nt_heap_alloc, wine_nt_heap_free}
+
+class WineKernel32GlobalMemoryResult:
+    ok: bool
+    error: text
+    heap: WineNtHeap
+    ptr: i64
+    size: i64
+    previous_ptr: i64
+    operations: text
+
+fn _result(ok: bool, error: text, heap: WineNtHeap, ptr: i64, size: i64, previous_ptr: i64, operations: text) -> WineKernel32GlobalMemoryResult:
+    WineKernel32GlobalMemoryResult(ok: ok, error: error, heap: heap, ptr: ptr, size: size, previous_ptr: previous_ptr, operations: operations)
+
+fn _find_block(heap: WineNtHeap, ptr: i64) -> WineNtHeapBlock:
+    for block in heap.blocks:
+        if block.ptr == ptr:
+            return block
+    WineNtHeapBlock(ptr: 0, size: 0, freed: true)
+
+fn _sequence_gate(symbols: [text]) -> text:
+    val dispatch_state = wine_nt_api_kernel32_global_memory_dispatch_gate(symbols)
+    if dispatch_state != "ready":
+        return dispatch_state
+    if symbols.len() != 4:
+        return "kernel32-global-memory-sequence-count-mismatch"
+    if symbols[0] != "GlobalAlloc":
+        return "kernel32-global-memory-sequence-expected:GlobalAlloc"
+    if symbols[1] != "GlobalSize":
+        return "kernel32-global-memory-sequence-expected:GlobalSize"
+    if symbols[2] != "GlobalReAlloc":
+        return "kernel32-global-memory-sequence-expected:GlobalReAlloc"
+    if symbols[3] != "GlobalFree":
+        return "kernel32-global-memory-sequence-expected:GlobalFree"
+    "ready"
+
+fn _failure(symbol: text, step: WineNtHeapResult, operations: text) -> WineKernel32GlobalMemoryResult:
+    _result(false, symbol + ":" + step.state, step.heap, step.ptr, step.size, 0, operations)
+
+pub fn wine_kernel32_global_alloc(heap: WineNtHeap, size: i64) -> WineKernel32GlobalMemoryResult:
+    val process_heap = wine_nt_get_process_heap(heap)
+    if not process_heap.ok:
+        return _failure("GlobalAlloc", process_heap, "")
+    val allocated = wine_nt_heap_alloc(process_heap.heap, process_heap.ptr, size)
+    if not allocated.ok:
+        return _failure("GlobalAlloc", allocated, "")
+    _result(true, "", allocated.heap, allocated.ptr, allocated.size, 0, "GlobalAlloc")
+
+pub fn wine_kernel32_global_size(heap: WineNtHeap, ptr: i64) -> WineKernel32GlobalMemoryResult:
+    val block = _find_block(heap, ptr)
+    if block.ptr == 0:
+        return _result(false, "GlobalSize:invalid-pointer", heap, ptr, 0, 0, "")
+    if block.freed:
+        return _result(false, "GlobalSize:freed-pointer", heap, ptr, block.size, 0, "")
+    _result(true, "", heap, ptr, block.size, 0, "GlobalSize")
+
+pub fn wine_kernel32_global_realloc(heap: WineNtHeap, ptr: i64, size: i64) -> WineKernel32GlobalMemoryResult:
+    val existing = wine_kernel32_global_size(heap, ptr)
+    if not existing.ok:
+        return _result(false, "GlobalReAlloc:" + existing.error, heap, ptr, 0, ptr, "")
+    val process_heap = wine_nt_get_process_heap(heap)
+    if not process_heap.ok:
+        return _failure("GlobalReAlloc", process_heap, "")
+    val allocated = wine_nt_heap_alloc(process_heap.heap, process_heap.ptr, size)
+    if not allocated.ok:
+        return _failure("GlobalReAlloc", allocated, "")
+    val freed = wine_nt_heap_free(allocated.heap, process_heap.ptr, ptr)
+    if not freed.ok:
+        return _failure("GlobalReAlloc", freed, "GlobalAlloc GlobalSize")
+    _result(true, "", freed.heap, allocated.ptr, allocated.size, ptr, "GlobalReAlloc")
+
+pub fn wine_kernel32_global_free(heap: WineNtHeap, ptr: i64) -> WineKernel32GlobalMemoryResult:
+    val process_heap = wine_nt_get_process_heap(heap)
+    if not process_heap.ok:
+        return _failure("GlobalFree", process_heap, "")
+    val freed = wine_nt_heap_free(process_heap.heap, process_heap.ptr, ptr)
+    if not freed.ok:
+        return _failure("GlobalFree", freed, "")
+    _result(true, "", freed.heap, ptr, freed.size, 0, "GlobalFree")
+
+pub fn wine_kernel32_execute_global_memory(symbols: [text], heap: WineNtHeap, initial_size: i64, resized_size: i64) -> WineKernel32GlobalMemoryResult:
+    val sequence_state = _sequence_gate(symbols)
+    if sequence_state != "ready":
+        return _result(false, sequence_state, heap, 0, 0, 0, "")
+    val allocated = wine_kernel32_global_alloc(heap, initial_size)
+    if not allocated.ok:
+        return allocated
+    val sized = wine_kernel32_global_size(allocated.heap, allocated.ptr)
+    if not sized.ok:
+        return _result(false, sized.error, sized.heap, allocated.ptr, 0, 0, "GlobalAlloc")
+    val reallocated = wine_kernel32_global_realloc(sized.heap, allocated.ptr, resized_size)
+    if not reallocated.ok:
+        return _result(false, reallocated.error, reallocated.heap, allocated.ptr, 0, allocated.ptr, "GlobalAlloc GlobalSize")
+    val freed = wine_kernel32_global_free(reallocated.heap, reallocated.ptr)
+    if not freed.ok:
+        return _result(false, freed.error, freed.heap, reallocated.ptr, reallocated.size, allocated.ptr, "GlobalAlloc GlobalSize GlobalReAlloc")
+    _result(true, "", freed.heap, reallocated.ptr, reallocated.size, allocated.ptr, "GlobalAlloc GlobalSize GlobalReAlloc GlobalFree")
