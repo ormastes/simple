@@ -262,6 +262,11 @@ state accounting with descriptor-qualified VMA import patching. The transaction
 requires released loader refcounts before the process VMA write window is
 accepted, carries the loader counts beside patch counts, and aborts before VMA
 patching when modeled module resolution rolls back.
+`wine_process_prepare_imported_entrypoint_handoff(...)` consumes the import
+loader transaction and exposes the patched process image entrypoint address with
+entrypoint mapping evidence. This is still a handoff record only; it does not
+execute the entrypoint, dispatch arbitrary PE instructions, load host DLLs, or
+run DLL/TLS entrypoints.
 `wine_process_plan_import_thunk_patches(...)` consumes those explicit records,
 so thunk patch evidence now carries module-loader, record-planning, and
 import-thunk preconditions before CPU dispatch preflight can pass.

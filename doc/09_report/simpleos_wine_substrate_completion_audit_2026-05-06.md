@@ -730,6 +730,12 @@ VMA patching when loader-state resolution rolls back. This completes REQ-039 as
 a modeled loader-state-gated import patch transaction only; it still does not
 load host DLLs, execute DLL entrypoints, run TLS callback instructions, or allow
 arbitrary PE execution.
+`wine_process_prepare_imported_entrypoint_handoff(...)` now consumes the import
+loader VMA transaction and reports a patched-image entrypoint handoff with
+mapped entrypoint evidence. This completes REQ-040 as non-executing entrypoint
+handoff only; it still does not execute the PE entrypoint, dispatch arbitrary
+instructions, load host DLLs, execute DLL entrypoints, or run TLS callback
+instructions.
 
 Fresh evidence:
 
@@ -773,6 +779,8 @@ Fresh evidence:
 - `bin/simple test test/lib/common/wine_process_session_import_transaction_spec.spl --mode=interpreter --clean`: covers REQ-039 loader-state-gated VMA import patch transactions.
 - `bin/simple test test/lib/common/wine_process_session_import_transaction_rollback_spec.spl --mode=interpreter --clean`: covers REQ-039 rollback-before-patch rejection without crossing into the VMA write path.
 - `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_process_import_transaction_spec.spl --mode=interpreter --clean`: includes REQ-039 system coverage for composed loader state plus VMA patch evidence without host DLL loading or PE execution.
+- `bin/simple test test/lib/common/wine_process_session_import_entrypoint_handoff_spec.spl --mode=interpreter --clean`: covers REQ-040 patched-image entrypoint handoff after the import loader VMA transaction.
+- `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_process_import_entrypoint_handoff_spec.spl --mode=interpreter --clean`: includes REQ-040 system coverage for non-executing patched-image entrypoint handoff.
 - `bin/simple test test/lib/common/wine_x86_64_decode_spec.spl --mode=interpreter --clean`: covers RIP-relative indirect call decoding and thunk-RVA target extraction.
 - `bin/simple test test/lib/common/wine_hello_exe_spec.spl --mode=interpreter --clean`: covers import-binding agreement against thunk RVAs.
 - `bin/simple test test/lib/common/wine_process_session_known_console_spec.spl --mode=interpreter --clean`: keeps known-console process execution on the patched-image path.

@@ -39,7 +39,7 @@ use common.wine_hello_fixture.{
     wine_hello_fixture_precondition_manifest
 }
 use common.wine_image_vm_map.{wine_image_map_into_vm_process}
-use common.wine_image_map.{wine_image_map_gate}
+use common.wine_image_map.{wine_image_map_gate, wine_image_entry_window_gate}
 use common.wine_kernel32_module_loader.{
     WineKernel32ModuleTable,
     wine_kernel32_get_module_handle_w,
@@ -336,6 +336,19 @@ class WineProcessImportLoaderVmaPatchTransactionResult:
     evidence: text
     status: text
 
+class WineProcessImportedEntrypointHandoff:
+    ok: bool
+    error: text
+    command: text
+    patched_image: [u8]
+    mapped_base: i64
+    mapped_size: i64
+    entry_address: i64
+    module_count: i64
+    patched_count: i64
+    evidence: text
+    status: text
+
 class WineProcessVmaRelocationApplyResult:
     ok: bool
     error: text
@@ -445,6 +458,9 @@ fn _wine_process_import_descriptor_vma_patch_result(ok: bool, error: text, comma
 
 fn _wine_process_import_loader_vma_patch_transaction_result(ok: bool, error: text, command: text, patched_image: [u8], mapped_base: i64, mapped_size: i64, module_count: i64, loaded_count: i64, released_count: i64, rollback_count: i64, patched_count: i64, evidence: text, status: text) -> WineProcessImportLoaderVmaPatchTransactionResult:
     WineProcessImportLoaderVmaPatchTransactionResult(ok: ok, error: error, command: command, patched_image: patched_image, mapped_base: mapped_base, mapped_size: mapped_size, module_count: module_count, loaded_count: loaded_count, released_count: released_count, rollback_count: rollback_count, patched_count: patched_count, evidence: evidence, status: status)
+
+fn _wine_process_imported_entrypoint_handoff(ok: bool, error: text, command: text, patched_image: [u8], mapped_base: i64, mapped_size: i64, entry_address: i64, module_count: i64, patched_count: i64, evidence: text, status: text) -> WineProcessImportedEntrypointHandoff:
+    WineProcessImportedEntrypointHandoff(ok: ok, error: error, command: command, patched_image: patched_image, mapped_base: mapped_base, mapped_size: mapped_size, entry_address: entry_address, module_count: module_count, patched_count: patched_count, evidence: evidence, status: status)
 
 fn _wine_process_vma_relocation_apply_result(ok: bool, error: text, command: text, patched_image: [u8], mapped_base: i64, mapped_size: i64, relocation_count: i64, target_rva: i64, evidence: text, status: text) -> WineProcessVmaRelocationApplyResult:
     WineProcessVmaRelocationApplyResult(ok: ok, error: error, command: command, patched_image: patched_image, mapped_base: mapped_base, mapped_size: mapped_size, relocation_count: relocation_count, target_rva: target_rva, evidence: evidence, status: status)
@@ -1219,3 +1235,19 @@ pub fn wine_process_apply_import_loader_transaction_in_vma(plan: WineProcessSess
         return _wine_process_import_loader_vma_patch_transaction_result(false, patched.error, plan.command, patched.patched_image, patched.mapped_base, patched.mapped_size, loader.module_count, loader.loaded_count, loader.released_count, loader.rollback_count, patched.patched_count, evidence, patched.status)
     val evidence = loader.evidence + " " + patched.evidence + " import-loader-state-before-vma-patch import-loader-vma-transaction-complete no-real-dll-loaded no-arbitrary-execution"
     _wine_process_import_loader_vma_patch_transaction_result(true, "", plan.command, patched.patched_image, patched.mapped_base, patched.mapped_size, loader.module_count, loader.loaded_count, loader.released_count, loader.rollback_count, patched.patched_count, evidence, "import-loader-vma-transaction-complete")
+
+pub fn wine_process_prepare_imported_entrypoint_handoff(plan: WineProcessSessionPlan, data: [u8], descriptor_limit: i64, symbol_limit: i64) -> WineProcessImportedEntrypointHandoff:
+    val transaction = wine_process_apply_import_loader_transaction_in_vma(plan, data, descriptor_limit, symbol_limit)
+    if not transaction.ok:
+        return _wine_process_imported_entrypoint_handoff(false, transaction.error, plan.command, transaction.patched_image, transaction.mapped_base, transaction.mapped_size, 0, transaction.module_count, transaction.patched_count, transaction.evidence, transaction.status)
+    val window_state = wine_image_entry_window_gate(transaction.patched_image, 1)
+    if window_state != "ready":
+        return _wine_process_imported_entrypoint_handoff(false, window_state, plan.command, transaction.patched_image, transaction.mapped_base, transaction.mapped_size, 0, transaction.module_count, transaction.patched_count, transaction.evidence, "rejected")
+    val entry_rva = pe_entry_point_rva(transaction.patched_image)
+    if entry_rva <= 0:
+        return _wine_process_imported_entrypoint_handoff(false, "missing-entrypoint", plan.command, transaction.patched_image, transaction.mapped_base, transaction.mapped_size, 0, transaction.module_count, transaction.patched_count, transaction.evidence, "rejected")
+    if entry_rva >= transaction.mapped_size:
+        return _wine_process_imported_entrypoint_handoff(false, "entrypoint-unmapped", plan.command, transaction.patched_image, transaction.mapped_base, transaction.mapped_size, 0, transaction.module_count, transaction.patched_count, transaction.evidence, "rejected")
+    val entry_address = transaction.mapped_base + entry_rva
+    val evidence = transaction.evidence + " imported-entrypoint-handoff-ready entrypoint-mapped entrypoint-rva-valid entrypoint-section-executable entrypoint-window-readable no-host-code-jump no-arbitrary-execution"
+    _wine_process_imported_entrypoint_handoff(true, "", plan.command, transaction.patched_image, transaction.mapped_base, transaction.mapped_size, entry_address, transaction.module_count, transaction.patched_count, evidence, "imported-entrypoint-handoff-ready")
