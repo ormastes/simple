@@ -326,6 +326,27 @@ Conservative boundary: this completes the controlled GUI milestone evidence
 path only. It is not a full X11 server, complete USER32 message pump, Wine
 graphics driver, compositor integration, or arbitrary GUI application support.
 
+## 2026-05-07 Structured Proton Runtime Evidence
+
+The Proton gate now has a structured runtime-evidence layer in addition to the
+flat readiness classifier. `wine_proton_runtime_gate` requires Steam runtime
+x86_64 ABI evidence, a pressure-vessel-style container rootfs with pid/fs/ipc/
+net/capability facets, Vulkan loader/device evidence, DXVK, VKD3D-Proton,
+shader cache, Proton launcher, Steamworks bridge, controller input, and
+esync-or-fsync evidence before deriving the legacy Proton feature string.
+
+Fresh evidence:
+
+- `bin/simple check src/lib/common/wine_proton_runtime.spl test/lib/common/wine_proton_runtime_spec.spl`: all checks passed.
+- `bin/simple test test/lib/common/wine_proton_runtime_spec.spl --mode=interpreter --clean`: 6 examples, 0 failures.
+- `bin/simple test test/lib/common/wine_proton_gate_spec.spl --mode=interpreter --clean`: 5 examples, 0 failures.
+- `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_proton_substrate_spec.spl --mode=interpreter --clean`: includes structured runtime evidence coverage.
+
+Conservative boundary: this is still a Proton readiness contract and modeled
+runtime evidence path. It does not implement upstream Proton, Steam client
+login, pressure-vessel execution, Linux ABI syscall coverage, Vulkan drivers,
+DXVK/VKD3D shader execution, or arbitrary Windows game compatibility.
+
 ## Completion Decision
 
 The WM/VM prerequisite plan in `doc/03_plan/agent_tasks/simpleos_wine_wm_vm_execution_plan_2026-05-06.md` is implemented at the Wine-facing SimpleOS contract level. Modeled X11/VM gates are no longer accepted as production evidence, and the new production gates require SimpleOS window records, framebuffer presents, OS process/address-space identity, container namespace evidence, OS VMA image mapping, thread stack/guard setup, fault evidence, and no-host-code-jump policy.
