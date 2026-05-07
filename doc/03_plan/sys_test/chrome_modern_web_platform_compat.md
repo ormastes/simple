@@ -68,6 +68,7 @@ REQ-004: Supported Feature Evidence
 - Given the current modern CSS slice, when renderer SSpec is inspected, then it should include positive and negative simple descendant `:has()` coverage.
 - Given the current modern CSS slice, when renderer SSpec is inspected, then it should include positive and negative partial `:empty` coverage.
 - Given the current modern CSS slice, when renderer SSpec is inspected, then it should include positive and negative partial `:first-child` coverage.
+- Given the current modern CSS slice, when renderer SSpec is inspected, then it should include positive and negative partial `:last-child` coverage.
 - Given the current modern CSS slice, when renderer SSpec is inspected, then it should include simple rule extraction from nested CSS `@layer` blocks.
 - Given the current modern CSS slice, when renderer SSpec is inspected, then it should include basic attribute presence and exact-value selector coverage.
 - Given the current modern CSS slice, when renderer SSpec is inspected, then it should include prefix, substring, and whitespace-token attribute selector operator coverage.
@@ -93,6 +94,7 @@ REQ-007: Initial Modern CSS BDD Slice
 - Given modern CSS selector-list pseudos, when source is inspected, then partial `:not()` and descendant `:has()` matching should be implemented.
 - Given modern CSS structural pseudos, when source is inspected, then partial `:empty` matching should be implemented for empty element content.
 - Given modern CSS structural pseudos, when source is inspected, then partial `:first-child` matching should be implemented for first element content.
+- Given modern CSS structural pseudos, when source is inspected, then partial `:last-child` matching should be implemented for last element content.
 - Given modern CSS at-rules, when source is inspected, then simple CSS `@layer` wrappers should be flattened before existing rule scans.
 - Given modern CSS selectors, when source is inspected, then basic `[attr]` and `[attr=value]` matching should be implemented.
 - Given modern CSS selectors, when source is inspected, then bounded `[attr^=value]`, `[attr*=value]`, and `[attr~=value]` matching should be implemented.
@@ -100,7 +102,7 @@ REQ-007: Initial Modern CSS BDD Slice
 - Given modern CSS selectors, when source is inspected, then bounded `[attr=value i]` matching should be implemented with the unflagged path remaining case-sensitive.
 - Given modern CSS selectors, when source is inspected, then bounded `[attr=value s]` syntax should be accepted and remain case-sensitive.
 - Given fallback renderer extraction, when source is inspected, then commas inside functional selectors should not split selector lists.
-- Given BDD coverage, when renderer SSpec is run, then the `:is()`, `:where()`, `:not()`, simple descendant `:has()`, simple CSS `@layer`, attribute selector/operator, `:empty`, and `:first-child` examples should pass.
+- Given BDD coverage, when renderer SSpec is run, then the `:is()`, `:where()`, `:not()`, simple descendant `:has()`, simple CSS `@layer`, attribute selector/operator, `:empty`, `:first-child`, and `:last-child` examples should pass.
 
 ## Execution Order
 

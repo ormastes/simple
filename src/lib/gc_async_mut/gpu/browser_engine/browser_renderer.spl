@@ -610,6 +610,7 @@ fn br_render_simple_block_fallback_pixels(html: text, width: i32, height: i32) -
     var cursor_y = margin
     var search_pos: i64 = 0
     var div_index = 0
+    val div_count = br_count_fallback_divs(lower)
     while search_pos < html.len():
         val div_pos = br_find_str(lower, "<div", search_pos)
         if div_pos >= 999999999:
@@ -632,7 +633,8 @@ fn br_render_simple_block_fallback_pixels(html: text, width: i32, height: i32) -
         val attr_style = br_style_block_rule_for_attr_self(html, "div", tag_content)
         val empty_style = br_style_block_rule_for_empty_self(html, "div", tag_content, tag_end + 1)
         val first_child_style = br_style_block_rule_for_first_child_self(html, "div", tag_content, div_index == 0)
-        val matched_style = br_merge_style_text(br_merge_style_text(br_merge_style_text(br_merge_style_text(br_merge_style_text(br_merge_style_text(br_merge_style_text(br_merge_style_text(br_merge_style_text(br_merge_style_text(tag_style, class_style), compound_class_style), multi_class_style), id_style), tag_id_style), attr_style), empty_style), first_child_style), has_style), not_style)
+        val last_child_style = br_style_block_rule_for_last_child_self(html, "div", tag_content, div_count > 0 and div_index == div_count - 1)
+        val matched_style = br_merge_style_text(br_merge_style_text(br_merge_style_text(br_merge_style_text(br_merge_style_text(br_merge_style_text(br_merge_style_text(br_merge_style_text(br_merge_style_text(br_merge_style_text(br_merge_style_text(tag_style, class_style), compound_class_style), multi_class_style), id_style), tag_id_style), attr_style), empty_style), first_child_style), last_child_style), has_style), not_style)
         val style = br_merge_style_text(matched_style, inline_style)
         val block_w = br_style_px_or_default(style, "width", width - margin * 2)
         val text_val = br_div_fallback_text(html, tag_end + 1)
@@ -652,6 +654,17 @@ fn br_render_simple_block_fallback_pixels(html: text, width: i32, height: i32) -
         div_index = div_index + 1
         search_pos = tag_end + 1
     pixels
+
+fn br_count_fallback_divs(lower_html: text) -> i32:
+    var count = 0
+    var search_pos: i64 = 0
+    while search_pos < lower_html.len():
+        val div_pos = br_find_str(lower_html, "<div", search_pos)
+        if div_pos >= 999999999:
+            return count
+        count = count + 1
+        search_pos = div_pos + 4
+    count
 
 fn br_body_background_argb_or_default(html: text, fallback: u32) -> u32:
     val body_style = br_combined_body_style(html)
@@ -865,6 +878,39 @@ fn br_style_block_rule_for_first_child_self(html: text, subject_selector: text, 
                 break
             val selector_list = css.slice(rule_start, open)
             if br_selector_list_contains_first_child_self(selector_list, subject, tag_content):
+                out = br_merge_style_text(out, css.slice(open + 1, close).trim())
+            rule_start = close + 1
+        search_pos = style_close + 1
+    out
+
+fn br_style_block_rule_for_last_child_self(html: text, subject_selector: text, tag_content: text, is_last_child: bool) -> text:
+    val subject = subject_selector.trim().lower()
+    if subject.len() == 0 or not is_last_child:
+        return ""
+    val lower_html = html.lower()
+    var out = ""
+    var search_pos: i64 = 0
+    while search_pos < html.len():
+        val style_pos = br_find_str(lower_html, "<style", search_pos)
+        if style_pos >= 999999999:
+            return out
+        val style_open_end = browser_renderer_find_char(html, ">", style_pos)
+        if style_open_end >= 999999999:
+            return out
+        val style_close = br_find_str(lower_html, "</style", style_open_end + 1)
+        if style_close >= 999999999:
+            return out
+        val css = br_flatten_layer_blocks(html.slice(style_open_end + 1, style_close))
+        var rule_start: i64 = 0
+        while rule_start < css.len():
+            val open = browser_renderer_find_char(css, "{", rule_start)
+            if open >= 999999999:
+                break
+            val close = browser_renderer_find_char(css, "}", open + 1)
+            if close >= 999999999:
+                break
+            val selector_list = css.slice(rule_start, open)
+            if br_selector_list_contains_last_child_self(selector_list, subject, tag_content):
                 out = br_merge_style_text(out, css.slice(open + 1, close).trim())
             rule_start = close + 1
         search_pos = style_close + 1
@@ -1124,6 +1170,30 @@ fn br_selector_list_contains_first_child_self(selector_list: text, subject: text
         idx = idx + 1
     false
 
+fn br_selector_list_contains_last_child_self(selector_list: text, subject: text, tag_content: text) -> bool:
+    var segment_start: i64 = 0
+    var idx: i64 = 0
+    var paren_depth = 0
+    var bracket_depth = 0
+    while idx <= selector_list.len():
+        if idx < selector_list.len():
+            val ch = selector_list.char_at(idx)
+            if ch == "(":
+                paren_depth = paren_depth + 1
+            elif ch == ")" and paren_depth > 0:
+                paren_depth = paren_depth - 1
+            elif ch == "[":
+                bracket_depth = bracket_depth + 1
+            elif ch == "]" and bracket_depth > 0:
+                bracket_depth = bracket_depth - 1
+        if idx == selector_list.len() or (selector_list.char_at(idx) == "," and paren_depth == 0 and bracket_depth == 0):
+            val part = selector_list.slice(segment_start, idx).trim().lower()
+            if br_selector_matches_last_child_self(part, subject, tag_content):
+                return true
+            segment_start = idx + 1
+        idx = idx + 1
+    false
+
 fn br_selector_matches_attr_self(selector: text, subject: text, tag_content: text) -> bool:
     val open = browser_renderer_find_char(selector, "[", 0)
     if open >= 999999999:
@@ -1168,6 +1238,17 @@ fn br_selector_matches_first_child_self(selector: text, subject: text, tag_conte
     if pseudo_pos >= 999999999:
         return false
     if pseudo_pos + 12 != selector.len():
+        return false
+    val prefix = selector.slice(0, pseudo_pos).trim()
+    if prefix.len() == 0:
+        return true
+    br_attr_prefix_matches(prefix, subject, tag_content)
+
+fn br_selector_matches_last_child_self(selector: text, subject: text, tag_content: text) -> bool:
+    val pseudo_pos = br_find_str(selector, ":last-child", 0)
+    if pseudo_pos >= 999999999:
+        return false
+    if pseudo_pos + 11 != selector.len():
         return false
     val prefix = selector.slice(0, pseudo_pos).trim()
     if prefix.len() == 0:

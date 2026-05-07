@@ -12,7 +12,7 @@
 #   - Compound: div.active, span.highlight
 #   - Comma-separated: div, span { ... }
 #   - Descendant: div span { ... } (limited — matches if ANY ancestor matches)
-#   - Pseudo-classes: :nth-child(N) (basic numeric only), :first-child, :empty, :is(), :where(), :not(), :has()
+#   - Pseudo-classes: :nth-child(N) (basic numeric only), :first-child, :last-child, :empty, :is(), :where(), :not(), :has()
 #   - Shorthand properties: flex, border, background, margin multi-value
 
 use std.gc_async_mut.gpu.browser_engine.dom.{BeDomNode,
@@ -414,7 +414,7 @@ fn expand_box_shorthand(prop: text, value: text) -> [CssDecl]:
 # Selector matching
 # =========================================================================
 
-fn selector_matches(selector: text, node: BeDomNode, parent: BeDomNode?, nth: i32) -> bool:
+fn selector_matches(selector: text, node: BeDomNode, parent: BeDomNode?, nth: i32, sibling_count: i32) -> bool:
     val trimmed = selector.trim()
     if trimmed.len() == 0:
         return false
@@ -424,35 +424,37 @@ fn selector_matches(selector: text, node: BeDomNode, parent: BeDomNode?, nth: i3
     if space_parts.len() > 1:
         # Last part must match the node itself
         val last = space_parts[space_parts.len() - 1]
-        if not simple_selector_matches(last, node, nth):
+        if not simple_selector_matches(last, node, nth, sibling_count):
             return false
         # For descendant, we just check if node matches the last selector
         # Full descendant matching would require walking ancestors, but the
         # caller walks the tree so parents are available
         return true
 
-    simple_selector_matches(trimmed, node, nth)
+    simple_selector_matches(trimmed, node, nth, sibling_count)
 
-fn simple_selector_matches(selector: text, node: BeDomNode, nth: i32) -> bool:
+fn simple_selector_matches(selector: text, node: BeDomNode, nth: i32, sibling_count: i32) -> bool:
     val sel = selector.trim()
     if sel.len() == 0:
         return false
     if sel == "*":
         return node.is_element()
     if sb_find(sel, "[", 0) < 999999999:
-        return attribute_selector_matches(sel, node, nth)
+        return attribute_selector_matches(sel, node, nth, sibling_count)
 
     # Modern forgiving selector-list pseudos. Specificity differences do not
     # matter in this order-only style applicator, so :is() and :where() share
     # matching behavior here.
     if sel.starts_with(":is(") or sel.starts_with(":where("):
-        return functional_selector_list_matches(sel, node, nth)
+        return functional_selector_list_matches(sel, node, nth, sibling_count)
     if sel.starts_with(":not("):
-        return not_selector_list_matches(sel, node, nth)
+        return not_selector_list_matches(sel, node, nth, sibling_count)
     if sel.starts_with(":has("):
         return has_descendant_selector_list_match(sel, node)
     if sel == ":first-child":
         return node.is_element() and nth == 1
+    if sel == ":last-child":
+        return node.is_element() and nth == sibling_count
     if sel == ":empty":
         return node_is_empty(node)
 
@@ -469,20 +471,26 @@ fn simple_selector_matches(selector: text, node: BeDomNode, nth: i32) -> bool:
                 return false
             if base_sel.len() == 0:
                 return node.is_element()
-            return simple_selector_matches(base_sel, node, nth)
+            return simple_selector_matches(base_sel, node, nth, sibling_count)
 
     val pseudo_empty_pos = sb_find(sel, ":empty", 0)
     if pseudo_empty_pos > 0 and pseudo_empty_pos < 999999999:
         if pseudo_empty_pos + 6 != sel.len():
             return false
         val base = sel.slice(0, pseudo_empty_pos)
-        return simple_selector_matches(base, node, nth) and node_is_empty(node)
+        return simple_selector_matches(base, node, nth, sibling_count) and node_is_empty(node)
     val pseudo_first_child_pos = sb_find(sel, ":first-child", 0)
     if pseudo_first_child_pos > 0 and pseudo_first_child_pos < 999999999:
         if pseudo_first_child_pos + 12 != sel.len():
             return false
         val base2 = sel.slice(0, pseudo_first_child_pos)
-        return simple_selector_matches(base2, node, nth) and nth == 1
+        return simple_selector_matches(base2, node, nth, sibling_count) and nth == 1
+    val pseudo_last_child_pos = sb_find(sel, ":last-child", 0)
+    if pseudo_last_child_pos > 0 and pseudo_last_child_pos < 999999999:
+        if pseudo_last_child_pos + 11 != sel.len():
+            return false
+        val base3 = sel.slice(0, pseudo_last_child_pos)
+        return simple_selector_matches(base3, node, nth, sibling_count) and nth == sibling_count
 
     # ID selector: #foo
     if sel.starts_with("#"):
@@ -499,22 +507,22 @@ fn simple_selector_matches(selector: text, node: BeDomNode, nth: i32) -> bool:
     if pseudo_is_pos > 0 and pseudo_is_pos < 999999999:
         val base = sel.slice(0, pseudo_is_pos)
         val pseudo = sel.slice(pseudo_is_pos, sel.len())
-        return simple_selector_matches(base, node, nth) and functional_selector_list_matches(pseudo, node, nth)
+        return simple_selector_matches(base, node, nth, sibling_count) and functional_selector_list_matches(pseudo, node, nth, sibling_count)
     val pseudo_where_pos = sb_find(sel, ":where(", 0)
     if pseudo_where_pos > 0 and pseudo_where_pos < 999999999:
         val base = sel.slice(0, pseudo_where_pos)
         val pseudo = sel.slice(pseudo_where_pos, sel.len())
-        return simple_selector_matches(base, node, nth) and functional_selector_list_matches(pseudo, node, nth)
+        return simple_selector_matches(base, node, nth, sibling_count) and functional_selector_list_matches(pseudo, node, nth, sibling_count)
     val pseudo_not_pos = sb_find(sel, ":not(", 0)
     if pseudo_not_pos > 0 and pseudo_not_pos < 999999999:
         val base = sel.slice(0, pseudo_not_pos)
         val pseudo = sel.slice(pseudo_not_pos, sel.len())
-        return simple_selector_matches(base, node, nth) and not_selector_list_matches(pseudo, node, nth)
+        return simple_selector_matches(base, node, nth, sibling_count) and not_selector_list_matches(pseudo, node, nth, sibling_count)
     val pseudo_has_pos = sb_find(sel, ":has(", 0)
     if pseudo_has_pos > 0 and pseudo_has_pos < 999999999:
         val base = sel.slice(0, pseudo_has_pos)
         val pseudo = sel.slice(pseudo_has_pos, sel.len())
-        return simple_selector_matches(base, node, nth) and has_descendant_selector_list_match(pseudo, node)
+        return simple_selector_matches(base, node, nth, sibling_count) and has_descendant_selector_list_match(pseudo, node)
 
     val dot_pos = sb_find(sel, ".", 0)
     if dot_pos > 0 and dot_pos < 999999999:
@@ -548,7 +556,7 @@ fn node_is_empty(node: BeDomNode) -> bool:
         idx = idx + 1
     true
 
-fn attribute_selector_matches(selector: text, node: BeDomNode, nth: i32) -> bool:
+fn attribute_selector_matches(selector: text, node: BeDomNode, nth: i32, sibling_count: i32) -> bool:
     val open = sb_find(selector, "[", 0)
     if open >= 999999999:
         return false
@@ -556,7 +564,7 @@ fn attribute_selector_matches(selector: text, node: BeDomNode, nth: i32) -> bool
     if close >= 999999999:
         return false
     val base = selector.slice(0, open).trim()
-    if base.len() > 0 and not simple_selector_matches(base, node, nth):
+    if base.len() > 0 and not simple_selector_matches(base, node, nth, sibling_count):
         return false
     val body = selector.slice(open + 1, close).trim()
     if body.len() == 0:
@@ -629,7 +637,7 @@ fn sb_unquote_attr_value(value: text) -> text:
             return value.slice(1, value.len() - 1)
     value
 
-fn functional_selector_list_matches(selector: text, node: BeDomNode, nth: i32) -> bool:
+fn functional_selector_list_matches(selector: text, node: BeDomNode, nth: i32, sibling_count: i32) -> bool:
     val open = sb_find(selector, "(", 0)
     if open >= 999999999:
         return false
@@ -641,12 +649,12 @@ fn functional_selector_list_matches(selector: text, node: BeDomNode, nth: i32) -
     var idx = 0
     while idx < options.len():
         val option = options[idx].trim()
-        if option.len() > 0 and simple_selector_matches(option, node, nth):
+        if option.len() > 0 and simple_selector_matches(option, node, nth, sibling_count):
             return true
         idx = idx + 1
     false
 
-fn not_selector_list_matches(selector: text, node: BeDomNode, nth: i32) -> bool:
+fn not_selector_list_matches(selector: text, node: BeDomNode, nth: i32, sibling_count: i32) -> bool:
     val open = sb_find(selector, "(", 0)
     if open >= 999999999:
         return false
@@ -661,7 +669,7 @@ fn not_selector_list_matches(selector: text, node: BeDomNode, nth: i32) -> bool:
         val option = options[idx].trim()
         if option.len() > 0:
             saw_option = true
-            if simple_selector_matches(option, node, nth):
+            if simple_selector_matches(option, node, nth, sibling_count):
                 return false
         idx = idx + 1
     saw_option
@@ -685,12 +693,18 @@ fn has_descendant_selector_list_match(selector: text, node: BeDomNode) -> bool:
 
 fn node_has_descendant_matching(node: BeDomNode, selector: text) -> bool:
     val children = be_dom_get_children(node)
+    var sibling_count = 0
+    var count_idx = 0
+    while count_idx < children.len():
+        if not be_dom_get_is_text(children[count_idx]):
+            sibling_count = sibling_count + 1
+        count_idx = count_idx + 1
     var idx = 0
     var nth = 1
     while idx < children.len():
         val child = children[idx]
         if not be_dom_get_is_text(child):
-            if simple_selector_matches(selector, child, nth):
+            if simple_selector_matches(selector, child, nth, sibling_count):
                 return true
             if node_has_descendant_matching(child, selector):
                 return true
@@ -711,9 +725,9 @@ fn sb_has_class(node: BeDomNode, name: text) -> bool:
 # =========================================================================
 
 fn apply_css_rules_to_tree(root: BeDomNode, rules: [CssRule]):
-    apply_rules_to_node(root, rules, nil, 1)
+    apply_rules_to_node(root, rules, nil, 1, 1)
 
-fn apply_rules_to_node(node: BeDomNode, rules: [CssRule], parent: BeDomNode?, nth: i32):
+fn apply_rules_to_node(node: BeDomNode, rules: [CssRule], parent: BeDomNode?, nth: i32, sibling_count: i32):
     if be_dom_get_is_text(node):
         return
 
@@ -726,7 +740,7 @@ fn apply_rules_to_node(node: BeDomNode, rules: [CssRule], parent: BeDomNode?, nt
     while color_ru_idx < rules.len():
         val rule = rules[color_ru_idx]
         color_ru_idx = color_ru_idx + 1
-        if selector_matches(rule.selector, node, parent, nth):
+        if selector_matches(rule.selector, node, parent, nth, sibling_count):
             var dc_idx = 0
             while dc_idx < rule.declarations.len():
                 val decl = rule.declarations[dc_idx]
@@ -737,7 +751,7 @@ fn apply_rules_to_node(node: BeDomNode, rules: [CssRule], parent: BeDomNode?, nt
     while ru_idx < rules.len():
         val rule = rules[ru_idx]
         ru_idx = ru_idx + 1
-        if selector_matches(rule.selector, node, parent, nth):
+        if selector_matches(rule.selector, node, parent, nth, sibling_count):
             var dc_idx = 0
             while dc_idx < rule.declarations.len():
                 val decl = rule.declarations[dc_idx]
@@ -753,12 +767,18 @@ fn apply_rules_to_node(node: BeDomNode, rules: [CssRule], parent: BeDomNode?, nt
     # be_dom_set_children so the parent sees the changes.
     var child_nth = 1
     val sb_kids = be_dom_get_children(node)
+    var child_count = 0
+    var count_idx = 0
+    while count_idx < sb_kids.len():
+        if not be_dom_get_is_text(sb_kids[count_idx]):
+            child_count = child_count + 1
+        count_idx = count_idx + 1
     var new_kids: [BeDomNode] = []
     var sc_idx = 0
     while sc_idx < sb_kids.len():
         var child = sb_kids[sc_idx]
         sc_idx = sc_idx + 1
-        apply_rules_to_node(child, rules, node, child_nth)
+        apply_rules_to_node(child, rules, node, child_nth, child_count)
         new_kids.push(child)
         if not be_dom_get_is_text(child):
             child_nth = child_nth + 1
