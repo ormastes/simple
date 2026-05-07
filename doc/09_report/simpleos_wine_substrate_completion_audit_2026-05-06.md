@@ -1556,3 +1556,17 @@ Fresh evidence:
 - `bin/simple test test/lib/common/wine_dll_view_relocation_spec.spl --mode=interpreter --clean`: covers VM-write/readback-gated retained DLL relocation readiness alongside existing relocation behavior.
 - `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_dll_view_relocation_spec.spl --mode=interpreter --clean`: covers the SimpleOS system-level retained DLL relocation requiring PEB/TEB VM write/readback evidence.
 - `bin/simple test test/lib/common/wine_dll_view_import_binding_vm_write_spec.spl --mode=interpreter --clean`: verifies import binding still passes through the gated relocation record.
+
+## 2026-05-07 DLL File-View Mapping VM-Write Update
+
+`wine_dll_map_file_backed_view_with_peb_teb_vm_writes(...)` now requires PEB/TEB
+VM byte-write/readback evidence before retained DLL file-view mapping readiness
+can be reported. The retained DLL relocation VM-write path now consumes this
+gated file-view mapping record instead of gating only after mapping readiness
+was already available.
+
+Fresh evidence:
+
+- `bin/simple test test/lib/common/wine_dll_file_view_spec.spl --mode=interpreter --clean`: covers VM-write/readback-gated retained DLL file-view mapping alongside existing file-view behavior.
+- `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_dll_file_view_spec.spl --mode=interpreter --clean`: covers the SimpleOS system-level retained DLL file view requiring PEB/TEB VM write/readback evidence.
+- `bin/simple test test/lib/common/wine_dll_view_relocation_spec.spl --mode=interpreter --clean`: verifies retained DLL relocation still passes through the gated file-view mapping record.

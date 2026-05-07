@@ -1,6 +1,7 @@
 """Modeled file-backed DLL view mapping for Wine loader progress."""
 
 use common.wine_dll_file_probe.{WineDllProbeFile, wine_dll_probe_candidate_bytes}
+use common.wine_peb_teb.{WinePebTebVmWriteResult}
 use common.wine_vm_adapter.{WineVmSpace, wine_vm_map_executable_image, wine_vm_process_space_new}
 
 class WineDllFileViewResult:
@@ -19,17 +20,47 @@ fn _result(ok: bool, error: text, dll_name: text, selected_path: text, mapped_ba
     WineDllFileViewResult(ok: ok, error: error, dll_name: dll_name.lower(), selected_path: selected_path, mapped_base: mapped_base, mapped_size: mapped_size, entrypoint_rva: entrypoint_rva, space: space, evidence: evidence, status: status)
 
 pub fn wine_dll_map_file_backed_view(dll_name: text, application_directory: text, working_directory: text, path_dirs: [text], known_dlls: [text], files: [WineDllProbeFile], process_id: i64, address_space_id: i64, container_evidence: text, image_base: i64) -> WineDllFileViewResult:
+    _map_file_backed_view(dll_name, application_directory, working_directory, path_dirs, known_dlls, files, process_id, address_space_id, container_evidence, image_base, "")
+
+pub fn wine_dll_map_file_backed_view_with_peb_teb_vm_writes(dll_name: text, application_directory: text, working_directory: text, path_dirs: [text], known_dlls: [text], files: [WineDllProbeFile], process_id: i64, address_space_id: i64, container_evidence: text, image_base: i64, vm_writes: WinePebTebVmWriteResult) -> WineDllFileViewResult:
+    val vm_evidence = _peb_teb_vm_write_evidence(vm_writes)
+    if vm_evidence == "":
+        return _result(false, _peb_teb_vm_write_error(vm_writes), dll_name, "", 0, 0, 0, WineVmSpace(process_id: process_id, address_space_id: address_space_id, root_id: 0, regions: [], evidence: container_evidence), vm_writes.operations + " dll-file-backed-view-blocked no-dll-view-mapped no-dll-entrypoint-executed no-tls-callback-executed no-arbitrary-execution", "rejected")
+    _map_file_backed_view(dll_name, application_directory, working_directory, path_dirs, known_dlls, files, process_id, address_space_id, container_evidence, image_base, vm_evidence)
+
+fn _map_file_backed_view(dll_name: text, application_directory: text, working_directory: text, path_dirs: [text], known_dlls: [text], files: [WineDllProbeFile], process_id: i64, address_space_id: i64, container_evidence: text, image_base: i64, preflight_evidence: text) -> WineDllFileViewResult:
     val initial_space = wine_vm_process_space_new(process_id, address_space_id, container_evidence)
     if image_base <= 0:
-        return _result(false, "invalid-image-base", dll_name, "", 0, 0, 0, initial_space, "", "rejected")
+        return _result(false, "invalid-image-base", dll_name, "", 0, 0, 0, initial_space, preflight_evidence, "rejected")
 
     val probe = wine_dll_probe_candidate_bytes(dll_name, application_directory, working_directory, path_dirs, known_dlls, files)
+    var probe_evidence = probe.evidence
+    if preflight_evidence != "":
+        probe_evidence = preflight_evidence + " " + probe.evidence
     if not probe.ok:
-        return _result(false, "dll-file-probe:" + probe.error, probe.dll_name, probe.selected_path, 0, probe.image_size, probe.entrypoint_rva, initial_space, probe.evidence, "rejected")
+        return _result(false, "dll-file-probe:" + probe.error, probe.dll_name, probe.selected_path, 0, probe.image_size, probe.entrypoint_rva, initial_space, probe_evidence, "rejected")
 
     val mapped = wine_vm_map_executable_image(initial_space, image_base, probe.image_size)
     if not mapped.ok:
-        return _result(false, "NtMapViewOfSection:" + mapped.state, probe.dll_name, probe.selected_path, 0, probe.image_size, probe.entrypoint_rva, mapped.space, probe.evidence + " file-backed-dll-view-map-failed", "blocked")
+        return _result(false, "NtMapViewOfSection:" + mapped.state, probe.dll_name, probe.selected_path, 0, probe.image_size, probe.entrypoint_rva, mapped.space, probe_evidence + " file-backed-dll-view-map-failed", "blocked")
 
-    val evidence = probe.evidence + " file-backed-dll-view-mapped file-backed-dll-view-persistent os-process os-address-space os-vma image-map exec-perm no-dll-entrypoint-executed no-tls-callback-executed no-arbitrary-execution"
+    val evidence = probe_evidence + " file-backed-dll-view-mapped file-backed-dll-view-persistent os-process os-address-space os-vma image-map exec-perm no-dll-entrypoint-executed no-tls-callback-executed no-arbitrary-execution"
     _result(true, "", probe.dll_name, probe.selected_path, mapped.region.base, mapped.region.size, probe.entrypoint_rva, mapped.space, evidence, "dll-file-backed-view-mapped")
+
+fn _peb_teb_vm_write_evidence(vm_writes: WinePebTebVmWriteResult) -> text:
+    if not vm_writes.ok:
+        return ""
+    if vm_writes.write_count != 6:
+        return ""
+    if vm_writes.byte_count != 48:
+        return ""
+    vm_writes.operations + " peb-teb-vm-writes-ready"
+
+fn _peb_teb_vm_write_error(vm_writes: WinePebTebVmWriteResult) -> text:
+    if not vm_writes.ok:
+        return "peb-teb-vm-write:" + vm_writes.state
+    if vm_writes.write_count != 6:
+        return "peb-teb-vm-write-count-mismatch"
+    if vm_writes.byte_count != 48:
+        return "peb-teb-vm-byte-count-mismatch"
+    "peb-teb-vm-write:unknown"

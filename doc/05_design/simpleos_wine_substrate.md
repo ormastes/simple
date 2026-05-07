@@ -300,14 +300,18 @@ retained SimpleOS process image view. It records the selected path, mapped base,
 image size, and entrypoint RVA on an OS-backed VMA, but still does not perform
 relocations, import binding, TLS callback execution, DllMain, or arbitrary PE
 dispatch.
+`wine_dll_map_file_backed_view_with_peb_teb_vm_writes(...)` requires PEB/TEB VM
+byte-write/readback evidence before retained DLL view mapping readiness can be
+reported, keeping the OS VMA boundary below relocation/import/TLS/DllMain.
 `wine_dll_apply_file_view_relocations(...)` opens a modeled write window on the
 retained DLL view, applies bounded DIR64 relocation evidence from
 `wine_pe_apply_relocation_plan`, restores `rx`, and verifies no-host-code-jump;
 still no import binding, TLS callbacks, DllMain, or arbitrary PE dispatch.
 `wine_dll_apply_file_view_relocations_with_peb_teb_vm_writes(...)` requires
 PEB/TEB VM byte-write/readback evidence before retained DLL relocation
-readiness can be reported, so downstream import binding cannot rely on a
-relocated view before startup memory state has been written back through the VM.
+readiness can be reported, consumes the gated file-view mapping record, and
+keeps downstream import binding from relying on a relocated view before startup
+memory state has been written back through the VM.
 `wine_dll_bind_file_view_imports(...)` composes that relocated retained view
 with bounded import descriptor inventory and the modeled KERNEL32/USER32/GDI32
 module table. It opens a second modeled write window, patches supported IAT
