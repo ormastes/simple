@@ -628,7 +628,8 @@ fn br_render_simple_block_fallback_pixels(html: text, width: i32, height: i32) -
         val tag_id_style = br_style_block_rule_for_tag_id(html, "div", id_value)
         val has_style = br_style_block_rule_for_has_descendant(html, "div", tag_end + 1)
         val not_style = br_style_block_rule_for_not_self(html, "div", tag_content)
-        val matched_style = br_merge_style_text(br_merge_style_text(br_merge_style_text(br_merge_style_text(br_merge_style_text(br_merge_style_text(br_merge_style_text(tag_style, class_style), compound_class_style), multi_class_style), id_style), tag_id_style), has_style), not_style)
+        val attr_style = br_style_block_rule_for_attr_self(html, "div", tag_content)
+        val matched_style = br_merge_style_text(br_merge_style_text(br_merge_style_text(br_merge_style_text(br_merge_style_text(br_merge_style_text(br_merge_style_text(br_merge_style_text(tag_style, class_style), compound_class_style), multi_class_style), id_style), tag_id_style), attr_style), has_style), not_style)
         val style = br_merge_style_text(matched_style, inline_style)
         val block_w = br_style_px_or_default(style, "width", width - margin * 2)
         val text_val = br_div_fallback_text(html, tag_end + 1)
@@ -799,6 +800,39 @@ fn br_style_block_rule_for_not_self(html: text, subject_selector: text, tag_cont
         search_pos = style_close + 1
     out
 
+fn br_style_block_rule_for_attr_self(html: text, subject_selector: text, tag_content: text) -> text:
+    val subject = subject_selector.trim().lower()
+    if subject.len() == 0:
+        return ""
+    val lower_html = html.lower()
+    var out = ""
+    var search_pos: i64 = 0
+    while search_pos < html.len():
+        val style_pos = br_find_str(lower_html, "<style", search_pos)
+        if style_pos >= 999999999:
+            return out
+        val style_open_end = browser_renderer_find_char(html, ">", style_pos)
+        if style_open_end >= 999999999:
+            return out
+        val style_close = br_find_str(lower_html, "</style", style_open_end + 1)
+        if style_close >= 999999999:
+            return out
+        val css = br_flatten_layer_blocks(html.slice(style_open_end + 1, style_close))
+        var rule_start: i64 = 0
+        while rule_start < css.len():
+            val open = browser_renderer_find_char(css, "{", rule_start)
+            if open >= 999999999:
+                break
+            val close = browser_renderer_find_char(css, "}", open + 1)
+            if close >= 999999999:
+                break
+            val selector_list = css.slice(rule_start, open)
+            if br_selector_list_contains_attr_self(selector_list, subject, tag_content):
+                out = br_merge_style_text(out, css.slice(open + 1, close).trim())
+            rule_start = close + 1
+        search_pos = style_close + 1
+    out
+
 fn br_style_block_rule_for_multi_class(html: text, class_value: text) -> text:
     val classes = browser_renderer_split_spaces(class_value)
     if classes.len() < 2:
@@ -946,6 +980,69 @@ fn br_selector_list_contains_not_self(selector_list: text, subject: text, tag_co
                 return true
             segment_start = idx + 1
         idx = idx + 1
+    false
+
+fn br_selector_list_contains_attr_self(selector_list: text, subject: text, tag_content: text) -> bool:
+    var segment_start: i64 = 0
+    var idx: i64 = 0
+    var paren_depth = 0
+    var bracket_depth = 0
+    while idx <= selector_list.len():
+        if idx < selector_list.len():
+            val ch = selector_list.char_at(idx)
+            if ch == "(":
+                paren_depth = paren_depth + 1
+            elif ch == ")" and paren_depth > 0:
+                paren_depth = paren_depth - 1
+            elif ch == "[":
+                bracket_depth = bracket_depth + 1
+            elif ch == "]" and bracket_depth > 0:
+                bracket_depth = bracket_depth - 1
+        if idx == selector_list.len() or (selector_list.char_at(idx) == "," and paren_depth == 0 and bracket_depth == 0):
+            val part = selector_list.slice(segment_start, idx).trim().lower()
+            if br_selector_matches_attr_self(part, subject, tag_content):
+                return true
+            segment_start = idx + 1
+        idx = idx + 1
+    false
+
+fn br_selector_matches_attr_self(selector: text, subject: text, tag_content: text) -> bool:
+    val open = browser_renderer_find_char(selector, "[", 0)
+    if open >= 999999999:
+        return false
+    val close = browser_renderer_find_char(selector, "]", open + 1)
+    if close >= 999999999:
+        return false
+    val prefix = selector.slice(0, open).trim()
+    if prefix.len() > 0 and not br_attr_prefix_matches(prefix, subject, tag_content):
+        return false
+    val body = selector.slice(open + 1, close).trim()
+    if body.len() == 0:
+        return false
+    val eq_pos = browser_renderer_find_char(body, "=", 0)
+    if eq_pos >= 999999999:
+        return br_tag_has_attr(tag_content, body.lower())
+    val key = body.slice(0, eq_pos).trim().lower()
+    val expected = br_unquote_attr_value(body.slice(eq_pos + 1, body.len()).trim())
+    if key.len() == 0:
+        return false
+    br_tag_has_attr(tag_content, key) and br_tag_attr_value(tag_content, key) == expected
+
+fn br_attr_prefix_matches(prefix: text, subject: text, tag_content: text) -> bool:
+    if prefix == "*" or prefix == subject:
+        return true
+    if prefix.starts_with(".") or prefix.starts_with("#"):
+        return br_simple_self_option_matches(prefix, subject, tag_content)
+    val dot_pos = browser_renderer_find_char(prefix, ".", 0)
+    if dot_pos > 0 and dot_pos < 999999999:
+        val tag = prefix.slice(0, dot_pos)
+        val cls = prefix.slice(dot_pos, prefix.len())
+        return tag == subject and br_simple_self_option_matches(cls, subject, tag_content)
+    val hash_pos = browser_renderer_find_char(prefix, "#", 0)
+    if hash_pos > 0 and hash_pos < 999999999:
+        val tag2 = prefix.slice(0, hash_pos)
+        val id_sel = prefix.slice(hash_pos, prefix.len())
+        return tag2 == subject and br_simple_self_option_matches(id_sel, subject, tag_content)
     false
 
 fn br_selector_matches_has_descendant(selector: text, subject: text, subtree: text) -> bool:
@@ -1097,6 +1194,26 @@ fn br_tag_attr_value(tag_content: text, attr: text) -> text:
         idx = idx + 1
     ""
 
+fn br_tag_has_attr(tag_content: text, attr: text) -> bool:
+    val parts = browser_renderer_split_tag_parts(tag_content)
+    var idx = 1
+    while idx < parts.len():
+        val part = parts[idx]
+        val eq_pos = browser_renderer_find_char(part, "=", 0)
+        var key = part.trim().lower()
+        if eq_pos > 0:
+            key = part.slice(0, eq_pos).trim().lower()
+        if key == attr:
+            return true
+        idx = idx + 1
+    false
+
+fn br_unquote_attr_value(value: text) -> text:
+    if value.len() >= 2:
+        if (value.starts_with("\"") and value.ends_with("\"")) or (value.starts_with("'") and value.ends_with("'")):
+            return value.slice(1, value.len() - 1)
+    value
+
 fn br_style_background_argb(html: text, style: text) -> u32:
     val declarations = browser_renderer_split_semicolons(style)
     var idx = declarations.len() - 1
@@ -1225,8 +1342,9 @@ fn br_first_span_style_before_div_close(html: text, content_start: i64, parent_t
     val id_value = br_tag_attr_value(tag_content, "id")
     val id_style = br_style_block_rule_for_id(html, id_value)
     val tag_id_style = br_style_block_rule_for_tag_id(html, "span", id_value)
+    val attr_style = br_style_block_rule_for_attr_self(html, "span", tag_content)
     val descendant_style = br_span_descendant_style(html, parent_tag_content)
-    br_merge_style_text(br_merge_style_text(br_merge_style_text(br_merge_style_text(br_merge_style_text(br_merge_style_text(br_merge_style_text(tag_style, class_style), compound_class_style), multi_class_style), descendant_style), id_style), tag_id_style), inline_style)
+    br_merge_style_text(br_merge_style_text(br_merge_style_text(br_merge_style_text(br_merge_style_text(br_merge_style_text(br_merge_style_text(br_merge_style_text(tag_style, class_style), compound_class_style), multi_class_style), descendant_style), id_style), tag_id_style), attr_style), inline_style)
 
 fn br_span_descendant_style(html: text, parent_tag_content: text) -> text:
     var out = br_style_block_rule_for_descendant(html, "div", "span")

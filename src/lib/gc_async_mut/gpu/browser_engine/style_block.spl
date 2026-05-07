@@ -8,6 +8,7 @@
 #   - Tag selectors: div, span, p, h1-h6, etc.
 #   - Class selectors: .container, .active
 #   - ID selectors: #main, #header
+#   - Attribute selectors: [data-state], div[data-state="active"] (basic exact/presence)
 #   - Compound: div.active, span.highlight
 #   - Comma-separated: div, span { ... }
 #   - Descendant: div span { ... } (limited — matches if ANY ancestor matches)
@@ -17,7 +18,7 @@
 use std.gc_async_mut.gpu.browser_engine.dom.{BeDomNode,
     be_dom_get_tag, be_dom_get_id, be_dom_get_classes, be_dom_get_children,
     be_dom_get_is_text, be_dom_set_children, be_dom_get_bg_color,
-    parse_color_value}
+    be_dom_get_attr, be_dom_has_attr, parse_color_value}
 use std.gc_async_mut.gpu.browser_engine.css.{parse_css_value, BoxEdges,
     BorderProps, CssValue}
 use common.string_builder.{StringBuilder}
@@ -438,6 +439,8 @@ fn simple_selector_matches(selector: text, node: BeDomNode, nth: i32) -> bool:
         return false
     if sel == "*":
         return node.is_element()
+    if sb_find(sel, "[", 0) < 999999999:
+        return attribute_selector_matches(sel, node, nth)
 
     # Modern forgiving selector-list pseudos. Specificity differences do not
     # matter in this order-only style applicator, so :is() and :where() share
@@ -514,6 +517,34 @@ fn simple_selector_matches(selector: text, node: BeDomNode, nth: i32) -> bool:
     # Plain tag selector
     val ntag3 = be_dom_get_tag(node)
     ntag3 == sel
+
+fn attribute_selector_matches(selector: text, node: BeDomNode, nth: i32) -> bool:
+    val open = sb_find(selector, "[", 0)
+    if open >= 999999999:
+        return false
+    val close = sb_find(selector, "]", open + 1)
+    if close >= 999999999:
+        return false
+    val base = selector.slice(0, open).trim()
+    if base.len() > 0 and not simple_selector_matches(base, node, nth):
+        return false
+    val body = selector.slice(open + 1, close).trim()
+    if body.len() == 0:
+        return false
+    val eq_pos = sb_find(body, "=", 0)
+    if eq_pos >= 999999999:
+        return be_dom_has_attr(node, body.lower())
+    val key = body.slice(0, eq_pos).trim().lower()
+    val expected = sb_unquote_attr_value(body.slice(eq_pos + 1, body.len()).trim())
+    if key.len() == 0:
+        return false
+    be_dom_has_attr(node, key) and be_dom_get_attr(node, key) == expected
+
+fn sb_unquote_attr_value(value: text) -> text:
+    if value.len() >= 2:
+        if (value.starts_with("\"") and value.ends_with("\"")) or (value.starts_with("'") and value.ends_with("'")):
+            return value.slice(1, value.len() - 1)
+    value
 
 fn functional_selector_list_matches(selector: text, node: BeDomNode, nth: i32) -> bool:
     val open = sb_find(selector, "(", 0)
