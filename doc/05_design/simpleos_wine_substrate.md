@@ -154,6 +154,12 @@ descriptor DLL list and accepts only the currently modeled substrate DLL
 families (`KERNEL32`, `USER32`, and `GDI32`), returning explicit rejection
 evidence for unsupported modules before loader work can begin. It still returns
 no module handles, export addresses, bound thunks, or executable state.
+`wine_process_plan_import_resolution(...)` is the next process-session preflight
+layer: it uses the supported dependency plan, a modeled module table for the
+currently covered DLL families, and descriptor-qualified thunk inventory to
+prove that each imported symbol has a modeled module handle and procedure
+address. The result is still evidence only: no real DLL is loaded, no IAT is
+patched, and no arbitrary process code is executed.
 `wine_process_bind_known_kernel32_imports(...)`
 then plans the currently supported KERNEL32 console binding sequence and
 rejects unsupported or incomplete import sets; it still does not patch thunks or
