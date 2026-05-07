@@ -9,6 +9,8 @@ use common.pe_coff_header.{
     pe_first_import_symbol_names,
     pe_first_import_thunk_bindings,
     pe_first_import_thunk_gate,
+    pe_import_descriptor_summaries,
+    pe_import_descriptor_table_gate,
     pe_import_directory_gate,
     pe_relocation_directory_gate,
     pe_rva_to_file_offset,
@@ -99,6 +101,16 @@ class WineProcessImportInspectionResult:
     dll_name: text
     symbol_count: i64
     symbols: [text]
+    status: text
+
+class WineProcessImportDescriptorTableResult:
+    ok: bool
+    error: text
+    command: text
+    descriptor_count: i64
+    dll_names: [text]
+    import_count: i64
+    evidence: text
     status: text
 
 class WineProcessImportBindingResult:
@@ -241,6 +253,9 @@ fn _wine_process_image_validation_result(ok: bool, error: text, command: text, m
 fn _wine_process_import_inspection_result(ok: bool, error: text, command: text, dll_name: text, symbol_count: i64, symbols: [text], status: text) -> WineProcessImportInspectionResult:
     WineProcessImportInspectionResult(ok: ok, error: error, command: command, dll_name: dll_name, symbol_count: symbol_count, symbols: symbols, status: status)
 
+fn _wine_process_import_descriptor_table_result(ok: bool, error: text, command: text, descriptor_count: i64, dll_names: [text], import_count: i64, evidence: text, status: text) -> WineProcessImportDescriptorTableResult:
+    WineProcessImportDescriptorTableResult(ok: ok, error: error, command: command, descriptor_count: descriptor_count, dll_names: dll_names, import_count: import_count, evidence: evidence, status: status)
+
 fn _wine_process_import_binding_result(ok: bool, error: text, command: text, dll_name: text, call_sequence: text, binding_count: i64, status: text) -> WineProcessImportBindingResult:
     WineProcessImportBindingResult(ok: ok, error: error, command: command, dll_name: dll_name, call_sequence: call_sequence, binding_count: binding_count, status: status)
 
@@ -341,7 +356,7 @@ fn _wine_process_image_gate(data: [u8]) -> text:
     val directory_state = pe_data_directory_gate(data)
     if directory_state != "ready":
         return directory_state
-    val import_state = pe_import_directory_gate(data)
+    val import_state = pe_import_descriptor_table_gate(data, 16, 128)
     if import_state != "ready":
         return import_state
     val relocation_state = pe_relocation_directory_gate(data)
@@ -485,6 +500,28 @@ pub fn wine_process_inspect_full_imports(plan: WineProcessSessionPlan, data: [u8
     if symbols.len() == 0:
         return _wine_process_import_inspection_result(false, "missing-import-symbols", plan.command, dll_name, 0, symbols, "rejected")
     _wine_process_import_inspection_result(true, "", plan.command, dll_name, symbols.len(), symbols, "imports-inspected")
+
+pub fn wine_process_inspect_import_descriptor_table(plan: WineProcessSessionPlan, data: [u8], descriptor_limit: i64, symbol_limit: i64) -> WineProcessImportDescriptorTableResult:
+    val image = wine_process_validate_full_image(plan, data)
+    if not image.ok:
+        return _wine_process_import_descriptor_table_result(false, image.error, plan.command, 0, [], 0, "", image.status)
+    if descriptor_limit <= 0:
+        return _wine_process_import_descriptor_table_result(false, "invalid-import-descriptor-limit", plan.command, 0, [], 0, "", "blocked")
+    if symbol_limit <= 0:
+        return _wine_process_import_descriptor_table_result(false, "invalid-import-symbol-limit", plan.command, 0, [], 0, "", "blocked")
+    val table_state = pe_import_descriptor_table_gate(data, descriptor_limit, symbol_limit)
+    if table_state != "ready":
+        return _wine_process_import_descriptor_table_result(false, table_state, plan.command, 0, [], 0, "", "rejected")
+    val summaries = pe_import_descriptor_summaries(data, descriptor_limit, symbol_limit)
+    if summaries.len() <= 0:
+        return _wine_process_import_descriptor_table_result(false, "missing-import-descriptors", plan.command, 0, [], 0, "", "rejected")
+    var dll_names: [text] = []
+    var import_count = 0
+    for summary in summaries:
+        dll_names.push(summary.dll_name)
+        import_count = import_count + summary.symbol_count
+    val evidence = "full-image-validated import-descriptor-table-valid import-descriptor-table-bounded import-dll-names-resolved import-thunk-tables-bounded import-symbol-counts-bounded"
+    _wine_process_import_descriptor_table_result(true, "", plan.command, summaries.len(), dll_names, import_count, evidence, "import-descriptor-table-inspected")
 
 pub fn wine_process_bind_known_kernel32_imports(plan: WineProcessSessionPlan, data: [u8], symbol_limit: i64) -> WineProcessImportBindingResult:
     val imports = wine_process_inspect_full_imports(plan, data, symbol_limit)

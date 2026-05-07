@@ -650,6 +650,16 @@ full-Wine-process handoff: it validates the PE image, maps image plus
 stack/guard regions into an OS-backed SimpleOS VM process, verifies the VM
 production gate, and reports the mapped entrypoint without executing arbitrary
 instructions.
+`pe_import_descriptor_table_gate(...)` and
+`pe_import_descriptor_summaries(...)` now add a bounded PE import-descriptor
+table layer for full-Wine images. `wine_process_validate_full_image(...)` uses
+that table-aware gate, while legacy first-import helpers remain strict for the
+known-console KERNEL32 binding path. `wine_process_inspect_import_descriptor_table(...)`
+exposes the MDSOC process-session view: bounded descriptor count, DLL names,
+total thunk-symbol count, and evidence that no DLL binding, thunk patching, or
+arbitrary instruction dispatch has occurred. This completes REQ-029 as
+inspection/preflight only; multi-DLL loading, import binding, and arbitrary PE
+execution remain outside the completed surface.
 
 Fresh evidence:
 
@@ -668,6 +678,9 @@ Fresh evidence:
 - `bin/simple test test/lib/common/wine_process_session_thunk_apply_spec.spl --mode=interpreter --clean`: covers bounded copied-image byte patching for the known KERNEL32 thunk slots.
 - `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_process_thunk_apply_spec.spl --mode=interpreter --clean`: includes REQ-025 bounded import thunk byte patching coverage.
 - `bin/simple test test/lib/common/wine_kernel32_module_loader_spec.spl --mode=interpreter --clean`: keeps the lower KERNEL32 module-loader bridge covered.
+- `bin/simple test test/lib/common/pe_coff_header_spec.spl --mode=interpreter --clean`: covers bounded multi-descriptor import table validation and descriptor summaries.
+- `bin/simple test test/lib/common/wine_process_session_import_descriptor_table_spec.spl --mode=interpreter --clean`: covers full-Wine process-session import descriptor table inspection and descriptor-limit rejection.
+- `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_process_import_descriptor_table_spec.spl --mode=interpreter --clean`: includes REQ-029 bounded multi-DLL import descriptor inspection coverage.
 - `bin/simple test test/lib/common/wine_x86_64_decode_spec.spl --mode=interpreter --clean`: covers RIP-relative indirect call decoding and thunk-RVA target extraction.
 - `bin/simple test test/lib/common/wine_hello_exe_spec.spl --mode=interpreter --clean`: covers import-binding agreement against thunk RVAs.
 - `bin/simple test test/lib/common/wine_process_session_known_console_spec.spl --mode=interpreter --clean`: keeps known-console process execution on the patched-image path.

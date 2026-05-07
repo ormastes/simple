@@ -6,6 +6,8 @@ use common.pe_coff_header.{
     pe_entry_section_executable_gate,
     pe_rva_to_file_offset,
     pe_import_directory_gate,
+    pe_import_descriptor_table_gate,
+    pe_import_descriptor_summaries,
     pe_relocation_directory_gate,
     pe_tls_directory_gate,
     pe_first_import_dll_name,
@@ -51,6 +53,20 @@ fn _put_kernel32_name(data: [u8], offset: i64) -> [u8]:
     data[offset + 12] = 0
     data
 
+fn _put_user32_name(data: [u8], offset: i64) -> [u8]:
+    data[offset] = 0x55
+    data[offset + 1] = 0x53
+    data[offset + 2] = 0x45
+    data[offset + 3] = 0x52
+    data[offset + 4] = 0x33
+    data[offset + 5] = 0x32
+    data[offset + 6] = 0x2e
+    data[offset + 7] = 0x64
+    data[offset + 8] = 0x6c
+    data[offset + 9] = 0x6c
+    data[offset + 10] = 0
+    data
+
 fn _put_write_file_name(data: [u8], offset: i64) -> [u8]:
     data[offset] = 0
     data[offset + 1] = 0
@@ -64,6 +80,30 @@ fn _put_write_file_name(data: [u8], offset: i64) -> [u8]:
     data[offset + 9] = 0x6c
     data[offset + 10] = 0x65
     data[offset + 11] = 0
+    data
+
+fn _put_message_box_name(data: [u8], offset: i64) -> [u8]:
+    data[offset] = 0
+    data[offset + 1] = 0
+    data[offset + 2] = 0x4d
+    data[offset + 3] = 0x65
+    data[offset + 4] = 0x73
+    data[offset + 5] = 0x73
+    data[offset + 6] = 0x61
+    data[offset + 7] = 0x67
+    data[offset + 8] = 0x65
+    data[offset + 9] = 0x42
+    data[offset + 10] = 0x6f
+    data[offset + 11] = 0x78
+    data[offset + 12] = 0x57
+    data[offset + 13] = 0
+    data
+
+fn _clear_bytes(data: [u8], offset: i64, count: i64) -> [u8]:
+    var i = 0
+    while i < count:
+        data[offset + i] = 0
+        i = i + 1
     data
 
 fn _minimal_pe64_console() -> [u8]:
@@ -120,6 +160,20 @@ fn _minimal_pe64_console_with_unterminated_import_descriptor() -> [u8]:
     data = _put_u32_le(data, 0x220 + 20, 0x2060)
     data
 
+fn _minimal_pe64_console_with_two_import_descriptors() -> [u8]:
+    var data = _minimal_pe64_console_with_import_descriptor()
+    data = _clear_bytes(data, 0x250, 16)
+    data = _put_u32_le(data, 0x220 + 12, 0x20d0)
+    data = _put_u32_le(data, 0x220 + 20, 0x20a0)
+    data = _put_u32_le(data, 0x220 + 20 + 12, 0x20e0)
+    data = _put_u32_le(data, 0x220 + 20 + 16, 0x20b0)
+    data = _put_kernel32_name(data, 0x2d0)
+    data = _put_user32_name(data, 0x2e0)
+    data = _put_u32_le(data, 0x2a0, 0x20c0)
+    data = _put_u32_le(data, 0x2b0, 0x20c0)
+    data = _put_message_box_name(data, 0x2c0)
+    data
+
 fn _minimal_pe64_console_with_bad_import_name_rva() -> [u8]:
     var data = _minimal_pe64_console_with_import_descriptor()
     data = _put_u32_le(data, 0x260, 0x9000)
@@ -163,6 +217,25 @@ describe "PE/COFF header classifier":
 
     it "requires a null import descriptor terminator after the first descriptor":
         expect pe_import_directory_gate(_minimal_pe64_console_with_unterminated_import_descriptor()) == "import-descriptor-unterminated"
+
+    it "validates a bounded import descriptor table without executing code":
+        expect pe_import_descriptor_table_gate(_minimal_pe64_console_with_import_descriptor(), 4, 8) == "ready"
+        expect pe_import_descriptor_table_gate(_minimal_pe64_console_with_two_import_descriptors(), 4, 8) == "ready"
+        expect pe_import_descriptor_table_gate(_minimal_pe64_console_with_two_import_descriptors(), 1, 8) == "import-descriptor-limit-exceeded"
+
+    it "summarizes multiple import descriptors and thunk counts":
+        val summaries = pe_import_descriptor_summaries(_minimal_pe64_console_with_two_import_descriptors(), 4, 8)
+        expect summaries.len() == 2
+        expect summaries[0].dll_name == "KERNEL32.dll"
+        expect summaries[0].descriptor_index == 0
+        expect summaries[0].lookup_thunk_rva == 0x2060
+        expect summaries[0].first_thunk_rva == 0x2070
+        expect summaries[0].symbol_count == 1
+        expect summaries[1].dll_name == "USER32.dll"
+        expect summaries[1].descriptor_index == 1
+        expect summaries[1].lookup_thunk_rva == 0x20a0
+        expect summaries[1].first_thunk_rva == 0x20b0
+        expect summaries[1].symbol_count == 1
 
     it "validates relocation and TLS directories through mapped section bounds":
         expect pe_relocation_directory_gate(_minimal_pe64_console_with_dirs()) == "relocation-directory-unmapped"

@@ -139,8 +139,13 @@ SimpleOS OS-backed VM process and returns entrypoint, mapped-size, and
 no-host-code-jump evidence without executing arbitrary instructions. After
 image validation,
 `wine_process_inspect_full_imports(...)` exposes a bounded first-import table
-inspection result with DLL name and imported symbols. It does not bind DLLs or
-dispatch imported functions. `wine_process_bind_known_kernel32_imports(...)`
+inspection result with DLL name and imported symbols for the known-console
+binding path. `wine_process_inspect_import_descriptor_table(...)` is the
+MDSOC-facing full-image inspection layer for arbitrary process preparation: it
+accepts a caller-supplied descriptor bound and per-descriptor symbol bound,
+walks all import descriptors up to the null terminator, resolves DLL names, and
+counts each thunk table without binding DLLs, patching IATs, or executing
+process code. `wine_process_bind_known_kernel32_imports(...)`
 then plans the currently supported KERNEL32 console binding sequence and
 rejects unsupported or incomplete import sets; it still does not patch thunks or
 execute arbitrary process code. `wine_process_plan_import_thunk_patches(...)`

@@ -19,6 +19,13 @@ class PeImportThunkBinding:
     thunk_rva: i64
     name_rva: i64
 
+class PeImportDescriptorSummary:
+    dll_name: text
+    descriptor_index: i64
+    lookup_thunk_rva: i64
+    first_thunk_rva: i64
+    symbol_count: i64
+
 fn _read_u16_le(data: [u8], offset: i64) -> i64:
     if offset + 1 >= data.len():
         return 0
@@ -262,6 +269,77 @@ fn _read_ascii_z(data: [u8], offset: i64, limit: i64) -> text:
         count = count + 1
     ""
 
+fn _import_descriptor_is_zero(data: [u8], offset: i64) -> bool:
+    if offset < 0 or offset + 19 >= data.len():
+        return false
+    _read_u32_le(data, offset) == 0 and
+       _read_u32_le(data, offset + 4) == 0 and
+       _read_u32_le(data, offset + 8) == 0 and
+       _read_u32_le(data, offset + 12) == 0 and
+       _read_u32_le(data, offset + 16) == 0
+
+fn _import_directory_offset(data: [u8]) -> i64:
+    val directory_state = pe_data_directory_gate(data)
+    if directory_state != "ready":
+        return -1
+    val summary = parse_pe_header_summary(data)
+    val optional_offset = summary.pe_offset + 24
+    val import_rva = _read_u32_le(data, optional_offset + 0x70 + 8)
+    pe_rva_to_file_offset(data, import_rva)
+
+fn _import_descriptor_thunk_gate(data: [u8], descriptor_offset: i64, limit: i64) -> text:
+    if limit <= 0:
+        return "invalid-import-symbol-limit"
+    var thunk_rva = _read_u32_le(data, descriptor_offset)
+    if thunk_rva == 0:
+        thunk_rva = _read_u32_le(data, descriptor_offset + 16)
+    if thunk_rva == 0:
+        return "missing-import-thunk"
+    var i = 0
+    var symbol_count = 0
+    while i < limit:
+        val entry_rva = thunk_rva + (i * 8)
+        val entry_offset = pe_rva_to_file_offset(data, entry_rva)
+        if entry_offset < 0 or entry_offset + 7 >= data.len():
+            return "import-thunk-entry-unmapped"
+        val name_rva = _read_u32_le(data, entry_offset)
+        val entry_high = _read_u32_le(data, entry_offset + 4)
+        if name_rva == 0 and entry_high == 0:
+            if symbol_count == 0:
+                return "import-thunk-empty"
+            return "ready"
+        if entry_high != 0:
+            return "import-thunk-ordinal-unsupported"
+        val name_offset = pe_rva_to_file_offset(data, name_rva)
+        if name_offset < 0 or name_offset + 2 >= data.len():
+            return "import-symbol-name-unmapped"
+        val symbol = _read_ascii_z(data, name_offset + 2, 128)
+        if symbol == "":
+            return "import-symbol-name-invalid"
+        symbol_count = symbol_count + 1
+        i = i + 1
+    "import-thunk-limit-exceeded"
+
+fn _import_descriptor_symbol_count(data: [u8], descriptor_offset: i64, limit: i64) -> i64:
+    var thunk_rva = _read_u32_le(data, descriptor_offset)
+    if thunk_rva == 0:
+        thunk_rva = _read_u32_le(data, descriptor_offset + 16)
+    if thunk_rva == 0 or limit <= 0:
+        return 0
+    var i = 0
+    while i < limit:
+        val entry_offset = pe_rva_to_file_offset(data, thunk_rva + (i * 8))
+        if entry_offset < 0 or entry_offset + 7 >= data.len():
+            return i
+        val name_rva = _read_u32_le(data, entry_offset)
+        val entry_high = _read_u32_le(data, entry_offset + 4)
+        if name_rva == 0 and entry_high == 0:
+            return i
+        if entry_high != 0:
+            return i
+        i = i + 1
+    i
+
 pub fn pe_import_directory_gate(data: [u8]) -> text:
     val directory_state = pe_data_directory_gate(data)
     if directory_state != "ready":
@@ -289,6 +367,62 @@ pub fn pe_import_directory_gate(data: [u8]) -> text:
        _read_u32_le(data, next_descriptor_offset + 16) != 0:
         return "import-descriptor-unterminated"
     return "ready"
+
+pub fn pe_import_descriptor_table_gate(data: [u8], descriptor_limit: i64, symbol_limit: i64) -> text:
+    val directory_state = pe_data_directory_gate(data)
+    if directory_state != "ready":
+        return directory_state
+    if descriptor_limit <= 0:
+        return "invalid-import-descriptor-limit"
+    if symbol_limit <= 0:
+        return "invalid-import-symbol-limit"
+    val import_offset = _import_directory_offset(data)
+    if import_offset < 0 or import_offset + 19 >= data.len():
+        return "import-directory-out-of-bounds"
+    var i = 0
+    while i < descriptor_limit:
+        val descriptor_offset = import_offset + (i * 20)
+        if descriptor_offset + 19 >= data.len():
+            return "import-descriptor-out-of-bounds"
+        if _import_descriptor_is_zero(data, descriptor_offset):
+            if i == 0:
+                return "missing-import-descriptor"
+            return "ready"
+        val name_rva = _read_u32_le(data, descriptor_offset + 12)
+        if name_rva == 0:
+            return "missing-import-name"
+        val name_offset = pe_rva_to_file_offset(data, name_rva)
+        val name = _read_ascii_z(data, name_offset, 128)
+        if name == "":
+            return "import-name-out-of-bounds"
+        val thunk_state = _import_descriptor_thunk_gate(data, descriptor_offset, symbol_limit)
+        if thunk_state != "ready":
+            return thunk_state
+        i = i + 1
+    "import-descriptor-limit-exceeded"
+
+pub fn pe_import_descriptor_summaries(data: [u8], descriptor_limit: i64, symbol_limit: i64) -> [PeImportDescriptorSummary]:
+    var summaries: [PeImportDescriptorSummary] = []
+    val table_state = pe_import_descriptor_table_gate(data, descriptor_limit, symbol_limit)
+    if table_state != "ready":
+        return summaries
+    val import_offset = _import_directory_offset(data)
+    var i = 0
+    while i < descriptor_limit:
+        val descriptor_offset = import_offset + (i * 20)
+        if _import_descriptor_is_zero(data, descriptor_offset):
+            return summaries
+        val name_rva = _read_u32_le(data, descriptor_offset + 12)
+        val name_offset = pe_rva_to_file_offset(data, name_rva)
+        val dll_name = _read_ascii_z(data, name_offset, 128)
+        var lookup_thunk_rva = _read_u32_le(data, descriptor_offset)
+        val first_thunk_rva = _read_u32_le(data, descriptor_offset + 16)
+        if lookup_thunk_rva == 0:
+            lookup_thunk_rva = first_thunk_rva
+        val symbol_count = _import_descriptor_symbol_count(data, descriptor_offset, symbol_limit)
+        summaries.push(PeImportDescriptorSummary(dll_name: dll_name, descriptor_index: i, lookup_thunk_rva: lookup_thunk_rva, first_thunk_rva: first_thunk_rva, symbol_count: symbol_count))
+        i = i + 1
+    summaries
 
 fn _directory_rva(data: [u8], index: i64) -> i64:
     val summary = parse_pe_header_summary(data)

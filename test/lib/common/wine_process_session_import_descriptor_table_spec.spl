@@ -1,0 +1,74 @@
+use common.wine_hello_fixture.{wine_known_hello_exe_fixture_bytes}
+use common.wine_process_session.{
+    wine_process_inspect_import_descriptor_table,
+    wine_process_session_plan,
+    wine_process_session_request_new
+}
+
+fn _put_u32_le(data: [u8], offset: i64, value: i64) -> [u8]:
+    data[offset] = (value & 0xff) as u8
+    data[offset + 1] = ((value >> 8) & 0xff) as u8
+    data[offset + 2] = ((value >> 16) & 0xff) as u8
+    data[offset + 3] = ((value >> 24) & 0xff) as u8
+    data
+
+fn _put_ascii_z(data: [u8], offset: i64, value: text) -> [u8]:
+    var i = 0
+    while i < value.len():
+        data[offset + i] = value[i] as u8
+        i = i + 1
+    data[offset + value.len()] = 0
+    data
+
+fn _put_import_name(data: [u8], offset: i64, value: text) -> [u8]:
+    data[offset] = 0
+    data[offset + 1] = 0
+    _put_ascii_z(data, offset + 2, value)
+
+fn _clear_bytes(data: [u8], offset: i64, count: i64) -> [u8]:
+    var i = 0
+    while i < count:
+        data[offset + i] = 0
+        i = i + 1
+    data
+
+fn _full_gates() -> text:
+    "process=verified exec_env=verified vm=verified renderer=verified user32=verified " +
+        "gdi32=verified kernel32_core=verified host=verified posix=verified registry=verified " +
+        "pthread=verified dynload=verified audio=verified fonts=verified input=verified " +
+        "pe_loader=verified async=verified nt_bridge=verified"
+
+fn _known_hello_with_second_import_descriptor() -> [u8]:
+    var data = wine_known_hello_exe_fixture_bytes()
+    data = _clear_bytes(data, 0x250, 16)
+    data = _put_u32_le(data, 0x220 + 12, 0x21d0)
+    data = _put_u32_le(data, 0x220 + 20, 0x2190)
+    data = _put_u32_le(data, 0x220 + 20 + 12, 0x21e0)
+    data = _put_u32_le(data, 0x220 + 20 + 16, 0x21a0)
+    data = _put_u32_le(data, 0x390, 0x21f0)
+    data = _put_u32_le(data, 0x3a0, 0x21f0)
+    data = _put_ascii_z(data, 0x3d0, "KERNEL32.dll")
+    data = _put_ascii_z(data, 0x3e0, "USER32.dll")
+    data = _put_import_name(data, 0x3f0, "MessageBoxW")
+    data
+
+describe "Wine process session import descriptor table":
+    it "inspects all bounded import descriptors for a full-Wine image":
+        val plan = wine_process_session_plan(wine_process_session_request_new("game.exe", [], "C:\\Games"), _full_gates())
+        val result = wine_process_inspect_import_descriptor_table(plan, _known_hello_with_second_import_descriptor(), 4, 8)
+        expect(result.ok).to_equal(true)
+        expect(result.command).to_equal("game.exe")
+        expect(result.descriptor_count).to_equal(2)
+        expect(result.dll_names[0]).to_equal("KERNEL32.dll")
+        expect(result.dll_names[1]).to_equal("USER32.dll")
+        expect(result.import_count).to_equal(4)
+        expect(result.evidence).to_contain("import-descriptor-table-valid")
+        expect(result.evidence).to_contain("import-thunk-tables-bounded")
+        expect(result.status).to_equal("import-descriptor-table-inspected")
+
+    it "rejects descriptor tables beyond the caller supplied bound":
+        val plan = wine_process_session_plan(wine_process_session_request_new("game.exe", [], "C:\\Games"), _full_gates())
+        val result = wine_process_inspect_import_descriptor_table(plan, _known_hello_with_second_import_descriptor(), 1, 8)
+        expect(result.ok).to_equal(false)
+        expect(result.error).to_equal("import-descriptor-limit-exceeded")
+        expect(result.status).to_equal("rejected")
