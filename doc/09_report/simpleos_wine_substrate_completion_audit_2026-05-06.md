@@ -645,6 +645,11 @@ policy at the mapped PE entrypoint.
 known thunk writes inside that modeled process image: it opens a bounded VMA
 write window, writes the three planned KERNEL32 thunk records, restores `rx`,
 and rechecks no-host-code-jump before the mapped-image preflight can pass.
+`wine_process_prepare_full_image_handoff(...)` now provides a separate
+full-Wine-process handoff: it validates the PE image, maps image plus
+stack/guard regions into an OS-backed SimpleOS VM process, verifies the VM
+production gate, and reports the mapped entrypoint without executing arbitrary
+instructions.
 
 Fresh evidence:
 
@@ -670,6 +675,8 @@ Fresh evidence:
 - `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_process_mapped_image_spec.spl --mode=interpreter --clean`: includes REQ-026 mapped patched process image coverage.
 - `bin/simple test test/lib/common/wine_process_session_vma_thunk_write_spec.spl --mode=interpreter --clean`: covers the bounded process VMA write window for known thunk records.
 - `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_process_vma_thunk_write_spec.spl --mode=interpreter --clean`: includes REQ-027 bounded process VMA thunk patch window coverage.
+- `bin/simple test test/lib/common/wine_process_session_full_image_handoff_spec.spl --mode=interpreter --clean`: covers the full-Wine image-to-VM handoff and rejection gates.
+- `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_process_full_image_handoff_spec.spl --mode=interpreter --clean`: includes REQ-028 arbitrary process image VM handoff coverage.
 
 Conservative boundary: this is a curated KERNEL32 table and bounded loader
 sequence. It is not arbitrary DLL loading, host DLL mapping, Windows DLL search

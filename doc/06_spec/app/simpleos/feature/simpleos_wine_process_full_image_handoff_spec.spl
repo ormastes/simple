@@ -1,0 +1,51 @@
+use common.wine_hello_fixture.{wine_known_hello_exe_fixture_bytes}
+use common.wine_process_session.{
+    wine_process_prepare_full_image_handoff,
+    wine_process_session_plan,
+    wine_process_session_request_new
+}
+
+fn _zero_bytes(count: i64) -> [u8]:
+    var out: [u8] = []
+    var i = 0
+    while i < count:
+        out.push(0)
+        i = i + 1
+    out
+
+fn _hello_gates() -> text:
+    "process=verified exec_env=verified vm=verified host=verified posix=verified " +
+        "pthread=verified dynload=verified pe_loader=verified async=verified nt_bridge=verified"
+
+fn _full_gates() -> text:
+    "process=verified exec_env=verified vm=verified renderer=verified user32=verified " +
+        "gdi32=verified kernel32_core=verified host=verified posix=verified registry=verified " +
+        "pthread=verified dynload=verified audio=verified fonts=verified input=verified " +
+        "pe_loader=verified async=verified nt_bridge=verified"
+
+describe "SimpleOS Wine full image handoff":
+    describe "REQ-028: arbitrary process image VM handoff":
+        it "should map a validated full-Wine process image into an OS-backed VM without executing it":
+            val plan = wine_process_session_plan(wine_process_session_request_new("game.exe", [], "C:\\Games"), _full_gates())
+            val handoff = wine_process_prepare_full_image_handoff(plan, wine_known_hello_exe_fixture_bytes())
+            expect(handoff.ok).to_equal(true)
+            expect(handoff.mapped_base).to_equal(0x400000)
+            expect(handoff.mapped_size).to_equal(0x5000)
+            expect(handoff.entry_address).to_equal(0x402000)
+            expect(handoff.evidence).to_contain("arbitrary-process-image-handoff")
+            expect(handoff.evidence).to_contain("os-vma")
+            expect(handoff.evidence).to_contain("thread-stack")
+            expect(handoff.evidence).to_contain("guard-page")
+            expect(handoff.evidence).to_contain("no-host-code-jump")
+            expect(handoff.status).to_equal("full-image-handoff-ready")
+
+        it "should keep arbitrary image handoff behind full-Wine and PE validation gates":
+            val controlled = wine_process_session_plan(wine_process_session_request_new("hello.exe", [], "C:\\"), _hello_gates())
+            val unsupported = wine_process_prepare_full_image_handoff(controlled, wine_known_hello_exe_fixture_bytes())
+            expect(unsupported.ok).to_equal(false)
+            expect(unsupported.error).to_equal("unsupported-process-session")
+
+            val full = wine_process_session_plan(wine_process_session_request_new("game.exe", [], "C:\\Games"), _full_gates())
+            val malformed = wine_process_prepare_full_image_handoff(full, _zero_bytes(0))
+            expect(malformed.ok).to_equal(false)
+            expect(malformed.error).to_equal("too-small")
