@@ -224,6 +224,8 @@ before any future arbitrary process dispatch can be attempted. It checks
 non-import CPU prerequisites before the heavier import-record planning path, so
 missing thread/stack/dispatch evidence is rejected without running the PE loader
 chain.
+`wine_process_cpu_dispatch_preflight_with_peb_teb_vm_writes(...)` requires the
+VM-readback-gated mapped-image path before reporting CPU dispatch preflight.
 `wine_process_prepare_known_console_image(...)` is the shared preflight for
 known-console dispatch and execution: it applies the bounded copied-image thunk
 patches and returns the patched image plus the composed CPU evidence.

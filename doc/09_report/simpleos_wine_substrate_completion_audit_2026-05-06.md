@@ -1427,3 +1427,21 @@ Fresh evidence:
 
 - `bin/simple test test/lib/common/wine_process_session_mapped_image_spec.spl --mode=interpreter --clean`: covers VM-write/readback-gated mapped-image preflight and failure propagation.
 - `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_process_mapped_image_spec.spl --mode=interpreter --clean`: covers the SimpleOS system-level mapped-image path requiring PEB/TEB VM write/readback evidence.
+
+## 2026-05-07 CPU Dispatch Preflight VM-Write Update
+
+`wine_process_cpu_dispatch_preflight_with_peb_teb_vm_writes(...)` now requires
+the PEB/TEB VM byte-write/readback-gated mapped-image path before reporting CPU
+dispatch preflight readiness. Failed VM byte-write composition blocks CPU
+dispatch preflight before known-console dispatch planning is reported.
+
+Fresh evidence:
+
+- `bin/simple test test/lib/common/wine_process_session_cpu_preflight_spec.spl --mode=interpreter --clean`: covers VM-write/readback-gated CPU dispatch preflight and failure propagation.
+- `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_process_cpu_preflight_spec.spl --mode=interpreter --clean`: covers the SimpleOS system-level CPU dispatch preflight path requiring PEB/TEB VM write/readback evidence.
+
+Performance follow-up: `test/lib/common/wine_process_session_spec.spl` now
+passes after moving known-console dispatch coverage into a focused spec, but it
+still runs near the 60s interpreter watchdog. Split the remaining import and
+CPU preflight examples into focused specs before adding more coverage to the
+aggregate session-planning spec.
