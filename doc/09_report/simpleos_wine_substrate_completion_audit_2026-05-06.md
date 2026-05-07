@@ -21,6 +21,7 @@ Deliver the production-quality prerequisites for a controlled SimpleOS Wine path
 | Requirements/design/test artifacts | `doc/02_requirements/feature/simpleos_wine_substrate.md`, `doc/02_requirements/nfr/simpleos_wine_substrate.md`, `doc/04_architecture/simpleos_wine_substrate.md`, `doc/04_architecture/simpleos_wine_wm_vm.md`, `doc/05_design/simpleos_wine_substrate.md`, `doc/03_plan/sys_test/simpleos_wine_substrate.md`, `doc/06_spec/app/simpleos/feature/simpleos_wine_substrate_spec.spl` | Done |
 | SimpleOS executable environment gate | `src/lib/common/wine_simpleos_exec_env_gate.spl` requires QEMU VM, full OS boot, user process, VM space, filesystem, window system, network, separate pid/fs/ipc/net/capability container namespace facets, container rootfs evidence, and NVFS rootfs backend evidence; `src/lib/common/wine_substrate.spl` exposes this as the `exec_env` matrix row/gate | Implemented prerequisite |
 | Dynamic loading prerequisite | `src/lib/common/wine_dynload_adapter.spl` requires native loader APIs, search path/dependency/namespace coverage, relocation/import/TLS surfaces, structured loader errors, and bounded NTDLL `LdrLoadDll`/`LdrGetProcedureAddress`/`LdrUnloadDll` evidence before dynload readiness | Implemented prerequisite |
+| Registry prerequisite | `src/lib/common/wine_advapi32_registry.spl` and `src/lib/common/wine_ntdll_registry.spl` provide bounded create/open/set/query/close registry evidence; `src/lib/common/wine_substrate.spl` exposes this as the `registry` matrix row/gate | Implemented prerequisite |
 | Thread/TLS/wait prerequisite | `src/lib/common/wine_thread_adapter.spl` requires thread/TLS/synchronization/wait/fault APIs and bounded NT `CreateThread`/`WaitForSingleObject` evidence before pthread readiness | Implemented prerequisite |
 | POSIX/file-I/O prerequisite | `src/lib/common/wine_posix_adapter.spl` requires fd/process/stdio/wait/timer/socket/path/errno APIs over `nogc_async_mut`, and bounded KERNEL32 `CreateFileW`/`ReadFile`/`GetFileType`/`CloseHandle` evidence before POSIX readiness | Implemented prerequisite |
 | Service and peripheral prerequisite | `src/lib/common/wine_service_adapter.spl` requires complete IPC, handle, audio, font, crypto, HID, printing, and multimedia service declarations plus bounded ADVAPI32 `OpenSCManagerW`/`CreateServiceW`/`OpenServiceW`/`StartServiceW`/`CloseServiceHandle` evidence before service readiness; audio, font, and input rows require separate waveOut/font/HID evidence gates instead of broad `host=verified` evidence | Implemented prerequisite |
@@ -173,6 +174,20 @@ Fresh evidence:
 - `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_substrate_spec.spl`: 14 examples, 0 failures.
 
 Conservative boundary: this is bounded peripheral evidence for the substrate matrix. It does not provide real DirectSound/MME devices, complete fontconfig/GDI font rendering, raw input, XInput, joystick support, or arbitrary multimedia behavior.
+
+## 2026-05-07 Registry Matrix Update
+
+The top-level Wine substrate matrix now exposes registry readiness through a first-class `registry` capability row. The row points at bounded ADVAPI32 registry roundtrip evidence and NTDLL registry query evidence instead of leaving registry behavior hidden in lower-level bridge tests.
+
+Fresh evidence:
+
+- `bin/simple check src/lib/common/wine_substrate.spl test/lib/common/wine_substrate_spec.spl doc/06_spec/app/simpleos/feature/simpleos_wine_substrate_spec.spl`: all checks passed.
+- `bin/simple test test/lib/common/wine_advapi32_registry_spec.spl`: 2 examples, 0 failures.
+- `bin/simple test test/lib/common/wine_ntdll_registry_spec.spl`: 3 examples, 0 failures.
+- `bin/simple test test/lib/common/wine_substrate_spec.spl`: 16 examples, 0 failures.
+- `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_substrate_spec.spl`: 14 examples, 0 failures.
+
+Conservative boundary: this is bounded registry bridge evidence for startup probes. It does not provide a persistent Windows registry hive, ACL/security semantics, reflection, transactions, notifications, or full registry virtualization.
 
 ## Completion Decision
 
