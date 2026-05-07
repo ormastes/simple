@@ -625,8 +625,11 @@ fn br_render_simple_block_fallback_pixels(html: text, width: i32, height: i32) -
         val multi_class_style = br_style_block_rule_for_multi_class(html, class_value)
         val id_value = br_tag_attr_value(tag_content, "id")
         val id_style = br_style_block_rule_for_id(html, id_value)
-        val tag_id_style = br_style_block_rule_for_tag_id(html, "div", id_value) # probe
-        val style = br_merge_style_text(br_merge_style_text(br_merge_style_text(br_merge_style_text(br_merge_style_text(br_merge_style_text(tag_style, class_style), compound_class_style), multi_class_style), id_style), tag_id_style), inline_style)
+        val tag_id_style = br_style_block_rule_for_tag_id(html, "div", id_value)
+        val has_style = br_style_block_rule_for_has_descendant(html, "div", tag_end + 1)
+        val not_style = br_style_block_rule_for_not_self(html, "div", tag_content)
+        val matched_style = br_merge_style_text(br_merge_style_text(br_merge_style_text(br_merge_style_text(br_merge_style_text(br_merge_style_text(br_merge_style_text(tag_style, class_style), compound_class_style), multi_class_style), id_style), tag_id_style), has_style), not_style)
+        val style = br_merge_style_text(matched_style, inline_style)
         val block_w = br_style_px_or_default(style, "width", width - margin * 2)
         val text_val = br_div_fallback_text(html, tag_end + 1)
         var block_h = br_style_px_or_default(style, "height", 0)
@@ -725,6 +728,76 @@ fn br_style_block_rule_for_child(html: text, ancestor_selector: text, child_sele
     if ancestor.len() == 0 or child.len() == 0:
         return ""
     br_style_block_rule_for_selector(html, ancestor + " > " + child)
+
+fn br_style_block_rule_for_has_descendant(html: text, subject_selector: text, content_start: i64) -> text:
+    val subject = subject_selector.trim().lower()
+    if subject.len() == 0:
+        return ""
+    val lower_html = html.lower()
+    val subject_close = br_find_str(lower_html, "</" + subject, content_start)
+    if subject_close >= 999999999:
+        return ""
+    val subtree = lower_html.slice(content_start, subject_close)
+    var out = ""
+    var search_pos: i64 = 0
+    while search_pos < html.len():
+        val style_pos = br_find_str(lower_html, "<style", search_pos)
+        if style_pos >= 999999999:
+            return out
+        val style_open_end = browser_renderer_find_char(html, ">", style_pos)
+        if style_open_end >= 999999999:
+            return out
+        val style_close = br_find_str(lower_html, "</style", style_open_end + 1)
+        if style_close >= 999999999:
+            return out
+        val css = html.slice(style_open_end + 1, style_close)
+        var rule_start: i64 = 0
+        while rule_start < css.len():
+            val open = browser_renderer_find_char(css, "{", rule_start)
+            if open >= 999999999:
+                break
+            val close = browser_renderer_find_char(css, "}", open + 1)
+            if close >= 999999999:
+                break
+            val selector_list = css.slice(rule_start, open)
+            if br_selector_list_contains_has_descendant(selector_list, subject, subtree):
+                out = br_merge_style_text(out, css.slice(open + 1, close).trim())
+            rule_start = close + 1
+        search_pos = style_close + 1
+    out
+
+fn br_style_block_rule_for_not_self(html: text, subject_selector: text, tag_content: text) -> text:
+    val subject = subject_selector.trim().lower()
+    if subject.len() == 0:
+        return ""
+    val lower_html = html.lower()
+    var out = ""
+    var search_pos: i64 = 0
+    while search_pos < html.len():
+        val style_pos = br_find_str(lower_html, "<style", search_pos)
+        if style_pos >= 999999999:
+            return out
+        val style_open_end = browser_renderer_find_char(html, ">", style_pos)
+        if style_open_end >= 999999999:
+            return out
+        val style_close = br_find_str(lower_html, "</style", style_open_end + 1)
+        if style_close >= 999999999:
+            return out
+        val css = html.slice(style_open_end + 1, style_close)
+        var rule_start: i64 = 0
+        while rule_start < css.len():
+            val open = browser_renderer_find_char(css, "{", rule_start)
+            if open >= 999999999:
+                break
+            val close = browser_renderer_find_char(css, "}", open + 1)
+            if close >= 999999999:
+                break
+            val selector_list = css.slice(rule_start, open)
+            if br_selector_list_contains_not_self(selector_list, subject, tag_content):
+                out = br_merge_style_text(out, css.slice(open + 1, close).trim())
+            rule_start = close + 1
+        search_pos = style_close + 1
+    out
 
 fn br_style_block_rule_for_multi_class(html: text, class_value: text) -> text:
     val classes = browser_renderer_split_spaces(class_value)
@@ -836,6 +909,128 @@ fn br_functional_selector_contains(selector: text, wanted: text) -> bool:
             segment_start = idx + 1
         idx = idx + 1
     false
+
+fn br_selector_list_contains_has_descendant(selector_list: text, subject: text, subtree: text) -> bool:
+    var segment_start: i64 = 0
+    var idx: i64 = 0
+    var paren_depth = 0
+    while idx <= selector_list.len():
+        if idx < selector_list.len():
+            val ch = selector_list.char_at(idx)
+            if ch == "(":
+                paren_depth = paren_depth + 1
+            elif ch == ")" and paren_depth > 0:
+                paren_depth = paren_depth - 1
+        if idx == selector_list.len() or (selector_list.char_at(idx) == "," and paren_depth == 0):
+            val part = selector_list.slice(segment_start, idx).trim().lower()
+            if br_selector_matches_has_descendant(part, subject, subtree):
+                return true
+            segment_start = idx + 1
+        idx = idx + 1
+    false
+
+fn br_selector_list_contains_not_self(selector_list: text, subject: text, tag_content: text) -> bool:
+    var segment_start: i64 = 0
+    var idx: i64 = 0
+    var paren_depth = 0
+    while idx <= selector_list.len():
+        if idx < selector_list.len():
+            val ch = selector_list.char_at(idx)
+            if ch == "(":
+                paren_depth = paren_depth + 1
+            elif ch == ")" and paren_depth > 0:
+                paren_depth = paren_depth - 1
+        if idx == selector_list.len() or (selector_list.char_at(idx) == "," and paren_depth == 0):
+            val part = selector_list.slice(segment_start, idx).trim().lower()
+            if br_selector_matches_not_self(part, subject, tag_content):
+                return true
+            segment_start = idx + 1
+        idx = idx + 1
+    false
+
+fn br_selector_matches_has_descendant(selector: text, subject: text, subtree: text) -> bool:
+    val has_pos = br_find_str(selector, ":has(", 0)
+    if has_pos >= 999999999:
+        return false
+    val prefix = selector.slice(0, has_pos).trim()
+    if prefix.len() > 0 and prefix != "*" and prefix != subject:
+        return false
+    val open = browser_renderer_find_char(selector, "(", has_pos)
+    val close = browser_renderer_find_char(selector, ")", open + 1)
+    if open >= 999999999 or close >= 999999999:
+        return false
+    var segment_start: i64 = open + 1
+    var idx: i64 = open + 1
+    while idx <= close:
+        if idx == close or selector.char_at(idx) == ",":
+            val option = selector.slice(segment_start, idx).trim()
+            if br_simple_descendant_option_in_subtree(option, subtree):
+                return true
+            segment_start = idx + 1
+        idx = idx + 1
+    false
+
+fn br_selector_matches_not_self(selector: text, subject: text, tag_content: text) -> bool:
+    val not_pos = br_find_str(selector, ":not(", 0)
+    if not_pos >= 999999999:
+        return false
+    val prefix = selector.slice(0, not_pos).trim()
+    if prefix.len() > 0 and prefix != "*" and prefix != subject:
+        return false
+    val open = browser_renderer_find_char(selector, "(", not_pos)
+    val close = browser_renderer_find_char(selector, ")", open + 1)
+    if open >= 999999999 or close >= 999999999:
+        return false
+    var saw_option = false
+    var segment_start: i64 = open + 1
+    var idx: i64 = open + 1
+    while idx <= close:
+        if idx == close or selector.char_at(idx) == ",":
+            val option = selector.slice(segment_start, idx).trim()
+            if option.len() > 0:
+                saw_option = true
+                if br_simple_self_option_matches(option, subject, tag_content):
+                    return false
+            segment_start = idx + 1
+        idx = idx + 1
+    saw_option
+
+fn br_simple_self_option_matches(option: text, subject: text, tag_content: text) -> bool:
+    val trimmed = option.trim().lower()
+    if trimmed.len() == 0:
+        return false
+    if trimmed == subject or trimmed == "*":
+        return true
+    if trimmed.starts_with("."):
+        val cls = trimmed.slice(1, trimmed.len())
+        val classes = browser_renderer_split_spaces(br_tag_attr_value(tag_content, "class").lower())
+        var idx = 0
+        while idx < classes.len():
+            if classes[idx] == cls:
+                return true
+            idx = idx + 1
+        return false
+    if trimmed.starts_with("#"):
+        val id_val = trimmed.slice(1, trimmed.len())
+        return br_tag_attr_value(tag_content, "id").lower() == id_val
+    false
+
+fn br_simple_descendant_option_in_subtree(option: text, subtree: text) -> bool:
+    val trimmed = option.trim().lower()
+    if trimmed.len() == 0:
+        return false
+    if trimmed.starts_with("."):
+        val cls = trimmed.slice(1, trimmed.len())
+        return br_subtree_contains_class(subtree, cls)
+    if trimmed.starts_with("#"):
+        val id_val = trimmed.slice(1, trimmed.len())
+        return subtree.contains("id='" + id_val + "'") or subtree.contains("id=\"" + id_val + "\"")
+    if trimmed.contains(".") or trimmed.contains("#") or trimmed.contains(":"):
+        return false
+    subtree.contains("<" + trimmed)
+
+fn br_subtree_contains_class(subtree: text, cls: text) -> bool:
+    subtree.contains("class='" + cls + "'") or subtree.contains("class=\"" + cls + "\"") or subtree.contains("class='" + cls + " ") or subtree.contains("class=\"" + cls + " ") or subtree.contains(" " + cls + " ") or subtree.contains(" " + cls + "'") or subtree.contains(" " + cls + "\"")
 
 fn br_selector_list_contains_multi_class(selector_list: text, classes: [text]) -> bool:
     var segment_start: i64 = 0

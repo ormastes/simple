@@ -31,7 +31,7 @@ Out of scope:
 | Requirement | Description | Test File | Test Cases | Coverage |
 | --- | --- | --- | --- | --- |
 | REQ-001 | Compatibility matrix | `chrome_modern_web_platform_compat_spec.spl` | 3 | Full |
-| REQ-002 | WPT subset path | `chrome_modern_web_platform_compat_spec.spl` | 3 | Full |
+| REQ-002 | WPT subset path | `chrome_modern_web_platform_compat_spec.spl`, `selector_color_subset_spec.spl` | 4 | Full |
 | REQ-003 | Test262 subset path | `chrome_modern_web_platform_compat_spec.spl` | 3 | Full |
 | REQ-004 | Supported feature evidence | `chrome_modern_web_platform_compat_spec.spl` | 5 | Full |
 | REQ-005 | Unsupported feature tracking | `chrome_modern_web_platform_compat_spec.spl` | 3 | Full |
@@ -49,6 +49,7 @@ REQ-001: Compatibility Matrix
 REQ-002: WPT Subset Path
 
 - Given browser compatibility depends on WPT, when the plan is inspected, then it should create a WPT subset path.
+- Given the first WPT subset path, when artifacts are inspected, then it should provide an executable selector/color SSpec.
 - Given WPT migration, when the initial subset is inspected, then it should cover CSS selectors, CSS colors, HTML parser basics, and rendering basics.
 - Given WPT execution, when the exit gate is inspected, then it should require at least 25 WPT-derived SSpec cases.
 
@@ -88,14 +89,16 @@ REQ-007: Initial Modern CSS BDD Slice
 ## Execution Order
 
 1. Run the plan acceptance SSpec.
-2. Run the focused browser renderer SSpec.
-3. Run `bin/simple check src/lib` after implementation changes.
+2. Run the WPT selector/color subset SSpec.
+3. Run the focused browser renderer SSpec.
+4. Run `bin/simple check src/lib` after implementation changes.
 
 ## Pass/Fail Criteria
 
 PASS:
 
 - The plan acceptance SSpec passes.
+- The WPT selector/color subset SSpec passes.
 - The focused renderer SSpec passes.
 - `bin/simple check src/lib` passes.
 

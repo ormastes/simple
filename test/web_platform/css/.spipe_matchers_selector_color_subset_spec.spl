@@ -1,0 +1,106 @@
+use std.spec.*
+
+use std.gc_async_mut.gpu.browser_engine.browser_renderer.{render_html_to_pixels_with_viewport}
+
+val WIDTH: i32 = 32
+val HEIGHT: i32 = 24
+
+fn _count_color(pixels: [u32], color: u32) -> i32:
+    var count: i32 = 0
+    var idx: i32 = 0
+    while idx < pixels.len():
+        if pixels[idx] == color:
+            count = count + 1
+        idx = idx + 1
+    count
+
+fn _renders_color(style: text, body: text, color: u32) -> bool:
+    val html = "<html><head><style>body { margin: 0; background-color: #ffffff; } " + style + "</style></head><body>" + body + "</body></html>"
+    val pixels = render_html_to_pixels_with_viewport(html, WIDTH, HEIGHT).pixel_data
+    _count_color(pixels, color) > 0
+
+fn _body_renders_color(style: text, color: u32) -> bool:
+    val html = "<html><body style='margin:0; " + style + "'>Simple</body></html>"
+    val pixels = render_html_to_pixels_with_viewport(html, 8, 220).pixel_data
+    pixels[7 + 210 * 8] == color
+
+describe "WPT-derived CSS selector and color subset":
+
+    context "CSS selector basics":
+
+        it "covers type selector matching":
+            expect _renders_color("div { width: 12px; height: 8px; background-color: #2563eb; }", "<div></div>", 0xFF2563EBu32) == true
+
+        it "covers class selector matching":
+            expect _renders_color(".card { width: 12px; height: 8px; background-color: #16a34a; }", "<div class='card'></div>", 0xFF16A34Au32) == true
+
+        it "covers id selector matching":
+            expect _renders_color("#hero { width: 12px; height: 8px; background-color: #dc2626; }", "<div id='hero'></div>", 0xFFDC2626u32) == true
+
+        it "covers selector-list matching":
+            expect _renders_color("section, .card { width: 12px; height: 8px; background-color: #0891b2; }", "<div class='card'></div>", 0xFF0891B2u32) == true
+
+        it "covers tag class compound selector matching":
+            expect _renders_color("div.card { width: 12px; height: 8px; background-color: #7c3aed; }", "<div class='card'></div>", 0xFF7C3AEDu32) == true
+
+        it "covers multi class selector matching":
+            expect _renders_color(".card.primary { width: 12px; height: 8px; background-color: #0f766e; }", "<div class='primary card'></div>", 0xFF0F766Eu32) == true
+
+        it "covers tag id compound selector matching":
+            expect _renders_color("div#hero { width: 12px; height: 8px; background-color: #be123c; }", "<div id='hero'></div>", 0xFFBE123Cu32) == true
+
+        it "covers later class rule ordering":
+            expect _renders_color(".card { width: 12px; height: 8px; background-color: #2563eb; } .card { background-color: #9333ea; }", "<div class='card'></div>", 0xFF9333EAu32) == true
+
+        it "covers class selector token boundaries":
+            expect _renders_color(".card-title { width: 12px; height: 8px; background-color: #2563eb; } .card { width: 12px; height: 8px; background-color: #ea580c; }", "<div class='card'></div>", 0xFFEA580Cu32) == true
+
+        it "covers :is selector-list matching":
+            expect _renders_color(":is(section, .card) { width: 12px; height: 8px; background-color: #2563eb; }", "<div class='card'></div>", 0xFF2563EBu32) == true
+
+        it "covers :where selector-list matching":
+            expect _renders_color(":where(section, .card) { width: 12px; height: 8px; background-color: #16a34a; }", "<div class='card'></div>", 0xFF16A34Au32) == true
+
+        it "covers partial :not selector-list exclusion":
+            expect _renders_color("div:not(.disabled, #archived) { width: 12px; height: 8px; background-color: #0891b2; }", "<div class='card'></div>", 0xFF0891B2u32) == true
+
+        it "covers partial :has descendant matching":
+            expect _renders_color("div:has(.badge) { width: 12px; height: 8px; background-color: #7c3aed; }", "<div><span class='badge'></span></div>", 0xFF7C3AEDu32) == true
+
+    context "CSS color and background basics":
+
+        it "covers six digit hex color":
+            expect _body_renders_color("background-color:#2563eb", 0xFF2563EBu32) == true
+
+        it "covers shorthand hex color":
+            expect _body_renders_color("background-color:#0f8", 0xFF00FF88u32) == true
+
+        it "covers legacy rgb function color":
+            expect _body_renders_color("background-color:rgb(5, 150, 105)", 0xFF059669u32) == true
+
+        it "covers modern space separated rgb function color":
+            expect _body_renders_color("background-color:rgb(5 150 105)", 0xFF059669u32) == true
+
+        it "covers rgba compositing over white":
+            expect _body_renders_color("background-color:rgba(0, 0, 0, 0.5)", 0xFF808080u32) == true
+
+        it "covers hsl function color":
+            expect _body_renders_color("background-color:hsl(120, 100%, 25%)", 0xFF008000u32) == true
+
+        it "covers named CSS color":
+            expect _body_renders_color("background-color:rebeccapurple", 0xFF663399u32) == true
+
+        it "covers transparent compositing to white":
+            expect _body_renders_color("background-color:transparent", 0xFFFFFFFFu32) == true
+
+        it "covers function color background shorthand":
+            expect _body_renders_color("background:rgb(5, 150, 105) no-repeat", 0xFF059669u32) == true
+
+        it "covers color-first background shorthand":
+            expect _body_renders_color("background:rebeccapurple no-repeat", 0xFF663399u32) == true
+
+        it "covers url background shorthand fallback color":
+            expect _body_renders_color("background:url(hero.png) #0f8 no-repeat", 0xFF00FF88u32) == true
+
+        it "covers later background-color overriding shorthand":
+            expect _body_renders_color("background:#0f8; background-color:rebeccapurple", 0xFF663399u32) == true
