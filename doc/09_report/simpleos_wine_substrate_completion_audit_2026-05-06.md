@@ -1199,3 +1199,15 @@ Fresh evidence:
 
 - `bin/simple test test/lib/common/wine_dll_view_dllmain_handoff_spec.spl --mode=interpreter --clean`: covers loader-lock plus PEB/TEB write readiness and unmapped startup-write rejection.
 - `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_dll_view_dllmain_handoff_spec.spl --mode=interpreter --clean`: covers the SimpleOS system-level DllMain handoff requiring PEB/TEB writes.
+
+## 2026-05-07 DllMain Startup-Fault Write-Handoff Update
+
+`wine_dll_record_file_view_startup_fault_with_peb_teb_writes(...)` now carries
+the write-gated DllMain handoff into the modeled SEH rollback path. Startup
+rollback is recorded only after PEB/TEB loader-lock and writable-page evidence
+are ready; missing startup writes block before rollback evidence is emitted.
+
+Fresh evidence:
+
+- `bin/simple test test/lib/common/wine_dll_view_startup_fault_spec.spl --mode=interpreter --clean`: covers write-gated startup rollback and unmapped PEB/TEB write rejection.
+- `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_dll_view_startup_fault_spec.spl --mode=interpreter --clean`: covers the SimpleOS system-level startup rollback path requiring PEB/TEB writes.

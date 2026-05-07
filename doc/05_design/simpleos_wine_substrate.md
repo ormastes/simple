@@ -431,6 +431,9 @@ that write readiness before the NTDLL process/thread information bridge reports
 PEB/TEB addresses. `wine_dllmain_handoff_require_peb_teb_writes(...)` also
 requires the same write readiness before a retained DLL view can report
 non-executing DllMain process-attach handoff readiness.
+`wine_dll_record_file_view_startup_fault_with_peb_teb_writes(...)` carries
+that gate into the modeled SEH rollback path so startup-fault rollback is only
+recorded after the write-gated DllMain handoff is ready.
 `src/lib/common/wine_nt_heap.spl` models `HeapAlloc` and `HeapFree` with a
 deterministic process-heap handle and VM-reservation-backed block tracking.
 `src/lib/common/wine_ntdll_bridge.spl` maps the catalogued ntdll/Rtl forms onto

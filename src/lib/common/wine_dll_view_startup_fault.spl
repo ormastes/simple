@@ -1,7 +1,8 @@
 """Modeled DllMain startup fault rollback for retained Wine DLL views."""
 
 use common.wine_dll_file_probe.{WineDllProbeFile}
-use common.wine_dll_view_dllmain_handoff.{wine_dll_prepare_file_view_dllmain_handoff}
+use common.wine_dll_view_dllmain_handoff.{WineDllViewDllMainHandoffResult, wine_dll_prepare_file_view_dllmain_handoff, wine_dllmain_handoff_require_peb_teb_writes}
+use common.wine_peb_teb.{WinePebTebMemoryWriteResult}
 use common.wine_vm_adapter.{WineVmFault, wine_vm_fault_evidence}
 use common.wine_vm_gate.{wine_vm_fault_gate}
 
@@ -21,8 +22,7 @@ class WineDllViewStartupFaultResult:
 fn _result(ok: bool, error: text, dll_name: text, selected_path: text, mapped_base: i64, mapped_size: i64, entrypoint_address: i64, fault_address: i64, rollback_count: i64, evidence: text, status: text) -> WineDllViewStartupFaultResult:
     WineDllViewStartupFaultResult(ok: ok, error: error, dll_name: dll_name.lower(), selected_path: selected_path, mapped_base: mapped_base, mapped_size: mapped_size, entrypoint_address: entrypoint_address, fault_address: fault_address, rollback_count: rollback_count, evidence: evidence, status: status)
 
-pub fn wine_dll_record_file_view_startup_fault(dll_name: text, application_directory: text, working_directory: text, path_dirs: [text], known_dlls: [text], files: [WineDllProbeFile], data: [u8], preferred_base: i64, load_base: i64, process_id: i64, address_space_id: i64, container_evidence: text, descriptor_limit: i64, symbol_limit: i64, dynload_apis: text, fault: WineVmFault) -> WineDllViewStartupFaultResult:
-    val handoff = wine_dll_prepare_file_view_dllmain_handoff(dll_name, application_directory, working_directory, path_dirs, known_dlls, files, data, preferred_base, load_base, process_id, address_space_id, container_evidence, descriptor_limit, symbol_limit, dynload_apis, false)
+fn _record_startup_fault_from_handoff(handoff: WineDllViewDllMainHandoffResult, process_id: i64, fault: WineVmFault) -> WineDllViewStartupFaultResult:
     if not handoff.ok:
         return _result(false, "dllmain-handoff:" + handoff.error, handoff.dll_name, handoff.selected_path, handoff.mapped_base, handoff.mapped_size, handoff.entrypoint_address, fault.address, 0, handoff.evidence + " dllmain-startup-fault-blocked no-dllmain-executed", "rejected")
 
@@ -40,3 +40,12 @@ pub fn wine_dll_record_file_view_startup_fault(dll_name: text, application_direc
 
     val evidence = handoff.evidence + " " + wine_vm_fault_evidence(fault) + " startup-fault-recorded fault-policy-deliver-seh seh-dispatch-recorded dllmain-startup-rollback-recorded loader-lock-released dll-view-rx-restored no-tls-callback-executed no-dllmain-executed no-arbitrary-execution"
     _result(true, "", handoff.dll_name, handoff.selected_path, handoff.mapped_base, handoff.mapped_size, handoff.entrypoint_address, fault.address, 1, evidence, "dllmain-startup-fault-rollback-recorded")
+
+pub fn wine_dll_record_file_view_startup_fault(dll_name: text, application_directory: text, working_directory: text, path_dirs: [text], known_dlls: [text], files: [WineDllProbeFile], data: [u8], preferred_base: i64, load_base: i64, process_id: i64, address_space_id: i64, container_evidence: text, descriptor_limit: i64, symbol_limit: i64, dynload_apis: text, fault: WineVmFault) -> WineDllViewStartupFaultResult:
+    val handoff = wine_dll_prepare_file_view_dllmain_handoff(dll_name, application_directory, working_directory, path_dirs, known_dlls, files, data, preferred_base, load_base, process_id, address_space_id, container_evidence, descriptor_limit, symbol_limit, dynload_apis, false)
+    _record_startup_fault_from_handoff(handoff, process_id, fault)
+
+pub fn wine_dll_record_file_view_startup_fault_with_peb_teb_writes(dll_name: text, application_directory: text, working_directory: text, path_dirs: [text], known_dlls: [text], files: [WineDllProbeFile], data: [u8], preferred_base: i64, load_base: i64, process_id: i64, address_space_id: i64, container_evidence: text, descriptor_limit: i64, symbol_limit: i64, dynload_apis: text, fault: WineVmFault, startup_ok: bool, startup_state: text, startup_operations: text, writes: WinePebTebMemoryWriteResult) -> WineDllViewStartupFaultResult:
+    val handoff = wine_dll_prepare_file_view_dllmain_handoff(dll_name, application_directory, working_directory, path_dirs, known_dlls, files, data, preferred_base, load_base, process_id, address_space_id, container_evidence, descriptor_limit, symbol_limit, dynload_apis, false)
+    val gated = wine_dllmain_handoff_require_peb_teb_writes(handoff, startup_ok, startup_state, startup_operations, writes)
+    _record_startup_fault_from_handoff(gated, process_id, fault)
