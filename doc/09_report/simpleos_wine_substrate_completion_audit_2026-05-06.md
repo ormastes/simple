@@ -468,6 +468,23 @@ Conservative boundary: this is controlled `hello.exe` execution only. Arbitrary
 PE/DLL loading, full Win32/NT behavior, generic Wine process execution, and
 Steam/Proton game execution remain blocked.
 
+## 2026-05-07 Arbitrary Process Image Validation Boundary
+
+`src/lib/common/wine_process_session.spl` now exposes
+`wine_process_validate_full_image(...)` for full-Wine process plans. It requires
+a planned full-Wine session, then runs the PE header, section, directory,
+import, relocation, TLS, and image-map gates before reporting
+`image-validated`.
+
+Fresh evidence:
+
+- `bin/simple test test/lib/common/wine_process_session_spec.spl --mode=interpreter --clean`: includes full-image validation, malformed-image rejection, and controlled-plan rejection coverage.
+- `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_substrate_spec.spl --mode=interpreter --clean`: includes REQ-013 process image validation coverage.
+
+Conservative boundary: this validates arbitrary process images only. It does
+not load arbitrary DLLs, bind imports beyond existing gate checks, or execute
+arbitrary PE code.
+
 ## Completion Decision
 
 The WM/VM prerequisite plan in `doc/03_plan/agent_tasks/simpleos_wine_wm_vm_execution_plan_2026-05-06.md` is implemented at the Wine-facing SimpleOS contract level. Modeled X11/VM gates are no longer accepted as production evidence, and the new production gates require SimpleOS window records, framebuffer presents, OS process/address-space identity, container namespace evidence, OS VMA image mapping, thread stack/guard setup, fault evidence, and no-host-code-jump policy.

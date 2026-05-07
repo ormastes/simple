@@ -130,7 +130,10 @@ VM-backed hello executor.
 
 Arbitrary `.exe` sessions require `wine_substrate_full_wine_gate(...) ==
 "ready"` for planning, but the controlled executor still rejects them as
-`unsupported-process-session`.
+`unsupported-process-session`. Full-Wine process plans must also pass
+`wine_process_validate_full_image(...)`, which runs PE header, section,
+directory, import, relocation, TLS, and image-map gates before any future
+arbitrary execution boundary can be added.
 
 `src/app/wine_process_session_plan/main.spl` exposes the controlled hello
 process-session handoff as a command. It prints command, substrate readiness,
