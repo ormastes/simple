@@ -1,0 +1,92 @@
+"""Bounded KERNEL32 critical-section bridge for Wine startup probes."""
+
+class WineKernel32CriticalSection:
+    handle: i64
+    name: text
+    initialized: bool
+    entered: bool
+
+class WineKernel32CriticalSectionTable:
+    sections: [WineKernel32CriticalSection]
+    next_handle: i64
+
+class WineKernel32CriticalSectionResult:
+    ok: bool
+    error: text
+    table: WineKernel32CriticalSectionTable
+    handle: i64
+    operations: text
+
+fn _section(handle: i64, name: text, initialized: bool, entered: bool) -> WineKernel32CriticalSection:
+    WineKernel32CriticalSection(handle: handle, name: name, initialized: initialized, entered: entered)
+
+fn _table(sections: [WineKernel32CriticalSection], next_handle: i64) -> WineKernel32CriticalSectionTable:
+    WineKernel32CriticalSectionTable(sections: sections, next_handle: next_handle)
+
+fn _result(ok: bool, error: text, table: WineKernel32CriticalSectionTable, handle: i64, operations: text) -> WineKernel32CriticalSectionResult:
+    WineKernel32CriticalSectionResult(ok: ok, error: error, table: table, handle: handle, operations: operations)
+
+fn _find_section(table: WineKernel32CriticalSectionTable, handle: i64) -> WineKernel32CriticalSection:
+    for section in table.sections:
+        if section.handle == handle:
+            return section
+    _section(0, "", false, false)
+
+fn _replace_section(table: WineKernel32CriticalSectionTable, replacement: WineKernel32CriticalSection) -> WineKernel32CriticalSectionTable:
+    var sections: [WineKernel32CriticalSection] = []
+    for section in table.sections:
+        if section.handle == replacement.handle:
+            sections.push(replacement)
+        else:
+            sections.push(section)
+    _table(sections, table.next_handle)
+
+fn _remove_section(table: WineKernel32CriticalSectionTable, handle: i64) -> WineKernel32CriticalSectionTable:
+    var sections: [WineKernel32CriticalSection] = []
+    for section in table.sections:
+        if section.handle != handle:
+            sections.push(section)
+    _table(sections, table.next_handle)
+
+fn _sequence_gate(symbols: [text]) -> text:
+    if symbols.len() == 0:
+        return "bridge-missing:kernel32-critical-section"
+    for symbol in symbols:
+        if symbol != "InitializeCriticalSection" and symbol != "EnterCriticalSection" and symbol != "LeaveCriticalSection" and symbol != "DeleteCriticalSection":
+            return "bridge-wrong-category:" + symbol
+    if symbols.len() != 4:
+        return "kernel32-critical-section-sequence-count-mismatch"
+    if symbols[0] != "InitializeCriticalSection":
+        return "kernel32-critical-section-sequence-expected:InitializeCriticalSection"
+    if symbols[1] != "EnterCriticalSection":
+        return "kernel32-critical-section-sequence-expected:EnterCriticalSection"
+    if symbols[2] != "LeaveCriticalSection":
+        return "kernel32-critical-section-sequence-expected:LeaveCriticalSection"
+    if symbols[3] != "DeleteCriticalSection":
+        return "kernel32-critical-section-sequence-expected:DeleteCriticalSection"
+    "ready"
+
+pub fn wine_kernel32_critical_section_table_new() -> WineKernel32CriticalSectionTable:
+    _table([], 0x300)
+
+pub fn wine_kernel32_execute_critical_section(symbols: [text], table: WineKernel32CriticalSectionTable, name: text) -> WineKernel32CriticalSectionResult:
+    val sequence_state = _sequence_gate(symbols)
+    if sequence_state != "ready":
+        return _result(false, sequence_state, table, 0, "")
+    if name == "":
+        return _result(false, "InitializeCriticalSection:invalid-name", table, 0, "")
+    val handle = table.next_handle
+    var sections = table.sections
+    sections.push(_section(handle, name, true, false))
+    val initialized = _table(sections, handle + 1)
+
+    val section = _find_section(initialized, handle)
+    if not section.initialized:
+        return _result(false, "EnterCriticalSection:invalid-handle", initialized, handle, "InitializeCriticalSection")
+    val entered = _replace_section(initialized, _section(section.handle, section.name, true, true))
+    val entered_section = _find_section(entered, handle)
+    if not entered_section.entered:
+        return _result(false, "LeaveCriticalSection:not-entered", entered, handle, "InitializeCriticalSection EnterCriticalSection")
+    val left = _replace_section(entered, _section(entered_section.handle, entered_section.name, true, false))
+    val deleted = _remove_section(left, handle)
+    _result(true, "", deleted, handle, "InitializeCriticalSection EnterCriticalSection LeaveCriticalSection DeleteCriticalSection")
