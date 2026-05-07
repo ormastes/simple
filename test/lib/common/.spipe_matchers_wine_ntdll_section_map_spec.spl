@@ -1,0 +1,67 @@
+use common.wine_ntdll_section_map.{wine_ntdll_execute_section_map, wine_ntdll_section_table_new}
+use common.wine_vm_adapter.{wine_vm_map_executable_image, wine_vm_process_space_new}
+
+describe "Wine NTDLL section map bridge":
+    it "executes a bounded NtCreateSection, NtMapViewOfSection, and NtUnmapViewOfSection sequence":
+        val result = wine_ntdll_execute_section_map(
+            ["NtCreateSection", "NtMapViewOfSection", "NtUnmapViewOfSection"],
+            wine_ntdll_section_table_new(),
+            wine_vm_process_space_new(10, 9000, "pid fs ipc net capability"),
+            "\\KnownDlls\\kernel32.dll",
+            0x3000,
+            0x400000
+        )
+
+        expect result.ok == true
+        expect result.handle == 0x400
+        expect result.mapped_base == 0x400000
+        expect result.table.sections[0].mapped_base == 0
+        expect result.space.regions.len() == 0
+        expect result.operations == "NtCreateSection NtMapViewOfSection NtUnmapViewOfSection"
+
+    it "keeps NTDLL section mapping ordered and bounded":
+        val out_of_order = wine_ntdll_execute_section_map(
+            ["NtMapViewOfSection", "NtCreateSection", "NtUnmapViewOfSection"],
+            wine_ntdll_section_table_new(),
+            wine_vm_process_space_new(10, 9000, "pid fs ipc net capability"),
+            "\\KnownDlls\\kernel32.dll",
+            0x3000,
+            0x400000
+        )
+        expect out_of_order.ok == false
+        expect out_of_order.error == "ntdll-section-map-sequence-expected:NtCreateSection"
+
+        val wrong_family = wine_ntdll_execute_section_map(
+            ["NtCreateSection", "NtMapViewOfSection", "NtCreateFile"],
+            wine_ntdll_section_table_new(),
+            wine_vm_process_space_new(10, 9000, "pid fs ipc net capability"),
+            "\\KnownDlls\\kernel32.dll",
+            0x3000,
+            0x400000
+        )
+        expect wrong_family.ok == false
+        expect wrong_family.error == "bridge-wrong-category:NtCreateFile"
+
+    it "rejects invalid section descriptors and conflicting view bases":
+        val invalid = wine_ntdll_execute_section_map(
+            ["NtCreateSection", "NtMapViewOfSection", "NtUnmapViewOfSection"],
+            wine_ntdll_section_table_new(),
+            wine_vm_process_space_new(10, 9000, "pid fs ipc net capability"),
+            "",
+            0x3000,
+            0x400000
+        )
+        expect invalid.ok == false
+        expect invalid.error == "NtCreateSection:invalid-name"
+
+        val occupied = wine_vm_map_executable_image(wine_vm_process_space_new(10, 9000, "pid fs ipc net capability"), 0x400000, 0x1000)
+        val conflict = wine_ntdll_execute_section_map(
+            ["NtCreateSection", "NtMapViewOfSection", "NtUnmapViewOfSection"],
+            wine_ntdll_section_table_new(),
+            occupied.space,
+            "\\KnownDlls\\user32.dll",
+            0x3000,
+            0x400000
+        )
+        expect conflict.ok == false
+        expect conflict.error == "NtMapViewOfSection:fixed-map-conflict"
