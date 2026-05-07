@@ -1,0 +1,89 @@
+"""Bounded NTDLL process/thread information bridge for Wine startup probes."""
+
+use common.wine_nt_api_catalog.{wine_nt_api_ntdll_process_info_dispatch_gate}
+
+class WineNtdllProcessThreadInfo:
+    process_id: i64
+    thread_id: i64
+    peb_address: i64
+    teb_address: i64
+    image_base: i64
+    priority: i64
+
+class WineNtdllProcessInfoResult:
+    ok: bool
+    error: text
+    process_id: i64
+    thread_id: i64
+    peb_address: i64
+    teb_address: i64
+    image_base: i64
+    priority: i64
+    classes: text
+    operations: text
+
+fn _info(process_id: i64, thread_id: i64, peb_address: i64, teb_address: i64, image_base: i64, priority: i64) -> WineNtdllProcessThreadInfo:
+    WineNtdllProcessThreadInfo(process_id: process_id, thread_id: thread_id, peb_address: peb_address, teb_address: teb_address, image_base: image_base, priority: priority)
+
+fn _result(ok: bool, error: text, process_id: i64, thread_id: i64, peb_address: i64, teb_address: i64, image_base: i64, priority: i64, classes: text, operations: text) -> WineNtdllProcessInfoResult:
+    WineNtdllProcessInfoResult(ok: ok, error: error, process_id: process_id, thread_id: thread_id, peb_address: peb_address, teb_address: teb_address, image_base: image_base, priority: priority, classes: classes, operations: operations)
+
+pub fn wine_ntdll_process_thread_info_default() -> WineNtdllProcessThreadInfo:
+    _info(10, 20, 0x7ffdf000, 0x7ffde000, 0x400000, 8)
+
+fn _sequence_gate(symbols: [text], classes: [text]) -> text:
+    val dispatch_state = wine_nt_api_ntdll_process_info_dispatch_gate(symbols)
+    if dispatch_state != "ready":
+        return dispatch_state
+    if symbols.len() != 2:
+        return "ntdll-process-info-sequence-count-mismatch"
+    if symbols[0] != "NtQueryInformationProcess":
+        return "ntdll-process-info-sequence-expected:NtQueryInformationProcess"
+    if symbols[1] != "NtQueryInformationThread":
+        return "ntdll-process-info-sequence-expected:NtQueryInformationThread"
+    if classes.len() != 3:
+        return "ntdll-process-info-class-count-mismatch"
+    if classes[0] != "ProcessBasicInformation":
+        return "ntdll-process-info-class-expected:ProcessBasicInformation"
+    if classes[1] != "ProcessImageInformation":
+        return "ntdll-process-info-class-expected:ProcessImageInformation"
+    if classes[2] != "ThreadBasicInformation":
+        return "ntdll-process-info-class-expected:ThreadBasicInformation"
+    "ready"
+
+fn _class_text(classes: [text]) -> text:
+    var out = ""
+    var i = 0
+    for item in classes:
+        if i > 0:
+            out = out + " "
+        out = out + item
+        i = i + 1
+    out
+
+pub fn wine_ntdll_execute_process_info(symbols: [text], classes: [text], info: WineNtdllProcessThreadInfo) -> WineNtdllProcessInfoResult:
+    val sequence_state = _sequence_gate(symbols, classes)
+    if sequence_state != "ready":
+        return _result(false, sequence_state, 0, 0, 0, 0, 0, 0, "", "")
+    if info.process_id <= 0:
+        return _result(false, "NtQueryInformationProcess:invalid-process-id", 0, 0, 0, 0, 0, 0, "", "")
+    if info.peb_address <= 0:
+        return _result(false, "NtQueryInformationProcess:invalid-peb", info.process_id, 0, 0, 0, 0, 0, "ProcessBasicInformation", "NtQueryInformationProcess")
+    if info.image_base <= 0:
+        return _result(false, "NtQueryInformationProcess:invalid-image-base", info.process_id, 0, info.peb_address, 0, 0, 0, "ProcessBasicInformation ProcessImageInformation", "NtQueryInformationProcess")
+    if info.thread_id <= 0:
+        return _result(false, "NtQueryInformationThread:invalid-thread-id", info.process_id, 0, info.peb_address, 0, info.image_base, 0, "ProcessBasicInformation ProcessImageInformation", "NtQueryInformationProcess")
+    if info.teb_address <= 0:
+        return _result(false, "NtQueryInformationThread:invalid-teb", info.process_id, info.thread_id, info.peb_address, 0, info.image_base, 0, "ProcessBasicInformation ProcessImageInformation", "NtQueryInformationProcess")
+    _result(
+        true,
+        "",
+        info.process_id,
+        info.thread_id,
+        info.peb_address,
+        info.teb_address,
+        info.image_base,
+        info.priority,
+        _class_text(classes),
+        "NtQueryInformationProcess NtQueryInformationThread"
+    )

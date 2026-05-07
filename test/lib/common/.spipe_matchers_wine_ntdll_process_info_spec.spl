@@ -1,0 +1,43 @@
+use common.wine_ntdll_process_info.{
+    WineNtdllProcessThreadInfo,
+    wine_ntdll_execute_process_info,
+    wine_ntdll_process_thread_info_default
+}
+
+fn _classes() -> [text]:
+    ["ProcessBasicInformation", "ProcessImageInformation", "ThreadBasicInformation"]
+
+describe "Wine NTDLL process information bridge":
+    it "executes bounded process and thread information queries":
+        val result = wine_ntdll_execute_process_info(["NtQueryInformationProcess", "NtQueryInformationThread"], _classes(), wine_ntdll_process_thread_info_default())
+
+        expect result.ok == true
+        expect result.process_id == 10
+        expect result.thread_id == 20
+        expect result.peb_address == 0x7ffdf000
+        expect result.teb_address == 0x7ffde000
+        expect result.image_base == 0x400000
+        expect result.classes == "ProcessBasicInformation ProcessImageInformation ThreadBasicInformation"
+        expect result.operations == "NtQueryInformationProcess NtQueryInformationThread"
+
+    it "keeps process information dispatch and classes bounded":
+        val wrong_family = wine_ntdll_execute_process_info(["NtQueryInformationProcess", "NtCreateFile"], _classes(), wine_ntdll_process_thread_info_default())
+        expect wrong_family.ok == false
+        expect wrong_family.error == "bridge-wrong-category:NtCreateFile"
+
+        val wrong_class = wine_ntdll_execute_process_info(["NtQueryInformationProcess", "NtQueryInformationThread"], ["ThreadBasicInformation", "ProcessImageInformation", "ProcessBasicInformation"], wine_ntdll_process_thread_info_default())
+        expect wrong_class.ok == false
+        expect wrong_class.error == "ntdll-process-info-class-expected:ProcessBasicInformation"
+
+    it "rejects invalid process and thread facts":
+        val invalid = WineNtdllProcessThreadInfo(
+            process_id: 10,
+            thread_id: 0,
+            peb_address: 0x7ffdf000,
+            teb_address: 0x7ffde000,
+            image_base: 0x400000,
+            priority: 8
+        )
+        val result = wine_ntdll_execute_process_info(["NtQueryInformationProcess", "NtQueryInformationThread"], _classes(), invalid)
+        expect result.ok == false
+        expect result.error == "NtQueryInformationThread:invalid-thread-id"
