@@ -12,6 +12,7 @@ use common.pe_coff_header.{
     pe_section_table_gate,
     pe_tls_directory_gate
 }
+use common.wine_cpu_exec.{wine_cpu_execution_gate, wine_instruction_dispatch_gate}
 use common.wine_hello_exe.{wine_hello_exe_probe_manifest_evidence_vm}
 use common.wine_hello_fixture.{
     wine_known_hello_exe_fixture_bytes,
@@ -86,6 +87,13 @@ class WineProcessThunkPatchPlanResult:
     evidence: text
     status: text
 
+class WineProcessCpuPreflightResult:
+    ok: bool
+    error: text
+    command: text
+    evidence: text
+    status: text
+
 fn _wine_process_session_request(executable_path: text, argv: [text], working_directory: text) -> WineProcessSessionRequest:
     WineProcessSessionRequest(executable_path: executable_path, argv: argv, working_directory: working_directory)
 
@@ -109,6 +117,9 @@ fn _wine_process_import_binding_result(ok: bool, error: text, command: text, dll
 
 fn _wine_process_thunk_patch_plan_result(ok: bool, error: text, command: text, dll_name: text, patch_count: i64, evidence: text, status: text) -> WineProcessThunkPatchPlanResult:
     WineProcessThunkPatchPlanResult(ok: ok, error: error, command: command, dll_name: dll_name, patch_count: patch_count, evidence: evidence, status: status)
+
+fn _wine_process_cpu_preflight_result(ok: bool, error: text, command: text, evidence: text, status: text) -> WineProcessCpuPreflightResult:
+    WineProcessCpuPreflightResult(ok: ok, error: error, command: command, evidence: evidence, status: status)
 
 fn _wine_process_image_gate(data: [u8]) -> text:
     val summary = parse_pe_header_summary(data)
@@ -257,3 +268,16 @@ pub fn wine_process_plan_import_thunk_patches(plan: WineProcessSessionPlan, data
         return _wine_process_thunk_patch_plan_result(false, "missing-bindings", plan.command, bindings.dll_name, 0, "", "rejected")
     val evidence = "import-thunks-bound import-thunk-table-valid import-thunk-symbols-resolved import-thunk-bindings-match import-thunk-iat-guarded"
     _wine_process_thunk_patch_plan_result(true, "", plan.command, bindings.dll_name, bindings.binding_count, evidence, "thunk-patch-planned")
+
+pub fn wine_process_cpu_dispatch_preflight(plan: WineProcessSessionPlan, data: [u8], symbol_limit: i64, cpu_evidence: text) -> WineProcessCpuPreflightResult:
+    val patches = wine_process_plan_import_thunk_patches(plan, data, symbol_limit)
+    if not patches.ok:
+        return _wine_process_cpu_preflight_result(false, patches.error, plan.command, "", patches.status)
+    val evidence = patches.evidence + " " + cpu_evidence
+    val cpu_state = wine_cpu_execution_gate(evidence)
+    if cpu_state != "ready":
+        return _wine_process_cpu_preflight_result(false, cpu_state, plan.command, evidence, "blocked")
+    val dispatch_state = wine_instruction_dispatch_gate(evidence)
+    if dispatch_state != "ready":
+        return _wine_process_cpu_preflight_result(false, dispatch_state, plan.command, evidence, "blocked")
+    _wine_process_cpu_preflight_result(true, "", plan.command, evidence, "cpu-preflight-ready")

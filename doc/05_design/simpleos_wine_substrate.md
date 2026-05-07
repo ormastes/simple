@@ -142,6 +142,9 @@ rejects unsupported or incomplete import sets; it still does not patch thunks or
 execute arbitrary process code. `wine_process_plan_import_thunk_patches(...)`
 turns a supported binding plan into explicit guarded import-thunk evidence for
 the CPU execution gate, without mutating image bytes.
+`wine_process_cpu_dispatch_preflight(...)` composes that loader evidence with
+caller-provided CPU evidence and runs the CPU and instruction-dispatch gates
+before any future arbitrary process dispatch can be attempted.
 
 `src/app/wine_process_session_plan/main.spl` exposes the controlled hello
 process-session handoff as a command. It prints command, substrate readiness,

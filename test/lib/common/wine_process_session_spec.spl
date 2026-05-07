@@ -1,6 +1,8 @@
 use common.wine_hello_fixture.{wine_known_hello_exe_fixture_bytes}
+use common.wine_cpu_exec.{wine_cpu_execution_evidence_all_ready, wine_cpu_execution_evidence_text}
 use common.wine_process_session.{
     wine_process_bind_known_kernel32_imports,
+    wine_process_cpu_dispatch_preflight,
     wine_process_execute_controlled_hello,
     wine_process_inspect_full_imports,
     wine_process_launch_handoff,
@@ -164,3 +166,19 @@ describe "Wine process session planning":
         expect(result.ok).to_equal(false)
         expect(result.error).to_equal("import-thunk-limit-exceeded")
         expect(result.status).to_equal("rejected")
+
+    it "accepts CPU dispatch preflight after loader and execution evidence compose":
+        val plan = wine_process_session_plan(wine_process_session_request_new("game.exe", [], "C:\\Games"), _full_gates())
+        val result = wine_process_cpu_dispatch_preflight(plan, wine_known_hello_exe_fixture_bytes(), 8, wine_cpu_execution_evidence_text(wine_cpu_execution_evidence_all_ready()))
+        expect(result.ok).to_equal(true)
+        expect(result.command).to_equal("game.exe")
+        expect(result.evidence).to_contain("import-thunks-bound")
+        expect(result.evidence).to_contain("x86_64-dispatch-import-calls-only")
+        expect(result.status).to_equal("cpu-preflight-ready")
+
+    it "blocks CPU dispatch preflight when execution evidence is incomplete":
+        val plan = wine_process_session_plan(wine_process_session_request_new("game.exe", [], "C:\\Games"), _full_gates())
+        val result = wine_process_cpu_dispatch_preflight(plan, wine_known_hello_exe_fixture_bytes(), 8, "")
+        expect(result.ok).to_equal(false)
+        expect(result.error).to_equal("missing-thread-context")
+        expect(result.status).to_equal("blocked")

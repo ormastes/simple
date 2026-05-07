@@ -538,6 +538,23 @@ Conservative boundary: this is still a patch plan. It does not mutate import
 tables, map process memory writable, dispatch imported functions, or execute
 arbitrary PE images.
 
+## 2026-05-07 Process CPU Dispatch Preflight
+
+`src/lib/common/wine_process_session.spl` now exposes
+`wine_process_cpu_dispatch_preflight(...)`. It composes the guarded
+import-thunk evidence produced by the process loader path with caller-provided
+CPU execution evidence, then runs both `wine_cpu_execution_gate(...)` and
+`wine_instruction_dispatch_gate(...)`.
+
+Fresh evidence:
+
+- `bin/simple test test/lib/common/wine_process_session_spec.spl --mode=interpreter --clean`: includes CPU preflight acceptance and missing-evidence rejection coverage.
+- `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_substrate_spec.spl --mode=interpreter --clean`: includes REQ-017 CPU dispatch preflight coverage.
+- `bin/simple test test/lib/common/wine_cpu_exec_spec.spl --mode=interpreter --clean`: keeps CPU and instruction dispatch gates covered.
+
+Conservative boundary: this is a preflight gate only. It does not dispatch
+instructions, call imported functions, or execute arbitrary PE images.
+
 ## Completion Decision
 
 The WM/VM prerequisite plan in `doc/03_plan/agent_tasks/simpleos_wine_wm_vm_execution_plan_2026-05-06.md` is implemented at the Wine-facing SimpleOS contract level. Modeled X11/VM gates are no longer accepted as production evidence, and the new production gates require SimpleOS window records, framebuffer presents, OS process/address-space identity, container namespace evidence, OS VMA image mapping, thread stack/guard setup, fault evidence, and no-host-code-jump policy.

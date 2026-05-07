@@ -17,8 +17,10 @@ use common.wine_substrate.{
 }
 use common.wine_hello_exe.{wine_hello_exe_probe}
 use common.wine_hello_fixture.{wine_known_hello_exe_fixture_bytes}
+use common.wine_cpu_exec.{wine_cpu_execution_evidence_all_ready, wine_cpu_execution_evidence_text}
 use common.wine_process_session.{
     wine_process_bind_known_kernel32_imports,
+    wine_process_cpu_dispatch_preflight,
     wine_process_execute_controlled_hello,
     wine_process_inspect_full_imports,
     wine_process_launch_handoff,
@@ -274,3 +276,20 @@ describe "SimpleOS Wine Substrate":
             val patches = wine_process_plan_import_thunk_patches(plan, wine_known_hello_exe_fixture_bytes(), 1)
             expect(patches.ok).to_equal(false)
             expect(patches.error).to_equal("import-thunk-limit-exceeded")
+
+    describe "REQ-017: process CPU dispatch preflight":
+        it "should require process loader evidence and CPU dispatch evidence before future execution":
+            val full_gates = "process=verified exec_env=verified vm=verified renderer=verified user32=verified gdi32=verified kernel32_core=verified host=verified posix=verified registry=verified pthread=verified dynload=verified audio=verified fonts=verified input=verified pe_loader=verified async=verified nt_bridge=verified"
+            val plan = wine_process_session_plan(wine_process_session_request_new("game.exe", [], "C:\\Games"), full_gates)
+            val preflight = wine_process_cpu_dispatch_preflight(plan, wine_known_hello_exe_fixture_bytes(), 8, wine_cpu_execution_evidence_text(wine_cpu_execution_evidence_all_ready()))
+            expect(preflight.ok).to_equal(true)
+            expect(preflight.evidence).to_contain("import-thunk-iat-guarded")
+            expect(preflight.evidence).to_contain("x86_64-dispatch")
+            expect(preflight.status).to_equal("cpu-preflight-ready")
+
+        it "should block process CPU dispatch preflight when CPU evidence is missing":
+            val full_gates = "process=verified exec_env=verified vm=verified renderer=verified user32=verified gdi32=verified kernel32_core=verified host=verified posix=verified registry=verified pthread=verified dynload=verified audio=verified fonts=verified input=verified pe_loader=verified async=verified nt_bridge=verified"
+            val plan = wine_process_session_plan(wine_process_session_request_new("game.exe", [], "C:\\Games"), full_gates)
+            val preflight = wine_process_cpu_dispatch_preflight(plan, wine_known_hello_exe_fixture_bytes(), 8, "")
+            expect(preflight.ok).to_equal(false)
+            expect(preflight.error).to_equal("missing-thread-context")
