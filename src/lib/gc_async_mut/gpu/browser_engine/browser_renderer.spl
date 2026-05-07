@@ -1027,10 +1027,12 @@ fn br_selector_matches_attr_self(selector: text, subject: text, tag_content: tex
     if op != "=":
         key_end = eq_pos - 1
     val key = body.slice(0, key_end).trim().lower()
-    val expected = br_unquote_attr_value(body.slice(eq_pos + 1, body.len()).trim())
+    val raw_expected = body.slice(eq_pos + 1, body.len()).trim()
+    val insensitive = br_attr_has_i_flag(raw_expected)
+    val expected = br_unquote_attr_value(br_attr_value_without_flag(raw_expected))
     if key.len() == 0:
         return false
-    br_tag_has_attr(tag_content, key) and br_attr_value_matches(br_tag_attr_value(tag_content, key), op, expected)
+    br_tag_has_attr(tag_content, key) and br_attr_value_matches(br_tag_attr_value(tag_content, key), op, expected, insensitive)
 
 fn br_attr_operator(body: text, eq_pos: i64) -> text:
     if eq_pos > 0:
@@ -1039,18 +1041,31 @@ fn br_attr_operator(body: text, eq_pos: i64) -> text:
             return marker + "="
     "="
 
-fn br_attr_value_matches(actual: text, op: text, expected: text) -> bool:
+fn br_attr_value_matches(actual: text, op: text, expected: text, insensitive: bool) -> bool:
+    var actual_cmp = actual
+    var expected_cmp = expected
+    if insensitive:
+        actual_cmp = actual.lower()
+        expected_cmp = expected.lower()
     if op == "=":
-        return actual == expected
+        return actual_cmp == expected_cmp
     if op == "^=":
-        return actual.starts_with(expected)
+        return actual_cmp.starts_with(expected_cmp)
     if op == "*=":
-        return actual.contains(expected)
+        return actual_cmp.contains(expected_cmp)
     if op == "~=":
-        return br_attr_token_contains(actual, expected)
+        return br_attr_token_contains(actual_cmp, expected_cmp)
     if op == "|=":
-        return actual == expected or actual.starts_with(expected + "-")
+        return actual_cmp == expected_cmp or actual_cmp.starts_with(expected_cmp + "-")
     false
+
+fn br_attr_has_i_flag(value: text) -> bool:
+    value.ends_with(" i") or value.ends_with(" I")
+
+fn br_attr_value_without_flag(value: text) -> text:
+    if br_attr_has_i_flag(value):
+        return value.slice(0, value.len() - 2).trim()
+    value
 
 fn br_attr_token_contains(actual: text, expected: text) -> bool:
     val parts = browser_renderer_split_spaces(actual)

@@ -8,7 +8,7 @@
 #   - Tag selectors: div, span, p, h1-h6, etc.
 #   - Class selectors: .container, .active
 #   - ID selectors: #main, #header
-#   - Attribute selectors: [data-state], div[data-state="active"], prefix/substring/token/dash operators (partial)
+#   - Attribute selectors: [data-state], div[data-state="active"], prefix/substring/token/dash operators, i flag (partial)
 #   - Compound: div.active, span.highlight
 #   - Comma-separated: div, span { ... }
 #   - Descendant: div span { ... } (limited — matches if ANY ancestor matches)
@@ -539,12 +539,14 @@ fn attribute_selector_matches(selector: text, node: BeDomNode, nth: i32) -> bool
     if op != "=":
         key_end = eq_pos - 1
     val key = body.slice(0, key_end).trim().lower()
-    val expected = sb_unquote_attr_value(body.slice(eq_pos + 1, body.len()).trim())
+    val raw_expected = body.slice(eq_pos + 1, body.len()).trim()
+    val insensitive = sb_attr_has_i_flag(raw_expected)
+    val expected = sb_unquote_attr_value(sb_attr_value_without_flag(raw_expected))
     if key.len() == 0:
         return false
     if not be_dom_has_attr(node, key):
         return false
-    sb_attr_value_matches(be_dom_get_attr(node, key), op, expected)
+    sb_attr_value_matches(be_dom_get_attr(node, key), op, expected, insensitive)
 
 fn sb_attr_operator(body: text, eq_pos: i32) -> text:
     if eq_pos > 0:
@@ -553,18 +555,31 @@ fn sb_attr_operator(body: text, eq_pos: i32) -> text:
             return marker + "="
     "="
 
-fn sb_attr_value_matches(actual: text, op: text, expected: text) -> bool:
+fn sb_attr_value_matches(actual: text, op: text, expected: text, insensitive: bool) -> bool:
+    var actual_cmp = actual
+    var expected_cmp = expected
+    if insensitive:
+        actual_cmp = actual.lower()
+        expected_cmp = expected.lower()
     if op == "=":
-        return actual == expected
+        return actual_cmp == expected_cmp
     if op == "^=":
-        return actual.starts_with(expected)
+        return actual_cmp.starts_with(expected_cmp)
     if op == "*=":
-        return actual.contains(expected)
+        return actual_cmp.contains(expected_cmp)
     if op == "~=":
-        return sb_attr_token_contains(actual, expected)
+        return sb_attr_token_contains(actual_cmp, expected_cmp)
     if op == "|=":
-        return actual == expected or actual.starts_with(expected + "-")
+        return actual_cmp == expected_cmp or actual_cmp.starts_with(expected_cmp + "-")
     false
+
+fn sb_attr_has_i_flag(value: text) -> bool:
+    value.ends_with(" i") or value.ends_with(" I")
+
+fn sb_attr_value_without_flag(value: text) -> text:
+    if sb_attr_has_i_flag(value):
+        return value.slice(0, value.len() - 2).trim()
+    value
 
 fn sb_attr_token_contains(actual: text, expected: text) -> bool:
     val parts = sb_split_ws(actual)

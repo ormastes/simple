@@ -70,6 +70,7 @@ REQ-004: Supported Feature Evidence
 - Given the current modern CSS slice, when renderer SSpec is inspected, then it should include basic attribute presence and exact-value selector coverage.
 - Given the current modern CSS slice, when renderer SSpec is inspected, then it should include prefix, substring, and whitespace-token attribute selector operator coverage.
 - Given the current modern CSS slice, when renderer SSpec is inspected, then it should include dash-match attribute selector operator coverage.
+- Given the current modern CSS slice, when renderer SSpec is inspected, then it should include ASCII case-insensitive attribute selector flag coverage.
 
 REQ-005: Unsupported Feature Tracking
 
@@ -91,6 +92,7 @@ REQ-007: Initial Modern CSS BDD Slice
 - Given modern CSS selectors, when source is inspected, then basic `[attr]` and `[attr=value]` matching should be implemented.
 - Given modern CSS selectors, when source is inspected, then bounded `[attr^=value]`, `[attr*=value]`, and `[attr~=value]` matching should be implemented.
 - Given modern CSS selectors, when source is inspected, then bounded `[attr|=value]` matching should be implemented for exact-or-hyphen language style values.
+- Given modern CSS selectors, when source is inspected, then bounded `[attr=value i]` matching should be implemented with the unflagged path remaining case-sensitive.
 - Given fallback renderer extraction, when source is inspected, then commas inside functional selectors should not split selector lists.
 - Given BDD coverage, when renderer SSpec is run, then the `:is()`, `:where()`, `:not()`, simple descendant `:has()`, simple CSS `@layer`, and attribute selector/operator examples should pass.
 
