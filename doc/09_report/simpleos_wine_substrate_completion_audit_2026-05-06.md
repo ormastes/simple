@@ -199,6 +199,18 @@ Fresh evidence:
 - `bin/simple check src/lib`: 2703 files, all checks passed.
 - Wine DLL view DllMain-handoff changed-file stub scan: pass.
 
+## 2026-05-07 DLL View Startup Fault/Rollback Update
+
+The DLL view startup-fault layer now composes the non-executing DllMain handoff with modeled VM fault evidence. It accepts `deliver-seh` startup faults, records SEH dispatch plus loader-lock release/rollback evidence, and keeps TLS callbacks, DllMain, and arbitrary PE instruction execution blocked.
+
+Fresh evidence:
+
+- `bin/simple check` on changed DLL view startup-fault source/spec files plus generated matcher specs: all checks passed.
+- `bin/simple test test/lib/common/wine_dll_view_startup_fault_spec.spl --mode=interpreter --clean`: 3 examples, 0 failures.
+- `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_dll_view_startup_fault_spec.spl --mode=interpreter --clean`: 1 example, 0 failures.
+- `bin/simple check src/lib`: 2704 files, all checks passed.
+- Wine DLL view startup-fault changed-file stub scan: pass.
+
 ## 2026-05-07 Executable-Environment Matrix Update
 
 The top-level Wine substrate matrix now exposes the SimpleOS executable-environment gate directly through `wine_substrate_exec_env_gate` and the `exec_env` capability row. This makes VM/full-OS/container evidence a first-class Wine readiness prerequisite instead of an implicit side gate.

@@ -286,6 +286,11 @@ callback instructions, DllMain, and arbitrary PE code are still not executed.
 DllMain process-attach handoff from the same import-bound retained view. It
 requires TLS planning, a byte-mapped DLL entrypoint, and a no-host-code-jump
 check, while requests to actually execute DllMain remain hard-blocked.
+`wine_dll_record_file_view_startup_fault(...)` composes that DllMain handoff
+with modeled VM fault evidence and records the loader-lock release, SEH
+dispatch, and startup rollback boundary. Only `deliver-seh` startup faults are
+accepted; unsupported policies stay blocked and no TLS callback, DllMain, or
+arbitrary PE instruction execution occurs.
 `wine_process_resolve_first_import_module(...)` composes the PE first-import
 inspection gate with that module resolver, so validated full-Wine process
 images can resolve a requested procedure against their first imported KERNEL32

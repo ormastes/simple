@@ -1,0 +1,129 @@
+use common.pe_coff_header.{pe_rva_to_file_offset}
+use common.wine_dll_file_probe.{wine_dll_probe_file}
+use common.wine_dll_view_startup_fault.{wine_dll_record_file_view_startup_fault}
+use common.wine_vm_adapter.{WineVmFault}
+
+fn _zero_bytes(count: i64) -> [u8]:
+    var out: [u8] = []
+    var i = 0
+    while i < count:
+        out.push(0)
+        i = i + 1
+    out
+
+fn _put_u16_le(data: [u8], offset: i64, value: i64) -> [u8]:
+    data[offset] = (value & 0xff) as u8
+    data[offset + 1] = ((value >> 8) & 0xff) as u8
+    data
+
+fn _put_u32_le(data: [u8], offset: i64, value: i64) -> [u8]:
+    data[offset] = (value & 0xff) as u8
+    data[offset + 1] = ((value >> 8) & 0xff) as u8
+    data[offset + 2] = ((value >> 16) & 0xff) as u8
+    data[offset + 3] = ((value >> 24) & 0xff) as u8
+    data
+
+fn _put_u64_le(data: [u8], offset: i64, value: i64) -> [u8]:
+    var remaining = value
+    var i = 0
+    while i < 8:
+        data[offset + i] = remaining % 256
+        remaining = remaining / 256
+        i = i + 1
+    data
+
+fn _put_ascii_z(data: [u8], offset: i64, value: text) -> [u8]:
+    var i = 0
+    while i < value.len():
+        data[offset + i] = value[i] as u8
+        i = i + 1
+    data[offset + i] = 0
+    data
+
+fn _put_import_name(data: [u8], offset: i64, value: text) -> [u8]:
+    data = _put_u16_le(data, offset, 0)
+    _put_ascii_z(data, offset + 2, value)
+
+fn _dll_with_import_relocation_tls() -> [u8]:
+    var data = _zero_bytes(1536)
+    data[0] = 0x4d
+    data[1] = 0x5a
+    data = _put_u32_le(data, 0x3c, 0x80)
+    data[0x80] = 0x50
+    data[0x81] = 0x45
+    data = _put_u16_le(data, 0x84, 0x8664)
+    data = _put_u16_le(data, 0x86, 1)
+    data = _put_u16_le(data, 0x94, 0xf0)
+    data = _put_u16_le(data, 0x96, 0x2022)
+    data = _put_u16_le(data, 0x98, 0x20b)
+    data = _put_u32_le(data, 0x98 + 0x10, 0x2100)
+    data = _put_u32_le(data, 0x98 + 0x38, 0x5000)
+    data = _put_u32_le(data, 0x98 + 0x3c, 0x200)
+    data = _put_u16_le(data, 0x98 + 0x5c, 3)
+    data = _put_u32_le(data, 0x98 + 0x6c, 16)
+    data = _put_u32_le(data, 0x98 + 0x70 + 8, 0x2020)
+    data = _put_u32_le(data, 0x98 + 0x70 + 12, 0x60)
+    data = _put_u32_le(data, 0x98 + 0x70 + 40, 0x2160)
+    data = _put_u32_le(data, 0x98 + 0x70 + 44, 0x0a)
+    data = _put_u32_le(data, 0x98 + 0x70 + 72, 0x2170)
+    data = _put_u32_le(data, 0x98 + 0x70 + 76, 0x28)
+    val section_offset = 0x98 + 0xf0
+    data = _put_u32_le(data, section_offset + 8, 0x400)
+    data = _put_u32_le(data, section_offset + 12, 0x2000)
+    data = _put_u32_le(data, section_offset + 16, 0x400)
+    data = _put_u32_le(data, section_offset + 20, 0x200)
+    data = _put_u32_le(data, section_offset + 36, 0x60000020)
+    data = _put_u32_le(data, 0x220, 0x2060)
+    data = _put_u32_le(data, 0x22c, 0x2050)
+    data = _put_u32_le(data, 0x230, 0x2080)
+    data = _put_ascii_z(data, 0x250, "kernel32.dll")
+    data = _put_u64_le(data, 0x260, 0x20a0)
+    data = _put_u64_le(data, 0x268, 0)
+    data = _put_u64_le(data, 0x280, 0x20a0)
+    data = _put_u64_le(data, 0x288, 0)
+    data = _put_import_name(data, 0x2a0, "WriteFile")
+    data = _put_u64_le(data, pe_rva_to_file_offset(data, 0x2100), 0x401234)
+    data = _put_u32_le(data, 0x360, 0x2000)
+    data = _put_u32_le(data, 0x364, 0x0a)
+    data = _put_u16_le(data, 0x368, 0xa100)
+    data = _put_u32_le(data, 0x388, 0x2190)
+    data = _put_u32_le(data, 0x390, 0x2100)
+    data
+
+describe "wine dll view startup fault rollback":
+    it "records SEH rollback around DllMain handoff without executing DLL code":
+        val data = _dll_with_import_relocation_tls()
+        val files = [wine_dll_probe_file("\\KnownDlls\\game.dll", data)]
+        val fault = WineVmFault(process_id: 77, thread_id: 12, address: 0x502100, access: "execute", policy: "deliver-seh")
+        val result = wine_dll_record_file_view_startup_fault("game.dll", "C:\\Games", "C:\\Users\\Player", [], ["game.dll"], files, data, 0x400000, 0x500000, 77, 78, "pid fs ipc net capability", 2, 4, "native-module-open tls-callback", fault)
+        expect(result.ok).to_equal(true)
+        expect(result.status).to_equal("dllmain-startup-fault-rollback-recorded")
+        expect(result.entrypoint_address).to_equal(0x502100)
+        expect(result.fault_address).to_equal(0x502100)
+        expect(result.rollback_count).to_equal(1)
+        expect(result.evidence).to_contain("dllmain-handoff-ready")
+        expect(result.evidence).to_contain("fault-policy-deliver-seh")
+        expect(result.evidence).to_contain("seh-dispatch-recorded")
+        expect(result.evidence).to_contain("loader-lock-released")
+        expect(result.evidence).to_contain("dllmain-startup-rollback-recorded")
+        expect(result.evidence).to_contain("no-dllmain-executed")
+
+    it "rejects unsupported startup fault policies before rollback":
+        val data = _dll_with_import_relocation_tls()
+        val files = [wine_dll_probe_file("\\KnownDlls\\game.dll", data)]
+        val fault = WineVmFault(process_id: 77, thread_id: 12, address: 0x502100, access: "execute", policy: "terminate-process")
+        val result = wine_dll_record_file_view_startup_fault("game.dll", "C:\\Games", "C:\\Users\\Player", [], ["game.dll"], files, data, 0x400000, 0x500000, 77, 78, "pid fs ipc net capability", 2, 4, "native-module-open tls-callback", fault)
+        expect(result.ok).to_equal(false)
+        expect(result.error).to_equal("startup-fault-policy:terminate-process")
+        expect(result.rollback_count).to_equal(0)
+        expect(result.evidence).to_contain("dllmain-startup-fault-blocked")
+        expect(result.evidence).to_contain("no-dllmain-executed")
+
+    it "rejects startup faults that do not target the planned DllMain entrypoint":
+        val data = _dll_with_import_relocation_tls()
+        val files = [wine_dll_probe_file("\\KnownDlls\\game.dll", data)]
+        val fault = WineVmFault(process_id: 77, thread_id: 12, address: 0x502200, access: "execute", policy: "deliver-seh")
+        val result = wine_dll_record_file_view_startup_fault("game.dll", "C:\\Games", "C:\\Users\\Player", [], ["game.dll"], files, data, 0x400000, 0x500000, 77, 78, "pid fs ipc net capability", 2, 4, "native-module-open tls-callback", fault)
+        expect(result.ok).to_equal(false)
+        expect(result.error).to_equal("startup-fault-entrypoint-mismatch")
+        expect(result.rollback_count).to_equal(0)
