@@ -307,6 +307,25 @@ It does not provide the full KERNEL32 export set, complete object lifetime,
 true Windows file sharing semantics, complete loader behavior, or arbitrary PE
 execution.
 
+## 2026-05-07 GUI Milestone Production Evidence Fix
+
+The controlled GUI hello milestone now carries SimpleOS-side cursor and
+clipboard evidence into the `/win` bridge before binding Wine-facing X11 state
+to SimpleOS production evidence. This closes the remaining `wine_gui_hello_spec`
+failure without relaxing the X11 production gate.
+
+Fresh evidence:
+
+- `bin/simple check src/lib/common/wine_gui_hello.spl test/lib/common/wine_gui_hello_spec.spl src/app/wine_gui_hello/main.spl`: all checks passed.
+- `bin/simple test test/lib/common/wine_gui_hello_spec.spl --mode=interpreter --clean`: 2 examples, 0 failures.
+- `bin/simple run src/app/wine_gui_hello/main.spl`: emitted `window=SimpleOS Wine GUI Hello`, `text=Hello from SimpleOS Wine`, and checksum evidence.
+- `bin/simple test test/integration/app/wine_gui_hello_command_spec.spl --mode=interpreter --clean`: 1 example, 0 failures.
+- Individual `bin/simple test` runs for every `test/lib/common/wine_*_spec.spl`: 0 failing Wine specs.
+
+Conservative boundary: this completes the controlled GUI milestone evidence
+path only. It is not a full X11 server, complete USER32 message pump, Wine
+graphics driver, compositor integration, or arbitrary GUI application support.
+
 ## Completion Decision
 
 The WM/VM prerequisite plan in `doc/03_plan/agent_tasks/simpleos_wine_wm_vm_execution_plan_2026-05-06.md` is implemented at the Wine-facing SimpleOS contract level. Modeled X11/VM gates are no longer accepted as production evidence, and the new production gates require SimpleOS window records, framebuffer presents, OS process/address-space identity, container namespace evidence, OS VMA image mapping, thread stack/guard setup, fault evidence, and no-host-code-jump policy.

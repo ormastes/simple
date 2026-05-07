@@ -7,6 +7,8 @@ use common.ui.wine_simpleos_window_bridge.{
     wine_simpleos_configure_window,
     wine_simpleos_focus_window,
     wine_simpleos_present_window,
+    wine_simpleos_set_cursor,
+    wine_simpleos_set_clipboard,
     wine_simpleos_unmap_window,
     wine_simpleos_destroy_window
 }
@@ -46,7 +48,7 @@ class WineGuiHelloResult:
     window_id: text
     framebuffer_checksum: i64
 
-fn _result(status: text, error: text, stdout: text, window_title: text, window_text: text, window_id: text, framebuffer_checksum: i64) -> WineGuiHelloResult:
+fn _wine_gui_hello_result(status: text, error: text, stdout: text, window_title: text, window_text: text, window_id: text, framebuffer_checksum: i64) -> WineGuiHelloResult:
     WineGuiHelloResult(
         status: status,
         error: error,
@@ -60,14 +62,14 @@ fn _result(status: text, error: text, stdout: text, window_title: text, window_t
 pub fn wine_gui_hello_probe_vm(data: [u8], manifest: WinePreconditionManifest, execution_evidence: WineCpuExecutionEvidence, space: WineVmSpace, image_base: i64, stack_base: i64, stack_size: i64, guard_size: i64) -> WineGuiHelloResult:
     val console = wine_hello_exe_probe_manifest_evidence_vm(data, manifest, execution_evidence, space, image_base, stack_base, stack_size, guard_size)
     if console.status != "executed":
-        return _result("blocked", console.status + ":" + console.error, "", "", "", "", 0)
+        return _wine_gui_hello_result("blocked", console.status + ":" + console.error, "", "", "", "", 0)
     val dialog = wine_nt_bridge_execute_message_box_sequence(["MessageBoxW"], "SimpleOS Wine GUI Hello", console.stdout)
     if not dialog.ok:
-        return _result("blocked", dialog.error, console.stdout, "", "", "", 0)
+        return _wine_gui_hello_result("blocked", dialog.error, console.stdout, "", "", "", 0)
 
     val x_created = wine_x11_create_window(wine_x11_backend_new(), "wine-gui-hello")
     if not x_created.ok:
-        return _result("blocked", "x11-" + x_created.state, console.stdout, "", "", "", 0)
+        return _wine_gui_hello_result("blocked", "x11-" + x_created.state, console.stdout, "", "", "", 0)
     val x_mapped = wine_x11_map_window(x_created.backend, "wine-gui-hello")
     val x_configured = wine_x11_configure_window(x_mapped.backend, "wine-gui-hello", 640, 240)
     val x_focused = wine_x11_focus_window(x_configured.backend, "wine-gui-hello")
@@ -85,22 +87,24 @@ pub fn wine_gui_hello_probe_vm(data: [u8], manifest: WinePreconditionManifest, e
     val x_unmapped = wine_x11_unmap_window(x_clipboard.backend, "wine-gui-hello")
     val x_destroyed = wine_x11_destroy_window(x_unmapped.backend, "wine-gui-hello")
     if not x_destroyed.ok:
-        return _result("blocked", "x11-" + x_destroyed.state, console.stdout, "", "", "", 0)
+        return _wine_gui_hello_result("blocked", "x11-" + x_destroyed.state, console.stdout, "", "", "", 0)
 
     val s_created = wine_simpleos_create_window(wine_simpleos_window_bridge_new(), 1001, "wine", "SimpleOS Wine GUI Hello", 640, 240)
     if not s_created.ok:
-        return _result("blocked", "simpleos-" + s_created.state, console.stdout, "", "", "", 0)
+        return _wine_gui_hello_result("blocked", "simpleos-" + s_created.state, console.stdout, "", "", "", 0)
     val s_mapped = wine_simpleos_map_window(s_created.bridge, 1001)
     val s_configured = wine_simpleos_configure_window(s_mapped.bridge, 1001, 0, 0, 640, 240)
     val s_focused = wine_simpleos_focus_window(s_configured.bridge, 1001)
     val s_presented = wine_simpleos_present_window(s_focused.bridge, 1001, console.stdout.len() + 1)
-    val s_unmapped = wine_simpleos_unmap_window(s_presented.bridge, 1001)
+    val s_cursor = wine_simpleos_set_cursor(s_presented.bridge, "arrow")
+    val s_clipboard = wine_simpleos_set_clipboard(s_cursor.bridge, console.stdout)
+    val s_unmapped = wine_simpleos_unmap_window(s_clipboard.bridge, 1001)
     val s_destroyed = wine_simpleos_destroy_window(s_unmapped.bridge, 1001)
     val bound = wine_x11_backend_bind_simpleos(x_destroyed.backend, s_destroyed.bridge)
     if not bound.ok:
-        return _result("blocked", "simpleos-bind-" + bound.state, console.stdout, "", "", "", s_destroyed.bridge.checksum)
+        return _wine_gui_hello_result("blocked", "simpleos-bind-" + bound.state, console.stdout, "", "", "", s_destroyed.bridge.checksum)
     val production_state = wine_x11_backend_production_ready(bound.backend)
     if production_state != "ready":
-        return _result("blocked", production_state, console.stdout, "", "", "", s_destroyed.bridge.checksum)
+        return _wine_gui_hello_result("blocked", production_state, console.stdout, "", "", "", s_destroyed.bridge.checksum)
 
-    _result("executed", "", console.stdout, dialog.title, dialog.message, "wine-gui-hello", s_destroyed.bridge.checksum)
+    _wine_gui_hello_result("executed", "", console.stdout, dialog.title, dialog.message, "wine-gui-hello", s_destroyed.bridge.checksum)
