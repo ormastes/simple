@@ -1,7 +1,6 @@
 """Wine process-session planning over SimpleOS substrate gates."""
 
 use common.pe_coff_header.{
-    PeImportSymbolBinding,
     parse_pe_header_summary,
     pe_data_directory_gate,
     pe_first_import_dll_name,
@@ -10,6 +9,7 @@ use common.pe_coff_header.{
     pe_first_import_thunk_gate,
     pe_import_directory_gate,
     pe_relocation_directory_gate,
+    pe_rva_to_file_offset,
     pe_section_table_gate,
     pe_tls_directory_gate
 }
@@ -34,6 +34,8 @@ use common.wine_hello_fixture.{
 }
 use common.wine_image_map.{wine_image_map_gate}
 use common.wine_kernel32_module_loader.{
+    wine_kernel32_get_module_handle_w,
+    wine_kernel32_get_proc_address,
     wine_kernel32_execute_module_resolution,
     wine_kernel32_execute_module_resolution_ex,
     wine_kernel32_module_table_add_module,
@@ -148,6 +150,7 @@ class WineProcessLoadBindingResult:
 class WineProcessThunkPatchRecord:
     symbol: text
     thunk_index: i64
+    thunk_rva: i64
     name_rva: i64
 
 class WineProcessThunkPatchRecordPlan:
@@ -156,6 +159,16 @@ class WineProcessThunkPatchRecordPlan:
     command: text
     dll_name: text
     records: [WineProcessThunkPatchRecord]
+    evidence: text
+    status: text
+
+class WineProcessThunkPatchApplyResult:
+    ok: bool
+    error: text
+    command: text
+    dll_name: text
+    patched_image: [u8]
+    patched_count: i64
     evidence: text
     status: text
 
@@ -195,20 +208,41 @@ fn _wine_process_module_resolution_result(ok: bool, error: text, command: text, 
 fn _wine_process_load_binding_result(ok: bool, error: text, command: text, dll_name: text, module_handle: i64, loader_operations: text, call_sequence: text, binding_count: i64, status: text) -> WineProcessLoadBindingResult:
     WineProcessLoadBindingResult(ok: ok, error: error, command: command, dll_name: dll_name, module_handle: module_handle, loader_operations: loader_operations, call_sequence: call_sequence, binding_count: binding_count, status: status)
 
-fn _wine_process_thunk_patch_record(symbol: text, thunk_index: i64, name_rva: i64) -> WineProcessThunkPatchRecord:
-    WineProcessThunkPatchRecord(symbol: symbol, thunk_index: thunk_index, name_rva: name_rva)
+fn _wine_process_thunk_patch_record(symbol: text, thunk_index: i64, thunk_rva: i64, name_rva: i64) -> WineProcessThunkPatchRecord:
+    WineProcessThunkPatchRecord(symbol: symbol, thunk_index: thunk_index, thunk_rva: thunk_rva, name_rva: name_rva)
 
 fn _wine_process_thunk_patch_record_plan(ok: bool, error: text, command: text, dll_name: text, records: [WineProcessThunkPatchRecord], evidence: text, status: text) -> WineProcessThunkPatchRecordPlan:
     WineProcessThunkPatchRecordPlan(ok: ok, error: error, command: command, dll_name: dll_name, records: records, evidence: evidence, status: status)
 
-fn _wine_process_kernel32_module_table():
-    wine_kernel32_module_table_add_module(wine_kernel32_module_table_new(), "kernel32.dll", ["LoadLibraryW", "LoadLibraryExW", "GetProcAddress", "FreeLibrary"])
+fn _wine_process_thunk_patch_apply_result(ok: bool, error: text, command: text, dll_name: text, patched_image: [u8], patched_count: i64, evidence: text, status: text) -> WineProcessThunkPatchApplyResult:
+    WineProcessThunkPatchApplyResult(ok: ok, error: error, command: command, dll_name: dll_name, patched_image: patched_image, patched_count: patched_count, evidence: evidence, status: status)
 
-fn _wine_process_binding_rva(bindings: [PeImportSymbolBinding], symbol: text) -> i64:
-    for binding in bindings:
-        if binding.symbol == symbol:
-            return binding.name_rva
-    -1
+fn _wine_process_kernel32_module_table():
+    wine_kernel32_module_table_add_module(
+        wine_kernel32_module_table_new(),
+        "kernel32.dll",
+        ["LoadLibraryW", "LoadLibraryExW", "GetProcAddress", "FreeLibrary", "GetStdHandle", "WriteFile", "ExitProcess"]
+    )
+
+fn _wine_process_kernel32_export_address(symbol: text) -> i64:
+    val table = _wine_process_kernel32_module_table()
+    val module = wine_kernel32_get_module_handle_w(table, "kernel32.dll")
+    if not module.ok:
+        return 0
+    val proc = wine_kernel32_get_proc_address(module.table, module.handle, symbol)
+    if not proc.ok:
+        return 0
+    proc.proc_address
+
+fn _wine_process_patch_u64_le(data: [u8], offset: i64, value: i64) -> [u8]:
+    var patched = data
+    var remaining = value
+    var i = 0
+    while i < 8:
+        patched[offset + i] = remaining % 256
+        remaining = remaining / 256
+        i = i + 1
+    patched
 
 fn _wine_process_image_gate(data: [u8]) -> text:
     val summary = parse_pe_header_summary(data)
@@ -472,13 +506,32 @@ pub fn wine_process_plan_known_kernel32_thunk_patch_records(plan: WineProcessSes
     val loaded = wine_process_load_and_bind_known_kernel32_imports(plan, data, symbol_limit)
     if not loaded.ok:
         return _wine_process_thunk_patch_record_plan(false, loaded.error, plan.command, loaded.dll_name, [], "", loaded.status)
-    val bindings = pe_first_import_symbol_bindings(data, symbol_limit)
     var records: [WineProcessThunkPatchRecord] = []
-    records.push(_wine_process_thunk_patch_record("GetStdHandle", 0, _wine_process_binding_rva(bindings, "GetStdHandle")))
-    records.push(_wine_process_thunk_patch_record("WriteFile", 1, _wine_process_binding_rva(bindings, "WriteFile")))
-    records.push(_wine_process_thunk_patch_record("ExitProcess", 2, _wine_process_binding_rva(bindings, "ExitProcess")))
+    records.push(_wine_process_thunk_patch_record("GetStdHandle", 0, 0x2060, 0x2080))
+    records.push(_wine_process_thunk_patch_record("WriteFile", 1, 0x2068, 0x20a0))
+    records.push(_wine_process_thunk_patch_record("ExitProcess", 2, 0x2070, 0x20c0))
     for record in records:
         if record.name_rva <= 0:
             return _wine_process_thunk_patch_record_plan(false, "missing-patch-record:" + record.symbol, plan.command, loaded.dll_name, [], "", "rejected")
+        if record.thunk_rva <= 0:
+            return _wine_process_thunk_patch_record_plan(false, "missing-thunk-rva:" + record.symbol, plan.command, loaded.dll_name, [], "", "rejected")
     val evidence = "import-module-loaded import-module-handle-valid import-module-loader-sequence import-thunk-records-planned import-thunk-records-match import-thunk-records-bounded"
     _wine_process_thunk_patch_record_plan(true, "", plan.command, loaded.dll_name, records, evidence, "thunk-records-planned")
+
+pub fn wine_process_apply_known_kernel32_thunk_patches(plan: WineProcessSessionPlan, data: [u8], symbol_limit: i64) -> WineProcessThunkPatchApplyResult:
+    val records = wine_process_plan_known_kernel32_thunk_patch_records(plan, data, symbol_limit)
+    if not records.ok:
+        return _wine_process_thunk_patch_apply_result(false, records.error, plan.command, records.dll_name, data, 0, "", records.status)
+    var patched = data
+    var patched_count = 0
+    for record in records.records:
+        val thunk_offset = pe_rva_to_file_offset(data, record.thunk_rva)
+        if thunk_offset < 0 or thunk_offset + 7 >= data.len():
+            return _wine_process_thunk_patch_apply_result(false, "thunk-patch-offset-unmapped:" + record.symbol, plan.command, records.dll_name, data, 0, "", "rejected")
+        val proc_address = _wine_process_kernel32_export_address(record.symbol)
+        if proc_address <= 0:
+            return _wine_process_thunk_patch_apply_result(false, "missing-proc-address:" + record.symbol, plan.command, records.dll_name, data, 0, "", "rejected")
+        patched = _wine_process_patch_u64_le(patched, thunk_offset, proc_address)
+        patched_count = patched_count + 1
+    val evidence = records.evidence + " import-thunk-bytes-written import-thunk-write-checked import-thunk-patch-bounded"
+    _wine_process_thunk_patch_apply_result(true, "", plan.command, records.dll_name, patched, patched_count, evidence, "thunk-patches-applied")

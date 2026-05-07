@@ -619,7 +619,13 @@ tokens too, preventing direct CPU preflight callers from reusing the older
 thunk-only evidence envelope.
 `wine_process_plan_known_kernel32_thunk_patch_records(...)` expands the
 loaded-and-bound known KERNEL32 imports into concrete bounded records for the
-three modeled thunk slots, including symbol names, thunk indexes, and name RVAs.
+three modeled thunk slots, including symbol names, thunk indexes, thunk RVAs,
+and name RVAs.
+`wine_process_apply_known_kernel32_thunk_patches(...)` now consumes those
+records and writes modeled KERNEL32 procedure addresses into a copied PE image
+for the same three known thunk slots. This remains bounded fixture image
+mutation; writable OS VMA mutation, multi-DLL import-table patching, rollback,
+and arbitrary process execution are still outside the completed surface.
 
 Fresh evidence:
 
@@ -634,12 +640,14 @@ Fresh evidence:
 - `bin/simple test test/lib/common/wine_cpu_exec_spec.spl --mode=interpreter --clean`: covers the tightened CPU import-thunk gate requiring module-loader evidence.
 - `bin/simple test test/lib/common/wine_process_session_thunk_records_spec.spl --mode=interpreter --clean`: covers bounded known KERNEL32 thunk patch record planning.
 - `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_process_thunk_records_spec.spl --mode=interpreter --clean`: includes REQ-024 thunk patch record coverage.
+- `bin/simple test test/lib/common/wine_process_session_thunk_apply_spec.spl --mode=interpreter --clean`: covers bounded copied-image byte patching for the known KERNEL32 thunk slots.
+- `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_process_thunk_apply_spec.spl --mode=interpreter --clean`: includes REQ-025 bounded import thunk byte patching coverage.
 - `bin/simple test test/lib/common/wine_kernel32_module_loader_spec.spl --mode=interpreter --clean`: keeps the lower KERNEL32 module-loader bridge covered.
 
 Conservative boundary: this is a curated KERNEL32 table and bounded loader
 sequence. It is not arbitrary DLL loading, host DLL mapping, Windows DLL search
-order, arbitrary import-table binding, image-byte mutation, PE DLL relocation,
-reference-count-complete loader state, or broad Win32/NT behavior.
+order, arbitrary import-table binding, writable OS VMA mutation, PE DLL
+relocation, reference-count-complete loader state, or broad Win32/NT behavior.
 
 ## Completion Decision
 
