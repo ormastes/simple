@@ -1,5 +1,7 @@
 """Bounded PEB/TEB initialization evidence for Wine NT startup probes."""
 
+use common.wine_kernel32_critical_section.{WineKernel32CriticalSectionTable, wine_kernel32_execute_critical_section}
+
 class WinePebTebInitEvidence:
     process_id: i64
     thread_id: i64
@@ -86,3 +88,12 @@ pub fn wine_peb_teb_init_gate(init: WinePebTebInitEvidence) -> WinePebTebInitRes
     if not _aligned_pointer(init.process_parameters_address):
         return _result(false, "invalid-process-parameters", init, "")
     _result(true, "ready", init, "PEB TEB TLS ProcessParameters")
+
+pub fn wine_peb_teb_init_with_loader_lock(init: WinePebTebInitEvidence, symbols: [text], table: WineKernel32CriticalSectionTable) -> WinePebTebInitResult:
+    val locked = wine_kernel32_execute_critical_section(symbols, table, "loader-lock")
+    if not locked.ok:
+        return _result(false, "loader-lock:" + locked.error, init, locked.operations)
+    val initialized = wine_peb_teb_init_gate(init)
+    if not initialized.ok:
+        return initialized
+    _result(true, "ready", init, initialized.operations + " LoaderLock")

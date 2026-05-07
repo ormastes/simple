@@ -314,6 +314,25 @@ Fresh evidence:
 Conservative boundary: this validates startup evidence only. It does not execute
 arbitrary TLS callbacks, mutate a live PEB/TEB, or run general PE code.
 
+## 2026-05-07 PEB/TEB Loader-Lock Update
+
+The PEB/TEB startup gate now has a loader-lock variant that composes the
+bounded KERNEL32 critical-section sequence (`InitializeCriticalSection`,
+`EnterCriticalSection`, `LeaveCriticalSection`, `DeleteCriticalSection`) around
+PEB/TEB/TLS/process-parameter evidence before reporting startup readiness.
+
+Fresh evidence:
+
+- `bin/simple check src/lib/common/wine_peb_teb.spl test/lib/common/wine_peb_teb_spec.spl doc/06_spec/app/simpleos/feature/simpleos_wine_peb_teb_spec.spl` passed.
+- `bin/simple test test/lib/common/wine_peb_teb_spec.spl --mode=interpreter --clean`: 5 examples, 0 failures.
+- `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_peb_teb_spec.spl --mode=interpreter --clean`: 2 examples, 0 failures.
+- `bin/simple check test/lib/common/.spipe_matchers_wine_peb_teb_spec.spl doc/06_spec/app/simpleos/feature/.spipe_matchers_simpleos_wine_peb_teb_spec.spl` passed.
+- `bin/simple check src/lib`: 2707 files, all checks passed.
+
+Conservative boundary: this models loader-lock ordering only. It still does not
+run live TLS callbacks, execute DllMain, mutate PEB/TEB memory, or transfer
+control to arbitrary PE code.
+
 ## 2026-05-07 Wine Aggregate Watchdog Split
 
 REQ-018 known-console dispatch planning now has focused system coverage in

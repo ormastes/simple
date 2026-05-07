@@ -1,4 +1,8 @@
-use common.wine_peb_teb.{WinePebTebInitEvidence, wine_peb_teb_init_default, wine_peb_teb_init_gate, wine_peb_teb_required_evidence}
+use common.wine_kernel32_critical_section.{wine_kernel32_critical_section_table_new}
+use common.wine_peb_teb.{WinePebTebInitEvidence, wine_peb_teb_init_default, wine_peb_teb_init_gate, wine_peb_teb_init_with_loader_lock, wine_peb_teb_required_evidence}
+
+fn _loader_lock_symbols() -> [text]:
+    ["InitializeCriticalSection", "EnterCriticalSection", "LeaveCriticalSection", "DeleteCriticalSection"]
 
 describe "Wine PEB/TEB initialization gate":
     it "lists the SimpleOS and MDSOC evidence required before PEB/TEB handoff":
@@ -70,3 +74,16 @@ describe "Wine PEB/TEB initialization gate":
             evidence: "simpleos-process-identity simpleos-thread-identity simpleos-address-space simpleos-stack-bounds simpleos-process-parameters simpleos-tls-vector simpleos-mdsoc-process-port simpleos-mdsoc-thread-port"
         )
         expect(wine_peb_teb_init_gate(unaligned).state).to_equal("invalid-peb-address")
+
+    it "requires the bounded loader-lock sequence around PEB/TEB startup":
+        val result = wine_peb_teb_init_with_loader_lock(wine_peb_teb_init_default(), _loader_lock_symbols(), wine_kernel32_critical_section_table_new())
+        expect(result.ok).to_equal(true)
+        expect(result.operations).to_equal("PEB TEB TLS ProcessParameters LoaderLock")
+
+        val blocked = wine_peb_teb_init_with_loader_lock(
+            wine_peb_teb_init_default(),
+            ["EnterCriticalSection", "InitializeCriticalSection", "LeaveCriticalSection", "DeleteCriticalSection"],
+            wine_kernel32_critical_section_table_new()
+        )
+        expect(blocked.ok).to_equal(false)
+        expect(blocked.state).to_equal("loader-lock:kernel32-critical-section-sequence-expected:InitializeCriticalSection")
