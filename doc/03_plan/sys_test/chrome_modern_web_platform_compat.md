@@ -68,7 +68,7 @@ REQ-004: Supported Feature Evidence
 - Given the current modern CSS slice, when renderer SSpec is inspected, then it should include positive and negative `:not()` coverage.
 - Given the current modern CSS slice, when renderer SSpec is inspected, then it should include positive and negative simple descendant `:has()` coverage, plus bounded direct-child `:has(> .class)` coverage.
 - Given the current modern CSS slice, when the WPT selector subset is inspected, then it should include bounded positive and sibling-negative descendant combinator coverage.
-- Given the current modern CSS slice, when the WPT selector subset is inspected, then it should include bounded positive and nested-negative direct child combinator coverage.
+- Given the current modern CSS slice, when the WPT selector subset is inspected, then it should include bounded positive and nested-negative direct child combinator coverage for body children and ancestor children.
 - Given the current modern CSS slice, when the WPT selector subset is inspected, then it should include bounded positive and non-adjacent-negative adjacent sibling combinator coverage.
 - Given the current modern CSS slice, when the WPT selector subset is inspected, then it should include bounded positive and preceding-source-negative general sibling combinator coverage.
 - Given the current modern CSS slice, when renderer SSpec is inspected, then it should include positive and negative partial `:empty` coverage.
@@ -109,6 +109,7 @@ REQ-007: Initial Modern CSS BDD Slice
 - Given modern CSS at-rules, when source is inspected, then simple CSS `@layer` wrappers should be flattened before existing rule scans.
 - Given modern CSS selectors, when source is inspected, then simple `&` parent-selector nested rules should be flattened before existing rule scans.
 - Given modern CSS selectors, when source is inspected, then bounded `body > div/.class/#id` direct-child matching should be implemented in the fallback block scanner.
+- Given modern CSS selectors, when source is inspected, then bounded ancestor `> div/.class/#id` child matching should be implemented in the fallback block scanner.
 - Given modern CSS selectors, when source is inspected, then bounded direct body-child adjacent sibling matching should be implemented in the fallback block scanner.
 - Given modern CSS selectors, when source is inspected, then bounded direct body-child general sibling matching should be implemented in the fallback block scanner.
 - Given modern CSS selectors, when source is inspected, then basic `[attr]`, `[attr=value]`, and quoted-space exact-value matching should be implemented.
