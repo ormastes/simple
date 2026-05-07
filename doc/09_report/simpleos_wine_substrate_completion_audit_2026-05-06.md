@@ -384,6 +384,22 @@ Fresh evidence:
 Conservative boundary: this is a launch-session plan, not execution. It does
 not start Steam, Wine, Proton, pressure-vessel, Vulkan, or any game process.
 
+## 2026-05-07 Proton Session Plan Command
+
+`src/app/proton_session_plan/main.spl` now exposes the non-Wine Proton session
+planner as a command. It prints the Steam app id, compat prefix, planned
+executable command, status, and runtime feature evidence for the fixture
+non-Wine Proton runtime.
+
+Fresh evidence:
+
+- `bin/simple check src/app/proton_session_plan/main.spl test/integration/app/proton_session_plan_command_spec.spl`: all checks passed.
+- `bin/simple run src/app/proton_session_plan/main.spl`: emitted `app_id=480`, `prefix=steamapps/compatdata/480/pfx`, `command=hl2.exe -novid`, `status=planned`, and Proton runtime feature evidence.
+- `bin/simple test test/integration/app/proton_session_plan_command_spec.spl --mode=interpreter --clean`: 1 example, 0 failures.
+
+Conservative boundary: this command reports a planned session only. It does
+not execute Steam, Wine, Proton, pressure-vessel, Vulkan, or game code.
+
 ## Completion Decision
 
 The WM/VM prerequisite plan in `doc/03_plan/agent_tasks/simpleos_wine_wm_vm_execution_plan_2026-05-06.md` is implemented at the Wine-facing SimpleOS contract level. Modeled X11/VM gates are no longer accepted as production evidence, and the new production gates require SimpleOS window records, framebuffer presents, OS process/address-space identity, container namespace evidence, OS VMA image mapping, thread stack/guard setup, fault evidence, and no-host-code-jump policy.

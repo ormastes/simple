@@ -40,6 +40,10 @@ The session planner validates Steam app id, compat prefix, executable path, and
 non-Wine runtime subsystem evidence. It emits a planned launch command and
 runtime feature evidence, but does not execute Wine or a game process.
 
+`src/app/proton_session_plan/main.spl` is a narrow command surface for this
+planner. It prints app id, compat prefix, planned command, status, and runtime
+features for the fixture non-Wine Proton evidence.
+
 ## Required Proton Features
 
 - `steam-runtime`
