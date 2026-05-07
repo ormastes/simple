@@ -211,6 +211,18 @@ Fresh evidence:
 - `bin/simple check src/lib`: 2704 files, all checks passed.
 - Wine DLL view startup-fault changed-file stub scan: pass.
 
+## 2026-05-07 Process Entrypoint Startup Fault/Rollback Update
+
+The process entrypoint startup-fault layer now composes import-loader VMA transaction handoff evidence with modeled VM fault evidence. It records SEH dispatch, process loader-lock release, import-loader refcount release, and process VMA rx restoration only for `deliver-seh` execute faults at the imported entrypoint; other fault addresses or policies stay blocked.
+
+Fresh evidence:
+
+- `bin/simple check` on changed process entrypoint startup-fault source/spec files plus generated matcher specs: all checks passed.
+- `bin/simple test test/lib/common/wine_process_entrypoint_startup_fault_spec.spl --mode=interpreter --clean`: 3 examples, 0 failures.
+- `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_process_entrypoint_startup_fault_spec.spl --mode=interpreter --clean`: 1 example, 0 failures.
+- `bin/simple check src/lib`: 2705 files, all checks passed.
+- Wine process entrypoint startup-fault changed-file stub scan: pass.
+
 ## 2026-05-07 Executable-Environment Matrix Update
 
 The top-level Wine substrate matrix now exposes the SimpleOS executable-environment gate directly through `wine_substrate_exec_env_gate` and the `exec_env` capability row. This makes VM/full-OS/container evidence a first-class Wine readiness prerequisite instead of an implicit side gate.

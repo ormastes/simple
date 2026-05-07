@@ -328,6 +328,11 @@ loader transaction and exposes the patched process image entrypoint address with
 entrypoint mapping evidence. This is still a handoff record only; it does not
 execute the entrypoint, dispatch arbitrary PE instructions, load host DLLs, or
 run DLL/TLS entrypoints.
+`wine_process_record_imported_entrypoint_startup_fault(...)` then composes that
+handoff with modeled VM fault evidence and records the process-entrypoint SEH
+rollback boundary. The accepted fault must target the imported entrypoint with
+`execute` access and `deliver-seh` policy; other policies or addresses stay
+blocked before rollback evidence is claimed.
 `wine_process_plan_import_thunk_patches(...)` consumes those explicit records,
 so thunk patch evidence now carries module-loader, record-planning, and
 import-thunk preconditions before CPU dispatch preflight can pass.

@@ -1,0 +1,46 @@
+"""Modeled process entrypoint startup fault rollback for Wine handoffs."""
+
+use common.wine_process_session.{
+    WineProcessImportedEntrypointHandoff,
+    WineProcessSessionPlan,
+    wine_process_prepare_imported_entrypoint_handoff
+}
+use common.wine_vm_adapter.{WineVmFault, wine_vm_fault_evidence}
+use common.wine_vm_gate.{wine_vm_fault_gate}
+
+class WineProcessEntrypointStartupFaultResult:
+    ok: bool
+    error: text
+    command: text
+    mapped_base: i64
+    mapped_size: i64
+    entry_address: i64
+    fault_address: i64
+    module_count: i64
+    rollback_count: i64
+    evidence: text
+    status: text
+
+fn _result(ok: bool, error: text, command: text, mapped_base: i64, mapped_size: i64, entry_address: i64, fault_address: i64, module_count: i64, rollback_count: i64, evidence: text, status: text) -> WineProcessEntrypointStartupFaultResult:
+    WineProcessEntrypointStartupFaultResult(ok: ok, error: error, command: command, mapped_base: mapped_base, mapped_size: mapped_size, entry_address: entry_address, fault_address: fault_address, module_count: module_count, rollback_count: rollback_count, evidence: evidence, status: status)
+
+pub fn wine_process_record_imported_entrypoint_startup_fault(plan: WineProcessSessionPlan, data: [u8], descriptor_limit: i64, symbol_limit: i64, fault: WineVmFault) -> WineProcessEntrypointStartupFaultResult:
+    val handoff = wine_process_prepare_imported_entrypoint_handoff(plan, data, descriptor_limit, symbol_limit)
+    wine_process_record_imported_entrypoint_handoff_startup_fault(handoff, fault)
+
+pub fn wine_process_record_imported_entrypoint_handoff_startup_fault(handoff: WineProcessImportedEntrypointHandoff, fault: WineVmFault) -> WineProcessEntrypointStartupFaultResult:
+    if not handoff.ok:
+        return _result(false, "imported-entrypoint-handoff:" + handoff.error, handoff.command, handoff.mapped_base, handoff.mapped_size, handoff.entry_address, fault.address, handoff.module_count, 0, handoff.evidence + " process-entrypoint-startup-fault-blocked no-arbitrary-execution", "rejected")
+
+    val fault_state = wine_vm_fault_gate(wine_vm_fault_evidence(fault))
+    if fault_state != "ready":
+        return _result(false, "startup-fault:" + fault_state, handoff.command, handoff.mapped_base, handoff.mapped_size, handoff.entry_address, fault.address, handoff.module_count, 0, handoff.evidence + " process-entrypoint-startup-fault-blocked no-arbitrary-execution", "rejected")
+    if fault.address != handoff.entry_address:
+        return _result(false, "startup-fault-entrypoint-mismatch", handoff.command, handoff.mapped_base, handoff.mapped_size, handoff.entry_address, fault.address, handoff.module_count, 0, handoff.evidence + " process-entrypoint-startup-fault-blocked no-arbitrary-execution", "rejected")
+    if fault.access != "execute":
+        return _result(false, "startup-fault-access:" + fault.access, handoff.command, handoff.mapped_base, handoff.mapped_size, handoff.entry_address, fault.address, handoff.module_count, 0, handoff.evidence + " process-entrypoint-startup-fault-blocked no-arbitrary-execution", "rejected")
+    if fault.policy != "deliver-seh":
+        return _result(false, "startup-fault-policy:" + fault.policy, handoff.command, handoff.mapped_base, handoff.mapped_size, handoff.entry_address, fault.address, handoff.module_count, 0, handoff.evidence + " process-entrypoint-startup-fault-blocked no-arbitrary-execution", "blocked")
+
+    val evidence = handoff.evidence + " " + wine_vm_fault_evidence(fault) + " process-entrypoint-startup-fault-recorded fault-policy-deliver-seh seh-dispatch-recorded imported-entrypoint-startup-rollback-recorded process-loader-lock-released import-loader-refcounts-released process-vma-rx-restored no-real-dll-loaded no-arbitrary-execution"
+    _result(true, "", handoff.command, handoff.mapped_base, handoff.mapped_size, handoff.entry_address, fault.address, handoff.module_count, handoff.module_count, evidence, "imported-entrypoint-startup-fault-rollback-recorded")
