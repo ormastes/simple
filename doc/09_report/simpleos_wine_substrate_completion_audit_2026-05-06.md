@@ -1224,3 +1224,15 @@ Fresh evidence:
 
 - `bin/simple test test/lib/common/wine_peb_teb_spec.spl --mode=interpreter --clean`: covers successful x64 layout record planning and write-readiness rejection.
 - `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_peb_teb_spec.spl --mode=interpreter --clean`: covers the SimpleOS system-level PEB/TEB layout-write plan.
+
+## 2026-05-07 NTDLL PEB/TEB Layout-Handoff Update
+
+`wine_ntdll_execute_process_info_with_peb_teb_layout(...)` now requires the
+six-record PEB/TEB layout-write plan before the NTDLL process/thread
+information bridge reports PEB and TEB addresses. Failed layout planning
+propagates as a hard handoff rejection.
+
+Fresh evidence:
+
+- `bin/simple test test/lib/common/wine_ntdll_process_info_spec.spl --mode=interpreter --clean`: covers layout-aware NTDLL process-info handoff and layout rejection.
+- `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_peb_teb_spec.spl --mode=interpreter --clean`: covers the SimpleOS system-level PEB/TEB layout-to-NTDLL handoff.

@@ -430,7 +430,9 @@ readiness. `wine_peb_teb_layout_write_plan(...)` converts that readiness into
 bounded x64 layout write records for TEB stack bounds, TEB TLS/PEB pointers,
 and PEB image-base/process-parameter pointers. `wine_ntdll_execute_process_info_with_peb_teb_writes(...)` composes
 that write readiness before the NTDLL process/thread information bridge reports
-PEB/TEB addresses. `wine_dllmain_handoff_require_peb_teb_writes(...)` also
+PEB/TEB addresses, and
+`wine_ntdll_execute_process_info_with_peb_teb_layout(...)` requires the
+layout-write plan before reporting those addresses. `wine_dllmain_handoff_require_peb_teb_writes(...)` also
 requires the same write readiness before a retained DLL view can report
 non-executing DllMain process-attach handoff readiness.
 `wine_dll_record_file_view_startup_fault_with_peb_teb_writes(...)` carries
