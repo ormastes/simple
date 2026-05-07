@@ -53,6 +53,7 @@ use common.wine_kernel32_module_loader.{
 }
 use common.wine_nt_import.{wine_nt_import_hello_binding_plan}
 use common.wine_pe_loader_runtime.{wine_pe_apply_relocation_plan, wine_pe_tls_callback_plan}
+use common.wine_peb_teb.{WinePebTebVmWriteResult}
 use common.wine_substrate.{wine_substrate_full_wine_gate, wine_substrate_hello_exe_gate}
 use common.wine_vm_adapter.{
     WineVmFault,
@@ -447,6 +448,30 @@ fn _wine_process_mapped_image_preflight_result(ok: bool, error: text, command: t
 fn _wine_process_full_image_handoff(ok: bool, error: text, command: text, mapped_base: i64, mapped_size: i64, entry_address: i64, evidence: text, status: text) -> WineProcessFullImageHandoff:
     WineProcessFullImageHandoff(ok: ok, error: error, command: command, mapped_base: mapped_base, mapped_size: mapped_size, entry_address: entry_address, evidence: evidence, status: status)
 
+fn _wine_process_full_image_handoff_require_peb_teb_vm_writes(handoff: WineProcessFullImageHandoff, vm_writes: WinePebTebVmWriteResult) -> WineProcessFullImageHandoff:
+    if not handoff.ok:
+        return handoff
+    if not vm_writes.ok:
+        handoff.ok = false
+        handoff.error = "peb-teb-vm-write:" + vm_writes.state
+        handoff.evidence = vm_writes.operations + " full-image-handoff-blocked"
+        handoff.status = "rejected"
+        return handoff
+    if vm_writes.write_count != 6:
+        handoff.ok = false
+        handoff.error = "peb-teb-vm-write-count-mismatch"
+        handoff.evidence = vm_writes.operations + " full-image-handoff-blocked"
+        handoff.status = "rejected"
+        return handoff
+    if vm_writes.byte_count != 48:
+        handoff.ok = false
+        handoff.error = "peb-teb-vm-byte-count-mismatch"
+        handoff.evidence = vm_writes.operations + " full-image-handoff-blocked"
+        handoff.status = "rejected"
+        return handoff
+    handoff.evidence = vm_writes.operations + " peb-teb-vm-writes-ready " + handoff.evidence
+    handoff
+
 fn _wine_process_full_image_loader_runtime_plan(ok: bool, error: text, command: text, relocation_count: i64, tls_callback_count: i64, evidence: text, status: text) -> WineProcessFullImageLoaderRuntimePlan:
     WineProcessFullImageLoaderRuntimePlan(ok: ok, error: error, command: command, relocation_count: relocation_count, tls_callback_count: tls_callback_count, evidence: evidence, status: status)
 
@@ -698,6 +723,10 @@ pub fn wine_process_prepare_full_image_handoff(plan: WineProcessSessionPlan, dat
         return _wine_process_full_image_handoff(false, production_state, plan.command, mapped_base, image_size, mapped.entry_address, "", "blocked")
     val evidence = "full-image-validated arbitrary-process-image-handoff process-image-mapped os-process os-address-space os-vma image-map thread-stack guard-page stack-growth exec-perm no-host-code-jump"
     _wine_process_full_image_handoff(true, "", plan.command, mapped_base, image_size, mapped.entry_address, evidence, "full-image-handoff-ready")
+
+pub fn wine_process_prepare_full_image_handoff_with_peb_teb_vm_writes(plan: WineProcessSessionPlan, data: [u8], vm_writes: WinePebTebVmWriteResult) -> WineProcessFullImageHandoff:
+    val handoff = wine_process_prepare_full_image_handoff(plan, data)
+    _wine_process_full_image_handoff_require_peb_teb_vm_writes(handoff, vm_writes)
 
 pub fn wine_process_plan_full_image_loader_runtime(plan: WineProcessSessionPlan, data: [u8], preferred_base: i64, load_base: i64, dynload_apis: text) -> WineProcessFullImageLoaderRuntimePlan:
     val handoff = wine_process_prepare_full_image_handoff(plan, data)
