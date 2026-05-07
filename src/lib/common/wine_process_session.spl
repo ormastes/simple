@@ -50,6 +50,7 @@ use common.wine_kernel32_module_loader.{
     wine_kernel32_module_table_new
 }
 use common.wine_nt_import.{wine_nt_import_hello_binding_plan}
+use common.wine_pe_loader_runtime.{wine_pe_apply_relocation_plan, wine_pe_tls_callback_plan}
 use common.wine_substrate.{wine_substrate_full_wine_gate, wine_substrate_hello_exe_gate}
 use common.wine_vm_adapter.{
     WineVmFault,
@@ -274,6 +275,15 @@ class WineProcessFullImageHandoff:
     evidence: text
     status: text
 
+class WineProcessFullImageLoaderRuntimePlan:
+    ok: bool
+    error: text
+    command: text
+    relocation_count: i64
+    tls_callback_count: i64
+    evidence: text
+    status: text
+
 class WineProcessVmaThunkPatchResult:
     ok: bool
     error: text
@@ -368,6 +378,9 @@ fn _wine_process_mapped_image_preflight_result(ok: bool, error: text, command: t
 
 fn _wine_process_full_image_handoff(ok: bool, error: text, command: text, mapped_base: i64, mapped_size: i64, entry_address: i64, evidence: text, status: text) -> WineProcessFullImageHandoff:
     WineProcessFullImageHandoff(ok: ok, error: error, command: command, mapped_base: mapped_base, mapped_size: mapped_size, entry_address: entry_address, evidence: evidence, status: status)
+
+fn _wine_process_full_image_loader_runtime_plan(ok: bool, error: text, command: text, relocation_count: i64, tls_callback_count: i64, evidence: text, status: text) -> WineProcessFullImageLoaderRuntimePlan:
+    WineProcessFullImageLoaderRuntimePlan(ok: ok, error: error, command: command, relocation_count: relocation_count, tls_callback_count: tls_callback_count, evidence: evidence, status: status)
 
 fn _wine_process_vma_thunk_patch_result(ok: bool, error: text, command: text, dll_name: text, patched_image: [u8], mapped_base: i64, mapped_size: i64, patched_count: i64, evidence: text, status: text) -> WineProcessVmaThunkPatchResult:
     WineProcessVmaThunkPatchResult(ok: ok, error: error, command: command, dll_name: dll_name, patched_image: patched_image, mapped_base: mapped_base, mapped_size: mapped_size, patched_count: patched_count, evidence: evidence, status: status)
@@ -586,6 +599,19 @@ pub fn wine_process_prepare_full_image_handoff(plan: WineProcessSessionPlan, dat
         return _wine_process_full_image_handoff(false, production_state, plan.command, mapped_base, image_size, mapped.entry_address, "", "blocked")
     val evidence = "full-image-validated arbitrary-process-image-handoff process-image-mapped os-process os-address-space os-vma image-map thread-stack guard-page stack-growth exec-perm no-host-code-jump"
     _wine_process_full_image_handoff(true, "", plan.command, mapped_base, image_size, mapped.entry_address, evidence, "full-image-handoff-ready")
+
+pub fn wine_process_plan_full_image_loader_runtime(plan: WineProcessSessionPlan, data: [u8], preferred_base: i64, load_base: i64, dynload_apis: text) -> WineProcessFullImageLoaderRuntimePlan:
+    val handoff = wine_process_prepare_full_image_handoff(plan, data)
+    if not handoff.ok:
+        return _wine_process_full_image_loader_runtime_plan(false, handoff.error, plan.command, 0, 0, handoff.evidence, handoff.status)
+    val relocated = wine_pe_apply_relocation_plan(data, preferred_base, load_base)
+    if not relocated.ok:
+        return _wine_process_full_image_loader_runtime_plan(false, "relocation:" + relocated.error, plan.command, relocated.relocation_count, 0, handoff.evidence + " " + relocated.operations, "rejected")
+    val tls = wine_pe_tls_callback_plan(data, dynload_apis)
+    if not tls.ok:
+        return _wine_process_full_image_loader_runtime_plan(false, "tls:" + tls.error, plan.command, relocated.relocation_count, tls.callback_count, handoff.evidence + " " + relocated.operations + " " + tls.operations, "rejected")
+    val evidence = handoff.evidence + " " + relocated.operations + " " + tls.operations + " full-image-loader-runtime-planned relocation-runtime-planned tls-runtime-planned no-arbitrary-execution"
+    _wine_process_full_image_loader_runtime_plan(true, "", plan.command, relocated.relocation_count, tls.callback_count, evidence, "full-image-loader-runtime-planned")
 
 pub fn wine_process_inspect_full_imports(plan: WineProcessSessionPlan, data: [u8], symbol_limit: i64) -> WineProcessImportInspectionResult:
     val image = wine_process_validate_full_image(plan, data)

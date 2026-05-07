@@ -174,6 +174,12 @@ jump policy. The lookup thunk table remains read-only import metadata. This is
 still a modeled multi-DLL thunk application over covered DLL families, not real
 DLL loading, relocation, TLS callback execution, or arbitrary PE instruction
 dispatch.
+`wine_process_plan_full_image_loader_runtime(...)` composes the full-image VM
+handoff with bounded relocation planning and TLS callback-table planning before
+any arbitrary process execution boundary. It returns relocation and TLS runtime
+evidence while preserving the no-host-code-jump and no-arbitrary-execution
+boundary; it does not mutate VM relocation targets, dispatch TLS callbacks,
+load real DLLs, or transfer control to PE code.
 `wine_process_bind_known_kernel32_imports(...)`
 then plans the currently supported KERNEL32 console binding sequence and
 rejects unsupported or incomplete import sets; it still does not patch thunks or
