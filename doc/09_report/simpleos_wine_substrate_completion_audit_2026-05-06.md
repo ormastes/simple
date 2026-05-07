@@ -633,6 +633,11 @@ The controlled hello CPU skeleton now uses RIP-relative indirect calls through
 the patched KERNEL32 thunk RVAs (`0x2060`, `0x2068`, and `0x2070`) instead of
 direct calls to import-name RVAs. This keeps known-console dispatch tied to the
 bounded IAT patch records while preserving the arbitrary-instruction block.
+`wine_process_map_known_console_image(...)` now maps that patched image through
+the modeled SimpleOS process VM adapter before CPU dispatch preflight reports
+ready. The evidence records process image mapping, OS process/address-space
+identity, OS VMA backing, executable image-map state, and no-host-code-jump
+policy at the mapped PE entrypoint.
 
 Fresh evidence:
 
@@ -653,11 +658,14 @@ Fresh evidence:
 - `bin/simple test test/lib/common/wine_x86_64_decode_spec.spl --mode=interpreter --clean`: covers RIP-relative indirect call decoding and thunk-RVA target extraction.
 - `bin/simple test test/lib/common/wine_hello_exe_spec.spl --mode=interpreter --clean`: covers import-binding agreement against thunk RVAs.
 - `bin/simple test test/lib/common/wine_process_session_known_console_spec.spl --mode=interpreter --clean`: keeps known-console process execution on the patched-image path.
+- `bin/simple test test/lib/common/wine_process_session_mapped_image_spec.spl --mode=interpreter --clean`: covers the mapped patched-image preflight and missing CPU evidence rejection.
+- `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_process_mapped_image_spec.spl --mode=interpreter --clean`: includes REQ-026 mapped patched process image coverage.
 
 Conservative boundary: this is a curated KERNEL32 table and bounded loader
 sequence. It is not arbitrary DLL loading, host DLL mapping, Windows DLL search
-order, arbitrary import-table binding, writable OS VMA mutation, PE DLL
-relocation, reference-count-complete loader state, or broad Win32/NT behavior.
+order, arbitrary import-table binding, writable arbitrary OS VMA mutation, PE
+DLL relocation, reference-count-complete loader state, or broad Win32/NT
+behavior.
 
 ## Completion Decision
 

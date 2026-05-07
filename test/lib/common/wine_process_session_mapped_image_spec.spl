@@ -1,0 +1,36 @@
+use common.wine_cpu_exec.{wine_cpu_execution_evidence_all_ready, wine_cpu_execution_evidence_text}
+use common.wine_hello_fixture.{wine_known_hello_exe_fixture_bytes}
+use common.wine_process_session.{
+    wine_process_map_known_console_image,
+    wine_process_session_plan,
+    wine_process_session_request_new
+}
+
+fn _full_gates() -> text:
+    "process=verified exec_env=verified vm=verified renderer=verified user32=verified " +
+        "gdi32=verified kernel32_core=verified host=verified posix=verified registry=verified " +
+        "pthread=verified dynload=verified audio=verified fonts=verified input=verified " +
+        "pe_loader=verified async=verified nt_bridge=verified"
+
+describe "Wine process session mapped image preflight":
+    it "maps the patched known-console image into a bounded process address space":
+        val plan = wine_process_session_plan(wine_process_session_request_new("game.exe", [], "C:\\Games"), _full_gates())
+        val result = wine_process_map_known_console_image(plan, wine_known_hello_exe_fixture_bytes(), 8, wine_cpu_execution_evidence_text(wine_cpu_execution_evidence_all_ready()))
+        expect(result.ok).to_equal(true)
+        expect(result.command).to_equal("game.exe")
+        expect(result.mapped_base).to_equal(0x400000)
+        expect(result.mapped_size).to_equal(0x5000)
+        expect(result.evidence).to_contain("process-image-mapped")
+        expect(result.evidence).to_contain("os-process")
+        expect(result.evidence).to_contain("os-address-space")
+        expect(result.evidence).to_contain("os-vma")
+        expect(result.evidence).to_contain("image-map")
+        expect(result.evidence).to_contain("no-host-code-jump")
+        expect(result.status).to_equal("mapped-image-preflight-ready")
+
+    it "blocks mapped-image preflight before non-import CPU evidence is complete":
+        val plan = wine_process_session_plan(wine_process_session_request_new("game.exe", [], "C:\\Games"), _full_gates())
+        val result = wine_process_map_known_console_image(plan, wine_known_hello_exe_fixture_bytes(), 8, "")
+        expect(result.ok).to_equal(false)
+        expect(result.error).to_equal("missing-thread-context")
+        expect(result.status).to_equal("blocked")

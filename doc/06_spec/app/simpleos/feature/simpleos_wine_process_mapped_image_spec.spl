@@ -1,0 +1,36 @@
+use common.wine_cpu_exec.{wine_cpu_execution_evidence_all_ready, wine_cpu_execution_evidence_text}
+use common.wine_hello_fixture.{wine_known_hello_exe_fixture_bytes}
+use common.wine_process_session.{
+    wine_process_map_known_console_image,
+    wine_process_session_plan,
+    wine_process_session_request_new
+}
+
+fn _full_gates() -> text:
+    "process=verified exec_env=verified vm=verified renderer=verified user32=verified " +
+        "gdi32=verified kernel32_core=verified host=verified posix=verified registry=verified " +
+        "pthread=verified dynload=verified audio=verified fonts=verified input=verified " +
+        "pe_loader=verified async=verified nt_bridge=verified"
+
+describe "SimpleOS Wine process mapped image":
+    describe "REQ-026: mapped patched process image preflight":
+        it "should map the patched image into a SimpleOS process VMA before dispatch":
+            val plan = wine_process_session_plan(wine_process_session_request_new("game.exe", [], "C:\\Games"), _full_gates())
+            val mapped = wine_process_map_known_console_image(plan, wine_known_hello_exe_fixture_bytes(), 8, wine_cpu_execution_evidence_text(wine_cpu_execution_evidence_all_ready()))
+            expect(mapped.ok).to_equal(true)
+            expect(mapped.mapped_base).to_equal(0x400000)
+            expect(mapped.mapped_size).to_equal(0x5000)
+            expect(mapped.evidence).to_contain("process-image-mapped")
+            expect(mapped.evidence).to_contain("os-process")
+            expect(mapped.evidence).to_contain("os-address-space")
+            expect(mapped.evidence).to_contain("os-vma")
+            expect(mapped.evidence).to_contain("image-map")
+            expect(mapped.evidence).to_contain("no-host-code-jump")
+            expect(mapped.status).to_equal("mapped-image-preflight-ready")
+
+        it "should reject mapped-image preflight before CPU evidence is complete":
+            val plan = wine_process_session_plan(wine_process_session_request_new("game.exe", [], "C:\\Games"), _full_gates())
+            val mapped = wine_process_map_known_console_image(plan, wine_known_hello_exe_fixture_bytes(), 8, "")
+            expect(mapped.ok).to_equal(false)
+            expect(mapped.error).to_equal("missing-thread-context")
+            expect(mapped.status).to_equal("blocked")

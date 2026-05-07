@@ -151,6 +151,11 @@ chain.
 `wine_process_prepare_known_console_image(...)` is the shared preflight for
 known-console dispatch and execution: it applies the bounded copied-image thunk
 patches and returns the patched image plus the composed CPU evidence.
+`wine_process_map_known_console_image(...)` then maps that patched image into a
+modeled SimpleOS process address space with OS VMA backing, image-map evidence,
+and a no-host-code-jump check at the PE entrypoint. This is still a bounded
+preflight record; it does not expose writable arbitrary process memory or step
+general instructions.
 `wine_process_plan_known_console_dispatch(...)` then decodes the bounded known
 console call sequence from that patched image. The sequence now models
 RIP-relative indirect calls through the patched thunk RVAs, so the decoded
