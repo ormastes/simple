@@ -5,6 +5,7 @@ use common.wine_process_session.{
     WineProcessSessionPlan,
     wine_process_prepare_imported_entrypoint_handoff
 }
+use common.wine_peb_teb.{WinePebTebVmWriteResult}
 use common.wine_seh_frame.{WineSehFrame, wine_seh_dispatch_fault}
 use common.wine_vm_adapter.{WineVmFault, wine_vm_fault_evidence}
 use common.wine_vm_gate.{wine_vm_fault_gate}
@@ -25,9 +26,37 @@ class WineProcessEntrypointStartupFaultResult:
 fn _result(ok: bool, error: text, command: text, mapped_base: i64, mapped_size: i64, entry_address: i64, fault_address: i64, module_count: i64, rollback_count: i64, evidence: text, status: text) -> WineProcessEntrypointStartupFaultResult:
     WineProcessEntrypointStartupFaultResult(ok: ok, error: error, command: command, mapped_base: mapped_base, mapped_size: mapped_size, entry_address: entry_address, fault_address: fault_address, module_count: module_count, rollback_count: rollback_count, evidence: evidence, status: status)
 
+fn _require_peb_teb_vm_writes(handoff: WineProcessImportedEntrypointHandoff, vm_writes: WinePebTebVmWriteResult) -> WineProcessImportedEntrypointHandoff:
+    if not handoff.ok:
+        return handoff
+    if not vm_writes.ok:
+        handoff.ok = false
+        handoff.error = "peb-teb-vm-write:" + vm_writes.state
+        handoff.evidence = vm_writes.operations + " imported-entrypoint-handoff-blocked"
+        handoff.status = "rejected"
+        return handoff
+    if vm_writes.write_count != 6:
+        handoff.ok = false
+        handoff.error = "peb-teb-vm-write-count-mismatch"
+        handoff.evidence = vm_writes.operations + " imported-entrypoint-handoff-blocked"
+        handoff.status = "rejected"
+        return handoff
+    if vm_writes.byte_count != 48:
+        handoff.ok = false
+        handoff.error = "peb-teb-vm-byte-count-mismatch"
+        handoff.evidence = vm_writes.operations + " imported-entrypoint-handoff-blocked"
+        handoff.status = "rejected"
+        return handoff
+    handoff.evidence = vm_writes.operations + " peb-teb-vm-writes-ready " + handoff.evidence
+    handoff
+
 pub fn wine_process_record_imported_entrypoint_startup_fault(plan: WineProcessSessionPlan, data: [u8], descriptor_limit: i64, symbol_limit: i64, fault: WineVmFault) -> WineProcessEntrypointStartupFaultResult:
     val handoff = wine_process_prepare_imported_entrypoint_handoff(plan, data, descriptor_limit, symbol_limit)
     wine_process_record_imported_entrypoint_handoff_startup_fault(handoff, fault)
+
+pub fn wine_process_record_imported_entrypoint_startup_fault_with_peb_teb_vm_writes(plan: WineProcessSessionPlan, data: [u8], descriptor_limit: i64, symbol_limit: i64, fault: WineVmFault, vm_writes: WinePebTebVmWriteResult) -> WineProcessEntrypointStartupFaultResult:
+    val handoff = wine_process_prepare_imported_entrypoint_handoff(plan, data, descriptor_limit, symbol_limit)
+    wine_process_record_imported_entrypoint_handoff_startup_fault_with_peb_teb_vm_writes(handoff, fault, vm_writes)
 
 pub fn wine_process_record_imported_entrypoint_handoff_startup_fault(handoff: WineProcessImportedEntrypointHandoff, fault: WineVmFault) -> WineProcessEntrypointStartupFaultResult:
     if not handoff.ok:
@@ -45,6 +74,10 @@ pub fn wine_process_record_imported_entrypoint_handoff_startup_fault(handoff: Wi
 
     val evidence = handoff.evidence + " " + wine_vm_fault_evidence(fault) + " process-entrypoint-startup-fault-recorded fault-policy-deliver-seh seh-dispatch-recorded imported-entrypoint-startup-rollback-recorded process-loader-lock-released import-loader-refcounts-released process-vma-rx-restored no-real-dll-loaded no-arbitrary-execution"
     _result(true, "", handoff.command, handoff.mapped_base, handoff.mapped_size, handoff.entry_address, fault.address, handoff.module_count, handoff.module_count, evidence, "imported-entrypoint-startup-fault-rollback-recorded")
+
+pub fn wine_process_record_imported_entrypoint_handoff_startup_fault_with_peb_teb_vm_writes(handoff: WineProcessImportedEntrypointHandoff, fault: WineVmFault, vm_writes: WinePebTebVmWriteResult) -> WineProcessEntrypointStartupFaultResult:
+    val gated = _require_peb_teb_vm_writes(handoff, vm_writes)
+    wine_process_record_imported_entrypoint_handoff_startup_fault(gated, fault)
 
 pub fn wine_process_record_imported_entrypoint_startup_fault_with_seh(plan: WineProcessSessionPlan, data: [u8], descriptor_limit: i64, symbol_limit: i64, fault: WineVmFault, frames: [WineSehFrame]) -> WineProcessEntrypointStartupFaultResult:
     val handoff = wine_process_prepare_imported_entrypoint_handoff(plan, data, descriptor_limit, symbol_limit)

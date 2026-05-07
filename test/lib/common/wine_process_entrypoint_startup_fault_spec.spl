@@ -1,16 +1,19 @@
 use common.wine_hello_fixture.{wine_known_hello_exe_fixture_bytes}
 use common.wine_process_entrypoint_startup_fault.{
     wine_process_record_imported_entrypoint_handoff_startup_fault,
+    wine_process_record_imported_entrypoint_handoff_startup_fault_with_peb_teb_vm_writes,
     wine_process_record_imported_entrypoint_handoff_startup_fault_with_seh,
-    wine_process_record_imported_entrypoint_startup_fault
+    wine_process_record_imported_entrypoint_startup_fault,
+    wine_process_record_imported_entrypoint_startup_fault_with_peb_teb_vm_writes
 }
+use common.wine_peb_teb.{wine_peb_teb_apply_layout_byte_writes, wine_peb_teb_init_default, wine_peb_teb_layout_byte_writes, wine_peb_teb_layout_write_plan, wine_peb_teb_memory_write_gate}
 use common.wine_process_session.{
     WineProcessImportedEntrypointHandoff,
     wine_process_session_plan,
     wine_process_session_request_new
 }
 use common.wine_seh_frame.{wine_seh_frame_new}
-use common.wine_vm_adapter.{WineVmFault}
+use common.wine_vm_adapter.{WineVmFault, WineVmSpace, wine_vm_commit, wine_vm_process_space_new, wine_vm_reserve_fixed}
 
 fn _put_u32_le(data: [u8], offset: i64, value: i64) -> [u8]:
     data[offset] = (value & 0xff) as u8
@@ -38,6 +41,20 @@ fn _clear_bytes(data: [u8], offset: i64, count: i64) -> [u8]:
         data[offset + i] = 0
         i = i + 1
     data
+
+fn _commit_fixed(space: WineVmSpace, base: i64, size: i64, perms: text) -> WineVmSpace:
+    val reserved = wine_vm_reserve_fixed(space, base, size)
+    if not reserved.ok:
+        return reserved.space
+    val committed = wine_vm_commit(reserved.space, reserved.region.base, perms)
+    committed.space
+
+fn _startup_write_space() -> WineVmSpace:
+    var space = wine_vm_process_space_new(10, 30, "pid fs ipc net capability")
+    space = _commit_fixed(space, 0x7ffdc000, 0x1000, "rw")
+    space = _commit_fixed(space, 0x7ffdd000, 0x1000, "rw")
+    space = _commit_fixed(space, 0x7ffde000, 0x1000, "rw")
+    _commit_fixed(space, 0x7ffdf000, 0x1000, "rw")
 
 fn _full_gates() -> text:
     "process=verified exec_env=verified vm=verified renderer=verified user32=verified " +
@@ -90,6 +107,35 @@ describe "Wine process imported entrypoint startup fault rollback":
         expect(result.evidence).to_contain("seh-dispatch-recorded")
         expect(result.evidence).to_contain("import-loader-refcounts-released")
         expect(result.evidence).to_contain("no-arbitrary-execution")
+
+    it "records imported entrypoint rollback only after PEB/TEB VM byte-write readback":
+        val fault = WineVmFault(process_id: 77, thread_id: 12, address: 0x402000, access: "execute", policy: "deliver-seh")
+        val init = wine_peb_teb_init_default()
+        val writes = wine_peb_teb_memory_write_gate(init, _startup_write_space())
+        val layout = wine_peb_teb_layout_write_plan(init, writes)
+        val bytes = wine_peb_teb_layout_byte_writes(layout)
+        val vm_writes = wine_peb_teb_apply_layout_byte_writes(_startup_write_space(), bytes)
+        val result = wine_process_record_imported_entrypoint_handoff_startup_fault_with_peb_teb_vm_writes(_ready_handoff(), fault, vm_writes)
+
+        expect(result.ok).to_equal(true)
+        expect(result.status).to_equal("imported-entrypoint-startup-fault-rollback-recorded")
+        expect(result.evidence).to_contain("peb-teb-vm-writes-ready")
+        expect(result.evidence).to_contain("VMWriteReadback:PEBTEBLayoutBytes")
+        expect(result.evidence).to_contain("imported-entrypoint-startup-rollback-recorded")
+
+    it "blocks imported entrypoint rollback when PEB/TEB VM byte writes are not ready":
+        val fault = WineVmFault(process_id: 77, thread_id: 12, address: 0x402000, access: "execute", policy: "deliver-seh")
+        val init = wine_peb_teb_init_default()
+        val writes = wine_peb_teb_memory_write_gate(init, _startup_write_space())
+        val layout = wine_peb_teb_layout_write_plan(init, writes)
+        val bytes = wine_peb_teb_layout_byte_writes(layout)
+        val vm_writes = wine_peb_teb_apply_layout_byte_writes(wine_vm_process_space_new(10, 30, "pid fs ipc net capability"), bytes)
+        val result = wine_process_record_imported_entrypoint_handoff_startup_fault_with_peb_teb_vm_writes(_ready_handoff(), fault, vm_writes)
+
+        expect(result.ok).to_equal(false)
+        expect(result.error).to_equal("imported-entrypoint-handoff:peb-teb-vm-write:vm-write:NtTib.StackBase:page-fault-unmapped")
+        expect(result.rollback_count).to_equal(0)
+        expect(result.evidence).to_contain("process-entrypoint-startup-fault-blocked")
 
     it "rejects startup faults that miss the imported entrypoint":
         val fault = WineVmFault(process_id: 77, thread_id: 12, address: 0x402010, access: "execute", policy: "deliver-seh")
