@@ -187,6 +187,18 @@ Fresh evidence:
 - `bin/simple check src/lib`: 2702 files, all checks passed.
 - Wine DLL view TLS-dispatch changed-file stub scan: pass.
 
+## 2026-05-07 DLL View DllMain-Handoff Update
+
+The DLL view DllMain-handoff layer now composes import-bound retained DLL views with TLS callback planning, validates a byte-mapped DLL entrypoint, records loader-lock/TLS-before-DllMain/process-attach handoff evidence, and hard-blocks actual DllMain execution.
+
+Fresh evidence:
+
+- `bin/simple check` on changed DLL view DllMain-handoff source/spec files: all checks passed.
+- `bin/simple test test/lib/common/wine_dll_view_dllmain_handoff_spec.spl`: 2 examples, 0 failures.
+- `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_dll_view_dllmain_handoff_spec.spl`: 1 example, 0 failures.
+- `bin/simple check src/lib`: 2703 files, all checks passed.
+- Wine DLL view DllMain-handoff changed-file stub scan: pass.
+
 ## 2026-05-07 Executable-Environment Matrix Update
 
 The top-level Wine substrate matrix now exposes the SimpleOS executable-environment gate directly through `wine_substrate_exec_env_gate` and the `exec_env` capability row. This makes VM/full-OS/container evidence a first-class Wine readiness prerequisite instead of an implicit side gate.

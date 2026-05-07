@@ -282,6 +282,10 @@ loads, TLS callbacks, DllMain, and arbitrary PE dispatch blocked.
 view with TLS callback-table planning and records loader-lock/TLS-before-DllMain
 dispatch evidence. The callback target must map inside the DLL image, but
 callback instructions, DllMain, and arbitrary PE code are still not executed.
+`wine_dll_prepare_file_view_dllmain_handoff(...)` then prepares a non-executing
+DllMain process-attach handoff from the same import-bound retained view. It
+requires TLS planning, a byte-mapped DLL entrypoint, and a no-host-code-jump
+check, while requests to actually execute DllMain remain hard-blocked.
 `wine_process_resolve_first_import_module(...)` composes the PE first-import
 inspection gate with that module resolver, so validated full-Wine process
 images can resolve a requested procedure against their first imported KERNEL32
