@@ -3,6 +3,7 @@
 use common.pe_coff_header.{pe_rva_to_file_offset}
 use common.wine_dll_file_probe.{WineDllProbeFile}
 use common.wine_dll_view_import_binding.{wine_dll_bind_file_view_imports}
+use common.wine_peb_teb.{WinePebTebVmWriteResult}
 use common.wine_pe_loader_runtime.{wine_pe_tls_callback_plan}
 
 class WineDllViewTlsDispatchResult:
@@ -23,18 +24,49 @@ fn _result(ok: bool, error: text, dll_name: text, selected_path: text, mapped_ba
 
 pub fn wine_dll_record_file_view_tls_dispatch(dll_name: text, application_directory: text, working_directory: text, path_dirs: [text], known_dlls: [text], files: [WineDllProbeFile], data: [u8], preferred_base: i64, load_base: i64, process_id: i64, address_space_id: i64, container_evidence: text, descriptor_limit: i64, symbol_limit: i64, dynload_apis: text) -> WineDllViewTlsDispatchResult:
     val bound = wine_dll_bind_file_view_imports(dll_name, application_directory, working_directory, path_dirs, known_dlls, files, data, preferred_base, load_base, process_id, address_space_id, container_evidence, descriptor_limit, symbol_limit)
+    _record_file_view_tls_dispatch_from_bound(bound, dynload_apis, "")
+
+pub fn wine_dll_record_file_view_tls_dispatch_with_peb_teb_vm_writes(dll_name: text, application_directory: text, working_directory: text, path_dirs: [text], known_dlls: [text], files: [WineDllProbeFile], data: [u8], preferred_base: i64, load_base: i64, process_id: i64, address_space_id: i64, container_evidence: text, descriptor_limit: i64, symbol_limit: i64, dynload_apis: text, vm_writes: WinePebTebVmWriteResult) -> WineDllViewTlsDispatchResult:
+    val vm_evidence = _peb_teb_vm_write_evidence(vm_writes)
+    if vm_evidence == "":
+        return _result(false, _peb_teb_vm_write_error(vm_writes), dll_name, "", 0, 0, 0, 0, 0, vm_writes.operations + " dll-view-tls-dispatch-blocked no-tls-callback-executed no-dllmain-executed", "rejected")
+    val bound = wine_dll_bind_file_view_imports(dll_name, application_directory, working_directory, path_dirs, known_dlls, files, data, preferred_base, load_base, process_id, address_space_id, container_evidence, descriptor_limit, symbol_limit)
+    _record_file_view_tls_dispatch_from_bound(bound, dynload_apis, vm_evidence)
+
+fn _record_file_view_tls_dispatch_from_bound(bound, dynload_apis: text, preflight_evidence: text) -> WineDllViewTlsDispatchResult:
+    var bound_evidence = bound.evidence
+    if preflight_evidence != "":
+        bound_evidence = preflight_evidence + " " + bound.evidence
     if not bound.ok:
-        return _result(false, "dll-view-import-binding:" + bound.error, bound.dll_name, bound.selected_path, bound.mapped_base, bound.mapped_size, 0, 0, 0, bound.evidence, bound.status)
+        return _result(false, "dll-view-import-binding:" + bound.error, bound.dll_name, bound.selected_path, bound.mapped_base, bound.mapped_size, 0, 0, 0, bound_evidence, bound.status)
 
     val tls = wine_pe_tls_callback_plan(bound.patched_image, dynload_apis)
     if not tls.ok:
-        return _result(false, "dll-tls:" + tls.error, bound.dll_name, bound.selected_path, bound.mapped_base, bound.mapped_size, tls.callback_count, tls.first_callback_rva, 0, bound.evidence + " " + tls.operations + " dll-tls-dispatch-blocked no-tls-callback-executed", "rejected")
+        return _result(false, "dll-tls:" + tls.error, bound.dll_name, bound.selected_path, bound.mapped_base, bound.mapped_size, tls.callback_count, tls.first_callback_rva, 0, bound_evidence + " " + tls.operations + " dll-tls-dispatch-blocked no-tls-callback-executed", "rejected")
 
     var dispatch_count = 0
     if tls.callback_count > 0:
         if pe_rva_to_file_offset(bound.patched_image, tls.first_callback_rva) < 0:
-            return _result(false, "dll-tls-callback-unmapped", bound.dll_name, bound.selected_path, bound.mapped_base, bound.mapped_size, tls.callback_count, tls.first_callback_rva, 0, bound.evidence + " " + tls.operations + " dll-tls-dispatch-blocked no-tls-callback-executed", "rejected")
+            return _result(false, "dll-tls-callback-unmapped", bound.dll_name, bound.selected_path, bound.mapped_base, bound.mapped_size, tls.callback_count, tls.first_callback_rva, 0, bound_evidence + " " + tls.operations + " dll-tls-dispatch-blocked no-tls-callback-executed", "rejected")
         dispatch_count = 1
 
-    val evidence = bound.evidence + " " + tls.operations + " dll-tls-callback-dispatch-recorded dll-tls-callback-target-mapped loader-lock-held tls-before-dllmain no-tls-callback-executed no-dllmain-executed no-arbitrary-execution"
+    val evidence = bound_evidence + " " + tls.operations + " dll-tls-callback-dispatch-recorded dll-tls-callback-target-mapped loader-lock-held tls-before-dllmain no-tls-callback-executed no-dllmain-executed no-arbitrary-execution"
     _result(true, "", bound.dll_name, bound.selected_path, bound.mapped_base, bound.mapped_size, tls.callback_count, tls.first_callback_rva, dispatch_count, evidence, "dll-view-tls-dispatch-recorded")
+
+fn _peb_teb_vm_write_evidence(vm_writes: WinePebTebVmWriteResult) -> text:
+    if not vm_writes.ok:
+        return ""
+    if vm_writes.write_count != 6:
+        return ""
+    if vm_writes.byte_count != 48:
+        return ""
+    vm_writes.operations + " peb-teb-vm-writes-ready"
+
+fn _peb_teb_vm_write_error(vm_writes: WinePebTebVmWriteResult) -> text:
+    if not vm_writes.ok:
+        return "peb-teb-vm-write:" + vm_writes.state
+    if vm_writes.write_count != 6:
+        return "peb-teb-vm-write-count-mismatch"
+    if vm_writes.byte_count != 48:
+        return "peb-teb-vm-byte-count-mismatch"
+    "peb-teb-vm-write:unknown"

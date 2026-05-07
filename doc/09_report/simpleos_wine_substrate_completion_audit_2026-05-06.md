@@ -1516,3 +1516,15 @@ Performance follow-up: the focused import-loader transaction and imported
 entrypoint VM-write specs pass but run close to the 60s interpreter watchdog.
 Split or optimize the shared multi-DLL PE fixture path before adding more
 examples to these specs.
+
+## 2026-05-07 DLL TLS Dispatch VM-Write Update
+
+`wine_dll_record_file_view_tls_dispatch_with_peb_teb_vm_writes(...)` now
+requires PEB/TEB VM byte-write/readback evidence before retained DLL view TLS
+callback dispatch readiness can be recorded. The path remains non-executing:
+TLS callback instructions, DllMain, and arbitrary PE code are still not run.
+
+Fresh evidence:
+
+- `bin/simple test test/lib/common/wine_dll_view_tls_dispatch_vm_write_spec.spl --mode=interpreter --clean`: covers VM-write/readback-gated retained DLL TLS dispatch readiness.
+- `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_dll_view_tls_dispatch_vm_write_spec.spl --mode=interpreter --clean`: covers the SimpleOS system-level retained DLL TLS dispatch requiring PEB/TEB VM write/readback evidence.

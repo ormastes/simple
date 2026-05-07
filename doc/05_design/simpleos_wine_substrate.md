@@ -313,6 +313,9 @@ loads, TLS callbacks, DllMain, and arbitrary PE dispatch blocked.
 view with TLS callback-table planning and records loader-lock/TLS-before-DllMain
 dispatch evidence. The callback target must map inside the DLL image, but
 callback instructions, DllMain, and arbitrary PE code are still not executed.
+`wine_dll_record_file_view_tls_dispatch_with_peb_teb_vm_writes(...)` requires
+PEB/TEB VM byte-write/readback evidence before the retained TLS dispatch record
+can report readiness.
 `wine_dll_prepare_file_view_dllmain_handoff(...)` then prepares a non-executing
 DllMain process-attach handoff from the same import-bound retained view. It
 requires TLS planning, a byte-mapped DLL entrypoint, and a no-host-code-jump
