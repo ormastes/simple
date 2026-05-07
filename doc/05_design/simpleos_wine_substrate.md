@@ -186,6 +186,12 @@ relocation target in the copied image bytes, restores `rx`, and rechecks the
 no-host-code-jump policy. This is loader-owned relocation mutation evidence for
 the process image, but it still does not dispatch TLS callbacks, load real DLLs,
 or execute arbitrary PE instructions.
+`wine_process_record_tls_callback_dispatch(...)` composes that relocated image
+state with the TLS callback table plan, verifies that the first callback target
+is mapped inside the process image, and records a loader-owned TLS callback
+dispatch. The record is still non-executing preflight: it does not step callback
+instructions, run user code, load DLLs, or cross the arbitrary PE execution
+boundary.
 `wine_process_bind_known_kernel32_imports(...)`
 then plans the currently supported KERNEL32 console binding sequence and
 rejects unsupported or incomplete import sets; it still does not patch thunks or

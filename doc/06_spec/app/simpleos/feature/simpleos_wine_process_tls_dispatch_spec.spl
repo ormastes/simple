@@ -1,0 +1,39 @@
+use common.wine_hello_fixture.{wine_known_hello_exe_fixture_bytes}
+use common.wine_process_session.{
+    wine_process_record_tls_callback_dispatch,
+    wine_process_session_plan,
+    wine_process_session_request_new
+}
+
+fn _put_u32_le(data: [u8], offset: i64, value: i64) -> [u8]:
+    data[offset] = (value & 0xff) as u8
+    data[offset + 1] = ((value >> 8) & 0xff) as u8
+    data[offset + 2] = ((value >> 16) & 0xff) as u8
+    data[offset + 3] = ((value >> 24) & 0xff) as u8
+    data
+
+fn _full_gates() -> text:
+    "process=verified exec_env=verified vm=verified renderer=verified user32=verified " +
+        "gdi32=verified kernel32_core=verified host=verified posix=verified registry=verified " +
+        "pthread=verified dynload=verified audio=verified fonts=verified input=verified " +
+        "pe_loader=verified async=verified nt_bridge=verified"
+
+fn _known_hello_with_tls_callback() -> [u8]:
+    var data = wine_known_hello_exe_fixture_bytes()
+    data = _put_u32_le(data, 0x388, 0x2190)
+    data = _put_u32_le(data, 0x390, 0x2000)
+    data
+
+describe "SimpleOS Wine TLS callback dispatch":
+    describe "REQ-037: loader-owned TLS callback dispatch record":
+        it "should record a mapped TLS callback dispatch after relocation without executing PE code":
+            val plan = wine_process_session_plan(wine_process_session_request_new("game.exe", [], "C:\\Games"), _full_gates())
+            val result = wine_process_record_tls_callback_dispatch(plan, _known_hello_with_tls_callback(), 0x400000, 0x400000, "native-module-open tls-callback")
+            expect(result.ok).to_equal(true)
+            expect(result.callback_count).to_equal(1)
+            expect(result.first_callback_rva).to_equal(0x2000)
+            expect(result.dispatch_count).to_equal(1)
+            expect(result.evidence).to_contain("tls-callback-target-mapped")
+            expect(result.evidence).to_contain("loader-tls-callback-dispatch-owned")
+            expect(result.evidence).to_contain("no-arbitrary-execution")
+            expect(result.status).to_equal("tls-callback-dispatch-recorded")
