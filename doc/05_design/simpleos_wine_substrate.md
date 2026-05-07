@@ -440,6 +440,8 @@ that write readiness before the NTDLL process/thread information bridge reports
 PEB/TEB addresses, and
 `wine_ntdll_execute_process_info_with_peb_teb_layout(...)` requires the
 layout-write plan before reporting those addresses.
+`wine_ntdll_execute_process_info_with_peb_teb_vm_writes(...)` requires the
+VM byte-write/readback result before reporting those addresses.
 `wine_dllmain_handoff_require_peb_teb_writes(...)` keeps the writable-page
 compatibility gate, while `wine_dllmain_handoff_require_peb_teb_layout(...)`
 requires the six-record PEB/TEB layout plan before a retained DLL view can

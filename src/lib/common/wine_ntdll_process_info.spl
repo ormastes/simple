@@ -1,7 +1,7 @@
 """Bounded NTDLL process/thread information bridge for Wine startup probes."""
 
 use common.wine_nt_api_catalog.{wine_nt_api_ntdll_process_info_dispatch_gate}
-use common.wine_peb_teb.{WinePebTebInitEvidence, WinePebTebLayoutWritePlan, WinePebTebMemoryWriteResult, wine_peb_teb_init_gate}
+use common.wine_peb_teb.{WinePebTebInitEvidence, WinePebTebLayoutWritePlan, WinePebTebMemoryWriteResult, WinePebTebVmWriteResult, wine_peb_teb_init_gate}
 
 class WineNtdllProcessThreadInfo:
     process_id: i64
@@ -123,4 +123,19 @@ pub fn wine_ntdll_execute_process_info_with_peb_teb_layout(symbols: [text], clas
     if not result.ok:
         return result
     result.operations = layout.operations + " NtQueryInformationProcess NtQueryInformationThread"
+    result
+
+pub fn wine_ntdll_execute_process_info_with_peb_teb_vm_writes(symbols: [text], classes: [text], init: WinePebTebInitEvidence, vm_writes: WinePebTebVmWriteResult) -> WineNtdllProcessInfoResult:
+    if not vm_writes.ok:
+        return _result(false, "peb-teb-vm-write:" + vm_writes.state, init.process_id, init.thread_id, init.peb_address, init.teb_address, init.image_base, 0, "", vm_writes.operations)
+    if vm_writes.write_count != 6:
+        return _result(false, "peb-teb-vm-write-count-mismatch", init.process_id, init.thread_id, init.peb_address, init.teb_address, init.image_base, 0, "", vm_writes.operations)
+    if vm_writes.byte_count != 48:
+        return _result(false, "peb-teb-vm-byte-count-mismatch", init.process_id, init.thread_id, init.peb_address, init.teb_address, init.image_base, 0, "", vm_writes.operations)
+    if vm_writes.process_id != init.process_id or vm_writes.thread_id != init.thread_id:
+        return _result(false, "peb-teb-vm-write-identity-mismatch", init.process_id, init.thread_id, init.peb_address, init.teb_address, init.image_base, 0, "", vm_writes.operations)
+    val result = wine_ntdll_execute_process_info_with_peb_teb(symbols, classes, init)
+    if not result.ok:
+        return result
+    result.operations = vm_writes.operations + " NtQueryInformationProcess NtQueryInformationThread"
     result

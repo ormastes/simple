@@ -1285,3 +1285,15 @@ Fresh evidence:
 - `bin/simple test test/lib/common/wine_vm_adapter_spec.spl --mode=interpreter --clean`: covers modeled VM byte write/readback and write rejection.
 - `bin/simple test test/lib/common/wine_peb_teb_spec.spl --mode=interpreter --clean`: covers PEB/TEB layout byte application plus read-only startup-memory rejection.
 - `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_peb_teb_spec.spl --mode=interpreter --clean`: covers the SimpleOS system-level PEB/TEB VM byte-write/readback path.
+
+## 2026-05-07 NTDLL PEB/TEB VM-Write Handoff Update
+
+`wine_ntdll_execute_process_info_with_peb_teb_vm_writes(...)` now requires the
+PEB/TEB VM byte-write/readback result before the NTDLL process/thread
+information bridge reports PEB and TEB addresses. Failed VM byte-write
+composition propagates as a hard handoff rejection.
+
+Fresh evidence:
+
+- `bin/simple test test/lib/common/wine_ntdll_process_info_spec.spl --mode=interpreter --clean`: covers VM-write/readback-gated process-info handoff and failure propagation.
+- `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_peb_teb_spec.spl --mode=interpreter --clean`: covers the SimpleOS system-level VM-write/readback-to-NTDLL handoff.
