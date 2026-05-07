@@ -188,6 +188,9 @@ any arbitrary process execution boundary. It returns relocation and TLS runtime
 evidence while preserving the no-host-code-jump and no-arbitrary-execution
 boundary; it does not mutate VM relocation targets, dispatch TLS callbacks,
 load real DLLs, or transfer control to PE code.
+`wine_process_plan_full_image_loader_runtime_with_peb_teb_vm_writes(...)`
+starts from the PEB/TEB VM byte-write/readback-gated full-image handoff before
+recording the same relocation and TLS runtime evidence.
 `wine_process_apply_loader_relocations_in_vma(...)` then opens a modeled
 process VMA write window for the validated image, applies the bounded DIR64
 relocation target in the copied image bytes, restores `rx`, and rechecks the

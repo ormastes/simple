@@ -1351,3 +1351,16 @@ Fresh evidence:
 
 - `bin/simple test test/lib/common/wine_process_session_full_image_handoff_spec.spl --mode=interpreter --clean`: covers VM-write/readback-gated full-image handoff and failure propagation.
 - `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_process_full_image_handoff_spec.spl --mode=interpreter --clean`: covers the SimpleOS system-level full-image handoff path requiring PEB/TEB VM write/readback evidence.
+
+## 2026-05-07 Full Image Loader Runtime VM-Write Update
+
+`wine_process_plan_full_image_loader_runtime_with_peb_teb_vm_writes(...)` now
+starts from the PEB/TEB VM byte-write/readback-gated full-image handoff before
+recording relocation and TLS runtime preflight evidence. Failed VM byte-write
+composition blocks the runtime preflight before relocation/TLS evidence is
+reported.
+
+Fresh evidence:
+
+- `bin/simple test test/lib/common/wine_process_session_loader_runtime_spec.spl --mode=interpreter --clean`: covers VM-write/readback-gated full-image loader runtime planning and failure propagation.
+- `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_process_loader_runtime_spec.spl --mode=interpreter --clean`: covers the SimpleOS system-level loader runtime path requiring PEB/TEB VM write/readback evidence.
