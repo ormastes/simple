@@ -1,7 +1,7 @@
 use common.pe_coff_header.{pe_rva_to_file_offset}
 use common.wine_dll_file_probe.{wine_dll_probe_file}
-use common.wine_dll_view_startup_fault.{wine_dll_record_file_view_startup_fault, wine_dll_record_file_view_startup_fault_with_peb_teb_writes}
-use common.wine_peb_teb.{wine_peb_teb_init_default, wine_peb_teb_memory_write_gate}
+use common.wine_dll_view_startup_fault.{wine_dll_record_file_view_startup_fault, wine_dll_record_file_view_startup_fault_with_peb_teb_layout, wine_dll_record_file_view_startup_fault_with_peb_teb_writes}
+use common.wine_peb_teb.{wine_peb_teb_init_default, wine_peb_teb_layout_write_plan, wine_peb_teb_memory_write_gate}
 use common.wine_vm_adapter.{WineVmFault, WineVmSpace, wine_vm_commit, wine_vm_process_space_new, wine_vm_reserve_fixed}
 
 fn _zero_bytes(count: i64) -> [u8]:
@@ -130,4 +130,19 @@ describe "REQ-044: DLL view startup fault rollback":
         expect(result.status).to_equal("dllmain-startup-fault-rollback-recorded")
         expect(result.evidence).to_contain("peb-teb-writes-ready")
         expect(result.evidence).to_contain("ProcessParametersWrite")
+        expect(result.evidence).to_contain("no-dllmain-executed")
+
+    it "requires PEB/TEB layout-gated DllMain handoff before startup rollback":
+        val data = _dll_with_import_relocation_tls()
+        val files = [wine_dll_probe_file("\\KnownDlls\\game.dll", data)]
+        val fault = WineVmFault(process_id: 77, thread_id: 12, address: 0x502100, access: "execute", policy: "deliver-seh")
+        val init = wine_peb_teb_init_default()
+        val writes = wine_peb_teb_memory_write_gate(init, _startup_write_space())
+        val layout = wine_peb_teb_layout_write_plan(init, writes)
+        val result = wine_dll_record_file_view_startup_fault_with_peb_teb_layout("game.dll", "C:\\Games", "C:\\Users\\Player", [], ["game.dll"], files, data, 0x400000, 0x500000, 77, 78, "pid fs ipc net capability", 2, 4, "native-module-open tls-callback", fault, true, "ready", "PEB TEB TLS ProcessParameters LoaderLock", layout)
+
+        expect(result.ok).to_equal(true)
+        expect(result.status).to_equal("dllmain-startup-fault-rollback-recorded")
+        expect(result.evidence).to_contain("peb-teb-layout-ready")
+        expect(result.evidence).to_contain("PEBTEBLayoutWritePlan")
         expect(result.evidence).to_contain("no-dllmain-executed")

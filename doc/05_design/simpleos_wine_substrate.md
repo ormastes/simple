@@ -440,6 +440,9 @@ report non-executing DllMain process-attach handoff readiness.
 `wine_dll_record_file_view_startup_fault_with_peb_teb_writes(...)` carries
 that gate into the modeled SEH rollback path so startup-fault rollback is only
 recorded after the write-gated DllMain handoff is ready.
+`wine_dll_record_file_view_startup_fault_with_peb_teb_layout(...)` tightens the
+rollback path to the layout-gated DllMain handoff before recording the same
+non-executing SEH rollback evidence.
 `src/lib/common/wine_nt_heap.spl` models `HeapAlloc` and `HeapFree` with a
 deterministic process-heap handle and VM-reservation-backed block tracking.
 `src/lib/common/wine_ntdll_bridge.spl` maps the catalogued ntdll/Rtl forms onto

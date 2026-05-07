@@ -1248,3 +1248,15 @@ Fresh evidence:
 
 - `bin/simple test test/lib/common/wine_dll_view_dllmain_handoff_spec.spl --mode=interpreter --clean`: covers layout-gated DllMain handoff and layout rejection.
 - `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_dll_view_dllmain_handoff_spec.spl --mode=interpreter --clean`: covers the SimpleOS system-level DllMain layout handoff.
+
+## 2026-05-07 DllMain Startup-Fault Layout-Handoff Update
+
+`wine_dll_record_file_view_startup_fault_with_peb_teb_layout(...)` now carries
+the layout-gated DllMain handoff into the modeled SEH rollback path. Startup
+rollback is recorded only after loader-lock readiness and the six-record
+PEB/TEB layout-write plan are ready.
+
+Fresh evidence:
+
+- `bin/simple test test/lib/common/wine_dll_view_startup_fault_spec.spl --mode=interpreter --clean`: covers layout-gated startup rollback and layout rejection.
+- `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_dll_view_startup_fault_spec.spl --mode=interpreter --clean`: covers the SimpleOS system-level startup rollback path requiring the PEB/TEB layout handoff.
