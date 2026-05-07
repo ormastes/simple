@@ -252,7 +252,25 @@ Fresh evidence:
 - `bin/simple check` on generated executable-environment matcher specs: all checks passed.
 - `bin/simple check src/lib`: 2706 files, all checks passed.
 - Executable-environment changed-file `git diff --check` and stub scan: pass.
-- Aggregate `simpleos_wine_substrate_spec` still reaches its known process-dispatch watchdog later in the file; the executable-environment assertion passed before that timeout.
+- Aggregate `simpleos_wine_substrate_spec` now completes under the watchdog after moving REQ-018 dispatch-plan coverage to the focused `simpleos_wine_known_console_dispatch_spec.spl`.
+
+## 2026-05-07 Wine Aggregate Watchdog Split
+
+REQ-018 known-console dispatch planning now has focused system coverage in
+`doc/06_spec/app/simpleos/feature/simpleos_wine_known_console_dispatch_spec.spl`.
+The aggregate Wine substrate spec retains the prerequisite and boundary checks
+through REQ-017 and no longer repeats the heavy dispatch-plan path that pushed
+the aggregate system spec over the Simple test watchdog.
+
+Fresh evidence:
+
+- `bin/simple check` on aggregate and focused REQ-018 system specs: all checks passed.
+- `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_substrate_spec.spl --mode=interpreter --clean`: 30 examples, 0 failures.
+- `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_known_console_dispatch_spec.spl --mode=interpreter --clean`: 1 example, 0 failures.
+- Generated matcher specs checked clean; changed-file `git diff --check` and stub scan: pass.
+
+Conservative boundary: this improves verification shape only. It does not add
+new arbitrary PE coverage or broader Wine compatibility.
 
 ## 2026-05-07 Executable-Environment Matrix Update
 
