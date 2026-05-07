@@ -14,6 +14,7 @@ class WineKernel32PathResult:
     windows_directory: text
     system_directory: text
     temp_path: text
+    temp_file_name: text
     full_path: text
     found_path: text
     operations: text
@@ -21,16 +22,16 @@ class WineKernel32PathResult:
 fn _env(windows_directory: text, system_directory: text, temp_path: text, current_directory: text, search_paths: [text], files: [text]) -> WineKernel32PathEnv:
     WineKernel32PathEnv(windows_directory: windows_directory, system_directory: system_directory, temp_path: temp_path, current_directory: current_directory, search_paths: search_paths, files: files)
 
-fn _result(ok: bool, error: text, windows_directory: text, system_directory: text, temp_path: text, full_path: text, found_path: text, operations: text) -> WineKernel32PathResult:
-    WineKernel32PathResult(ok: ok, error: error, windows_directory: windows_directory, system_directory: system_directory, temp_path: temp_path, full_path: full_path, found_path: found_path, operations: operations)
+fn _result(ok: bool, error: text, windows_directory: text, system_directory: text, temp_path: text, temp_file_name: text, full_path: text, found_path: text, operations: text) -> WineKernel32PathResult:
+    WineKernel32PathResult(ok: ok, error: error, windows_directory: windows_directory, system_directory: system_directory, temp_path: temp_path, temp_file_name: temp_file_name, full_path: full_path, found_path: found_path, operations: operations)
 
 fn _sequence_gate(symbols: [text]) -> text:
     if symbols.len() == 0:
         return "bridge-missing:kernel32-path"
     for symbol in symbols:
-        if symbol != "GetWindowsDirectoryW" and symbol != "GetSystemDirectoryW" and symbol != "GetTempPathW" and symbol != "GetFullPathNameW" and symbol != "SearchPathW":
+        if symbol != "GetWindowsDirectoryW" and symbol != "GetSystemDirectoryW" and symbol != "GetTempPathW" and symbol != "GetTempFileNameW" and symbol != "GetFullPathNameW" and symbol != "SearchPathW":
             return "bridge-wrong-category:" + symbol
-    if symbols.len() != 5:
+    if symbols.len() != 6:
         return "kernel32-path-sequence-count-mismatch"
     if symbols[0] != "GetWindowsDirectoryW":
         return "kernel32-path-sequence-expected:GetWindowsDirectoryW"
@@ -38,9 +39,11 @@ fn _sequence_gate(symbols: [text]) -> text:
         return "kernel32-path-sequence-expected:GetSystemDirectoryW"
     if symbols[2] != "GetTempPathW":
         return "kernel32-path-sequence-expected:GetTempPathW"
-    if symbols[3] != "GetFullPathNameW":
+    if symbols[3] != "GetTempFileNameW":
+        return "kernel32-path-sequence-expected:GetTempFileNameW"
+    if symbols[4] != "GetFullPathNameW":
         return "kernel32-path-sequence-expected:GetFullPathNameW"
-    if symbols[4] != "SearchPathW":
+    if symbols[5] != "SearchPathW":
         return "kernel32-path-sequence-expected:SearchPathW"
     "ready"
 
@@ -76,6 +79,11 @@ fn _full_path(env: WineKernel32PathEnv, file_name: text) -> text:
         return _join_path(env.current_directory, file_name)
     _join_path(env.current_directory, file_name)
 
+fn _temp_file_name(temp_path: text, prefix: text) -> text:
+    if temp_path == "" or prefix == "":
+        return ""
+    _join_path(temp_path, prefix + "0001.tmp")
+
 pub fn wine_kernel32_path_env_default() -> WineKernel32PathEnv:
     _env(
         "C:\\Windows",
@@ -86,20 +94,23 @@ pub fn wine_kernel32_path_env_default() -> WineKernel32PathEnv:
         ["C:\\Windows\\System32\\kernel32.dll", "C:\\Program Files\\SimpleWine\\hello.exe"]
     )
 
-pub fn wine_kernel32_execute_path_lookup(symbols: [text], env: WineKernel32PathEnv, file_name: text) -> WineKernel32PathResult:
+pub fn wine_kernel32_execute_path_lookup(symbols: [text], env: WineKernel32PathEnv, file_name: text, temp_prefix: text) -> WineKernel32PathResult:
     val sequence_state = _sequence_gate(symbols)
     if sequence_state != "ready":
-        return _result(false, sequence_state, "", "", "", "", "", "")
+        return _result(false, sequence_state, "", "", "", "", "", "", "")
     if env.windows_directory == "":
-        return _result(false, "GetWindowsDirectoryW:missing-windows-directory", "", "", "", "", "", "")
+        return _result(false, "GetWindowsDirectoryW:missing-windows-directory", "", "", "", "", "", "", "")
     if env.system_directory == "":
-        return _result(false, "GetSystemDirectoryW:missing-system-directory", env.windows_directory, "", "", "", "", "GetWindowsDirectoryW")
+        return _result(false, "GetSystemDirectoryW:missing-system-directory", env.windows_directory, "", "", "", "", "", "GetWindowsDirectoryW")
     if env.temp_path == "":
-        return _result(false, "GetTempPathW:missing-temp-path", env.windows_directory, env.system_directory, "", "", "", "GetWindowsDirectoryW GetSystemDirectoryW")
+        return _result(false, "GetTempPathW:missing-temp-path", env.windows_directory, env.system_directory, "", "", "", "", "GetWindowsDirectoryW GetSystemDirectoryW")
+    val temp_file = _temp_file_name(env.temp_path, temp_prefix)
+    if temp_file == "":
+        return _result(false, "GetTempFileNameW:invalid-prefix", env.windows_directory, env.system_directory, env.temp_path, "", "", "", "GetWindowsDirectoryW GetSystemDirectoryW GetTempPathW")
     val full = _full_path(env, file_name)
     if full == "":
-        return _result(false, "GetFullPathNameW:invalid-path", env.windows_directory, env.system_directory, env.temp_path, "", "", "GetWindowsDirectoryW GetSystemDirectoryW GetTempPathW")
+        return _result(false, "GetFullPathNameW:invalid-path", env.windows_directory, env.system_directory, env.temp_path, temp_file, "", "", "GetWindowsDirectoryW GetSystemDirectoryW GetTempPathW GetTempFileNameW")
     val found = _search_path(env, file_name)
     if found == "":
-        return _result(false, "SearchPathW:not-found", env.windows_directory, env.system_directory, env.temp_path, full, "", "GetWindowsDirectoryW GetSystemDirectoryW GetTempPathW GetFullPathNameW")
-    _result(true, "", env.windows_directory, env.system_directory, env.temp_path, full, found, "GetWindowsDirectoryW GetSystemDirectoryW GetTempPathW GetFullPathNameW SearchPathW")
+        return _result(false, "SearchPathW:not-found", env.windows_directory, env.system_directory, env.temp_path, temp_file, full, "", "GetWindowsDirectoryW GetSystemDirectoryW GetTempPathW GetTempFileNameW GetFullPathNameW")
+    _result(true, "", env.windows_directory, env.system_directory, env.temp_path, temp_file, full, found, "GetWindowsDirectoryW GetSystemDirectoryW GetTempPathW GetTempFileNameW GetFullPathNameW SearchPathW")

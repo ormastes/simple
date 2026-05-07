@@ -1,34 +1,38 @@
 use common.wine_kernel32_path.{WineKernel32PathEnv, wine_kernel32_execute_path_lookup, wine_kernel32_path_env_default}
 
 describe "Wine KERNEL32 path bridge":
-    it "executes bounded Windows, system, temp, full-path, and search path calls":
+    it "executes bounded Windows, system, temp file, full-path, and search path calls":
         val result = wine_kernel32_execute_path_lookup(
-            ["GetWindowsDirectoryW", "GetSystemDirectoryW", "GetTempPathW", "GetFullPathNameW", "SearchPathW"],
+            ["GetWindowsDirectoryW", "GetSystemDirectoryW", "GetTempPathW", "GetTempFileNameW", "GetFullPathNameW", "SearchPathW"],
             wine_kernel32_path_env_default(),
-            "hello.exe"
+            "hello.exe",
+            "sw"
         )
 
         expect result.ok == true
         expect result.windows_directory == "C:\\Windows"
         expect result.system_directory == "C:\\Windows\\System32"
         expect result.temp_path == "C:\\Temp\\"
+        expect result.temp_file_name == "C:\\Temp\\sw0001.tmp"
         expect result.full_path == "C:\\Program Files\\SimpleWine\\hello.exe"
         expect result.found_path == "C:\\Program Files\\SimpleWine\\hello.exe"
-        expect result.operations == "GetWindowsDirectoryW GetSystemDirectoryW GetTempPathW GetFullPathNameW SearchPathW"
+        expect result.operations == "GetWindowsDirectoryW GetSystemDirectoryW GetTempPathW GetTempFileNameW GetFullPathNameW SearchPathW"
 
     it "keeps path dispatch ordered and bounded":
         val out_of_order = wine_kernel32_execute_path_lookup(
-            ["SearchPathW", "GetWindowsDirectoryW", "GetSystemDirectoryW", "GetTempPathW", "GetFullPathNameW"],
+            ["SearchPathW", "GetWindowsDirectoryW", "GetSystemDirectoryW", "GetTempPathW", "GetTempFileNameW", "GetFullPathNameW"],
             wine_kernel32_path_env_default(),
-            "hello.exe"
+            "hello.exe",
+            "sw"
         )
         expect out_of_order.ok == false
         expect out_of_order.error == "kernel32-path-sequence-expected:GetWindowsDirectoryW"
 
         val wrong_family = wine_kernel32_execute_path_lookup(
-            ["GetWindowsDirectoryW", "GetSystemDirectoryW", "GetTempPathW", "GetFullPathNameW", "HeapAlloc"],
+            ["GetWindowsDirectoryW", "GetSystemDirectoryW", "GetTempPathW", "GetTempFileNameW", "GetFullPathNameW", "HeapAlloc"],
             wine_kernel32_path_env_default(),
-            "hello.exe"
+            "hello.exe",
+            "sw"
         )
         expect wrong_family.ok == false
         expect wrong_family.error == "bridge-wrong-category:HeapAlloc"
@@ -43,26 +47,38 @@ describe "Wine KERNEL32 path bridge":
             files: []
         )
         val missing_system = wine_kernel32_execute_path_lookup(
-            ["GetWindowsDirectoryW", "GetSystemDirectoryW", "GetTempPathW", "GetFullPathNameW", "SearchPathW"],
+            ["GetWindowsDirectoryW", "GetSystemDirectoryW", "GetTempPathW", "GetTempFileNameW", "GetFullPathNameW", "SearchPathW"],
             missing_env,
-            "hello.exe"
+            "hello.exe",
+            "sw"
         )
         expect missing_system.ok == false
         expect missing_system.error == "GetSystemDirectoryW:missing-system-directory"
 
         val not_found = wine_kernel32_execute_path_lookup(
-            ["GetWindowsDirectoryW", "GetSystemDirectoryW", "GetTempPathW", "GetFullPathNameW", "SearchPathW"],
+            ["GetWindowsDirectoryW", "GetSystemDirectoryW", "GetTempPathW", "GetTempFileNameW", "GetFullPathNameW", "SearchPathW"],
             wine_kernel32_path_env_default(),
-            "missing.exe"
+            "missing.exe",
+            "sw"
         )
         expect not_found.ok == false
         expect not_found.error == "SearchPathW:not-found"
         expect not_found.full_path == "C:\\Program Files\\SimpleWine\\missing.exe"
 
         val invalid = wine_kernel32_execute_path_lookup(
-            ["GetWindowsDirectoryW", "GetSystemDirectoryW", "GetTempPathW", "GetFullPathNameW", "SearchPathW"],
+            ["GetWindowsDirectoryW", "GetSystemDirectoryW", "GetTempPathW", "GetTempFileNameW", "GetFullPathNameW", "SearchPathW"],
             wine_kernel32_path_env_default(),
-            ""
+            "",
+            "sw"
         )
         expect invalid.ok == false
         expect invalid.error == "GetFullPathNameW:invalid-path"
+
+        val invalid_prefix = wine_kernel32_execute_path_lookup(
+            ["GetWindowsDirectoryW", "GetSystemDirectoryW", "GetTempPathW", "GetTempFileNameW", "GetFullPathNameW", "SearchPathW"],
+            wine_kernel32_path_env_default(),
+            "hello.exe",
+            ""
+        )
+        expect invalid_prefix.ok == false
+        expect invalid_prefix.error == "GetTempFileNameW:invalid-prefix"
