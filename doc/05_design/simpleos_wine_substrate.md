@@ -197,6 +197,9 @@ relocation target in the copied image bytes, restores `rx`, and rechecks the
 no-host-code-jump policy. This is loader-owned relocation mutation evidence for
 the process image, but it still does not dispatch TLS callbacks, load real DLLs,
 or execute arbitrary PE instructions.
+`wine_process_apply_loader_relocations_in_vma_with_peb_teb_vm_writes(...)`
+requires the same PEB/TEB VM byte-write/readback-gated runtime preflight before
+opening the relocation write window.
 `wine_process_record_tls_callback_dispatch(...)` composes that relocated image
 state with the TLS callback table plan, verifies that the first callback target
 is mapped inside the process image, and records a loader-owned TLS callback

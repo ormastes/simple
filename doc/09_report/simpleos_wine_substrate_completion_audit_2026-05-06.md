@@ -1364,3 +1364,15 @@ Fresh evidence:
 
 - `bin/simple test test/lib/common/wine_process_session_loader_runtime_spec.spl --mode=interpreter --clean`: covers VM-write/readback-gated full-image loader runtime planning and failure propagation.
 - `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_process_loader_runtime_spec.spl --mode=interpreter --clean`: covers the SimpleOS system-level loader runtime path requiring PEB/TEB VM write/readback evidence.
+
+## 2026-05-07 Loader Relocation VMA VM-Write Update
+
+`wine_process_apply_loader_relocations_in_vma_with_peb_teb_vm_writes(...)` now
+requires the PEB/TEB VM byte-write/readback-gated loader runtime preflight
+before opening the modeled relocation write window. Failed VM byte-write
+composition blocks relocation mutation before copied image bytes are patched.
+
+Fresh evidence:
+
+- `bin/simple test test/lib/common/wine_process_session_vma_relocation_spec.spl --mode=interpreter --clean`: covers VM-write/readback-gated loader relocation mutation and failure propagation.
+- `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_process_vma_relocation_spec.spl --mode=interpreter --clean`: covers the SimpleOS system-level relocation mutation path requiring PEB/TEB VM write/readback evidence.
