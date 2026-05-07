@@ -16,6 +16,11 @@ use common.wine_substrate.{
     wine_substrate_async_gate
 }
 use common.wine_hello_exe.{wine_hello_exe_probe}
+use common.wine_process_session.{
+    wine_process_launch_handoff,
+    wine_process_session_plan,
+    wine_process_session_request_new
+}
 
 fn _zero_pe_bytes(count: i64) -> [u8]:
     var out: [u8] = []
@@ -155,3 +160,18 @@ describe "SimpleOS Wine Substrate":
         it "should require all tracked Wine substrate rows for the full Wine gate":
             val gates = "process=verified exec_env=verified vm=verified renderer=verified user32=verified gdi32=verified kernel32_core=verified host=verified posix=verified registry=verified pthread=verified dynload=verified audio=verified fonts=verified input=verified pe_loader=verified async=verified nt_bridge=verified"
             expect(wine_substrate_full_wine_gate(gates)).to_equal("ready")
+
+    describe "REQ-011: Wine process-session handoff":
+        it "should keep arbitrary exe sessions blocked until full Wine readiness":
+            val hello_gates = "process=verified exec_env=verified vm=verified host=verified posix=verified pthread=verified dynload=verified pe_loader=verified async=verified nt_bridge=verified"
+            val arbitrary = wine_process_session_plan(wine_process_session_request_new("game.exe", [], "C:\\"), hello_gates)
+            expect(arbitrary.ok).to_equal(false)
+            expect(arbitrary.error).to_equal("blocked-missing-renderer")
+
+        it "should emit a dry-run handoff for the controlled hello path":
+            val hello_gates = "process=verified exec_env=verified vm=verified host=verified posix=verified pthread=verified dynload=verified pe_loader=verified async=verified nt_bridge=verified"
+            val plan = wine_process_session_plan(wine_process_session_request_new("hello.exe", [], "C:\\"), hello_gates)
+            val handoff = wine_process_launch_handoff(plan, true)
+            expect(handoff.ok).to_equal(true)
+            expect(handoff.substrate_readiness).to_equal("controlled-hello-ready")
+            expect(handoff.status).to_equal("dry-run-ready")

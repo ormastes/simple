@@ -417,6 +417,24 @@ Fresh evidence:
 Conservative boundary: this is still non-executing handoff evidence. Real
 Steam/Proton/pressure-vessel/Wine/game process execution remains blocked.
 
+## 2026-05-07 Wine Process Session Handoff
+
+`src/lib/common/wine_process_session.spl` now exposes a Wine-side process
+session boundary. It validates executable path and working directory, allows a
+planned session for the controlled `hello.exe` milestone when the hello gate is
+ready, requires the full Wine gate for arbitrary `.exe` sessions, and emits
+only dry-run launch handoff records until real process execution exists.
+
+Fresh evidence:
+
+- `bin/simple check src/lib/common/wine_process_session.spl test/lib/common/wine_process_session_spec.spl`: all checks passed.
+- `bin/simple test test/lib/common/wine_process_session_spec.spl --mode=interpreter --clean`: 4 examples, 0 failures.
+- `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_substrate_spec.spl --mode=interpreter --clean`: includes Wine process-session handoff coverage.
+
+Conservative boundary: this adds a process-session/handoff artifact, not a
+general Wine executor. Arbitrary `.exe` execution remains blocked until full
+Wine readiness and an actual process execution boundary are implemented.
+
 ## Completion Decision
 
 The WM/VM prerequisite plan in `doc/03_plan/agent_tasks/simpleos_wine_wm_vm_execution_plan_2026-05-06.md` is implemented at the Wine-facing SimpleOS contract level. Modeled X11/VM gates are no longer accepted as production evidence, and the new production gates require SimpleOS window records, framebuffer presents, OS process/address-space identity, container namespace evidence, OS VMA image mapping, thread stack/guard setup, fault evidence, and no-host-code-jump policy.

@@ -1,0 +1,81 @@
+"""Wine process-session planning over SimpleOS substrate gates."""
+
+use common.wine_substrate.{wine_substrate_full_wine_gate, wine_substrate_hello_exe_gate}
+
+class WineProcessSessionRequest:
+    executable_path: text
+    argv: [text]
+    working_directory: text
+
+class WineProcessSessionPlan:
+    ok: bool
+    error: text
+    executable_path: text
+    command: text
+    readiness: text
+    status: text
+
+class WineProcessLaunchHandoff:
+    ok: bool
+    error: text
+    command: text
+    substrate_readiness: text
+    status: text
+
+fn _wine_process_session_request(executable_path: text, argv: [text], working_directory: text) -> WineProcessSessionRequest:
+    WineProcessSessionRequest(executable_path: executable_path, argv: argv, working_directory: working_directory)
+
+fn _wine_process_session_plan(ok: bool, error: text, executable_path: text, command: text, readiness: text, status: text) -> WineProcessSessionPlan:
+    WineProcessSessionPlan(ok: ok, error: error, executable_path: executable_path, command: command, readiness: readiness, status: status)
+
+fn _wine_process_launch_handoff(ok: bool, error: text, command: text, substrate_readiness: text, status: text) -> WineProcessLaunchHandoff:
+    WineProcessLaunchHandoff(ok: ok, error: error, command: command, substrate_readiness: substrate_readiness, status: status)
+
+fn _wine_join_args(args: [text]) -> text:
+    var joined = ""
+    for arg in args:
+        if joined == "":
+            joined = arg
+        else:
+            joined = joined + " " + arg
+    joined
+
+fn _wine_command(executable_path: text, argv: [text]) -> text:
+    val args = _wine_join_args(argv)
+    if args == "":
+        return executable_path
+    executable_path + " " + args
+
+pub fn wine_process_session_request_new(executable_path: text, argv: [text], working_directory: text) -> WineProcessSessionRequest:
+    _wine_process_session_request(executable_path, argv, working_directory)
+
+pub fn wine_process_session_request_gate(request: WineProcessSessionRequest) -> text:
+    if request.executable_path == "":
+        return "missing-executable-path"
+    if not request.executable_path.contains(".exe"):
+        return "unsupported-executable"
+    if request.working_directory == "":
+        return "missing-working-directory"
+    "ready"
+
+pub fn wine_process_session_plan(request: WineProcessSessionRequest, gates: text) -> WineProcessSessionPlan:
+    val request_state = wine_process_session_request_gate(request)
+    if request_state != "ready":
+        return _wine_process_session_plan(false, request_state, request.executable_path, "", "", "blocked")
+
+    val full_state = wine_substrate_full_wine_gate(gates)
+    if full_state == "ready":
+        return _wine_process_session_plan(true, "", request.executable_path, _wine_command(request.executable_path, request.argv), "full-wine-ready", "planned")
+
+    val hello_state = wine_substrate_hello_exe_gate(gates)
+    if request.executable_path.contains("hello.exe") and hello_state == "ready":
+        return _wine_process_session_plan(true, "", request.executable_path, _wine_command(request.executable_path, request.argv), "controlled-hello-ready", "planned")
+
+    _wine_process_session_plan(false, full_state, request.executable_path, "", full_state, "blocked")
+
+pub fn wine_process_launch_handoff(plan: WineProcessSessionPlan, dry_run: bool) -> WineProcessLaunchHandoff:
+    if not plan.ok:
+        return _wine_process_launch_handoff(false, plan.error, plan.command, plan.readiness, "blocked")
+    if not dry_run:
+        return _wine_process_launch_handoff(false, "execution-not-implemented", plan.command, plan.readiness, "blocked")
+    _wine_process_launch_handoff(true, "", plan.command, plan.readiness, "dry-run-ready")

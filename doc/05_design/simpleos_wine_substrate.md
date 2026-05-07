@@ -119,6 +119,17 @@ multimedia timer evidence. It derives the final `wine_host_gate` features only
 from complete service pairs, so partial audio/font/crypto/HID coverage cannot
 accidentally mark the host substrate ready.
 
+## Wine Process Session Target
+
+`src/lib/common/wine_process_session.spl` models a Wine process request and
+non-executing handoff boundary. It validates executable path and working
+directory, distinguishes the controlled `hello.exe` milestone from full Wine
+readiness, and emits a `dry-run-ready` handoff only when explicitly requested.
+
+Arbitrary `.exe` sessions require `wine_substrate_full_wine_gate(...) ==
+"ready"`. Until real execution exists, non-dry-run handoff calls return
+`execution-not-implemented`.
+
 `src/lib/common/wine_precondition_manifest.spl` composes the process baseline,
 VM, renderer, host, POSIX, pthread, dynamic loading, async, PE-loader, and NT bridge gate
 states into one ordered manifest. Its process evidence requires all five named

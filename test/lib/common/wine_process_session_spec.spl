@@ -1,0 +1,61 @@
+use common.wine_process_session.{
+    wine_process_launch_handoff,
+    wine_process_session_plan,
+    wine_process_session_request_gate,
+    wine_process_session_request_new
+}
+
+fn _hello_gates() -> text:
+    "process=verified exec_env=verified vm=verified host=verified posix=verified " +
+        "pthread=verified dynload=verified pe_loader=verified async=verified nt_bridge=verified"
+
+fn _full_gates() -> text:
+    "process=verified exec_env=verified vm=verified renderer=verified user32=verified " +
+        "gdi32=verified kernel32_core=verified host=verified posix=verified registry=verified " +
+        "pthread=verified dynload=verified audio=verified fonts=verified input=verified " +
+        "pe_loader=verified async=verified nt_bridge=verified"
+
+describe "Wine process session planning":
+    it "rejects incomplete process session requests":
+        val missing_path = wine_process_session_request_new("", [], "C:\\")
+        expect(wine_process_session_request_gate(missing_path)).to_equal("missing-executable-path")
+
+        val unsupported = wine_process_session_request_new("README.txt", [], "C:\\")
+        expect(wine_process_session_request_gate(unsupported)).to_equal("unsupported-executable")
+
+        val missing_cwd = wine_process_session_request_new("hello.exe", [], "")
+        expect(wine_process_session_request_gate(missing_cwd)).to_equal("missing-working-directory")
+
+    it "plans only the controlled hello path when full Wine is incomplete":
+        val request = wine_process_session_request_new("hello.exe", ["--smoke"], "C:\\")
+        val plan = wine_process_session_plan(request, _hello_gates())
+        expect(plan.ok).to_equal(true)
+        expect(plan.command).to_equal("hello.exe --smoke")
+        expect(plan.readiness).to_equal("controlled-hello-ready")
+        expect(plan.status).to_equal("planned")
+
+        val arbitrary = wine_process_session_request_new("game.exe", [], "C:\\")
+        val blocked = wine_process_session_plan(arbitrary, _hello_gates())
+        expect(blocked.ok).to_equal(false)
+        expect(blocked.error).to_equal("blocked-missing-renderer")
+
+    it "plans arbitrary exe sessions only when full Wine gates are complete":
+        val request = wine_process_session_request_new("game.exe", ["-windowed"], "C:\\Games")
+        val plan = wine_process_session_plan(request, _full_gates())
+        expect(plan.ok).to_equal(true)
+        expect(plan.command).to_equal("game.exe -windowed")
+        expect(plan.readiness).to_equal("full-wine-ready")
+        expect(plan.status).to_equal("planned")
+
+    it "emits dry-run handoff records without executing Wine":
+        val plan = wine_process_session_plan(wine_process_session_request_new("hello.exe", [], "C:\\"), _hello_gates())
+        val blocked = wine_process_launch_handoff(plan, false)
+        expect(blocked.ok).to_equal(false)
+        expect(blocked.error).to_equal("execution-not-implemented")
+        expect(blocked.status).to_equal("blocked")
+
+        val handoff = wine_process_launch_handoff(plan, true)
+        expect(handoff.ok).to_equal(true)
+        expect(handoff.command).to_equal("hello.exe")
+        expect(handoff.substrate_readiness).to_equal("controlled-hello-ready")
+        expect(handoff.status).to_equal("dry-run-ready")
