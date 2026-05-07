@@ -18,7 +18,7 @@ use common.wine_async_gate.{wine_async_gate}
 use common.wine_dynload_adapter.{wine_dynload_adapter_gate}
 use common.wine_host_gate.{wine_host_gate}
 use common.wine_nt_api_catalog.{wine_nt_api_catalogued_future_symbols, wine_nt_api_modeled_precondition_symbols}
-use common.wine_nt_file_io.{wine_nt_file_table_add_file, wine_nt_file_table_new}
+use common.wine_nt_file_io.{wine_nt_file_table_add_directory, wine_nt_file_table_add_file, wine_nt_file_table_new}
 use common.wine_nt_heap.{wine_nt_process_heap_new}
 use common.wine_kernel32_heap.{wine_kernel32_execute_heap}
 use common.wine_kernel32_module_loader.{
@@ -47,6 +47,7 @@ use common.wine_ntdll_bridge.{
     wine_ntdll_free_virtual_memory,
     wine_ntdll_protect_virtual_memory,
     wine_ntdll_query_attributes_file,
+    wine_ntdll_query_directory_file,
     wine_ntdll_query_information_file,
     wine_ntdll_read_file,
     wine_ntdll_write_file,
@@ -128,7 +129,7 @@ pub fn wine_precondition_fixture_pe_loader_state() -> text:
 fn _precondition_symbol_dll(symbol: text) -> text:
     if symbol == "NtAllocateVirtualMemory" or symbol == "NtProtectVirtualMemory" or symbol == "NtFreeVirtualMemory":
         return "ntdll.dll"
-    if symbol == "NtCreateFile" or symbol == "NtOpenFile" or symbol == "NtReadFile" or symbol == "NtWriteFile" or symbol == "NtClose" or symbol == "NtQueryInformationFile" or symbol == "NtQueryAttributesFile" or symbol == "NtSetInformationFile":
+    if symbol == "NtCreateFile" or symbol == "NtOpenFile" or symbol == "NtReadFile" or symbol == "NtWriteFile" or symbol == "NtClose" or symbol == "NtQueryInformationFile" or symbol == "NtQueryAttributesFile" or symbol == "NtQueryDirectoryFile" or symbol == "NtSetInformationFile":
         return "ntdll.dll"
     if symbol == "RtlAllocateHeap" or symbol == "RtlFreeHeap":
         return "ntdll.dll"
@@ -153,11 +154,14 @@ pub fn wine_precondition_fixture_nt_bridge_state() -> text:
     if not freed_vm.ok:
         return "vm-" + freed_vm.state
 
-    val file_table = wine_nt_file_table_add_file(wine_nt_file_table_new(wine_precondition_fixture_posix_apis(), wine_precondition_fixture_async_features()), "C:\\hello.txt", "hello")
-    val attributes = wine_ntdll_query_attributes_file(file_table, "C:\\hello.txt")
+    val file_table = wine_nt_file_table_add_file(wine_nt_file_table_add_directory(wine_nt_file_table_new(wine_precondition_fixture_posix_apis(), wine_precondition_fixture_async_features()), "C:\\Windows"), "C:\\Windows\\hello.txt", "hello")
+    val directory = wine_ntdll_query_directory_file(file_table, "C:\\Windows")
+    if not directory.ok or directory.data != "hello.txt":
+        return "file-" + directory.state
+    val attributes = wine_ntdll_query_attributes_file(file_table, "C:\\Windows\\hello.txt")
     if not attributes.ok:
         return "file-" + attributes.state
-    val opened = wine_ntdll_create_file(file_table, "C:\\hello.txt")
+    val opened = wine_ntdll_create_file(file_table, "C:\\Windows\\hello.txt")
     if not opened.ok:
         return "file-" + opened.state
     val read = wine_ntdll_read_file(opened.table, opened.handle, 5)

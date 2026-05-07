@@ -11,6 +11,7 @@ use common.wine_nt_file_io.{
     wine_nt_file_delete_w,
     wine_nt_file_get_attributes_w,
     wine_nt_file_get_information_by_handle,
+    wine_nt_file_query_directory_w,
     wine_nt_file_read,
     wine_nt_file_remove_directory_w,
     wine_nt_file_write
@@ -142,6 +143,16 @@ fn _ntdll_file_attributes_sequence_gate(symbols: [text]) -> text:
         return "ntdll-file-io-sequence-expected:NtQueryAttributesFile"
     "ready"
 
+fn _ntdll_directory_query_sequence_gate(symbols: [text]) -> text:
+    val dispatch_state = wine_nt_api_ntdll_file_io_dispatch_gate(symbols)
+    if dispatch_state != "ready":
+        return dispatch_state
+    if symbols.len() != 1:
+        return "ntdll-file-io-sequence-count-mismatch"
+    if symbols[0] != "NtQueryDirectoryFile":
+        return "ntdll-file-io-sequence-expected:NtQueryDirectoryFile"
+    "ready"
+
 fn _ntdll_directory_create_sequence_gate(symbols: [text]) -> text:
     val dispatch_state = wine_nt_api_ntdll_file_io_dispatch_gate(symbols)
     if dispatch_state != "ready":
@@ -205,6 +216,7 @@ pub fn wine_ntdll_required_calls() -> [text]:
         "NtClose",
         "NtQueryInformationFile",
         "NtQueryAttributesFile",
+        "NtQueryDirectoryFile",
         "NtSetInformationFile",
         "RtlAllocateHeap",
         "RtlFreeHeap"
@@ -258,6 +270,9 @@ pub fn wine_ntdll_query_information_file(table: WineNtFileTable, handle: i64) ->
 
 pub fn wine_ntdll_query_attributes_file(table: WineNtFileTable, path: text) -> WineNtFileMetadataResult:
     wine_nt_file_get_attributes_w(table, path)
+
+pub fn wine_ntdll_query_directory_file(table: WineNtFileTable, path: text) -> WineNtFileIoResult:
+    wine_nt_file_query_directory_w(table, path)
 
 pub fn wine_ntdll_read_file(table: WineNtFileTable, handle: i64, requested_len: i64) -> WineNtFileIoResult:
     wine_nt_file_read(table, handle, requested_len)
@@ -354,6 +369,17 @@ pub fn wine_ntdll_execute_file_attributes(symbols: [text], table: WineNtFileTabl
         return _ntdll_file_metadata_failure("NtQueryAttributesFile", attributes, "")
 
     _file_sequence_result(true, "", attributes.table, 0, "", attributes.value, "NtQueryAttributesFile")
+
+pub fn wine_ntdll_execute_directory_query(symbols: [text], table: WineNtFileTable, path: text) -> WineNtdllFileIoSequenceResult:
+    val sequence_state = _ntdll_directory_query_sequence_gate(symbols)
+    if sequence_state != "ready":
+        return _file_sequence_result(false, sequence_state, table, 0, "", 0, "")
+
+    val queried = wine_ntdll_query_directory_file(table, path)
+    if not queried.ok:
+        return _ntdll_file_failure("NtQueryDirectoryFile", queried, "")
+
+    _file_sequence_result(true, "", queried.table, 0, queried.data, queried.bytes_read, "NtQueryDirectoryFile")
 
 pub fn wine_ntdll_execute_directory_create(symbols: [text], table: WineNtFileTable, path: text) -> WineNtdllFileIoSequenceResult:
     val sequence_state = _ntdll_directory_create_sequence_gate(symbols)

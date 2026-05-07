@@ -7,6 +7,7 @@ use common.wine_ntdll_bridge.{
     wine_ntdll_create_file,
     wine_ntdll_delete_file,
     wine_ntdll_execute_directory_create,
+    wine_ntdll_execute_directory_query,
     wine_ntdll_execute_directory_remove,
     wine_ntdll_execute_file_delete,
     wine_ntdll_execute_file_attributes,
@@ -19,6 +20,7 @@ use common.wine_ntdll_bridge.{
     wine_ntdll_open_file,
     wine_ntdll_protect_virtual_memory,
     wine_ntdll_query_attributes_file,
+    wine_ntdll_query_directory_file,
     wine_ntdll_query_information_file,
     wine_ntdll_read_file,
     wine_ntdll_remove_directory,
@@ -41,14 +43,15 @@ fn _all_async_features() -> text:
 describe "Wine ntdll and Rtl bridge":
     it "lists the modeled ntdll and Rtl calls":
         val calls = wine_ntdll_required_calls()
-        expect(calls.len()).to_equal(13)
+        expect(calls.len()).to_equal(14)
         expect(calls[0]).to_equal("NtAllocateVirtualMemory")
         expect(calls[4]).to_equal("NtOpenFile")
         expect(calls[7]).to_equal("NtClose")
         expect(calls[8]).to_equal("NtQueryInformationFile")
         expect(calls[9]).to_equal("NtQueryAttributesFile")
-        expect(calls[10]).to_equal("NtSetInformationFile")
-        expect(calls[11]).to_equal("RtlAllocateHeap")
+        expect(calls[10]).to_equal("NtQueryDirectoryFile")
+        expect(calls[11]).to_equal("NtSetInformationFile")
+        expect(calls[12]).to_equal("RtlAllocateHeap")
 
     it "wraps ntdll virtual-memory calls over the VM bridge":
         val allocated = wine_ntdll_allocate_virtual_memory(wine_vm_space_new(), 0x500000, 0x1000, "rw")
@@ -234,6 +237,29 @@ describe "Wine ntdll and Rtl bridge":
         val non_empty = wine_ntdll_execute_directory_remove(["NtSetInformationFile"], with_non_empty_dir, "C:\\TempDir")
         expect(non_empty.ok).to_equal(false)
         expect(non_empty.error).to_equal("NtSetInformationFile:directory-not-empty")
+
+    it "wraps bounded ntdll directory enumeration through NtQueryDirectoryFile":
+        val table = wine_nt_file_table_new(_all_adapter_apis(), _all_async_features())
+        val with_dir = wine_nt_file_table_add_directory(wine_nt_file_table_add_directory(table, "C:\\TempDir"), "C:\\TempDir\\SubDir")
+        val with_file = wine_nt_file_table_add_file(with_dir, "C:\\TempDir\\child.txt", "child")
+        val queried = wine_ntdll_query_directory_file(with_file, "C:\\TempDir")
+        expect(queried.ok).to_equal(true)
+        expect(queried.data).to_equal("child.txt")
+        expect(queried.bytes_read).to_equal(2)
+
+        val sequence = wine_ntdll_execute_directory_query(["NtQueryDirectoryFile"], with_file, "C:\\TempDir")
+        expect(sequence.ok).to_equal(true)
+        expect(sequence.data).to_equal("child.txt")
+        expect(sequence.bytes_read).to_equal(2)
+        expect(sequence.operations).to_equal("NtQueryDirectoryFile")
+
+        val missing = wine_ntdll_execute_directory_query(["NtQueryDirectoryFile"], with_file, "C:\\missing")
+        expect(missing.ok).to_equal(false)
+        expect(missing.error).to_equal("NtQueryDirectoryFile:directory-not-found")
+
+        val wrong = wine_ntdll_execute_directory_query(["NtQueryAttributesFile"], with_file, "C:\\TempDir")
+        expect(wrong.ok).to_equal(false)
+        expect(wrong.error).to_equal("ntdll-file-io-sequence-expected:NtQueryDirectoryFile")
 
     it "wraps bounded ntdll file deletion through NtSetInformationFile":
         val table = wine_nt_file_table_add_file(wine_nt_file_table_new(_all_adapter_apis(), _all_async_features()), "C:\\delete.tmp", "delete")

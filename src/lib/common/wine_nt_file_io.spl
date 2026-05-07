@@ -65,6 +65,19 @@ fn _has_directory(table: WineNtFileTable, path: text) -> bool:
 fn _is_child_path(parent: text, child: text) -> bool:
     child.starts_with(parent + "\\")
 
+fn _direct_child_name(parent: text, child: text) -> text:
+    val prefix = parent + "\\"
+    if not child.starts_with(prefix):
+        return ""
+    var name = ""
+    var i = prefix.len()
+    while i < child.len():
+        if child[i] == "\\":
+            return ""
+        name = name + child[i]
+        i = i + 1
+    name
+
 fn _directory_not_empty(table: WineNtFileTable, path: text) -> bool:
     for file in table.files:
         if _is_child_path(path, file.path):
@@ -73,6 +86,28 @@ fn _directory_not_empty(table: WineNtFileTable, path: text) -> bool:
         if directory != path and _is_child_path(path, directory):
             return true
     false
+
+fn _directory_child_count(table: WineNtFileTable, path: text) -> i64:
+    var count = 0
+    for file in table.files:
+        if _direct_child_name(path, file.path) != "":
+            count = count + 1
+    for directory in table.directories:
+        if directory != path and _direct_child_name(path, directory) != "":
+            count = count + 1
+    count
+
+fn _first_directory_child_name(table: WineNtFileTable, path: text) -> text:
+    for file in table.files:
+        val name = _direct_child_name(path, file.path)
+        if name != "":
+            return name
+    for directory in table.directories:
+        if directory != path:
+            val name = _direct_child_name(path, directory)
+            if name != "":
+                return name
+    ""
 
 fn _find_handle(handles: [WineNtFileHandle], handle: i64) -> WineNtFileHandle:
     for item in handles:
@@ -274,6 +309,18 @@ pub fn wine_nt_file_remove_directory_w(table: WineNtFileTable, path: text) -> Wi
     if _directory_not_empty(table, path):
         return _result(false, "directory-not-empty", table, 0, "", 0)
     _result(true, "directory-removed", _remove_directory(table, path), 0, "", 0)
+
+pub fn wine_nt_file_query_directory_w(table: WineNtFileTable, path: text) -> WineNtFileIoResult:
+    if not table.ready:
+        return _result(false, table.state, table, 0, "", 0)
+    if path == "":
+        return _result(false, "invalid-path", table, 0, "", 0)
+    if not _has_directory(table, path):
+        val file = _find_file(table.files, path)
+        if file.path != "":
+            return _result(false, "directory-not-directory", table, 0, "", 0)
+        return _result(false, "directory-not-found", table, 0, "", 0)
+    _result(true, "directory-enumerated", table, 0, _first_directory_child_name(table, path), _directory_child_count(table, path))
 
 pub fn wine_nt_file_copy_w(table: WineNtFileTable, source_path: text, dest_path: text, fail_if_exists: bool) -> WineNtFileIoResult:
     if not table.ready:
