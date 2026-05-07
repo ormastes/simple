@@ -1388,3 +1388,16 @@ Fresh evidence:
 
 - `bin/simple test test/lib/common/wine_process_session_tls_dispatch_spec.spl --mode=interpreter --clean`: covers VM-write/readback-gated TLS callback dispatch and failure propagation.
 - `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_process_tls_dispatch_spec.spl --mode=interpreter --clean`: covers the SimpleOS system-level TLS callback dispatch path requiring PEB/TEB VM write/readback evidence.
+
+## 2026-05-07 Import Thunk Planning VM-Write Update
+
+`wine_process_plan_import_thunk_patches_with_peb_teb_vm_writes(...)` now
+requires the PEB/TEB VM byte-write/readback-gated TLS dispatch path before
+recording guarded KERNEL32 import-thunk planning evidence. Failed VM byte-write
+composition blocks import-thunk planning before thunk-binding evidence is
+reported.
+
+Fresh evidence:
+
+- `bin/simple test test/lib/common/wine_process_session_thunk_load_bind_spec.spl --mode=interpreter --clean`: covers VM-write/readback-gated import thunk planning and failure propagation.
+- `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_process_thunk_load_bind_spec.spl --mode=interpreter --clean`: covers the SimpleOS system-level import thunk planning path requiring PEB/TEB VM write/readback evidence.

@@ -215,6 +215,9 @@ rejects unsupported or incomplete import sets; it still does not patch thunks or
 execute arbitrary process code. `wine_process_plan_import_thunk_patches(...)`
 turns a supported binding plan into explicit guarded import-thunk evidence for
 the CPU execution gate, without mutating image bytes.
+`wine_process_plan_import_thunk_patches_with_peb_teb_vm_writes(...)` composes
+the VM-readback-gated TLS dispatch preflight before recording those same
+guarded import-thunk bindings.
 `wine_process_cpu_dispatch_preflight(...)` composes that loader evidence with
 caller-provided CPU evidence and runs the CPU and instruction-dispatch gates
 before any future arbitrary process dispatch can be attempted. It checks
