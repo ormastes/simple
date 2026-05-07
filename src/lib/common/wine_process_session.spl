@@ -7,6 +7,7 @@ use common.pe_coff_header.{
     pe_first_import_dll_name,
     pe_first_import_symbol_bindings,
     pe_first_import_symbol_names,
+    pe_first_import_thunk_bindings,
     pe_first_import_thunk_gate,
     pe_import_directory_gate,
     pe_relocation_directory_gate,
@@ -572,16 +573,35 @@ pub fn wine_process_plan_known_kernel32_thunk_patch_records(plan: WineProcessSes
     val loaded = wine_process_load_and_bind_known_kernel32_imports(plan, data, symbol_limit)
     if not loaded.ok:
         return _wine_process_thunk_patch_record_plan(false, loaded.error, plan.command, loaded.dll_name, [], "", loaded.status)
+    val thunk_bindings = pe_first_import_thunk_bindings(data, symbol_limit)
+    if thunk_bindings.len() != loaded.binding_count:
+        return _wine_process_thunk_patch_record_plan(false, "import-thunk-record-count-mismatch", plan.command, loaded.dll_name, [], "", "rejected")
     var records: [WineProcessThunkPatchRecord] = []
-    records.push(_wine_process_thunk_patch_record("GetStdHandle", 0, 0x2060, 0x2080))
-    records.push(_wine_process_thunk_patch_record("WriteFile", 1, 0x2068, 0x20a0))
-    records.push(_wine_process_thunk_patch_record("ExitProcess", 2, 0x2070, 0x20c0))
+    for binding in thunk_bindings:
+        records.push(_wine_process_thunk_patch_record(binding.symbol, binding.thunk_index, binding.thunk_rva, binding.name_rva))
+    var get_std_handle_seen = false
+    var write_file_seen = false
+    var exit_process_seen = false
     for record in records:
         if record.name_rva <= 0:
             return _wine_process_thunk_patch_record_plan(false, "missing-patch-record:" + record.symbol, plan.command, loaded.dll_name, [], "", "rejected")
         if record.thunk_rva <= 0:
             return _wine_process_thunk_patch_record_plan(false, "missing-thunk-rva:" + record.symbol, plan.command, loaded.dll_name, [], "", "rejected")
-    val evidence = "import-module-loaded import-module-handle-valid import-module-loader-sequence import-thunk-records-planned import-thunk-records-match import-thunk-records-bounded"
+        if record.symbol == "GetStdHandle":
+            get_std_handle_seen = true
+        elif record.symbol == "WriteFile":
+            write_file_seen = true
+        elif record.symbol == "ExitProcess":
+            exit_process_seen = true
+        else:
+            return _wine_process_thunk_patch_record_plan(false, "unsupported-thunk-record:" + record.symbol, plan.command, loaded.dll_name, [], "", "rejected")
+    if not get_std_handle_seen:
+        return _wine_process_thunk_patch_record_plan(false, "missing-thunk-record:GetStdHandle", plan.command, loaded.dll_name, [], "", "rejected")
+    if not write_file_seen:
+        return _wine_process_thunk_patch_record_plan(false, "missing-thunk-record:WriteFile", plan.command, loaded.dll_name, [], "", "rejected")
+    if not exit_process_seen:
+        return _wine_process_thunk_patch_record_plan(false, "missing-thunk-record:ExitProcess", plan.command, loaded.dll_name, [], "", "rejected")
+    val evidence = "import-module-loaded import-module-handle-valid import-module-loader-sequence import-thunk-records-planned import-thunk-records-data-backed import-thunk-records-match import-thunk-records-bounded"
     _wine_process_thunk_patch_record_plan(true, "", plan.command, loaded.dll_name, records, evidence, "thunk-records-planned")
 
 pub fn wine_process_apply_known_kernel32_thunk_patches(plan: WineProcessSessionPlan, data: [u8], symbol_limit: i64) -> WineProcessThunkPatchApplyResult:

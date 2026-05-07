@@ -187,7 +187,8 @@ inspection for module resolution and binding so the process-session aggregate
 specs do not repeatedly traverse the same PE import table.
 `wine_process_plan_known_kernel32_thunk_patch_records(...)` expands the known
 KERNEL32 binding plan into bounded patch records for the three modeled import
-slots. It records symbol names, thunk indexes, thunk RVAs, and name RVAs.
+slots. It derives those record RVAs from the PE first-import lookup thunk table,
+then records symbol names, thunk indexes, thunk RVAs, and name RVAs.
 `wine_process_apply_known_kernel32_thunk_patches(...)` consumes those records
 and writes modeled KERNEL32 procedure addresses into a copied PE image for the
 same three known slots. This is still bounded fixture image mutation, not

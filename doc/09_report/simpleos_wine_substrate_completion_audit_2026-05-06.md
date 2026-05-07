@@ -621,6 +621,9 @@ thunk-only evidence envelope.
 loaded-and-bound known KERNEL32 imports into concrete bounded records for the
 three modeled thunk slots, including symbol names, thunk indexes, thunk RVAs,
 and name RVAs.
+Those record RVAs are now derived from `pe_first_import_thunk_bindings(...)`
+over the PE first-import lookup thunk table rather than hard-coded in the
+process-session planner.
 `wine_process_apply_known_kernel32_thunk_patches(...)` now consumes those
 records and writes modeled KERNEL32 procedure addresses into a copied PE image
 for the same three known thunk slots. This remains bounded fixture image
@@ -656,6 +659,7 @@ Fresh evidence:
 - `bin/simple test test/lib/common/wine_cpu_exec_spec.spl --mode=interpreter --clean`: covers the tightened CPU import-thunk gate requiring module-loader evidence.
 - `bin/simple test test/lib/common/wine_process_session_thunk_records_spec.spl --mode=interpreter --clean`: covers bounded known KERNEL32 thunk patch record planning.
 - `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_process_thunk_records_spec.spl --mode=interpreter --clean`: includes REQ-024 thunk patch record coverage.
+- `bin/simple test test/lib/common/pe_coff_header_spec.spl --mode=interpreter --clean`: covers extraction of import lookup thunk RVAs separately from import symbol name RVAs.
 - `bin/simple test test/lib/common/wine_process_session_thunk_apply_spec.spl --mode=interpreter --clean`: covers bounded copied-image byte patching for the known KERNEL32 thunk slots.
 - `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_process_thunk_apply_spec.spl --mode=interpreter --clean`: includes REQ-025 bounded import thunk byte patching coverage.
 - `bin/simple test test/lib/common/wine_kernel32_module_loader_spec.spl --mode=interpreter --clean`: keeps the lower KERNEL32 module-loader bridge covered.
