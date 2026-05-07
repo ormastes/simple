@@ -231,6 +231,24 @@ Fresh evidence:
 
 Conservative boundary: this is bounded KERNEL32 core API evidence. It does not provide every KERNEL32 export, true Windows object lifetime, complete virtual memory semantics, loader integration, process-environment readiness, or arbitrary process execution. `test/lib/common/wine_kernel32_process_env_spec.spl` remains a known failing blocker and is intentionally not used as passing evidence for this row.
 
+## 2026-05-07 MDSOC+ Architecture Alignment
+
+The Wine/SimpleOS architecture docs now explicitly base the substrate on the
+repo MDSOC+ contract: common Wine adapters are shared tree-node facades under
+`src/lib/common/`, kernel and drivers remain MDSOC-only, and resident userland
+WM/process/container/Wine service state must use an MDSOC outer capsule with an
+ECS inner world.
+
+Fresh evidence:
+
+- `bin/simple check src/lib/common/wine_substrate.spl test/lib/common/wine_substrate_spec.spl doc/06_spec/app/simpleos/feature/simpleos_wine_substrate_spec.spl`: all checks passed.
+- `bin/simple test test/lib/common/wine_substrate_spec.spl`: 18 examples, 0 failures.
+- `bin/simple test doc/06_spec/app/simpleos/feature/simpleos_wine_substrate_spec.spl`: 16 examples, 0 failures.
+
+Conservative boundary: this is an architecture constraint and documentation
+alignment. It does not make full Wine, a complete X server, kernel page-table
+enforcement, or arbitrary containerized PE execution complete.
+
 ## Completion Decision
 
 The WM/VM prerequisite plan in `doc/03_plan/agent_tasks/simpleos_wine_wm_vm_execution_plan_2026-05-06.md` is implemented at the Wine-facing SimpleOS contract level. Modeled X11/VM gates are no longer accepted as production evidence, and the new production gates require SimpleOS window records, framebuffer presents, OS process/address-space identity, container namespace evidence, OS VMA image mapping, thread stack/guard setup, fault evidence, and no-host-code-jump policy.

@@ -6,12 +6,37 @@ Date: 2026-05-06
 
 ## Decision
 
-Separate Wine readiness into two explicit evidence lanes:
+Separate Wine readiness into two explicit MDSOC+ evidence lanes:
 
 1. a Wine-facing X11/window adapter that binds to real SimpleOS window records and framebuffer presents;
 2. a Wine-facing VM adapter that binds PE image mapping to an OS process id, address-space id, container evidence, stack/guard allocation, and no-host-code-jump policy.
 
 Modeled compatibility gates remain valid for early diagnostics, but production readiness must call the stricter production gates.
+
+## MDSOC+ Placement
+
+The WM/VM prerequisite path is based on the same MDSOC+ split used by
+SimpleOS userland:
+
+- `src/lib/common/ui/wine_x11_adapter.spl` and
+  `src/lib/common/ui/wine_simpleos_window_bridge.spl` are common tree-node
+  facades. They describe the Wine-facing X11-class contract and evidence shape;
+  they do not own the final compositor state.
+- A resident SimpleOS WM service owns window/session state as an MDSOC+ userland
+  capsule: MDSOC ports/capabilities outside, ECS `World` inside. Expected
+  components are window record, surface/buffer ref, damage region, focus,
+  cursor, clipboard, input event, and present checksum evidence.
+- `src/lib/common/wine_vm_adapter.spl` and
+  `src/lib/common/wine_image_vm_map.spl` are VM/PE mapping facades. The kernel
+  page-table and fault machinery remains MDSOC-only; the userland process or
+  container manager that tracks namespaces, process identities, and executable
+  sessions is MDSOC+.
+- Wine/Win32/X11-class adapters translate between Wine concepts and native
+  SimpleOS ports. They must not bypass native WM, VM, process, filesystem,
+  container, or capability ownership.
+
+This keeps the architecture MDSOC+ based without moving ECS into kernel or
+driver code.
 
 ## WM / Graphics Boundary
 
@@ -34,6 +59,15 @@ The bridge writes SimpleOS `/win` records through `WindowRecord`, `WindowState`,
 - no-host-code-jump policy.
 
 `src/lib/common/wine_image_vm_map.spl` maps validated PE images into that process space before controlled hello execution can proceed.
+
+## MDSOC+ Component Sketch
+
+| Capsule | Components | Systems |
+|---|---|---|
+| WM service | `WindowRecord`, `SurfaceRef`, `DamageRegion`, `FocusState`, `CursorState`, `ClipboardValue`, `InputEvent`, `PresentEvidence` | create/map/configure/focus/present/destroy, input dispatch, clipboard update |
+| Process/container service | `ProcessIdentity`, `AddressSpaceIdentity`, `NamespaceFacet`, `CapabilityBoundary`, `RootfsBinding`, `ExitStatus` | spawn, wait/reap, namespace bind, capability check, rootfs mount |
+| VM/session service | `VmaRegion`, `ImageSection`, `StackRegion`, `GuardPage`, `FaultRecord`, `NoHostJumpPolicy` | reserve/map/protect/unmap, stack setup, fault classify, executable policy check |
+| Wine service facade | `ImportBinding`, `NtHandle`, `RegistryKey`, `ServiceHandle`, `AudioBuffer`, `FontFace`, `InputMessage` | import bind, handle dispatch, registry roundtrip, service-control dispatch, peripheral evidence |
 
 ## Current Limits
 

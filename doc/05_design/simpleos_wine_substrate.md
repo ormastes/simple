@@ -12,6 +12,23 @@ Add a small data model in Simple lib or OS docs first, then promote to code:
 - `WineCapabilityState`: missing, scaffold, partial, ready, verified.
 - `WineCapabilityEvidence`: path, command, last_result, notes.
 
+## MDSOC+ Design Rule
+
+The Wine substrate is MDSOC+ based:
+
+- shared Wine contracts and evidence records live in `src/lib/common/wine_*`
+  as common tree-node facades;
+- kernel VM, scheduler, and driver state remain MDSOC-only;
+- long-lived userland state for WM, process/container, registry, wineserver-like
+  dispatch, audio, fonts, input, and GUI sessions is modeled as ECS inside the
+  owning MDSOC capsule;
+- POSIX, Win32, X11-class, and Wine adapters are translation veneers over native
+  ports/capabilities and must not own sibling service state directly.
+
+Any new resident Wine-facing service spec must declare its ECS `World`,
+components, systems, and public MDSOC port/capability facade before code is
+added.
+
 ## 2D Renderer/WM Target
 
 The target is X11-class behavior, not necessarily X11 protocol wire compatibility:
