@@ -1,0 +1,93 @@
+"""Bounded RTL string bridge for Wine startup probes."""
+
+use common.wine_nt_api_catalog.{wine_nt_api_rtl_string_dispatch_gate}
+
+class WineRtlUnicodeString:
+    buffer: text
+    length_bytes: i64
+    maximum_length_bytes: i64
+
+class WineRtlAnsiString:
+    buffer: text
+    length_bytes: i64
+    maximum_length_bytes: i64
+    allocated: bool
+
+class WineRtlStringResult:
+    ok: bool
+    error: text
+    unicode: WineRtlUnicodeString
+    ansi: WineRtlAnsiString
+    operations: text
+
+fn _unicode(buffer: text, length_bytes: i64, maximum_length_bytes: i64) -> WineRtlUnicodeString:
+    WineRtlUnicodeString(buffer: buffer, length_bytes: length_bytes, maximum_length_bytes: maximum_length_bytes)
+
+fn _ansi(buffer: text, length_bytes: i64, maximum_length_bytes: i64, allocated: bool) -> WineRtlAnsiString:
+    WineRtlAnsiString(buffer: buffer, length_bytes: length_bytes, maximum_length_bytes: maximum_length_bytes, allocated: allocated)
+
+fn _result(ok: bool, error: text, unicode: WineRtlUnicodeString, ansi: WineRtlAnsiString, operations: text) -> WineRtlStringResult:
+    WineRtlStringResult(ok: ok, error: error, unicode: unicode, ansi: ansi, operations: operations)
+
+fn _empty_unicode() -> WineRtlUnicodeString:
+    _unicode("", 0, 0)
+
+fn _empty_ansi() -> WineRtlAnsiString:
+    _ansi("", 0, 0, false)
+
+fn _sequence_gate(symbols: [text]) -> text:
+    val dispatch_state = wine_nt_api_rtl_string_dispatch_gate(symbols)
+    if dispatch_state != "ready":
+        return dispatch_state
+    if symbols.len() != 3:
+        return "rtl-string-sequence-count-mismatch"
+    if symbols[0] != "RtlInitUnicodeString":
+        return "rtl-string-sequence-expected:RtlInitUnicodeString"
+    if symbols[1] != "RtlUnicodeStringToAnsiString":
+        return "rtl-string-sequence-expected:RtlUnicodeStringToAnsiString"
+    if symbols[2] != "RtlFreeAnsiString":
+        return "rtl-string-sequence-expected:RtlFreeAnsiString"
+    "ready"
+
+pub fn wine_rtl_string_required_calls() -> [text]:
+    [
+        "RtlInitUnicodeString",
+        "RtlUnicodeStringToAnsiString",
+        "RtlFreeAnsiString"
+    ]
+
+pub fn wine_rtl_init_unicode_string(source: text) -> WineRtlStringResult:
+    val length = source.len() * 2
+    _result(true, "", _unicode(source, length, length + 2), _empty_ansi(), "RtlInitUnicodeString")
+
+pub fn wine_rtl_unicode_string_to_ansi_string(unicode: WineRtlUnicodeString, allocate_destination: bool) -> WineRtlStringResult:
+    if unicode.maximum_length_bytes < unicode.length_bytes:
+        return _result(false, "RtlUnicodeStringToAnsiString:invalid-unicode-length", unicode, _empty_ansi(), "")
+    if not allocate_destination:
+        return _result(false, "RtlUnicodeStringToAnsiString:destination-not-allocated", unicode, _empty_ansi(), "")
+    val length = unicode.buffer.len()
+    _result(true, "", unicode, _ansi(unicode.buffer, length, length + 1, true), "RtlUnicodeStringToAnsiString")
+
+pub fn wine_rtl_free_ansi_string(ansi: WineRtlAnsiString) -> WineRtlStringResult:
+    if not ansi.allocated:
+        return _result(false, "RtlFreeAnsiString:not-allocated", _empty_unicode(), ansi, "")
+    _result(true, "", _empty_unicode(), _ansi("", 0, 0, false), "RtlFreeAnsiString")
+
+pub fn wine_rtl_execute_string(symbols: [text], source: text) -> WineRtlStringResult:
+    val sequence_state = _sequence_gate(symbols)
+    if sequence_state != "ready":
+        return _result(false, sequence_state, _empty_unicode(), _empty_ansi(), "")
+
+    val initialized = wine_rtl_init_unicode_string(source)
+    if not initialized.ok:
+        return initialized
+
+    val converted = wine_rtl_unicode_string_to_ansi_string(initialized.unicode, true)
+    if not converted.ok:
+        return _result(false, converted.error, converted.unicode, converted.ansi, "RtlInitUnicodeString")
+
+    val freed = wine_rtl_free_ansi_string(converted.ansi)
+    if not freed.ok:
+        return _result(false, freed.error, converted.unicode, converted.ansi, "RtlInitUnicodeString RtlUnicodeStringToAnsiString")
+
+    _result(true, "", initialized.unicode, freed.ansi, "RtlInitUnicodeString RtlUnicodeStringToAnsiString RtlFreeAnsiString")

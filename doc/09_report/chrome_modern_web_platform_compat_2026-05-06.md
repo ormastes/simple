@@ -28,6 +28,8 @@ The high-value focused compatibility slice migrated into SSpec is modern CSS sel
 - `:is(section, .card)` selector-list matching
 - `:where(section, .card)` selector-list matching
 - `div:is(.card, .panel)` tag-qualified matching
+- `div:not(.disabled, #archived)` selector-list exclusion matching
+- `div:has(.badge)` descendant matching with comma-safe selector-list parsing
 - Simplified DOM event registration, cancelation, propagation, default-action metadata, keyboard activation, id path dispatch, and basic mouse/pointer payload fields including modifier-key state
 - Layout-coordinate hit testing through pointer-derived `mousedown`/`mouseup`/`click` dispatch
 
@@ -46,7 +48,7 @@ Implemented modern selector-list pseudo matching for:
 - Browser-engine DOM listener storage, deterministic capture/target/bubble dispatch, default-action metadata, and basic pointer event payload fields with modifier keys in `src/lib/gc_async_mut/gpu/browser_engine/dom.spl`
 - Browser-engine layout hit-test event routing, coordinate/button/modifier payload propagation, and same-target pointer click synthesis in `src/lib/gc_async_mut/gpu/browser_engine/layout.spl`
 
-The fallback CSS scanner now avoids splitting commas inside functional selector pseudos.
+The fallback CSS scanner now avoids splitting commas inside functional selector pseudos. `:not()` and `:has()` support is intentionally partial: it covers simple selector-list exclusion and descendant selector-list matching, and does not claim complex relative selectors, sibling combinators, specificity parity, or WPT completeness.
 
 ## Remaining Gaps
 

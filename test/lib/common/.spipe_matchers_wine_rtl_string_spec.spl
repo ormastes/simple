@@ -1,0 +1,63 @@
+use common.wine_rtl_string.{
+    wine_rtl_execute_string,
+    wine_rtl_free_ansi_string,
+    wine_rtl_init_unicode_string,
+    wine_rtl_string_required_calls,
+    wine_rtl_unicode_string_to_ansi_string
+}
+
+describe "Wine RTL string bridge":
+    it "lists the modeled RTL string calls":
+        val calls = wine_rtl_string_required_calls()
+        expect calls.len() == 3
+        expect calls[0] == "RtlInitUnicodeString"
+        expect calls[2] == "RtlFreeAnsiString"
+
+    it "initializes and converts bounded Unicode strings":
+        val initialized = wine_rtl_init_unicode_string("C:\\hello.exe")
+        val converted = wine_rtl_unicode_string_to_ansi_string(initialized.unicode, true)
+        val freed = wine_rtl_free_ansi_string(converted.ansi)
+
+        expect initialized.ok == true
+        expect initialized.unicode.length_bytes == 24
+        expect initialized.unicode.maximum_length_bytes == 26
+        expect converted.ok == true
+        expect converted.ansi.buffer == "C:\\hello.exe"
+        expect converted.ansi.length_bytes == 12
+        expect freed.ok == true
+        expect freed.ansi.allocated == false
+
+    it "executes only the bounded RTL string sequence":
+        val result = wine_rtl_execute_string(
+            ["RtlInitUnicodeString", "RtlUnicodeStringToAnsiString", "RtlFreeAnsiString"],
+            "C:\\hello.exe"
+        )
+
+        expect result.ok == true
+        expect result.unicode.buffer == "C:\\hello.exe"
+        expect result.ansi.allocated == false
+        expect result.operations == "RtlInitUnicodeString RtlUnicodeStringToAnsiString RtlFreeAnsiString"
+
+        val out_of_order = wine_rtl_execute_string(
+            ["RtlUnicodeStringToAnsiString", "RtlInitUnicodeString", "RtlFreeAnsiString"],
+            "C:\\hello.exe"
+        )
+        expect out_of_order.ok == false
+        expect out_of_order.error == "rtl-string-sequence-expected:RtlInitUnicodeString"
+
+        val wrong_family = wine_rtl_execute_string(
+            ["RtlInitUnicodeString", "RtlUnicodeStringToAnsiString", "RtlFreeHeap"],
+            "C:\\hello.exe"
+        )
+        expect wrong_family.ok == false
+        expect wrong_family.error == "bridge-wrong-category:RtlFreeHeap"
+
+    it "rejects conversion and free calls with invalid destination state":
+        val initialized = wine_rtl_init_unicode_string("C:\\hello.exe")
+        val not_allocated = wine_rtl_unicode_string_to_ansi_string(initialized.unicode, false)
+        val freed = wine_rtl_free_ansi_string(not_allocated.ansi)
+
+        expect not_allocated.ok == false
+        expect not_allocated.error == "RtlUnicodeStringToAnsiString:destination-not-allocated"
+        expect freed.ok == false
+        expect freed.error == "RtlFreeAnsiString:not-allocated"
