@@ -22,7 +22,7 @@ struct MiBlock:
 
 struct MiPage:
     """64 KiB unit holding blocks of one size class with three free lists."""
-    base: u64               # Virtual base address of the physical page
+    base: u64
     block_size: usize
     capacity: usize
     used: usize
@@ -250,20 +250,21 @@ fn _page_alloc_from_free(page: MiPage) -> (MiPage, [u8]?):
 fn _page_alloc_raw(page: MiPage) -> (MiPage, usize):
     """Pop one block from the page's free list. Returns updated page + virtual address."""
     if page.free.len() == 0:
-        return (page, 0)
-    val block = page.free[0]
-    val new_free = page.free[1:]
-    val new_page = MiPage(
-        base: page.base,
-        block_size: page.block_size,
-        capacity: page.capacity,
-        used: page.used + 1,
-        free: new_free,
-        local_free: page.local_free,
-        xthread_free: page.xthread_free,
-    )
-    val addr = page.base + (block.next * page.block_size) as u64
-    (new_page, addr as usize)
+        (page, 0)
+    else:
+        val block = page.free[0]
+        val new_free = page.free[1:]
+        val new_page = MiPage(
+            base: page.base,
+            block_size: page.block_size,
+            capacity: page.capacity,
+            used: page.used + 1,
+            free: new_free,
+            local_free: page.local_free,
+            xthread_free: page.xthread_free,
+        )
+        val addr = page.base + (block.next * page.block_size) as u64
+        (new_page, addr as usize)
 
 fn _page_free_to_local(page: MiPage, _ptr: [u8]) -> MiPage:
     """Push a freed block onto local_free. ptr ignored in interpreter mode."""
@@ -556,9 +557,9 @@ fn _g_total_allocated_get() -> usize:
 fn mi_malloc_raw(size: usize) -> usize:
     """Kernel-facing allocator. Returns virtual address as usize; 0 = failure.
 
-    Small/medium allocs (≤ 65536) share 4 KiB OS pages via MiPage free-list
-    bookkeeping. Large allocs go directly to g_os_page_alloc. Works in
-    interpreter stub mode (g_os_page_alloc returns 0 → returns 0).
+    Small/medium allocs share 4 KiB OS pages via MiPage free-list bookkeeping.
+    Large allocs go directly to g_os_page_alloc. Works in interpreter stub
+    mode (g_os_page_alloc returns 0 -> returns 0).
     """
     if size == 0:
         return 0
@@ -599,10 +600,10 @@ fn mi_malloc_raw(size: usize) -> usize:
     # No free blocks — allocate one 4 KiB OS page and carve it into blocks
     val cap = _raw_blocks_per_page(actual_size)
     val os_bytes = cap * actual_size
-    val base = _g_os_page_alloc(os_bytes)
-    if base == 0:
+    val raw_base = _g_os_page_alloc(os_bytes)
+    if raw_base == 0:
         return 0
-    val new_page = _new_page(actual_size, cap, base as u64)
+    val new_page = _new_page(actual_size, cap, raw_base as u64)
     val alloc_result = _page_alloc_raw(new_page)
     val updated_new_page = alloc_result[0]
     val addr2 = alloc_result[1]
@@ -641,7 +642,9 @@ fn mi_free_raw(addr: usize, size: usize):
                 if addr as u64 >= page.base and addr as u64 < page_end:
                     val block_index = (addr as u64 - page.base) as usize / page.block_size
                     val block = MiBlock(next: block_index)
-                    val new_used = if page.used > 0: page.used - 1 else: 0
+                    var new_used: usize = 0
+                    if page.used > 0:
+                        new_used = page.used - 1
                     val new_free_list = page.free.push(block)
                     val updated_page = MiPage(
                         base: page.base,

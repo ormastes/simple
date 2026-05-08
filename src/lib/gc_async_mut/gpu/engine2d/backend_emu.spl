@@ -308,133 +308,543 @@ fn emu_draw_text_bg(core: RenderBackendCore, x: i32, y: i32, text_val: text, fg:
 # ============================================================================
 
 fn emu_draw_ellipse(core: RenderBackendCore, cx: i32, cy: i32, rx: i32, ry: i32, color: u32):
-    pass_todo
+    if rx <= 0 or ry <= 0:
+        core.draw_rect_filled(cx, cy, 1, 1, color)
+        return
+    var x: i32 = 0
+    var y: i32 = ry
+    val rx2 = rx * rx
+    val ry2 = ry * ry
+    var px = 0
+    var py = 2 * rx2 * y
+    var d1 = ry2 - rx2 * ry + rx2 / 4
+    while px < py:
+        core.draw_rect_filled(cx + x, cy + y, 1, 1, color)
+        core.draw_rect_filled(cx - x, cy + y, 1, 1, color)
+        core.draw_rect_filled(cx + x, cy - y, 1, 1, color)
+        core.draw_rect_filled(cx - x, cy - y, 1, 1, color)
+        x = x + 1
+        px = px + 2 * ry2
+        if d1 < 0:
+            d1 = d1 + ry2 + px
+        else:
+            y = y - 1
+            py = py - 2 * rx2
+            d1 = d1 + ry2 + px - py
+    var d2 = ry2 * (2 * x + 1) * (2 * x + 1) / 4 + rx2 * (y - 1) * (y - 1) - rx2 * ry2
+    while y >= 0:
+        core.draw_rect_filled(cx + x, cy + y, 1, 1, color)
+        core.draw_rect_filled(cx - x, cy + y, 1, 1, color)
+        core.draw_rect_filled(cx + x, cy - y, 1, 1, color)
+        core.draw_rect_filled(cx - x, cy - y, 1, 1, color)
+        y = y - 1
+        py = py - 2 * rx2
+        if d2 > 0:
+            d2 = d2 + rx2 - py
+        else:
+            x = x + 1
+            px = px + 2 * ry2
+            d2 = d2 + ry2 - py + px + rx2
 
 # ============================================================================
 # Ellipse Filled — Midpoint ellipse + horizontal scanline spans
 # ============================================================================
 
 fn emu_draw_ellipse_filled(core: RenderBackendCore, cx: i32, cy: i32, rx: i32, ry: i32, color: u32):
-    pass_todo
+    if rx <= 0 or ry <= 0:
+        core.draw_rect_filled(cx, cy, 1, 1, color)
+        return
+    var x: i32 = 0
+    var y: i32 = ry
+    val rx2 = rx * rx
+    val ry2 = ry * ry
+    var px = 0
+    var py = 2 * rx2 * y
+    var d1 = ry2 - rx2 * ry + rx2 / 4
+    while px < py:
+        core.draw_rect_filled(cx - x, cy + y, 2 * x + 1, 1, color)
+        core.draw_rect_filled(cx - x, cy - y, 2 * x + 1, 1, color)
+        x = x + 1
+        px = px + 2 * ry2
+        if d1 < 0:
+            d1 = d1 + ry2 + px
+        else:
+            y = y - 1
+            py = py - 2 * rx2
+            d1 = d1 + ry2 + px - py
+    var d2 = ry2 * (2 * x + 1) * (2 * x + 1) / 4 + rx2 * (y - 1) * (y - 1) - rx2 * ry2
+    while y >= 0:
+        core.draw_rect_filled(cx - x, cy + y, 2 * x + 1, 1, color)
+        core.draw_rect_filled(cx - x, cy - y, 2 * x + 1, 1, color)
+        y = y - 1
+        py = py - 2 * rx2
+        if d2 > 0:
+            d2 = d2 + rx2 - py
+        else:
+            x = x + 1
+            px = px + 2 * ry2
+            d2 = d2 + ry2 - py + px + rx2
 
 # ============================================================================
 # Arc — Midpoint circle with angle-range pixel filter
 # ============================================================================
 
 fn emu_draw_arc(core: RenderBackendCore, cx: i32, cy: i32, r: i32, start_deg: i32, end_deg: i32, color: u32, thickness: i32):
-    pass_todo
+    if r <= 0:
+        return
+    var ang = start_deg
+    while ang <= end_deg:
+        val px = cx + r * _emu_cos_approx(ang) / 1000
+        val py = cy - r * _emu_sin_approx(ang) / 1000
+        val half = thickness / 2
+        if thickness <= 1:
+            core.draw_rect_filled(px, py, 1, 1, color)
+        else:
+            core.draw_rect_filled(px - half, py - half, thickness, thickness, color)
+        ang = ang + 1
 
 # ============================================================================
 # Cubic Bezier — De Casteljau subdivision to line segments
 # ============================================================================
 
 fn emu_draw_bezier(core: RenderBackendCore, x1: i32, y1: i32, cx1: i32, cy1: i32, cx2: i32, cy2: i32, x2: i32, y2: i32, color: u32, thickness: i32):
-    pass_todo
+    _emu_bezier_recursive(core, x1, y1, cx1, cy1, cx2, cy2, x2, y2, color, thickness, 0)
+
+fn _emu_bezier_recursive(core: RenderBackendCore, x1: i32, y1: i32, cx1: i32, cy1: i32, cx2: i32, cy2: i32, x2: i32, y2: i32, color: u32, thickness: i32, depth: i32):
+    if depth > 8:
+        emu_draw_line(core, x1, y1, x2, y2, color, thickness)
+        return
+    val dx = x2 - x1
+    val dy = y2 - y1
+    val d1 = _emu_abs((cx1 - x2) * dy - (cy1 - y2) * dx)
+    val d2 = _emu_abs((cx2 - x2) * dy - (cy2 - y2) * dx)
+    val flatness = (d1 + d2) * (d1 + d2)
+    val len_sq = dx * dx + dy * dy
+    if flatness <= _emu_max(len_sq / 16, 4):
+        emu_draw_line(core, x1, y1, x2, y2, color, thickness)
+        return
+    val m12x = (x1 + cx1) / 2
+    val m12y = (y1 + cy1) / 2
+    val m23x = (cx1 + cx2) / 2
+    val m23y = (cy1 + cy2) / 2
+    val m34x = (cx2 + x2) / 2
+    val m34y = (cy2 + y2) / 2
+    val m123x = (m12x + m23x) / 2
+    val m123y = (m12y + m23y) / 2
+    val m234x = (m23x + m34x) / 2
+    val m234y = (m23y + m34y) / 2
+    val mx = (m123x + m234x) / 2
+    val my = (m123y + m234y) / 2
+    _emu_bezier_recursive(core, x1, y1, m12x, m12y, m123x, m123y, mx, my, color, thickness, depth + 1)
+    _emu_bezier_recursive(core, mx, my, m234x, m234y, m34x, m34y, x2, y2, color, thickness, depth + 1)
 
 # ============================================================================
 # Polygon Filled — Scanline fill with active edge table
 # ============================================================================
 
 fn emu_draw_polygon_filled(core: RenderBackendCore, xs: [i32], ys: [i32], count: i32, color: u32):
-    pass_todo
+    if count < 3:
+        return
+    var min_y = ys[0]
+    var max_y = ys[0]
+    var i: i32 = 1
+    while i < count:
+        if ys[i] < min_y:
+            min_y = ys[i]
+        if ys[i] > max_y:
+            max_y = ys[i]
+        i = i + 1
+    var row = min_y
+    while row <= max_y:
+        var node_x: [i32] = []
+        var j: i32 = 0
+        while j < count:
+            val k = (j + 1) % count
+            val yj = ys[j]
+            val yk = ys[k]
+            if (yj < row and yk >= row) or (yk < row and yj >= row):
+                val ix = xs[j] + (row - yj) * (xs[k] - xs[j]) / _emu_max(_emu_abs(yk - yj), 1)
+                node_x.push(ix)
+            j = j + 1
+        _emu_sort_i32(node_x)
+        var n: i32 = 0
+        while n + 1 < node_x.len():
+            core.draw_rect_filled(node_x[n], row, node_x[n + 1] - node_x[n] + 1, 1, color)
+            n = n + 2
+        row = row + 1
 
 # ============================================================================
 # Polyline — Chain of line segments
 # ============================================================================
 
 fn emu_draw_polyline(core: RenderBackendCore, xs: [i32], ys: [i32], count: i32, color: u32, thickness: i32):
-    pass_todo
+    if count < 2:
+        return
+    var i: i32 = 0
+    while i < count - 1:
+        emu_draw_line(core, xs[i], ys[i], xs[i + 1], ys[i + 1], color, thickness)
+        i = i + 1
 
 # ============================================================================
 # Rectangle Outline with Thickness
 # ============================================================================
 
 fn emu_draw_rect_thick(core: RenderBackendCore, x: i32, y: i32, w: i32, h: i32, color: u32, thickness: i32):
-    pass_todo
+    if w <= 0 or h <= 0:
+        return
+    val t = _emu_min(thickness, _emu_min(w / 2, h / 2))
+    core.draw_rect_filled(x, y, w, t, color)
+    core.draw_rect_filled(x, y + h - t, w, t, color)
+    core.draw_rect_filled(x, y + t, t, h - 2 * t, color)
+    core.draw_rect_filled(x + w - t, y + t, t, h - 2 * t, color)
 
 # ============================================================================
 # Circle Outline with Thickness
 # ============================================================================
 
 fn emu_draw_circle_thick(core: RenderBackendCore, cx: i32, cy: i32, r: i32, color: u32, thickness: i32):
-    pass_todo
+    if r <= 0:
+        core.draw_rect_filled(cx, cy, 1, 1, color)
+        return
+    val r_outer = r
+    val r_inner = _emu_max(r - thickness, 0)
+    val r_outer_sq = r_outer * r_outer
+    val r_inner_sq = r_inner * r_inner
+    var py: i32 = -r_outer
+    while py <= r_outer:
+        var px: i32 = -r_outer
+        while px <= r_outer:
+            val dist_sq = px * px + py * py
+            if dist_sq <= r_outer_sq and dist_sq >= r_inner_sq:
+                core.draw_rect_filled(cx + px, cy + py, 1, 1, color)
+            px = px + 1
+        py = py + 1
 
 # ============================================================================
 # Rounded Rectangle Outline with Thickness
 # ============================================================================
 
 fn emu_draw_rounded_rect_outline(core: RenderBackendCore, x: i32, y: i32, w: i32, h: i32, radius: i32, color: u32, thickness: i32):
-    pass_todo
+    if w <= 0 or h <= 0:
+        return
+    var r = radius
+    if r > w / 2:
+        r = w / 2
+    if r > h / 2:
+        r = h / 2
+    val t = thickness
+    core.draw_rect_filled(x + r, y, w - 2 * r, t, color)
+    core.draw_rect_filled(x + r, y + h - t, w - 2 * r, t, color)
+    core.draw_rect_filled(x, y + r, t, h - 2 * r, color)
+    core.draw_rect_filled(x + w - t, y + r, t, h - 2 * r, color)
+    _emu_thick_corner_arc(core, x + r, y + r, r, t, color, -1, -1)
+    _emu_thick_corner_arc(core, x + w - r - 1, y + r, r, t, color, 1, -1)
+    _emu_thick_corner_arc(core, x + r, y + h - r - 1, r, t, color, -1, 1)
+    _emu_thick_corner_arc(core, x + w - r - 1, y + h - r - 1, r, t, color, 1, 1)
+
+fn _emu_thick_corner_arc(core: RenderBackendCore, cx: i32, cy: i32, r: i32, thickness: i32, color: u32, dx_sign: i32, dy_sign: i32):
+    val r_outer = r
+    val r_inner = _emu_max(r - thickness, 0)
+    val ro_sq = r_outer * r_outer
+    val ri_sq = r_inner * r_inner
+    var py: i32 = 0
+    while py <= r_outer:
+        var px: i32 = 0
+        while px <= r_outer:
+            val d = px * px + py * py
+            if d <= ro_sq and d >= ri_sq:
+                core.draw_rect_filled(cx + dx_sign * px, cy + dy_sign * py, 1, 1, color)
+            px = px + 1
+        py = py + 1
 
 # ============================================================================
 # Horizontal Gradient Rectangle — Column-by-column color lerp
 # ============================================================================
 
 fn emu_draw_gradient_rect_h(core: RenderBackendCore, x: i32, y: i32, w: i32, h: i32, left_color: u32, right_color: u32):
-    pass_todo
+    if w <= 0 or h <= 0:
+        return
+    val lr = color_r(left_color)
+    val lg = color_g(left_color)
+    val lb = color_b(left_color)
+    val la = color_a(left_color)
+    val rr = color_r(right_color)
+    val rg = color_g(right_color)
+    val rb = color_b(right_color)
+    val ra = color_a(right_color)
+    var col: i32 = 0
+    while col < w:
+        val r = lr + (rr - lr) * col / _emu_max(w - 1, 1)
+        val g = lg + (rg - lg) * col / _emu_max(w - 1, 1)
+        val b = lb + (rb - lb) * col / _emu_max(w - 1, 1)
+        val a = la + (ra - la) * col / _emu_max(w - 1, 1)
+        val c = rgba(r, g, b, a)
+        core.draw_rect_filled(x + col, y, 1, h, c)
+        col = col + 1
 
 # ============================================================================
 # Radial Gradient — Per-pixel distance lerp in bounding box
 # ============================================================================
 
 fn emu_draw_radial_gradient(core: RenderBackendCore, cx: i32, cy: i32, r: i32, center_color: u32, edge_color: u32):
-    pass_todo
+    if r <= 0:
+        core.draw_rect_filled(cx, cy, 1, 1, center_color)
+        return
+    val cr = color_r(center_color)
+    val cg = color_g(center_color)
+    val cb = color_b(center_color)
+    val ca = color_a(center_color)
+    val er = color_r(edge_color)
+    val eg = color_g(edge_color)
+    val eb = color_b(edge_color)
+    val ea = color_a(edge_color)
+    var py: i32 = -r
+    while py <= r:
+        var px: i32 = -r
+        while px <= r:
+            val dist_sq = px * px + py * py
+            val r_sq = r * r
+            if dist_sq <= r_sq:
+                val dist = _emu_isqrt(dist_sq)
+                val rr = cr + (er - cr) * dist / _emu_max(r, 1)
+                val gg = cg + (eg - cg) * dist / _emu_max(r, 1)
+                val bb = cb + (eb - cb) * dist / _emu_max(r, 1)
+                val aa = ca + (ea - ca) * dist / _emu_max(r, 1)
+                core.draw_rect_filled(cx + px, cy + py, 1, 1, rgba(rr, gg, bb, aa))
+            px = px + 1
+        py = py + 1
 
 # ============================================================================
 # Alpha-Blended Rectangle — Porter-Duff src-over
 # ============================================================================
 
 fn emu_draw_rect_blend(core: RenderBackendCore, x: i32, y: i32, w: i32, h: i32, color: u32):
-    pass_todo
+    if w <= 0 or h <= 0:
+        return
+    val sa = color_a(color)
+    if sa == 255:
+        core.draw_rect_filled(x, y, w, h, color)
+        return
+    if sa == 0:
+        return
+    val fb = core.read_pixels()
+    val fb_w = core.width()
+    val sr = color_r(color)
+    val sg = color_g(color)
+    val sb = color_b(color)
+    var result: [u32] = [0u32; w * h]
+    var py: i32 = 0
+    while py < h:
+        var px: i32 = 0
+        while px < w:
+            val fx = x + px
+            val fy = y + py
+            if fx >= 0 and fx < fb_w and fy >= 0 and fy < core.height():
+                val dst = fb[fy * fb_w + fx]
+                val blended = _emu_blend_over(sr, sg, sb, sa, dst)
+                result[py * w + px] = blended
+            px = px + 1
+        py = py + 1
+    core.draw_image(x, y, w, h, result)
 
 # ============================================================================
 # Alpha-Blended Image — Per-pixel alpha compositing
 # ============================================================================
 
 fn emu_draw_image_blend(core: RenderBackendCore, x: i32, y: i32, w: i32, h: i32, pixels: [u32]):
-    pass_todo
+    if w <= 0 or h <= 0:
+        return
+    val fb = core.read_pixels()
+    val fb_w = core.width()
+    val fb_h = core.height()
+    var result: [u32] = [0u32; w * h]
+    var py: i32 = 0
+    while py < h:
+        var px: i32 = 0
+        while px < w:
+            val src = pixels[py * w + px]
+            val sa = color_a(src)
+            val fx = x + px
+            val fy = y + py
+            if fx >= 0 and fx < fb_w and fy >= 0 and fy < fb_h:
+                if sa == 255:
+                    result[py * w + px] = src
+                else if sa == 0:
+                    result[py * w + px] = fb[fy * fb_w + fx]
+                else:
+                    val dst = fb[fy * fb_w + fx]
+                    result[py * w + px] = _emu_blend_over(color_r(src), color_g(src), color_b(src), sa, dst)
+            px = px + 1
+        py = py + 1
+    core.draw_image(x, y, w, h, result)
 
 # ============================================================================
 # Scaled Image — Nearest-neighbor resample
 # ============================================================================
 
 fn emu_draw_image_scaled(core: RenderBackendCore, dst_x: i32, dst_y: i32, dst_w: i32, dst_h: i32, src_w: i32, src_h: i32, pixels: [u32]):
-    pass_todo
+    if dst_w <= 0 or dst_h <= 0 or src_w <= 0 or src_h <= 0:
+        return
+    var result: [u32] = [0u32; dst_w * dst_h]
+    var dy: i32 = 0
+    while dy < dst_h:
+        val sy = dy * src_h / dst_h
+        var dx: i32 = 0
+        while dx < dst_w:
+            val sx = dx * src_w / dst_w
+            result[dy * dst_w + dx] = pixels[sy * src_w + sx]
+            dx = dx + 1
+        dy = dy + 1
+    core.draw_image(dst_x, dst_y, dst_w, dst_h, result)
 
 # ============================================================================
 # Triangle Outline — 3 line segments
 # ============================================================================
 
 fn emu_draw_triangle_outline(core: RenderBackendCore, x1: i32, y1: i32, x2: i32, y2: i32, x3: i32, y3: i32, color: u32, thickness: i32):
-    pass_todo
+    emu_draw_line(core, x1, y1, x2, y2, color, thickness)
+    emu_draw_line(core, x2, y2, x3, y3, color, thickness)
+    emu_draw_line(core, x3, y3, x1, y1, color, thickness)
 
 # ============================================================================
 # Box Blur — Separable convolution on framebuffer region
 # ============================================================================
 
 fn emu_draw_blur_rect(core: RenderBackendCore, x: i32, y: i32, w: i32, h: i32, radius: i32):
-    pass_todo
+    if w <= 0 or h <= 0 or radius <= 0:
+        return
+    val fb = core.read_pixels()
+    val fb_w = core.width()
+    val fb_h = core.height()
+    var temp: [u32] = [0u32; w * h]
+    var py: i32 = 0
+    while py < h:
+        var px: i32 = 0
+        while px < w:
+            var sr: i32 = 0
+            var sg: i32 = 0
+            var sb: i32 = 0
+            var sa: i32 = 0
+            var cnt: i32 = 0
+            var ky = -radius
+            while ky <= radius:
+                var kx = -radius
+                while kx <= radius:
+                    val fx = x + px + kx
+                    val fy = y + py + ky
+                    if fx >= 0 and fx < fb_w and fy >= 0 and fy < fb_h:
+                        val p = fb[fy * fb_w + fx]
+                        sr = sr + color_r(p)
+                        sg = sg + color_g(p)
+                        sb = sb + color_b(p)
+                        sa = sa + color_a(p)
+                        cnt = cnt + 1
+                    kx = kx + 1
+                ky = ky + 1
+            if cnt > 0:
+                temp[py * w + px] = rgba(sr / cnt, sg / cnt, sb / cnt, sa / cnt)
+            px = px + 1
+        py = py + 1
+    core.draw_image(x, y, w, h, temp)
 
 # ============================================================================
 # Drop Shadow — Offset + blur + blend compose
 # ============================================================================
 
 fn emu_draw_shadow_rect(core: RenderBackendCore, x: i32, y: i32, w: i32, h: i32, offset_x: i32, offset_y: i32, blur_r: i32, color: u32):
-    pass_todo
+    if w <= 0 or h <= 0:
+        return
+    val sx = x + offset_x
+    val sy = y + offset_y
+    val sw = w + 2 * blur_r
+    val sh = h + 2 * blur_r
+    core.draw_rect_filled(sx - blur_r, sy - blur_r, sw, sh, color)
+    if blur_r > 0:
+        emu_draw_blur_rect(core, sx - blur_r, sy - blur_r, sw, sh, blur_r)
 
 # ============================================================================
 # Affine Transform Image — Per-pixel inverse transform sample
 # ============================================================================
 
 fn emu_draw_image_transform(core: RenderBackendCore, dst_x: i32, dst_y: i32, src_w: i32, src_h: i32, a: i32, b: i32, c: i32, d: i32, tx: i32, ty: i32, pixels: [u32]):
-    pass_todo
+    if src_w <= 0 or src_h <= 0:
+        return
+    val det = a * d - b * c
+    if det == 0:
+        return
+    val bx1 = _emu_min(_emu_min(0, a * src_w), _emu_min(b * src_h, a * src_w + b * src_h)) / 256
+    val by1 = _emu_min(_emu_min(0, c * src_w), _emu_min(d * src_h, c * src_w + d * src_h)) / 256
+    val bx2 = _emu_max(_emu_max(0, a * src_w), _emu_max(b * src_h, a * src_w + b * src_h)) / 256
+    val by2 = _emu_max(_emu_max(0, c * src_w), _emu_max(d * src_h, c * src_w + d * src_h)) / 256
+    val out_w = bx2 - bx1 + 1
+    val out_h = by2 - by1 + 1
+    if out_w <= 0 or out_h <= 0:
+        return
+    var result: [u32] = [0u32; out_w * out_h]
+    var py: i32 = 0
+    while py < out_h:
+        var px: i32 = 0
+        while px < out_w:
+            val ox = (bx1 + px) * 256 - tx
+            val oy = (by1 + py) * 256 - ty
+            val sx = (d * ox - b * oy) / det
+            val sy = (-c * ox + a * oy) / det
+            if sx >= 0 and sx < src_w and sy >= 0 and sy < src_h:
+                result[py * out_w + px] = pixels[sy * src_w + sx]
+            px = px + 1
+        py = py + 1
+    core.draw_image(dst_x + bx1, dst_y + by1, out_w, out_h, result)
 
 # ============================================================================
 # Blend Mode Rect — Read + compute + write with mode selection
+# mode: 0=src-over, 1=multiply, 2=screen, 3=overlay
 # ============================================================================
 
 fn emu_draw_rect_blend_mode(core: RenderBackendCore, x: i32, y: i32, w: i32, h: i32, color: u32, mode: i32):
-    pass_todo
+    if w <= 0 or h <= 0:
+        return
+    val fb = core.read_pixels()
+    val fb_w = core.width()
+    val fb_h = core.height()
+    val sr = color_r(color)
+    val sg = color_g(color)
+    val sb = color_b(color)
+    val sa = color_a(color)
+    var result: [u32] = [0u32; w * h]
+    var py: i32 = 0
+    while py < h:
+        var px: i32 = 0
+        while px < w:
+            val fx = x + px
+            val fy = y + py
+            if fx >= 0 and fx < fb_w and fy >= 0 and fy < fb_h:
+                val dst = fb[fy * fb_w + fx]
+                val dr = color_r(dst)
+                val dg = color_g(dst)
+                val db = color_b(dst)
+                val da = color_a(dst)
+                var rr: i32 = sr
+                var rg: i32 = sg
+                var rb: i32 = sb
+                if mode == 1:
+                    rr = sr * dr / 255
+                    rg = sg * dg / 255
+                    rb = sb * db / 255
+                else if mode == 2:
+                    rr = 255 - (255 - sr) * (255 - dr) / 255
+                    rg = 255 - (255 - sg) * (255 - dg) / 255
+                    rb = 255 - (255 - sb) * (255 - db) / 255
+                else if mode == 3:
+                    rr = _emu_overlay_ch(sr, dr)
+                    rg = _emu_overlay_ch(sg, dg)
+                    rb = _emu_overlay_ch(sb, db)
+                val out_r = dr + (rr - dr) * sa / 255
+                val out_g = dg + (rg - dg) * sa / 255
+                val out_b = db + (rb - db) * sa / 255
+                result[py * w + px] = rgba(out_r, out_g, out_b, _emu_max(sa, da))
+            px = px + 1
+        py = py + 1
+    core.draw_image(x, y, w, h, result)
 
 # ============================================================================
 # Internal helpers (stateless, pure)
@@ -457,3 +867,59 @@ fn _emu_max(a: i32, b: i32) -> i32:
         a
     else:
         b
+
+fn _emu_isqrt(n: i32) -> i32:
+    if n <= 0:
+        return 0
+    var x = n
+    var y = (x + 1) / 2
+    while y < x:
+        x = y
+        y = (x + n / x) / 2
+    x
+
+fn _emu_blend_over(sr: i32, sg: i32, sb: i32, sa: i32, dst: u32) -> u32:
+    val dr = color_r(dst)
+    val dg = color_g(dst)
+    val db = color_b(dst)
+    val da = color_a(dst)
+    val inv_a = 255 - sa
+    val out_r = (sr * sa + dr * inv_a) / 255
+    val out_g = (sg * sa + dg * inv_a) / 255
+    val out_b = (sb * sa + db * inv_a) / 255
+    val out_a = sa + da * inv_a / 255
+    rgba(out_r, out_g, out_b, out_a)
+
+fn _emu_overlay_ch(s: i32, d: i32) -> i32:
+    if d < 128:
+        2 * s * d / 255
+    else:
+        255 - 2 * (255 - s) * (255 - d) / 255
+
+fn _emu_sin_approx(deg: i32) -> i32:
+    var d = deg % 360
+    if d < 0:
+        d = d + 360
+    var sign: i32 = 1
+    if d >= 180:
+        sign = -1
+        d = d - 180
+    if d > 90:
+        d = 180 - d
+    val x = d * 1000 / 90
+    val result = x * (2000 - x) / 2000
+    sign * result * 1000 / 500
+
+fn _emu_cos_approx(deg: i32) -> i32:
+    _emu_sin_approx(deg + 90)
+
+fn _emu_sort_i32(arr: [i32]):
+    var i: i32 = 1
+    while i < arr.len():
+        val key = arr[i]
+        var j = i - 1
+        while j >= 0 and arr[j] > key:
+            arr[j + 1] = arr[j]
+            j = j - 1
+        arr[j + 1] = key
+        i = i + 1
