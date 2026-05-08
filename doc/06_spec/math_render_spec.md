@@ -11,7 +11,7 @@ Intensive tests for the math expression rendering pipeline:
 | Difficulty | 3/5 |
 | Status | Implemented |
 | Source | `test/feature/usage/math_render_spec.spl` |
-| Updated | 2026-04-27 |
+| Updated | 2026-05-08 |
 | Generator | `simple spipe-docgen` (Rust) |
 
 ## Scenario Summary
@@ -36,19 +36,6 @@ Intensive tests for the math expression rendering pipeline:
 Covers edge cases: nested fracs, sum/integral binders, transpose,
 subscript, complex DL equations, Greek letters, operator precedence,
 implicit multiplication, and LaTeX-style commands.
-
-## Evidence
-
-| Category | Count |
-|----------|------:|
-| Artifacts | 2 |
-
-### Artifacts
-
-| Item | Kind | Path |
-|------|------|------|
-| `result.json` | JSON artifact | `build/test-artifacts/feature/usage/math_render/result.json` |
-| `summary.txt` | Text artifact | `build/test-artifacts/feature/usage/math_render/summary.txt` |
 
 ## Scenarios
 

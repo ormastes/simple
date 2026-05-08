@@ -11,7 +11,7 @@ Tests that `loss{}` and `nograd{}` blocks parse, evaluate, and render the same s
 | Difficulty | 2/5 |
 | Status | Implemented |
 | Source | `test/feature/usage/loss_nograd_blocks_spec.spl` |
-| Updated | 2026-04-27 |
+| Updated | 2026-05-08 |
 | Generator | `simple spipe-docgen` (Rust) |
 
 ## Scenario Summary
@@ -29,19 +29,6 @@ Tests that `loss{}` and `nograd{}` blocks parse, evaluate, and render the same s
 Tests that `loss{}` and `nograd{}` blocks parse, evaluate, and render the
 same supported math-expression subset as `m{}` blocks. Runtime autograd
 semantics are covered by `math_autograd_runtime_spec.spl`.
-
-## Evidence
-
-| Category | Count |
-|----------|------:|
-| Artifacts | 2 |
-
-### Artifacts
-
-| Item | Kind | Path |
-|------|------|------|
-| `result.json` | JSON artifact | `build/test-artifacts/feature/usage/loss_nograd_blocks/result.json` |
-| `summary.txt` | Text artifact | `build/test-artifacts/feature/usage/loss_nograd_blocks/summary.txt` |
 
 ## Scenarios
 
