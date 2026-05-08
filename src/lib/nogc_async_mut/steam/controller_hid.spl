@@ -1,0 +1,132 @@
+"""Steam controller HID: /dev/input event read and XInput/DirectInput bridge (M5, REQ-10).
+
+Maps Linux /dev/input events to SDL2-class controller state, and bridges to
+XInput/DirectInput. In interpreter mode: modeled with synthetic button/axis
+values — no real /dev/input read.
+"""
+
+# ============================================================================
+# Types
+# ============================================================================
+
+class ControllerState:
+    connected: bool
+    buttons:   i64
+    axis_lx:   i64
+    axis_ly:   i64
+    axis_rx:   i64
+    axis_ry:   i64
+    axis_lt:   i64
+    axis_rt:   i64
+
+class ControllerResult:
+    is_ok:      bool
+    error:      text
+    device_id:  i64
+
+# ============================================================================
+# Storage
+# ============================================================================
+
+var _hid_ctr:     i64             = 0
+var _hid_ids:     [i64]           = []
+var _hid_states:  [ControllerState] = []
+var _hid_alive:   [bool]          = []
+
+fn _hid_find(device_id: i64) -> i64:
+    val n = _hid_ids.len()
+    var i: i64 = 0
+    while i < n:
+        if _hid_alive[i] and _hid_ids[i] == device_id:
+            return i
+        i = i + 1
+    -1
+
+fn _hid_default_state() -> ControllerState:
+    ControllerState(
+        connected: true,
+        buttons: 0,
+        axis_lx: 0,
+        axis_ly: 0,
+        axis_rx: 0,
+        axis_ry: 0,
+        axis_lt: 0,
+        axis_rt: 0
+    )
+
+# ============================================================================
+# Public API
+# ============================================================================
+
+pub fn controller_hid_open(input_path: text) -> ControllerResult:
+    """Open a /dev/input event device for a Steam controller.
+
+    Args:
+        input_path: path to the input device (e.g. /dev/input/event0)
+
+    Returns:
+        ControllerResult with is_ok=true and a positive device_id.
+    """
+    if input_path == "":
+        return ControllerResult(is_ok: false, error: "missing-input-path", device_id: 0)
+    _hid_ctr = _hid_ctr + 1
+    val did = _hid_ctr
+    _hid_ids.push(did)
+    _hid_states.push(_hid_default_state())
+    _hid_alive.push(true)
+    ControllerResult(is_ok: true, error: "", device_id: did)
+
+pub fn controller_hid_poll(device_id: i64) -> ControllerState:
+    """Read the latest controller state.
+
+    Args:
+        device_id: handle from controller_hid_open
+
+    Returns:
+        ControllerState with connected=false when device is not found.
+    """
+    val row = _hid_find(device_id)
+    if row == -1:
+        return ControllerState(
+            connected: false,
+            buttons: 0,
+            axis_lx: 0,
+            axis_ly: 0,
+            axis_rx: 0,
+            axis_ry: 0,
+            axis_lt: 0,
+            axis_rt: 0
+        )
+    _hid_states[row]
+
+pub fn controller_hid_set_buttons(device_id: i64, buttons: i64):
+    """Inject synthetic button state (used in tests).
+
+    Args:
+        device_id: handle from controller_hid_open
+        buttons:   bitmask of pressed buttons
+    """
+    val row = _hid_find(device_id)
+    if row == -1:
+        return
+    val old = _hid_states[row]
+    _hid_states[row] = ControllerState(
+        connected: old.connected,
+        buttons: buttons,
+        axis_lx: old.axis_lx,
+        axis_ly: old.axis_ly,
+        axis_rx: old.axis_rx,
+        axis_ry: old.axis_ry,
+        axis_lt: old.axis_lt,
+        axis_rt: old.axis_rt
+    )
+
+pub fn controller_hid_close(device_id: i64):
+    """Close the HID device handle.
+
+    Args:
+        device_id: handle from controller_hid_open
+    """
+    val row = _hid_find(device_id)
+    if row != -1:
+        _hid_alive[row] = false

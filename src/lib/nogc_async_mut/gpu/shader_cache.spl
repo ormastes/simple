@@ -1,0 +1,116 @@
+"""SPIR-V shader cache keyed by pipeline hash (M5, REQ-9).
+
+Cache compiled shader bytecode keyed by a hash string.  Persistent storage
+is modeled via an in-memory parallel array in interpreter mode.  In compiled
+mode, entries would be written to /cache/shaders/<hash>.spv.
+"""
+
+# ============================================================================
+# Types
+# ============================================================================
+
+class ShaderCacheEntry:
+    hash:   text
+    size:   i64
+    hits:   i64
+
+class ShaderLookupResult:
+    found:  bool
+    hash:   text
+    size:   i64
+
+# ============================================================================
+# Storage
+# ============================================================================
+
+var _sc_entries: [ShaderCacheEntry] = []
+var _sc_alive:   [bool]             = []
+var _sc_hits:    i64                = 0
+var _sc_misses:  i64                = 0
+
+fn _sc_find(hash: text) -> i64:
+    val n = _sc_entries.len()
+    var i: i64 = 0
+    while i < n:
+        if _sc_alive[i] and _sc_entries[i].hash == hash:
+            return i
+        i = i + 1
+    -1
+
+# ============================================================================
+# Public API
+# ============================================================================
+
+pub fn shader_cache_store(hash: text, size: i64):
+    """Store a compiled shader entry in the cache.
+
+    Args:
+        hash: pipeline hash string (hex or base64)
+        size: byte size of the SPIR-V blob
+    """
+    if hash == "" or size <= 0:
+        return
+    val row = _sc_find(hash)
+    if row != -1:
+        return
+    val entry = ShaderCacheEntry(hash: hash, size: size, hits: 0)
+    _sc_entries.push(entry)
+    _sc_alive.push(true)
+
+pub fn shader_cache_lookup(hash: text) -> ShaderLookupResult:
+    """Look up a shader in the cache by hash.
+
+    Args:
+        hash: pipeline hash string
+
+    Returns:
+        ShaderLookupResult with found=true and the size when present.
+    """
+    val row = _sc_find(hash)
+    if row == -1:
+        _sc_misses = _sc_misses + 1
+        return ShaderLookupResult(found: false, hash: hash, size: 0)
+    _sc_hits = _sc_hits + 1
+    val entry = _sc_entries[row]
+    ShaderLookupResult(found: true, hash: hash, size: entry.size)
+
+pub fn shader_cache_hit_count() -> i64:
+    """Return the total number of cache hits since startup.
+
+    Returns:
+        Non-negative hit count.
+    """
+    _sc_hits
+
+pub fn shader_cache_miss_count() -> i64:
+    """Return the total number of cache misses since startup.
+
+    Returns:
+        Non-negative miss count.
+    """
+    _sc_misses
+
+pub fn shader_cache_invalidate(hash: text):
+    """Remove a shader entry from the cache.
+
+    Args:
+        hash: pipeline hash string
+    """
+    val row = _sc_find(hash)
+    if row != -1:
+        _sc_alive[row] = false
+
+pub fn shader_cache_size() -> i64:
+    """Return the number of live entries in the cache.
+
+    Returns:
+        Non-negative entry count.
+    """
+    val n = _sc_entries.len()
+    var count: i64 = 0
+    var i: i64 = 0
+    while i < n:
+        if _sc_alive[i]:
+            count = count + 1
+        i = i + 1
+    count

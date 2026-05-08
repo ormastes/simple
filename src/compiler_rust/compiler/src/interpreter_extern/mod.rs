@@ -781,6 +781,10 @@ pub(crate) fn call_extern_function(
         "rt_channel_is_closed" => concurrency::rt_channel_is_closed(&evaluated),
         "rt_set_concurrent_backend" => concurrency::rt_set_concurrent_backend(&evaluated),
         "rt_get_concurrent_backend" => concurrency::rt_get_concurrent_backend(&evaluated),
+        "rt_thread_local_new" => concurrency::rt_thread_local_new(&evaluated),
+        "rt_thread_local_get" => concurrency::rt_thread_local_get(&evaluated),
+        "rt_thread_local_set" => concurrency::rt_thread_local_set(&evaluated),
+        "rt_thread_local_free" => concurrency::rt_thread_local_free(&evaluated),
 
         // ====================================================================
         // Runtime Config Operations (4 functions)

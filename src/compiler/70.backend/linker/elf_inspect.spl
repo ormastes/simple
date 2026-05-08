@@ -1,0 +1,250 @@
+# ELF Read-Only Inspector - Pure-Simple ELF header parser for compiler diagnostics.
+#
+# Parses ELF64 binary headers and section tables from raw byte arrays.
+# Supports x86_64, AArch64, and RISC-V ELF files.
+# No file I/O — caller supplies the raw bytes (e.g. from file_read_bytes).
+
+use std.io_runtime.{file_exists}
+
+# ============================================================================
+# ELF Constants
+# ============================================================================
+
+# e_type values
+val ET_NONE: i64 = 0
+val ET_REL: i64 = 1
+val ET_EXEC: i64 = 2
+val ET_DYN: i64 = 3
+
+# e_machine values
+val EM_X86_64: i64 = 62
+val EM_AARCH64: i64 = 183
+val EM_RISCV: i64 = 243
+
+# sh_type values
+val SHT_NULL: i64 = 0
+val SHT_PROGBITS: i64 = 1
+val SHT_SYMTAB: i64 = 2
+val SHT_STRTAB: i64 = 3
+
+# ELF magic bytes
+val ELF_MAGIC_0: i64 = 0x7f
+val ELF_MAGIC_1: i64 = 0x45  # 'E'
+val ELF_MAGIC_2: i64 = 0x4c  # 'L'
+val ELF_MAGIC_3: i64 = 0x46  # 'F'
+
+# ELF64 header size
+val ELF64_HEADER_SIZE: i64 = 64
+
+# ELF64 section header size
+val ELF64_SHDR_SIZE: i64 = 64
+
+# ============================================================================
+# Structs
+# ============================================================================
+
+struct ElfHeader:
+    """Parsed ELF64 file header fields."""
+    e_type: i64        # ET_NONE=0, ET_REL=1, ET_EXEC=2, ET_DYN=3
+    e_machine: i64     # EM_X86_64=62, EM_AARCH64=183, EM_RISCV=243
+    e_entry: i64
+    e_phoff: i64
+    e_shoff: i64
+    e_shnum: i64
+    e_shstrndx: i64
+
+struct ElfSectionHeader:
+    """Parsed ELF64 section header fields."""
+    sh_name: i64
+    sh_type: i64       # SHT_NULL=0, SHT_PROGBITS=1, SHT_SYMTAB=2, SHT_STRTAB=3
+    sh_flags: i64
+    sh_addr: i64
+    sh_size: i64
+
+struct ElfInspector:
+    """Combined ELF inspection result."""
+    header: ElfHeader
+    sections: [ElfSectionHeader]
+    is_valid: bool
+
+# ============================================================================
+# Little-Endian Byte Readers
+# ============================================================================
+
+fn elf_read_u16_le(bytes: [i64], offset: i64) -> i64:
+    """Read a 16-bit little-endian unsigned value from bytes at offset."""
+    val b0 = bytes[offset] as i64
+    val b1 = bytes[offset + 1] as i64
+    b0 | (b1 << 8)
+
+fn elf_read_u32_le(bytes: [i64], offset: i64) -> i64:
+    """Read a 32-bit little-endian unsigned value from bytes at offset."""
+    val b0 = bytes[offset] as i64
+    val b1 = bytes[offset + 1] as i64
+    val b2 = bytes[offset + 2] as i64
+    val b3 = bytes[offset + 3] as i64
+    b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)
+
+fn elf_read_u64_le(bytes: [i64], offset: i64) -> i64:
+    """Read a 64-bit little-endian value from bytes at offset."""
+    val b0 = bytes[offset] as i64
+    val b1 = bytes[offset + 1] as i64
+    val b2 = bytes[offset + 2] as i64
+    val b3 = bytes[offset + 3] as i64
+    val b4 = bytes[offset + 4] as i64
+    val b5 = bytes[offset + 5] as i64
+    val b6 = bytes[offset + 6] as i64
+    val b7 = bytes[offset + 7] as i64
+    b0 | (b1 << 8) | (b2 << 16) | (b3 << 24) | (b4 << 32) | (b5 << 40) | (b6 << 48) | (b7 << 56)
+
+# ============================================================================
+# ELF Parsing Functions
+# ============================================================================
+
+fn elf_parse_header(bytes: [i64]) -> Result<ElfHeader, text>:
+    """Parse the 64-byte ELF64 header from raw bytes.
+
+    Checks magic bytes [0x7f, 0x45, 0x4c, 0x46] ("\\x7fELF").
+    Parses fields at standard ELF64 offsets (little-endian).
+    """
+    if bytes.len() < ELF64_HEADER_SIZE:
+        return Err("Buffer too small for ELF header: need {ELF64_HEADER_SIZE} bytes, got {bytes.len()}")
+
+    # Check ELF magic
+    if (bytes[0] as i64) != ELF_MAGIC_0:
+        return Err("Invalid ELF magic: expected 0x7f at offset 0")
+    if (bytes[1] as i64) != ELF_MAGIC_1:
+        return Err("Invalid ELF magic: expected 0x45 ('E') at offset 1")
+    if (bytes[2] as i64) != ELF_MAGIC_2:
+        return Err("Invalid ELF magic: expected 0x4c ('L') at offset 2")
+    if (bytes[3] as i64) != ELF_MAGIC_3:
+        return Err("Invalid ELF magic: expected 0x46 ('F') at offset 3")
+
+    # EI_CLASS at offset 4: 2 = ELFCLASS64
+    val ei_class = bytes[4] as i64
+    if ei_class != 2:
+        return Err("Only ELF64 is supported (EI_CLASS={ei_class}, expected 2)")
+
+    # EI_DATA at offset 5: 1 = little-endian
+    val ei_data = bytes[5] as i64
+    if ei_data != 1:
+        return Err("Only little-endian ELF is supported (EI_DATA={ei_data}, expected 1)")
+
+    # Parse header fields at ELF64 offsets
+    val e_type    = elf_read_u16_le(bytes, 16)
+    val e_machine = elf_read_u16_le(bytes, 18)
+    val e_entry   = elf_read_u64_le(bytes, 24)
+    val e_phoff   = elf_read_u64_le(bytes, 32)
+    val e_shoff   = elf_read_u64_le(bytes, 40)
+    val e_shnum   = elf_read_u16_le(bytes, 60)
+    val e_shstrndx = elf_read_u16_le(bytes, 62)
+
+    Ok(ElfHeader(
+        e_type: e_type,
+        e_machine: e_machine,
+        e_entry: e_entry,
+        e_phoff: e_phoff,
+        e_shoff: e_shoff,
+        e_shnum: e_shnum,
+        e_shstrndx: e_shstrndx
+    ))
+
+fn elf_parse_sections(bytes: [i64], header: ElfHeader) -> [ElfSectionHeader]:
+    """Parse section headers from the byte array using the ELF header offsets.
+
+    Returns an empty list if the section table is absent or out of bounds.
+    ELF64 section header is 64 bytes each.
+    """
+    var sections: [ElfSectionHeader] = []
+
+    if header.e_shnum == 0:
+        return sections
+
+    val shoff = header.e_shoff
+    val shnum = header.e_shnum
+    val table_end = shoff + shnum * ELF64_SHDR_SIZE
+
+    if shoff < 0 or table_end > bytes.len():
+        return sections
+
+    var i: i64 = 0
+    while i < shnum:
+        val base = shoff + i * ELF64_SHDR_SIZE
+
+        val sh_name  = elf_read_u32_le(bytes, base + 0)
+        val sh_type  = elf_read_u32_le(bytes, base + 4)
+        val sh_flags = elf_read_u64_le(bytes, base + 8)
+        val sh_addr  = elf_read_u64_le(bytes, base + 16)
+        val sh_size  = elf_read_u64_le(bytes, base + 32)
+
+        sections = sections.push(ElfSectionHeader(
+            sh_name: sh_name,
+            sh_type: sh_type,
+            sh_flags: sh_flags,
+            sh_addr: sh_addr,
+            sh_size: sh_size
+        ))
+        i = i + 1
+
+    sections
+
+fn elf_inspect(bytes: [i64]) -> Result<ElfInspector, text>:
+    """Parse header and sections from raw ELF bytes.
+
+    Convenience combining elf_parse_header + elf_parse_sections.
+    """
+    val header = elf_parse_header(bytes)?
+    val sections = elf_parse_sections(bytes, header)
+    Ok(ElfInspector(
+        header: header,
+        sections: sections,
+        is_valid: true
+    ))
+
+fn elf_has_symbol_table(inspector: ElfInspector) -> bool:
+    """Return true if any section has sh_type == SHT_SYMTAB (2)."""
+    for sec in inspector.sections:
+        if sec.sh_type == SHT_SYMTAB:
+            return true
+    false
+
+fn elf_machine_name(machine: i64) -> text:
+    """Return a human-readable architecture name for an e_machine value."""
+    if machine == EM_X86_64:
+        return "x86_64"
+    if machine == EM_AARCH64:
+        return "aarch64"
+    if machine == EM_RISCV:
+        return "riscv"
+    if machine == 3:
+        return "x86"
+    if machine == 40:
+        return "arm"
+    if machine == 20:
+        return "powerpc"
+    if machine == 21:
+        return "powerpc64"
+    if machine == 43:
+        return "sparc64"
+    if machine == 50:
+        return "ia64"
+    if machine == 183:
+        return "aarch64"
+    "unknown({machine})"
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export ElfHeader
+export ElfSectionHeader
+export ElfInspector
+export elf_parse_header
+export elf_parse_sections
+export elf_inspect
+export elf_has_symbol_table
+export elf_machine_name
+export ET_NONE, ET_REL, ET_EXEC, ET_DYN
+export EM_X86_64, EM_AARCH64, EM_RISCV
+export SHT_NULL, SHT_PROGBITS, SHT_SYMTAB, SHT_STRTAB
+export ELF64_HEADER_SIZE, ELF64_SHDR_SIZE

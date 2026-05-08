@@ -1,25 +1,11 @@
 # Window Manager Service — MDSOC+ capsule surface for WM port + window lifecycle (M2, REQ-5).
 #
-# wm_port_open   — open a connection port to the WM service
-# wm_window_create — create a window record on an open port
+# wm_port_open   — open a connection port to the WM service, returns i64 handle
+# wm_window_create — create a window record on an open port, returns i64 handle
 #
-# In interpreter mode these operate against in-process state arrays.
+# The spec expects integer handles (> 0 == valid). Internal state uses parallel arrays.
 #
 # @cover wm_service
-
-# ============================================================================
-# Handle types
-# ============================================================================
-
-struct WmPort:
-    """Opaque WM connection port handle."""
-    is_valid: bool
-    id:       i64
-
-struct WmWindow:
-    """Opaque window handle."""
-    is_valid: bool
-    id:       i64
 
 # ============================================================================
 # Storage
@@ -30,6 +16,7 @@ var _wm_window_ctr: i64    = 0
 var _wm_port_ids:   [i64]  = []
 var _wm_port_alive: [bool] = []
 var _wm_win_ids:    [i64]  = []
+var _wm_win_ports:  [i64]  = []
 var _wm_win_titles: [text] = []
 var _wm_win_alive:  [bool] = []
 
@@ -37,40 +24,41 @@ var _wm_win_alive:  [bool] = []
 # Public API
 # ============================================================================
 
-pub fn wm_port_open() -> WmPort:
+pub fn wm_port_open() -> i64:
     """Open a connection port to the WM service.
 
     Returns:
-        WmPort with is_valid=true and a positive id.
+        Positive integer port handle (> 0), or 0 on failure.
     """
     _wm_port_ctr = _wm_port_ctr + 1
     val id = _wm_port_ctr
     _wm_port_ids.push(id)
     _wm_port_alive.push(true)
-    WmPort(is_valid: true, id: id)
+    id
 
-pub fn wm_window_create(port: WmPort, title: text, width: i64, height: i64) -> WmWindow:
+pub fn wm_window_create(port: i64, title: text, width: i64, height: i64) -> i64:
     """Create a new window on the given WM port.
 
     Args:
-        port:   Open WM port from wm_port_open()
+        port:   Port handle from wm_port_open()
         title:  Window title string
         width:  Width in pixels
         height: Height in pixels
 
     Returns:
-        WmWindow with is_valid=true on success, is_valid=false if port is invalid.
+        Positive integer window handle (> 0), or 0 if port is invalid.
     """
-    if not port.is_valid:
-        return WmWindow(is_valid: false, id: 0)
+    if port <= 0:
+        return 0
     _wm_window_ctr = _wm_window_ctr + 1
     val id = _wm_window_ctr
     _wm_win_ids.push(id)
+    _wm_win_ports.push(port)
     _wm_win_titles.push(title)
     _wm_win_alive.push(true)
-    WmWindow(is_valid: true, id: id)
+    id
 
-pub fn wm_port_close(port: WmPort) -> bool:
+pub fn wm_port_close(port: i64) -> bool:
     """Close a WM port.
 
     Returns:
@@ -79,7 +67,7 @@ pub fn wm_port_close(port: WmPort) -> bool:
     val n = _wm_port_ids.len()
     var i: i64 = 0
     while i < n:
-        if _wm_port_alive[i] and _wm_port_ids[i] == port.id:
+        if _wm_port_alive[i] and _wm_port_ids[i] == port:
             _wm_port_alive[i] = false
             return true
         i = i + 1

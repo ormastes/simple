@@ -4,6 +4,8 @@
 # functions operate against a module registry (parallel arrays). In compiled
 # mode the implementation delegates to the host DynLib loader via SFFI.
 #
+# Result type uses .is_some / .value to match the spec expectations.
+#
 # @cover guest_dlopen
 
 # ============================================================================
@@ -25,20 +27,20 @@ fn _dl_find_path(path: text) -> i64:
     -1
 
 # ============================================================================
-# Result type
+# Result type — uses is_some/value to match spec expectations
 # ============================================================================
 
 struct DlopenResult:
-    """Result of guest_dlopen."""
-    is_ok:  bool
-    handle: i64
-    error:  text
+    """Result of guest_dlopen. is_some=true means a valid handle was returned."""
+    is_some: bool
+    value:   i64
+    error:   text
 
 fn _dl_ok(handle: i64) -> DlopenResult:
-    DlopenResult(is_ok: true, handle: handle, error: "")
+    DlopenResult(is_some: true, value: handle, error: "")
 
 fn _dl_err(msg: text) -> DlopenResult:
-    DlopenResult(is_ok: false, handle: -1, error: msg)
+    DlopenResult(is_some: false, value: -1, error: msg)
 
 # ============================================================================
 # Public API
@@ -54,7 +56,7 @@ pub fn guest_dlopen(path: text) -> DlopenResult:
         path: Path to the guest DLL/SO (e.g. "kernel32.dll").
 
     Returns:
-        DlopenResult with is_ok=true and a positive handle on success.
+        DlopenResult with is_some=true and a positive value on success.
     """
     val existing = _dl_find_path(path)
     if existing != -1:
@@ -72,7 +74,7 @@ pub fn guest_dlsym(handle: i64, symbol: text) -> i64:
     In interpreter mode returns a non-zero stub address for any valid handle.
 
     Args:
-        handle: Handle from guest_dlopen()
+        handle: Integer handle value from DlopenResult.value
         symbol: Symbol name to resolve.
 
     Returns:
@@ -80,7 +82,7 @@ pub fn guest_dlsym(handle: i64, symbol: text) -> i64:
     """
     if handle <= 0:
         return 0
-    # Stub address: encode handle + symbol hash so different symbols differ
+    # Stub address: encode handle + symbol length so different symbols differ
     val addr = handle * 0x10000 + symbol.len() as i64 + 1
     addr
 
@@ -88,7 +90,7 @@ pub fn guest_dlclose(handle: i64) -> bool:
     """Unload a guest module.
 
     Args:
-        handle: Handle from guest_dlopen()
+        handle: Integer handle value from DlopenResult.value
 
     Returns:
         true if handle was valid and unloaded.

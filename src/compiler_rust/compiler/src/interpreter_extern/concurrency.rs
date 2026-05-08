@@ -34,6 +34,10 @@ lazy_static::lazy_static! {
         Arc::new(Mutex::new(HashMap::new()));
     static ref NEXT_HANDLE_ID: Arc<Mutex<i64>> = Arc::new(Mutex::new(1));
     static ref NEXT_CHANNEL_ID: Arc<Mutex<i64>> = Arc::new(Mutex::new(1));
+    // TLS registry: maps handle id -> per-slot HashMap<thread_id_string, Value>
+    static ref TLS_REGISTRY: Arc<Mutex<HashMap<i64, HashMap<String, Value>>>> =
+        Arc::new(Mutex::new(HashMap::new()));
+    static ref NEXT_TLS_HANDLE: Arc<Mutex<i64>> = Arc::new(Mutex::new(1));
 }
 
 /// Clear all concurrency registries and reset ID counters.
@@ -615,4 +619,79 @@ pub fn rt_get_concurrent_backend(_args: &[Value]) -> Result<Value, CompileError>
         ConcurrentBackend::Native => "native",
     };
     Ok(Value::Str(name.to_string()))
+}
+
+// ============================================================================
+// Thread-Local Storage (TLS) Operations
+//
+// Interpreter-mode simulation of rt_thread_local_new/get/set/free.
+// Each handle maps to a per-thread-id slot (keyed by std::thread::current().id()).
+// ============================================================================
+
+fn tls_thread_key() -> String {
+    format!("{:?}", std::thread::current().id())
+}
+
+/// Create a new TLS handle. Returns an i64 handle id.
+pub fn rt_thread_local_new(_args: &[Value]) -> Result<Value, CompileError> {
+    let mut next = NEXT_TLS_HANDLE.lock().unwrap();
+    let handle = *next;
+    *next += 1;
+    drop(next);
+    TLS_REGISTRY.lock().unwrap().insert(handle, HashMap::new());
+    Ok(Value::Int(handle))
+}
+
+/// Get the value stored for this thread in the given TLS handle. Returns 0 if unset.
+pub fn rt_thread_local_get(args: &[Value]) -> Result<Value, CompileError> {
+    if args.len() != 1 {
+        return Err(CompileError::Runtime(
+            "rt_thread_local_get expects 1 argument (tls: i64)".to_string(),
+        ));
+    }
+    let handle = match &args[0] {
+        Value::Int(h) => *h,
+        _ => return Err(CompileError::Runtime("rt_thread_local_get expects integer handle".to_string())),
+    };
+    let registry = TLS_REGISTRY.lock().unwrap();
+    let value = registry
+        .get(&handle)
+        .and_then(|slot| slot.get(&tls_thread_key()))
+        .cloned()
+        .unwrap_or(Value::Int(0));
+    Ok(value)
+}
+
+/// Set the value for this thread in the given TLS handle.
+pub fn rt_thread_local_set(args: &[Value]) -> Result<Value, CompileError> {
+    if args.len() != 2 {
+        return Err(CompileError::Runtime(
+            "rt_thread_local_set expects 2 arguments (tls: i64, value: i64)".to_string(),
+        ));
+    }
+    let handle = match &args[0] {
+        Value::Int(h) => *h,
+        _ => return Err(CompileError::Runtime("rt_thread_local_set expects integer handle".to_string())),
+    };
+    let value = args[1].clone();
+    let mut registry = TLS_REGISTRY.lock().unwrap();
+    if let Some(slot) = registry.get_mut(&handle) {
+        slot.insert(tls_thread_key(), value);
+    }
+    Ok(Value::Nil)
+}
+
+/// Free a TLS handle and all per-thread values stored in it.
+pub fn rt_thread_local_free(args: &[Value]) -> Result<Value, CompileError> {
+    if args.len() != 1 {
+        return Err(CompileError::Runtime(
+            "rt_thread_local_free expects 1 argument (tls: i64)".to_string(),
+        ));
+    }
+    let handle = match &args[0] {
+        Value::Int(h) => *h,
+        _ => return Err(CompileError::Runtime("rt_thread_local_free expects integer handle".to_string())),
+    };
+    TLS_REGISTRY.lock().unwrap().remove(&handle);
+    Ok(Value::Nil)
 }

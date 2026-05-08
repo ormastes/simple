@@ -1,0 +1,151 @@
+"""Pressure-vessel container exec (M5, REQ-10).
+
+Sets up an isolated container using kernel namespace facets (pid, fs, ipc, net,
+capability), binds an NVFS-backed rootfs, and models the exec handoff.
+In interpreter mode: all operations are modeled — no real syscalls.
+"""
+
+# ============================================================================
+# Types
+# ============================================================================
+
+class PressureVesselConfig:
+    container_id:  i64
+    rootfs_path:   text
+    nvfs_backend:  bool
+    ns_pid:        bool
+    ns_fs:         bool
+    ns_ipc:        bool
+    ns_net:        bool
+    ns_capability: bool
+
+class PressureVesselResult:
+    is_ok:        bool
+    error:        text
+    container_id: i64
+    status:       text
+
+# ============================================================================
+# Private helpers
+# ============================================================================
+
+fn _pv_ok(cid: i64, status: text) -> PressureVesselResult:
+    PressureVesselResult(is_ok: true, error: "", container_id: cid, status: status)
+
+fn _pv_err(msg: text) -> PressureVesselResult:
+    PressureVesselResult(is_ok: false, error: msg, container_id: 0, status: "failed")
+
+# ============================================================================
+# Storage
+# ============================================================================
+
+var _pv_ctr:    i64                    = 0
+var _pv_active: [PressureVesselConfig] = []
+var _pv_alive:  [bool]                 = []
+
+fn _pv_find(cid: i64) -> i64:
+    val n = _pv_active.len()
+    var i: i64 = 0
+    while i < n:
+        if _pv_alive[i] and _pv_active[i].container_id == cid:
+            return i
+        i = i + 1
+    -1
+
+# ============================================================================
+# Public API
+# ============================================================================
+
+pub fn pressure_vessel_create(rootfs_path: text, nvfs_backend: bool) -> PressureVesselResult:
+    """Create a new pressure-vessel container with all five namespace facets.
+
+    Args:
+        rootfs_path:  Path to the container rootfs (must be non-empty).
+        nvfs_backend: true to use NVFS-backed rootfs binding.
+
+    Returns:
+        PressureVesselResult with is_ok=true and a positive container_id.
+    """
+    if rootfs_path == "":
+        return _pv_err("missing-rootfs-path")
+    _pv_ctr = _pv_ctr + 1
+    val cid = _pv_ctr
+    val cfg = PressureVesselConfig(
+        container_id: cid,
+        rootfs_path: rootfs_path,
+        nvfs_backend: nvfs_backend,
+        ns_pid: true,
+        ns_fs: true,
+        ns_ipc: true,
+        ns_net: true,
+        ns_capability: true
+    )
+    _pv_active.push(cfg)
+    _pv_alive.push(true)
+    _pv_ok(cid, "created")
+
+pub fn pressure_vessel_exec(container_id: i64, command: text) -> PressureVesselResult:
+    """Execute a command inside the container.
+
+    Args:
+        container_id: handle from pressure_vessel_create
+        command:      command string to exec (e.g. "wine64 hl2.exe")
+
+    Returns:
+        PressureVesselResult with status "exec-ready" on success.
+    """
+    if container_id <= 0:
+        return _pv_err("invalid-container")
+    val row = _pv_find(container_id)
+    if row == -1:
+        return _pv_err("container-not-found")
+    if command == "":
+        return _pv_err("missing-command")
+    _pv_ok(container_id, "exec-ready")
+
+pub fn pressure_vessel_destroy(container_id: i64):
+    """Release a container and all associated namespace handles.
+
+    Args:
+        container_id: handle from pressure_vessel_create
+    """
+    val row = _pv_find(container_id)
+    if row != -1:
+        _pv_alive[row] = false
+
+pub fn pressure_vessel_has_nvfs(container_id: i64) -> bool:
+    """Return true if the container uses NVFS-backed rootfs.
+
+    Args:
+        container_id: handle from pressure_vessel_create
+    """
+    val row = _pv_find(container_id)
+    if row == -1:
+        return false
+    _pv_active[row].nvfs_backend
+
+pub fn pressure_vessel_namespace_profile(container_id: i64) -> text:
+    """Return a space-separated list of active namespace facets.
+
+    Args:
+        container_id: handle from pressure_vessel_create
+
+    Returns:
+        Text token list, e.g. "ns-pid ns-fs ns-ipc ns-net ns-capability".
+    """
+    val row = _pv_find(container_id)
+    if row == -1:
+        return ""
+    val cfg = _pv_active[row]
+    var profile = ""
+    if cfg.ns_pid:
+        profile = profile + "ns-pid "
+    if cfg.ns_fs:
+        profile = profile + "ns-fs "
+    if cfg.ns_ipc:
+        profile = profile + "ns-ipc "
+    if cfg.ns_net:
+        profile = profile + "ns-net "
+    if cfg.ns_capability:
+        profile = profile + "ns-capability"
+    profile

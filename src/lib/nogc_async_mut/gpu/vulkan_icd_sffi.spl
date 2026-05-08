@@ -1,0 +1,78 @@
+"""Vulkan ICD SFFI shim: delegates vkCreate*/vkQueue* to host Vulkan (M5, REQ-9).
+
+In interpreter mode: returns structured stubs so callers can validate shape
+without real host Vulkan. In compiled mode, spl_dlopen/spl_dlsym would be
+used to resolve real vkGetInstanceProcAddr.
+"""
+
+use std.nogc_async_mut.gpu.vulkan_dispatch.{vulkan_dispatch_create, vulkan_dispatch_destroy}
+
+# ============================================================================
+# Types
+# ============================================================================
+
+class VkIcdResult:
+    is_ok:           bool
+    error:           text
+    instance_handle: i64
+    device_handle:   i64
+    dispatch_handle: i64
+
+# ============================================================================
+# Private helpers
+# ============================================================================
+
+fn _icd_ok(inst: i64, dev: i64, disp: i64) -> VkIcdResult:
+    VkIcdResult(is_ok: true, error: "", instance_handle: inst, device_handle: dev, dispatch_handle: disp)
+
+fn _icd_err(msg: text) -> VkIcdResult:
+    VkIcdResult(is_ok: false, error: msg, instance_handle: 0, device_handle: 0, dispatch_handle: 0)
+
+# ============================================================================
+# Storage
+# ============================================================================
+
+var _icd_instance_ctr: i64 = 0
+var _icd_device_ctr:   i64 = 0
+
+# ============================================================================
+# Public API
+# ============================================================================
+
+pub fn vk_icd_create_instance() -> VkIcdResult:
+    """Create a Vulkan instance via SFFI shim.
+
+    Returns:
+        VkIcdResult with is_ok=true and valid handles on success.
+    """
+    _icd_instance_ctr = _icd_instance_ctr + 1
+    val inst = _icd_instance_ctr
+    _icd_device_ctr = _icd_device_ctr + 1
+    val dev = _icd_device_ctr
+    val disp = vulkan_dispatch_create(inst, dev)
+    _icd_ok(inst, dev, disp)
+
+pub fn vk_icd_create_device(instance_handle: i64) -> VkIcdResult:
+    """Create a Vulkan logical device for the given instance.
+
+    Args:
+        instance_handle: handle from vk_icd_create_instance
+
+    Returns:
+        VkIcdResult with is_ok=true on success.
+    """
+    if instance_handle <= 0:
+        return _icd_err("invalid-instance")
+    _icd_device_ctr = _icd_device_ctr + 1
+    val dev = _icd_device_ctr
+    val disp = vulkan_dispatch_create(instance_handle, dev)
+    _icd_ok(instance_handle, dev, disp)
+
+pub fn vk_icd_destroy_instance(result: VkIcdResult):
+    """Release handles obtained from vk_icd_create_instance.
+
+    Args:
+        result: VkIcdResult previously returned by vk_icd_create_instance
+    """
+    if result.is_ok:
+        vulkan_dispatch_destroy(result.dispatch_handle)

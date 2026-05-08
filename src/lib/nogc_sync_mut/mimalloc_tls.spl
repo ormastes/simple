@@ -1,0 +1,165 @@
+@no_gc
+# mimalloc TLS (thread-local heap) support
+#
+# Provides per-thread MiHeap instances backed by the rt_thread_local_* externs.
+# Each thread initialises its own independent heap via mimalloc_thread_init()
+# and tears it down with mimalloc_thread_destroy().
+#
+# The global heap managed by mimalloc_init() in mimalloc.spl is unaffected.
+#
+# Type-cast note: Simple's interpreter does not support i64<->usize casts at
+# runtime.  All TLS slot ids and thread_id fields are kept as i64 throughout.
+# Array lookups use a linear scan over the heaps list (matching by thread_id)
+# to avoid indexing with an i64 value.
+
+use std.nogc_sync_mut.mimalloc.{MiHeap, MiPage, mimalloc_init, mi_heap_new}
+
+# ============================================================================
+# TLS externs (mirrors infra/synchronization.spl ThreadLocal<T>)
+# ============================================================================
+
+extern fn rt_thread_local_new() -> i64
+extern fn rt_thread_local_get(tls: i64) -> i64
+extern fn rt_thread_local_set(tls: i64, value: i64)
+extern fn rt_thread_local_free(tls: i64)
+
+# ============================================================================
+# Structures
+# ============================================================================
+
+struct MiThreadHeap:
+    """Per-thread heap record pairing a heap with its owning thread id."""
+    heap: MiHeap
+    thread_id: i64
+
+struct MiTlsRegistry:
+    """Registry of all per-thread heaps and the TLS handle used to index them."""
+    heaps: [MiThreadHeap]
+    tls_handle: i64
+
+# ============================================================================
+# Module-level registry state
+# ============================================================================
+
+var _g_tls_registry: MiTlsRegistry = MiTlsRegistry(heaps: [], tls_handle: 0)
+var _g_tls_initialized: bool = false
+var _g_tls_next_slot: i64 = 0
+
+# Sentinel stored in TLS to indicate "no slot registered for this thread"
+val _TLS_NO_SLOT: i64 = -1
+
+# ============================================================================
+# Internal helpers
+# ============================================================================
+
+fn _tls_ensure_registry():
+    """Lazily create the TLS handle on first use."""
+    if not _g_tls_initialized:
+        val handle = rt_thread_local_new()
+        _g_tls_registry = MiTlsRegistry(heaps: [], tls_handle: handle)
+        _g_tls_initialized = true
+
+fn _tls_next_id() -> i64:
+    """Return a monotonically-increasing i64 slot id."""
+    val id = _g_tls_next_slot
+    _g_tls_next_slot = _g_tls_next_slot + 1
+    id
+
+fn _tls_find_heap(slot_id: i64) -> MiHeap:
+    """Linear scan over registry to find the heap for slot_id.
+
+    Returns a fresh fallback heap if not found (no i64->usize cast needed).
+    """
+    for record in _g_tls_registry.heaps:
+        if record.thread_id == slot_id:
+            return record.heap
+    mi_heap_new()
+
+fn _tls_replace_heap(slot_id: i64, replacement: MiThreadHeap):
+    """Linear scan to replace the heap record matching slot_id in-place."""
+    var new_heaps: [MiThreadHeap] = []
+    for record in _g_tls_registry.heaps:
+        if record.thread_id == slot_id:
+            new_heaps = new_heaps.push(replacement)
+        else:
+            new_heaps = new_heaps.push(record)
+    _g_tls_registry = MiTlsRegistry(heaps: new_heaps, tls_handle: _g_tls_registry.tls_handle)
+
+# ============================================================================
+# Public API
+# ============================================================================
+
+fn mi_heap_new_thread() -> MiHeap:
+    """Create an independent per-thread heap with its own pages/segments.
+
+    Returns a fresh MiHeap that is NOT backed by the global heap. The caller
+    should store the returned heap in thread-local storage via
+    mimalloc_thread_init() rather than using this directly.
+    """
+    mi_heap_new()
+
+fn mimalloc_thread_init() -> MiThreadHeap:
+    """Create a new independent MiHeap and register it in the TLS registry.
+
+    Must be called once per thread before using mimalloc_thread_heap().
+    Returns the MiThreadHeap record for the calling thread.
+    """
+    _tls_ensure_registry()
+    val slot_id = _tls_next_id()
+    val heap = mi_heap_new_thread()
+    val record = MiThreadHeap(heap: heap, thread_id: slot_id)
+
+    # Append the record and store the slot index in TLS
+    val new_heaps = _g_tls_registry.heaps.push(record)
+    _g_tls_registry = MiTlsRegistry(heaps: new_heaps, tls_handle: _g_tls_registry.tls_handle)
+    rt_thread_local_set(_g_tls_registry.tls_handle, slot_id)
+
+    record
+
+fn mimalloc_thread_heap() -> MiHeap:
+    """Return the current thread's heap via TLS lookup.
+
+    Returns a fresh independent heap if no per-thread heap has been
+    registered for this thread yet.
+    """
+    if not _g_tls_initialized:
+        return mi_heap_new()
+
+    val slot_id = rt_thread_local_get(_g_tls_registry.tls_handle)
+    if slot_id == _TLS_NO_SLOT:
+        return mi_heap_new()
+
+    _tls_find_heap(slot_id)
+
+fn mimalloc_thread_destroy():
+    """Clean up the current thread's heap entry in the TLS registry.
+
+    Replaces the heap slot with an empty placeholder so its memory can
+    be reclaimed. Future lookups for this thread will return a fallback heap.
+    """
+    if not _g_tls_initialized:
+        return
+
+    val handle = _g_tls_registry.tls_handle
+    val slot_id = rt_thread_local_get(handle)
+    if slot_id == _TLS_NO_SLOT:
+        return
+
+    # Replace the heap record with an empty placeholder
+    val empty_heap = MiHeap(size_classes: [], pages_by_class: [])
+    val empty_record = MiThreadHeap(heap: empty_heap, thread_id: slot_id)
+    _tls_replace_heap(slot_id, empty_record)
+
+    # Reset TLS slot to sentinel so future lookups fall back gracefully
+    rt_thread_local_set(handle, _TLS_NO_SLOT)
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export MiThreadHeap
+export MiTlsRegistry
+export mi_heap_new_thread
+export mimalloc_thread_init
+export mimalloc_thread_heap
+export mimalloc_thread_destroy

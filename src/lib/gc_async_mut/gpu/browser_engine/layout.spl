@@ -22,7 +22,8 @@ use std.gc_async_mut.gpu.browser_engine.dom.{BeDomNode, be_dom_get_style,
     be_dom_get_text_decoration, BeDomEventDispatch, be_dom_create_pointer_event_with_modifiers,
     be_dom_dispatch_event_path, be_dom_dispatch_event_path_with_event}
 use std.gc_async_mut.gpu.browser_engine.css.{StyleProps, CssValue, BoxEdges, BoxShadow,
-    be_default_style, CssPx, CssColor, CssOpacity}
+    be_default_style, CssPx, CssColor, CssOpacity,
+    FloatCode, ClearCode, css_get_float_code, css_get_clear_code, css_get_overflow}
 use common.text_layout.text_layout.{measure_text, text_char_width, text_line_height}
 use common.render_scene.scene.{SceneCommand, RenderScene, render_scene,
     scene_fill_rect, scene_stroke_rect, scene_text, scene_rounded_rect,
@@ -84,6 +85,180 @@ class BePointerActivationDispatch:
         )
 
 # =========================================================================
+# Float Layout Types (CSS 2.1 §9.5.1)
+# =========================================================================
+
+class FloatBox:
+    x: i32
+    y: i32
+    width: i32
+    height: i32
+    side: i32
+
+class FloatContext:
+    left_floats: [FloatBox]
+    right_floats: [FloatBox]
+    current_y: i32
+
+    static fn create() -> FloatContext:
+        FloatContext(
+            left_floats: [FloatBox](),
+            right_floats: [FloatBox](),
+            current_y: 0
+        )
+
+    static fn at_y(y: i32) -> FloatContext:
+        FloatContext(
+            left_floats: [FloatBox](),
+            right_floats: [FloatBox](),
+            current_y: y
+        )
+
+class FloatPos:
+    x: i32
+    y: i32
+
+fn float_available_width_at(y: i32, ctx: FloatContext, total_width: i32) -> i32:
+    var left_intrusion = 0
+    var right_intrusion = 0
+    var li = 0
+    while li < ctx.left_floats.len():
+        val fl = ctx.left_floats[li]
+        li = li + 1
+        if y >= fl.y and y < (fl.y + fl.height):
+            val intrusion = fl.x + fl.width
+            if intrusion > left_intrusion:
+                left_intrusion = intrusion
+    var ri = 0
+    while ri < ctx.right_floats.len():
+        val fr = ctx.right_floats[ri]
+        ri = ri + 1
+        if y >= fr.y and y < (fr.y + fr.height):
+            val intrusion = total_width - fr.x
+            if intrusion > right_intrusion:
+                right_intrusion = intrusion
+    val available = total_width - left_intrusion - right_intrusion
+    if available > 0: available else: 0
+
+fn float_left_offset_at(y: i32, ctx: FloatContext) -> i32:
+    var left_edge = 0
+    var li = 0
+    while li < ctx.left_floats.len():
+        val fl = ctx.left_floats[li]
+        li = li + 1
+        if y >= fl.y and y < (fl.y + fl.height):
+            val edge = fl.x + fl.width
+            if edge > left_edge:
+                left_edge = edge
+    left_edge
+
+fn float_clear_y(clear_code: i32, ctx: FloatContext) -> i32:
+    var clear_y = ctx.current_y
+    if clear_code == 1 or clear_code == 3:
+        var li = 0
+        while li < ctx.left_floats.len():
+            val fl = ctx.left_floats[li]
+            li = li + 1
+            val bottom = fl.y + fl.height
+            if bottom > clear_y:
+                clear_y = bottom
+    if clear_code == 2 or clear_code == 3:
+        var ri = 0
+        while ri < ctx.right_floats.len():
+            val fr = ctx.right_floats[ri]
+            ri = ri + 1
+            val bottom = fr.y + fr.height
+            if bottom > clear_y:
+                clear_y = bottom
+    clear_y
+
+fn float_next_clear_y(y: i32, ctx: FloatContext) -> i32:
+    var min_bottom = y
+    var found = false
+    var li = 0
+    while li < ctx.left_floats.len():
+        val fl = ctx.left_floats[li]
+        li = li + 1
+        if y >= fl.y and y < (fl.y + fl.height):
+            val bottom = fl.y + fl.height
+            if not found or bottom < min_bottom:
+                min_bottom = bottom
+                found = true
+    var ri = 0
+    while ri < ctx.right_floats.len():
+        val fr = ctx.right_floats[ri]
+        ri = ri + 1
+        if y >= fr.y and y < (fr.y + fr.height):
+            val bottom = fr.y + fr.height
+            if not found or bottom < min_bottom:
+                min_bottom = bottom
+                found = true
+    if found: min_bottom else: y
+
+fn float_find_position(width: i32, side: i32, y: i32, ctx: FloatContext, available: i32) -> FloatPos:
+    if side == 1:
+        var left_edge = 0
+        var li = 0
+        while li < ctx.left_floats.len():
+            val fl = ctx.left_floats[li]
+            li = li + 1
+            if y >= fl.y and y < (fl.y + fl.height):
+                val edge = fl.x + fl.width
+                if edge > left_edge:
+                    left_edge = edge
+        return FloatPos(x: left_edge, y: y)
+    var right_edge = available
+    var ri = 0
+    while ri < ctx.right_floats.len():
+        val fr = ctx.right_floats[ri]
+        ri = ri + 1
+        if y >= fr.y and y < (fr.y + fr.height):
+            if fr.x < right_edge:
+                right_edge = fr.x
+    FloatPos(x: right_edge - width, y: y)
+
+fn float_place(float_w: i32, float_h: i32, side: i32, ctx: FloatContext, container_width: i32) -> FloatPos:
+    var try_y = ctx.current_y
+    var attempts = 0
+    while attempts < 100:
+        val avail = float_available_width_at(try_y, ctx, container_width)
+        if avail >= float_w:
+            return float_find_position(float_w, side, try_y, ctx, container_width)
+        val next_y = float_next_clear_y(try_y, ctx)
+        if next_y <= try_y:
+            return float_find_position(float_w, side, try_y, ctx, container_width)
+        try_y = next_y
+        attempts = attempts + 1
+    float_find_position(float_w, side, try_y, ctx, container_width)
+
+fn float_context_height(ctx: FloatContext) -> i32:
+    var max_bottom = 0
+    var li = 0
+    while li < ctx.left_floats.len():
+        val fl = ctx.left_floats[li]
+        li = li + 1
+        val bottom = fl.y + fl.height
+        if bottom > max_bottom:
+            max_bottom = bottom
+    var ri = 0
+    while ri < ctx.right_floats.len():
+        val fr = ctx.right_floats[ri]
+        ri = ri + 1
+        val bottom = fr.y + fr.height
+        if bottom > max_bottom:
+            max_bottom = bottom
+    max_bottom
+
+fn float_is_bfc_root(style: StyleProps) -> bool:
+    val overflow = css_get_overflow(style)
+    if overflow != "visible" and overflow != "":
+        return true
+    val disp = style.display
+    if disp == "flow-root" or disp == "flex" or disp == "inline-flex":
+        return true
+    false
+
+# =========================================================================
 # Main Layout Entry Point
 # =========================================================================
 
@@ -128,29 +303,29 @@ pub fn layout_tree(root: BeDomNode, viewport_w: i32, viewport_h: i32) -> BeLayou
         node: root, children: []
     )
     val base_style = be_default_style()
-    val result = layout_node(root, container, base_style)
+    val root_ctx = FloatContext.create()
+    val result = layout_node(root, container, base_style, root_ctx)
     return result
 
 # =========================================================================
 # Node Layout Dispatch
 # =========================================================================
 
-fn layout_node(node: BeDomNode, container: BeLayoutBox, parent_style: StyleProps) -> BeLayoutBox:
+fn layout_node(node: BeDomNode, container: BeLayoutBox, parent_style: StyleProps, ctx: FloatContext) -> BeLayoutBox:
     """Lay out a single node within its container — dispatches by display type."""
     _ld("[LN] enter")
-    # Use accessor for display to avoid cross-module FieldGet bug on StyleProps
     val disp = be_dom_get_display(node)
     _ld("[LN] disp='{disp}'")
     if disp == "none":
         return BeLayoutBox.empty(node)
     val s = be_dom_get_style(node)
     _ld("[LN] style got")
-    if disp == "flex":
-        return layout_flex(node, container, s)
+    if disp == "flex" or disp == "inline-flex":
+        return layout_flex(node, container, s, ctx)
     if be_dom_get_is_text(node):
-        return layout_text_node(node, container, parent_style)
+        return layout_text_node(node, container, parent_style, ctx)
     _ld("[LN] calling layout_block")
-    return layout_block(node, container, s)
+    return layout_block(node, container, s, ctx)
 
 fn resolve_offset(value: CssValue, reference: i32) -> i32:
     """Resolve a CSS offset value (top/left/right/bottom) to pixels."""
@@ -162,7 +337,7 @@ fn resolve_offset(value: CssValue, reference: i32) -> i32:
 # Block Layout
 # =========================================================================
 
-fn layout_block(node: BeDomNode, container: BeLayoutBox, style: StyleProps) -> BeLayoutBox:
+fn layout_block(node: BeDomNode, container: BeLayoutBox, style: StyleProps, parent_ctx: FloatContext) -> BeLayoutBox:
     """Lay out a block-level element with proper CSS box model and child recursion."""
     val s = style
     val s_width = s.width
@@ -191,7 +366,6 @@ fn layout_block(node: BeDomNode, container: BeLayoutBox, style: StyleProps) -> B
         val min_w = s_min_w.resolve_px(cw)
         if box_width < min_w:
             box_width = min_w
-    # Clamp: negative margins can push box_width below 0
     if box_width < 0:
         box_width = 0
 
@@ -206,15 +380,10 @@ fn layout_block(node: BeDomNode, container: BeLayoutBox, style: StyleProps) -> B
     val cont_x = box_x + border_w + s_padding.left
     val cont_y = box_y + border_w + s_padding.top
 
-    # Lay out children vertically (block flow). Adjacent vertical sibling
-    # margins collapse to max(prev.bottom, cur.top) per CSS 2.1 §8.3.1 rule 1.
-    # Parent-child collapsing (rule 2): if the parent has no top
-    # border/padding, the first in-flow child's top margin collapses with
-    # the parent's top margin. We implement this by starting cursor_y a bit
-    # above cont_y for the first child so its outer box (which already
-    # carries its own margin.top) overlaps with the parent's margin region.
-    # The symmetric bottom collapse is applied after the loop via
-    # last_child_mb.
+    # BFC detection: BFC roots get a fresh FloatContext; non-BFC inherit parent's
+    val is_bfc = float_is_bfc_root(s)
+    var float_ctx = if is_bfc: FloatContext.at_y(cont_y) else: parent_ctx
+
     val can_top_collapse = border_w == 0 and s_padding.top == 0
     val can_bot_collapse = border_w == 0 and s_padding.bottom == 0
     var child_boxes: [BeLayoutBox] = []
@@ -235,46 +404,92 @@ fn layout_block(node: BeDomNode, container: BeLayoutBox, style: StyleProps) -> B
         _ld("[LB] disp='{child_disp}'")
         if child_disp != "none":
             val child_style = be_dom_get_style(child)
-            val child_mt = child_style.margin.top
-            val child_mb = child_style.margin.bottom
-            if seen_child:
-                val collapse = if prev_bottom_margin < child_mt: prev_bottom_margin else: child_mt
-                cursor_y = cursor_y - collapse
-            else:
-                # Parent-child top margin collapse (rule 2, top side).
-                if can_top_collapse and s_margin.top >= 0 and child_mt >= 0:
-                    val top_collapse = if s_margin.top < child_mt: s_margin.top else: child_mt
-                    cursor_y = cursor_y - top_collapse
-            val child_container = BeLayoutBox(
-                x: cont_x, y: cursor_y,
-                width: content_w, height: 0,
-                content_x: cont_x, content_y: cursor_y,
-                content_width: content_w, content_height: 0,
-                node: child, children: []
-            )
-            _ld("[LB] container created")
-            val child_box = layout_node(child, child_container, s)
-            _ld("[LB] child laid out")
-            child_boxes.push(child_box)
-            cursor_y = cursor_y + child_box.height
-            prev_bottom_margin = child_mb
-            last_child_mb = child_mb
-            seen_child = true
+            val child_fc = css_get_float_code(child_style)
+            val child_cc = css_get_clear_code(child_style)
 
-    # CSS 2.1 §8.3.1 rule 2, bottom side: if parent has no bottom
-    # border/padding, parent.margin.bottom collapses with the last in-flow
-    # child's margin.bottom. The child's bottom margin is already inside
-    # content_h via cursor_y, and parent.margin.bottom is added via
-    # s_margin.vertical() below, so we remove the overlap from content_h.
+            # Clear: advance cursor_y past cleared floats
+            if child_cc.value > 0:
+                val cleared_y = float_clear_y(child_cc.value, float_ctx)
+                if cleared_y > cursor_y:
+                    cursor_y = cleared_y
+
+            if child_fc.value == 1 or child_fc.value == 2:
+                # Float child: lay out, place, register, do NOT advance cursor_y
+                float_ctx.current_y = cursor_y
+                val float_child_container = BeLayoutBox(
+                    x: cont_x, y: cursor_y,
+                    width: content_w, height: 0,
+                    content_x: cont_x, content_y: cursor_y,
+                    content_width: content_w, content_height: 0,
+                    node: child, children: []
+                )
+                val float_child_box = layout_node(child, float_child_container, s, float_ctx)
+                val fw = float_child_box.width
+                val fh = float_child_box.height
+                val fpos = float_place(fw, fh, child_fc.value, float_ctx, content_w)
+                val placed_box = BeLayoutBox(
+                    x: fpos.x + cont_x, y: fpos.y,
+                    width: fw, height: fh,
+                    content_x: float_child_box.content_x + (fpos.x + cont_x - float_child_box.x),
+                    content_y: float_child_box.content_y + (fpos.y - float_child_box.y),
+                    content_width: float_child_box.content_width,
+                    content_height: float_child_box.content_height,
+                    node: child, children: float_child_box.children
+                )
+                val fb = FloatBox(x: fpos.x, y: fpos.y, width: fw, height: fh, side: child_fc.value)
+                if child_fc.value == 1:
+                    float_ctx.left_floats.push(fb)
+                else:
+                    float_ctx.right_floats.push(fb)
+                child_boxes.push(placed_box)
+            else:
+                # Normal in-flow child
+                val child_mt = child_style.margin.top
+                val child_mb = child_style.margin.bottom
+                if seen_child:
+                    val collapse = if prev_bottom_margin < child_mt: prev_bottom_margin else: child_mt
+                    cursor_y = cursor_y - collapse
+                else:
+                    if can_top_collapse and s_margin.top >= 0 and child_mt >= 0:
+                        val top_collapse = if s_margin.top < child_mt: s_margin.top else: child_mt
+                        cursor_y = cursor_y - top_collapse
+                # Narrow container by active floats at this y
+                val avail_w = float_available_width_at(cursor_y, float_ctx, content_w)
+                val left_off = float_left_offset_at(cursor_y, float_ctx)
+                val child_cx = cont_x + left_off
+                val child_container = BeLayoutBox(
+                    x: child_cx, y: cursor_y,
+                    width: avail_w, height: 0,
+                    content_x: child_cx, content_y: cursor_y,
+                    content_width: avail_w, content_height: 0,
+                    node: child, children: []
+                )
+                _ld("[LB] container created")
+                float_ctx.current_y = cursor_y
+                val child_box = layout_node(child, child_container, s, float_ctx)
+                _ld("[LB] child laid out")
+                child_boxes.push(child_box)
+                cursor_y = cursor_y + child_box.height
+                prev_bottom_margin = child_mb
+                last_child_mb = child_mb
+                seen_child = true
+
     if seen_child and can_bot_collapse and s_margin.bottom >= 0 and last_child_mb >= 0:
         val bot_collapse = if s_margin.bottom < last_child_mb: s_margin.bottom else: last_child_mb
         cursor_y = cursor_y - bot_collapse
 
     # Resolve height
     var content_h = cursor_y - cont_y
-    # Clamp: negative margins on children can make cursor_y < cont_y
     if content_h < 0:
         content_h = 0
+
+    # BFC roots enclose their floats
+    if is_bfc:
+        val fh = float_context_height(float_ctx)
+        val float_content_h = if fh > cont_y: fh - cont_y else: 0
+        if float_content_h > content_h:
+            content_h = float_content_h
+
     if not s_height.is_auto():
         val explicit_h = s_height.resolve_px(ch)
         var resolved_h = if explicit_h > inset_v: explicit_h - inset_v else: 0
@@ -299,7 +514,6 @@ fn layout_block(node: BeDomNode, container: BeLayoutBox, style: StyleProps) -> B
             content_h = min_h
 
     val box_height = content_h + inset_v
-    # Clamp total height: negative margins can make final height negative
     var total_height = box_height + s_margin.vertical()
     if total_height < 0:
         total_height = 0
@@ -316,7 +530,7 @@ fn layout_block(node: BeDomNode, container: BeLayoutBox, style: StyleProps) -> B
 # Flexbox Layout
 # =========================================================================
 
-fn layout_flex(node: BeDomNode, container: BeLayoutBox, style: StyleProps) -> BeLayoutBox:
+fn layout_flex(node: BeDomNode, container: BeLayoutBox, style: StyleProps, parent_ctx: FloatContext) -> BeLayoutBox:
     """Lay out a flex container with full CSS flexbox support.
     Handles: flex-grow/shrink/basis, justify-content, align-items,
     align-self, flex-direction (row/column/row-reverse/column-reverse),
@@ -481,7 +695,8 @@ fn layout_flex(node: BeDomNode, container: BeLayoutBox, style: StyleProps) -> Be
                 node: child, children: []
             )
 
-        val child_box = layout_node(child, child_container, style)
+        val flex_child_ctx = FloatContext.create()
+        val child_box = layout_node(child, child_container, style, flex_child_ctx)
         child_boxes.push(child_box)
 
         if is_row:
@@ -655,34 +870,57 @@ fn flex_distribute_x(boxes: [BeLayoutBox], start_x: i32, extra_per_item: i32, ga
 # Text Layout
 # =========================================================================
 
-fn layout_text_node(node: BeDomNode, container: BeLayoutBox, parent_style: StyleProps) -> BeLayoutBox:
-    """Lay out a text node using font renderer metrics.
-    Uses vector/bitmap font with proportional width when available.
-
-    Text nodes don't carry their own computed font_size (they keep the
-    default 16), so use the parent element's font_size — which is the
-    CSS-inheritable value the text actually renders at.
-    """
+fn layout_text_node(node: BeDomNode, container: BeLayoutBox, parent_style: StyleProps, ctx: FloatContext) -> BeLayoutBox:
+    """Lay out a text node with per-line float-aware wrapping."""
     val ns = be_dom_get_style(node)
     val font_size = parent_style.font_size
-    # CSS "line-height: normal" ≈ 1.2×font-size. text_line_height() returns
-    # a flat 18 for any fs > 8 which massively over-sizes small-font blocks
-    # and pushes ancestor borders down. Use font-proportional metrics.
     val line_h = if font_size <= 8:
         text_line_height(font_size)
     else:
-        font_size + font_size / 5  # 1.2× (floor)
+        font_size + font_size / 5
 
     val node_txt = be_dom_get_text(node)
     val cont_cw = if container.content_width > 0: container.content_width else: 0
     val char_w = text_char_width(font_size)
-    var raw_w = node_txt.len() * char_w
-    var line_count = 1
-    if cont_cw > 0 and raw_w > cont_cw:
-        line_count = (raw_w + cont_cw - 1) / cont_cw
-        raw_w = cont_cw
+    val total_chars = node_txt.len()
+    var raw_w = total_chars * char_w
+
+    # Fast path: no floats active — use original ceiling formula
+    val has_floats = ctx.left_floats.len() > 0 or ctx.right_floats.len() > 0
+    if not has_floats:
+        var line_count = 1
+        if cont_cw > 0 and raw_w > cont_cw:
+            line_count = (raw_w + cont_cw - 1) / cont_cw
+            raw_w = cont_cw
+        val h = line_count * line_h
+        val w = raw_w
+        return BeLayoutBox(
+            x: container.content_x, y: container.content_y,
+            width: w, height: h,
+            content_x: container.content_x, content_y: container.content_y,
+            content_width: w, content_height: h,
+            node: node, children: []
+        )
+
+    # Float-aware path: per-line available_width_at queries
+    var chars_remaining = total_chars
+    var line_count = 0
+    var max_line_w = 0
+    var line_y = container.content_y
+    while chars_remaining > 0:
+        val avail = float_available_width_at(line_y, ctx, cont_cw)
+        val line_w = if avail > 0: avail else: cont_cw
+        val chars_per_line = if char_w > 0 and line_w > 0: line_w / char_w else: total_chars
+        val chars_this_line = if chars_per_line > 0: chars_per_line else: 1
+        val used = if chars_this_line < chars_remaining: chars_this_line else: chars_remaining
+        chars_remaining = chars_remaining - used
+        val this_w = used * char_w
+        if this_w > max_line_w:
+            max_line_w = this_w
+        line_count = line_count + 1
+        line_y = line_y + line_h
     val h = line_count * line_h
-    val w = raw_w
+    val w = if max_line_w > cont_cw: cont_cw else: max_line_w
 
     return BeLayoutBox(
         x: container.content_x, y: container.content_y,

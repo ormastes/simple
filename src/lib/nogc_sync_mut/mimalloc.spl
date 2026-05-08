@@ -1,5 +1,6 @@
 @no_gc
 use std.nogc_sync_mut.allocator.{Allocator}
+use std.nogc_sync_mut.mimalloc_page_policy.{MiDelayedFreeEntry}
 # mimalloc pure-Simple port
 #
 # Structural port of mimalloc's segment/page/free-list algorithm.
@@ -8,9 +9,8 @@ use std.nogc_sync_mut.allocator.{Allocator}
 #
 # Constraints (see state.md):
 # - D-1: Single global heap; mimalloc_init() required before first use.
-# - D-2: Size-class lookup uses a linear table scan (_SIZE_CLASS_TABLE).
+# - D-2: Size-class lookup uses a linear table scan.
 # - D-3: Pure-Simple port is structural/simulation; C wiring (AC-3) is separate.
-# - TLS: no thread-locals in nogc_sync_mut — single-threaded heap only.
 
 # ============================================================================
 # Core Structures
@@ -78,6 +78,7 @@ var _g_raw_allocated: usize = 0
 var _g_peak_allocated: usize = 0
 var _g_allocation_count: usize = 0
 var _g_free_count: usize = 0
+var _g_delayed_free: [MiDelayedFreeEntry] = []
 var _g_option_show_stats: bool = false
 var _g_option_verbose: bool = false
 var _g_option_eager_commit: bool = false
@@ -150,8 +151,19 @@ fn mimalloc_init(heap: MiHeap):
         _g_heap = MiHeap(size_classes: _g_heap.size_classes, pages_by_class: pbc)
 
 fn mi_heap_new() -> MiHeap:
-    """Create an empty heap value compatible with the current single-heap port."""
-    MiHeap(size_classes: [], pages_by_class: [])
+    """Create an independent heap with its own size_classes and pages_by_class slots.
+
+    Each call returns a new heap value that is isolated from the global heap
+    and from other heaps returned by mi_heap_new. The caller is responsible
+    for initializing the returned heap before use (e.g. via mimalloc_init or
+    by passing it directly to mi_heap_malloc).
+    """
+    var pbc: [[MiPage]] = []
+    for _sc in _SIZE_CLASS_TABLE:
+        pbc = pbc.push([])
+    # Extra slot for the large class (index == _SIZE_CLASS_TABLE.len())
+    pbc = pbc.push([])
+    MiHeap(size_classes: [], pages_by_class: pbc)
 
 fn mi_heap_delete(_heap: MiHeap):
     """Delete a heap value.
@@ -198,6 +210,17 @@ fn _record_free(size: usize):
     if _g_total_allocated >= size:
         _g_total_allocated = _g_total_allocated - size
     _g_free_count = _g_free_count + 1
+
+fn _drain_delayed_free():
+    """Process all pending cross-thread free entries from _g_delayed_free.
+
+    Calls _record_free for each drained entry then clears the global list.
+    Called at the top of mi_malloc to integrate deferred frees before allocating.
+    """
+    val pending = _g_delayed_free
+    _g_delayed_free = []
+    for entry in pending:
+        _record_free(entry.block_size)
 
 # ============================================================================
 # Page operations
@@ -270,6 +293,8 @@ fn mi_malloc(size: usize) -> [u8]?:
     """Allocate size bytes from the global heap. Returns mock [u8] slice in interpreter mode."""
     if size == 0:
         return nil
+
+    _drain_delayed_free()
 
     val class_idx = _size_class_slot(size)
     val actual_size = _class_size(class_idx)
@@ -564,13 +589,16 @@ fn mi_stats_reset():
     _g_allocation_count = 0
     _g_free_count = 0
 
-fn mi_collect(_force: bool):
-    """Collection hook.
+fn mi_collect(force: bool):
+    """Collection hook — drains the delayed free list when force is true.
 
-    The structural port has no abandoned segments yet; collection is a no-op
-    compatibility entrypoint.
+    When force is true, all pending cross-thread free entries in _g_delayed_free
+    are processed via _drain_delayed_free() and the free counter reflects the
+    drain. When force is false the call is safe but does nothing (matches
+    mimalloc's non-forced collect semantics).
     """
-    return
+    if force:
+        _drain_delayed_free()
 
 fn mi_heap_collect(_heap: MiHeap, force: bool):
     """Heap-specific collection hook over the current single global heap."""
@@ -690,3 +718,5 @@ export mi_option_disable
 export mi_option_set_enabled
 export mi_size_class_index
 export default_allocator
+export _g_delayed_free
+export _drain_delayed_free
