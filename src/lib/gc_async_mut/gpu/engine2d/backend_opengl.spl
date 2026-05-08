@@ -31,7 +31,7 @@ use std.gpu.engine2d.backend_emu.{
     emu_draw_image_transform,
     emu_draw_rect_blend_mode
 }
-use std.gpu.engine2d.glyph.{render_text_to_buffer}
+use std.gpu.engine2d.glyph.{glyph_height, glyph_advance, render_text_to_buffer}
 use std.gc_async_mut.io.opengl_ffi.{
     opengl_available,
     opengl_init, opengl_destroy,
@@ -300,15 +300,24 @@ impl RenderBackend for OpenGLBackend:
         emu_draw_rect_blend_mode(self, x, y, w, h, color, mode)
 
 impl Engine2DExtended for OpenGLBackend:
-    # Phase 1 fallback: fill bg cell via the GL rect pipeline, then the
-    # CPU-side text fallback uploads glyph pixels as a textured quad.
-    # TODO(sys-gui-007 draw_text_bg native) — glyph-atlas sampling shader.
     me draw_text_bg(x: i32, y: i32, text_val: text, fg: u32, bg: u32, font_size: i32):
-        val cell_w: i32 = 6 * font_size / 7
-        val cell_h: i32 = font_size
-        val tw: i32 = text_val.len().to_i32() * cell_w
-        self.draw_rect_filled(x, y, tw, cell_h, bg)
-        _gl_draw_text_fallback(self, x, y, text_val, fg, font_size)
+        val gh = glyph_height()
+        var scale = font_size / gh
+        if scale < 1:
+            scale = 1
+        val advance = glyph_advance(scale)
+        val text_w = text_val.len().to_i32() * advance
+        val text_h = gh * scale
+        if text_w <= 0 or text_h <= 0:
+            return
+        var buf: [u32] = []
+        var _i = 0
+        val buf_size = text_w * text_h
+        while _i < buf_size:
+            buf.push(bg)
+            _i = _i + 1
+        render_text_to_buffer(buf, text_w, text_h, 0, 0, text_val, fg, font_size)
+        self.draw_image(x, y, text_w, text_h, buf)
 
 # ============================================================================
 # Text Rendering Fallback
