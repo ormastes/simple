@@ -993,7 +993,7 @@ If this entry depends on hosted-only runtime symbols, rebuild with `--runtime-bu
                                 continue;
                             }
                             let minimal_boot = std::env::var("SIMPLE_BOOT_MINIMAL").is_ok();
-                            if minimal_boot && !skip_boot_autodiscovery && stem != "baremetal_stubs" {
+                            if minimal_boot && !skip_boot_autodiscovery && stem != "baremetal_stubs" && stem != "curve25519_ring_helper" && stem != "ed25519_verify_helper" {
                                 continue;
                             }
                             let out = temp_dir.join(format!("_boot_{}.o", stem));
