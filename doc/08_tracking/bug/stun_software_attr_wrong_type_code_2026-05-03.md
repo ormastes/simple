@@ -1,6 +1,8 @@
 # Bug — `STUN_ATTR_SOFTWARE` constant uses wrong type code (0x802b vs RFC 0x8022)
 
 **Filed:** 2026-05-03 (W29-L STUN KAT spec, RFC 5769 §2 vector work)
+**Resolved:** 2026-05-08 — `STUN_ATTR_SOFTWARE` already corrected to `0x8022` in
+`src/os/proxy/stun.spl` (line 49); confirming comment added at fix time.
 **Severity:** Medium — SOFTWARE attributes in RFC 5769 §2.1/§2.2/§2.3 vectors parse as
 `Unknown(type_code: 0x8022, value: ...)` instead of `Software(value: ...)`. Emit also
 writes 0x802b on the wire instead of 0x8022, breaking interoperability.

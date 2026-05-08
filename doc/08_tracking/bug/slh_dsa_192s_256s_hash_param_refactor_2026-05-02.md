@@ -13,6 +13,11 @@ green** — see `test/unit/lib/crypto/sha512_extern_dispatch_spec.spl`
 description. This bug captures the exact surface so the next attempt
 can land it cleanly.
 
+**Reviewed 2026-05-08:** Status confirmed open/blocked. No partial fix applied —
+Option A (sibling files) or Option B (tag-dispatched generic) must be chosen and
+implemented as a dedicated wave. The 128s code is correct; only additive work
+is needed for 192s/256s support.
+
 ## Problem
 
 `src/os/crypto/slh_dsa*.spl` is hardcoded to the SLH-DSA-SHA2-128s
