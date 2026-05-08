@@ -1,0 +1,100 @@
+"""Proton real execution via pressure-vessel container dispatch (AC-1, AC-10)."""
+
+use common.proton_runtime_subsystems.{
+    proton_fixture_non_wine_runtime_evidence,
+    proton_non_wine_runtime_evidence_new
+}
+use common.proton_session.{
+    proton_session_launch_handoff,
+    proton_session_plan,
+    proton_session_request_new
+}
+use nogc_async_mut.container.pressure_vessel.{
+    pressure_vessel_create,
+    pressure_vessel_destroy,
+    pressure_vessel_exec_wine,
+    pressure_vessel_setup_wine_prefix
+}
+
+describe "Proton real execution via pressure-vessel":
+    it "dry_run=true still returns dry-run-ready (regression)":
+        val request = proton_session_request_new("480", "steamapps/compatdata/480/pfx", "hl2.exe", ["-novid"])
+        val plan = proton_session_plan(request, proton_fixture_non_wine_runtime_evidence())
+        val handoff = proton_session_launch_handoff(plan, true)
+        expect(handoff.ok).to_equal(true)
+        expect(handoff.status).to_equal("dry-run-ready")
+
+    it "dry_run=false no longer returns execution-not-implemented":
+        val request = proton_session_request_new("480", "steamapps/compatdata/480/pfx", "hl2.exe", ["-novid"])
+        val plan = proton_session_plan(request, proton_fixture_non_wine_runtime_evidence())
+        val handoff = proton_session_launch_handoff(plan, false)
+        expect(handoff.error).to_equal("")
+        expect(handoff.status != "blocked").to_equal(true)
+
+    it "dry_run=false returns exec-dispatched status":
+        val request = proton_session_request_new("480", "steamapps/compatdata/480/pfx", "hl2.exe", ["-novid"])
+        val plan = proton_session_plan(request, proton_fixture_non_wine_runtime_evidence())
+        val handoff = proton_session_launch_handoff(plan, false)
+        expect(handoff.ok).to_equal(true)
+        expect(handoff.status).to_equal("exec-dispatched")
+
+    it "dry_run=false launch_command contains wine64":
+        val request = proton_session_request_new("480", "steamapps/compatdata/480/pfx", "hl2.exe", ["-novid"])
+        val plan = proton_session_plan(request, proton_fixture_non_wine_runtime_evidence())
+        val handoff = proton_session_launch_handoff(plan, false)
+        expect(handoff.launch_command).to_contain("wine64")
+        expect(handoff.launch_command).to_contain("hl2.exe")
+
+    it "container_profile contains namespace facets":
+        val request = proton_session_request_new("480", "steamapps/compatdata/480/pfx", "hl2.exe", [])
+        val plan = proton_session_plan(request, proton_fixture_non_wine_runtime_evidence())
+        val handoff = proton_session_launch_handoff(plan, false)
+        expect(handoff.container_profile).to_contain("ns-pid")
+        expect(handoff.container_profile).to_contain("ns-fs")
+        expect(handoff.container_profile).to_contain("ns-capability")
+
+    it "invalid plan returns error for both dry_run modes":
+        val request = proton_session_request_new("", "steamapps/compatdata/480/pfx", "hl2.exe", [])
+        val plan = proton_session_plan(request, proton_fixture_non_wine_runtime_evidence())
+        val dry = proton_session_launch_handoff(plan, true)
+        expect(dry.ok).to_equal(false)
+        expect(dry.status).to_equal("blocked")
+        val real = proton_session_launch_handoff(plan, false)
+        expect(real.ok).to_equal(false)
+        expect(real.status).to_equal("blocked")
+
+    it "missing compat_prefix returns error":
+        val request = proton_session_request_new("480", "", "hl2.exe", [])
+        val plan = proton_session_plan(request, proton_fixture_non_wine_runtime_evidence())
+        val handoff = proton_session_launch_handoff(plan, false)
+        expect(handoff.ok).to_equal(false)
+        expect(handoff.error).to_equal("missing-compat-prefix")
+
+    it "pressure_vessel_exec_wine composes wine command":
+        val container = pressure_vessel_create("/tmp/rootfs", true)
+        expect(container.is_ok).to_equal(true)
+        val result = pressure_vessel_exec_wine(container.container_id, "game.exe")
+        expect(result.is_ok).to_equal(true)
+        expect(result.status).to_equal("exec-ready")
+        pressure_vessel_destroy(container.container_id)
+
+    it "pressure_vessel_exec_wine fails with empty executable":
+        val container = pressure_vessel_create("/tmp/rootfs", true)
+        val result = pressure_vessel_exec_wine(container.container_id, "")
+        expect(result.is_ok).to_equal(false)
+        expect(result.error).to_equal("missing-executable")
+        pressure_vessel_destroy(container.container_id)
+
+    it "pressure_vessel_setup_wine_prefix succeeds with valid path":
+        val container = pressure_vessel_create("/tmp/rootfs", true)
+        val result = pressure_vessel_setup_wine_prefix(container.container_id, "/tmp/wine-prefix")
+        expect(result.is_ok).to_equal(true)
+        expect(result.status).to_equal("prefix-ready")
+        pressure_vessel_destroy(container.container_id)
+
+    it "pressure_vessel_setup_wine_prefix fails with empty path":
+        val container = pressure_vessel_create("/tmp/rootfs", true)
+        val result = pressure_vessel_setup_wine_prefix(container.container_id, "")
+        expect(result.is_ok).to_equal(false)
+        expect(result.error).to_equal("missing-prefix-path")
+        pressure_vessel_destroy(container.container_id)

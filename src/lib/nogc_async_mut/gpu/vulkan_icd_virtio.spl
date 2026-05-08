@@ -1,0 +1,180 @@
+"""Virtio-gpu Venus ICD transport layer.
+
+Serializes Vulkan API calls into virtio-gpu Venus protocol messages and
+deserializes responses.  The dispatch structure is real; the transport layer
+uses modeled responses pending virtio-gpu kernel driver integration.
+
+When virtio transport is available, replace _venus_transport_send/recv
+with real virtio-gpu ring buffer I/O.
+"""
+
+# ============================================================================
+# Types
+# ============================================================================
+
+class VenusTransportConfig:
+    device_path: text
+    ring_size: i64
+    protocol_version: i64
+
+class VenusCallResult:
+    is_ok: bool
+    error: text
+    handle: i64
+    payload_size: i64
+
+class VenusMessage:
+    opcode: i64
+    handle_in: i64
+    size_in: i64
+
+# ============================================================================
+# Storage
+# ============================================================================
+
+var _venus_connected: bool = false
+var _venus_device_path: text = ""
+var _venus_ring_size: i64 = 0
+var _venus_protocol_version: i64 = 0
+var _venus_handle_ctr: i64 = 0
+
+# Venus opcodes
+var VENUS_OP_CREATE_INSTANCE: i64 = 1
+var VENUS_OP_CREATE_DEVICE: i64 = 2
+var VENUS_OP_ALLOCATE_MEMORY: i64 = 3
+var VENUS_OP_CREATE_BUFFER: i64 = 4
+var VENUS_OP_DESTROY_INSTANCE: i64 = 5
+
+# ============================================================================
+# Transport (modeled)
+# ============================================================================
+
+fn _venus_transport_send(msg: VenusMessage) -> VenusCallResult:
+    """Send a Venus protocol message over virtio-gpu.
+
+    Modeled: in a real implementation this writes to the virtio-gpu ring
+    buffer and waits for the host renderer response.
+    """
+    _venus_handle_ctr = _venus_handle_ctr + 1
+    VenusCallResult(is_ok: true, error: "", handle: _venus_handle_ctr, payload_size: 0)
+
+# ============================================================================
+# Public API
+# ============================================================================
+
+pub fn venus_icd_connect(device_path: text, ring_size: i64) -> bool:
+    """Connect to a virtio-gpu Venus device.
+
+    Args:
+        device_path: path to the virtio-gpu device (e.g. "/dev/vgpu0")
+        ring_size:   size of the virtio ring buffer
+
+    Returns:
+        true on success, false if device_path is empty.
+    """
+    if device_path == "":
+        return false
+    _venus_device_path = device_path
+    _venus_ring_size = ring_size
+    _venus_protocol_version = 1
+    _venus_connected = true
+    true
+
+pub fn venus_icd_disconnect():
+    """Disconnect from the virtio-gpu Venus device."""
+    _venus_connected = false
+    _venus_device_path = ""
+    _venus_ring_size = 0
+    _venus_handle_ctr = 0
+
+pub fn venus_icd_is_connected() -> bool:
+    """Return whether the transport is connected.
+
+    Returns:
+        true when connected, false otherwise.
+    """
+    _venus_connected
+
+pub fn venus_icd_create_instance() -> VenusCallResult:
+    """Create a Vulkan instance via Venus protocol.
+
+    Returns:
+        VenusCallResult with a new instance handle or an error.
+    """
+    if not _venus_connected:
+        return VenusCallResult(is_ok: false, error: "not-connected", handle: 0, payload_size: 0)
+    val msg = VenusMessage(opcode: VENUS_OP_CREATE_INSTANCE, handle_in: 0, size_in: 0)
+    _venus_transport_send(msg)
+
+pub fn venus_icd_create_device(instance_handle: i64) -> VenusCallResult:
+    """Create a Vulkan device on a given instance.
+
+    Args:
+        instance_handle: handle from venus_icd_create_instance
+
+    Returns:
+        VenusCallResult with a new device handle or an error.
+    """
+    if not _venus_connected:
+        return VenusCallResult(is_ok: false, error: "not-connected", handle: 0, payload_size: 0)
+    if instance_handle <= 0:
+        return VenusCallResult(is_ok: false, error: "invalid-instance", handle: 0, payload_size: 0)
+    val msg = VenusMessage(opcode: VENUS_OP_CREATE_DEVICE, handle_in: instance_handle, size_in: 0)
+    _venus_transport_send(msg)
+
+pub fn venus_icd_allocate_memory(device_handle: i64, size: i64) -> VenusCallResult:
+    """Allocate device memory via Venus protocol.
+
+    Args:
+        device_handle: handle from venus_icd_create_device
+        size:          allocation size in bytes
+
+    Returns:
+        VenusCallResult with a memory handle or an error.
+    """
+    if not _venus_connected:
+        return VenusCallResult(is_ok: false, error: "not-connected", handle: 0, payload_size: 0)
+    if device_handle <= 0:
+        return VenusCallResult(is_ok: false, error: "invalid-device", handle: 0, payload_size: 0)
+    val msg = VenusMessage(opcode: VENUS_OP_ALLOCATE_MEMORY, handle_in: device_handle, size_in: size)
+    _venus_transport_send(msg)
+
+pub fn venus_icd_create_buffer(device_handle: i64, size: i64) -> VenusCallResult:
+    """Create a buffer on a device via Venus protocol.
+
+    Args:
+        device_handle: handle from venus_icd_create_device
+        size:          buffer size in bytes
+
+    Returns:
+        VenusCallResult with a buffer handle or an error.
+    """
+    if not _venus_connected:
+        return VenusCallResult(is_ok: false, error: "not-connected", handle: 0, payload_size: 0)
+    if device_handle <= 0:
+        return VenusCallResult(is_ok: false, error: "invalid-device", handle: 0, payload_size: 0)
+    val msg = VenusMessage(opcode: VENUS_OP_CREATE_BUFFER, handle_in: device_handle, size_in: size)
+    _venus_transport_send(msg)
+
+pub fn venus_icd_destroy_instance(instance_handle: i64):
+    """Destroy a Vulkan instance via Venus protocol.
+
+    Args:
+        instance_handle: handle from venus_icd_create_instance
+    """
+    if not _venus_connected:
+        return
+    if instance_handle <= 0:
+        return
+    val msg = VenusMessage(opcode: VENUS_OP_DESTROY_INSTANCE, handle_in: instance_handle, size_in: 0)
+    _venus_transport_send(msg)
+
+pub fn venus_icd_protocol_version() -> i64:
+    """Return the Venus protocol version.
+
+    Returns:
+        Protocol version number (0 if not connected).
+    """
+    if not _venus_connected:
+        return 0
+    _venus_protocol_version

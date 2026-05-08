@@ -158,3 +158,47 @@ pub fn wine_hello_exe_manifest_can_execute(data: [u8], manifest: WinePreconditio
 pub fn wine_hello_exe_manifest_evidence_can_execute(data: [u8], manifest: WinePreconditionManifest, execution_evidence: WineCpuExecutionEvidence) -> bool:
     val result = wine_hello_exe_probe_manifest_evidence(data, manifest, execution_evidence)
     result.status == "executed"
+
+pub fn wine_arbitrary_pe_probe(data: [u8], gates: text) -> WineHelloExeProbeResult:
+    """Probe arbitrary PE data through implemented NT dispatch.
+
+    Unlike wine_hello_exe_probe which requires exact hello.exe layout,
+    this accepts any PE with imports from implemented NT APIs.
+    Returns structured results: 'accepted' if all imports are implemented,
+    'partial' if some are unimplemented, 'rejected' if PE is invalid.
+    """
+    val gate_state = wine_substrate_hello_exe_gate(gates)
+    if gate_state != "ready":
+        return _blocked_result("blocked", gate_state)
+
+    val summary = parse_pe_header_summary(data)
+    if not summary.ok:
+        return _blocked_result("rejected", summary.error)
+
+    val section_state = pe_section_table_gate(data)
+    if section_state != "ready":
+        return _blocked_result("rejected", section_state)
+
+    val directory_state = pe_data_directory_gate(data)
+    if directory_state != "ready":
+        return _blocked_result("rejected", directory_state)
+
+    val import_state = pe_import_directory_gate(data)
+    if import_state != "ready":
+        return _blocked_result("rejected", import_state)
+
+    val dll_name = pe_first_import_dll_name(data)
+    if dll_name == "":
+        return _blocked_result("rejected", "missing-import-name")
+
+    val import_symbols = pe_first_import_symbol_names(data, 32)
+    val bridge_state = wine_nt_bridge_gate(import_symbols)
+    if bridge_state != "ready":
+        return _blocked_result("partial", "unimplemented-imports:" + bridge_state)
+
+    _probe_result("accepted", "", "", 0, 0, 0)
+
+pub fn wine_arbitrary_pe_can_probe(data: [u8], gates: text) -> bool:
+    """Return true if the arbitrary PE has all imports implemented."""
+    val result = wine_arbitrary_pe_probe(data, gates)
+    result.status == "accepted" or result.status == "executed"

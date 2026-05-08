@@ -1,9 +1,15 @@
-"""SPIR-V shader cache keyed by pipeline hash (M5, REQ-9).
+"""SPIR-V shader cache with real filesystem persistence via rt_file_write_text/rt_file_read_text.
 
-Cache compiled shader bytecode keyed by a hash string.  Persistent storage
-is modeled via an in-memory parallel array in interpreter mode.  In compiled
-mode, entries would be written to /cache/shaders/<hash>.spv.
+Cache compiled shader bytecode keyed by a hash string.  Entries are stored
+both in an in-memory parallel array (fast path) and on disk under the
+configured cache directory (persistent path).  On lookup miss in memory,
+the cache falls back to the filesystem.
 """
+
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_dir_create_all(path: text) -> bool
 
 # ============================================================================
 # Types
@@ -27,6 +33,7 @@ var _sc_entries: [ShaderCacheEntry] = []
 var _sc_alive:   [bool]             = []
 var _sc_hits:    i64                = 0
 var _sc_misses:  i64                = 0
+var _sc_cache_dir: text             = "/tmp/simple_shader_cache"
 
 fn _sc_find(hash: text) -> i64:
     val n = _sc_entries.len()
@@ -38,11 +45,35 @@ fn _sc_find(hash: text) -> i64:
     -1
 
 # ============================================================================
+# Disk helpers
+# ============================================================================
+
+fn _sc_file_path(hash: text) -> text:
+    _sc_cache_dir + "/" + hash + ".spv"
+
+fn _sc_write_to_disk(hash: text, size: i64):
+    rt_dir_create_all(_sc_cache_dir)
+    val path = _sc_file_path(hash)
+    val content = "SPIRV:" + hash + ":" + size.to_text()
+    rt_file_write_text(path, content)
+
+fn _sc_read_from_disk(hash: text) -> ShaderLookupResult:
+    val path = _sc_file_path(hash)
+    if not rt_file_exists(path):
+        return ShaderLookupResult(found: false, hash: hash, size: 0)
+    val content = rt_file_read_text(path)
+    val parts = content.split(":")
+    if parts.len() < 3:
+        return ShaderLookupResult(found: false, hash: hash, size: 0)
+    val size = parts[2].to_i64()
+    ShaderLookupResult(found: true, hash: hash, size: size)
+
+# ============================================================================
 # Public API
 # ============================================================================
 
 pub fn shader_cache_store(hash: text, size: i64):
-    """Store a compiled shader entry in the cache.
+    """Store a compiled shader entry in the cache and write to disk.
 
     Args:
         hash: pipeline hash string (hex or base64)
@@ -56,9 +87,13 @@ pub fn shader_cache_store(hash: text, size: i64):
     val entry = ShaderCacheEntry(hash: hash, size: size, hits: 0)
     _sc_entries.push(entry)
     _sc_alive.push(true)
+    _sc_write_to_disk(hash, size)
 
 pub fn shader_cache_lookup(hash: text) -> ShaderLookupResult:
     """Look up a shader in the cache by hash.
+
+    Checks the in-memory cache first.  On miss, falls back to the
+    filesystem and reloads the entry into memory if found.
 
     Args:
         hash: pipeline hash string
@@ -67,12 +102,21 @@ pub fn shader_cache_lookup(hash: text) -> ShaderLookupResult:
         ShaderLookupResult with found=true and the size when present.
     """
     val row = _sc_find(hash)
-    if row == -1:
-        _sc_misses = _sc_misses + 1
-        return ShaderLookupResult(found: false, hash: hash, size: 0)
-    _sc_hits = _sc_hits + 1
-    val entry = _sc_entries[row]
-    ShaderLookupResult(found: true, hash: hash, size: entry.size)
+    if row != -1:
+        _sc_hits = _sc_hits + 1
+        val entry = _sc_entries[row]
+        return ShaderLookupResult(found: true, hash: hash, size: entry.size)
+    # Fall back to disk
+    val disk_result = _sc_read_from_disk(hash)
+    if disk_result.found:
+        # Reload into memory
+        val reloaded = ShaderCacheEntry(hash: hash, size: disk_result.size, hits: 0)
+        _sc_entries.push(reloaded)
+        _sc_alive.push(true)
+        _sc_hits = _sc_hits + 1
+        return disk_result
+    _sc_misses = _sc_misses + 1
+    ShaderLookupResult(found: false, hash: hash, size: 0)
 
 pub fn shader_cache_hit_count() -> i64:
     """Return the total number of cache hits since startup.
@@ -91,7 +135,10 @@ pub fn shader_cache_miss_count() -> i64:
     _sc_misses
 
 pub fn shader_cache_invalidate(hash: text):
-    """Remove a shader entry from the cache.
+    """Remove a shader entry from the in-memory cache.
+
+    The on-disk entry is preserved so a subsequent lookup can
+    recover it from persistent storage.
 
     Args:
         hash: pipeline hash string
@@ -114,3 +161,30 @@ pub fn shader_cache_size() -> i64:
             count = count + 1
         i = i + 1
     count
+
+pub fn shader_cache_set_directory(dir: text):
+    """Set the cache directory for persistent shader storage.
+
+    Args:
+        dir: absolute path to the cache directory
+    """
+    if dir != "":
+        _sc_cache_dir = dir
+
+pub fn shader_cache_flush():
+    """Write all live in-memory entries to disk."""
+    val n = _sc_entries.len()
+    var i: i64 = 0
+    while i < n:
+        if _sc_alive[i]:
+            val entry = _sc_entries[i]
+            _sc_write_to_disk(entry.hash, entry.size)
+        i = i + 1
+
+pub fn shader_cache_is_persistent() -> bool:
+    """Return true because real filesystem I/O is available.
+
+    Returns:
+        Always true — this build uses rt_file_write_text/rt_file_read_text.
+    """
+    true

@@ -1,9 +1,17 @@
-"""VKD3D-Proton D3D12 -> Vulkan translation stubs (M5, REQ-9).
+"""VKD3D-Proton D3D12 -> Vulkan translation layer (M5, REQ-9).
 
-Maps Direct3D 12 device creation, command list, command queue, fence, root
-signature, and descriptor heap operations to Vulkan ICD handles.
-In interpreter mode: returns structured records without a real GPU.
+Routes through vulkan_icd_sffi dispatch chain. ICD itself uses structured
+handles pending rt_dlopen for real libvulkan. The dispatch CHAIN
+(D3D12 -> vulkan_icd_sffi -> vulkan_dispatch) is real routing; the leaf
+(vulkan_icd_sffi creating actual Vulkan objects) uses structured handles.
 """
+
+use std.nogc_async_mut.gpu.vulkan_icd_sffi.{
+    vk_icd_create_instance,
+    vk_icd_create_device,
+    vk_icd_queue_submit,
+    vk_icd_destroy_device
+}
 
 # ============================================================================
 # Types
@@ -13,6 +21,9 @@ class D3d12DeviceResult:
     is_ok:         bool
     error:         text
     device_handle: i64
+    icd_instance:  i64
+    icd_device:    i64
+    icd_dispatch:  i64
 
 class D3d12CommandListResult:
     is_ok:       bool
@@ -26,14 +37,34 @@ class D3d12FenceResult:
     fence_value:   i64
 
 # ============================================================================
+# Per-device ICD state (parallel tombstone arrays)
+# ============================================================================
+
+class _D3d12DeviceState:
+    device_handle: i64
+    icd_instance:  i64
+    icd_device:    i64
+    icd_dispatch:  i64
+
+class _D3d12CmdListState:
+    list_handle:   i64
+    device_handle: i64
+
+var _d12_devices:   [_D3d12DeviceState] = []
+var _d12_dev_alive: [bool] = []
+var _d12_cmd_lists: [_D3d12CmdListState] = []
+var _d12_cl_alive:  [bool] = []
+var _d12_res_ctr:   i64 = 0
+
+# ============================================================================
 # Private helpers
 # ============================================================================
 
-fn _d12_dev_ok(dev: i64) -> D3d12DeviceResult:
-    D3d12DeviceResult(is_ok: true, error: "", device_handle: dev)
+fn _d12_dev_ok(dev: i64, inst: i64, idev: i64, idisp: i64) -> D3d12DeviceResult:
+    D3d12DeviceResult(is_ok: true, error: "", device_handle: dev, icd_instance: inst, icd_device: idev, icd_dispatch: idisp)
 
 fn _d12_dev_err(msg: text) -> D3d12DeviceResult:
-    D3d12DeviceResult(is_ok: false, error: msg, device_handle: 0)
+    D3d12DeviceResult(is_ok: false, error: msg, device_handle: 0, icd_instance: 0, icd_device: 0, icd_dispatch: 0)
 
 fn _d12_cl_ok(h: i64) -> D3d12CommandListResult:
     D3d12CommandListResult(is_ok: true, error: "", list_handle: h)
@@ -41,11 +72,21 @@ fn _d12_cl_ok(h: i64) -> D3d12CommandListResult:
 fn _d12_cl_err(msg: text) -> D3d12CommandListResult:
     D3d12CommandListResult(is_ok: false, error: msg, list_handle: 0)
 
-# ============================================================================
-# Storage
-# ============================================================================
+fn _d12_is_valid(device_handle: i64) -> bool:
+    if device_handle <= 0:
+        return false
+    val idx = device_handle - 1
+    if idx >= _d12_dev_alive.len():
+        return false
+    _d12_dev_alive[idx]
 
-var _d12_ctr: i64 = 0
+fn _d12_cl_is_valid(list_handle: i64) -> bool:
+    if list_handle <= 0:
+        return false
+    val idx = list_handle - 1
+    if idx >= _d12_cl_alive.len():
+        return false
+    _d12_cl_alive[idx]
 
 # ============================================================================
 # Public API
@@ -54,16 +95,29 @@ var _d12_ctr: i64 = 0
 pub fn vkd3d_d3d12_create_device() -> D3d12DeviceResult:
     """Create a D3D12 device backed by Vulkan via VKD3D-Proton.
 
-    In interpreter mode returns a modeled stub with a positive handle.
+    Routes through vulkan_icd_sffi dispatch chain. Creates a Vulkan instance
+    and logical device via ICD, storing ICD handles in the result for
+    validation. ICD itself uses structured handles pending rt_dlopen.
 
     Returns:
-        D3d12DeviceResult with is_ok=true and a positive device_handle.
+        D3d12DeviceResult with is_ok=true and positive handles.
     """
-    _d12_ctr = _d12_ctr + 1
-    _d12_dev_ok(_d12_ctr)
+    val inst_result = vk_icd_create_instance()
+    if inst_result.is_ok == false:
+        return _d12_dev_err("icd-instance-failed")
+    val dev_result = vk_icd_create_device(inst_result.instance_handle)
+    if dev_result.is_ok == false:
+        return _d12_dev_err("icd-device-failed")
+    val handle = _d12_devices.len() + 1
+    val state = _D3d12DeviceState(device_handle: handle, icd_instance: inst_result.instance_handle, icd_device: dev_result.device_handle, icd_dispatch: dev_result.dispatch_handle)
+    _d12_devices.push(state)
+    _d12_dev_alive.push(true)
+    _d12_dev_ok(handle, inst_result.instance_handle, dev_result.device_handle, dev_result.dispatch_handle)
 
 pub fn vkd3d_d3d12_create_command_list(device_handle: i64) -> D3d12CommandListResult:
     """Create a D3D12 direct command list.
+
+    Validates device ICD chain before creating command list.
 
     Args:
         device_handle: handle from vkd3d_d3d12_create_device
@@ -71,13 +125,18 @@ pub fn vkd3d_d3d12_create_command_list(device_handle: i64) -> D3d12CommandListRe
     Returns:
         D3d12CommandListResult with is_ok=true and a positive list_handle.
     """
-    if device_handle <= 0:
+    if _d12_is_valid(device_handle) == false:
         return _d12_cl_err("invalid-device")
-    _d12_ctr = _d12_ctr + 1
-    _d12_cl_ok(_d12_ctr)
+    val cl_handle = _d12_cmd_lists.len() + 1
+    val cl_state = _D3d12CmdListState(list_handle: cl_handle, device_handle: device_handle)
+    _d12_cmd_lists.push(cl_state)
+    _d12_cl_alive.push(true)
+    _d12_cl_ok(cl_handle)
 
 pub fn vkd3d_d3d12_execute_command_lists(device_handle: i64, list_handle: i64) -> bool:
     """Submit a command list to the D3D12 queue.
+
+    Validates command list -> device -> ICD chain before submitting.
 
     Args:
         device_handle: handle from vkd3d_d3d12_create_device
@@ -86,10 +145,16 @@ pub fn vkd3d_d3d12_execute_command_lists(device_handle: i64, list_handle: i64) -
     Returns:
         true if the submit was accepted.
     """
-    (device_handle > 0) and (list_handle > 0)
+    if _d12_is_valid(device_handle) == false:
+        return false
+    if _d12_cl_is_valid(list_handle) == false:
+        return false
+    val dev_idx = device_handle - 1
+    val dev_state = _d12_devices[dev_idx]
+    vk_icd_queue_submit(dev_state.icd_device)
 
 pub fn vkd3d_d3d12_create_fence(device_handle: i64) -> D3d12FenceResult:
-    """Create a D3D12 fence.
+    """Create a D3D12 fence with ICD reference.
 
     Args:
         device_handle: handle from vkd3d_d3d12_create_device
@@ -97,10 +162,10 @@ pub fn vkd3d_d3d12_create_fence(device_handle: i64) -> D3d12FenceResult:
     Returns:
         D3d12FenceResult with is_ok=true and fence_value=0.
     """
-    if device_handle <= 0:
+    if _d12_is_valid(device_handle) == false:
         return D3d12FenceResult(is_ok: false, error: "invalid-device", fence_handle: 0, fence_value: 0)
-    _d12_ctr = _d12_ctr + 1
-    D3d12FenceResult(is_ok: true, error: "", fence_handle: _d12_ctr, fence_value: 0)
+    _d12_res_ctr = _d12_res_ctr + 1
+    D3d12FenceResult(is_ok: true, error: "", fence_handle: _d12_res_ctr, fence_value: 0)
 
 pub fn vkd3d_d3d12_create_root_signature(device_handle: i64) -> i64:
     """Create a D3D12 root signature (maps to Vulkan pipeline layout).
@@ -111,10 +176,10 @@ pub fn vkd3d_d3d12_create_root_signature(device_handle: i64) -> i64:
     Returns:
         Positive handle, or 0 on invalid device.
     """
-    if device_handle <= 0:
+    if _d12_is_valid(device_handle) == false:
         return 0
-    _d12_ctr = _d12_ctr + 1
-    _d12_ctr
+    _d12_res_ctr = _d12_res_ctr + 1
+    _d12_res_ctr
 
 pub fn vkd3d_d3d12_create_descriptor_heap(device_handle: i64, num_descriptors: i64) -> i64:
     """Create a D3D12 descriptor heap.
@@ -126,7 +191,28 @@ pub fn vkd3d_d3d12_create_descriptor_heap(device_handle: i64, num_descriptors: i
     Returns:
         Positive heap handle, or 0 on error.
     """
-    if device_handle <= 0 or num_descriptors <= 0:
+    if _d12_is_valid(device_handle) == false:
         return 0
-    _d12_ctr = _d12_ctr + 1
-    _d12_ctr
+    if num_descriptors <= 0:
+        return 0
+    _d12_res_ctr = _d12_res_ctr + 1
+    _d12_res_ctr
+
+pub fn vkd3d_d3d12_destroy_device(device_handle: i64) -> bool:
+    """Destroy a D3D12 device and release ICD resources.
+
+    Calls vk_icd_destroy_device to release the Vulkan dispatch table.
+
+    Args:
+        device_handle: handle from vkd3d_d3d12_create_device
+
+    Returns:
+        true if the device was successfully destroyed.
+    """
+    if _d12_is_valid(device_handle) == false:
+        return false
+    val idx = device_handle - 1
+    val state = _d12_devices[idx]
+    vk_icd_destroy_device(state.icd_dispatch)
+    _d12_dev_alive[idx] = false
+    true

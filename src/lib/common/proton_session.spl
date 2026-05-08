@@ -1,4 +1,8 @@
-"""Non-Wine Proton session planning over structured runtime subsystem evidence."""
+"""Non-Wine Proton session planning over structured runtime subsystem evidence.
+
+Routes non-dry-run launches through pressure_vessel container dispatch.
+Container exec uses modeled process execution pending rt_execve runtime extern.
+"""
 
 use common.proton_runtime_subsystems.{
     ProtonNonWineRuntimeEvidence,
@@ -6,6 +10,12 @@ use common.proton_runtime_subsystems.{
     proton_non_wine_runtime_gate
 }
 use common.wine_simpleos_exec_env_gate.{wine_simpleos_exec_env_gate}
+use nogc_async_mut.container.pressure_vessel.{
+    pressure_vessel_create,
+    pressure_vessel_exec,
+    pressure_vessel_destroy,
+    pressure_vessel_namespace_profile
+}
 
 class ProtonSessionRequest:
     app_id: text
@@ -85,10 +95,20 @@ pub fn proton_session_plan(request: ProtonSessionRequest, evidence: ProtonNonWin
 pub fn proton_session_launch_handoff(plan: ProtonSessionPlan, dry_run: bool) -> ProtonLaunchHandoff:
     if not plan.ok:
         return _proton_launch_handoff(false, plan.error, plan.app_id, plan.compat_prefix, plan.launch_command, "", plan.runtime_features, "blocked")
-    if not dry_run:
-        return _proton_launch_handoff(false, "execution-not-implemented", plan.app_id, plan.compat_prefix, plan.launch_command, "", plan.runtime_features, "blocked")
     val profile = "pressure-vessel container-rootfs-nvfs namespace-pid namespace-fs namespace-ipc namespace-net namespace-capability"
-    _proton_launch_handoff(true, "", plan.app_id, plan.compat_prefix, plan.launch_command, profile, plan.runtime_features, "dry-run-ready")
+    if dry_run:
+        return _proton_launch_handoff(true, "", plan.app_id, plan.compat_prefix, plan.launch_command, profile, plan.runtime_features, "dry-run-ready")
+    # Real execution path via pressure-vessel
+    val container = pressure_vessel_create(plan.compat_prefix, true)
+    if not container.is_ok:
+        return _proton_launch_handoff(false, "container-create-failed:" + container.error, plan.app_id, plan.compat_prefix, plan.launch_command, "", plan.runtime_features, "blocked")
+    val wine_cmd = "wine64 " + plan.launch_command
+    val exec_result = pressure_vessel_exec(container.container_id, wine_cmd)
+    if not exec_result.is_ok:
+        pressure_vessel_destroy(container.container_id)
+        return _proton_launch_handoff(false, "container-exec-failed:" + exec_result.error, plan.app_id, plan.compat_prefix, plan.launch_command, "", plan.runtime_features, "blocked")
+    val ns_profile = pressure_vessel_namespace_profile(container.container_id)
+    _proton_launch_handoff(true, "", plan.app_id, plan.compat_prefix, wine_cmd, ns_profile, plan.runtime_features, "exec-dispatched")
 
 pub fn proton_session_launch_handoff_with_exec_env(plan: ProtonSessionPlan, dry_run: bool, exec_env_evidence: text) -> ProtonLaunchHandoff:
     val exec_env_state = wine_simpleos_exec_env_gate(exec_env_evidence)

@@ -1,0 +1,76 @@
+# @cover src/lib/nogc_async_mut/gpu/shader_cache.spl
+
+use std.spec
+use std.nogc_async_mut.gpu.shader_cache.{
+    shader_cache_store,
+    shader_cache_lookup,
+    shader_cache_hit_count,
+    shader_cache_miss_count,
+    shader_cache_invalidate,
+    shader_cache_size,
+    shader_cache_set_directory,
+    shader_cache_flush,
+    shader_cache_is_persistent
+}
+
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_file_read_text(path: text) -> text
+
+describe "Shader cache real I/O":
+    it "shader_cache_is_persistent returns true":
+        expect(shader_cache_is_persistent()).to_equal(true)
+
+    it "store and lookup works in memory":
+        shader_cache_store("rio_abc", 2048)
+        val result = shader_cache_lookup("rio_abc")
+        expect(result.found).to_equal(true)
+        expect(result.size).to_equal(2048)
+
+    it "store writes file to disk":
+        shader_cache_set_directory("/tmp/simple_shader_cache_test")
+        shader_cache_store("rio_disk01", 512)
+        val exists = rt_file_exists("/tmp/simple_shader_cache_test/rio_disk01.spv")
+        expect(exists).to_equal(true)
+
+    it "lookup after invalidate falls back to disk":
+        shader_cache_set_directory("/tmp/simple_shader_cache_test")
+        shader_cache_store("rio_fallback", 1024)
+        shader_cache_invalidate("rio_fallback")
+        val result = shader_cache_lookup("rio_fallback")
+        expect(result.found).to_equal(true)
+        expect(result.size).to_equal(1024)
+
+    it "set_directory changes cache path":
+        shader_cache_set_directory("/tmp/simple_shader_cache_alt")
+        shader_cache_store("rio_alt01", 256)
+        val exists = rt_file_exists("/tmp/simple_shader_cache_alt/rio_alt01.spv")
+        expect(exists).to_equal(true)
+
+    it "flush writes all entries to disk":
+        shader_cache_set_directory("/tmp/simple_shader_cache_flush")
+        shader_cache_store("rio_flush01", 100)
+        shader_cache_store("rio_flush02", 200)
+        shader_cache_flush()
+        val e1 = rt_file_exists("/tmp/simple_shader_cache_flush/rio_flush01.spv")
+        val e2 = rt_file_exists("/tmp/simple_shader_cache_flush/rio_flush02.spv")
+        expect(e1).to_equal(true)
+        expect(e2).to_equal(true)
+
+    it "hit and miss counts still work":
+        val hits_before = shader_cache_hit_count()
+        val misses_before = shader_cache_miss_count()
+        shader_cache_store("rio_hitcount", 64)
+        shader_cache_lookup("rio_hitcount")
+        shader_cache_lookup("rio_nosuch999")
+        expect(shader_cache_hit_count()).to_be_greater_than(hits_before)
+        expect(shader_cache_miss_count()).to_be_greater_than(misses_before)
+
+    it "empty hash rejected":
+        val before = shader_cache_size()
+        shader_cache_store("", 1024)
+        expect(shader_cache_size()).to_equal(before)
+
+    it "zero size rejected":
+        val before = shader_cache_size()
+        shader_cache_store("rio_zero", 0)
+        expect(shader_cache_size()).to_equal(before)

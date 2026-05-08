@@ -1,9 +1,18 @@
-"""DXVK D3D11 -> Vulkan translation stubs (M5, REQ-9).
+"""DXVK D3D11 -> Vulkan translation layer (M5, REQ-9).
 
-Maps Direct3D 11 device creation, swap chain, and render target operations to
-Vulkan ICD handles. In interpreter mode: returns structured records without a
-real GPU.
+Routes through vulkan_icd_sffi dispatch chain. ICD itself uses structured
+handles pending rt_dlopen for real libvulkan. The dispatch CHAIN
+(D3D11 -> vulkan_icd_sffi -> vulkan_dispatch) is real routing; the leaf
+(vulkan_icd_sffi creating actual Vulkan objects) uses structured handles.
 """
+
+use std.nogc_async_mut.gpu.vulkan_icd_sffi.{
+    vk_icd_create_instance,
+    vk_icd_create_device,
+    vk_icd_queue_submit,
+    vk_icd_queue_present,
+    vk_icd_destroy_device
+}
 
 # ============================================================================
 # Types
@@ -13,6 +22,9 @@ class D3d11DeviceResult:
     is_ok:         bool
     error:         text
     device_handle: i64
+    icd_instance:  i64
+    icd_device:    i64
+    icd_dispatch:  i64
 
 class D3d11SwapChainResult:
     is_ok:            bool
@@ -20,14 +32,34 @@ class D3d11SwapChainResult:
     swapchain_handle: i64
 
 # ============================================================================
+# Per-device ICD state (parallel tombstone arrays)
+# ============================================================================
+
+class _D3d11DeviceState:
+    device_handle: i64
+    icd_instance:  i64
+    icd_device:    i64
+    icd_dispatch:  i64
+
+class _D3d11SwapchainState:
+    swapchain_handle: i64
+    device_handle:    i64
+
+var _d11_devices:    [_D3d11DeviceState] = []
+var _d11_dev_alive:  [bool] = []
+var _d11_swapchains: [_D3d11SwapchainState] = []
+var _d11_sc_alive:   [bool] = []
+var _d11_res_ctr:    i64 = 0
+
+# ============================================================================
 # Private helpers
 # ============================================================================
 
-fn _d11_dev_ok(dev: i64) -> D3d11DeviceResult:
-    D3d11DeviceResult(is_ok: true, error: "", device_handle: dev)
+fn _d11_dev_ok(dev: i64, inst: i64, idev: i64, idisp: i64) -> D3d11DeviceResult:
+    D3d11DeviceResult(is_ok: true, error: "", device_handle: dev, icd_instance: inst, icd_device: idev, icd_dispatch: idisp)
 
 fn _d11_dev_err(msg: text) -> D3d11DeviceResult:
-    D3d11DeviceResult(is_ok: false, error: msg, device_handle: 0)
+    D3d11DeviceResult(is_ok: false, error: msg, device_handle: 0, icd_instance: 0, icd_device: 0, icd_dispatch: 0)
 
 fn _d11_sc_ok(sc: i64) -> D3d11SwapChainResult:
     D3d11SwapChainResult(is_ok: true, error: "", swapchain_handle: sc)
@@ -35,11 +67,21 @@ fn _d11_sc_ok(sc: i64) -> D3d11SwapChainResult:
 fn _d11_sc_err(msg: text) -> D3d11SwapChainResult:
     D3d11SwapChainResult(is_ok: false, error: msg, swapchain_handle: 0)
 
-# ============================================================================
-# Storage
-# ============================================================================
+fn _d11_is_valid(device_handle: i64) -> bool:
+    if device_handle <= 0:
+        return false
+    val idx = device_handle - 1
+    if idx >= _d11_dev_alive.len():
+        return false
+    _d11_dev_alive[idx]
 
-var _d11_ctr: i64 = 0
+fn _d11_sc_is_valid(swapchain_handle: i64) -> bool:
+    if swapchain_handle <= 0:
+        return false
+    val idx = swapchain_handle - 1
+    if idx >= _d11_sc_alive.len():
+        return false
+    _d11_sc_alive[idx]
 
 # ============================================================================
 # Public API
@@ -48,16 +90,29 @@ var _d11_ctr: i64 = 0
 pub fn dxvk_d3d11_create_device() -> D3d11DeviceResult:
     """Create a D3D11 device backed by Vulkan.
 
-    In interpreter mode returns a modeled stub with a positive handle.
+    Routes through vulkan_icd_sffi dispatch chain. Creates a Vulkan instance
+    and logical device via ICD, storing ICD handles in the result for
+    validation. ICD itself uses structured handles pending rt_dlopen.
 
     Returns:
-        D3d11DeviceResult with is_ok=true and a positive device_handle.
+        D3d11DeviceResult with is_ok=true and positive handles.
     """
-    _d11_ctr = _d11_ctr + 1
-    _d11_dev_ok(_d11_ctr)
+    val inst_result = vk_icd_create_instance()
+    if inst_result.is_ok == false:
+        return _d11_dev_err("icd-instance-failed")
+    val dev_result = vk_icd_create_device(inst_result.instance_handle)
+    if dev_result.is_ok == false:
+        return _d11_dev_err("icd-device-failed")
+    val handle = _d11_devices.len() + 1
+    val state = _D3d11DeviceState(device_handle: handle, icd_instance: inst_result.instance_handle, icd_device: dev_result.device_handle, icd_dispatch: dev_result.dispatch_handle)
+    _d11_devices.push(state)
+    _d11_dev_alive.push(true)
+    _d11_dev_ok(handle, inst_result.instance_handle, dev_result.device_handle, dev_result.dispatch_handle)
 
 pub fn dxvk_d3d11_create_swapchain(device_handle: i64, width: i64, height: i64) -> D3d11SwapChainResult:
     """Create a D3D11 swap chain for the given device.
+
+    Records swapchain with ICD device reference for present validation.
 
     Args:
         device_handle: handle from dxvk_d3d11_create_device
@@ -67,13 +122,18 @@ pub fn dxvk_d3d11_create_swapchain(device_handle: i64, width: i64, height: i64) 
     Returns:
         D3d11SwapChainResult with is_ok=true and a positive swapchain_handle.
     """
-    if device_handle <= 0:
+    if _d11_is_valid(device_handle) == false:
         return _d11_sc_err("invalid-device")
-    _d11_ctr = _d11_ctr + 1
-    _d11_sc_ok(_d11_ctr)
+    val sc_handle = _d11_swapchains.len() + 1
+    val sc_state = _D3d11SwapchainState(swapchain_handle: sc_handle, device_handle: device_handle)
+    _d11_swapchains.push(sc_state)
+    _d11_sc_alive.push(true)
+    _d11_sc_ok(sc_handle)
 
 pub fn dxvk_d3d11_present(swapchain_handle: i64) -> bool:
     """Present the current back buffer.
+
+    Validates swapchain -> device -> ICD chain before presenting.
 
     Args:
         swapchain_handle: handle from dxvk_d3d11_create_swapchain
@@ -81,7 +141,34 @@ pub fn dxvk_d3d11_present(swapchain_handle: i64) -> bool:
     Returns:
         true if present was accepted.
     """
-    swapchain_handle > 0
+    if _d11_sc_is_valid(swapchain_handle) == false:
+        return false
+    val sc_idx = swapchain_handle - 1
+    val sc_state = _d11_swapchains[sc_idx]
+    val dev_handle = sc_state.device_handle
+    if _d11_is_valid(dev_handle) == false:
+        return false
+    val dev_idx = dev_handle - 1
+    val dev_state = _d11_devices[dev_idx]
+    vk_icd_queue_present(dev_state.icd_device)
+
+pub fn dxvk_d3d11_draw(device_handle: i64, vertex_count: i64) -> bool:
+    """Submit a draw call through the Vulkan ICD pipeline.
+
+    Args:
+        device_handle: handle from dxvk_d3d11_create_device
+        vertex_count:  number of vertices to draw
+
+    Returns:
+        true if the draw was accepted.
+    """
+    if _d11_is_valid(device_handle) == false:
+        return false
+    if vertex_count <= 0:
+        return false
+    val idx = device_handle - 1
+    val state = _d11_devices[idx]
+    vk_icd_queue_submit(state.icd_device)
 
 pub fn dxvk_d3d11_create_render_target(device_handle: i64, width: i64, height: i64) -> i64:
     """Create a D3D11 render target view.
@@ -94,7 +181,26 @@ pub fn dxvk_d3d11_create_render_target(device_handle: i64, width: i64, height: i
     Returns:
         Positive render-target handle, or 0 on invalid device.
     """
-    if device_handle <= 0:
+    if _d11_is_valid(device_handle) == false:
         return 0
-    _d11_ctr = _d11_ctr + 1
-    _d11_ctr
+    _d11_res_ctr = _d11_res_ctr + 1
+    _d11_res_ctr
+
+pub fn dxvk_d3d11_destroy_device(device_handle: i64) -> bool:
+    """Destroy a D3D11 device and release ICD resources.
+
+    Calls vk_icd_destroy_device to release the Vulkan dispatch table.
+
+    Args:
+        device_handle: handle from dxvk_d3d11_create_device
+
+    Returns:
+        true if the device was successfully destroyed.
+    """
+    if _d11_is_valid(device_handle) == false:
+        return false
+    val idx = device_handle - 1
+    val state = _d11_devices[idx]
+    vk_icd_destroy_device(state.icd_dispatch)
+    _d11_dev_alive[idx] = false
+    true

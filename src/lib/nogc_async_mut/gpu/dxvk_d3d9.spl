@@ -1,9 +1,19 @@
-"""DXVK D3D9 -> Vulkan translation stubs (M5, REQ-9).
+"""DXVK D3D9 -> Vulkan translation layer (M5, REQ-9).
 
-Maps Direct3D 9 device creation, texture creation, and DrawPrimitive calls to
-Vulkan ICD handles. In interpreter mode: returns structured records so callers
-can validate the translation surface without a real GPU.
+Routes through vulkan_icd_sffi dispatch chain. ICD itself uses structured
+handles pending rt_dlopen for real libvulkan. The dispatch CHAIN
+(D3D9 -> vulkan_icd_sffi -> vulkan_dispatch) is real routing; the leaf
+(vulkan_icd_sffi creating actual Vulkan objects) uses structured handles.
 """
+
+use std.nogc_async_mut.gpu.vulkan_icd_sffi.{
+    vk_icd_create_instance,
+    vk_icd_create_device,
+    vk_icd_create_buffer,
+    vk_icd_queue_submit,
+    vk_icd_queue_present,
+    vk_icd_destroy_device
+}
 
 # ============================================================================
 # Types
@@ -13,6 +23,9 @@ class D3d9DeviceResult:
     is_ok:         bool
     error:         text
     device_handle: i64
+    icd_instance:  i64
+    icd_device:    i64
+    icd_dispatch:  i64
 
 class D3d9DrawResult:
     is_ok:         bool
@@ -20,20 +33,36 @@ class D3d9DrawResult:
     vertex_count:  i64
 
 # ============================================================================
+# Per-device ICD state (parallel tombstone arrays)
+# ============================================================================
+
+class _D3d9DeviceState:
+    device_handle: i64
+    icd_instance:  i64
+    icd_device:    i64
+    icd_dispatch:  i64
+
+var _d9_devices:   [_D3d9DeviceState] = []
+var _d9_dev_alive: [bool] = []
+var _d9_res_ctr:   i64 = 0
+
+# ============================================================================
 # Private helpers
 # ============================================================================
 
-fn _d9_ok(dev: i64) -> D3d9DeviceResult:
-    D3d9DeviceResult(is_ok: true, error: "", device_handle: dev)
+fn _d9_ok(dev: i64, inst: i64, idev: i64, idisp: i64) -> D3d9DeviceResult:
+    D3d9DeviceResult(is_ok: true, error: "", device_handle: dev, icd_instance: inst, icd_device: idev, icd_dispatch: idisp)
 
 fn _d9_err(msg: text) -> D3d9DeviceResult:
-    D3d9DeviceResult(is_ok: false, error: msg, device_handle: 0)
+    D3d9DeviceResult(is_ok: false, error: msg, device_handle: 0, icd_instance: 0, icd_device: 0, icd_dispatch: 0)
 
-# ============================================================================
-# Storage
-# ============================================================================
-
-var _d9_ctr: i64 = 0
+fn _d9_is_valid(device_handle: i64) -> bool:
+    if device_handle <= 0:
+        return false
+    val idx = device_handle - 1
+    if idx >= _d9_dev_alive.len():
+        return false
+    _d9_dev_alive[idx]
 
 # ============================================================================
 # Public API
@@ -42,18 +71,29 @@ var _d9_ctr: i64 = 0
 pub fn dxvk_d3d9_create_device() -> D3d9DeviceResult:
     """Create a D3D9 device backed by Vulkan.
 
-    In interpreter mode the Vulkan ICD is unavailable; returns a modeled
-    device stub with a positive handle so the translation surface can be
-    validated without a real GPU.
+    Routes through vulkan_icd_sffi dispatch chain. Creates a Vulkan instance
+    and logical device via ICD, storing ICD handles in the result for
+    validation. ICD itself uses structured handles pending rt_dlopen.
 
     Returns:
-        D3d9DeviceResult with is_ok=true and a positive device_handle.
+        D3d9DeviceResult with is_ok=true and positive handles.
     """
-    _d9_ctr = _d9_ctr + 1
-    _d9_ok(_d9_ctr)
+    val inst_result = vk_icd_create_instance()
+    if inst_result.is_ok == false:
+        return _d9_err("icd-instance-failed")
+    val dev_result = vk_icd_create_device(inst_result.instance_handle)
+    if dev_result.is_ok == false:
+        return _d9_err("icd-device-failed")
+    val handle = _d9_devices.len() + 1
+    val state = _D3d9DeviceState(device_handle: handle, icd_instance: inst_result.instance_handle, icd_device: dev_result.device_handle, icd_dispatch: dev_result.dispatch_handle)
+    _d9_devices.push(state)
+    _d9_dev_alive.push(true)
+    _d9_ok(handle, inst_result.instance_handle, dev_result.device_handle, dev_result.dispatch_handle)
 
 pub fn dxvk_d3d9_create_texture(device_handle: i64, width: i64, height: i64) -> i64:
     """Create a D3D9 texture object.
+
+    Validates device has ICD dispatch before creating texture.
 
     Args:
         device_handle: handle from dxvk_d3d9_create_device
@@ -63,13 +103,35 @@ pub fn dxvk_d3d9_create_texture(device_handle: i64, width: i64, height: i64) -> 
     Returns:
         Positive texture handle, or 0 on invalid device.
     """
-    if device_handle <= 0:
+    if _d9_is_valid(device_handle) == false:
         return 0
-    _d9_ctr = _d9_ctr + 1
-    _d9_ctr
+    _d9_res_ctr = _d9_res_ctr + 1
+    _d9_res_ctr
+
+pub fn dxvk_d3d9_create_vertex_buffer(device_handle: i64, size: i64) -> i64:
+    """Create a D3D9 vertex buffer via ICD buffer allocation.
+
+    Args:
+        device_handle: handle from dxvk_d3d9_create_device
+        size:          buffer size in bytes
+
+    Returns:
+        Positive buffer handle, or 0 on invalid device.
+    """
+    if _d9_is_valid(device_handle) == false:
+        return 0
+    val idx = device_handle - 1
+    val state = _d9_devices[idx]
+    val buf = vk_icd_create_buffer(state.icd_device, size)
+    if buf.is_ok == false:
+        return 0
+    _d9_res_ctr = _d9_res_ctr + 1
+    _d9_res_ctr
 
 pub fn dxvk_d3d9_draw_primitive(device_handle: i64, vertex_count: i64) -> D3d9DrawResult:
     """Submit a DrawPrimitive call through the Vulkan translation layer.
+
+    Validates device has ICD dispatch and records draw call via queue submit.
 
     Args:
         device_handle: handle from dxvk_d3d9_create_device
@@ -78,6 +140,45 @@ pub fn dxvk_d3d9_draw_primitive(device_handle: i64, vertex_count: i64) -> D3d9Dr
     Returns:
         D3d9DrawResult with is_ok=true when the call is accepted.
     """
-    if device_handle <= 0:
+    if _d9_is_valid(device_handle) == false:
         return D3d9DrawResult(is_ok: false, error: "invalid-device", vertex_count: 0)
+    val idx = device_handle - 1
+    val state = _d9_devices[idx]
+    val submitted = vk_icd_queue_submit(state.icd_device)
+    if submitted == false:
+        return D3d9DrawResult(is_ok: false, error: "queue-submit-failed", vertex_count: 0)
     D3d9DrawResult(is_ok: true, error: "", vertex_count: vertex_count)
+
+pub fn dxvk_d3d9_present(device_handle: i64) -> bool:
+    """Present the current frame (models vkQueuePresentKHR dispatch).
+
+    Args:
+        device_handle: handle from dxvk_d3d9_create_device
+
+    Returns:
+        true if present was accepted.
+    """
+    if _d9_is_valid(device_handle) == false:
+        return false
+    val idx = device_handle - 1
+    val state = _d9_devices[idx]
+    vk_icd_queue_present(state.icd_device)
+
+pub fn dxvk_d3d9_destroy_device(device_handle: i64) -> bool:
+    """Destroy a D3D9 device and release ICD resources.
+
+    Calls vk_icd_destroy_device to release the Vulkan dispatch table.
+
+    Args:
+        device_handle: handle from dxvk_d3d9_create_device
+
+    Returns:
+        true if the device was successfully destroyed.
+    """
+    if _d9_is_valid(device_handle) == false:
+        return false
+    val idx = device_handle - 1
+    val state = _d9_devices[idx]
+    vk_icd_destroy_device(state.icd_dispatch)
+    _d9_dev_alive[idx] = false
+    true
