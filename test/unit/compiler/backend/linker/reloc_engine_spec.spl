@@ -1,0 +1,231 @@
+# Relocation Engine Unit Tests
+#
+# Tests for reloc_engine.spl: byte patch helpers, arch detection,
+# x86_64/AArch64/RISC-V relocation formulas, unified dispatch, and
+# byte-patching integration.
+#
+# @cover src/compiler/70.backend/linker/reloc_engine.spl
+
+use compiler.backend.linker.reloc_engine.{
+    RelocArch, RelocTarget, RelocResult,
+    reloc_apply, reloc_apply_x86_64, reloc_apply_aarch64, reloc_apply_riscv,
+    reloc_patch_bytes, reloc_arch_from_machine,
+    patch_u32_le, patch_u64_le, read_u32_le,
+    R_X86_64_NONE, R_X86_64_64, R_X86_64_PC32, R_X86_64_PLT32,
+    R_X86_64_32, R_X86_64_32S, R_X86_64_GOTPCREL,
+    R_AARCH64_NONE, R_AARCH64_ABS64, R_AARCH64_ABS32, R_AARCH64_CALL26,
+    R_RISCV_NONE, R_RISCV_32, R_RISCV_64, R_RISCV_HI20, R_RISCV_LO12_I
+}
+
+# ============================================================================
+# Byte patch helpers
+# ============================================================================
+
+describe "reloc_engine - byte patch helpers":
+    it "patch_u32_le writes correct little-endian bytes":
+        val bytes: [i64] = [0, 0, 0, 0, 0, 0, 0, 0]
+        val result = patch_u32_le(bytes, 0, 0x12345678)
+        expect(result[0]).to_equal(0x78)
+        expect(result[1]).to_equal(0x56)
+        expect(result[2]).to_equal(0x34)
+        expect(result[3]).to_equal(0x12)
+
+    it "patch_u64_le writes correct little-endian bytes":
+        val bytes: [i64] = [0, 0, 0, 0, 0, 0, 0, 0]
+        val result = patch_u64_le(bytes, 0, 0x0102030405060708)
+        expect(result[0]).to_equal(0x08)
+        expect(result[1]).to_equal(0x07)
+        expect(result[2]).to_equal(0x06)
+        expect(result[3]).to_equal(0x05)
+        expect(result[4]).to_equal(0x04)
+        expect(result[5]).to_equal(0x03)
+        expect(result[6]).to_equal(0x02)
+        expect(result[7]).to_equal(0x01)
+
+    it "read_u32_le reads back correct little-endian value":
+        val bytes: [i64] = [0x78, 0x56, 0x34, 0x12]
+        val value = read_u32_le(bytes, 0)
+        expect(value).to_equal(0x12345678)
+
+    it "patch_u32_le then read_u32_le round-trips correctly":
+        val bytes: [i64] = [0, 0, 0, 0]
+        val written = patch_u32_le(bytes, 0, 0xDEADBEEF)
+        val read_back = read_u32_le(written, 0)
+        expect(read_back).to_equal(0xDEADBEEF)
+
+# ============================================================================
+# reloc_arch_from_machine
+# ============================================================================
+
+describe "reloc_engine - reloc_arch_from_machine":
+    it "machine 62 maps to X86_64":
+        val arch = reloc_arch_from_machine(62)
+        expect(arch == RelocArch.X86_64).to_equal(true)
+
+    it "machine 183 maps to AArch64":
+        val arch = reloc_arch_from_machine(183)
+        expect(arch == RelocArch.AArch64).to_equal(true)
+
+    it "machine 243 maps to Riscv64":
+        val arch = reloc_arch_from_machine(243)
+        expect(arch == RelocArch.Riscv64).to_equal(true)
+
+# ============================================================================
+# x86_64 relocations
+# ============================================================================
+
+describe "reloc_engine - x86_64 relocations":
+    it "R_X86_64_NONE returns success with value 0":
+        val bytes: [i64] = [0, 0, 0, 0]
+        val result = reloc_apply_x86_64(bytes, 0, R_X86_64_NONE, 0, 0, 0)
+        expect(result.success).to_equal(true)
+        expect(result.value).to_equal(0)
+
+    it "R_X86_64_64 computes S + A":
+        val bytes: [i64] = [0, 0, 0, 0, 0, 0, 0, 0]
+        val result = reloc_apply_x86_64(bytes, 0, R_X86_64_64, 0x1000, 8, 0)
+        expect(result.success).to_equal(true)
+        expect(result.value).to_equal(0x1008)
+
+    it "R_X86_64_PC32 computes S + A - P":
+        val bytes: [i64] = [0, 0, 0, 0]
+        val result = reloc_apply_x86_64(bytes, 0, R_X86_64_PC32, 0x2000, 0, 0x1000)
+        expect(result.success).to_equal(true)
+        expect(result.value).to_equal(0x1000)
+
+    it "R_X86_64_PLT32 computes S + A - P":
+        val bytes: [i64] = [0, 0, 0, 0]
+        val result = reloc_apply_x86_64(bytes, 0, R_X86_64_PLT32, 0x3000, -4, 0x1004)
+        expect(result.success).to_equal(true)
+        expect(result.value).to_equal(0x1FF8)
+
+    it "R_X86_64_32 computes S + A truncated to u32":
+        val bytes: [i64] = [0, 0, 0, 0]
+        val result = reloc_apply_x86_64(bytes, 0, R_X86_64_32, 0x400, 0, 0)
+        expect(result.success).to_equal(true)
+        expect(result.value).to_equal(0x400)
+
+    it "R_X86_64_32S computes S + A":
+        val bytes: [i64] = [0, 0, 0, 0]
+        val result = reloc_apply_x86_64(bytes, 0, R_X86_64_32S, 0x400, 0, 0)
+        expect(result.success).to_equal(true)
+        expect(result.value).to_equal(0x400)
+
+    it "unsupported x86_64 reloc type returns failure with non-empty error":
+        val bytes: [i64] = [0, 0, 0, 0]
+        val result = reloc_apply_x86_64(bytes, 0, 999, 0, 0, 0)
+        expect(result.success).to_equal(false)
+        expect(result.error.len() > 0).to_equal(true)
+
+# ============================================================================
+# AArch64 relocations
+# ============================================================================
+
+describe "reloc_engine - AArch64 relocations":
+    it "R_AARCH64_NONE returns success with value 0":
+        val bytes: [i64] = [0, 0, 0, 0]
+        val result = reloc_apply_aarch64(bytes, 0, R_AARCH64_NONE, 0, 0, 0)
+        expect(result.success).to_equal(true)
+        expect(result.value).to_equal(0)
+
+    it "R_AARCH64_ABS64 computes S + A":
+        val bytes: [i64] = [0, 0, 0, 0, 0, 0, 0, 0]
+        val result = reloc_apply_aarch64(bytes, 0, R_AARCH64_ABS64, 0x10000, 0, 0)
+        expect(result.success).to_equal(true)
+        expect(result.value).to_equal(0x10000)
+
+    it "R_AARCH64_CALL26 computes (S + A - P) >> 2 masked to 26 bits":
+        val bytes: [i64] = [0, 0, 0, 0]
+        val result = reloc_apply_aarch64(bytes, 0, R_AARCH64_CALL26, 0x2000, 0, 0x1000)
+        expect(result.success).to_equal(true)
+        expect(result.value).to_equal(0x400)
+
+    it "unsupported AArch64 reloc type returns failure with non-empty error":
+        val bytes: [i64] = [0, 0, 0, 0]
+        val result = reloc_apply_aarch64(bytes, 0, 999, 0, 0, 0)
+        expect(result.success).to_equal(false)
+        expect(result.error.len() > 0).to_equal(true)
+
+# ============================================================================
+# RISC-V relocations
+# ============================================================================
+
+describe "reloc_engine - RISC-V relocations":
+    it "R_RISCV_NONE returns success":
+        val bytes: [i64] = [0, 0, 0, 0]
+        val result = reloc_apply_riscv(bytes, 0, R_RISCV_NONE, 0, 0, 0)
+        expect(result.success).to_equal(true)
+
+    it "R_RISCV_64 computes S + A":
+        val bytes: [i64] = [0, 0, 0, 0, 0, 0, 0, 0]
+        val result = reloc_apply_riscv(bytes, 0, R_RISCV_64, 0x80000000, 0, 0)
+        expect(result.success).to_equal(true)
+        expect(result.value).to_equal(0x80000000)
+
+    it "R_RISCV_HI20 computes (S + A + 0x800) >> 12":
+        # 0x12345678 + 0x800 = 0x12345E78, >> 12 = 0x12345
+        val bytes: [i64] = [0, 0, 0, 0]
+        val result = reloc_apply_riscv(bytes, 0, R_RISCV_HI20, 0x12345678, 0, 0)
+        expect(result.success).to_equal(true)
+        expect(result.value).to_equal(0x12345)
+
+    it "R_RISCV_LO12_I computes S + A masked to 12 bits":
+        val bytes: [i64] = [0, 0, 0, 0]
+        val result = reloc_apply_riscv(bytes, 0, R_RISCV_LO12_I, 0x12345678, 0, 0)
+        expect(result.success).to_equal(true)
+        expect(result.value).to_equal(0x678)
+
+# ============================================================================
+# Unified dispatch
+# ============================================================================
+
+describe "reloc_engine - unified dispatch":
+    it "reloc_apply with X86_64 arch matches reloc_apply_x86_64":
+        val bytes: [i64] = [0, 0, 0, 0, 0, 0, 0, 0]
+        val direct = reloc_apply_x86_64(bytes, 0, R_X86_64_64, 0x1000, 8, 0)
+        val unified = reloc_apply(RelocArch.X86_64, bytes, 0, R_X86_64_64, 0x1000, 8, 0)
+        expect(unified.success).to_equal(direct.success)
+        expect(unified.value).to_equal(direct.value)
+
+    it "reloc_apply with AArch64 arch matches reloc_apply_aarch64":
+        val bytes: [i64] = [0, 0, 0, 0, 0, 0, 0, 0]
+        val direct = reloc_apply_aarch64(bytes, 0, R_AARCH64_ABS64, 0x10000, 0, 0)
+        val unified = reloc_apply(RelocArch.AArch64, bytes, 0, R_AARCH64_ABS64, 0x10000, 0, 0)
+        expect(unified.success).to_equal(direct.success)
+        expect(unified.value).to_equal(direct.value)
+
+# ============================================================================
+# Byte patching integration
+# ============================================================================
+
+describe "reloc_engine - byte patching integration":
+    it "R_X86_64_64 reloc value patched as 8 LE bytes at offset":
+        # reloc_patch_bytes internally uses .set() which requires compiled mode.
+        # Verify the same end-to-end semantics by composing reloc_apply + patch_u64_le.
+        val bytes: [i64] = [0, 0, 0, 0, 0, 0, 0, 0]
+        val result = reloc_apply(RelocArch.X86_64, bytes, 0, R_X86_64_64, 0x1000, 8, 0)
+        expect(result.success).to_equal(true)
+        expect(result.value).to_equal(0x1008)
+        val patched = patch_u64_le(bytes, 0, result.value)
+        # 0x1008 in LE: 0x08, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
+        expect(patched[0]).to_equal(0x08)
+        expect(patched[1]).to_equal(0x10)
+        expect(patched[2]).to_equal(0x00)
+        expect(patched[3]).to_equal(0x00)
+        expect(patched[4]).to_equal(0x00)
+        expect(patched[5]).to_equal(0x00)
+        expect(patched[6]).to_equal(0x00)
+        expect(patched[7]).to_equal(0x00)
+
+    it "R_X86_64_PC32 reloc value patched as 4 LE bytes at offset":
+        # Verify end-to-end via reloc_apply + patch_u32_le (avoids interpreter .set() dispatch issue).
+        val bytes: [i64] = [0, 0, 0, 0]
+        val result = reloc_apply(RelocArch.X86_64, bytes, 0, R_X86_64_PC32, 0x2000, 0, 0x1000)
+        expect(result.success).to_equal(true)
+        expect(result.value).to_equal(0x1000)
+        val patched = patch_u32_le(bytes, 0, result.value)
+        # 0x1000 in LE: 0x00, 0x10, 0x00, 0x00
+        expect(patched[0]).to_equal(0x00)
+        expect(patched[1]).to_equal(0x10)
+        expect(patched[2]).to_equal(0x00)
+        expect(patched[3]).to_equal(0x00)
