@@ -22,6 +22,7 @@ struct MiBlock:
 
 struct MiPage:
     """64 KiB unit holding blocks of one size class with three free lists."""
+    base: u64               # Virtual base address of the physical page
     block_size: usize
     capacity: usize
     used: usize
@@ -234,6 +235,7 @@ fn _page_alloc_from_free(page: MiPage) -> (MiPage, [u8]?):
         val block = page.free[0]
         val new_free = page.free[1:]
         val new_page = MiPage(
+            base: page.base,
             block_size: page.block_size,
             capacity: page.capacity,
             used: page.used + 1,
@@ -245,11 +247,30 @@ fn _page_alloc_from_free(page: MiPage) -> (MiPage, [u8]?):
         val mock_ptr: [u8] = [0u8; page.block_size]
         (new_page, Some(mock_ptr))
 
+fn _page_alloc_raw(page: MiPage) -> (MiPage, usize):
+    """Pop one block from the page's free list. Returns updated page + virtual address."""
+    if page.free.len() == 0:
+        return (page, 0)
+    val block = page.free[0]
+    val new_free = page.free[1:]
+    val new_page = MiPage(
+        base: page.base,
+        block_size: page.block_size,
+        capacity: page.capacity,
+        used: page.used + 1,
+        free: new_free,
+        local_free: page.local_free,
+        xthread_free: page.xthread_free,
+    )
+    val addr = page.base + (block.next * page.block_size) as u64
+    (new_page, addr as usize)
+
 fn _page_free_to_local(page: MiPage, _ptr: [u8]) -> MiPage:
     """Push a freed block onto local_free. ptr ignored in interpreter mode."""
     val block = MiBlock(next: 0)
     val new_local = page.local_free.push(block)
     MiPage(
+        base: page.base,
         block_size: page.block_size,
         capacity: page.capacity,
         used: page.used - 1,
@@ -258,7 +279,7 @@ fn _page_free_to_local(page: MiPage, _ptr: [u8]) -> MiPage:
         xthread_free: page.xthread_free,
     )
 
-fn _new_page(block_size: usize, capacity: usize) -> MiPage:
+fn _new_page(block_size: usize, capacity: usize, base: u64) -> MiPage:
     """Carve a new page with a full free list."""
     var free_list: [MiBlock] = []
     var idx: usize = 0
@@ -266,6 +287,7 @@ fn _new_page(block_size: usize, capacity: usize) -> MiPage:
         free_list = free_list.push(MiBlock(next: idx))
         idx = idx + 1
     MiPage(
+        base: base,
         block_size: block_size,
         capacity: capacity,
         used: 0,
@@ -284,6 +306,15 @@ fn _blocks_per_page(block_size: usize) -> usize:
         16
     else:
         8
+
+fn _raw_blocks_per_page(block_size: usize) -> usize:
+    """Blocks per 4 KiB OS page for kernel raw allocator."""
+    if block_size == 0:
+        0
+    elif block_size <= 4096:
+        4096 / block_size
+    else:
+        1
 
 # ============================================================================
 # Main allocation/free/realloc
@@ -330,7 +361,8 @@ fn mi_malloc(size: usize) -> [u8]?:
 
     # No page had free blocks — allocate a new page
     val cap = _blocks_per_page(actual_size)
-    val new_page = _new_page(actual_size, cap)
+    val base = _g_os_page_alloc(cap * actual_size) as u64
+    val new_page = _new_page(actual_size, cap, base)
     val alloc_result = _page_alloc_from_free(new_page)
     val updated_new_page = alloc_result[0]
     val ptr_opt2 = alloc_result[1]
@@ -513,22 +545,20 @@ fn _g_total_allocated_get() -> usize:
 # Raw kernel API — returns usize (virtual address); 0 = failure
 #
 # mi_malloc_raw: kernel-facing allocator that returns a VirtAddr as usize.
-#   - Small/medium (size class 0..13, ≤ 65536): allocates a bookkeeping slot
-#     from the size-class free list and returns g_os_page_alloc(actual_size).
-#     The page provider must back the memory with real physical pages.
+#   - Small/medium (class 0..13, ≤ 65536): uses MiPage bookkeeping so
+#     multiple allocs share a single 4 KiB OS page (sub-page bucketing).
 #   - Large (class 14, > 65536): calls g_os_page_alloc(size) directly.
 #   - If g_os_page_alloc returns 0 (stub mode), returns 0 (nil).
 #
-# mi_free_raw: counterpart. Decrements raw allocation counter; page reclaim
-#   is deferred to the OS page provider (not yet implemented).
+# mi_free_raw: returns the block to the owning MiPage's free list for reuse.
 # ============================================================================
 
 fn mi_malloc_raw(size: usize) -> usize:
     """Kernel-facing allocator. Returns virtual address as usize; 0 = failure.
 
-    Uses g_os_page_alloc for backing pages. Does not return [u8]? — safe to
-    cast result to VirtAddr in kernel code. Works in interpreter stub mode
-    (g_os_page_alloc returns 0 → mi_malloc_raw returns 0).
+    Small/medium allocs (≤ 65536) share 4 KiB OS pages via MiPage free-list
+    bookkeeping. Large allocs go directly to g_os_page_alloc. Works in
+    interpreter stub mode (g_os_page_alloc returns 0 → returns 0).
     """
     if size == 0:
         return 0
@@ -539,21 +569,59 @@ fn mi_malloc_raw(size: usize) -> usize:
     else:
         size
 
-    # Ensure size-class slot exists in the global heap table
+    # Large class — direct OS page alloc, no page bookkeeping
+    if class_idx >= _SIZE_CLASS_TABLE.len():
+        val addr = _g_os_page_alloc(actual_size)
+        if addr != 0:
+            _g_raw_allocated = _g_raw_allocated + actual_size
+        return addr
+
     _ensure_class_slot(class_idx)
 
-    # Delegate page backing to the OS page provider
-    val page_alloc = _g_os_page_alloc
-    val addr = page_alloc(actual_size)
-    if addr != 0:
+    # Try existing pages in this size class
+    val pages = _g_heap.pages_by_class[class_idx]
+    var page_idx: usize = 0
+    for page in pages:
+        if page.free.len() > 0:
+            val result = _page_alloc_raw(page)
+            val updated_page = result[0]
+            val addr = result[1]
+            if addr != 0:
+                var new_pages = _g_heap.pages_by_class
+                var class_pages = new_pages[class_idx]
+                class_pages[page_idx] = updated_page
+                new_pages[class_idx] = class_pages
+                _g_heap = MiHeap(size_classes: _g_heap.size_classes, pages_by_class: new_pages)
+                _g_raw_allocated = _g_raw_allocated + actual_size
+                return addr
+        page_idx = page_idx + 1
+
+    # No free blocks — allocate one 4 KiB OS page and carve it into blocks
+    val cap = _raw_blocks_per_page(actual_size)
+    val os_bytes = cap * actual_size
+    val base = _g_os_page_alloc(os_bytes)
+    if base == 0:
+        return 0
+    val new_page = _new_page(actual_size, cap, base as u64)
+    val alloc_result = _page_alloc_raw(new_page)
+    val updated_new_page = alloc_result[0]
+    val addr2 = alloc_result[1]
+
+    var new_pages2 = _g_heap.pages_by_class
+    var class_pages2 = new_pages2[class_idx]
+    class_pages2 = class_pages2.push(updated_new_page)
+    new_pages2[class_idx] = class_pages2
+    _g_heap = MiHeap(size_classes: _g_heap.size_classes, pages_by_class: new_pages2)
+
+    if addr2 != 0:
         _g_raw_allocated = _g_raw_allocated + actual_size
-    addr
+    addr2
 
 fn mi_free_raw(addr: usize, size: usize):
-    """Kernel-facing free. Decrements raw allocation counter.
+    """Kernel-facing free. Returns block to owning page's free list.
 
-    Page reclaim is handled by the OS page provider when it implements
-    a free path. Currently a no-op beyond the counter update.
+    Small/medium allocs locate the owning MiPage by address range and push the
+    block back. Large allocs only update the counter (OS page reclaim deferred).
     """
     if addr == 0:
         return
@@ -562,6 +630,36 @@ fn mi_free_raw(addr: usize, size: usize):
         _class_size(class_idx)
     else:
         size
+
+    if class_idx < _SIZE_CLASS_TABLE.len() and class_idx < _g_heap.pages_by_class.len():
+        val pages = _g_heap.pages_by_class[class_idx]
+        var page_idx: usize = 0
+        var freed: bool = false
+        for page in pages:
+            if not freed:
+                val page_end = page.base + (page.capacity * page.block_size) as u64
+                if addr as u64 >= page.base and addr as u64 < page_end:
+                    val block_index = (addr as u64 - page.base) as usize / page.block_size
+                    val block = MiBlock(next: block_index)
+                    val new_used = if page.used > 0: page.used - 1 else: 0
+                    val new_free_list = page.free.push(block)
+                    val updated_page = MiPage(
+                        base: page.base,
+                        block_size: page.block_size,
+                        capacity: page.capacity,
+                        used: new_used,
+                        free: new_free_list,
+                        local_free: page.local_free,
+                        xthread_free: page.xthread_free,
+                    )
+                    var new_pages = _g_heap.pages_by_class
+                    var class_pages = new_pages[class_idx]
+                    class_pages[page_idx] = updated_page
+                    new_pages[class_idx] = class_pages
+                    _g_heap = MiHeap(size_classes: _g_heap.size_classes, pages_by_class: new_pages)
+                    freed = true
+            page_idx = page_idx + 1
+
     if _g_raw_allocated >= actual_size:
         _g_raw_allocated = _g_raw_allocated - actual_size
 

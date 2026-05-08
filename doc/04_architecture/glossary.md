@@ -313,11 +313,11 @@ The minimum required interface for a 2D rendering backend. Contains 12 methods: 
 
 ## RenderBackendAdv (Engine2D)
 
-Optimized operations that backends SHOULD implement natively for performance but CAN omit. Contains 9 methods: `draw_rect` (outline), `draw_line`, `draw_circle`, `draw_circle_filled`, `draw_rounded_rect`, `draw_triangle_filled`, `draw_gradient_rect`, `draw_text`, `draw_text_bg`. Every method is statelessly emulatable from RenderBackendCore. GPU backends implement these as dedicated compute kernels; minimal backends skip them. Defined in `src/lib/gc_async_mut/gpu/engine2d/backend_adv.spl`.
+Optimized operations that backends SHOULD implement natively for performance but CAN omit. Contains 23 methods across 7 categories: shapes (`draw_rect`, `draw_line`, `draw_circle`, `draw_circle_filled`, `draw_rounded_rect`, `draw_triangle_filled`, `draw_ellipse`, `draw_ellipse_filled`, `draw_arc`, `draw_bezier`, `draw_polygon_filled`, `draw_polyline`), thick outlines (`draw_rect_thick`, `draw_circle_thick`, `draw_rounded_rect_outline`), gradients (`draw_gradient_rect`, `draw_gradient_rect_h`, `draw_radial_gradient`), text (`draw_text`, `draw_text_bg`), alpha blending (`draw_rect_blend`, `draw_image_blend`), and scaled image (`draw_image_scaled`). Every method is statelessly emulatable from RenderBackendCore. GPU backends implement these as dedicated compute kernels; minimal backends skip them. Defined in `src/lib/gc_async_mut/gpu/engine2d/backend_adv.spl`.
 
 ## Stateless Emulation Layer (Engine2D)
 
-A set of standalone `emu_*` functions that implement every RenderBackendAdv operation using only RenderBackendCore methods. **Stateless** means: no mutable module state, no caches, no internal buffers — each function takes the core backend + operation parameters, composes Core calls, and returns. Algorithms: Bresenham (lines), midpoint (circles), scanline fill (triangles), row-by-row lerp (gradients), bitmap font iteration (text). Defined in `src/lib/gc_async_mut/gpu/engine2d/backend_emu.spl`.
+A set of standalone `emu_*` functions that implement every RenderBackendAdv operation using only RenderBackendCore methods. **Stateless** means: no mutable module state, no caches, no internal buffers — each function takes the core backend + operation parameters, composes Core calls, and returns. Algorithms: Bresenham (lines), midpoint (circles/ellipses), scanline fill (triangles/polygons), De Casteljau (bezier), row/column lerp (gradients), distance-based lerp (radial gradient), Porter-Duff src-over (alpha blend), nearest-neighbor resample (scaled image), bitmap font iteration (text). Defined in `src/lib/gc_async_mut/gpu/engine2d/backend_emu.spl`.
 
 ## GpuFfiMode (Engine2D)
 
