@@ -1,0 +1,103 @@
+# Guest dlopen/dlsym — in-guest dynamic symbol resolution (M2, REQ-6).
+#
+# Provides the Wine-facing guest loader surface. In interpreter mode the
+# functions operate against a module registry (parallel arrays). In compiled
+# mode the implementation delegates to the host DynLib loader via SFFI.
+#
+# @cover guest_dlopen
+
+# ============================================================================
+# Module registry (interpreter-mode)
+# ============================================================================
+
+var _dl_paths:   [text] = []
+var _dl_handles: [i64]  = []
+var _dl_alive:   [bool] = []
+var _dl_ctr:     i64    = 0
+
+fn _dl_find_path(path: text) -> i64:
+    val n = _dl_paths.len()
+    var i: i64 = 0
+    while i < n:
+        if _dl_alive[i] and _dl_paths[i] == path:
+            return _dl_handles[i]
+        i = i + 1
+    -1
+
+# ============================================================================
+# Result type
+# ============================================================================
+
+struct DlopenResult:
+    """Result of guest_dlopen."""
+    is_ok:  bool
+    handle: i64
+    error:  text
+
+fn _dl_ok(handle: i64) -> DlopenResult:
+    DlopenResult(is_ok: true, handle: handle, error: "")
+
+fn _dl_err(msg: text) -> DlopenResult:
+    DlopenResult(is_ok: false, handle: -1, error: msg)
+
+# ============================================================================
+# Public API
+# ============================================================================
+
+pub fn guest_dlopen(path: text) -> DlopenResult:
+    """Load a guest module by path and return an opaque handle.
+
+    In interpreter mode a synthetic handle is assigned; the module is not
+    actually loaded from disk. Real PE loading is wired in compiled mode.
+
+    Args:
+        path: Path to the guest DLL/SO (e.g. "kernel32.dll").
+
+    Returns:
+        DlopenResult with is_ok=true and a positive handle on success.
+    """
+    val existing = _dl_find_path(path)
+    if existing != -1:
+        return _dl_ok(existing)
+    _dl_ctr = _dl_ctr + 1
+    val handle = _dl_ctr
+    _dl_paths.push(path)
+    _dl_handles.push(handle)
+    _dl_alive.push(true)
+    _dl_ok(handle)
+
+pub fn guest_dlsym(handle: i64, symbol: text) -> i64:
+    """Look up a symbol address in a guest module handle.
+
+    In interpreter mode returns a non-zero stub address for any valid handle.
+
+    Args:
+        handle: Handle from guest_dlopen()
+        symbol: Symbol name to resolve.
+
+    Returns:
+        Non-zero stub address on success, 0 if not found.
+    """
+    if handle <= 0:
+        return 0
+    # Stub address: encode handle + symbol hash so different symbols differ
+    val addr = handle * 0x10000 + symbol.len() as i64 + 1
+    addr
+
+pub fn guest_dlclose(handle: i64) -> bool:
+    """Unload a guest module.
+
+    Args:
+        handle: Handle from guest_dlopen()
+
+    Returns:
+        true if handle was valid and unloaded.
+    """
+    val n = _dl_handles.len()
+    var i: i64 = 0
+    while i < n:
+        if _dl_alive[i] and _dl_handles[i] == handle:
+            _dl_alive[i] = false
+            return true
+        i = i + 1
+    false

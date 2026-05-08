@@ -1,0 +1,159 @@
+"""WM Compositor ECS World — window lifecycle, framebuffer present, input, clipboard, cursor."""
+
+class WmWindowEntry:
+    id: u64
+    app: text
+    title: text
+    x: i32
+    y: i32
+    width: u32
+    height: u32
+    generation: u32
+    alive: bool
+
+class WmInputEvent:
+    window_id: u64
+    kind: text
+    key_code: i32
+    scan_code: i32
+    modifiers: i32
+    mouse_x: i32
+    mouse_y: i32
+    button: i32
+    pressed: bool
+
+class WmCompositor:
+    windows: [WmWindowEntry]
+    focused_id: u64
+    cursor_name: text
+    clipboard_text: text
+    input_queue: [WmInputEvent]
+    present_count: i64
+    checksum: i64
+
+class WmOpResult:
+    ok: bool
+    state: text
+    compositor: WmCompositor
+    generation: u32
+    focused_id: u64
+    checksum: i64
+    cursor_name: text
+
+class WmInputPollResult:
+    ok: bool
+    state: text
+    compositor: WmCompositor
+    event: WmInputEvent
+
+fn _empty_event() -> WmInputEvent:
+    WmInputEvent(window_id: 0, kind: "", key_code: 0, scan_code: 0, modifiers: 0, mouse_x: 0, mouse_y: 0, button: 0, pressed: false)
+
+fn _result(ok: bool, state: text, compositor: WmCompositor, generation: u32, focused_id: u64, checksum: i64, cursor_name: text) -> WmOpResult:
+    WmOpResult(ok: ok, state: state, compositor: compositor, generation: generation, focused_id: focused_id, checksum: checksum, cursor_name: cursor_name)
+
+fn _err(state: text, compositor: WmCompositor) -> WmOpResult:
+    _result(false, state, compositor, 0, 0, 0, "")
+
+fn _ok(state: text, compositor: WmCompositor, generation: u32, focused_id: u64, checksum: i64, cursor_name: text) -> WmOpResult:
+    _result(true, state, compositor, generation, focused_id, checksum, cursor_name)
+
+fn _find_window(compositor: WmCompositor, id: u64) -> WmWindowEntry:
+    for entry in compositor.windows:
+        if (entry.id == id and entry.alive):
+            return entry
+    WmWindowEntry(id: 0, app: "", title: "", x: 0, y: 0, width: 0, height: 0, generation: 0, alive: false)
+
+fn _replace_window(compositor: WmCompositor, replacement: WmWindowEntry) -> WmCompositor:
+    var windows: [WmWindowEntry] = []
+    for entry in compositor.windows:
+        if entry.id == replacement.id:
+            windows.push(replacement)
+        else:
+            windows.push(entry)
+    WmCompositor(windows: windows, focused_id: compositor.focused_id, cursor_name: compositor.cursor_name, clipboard_text: compositor.clipboard_text, input_queue: compositor.input_queue, present_count: compositor.present_count, checksum: compositor.checksum)
+
+pub fn wm_compositor_new() -> WmCompositor:
+    WmCompositor(windows: [], focused_id: 0, cursor_name: "", clipboard_text: "", input_queue: [], present_count: 0, checksum: 0)
+
+pub fn wm_compositor_window_count(compositor: WmCompositor) -> i64:
+    var count: i64 = 0
+    for entry in compositor.windows:
+        if entry.alive:
+            count = count + 1
+    count
+
+pub fn wm_compositor_window_create(compositor: WmCompositor, id: u64, app: text, title: text, width: u32, height: u32) -> WmOpResult:
+    if id == 0:
+        return _err("invalid-id", compositor)
+    val existing = _find_window(compositor, id)
+    if existing.id != 0:
+        return _err("window-exists", compositor)
+    val entry = WmWindowEntry(id: id, app: app, title: title, x: 0, y: 0, width: width, height: height, generation: 1, alive: true)
+    var windows = compositor.windows
+    windows.push(entry)
+    val c = WmCompositor(windows: windows, focused_id: compositor.focused_id, cursor_name: compositor.cursor_name, clipboard_text: compositor.clipboard_text, input_queue: compositor.input_queue, present_count: compositor.present_count, checksum: compositor.checksum)
+    _ok("created", c, 1, compositor.focused_id, compositor.checksum, compositor.cursor_name)
+
+pub fn wm_compositor_window_configure(compositor: WmCompositor, id: u64, x: i32, y: i32, width: u32, height: u32) -> WmOpResult:
+    val entry = _find_window(compositor, id)
+    if entry.id == 0:
+        return _err("missing-window", compositor)
+    val next_gen = entry.generation + (1 as u32)
+    val updated = WmWindowEntry(id: entry.id, app: entry.app, title: entry.title, x: x, y: y, width: width, height: height, generation: next_gen, alive: true)
+    val c = _replace_window(compositor, updated)
+    _ok("configured", c, next_gen, compositor.focused_id, compositor.checksum, compositor.cursor_name)
+
+pub fn wm_compositor_window_focus(compositor: WmCompositor, id: u64) -> WmOpResult:
+    val entry = _find_window(compositor, id)
+    if entry.id == 0:
+        return _err("missing-window", compositor)
+    val c = WmCompositor(windows: compositor.windows, focused_id: id, cursor_name: compositor.cursor_name, clipboard_text: compositor.clipboard_text, input_queue: compositor.input_queue, present_count: compositor.present_count, checksum: compositor.checksum)
+    _ok("focused", c, entry.generation, id, compositor.checksum, compositor.cursor_name)
+
+pub fn wm_compositor_window_present(compositor: WmCompositor, id: u64, frame_seed: i64) -> WmOpResult:
+    val entry = _find_window(compositor, id)
+    if entry.id == 0:
+        return _err("missing-window", compositor)
+    val bytes = (entry.width as i64) * (entry.height as i64) * 4
+    val checksum = compositor.checksum + frame_seed + bytes + (id as i64)
+    val c = WmCompositor(windows: compositor.windows, focused_id: compositor.focused_id, cursor_name: compositor.cursor_name, clipboard_text: compositor.clipboard_text, input_queue: compositor.input_queue, present_count: compositor.present_count + 1, checksum: checksum)
+    _ok("presented", c, entry.generation, compositor.focused_id, checksum, compositor.cursor_name)
+
+pub fn wm_compositor_set_cursor(compositor: WmCompositor, name: text) -> WmOpResult:
+    val c = WmCompositor(windows: compositor.windows, focused_id: compositor.focused_id, cursor_name: name, clipboard_text: compositor.clipboard_text, input_queue: compositor.input_queue, present_count: compositor.present_count, checksum: compositor.checksum)
+    _ok("cursor-set", c, 0, compositor.focused_id, compositor.checksum, name)
+
+pub fn wm_compositor_set_clipboard(compositor: WmCompositor, value: text) -> WmOpResult:
+    val c = WmCompositor(windows: compositor.windows, focused_id: compositor.focused_id, cursor_name: compositor.cursor_name, clipboard_text: value, input_queue: compositor.input_queue, present_count: compositor.present_count, checksum: compositor.checksum)
+    _ok("clipboard-set", c, 0, compositor.focused_id, compositor.checksum, compositor.cursor_name)
+
+pub fn wm_compositor_get_clipboard(compositor: WmCompositor) -> text:
+    compositor.clipboard_text
+
+pub fn wm_compositor_window_destroy(compositor: WmCompositor, id: u64) -> WmOpResult:
+    val entry = _find_window(compositor, id)
+    if entry.id == 0:
+        return _err("missing-window", compositor)
+    val dead = WmWindowEntry(id: entry.id, app: entry.app, title: entry.title, x: entry.x, y: entry.y, width: entry.width, height: entry.height, generation: entry.generation, alive: false)
+    val c = _replace_window(compositor, dead)
+    val focused = if compositor.focused_id == id: 0 else compositor.focused_id
+    val c2 = WmCompositor(windows: c.windows, focused_id: focused, cursor_name: c.cursor_name, clipboard_text: c.clipboard_text, input_queue: c.input_queue, present_count: c.present_count, checksum: c.checksum)
+    _ok("destroyed", c2, entry.generation, focused, compositor.checksum, compositor.cursor_name)
+
+pub fn wm_compositor_push_input(compositor: WmCompositor, event: WmInputEvent) -> WmCompositor:
+    var queue = compositor.input_queue
+    queue.push(event)
+    WmCompositor(windows: compositor.windows, focused_id: compositor.focused_id, cursor_name: compositor.cursor_name, clipboard_text: compositor.clipboard_text, input_queue: queue, present_count: compositor.present_count, checksum: compositor.checksum)
+
+pub fn wm_compositor_poll_input(compositor: WmCompositor) -> WmInputPollResult:
+    if compositor.input_queue.len() == 0:
+        return WmInputPollResult(ok: false, state: "queue-empty", compositor: compositor, event: _empty_event())
+    val event = compositor.input_queue[0]
+    var queue: [WmInputEvent] = []
+    var i = 1
+    while i < compositor.input_queue.len():
+        queue.push(compositor.input_queue[i])
+        i = i + 1
+    val c = WmCompositor(windows: compositor.windows, focused_id: compositor.focused_id, cursor_name: compositor.cursor_name, clipboard_text: compositor.clipboard_text, input_queue: queue, present_count: compositor.present_count, checksum: compositor.checksum)
+    WmInputPollResult(ok: true, state: "event", compositor: c, event: event)
