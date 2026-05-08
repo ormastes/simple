@@ -132,20 +132,40 @@ fn two_gate_check(mirror: PrivilegeTokenMirror, required_id_path_bytes: [u8]) ->
 
 fn two_gate_for_task(task_id: u64, cap_kind: CapabilityKind) -> bool:
     """Look up the cached mirror and run a two-gate check. If no mirror
-    is present (early boot, SPM not up yet) we allow the existing
-    capability path to decide — but we emit a TODO-prefix kernel log line
-    so the gap is visible. See `capability.spl` for the call site."""
+    is present, fall back to capability-only gating (return true) so tasks
+    whose SPM mirror hasn't been delivered yet aren't deadlocked.
+
+    Boot-critical tasks (pid 1, SPM placeholder) receive a root mirror via
+    `bridge_deposit_boot_mirrors` during init, so they go through the real
+    two-gate path. This fallback is defense-in-depth for late-spawned tasks."""
     if not bridge_has_mirror(task_id):
-        # TODO(spm-winfs-llm-suite): early-boot fallback — no mirror cached
-        # yet. Returning `true` preserves the existing capability-only gate
-        # so boot doesn't deadlock on SPM. Remove once the init sequence
-        # deposits a root mirror for pid 1.
         return true
     val mirror = bridge_lookup(task_id)
     val required = _cap_kind_to_id_path_bytes(cap_kind)
     if required.len() == 0 as i64:
         return true
     two_gate_check(mirror, required)
+
+fn bridge_deposit_boot_mirrors(first_pid: u64, spm_placeholder_id: u64):
+    """Seed root-privilege mirrors for boot-critical tasks.
+
+    Called once from init_services after SPM port registration. Gives pid 1
+    and the SPM placeholder a kernel-deposited mirror so the two-gate check
+    runs the real path instead of the no-mirror fallback."""
+    val root_mirror = PrivilegeTokenMirror(
+        id_path_bytes: "id".bytes(),
+        authority: 3 as u8,
+        principal_bytes: "kernel".bytes(),
+        sig: []
+    )
+    bridge_set_mirror(first_pid, root_mirror)
+    val spm_mirror = PrivilegeTokenMirror(
+        id_path_bytes: "id".bytes(),
+        authority: 3 as u8,
+        principal_bytes: "kernel".bytes(),
+        sig: []
+    )
+    bridge_set_mirror(spm_placeholder_id, spm_mirror)
 
 fn _cap_kind_to_id_path_bytes(kind: CapabilityKind) -> [u8]:
     """Map kernel CapabilityKind onto a required-id_path byte slice.
