@@ -1,0 +1,418 @@
+# ELF Full Object Parser - Pure-Simple ELF64 parser with relocations, symbols, string tables.
+#
+# Extends the read-only elf_inspect.spl inspector into a complete ELF object parser.
+# Supports symbol tables (SHT_SYMTAB), string tables (SHT_STRTAB), and RELA sections.
+# No file I/O — caller supplies the raw bytes (e.g. from file_read_bytes).
+
+use compiler.backend.linker.elf_inspect.{
+    ElfHeader, ElfSectionHeader, ElfInspector,
+    elf_parse_header, elf_parse_sections,
+    elf_read_u16_le, elf_read_u32_le, elf_read_u64_le,
+    ELF64_HEADER_SIZE, ELF64_SHDR_SIZE,
+    SHT_NULL, SHT_PROGBITS, SHT_SYMTAB, SHT_STRTAB,
+    ET_NONE, ET_REL, ET_EXEC, ET_DYN,
+    EM_X86_64, EM_AARCH64, EM_RISCV
+}
+use std.string_core.{char_from_code}
+
+# ============================================================================
+# Additional ELF Constants
+# ============================================================================
+
+# Additional sh_type values
+val SHT_RELA: i64 = 4
+val SHT_HASH: i64 = 5
+val SHT_DYNAMIC: i64 = 6
+val SHT_NOTE: i64 = 7
+val SHT_NOBITS: i64 = 8
+val SHT_REL: i64 = 9
+
+# Special section indices
+val SHN_UNDEF: i64 = 0
+
+# Symbol binding (high nibble of st_info)
+val STB_LOCAL: i64 = 0
+val STB_GLOBAL: i64 = 1
+val STB_WEAK: i64 = 2
+
+# Symbol type (low nibble of st_info)
+val STT_NOTYPE: i64 = 0
+val STT_OBJECT: i64 = 1
+val STT_FUNC: i64 = 2
+val STT_SECTION: i64 = 3
+
+# ELF64 symbol entry size
+val ELF64_SYM_SIZE: i64 = 24
+
+# ELF64 RELA entry size
+val ELF64_RELA_SIZE: i64 = 24
+
+# ============================================================================
+# Structs
+# ============================================================================
+
+struct ElfSymbol:
+    """Parsed ELF64 symbol table entry."""
+    st_name: i64       # index into string table
+    st_info: i64       # type (low 4) + binding (high 4)
+    st_other: i64
+    st_shndx: i64      # section index (SHN_UNDEF=0 means undefined)
+    st_value: i64      # symbol value/address
+    st_size: i64       # symbol size
+    name: text         # resolved name from strtab
+
+struct ElfRelocation:
+    """Parsed ELF64 RELA relocation entry."""
+    r_offset: i64      # location to apply relocation
+    r_info: i64        # symbol index + relocation type (packed)
+    r_addend: i64      # addend for RELA
+
+struct ElfStringTable:
+    """Raw string table data and file offset."""
+    data: [i64]        # raw bytes of string table section
+    offset: i64        # offset of this section in the file
+
+struct ElfObject:
+    """Complete parsed ELF object file."""
+    header: ElfHeader
+    sections: [ElfSectionHeader]
+    symbols: [ElfSymbol]
+    relocations: [ElfRelocation]
+    strtab: ElfStringTable
+    shstrtab: ElfStringTable
+    raw: [i64]         # full file bytes
+
+# ============================================================================
+# String Table Helpers
+# ============================================================================
+
+fn elf_make_empty_strtab() -> ElfStringTable:
+    """Return an empty string table sentinel."""
+    ElfStringTable(data: [], offset: 0)
+
+fn elf_parse_string_table(bytes: [i64], section: ElfSectionHeader) -> ElfStringTable:
+    """Extract string table bytes from a section.
+
+    Slices the raw section data out of the file byte array.
+    Returns an empty table if the section is out of bounds.
+    """
+    val sh_offset = section.sh_addr   # NOTE: sh_offset is at field sh_addr in ElfSectionHeader
+    val sh_size = section.sh_size
+    val end = sh_offset + sh_size
+
+    if sh_offset < 0 or end > bytes.len() or sh_size <= 0:
+        return ElfStringTable(data: [], offset: sh_offset)
+
+    var data: [i64] = []
+    var i: i64 = sh_offset
+    while i < end:
+        data = data.push(bytes[i])
+        i = i + 1
+
+    ElfStringTable(data: data, offset: sh_offset)
+
+fn elf_strtab_get(strtab: ElfStringTable, index: i64) -> text:
+    """Look up a NUL-terminated string at byte index in the string table.
+
+    Returns empty string if index is out of range or table is empty.
+    """
+    if index < 0 or index >= strtab.data.len():
+        return ""
+
+    var result: text = ""
+    var i: i64 = index
+    val len = strtab.data.len()
+    while i < len:
+        val b = strtab.data[i]
+        if b == 0:
+            return result
+        result = result + char_from_code(b)
+        i = i + 1
+
+    result
+
+# ============================================================================
+# Symbol Helpers
+# ============================================================================
+
+fn elf_symbol_binding(sym: ElfSymbol) -> i64:
+    """Extract binding from st_info: STB_LOCAL=0, STB_GLOBAL=1, STB_WEAK=2."""
+    (sym.st_info >> 4) & 0xf
+
+fn elf_symbol_type(sym: ElfSymbol) -> i64:
+    """Extract type from st_info: STT_NOTYPE=0, STT_OBJECT=1, STT_FUNC=2, STT_SECTION=3."""
+    sym.st_info & 0xf
+
+# ============================================================================
+# Relocation Helpers
+# ============================================================================
+
+fn elf_reloc_sym(reloc: ElfRelocation) -> i64:
+    """Extract symbol index from r_info (high 32 bits for ELF64)."""
+    (reloc.r_info >> 32) & 0xffffffff
+
+fn elf_reloc_type(reloc: ElfRelocation) -> i64:
+    """Extract relocation type from r_info (low 32 bits for ELF64)."""
+    reloc.r_info & 0xffffffff
+
+# ============================================================================
+# Section Lookup
+# ============================================================================
+
+fn elf_find_section_by_type(obj: ElfObject, sh_type: i64) -> ElfSectionHeader?:
+    """Return the first section with the given sh_type, or nil."""
+    for sec in obj.sections:
+        if sec.sh_type == sh_type:
+            return sec
+    nil
+
+# ============================================================================
+# Symbol Table Parser
+# ============================================================================
+
+fn elf_parse_symbols(bytes: [i64], symtab_section: ElfSectionHeader, strtab: ElfStringTable) -> [ElfSymbol]:
+    """Parse all ELF64 symbol table entries from a SHT_SYMTAB section.
+
+    ELF64 Sym entry layout (24 bytes):
+      offset 0:  st_name  (4 bytes, u32)
+      offset 4:  st_info  (1 byte)
+      offset 5:  st_other (1 byte)
+      offset 6:  st_shndx (2 bytes, u16)
+      offset 8:  st_value (8 bytes, u64)
+      offset 16: st_size  (8 bytes, u64)
+    """
+    var symbols: [ElfSymbol] = []
+
+    val sec_offset = symtab_section.sh_addr
+    val sec_size = symtab_section.sh_size
+
+    if sec_size <= 0 or sec_offset < 0:
+        return symbols
+
+    val end = sec_offset + sec_size
+    if end > bytes.len():
+        return symbols
+
+    val count = sec_size / ELF64_SYM_SIZE
+    var i: i64 = 0
+    while i < count:
+        val base = sec_offset + i * ELF64_SYM_SIZE
+
+        val st_name  = elf_read_u32_le(bytes, base + 0)
+        val st_info  = bytes[base + 4] as i64
+        val st_other = bytes[base + 5] as i64
+        val st_shndx = elf_read_u16_le(bytes, base + 6)
+        val st_value = elf_read_u64_le(bytes, base + 8)
+        val st_size  = elf_read_u64_le(bytes, base + 16)
+
+        val name = elf_strtab_get(strtab, st_name)
+
+        symbols = symbols.push(ElfSymbol(
+            st_name: st_name,
+            st_info: st_info,
+            st_other: st_other,
+            st_shndx: st_shndx,
+            st_value: st_value,
+            st_size: st_size,
+            name: name
+        ))
+        i = i + 1
+
+    symbols
+
+# ============================================================================
+# Relocation Table Parser
+# ============================================================================
+
+fn elf_parse_relocations(bytes: [i64], rela_section: ElfSectionHeader) -> [ElfRelocation]:
+    """Parse all ELF64 RELA relocation entries from a SHT_RELA section.
+
+    ELF64 Rela entry layout (24 bytes):
+      offset 0:  r_offset (8 bytes)
+      offset 8:  r_info   (8 bytes)
+      offset 16: r_addend (8 bytes, signed)
+    """
+    var relocs: [ElfRelocation] = []
+
+    val sec_offset = rela_section.sh_addr
+    val sec_size = rela_section.sh_size
+
+    if sec_size <= 0 or sec_offset < 0:
+        return relocs
+
+    val end = sec_offset + sec_size
+    if end > bytes.len():
+        return relocs
+
+    val count = sec_size / ELF64_RELA_SIZE
+    var i: i64 = 0
+    while i < count:
+        val base = sec_offset + i * ELF64_RELA_SIZE
+
+        val r_offset = elf_read_u64_le(bytes, base + 0)
+        val r_info   = elf_read_u64_le(bytes, base + 8)
+        val r_addend = elf_read_u64_le(bytes, base + 16)
+
+        relocs = relocs.push(ElfRelocation(
+            r_offset: r_offset,
+            r_info: r_info,
+            r_addend: r_addend
+        ))
+        i = i + 1
+
+    relocs
+
+# ============================================================================
+# Symbol Filter Helpers
+# ============================================================================
+
+fn elf_defined_symbols(obj: ElfObject) -> [ElfSymbol]:
+    """Return symbols where st_shndx != SHN_UNDEF (defined symbols)."""
+    var result: [ElfSymbol] = []
+    for sym in obj.symbols:
+        if sym.st_shndx != SHN_UNDEF:
+            result = result.push(sym)
+    result
+
+fn elf_undefined_symbols(obj: ElfObject) -> [ElfSymbol]:
+    """Return symbols where st_shndx == SHN_UNDEF (undefined/external references)."""
+    var result: [ElfSymbol] = []
+    for sym in obj.symbols:
+        if sym.st_shndx == SHN_UNDEF:
+            result = result.push(sym)
+    result
+
+# ============================================================================
+# ElfSectionHeader sh_offset accessor
+# ============================================================================
+#
+# NOTE: ElfSectionHeader in elf_inspect.spl stores only:
+#   sh_name, sh_type, sh_flags, sh_addr, sh_size
+# It does NOT store sh_offset (section file offset).
+# We re-parse sh_offset from raw bytes when needed.
+
+fn elf_shdr_offset(bytes: [i64], section_index: i64, shoff: i64) -> i64:
+    """Read sh_offset from raw bytes for a section by index."""
+    val base = shoff + section_index * ELF64_SHDR_SIZE
+    elf_read_u64_le(bytes, base + 24)
+
+# ============================================================================
+# Top-Level Parser
+# ============================================================================
+
+fn elf_parse_object(bytes: [i64]) -> Result<ElfObject, text>:
+    """Parse a complete ELF64 object file into an ElfObject.
+
+    Parses header, all sections, symbol table, string table, and RELA relocations.
+    Returns Err on bad magic, too-short input, or invalid structure.
+    """
+    val header = elf_parse_header(bytes)?
+
+    # Parse section headers — but ElfSectionHeader only has sh_addr not sh_offset.
+    # We need sh_offset for sections, so we build a richer picture from raw bytes.
+    val shoff = header.e_shoff
+    val shnum = header.e_shnum
+
+    if shoff < 0 or shnum < 0:
+        return Err("Invalid section header table offset or count")
+
+    val table_end = shoff + shnum * ELF64_SHDR_SIZE
+    if table_end > bytes.len():
+        return Err("Section header table extends beyond file end")
+
+    # Collect full section metadata (including sh_offset) directly from raw bytes
+    var sections: [ElfSectionHeader] = []
+    var i: i64 = 0
+    while i < shnum:
+        val base = shoff + i * ELF64_SHDR_SIZE
+
+        val sh_name  = elf_read_u32_le(bytes, base + 0)
+        val sh_type  = elf_read_u32_le(bytes, base + 4)
+        val sh_flags = elf_read_u64_le(bytes, base + 8)
+        # sh_addr at offset 16 (virtual address) — not what we need for data location
+        val sh_off   = elf_read_u64_le(bytes, base + 24)  # sh_offset: file offset
+        val sh_size  = elf_read_u64_le(bytes, base + 32)
+
+        # We store sh_off in the sh_addr field since ElfSectionHeader has no sh_offset field.
+        # All callers in elf_parser use sh_addr as the file offset for data sections.
+        sections = sections.push(ElfSectionHeader(
+            sh_name: sh_name,
+            sh_type: sh_type,
+            sh_flags: sh_flags,
+            sh_addr: sh_off,   # repurposed: file offset for elf_parser purposes
+            sh_size: sh_size
+        ))
+        i = i + 1
+
+    # Find string tables
+    val empty_strtab = elf_make_empty_strtab()
+
+    # .strtab: first SHT_STRTAB section (not shstrtab)
+    var strtab = empty_strtab
+    var shstrtab = empty_strtab
+
+    val shstrndx = header.e_shstrndx
+    if shstrndx >= 0 and shstrndx < sections.len():
+        shstrtab = elf_parse_string_table(bytes, sections[shstrndx])
+
+    # Find .strtab: SHT_STRTAB section that is not shstrtab
+    var j: i64 = 0
+    while j < sections.len():
+        if j != shstrndx and sections[j].sh_type == SHT_STRTAB:
+            strtab = elf_parse_string_table(bytes, sections[j])
+            # Use the first one found
+            j = sections.len()
+        j = j + 1
+
+    # Find and parse symbol table
+    var symbols: [ElfSymbol] = []
+    for sec in sections:
+        if sec.sh_type == SHT_SYMTAB:
+            symbols = elf_parse_symbols(bytes, sec, strtab)
+
+    # Find and parse first RELA section
+    var relocations: [ElfRelocation] = []
+    for sec in sections:
+        if sec.sh_type == SHT_RELA:
+            val rela_relocs = elf_parse_relocations(bytes, sec)
+            var k: i64 = 0
+            while k < rela_relocs.len():
+                relocations = relocations.push(rela_relocs[k])
+                k = k + 1
+
+    Ok(ElfObject(
+        header: header,
+        sections: sections,
+        symbols: symbols,
+        relocations: relocations,
+        strtab: strtab,
+        shstrtab: shstrtab,
+        raw: bytes
+    ))
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export ElfSymbol
+export ElfRelocation
+export ElfStringTable
+export ElfObject
+export elf_parse_object
+export elf_parse_symbols
+export elf_parse_relocations
+export elf_parse_string_table
+export elf_strtab_get
+export elf_symbol_binding
+export elf_symbol_type
+export elf_reloc_sym
+export elf_reloc_type
+export elf_find_section_by_type
+export elf_defined_symbols
+export elf_undefined_symbols
+export elf_make_empty_strtab
+export SHT_RELA, SHT_HASH, SHT_DYNAMIC, SHT_NOTE, SHT_NOBITS, SHT_REL
+export SHN_UNDEF
+export STB_LOCAL, STB_GLOBAL, STB_WEAK
+export STT_NOTYPE, STT_OBJECT, STT_FUNC, STT_SECTION
+export ELF64_SYM_SIZE, ELF64_RELA_SIZE
