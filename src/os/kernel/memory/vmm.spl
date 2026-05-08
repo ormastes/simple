@@ -1728,11 +1728,66 @@ fn vmm_handle_anon_fault(space: ProcessVmSpace, vaddr: u64) -> i32:
     -22  # -EINVAL — address not in any VMA
 
 fn vmm_handle_file_fault(space: ProcessVmSpace, vaddr: u64) -> i32:
-    """Demand-page handler for file-backed fault at `vaddr`.
+    """Demand-page handler for file-backed fault at `vaddr`."""
+    val page_base = _align_down(vaddr, PAGE_SIZE)
+    val area_opt = vma_find(space, vaddr)
+    if val Some(area) = area_opt:
+        if area.kind != VMM_VMA_FILE:
+            return -22
+        val cached = _file_cache_lookup(area.backing)
+        if cached.len() == 0 as i64:
+            return -2   # -ENOENT — backing not cached
+        val pa = pmm_alloc_page_raw()
+        if pa == 0:
+            return -12
+        val file_offset = area.backing_offset + (page_base - area.start)
+        val new_virt = _phys_to_virt(pa)
+        var bi: u64 = 0
+        while bi < PAGE_SIZE:
+            val src_off = file_offset + bi
+            if (src_off as i64) < cached.len():
+                mmio_write8(new_virt + bi, cached[src_off as i64])
+            else:
+                mmio_write8(new_virt + bi, 0 as u8)
+            bi = bi + 1
+        var flag_bits: u32 = 1
+        if (area.flags & 2) != 0:
+            flag_bits = flag_bits | 2
+        flag_bits = flag_bits | 4
+        if (area.flags & VMM_VMA_EXEC) == 0:
+            flag_bits = flag_bits | 32
+        val as_handle = AddressSpace(phys_root: space.pml4, id: space.id)
+        val map_flags = VmFlags(bits: flag_bits)
+        val mapped = vmm_map_page_in(as_handle, VirtAddr(addr: page_base), PhysAddr(addr: pa), map_flags)
+        if not mapped:
+            pmm_free_page_raw(pa)
+            return -12
+        return 0
+    -22
 
-    # TODO(mdsoc+): needs VFS read path (Wave 3). Returns -ENOSYS until then.
-    """
-    -38  # -ENOSYS
+var _file_cache_handles: [u64] = []
+var _file_cache_bytes: [[u8]] = []
+
+fn vmm_cache_file_backing(handle: u64, bytes: [u8]):
+    """Cache file content for a backing handle so demand faults can read it."""
+    var i = 0
+    val n = _file_cache_handles.len()
+    while i < n:
+        if _file_cache_handles[i] == handle:
+            _file_cache_bytes[i] = bytes
+            return
+        i = i + 1
+    _file_cache_handles = _file_cache_handles + [handle]
+    _file_cache_bytes = _file_cache_bytes + [bytes]
+
+fn _file_cache_lookup(handle: u64) -> [u8]:
+    var i = 0
+    val n = _file_cache_handles.len()
+    while i < n:
+        if _file_cache_handles[i] == handle:
+            return _file_cache_bytes[i]
+        i = i + 1
+    [] as [u8]
 
 # ============================================================================
 # Page-table helper: mark a virtual page read-only
