@@ -1,0 +1,111 @@
+# CRC-32 (IEEE 802.3) and CRC-32C (Castagnoli) — Pure Simple Implementation
+#
+# Two standard CRC-32 variants:
+#   crc32  — IEEE 802.3 poly 0xEDB88320 (reflected 0x04C11DB7)
+#             Used by: gzip, Ethernet, PNG, ZIP
+#   crc32c — Castagnoli poly 0x82F63B78 (reflected 0x1EDC6F41)
+#             Used by: iSCSI, Btrfs, SCTP, NVMe
+#
+# Both use:
+#   - 256-entry lookup table (table-driven, byte-at-a-time)
+#   - init  = 0xFFFFFFFF
+#   - xorout = 0xFFFFFFFF
+#   - refin = refout = true  (reflected input/output)
+#
+# Reference: ISO 3309, ITU-T V.42 (IEEE), IETF RFC 3720 (Castagnoli)
+# ============================================================================
+
+# ============================================================================
+# Table generation
+# ============================================================================
+
+fn _make_table(poly: u32) -> [u32]:
+    """Build a 256-entry CRC lookup table for the given reflected polynomial."""
+    var tbl: [u32] = []
+    var i: u32 = 0
+    while i < 256:
+        var crc: u32 = i
+        var bit: u32 = 0
+        while bit < 8:
+            if (crc & 1) == 1:
+                crc = (crc >> 1) ^ poly
+            else:
+                crc = crc >> 1
+            bit = bit + 1
+        tbl.push(crc)
+        i = i + 1
+    tbl
+
+fn _ieee_table() -> [u32]:
+    """CRC-32 IEEE 802.3 reflected polynomial table (poly=0xEDB88320)."""
+    _make_table(0xEDB88320)
+
+fn _castagnoli_table() -> [u32]:
+    """CRC-32C Castagnoli reflected polynomial table (poly=0x82F63B78)."""
+    _make_table(0x82F63B78)
+
+# ============================================================================
+# Core engine
+# ============================================================================
+
+fn _crc32_update_table(state: u32, data: [u8], tbl: [u32]) -> u32:
+    """Feed bytes into a CRC state using the given table."""
+    var crc: u32 = state
+    var i: u64 = 0
+    while i < data.len().to_u64():
+        val idx: u32 = (crc ^ data[i].to_u32()) & 0xFF
+        crc = (crc >> 8) ^ tbl[idx.to_u64()]
+        i = i + 1
+    crc
+
+# ============================================================================
+# Public API — CRC-32 IEEE 802.3 (one-shot and streaming)
+# ============================================================================
+
+fn crc32_init() -> u32:
+    """Start a CRC-32 (IEEE 802.3) streaming computation.
+    Pass the returned state to crc32_update, then crc32_finalize.
+    """
+    0xFFFFFFFF
+
+fn crc32_update(state: u32, data: [u8]) -> u32:
+    """Feed more bytes into a CRC-32 (IEEE 802.3) streaming state."""
+    _crc32_update_table(state, data, _ieee_table())
+
+fn crc32_finalize(state: u32) -> u32:
+    """Finalize a CRC-32 (IEEE 802.3) streaming state (XOR with 0xFFFFFFFF)."""
+    state ^ 0xFFFFFFFF
+
+fn crc32(data: [u8]) -> u32:
+    """Compute CRC-32 (IEEE 802.3) over the given byte slice.
+
+    Returns the standard gzip/Ethernet/PNG checksum.
+    Empty input returns 0x00000000.
+    """
+    crc32_finalize(crc32_update(crc32_init(), data))
+
+# ============================================================================
+# Public API — CRC-32C Castagnoli (one-shot and streaming)
+# ============================================================================
+
+fn crc32c_init() -> u32:
+    """Start a CRC-32C (Castagnoli) streaming computation.
+    Pass the returned state to crc32c_update, then crc32c_finalize.
+    """
+    0xFFFFFFFF
+
+fn crc32c_update(state: u32, data: [u8]) -> u32:
+    """Feed more bytes into a CRC-32C (Castagnoli) streaming state."""
+    _crc32_update_table(state, data, _castagnoli_table())
+
+fn crc32c_finalize(state: u32) -> u32:
+    """Finalize a CRC-32C (Castagnoli) streaming state (XOR with 0xFFFFFFFF)."""
+    state ^ 0xFFFFFFFF
+
+fn crc32c(data: [u8]) -> u32:
+    """Compute CRC-32C (Castagnoli) over the given byte slice.
+
+    Returns the standard iSCSI/Btrfs/SCTP checksum.
+    Empty input returns 0x00000000.
+    """
+    crc32c_finalize(crc32c_update(crc32c_init(), data))
