@@ -1,0 +1,86 @@
+# fsync — futex-based sync primitive for Wine (M2, REQ-10).
+#
+# Implements the fsync (futex-backed mutex/semaphore) model. In interpreter
+# mode uses an in-process lock table (parallel arrays). No actual kernel
+# futex syscall is made in interpreter mode.
+#
+# @cover fsync
+
+# ============================================================================
+# Storage
+# ============================================================================
+
+var _fsync_addrs:  [u32]  = []
+var _fsync_locked: [bool] = []
+var _fsync_alive:  [bool] = []
+
+fn _fsync_find(addr: u32) -> i64:
+    val n = _fsync_addrs.len()
+    var i: i64 = 0
+    while i < n:
+        if _fsync_alive[i] and _fsync_addrs[i] == addr:
+            return i
+        i = i + 1
+    -1
+
+fn _fsync_ensure(addr: u32) -> i64:
+    val row = _fsync_find(addr)
+    if row != -1:
+        return row
+    _fsync_addrs.push(addr)
+    _fsync_locked.push(false)
+    _fsync_alive.push(true)
+    val new_row = _fsync_addrs.len() as i64 - 1
+    new_row
+
+# ============================================================================
+# Public API
+# ============================================================================
+
+pub fn fsync_mutex_lock(addr: u32):
+    """Acquire a futex-backed mutex at the given address.
+
+    In interpreter mode: acquires immediately (no contention modeled).
+    Multiple lock calls without unlock will still succeed in interpreter mode.
+
+    Args:
+        addr: Shared memory address used as the futex key.
+    """
+    val row = _fsync_ensure(addr)
+    _fsync_locked[row] = true
+
+pub fn fsync_mutex_unlock(addr: u32):
+    """Release a futex-backed mutex at the given address.
+
+    Args:
+        addr: Shared memory address used as the futex key.
+    """
+    val row = _fsync_find(addr)
+    if row != -1:
+        _fsync_locked[row] = false
+
+pub fn fsync_mutex_trylock(addr: u32) -> bool:
+    """Try to acquire the mutex without blocking.
+
+    Returns:
+        true if lock acquired, false if already held.
+    """
+    val row = _fsync_ensure(addr)
+    if _fsync_locked[row]:
+        return false
+    _fsync_locked[row] = true
+    true
+
+pub fn fsync_mutex_is_locked(addr: u32) -> bool:
+    """Query lock state (for diagnostics/tests only).
+
+    Args:
+        addr: Futex address.
+
+    Returns:
+        true if currently locked.
+    """
+    val row = _fsync_find(addr)
+    if row == -1:
+        return false
+    _fsync_locked[row]
