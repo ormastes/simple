@@ -27,6 +27,7 @@ use common.string_core.{str_char_at}
 use examples.nvfs.src.posix.fs_driver_impl.{NvfsPosixDriver}
 
 use os.kernel.log.klog_api.{log_raw_println}
+use os.kernel.loader.app_registry.{app_registry_load, app_registry_load_hardcoded_fallback, app_registry_fat32_alias, app_registry_root_alias, app_registry_cached_bytes, app_registry_cache_bytes, app_registry_boot_seed_entries, app_registry_lookup}
 extern fn serial_println(msg: text)
 extern fn unsafe_addr_of(ref: any) -> u64
 extern fn syscall(id: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64) -> i64
@@ -296,6 +297,15 @@ fn vfs_boot_init() -> bool:
     # separate processes, while only storage driver code remains baremetal-aware.
     log_raw_println("[vfs-init] FAT32 executable VFS path ready")
 
+    val manifest_bytes = simpleos_fat32_read_path_array("/SYS/APPS/APPIDX.TXT")
+    if manifest_bytes.len() > 0:
+        val manifest_text = _vfs_bytes_to_text(manifest_bytes, manifest_bytes.len().to_u64())
+        app_registry_load(manifest_text)
+        log_raw_println("[vfs-init] app-registry loaded from manifest")
+    else:
+        app_registry_load_hardcoded_fallback()
+        log_raw_println("[vfs-init] app-registry loaded from hardcoded fallback")
+
     val exec_probe_path = "/SYS/APPS/BROWSMF.SMF"
     val exec_probe_size = simpleos_fat32_read_path_size(exec_probe_path)
     if exec_probe_size <= 4:
@@ -312,11 +322,27 @@ fn vfs_boot_init() -> bool:
         log_raw_println("[vfs-init] executable load probe failed path={exec_probe_path} invalid_elf")
         return false
     g_vfs_browser_demo_exec_bytes = _copy_bytes_from_addr(simpleos_fat32_path_read_buffer_addr(), exec_probe_size.to_u64())
+    app_registry_cache_bytes("/sys/apps/browser_demo", g_vfs_browser_demo_exec_bytes)
     log_raw_println("[vfs-init] executable load probe ok path=/sys/apps/browser_demo bytes={exec_probe_size}")
-    g_vfs_hello_world_exec_bytes = _seed_c_fat32_exec_bytes("hello_world", "/SYS/APPS/HELLOSMF.SMF")
-    g_vfs_clang_exec_bytes = _seed_c_fat32_exec_bytes("clang", "/SYS/APPS/CLANGSMF.SMF")
-    g_vfs_rust_exec_bytes = _seed_c_fat32_exec_bytes("rust", "/SYS/APPS/RUSTSMF.SMF")
-    g_vfs_simple_exec_bytes = _seed_c_fat32_exec_bytes("simple", "/SIMPLSTC.SMF")
+    for seed_entry in app_registry_boot_seed_entries():
+        if seed_entry.canonical_path == "/sys/apps/browser_demo":
+            continue
+        val seed_fat32 = app_registry_fat32_alias(seed_entry.canonical_path)
+        if seed_fat32 == nil:
+            continue
+        val seed_path = seed_fat32.unwrap()
+        val seed_root = app_registry_root_alias(seed_entry.canonical_path)
+        var fat32_path = seed_path
+        if seed_root != nil:
+            val root_bytes = _seed_c_fat32_exec_bytes(seed_entry.canonical_path, seed_root.unwrap())
+            if root_bytes.len() > 0:
+                app_registry_cache_bytes(seed_entry.canonical_path, root_bytes)
+                _sync_legacy_global(seed_entry.canonical_path, root_bytes)
+                continue
+        val seed_bytes = _seed_c_fat32_exec_bytes(seed_entry.canonical_path, fat32_path)
+        if seed_bytes.len() > 0:
+            app_registry_cache_bytes(seed_entry.canonical_path, seed_bytes)
+            _sync_legacy_global(seed_entry.canonical_path, seed_bytes)
 
     log_raw_println("[vfs-init] VFS ready (C-backed)")
     return true
@@ -666,90 +692,21 @@ fn g_vfs_known_app_id(path: text) -> u64:
     0
 
 fn _vfs_common_exec_disk_leaf(path: text) -> text:
-    match path:
-        case "/sys/apps/info":
-            "info"
-        case "/sys/apps/info.smf":
-            "info.smf"
-        case "/sys/apps/browser_demo":
-            "BROWSMF.SMF"
-        case "/sys/apps/browser_demo.smf":
-            "BROWSMF.SMF"
-        case "/sys/apps/file_manager":
-            "FILESMF.SMF"
-        case "/sys/apps/file_manager.smf":
-            "FILESMF.SMF"
-        case "/sys/apps/hello_world":
-            "HELLOSMF.SMF"
-        case "/sys/apps/hello_world.smf":
-            "HELLOSMF.SMF"
-        case "/sys/apps/shell":
-            "SHELLSMF.SMF"
-        case "/sys/apps/shell.smf":
-            "SHELLSMF.SMF"
-        case "/sys/apps/editor":
-            "EDITORSM.SMF"
-        case "/sys/apps/editor.smf":
-            "EDITORSM.SMF"
-        case "/sys/apps/simple_browser":
-            "SBROWSMF.SMF"
-        case "/sys/apps/simple_browser.smf":
-            "SBROWSMF.SMF"
-        case "/sys/apps/simple_compiler":
-            "SCOMPSMF.SMF"
-        case "/sys/apps/simple_compiler.smf":
-            "SCOMPSMF.SMF"
-        case "/sys/apps/simple_interpreter":
-            "SINTSMF.SMF"
-        case "/sys/apps/simple_interpreter.smf":
-            "SINTSMF.SMF"
-        case "/sys/apps/simple_loader":
-            "SLOADSMF.SMF"
-        case "/sys/apps/simple_loader.smf":
-            "SLOADSMF.SMF"
-        case "/sys/apps/llvm":
-            "LLVMSMF.SMF"
-        case "/sys/apps/llvm.smf":
-            "LLVMSMF.SMF"
-        case "/sys/apps/clang":
-            "CLANGSMF.SMF"
-        case "/sys/apps/clang.smf":
-            "CLANGSMF.SMF"
-        case "/sys/apps/rust":
-            "RUSTSMF.SMF"
-        case "/sys/apps/rust.smf":
-            "RUSTSMF.SMF"
-        case "/sys/apps/wine_hello":
-            "WINHLSMF.SMF"
-        case "/sys/apps/wine_hello.smf":
-            "WINHLSMF.SMF"
-        case _:
-            ""
+    val entry = app_registry_lookup(path)
+    if entry != nil:
+        return entry.unwrap().fat32_leaf
+    ""
 
 fn _vfs_exec_disk_alias(path: text) -> text:
-    val common_leaf = _vfs_common_exec_disk_leaf(path)
-    if common_leaf != "":
-        return "/SYS/APPS/" + common_leaf
-    match path:
-        case "/sys/apps/clang_static":
-            "/SYS/APPS/CLANGSTC.SMF"
-        case "/sys/apps/clang_static.smf":
-            "/SYS/APPS/CLANGSTC.SMF"
-        case "/sys/apps/rustc_static":
-            "/SYS/APPS/RUSTCSTC.SMF"
-        case "/sys/apps/rustc_static.smf":
-            "/SYS/APPS/RUSTCSTC.SMF"
-        case "/sys/apps/simple":
-            "/SYS/APPS/SIMPLSTC.SMF"
-        case "/sys/apps/simple.smf":
-            "/SYS/APPS/SIMPLSTC.SMF"
-        case _:
-            path
+    val fat32 = app_registry_fat32_alias(path)
+    if fat32 != nil:
+        return fat32.unwrap()
+    path
 
 fn _vfs_exec_root_disk_alias(path: text) -> text:
-    val common_leaf = _vfs_common_exec_disk_leaf(path)
-    if common_leaf != "":
-        return "/" + common_leaf
+    val root = app_registry_root_alias(path)
+    if root != nil:
+        return root.unwrap()
     path
 
 fn _known_app_has_elf_magic(buf_addr: u64) -> bool:
@@ -793,120 +750,55 @@ fn _seed_c_fat32_exec_bytes(label: text, path: text) -> [u8]:
         serial_println("[vfs-fix] {label} probe skipped path={path}")
     bytes
 
-fn _cached_known_exec_bytes(path: text) -> [u8]:
-    val app_id = g_vfs_known_app_id(path)
-    if app_id == 1:
-        return g_vfs_browser_demo_exec_bytes
-    if app_id == 2:
-        return g_vfs_file_manager_exec_bytes
-    if app_id == 3:
-        return g_vfs_hello_world_exec_bytes
-    if app_id == 4:
-        return g_vfs_shell_exec_bytes
-    if app_id == 5:
-        return g_vfs_editor_exec_bytes
-    if app_id == 6:
-        return g_vfs_clang_static_exec_bytes
-    if app_id == 7:
-        return g_vfs_rustc_static_exec_bytes
-    if app_id == 8:
-        return g_vfs_simple_exec_bytes
-    []
+fn _sync_legacy_global(canonical_path: text, bytes: [u8]):
+    if canonical_path == "/sys/apps/browser_demo":
+        g_vfs_browser_demo_exec_bytes = bytes
+    if canonical_path == "/sys/apps/hello_world":
+        g_vfs_hello_world_exec_bytes = bytes
+    if canonical_path == "/sys/apps/file_manager":
+        g_vfs_file_manager_exec_bytes = bytes
+    if canonical_path == "/sys/apps/shell":
+        g_vfs_shell_exec_bytes = bytes
+    if canonical_path == "/sys/apps/editor":
+        g_vfs_editor_exec_bytes = bytes
+    if canonical_path == "/sys/apps/info":
+        g_vfs_info_exec_bytes = bytes
+    if canonical_path == "/sys/apps/simple_browser":
+        g_vfs_simple_browser_exec_bytes = bytes
+    if canonical_path == "/sys/apps/simple_compiler":
+        g_vfs_simple_compiler_exec_bytes = bytes
+    if canonical_path == "/sys/apps/simple_interpreter":
+        g_vfs_simple_interpreter_exec_bytes = bytes
+    if canonical_path == "/sys/apps/simple_loader":
+        g_vfs_simple_loader_exec_bytes = bytes
+    if canonical_path == "/sys/apps/llvm":
+        g_vfs_llvm_exec_bytes = bytes
+    if canonical_path == "/sys/apps/clang":
+        g_vfs_clang_exec_bytes = bytes
+    if canonical_path == "/sys/apps/rust":
+        g_vfs_rust_exec_bytes = bytes
+    if canonical_path == "/sys/apps/wine_hello":
+        g_vfs_wine_hello_exec_bytes = bytes
+    if canonical_path == "/sys/apps/clang_static":
+        g_vfs_clang_static_exec_bytes = bytes
+    if canonical_path == "/sys/apps/rustc_static":
+        g_vfs_rustc_static_exec_bytes = bytes
+    if canonical_path == "/sys/apps/simple":
+        g_vfs_simple_exec_bytes = bytes
 
-fn _vfs_lazy_exec_id(path: text) -> i32:
-    if path == "/sys/apps/info" or path == "/sys/apps/info.smf" or path == "/SYS/APPS/info" or path == "/SYS/APPS/info.smf" or path == "/info" or path == "/info.smf":
-        return 1
-    if path == "/sys/apps/simple_browser" or path == "/sys/apps/simple_browser.smf" or path == "/SYS/APPS/simple_browser" or path == "/SYS/APPS/simple_browser.smf" or path == "/SYS/APPS/SBROWSMF.SMF" or path == "/SBROWSMF.SMF":
-        return 2
-    if path == "/sys/apps/simple_compiler" or path == "/sys/apps/simple_compiler.smf" or path == "/SYS/APPS/simple_compiler" or path == "/SYS/APPS/simple_compiler.smf" or path == "/SYS/APPS/SCOMPSMF.SMF" or path == "/SCOMPSMF.SMF":
-        return 3
-    if path == "/sys/apps/simple_interpreter" or path == "/sys/apps/simple_interpreter.smf" or path == "/SYS/APPS/simple_interpreter" or path == "/SYS/APPS/simple_interpreter.smf" or path == "/SYS/APPS/SINTSMF.SMF" or path == "/SINTSMF.SMF":
-        return 4
-    if path == "/sys/apps/simple_loader" or path == "/sys/apps/simple_loader.smf" or path == "/SYS/APPS/simple_loader" or path == "/SYS/APPS/simple_loader.smf" or path == "/SYS/APPS/SLOADSMF.SMF" or path == "/SLOADSMF.SMF":
-        return 5
-    if path == "/sys/apps/llvm" or path == "/sys/apps/llvm.smf" or path == "/SYS/APPS/llvm" or path == "/SYS/APPS/llvm.smf" or path == "/SYS/APPS/LLVMSMF.SMF" or path == "/LLVMSMF.SMF":
-        return 6
-    if path == "/sys/apps/clang" or path == "/sys/apps/clang.smf" or path == "/SYS/APPS/clang" or path == "/SYS/APPS/clang.smf" or path == "/SYS/APPS/CLANGSMF.SMF" or path == "/CLANGSMF.SMF":
-        return 7
-    if path == "/sys/apps/rust" or path == "/sys/apps/rust.smf" or path == "/SYS/APPS/rust" or path == "/SYS/APPS/rust.smf" or path == "/SYS/APPS/RUSTSMF.SMF" or path == "/RUSTSMF.SMF":
-        return 8
-    if path == "/sys/apps/wine_hello" or path == "/sys/apps/wine_hello.smf" or path == "/SYS/APPS/wine_hello" or path == "/SYS/APPS/wine_hello.smf" or path == "/SYS/APPS/WINHLSMF.SMF" or path == "/WINHLSMF.SMF":
-        return 9
-    0
+fn _cached_known_exec_bytes(path: text) -> [u8]:
+    app_registry_cached_bytes(path)
 
 fn _cached_lazy_exec_bytes(path: text) -> [u8]:
-    match _vfs_lazy_exec_id(path):
-        case 1:
-            return g_vfs_info_exec_bytes
-        case 2:
-            return g_vfs_simple_browser_exec_bytes
-        case 3:
-            return g_vfs_simple_compiler_exec_bytes
-        case 4:
-            return g_vfs_simple_interpreter_exec_bytes
-        case 5:
-            return g_vfs_simple_loader_exec_bytes
-        case 6:
-            return g_vfs_llvm_exec_bytes
-        case 7:
-            return g_vfs_clang_exec_bytes
-        case 8:
-            return g_vfs_rust_exec_bytes
-        case 9:
-            return g_vfs_wine_hello_exec_bytes
-        case _:
-            []
+    app_registry_cached_bytes(path)
 
 fn _cache_lazy_exec_bytes(path: text, bytes: [u8]) -> [u8]:
-    match _vfs_lazy_exec_id(path):
-        case 1:
-            g_vfs_info_exec_bytes = bytes
-            return g_vfs_info_exec_bytes
-        case 2:
-            g_vfs_simple_browser_exec_bytes = bytes
-            return g_vfs_simple_browser_exec_bytes
-        case 3:
-            g_vfs_simple_compiler_exec_bytes = bytes
-            return g_vfs_simple_compiler_exec_bytes
-        case 4:
-            g_vfs_simple_interpreter_exec_bytes = bytes
-            return g_vfs_simple_interpreter_exec_bytes
-        case 5:
-            g_vfs_simple_loader_exec_bytes = bytes
-            return g_vfs_simple_loader_exec_bytes
-        case 6:
-            g_vfs_llvm_exec_bytes = bytes
-            return g_vfs_llvm_exec_bytes
-        case 7:
-            g_vfs_clang_exec_bytes = bytes
-            return g_vfs_clang_exec_bytes
-        case 8:
-            g_vfs_rust_exec_bytes = bytes
-            return g_vfs_rust_exec_bytes
-        case 9:
-            g_vfs_wine_hello_exec_bytes = bytes
-            return g_vfs_wine_hello_exec_bytes
-        case _:
-            bytes
-
-fn _seeded_exec_leaf_for_path(path: text) -> text:
-    val common_leaf = _vfs_common_exec_disk_leaf(path)
-    if common_leaf != "":
-        return common_leaf
-    if path == "/SYS/APPS/BROWSMF.SMF":
-        return "BROWSMF.SMF"
-    if path == "/SYS/APPS/HELLOSMF.SMF":
-        return "HELLOSMF.SMF"
-    ""
+    app_registry_cache_bytes(path, bytes)
+    _sync_legacy_global(path, bytes)
+    bytes
 
 fn _seeded_exec_bytes_for_logical_path(path: text) -> [u8]:
-    match _seeded_exec_leaf_for_path(path):
-        case "BROWSMF.SMF":
-            return g_vfs_browser_demo_exec_bytes
-        case "HELLOSMF.SMF":
-            return g_vfs_hello_world_exec_bytes
-        case _:
-            _cached_lazy_exec_bytes(path)
+    app_registry_cached_bytes(path)
 
 fn g_vfs_read_known_app_bytes(path: text) -> [u8]:
     val app_id = g_vfs_known_app_id(path)

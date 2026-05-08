@@ -1,0 +1,203 @@
+use os.kernel.loader.app_registry.{
+    app_registry_load,
+    app_registry_register,
+    app_registry_entries,
+    app_registry_is_loaded,
+    app_registry_lookup,
+    app_registry_lookup_by_fat32,
+    app_registry_fat32_alias,
+    app_registry_root_alias,
+    app_registry_canonical_from_bytes,
+    app_registry_cache_bytes,
+    app_registry_cached_bytes,
+    app_registry_boot_seed_entries,
+    app_registry_clear,
+    app_registry_load_hardcoded_fallback
+}
+
+extern fn rt_text_to_bytes(s: text) -> [u8]
+
+fn _unwrap_text(opt: text?) -> text:
+    opt.unwrap()
+
+fn _test_manifest() -> text:
+    "# app registry manifest\n" +
+    "/sys/apps/clang|CLANGSMF.SMF|true\n" +
+    "/sys/apps/rust|RUSTSMF.SMF|true\n" +
+    "/sys/apps/hello_world|HELLOSMF.SMF|false\n" +
+    "/sys/apps/llvm|LLVMSMF.SMF|false\n"
+
+describe "app registry manifest parser":
+    it "parses a well-formed manifest":
+        app_registry_clear()
+        app_registry_load(_test_manifest())
+        expect(app_registry_is_loaded()).to_equal(true)
+        expect(app_registry_entries().len()).to_equal(4)
+
+    it "skips comments and blank lines":
+        app_registry_clear()
+        app_registry_load("# comment\n\n/sys/apps/a|A.SMF|false\n# another\n")
+        expect(app_registry_entries().len()).to_equal(1)
+
+    it "skips malformed lines":
+        app_registry_clear()
+        app_registry_load("bad line\n/sys/apps/a|A.SMF|false\nincomplete|only\n")
+        expect(app_registry_entries().len()).to_equal(1)
+
+describe "app registry lookup":
+    it "looks up by canonical path":
+        app_registry_clear()
+        app_registry_load(_test_manifest())
+        val entry = app_registry_lookup("/sys/apps/clang")
+        expect(entry != nil).to_equal(true)
+        val e = entry.unwrap()
+        expect(e.fat32_leaf).to_equal("CLANGSMF.SMF")
+        expect(e.boot_seed).to_equal(true)
+
+    it "resolves .smf suffix variants":
+        app_registry_clear()
+        app_registry_load(_test_manifest())
+        val entry = app_registry_lookup("/sys/apps/clang.smf")
+        expect(entry != nil).to_equal(true)
+        val e = entry.unwrap()
+        expect(e.canonical_path).to_equal("/sys/apps/clang")
+
+    it "returns nil for unknown paths":
+        app_registry_clear()
+        app_registry_load(_test_manifest())
+        expect(app_registry_lookup("/sys/apps/unknown")).to_equal(nil)
+
+    it "looks up by FAT32 leaf":
+        app_registry_clear()
+        app_registry_load(_test_manifest())
+        val entry = app_registry_lookup_by_fat32("CLANGSMF.SMF")
+        expect(entry != nil).to_equal(true)
+        val e = entry.unwrap()
+        expect(e.canonical_path).to_equal("/sys/apps/clang")
+
+describe "app registry aliases":
+    it "returns FAT32 alias path":
+        app_registry_clear()
+        app_registry_load(_test_manifest())
+        val fat32_path = app_registry_fat32_alias("/sys/apps/clang")
+        expect(fat32_path != nil).to_equal(true)
+        expect(_unwrap_text(fat32_path)).to_equal("/SYS/APPS/CLANGSMF.SMF")
+
+    it "returns root alias path":
+        app_registry_clear()
+        app_registry_load(_test_manifest())
+        val root_path = app_registry_root_alias("/sys/apps/rust")
+        expect(root_path != nil).to_equal(true)
+        expect(_unwrap_text(root_path)).to_equal("/RUSTSMF.SMF")
+
+    it "returns nil for unknown path alias":
+        app_registry_clear()
+        app_registry_load(_test_manifest())
+        expect(app_registry_fat32_alias("/sys/apps/unknown")).to_equal(nil)
+        expect(app_registry_root_alias("/sys/apps/unknown")).to_equal(nil)
+
+describe "app registry canonicalization":
+    it "canonicalizes registered path bytes":
+        app_registry_clear()
+        app_registry_load(_test_manifest())
+        val bytes = rt_text_to_bytes("/sys/apps/clang")
+        val canonical = app_registry_canonical_from_bytes(bytes)
+        expect(canonical != nil).to_equal(true)
+        expect(_unwrap_text(canonical)).to_equal("/sys/apps/clang")
+
+    it "canonicalizes unregistered /sys/apps/ path bytes":
+        app_registry_clear()
+        app_registry_load(_test_manifest())
+        val bytes = rt_text_to_bytes("/sys/apps/new_tool")
+        val canonical = app_registry_canonical_from_bytes(bytes)
+        expect(canonical != nil).to_equal(true)
+        expect(_unwrap_text(canonical)).to_equal("/sys/apps/new_tool")
+
+    it "returns nil for non-app paths":
+        app_registry_clear()
+        app_registry_load(_test_manifest())
+        val bytes = rt_text_to_bytes("/etc/config")
+        expect(app_registry_canonical_from_bytes(bytes)).to_equal(nil)
+
+describe "app registry cache":
+    it "round-trips cached bytes":
+        app_registry_clear()
+        app_registry_load(_test_manifest())
+        val data: [u8] = [0x7F, 0x45, 0x4C, 0x46]
+        app_registry_cache_bytes("/sys/apps/clang", data)
+        val cached = app_registry_cached_bytes("/sys/apps/clang")
+        expect(cached.len()).to_equal(4)
+        expect(cached[0]).to_equal(0x7F)
+
+    it "returns empty for uncached paths":
+        app_registry_clear()
+        app_registry_load(_test_manifest())
+        expect(app_registry_cached_bytes("/sys/apps/clang").len()).to_equal(0)
+
+    it "auto-registers unregistered path on cache":
+        app_registry_clear()
+        app_registry_load(_test_manifest())
+        val data: [u8] = [0x01, 0x02]
+        app_registry_cache_bytes("/sys/apps/new_tool", data)
+        val entry = app_registry_lookup("/sys/apps/new_tool")
+        expect(entry != nil).to_equal(true)
+        expect(app_registry_cached_bytes("/sys/apps/new_tool").len()).to_equal(2)
+
+describe "app registry boot seed":
+    it "filters boot seed entries":
+        app_registry_clear()
+        app_registry_load(_test_manifest())
+        val seeds = app_registry_boot_seed_entries()
+        expect(seeds.len()).to_equal(2)
+        expect(seeds[0].canonical_path).to_equal("/sys/apps/clang")
+        expect(seeds[1].canonical_path).to_equal("/sys/apps/rust")
+
+describe "app registry dynamic registration":
+    it "registers a new entry":
+        app_registry_clear()
+        app_registry_register("/sys/apps/game", "GAMESMF.SMF", false)
+        expect(app_registry_entries().len()).to_equal(1)
+        val fat32_path = app_registry_fat32_alias("/sys/apps/game")
+        expect(fat32_path != nil).to_equal(true)
+        expect(_unwrap_text(fat32_path)).to_equal("/SYS/APPS/GAMESMF.SMF")
+
+    it "updates existing entry on re-register":
+        app_registry_clear()
+        app_registry_register("/sys/apps/game", "GAMESMF.SMF", false)
+        app_registry_register("/sys/apps/game", "GAME2.SMF", true)
+        expect(app_registry_entries().len()).to_equal(1)
+        val entry = app_registry_lookup("/sys/apps/game")
+        val e = entry.unwrap()
+        expect(e.fat32_leaf).to_equal("GAME2.SMF")
+        expect(e.boot_seed).to_equal(true)
+
+describe "app registry hardcoded fallback":
+    it "populates all 18 standard entries":
+        app_registry_clear()
+        app_registry_load_hardcoded_fallback()
+        expect(app_registry_is_loaded()).to_equal(true)
+        expect(app_registry_entries().len()).to_equal(18)
+
+    it "resolves clang and rust from fallback":
+        app_registry_clear()
+        app_registry_load_hardcoded_fallback()
+        val clang = app_registry_lookup("/sys/apps/clang")
+        expect(clang != nil).to_equal(true)
+        val ce = clang.unwrap()
+        expect(ce.fat32_leaf).to_equal("CLANGSMF.SMF")
+        expect(ce.boot_seed).to_equal(true)
+        val rust = app_registry_lookup("/sys/apps/rust")
+        expect(rust != nil).to_equal(true)
+        val re = rust.unwrap()
+        expect(re.fat32_leaf).to_equal("RUSTSMF.SMF")
+        expect(re.boot_seed).to_equal(true)
+
+    it "resolves all 18 FAT32 aliases from fallback":
+        app_registry_clear()
+        app_registry_load_hardcoded_fallback()
+        expect(app_registry_fat32_alias("/sys/apps/info") != nil).to_equal(true)
+        expect(app_registry_fat32_alias("/sys/apps/browser_demo") != nil).to_equal(true)
+        expect(app_registry_fat32_alias("/sys/apps/simple_compiler") != nil).to_equal(true)
+        expect(app_registry_fat32_alias("/sys/apps/llvm") != nil).to_equal(true)
+        expect(app_registry_fat32_alias("/sys/apps/wine_hello") != nil).to_equal(true)
+        expect(app_registry_fat32_alias("/sys/apps/simple") != nil).to_equal(true)

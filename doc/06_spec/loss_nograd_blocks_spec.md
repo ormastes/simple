@@ -30,6 +30,19 @@ Tests that `loss{}` and `nograd{}` blocks parse, evaluate, and render the
 same supported math-expression subset as `m{}` blocks. Runtime autograd
 semantics are covered by `math_autograd_runtime_spec.spl`.
 
+## Evidence
+
+| Category | Count |
+|----------|------:|
+| Artifacts | 2 |
+
+### Artifacts
+
+| Item | Kind | Path |
+|------|------|------|
+| `result.json` | JSON artifact | `build/test-artifacts/feature/usage/loss_nograd_blocks/result.json` |
+| `summary.txt` | Text artifact | `build/test-artifacts/feature/usage/loss_nograd_blocks/summary.txt` |
+
 ## Scenarios
 
 - evaluates addition

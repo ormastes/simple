@@ -10,6 +10,7 @@
 use os.kernel.arch.arch_context.{Architecture}
 use os.kernel.loader.zstd_decompress.{zstd_decompress}
 use os.kernel.loader.cpio_newc.{CpioEntry, cpio_parse, cpio_lookup}
+use os.kernel.loader.app_registry.{app_registry_fat32_alias, app_registry_root_alias, app_registry_canonical_from_bytes}
 
 use os.kernel.log.klog_api.{log_raw_println}
 extern fn rt_string_from_byte_array(arr: [u8]) -> text
@@ -49,50 +50,12 @@ var g_cpio_entries: [CpioEntry] = []
 var g_cpio_decoded: bool = false
 
 fn _desktop_app_short_alias(path: text) -> text?:
-    """Return the FAT32 short-name alias for seeded desktop app binaries."""
-    if path == "/sys/apps/info" or path == "/sys/apps/info.smf":
-        return Some("/SYS/APPS/info")
-    if path == "/sys/apps/browser_demo" or path == "/sys/apps/browser_demo.smf":
-        return Some("/SYS/APPS/BROWSMF.SMF")
-    if path == "/sys/apps/hello_world" or path == "/sys/apps/hello_world.smf":
-        return Some("/SYS/APPS/HELLOSMF.SMF")
-    if path == "/sys/apps/file_manager" or path == "/sys/apps/file_manager.smf":
-        return Some("/SYS/APPS/FILESMF.SMF")
-    if path == "/sys/apps/shell" or path == "/sys/apps/shell.smf":
-        return Some("/SYS/APPS/SHELLSMF.SMF")
-    if path == "/sys/apps/editor" or path == "/sys/apps/editor.smf":
-        return Some("/SYS/APPS/EDITORSM.SMF")
-    if path == "/sys/apps/simple_browser" or path == "/sys/apps/simple_browser.smf":
-        return Some("/SYS/APPS/SBROWSMF.SMF")
-    if path == "/sys/apps/smux" or path == "/sys/apps/smux.smf":
-        return Some("/SYS/APPS/SMUXSMF.SMF")
-    if path == "/sys/apps/simple_compiler" or path == "/sys/apps/simple_compiler.smf":
-        return Some("/SYS/APPS/SCOMPSMF.SMF")
-    if path == "/sys/apps/simple_interpreter" or path == "/sys/apps/simple_interpreter.smf":
-        return Some("/SYS/APPS/SINTSMF.SMF")
-    if path == "/sys/apps/simple_loader" or path == "/sys/apps/simple_loader.smf":
-        return Some("/SYS/APPS/SLOADSMF.SMF")
-    if path == "/sys/apps/llvm" or path == "/sys/apps/llvm.smf":
-        return Some("/SYS/APPS/LLVMSMF.SMF")
-    if path == "/sys/apps/clang" or path == "/sys/apps/clang.smf":
-        return Some("/SYS/APPS/CLANGSMF.SMF")
-    if path == "/sys/apps/rust" or path == "/sys/apps/rust.smf":
-        return Some("/SYS/APPS/RUSTSMF.SMF")
-    nil
+    """Return the FAT32 short-name alias for desktop app binaries via registry."""
+    app_registry_fat32_alias(path)
 
 fn _desktop_app_root_elf_alias(path: text) -> text?:
-    """Return the root-level 8.3 ELF alias currently present on seeded images.
-
-    `make_os_disk.shs` copies the temporary staging tree recursively into the
-    FAT32 image, so the built ELF artifacts are currently present at the image
-    root as well as under the canonical app paths. Keep this as a filesystem
-    fallback only; the launcher and app model still use `/sys/apps/...`.
-    """
-    val short = _desktop_app_short_alias(path)
-    if short == nil:
-        return nil
-    val alias = short.unwrap()
-    Some(alias.replace("/SYS/APPS", ""))
+    """Return the root-level 8.3 ELF alias via registry."""
+    app_registry_root_alias(path)
 
 fn _path_bytes_to_text(path_bytes: [u8]) -> text:
     rt_string_from_byte_array(path_bytes)
@@ -102,37 +65,7 @@ fn _exec_vfs_read_file_bytes(path: text) -> [u8]:
     g_vfs_read_executable_bytes(path)
 
 fn _canonical_seeded_path_from_bytes(path_bytes: [u8]) -> text?:
-    match _path_bytes_to_text(path_bytes):
-        case "/sys/apps/info":
-            Some("/sys/apps/info")
-        case "/sys/apps/browser_demo":
-            Some("/sys/apps/browser_demo")
-        case "/sys/apps/hello_world":
-            Some("/sys/apps/hello_world")
-        case "/sys/apps/file_manager":
-            Some("/sys/apps/file_manager")
-        case "/sys/apps/shell":
-            Some("/sys/apps/shell")
-        case "/sys/apps/editor":
-            Some("/sys/apps/editor")
-        case "/sys/apps/simple_browser":
-            Some("/sys/apps/simple_browser")
-        case "/sys/apps/smux":
-            Some("/sys/apps/smux")
-        case "/sys/apps/simple_compiler":
-            Some("/sys/apps/simple_compiler")
-        case "/sys/apps/simple_interpreter":
-            Some("/sys/apps/simple_interpreter")
-        case "/sys/apps/simple_loader":
-            Some("/sys/apps/simple_loader")
-        case "/sys/apps/llvm":
-            Some("/sys/apps/llvm")
-        case "/sys/apps/clang":
-            Some("/sys/apps/clang")
-        case "/sys/apps/rust":
-            Some("/sys/apps/rust")
-        case _:
-            nil
+    app_registry_canonical_from_bytes(path_bytes)
 
 fn canonical_seeded_path_from_bytes(path_bytes: [u8]) -> text?:
     """Expose the stable syscall-byte canonicalization used by app exec."""

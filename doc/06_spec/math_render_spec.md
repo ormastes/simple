@@ -37,6 +37,19 @@ Covers edge cases: nested fracs, sum/integral binders, transpose,
 subscript, complex DL equations, Greek letters, operator precedence,
 implicit multiplication, and LaTeX-style commands.
 
+## Evidence
+
+| Category | Count |
+|----------|------:|
+| Artifacts | 2 |
+
+### Artifacts
+
+| Item | Kind | Path |
+|------|------|------|
+| `result.json` | JSON artifact | `build/test-artifacts/feature/usage/math_render/result.json` |
+| `summary.txt` | Text artifact | `build/test-artifacts/feature/usage/math_render/summary.txt` |
+
 ## Scenarios
 
 - renders addition
