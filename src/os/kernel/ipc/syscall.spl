@@ -35,7 +35,7 @@ use os.kernel.interrupts.irq_routing.{irq_route_register}
 use os.kernel.interrupts.idt.{VEC_IRQ_BASE}
 use os.kernel.lifecycle.task_cleanup.{task_cleanup, task_register_resource, task_unregister_resource, RES_NOTIFICATION, RES_IRQ_ROUTE, RES_DMA_BUFFER}
 use os.kernel.ipc.capability.{CapabilityManager, PrivilegeTable, GrantTable, _vma_range_readable, register_task_vmspace, task_vmspace_of}
-use os.kernel.types.capability_types.{PrivilegeMask, Grant, PRIVCTL_SET_MASK, PRIVCTL_GET_MASK, PRIVCTL_ADD_PEER, PRIVCTL_REMOVE_PEER, GRANT_R, GRANT_W, GRANT_RW}
+use os.kernel.types.capability_types.{PrivilegeMask, Grant, PRIVCTL_SET_MASK, PRIVCTL_GET_MASK, PRIVCTL_ADD_PEER, PRIVCTL_REMOVE_PEER, PRIVCTL_SET_MASK_FULL, GRANT_R, GRANT_W, GRANT_RW}
 use os.drivers.rtc.rtc.{rtc_get_seconds, rtc_get_minutes, rtc_get_hours}
 use os.kernel.ipc.spm_port.{spm_port_send, spm_port_listen, spm_port_is_registered}
 use os.kernel.ipc.spm_claim.{spm_claim_for_task}
@@ -600,11 +600,14 @@ fn syscall_handler(args: SyscallArgs, scheduler: Scheduler, ipc: IpcManager, klo
             _handle_safecopy_to(args, scheduler)
 
         # -- VM mmap / munmap (Wave 1 G13) -----------------------------------
-        # TODO(mdsoc+): gate with VM capability once capability registry lands
         case 103:   # sys_mmap
-            _handle_sys_mmap(args)
+            if not _cap_check(ipc, caller, CapabilityKind.VmMap):
+                return SyscallResult(value: SYSCALL_EPERM)
+            _handle_sys_mmap(args, caller.id)
         case 104:   # sys_munmap
-            _handle_sys_munmap(args)
+            if not _cap_check(ipc, caller, CapabilityKind.VmMap):
+                return SyscallResult(value: SYSCALL_EPERM)
+            _handle_sys_munmap(args, caller.id)
 
         # -- Scheduler policy (service agent reserved ABI) -------------------
         case 106:   # sys_schedule: cooperative reschedule point
@@ -801,6 +804,8 @@ fn _handle_exec(args: SyscallArgs, scheduler: Scheduler) -> SyscallResult:
     val result = sched.exec_image(current, image_result.unwrap())
     if result == 0:
         _close_cloexec_fds_with_backends()
+        val exec_space = vmm_new_process_space(0, 0)
+        register_task_vmspace(current.id.to_u32(), exec_space)
     SyscallResult(value: result.to_i64())
 
 fn _encode_wait_status(exit_code: i32) -> u32:
@@ -1209,6 +1214,8 @@ fn _handle_spawn_binary(args: SyscallArgs, scheduler: Scheduler, klog: KernelLog
         if pid == 0:
             return SyscallResult(value: -12)
 
+        val child_space = vmm_new_process_space(0, 0)
+        register_task_vmspace(pid.to_u32(), child_space)
         return SyscallResult(value: pid.to_i64())
 
     var log = klog
@@ -3255,12 +3262,17 @@ fn _handle_privctl(args: SyscallArgs, scheduler: Scheduler) -> SyscallResult:
 
     Args:
       arg0: target_task (u32 task ID)
-      arg1: op — PRIVCTL_SET_MASK / GET_MASK / ADD_PEER / REMOVE_PEER
-      arg2: data — op-specific (peer id for ADD/REMOVE; ignored for GET)
+      arg1: op — PRIVCTL_SET_MASK / GET_MASK / ADD_PEER / REMOVE_PEER / SET_MASK_FULL
+      arg2: data — op-specific (peer id for ADD/REMOVE; userptr for SET_MASK_FULL)
+      arg3: len  — byte length for SET_MASK_FULL (min 20)
 
-    For SET_MASK: builds a mask with kernel_calls=data, all other fields 0.
-    Full struct marshal deferred until user-copy helpers land.
-    # TODO(mdsoc+): full PrivilegeMask marshal via user-copy once vmm_copy lands
+    SET_MASK: builds a mask with kernel_calls=data, all other fields 0.
+    SET_MASK_FULL: reads a packed PrivilegeMask struct from userspace at arg2:
+      [0..8)  kernel_calls (u64 LE)
+      [8..16) irqs (u64 LE)
+      [16..18) io_port_base (u16 LE)
+      [18..20) io_port_len (u16 LE)
+      [20..)  allowed_peers (packed u32 LE array)
     """
     val target_id = args.arg0.to_u32()
     val op = args.arg1.to_u32()
@@ -3283,7 +3295,6 @@ fn _handle_privctl(args: SyscallArgs, scheduler: Scheduler) -> SyscallResult:
                 SyscallResult(value: -1)
             else:
                 val m = found
-                # Return kernel_calls bitmap as the result value
                 SyscallResult(value: m.kernel_calls.to_i64())
         else:
             if op == PRIVCTL_ADD_PEER:
@@ -3294,7 +3305,48 @@ fn _handle_privctl(args: SyscallArgs, scheduler: Scheduler) -> SyscallResult:
                     _priv_table.remove_peer(target_id, data.to_u32())
                     SyscallResult(value: 0)
                 else:
-                    SyscallResult(value: -1)    # Unknown op
+                    if op == PRIVCTL_SET_MASK_FULL:
+                        _handle_privctl_set_mask_full(target_id, data, args.arg3)
+                    else:
+                        SyscallResult(value: -1)
+
+fn _privmask_read_le_u16(data: [u8], off: i64) -> u16:
+    ((data[off] as i64) | ((data[off + 1] as i64) << 8)).to_u16()
+
+fn _privmask_read_le_u32(data: [u8], off: i64) -> u32:
+    ((data[off] as i64) | ((data[off + 1] as i64) << 8) |
+     ((data[off + 2] as i64) << 16) | ((data[off + 3] as i64) << 24)).to_u32()
+
+fn _privmask_read_le_u64(data: [u8], off: i64) -> u64:
+    val lo = _privmask_read_le_u32(data, off)
+    val hi = _privmask_read_le_u32(data, off + 4)
+    (lo as u64) | ((hi as u64) << 32)
+
+fn _handle_privctl_set_mask_full(target_id: u32, ptr: u64, len: u64) -> SyscallResult:
+    """Marshal a full PrivilegeMask from userspace struct."""
+    if len < 20:
+        return SyscallResult(value: -22)
+    val bytes = _copy_in_bytes(ptr, len)
+    if bytes.len() == 0:
+        return SyscallResult(value: -14)
+    val kernel_calls = _privmask_read_le_u64(bytes, 0)
+    val irqs = _privmask_read_le_u64(bytes, 8)
+    val io_port_base = _privmask_read_le_u16(bytes, 16)
+    val io_port_len = _privmask_read_le_u16(bytes, 18)
+    var peers: [u32] = []
+    var off: i64 = 20
+    while off + 4 <= bytes.len():
+        peers.push(_privmask_read_le_u32(bytes, off))
+        off = off + 4
+    val mask = PrivilegeMask(
+        kernel_calls: kernel_calls,
+        irqs: irqs,
+        io_port_base: io_port_base,
+        io_port_len: io_port_len,
+        allowed_peers: peers
+    )
+    _priv_table.set(target_id, mask)
+    SyscallResult(value: 0)
 
 # ============================================================================
 # G12 — sys_grant / sys_revoke / sys_safecopy_from / sys_safecopy_to handlers
@@ -3409,8 +3461,6 @@ fn _handle_safecopy_to(args: SyscallArgs, scheduler: Scheduler) -> SyscallResult
 # VM mmap / munmap handlers (Wave 1 G13 — syscall IDs 103 / 104)
 # ============================================================================
 
-# TODO(mdsoc+): replace g_current_vmspace with sched.get_current().vmspace
-# once PM Wave 2 lands and Task carries a ProcessVmSpace field.
 var g_current_vmspace: ProcessVmSpace = vmm_new_process_space(0, 0)
 
 struct TaskBrkEntry:
@@ -3503,8 +3553,8 @@ fn _handle_system_reboot(args: SyscallArgs) -> SyscallResult:
     _ = args
     SyscallResult(value: hal_system_reset())
 
-fn _handle_sys_mmap(args: SyscallArgs) -> SyscallResult:
-    """sys_mmap — map a virtual address range into the current task's space.
+fn _handle_sys_mmap(args: SyscallArgs, task_id: u64) -> SyscallResult:
+    """sys_mmap — map a virtual address range into the calling task's space.
 
     Args:
       arg0: vaddr          — requested virtual address (0 = kernel picks)
@@ -3522,11 +3572,22 @@ fn _handle_sys_mmap(args: SyscallArgs) -> SyscallResult:
     val kind           = args.arg3.to_u32()
     val backing        = args.arg4
     val backing_offset = args.arg5
-    val rc = vmm_mmap(g_current_vmspace, vaddr, len, flags, kind, backing, backing_offset)
+    var map_space = g_current_vmspace
+    var used_registered = false
+    val registered = task_vmspace_of(task_id.to_u32())
+    if registered != nil:
+        map_space = registered
+        used_registered = true
+    val rc = vmm_mmap(map_space, vaddr, len, flags, kind, backing, backing_offset)
+    if rc >= 0:
+        if used_registered:
+            register_task_vmspace(task_id.to_u32(), map_space)
+        else:
+            g_current_vmspace = map_space
     SyscallResult(value: rc)
 
-fn _handle_sys_munmap(args: SyscallArgs) -> SyscallResult:
-    """sys_munmap — unmap a virtual address range from the current task's space.
+fn _handle_sys_munmap(args: SyscallArgs, task_id: u64) -> SyscallResult:
+    """sys_munmap — unmap a virtual address range from the calling task's space.
 
     Args:
       arg0: vaddr — start of region to unmap (page-aligned)
@@ -3536,7 +3597,18 @@ fn _handle_sys_munmap(args: SyscallArgs) -> SyscallResult:
     """
     val vaddr = args.arg0
     val len   = args.arg1
-    val rc = vmm_munmap(g_current_vmspace, vaddr, len)
+    var map_space = g_current_vmspace
+    var used_registered = false
+    val registered = task_vmspace_of(task_id.to_u32())
+    if registered != nil:
+        map_space = registered
+        used_registered = true
+    val rc = vmm_munmap(map_space, vaddr, len)
+    if rc == 0:
+        if used_registered:
+            register_task_vmspace(task_id.to_u32(), map_space)
+        else:
+            g_current_vmspace = map_space
     SyscallResult(value: rc.to_i64())
 
 # ============================================================================
