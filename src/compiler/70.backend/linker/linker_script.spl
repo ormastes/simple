@@ -1,0 +1,621 @@
+# Linker Script Parser - Minimal GNU ld-style linker script parser
+#
+# Parses ENTRY, MEMORY, and SECTIONS directives for embedded targets
+# (RISC-V, ARM Cortex-M). No file I/O — caller supplies the script text.
+#
+# Supported grammar:
+#   ENTRY(symbol)
+#   MEMORY { name (rwx) : ORIGIN = num, LENGTH = num ; ... }
+#   SECTIONS { .name addr? : { *(.pattern) ... } > region? ; ... }
+
+# ============================================================================
+# Token Types
+# ============================================================================
+
+enum LdTokenKind:
+    Word
+    Number
+    LParen
+    RParen
+    LBrace
+    RBrace
+    Colon
+    Semicolon
+    Equals
+    GreaterThan
+    Star
+    Comma
+    Eof
+
+# ============================================================================
+# Token
+# ============================================================================
+
+struct LdToken:
+    """A single lexical token from a linker script."""
+    kind: LdTokenKind
+    value: text
+
+# ============================================================================
+# Data Types
+# ============================================================================
+
+struct LdEntry:
+    """Entry point directive."""
+    symbol: text
+
+struct LdMemoryRegion:
+    """A memory region from the MEMORY block."""
+    name: text
+    attrs: text          # e.g. "rwx" or "" if omitted
+    origin: i64
+    length: i64
+
+struct LdInputPattern:
+    """An input section glob from *(...) inside a SECTIONS output section."""
+    pattern: text        # e.g. ".text", ".text*", ".rodata"
+
+struct LdOutputSection:
+    """An output section from the SECTIONS block."""
+    name: text           # e.g. ".text"
+    address: i64         # explicit address or -1 if none
+    inputs: [LdInputPattern]
+    region: text         # memory region name or "" if none
+
+struct LdScript:
+    """Complete parsed linker script."""
+    entry: text          # entry symbol or "" if not specified
+    memory: [LdMemoryRegion]
+    sections: [LdOutputSection]
+
+# ============================================================================
+# Parser State
+# ============================================================================
+
+struct LdParser:
+    """Recursive descent parser state."""
+    tokens: [LdToken]
+    pos: i64
+
+# ============================================================================
+# Tokenizer Helpers
+# ============================================================================
+
+fn _ld_is_whitespace(ch: text) -> bool:
+    ch == " " or ch == "\t" or ch == "\n" or ch == "\r"
+
+fn _ld_is_alpha(ch: text) -> bool:
+    (ch >= "a" and ch <= "z") or (ch >= "A" and ch <= "Z") or ch == "_"
+
+fn _ld_is_digit(ch: text) -> bool:
+    ch >= "0" and ch <= "9"
+
+fn _ld_is_hex_digit(ch: text) -> bool:
+    (ch >= "0" and ch <= "9") or (ch >= "a" and ch <= "f") or (ch >= "A" and ch <= "F")
+
+fn _ld_is_word_start(ch: text) -> bool:
+    _ld_is_alpha(ch) or ch == "." or ch == "_"
+
+fn _ld_is_word_cont(ch: text) -> bool:
+    _ld_is_alpha(ch) or _ld_is_digit(ch) or ch == "." or ch == "_" or ch == "*" or ch == "?"
+
+# ============================================================================
+# Tokenizer
+# ============================================================================
+
+fn ld_tokenize(input: text) -> [LdToken]:
+    """Tokenize a linker script into a flat token array."""
+    var tokens: [LdToken] = []
+    var i: i64 = 0
+    val n = input.len()
+
+    while i < n:
+        val ch = input.char_at(i)
+
+        # Skip whitespace
+        if _ld_is_whitespace(ch):
+            i = i + 1
+            continue
+
+        # Skip C-style block comments /* ... */
+        if ch == "/" and i + 1 < n and input.char_at(i + 1) == "*":
+            i = i + 2
+            while i + 1 < n:
+                if input.char_at(i) == "*" and input.char_at(i + 1) == "/":
+                    i = i + 2
+                    break
+                i = i + 1
+            continue
+
+        # Skip line comments (// to end of line)
+        if ch == "/" and i + 1 < n and input.char_at(i + 1) == "/":
+            i = i + 2
+            while i < n and input.char_at(i) != "\n":
+                i = i + 1
+            continue
+
+        # Single-character tokens
+        if ch == "(":
+            tokens = tokens.push(LdToken(kind: LdTokenKind.LParen, value: "("))
+            i = i + 1
+            continue
+        if ch == ")":
+            tokens = tokens.push(LdToken(kind: LdTokenKind.RParen, value: ")"))
+            i = i + 1
+            continue
+        if ch == "{":
+            tokens = tokens.push(LdToken(kind: LdTokenKind.LBrace, value: "{"))
+            i = i + 1
+            continue
+        if ch == "}":
+            tokens = tokens.push(LdToken(kind: LdTokenKind.RBrace, value: "}"))
+            i = i + 1
+            continue
+        if ch == ":":
+            tokens = tokens.push(LdToken(kind: LdTokenKind.Colon, value: ":"))
+            i = i + 1
+            continue
+        if ch == ";":
+            tokens = tokens.push(LdToken(kind: LdTokenKind.Semicolon, value: ";"))
+            i = i + 1
+            continue
+        if ch == "=":
+            tokens = tokens.push(LdToken(kind: LdTokenKind.Equals, value: "="))
+            i = i + 1
+            continue
+        if ch == ">":
+            tokens = tokens.push(LdToken(kind: LdTokenKind.GreaterThan, value: ">"))
+            i = i + 1
+            continue
+        if ch == ",":
+            tokens = tokens.push(LdToken(kind: LdTokenKind.Comma, value: ","))
+            i = i + 1
+            continue
+
+        # Standalone star (not part of a word)
+        if ch == "*" and (i + 1 >= n or not _ld_is_word_cont(input.char_at(i + 1)) or input.char_at(i + 1) == "*"):
+            # Check if next char starts a paren — standalone star
+            if i + 1 >= n or input.char_at(i + 1) == "(" or _ld_is_whitespace(input.char_at(i + 1)):
+                tokens = tokens.push(LdToken(kind: LdTokenKind.Star, value: "*"))
+                i = i + 1
+                continue
+
+        # Number: starts with digit, or 0x for hex
+        if _ld_is_digit(ch):
+            var num_str = ""
+            # Check for hex prefix
+            if ch == "0" and i + 1 < n and (input.char_at(i + 1) == "x" or input.char_at(i + 1) == "X"):
+                num_str = "0x"
+                i = i + 2
+                while i < n and _ld_is_hex_digit(input.char_at(i)):
+                    num_str = num_str + input.char_at(i)
+                    i = i + 1
+            else:
+                while i < n and _ld_is_digit(input.char_at(i)):
+                    num_str = num_str + input.char_at(i)
+                    i = i + 1
+                # Handle K/M suffixes (e.g. 256K, 1M)
+                if i < n:
+                    val suffix = input.char_at(i)
+                    if suffix == "K" or suffix == "k":
+                        num_str = num_str + "K"
+                        i = i + 1
+                    else if suffix == "M" or suffix == "m":
+                        num_str = num_str + "M"
+                        i = i + 1
+            tokens = tokens.push(LdToken(kind: LdTokenKind.Number, value: num_str))
+            continue
+
+        # Word: identifier, section name (starts with . or alpha)
+        if _ld_is_word_start(ch) or ch == "*":
+            var word = ""
+            while i < n and _ld_is_word_cont(input.char_at(i)):
+                word = word + input.char_at(i)
+                i = i + 1
+            tokens = tokens.push(LdToken(kind: LdTokenKind.Word, value: word))
+            continue
+
+        # Unknown character — skip
+        i = i + 1
+
+    # Append EOF sentinel
+    tokens = tokens.push(LdToken(kind: LdTokenKind.Eof, value: ""))
+    tokens
+
+# ============================================================================
+# Number Parser
+# ============================================================================
+
+fn _ld_hex_digit_value(ch: text) -> i64:
+    """Return hex digit value 0-15, or -1 if not a hex digit."""
+    if ch == "0": return 0
+    if ch == "1": return 1
+    if ch == "2": return 2
+    if ch == "3": return 3
+    if ch == "4": return 4
+    if ch == "5": return 5
+    if ch == "6": return 6
+    if ch == "7": return 7
+    if ch == "8": return 8
+    if ch == "9": return 9
+    if ch == "a" or ch == "A": return 10
+    if ch == "b" or ch == "B": return 11
+    if ch == "c" or ch == "C": return 12
+    if ch == "d" or ch == "D": return 13
+    if ch == "e" or ch == "E": return 14
+    if ch == "f" or ch == "F": return 15
+    -1
+
+fn ld_parse_number(value: text) -> i64:
+    """Parse a decimal or hex (0x-prefixed) number. Supports K/M suffixes."""
+    if value == "":
+        return 0
+
+    var result: i64 = 0
+    var i: i64 = 0
+    val n = value.len()
+    var multiplier: i64 = 1
+
+    # Check for K/M suffix
+    if n > 0:
+        val last = value.char_at(n - 1)
+        if last == "K" or last == "k":
+            multiplier = 1024
+        else if last == "M" or last == "m":
+            multiplier = 1048576
+
+    val effective_len = if multiplier > 1: n - 1 else n
+
+    # Hex
+    if value.starts_with("0x") or value.starts_with("0X"):
+        i = 2
+        while i < effective_len:
+            val d = _ld_hex_digit_value(value.char_at(i))
+            if d < 0:
+                break
+            result = result * 16 + d
+            i = i + 1
+        return result * multiplier
+
+    # Decimal
+    while i < effective_len:
+        val ch = value.char_at(i)
+        if ch >= "0" and ch <= "9":
+            val d = _ld_hex_digit_value(ch)
+            result = result * 10 + d
+        else:
+            break
+        i = i + 1
+
+    result * multiplier
+
+# ============================================================================
+# Parser Helpers
+# ============================================================================
+
+fn _ld_peek(parser: LdParser) -> LdToken:
+    """Return current token without advancing."""
+    if parser.pos < parser.tokens.len():
+        return parser.tokens[parser.pos]
+    LdToken(kind: LdTokenKind.Eof, value: "")
+
+fn _ld_advance(parser: LdParser) -> LdParser:
+    """Advance parser by one token."""
+    LdParser(tokens: parser.tokens, pos: parser.pos + 1)
+
+fn _ld_expect_kind(parser: LdParser, kind: LdTokenKind) -> (LdParser, LdToken):
+    """Consume a token of the expected kind, or return Eof token on mismatch."""
+    val tok = _ld_peek(parser)
+    if tok.kind == kind:
+        return (_ld_advance(parser), tok)
+    (parser, LdToken(kind: LdTokenKind.Eof, value: ""))
+
+fn _ld_at_kind(parser: LdParser, kind: LdTokenKind) -> bool:
+    """Check if current token matches the given kind."""
+    val tok = _ld_peek(parser)
+    tok.kind == kind
+
+fn _ld_at_word(parser: LdParser, word: text) -> bool:
+    """Check if current token is a specific word."""
+    val tok = _ld_peek(parser)
+    tok.kind == LdTokenKind.Word and tok.value == word
+
+# ============================================================================
+# ENTRY Parser
+# ============================================================================
+
+fn ld_parse_entry(parser: LdParser) -> (LdParser, text):
+    """Parse ENTRY(symbol) — assumes 'ENTRY' word already consumed."""
+    var p = parser
+    # Expect LParen
+    val (p2, _lp) = _ld_expect_kind(p, LdTokenKind.LParen)
+    p = p2
+    # Expect symbol (Word)
+    val (p3, sym_tok) = _ld_expect_kind(p, LdTokenKind.Word)
+    p = p3
+    val symbol = sym_tok.value
+    # Expect RParen
+    val (p4, _rp) = _ld_expect_kind(p, LdTokenKind.RParen)
+    p = p4
+    (p, symbol)
+
+# ============================================================================
+# MEMORY Parser
+# ============================================================================
+
+fn _ld_parse_one_region(parser: LdParser) -> (LdParser, LdMemoryRegion):
+    """Parse one memory region: name (attrs)? : ORIGIN = num , LENGTH = num"""
+    var p = parser
+
+    # Region name
+    val (p2, name_tok) = _ld_expect_kind(p, LdTokenKind.Word)
+    p = p2
+    val name = name_tok.value
+
+    # Optional attributes in parens
+    var attrs = ""
+    if _ld_at_kind(p, LdTokenKind.LParen):
+        p = _ld_advance(p)
+        # Collect attribute characters until RParen
+        while not _ld_at_kind(p, LdTokenKind.RParen) and not _ld_at_kind(p, LdTokenKind.Eof):
+            val tok = _ld_peek(p)
+            attrs = attrs + tok.value
+            p = _ld_advance(p)
+        # Consume RParen
+        val (p3, _rp) = _ld_expect_kind(p, LdTokenKind.RParen)
+        p = p3
+
+    # Expect colon
+    val (p4, _colon) = _ld_expect_kind(p, LdTokenKind.Colon)
+    p = p4
+
+    # ORIGIN = number
+    var origin: i64 = 0
+    if _ld_at_word(p, "ORIGIN") or _ld_at_word(p, "org") or _ld_at_word(p, "o"):
+        p = _ld_advance(p)
+        val (p5, _eq) = _ld_expect_kind(p, LdTokenKind.Equals)
+        p = p5
+        val (p6, origin_tok) = _ld_expect_kind(p, LdTokenKind.Number)
+        p = p6
+        origin = ld_parse_number(origin_tok.value)
+
+    # Expect comma
+    val (p7, _comma) = _ld_expect_kind(p, LdTokenKind.Comma)
+    p = p7
+
+    # LENGTH = number
+    var length: i64 = 0
+    if _ld_at_word(p, "LENGTH") or _ld_at_word(p, "len") or _ld_at_word(p, "l"):
+        p = _ld_advance(p)
+        val (p8, _eq2) = _ld_expect_kind(p, LdTokenKind.Equals)
+        p = p8
+        val (p9, length_tok) = _ld_expect_kind(p, LdTokenKind.Number)
+        p = p9
+        length = ld_parse_number(length_tok.value)
+
+    val region = LdMemoryRegion(name: name, attrs: attrs, origin: origin, length: length)
+    (p, region)
+
+fn ld_parse_memory(parser: LdParser) -> (LdParser, [LdMemoryRegion]):
+    """Parse MEMORY { ... } block — assumes 'MEMORY' word already consumed."""
+    var p = parser
+    var regions: [LdMemoryRegion] = []
+
+    # Expect LBrace
+    val (p2, _lb) = _ld_expect_kind(p, LdTokenKind.LBrace)
+    p = p2
+
+    # Parse regions until RBrace
+    while not _ld_at_kind(p, LdTokenKind.RBrace) and not _ld_at_kind(p, LdTokenKind.Eof):
+        # Skip semicolons between regions
+        if _ld_at_kind(p, LdTokenKind.Semicolon):
+            p = _ld_advance(p)
+            continue
+
+        val (p3, region) = _ld_parse_one_region(p)
+        p = p3
+        regions = regions.push(region)
+
+    # Consume RBrace
+    val (p4, _rb) = _ld_expect_kind(p, LdTokenKind.RBrace)
+    p = p4
+
+    (p, regions)
+
+# ============================================================================
+# SECTIONS Parser
+# ============================================================================
+
+fn _ld_parse_input_patterns(parser: LdParser) -> (LdParser, [LdInputPattern]):
+    """Parse the inside of { *(.pat) *(.pat2) ... } within an output section."""
+    var p = parser
+    var inputs: [LdInputPattern] = []
+
+    # Expect LBrace
+    val (p2, _lb) = _ld_expect_kind(p, LdTokenKind.LBrace)
+    p = p2
+
+    while not _ld_at_kind(p, LdTokenKind.RBrace) and not _ld_at_kind(p, LdTokenKind.Eof):
+        # Skip semicolons
+        if _ld_at_kind(p, LdTokenKind.Semicolon):
+            p = _ld_advance(p)
+            continue
+
+        # Expect * ( pattern ) or just skip unknown tokens
+        if _ld_at_kind(p, LdTokenKind.Star):
+            p = _ld_advance(p)
+            # Expect LParen
+            if _ld_at_kind(p, LdTokenKind.LParen):
+                p = _ld_advance(p)
+                # Collect pattern tokens until RParen
+                var pattern = ""
+                while not _ld_at_kind(p, LdTokenKind.RParen) and not _ld_at_kind(p, LdTokenKind.Eof):
+                    val tok = _ld_peek(p)
+                    pattern = pattern + tok.value
+                    p = _ld_advance(p)
+                # Consume RParen
+                val (p3, _rp) = _ld_expect_kind(p, LdTokenKind.RParen)
+                p = p3
+                inputs = inputs.push(LdInputPattern(pattern: pattern))
+        else:
+            # Skip unknown token inside section body
+            p = _ld_advance(p)
+
+    # Consume RBrace
+    val (p4, _rb) = _ld_expect_kind(p, LdTokenKind.RBrace)
+    p = p4
+
+    (p, inputs)
+
+fn _ld_parse_one_section(parser: LdParser) -> (LdParser, LdOutputSection):
+    """Parse one output section: .name addr? : { *(.pat) ... } > region?"""
+    var p = parser
+
+    # Section name (e.g. ".text", ".data")
+    val (p2, name_tok) = _ld_expect_kind(p, LdTokenKind.Word)
+    p = p2
+    val name = name_tok.value
+
+    # Optional address before colon
+    var address: i64 = -1
+    if _ld_at_kind(p, LdTokenKind.Number):
+        val num_tok = _ld_peek(p)
+        address = ld_parse_number(num_tok.value)
+        p = _ld_advance(p)
+
+    # Expect colon
+    val (p3, _colon) = _ld_expect_kind(p, LdTokenKind.Colon)
+    p = p3
+
+    # Parse input patterns { *(.pat) ... }
+    val (p4, inputs) = _ld_parse_input_patterns(p)
+    p = p4
+
+    # Optional > region
+    var region = ""
+    if _ld_at_kind(p, LdTokenKind.GreaterThan):
+        p = _ld_advance(p)
+        val (p5, region_tok) = _ld_expect_kind(p, LdTokenKind.Word)
+        p = p5
+        region = region_tok.value
+
+    val section = LdOutputSection(name: name, address: address, inputs: inputs, region: region)
+    (p, section)
+
+fn ld_parse_sections(parser: LdParser) -> (LdParser, [LdOutputSection]):
+    """Parse SECTIONS { ... } block — assumes 'SECTIONS' word already consumed."""
+    var p = parser
+    var sections: [LdOutputSection] = []
+
+    # Expect LBrace
+    val (p2, _lb) = _ld_expect_kind(p, LdTokenKind.LBrace)
+    p = p2
+
+    # Parse sections until RBrace
+    while not _ld_at_kind(p, LdTokenKind.RBrace) and not _ld_at_kind(p, LdTokenKind.Eof):
+        # Skip semicolons
+        if _ld_at_kind(p, LdTokenKind.Semicolon):
+            p = _ld_advance(p)
+            continue
+
+        # Output section names typically start with '.'
+        val tok = _ld_peek(p)
+        if tok.kind == LdTokenKind.Word and tok.value.starts_with("."):
+            val (p3, section) = _ld_parse_one_section(p)
+            p = p3
+            sections = sections.push(section)
+        else:
+            # Skip unknown directives inside SECTIONS
+            p = _ld_advance(p)
+
+    # Consume RBrace
+    val (p4, _rb) = _ld_expect_kind(p, LdTokenKind.RBrace)
+    p = p4
+
+    (p, sections)
+
+# ============================================================================
+# Top-Level Parser
+# ============================================================================
+
+fn ld_parse(input: text) -> Result<LdScript, text>:
+    """Parse a GNU ld-style linker script into an LdScript."""
+    val tokens = ld_tokenize(input)
+    var p = LdParser(tokens: tokens, pos: 0)
+    var entry = ""
+    var memory: [LdMemoryRegion] = []
+    var sections: [LdOutputSection] = []
+
+    while not _ld_at_kind(p, LdTokenKind.Eof):
+        val tok = _ld_peek(p)
+
+        if tok.kind == LdTokenKind.Word and tok.value == "ENTRY":
+            p = _ld_advance(p)
+            val (p2, sym) = ld_parse_entry(p)
+            p = p2
+            entry = sym
+
+        else if tok.kind == LdTokenKind.Word and tok.value == "MEMORY":
+            p = _ld_advance(p)
+            val (p2, regions) = ld_parse_memory(p)
+            p = p2
+            memory = regions
+
+        else if tok.kind == LdTokenKind.Word and tok.value == "SECTIONS":
+            p = _ld_advance(p)
+            val (p2, sects) = ld_parse_sections(p)
+            p = p2
+            sections = sects
+
+        else:
+            # Skip semicolons and unknown tokens
+            p = _ld_advance(p)
+
+    Ok(LdScript(entry: entry, memory: memory, sections: sections))
+
+# ============================================================================
+# Convenience Functions
+# ============================================================================
+
+fn ld_script_new() -> LdScript:
+    """Create an empty linker script."""
+    LdScript(entry: "", memory: [], sections: [])
+
+fn ld_has_entry(script: LdScript) -> bool:
+    """Check if the script specifies an entry point."""
+    script.entry != ""
+
+fn ld_find_region(script: LdScript, name: text) -> LdMemoryRegion?:
+    """Find a memory region by name, or nil if not found."""
+    for region in script.memory:
+        if region.name == name:
+            return region
+    nil
+
+fn ld_find_section(script: LdScript, name: text) -> LdOutputSection?:
+    """Find an output section by name, or nil if not found."""
+    for section in script.sections:
+        if section.name == name:
+            return section
+    nil
+
+fn ld_section_count(script: LdScript) -> i64:
+    """Return the number of output sections."""
+    script.sections.len()
+
+fn ld_region_count(script: LdScript) -> i64:
+    """Return the number of memory regions."""
+    script.memory.len()
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export LdTokenKind, LdToken
+export LdEntry, LdMemoryRegion, LdInputPattern, LdOutputSection, LdScript
+export LdParser
+export ld_tokenize, ld_parse_number
+export ld_parse_entry, ld_parse_memory, ld_parse_sections
+export ld_parse
+export ld_script_new, ld_has_entry, ld_find_region, ld_find_section
+export ld_section_count, ld_region_count
