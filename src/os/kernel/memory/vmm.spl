@@ -28,7 +28,7 @@ use os.kernel.types.task_types.{AddressSpace}
 use os.kernel.types.vmspace_types.{
     VmArea, ProcessVmSpace,
 }
-use os.kernel.boot.mmio.{mmio_read8, mmio_read64, mmio_write64}
+use os.kernel.boot.mmio.{mmio_read8, mmio_write8, mmio_read64, mmio_write64}
 use os.kernel.memory.pmm.{PhysMemManager}
 # ============================================================================
 # Constants
@@ -1181,6 +1181,26 @@ fn _cow_clear_writable_recursive(table_phys: u64, level: u32):
                 _cow_clear_writable_recursive(child_phys, level - 1)
         i = i + 1
 
+fn _cow_ref_leaf_pages(table_phys: u64, level: u32):
+    val table_virt = _phys_to_virt(table_phys)
+    var limit: u64 = ENTRIES_PER_TABLE
+    if level == 3:
+        limit = 256
+    var i: u64 = 0
+    while i < limit:
+        val entry = _read_pte(table_virt, i)
+        if _pte_is_present(entry):
+            if level == 0:
+                val pa = _pte_phys_addr(entry)
+                pmm_ref_page(pa)
+            else if level == 1 and (entry & PTE_HUGE_PAGE) != 0:
+                val pa = _pte_phys_addr(entry)
+                pmm_ref_page(pa)
+            else:
+                val child_phys = _pte_phys_addr(entry)
+                _cow_ref_leaf_pages(child_phys, level - 1)
+        i = i + 1
+
 fn _free_user_half_subtree(pml4_virt: u64):
     """Walk the user half of a PML4 and free all intermediate page table pages.
 
@@ -1571,9 +1591,9 @@ fn vmm_cow_clone(parent_space: ProcessVmSpace) -> ProcessVmSpace:
                 backing_offset: src.backing_offset
             )
 
-        # TODO(mdsoc+): walk PT for each VMA page and call pmm_ref_page per
-        # physical frame so COW unref can safely free the last copy.
         i = i + 1
+
+    _cow_ref_leaf_pages(parent_space.pml4, 3)
 
     child
 
@@ -1751,3 +1771,56 @@ fn pt_set_ro(pml4: u64, vaddr: u64):
     if _pte_is_present(pt_entry):
         _write_pte(pt_virt, _pt_index(vaddr), pt_entry & ~PTE_WRITABLE)
         _invlpg(vaddr)
+
+# ============================================================================
+# ELF segment copy-to-user
+# ============================================================================
+
+fn vmm_copy_to_user(space: ProcessVmSpace, vaddr: u64, src_bytes: [u8], src_offset: u64, copy_len: u64, total_len: u64, flags: VmFlags) -> i32:
+    val as_handle = AddressSpace(phys_root: space.pml4, id: space.id)
+    var page_offset: u64 = 0
+    while page_offset < total_len:
+        val cur_vaddr = vaddr + page_offset
+        val page_base = _align_down(cur_vaddr, PAGE_SIZE)
+        val in_page_off = cur_vaddr - page_base
+
+        val pa = pmm_alloc_page_raw()
+        if pa == 0:
+            return -12
+
+        val page_virt = _phys_to_virt(pa)
+        var zi: u64 = 0
+        while zi < PAGE_SIZE:
+            mmio_write64(page_virt + zi, 0)
+            zi = zi + 8
+
+        val page_end = page_base + PAGE_SIZE
+        val data_start = vaddr
+        val data_end = vaddr + copy_len
+        val overlap_start = if cur_vaddr > data_start: cur_vaddr else: data_start
+        val overlap_end = if page_end < data_end: page_end else: data_end
+
+        if overlap_end > overlap_start:
+            val dest_off = overlap_start - page_base
+            val src_off = src_offset + (overlap_start - data_start)
+            var bi: u64 = 0
+            val count = overlap_end - overlap_start
+            while bi < count:
+                val byte_val = src_bytes[(src_off + bi) as i64]
+                mmio_write8(page_virt + dest_off + bi, byte_val)
+                bi = bi + 1
+
+        val mapped = vmm_map_page_in(
+            as_handle,
+            VirtAddr(addr: page_base),
+            PhysAddr(addr: pa),
+            flags
+        )
+        if not mapped:
+            pmm_free_page_raw(pa)
+            return -12
+
+        val remaining_in_page = PAGE_SIZE - in_page_off
+        page_offset = page_offset + remaining_in_page
+
+    0

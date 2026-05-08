@@ -1,16 +1,12 @@
 # ELF64 Loader — minimal ELF64 parser + PT_LOAD mapper
 #
-# Parses ELF64 executables and maps PT_LOAD segments into a ProcessVmSpace
-# via vmm_mmap.  Does NOT copy bytes into the mapped pages — pages are
-# demand-faulted; a copy_to_user helper is required for that step.
-#
-# TODO(mdsoc+): copy p_filesz bytes into each VMA once vmm exposes a
-#               copy_to_user / fill_vma helper.  Currently only the VMA
-#               reservation is performed; the segment data lives in the
-#               kernel-side bytes buffer and is not yet transferred.
+# Parses ELF64 executables and maps PT_LOAD segments into a ProcessVmSpace.
+# Each PT_LOAD segment is vmm_mmap'd, then populated via vmm_copy_to_user
+# which allocates physical pages, copies file data, and zeroes BSS.
 
-use os.kernel.memory.vmm.{vmm_mmap}
+use os.kernel.memory.vmm.{vmm_mmap, vmm_copy_to_user}
 use os.kernel.types.vmspace_types.{ProcessVmSpace}
+use os.kernel.types.memory_types.{VmFlags, VM_PRESENT, VM_WRITABLE, VM_USER, VM_NO_EXECUTE}
 
 extern fn rt_bytes_u8_at(arr: [u8], idx: i64) -> i64
 
@@ -147,14 +143,11 @@ fn elf64_program_headers(bytes: [u8], hdr: Elf64Header) -> [Elf64ProgramHeader]:
     out
 
 fn elf64_load(bytes: [u8], space: ProcessVmSpace) -> i64:
-    """Map all PT_LOAD segments into `space` via vmm_mmap.
+    """Map all PT_LOAD segments into `space` and copy segment data.
 
     Returns the ELF entry-point vaddr on success, or a negative errno:
       -8  (-ENOEXEC)  bad ELF header or no PT_LOAD segments
-      -12 (-ENOMEM)   vmm_mmap refused a segment
-
-    # TODO(mdsoc+): copy p_filesz bytes into each VMA once vmm exposes a
-    #               copy_to_user / fill_vma helper.
+      -12 (-ENOMEM)   vmm_mmap or copy_to_user failed
     """
     val hdr_opt = elf64_parse_header(bytes)
     if hdr_opt == nil:
@@ -182,6 +175,24 @@ fn elf64_load(bytes: [u8], space: ProcessVmSpace) -> i64:
             )
             if rc < 0:
                 return rc
+
+            var flag_bits: u32 = VM_PRESENT | VM_USER
+            if (perms & 2) != 0:
+                flag_bits = flag_bits | VM_WRITABLE
+            if (perms & 4) == 0:
+                flag_bits = flag_bits | VM_NO_EXECUTE
+            val copy_rc = vmm_copy_to_user(
+                space,
+                ph.p_vaddr as u64,
+                bytes,
+                ph.p_offset as u64,
+                ph.p_filesz as u64,
+                ph.p_memsz as u64,
+                VmFlags(bits: flag_bits)
+            )
+            if copy_rc < 0:
+                return copy_rc as i64
+
             mapped = mapped + 1
         idx = idx + 1
     if mapped == 0:
