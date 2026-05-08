@@ -43,7 +43,7 @@ use os.kernel.ipc.shared_dataset.{SharedDatasetRead, shared_dataset_create, shar
 use os.kernel.ipc.process_queue.{ProcessQueueRecv, PROCESS_QUEUE_NO_HANDLE, process_queue_create, process_queue_send, process_queue_recv, process_queue_poll, process_queue_close}
 use os.kernel.privilege.privilege_bridge.{bridge_lookup, two_gate_check}
 use os.posix.pipe_compat.{posix_pipe}
-use os.posix.fd_io.{PosixPreadExactBytes, posix_close, posix_dup, posix_dup2, posix_read, posix_write, posix_pread_exact_bytes}
+use os.posix.fd_io.{PosixPreadExactBytes, posix_close, posix_dup, posix_dup2, posix_read, posix_write, posix_pread_exact_bytes, posix_lseek}
 use os.posix.fd_table.{fd_activate_task, fd_prepare_fork_to_task, fd_dup_from, fd_is_valid, fd_get_cloexec, fd_set_cloexec, fd_get_status_flags, fd_set_status_flags, fd_get_object_id, fd_poll_ready, fd_poll_notification, MAX_FDS, POLLERR, POLLHUP, POLLNVAL}
 use os.posix.errno.{EFAULT, EIO, EINVAL, ENAMETOOLONG}
 use os.kernel.log.klog_api.{log_raw_println}
@@ -2796,7 +2796,7 @@ fn _handle_file_readdir(args: SyscallArgs, scheduler: Scheduler, ipc: IpcManager
 # ============================================================================
 
 fn _handle_file_unlink(args: SyscallArgs, scheduler: Scheduler, ipc: IpcManager) -> SyscallResult:
-    """Remove a file. Routed to VFS service via IPC.
+    """Remove a file. Routed to VFS service via IPC method 8 (UNLINK).
 
     Args:
       arg0: path pointer (userspace)
@@ -2806,17 +2806,31 @@ fn _handle_file_unlink(args: SyscallArgs, scheduler: Scheduler, ipc: IpcManager)
     val path_len = args.arg1 as u64
     if path_ptr == 0 or path_len == 0 or path_len > MAX_BINARY_PATH_LEN:
         return SyscallResult(value: -22)  # EINVAL
-    # Return -ENOSYS until VFS IPC payload is fully wired
-    SyscallResult(value: -38)  # ENOSYS
+    var sched = scheduler
+    val current = sched.get_current()
+    val msg = IpcMessage(
+        src_port: current.id,
+        dst_port: 0,
+        method: 8,
+        flags: 0,
+        payload_len: path_len,
+        cap_count: 0
+    )
+    var ipc_mgr = ipc
+    val result = ipc_mgr.send(msg)
+    SyscallResult(value: result)
 
 fn _handle_file_rename(args: SyscallArgs, scheduler: Scheduler, ipc: IpcManager) -> SyscallResult:
-    """Rename a file or directory. Routed to VFS service via IPC.
+    """Rename a file or directory. Routed to VFS service via IPC method 9 (RENAME).
 
     Args:
       arg0: old_path pointer (userspace)
       arg1: old_path length
       arg2: new_path pointer (userspace)
       arg3: new_path length
+
+    VFS dispatch_rename expects old_path\\0new_path concatenated in the payload.
+    flags encodes the old_path length so the VFS can split them.
     """
     val old_ptr = args.arg0 as u64
     val old_len = args.arg1 as u64
@@ -2826,11 +2840,22 @@ fn _handle_file_rename(args: SyscallArgs, scheduler: Scheduler, ipc: IpcManager)
         return SyscallResult(value: -22)  # EINVAL
     if new_ptr == 0 or new_len == 0 or new_len > MAX_BINARY_PATH_LEN:
         return SyscallResult(value: -22)  # EINVAL
-    # Return -ENOSYS until VFS IPC payload is fully wired
-    SyscallResult(value: -38)  # ENOSYS
+    var sched = scheduler
+    val current = sched.get_current()
+    val msg = IpcMessage(
+        src_port: current.id,
+        dst_port: 0,
+        method: 9,
+        flags: old_len as u32,
+        payload_len: old_len + 1 + new_len,
+        cap_count: 0
+    )
+    var ipc_mgr = ipc
+    val result = ipc_mgr.send(msg)
+    SyscallResult(value: result)
 
 fn _handle_file_rmdir(args: SyscallArgs, scheduler: Scheduler, ipc: IpcManager) -> SyscallResult:
-    """Remove a directory. Routed to VFS service via IPC.
+    """Remove a directory. Routed to VFS service via IPC method 14 (RMDIR).
 
     Args:
       arg0: path pointer (userspace)
@@ -2840,25 +2865,32 @@ fn _handle_file_rmdir(args: SyscallArgs, scheduler: Scheduler, ipc: IpcManager) 
     val path_len = args.arg1 as u64
     if path_ptr == 0 or path_len == 0 or path_len > MAX_BINARY_PATH_LEN:
         return SyscallResult(value: -22)  # EINVAL
-    # Return -ENOSYS until VFS IPC payload is fully wired
-    SyscallResult(value: -38)  # ENOSYS
+    var sched = scheduler
+    val current = sched.get_current()
+    val msg = IpcMessage(
+        src_port: current.id,
+        dst_port: 0,
+        method: 14,
+        flags: 0,
+        payload_len: path_len,
+        cap_count: 0
+    )
+    var ipc_mgr = ipc
+    val result = ipc_mgr.send(msg)
+    SyscallResult(value: result)
 
 fn _handle_lseek(args: SyscallArgs) -> SyscallResult:
-    """Reposition read/write file offset.
+    """Reposition read/write file offset via POSIX fd layer.
 
     Args:
       arg0: file descriptor
       arg1: offset
       arg2: whence (0=SEEK_SET, 1=SEEK_CUR, 2=SEEK_END)
     """
-    val fd = args.arg0 as u64
+    val fd = args.arg0 as i32
     val offset = args.arg1 as i64
-    val whence = args.arg2 as u64
-    # Validate whence
-    if whence > 2:
-        return SyscallResult(value: -22)  # EINVAL
-    # Stub: return the requested offset as-is (no real FD table yet)
-    SyscallResult(value: offset)
+    val whence = args.arg2 as u32
+    SyscallResult(value: posix_lseek(fd, offset, whence))
 
 fn _handle_ftruncate(args: SyscallArgs) -> SyscallResult:
     """Truncate an open file descriptor to the given length.
@@ -2866,14 +2898,14 @@ fn _handle_ftruncate(args: SyscallArgs) -> SyscallResult:
     Args:
       arg0: file descriptor
       arg1: length
+
+    Returns -ENOSYS: FS driver ftruncate() method not yet implemented.
     """
     val fd = args.arg0 as u64
     val length = args.arg1 as i64
-    # Validate length is non-negative
     if length < 0:
         return SyscallResult(value: -22)  # EINVAL
-    # Return -ENOSYS until VFS IPC payload is fully wired
-    SyscallResult(value: -38)  # ENOSYS
+    SyscallResult(value: -38)  # ENOSYS — needs FS driver ftruncate()
 
 fn _handle_getcwd(args: SyscallArgs, scheduler: Scheduler) -> SyscallResult:
     """Get current working directory.

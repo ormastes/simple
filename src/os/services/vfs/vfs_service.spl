@@ -45,6 +45,7 @@ val VFS_MOUNT_LIST: u32 = 10
 val VFS_SEEK: u32 = 11
 val VFS_CHMOD: u32 = 12
 val VFS_SYMLINK: u32 = 13
+val VFS_RMDIR: u32 = 14
 
 # Syscall numbers — canonical values from src/os/kernel/ipc/syscall.spl
 # dispatcher cases 20..23. Keep in sync with test/unit/os/kernel/ipc/
@@ -174,6 +175,7 @@ impl VfsService:
             VFS_SEEK: self.dispatch_seek(src_port, payload_addr, payload_len)
             VFS_CHMOD: self.dispatch_chmod(src_port, payload_addr, payload_len)
             VFS_SYMLINK: self.dispatch_symlink(src_port, payload_addr, payload_len)
+            VFS_RMDIR: self.dispatch_rmdir(src_port, payload_addr, payload_len)
             _: self.send_error_reply(src_port, STATUS_INVALID, "unknown VFS method")
 
     # ========================================================================
@@ -301,6 +303,21 @@ impl VfsService:
             val entry = mount.unwrap()
             val relative = self.vfs.strip_mount_prefix(path, entry.point.path)
             match entry.fs.unlink(relative):
+                Result.Ok(v):
+                    self.send_u64_reply(src_port, STATUS_OK, 1)
+                Result.Err(e):
+                    self.send_error_reply(src_port, STATUS_ERR, e)
+        else:
+            self.send_error_reply(src_port, STATUS_NOT_FOUND, "no filesystem for path")
+
+    me dispatch_rmdir(src_port: u64, payload_addr: u64, payload_len: u32):
+        """Parse RMDIR request: path(text)."""
+        val path = _read_text(payload_addr, payload_len)
+        val mount = self.vfs.resolve_mount(path)
+        if mount.?:
+            val entry = mount.unwrap()
+            val relative = self.vfs.strip_mount_prefix(path, entry.point.path)
+            match entry.fs.rmdir(relative):
                 Result.Ok(v):
                     self.send_u64_reply(src_port, STATUS_OK, 1)
                 Result.Err(e):
