@@ -1,0 +1,213 @@
+# Mach-O 64-bit Inspector
+# Pure-Simple Mach-O header and load command reader using BinaryReader.
+# Mirrors the elf_inspect two-layer pattern: parse_header -> parse_load_commands -> inspect.
+
+use std.binary_io.{BinaryReader, ByteOrder}
+
+# ============================================================================
+# Mach-O Constants (read-side; writer constants live in macho_writer.spl)
+# ============================================================================
+
+val MH_MAGIC_64: i64 = 0xfeedfacf
+val MH_CIGAM_64: i64 = 0xcffaedfe
+
+val MH_OBJECT: i64 = 1
+val MH_EXECUTE: i64 = 2
+val MH_DYLIB: i64 = 6
+val MH_BUNDLE: i64 = 8
+val MH_DSYM: i64 = 10
+
+val CPU_TYPE_X86_64: i64 = 0x01000007
+val CPU_TYPE_ARM64: i64 = 0x0100000c
+
+val LC_SEGMENT_64: i64 = 0x19
+val LC_SYMTAB: i64 = 0x02
+val LC_DYSYMTAB: i64 = 0x0b
+val LC_UUID: i64 = 0x1b
+val LC_BUILD_VERSION: i64 = 0x32
+val LC_SOURCE_VERSION: i64 = 0x2a
+
+val MACHO_HEADER_SIZE: i64 = 32
+val SEGMENT_CMD_SIZE: i64 = 72
+val SECTION_64_SIZE: i64 = 80
+val NLIST_64_SIZE: i64 = 16
+
+# ============================================================================
+# Data Structures
+# ============================================================================
+
+struct MachOHeader:
+    magic: i64
+    cputype: i64
+    cpusubtype: i64
+    filetype: i64
+    ncmds: i64
+    sizeofcmds: i64
+    flags: i64
+    reserved: i64
+
+struct MachOLoadCommand:
+    cmd: i64
+    cmdsize: i64
+    offset: i64
+
+struct MachOInspector:
+    header: MachOHeader
+    load_commands: [MachOLoadCommand]
+    is_valid: bool
+    byte_order: ByteOrder
+
+# ============================================================================
+# Parsing Functions
+# ============================================================================
+
+fn macho_parse_header(data: [u8]) -> Result<MachOHeader, text>:
+    if data.len() < MACHO_HEADER_SIZE:
+        return Err("data too small for Mach-O header")
+
+    var reader = BinaryReader.new(data)
+
+    val magic_bytes = reader.read_u32(ByteOrder.LittleEndian)
+    if magic_bytes.?:
+        pass_dn
+    else:
+        return Err("failed to read magic")
+
+    val magic = magic_bytes!
+
+    var order = ByteOrder.LittleEndian
+    if magic == MH_MAGIC_64:
+        order = ByteOrder.LittleEndian
+    else if magic == MH_CIGAM_64:
+        order = ByteOrder.BigEndian
+    else:
+        return Err("not a Mach-O 64-bit file: bad magic 0x{magic}")
+
+    val cputype = reader.read_u32(order)
+    val cpusubtype = reader.read_u32(order)
+    val filetype = reader.read_u32(order)
+    val ncmds = reader.read_u32(order)
+    val sizeofcmds = reader.read_u32(order)
+    val flags = reader.read_u32(order)
+    val reserved = reader.read_u32(order)
+
+    if cputype.? and cpusubtype.? and filetype.? and ncmds.? and sizeofcmds.? and flags.? and reserved.?:
+        return Ok(MachOHeader(
+            magic: magic,
+            cputype: cputype!,
+            cpusubtype: cpusubtype!,
+            filetype: filetype!,
+            ncmds: ncmds!,
+            sizeofcmds: sizeofcmds!,
+            flags: flags!,
+            reserved: reserved!,
+        ))
+    return Err("truncated Mach-O header")
+
+fn macho_detect_byte_order(header: MachOHeader) -> ByteOrder:
+    if header.magic == MH_CIGAM_64:
+        return ByteOrder.BigEndian
+    return ByteOrder.LittleEndian
+
+fn macho_parse_load_commands(data: [u8], header: MachOHeader) -> [MachOLoadCommand]:
+    val order = macho_detect_byte_order(header)
+    var reader = BinaryReader.new(data)
+    reader.skip(MACHO_HEADER_SIZE)
+
+    var commands: [MachOLoadCommand] = []
+    var offset = MACHO_HEADER_SIZE
+
+    var i = 0
+    while i < header.ncmds:
+        val cmd_val = reader.read_u32(order)
+        val cmdsize_val = reader.read_u32(order)
+
+        if cmd_val.? and cmdsize_val.?:
+            commands = commands.push(MachOLoadCommand(
+                cmd: cmd_val!,
+                cmdsize: cmdsize_val!,
+                offset: offset,
+            ))
+            val skip_amount = cmdsize_val! - 8
+            if skip_amount > 0:
+                reader.skip(skip_amount)
+            offset = offset + cmdsize_val!
+        else:
+            break
+        i = i + 1
+
+    commands
+
+fn macho_inspect(data: [u8]) -> Result<MachOInspector, text>:
+    val header_result = macho_parse_header(data)
+    if header_result.is_err():
+        return Err(header_result.err()!)
+
+    val header = header_result.ok()!
+    val commands = macho_parse_load_commands(data, header)
+    val order = macho_detect_byte_order(header)
+
+    Ok(MachOInspector(
+        header: header,
+        load_commands: commands,
+        is_valid: true,
+        byte_order: order,
+    ))
+
+# ============================================================================
+# Utility Functions
+# ============================================================================
+
+fn macho_filetype_name(filetype: i64) -> text:
+    if filetype == MH_OBJECT:
+        return "MH_OBJECT"
+    if filetype == MH_EXECUTE:
+        return "MH_EXECUTE"
+    if filetype == MH_DYLIB:
+        return "MH_DYLIB"
+    if filetype == MH_BUNDLE:
+        return "MH_BUNDLE"
+    if filetype == MH_DSYM:
+        return "MH_DSYM"
+    "unknown({filetype})"
+
+fn macho_cputype_name(cputype: i64) -> text:
+    if cputype == CPU_TYPE_X86_64:
+        return "x86_64"
+    if cputype == CPU_TYPE_ARM64:
+        return "arm64"
+    "unknown({cputype})"
+
+fn macho_loadcmd_name(cmd: i64) -> text:
+    if cmd == LC_SEGMENT_64:
+        return "LC_SEGMENT_64"
+    if cmd == LC_SYMTAB:
+        return "LC_SYMTAB"
+    if cmd == LC_DYSYMTAB:
+        return "LC_DYSYMTAB"
+    if cmd == LC_UUID:
+        return "LC_UUID"
+    if cmd == LC_BUILD_VERSION:
+        return "LC_BUILD_VERSION"
+    if cmd == LC_SOURCE_VERSION:
+        return "LC_SOURCE_VERSION"
+    "LC_unknown(0x{cmd})"
+
+fn macho_find_load_command(inspector: MachOInspector, cmd_type: i64) -> MachOLoadCommand?:
+    for lc in inspector.load_commands:
+        if lc.cmd == cmd_type:
+            return lc
+    return nil
+
+fn macho_has_uuid(inspector: MachOInspector) -> bool:
+    val lc = macho_find_load_command(inspector, LC_UUID)
+    lc.?
+
+fn macho_is_dsym(inspector: MachOInspector) -> bool:
+    inspector.header.filetype == MH_DSYM
+
+fn macho_is_object(inspector: MachOInspector) -> bool:
+    inspector.header.filetype == MH_OBJECT
+
+fn macho_is_executable(inspector: MachOInspector) -> bool:
+    inspector.header.filetype == MH_EXECUTE
