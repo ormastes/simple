@@ -1,0 +1,199 @@
+# @cover src/compiler/80.driver/ 80%
+# Advanced Types Integration Tests
+#
+# This spec intentionally avoids placeholder claims about full generic,
+# intersection, or refinement support. It covers the bounded "advanced type"
+# behavior that the public compiler facade can honestly verify today:
+# - union definitions and pattern matching
+# - Result/Option-style propagation with `?`
+# - SIMD type annotations (`vec[...]`)
+# - parser rejection for currently unsupported intersection/refinement syntax
+
+use std.spec
+
+use compiler.driver.driver_api.{check_file, compile_to_smf}
+
+val NL = "\n"
+
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_file_delete(path: text) -> bool
+extern fn rt_file_exists(path: text) -> bool
+
+fn write_file(path: text, content: text) -> bool:
+    rt_file_write_text(path, content)
+
+fn delete_file(path: text) -> bool:
+    rt_file_delete(path)
+
+fn union_program() -> text:
+    "union MyResult:" + NL +
+    "    Ok(value: i32)" + NL +
+    "    Err(msg: text)" + NL + NL +
+    "fn unwrap_or_zero(r: MyResult) -> i32:" + NL +
+    "    match r:" + NL +
+    "        case MyResult.Ok(v):" + NL +
+    "            v" + NL +
+    "        case MyResult.Err(_):" + NL +
+    "            0" + NL + NL +
+    "fn main() -> i32:" + NL +
+    "    unwrap_or_zero(MyResult.Ok(42))"
+
+fn try_operator_program() -> text:
+    "fn divide(a: i64, b: i64) -> Result<i64, text>:" + NL +
+    "    if b == 0:" + NL +
+    "        return Err(\"division by zero\")" + NL +
+    "    return Ok(a / b)" + NL + NL +
+    "fn compute() -> Result<i64, text>:" + NL +
+    "    val x = divide(a=84, b=2)?" + NL +
+    "    Ok(x / 2)" + NL + NL +
+    "fn main() -> i64:" + NL +
+    "    match compute():" + NL +
+    "        case Ok(v):" + NL +
+    "            v" + NL +
+    "        case Err(_):" + NL +
+    "            0"
+
+fn simd_annotation_program() -> text:
+    "fn add_vectors(a: vec[4, f32], b: vec[4, f32]) -> vec[4, f32]:" + NL +
+    "    a" + NL + NL +
+    "fn main() -> i64:" + NL +
+    "    0"
+
+fn intersection_syntax_program() -> text:
+    "fn takes_both(x: Read & Write) -> i64:" + NL +
+    "    1"
+
+fn refinement_syntax_program() -> text:
+    "fn positive(x: i64 where x > 0) -> i64:" + NL +
+    "    x"
+
+describe "Advanced Type Integration via Compiler Facade":
+
+    context "when checking supported advanced type forms":
+        it "accepts unions with payloads and pattern matching":
+            val src_path = "/tmp/sml_advanced_types_union_ok.spl"
+            val out_path = "/tmp/sml_advanced_types_union_ok.smf"
+            delete_file(out_path)
+            write_file(src_path, union_program())
+
+            val result = check_file(src_path)
+
+            expect result.is_success() == true
+            delete_file(src_path)
+            delete_file(out_path)
+
+        it "compiles union-based control flow into an smf artifact":
+            val src_path = "/tmp/sml_advanced_types_union_compile.spl"
+            val out_path = "/tmp/sml_advanced_types_union_compile.smf"
+            delete_file(out_path)
+            write_file(src_path, union_program())
+
+            val result = compile_to_smf(src_path, out_path)
+
+            expect result.is_ok() == true
+            expect rt_file_exists(out_path) == true
+            delete_file(src_path)
+            delete_file(out_path)
+
+        it "accepts result propagation with the try operator":
+            val src_path = "/tmp/sml_advanced_types_try_ok.spl"
+            val out_path = "/tmp/sml_advanced_types_try_ok.smf"
+            delete_file(out_path)
+            write_file(src_path, try_operator_program())
+
+            val result = check_file(src_path)
+
+            expect result.is_success() == true
+            delete_file(src_path)
+            delete_file(out_path)
+
+        it "compiles a try-operator program into an smf artifact":
+            val src_path = "/tmp/sml_advanced_types_try_compile.spl"
+            val out_path = "/tmp/sml_advanced_types_try_compile.smf"
+            delete_file(out_path)
+            write_file(src_path, try_operator_program())
+
+            val result = compile_to_smf(src_path, out_path)
+
+            expect result.is_ok() == true
+            expect rt_file_exists(out_path) == true
+            delete_file(src_path)
+            delete_file(out_path)
+
+        it "accepts SIMD vector annotations in function signatures":
+            val src_path = "/tmp/sml_advanced_types_simd_ok.spl"
+            val out_path = "/tmp/sml_advanced_types_simd_ok.smf"
+            delete_file(out_path)
+            write_file(src_path, simd_annotation_program())
+
+            val result = check_file(src_path)
+
+            expect result.is_success() == true
+            delete_file(src_path)
+            delete_file(out_path)
+
+        it "compiles a program with SIMD-typed signatures":
+            val src_path = "/tmp/sml_advanced_types_simd_compile.spl"
+            val out_path = "/tmp/sml_advanced_types_simd_compile.smf"
+            delete_file(out_path)
+            write_file(src_path, simd_annotation_program())
+
+            val result = compile_to_smf(src_path, out_path)
+
+            expect result.is_ok() == true
+            expect rt_file_exists(out_path) == true
+            delete_file(src_path)
+            delete_file(out_path)
+
+    context "when checking unsupported advanced type syntax":
+        it "rejects intersection type syntax with a concrete parser error":
+            val src_path = "/tmp/sml_advanced_types_intersection_bad.spl"
+            val out_path = "/tmp/sml_advanced_types_intersection_bad.smf"
+            delete_file(out_path)
+            write_file(src_path, intersection_syntax_program())
+
+            val result = check_file(src_path)
+
+            expect result.is_success() == false
+            expect (result.get_errors().join("\n")).contains("Ampersand")
+            delete_file(src_path)
+            delete_file(out_path)
+
+        it "rejects refinement-style where clauses with a concrete parser error":
+            val src_path = "/tmp/sml_advanced_types_refinement_bad.spl"
+            val out_path = "/tmp/sml_advanced_types_refinement_bad.smf"
+            delete_file(out_path)
+            write_file(src_path, refinement_syntax_program())
+
+            val result = check_file(src_path)
+
+            expect result.is_success() == false
+            expect (result.get_errors().join("\n")).contains("Where")
+            delete_file(src_path)
+            delete_file(out_path)
+
+        it "does not emit an artifact for rejected intersection syntax":
+            val src_path = "/tmp/sml_advanced_types_intersection_compile_bad.spl"
+            val out_path = "/tmp/sml_advanced_types_intersection_compile_bad.smf"
+            delete_file(out_path)
+            write_file(src_path, intersection_syntax_program())
+
+            val result = compile_to_smf(src_path, out_path)
+
+            expect result.is_ok() == false
+            expect rt_file_exists(out_path) == false
+            delete_file(src_path)
+            delete_file(out_path)
+
+        it "does not emit an artifact for rejected refinement syntax":
+            val src_path = "/tmp/sml_advanced_types_refinement_compile_bad.spl"
+            val out_path = "/tmp/sml_advanced_types_refinement_compile_bad.smf"
+            delete_file(out_path)
+            write_file(src_path, refinement_syntax_program())
+
+            val result = compile_to_smf(src_path, out_path)
+
+            expect result.is_ok() == false
+            expect rt_file_exists(out_path) == false
+            delete_file(src_path)
+            delete_file(out_path)

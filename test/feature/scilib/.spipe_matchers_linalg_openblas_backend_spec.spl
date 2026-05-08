@@ -1,0 +1,96 @@
+# @cover src/lib/nogc_async_mut/linalg/mod.spl 80%
+"""
+# Linalg OpenBLAS Backend Specification
+
+**Feature IDs:** REQ-SCILIB-B-001, REQ-SCILIB-B-002, REQ-SCILIB-B-003, REQ-SCILIB-B-004,
+NFR-SCILIB-B-001, NFR-SCILIB-B-002, NFR-SCILIB-B-004
+
+Validates the dynamic OpenBLAS/LAPACKE adapter. The existing scalar public APIs
+keep their signatures and fall back to scalar behavior when the native shim is
+unavailable.
+"""
+
+use std.linalg.*
+use std.ndarray.*
+
+
+describe "linalg OpenBLAS dynamic backend":
+    it "reports either an available OpenBLAS backend or a typed unavailable error":
+        val required = require_linalg_backend("openblas")
+        match required:
+            case Ok(status):
+                expect status.selected == "openblas"
+                expect status.real_native == true
+            case Err(BackendError.BackendUnavailable(name)):
+                expect name == "openblas"
+            case _:
+                expect false == true
+
+    it "matches scalar dot when the OpenBLAS shim is available":
+        val left = vector_from([Float64.new(1.5), Float64.new(-2.0), Float64.new(3.25), Float64.new(4.0)])
+        val right = vector_from([Float64.new(2.0), Float64.new(5.0), Float64.new(-1.0), Float64.new(0.5)])
+        val result = openblas_dot(left, right)
+        match result:
+            case Ok(value):
+                expect value == dot(left, right).unwrap()
+            case Err(BackendError.BackendUnavailable(name)):
+                expect name == "openblas"
+            case _:
+                expect false == true
+
+    it "matches scalar axpy when the OpenBLAS shim is available":
+        val x = vector_from([Float64.new(1.0), Float64.new(2.0), Float64.new(3.0), Float64.new(4.0)])
+        val y = vector_from([Float64.new(5.0), Float64.new(6.0), Float64.new(7.0), Float64.new(8.0)])
+        val result = openblas_axpy(Float64.new(2.0), x, y)
+        match result:
+            case Ok(value):
+                val scalar = try_axpy(Float64.new(2.0), x, y).unwrap()
+                expect value.get_f64(Index.new(0)) == scalar.get_f64(Index.new(0))
+                expect value.get_f64(Index.new(3)) == scalar.get_f64(Index.new(3))
+            case Err(BackendError.BackendUnavailable(name)):
+                expect name == "openblas"
+            case _:
+                expect false == true
+
+    it "matches scalar gemm when the OpenBLAS shim is available":
+        val a = matrix_from_rows([
+            [Float64.new(1.0), Float64.new(2.0), Float64.new(3.0)],
+            [Float64.new(4.0), Float64.new(5.0), Float64.new(6.0)]])
+        val b = matrix_from_rows([
+            [Float64.new(7.0), Float64.new(8.0)],
+            [Float64.new(9.0), Float64.new(10.0)],
+            [Float64.new(11.0), Float64.new(12.0)]])
+        val c_in = full_matrix(Index.new(2), Index.new(2), Float64.new(1.0))
+        val result = openblas_gemm(Float64.new(2.0), a, b, Float64.new(3.0), c_in)
+        match result:
+            case Ok(value):
+                val scalar = gemm(Float64.new(2.0), a, b, Float64.new(3.0), c_in)
+                expect value.get_f64_at([Index.new(0), Index.new(0)]) == scalar.get_f64_at([Index.new(0), Index.new(0)])
+                expect value.get_f64_at([Index.new(1), Index.new(1)]) == scalar.get_f64_at([Index.new(1), Index.new(1)])
+            case Err(BackendError.BackendUnavailable(name)):
+                expect name == "openblas"
+            case _:
+                expect false == true
+
+    it "matches scalar solve when the OpenBLAS shim is available":
+        val a = matrix_from_rows([
+            [Float64.new(2.0), Float64.new(0.0), Float64.new(0.0)],
+            [Float64.new(1.0), Float64.new(2.0), Float64.new(0.0)],
+            [Float64.new(1.0), Float64.new(1.0), Float64.new(3.0)]])
+        val b = vector_from([Float64.new(2.0), Float64.new(5.0), Float64.new(14.0)])
+        val result = openblas_solve(a, b)
+        match result:
+            case Ok(value):
+                val scalar = solve(a, b).unwrap()
+                expect value.get_f64(Index.new(0)) == scalar.get_f64(Index.new(0))
+                expect value.get_f64(Index.new(1)) == scalar.get_f64(Index.new(1))
+                expect value.get_f64(Index.new(2)) == scalar.get_f64(Index.new(2))
+            case Err(BackendError.BackendUnavailable(name)):
+                expect name == "openblas"
+            case _:
+                expect false == true
+
+    it "preserves public scalar fallback when OpenBLAS is requested but unavailable":
+        val left = vector_from([Float64.new(1.0), Float64.new(2.0), Float64.new(3.0)])
+        val right = vector_from([Float64.new(4.0), Float64.new(5.0), Float64.new(6.0)])
+        expect dot(left, right).unwrap().value == 32.0

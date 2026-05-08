@@ -1,0 +1,101 @@
+use std.spec.*
+use common.ui.theme_package.{
+    default_theme_id,
+    resolve_theme_alias,
+    load_theme_package,
+    resolved_theme_css,
+    theme_glass_config,
+    theme_icon_defaults,
+    theme_numeric_colors,
+    validate_default_theme_package,
+    render_theme_validation_report
+}
+use app.ui.web.html.{generate_css}
+use os.compositor.simple_web_window_renderer.{simple_web_app_html_with_theme}
+use os.compositor.browser_backend.{theme_bg, theme_accent}
+
+describe "Folder theme packages":
+
+    it "uses aetheric_dark as the registry default":
+        expect default_theme_id() == "aetheric_dark"
+
+    it "keeps glass_obsidian_dark as a compatibility alias":
+        expect resolve_theme_alias("glass_obsidian_dark") == "aetheric_dark"
+
+    it "resolves the Aetheric package metadata and source reference":
+        val pkg = load_theme_package("aetheric_dark")
+        expect pkg.id == "aetheric_dark"
+        expect pkg.family_id == "aetheric"
+        expect (pkg.source_reference).ends_with("config/themes/raw/simple_os_dark_refined_alignment/code.html")
+        expect pkg.theme_path == "config/themes/aetheric_dark/theme.sdn"
+        expect pkg.family_path == "config/themes/families/aetheric/theme.sdn"
+
+    it "assembles family shape CSS, base CSS, widgets, and icon defaults":
+        val css = resolved_theme_css("aetheric_dark")
+        expect (css).contains("--radius-md")
+        expect (css).contains("--ui-accent: #adc6ff")
+        expect (css).contains(".widget-panel")
+        expect (css).contains("--theme-icon-terminal")
+        expect (css).contains("--theme-icon-command-palette")
+
+    it "keeps per-widget CSS and tokens on the resolved package":
+        val pkg = load_theme_package("aetheric_dark")
+        expect pkg.token_map.get("--ui-accent") ?? "" == "#adc6ff"
+        expect (pkg.widget_css_by_name.get("panel") ?? "").contains(".widget-panel")
+        expect pkg.ui_theme.name == "aetheric_dark"
+
+    it "resolves numeric colors for BrowserBackend from the package":
+        val colors = theme_numeric_colors("aetheric_dark")
+        expect colors.bg == 0xFF0E0E10
+        expect colors.accent == 0xFFADC6FF
+        expect theme_bg("aetheric_dark") == colors.bg
+        expect theme_accent("aetheric_dark") == colors.accent
+
+    it "resolves compositor glass config from the same package colors":
+        val colors = theme_numeric_colors("aetheric_dark")
+        val cfg = theme_glass_config("aetheric_dark")
+        expect cfg.accent_color == colors.accent & 0x00FFFFFF
+        expect cfg.bg_top == colors.bg & 0x00FFFFFF
+        expect cfg.blur_radius == 30
+
+    it "resolves all default icon roles with labels colors and sizes":
+        val icons = theme_icon_defaults("aetheric_dark")
+        match icons.get("terminal"):
+            case Some(icon):
+                expect icon.icon_id == "terminal"
+                expect icon.label == "Terminal"
+                expect icon.color_token == "var(--ui-success)"
+                expect icon.size_role == "app"
+            case _:
+                expect "missing terminal icon" == "resolved terminal icon"
+        match icons.get("command_palette"):
+            case Some(icon):
+                expect icon.icon_id == "command_palette"
+                expect icon.size_role == "action"
+            case _:
+                expect "missing command palette icon" == "resolved command palette icon"
+        match icons.get("error"):
+            case Some(icon):
+                expect icon.color_token == "var(--ui-error)"
+                expect icon.size_role == "status"
+            case _:
+                expect "missing error icon" == "resolved error icon"
+
+    it "web CSS includes package tokens and local widget overrides":
+        val css = generate_css("aetheric_dark")
+        expect (css).contains("Folder theme package")
+        expect (css).contains("--app-background-image")
+        expect (css).contains("0 0 40px var(--glass-accent)")
+
+    it "Simple Web app windows consume the selected theme":
+        val html = simple_web_app_html_with_theme("aetheric_dark", "Terminal", "pwd")
+        expect (html).contains("--ui-accent: #adc6ff")
+        expect (html).contains("SimpleOS shell via Simple Web")
+
+    it "validates the checked-in theme package graph":
+        val issues = validate_default_theme_package()
+        expect issues.len() == 0
+
+    it "renders a PASS validation report":
+        val report = render_theme_validation_report(validate_default_theme_package())
+        expect (report).contains("STATUS: PASS")

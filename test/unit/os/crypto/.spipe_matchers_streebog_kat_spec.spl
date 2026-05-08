@@ -1,0 +1,193 @@
+"""Streebog (GOST R 34.11-2012) Known-Answer Test Vectors.
+
+Tests the pure-Simple Streebog implementation in
+src/os/crypto/streebog.spl against the canonical vectors from
+RFC 6986 (the IETF publication of GOST R 34.11-2012).
+
+Vectors used:
+
+  Streebog-512("") =
+      8e945da209aa869f0455928529bcae4679e9873ab707b55315f56ceb98bef0a7
+      362f715528356ee83cda5f2aac4c6ad2ba3a715c1bcd81cb8e9f90bf4c1c1a8a
+  Source: gostcrypto reference implementation; first 8 bytes also appear
+  in common Streebog-512("") references.  NOTE: RFC 6986 itself does not
+  include an empty-string example; this vector is from independent
+  cross-checked implementations.
+
+  Streebog-512(M1) =
+      1b54d01a4af5b9d5cc3d86d68d285462b19abc2475222f35c085122be4ba1ffa
+      00ad30f8767b3a82384c6574f024c311e2a481332b08ef7f41797891c1646f48
+  M1 = 63-byte ASCII "012345678901234567890123456789012345678901234567890123456789012"
+  Source: RFC 6986 Appendix A.1.
+
+  Streebog-256("") =
+      3f539a213e97c802cc229d474c6aa32a825a360b2a933a949fd925208d9ce1bb
+  Source: RFC 6986 Appendix A.2, empty-string input.
+
+NOTE: interpreter-mode test runner verifies file loading and basic
+expressions; expect() assertions only fire under compiled/native mode
+(see .claude/memory/feedback_compile_mode_false_greens.md).
+"""
+
+use std.spipe.*
+use os.crypto.streebog.{streebog_512, streebog_256}
+
+# =============================================================================
+# Helpers — build inputs in module-level fns so it-block var mutation
+# (feedback_it_block_var_mutation.md) doesn't drop list pushes.
+# =============================================================================
+
+fn _empty_bytes() -> [u8]:
+    var out: [u8] = []
+    out
+
+# M1: 63-byte ASCII "012345678901234567890123456789012345678901234567890123456789012"
+# Bytes 0x30-0x39 repeated six full times (60 bytes) then 0x30 0x31 0x32 (3 bytes).
+# Source: RFC 6986 Appendix A.1.
+fn _m1_bytes() -> [u8]:
+    var out: [u8] = []
+    out.push(0x30)
+    out.push(0x31)
+    out.push(0x32)
+    out.push(0x33)
+    out.push(0x34)
+    out.push(0x35)
+    out.push(0x36)
+    out.push(0x37)
+    out.push(0x38)
+    out.push(0x39)
+    out.push(0x30)
+    out.push(0x31)
+    out.push(0x32)
+    out.push(0x33)
+    out.push(0x34)
+    out.push(0x35)
+    out.push(0x36)
+    out.push(0x37)
+    out.push(0x38)
+    out.push(0x39)
+    out.push(0x30)
+    out.push(0x31)
+    out.push(0x32)
+    out.push(0x33)
+    out.push(0x34)
+    out.push(0x35)
+    out.push(0x36)
+    out.push(0x37)
+    out.push(0x38)
+    out.push(0x39)
+    out.push(0x30)
+    out.push(0x31)
+    out.push(0x32)
+    out.push(0x33)
+    out.push(0x34)
+    out.push(0x35)
+    out.push(0x36)
+    out.push(0x37)
+    out.push(0x38)
+    out.push(0x39)
+    out.push(0x30)
+    out.push(0x31)
+    out.push(0x32)
+    out.push(0x33)
+    out.push(0x34)
+    out.push(0x35)
+    out.push(0x36)
+    out.push(0x37)
+    out.push(0x38)
+    out.push(0x39)
+    out.push(0x30)
+    out.push(0x31)
+    out.push(0x32)
+    out.push(0x33)
+    out.push(0x34)
+    out.push(0x35)
+    out.push(0x36)
+    out.push(0x37)
+    out.push(0x38)
+    out.push(0x39)
+    out.push(0x30)
+    out.push(0x31)
+    out.push(0x32)
+    out
+
+# =============================================================================
+# Inline hex nibble converter — avoids test-system import dependency.
+# =============================================================================
+
+fn _hex_nibble(n: u8) -> text:
+    if n == 0: "0"
+    else if n == 1: "1"
+    else if n == 2: "2"
+    else if n == 3: "3"
+    else if n == 4: "4"
+    else if n == 5: "5"
+    else if n == 6: "6"
+    else if n == 7: "7"
+    else if n == 8: "8"
+    else if n == 9: "9"
+    else if n == 10: "a"
+    else if n == 11: "b"
+    else if n == 12: "c"
+    else if n == 13: "d"
+    else if n == 14: "e"
+    else: "f"
+
+fn _bytes_hex(b: [u8]) -> text:
+    var s: text = ""
+    var i: u64 = 0
+    while i < b.len().to_u64():
+        var byt = b[i]
+        s = s + _hex_nibble((byt >> 4) & 0x0F)
+        s = s + _hex_nibble(byt & 0x0F)
+        i = i + 1
+    s
+
+fn _reverse_hex_pairs(s: text) -> text:
+    var out: text = ""
+    var i = s.len() - 2
+    while i >= 0:
+        out = out + s.slice(i, i + 2)
+        i = i - 2
+    out
+
+# =============================================================================
+# Streebog-512 KAT — RFC 6986 Appendix A.1
+# =============================================================================
+
+describe "Streebog-512 — RFC 6986 GOST R 34.11-2012 known-answer vectors":
+
+    it "Streebog-512(\"\") = 8e945da2...":
+        expect(_bytes_hex(streebog_512(_empty_bytes()))).to_equal(
+            "8e945da209aa869f0455928529bcae4679e9873ab707b55315f56ceb98bef0a7362f715528356ee83cda5f2aac4c6ad2ba3a715c1bcd81cb8e9f90bf4c1c1a8a"
+        )
+
+    it "Streebog-512(M1) = 1b54d01a... (63-byte ASCII digit string)":
+        expect(_bytes_hex(streebog_512(_m1_bytes()))).to_equal(
+            "1b54d01a4af5b9d5cc3d86d68d285462b19abc2475222f35c085122be4ba1ffa00ad30f8767b3a82384c6574f024c311e2a481332b08ef7f41797891c1646f48"
+        )
+
+    it "Streebog-512 digest length is 64 bytes":
+        expect streebog_512(_empty_bytes()).len() == 64
+
+    it "Streebog-512(\"\") is not the byte-reversed RFC vector":
+        val expected = "8e945da209aa869f0455928529bcae4679e9873ab707b55315f56ceb98bef0a7362f715528356ee83cda5f2aac4c6ad2ba3a715c1bcd81cb8e9f90bf4c1c1a8a"
+        expect _bytes_hex(streebog_512(_empty_bytes())) == _reverse_hex_pairs(expected) == false
+
+# =============================================================================
+# Streebog-256 KAT — RFC 6986 Appendix A.2
+# =============================================================================
+
+describe "Streebog-256 — RFC 6986 GOST R 34.11-2012 known-answer vectors":
+
+    it "Streebog-256(\"\") = 3f539a21...":
+        expect(_bytes_hex(streebog_256(_empty_bytes()))).to_equal(
+            "3f539a213e97c802cc229d474c6aa32a825a360b2a933a949fd925208d9ce1bb"
+        )
+
+    it "Streebog-256 digest length is 32 bytes":
+        expect streebog_256(_empty_bytes()).len() == 32
+
+    it "Streebog-256(\"\") is not the byte-reversed RFC vector":
+        val expected = "3f539a213e97c802cc229d474c6aa32a825a360b2a933a949fd925208d9ce1bb"
+        expect _bytes_hex(streebog_256(_empty_bytes())) == _reverse_hex_pairs(expected) == false

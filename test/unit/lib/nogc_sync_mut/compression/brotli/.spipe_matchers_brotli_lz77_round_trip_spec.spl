@@ -1,0 +1,621 @@
+# brotli_lz77_round_trip_spec.spl
+#
+# Round-trip tests for the LZ77 single-backreference brotli path
+# (RFC 7932 §5/§7.3 insert-and-copy commands + §4 distance code).
+#
+# The encoder picks the LZ77 path when:
+#   - distinct(input) <= 4    (simple-prefix literal tree)
+#   - data[p..n] = data[p-d..n-d] for some prefix p in 0..=130 and distance d
+#   - cop_len = n-p in 2..=261, with the 70..261 tier requiring p=130 so the
+#     encoder can use insert-length code 16 and ICP kind 10
+# Otherwise it falls back to the literal-only or uncompressed paths.
+# All paths must round-trip byte-exactly through the decoder.
+
+use std.spec.{describe, it, expect}
+use std.nogc_sync_mut.compression.brotli.decoder.{brotli_decode}
+use std.nogc_sync_mut.compression.brotli.encoder.{brotli_encode_uncompressed, brotli_encode}
+use std.common.compress.types.{CompressionError}
+
+# ---- helpers ----
+
+fn _bytes_equal(a: [u8], b: [u8]) -> bool:
+    if a.len() != b.len():
+        return false
+    var i = 0
+    while i < a.len():
+        if a[i] != b[i]:
+            return false
+        i = i + 1
+    true
+
+# 24 bytes "ABCABC..." (8 reps of 'A','B','C').
+# distinct=3, p=3 prefix "ABC", copy_len=21 at distance 3 (cop_kind=1).
+fn _abc_rep_24() -> [u8]:
+    var out: [u8] = []
+    var i = 0
+    while i < 8:
+        out.push(0x41u8)
+        out.push(0x42u8)
+        out.push(0x43u8)
+        i = i + 1
+    out
+
+# 60 bytes "ABCABC..." (20 reps).  Tests larger copy length still in cop_kind=1.
+fn _abc_rep_60() -> [u8]:
+    var out: [u8] = []
+    var i = 0
+    while i < 20:
+        out.push(0x41u8)
+        out.push(0x42u8)
+        out.push(0x43u8)
+        i = i + 1
+    out
+
+# 12 bytes "ABABABAB...": 2 distinct bytes, prefix p=2 "AB", copy 10 at d=2.
+fn _ab_rep_12() -> [u8]:
+    var out: [u8] = []
+    var i = 0
+    while i < 6:
+        out.push(0x41u8)
+        out.push(0x42u8)
+        i = i + 1
+    out
+
+# 4 bytes "ABAB": the smallest payload that still admits a backreference.
+# p=2, copy_len=2 at distance 2, which is the lower bound of the current
+# single-command copy-length subset.
+fn _ab_rep_4() -> [u8]:
+    var out: [u8] = []
+    out.push(0x41u8)
+    out.push(0x42u8)
+    out.push(0x41u8)
+    out.push(0x42u8)
+    out
+
+# 16 bytes all 'X': RLE-style, p=1 prefix "X", copy 15 at distance 1.
+# Tests overlapping copy (distance < copy_length).
+fn _xxxx_16() -> [u8]:
+    var out: [u8] = []
+    var i = 0
+    while i < 16:
+        out.push(0x58u8)
+        i = i + 1
+    out
+
+# Mixed: "AAABAAAB" (8 bytes, 2 distinct).  p=4 prefix "AAAB", copy 4 at d=4.
+fn _aaab_aaab_8() -> [u8]:
+    var out: [u8] = []
+    out.push(0x41u8)
+    out.push(0x41u8)
+    out.push(0x41u8)
+    out.push(0x42u8)
+    out.push(0x41u8)
+    out.push(0x41u8)
+    out.push(0x41u8)
+    out.push(0x42u8)
+    out
+
+# 16 bytes with an 8-byte non-periodic prefix repeated once.
+# distinct=4, p=8, copy_len=8 at distance 8. This exercises the
+# insert-length 8..15 ICP tier (kind 6) that used to be unreachable.
+fn _abcdabcc_twice_16() -> [u8]:
+    var out: [u8] = []
+    val prefix: [u8] = [0x41u8, 0x42u8, 0x43u8, 0x44u8, 0x41u8, 0x42u8, 0x43u8, 0x43u8]
+    var rep = 0
+    while rep < 2:
+        var i = 0
+        while i < prefix.len():
+            out.push(prefix[i])
+            i = i + 1
+        rep = rep + 1
+    out
+
+# 32 bytes with the first repeated suffix only reachable at p=16, d=16.
+# This exercises a larger insert prefix that still fits the current
+# single-command copy-length bound.
+fn _a15b_twice_32() -> [u8]:
+    var out: [u8] = []
+    var rep = 0
+    while rep < 2:
+        var i = 0
+        while i < 15:
+            out.push(0x41u8)
+            i = i + 1
+        out.push(0x42u8)
+        rep = rep + 1
+    out
+
+# 46 bytes with the first repeated suffix only reachable at p=23, d=23.
+# This marks the previously verified upper bound of the prefix search window.
+fn _a22b_twice_46() -> [u8]:
+    var out: [u8] = []
+    var rep = 0
+    while rep < 2:
+        var i = 0
+        while i < 22:
+            out.push(0x41u8)
+            i = i + 1
+        out.push(0x42u8)
+        rep = rep + 1
+    out
+
+# 52 bytes with the first repeated suffix only reachable at p=26, d=26.
+# This exercises the next insert-length code bucket the decoder already
+# supports without extending copy handling beyond the existing 2..69 range.
+fn _a25b_twice_52() -> [u8]:
+    var out: [u8] = []
+    var rep = 0
+    while rep < 2:
+        var i = 0
+        while i < 25:
+            out.push(0x41u8)
+            i = i + 1
+        out.push(0x42u8)
+        rep = rep + 1
+    out
+
+# 66 bytes with the first repeated suffix only reachable at p=33, d=33.
+# This covers the top of the newly widened prefix-search window.
+fn _a32b_twice_66() -> [u8]:
+    var out: [u8] = []
+    var rep = 0
+    while rep < 2:
+        var i = 0
+        while i < 32:
+            out.push(0x41u8)
+            i = i + 1
+        out.push(0x42u8)
+        rep = rep + 1
+    out
+
+# Build a periodic payload of `a_count` times 'A' followed by one 'B'. The
+# `tail_a` bytes continue the next repetition and let us hit exact size edges
+# without introducing a smaller period.
+fn _repeat_a_then_b(a_count: i64, reps: i64, tail_a: i64) -> [u8]:
+    var out: [u8] = []
+    var rep = 0
+    while rep < reps:
+        var i = 0
+        while i < a_count:
+            out.push(0x41u8)
+            i = i + 1
+        out.push(0x42u8)
+        rep = rep + 1
+    var j = 0
+    while j < tail_a:
+        out.push(0x41u8)
+        j = j + 1
+    out
+
+# 68 bytes with a 34-byte period (33x'A' + 'B') repeated twice.
+# With the widened p<=130 search window this now fits the single-command path.
+fn _a33b_twice_68() -> [u8]:
+    _repeat_a_then_b(33, 2, 0)
+
+# 102 bytes with a 33-byte period continued three extra 'A' bytes.
+# This hits the exact current single-command LZ77 budget: p=33, copy_len=69.
+fn _a32b_periodic_102() -> [u8]:
+    _repeat_a_then_b(32, 3, 3)
+
+# 103 bytes on the same period, one byte beyond the current copy_len<=69 limit.
+# The encoder must fall back while still preserving a byte-exact round trip.
+fn _a32b_periodic_103() -> [u8]:
+    _repeat_a_then_b(32, 3, 4)
+
+# 231 bytes with a 130-byte period prefix (129x'A' + 'B') and a 101-byte tail.
+# This is the first kind-10 copy bucket case: p=130, copy_len=101,
+# insert-length code 16 and copy-length code 16.
+fn _a129b_periodic_231() -> [u8]:
+    _repeat_a_then_b(129, 1, 101)
+
+# 232 bytes on the same period, one byte into the next decoder-supported copy
+# bucket: p=130, copy_len=102, insert-length code 16, copy-length code 17.
+fn _a129b_periodic_232() -> [u8]:
+    _repeat_a_then_b(129, 1, 102)
+
+# 263 bytes with a 130-byte period prefix (129x'A' + 'B') and a 133-byte tail.
+# This is the top of the copy-length code 17 range: p=130, copy_len=133,
+# insert-length code 16 and ICP kind 10.
+fn _a129b_periodic_263() -> [u8]:
+    _repeat_a_then_b(129, 1, 133)
+
+# 264 bytes on the same period, one byte into the next decoder-supported copy
+# bucket: p=130, copy_len=134, insert-length code 16, copy-length code 18.
+fn _a129b_periodic_264() -> [u8]:
+    _repeat_a_then_b(129, 1, 134)
+
+# 295 bytes with a 130-byte period prefix (129x'A' + 'B') and a 165-byte tail.
+# This is the top of copy-length code 18: p=130, copy_len=165,
+# insert-length code 16, copy-length code 18, and ICP kind 10.
+fn _a129b_periodic_295() -> [u8]:
+    _repeat_a_then_b(129, 1, 165)
+
+# 296 bytes on the same period, one byte into the next decoder-supported copy
+# bucket: p=130, copy_len=166, insert-length code 16, copy-length code 19.
+fn _a129b_periodic_296() -> [u8]:
+    _repeat_a_then_b(129, 1, 166)
+
+# 328 bytes with a 130-byte period prefix (129x'A' + 'B') and a 198-byte tail.
+# This is the first copy-length code 19 case: p=130, copy_len=198,
+# insert-length code 16, copy-length code 19, and ICP kind 10.
+fn _a129b_periodic_328() -> [u8]:
+    _repeat_a_then_b(129, 1, 198)
+
+# 391 bytes with a 130-byte period prefix (129x'A' + 'B') and a 261-byte tail.
+# This is the widened single-command boundary: p=130, copy_len=261,
+# insert-length code 16, copy-length code 19, and ICP kind 10.
+fn _a129b_periodic_391() -> [u8]:
+    _repeat_a_then_b(129, 1, 261)
+
+# 392 bytes on the same period, one byte beyond the widened copy code 19 range.
+# The encoder must fall back while preserving a byte-exact round trip.
+fn _a129b_periodic_392() -> [u8]:
+    _repeat_a_then_b(129, 1, 262)
+
+# 264 bytes with a 131-byte period prefix (130x'A' + 'B') and a 133-byte tail.
+# The first usable backreference is at p=131, just outside the still-bounded
+# p<=130 search window, so this remains a fallback case even though copy_len=133
+# fits the verified kind-10 subset.
+fn _a130b_periodic_264_window_miss() -> [u8]:
+    _repeat_a_then_b(130, 1, 133)
+
+# "the quick brown fox jumps over the lazy dog" repeated 20x (>4 distinct
+# bytes => uncompressed fallback).
+fn _quick_fox_phrase() -> [u8]:
+    # Hardcoded byte values for "the quick brown fox jumps over the lazy dog"
+    # (43 bytes, ASCII).  Avoids string indexing.
+    var p: [u8] = []
+    p.push(0x74u8)  # t
+    p.push(0x68u8)  # h
+    p.push(0x65u8)  # e
+    p.push(0x20u8)  # space
+    p.push(0x71u8)  # q
+    p.push(0x75u8)  # u
+    p.push(0x69u8)  # i
+    p.push(0x63u8)  # c
+    p.push(0x6bu8)  # k
+    p.push(0x20u8)  # space
+    p.push(0x62u8)  # b
+    p.push(0x72u8)  # r
+    p.push(0x6fu8)  # o
+    p.push(0x77u8)  # w
+    p.push(0x6eu8)  # n
+    p.push(0x20u8)  # space
+    p.push(0x66u8)  # f
+    p.push(0x6fu8)  # o
+    p.push(0x78u8)  # x
+    p.push(0x20u8)  # space
+    p.push(0x6au8)  # j
+    p.push(0x75u8)  # u
+    p.push(0x6du8)  # m
+    p.push(0x70u8)  # p
+    p.push(0x73u8)  # s
+    p.push(0x20u8)  # space
+    p.push(0x6fu8)  # o
+    p.push(0x76u8)  # v
+    p.push(0x65u8)  # e
+    p.push(0x72u8)  # r
+    p.push(0x20u8)  # space
+    p.push(0x74u8)  # t
+    p.push(0x68u8)  # h
+    p.push(0x65u8)  # e
+    p.push(0x20u8)  # space
+    p.push(0x6cu8)  # l
+    p.push(0x61u8)  # a
+    p.push(0x7au8)  # z
+    p.push(0x79u8)  # y
+    p.push(0x20u8)  # space
+    p.push(0x64u8)  # d
+    p.push(0x6fu8)  # o
+    p.push(0x67u8)  # g
+    p
+
+fn _quick_fox_20() -> [u8]:
+    val phrase = _quick_fox_phrase()
+    var out: [u8] = []
+    var rep = 0
+    while rep < 20:
+        var i = 0
+        while i < phrase.len():
+            out.push(phrase[i])
+            i = i + 1
+        rep = rep + 1
+    out
+
+# ---- specs ----
+
+describe("brotli_encode (LZ77) — round-trip"):
+
+    it("round-trips 24-byte 'ABC' x8 via LZ77 backref at distance 3"):
+        val payload = _abc_rep_24()
+        val encoded = brotli_encode(payload)
+        val result = brotli_decode(encoded)
+        expect result.is_err() == false
+        val out = result.unwrap()
+        expect _bytes_equal(out, payload) == true
+
+    it("round-trips 60-byte 'ABC' x20 via LZ77 backref at distance 3"):
+        val payload = _abc_rep_60()
+        val encoded = brotli_encode(payload)
+        val result = brotli_decode(encoded)
+        expect result.is_err() == false
+        val out = result.unwrap()
+        expect _bytes_equal(out, payload) == true
+
+    it("round-trips 12-byte 'AB' x6 via LZ77 backref at distance 2"):
+        val payload = _ab_rep_12()
+        val encoded = brotli_encode(payload)
+        val result = brotli_decode(encoded)
+        expect result.is_err() == false
+        val out = result.unwrap()
+        expect _bytes_equal(out, payload) == true
+
+    it("round-trips the minimum 4-byte 'AB' x2 payload at copy_len=2"):
+        val payload = _ab_rep_4()
+        val encoded = brotli_encode(payload)
+        val result = brotli_decode(encoded)
+        expect result.is_err() == false
+        val out = result.unwrap()
+        expect _bytes_equal(out, payload) == true
+
+    it("round-trips 16-byte run-length 'X' x16 via overlapping copy d=1"):
+        val payload = _xxxx_16()
+        val encoded = brotli_encode(payload)
+        val result = brotli_decode(encoded)
+        expect result.is_err() == false
+        val out = result.unwrap()
+        expect _bytes_equal(out, payload) == true
+
+    it("round-trips mixed 'AAAB' x2 via 4-byte insert + 4-byte copy at d=4"):
+        val payload = _aaab_aaab_8()
+        val encoded = brotli_encode(payload)
+        val result = brotli_decode(encoded)
+        expect result.is_err() == false
+        val out = result.unwrap()
+        expect _bytes_equal(out, payload) == true
+
+    it("round-trips an 8-byte insert prefix via the extended single-backref tier"):
+        val payload = _abcdabcc_twice_16()
+        val encoded = brotli_encode(payload)
+        val result = brotli_decode(encoded)
+        expect result.is_err() == false
+        val out = result.unwrap()
+        expect _bytes_equal(out, payload) == true
+
+    it("round-trips a forced 16-byte insert prefix"):
+        val payload = _a15b_twice_32()
+        val encoded = brotli_encode(payload)
+        val result = brotli_decode(encoded)
+        expect result.is_err() == false
+        val out = result.unwrap()
+        expect _bytes_equal(out, payload) == true
+
+    it("round-trips a forced 23-byte insert prefix at the former search bound"):
+        val payload = _a22b_twice_46()
+        val encoded = brotli_encode(payload)
+        val result = brotli_decode(encoded)
+        expect result.is_err() == false
+        val out = result.unwrap()
+        expect _bytes_equal(out, payload) == true
+
+    it("round-trips a forced 26-byte insert prefix in the next decoder-supported bucket"):
+        val payload = _a25b_twice_52()
+        val encoded = brotli_encode(payload)
+        val result = brotli_decode(encoded)
+        expect result.is_err() == false
+        val out = result.unwrap()
+        expect _bytes_equal(out, payload) == true
+
+    it("round-trips a forced 33-byte insert prefix at the new bounded limit"):
+        val payload = _a32b_twice_66()
+        val encoded = brotli_encode(payload)
+        val result = brotli_decode(encoded)
+        expect result.is_err() == false
+        val out = result.unwrap()
+        expect _bytes_equal(out, payload) == true
+
+    it("round-trips a 34-byte-period repeat now covered by the widened prefix-search window"):
+        val payload = _a33b_twice_68()
+        val encoded = brotli_encode(payload)
+        val result = brotli_decode(encoded)
+        expect result.is_err() == false
+        val out = result.unwrap()
+        expect _bytes_equal(out, payload) == true
+
+    it("round-trips the 102-byte single-command copy-length boundary"):
+        val payload = _a32b_periodic_102()
+        val encoded = brotli_encode(payload)
+        val result = brotli_decode(encoded)
+        expect result.is_err() == false
+        val out = result.unwrap()
+        expect _bytes_equal(out, payload) == true
+
+    it("round-trips a 103-byte repeat just beyond the single-command copy budget"):
+        val payload = _a32b_periodic_103()
+        val encoded = brotli_encode(payload)
+        val result = brotli_decode(encoded)
+        expect result.is_err() == false
+        val out = result.unwrap()
+        expect _bytes_equal(out, payload) == true
+
+    it("round-trips the 231-byte first copy-code-16 case"):
+        val payload = _a129b_periodic_231()
+        val encoded = brotli_encode(payload)
+        val result = brotli_decode(encoded)
+        expect result.is_err() == false
+        val out = result.unwrap()
+        expect _bytes_equal(out, payload) == true
+
+    it("round-trips a 232-byte repeat in the next decoder-supported copy bucket"):
+        val payload = _a129b_periodic_232()
+        val encoded = brotli_encode(payload)
+        val result = brotli_decode(encoded)
+        expect result.is_err() == false
+        val out = result.unwrap()
+        expect _bytes_equal(out, payload) == true
+
+    it("round-trips the 263-byte top of the copy-code-17 range"):
+        val payload = _a129b_periodic_263()
+        val encoded = brotli_encode(payload)
+        val result = brotli_decode(encoded)
+        expect result.is_err() == false
+        val out = result.unwrap()
+        expect _bytes_equal(out, payload) == true
+
+    it("round-trips the 264-byte first copy-code-18 case"):
+        val payload = _a129b_periodic_264()
+        val encoded = brotli_encode(payload)
+        val result = brotli_decode(encoded)
+        expect result.is_err() == false
+        val out = result.unwrap()
+        expect _bytes_equal(out, payload) == true
+
+    it("round-trips the 295-byte widened copy-length boundary"):
+        val payload = _a129b_periodic_295()
+        val encoded = brotli_encode(payload)
+        val result = brotli_decode(encoded)
+        expect result.is_err() == false
+        val out = result.unwrap()
+        expect _bytes_equal(out, payload) == true
+
+    it("round-trips the 296-byte first copy-code-19 case"):
+        val payload = _a129b_periodic_296()
+        val encoded = brotli_encode(payload)
+        val result = brotli_decode(encoded)
+        expect result.is_err() == false
+        val out = result.unwrap()
+        expect _bytes_equal(out, payload) == true
+
+    it("round-trips the 328-byte first copy-code-19 base case"):
+        val payload = _a129b_periodic_328()
+        val encoded = brotli_encode(payload)
+        val result = brotli_decode(encoded)
+        expect result.is_err() == false
+        val out = result.unwrap()
+        expect _bytes_equal(out, payload) == true
+
+    it("round-trips the 391-byte widened copy-length boundary"):
+        val payload = _a129b_periodic_391()
+        val encoded = brotli_encode(payload)
+        val result = brotli_decode(encoded)
+        expect result.is_err() == false
+        val out = result.unwrap()
+        expect _bytes_equal(out, payload) == true
+
+    it("round-trips a 392-byte repeat just beyond the widened copy-length boundary"):
+        val payload = _a129b_periodic_392()
+        val encoded = brotli_encode(payload)
+        val result = brotli_decode(encoded)
+        expect result.is_err() == false
+        val out = result.unwrap()
+        expect _bytes_equal(out, payload) == true
+
+    it("round-trips a 264-byte 131-period repeat just beyond the widened prefix-search window"):
+        val payload = _a130b_periodic_264_window_miss()
+        val encoded = brotli_encode(payload)
+        val result = brotli_decode(encoded)
+        expect result.is_err() == false
+        val out = result.unwrap()
+        expect _bytes_equal(out, payload) == true
+
+    it("round-trips English text via uncompressed fallback (>4 distinct)"):
+        val payload = _quick_fox_20()
+        val encoded = brotli_encode(payload)
+        val result = brotli_decode(encoded)
+        expect result.is_err() == false
+        val out = result.unwrap()
+        expect _bytes_equal(out, payload) == true
+
+describe("brotli_encode (LZ77) — size advantage"):
+
+    it("LZ77 path beats literal-only on 60-byte 'ABC' x20"):
+        # Literal-only would emit 60 * 1-bit + 2-bit codewords ~= 120 bits + header.
+        # LZ77 emits 3 literals + ICP + distance + extras ~= 3 bytes + ~60 bits header.
+        # Should be smaller.
+        val payload = _abc_rep_60()
+        val raw = brotli_encode_uncompressed(payload)
+        val compressed = brotli_encode(payload)
+        expect compressed.len() < raw.len() == true
+
+    it("8-byte-prefix repeat beats the former 17-byte fallback encoding"):
+        val payload = _abcdabcc_twice_16()
+        val compressed = brotli_encode(payload)
+        expect compressed.len() < 17 == true
+
+    it("16-byte-prefix repeat compresses below the old literal-only fallback"):
+        val payload = _a15b_twice_32()
+        val compressed = brotli_encode(payload)
+        expect compressed.len() < 15 == true
+
+    it("23-byte-prefix repeat still chooses the single-backref path"):
+        val payload = _a22b_twice_46()
+        val compressed = brotli_encode(payload)
+        expect compressed.len() < 17 == true
+
+    it("33-byte-prefix repeat still chooses the single-backref path"):
+        val payload = _a32b_twice_66()
+        val compressed = brotli_encode(payload)
+        expect compressed.len() < 20 == true
+
+    it("34-byte-period repeat now chooses the widened single-backref path"):
+        val payload = _a33b_twice_68()
+        val raw = brotli_encode_uncompressed(payload)
+        val compressed = brotli_encode(payload)
+        expect compressed.len() < raw.len() == true
+
+    it("102-byte boundary case stays smaller than uncompressed fallback"):
+        val payload = _a32b_periodic_102()
+        val raw = brotli_encode_uncompressed(payload)
+        val compressed = brotli_encode(payload)
+        expect compressed.len() < raw.len() == true
+
+    it("103-byte over-budget repeat is larger than the 102-byte boundary case"):
+        val at_limit = brotli_encode(_a32b_periodic_102())
+        val over_limit = brotli_encode(_a32b_periodic_103())
+        expect over_limit.len() > at_limit.len() == true
+
+    it("231-byte first kind-10 case stays smaller than uncompressed fallback"):
+        val payload = _a129b_periodic_231()
+        val raw = brotli_encode_uncompressed(payload)
+        val compressed = brotli_encode(payload)
+        expect compressed.len() < raw.len() == true
+
+    it("263-byte top-of-copy-code-17 case stays smaller than uncompressed fallback"):
+        val payload = _a129b_periodic_263()
+        val raw = brotli_encode_uncompressed(payload)
+        val compressed = brotli_encode(payload)
+        expect compressed.len() < raw.len() == true
+
+    it("264-byte first copy-code-18 case stays smaller than uncompressed fallback"):
+        val payload = _a129b_periodic_264()
+        val raw = brotli_encode_uncompressed(payload)
+        val compressed = brotli_encode(payload)
+        expect compressed.len() < raw.len() == true
+
+    it("295-byte widened boundary stays smaller than uncompressed fallback"):
+        val payload = _a129b_periodic_295()
+        val raw = brotli_encode_uncompressed(payload)
+        val compressed = brotli_encode(payload)
+        expect compressed.len() < raw.len() == true
+
+    it("296-byte first copy-code-19 case stays smaller than uncompressed fallback"):
+        val payload = _a129b_periodic_296()
+        val raw = brotli_encode_uncompressed(payload)
+        val compressed = brotli_encode(payload)
+        expect compressed.len() < raw.len() == true
+
+    it("391-byte widened boundary stays smaller than uncompressed fallback"):
+        val payload = _a129b_periodic_391()
+        val raw = brotli_encode_uncompressed(payload)
+        val compressed = brotli_encode(payload)
+        expect compressed.len() < raw.len() == true
+
+    it("392-byte over-budget repeat is no smaller than the 391-byte boundary case"):
+        val at_limit = brotli_encode(_a129b_periodic_391())
+        val over_limit = brotli_encode(_a129b_periodic_392())
+        expect over_limit.len() >= at_limit.len() == true
+
+    it("264-byte 131-period repeat is no smaller than the 263-byte boundary case"):
+        val in_window = brotli_encode(_a129b_periodic_263())
+        val past_window = brotli_encode(_a130b_periodic_264_window_miss())
+        expect past_window.len() >= in_window.len() == true

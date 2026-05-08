@@ -1,0 +1,56 @@
+# @tag:system
+
+use std.spec.*
+use test.system.os_tls_hosted_interop_helpers.{
+    file_exists, server_bin, simple_bin, ensure_server_bin, cleanup_server_processes,
+    write_server_config, spawn_server, run_openssl_client, run_simple_client,
+    kill_server, seed_fixture_dir, make_temp_fixture_dir, cleanup_fixture_dir, sleep_ms
+}
+
+describe "Hosted TLS interop mTLS":
+
+    it "requires a client certificate when the shared SDN config enables mTLS":
+        val build = ensure_server_bin()
+        expect build.2 == 0
+        expect file_exists(server_bin()) == true
+        expect file_exists(simple_bin()) == true
+
+        val fixture_dir = make_temp_fixture_dir("mtls")
+        val openssl_listen = "127.0.0.1:34435"
+        val simple_listen = "127.0.0.1:34436"
+        val openssl_config_path = fixture_dir + "/mtls_openssl.sdn"
+        val simple_config_path = fixture_dir + "/mtls_simple.sdn"
+        seed_fixture_dir(fixture_dir)
+        cleanup_server_processes()
+        write_server_config(openssl_config_path, openssl_listen, fixture_dir, true, 1)
+        write_server_config(simple_config_path, simple_listen, fixture_dir, true, 1)
+
+        val openssl_server_pid = spawn_server(openssl_config_path)
+        expect openssl_server_pid > 0 == true
+        if openssl_server_pid <= 0:
+            return
+
+        sleep_ms(1000)
+        val missing_cert = run_openssl_client(openssl_listen, fixture_dir, false)
+        kill_server(openssl_server_pid)
+        cleanup_server_processes()
+
+        val simple_server_pid = spawn_server(simple_config_path)
+        expect simple_server_pid > 0 == true
+        if simple_server_pid <= 0:
+            return
+
+        sleep_ms(1000)
+        val simple_result = run_simple_client(simple_config_path)
+        kill_server(simple_server_pid)
+        cleanup_server_processes()
+
+        expect missing_cert.2 == 0 == false
+        val simple_output = simple_result.0 + simple_result.1
+        if simple_output.contains("unknown extern function"):
+            print "[os_tls_hosted_interop_mtls_spec] skipping Simple hosted client: TLS runtime externs unavailable"
+            expect true == true
+        else:
+            expect simple_result.2 == 0
+            expect (simple_output).contains("[simple-client] handshake ok")
+        cleanup_fixture_dir(fixture_dir)

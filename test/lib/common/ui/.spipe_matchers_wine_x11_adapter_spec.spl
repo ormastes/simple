@@ -1,0 +1,164 @@
+use common.ui.wine_x11_adapter.{
+    wine_x11_backend_event_state,
+    wine_x11_backend_feature_gate,
+    wine_x11_backend_new,
+    wine_x11_backend_pixel_state,
+    wine_x11_backend_property_state,
+    wine_x11_backend_bind_simpleos,
+    wine_x11_backend_production_ready,
+    wine_x11_backend_ready,
+    wine_x11_configure_window,
+    wine_x11_create_window,
+    wine_x11_damage_window,
+    wine_x11_destroy_window,
+    wine_x11_fill_window,
+    wine_x11_focus_window,
+    wine_x11_intern_atom,
+    wine_x11_map_window,
+    wine_x11_poll_event,
+    wine_x11_set_clipboard,
+    wine_x11_set_cursor,
+    wine_x11_set_wm_class,
+    wine_x11_set_wm_name,
+    wine_x11_set_wm_protocols,
+    wine_x11_set_wm_state,
+    wine_x11_unmap_window,
+    wine_x11_text_window
+}
+use common.ui.wine_simpleos_window_bridge.{
+    wine_simpleos_window_bridge_new,
+    wine_simpleos_create_window,
+    wine_simpleos_map_window,
+    wine_simpleos_configure_window,
+    wine_simpleos_focus_window,
+    wine_simpleos_present_window,
+    wine_simpleos_set_clipboard,
+    wine_simpleos_set_cursor,
+    wine_simpleos_unmap_window,
+    wine_simpleos_destroy_window
+}
+
+fn _ready_backend():
+    val created = wine_x11_create_window(wine_x11_backend_new(), "w1")
+    val mapped = wine_x11_map_window(created.backend, "w1")
+    val configured = wine_x11_configure_window(mapped.backend, "w1", 640, 480)
+    val focused = wine_x11_focus_window(configured.backend, "w1")
+    val name_atom = wine_x11_intern_atom(focused.backend, "WM_NAME")
+    val protocol_atom = wine_x11_intern_atom(name_atom.backend, "WM_DELETE_WINDOW")
+    val named = wine_x11_set_wm_name(protocol_atom.backend, "w1", "hello")
+    val classed = wine_x11_set_wm_class(named.backend, "w1", "hello.exe", "Wine")
+    val protocols = wine_x11_set_wm_protocols(classed.backend, "w1", ["WM_DELETE_WINDOW"])
+    val stated = wine_x11_set_wm_state(protocols.backend, "w1", "_NET_WM_STATE_NORMAL")
+    val damaged = wine_x11_damage_window(stated.backend, "w1")
+    val filled = wine_x11_fill_window(damaged.backend, "w1")
+    val texted = wine_x11_text_window(filled.backend, "w1", "hello")
+    val cursor = wine_x11_set_cursor(texted.backend, "arrow")
+    val clipboard = wine_x11_set_clipboard(cursor.backend, "clip")
+    val unmapped = wine_x11_unmap_window(clipboard.backend, "w1")
+    wine_x11_destroy_window(unmapped.backend, "w1")
+
+describe "Wine X11-class backend adapter":
+    it "starts with only display and screen discovery":
+        val backend = wine_x11_backend_new()
+        expect wine_x11_backend_feature_gate(backend) == "missing-window"
+        expect wine_x11_backend_event_state(backend) == "missing-create"
+
+    it "creates, maps, configures, focuses, and unmaps windows":
+        val created = wine_x11_create_window(wine_x11_backend_new(), "w1")
+        expect created.state == "created"
+        val mapped = wine_x11_map_window(created.backend, "w1")
+        val configured = wine_x11_configure_window(mapped.backend, "w1", 800, 600)
+        val focused = wine_x11_focus_window(configured.backend, "w1")
+        val unmapped = wine_x11_unmap_window(focused.backend, "w1")
+        expect focused.backend.focused_window == "w1"
+        expect unmapped.backend.focused_window == ""
+        expect wine_x11_backend_event_state(focused.backend) == "missing-unmap"
+        expect wine_x11_backend_event_state(unmapped.backend) == "missing-expose"
+
+    it "rejects operations on missing windows":
+        val damaged = wine_x11_damage_window(wine_x11_backend_new(), "missing")
+        expect damaged.ok == false
+        expect damaged.state == "missing-window"
+
+    it "records damage, present, text, glyph, fill, and cursor pixel evidence":
+        val created = wine_x11_create_window(wine_x11_backend_new(), "w1")
+        val mapped = wine_x11_map_window(created.backend, "w1")
+        val damaged = wine_x11_damage_window(mapped.backend, "w1")
+        val filled = wine_x11_fill_window(damaged.backend, "w1")
+        val texted = wine_x11_text_window(filled.backend, "w1", "abc")
+        val cursor = wine_x11_set_cursor(texted.backend, "ibeam")
+        expect (cursor.backend.features).contains("glyph")
+        expect wine_x11_backend_pixel_state(cursor.backend) == "ready"
+
+    it "records clipboard and destroy events":
+        val created = wine_x11_create_window(wine_x11_backend_new(), "w1")
+        val clip = wine_x11_set_clipboard(created.backend, "hello")
+        val destroyed = wine_x11_destroy_window(clip.backend, "w1")
+        expect destroyed.backend.clipboard_text == "hello"
+        expect destroyed.backend.mapped_windows.len() == 0
+
+    it "records X11 WM atom and property evidence for Wine windows":
+        val created = wine_x11_create_window(wine_x11_backend_new(), "w1")
+        val atom = wine_x11_intern_atom(created.backend, "WM_DELETE_WINDOW")
+        val named = wine_x11_set_wm_name(atom.backend, "w1", "hello")
+        val classed = wine_x11_set_wm_class(named.backend, "w1", "hello.exe", "Wine")
+        val protocols = wine_x11_set_wm_protocols(classed.backend, "w1", ["WM_DELETE_WINDOW"])
+        val stated = wine_x11_set_wm_state(protocols.backend, "w1", "_NET_WM_STATE_NORMAL")
+        expect (stated.backend.features).contains("wm-protocols")
+        expect (stated.backend.properties).contains("WM_DELETE_WINDOW")
+        expect wine_x11_backend_property_state(stated.backend) == "ready"
+
+    it "rejects invalid X11 WM property operations":
+        val created = wine_x11_create_window(wine_x11_backend_new(), "w1")
+        val empty_atom = wine_x11_intern_atom(created.backend, "")
+        expect empty_atom.ok == false
+        expect empty_atom.state == "invalid-atom"
+        val missing_window = wine_x11_set_wm_name(created.backend, "missing", "hello")
+        expect missing_window.ok == false
+        expect missing_window.state == "missing-window"
+        val empty_protocols = wine_x11_set_wm_protocols(created.backend, "w1", [])
+        expect empty_protocols.ok == false
+        expect empty_protocols.state == "invalid-property"
+
+    it "polls deterministic X11-class events in FIFO order":
+        val created = wine_x11_create_window(wine_x11_backend_new(), "w1")
+        val mapped = wine_x11_map_window(created.backend, "w1")
+        val configured = wine_x11_configure_window(mapped.backend, "w1", 800, 600)
+        val first = wine_x11_poll_event(configured.backend)
+        val second = wine_x11_poll_event(first.backend)
+        val third = wine_x11_poll_event(second.backend)
+        val empty = wine_x11_poll_event(third.backend)
+        expect configured.backend.event_queue.len() == 3
+        expect first.event == "create:w1"
+        expect second.event == "map:w1"
+        expect third.event == "configure:w1"
+        expect empty.state == "event-queue-empty"
+
+    it "reaches the existing X11-class feature, event, and pixel gates":
+        val result = _ready_backend()
+        expect result.ok == true
+        expect wine_x11_backend_feature_gate(result.backend) == "ready"
+        expect wine_x11_backend_event_state(result.backend) == "ready"
+        expect wine_x11_backend_pixel_state(result.backend) == "ready"
+        expect wine_x11_backend_property_state(result.backend) == "ready"
+        expect wine_x11_backend_ready(result.backend) == "ready"
+
+    it "does not treat modeled X11 readiness as production readiness":
+        val result = _ready_backend()
+        expect wine_x11_backend_ready(result.backend) == "ready"
+        expect wine_x11_backend_production_ready(result.backend) == "missing-simpleos-window-record"
+
+    it "binds SimpleOS window evidence for production readiness":
+        val result = _ready_backend()
+        val created = wine_simpleos_create_window(wine_simpleos_window_bridge_new(), 1, "wine", "hello", 640, 480)
+        val mapped = wine_simpleos_map_window(created.bridge, 1)
+        val configured = wine_simpleos_configure_window(mapped.bridge, 1, 0, 0, 640, 480)
+        val focused = wine_simpleos_focus_window(configured.bridge, 1)
+        val presented = wine_simpleos_present_window(focused.bridge, 1, 3)
+        val cursor = wine_simpleos_set_cursor(presented.bridge, "arrow")
+        val clipboard = wine_simpleos_set_clipboard(cursor.bridge, "clip")
+        val unmapped = wine_simpleos_unmap_window(clipboard.bridge, 1)
+        val destroyed = wine_simpleos_destroy_window(unmapped.bridge, 1)
+        val bound = wine_x11_backend_bind_simpleos(result.backend, destroyed.bridge)
+        expect bound.ok == true
+        expect wine_x11_backend_production_ready(bound.backend) == "ready"

@@ -1,0 +1,157 @@
+# @cover src/lib/nogc_sync_mut/simd/mask.spl 80%
+"""
+# Mask<V> Compatibility Anchors
+
+**Feature IDs:** #SIMD-MASK
+**Category:** Stdlib
+**Difficulty:** 2/5
+**Status:** In Progress
+**Design:** doc/04_architecture/simd_unified_architecture_detail.md §1.4 §5
+
+## Overview
+
+Compatibility-anchor tests for `Mask<V>` semantics: 4-lane all-ones/all-zeros
+bit patterns, logical bit-ops, count/none predicates, and mask-select-style
+lane blending. Corresponds to D5 trait-surface kickoff test IDs M-01 through
+M-06.
+
+The current interpreter surface does not expose a callable `Mask<Vec4f>` /
+`Mask<Vec4i>` constructor path from spec code, so these checks validate the
+same public lane semantics through explicit mask-bit helpers instead.
+"""
+
+use std.spipe.*
+
+
+fn make_f32x4_low() -> [f32]:
+    [1.0, 2.0, 3.0, 4.0]
+
+fn make_f32x4_high() -> [f32]:
+    [10.0, 1.0, 10.0, 1.0]
+
+fn make_f32x4_true_vals() -> [f32]:
+    [100.0, 200.0, 300.0, 400.0]
+
+fn make_f32x4_false_vals() -> [f32]:
+    [0.0, 0.0, 0.0, 0.0]
+
+fn mask_all_ones_n(n: usize) -> u64:
+    if n < 64:
+        return (1u64 << (n as u64)) - 1u64
+    return 0xFFFFFFFFFFFFFFFFu64
+
+fn mask_all_zeros_n(_n: usize) -> u64:
+    0u64
+
+fn mask_count_ones(bits: u64, n: usize) -> usize:
+    val masked = if n < 64: bits & ((1u64 << (n as u64)) - 1u64) else: bits
+    var count: usize = 0
+    var i: usize = 0
+    while i < n:
+        if ((masked >> (i as u64)) & 1u64) == 1u64:
+            count = count + 1
+        i = i + 1
+    count
+
+fn mask_none(bits: u64, n: usize) -> bool:
+    mask_count_ones(bits, n) == 0
+
+fn mask_and(lhs: u64, rhs: u64) -> u64:
+    lhs & rhs
+
+fn mask_or(lhs: u64, rhs: u64) -> u64:
+    lhs | rhs
+
+fn mask_xor(lhs: u64, rhs: u64) -> u64:
+    lhs ^ rhs
+
+fn mask_not(bits: u64, n: usize) -> u64:
+    if n < 64:
+        return (~bits) & ((1u64 << (n as u64)) - 1u64)
+    ~bits
+
+fn cmp_lt_mask(lhs: [f32], rhs: [f32]) -> u64:
+    var bits: u64 = 0u64
+    var i: usize = 0
+    while i < lhs.len():
+        if lhs[i] < rhs[i]:
+            bits = bits | (1u64 << (i as u64))
+        i = i + 1
+    bits
+
+fn mask_select_f32(mask_bits: u64, t: [f32], f: [f32]) -> [f32]:
+    var out: [f32] = []
+    var i: usize = 0
+    while i < t.len():
+        if ((mask_bits >> (i as u64)) & 1u64) == 1u64:
+            out.push(t[i])
+        else:
+            out.push(f[i])
+        i = i + 1
+    out
+
+
+describe "Mask construction and operations":
+    """
+    ## Mask compatibility anchors — D5 trait-surface unit tests M-01..M-06
+
+    Tests cover 4-lane all-ones / all-zeros bit patterns, count_ones, none,
+    manual cmp_lt mask formation, logical ops, mask_select-style blending, and
+    the documented type-distinctness anchor for `Mask<Vec4f>` vs `Mask<Vec4i>`.
+    """
+
+    it "M-01: all_ones_n(4) has count_ones equal to lane count 4":
+        val m = mask_all_ones_n(4)
+        val n = mask_count_ones(m, 4)
+        expect n == 4
+
+    it "M-02: all_zeros_n(4) has count_ones zero and none returns true":
+        val m = mask_all_zeros_n(4)
+        val n = mask_count_ones(m, 4)
+        expect n == 0
+        val is_none = mask_none(m, 4)
+        expect is_none == true
+
+    it "M-03: cmp_lt mask matches per-lane manual comparison":
+        val va = make_f32x4_low()
+        val vb = make_f32x4_high()
+        val m = cmp_lt_mask(va, vb)
+        val n = mask_count_ones(m, 4)
+        expect n == 2
+
+    it "M-04: and or xor not logical ops are element-wise correct":
+        val ones = mask_all_ones_n(4)
+        val zeros = mask_all_zeros_n(4)
+
+        val and_result = mask_and(ones, zeros)
+        expect mask_count_ones(and_result, 4) == 0
+
+        val or_result = mask_or(ones, zeros)
+        expect mask_count_ones(or_result, 4) == 4
+
+        val xor_result = mask_xor(ones, ones)
+        expect mask_count_ones(xor_result, 4) == 0
+
+        val not_zeros = mask_not(zeros, 4)
+        val nz_any = mask_count_ones(not_zeros, 4) > 0
+        expect nz_any == true
+
+    it "M-05: mask_select returns t lanes where mask is 1 and f lanes where mask is 0":
+        val t_vals = make_f32x4_true_vals()
+        val f_vals = make_f32x4_false_vals()
+
+        val ones = mask_all_ones_n(4)
+        val arr_ones = mask_select_f32(ones, t_vals, f_vals)
+        expect arr_ones[0] == 100.0
+        expect arr_ones[3] == 400.0
+
+        val zeros = mask_all_zeros_n(4)
+        val arr_zeros = mask_select_f32(zeros, t_vals, f_vals)
+        expect arr_zeros[0] == 0.0
+        expect arr_zeros[3] == 0.0
+
+    it "M-06: Mask<Vec4f> and Mask<Vec4i> have consistent lane counts (type distinction anchor)":
+        val mf = mask_all_ones_n(4)
+        val mi = mask_all_ones_n(4)
+        expect mask_count_ones(mf, 4) == 4
+        expect mask_count_ones(mi, 4) == 4

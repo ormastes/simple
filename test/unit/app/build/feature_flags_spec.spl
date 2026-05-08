@@ -1,0 +1,197 @@
+# Tests for app.build.feature_flags
+# Covers parse_target_features and apply_feature_overrides_* helpers.
+
+use app.build.feature_flags.{
+    FeatureFlag,
+    parse_target_features,
+    apply_feature_overrides_x86,
+    apply_feature_overrides_aarch64,
+    apply_feature_overrides_rv64
+}
+use compiler.backend.feature_caps.{X86Caps, Aarch64Caps, Rv64Caps}
+
+describe "app.build.feature_flags":
+
+    describe "parse_target_features":
+
+        it "parses a single +flag":
+            val result = parse_target_features("+aes")
+            val flags = result[0]
+            val err   = result[1]
+            expect(err).to_equal("")
+            expect(flags.len()).to_equal(1)
+            expect(flags[0].name).to_equal("aes")
+            expect(flags[0].enabled).to_equal(true)
+
+        it "parses a -flag as disabled":
+            val result = parse_target_features("-sha")
+            val flags = result[0]
+            val err   = result[1]
+            expect(err).to_equal("")
+            expect(flags.len()).to_equal(1)
+            expect(flags[0].name).to_equal("sha")
+            expect(flags[0].enabled).to_equal(false)
+
+        it "parses +aes,-sha into two flags":
+            val result = parse_target_features("+aes,-sha")
+            val flags = result[0]
+            expect(flags.len()).to_equal(2)
+            expect(flags[0].name).to_equal("aes")
+            expect(flags[0].enabled).to_equal(true)
+            expect(flags[1].name).to_equal("sha")
+            expect(flags[1].enabled).to_equal(false)
+
+        it "is whitespace tolerant around tokens":
+            val result = parse_target_features("+ aes , -sha ")
+            val flags = result[0]
+            val err   = result[1]
+            expect(err).to_equal("")
+            expect(flags.len()).to_equal(2)
+            expect(flags[0].name).to_equal("aes")
+            expect(flags[1].name).to_equal("sha")
+
+        it "returns empty list and no error for empty input":
+            val result = parse_target_features("")
+            val flags = result[0]
+            val err   = result[1]
+            expect(flags.len()).to_equal(0)
+            expect(err).to_equal("")
+
+        it "rejects a bare name without sign":
+            val result = parse_target_features("aes")
+            val flags = result[0]
+            val err   = result[1]
+            expect(flags.len()).to_equal(0)
+            expect(err.contains("aes")).to_equal(true)
+            expect(err.contains("+")).to_equal(true)
+
+        it "rejects a mix where second token lacks sign":
+            val result = parse_target_features("+aes,sha")
+            val flags = result[0]
+            val err   = result[1]
+            expect(flags.len()).to_equal(0)
+            expect(err.len()).to_be_greater_than(0)
+
+        it "parses three flags of mixed signs":
+            val result = parse_target_features("+aes,+sha,-pclmul")
+            val flags = result[0]
+            expect(flags.len()).to_equal(3)
+            expect(flags[2].name).to_equal("pclmul")
+            expect(flags[2].enabled).to_equal(false)
+
+    describe "apply_feature_overrides_x86":
+
+        fn all_false_x86() -> X86Caps:
+            X86Caps(
+                has_aes: false,
+                has_sha_ni: false,
+                has_sse42: false,
+                has_pclmul: false,
+                has_avx2: false,
+                has_avx512: false
+            )
+
+        it "turns on aes via +aes":
+            val base = all_false_x86()
+            val result = parse_target_features("+aes")
+            val caps = apply_feature_overrides_x86(base, result[0])
+            expect(caps.has_aes).to_equal(true)
+            expect(caps.has_sha_ni).to_equal(false)
+
+        it "turns off aes from an all-true base via -aes":
+            val base = X86Caps(
+                has_aes: true,
+                has_sha_ni: true,
+                has_sse42: true,
+                has_pclmul: true,
+                has_avx2: true,
+                has_avx512: true
+            )
+            val result = parse_target_features("-aes")
+            val caps = apply_feature_overrides_x86(base, result[0])
+            expect(caps.has_aes).to_equal(false)
+            expect(caps.has_sha_ni).to_equal(true)
+
+        it "ignores unknown flags (e.g. AArch64 pmull) without error":
+            val base = all_false_x86()
+            val result = parse_target_features("+pmull,+aes")
+            val caps = apply_feature_overrides_x86(base, result[0])
+            expect(caps.has_aes).to_equal(true)
+            expect(caps.has_pclmul).to_equal(false)
+
+        it "applies multiple flags in one call":
+            val base = all_false_x86()
+            val result = parse_target_features("+aes,+sha,+sse4.2,+pclmul")
+            val caps = apply_feature_overrides_x86(base, result[0])
+            expect(caps.has_aes).to_equal(true)
+            expect(caps.has_sha_ni).to_equal(true)
+            expect(caps.has_sse42).to_equal(true)
+            expect(caps.has_pclmul).to_equal(true)
+
+    describe "apply_feature_overrides_aarch64":
+
+        fn all_false_aarch64() -> Aarch64Caps:
+            Aarch64Caps(
+                has_aes: false,
+                has_sha2: false,
+                has_sha3: false,
+                has_pmull: false,
+                has_crc32: false,
+                has_neon: false,
+                has_sve2: false,
+                has_sha512: false
+            )
+
+        it "turns on AArch64 cipher caps":
+            val base = all_false_aarch64()
+            val result = parse_target_features("+aes-arm,+sha-arm,+pmull,+crc32-arm")
+            val caps = apply_feature_overrides_aarch64(base, result[0])
+            expect(caps.has_aes).to_equal(true)
+            expect(caps.has_sha2).to_equal(true)
+            expect(caps.has_pmull).to_equal(true)
+            expect(caps.has_crc32).to_equal(true)
+
+        it "ignores x86-only flags without error":
+            val base = all_false_aarch64()
+            val result = parse_target_features("+pclmul,+pmull")
+            val caps = apply_feature_overrides_aarch64(base, result[0])
+            expect(caps.has_pmull).to_equal(true)
+            expect(caps.has_crc32).to_equal(false)
+
+    describe "apply_feature_overrides_rv64":
+
+        fn all_false_rv64() -> Rv64Caps:
+            Rv64Caps(
+                has_zvkned: false,
+                has_zvknh: false,
+                has_zvkg: false,
+                has_v: false,
+                vlen_bits: 128
+            )
+
+        it "turns on RV64 Zvk caps":
+            val base = all_false_rv64()
+            val result = parse_target_features("+zvkned,+zvknh,+zvkg")
+            val caps = apply_feature_overrides_rv64(base, result[0])
+            expect(caps.has_zvkned).to_equal(true)
+            expect(caps.has_zvknh).to_equal(true)
+            expect(caps.has_zvkg).to_equal(true)
+
+        it "ignores x86/AArch64 flags silently":
+            val base = all_false_rv64()
+            val result = parse_target_features("+aes,+zvkned")
+            val caps = apply_feature_overrides_rv64(base, result[0])
+            expect(caps.has_zvkned).to_equal(true)
+            expect(caps.has_zvknh).to_equal(false)
+
+        it "preserves vlen_bits through override":
+            val base = Rv64Caps(
+                has_zvkned: false,
+                has_zvknh: false,
+                has_zvkg: false,
+                has_v: false,
+                vlen_bits: 512
+            )
+            val result = parse_target_features("+zvkned")
+            val caps = apply_feature_overrides_rv64(base, result[0])
+            expect(caps.vlen_bits).to_equal(512)

@@ -1,0 +1,105 @@
+use common.wine_pe_gate.{
+    wine_pe_required_features,
+    wine_pe_missing_features,
+    wine_pe_gate,
+    wine_pe_gate_from_image,
+    wine_pe_header_gate,
+    wine_pe_execution_gate
+}
+
+fn _zero_bytes(count: i64) -> [u8]:
+    var out: [u8] = []
+    var i = 0
+    while i < count:
+        out.push(0)
+        i = i + 1
+    out
+
+fn _put_u16_le(data: [u8], offset: i64, value: i64) -> [u8]:
+    data[offset] = (value & 0xff) as u8
+    data[offset + 1] = ((value >> 8) & 0xff) as u8
+    data
+
+fn _put_u32_le(data: [u8], offset: i64, value: i64) -> [u8]:
+    data[offset] = (value & 0xff) as u8
+    data[offset + 1] = ((value >> 8) & 0xff) as u8
+    data[offset + 2] = ((value >> 16) & 0xff) as u8
+    data[offset + 3] = ((value >> 24) & 0xff) as u8
+    data
+
+fn _image() -> [u8]:
+    var data = _zero_bytes(1024)
+    data[0] = 0x4d
+    data[1] = 0x5a
+    data = _put_u32_le(data, 0x3c, 0x80)
+    data[0x80] = 0x50
+    data[0x81] = 0x45
+    data = _put_u16_le(data, 0x84, 0x8664)
+    data = _put_u16_le(data, 0x86, 1)
+    data = _put_u16_le(data, 0x94, 0xf0)
+    data = _put_u16_le(data, 0x98, 0x20b)
+    data = _put_u32_le(data, 0x98 + 0x10, 0x2010)
+    data = _put_u32_le(data, 0x98 + 0x38, 0x5000)
+    data = _put_u32_le(data, 0x98 + 0x3c, 0x200)
+    data = _put_u16_le(data, 0x98 + 0x5c, 3)
+    data = _put_u32_le(data, 0x98 + 0x6c, 16)
+    data = _put_u32_le(data, 0x98 + 0x70 + 8, 0x2020)
+    data = _put_u32_le(data, 0x98 + 0x70 + 12, 0x40)
+    data = _put_u32_le(data, 0x98 + 0x70 + 40, 0x2160)
+    data = _put_u32_le(data, 0x98 + 0x70 + 44, 0x0c)
+    data = _put_u32_le(data, 0x98 + 0x70 + 72, 0x2170)
+    data = _put_u32_le(data, 0x98 + 0x70 + 76, 0x28)
+    val section_offset = 0x98 + 0xf0
+    data = _put_u32_le(data, section_offset + 8, 0x300)
+    data = _put_u32_le(data, section_offset + 12, 0x2000)
+    data = _put_u32_le(data, section_offset + 16, 0x200)
+    data = _put_u32_le(data, section_offset + 20, 0x200)
+    data = _put_u32_le(data, section_offset + 36, 0x60000020)
+    data = _put_u32_le(data, 0x220 + 12, 0x2050)
+    data = _put_u32_le(data, 0x250, 0x4b)
+    data = _put_u32_le(data, 0x360, 0x2000)
+    data = _put_u32_le(data, 0x364, 0x0c)
+    data = _put_u16_le(data, 0x368, 0xa018)
+    data = _put_u32_le(data, 0x370 + 24, 0x2190)
+    data = _put_u32_le(data, 0x390, 0x2010)
+    data
+
+describe "Wine PE loader gate":
+    describe "loader feature coverage":
+        it "lists PE validation features needed before hello.exe":
+            val required = wine_pe_required_features()
+            expect required.len() > 10
+            expect required[0] == "mz"
+
+        it "reports the first missing PE loader feature":
+            val state = wine_pe_gate("mz pe-signature machine-x86_64 pe32plus")
+            expect state == "missing-section-bounds"
+
+        it "returns ready for the full safe parse/map feature set":
+            val state = wine_pe_gate("mz pe-signature machine-x86_64 pe32plus section-bounds console-subsystem imports relocations tls-directory structured-errors safe-map no-exec-before-gates")
+            expect state == "ready"
+
+        it "derives PE readiness from actual image bytes and loader policies":
+            val state = wine_pe_gate_from_image(_image(), "native-module-open tls-callback", "structured-errors safe-map no-exec-before-gates")
+            expect state == "ready"
+
+        it "keeps image-backed PE readiness blocked on structured loader policy":
+            expect wine_pe_gate_from_image(_image(), "native-module-open tls-callback", "structured-errors safe-map") == "missing-no-exec-before-gates"
+            expect wine_pe_gate_from_image(_image(), "native-module-open", "structured-errors safe-map no-exec-before-gates") == "missing-api-tls-callback"
+
+    describe "header classification":
+        it "rejects non-MZ inputs":
+            expect wine_pe_header_gate("not-pe") == "bad-mz"
+
+        it "accepts a declared PE32+ x86_64 console header summary":
+            val summary = "MZ PE x86_64 PE32+ console"
+            expect wine_pe_header_gate(summary) == "ready"
+
+    describe "execution gate":
+        it "blocks execution until process, VM, host, and PE gates are verified":
+            val state = wine_pe_execution_gate("process=verified vm=verified host=partial pe=verified")
+            expect state == "blocked-host"
+
+        it "requires async and thread gates before PE execution":
+            val state = wine_pe_execution_gate("process=verified vm=verified host=verified posix=verified pthread=verified dynload=verified pe=verified")
+            expect state == "blocked-async"

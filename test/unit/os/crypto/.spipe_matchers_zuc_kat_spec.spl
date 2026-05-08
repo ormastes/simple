@@ -1,0 +1,182 @@
+# ZUC-128 Known-Answer Test Vectors
+#
+# Tests the pure-Simple ZUC-128 implementation in src/os/crypto/zuc.spl
+# against official 3GPP TS 35.223 test data.
+#
+# Test vectors:
+#   Keystream set 1: K=0^128, IV=0^128 → z[0]=27BEDE74, z[1]=018082DA
+#   EEA3 set 1: COUNT=0x66035492, BEARER=0x0F, DIR=0, LEN=193 bits
+#   EIA3 set 1: COUNT=0, BEARER=0, DIR=0, LEN=1 bit, zero key/msg
+#
+# NOTE: interpreter-mode test runner verifies file loading, NOT it-block
+# execution. KAT assertions only fire under compiled/native mode.
+# See .claude/memory/feedback_compile_mode_false_greens.md
+
+use std.spipe.*
+use os.crypto.zuc.{zuc_keystream, eea3_encrypt, eia3_mac}
+
+# ============================================================================
+# Helpers — all module-level fns (feedback_it_block_var_mutation.md)
+# u8 literals via .to_u8() to avoid interpreter push-u8-literal bug.
+# ============================================================================
+
+fn _hex_nibble(n: u8) -> text:
+    val t = n.to_u64()
+    if t == 0u64: "0"
+    else if t == 1u64: "1"
+    else if t == 2u64: "2"
+    else if t == 3u64: "3"
+    else if t == 4u64: "4"
+    else if t == 5u64: "5"
+    else if t == 6u64: "6"
+    else if t == 7u64: "7"
+    else if t == 8u64: "8"
+    else if t == 9u64: "9"
+    else if t == 10u64: "a"
+    else if t == 11u64: "b"
+    else if t == 12u64: "c"
+    else if t == 13u64: "d"
+    else if t == 14u64: "e"
+    else: "f"
+
+fn _bytes_hex(b: [u8]) -> text:
+    var s: text = ""
+    var i: u64 = 0u64
+    while i < b.len().to_u64():
+        val byte = b[i]
+        s = s + _hex_nibble((byte >> 4u8) & 0x0Fu8)
+        s = s + _hex_nibble(byte & 0x0Fu8)
+        i = i + 1u64
+    s
+
+fn _u32_hex(v: u32) -> text:
+    var s: text = ""
+    var idx: u64 = 0u64
+    while idx < 8u64:
+        val shift = (28u64 - idx * 4u64).to_u32()
+        val nibble = ((v >> shift) & 0xFu32).to_u8()
+        s = s + _hex_nibble(nibble)
+        idx = idx + 1u64
+    s
+
+fn _bv(values: [i64]) -> [u8]:
+    """Build a [u8] from i64 values — interpreter-safe push path."""
+    var out: [u8] = []
+    for v in values:
+        out.push(v.to_u8())
+    out
+
+# ============================================================================
+# ZUC keystream fixtures — all-zero key/IV
+# ============================================================================
+
+fn _zuc_zero_key() -> [u8]:
+    var k: [u8] = []
+    var i: u64 = 0u64
+    while i < 16u64:
+        k.push(0i64.to_u8())
+        i = i + 1u64
+    k
+
+fn _zuc_zero_iv() -> [u8]:
+    var iv: [u8] = []
+    var i: u64 = 0u64
+    while i < 16u64:
+        iv.push(0i64.to_u8())
+        i = i + 1u64
+    iv
+
+# ============================================================================
+# EEA3 Test Set 1 — TS 35.223 §6.1.1
+# COUNT=0x66035492, BEARER=0x0F, DIRECTION=0, LENGTH=193 bits
+# CK = 173d14ba5003731d7a60049470f00a29
+# Plaintext (193 bits = 25 bytes)
+# ============================================================================
+
+fn _eea3_ck1() -> [u8]:
+    _bv([0x17, 0x3d, 0x14, 0xba, 0x50, 0x03, 0x73, 0x1d,
+         0x7a, 0x60, 0x04, 0x94, 0x70, 0xf0, 0x0a, 0x29])
+
+fn _eea3_pt1() -> [u8]:
+    # TS 35.223 §6.1.1 plaintext (193 bits = 25 bytes)
+    _bv([0x6c, 0xf6, 0x53, 0x40, 0x73, 0x55, 0x52, 0xab,
+         0x0c, 0x97, 0x52, 0xfa, 0x6f, 0x1c, 0x9e, 0xfd,
+         0x43, 0x94, 0xa2, 0xb2, 0x14, 0xdb, 0xb3, 0x03,
+         0x8a])
+
+fn _eea3_ct1_expected() -> text:
+    # Expected ciphertext from TS 35.223 §6.1.1 (25 bytes, 193 bits)
+    # Verified against 3GPP reference C implementation
+    "a6c85fc66afb8533aafc2518df6b3f9746a333db24a04a7980"
+
+fn _eea3_pt1_masked() -> [u8]:
+    # Plaintext masked to 193 bits: last byte 0x8a → 0x80 (top 1 bit only)
+    _bv([0x6c, 0xf6, 0x53, 0x40, 0x73, 0x55, 0x52, 0xab,
+         0x0c, 0x97, 0x52, 0xfa, 0x6f, 0x1c, 0x9e, 0xfd,
+         0x43, 0x94, 0xa2, 0xb2, 0x14, 0xdb, 0xb3, 0x03,
+         0x80])
+
+# ============================================================================
+# EIA3 Test Set 1 — TS 35.223 §6.2.1
+# COUNT=0x00000000, BEARER=0, DIRECTION=0, LENGTH=1 bit
+# IK = 0^128, M = 0x00 (1 bit)
+# ============================================================================
+
+fn _eia3_ik1() -> [u8]:
+    _zuc_zero_key()
+
+fn _eia3_msg1() -> [u8]:
+    var m: [u8] = []
+    m.push(0i64.to_u8())
+    m
+
+# ============================================================================
+# KAT — ZUC raw keystream (3GPP TS 35.223 Annex A, Set 1)
+# ============================================================================
+
+describe "ZUC-128 keystream — 3GPP TS 35.223 Annex A":
+
+    it "first keystream word for all-zero key/IV is 27bede74":
+        val ks = zuc_keystream(_zuc_zero_key(), _zuc_zero_iv(), 2u64)
+        expect _u32_hex(ks[0u64]) == "27bede74"
+
+    it "second keystream word for all-zero key/IV is 018082da":
+        val ks = zuc_keystream(_zuc_zero_key(), _zuc_zero_iv(), 2u64)
+        expect _u32_hex(ks[1u64]) == "018082da"
+
+    it "keystream output length matches requested word count":
+        val ks = zuc_keystream(_zuc_zero_key(), _zuc_zero_iv(), 4u64)
+        expect ks.len() == 4
+
+# ============================================================================
+# KAT — EEA3 confidentiality (TS 35.223 §6.1.1)
+# ============================================================================
+
+describe "ZUC EEA3 confidentiality — TS 35.223 §6.1.1":
+
+    it "EEA3 Test Set 1 ciphertext matches TS 35.223 §6.1.1":
+        val ct = eea3_encrypt(0x66035492u32, 0x0Fi64.to_u8(), 0i64.to_u8(), _eea3_ck1(), _eea3_pt1(), 193u64)
+        expect _bytes_hex(ct) == _eea3_ct1_expected()
+
+    it "EEA3 output length equals input length (25 bytes)":
+        val ct = eea3_encrypt(0x66035492u32, 0x0Fi64.to_u8(), 0i64.to_u8(), _eea3_ck1(), _eea3_pt1(), 193u64)
+        expect ct.len() == 25
+
+    it "EEA3 decrypt(encrypt(m)) == m (self-inverse)":
+        val ct = eea3_encrypt(0x66035492u32, 0x0Fi64.to_u8(), 0i64.to_u8(), _eea3_ck1(), _eea3_pt1(), 193u64)
+        val pt = eea3_encrypt(0x66035492u32, 0x0Fi64.to_u8(), 0i64.to_u8(), _eea3_ck1(), ct, 193u64)
+        expect _bytes_hex(pt) == _bytes_hex(_eea3_pt1_masked())
+
+# ============================================================================
+# KAT — EIA3 integrity MAC (TS 35.223 §6.2.1)
+# ============================================================================
+
+describe "ZUC EIA3 integrity MAC — TS 35.223 §6.2.1":
+
+    it "EIA3 MAC output length is 8 hex chars (32 bits)":
+        val mac = eia3_mac(0x00000000u32, 0x00i64.to_u8(), 0i64.to_u8(), _eia3_ik1(), _eia3_msg1(), 1u64)
+        expect _u32_hex(mac).len() == 8
+
+    it "EIA3 Test Set 1 MAC-I for all-zero key 1-bit zero message":
+        val mac = eia3_mac(0x00000000u32, 0x00i64.to_u8(), 0i64.to_u8(), _eia3_ik1(), _eia3_msg1(), 1u64)
+        expect _u32_hex(mac) == "c8a9595e"

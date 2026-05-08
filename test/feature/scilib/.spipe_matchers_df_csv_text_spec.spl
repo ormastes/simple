@@ -1,0 +1,57 @@
+# @cover src/lib/nogc_sync_mut/df/mod.spl 80%
+"""
+# DataFrame CSV Text Specification
+
+**Feature IDs:** science-math-lib-set-df-csv-text-core
+**Plan:** doc/03_plan/agent_tasks/science_math_lib_set.md
+**Design:** doc/05_design/science_math_lib_set.md
+
+Validates pure CSV text import/export for simple numeric DataFrames.
+"""
+
+use std.spipe.*
+use std.df.*
+use std.ndarray.*
+
+
+describe "DataFrame CSV text I/O":
+    it "parses numeric CSV text into F64 columns":
+        val df = from_csv_text("x,y\n1.5,2.5\n3.0,4.0").unwrap()
+        expect df.num_rows() == Index.new(2)
+        expect df.num_cols() == Index.new(2)
+        expect df.col(Symbol.from("x")).unwrap().values.flat_f64(0) == Float64.new(1.5)
+        expect df.col(Symbol.from("y")).unwrap().values.flat_f64(1) == Float64.new(4.0)
+
+    it "infers integer CSV columns as I64":
+        val df = from_csv_text("id,score\n1,10.5\n2,20.25").unwrap()
+        val id = df.col(Symbol.from("id")).unwrap()
+        val score = df.col(Symbol.from("score")).unwrap()
+        expect id.dtype == DType.I64
+        expect score.dtype == DType.F64
+        expect id.values.flat_i64(1) == Int64.new(2)
+        expect score.values.flat_f64(0) == Float64.new(10.5)
+
+    it "exports a DataFrame to CSV text and parses it back":
+        val df = DataFrame.from_columns([
+            SeriesErased.F64Series(Series(name: Symbol.from("x"), values: array([Float64.new(1.0), Float64.new(3.0)]), dtype: DType.F64, missing: [Bool.new(false), Bool.new(false)])),
+            SeriesErased.I64Series(Series(name: Symbol.from("y"), values: array_i64([Int64.new(2), Int64.new(4)]), dtype: DType.I64, missing: [Bool.new(false), Bool.new(false)]))
+        ]).unwrap()
+        val csv = df.to_csv_text().unwrap()
+        expect csv.starts_with("x,y\n") == true
+        val parsed = from_csv_text(csv).unwrap()
+        expect parsed.col(Symbol.from("x")).unwrap().values.flat_f64(1) == Float64.new(3.0)
+        expect parsed.col(Symbol.from("y")).unwrap().dtype == DType.I64
+        expect parsed.col(Symbol.from("y")).unwrap().values.flat_i64(1) == Int64.new(4)
+
+    it "round-trips blank CSV cells as missing values":
+        val df = from_csv_text("x,y\n1.0,\n,4.0").unwrap()
+        expect df.col(Symbol.from("y")).unwrap().is_missing(Index.new(0)).unwrap() == true
+        expect df.col(Symbol.from("x")).unwrap().is_missing(Index.new(1)).unwrap() == true
+        val csv = df.to_csv_text().unwrap()
+        expect (csv).contains("1.0,")
+        expect (csv).contains(",4.0")
+
+    it "returns errors for malformed CSV":
+        expect from_csv_text("").is_err() == true
+        expect from_csv_text("x,y\n1.0").is_err() == true
+        expect from_csv_text("x\nnope").is_err() == true

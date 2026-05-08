@@ -1,0 +1,484 @@
+# ChaCha20-Poly1305 AEAD Known-Answer Test — RFC 8439 §2.8.2
+#
+# Tests chacha20_poly1305_encrypt and chacha20_poly1305_decrypt against the
+# canonical AEAD construction test vector from RFC 8439 Section 2.8.2.
+#
+# Encrypt returns ciphertext || 16-byte Poly1305 tag concatenated (130 bytes).
+# Decrypt takes (key, nonce, ciphertext_only, aad, tag) and returns
+# Chacha20Poly1305Result.Ok(data: plaintext) on success.
+#
+# NOTE: per memory/feedback_it_block_var_mutation.md, byte-array inputs are
+# built in module-level fn helpers so loop pushes persist across calls.
+# NOTE: per memory/feedback_compile_mode_false_greens.md this spec is
+# verified in interpreter mode only.
+# NOTE: hex literals have no u8 suffix (matches aes_modes_nist_spec.spl style).
+#
+# Source: RFC 8439 Section 2.8.2
+# https://www.rfc-editor.org/rfc/rfc8439#section-2.8.2
+
+use std.spec.*
+use os.crypto.chacha20_poly1305.{
+    chacha20_poly1305_encrypt,
+    chacha20_poly1305_decrypt,
+    Chacha20Poly1305Result
+}
+
+extern fn rt_bytes_u8_at(arr: [u8], idx: i64) -> i64
+
+# ============================================================================
+# Slice helper
+# ============================================================================
+
+fn _slice(buf: [u8], start: i64, end_: i64) -> [u8]:
+    var s: [u8] = []
+    var i: i64 = start
+    while i < end_:
+        s.push(rt_bytes_u8_at(buf, i))
+        i = i + 1
+    s
+
+# ============================================================================
+# Result enum helpers
+# ============================================================================
+
+fn _decrypt_ok(r: Chacha20Poly1305Result) -> bool:
+    match r:
+        Chacha20Poly1305Result.Ok(_):  true
+        Chacha20Poly1305Result.Err(_): false
+
+fn _decrypt_payload(r: Chacha20Poly1305Result) -> [u8]:
+    match r:
+        Chacha20Poly1305Result.Ok(data): data
+        Chacha20Poly1305Result.Err(_):   []
+
+# ============================================================================
+# RFC 8439 §2.8.2 test vectors
+# ============================================================================
+
+# Key (32 bytes): 808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f
+fn _key() -> [u8]:
+    var k: [u8] = []
+    k.push(0x80)
+    k.push(0x81)
+    k.push(0x82)
+    k.push(0x83)
+    k.push(0x84)
+    k.push(0x85)
+    k.push(0x86)
+    k.push(0x87)
+    k.push(0x88)
+    k.push(0x89)
+    k.push(0x8a)
+    k.push(0x8b)
+    k.push(0x8c)
+    k.push(0x8d)
+    k.push(0x8e)
+    k.push(0x8f)
+    k.push(0x90)
+    k.push(0x91)
+    k.push(0x92)
+    k.push(0x93)
+    k.push(0x94)
+    k.push(0x95)
+    k.push(0x96)
+    k.push(0x97)
+    k.push(0x98)
+    k.push(0x99)
+    k.push(0x9a)
+    k.push(0x9b)
+    k.push(0x9c)
+    k.push(0x9d)
+    k.push(0x9e)
+    k.push(0x9f)
+    k
+
+# Nonce (12 bytes): 070000004041424344454647
+fn _nonce() -> [u8]:
+    var n: [u8] = []
+    n.push(0x07)
+    n.push(0x00)
+    n.push(0x00)
+    n.push(0x00)
+    n.push(0x40)
+    n.push(0x41)
+    n.push(0x42)
+    n.push(0x43)
+    n.push(0x44)
+    n.push(0x45)
+    n.push(0x46)
+    n.push(0x47)
+    n
+
+# AAD (12 bytes): 50515253c0c1c2c3c4c5c6c7
+fn _aad() -> [u8]:
+    var a: [u8] = []
+    a.push(0x50)
+    a.push(0x51)
+    a.push(0x52)
+    a.push(0x53)
+    a.push(0xc0)
+    a.push(0xc1)
+    a.push(0xc2)
+    a.push(0xc3)
+    a.push(0xc4)
+    a.push(0xc5)
+    a.push(0xc6)
+    a.push(0xc7)
+    a
+
+# Plaintext (114 bytes):
+# "Ladies and Gentlemen of the class of '99: If I could offer you only one
+# tip for the future, sunscreen would be it."
+fn _plaintext() -> [u8]:
+    var p: [u8] = []
+    # L  a  d  i  e  s     a  n  d
+    p.push(0x4c)
+    p.push(0x61)
+    p.push(0x64)
+    p.push(0x69)
+    p.push(0x65)
+    p.push(0x73)
+    p.push(0x20)
+    p.push(0x61)
+    p.push(0x6e)
+    p.push(0x64)
+    #     G  e  n  t  l  e  m  e  n
+    p.push(0x20)
+    p.push(0x47)
+    p.push(0x65)
+    p.push(0x6e)
+    p.push(0x74)
+    p.push(0x6c)
+    p.push(0x65)
+    p.push(0x6d)
+    p.push(0x65)
+    p.push(0x6e)
+    #     o  f     t  h  e     c  l  a
+    p.push(0x20)
+    p.push(0x6f)
+    p.push(0x66)
+    p.push(0x20)
+    p.push(0x74)
+    p.push(0x68)
+    p.push(0x65)
+    p.push(0x20)
+    p.push(0x63)
+    p.push(0x6c)
+    # s  s     o  f     '  9  9  :
+    p.push(0x61)
+    p.push(0x73)
+    p.push(0x73)
+    p.push(0x20)
+    p.push(0x6f)
+    p.push(0x66)
+    p.push(0x20)
+    p.push(0x27)
+    p.push(0x39)
+    p.push(0x39)
+    # :     I  f     I     c  o  u
+    p.push(0x3a)
+    p.push(0x20)
+    p.push(0x49)
+    p.push(0x66)
+    p.push(0x20)
+    p.push(0x49)
+    p.push(0x20)
+    p.push(0x63)
+    p.push(0x6f)
+    p.push(0x75)
+    # l  d     o  f  f  e  r     y
+    p.push(0x6c)
+    p.push(0x64)
+    p.push(0x20)
+    p.push(0x6f)
+    p.push(0x66)
+    p.push(0x66)
+    p.push(0x65)
+    p.push(0x72)
+    p.push(0x20)
+    p.push(0x79)
+    # o  u     o  n  l  y     o  n
+    p.push(0x6f)
+    p.push(0x75)
+    p.push(0x20)
+    p.push(0x6f)
+    p.push(0x6e)
+    p.push(0x6c)
+    p.push(0x79)
+    p.push(0x20)
+    p.push(0x6f)
+    p.push(0x6e)
+    # e     t  i  p     f  o  r     t
+    p.push(0x65)
+    p.push(0x20)
+    p.push(0x74)
+    p.push(0x69)
+    p.push(0x70)
+    p.push(0x20)
+    p.push(0x66)
+    p.push(0x6f)
+    p.push(0x72)
+    p.push(0x20)
+    p.push(0x74)
+    # h  e     f  u  t  u  r  e  ,
+    p.push(0x68)
+    p.push(0x65)
+    p.push(0x20)
+    p.push(0x66)
+    p.push(0x75)
+    p.push(0x74)
+    p.push(0x75)
+    p.push(0x72)
+    p.push(0x65)
+    p.push(0x2c)
+    #     s  u  n  s  c  r  e  e  n
+    p.push(0x20)
+    p.push(0x73)
+    p.push(0x75)
+    p.push(0x6e)
+    p.push(0x73)
+    p.push(0x63)
+    p.push(0x72)
+    p.push(0x65)
+    p.push(0x65)
+    p.push(0x6e)
+    #     w  o  u  l  d     b  e     i
+    p.push(0x20)
+    p.push(0x77)
+    p.push(0x6f)
+    p.push(0x75)
+    p.push(0x6c)
+    p.push(0x64)
+    p.push(0x20)
+    p.push(0x62)
+    p.push(0x65)
+    p.push(0x20)
+    p.push(0x69)
+    # t  .
+    p.push(0x74)
+    p.push(0x2e)
+    p
+
+# Expected ciphertext (114 bytes):
+# d31a8d34648e60db7b86afbc53ef7ec2
+# a4aded51296e08fea9e2b5a736ee62d6
+# 3dbea45e8ca9671282fafb69da92728b
+# 1a71de0a9e060b2905d6a5b67ecd3b36
+# 92ddbd7f2d778b8c9803aee328091b58
+# fab324e4fad675945585808b4831d7bc
+# 3ff4def08e4b7a9de576d26586cec64b
+# 6116
+fn _expected_ciphertext() -> [u8]:
+    var c: [u8] = []
+    # d31a8d34648e60db7b86afbc53ef7ec2
+    c.push(0xd3)
+    c.push(0x1a)
+    c.push(0x8d)
+    c.push(0x34)
+    c.push(0x64)
+    c.push(0x8e)
+    c.push(0x60)
+    c.push(0xdb)
+    c.push(0x7b)
+    c.push(0x86)
+    c.push(0xaf)
+    c.push(0xbc)
+    c.push(0x53)
+    c.push(0xef)
+    c.push(0x7e)
+    c.push(0xc2)
+    # a4aded51296e08fea9e2b5a736ee62d6
+    c.push(0xa4)
+    c.push(0xad)
+    c.push(0xed)
+    c.push(0x51)
+    c.push(0x29)
+    c.push(0x6e)
+    c.push(0x08)
+    c.push(0xfe)
+    c.push(0xa9)
+    c.push(0xe2)
+    c.push(0xb5)
+    c.push(0xa7)
+    c.push(0x36)
+    c.push(0xee)
+    c.push(0x62)
+    c.push(0xd6)
+    # 3dbea45e8ca9671282fafb69da92728b
+    c.push(0x3d)
+    c.push(0xbe)
+    c.push(0xa4)
+    c.push(0x5e)
+    c.push(0x8c)
+    c.push(0xa9)
+    c.push(0x67)
+    c.push(0x12)
+    c.push(0x82)
+    c.push(0xfa)
+    c.push(0xfb)
+    c.push(0x69)
+    c.push(0xda)
+    c.push(0x92)
+    c.push(0x72)
+    c.push(0x8b)
+    # 1a71de0a9e060b2905d6a5b67ecd3b36
+    c.push(0x1a)
+    c.push(0x71)
+    c.push(0xde)
+    c.push(0x0a)
+    c.push(0x9e)
+    c.push(0x06)
+    c.push(0x0b)
+    c.push(0x29)
+    c.push(0x05)
+    c.push(0xd6)
+    c.push(0xa5)
+    c.push(0xb6)
+    c.push(0x7e)
+    c.push(0xcd)
+    c.push(0x3b)
+    c.push(0x36)
+    # 92ddbd7f2d778b8c9803aee328091b58
+    c.push(0x92)
+    c.push(0xdd)
+    c.push(0xbd)
+    c.push(0x7f)
+    c.push(0x2d)
+    c.push(0x77)
+    c.push(0x8b)
+    c.push(0x8c)
+    c.push(0x98)
+    c.push(0x03)
+    c.push(0xae)
+    c.push(0xe3)
+    c.push(0x28)
+    c.push(0x09)
+    c.push(0x1b)
+    c.push(0x58)
+    # fab324e4fad675945585808b4831d7bc
+    c.push(0xfa)
+    c.push(0xb3)
+    c.push(0x24)
+    c.push(0xe4)
+    c.push(0xfa)
+    c.push(0xd6)
+    c.push(0x75)
+    c.push(0x94)
+    c.push(0x55)
+    c.push(0x85)
+    c.push(0x80)
+    c.push(0x8b)
+    c.push(0x48)
+    c.push(0x31)
+    c.push(0xd7)
+    c.push(0xbc)
+    # 3ff4def08e4b7a9de576d26586cec64b
+    c.push(0x3f)
+    c.push(0xf4)
+    c.push(0xde)
+    c.push(0xf0)
+    c.push(0x8e)
+    c.push(0x4b)
+    c.push(0x7a)
+    c.push(0x9d)
+    c.push(0xe5)
+    c.push(0x76)
+    c.push(0xd2)
+    c.push(0x65)
+    c.push(0x86)
+    c.push(0xce)
+    c.push(0xc6)
+    c.push(0x4b)
+    # 6116
+    c.push(0x61)
+    c.push(0x16)
+    c
+
+# Expected tag (16 bytes): 1ae10b594f09e26a7e902ecbd0600691
+fn _expected_tag() -> [u8]:
+    var t: [u8] = []
+    t.push(0x1a)
+    t.push(0xe1)
+    t.push(0x0b)
+    t.push(0x59)
+    t.push(0x4f)
+    t.push(0x09)
+    t.push(0xe2)
+    t.push(0x6a)
+    t.push(0x7e)
+    t.push(0x90)
+    t.push(0x2e)
+    t.push(0xcb)
+    t.push(0xd0)
+    t.push(0x60)
+    t.push(0x06)
+    t.push(0x91)
+    t
+
+# ============================================================================
+# Specs
+# ============================================================================
+
+describe "ChaCha20-Poly1305 RFC 8439 §2.8.2 AEAD KAT":
+
+    it "encrypt produces correct total output length (114 ciphertext + 16 tag = 130 bytes)":
+        val out = chacha20_poly1305_encrypt(_key(), _nonce(), _plaintext(), _aad())
+        expect out.len() == 130
+
+    it "encrypt produces correct ciphertext bytes (first 16)":
+        val out = chacha20_poly1305_encrypt(_key(), _nonce(), _plaintext(), _aad())
+        val got = _slice(out, 0, 16)
+        val exp = _slice(_expected_ciphertext(), 0, 16)
+        expect got == exp
+
+    it "encrypt produces correct ciphertext bytes (bytes 16-32)":
+        val out = chacha20_poly1305_encrypt(_key(), _nonce(), _plaintext(), _aad())
+        val got = _slice(out, 16, 32)
+        val exp = _slice(_expected_ciphertext(), 16, 32)
+        expect got == exp
+
+    it "encrypt produces correct ciphertext bytes (bytes 32-64)":
+        val out = chacha20_poly1305_encrypt(_key(), _nonce(), _plaintext(), _aad())
+        val got = _slice(out, 32, 64)
+        val exp = _slice(_expected_ciphertext(), 32, 64)
+        expect got == exp
+
+    it "encrypt produces correct ciphertext bytes (bytes 64-114)":
+        val out = chacha20_poly1305_encrypt(_key(), _nonce(), _plaintext(), _aad())
+        val got = _slice(out, 64, 114)
+        val exp = _slice(_expected_ciphertext(), 64, 114)
+        expect got == exp
+
+    it "encrypt produces correct Poly1305 tag (last 16 bytes)":
+        val out = chacha20_poly1305_encrypt(_key(), _nonce(), _plaintext(), _aad())
+        val got_tag = _slice(out, 114, 130)
+        expect got_tag == _expected_tag()
+
+    it "decrypt with correct tag succeeds":
+        val res = chacha20_poly1305_decrypt(_key(), _nonce(), _expected_ciphertext(), _aad(), _expected_tag())
+        expect _decrypt_ok(res) == true
+
+    it "decrypt recovers original plaintext":
+        val res = chacha20_poly1305_decrypt(_key(), _nonce(), _expected_ciphertext(), _aad(), _expected_tag())
+        expect _decrypt_payload(res) == _plaintext()
+
+    it "decrypt with wrong tag fails authentication":
+        var bad_tag: [u8] = []
+        bad_tag.push(0x00)
+        bad_tag.push(0x00)
+        bad_tag.push(0x00)
+        bad_tag.push(0x00)
+        bad_tag.push(0x00)
+        bad_tag.push(0x00)
+        bad_tag.push(0x00)
+        bad_tag.push(0x00)
+        bad_tag.push(0x00)
+        bad_tag.push(0x00)
+        bad_tag.push(0x00)
+        bad_tag.push(0x00)
+        bad_tag.push(0x00)
+        bad_tag.push(0x00)
+        bad_tag.push(0x00)
+        bad_tag.push(0x00)
+        val res = chacha20_poly1305_decrypt(_key(), _nonce(), _expected_ciphertext(), _aad(), bad_tag)
+        expect _decrypt_ok(res) == false

@@ -1,0 +1,126 @@
+use std.spec.*
+
+use compiler.mir.mir_data.*
+use compiler.mir.intrinsics.{BIT_ROTATE_LEFT, BIT_ROTATE_RIGHT, BIT_CLZ, BIT_CTZ, BIT_BSWAP}
+use compiler.backend.common.isel_context.{new_isel_context}
+use compiler.backend.backend.backend_types.{CodegenTarget}
+use compiler.backend.backend.riscv_target.{riscv_linux_target_contract}
+use compiler.backend.backend.native.isel_riscv64.{isel_module_riscv64, rv_select_scalar_bitmanip}
+use compiler.backend.native.{RV64_WORD_SIZE}
+use compiler.backend.native.mach_inst.{
+    MachModule, MachBlock, MachReg, MachRegKind, Operand, OperandKind,
+    RV_OP_NOP, RV_OP_ROL, RV_OP_ROR, RV_OP_CLZ, RV_OP_CTZ, RV_OP_REV8,
+    reg_id, operand_get_reg
+}
+use compiler.common.diagnostics.span.{Span}
+use compiler.hir.hir_types.{SymbolId}
+
+fn virt_operand(id: i64) -> Operand:
+    Operand(kind: OperandKind.Reg(MachReg(kind: MachRegKind.Virtual(id))))
+
+fn build_intrinsic_module(name: text, intrinsic_name: text, arity: i64) -> MirModule:
+    val i64_type = MirType(kind: MirTypeKind.I64)
+    val sig = MirSignature(params: [], return_type: i64_type, is_variadic: false)
+    val locals = [
+        MirLocal(id: LocalId(id: 0), name: Some("_return"), type_: i64_type, kind: LocalKind.Return),
+        MirLocal(id: LocalId(id: 1), name: Some("value"), type_: i64_type, kind: LocalKind.Temp),
+        MirLocal(id: LocalId(id: 2), name: Some("count"), type_: i64_type, kind: LocalKind.Temp),
+        MirLocal(id: LocalId(id: 3), name: Some("result"), type_: i64_type, kind: LocalKind.Temp)
+    ]
+    var instructions = [
+        MirInst(kind: MirInstKind.Const(LocalId(id: 1), MirConstValue.Int(0x123456789ABCDEF), i64_type), span: nil),
+        MirInst(kind: MirInstKind.Const(LocalId(id: 2), MirConstValue.Int(13), i64_type), span: nil)
+    ]
+    var args = [MirOperand(kind: MirOperandKind.Copy(LocalId(id: 1)))]
+    if arity == 2:
+        args.push(MirOperand(kind: MirOperandKind.Copy(LocalId(id: 2))))
+    instructions.push(MirInst(kind: MirInstKind.Intrinsic(Some(LocalId(id: 3)), intrinsic_name, args), span: nil))
+    val entry = MirBlock(
+        id: BlockId.new(0),
+        label: Some("entry"),
+        instructions: instructions,
+        terminator: MirTerminator.Return(Some(MirOperand(kind: MirOperandKind.Copy(LocalId(id: 3)))))
+    )
+    val func = MirFunction(
+        symbol: SymbolId.new(0),
+        name: name,
+        signature: sig,
+        locals: locals,
+        blocks: [entry],
+        entry_block: BlockId.new(0),
+        span: Span(start: 0, end: 0, line: 1, col: 1),
+        generic_params: [],
+        is_generic_template: false,
+        specialization_of: nil,
+        type_bindings: {}
+    )
+    var functions: Dict<SymbolId, MirFunction> = {}
+    functions[SymbolId.new(0)] = func
+    MirModule(name: name, functions: functions, statics: {}, constants: {}, types: {})
+
+fn entry_block(module: MachModule) -> MachBlock:
+    module.functions[0].blocks[1]
+
+fn find_opcode(block: MachBlock, opcode: i64) -> i64:
+    for i in 0..block.insts.len():
+        if block.insts[i].opcode == opcode:
+            return i
+    -1
+
+describe "Isel Riscv64":
+    it "uses the shared LP64D contract word size":
+        val contract = riscv_linux_target_contract(CodegenTarget.Riscv64)
+        expect RV64_WORD_SIZE == 8
+        expect contract.pointer_bits == 64
+        expect contract.stack_align_bytes == 16
+
+    it "keeps RV64 Linux ABI metadata explicit":
+        val contract = riscv_linux_target_contract(CodegenTarget.Riscv64)
+        expect contract.abi_text() == "lp64d"
+        expect contract.arg_register_count == 8
+
+describe "RV64 native ISel scalar bitmanip":
+    it "selects rotates and unary bitmanip helpers":
+        val rol = rv_select_scalar_bitmanip(new_isel_context(), virt_operand(7), BIT_ROTATE_LEFT, [virt_operand(3), virt_operand(4)])
+        expect rol.insts.len() == 1
+        expect rol.insts[0].opcode == RV_OP_ROL
+        expect reg_id(operand_get_reg(rol.insts[0].operands[0])) == 7
+
+        val ror = rv_select_scalar_bitmanip(new_isel_context(), virt_operand(7), BIT_ROTATE_RIGHT, [virt_operand(3), virt_operand(4)])
+        expect ror.insts.len() == 1
+        expect ror.insts[0].opcode == RV_OP_ROR
+
+        val clz = rv_select_scalar_bitmanip(new_isel_context(), virt_operand(5), BIT_CLZ, [virt_operand(2)])
+        expect clz.insts[0].opcode == RV_OP_CLZ
+
+        val ctz = rv_select_scalar_bitmanip(new_isel_context(), virt_operand(5), BIT_CTZ, [virt_operand(2)])
+        expect ctz.insts[0].opcode == RV_OP_CTZ
+
+        val bswap = rv_select_scalar_bitmanip(new_isel_context(), virt_operand(5), BIT_BSWAP, [virt_operand(2)])
+        expect bswap.insts[0].opcode == RV_OP_REV8
+
+    it "keeps unsupported or malformed intrinsics inert":
+        val unsupported = rv_select_scalar_bitmanip(new_isel_context(), virt_operand(1), "bit_popcount", [virt_operand(0)])
+        expect unsupported.insts.len() == 1
+        expect unsupported.insts[0].opcode == RV_OP_NOP
+
+        val malformed = rv_select_scalar_bitmanip(new_isel_context(), virt_operand(1), BIT_ROTATE_LEFT, [virt_operand(0)])
+        expect malformed.insts.len() == 1
+        expect malformed.insts[0].opcode == RV_OP_NOP
+
+    it "lowers rotate intrinsics through the RV64 module path":
+        val rol_block = entry_block(isel_module_riscv64(build_intrinsic_module("rol_test", BIT_ROTATE_LEFT, 2)))
+        expect find_opcode(rol_block, RV_OP_ROL) >= 0 == true
+
+        val ror_block = entry_block(isel_module_riscv64(build_intrinsic_module("ror_test", BIT_ROTATE_RIGHT, 2)))
+        expect find_opcode(ror_block, RV_OP_ROR) >= 0 == true
+
+    it "lowers clz/ctz/bswap intrinsics through the RV64 module path":
+        val clz_block = entry_block(isel_module_riscv64(build_intrinsic_module("clz_test", BIT_CLZ, 1)))
+        expect find_opcode(clz_block, RV_OP_CLZ) >= 0 == true
+
+        val ctz_block = entry_block(isel_module_riscv64(build_intrinsic_module("ctz_test", BIT_CTZ, 1)))
+        expect find_opcode(ctz_block, RV_OP_CTZ) >= 0 == true
+
+        val bswap_block = entry_block(isel_module_riscv64(build_intrinsic_module("bswap_test", BIT_BSWAP, 1)))
+        expect find_opcode(bswap_block, RV_OP_REV8) >= 0 == true

@@ -1,0 +1,128 @@
+# @tag: sys, wm_compare, html_compat, chromium
+
+use std.spec.{describe, context, it, expect}
+use app.wm_compare.html_compat.{
+    Fixture, build_catalog, load_combined_html, load_chrome_golden, parse_opts,
+    compare_exact,
+}
+
+fn _catalog_has(id: text) -> bool:
+    val catalog = build_catalog()
+    for fixture in catalog:
+        if fixture.id == id:
+            return true
+    false
+
+describe "wm_compare HTML Chromium compatibility manifest":
+
+    context "v1 widget scene manifest":
+
+        it "lists the fixed 320x240 widget scenes":
+            val catalog = build_catalog()
+            expect catalog.len() == 16
+            expect _catalog_has("00_text_only")
+            expect _catalog_has("01_inline_text")
+            expect _catalog_has("02_block_boxes")
+            expect _catalog_has("03_list")
+            expect _catalog_has("04_button")
+            expect _catalog_has("05_text_input")
+            expect _catalog_has("06_card_panel")
+            expect _catalog_has("07_scrollable_list")
+            expect _catalog_has("10_colors")
+            expect _catalog_has("11_font_size")
+            expect _catalog_has("12_padding")
+            expect _catalog_has("13_margin")
+            expect _catalog_has("14_border")
+            expect _catalog_has("15_background")
+            expect _catalog_has("16_flex_row")
+            expect _catalog_has("17_flex_col")
+
+        it "uses text-tolerant matching for antialiased text scenes":
+            val catalog = build_catalog()
+            var strict = true
+            for fixture in catalog:
+                if fixture.id == "00_text_only":
+                    strict = fixture.strict
+            expect strict == false
+
+        it "uses perceptual matching for Chrome edge-antialiased block boxes":
+            val catalog = build_catalog()
+            var strict = true
+            for fixture in catalog:
+                if fixture.id == "02_block_boxes":
+                    strict = fixture.strict
+            expect strict == false
+
+        it "uses perceptual matching for Chrome edge-antialiased list rows":
+            val catalog = build_catalog()
+            var strict = true
+            for fixture in catalog:
+                if fixture.id == "03_list":
+                    strict = fixture.strict
+            expect strict == false
+
+        it "resolves scene HTML from the fixture tree":
+            val fixture = Fixture(
+                id: "04_button",
+                html_path: "test/fixtures/html_compat/04_button.html",
+                css_path: "",
+                strict: false
+            )
+            val html = load_combined_html(fixture)
+            expect (html).contains("<button")
+
+    context "Chromium golden loading":
+
+        it "loads checked-in Chromium PPMs at the canonical viewport":
+            val fixture = Fixture(
+                id: "04_button",
+                html_path: "test/fixtures/html_compat/04_button.html",
+                css_path: "",
+                strict: false
+            )
+            val golden = load_chrome_golden(fixture, 320, 240)
+            expect golden.success
+            expect golden.pixels.len() == 320 * 240
+
+        it "fails clearly when the viewport does not match the golden":
+            val fixture = Fixture(
+                id: "04_button",
+                html_path: "test/fixtures/html_compat/04_button.html",
+                css_path: "",
+                strict: false
+            )
+            val golden = load_chrome_golden(fixture, 160, 120)
+            expect not (golden.success)
+            expect (golden.error).contains("viewport mismatch")
+
+    context "Simple child-process timeout options":
+
+        it "defaults Simple source-B timeout to 20 seconds":
+            val opts = parse_opts([])
+            expect opts.simple_timeout_ms == 20000
+
+        it "parses explicit Simple source-B timeout":
+            val opts = parse_opts(["--simple-timeout-ms=3210"])
+            expect opts.simple_timeout_ms == 3210
+
+    context "bitwise pixel comparison":
+
+        it "reports exact match for identical pixel buffers":
+            val result = compare_exact(
+                [0xFF000000u32, 0xFFFFFFFFu32],
+                [0xFF000000u32, 0xFFFFFFFFu32],
+                2, 1
+            )
+            expect result.different_pixels == 0
+            expect result.match_percentage == 10000
+            expect result.max_channel_diff == 0
+
+        it "reports changed pixels and maximum channel drift":
+            val result = compare_exact(
+                [0xFF000000u32, 0xFFFFFFFFu32],
+                [0xFF000000u32, 0xFF00FFFFu32],
+                2, 1
+            )
+            expect result.different_pixels == 1
+            expect result.match_percentage == 5000
+            expect result.max_channel_diff == 255

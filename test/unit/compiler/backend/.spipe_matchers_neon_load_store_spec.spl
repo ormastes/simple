@@ -1,0 +1,247 @@
+# test/unit/compiler/backend/neon_load_store_spec.spl
+#
+# Byte-level golden tests for NEON load/store emit helpers (N4 wave).
+# Verifies emit_neon_ld1q_16b_immoff, emit_neon_st1q_16b_immoff,
+# emit_neon_ld1q_4s_immoff, emit_neon_st1q_4s_immoff,
+# emit_neon_ld2_4s_post, emit_neon_st2_4s_post
+# produce exact ARMv8 ARM bytes.
+#
+# Reference: ARMv8 ARM §C7.2.219 LD1 (multiple structures, no offset)
+#            ARMv8 ARM §C7.2.385 ST1 (multiple structures, no offset)
+#            ARMv8 ARM §C7.2.222 LD2 (multiple structures, post-index)
+#            ARMv8 ARM §C7.2.388 ST2 (multiple structures, post-index)
+#            doc/04_architecture/simd_backend_strict_emit_detail_part2.md §10.1
+#
+# Register indices: raw 0-31 (Vt index, NOT mach_inst ID range 64-79).
+#   V0=0, V1=1, V31=31
+# Base register: raw 0-31 (Xn index).
+#   X0=0, X1=1
+#
+# All instructions 4-byte fixed-width, little-endian.
+#
+# Encoding: Advanced SIMD load/store multiple structures (no-offset form):
+#   0 Q 001100 0 L 000000 opcode[3:0] size[1:0] Rn[4:0] Rt[4:0]
+# Post-index immediate form (Rm=11111):
+#   0 Q 001100 1 L Rm[4:0] opcode[3:0] size[1:0] Rn[4:0] Rt[4:0]
+#
+# ARMv8 ARM §C7.2 citations per instruction family.
+
+use compiler.backend.native.arm_neon.{emit_neon_ld1q_16b_immoff, emit_neon_st1q_16b_immoff, emit_neon_ld1q_4s_immoff, emit_neon_st1q_4s_immoff, emit_neon_ld2_4s_post, emit_neon_st2_4s_post}
+
+# ============================================================================
+# LD1 V0.16B, [X0]
+# ARMv8 ARM §C7.2.219 LD1 — Q=1, L=1, opcode=0111 (1-reg), size=00 (B)
+# Base word: 0x4C407000 → LE: 0x00 0x70 0x40 0x4C
+# Fields: bits[4:0]=Rt=0, bits[9:5]=Rn=0, bits[11:10]=size=00, bits[15:12]=opcode=0111
+#         bits[22]=L=1 (load), bits[23]=0 (no post-index), bits[30]=Q=1 (128-bit)
+# ============================================================================
+
+describe "NEON emit_neon_ld1q_16b_immoff golden":
+    it "LD1 V0.16B [X0] emits 4 bytes":
+        val result = emit_neon_ld1q_16b_immoff(0, 0)
+        expect result.len() == 4
+
+    it "LD1 V0.16B [X0] byte0 is 0x00":
+        # bits[7:0]: Rt=0, Rn[2:0]=0
+        val result = emit_neon_ld1q_16b_immoff(0, 0)
+        expect result[0] == 0
+
+    it "LD1 V0.16B [X0] byte1 is 0x70":
+        # bits[15:8]: opcode=0111 upper in bits[15:12], size=00 in bits[11:10] → 0x70
+        val result = emit_neon_ld1q_16b_immoff(0, 0)
+        expect result[1] == 112
+
+    it "LD1 V0.16B [X0] byte2 is 0x40":
+        # bits[23:16]: bit23=0 (no post), bit22=L=1, bit21=0, bits[20:16]=Rm=00000 → 0x40
+        val result = emit_neon_ld1q_16b_immoff(0, 0)
+        expect result[2] == 64
+
+    it "LD1 V0.16B [X0] byte3 is 0x4C":
+        # bits[31:24]: bit31=0, bit30=Q=1, bits[29:24]=001100 → 0x4C
+        val result = emit_neon_ld1q_16b_immoff(0, 0)
+        expect result[3] == 76
+
+    it "LD1 V1.16B [X0] byte0 encodes Rt=1":
+        # Rt=1 in bits[4:0], Rn=0 → byte0 = 1
+        val result = emit_neon_ld1q_16b_immoff(1, 0)
+        expect result[0] == 1
+
+    it "LD1 V0.16B [X1] byte0 encodes Rn=1":
+        # Rn=1 in bits[9:5] → byte0 = 0 + (1*32)%256 = 0x20
+        val result = emit_neon_ld1q_16b_immoff(0, 1)
+        expect result[0] == 32
+
+# ============================================================================
+# ST1 V0.16B, [X0]
+# ARMv8 ARM §C7.2.385 ST1 — Q=1, L=0, opcode=0111 (1-reg), size=00 (B)
+# Base word: 0x4C007000 → LE: 0x00 0x70 0x00 0x4C
+# Fields: L=0 (store), all else same as LD1 16B
+# ============================================================================
+
+describe "NEON emit_neon_st1q_16b_immoff golden":
+    it "ST1 V0.16B [X0] emits 4 bytes":
+        val result = emit_neon_st1q_16b_immoff(0, 0)
+        expect result.len() == 4
+
+    it "ST1 V0.16B [X0] byte1 is 0x70":
+        # opcode/size same as LD1 16B
+        val result = emit_neon_st1q_16b_immoff(0, 0)
+        expect result[1] == 112
+
+    it "ST1 V0.16B [X0] byte2 is 0x00":
+        # L=0 (store): bits[23:16]=0x00
+        val result = emit_neon_st1q_16b_immoff(0, 0)
+        expect result[2] == 0
+
+    it "ST1 V0.16B [X0] byte3 is 0x4C":
+        val result = emit_neon_st1q_16b_immoff(0, 0)
+        expect result[3] == 76
+
+    it "ST1 V0.16B vs LD1 V0.16B differ only in byte2 L-bit":
+        # Store clears L bit (byte2 bit6); Load sets it
+        val ld = emit_neon_ld1q_16b_immoff(0, 0)
+        val st = emit_neon_st1q_16b_immoff(0, 0)
+        expect ld[2] - st[2] == 64
+
+# ============================================================================
+# LD1 V0.4S, [X0]
+# ARMv8 ARM §C7.2.219 LD1 — Q=1, L=1, opcode=0111 (1-reg), size=10 (S/32-bit)
+# Base word: 0x4C407800 → LE: 0x00 0x78 0x40 0x4C
+# Fields: bits[11:10]=10 (size=S), all else same as LD1 16B except size
+# ============================================================================
+
+describe "NEON emit_neon_ld1q_4s_immoff golden":
+    it "LD1 V0.4S [X0] emits 4 bytes":
+        val result = emit_neon_ld1q_4s_immoff(0, 0)
+        expect result.len() == 4
+
+    it "LD1 V0.4S [X0] byte0 is 0x00":
+        val result = emit_neon_ld1q_4s_immoff(0, 0)
+        expect result[0] == 0
+
+    it "LD1 V0.4S [X0] byte1 is 0x78":
+        # bits[15:8]: opcode=0111 in bits[15:12], size=10 in bits[11:10] → 0111_1000 = 0x78
+        val result = emit_neon_ld1q_4s_immoff(0, 0)
+        expect result[1] == 120
+
+    it "LD1 V0.4S [X0] byte2 is 0x40":
+        val result = emit_neon_ld1q_4s_immoff(0, 0)
+        expect result[2] == 64
+
+    it "LD1 V0.4S [X0] byte3 is 0x4C":
+        val result = emit_neon_ld1q_4s_immoff(0, 0)
+        expect result[3] == 76
+
+    it "LD1 V31.4S [X0] byte0 encodes Rt=31":
+        # Rt=31 in bits[4:0], Rn=0 → byte0 = 31 = 0x1F
+        val result = emit_neon_ld1q_4s_immoff(31, 0)
+        expect result[0] == 31
+
+    it "LD1 V0.4S [X1] byte0 encodes Rn=1":
+        # Rn=1 → bits[9:5]=1 → byte0 = 0 + (1*32) = 32 = 0x20
+        val result = emit_neon_ld1q_4s_immoff(0, 1)
+        expect result[0] == 32
+
+    it "LD1 V0.4S vs LD1 V0.16B differ only in size field byte1":
+        # .4S has size=10 (bit9=1 → byte1 bit1=1 = +8); .16B has size=00
+        val ls = emit_neon_ld1q_4s_immoff(0, 0)
+        val lb = emit_neon_ld1q_16b_immoff(0, 0)
+        expect ls[1] - lb[1] == 8
+
+# ============================================================================
+# ST1 V0.4S, [X0]
+# ARMv8 ARM §C7.2.385 ST1 — Q=1, L=0, opcode=0111, size=10 (S)
+# Base word: 0x4C007800 → LE: 0x00 0x78 0x00 0x4C
+# ============================================================================
+
+describe "NEON emit_neon_st1q_4s_immoff golden":
+    it "ST1 V0.4S [X0] emits 4 bytes":
+        val result = emit_neon_st1q_4s_immoff(0, 0)
+        expect result.len() == 4
+
+    it "ST1 V0.4S [X0] byte1 is 0x78":
+        val result = emit_neon_st1q_4s_immoff(0, 0)
+        expect result[1] == 120
+
+    it "ST1 V0.4S [X0] byte2 is 0x00":
+        # L=0 → byte2 = 0x00
+        val result = emit_neon_st1q_4s_immoff(0, 0)
+        expect result[2] == 0
+
+    it "ST1 V0.4S [X0] byte3 is 0x4C":
+        val result = emit_neon_st1q_4s_immoff(0, 0)
+        expect result[3] == 76
+
+    it "ST1 V0.4S vs LD1 V0.4S differ only in byte2 L-bit":
+        val ld = emit_neon_ld1q_4s_immoff(0, 0)
+        val st = emit_neon_st1q_4s_immoff(0, 0)
+        expect ld[2] - st[2] == 64
+
+# ============================================================================
+# LD2 {V0.4S, V1.4S}, [X0], #32
+# ARMv8 ARM §C7.2.222 LD2 (multiple structures, post-index immediate)
+# Base word: 0x4CDF8800 → LE: 0x00 0x88 0xDF 0x4C
+# Fields: Q=1, bit23=1 (post-index), L=1, Rm=11111 (imm), opcode=1000 (2-reg), size=10 (S)
+# bits[23:16]: 1_1_0_11111 = 0xDF; bits[15:8]: 1000_10_00 = 0x88
+# ============================================================================
+
+describe "NEON emit_neon_ld2_4s_post golden":
+    it "LD2 {V0.4S V1.4S} [X0] post32 emits 4 bytes":
+        val result = emit_neon_ld2_4s_post(0, 0)
+        expect result.len() == 4
+
+    it "LD2 {V0.4S V1.4S} [X0] post32 byte0 is 0x00":
+        val result = emit_neon_ld2_4s_post(0, 0)
+        expect result[0] == 0
+
+    it "LD2 {V0.4S V1.4S} [X0] post32 byte1 is 0x88":
+        # bits[15:8]: opcode=1000 in bits[15:12], size=10 in bits[11:10] → 1000_1000 = 0x88
+        val result = emit_neon_ld2_4s_post(0, 0)
+        expect result[1] == 136
+
+    it "LD2 {V0.4S V1.4S} [X0] post32 byte2 is 0xDF":
+        # bits[23:16]: bit23=1 (post), bit22=L=1, bit21=0, bits[20:16]=Rm=11111 → 1101_1111=0xDF
+        val result = emit_neon_ld2_4s_post(0, 0)
+        expect result[2] == 223
+
+    it "LD2 {V0.4S V1.4S} [X0] post32 byte3 is 0x4C":
+        val result = emit_neon_ld2_4s_post(0, 0)
+        expect result[3] == 76
+
+    it "LD2 V1.4S [X0] post32 byte0 encodes Rt=1":
+        # Rt=1 in bits[4:0] → byte0=1
+        val result = emit_neon_ld2_4s_post(1, 0)
+        expect result[0] == 1
+
+# ============================================================================
+# ST2 {V0.4S, V1.4S}, [X0], #32
+# ARMv8 ARM §C7.2.388 ST2 (multiple structures, post-index immediate)
+# Base word: 0x4C9F8800 → LE: 0x00 0x88 0x9F 0x4C
+# Fields: Q=1, bit23=1 (post-index), L=0 (store), Rm=11111, opcode=1000, size=10
+# bits[23:16]: 1_0_0_11111 = 0x9F; bits[15:8]: 1000_10_00 = 0x88
+# ============================================================================
+
+describe "NEON emit_neon_st2_4s_post golden":
+    it "ST2 {V0.4S V1.4S} [X0] post32 emits 4 bytes":
+        val result = emit_neon_st2_4s_post(0, 0)
+        expect result.len() == 4
+
+    it "ST2 {V0.4S V1.4S} [X0] post32 byte1 is 0x88":
+        # Same opcode+size as LD2; differs only in L-bit
+        val result = emit_neon_st2_4s_post(0, 0)
+        expect result[1] == 136
+
+    it "ST2 {V0.4S V1.4S} [X0] post32 byte2 is 0x9F":
+        # bits[23:16]: 1_0_0_11111 = 0x9F (L=0 for store)
+        val result = emit_neon_st2_4s_post(0, 0)
+        expect result[2] == 159
+
+    it "ST2 {V0.4S V1.4S} [X0] post32 byte3 is 0x4C":
+        val result = emit_neon_st2_4s_post(0, 0)
+        expect result[3] == 76
+
+    it "ST2 vs LD2 differ only in byte2 L-bit":
+        # LD2 byte2=0xDF=223, ST2 byte2=0x9F=159; difference = 64 (bit6 = L)
+        val ld = emit_neon_ld2_4s_post(0, 0)
+        val st = emit_neon_st2_4s_post(0, 0)
+        expect ld[2] - st[2] == 64

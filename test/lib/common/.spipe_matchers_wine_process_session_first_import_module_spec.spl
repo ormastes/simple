@@ -1,0 +1,31 @@
+use common.wine_hello_fixture.{wine_known_hello_exe_fixture_bytes}
+use common.wine_process_session.{
+    wine_process_resolve_first_import_module,
+    wine_process_session_plan,
+    wine_process_session_request_new
+}
+
+fn _full_gates() -> text:
+    "process=verified exec_env=verified vm=verified renderer=verified user32=verified " +
+        "gdi32=verified kernel32_core=verified host=verified posix=verified registry=verified " +
+        "pthread=verified dynload=verified audio=verified fonts=verified input=verified " +
+        "pe_loader=verified async=verified nt_bridge=verified"
+
+describe "Wine process session first-import module resolution":
+    it "resolves a requested procedure against the first imported KERNEL32 module":
+        val plan = wine_process_session_plan(wine_process_session_request_new("game.exe", [], "C:\\Games"), _full_gates())
+        val result = wine_process_resolve_first_import_module(plan, wine_known_hello_exe_fixture_bytes(), 8, "GetProcAddress")
+        expect result.ok == true
+        expect result.module_name == "KERNEL32.dll"
+        expect result.proc_name == "GetProcAddress"
+        expect result.handle == 0x120
+        expect result.proc_address == 0x120000 + 3
+        expect result.operations == "GetModuleHandleW LoadLibraryExW GetProcAddress FreeLibrary"
+        expect result.status == "module-resolved"
+
+    it "keeps first-import module resolution behind import inspection":
+        val plan = wine_process_session_plan(wine_process_session_request_new("game.exe", [], "C:\\Games"), _full_gates())
+        val result = wine_process_resolve_first_import_module(plan, wine_known_hello_exe_fixture_bytes(), 0, "GetProcAddress")
+        expect result.ok == false
+        expect result.error == "invalid-symbol-limit"
+        expect result.status == "blocked"

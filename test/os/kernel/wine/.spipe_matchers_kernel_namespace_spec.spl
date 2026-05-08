@@ -1,0 +1,133 @@
+# Spec for kernel_namespace — pid/fs/ipc/net/capability namespace facets (M1, REQ-4).
+#
+# These specs lock the public API surface for:
+#   src/lib/nogc_async_mut_noalloc/baremetal/namespace.spl
+#
+# Tests are in the red phase: the implementation does not yet exist.
+# Run with:
+#   bin/simple test test/os/kernel/wine/kernel_namespace_spec.spl
+#
+# @cover src/lib/nogc_async_mut_noalloc/baremetal/namespace.spl
+
+use std.spec
+use std.nogc_async_mut_noalloc.baremetal.namespace.{
+    namespace_create,
+    namespace_clone,
+    namespace_unshare,
+    namespace_lookup,
+    namespace_drop,
+    NsFlags
+}
+
+describe "kernel_namespace — isolation facets":
+
+    describe "AC-4: NsFlags — namespace type constants":
+        it "AC-4: NsFlags.pid is defined as a non-zero value":
+            expect NsFlags.pid > 0
+
+        it "AC-4: NsFlags.fs is defined as a non-zero value":
+            expect NsFlags.fs > 0
+
+        it "AC-4: NsFlags.ipc is defined as a non-zero value":
+            expect NsFlags.ipc > 0
+
+        it "AC-4: NsFlags.net is defined as a non-zero value":
+            expect NsFlags.net > 0
+
+        it "AC-4: NsFlags.capability is defined as a non-zero value":
+            expect NsFlags.capability > 0
+
+        it "AC-4: NsFlags values are all distinct (no aliasing)":
+            expect NsFlags.pid == NsFlags.fs == false
+            expect NsFlags.pid == NsFlags.ipc == false
+            expect NsFlags.pid == NsFlags.net == false
+            expect NsFlags.pid == NsFlags.capability == false
+            expect NsFlags.fs == NsFlags.ipc == false
+            expect NsFlags.fs == NsFlags.net == false
+            expect NsFlags.net == NsFlags.capability == false
+
+    describe "AC-4: namespace_create — initial namespace":
+        it "AC-4: namespace_create returns a positive ns_id":
+            val ns_id = namespace_create(NsFlags.pid)
+            expect ns_id > 0
+
+        it "AC-4: namespace_create for each facet type succeeds":
+            val ns_pid = namespace_create(NsFlags.pid)
+            val ns_fs  = namespace_create(NsFlags.fs)
+            val ns_ipc = namespace_create(NsFlags.ipc)
+            val ns_net = namespace_create(NsFlags.net)
+            val ns_cap = namespace_create(NsFlags.capability)
+            expect ns_pid > 0
+            expect ns_fs > 0
+            expect ns_ipc > 0
+            expect ns_net > 0
+            expect ns_cap > 0
+
+        it "AC-4: consecutive namespace_create calls return distinct ids":
+            val a = namespace_create(NsFlags.pid)
+            val b = namespace_create(NsFlags.pid)
+            expect a == b == false
+
+    describe "AC-4: namespace_clone — isolation via clone":
+        it "AC-4: namespace_clone returns a distinct id from the source":
+            val parent = namespace_create(NsFlags.pid)
+            val child  = namespace_clone(parent, NsFlags.pid)
+            expect child > 0
+            expect child == parent == false
+
+        it "AC-4: cloned namespace is independently visible via lookup":
+            val parent = namespace_create(NsFlags.net)
+            val child  = namespace_clone(parent, NsFlags.net)
+            val entry  = namespace_lookup(child)
+            expect entry.is_some == true
+
+        it "AC-4: dropping the parent does not invalidate the clone":
+            val parent = namespace_create(NsFlags.ipc)
+            val child  = namespace_clone(parent, NsFlags.ipc)
+            namespace_drop(parent)
+            val entry = namespace_lookup(child)
+            expect entry.is_some == true
+
+    describe "AC-4: namespace_unshare — capability isolation":
+        it "AC-4: namespace_unshare for capability creates a new restricted namespace":
+            val original = namespace_create(NsFlags.capability)
+            val restricted = namespace_unshare(original, NsFlags.capability)
+            expect restricted > 0
+            expect restricted == original == false
+
+        it "AC-4: unshared capability namespace is visible via lookup":
+            val original   = namespace_create(NsFlags.capability)
+            val restricted = namespace_unshare(original, NsFlags.capability)
+            val entry = namespace_lookup(restricted)
+            expect entry.is_some == true
+            expect entry.value.flags == NsFlags.capability
+
+    describe "AC-4: namespace_lookup — query":
+        it "AC-4: lookup of unknown ns_id returns None":
+            val entry = namespace_lookup(0xFFFFFFFF)
+            expect entry.is_some == false
+
+        it "AC-4: lookup after drop returns None":
+            val ns_id = namespace_create(NsFlags.fs)
+            namespace_drop(ns_id)
+            val entry = namespace_lookup(ns_id)
+            expect entry.is_some == false
+
+    describe "AC-4: container namespace — combined facets":
+        it "AC-4: all five facet namespaces can be created for a single container":
+            # Simulate the namespace set for a Wine/Proton container
+            val pid_ns = namespace_create(NsFlags.pid)
+            val fs_ns  = namespace_create(NsFlags.fs)
+            val ipc_ns = namespace_create(NsFlags.ipc)
+            val net_ns = namespace_create(NsFlags.net)
+            val cap_ns = namespace_create(NsFlags.capability)
+            expect pid_ns > 0
+            expect fs_ns > 0
+            expect ipc_ns > 0
+            expect net_ns > 0
+            expect cap_ns > 0
+            # All must be distinct
+            expect pid_ns == fs_ns == false
+            expect fs_ns == ipc_ns == false
+            expect ipc_ns == net_ns == false
+            expect net_ns == cap_ns == false

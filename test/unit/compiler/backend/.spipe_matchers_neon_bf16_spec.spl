@@ -1,0 +1,147 @@
+# test/unit/compiler/backend/neon_bf16_spec.spl
+#
+# Feature ID: #COMPILER-BACKEND-NATIVE-NEON-BF16
+# Category:   Compiler | Backend | Native | AArch64 BFloat16 Encoding
+#
+# Byte-level golden tests for ARMv8.6-A BF16 emit variants:
+#   BFDOT  Vd.2S,  Vn.4H, Vm.4H  (Q=0, ARMv8 ARM §C7.2.20)
+#   BFMMLA Vd.4S,  Vn.8H, Vm.8H  (Q=1, ARMv8 ARM §C7.2.21)
+#   BFCVTN  Vd.4H, Vn.4S          (Q=0, ARMv8 ARM §C7.2.19)
+#   BFCVTN2 Vd.8H, Vn.4S          (Q=1, ARMv8 ARM §C7.2.19)
+#
+# All instructions are 4-byte fixed-width, little-endian per ARMv8 ABI.
+# Encoding: 3-reg: base + Rm*65536 + Rn*32 + Rd
+#           2-reg: base + Rn*32 + Rd
+#
+# Interpreter-mode note (per .claude/rules/testing.md):
+#   The test runner in interpreter mode only verifies file loading and
+#   describe/it block reachability.  Assertions inside it-blocks are not
+#   executed.  Compiled-mode execution will exercise them.
+
+use compiler.backend.native.arm_neon.{emit_bfdot_v4bf16, emit_bfmmla_v4bf16, emit_bfcvtn_v4bf16, emit_bfcvtn2_v8bf16}
+
+# ============================================================================
+# BFDOT V0.2S, V0.4H, V0.4H => base 0x2E40FC00
+# LE bytes: 0x00, 0xFC, 0x40, 0x2E
+# ============================================================================
+
+describe "emit_bfdot_v4bf16 — BF16 dot product 64-bit":
+    it "BFDOT V0.2S, V0.4H, V0.4H encodes to base opcode bytes":
+        var b = emit_bfdot_v4bf16(0, 0, 0)
+        expect b.len() == 4
+        expect b[0] == 0x00
+        expect b[1] == 0xFC
+        expect b[2] == 0x40
+        expect b[3] == 0x2E
+
+    it "BFDOT V1.2S, V2.4H, V3.4H encodes register fields correctly":
+        # word = 0x2E40FC00 + 3*65536 + 2*32 + 1 = 0x2E43FC41
+        # LE bytes: 0x41, 0xFC, 0x43, 0x2E
+        var b = emit_bfdot_v4bf16(1, 2, 3)
+        expect b.len() == 4
+        expect b[0] == 0x41
+        expect b[1] == 0xFC
+        expect b[2] == 0x43
+        expect b[3] == 0x2E
+
+    it "emit_bfdot_v4bf16 always returns 4 bytes":
+        var b = emit_bfdot_v4bf16(5, 6, 7)
+        expect b.len() == 4
+
+# ============================================================================
+# BFMMLA V0.4S, V0.8H, V0.8H => base 0x6E40EC00
+# LE bytes: 0x00, 0xEC, 0x40, 0x6E
+# ============================================================================
+
+describe "emit_bfmmla_v4bf16 — BF16 matrix multiply-accumulate 128-bit":
+    it "BFMMLA V0.4S, V0.8H, V0.8H encodes to base opcode bytes":
+        var b = emit_bfmmla_v4bf16(0, 0, 0)
+        expect b.len() == 4
+        expect b[0] == 0x00
+        expect b[1] == 0xEC
+        expect b[2] == 0x40
+        expect b[3] == 0x6E
+
+    it "BFMMLA V1.4S, V2.8H, V3.8H encodes register fields correctly":
+        # word = 0x6E40EC00 + 3*65536 + 2*32 + 1 = 0x6E43EC41
+        # LE bytes: 0x41, 0xEC, 0x43, 0x6E
+        var b = emit_bfmmla_v4bf16(1, 2, 3)
+        expect b.len() == 4
+        expect b[0] == 0x41
+        expect b[1] == 0xEC
+        expect b[2] == 0x43
+        expect b[3] == 0x6E
+
+    it "emit_bfmmla_v4bf16 always returns 4 bytes":
+        var b = emit_bfmmla_v4bf16(5, 6, 7)
+        expect b.len() == 4
+
+# ============================================================================
+# BFCVTN V0.4H, V0.4S => base 0x0EA16800
+# LE bytes: 0x00, 0x68, 0xA1, 0x0E
+# ============================================================================
+
+describe "emit_bfcvtn_v4bf16 — narrow float32 to bfloat16 lower half":
+    it "BFCVTN V0.4H, V0.4S encodes to base opcode bytes":
+        var b = emit_bfcvtn_v4bf16(0, 0)
+        expect b.len() == 4
+        expect b[0] == 0x00
+        expect b[1] == 0x68
+        expect b[2] == 0xA1
+        expect b[3] == 0x0E
+
+    it "BFCVTN V1.4H, V2.4S encodes register fields correctly":
+        # word = 0x0EA16800 + 2*32 + 1 = 0x0EA16841
+        # LE bytes: 0x41, 0x68, 0xA1, 0x0E
+        var b = emit_bfcvtn_v4bf16(1, 2)
+        expect b.len() == 4
+        expect b[0] == 0x41
+        expect b[1] == 0x68
+        expect b[2] == 0xA1
+        expect b[3] == 0x0E
+
+    it "emit_bfcvtn_v4bf16 always returns 4 bytes":
+        var b = emit_bfcvtn_v4bf16(3, 4)
+        expect b.len() == 4
+
+# ============================================================================
+# BFCVTN2 V0.8H, V0.4S => base 0x4EA16800
+# LE bytes: 0x00, 0x68, 0xA1, 0x4E
+# ============================================================================
+
+describe "emit_bfcvtn2_v8bf16 — narrow float32 to bfloat16 upper half":
+    it "BFCVTN2 V0.8H, V0.4S encodes to base opcode bytes":
+        var b = emit_bfcvtn2_v8bf16(0, 0)
+        expect b.len() == 4
+        expect b[0] == 0x00
+        expect b[1] == 0x68
+        expect b[2] == 0xA1
+        expect b[3] == 0x4E
+
+    it "BFCVTN2 V1.8H, V2.4S encodes register fields correctly":
+        # word = 0x4EA16800 + 2*32 + 1 = 0x4EA16841
+        # LE bytes: 0x41, 0x68, 0xA1, 0x4E
+        var b = emit_bfcvtn2_v8bf16(1, 2)
+        expect b.len() == 4
+        expect b[0] == 0x41
+        expect b[1] == 0x68
+        expect b[2] == 0xA1
+        expect b[3] == 0x4E
+
+    it "emit_bfcvtn2_v8bf16 always returns 4 bytes":
+        var b = emit_bfcvtn2_v8bf16(3, 4)
+        expect b.len() == 4
+
+# ============================================================================
+# Property: BFCVTN vs BFCVTN2 differ only in byte[3] by Q bit (0x40)
+# ============================================================================
+
+describe "BFCVTN vs BFCVTN2 Q-bit distinction":
+    it "BFCVTN and BFCVTN2 with same regs match bytes 0-2 and differ at byte[3]":
+        var n = emit_bfcvtn_v4bf16(1, 2)
+        var n2 = emit_bfcvtn2_v8bf16(1, 2)
+        expect n[0] == n2[0]
+        expect n[1] == n2[1]
+        expect n[2] == n2[2]
+        # BFCVTN2 has Q=1 (bit 30), which raises byte[3] by 0x40
+        expect n2[3] - n[3] == 0x40

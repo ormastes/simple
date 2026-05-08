@@ -1,0 +1,74 @@
+use std.spec.*
+
+use std.gc_async_mut.gpu.browser_engine.dom.{BeDomNode, be_dom_get_style, parse_length_or_calc}
+use std.gc_async_mut.gpu.browser_engine.css.{css_get_float_code, css_get_clear_code,
+    css_get_outline_width, css_get_outline_style, css_get_outline_color,
+    css_get_outline_offset, css_get_width, css_value_as_i32, css_value_unit}
+use app.ui.chromium.css_ext.{parse_float_keyword, parse_clear_keyword,
+    parse_outline_style, calc_resolve, calc_value_ok, calc_value_pixels,
+    CalcValue, CALC_OP_ADD, CALC_OP_MUL}
+
+# =========================================================================
+# M8 CSS extension wiring — verifies that `dom.spl::set_style` routes the
+# four high-impact properties (float, clear, outline-*, calc()) through
+# the pure parsers that M8 landed in `app/ui.chromium/css_ext.spl`.
+# =========================================================================
+
+describe "css_ext routing into parse_declaration":
+
+    it "routes `float: left` through css_ext::parse_float_keyword":
+        val node = BeDomNode.element("div")
+        node.set_style("float", "left")
+        val style = be_dom_get_style(node)
+        expect css_get_float_code(style).value == parse_float_keyword("left")
+
+    it "routes `clear: both` through css_ext::parse_clear_keyword":
+        val node = BeDomNode.element("div")
+        node.set_style("clear", "both")
+        val style = be_dom_get_style(node)
+        expect css_get_clear_code(style).value == parse_clear_keyword("both")
+
+    it "routes `outline-style: dashed` through css_ext::parse_outline_style":
+        val node = BeDomNode.element("div")
+        node.set_style("outline-style", "dashed")
+        val style = be_dom_get_style(node)
+        expect css_get_outline_style(style) == "dashed"
+        expect parse_outline_style("dashed") == 3
+
+    it "expands the `outline` shorthand into width/style/color":
+        val node = BeDomNode.element("div")
+        node.set_style("outline", "2px solid #ff0000")
+        val style = be_dom_get_style(node)
+        expect css_get_outline_width(style).value == 2
+        expect css_get_outline_style(style) == "solid"
+        expect css_get_outline_color(style) != 0
+
+    it "routes `outline-offset` into the Outline record":
+        val node = BeDomNode.element("div")
+        node.set_style("outline-offset", "4px")
+        val style = be_dom_get_style(node)
+        expect css_get_outline_offset(style).value == 4
+
+    it "routes `width: calc(10px + 5px)` through css_ext::calc_resolve":
+        val cv = parse_length_or_calc("calc(10px + 5px)")
+        expect css_value_as_i32(cv) == 15
+
+    it "honours operator precedence for `calc(2px + 3px * 4)`":
+        val cv = parse_length_or_calc("calc(2px + 3px * 4)")
+        expect css_value_as_i32(cv) == 14
+
+    it "falls back to parse_css_value when calc() is malformed":
+        # Unknown trailing token fails calc, plain parser falls back to auto.
+        val cv = parse_length_or_calc("calc(10px +)")
+        expect css_value_unit(cv) == "auto"
+
+    it "applies `calc(...)` through set_style(\"width\")":
+        val node = BeDomNode.element("div")
+        node.set_style("width", "calc(100px - 25px)")
+        val style = be_dom_get_style(node)
+        expect css_value_as_i32(css_get_width(style)) == 75
+
+    it "keeps calc_resolve pure and predictable for external callers":
+        val result = calc_resolve([6, 2, 3], [CALC_OP_ADD, CALC_OP_MUL])
+        expect calc_value_ok(result)
+        expect calc_value_pixels(result) == 12

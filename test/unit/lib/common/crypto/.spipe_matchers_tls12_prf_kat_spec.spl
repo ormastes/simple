@@ -1,0 +1,245 @@
+# TLS 1.2 PRF KAT — RFC 5246 §5 / §6.3 / §7.4.9 / §8.1
+#
+# Verifies the pure-Simple P_hash + TLS 1.2 PRF implementation in
+# src/lib/common/crypto/tls12_prf.spl.
+#
+# RFC 5246 itself does not bundle algorithm test vectors. The closest
+# attested public TLS 1.2 PRF test vector is the one circulated on the
+# ietf-tls mailing list and reproduced widely (e.g. mbed TLS, Botan,
+# OpenSSL test data) for P_SHA-256:
+#
+#     secret  = 9b be 43 6b a9 40 f0 17 b1 76 52 84 9a 71 db 35
+#     label   = "test label"
+#     seed    = a0 ba 9f 93 6c da 31 18 27 a6 f7 96 ff d5 19 8c
+#     length  = 100
+#     output  =
+#         e3 f2 29 ba 72 7b e1 7b
+#         8d 12 26 20 55 7c d4 53
+#         c2 aa b2 1d 07 c3 d4 95
+#         32 9b 52 d4 e6 1e db 5a
+#         6b 30 17 91 e9 0d 35 c9
+#         c9 a4 6b 4e 14 ba f9 af
+#         0f a0 22 f7 07 7d ef 17
+#         ab fd 37 97 c0 56 4b ab
+#         4f bc 91 66 6e 9d ef 9b
+#         97 fc e3 4f 79 67 89 ba
+#         a4 80 82 d1 22 ee 42 c5
+#         a7 2e 5a 51 10 ff f7 01
+#         87 34 7b 66
+#
+# This one P_SHA256 vector exercises the full A-chain across multiple
+# 32-byte blocks (output_len=100 > 3*32 < 4*32, forces 4 HMAC iterations
+# and a final 4-byte truncation), so it covers both edge cases the task
+# enumerates: output_len > hash output (multiple A-iterations) and
+# output_len < hash output (truncation in the final block).
+#
+# Self-consistency tests cover:
+#   - A short truncation case (output_len < 32)
+#   - The PRF wrapper composes correctly (PRF(s,l,seed) == P_hash(s, l||seed))
+#   - master_secret is exactly 48 bytes
+#   - Finished verify_data is exactly 12 bytes
+#   - "client finished" vs "server finished" produce different output
+#   - SHA-384 PRF differs from SHA-256 PRF for the same (secret, label, seed)
+#
+# NOTE: under interpreter-mode test runner, file-load is verified but it-
+# block bodies don't execute the same way as compiled mode (see
+# .claude/memory/feedback_compile_mode_false_greens.md).
+
+use std.spipe.*
+use std.crypto.tls12_prf.{p_hash_sha256, p_hash_sha384, tls12_prf}
+use std.crypto.tls12_prf.{tls12_prf_sha256, tls12_prf_sha384}
+use std.crypto.tls12_prf.{tls12_master_secret, tls12_key_block, tls12_finished_verify_data}
+use std.crypto.types.{bytes_to_hex}
+
+# ============================================================================
+# Helpers — IETF P_SHA-256 reference vector inputs
+# ============================================================================
+
+fn _ietf_secret() -> list:
+    [0x9b, 0xbe, 0x43, 0x6b, 0xa9, 0x40, 0xf0, 0x17,
+     0xb1, 0x76, 0x52, 0x84, 0x9a, 0x71, 0xdb, 0x35]
+
+fn _ietf_seed() -> list:
+    [0xa0, 0xba, 0x9f, 0x93, 0x6c, 0xda, 0x31, 0x18,
+     0x27, 0xa6, 0xf7, 0x96, 0xff, 0xd5, 0x19, 0x8c]
+
+# label || seed — "test label" || ietf_seed
+fn _ietf_label_seed() -> list:
+    [0x74, 0x65, 0x73, 0x74, 0x20, 0x6c, 0x61, 0x62, 0x65, 0x6c,  # "test label"
+     0xa0, 0xba, 0x9f, 0x93, 0x6c, 0xda, 0x31, 0x18,
+     0x27, 0xa6, 0xf7, 0x96, 0xff, 0xd5, 0x19, 0x8c]
+
+# Some commonly-used 32-byte test values
+fn _zeros32() -> list:
+    var out = []
+    var i = 0
+    while i < 32:
+        out.push(0)
+        i = i + 1
+    out
+
+fn _ones32() -> list:
+    var out = []
+    var i = 0
+    while i < 32:
+        out.push(0x01)
+        i = i + 1
+    out
+
+# ============================================================================
+# IETF-tls TLS 1.2 PRF P_SHA-256 reference vector
+# ============================================================================
+
+describe "TLS 1.2 P_SHA-256 — IETF reference vector":
+
+    it "P_SHA256(secret, 'test label'||seed, 100) matches the IETF reference output":
+        # The full 100-byte expected OKM.
+        # This forces 4 iterations of the HMAC A-chain (4*32=128, truncated to 100)
+        # so both "multi-iteration" and "truncation" edges are exercised.
+        expect(bytes_to_hex(p_hash_sha256(_ietf_secret(), _ietf_label_seed(), 100))).to_equal(
+            "e3f229ba727be17b8d122620557cd453c2aab21d07c3d495329b52d4e61edb5a6b301791e90d35c9c9a46b4e14baf9af0fa022f7077def17abfd3797c0564bab4fbc91666e9def9b97fce34f796789baa48082d122ee42c5a72e5a5110fff70187347b66"
+        )
+
+    it "tls12_prf_sha256 wrapper composes correctly":
+        # tls12_prf_sha256(secret, "test label", seed, 100) == p_hash_sha256(secret, "test label"||seed, 100)
+        expect(bytes_to_hex(tls12_prf_sha256(_ietf_secret(), "test label", _ietf_seed(), 100))).to_equal(
+            "e3f229ba727be17b8d122620557cd453c2aab21d07c3d495329b52d4e61edb5a6b301791e90d35c9c9a46b4e14baf9af0fa022f7077def17abfd3797c0564bab4fbc91666e9def9b97fce34f796789baa48082d122ee42c5a72e5a5110fff70187347b66"
+        )
+
+    it "tls12_prf(use_sha384=false) equals tls12_prf_sha256":
+        val a = bytes_to_hex(tls12_prf(_ietf_secret(), "test label", _ietf_seed(), 64, false))
+        val b = bytes_to_hex(tls12_prf_sha256(_ietf_secret(), "test label", _ietf_seed(), 64))
+        expect a == b
+
+# ============================================================================
+# Edge cases — truncation (< hash output) and multi-iteration (> hash output)
+# ============================================================================
+
+describe "TLS 1.2 P_hash boundary behavior":
+
+    it "P_SHA256 with output_len=12 (truncation < HashLen=32) returns 12 bytes":
+        # 12 is the verify_data length used by Finished — common truncation case.
+        expect p_hash_sha256(_ietf_secret(), _ietf_label_seed(), 12).len() == 12
+
+    it "P_SHA256 with output_len=12 prefix matches output_len=32 prefix":
+        val short = bytes_to_hex(p_hash_sha256(_ietf_secret(), _ietf_label_seed(), 12))
+        val long32 = bytes_to_hex(p_hash_sha256(_ietf_secret(), _ietf_label_seed(), 32))
+        # First 24 hex chars (12 bytes) of the 32-byte result must equal the 12-byte result.
+        var prefix = ""
+        var i = 0
+        while i < 24:
+            prefix = prefix + long32.char_at(i)
+            i = i + 1
+        expect short == prefix
+
+    it "P_SHA256 with output_len=64 prefix matches output_len=32 prefix":
+        # output_len=64 = 2 HMAC blocks; first 32 must equal output_len=32 single block.
+        val len32 = bytes_to_hex(p_hash_sha256(_ietf_secret(), _ietf_label_seed(), 32))
+        val len64 = bytes_to_hex(p_hash_sha256(_ietf_secret(), _ietf_label_seed(), 64))
+        var prefix = ""
+        var i = 0
+        while i < 64:
+            prefix = prefix + len64.char_at(i)
+            i = i + 1
+        expect prefix == len32
+
+    it "P_SHA256 with output_len=0 returns empty":
+        expect p_hash_sha256(_ietf_secret(), _ietf_label_seed(), 0).len() == 0
+
+    it "P_SHA384 with output_len=96 (= 2 * HashLen=48) produces 96 bytes":
+        # SHA-384 HashLen=48; output_len=96 forces 2 A-chain iterations exactly.
+        expect p_hash_sha384(_ietf_secret(), _ietf_label_seed(), 96).len() == 96
+
+    it "P_SHA384 with output_len=24 (truncation < HashLen=48) returns 24 bytes":
+        expect p_hash_sha384(_ietf_secret(), _ietf_label_seed(), 24).len() == 24
+
+# ============================================================================
+# RFC 5246 §8.1 master_secret — length + cross-PRF determinism
+# ============================================================================
+
+describe "TLS 1.2 master_secret (RFC 5246 §8.1)":
+
+    it "master_secret is exactly 48 bytes for SHA-256 PRF":
+        val ms = tls12_master_secret(_ietf_secret(), _zeros32(), _ones32(), false)
+        expect ms.len() == 48
+
+    it "master_secret is exactly 48 bytes for SHA-384 PRF":
+        val ms = tls12_master_secret(_ietf_secret(), _zeros32(), _ones32(), true)
+        expect ms.len() == 48
+
+    it "master_secret is deterministic":
+        val a = bytes_to_hex(tls12_master_secret(_ietf_secret(), _zeros32(), _ones32(), false))
+        val b = bytes_to_hex(tls12_master_secret(_ietf_secret(), _zeros32(), _ones32(), false))
+        expect a == b
+
+    it "master_secret SHA-384 differs from SHA-256 for same inputs":
+        val sha256 = bytes_to_hex(tls12_master_secret(_ietf_secret(), _zeros32(), _ones32(), false))
+        val sha384 = bytes_to_hex(tls12_master_secret(_ietf_secret(), _zeros32(), _ones32(), true))
+        # Two independent PRFs must produce different outputs with overwhelming probability.
+        expect sha256 == sha384 == false
+
+    it "master_secret swapping client/server randoms changes output":
+        # "master secret" PRF concatenates client_random || server_random, so
+        # swapping the two operands must change the result.
+        val a = bytes_to_hex(tls12_master_secret(_ietf_secret(), _zeros32(), _ones32(), false))
+        val b = bytes_to_hex(tls12_master_secret(_ietf_secret(), _ones32(), _zeros32(), false))
+        expect a == b == false
+
+# ============================================================================
+# RFC 5246 §6.3 key_block — length + ordering
+# ============================================================================
+
+describe "TLS 1.2 key_block (RFC 5246 §6.3)":
+
+    it "key_block returns the requested length (104 bytes — typical AES-128-SHA256 sizing)":
+        # 2 * (mac_key=32 + enc_key=16 + iv=4) = 104 for AES_128_GCM_SHA256.
+        val ms = tls12_master_secret(_ietf_secret(), _zeros32(), _ones32(), false)
+        val kb = tls12_key_block(ms, _ones32(), _zeros32(), 104, false)
+        expect kb.len() == 104
+
+    it "key_block uses server_random || client_random ordering (different from master_secret)":
+        # master_secret uses (client_random, server_random); key_block uses
+        # (server_random, client_random). Swap operands and verify they differ.
+        val ms = tls12_master_secret(_ietf_secret(), _zeros32(), _ones32(), false)
+        val kb1 = bytes_to_hex(tls12_key_block(ms, _ones32(), _zeros32(), 64, false))
+        val kb2 = bytes_to_hex(tls12_key_block(ms, _zeros32(), _ones32(), 64, false))
+        expect kb1 == kb2 == false
+
+# ============================================================================
+# RFC 5246 §7.4.9 Finished verify_data — fixed 12-byte length + label sensitivity
+# ============================================================================
+
+describe "TLS 1.2 Finished verify_data (RFC 5246 §7.4.9)":
+
+    it "client_finished verify_data is exactly 12 bytes":
+        val ms = tls12_master_secret(_ietf_secret(), _zeros32(), _ones32(), false)
+        # transcript_hash is the 32-byte SHA-256 digest of the handshake record;
+        # we fake it here with an attested 32-byte input.
+        val vd = tls12_finished_verify_data(ms, _ietf_label_seed(), true, false)
+        expect vd.len() == 12
+
+    it "server_finished verify_data is exactly 12 bytes":
+        val ms = tls12_master_secret(_ietf_secret(), _zeros32(), _ones32(), false)
+        val vd = tls12_finished_verify_data(ms, _ietf_label_seed(), false, false)
+        expect vd.len() == 12
+
+    it "client_finished and server_finished produce different verify_data":
+        # The labels "client finished" vs "server finished" must yield distinct
+        # output for the same master_secret + transcript_hash.
+        val ms = tls12_master_secret(_ietf_secret(), _zeros32(), _ones32(), false)
+        val client_vd = bytes_to_hex(tls12_finished_verify_data(ms, _ietf_label_seed(), true, false))
+        val server_vd = bytes_to_hex(tls12_finished_verify_data(ms, _ietf_label_seed(), false, false))
+        expect client_vd == server_vd == false
+
+    it "verify_data is deterministic":
+        val ms = tls12_master_secret(_ietf_secret(), _zeros32(), _ones32(), false)
+        val a = bytes_to_hex(tls12_finished_verify_data(ms, _ietf_label_seed(), true, false))
+        val b = bytes_to_hex(tls12_finished_verify_data(ms, _ietf_label_seed(), true, false))
+        expect a == b
+
+    it "SHA-384 PRF Finished differs from SHA-256 PRF Finished":
+        val ms256 = tls12_master_secret(_ietf_secret(), _zeros32(), _ones32(), false)
+        val ms384 = tls12_master_secret(_ietf_secret(), _zeros32(), _ones32(), true)
+        val vd256 = bytes_to_hex(tls12_finished_verify_data(ms256, _ietf_label_seed(), true, false))
+        val vd384 = bytes_to_hex(tls12_finished_verify_data(ms384, _ietf_label_seed(), true, true))
+        expect vd256 == vd384 == false

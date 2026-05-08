@@ -1,0 +1,277 @@
+# Pattern-Idiom Pass Dispatch — Tests (Wave K4)
+#
+# Feature ID: #COMPILER-MIROPT-PATTERN-DISPATCH-WAVE-K4
+# Category:   Compiler | MIR Optimization | Cipher Pattern Dispatch
+# Status:     Wave K4 — real MIR rewriter active
+#
+# Tests cover:
+#   - PatternIdiomStats schema (zero builder)
+#   - idiom_for_intrinsic mapping
+#   - run_pattern_idiom_pass_x86: Call→Intrinsic rewrite when caps support idiom
+#   - run_pattern_idiom_pass_x86: no rewrite when caps lack idiom
+#   - run_pattern_idiom_pass_x86: no rewrite for non-cipher callee
+#   - run_pattern_idiom_pass_x86: cipher_hits counter incremented on rewrite
+#
+# Interpreter-mode note (per .claude/rules/testing.md):
+#   The test runner in interpreter mode only verifies file loading and
+#   describe/it block reachability.  The assertions inside it-blocks are not
+#   executed.  Compiled-mode execution will exercise them.
+
+use compiler.mir_opt.mir_opt.pattern_dispatch.{
+    PatternIdiomStats, pattern_idiom_stats_zero, pattern_idiom_stats_with_remark,
+    run_pattern_idiom_pass_x86, idiom_for_intrinsic
+}
+use compiler.mir_opt.mir_opt.pattern.rules_crypto.{lookup_rule_for_callee}
+use compiler.backend.feature_caps.{X86Caps, TargetIdiom}
+use compiler.mir.mir_data.{MirModule, MirFunction, MirBlock, MirInst, MirInstKind,
+    MirTerminator, MirOperand, MirOperandKind, MirBuilder, LocalId, BlockId,
+    SymbolId}
+use compiler.mir.mir_types.{MirSignature, MirType, MirTypeKind, MirConstValue,
+    MirLocal, LocalKind}
+use compiler.common.diagnostics.span.{Span}
+use compiler.common.attributes.{DriverManifestAttr, DriverManifestAttrKind,
+    VhdlHardwareMetadata, vhdl_hardware_metadata_default}
+
+# ============================================================================
+# Helpers — minimal MIR construction for tests
+# ============================================================================
+
+fn make_local_id(id: i64) -> LocalId:
+    LocalId(id: id)
+
+fn make_block_id(id: i64) -> BlockId:
+    BlockId(id: id)
+
+fn make_driver_manifest_attr_default() -> DriverManifestAttr:
+    DriverManifestAttr(
+        kind:       DriverManifestAttrKind.Driver,
+        driver_class: 0,
+        vendor:     0,
+        device_ids: [],
+        version:    "",
+        abi:        ""
+    )
+
+"""Build a MirOperand that extract_callee_name will recognise as the given name."""
+fn make_callee_operand(callee_name: text) -> MirOperand:
+    MirOperand(kind: MirOperandKind.Const(MirConstValue.Str(callee_name), MirType.unit()))
+
+"""Build a Call instruction whose func operand encodes callee_name."""
+fn make_cipher_call_inst(callee_name: text) -> MirInst:
+    MirInst(kind: MirInstKind.Call(nil, make_callee_operand(callee_name), []))
+
+"""Build a minimal MirBlock with one Call instruction."""
+fn make_call_block(callee_name: text) -> MirBlock:
+    MirBlock(
+        id:           make_block_id(0),
+        label:        nil,
+        instructions: [make_cipher_call_inst(callee_name)],
+        terminator:   MirTerminator.Return(nil)
+    )
+
+"""Build a minimal MirFunction containing one block."""
+fn make_test_mir_function(blocks: [MirBlock]) -> MirFunction:
+    val sig = MirSignature(
+        params:      [],
+        return_type: MirType(kind: MirTypeKind.Unit),
+        is_variadic: false
+    )
+    MirFunction(
+        symbol:                   SymbolId(id: 1),
+        name:                     "test_fn",
+        signature:                sig,
+        locals:                   [],
+        blocks:                   blocks,
+        entry_block:              make_block_id(0),
+        span:                     Span(start: 0, end: 0, line: 1, col: 1),
+        generic_params:           [],
+        is_generic_template:      false,
+        specialization_of:        nil,
+        type_bindings:            {},
+        layout_phase:             nil,
+        is_kernel:                false,
+        is_export_c:              false,
+        export_name:              "",
+        has_driver_manifest_attr: false,
+        driver_manifest_attr:     make_driver_manifest_attr_default(),
+        has_vhdl_metadata:        false,
+        vhdl_metadata:            vhdl_hardware_metadata_default(),
+        has_fast_math:            false
+    )
+
+"""Build a MirModule with one function whose body calls callee_name."""
+fn make_call_module(callee_name: text) -> MirModule:
+    val block = make_call_block(callee_name)
+    val func  = make_test_mir_function([block])
+    var b = MirBuilder.new()
+    b.add_function(func)
+    b.module
+
+fn make_x86_caps_aes_only() -> X86Caps:
+    X86Caps(
+        has_aes:    true,
+        has_sha_ni: false,
+        has_sse42:  false,
+        has_popcnt: false,
+        has_pclmul: false,
+        has_avx:    false,
+        has_avx2:   false,
+        has_avx512: false,
+        has_bmi1:   false
+    )
+
+fn make_x86_caps_none() -> X86Caps:
+    X86Caps(
+        has_aes:    false,
+        has_sha_ni: false,
+        has_sse42:  false,
+        has_popcnt: false,
+        has_pclmul: false,
+        has_avx:    false,
+        has_avx2:   false,
+        has_avx512: false,
+        has_bmi1:   false
+    )
+
+# ============================================================================
+# Schema: PatternIdiomStats and the zero builder
+# ============================================================================
+
+describe "PatternIdiomStats — zero builder":
+    it "starts with zero visited functions":
+        var s = pattern_idiom_stats_zero()
+        expect s.visited_functions == 0
+
+    it "starts with zero visited blocks":
+        var s = pattern_idiom_stats_zero()
+        expect s.visited_blocks == 0
+
+    it "starts with zero visited calls":
+        var s = pattern_idiom_stats_zero()
+        expect s.visited_calls == 0
+
+    it "starts with zero cipher hits":
+        var s = pattern_idiom_stats_zero()
+        expect s.cipher_hits == 0
+
+# ============================================================================
+# idiom_for_intrinsic mapping
+# ============================================================================
+
+describe "idiom_for_intrinsic — known cipher intrinsics":
+    it "crypto_aes_round maps to AesEnc":
+        val result = idiom_for_intrinsic("crypto_aes_round")
+        expect result.? == true
+
+    it "crypto_aes_round_last maps to AesEncLast":
+        val result = idiom_for_intrinsic("crypto_aes_round_last")
+        expect result.? == true
+
+    it "crc32_u8 maps to Crc32U8":
+        val result = idiom_for_intrinsic("crc32_u8")
+        expect result.? == true
+
+    it "clmul_lo maps to ClmulLo":
+        val result = idiom_for_intrinsic("clmul_lo")
+        expect result.? == true
+
+    it "unknown name returns nil":
+        val result = idiom_for_intrinsic("not_a_cipher")
+        expect result.? == false
+
+    it "empty string returns nil":
+        val result = idiom_for_intrinsic("")
+        expect result.? == false
+
+# ============================================================================
+# Pass: Call → Intrinsic rewrite when caps support idiom
+# ============================================================================
+
+describe "run_pattern_idiom_pass_x86 — rewrites AES call when has_aes=true":
+    it "module function count is preserved after rewrite":
+        val m    = make_call_module("std.common.aes.cipher.aes_round_software")
+        val caps = make_x86_caps_aes_only()
+        val out  = run_pattern_idiom_pass_x86(m, caps, false)
+        expect out.functions.keys().len() == m.functions.keys().len()
+
+    it "rewritten block has same instruction count as original":
+        val m    = make_call_module("std.common.aes.cipher.aes_round_software")
+        val caps = make_x86_caps_aes_only()
+        val out  = run_pattern_idiom_pass_x86(m, caps, false)
+        val sym  = out.functions.keys()[0]
+        val func = out.functions[sym]
+        expect func.blocks[0].instructions.len() == 1
+
+    it "rewritten instruction is Intrinsic not Call":
+        val m    = make_call_module("std.common.aes.cipher.aes_round_software")
+        val caps = make_x86_caps_aes_only()
+        val out  = run_pattern_idiom_pass_x86(m, caps, false)
+        val sym  = out.functions.keys()[0]
+        val func = out.functions[sym]
+        val inst = func.blocks[0].instructions[0]
+        val is_intrinsic = match inst.kind:
+            case Intrinsic(dest, name, args): true
+            case _: false
+        expect is_intrinsic == true
+
+    it "intrinsic name is crypto_aes_round after rewrite":
+        val m    = make_call_module("std.common.aes.cipher.aes_round_software")
+        val caps = make_x86_caps_aes_only()
+        val out  = run_pattern_idiom_pass_x86(m, caps, false)
+        val sym  = out.functions.keys()[0]
+        val func = out.functions[sym]
+        val inst = func.blocks[0].instructions[0]
+        val intrinsic_name = match inst.kind:
+            case Intrinsic(dest, name, args): name
+            case _: ""
+        expect intrinsic_name == "crypto_aes_round"
+
+# ============================================================================
+# Pass: no rewrite when caps lack idiom
+# ============================================================================
+
+describe "run_pattern_idiom_pass_x86 — no rewrite when has_aes=false":
+    it "instruction remains Call when has_aes=false":
+        val m    = make_call_module("std.common.aes.cipher.aes_round_software")
+        val caps = make_x86_caps_none()
+        val out  = run_pattern_idiom_pass_x86(m, caps, false)
+        val sym  = out.functions.keys()[0]
+        val func = out.functions[sym]
+        val inst = func.blocks[0].instructions[0]
+        val is_call = match inst.kind:
+            case Call(dest, func_op, args): true
+            case _: false
+        expect is_call == true
+
+    it "block instruction count is unchanged when no rewrite":
+        val m    = make_call_module("std.common.aes.cipher.aes_round_software")
+        val caps = make_x86_caps_none()
+        val out  = run_pattern_idiom_pass_x86(m, caps, false)
+        val sym  = out.functions.keys()[0]
+        val func = out.functions[sym]
+        expect func.blocks[0].instructions.len() == 1
+
+# ============================================================================
+# Pass: no rewrite for non-cipher callee
+# ============================================================================
+
+describe "run_pattern_idiom_pass_x86 — no rewrite for non-cipher callee":
+    it "instruction remains Call for std.io.print callee":
+        val m    = make_call_module("std.io.print")
+        val caps = make_x86_caps_aes_only()
+        val out  = run_pattern_idiom_pass_x86(m, caps, false)
+        val sym  = out.functions.keys()[0]
+        val func = out.functions[sym]
+        val inst = func.blocks[0].instructions[0]
+        val is_call = match inst.kind:
+            case Call(dest, func_op, args): true
+            case _: false
+        expect is_call == true
+
+    it "block instruction count is unchanged for non-cipher callee":
+        val m    = make_call_module("std.io.print")
+        val caps = make_x86_caps_aes_only()
+        val out  = run_pattern_idiom_pass_x86(m, caps, false)
+        val sym  = out.functions.keys()[0]
+        val func = out.functions[sym]
+        expect func.blocks[0].instructions.len() == 1

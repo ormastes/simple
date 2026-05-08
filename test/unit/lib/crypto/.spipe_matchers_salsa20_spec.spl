@@ -1,0 +1,317 @@
+# Salsa20/20 + HSalsa20 + XSalsa20 — Known-Answer Test spec
+#
+# Exercises src/os/crypto/salsa20.spl against canonical DJB / NaCl test vectors.
+#
+# References:
+#   DJB, "Salsa20 specification" (2005) — https://cr.yp.to/snuffle/spec.pdf
+#     Set 1 vector 0: key=80 00..00 (32 B), nonce=00..00 (8 B), ctr=0
+#     Set 2 vector 0: key=00..00 (32 B), nonce=80 00..00 (8 B), ctr=0
+#     Set 0 vector 0: key=00..00 (32 B), nonce=00..00 (8 B), ctr=0
+#   NaCl crypto_core/hsalsa20/ref/test.c — DJB's canonical HSalsa20 vector
+#   XSalsa20 — computed byte vector (key from NaCl test, 24-byte nonce) + round-trip
+#
+# Execution note: the unit test runner (interpreter mode) verifies file loading
+# and syntax, but does NOT execute it-block bodies. Assertions are structurally
+# correct; they become live regression gates under compiled mode.
+
+use std.spipe.*
+use os.crypto.salsa20.{salsa20_20_block, salsa20_20_xor, hsalsa20, xsalsa20_xor}
+
+# ============================================================================
+# Module-level helpers — avoids it-block var mutation drop in interpreter mode
+# (per .claude/memory/feedback_it_block_var_mutation.md)
+# ============================================================================
+
+fn _bytes_hex(b: [u8]) -> text:
+    var s = ""
+    var i: u64 = 0
+    val n = b.len()
+    while i < n:
+        val byte = b[i].to_i64()
+        val hi = (byte >> 4) & 0xF
+        val lo = byte & 0xF
+        val hc: text = if hi == 0: "0" else: if hi == 1: "1" else: if hi == 2: "2"
+                       else: if hi == 3: "3" else: if hi == 4: "4" else: if hi == 5: "5"
+                       else: if hi == 6: "6" else: if hi == 7: "7" else: if hi == 8: "8"
+                       else: if hi == 9: "9" else: if hi == 10: "a" else: if hi == 11: "b"
+                       else: if hi == 12: "c" else: if hi == 13: "d" else: if hi == 14: "e"
+                       else: "f"
+        val lc: text = if lo == 0: "0" else: if lo == 1: "1" else: if lo == 2: "2"
+                       else: if lo == 3: "3" else: if lo == 4: "4" else: if lo == 5: "5"
+                       else: if lo == 6: "6" else: if lo == 7: "7" else: if lo == 8: "8"
+                       else: if lo == 9: "9" else: if lo == 10: "a" else: if lo == 11: "b"
+                       else: if lo == 12: "c" else: if lo == 13: "d" else: if lo == 14: "e"
+                       else: "f"
+        s = s + hc + lc
+        i = i + 1
+    s
+
+fn _make_key_0x80() -> [u8]:
+    """32-byte key: first byte 0x80, rest 0x00."""
+    var k: [u8] = []
+    k.push(0x80u8)
+    var i: u64 = 1
+    while i < 32:
+        k.push(0x00u8)
+        i = i + 1
+    k
+
+fn _make_key_zeros() -> [u8]:
+    var k: [u8] = []
+    var i: u64 = 0
+    while i < 32:
+        k.push(0x00u8)
+        i = i + 1
+    k
+
+fn _make_nonce_zeros_8() -> [u8]:
+    var n: [u8] = []
+    var i: u64 = 0
+    while i < 8:
+        n.push(0x00u8)
+        i = i + 1
+    n
+
+fn _make_nonce_0x80() -> [u8]:
+    """8-byte nonce: first byte 0x80, rest 0x00."""
+    var n: [u8] = []
+    n.push(0x80u8)
+    var i: u64 = 1
+    while i < 8:
+        n.push(0x00u8)
+        i = i + 1
+    n
+
+# ============================================================================
+# DJB spec Set 1 vector 0 — expected 64-byte keystream
+# key = 80 00..00 (32 bytes), nonce = 00..00 (8 bytes), counter = 0
+# Source: https://cr.yp.to/snuffle/spec.pdf §8, confirmed by Python impl
+# ============================================================================
+
+fn _expected_set1_v0() -> [u8]:
+    [
+        0xe3u8, 0xbeu8, 0x8fu8, 0xddu8, 0x8bu8, 0xecu8, 0xa2u8, 0xe3u8,
+        0xeau8, 0x8eu8, 0xf9u8, 0x47u8, 0x5bu8, 0x29u8, 0xa6u8, 0xe7u8,
+        0x00u8, 0x39u8, 0x51u8, 0xe1u8, 0x09u8, 0x7au8, 0x5cu8, 0x38u8,
+        0xd2u8, 0x3bu8, 0x7au8, 0x5fu8, 0xadu8, 0x9fu8, 0x68u8, 0x44u8,
+        0xb2u8, 0x2cu8, 0x97u8, 0x55u8, 0x9eu8, 0x27u8, 0x23u8, 0xc7u8,
+        0xcbu8, 0xbdu8, 0x3fu8, 0xe4u8, 0xfcu8, 0x8du8, 0x9au8, 0x07u8,
+        0x44u8, 0x65u8, 0x2au8, 0x83u8, 0xe7u8, 0x2au8, 0x9cu8, 0x46u8,
+        0x18u8, 0x76u8, 0xafu8, 0x4du8, 0x7eu8, 0xf1u8, 0xa1u8, 0x17u8
+    ]
+
+# ============================================================================
+# DJB spec Set 2 vector 0 — expected 64-byte keystream
+# key = 00..00 (32 bytes), nonce = 80 00..00 (8 bytes), counter = 0
+# ============================================================================
+
+fn _expected_set2_v0() -> [u8]:
+    [
+        0x31u8, 0x7du8, 0x79u8, 0x1fu8, 0xfcu8, 0x32u8, 0x44u8, 0xd5u8,
+        0x46u8, 0xd6u8, 0x76u8, 0x10u8, 0xc5u8, 0xedu8, 0x43u8, 0x35u8,
+        0x13u8, 0xedu8, 0xd7u8, 0x36u8, 0x09u8, 0x7cu8, 0x4au8, 0xe8u8,
+        0x63u8, 0x2du8, 0x86u8, 0xdbu8, 0x9eu8, 0xd1u8, 0x2cu8, 0x72u8,
+        0xc8u8, 0xeeu8, 0x40u8, 0xb1u8, 0x1cu8, 0xa8u8, 0x32u8, 0xc1u8,
+        0x44u8, 0x03u8, 0x5du8, 0x56u8, 0xa5u8, 0x2fu8, 0x13u8, 0x79u8,
+        0xd7u8, 0x96u8, 0xf5u8, 0x52u8, 0xe9u8, 0xa1u8, 0xdeu8, 0x77u8,
+        0x5eu8, 0x64u8, 0x26u8, 0x8eu8, 0x55u8, 0x58u8, 0xf0u8, 0x42u8
+    ]
+
+# ============================================================================
+# DJB spec Set 0 vector 0 — expected 64-byte keystream
+# key = 00..00 (32 bytes), nonce = 00..00 (8 bytes), counter = 0
+# ============================================================================
+
+fn _expected_set0_v0() -> [u8]:
+    [
+        0x9au8, 0x97u8, 0xf6u8, 0x5bu8, 0x9bu8, 0x4cu8, 0x72u8, 0x1bu8,
+        0x96u8, 0x0au8, 0x67u8, 0x21u8, 0x45u8, 0xfcu8, 0xa8u8, 0xd4u8,
+        0xe3u8, 0x2eu8, 0x67u8, 0xf9u8, 0x11u8, 0x1eu8, 0xa9u8, 0x79u8,
+        0xceu8, 0x9cu8, 0x48u8, 0x26u8, 0x80u8, 0x6au8, 0xeeu8, 0xe6u8,
+        0x3du8, 0xe9u8, 0xc0u8, 0xdau8, 0x2bu8, 0xd7u8, 0xf9u8, 0x1eu8,
+        0xbcu8, 0xb2u8, 0x63u8, 0x9bu8, 0xf9u8, 0x89u8, 0xc6u8, 0x25u8,
+        0x1bu8, 0x29u8, 0xbfu8, 0x38u8, 0xd3u8, 0x9au8, 0x9bu8, 0xdcu8,
+        0xe7u8, 0xc5u8, 0x5fu8, 0x4bu8, 0x2au8, 0xc1u8, 0x2au8, 0x39u8
+    ]
+
+# ============================================================================
+# NaCl HSalsa20 reference vector
+# Source: NaCl crypto_core/hsalsa20/ref/test.c (DJB)
+#   key   = 1b 27 55 64 73 e9 85 d4 62 cd 51 19 7a 9a 46 c7
+#           60 09 54 9e ac 64 74 f2 06 c4 ee 08 44 f6 83 89
+#   input = 69 69 6e e9 55 b6 2b 73 cd 62 bd a8 75 fc 73 d6
+# expected= 49 7e ff e5 cd 82 a9 0d b6 58 2a 8e 27 2b 18 53
+#           ff 28 7e bb 56 ed 24 1c f7 2d a5 bc 56 24 8a 5f
+# ============================================================================
+
+fn _hsalsa_key() -> [u8]:
+    [
+        0x1bu8, 0x27u8, 0x55u8, 0x64u8, 0x73u8, 0xe9u8, 0x85u8, 0xd4u8,
+        0x62u8, 0xcdu8, 0x51u8, 0x19u8, 0x7au8, 0x9au8, 0x46u8, 0xc7u8,
+        0x60u8, 0x09u8, 0x54u8, 0x9eu8, 0xacu8, 0x64u8, 0x74u8, 0xf2u8,
+        0x06u8, 0xc4u8, 0xeeu8, 0x08u8, 0x44u8, 0xf6u8, 0x83u8, 0x89u8
+    ]
+
+fn _hsalsa_input() -> [u8]:
+    [
+        0x69u8, 0x69u8, 0x6eu8, 0xe9u8, 0x55u8, 0xb6u8, 0x2bu8, 0x73u8,
+        0xcdu8, 0x62u8, 0xbdu8, 0xa8u8, 0x75u8, 0xfcu8, 0x73u8, 0xd6u8
+    ]
+
+fn _hsalsa_expected() -> [u8]:
+    [
+        0x49u8, 0x7eu8, 0xffu8, 0xe5u8, 0xcdu8, 0x82u8, 0xa9u8, 0x0du8,
+        0xb6u8, 0x58u8, 0x2au8, 0x8eu8, 0x27u8, 0x2bu8, 0x18u8, 0x53u8,
+        0xffu8, 0x28u8, 0x7eu8, 0xbbu8, 0x56u8, 0xedu8, 0x24u8, 0x1cu8,
+        0xf7u8, 0x2du8, 0xa5u8, 0xbcu8, 0x56u8, 0x24u8, 0x8au8, 0x5fu8
+    ]
+
+# ============================================================================
+# XSalsa20 computed byte-exact vector
+# key   = same as _hsalsa_key() (32 bytes)
+# nonce = 69 69 6e e9 55 b6 2b 73 cd 62 bd a8 75 fc 73 d6  (first 16 = hsalsa input)
+#         5d 6b 4f e2 d8 a0 20 f5                           (last 8 = Salsa20 nonce)
+# pt    = "This is a test message for XSalsa20" (35 bytes, ASCII)
+# ct    = Python-verified against reference Salsa20 impl
+# ============================================================================
+
+fn _xsalsa_nonce24() -> [u8]:
+    [
+        0x69u8, 0x69u8, 0x6eu8, 0xe9u8, 0x55u8, 0xb6u8, 0x2bu8, 0x73u8,
+        0xcdu8, 0x62u8, 0xbdu8, 0xa8u8, 0x75u8, 0xfcu8, 0x73u8, 0xd6u8,
+        0x5du8, 0x6bu8, 0x4fu8, 0xe2u8, 0xd8u8, 0xa0u8, 0x20u8, 0xf5u8
+    ]
+
+fn _xsalsa_plaintext() -> [u8]:
+    # "This is a test message for XSalsa20"
+    [
+        0x54u8, 0x68u8, 0x69u8, 0x73u8, 0x20u8, 0x69u8, 0x73u8, 0x20u8,
+        0x61u8, 0x20u8, 0x74u8, 0x65u8, 0x73u8, 0x74u8, 0x20u8, 0x6du8,
+        0x65u8, 0x73u8, 0x73u8, 0x61u8, 0x67u8, 0x65u8, 0x20u8, 0x66u8,
+        0x6fu8, 0x72u8, 0x20u8, 0x58u8, 0x53u8, 0x61u8, 0x6cu8, 0x73u8,
+        0x61u8, 0x32u8, 0x30u8
+    ]
+
+fn _xsalsa_expected_ct() -> [u8]:
+    # Python-verified: xsalsa20_xor(_hsalsa_key(), _xsalsa_nonce24(), _xsalsa_plaintext())
+    [
+        0xe2u8, 0x62u8, 0x19u8, 0x42u8, 0xf7u8, 0x27u8, 0x3au8, 0x85u8,
+        0x1cu8, 0xbbu8, 0x9fu8, 0x95u8, 0x4eu8, 0xb7u8, 0x5eu8, 0x78u8,
+        0xd5u8, 0xcdu8, 0x85u8, 0x9eu8, 0x17u8, 0x3du8, 0x01u8, 0xefu8,
+        0xa8u8, 0x70u8, 0xeeu8, 0xfbu8, 0xc6u8, 0x5au8, 0x81u8, 0x57u8,
+        0x75u8, 0xdbu8, 0x55u8
+    ]
+
+fn _nonce24_zeros() -> [u8]:
+    var n: [u8] = []
+    var i: u64 = 0
+    while i < 24:
+        n.push(0x00u8)
+        i = i + 1
+    n
+
+fn _nonce24_alt() -> [u8]:
+    # Different last byte to verify nonce-sensitivity
+    [
+        0x00u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8,
+        0x00u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8,
+        0x00u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8, 0x01u8
+    ]
+
+# ============================================================================
+# Tests: Salsa20/20 block — DJB known-answer vectors
+# ============================================================================
+
+describe "Salsa20/20 block — DJB spec Set 1 vector 0 (key=0x80..0, nonce=0)":
+
+    it "block output is 64 bytes":
+        val out = salsa20_20_block(_make_key_0x80(), _make_nonce_zeros_8(), 0u32, 0u32)
+        expect out.len() == 64u64
+
+    it "block output matches DJB spec byte-exact":
+        val out = salsa20_20_block(_make_key_0x80(), _make_nonce_zeros_8(), 0u32, 0u32)
+        expect _bytes_hex(out) == _bytes_hex(_expected_set1_v0())
+
+describe "Salsa20/20 block — DJB spec Set 2 vector 0 (key=0, nonce=0x80..0)":
+
+    it "block output is 64 bytes":
+        val out = salsa20_20_block(_make_key_zeros(), _make_nonce_0x80(), 0u32, 0u32)
+        expect out.len() == 64u64
+
+    it "block output matches DJB spec byte-exact":
+        val out = salsa20_20_block(_make_key_zeros(), _make_nonce_0x80(), 0u32, 0u32)
+        expect _bytes_hex(out) == _bytes_hex(_expected_set2_v0())
+
+describe "Salsa20/20 block — DJB spec Set 0 vector 0 (all-zero key+nonce)":
+
+    it "block output matches DJB spec byte-exact":
+        val out = salsa20_20_block(_make_key_zeros(), _make_nonce_zeros_8(), 0u32, 0u32)
+        expect _bytes_hex(out) == _bytes_hex(_expected_set0_v0())
+
+# ============================================================================
+# Tests: Salsa20/20 XOR — round-trip
+# ============================================================================
+
+describe "Salsa20/20 XOR — round-trip and length":
+
+    it "output length equals plaintext length":
+        val pt: [u8] = [0x00u8, 0x01u8, 0x02u8, 0x03u8, 0x04u8, 0x05u8, 0x06u8, 0x07u8]
+        val ct = salsa20_20_xor(_make_key_0x80(), _make_nonce_zeros_8(), pt)
+        expect ct.len() == 8u64
+
+    it "encrypt then decrypt recovers original plaintext":
+        val pt: [u8] = [
+            0x01u8, 0x23u8, 0x45u8, 0x67u8, 0x89u8, 0xabu8, 0xcdu8, 0xefu8,
+            0xfeu8, 0xdcu8, 0xbau8, 0x98u8, 0x76u8, 0x54u8, 0x32u8, 0x10u8
+        ]
+        val ct = salsa20_20_xor(_make_key_0x80(), _make_nonce_zeros_8(), pt)
+        val rt = salsa20_20_xor(_make_key_0x80(), _make_nonce_zeros_8(), ct)
+        expect _bytes_hex(rt) == _bytes_hex(pt)
+
+# ============================================================================
+# Tests: HSalsa20 — NaCl reference vector
+# ============================================================================
+
+describe "HSalsa20 — NaCl reference vector (DJB crypto_core/hsalsa20/ref/test.c)":
+
+    it "output is 32 bytes":
+        val out = hsalsa20(_hsalsa_key(), _hsalsa_input())
+        expect out.len() == 32u64
+
+    it "output matches NaCl reference vector byte-exact":
+        val out = hsalsa20(_hsalsa_key(), _hsalsa_input())
+        expect _bytes_hex(out) == _bytes_hex(_hsalsa_expected())
+
+# ============================================================================
+# Tests: XSalsa20 — byte-exact KAT + round-trip
+# ============================================================================
+
+describe "XSalsa20 — computed byte-exact vector (Python-verified)":
+
+    it "output length equals plaintext length (35 bytes)":
+        val ct = xsalsa20_xor(_hsalsa_key(), _xsalsa_nonce24(), _xsalsa_plaintext())
+        expect ct.len() == 35u64
+
+    it "encryption matches computed ciphertext byte-exact":
+        val ct = xsalsa20_xor(_hsalsa_key(), _xsalsa_nonce24(), _xsalsa_plaintext())
+        expect _bytes_hex(ct) == _bytes_hex(_xsalsa_expected_ct())
+
+describe "XSalsa20 — round-trip":
+
+    it "encrypt then decrypt recovers original plaintext":
+        val pt = _xsalsa_plaintext()
+        val ct = xsalsa20_xor(_hsalsa_key(), _xsalsa_nonce24(), pt)
+        val rt = xsalsa20_xor(_hsalsa_key(), _xsalsa_nonce24(), ct)
+        expect _bytes_hex(rt) == _bytes_hex(pt)
+
+    it "different keys produce different ciphertext":
+        val pt = _xsalsa_plaintext()
+        val ct1 = xsalsa20_xor(_hsalsa_key(), _xsalsa_nonce24(), pt)
+        val ct2 = xsalsa20_xor(_make_key_zeros(), _xsalsa_nonce24(), pt)
+        expect _bytes_hex(ct1) == _bytes_hex(ct2) == false
+
+    it "different nonces produce different ciphertext":
+        val pt = _xsalsa_plaintext()
+        val ct1 = xsalsa20_xor(_hsalsa_key(), _xsalsa_nonce24(), pt)
+        val ct2 = xsalsa20_xor(_hsalsa_key(), _nonce24_alt(), pt)
+        expect _bytes_hex(ct1) == _bytes_hex(ct2) == false

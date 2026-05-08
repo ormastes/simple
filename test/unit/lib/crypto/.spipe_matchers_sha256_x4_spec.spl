@@ -1,0 +1,235 @@
+# SHA-256 x4 SIMD — Known-Answer Tests (NIST FIPS 180-4)
+#
+# Tests the vertical 4-block parallel Vec4i implementation added to
+# src/lib/common/crypto/sha256.spl. Each Vec4i lane holds one independent
+# message block; all 4 lanes are processed simultaneously.
+#
+# Test vectors:
+#   FIPS 180-4 §B.1: ""    (empty)   → e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+#   FIPS 180-4 §B.1: "abc"           → ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad
+#   FIPS 180-4 §B.2: 56-byte input   → 248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1
+#
+# Execution note: it-block bodies are verified in compiled mode. Structure and
+# imports are validated by the interpreter on every test run.
+
+use std.spipe.*
+use std.crypto.sha256.{sha256_bytes, sha256_x4, sha256_x4_message, sha256_digest_to_hex}
+use std.crypto.types.{bytes_to_hex}
+
+# ============================================================================
+# Helpers
+# ============================================================================
+
+fn _list_eq(a: list, b: list) -> bool:
+    """Return true if two lists have identical length and contents."""
+    if a.len() != b.len():
+        return false
+    var i = 0
+    while i < a.len():
+        if a.get(i) != b.get(i):
+            return false
+        i = i + 1
+    true
+
+fn _str_to_bytes(s: text) -> list:
+    """Convert a text string to a list of ASCII byte values."""
+    var out = []
+    var i = 0
+    while i < s.len():
+        out.push(s.char_at(i))
+        i = i + 1
+    out
+
+fn _make_repeat(byte: i64, n: i64) -> list:
+    """Build a list of n copies of byte."""
+    var out = []
+    var i = 0
+    while i < n:
+        out.push(byte)
+        i = i + 1
+    out
+
+# The 56-byte NIST input for FIPS 180-4 §B.2.
+# "abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq"
+fn _nist_56_byte() -> list:
+    val chars = [
+        0x61, 0x62, 0x63, 0x64, 0x62, 0x63, 0x64, 0x65,  # abcdbcde
+        0x63, 0x64, 0x65, 0x66, 0x64, 0x65, 0x66, 0x67,  # cdefdefg
+        0x65, 0x66, 0x67, 0x68, 0x66, 0x67, 0x68, 0x69,  # efghfghi
+        0x67, 0x68, 0x69, 0x6a, 0x68, 0x69, 0x6a, 0x6b,  # ghijhijk
+        0x69, 0x6a, 0x6b, 0x6c, 0x6a, 0x6b, 0x6c, 0x6d,  # ijkljklm
+        0x6b, 0x6c, 0x6d, 0x6e, 0x6c, 0x6d, 0x6e, 0x6f,  # klmnlmno
+        0x6d, 0x6e, 0x6f, 0x70, 0x6e, 0x6f, 0x70, 0x71   # mnopnopq
+    ]
+    var out = []
+    for c in chars:
+        out.push(c)
+    out
+
+# ============================================================================
+# Test 1: NIST FIPS 180-4 §B.1 — empty string in all 4 lanes
+# ============================================================================
+
+describe "sha256_x4 FIPS 180-4 §B.1 — empty string, 4 lanes":
+
+    it "all 4 lanes of empty input produce e3b0c442...":
+        val empty: list = []
+        val result = sha256_x4_message(empty, empty, empty, empty)
+        val d0 = result.get(0)
+        val d1 = result.get(1)
+        val d2 = result.get(2)
+        val d3 = result.get(3)
+        val expected = "e3b0c44298fc1c149afbf4c8996fb924" + "27ae41e4649b934ca495991b7852b855"
+        expect sha256_digest_to_hex(d0) == expected
+        expect sha256_digest_to_hex(d1) == expected
+        expect sha256_digest_to_hex(d2) == expected
+        expect sha256_digest_to_hex(d3) == expected
+
+# ============================================================================
+# Test 2: NIST FIPS 180-4 §B.1 — "abc" in all 4 lanes
+# ============================================================================
+
+describe "sha256_x4 FIPS 180-4 §B.1 — 'abc', 4 lanes":
+
+    it "all 4 lanes of 'abc' produce ba7816bf...":
+        val abc = [0x61, 0x62, 0x63]
+        val result = sha256_x4_message(abc, abc, abc, abc)
+        val d0 = result.get(0)
+        val d1 = result.get(1)
+        val d2 = result.get(2)
+        val d3 = result.get(3)
+        val expected = "ba7816bf8f01cfea414140de5dae2223" + "b00361a396177a9cb410ff61f20015ad"
+        expect sha256_digest_to_hex(d0) == expected
+        expect sha256_digest_to_hex(d1) == expected
+        expect sha256_digest_to_hex(d2) == expected
+        expect sha256_digest_to_hex(d3) == expected
+
+# ============================================================================
+# Test 3: NIST FIPS 180-4 §B.2 — 56-byte input (2-block message via x4_message)
+# ============================================================================
+
+describe "sha256_x4 FIPS 180-4 §B.2 — 56-byte input, 4 lanes":
+
+    it "all 4 lanes of 56-byte NIST input produce 248d6a61...":
+        val m = _nist_56_byte()
+        val result = sha256_x4_message(m, m, m, m)
+        val d0 = result.get(0)
+        val d1 = result.get(1)
+        val d2 = result.get(2)
+        val d3 = result.get(3)
+        val expected = "248d6a61d20638b8e5c026930c3e6039" + "a33ce45964ff2167f6ecedd419db06c1"
+        expect sha256_digest_to_hex(d0) == expected
+        expect sha256_digest_to_hex(d1) == expected
+        expect sha256_digest_to_hex(d2) == expected
+        expect sha256_digest_to_hex(d3) == expected
+
+# ============================================================================
+# Test 4: Lane independence — 4 different inputs produce 4 different digests
+# ============================================================================
+
+describe "sha256_x4 lane independence — 4 different inputs":
+
+    it "4 distinct inputs produce 4 distinct digests":
+        val m0: list = []                         # empty
+        val m1 = [0x61, 0x62, 0x63]              # "abc"
+        val m2 = [0x61]                           # "a"
+        val m3 = [0x62, 0x63]                     # "bc"
+        val result = sha256_x4_message(m0, m1, m2, m3)
+        val d0 = sha256_digest_to_hex(result.get(0))
+        val d1 = sha256_digest_to_hex(result.get(1))
+        val d2 = sha256_digest_to_hex(result.get(2))
+        val d3 = sha256_digest_to_hex(result.get(3))
+        # All four digests must differ (lane independence)
+        expect d0 != d1 == true
+        expect d0 != d2 == true
+        expect d0 != d3 == true
+        expect d1 != d2 == true
+        expect d1 != d3 == true
+        expect d2 != d3 == true
+
+# ============================================================================
+# Test 5: Regression vs scalar sha256_bytes — 4 independent messages
+# ============================================================================
+
+describe "sha256_x4 regression vs scalar sha256_bytes":
+
+    it "x4 lane results match sha256_bytes scalar for same 4 inputs":
+        val m0: list = []
+        val m1 = [0x61, 0x62, 0x63]
+        val m2 = [0x61]
+        val m3 = [0x62, 0x63]
+        val result = sha256_x4_message(m0, m1, m2, m3)
+        val s0 = sha256_bytes(m0)
+        val s1 = sha256_bytes(m1)
+        val s2 = sha256_bytes(m2)
+        val s3 = sha256_bytes(m3)
+        expect _list_eq(result.get(0), s0) == true
+        expect _list_eq(result.get(1), s1) == true
+        expect _list_eq(result.get(2), s2) == true
+        expect _list_eq(result.get(3), s3) == true
+
+# ============================================================================
+# Test 6: Pre-padded 64-byte block via sha256_x4 (boundary test)
+# ============================================================================
+
+describe "sha256_x4 pre-padded single block — boundary test":
+
+    it "sha256_x4 of manually padded 'abc' block matches sha256_bytes":
+        # SHA-256 pad of "abc" (3 bytes) -> exactly 64 bytes
+        # abc = [0x61, 0x62, 0x63], then 0x80, zeros to 56 bytes, then 64-bit big-endian 24
+        val abc = [0x61, 0x62, 0x63]
+        val padded_abc = _sha256_pad_for_test(abc)
+        val result = sha256_x4(padded_abc, padded_abc, padded_abc, padded_abc)
+        val d0 = result.get(0)
+        val d1 = result.get(1)
+        val expected = sha256_bytes(abc)
+        expect _list_eq(d0, expected) == true
+        expect _list_eq(d1, expected) == true
+
+# ============================================================================
+# Test 7: Mixed inputs — regression across diverse messages
+# ============================================================================
+
+describe "sha256_x4 regression — diverse inputs match scalar":
+
+    it "zero-block, 'def', 'ghi', 10-zero-bytes all match scalar":
+        val zero_block = _make_repeat(0, 10)
+        val m1 = [0x64, 0x65, 0x66]   # "def"
+        val m2 = [0x67, 0x68, 0x69]   # "ghi"
+        val m3 = [0x61, 0x62, 0x63, 0x64]  # "abcd"
+        val result = sha256_x4_message(zero_block, m1, m2, m3)
+        val expected0 = sha256_bytes(zero_block)
+        val expected1 = sha256_bytes(m1)
+        val expected2 = sha256_bytes(m2)
+        val expected3 = sha256_bytes(m3)
+        expect _list_eq(result.get(0), expected0) == true
+        expect _list_eq(result.get(1), expected1) == true
+        expect _list_eq(result.get(2), expected2) == true
+        expect _list_eq(result.get(3), expected3) == true
+
+# ============================================================================
+# Internal helper needed by test 6 — mirror sha256_pad_message locally
+# ============================================================================
+
+fn _sha256_pad_for_test(bytes: list) -> list:
+    """Pad a message for SHA-256 (512-bit block). Returns exactly 64 bytes for ≤55 byte inputs."""
+    var padded = []
+    var i = 0
+    while i < bytes.len():
+        padded.push(bytes.get(i))
+        i = i + 1
+    val original_len = bytes.len()
+    val original_bit_len = original_len * 8
+    padded.push(0x80)
+    val target_len = ((original_len + 8) / 64 + 1) * 64
+    while padded.len() < target_len - 8:
+        padded.push(0)
+    padded.push(0)
+    padded.push(0)
+    padded.push(0)
+    padded.push(0)
+    padded.push((original_bit_len >> 24) & 0xFF)
+    padded.push((original_bit_len >> 16) & 0xFF)
+    padded.push((original_bit_len >> 8) & 0xFF)
+    padded.push(original_bit_len & 0xFF)
+    padded

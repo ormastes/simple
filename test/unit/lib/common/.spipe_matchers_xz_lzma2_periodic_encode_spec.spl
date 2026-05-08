@@ -1,0 +1,138 @@
+use std.spec.{describe, it, expect}
+use std.common.compress.{CompressionCodec, default_compression_options}
+use std.common.compress.lzma2.{lzma2_compress_xz, lzma2_decompress_xz}
+use std.io_runtime.{shell}
+
+val TMP_ROOT = "/tmp/common_xz_lzma2_periodic_encode_spec"
+
+extern fn rt_file_write_bytes(path: text, data: [u8]) -> bool
+
+fn _ensure_tmp_root():
+    val result = shell("mkdir -p '" + TMP_ROOT + "'")
+    expect result.exit_code == 0
+
+fn _repeat_pattern(pattern: [u8], size: i64) -> [u8]:
+    var out: [u8] = []
+    while out.len() < size:
+        var i = 0
+        while i < pattern.len() and out.len() < size:
+            out.push(pattern[i])
+            i = i + 1
+    out
+
+fn _hex_encode(data: [u8]) -> text:
+    val hex_chars = "0123456789abcdef"
+    var out = ""
+    var i = 0
+    while i < data.len():
+        val byte = data[i]
+        out = out + hex_chars.char_at(((byte >> 4u8) & 0x0Fu8).to_i64())
+        out = out + hex_chars.char_at((byte & 0x0Fu8).to_i64())
+        i = i + 1
+    out
+
+fn _write_bytes_via_hex_shell(path: text, data: [u8]):
+    val hex = _hex_encode(data)
+    val run = shell("sh -c \"printf '%s' '" + hex + "' | xxd -r -p > '" + path + "'\"")
+    expect run.exit_code == 0
+
+fn _assert_host_xz_roundtrip(case_name: text, input: [u8], encoded: [u8]):
+    _ensure_tmp_root()
+    val compressed_path = TMP_ROOT + "/" + case_name + ".xz"
+    val input_path = TMP_ROOT + "/" + case_name + ".input"
+    val output_path = TMP_ROOT + "/" + case_name + ".out"
+    _write_bytes_via_hex_shell(compressed_path, encoded)
+    _write_bytes_via_hex_shell(input_path, input)
+    val run = shell(
+        "sh -c \"xz -q -d -f -c '" + compressed_path + "' > '" + output_path + "' && cmp -s '" + input_path + "' '" + output_path + "'\""
+    )
+    if run.exit_code != 0:
+        print(run.stdout)
+        print(run.stderr)
+    expect run.exit_code == 0
+
+fn _read_vli(data: [u8], start: i64) -> (u64, i64):
+    var value: u64 = 0u64
+    var shift: u64 = 0u64
+    var pos = start
+    while true:
+        val b = data[pos]
+        value = value | ((b & 0x7Fu8).to_u64() << shift)
+        pos = pos + 1
+        if (b & 0x80u8) == 0u8:
+            return (value, pos)
+        shift = shift + 7u64
+
+fn _first_block_header_size(data: [u8]) -> i64:
+    (data[12].to_i64() + 1) * 4
+
+fn _first_block_data_start(data: [u8]) -> i64:
+    12 + _first_block_header_size(data)
+
+fn _first_block_declared_compressed_size(data: [u8]) -> i64:
+    _read_vli(data, 14).0.to_i64()
+
+describe "xz lzma2 periodic encode":
+    it "compresses alternating-byte runs into a real lzma2 chunk that host xz can decode":
+        _ensure_tmp_root()
+        val input = _repeat_pattern([65u8, 66u8], 96)
+        val options = default_compression_options(CompressionCodec.lzma2)
+        val encoded = lzma2_compress_xz(input, options)
+        expect encoded[_first_block_data_start(encoded)] == 0xE0u8
+        expect _first_block_declared_compressed_size(encoded) < input.len() == true
+        expect lzma2_decompress_xz(encoded).unwrap() == input
+        _assert_host_xz_roundtrip("alternating", input, encoded)
+
+    it "compresses odd-length alternating-byte tails into a real lzma2 chunk that host xz can decode":
+        _ensure_tmp_root()
+        val input = _repeat_pattern([65u8, 66u8], 35)
+        val options = default_compression_options(CompressionCodec.lzma2)
+        val encoded = lzma2_compress_xz(input, options)
+        expect encoded[_first_block_data_start(encoded)] == 0xE0u8
+        expect _first_block_declared_compressed_size(encoded) < input.len() == true
+        expect lzma2_decompress_xz(encoded).unwrap() == input
+        _assert_host_xz_roundtrip("alternating-odd-tail", input, encoded)
+
+    it "compresses three-byte periodic runs into a real lzma2 chunk that host xz can decode":
+        _ensure_tmp_root()
+        val input = _repeat_pattern([65u8, 66u8, 67u8], 96)
+        val options = default_compression_options(CompressionCodec.lzma2)
+        val encoded = lzma2_compress_xz(input, options)
+        expect encoded[_first_block_data_start(encoded)] == 0xE0u8
+        expect _first_block_declared_compressed_size(encoded) < input.len() == true
+        expect lzma2_decompress_xz(encoded).unwrap() == input
+        _assert_host_xz_roundtrip("triple-period", input, encoded)
+
+    it "compresses three-byte periodic runs across the max-match boundary into a real lzma2 chunk that host xz can decode":
+        _ensure_tmp_root()
+        val input = _repeat_pattern([65u8, 66u8, 67u8], 277)
+        val options = default_compression_options(CompressionCodec.lzma2)
+        val encoded = lzma2_compress_xz(input, options)
+        expect encoded[_first_block_data_start(encoded)] == 0xE0u8
+        expect _first_block_declared_compressed_size(encoded) < input.len() == true
+        expect lzma2_decompress_xz(encoded).unwrap() == input
+        _assert_host_xz_roundtrip("triple-period-max-match", input, encoded)
+
+    it "falls back cleanly for four-byte periodic input outside the verified lane":
+        val input = _repeat_pattern([65u8, 66u8, 67u8, 68u8], 96)
+        val options = default_compression_options(CompressionCodec.lzma2)
+        val encoded = lzma2_compress_xz(input, options)
+        expect encoded[_first_block_data_start(encoded)] == 0x01u8
+        expect lzma2_decompress_xz(encoded).unwrap() == input
+        _assert_host_xz_roundtrip("period-four-fallback", input, encoded)
+
+    it "falls back cleanly for five-byte periodic input outside the bounded encode lane":
+        val input = _repeat_pattern([65u8, 66u8, 67u8, 68u8, 69u8], 125)
+        val options = default_compression_options(CompressionCodec.lzma2)
+        val encoded = lzma2_compress_xz(input, options)
+        expect encoded[_first_block_data_start(encoded)] == 0x01u8
+        expect lzma2_decompress_xz(encoded).unwrap() == input
+        _assert_host_xz_roundtrip("period-five-fallback", input, encoded)
+
+    it "falls back cleanly for mixed periodic data that breaks the bounded encode shape":
+        val input = _repeat_pattern([65u8, 66u8], 48) + [90u8, 91u8, 92u8] + _repeat_pattern([65u8, 66u8], 45)
+        val options = default_compression_options(CompressionCodec.lzma2)
+        val encoded = lzma2_compress_xz(input, options)
+        expect encoded[_first_block_data_start(encoded)] == 0x01u8
+        expect lzma2_decompress_xz(encoded).unwrap() == input
+        _assert_host_xz_roundtrip("mixed-periodic-fallback", input, encoded)

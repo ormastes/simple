@@ -1,0 +1,423 @@
+# MessagePack Encoder/Decoder Specification
+# Tests the pure-Simple MessagePack implementation in
+# src/lib/common/encoding/msgpack.spl against the msgpack.org spec.
+#
+# NOTE: The interpreter test runner verifies file loading, NOT it-block
+# execution. Assertions only fire under compiled/native mode.
+#
+# NOTE: All module-level helper functions are used to avoid the it-block
+# var-mutation footgun (see .claude/memory/feedback_it_block_var_mutation.md).
+
+use std.encoding.msgpack.{msgpack_encode_nil, msgpack_encode_bool,
+    msgpack_encode_int, msgpack_encode_str, msgpack_encode_bin,
+    msgpack_encode_array_header, msgpack_encode_map_header,
+    msgpack_decode_type, msgpack_decode_int, msgpack_decode_str}
+
+# ============================================================================
+# Nil encode helpers
+# ============================================================================
+
+fn _nil_len_ok() -> bool:
+    msgpack_encode_nil().len() == 1
+
+fn _nil_byte_ok() -> bool:
+    val b = msgpack_encode_nil()
+    b[0].to_i64() == 0xC0
+
+# ============================================================================
+# Bool encode helpers
+# ============================================================================
+
+fn _bool_false_len_ok() -> bool:
+    msgpack_encode_bool(false).len() == 1
+
+fn _bool_false_byte_ok() -> bool:
+    val b = msgpack_encode_bool(false)
+    b[0].to_i64() == 0xC2
+
+fn _bool_true_len_ok() -> bool:
+    msgpack_encode_bool(true).len() == 1
+
+fn _bool_true_byte_ok() -> bool:
+    val b = msgpack_encode_bool(true)
+    b[0].to_i64() == 0xC3
+
+# ============================================================================
+# Integer encode helpers
+# ============================================================================
+
+fn _int_fixpos_zero_ok() -> bool:
+    # 0 → positive fixint: [0x00]
+    val b = msgpack_encode_int(0)
+    b.len() == 1 and b[0].to_i64() == 0x00
+
+fn _int_fixpos_max_ok() -> bool:
+    # 127 → positive fixint: [0x7F]
+    val b = msgpack_encode_int(127)
+    b.len() == 1 and b[0].to_i64() == 0x7F
+
+fn _int_fixneg_minus1_ok() -> bool:
+    # -1 → negative fixint: [0xFF]
+    val b = msgpack_encode_int(-1)
+    b.len() == 1 and b[0].to_i64() == 0xFF
+
+fn _int_fixneg_minus32_ok() -> bool:
+    # -32 → negative fixint: [0xE0]
+    val b = msgpack_encode_int(-32)
+    b.len() == 1 and b[0].to_i64() == 0xE0
+
+fn _int_uint8_ok() -> bool:
+    # 200 → uint8: [0xCC, 0xC8]
+    val b = msgpack_encode_int(200)
+    b.len() == 2 and b[0].to_i64() == 0xCC and b[1].to_i64() == 0xC8
+
+fn _int_uint16_ok() -> bool:
+    # 1000 → uint16: [0xCD, 0x03, 0xE8]
+    val b = msgpack_encode_int(1000)
+    b.len() == 3 and b[0].to_i64() == 0xCD and b[1].to_i64() == 0x03 and b[2].to_i64() == 0xE8
+
+fn _int_int8_minus50_ok() -> bool:
+    # -50 → int8: [0xD0, 0xCE]  (0xCE = 256 - 50 = 206)
+    val b = msgpack_encode_int(-50)
+    b.len() == 2 and b[0].to_i64() == 0xD0 and b[1].to_i64() == 0xCE
+
+fn _int_int16_minus200_ok() -> bool:
+    # -200 → int16: [0xD1, 0xFF, 0x38]
+    # Two's complement of -200 in 16 bits: 65536 - 200 = 65336 = 0xFF38
+    val b = msgpack_encode_int(-200)
+    b.len() == 3 and b[0].to_i64() == 0xD1 and b[1].to_i64() == 0xFF and b[2].to_i64() == 0x38
+
+# ============================================================================
+# String encode helpers
+# ============================================================================
+
+fn _str_empty_ok() -> bool:
+    # "" → fixstr: [0xA0]
+    val b = msgpack_encode_str("")
+    b.len() == 1 and b[0].to_i64() == 0xA0
+
+fn _str_hello_len_ok() -> bool:
+    # "hello" (5 bytes) → fixstr: [0xA5, 'h','e','l','l','o']
+    val b = msgpack_encode_str("hello")
+    b.len() == 6
+
+fn _str_hello_header_ok() -> bool:
+    val b = msgpack_encode_str("hello")
+    b[0].to_i64() == 0xA5
+
+fn _str_hello_bytes_ok() -> bool:
+    val b = msgpack_encode_str("hello")
+    (b[1].to_i64() == 104) and  # 'h'
+    (b[2].to_i64() == 101) and  # 'e'
+    (b[3].to_i64() == 108) and  # 'l'
+    (b[4].to_i64() == 108) and  # 'l'
+    (b[5].to_i64() == 111)      # 'o'
+
+fn _str_32bytes_is_str8() -> bool:
+    # A 32-character string → str8 format (not fixstr, which caps at 31)
+    val s = "aaaaaaaaaabbbbbbbbbbccccccccccdd"  # 32 chars
+    val b = msgpack_encode_str(s)
+    # header: [0xD9, 0x20] (0x20 = 32), then 32 bytes payload
+    b.len() == 34 and b[0].to_i64() == 0xD9 and b[1].to_i64() == 32
+
+# ============================================================================
+# Binary encode helpers
+# ============================================================================
+
+fn _bin_empty_ok() -> bool:
+    # empty → bin8: [0xC4, 0x00]
+    val data: [u8] = []
+    val b = msgpack_encode_bin(data)
+    b.len() == 2 and b[0].to_i64() == 0xC4 and b[1].to_i64() == 0x00
+
+fn _bin_three_bytes_ok() -> bool:
+    # [0x01, 0x02, 0x03] → bin8: [0xC4, 0x03, 0x01, 0x02, 0x03]
+    var data: [u8] = []
+    data.push(0x01)
+    data.push(0x02)
+    data.push(0x03)
+    val b = msgpack_encode_bin(data)
+    (b.len() == 5) and
+    (b[0].to_i64() == 0xC4) and
+    (b[1].to_i64() == 0x03) and
+    (b[2].to_i64() == 0x01) and
+    (b[3].to_i64() == 0x02) and
+    (b[4].to_i64() == 0x03)
+
+# ============================================================================
+# Array/map header helpers
+# ============================================================================
+
+fn _array_fixarray_ok() -> bool:
+    # count=3 → fixarray: [0x93]
+    val b = msgpack_encode_array_header(3)
+    b.len() == 1 and b[0].to_i64() == 0x93
+
+fn _array_fixarray_max_ok() -> bool:
+    # count=15 → fixarray max: [0x9F]
+    val b = msgpack_encode_array_header(15)
+    b.len() == 1 and b[0].to_i64() == 0x9F
+
+fn _array_array16_ok() -> bool:
+    # count=16 → array16: [0xDC, 0x00, 0x10]
+    val b = msgpack_encode_array_header(16)
+    b.len() == 3 and b[0].to_i64() == 0xDC and b[1].to_i64() == 0x00 and b[2].to_i64() == 0x10
+
+fn _map_fixmap_ok() -> bool:
+    # count=2 → fixmap: [0x82]
+    val b = msgpack_encode_map_header(2)
+    b.len() == 1 and b[0].to_i64() == 0x82
+
+fn _map_fixmap_zero_ok() -> bool:
+    # count=0 → fixmap: [0x80]
+    val b = msgpack_encode_map_header(0)
+    b.len() == 1 and b[0].to_i64() == 0x80
+
+fn _map_map16_ok() -> bool:
+    # count=16 → map16: [0xDE, 0x00, 0x10]
+    val b = msgpack_encode_map_header(16)
+    b.len() == 3 and b[0].to_i64() == 0xDE and b[1].to_i64() == 0x00 and b[2].to_i64() == 0x10
+
+# ============================================================================
+# Round-trip helpers: encode int then decode back
+# ============================================================================
+
+fn _rt_int(n: i64) -> i64:
+    """Encode n, then decode from position 0. Returns decoded value."""
+    val encoded = msgpack_encode_int(n)
+    val decoded = msgpack_decode_int(encoded, 0)
+    decoded[0]
+
+fn _rt_zero_ok() -> bool:
+    _rt_int(0) == 0
+
+fn _rt_127_ok() -> bool:
+    _rt_int(127) == 127
+
+fn _rt_minus1_ok() -> bool:
+    _rt_int(-1) == -1
+
+fn _rt_minus32_ok() -> bool:
+    _rt_int(-32) == -32
+
+fn _rt_200_ok() -> bool:
+    _rt_int(200) == 200
+
+fn _rt_1000_ok() -> bool:
+    _rt_int(1000) == 1000
+
+fn _rt_minus50_ok() -> bool:
+    _rt_int(-50) == -50
+
+fn _rt_minus200_ok() -> bool:
+    _rt_int(-200) == -200
+
+fn _rt_65535_ok() -> bool:
+    _rt_int(65535) == 65535
+
+fn _rt_70000_ok() -> bool:
+    _rt_int(70000) == 70000
+
+# ============================================================================
+# decode_type helpers
+# ============================================================================
+
+fn _dtype_nil_ok() -> bool:
+    val b = msgpack_encode_nil()
+    val r = msgpack_decode_type(b, 0)
+    r[0] == 0xC0 and r[2] == 1
+
+fn _dtype_bool_true_ok() -> bool:
+    val b = msgpack_encode_bool(true)
+    val r = msgpack_decode_type(b, 0)
+    r[0] == 0xC3 and r[1] == 1 and r[2] == 1
+
+fn _dtype_fixpos_ok() -> bool:
+    val b = msgpack_encode_int(42)
+    val r = msgpack_decode_type(b, 0)
+    r[0] == 42 and r[1] == 42 and r[2] == 1
+
+fn _dtype_fixneg_ok() -> bool:
+    val b = msgpack_encode_int(-5)
+    val r = msgpack_decode_type(b, 0)
+    r[1] == -5 and r[2] == 1
+
+# ============================================================================
+# decode_str helpers
+# ============================================================================
+
+fn _decode_str_hello_ok() -> bool:
+    val encoded = msgpack_encode_str("hello")
+    val r = msgpack_decode_str(encoded, 0)
+    r[0] == "hello"
+
+fn _decode_str_empty_ok() -> bool:
+    val encoded = msgpack_encode_str("")
+    val r = msgpack_decode_str(encoded, 0)
+    r[0] == ""
+
+fn _decode_str_newpos_ok() -> bool:
+    val encoded = msgpack_encode_str("hi")
+    val r = msgpack_decode_str(encoded, 0)
+    # fixstr 2 bytes: [0xA2, 'h', 'i'] → new_pos = 3
+    r[1] == 3
+
+# ============================================================================
+# Spec
+# ============================================================================
+
+describe "MessagePack — nil encode":
+
+    it "encodes to 1 byte":
+        expect _nil_len_ok() == true
+
+    it "encodes to byte 0xC0":
+        expect _nil_byte_ok() == true
+
+describe "MessagePack — bool encode":
+
+    it "false encodes to 1 byte":
+        expect _bool_false_len_ok() == true
+
+    it "false encodes to 0xC2":
+        expect _bool_false_byte_ok() == true
+
+    it "true encodes to 1 byte":
+        expect _bool_true_len_ok() == true
+
+    it "true encodes to 0xC3":
+        expect _bool_true_byte_ok() == true
+
+describe "MessagePack — integer encode":
+
+    context "positive fixint":
+        it "0 encodes as single byte 0x00":
+            expect _int_fixpos_zero_ok() == true
+
+        it "127 encodes as single byte 0x7F":
+            expect _int_fixpos_max_ok() == true
+
+    context "negative fixint":
+        it "-1 encodes as single byte 0xFF":
+            expect _int_fixneg_minus1_ok() == true
+
+        it "-32 encodes as single byte 0xE0":
+            expect _int_fixneg_minus32_ok() == true
+
+    context "uint8":
+        it "200 encodes as [0xCC, 0xC8]":
+            expect _int_uint8_ok() == true
+
+    context "uint16":
+        it "1000 encodes as [0xCD, 0x03, 0xE8]":
+            expect _int_uint16_ok() == true
+
+    context "int8":
+        it "-50 encodes as [0xD0, 0xCE]":
+            expect _int_int8_minus50_ok() == true
+
+    context "int16":
+        it "-200 encodes as [0xD1, 0xFF, 0x38]":
+            expect _int_int16_minus200_ok() == true
+
+describe "MessagePack — string encode":
+
+    it "empty string encodes as fixstr [0xA0]":
+        expect _str_empty_ok() == true
+
+    it "hello encodes to 6 bytes":
+        expect _str_hello_len_ok() == true
+
+    it "hello header is 0xA5":
+        expect _str_hello_header_ok() == true
+
+    it "hello payload bytes are correct":
+        expect _str_hello_bytes_ok() == true
+
+    it "32-char string uses str8 format":
+        expect _str_32bytes_is_str8() == true
+
+describe "MessagePack — binary encode":
+
+    it "empty bin encodes as bin8 [0xC4, 0x00]":
+        expect _bin_empty_ok() == true
+
+    it "3-byte bin encodes correctly":
+        expect _bin_three_bytes_ok() == true
+
+describe "MessagePack — array/map headers":
+
+    it "fixarray count=3 is 0x93":
+        expect _array_fixarray_ok() == true
+
+    it "fixarray count=15 is 0x9F":
+        expect _array_fixarray_max_ok() == true
+
+    it "array16 count=16 encodes correctly":
+        expect _array_array16_ok() == true
+
+    it "fixmap count=2 is 0x82":
+        expect _map_fixmap_ok() == true
+
+    it "fixmap count=0 is 0x80":
+        expect _map_fixmap_zero_ok() == true
+
+    it "map16 count=16 encodes correctly":
+        expect _map_map16_ok() == true
+
+describe "MessagePack — decode_type":
+
+    it "nil type tag is 0xC0 and advances by 1":
+        expect _dtype_nil_ok() == true
+
+    it "bool true tag is 0xC3, value=1, advances by 1":
+        expect _dtype_bool_true_ok() == true
+
+    it "fixint 42 tag=42, value=42, advances by 1":
+        expect _dtype_fixpos_ok() == true
+
+    it "negative fixint -5 value=-5, advances by 1":
+        expect _dtype_fixneg_ok() == true
+
+describe "MessagePack — decode_str":
+
+    it "decodes 'hello' back to 'hello'":
+        expect _decode_str_hello_ok() == true
+
+    it "decodes empty string":
+        expect _decode_str_empty_ok() == true
+
+    it "'hi' advances position by 3":
+        expect _decode_str_newpos_ok() == true
+
+describe "MessagePack — integer round-trip":
+
+    it "0 round-trips":
+        expect _rt_zero_ok() == true
+
+    it "127 round-trips":
+        expect _rt_127_ok() == true
+
+    it "-1 round-trips":
+        expect _rt_minus1_ok() == true
+
+    it "-32 round-trips":
+        expect _rt_minus32_ok() == true
+
+    it "200 round-trips (uint8)":
+        expect _rt_200_ok() == true
+
+    it "1000 round-trips (uint16)":
+        expect _rt_1000_ok() == true
+
+    it "-50 round-trips (int8)":
+        expect _rt_minus50_ok() == true
+
+    it "-200 round-trips (int16)":
+        expect _rt_minus200_ok() == true
+
+    it "65535 round-trips (uint16 max)":
+        expect _rt_65535_ok() == true
+
+    it "70000 round-trips (uint32)":
+        expect _rt_70000_ok() == true

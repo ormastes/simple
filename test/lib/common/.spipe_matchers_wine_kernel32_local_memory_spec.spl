@@ -1,0 +1,62 @@
+use common.wine_kernel32_local_memory.{
+    wine_kernel32_execute_local_memory,
+    wine_kernel32_local_alloc,
+    wine_kernel32_local_free,
+    wine_kernel32_local_realloc,
+    wine_kernel32_local_size
+}
+use common.wine_nt_heap.{wine_nt_process_heap_new}
+use common.wine_vm_adapter.{wine_vm_space_new}
+
+describe "Wine KERNEL32 local-memory bridge":
+    it "executes a bounded LocalAlloc, LocalSize, LocalReAlloc, and LocalFree sequence":
+        val heap = wine_nt_process_heap_new(wine_vm_space_new(), true)
+        val result = wine_kernel32_execute_local_memory(
+            ["LocalAlloc", "LocalSize", "LocalReAlloc", "LocalFree"],
+            heap,
+            24,
+            40
+        )
+
+        expect result.ok == true
+        expect result.previous_ptr == 0x71000000
+        expect result.ptr == 0x71000018
+        expect result.size == 40
+        expect result.heap.blocks.len() == 2
+        expect result.heap.blocks[0].freed == true
+        expect result.heap.blocks[1].freed == true
+        expect result.operations == "LocalAlloc LocalSize LocalReAlloc LocalFree"
+
+    it "exposes direct local-memory helpers":
+        val heap = wine_nt_process_heap_new(wine_vm_space_new(), true)
+        val allocated = wine_kernel32_local_alloc(heap, 16)
+        val sized = wine_kernel32_local_size(allocated.heap, allocated.ptr)
+        val reallocated = wine_kernel32_local_realloc(sized.heap, sized.ptr, 32)
+        val freed = wine_kernel32_local_free(reallocated.heap, reallocated.ptr)
+
+        expect allocated.ok == true
+        expect sized.size == 16
+        expect reallocated.previous_ptr == 0x71000000
+        expect reallocated.ptr == 0x71000010
+        expect freed.ok == true
+        expect freed.heap.blocks[1].freed == true
+
+    it "keeps local-memory dispatch ordered and bounded":
+        val heap = wine_nt_process_heap_new(wine_vm_space_new(), true)
+        val out_of_order = wine_kernel32_execute_local_memory(["LocalSize", "LocalAlloc", "LocalReAlloc", "LocalFree"], heap, 16, 32)
+        expect out_of_order.ok == false
+        expect out_of_order.error == "kernel32-local-memory-sequence-expected:LocalAlloc"
+
+        val wrong_family = wine_kernel32_execute_local_memory(["LocalAlloc", "LocalSize", "LocalReAlloc", "HeapAlloc"], heap, 16, 32)
+        expect wrong_family.ok == false
+        expect wrong_family.error == "bridge-wrong-category:HeapAlloc"
+
+    it "rejects invalid local-memory sizes and pointers":
+        val heap = wine_nt_process_heap_new(wine_vm_space_new(), true)
+        val allocated = wine_kernel32_local_alloc(heap, 16)
+        val freed = wine_kernel32_local_free(allocated.heap, allocated.ptr)
+
+        expect wine_kernel32_local_alloc(heap, 0).error == "LocalAlloc:invalid-size"
+        expect wine_kernel32_local_size(heap, 0x72000000).error == "LocalSize:invalid-pointer"
+        expect wine_kernel32_local_size(freed.heap, allocated.ptr).error == "LocalSize:freed-pointer"
+        expect wine_kernel32_local_realloc(heap, 0x72000000, 8).error == "LocalReAlloc:LocalSize:invalid-pointer"

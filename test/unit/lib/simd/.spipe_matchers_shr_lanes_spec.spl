@@ -1,0 +1,261 @@
+# @cover src/lib/nogc_sync_mut/simd/fixed.spl 80%
+"""
+# shr_logical / shl lane-width sweep — I1 unit tests
+
+**Feature IDs:** #SIMD-FIXEDVEC
+**Category:** Stdlib
+**Difficulty:** 2/5
+**Status:** In Progress
+**Wave:** I1 — F-10 follow-up lane-width sweep
+
+## Overview
+
+Unit tests for `fixedvec_shr_logical_i8/i16/i64` and
+`fixedvec_shl_i8/i16/i64` — the per-width standalone helpers added in I1.
+
+Test IDs: SL-01 .. SL-15 (≥3 per width × 2 ops × 3 widths, minus shl
+which needs fewer goldens).
+
+Covers:
+- count=0  → identity
+- count=1  → single-step logical shift (sign bit zero-filled)
+- count=N-1 → all but lsb shifted out, sign bit zero
+
+All tests run in interpreter mode (no MIR required).
+"""
+
+use std.spipe.*
+use std.simd.fixed.{
+    FixedVec,
+    fixedvec_from_array,
+    fixedvec_shr_logical_i8,
+    fixedvec_shr_logical_i16,
+    fixedvec_shr_logical_i64,
+    fixedvec_shl_i8,
+    fixedvec_shl_i16,
+    fixedvec_shl_i64
+}
+
+# ============================================================================
+# Helper constructors — avoid var-rebind inside it blocks
+# (feedback_it_block_var_mutation.md)
+# ============================================================================
+
+fn make_i8x4_neg() -> FixedVec<i8>:
+    # -8 in i8 two's-complement (0xF8); shr_logical should zero top bit
+    return fixedvec_from_array([-8 as i8, -8 as i8, -8 as i8, -8 as i8])
+
+fn make_i8x4_pos() -> FixedVec<i8>:
+    return fixedvec_from_array([4 as i8, 8 as i8, 16 as i8, 32 as i8])
+
+fn make_i16x4_neg() -> FixedVec<i16>:
+    # -256 in i16 two's-complement; shr_logical should zero top bit
+    return fixedvec_from_array([-256 as i16, -256 as i16, -256 as i16, -256 as i16])
+
+fn make_i16x4_pos() -> FixedVec<i16>:
+    return fixedvec_from_array([4 as i16, 8 as i16, 16 as i16, 32 as i16])
+
+fn make_i64x4_neg() -> FixedVec<i64>:
+    # -8 in i64 two's-complement; shr_logical should zero top bit
+    return fixedvec_from_array([-8 as i64, -8 as i64, -8 as i64, -8 as i64])
+
+fn make_i64x4_pos() -> FixedVec<i64>:
+    return fixedvec_from_array([4 as i64, 8 as i64, 16 as i64, 32 as i64])
+
+# ============================================================================
+# i8 — shr_logical
+# ============================================================================
+
+describe "shr_logical i8 lane-width":
+    """
+    ## SL-01..SL-03: fixedvec_shr_logical_i8
+
+    count=0 → identity; count=1 → sign bit zero-filled; count=6 → high 6 bits cleared.
+    """
+
+    # SL-01: count=0 is identity for i8
+    it "SL-01: shr_logical_i8 count=0 is identity":
+        val v = make_i8x4_pos()
+        val result = fixedvec_shr_logical_i8(v, 0)
+        val arr = result.to_array()
+        expect arr[0] == 4 as i8
+        expect arr[1] == 8 as i8
+        expect arr[2] == 16 as i8
+        expect arr[3] == 32 as i8
+
+    # SL-02: count=1 on negative i8 (-8) → result must be positive (sign bit cleared)
+    it "SL-02: shr_logical_i8 count=1 on negative input gives positive result":
+        val v = make_i8x4_neg()
+        val result = fixedvec_shr_logical_i8(v, 1)
+        val lane0 = result.lane(0)
+        expect lane0 > 0
+
+    # SL-03: count=6 on -8 (i8) → result in [0,1] (top 6 bits zeroed, lsb from bit1)
+    it "SL-03: shr_logical_i8 count=6 on -8 gives result in range [0,1]":
+        val v = make_i8x4_neg()
+        val result = fixedvec_shr_logical_i8(v, 6)
+        val lane0 = result.lane(0)
+        # -8 = 0xF8; logical >> 6 = 0x03
+        expect lane0 > -1
+        expect lane0 == 3 as i8
+
+# ============================================================================
+# i16 — shr_logical
+# ============================================================================
+
+describe "shr_logical i16 lane-width":
+    """
+    ## SL-04..SL-06: fixedvec_shr_logical_i16
+
+    count=0 → identity; count=1 → sign bit zero-filled; count=14 → high bits cleared.
+    """
+
+    # SL-04: count=0 is identity for i16
+    it "SL-04: shr_logical_i16 count=0 is identity":
+        val v = make_i16x4_pos()
+        val result = fixedvec_shr_logical_i16(v, 0)
+        val arr = result.to_array()
+        expect arr[0] == 4 as i16
+        expect arr[1] == 8 as i16
+        expect arr[2] == 16 as i16
+        expect arr[3] == 32 as i16
+
+    # SL-05: count=1 on negative i16 (-256) → result must be positive (sign bit cleared)
+    it "SL-05: shr_logical_i16 count=1 on negative input gives positive result":
+        val v = make_i16x4_neg()
+        val result = fixedvec_shr_logical_i16(v, 1)
+        val lane0 = result.lane(0)
+        expect lane0 > 0
+
+    # SL-06: count=14 on -256 (i16 = 0xFF00) → logical >> 14 = 0x0003
+    it "SL-06: shr_logical_i16 count=14 on -256 equals 3":
+        val v = make_i16x4_neg()
+        val result = fixedvec_shr_logical_i16(v, 14)
+        val lane0 = result.lane(0)
+        # -256 = 0xFF00 as u16; 0xFF00 >> 14 = 3
+        expect lane0 == 3 as i16
+
+# ============================================================================
+# i64 — shr_logical
+# ============================================================================
+
+describe "shr_logical i64 lane-width":
+    """
+    ## SL-07..SL-09: fixedvec_shr_logical_i64
+
+    count=0 → identity; count=1 → sign bit zero-filled; count=62 → high bits cleared.
+    """
+
+    # SL-07: count=0 is identity for i64
+    it "SL-07: shr_logical_i64 count=0 is identity":
+        val v = make_i64x4_pos()
+        val result = fixedvec_shr_logical_i64(v, 0)
+        val arr = result.to_array()
+        expect arr[0] == 4 as i64
+        expect arr[1] == 8 as i64
+        expect arr[2] == 16 as i64
+        expect arr[3] == 32 as i64
+
+    # SL-08: count=1 on negative i64 (-8) → result must be positive (sign bit cleared)
+    it "SL-08: shr_logical_i64 count=1 on negative input gives positive result":
+        val v = make_i64x4_neg()
+        val result = fixedvec_shr_logical_i64(v, 1)
+        val lane0 = result.lane(0)
+        expect lane0 > 0
+
+    # SL-09: count=62 on -8 (i64 = 0xFFFFFFFFFFFFFFF8) → logical >> 62 = 3
+    it "SL-09: shr_logical_i64 count=62 on -8 equals 3":
+        val v = make_i64x4_neg()
+        val result = fixedvec_shr_logical_i64(v, 62)
+        val lane0 = result.lane(0)
+        # -8 = 0xFFFFFFFFFFFFFFF8; 0xFFFFFFFFFFFFFFF8 >> 62 = 3
+        expect lane0 == 3 as i64
+
+# ============================================================================
+# i8 — shl
+# ============================================================================
+
+describe "shl i8 lane-width":
+    """
+    ## SL-10..SL-12: fixedvec_shl_i8
+
+    count=0 → identity; count=1 → left shift; count=3 → multiply by 8.
+    """
+
+    # SL-10: count=0 is identity for shl_i8
+    it "SL-10: shl_i8 count=0 is identity":
+        val v = make_i8x4_pos()
+        val result = fixedvec_shl_i8(v, 0)
+        val arr = result.to_array()
+        expect arr[0] == 4 as i8
+        expect arr[1] == 8 as i8
+        expect arr[2] == 16 as i8
+        expect arr[3] == 32 as i8
+
+    # SL-11: count=1 doubles each element
+    it "SL-11: shl_i8 count=1 doubles each lane":
+        val v = make_i8x4_pos()
+        val result = fixedvec_shl_i8(v, 1)
+        val arr = result.to_array()
+        expect arr[0] == 8 as i8
+        expect arr[1] == 16 as i8
+        expect arr[2] == 32 as i8
+        expect arr[3] == 64 as i8
+
+    # SL-12: count=3 multiplies by 8
+    it "SL-12: shl_i8 count=3 multiplies each lane by 8":
+        val v = fixedvec_from_array([1 as i8, 2 as i8, 3 as i8, 4 as i8])
+        val result = fixedvec_shl_i8(v, 3)
+        val arr = result.to_array()
+        expect arr[0] == 8 as i8
+        expect arr[1] == 16 as i8
+        expect arr[2] == 24 as i8
+        expect arr[3] == 32 as i8
+
+# ============================================================================
+# i16 — shl
+# ============================================================================
+
+describe "shl i16 lane-width":
+    """
+    ## SL-13: fixedvec_shl_i16 basic correctness
+    """
+
+    # SL-13: count=0 is identity for shl_i16; count=2 multiplies by 4
+    it "SL-13: shl_i16 count=2 multiplies each lane by 4":
+        val v = make_i16x4_pos()
+        val result = fixedvec_shl_i16(v, 2)
+        val arr = result.to_array()
+        expect arr[0] == 16 as i16
+        expect arr[1] == 32 as i16
+        expect arr[2] == 64 as i16
+        expect arr[3] == 128 as i16
+
+# ============================================================================
+# i64 — shl
+# ============================================================================
+
+describe "shl i64 lane-width":
+    """
+    ## SL-14..SL-15: fixedvec_shl_i64 basic correctness
+    """
+
+    # SL-14: count=0 is identity for shl_i64
+    it "SL-14: shl_i64 count=0 is identity":
+        val v = make_i64x4_pos()
+        val result = fixedvec_shl_i64(v, 0)
+        val arr = result.to_array()
+        expect arr[0] == 4 as i64
+        expect arr[1] == 8 as i64
+        expect arr[2] == 16 as i64
+        expect arr[3] == 32 as i64
+
+    # SL-15: count=1 doubles each element for i64
+    it "SL-15: shl_i64 count=1 doubles each lane":
+        val v = make_i64x4_pos()
+        val result = fixedvec_shl_i64(v, 1)
+        val arr = result.to_array()
+        expect arr[0] == 8 as i64
+        expect arr[1] == 16 as i64
+        expect arr[2] == 32 as i64
+        expect arr[3] == 64 as i64

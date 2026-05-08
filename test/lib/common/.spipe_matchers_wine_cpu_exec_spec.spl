@@ -1,0 +1,209 @@
+use common.wine_cpu_exec.{
+    wine_cpu_execution_evidence,
+    wine_cpu_execution_evidence_all_ready,
+    wine_cpu_execution_evidence_text,
+    wine_cpu_hello_execution_plan,
+    wine_cpu_hello_execution_plan_from_evidence,
+    wine_entrypoint_mapping_gate,
+    wine_entrypoint_mapping_required_features,
+    wine_cpu_entry_scan_gate,
+    wine_cpu_execution_required_features,
+    wine_cpu_execution_gate,
+    wine_exit_trap_gate,
+    wine_exit_trap_required_features,
+    wine_import_thunk_binding_gate,
+    wine_import_thunk_binding_required_features,
+    wine_no_native_jump_gate,
+    wine_no_native_jump_required_features,
+    wine_stdout_handle_gate,
+    wine_stdout_handle_required_features,
+    wine_thread_context_gate,
+    wine_thread_context_required_features,
+    wine_user_stack_gate,
+    wine_user_stack_required_features,
+    wine_win64_abi_gate,
+    wine_win64_abi_required_features,
+    wine_x86_64_decoder_gate,
+    wine_x86_64_decoder_required_features,
+    wine_x86_64_dispatch_gate,
+    wine_x86_64_dispatch_required_features,
+    wine_instruction_dispatch_gate
+}
+
+fn _zero_bytes(count: i64) -> [u8]:
+    var out: [u8] = []
+    var i = 0
+    while i < count:
+        out.push(0)
+        i = i + 1
+    out
+
+fn _put_u16_le(data: [u8], offset: i64, value: i64) -> [u8]:
+    data[offset] = (value & 0xff) as u8
+    data[offset + 1] = ((value >> 8) & 0xff) as u8
+    data
+
+fn _put_u32_le(data: [u8], offset: i64, value: i64) -> [u8]:
+    data[offset] = (value & 0xff) as u8
+    data[offset + 1] = ((value >> 8) & 0xff) as u8
+    data[offset + 2] = ((value >> 16) & 0xff) as u8
+    data[offset + 3] = ((value >> 24) & 0xff) as u8
+    data
+
+fn _minimal_image() -> [u8]:
+    var data = _zero_bytes(1024)
+    data[0] = 0x4d
+    data[1] = 0x5a
+    data = _put_u32_le(data, 0x3c, 0x80)
+    data[0x80] = 0x50
+    data[0x81] = 0x45
+    data = _put_u16_le(data, 0x84, 0x8664)
+    data = _put_u16_le(data, 0x86, 1)
+    data = _put_u16_le(data, 0x94, 0xf0)
+    data = _put_u16_le(data, 0x98, 0x20b)
+    data = _put_u32_le(data, 0x98 + 0x10, 0x2010)
+    data = _put_u32_le(data, 0x98 + 0x38, 0x5000)
+    data = _put_u32_le(data, 0x98 + 0x3c, 0x200)
+    data = _put_u16_le(data, 0x98 + 0x5c, 3)
+    data = _put_u32_le(data, 0x98 + 0x6c, 16)
+    val section_offset = 0x98 + 0xf0
+    data = _put_u32_le(data, section_offset + 8, 0x300)
+    data = _put_u32_le(data, section_offset + 12, 0x2000)
+    data = _put_u32_le(data, section_offset + 16, 0x200)
+    data = _put_u32_le(data, section_offset + 20, 0x200)
+    data = _put_u32_le(data, section_offset + 36, 0x60000020)
+    data
+
+fn _put_hello_code(data: [u8], offset: i64) -> [u8]:
+    _put_hello_code_at_rva(data, offset, 0x2010)
+
+fn _put_hello_code_at_rva(data: [u8], offset: i64, code_rva: i64) -> [u8]:
+    data[offset] = 0x48
+    data[offset + 1] = 0x31
+    data[offset + 2] = 0xc9
+    data[offset + 3] = 0xff
+    data[offset + 4] = 0x15
+    data = _put_u32_le(data, offset + 5, 0x2060 - (code_rva + 9))
+    data[offset + 9] = 0x48
+    data[offset + 10] = 0x8d
+    data[offset + 11] = 0x15
+    data = _put_u32_le(data, offset + 12, 0x2120 - (code_rva + 16))
+    data[offset + 16] = 0xff
+    data[offset + 17] = 0x15
+    data = _put_u32_le(data, offset + 18, 0x2068 - (code_rva + 22))
+    data[offset + 22] = 0x31
+    data[offset + 23] = 0xc9
+    data[offset + 24] = 0xff
+    data[offset + 25] = 0x15
+    data = _put_u32_le(data, offset + 26, 0x2070 - (code_rva + 30))
+    data
+
+fn _put_hello_code_with_safe_prologue(data: [u8], offset: i64) -> [u8]:
+    data[offset] = 0x48
+    data[offset + 1] = 0x83
+    data[offset + 2] = 0xec
+    data[offset + 3] = 0x28
+    data[offset + 4] = 0x90
+    _put_hello_code_at_rva(data, offset + 5, 0x2015)
+
+fn _verified_dispatch_gates() -> text:
+    "thread-context thread-context-rip thread-context-rsp thread-context-registers-zeroed thread-context-teb-bound user-stack user-stack-allocated user-stack-committed user-stack-guard-page user-stack-aligned entrypoint-mapped entrypoint-rva-valid entrypoint-section-executable entrypoint-window-readable import-thunks-bound import-module-loaded import-module-handle-valid import-module-loader-sequence import-thunk-table-valid import-thunk-symbols-resolved import-thunk-bindings-match import-thunk-iat-guarded stdout-handle stdout-handle-std-output stdout-handle-writable stdout-byte-count-checked stdout-write-guarded exit-trap exit-trap-process-exit exit-trap-status-code exit-trap-no-fallthrough no-native-jump no-native-jump-import-targets no-native-jump-entry-bounds no-native-jump-host-code-blocked win64-abi win64-abi-register-args win64-abi-shadow-space win64-abi-stack-align win64-abi-return-value win64-abi-guarded-call x86_64-decoder x86_64-decode-window-mapped x86_64-decode-window-bounded x86_64-decode-supported-ops x86_64-decode-call-targets x86_64-dispatch x86_64-dispatch-no-native-jump x86_64-dispatch-import-calls-only x86_64-dispatch-exit-trap x86_64-dispatch-stdout-sequence"
+
+describe "Wine CPU execution gates":
+    it "lists the required safe execution preconditions":
+        expect wine_cpu_execution_required_features().len() == 8
+
+    it "reports the first missing execution precondition":
+        expect wine_cpu_execution_gate("thread-context user-stack") == "missing-entrypoint-mapped"
+
+    it "accepts a safe non-native-jump execution envelope":
+        val evidence = "thread-context thread-context-rip thread-context-rsp thread-context-registers-zeroed thread-context-teb-bound user-stack user-stack-allocated user-stack-committed user-stack-guard-page user-stack-aligned entrypoint-mapped entrypoint-rva-valid entrypoint-section-executable entrypoint-window-readable import-thunks-bound import-module-loaded import-module-handle-valid import-module-loader-sequence import-thunk-table-valid import-thunk-symbols-resolved import-thunk-bindings-match import-thunk-iat-guarded stdout-handle stdout-handle-std-output stdout-handle-writable stdout-byte-count-checked stdout-write-guarded exit-trap exit-trap-process-exit exit-trap-status-code exit-trap-no-fallthrough no-native-jump no-native-jump-import-targets no-native-jump-entry-bounds no-native-jump-host-code-blocked win64-abi win64-abi-register-args win64-abi-shadow-space win64-abi-stack-align win64-abi-return-value win64-abi-guarded-call"
+        expect wine_cpu_execution_gate(evidence) == "ready"
+
+    it "requires concrete thread context, stack, and entrypoint facets":
+        expect wine_thread_context_required_features().len() == 4
+        expect wine_thread_context_gate("thread-context thread-context-rip") == "missing-thread-context-rsp"
+        expect wine_user_stack_required_features().len() == 4
+        expect wine_user_stack_gate("user-stack user-stack-allocated") == "missing-user-stack-committed"
+        expect wine_entrypoint_mapping_required_features().len() == 3
+        expect wine_entrypoint_mapping_gate("entrypoint-mapped entrypoint-rva-valid") == "missing-entrypoint-section-executable"
+        val evidence = "thread-context user-stack entrypoint-mapped import-thunks-bound stdout-handle exit-trap no-native-jump win64-abi"
+        expect wine_cpu_execution_gate(evidence) == "missing-thread-context-rip"
+
+    it "requires concrete import thunk binding facets":
+        expect wine_import_thunk_binding_required_features().len() == 7
+        expect wine_import_thunk_binding_gate("import-thunks-bound import-thunk-table-valid") == "missing-import-module-loaded"
+        expect wine_import_thunk_binding_gate("import-thunks-bound import-module-loaded import-module-handle-valid import-thunk-table-valid") == "missing-import-module-loader-sequence"
+        val evidence = "thread-context thread-context-rip thread-context-rsp thread-context-registers-zeroed thread-context-teb-bound user-stack user-stack-allocated user-stack-committed user-stack-guard-page user-stack-aligned entrypoint-mapped entrypoint-rva-valid entrypoint-section-executable entrypoint-window-readable import-thunks-bound stdout-handle stdout-handle-std-output stdout-handle-writable stdout-byte-count-checked stdout-write-guarded exit-trap no-native-jump win64-abi win64-abi-register-args win64-abi-shadow-space win64-abi-stack-align win64-abi-return-value win64-abi-guarded-call"
+        expect wine_cpu_execution_gate(evidence) == "missing-import-module-loaded"
+
+    it "requires concrete stdout handle facets":
+        expect wine_stdout_handle_required_features().len() == 4
+        expect wine_stdout_handle_gate("stdout-handle stdout-handle-std-output") == "missing-stdout-handle-writable"
+        val evidence = "thread-context thread-context-rip thread-context-rsp thread-context-registers-zeroed thread-context-teb-bound user-stack user-stack-allocated user-stack-committed user-stack-guard-page user-stack-aligned entrypoint-mapped entrypoint-rva-valid entrypoint-section-executable entrypoint-window-readable import-thunks-bound import-module-loaded import-module-handle-valid import-module-loader-sequence import-thunk-table-valid import-thunk-symbols-resolved import-thunk-bindings-match import-thunk-iat-guarded stdout-handle exit-trap no-native-jump win64-abi win64-abi-register-args win64-abi-shadow-space win64-abi-stack-align win64-abi-return-value win64-abi-guarded-call"
+        expect wine_cpu_execution_gate(evidence) == "missing-stdout-handle-std-output"
+
+    it "requires concrete exit-trap and native-jump policy facets":
+        expect wine_exit_trap_required_features().len() == 3
+        expect wine_exit_trap_gate("exit-trap exit-trap-process-exit") == "missing-exit-trap-status-code"
+        expect wine_no_native_jump_required_features().len() == 3
+        expect wine_no_native_jump_gate("no-native-jump no-native-jump-import-targets") == "missing-no-native-jump-entry-bounds"
+        val evidence = "thread-context thread-context-rip thread-context-rsp thread-context-registers-zeroed thread-context-teb-bound user-stack user-stack-allocated user-stack-committed user-stack-guard-page user-stack-aligned entrypoint-mapped entrypoint-rva-valid entrypoint-section-executable entrypoint-window-readable import-thunks-bound import-module-loaded import-module-handle-valid import-module-loader-sequence import-thunk-table-valid import-thunk-symbols-resolved import-thunk-bindings-match import-thunk-iat-guarded stdout-handle stdout-handle-std-output stdout-handle-writable stdout-byte-count-checked stdout-write-guarded exit-trap no-native-jump win64-abi win64-abi-register-args win64-abi-shadow-space win64-abi-stack-align win64-abi-return-value win64-abi-guarded-call"
+        expect wine_cpu_execution_gate(evidence) == "missing-exit-trap-process-exit"
+
+    it "requires Win64 ABI evidence before CPU execution":
+        val evidence = "thread-context thread-context-rip thread-context-rsp thread-context-registers-zeroed thread-context-teb-bound user-stack user-stack-allocated user-stack-committed user-stack-guard-page user-stack-aligned entrypoint-mapped entrypoint-rva-valid entrypoint-section-executable entrypoint-window-readable import-thunks-bound import-module-loaded import-module-handle-valid import-module-loader-sequence import-thunk-table-valid import-thunk-symbols-resolved import-thunk-bindings-match import-thunk-iat-guarded stdout-handle stdout-handle-std-output stdout-handle-writable stdout-byte-count-checked stdout-write-guarded exit-trap exit-trap-process-exit exit-trap-status-code exit-trap-no-fallthrough no-native-jump no-native-jump-import-targets no-native-jump-entry-bounds no-native-jump-host-code-blocked"
+        expect wine_cpu_execution_gate(evidence) == "missing-win64-abi"
+
+    it "requires concrete Win64 ABI facets":
+        expect wine_win64_abi_required_features().len() == 5
+        expect wine_win64_abi_gate("win64-abi win64-abi-register-args") == "missing-win64-abi-shadow-space"
+
+    it "keeps instruction dispatch explicitly gated":
+        expect wine_instruction_dispatch_gate("thread-context") == "instruction-decoder-missing"
+        expect wine_instruction_dispatch_gate("x86_64-decoder") == "missing-x86_64-decode-window-mapped"
+        expect wine_instruction_dispatch_gate("x86_64-decoder x86_64-decode-window-mapped x86_64-decode-window-bounded x86_64-decode-supported-ops x86_64-decode-call-targets") == "instruction-dispatch-missing"
+        expect wine_instruction_dispatch_gate(_verified_dispatch_gates()) == "ready"
+
+    it "requires concrete x86_64 decoder and dispatch facets":
+        expect wine_x86_64_decoder_required_features().len() == 4
+        expect wine_x86_64_decoder_gate("x86_64-decoder x86_64-decode-window-mapped") == "missing-x86_64-decode-window-bounded"
+        expect wine_x86_64_dispatch_required_features().len() == 4
+        expect wine_x86_64_dispatch_gate("x86_64-dispatch x86_64-dispatch-no-native-jump") == "missing-x86_64-dispatch-import-calls-only"
+
+    it "gates CPU entry scanning with bounded x86_64 decode evidence":
+        expect wine_cpu_entry_scan_gate(_put_hello_code(_minimal_image(), 0x210), 30, 16) == "ready"
+        expect wine_cpu_entry_scan_gate(_put_hello_code(_minimal_image(), 0x210), 30, 3) == "instruction-limit"
+        expect wine_cpu_entry_scan_gate(_put_hello_code(_minimal_image(), 0x210), 4, 16) == "instruction-window-overrun:call-rip-indirect"
+
+    it "serializes structured execution evidence for the hello gate":
+        val partial = wine_cpu_execution_evidence(true, true, false, false, false, false, false, false, false, false)
+        expect wine_cpu_execution_gate(wine_cpu_execution_evidence_text(partial)) == "missing-entrypoint-mapped"
+        expect wine_instruction_dispatch_gate(wine_cpu_execution_evidence_text(wine_cpu_execution_evidence_all_ready())) == "ready"
+
+    it "returns a CPU-level hello plan only after execution and dispatch evidence":
+        val missing = wine_cpu_hello_execution_plan(_put_hello_code(_minimal_image(), 0x210), "thread-context")
+        expect missing.ok == false
+        expect missing.error == "missing-user-stack"
+
+        val plan = wine_cpu_hello_execution_plan(_put_hello_code(_minimal_image(), 0x210), _verified_dispatch_gates())
+        expect plan.ok == true
+        expect plan.sequence_rva == 0x2010
+        expect plan.sequence_end_rva == 0x202e
+        expect plan.instruction_sequence == "xor-rcx-rcx call-rip-indirect lea-rdx-rip-rel32 call-rip-indirect xor-ecx-ecx call-rip-indirect"
+        expect plan.instruction_count == 6
+        expect plan.call_sequence == "GetStdHandle WriteFile ExitProcess"
+        expect plan.call_count == 3
+        expect plan.stdout_payload_rva == 0x2120
+
+    it "accepts a bounded safe prologue before the CPU-level hello plan":
+        val plan = wine_cpu_hello_execution_plan(_put_hello_code_with_safe_prologue(_minimal_image(), 0x210), _verified_dispatch_gates())
+        expect plan.ok == true
+        expect plan.sequence_rva == 0x2015
+        expect plan.call_sequence == "GetStdHandle WriteFile ExitProcess"
+        expect plan.stdout_payload_rva == 0x2120
+
+    it "accepts structured evidence for the CPU-level hello plan":
+        val plan = wine_cpu_hello_execution_plan_from_evidence(_put_hello_code(_minimal_image(), 0x210), wine_cpu_execution_evidence_all_ready())
+        expect plan.ok == true
+        expect plan.exit_process_rva == 0x2070

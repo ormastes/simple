@@ -1,0 +1,190 @@
+use common.wine_hello_fixture.{wine_known_hello_exe_fixture_bytes}
+use common.wine_cpu_exec.{wine_cpu_execution_evidence_all_ready, wine_cpu_execution_evidence_text}
+use common.wine_process_session.{
+    wine_process_bind_known_kernel32_imports,
+    wine_process_cpu_dispatch_preflight,
+    wine_process_execute_controlled_hello,
+    wine_process_inspect_full_imports,
+    wine_process_launch_handoff,
+    wine_process_plan_import_thunk_patches,
+    wine_process_validate_full_image,
+    wine_process_session_plan,
+    wine_process_session_request_gate,
+    wine_process_session_request_new
+}
+
+fn _zero_bytes(count: i64) -> [u8]:
+    var out: [u8] = []
+    var i = 0
+    while i < count:
+        out.push(0)
+        i = i + 1
+    out
+
+fn _hello_gates() -> text:
+    "process=verified exec_env=verified vm=verified host=verified posix=verified " +
+        "pthread=verified dynload=verified pe_loader=verified async=verified nt_bridge=verified"
+
+fn _full_gates() -> text:
+    "process=verified exec_env=verified vm=verified renderer=verified user32=verified " +
+        "gdi32=verified kernel32_core=verified host=verified posix=verified registry=verified " +
+        "pthread=verified dynload=verified audio=verified fonts=verified input=verified " +
+        "pe_loader=verified async=verified nt_bridge=verified"
+
+describe "Wine process session planning":
+    it "rejects incomplete process session requests":
+        val missing_path = wine_process_session_request_new("", [], "C:\\")
+        expect wine_process_session_request_gate(missing_path) == "missing-executable-path"
+
+        val unsupported = wine_process_session_request_new("README.txt", [], "C:\\")
+        expect wine_process_session_request_gate(unsupported) == "unsupported-executable"
+
+        val missing_cwd = wine_process_session_request_new("hello.exe", [], "")
+        expect wine_process_session_request_gate(missing_cwd) == "missing-working-directory"
+
+    it "plans only the controlled hello path when full Wine is incomplete":
+        val request = wine_process_session_request_new("hello.exe", ["--smoke"], "C:\\")
+        val plan = wine_process_session_plan(request, _hello_gates())
+        expect plan.ok == true
+        expect plan.command == "hello.exe --smoke"
+        expect plan.readiness == "controlled-hello-ready"
+        expect plan.status == "planned"
+
+        val arbitrary = wine_process_session_request_new("game.exe", [], "C:\\")
+        val blocked = wine_process_session_plan(arbitrary, _hello_gates())
+        expect blocked.ok == false
+        expect blocked.error == "blocked-missing-renderer"
+
+    it "plans arbitrary exe sessions only when full Wine gates are complete":
+        val request = wine_process_session_request_new("game.exe", ["-windowed"], "C:\\Games")
+        val plan = wine_process_session_plan(request, _full_gates())
+        expect plan.ok == true
+        expect plan.command == "game.exe -windowed"
+        expect plan.readiness == "full-wine-ready"
+        expect plan.status == "planned"
+
+    it "emits dry-run handoff records without executing Wine":
+        val plan = wine_process_session_plan(wine_process_session_request_new("hello.exe", [], "C:\\"), _hello_gates())
+        val blocked = wine_process_launch_handoff(plan, false)
+        expect blocked.ok == false
+        expect blocked.error == "execution-not-implemented"
+        expect blocked.status == "blocked"
+
+        val handoff = wine_process_launch_handoff(plan, true)
+        expect handoff.ok == true
+        expect handoff.command == "hello.exe"
+        expect handoff.substrate_readiness == "controlled-hello-ready"
+        expect handoff.status == "dry-run-ready"
+
+    it "executes the controlled hello session through the process boundary":
+        val plan = wine_process_session_plan(wine_process_session_request_new("hello.exe", [], "C:\\"), _hello_gates())
+        val result = wine_process_execute_controlled_hello(plan)
+        expect result.ok == true
+        expect result.command == "hello.exe"
+        expect result.stdout == "Hello from SimpleOS Wine\n"
+        expect result.exit_code == 0
+        expect result.status == "executed"
+
+    it "keeps arbitrary full-Wine sessions outside the controlled executor":
+        val plan = wine_process_session_plan(wine_process_session_request_new("game.exe", [], "C:\\Games"), _full_gates())
+        val result = wine_process_execute_controlled_hello(plan)
+        expect result.ok == false
+        expect result.error == "unsupported-process-session"
+        expect result.status == "blocked"
+
+    it "validates full-Wine process images before future arbitrary execution":
+        val plan = wine_process_session_plan(wine_process_session_request_new("game.exe", [], "C:\\Games"), _full_gates())
+        val result = wine_process_validate_full_image(plan, wine_known_hello_exe_fixture_bytes())
+        expect result.ok == true
+        expect result.command == "game.exe"
+        expect result.machine == "x86_64"
+        expect result.subsystem == "console"
+        expect result.status == "image-validated"
+
+    it "rejects malformed arbitrary process images":
+        val plan = wine_process_session_plan(wine_process_session_request_new("game.exe", [], "C:\\Games"), _full_gates())
+        val result = wine_process_validate_full_image(plan, _zero_bytes(0))
+        expect result.ok == false
+        expect result.error == "too-small"
+        expect result.status == "rejected"
+
+    it "does not use full-image validation for the controlled hello plan":
+        val plan = wine_process_session_plan(wine_process_session_request_new("hello.exe", [], "C:\\"), _hello_gates())
+        val result = wine_process_validate_full_image(plan, wine_known_hello_exe_fixture_bytes())
+        expect result.ok == false
+        expect result.error == "unsupported-process-session"
+
+    it "inspects the first import table for full-Wine process images":
+        val plan = wine_process_session_plan(wine_process_session_request_new("game.exe", [], "C:\\Games"), _full_gates())
+        val result = wine_process_inspect_full_imports(plan, wine_known_hello_exe_fixture_bytes(), 8)
+        expect result.ok == true
+        expect result.command == "game.exe"
+        expect result.dll_name == "KERNEL32.dll"
+        expect result.symbol_count == 3
+        expect result.symbols[0] == "GetStdHandle"
+        expect result.symbols[1] == "WriteFile"
+        expect result.symbols[2] == "ExitProcess"
+        expect result.status == "imports-inspected"
+
+    it "requires bounded import inspection limits":
+        val plan = wine_process_session_plan(wine_process_session_request_new("game.exe", [], "C:\\Games"), _full_gates())
+        val result = wine_process_inspect_full_imports(plan, wine_known_hello_exe_fixture_bytes(), 0)
+        expect result.ok == false
+        expect result.error == "invalid-symbol-limit"
+        expect result.status == "blocked"
+
+    it "plans known KERNEL32 import bindings for full-Wine process images":
+        val plan = wine_process_session_plan(wine_process_session_request_new("game.exe", [], "C:\\Games"), _full_gates())
+        val result = wine_process_bind_known_kernel32_imports(plan, wine_known_hello_exe_fixture_bytes(), 8)
+        expect result.ok == true
+        expect result.command == "game.exe"
+        expect result.dll_name == "kernel32.dll"
+        expect result.call_sequence == "GetStdHandle WriteFile ExitProcess"
+        expect result.binding_count == 3
+        expect result.status == "imports-bound"
+
+    it "rejects unsupported full-Wine import binding attempts":
+        val plan = wine_process_session_plan(wine_process_session_request_new("game.exe", [], "C:\\Games"), _full_gates())
+        val result = wine_process_bind_known_kernel32_imports(plan, wine_known_hello_exe_fixture_bytes(), 1)
+        expect result.ok == false
+        expect result.error == "import-thunk-limit-exceeded"
+        expect result.status == "rejected"
+
+    it "plans guarded import thunk patches after supported binding":
+        val plan = wine_process_session_plan(wine_process_session_request_new("game.exe", [], "C:\\Games"), _full_gates())
+        val result = wine_process_plan_import_thunk_patches(plan, wine_known_hello_exe_fixture_bytes(), 8)
+        expect result.ok == true
+        expect result.dll_name == "kernel32.dll"
+        expect result.patch_count == 3
+        expect (result.evidence).contains("import-thunks-bound")
+        expect (result.evidence).contains("import-thunk-iat-guarded")
+        expect result.status == "thunk-patch-planned"
+
+    it "does not plan import thunk patches when binding is rejected":
+        val plan = wine_process_session_plan(wine_process_session_request_new("game.exe", [], "C:\\Games"), _full_gates())
+        val result = wine_process_plan_import_thunk_patches(plan, wine_known_hello_exe_fixture_bytes(), 1)
+        expect result.ok == false
+        expect result.error == "import-thunk-limit-exceeded"
+        expect result.status == "rejected"
+
+    it "accepts CPU dispatch preflight after loader and execution evidence compose":
+        val plan = wine_process_session_plan(wine_process_session_request_new("game.exe", [], "C:\\Games"), _full_gates())
+        val result = wine_process_cpu_dispatch_preflight(plan, wine_known_hello_exe_fixture_bytes(), 8, wine_cpu_execution_evidence_text(wine_cpu_execution_evidence_all_ready()))
+        expect result.ok == true
+        expect result.command == "game.exe"
+        expect (result.evidence).contains("import-thunk-bytes-written")
+        expect (result.evidence).contains("import-thunks-bound")
+        expect (result.evidence).contains("x86_64-dispatch-import-calls-only")
+        expect (result.evidence).contains("process-image-mapped")
+        expect (result.evidence).contains("os-vma")
+        expect (result.evidence).contains("process-vma-write-window")
+        expect (result.evidence).contains("process-vma-rx-restored")
+        expect (result.evidence).contains("no-host-code-jump")
+        expect result.status == "cpu-preflight-ready"
+
+    it "blocks CPU dispatch preflight when execution evidence is incomplete":
+        val plan = wine_process_session_plan(wine_process_session_request_new("game.exe", [], "C:\\Games"), _full_gates())
+        val result = wine_process_cpu_dispatch_preflight(plan, wine_known_hello_exe_fixture_bytes(), 8, "")
+        expect result.ok == false
+        expect result.error == "missing-thread-context"
+        expect result.status == "blocked"

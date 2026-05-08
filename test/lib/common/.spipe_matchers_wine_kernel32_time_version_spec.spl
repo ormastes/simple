@@ -1,0 +1,53 @@
+use common.wine_kernel32_time_version.{
+    WineKernel32TimeVersionClock,
+    wine_kernel32_execute_time_version,
+    wine_kernel32_time_version_clock_default
+}
+
+describe "Wine KERNEL32 time and version bridge":
+    it "executes a bounded time and version sequence":
+        val result = wine_kernel32_execute_time_version(
+            ["GetTickCount", "QueryPerformanceCounter", "QueryPerformanceFrequency", "GetVersion", "GetVersionExW"],
+            wine_kernel32_time_version_clock_default()
+        )
+
+        expect result.ok == true
+        expect result.tick_count_ms == 1234
+        expect result.performance_counter == 987654321
+        expect result.performance_frequency == 10000000
+        expect result.version_text == "6.1.7601"
+        expect result.platform_id == "VER_PLATFORM_WIN32_NT"
+        expect result.operations == "GetTickCount QueryPerformanceCounter QueryPerformanceFrequency GetVersion GetVersionExW"
+
+    it "keeps time/version dispatch ordered and bounded":
+        val out_of_order = wine_kernel32_execute_time_version(
+            ["QueryPerformanceCounter", "GetTickCount", "QueryPerformanceFrequency", "GetVersion", "GetVersionExW"],
+            wine_kernel32_time_version_clock_default()
+        )
+        expect out_of_order.ok == false
+        expect out_of_order.error == "kernel32-time-version-sequence-expected:GetTickCount"
+
+        val wrong_family = wine_kernel32_execute_time_version(
+            ["GetTickCount", "QueryPerformanceCounter", "QueryPerformanceFrequency", "GetVersion", "HeapAlloc"],
+            wine_kernel32_time_version_clock_default()
+        )
+        expect wrong_family.ok == false
+        expect wrong_family.error == "bridge-wrong-category:HeapAlloc"
+
+    it "rejects invalid clock inputs":
+        val clock = WineKernel32TimeVersionClock(
+            tick_count_ms: 1,
+            performance_counter: 2,
+            performance_frequency: 0,
+            version_major: 6,
+            version_minor: 1,
+            version_build: 7601,
+            platform_id: "VER_PLATFORM_WIN32_NT"
+        )
+        val result = wine_kernel32_execute_time_version(
+            ["GetTickCount", "QueryPerformanceCounter", "QueryPerformanceFrequency", "GetVersion", "GetVersionExW"],
+            clock
+        )
+
+        expect result.ok == false
+        expect result.error == "QueryPerformanceFrequency:invalid-frequency"

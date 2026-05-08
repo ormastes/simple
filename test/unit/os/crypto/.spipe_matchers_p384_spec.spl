@@ -1,0 +1,232 @@
+# P-384 ECDSA/ECDH Known-Answer Test
+#
+# Verifies the pure-Simple P-384 implementation.
+#
+# Note: ECDSA sign/verify and ECDH require scalar-mults and exceed the 60s
+# test-runner timeout in interpreter mode. Those tests are exercised via
+# bin/simple run.
+
+use std.spipe.*
+use os.crypto.p384.{p384_ecdsa_sign, p384_ecdsa_verify, p384_keygen, p384_ecdh, p384_scalar_mult, p384_point_on_curve, p384_add, p384_mul}
+use os.crypto.sha384.{sha384}
+
+fn _hex_nibble(n: u8) -> text:
+    if n == 0: "0"
+    elif n == 1: "1"
+    elif n == 2: "2"
+    elif n == 3: "3"
+    elif n == 4: "4"
+    elif n == 5: "5"
+    elif n == 6: "6"
+    elif n == 7: "7"
+    elif n == 8: "8"
+    elif n == 9: "9"
+    elif n == 10: "a"
+    elif n == 11: "b"
+    elif n == 12: "c"
+    elif n == 13: "d"
+    elif n == 14: "e"
+    else: "f"
+
+fn _bytes_hex(b: [u8]) -> text:
+    var s: text = ""
+    var i: u64 = 0
+    while i < b.len().to_u64():
+        val bv = b[i]
+        s = s + _hex_nibble((bv >> 4) & 0x0F)
+        s = s + _hex_nibble(bv & 0x0F)
+        i = i + 1
+    s
+
+fn _be48_val(last_byte: u8) -> [u8]:
+    var b: [u8] = []
+    var i: u64 = 0
+    while i < 47:
+        b.push(0x00)
+        i = i + 1
+    b.push(last_byte)
+    b
+
+fn _make_key(seed: u8) -> [u8]:
+    var k: [u8] = []
+    var i: u64 = 0
+    while i < 48:
+        val v: u8 = ((seed.to_u64() + i * 7 + 3) & 0xFF).to_u8()
+        k.push(v)
+        i = i + 1
+    k
+
+fn _pub_hex_k1() -> text:
+    "04aa87ca22be8b05378eb1c71ef320ad746e1d3b628ba79b9859f741e082542a385502f25dbf55296c3a545e3872760ab73617de4a96262c6f5d9e98bf9292dc29f8f41dbd289a147ce9da3113b5f0b8c00a60b1ce1d7e819d7a431d7c90ea0e5f"
+
+fn _pub_hex_k2() -> text:
+    "0408d999057ba3d2d969260045c55b97f089025959a6f434d651d207d19fb96e9e4fe0e86ebe0e64f85b96a9c75295df618e80f1fa5b1b3cedb7bfe8dffd6dba74b275d875bc6cc43e904e505f256ab4255ffd43e94d39e22d61501e700a940e80"
+
+fn _pub_hex_k3() -> text:
+    "04077a41d4606ffa1464793c7e5fdc7d98cb9d3910202dcd06bea4f240d3566da6b408bbae5026580d02d7e5c70500c831c995f7ca0b0c42837d0bbe9602a9fc998520b41c85115aa5f7684c0edc111eacc24abd6be4b5d298b65f28600a2f1df1"
+
+fn _pub_hex_alice() -> text:
+    "045c1175e56418c0f978034efbdce6453f787b47b722a4c14cceee43653857895a8dce11c025295617adcafa524e07a7a34177b866d0fc47e2d83de93550664524d4cd855e2a1d178336af4a8432df0bae4d4f0e44ad58be2889fb07a13fa6fd45"
+
+fn _pub_hex_bob() -> text:
+    "0474d29aa76737dce53e9f0061af7fd98b88e90b5673d12b0817429491a01767fb7bd9f301f615f03153ff878ba7d760fc80cb6a966b20279169cff5b2e7516f49cc97bd698102da8920744cb10cdfca1b5b99a9f3759cf38c8f80a15d9ab4fd6b"
+
+fn _shared_hex_alice_bob() -> text:
+    "82d29493f35f463d4e55c4c56f686e041f994cd90106da667fe70877f052f2fe45c15ca1b04915c6c5ad1dc571d0abcf"
+
+fn _gx_bytes() -> [u8]:
+    var b: [u8] = []
+    b.push(0xAA)
+    b.push(0x87)
+    b.push(0xCA)
+    b.push(0x22)
+    b.push(0xBE)
+    b.push(0x8B)
+    b.push(0x05)
+    b.push(0x37)
+    b.push(0x8E)
+    b.push(0xB1)
+    b.push(0xC7)
+    b.push(0x1E)
+    b.push(0xF3)
+    b.push(0x20)
+    b.push(0xAD)
+    b.push(0x74)
+    b.push(0x6E)
+    b.push(0x1D)
+    b.push(0x3B)
+    b.push(0x62)
+    b.push(0x8B)
+    b.push(0xA7)
+    b.push(0x9B)
+    b.push(0x98)
+    b.push(0x59)
+    b.push(0xF7)
+    b.push(0x41)
+    b.push(0xE0)
+    b.push(0x82)
+    b.push(0x54)
+    b.push(0x2A)
+    b.push(0x38)
+    b.push(0x55)
+    b.push(0x02)
+    b.push(0xF2)
+    b.push(0x5D)
+    b.push(0xBF)
+    b.push(0x55)
+    b.push(0x29)
+    b.push(0x6C)
+    b.push(0x3A)
+    b.push(0x54)
+    b.push(0x5E)
+    b.push(0x38)
+    b.push(0x72)
+    b.push(0x76)
+    b.push(0x0A)
+    b.push(0xB7)
+    b
+
+fn _gy_bytes() -> [u8]:
+    var b: [u8] = []
+    b.push(0x36)
+    b.push(0x17)
+    b.push(0xDE)
+    b.push(0x4A)
+    b.push(0x96)
+    b.push(0x26)
+    b.push(0x2C)
+    b.push(0x6F)
+    b.push(0x5D)
+    b.push(0x9E)
+    b.push(0x98)
+    b.push(0xBF)
+    b.push(0x92)
+    b.push(0x92)
+    b.push(0xDC)
+    b.push(0x29)
+    b.push(0xF8)
+    b.push(0xF4)
+    b.push(0x1D)
+    b.push(0xBD)
+    b.push(0x28)
+    b.push(0x9A)
+    b.push(0x14)
+    b.push(0x7C)
+    b.push(0xE9)
+    b.push(0xDA)
+    b.push(0x31)
+    b.push(0x13)
+    b.push(0xB5)
+    b.push(0xF0)
+    b.push(0xB8)
+    b.push(0xC0)
+    b.push(0x0A)
+    b.push(0x60)
+    b.push(0xB1)
+    b.push(0xCE)
+    b.push(0x1D)
+    b.push(0x7E)
+    b.push(0x81)
+    b.push(0x9D)
+    b.push(0x7A)
+    b.push(0x43)
+    b.push(0x1D)
+    b.push(0x7C)
+    b.push(0x90)
+    b.push(0xEA)
+    b.push(0x0E)
+    b.push(0x5F)
+    b
+
+describe "P-384":
+
+    it "field add and mul":
+        val one = _be48_val(0x01)
+        val two_bytes = p384_add(one, one)
+        val two = _be48_val(0x02)
+        expect _bytes_hex(two_bytes) == _bytes_hex(two)
+        val three = _be48_val(0x03)
+        val six_bytes = p384_mul(two, three)
+        val six = _be48_val(0x06)
+        expect _bytes_hex(six_bytes) == _bytes_hex(six)
+
+    it "Generator G is on the P-384 curve":
+        expect p384_point_on_curve(_gx_bytes(), _gy_bytes()) == true
+
+    it "scalar multiplication matches exact public-key KAT for k=1":
+        val k1_pub = p384_scalar_mult(_be48_val(0x01), _gx_bytes(), _gy_bytes())
+        expect _bytes_hex(k1_pub) == _pub_hex_k1()
+
+    it "scalar multiplication matches exact public-key KAT for k=2":
+        val k2_pub = p384_scalar_mult(_be48_val(0x02), _gx_bytes(), _gy_bytes())
+        expect _bytes_hex(k2_pub) == _pub_hex_k2()
+
+    it "scalar multiplication matches exact public-key KAT for k=3":
+        val k3_pub = p384_scalar_mult(_be48_val(0x03), _gx_bytes(), _gy_bytes())
+        expect _bytes_hex(k3_pub) == _pub_hex_k3()
+
+    it "keygen matches exact public-key KAT for seeded private key 0x6B":
+        expect _bytes_hex(p384_keygen(_make_key(0x6B))) == _pub_hex_alice()
+
+    it "keygen matches exact public-key KAT for seeded private key 0x01":
+        expect _bytes_hex(p384_keygen(_make_key(0x01))) == _pub_hex_bob()
+
+    it "keygen and ECDSA sign-verify round trip":
+        val sk = _make_key(0x6B)
+        val pub_key = p384_keygen(sk)
+        expect pub_key.len() == 97
+        expect pub_key[0u64] == 0x04u8
+        val msg_hash = sha384(_make_key(0x01))
+        val sig = p384_ecdsa_sign(sk, msg_hash)
+        expect sig.len() == 96
+        expect p384_ecdsa_verify(pub_key, msg_hash, sig) == true
+
+    it "ECDH commutativity":
+        val alice_priv = _make_key(0x6B)
+        val bob_priv = _make_key(0x01)
+        val alice_pub = p384_keygen(alice_priv)
+        val bob_pub = p384_keygen(bob_priv)
+        val shared_ab = p384_ecdh(alice_priv, bob_pub)
+        val shared_ba = p384_ecdh(bob_priv, alice_pub)
+        expect _bytes_hex(shared_ab) == _bytes_hex(shared_ba)
+        expect _bytes_hex(shared_ab) == _shared_hex_alice_bob()

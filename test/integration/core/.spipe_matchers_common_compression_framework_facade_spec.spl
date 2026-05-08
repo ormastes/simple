@@ -1,0 +1,82 @@
+use std.spec.{describe, it, expect}
+use std.common.compress.{
+    CompressionCodec,
+    CompressionError,
+    CompressionOptions,
+    default_compression_options,
+    compress_bytes,
+    decompress_bytes
+}
+use os.kernel.loader.zstd_decompress.{zstd_decompress}
+
+fn _payload(count: i64) -> [u8]:
+    var out: [u8] = []
+    var i = 0
+    while i < count:
+        out.push((((i * 29) + (i / 5) + 7) % 251).to_u8())
+        if (i % 7) < 3:
+            out.push(0x61u8 + (i % 5).to_u8())
+        i = i + 1
+    out
+
+fn _zstd_checksum_options() -> CompressionOptions:
+    val base = default_compression_options(CompressionCodec.zstd)
+    CompressionOptions(
+        codec: base.codec,
+        level: base.level,
+        checksum: true,
+        block_mode: base.block_mode,
+        dictionary_bytes: base.dictionary_bytes,
+        dictionary_id: base.dictionary_id,
+        content_size: base.content_size
+    )
+
+fn _error_text(err: CompressionError) -> text:
+    match err:
+        CompressionError.InvalidHeader(message): message
+        CompressionError.UnsupportedFeature(message): message
+        CompressionError.TruncatedInput(message): message
+        CompressionError.ChecksumMismatch(message): message
+        CompressionError.CorruptStream(message): message
+        CompressionError.SizeLimitExceeded(limit): "zstd size limit exceeded: " + limit.to_string()
+
+describe "common compression facade integration":
+    it "keeps the kernel zstd adapter byte-identical with the public facade on deterministic frames":
+        val payload = _payload(4096)
+        val encoded = compress_bytes(payload, default_compression_options(CompressionCodec.zstd))
+        val facade = decompress_bytes(encoded, Some(CompressionCodec.zstd))
+        val adapter = zstd_decompress(encoded)
+        expect facade.is_err() == false
+        expect adapter.is_err() == false
+        expect adapter.unwrap() == facade.unwrap()
+        expect adapter.unwrap() == payload
+
+    it "keeps the kernel zstd adapter aligned with concatenated-frame facade decode":
+        val left = compress_bytes(_payload(256), default_compression_options(CompressionCodec.zstd))
+        val right = compress_bytes(_payload(384), default_compression_options(CompressionCodec.zstd))
+        val combined = left + right
+        val facade = decompress_bytes(combined, Some(CompressionCodec.zstd))
+        val adapter = zstd_decompress(combined)
+        expect facade.is_err() == false
+        expect adapter.is_err() == false
+        expect adapter.unwrap() == facade.unwrap()
+
+    it "translates public checksum failures through the kernel adapter deterministically":
+        val payload = _payload(1024)
+        var encoded = compress_bytes(payload, _zstd_checksum_options())
+        encoded[encoded.len() - 1] = encoded[encoded.len() - 1] ^ 0x01u8
+        val facade = decompress_bytes(encoded, Some(CompressionCodec.zstd))
+        val adapter = zstd_decompress(encoded)
+        expect facade.is_err() == true
+        expect adapter.is_err() == true
+        expect adapter.unwrap_err() == _error_text(facade.unwrap_err())
+
+    it "translates public invalid-header failures through the kernel adapter deterministically":
+        val payload = _payload(128)
+        var encoded = compress_bytes(payload, default_compression_options(CompressionCodec.zstd))
+        encoded[0] = encoded[0] ^ 0x01u8
+        val facade = decompress_bytes(encoded, Some(CompressionCodec.zstd))
+        val adapter = zstd_decompress(encoded)
+        expect facade.is_err() == true
+        expect adapter.is_err() == true
+        expect adapter.unwrap_err() == _error_text(facade.unwrap_err())

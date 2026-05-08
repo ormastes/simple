@@ -1,0 +1,111 @@
+# Specification for src/lib/common/hpack/static_table.spl
+#
+# Verifies the static table contents match RFC 7541 Appendix A.
+
+use std.spipe.*
+use std.common.hpack.static_table.{
+    StaticEntry,
+    hpack_static_table,
+    hpack_static_table_size,
+    hpack_static_lookup,
+    hpack_static_find,
+}
+
+describe "HPACK static table":
+
+    it "has exactly 61 entries":
+        expect hpack_static_table_size() == 61
+        expect hpack_static_table().len() == 61
+
+    it "index 1 is :authority with empty value":
+        val e = hpack_static_lookup(1)
+        expect e.? == true
+        val entry = e ?? StaticEntry(name: "", value: "")
+        expect entry.name == ":authority"
+        expect entry.value == ""
+
+    it "index 2 is :method GET":
+        val entry = hpack_static_lookup(2) ?? StaticEntry(name: "", value: "")
+        expect entry.name == ":method"
+        expect entry.value == "GET"
+
+    it "index 3 is :method POST":
+        val entry = hpack_static_lookup(3) ?? StaticEntry(name: "", value: "")
+        expect entry.name == ":method"
+        expect entry.value == "POST"
+
+    it "index 7 is :scheme https":
+        val entry = hpack_static_lookup(7) ?? StaticEntry(name: "", value: "")
+        expect entry.name == ":scheme"
+        expect entry.value == "https"
+
+    it "index 8 is :status 200":
+        val entry = hpack_static_lookup(8) ?? StaticEntry(name: "", value: "")
+        expect entry.name == ":status"
+        expect entry.value == "200"
+
+    it "index 16 is accept-encoding 'gzip, deflate'":
+        val entry = hpack_static_lookup(16) ?? StaticEntry(name: "", value: "")
+        expect entry.name == "accept-encoding"
+        expect entry.value == "gzip, deflate"
+
+    it "index 31 is content-type with empty value":
+        val entry = hpack_static_lookup(31) ?? StaticEntry(name: "", value: "")
+        expect entry.name == "content-type"
+        expect entry.value == ""
+
+    it "index 61 is www-authenticate with empty value":
+        val entry = hpack_static_lookup(61) ?? StaticEntry(name: "", value: "")
+        expect entry.name == "www-authenticate"
+        expect entry.value == ""
+
+    it "out-of-range indices return nil":
+        expect hpack_static_lookup(0).? == false
+        expect hpack_static_lookup(62).? == false
+        expect hpack_static_lookup(-1).? == false
+
+describe "HPACK static table lookup":
+
+    it "finds an exact (name, value) pair":
+        val r = hpack_static_find(":method", "GET")
+        expect r.0 == 2
+        expect r.1 == true
+
+    it "finds :method POST at index 3":
+        val r = hpack_static_find(":method", "POST")
+        expect r.0 == 3
+        expect r.1 == true
+
+    it "finds :status 404 at index 13":
+        val r = hpack_static_find(":status", "404")
+        expect r.0 == 13
+        expect r.1 == true
+
+    it "returns name-only match for an unknown method":
+        # :method exists with values GET (idx 2) and POST (idx 3); first
+        # name-match wins, so index 2 is returned without value match.
+        val r = hpack_static_find(":method", "PUT")
+        expect r.0 == 2
+        expect r.1 == false
+
+    it "returns name-only match for a header with no value variants":
+        # content-type only appears once with empty value; querying with a
+        # specific MIME yields name-only.
+        val r = hpack_static_find("content-type", "application/json")
+        expect r.0 == 31
+        expect r.1 == false
+
+    it "finds the empty-value entry as an exact match":
+        val r = hpack_static_find("content-type", "")
+        expect r.0 == 31
+        expect r.1 == true
+
+    it "returns -1 for unknown header name":
+        val r = hpack_static_find("x-custom-header", "value")
+        expect r.0 == -1
+        expect r.1 == false
+
+    it "is case-sensitive (HPACK requires lowercase names)":
+        # Caller is responsible for lowercasing; uppercase names do not match.
+        val r = hpack_static_find("CONTENT-TYPE", "")
+        expect r.0 == -1

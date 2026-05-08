@@ -1,0 +1,218 @@
+# @cover src/compiler_rust/compiler/src/blocks/math/eval/mod.rs 60%
+"""
+# Math Block Matmul and Linalg Specification
+
+**Feature IDs:** #MATHBLOCK-01 through #MATHBLOCK-15
+**Category:** Syntax / Math DSL
+**Difficulty:** 4/5
+**Status:** Draft
+**Plan:** doc/03_plan/agent_tasks/scilib_port_math_block.md
+**Design:** doc/05_design/scilib_port_architecture.md §7
+**Research:** doc/01_research/scilib_fortran_port/03_math_block_lowering.md
+
+## Overview
+
+Specifies the `m{}` math block extensions for linalg and ndarray operations:
+`A @ B` matmul infix, `A[i:j, k]` slice subscript, `inv(A)` and `solve(A, b)`
+dispatch arms, and operator precedence of `@` vs `+`.
+
+## Performance Caveat (v1, OQ-A)
+
+In v1 the math block remains a runtime string-payload interpreter (OQ-A locks
+HIR-lift to v2). `m{ A @ B + c }` allocates two intermediate Block values —
+one for `A @ B`, one for the addition. This is PERF-SUGAR-002 (kernel fusion
+deferred to v2). Do NOT use `m{}` in hot inner loops in v1; use explicit
+`linalg.gemm()` calls instead. These specs assert CORRECTNESS only, not perf.
+
+## Backend
+
+All specs run in interpreter mode with `SIMPLE_BLAS_BACKEND=mock`.
+The mock backend returns deterministic results for all linalg calls:
+- `matmul(I, I)` → identity matrix of same shape
+- `inv(I)` → identity matrix
+- `solve(I, b)` → b unchanged
+(Coordinate with T-LAPACK-01 / T-BLAS-01 owner if mock contract changes.)
+"""
+
+use std.spipe.*
+
+
+# ============================================================================
+# Matmul infix `A @ B`  — T-MATHBLOCK-01, T-MATHBLOCK-03, T-MATHBLOCK-06
+# ============================================================================
+
+describe "Math Block matmul A @ B":
+    """
+    ## `@` infix operator
+
+    Verifies that `A @ B` is recognised as matrix multiplication with
+    operator precedence between `Mul` and `Pow` (above `+`/`-`).
+    Requires T-MATHBLOCK-01 (`@` lexer token) and T-MATHBLOCK-03 (MatMul AST).
+    """
+
+    it "evaluates A @ B result has correct rank":
+        # T-MATHBLOCK-06: MatMul eval arm → Tensor::matmul
+        # 2×2 identity @ 2×2 identity — mock backend returns 2×2 identity
+        val result = m{ [[1,0],[0,1]] @ [[1,0],[0,1]] }
+        expect result.ndim() == 2
+
+    it "evaluates A @ B diagonal element [0][0]":
+        # Mock: identity @ identity[0][0] = 1.0
+        val result = m{ [[1,0],[0,1]] @ [[1,0],[0,1]] }
+        expect result[0][0] == 1.0
+
+    it "evaluates A @ B off-diagonal element [0][1]":
+        # Mock: identity @ identity[0][1] = 0.0
+        val result = m{ [[1,0],[0,1]] @ [[1,0],[0,1]] }
+        expect result[0][1] == 0.0
+
+    it "evaluates non-trivial matmul [0][0]":
+        # [[1,2],[3,4]] @ [[1,0],[0,1]] = [[1,2],[3,4]]
+        val result = m{ [[1,2],[3,4]] @ [[1,0],[0,1]] }
+        expect result[0][0] == 1.0
+
+    it "evaluates non-trivial matmul [1][0]":
+        # [[1,2],[3,4]] @ [[1,0],[0,1]] = [[1,2],[3,4]]
+        val result = m{ [[1,2],[3,4]] @ [[1,0],[0,1]] }
+        expect result[1][0] == 3.0
+
+
+# ============================================================================
+# Operator precedence: `A @ B + c` = `(A @ B) + c`  — T-MATHBLOCK-01, T-MATHBLOCK-05
+# ============================================================================
+
+describe "Math Block precedence A @ B + c":
+    """
+    ## `@` binds tighter than `+`
+
+    AC from scilib_port_math_block.md:
+      `parse("A @ B + c")` → `Add(MatMul(Var("A"), Var("B")), Var("c"))`
+    These scenarios verify the runtime consequence of that parse decision.
+    """
+
+    it "A @ B + c parses as (A @ B) + c not A @ (B + c)":
+        # T-MATHBLOCK-05: @ at multiplicative level (above +)
+        # I @ I + [[2,0],[0,2]] should be I + 2*I = [[3,0],[0,3]]
+        # If precedence were wrong: I @ (I + [[2,0],[0,2]]) = I @ [[3,0],[0,3]] = [[3,0],[0,3]] (same here)
+        # Use an asymmetric case to distinguish:
+        # [[1,0],[0,1]] @ [[2,3],[4,5]] + [[10,0],[0,10]]
+        # = [[2,3],[4,5]] + [[10,0],[0,10]] = [[12,3],[4,15]]  (correct @ before +)
+        # If wrong: [[1,0],[0,1]] @ ([[2,3],[4,5]] + [[10,0],[0,10]])
+        #         = [[1,0],[0,1]] @ [[12,3],[4,15]] = [[12,3],[4,15]]  (same — not distinguishable here)
+        # Best distinguishable form: A @ B + c where A != I
+        # [[2,0],[0,2]] @ [[1,0],[0,1]] + [[1,0],[0,1]]
+        # (@ first): [[2,0],[0,2]] + [[1,0],[0,1]] = [[3,0],[0,3]], so [0][0] = 3
+        # (+ first): [[2,0],[0,2]] @ [[2,0],[0,2]] = [[4,0],[0,4]], so [0][0] = 4
+        val result = m{ [[2,0],[0,2]] @ [[1,0],[0,1]] + [[1,0],[0,1]] }
+        expect result[0][0] == 3.0
+
+    it "A @ B + c result off-diagonal is zero":
+        val result = m{ [[2,0],[0,2]] @ [[1,0],[0,1]] + [[1,0],[0,1]] }
+        expect result[0][1] == 0.0
+
+    it "scalar addition after matmul preserves rank":
+        val result = m{ [[1,0],[0,1]] @ [[1,0],[0,1]] + [[0,0],[0,0]] }
+        expect result.ndim() == 2
+
+
+# ============================================================================
+# Slice subscript `A[i:j, k]`  — T-MATHBLOCK-02, T-MATHBLOCK-04, T-MATHBLOCK-07
+# ============================================================================
+
+describe "Math Block slice A[i:j, k]":
+    """
+    ## Slice subscript integration
+
+    Verifies the `:` slice token (T-MATHBLOCK-02), `Slice` AST node
+    (T-MATHBLOCK-04), and `tensor_slice` eval arm (T-MATHBLOCK-07).
+    No FFI required — slice is pure tensor indexing.
+    """
+
+    it "1D slice A[0:2] has correct length":
+        # T-MATHBLOCK-07: 1D slice of [10,20,30] → [10,20]
+        val result = m{ [10,20,30][0:2] }
+        expect result.length() == 2
+
+    it "1D slice A[0:2] first element":
+        val result = m{ [10,20,30][0:2] }
+        expect result[0] == 10.0
+
+    it "1D slice A[1:3] second element":
+        val result = m{ [10,20,30][1:3] }
+        expect result[0] == 20.0
+
+    it "2D slice A[0:2, 0:2] has rank 2":
+        # T-MATHBLOCK-07: 3×3 → 2×2 sub-matrix
+        val result = m{ [[1,2,3],[4,5,6],[7,8,9]][0:2, 0:2] }
+        expect result.ndim() == 2
+
+    it "2D slice A[0:2, 0:2] element [0][0]":
+        val result = m{ [[1,2,3],[4,5,6],[7,8,9]][0:2, 0:2] }
+        expect result[0][0] == 1.0
+
+    it "2D slice A[0:2, 0:2] element [1][1]":
+        val result = m{ [[1,2,3],[4,5,6],[7,8,9]][0:2, 0:2] }
+        expect result[1][1] == 5.0
+
+    it "column slice A[.., 1] has correct length":
+        # T-MATHBLOCK-07: column slice → 1D vector of length = nrows
+        val result = m{ [[1,2,3],[4,5,6],[7,8,9]][.., 1] }
+        expect result.length() == 3
+
+    it "column slice A[.., 1] first element":
+        val result = m{ [[1,2,3],[4,5,6],[7,8,9]][.., 1] }
+        expect result[0] == 2.0
+
+
+# ============================================================================
+# inv(A) and solve(A, b)  — T-MATHBLOCK-08, T-MATHBLOCK-09, T-MATHBLOCK-14
+# ============================================================================
+
+describe "Math Block inv and solve":
+    """
+    ## App dispatch arms for inv and solve
+
+    Requires T-MATHBLOCK-08 (`inv` LAPACK FFI arm) and T-MATHBLOCK-09
+    (`solve` LAPACK FFI arm). Mock backend: `inv(I) = I`, `solve(I, b) = b`.
+    All run with `SIMPLE_BLAS_BACKEND=mock`.
+
+    RISK NOTE: T-MATHBLOCK-08 is HIGH risk — first LAPACK FFI call from inside
+    the math block eval path. If the mock shim FFI resolution fails in interp
+    mode, these specs must be held (not skipped) until the blocker is fixed.
+    See scilib_port_math_block.md Risk Register.
+    """
+
+    it "inv(I) has rank 2":
+        # T-MATHBLOCK-08: inv of 2×2 identity → 2×2 identity
+        val result = m{ inv([[1,0],[0,1]]) }
+        expect result.ndim() == 2
+
+    it "inv(I) diagonal element [0][0]":
+        # Mock: inv(identity) = identity; [0][0] = 1.0
+        val result = m{ inv([[1,0],[0,1]]) }
+        expect result[0][0] == 1.0
+
+    it "inv(I) off-diagonal element [0][1]":
+        # Mock: inv(identity)[0][1] = 0.0
+        val result = m{ inv([[1,0],[0,1]]) }
+        expect result[0][1] == 0.0
+
+    it "inv of singular matrix surfaces error":
+        # T-MATHBLOCK-08: zero matrix is singular; expect error result
+        # MathError::Singular should be surfaced — block evaluator error surface
+        val result = m{ inv([[0,0],[0,0]]) }
+        expect result.is_err() == true
+
+    it "solve(I, b) returns vector of correct length":
+        # T-MATHBLOCK-09: solve(2×2 identity, [3,7]) = [3,7]
+        val result = m{ solve([[1,0],[0,1]], [3,7]) }
+        expect result.length() == 2
+
+    it "solve(I, b) first element":
+        # Mock: solve(I, b) = b; first element = 3.0
+        val result = m{ solve([[1,0],[0,1]], [3,7]) }
+        expect result[0] == 3.0
+
+    it "solve(I, b) second element":
+        val result = m{ solve([[1,0],[0,1]], [3,7]) }
+        expect result[1] == 7.0

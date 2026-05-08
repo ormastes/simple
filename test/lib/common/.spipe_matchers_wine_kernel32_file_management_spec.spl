@@ -1,0 +1,111 @@
+use common.wine_kernel32_file_management.{wine_kernel32_execute_directory_create, wine_kernel32_execute_directory_remove, wine_kernel32_execute_file_copy, wine_kernel32_execute_file_delete, wine_kernel32_execute_file_move}
+use common.wine_nt_file_io.{WineNtFileTable, wine_nt_file_create_w, wine_nt_file_get_attributes_w, wine_nt_file_table_add_directory, wine_nt_file_table_add_file, wine_nt_file_table_new}
+
+fn _all_adapter_apis() -> text:
+    "fd-open fd-read fd-write fd-close fd-dup fd-inherit stdio pipe socket timer poll-wait " +
+        "cwd env argv spawn path-normalize path-attrs path-locks errno-map"
+
+fn _all_async_features() -> text:
+    "io-driver submit-open submit-read submit-write submit-close submit-timeout poll-completion " +
+        "event-loop register-fd deregister-fd waker wake"
+
+fn _table_with_file() -> WineNtFileTable:
+    wine_nt_file_table_add_file(wine_nt_file_table_new(_all_adapter_apis(), _all_async_features()), "C:\\temp.tmp", "temp")
+
+describe "Wine KERNEL32 file-management bridge":
+    it "executes a bounded DeleteFileW sequence":
+        val result = wine_kernel32_execute_file_delete(["DeleteFileW"], _table_with_file(), "C:\\temp.tmp")
+
+        expect result.ok == true
+        expect result.operations == "DeleteFileW"
+        expect wine_nt_file_get_attributes_w(result.table, "C:\\temp.tmp").state == "file-not-found"
+
+    it "executes bounded CopyFileW and MoveFileW sequences":
+        val copied = wine_kernel32_execute_file_copy(["CopyFileW"], _table_with_file(), "C:\\temp.tmp", "C:\\copy.tmp", true)
+        expect copied.ok == true
+        expect copied.operations == "CopyFileW"
+        expect wine_nt_file_get_attributes_w(copied.table, "C:\\temp.tmp").ok == true
+        expect wine_nt_file_get_attributes_w(copied.table, "C:\\copy.tmp").ok == true
+
+        val moved = wine_kernel32_execute_file_move(["MoveFileW"], copied.table, "C:\\copy.tmp", "C:\\moved.tmp")
+        expect moved.ok == true
+        expect moved.operations == "MoveFileW"
+        expect wine_nt_file_get_attributes_w(moved.table, "C:\\copy.tmp").state == "file-not-found"
+        expect wine_nt_file_get_attributes_w(moved.table, "C:\\moved.tmp").ok == true
+
+    it "executes bounded CreateDirectoryW and RemoveDirectoryW sequences":
+        val created = wine_kernel32_execute_directory_create(["CreateDirectoryW"], _table_with_file(), "C:\\TempDir")
+        expect created.ok == true
+        expect created.operations == "CreateDirectoryW"
+        expect created.table.directories.len() == 1
+
+        val removed = wine_kernel32_execute_directory_remove(["RemoveDirectoryW"], created.table, "C:\\TempDir")
+        expect removed.ok == true
+        expect removed.operations == "RemoveDirectoryW"
+        expect removed.table.directories.len() == 0
+
+    it "keeps file-management dispatch ordered and bounded":
+        val extra = wine_kernel32_execute_file_delete(["DeleteFileW", "CloseHandle"], _table_with_file(), "C:\\temp.tmp")
+        expect extra.ok == false
+        expect extra.error == "bridge-wrong-category:CloseHandle"
+
+        val wrong_family = wine_kernel32_execute_file_delete(["HeapAlloc"], _table_with_file(), "C:\\temp.tmp")
+        expect wrong_family.ok == false
+        expect wrong_family.error == "bridge-wrong-category:HeapAlloc"
+
+        val wrong_copy = wine_kernel32_execute_file_copy(["DeleteFileW"], _table_with_file(), "C:\\temp.tmp", "C:\\copy.tmp", true)
+        expect wrong_copy.ok == false
+        expect wrong_copy.error == "kernel32-file-management-sequence-expected:CopyFileW"
+
+        val wrong_move = wine_kernel32_execute_file_move(["CopyFileW"], _table_with_file(), "C:\\temp.tmp", "C:\\moved.tmp")
+        expect wrong_move.ok == false
+        expect wrong_move.error == "kernel32-file-management-sequence-expected:MoveFileW"
+
+        val wrong_create_dir = wine_kernel32_execute_directory_create(["RemoveDirectoryW"], _table_with_file(), "C:\\TempDir")
+        expect wrong_create_dir.ok == false
+        expect wrong_create_dir.error == "kernel32-file-management-sequence-expected:CreateDirectoryW"
+
+        val wrong_remove_dir = wine_kernel32_execute_directory_remove(["CreateDirectoryW"], _table_with_file(), "C:\\TempDir")
+        expect wrong_remove_dir.ok == false
+        expect wrong_remove_dir.error == "kernel32-file-management-sequence-expected:RemoveDirectoryW"
+
+    it "propagates readiness, missing-file, and sharing-violation errors":
+        val blocked = wine_nt_file_table_new("fd-open fd-read", _all_async_features())
+        val not_ready = wine_kernel32_execute_file_delete(["DeleteFileW"], blocked, "C:\\temp.tmp")
+        expect not_ready.ok == false
+        expect not_ready.error == "DeleteFileW:missing-api-fd-write"
+
+        val missing = wine_kernel32_execute_file_delete(["DeleteFileW"], _table_with_file(), "C:\\missing.tmp")
+        expect missing.ok == false
+        expect missing.error == "DeleteFileW:file-not-found"
+
+        val table = _table_with_file()
+        val opened = wine_nt_file_create_w(table, "C:\\temp.tmp")
+        val sharing = wine_kernel32_execute_file_delete(["DeleteFileW"], opened.table, "C:\\temp.tmp")
+        expect sharing.ok == false
+        expect sharing.error == "DeleteFileW:sharing-violation"
+
+        val copy_exists = wine_kernel32_execute_file_copy(["CopyFileW"], _table_with_file(), "C:\\temp.tmp", "C:\\temp.tmp", true)
+        expect copy_exists.ok == false
+        expect copy_exists.error == "CopyFileW:file-exists"
+
+        val copy_to_dir = wine_kernel32_execute_file_copy(["CopyFileW"], wine_nt_file_table_add_directory(_table_with_file(), "C:\\dir"), "C:\\temp.tmp", "C:\\dir", true)
+        expect copy_to_dir.ok == false
+        expect copy_to_dir.error == "CopyFileW:directory-exists"
+
+        val move_missing = wine_kernel32_execute_file_move(["MoveFileW"], _table_with_file(), "C:\\missing.tmp", "C:\\moved.tmp")
+        expect move_missing.ok == false
+        expect move_missing.error == "MoveFileW:file-not-found"
+
+        val move_from_dir = wine_kernel32_execute_file_move(["MoveFileW"], wine_nt_file_table_add_directory(_table_with_file(), "C:\\dir"), "C:\\dir", "C:\\moved.tmp")
+        expect move_from_dir.ok == false
+        expect move_from_dir.error == "MoveFileW:directory-move-unsupported"
+
+        val with_dir = wine_nt_file_table_add_directory(_table_with_file(), "C:\\TempDir")
+        val duplicate_dir = wine_kernel32_execute_directory_create(["CreateDirectoryW"], with_dir, "C:\\TempDir")
+        expect duplicate_dir.ok == false
+        expect duplicate_dir.error == "CreateDirectoryW:directory-exists"
+
+        val non_empty_dir = wine_kernel32_execute_directory_remove(["RemoveDirectoryW"], wine_nt_file_table_add_file(with_dir, "C:\\TempDir\\child.txt", "child"), "C:\\TempDir")
+        expect non_empty_dir.ok == false
+        expect non_empty_dir.error == "RemoveDirectoryW:directory-not-empty"

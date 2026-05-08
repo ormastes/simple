@@ -1,0 +1,233 @@
+use common.pe_coff_header.{pe_rva_to_file_offset}
+use common.wine_dll_file_probe.{wine_dll_probe_file}
+use common.wine_dll_view_startup_fault.{wine_dll_record_file_view_startup_fault, wine_dll_record_file_view_startup_fault_with_peb_teb_layout, wine_dll_record_file_view_startup_fault_with_peb_teb_vm_writes, wine_dll_record_file_view_startup_fault_with_peb_teb_writes}
+use common.wine_peb_teb.{wine_peb_teb_apply_layout_byte_writes, wine_peb_teb_init_default, wine_peb_teb_layout_byte_writes, wine_peb_teb_layout_write_plan, wine_peb_teb_memory_write_gate}
+use common.wine_vm_adapter.{WineVmFault, WineVmSpace, wine_vm_commit, wine_vm_process_space_new, wine_vm_reserve_fixed}
+
+fn _zero_bytes(count: i64) -> [u8]:
+    var out: [u8] = []
+    var i = 0
+    while i < count:
+        out.push(0)
+        i = i + 1
+    out
+
+fn _put_u16_le(data: [u8], offset: i64, value: i64) -> [u8]:
+    data[offset] = (value & 0xff) as u8
+    data[offset + 1] = ((value >> 8) & 0xff) as u8
+    data
+
+fn _put_u32_le(data: [u8], offset: i64, value: i64) -> [u8]:
+    data[offset] = (value & 0xff) as u8
+    data[offset + 1] = ((value >> 8) & 0xff) as u8
+    data[offset + 2] = ((value >> 16) & 0xff) as u8
+    data[offset + 3] = ((value >> 24) & 0xff) as u8
+    data
+
+fn _put_u64_le(data: [u8], offset: i64, value: i64) -> [u8]:
+    var remaining = value
+    var i = 0
+    while i < 8:
+        data[offset + i] = remaining % 256
+        remaining = remaining / 256
+        i = i + 1
+    data
+
+fn _put_ascii_z(data: [u8], offset: i64, value: text) -> [u8]:
+    var i = 0
+    while i < value.len():
+        data[offset + i] = value[i] as u8
+        i = i + 1
+    data[offset + i] = 0
+    data
+
+fn _put_import_name(data: [u8], offset: i64, value: text) -> [u8]:
+    data = _put_u16_le(data, offset, 0)
+    _put_ascii_z(data, offset + 2, value)
+
+fn _commit_fixed(space: WineVmSpace, base: i64, size: i64, perms: text) -> WineVmSpace:
+    val reserved = wine_vm_reserve_fixed(space, base, size)
+    if not reserved.ok:
+        return reserved.space
+    val committed = wine_vm_commit(reserved.space, reserved.region.base, perms)
+    committed.space
+
+fn _startup_write_space() -> WineVmSpace:
+    var space = wine_vm_process_space_new(10, 30, "pid fs ipc net capability")
+    space = _commit_fixed(space, 0x7ffdc000, 0x1000, "rw")
+    space = _commit_fixed(space, 0x7ffdd000, 0x1000, "rw")
+    space = _commit_fixed(space, 0x7ffde000, 0x1000, "rw")
+    _commit_fixed(space, 0x7ffdf000, 0x1000, "rw")
+
+fn _dll_with_import_relocation_tls() -> [u8]:
+    var data = _zero_bytes(1536)
+    data[0] = 0x4d
+    data[1] = 0x5a
+    data = _put_u32_le(data, 0x3c, 0x80)
+    data[0x80] = 0x50
+    data[0x81] = 0x45
+    data = _put_u16_le(data, 0x84, 0x8664)
+    data = _put_u16_le(data, 0x86, 1)
+    data = _put_u16_le(data, 0x94, 0xf0)
+    data = _put_u16_le(data, 0x96, 0x2022)
+    data = _put_u16_le(data, 0x98, 0x20b)
+    data = _put_u32_le(data, 0x98 + 0x10, 0x2100)
+    data = _put_u32_le(data, 0x98 + 0x38, 0x5000)
+    data = _put_u32_le(data, 0x98 + 0x3c, 0x200)
+    data = _put_u16_le(data, 0x98 + 0x5c, 3)
+    data = _put_u32_le(data, 0x98 + 0x6c, 16)
+    data = _put_u32_le(data, 0x98 + 0x70 + 8, 0x2020)
+    data = _put_u32_le(data, 0x98 + 0x70 + 12, 0x60)
+    data = _put_u32_le(data, 0x98 + 0x70 + 40, 0x2160)
+    data = _put_u32_le(data, 0x98 + 0x70 + 44, 0x0a)
+    data = _put_u32_le(data, 0x98 + 0x70 + 72, 0x2170)
+    data = _put_u32_le(data, 0x98 + 0x70 + 76, 0x28)
+    val section_offset = 0x98 + 0xf0
+    data = _put_u32_le(data, section_offset + 8, 0x400)
+    data = _put_u32_le(data, section_offset + 12, 0x2000)
+    data = _put_u32_le(data, section_offset + 16, 0x400)
+    data = _put_u32_le(data, section_offset + 20, 0x200)
+    data = _put_u32_le(data, section_offset + 36, 0x60000020)
+    data = _put_u32_le(data, 0x220, 0x2060)
+    data = _put_u32_le(data, 0x22c, 0x2050)
+    data = _put_u32_le(data, 0x230, 0x2080)
+    data = _put_ascii_z(data, 0x250, "kernel32.dll")
+    data = _put_u64_le(data, 0x260, 0x20a0)
+    data = _put_u64_le(data, 0x268, 0)
+    data = _put_u64_le(data, 0x280, 0x20a0)
+    data = _put_u64_le(data, 0x288, 0)
+    data = _put_import_name(data, 0x2a0, "WriteFile")
+    data = _put_u64_le(data, pe_rva_to_file_offset(data, 0x2100), 0x401234)
+    data = _put_u32_le(data, 0x360, 0x2000)
+    data = _put_u32_le(data, 0x364, 0x0a)
+    data = _put_u16_le(data, 0x368, 0xa100)
+    data = _put_u32_le(data, 0x388, 0x2190)
+    data = _put_u32_le(data, 0x390, 0x2100)
+    data
+
+describe "wine dll view startup fault rollback":
+    it "records SEH rollback around DllMain handoff without executing DLL code":
+        val data = _dll_with_import_relocation_tls()
+        val files = [wine_dll_probe_file("\\KnownDlls\\game.dll", data)]
+        val fault = WineVmFault(process_id: 77, thread_id: 12, address: 0x502100, access: "execute", policy: "deliver-seh")
+        val result = wine_dll_record_file_view_startup_fault("game.dll", "C:\\Games", "C:\\Users\\Player", [], ["game.dll"], files, data, 0x400000, 0x500000, 77, 78, "pid fs ipc net capability", 2, 4, "native-module-open tls-callback", fault)
+        expect result.ok == true
+        expect result.status == "dllmain-startup-fault-rollback-recorded"
+        expect result.entrypoint_address == 0x502100
+        expect result.fault_address == 0x502100
+        expect result.rollback_count == 1
+        expect (result.evidence).contains("dllmain-handoff-ready")
+        expect (result.evidence).contains("fault-policy-deliver-seh")
+        expect (result.evidence).contains("seh-dispatch-recorded")
+        expect (result.evidence).contains("loader-lock-released")
+        expect (result.evidence).contains("dllmain-startup-rollback-recorded")
+        expect (result.evidence).contains("no-dllmain-executed")
+
+    it "rejects unsupported startup fault policies before rollback":
+        val data = _dll_with_import_relocation_tls()
+        val files = [wine_dll_probe_file("\\KnownDlls\\game.dll", data)]
+        val fault = WineVmFault(process_id: 77, thread_id: 12, address: 0x502100, access: "execute", policy: "terminate-process")
+        val result = wine_dll_record_file_view_startup_fault("game.dll", "C:\\Games", "C:\\Users\\Player", [], ["game.dll"], files, data, 0x400000, 0x500000, 77, 78, "pid fs ipc net capability", 2, 4, "native-module-open tls-callback", fault)
+        expect result.ok == false
+        expect result.error == "startup-fault-policy:terminate-process"
+        expect result.rollback_count == 0
+        expect (result.evidence).contains("dllmain-startup-fault-blocked")
+        expect (result.evidence).contains("no-dllmain-executed")
+
+    it "rejects startup faults that do not target the planned DllMain entrypoint":
+        val data = _dll_with_import_relocation_tls()
+        val files = [wine_dll_probe_file("\\KnownDlls\\game.dll", data)]
+        val fault = WineVmFault(process_id: 77, thread_id: 12, address: 0x502200, access: "execute", policy: "deliver-seh")
+        val result = wine_dll_record_file_view_startup_fault("game.dll", "C:\\Games", "C:\\Users\\Player", [], ["game.dll"], files, data, 0x400000, 0x500000, 77, 78, "pid fs ipc net capability", 2, 4, "native-module-open tls-callback", fault)
+        expect result.ok == false
+        expect result.error == "startup-fault-entrypoint-mismatch"
+        expect result.rollback_count == 0
+
+    it "records startup rollback only after PEB/TEB write-gated DllMain handoff":
+        val data = _dll_with_import_relocation_tls()
+        val files = [wine_dll_probe_file("\\KnownDlls\\game.dll", data)]
+        val fault = WineVmFault(process_id: 77, thread_id: 12, address: 0x502100, access: "execute", policy: "deliver-seh")
+        val init = wine_peb_teb_init_default()
+        val writes = wine_peb_teb_memory_write_gate(init, _startup_write_space())
+        val result = wine_dll_record_file_view_startup_fault_with_peb_teb_writes("game.dll", "C:\\Games", "C:\\Users\\Player", [], ["game.dll"], files, data, 0x400000, 0x500000, 77, 78, "pid fs ipc net capability", 2, 4, "native-module-open tls-callback", fault, true, "ready", "PEB TEB TLS ProcessParameters LoaderLock", writes)
+
+        expect result.ok == true
+        expect result.status == "dllmain-startup-fault-rollback-recorded"
+        expect (result.evidence).contains("peb-teb-writes-ready")
+        expect (result.evidence).contains("ProcessParametersWrite")
+        expect (result.evidence).contains("dllmain-startup-rollback-recorded")
+
+    it "blocks startup rollback when PEB/TEB writes are not mapped":
+        val data = _dll_with_import_relocation_tls()
+        val files = [wine_dll_probe_file("\\KnownDlls\\game.dll", data)]
+        val fault = WineVmFault(process_id: 77, thread_id: 12, address: 0x502100, access: "execute", policy: "deliver-seh")
+        val init = wine_peb_teb_init_default()
+        val writes = wine_peb_teb_memory_write_gate(init, wine_vm_process_space_new(10, 30, "pid fs ipc net capability"))
+        val result = wine_dll_record_file_view_startup_fault_with_peb_teb_writes("game.dll", "C:\\Games", "C:\\Users\\Player", [], ["game.dll"], files, data, 0x400000, 0x500000, 77, 78, "pid fs ipc net capability", 2, 4, "native-module-open tls-callback", fault, true, "ready", "PEB TEB TLS ProcessParameters LoaderLock", writes)
+
+        expect result.ok == false
+        expect result.error == "dllmain-handoff:peb-teb-write:peb-write:page-fault-unmapped"
+        expect result.rollback_count == 0
+        expect (result.evidence).contains("dllmain-startup-fault-blocked")
+
+    it "records startup rollback only after PEB/TEB layout-gated DllMain handoff":
+        val data = _dll_with_import_relocation_tls()
+        val files = [wine_dll_probe_file("\\KnownDlls\\game.dll", data)]
+        val fault = WineVmFault(process_id: 77, thread_id: 12, address: 0x502100, access: "execute", policy: "deliver-seh")
+        val init = wine_peb_teb_init_default()
+        val writes = wine_peb_teb_memory_write_gate(init, _startup_write_space())
+        val layout = wine_peb_teb_layout_write_plan(init, writes)
+        val result = wine_dll_record_file_view_startup_fault_with_peb_teb_layout("game.dll", "C:\\Games", "C:\\Users\\Player", [], ["game.dll"], files, data, 0x400000, 0x500000, 77, 78, "pid fs ipc net capability", 2, 4, "native-module-open tls-callback", fault, true, "ready", "PEB TEB TLS ProcessParameters LoaderLock", layout)
+
+        expect result.ok == true
+        expect result.status == "dllmain-startup-fault-rollback-recorded"
+        expect (result.evidence).contains("peb-teb-layout-ready")
+        expect (result.evidence).contains("PEBTEBLayoutWritePlan")
+        expect (result.evidence).contains("dllmain-startup-rollback-recorded")
+
+    it "blocks startup rollback when PEB/TEB layout records are not ready":
+        val data = _dll_with_import_relocation_tls()
+        val files = [wine_dll_probe_file("\\KnownDlls\\game.dll", data)]
+        val fault = WineVmFault(process_id: 77, thread_id: 12, address: 0x502100, access: "execute", policy: "deliver-seh")
+        val init = wine_peb_teb_init_default()
+        val writes = wine_peb_teb_memory_write_gate(init, wine_vm_process_space_new(10, 30, "pid fs ipc net capability"))
+        val layout = wine_peb_teb_layout_write_plan(init, writes)
+        val result = wine_dll_record_file_view_startup_fault_with_peb_teb_layout("game.dll", "C:\\Games", "C:\\Users\\Player", [], ["game.dll"], files, data, 0x400000, 0x500000, 77, 78, "pid fs ipc net capability", 2, 4, "native-module-open tls-callback", fault, true, "ready", "PEB TEB TLS ProcessParameters LoaderLock", layout)
+
+        expect result.ok == false
+        expect result.error == "dllmain-handoff:peb-teb-layout:write:peb-write:page-fault-unmapped"
+        expect result.rollback_count == 0
+        expect (result.evidence).contains("dllmain-startup-fault-blocked")
+
+    it "records startup rollback only after PEB/TEB VM byte-write readback":
+        val data = _dll_with_import_relocation_tls()
+        val files = [wine_dll_probe_file("\\KnownDlls\\game.dll", data)]
+        val fault = WineVmFault(process_id: 77, thread_id: 12, address: 0x502100, access: "execute", policy: "deliver-seh")
+        val init = wine_peb_teb_init_default()
+        val writes = wine_peb_teb_memory_write_gate(init, _startup_write_space())
+        val layout = wine_peb_teb_layout_write_plan(init, writes)
+        val layout_bytes = wine_peb_teb_layout_byte_writes(layout)
+        val vm_writes = wine_peb_teb_apply_layout_byte_writes(_startup_write_space(), layout_bytes)
+        val result = wine_dll_record_file_view_startup_fault_with_peb_teb_vm_writes("game.dll", "C:\\Games", "C:\\Users\\Player", [], ["game.dll"], files, data, 0x400000, 0x500000, 77, 78, "pid fs ipc net capability", 2, 4, "native-module-open tls-callback", fault, true, "ready", "PEB TEB TLS ProcessParameters LoaderLock", vm_writes)
+
+        expect result.ok == true
+        expect result.status == "dllmain-startup-fault-rollback-recorded"
+        expect (result.evidence).contains("peb-teb-vm-writes-ready")
+        expect (result.evidence).contains("VMWriteReadback:PEBTEBLayoutBytes")
+        expect (result.evidence).contains("dllmain-startup-rollback-recorded")
+
+    it "blocks startup rollback when PEB/TEB VM byte writes are not ready":
+        val data = _dll_with_import_relocation_tls()
+        val files = [wine_dll_probe_file("\\KnownDlls\\game.dll", data)]
+        val fault = WineVmFault(process_id: 77, thread_id: 12, address: 0x502100, access: "execute", policy: "deliver-seh")
+        val init = wine_peb_teb_init_default()
+        val writes = wine_peb_teb_memory_write_gate(init, _startup_write_space())
+        val layout = wine_peb_teb_layout_write_plan(init, writes)
+        val layout_bytes = wine_peb_teb_layout_byte_writes(layout)
+        val vm_writes = wine_peb_teb_apply_layout_byte_writes(wine_vm_process_space_new(10, 30, "pid fs ipc net capability"), layout_bytes)
+        val result = wine_dll_record_file_view_startup_fault_with_peb_teb_vm_writes("game.dll", "C:\\Games", "C:\\Users\\Player", [], ["game.dll"], files, data, 0x400000, 0x500000, 77, 78, "pid fs ipc net capability", 2, 4, "native-module-open tls-callback", fault, true, "ready", "PEB TEB TLS ProcessParameters LoaderLock", vm_writes)
+
+        expect result.ok == false
+        expect result.error == "dllmain-handoff:dll-view-import-binding:peb-teb-vm-write:vm-write:NtTib.StackBase:page-fault-unmapped"
+        expect result.rollback_count == 0
+        expect (result.evidence).contains("dllmain-startup-fault-blocked")

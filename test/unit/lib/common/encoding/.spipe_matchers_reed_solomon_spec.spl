@@ -1,0 +1,398 @@
+# Reed-Solomon GF(2^8) Erasure Coding Specification
+#
+# Tests GF(2^8) arithmetic correctness and encode/decode round-trips.
+# Uses CCSDS/JPEG irreducible polynomial 0x11D.
+#
+# NOTE: All module-level helper functions are used to avoid the it-block
+# var-mutation footgun (see .claude/memory/feedback_it_block_var_mutation.md).
+#
+# ============================================================================
+
+use std.spipe.*
+use std.common.encoding.reed_solomon.{gf_mul, gf_inv, gf_pow, gf_add,
+    rs_encode, rs_decode}
+
+# ============================================================================
+# GF(2^8) arithmetic helpers
+# ============================================================================
+
+fn _gf_add_basic() -> bool:
+    # Addition in GF(2^8) is XOR
+    gf_add(0x53, 0xCA) == (0x53 xor 0xCA)
+
+fn _gf_add_self_zero() -> bool:
+    # a + a = 0 in GF(2^8)
+    gf_add(0xAB, 0xAB) == 0
+
+fn _gf_mul_identity() -> bool:
+    # a * 1 = a
+    gf_mul(0x53, 1) == 0x53
+
+fn _gf_mul_zero() -> bool:
+    # a * 0 = 0
+    gf_mul(0x53, 0) == 0
+
+fn _gf_mul_commutativity() -> bool:
+    # a * b = b * a
+    gf_mul(0x53, 0xCA) == gf_mul(0xCA, 0x53)
+
+fn _gf_mul_known_value() -> bool:
+    # 2 * 2 = 4 (no reduction needed since 4 < 256)
+    gf_mul(2, 2) == 4
+
+fn _gf_mul_with_reduction() -> bool:
+    # 0x80 * 2 should trigger reduction with 0x11D
+    # 0x80 << 1 = 0x100, then XOR 0x11D = 0x1D
+    gf_mul(0x80, 2) == 0x1D
+
+fn _gf_inv_basic() -> bool:
+    # inv(a) * a = 1
+    val a = 0x53
+    val inv_a = gf_inv(a)
+    gf_mul(a, inv_a) == 1
+
+fn _gf_inv_one() -> bool:
+    # inv(1) = 1
+    gf_inv(1) == 1
+
+fn _gf_inv_all_nonzero() -> bool:
+    # For all non-zero elements, a * inv(a) = 1
+    # Test a sample of values
+    var ok = true
+    var a = 1
+    while a <= 255 and ok:
+        val inv_a = gf_inv(a)
+        if gf_mul(a, inv_a) != 1:
+            ok = false
+        a = a + 1
+    ok
+
+fn _gf_pow_basic() -> bool:
+    # a^0 = 1, a^1 = a
+    gf_pow(0x53, 0) == 1 and gf_pow(0x53, 1) == 0x53
+
+fn _gf_pow_two_cubed() -> bool:
+    # 2^8 should wrap: 2^8 = 256 mod p(x) = 0x11D & 0xFF = 0x1D
+    gf_pow(2, 8) == 0x1D
+
+fn _gf_pow_order() -> bool:
+    # alpha=2 has order 255 in GF(2^8): 2^255 = 1
+    gf_pow(2, 255) == 1
+
+# ============================================================================
+# Encode helpers
+# ============================================================================
+
+fn _enc_basic_no_error() -> bool:
+    # Encode 4 bytes with 2 parity bytes, verify output length is 6
+    var data: [u8] = []
+    data.push(1)
+    data.push(2)
+    data.push(3)
+    data.push(4)
+    val r = rs_encode(data, 2)
+    if r.is_ok():
+        val encoded = r.unwrap()
+        encoded.len() == 6
+    else:
+        false
+
+fn _enc_systematic() -> bool:
+    # First k bytes of encoded output should equal input data
+    var data: [u8] = []
+    data.push(0xDE)
+    data.push(0xAD)
+    data.push(0xBE)
+    data.push(0xEF)
+    val r = rs_encode(data, 3)
+    if r.is_ok():
+        val enc = r.unwrap()
+        val b0 = (enc[0].to_i64() & 0xFF) == 0xDE
+        val b1 = (enc[1].to_i64() & 0xFF) == 0xAD
+        val b2 = (enc[2].to_i64() & 0xFF) == 0xBE
+        val b3 = (enc[3].to_i64() & 0xFF) == 0xEF
+        b0 and b1 and b2 and b3
+    else:
+        false
+
+fn _enc_moderate_size() -> bool:
+    # 8 data + 4 parity = 12 total (validates non-trivial encoding works)
+    var data: [u8] = []
+    var i = 0
+    while i < 8:
+        data.push((i * 31 + 7) & 0xFF)
+        i = i + 1
+    val r = rs_encode(data, 4)
+    if r.is_ok():
+        val enc = r.unwrap()
+        enc.len() == 12
+    else:
+        false
+
+fn _enc_exceeds_field() -> bool:
+    # Validate the check fires: use small data but huge parity_count
+    # 10 data + 246 parity = 256 > 255 → should return Err
+    var data: [u8] = []
+    var i = 0
+    while i < 10:
+        data.push(0x42)
+        i = i + 1
+    val r = rs_encode(data, 246)
+    not r.is_ok()
+
+# ============================================================================
+# Decode / round-trip helpers
+# ============================================================================
+
+fn _dec_no_erasures() -> bool:
+    # Encode then decode with no erasures: should recover original
+    var data: [u8] = []
+    data.push(10)
+    data.push(20)
+    data.push(30)
+    data.push(40)
+    val enc_r = rs_encode(data, 4)
+    if not enc_r.is_ok():
+        return false
+    val encoded = enc_r.unwrap()
+    var no_erasures: [i64] = []
+    val dec_r = rs_decode(encoded, 4, no_erasures)
+    if not dec_r.is_ok():
+        return false
+    val decoded = dec_r.unwrap()
+    if decoded.len() != 4:
+        return false
+    val d0 = (decoded[0].to_i64() & 0xFF) == 10
+    val d1 = (decoded[1].to_i64() & 0xFF) == 20
+    val d2 = (decoded[2].to_i64() & 0xFF) == 30
+    val d3 = (decoded[3].to_i64() & 0xFF) == 40
+    d0 and d1 and d2 and d3
+
+fn _dec_single_data_erasure() -> bool:
+    # Erase one data symbol, recover it
+    var data: [u8] = []
+    data.push(0xAA)
+    data.push(0xBB)
+    data.push(0xCC)
+    data.push(0xDD)
+    val enc_r = rs_encode(data, 2)
+    if not enc_r.is_ok():
+        return false
+    var received = enc_r.unwrap()
+    # Erase position 1
+    received[1] = 0x00
+    var erasures: [i64] = []
+    erasures.push(1)
+    val dec_r = rs_decode(received, 2, erasures)
+    if not dec_r.is_ok():
+        return false
+    val decoded = dec_r.unwrap()
+    if decoded.len() != 4:
+        return false
+    val d0 = (decoded[0].to_i64() & 0xFF) == 0xAA
+    val d1 = (decoded[1].to_i64() & 0xFF) == 0xBB
+    val d2 = (decoded[2].to_i64() & 0xFF) == 0xCC
+    val d3 = (decoded[3].to_i64() & 0xFF) == 0xDD
+    d0 and d1 and d2 and d3
+
+fn _dec_single_parity_erasure() -> bool:
+    # Erase one parity symbol, still recovers original data
+    var data: [u8] = []
+    data.push(0x11)
+    data.push(0x22)
+    data.push(0x33)
+    val enc_r = rs_encode(data, 3)
+    if not enc_r.is_ok():
+        return false
+    var received = enc_r.unwrap()
+    # Erase last parity position (index 5)
+    received[5] = 0x00
+    var erasures: [i64] = []
+    erasures.push(5)
+    val dec_r = rs_decode(received, 3, erasures)
+    if not dec_r.is_ok():
+        return false
+    val decoded = dec_r.unwrap()
+    if decoded.len() != 3:
+        return false
+    val d0 = (decoded[0].to_i64() & 0xFF) == 0x11
+    val d1 = (decoded[1].to_i64() & 0xFF) == 0x22
+    val d2 = (decoded[2].to_i64() & 0xFF) == 0x33
+    d0 and d1 and d2
+
+fn _dec_max_erasures() -> bool:
+    # Erase exactly parity_count symbols (maximum recoverable)
+    var data: [u8] = []
+    data.push(0x01)
+    data.push(0x02)
+    data.push(0x03)
+    data.push(0x04)
+    data.push(0x05)
+    val enc_r = rs_encode(data, 3)
+    if not enc_r.is_ok():
+        return false
+    var received = enc_r.unwrap()
+    # Erase 3 positions: data[0], data[2], parity[0] (index 5)
+    received[0] = 0x00
+    received[2] = 0x00
+    received[5] = 0x00
+    var erasures: [i64] = []
+    erasures.push(0)
+    erasures.push(2)
+    erasures.push(5)
+    val dec_r = rs_decode(received, 3, erasures)
+    if not dec_r.is_ok():
+        return false
+    val decoded = dec_r.unwrap()
+    if decoded.len() != 5:
+        return false
+    val d0 = (decoded[0].to_i64() & 0xFF) == 0x01
+    val d1 = (decoded[1].to_i64() & 0xFF) == 0x02
+    val d2 = (decoded[2].to_i64() & 0xFF) == 0x03
+    val d3 = (decoded[3].to_i64() & 0xFF) == 0x04
+    val d4 = (decoded[4].to_i64() & 0xFF) == 0x05
+    d0 and d1 and d2 and d3 and d4
+
+fn _dec_too_many_erasures() -> bool:
+    # More erasures than parity_count should fail
+    var data: [u8] = []
+    data.push(1)
+    data.push(2)
+    data.push(3)
+    val enc_r = rs_encode(data, 2)
+    if not enc_r.is_ok():
+        return false
+    var received = enc_r.unwrap()
+    received[0] = 0
+    received[1] = 0
+    received[2] = 0
+    var erasures: [i64] = []
+    erasures.push(0)
+    erasures.push(1)
+    erasures.push(2)
+    val dec_r = rs_decode(received, 2, erasures)
+    not dec_r.is_ok()
+
+fn _dec_roundtrip_larger() -> bool:
+    # Larger data block: 16 data + 4 parity, erase 4 positions
+    var data: [u8] = []
+    var i = 0
+    while i < 16:
+        data.push((i * 17 + 3) & 0xFF)
+        i = i + 1
+    val enc_r = rs_encode(data, 4)
+    if not enc_r.is_ok():
+        return false
+    var received = enc_r.unwrap()
+    # Erase positions 3, 7, 11, 15
+    received[3] = 0x00
+    received[7] = 0x00
+    received[11] = 0x00
+    received[15] = 0x00
+    var erasures: [i64] = []
+    erasures.push(3)
+    erasures.push(7)
+    erasures.push(11)
+    erasures.push(15)
+    val dec_r = rs_decode(received, 4, erasures)
+    if not dec_r.is_ok():
+        return false
+    val decoded = dec_r.unwrap()
+    if decoded.len() != 16:
+        return false
+    # Verify all 16 bytes match original
+    var ok = true
+    var j = 0
+    while j < 16 and ok:
+        val expected = (j * 17 + 3) & 0xFF
+        if (decoded[j].to_i64() & 0xFF) != expected:
+            ok = false
+        j = j + 1
+    ok
+
+# ============================================================================
+# Spec: GF(2^8) Arithmetic
+# ============================================================================
+
+describe "GF(2^8) arithmetic":
+
+    it "addition is XOR":
+        expect _gf_add_basic() == true
+
+    it "a + a = 0 (self-inverse)":
+        expect _gf_add_self_zero() == true
+
+    it "multiplication by 1 is identity":
+        expect _gf_mul_identity() == true
+
+    it "multiplication by 0 is zero":
+        expect _gf_mul_zero() == true
+
+    it "multiplication is commutative":
+        expect _gf_mul_commutativity() == true
+
+    it "2 * 2 = 4 (no reduction)":
+        expect _gf_mul_known_value() == true
+
+    it "0x80 * 2 = 0x1D (with reduction)":
+        expect _gf_mul_with_reduction() == true
+
+    it "a * inv(a) = 1":
+        expect _gf_inv_basic() == true
+
+    it "inv(1) = 1":
+        expect _gf_inv_one() == true
+
+    it "all non-zero elements have valid inverses":
+        expect _gf_inv_all_nonzero() == true
+
+    it "pow basics: a^0=1, a^1=a":
+        expect _gf_pow_basic() == true
+
+    it "2^8 = 0x1D (polynomial reduction)":
+        expect _gf_pow_two_cubed() == true
+
+    it "alpha=2 has order 255":
+        expect _gf_pow_order() == true
+
+# ============================================================================
+# Spec: Reed-Solomon Encode
+# ============================================================================
+
+describe "RS encode":
+
+    it "output length is data + parity":
+        expect _enc_basic_no_error() == true
+
+    it "encoding is systematic (data bytes preserved)":
+        expect _enc_systematic() == true
+
+    it "moderate size encoding produces correct length":
+        expect _enc_moderate_size() == true
+
+    it "256+ total symbols returns error":
+        expect _enc_exceeds_field() == true
+
+# ============================================================================
+# Spec: Reed-Solomon Decode (erasure)
+# ============================================================================
+
+describe "RS decode (erasure)":
+
+    it "no erasures recovers original data":
+        expect _dec_no_erasures() == true
+
+    it "single data erasure recovered":
+        expect _dec_single_data_erasure() == true
+
+    it "single parity erasure recovered":
+        expect _dec_single_parity_erasure() == true
+
+    it "maximum erasures (= parity count) recovered":
+        expect _dec_max_erasures() == true
+
+    it "too many erasures returns error":
+        expect _dec_too_many_erasures() == true
+
+    it "larger block (16 data, 4 parity, 4 erasures) round-trips":
+        expect _dec_roundtrip_larger() == true

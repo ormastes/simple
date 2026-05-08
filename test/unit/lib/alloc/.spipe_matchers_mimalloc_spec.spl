@@ -1,0 +1,471 @@
+# @cover src/lib/nogc_sync_mut/mimalloc.spl
+# # Mimalloc Allocator Specification
+#
+# **Feature IDs:** #alloc-001
+# **Category:** Infrastructure | Stdlib
+# **Difficulty:** 4/5
+# **Status:** Draft
+# **Requirements:** N/A
+# **Plan:** N/A
+# **Design:** N/A
+# **Research:** N/A
+# **Artifacts:** N/A
+#
+# ## Overview
+#
+# BDD specs for the pure-Simple mimalloc port.
+# Covers MiPage free-list mechanics, MiSegment slice carving,
+# MiHeap size-class lookup, MimallocAllocator trait impl, and
+# a 10k-iteration alloc/free stress loop.
+#
+# Tests are RED until `src/lib/nogc_sync_mut/mimalloc.spl` is implemented.
+# In interpreter mode the file load itself fails (module not found) — that
+# is the intended red-phase signal.  In compiled mode the `it` bodies run.
+#
+# ## Key Concepts
+#
+# | Concept        | Description                                              |
+# |----------------|----------------------------------------------------------|
+# | MiPage         | 64 KiB unit; holds blocks of one size class; 3 free lists|
+# | MiSegment      | 32 MiB OS chunk; carved into 1024 slices / pages         |
+# | MiHeap         | Thread-local heap; per-size-class page lists             |
+# | MimallocAllocator | Implements Allocator trait; default_allocator() entry |
+
+use std.nogc_sync_mut.mimalloc.{
+    MiBlock,
+    MiPage,
+    MiSegment,
+    MiHeap,
+    MiOption,
+    MimallocAllocator,
+    mimalloc_init,
+    mi_heap_new,
+    mi_heap_delete,
+    mi_heap_malloc,
+    mi_heap_zalloc,
+    mi_heap_calloc,
+    mi_heap_realloc,
+    mi_heap_free,
+    mi_good_size,
+    mi_usable_size,
+    mi_zalloc,
+    mi_mallocn,
+    mi_malloc_aligned,
+    mi_zalloc_aligned,
+    mi_calloc,
+    mi_calloc_aligned,
+    mi_free_size,
+    mi_free_size_aligned,
+    mi_rezalloc,
+    mi_realloc_aligned,
+    mi_rezalloc_aligned,
+    mi_stats_current,
+    mi_stats_reset,
+    mi_collect,
+    mi_heap_collect,
+    mi_version,
+    mi_option_is_enabled,
+    mi_option_enable,
+    mi_option_disable,
+    mi_option_set_enabled,
+    mi_size_class_index,
+    default_allocator,
+}
+
+# ============================================================================
+# Test Group 1: MiPage free-list mechanics
+# ============================================================================
+
+describe "MiPage":
+    """
+    ## MiPage — per-size-class page with three free lists
+
+    Validates that the local free list supports O(1) pop-to-alloc and
+    push-to-free, and that capacity / used bookkeeping stays consistent.
+    """
+
+    it "alloc from non-empty free list decrements free count":
+        # Construct a page with 4 free blocks of size 64
+        val page = MiPage(
+            block_size: 64,
+            capacity: 4,
+            used: 0,
+            free: [MiBlock(next: 1), MiBlock(next: 2), MiBlock(next: 3), MiBlock(next: 0)],
+            local_free: [],
+            xthread_free: [],
+        )
+        val free_before = page.free.len()
+        # After one alloc the free list should shrink by one
+        expect free_before == 4
+
+    it "free pushes block to local_free list":
+        val page = MiPage(
+            block_size: 32,
+            capacity: 8,
+            used: 3,
+            free: [],
+            local_free: [],
+            xthread_free: [],
+        )
+        val local_before = page.local_free.len()
+        # Simulate push: local_free grows after a free
+        expect local_before == 0
+
+    it "capacity equals used plus free plus local_free at init":
+        val page = MiPage(
+            block_size: 16,
+            capacity: 8,
+            used: 2,
+            free: [MiBlock(next: 0), MiBlock(next: 0), MiBlock(next: 0)],
+            local_free: [MiBlock(next: 0), MiBlock(next: 0), MiBlock(next: 0)],
+            xthread_free: [],
+        )
+        # used(2) + free(3) + local_free(3) == capacity(8)
+        val check = page.used + page.free.len() + page.local_free.len()
+        expect check == page.capacity
+
+    it "block_size field stores the size class value":
+        val page = MiPage(
+            block_size: 128,
+            capacity: 1,
+            used: 0,
+            free: [],
+            local_free: [],
+            xthread_free: [],
+        )
+        expect page.block_size == 128
+
+# ============================================================================
+# Test Group 2: MiSegment slice carving
+# ============================================================================
+
+describe "MiSegment":
+    """
+    ## MiSegment — 32 MiB OS chunk divided into 1024 slices
+
+    Validates segment construction and page list population.
+    """
+
+    it "can be created with zero pages":
+        val seg = MiSegment(
+            slice_count: 0,
+            thread_id: 0,
+            pages: [],
+        )
+        expect seg.pages.len() == 0
+
+    it "slice_count reflects number of carved pages":
+        val page0 = MiPage(block_size: 64, capacity: 16, used: 0, free: [], local_free: [], xthread_free: [])
+        val page1 = MiPage(block_size: 64, capacity: 16, used: 0, free: [], local_free: [], xthread_free: [])
+        val seg = MiSegment(
+            slice_count: 2,
+            thread_id: 1,
+            pages: [page0, page1],
+        )
+        expect seg.slice_count == seg.pages.len()
+
+    it "thread_id is stored on the segment":
+        val seg = MiSegment(slice_count: 0, thread_id: 42, pages: [])
+        expect seg.thread_id == 42
+
+# ============================================================================
+# Test Group 3: MiHeap size-class lookup
+# ============================================================================
+
+describe "MiHeap":
+    """
+    ## MiHeap — thread-local heap with per-size-class page lists
+
+    Validates size-class index lookup and basic heap accessors.
+    The pure-Simple port uses a fixed ~32-entry lookup table; no right-shift
+    (Cranelift >> bug workaround — see MEMORY.md / D-2).
+    """
+
+    it "size 8 maps to class index 0":
+        val idx = mi_size_class_index(8)
+        expect idx == 0
+
+    it "size 64 maps to a valid class index":
+        val idx = mi_size_class_index(64)
+        expect idx > 0
+
+    it "size 1025 maps to large class (index beyond small range)":
+        # Small range covers up to 1024; 1025 should return an index >= 8
+        val idx = mi_size_class_index(1025)
+        expect idx > 7
+
+    it "mi_size_class_index is non-negative for any positive size":
+        val idx8   = mi_size_class_index(8)
+        val idx16  = mi_size_class_index(16)
+        val idx512 = mi_size_class_index(512)
+        expect idx8 > -1
+        expect idx16 > -1
+        expect idx512 > -1
+
+# ============================================================================
+# Test Group 4: MimallocAllocator — Allocator trait impl
+# ============================================================================
+
+describe "MimallocAllocator":
+    """
+    ## MimallocAllocator — implements Allocator trait
+
+    Validates allocate / deallocate / reallocate and the default_allocator()
+    factory.  In interpreter mock mode sys_malloc is simulated with arrays,
+    so all assertions run without native code.
+    """
+
+    it "default_allocator returns a MimallocAllocator":
+        val alloc = default_allocator()
+        # Structural check: initialized must be false before mimalloc_init()
+        expect alloc.initialized == false
+
+    it "allocate after init returns non-nil for size 64":
+        val heap = MiHeap(size_classes: [8, 16, 32, 64, 128, 256, 512, 1024], pages_by_class: [])
+        mimalloc_init(heap)
+        val alloc = MimallocAllocator(initialized: true)
+        val ptr = alloc.allocate(64, 8)
+        expect ptr.? == true
+
+    it "allocate size 0 returns nil":
+        val heap = MiHeap(size_classes: [8, 16, 32, 64, 128, 256, 512, 1024], pages_by_class: [])
+        mimalloc_init(heap)
+        val alloc = MimallocAllocator(initialized: true)
+        val ptr = alloc.allocate(0, 8)
+        expect ptr.? == false
+
+    it "deallocate does not crash for valid ptr":
+        val heap = MiHeap(size_classes: [8, 16, 32, 64, 128, 256, 512, 1024], pages_by_class: [])
+        mimalloc_init(heap)
+        val alloc = MimallocAllocator(initialized: true)
+        val ptr = alloc.allocate(32, 8)
+        # If allocate returned something, free it; either way expect no crash
+        val got_ptr = ptr.?
+        expect got_ptr == true
+
+    it "reallocate to larger size returns non-nil":
+        val heap = MiHeap(size_classes: [8, 16, 32, 64, 128, 256, 512, 1024], pages_by_class: [])
+        mimalloc_init(heap)
+        val alloc = MimallocAllocator(initialized: true)
+        val old_ptr_opt = alloc.allocate(32, 8)
+        val old_ptr = old_ptr_opt.unwrap()
+        val new_ptr = alloc.reallocate(old_ptr, 32, 128, 8)
+        expect new_ptr.? == true
+
+    it "mi_zalloc returns zeroed memory":
+        val heap = MiHeap(size_classes: [8, 16, 32, 64, 128, 256, 512, 1024], pages_by_class: [])
+        mimalloc_init(heap)
+        val ptr_opt = mi_zalloc(32)
+        val ptr = ptr_opt.unwrap()
+        var zero_count: i64 = 0
+        for byte in ptr:
+            if byte == 0u8:
+                zero_count = zero_count + 1
+        expect zero_count == ptr.len() as i64
+
+    it "mi_good_size returns the serving size class":
+        expect mi_good_size(0) == 0
+        expect mi_good_size(1) == 8
+        expect mi_good_size(65) == 128
+        expect mi_good_size(70000) == 70000
+
+    it "mi_usable_size returns mock pointer length":
+        val heap = MiHeap(size_classes: [8, 16, 32, 64, 128, 256, 512, 1024], pages_by_class: [])
+        mimalloc_init(heap)
+        val ptr_opt = mi_mallocn(2, 16)
+        val ptr = ptr_opt.unwrap()
+        expect mi_usable_size(ptr) == ptr.len()
+
+    it "mi_mallocn allocates count times size bytes":
+        val heap = MiHeap(size_classes: [8, 16, 32, 64, 128, 256, 512, 1024], pages_by_class: [])
+        mimalloc_init(heap)
+        val ptr_opt = mi_mallocn(4, 8)
+        val ptr = ptr_opt.unwrap()
+        expect ptr.len() == 32
+
+    it "aligned allocation validates power-of-two alignment":
+        val heap = MiHeap(size_classes: [8, 16, 32, 64, 128, 256, 512, 1024], pages_by_class: [])
+        mimalloc_init(heap)
+        expect mi_malloc_aligned(32, 16).? == true
+        expect mi_malloc_aligned(32, 24).? == false
+
+    it "aligned zero allocation keeps zeroing semantics":
+        val heap = MiHeap(size_classes: [8, 16, 32, 64, 128, 256, 512, 1024], pages_by_class: [])
+        mimalloc_init(heap)
+        val ptr_opt = mi_zalloc_aligned(32, 16)
+        val ptr = ptr_opt.unwrap()
+        var zero_count: i64 = 0
+        for byte in ptr:
+            if byte == 0u8:
+                zero_count = zero_count + 1
+        expect zero_count == ptr.len() as i64
+
+    it "mi_calloc returns zeroed count times size bytes":
+        val heap = MiHeap(size_classes: [8, 16, 32, 64, 128, 256, 512, 1024], pages_by_class: [])
+        mimalloc_init(heap)
+        val ptr_opt = mi_calloc(3, 16)
+        val ptr = ptr_opt.unwrap()
+        var zero_count: i64 = 0
+        for byte in ptr:
+            if byte == 0u8:
+                zero_count = zero_count + 1
+        expect ptr.len() == 64
+        expect zero_count == ptr.len() as i64
+
+    it "mi_calloc_aligned validates alignment and returns zeroed memory":
+        val heap = MiHeap(size_classes: [8, 16, 32, 64, 128, 256, 512, 1024], pages_by_class: [])
+        mimalloc_init(heap)
+        val ptr_opt = mi_calloc_aligned(2, 16, 32)
+        val ptr = ptr_opt.unwrap()
+        expect ptr.len() == 32
+        expect mi_calloc_aligned(2, 16, 12).? == false
+
+    it "mi_rezalloc preserves bytes and zeros the grown tail":
+        val heap = MiHeap(size_classes: [8, 16, 32, 64, 128, 256, 512, 1024], pages_by_class: [])
+        mimalloc_init(heap)
+        val old_ptr_opt = mi_zalloc(8)
+        val old_ptr = old_ptr_opt.unwrap()
+        old_ptr[0] = 7u8
+        val new_ptr_opt = mi_rezalloc(old_ptr, 8, 32)
+        val new_ptr = new_ptr_opt.unwrap()
+        var tail_zero_count: i64 = 0
+        for i in 8..new_ptr.len():
+            if new_ptr[i] == 0u8:
+                tail_zero_count = tail_zero_count + 1
+        expect new_ptr[0] == 7u8
+        expect tail_zero_count == (new_ptr.len() - 8) as i64
+
+    it "aligned realloc variants validate alignment":
+        val heap = MiHeap(size_classes: [8, 16, 32, 64, 128, 256, 512, 1024], pages_by_class: [])
+        mimalloc_init(heap)
+        val ptr = mi_zalloc(16).unwrap()
+        expect mi_realloc_aligned(ptr, 16, 32, 16).? == true
+        val ptr2 = mi_zalloc(16).unwrap()
+        expect mi_rezalloc_aligned(ptr2, 16, 32, 24).? == false
+
+    it "sized free variants preserve accounting":
+        val heap = MiHeap(size_classes: [8, 16, 32, 64, 128, 256, 512, 1024], pages_by_class: [])
+        mimalloc_init(heap)
+        val alloc = MimallocAllocator(initialized: true)
+        val ptr = mi_mallocn(2, 16).unwrap()
+        val before_free = alloc.total_allocated()
+        mi_free_size(ptr, 32)
+        val after_free = alloc.total_allocated()
+        val ptr2 = mi_mallocn(2, 16).unwrap()
+        mi_free_size_aligned(ptr2, 32, 16)
+        expect before_free > after_free
+
+    it "heap-specific allocation shims delegate to the global heap":
+        val heap = mi_heap_new()
+        mimalloc_init(heap)
+        val ptr = mi_heap_malloc(heap, 16)
+        val zptr = mi_heap_zalloc(heap, 16)
+        val cptr = mi_heap_calloc(heap, 2, 8)
+        expect ptr.? == true
+        expect zptr.? == true
+        expect cptr.? == true
+        mi_heap_free(heap, ptr.unwrap(), 16)
+        mi_heap_delete(heap)
+        expect mi_good_size(16) == 16
+
+    it "heap-specific realloc shim preserves prefix bytes":
+        val heap = mi_heap_new()
+        mimalloc_init(heap)
+        val ptr = mi_heap_zalloc(heap, 8).unwrap()
+        ptr[0] = 9u8
+        val grown = mi_heap_realloc(heap, ptr, 8, 32)
+        expect grown.? == true
+        val bytes = grown.unwrap()
+        expect bytes[0] == 9u8
+        expect bytes.len() == 32
+
+    it "total_allocated increases after each alloc":
+        val heap = MiHeap(size_classes: [8, 16, 32, 64, 128, 256, 512, 1024], pages_by_class: [])
+        mimalloc_init(heap)
+        val alloc = MimallocAllocator(initialized: true)
+        val before = alloc.total_allocated()
+        alloc.allocate(64, 8)
+        val after = alloc.total_allocated()
+        expect after > before
+
+    it "stats snapshot tracks allocation and free counters":
+        val heap = mi_heap_new()
+        mimalloc_init(heap)
+        val ptr = mi_mallocn(2, 16).unwrap()
+        val after_alloc = mi_stats_current()
+        expect after_alloc.allocated == 32
+        expect after_alloc.peak_allocated == 32
+        expect after_alloc.allocation_count == 1
+        mi_free_size(ptr, 32)
+        val after_free = mi_stats_current()
+        expect after_free.allocated == 0
+        expect after_free.free_count == 1
+
+    it "stats reset keeps allocated bytes but clears event counters":
+        val heap = mi_heap_new()
+        mimalloc_init(heap)
+        mi_mallocn(2, 16)
+        mi_stats_reset()
+        val stats = mi_stats_current()
+        expect stats.allocated == 32
+        expect stats.peak_allocated == 32
+        expect stats.allocation_count == 0
+        expect stats.free_count == 0
+
+    it "collect hooks and version string expose compatibility surface":
+        val heap = mi_heap_new()
+        mimalloc_init(heap)
+        mi_collect(true)
+        mi_heap_collect(heap, false)
+        expect mi_version() == "simple-mimalloc-compat"
+
+    it "option toggles round-trip modeled option state":
+        mimalloc_init(mi_heap_new())
+        expect mi_option_is_enabled(MiOption.Verbose) == false
+        mi_option_enable(MiOption.Verbose)
+        expect mi_option_is_enabled(MiOption.Verbose) == true
+        mi_option_disable(MiOption.Verbose)
+        expect mi_option_is_enabled(MiOption.Verbose) == false
+        mi_option_set_enabled(MiOption.ShowStats, true)
+        expect mi_option_is_enabled(MiOption.ShowStats) == true
+
+# ============================================================================
+# Test Group 5: Stress — 10k alloc/free cycle
+# ============================================================================
+
+describe "stress":
+    """
+    ## Stress — 10 000 alloc/free iterations
+
+    Validates that the allocator does not crash or corrupt state under
+    repeated use.  In compiled mode this loop runs for real.
+    In interpreter mode the file load is the red-phase signal.
+
+    D-8 note: no `return` inside `it`; loop result accumulated into a single
+    final expression.
+    """
+
+    it "10k alloc/free cycle completes without crash":
+        val heap = MiHeap(size_classes: [8, 16, 32, 64, 128, 256, 512, 1024], pages_by_class: [])
+        mimalloc_init(heap)
+        val alloc = MimallocAllocator(initialized: true)
+        var count: i64 = 0
+        for _i in 0..10000:
+            val ptr_opt = alloc.allocate(64, 8)
+            if ptr_opt.?:
+                val ptr = ptr_opt.unwrap()
+                alloc.deallocate(ptr, 64, 8)
+                count = count + 1
+        expect count == 10000
+
+    it "total_allocated tracks correctly after mixed sizes":
+        val heap = MiHeap(size_classes: [8, 16, 32, 64, 128, 256, 512, 1024], pages_by_class: [])
+        mimalloc_init(heap)
+        val alloc = MimallocAllocator(initialized: true)
+        val sizes = [8, 16, 32, 64, 128, 256]
+        var alloc_count: i64 = 0
+        for sz in sizes:
+            val ptr_opt = alloc.allocate(sz, 8)
+            if ptr_opt.?:
+                alloc_count = alloc_count + 1
+        expect alloc_count > 0

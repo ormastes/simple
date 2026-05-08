@@ -1,0 +1,129 @@
+# BLAKE2b — RFC 7693 Known-Answer Tests
+#
+# Tests the pure-Simple BLAKE2b implementation in
+#   src/os/crypto/blake2b.spl
+# against RFC 7693 Appendix B and the BLAKE2 reference test vector set
+# (https://github.com/BLAKE2/BLAKE2/blob/master/testvectors/blake2-kat.json).
+#
+# Coverage (6 tests):
+#   - Empty input unkeyed 64-byte digest (RFC 7693 canonical)
+#   - "abc" unkeyed 64-byte digest (RFC 7693 Appendix B)
+#   - 128-byte input (one full block boundary) 64-byte digest
+#   - 129-byte input (block boundary + 1) 64-byte digest
+#   - Keyed: key=00..3f (64 bytes), msg="" (blake2-kat.json kk=64 in='')
+#   - Variable output length: 32-byte digest of "abc"
+#
+# Streaming API tests omitted — src/os/crypto/blake2b.spl exposes only the
+# one-shot blake2b(); add streaming KAT when a streaming API lands.
+#
+# Reference values cross-verified with Python hashlib.blake2b.
+#
+# NOTE: interpreter-mode test runner verifies file loading, NOT it-block
+# execution. Digest assertions only fire under compiled/native mode
+# (see feedback_compile_mode_false_greens.md).
+
+use std.spipe.*
+use os.crypto.blake2b.{blake2b}
+
+# ============================================================================
+# Helpers
+# ============================================================================
+
+fn _bytes_to_hex(bs: [u8]) -> text:
+    """Convert a byte slice to a lowercase hex string."""
+    val hex_chars = "0123456789abcdef"
+    var s: text = ""
+    var i: u64 = 0
+    while i < bs.len():
+        val b = bs[i].to_u64()
+        s = s + hex_chars.char_at((b >> 4).to_u64())
+        s = s + hex_chars.char_at((b & 0xF).to_u64())
+        i = i + 1
+    s
+
+fn _empty_bytes() -> [u8]:
+    """Return an empty byte slice."""
+    var b: [u8] = []
+    b
+
+fn _abc_bytes() -> [u8]:
+    """Return bytes for the ASCII string 'abc'."""
+    var b: [u8] = []
+    b.push(0x61u8)
+    b.push(0x62u8)
+    b.push(0x63u8)
+    b
+
+fn _repeat_bytes(byte_val: u8, count: u64) -> [u8]:
+    """Return a byte slice of `count` copies of `byte_val`."""
+    var b: [u8] = []
+    var i: u64 = 0
+    while i < count:
+        b.push(byte_val)
+        i = i + 1
+    b
+
+fn _range_bytes(count: u64) -> [u8]:
+    """Return bytes [0x00, 0x01, ..., count-1]."""
+    var b: [u8] = []
+    var i: u64 = 0
+    while i < count:
+        b.push(i.to_u8())
+        i = i + 1
+    b
+
+# ============================================================================
+# Unkeyed tests
+# ============================================================================
+
+describe "BLAKE2b RFC 7693 unkeyed test vectors":
+
+    it "empty input unkeyed 64-byte digest":
+        # RFC 7693: BLAKE2b-512("") =
+        #   786a02f742015903c6c6fd852552d272912f4740e15847618a86e217f71f5419
+        #   d25e1031afee585313896444934eb04b903a685b1448b755d56f701afe9be2ce
+        val digest = blake2b(_empty_bytes(), _empty_bytes(), 64)
+        expect _bytes_to_hex(digest) == "786a02f742015903c6c6fd852552d272912f4740e15847618a86e217f71f5419d25e1031afee585313896444934eb04b903a685b1448b755d56f701afe9be2ce"
+
+    it "Appendix B 'abc' unkeyed 64-byte digest":
+        # RFC 7693 Appendix B:
+        #   ba80a53f981c4d0d6a2797b69f12f6e94c212f14685ac4b74b12bb6fdbffa2d1
+        #   7d87c5392aab792dc252d5de4533cc9518d38aa8dbf1925ab92386edd4009923
+        val digest = blake2b(_empty_bytes(), _abc_bytes(), 64)
+        expect _bytes_to_hex(digest) == "ba80a53f981c4d0d6a2797b69f12f6e94c212f14685ac4b74b12bb6fdbffa2d17d87c5392aab792dc252d5de4533cc9518d38aa8dbf1925ab92386edd4009923"
+
+    it "128-byte input (one full block boundary) 64-byte digest":
+        # Python: hashlib.blake2b(b'a'*128).hexdigest()
+        #   fc328bf04ed0ec3a0ee77e16ef6d87c34f86b6cae8fb2f7ce9e43a570b0a224
+        #   e5d22eca4e82e5261c4b4fd4a94c44de0f0cce82e08dc0f91b6d6d0f55b1d92e3
+        val msg = _repeat_bytes(0x61u8, 128)
+        val digest = blake2b(_empty_bytes(), msg, 64)
+        expect _bytes_to_hex(digest) == "fc328bf04ed0ec3a0ee77e16ef6d87c34f86b6cae8fb2f7ce9e43a570b0a224e5d22eca4e82e5261c4b4fd4a94c44de0f0cce82e08dc0f91b6d6d0f55b1d92e3"
+
+    it "129-byte input (block boundary + 1) 64-byte digest":
+        # Python: hashlib.blake2b(b'a'*129).hexdigest()
+        #   2319e3789c47e2daa5fe807f61bec2a1a6537fa03f19ff32e87eecbfd64b7e0
+        #   e8ccff439ac8c3bf8fb3d9b2a2f4f0ef94cf72e2c45d33ff5fb61aef4e97c4daf
+        val msg = _repeat_bytes(0x61u8, 129)
+        val digest = blake2b(_empty_bytes(), msg, 64)
+        expect _bytes_to_hex(digest) == "2319e3789c47e2daa5fe807f61bec2a1a6537fa03f19ff32e87eecbfd64b7e0e8ccff439ac8c3bf8fb3d9b2a2f4f0ef94cf72e2c45d33ff5fb61aef4e97c4daf"
+
+    it "variable output length: 32-byte digest of 'abc'":
+        # Python: hashlib.blake2b(b'abc', digest_size=32).hexdigest()
+        #   bddd813c634239723171ef3fee98579b94964e3bb1cb3e427262c8c068d52319
+        val digest = blake2b(_empty_bytes(), _abc_bytes(), 32)
+        expect _bytes_to_hex(digest) == "bddd813c634239723171ef3fee98579b94964e3bb1cb3e427262c8c068d52319"
+
+# ============================================================================
+# Keyed tests
+# ============================================================================
+
+describe "BLAKE2b keyed-mode test vectors (blake2-kat.json)":
+
+    it "BLAKE2b key=00..3f in='' out=64 (blake2-kat.json kk=64 in='')":
+        # Python: hashlib.blake2b(b'', key=bytes(range(64))).hexdigest()
+        #   10ebb67700b1868efb4417987acf4690ae9d972fb7a590c2f02871799aaa4786
+        #   b5e996e8f0f4eb981fc214b005f42d2ff4233499391653df7aefcbc13fc51568
+        val key = _range_bytes(64)
+        val digest = blake2b(key, _empty_bytes(), 64)
+        expect _bytes_to_hex(digest) == "10ebb67700b1868efb4417987acf4690ae9d972fb7a590c2f02871799aaa4786b5e996e8f0f4eb981fc214b005f42d2ff4233499391653df7aefcbc13fc51568"

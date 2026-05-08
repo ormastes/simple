@@ -1,0 +1,89 @@
+use common.wine_service_adapter.{
+    wine_service_adapter_add,
+    wine_service_adapter_audio_gate,
+    wine_service_adapter_feature_string,
+    wine_service_adapter_font_gate,
+    wine_service_adapter_gate,
+    wine_service_adapter_gate_with_service_result,
+    wine_service_adapter_input_gate,
+    wine_service_adapter_missing_services,
+    wine_service_adapter_new,
+    wine_service_adapter_ready,
+    wine_service_adapter_required_services
+}
+use common.wine_advapi32_service.{wine_advapi32_execute_service_start}
+
+fn _base_host_features() -> text:
+    "fd-table stdio pipes sockets poll-wait timers errno cwd-env-argv spawn fs-paths fs-attrs fs-locks " +
+        "pthread tls mutex condvar semaphore event dynload"
+
+fn _all_services() -> text:
+    "ipc-server handle-table audio-device audio-buffer font-discovery font-raster " +
+        "crypto-random crypto-hash hid-keyboard hid-pointer printer-spool multimedia-timer"
+
+describe "Wine host service adapter":
+    it "lists IPC, handle, audio, font, crypto, HID, printing, and multimedia services":
+        val services = wine_service_adapter_required_services()
+        expect services.len() > 10
+        expect services[0] == "ipc-server"
+
+    it "reports the first missing service":
+        val missing = wine_service_adapter_missing_services("ipc-server handle-table")
+        expect missing[0] == "audio-device"
+
+    it "rejects unknown service declarations":
+        val result = wine_service_adapter_add(wine_service_adapter_new(_base_host_features()), "unknown")
+        expect result.ok == false
+        expect result.state == "unknown-service"
+
+    it "derives host features only from complete service pairs":
+        val partial = wine_service_adapter_feature_string("audio-device font-discovery crypto-random hid-keyboard", _base_host_features())
+        expect partial == _base_host_features()
+
+        val full = wine_service_adapter_feature_string(_all_services(), _base_host_features())
+        expect (full).contains("audio")
+        expect (full).contains("fonts")
+        expect (full).contains("crypto")
+        expect (full).contains("hid")
+
+    it "blocks on missing service coverage before host readiness":
+        val adapter = wine_service_adapter_new(_base_host_features())
+        val added = wine_service_adapter_add(adapter, "ipc-server")
+        expect wine_service_adapter_gate(added.adapter) == "missing-service-handle-table"
+
+    it "reaches the existing host gate when all service and base features are present":
+        val adapter = wine_service_adapter_ready(_base_host_features())
+        expect wine_service_adapter_gate(adapter) == "ready"
+
+    it "requires bounded ADVAPI32 service-control evidence before service readiness":
+        val adapter = wine_service_adapter_ready(_base_host_features())
+        val service = wine_advapi32_execute_service_start(
+            ["OpenSCManagerW", "CreateServiceW", "OpenServiceW", "StartServiceW", "CloseServiceHandle"],
+            "SimpleOSSCM",
+            "WineEventLog"
+        )
+        expect wine_service_adapter_gate_with_service_result(adapter, service) == "ready"
+
+    it "keeps service readiness blocked on failed service-control evidence":
+        val adapter = wine_service_adapter_ready(_base_host_features())
+        val service = wine_advapi32_execute_service_start(
+            ["OpenSCManagerW", "CreateServiceW", "OpenServiceW", "StartServiceW", "CloseServiceHandle"],
+            "SimpleOSSCM",
+            ""
+        )
+        expect wine_service_adapter_gate_with_service_result(adapter, service) == "service-control-empty-service"
+
+    it "requires bounded audio device and buffer evidence before audio readiness":
+        val adapter = wine_service_adapter_ready(_base_host_features())
+        expect wine_service_adapter_audio_gate(adapter, "waveOutOpen waveOutPrepareHeader waveOutClose audio-buffer-commit") == "missing-peripheral-waveOutWrite"
+        expect wine_service_adapter_audio_gate(adapter, "waveOutOpen waveOutPrepareHeader waveOutWrite waveOutClose audio-buffer-commit") == "ready"
+
+    it "requires font discovery and glyph raster evidence before font readiness":
+        val adapter = wine_service_adapter_ready(_base_host_features())
+        expect wine_service_adapter_font_gate(adapter, "EnumFontFamiliesExW CreateFontIndirectW font-raster-cache") == "missing-peripheral-GetGlyphOutlineW"
+        expect wine_service_adapter_font_gate(adapter, "EnumFontFamiliesExW CreateFontIndirectW GetGlyphOutlineW font-raster-cache") == "ready"
+
+    it "requires keyboard, pointer, and message dispatch evidence before input readiness":
+        val adapter = wine_service_adapter_ready(_base_host_features())
+        expect wine_service_adapter_input_gate(adapter, "GetKeyboardState GetCursorPos DispatchMessageW") == "missing-peripheral-hid-event-queue"
+        expect wine_service_adapter_input_gate(adapter, "GetKeyboardState GetCursorPos DispatchMessageW hid-event-queue") == "ready"

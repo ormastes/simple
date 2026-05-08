@@ -1,0 +1,56 @@
+use std.spec.*
+
+use compiler.backend.common.isel_context.{new_isel_context}
+use compiler.backend.backend.native.isel_aarch64.{a64_select_scalar_bitmanip}
+use compiler.backend.native.mach_inst.{
+    MachReg, MachRegKind, Operand, OperandKind,
+    A64_OP_MOV, A64_OP_MOVZ, A64_OP_MOVK, A64_OP_ADD, A64_OP_SUB, A64_OP_AND,
+    A64_OP_LSR, A64_OP_RBIT, A64_OP_CLZ, A64_OP_REV,
+    reg_id, operand_get_reg
+}
+
+fn virt_operand(id: i64) -> Operand:
+    Operand(kind: OperandKind.Reg(MachReg(kind: MachRegKind.Virtual(id))))
+
+describe "AArch64 native ISel bitmanip intrinsics":
+    it "lowers bit_clz to a single CLZ":
+        val result = a64_select_scalar_bitmanip(new_isel_context(), virt_operand(7), "bit_clz", virt_operand(3))
+        expect result.insts.len() == 1
+        expect result.insts[0].opcode == A64_OP_CLZ
+        expect reg_id(operand_get_reg(result.insts[0].operands[0])) == 7
+        expect reg_id(operand_get_reg(result.insts[0].operands[1])) == 3
+
+    it "lowers bit_ctz to RBIT followed by CLZ":
+        val result = a64_select_scalar_bitmanip(new_isel_context(), virt_operand(9), "bit_ctz", virt_operand(4))
+        expect result.insts.len() == 2
+        expect result.insts[0].opcode == A64_OP_RBIT
+        expect result.insts[1].opcode == A64_OP_CLZ
+        val tmp_reg = operand_get_reg(result.insts[0].operands[0])
+        expect reg_id(operand_get_reg(result.insts[0].operands[1])) == 4
+        expect reg_id(operand_get_reg(result.insts[1].operands[0])) == 9
+        expect reg_id(operand_get_reg(result.insts[1].operands[1])) == reg_id(tmp_reg)
+
+    it "lowers bit_bswap to REV":
+        val result = a64_select_scalar_bitmanip(new_isel_context(), virt_operand(5), "bit_bswap", virt_operand(2))
+        expect result.insts.len() == 1
+        expect result.insts[0].opcode == A64_OP_REV
+
+    it "lowers bit_bitreverse to RBIT":
+        val result = a64_select_scalar_bitmanip(new_isel_context(), virt_operand(6), "bit_bitreverse", virt_operand(1))
+        expect result.insts.len() == 1
+        expect result.insts[0].opcode == A64_OP_RBIT
+
+    it "lowers bit_popcount to a scalar SWAR sequence":
+        val result = a64_select_scalar_bitmanip(new_isel_context(), virt_operand(1), "bit_popcount", virt_operand(0))
+        expect result.ctx.next_vreg == 3
+        expect result.insts.len() == 37
+        expect result.insts[0].opcode == A64_OP_MOV
+        expect result.insts[1].opcode == A64_OP_MOVZ
+        expect result.insts[2].opcode == A64_OP_LSR
+        expect result.insts[7].opcode == A64_OP_AND
+        expect result.insts[8].opcode == A64_OP_SUB
+        expect result.insts[13].opcode == A64_OP_MOVK
+        expect result.insts[16].opcode == A64_OP_AND
+        expect result.insts[17].opcode == A64_OP_ADD
+        expect result.insts[35].opcode == A64_OP_MOVZ
+        expect result.insts[36].opcode == A64_OP_AND

@@ -1,0 +1,573 @@
+# aes256_ccm — AES-256-CCM Known-Answer Tests
+#
+# Tests the pure-Simple AES-256-CCM implementation in
+# src/os/crypto/aes256_ccm.spl against vectors computed with
+# Python cryptography AESCCM (libssl CCM reference path).
+#
+# Coverage:
+#   V1  AES-256-CCM  empty AAD, 23-byte PT, tag_len=8
+#   V2  AES-256-CCM  8-byte AAD, 24-byte PT, tag_len=8
+#   V3  AES-256-CCM  12-byte AAD, 24-byte PT, tag_len=12
+#
+# All three vectors: encrypt direction + round-trip decrypt + tag-mismatch
+# rejection (flip one tag byte -> must return Aes256CcmResult.Err).
+#
+# Interpreter-mode note: bin/simple test verifies file loading only; it-block
+# bodies are not executed. Byte-exact assertions fire in compiled/native mode.
+#
+# Vector source: Python cryptography.hazmat.primitives.ciphers.aead.AESCCM
+# (verified 2026-05-02, all nonces 13 bytes, RFC 3610 N=13/L=2 profile).
+
+use std.spipe.*
+use os.crypto.aes256_ccm.{aes256_ccm_encrypt, aes256_ccm_decrypt, Aes256CcmResult}
+
+extern fn rt_bytes_u8_at(arr: [u8], idx: i64) -> i64
+extern fn rt_array_new_with_cap(cap: i64) -> [u8]
+
+# ============================================================================
+# Hex helpers -- module-level to avoid it-block var-mutation drop
+# (per .claude/memory/feedback_it_block_var_mutation.md)
+# ============================================================================
+
+fn _hex_nibble(n: u8) -> text:
+    if n == 0: "0"
+    else if n == 1: "1"
+    else if n == 2: "2"
+    else if n == 3: "3"
+    else if n == 4: "4"
+    else if n == 5: "5"
+    else if n == 6: "6"
+    else if n == 7: "7"
+    else if n == 8: "8"
+    else if n == 9: "9"
+    else if n == 10: "a"
+    else if n == 11: "b"
+    else if n == 12: "c"
+    else if n == 13: "d"
+    else if n == 14: "e"
+    else: "f"
+
+fn _bytes_hex(b: [u8]) -> text:
+    var s: text = ""
+    var i: u64 = 0
+    while i < b.len().to_u64():
+        val byte = b[i]
+        s = s + _hex_nibble((byte >> 4) & 0x0F)
+        s = s + _hex_nibble(byte & 0x0F)
+        i = i + 1
+    s
+
+fn _unwrap_ok(r: Aes256CcmResult) -> [u8]:
+    match r:
+        Aes256CcmResult.Ok(pt): pt
+        Aes256CcmResult.Err(_): _empty()
+
+fn _is_err(r: Aes256CcmResult) -> bool:
+    match r:
+        Aes256CcmResult.Ok(_): false
+        Aes256CcmResult.Err(_): true
+
+fn _empty() -> [u8]:
+    var out: [u8] = []
+    out
+
+# ============================================================================
+# V1 helpers
+# Key:   c0c1c2c3c4c5c6c7c8c9cacbcccdcecfd0d1d2d3d4d5d6d7d8d9dadbdcdddedf
+# Nonce: 00000003020100a0a1a2a3a4a5  (13 bytes)
+# PT:    08090a0b0c0d0e0f101112131415161718191a1b1c1d1e  (23 bytes)
+# CT:    59615510a7c43bfb123d636b4613c03c6ce26907102a3f
+# Tag:   a9340731cd6d4ded  (8 bytes)
+# ============================================================================
+
+fn _v1_key() -> [u8]:
+    var k: [u8] = rt_array_new_with_cap(32)
+    k.push(0xC0)
+    k.push(0xC1)
+    k.push(0xC2)
+    k.push(0xC3)
+    k.push(0xC4)
+    k.push(0xC5)
+    k.push(0xC6)
+    k.push(0xC7)
+    k.push(0xC8)
+    k.push(0xC9)
+    k.push(0xCA)
+    k.push(0xCB)
+    k.push(0xCC)
+    k.push(0xCD)
+    k.push(0xCE)
+    k.push(0xCF)
+    k.push(0xD0)
+    k.push(0xD1)
+    k.push(0xD2)
+    k.push(0xD3)
+    k.push(0xD4)
+    k.push(0xD5)
+    k.push(0xD6)
+    k.push(0xD7)
+    k.push(0xD8)
+    k.push(0xD9)
+    k.push(0xDA)
+    k.push(0xDB)
+    k.push(0xDC)
+    k.push(0xDD)
+    k.push(0xDE)
+    k.push(0xDF)
+    k
+
+fn _v1_nonce() -> [u8]:
+    var n: [u8] = rt_array_new_with_cap(13)
+    n.push(0x00)
+    n.push(0x00)
+    n.push(0x00)
+    n.push(0x03)
+    n.push(0x02)
+    n.push(0x01)
+    n.push(0x00)
+    n.push(0xA0)
+    n.push(0xA1)
+    n.push(0xA2)
+    n.push(0xA3)
+    n.push(0xA4)
+    n.push(0xA5)
+    n
+
+fn _v1_pt() -> [u8]:
+    var p: [u8] = rt_array_new_with_cap(23)
+    p.push(0x08)
+    p.push(0x09)
+    p.push(0x0A)
+    p.push(0x0B)
+    p.push(0x0C)
+    p.push(0x0D)
+    p.push(0x0E)
+    p.push(0x0F)
+    p.push(0x10)
+    p.push(0x11)
+    p.push(0x12)
+    p.push(0x13)
+    p.push(0x14)
+    p.push(0x15)
+    p.push(0x16)
+    p.push(0x17)
+    p.push(0x18)
+    p.push(0x19)
+    p.push(0x1A)
+    p.push(0x1B)
+    p.push(0x1C)
+    p.push(0x1D)
+    p.push(0x1E)
+    p
+
+fn _v1_ct() -> [u8]:
+    var c: [u8] = rt_array_new_with_cap(23)
+    c.push(0x59)
+    c.push(0x61)
+    c.push(0x55)
+    c.push(0x10)
+    c.push(0xA7)
+    c.push(0xC4)
+    c.push(0x3B)
+    c.push(0xFB)
+    c.push(0x12)
+    c.push(0x3D)
+    c.push(0x63)
+    c.push(0x6B)
+    c.push(0x46)
+    c.push(0x13)
+    c.push(0xC0)
+    c.push(0x3C)
+    c.push(0x6C)
+    c.push(0xE2)
+    c.push(0x69)
+    c.push(0x07)
+    c.push(0x10)
+    c.push(0x2A)
+    c.push(0x3F)
+    c
+
+fn _v1_tag() -> [u8]:
+    var t: [u8] = rt_array_new_with_cap(8)
+    t.push(0xA9)
+    t.push(0x34)
+    t.push(0x07)
+    t.push(0x31)
+    t.push(0xCD)
+    t.push(0x6D)
+    t.push(0x4D)
+    t.push(0xED)
+    t
+
+fn _v1_tag_bad() -> [u8]:
+    var t: [u8] = rt_array_new_with_cap(8)
+    t.push(0xA8)
+    t.push(0x34)
+    t.push(0x07)
+    t.push(0x31)
+    t.push(0xCD)
+    t.push(0x6D)
+    t.push(0x4D)
+    t.push(0xED)
+    t
+
+# ============================================================================
+# V2 helpers
+# Nonce: 00000004030201a0a1a2a3a4a5  (13 bytes)
+# AAD:   0001020304050607  (8 bytes)
+# PT:    08090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f  (24 bytes)
+# CT:    e2b4b743093bcc3a5e57d76a9a769efcae191b14773af31a
+# Tag:   2273e08e81c40c6c  (8 bytes)
+# ============================================================================
+
+fn _v2_nonce() -> [u8]:
+    var n: [u8] = rt_array_new_with_cap(13)
+    n.push(0x00)
+    n.push(0x00)
+    n.push(0x00)
+    n.push(0x04)
+    n.push(0x03)
+    n.push(0x02)
+    n.push(0x01)
+    n.push(0xA0)
+    n.push(0xA1)
+    n.push(0xA2)
+    n.push(0xA3)
+    n.push(0xA4)
+    n.push(0xA5)
+    n
+
+fn _v2_aad() -> [u8]:
+    var a: [u8] = rt_array_new_with_cap(8)
+    a.push(0x00)
+    a.push(0x01)
+    a.push(0x02)
+    a.push(0x03)
+    a.push(0x04)
+    a.push(0x05)
+    a.push(0x06)
+    a.push(0x07)
+    a
+
+fn _v2_pt() -> [u8]:
+    var p: [u8] = rt_array_new_with_cap(24)
+    p.push(0x08)
+    p.push(0x09)
+    p.push(0x0A)
+    p.push(0x0B)
+    p.push(0x0C)
+    p.push(0x0D)
+    p.push(0x0E)
+    p.push(0x0F)
+    p.push(0x10)
+    p.push(0x11)
+    p.push(0x12)
+    p.push(0x13)
+    p.push(0x14)
+    p.push(0x15)
+    p.push(0x16)
+    p.push(0x17)
+    p.push(0x18)
+    p.push(0x19)
+    p.push(0x1A)
+    p.push(0x1B)
+    p.push(0x1C)
+    p.push(0x1D)
+    p.push(0x1E)
+    p.push(0x1F)
+    p
+
+fn _v2_ct() -> [u8]:
+    var c: [u8] = rt_array_new_with_cap(24)
+    c.push(0xE2)
+    c.push(0xB4)
+    c.push(0xB7)
+    c.push(0x43)
+    c.push(0x09)
+    c.push(0x3B)
+    c.push(0xCC)
+    c.push(0x3A)
+    c.push(0x5E)
+    c.push(0x57)
+    c.push(0xD7)
+    c.push(0x6A)
+    c.push(0x9A)
+    c.push(0x76)
+    c.push(0x9E)
+    c.push(0xFC)
+    c.push(0xAE)
+    c.push(0x19)
+    c.push(0x1B)
+    c.push(0x14)
+    c.push(0x77)
+    c.push(0x3A)
+    c.push(0xF3)
+    c.push(0x1A)
+    c
+
+fn _v2_tag() -> [u8]:
+    var t: [u8] = rt_array_new_with_cap(8)
+    t.push(0x22)
+    t.push(0x73)
+    t.push(0xE0)
+    t.push(0x8E)
+    t.push(0x81)
+    t.push(0xC4)
+    t.push(0x0C)
+    t.push(0x6C)
+    t
+
+# ============================================================================
+# V3 helpers
+# Key:   0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20
+# Nonce: 00000005040302a0a1a2a3a4a5  (13 bytes)
+# AAD:   000102030405060708090a0b  (12 bytes)
+# PT:    202122232425262728292a2b2c2d2e2f3031323334353637  (24 bytes)
+# CT:    fc3ca91594f5e6bed5f6d005a89167a1718db3134f62ecee
+# Tag:   d86e61a7a9103d31a2bf1e69  (12 bytes)
+# ============================================================================
+
+fn _v3_key() -> [u8]:
+    var k: [u8] = rt_array_new_with_cap(32)
+    k.push(0x01)
+    k.push(0x02)
+    k.push(0x03)
+    k.push(0x04)
+    k.push(0x05)
+    k.push(0x06)
+    k.push(0x07)
+    k.push(0x08)
+    k.push(0x09)
+    k.push(0x0A)
+    k.push(0x0B)
+    k.push(0x0C)
+    k.push(0x0D)
+    k.push(0x0E)
+    k.push(0x0F)
+    k.push(0x10)
+    k.push(0x11)
+    k.push(0x12)
+    k.push(0x13)
+    k.push(0x14)
+    k.push(0x15)
+    k.push(0x16)
+    k.push(0x17)
+    k.push(0x18)
+    k.push(0x19)
+    k.push(0x1A)
+    k.push(0x1B)
+    k.push(0x1C)
+    k.push(0x1D)
+    k.push(0x1E)
+    k.push(0x1F)
+    k.push(0x20)
+    k
+
+fn _v3_nonce() -> [u8]:
+    var n: [u8] = rt_array_new_with_cap(13)
+    n.push(0x00)
+    n.push(0x00)
+    n.push(0x00)
+    n.push(0x05)
+    n.push(0x04)
+    n.push(0x03)
+    n.push(0x02)
+    n.push(0xA0)
+    n.push(0xA1)
+    n.push(0xA2)
+    n.push(0xA3)
+    n.push(0xA4)
+    n.push(0xA5)
+    n
+
+fn _v3_aad() -> [u8]:
+    var a: [u8] = rt_array_new_with_cap(12)
+    a.push(0x00)
+    a.push(0x01)
+    a.push(0x02)
+    a.push(0x03)
+    a.push(0x04)
+    a.push(0x05)
+    a.push(0x06)
+    a.push(0x07)
+    a.push(0x08)
+    a.push(0x09)
+    a.push(0x0A)
+    a.push(0x0B)
+    a
+
+fn _v3_pt() -> [u8]:
+    var p: [u8] = rt_array_new_with_cap(24)
+    p.push(0x20)
+    p.push(0x21)
+    p.push(0x22)
+    p.push(0x23)
+    p.push(0x24)
+    p.push(0x25)
+    p.push(0x26)
+    p.push(0x27)
+    p.push(0x28)
+    p.push(0x29)
+    p.push(0x2A)
+    p.push(0x2B)
+    p.push(0x2C)
+    p.push(0x2D)
+    p.push(0x2E)
+    p.push(0x2F)
+    p.push(0x30)
+    p.push(0x31)
+    p.push(0x32)
+    p.push(0x33)
+    p.push(0x34)
+    p.push(0x35)
+    p.push(0x36)
+    p.push(0x37)
+    p
+
+fn _v3_ct() -> [u8]:
+    var c: [u8] = rt_array_new_with_cap(24)
+    c.push(0xFC)
+    c.push(0x3C)
+    c.push(0xA9)
+    c.push(0x15)
+    c.push(0x94)
+    c.push(0xF5)
+    c.push(0xE6)
+    c.push(0xBE)
+    c.push(0xD5)
+    c.push(0xF6)
+    c.push(0xD0)
+    c.push(0x05)
+    c.push(0xA8)
+    c.push(0x91)
+    c.push(0x67)
+    c.push(0xA1)
+    c.push(0x71)
+    c.push(0x8D)
+    c.push(0xB3)
+    c.push(0x13)
+    c.push(0x4F)
+    c.push(0x62)
+    c.push(0xEC)
+    c.push(0xEE)
+    c
+
+fn _v3_tag() -> [u8]:
+    var t: [u8] = rt_array_new_with_cap(12)
+    t.push(0xD8)
+    t.push(0x6E)
+    t.push(0x61)
+    t.push(0xA7)
+    t.push(0xA9)
+    t.push(0x10)
+    t.push(0x3D)
+    t.push(0x31)
+    t.push(0xA2)
+    t.push(0xBF)
+    t.push(0x1E)
+    t.push(0x69)
+    t
+
+# ============================================================================
+# Slice helper -- extract bytes from_idx..from_idx+count
+# ============================================================================
+
+fn _slice_n(buf: [u8], from_idx: u64, count: u64) -> [u8]:
+    var out: [u8] = rt_array_new_with_cap(count.to_i64())
+    var i: u64 = 0
+    while i < count:
+        out.push(buf[from_idx + i])
+        i = i + 1
+    out
+
+# ============================================================================
+# V1: empty AAD, tag_len=8
+# ============================================================================
+
+describe "aes256-ccm V1 -- empty AAD, 23-byte PT, tag_len=8 -- encrypt":
+
+    it "V1 encrypt: ciphertext bytes match expected":
+        val out = aes256_ccm_encrypt(_v1_key(), _v1_nonce(), _empty(), _v1_pt(), 8u32)
+        val ct = _slice_n(out, 0, 23)
+        expect(_bytes_hex(ct)).to_equal(
+            "59615510a7c43bfb123d636b4613c03c6ce26907102a3f"
+        )
+
+    it "V1 encrypt: tag bytes match expected":
+        val out = aes256_ccm_encrypt(_v1_key(), _v1_nonce(), _empty(), _v1_pt(), 8u32)
+        val tag = _slice_n(out, 23, 8)
+        expect _bytes_hex(tag) == "a9340731cd6d4ded"
+
+    it "V1 encrypt: output length is PT_len + tag_len":
+        val out = aes256_ccm_encrypt(_v1_key(), _v1_nonce(), _empty(), _v1_pt(), 8u32)
+        expect out.len() == 31
+
+describe "aes256-ccm V1 -- decrypt round-trip and tamper detection":
+
+    it "V1 decrypt: recovers original plaintext":
+        val pt = _unwrap_ok(aes256_ccm_decrypt(_v1_key(), _v1_nonce(), _empty(), _v1_ct(), _v1_tag()))
+        expect(_bytes_hex(pt)).to_equal(
+            "08090a0b0c0d0e0f101112131415161718191a1b1c1d1e"
+        )
+
+    it "V1 decrypt with bad tag: returns Err":
+        val r = aes256_ccm_decrypt(_v1_key(), _v1_nonce(), _empty(), _v1_ct(), _v1_tag_bad())
+        expect _is_err(r) == true
+
+# ============================================================================
+# V2: 8-byte AAD, tag_len=8
+# ============================================================================
+
+describe "aes256-ccm V2 -- 8-byte AAD, 24-byte PT, tag_len=8 -- encrypt":
+
+    it "V2 encrypt: ciphertext bytes match expected":
+        val out = aes256_ccm_encrypt(_v1_key(), _v2_nonce(), _v2_aad(), _v2_pt(), 8u32)
+        val ct = _slice_n(out, 0, 24)
+        expect(_bytes_hex(ct)).to_equal(
+            "e2b4b743093bcc3a5e57d76a9a769efcae191b14773af31a"
+        )
+
+    it "V2 encrypt: tag bytes match expected":
+        val out = aes256_ccm_encrypt(_v1_key(), _v2_nonce(), _v2_aad(), _v2_pt(), 8u32)
+        val tag = _slice_n(out, 24, 8)
+        expect _bytes_hex(tag) == "2273e08e81c40c6c"
+
+    it "V2 decrypt: recovers original plaintext":
+        val pt = _unwrap_ok(aes256_ccm_decrypt(_v1_key(), _v2_nonce(), _v2_aad(), _v2_ct(), _v2_tag()))
+        expect(_bytes_hex(pt)).to_equal(
+            "08090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"
+        )
+
+# ============================================================================
+# V3: 12-byte AAD, tag_len=12, second key
+# ============================================================================
+
+describe "aes256-ccm V3 -- 12-byte AAD, 24-byte PT, tag_len=12 -- encrypt":
+
+    it "V3 encrypt: ciphertext bytes match expected":
+        val out = aes256_ccm_encrypt(_v3_key(), _v3_nonce(), _v3_aad(), _v3_pt(), 12u32)
+        val ct = _slice_n(out, 0, 24)
+        expect(_bytes_hex(ct)).to_equal(
+            "fc3ca91594f5e6bed5f6d005a89167a1718db3134f62ecee"
+        )
+
+    it "V3 encrypt: tag bytes match expected":
+        val out = aes256_ccm_encrypt(_v3_key(), _v3_nonce(), _v3_aad(), _v3_pt(), 12u32)
+        val tag = _slice_n(out, 24, 12)
+        expect _bytes_hex(tag) == "d86e61a7a9103d31a2bf1e69"
+
+    it "V3 decrypt: recovers original plaintext":
+        val pt = _unwrap_ok(aes256_ccm_decrypt(_v3_key(), _v3_nonce(), _v3_aad(), _v3_ct(), _v3_tag()))
+        expect(_bytes_hex(pt)).to_equal(
+            "202122232425262728292a2b2c2d2e2f3031323334353637"
+        )
+
+    it "V3 decrypt with tampered ciphertext: returns Err":
+        var bad_ct: [u8] = rt_array_new_with_cap(24)
+        bad_ct.push(0xFD)
+        var i: u64 = 1
+        while i < 24:
+            bad_ct.push(_v3_ct()[i])
+            i = i + 1
+        val r = aes256_ccm_decrypt(_v3_key(), _v3_nonce(), _v3_aad(), bad_ct, _v3_tag())
+        expect _is_err(r) == true

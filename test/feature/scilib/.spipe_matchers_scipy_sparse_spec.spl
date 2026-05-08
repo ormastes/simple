@@ -1,0 +1,80 @@
+# @cover src/lib/scipy/sparse/mod.spl 80%
+"""
+# SciPy Sparse Facade Specification
+
+**Feature IDs:** science-math-lib-set-scipy-sparse-core
+**Plan:** doc/03_plan/agent_tasks/science_math_lib_set.md
+**Design:** doc/05_design/science_math_lib_set.md
+
+Validates a first sparse namespace slice using COO matrices over typed F64
+`NDArray` values.
+"""
+
+use std.spipe.*
+use std.ndarray.*
+use std.scipy.sparse.*
+
+
+describe "scipy.sparse COO facade":
+    it "creates a COO matrix from a dense matrix":
+        val dense = array([Float64.new(0.0), Float64.new(2.0), Float64.new(3.0), Float64.new(0.0)]).reshape(Shape.new([Index.new(2), Index.new(2)]))
+        val coo = coo_from_dense(dense).unwrap()
+        expect coo.nnz() == Index.new(2)
+        expect coo.row_indices[0] == Index.new(0)
+        expect coo.col_indices[0] == Index.new(1)
+        expect coo.values[0] == Float64.new(2.0)
+
+    it "converts COO matrices back to dense matrices":
+        val coo = CooMatrix(
+            shape: Shape.new([Index.new(2), Index.new(3)]),
+            row_indices: [Index.new(0), Index.new(1)],
+            col_indices: [Index.new(2), Index.new(0)],
+            values: [Float64.new(5.0), Float64.new(7.0)]
+        )
+        val dense = coo_to_dense(coo).unwrap()
+        expect dense.shape == Shape.new([Index.new(2), Index.new(3)])
+        expect dense.flat_f64(2) == Float64.new(5.0)
+        expect dense.flat_f64(3) == Float64.new(7.0)
+
+    it "accumulates duplicate COO entries":
+        val coo = CooMatrix(
+            shape: Shape.new([Index.new(1), Index.new(1)]),
+            row_indices: [Index.new(0), Index.new(0)],
+            col_indices: [Index.new(0), Index.new(0)],
+            values: [Float64.new(2.0), Float64.new(3.0)]
+        )
+        expect coo.to_dense().unwrap().flat_f64(0) == Float64.new(5.0)
+
+    it "multiplies a COO matrix by a dense vector":
+        val coo = CooMatrix(
+            shape: Shape.new([Index.new(2), Index.new(3)]),
+            row_indices: [Index.new(0), Index.new(0), Index.new(1)],
+            col_indices: [Index.new(0), Index.new(2), Index.new(1)],
+            values: [Float64.new(2.0), Float64.new(3.0), Float64.new(4.0)]
+        )
+        val vector = array([Float64.new(10.0), Float64.new(20.0), Float64.new(30.0)])
+        val result = coo.matvec(vector).unwrap()
+        expect result.len() == Index.new(2)
+        expect result.flat_f64(0) == Float64.new(110.0)
+        expect result.flat_f64(1) == Float64.new(80.0)
+
+    it "returns errors for invalid sparse matvec inputs":
+        val coo = CooMatrix(
+            shape: Shape.new([Index.new(1), Index.new(2)]),
+            row_indices: [Index.new(0)],
+            col_indices: [Index.new(1)],
+            values: [Float64.new(2.0)]
+        )
+        expect coo_matvec(coo, array([Float64.new(1.0)])).is_err() == true
+        expect coo_matvec(coo, array_i64([Int64.new(1), Int64.new(2)])).is_err() == true
+
+    it "returns errors for unsupported dense inputs and malformed COO data":
+        val dense = array_i64([Int64.new(1), Int64.new(2)])
+        expect coo_from_dense(dense).is_err() == true
+        val malformed = CooMatrix(
+            shape: Shape.new([Index.new(1), Index.new(1)]),
+            row_indices: [Index.new(0)],
+            col_indices: [],
+            values: [Float64.new(1.0)]
+        )
+        expect coo_to_dense(malformed).is_err() == true

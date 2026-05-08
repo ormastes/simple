@@ -1,0 +1,191 @@
+# Finished message wire-format + constant-time verify_data compare spec
+# (W8-2 closeout following W7-B revised plan).
+#
+# Covers:
+#   1. build_finished_bytes wire format (RFC 8446 §4.4.4):
+#        type(0x14) + 3-byte length + verify_data
+#   2. parse_finished_body identity (body == verify_data, no header).
+#   3. build → strip-header → parse round-trip equality.
+#   4. CT-compare semantics for tls13_ct_bytes_equal (XOR-accumulate-OR per
+#      memory note B6 — no early exit on first differing byte):
+#        - equal inputs → true
+#        - single-bit flip at first byte → false
+#        - single-bit flip at last byte  → false
+#        - length mismatch → false
+#        - both empty → true
+#   5. Both 32-byte (SHA-256) and 48-byte (SHA-384) verify_data widths exercise
+#      the same builder and CT-compare; the loop length is data-dependent on
+#      the negotiated hash, which is public per RFC 8446.
+#
+# Byte-exact MAC round-trip (HMAC-SHA-256 over a real transcript) remains
+# blocked on `rt_tls13_sha256` / `rt_tls13_hkdf_expand_label_*` extern
+# registration tracked under W8-6, parallel to AC-3/AC-4 of W6-C; this spec
+# stays at the wire-format and CT-compare layers and is safe in interpreter
+# mode.
+
+use std.spipe.*
+use os.tls13.handshake13.{build_finished_bytes, parse_finished_body}
+use os.tls13.tls13.{tls13_ct_bytes_equal}
+
+# ============================================================================
+# Helpers — module-level fns (it-block var rebinds aren't safe in interpreter)
+# ============================================================================
+
+fn _vd_pattern(width: u64, seed: u8) -> [u8]:
+    """Deterministic verify_data fixture of `width` bytes."""
+    var out: [u8] = []
+    var i: u64 = 0u64
+    while i < width:
+        out.push(((seed.to_u64() + i) & 0xFFu64).to_u8())
+        i = i + 1u64
+    out
+
+fn _strip_finished_header(msg: [u8]) -> [u8]:
+    """Drop the 4-byte handshake header (1B type + 3B length) and return body."""
+    var out: [u8] = []
+    var i: u64 = 4u64
+    while i < msg.len().to_u64():
+        out.push(msg[i])
+        i = i + 1u64
+    out
+
+fn _flip_byte(buf: [u8], idx: u64, mask: u8) -> [u8]:
+    """Return a copy of buf with `buf[idx] ^= mask`."""
+    var out: [u8] = []
+    var i: u64 = 0u64
+    while i < buf.len().to_u64():
+        if i == idx:
+            out.push(buf[i] ^ mask)
+        else:
+            out.push(buf[i])
+        i = i + 1u64
+    out
+
+# ============================================================================
+# build_finished_bytes wire format — RFC 8446 §4.4.4
+# ============================================================================
+
+describe "build_finished_bytes wire format":
+
+    it "emits 0x14 type byte and 3-byte length for SHA-256 verify_data (32B)":
+        val vd = _vd_pattern(32u64, 0xA0u8)
+        val msg = build_finished_bytes(vd)
+        # 1B type + 3B length + 32B body
+        expect msg.len().to_u64() == 36u64
+        expect msg[0] == 0x14u8
+        # 24-bit big-endian length encoding 32 → 0x000020
+        expect msg[1] == 0x00u8
+        expect msg[2] == 0x00u8
+        expect msg[3] == 0x20u8
+
+    it "emits 0x14 type byte and 3-byte length for SHA-384 verify_data (48B)":
+        val vd = _vd_pattern(48u64, 0x70u8)
+        val msg = build_finished_bytes(vd)
+        # 1B type + 3B length + 48B body
+        expect msg.len().to_u64() == 52u64
+        expect msg[0] == 0x14u8
+        # 24-bit big-endian length encoding 48 → 0x000030
+        expect msg[1] == 0x00u8
+        expect msg[2] == 0x00u8
+        expect msg[3] == 0x30u8
+
+    it "places verify_data immediately after the 4-byte header (32B)":
+        val vd = _vd_pattern(32u64, 0xA0u8)
+        val msg = build_finished_bytes(vd)
+        # Spot-check first/middle/last verify_data byte through the wire format
+        expect msg[4] == vd[0u64]
+        expect msg[20] == vd[16u64]
+        expect msg[35] == vd[31u64]
+
+# ============================================================================
+# parse_finished_body identity + round-trip
+# ============================================================================
+
+describe "parse_finished_body identity":
+
+    it "returns body bytes unchanged for SHA-256 width (32B)":
+        val vd = _vd_pattern(32u64, 0x11u8)
+        val parsed = parse_finished_body(vd)
+        expect parsed.len().to_u64() == 32u64
+        expect tls13_ct_bytes_equal(parsed, vd) == true
+
+    it "returns body bytes unchanged for SHA-384 width (48B)":
+        val vd = _vd_pattern(48u64, 0x55u8)
+        val parsed = parse_finished_body(vd)
+        expect parsed.len().to_u64() == 48u64
+        expect tls13_ct_bytes_equal(parsed, vd) == true
+
+describe "build → strip-header → parse round-trip":
+
+    it "round-trips a 32-byte SHA-256 verify_data":
+        val vd = _vd_pattern(32u64, 0xC3u8)
+        val msg = build_finished_bytes(vd)
+        val body = _strip_finished_header(msg)
+        val parsed = parse_finished_body(body)
+        expect tls13_ct_bytes_equal(parsed, vd) == true
+
+    it "round-trips a 48-byte SHA-384 verify_data":
+        val vd = _vd_pattern(48u64, 0x7Fu8)
+        val msg = build_finished_bytes(vd)
+        val body = _strip_finished_header(msg)
+        val parsed = parse_finished_body(body)
+        expect tls13_ct_bytes_equal(parsed, vd) == true
+
+# ============================================================================
+# tls13_ct_bytes_equal — constant-time compare semantics (B6)
+# ============================================================================
+
+describe "tls13_ct_bytes_equal semantics":
+
+    it "returns true for identical 32-byte inputs":
+        val a = _vd_pattern(32u64, 0x42u8)
+        val b = _vd_pattern(32u64, 0x42u8)
+        expect tls13_ct_bytes_equal(a, b) == true
+
+    it "returns true for identical 48-byte inputs":
+        val a = _vd_pattern(48u64, 0x99u8)
+        val b = _vd_pattern(48u64, 0x99u8)
+        expect tls13_ct_bytes_equal(a, b) == true
+
+    it "returns true for two empty buffers":
+        val empty: [u8] = []
+        expect tls13_ct_bytes_equal(empty, empty) == true
+
+    it "returns false on a single-bit flip at the FIRST byte (32B)":
+        val a = _vd_pattern(32u64, 0x42u8)
+        val b = _flip_byte(a, 0u64, 0x01u8)
+        expect tls13_ct_bytes_equal(a, b) == false
+
+    it "returns false on a single-bit flip at the LAST byte (32B)":
+        val a = _vd_pattern(32u64, 0x42u8)
+        val b = _flip_byte(a, 31u64, 0x80u8)
+        expect tls13_ct_bytes_equal(a, b) == false
+
+    it "returns false on a single-bit flip at the FIRST byte (48B)":
+        val a = _vd_pattern(48u64, 0x99u8)
+        val b = _flip_byte(a, 0u64, 0x01u8)
+        expect tls13_ct_bytes_equal(a, b) == false
+
+    it "returns false on a single-bit flip at the LAST byte (48B)":
+        val a = _vd_pattern(48u64, 0x99u8)
+        val b = _flip_byte(a, 47u64, 0x80u8)
+        expect tls13_ct_bytes_equal(a, b) == false
+
+    it "returns false when lengths differ (32B vs 48B)":
+        val a = _vd_pattern(32u64, 0x42u8)
+        val b = _vd_pattern(48u64, 0x42u8)
+        expect tls13_ct_bytes_equal(a, b) == false
+
+    it "returns false when lengths differ (empty vs 32B)":
+        val empty: [u8] = []
+        val b = _vd_pattern(32u64, 0x42u8)
+        expect tls13_ct_bytes_equal(empty, b) == false
+
+    it "returns false on a multi-byte difference (every byte XORed)":
+        val a = _vd_pattern(32u64, 0x42u8)
+        var b: [u8] = []
+        var i: u64 = 0u64
+        while i < a.len().to_u64():
+            b.push(a[i] ^ 0x55u8)
+            i = i + 1u64
+        expect tls13_ct_bytes_equal(a, b) == false

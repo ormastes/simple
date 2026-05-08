@@ -1,0 +1,47 @@
+use common.wine_user32_window.{wine_user32_execute_message_loop, wine_user32_execute_window_lifecycle}
+
+describe "Wine USER32 window lifecycle bridge":
+    it "executes CreateWindowExW, ShowWindow, UpdateWindow, and DefWindowProcW through SimpleOS records":
+        val result = wine_user32_execute_window_lifecycle(["CreateWindowExW", "ShowWindow", "UpdateWindow", "DefWindowProcW"], 4001, "SimpleOS USER32 Window", 320, 200, 7)
+        expect result.ok == true
+        expect result.hwnd == 4001
+        expect result.title == "SimpleOS USER32 Window"
+        expect (result.operations).contains("create")
+        expect (result.operations).contains("map")
+        expect (result.operations).contains("simpleos-framebuffer-present")
+        expect (result.operations).contains("destroy")
+        expect result.checksum > 0
+
+    it "keeps lifecycle dispatch ordered and bounded":
+        val missing = wine_user32_execute_window_lifecycle(["CreateWindowExW", "ShowWindow", "UpdateWindow"], 4001, "title", 320, 200, 7)
+        expect missing.ok == false
+        expect missing.error == "user32-sequence-count-mismatch"
+
+        val out_of_order = wine_user32_execute_window_lifecycle(["ShowWindow", "CreateWindowExW", "UpdateWindow", "DefWindowProcW"], 4001, "title", 320, 200, 7)
+        expect out_of_order.ok == false
+        expect out_of_order.error == "user32-sequence-expected:CreateWindowExW"
+
+        val unsupported = wine_user32_execute_window_lifecycle(["CreateWindowExW", "GetMessageW", "UpdateWindow", "DefWindowProcW"], 4001, "title", 320, 200, 7)
+        expect unsupported.ok == false
+        expect unsupported.error == "user32-sequence-expected:ShowWindow"
+
+    it "executes a bounded USER32 message loop for a created window":
+        val result = wine_user32_execute_message_loop(["PeekMessageW", "GetMessageW", "TranslateMessage", "DispatchMessageW"], 4001, "WM_PAINT")
+        expect result.ok == true
+        expect result.hwnd == 4001
+        expect result.message == "WM_PAINT"
+        expect result.translated == true
+        expect result.dispatched_count == 1
+
+    it "keeps message loop dispatch ordered and bounded":
+        val out_of_order = wine_user32_execute_message_loop(["GetMessageW", "PeekMessageW", "TranslateMessage", "DispatchMessageW"], 4001, "WM_PAINT")
+        expect out_of_order.ok == false
+        expect out_of_order.error == "user32-message-sequence-expected:PeekMessageW"
+
+        val unsupported = wine_user32_execute_message_loop(["PeekMessageW", "GetMessageW", "TextOutW", "DispatchMessageW"], 4001, "WM_PAINT")
+        expect unsupported.ok == false
+        expect unsupported.error == "bridge-unsupported:TextOutW"
+
+        val invalid = wine_user32_execute_message_loop(["PeekMessageW", "GetMessageW", "TranslateMessage", "DispatchMessageW"], 0, "WM_PAINT")
+        expect invalid.ok == false
+        expect invalid.error == "invalid-hwnd"

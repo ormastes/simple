@@ -1,0 +1,250 @@
+# test/unit/compiler/backend/avx512_gather_scatter_spec.spl
+#
+# Byte-level golden tests for AVX-512 gather/scatter VSIB emit helpers.
+# Covers: VPGATHERDD, VPSCATTERDD, VGATHERDPS, VSCATTERDPS (all 512-bit ZMM forms).
+#
+# All byte sequences verified with:
+#   llvm-mc -triple=x86_64-linux -mattr=+avx512f --show-encoding (Intel syntax)
+#
+# Reference: Intel SDM Vol 2C §VPGATHERDD, §VPSCATTERDD, §VGATHERDPS, §VSCATTERDPS
+#            Intel SDM Vol 2A §2.6.1 Table 2-36 (EVEX prefix), §2.6.2 (VSIB)
+#            simd_strict_emit_errata.md ERR-001a/b RESOLVED
+#
+# Register IDs (from x86_64_avx512.spl scaffold):
+#   X86_ZMM0=48, X86_ZMM1=49, X86_ZMM2=50
+#   X86_K0=80 (reserved/forbidden for gather), X86_K1=81, X86_K7=87
+#   GPR: rax=0, rcx=1
+
+use compiler.backend.native.x86_64_avx512.{emit_avx512_vpgatherdd_zmm, emit_avx512_vpscatterdd_zmm, emit_avx512_vgatherdps_zmm, emit_avx512_vscatterdps_zmm}
+
+# ============================================================================
+# Test 1: VPGATHERDD zmm0 {k1}, [rax + zmm1*4]
+# EVEX.512.66.0F38.W0 90 /vsib
+# zdst=Z0(48) k=k1(81) zidx=Z1(49) base=rax(0) scale=4 disp=0
+# Expected bytes: 62 F2 7D 49 90 04 88
+#
+# Bit decode:
+#   62       EVEX escape
+#   F2=11110010  P0: ~R=1 ~X=1 ~B=1 ~R'=1 0 mm=010 (0F38)
+#   7D=01111101  P1: W=0 ~vvvv=1111 must-1=1 pp=01 (0x66)
+#   49=01001001  P2: z=0 L'=1 L=0 b=0 ~V'=1 aaa=001 (k1)
+#   90           opcode VPGATHERDD
+#   04=00000100  ModRM: mod=00 reg=000(zmm0) rm=100(SIB)
+#   88=10001000  SIB: ss=10(x4) idx=001(zmm1) base=000(rax)
+# ============================================================================
+
+describe "AVX-512 VPGATHERDD zmm0 k1 rax zmm1 scale4 no-disp":
+    it "VPGATHERDD Z0 k1 rax Z1*4 emits 7 bytes":
+        val result = emit_avx512_vpgatherdd_zmm(48, 81, 49, 0, 4, 0)
+        expect result.len() == 7
+
+    it "VPGATHERDD Z0 k1 rax Z1*4 escape is 0x62":
+        val result = emit_avx512_vpgatherdd_zmm(48, 81, 49, 0, 4, 0)
+        expect result[0] == 98
+
+    it "VPGATHERDD Z0 k1 rax Z1*4 P0 is 0xF2":
+        # P0: ~R=1 ~X=1 ~B=1 ~R'=1 0 mm=010 (0F38) = 11110010 = 0xF2 = 242
+        val result = emit_avx512_vpgatherdd_zmm(48, 81, 49, 0, 4, 0)
+        expect result[1] == 242
+
+    it "VPGATHERDD Z0 k1 rax Z1*4 P1 is 0x7D":
+        # P1: W=0 ~vvvv=1111 must-1=1 pp=01 = 01111101 = 0x7D = 125
+        val result = emit_avx512_vpgatherdd_zmm(48, 81, 49, 0, 4, 0)
+        expect result[2] == 125
+
+    it "VPGATHERDD Z0 k1 rax Z1*4 P2 is 0x49":
+        # P2: z=0 L'=1 L=0 b=0 ~V'=1 aaa=001 = 01001001 = 0x49 = 73
+        val result = emit_avx512_vpgatherdd_zmm(48, 81, 49, 0, 4, 0)
+        expect result[3] == 73
+
+    it "VPGATHERDD Z0 k1 rax Z1*4 opcode is 0x90":
+        val result = emit_avx512_vpgatherdd_zmm(48, 81, 49, 0, 4, 0)
+        expect result[4] == 144
+
+    it "VPGATHERDD Z0 k1 rax Z1*4 ModRM is 0x04":
+        # ModRM: mod=00 reg=000(zmm0) rm=100(SIB) = 00000100 = 0x04 = 4
+        val result = emit_avx512_vpgatherdd_zmm(48, 81, 49, 0, 4, 0)
+        expect result[5] == 4
+
+    it "VPGATHERDD Z0 k1 rax Z1*4 SIB is 0x88":
+        # SIB: ss=10(x4) idx=001(zmm1) base=000(rax) = 10001000 = 0x88 = 136
+        val result = emit_avx512_vpgatherdd_zmm(48, 81, 49, 0, 4, 0)
+        expect result[6] == 136
+
+# ============================================================================
+# Test 2: VPGATHERDD zmm0 {k1}, [rax + zmm1*4 + 8]   (with disp8)
+# Expected bytes: 62 F2 7D 49 90 44 88 02
+#
+# Bit decode of ModRM+disp:
+#   44=01000100  ModRM: mod=01 reg=000(zmm0) rm=100(SIB)
+#   88           SIB: same as above
+#   02           disp8 = 8/4 = 2 (compressed by element size N=4)
+# ============================================================================
+
+describe "AVX-512 VPGATHERDD zmm0 k1 rax zmm1 scale4 disp8":
+    it "VPGATHERDD Z0 k1 rax Z1*4+8 emits 8 bytes":
+        val result = emit_avx512_vpgatherdd_zmm(48, 81, 49, 0, 4, 8)
+        expect result.len() == 8
+
+    it "VPGATHERDD Z0 k1 rax Z1*4+8 ModRM is 0x44":
+        # mod=01 = disp8 present
+        val result = emit_avx512_vpgatherdd_zmm(48, 81, 49, 0, 4, 8)
+        expect result[5] == 68
+
+    it "VPGATHERDD Z0 k1 rax Z1*4+8 SIB is 0x88":
+        val result = emit_avx512_vpgatherdd_zmm(48, 81, 49, 0, 4, 8)
+        expect result[6] == 136
+
+    it "VPGATHERDD Z0 k1 rax Z1*4+8 disp8 is 0x02":
+        # disp8 = 8/4 = 2 (EVEX disp8*N compressed, N=4)
+        val result = emit_avx512_vpgatherdd_zmm(48, 81, 49, 0, 4, 8)
+        expect result[7] == 2
+
+# ============================================================================
+# Test 3: VPGATHERDD zmm0 {k7}, [rax + zmm1*4]   (max k-mask k7)
+# Expected bytes: 62 F2 7D 4F 90 04 88
+#
+# Bit decode of P2:
+#   4F=01001111  P2: z=0 L'=1 L=0 b=0 ~V'=1 aaa=111 (k7)
+# ============================================================================
+
+describe "AVX-512 VPGATHERDD zmm0 k7 rax zmm1 scale4":
+    it "VPGATHERDD Z0 k7 rax Z1*4 emits 7 bytes":
+        val result = emit_avx512_vpgatherdd_zmm(48, 87, 49, 0, 4, 0)
+        expect result.len() == 7
+
+    it "VPGATHERDD Z0 k7 rax Z1*4 P2 is 0x4F":
+        # P2: z=0 L'=1 L=0 b=0 ~V'=1 aaa=111 = 01001111 = 0x4F = 79
+        val result = emit_avx512_vpgatherdd_zmm(48, 87, 49, 0, 4, 0)
+        expect result[3] == 79
+
+# ============================================================================
+# Test 4: VPSCATTERDD [rax + zmm1*4] {k1}, zmm0
+# Expected bytes: 62 F2 7D 49 A0 04 88
+# ============================================================================
+
+describe "AVX-512 VPSCATTERDD rax zmm1 scale4 k1 zmm0":
+    it "VPSCATTERDD k1 rax Z1*4 Z0 emits 7 bytes":
+        val result = emit_avx512_vpscatterdd_zmm(81, 49, 0, 4, 0, 48)
+        expect result.len() == 7
+
+    it "VPSCATTERDD k1 rax Z1*4 Z0 escape is 0x62":
+        val result = emit_avx512_vpscatterdd_zmm(81, 49, 0, 4, 0, 48)
+        expect result[0] == 98
+
+    it "VPSCATTERDD k1 rax Z1*4 Z0 P0 is 0xF2":
+        val result = emit_avx512_vpscatterdd_zmm(81, 49, 0, 4, 0, 48)
+        expect result[1] == 242
+
+    it "VPSCATTERDD k1 rax Z1*4 Z0 opcode is 0xA0":
+        val result = emit_avx512_vpscatterdd_zmm(81, 49, 0, 4, 0, 48)
+        expect result[4] == 160
+
+    it "VPSCATTERDD k1 rax Z1*4 Z0 SIB is 0x88":
+        val result = emit_avx512_vpscatterdd_zmm(81, 49, 0, 4, 0, 48)
+        expect result[6] == 136
+
+# ============================================================================
+# Test 5: VGATHERDPS zmm0 {k1}, [rax + zmm1*4]
+# Expected bytes: 62 F2 7D 49 92 04 88
+# ============================================================================
+
+describe "AVX-512 VGATHERDPS zmm0 k1 rax zmm1 scale4":
+    it "VGATHERDPS Z0 k1 rax Z1*4 emits 7 bytes":
+        val result = emit_avx512_vgatherdps_zmm(48, 81, 49, 0, 4, 0)
+        expect result.len() == 7
+
+    it "VGATHERDPS Z0 k1 rax Z1*4 opcode is 0x92":
+        val result = emit_avx512_vgatherdps_zmm(48, 81, 49, 0, 4, 0)
+        expect result[4] == 146
+
+    it "VGATHERDPS Z0 k1 rax Z1*4 SIB is 0x88":
+        val result = emit_avx512_vgatherdps_zmm(48, 81, 49, 0, 4, 0)
+        expect result[6] == 136
+
+# ============================================================================
+# Test 6: VSCATTERDPS [rax + zmm1*4] {k1}, zmm0
+# Expected bytes: 62 F2 7D 49 A2 04 88
+# ============================================================================
+
+describe "AVX-512 VSCATTERDPS rax zmm1 scale4 k1 zmm0":
+    it "VSCATTERDPS k1 rax Z1*4 Z0 emits 7 bytes":
+        val result = emit_avx512_vscatterdps_zmm(81, 49, 0, 4, 0, 48)
+        expect result.len() == 7
+
+    it "VSCATTERDPS k1 rax Z1*4 Z0 opcode is 0xA2":
+        val result = emit_avx512_vscatterdps_zmm(81, 49, 0, 4, 0, 48)
+        expect result[4] == 162
+
+    it "VSCATTERDPS k1 rax Z1*4 Z0 SIB is 0x88":
+        val result = emit_avx512_vscatterdps_zmm(81, 49, 0, 4, 0, 48)
+        expect result[6] == 136
+
+# ============================================================================
+# Tests 7-10: Scale boundary tests on VPGATHERDD (SIB ss field)
+# SIB byte = (ss<<6) | (idx_zmm<<3) | base
+# With zmm1 as index (idx=001) and rax as base (base=000):
+#   scale=1: ss=00 → SIB = 00 001 000 = 0x08
+#   scale=2: ss=01 → SIB = 01 001 000 = 0x48
+#   scale=4: ss=10 → SIB = 10 001 000 = 0x88 (covered in Test 1)
+#   scale=8: ss=11 → SIB = 11 001 000 = 0xC8
+# llvm-mc verified: vpgatherdd (%rax,%zmm1), %zmm0 {%k1}   → 0x08
+#                   vpgatherdd (%rax,%zmm1,2), %zmm0 {%k1}  → 0x48
+#                   vpgatherdd (%rax,%zmm1,8), %zmm0 {%k1}  → 0xC8
+# ============================================================================
+
+describe "AVX-512 VPGATHERDD scale boundary SIB tests":
+    it "VPGATHERDD scale=1 SIB is 0x08":
+        # SIB: ss=00(x1) idx=001(zmm1) base=000(rax) = 00001000 = 0x08 = 8
+        val result = emit_avx512_vpgatherdd_zmm(48, 81, 49, 0, 1, 0)
+        expect result[6] == 8
+
+    it "VPGATHERDD scale=2 SIB is 0x48":
+        # SIB: ss=01(x2) idx=001(zmm1) base=000(rax) = 01001000 = 0x48 = 72
+        val result = emit_avx512_vpgatherdd_zmm(48, 81, 49, 0, 2, 0)
+        expect result[6] == 72
+
+    it "VPGATHERDD scale=4 SIB is 0x88":
+        # SIB: ss=10(x4) idx=001(zmm1) base=000(rax) = 10001000 = 0x88 = 136
+        val result = emit_avx512_vpgatherdd_zmm(48, 81, 49, 0, 4, 0)
+        expect result[6] == 136
+
+    it "VPGATHERDD scale=8 SIB is 0xC8":
+        # SIB: ss=11(x8) idx=001(zmm1) base=000(rax) = 11001000 = 0xC8 = 200
+        val result = emit_avx512_vpgatherdd_zmm(48, 81, 49, 0, 8, 0)
+        expect result[6] == 200
+
+# ============================================================================
+# Test 11: k0 rejection guard
+# Passing k0 (ID=80) must return [] per Intel SDM gather/scatter constraint.
+# k0 means "no masking" but gather/scatter REQUIRE a non-zero mask.
+# ============================================================================
+
+describe "AVX-512 gather k0 rejection guard":
+    it "VPGATHERDD with k0 returns empty (k0 forbidden)":
+        val result = emit_avx512_vpgatherdd_zmm(48, 80, 49, 0, 4, 0)
+        expect result.len() == 0
+
+    it "VPSCATTERDD with k0 returns empty (k0 forbidden)":
+        val result = emit_avx512_vpscatterdd_zmm(80, 49, 0, 4, 0, 48)
+        expect result.len() == 0
+
+# ============================================================================
+# Test 12: VPGATHERDD zmm1 {k1}, [rax + zmm0*4]  (swapped registers)
+# Expected bytes: 62 F2 7D 49 90 0C 80
+#
+# Bit decode:
+#   0C=00001100  ModRM: mod=00 reg=001(zmm1) rm=100(SIB)
+#   80=10000000  SIB: ss=10(x4) idx=000(zmm0) base=000(rax)
+# ============================================================================
+
+describe "AVX-512 VPGATHERDD zmm1 k1 rax zmm0 scale4 swapped":
+    it "VPGATHERDD Z1 k1 rax Z0*4 ModRM is 0x0C":
+        # ModRM: mod=00 reg=001(zmm1) rm=100(SIB) = 00001100 = 0x0C = 12
+        val result = emit_avx512_vpgatherdd_zmm(49, 81, 48, 0, 4, 0)
+        expect result[5] == 12
+
+    it "VPGATHERDD Z1 k1 rax Z0*4 SIB is 0x80":
+        # SIB: ss=10(x4) idx=000(zmm0) base=000(rax) = 10000000 = 0x80 = 128
+        val result = emit_avx512_vpgatherdd_zmm(49, 81, 48, 0, 4, 0)
+        expect result[6] == 128

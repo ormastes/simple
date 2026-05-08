@@ -1,0 +1,386 @@
+"""
+# Capability Enforcement Specification
+
+**Feature IDs:** #OS-007
+**Category:** Runtime
+**Difficulty:** 4/5
+**Status:** Implemented
+**Requirements:** N/A
+**Plan:** N/A
+**Design:** N/A
+**Research:** N/A
+
+## Overview
+
+Tests for the capability enforcement manager. Validates grant/revoke lifecycle,
+pledge() monotonic restriction, unveil() file path restriction, and file access
+checking with prefix matching.
+"""
+
+use std.spec.{describe, it, expect}
+use os.kernel.types.task_types.{TaskId}
+use os.kernel.types.capability_types.{CapabilityToken, CapabilityKind, CapabilitySet, CAP_RIGHT_READ, CAP_RIGHT_WRITE, CAP_RIGHT_ADMIN, CAP_RIGHT_MAP, CAP_RIGHT_DATASET_BUILD, CAP_RIGHT_QUEUE_SUBMIT, CAP_RIGHT_QUEUE_RECV}
+use os.kernel.ipc.capability.{CapabilityManager}
+
+
+# ============================================================================
+# Test Group 1: CapabilityManager Construction
+# ============================================================================
+
+describe "CapabilityManager":
+    describe "construction":
+        it "creates with empty records":
+            val mgr = CapabilityManager.new()
+            val task = TaskId(id: 1)
+            val result = mgr.check(task, CapabilityKind.ProcessSpawn)
+            expect result == false
+
+    describe "init_task":
+        it "initializes a task with given capabilities":
+            var mgr = CapabilityManager.new()
+            val task = TaskId(id: 1)
+            val token = CapabilityToken(
+                kind: CapabilityKind.ProcessSpawn,
+                generation: 1,
+                owner: 1
+            )
+            val caps = CapabilitySet(caps: [token], is_pledged: false)
+            mgr.init_task(task, caps)
+            val has = mgr.check(task, CapabilityKind.ProcessSpawn)
+            expect has == true
+
+        it "initializes a task with empty capabilities":
+            var mgr = CapabilityManager.new()
+            val task = TaskId(id: 1)
+            mgr.init_task(task, CapabilitySet.full())
+            val has = mgr.check(task, CapabilityKind.ProcessSpawn)
+            expect has == false
+
+
+# ============================================================================
+# Test Group 2: Check / Grant / Revoke
+# ============================================================================
+
+describe "CapabilityManager check":
+    it "returns false for unregistered task":
+        val mgr = CapabilityManager.new()
+        val result = mgr.check(TaskId(id: 999), CapabilityKind.SystemReboot)
+        expect result == false
+
+    it "returns true when task has matching capability":
+        var mgr = CapabilityManager.new()
+        val task = TaskId(id: 1)
+        val token = CapabilityToken(
+            kind: CapabilityKind.NetRaw,
+            generation: 1,
+            owner: 1
+        )
+        mgr.init_task(task, CapabilitySet(caps: [token], is_pledged: false))
+        expect mgr.check(task, CapabilityKind.NetRaw) == true
+
+    it "returns false for non-matching capability kind":
+        var mgr = CapabilityManager.new()
+        val task = TaskId(id: 1)
+        val token = CapabilityToken(
+            kind: CapabilityKind.NetRaw,
+            generation: 1,
+            owner: 1
+        )
+        mgr.init_task(task, CapabilitySet(caps: [token], is_pledged: false))
+        expect mgr.check(task, CapabilityKind.SystemReboot) == false
+
+    it "allows dataset rights by object and generation":
+        var mgr = CapabilityManager.new()
+        val task = TaskId(id: 1)
+        val token = CapabilityToken(
+            kind: CapabilityKind.SharedDataset(object_id: 7u64, generation: 3u64, rights: CAP_RIGHT_READ | CAP_RIGHT_MAP | CAP_RIGHT_ADMIN),
+            generation: 3u64,
+            owner: 1u64
+        )
+        mgr.init_task(task, CapabilitySet(caps: [token], is_pledged: false))
+
+        expect mgr.check(task, CapabilityKind.SharedDataset(object_id: 7u64, generation: 3u64, rights: CAP_RIGHT_READ)) == true
+        expect mgr.check(task, CapabilityKind.SharedDataset(object_id: 7u64, generation: 3u64, rights: CAP_RIGHT_MAP)) == true
+        expect mgr.check(task, CapabilityKind.SharedDataset(object_id: 7u64, generation: 4u64, rights: CAP_RIGHT_READ)) == false
+        expect mgr.check(task, CapabilityKind.SharedDataset(object_id: 8u64, generation: 3u64, rights: CAP_RIGHT_READ)) == false
+        expect mgr.check(task, CapabilityKind.SharedDataset(object_id: 7u64, generation: 3u64, rights: CAP_RIGHT_DATASET_BUILD)) == false
+
+    it "allows process queue submit and receive rights by generation":
+        var mgr = CapabilityManager.new()
+        val task = TaskId(id: 2)
+        val token = CapabilityToken(
+            kind: CapabilityKind.ProcessQueue(queue_id: 11u64, generation: 5u64, rights: CAP_RIGHT_QUEUE_SUBMIT | CAP_RIGHT_QUEUE_RECV),
+            generation: 5u64,
+            owner: 2u64
+        )
+        mgr.init_task(task, CapabilitySet(caps: [token], is_pledged: false))
+
+        expect mgr.check(task, CapabilityKind.ProcessQueue(queue_id: 11u64, generation: 5u64, rights: CAP_RIGHT_QUEUE_SUBMIT)) == true
+        expect mgr.check(task, CapabilityKind.ProcessQueue(queue_id: 11u64, generation: 5u64, rights: CAP_RIGHT_QUEUE_RECV)) == true
+        expect mgr.check(task, CapabilityKind.ProcessQueue(queue_id: 11u64, generation: 6u64, rights: CAP_RIGHT_QUEUE_RECV)) == false
+        expect mgr.check(task, CapabilityKind.ProcessQueue(queue_id: 12u64, generation: 5u64, rights: CAP_RIGHT_QUEUE_RECV)) == false
+        expect mgr.check(task, CapabilityKind.ProcessQueue(queue_id: 11u64, generation: 5u64, rights: CAP_RIGHT_ADMIN)) == false
+
+describe "CapabilityManager grant":
+    it "grants capability from source to target":
+        var mgr = CapabilityManager.new()
+        val src = TaskId(id: 1)
+        val dst = TaskId(id: 2)
+        val token = CapabilityToken(
+            kind: CapabilityKind.ProcessSpawn,
+            generation: 1,
+            owner: 1
+        )
+        mgr.init_task(src, CapabilitySet(caps: [token], is_pledged: false))
+        mgr.init_task(dst, CapabilitySet.full())
+
+        val ok = mgr.grant(src, dst, token)
+        expect ok == true
+        expect mgr.check(dst, CapabilityKind.ProcessSpawn) == true
+
+    it "fails to grant if source does not hold capability":
+        var mgr = CapabilityManager.new()
+        val src = TaskId(id: 1)
+        val dst = TaskId(id: 2)
+        mgr.init_task(src, CapabilitySet.full())  # Empty caps
+        mgr.init_task(dst, CapabilitySet.full())
+
+        val token = CapabilityToken(
+            kind: CapabilityKind.SystemReboot,
+            generation: 1,
+            owner: 1
+        )
+        val ok = mgr.grant(src, dst, token)
+        expect ok == false
+
+describe "CapabilityManager revoke":
+    it "revokes a capability token":
+        var mgr = CapabilityManager.new()
+        val task = TaskId(id: 1)
+        val token = CapabilityToken(
+            kind: CapabilityKind.NetRaw,
+            generation: 1,
+            owner: 1
+        )
+        mgr.init_task(task, CapabilitySet(caps: [token], is_pledged: false))
+
+        val revoked = mgr.revoke(token)
+        expect revoked == true
+        # After revoke, the capability should be gone
+        expect mgr.check(task, CapabilityKind.NetRaw) == false
+
+    it "revoke returns false for unknown token":
+        var mgr = CapabilityManager.new()
+        val token = CapabilityToken(
+            kind: CapabilityKind.SystemMount,
+            generation: 99,
+            owner: 999
+        )
+        val result = mgr.revoke(token)
+        expect result == false
+
+
+# ============================================================================
+# Test Group 3: Pledge (Monotonic Restriction)
+# ============================================================================
+
+describe "CapabilityManager pledge":
+    it "restricts capabilities to allowed list":
+        var mgr = CapabilityManager.new()
+        val task = TaskId(id: 1)
+        val spawn_token = CapabilityToken(
+            kind: CapabilityKind.ProcessSpawn,
+            generation: 1,
+            owner: 1
+        )
+        val reboot_token = CapabilityToken(
+            kind: CapabilityKind.SystemReboot,
+            generation: 2,
+            owner: 1
+        )
+        mgr.init_task(task, CapabilitySet(
+            caps: [spawn_token, reboot_token],
+            is_pledged: false
+        ))
+
+        # Pledge to only ProcessSpawn
+        mgr.pledge(task, [CapabilityKind.ProcessSpawn])
+
+        expect mgr.check(task, CapabilityKind.ProcessSpawn) == true
+        expect mgr.check(task, CapabilityKind.SystemReboot) == false
+
+    it "pledge with empty list removes all capabilities":
+        var mgr = CapabilityManager.new()
+        val task = TaskId(id: 1)
+        val token = CapabilityToken(
+            kind: CapabilityKind.NetRaw,
+            generation: 1,
+            owner: 1
+        )
+        mgr.init_task(task, CapabilitySet(caps: [token], is_pledged: false))
+
+        mgr.pledge(task, [])
+
+        expect mgr.check(task, CapabilityKind.NetRaw) == false
+
+    it "second pledge is no-op (already pledged)":
+        var mgr = CapabilityManager.new()
+        val task = TaskId(id: 1)
+        val token = CapabilityToken(
+            kind: CapabilityKind.ProcessSpawn,
+            generation: 1,
+            owner: 1
+        )
+        mgr.init_task(task, CapabilitySet(caps: [token], is_pledged: false))
+
+        # First pledge: keep ProcessSpawn
+        mgr.pledge(task, [CapabilityKind.ProcessSpawn])
+        expect mgr.check(task, CapabilityKind.ProcessSpawn) == true
+
+        # Second pledge: try to remove all - should be no-op
+        mgr.pledge(task, [])
+        # ProcessSpawn should still be present because second pledge was ignored
+        expect mgr.check(task, CapabilityKind.ProcessSpawn) == true
+
+
+# ============================================================================
+# Test Group 4: Unveil (File Path Restriction)
+# ============================================================================
+
+describe "CapabilityManager unveil":
+    it "before unveil, all paths are allowed":
+        var mgr = CapabilityManager.new()
+        val task = TaskId(id: 1)
+        mgr.init_task(task, CapabilitySet.full())
+        val allowed = mgr.check_file_access(task, "/any/path", "r")
+        expect allowed == true
+
+    it "after unveil, only unveiled paths are allowed":
+        var mgr = CapabilityManager.new()
+        val task = TaskId(id: 1)
+        mgr.init_task(task, CapabilitySet.full())
+
+        # Unveil /tmp with read permission
+        mgr.unveil(task, "/tmp", "r")
+
+        val tmp_ok = mgr.check_file_access(task, "/tmp/file.txt", "r")
+        expect tmp_ok == true
+
+        val etc_denied = mgr.check_file_access(task, "/etc/passwd", "r")
+        expect etc_denied == false
+
+    it "unveil supports write permission":
+        var mgr = CapabilityManager.new()
+        val task = TaskId(id: 1)
+        mgr.init_task(task, CapabilitySet.full())
+
+        mgr.unveil(task, "/var/log", "rw")
+
+        val write_ok = mgr.check_file_access(task, "/var/log/app.log", "w")
+        expect write_ok == true
+
+    it "multiple unveil calls add entries":
+        var mgr = CapabilityManager.new()
+        val task = TaskId(id: 1)
+        mgr.init_task(task, CapabilitySet.full())
+
+        mgr.unveil(task, "/tmp", "r")
+        mgr.unveil(task, "/home", "rw")
+
+        val tmp_ok = mgr.check_file_access(task, "/tmp/data", "r")
+        expect tmp_ok == true
+
+        val home_ok = mgr.check_file_access(task, "/home/user/file", "r")
+        expect home_ok == true
+
+    it "unveil denies paths not in the list":
+        var mgr = CapabilityManager.new()
+        val task = TaskId(id: 1)
+        mgr.init_task(task, CapabilitySet.full())
+
+        mgr.unveil(task, "/safe", "r")
+
+        val unsafe = mgr.check_file_access(task, "/unsafe/secret", "r")
+        expect unsafe == false
+
+    it "path prefix matching works correctly":
+        var mgr = CapabilityManager.new()
+        val task = TaskId(id: 1)
+        mgr.init_task(task, CapabilitySet.full())
+
+        mgr.unveil(task, "/home/user", "r")
+
+        # Subpath should match
+        val sub = mgr.check_file_access(task, "/home/user/docs/file.txt", "r")
+        expect sub == true
+
+        # Parent path should NOT match
+        val parent = mgr.check_file_access(task, "/home", "r")
+        expect parent == false
+
+
+# ============================================================================
+# Test Group 5: Destroy Task
+# ============================================================================
+
+describe "CapabilityManager destroy_task":
+    it "removes all records for the destroyed task":
+        var mgr = CapabilityManager.new()
+        val task = TaskId(id: 1)
+        val token = CapabilityToken(
+            kind: CapabilityKind.ProcessSpawn,
+            generation: 1,
+            owner: 1
+        )
+        mgr.init_task(task, CapabilitySet(caps: [token], is_pledged: false))
+        expect mgr.check(task, CapabilityKind.ProcessSpawn) == true
+
+        mgr.destroy_task(task)
+        expect mgr.check(task, CapabilityKind.ProcessSpawn) == false
+
+
+# ============================================================================
+# Test Group 6: init_task_record at spawn
+# ============================================================================
+
+describe "CapabilityManager init_task_record":
+    it "new tasks get full capability record at spawn":
+        """After init_task_record(task, full: true), check() no longer falls
+        through to the (removed) default-ALLOW path — the explicit record
+        exists and returns false for a capability not in the empty set."""
+        var mgr = CapabilityManager.new()
+        val task = TaskId(id: 42)
+
+        # Before init_task_record: no record, check returns false
+        expect mgr.check(task, CapabilityKind.ProcessSpawn) == false
+
+        # After init_task_record(full: true): record exists, still false
+        # because CapabilitySet.full() starts as empty (unpledged full trust)
+        mgr.init_task_record(task, true)
+        val result = mgr.check(task, CapabilityKind.ProcessSpawn)
+        expect result == false
+
+    it "init_task_record is idempotent":
+        """Calling init_task_record twice for the same task must not
+        overwrite an existing record."""
+        var mgr = CapabilityManager.new()
+        val task = TaskId(id: 7)
+        val token = CapabilityToken(
+            kind: CapabilityKind.NetRaw,
+            generation: 1,
+            owner: 7
+        )
+        # Initialize with an explicit token
+        mgr.init_task(task, CapabilitySet(caps: [token], is_pledged: false))
+        expect mgr.check(task, CapabilityKind.NetRaw) == true
+
+        # Second init_task_record must not overwrite
+        mgr.init_task_record(task, false)
+        expect mgr.check(task, CapabilityKind.NetRaw) == true
+
+    it "init_task_record with full=false creates pledged empty record":
+        var mgr = CapabilityManager.new()
+        val task = TaskId(id: 99)
+        mgr.init_task_record(task, false)
+        # Pledged + empty: check returns false
+        expect mgr.check(task, CapabilityKind.SystemReboot) == false

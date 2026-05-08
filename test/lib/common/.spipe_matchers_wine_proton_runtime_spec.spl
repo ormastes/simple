@@ -1,0 +1,66 @@
+use common.wine_proton_gate.{wine_proton_fixture_wine_gates}
+use common.wine_proton_runtime.{
+    wine_proton_fixture_runtime_evidence,
+    wine_proton_runtime_evidence_new,
+    wine_proton_runtime_feature_evidence,
+    wine_proton_runtime_gate,
+    wine_proton_runtime_readiness_gate
+}
+
+describe "Wine Proton runtime evidence":
+    it "requires Steam runtime ABI evidence before Proton can launch":
+        val missing_runtime = wine_proton_runtime_evidence_new("", "", "", "", "")
+        expect wine_proton_runtime_gate(missing_runtime) == "missing-steam-runtime"
+
+        val missing_abi = wine_proton_runtime_evidence_new("steam-runtime soldier", "", "", "", "")
+        expect wine_proton_runtime_gate(missing_abi) == "missing-abi-x86_64"
+
+        val missing_generation = wine_proton_runtime_evidence_new("steam-runtime abi-x86_64", "", "", "", "")
+        expect wine_proton_runtime_gate(missing_generation) == "missing-steam-linux-runtime-generation"
+
+    it "requires pressure-vessel style container rootfs and namespaces":
+        val missing_rootfs = wine_proton_runtime_evidence_new("steam-runtime abi-x86_64 soldier", "pressure-vessel-container namespace-pid namespace-fs namespace-ipc namespace-net namespace-capability", "", "", "")
+        expect wine_proton_runtime_gate(missing_rootfs) == "missing-container-rootfs"
+
+        val missing_backend = wine_proton_runtime_evidence_new("steam-runtime abi-x86_64 soldier", "pressure-vessel-container container-rootfs namespace-pid namespace-fs namespace-ipc namespace-net namespace-capability", "", "", "")
+        expect wine_proton_runtime_gate(missing_backend) == "missing-container-rootfs-nvfs"
+
+        val missing_namespace = wine_proton_runtime_evidence_new("steam-runtime abi-x86_64 soldier", "pressure-vessel-container container-rootfs container-rootfs-nvfs namespace-pid namespace-fs namespace-ipc namespace-net", "", "", "")
+        expect wine_proton_runtime_gate(missing_namespace) == "missing-namespace-capability"
+
+    it "requires Vulkan, DXVK, VKD3D-Proton, shader cache, and Steam integration":
+        val missing_dxvk = wine_proton_runtime_evidence_new(
+            "steam-runtime abi-x86_64 soldier",
+            "pressure-vessel-container container-rootfs container-rootfs-nvfs namespace-pid namespace-fs namespace-ipc namespace-net namespace-capability",
+            "vulkan-loader vulkan-device",
+            "proton-launcher steamworks-bridge controller-input",
+            "esync-or-fsync"
+        )
+        expect wine_proton_runtime_gate(missing_dxvk) == "missing-dxvk"
+
+        val missing_steamworks = wine_proton_runtime_evidence_new(
+            "steam-runtime abi-x86_64 soldier",
+            "pressure-vessel-container container-rootfs container-rootfs-nvfs namespace-pid namespace-fs namespace-ipc namespace-net namespace-capability",
+            "vulkan-loader vulkan-device dxvk vkd3d-proton shader-cache",
+            "proton-launcher controller-input",
+            "esync-or-fsync"
+        )
+        expect wine_proton_runtime_gate(missing_steamworks) == "missing-steamworks-bridge"
+
+    it "derives the legacy Proton feature string from structured evidence":
+        val features = wine_proton_runtime_feature_evidence(wine_proton_fixture_runtime_evidence())
+        expect (features).contains("steam-runtime")
+        expect (features).contains("pressure-vessel-container")
+        expect (features).contains("wine-full")
+        expect (features).contains("vulkan-device")
+        expect (features).contains("dxvk")
+        expect (features).contains("vkd3d-proton")
+        expect (features).contains("esync-or-fsync")
+
+    it "keeps structured Proton runtime readiness blocked on incomplete Wine":
+        val state = wine_proton_runtime_readiness_gate("process=verified exec_env=verified", wine_proton_fixture_runtime_evidence())
+        expect state == "blocked-wine-blocked-missing-vm"
+
+    it "allows structured Proton readiness only when Wine and runtime evidence are complete":
+        val state = wine_proton_runtime_readiness_gate(wine_proton_fixture_wine_gates(), wine_proton_fixture_runtime_evidence())
+        expect state == "ready"

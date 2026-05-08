@@ -1,0 +1,120 @@
+use common.pe_coff_header.{pe_rva_to_file_offset}
+use common.wine_hello_fixture.{wine_known_hello_exe_fixture_bytes}
+use common.wine_peb_teb.{wine_peb_teb_apply_layout_byte_writes, wine_peb_teb_init_default, wine_peb_teb_layout_byte_writes, wine_peb_teb_layout_write_plan, wine_peb_teb_memory_write_gate}
+use common.wine_process_session.{
+    wine_process_apply_loader_relocations_in_vma,
+    wine_process_apply_loader_relocations_in_vma_with_peb_teb_vm_writes,
+    wine_process_session_plan,
+    wine_process_session_request_new
+}
+use common.wine_vm_adapter.{WineVmSpace, wine_vm_commit, wine_vm_process_space_new, wine_vm_reserve_fixed}
+
+fn _put_u16_le(data: [u8], offset: i64, value: i64) -> [u8]:
+    data[offset] = (value & 0xff) as u8
+    data[offset + 1] = ((value >> 8) & 0xff) as u8
+    data
+
+fn _put_u32_le(data: [u8], offset: i64, value: i64) -> [u8]:
+    data[offset] = (value & 0xff) as u8
+    data[offset + 1] = ((value >> 8) & 0xff) as u8
+    data[offset + 2] = ((value >> 16) & 0xff) as u8
+    data[offset + 3] = ((value >> 24) & 0xff) as u8
+    data
+
+fn _put_u64_le(data: [u8], offset: i64, value: i64) -> [u8]:
+    var remaining = value
+    var i = 0
+    while i < 8:
+        data[offset + i] = remaining % 256
+        remaining = remaining / 256
+        i = i + 1
+    data
+
+fn _read_u64_le(data: [u8], offset: i64) -> i64:
+    var value = 0
+    var shift = 0
+    var i = 0
+    while i < 8:
+        value = value | ((data[offset + i] as i64) << shift)
+        shift = shift + 8
+        i = i + 1
+    value
+
+fn _commit_fixed(space: WineVmSpace, base: i64, size: i64, perms: text) -> WineVmSpace:
+    val reserved = wine_vm_reserve_fixed(space, base, size)
+    if not reserved.ok:
+        return reserved.space
+    val committed = wine_vm_commit(reserved.space, reserved.region.base, perms)
+    committed.space
+
+fn _startup_write_space() -> WineVmSpace:
+    var space = wine_vm_process_space_new(10, 30, "pid fs ipc net capability")
+    space = _commit_fixed(space, 0x7ffdc000, 0x1000, "rw")
+    space = _commit_fixed(space, 0x7ffdd000, 0x1000, "rw")
+    space = _commit_fixed(space, 0x7ffde000, 0x1000, "rw")
+    _commit_fixed(space, 0x7ffdf000, 0x1000, "rw")
+
+fn _full_gates() -> text:
+    "process=verified exec_env=verified vm=verified renderer=verified user32=verified " +
+        "gdi32=verified kernel32_core=verified host=verified posix=verified registry=verified " +
+        "pthread=verified dynload=verified audio=verified fonts=verified input=verified " +
+        "pe_loader=verified async=verified nt_bridge=verified"
+
+fn _known_hello_with_dir64_relocation() -> [u8]:
+    var data = wine_known_hello_exe_fixture_bytes()
+    data = _put_u32_le(data, 0x98 + 0x70 + 44, 0x0c)
+    data = _put_u32_le(data, 0x364, 0x0c)
+    data = _put_u16_le(data, 0x368, 0xa018)
+    data = _put_u64_le(data, pe_rva_to_file_offset(data, 0x2018), 0x402018)
+    data
+
+describe "Wine process session VMA relocation application":
+    it "applies a bounded DIR64 relocation through a process VMA write window":
+        val plan = wine_process_session_plan(wine_process_session_request_new("game.exe", [], "C:\\Games"), _full_gates())
+        val data = _known_hello_with_dir64_relocation()
+        val target_offset = pe_rva_to_file_offset(data, 0x2018)
+        val result = wine_process_apply_loader_relocations_in_vma(plan, data, 0x400000, 0x500000, "native-module-open tls-callback")
+        expect result.ok == true
+        expect result.mapped_base == 0x500000
+        expect result.relocation_count == 1
+        expect result.target_rva == 0x2018
+        expect _read_u64_le(result.patched_image, target_offset) == 0x502018
+        expect (result.evidence).contains("relocation-dir64")
+        expect (result.evidence).contains("loader-relocations-vma-applied")
+        expect (result.evidence).contains("process-vma-write-enabled")
+        expect (result.evidence).contains("process-vma-rx-restored")
+        expect (result.evidence).contains("no-arbitrary-execution")
+        expect result.status == "loader-relocations-vma-applied"
+
+    it "applies loader relocations only after PEB/TEB VM byte-write readback":
+        val plan = wine_process_session_plan(wine_process_session_request_new("game.exe", [], "C:\\Games"), _full_gates())
+        val data = _known_hello_with_dir64_relocation()
+        val target_offset = pe_rva_to_file_offset(data, 0x2018)
+        val init = wine_peb_teb_init_default()
+        val writes = wine_peb_teb_memory_write_gate(init, _startup_write_space())
+        val layout = wine_peb_teb_layout_write_plan(init, writes)
+        val bytes = wine_peb_teb_layout_byte_writes(layout)
+        val vm_writes = wine_peb_teb_apply_layout_byte_writes(_startup_write_space(), bytes)
+        val result = wine_process_apply_loader_relocations_in_vma_with_peb_teb_vm_writes(plan, data, 0x400000, 0x500000, "native-module-open tls-callback", vm_writes)
+
+        expect result.ok == true
+        expect result.status == "loader-relocations-vma-applied"
+        expect _read_u64_le(result.patched_image, target_offset) == 0x502018
+        expect (result.evidence).contains("peb-teb-vm-writes-ready")
+        expect (result.evidence).contains("VMWriteReadback:PEBTEBLayoutBytes")
+        expect (result.evidence).contains("loader-relocations-vma-applied")
+
+    it "blocks loader relocations when PEB/TEB VM byte writes are not ready":
+        val plan = wine_process_session_plan(wine_process_session_request_new("game.exe", [], "C:\\Games"), _full_gates())
+        val data = _known_hello_with_dir64_relocation()
+        val init = wine_peb_teb_init_default()
+        val writes = wine_peb_teb_memory_write_gate(init, _startup_write_space())
+        val layout = wine_peb_teb_layout_write_plan(init, writes)
+        val bytes = wine_peb_teb_layout_byte_writes(layout)
+        val vm_writes = wine_peb_teb_apply_layout_byte_writes(wine_vm_process_space_new(10, 30, "pid fs ipc net capability"), bytes)
+        val result = wine_process_apply_loader_relocations_in_vma_with_peb_teb_vm_writes(plan, data, 0x400000, 0x500000, "native-module-open tls-callback", vm_writes)
+
+        expect result.ok == false
+        expect result.error == "peb-teb-vm-write:vm-write:NtTib.StackBase:page-fault-unmapped"
+        expect result.status == "rejected"
+        expect (result.evidence).contains("full-image-handoff-blocked")

@@ -1,0 +1,399 @@
+# HelloRetryRequest spec — RFC 8446 §4.1.4 + §4.4.1
+#
+# Exercises the HRR support added to handshake13.spl:
+#   - HRR_MAGIC detection via is_hello_retry_request().
+#   - parse_hello_retry_request(): cipher_suite + selected_group + cookie,
+#     and rejection paths (compression!=0, supported_versions!=0x0304,
+#     missing key_share).
+#   - build_hrr_synthetic_message_hash(): byte-exact 36-byte SHA-256 prefix
+#     0xfe 0x00 0x00 0x20 || Hash(CH1) per §4.4.1.
+#   - build_client_hello2_bytes(): same client_random as CH1, fresh key_share,
+#     cookie echoed verbatim when HRR included one.
+#
+# Caller-side state checks (two HRRs in a row, same key_share group as CH1,
+# non-zero compression) live partly in the connect flow. This spec drives
+# the parser-level rejections that catch each at the wire level.
+
+use std.spipe.*
+use os.tls13.handshake13.{
+    is_hello_retry_request,
+    parse_hello_retry_request,
+    build_hrr_synthetic_message_hash,
+    build_client_hello2_bytes,
+    HRR_MAGIC,
+    HS_MESSAGE_HASH,
+    EXT_COOKIE,
+    EXT_KEY_SHARE,
+    EXT_SUPPORTED_VERSIONS,
+    GROUP_X25519,
+    HelloRetryRequest13,
+    HrrResult,
+    ServerHello13
+}
+
+# ============================================================================
+# HRR body builders — module-level fns (it-block var rebinds aren't safe)
+# ============================================================================
+
+fn _hrr_random_bytes() -> [u8]:
+    # Copy HRR_MAGIC into a fresh [u8] to feed into ServerHello13.random.
+    var out: [u8] = []
+    var i: u64 = 0
+    while i < 32:
+        out.push(HRR_MAGIC[i])
+        i = i + 1
+    out
+
+fn _flipped_random_bytes() -> [u8]:
+    # HRR_MAGIC with one byte flipped — must NOT match.
+    var out: [u8] = []
+    var i: u64 = 0
+    while i < 32:
+        if i == 0:
+            out.push((HRR_MAGIC[i].to_u64() ^ 0x01u64).to_u8())
+        else:
+            out.push(HRR_MAGIC[i])
+        i = i + 1
+    out
+
+fn _u16_bytes(v: u64) -> [u8]:
+    [((v >> 8) & 0xFF).to_u8(), (v & 0xFF).to_u8()]
+
+fn _ext_block(ext_type: u64, data: [u8]) -> [u8]:
+    val n = data.len().to_u64()
+    var out: [u8] = []
+    out.push(((ext_type >> 8) & 0xFF).to_u8())
+    out.push((ext_type & 0xFF).to_u8())
+    out.push(((n >> 8) & 0xFF).to_u8())
+    out.push((n & 0xFF).to_u8())
+    var i: u64 = 0
+    while i < n:
+        out.push(data[i])
+        i = i + 1
+    out
+
+fn _hrr_supported_versions_tls13() -> [u8]:
+    # supported_versions extension data = u16 selected_version 0x0304.
+    _ext_block(43u64, [0x03u8, 0x04u8])
+
+fn _hrr_supported_versions_bogus() -> [u8]:
+    # Bogus 0x0303 (TLS 1.2) — must be rejected.
+    _ext_block(43u64, [0x03u8, 0x03u8])
+
+fn _hrr_key_share_secp256r1() -> [u8]:
+    # HRR variant: key_share carries a single 2-byte selected_group (0x0017).
+    _ext_block(51u64, [0x00u8, 0x17u8])
+
+fn _hrr_key_share_x25519() -> [u8]:
+    # HRR re-selects the same group X25519 (0x001D) — the connect-flow caller
+    # MUST reject this as illegal_parameter; parser still extracts the group.
+    _ext_block(51u64, [0x00u8, 0x1Du8])
+
+fn _hrr_cookie(cookie_bytes: [u8]) -> [u8]:
+    # cookie extension data = u16 cookie_len + cookie bytes.
+    val n = cookie_bytes.len().to_u64()
+    var data: [u8] = []
+    data.push(((n >> 8) & 0xFF).to_u8())
+    data.push((n & 0xFF).to_u8())
+    var i: u64 = 0
+    while i < n:
+        data.push(cookie_bytes[i])
+        i = i + 1
+    _ext_block(44u64, data)
+
+fn _concat(a: [u8], b: [u8]) -> [u8]:
+    var out: [u8] = []
+    var i: u64 = 0
+    while i < a.len():
+        out.push(a[i])
+        i = i + 1
+    var j: u64 = 0
+    while j < b.len():
+        out.push(b[j])
+        j = j + 1
+    out
+
+fn _build_hrr_body(extensions: [u8], compression: u8) -> [u8]:
+    # Assemble HRR body matching ServerHello layout:
+    #   legacy_version(2) + random(32 = HRR_MAGIC) + sid_len(1=0) +
+    #   cipher_suite(2 = TLS_AES_128_GCM_SHA256) + compression(1) +
+    #   ext_len(2) + extensions
+    var body: [u8] = [0x03u8, 0x03u8]
+    var i: u64 = 0
+    while i < 32:
+        body.push(HRR_MAGIC[i])
+        i = i + 1
+    body.push(0x00u8)              # session_id_len = 0
+    body.push(0x13u8)              # cipher_suite hi (0x1301)
+    body.push(0x01u8)              # cipher_suite lo
+    body.push(compression)
+    val ext_len = extensions.len().to_u64()
+    body.push(((ext_len >> 8) & 0xFF).to_u8())
+    body.push((ext_len & 0xFF).to_u8())
+    var k: u64 = 0
+    while k < ext_len:
+        body.push(extensions[k])
+        k = k + 1
+    body
+
+fn _hrr_with_cookie() -> [u8]:
+    val cookie = _hrr_cookie([0xCAu8, 0xFEu8, 0xBAu8, 0xBEu8])
+    val ks = _hrr_key_share_secp256r1()
+    val sv = _hrr_supported_versions_tls13()
+    _build_hrr_body(_concat(_concat(sv, ks), cookie), 0x00u8)
+
+fn _hrr_no_cookie() -> [u8]:
+    val ks = _hrr_key_share_secp256r1()
+    val sv = _hrr_supported_versions_tls13()
+    _build_hrr_body(_concat(sv, ks), 0x00u8)
+
+fn _hrr_bad_compression() -> [u8]:
+    val ks = _hrr_key_share_secp256r1()
+    val sv = _hrr_supported_versions_tls13()
+    _build_hrr_body(_concat(sv, ks), 0x01u8)
+
+fn _hrr_bad_supported_versions() -> [u8]:
+    val ks = _hrr_key_share_secp256r1()
+    val sv = _hrr_supported_versions_bogus()
+    _build_hrr_body(_concat(sv, ks), 0x00u8)
+
+fn _hrr_no_key_share() -> [u8]:
+    val sv = _hrr_supported_versions_tls13()
+    _build_hrr_body(sv, 0x00u8)
+
+fn _hrr_same_group_x25519() -> [u8]:
+    val ks = _hrr_key_share_x25519()
+    val sv = _hrr_supported_versions_tls13()
+    _build_hrr_body(_concat(sv, ks), 0x00u8)
+
+# ============================================================================
+# CH1-style hash for transcript replacement test
+# ============================================================================
+
+fn _ch1_hash_fixture() -> [u8]:
+    # 32-byte fixed "hash" — value irrelevant, byte-exact match is what matters.
+    var out: [u8] = []
+    var i: u64 = 0
+    while i < 32:
+        out.push((0xA0u64 + i).to_u8())
+        i = i + 1
+    out
+
+# ============================================================================
+# AC-1: HRR magic-bytes detection
+# ============================================================================
+
+describe "HRR magic-bytes detection":
+
+    it "detects HRR when ServerHello.random == HRR_MAGIC":
+        val sh = ServerHello13(random: _hrr_random_bytes(), cipher_suite: 0x1301u16, x25519_pub: [], p256_pub: [])
+        expect is_hello_retry_request(sh) == true
+
+    it "rejects ServerHello whose random differs by even one byte":
+        val sh = ServerHello13(random: _flipped_random_bytes(), cipher_suite: 0x1301u16, x25519_pub: [], p256_pub: [])
+        expect is_hello_retry_request(sh) == false
+
+    it "HRR_MAGIC is exactly 32 bytes and starts with 0xCF 0x21 0xAD 0x74":
+        expect HRR_MAGIC.len().to_u64() == 32u64
+        expect HRR_MAGIC[0] == 0xCFu8
+        expect HRR_MAGIC[1] == 0x21u8
+        expect HRR_MAGIC[2] == 0xADu8
+        expect HRR_MAGIC[3] == 0x74u8
+
+# ============================================================================
+# AC-2: parse_hello_retry_request happy paths
+# ============================================================================
+
+describe "parse_hello_retry_request happy paths":
+
+    it "extracts cipher_suite, selected_group, and cookie when all present":
+        val res = parse_hello_retry_request(_hrr_with_cookie())
+        if val HrrResult.Ok(value) = res:
+            expect value.cipher_suite == 0x1301u16
+            expect value.selected_group == 0x0017u16
+            expect value.cookie.len().to_u64() == 4u64
+            expect value.cookie[0] == 0xCAu8
+            expect value.cookie[1] == 0xFEu8
+            expect value.cookie[2] == 0xBAu8
+            expect value.cookie[3] == 0xBEu8
+        else:
+            expect false == true
+
+    it "yields empty cookie when HRR omits the cookie extension":
+        val res = parse_hello_retry_request(_hrr_no_cookie())
+        if val HrrResult.Ok(value) = res:
+            expect value.selected_group == 0x0017u16
+            expect value.cookie.len().to_u64() == 0u64
+        else:
+            expect false == true
+
+# ============================================================================
+# AC-5: parse_hello_retry_request rejections (compression / version / key_share)
+# ============================================================================
+
+describe "parse_hello_retry_request rejections":
+
+    it "rejects HRR with legacy_compression_method != 0x00":
+        val res = parse_hello_retry_request(_hrr_bad_compression())
+        if val HrrResult.Err(reason) = res:
+            expect reason.contains("illegal_parameter") == true
+            expect reason.contains("compression") == true
+        else:
+            expect false == true
+
+    it "rejects HRR whose supported_versions != 0x0304":
+        val res = parse_hello_retry_request(_hrr_bad_supported_versions())
+        if val HrrResult.Err(reason) = res:
+            expect reason.contains("illegal_parameter") == true
+            expect reason.contains("supported_versions") == true
+        else:
+            expect false == true
+
+    it "rejects HRR missing the key_share extension":
+        val res = parse_hello_retry_request(_hrr_no_key_share())
+        if val HrrResult.Err(reason) = res:
+            expect reason.contains("missing_extension") == true
+        else:
+            expect false == true
+
+    it "rejects truncated HRR body (< 38 bytes)":
+        val short_body: [u8] = [0x03u8, 0x03u8]
+        val res = parse_hello_retry_request(short_body)
+        if val HrrResult.Err(reason) = res:
+            expect reason.contains("decode_error") == true
+        else:
+            expect false == true
+
+    it "still parses but flags same-group HRR via selected_group field":
+        # The wire-level parser cannot know what CH1 sent. The connect-flow
+        # caller is responsible for comparing parsed selected_group against
+        # CH1's offered group and rejecting if equal — RFC 8446 §4.1.4.
+        val res = parse_hello_retry_request(_hrr_same_group_x25519())
+        if val HrrResult.Ok(value) = res:
+            expect value.selected_group == GROUP_X25519
+        else:
+            expect false == true
+
+# ============================================================================
+# AC-4: synthetic message_hash transcript replacement (RFC 8446 §4.4.1)
+# ============================================================================
+
+describe "build_hrr_synthetic_message_hash byte-exact format":
+
+    it "emits 0xfe 0x00 0x00 0x20 || Hash(CH1) for SHA-256 input":
+        val ch1_hash = _ch1_hash_fixture()
+        val msg = build_hrr_synthetic_message_hash(ch1_hash)
+        expect msg.len().to_u64() == 36u64
+        expect msg[0] == 0xFEu8
+        expect msg[1] == 0x00u8
+        expect msg[2] == 0x00u8
+        expect msg[3] == 0x20u8
+        # Body bytes 4..36 must equal the input hash byte-for-byte.
+        var i: u64 = 0
+        while i < 32:
+            expect msg[4 + i] == ch1_hash[i]
+            i = i + 1
+
+    it "uses the message_hash handshake type 254 (0xfe)":
+        expect HS_MESSAGE_HASH == 254u8
+
+    it "encodes hash length as big-endian u24 in handshake header":
+        # Use a 16-byte (truncated) hash to confirm length encoding scales.
+        var short_hash: [u8] = []
+        var i: u64 = 0
+        while i < 16:
+            short_hash.push(0x55u8)
+            i = i + 1
+        val msg = build_hrr_synthetic_message_hash(short_hash)
+        expect msg.len().to_u64() == 20u64
+        expect msg[0] == 0xFEu8
+        expect msg[1] == 0x00u8
+        expect msg[2] == 0x00u8
+        expect msg[3] == 0x10u8
+
+# ============================================================================
+# AC-3: build_client_hello2_bytes — same random, fresh key_share, cookie echo
+# ============================================================================
+
+fn _ch1_random_fixture() -> [u8]:
+    var out: [u8] = []
+    var i: u64 = 0
+    while i < 32:
+        out.push((0xA0u64 + i).to_u8())
+        i = i + 1
+    out
+
+fn _fresh_x25519_pub() -> [u8]:
+    var out: [u8] = []
+    var i: u64 = 0
+    while i < 32:
+        out.push((0x10u64 + i).to_u8())
+        i = i + 1
+    out
+
+fn _byte_index_of(haystack: [u8], needle: [u8]) -> i64:
+    val nlen = needle.len()
+    if nlen == 0u64:
+        return -1
+    val hlen = haystack.len()
+    if hlen < nlen:
+        return -1
+    var i: u64 = 0
+    while i + nlen <= hlen:
+        var match = true
+        var j: u64 = 0
+        while j < nlen and match:
+            if haystack[i + j] != needle[j]:
+                match = false
+            j = j + 1
+        if match:
+            return i.to_i64()
+        i = i + 1
+    -1
+
+describe "build_client_hello2_bytes structure":
+
+    it "places the same client_random in CH2 as CH1":
+        val random = _ch1_random_fixture()
+        val pub_key = _fresh_x25519_pub()
+        val ch2 = build_client_hello2_bytes(random, pub_key, "example.com", [])
+        # CH2 layout: type(1=HS_CLIENT_HELLO=0x01) + len(3) + legacy_version(2) + random(32) + ...
+        expect ch2[0] == 0x01u8
+        # Random starts at offset 6 (1 + 3 + 2).
+        var i: u64 = 0
+        while i < 32:
+            expect ch2[6 + i] == random[i]
+            i = i + 1
+
+    it "embeds a fresh key_share with the supplied pub_key":
+        val random = _ch1_random_fixture()
+        val pub_key = _fresh_x25519_pub()
+        val ch2 = build_client_hello2_bytes(random, pub_key, "example.com", [])
+        # The 32-byte fresh pub_key must appear somewhere in CH2.
+        val idx = _byte_index_of(ch2, pub_key)
+        expect idx.to_i64() >= 0 == true
+
+    it "echoes a non-empty cookie verbatim into CH2":
+        val random = _ch1_random_fixture()
+        val pub_key = _fresh_x25519_pub()
+        val cookie: [u8] = [0xCAu8, 0xFEu8, 0xBAu8, 0xBEu8, 0xDEu8, 0xADu8]
+        val ch2 = build_client_hello2_bytes(random, pub_key, "example.com", cookie)
+        # Cookie bytes must appear after a 0x002C extension type marker.
+        val idx = _byte_index_of(ch2, cookie)
+        expect idx.to_i64() >= 0 == true
+        # And the EXT_COOKIE = 44 = 0x002C marker should appear at idx-4.
+        expect EXT_COOKIE == 44u16
+        # idx points to start of cookie bytes which is 2 (cookie u16 len) bytes
+        # after data start, which is 4 bytes after ext_type. So ext_type at idx-6.
+        # Verify presence of the 0x00 0x2C type pair in CH2 bytes.
+        val ck_marker: [u8] = [0x00u8, 0x2Cu8]
+        val mark_idx = _byte_index_of(ch2, ck_marker)
+        expect mark_idx.to_i64() >= 0 == true
+
+    it "omits the cookie extension when caller passes an empty cookie":
+        val random = _ch1_random_fixture()
+        val pub_key = _fresh_x25519_pub()
+        val ch2_no_cookie = build_client_hello2_bytes(random, pub_key, "example.com", [])
+        val ch2_with_cookie = build_client_hello2_bytes(random, pub_key, "example.com", [0xAAu8, 0xBBu8])
+        # CH2 with cookie must be strictly longer.
+        expect ch2_no_cookie.len() < ch2_with_cookie.len() == true

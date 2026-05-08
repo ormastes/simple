@@ -1,0 +1,455 @@
+"""
+# Bulk Validate Path Handling Specification
+
+**Feature IDs:** #CMM-BULK-PATH
+**Category:** Tooling
+**Status:** Implemented
+**Requirements:** N/A
+**Plan:** N/A
+**Design:** N/A
+**Research:** N/A
+
+## Overview
+
+Tests for path normalization, dot-directory handling, file extension detection,
+and CMM file identification in the bulk validator. Covers the bug where
+rt_dir_list() callers could not handle paths containing `.`, `..`, or
+double slashes, and the heuristic that mistakenly treated directories
+as files (or vice versa).
+
+## Key Concepts
+
+| Concept | Description |
+|---------|-------------|
+| normalize_path | Resolves `.`, `..`, double slashes, trailing slashes |
+| is_likely_directory | Heuristic: no extension = directory, dotfile = skip |
+| is_cmm_file | Case-insensitive `.cmm` extension check |
+| collect_cmm_files | Recursive directory traversal with dot-dir safety |
+"""
+
+# tag: ["only-compiled"]
+
+import std.spec
+
+# ---------------------------------------------------------------------------
+# Stubs — these mirror the bulk_validate.spl functions for testing.
+# In compiled mode the real implementations would be imported.
+# ---------------------------------------------------------------------------
+
+# Normalize a path: collapse "//", resolve "." and ".." components, strip trailing slash.
+fn normalize_path(p: text) -> text:
+    if p.len() == 0:
+        return "."
+    var parts: [text] = []
+    var start = 0
+    var i = 0
+    while i < p.len():
+        if p[i:i + 1] == "/":
+            if i > start:
+                val part = p[start:i]
+                if part == "..":
+                    if parts.len() > 0 and parts[parts.len() - 1] != "..":
+                        parts.pop()
+                    else:
+                        parts.push(part)
+                else if part != ".":
+                    parts.push(part)
+            else if i == 0:
+                parts.push("")
+            start = i + 1
+        i = i + 1
+    if start < p.len():
+        val part = p[start:p.len()]
+        if part == "..":
+            if parts.len() > 0 and parts[parts.len() - 1] != "..":
+                parts.pop()
+            else:
+                parts.push(part)
+        else if part != ".":
+            parts.push(part)
+    if parts.len() == 0:
+        return "."
+    if parts.len() == 1 and parts[0] == "":
+        return "/"
+    var result = parts[0]
+    var ri = 1
+    while ri < parts.len():
+        result = result + "/" + parts[ri]
+        ri = ri + 1
+    result
+
+fn is_cmm_file(name: text) -> bool:
+    if name.len() < 5:
+        return false
+    val ext = name[name.len() - 4:name.len()]
+    val c0 = ext[0:1]
+    if c0 != ".":
+        return false
+    val c1 = ext[1:2]
+    val c2 = ext[2:3]
+    val c3 = ext[3:4]
+    (c1 == "c" or c1 == "C") and (c2 == "m" or c2 == "M") and (c3 == "m" or c3 == "M")
+
+fn is_likely_directory(name: text) -> bool:
+    if name.len() > 0 and name[0:1] == ".":
+        return false
+    var last_dot = -1
+    var i = 0
+    while i < name.len():
+        if name[i:i + 1] == ".":
+            last_dot = i
+        i = i + 1
+    if last_dot < 0:
+        return true
+    val ext_len = name.len() - last_dot - 1
+    if ext_len >= 1 and ext_len <= 4:
+        return false
+    true
+
+fn contains(haystack: text, needle: text) -> bool:
+    if needle.len() > haystack.len():
+        return false
+    val limit = haystack.len() - needle.len()
+    var i = 0
+    while i <= limit:
+        if haystack[i:i + needle.len()] == needle:
+            return true
+        i = i + 1
+    false
+
+fn starts_with(s: text, prefix: text) -> bool:
+    if prefix.len() > s.len():
+        return false
+    s[0:prefix.len()] == prefix
+
+
+# ============================================================================
+# Test Group 1: normalize_path — dot and double-slash handling
+# ============================================================================
+
+describe "normalize_path":
+    """
+    ## Path Normalization
+
+    Validates that normalize_path correctly resolves `.`, `..`, double
+    slashes, and trailing slashes. This is the core fix for the dot-dir bug.
+    """
+
+    context "simple paths":
+        it "returns identity for clean paths":
+            expect normalize_path("/opt/t32/demo") == "/opt/t32/demo"
+
+        it "returns identity for relative clean paths":
+            expect normalize_path("foo/bar/baz") == "foo/bar/baz"
+
+        it "returns identity for root":
+            expect normalize_path("/") == "/"
+
+    context "current directory dot":
+        it "resolves single dot to current dir":
+            expect normalize_path(".") == "."
+
+        it "resolves leading dot-slash":
+            expect normalize_path("./foo") == "foo"
+
+        it "resolves middle dot component":
+            expect normalize_path("foo/./bar") == "foo/bar"
+
+        it "resolves trailing dot":
+            expect normalize_path("foo/bar/.") == "foo/bar"
+
+        it "resolves multiple consecutive dots":
+            expect normalize_path("./foo/./bar/./baz") == "foo/bar/baz"
+
+        it "resolves dot after absolute path":
+            expect normalize_path("/opt/./t32/./demo") == "/opt/t32/demo"
+
+    context "parent directory double-dot":
+        it "resolves trailing parent ref":
+            expect normalize_path("foo/bar/..") == "foo"
+
+        it "resolves middle parent ref":
+            expect normalize_path("foo/bar/../baz") == "foo/baz"
+
+        it "resolves multiple parent refs":
+            expect normalize_path("a/b/c/../../d") == "a/d"
+
+        it "resolves parent at root — stays at root":
+            expect normalize_path("/..") == "/"
+
+        it "resolves complex mixed dot and dotdot":
+            expect normalize_path("a/./b/../c/./d/../e") == "a/c/e"
+
+        it "handles going above relative root with dotdot":
+            expect normalize_path("../foo") == "../foo"
+
+        it "handles double dotdot above relative root":
+            expect normalize_path("../../foo/bar") == "../../foo/bar"
+
+    context "double slashes":
+        it "collapses double slash in middle":
+            expect normalize_path("foo//bar") == "foo/bar"
+
+        it "collapses triple slash":
+            expect normalize_path("foo///bar") == "foo/bar"
+
+        it "collapses double slash at start of absolute path":
+            expect normalize_path("//opt/t32") == "/opt/t32"
+
+        it "collapses double slash with dots":
+            expect normalize_path(".//foo/./bar//baz") == "foo/bar/baz"
+
+    context "trailing slashes":
+        it "strips trailing slash":
+            expect normalize_path("foo/bar/") == "foo/bar"
+
+        it "strips multiple trailing slashes":
+            expect normalize_path("foo/bar///") == "foo/bar"
+
+        it "strips trailing slash on absolute path":
+            expect normalize_path("/opt/t32/") == "/opt/t32"
+
+    context "empty and edge cases":
+        it "returns dot for empty string":
+            expect normalize_path("") == "."
+
+        it "handles single component":
+            expect normalize_path("foo") == "foo"
+
+        it "handles dot-dot only":
+            expect normalize_path("..") == ".."
+
+        it "handles deeply nested dotdot collapse":
+            expect normalize_path("a/b/c/d/e/../../../../f") == "a/f"
+
+    context "bug reproduction — paths that caused rt_dir_list failures":
+        """
+        ### Bug Reproduction
+
+        These are the exact path patterns that triggered the original bug
+        where collect_cmm_files would pass un-normalized paths to rt_dir_list.
+        """
+
+        it "reproduces: dot-slash prefix ./subdir":
+            expect normalize_path("./demo/practice") == "demo/practice"
+
+        it "reproduces: middle dotdot dir/subdir/../other":
+            expect normalize_path("/opt/t32/demo/../scripts") == "/opt/t32/scripts"
+
+        it "reproduces: double slash from string concat":
+            expect normalize_path("/opt/t32//demo") == "/opt/t32/demo"
+
+        it "reproduces: complex mixed path":
+            expect normalize_path("./demo/./practice/../scripts//cmm/./") == "demo/scripts/cmm"
+
+
+# ============================================================================
+# Test Group 2: is_cmm_file — case-insensitive extension check
+# ============================================================================
+
+describe "is_cmm_file":
+    """
+    ## CMM File Detection
+
+    Validates case-insensitive `.cmm` extension matching without O(n²)
+    string conversion.
+    """
+
+    context "positive matches":
+        it "matches lowercase .cmm":
+            expect is_cmm_file("test.cmm") == true
+
+        it "matches uppercase .CMM":
+            expect is_cmm_file("test.CMM") == true
+
+        it "matches mixed case .Cmm":
+            expect is_cmm_file("test.Cmm") == true
+
+        it "matches mixed case .cMM":
+            expect is_cmm_file("test.cMM") == true
+
+        it "matches mixed case .CMm":
+            expect is_cmm_file("test.CMm") == true
+
+        it "matches long filename":
+            expect is_cmm_file("my_long_script_name.cmm") == true
+
+        it "matches filename with dots":
+            expect is_cmm_file("script.v2.cmm") == true
+
+        it "matches minimum length name":
+            expect is_cmm_file("a.cmm") == true
+
+    context "negative matches":
+        it "rejects .txt extension":
+            expect is_cmm_file("test.txt") == false
+
+        it "rejects .c extension":
+            expect is_cmm_file("test.c") == false
+
+        it "rejects .cmm prefix without dot":
+            expect is_cmm_file("cmm") == false
+
+        it "rejects too short name":
+            expect is_cmm_file(".cmm") == false
+
+        it "rejects partial extension .cm":
+            expect is_cmm_file("test.cm") == false
+
+        it "rejects .cmmx extension":
+            expect is_cmm_file("test.cmmx") == false
+
+        it "rejects empty string":
+            expect is_cmm_file("") == false
+
+        it "rejects no extension":
+            expect is_cmm_file("testfile") == false
+
+
+# ============================================================================
+# Test Group 3: is_likely_directory — heuristic file vs dir detection
+# ============================================================================
+
+describe "is_likely_directory":
+    """
+    ## Directory Detection Heuristic
+
+    Validates that the heuristic correctly distinguishes directories from files,
+    and properly handles hidden dotfiles/dotdirs.
+    """
+
+    context "entries that are likely directories":
+        it "detects name without extension as directory":
+            expect is_likely_directory("demo") == true
+
+        it "detects name without extension — underscore":
+            expect is_likely_directory("my_scripts") == true
+
+        it "detects name without extension — digits":
+            expect is_likely_directory("t32") == true
+
+        it "detects name with very long pseudo-extension":
+            expect is_likely_directory("file.longextname") == true
+
+    context "entries that are likely files":
+        it "detects .cmm as file":
+            expect is_likely_directory("test.cmm") == false
+
+        it "detects .txt as file":
+            expect is_likely_directory("readme.txt") == false
+
+        it "detects .c as file":
+            expect is_likely_directory("main.c") == false
+
+        it "detects .h as file":
+            expect is_likely_directory("header.h") == false
+
+        it "detects .py as file":
+            expect is_likely_directory("script.py") == false
+
+        it "detects .cmm uppercase as file":
+            expect is_likely_directory("TEST.CMM") == false
+
+    context "hidden entries — should be skipped (returns false)":
+        """
+        ### Hidden Entry Handling (Bug Fix)
+
+        Previously, `.gitignore` was detected as having an extension and
+        not recursed. Hidden directories like `.svn` were also not recursed.
+        The fix is to return false for all hidden entries so they are neither
+        recursed into nor collected as CMM files.
+        """
+
+        it "skips .git directory":
+            expect is_likely_directory(".git") == false
+
+        it "skips .svn directory":
+            expect is_likely_directory(".svn") == false
+
+        it "skips .gitignore file":
+            expect is_likely_directory(".gitignore") == false
+
+        it "skips .hidden":
+            expect is_likely_directory(".hidden") == false
+
+        it "skips dotfile with extension":
+            expect is_likely_directory(".bashrc") == false
+
+    context "edge cases":
+        it "handles single char name as directory":
+            expect is_likely_directory("a") == true
+
+        it "handles name ending with dot only":
+            # "file." has ext_len = 0, so not 1..4 → treated as directory
+            expect is_likely_directory("file.") == true
+
+
+# ============================================================================
+# Test Group 4: contains — substring search
+# ============================================================================
+
+describe "contains":
+    """
+    ## Substring Search
+
+    Validates the O(n) contains function used for error categorization.
+    """
+
+    context "basic matches":
+        it "finds needle at start":
+            expect contains("Unterminated block", "Unterminated") == true
+
+        it "finds needle in middle":
+            expect contains("Line 5: Expected expression", "Expected") == true
+
+        it "finds needle at end":
+            expect contains("something unexpected", "unexpected") == true
+
+        it "finds exact match":
+            expect contains("hello", "hello") == true
+
+    context "no matches":
+        it "returns false for missing needle":
+            expect contains("hello world", "xyz") == false
+
+        it "returns false when needle longer than haystack":
+            expect contains("hi", "hello world") == false
+
+        it "returns false for empty haystack":
+            expect contains("", "x") == false
+
+    context "edge cases":
+        it "finds empty needle":
+            expect contains("hello", "") == true
+
+        it "handles single char needle":
+            expect contains("abc", "b") == true
+
+        it "handles single char miss":
+            expect contains("abc", "z") == false
+
+        it "handles repeated pattern":
+            expect contains("aaabaaab", "aaab") == true
+
+
+# ============================================================================
+# Test Group 5: starts_with
+# ============================================================================
+
+describe "starts_with":
+    context "matches":
+        it "matches prefix":
+            expect starts_with("trace32 encrypted", "trace32") == true
+
+        it "matches full string":
+            expect starts_with("hello", "hello") == true
+
+        it "matches empty prefix":
+            expect starts_with("anything", "") == true
+
+    context "no matches":
+        it "rejects wrong prefix":
+            expect starts_with("hello", "world") == false
+
+        it "rejects longer prefix":
+            expect starts_with("hi", "hello") == false

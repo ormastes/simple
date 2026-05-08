@@ -1,0 +1,58 @@
+use common.wine_kernel32_tls.{
+    wine_kernel32_execute_tls,
+    wine_kernel32_tls_alloc,
+    wine_kernel32_tls_free,
+    wine_kernel32_tls_get_value,
+    wine_kernel32_tls_set_value,
+    wine_kernel32_tls_table_new
+}
+
+describe "Wine KERNEL32 TLS bridge":
+    it "executes a bounded allocate, set, get, and free TLS sequence":
+        val result = wine_kernel32_execute_tls(
+            ["TlsAlloc", "TlsSetValue", "TlsGetValue", "TlsFree"],
+            wine_kernel32_tls_table_new(),
+            "thread-local-startup-state"
+        )
+
+        expect result.ok == true
+        expect result.index == 0
+        expect result.value == "thread-local-startup-state"
+        expect result.table.slots.len() == 0
+        expect result.operations == "TlsAlloc TlsSetValue TlsGetValue TlsFree"
+
+    it "exposes direct TLS slot helpers":
+        val allocated = wine_kernel32_tls_alloc(wine_kernel32_tls_table_new())
+        val set_value = wine_kernel32_tls_set_value(allocated.table, allocated.index, "teb-slot")
+        val got_value = wine_kernel32_tls_get_value(set_value.table, allocated.index)
+        val freed = wine_kernel32_tls_free(got_value.table, got_value.index)
+
+        expect allocated.ok == true
+        expect allocated.index == 0
+        expect set_value.ok == true
+        expect got_value.value == "teb-slot"
+        expect freed.ok == true
+        expect freed.table.slots.len() == 0
+
+    it "keeps TLS dispatch ordered and bounded":
+        val out_of_order = wine_kernel32_execute_tls(
+            ["TlsSetValue", "TlsAlloc", "TlsGetValue", "TlsFree"],
+            wine_kernel32_tls_table_new(),
+            "thread-local-startup-state"
+        )
+        expect out_of_order.ok == false
+        expect out_of_order.error == "kernel32-tls-sequence-expected:TlsAlloc"
+
+        val wrong_family = wine_kernel32_execute_tls(
+            ["TlsAlloc", "TlsSetValue", "TlsGetValue", "HeapAlloc"],
+            wine_kernel32_tls_table_new(),
+            "thread-local-startup-state"
+        )
+        expect wrong_family.ok == false
+        expect wrong_family.error == "bridge-wrong-category:HeapAlloc"
+
+    it "rejects invalid TLS indexes":
+        val table = wine_kernel32_tls_table_new()
+        expect wine_kernel32_tls_set_value(table, 0, "missing").error == "TlsSetValue:invalid-tls-index"
+        expect wine_kernel32_tls_get_value(table, 0).error == "TlsGetValue:invalid-tls-index"
+        expect wine_kernel32_tls_free(table, 0).error == "TlsFree:invalid-tls-index"

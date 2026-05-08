@@ -1,0 +1,109 @@
+# Maps to: AC-3, AC-5, AC-9
+# Run: bin/simple test test/dbfs/dbfs_tx_protocol_spec.spl
+
+"""
+DBFS Transaction Protocol Specification
+
+Verifies the 6-step write path (D4):
+  1. data blobs written before metadata pages
+  2. metadata pages written before WAL append
+  3. WAL appended before flush
+  4. flush is the only fsync point (DURABLE_GROUP_COMMIT)
+  5. root CAS after flush
+  6. partially-published txn is invisible to readers
+  7. DURABLE_GROUP_COMMIT batches one fsync per commit
+"""
+
+use std.spipe.*
+use std.db.dbfs_engine.txn.{DbfsTxn, TxnStep, TxnId}
+use std.db.dbfs_engine.wal.{DbfsWal}
+use std.db.dbfs_driver.{DbFsDriver}
+
+fn make_driver() -> DbFsDriver:
+    DbFsDriver.new_hosted()
+
+describe "DBFS Tx Protocol — 6-step write order":
+    """Steps must occur in the prescribed order."""
+
+    it "data step precedes metadata step":
+        val driver = make_driver()
+        val txn = driver.begin_txn()
+        val steps = txn.observe_steps()
+        txn.write_data("hello").unwrap()
+        txn.write_metadata_private().unwrap()
+        txn.append_wal().unwrap()
+        txn.flush_wal().unwrap()
+        txn.publish_root().unwrap()
+        txn.commit().unwrap()
+        val order = steps.order()
+        expect order.index_of(TxnStep.Data) < order.index_of(TxnStep.MetadataPrivate) == true
+
+    it "metadata step precedes WAL append":
+        val driver = make_driver()
+        val txn = driver.begin_txn()
+        val steps = txn.observe_steps()
+        txn.write_data("x").unwrap()
+        txn.write_metadata_private().unwrap()
+        txn.append_wal().unwrap()
+        txn.flush_wal().unwrap()
+        txn.publish_root().unwrap()
+        txn.commit().unwrap()
+        val order = steps.order()
+        expect order.index_of(TxnStep.MetadataPrivate) < order.index_of(TxnStep.WalAppend) == true
+
+    it "WAL append precedes flush":
+        val driver = make_driver()
+        val txn = driver.begin_txn()
+        val steps = txn.observe_steps()
+        txn.write_data("y").unwrap()
+        txn.write_metadata_private().unwrap()
+        txn.append_wal().unwrap()
+        txn.flush_wal().unwrap()
+        txn.publish_root().unwrap()
+        txn.commit().unwrap()
+        val order = steps.order()
+        expect order.index_of(TxnStep.WalAppend) < order.index_of(TxnStep.Flush) == true
+
+    it "flush precedes root publish":
+        val driver = make_driver()
+        val txn = driver.begin_txn()
+        val steps = txn.observe_steps()
+        txn.write_data("z").unwrap()
+        txn.write_metadata_private().unwrap()
+        txn.append_wal().unwrap()
+        txn.flush_wal().unwrap()
+        txn.publish_root().unwrap()
+        txn.commit().unwrap()
+        val order = steps.order()
+        expect order.index_of(TxnStep.Flush) < order.index_of(TxnStep.Publish) == true
+
+describe "DBFS Tx Protocol — visibility":
+    """Partially-published txn is invisible to concurrent readers."""
+
+    it "uncommitted txn data is invisible to a second reader":
+        val driver = make_driver()
+        driver.mkdir("/tmp", 0o755).unwrap()
+        val txn = driver.begin_txn()
+        txn.write_data("secret").unwrap()
+        txn.write_metadata_private().unwrap()
+        txn.append_wal().unwrap()
+        # Do NOT flush or publish — txn is in-flight
+        val stat = driver.stat("/tmp/secret_file")
+        expect stat.is_err() == true
+        txn.abort()
+
+describe "DBFS Tx Protocol — DURABLE_GROUP_COMMIT":
+    """Only one fsync per commit boundary."""
+
+    it "two concurrent txns share one flush call":
+        val driver = make_driver()
+        val flush_count_before = driver.flush_call_count()
+        val txn1 = driver.begin_txn()
+        val txn2 = driver.begin_txn()
+        txn1.write_data("a").unwrap()
+        txn2.write_data("b").unwrap()
+        txn1.append_wal().unwrap()
+        txn2.append_wal().unwrap()
+        driver.group_commit().unwrap()
+        val flush_count_after = driver.flush_call_count()
+        expect flush_count_after - flush_count_before == 1

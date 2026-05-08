@@ -1,0 +1,173 @@
+use std.spec.*
+use std.gc_async_mut.gpu.browser_engine.simple_web_renderer.{
+    SimpleWebRenderer, simple_web_render_html_to_scene, simple_web_render_html_to_pixels,
+    simple_web_render_url_to_pixels}
+use std.gc_async_mut.gpu.browser_engine.browser_renderer.{BrowserRenderer}
+
+fn _count_non_bg(pixels: [u32], bg: u32) -> i32:
+    var count: i32 = 0
+    var idx: i32 = 0
+    while idx < pixels.len():
+        if pixels[idx] != bg:
+            count = count + 1
+        idx = idx + 1
+    count
+
+fn _pixels_equal(a: [u32], b: [u32]) -> bool:
+    if a.len() != b.len():
+        return false
+    var idx: i32 = 0
+    while idx < a.len():
+        if a[idx] != b[idx]:
+            return false
+        idx = idx + 1
+    true
+
+fn _simple_scene_has_fill_color(html: text, color: u32) -> bool:
+    val scene = simple_web_render_html_to_scene(html, 140, 90)
+    var idx: i32 = 0
+    while idx < scene.commands.len():
+        val cmd = scene.commands[idx]
+        if cmd.kind == "fill_rect" and cmd.color == color:
+            return true
+        idx = idx + 1
+    false
+
+describe "SimpleWebRenderer":
+
+    it "renders HTML through the canonical browser engine to RenderScene":
+        val html = "<html><body><div style='width: 80px; height: 40px; background-color: #2050a0'></div></body></html>"
+        val scene = simple_web_render_html_to_scene(html, 120, 80)
+        expect scene.width == 120
+        expect scene.height == 80
+        expect scene.commands.len() > 0
+
+    it "renders inline url background shorthand fallback colors through RenderScene":
+        val html = "<html><body><div style='width: 80px; height: 40px; background: url(hero.png) #0f8 no-repeat'></div></body></html>"
+        expect _simple_scene_has_fill_color(html, 0xFF00FF88u32) == true
+
+    it "renders style block url background shorthand fallback colors through RenderScene":
+        val html = "<html><head><style>.card { width: 80px; height: 40px; background: url(hero.png) #0f8 no-repeat; }</style></head><body><div class='card'></div></body></html>"
+        expect _simple_scene_has_fill_color(html, 0xFF00FF88u32) == true
+
+    it "renders HTML to pixels for framebuffer and host adapters":
+        val html = "<html><body><div style='width: 80px; height: 40px; background-color: #2050a0'></div></body></html>"
+        val pixels = simple_web_render_html_to_pixels(html, 120, 80)
+        expect pixels.len() == 120 * 80
+        expect _count_non_bg(pixels, 0xFFFFFFFF) > 0
+
+    it "renders a URL page without returning a blank frame":
+        val pixels = simple_web_render_url_to_pixels("about:network", 120, 80)
+        expect pixels.len() == 120 * 80
+        expect _count_non_bg(pixels, 0xFFFFFFFF) > 0
+
+    it "keeps backend choice wrapped behind the renderer interface":
+        val renderer = SimpleWebRenderer.create_with_backend(96, 64, "software")
+        val pixels = renderer.render_url_to_pixels("about:blank")
+        expect renderer.backend_name == "software"
+        expect pixels.len() == 96 * 64
+
+    it "reports the actual backend after invalid backend fallback":
+        val renderer = SimpleWebRenderer.create_with_backend(96, 64, "not-a-backend")
+        val pixels = renderer.render_url_to_pixels("about:blank")
+        expect renderer.backend_name == "software"
+        expect pixels.len() == 96 * 64
+
+    it "keeps BrowserRenderer.render_html_to_pixels on the non-empty software path":
+        val renderer = BrowserRenderer.create(48, 32)
+        val result = renderer.render_html_to_pixels("<html><body><div style='width:24px; height:16px; background-color:#2563eb'></div></body></html>")
+        expect result.pixel_data.len() == 48 * 32
+        expect _count_non_bg(result.pixel_data, 0xFFFFFFFF) > 0
+
+    it "default renderer uses the BrowserRenderer Engine2D software pixel path":
+        val html = "<html><body><div style='width: 72px; height: 32px; background-color: #44aa22'></div><span style='color:#ffffff'>Simple</span></body></html>"
+        val simple = SimpleWebRenderer.create(120, 80)
+        val browser = BrowserRenderer.create_with_backend(120, 80, "software")
+        val simple_pixels = simple.render_html_to_pixels(html)
+        val browser_pixels = browser.render_html_to_pixels(html).pixel_data
+        expect simple.backend_name == "software"
+        expect _pixels_equal(simple_pixels, browser_pixels) == true
+
+    it "fallback facade parses rgb() background-color with the shared CSS parser":
+        val html = "<html><body style='background-color: rgb(5, 150, 105)'>Simple Web Renderer</body></html>"
+        val pixels = simple_web_render_html_to_pixels(html, 8, 220)
+        expect pixels.len() == 8 * 220
+        expect pixels[7 + 210 * 8] == 0xFF059669u32
+
+    it "fallback facade composites rgba() background-color over the white page":
+        val html = "<html><body style='background-color: rgba(0, 0, 0, 0.5)'>Simple Web Renderer</body></html>"
+        val pixels = simple_web_render_html_to_pixels(html, 8, 220)
+        expect pixels.len() == 8 * 220
+        expect pixels[7 + 210 * 8] == 0xFF808080u32
+
+    it "fallback facade parses shorthand hex background-color":
+        val html = "<html><body style='background-color: #0f8'>Simple Web Renderer</body></html>"
+        val pixels = simple_web_render_html_to_pixels(html, 8, 220)
+        expect pixels.len() == 8 * 220
+        expect pixels[7 + 210 * 8] == 0xFF00FF88u32
+
+    it "fallback facade composites shorthand hex alpha background-color to the white page":
+        val html = "<html><body style='background-color: #0008'>Simple Web Renderer</body></html>"
+        val pixels = simple_web_render_html_to_pixels(html, 8, 220)
+        expect pixels.len() == 8 * 220
+        expect pixels[7 + 210 * 8] == 0xFF777777u32
+
+    it "fallback facade parses named CSS background-color":
+        val html = "<html><body style='background-color: rebeccapurple'>Simple Web Renderer</body></html>"
+        val pixels = simple_web_render_html_to_pixels(html, 8, 220)
+        expect pixels.len() == 8 * 220
+        expect pixels[7 + 210 * 8] == 0xFF663399u32
+
+    it "fallback facade composites transparent background-color to the white page":
+        val html = "<html><body style='background-color: transparent'>Simple Web Renderer</body></html>"
+        val pixels = simple_web_render_html_to_pixels(html, 8, 220)
+        expect pixels.len() == 8 * 220
+        expect pixels[7 + 210 * 8] == 0xFFFFFFFFu32
+
+    it "fallback facade parses hsl() background-color":
+        val html = "<html><body style='background-color: hsl(120, 100%, 25%)'>Simple Web Renderer</body></html>"
+        val pixels = simple_web_render_html_to_pixels(html, 8, 220)
+        expect pixels.len() == 8 * 220
+        expect pixels[7 + 210 * 8] == 0xFF008000u32
+
+    it "fallback facade resolves background-color currentColor from text color":
+        val html = "<html><body style='background-color: currentColor; color: #456789'>Simple Web Renderer</body></html>"
+        val pixels = simple_web_render_html_to_pixels(html, 8, 220)
+        expect pixels.len() == 8 * 220
+        expect pixels[7 + 210 * 8] == 0xFF456789u32
+
+    it "fallback facade parses color-first background shorthand":
+        val html = "<html><body style='background: rebeccapurple no-repeat'>Simple Web Renderer</body></html>"
+        val pixels = simple_web_render_html_to_pixels(html, 8, 220)
+        expect pixels.len() == 8 * 220
+        expect pixels[7 + 210 * 8] == 0xFF663399u32
+
+    it "fallback facade parses function color background shorthand before trailing tokens":
+        val html = "<html><body style='background: rgb(5, 150, 105) no-repeat'>Simple Web Renderer</body></html>"
+        val pixels = simple_web_render_html_to_pixels(html, 8, 220)
+        expect pixels.len() == 8 * 220
+        expect pixels[7 + 210 * 8] == 0xFF059669u32
+
+    it "fallback facade parses fallback color after url() in background shorthand":
+        val html = "<html><body style='background: url(hero.png) #0f8 no-repeat'>Simple Web Renderer</body></html>"
+        val pixels = simple_web_render_html_to_pixels(html, 8, 220)
+        expect pixels.len() == 8 * 220
+        expect pixels[7 + 210 * 8] == 0xFF00FF88u32
+
+    it "fallback facade resolves background shorthand currentColor from text color":
+        val html = "<html><body style='background: currentColor no-repeat; color: #345678'>Simple Web Renderer</body></html>"
+        val pixels = simple_web_render_html_to_pixels(html, 8, 220)
+        expect pixels.len() == 8 * 220
+        expect pixels[7 + 210 * 8] == 0xFF345678u32
+
+    it "fallback facade lets later background shorthand override earlier background-color":
+        val html = "<html><body style='background-color: rebeccapurple; background: #0f8'>Simple Web Renderer</body></html>"
+        val pixels = simple_web_render_html_to_pixels(html, 8, 220)
+        expect pixels.len() == 8 * 220
+        expect pixels[7 + 210 * 8] == 0xFF00FF88u32
+
+    it "fallback facade lets later background-color override earlier background shorthand":
+        val html = "<html><body style='background: #0f8; background-color: rebeccapurple'>Simple Web Renderer</body></html>"
+        val pixels = simple_web_render_html_to_pixels(html, 8, 220)
+        expect pixels.len() == 8 * 220
+        expect pixels[7 + 210 * 8] == 0xFF663399u32

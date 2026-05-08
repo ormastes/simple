@@ -1,0 +1,42 @@
+use compiler.loader.jit_context.*
+use compiler.loader.compiler_ffi.{make_named_type}
+
+fn build_template(name: text, param_count: i64) -> TemplateBytes:
+    TemplateBytes(bytes: [1, 2, 3], name: name, param_count: param_count)
+
+describe "Jit Compilation Context":
+    it "loads existing templates from SMF state":
+        var templates: Dict<text, TemplateBytes> = {}
+        templates["Vec"] = build_template("Vec", 1)
+        val ctx = JitCompilationContext.from_smf(templates)
+
+        expect ctx.has_template("Vec") == true
+        expect ctx.has_template("Map") == false
+        expect ctx.load_template("Vec").is_ok() == true
+
+    it "reports boundary contract mode and jit_time instantiation":
+        val ctx = JitCompilationContext.from_smf({})
+        expect ctx.contract_mode() == "boundary"
+        expect ctx.coverage_enabled() == false
+        expect ctx.instantiation_mode() == "jit_time"
+        expect ctx.di_container().? == false
+        expect ctx.aop_weaver().? == false
+
+    it "compiles a template into a mangled specialized unit":
+        var templates: Dict<text, TemplateBytes> = {}
+        templates["List"] = build_template("List", 1)
+        val ctx = JitCompilationContext.from_smf(templates)
+        val tmpl = ctx.load_template("List").unwrap()
+
+        val result = ctx.compile_template(tmpl, [make_named_type("Int")])
+        expect result.is_ok() == true
+        expect result.unwrap().name == "List$Int"
+        expect result.unwrap().bytes.len() > 0
+
+    it "records instantiation attempts":
+        var ctx = JitCompilationContext.from_smf({})
+        ctx.record_instantiation("Result", [make_named_type("String")], "Result$String", true, nil)
+
+        expect ctx.recorded.len() == 1
+        expect ctx.recorded[0].mangled_name == "Result$String"
+        expect ctx.recorded[0].success == true

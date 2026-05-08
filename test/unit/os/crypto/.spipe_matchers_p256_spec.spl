@@ -1,0 +1,279 @@
+# P-256 ECDSA/ECDH Known-Answer Test — RFC 6979 §A.2.5
+#
+# Verifies the pure-Simple P-256 implementation against the deterministic
+# ECDSA test vector from RFC 6979 Appendix A.2.5 (NIST P-256, SHA-256).
+#
+# Note: ECDSA verify requires 2 scalar-mults and exceeds the 60s test-runner
+# timeout in interpreter mode. Those tests are exercised via bin/simple run.
+
+use std.spipe.*
+use os.crypto.p256.{
+    p256_ecdsa_sign,
+    p256_keygen, p256_ecdh,
+    p256_point_on_curve, p256_add, p256_mul
+}
+use os.crypto.sha256.{sha256}
+
+fn _hex_nibble(n: u8) -> text:
+    if n == 0: "0"
+    else if n == 1: "1"
+    else if n == 2: "2"
+    else if n == 3: "3"
+    else if n == 4: "4"
+    else if n == 5: "5"
+    else if n == 6: "6"
+    else if n == 7: "7"
+    else if n == 8: "8"
+    else if n == 9: "9"
+    else if n == 10: "a"
+    else if n == 11: "b"
+    else if n == 12: "c"
+    else if n == 13: "d"
+    else if n == 14: "e"
+    else: "f"
+
+fn _bytes_hex(b: [u8]) -> text:
+    var s: text = ""
+    var i: u64 = 0
+    var blen: u64 = b.len().to_u64()
+    while i < blen:
+        var byte: u8 = b[i]
+        s = s + _hex_nibble((byte >> 4) & 0x0F)
+        s = s + _hex_nibble(byte & 0x0F)
+        i = i + 1
+    s
+
+fn _rfc6979_privkey() -> [u8]:
+    var k: [u8] = []
+    k.push(0xC9)
+    k.push(0xAF)
+    k.push(0xA9)
+    k.push(0xD8)
+    k.push(0x45)
+    k.push(0xBA)
+    k.push(0x75)
+    k.push(0x16)
+    k.push(0x6B)
+    k.push(0x5C)
+    k.push(0x21)
+    k.push(0x57)
+    k.push(0x67)
+    k.push(0xB1)
+    k.push(0xD6)
+    k.push(0x93)
+    k.push(0x4E)
+    k.push(0x50)
+    k.push(0xC3)
+    k.push(0xDB)
+    k.push(0x36)
+    k.push(0xE8)
+    k.push(0x9B)
+    k.push(0x12)
+    k.push(0x7B)
+    k.push(0x8A)
+    k.push(0x62)
+    k.push(0x2B)
+    k.push(0x12)
+    k.push(0x0F)
+    k.push(0x67)
+    k.push(0x21)
+    k
+
+fn _sample_msg() -> [u8]:
+    var m: [u8] = []
+    m.push(0x73)
+    m.push(0x61)
+    m.push(0x6D)
+    m.push(0x70)
+    m.push(0x6C)
+    m.push(0x65)
+    m
+
+fn _extract_first_32(buf: [u8]) -> [u8]:
+    var r: [u8] = []
+    r.push(buf[0u64])
+    r.push(buf[1u64])
+    r.push(buf[2u64])
+    r.push(buf[3u64])
+    r.push(buf[4u64])
+    r.push(buf[5u64])
+    r.push(buf[6u64])
+    r.push(buf[7u64])
+    r.push(buf[8u64])
+    r.push(buf[9u64])
+    r.push(buf[10u64])
+    r.push(buf[11u64])
+    r.push(buf[12u64])
+    r.push(buf[13u64])
+    r.push(buf[14u64])
+    r.push(buf[15u64])
+    r.push(buf[16u64])
+    r.push(buf[17u64])
+    r.push(buf[18u64])
+    r.push(buf[19u64])
+    r.push(buf[20u64])
+    r.push(buf[21u64])
+    r.push(buf[22u64])
+    r.push(buf[23u64])
+    r.push(buf[24u64])
+    r.push(buf[25u64])
+    r.push(buf[26u64])
+    r.push(buf[27u64])
+    r.push(buf[28u64])
+    r.push(buf[29u64])
+    r.push(buf[30u64])
+    r.push(buf[31u64])
+    r
+
+fn _get_pubkey_x(pk: [u8]) -> [u8]:
+    var r: [u8] = []
+    r.push(pk[1u64])
+    r.push(pk[2u64])
+    r.push(pk[3u64])
+    r.push(pk[4u64])
+    r.push(pk[5u64])
+    r.push(pk[6u64])
+    r.push(pk[7u64])
+    r.push(pk[8u64])
+    r.push(pk[9u64])
+    r.push(pk[10u64])
+    r.push(pk[11u64])
+    r.push(pk[12u64])
+    r.push(pk[13u64])
+    r.push(pk[14u64])
+    r.push(pk[15u64])
+    r.push(pk[16u64])
+    r.push(pk[17u64])
+    r.push(pk[18u64])
+    r.push(pk[19u64])
+    r.push(pk[20u64])
+    r.push(pk[21u64])
+    r.push(pk[22u64])
+    r.push(pk[23u64])
+    r.push(pk[24u64])
+    r.push(pk[25u64])
+    r.push(pk[26u64])
+    r.push(pk[27u64])
+    r.push(pk[28u64])
+    r.push(pk[29u64])
+    r.push(pk[30u64])
+    r.push(pk[31u64])
+    r.push(pk[32u64])
+    r
+
+fn _get_pubkey_y(pk: [u8]) -> [u8]:
+    var r: [u8] = []
+    r.push(pk[33u64])
+    r.push(pk[34u64])
+    r.push(pk[35u64])
+    r.push(pk[36u64])
+    r.push(pk[37u64])
+    r.push(pk[38u64])
+    r.push(pk[39u64])
+    r.push(pk[40u64])
+    r.push(pk[41u64])
+    r.push(pk[42u64])
+    r.push(pk[43u64])
+    r.push(pk[44u64])
+    r.push(pk[45u64])
+    r.push(pk[46u64])
+    r.push(pk[47u64])
+    r.push(pk[48u64])
+    r.push(pk[49u64])
+    r.push(pk[50u64])
+    r.push(pk[51u64])
+    r.push(pk[52u64])
+    r.push(pk[53u64])
+    r.push(pk[54u64])
+    r.push(pk[55u64])
+    r.push(pk[56u64])
+    r.push(pk[57u64])
+    r.push(pk[58u64])
+    r.push(pk[59u64])
+    r.push(pk[60u64])
+    r.push(pk[61u64])
+    r.push(pk[62u64])
+    r.push(pk[63u64])
+    r.push(pk[64u64])
+    r
+
+fn _be32_val(last_byte: u8) -> [u8]:
+    var b: [u8] = []
+    b.push(0x00)
+    b.push(0x00)
+    b.push(0x00)
+    b.push(0x00)
+    b.push(0x00)
+    b.push(0x00)
+    b.push(0x00)
+    b.push(0x00)
+    b.push(0x00)
+    b.push(0x00)
+    b.push(0x00)
+    b.push(0x00)
+    b.push(0x00)
+    b.push(0x00)
+    b.push(0x00)
+    b.push(0x00)
+    b.push(0x00)
+    b.push(0x00)
+    b.push(0x00)
+    b.push(0x00)
+    b.push(0x00)
+    b.push(0x00)
+    b.push(0x00)
+    b.push(0x00)
+    b.push(0x00)
+    b.push(0x00)
+    b.push(0x00)
+    b.push(0x00)
+    b.push(0x00)
+    b.push(0x00)
+    b.push(0x00)
+    b.push(last_byte)
+    b
+
+describe "P-256 ECDSA/ECDH — RFC 6979 known-answer tests":
+
+    it "keygen produces 65-byte uncompressed pubkey":
+        val sk = _rfc6979_privkey()
+        val pk = p256_keygen(sk)
+        expect pk.len() == 65
+        expect pk[0u64] == 0x04u8
+
+    it "generated pubkey is on curve":
+        val sk = _rfc6979_privkey()
+        val pk = p256_keygen(sk)
+        val px = _get_pubkey_x(pk)
+        val py = _get_pubkey_y(pk)
+        expect p256_point_on_curve(px, py) == true
+
+    it "ECDSA sign produces 64-byte signature":
+        val sk = _rfc6979_privkey()
+        val msg = _sample_msg()
+        val msg_hash = sha256(msg)
+        val sig = p256_ecdsa_sign(sk, msg_hash)
+        expect sig.len() == 64
+
+    it "ECDSA sign matches RFC 6979 r value":
+        val sk = _rfc6979_privkey()
+        val msg = _sample_msg()
+        val msg_hash = sha256(msg)
+        val sig = p256_ecdsa_sign(sk, msg_hash)
+        val r_bytes = _extract_first_32(sig)
+        expect(_bytes_hex(r_bytes)).to_equal(
+            "efd48b2aacb6a8fd1140dd9cd45e81d69d2c877b56aaf991c34d0ea84eaf3716"
+        )
+
+    it "p256_add(1, 1) mod p == 2":
+        val one = _be32_val(0x01u8)
+        val two_bytes = p256_add(one, one)
+        val expected = _be32_val(0x02u8)
+        expect _bytes_hex(two_bytes) == _bytes_hex(expected)
+
+    it "p256_mul(2, 3) mod p == 6":
+        val two = _be32_val(0x02u8)
+        val three = _be32_val(0x03u8)
+        val six_bytes = p256_mul(two, three)
+        val expected = _be32_val(0x06u8)
+        expect _bytes_hex(six_bytes) == _bytes_hex(expected)

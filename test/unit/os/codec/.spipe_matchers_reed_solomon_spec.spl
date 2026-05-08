@@ -1,0 +1,242 @@
+# Reed-Solomon GF(2^8) Known-Answer Test Vectors
+#
+# Tests rs_gf256_encode / rs_gf256_decode against the canonical n=10, k=4
+# KAT vector verified in doc/08_tracking/bug/reed_solomon_impl_missing_2026-05-03.md.
+#
+# Primitive polynomial : 0x11d  (x^8+x^4+x^3+x^2+1)
+# Parameters          : n=10, k=4, t=3
+# Generator roots     : alpha^0 .. alpha^5  (alpha = 0x02)
+# Generator poly      : [0x01, 0x3f, 0x01, 0xda, 0x20, 0xe3, 0x26]
+#
+# Data    : [0x48, 0x65, 0x6c, 0x6c]
+# Parity  : [0xfa, 0x22, 0x1d, 0xc7, 0x40, 0x6f]
+# Codeword: [0x48, 0x65, 0x6c, 0x6c, 0xfa, 0x22, 0x1d, 0xc7, 0x40, 0x6f]
+#
+# Reference: ISO/IEC 18004:2015 §7.5
+#
+# NOTE: per .claude/memory/feedback_compile_mode_false_greens.md this spec is
+# verified in interpreter mode (file-load only). The expect() assertions
+# exercise the algorithm correctness under compiled/native mode.
+# ============================================================================
+
+use std.spipe.*
+use os.codec.reed_solomon.{rs_gf256_encode, rs_gf256_decode, RsDecodeResult}
+
+# ============================================================================
+# Test data helpers — module-level to avoid it-block var-mutation footgun
+# (see .claude/memory/feedback_it_block_var_mutation.md)
+# ============================================================================
+
+fn _data() -> [u8]:
+    # [0x48, 0x65, 0x6c, 0x6c] = "Hell"
+    var out: [u8] = []
+    out.push(0x48)
+    out.push(0x65)
+    out.push(0x6c)
+    out.push(0x6c)
+    out
+
+fn _parity() -> [u8]:
+    # KAT parity bytes: [0xfa, 0x22, 0x1d, 0xc7, 0x40, 0x6f]
+    var out: [u8] = []
+    out.push(0xfa)
+    out.push(0x22)
+    out.push(0x1d)
+    out.push(0xc7)
+    out.push(0x40)
+    out.push(0x6f)
+    out
+
+fn _codeword() -> [u8]:
+    # Full codeword: data ++ parity
+    var out: [u8] = []
+    out.push(0x48)
+    out.push(0x65)
+    out.push(0x6c)
+    out.push(0x6c)
+    out.push(0xfa)
+    out.push(0x22)
+    out.push(0x1d)
+    out.push(0xc7)
+    out.push(0x40)
+    out.push(0x6f)
+    out
+
+fn _corrupt1() -> [u8]:
+    # Codeword with 1 error at position 3 (mag 0xAB)
+    var out: [u8] = _codeword()
+    out[3] = out[3] ^ 0xab
+    out
+
+fn _corrupt2() -> [u8]:
+    # Codeword with 2 errors at positions 1 (mag 0x11) and 7 (mag 0x22)
+    var out: [u8] = _codeword()
+    out[1] = out[1] ^ 0x11
+    out[7] = out[7] ^ 0x22
+    out
+
+fn _corrupt3() -> [u8]:
+    # Codeword with 3 errors at positions 0 (0x01), 4 (0x02), 9 (0x03)
+    var out: [u8] = _codeword()
+    out[0] = out[0] ^ 0x01
+    out[4] = out[4] ^ 0x02
+    out[9] = out[9] ^ 0x03
+    out
+
+fn _corrupt4() -> [u8]:
+    # Codeword with 4 errors — exceeds t=3 capacity
+    var out: [u8] = _codeword()
+    out[0] = out[0] ^ 0x01
+    out[2] = out[2] ^ 0x02
+    out[5] = out[5] ^ 0x03
+    out[8] = out[8] ^ 0x04
+    out
+
+fn _decode_ok(result: RsDecodeResult) -> bool:
+    match result:
+        case RsDecodeResult.Ok(_): true
+        case RsDecodeResult.Err(_): false
+
+fn _decode_data(result: RsDecodeResult) -> [u8]:
+    match result:
+        case RsDecodeResult.Ok(d): d
+        case RsDecodeResult.Err(_):
+            var empty: [u8] = []
+            empty
+
+fn _decode_err(result: RsDecodeResult) -> bool:
+    match result:
+        case RsDecodeResult.Ok(_): false
+        case RsDecodeResult.Err(_): true
+
+# ============================================================================
+# Encoder KAT — parity bytes
+# ============================================================================
+
+describe "Reed-Solomon GF(2^8) encoder KAT (n=10, k=4)":
+
+    it "produces correct parity byte 0 (0xfa)":
+        val p = rs_gf256_encode(_data(), 10, 4)
+        expect p[0].to_u64() == 0xfau64
+
+    it "produces correct parity byte 1 (0x22)":
+        val p = rs_gf256_encode(_data(), 10, 4)
+        expect p[1].to_u64() == 0x22u64
+
+    it "produces correct parity byte 2 (0x1d)":
+        val p = rs_gf256_encode(_data(), 10, 4)
+        expect p[2].to_u64() == 0x1du64
+
+    it "produces correct parity byte 3 (0xc7)":
+        val p = rs_gf256_encode(_data(), 10, 4)
+        expect p[3].to_u64() == 0xc7u64
+
+    it "produces correct parity byte 4 (0x40)":
+        val p = rs_gf256_encode(_data(), 10, 4)
+        expect p[4].to_u64() == 0x40u64
+
+    it "produces correct parity byte 5 (0x6f)":
+        val p = rs_gf256_encode(_data(), 10, 4)
+        expect p[5].to_u64() == 0x6fu64
+
+    it "returns exactly (n-k)=6 parity bytes":
+        val p = rs_gf256_encode(_data(), 10, 4)
+        expect p.len() == 6u64
+
+# ============================================================================
+# Decoder — clean codeword (zero syndromes)
+# ============================================================================
+
+describe "Reed-Solomon GF(2^8) decoder — clean codeword":
+
+    it "clean codeword returns Ok":
+        val result = rs_gf256_decode(_codeword(), 10, 4)
+        expect _decode_ok(result) == true
+
+    it "clean codeword recovers data byte 0 (0x48)":
+        val d = _decode_data(rs_gf256_decode(_codeword(), 10, 4))
+        expect d[0].to_u64() == 0x48u64
+
+    it "clean codeword recovers data byte 1 (0x65)":
+        val d = _decode_data(rs_gf256_decode(_codeword(), 10, 4))
+        expect d[1].to_u64() == 0x65u64
+
+    it "clean codeword recovers data byte 2 (0x6c)":
+        val d = _decode_data(rs_gf256_decode(_codeword(), 10, 4))
+        expect d[2].to_u64() == 0x6cu64
+
+    it "clean codeword recovers data byte 3 (0x6c)":
+        val d = _decode_data(rs_gf256_decode(_codeword(), 10, 4))
+        expect d[3].to_u64() == 0x6cu64
+
+# ============================================================================
+# Decoder — 1-error correction
+# ============================================================================
+
+describe "Reed-Solomon GF(2^8) decoder — 1-error correction":
+
+    it "1-error: returns Ok":
+        val result = rs_gf256_decode(_corrupt1(), 10, 4)
+        expect _decode_ok(result) == true
+
+    it "1-error: recovers data byte 0":
+        val d = _decode_data(rs_gf256_decode(_corrupt1(), 10, 4))
+        expect d[0].to_u64() == 0x48u64
+
+    it "1-error: recovers data byte 3 (the corrupted one)":
+        val d = _decode_data(rs_gf256_decode(_corrupt1(), 10, 4))
+        expect d[3].to_u64() == 0x6cu64
+
+# ============================================================================
+# Decoder — 2-error correction
+# ============================================================================
+
+describe "Reed-Solomon GF(2^8) decoder — 2-error correction":
+
+    it "2-error: returns Ok":
+        val result = rs_gf256_decode(_corrupt2(), 10, 4)
+        expect _decode_ok(result) == true
+
+    it "2-error: recovers data byte 0":
+        val d = _decode_data(rs_gf256_decode(_corrupt2(), 10, 4))
+        expect d[0].to_u64() == 0x48u64
+
+    it "2-error: recovers data byte 1 (corrupted)":
+        val d = _decode_data(rs_gf256_decode(_corrupt2(), 10, 4))
+        expect d[1].to_u64() == 0x65u64
+
+# ============================================================================
+# Decoder — 3-error correction (at capacity t=3)
+# ============================================================================
+
+describe "Reed-Solomon GF(2^8) decoder — 3-error correction (t=3)":
+
+    it "3-error: returns Ok":
+        val result = rs_gf256_decode(_corrupt3(), 10, 4)
+        expect _decode_ok(result) == true
+
+    it "3-error: recovers data byte 0 (corrupted)":
+        val d = _decode_data(rs_gf256_decode(_corrupt3(), 10, 4))
+        expect d[0].to_u64() == 0x48u64
+
+    it "3-error: recovers data byte 1":
+        val d = _decode_data(rs_gf256_decode(_corrupt3(), 10, 4))
+        expect d[1].to_u64() == 0x65u64
+
+    it "3-error: recovers data byte 2":
+        val d = _decode_data(rs_gf256_decode(_corrupt3(), 10, 4))
+        expect d[2].to_u64() == 0x6cu64
+
+    it "3-error: recovers data byte 3":
+        val d = _decode_data(rs_gf256_decode(_corrupt3(), 10, 4))
+        expect d[3].to_u64() == 0x6cu64
+
+# ============================================================================
+# Decoder — > t errors returns Err
+# ============================================================================
+
+describe "Reed-Solomon GF(2^8) decoder — over-capacity (4 errors > t=3)":
+
+    it "4-error: returns Err (not Ok)":
+        val result = rs_gf256_decode(_corrupt4(), 10, 4)
+        expect _decode_err(result) == true

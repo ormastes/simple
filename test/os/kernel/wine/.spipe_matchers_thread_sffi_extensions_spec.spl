@@ -1,0 +1,145 @@
+# Spec for thread_sffi extensions — TLS keys, semaphore, event-wait (M1, REQ-3).
+#
+# These specs cover the new functions added to:
+#   src/lib/nogc_async_mut/thread_sffi.spl
+#
+# Tests are in the red phase: the new functions do not yet exist.
+# Run with:
+#   bin/simple test test/os/kernel/wine/thread_sffi_extensions_spec.spl
+#
+# @cover src/lib/nogc_async_mut/thread_sffi.spl
+
+use std.spec
+use std.nogc_async_mut.thread_sffi.{
+    tls_key_alloc,
+    tls_key_set,
+    tls_key_get,
+    semaphore_create,
+    semaphore_post,
+    semaphore_wait,
+    event_wait_create,
+    event_wait_set,
+    event_wait_reset,
+    event_wait_wait
+}
+
+describe "thread_sffi extensions — TLS keys, semaphore, event-wait":
+
+    describe "AC-3: tls_key_alloc / set / get — per-thread storage":
+        it "AC-3: tls_key_alloc returns a positive key":
+            fn no_destructor(p: *void) -> void:
+                val _ = 0
+            val key = tls_key_alloc(no_destructor)
+            expect key > 0
+
+        it "AC-3: consecutive tls_key_alloc calls return distinct keys":
+            fn no_destructor(p: *void) -> void:
+                val _ = 0
+            val k1 = tls_key_alloc(no_destructor)
+            val k2 = tls_key_alloc(no_destructor)
+            expect k1 == k2 == false
+
+        it "AC-3: tls_key_set and tls_key_get round-trip a value":
+            fn no_destructor(p: *void) -> void:
+                val _ = 0
+            val key = tls_key_alloc(no_destructor)
+            tls_key_set(key, 0xABCD)
+            val got = tls_key_get(key)
+            expect got == 0xABCD
+
+        it "AC-3: tls_key_get on unused key returns null (0)":
+            fn no_destructor(p: *void) -> void:
+                val _ = 0
+            val key = tls_key_alloc(no_destructor)
+            val got = tls_key_get(key)
+            expect got == 0
+
+        it "AC-3: tls_key_set overwrite updates the stored value":
+            fn no_destructor(p: *void) -> void:
+                val _ = 0
+            val key = tls_key_alloc(no_destructor)
+            tls_key_set(key, 0x11)
+            tls_key_set(key, 0x22)
+            val got = tls_key_get(key)
+            expect got == 0x22
+
+    describe "AC-3: semaphore — create / post / wait":
+        it "AC-3: semaphore_create with initial=0 returns a valid handle":
+            val h = semaphore_create(0)
+            expect h > 0
+
+        it "AC-3: semaphore_create with initial=1 returns a valid handle":
+            val h = semaphore_create(1)
+            expect h > 0
+
+        it "AC-3: semaphore_create returns distinct handles":
+            val h1 = semaphore_create(0)
+            val h2 = semaphore_create(0)
+            expect h1 == h2 == false
+
+        it "AC-3: semaphore_wait with initial=1 and timeout_ns=0 returns signaled":
+            val h = semaphore_create(1)
+            val result = semaphore_wait(h, 0)
+            expect result == "signaled"
+
+        it "AC-3: semaphore_wait on zero-count semaphore with timeout_ns=0 returns timeout":
+            val h = semaphore_create(0)
+            val result = semaphore_wait(h, 0)
+            expect result == "timeout"
+
+        it "AC-3: semaphore_post followed by semaphore_wait returns signaled":
+            val h = semaphore_create(0)
+            semaphore_post(h)
+            val result = semaphore_wait(h, 0)
+            expect result == "signaled"
+
+        it "AC-3: semaphore count decrements after successful wait":
+            val h = semaphore_create(1)
+            val r1 = semaphore_wait(h, 0)
+            expect r1 == "signaled"
+            # Count is now 0; next wait should timeout
+            val r2 = semaphore_wait(h, 0)
+            expect r2 == "timeout"
+
+    describe "AC-3: event_wait — create / set / reset / wait":
+        it "AC-3: event_wait_create with manual_reset=false returns a valid handle":
+            val h = event_wait_create(false)
+            expect h > 0
+
+        it "AC-3: event_wait_create with manual_reset=true returns a valid handle":
+            val h = event_wait_create(true)
+            expect h > 0
+
+        it "AC-3: event_wait_wait on unset event with timeout_ns=0 returns timeout":
+            val h = event_wait_create(false)
+            val result = event_wait_wait(h, 0)
+            expect result == "timeout"
+
+        it "AC-3: event_wait_set then event_wait_wait returns signaled":
+            val h = event_wait_create(false)
+            event_wait_set(h)
+            val result = event_wait_wait(h, 0)
+            expect result == "signaled"
+
+        it "AC-3: manual-reset event remains set after first wait":
+            val h = event_wait_create(true)
+            event_wait_set(h)
+            val r1 = event_wait_wait(h, 0)
+            expect r1 == "signaled"
+            val r2 = event_wait_wait(h, 0)
+            expect r2 == "signaled"
+
+        it "AC-3: auto-reset event is consumed after first wait":
+            val h = event_wait_create(false)
+            event_wait_set(h)
+            val r1 = event_wait_wait(h, 0)
+            expect r1 == "signaled"
+            val r2 = event_wait_wait(h, 0)
+            expect r2 == "timeout"
+
+        it "AC-3: event_wait_reset on set event causes next wait to timeout":
+            val h = event_wait_create(true)
+            event_wait_set(h)
+            event_wait_reset(h)
+            val result = event_wait_wait(h, 0)
+            expect result == "timeout"

@@ -1,0 +1,110 @@
+# simd_rotl_i32x4 / simd_rotr_i32x4 — unit tests
+#
+# Tests cover:
+#   - rotl identity (n=0)
+#   - rotl by 8, 16, 31
+#   - rotr by 8, 16
+#   - rotr(x, 16) == rotl(x, 16) (rotation by half-width is self-inverse)
+#   - All four lanes independent: [0x01, 0x02, 0x04, 0x08] rotl by 1
+#   - rotl by 32 is identity (n masked to 0)
+#
+# Helper constructors build Vec4i values outside it-blocks to avoid
+# interpreter var-rebind limitation (feedback_it_block_var_mutation.md).
+
+use std.spipe.*
+use std.simd.{Vec4i, simd_rotl_i32x4, simd_rotr_i32x4}
+
+# ============================================================================
+# Helpers
+# ============================================================================
+
+fn _v4(x: i32, y: i32, z: i32, w: i32) -> Vec4i:
+    Vec4i(x: x, y: y, z: z, w: w)
+
+fn _splat4(v: i32) -> Vec4i:
+    Vec4i(x: v, y: v, z: v, w: v)
+
+# Pre-built inputs used across tests
+fn _input_12345678() -> Vec4i:
+    _splat4(0x12345678)
+
+fn _input_lanes() -> Vec4i:
+    _v4(0x00000001, 0x00000002, 0x00000004, 0x00000008)
+
+# ============================================================================
+# rotl tests
+# ============================================================================
+
+describe "simd_rotl_i32x4":
+    """
+    Rotate-left wrapper over simd_shl_i32x4, simd_shr_i32x4, simd_or_i32x4.
+    Test vectors derived from RFC 7539 rotation amounts and hand-computed values.
+    """
+
+    it "rotl by 0 is identity":
+        val r = simd_rotl_i32x4(_input_12345678(), 0)
+        expect r.x == 0x12345678
+        expect r.y == 0x12345678
+        expect r.z == 0x12345678
+        expect r.w == 0x12345678
+
+    it "rotl by 8: 0x12345678 -> 0x34567812":
+        val r = simd_rotl_i32x4(_input_12345678(), 8)
+        expect r.x == 0x34567812
+        expect r.y == 0x34567812
+        expect r.z == 0x34567812
+        expect r.w == 0x34567812
+
+    it "rotl by 16: 0x12345678 -> 0x56781234":
+        val r = simd_rotl_i32x4(_input_12345678(), 16)
+        expect r.x == 0x56781234
+        expect r.y == 0x56781234
+        expect r.z == 0x56781234
+        expect r.w == 0x56781234
+
+    it "rotl by 31: 0x12345678 -> 0x091a2b3c":
+        # 0x12345678 << 31 = 0 (bit 0 of 0x78 = 0), >> 1 = 0x091A2B3C
+        val r = simd_rotl_i32x4(_input_12345678(), 31)
+        expect r.x == 0x091a2b3c
+        expect r.y == 0x091a2b3c
+        expect r.z == 0x091a2b3c
+        expect r.w == 0x091a2b3c
+
+    it "rotl by 32 is identity (n masked to 0)":
+        val r = simd_rotl_i32x4(_input_12345678(), 32)
+        expect r.x == 0x12345678
+        expect r.y == 0x12345678
+        expect r.z == 0x12345678
+        expect r.w == 0x12345678
+
+    it "rotl by 1 is independent per lane: [1,2,4,8] -> [2,4,8,16]":
+        val r = simd_rotl_i32x4(_input_lanes(), 1)
+        expect r.x == 0x00000002
+        expect r.y == 0x00000004
+        expect r.z == 0x00000008
+        expect r.w == 0x00000010
+
+# ============================================================================
+# rotr tests
+# ============================================================================
+
+describe "simd_rotr_i32x4":
+    """
+    Rotate-right wrapper — mirror of rotl.
+    BLAKE2s uses rotr(x, 16), rotr(x, 12), rotr(x, 8), rotr(x, 7).
+    """
+
+    it "rotr by 8: 0x12345678 -> 0x78123456":
+        # >> 8 = 0x00123456, << 24 = 0x78000000
+        val r = simd_rotr_i32x4(_input_12345678(), 8)
+        expect r.x == 0x78123456
+        expect r.y == 0x78123456
+        expect r.z == 0x78123456
+        expect r.w == 0x78123456
+
+    it "rotr by 16: 0x12345678 -> 0x56781234 (same as rotl by 16)":
+        val r = simd_rotr_i32x4(_input_12345678(), 16)
+        expect r.x == 0x56781234
+        expect r.y == 0x56781234
+        expect r.z == 0x56781234
+        expect r.w == 0x56781234

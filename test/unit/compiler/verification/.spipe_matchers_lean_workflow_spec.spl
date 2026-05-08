@@ -1,0 +1,162 @@
+import spipe
+import io.fs as fs
+import verification.lean.runner as runner
+import verification.models.contracts as contracts
+import verification.proofs.obligations as obligations
+import verification.proofs.checker as checker
+import verification.regenerate as regen
+
+describe "Lean Verification Workflow Core":
+    context "LeanCheckResult":
+        it "flags unproven goals and formats them":
+            val result = runner.LeanCheckResult(
+                file: "src/verification/demo.lean",
+                success: true,
+                stdout: "goals accomplished",
+                stderr: "",
+                goals_solved: 1,
+                goals_remaining: 2,
+                exit_code: Some(0)
+            )
+
+            expect result.has_unproven() == true
+            expect result.is_fully_proven() == false
+            expect result.passed() == true
+            expect (result.format()).contains("Goals remaining (sorry): 2")
+
+    context "VerificationSummary":
+        it "aggregates pass/fail and unproven counts":
+            val ok = runner.LeanCheckResult(
+                file: "src/verification/ok.lean",
+                success: true,
+                stdout: "goals accomplished",
+                stderr: "",
+                goals_solved: 1,
+                goals_remaining: 0,
+                exit_code: Some(0)
+            )
+            val bad = runner.LeanCheckResult(
+                file: "src/verification/bad.lean",
+                success: false,
+                stdout: "",
+                stderr: "error: sorry",
+                goals_solved: 0,
+                goals_remaining: 1,
+                exit_code: Some(1)
+            )
+
+            val summary = runner.VerificationSummary.from_results([ok, bad])
+            expect summary.files_checked == 2
+            expect summary.files_passed == 1
+            expect summary.files_failed == 1
+            expect summary.total_theorems == 2
+            expect summary.proven_theorems == 1
+            expect summary.unproven_theorems == 1
+            expect summary.is_success() == false
+            expect summary.is_fully_proven() == false
+            expect (summary.format()).contains("Files: 1/2 passed")
+            expect (summary.format()).contains("Theorems: 1/2 proven")
+            expect (summary.format()).contains("Unproven (sorry): 1")
+
+    context "Proof obligations":
+        it "extracts obligations with stable identifiers":
+            var contract = contracts.FunctionContract.new()
+            contract = contract.add_precondition(
+                contracts.ContractClause.new(
+                    contracts.ContractExpr.ge(
+                        contracts.ContractExpr.variable("n"),
+                        contracts.ContractExpr.int_val(0)
+                    )
+                )
+            )
+            contract = contract.add_postcondition(
+                contracts.ContractClause.new(
+                    contracts.ContractExpr.gt(
+                        contracts.ContractExpr.result(),
+                        contracts.ContractExpr.int_val(0)
+                    )
+                )
+            )
+            contract = contract.add_invariant(
+                contracts.ContractClause.new(
+                    contracts.ContractExpr.ge(
+                        contracts.ContractExpr.variable("n"),
+                        contracts.ContractExpr.int_val(0)
+                    )
+                )
+            )
+
+            val obls = obligations.extract_from_contract("factorial", "math.spl", 42, contract)
+            expect obls.len() == 3
+            expect obls[0].id == "factorial_pre_0"
+            expect obls[1].id == "factorial_post_0"
+            expect obls[2].id == "factorial_inv_0"
+            expect obls[0].source_file == "math.spl"
+            expect obls[0].source_line == 42
+
+        it "preserves proof text when marked proven":
+            val ob = obligations.ProofObligation.create(
+                "demo_post_0",
+                "demo_postcondition_0",
+                "demo.spl",
+                7,
+                "True"
+            )
+            val proven = ob.with_status(obligations.ProofStatus.Proven).with_proof("rfl")
+            val theorem = proven.to_lean_theorem()
+
+            expect proven.status.to_string() == "proven"
+            expect theorem.name == "demo_postcondition_0"
+            expect theorem.proof == "rfl"
+            expect (theorem.to_lean()).contains("rfl")
+
+    context "Regeneration inventory":
+        it "returns the supported file set":
+            val files = regen.regenerate_all()
+            expect files.len() == 15
+            expect files.has("src/verification/memory_capabilities/src/MemoryCapabilities.lean") == true
+            expect files.has("src/verification/memory_model_drf/src/MemoryModelDRF.lean") == true
+            expect files.has("src/verification/type_inference_compile/src/Contracts.lean") == true
+
+        it "writes regenerated files to a temp directory":
+            val temp_root = "/tmp/simple-lean-workflow-unit"
+            val sample = {"src/verification/demo/src/Demo.lean": "theorem demo : True := by rfl"}
+            val written = regen.write_regenerated_files(sample, temp_root)
+
+            expect written.len() == 1
+            expect (written[0]).starts_with(temp_root)
+            expect fs.exist(written[0]) == true
+            expect fs.read_text(written[0]) == "theorem demo : True := by rfl"
+
+    context "Proof status":
+        it "renders admitted and pending states distinctly":
+            expect obligations.ProofStatus.Pending.to_string() == "pending"
+            expect obligations.ProofStatus.Proven.to_string() == "proven"
+            expect obligations.ProofStatus.Admitted.to_string() == "admitted"
+
+    context "Strict checker":
+        it "hard-fails on files that still contain sorry":
+            val temp_root = "/tmp/simple-lean-workflow-strict"
+            val temp_path = "{temp_root}/Demo.lean"
+            val written = regen.write_regenerated_files(
+                {"src/verification/demo/src/Demo.lean": "theorem demo : True := by sorry"},
+                temp_root
+            )
+
+            expect written.len() == 1
+
+            val proof_checker = checker.ProofChecker.create()
+            val result = proof_checker.check_file(temp_path)
+
+            expect result.status == checker.ProofStatus.Failed
+            expect result.sorry_count == 1
+            expect (result.error_message).contains("sorry")
+
+        it "flags missing validation targets as mismatches":
+            val validation = regen.validate_regeneration(
+                {"src/verification/demo/src/Demo.lean": "theorem demo : True := by rfl"},
+                "/tmp/simple-lean-workflow-missing"
+            )
+
+            expect validation.has("src/verification/demo/src/Demo.lean") == true
+            expect validation.get("src/verification/demo/src/Demo.lean").? == false

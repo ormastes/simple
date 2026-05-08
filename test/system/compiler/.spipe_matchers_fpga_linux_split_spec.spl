@@ -1,0 +1,234 @@
+# @cover src/hardware/fpga_linux/riscv_fpga_linux.spl 80%
+# @cover src/hardware/fpga_linux/fpga_linux_orchestrator.spl 80%
+# @cover src/hardware/fpga_linux/fpga_linux_data.spl 80%
+# @cover src/hardware/fpga_linux/fpga_linux_manifest.spl 80%
+"""
+# FPGA Linux riscv_fpga_linux.spl Split Specification
+
+**Feature IDs:** #rtl-mdsoc-reorg
+**Category:** Infrastructure
+**Difficulty:** 4/5
+**Status:** Draft
+**Requirements:** doc/02_requirements/feature/rtl_riscv_mdsoc_reorg.md
+**Design:** doc/05_design/rtl_riscv_mdsoc_capsules.md
+
+## Overview
+
+Verifies that the 4547-line `riscv_fpga_linux.spl` is split into three
+specialized capsule files plus a thin re-export facade, that the facade
+preserves the original public API, and that line-count budgets are respected.
+
+## Split Design (Phase 3 D-2)
+
+- `fpga_linux_orchestrator.spl` — Control capsule: lane runner, board structs,
+  bundle generation (budget: < 900 lines)
+- `fpga_linux_data.spl` — Data capsule: VHDL-emission methods (budget: < 2700 lines)
+  NOTE: Phase 3 sizing estimated ~2855 lines for data — budget < 2700 may require
+  additional split in Phase 5. Phase 5 SA-3 must resolve and record any deviation.
+- `fpga_linux_manifest.spl` — Metadata capsule: debug sidecar JSON emission
+  (budget: < 200 lines)
+- `riscv_fpga_linux.spl` — Thin re-export facade (budget: < 30 lines)
+
+## Public API Preservation (AC-1, AC-6)
+
+The re-export facade must preserve:
+- `RiscvFpgaLane`
+- `FpgaPrepareManifest`
+- `XilinxBoardProfile`
+
+These are the canonical public symbols. Any probe that imports them from
+`hardware.fpga_linux.riscv_fpga_linux` must resolve correctly.
+
+## Acceptance Criteria
+
+- AC-1: Physical split into named MDSOC capsules
+- AC-6: Existing spec `pure_simple_vhdl_source_of_truth_spec.spl` must pass
+  (probes that import riscv_fpga_linux symbols keep working)
+
+TDD-red: split files do not exist before Phase 5 SA-3 runs.
+"""
+
+use std.spec
+
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_file_read_text(path: text) -> text?
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+
+fn check_msg(condition: bool, msg: text):
+    if not condition:
+        expect msg == ""
+
+fn read_file(path: text) -> text:
+    rt_file_read_text(path) ?? ""
+
+fn file_line_count(path: text) -> i64:
+    # Use wc -l via shell; returns 0 if file absent or on error.
+    if not rt_file_exists(path):
+        return 0
+    val (stdout, _stderr, code) = rt_process_run("sh", ["-c", "wc -l < '" + path + "' 2>/dev/null || echo 0"])
+    if code != 0:
+        return 0
+    val trimmed = stdout.trim()
+    if trimmed == "":
+        return 0
+    trimmed.to_i64() ?? 0
+
+fn fpga_orch_path() -> text:
+    "src/hardware/fpga_linux/fpga_linux_orchestrator.spl"
+
+fn fpga_data_path() -> text:
+    "src/hardware/fpga_linux/fpga_linux_data.spl"
+
+fn fpga_manifest_path() -> text:
+    "src/hardware/fpga_linux/fpga_linux_manifest.spl"
+
+fn fpga_facade_path() -> text:
+    "src/hardware/fpga_linux/riscv_fpga_linux.spl"
+
+fn rv32_script_path() -> text:
+    "scripts/rtl_riscv32_linux_generated.shs"
+
+fn rv64_script_path() -> text:
+    "scripts/rtl_riscv64_linux_generated.shs"
+
+describe "FPGA Linux Split: file existence (AC-1)":
+    """
+    ## Split File Existence
+
+    All three new capsule files must exist after Phase 5 SA-3 runs.
+    TDD-red: these files do not exist yet.
+    """
+
+    it "AC-1: fpga_linux_orchestrator.spl exists":
+        val path = fpga_orch_path()
+        val exists = rt_file_exists(path)
+        check_msg(exists, "SA-3 not run yet — file missing: " + path)
+        expect exists == true
+
+    it "AC-1: fpga_linux_data.spl exists":
+        val path = fpga_data_path()
+        val exists = rt_file_exists(path)
+        check_msg(exists, "SA-3 not run yet — file missing: " + path)
+        expect exists == true
+
+    it "AC-1: fpga_linux_manifest.spl exists":
+        val path = fpga_manifest_path()
+        val exists = rt_file_exists(path)
+        check_msg(exists, "SA-3 not run yet — file missing: " + path)
+        expect exists == true
+
+    it "AC-1: riscv_fpga_linux.spl (facade) still exists":
+        val path = fpga_facade_path()
+        val exists = rt_file_exists(path)
+        expect exists == true
+
+describe "FPGA Linux Split: line-count budgets (AC-1)":
+    """
+    ## Line-Count Budgets
+
+    Each capsule file must stay within its budget.
+    Note: fpga_linux_data.spl budget is < 2700 lines (task authority).
+    Phase 3 sizing estimated ~2855 lines — SA-3 must report any overage.
+    """
+
+    it "AC-1: fpga_linux_orchestrator.spl is under 900 lines":
+        val path = fpga_orch_path()
+        check_msg(rt_file_exists(path), "file not found: " + path)
+        val lines = file_line_count(path)
+        check_msg(lines < 900, "orchestrator line count " + lines.to_text() + " exceeds budget of 900")
+        expect lines < 900
+
+    it "AC-1: fpga_linux_data.spl is under 2700 lines":
+        val path = fpga_data_path()
+        check_msg(rt_file_exists(path), "file not found: " + path)
+        val lines = file_line_count(path)
+        check_msg(lines < 2700, "data line count " + lines.to_text() + " exceeds budget of 2700 (Phase 3 estimated 2855 — SA-3 must resolve)")
+        expect lines < 2700
+
+    it "AC-1: fpga_linux_manifest.spl is under 200 lines":
+        val path = fpga_manifest_path()
+        check_msg(rt_file_exists(path), "file not found: " + path)
+        val lines = file_line_count(path)
+        check_msg(lines < 200, "manifest line count " + lines.to_text() + " exceeds budget of 200")
+        expect lines < 200
+
+describe "FPGA Linux Split: re-export facade preserves public API (AC-1, AC-6)":
+    """
+    ## Re-Export Facade API Preservation
+
+    The thin re-export riscv_fpga_linux.spl must re-export all canonical
+    public symbols: RiscvFpgaLane, FpgaPrepareManifest, XilinxBoardProfile.
+    """
+
+    it "AC-1: riscv_fpga_linux.spl re-exports RiscvFpgaLane":
+        val path = fpga_facade_path()
+        check_msg(rt_file_exists(path), "facade file not found: " + path)
+        val content = read_file(path)
+        val has_symbol = content.contains("RiscvFpgaLane")
+        expect has_symbol == true
+
+    it "AC-1: riscv_fpga_linux.spl re-exports FpgaPrepareManifest":
+        val path = fpga_facade_path()
+        check_msg(rt_file_exists(path), "facade file not found: " + path)
+        val content = read_file(path)
+        val has_symbol = content.contains("FpgaPrepareManifest")
+        expect has_symbol == true
+
+    it "AC-1: riscv_fpga_linux.spl re-exports XilinxBoardProfile":
+        val path = fpga_facade_path()
+        check_msg(rt_file_exists(path), "facade file not found: " + path)
+        val content = read_file(path)
+        val has_symbol = content.contains("XilinxBoardProfile")
+        expect has_symbol == true
+
+    it "AC-1: riscv_fpga_linux.spl facade imports fpga_linux_orchestrator":
+        val path = fpga_facade_path()
+        check_msg(rt_file_exists(path), "facade file not found: " + path)
+        val content = read_file(path)
+        val has_import = content.contains("fpga_linux_orchestrator")
+        expect has_import == true
+
+    it "AC-1: riscv_fpga_linux.spl facade imports fpga_linux_data":
+        val path = fpga_facade_path()
+        check_msg(rt_file_exists(path), "facade file not found: " + path)
+        val content = read_file(path)
+        val has_import = content.contains("fpga_linux_data")
+        expect has_import == true
+
+    it "AC-1: riscv_fpga_linux.spl facade imports fpga_linux_manifest":
+        val path = fpga_facade_path()
+        check_msg(rt_file_exists(path), "facade file not found: " + path)
+        val content = read_file(path)
+        val has_import = content.contains("fpga_linux_manifest")
+        expect has_import == true
+
+describe "FPGA Linux Split: smoke-script compatibility (AC-7)":
+    """
+    ## Smoke Script Compatibility (AC-7)
+
+    The generation scripts must still pass after the split.
+    TDD-red: split files don't exist yet so scripts would fail.
+    """
+
+    it "AC-7: rtl_riscv32_linux_generated.shs script exists":
+        val path = rv32_script_path()
+        val exists = rt_file_exists(path)
+        expect exists == true
+
+    it "AC-7: rtl_riscv64_linux_generated.shs script exists":
+        val path = rv64_script_path()
+        val exists = rt_file_exists(path)
+        expect exists == true
+
+    it "AC-7: split files not absent when smoke scripts are invoked":
+        # After SA-3 runs, the split files must be present for scripts to work.
+        # This test confirms the three capsule files exist as a precondition.
+        val orch_ok = rt_file_exists(fpga_orch_path())
+        val data_ok = rt_file_exists(fpga_data_path())
+        val manifest_ok = rt_file_exists(fpga_manifest_path())
+        check_msg(orch_ok, "orchestrator missing — smoke scripts will fail")
+        check_msg(data_ok, "data module missing — smoke scripts will fail")
+        check_msg(manifest_ok, "manifest module missing — smoke scripts will fail")
+        expect orch_ok == true
+        expect data_ok == true
+        expect manifest_ok == true

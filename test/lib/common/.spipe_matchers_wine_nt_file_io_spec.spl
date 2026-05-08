@@ -1,0 +1,222 @@
+use common.wine_nt_file_io.{
+    wine_nt_file_close,
+    wine_nt_file_copy_w,
+    wine_nt_file_create_directory_w,
+    wine_nt_file_create_w,
+    wine_nt_file_delete_w,
+    wine_nt_file_get_attributes_w,
+    wine_nt_file_get_information_by_handle,
+    wine_nt_file_get_size,
+    wine_nt_file_get_type,
+    wine_nt_file_io_required_calls,
+    wine_nt_file_move_w,
+    wine_nt_file_query_directory_w,
+    wine_nt_file_read,
+    wine_nt_file_remove_directory_w,
+    wine_nt_file_set_pointer,
+    wine_nt_file_table_add_directory,
+    wine_nt_file_table_add_file,
+    wine_nt_file_table_new,
+    wine_nt_file_write
+}
+
+fn _all_adapter_apis() -> text:
+    "fd-open fd-read fd-write fd-close fd-dup fd-inherit stdio pipe socket timer poll-wait " +
+        "cwd env argv spawn path-normalize path-attrs path-locks errno-map"
+
+fn _all_async_features() -> text:
+    "io-driver submit-open submit-read submit-write submit-close submit-timeout poll-completion " +
+        "event-loop register-fd deregister-fd waker wake"
+
+describe "Wine NT file I/O bridge":
+    it "lists the modeled CreateFileW, ReadFile, GetFileType, and metadata calls":
+        val calls = wine_nt_file_io_required_calls()
+        expect calls.len() == 13
+        expect calls[0] == "CreateFileW"
+        expect calls[2] == "GetFileType"
+        expect calls[4] == "GetFileAttributesW"
+        expect calls[6] == "GetFileInformationByHandle"
+        expect calls[7] == "SetFilePointer"
+        expect calls[8] == "DeleteFileW"
+        expect calls[9] == "CopyFileW"
+        expect calls[10] == "MoveFileW"
+        expect calls[11] == "CreateDirectoryW"
+        expect calls[12] == "RemoveDirectoryW"
+
+    it "blocks file table readiness until POSIX and async prerequisites pass":
+        val table = wine_nt_file_table_new("fd-open fd-read", _all_async_features())
+        expect table.ready == false
+        expect table.state == "missing-api-fd-write"
+
+    it "opens a modeled file and reads requested bytes":
+        val table = wine_nt_file_table_add_file(wine_nt_file_table_new(_all_adapter_apis(), _all_async_features()), "C:\\hello.txt", "hello wine")
+        val opened = wine_nt_file_create_w(table, "C:\\hello.txt")
+        expect opened.ok == true
+        expect opened.handle == 0x40
+        val read = wine_nt_file_read(opened.table, opened.handle, 5)
+        expect read.ok == true
+        expect read.data == "hello"
+        expect read.bytes_read == 5
+
+    it "advances the read cursor across ReadFile calls":
+        val table = wine_nt_file_table_add_file(wine_nt_file_table_new(_all_adapter_apis(), _all_async_features()), "C:\\hello.txt", "hello wine")
+        val opened = wine_nt_file_create_w(table, "C:\\hello.txt")
+        val first = wine_nt_file_read(opened.table, opened.handle, 6)
+        val second = wine_nt_file_read(first.table, opened.handle, 4)
+        expect first.data == "hello "
+        expect second.data == "wine"
+
+    it "writes modeled file bytes at the current handle cursor":
+        val table = wine_nt_file_table_add_file(wine_nt_file_table_new(_all_adapter_apis(), _all_async_features()), "C:\\hello.txt", "hello wine")
+        val opened = wine_nt_file_create_w(table, "C:\\hello.txt")
+        val moved = wine_nt_file_set_pointer(opened.table, opened.handle, 6)
+        val written = wine_nt_file_write(moved.table, opened.handle, "Simple")
+        val reset = wine_nt_file_set_pointer(written.table, opened.handle, 0)
+        val read = wine_nt_file_read(reset.table, opened.handle, 12)
+
+        expect written.ok == true
+        expect written.state == "written"
+        expect written.bytes_read == 6
+        expect read.data == "hello Simple"
+
+    it "closes handles and rejects reads after CloseHandle":
+        val table = wine_nt_file_table_add_file(wine_nt_file_table_new(_all_adapter_apis(), _all_async_features()), "C:\\hello.txt", "hello")
+        val opened = wine_nt_file_create_w(table, "C:\\hello.txt")
+        val closed = wine_nt_file_close(opened.table, opened.handle)
+        expect closed.ok == true
+        expect closed.state == "closed"
+        expect wine_nt_file_read(closed.table, opened.handle, 1).state == "invalid-handle"
+
+    it "rejects invalid paths, missing files, invalid handles, and invalid read sizes":
+        val table = wine_nt_file_table_new(_all_adapter_apis(), _all_async_features())
+        expect wine_nt_file_create_w(table, "").state == "invalid-path"
+        expect wine_nt_file_create_w(table, "C:\\missing.txt").state == "file-not-found"
+        expect wine_nt_file_read(table, 0x40, 1).state == "invalid-handle"
+        expect wine_nt_file_write(table, 0x40, "x").state == "invalid-handle"
+        val with_file = wine_nt_file_table_add_file(table, "C:\\hello.txt", "hello")
+        val opened = wine_nt_file_create_w(with_file, "C:\\hello.txt")
+        expect wine_nt_file_read(opened.table, opened.handle, -1).state == "invalid-read-size"
+
+    it "returns deterministic file type, attributes, information, file size, and pointer movement":
+        val table = wine_nt_file_table_add_file(wine_nt_file_table_new(_all_adapter_apis(), _all_async_features()), "C:\\hello.txt", "hello wine")
+        val attrs = wine_nt_file_get_attributes_w(table, "C:\\hello.txt")
+        val opened = wine_nt_file_create_w(table, "C:\\hello.txt")
+        val file_type = wine_nt_file_get_type(opened.table, opened.handle)
+        val size = wine_nt_file_get_size(opened.table, opened.handle)
+        val info = wine_nt_file_get_information_by_handle(opened.table, opened.handle)
+        val moved = wine_nt_file_set_pointer(size.table, opened.handle, 6)
+        val read = wine_nt_file_read(moved.table, opened.handle, 4)
+
+        expect file_type.ok == true
+        expect file_type.value == 1
+        expect attrs.ok == true
+        expect attrs.value == 0x80
+        expect size.ok == true
+        expect size.value == 10
+        expect info.ok == true
+        expect info.value == 0x100000 + 10
+        expect moved.ok == true
+        expect moved.value == 6
+        expect read.data == "wine"
+
+    it "rejects invalid metadata and pointer requests":
+        val table = wine_nt_file_table_add_file(wine_nt_file_table_new(_all_adapter_apis(), _all_async_features()), "C:\\hello.txt", "hello")
+        val opened = wine_nt_file_create_w(table, "C:\\hello.txt")
+        expect wine_nt_file_get_attributes_w(table, "C:\\missing.txt").state == "file-not-found"
+        expect wine_nt_file_get_type(table, 0x99).state == "invalid-handle"
+        expect wine_nt_file_get_information_by_handle(table, 0x99).state == "invalid-handle"
+        expect wine_nt_file_get_size(table, 0x99).state == "invalid-handle"
+        expect wine_nt_file_set_pointer(opened.table, opened.handle, -1).state == "invalid-file-pointer"
+        expect wine_nt_file_set_pointer(opened.table, opened.handle, 99).state == "file-pointer-past-eof"
+
+    it "deletes closed modeled files and blocks deletion while a handle is open":
+        val table = wine_nt_file_table_add_file(wine_nt_file_table_new(_all_adapter_apis(), _all_async_features()), "C:\\temp.tmp", "temp")
+        val opened = wine_nt_file_create_w(table, "C:\\temp.tmp")
+        val blocked = wine_nt_file_delete_w(opened.table, "C:\\temp.tmp")
+        expect blocked.ok == false
+        expect blocked.state == "sharing-violation"
+
+        val closed = wine_nt_file_close(opened.table, opened.handle)
+        val deleted = wine_nt_file_delete_w(closed.table, "C:\\temp.tmp")
+        expect deleted.ok == true
+        expect deleted.state == "deleted"
+        expect wine_nt_file_get_attributes_w(deleted.table, "C:\\temp.tmp").state == "file-not-found"
+        expect wine_nt_file_delete_w(deleted.table, "C:\\missing.tmp").state == "file-not-found"
+
+    it "copies files with existing-destination and open-destination guards":
+        val table = wine_nt_file_table_add_file(wine_nt_file_table_new(_all_adapter_apis(), _all_async_features()), "C:\\source.txt", "copy me")
+        val copied = wine_nt_file_copy_w(table, "C:\\source.txt", "C:\\dest.txt", true)
+        expect copied.ok == true
+        expect copied.state == "copied"
+        expect copied.bytes_read == 7
+        expect wine_nt_file_get_attributes_w(copied.table, "C:\\source.txt").ok == true
+        expect wine_nt_file_get_attributes_w(copied.table, "C:\\dest.txt").ok == true
+
+        val already_there = wine_nt_file_copy_w(copied.table, "C:\\source.txt", "C:\\dest.txt", true)
+        expect already_there.state == "file-exists"
+        val overwrite = wine_nt_file_copy_w(copied.table, "C:\\source.txt", "C:\\dest.txt", false)
+        expect overwrite.ok == true
+
+        val opened_dest = wine_nt_file_create_w(copied.table, "C:\\dest.txt")
+        val sharing = wine_nt_file_copy_w(opened_dest.table, "C:\\source.txt", "C:\\dest.txt", false)
+        val missing = wine_nt_file_copy_w(table, "C:\\missing.txt", "C:\\dest.txt", true)
+        expect sharing.state == "sharing-violation"
+        expect missing.state == "file-not-found"
+        val with_directory = wine_nt_file_table_add_directory(table, "C:\\dir")
+        expect wine_nt_file_copy_w(with_directory, "C:\\dir", "C:\\copy.txt", true).state == "directory-not-file"
+        expect wine_nt_file_copy_w(with_directory, "C:\\source.txt", "C:\\dir", true).state == "directory-exists"
+
+    it "moves files and removes the source path":
+        val table = wine_nt_file_table_add_file(wine_nt_file_table_new(_all_adapter_apis(), _all_async_features()), "C:\\source.txt", "move me")
+        val moved = wine_nt_file_move_w(table, "C:\\source.txt", "C:\\dest.txt")
+        expect moved.ok == true
+        expect moved.state == "moved"
+        expect moved.bytes_read == 7
+        expect wine_nt_file_get_attributes_w(moved.table, "C:\\source.txt").state == "file-not-found"
+        expect wine_nt_file_get_attributes_w(moved.table, "C:\\dest.txt").ok == true
+
+        val opened = wine_nt_file_create_w(table, "C:\\source.txt")
+        expect wine_nt_file_move_w(opened.table, "C:\\source.txt", "C:\\dest.txt").state == "sharing-violation"
+        expect wine_nt_file_move_w(table, "C:\\missing.txt", "C:\\dest.txt").state == "file-not-found"
+        val with_directory = wine_nt_file_table_add_directory(table, "C:\\dir")
+        expect wine_nt_file_move_w(with_directory, "C:\\dir", "C:\\moved.txt").state == "directory-move-unsupported"
+        expect wine_nt_file_move_w(with_directory, "C:\\source.txt", "C:\\dir").state == "directory-exists"
+
+    it "creates and removes empty directories":
+        val table = wine_nt_file_table_new(_all_adapter_apis(), _all_async_features())
+        val created = wine_nt_file_create_directory_w(table, "C:\\TempDir")
+        expect created.ok == true
+        expect created.state == "directory-created"
+        expect wine_nt_file_get_attributes_w(created.table, "C:\\TempDir").value == 0x10
+        expect created.table.directories.len() == 1
+
+        val removed = wine_nt_file_remove_directory_w(created.table, "C:\\TempDir")
+        expect removed.ok == true
+        expect removed.state == "directory-removed"
+        expect removed.table.directories.len() == 0
+
+    it "rejects duplicate, conflicting, missing, non-empty, and invalid directories":
+        val table = wine_nt_file_table_new(_all_adapter_apis(), _all_async_features())
+        val with_dir = wine_nt_file_table_add_directory(table, "C:\\TempDir")
+        val with_file = wine_nt_file_table_add_file(with_dir, "C:\\TempDir\\child.txt", "child")
+
+        expect wine_nt_file_create_directory_w(with_dir, "C:\\TempDir").state == "directory-exists"
+        expect wine_nt_file_create_directory_w(wine_nt_file_table_add_file(table, "C:\\file.txt", "file"), "C:\\file.txt").state == "file-exists"
+        expect wine_nt_file_create_directory_w(table, "").state == "invalid-path"
+        expect wine_nt_file_remove_directory_w(table, "C:\\MissingDir").state == "directory-not-found"
+        expect wine_nt_file_remove_directory_w(with_file, "C:\\TempDir").state == "directory-not-empty"
+        expect wine_nt_file_remove_directory_w(with_dir, "").state == "invalid-path"
+
+    it "enumerates deterministic direct directory children":
+        val table = wine_nt_file_table_new(_all_adapter_apis(), _all_async_features())
+        val with_dir = wine_nt_file_table_add_directory(wine_nt_file_table_add_directory(table, "C:\\TempDir"), "C:\\TempDir\\SubDir")
+        val with_file = wine_nt_file_table_add_file(wine_nt_file_table_add_file(with_dir, "C:\\TempDir\\child.txt", "child"), "C:\\TempDir\\SubDir\\nested.txt", "nested")
+        val listed = wine_nt_file_query_directory_w(with_file, "C:\\TempDir")
+
+        expect listed.ok == true
+        expect listed.state == "directory-enumerated"
+        expect listed.data == "child.txt"
+        expect listed.bytes_read == 2
+        expect wine_nt_file_query_directory_w(with_file, "C:\\missing").state == "directory-not-found"
+        expect wine_nt_file_query_directory_w(with_file, "C:\\TempDir\\child.txt").state == "directory-not-directory"
+        expect wine_nt_file_query_directory_w(with_file, "").state == "invalid-path"
