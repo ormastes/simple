@@ -1,0 +1,185 @@
+"""SIMD-Accelerated Pixel Operations
+
+@tag:stdlib
+@tag:gpu
+
+Provides vectorized fill, blend, and blit operations with runtime CPU
+feature detection. Falls back to scalar loops when no SIMD is available.
+
+The actual SIMD intrinsics live in the C/Rust runtime (rt_simd_*).
+This module detects the CPU's capability level and dispatches to the
+appropriate runtime function.
+
+Usage:
+    val level = detect_simd_level()
+    simd_fill_row(buffer, 0, 256, 0xFFFF0000)
+    simd_blend_row(dst, src, 0, 128)
+"""
+
+# ============================================================================
+# SIMD Level Enum
+# ============================================================================
+
+enum SimdLevel:
+    None_
+    Sse42
+    Avx2
+    Avx512
+    Neon
+
+impl SimdLevel:
+    fn to_text() -> text:
+        match self:
+            case None_: "None"
+            case Sse42: "SSE4.2"
+            case Avx2: "AVX2"
+            case Avx512: "AVX-512"
+            case Neon: "NEON"
+
+# ============================================================================
+# Runtime externs for CPU feature detection
+# ============================================================================
+
+extern fn rt_cpu_has_sse42() -> bool
+extern fn rt_cpu_has_avx2() -> bool
+extern fn rt_cpu_has_avx512() -> bool
+extern fn rt_cpu_has_neon() -> bool
+
+# ============================================================================
+# Runtime externs for SIMD kernels
+# ============================================================================
+
+extern fn rt_simd_fill_row_avx2(buf: [u32], offset: i64, count: i64, color: u32)
+extern fn rt_simd_fill_row_sse42(buf: [u32], offset: i64, count: i64, color: u32)
+extern fn rt_simd_fill_row_neon(buf: [u32], offset: i64, count: i64, color: u32)
+
+extern fn rt_simd_blend_row_avx2(dst: [u32], src: [u32], offset: i64, count: i64)
+extern fn rt_simd_blend_row_sse42(dst: [u32], src: [u32], offset: i64, count: i64)
+extern fn rt_simd_blend_row_neon(dst: [u32], src: [u32], offset: i64, count: i64)
+
+extern fn rt_simd_blit_row_avx2(dst: [u32], dst_offset: i64, src: [u32], src_offset: i64, count: i64)
+extern fn rt_simd_blit_row_sse42(dst: [u32], dst_offset: i64, src: [u32], src_offset: i64, count: i64)
+extern fn rt_simd_blit_row_neon(dst: [u32], dst_offset: i64, src: [u32], src_offset: i64, count: i64)
+
+# ============================================================================
+# Detection
+# ============================================================================
+
+var _cached_simd_level: SimdLevel = SimdLevel.None_
+var _simd_detected: bool = false
+
+fn detect_simd_level() -> SimdLevel:
+    if _simd_detected:
+        return _cached_simd_level
+
+    if rt_cpu_has_avx512():
+        _cached_simd_level = SimdLevel.Avx512
+    elif rt_cpu_has_avx2():
+        _cached_simd_level = SimdLevel.Avx2
+    elif rt_cpu_has_sse42():
+        _cached_simd_level = SimdLevel.Sse42
+    elif rt_cpu_has_neon():
+        _cached_simd_level = SimdLevel.Neon
+    else:
+        _cached_simd_level = SimdLevel.None_
+
+    _simd_detected = true
+    _cached_simd_level
+
+# ============================================================================
+# Fill Row — write solid color across a pixel row
+# ============================================================================
+
+fn simd_fill_row(buf: [u32], offset: i64, count: i64, color: u32):
+    if count <= 0:
+        return
+
+    val level = detect_simd_level()
+    match level:
+        case Avx512:
+            rt_simd_fill_row_avx2(buf, offset, count, color)
+        case Avx2:
+            rt_simd_fill_row_avx2(buf, offset, count, color)
+        case Sse42:
+            rt_simd_fill_row_sse42(buf, offset, count, color)
+        case Neon:
+            rt_simd_fill_row_neon(buf, offset, count, color)
+        case None_:
+            _scalar_fill_row(buf, offset, count, color)
+
+fn _scalar_fill_row(buf: [u32], offset: i64, count: i64, color: u32):
+    var i: i64 = 0
+    while i < count:
+        buf[offset + i] = color
+        i = i + 1
+
+# ============================================================================
+# Blend Row — Porter-Duff src-over alpha blending
+# ============================================================================
+
+fn simd_blend_row(dst: [u32], src: [u32], offset: i64, count: i64):
+    if count <= 0:
+        return
+
+    val level = detect_simd_level()
+    match level:
+        case Avx512:
+            rt_simd_blend_row_avx2(dst, src, offset, count)
+        case Avx2:
+            rt_simd_blend_row_avx2(dst, src, offset, count)
+        case Sse42:
+            rt_simd_blend_row_sse42(dst, src, offset, count)
+        case Neon:
+            rt_simd_blend_row_neon(dst, src, offset, count)
+        case None_:
+            _scalar_blend_row(dst, src, offset, count)
+
+fn _scalar_blend_row(dst: [u32], src: [u32], offset: i64, count: i64):
+    var i: i64 = 0
+    while i < count:
+        val idx = offset + i
+        val s = src[idx]
+        val sa = (s >> 24) & 0xFF
+        if sa == 255:
+            dst[idx] = s
+        elif sa > 0:
+            val d = dst[idx]
+            val inv_a = 255 - sa
+            val dr = (d >> 16) & 0xFF
+            val dg = (d >> 8) & 0xFF
+            val db = d & 0xFF
+            val sr = (s >> 16) & 0xFF
+            val sg = (s >> 8) & 0xFF
+            val sb = s & 0xFF
+            val r = (sr * sa + dr * inv_a) / 255
+            val g = (sg * sa + dg * inv_a) / 255
+            val b = (sb * sa + db * inv_a) / 255
+            dst[idx] = (255 << 24) | (r << 16) | (g << 8) | b
+        i = i + 1
+
+# ============================================================================
+# Blit Row — pixel copy
+# ============================================================================
+
+fn simd_blit_row(dst: [u32], dst_offset: i64, src: [u32], src_offset: i64, count: i64):
+    if count <= 0:
+        return
+
+    val level = detect_simd_level()
+    match level:
+        case Avx512:
+            rt_simd_blit_row_avx2(dst, dst_offset, src, src_offset, count)
+        case Avx2:
+            rt_simd_blit_row_avx2(dst, dst_offset, src, src_offset, count)
+        case Sse42:
+            rt_simd_blit_row_sse42(dst, dst_offset, src, src_offset, count)
+        case Neon:
+            rt_simd_blit_row_neon(dst, dst_offset, src, src_offset, count)
+        case None_:
+            _scalar_blit_row(dst, dst_offset, src, src_offset, count)
+
+fn _scalar_blit_row(dst: [u32], dst_offset: i64, src: [u32], src_offset: i64, count: i64):
+    var i: i64 = 0
+    while i < count:
+        dst[dst_offset + i] = src[src_offset + i]
+        i = i + 1

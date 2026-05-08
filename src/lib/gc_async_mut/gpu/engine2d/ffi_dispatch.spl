@@ -1,0 +1,105 @@
+"""FFI Dispatch Layer — Static/Dynamic Dual-Path GPU Function Resolution
+
+@tag:stdlib
+@tag:gpu
+
+Provides the dual-path FFI dispatch infrastructure for GPU backends.
+Each backend gets a *Ffi class that holds either static (extern fn) or
+dynamic (DynLib dlopen) function pointers. At init time, hosted OSes
+try dynamic first; SimpleOS always uses static.
+
+Usage:
+    val mode = default_ffi_mode()
+    val vk = VulkanFfi.create(mode)  # auto-selects path
+"""
+
+use std.ffi.dynamic.{DynLib, DynLoader, sffi_call}
+
+# ============================================================================
+# FFI Mode Enum
+# ============================================================================
+
+enum GpuFfiMode:
+    Static
+    Dynamic
+
+impl GpuFfiMode:
+    fn to_text() -> text:
+        match self:
+            case Static: "Static"
+            case Dynamic: "Dynamic"
+
+# ============================================================================
+# Platform Detection
+# ============================================================================
+
+extern fn rt_env_get(name: text) -> text
+
+fn is_simpleos() -> bool:
+    val os = rt_env_get("SIMPLE_OS_KERNEL")
+    os == "simpleos"
+
+fn default_ffi_mode() -> GpuFfiMode:
+    if is_simpleos():
+        GpuFfiMode.Static
+    else:
+        GpuFfiMode.Dynamic
+
+# ============================================================================
+# FfiDispatchBase Trait
+# ============================================================================
+
+trait FfiDispatchBase:
+    fn mode() -> GpuFfiMode
+    fn is_available() -> bool
+
+# ============================================================================
+# Dynamic Library Path Resolution
+# ============================================================================
+
+fn gpu_lib_path(lib_name: text) -> text:
+    val os = rt_env_get("OS")
+    if os == "Windows_NT":
+        "{lib_name}.dll"
+    else:
+        val uname = rt_env_get("SIMPLE_OS_TYPE")
+        if uname == "Darwin":
+            "lib{lib_name}.dylib"
+        else:
+            "lib{lib_name}.so"
+
+fn gpu_lib_candidates(base_name: text) -> [text]:
+    val os = rt_env_get("OS")
+    var paths: [text] = []
+    if os == "Windows_NT":
+        paths.push("{base_name}.dll")
+    else:
+        val uname = rt_env_get("SIMPLE_OS_TYPE")
+        if uname == "Darwin":
+            paths.push("lib{base_name}.dylib")
+            paths.push("lib{base_name}.1.dylib")
+        else:
+            paths.push("lib{base_name}.so.1")
+            paths.push("lib{base_name}.so")
+    paths
+
+fn try_load_gpu_lib(base_name: text) -> DynLib?:
+    val candidates = gpu_lib_candidates(base_name)
+    var i = 0
+    while i < candidates.len():
+        val lib = DynLib.load(candidates[i])
+        if lib != nil:
+            return lib
+        i = i + 1
+    nil
+
+# ============================================================================
+# FFI Mode Resolution Helper
+# ============================================================================
+
+fn resolve_ffi_mode(backend_name: text) -> GpuFfiMode:
+    val mode = default_ffi_mode()
+    mode
+
+fn try_create_dynamic_vulkan(lib_path: text) -> DynLib?:
+    DynLib.load(lib_path)

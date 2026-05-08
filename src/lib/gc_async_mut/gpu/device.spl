@@ -10,11 +10,12 @@ use std.torch.{torch_cuda_available}
 
 enum GpuBackend:
     """GPU backend type."""
-    Cuda       # NVIDIA CUDA (via PyTorch)
+    Cuda       # NVIDIA CUDA (via PyTorch or Driver API)
     Vulkan     # Vulkan compute
     Rocm       # AMD ROCm HIP
     OneApi     # Intel oneAPI SYCL / Level Zero
     Metal      # Apple Metal
+    Qualcomm   # Qualcomm Adreno (via Vulkan + Turnip)
     None_      # No GPU / CPU fallback
 
 impl GpuBackend:
@@ -25,6 +26,7 @@ impl GpuBackend:
             case Rocm: "ROCm"
             case OneApi: "oneAPI"
             case Metal: "Metal"
+            case Qualcomm: "Qualcomm"
             case None_: "None"
 
 # ============================================================================
@@ -60,6 +62,8 @@ impl Gpu:
                 true
             case GpuBackend.Metal:
                 # Metal device sync (needs MTLCommandBuffer waitUntilCompleted FFI)
+                true
+            case GpuBackend.Qualcomm:
                 true
             case GpuBackend.None:
                 true
@@ -105,6 +109,53 @@ fn detect_backends() -> [GpuBackend]:
     #     backends.push(GpuBackend.Vulkan)
 
     backends
+
+fn detect_backends_full(ffi_mode: GpuFfiMode) -> [GpuBackend]:
+    """Detect available GPU backends using FFI dispatch mode.
+
+    Uses dynamic (dlopen) or static (extern fn) detection based on ffi_mode.
+    Checks all backends and returns those that are available.
+    """
+    use std.gpu.engine2d.ffi_dispatch.{GpuFfiMode}
+    use std.gpu.engine2d.ffi_vulkan.{VulkanFfi}
+    use std.gpu.engine2d.ffi_cuda.{CudaFfi}
+    use std.gpu.engine2d.ffi_rocm.{RocmFfi}
+    use std.gpu.engine2d.ffi_intel.{IntelFfi}
+
+    var backends: [GpuBackend] = []
+
+    val cuda_ffi = CudaFfi.create(ffi_mode)
+    if cuda_ffi != nil and cuda_ffi.is_available():
+        backends.push(GpuBackend.Cuda)
+
+    val rocm_ffi = RocmFfi.create(ffi_mode)
+    if rocm_ffi != nil and rocm_ffi.is_available():
+        backends.push(GpuBackend.Rocm)
+
+    val vk_ffi = VulkanFfi.create(ffi_mode)
+    if vk_ffi != nil and vk_ffi.is_available():
+        backends.push(GpuBackend.Vulkan)
+
+    val intel_ffi = IntelFfi.create(ffi_mode)
+    if intel_ffi != nil and intel_ffi.is_available():
+        backends.push(GpuBackend.OneApi)
+
+    backends
+
+fn detect_best_backend_for_platform() -> text:
+    """Get best backend name for the current platform.
+
+    Returns backend name string suitable for Engine2D.create_with_backend().
+    """
+    use std.gpu.engine2d.ffi_dispatch.{default_ffi_mode}
+
+    val ffi_mode = default_ffi_mode()
+    val backends = detect_backends_full(ffi_mode)
+
+    if backends.len() > 0:
+        backends[0].to_text().lower()
+    else:
+        "software"
 
 fn preferred_backend() -> GpuBackend:
     """Get preferred backend (first available).
@@ -193,6 +244,21 @@ fn gpu_metal(device_id: i32) -> Gpu:
     """
     Gpu(
         backend: GpuBackend.Metal,
+        device_id: device_id,
+        is_initialized: true
+    )
+
+fn gpu_qualcomm(device_id: i32) -> Gpu:
+    """Create Qualcomm Adreno GPU handle (via Vulkan).
+
+    Args:
+        device_id: Device ID
+
+    Returns:
+        GPU handle for Qualcomm Adreno device
+    """
+    Gpu(
+        backend: GpuBackend.Qualcomm,
         device_id: device_id,
         is_initialized: true
     )

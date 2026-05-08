@@ -306,3 +306,19 @@ The per-component dense column that backs a `World`. Struct-of-arrays layout for
 `Added<T>`, `Changed<T>`, `Removed<T>` tick flags on components, used by the Reincarnation Server (RS) to snapshot only the modified slice of a capsule's World during state transfer across a restart. Defined in `src/lib/nogc_sync_mut/ecs/change_detection.spl`.
 
 Cross-ref: MDSOC capsules in `src/os/services/**` and `src/os/apps/**` use ECS for internals; kernel capsules in `src/os/kernel/**` and driver capsules in `src/os/drivers/**` do not.
+
+## RenderBackendCore (Engine2D)
+
+The minimum required interface for a 2D rendering backend. Contains 12 methods: lifecycle (`init`, `shutdown`, `present`), identity (`name`, `width`, `height`), readback (`read_pixels`), clipping (`set_clip`, `clear_clip`), and three irreducible drawing primitives (`clear`, `draw_rect_filled`, `draw_image`). Any backend implementing only Core gets full advanced rendering via the stateless emulation layer. Defined in `src/lib/gc_async_mut/gpu/engine2d/backend_core.spl`.
+
+## RenderBackendAdv (Engine2D)
+
+Optimized operations that backends SHOULD implement natively for performance but CAN omit. Contains 9 methods: `draw_rect` (outline), `draw_line`, `draw_circle`, `draw_circle_filled`, `draw_rounded_rect`, `draw_triangle_filled`, `draw_gradient_rect`, `draw_text`, `draw_text_bg`. Every method is statelessly emulatable from RenderBackendCore. GPU backends implement these as dedicated compute kernels; minimal backends skip them. Defined in `src/lib/gc_async_mut/gpu/engine2d/backend_adv.spl`.
+
+## Stateless Emulation Layer (Engine2D)
+
+A set of standalone `emu_*` functions that implement every RenderBackendAdv operation using only RenderBackendCore methods. **Stateless** means: no mutable module state, no caches, no internal buffers — each function takes the core backend + operation parameters, composes Core calls, and returns. Algorithms: Bresenham (lines), midpoint (circles), scanline fill (triangles), row-by-row lerp (gradients), bitmap font iteration (text). Defined in `src/lib/gc_async_mut/gpu/engine2d/backend_emu.spl`.
+
+## GpuFfiMode (Engine2D)
+
+Enum with two variants: `Static` (extern fn resolved at link time against Rust runtime) and `Dynamic` (DynLib.load via dlopen at runtime). SimpleOS defaults to Static (no dynamic loader); hosted OSes default to Dynamic with graceful fallback. Defined in `src/lib/gc_async_mut/gpu/engine2d/ffi_dispatch.spl`.

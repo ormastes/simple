@@ -1,0 +1,326 @@
+"""2D Engine — Stateless Emulation Layer
+
+@tag:stdlib
+@tag:api
+@tag:gpu
+
+Implements every RenderBackendAdv operation using ONLY RenderBackendCore
+methods. All functions are stateless: no mutable module state, no caches,
+no internal buffers. Each function receives the core backend and operation
+parameters, composes Core calls, and returns.
+
+A backend that implements only RenderBackendCore gets full advanced
+rendering by routing through these functions.
+
+Usage:
+    # In a Core-only backend wrapper:
+    emu_draw_line(core_backend, 0, 0, 100, 100, 0xFFFF0000, 1)
+    emu_draw_circle_filled(core_backend, 50, 50, 25, 0xFF00FF00)
+"""
+
+use std.gpu.engine2d.backend_core.{RenderBackendCore}
+use std.gpu.engine2d.glyph.{glyph_data, glyph_width, glyph_height, glyph_advance}
+use std.gpu.engine2d.color.{color_r, color_g, color_b, color_a, rgba}
+
+# ============================================================================
+# Rectangle Outline — 4 filled edges
+# ============================================================================
+
+fn emu_draw_rect(core: RenderBackendCore, x: i32, y: i32, w: i32, h: i32, color: u32):
+    if w <= 0 or h <= 0:
+        return
+    core.draw_rect_filled(x, y, w, 1, color)
+    core.draw_rect_filled(x, y + h - 1, w, 1, color)
+    core.draw_rect_filled(x, y + 1, 1, h - 2, color)
+    core.draw_rect_filled(x + w - 1, y + 1, 1, h - 2, color)
+
+# ============================================================================
+# Line — Bresenham
+# ============================================================================
+
+fn emu_draw_line(core: RenderBackendCore, x1: i32, y1: i32, x2: i32, y2: i32, color: u32, thickness: i32):
+    var dx = x2 - x1
+    var dy = y2 - y1
+    if dx < 0:
+        dx = -dx
+    if dy < 0:
+        dy = -dy
+
+    var sx: i32 = 1
+    if x1 > x2:
+        sx = -1
+    var sy: i32 = 1
+    if y1 > y2:
+        sy = -1
+
+    var err = dx - dy
+    var cx = x1
+    var cy = y1
+    val t = thickness
+    val half = t / 2
+
+    while true:
+        if t <= 1:
+            core.draw_rect_filled(cx, cy, 1, 1, color)
+        else:
+            core.draw_rect_filled(cx - half, cy - half, t, t, color)
+
+        if cx == x2 and cy == y2:
+            return
+
+        val e2 = 2 * err
+        if e2 > -dy:
+            err = err - dy
+            cx = cx + sx
+        if e2 < dx:
+            err = err + dx
+            cy = cy + sy
+
+# ============================================================================
+# Circle Outline — Midpoint algorithm
+# ============================================================================
+
+fn emu_draw_circle(core: RenderBackendCore, cx: i32, cy: i32, r: i32, color: u32):
+    if r <= 0:
+        core.draw_rect_filled(cx, cy, 1, 1, color)
+        return
+
+    var x: i32 = r
+    var y: i32 = 0
+    var d: i32 = 1 - r
+
+    while x >= y:
+        core.draw_rect_filled(cx + x, cy + y, 1, 1, color)
+        core.draw_rect_filled(cx - x, cy + y, 1, 1, color)
+        core.draw_rect_filled(cx + x, cy - y, 1, 1, color)
+        core.draw_rect_filled(cx - x, cy - y, 1, 1, color)
+        core.draw_rect_filled(cx + y, cy + x, 1, 1, color)
+        core.draw_rect_filled(cx - y, cy + x, 1, 1, color)
+        core.draw_rect_filled(cx + y, cy - x, 1, 1, color)
+        core.draw_rect_filled(cx - y, cy - x, 1, 1, color)
+
+        y = y + 1
+        if d < 0:
+            d = d + 2 * y + 1
+        else:
+            x = x - 1
+            d = d + 2 * (y - x) + 1
+
+# ============================================================================
+# Circle Filled — Horizontal scanline spans
+# ============================================================================
+
+fn emu_draw_circle_filled(core: RenderBackendCore, cx: i32, cy: i32, r: i32, color: u32):
+    if r <= 0:
+        core.draw_rect_filled(cx, cy, 1, 1, color)
+        return
+
+    var x: i32 = r
+    var y: i32 = 0
+    var d: i32 = 1 - r
+
+    while x >= y:
+        core.draw_rect_filled(cx - x, cy + y, 2 * x + 1, 1, color)
+        core.draw_rect_filled(cx - x, cy - y, 2 * x + 1, 1, color)
+        core.draw_rect_filled(cx - y, cy + x, 2 * y + 1, 1, color)
+        core.draw_rect_filled(cx - y, cy - x, 2 * y + 1, 1, color)
+
+        y = y + 1
+        if d < 0:
+            d = d + 2 * y + 1
+        else:
+            x = x - 1
+            d = d + 2 * (y - x) + 1
+
+# ============================================================================
+# Rounded Rectangle — rect body + 4 corner arcs
+# ============================================================================
+
+fn emu_draw_rounded_rect(core: RenderBackendCore, x: i32, y: i32, w: i32, h: i32, radius: i32, color: u32):
+    if w <= 0 or h <= 0:
+        return
+
+    var r = radius
+    if r > w / 2:
+        r = w / 2
+    if r > h / 2:
+        r = h / 2
+
+    core.draw_rect_filled(x + r, y, w - 2 * r, h, color)
+    core.draw_rect_filled(x, y + r, r, h - 2 * r, color)
+    core.draw_rect_filled(x + w - r, y + r, r, h - 2 * r, color)
+
+    _emu_corner_arc(core, x + r, y + r, r, color, -1, -1)
+    _emu_corner_arc(core, x + w - r - 1, y + r, r, color, 1, -1)
+    _emu_corner_arc(core, x + r, y + h - r - 1, r, color, -1, 1)
+    _emu_corner_arc(core, x + w - r - 1, y + h - r - 1, r, color, 1, 1)
+
+fn _emu_corner_arc(core: RenderBackendCore, cx: i32, cy: i32, r: i32, color: u32, dx_sign: i32, dy_sign: i32):
+    var px: i32 = r
+    var py: i32 = 0
+    var d: i32 = 1 - r
+
+    while px >= py:
+        val sx = cx + dx_sign * px
+        val ex = cx
+        val span_x = _emu_min(sx, ex)
+        val span_w = _emu_abs(sx - ex) + 1
+        core.draw_rect_filled(span_x, cy + dy_sign * py, span_w, 1, color)
+
+        val sx2 = cx + dx_sign * py
+        val span_x2 = _emu_min(sx2, ex)
+        val span_w2 = _emu_abs(sx2 - ex) + 1
+        core.draw_rect_filled(span_x2, cy + dy_sign * px, span_w2, 1, color)
+
+        py = py + 1
+        if d < 0:
+            d = d + 2 * py + 1
+        else:
+            px = px - 1
+            d = d + 2 * (py - px) + 1
+
+# ============================================================================
+# Triangle Filled — Scanline fill
+# ============================================================================
+
+fn emu_draw_triangle_filled(core: RenderBackendCore, x1: i32, y1: i32, x2: i32, y2: i32, x3: i32, y3: i32, color: u32):
+    var ay = y1
+    var ax = x1
+    var by = y2
+    var bx = x2
+    var cy = y3
+    var ccx = x3
+
+    if ay > by:
+        var t = ay
+        ay = by
+        by = t
+        t = ax
+        ax = bx
+        bx = t
+    if ay > cy:
+        var t = ay
+        ay = cy
+        cy = t
+        t = ax
+        ax = ccx
+        ccx = t
+    if by > cy:
+        var t = by
+        by = cy
+        cy = t
+        t = bx
+        bx = ccx
+        ccx = t
+
+    var row = ay
+    while row <= cy:
+        var left = ax + (bx - ax) * (row - ay) / _emu_max(by - ay, 1)
+        var right = ax + (ccx - ax) * (row - ay) / _emu_max(cy - ay, 1)
+
+        if row >= by:
+            left = bx + (ccx - bx) * (row - by) / _emu_max(cy - by, 1)
+
+        if left > right:
+            val t = left
+            left = right
+            right = t
+
+        core.draw_rect_filled(left, row, right - left + 1, 1, color)
+        row = row + 1
+
+# ============================================================================
+# Gradient Rectangle — Row-by-row color interpolation
+# ============================================================================
+
+fn emu_draw_gradient_rect(core: RenderBackendCore, x: i32, y: i32, w: i32, h: i32, top_color: u32, bottom_color: u32):
+    if w <= 0 or h <= 0:
+        return
+
+    val tr = color_r(top_color)
+    val tg = color_g(top_color)
+    val tb = color_b(top_color)
+    val ta = color_a(top_color)
+    val br = color_r(bottom_color)
+    val bg = color_g(bottom_color)
+    val bb = color_b(bottom_color)
+    val ba = color_a(bottom_color)
+
+    var row: i32 = 0
+    while row < h:
+        val r = tr + (br - tr) * row / _emu_max(h - 1, 1)
+        val g = tg + (bg - tg) * row / _emu_max(h - 1, 1)
+        val b = tb + (bb - tb) * row / _emu_max(h - 1, 1)
+        val a = ta + (ba - ta) * row / _emu_max(h - 1, 1)
+        val c = rgba(r, g, b, a)
+        core.draw_rect_filled(x, y + row, w, 1, c)
+        row = row + 1
+
+# ============================================================================
+# Text — Bitmap font glyph iteration
+# ============================================================================
+
+fn emu_draw_text(core: RenderBackendCore, x: i32, y: i32, text_val: text, color: u32, font_size: i32):
+    val gw = glyph_width()
+    val gh = glyph_height()
+    var scale = font_size / gh
+    if scale < 1:
+        scale = 1
+    val advance = glyph_advance(scale)
+
+    var cursor_x = x
+    var i: i32 = 0
+    while i < text_val.len():
+        val ch = text_val.char_at(i)
+        val data = glyph_data(ch)
+
+        var gy: i32 = 0
+        while gy < gh:
+            var gx: i32 = 0
+            while gx < gw:
+                val idx = gy * gw + gx
+                if idx < data.len() and data[idx] != 0:
+                    core.draw_rect_filled(cursor_x + gx * scale, y + gy * scale, scale, scale, color)
+                gx = gx + 1
+            gy = gy + 1
+
+        cursor_x = cursor_x + advance
+        i = i + 1
+
+# ============================================================================
+# Text with Background — bg fill + text overlay
+# ============================================================================
+
+fn emu_draw_text_bg(core: RenderBackendCore, x: i32, y: i32, text_val: text, fg: u32, bg: u32, font_size: i32):
+    val gh = glyph_height()
+    var scale = font_size / gh
+    if scale < 1:
+        scale = 1
+    val advance = glyph_advance(scale)
+    val text_w = text_val.len() * advance
+    val text_h = gh * scale
+
+    core.draw_rect_filled(x, y, text_w, text_h, bg)
+    emu_draw_text(core, x, y, text_val, fg, font_size)
+
+# ============================================================================
+# Internal helpers (stateless, pure)
+# ============================================================================
+
+fn _emu_abs(v: i32) -> i32:
+    if v < 0:
+        -v
+    else:
+        v
+
+fn _emu_min(a: i32, b: i32) -> i32:
+    if a < b:
+        a
+    else:
+        b
+
+fn _emu_max(a: i32, b: i32) -> i32:
+    if a > b:
+        a
+    else:
+        b

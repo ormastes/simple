@@ -1,0 +1,306 @@
+"""Vulkan FFI Dispatch — Static/Dynamic Dual-Path
+
+@tag:stdlib
+@tag:gpu
+
+Wraps all rt_vulkan_* extern functions behind a VulkanFfi class that
+supports both static (extern fn) and dynamic (DynLib) dispatch.
+
+Usage:
+    val ffi = VulkanFfi.create(GpuFfiMode.Dynamic)
+    if ffi.is_available():
+        ffi.init()
+"""
+
+use std.ffi.dynamic.{DynLib}
+use std.gpu.engine2d.ffi_dispatch.{GpuFfiMode, FfiDispatchBase, try_load_gpu_lib}
+
+# ============================================================================
+# Static extern declarations (resolved at link time against Rust runtime)
+# ============================================================================
+
+extern fn rt_vulkan_init() -> bool
+extern fn rt_vulkan_shutdown() -> bool
+extern fn rt_vulkan_is_available() -> bool
+extern fn rt_vulkan_device_count() -> i64
+extern fn rt_vulkan_select_device(id: i64) -> bool
+extern fn rt_vulkan_alloc_buffer(size: i64, usage: i64) -> i64
+extern fn rt_vulkan_free_buffer(handle: i64) -> bool
+extern fn rt_vulkan_copy_to_buffer(handle: i64, data: [u8], offset: i64) -> bool
+extern fn rt_vulkan_copy_from_buffer(data: [u8], handle: i64, offset: i64) -> bool
+extern fn rt_vulkan_compile_glsl(glsl_source: text) -> i64
+extern fn rt_vulkan_destroy_shader(module: i64) -> bool
+extern fn rt_vulkan_create_compute_pipeline(shader_module: i64, entry_point: text, push_constant_size: i64) -> i64
+extern fn rt_vulkan_destroy_pipeline(pipe: i64) -> bool
+extern fn rt_vulkan_create_descriptor_set(pipe: i64) -> i64
+extern fn rt_vulkan_bind_buffer(descriptor_set: i64, binding: i64, buf: i64) -> bool
+extern fn rt_vulkan_destroy_descriptor_set(descriptor_set: i64) -> bool
+extern fn rt_vulkan_begin_compute() -> i64
+extern fn rt_vulkan_bind_pipeline(cmd: i64, pipe: i64) -> bool
+extern fn rt_vulkan_bind_descriptors(cmd: i64, descriptor_set: i64) -> bool
+extern fn rt_vulkan_push_constants(cmd: i64, pipe: i64, data: [u8]) -> bool
+extern fn rt_vulkan_dispatch(cmd: i64, x: i64, y: i64, z: i64) -> bool
+extern fn rt_vulkan_end_compute(cmd: i64) -> bool
+extern fn rt_vulkan_submit_and_wait(cmd: i64) -> bool
+extern fn rt_vulkan_wait_idle() -> bool
+
+# ============================================================================
+# VulkanFfi
+# ============================================================================
+
+class VulkanFfi:
+    _mode: GpuFfiMode
+    _dyn_lib: DynLib?
+
+impl VulkanFfi: FfiDispatchBase
+
+    fn mode() -> GpuFfiMode:
+        self._mode
+
+    # --- Constructors -------------------------------------------------------
+
+    static fn create_static() -> VulkanFfi:
+        VulkanFfi(_mode: GpuFfiMode.Static, _dyn_lib: nil)
+
+    static fn create_dynamic() -> VulkanFfi?:
+        val lib = try_load_gpu_lib("vulkan")
+        if lib == nil:
+            return nil
+        VulkanFfi(_mode: GpuFfiMode.Dynamic, _dyn_lib: lib)
+
+    static fn create_dynamic_from(path: text) -> VulkanFfi?:
+        val lib = DynLib.load(path)
+        if lib == nil:
+            return nil
+        VulkanFfi(_mode: GpuFfiMode.Dynamic, _dyn_lib: lib)
+
+    static fn create(ffi_mode: GpuFfiMode) -> VulkanFfi?:
+        match ffi_mode:
+            case Dynamic:
+                val dyn_ffi = VulkanFfi.create_dynamic()
+                if dyn_ffi != nil:
+                    return dyn_ffi
+                VulkanFfi.create_static()
+            case Static:
+                VulkanFfi.create_static()
+
+    # --- Dispatch methods ---------------------------------------------------
+
+    fn is_available() -> bool:
+        match self._mode:
+            case Static: rt_vulkan_is_available()
+            case Dynamic:
+                if self._dyn_lib != nil:
+                    val result = self._dyn_lib.call0("vkEnumerateInstanceVersion")
+                    result != 0
+                else:
+                    false
+
+    fn init() -> bool:
+        match self._mode:
+            case Static: rt_vulkan_init()
+            case Dynamic:
+                if self._dyn_lib != nil:
+                    val result = self._dyn_lib.call0("rt_vulkan_init")
+                    result != 0
+                else:
+                    false
+
+    fn shutdown() -> bool:
+        match self._mode:
+            case Static: rt_vulkan_shutdown()
+            case Dynamic:
+                if self._dyn_lib != nil:
+                    val result = self._dyn_lib.call0("rt_vulkan_shutdown")
+                    result != 0
+                else:
+                    false
+
+    fn device_count() -> i64:
+        match self._mode:
+            case Static: rt_vulkan_device_count()
+            case Dynamic:
+                if self._dyn_lib != nil:
+                    self._dyn_lib.call0("rt_vulkan_device_count")
+                else:
+                    0
+
+    fn select_device(id: i64) -> bool:
+        match self._mode:
+            case Static: rt_vulkan_select_device(id)
+            case Dynamic:
+                if self._dyn_lib != nil:
+                    val result = self._dyn_lib.call1("rt_vulkan_select_device", id)
+                    result != 0
+                else:
+                    false
+
+    fn alloc_buffer(size: i64, usage: i64) -> i64:
+        match self._mode:
+            case Static: rt_vulkan_alloc_buffer(size, usage)
+            case Dynamic:
+                if self._dyn_lib != nil:
+                    self._dyn_lib.call2("rt_vulkan_alloc_buffer", size, usage)
+                else:
+                    0
+
+    fn free_buffer(handle: i64) -> bool:
+        match self._mode:
+            case Static: rt_vulkan_free_buffer(handle)
+            case Dynamic:
+                if self._dyn_lib != nil:
+                    val result = self._dyn_lib.call1("rt_vulkan_free_buffer", handle)
+                    result != 0
+                else:
+                    false
+
+    fn copy_to_buffer(handle: i64, data: [u8], offset: i64) -> bool:
+        match self._mode:
+            case Static: rt_vulkan_copy_to_buffer(handle, data, offset)
+            case Dynamic: false
+
+    fn copy_from_buffer(data: [u8], handle: i64, offset: i64) -> bool:
+        match self._mode:
+            case Static: rt_vulkan_copy_from_buffer(data, handle, offset)
+            case Dynamic: false
+
+    fn compile_glsl(source: text) -> i64:
+        match self._mode:
+            case Static: rt_vulkan_compile_glsl(source)
+            case Dynamic:
+                if self._dyn_lib != nil:
+                    self._dyn_lib.call0("rt_vulkan_compile_glsl")
+                else:
+                    0
+
+    fn create_compute_pipeline(shader: i64, entry: text, pc_size: i64) -> i64:
+        match self._mode:
+            case Static: rt_vulkan_create_compute_pipeline(shader, entry, pc_size)
+            case Dynamic:
+                if self._dyn_lib != nil:
+                    self._dyn_lib.call2("rt_vulkan_create_compute_pipeline", shader, pc_size)
+                else:
+                    0
+
+    fn create_descriptor_set(pipe: i64) -> i64:
+        match self._mode:
+            case Static: rt_vulkan_create_descriptor_set(pipe)
+            case Dynamic:
+                if self._dyn_lib != nil:
+                    self._dyn_lib.call1("rt_vulkan_create_descriptor_set", pipe)
+                else:
+                    0
+
+    fn bind_buffer(descriptor_set: i64, binding: i64, buf: i64) -> bool:
+        match self._mode:
+            case Static: rt_vulkan_bind_buffer(descriptor_set, binding, buf)
+            case Dynamic:
+                if self._dyn_lib != nil:
+                    val result = self._dyn_lib.call3("rt_vulkan_bind_buffer", descriptor_set, binding, buf)
+                    result != 0
+                else:
+                    false
+
+    fn destroy_descriptor_set(descriptor_set: i64) -> bool:
+        match self._mode:
+            case Static: rt_vulkan_destroy_descriptor_set(descriptor_set)
+            case Dynamic:
+                if self._dyn_lib != nil:
+                    val result = self._dyn_lib.call1("rt_vulkan_destroy_descriptor_set", descriptor_set)
+                    result != 0
+                else:
+                    false
+
+    fn begin_compute() -> i64:
+        match self._mode:
+            case Static: rt_vulkan_begin_compute()
+            case Dynamic:
+                if self._dyn_lib != nil:
+                    self._dyn_lib.call0("rt_vulkan_begin_compute")
+                else:
+                    0
+
+    fn bind_pipeline(cmd: i64, pipe: i64) -> bool:
+        match self._mode:
+            case Static: rt_vulkan_bind_pipeline(cmd, pipe)
+            case Dynamic:
+                if self._dyn_lib != nil:
+                    val result = self._dyn_lib.call2("rt_vulkan_bind_pipeline", cmd, pipe)
+                    result != 0
+                else:
+                    false
+
+    fn bind_descriptors(cmd: i64, ds: i64) -> bool:
+        match self._mode:
+            case Static: rt_vulkan_bind_descriptors(cmd, ds)
+            case Dynamic:
+                if self._dyn_lib != nil:
+                    val result = self._dyn_lib.call2("rt_vulkan_bind_descriptors", cmd, ds)
+                    result != 0
+                else:
+                    false
+
+    fn push_constants(cmd: i64, pipe: i64, data: [u8]) -> bool:
+        match self._mode:
+            case Static: rt_vulkan_push_constants(cmd, pipe, data)
+            case Dynamic: false
+
+    fn dispatch(cmd: i64, x: i64, y: i64, z: i64) -> bool:
+        match self._mode:
+            case Static: rt_vulkan_dispatch(cmd, x, y, z)
+            case Dynamic:
+                if self._dyn_lib != nil:
+                    val result = self._dyn_lib.call4("rt_vulkan_dispatch", cmd, x, y, z)
+                    result != 0
+                else:
+                    false
+
+    fn end_compute(cmd: i64) -> bool:
+        match self._mode:
+            case Static: rt_vulkan_end_compute(cmd)
+            case Dynamic:
+                if self._dyn_lib != nil:
+                    val result = self._dyn_lib.call1("rt_vulkan_end_compute", cmd)
+                    result != 0
+                else:
+                    false
+
+    fn submit_and_wait(cmd: i64) -> bool:
+        match self._mode:
+            case Static: rt_vulkan_submit_and_wait(cmd)
+            case Dynamic:
+                if self._dyn_lib != nil:
+                    val result = self._dyn_lib.call1("rt_vulkan_submit_and_wait", cmd)
+                    result != 0
+                else:
+                    false
+
+    fn wait_idle() -> bool:
+        match self._mode:
+            case Static: rt_vulkan_wait_idle()
+            case Dynamic:
+                if self._dyn_lib != nil:
+                    val result = self._dyn_lib.call0("rt_vulkan_wait_idle")
+                    result != 0
+                else:
+                    false
+
+    fn destroy_shader(module: i64) -> bool:
+        match self._mode:
+            case Static: rt_vulkan_destroy_shader(module)
+            case Dynamic:
+                if self._dyn_lib != nil:
+                    val result = self._dyn_lib.call1("rt_vulkan_destroy_shader", module)
+                    result != 0
+                else:
+                    false
+
+    fn destroy_pipeline(pipe: i64) -> bool:
+        match self._mode:
+            case Static: rt_vulkan_destroy_pipeline(pipe)
+            case Dynamic:
+                if self._dyn_lib != nil:
+                    val result = self._dyn_lib.call1("rt_vulkan_destroy_pipeline", pipe)
+                    result != 0
+                else:
+                    false
