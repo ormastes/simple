@@ -1,0 +1,317 @@
+# PDB Parser
+# Pure-Simple PDB debug info parser implementing DebugInfoProvider.
+# Parses MSF container, then DBI, symbol, and line info streams.
+
+use std.binary_io.{BinaryReader, ByteOrder}
+use std.debug.formats.debug_types.{
+    SourceLocation, DebugLineEntry, DebugFunction, DebugVariable,
+    DebugCompilationUnit, DebugFormatKind,
+}
+use std.debug.formats.debug_provider.{DebugInfoProvider}
+use std.debug.formats.pdb_constants.{
+    PDB_STREAM_PDB, PDB_STREAM_TPI, PDB_STREAM_DBI, PDB_STREAM_IPI,
+    DBI_HEADER_SIZE,
+    S_GPROC32, S_LPROC32, S_GPROC32_ID, S_LPROC32_ID,
+    DEBUG_S_LINES, DEBUG_S_STRINGTABLE, DEBUG_S_FILECHKSMS,
+}
+use std.debug.formats.msf_parser.{MsfFile, msf_parse, msf_stream_data, msf_stream_count}
+use std.debug.formats.codeview_records.{
+    CvSymRecord, CvProcSymbol, CvLineBlock, CvLinePair, CvFileChecksum,
+    cv_parse_symbol_records, cv_decode_proc_symbol,
+    cv_parse_line_subsections, cv_parse_file_checksums,
+    cv_extract_string_table, cv_string_table_get,
+}
+
+# ============================================================================
+# DBI Header
+# ============================================================================
+
+struct DbiHeader:
+    version_signature: i64
+    version_header: i64
+    age: i64
+    global_stream_index: i64
+    build_number: i64
+    public_stream_index: i64
+    pdb_dll_version: i64
+    sym_record_stream: i64
+    mod_info_size: i64
+    section_contribution_size: i64
+    section_map_size: i64
+    source_info_size: i64
+    debug_header_size: i64
+
+struct DbiModuleInfo:
+    module_name: text
+    obj_file_name: text
+    sym_stream: i64
+    sym_byte_size: i64
+    c11_byte_size: i64
+    c13_byte_size: i64
+
+# ============================================================================
+# DBI Parsing
+# ============================================================================
+
+fn _read_u16_at(data: [u8], offset: i64) -> i64:
+    if offset + 1 >= data.len():
+        return 0
+    (data[offset] as i64) | ((data[offset + 1] as i64) << 8)
+
+fn _read_u32_at(data: [u8], offset: i64) -> i64:
+    if offset + 3 >= data.len():
+        return 0
+    (data[offset] as i64) | ((data[offset + 1] as i64) << 8) | ((data[offset + 2] as i64) << 16) | ((data[offset + 3] as i64) << 24)
+
+fn _read_i32_at(data: [u8], offset: i64) -> i64:
+    val u = _read_u32_at(data, offset)
+    if u >= 0x80000000:
+        return u - 0x100000000
+    u
+
+fn _read_cstr_at(data: [u8], offset: i64) -> (text, i64):
+    var result = ""
+    var pos = offset
+    while pos < data.len():
+        val b = data[pos]
+        pos = pos + 1
+        if b == 0:
+            break
+        result = result + text.from_char_code(b)
+    (result, pos)
+
+fn _parse_dbi_header(dbi_data: [u8]) -> Result<DbiHeader, text>:
+    if dbi_data.len() < DBI_HEADER_SIZE:
+        return Err("DBI stream too small")
+
+    Ok(DbiHeader(
+        version_signature: _read_i32_at(dbi_data, 0),
+        version_header: _read_u32_at(dbi_data, 4),
+        age: _read_u32_at(dbi_data, 8),
+        global_stream_index: _read_u16_at(dbi_data, 12),
+        build_number: _read_u16_at(dbi_data, 14),
+        public_stream_index: _read_u16_at(dbi_data, 16),
+        pdb_dll_version: _read_u16_at(dbi_data, 18),
+        sym_record_stream: _read_u16_at(dbi_data, 20),
+        mod_info_size: _read_u32_at(dbi_data, 24),
+        section_contribution_size: _read_u32_at(dbi_data, 28),
+        section_map_size: _read_u32_at(dbi_data, 32),
+        source_info_size: _read_u32_at(dbi_data, 36),
+        debug_header_size: _read_u32_at(dbi_data, 52),
+    ))
+
+fn _parse_module_infos(dbi_data: [u8], mod_info_size: i64) -> [DbiModuleInfo]:
+    var modules: [DbiModuleInfo] = []
+    var pos = DBI_HEADER_SIZE
+    val end_pos = DBI_HEADER_SIZE + mod_info_size
+
+    while pos + 64 <= end_pos and pos + 64 <= dbi_data.len():
+        val sym_stream = _read_u16_at(dbi_data, pos + 34)
+        val sym_byte_size = _read_u32_at(dbi_data, pos + 36)
+        val c11_byte_size = _read_u32_at(dbi_data, pos + 40)
+        val c13_byte_size = _read_u32_at(dbi_data, pos + 44)
+
+        val mod_name_result = _read_cstr_at(dbi_data, pos + 64)
+        val mod_name = mod_name_result.0
+        val after_mod = mod_name_result.1
+
+        val obj_name_result = _read_cstr_at(dbi_data, after_mod)
+        val obj_name = obj_name_result.0
+        pos = obj_name_result.1
+
+        if pos % 4 != 0:
+            pos = pos + (4 - (pos % 4))
+
+        modules = modules.push(DbiModuleInfo(
+            module_name: mod_name,
+            obj_file_name: obj_name,
+            sym_stream: sym_stream,
+            sym_byte_size: sym_byte_size,
+            c11_byte_size: c11_byte_size,
+            c13_byte_size: c13_byte_size,
+        ))
+
+    modules
+
+# ============================================================================
+# PDB Parser Class
+# ============================================================================
+
+class PdbParser:
+    msf: MsfFile
+    dbi_header: DbiHeader
+    modules: [DbiModuleInfo]
+    functions: [DebugFunction]
+    line_entries: [DebugLineEntry]
+    units: [DebugCompilationUnit]
+    parsed: bool
+
+    static fn parse(data: [u8]) -> Result<PdbParser, text>:
+        val msf_result = msf_parse(data)
+        if msf_result.is_err():
+            return Err(msf_result.err()!)
+
+        val msf = msf_result.ok()!
+
+        if msf_stream_count(msf) <= PDB_STREAM_DBI:
+            return Err("PDB has no DBI stream")
+
+        val dbi_data = msf_stream_data(msf, PDB_STREAM_DBI)
+        val dbi_result = _parse_dbi_header(dbi_data)
+        if dbi_result.is_err():
+            return Err(dbi_result.err()!)
+
+        val dbi = dbi_result.ok()!
+        val modules = _parse_module_infos(dbi_data, dbi.mod_info_size)
+
+        var all_functions: [DebugFunction] = []
+        var all_lines: [DebugLineEntry] = []
+        var all_units: [DebugCompilationUnit] = []
+
+        var mod_idx = 0
+        for mod_info in modules:
+            if mod_info.sym_stream == 0xffff or mod_info.sym_stream == 0:
+                mod_idx = mod_idx + 1
+                continue
+
+            val mod_data = msf_stream_data(msf, mod_info.sym_stream)
+            if mod_data.len() < 4:
+                mod_idx = mod_idx + 1
+                continue
+
+            val sig = _read_u32_at(mod_data, 0)
+            val sym_end = 4 + mod_info.sym_byte_size - 4
+
+            var sym_data: [u8] = []
+            var sd_i = 4
+            while sd_i < sym_end and sd_i < mod_data.len():
+                sym_data = sym_data.push(mod_data[sd_i])
+                sd_i = sd_i + 1
+
+            val sym_records = cv_parse_symbol_records(sym_data)
+            var mod_functions: [DebugFunction] = []
+            for rec in sym_records:
+                val proc = cv_decode_proc_symbol(rec)
+                if proc.?:
+                    val p = proc!
+                    mod_functions = mod_functions.push(DebugFunction(
+                        name: p.name,
+                        low_pc: p.offset,
+                        high_pc: p.offset + p.code_size,
+                        comp_unit_index: mod_idx,
+                    ))
+                    all_functions = all_functions.push(DebugFunction(
+                        name: p.name,
+                        low_pc: p.offset,
+                        high_pc: p.offset + p.code_size,
+                        comp_unit_index: mod_idx,
+                    ))
+
+            val c13_start = 4 + mod_info.sym_byte_size - 4 + mod_info.c11_byte_size
+            val c13_end = c13_start + mod_info.c13_byte_size
+            if c13_end <= mod_data.len() and mod_info.c13_byte_size > 0:
+                var c13_data: [u8] = []
+                var ci = c13_start
+                while ci < c13_end and ci < mod_data.len():
+                    c13_data = c13_data.push(mod_data[ci])
+                    ci = ci + 1
+
+                val string_table = cv_extract_string_table(c13_data)
+                val checksums = cv_parse_file_checksums(c13_data)
+                val line_blocks = cv_parse_line_subsections(c13_data)
+
+                var mod_lines: [DebugLineEntry] = []
+                for block in line_blocks:
+                    var file_name = ""
+                    val file_idx = block.file_index / 8
+                    if file_idx < checksums.len():
+                        val cs = checksums[file_idx]
+                        file_name = cv_string_table_get(string_table, cs.name_offset)
+
+                    for lp in block.lines:
+                        val entry = DebugLineEntry(
+                            address: lp.offset,
+                            location: SourceLocation(file: file_name, line: lp.line_start, column: 0),
+                            is_stmt: true,
+                            end_sequence: false,
+                            prologue_end: false,
+                            epilogue_begin: false,
+                        )
+                        mod_lines = mod_lines.push(entry)
+                        all_lines = all_lines.push(entry)
+
+                all_units = all_units.push(DebugCompilationUnit(
+                    name: mod_info.module_name,
+                    comp_dir: "",
+                    language: 0,
+                    low_pc: 0,
+                    high_pc: 0,
+                    line_entries: mod_lines,
+                    functions: mod_functions,
+                ))
+            else:
+                all_units = all_units.push(DebugCompilationUnit(
+                    name: mod_info.module_name,
+                    comp_dir: "",
+                    language: 0,
+                    low_pc: 0,
+                    high_pc: 0,
+                    line_entries: [],
+                    functions: mod_functions,
+                ))
+
+            mod_idx = mod_idx + 1
+
+        Ok(PdbParser(
+            msf: msf,
+            dbi_header: dbi,
+            modules: modules,
+            functions: all_functions,
+            line_entries: all_lines,
+            units: all_units,
+            parsed: true,
+        ))
+
+    fn format_kind() -> DebugFormatKind:
+        DebugFormatKind.Pdb
+
+    fn addr_to_source(addr: i64) -> SourceLocation?:
+        var best: DebugLineEntry? = nil
+        for entry in self.line_entries:
+            if entry.address <= addr:
+                if best.?:
+                    if entry.address > best!.address:
+                        best = entry
+                else:
+                    best = entry
+        if best.?:
+            return best!.location
+        return nil
+
+    fn source_to_addr(file: text, line: i64) -> i64?:
+        for entry in self.line_entries:
+            if entry.location.line == line and entry.location.file.ends_with(file):
+                return entry.address
+        return nil
+
+    fn function_at(addr: i64) -> DebugFunction?:
+        for func in self.functions:
+            if func.contains_address(addr):
+                return func
+        return nil
+
+    fn functions_in_range(low: i64, high: i64) -> [DebugFunction]:
+        var result: [DebugFunction] = []
+        for func in self.functions:
+            if func.low_pc < high and func.high_pc > low:
+                result = result.push(func)
+        result
+
+    fn locals_at(addr: i64) -> [DebugVariable]:
+        []
+
+    fn compilation_units() -> [DebugCompilationUnit]:
+        self.units
+
+    fn line_entries_all() -> [DebugLineEntry]:
+        self.line_entries
