@@ -9,6 +9,7 @@ Feature: spm-winfs-llm-suite AC-4.
 """
 
 use os.kernel.fs.win_vfs.win_vfs_driver.{WinVfsDriver}
+use os.services.vfs.vfs.{VfsManager}
 
 class RegisterStatus:
     """Sized result: `value` is the mount path on success."""
@@ -16,18 +17,25 @@ class RegisterStatus:
     value: text
     error: text
 
+var _g_vfs_managers: [VfsManager] = []
+
+fn win_vfs_set_manager(mgr: VfsManager):
+    """Set the global VFS manager used by register_win_vfs."""
+    _g_vfs_managers = [mgr]
+
 fn register_win_vfs() -> RegisterStatus:
     """Instantiate the driver and register it under `/win`.
 
-    The real `VfsManager` reference is fetched from the kernel service
-    locator at boot. For spec/unit contexts we only need the path report
-    so the caller can assert the mount intent; the underlying mount call
-    is a no-op when the locator is not wired yet.
+    When a VfsManager has been set via `win_vfs_set_manager`, the driver
+    is mounted through the VFS layer. Otherwise (spec/unit contexts) the
+    driver's own mount is exercised directly.
     """
     val drv = WinVfsDriver.new()
-    # TODO(spm-winfs-llm-suite): wire VfsManager.mount once the kernel
-    # service locator exposes a global handle. Until then, driver.mount()
-    # is exercised directly in tests.
+    if _g_vfs_managers.len() > 0:
+        val result = _g_vfs_managers[0].mount("/win", "winfs", "", false, drv)
+        if result.is_err():
+            return RegisterStatus(ok: false, value: "", error: result.unwrap_err())
+        return RegisterStatus(ok: true, value: "/win", error: "")
     val mount_result = drv.mount("win", "")
     if not mount_result.ok:
         return RegisterStatus(ok: false, value: "", error: mount_result.error)

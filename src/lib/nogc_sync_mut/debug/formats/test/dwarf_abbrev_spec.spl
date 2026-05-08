@@ -1,0 +1,85 @@
+"""DWARF abbreviation and LEB128 specification tests."""
+
+use std.debug.formats.dwarf_abbrev.{read_uleb128, read_sleb128, dwarf_parse_abbrev_table, dwarf_find_abbrev}
+
+describe "DWARF LEB128":
+    it "decodes unsigned LEB128 single byte":
+        val data: [u8] = [0x00]
+        val result = read_uleb128(data, 0)
+        expect(result.0).to_equal(0)
+        expect(result.1).to_equal(1)
+
+    it "decodes unsigned LEB128 value 127":
+        val data: [u8] = [0x7f]
+        val result = read_uleb128(data, 0)
+        expect(result.0).to_equal(127)
+        expect(result.1).to_equal(1)
+
+    it "decodes unsigned LEB128 multi-byte":
+        val data: [u8] = [0x80, 0x01]
+        val result = read_uleb128(data, 0)
+        expect(result.0).to_equal(128)
+        expect(result.1).to_equal(2)
+
+    it "decodes unsigned LEB128 value 624485":
+        val data: [u8] = [0xe5, 0x8e, 0x26]
+        val result = read_uleb128(data, 0)
+        expect(result.0).to_equal(624485)
+        expect(result.1).to_equal(3)
+
+    it "decodes signed LEB128 positive":
+        val data: [u8] = [0x3f]
+        val result = read_sleb128(data, 0)
+        expect(result.0).to_equal(63)
+
+    it "decodes signed LEB128 negative -1":
+        val data: [u8] = [0x7f]
+        val result = read_sleb128(data, 0)
+        expect(result.0).to_equal(-1)
+
+    it "decodes signed LEB128 negative -128":
+        val data: [u8] = [0x80, 0x7f]
+        val result = read_sleb128(data, 0)
+        expect(result.0).to_equal(-128)
+
+describe "DWARF Abbreviation Table":
+    it "parses empty table":
+        val data: [u8] = [0x00]
+        val table = dwarf_parse_abbrev_table(data, 0)
+        expect(table.entries.len()).to_equal(0)
+
+    it "parses single entry with no attrs":
+        val data: [u8] = [
+            0x01,       # abbrev code 1
+            0x11,       # DW_TAG_compile_unit
+            0x01,       # has_children = true
+            0x00, 0x00, # attr terminator
+            0x00,       # table terminator
+        ]
+        val table = dwarf_parse_abbrev_table(data, 0)
+        expect(table.entries.len()).to_equal(1)
+        expect(table.entries[0].code).to_equal(1)
+        expect(table.entries[0].tag).to_equal(0x11)
+        expect(table.entries[0].has_children).to_equal(true)
+        expect(table.entries[0].attrs.len()).to_equal(0)
+
+    it "finds abbrev by code":
+        val data: [u8] = [
+            0x01, 0x11, 0x01, 0x00, 0x00,
+            0x02, 0x2e, 0x00, 0x00, 0x00,
+            0x00,
+        ]
+        val table = dwarf_parse_abbrev_table(data, 0)
+        expect(table.entries.len()).to_equal(2)
+
+        val found = dwarf_find_abbrev(table, 2)
+        expect(found.?).to_equal(true)
+        val f = found!
+        expect(f.tag).to_equal(0x2e)
+        expect(f.has_children).to_equal(false)
+
+    it "returns nil for unknown code":
+        val data: [u8] = [0x01, 0x11, 0x00, 0x00, 0x00, 0x00]
+        val table = dwarf_parse_abbrev_table(data, 0)
+        val not_found = dwarf_find_abbrev(table, 99)
+        expect(not_found.?).to_equal(false)

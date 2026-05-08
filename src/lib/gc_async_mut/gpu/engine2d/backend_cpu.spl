@@ -51,6 +51,9 @@ class CpuBackend:
     clip_w: i32
     clip_h: i32
     clip_enabled: bool
+    mask_buf: [u8]
+    mask_w: i32
+    mask_h: i32
     initialized: bool
 
     static fn create() -> CpuBackend:
@@ -64,6 +67,9 @@ class CpuBackend:
             clip_w: 0,
             clip_h: 0,
             clip_enabled: false,
+            mask_buf: [],
+            mask_w: 0,
+            mask_h: 0,
             initialized: false
         )
 
@@ -92,6 +98,9 @@ impl RenderBackend for CpuBackend:
 
     me shutdown():
         self.buf = []
+        self.mask_buf = []
+        self.mask_w = 0
+        self.mask_h = 0
         self.w = 0
         self.h = 0
         self.initialized = false
@@ -124,7 +133,8 @@ impl RenderBackend for CpuBackend:
                             col >= self.clip_x and col < self.clip_x + self.clip_w and
                             row >= self.clip_y and row < self.clip_y + self.clip_h
                         ):
-                            self.buf[row * self.w + col] = color
+                            if not _mask_blocks(self, col, row):
+                                self.buf[row * self.w + col] = color
                     col = col + 1
             row = row + 1
 
@@ -292,10 +302,14 @@ impl RenderBackend for CpuBackend:
         self.clip_h = self.h
 
     me set_mask(mask_pixels: [u8], w: i32, h: i32):
-        pass_do_nothing
+        self.mask_buf = mask_pixels
+        self.mask_w = w
+        self.mask_h = h
 
     me clear_mask():
-        pass_do_nothing
+        self.mask_buf = []
+        self.mask_w = 0
+        self.mask_h = 0
 
     me present():
         # CPU backend: framebuffer is already in memory, nothing to flush
@@ -410,8 +424,9 @@ impl Engine2DExtended for CpuBackend:
                             out_x >= self.clip_x and out_x < self.clip_x + self.clip_w and
                             out_y >= self.clip_y and out_y < self.clip_y + self.clip_h
                         ):
-                            val c: u32 = lerp_color(bg, fg, cov)
-                            self.buf[out_y * self.w + out_x] = c
+                            if not _mask_blocks(self, out_x, out_y):
+                                val c: u32 = lerp_color(bg, fg, cov)
+                                self.buf[out_y * self.w + out_x] = c
                     px = px + 1
                 py = py + 1
             gi = gi + 1
@@ -420,8 +435,16 @@ impl Engine2DExtended for CpuBackend:
 # Pixel Operations (Internal)
 # ============================================================================
 
+fn _mask_blocks(backend: CpuBackend, x: i32, y: i32) -> bool:
+    if backend.mask_buf.len() == 0:
+        return false
+    val mi = y * backend.mask_w + x
+    if mi < 0 or mi >= backend.mask_buf.len():
+        return false
+    backend.mask_buf[mi] == 0u8
+
 fn _set_pixel(backend: CpuBackend, x: i32, y: i32, color: u32):
-    """Set a single pixel, respecting clip rect and bounds."""
+    """Set a single pixel, respecting clip rect, mask, and bounds."""
     if x < 0 or y < 0 or x >= backend.w or y >= backend.h:
         return
 
@@ -429,6 +452,9 @@ fn _set_pixel(backend: CpuBackend, x: i32, y: i32, color: u32):
         if (x < backend.clip_x or x >= backend.clip_x + backend.clip_w or
             y < backend.clip_y or y >= backend.clip_y + backend.clip_h):
             return
+
+    if _mask_blocks(backend, x, y):
+        return
 
     val idx = y * backend.w + x
     backend.buf[idx] = color
@@ -442,6 +468,9 @@ fn _set_pixel_blend(backend: CpuBackend, x: i32, y: i32, color: u32):
         if (x < backend.clip_x or x >= backend.clip_x + backend.clip_w or
             y < backend.clip_y or y >= backend.clip_y + backend.clip_h):
             return
+
+    if _mask_blocks(backend, x, y):
+        return
 
     val idx = y * backend.w + x
     val dst = backend.buf[idx]

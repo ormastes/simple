@@ -61,6 +61,9 @@ class BaremetalBackend:
     clip_w: i32
     clip_h: i32
     clip_enabled: bool
+    mask_buf: [u8]
+    mask_w: i32
+    mask_h: i32
     initialized: bool
 
     static fn create(fb: FramebufferDriver) -> BaremetalBackend:
@@ -76,6 +79,9 @@ class BaremetalBackend:
             clip_w: fw,
             clip_h: fh,
             clip_enabled: false,
+            mask_buf: [],
+            mask_w: 0,
+            mask_h: 0,
             initialized: true
         )
 
@@ -98,6 +104,9 @@ impl RenderBackend for BaremetalBackend:
         true
 
     me shutdown():
+        self.mask_buf = []
+        self.mask_w = 0
+        self.mask_h = 0
         self.initialized = false
 
     me clear(color: u32):
@@ -323,10 +332,14 @@ impl RenderBackend for BaremetalBackend:
         self.clip_h = self.h
 
     me set_mask(mask_pixels: [u8], w: i32, h: i32):
-        pass_do_nothing
+        self.mask_buf = mask_pixels
+        self.mask_w = w
+        self.mask_h = h
 
     me clear_mask():
-        pass_do_nothing
+        self.mask_buf = []
+        self.mask_w = 0
+        self.mask_h = 0
 
     me present():
         """Flush the back buffer to the hardware framebuffer."""
@@ -419,6 +432,14 @@ impl Engine2DExtended for BaremetalBackend:
 # Internal Helpers
 # ============================================================================
 
+fn _bm_mask_blocks(backend: BaremetalBackend, x: i32, y: i32) -> bool:
+    if backend.mask_buf.len() == 0:
+        return false
+    val mi = y * backend.mask_w + x
+    if mi < 0 or mi >= backend.mask_buf.len():
+        return false
+    backend.mask_buf[mi] == 0u8
+
 fn _bm_put(backend: BaremetalBackend, x: i32, y: i32, color: Color):
     """Set a pixel with bounds and clip checking."""
     if x < 0 or y < 0 or x >= backend.w or y >= backend.h:
@@ -427,6 +448,8 @@ fn _bm_put(backend: BaremetalBackend, x: i32, y: i32, color: Color):
         if (x < backend.clip_x or x >= backend.clip_x + backend.clip_w or
             y < backend.clip_y or y >= backend.clip_y + backend.clip_h):
             return
+    if _bm_mask_blocks(backend, x, y):
+        return
     backend.fb.put_pixel(x.to_u32(), y.to_u32(), color)
 
 fn _bm_get_pixel(backend: BaremetalBackend, x: i32, y: i32) -> u32:

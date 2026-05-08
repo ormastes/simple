@@ -1,0 +1,144 @@
+# @tag: rendering, engine2d, mask, stencil
+# @cover src/lib/gc_async_mut/gpu/engine2d/backend_cpu.spl 60%
+# @cover src/lib/gc_async_mut/gpu/engine2d/backend_software.spl 60%
+#
+# Engine2D Stencil Mask Tests
+#
+# Verifies set_mask/clear_mask clipping behavior on pixel-buffer backends.
+# Mask semantics: [u8] buffer, 0 = block pixel writes, >0 = allow.
+
+use std.spec.{describe, context, it, expect}
+use std.gpu.engine2d.engine.{Engine2D}
+use std.gpu.engine2d.color.{rgb, color_r, color_g, color_b}
+
+fn _make_right_half_mask() -> [u8]:
+    var mask: [u8] = [0u8; 100]
+    var i = 0
+    while i < 100:
+        val col = i % 10
+        if col >= 5:
+            mask[i] = 255u8
+        i = i + 1
+    mask
+
+fn _make_bottom_half_mask() -> [u8]:
+    var mask: [u8] = [0u8; 100]
+    var i = 0
+    while i < 100:
+        val row = i / 10
+        if row >= 5:
+            mask[i] = 255u8
+        i = i + 1
+    mask
+
+fn _make_block_row5_mask() -> [u8]:
+    var mask: [u8] = [255u8; 100]
+    var col = 0
+    while col < 10:
+        mask[5 * 10 + col] = 0u8
+        col = col + 1
+    mask
+
+fn _make_block_all_mask() -> [u8]:
+    [0u8; 100]
+
+describe "Engine2D Stencil Mask":
+
+    context "cpu backend":
+
+        it "set_mask blocks draws in masked region":
+            var engine = Engine2D.create_with_backend(10, 10, "cpu")
+            engine.clear(rgb(0, 0, 0))
+
+            val mask = _make_right_half_mask()
+            engine.set_mask(mask, 10, 10)
+            engine.draw_rect_filled(0, 0, 10, 10, rgb(255, 0, 0))
+
+            val pixels = engine.read_pixels()
+            val p_left = pixels[0 * 10 + 2]
+            expect(color_r(p_left)).to_equal(0)
+            val p_right = pixels[0 * 10 + 7]
+            expect(color_r(p_right)).to_equal(255)
+            expect(color_g(p_right)).to_equal(0)
+            engine.shutdown()
+
+        it "clear_mask removes clipping":
+            var engine = Engine2D.create_with_backend(10, 10, "cpu")
+            engine.clear(rgb(0, 0, 0))
+
+            val mask = _make_block_all_mask()
+            engine.set_mask(mask, 10, 10)
+            engine.draw_rect_filled(0, 0, 10, 10, rgb(255, 0, 0))
+
+            val p1 = engine.read_pixels()[55]
+            expect(color_r(p1)).to_equal(0)
+
+            engine.clear_mask()
+            engine.draw_rect_filled(0, 0, 10, 10, rgb(0, 255, 0))
+
+            val p2 = engine.read_pixels()[55]
+            expect(color_g(p2)).to_equal(255)
+            engine.shutdown()
+
+        it "mask does not affect clear":
+            var engine = Engine2D.create_with_backend(10, 10, "cpu")
+            engine.clear(rgb(255, 0, 0))
+
+            val mask = _make_block_all_mask()
+            engine.set_mask(mask, 10, 10)
+
+            engine.clear(rgb(0, 0, 255))
+            val pixels = engine.read_pixels()
+            val p = pixels[0]
+            expect(color_b(p)).to_equal(255)
+            engine.shutdown()
+
+        it "draw_line respects mask":
+            var engine = Engine2D.create_with_backend(10, 10, "cpu")
+            engine.clear(rgb(0, 0, 0))
+
+            val mask = _make_block_row5_mask()
+            engine.set_mask(mask, 10, 10)
+            engine.draw_line(0, 0, 9, 9, rgb(255, 255, 255), 1)
+
+            val pixels = engine.read_pixels()
+            val p_blocked = pixels[5 * 10 + 5]
+            expect(color_r(p_blocked)).to_equal(0)
+            val p_drawn = pixels[3 * 10 + 3]
+            expect(color_r(p_drawn)).to_equal(255)
+            engine.shutdown()
+
+    context "software backend":
+
+        it "set_mask blocks draws in masked region":
+            var engine = Engine2D.create_with_backend(10, 10, "software")
+            engine.clear(rgb(0, 0, 0))
+
+            val mask = _make_bottom_half_mask()
+            engine.set_mask(mask, 10, 10)
+            engine.draw_rect_filled(0, 0, 10, 10, rgb(0, 255, 0))
+
+            val pixels = engine.read_pixels()
+            val p_top = pixels[2 * 10 + 5]
+            expect(color_g(p_top)).to_equal(0)
+            val p_bot = pixels[7 * 10 + 5]
+            expect(color_g(p_bot)).to_equal(255)
+            engine.shutdown()
+
+        it "clear_mask removes clipping":
+            var engine = Engine2D.create_with_backend(10, 10, "software")
+            engine.clear(rgb(0, 0, 0))
+
+            val mask = _make_block_all_mask()
+            engine.set_mask(mask, 10, 10)
+            engine.draw_rect_filled(0, 0, 10, 10, rgb(255, 0, 0))
+
+            val p1 = engine.read_pixels()[55]
+            expect(color_r(p1)).to_equal(0)
+
+            engine.clear_mask()
+            engine.draw_rect_filled(0, 0, 10, 10, rgb(0, 0, 255))
+
+            val p2 = engine.read_pixels()[55]
+            expect(color_b(p2)).to_equal(255)
+            engine.shutdown()

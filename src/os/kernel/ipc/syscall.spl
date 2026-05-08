@@ -13,8 +13,8 @@ use os.kernel.types.task_types.{
 use os.kernel.types.ipc_types.{IpcPort, IpcMessage}
 use os.kernel.types.capability_types.{CapabilityToken, CapabilityKind, CapabilitySet}
 use os.kernel.types.notification_types.{Notification}
-use os.kernel.types.vmspace_types.{ProcessVmSpace, VmArea, VMA_READ, VMA_WRITE, VMA_ANON, VMA_SHARED}
-use os.kernel.memory.vmm.{vmm_mmap, vmm_munmap, vmm_new_process_space}
+use os.kernel.types.vmspace_types.{ProcessVmSpace, VmArea, VMA_READ, VMA_WRITE, VMA_ANON, VMA_FILE, VMA_SHARED}
+use os.kernel.memory.vmm.{vmm_mmap, vmm_munmap, vmm_new_process_space, vmm_cache_file_backing}
 use os.kernel.scheduler.scheduler.{Scheduler, g_scheduler_next_task_id, wait_collect_result_pid, wait_collect_result_status, wait_collect_result_error, task_control_pid, task_control_parent_pid, task_control_memory_pages, task_control_name, task_control_state_code, task_control_priority_code, task_control_ticks_remaining}
 use os.kernel.ipc.ipc.{IpcManager}
 use os.kernel.ipc.notification.{NotificationTable, notification_create, notification_signal, notification_wait, notification_poll, notification_destroy, notification_wait_any, notification_register_multi_waiter, notification_drain_signaled_waiters}
@@ -3495,6 +3495,10 @@ fn _handle_safecopy_to(args: SyscallArgs, scheduler: Scheduler) -> SyscallResult
 
 var g_current_vmspace: ProcessVmSpace = vmm_new_process_space(0, 0)
 
+fn syscall_current_vmspace() -> ProcessVmSpace:
+    """Return the current task's virtual address space for ISR dispatch."""
+    g_current_vmspace
+
 struct TaskBrkEntry:
     """Per-task program break state."""
     task_id: u64
@@ -3612,6 +3616,11 @@ fn _handle_sys_mmap(args: SyscallArgs, task_id: u64) -> SyscallResult:
         used_registered = true
     val rc = vmm_mmap(map_space, vaddr, len, flags, kind, backing, backing_offset)
     if rc >= 0:
+        if kind == VMA_FILE and backing != 0:
+            # TODO: populate cache lazily on fault instead of eager full-len read
+            val file_read = posix_pread_exact_bytes(backing as i32, backing_offset, len)
+            if file_read.status >= 0:
+                vmm_cache_file_backing(backing, file_read.data)
         if used_registered:
             register_task_vmspace(task_id.to_u32(), map_space)
         else:

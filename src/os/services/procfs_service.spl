@@ -8,6 +8,7 @@ use std.ecs.entity.{Entity, EntityAllocator}
 use std.ecs.component_store.{ComponentStore}
 use std.ecs.world.{WorldBase}
 use os.posix.errno.{ENOENT}
+use os.kernel.ipc.message_buffer.{InlineMessage, ipc_send_inline}
 
 # ============================================================================
 # Node kind constants
@@ -74,9 +75,23 @@ impl ProcfsService:
         """Store the PM endpoint for later read-through queries.
 
         Must be called before any live content is read from /proc.
-        # TODO(mdsoc+): read-through to PM endpoint
         """
         self.pm_endpoint = pm_endpoint
+
+    me procfs_read(path: text) -> [u8]:
+        """Read content from a procfs node.
+
+        Looks up the node, then either queries the PM via IPC
+        read-through (when pm_endpoint is set) or synthesizes
+        minimal status from local ECS data.
+        """
+        val pid_result = self.procfs_node_lookup(path)
+        if pid_result < 0:
+            return [] as [u8]
+        val pid = pid_result as u32
+        if self.pm_endpoint != 0:
+            return _procfs_pm_read(self.pm_endpoint, pid, path)
+        _procfs_synthesize_status(pid)
 
     fn procfs_list_pids_path() -> text:
         """Return the canonical root path of the process namespace."""
@@ -118,3 +133,37 @@ impl ProcfsService:
     fn procfs_node_count() -> i32:
         """Return the number of currently registered procfs nodes."""
         self.world.paths.len()
+
+# ============================================================================
+# Read-through helpers
+# ============================================================================
+
+fn _procfs_synthesize_status(pid: u32) -> [u8]:
+    """Return minimal synthetic status when PM is unavailable."""
+    val status_text = "pid: {pid}\nstate: unknown\n"
+    status_text.bytes()
+
+fn _procfs_pm_read(endpoint: u64, pid: u32, path: text) -> [u8]:
+    """IPC read-through to the process manager.
+
+    Sends PM_READ (method_id=1) with pid in r0 to the PM endpoint.
+    # TODO: wire sync recv on a reply endpoint to return real PM data;
+    # ipc_recv_buffer requires a thread_id context that services lack.
+    """
+    val msg = InlineMessage(
+        method_id: 1,
+        cap_count: 0 as u16,
+        flags: 0 as u16,
+        payload_len: path.bytes().len() as u32,
+        badge: 0 as u32,
+        r0: pid as u64,
+        r1: 0,
+        r2: 0,
+        r3: 0,
+        r4: 0,
+        r5: 0,
+        r6: 0,
+        r7: 0
+    )
+    _ = ipc_send_inline(endpoint, msg)
+    _procfs_synthesize_status(pid)

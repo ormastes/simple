@@ -72,6 +72,9 @@ class VirtioGpuBackend:
     clip_w: i32
     clip_h: i32
     clip_active: bool
+    mask_buf: [u8]
+    mask_w: i32
+    mask_h: i32
     direct_fb: bool
 
     static fn create(gpu: VirtioGpuDriver) -> VirtioGpuBackend:
@@ -95,6 +98,9 @@ class VirtioGpuBackend:
             clip_w: 0,
             clip_h: 0,
             clip_active: false,
+            mask_buf: [],
+            mask_w: 0,
+            mask_h: 0,
             direct_fb: false
         )
 
@@ -115,6 +121,9 @@ class VirtioGpuBackend:
             clip_w: width,
             clip_h: height,
             clip_active: false,
+            mask_buf: [],
+            mask_w: 0,
+            mask_h: 0,
             direct_fb: true
         )
 
@@ -157,6 +166,9 @@ impl RenderBackend for VirtioGpuBackend:
         self.clip_w = 0
         self.clip_h = 0
         self.clip_active = false
+        self.mask_buf = []
+        self.mask_w = 0
+        self.mask_h = 0
         self.w = 0
         self.h = 0
 
@@ -361,10 +373,14 @@ impl RenderBackend for VirtioGpuBackend:
         self.clip_h = self.h
 
     me set_mask(mask_pixels: [u8], w: i32, h: i32):
-        pass_do_nothing
+        self.mask_buf = mask_pixels
+        self.mask_w = w
+        self.mask_h = h
 
     me clear_mask():
-        pass_do_nothing
+        self.mask_buf = []
+        self.mask_w = 0
+        self.mask_h = 0
 
     me present():
         self.blit_only()
@@ -480,6 +496,15 @@ impl Engine2DExtended for VirtioGpuBackend:
 # Pixel Operations (Internal)
 # ============================================================================
 
+fn _vg_mask_blocks(backend: VirtioGpuBackend, x: i32, y: i32) -> bool:
+    """Return true if the stencil mask blocks the pixel at (x, y)."""
+    if backend.mask_buf.len() == 0:
+        return false
+    val mi = y * backend.mask_w + x
+    if mi < 0 or mi >= backend.mask_buf.len():
+        return false
+    backend.mask_buf[mi] == 0u8
+
 fn _vg_set_pixel(backend: VirtioGpuBackend, x: i32, y: i32, color: u32):
     """Set a single pixel with bounds and clip checking."""
     if x < 0 or y < 0 or x >= backend.w or y >= backend.h:
@@ -488,6 +513,8 @@ fn _vg_set_pixel(backend: VirtioGpuBackend, x: i32, y: i32, color: u32):
         if (x < backend.clip_x or x >= backend.clip_x + backend.clip_w or
             y < backend.clip_y or y >= backend.clip_y + backend.clip_h):
             return
+    if _vg_mask_blocks(backend, x, y):
+        return
     val idx = y * backend.w + x
     if backend.direct_fb:
         mmio_write32(backend.fb_virt + (idx.to_u64() * 4), color)
