@@ -1,0 +1,217 @@
+# MSF Multi-Stream File Parser
+# Parses the PDB container format (MSF 7.0).
+# MSF files contain numbered streams; PDB metadata, types, symbols, and line info
+# are stored in separate streams.
+
+use std.binary_io.{BinaryReader, ByteOrder}
+use std.debug.formats.pdb_constants.{MSF_MAGIC_LEN}
+
+# ============================================================================
+# Data Structures
+# ============================================================================
+
+struct MsfHeader:
+    page_size: i64
+    free_page_map: i64
+    pages_used: i64
+    directory_size: i64
+    page_map_offset: i64
+
+struct MsfStream:
+    index: i64
+    size: i64
+    pages: [i64]
+
+struct MsfFile:
+    header: MsfHeader
+    streams: [MsfStream]
+    data: [u8]
+
+# ============================================================================
+# MSF Header Parsing
+# ============================================================================
+
+fn _check_msf_magic(data: [u8]) -> bool:
+    if data.len() < MSF_MAGIC_LEN:
+        return false
+    val expected: [i64] = [
+        0x4d, 0x69, 0x63, 0x72, 0x6f, 0x73, 0x6f, 0x66,
+        0x74, 0x20, 0x43, 0x2f, 0x43, 0x2b, 0x2b, 0x20,
+        0x4d, 0x53, 0x46, 0x20, 0x37, 0x2e, 0x30, 0x30,
+        0x0d, 0x0a, 0x1a, 0x44, 0x53, 0x00, 0x00, 0x00,
+    ]
+    var i = 0
+    while i < expected.len():
+        if (data[i] as i64) != expected[i]:
+            return false
+        i = i + 1
+    true
+
+fn msf_parse_header(data: [u8]) -> Result<MsfHeader, text>:
+    if not _check_msf_magic(data):
+        return Err("not a valid MSF 7.0 file (bad magic)")
+
+    if data.len() < MSF_MAGIC_LEN + 20:
+        return Err("MSF header truncated")
+
+    val order = ByteOrder.LittleEndian
+    var reader = BinaryReader.new(data)
+    reader.skip(MSF_MAGIC_LEN)
+
+    val page_size = reader.read_u32(order) ?? 0
+    val free_page_map = reader.read_u32(order) ?? 0
+    val pages_used = reader.read_u32(order) ?? 0
+    val directory_size = reader.read_u32(order) ?? 0
+    reader.skip(4)
+
+    if page_size == 0:
+        return Err("MSF page_size is zero")
+
+    Ok(MsfHeader(
+        page_size: page_size,
+        free_page_map: free_page_map,
+        pages_used: pages_used,
+        directory_size: directory_size,
+        page_map_offset: MSF_MAGIC_LEN + 20,
+    ))
+
+# ============================================================================
+# Page Reading
+# ============================================================================
+
+fn _pages_needed(size: i64, page_size: i64) -> i64:
+    if size == 0:
+        return 0
+    (size + page_size - 1) / page_size
+
+fn _read_page(data: [u8], page_num: i64, page_size: i64) -> [u8]:
+    val offset = page_num * page_size
+    if offset + page_size > data.len():
+        return []
+    var result: [u8] = []
+    var i = 0
+    while i < page_size:
+        result = result.push(data[offset + i])
+        i = i + 1
+    result
+
+fn _read_stream_data(data: [u8], stream: MsfStream, page_size: i64) -> [u8]:
+    if stream.size == 0:
+        return []
+    var result: [u8] = []
+    var remaining = stream.size
+    for page_num in stream.pages:
+        val page_bytes = _read_page(data, page_num, page_size)
+        val to_copy = if remaining < page_size: remaining else: page_size
+        var i = 0
+        while i < to_copy and i < page_bytes.len():
+            result = result.push(page_bytes[i])
+            i = i + 1
+        remaining = remaining - to_copy
+    result
+
+# ============================================================================
+# Stream Directory Parsing
+# ============================================================================
+
+fn _read_u32_le_at(data: [u8], offset: i64) -> i64:
+    if offset + 3 >= data.len():
+        return 0
+    val b0 = data[offset] as i64
+    val b1 = data[offset + 1] as i64
+    val b2 = data[offset + 2] as i64
+    val b3 = data[offset + 3] as i64
+    b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)
+
+fn _parse_stream_directory(dir_data: [u8], page_size: i64) -> [MsfStream]:
+    if dir_data.len() < 4:
+        return []
+
+    val num_streams = _read_u32_le_at(dir_data, 0)
+    var pos = 4
+
+    var stream_sizes: [i64] = []
+    var i = 0
+    while i < num_streams:
+        val size = _read_u32_le_at(dir_data, pos)
+        pos = pos + 4
+        stream_sizes = stream_sizes.push(size)
+        i = i + 1
+
+    var streams: [MsfStream] = []
+    var s = 0
+    while s < num_streams:
+        val size = stream_sizes[s]
+        val n_pages = _pages_needed(size, page_size)
+        var pages: [i64] = []
+        var p = 0
+        while p < n_pages:
+            val page_num = _read_u32_le_at(dir_data, pos)
+            pos = pos + 4
+            pages = pages.push(page_num)
+            p = p + 1
+        streams = streams.push(MsfStream(index: s, size: size, pages: pages))
+        s = s + 1
+
+    streams
+
+# ============================================================================
+# High-Level Parser
+# ============================================================================
+
+fn msf_parse(data: [u8]) -> Result<MsfFile, text>:
+    val header_result = msf_parse_header(data)
+    if header_result.is_err():
+        return Err(header_result.err()!)
+
+    val header = header_result.ok()!
+    val page_size = header.page_size
+
+    val dir_map_pages = _pages_needed(header.directory_size, page_size)
+    val dir_map_size = dir_map_pages * 4
+    val dir_map_pages_needed = _pages_needed(dir_map_size, page_size)
+
+    var dir_map_page_nums: [i64] = []
+    var dm = 0
+    val dm_offset = header.page_map_offset
+    while dm < dir_map_pages_needed:
+        val pn = _read_u32_le_at(data, dm_offset + (dm * 4))
+        dir_map_page_nums = dir_map_page_nums.push(pn)
+        dm = dm + 1
+
+    var dir_page_map_data: [u8] = []
+    for pn in dir_map_page_nums:
+        val page_bytes = _read_page(data, pn, page_size)
+        for b in page_bytes:
+            dir_page_map_data = dir_page_map_data.push(b)
+
+    var dir_page_nums: [i64] = []
+    var dp = 0
+    while dp < dir_map_pages:
+        val pn = _read_u32_le_at(dir_page_map_data, dp * 4)
+        dir_page_nums = dir_page_nums.push(pn)
+        dp = dp + 1
+
+    val dir_stream = MsfStream(index: -1, size: header.directory_size, pages: dir_page_nums)
+    val dir_data = _read_stream_data(data, dir_stream, page_size)
+
+    val streams = _parse_stream_directory(dir_data, page_size)
+
+    Ok(MsfFile(
+        header: header,
+        streams: streams,
+        data: data,
+    ))
+
+fn msf_stream_data(file: MsfFile, index: i64) -> [u8]:
+    if index < 0 or index >= file.streams.len():
+        return []
+    _read_stream_data(file.data, file.streams[index], file.header.page_size)
+
+fn msf_stream_count(file: MsfFile) -> i64:
+    file.streams.len()
+
+fn msf_stream_size(file: MsfFile, index: i64) -> i64:
+    if index < 0 or index >= file.streams.len():
+        return 0
+    file.streams[index].size
