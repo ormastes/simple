@@ -1,0 +1,228 @@
+#!/usr/bin/env node
+// Launcher for Simple LSP-MCP Server.
+// Prefer the native LSP-MCP binary in all normal cases.
+// Hosted `simple run src/app/simple_lsp_mcp/main.spl` fallback is legacy-only
+// and must be opted into explicitly with SIMPLE_ALLOW_HOSTED_FALLBACK=1.
+
+const { spawn, spawnSync } = require('child_process');
+const path = require('path');
+const fs = require('fs');
+const os = require('os');
+
+const ENTRY = 'src/app/simple_lsp_mcp/main.spl';
+
+function platformDirs() {
+  const platform = os.platform();
+  const arch = os.arch();
+  if (platform === 'darwin' && arch === 'arm64') {
+    return ['aarch64-apple-darwin-macho', 'aarch64-apple-darwin', 'darwin-aarch64', 'macos-arm64'];
+  }
+  if (platform === 'darwin' && arch === 'x64') {
+    return ['x86_64-apple-darwin-macho', 'x86_64-apple-darwin', 'darwin-x86_64', 'macos-x86_64'];
+  }
+  if (platform === 'linux' && arch === 'x64') {
+    return ['x86_64-unknown-linux-gnu', 'linux-x86_64'];
+  }
+  if (platform === 'linux' && arch === 'arm64') {
+    return ['aarch64-unknown-linux-gnu', 'linux-aarch64'];
+  }
+  if (platform === 'win32' && arch === 'x64') {
+    return ['x86_64-pc-windows-msvc', 'x86_64-pc-windows-gnu', 'windows-x86_64'];
+  }
+  if (platform === 'win32' && arch === 'arm64') {
+    return ['aarch64-pc-windows-msvc', 'aarch64-pc-windows-gnu', 'windows-aarch64'];
+  }
+  if (platform === 'freebsd' && arch === 'x64') {
+    return ['x86_64-unknown-freebsd', 'freebsd-x86_64'];
+  }
+  return [];
+}
+
+function resolveNativeServer(rootDir) {
+  const ext = os.platform() === 'win32' ? '.exe' : '';
+  const candidates = [];
+  for (const platformDir of platformDirs()) {
+    candidates.push(path.join(rootDir, 'bin', 'release', platformDir, `simple_lsp_mcp_server${ext}`));
+    candidates.push(path.join(rootDir, 'src', 'compiler_rust', 'bin', 'release', platformDir, `simple_lsp_mcp_server${ext}`));
+  }
+  candidates.push(
+    path.join(rootDir, 'bin', 'release', `simple_lsp_mcp_server${ext}`),
+    path.join(rootDir, 'bin', `simple_lsp_mcp_server${ext}`),
+    path.join(rootDir, 'src', 'compiler_rust', 'bin', 'release', `simple_lsp_mcp_server${ext}`)
+  );
+
+  for (const candidate of candidates) {
+    if (isHealthyBinary(candidate)) {
+      return candidate;
+    }
+  }
+
+  return null;
+}
+
+function resolveRuntimeBinary(rootDir) {
+  const ext = os.platform() === 'win32' ? '.exe' : '';
+  const candidates = [
+    path.join(rootDir, 'src', 'compiler_rust', 'target', 'bootstrap', `simple${ext}`),
+    path.join(rootDir, 'bin', `simple${ext}`)
+  ];
+
+  for (const platformDir of platformDirs()) {
+    candidates.push(path.join(rootDir, 'bin', 'release', platformDir, `simple${ext}`));
+    candidates.push(path.join(rootDir, 'src', 'compiler_rust', 'bin', 'release', platformDir, `simple${ext}`));
+  }
+
+  candidates.push(
+    path.join(rootDir, 'bin', 'release', `simple${ext}`),
+    path.join(rootDir, 'src', 'compiler_rust', 'target', 'release', `simple${ext}`),
+    path.join(rootDir, 'src', 'compiler_rust', 'bin', 'release', `simple${ext}`)
+  );
+
+  for (const candidate of candidates) {
+    if (isHealthyBinary(candidate)) {
+      return candidate;
+    }
+  }
+
+  return null;
+}
+
+function isHealthyBinary(candidate) {
+  if (!candidate) {
+    return false;
+  }
+  try {
+    fs.accessSync(candidate, fs.constants.X_OK);
+  } catch (_) {
+    return false;
+  }
+
+  const result = spawnSync(candidate, ['--version'], {
+    stdio: 'ignore',
+    timeout: 2000
+  });
+  return result.status === 0;
+}
+
+function resolveEnvRuntime(repoRoot) {
+  const explicit = process.env.SIMPLE_BINARY;
+  if (allowHostedFallback() && explicit && fs.existsSync(explicit) && fs.existsSync(path.join(repoRoot, ENTRY))) {
+    return { command: explicit, args: ['run', path.join(repoRoot, ENTRY)], repoRoot, mode: 'runtime' };
+  }
+  return null;
+}
+
+function allowHostedFallback() {
+  return process.env.SIMPLE_ALLOW_HOSTED_FALLBACK === '1';
+}
+
+function findRuntime() {
+  const ext = os.platform() === 'win32' ? '.exe' : '';
+  const nativeDir = path.join(__dirname, '..', 'native');
+  const projectRoot = path.join(__dirname, '..', '..', '..');
+  const sourceRoot = process.env.SIMPLE_SOURCE_ROOT;
+
+  if (sourceRoot && fs.existsSync(path.join(sourceRoot, ENTRY))) {
+    const envSourceRuntime = resolveEnvRuntime(sourceRoot);
+    if (envSourceRuntime) {
+      return envSourceRuntime;
+    }
+    const sourceServer = resolveNativeServer(sourceRoot);
+    if (sourceServer) {
+      return { command: sourceServer, args: [], repoRoot: sourceRoot, mode: 'native' };
+    }
+    if (allowHostedFallback()) {
+      const sourceRuntime = resolveRuntimeBinary(sourceRoot);
+      if (sourceRuntime) {
+        return { command: sourceRuntime, args: ['run', path.join(sourceRoot, ENTRY)], repoRoot: sourceRoot, mode: 'runtime' };
+      }
+    }
+  }
+
+  // 1. Prefer a live project checkout over any cached bootstrap bundle.
+  // The native bundle can lag behind the current source tree during development.
+  const devServer = resolveNativeServer(projectRoot);
+  if (devServer) {
+    return { command: devServer, args: [], repoRoot: projectRoot, mode: 'native' };
+  }
+  const envDevRuntime = resolveEnvRuntime(projectRoot);
+  if (envDevRuntime) {
+    return envDevRuntime;
+  }
+  if (allowHostedFallback()) {
+    const devRuntime = resolveRuntimeBinary(projectRoot);
+    if (devRuntime) {
+      return { command: devRuntime, args: ['run', path.join(projectRoot, ENTRY)], repoRoot: projectRoot, mode: 'runtime' };
+    }
+  }
+
+  // 2. Check extracted bootstrap package
+  if (fs.existsSync(nativeDir)) {
+    const entries = fs.readdirSync(nativeDir).filter(e => e.startsWith('simple-bootstrap-'));
+    if (entries.length > 0) {
+      const pkgDir = path.join(nativeDir, entries[0]);
+      const nativeServer = resolveNativeServer(pkgDir);
+      if (nativeServer) {
+        return { command: nativeServer, args: [], repoRoot: pkgDir, mode: 'native' };
+      }
+      const envBundledRuntime = resolveEnvRuntime(pkgDir);
+      if (envBundledRuntime) {
+        return envBundledRuntime;
+      }
+      if (allowHostedFallback()) {
+        const bundledRuntime = resolveRuntimeBinary(pkgDir);
+        if (bundledRuntime) {
+          return { command: bundledRuntime, args: ['run', path.join(pkgDir, ENTRY)], repoRoot: pkgDir, mode: 'runtime' };
+        }
+      }
+    }
+  }
+
+  if (allowHostedFallback()) {
+    return { command: `simple${ext}`, args: ['run', path.join(process.cwd(), ENTRY)], repoRoot: process.cwd(), mode: 'runtime' };
+  }
+
+  throw new Error(
+    'No native Simple LSP-MCP server binary found. Build or install `simple_lsp_mcp_server`, ' +
+    'or set SIMPLE_ALLOW_HOSTED_FALLBACK=1 to opt into the legacy hosted runtime path.'
+  );
+}
+let resolved;
+try {
+  resolved = findRuntime();
+} catch (err) {
+  process.stderr.write(`Error: ${err.message}\n`);
+  process.exit(1);
+}
+const { command, args, repoRoot, mode } = resolved;
+
+const child = spawn(command, [...args, ...process.argv.slice(2)], {
+  cwd: repoRoot,
+  stdio: 'inherit',
+  env: {
+    ...process.env,
+    SIMPLE_LIB: path.join(repoRoot, 'src'),
+    SIMPLE_BINARY: process.env.SIMPLE_BINARY || command,
+    SIMPLE_LOG: process.env.SIMPLE_LOG || 'error',
+    RUST_LOG: process.env.RUST_LOG || 'error'
+  }
+});
+
+child.on('error', (err) => {
+  if (err.code === 'ENOENT') {
+    process.stderr.write(
+      `Error: Simple runtime not found at: ${command}\n` +
+      `Run 'npm run postinstall' to download, or build from source.\n`
+    );
+  } else {
+    process.stderr.write(`Error launching Simple LSP-MCP Server: ${err.message}\n`);
+  }
+  process.exit(1);
+});
+
+child.on('exit', (code) => {
+  if ((code ?? 1) !== 0 && mode === 'native') {
+    process.stderr.write('Simple LSP-MCP native launch failed.\n');
+  }
+  process.exit(code ?? 1);
+});

@@ -1,0 +1,142 @@
+# @cover src/lib/nogc_sync_mut/mimalloc_page_policy.spl
+# # Mimalloc Page Policy Specification
+#
+# **Feature IDs:** #alloc-002
+# **Category:** Infrastructure | Stdlib
+# **Difficulty:** 2/5
+# **Status:** Draft
+# **Requirements:** N/A
+# **Plan:** N/A
+# **Design:** N/A
+# **Research:** N/A
+# **Artifacts:** N/A
+#
+# ## Overview
+#
+# BDD specs for cross-thread delayed free and page commit/decommit policy.
+# Covers MiDelayedFreeList mechanics, MiPagePolicy state transitions,
+# and the should_decommit predicate.
+
+use std.nogc_sync_mut.mimalloc_page_policy.{
+    OsPageOp,
+    MiDelayedFreeEntry,
+    MiDelayedFreeList,
+    MiPagePolicy,
+    delayed_free_list_new,
+    delayed_free_push,
+    delayed_free_drain,
+    page_policy_new,
+    mi_page_decommit,
+    mi_page_recommit,
+    should_decommit,
+}
+
+# ============================================================================
+# Test Group 1: Delayed free list
+# ============================================================================
+
+describe "MiDelayedFreeList":
+    """
+    ## MiDelayedFreeList — queue of cross-thread free entries
+
+    Validates creation, push, and drain operations using the functional style
+    where every operation returns a new list value.
+    """
+
+    it "delayed_free_list_new creates an empty list":
+        val list = delayed_free_list_new()
+        expect list.entries.len() == 0
+
+    it "delayed_free_push increases length by one":
+        val list = delayed_free_list_new()
+        val entry = MiDelayedFreeEntry(heap_id: 1, block_size: 64, block_index: 0)
+        val list2 = delayed_free_push(list, entry)
+        expect list2.entries.len() == 1
+
+    it "delayed_free_push adds multiple entries in order":
+        val list = delayed_free_list_new()
+        val e1 = MiDelayedFreeEntry(heap_id: 1, block_size: 32, block_index: 0)
+        val e2 = MiDelayedFreeEntry(heap_id: 2, block_size: 64, block_index: 1)
+        val list2 = delayed_free_push(list, e1)
+        val list3 = delayed_free_push(list2, e2)
+        expect list3.entries.len() == 2
+
+    it "delayed_free_drain returns all entries and empties the list":
+        val list = delayed_free_list_new()
+        val e1 = MiDelayedFreeEntry(heap_id: 1, block_size: 32, block_index: 0)
+        val e2 = MiDelayedFreeEntry(heap_id: 2, block_size: 64, block_index: 1)
+        val list2 = delayed_free_push(delayed_free_push(list, e1), e2)
+        val result = delayed_free_drain(list2)
+        val empty_list = result[0]
+        val drained = result[1]
+        expect empty_list.entries.len() == 0
+        expect drained.len() == 2
+
+    it "delayed_free_drain on empty list returns empty list and empty entries":
+        val list = delayed_free_list_new()
+        val result = delayed_free_drain(list)
+        val empty_list = result[0]
+        val drained = result[1]
+        expect empty_list.entries.len() == 0
+        expect drained.len() == 0
+
+# ============================================================================
+# Test Group 2: Page policy
+# ============================================================================
+
+describe "MiPagePolicy":
+    """
+    ## MiPagePolicy — commit/decommit state for a single page
+
+    Validates default construction, decommit, recommit, and the
+    should_decommit predicate. All operations return new policy values.
+    """
+
+    it "page_policy_new creates a committed policy with defaults":
+        val policy = page_policy_new()
+        expect policy.committed == true
+        expect policy.decommit_threshold == 4096
+        expect policy.recommit_count == 0
+
+    it "mi_page_decommit sets committed to false":
+        val policy = page_policy_new()
+        val decommitted = mi_page_decommit(policy)
+        expect decommitted.committed == false
+
+    it "mi_page_decommit preserves threshold and count":
+        val policy = page_policy_new()
+        val decommitted = mi_page_decommit(policy)
+        expect decommitted.decommit_threshold == 4096
+        expect decommitted.recommit_count == 0
+
+    it "mi_page_recommit sets committed to true":
+        val policy = page_policy_new()
+        val decommitted = mi_page_decommit(policy)
+        val recommitted = mi_page_recommit(decommitted)
+        expect recommitted.committed == true
+
+    it "mi_page_recommit increments recommit_count":
+        val policy = page_policy_new()
+        val decommitted = mi_page_decommit(policy)
+        val recommitted = mi_page_recommit(decommitted)
+        expect recommitted.recommit_count == 1
+
+    it "mi_page_recommit again increments recommit_count further":
+        val policy = page_policy_new()
+        val r1 = mi_page_recommit(mi_page_decommit(policy))
+        val r2 = mi_page_recommit(mi_page_decommit(r1))
+        expect r2.recommit_count == 2
+
+    it "should_decommit returns true when committed and free_bytes >= threshold":
+        val policy = page_policy_new()
+        expect should_decommit(policy, 4096) == true
+        expect should_decommit(policy, 8192) == true
+
+    it "should_decommit returns false when free_bytes < threshold":
+        val policy = page_policy_new()
+        expect should_decommit(policy, 4095) == false
+        expect should_decommit(policy, 0) == false
+
+    it "should_decommit returns false when page is already decommitted":
+        val policy = mi_page_decommit(page_policy_new())
+        expect should_decommit(policy, 8192) == false
