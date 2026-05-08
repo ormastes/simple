@@ -892,6 +892,25 @@ static RuntimeValue _int_to_string(int64_t n)
     return ENCODE_PTR(s);
 }
 
+RuntimeValue rt_raw_u64_to_string(RuntimeValue raw)
+{
+    uint64_t uv = (uint64_t)raw;
+    if (uv == 0) return rt_string_from_cstr("0");
+    char buf[21];
+    int pos = 0;
+    while (uv > 0) { buf[pos++] = '0' + (char)(uv % 10); uv /= 10; }
+    uint32_t len = (uint32_t)pos;
+    RuntimeString *s = (RuntimeString *)malloc(sizeof(RuntimeString) + len + 1);
+    if (!s) return NIL_VALUE;
+    s->hdr.type = HEAP_STRING;
+    s->hdr.size = (uint32_t)(sizeof(RuntimeString) + len + 1);
+    s->len = len;
+    int out = 0;
+    while (pos > 0) s->data[out++] = buf[--pos];
+    s->data[out] = '\0';
+    return ENCODE_PTR(s);
+}
+
 RuntimeValue rt_value_to_string(RuntimeValue val)
 {
     /* 1. Tagged integer (BoxInt: low 3 bits = 0, TAG_INT) */
@@ -6005,6 +6024,36 @@ static void sc_muladd(uint8_t out[32], const uint8_t a[32], const uint8_t b[32],
         _sc_sub_u32_8(prod32, prod32, _sc_l32);
     }
     _sc_store_u32_8(out, prod32);
+}
+
+/* ---------- ring crypto stubs (baremetal fallback — return -1 to trigger software path) ---------- */
+
+int64_t rt_tls13_ring_ed25519_keypair_raw(const uint8_t seed[32], uint8_t pk[32], uint8_t sk[64])
+{
+    (void)seed; (void)pk; (void)sk;
+    return -1;
+}
+
+int64_t rt_tls13_ring_ed25519_sign_raw(const uint8_t *msg, uint32_t msg_len,
+                                        const uint8_t sk[64], uint8_t sig[64])
+{
+    (void)msg; (void)msg_len; (void)sk; (void)sig;
+    return -1;
+}
+
+int64_t rt_tls13_ring_ed25519_verify_raw(const uint8_t *msg, uint32_t msg_len,
+                                          const uint8_t pk[32], const uint8_t sig[64])
+{
+    (void)msg; (void)msg_len; (void)pk; (void)sig;
+    return -1;
+}
+
+int64_t rt_tls13_ring_x25519_shared_secret_into_raw(const uint8_t scalar[32],
+                                                      const uint8_t point[32],
+                                                      uint8_t out[32])
+{
+    (void)scalar; (void)point; (void)out;
+    return -1;
 }
 
 /* ---------- Ed25519 high-level API ---------- */
