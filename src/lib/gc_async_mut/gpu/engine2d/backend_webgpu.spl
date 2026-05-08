@@ -34,7 +34,7 @@
 
 use std.gpu.engine2d.backend.{RenderBackend, Engine2DExtended}
 use std.gpu.engine2d.color.{rgba, rgb, color_r, color_g, color_b, color_a, blend, lerp_color}
-use std.gpu.engine2d.glyph.{glyph_data, render_text_to_buffer}
+use std.gpu.engine2d.glyph.{glyph_data, glyph_height, glyph_advance, render_text_to_buffer}
 use std.gpu.engine2d.backend_emu.{
     emu_draw_ellipse, emu_draw_ellipse_filled,
     emu_draw_arc, emu_draw_bezier,
@@ -133,6 +133,14 @@ class WebGpuBackend:
             mask_h: 0
         )
 
+fn _wgpu_mask_blocks(backend: WebGpuBackend, x: i32, y: i32) -> bool:
+    if backend.mask_buf.len() == 0:
+        return false
+    val mi = y * backend.mask_w + x
+    if mi < 0 or mi >= backend.mask_buf.len():
+        return false
+    backend.mask_buf[mi] == 0u8
+
 impl RenderBackend for WebGpuBackend:
 
     fn name() -> text:
@@ -188,6 +196,8 @@ impl RenderBackend for WebGpuBackend:
 
     me put_pixel(x: i32, y: i32, color: u32):
         if self.in_clip(x, y):
+            if _wgpu_mask_blocks(self, x, y):
+                return
             self.buf[y * self.w + x] = color
 
     # -- Clear --
@@ -300,9 +310,41 @@ impl RenderBackend for WebGpuBackend:
     # -- Advanced shapes --
 
     me draw_rounded_rect(x: i32, y: i32, w: i32, h: i32, radius: i32, color: u32):
-        # Fallback: straight rect outline. A true rounded outline is
-        # TODO until the GPU compute path lands.
-        self.draw_rect(x, y, w, h, color)
+        if w <= 0 or h <= 0:
+            return
+        var r = radius
+        if r > w / 2:
+            r = w / 2
+        if r > h / 2:
+            r = h / 2
+        var i = 0
+        while i < w - 2 * r:
+            self.put_pixel(x + r + i, y, color)
+            self.put_pixel(x + r + i, y + h - 1, color)
+            i = i + 1
+        var j = 0
+        while j < h - 2 * r:
+            self.put_pixel(x, y + r + j, color)
+            self.put_pixel(x + w - 1, y + r + j, color)
+            j = j + 1
+        var cx = r
+        var cy = 0
+        var err = 1 - r
+        while cx >= cy:
+            self.put_pixel(x + r - cx, y + r - cy, color)
+            self.put_pixel(x + r - cy, y + r - cx, color)
+            self.put_pixel(x + w - 1 - r + cx, y + r - cy, color)
+            self.put_pixel(x + w - 1 - r + cy, y + r - cx, color)
+            self.put_pixel(x + r - cx, y + h - 1 - r + cy, color)
+            self.put_pixel(x + r - cy, y + h - 1 - r + cx, color)
+            self.put_pixel(x + w - 1 - r + cx, y + h - 1 - r + cy, color)
+            self.put_pixel(x + w - 1 - r + cy, y + h - 1 - r + cx, color)
+            cy = cy + 1
+            if err < 0:
+                err = err + 2 * cy + 1
+            else:
+                cx = cx - 1
+                err = err + 2 * (cy - cx) + 1
 
     me draw_triangle_filled(x1: i32, y1: i32, x2: i32, y2: i32, x3: i32, y3: i32, color: u32):
         # Bounding-box scan with edge-function test (same approach used
@@ -466,16 +508,23 @@ impl RenderBackend for WebGpuBackend:
 impl Engine2DExtended for WebGpuBackend:
 
     me draw_text_bg(x: i32, y: i32, text_val: text, fg: u32, bg: u32, font_size: i32):
-        # Simple implementation: paint a background rect the size of the
-        # glyph bounding box, then stamp the foreground glyph run. The
-        # GPU compute path will do this in one pass - TODO.
-        val cell_w = 6 * font_size / 7
-        val cell_h = 2 * font_size
-        val n = text_val.len().to_i32()
-        if n <= 0:
+        val gh = glyph_height()
+        var scale = font_size / gh
+        if scale < 1:
+            scale = 1
+        val advance = glyph_advance(scale)
+        val text_w = text_val.len().to_i32() * advance
+        val text_h = gh * scale
+        if text_w <= 0 or text_h <= 0:
             return
-        self.draw_rect_filled(x, y, cell_w * n, cell_h, bg)
-        self.draw_text(x, y, text_val, fg, font_size)
+        var buf: [u32] = []
+        var _i = 0
+        val buf_size = text_w * text_h
+        while _i < buf_size:
+            buf.push(bg)
+            _i = _i + 1
+        render_text_to_buffer(buf, text_w, text_h, 0, 0, text_val, fg, font_size)
+        self.draw_image(x, y, text_w, text_h, buf)
 
 # ============================================================================
 # Small helpers

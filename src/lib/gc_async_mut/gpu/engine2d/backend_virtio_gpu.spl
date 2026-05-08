@@ -23,7 +23,7 @@
 
 use std.gpu.engine2d.backend.{RenderBackend, Engine2DExtended}
 use std.gpu.engine2d.color.{rgba, rgb, color_r, color_g, color_b, color_a, blend, lerp_color}
-use std.gpu.engine2d.glyph.{glyph_data, render_text_to_buffer}
+use std.gpu.engine2d.glyph.{glyph_data, glyph_height, glyph_advance, render_text_to_buffer}
 use os.drivers.virtio.virtio_gpu.{VirtioGpuDriver}
 use os.kernel.boot.mmio.{mmio_write32, mmio_read32}
 use std.gpu.engine2d.backend_emu.{
@@ -486,11 +486,23 @@ impl Engine2DExtended for VirtioGpuBackend:
     # draw_rect_filled, then overlay glyphs via the shared glyph raster.
     # present() pushes the buf to the virtio-GPU resource as usual.
     me draw_text_bg(x: i32, y: i32, text_val: text, fg: u32, bg: u32, font_size: i32):
-        val cell_w: i32 = 6 * font_size / 7
-        val cell_h: i32 = font_size
-        val tw: i32 = text_val.len().to_i32() * cell_w
-        self.draw_rect_filled(x, y, tw, cell_h, bg)
-        self.draw_text(x, y, text_val, fg, font_size)
+        val gh = glyph_height()
+        var scale = font_size / gh
+        if scale < 1:
+            scale = 1
+        val advance = glyph_advance(scale)
+        val text_w = text_val.len().to_i32() * advance
+        val text_h = gh * scale
+        if text_w <= 0 or text_h <= 0:
+            return
+        var buf: [u32] = []
+        var _i = 0
+        val buf_size = text_w * text_h
+        while _i < buf_size:
+            buf.push(bg)
+            _i = _i + 1
+        render_text_to_buffer(buf, text_w, text_h, 0, 0, text_val, fg, font_size)
+        self.draw_image(x, y, text_w, text_h, buf)
 
 # ============================================================================
 # Pixel Operations (Internal)
