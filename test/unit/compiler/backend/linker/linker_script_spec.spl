@@ -1,0 +1,210 @@
+# Linker Script Parser Unit Tests
+#
+# Tests for linker_script.spl: tokenizer, number parser,
+# ENTRY/MEMORY/SECTIONS directives, and convenience functions.
+#
+# @cover src/compiler/70.backend/linker/linker_script.spl
+
+use compiler.backend.linker.linker_script.{
+    LdTokenKind, LdToken, LdParser,
+    LdEntry, LdMemoryRegion, LdInputPattern, LdOutputSection, LdScript,
+    ld_tokenize, ld_parse_number,
+    ld_parse_entry, ld_parse_memory, ld_parse_sections,
+    ld_parse,
+    ld_script_new, ld_has_entry, ld_find_region, ld_find_section,
+    ld_section_count, ld_region_count
+}
+
+# ============================================================================
+# 1. Number Parser
+# ============================================================================
+
+describe "linker_script - number parser":
+    it "parses decimal number":
+        expect(ld_parse_number("1234")).to_equal(1234)
+
+    it "parses hex with 0x prefix":
+        expect(ld_parse_number("0x1000")).to_equal(4096)
+
+    it "parses hex uppercase digits":
+        expect(ld_parse_number("0xAB")).to_equal(171)
+
+    it "parses K suffix as 1024 multiplier":
+        expect(ld_parse_number("256K")).to_equal(262144)
+
+    it "parses M suffix as 1048576 multiplier":
+        expect(ld_parse_number("1M")).to_equal(1048576)
+
+    it "returns 0 for empty string":
+        expect(ld_parse_number("")).to_equal(0)
+
+    it "parses zero":
+        expect(ld_parse_number("0")).to_equal(0)
+
+# ============================================================================
+# 2. Tokenizer
+# ============================================================================
+
+describe "linker_script - tokenizer":
+    it "tokenizes ENTRY(_start) into 5 tokens":
+        val tokens = ld_tokenize("ENTRY(_start)")
+        expect(tokens.len()).to_equal(5)
+
+    it "first token is Word ENTRY":
+        val tokens = ld_tokenize("ENTRY(_start)")
+        expect(tokens[0].kind == LdTokenKind.Word).to_equal(true)
+        expect(tokens[0].value).to_equal("ENTRY")
+
+    it "produces correct token sequence for ENTRY(_start)":
+        val tokens = ld_tokenize("ENTRY(_start)")
+        expect(tokens[1].kind == LdTokenKind.LParen).to_equal(true)
+        expect(tokens[2].kind == LdTokenKind.Word).to_equal(true)
+        expect(tokens[2].value).to_equal("_start")
+        expect(tokens[3].kind == LdTokenKind.RParen).to_equal(true)
+        expect(tokens[4].kind == LdTokenKind.Eof).to_equal(true)
+
+    it "tokenizes empty string to single Eof":
+        val tokens = ld_tokenize("")
+        expect(tokens.len()).to_equal(1)
+        expect(tokens[0].kind == LdTokenKind.Eof).to_equal(true)
+
+    it "skips block comments":
+        val tokens = ld_tokenize("/* comment */ ENTRY(x)")
+        # Should have Word(ENTRY), LParen, Word(x), RParen, Eof
+        expect(tokens[0].value).to_equal("ENTRY")
+        expect(tokens[2].value).to_equal("x")
+
+    it "tokenizes hex number as Number kind":
+        val tokens = ld_tokenize("0x1000")
+        expect(tokens[0].kind == LdTokenKind.Number).to_equal(true)
+        expect(tokens[0].value).to_equal("0x1000")
+
+# ============================================================================
+# 3. ENTRY Directive
+# ============================================================================
+
+describe "linker_script - ENTRY directive":
+    it "parses ENTRY(_start)":
+        val script = ld_parse("ENTRY(_start)").unwrap()
+        expect(script.entry).to_equal("_start")
+
+    it "parses ENTRY(main)":
+        val script = ld_parse("ENTRY(main)").unwrap()
+        expect(script.entry).to_equal("main")
+
+    it "ld_has_entry returns true for parsed script":
+        val script = ld_parse("ENTRY(_start)").unwrap()
+        expect(ld_has_entry(script)).to_equal(true)
+
+# ============================================================================
+# 4. MEMORY Block
+# ============================================================================
+
+describe "linker_script - MEMORY block":
+    it "parses two memory regions":
+        val input = "MEMORY { FLASH (rx) : ORIGIN = 0x08000000, LENGTH = 256K RAM (rwx) : ORIGIN = 0x20000000, LENGTH = 64K }"
+        val script = ld_parse(input).unwrap()
+        expect(ld_region_count(script)).to_equal(2)
+
+    it "first region is FLASH with rx attrs":
+        val input = "MEMORY { FLASH (rx) : ORIGIN = 0x08000000, LENGTH = 256K RAM (rwx) : ORIGIN = 0x20000000, LENGTH = 64K }"
+        val script = ld_parse(input).unwrap()
+        expect(script.memory[0].name).to_equal("FLASH")
+        expect(script.memory[0].attrs).to_equal("rx")
+        expect(script.memory[0].origin).to_equal(134217728)
+        expect(script.memory[0].length).to_equal(262144)
+
+    it "second region is RAM with rwx attrs":
+        val input = "MEMORY { FLASH (rx) : ORIGIN = 0x08000000, LENGTH = 256K RAM (rwx) : ORIGIN = 0x20000000, LENGTH = 64K }"
+        val script = ld_parse(input).unwrap()
+        expect(script.memory[1].name).to_equal("RAM")
+        expect(script.memory[1].attrs).to_equal("rwx")
+
+    it "ld_find_region finds existing region":
+        val input = "MEMORY { FLASH (rx) : ORIGIN = 0x08000000, LENGTH = 256K }"
+        val script = ld_parse(input).unwrap()
+        val region = ld_find_region(script, "FLASH")
+        expect(region != nil).to_equal(true)
+
+    it "ld_find_region returns nil for nonexistent region":
+        val input = "MEMORY { FLASH (rx) : ORIGIN = 0x08000000, LENGTH = 256K }"
+        val script = ld_parse(input).unwrap()
+        val region = ld_find_region(script, "NONEXIST")
+        expect(region).to_be_nil()
+
+# ============================================================================
+# 5. SECTIONS Block
+# ============================================================================
+
+describe "linker_script - SECTIONS block":
+    it "parses three output sections":
+        val input = "SECTIONS { .text : { *(.text) *(.text*) } > FLASH .data : { *(.data) } > RAM .bss : { *(.bss) } > RAM }"
+        val script = ld_parse(input).unwrap()
+        expect(ld_section_count(script)).to_equal(3)
+
+    it "first section is .text with FLASH region":
+        val input = "SECTIONS { .text : { *(.text) *(.text*) } > FLASH .data : { *(.data) } > RAM }"
+        val script = ld_parse(input).unwrap()
+        expect(script.sections[0].name).to_equal(".text")
+        expect(script.sections[0].region).to_equal("FLASH")
+
+    it "first section has two input patterns":
+        val input = "SECTIONS { .text : { *(.text) *(.text*) } > FLASH }"
+        val script = ld_parse(input).unwrap()
+        expect(script.sections[0].inputs.len()).to_equal(2)
+        expect(script.sections[0].inputs[0].pattern).to_equal(".text")
+
+    it "ld_find_section finds existing section":
+        val input = "SECTIONS { .text : { *(.text) } > FLASH }"
+        val script = ld_parse(input).unwrap()
+        val section = ld_find_section(script, ".text")
+        expect(section != nil).to_equal(true)
+
+    it "ld_find_section returns nil for nonexistent section":
+        val input = "SECTIONS { .text : { *(.text) } > FLASH }"
+        val script = ld_parse(input).unwrap()
+        val section = ld_find_section(script, ".nonexist")
+        expect(section).to_be_nil()
+
+# ============================================================================
+# 6. Complete Script
+# ============================================================================
+
+describe "linker_script - complete script":
+    it "parses full script with ENTRY, MEMORY, and SECTIONS":
+        val input = "ENTRY(_start) MEMORY { FLASH (rx) : ORIGIN = 0x08000000, LENGTH = 256K RAM (rwx) : ORIGIN = 0x20000000, LENGTH = 64K } SECTIONS { .text : { *(.text) } > FLASH .data : { *(.data) } > RAM }"
+        val script = ld_parse(input).unwrap()
+        expect(script.entry).to_equal("_start")
+        expect(ld_region_count(script)).to_equal(2)
+        expect(ld_section_count(script)).to_equal(2)
+        expect(ld_has_entry(script)).to_equal(true)
+
+# ============================================================================
+# 7. Convenience Functions
+# ============================================================================
+
+describe "linker_script - convenience functions":
+    it "ld_script_new creates empty script":
+        val script = ld_script_new()
+        expect(script.entry).to_equal("")
+        expect(ld_section_count(script)).to_equal(0)
+        expect(ld_region_count(script)).to_equal(0)
+
+    it "ld_has_entry returns false for empty script":
+        val script = ld_script_new()
+        expect(ld_has_entry(script)).to_equal(false)
+
+# ============================================================================
+# 8. Section with Explicit Address
+# ============================================================================
+
+describe "linker_script - section with explicit address":
+    it "parses section with explicit address":
+        val input = "SECTIONS { .isr_vector 0x08000000 : { *(.isr_vector) } }"
+        val script = ld_parse(input).unwrap()
+        expect(script.sections[0].address).to_equal(134217728)
+
+    it "section without address has address -1":
+        val input = "SECTIONS { .text : { *(.text) } > FLASH }"
+        val script = ld_parse(input).unwrap()
+        expect(script.sections[0].address).to_equal(-1)
