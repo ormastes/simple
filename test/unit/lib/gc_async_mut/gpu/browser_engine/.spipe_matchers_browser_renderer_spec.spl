@@ -1,6 +1,7 @@
 use std.spec.*
 
-use std.gc_async_mut.gpu.browser_engine.browser_renderer.{BrowserRenderer, render_html_to_pixels_with_viewport}
+use std.gc_async_mut.gpu.browser_engine.browser_renderer.{BrowserRenderer, render_html_to_pixels_with_viewport,
+    browser_renderer_normalize_style_rules, browser_renderer_normalize_style_blocks}
 use std.gc_async_mut.gpu.browser_engine.browser_engine2d_bridge.{
     create_gpu_browser_renderer_with_backend, create_software_browser_renderer}
 
@@ -185,6 +186,18 @@ describe "BrowserRenderer HTML rendering":
 
         expect _count_color(result.pixel_data, 0xFF7C3AEDu32) > 0
 
+    it "applies :has direct child selectors in fallback pixels":
+        val html = "<html><head><style>body { margin: 0; background-color: #ffffff; } div:has(> .badge) { width: 12px; height: 8px; background-color: #0e7490; }</style></head><body><div><span class='badge'></span></div></body></html>"
+        val result = render_html_to_pixels_with_viewport(html, TEST_WIDTH, TEST_HEIGHT)
+
+        expect _count_color(result.pixel_data, 0xFF0E7490u32) > 0
+
+    it "rejects :has direct child selectors for nested descendants":
+        val html = "<html><head><style>body { margin: 0; background-color: #ffffff; } div:has(> .badge) { width: 12px; height: 8px; background-color: #0e7490; }</style></head><body><div><section><span class='badge'></span></section></div></body></html>"
+        val result = render_html_to_pixels_with_viewport(html, TEST_WIDTH, TEST_HEIGHT)
+
+        expect _count_color(result.pixel_data, 0xFF0E7490u32) == 0
+
     it "rejects :has selectors when no descendant option matches":
         val html = "<html><head><style>body { margin: 0; background-color: #ffffff; } div:has(.badge, strong) { width: 12px; height: 8px; background-color: #7c3aed; }</style></head><body><div><span class='label'></span></div></body></html>"
         val result = render_html_to_pixels_with_viewport(html, TEST_WIDTH, TEST_HEIGHT)
@@ -239,6 +252,30 @@ describe "BrowserRenderer HTML rendering":
 
         expect _count_color(result.pixel_data, 0xFF9333EAu32) == 0
 
+    it "applies :nth-child odd and even selectors in fallback pixels":
+        val html = "<html><head><style>body { margin: 0; background-color: #ffffff; } div:nth-child(even) { width: 12px; height: 8px; background-color: #0e7490; }</style></head><body><div></div><div></div></body></html>"
+        val result = render_html_to_pixels_with_viewport(html, TEST_WIDTH, TEST_HEIGHT)
+
+        expect _count_color(result.pixel_data, 0xFF0E7490u32) > 0
+
+    it "rejects :nth-child odd selectors for even fallback nodes":
+        val html = "<html><head><style>body { margin: 0; background-color: #ffffff; } .target:nth-child(odd) { width: 12px; height: 8px; background-color: #0e7490; }</style></head><body><div></div><div class='target'></div></body></html>"
+        val result = render_html_to_pixels_with_viewport(html, TEST_WIDTH, TEST_HEIGHT)
+
+        expect _count_color(result.pixel_data, 0xFF0E7490u32) == 0
+
+    it "applies :nth-child an plus b selectors in fallback pixels":
+        val html = "<html><head><style>body { margin: 0; background-color: #ffffff; } .target:nth-child(2n+1) { width: 12px; height: 8px; background-color: #7c2d12; }</style></head><body><div></div><div></div><div class='target'></div></body></html>"
+        val result = render_html_to_pixels_with_viewport(html, TEST_WIDTH, TEST_HEIGHT)
+
+        expect _count_color(result.pixel_data, 0xFF7C2D12u32) > 0
+
+    it "rejects :nth-child an plus b selectors for non matching fallback nodes":
+        val html = "<html><head><style>body { margin: 0; background-color: #ffffff; } .target:nth-child(2n+1) { width: 12px; height: 8px; background-color: #7c2d12; }</style></head><body><div></div><div class='target'></div><div></div></body></html>"
+        val result = render_html_to_pixels_with_viewport(html, TEST_WIDTH, TEST_HEIGHT)
+
+        expect _count_color(result.pixel_data, 0xFF7C2D12u32) == 0
+
     it "applies simple rules nested inside CSS layer blocks":
         val html = "<html><head><style>body { margin: 0; background-color: #ffffff; } @layer components { .card { width: 12px; height: 8px; background-color: #0f766e; } }</style></head><body><div class='card'></div></body></html>"
         val result = render_html_to_pixels_with_viewport(html, TEST_WIDTH, TEST_HEIGHT)
@@ -250,6 +287,41 @@ describe "BrowserRenderer HTML rendering":
         val result = render_html_to_pixels_with_viewport(html, TEST_WIDTH, TEST_HEIGHT)
 
         expect _count_color(result.pixel_data, 0xFFBE123Cu32) > 0
+
+    it "normalizes simple CSS nesting before fallback selector scans":
+        val normalized = browser_renderer_normalize_style_rules(".card { width: 12px; height: 8px; &.primary { background-color: #7e22ce; } & span { color: #0f766e; } }")
+        val normalized_document_style = browser_renderer_normalize_style_rules("body { margin: 0; background-color: #ffffff; } .card { &.primary { width: 12px; height: 8px; background-color: #7e22ce; } }")
+        val normalized_html = browser_renderer_normalize_style_blocks("<html><head><style>body { margin: 0; background-color: #ffffff; } .card { &.primary { width: 12px; height: 8px; background-color: #7e22ce; } }</style></head><body><div class='card primary'></div></body></html>")
+
+        expect (normalized).contains(".card { width: 12px; height: 8px; }")
+        expect (normalized).contains(".card.primary { background-color: #7e22ce; }")
+        expect (normalized).contains(".card span { color: #0f766e; }")
+        expect (normalized_document_style).contains(".card.primary { width: 12px; height: 8px; background-color: #7e22ce; }")
+        expect (normalized_html).contains(".card.primary { width: 12px; height: 8px; background-color: #7e22ce; }")
+        expect normalized_document_style.contains("&.primary") == false
+        expect normalized_html.contains("&.primary") == false
+
+    it "applies simple CSS nesting with parent selector references":
+        val html = "<html><head><style>body { margin: 0; background-color: #ffffff; } .card { &.primary { width: 12px; height: 8px; background-color: #7e22ce; } }</style></head><body><div class='card primary'></div></body></html>"
+        val flat_html = "<html><head><style>body { margin: 0; background-color: #ffffff; } .card.primary { width: 12px; height: 8px; background-color: #7e22ce; }</style></head><body><div class='card primary'></div></body></html>"
+        val normalized_css = "body { margin: 0; background-color: #ffffff; } " + browser_renderer_normalize_style_rules(".card { &.primary { width: 12px; height: 8px; background-color: #7e22ce; } }")
+        val normalized_rule_html = "<html><head><style>" + normalized_css + "</style></head><body><div class='card primary'></div></body></html>"
+        val result = render_html_to_pixels_with_viewport(normalized_rule_html, TEST_WIDTH, TEST_HEIGHT)
+        val flat_result = render_html_to_pixels_with_viewport(flat_html, TEST_WIDTH, TEST_HEIGHT)
+
+        expect _count_color(flat_result.pixel_data, 0xFF7E22CEu32) > 0
+        expect _count_color(result.pixel_data, 0xFF7E22CEu32) > 0
+
+    it "applies simple descendant rules from CSS nesting":
+        val red_html = "<html><head><style>body { margin: 0; background-color: #ffffff; } .card { width: 32px; height: 18px; background-color: #ffffff; color: #111827; font-size: 16px; & span { color:#dc2626; } }</style></head><body><div class='card'><span>Hi</span></div></body></html>"
+        val green_html = "<html><head><style>body { margin: 0; background-color: #ffffff; } .card { width: 32px; height: 18px; background-color: #ffffff; color: #111827; font-size: 16px; & span { color:#16a34a; } }</style></head><body><div class='card'><span>Hi</span></div></body></html>"
+        val red_css = "body { margin: 0; background-color: #ffffff; } " + browser_renderer_normalize_style_rules(".card { width: 32px; height: 18px; background-color: #ffffff; color: #111827; font-size: 16px; & span { color:#dc2626; } }")
+        val green_css = "body { margin: 0; background-color: #ffffff; } " + browser_renderer_normalize_style_rules(".card { width: 32px; height: 18px; background-color: #ffffff; color: #111827; font-size: 16px; & span { color:#16a34a; } }")
+        val red_pixels = render_html_to_pixels_with_viewport("<html><head><style>" + red_css + "</style></head><body><div class='card'><span>Hi</span></div></body></html>", TEST_WIDTH, TEST_HEIGHT).pixel_data
+        val green_pixels = render_html_to_pixels_with_viewport("<html><head><style>" + green_css + "</style></head><body><div class='card'><span>Hi</span></div></body></html>", TEST_WIDTH, TEST_HEIGHT).pixel_data
+
+        expect _sum_red(red_pixels) > _sum_red(green_pixels)
+        expect _sum_green(green_pixels) > _sum_green(red_pixels)
 
     it "applies attribute presence selectors in fallback pixels":
         val html = "<html><head><style>body { margin: 0; background-color: #ffffff; } [data-card] { width: 12px; height: 8px; background-color: #0e7490; }</style></head><body><div data-card='true'></div></body></html>"
@@ -263,6 +335,12 @@ describe "BrowserRenderer HTML rendering":
 
         expect _count_color(result.pixel_data, 0xFF4D7C0Fu32) > 0
 
+    it "applies exact quoted attribute value selectors containing spaces":
+        val html = "<html><head><style>body { margin: 0; background-color: #ffffff; } [data-label='primary action'] { width: 12px; height: 8px; background-color: #0f766e; }</style></head><body><div data-label='primary action'></div></body></html>"
+        val result = render_html_to_pixels_with_viewport(html, TEST_WIDTH, TEST_HEIGHT)
+
+        expect _count_color(result.pixel_data, 0xFF0F766Eu32) > 0
+
     it "rejects exact attribute value selectors with different values":
         val html = "<html><head><style>body { margin: 0; background-color: #ffffff; } div[data-state='active'] { width: 12px; height: 8px; background-color: #4d7c0f; }</style></head><body><div data-state='inactive'></div></body></html>"
         val result = render_html_to_pixels_with_viewport(html, TEST_WIDTH, TEST_HEIGHT)
@@ -274,6 +352,18 @@ describe "BrowserRenderer HTML rendering":
         val result = render_html_to_pixels_with_viewport(html, TEST_WIDTH, TEST_HEIGHT)
 
         expect _count_color(result.pixel_data, 0xFF0F5E9Cu32) > 0
+
+    it "applies attribute suffix selectors in fallback pixels":
+        val html = "<html><head><style>body { margin: 0; background-color: #ffffff; } div[data-route$='/settings'] { width: 12px; height: 8px; background-color: #065f46; }</style></head><body><div data-route='/app/settings'></div></body></html>"
+        val result = render_html_to_pixels_with_viewport(html, TEST_WIDTH, TEST_HEIGHT)
+
+        expect _count_color(result.pixel_data, 0xFF065F46u32) > 0
+
+    it "rejects attribute suffix selectors without a matching suffix":
+        val html = "<html><head><style>body { margin: 0; background-color: #ffffff; } div[data-route$='/settings'] { width: 12px; height: 8px; background-color: #065f46; }</style></head><body><div data-route='/app/settings/profile'></div></body></html>"
+        val result = render_html_to_pixels_with_viewport(html, TEST_WIDTH, TEST_HEIGHT)
+
+        expect _count_color(result.pixel_data, 0xFF065F46u32) == 0
 
     it "applies attribute substring selectors in fallback pixels":
         val html = "<html><head><style>body { margin: 0; background-color: #ffffff; } [data-tags*='beta'] { width: 12px; height: 8px; background-color: #9d174d; }</style></head><body><div data-tags='alpha-beta-release'></div></body></html>"

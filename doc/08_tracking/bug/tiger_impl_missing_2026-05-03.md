@@ -35,20 +35,19 @@ Verified vectors:
 
 ## Impact
 
-W29-R is blocked. No KAT spec can be written against a non-existent module —
-a `use os.crypto.tiger.{...}` import would be unresolvable and tests would
-produce false-green load-only results (see
-`.claude/memory/feedback_compile_mode_false_greens.md`).
+W29-R is unblocked. KAT spec exists and passes 5/5 vectors in interpreter mode.
 
-**vectors_passed: 0/5 (impl missing)**
+**vectors_passed: 5/5**
 
 ---
 
-## Root Cause
+## Root Cause (historical)
 
 W20-F either:
 1. Was never executed, or
 2. Produced a commit that was dropped/reverted before reaching current `main`
+
+Implementation was subsequently completed and landed on `main`.
 
 ---
 

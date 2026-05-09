@@ -1,6 +1,6 @@
 ---
 id: aarch64_lowering_emit_aesimc_x86_symbol_collision_2026-05-03
-status: OPEN
+status: RESOLVED
 severity: high
 discovered: 2026-05-03
 discovered_by: AArch64 cipher lowering golden byte test (lowering_aarch64_crypto_spec.spl)
@@ -11,6 +11,10 @@ related: src/compiler/70.backend/backend/native/__init__.spl
 ---
 
 # AArch64 `crypto_aes_inv_round` calls x86 `emit_aesimc` due to symbol collision
+
+**Status:** RESOLVED 2026-05-09. Option A fix (rename to `emit_aesimc_aarch64` /
+`emit_aesmc_aarch64`) already landed. All 24/24 lowering_aarch64_crypto_spec tests
+PASS in interpreter mode including the previously-failing `crypto_aes_inv_round`.
 
 ## Summary
 
