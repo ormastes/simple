@@ -356,10 +356,10 @@ fn main():
 
 ```simple
 # Import from standard library
-import std.math (sqrt, pow, abs)
+use std.math.{sqrt, pow, abs}
 
 # Import entire module
-import std.collections
+use std.collections
 
 fn main():
     print sqrt(16.0)            # 4.0
@@ -375,9 +375,9 @@ export fn double(x: i64) -> i64:
 
 ```simple
 # main.spl
-import math_utils
+use math_utils.{double}
 fn main():
-    print math_utils.double(5)  # 10
+    print double(5)             # 10
 ```
 
 ---
@@ -387,7 +387,7 @@ fn main():
 Create `math_spec.spl`:
 
 ```simple
-import std.spec
+use std.spec
 
 describe "Math operations":
     it "adds two numbers":
@@ -400,7 +400,7 @@ describe "Math operations":
 Run tests:
 
 ```bash
-simple test math_spec.spl
+bin/simple test math_spec.spl
 ```
 
 ---
@@ -422,13 +422,39 @@ dependencies:
 ### Commands
 
 ```bash
-simple build                    # Build project
-simple build --release          # Optimized build
-simple test                     # Run all tests
-simple build fmt                # Format code
-simple build lint               # Run linter
-simple build check              # All quality checks
+bin/simple build                    # Debug build (runs bootstrap by default)
+bin/simple build --release          # Optimized build
+bin/simple test                     # Run all tests
+bin/simple test path/to/spec.spl   # Run a specific test
+bin/simple build fmt                # Format code
+bin/simple build lint               # Run linter
+bin/simple build check              # All quality checks (lint + fmt --check + tests)
 ```
+
+### Bootstrap
+
+The compiler is self-hosted. Full bootstrap from scratch:
+
+```bash
+scripts/bootstrap/bootstrap-from-scratch.sh --deploy
+```
+
+This performs a 3-stage self-compilation verification (Rust seed -> Simple compiler -> self-hosted binary).
+
+### MCP Server Setup
+
+Install MCP server configuration for IDE integration:
+
+```bash
+sh config/mcp/install.shs
+```
+
+Available MCP servers:
+
+| Server | Binary | Purpose |
+|--------|--------|---------|
+| `simple-mcp` | `bin/simple_mcp_server` | Compiler MCP |
+| `simple-lsp-mcp` | `bin/simple_lsp_mcp_server` | LSP via MCP bridge |
 
 ### Compile to Binary
 
@@ -456,4 +482,7 @@ simple compile myprogram.spl -o myprogram
 - [CLI Reference](cli.md) -- command-line options and subcommands
 - [Build Guide](build.md) -- build system, bootstrap, and SDN configuration
 - [Syntax Quick Reference](quick_reference/syntax_quick_reference.md) -- full language syntax
-- [Standard Library Reference](../spec/stdlib.md)
+- [Import Quick Reference](quick_reference/import_quick_reference.md) -- import and module patterns
+- [Testing Guide](testing/testing.md) -- SPipe framework, matchers, mocking
+- [MCP Server Setup](tooling/mcp.md) -- MCP server configuration
+- [SimpleOS Apps Guide](simpleos_apps.md) -- 30 desktop applications and widget builder DSL

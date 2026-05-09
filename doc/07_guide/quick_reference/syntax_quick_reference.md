@@ -1,6 +1,6 @@
 # Simple Language Syntax Quick Reference
 
-**Last Updated:** 2026-04-02
+**Last Updated:** 2026-05-09
 
 A concise reference for the canonical public Simple syntax. Legacy or parser-compatibility forms are called out explicitly instead of being presented as current style.
 
