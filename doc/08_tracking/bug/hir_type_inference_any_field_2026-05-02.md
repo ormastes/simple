@@ -4,6 +4,7 @@
 **Status:** OPEN — blocks `bin/simple build bootstrap --deploy` stage 4 (full self-hosted CLI build).
 **Severity:** P1 (deploy blocker), but only for the stage-4 self-hosted CLI rebuild; stages 2 and 3 (seed-compiler self-host) PASS, so the seed binary that `bin/simple` wraps is buildable.
 **Wave:** filed by W11-E (doc-only). Fix is **NOT** in this doc's scope.
+**Blocked-by:** Error originates in Rust seed compiler (`src/compiler_rust/compiler/src/hir/lower/expr/access.rs` and `type_resolver.rs`), not in self-hosted `.spl` files. Fix requires multi-wave Rust-side surgery across 5 root-cause classes (see below). Cannot be resolved by editing `src/compiler/` `.spl` files alone. (assessed 2026-05-09)
 **Cross-link:** disproves W6-D / W7-D framing — see `doc/08_tracking/bug/w6d_vec8f_bitcast_framing_disproven_2026-05-01.md`.
 
 ## Empirical repro
