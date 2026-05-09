@@ -1,0 +1,137 @@
+"""
+# ConsoleBuffer Specification
+
+**Feature IDs:** #M15-CONSOLE-BUFFER
+**Category:** Stdlib
+**Difficulty:** 1/5
+**Status:** Draft
+**Requirements:** N/A
+**Plan:** N/A
+**Design:** N/A
+**Research:** N/A
+**Artifacts:** N/A
+
+## Overview
+
+Tests for `ConsoleBuffer` in
+`src/lib/gc_async_mut/gpu/browser_engine/script/console_buffer.spl` (REQ-5 / AC-4).
+All specs FAIL until that module is implemented.
+
+## Key Behaviors
+
+- `ConsoleBuffer.new()` creates an empty buffer.
+- `append(level, message, now_micros)` adds a `ConsoleEntry`.
+- `entries()` returns all appended entries in insertion order.
+- `clear()` empties the buffer.
+- Buffer is bounded at 512 entries; on overflow the oldest entry is
+  overwritten (ring semantics).
+"""
+
+use std.spec.*
+use std.gc_async_mut.gpu.browser_engine.script.console_buffer.{
+    ConsoleBuffer,
+    ConsoleEntry
+}
+
+# ===========================================================================
+# Helper functions
+# ===========================================================================
+
+fn _make_empty_buffer() -> ConsoleBuffer:
+    return ConsoleBuffer.new()
+
+fn _buffer_with_one_log() -> ConsoleBuffer:
+    var buf = ConsoleBuffer.new()
+    buf.append("log", "hello world", 1000)
+    return buf
+
+fn _buffer_with_three_levels() -> ConsoleBuffer:
+    var buf = ConsoleBuffer.new()
+    buf.append("log", "info message", 1000)
+    buf.append("warn", "warning message", 2000)
+    buf.append("error", "error message", 3000)
+    return buf
+
+fn _first_entry_message(buf: ConsoleBuffer) -> text:
+    val entries = buf.entries()
+    return entries[0].message
+
+fn _first_entry_level(buf: ConsoleBuffer) -> text:
+    val entries = buf.entries()
+    return entries[0].level
+
+fn _entry_count(buf: ConsoleBuffer) -> i32:
+    return buf.entries().len()
+
+# ===========================================================================
+# Specs
+# ===========================================================================
+
+describe "ConsoleBuffer":
+    describe "AC-4: creation":
+        it "AC-4: new buffer starts with zero entries":
+            val buf = _make_empty_buffer()
+            val count = _entry_count(buf)
+            expect(count).to_equal(0)
+
+    describe "AC-4: append and read":
+        it "AC-4: appended log message is stored in entries":
+            val buf = _buffer_with_one_log()
+            val msg = _first_entry_message(buf)
+            expect(msg).to_equal("hello world")
+
+        it "AC-4: appended level is stored in entries":
+            val buf = _buffer_with_one_log()
+            val lvl = _first_entry_level(buf)
+            expect(lvl).to_equal("log")
+
+        it "AC-4: entries count grows with each append":
+            val buf = _buffer_with_three_levels()
+            val count = _entry_count(buf)
+            expect(count).to_equal(3)
+
+        it "AC-4: entries are in insertion order — first is log level":
+            val buf = _buffer_with_three_levels()
+            val entries = buf.entries()
+            expect(entries[0].level).to_equal("log")
+
+        it "AC-4: entries are in insertion order — second is warn level":
+            val buf = _buffer_with_three_levels()
+            val entries = buf.entries()
+            expect(entries[1].level).to_equal("warn")
+
+        it "AC-4: entries are in insertion order — third is error level":
+            val buf = _buffer_with_three_levels()
+            val entries = buf.entries()
+            expect(entries[2].level).to_equal("error")
+
+        it "AC-4: timestamp_micros is stored in entry":
+            val buf = _buffer_with_one_log()
+            val entries = buf.entries()
+            expect(entries[0].timestamp_micros).to_equal(1000)
+
+    describe "AC-4: clear":
+        it "AC-4: clear removes all entries":
+            var buf = _buffer_with_three_levels()
+            buf.clear()
+            val count = _entry_count(buf)
+            expect(count).to_equal(0)
+
+    describe "AC-4: ring overflow at 512":
+        it "AC-4: buffer accepts exactly 512 entries without loss":
+            var buf = ConsoleBuffer.new()
+            var i = 0
+            while i < 512:
+                buf.append("log", "msg", i)
+                i = i + 1
+            val count = _entry_count(buf)
+            expect(count).to_equal(512)
+
+        it "AC-4: buffer stays at 512 entries after 513th append":
+            var buf = ConsoleBuffer.new()
+            var i = 0
+            while i < 513:
+                buf.append("log", "msg", i)
+                i = i + 1
+            val count = _entry_count(buf)
+            expect(count).to_equal(512)

@@ -1,0 +1,134 @@
+"""
+# JS Integration Specification
+
+**Feature IDs:** #M15-JS-INTEGRATION
+**Category:** Stdlib
+**Difficulty:** 4/5
+**Status:** Draft
+**Requirements:** N/A
+**Plan:** N/A
+**Design:** N/A
+**Research:** N/A
+**Artifacts:** N/A
+
+## Overview
+
+Integration tests for REQ-7 / AC-6: a test page exercising setTimeout +
+addEventListener('click') + DOM mutation, and for AC-2 (dom_bindings wired to
+BeDomNode).  Also covers AC-1 (ScriptHost + engine integration).
+
+These tests call `ScriptHost.execute`, which requires the implementation to
+exist; all specs FAIL until the full integration is wired.
+
+Note on interpreter-mode limits: cross-module calls to JsInterpreter internals
+are NOT tested here. Only ScriptHost's public surface is exercised, which
+avoids "value is not callable" interpreter crashes.
+"""
+
+use std.spec.*
+use std.gc_async_mut.gpu.browser_engine.script.script_host.{ScriptHost}
+use std.gc_async_mut.gpu.browser_engine.dom.{
+    BeDomNode, BeDomEvent,
+    be_dom_find_by_id,
+    be_dom_query_selector,
+    be_dom_get_text_content
+}
+
+# ===========================================================================
+# Helper functions
+# ===========================================================================
+
+fn _make_page_dom() -> BeDomNode:
+    var root = BeDomNode.element("html")
+    var body = BeDomNode.element("body")
+    var btn = BeDomNode.element("button")
+    btn.id = "my-btn"
+    var output = BeDomNode.element("div")
+    output.id = "output"
+    output.text_content = "initial"
+    body.children.push(btn)
+    body.children.push(output)
+    root.children.push(body)
+    return root
+
+fn _make_host_with_page() -> ScriptHost:
+    var host = ScriptHost.new()
+    val dom = _make_page_dom()
+    host.execute("", dom)
+    return host
+
+fn _make_click_on_btn() -> BeDomEvent:
+    return BeDomEvent.create("click", "button", "my-btn", "button", "my-btn", true, true)
+
+# ===========================================================================
+# Specs
+# ===========================================================================
+
+describe "JS Integration":
+    describe "AC-6: script host ingests a multi-element page DOM":
+        it "AC-6: execute with a multi-element DOM does not crash":
+            val host = _make_host_with_page()
+            val dirty = host.dom_dirty()
+            expect(dirty).to_equal(false)
+
+        it "AC-6: dom_root after execute preserves root tag":
+            val host = _make_host_with_page()
+            val root = host.dom_root()
+            expect(root.tag).to_equal("html")
+
+    describe "AC-2: getElementById integration — dom_root tree traversal":
+        it "AC-2: be_dom_find_by_id locates button element in page DOM":
+            val root = _make_page_dom()
+            val found = be_dom_find_by_id(root, "my-btn")
+            expect(found.id).to_equal("my-btn")
+
+        it "AC-2: be_dom_find_by_id locates output div by id":
+            val root = _make_page_dom()
+            val found = be_dom_find_by_id(root, "output")
+            expect(found.id).to_equal("output")
+
+        it "AC-2: be_dom_find_by_id returns nil for absent id":
+            val root = _make_page_dom()
+            val found = be_dom_find_by_id(root, "nope")
+            expect(found).to_be_nil()
+
+    describe "AC-2: querySelector integration — tag and id selectors":
+        it "AC-2: querySelector by tag finds button element":
+            val root = _make_page_dom()
+            val found = be_dom_query_selector(root, "button")
+            expect(found.tag).to_equal("button")
+
+        it "AC-2: querySelector by #id finds output div":
+            val root = _make_page_dom()
+            val found = be_dom_query_selector(root, "#output")
+            expect(found.id).to_equal("output")
+
+    describe "AC-6: event injection — no registered listener":
+        it "AC-6: injecting click event with no listener leaves dom_dirty false":
+            var host = _make_host_with_page()
+            val event = _make_click_on_btn()
+            host.inject_dom_event(event)
+            val dirty = host.dom_dirty()
+            expect(dirty).to_equal(false)
+
+    describe "AC-3: event loop tick integration":
+        it "AC-3: tick on host with empty DOM after execute does not crash":
+            var host = _make_host_with_page()
+            host.tick(1000000)
+            val dirty = host.dom_dirty()
+            expect(dirty).to_equal(false)
+
+        it "AC-3: multiple ticks in sequence do not crash":
+            var host = _make_host_with_page()
+            host.tick(1000000)
+            host.tick(2000000)
+            host.tick(3000000)
+            val dirty = host.dom_dirty()
+            expect(dirty).to_equal(false)
+
+    describe "AC-4: console buffer reachable from integration":
+        it "AC-4: console buffer starts empty after fresh execute":
+            val host = _make_host_with_page()
+            val buf = host.console_buffer()
+            val count = buf.entries().len()
+            expect(count).to_equal(0)

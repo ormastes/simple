@@ -1,0 +1,112 @@
+"""
+# ScriptHost Specification
+
+**Feature IDs:** #M15-SCRIPT-HOST
+**Category:** Stdlib
+**Difficulty:** 3/5
+**Status:** Draft
+**Requirements:** N/A
+**Plan:** N/A
+**Design:** N/A
+**Research:** N/A
+**Artifacts:** N/A
+
+## Overview
+
+Tests for `ScriptHost` in
+`src/lib/gc_async_mut/gpu/browser_engine/script/script_host.spl` (REQ-1 / AC-1).
+All specs FAIL until that module is implemented.
+
+## Key Behaviors
+
+- `ScriptHost.new()` creates a host ready to execute scripts.
+- After creation: `dom_dirty()` is false, `console_buffer().entries()` is empty.
+- `execute(source, dom_root)` does not panic on an empty script string.
+- `dom_dirty()` starts false, `clear_dirty()` resets it.
+- `inject_dom_event(event)` accepts a `BeDomEvent` without crashing when no
+  listener is registered.
+- `tick(now_micros)` can be called without an execute having run first.
+"""
+
+use std.spec.*
+use std.gc_async_mut.gpu.browser_engine.script.script_host.{ScriptHost}
+use std.gc_async_mut.gpu.browser_engine.dom.{BeDomNode, BeDomEvent}
+
+# ===========================================================================
+# Helper functions
+# ===========================================================================
+
+fn _make_host() -> ScriptHost:
+    return ScriptHost.new()
+
+fn _make_div_root() -> BeDomNode:
+    return BeDomNode.element("div")
+
+fn _make_click_event() -> BeDomEvent:
+    return BeDomEvent.create("click", "button", "btn1", "button", "btn1", true, true)
+
+# ===========================================================================
+# Specs
+# ===========================================================================
+
+describe "ScriptHost":
+    describe "AC-1: lifecycle — creation":
+        it "AC-1: new ScriptHost has dom_dirty false":
+            val host = _make_host()
+            val dirty = host.dom_dirty()
+            expect(dirty).to_equal(false)
+
+        it "AC-1: new ScriptHost has empty console buffer":
+            val host = _make_host()
+            val buf = host.console_buffer()
+            val count = buf.entries().len()
+            expect(count).to_equal(0)
+
+    describe "AC-1: execute — basic script intake":
+        it "AC-1: execute with empty string does not crash":
+            var host = _make_host()
+            val root = _make_div_root()
+            host.execute("", root)
+            val dirty = host.dom_dirty()
+            expect(dirty).to_equal(false)
+
+    describe "AC-1: dirty flag management":
+        it "AC-1: dom_dirty starts false before any tick":
+            val host = _make_host()
+            val dirty = host.dom_dirty()
+            expect(dirty).to_equal(false)
+
+        it "AC-1: clear_dirty leaves dom_dirty false when already false":
+            var host = _make_host()
+            host.clear_dirty()
+            val dirty = host.dom_dirty()
+            expect(dirty).to_equal(false)
+
+    describe "AC-1: tick — callable without prior execute":
+        it "AC-1: tick with zero timestamp does not crash":
+            var host = _make_host()
+            host.tick(0)
+            val dirty = host.dom_dirty()
+            expect(dirty).to_equal(false)
+
+        it "AC-1: tick with large timestamp does not crash":
+            var host = _make_host()
+            host.tick(9999999999)
+            val dirty = host.dom_dirty()
+            expect(dirty).to_equal(false)
+
+    describe "AC-1: inject_dom_event — no registered listeners":
+        it "AC-1: inject_dom_event does not crash when no listeners registered":
+            var host = _make_host()
+            val event = _make_click_event()
+            host.inject_dom_event(event)
+            val dirty = host.dom_dirty()
+            expect(dirty).to_equal(false)
+
+    describe "AC-1: dom_root — returns current root":
+        it "AC-1: dom_root after execute returns a BeDomNode":
+            var host = _make_host()
+            val root = _make_div_root()
+            host.execute("", root)
+            val returned_root = host.dom_root()
+            expect(returned_root.tag).to_equal("div")

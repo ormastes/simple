@@ -1,0 +1,176 @@
+"""
+# DOM Query Specification
+
+**Feature IDs:** #M15-DOM-QUERY
+**Category:** Stdlib
+**Difficulty:** 2/5
+**Status:** Draft
+**Requirements:** N/A
+**Plan:** N/A
+**Design:** N/A
+**Research:** N/A
+**Artifacts:** N/A
+
+## Overview
+
+Tests for `be_dom_find_by_id` and `be_dom_query_selector` tree-walk helpers
+added to `src/lib/gc_async_mut/gpu/browser_engine/dom.spl` (REQ-3 / AC-2).
+All specs FAIL until those functions are implemented.
+
+## Key Behaviors
+
+- `be_dom_find_by_id` walks the `BeDomNode` tree recursively and returns the
+  first node whose `id` field equals the target, or nil if not found.
+- `be_dom_query_selector` supports simple selectors: tag name, `#id`, `.class`.
+  Returns first matching node or nil.
+"""
+
+use std.spec.*
+use std.gc_async_mut.gpu.browser_engine.dom.{
+    BeDomNode,
+    be_dom_find_by_id,
+    be_dom_query_selector
+}
+
+# ===========================================================================
+# Helper functions — build BeDomNode trees without interpreter var-mutation
+# ===========================================================================
+
+fn _make_leaf(tag: text, id: text) -> BeDomNode:
+    var n = BeDomNode.element(tag)
+    n.id = id
+    return n
+
+fn _make_leaf_with_class(tag: text, cls: text) -> BeDomNode:
+    var n = BeDomNode.element(tag)
+    n.classes.push(cls)
+    return n
+
+fn _make_root_with_two_children() -> BeDomNode:
+    var root = BeDomNode.element("div")
+    root.id = "root"
+    var child1 = BeDomNode.element("span")
+    child1.id = "child1"
+    var child2 = BeDomNode.element("p")
+    child2.id = "child2"
+    root.children.push(child1)
+    root.children.push(child2)
+    return root
+
+fn _make_deep_tree() -> BeDomNode:
+    var root = BeDomNode.element("div")
+    root.id = "root"
+    var mid = BeDomNode.element("section")
+    mid.id = "mid"
+    var leaf = BeDomNode.element("button")
+    leaf.id = "deep-button"
+    mid.children.push(leaf)
+    root.children.push(mid)
+    return root
+
+fn _make_classed_tree() -> BeDomNode:
+    var root = BeDomNode.element("div")
+    var child = BeDomNode.element("span")
+    child.classes.push("highlight")
+    root.children.push(child)
+    return root
+
+fn _make_multi_tag_tree() -> BeDomNode:
+    var root = BeDomNode.element("div")
+    var p = BeDomNode.element("p")
+    var h1 = BeDomNode.element("h1")
+    root.children.push(p)
+    root.children.push(h1)
+    return root
+
+# ===========================================================================
+# Specs
+# ===========================================================================
+
+describe "be_dom_find_by_id":
+    describe "AC-2: getElementById — flat tree":
+        it "AC-2: finds the root node when id matches root":
+            val root = _make_leaf("div", "main")
+            val found = be_dom_find_by_id(root, "main")
+            expect(found).to_equal(root)
+
+        it "AC-2: finds a direct child by id":
+            val root = _make_root_with_two_children()
+            val found = be_dom_find_by_id(root, "child1")
+            expect(found.id).to_equal("child1")
+
+        it "AC-2: finds second child by id":
+            val root = _make_root_with_two_children()
+            val found = be_dom_find_by_id(root, "child2")
+            expect(found.id).to_equal("child2")
+
+        it "AC-2: returns nil when id not present in flat tree":
+            val root = _make_root_with_two_children()
+            val found = be_dom_find_by_id(root, "nonexistent")
+            expect(found).to_be_nil()
+
+    describe "AC-2: getElementById — deep tree":
+        it "AC-2: finds a deeply nested node by id":
+            val root = _make_deep_tree()
+            val found = be_dom_find_by_id(root, "deep-button")
+            expect(found.id).to_equal("deep-button")
+
+        it "AC-2: finds intermediate node by id":
+            val root = _make_deep_tree()
+            val found = be_dom_find_by_id(root, "mid")
+            expect(found.id).to_equal("mid")
+
+        it "AC-2: returns nil for id absent from deep tree":
+            val root = _make_deep_tree()
+            val found = be_dom_find_by_id(root, "ghost")
+            expect(found).to_be_nil()
+
+    describe "AC-2: getElementById — empty tree":
+        it "AC-2: returns nil on a childless node with non-matching id":
+            val root = _make_leaf("div", "only")
+            val found = be_dom_find_by_id(root, "other")
+            expect(found).to_be_nil()
+
+describe "be_dom_query_selector":
+    describe "AC-2: querySelector by tag":
+        it "AC-2: matches root node by its own tag name":
+            val root = _make_leaf("section", "")
+            val found = be_dom_query_selector(root, "section")
+            expect(found.tag).to_equal("section")
+
+        it "AC-2: matches first child tag when root tag does not match":
+            val root = _make_multi_tag_tree()
+            val found = be_dom_query_selector(root, "p")
+            expect(found.tag).to_equal("p")
+
+        it "AC-2: matches second child tag":
+            val root = _make_multi_tag_tree()
+            val found = be_dom_query_selector(root, "h1")
+            expect(found.tag).to_equal("h1")
+
+        it "AC-2: returns nil when no tag matches":
+            val root = _make_multi_tag_tree()
+            val found = be_dom_query_selector(root, "table")
+            expect(found).to_be_nil()
+
+    describe "AC-2: querySelector by id selector":
+        it "AC-2: #id selector finds node by id field":
+            val root = _make_root_with_two_children()
+            val found = be_dom_query_selector(root, "#child2")
+            expect(found.id).to_equal("child2")
+
+        it "AC-2: #id selector returns nil when id absent":
+            val root = _make_root_with_two_children()
+            val found = be_dom_query_selector(root, "#missing")
+            expect(found).to_be_nil()
+
+    describe "AC-2: querySelector by class selector":
+        it "AC-2: .class selector finds node that has the class":
+            val root = _make_classed_tree()
+            val found = be_dom_query_selector(root, ".highlight")
+            expect(found.classes).to_contain("highlight")
+
+        it "AC-2: .class selector returns nil when no node has the class":
+            val root = _make_classed_tree()
+            val found = be_dom_query_selector(root, ".absent")
+            expect(found).to_be_nil()
