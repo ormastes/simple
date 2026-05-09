@@ -102,38 +102,69 @@ fn hal_cache_init_with_isa(isa: text):
 # Test-log seams — production logic without real asm (observable in tests)
 # ============================================================================
 
-fn hal_cache_sync_icache_with_log(log: CacheOpLog, caps: CmoCapSnapshot, addr: u64, len: u64):
-    """Simulate hal_cache_sync_icache: cbo.flush per-line if Zicbom, then fence.i."""
+fn hal_cache_sync_icache_with_log(caps: CmoCapSnapshot, addr: u64, len: u64) -> CacheOpLog:
+    """Simulate hal_cache_sync_icache: cbo.flush per-line if Zicbom, then fence.i.
+    Returns a CacheOpLog with counters populated (avoids parameter-mutation interpreter bug)."""
     val stride: u32 = 64u32
+    var cbo_flush_count: u32 = 0u32
     if caps.has_zicbom:
         var cur = addr
         val end_addr = addr + len
         while cur < end_addr:
-            log.cbo_flush_count = log.cbo_flush_count + 1u32
+            cbo_flush_count = cbo_flush_count + 1u32
             cur = cur + stride as u64
-    log.fence_i_count = log.fence_i_count + 1u32
+    CacheOpLog(
+        fence_i_count: 1u32,
+        cbo_clean_count: 0u32,
+        cbo_inval_count: 0u32,
+        cbo_flush_count: cbo_flush_count,
+        cbo_zero_count: 0u32,
+        diagnostic_emitted: false
+    )
 
-fn hal_cache_clean_dcache_with_log(log: CacheOpLog, caps: CmoCapSnapshot, addr: u64, len: u64, stride: u32):
-    """Simulate hal_cache_clean_dcache: cbo.clean per-line when Zicbom=true, else diagnostic."""
+fn hal_cache_clean_dcache_with_log(caps: CmoCapSnapshot, addr: u64, len: u64, stride: u32) -> CacheOpLog:
+    """Simulate hal_cache_clean_dcache: cbo.clean per-line when Zicbom=true, else diagnostic.
+    Returns a CacheOpLog with counters populated (avoids parameter-mutation interpreter bug)."""
+    var cbo_clean_count: u32 = 0u32
+    var diagnostic_emitted: bool = false
     if caps.has_zicbom:
         var cur = addr
         val end_addr = addr + len
         while cur < end_addr:
-            log.cbo_clean_count = log.cbo_clean_count + 1u32
+            cbo_clean_count = cbo_clean_count + 1u32
             cur = cur + stride as u64
     else:
-        log.diagnostic_emitted = true
+        diagnostic_emitted = true
+    CacheOpLog(
+        fence_i_count: 0u32,
+        cbo_clean_count: cbo_clean_count,
+        cbo_inval_count: 0u32,
+        cbo_flush_count: 0u32,
+        cbo_zero_count: 0u32,
+        diagnostic_emitted: diagnostic_emitted
+    )
 
-fn hal_cache_invalidate_dcache_with_log(log: CacheOpLog, caps: CmoCapSnapshot, addr: u64, len: u64, stride: u32):
-    """Simulate hal_cache_invalidate_dcache: cbo.inval per-line when Zicbom=true, else diagnostic."""
+fn hal_cache_invalidate_dcache_with_log(caps: CmoCapSnapshot, addr: u64, len: u64, stride: u32) -> CacheOpLog:
+    """Simulate hal_cache_invalidate_dcache: cbo.inval per-line when Zicbom=true, else diagnostic.
+    Returns a CacheOpLog with counters populated (avoids parameter-mutation interpreter bug)."""
+    var cbo_inval_count: u32 = 0u32
+    var diagnostic_emitted: bool = false
     if caps.has_zicbom:
         var cur = addr
         val end_addr = addr + len
         while cur < end_addr:
-            log.cbo_inval_count = log.cbo_inval_count + 1u32
+            cbo_inval_count = cbo_inval_count + 1u32
             cur = cur + stride as u64
     else:
-        log.diagnostic_emitted = true
+        diagnostic_emitted = true
+    CacheOpLog(
+        fence_i_count: 0u32,
+        cbo_clean_count: 0u32,
+        cbo_inval_count: cbo_inval_count,
+        cbo_flush_count: 0u32,
+        cbo_zero_count: 0u32,
+        diagnostic_emitted: diagnostic_emitted
+    )
 
 # ============================================================================
 # Canonical trait methods — production-callable (AC-2)
@@ -150,23 +181,20 @@ fn current_cacheline_stride() -> u32:
 
 fn hal_cache_sync_icache(addr: u64, len: u64):
     """Sync icache: cbo.flush per-line (if Zicbom) then fence.i. Delegates to _with_log."""
-    val log = make_empty_log()
     val caps = current_cmo_caps()
-    hal_cache_sync_icache_with_log(log, caps, addr, len)
+    val log = hal_cache_sync_icache_with_log(caps, addr, len)
 
 fn hal_cache_clean_dcache(addr: u64, len: u64):
     """Clean dcache: cbo.clean per-line when Zicbom=true, else diagnostic. Delegates to _with_log."""
-    val log = make_empty_log()
     val caps = current_cmo_caps()
     val stride = current_cacheline_stride()
-    hal_cache_clean_dcache_with_log(log, caps, addr, len, stride)
+    val log = hal_cache_clean_dcache_with_log(caps, addr, len, stride)
 
 fn hal_cache_invalidate_dcache(addr: u64, len: u64):
     """Invalidate dcache: cbo.inval per-line when Zicbom=true, else diagnostic. Delegates to _with_log."""
-    val log = make_empty_log()
     val caps = current_cmo_caps()
     val stride = current_cacheline_stride()
-    hal_cache_invalidate_dcache_with_log(log, caps, addr, len, stride)
+    val log = hal_cache_invalidate_dcache_with_log(caps, addr, len, stride)
 
 # ============================================================================
 # AC-3: export ZICBOM state for compiler backend registry query

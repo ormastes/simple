@@ -52,35 +52,68 @@ fn read_tp_test_rv32() -> u32:
 # Used to verify that trap entry/exit correctly saves and restores x4 (tp).
 # This is a pure-Simple simulation; the real trap vector in start.S uses
 # inline asm to save/restore all registers.
+#
+# Uses module-level state to avoid interpreter parameter-mutation limitation:
+# class field mutations through function parameters do not persist back to
+# the caller in interpreter mode. Module-level var mutations DO work.
 # ============================================================================
 
 class TrapFrameTest:
-    var regs: [u64]
+    id: u32
+
+# Module-level register storage — indexed by [frame_id * 32 + reg_idx]
+# Supports up to 4 concurrent frames (128 slots).
+var TRAP_FRAME_REGS: [u64] = [
+    0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64,
+    0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64,
+    0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64,
+    0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64,
+    0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64,
+    0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64,
+    0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64,
+    0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64,
+    0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64,
+    0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64,
+    0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64,
+    0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64,
+    0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64,
+    0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64,
+    0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64,
+    0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64
+]
+var TRAP_FRAME_NEXT_ID: u32 = 0u32
 
 fn trap_frame_new() -> TrapFrameTest:
-    """Create a zeroed 32-register TrapFrameTest."""
-    TrapFrameTest(regs: [
-        0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64,
-        0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64,
-        0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64,
-        0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64
-    ])
+    """Create a zeroed 32-register TrapFrameTest backed by module-level storage."""
+    val id = TRAP_FRAME_NEXT_ID
+    TRAP_FRAME_NEXT_ID = TRAP_FRAME_NEXT_ID + 1u32
+    # Zero all 32 slots for this frame
+    val base = id * 32u32
+    var i: u32 = 0u32
+    while i < 32u32:
+        TRAP_FRAME_REGS[base + i] = 0u64
+        i = i + 1u32
+    TrapFrameTest(id: id)
 
 fn trap_frame_set_reg(frame: TrapFrameTest, idx: u32, value: u64):
     """Write register xN in the trap frame."""
-    frame.regs[idx] = value
+    val slot = frame.id * 32u32 + idx
+    TRAP_FRAME_REGS[slot] = value
 
 fn trap_frame_get_reg(frame: TrapFrameTest, idx: u32) -> u64:
     """Read register xN from the trap frame."""
-    frame.regs[idx]
+    val slot = frame.id * 32u32 + idx
+    TRAP_FRAME_REGS[slot]
 
 fn trap_frame_set_tp(frame: TrapFrameTest, value: u64):
     """Write x4 (tp) slot in the trap frame."""
-    frame.regs[4u32] = value
+    val slot = frame.id * 32u32 + 4u32
+    TRAP_FRAME_REGS[slot] = value
 
 fn trap_frame_save_restore_tp(frame: TrapFrameTest) -> u64:
     """Simulate trap entry (save x4) + exit (restore x4); returns restored tp value."""
-    frame.regs[4u32]
+    val slot = frame.id * 32u32 + 4u32
+    TRAP_FRAME_REGS[slot]
 
 fn trap_frame_simulate_entry_exit(frame: TrapFrameTest) -> u64:
     """Simulate a full trap entry/exit cycle; returns the tp value after exit."""

@@ -14,7 +14,6 @@ use os.kernel.arch.riscv64.hal_cache.{
     hal_cache_clean_dcache,
     portable_numeric_capabilities_has_riscv_zicbom,
     portable_numeric_capabilities_has_riscv_zicbom_default,
-    make_empty_log,
     CmoCapSnapshot,
     hal_cache_sync_icache_with_log,
     hal_cache_clean_dcache_with_log,
@@ -45,35 +44,28 @@ class IntegrationEnv:
     fdt_bytes: [u8]
     # CMO probe result (DTB isa string used)
     isa_string: text
-    # Observed operations during the run
-    var ipi_calls: [(u64, u64)]
-    var fence_i_count: u32
-    var cbo_flush_count: u32
-    var cbo_clean_count: u32
-    var diagnostic_emitted: bool
+
+# Integration result — returned from helper functions to avoid parameter-mutation
+# and module-level var scope issues in spec `it` blocks.
+class IntegrationResult:
+    ipi_call_count: u32
+    fence_i_count: u32
+    cbo_flush_count: u32
+    cbo_clean_count: u32
+    diagnostic_emitted: bool
 
 fn make_integration_env_zicbom_available() -> IntegrationEnv:
     IntegrationEnv(
         ipi_path: "V3",
         fdt_bytes: [0xD0u8, 0x0Du8, 0xFEu8, 0xEDu8],
-        isa_string: "rv64gc_zicbom_zicboz",
-        ipi_calls: [],
-        fence_i_count: 0u32,
-        cbo_flush_count: 0u32,
-        cbo_clean_count: 0u32,
-        diagnostic_emitted: false
+        isa_string: "rv64gc_zicbom_zicboz"
     )
 
 fn make_integration_env_no_zicbom() -> IntegrationEnv:
     IntegrationEnv(
         ipi_path: "Clint",
         fdt_bytes: [0xD0u8, 0x0Du8, 0xFEu8, 0xEDu8],
-        isa_string: "rv64gc",
-        ipi_calls: [],
-        fence_i_count: 0u32,
-        cbo_flush_count: 0u32,
-        cbo_clean_count: 0u32,
-        diagnostic_emitted: false
+        isa_string: "rv64gc"
     )
 
 # ---------------------------------------------------------------------------
@@ -110,45 +102,65 @@ fn hal_integration_init_with_hart_count(env: IntegrationEnv, count: u32):
     hal_cache_init_with_isa(env.isa_string)
     HAL_INTEGRATION_IPI_PATH = env.ipi_path
 
-fn hal_integration_ipi_send(env: IntegrationEnv, target: u32, vector: u32):
-    """Send IPI via mock SBI (interpreter-safe) and record call in env.ipi_calls."""
+fn hal_integration_ipi_send(env: IntegrationEnv, target: u32, vector: u32) -> IntegrationResult:
+    """Send IPI via mock SBI (interpreter-safe) and return result."""
     val mock = make_sbi_mock_for_env(env)
     hal_smp_ipi_send_with_mock(mock, target, vector)
-    val hart_mask = 1u64 << target as u64
-    env.ipi_calls.push((target as u64, hart_mask))
+    IntegrationResult(
+        ipi_call_count: 1u32,
+        fence_i_count: 0u32,
+        cbo_flush_count: 0u32,
+        cbo_clean_count: 0u32,
+        diagnostic_emitted: false
+    )
 
-fn hal_integration_ipi_broadcast(env: IntegrationEnv, vector: u32):
-    """Broadcast IPI via mock SBI (interpreter-safe) and record each call in env.ipi_calls."""
+fn hal_integration_ipi_broadcast(env: IntegrationEnv, vector: u32) -> IntegrationResult:
+    """Broadcast IPI via mock SBI (interpreter-safe) and return result."""
     val mock = make_sbi_mock_for_env(env)
     val count = HAL_SMP_CPU_COUNT_STATE
     val self_id = 0u32
     var i: u32 = 0u32
+    var call_count: u32 = 0u32
     while i < count:
         if i != self_id:
             hal_smp_ipi_send_with_mock(mock, i, vector)
-            val hart_mask = 1u64 << i as u64
-            env.ipi_calls.push((i as u64, hart_mask))
+            call_count = call_count + 1u32
         i = i + 1u32
+    IntegrationResult(
+        ipi_call_count: call_count,
+        fence_i_count: 0u32,
+        cbo_flush_count: 0u32,
+        cbo_clean_count: 0u32,
+        diagnostic_emitted: false
+    )
 
 fn hal_integration_get_pending_ipi(target: u32) -> u32:
     """Read PENDING_IPI slot for target hart."""
     hal_smp_get_pending_ipi(target)
 
-fn hal_integration_sync_icache(env: IntegrationEnv, addr: u64, len: u64):
-    """Sync icache and record fence.i + cbo.flush counts in env."""
-    val log = make_empty_log()
+fn hal_integration_sync_icache(env: IntegrationEnv, addr: u64, len: u64) -> IntegrationResult:
+    """Sync icache and return result with fence.i + cbo.flush counts."""
     val caps = CmoCapSnapshot(has_zicbom: ZICBOM_STATE, has_zicboz: false, has_zicbop: false)
-    hal_cache_sync_icache_with_log(log, caps, addr, len)
-    env.fence_i_count = env.fence_i_count + log.fence_i_count
-    env.cbo_flush_count = env.cbo_flush_count + log.cbo_flush_count
+    val log = hal_cache_sync_icache_with_log(caps, addr, len)
+    IntegrationResult(
+        ipi_call_count: 0u32,
+        fence_i_count: log.fence_i_count,
+        cbo_flush_count: log.cbo_flush_count,
+        cbo_clean_count: 0u32,
+        diagnostic_emitted: false
+    )
 
-fn hal_integration_clean_dcache(env: IntegrationEnv, addr: u64, len: u64):
-    """Clean dcache and record cbo.clean count + diagnostic in env."""
-    val log = make_empty_log()
+fn hal_integration_clean_dcache(env: IntegrationEnv, addr: u64, len: u64) -> IntegrationResult:
+    """Clean dcache and return result with cbo.clean count + diagnostic."""
     val caps = CmoCapSnapshot(has_zicbom: ZICBOM_STATE, has_zicboz: false, has_zicbop: false)
-    hal_cache_clean_dcache_with_log(log, caps, addr, len, 64u32)
-    env.cbo_clean_count = env.cbo_clean_count + log.cbo_clean_count
-    env.diagnostic_emitted = log.diagnostic_emitted
+    val log = hal_cache_clean_dcache_with_log(caps, addr, len, 64u32)
+    IntegrationResult(
+        ipi_call_count: 0u32,
+        fence_i_count: 0u32,
+        cbo_flush_count: 0u32,
+        cbo_clean_count: log.cbo_clean_count,
+        diagnostic_emitted: log.diagnostic_emitted
+    )
 
 fn hal_integration_full_boot(env: IntegrationEnv):
     """Full boot sequence: smp_init + cache_init from env."""
@@ -172,9 +184,9 @@ describe "HalSmp + HalCache Integration":
         it "AC-1+AC-5: IPI send to hart 1 records call and populates PENDING_IPI slot":
             val env = make_integration_env_zicbom_available()
             hal_integration_init(env)
-            hal_integration_ipi_send(env, 1u32, 10u32)
-            # IPI call recorded
-            expect(env.ipi_calls.len()).to_equal(1)
+            val result = hal_integration_ipi_send(env, 1u32, 10u32)
+            # IPI call recorded in returned result
+            expect(result.ipi_call_count).to_equal(1u32)
             # PENDING_IPI slot populated
             val pending = hal_integration_get_pending_ipi(1u32)
             expect(pending).to_equal(10u32)
@@ -182,39 +194,39 @@ describe "HalSmp + HalCache Integration":
         it "AC-1+AC-5: IPI broadcast reaches all non-self harts":
             val env = make_integration_env_zicbom_available()
             hal_integration_init_with_hart_count(env, 3u32)
-            hal_integration_ipi_broadcast(env, 255u32)
+            val result = hal_integration_ipi_broadcast(env, 255u32)
             # At least 2 calls (to hart 1 and hart 2; not to self hart 0)
-            expect(env.ipi_calls.len()).to_be_greater_than(0)
+            expect(result.ipi_call_count).to_be_greater_than(0u32)
 
     describe "fence.i ordering after code load":
         it "AC-2+AC-5: sync_icache with Zicbom emits cbo.flush then fence.i":
             val env = make_integration_env_zicbom_available()
             hal_integration_init(env)
-            hal_integration_sync_icache(env, 0x80200000u64, 4096u64)
-            expect(env.cbo_flush_count).to_be_greater_than(0u32)
-            expect(env.fence_i_count).to_be_greater_than(0u32)
+            val result = hal_integration_sync_icache(env, 0x80200000u64, 4096u64)
+            expect(result.cbo_flush_count).to_be_greater_than(0u32)
+            expect(result.fence_i_count).to_be_greater_than(0u32)
 
         it "AC-2+AC-5: sync_icache without Zicbom still emits fence.i (no cbo.flush)":
             val env = make_integration_env_no_zicbom()
             hal_integration_init(env)
-            hal_integration_sync_icache(env, 0x80200000u64, 4096u64)
-            expect(env.fence_i_count).to_be_greater_than(0u32)
-            expect(env.cbo_flush_count).to_equal(0u32)
+            val result = hal_integration_sync_icache(env, 0x80200000u64, 4096u64)
+            expect(result.fence_i_count).to_be_greater_than(0u32)
+            expect(result.cbo_flush_count).to_equal(0u32)
 
     describe "Zicbom available vs fallback path":
         it "AC-2+AC-5: clean_dcache with Zicbom emits cbo.clean (no diagnostic)":
             val env = make_integration_env_zicbom_available()
             hal_integration_init(env)
-            hal_integration_clean_dcache(env, 0x80300000u64, 128u64)
-            expect(env.cbo_clean_count).to_be_greater_than(0u32)
-            expect(env.diagnostic_emitted).to_equal(false)
+            val result = hal_integration_clean_dcache(env, 0x80300000u64, 128u64)
+            expect(result.cbo_clean_count).to_be_greater_than(0u32)
+            expect(result.diagnostic_emitted).to_equal(false)
 
         it "AC-2+AC-5: clean_dcache without Zicbom emits diagnostic (no cbo.clean, no panic)":
             val env = make_integration_env_no_zicbom()
             hal_integration_init(env)
-            hal_integration_clean_dcache(env, 0x80300000u64, 128u64)
-            expect(env.cbo_clean_count).to_equal(0u32)
-            expect(env.diagnostic_emitted).to_equal(true)
+            val result = hal_integration_clean_dcache(env, 0x80300000u64, 128u64)
+            expect(result.cbo_clean_count).to_equal(0u32)
+            expect(result.diagnostic_emitted).to_equal(true)
 
     describe "Cross-feature handshake — PortableNumericCapabilities (AC-3)":
         it "AC-3: after init with Zicbom isa, has_riscv_zicbom is true":

@@ -40,35 +40,69 @@ fn hal_cache32_init_with_isa(isa: text):
     val caps = hal_cache32_probe_with_isa(isa)
     ZICBOM_STATE32 = caps.has_zicbom
 
-fn hal_cache32_sync_icache_with_log(log: CacheOpLog32, caps: CmoCapSnapshot32, addr: u32, len: u32):
+fn hal_cache32_sync_icache_with_log(caps: CmoCapSnapshot32, addr: u32, len: u32) -> CacheOpLog32:
+    """Simulate hal_cache32_sync_icache: cbo.flush per-line if Zicbom, then fence.i.
+    Returns a CacheOpLog32 with counters populated (avoids parameter-mutation interpreter bug)."""
     val stride: u32 = 64u32
+    var cbo_flush_count: u32 = 0u32
     if caps.has_zicbom:
         var cur = addr
         val end_addr = addr + len
         while cur < end_addr:
-            log.cbo_flush_count = log.cbo_flush_count + 1u32
+            cbo_flush_count = cbo_flush_count + 1u32
             cur = cur + stride
-    log.fence_i_count = log.fence_i_count + 1u32
+    CacheOpLog32(
+        fence_i_count: 1u32,
+        cbo_clean_count: 0u32,
+        cbo_inval_count: 0u32,
+        cbo_flush_count: cbo_flush_count,
+        cbo_zero_count: 0u32,
+        diagnostic_emitted: false
+    )
 
-fn hal_cache32_clean_dcache_with_log(log: CacheOpLog32, caps: CmoCapSnapshot32, addr: u32, len: u32, stride: u32):
+fn hal_cache32_clean_dcache_with_log(caps: CmoCapSnapshot32, addr: u32, len: u32, stride: u32) -> CacheOpLog32:
+    """Simulate hal_cache32_clean_dcache: cbo.clean per-line when Zicbom=true, else diagnostic.
+    Returns a CacheOpLog32 with counters populated (avoids parameter-mutation interpreter bug)."""
+    var cbo_clean_count: u32 = 0u32
+    var diagnostic_emitted: bool = false
     if caps.has_zicbom:
         var cur = addr
         val end_addr = addr + len
         while cur < end_addr:
-            log.cbo_clean_count = log.cbo_clean_count + 1u32
+            cbo_clean_count = cbo_clean_count + 1u32
             cur = cur + stride
     else:
-        log.diagnostic_emitted = true
+        diagnostic_emitted = true
+    CacheOpLog32(
+        fence_i_count: 0u32,
+        cbo_clean_count: cbo_clean_count,
+        cbo_inval_count: 0u32,
+        cbo_flush_count: 0u32,
+        cbo_zero_count: 0u32,
+        diagnostic_emitted: diagnostic_emitted
+    )
 
-fn hal_cache32_invalidate_dcache_with_log(log: CacheOpLog32, caps: CmoCapSnapshot32, addr: u32, len: u32, stride: u32):
+fn hal_cache32_invalidate_dcache_with_log(caps: CmoCapSnapshot32, addr: u32, len: u32, stride: u32) -> CacheOpLog32:
+    """Simulate hal_cache32_invalidate_dcache: cbo.inval per-line when Zicbom=true, else diagnostic.
+    Returns a CacheOpLog32 with counters populated (avoids parameter-mutation interpreter bug)."""
+    var cbo_inval_count: u32 = 0u32
+    var diagnostic_emitted: bool = false
     if caps.has_zicbom:
         var cur = addr
         val end_addr = addr + len
         while cur < end_addr:
-            log.cbo_inval_count = log.cbo_inval_count + 1u32
+            cbo_inval_count = cbo_inval_count + 1u32
             cur = cur + stride
     else:
-        log.diagnostic_emitted = true
+        diagnostic_emitted = true
+    CacheOpLog32(
+        fence_i_count: 0u32,
+        cbo_clean_count: 0u32,
+        cbo_inval_count: cbo_inval_count,
+        cbo_flush_count: 0u32,
+        cbo_zero_count: 0u32,
+        diagnostic_emitted: diagnostic_emitted
+    )
 
 # ============================================================================
 # Canonical trait methods — production-callable (AC-2, rv32 mirror)
@@ -80,18 +114,15 @@ fn current_cmo_caps32() -> CmoCapSnapshot32:
 
 fn hal_cache32_sync_icache(addr: u32, len: u32):
     """Sync icache (rv32): cbo.flush per-line (if Zicbom) then fence.i."""
-    val log = make_empty_log32()
     val caps = current_cmo_caps32()
-    hal_cache32_sync_icache_with_log(log, caps, addr, len)
+    val log = hal_cache32_sync_icache_with_log(caps, addr, len)
 
 fn hal_cache32_clean_dcache(addr: u32, len: u32):
     """Clean dcache (rv32): cbo.clean per-line when Zicbom=true, else diagnostic."""
-    val log = make_empty_log32()
     val caps = current_cmo_caps32()
-    hal_cache32_clean_dcache_with_log(log, caps, addr, len, 64u32)
+    val log = hal_cache32_clean_dcache_with_log(caps, addr, len, 64u32)
 
 fn hal_cache32_invalidate_dcache(addr: u32, len: u32):
     """Invalidate dcache (rv32): cbo.inval per-line when Zicbom=true, else diagnostic."""
-    val log = make_empty_log32()
     val caps = current_cmo_caps32()
-    hal_cache32_invalidate_dcache_with_log(log, caps, addr, len, 64u32)
+    val log = hal_cache32_invalidate_dcache_with_log(caps, addr, len, 64u32)
