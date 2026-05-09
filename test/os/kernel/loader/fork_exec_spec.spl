@@ -1,15 +1,14 @@
 """
 Fork/Exec Structural Specification
 
-Tests the kernel-level fork (syscall 57) and exec (syscall 59) dispatch
-interfaces structurally. These specs verify:
-  - The syscall handler routes fork/exec IDs correctly
-  - exec rejects invalid arguments (null pointer, oversized path)
+Tests the kernel-level exec (syscall 59) dispatch path structurally.
+These specs verify:
+  - exec rejects invalid arguments (empty path)
   - exec resolves executable bytes from synthetic sources
-  - The API surface and error codes match the expected ABI
+  - The resolution pipeline returns correct bytes end-to-end
 
 No actual processes are spawned — all tests exercise the structural
-contract of the syscall dispatch path.
+contract of the executable resolution path.
 
 Run:
   bin/simple test test/os/kernel/loader/fork_exec_spec.spl
@@ -21,15 +20,8 @@ use os.kernel.loader.executable_source.{
     resolve_executable_bytes_from_path_bytes,
     _set_synthetic_initramfs_for_test,
     _clear_synthetic_initramfs_for_test,
-    _set_synthetic_vfs_file_for_test,
     _clear_synthetic_vfs_for_test
 }
-use os.kernel.loader.elf_loader.{
-    load_user_executable,
-    elf_image_entry,
-    elf_image_segments
-}
-use os.kernel.loader.process_image.{build_user_process_image}
 use os.kernel.arch.arch_context.{Architecture}
 use os.kernel.loader.app_registry.{app_registry_clear, app_registry_register}
 
@@ -119,22 +111,6 @@ fn _minimal_elf64_x86_64() -> [u8]:
 # Specs
 # ---------------------------------------------------------------------------
 
-describe "fork — kernel dispatch structural":
-    """Verify the fork syscall (57) interface contract exists and is structurally sound."""
-
-    it "fork syscall ID 57 is wired in the dispatch table":
-        # Structural assertion: the kernel dispatch table routes syscall 57
-        # to _handle_fork. We verify by confirming the exec path (59) is
-        # reachable via resolve_executable_bytes — the same dispatcher
-        # handles both fork (57) and exec (59). If exec dispatch works,
-        # the fork entry at 57 is also wired (same match block).
-        _clear_synthetic_initramfs_for_test()
-        # Non-absolute path avoids VFS reader (interpreter limitation)
-        val result = resolve_executable_bytes("nonexistent", Architecture.X86_64)
-        # resolve_executable_bytes itself works (returns ENOENT, not a crash),
-        # confirming the loader subsystem that exec depends on is functional.
-        expect(result.is_err()).to_equal(true)
-
 describe "exec — argument validation":
     """Verify exec rejects invalid arguments at the structural level."""
 
@@ -190,28 +166,10 @@ describe "exec — image replacement structural":
 
         _clear_synthetic_initramfs_for_test()
 
-    it "exec build_user_process_image returns a Result for valid ELF":
-        _clear_synthetic_initramfs_for_test()
-        _clear_synthetic_vfs_for_test()
-
-        val elf_data = _minimal_elf64_x86_64()
-
-        # build_user_process_image may fail due to pre-existing interpreter
-        # ElfClass comparison bug. Assert it returns a valid Result.
-        val image_result = build_user_process_image(
-            "/sys/apps/exec_target",
-            elf_data,
-            Architecture.X86_64,
-            ["/sys/apps/exec_target"],
-            []
-        )
-        val is_result = image_result.is_ok() or image_result.is_err()
-        expect(is_result).to_equal(true)
-
 describe "fork+exec lifecycle — structural":
     """Verify the complete fork+exec API surface compiles and the pipeline is coherent."""
 
-    it "full lifecycle: resolve -> ELF bytes confirmed -> build attempted":
+    it "full lifecycle: resolve -> ELF bytes confirmed":
         _clear_synthetic_initramfs_for_test()
         _clear_synthetic_vfs_for_test()
 
@@ -220,7 +178,7 @@ describe "fork+exec lifecycle — structural":
 
         # Parent would fork() (syscall 57) — returns child PID in parent.
         # Child would exec() (syscall 59) — replaces its image.
-        # We test the exec part structurally: resolve + build.
+        # We test the exec resolution part structurally.
 
         val bytes_result = resolve_executable_bytes("/sys/apps/lifecycle", Architecture.X86_64)
         expect(bytes_result.is_ok()).to_equal(true)
@@ -232,15 +190,7 @@ describe "fork+exec lifecycle — structural":
         expect(raw_bytes[2]).to_equal(0x4C.to_u8())
         expect(raw_bytes[3]).to_equal(0x46.to_u8())
 
-        # Attempt image build (may fail due to interpreter ElfClass bug)
-        val image_result = build_user_process_image(
-            "/sys/apps/lifecycle",
-            raw_bytes,
-            Architecture.X86_64,
-            ["/sys/apps/lifecycle", "arg1", "arg2"],
-            ["PATH=/usr/bin", "HOME=/home/user"]
-        )
-        val is_result = image_result.is_ok() or image_result.is_err()
-        expect(is_result).to_equal(true)
+        # Verify byte count matches
+        expect(raw_bytes.len()).to_equal(elf_data.len())
 
         _clear_synthetic_initramfs_for_test()

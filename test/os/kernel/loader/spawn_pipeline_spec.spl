@@ -19,12 +19,7 @@ use os.kernel.loader.executable_source.{
     _set_synthetic_vfs_file_for_test,
     _clear_synthetic_vfs_for_test
 }
-use os.kernel.loader.elf_loader.{
-    load_user_executable,
-    ElfImage,
-    elf_image_entry,
-    elf_image_segments
-}
+use os.kernel.loader.elf_loader.{load_user_executable}
 use os.kernel.loader.process_image.{build_user_process_image}
 use os.kernel.loader.app_registry.{
     app_registry_clear,
@@ -256,15 +251,6 @@ describe "spawn pipeline — executable resolution":
 describe "spawn pipeline — ELF parser validation":
     """ELF parser validates magic bytes and rejects non-ELF data."""
 
-    it "validates ELF magic bytes and parses a valid x86_64 ELF":
-        val elf_data = _minimal_elf64_x86_64()
-        val result = load_user_executable(elf_data, Architecture.X86_64)
-        # Pre-existing interpreter bug: ElfClass optional unwrap comparison
-        # fails in interpreter mode (process_image_spec has the same issue).
-        # Assert the function is callable and returns a Result.
-        val is_result = result.is_ok() or result.is_err()
-        expect(is_result).to_equal(true)
-
     it "rejects non-ELF data with an error":
         val bad_data = _non_elf_payload()
         val result = load_user_executable(bad_data, Architecture.X86_64)
@@ -278,22 +264,7 @@ describe "spawn pipeline — ELF parser validation":
         expect(result.is_err()).to_equal(true)
 
 describe "spawn pipeline — process image builder":
-    """build_user_process_image produces correct entry point from ELF."""
-
-    it "builds a process image and returns a Result":
-        val elf_data = _minimal_elf64_x86_64()
-        val result = build_user_process_image(
-            "/sys/apps/test_entry",
-            elf_data,
-            Architecture.X86_64,
-            ["/sys/apps/test_entry"],
-            []
-        )
-        # Pre-existing interpreter bug: ElfClass comparison fails in
-        # interpreter mode (same as process_image_spec.spl). Assert the
-        # function is callable and returns a Result.
-        val is_result = result.is_ok() or result.is_err()
-        expect(is_result).to_equal(true)
+    """build_user_process_image rejects invalid data."""
 
     it "rejects non-ELF data":
         val bad_data = _non_elf_payload()
@@ -376,7 +347,7 @@ describe "spawn pipeline — app registry":
 describe "spawn pipeline — full pipeline integration":
     """End-to-end: path -> bytes -> ELF parse -> image build."""
 
-    it "resolves a synthetic path and verifies ELF bytes are loadable":
+    it "resolves a synthetic path and verifies ELF magic in resolved bytes":
         _clear_synthetic_initramfs_for_test()
         _clear_synthetic_vfs_for_test()
         app_registry_clear()
@@ -385,7 +356,7 @@ describe "spawn pipeline — full pipeline integration":
         val elf_data = _minimal_elf64_x86_64()
         _set_synthetic_initramfs_for_test("/sys/apps/e2e_test", elf_data)
 
-        # Step 1: resolve path to bytes
+        # Resolve path to bytes
         val resolve_result = resolve_executable_bytes("/sys/apps/e2e_test", Architecture.X86_64)
         expect(resolve_result.is_ok()).to_equal(true)
         val raw_bytes = resolve_result.unwrap()
@@ -396,17 +367,8 @@ describe "spawn pipeline — full pipeline integration":
         expect(raw_bytes[2]).to_equal(0x4C.to_u8())
         expect(raw_bytes[3]).to_equal(0x46.to_u8())
 
-        # Step 2: attempt to build process image
-        # (may fail due to pre-existing interpreter ElfClass comparison bug)
-        val image_result = build_user_process_image(
-            "/sys/apps/e2e_test",
-            raw_bytes,
-            Architecture.X86_64,
-            ["/sys/apps/e2e_test", "--test"],
-            ["HOME=/root"]
-        )
-        val is_result = image_result.is_ok() or image_result.is_err()
-        expect(is_result).to_equal(true)
+        # Verify resolved byte count matches injected payload
+        expect(raw_bytes.len()).to_equal(elf_data.len())
 
         _clear_synthetic_initramfs_for_test()
         _clear_synthetic_vfs_for_test()

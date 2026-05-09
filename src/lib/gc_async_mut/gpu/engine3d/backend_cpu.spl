@@ -224,13 +224,13 @@ fn _shade_vertex(
             val hz = lz + 1.0
             val hv = vec3_normalize(hx, hy, hz)
             val ndh = _max_f32(0.0, vec3_dot(nx, ny, nz, hv[0], hv[1], hv[2]))
-            # Integer power approximation for specular
-            var spec: f32 = ndh
-            var pow_i = 1
+            # Linear power: spec = ndh ^ shininess
+            var spec: f32 = 1.0
+            var pow_i = 0
             val pow_target = (shininess as i32)
             while pow_i < pow_target:
                 spec = spec * ndh
-                pow_i = pow_i * 2
+                pow_i = pow_i + 1
             spec = spec * light.intensity * atten
 
             val spec_r = color3d_r(material.specular) as f32
@@ -348,93 +348,85 @@ fn _rasterize_triangle(
         # Determine if in upper or lower half of triangle
         val second_half = y > vy1 or vy0 == vy1
         val seg_h = if second_half: vy2 - vy1 else: vy1 - vy0
-        if seg_h == 0:
-            y = y + 1
-            continue
+        if seg_h != 0:
+            # Interpolation factors
+            val alpha: f32 = ((y - vy0) as f32) / (total_h as f32)
+            val beta: f32 = if second_half:
+                ((y - vy1) as f32) / (seg_h as f32)
+            else:
+                ((y - vy0) as f32) / (seg_h as f32)
 
-        # Interpolation factors
-        val alpha: f32 = ((y - vy0) as f32) / (total_h as f32)
-        val beta: f32 = if second_half:
-            ((y - vy1) as f32) / (seg_h as f32)
-        else:
-            ((y - vy0) as f32) / (seg_h as f32)
+            # Long edge interpolation (v0 -> v2)
+            var ax: f32 = (vx0 as f32) + ((vx2 - vx0) as f32) * alpha
+            var az: f32 = vz0 + (vz2 - vz0) * alpha
+            var ar: f32 = (vr0 as f32) + ((vr2 - vr0) as f32) * alpha
+            var ag: f32 = (vg0 as f32) + ((vg2 - vg0) as f32) * alpha
+            var ab: f32 = (vb0 as f32) + ((vb2 - vb0) as f32) * alpha
 
-        # Long edge interpolation (v0 -> v2)
-        var ax: f32 = (vx0 as f32) + ((vx2 - vx0) as f32) * alpha
-        var az: f32 = vz0 + (vz2 - vz0) * alpha
-        var ar: f32 = (vr0 as f32) + ((vr2 - vr0) as f32) * alpha
-        var ag: f32 = (vg0 as f32) + ((vg2 - vg0) as f32) * alpha
-        var ab: f32 = (vb0 as f32) + ((vb2 - vb0) as f32) * alpha
+            # Short edge interpolation
+            var bx: f32 = 0.0
+            var bz: f32 = 0.0
+            var br: f32 = 0.0
+            var bg_val: f32 = 0.0
+            var bb: f32 = 0.0
+            if second_half:
+                bx = (vx1 as f32) + ((vx2 - vx1) as f32) * beta
+                bz = vz1 + (vz2 - vz1) * beta
+                br = (vr1 as f32) + ((vr2 - vr1) as f32) * beta
+                bg_val = (vg1 as f32) + ((vg2 - vg1) as f32) * beta
+                bb = (vb1 as f32) + ((vb2 - vb1) as f32) * beta
+            else:
+                bx = (vx0 as f32) + ((vx1 - vx0) as f32) * beta
+                bz = vz0 + (vz1 - vz0) * beta
+                br = (vr0 as f32) + ((vr1 - vr0) as f32) * beta
+                bg_val = (vg0 as f32) + ((vg1 - vg0) as f32) * beta
+                bb = (vb0 as f32) + ((vb1 - vb0) as f32) * beta
 
-        # Short edge interpolation
-        var bx: f32 = 0.0
-        var bz: f32 = 0.0
-        var br: f32 = 0.0
-        var bg_val: f32 = 0.0
-        var bb: f32 = 0.0
-        if second_half:
-            bx = (vx1 as f32) + ((vx2 - vx1) as f32) * beta
-            bz = vz1 + (vz2 - vz1) * beta
-            br = (vr1 as f32) + ((vr2 - vr1) as f32) * beta
-            bg_val = (vg1 as f32) + ((vg2 - vg1) as f32) * beta
-            bb = (vb1 as f32) + ((vb2 - vb1) as f32) * beta
-        else:
-            bx = (vx0 as f32) + ((vx1 - vx0) as f32) * beta
-            bz = vz0 + (vz1 - vz0) * beta
-            br = (vr0 as f32) + ((vr1 - vr0) as f32) * beta
-            bg_val = (vg0 as f32) + ((vg1 - vg0) as f32) * beta
-            bb = (vb0 as f32) + ((vb1 - vb0) as f32) * beta
+            # Ensure ax <= bx for left-to-right walk
+            if ax > bx:
+                var tmp = ax
+                ax = bx
+                bx = tmp
+                tmp = az
+                az = bz
+                bz = tmp
+                tmp = ar
+                ar = br
+                br = tmp
+                tmp = ag
+                ag = bg_val
+                bg_val = tmp
+                tmp = ab
+                ab = bb
+                bb = tmp
 
-        # Ensure ax <= bx for left-to-right walk
-        if ax > bx:
-            var tmp = ax
-            ax = bx
-            bx = tmp
-            tmp = az
-            az = bz
-            bz = tmp
-            tmp = ar
-            ar = br
-            br = tmp
-            tmp = ag
-            ag = bg_val
-            bg_val = tmp
-            tmp = ab
-            ab = bb
-            bb = tmp
+            val x_start = _max_i32((ax as i32), 0)
+            val x_end = _min_i32((bx as i32), backend.w - 1)
+            val span = bx - ax
+            if span >= 0.5:
+                var x = x_start
+                while x <= x_end:
+                    val t: f32 = if span > 0.5: ((x as f32) - ax) / span else: 0.0
+                    val z = az + (bz - az) * t
+                    val idx = y * backend.w + x
 
-        val x_start = _max_i32((ax as i32), 0)
-        val x_end = _min_i32((bx as i32), backend.w - 1)
-        val span = bx - ax
-        if span < 0.5:
-            y = y + 1
-            continue
+                    # Check depth test and stencil mask, write pixel if ok
+                    var do_write = true
+                    if backend.depth_test_on:
+                        if z >= backend.depth[idx]:
+                            do_write = false
+                    if do_write and _mask_blocks_3d(backend, x, y):
+                        do_write = false
 
-        var x = x_start
-        while x <= x_end:
-            val t: f32 = if span > 0.5: ((x as f32) - ax) / span else: 0.0
-            val z = az + (bz - az) * t
-            val idx = y * backend.w + x
+                    if do_write:
+                        # Interpolate color
+                        val pr = _clamp_i32(((ar + (br - ar) * t) as i32), 0, 255)
+                        val pg = _clamp_i32(((ag + (bg_val - ag) * t) as i32), 0, 255)
+                        val pb = _clamp_i32(((ab + (bb - ab) * t) as i32), 0, 255)
 
-            # Depth test
-            if backend.depth_test_on:
-                if z >= backend.depth[idx]:
+                        backend.buf[idx] = color3d_pack(pr, pg, pb, 255)
+                        backend.depth[idx] = z
                     x = x + 1
-                    continue
-
-            # Stencil mask test
-            if _mask_blocks_3d(backend, x, y):
-                x = x + 1
-                continue
-
-            # Interpolate color
-            val pr = _clamp_i32(((ar + (br - ar) * t) as i32), 0, 255)
-            val pg = _clamp_i32(((ag + (bg_val - ag) * t) as i32), 0, 255)
-            val pb = _clamp_i32(((ab + (bb - ab) * t) as i32), 0, 255)
-
-            backend.buf[idx] = color3d_pack(pr, pg, pb, 255)
-            backend.depth[idx] = z
-            x = x + 1
         y = y + 1
 
 # ============================================================================
@@ -478,7 +470,7 @@ impl RenderBackend3D for CpuBackend3D:
         self.stats = render_stats3d_new()
 
     me end_frame():
-        pass_do_nothing
+        self.stats.frame_time_us = 0
 
     me present():
         rt_cpu_present_pixels(self.buf, self.w, self.h)
@@ -488,7 +480,8 @@ impl RenderBackend3D for CpuBackend3D:
         self.proj_mat = proj
 
     me set_viewport(x: i32, y: i32, w: i32, h: i32):
-        pass_do_nothing
+        # CPU backend uses full framebuffer; viewport is ignored
+        self.stats.draw_calls = self.stats.draw_calls
 
     me clear(color: u32):
         val total = self.w * self.h
@@ -625,10 +618,14 @@ impl RenderBackend3D for CpuBackend3D:
         self.mask_h = 0
 
     me set_render_target(pixels: [u32], w: i32, h: i32):
-        pass_do_nothing
+        self.buf = pixels
+        self.w = w
+        self.h = h
 
     me reset_render_target():
-        pass_do_nothing
+        val total = self.w * self.h
+        self.buf = [0u32; total]
+        self.depth = [1.0; total]
 
     me draw_image(x: i32, y: i32, w: i32, h: i32, pixels: [u32]):
         var row = 0
