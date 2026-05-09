@@ -1,9 +1,8 @@
 # HTML Tree Builder — WHATWG insertion-mode tree construction
 #
 # Builds a BeDomNode tree from tokenized HTML.
-# Uses a simplified insertion mode state machine covering the common cases.
-# See architecture decision AD-1: emits BeDomNode directly (no i64 node store).
-# See architecture decision AD-9: adoption agency simplified (deferred to M15).
+# Key constraint: BeDomNode values are COPIED when pushed to arrays in interpreter mode.
+# Pattern: use stack[n-1] = node after mutation; children added to parent when CLOSED.
 
 use std.gc_async_mut.gpu.browser_engine.html_tokenizer.{
     HtmlTokenizer, HtmlToken, HtmlTokenKind, HtmlAttr,
@@ -11,117 +10,65 @@ use std.gc_async_mut.gpu.browser_engine.html_tokenizer.{
 }
 use std.gc_async_mut.gpu.browser_engine.dom.{
     BeDomNode, be_dom_get_tag, be_dom_get_children, be_dom_get_attr,
-    be_dom_add_child, be_dom_set_attr, be_dom_get_is_text
+    be_dom_add_child, be_dom_set_attr, be_dom_get_is_text,
+    be_dom_set_children
 }
 use std.gc_async_mut.gpu.browser_engine.css.{be_default_style}
 
-# =========================================================================
-# Insertion Modes
-# =========================================================================
+# Append child to node at top of stack, write it back
+fn _stk_append(stack: [BeDomNode], child: BeDomNode) -> [BeDomNode]:
+    """Append child to top of stack; return modified stack."""
+    val n = stack.len()
+    if n == 0: return stack
+    var parent = stack[n - 1]
+    var kids = parent.children
+    kids.push(child)
+    parent.children = kids
+    stack[n - 1] = parent
+    stack
 
-enum HtmlInsertionMode:
-    Initial
-    BeforeHtml
-    BeforeHead
-    InHead
-    AfterHead
-    InBody
-    Text
-    InTable
-    InTableText
-    InTableBody
-    InRow
-    InCell
-    InSelect
-    AfterBody
-    AfterAfterBody
-
-# =========================================================================
-# Open Element Stack
-# =========================================================================
-
-class BeOpenElementStack:
-    """Stack of currently open BeDomNode elements."""
-    nodes: [BeDomNode]
-
-fn _stack_new() -> BeOpenElementStack:
-    BeOpenElementStack(nodes: [])
-
-fn _stack_push(stack: BeOpenElementStack, node: BeDomNode):
-    stack.nodes.push(node)
-
-fn _stack_pop(stack: BeOpenElementStack) -> BeDomNode:
-    val n = stack.nodes.len()
-    if n == 0:
-        return BeDomNode.element("#empty")
-    val top = stack.nodes[n - 1]
-    val new_nodes: [BeDomNode] = []
+# Pop top from stack, return it (caller writes back result stack)
+fn _stk_pop_and_append(stack: [BeDomNode]) -> [BeDomNode]:
+    """Pop top node, append it as child of new top. Return new stack."""
+    val n = stack.len()
+    if n <= 1: return stack
+    val completed = stack[n - 1]
+    var rest: [BeDomNode] = []
     var i = 0
     while i < n - 1:
-        new_nodes.push(stack.nodes[i])
+        rest.push(stack[i])
         i = i + 1
-    stack.nodes = new_nodes
-    top
+    # Append completed to rest's top
+    val rn = rest.len()
+    var parent = rest[rn - 1]
+    var kids = parent.children
+    kids.push(completed)
+    parent.children = kids
+    rest[rn - 1] = parent
+    rest
 
-fn _stack_top(stack: BeOpenElementStack) -> BeDomNode:
-    val n = stack.nodes.len()
-    if n == 0:
-        return BeDomNode.element("#empty")
-    stack.nodes[n - 1]
+# Find top index of tag in stack (-1 if not found)
+fn _stk_find_tag(stack: [BeDomNode], tag: text) -> i32:
+    var i = stack.len() - 1
+    while i >= 0:
+        if be_dom_get_tag(stack[i]) == tag:
+            return i
+        i = i - 1
+    -1
 
-fn _stack_len(stack: BeOpenElementStack) -> i32:
-    stack.nodes.len()
-
-fn _stack_has_tag(stack: BeOpenElementStack, tag: text) -> bool:
-    """True if any element in the stack has the given tag name."""
-    var i = 0
-    val n = stack.nodes.len()
-    while i < n:
-        if be_dom_get_tag(stack.nodes[i]) == tag:
-            return true
-        i = i + 1
-    false
-
-fn _stack_pop_until(stack: BeOpenElementStack, tag: text):
-    """Pop elements from the stack until (and including) element with the given tag."""
-    var done = false
+# Pop until and including tag
+fn _stk_pop_until_incl(stack: [BeDomNode], tag: text) -> [BeDomNode]:
+    var s = stack
     var limit = 200
-    while not done and limit > 0:
+    while limit > 0 and s.len() > 1:
         limit = limit - 1
-        if _stack_len(stack) == 0:
-            done = true
-        else:
-            val top = _stack_top(stack)
-            val top_tag = be_dom_get_tag(top)
-            val popped = _stack_pop(stack)
-            if top_tag == tag:
-                done = true
+        val top_tag = be_dom_get_tag(s[s.len() - 1])
+        s = _stk_pop_and_append(s)
+        if top_tag == tag:
+            limit = 0  # done
+    s
 
-fn _stack_pop_to_scope(stack: BeOpenElementStack, tags: [text]):
-    """Pop until top element tag is in tags list (do not pop the matching element)."""
-    var done = false
-    var limit = 200
-    while not done and limit > 0:
-        limit = limit - 1
-        if _stack_len(stack) == 0:
-            done = true
-        else:
-            val top_tag = be_dom_get_tag(_stack_top(stack))
-            if _text_in_list(top_tag, tags):
-                done = true
-            else:
-                val _popped = _stack_pop(stack)
-
-fn _text_in_list(s: text, list: [text]) -> bool:
-    var i = 0
-    while i < list.len():
-        if list[i] == s:
-            return true
-        i = i + 1
-    false
-
-# Void elements — self-closing even without /
-fn _is_void_element(tag: text) -> bool:
+fn _is_void(tag: text) -> bool:
     if tag == "area": return true
     if tag == "base": return true
     if tag == "br": return true
@@ -138,488 +85,223 @@ fn _is_void_element(tag: text) -> bool:
     if tag == "wbr": return true
     false
 
-# Elements that implicitly close an open <p>
-fn _closes_p(tag: text) -> bool:
-    val block_tags = ["address", "article", "aside", "blockquote", "details", "dialog",
-        "dir", "div", "dl", "fieldset", "figcaption", "figure", "footer",
-        "h1", "h2", "h3", "h4", "h5", "h6", "header", "hgroup", "hr",
-        "main", "menu", "nav", "ol", "p", "section", "summary", "table", "ul"]
-    _text_in_list(tag, block_tags)
+fn _is_table_context(tag: text) -> bool:
+    """True if this tag is a table structural element."""
+    tag == "table" or tag == "tbody" or tag == "thead" or tag == "tfoot" or tag == "tr"
 
-# Elements that can be implicitly closed
-fn _is_optional_end(tag: text) -> bool:
-    if tag == "li": return true
-    if tag == "dt": return true
-    if tag == "dd": return true
-    if tag == "p": return true
-    if tag == "rb": return true
-    if tag == "rt": return true
-    if tag == "rp": return true
-    if tag == "optgroup": return true
-    if tag == "option": return true
-    if tag == "thead": return true
-    if tag == "tbody": return true
-    if tag == "tfoot": return true
-    if tag == "tr": return true
+fn _is_table_content(tag: text) -> bool:
+    """True if this tag is valid inside a table."""
+    if _is_table_context(tag): return true
     if tag == "td": return true
     if tag == "th": return true
+    if tag == "col": return true
+    if tag == "colgroup": return true
+    if tag == "caption": return true
     false
 
-# Block-level element tags
-fn _is_block_tag(tag: text) -> bool:
-    val blocks = ["address", "article", "aside", "blockquote", "dd", "details",
-        "dialog", "dir", "div", "dl", "dt", "fieldset", "figcaption", "figure",
-        "footer", "form", "h1", "h2", "h3", "h4", "h5", "h6", "header", "hgroup",
-        "hr", "li", "main", "menu", "nav", "ol", "p", "pre", "section", "summary",
-        "table", "ul"]
-    _text_in_list(tag, blocks)
+fn _stk_in_table(stack: [BeDomNode]) -> bool:
+    """True if current insertion context is inside a table structural element."""
+    val top = be_dom_get_tag(stack[stack.len() - 1])
+    _is_table_context(top)
 
-# =========================================================================
-# HtmlTreeBuilder
-# =========================================================================
+fn _stk_find_table_ancestor(stack: [BeDomNode]) -> i32:
+    """Find index of nearest table ancestor in stack, or -1."""
+    var i = stack.len() - 1
+    while i >= 0:
+        if be_dom_get_tag(stack[i]) == "table":
+            return i
+        i = i - 1
+    -1
 
-class HtmlTreeBuilder:
-    """Builds a BeDomNode tree from HTML tokens."""
-    document: BeDomNode
-    open_elements: BeOpenElementStack
-    mode: HtmlInsertionMode
-    head_ptr: BeDomNode
-    foster_parenting: bool
+fn _stk_foster_append(stack: [BeDomNode], child: BeDomNode) -> [BeDomNode]:
+    """Append child before the table — to the table's parent. Returns modified stack."""
+    val table_idx = _stk_find_table_ancestor(stack)
+    if table_idx <= 0:
+        # No table or table is root — append to bottom
+        return _stk_append(stack, child)
+    else:
+        # Append to the table's parent (table_idx - 1)
+        var s = stack
+        var parent = s[table_idx - 1]
+        var kids = parent.children
+        kids.push(child)
+        parent.children = kids
+        s[table_idx - 1] = parent
+        return s
 
-fn _tb_new() -> HtmlTreeBuilder:
-    val doc = BeDomNode.element("#document")
-    HtmlTreeBuilder(
-        document: doc,
-        open_elements: _stack_new(),
-        mode: HtmlInsertionMode.Initial,
-        head_ptr: BeDomNode.element("#empty"),
-        foster_parenting: false
-    )
+fn _closes_p_elem(tag: text) -> bool:
+    if tag == "address": return true
+    if tag == "article": return true
+    if tag == "aside": return true
+    if tag == "blockquote": return true
+    if tag == "div": return true
+    if tag == "dl": return true
+    if tag == "fieldset": return true
+    if tag == "footer": return true
+    if tag == "h1": return true
+    if tag == "h2": return true
+    if tag == "h3": return true
+    if tag == "h4": return true
+    if tag == "h5": return true
+    if tag == "h6": return true
+    if tag == "header": return true
+    if tag == "hr": return true
+    if tag == "main": return true
+    if tag == "menu": return true
+    if tag == "nav": return true
+    if tag == "ol": return true
+    if tag == "p": return true
+    if tag == "pre": return true
+    if tag == "section": return true
+    if tag == "table": return true
+    if tag == "ul": return true
+    false
 
-fn _tb_current_node(tb: HtmlTreeBuilder) -> BeDomNode:
-    _stack_top(tb.open_elements)
-
-fn _tb_insert_element(tb: HtmlTreeBuilder, tag: text, attrs: [HtmlAttr]) -> BeDomNode:
-    """Insert a new element into the current node and push it onto the open stack."""
-    val node = BeDomNode.element(tag)
-    # Apply attributes
+fn _apply_attrs(node: BeDomNode, attrs: [HtmlAttr]) -> BeDomNode:
+    """Apply attributes to node and return the modified node."""
+    var n = node
     var ai = 0
     while ai < attrs.len():
         val attr = attrs[ai]
         ai = ai + 1
-        be_dom_set_attr(node, attr.name, attr.value)
-    val parent = _tb_current_node(tb)
-    be_dom_add_child(parent, node)
-    if not _is_void_element(tag):
-        _stack_push(tb.open_elements, node)
-    node
+        n.set_attr(attr.name, attr.value)
+    n
 
-fn _tb_insert_text(tb: HtmlTreeBuilder, data: text):
-    """Insert a text node into the current node."""
-    if data.trim().len() == 0:
-        # Ignore whitespace-only text in certain contexts
-        val cur_tag = be_dom_get_tag(_tb_current_node(tb))
-        if cur_tag == "#document" or cur_tag == "html" or cur_tag == "head":
-            return
-    val text_node = BeDomNode.text(data)
-    val parent = _tb_current_node(tb)
-    be_dom_add_child(parent, text_node)
-
-fn _tb_foster_parent_insert(tb: HtmlTreeBuilder, node: BeDomNode):
-    """Insert node using foster parenting (before the table, not inside it)."""
-    # Find the last table element in the open elements stack
-    val stack = tb.open_elements
-    val n = stack.nodes.len()
-    var table_idx = -1
-    var i = n - 1
-    while i >= 0:
-        if be_dom_get_tag(stack.nodes[i]) == "table":
-            table_idx = i
-            i = -1  # break
-        i = i - 1
-    if table_idx <= 0:
-        # No table in stack or table is root — insert into document
-        be_dom_add_child(tb.document, node)
-    else:
-        # Insert before the table in its parent
-        val table_parent = stack.nodes[table_idx - 1]
-        be_dom_add_child(table_parent, node)
-
-fn _tb_foster_parent_text(tb: HtmlTreeBuilder, data: text):
-    """Foster-parent a text node."""
-    if data.trim().len() == 0:
-        return
-    val text_node = BeDomNode.text(data)
-    _tb_foster_parent_insert(tb, text_node)
-
-fn _tb_process_token(tb: HtmlTreeBuilder, tok: HtmlToken):
-    """Process a single token in the current insertion mode."""
-    val kind = tok.token_kind
-    val mode = tb.mode
-
-    if mode == HtmlInsertionMode.Initial:
-        _tb_process_initial(tb, tok)
-    elif mode == HtmlInsertionMode.BeforeHtml:
-        _tb_process_before_html(tb, tok)
-    elif mode == HtmlInsertionMode.BeforeHead:
-        _tb_process_before_head(tb, tok)
-    elif mode == HtmlInsertionMode.InHead:
-        _tb_process_in_head(tb, tok)
-    elif mode == HtmlInsertionMode.AfterHead:
-        _tb_process_after_head(tb, tok)
-    elif mode == HtmlInsertionMode.InBody:
-        _tb_process_in_body(tb, tok)
-    elif mode == HtmlInsertionMode.Text:
-        _tb_process_text(tb, tok)
-    elif mode == HtmlInsertionMode.InTable:
-        _tb_process_in_table(tb, tok)
-    elif mode == HtmlInsertionMode.InTableBody:
-        _tb_process_in_table_body(tb, tok)
-    elif mode == HtmlInsertionMode.InRow:
-        _tb_process_in_row(tb, tok)
-    elif mode == HtmlInsertionMode.InCell:
-        _tb_process_in_body(tb, tok)
-    elif mode == HtmlInsertionMode.AfterBody:
-        _tb_process_after_body(tb, tok)
-    elif mode == HtmlInsertionMode.AfterAfterBody:
-        _tb_process_after_body(tb, tok)
-    else:
-        # Fallback: if in body-like modes, delegate to in_body
-        _tb_process_in_body(tb, tok)
-
-fn _tb_process_initial(tb: HtmlTreeBuilder, tok: HtmlToken):
-    if tok.token_kind == HtmlTokenKind.Doctype:
-        tb.mode = HtmlInsertionMode.BeforeHtml
-    elif tok.token_kind == HtmlTokenKind.Character:
-        # Ignore whitespace
-        if tok.data.trim().len() > 0:
-            tb.mode = HtmlInsertionMode.BeforeHtml
-            _tb_process_before_html(tb, tok)
-    else:
-        tb.mode = HtmlInsertionMode.BeforeHtml
-        _tb_process_before_html(tb, tok)
-
-fn _tb_process_before_html(tb: HtmlTreeBuilder, tok: HtmlToken):
-    if tok.token_kind == HtmlTokenKind.StartTag and tok.tag_name == "html":
-        val html_node = BeDomNode.element("html")
-        be_dom_add_child(tb.document, html_node)
-        _stack_push(tb.open_elements, html_node)
-        tb.mode = HtmlInsertionMode.BeforeHead
-    elif tok.token_kind == HtmlTokenKind.Eof:
-        # Create implied html element
-        val html_node2 = BeDomNode.element("html")
-        be_dom_add_child(tb.document, html_node2)
-        _stack_push(tb.open_elements, html_node2)
-        tb.mode = HtmlInsertionMode.BeforeHead
-    else:
-        # Create implied html element and reprocess
-        val html_node3 = BeDomNode.element("html")
-        be_dom_add_child(tb.document, html_node3)
-        _stack_push(tb.open_elements, html_node3)
-        tb.mode = HtmlInsertionMode.BeforeHead
-        _tb_process_before_head(tb, tok)
-
-fn _tb_process_before_head(tb: HtmlTreeBuilder, tok: HtmlToken):
-    if tok.token_kind == HtmlTokenKind.Character and tok.data.trim().len() == 0:
-        return  # ignore whitespace
-    if tok.token_kind == HtmlTokenKind.StartTag and tok.tag_name == "html":
-        _tb_process_in_body(tb, tok)
-    elif tok.token_kind == HtmlTokenKind.StartTag and tok.tag_name == "head":
-        val head = _tb_insert_element(tb, "head", tok.attrs)
-        tb.head_ptr = head
-        tb.mode = HtmlInsertionMode.InHead
-    elif tok.token_kind == HtmlTokenKind.EndTag:
-        val end_tag = tok.tag_name
-        if end_tag != "head" and end_tag != "body" and end_tag != "html" and end_tag != "br":
-            return  # parse error, ignore
-        # Fall through to implied head
-        val head2 = _tb_insert_element(tb, "head", [])
-        tb.head_ptr = head2
-        tb.mode = HtmlInsertionMode.InHead
-        _tb_process_in_head(tb, tok)
-    else:
-        # Implied head
-        val head3 = _tb_insert_element(tb, "head", [])
-        tb.head_ptr = head3
-        tb.mode = HtmlInsertionMode.InHead
-        _tb_process_in_head(tb, tok)
-
-fn _tb_process_in_head(tb: HtmlTreeBuilder, tok: HtmlToken):
-    if tok.token_kind == HtmlTokenKind.Character and tok.data.trim().len() == 0:
-        return  // ignore whitespace in head
-    if tok.token_kind == HtmlTokenKind.Comment:
-        return  // ignore comments
-    if tok.token_kind == HtmlTokenKind.StartTag:
-        val t = tok.tag_name
-        if t == "html":
-            _tb_process_in_body(tb, tok)
-        elif t == "base" or t == "basefont" or t == "bgsound" or t == "link" or t == "meta":
-            val _void = _tb_insert_element(tb, t, tok.attrs)
-            val _popped = _stack_pop(tb.open_elements)
-        elif t == "title":
-            val _title = _tb_insert_element(tb, t, tok.attrs)
-            tb.mode = HtmlInsertionMode.Text
-        elif t == "noframes" or t == "style" or t == "script" or t == "noscript":
-            val _raw = _tb_insert_element(tb, t, tok.attrs)
-            tb.mode = HtmlInsertionMode.Text
-        elif t == "head":
-            return  // parse error — ignore
-        else:
-            _tb_exit_head(tb)
-            _tb_process_after_head(tb, tok)
-    elif tok.token_kind == HtmlTokenKind.EndTag:
-        val et = tok.tag_name
-        if et == "head":
-            _tb_exit_head(tb)
-        elif et == "body" or et == "html" or et == "br":
-            _tb_exit_head(tb)
-            _tb_process_after_head(tb, tok)
-        else:
-            return  // parse error — ignore
-    else:
-        _tb_exit_head(tb)
-        _tb_process_after_head(tb, tok)
-
-fn _tb_exit_head(tb: HtmlTreeBuilder):
-    """Pop head element and transition to AfterHead."""
-    if be_dom_get_tag(_stack_top(tb.open_elements)) == "head":
-        val _h = _stack_pop(tb.open_elements)
-    tb.mode = HtmlInsertionMode.AfterHead
-
-fn _tb_process_after_head(tb: HtmlTreeBuilder, tok: HtmlToken):
-    if tok.token_kind == HtmlTokenKind.Character and tok.data.trim().len() == 0:
-        return  // ignore whitespace
-    if tok.token_kind == HtmlTokenKind.Comment:
-        return
-    if tok.token_kind == HtmlTokenKind.StartTag:
-        val t = tok.tag_name
-        if t == "html":
-            _tb_process_in_body(tb, tok)
-        elif t == "body":
-            val _body = _tb_insert_element(tb, "body", tok.attrs)
-            tb.mode = HtmlInsertionMode.InBody
-        elif t == "frameset":
-            val _fs = _tb_insert_element(tb, "frameset", tok.attrs)
-        elif t == "base" or t == "basefont" or t == "bgsound" or t == "link" or
-             t == "meta" or t == "noframes" or t == "script" or t == "style" or
-             t == "template" or t == "title":
-            // Treat as if in head
-            _stack_push(tb.open_elements, tb.head_ptr)
-            _tb_process_in_head(tb, tok)
-            _stack_pop_until(tb.open_elements, "head")
-        else:
-            val _body2 = _tb_insert_element(tb, "body", [])
-            tb.mode = HtmlInsertionMode.InBody
-            _tb_process_in_body(tb, tok)
-    elif tok.token_kind == HtmlTokenKind.EndTag:
-        val et = tok.tag_name
-        if et == "body" or et == "html" or et == "br":
-            val _body3 = _tb_insert_element(tb, "body", [])
-            tb.mode = HtmlInsertionMode.InBody
-            _tb_process_in_body(tb, tok)
-        else:
-            return  // parse error — ignore
-    else:
-        val _body4 = _tb_insert_element(tb, "body", [])
-        tb.mode = HtmlInsertionMode.InBody
-        _tb_process_in_body(tb, tok)
-
-fn _tb_process_in_body(tb: HtmlTreeBuilder, tok: HtmlToken):
-    if tok.token_kind == HtmlTokenKind.Character:
-        _tb_insert_text(tb, tok.data)
-    elif tok.token_kind == HtmlTokenKind.Comment:
-        return  // ignore
-    elif tok.token_kind == HtmlTokenKind.StartTag:
-        val t = tok.tag_name
-        # Implicitly close <p> when block element starts
-        if _closes_p(t) and _stack_has_tag(tb.open_elements, "p"):
-            _stack_pop_until(tb.open_elements, "p")
-        # Implicitly close <li> when new <li> starts
-        if t == "li" and _stack_has_tag(tb.open_elements, "li"):
-            _stack_pop_until(tb.open_elements, "li")
-        # Implicitly close <dt>/<dd>
-        if (t == "dt" or t == "dd") and (
-            _stack_has_tag(tb.open_elements, "dt") or
-            _stack_has_tag(tb.open_elements, "dd")):
-            _stack_pop_to_scope(tb.open_elements, ["dt", "dd"])
-        if t == "table":
-            val _table = _tb_insert_element(tb, "table", tok.attrs)
-            tb.mode = HtmlInsertionMode.InTable
-            tb.foster_parenting = true
-        elif t == "head":
-            return  // parse error — ignore
-        elif _is_void_element(t):
-            val _void2 = _tb_insert_element(tb, t, tok.attrs)
-            // void elements are not pushed (handled in _tb_insert_element)
-        else:
-            val _elem = _tb_insert_element(tb, t, tok.attrs)
-    elif tok.token_kind == HtmlTokenKind.EndTag:
-        val et = tok.tag_name
-        if et == "body" or et == "html":
-            if _stack_has_tag(tb.open_elements, "body"):
-                tb.mode = HtmlInsertionMode.AfterBody
-                if et == "html":
-                    _tb_process_after_body(tb, tok)
-        elif _stack_has_tag(tb.open_elements, et):
-            _stack_pop_until(tb.open_elements, et)
-        else:
-            return  // parse error — ignore
-    elif tok.token_kind == HtmlTokenKind.Eof:
-        // Stop parsing
-        tb.mode = HtmlInsertionMode.AfterAfterBody
-
-fn _tb_process_text(tb: HtmlTreeBuilder, tok: HtmlToken):
-    if tok.token_kind == HtmlTokenKind.Character:
-        _tb_insert_text(tb, tok.data)
-    elif tok.token_kind == HtmlTokenKind.EndTag:
-        // End of script/style/title
-        val _popped = _stack_pop(tb.open_elements)
-        tb.mode = HtmlInsertionMode.InBody
-    elif tok.token_kind == HtmlTokenKind.Eof:
-        val _popped2 = _stack_pop(tb.open_elements)
-        tb.mode = HtmlInsertionMode.InBody
-
-fn _tb_process_in_table(tb: HtmlTreeBuilder, tok: HtmlToken):
-    if tok.token_kind == HtmlTokenKind.Character:
-        // Foster-parent misplaced text
-        if tok.data.trim().len() > 0:
-            _tb_foster_parent_text(tb, tok.data)
-    elif tok.token_kind == HtmlTokenKind.StartTag:
-        val t = tok.tag_name
-        if t == "caption" or t == "colgroup" or t == "col":
-            val _elem = _tb_insert_element(tb, t, tok.attrs)
-        elif t == "tbody" or t == "tfoot" or t == "thead":
-            val _sec = _tb_insert_element(tb, t, tok.attrs)
-            tb.mode = HtmlInsertionMode.InTableBody
-        elif t == "td" or t == "th" or t == "tr":
-            // Create implied tbody
-            val tbody = _tb_insert_element(tb, "tbody", [])
-            tb.mode = HtmlInsertionMode.InTableBody
-            _tb_process_in_table_body(tb, tok)
-        elif t == "table":
-            // Nested table — foster parent
-            val _nested = BeDomNode.element("table")
-            _tb_foster_parent_insert(tb, _nested)
-        else:
-            // Foster-parent non-table content
-            val non_table_node = BeDomNode.element(t)
-            var ai2 = 0
-            while ai2 < tok.attrs.len():
-                val attr2 = tok.attrs[ai2]
-                ai2 = ai2 + 1
-                be_dom_set_attr(non_table_node, attr2.name, attr2.value)
-            _tb_foster_parent_insert(tb, non_table_node)
-    elif tok.token_kind == HtmlTokenKind.EndTag:
-        val et = tok.tag_name
-        if et == "table":
-            if _stack_has_tag(tb.open_elements, "table"):
-                _stack_pop_until(tb.open_elements, "table")
-            tb.mode = HtmlInsertionMode.InBody
-            tb.foster_parenting = false
-        elif et == "body" or et == "html":
-            return  // parse error — ignore
-    elif tok.token_kind == HtmlTokenKind.Eof:
-        tb.mode = HtmlInsertionMode.InBody
-
-fn _tb_process_in_table_body(tb: HtmlTreeBuilder, tok: HtmlToken):
-    if tok.token_kind == HtmlTokenKind.StartTag:
-        val t = tok.tag_name
-        if t == "tr":
-            if _stack_has_tag(tb.open_elements, "tr"):
-                _stack_pop_until(tb.open_elements, "tr")
-            val _tr = _tb_insert_element(tb, "tr", tok.attrs)
-            tb.mode = HtmlInsertionMode.InRow
-        elif t == "td" or t == "th":
-            // Create implied tr
-            val _tr2 = _tb_insert_element(tb, "tr", [])
-            tb.mode = HtmlInsertionMode.InRow
-            _tb_process_in_row(tb, tok)
-        elif t == "caption" or t == "col" or t == "colgroup" or
-             t == "tbody" or t == "tfoot" or t == "thead":
-            _stack_pop_to_scope(tb.open_elements, ["tbody", "thead", "tfoot", "table"])
-            val _sec = _tb_insert_element(tb, t, tok.attrs)
-        else:
-            _tb_process_in_table(tb, tok)
-    elif tok.token_kind == HtmlTokenKind.EndTag:
-        val et = tok.tag_name
-        if et == "tbody" or et == "tfoot" or et == "thead":
-            if _stack_has_tag(tb.open_elements, et):
-                _stack_pop_until(tb.open_elements, et)
-            tb.mode = HtmlInsertionMode.InTable
-        elif et == "table":
-            _stack_pop_to_scope(tb.open_elements, ["tbody", "thead", "tfoot", "table"])
-            _tb_process_in_table(tb, tok)
-        else:
-            _tb_process_in_table(tb, tok)
-    else:
-        _tb_process_in_table(tb, tok)
-
-fn _tb_process_in_row(tb: HtmlTreeBuilder, tok: HtmlToken):
-    if tok.token_kind == HtmlTokenKind.StartTag:
-        val t = tok.tag_name
-        if t == "td" or t == "th":
-            if _stack_has_tag(tb.open_elements, "td") or _stack_has_tag(tb.open_elements, "th"):
-                _stack_pop_to_scope(tb.open_elements, ["td", "th", "tr"])
-            val _cell = _tb_insert_element(tb, t, tok.attrs)
-            tb.mode = HtmlInsertionMode.InCell
-        elif t == "tr":
-            if _stack_has_tag(tb.open_elements, "tr"):
-                _stack_pop_until(tb.open_elements, "tr")
-            val _tr3 = _tb_insert_element(tb, "tr", tok.attrs)
-            tb.mode = HtmlInsertionMode.InRow
-        else:
-            _tb_process_in_table(tb, tok)
-    elif tok.token_kind == HtmlTokenKind.EndTag:
-        val et = tok.tag_name
-        if et == "tr":
-            if _stack_has_tag(tb.open_elements, "tr"):
-                _stack_pop_until(tb.open_elements, "tr")
-            tb.mode = HtmlInsertionMode.InTableBody
-        elif et == "table":
-            if _stack_has_tag(tb.open_elements, "tr"):
-                _stack_pop_until(tb.open_elements, "tr")
-            tb.mode = HtmlInsertionMode.InTableBody
-            _tb_process_in_table_body(tb, tok)
-        elif et == "tbody" or et == "tfoot" or et == "thead":
-            if _stack_has_tag(tb.open_elements, et):
-                _stack_pop_until(tb.open_elements, "tr")
-                tb.mode = HtmlInsertionMode.InTableBody
-                _tb_process_in_table_body(tb, tok)
-        else:
-            _tb_process_in_table(tb, tok)
-    else:
-        _tb_process_in_table(tb, tok)
-
-fn _tb_process_after_body(tb: HtmlTreeBuilder, tok: HtmlToken):
-    if tok.token_kind == HtmlTokenKind.Character and tok.data.trim().len() == 0:
-        return  // ignore whitespace
-    if tok.token_kind == HtmlTokenKind.Comment:
-        return
-    if tok.token_kind == HtmlTokenKind.StartTag and tok.tag_name == "html":
-        _tb_process_in_body(tb, tok)
-    elif tok.token_kind == HtmlTokenKind.EndTag and tok.tag_name == "html":
-        tb.mode = HtmlInsertionMode.AfterAfterBody
-    elif tok.token_kind == HtmlTokenKind.Eof:
-        tb.mode = HtmlInsertionMode.AfterAfterBody
-    else:
-        tb.mode = HtmlInsertionMode.InBody
-        _tb_process_in_body(tb, tok)
-
-# =========================================================================
-# Public entry point
-# =========================================================================
-
-pub fn html_tree_builder_build(html: text) -> BeDomNode:
-    """Tokenize and build a BeDomNode tree from an HTML string. Returns the #document node."""
-    val tokenizer = html_tokenizer_new(html)
+pub fn html_tree_builder_build(html_text: text) -> BeDomNode:
+    """Build a BeDomNode tree. Returns a #document node with an html child."""
+    val tokenizer = html_tokenizer_new(html_text)
     val tokens = html_tokenizer_tokenize(tokenizer)
-    val tb = _tb_new()
-    var i = 0
-    val n = tokens.len()
-    while i < n:
-        val tok = tokens[i]
-        i = i + 1
-        _tb_process_token(tb, tok)
-        if tb.mode == HtmlInsertionMode.AfterAfterBody:
-            i = n  // done
-    tb.document
+
+    # Stack: [#document, html, head] initially
+    # We'll switch from head-mode to body-mode on first body content
+    val doc_node = BeDomNode.element("#document")
+    val html_el = BeDomNode.element("html")
+    val head_el = BeDomNode.element("head")
+    val body_el = BeDomNode.element("body")
+
+    var stack: [BeDomNode] = []
+    stack.push(doc_node)
+    stack.push(html_el)
+    stack.push(head_el)
+
+    var in_body = false
+
+    val ntok = tokens.len()
+    var ti = 0
+    while ti < ntok:
+        val tok = tokens[ti]
+        ti = ti + 1
+
+        if tok.token_kind == HtmlTokenKind.Eof:
+            ti = ntok
+
+        elif tok.token_kind == HtmlTokenKind.Doctype:
+            pass_dn
+
+        elif tok.token_kind == HtmlTokenKind.Comment:
+            pass_dn
+
+        elif tok.token_kind == HtmlTokenKind.StartTag:
+            val t = tok.tag_name
+
+            if t == "html" or t == "head":
+                pass_dn  # already implicit
+
+            elif t == "body":
+                if not in_body:
+                    # Pop head, push body
+                    stack = _stk_pop_and_append(stack)
+                    stack.push(body_el)
+                    in_body = true
+
+            elif t == "title" or t == "meta" or t == "link" or t == "base":
+                # head elements — add to top of stack as void children
+                val he_raw = BeDomNode.element(t)
+                val he = _apply_attrs(he_raw, tok.attrs)
+                stack = _stk_append(stack, he)
+
+            elif t == "style" or t == "script" or t == "noscript":
+                pass_dn  # skip in M14
+
+            else:
+                # Switch to body if not yet
+                if not in_body:
+                    stack = _stk_pop_and_append(stack)  # close head
+                    stack.push(body_el)
+                    in_body = true
+
+                # Implicit close of <p> before block elements
+                if _closes_p_elem(t) and _stk_find_tag(stack, "p") >= 0:
+                    stack = _stk_pop_until_incl(stack, "p")
+
+                # Implicit close of <li> before new <li>
+                if t == "li" and _stk_find_tag(stack, "li") >= 0:
+                    stack = _stk_pop_until_incl(stack, "li")
+
+                # Implicit close of <dt>/<dd>
+                if t == "dt" and _stk_find_tag(stack, "dt") >= 0:
+                    stack = _stk_pop_until_incl(stack, "dt")
+                if t == "dd" and _stk_find_tag(stack, "dd") >= 0:
+                    stack = _stk_pop_until_incl(stack, "dd")
+
+                # Check if we're in a table context with non-table content
+                val top_tag = be_dom_get_tag(stack[stack.len() - 1])
+                val in_table_ctx = _is_table_context(top_tag)
+                val is_table_content = _is_table_content(t)
+
+                if _is_void(t):
+                    val vn_raw = BeDomNode.element(t)
+                    val vnode = _apply_attrs(vn_raw, tok.attrs)
+                    if in_table_ctx and not is_table_content:
+                        stack = _stk_foster_append(stack, vnode)
+                    else:
+                        stack = _stk_append(stack, vnode)
+                elif in_table_ctx and not is_table_content:
+                    # Foster-parent non-table elements that appear inside table context
+                    val fp_raw = BeDomNode.element(t)
+                    val fp_el = _apply_attrs(fp_raw, tok.attrs)
+                    # Insert before table: find table ancestor, insert in its parent
+                    val tbl_idx = _stk_find_table_ancestor(stack)
+                    if tbl_idx > 0:
+                        var tbl_parent = stack[tbl_idx - 1]
+                        var fp_kids = tbl_parent.children
+                        fp_kids.push(fp_el)
+                        tbl_parent.children = fp_kids
+                        stack[tbl_idx - 1] = tbl_parent
+                    else:
+                        stack = _stk_append(stack, fp_el)
+                else:
+                    val el_raw = BeDomNode.element(t)
+                    val new_el = _apply_attrs(el_raw, tok.attrs)
+                    stack.push(new_el)
+
+        elif tok.token_kind == HtmlTokenKind.EndTag:
+            val et = tok.tag_name
+            if et == "html" or et == "body" or et == "head":
+                pass_dn  # handled in drain
+            elif _stk_find_tag(stack, et) >= 0:
+                stack = _stk_pop_until_incl(stack, et)
+
+        elif tok.token_kind == HtmlTokenKind.Character:
+            val data = tok.data
+            if not in_body:
+                if data.trim().len() > 0:
+                    # Non-whitespace before body — switch to body
+                    stack = _stk_pop_and_append(stack)  # close head
+                    stack.push(body_el)
+                    in_body = true
+                    val tn = BeDomNode.text(data)
+                    stack = _stk_append(stack, tn)
+            else:
+                val tn2 = BeDomNode.text(data)
+                stack = _stk_append(stack, tn2)
+
+    # Drain remaining open elements
+    while stack.len() > 1:
+        stack = _stk_pop_and_append(stack)
+
+    # stack[0] is now doc_node with html as only child (after drain)
+    # But since we modified stack[0] in place, we need to return it
+    if stack.len() > 0:
+        return stack[0]
+    doc_node

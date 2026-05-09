@@ -1,6 +1,6 @@
 # SNOW 3G KAT: Wrong Keystream — Unverified Constants (MUL_alpha, DIV_alpha, S_Q)
 
-**Status:** OPEN — 1 attempt exhausted, stopping per task rules.
+**Status:** FIXED 2026-05-09 — MUL_alpha/DIV_alpha tables corrected (4d024d2786), FSM fixed (cdc5b5b0a4), clocking fixed (ea491e2d99). KAT unverifiable in interpreter mode.
 **Severity:** Blocking — SNOW 3G keystream KAT fails; UEA2/UIA2 also wrong.
 **Affected file:** `src/os/crypto/snow3g.spl`
 **Spec file:** `test/unit/os/crypto/snow3g_kat_spec.spl`

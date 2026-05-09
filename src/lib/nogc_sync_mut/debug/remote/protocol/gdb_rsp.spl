@@ -1,0 +1,264 @@
+# GDB Remote Serial Protocol (RSP) Client
+# Direct TCP communication with GDB stubs (QEMU, OpenOCD) without spawning GDB.
+# Protocol: $packet-data#checksum where checksum is 2-hex-digit modulo-256 sum.
+
+use std.nogc_sync_mut.net.tcp.TcpStream
+
+class GdbRspClient:
+    host: text
+    port: i32
+    stream: Option<TcpStream>
+    connected: bool
+    ack_mode: bool
+
+impl GdbRspClient:
+    static fn connect(host: text, port: i32) -> Result<GdbRspClient, text>:
+        val addr = "{host}:{port}"
+        val stream = TcpStream.connect(addr)
+        match stream:
+            Ok(s):
+                var client = GdbRspClient(
+                    host: host,
+                    port: port,
+                    stream: Some(s),
+                    connected: true,
+                    ack_mode: true
+                )
+                val supported = client.query_supported()
+                match supported:
+                    Ok(resp):
+                        if resp.contains("QStartNoAckMode+"):
+                            val no_ack = client.send_packet("QStartNoAckMode")
+                            match no_ack:
+                                Ok(r):
+                                    if r == "OK":
+                                        client.ack_mode = false
+                                Err(_): pass
+                    Err(_): pass
+                Ok(client)
+            Err(e):
+                Err("RSP connect to {addr} failed: {e}")
+
+    fn disconnect() -> Result<text, text>:
+        match self.stream:
+            Some(s):
+                s.close()
+                self.connected = false
+                self.stream = nil
+                Ok("disconnected")
+            nil:
+                Ok("not connected")
+
+    fn is_connected() -> bool:
+        self.connected
+
+    static fn compute_checksum(data: text) -> text:
+        var sum = 0
+        var i = 0
+        while i < data.len():
+            sum = sum + data.char_at(i)
+            i = i + 1
+        sum = sum % 256
+        val hi = sum / 16
+        val lo = sum % 16
+        val hex_chars = "0123456789abcdef"
+        "{hex_chars.char_at(hi)}{hex_chars.char_at(lo)}"
+
+    static fn encode_packet(data: text) -> text:
+        val cs = GdbRspClient.compute_checksum(data)
+        "${data}#{cs}"
+
+    fn send_packet(data: text) -> Result<text, text>:
+        match self.stream:
+            Some(s):
+                val packet = GdbRspClient.encode_packet(data)
+                val bytes = packet.to_bytes()
+                s.write(bytes)
+                if self.ack_mode:
+                    val ack = s.read(1)
+                    match ack:
+                        Ok(a):
+                            if a.len() > 0 and a[0] != 43:  # '+' = 0x2B = 43
+                                return Err("RSP: negative ack or no ack")
+                        Err(e): return Err("RSP ack read failed: {e}")
+                self._receive_packet()
+            nil:
+                Err("RSP: not connected")
+
+    fn _receive_packet() -> Result<text, text>:
+        match self.stream:
+            Some(s):
+                var buf = s.read(4096)
+                match buf:
+                    Ok(data):
+                        val raw = text.from_bytes(data)
+                        val parsed = GdbRspClient.parse_response(raw)
+                        if self.ack_mode:
+                            s.write("+".to_bytes())
+                        Ok(parsed)
+                    Err(e):
+                        Err("RSP receive failed: {e}")
+            nil:
+                Err("RSP: not connected")
+
+    static fn parse_response(raw: text) -> text:
+        var start = 0
+        while start < raw.len() and raw.char_at(start) != 36:  # '$' = 36
+            start = start + 1
+        if start >= raw.len():
+            return raw
+        start = start + 1
+        var end = start
+        while end < raw.len() and raw.char_at(end) != 35:  # '#' = 35
+            end = end + 1
+        raw.slice(start, end)
+
+    fn read_registers() -> Result<Dict<text, i64>, text>:
+        val resp = self.send_packet("g")?
+        var regs: Dict<text, i64> = {}
+        var offset = 0
+        var reg_idx = 0
+        while offset + 16 <= resp.len():
+            val hex_val = resp.slice(offset, offset + 16)
+            val le_val = GdbRspClient._hex_le_to_i64(hex_val)
+            regs["r{reg_idx}"] = le_val
+            offset = offset + 16
+            reg_idx = reg_idx + 1
+        Ok(regs)
+
+    fn write_register(index: i32, value: i64) -> Result<text, text>:
+        val hex_val = GdbRspClient._i64_to_hex_le(value)
+        self.send_packet("P{index}={hex_val}")
+
+    fn read_memory(addr: i64, size: i32) -> Result<[i32], text>:
+        val hex_addr = GdbRspClient._i64_to_hex(addr)
+        val resp = self.send_packet("m{hex_addr},{size}")?
+        if resp.starts_with("E"):
+            return Err("RSP memory read error: {resp}")
+        var result: [i32] = []
+        var i = 0
+        while i + 2 <= resp.len():
+            val byte_hex = resp.slice(i, i + 2)
+            val byte_val = GdbRspClient._hex_to_i32(byte_hex)
+            result.push(byte_val)
+            i = i + 2
+        Ok(result)
+
+    fn write_memory(addr: i64, data: [i32]) -> Result<text, text>:
+        val hex_addr = GdbRspClient._i64_to_hex(addr)
+        var hex_data = ""
+        for byte in data:
+            hex_data = hex_data + GdbRspClient._i32_to_hex_byte(byte)
+        self.send_packet("M{hex_addr},{data.len()}:{hex_data}")
+
+    fn continue_exec() -> Result<text, text>:
+        self.send_packet("c")
+
+    fn single_step() -> Result<text, text>:
+        self.send_packet("s")
+
+    fn set_breakpoint(addr: i64) -> Result<text, text>:
+        val hex_addr = GdbRspClient._i64_to_hex(addr)
+        self.send_packet("Z0,{hex_addr},1")
+
+    fn remove_breakpoint(addr: i64) -> Result<text, text>:
+        val hex_addr = GdbRspClient._i64_to_hex(addr)
+        self.send_packet("z0,{hex_addr},1")
+
+    fn set_hw_breakpoint(addr: i64) -> Result<text, text>:
+        val hex_addr = GdbRspClient._i64_to_hex(addr)
+        self.send_packet("Z1,{hex_addr},1")
+
+    fn set_watchpoint(addr: i64, size: i32, access: text) -> Result<text, text>:
+        val hex_addr = GdbRspClient._i64_to_hex(addr)
+        var wp_type = "Z2"
+        if access == "write":
+            wp_type = "Z2"
+        else if access == "read":
+            wp_type = "Z3"
+        else if access == "access" or access == "readWrite":
+            wp_type = "Z4"
+        self.send_packet("{wp_type},{hex_addr},{size}")
+
+    fn halt() -> Result<text, text>:
+        match self.stream:
+            Some(s):
+                s.write([3])  # Ctrl-C = 0x03
+                self._receive_packet()
+            nil:
+                Err("RSP: not connected")
+
+    fn query_supported() -> Result<text, text>:
+        self.send_packet("qSupported:multiprocess+;swbreak+;hwbreak+")
+
+    fn query_attached() -> Result<bool, text>:
+        val resp = self.send_packet("qAttached")?
+        Ok(resp == "1")
+
+    fn query_halt_reason() -> Result<text, text>:
+        self.send_packet("?")
+
+    fn detach_target() -> Result<text, text>:
+        self.send_packet("D")
+
+    fn kill_target() -> Result<text, text>:
+        self.send_packet("k")
+
+    # Hex conversion utilities
+    static fn _hex_char_val(c: i32) -> i32:
+        if c >= 48 and c <= 57:    # '0'-'9'
+            c - 48
+        else if c >= 97 and c <= 102:  # 'a'-'f'
+            c - 87
+        else if c >= 65 and c <= 70:   # 'A'-'F'
+            c - 55
+        else:
+            0
+
+    static fn _hex_to_i32(hex: text) -> i32:
+        var result = 0
+        var i = 0
+        while i < hex.len():
+            result = result * 16 + GdbRspClient._hex_char_val(hex.char_at(i))
+            i = i + 1
+        result
+
+    static fn _i64_to_hex(val: i64) -> text:
+        if val == 0:
+            return "0"
+        val hex_chars = "0123456789abcdef"
+        var result = ""
+        var v = val
+        while v > 0:
+            val digit = v % 16
+            result = "{hex_chars.char_at(digit)}{result}"
+            v = v / 16
+        result
+
+    static fn _i32_to_hex_byte(val: i32) -> text:
+        val hex_chars = "0123456789abcdef"
+        val hi = (val / 16) % 16
+        val lo = val % 16
+        "{hex_chars.char_at(hi)}{hex_chars.char_at(lo)}"
+
+    static fn _hex_le_to_i64(hex: text) -> i64:
+        var result: i64 = 0
+        var byte_idx = 0
+        var i = 0
+        while i + 2 <= hex.len():
+            val byte_val = GdbRspClient._hex_to_i32(hex.slice(i, i + 2))
+            result = result + (byte_val * (1 << (byte_idx * 8)))
+            byte_idx = byte_idx + 1
+            i = i + 2
+        result
+
+    static fn _i64_to_hex_le(val: i64) -> text:
+        var result = ""
+        var v = val
+        var i = 0
+        while i < 8:
+            val byte_val = v % 256
+            result = result + GdbRspClient._i32_to_hex_byte(byte_val)
+            v = v / 256
+            i = i + 1
+        result
