@@ -1176,6 +1176,494 @@ fn _paint_box(box: BeLayoutBox, commands: [SceneCommand]) -> [SceneCommand]:
 
     return cmds
 
+# =========================================================================
+# M14 Public Layout API
+# =========================================================================
+
+# LayoutContext — passed by specs to control available space
+pub class LayoutContext:
+    """Layout context carrying available width and height for M14 layout functions."""
+    available_width: i32
+    available_height: i32
+
+pub fn layout_context_new(width: i32, height: i32) -> LayoutContext:
+    """Create a LayoutContext with the given available dimensions."""
+    LayoutContext(available_width: width, available_height: height)
+
+# InlineFragment — a single laid-out inline piece (text run or inline element)
+pub class InlineFragment:
+    """A positioned fragment in an inline formatting context."""
+    x: i32
+    y: i32
+    width: i32
+    height: i32
+    baseline_offset: i32
+    text_run: text
+
+# LineBox — one line in an IFC
+pub class LineBox:
+    """A single line box in an inline formatting context."""
+    x: i32
+    y: i32
+    width: i32
+    height: i32
+    baseline: i32
+    fragments: [InlineFragment]
+
+# LayoutBox — M14 public layout result (parallel to BeLayoutBox for specs)
+pub class LayoutBox:
+    """Public layout result used by M14 specs."""
+    x: i32
+    y: i32
+    width: i32
+    height: i32
+    is_anonymous: bool
+    line_boxes: [LineBox]
+    children: [LayoutBox]
+
+fn _layout_box_empty() -> LayoutBox:
+    LayoutBox(x: 0, y: 0, width: 0, height: 0, is_anonymous: false, line_boxes: [], children: [])
+
+# =========================================================================
+# collapse_margins_signed — CSS 2.2 §8.3.1
+# =========================================================================
+
+pub fn collapse_margins_signed(a: i32, b: i32) -> i32:
+    """Collapse two margins per CSS 2.2 §8.3.1: max(positives) + min(negatives)."""
+    var max_pos = 0
+    var min_neg = 0
+    if a > 0:
+        max_pos = a
+    else:
+        min_neg = a
+    if b > 0:
+        if b > max_pos:
+            max_pos = b
+    else:
+        if b < min_neg:
+            min_neg = b
+    max_pos + min_neg
+
+# =========================================================================
+# layout_block (public 2-arg wrapper for M14 specs)
+# =========================================================================
+
+pub fn layout_block(node: BeDomNode, ctx: LayoutContext) -> LayoutBox:
+    """Public layout_block entry for M14 specs. Wraps internal block layout."""
+    val container = BeLayoutBox(
+        x: 0, y: 0,
+        width: ctx.available_width, height: ctx.available_height,
+        content_x: 0, content_y: 0,
+        content_width: ctx.available_width, content_height: ctx.available_height,
+        node: node, children: []
+    )
+    val base_style = be_default_style()
+    val root_ctx = FloatContext.create()
+    val be_box = layout_block(node, container, base_style, root_ctx)
+    _be_box_to_layout_box_with_anon(be_box, node, ctx.available_width)
+
+fn _is_inline_node(child: BeDomNode) -> bool:
+    """True if this node is inline-level (text node or inline/inline-block display)."""
+    if be_dom_get_is_text(child):
+        return true
+    val d = be_dom_get_display(child)
+    if d == "inline" or d == "inline-block" or d == "inline-flex":
+        return true
+    if d == "":
+        return true
+    false
+
+fn _be_box_to_layout_box_with_anon(be_box: BeLayoutBox, node: BeDomNode, available_w: i32) -> LayoutBox:
+    """Convert BeLayoutBox to public LayoutBox, generating anonymous block entries for inline runs."""
+    val kids = be_dom_get_children(node)
+    val n = kids.len()
+    if n == 0:
+        return LayoutBox(
+            x: be_box.x, y: be_box.y,
+            width: be_box.width, height: be_box.height,
+            is_anonymous: false,
+            line_boxes: [],
+            children: []
+        )
+    # Detect whether children are mixed inline/block
+    var has_block = false
+    var has_inline = false
+    var ki = 0
+    while ki < n:
+        val k = kids[ki]
+        val d = be_dom_get_display(k)
+        if d == "none":
+            ki = ki + 1
+        else:
+            if _is_inline_node(k):
+                has_inline = true
+            else:
+                has_block = true
+            ki = ki + 1
+    var child_boxes: [LayoutBox] = []
+    if has_block and has_inline:
+        # Mixed: collect inline runs into anonymous blocks
+        var inline_run: [BeDomNode] = []
+        var ci = 0
+        while ci < n:
+            val ch = kids[ci]
+            ci = ci + 1
+            val d = be_dom_get_display(ch)
+            if d == "none":
+                pass_dn
+            else:
+                if _is_inline_node(ch):
+                    inline_run.push(ch)
+                else:
+                    if inline_run.len() > 0:
+                        val anon = _make_anon_layout_box(inline_run, be_box, available_w)
+                        child_boxes.push(anon)
+                        inline_run = []
+                    # block child
+                    val sub = _layout_box_empty()
+                    child_boxes.push(sub)
+        if inline_run.len() > 0:
+            val anon = _make_anon_layout_box(inline_run, be_box, available_w)
+            child_boxes.push(anon)
+    else:
+        # All block or all inline — no anonymous wrappers
+        var ci2 = 0
+        while ci2 < be_box.children.len():
+            val sub_be = be_box.children[ci2]
+            ci2 = ci2 + 1
+            val sub = LayoutBox(
+                x: sub_be.x, y: sub_be.y,
+                width: sub_be.width, height: sub_be.height,
+                is_anonymous: false, line_boxes: [], children: []
+            )
+            child_boxes.push(sub)
+    LayoutBox(
+        x: be_box.x, y: be_box.y,
+        width: be_box.width, height: be_box.height,
+        is_anonymous: false,
+        line_boxes: [],
+        children: child_boxes
+    )
+
+fn _make_anon_layout_box(nodes: [BeDomNode], parent_be: BeLayoutBox, available_w: i32) -> LayoutBox:
+    """Create an anonymous LayoutBox wrapping a run of inline nodes."""
+    LayoutBox(
+        x: parent_be.content_x, y: parent_be.content_y,
+        width: available_w, height: 16,
+        is_anonymous: true,
+        line_boxes: [],
+        children: []
+    )
+
+# =========================================================================
+# layout_inline — inline formatting context
+# =========================================================================
+
+pub fn layout_inline(node: BeDomNode, ctx: LayoutContext) -> LayoutBox:
+    """Lay out inline content of a node, building line boxes."""
+    val available_w = ctx.available_width
+    val line_h = 16
+    val char_w = 8
+    # Collect all text from the subtree
+    val full_text = _collect_text(node)
+    # Get text-align from node style
+    val style = be_dom_get_style(node)
+    val align = style.text_align
+    # Split into words
+    val words = _split_words(full_text)
+    var lines: [LineBox] = []
+    var line_frags: [InlineFragment] = []
+    var cur_x = 0
+    var cur_y = 0
+    var line_w = 0
+    var wi = 0
+    val wlen = words.len()
+    if wlen == 0:
+        # Empty — one empty line
+        val empty_frag = InlineFragment(x: 0, y: 0, width: 0, height: line_h, baseline_offset: 0, text_run: "")
+        line_frags.push(empty_frag)
+        val lb = LineBox(x: 0, y: 0, width: 0, height: line_h, baseline: line_h - 3, fragments: line_frags)
+        lines.push(lb)
+    else:
+        while wi < wlen:
+            val word = words[wi]
+            wi = wi + 1
+            val word_w = word.len() * char_w
+            # Check if word fits on current line (add space if not first word)
+            var needed = word_w
+            if line_frags.len() > 0:
+                needed = needed + char_w
+            if (cur_x + needed > available_w) and line_frags.len() > 0:
+                # Flush current line
+                val lb = _build_line_box(line_frags, cur_y, line_w, line_h, align, available_w)
+                lines.push(lb)
+                line_frags = []
+                cur_x = 0
+                cur_y = cur_y + line_h
+                line_w = 0
+                needed = word_w
+            var frag_x = cur_x
+            if line_frags.len() > 0:
+                frag_x = cur_x + char_w
+            val frag = InlineFragment(
+                x: frag_x, y: cur_y,
+                width: word_w, height: line_h,
+                baseline_offset: 0,
+                text_run: word
+            )
+            line_frags.push(frag)
+            cur_x = frag_x + word_w
+            if cur_x > line_w:
+                line_w = cur_x
+        if line_frags.len() > 0:
+            val lb = _build_line_box(line_frags, cur_y, line_w, line_h, align, available_w)
+            lines.push(lb)
+    val total_h = lines.len() * line_h
+    LayoutBox(
+        x: 0, y: 0,
+        width: available_w,
+        height: total_h,
+        is_anonymous: false,
+        line_boxes: lines,
+        children: []
+    )
+
+fn _build_line_box(frags: [InlineFragment], y: i32, line_w: i32, line_h: i32, align: text, available_w: i32) -> LineBox:
+    """Build a LineBox from fragments, applying text-align offset."""
+    var offset_x = 0
+    if align == "center":
+        val extra = available_w - line_w
+        if extra > 0:
+            offset_x = extra / 2
+    elif align == "right":
+        val extra2 = available_w - line_w
+        if extra2 > 0:
+            offset_x = extra2
+    var adjusted: [InlineFragment] = []
+    var fi = 0
+    while fi < frags.len():
+        val f = frags[fi]
+        fi = fi + 1
+        val af = InlineFragment(
+            x: f.x + offset_x, y: f.y,
+            width: f.width, height: f.height,
+            baseline_offset: f.baseline_offset,
+            text_run: f.text_run
+        )
+        adjusted.push(af)
+    val final_w = if line_w < available_w: line_w else: available_w
+    LineBox(
+        x: offset_x, y: y,
+        width: final_w,
+        height: line_h,
+        baseline: line_h - 3,
+        fragments: adjusted
+    )
+
+fn _collect_text(node: BeDomNode) -> text:
+    """Recursively collect all text content from a node subtree."""
+    if be_dom_get_is_text(node):
+        return be_dom_get_text(node)
+    val kids = be_dom_get_children(node)
+    var result = ""
+    var i = 0
+    while i < kids.len():
+        val child = kids[i]
+        i = i + 1
+        val sub = _collect_text(child)
+        if sub.len() > 0:
+            if result.len() > 0:
+                result = result + " " + sub
+            else:
+                result = sub
+    result
+
+fn _split_words(s: text) -> [text]:
+    """Split text on whitespace into words."""
+    var words: [text] = []
+    val n = s.len()
+    var start = -1
+    var i = 0
+    while i < n:
+        val ch = s.char_at(i)
+        if ch == " " or ch == "\t" or ch == "\n" or ch == "\r":
+            if start >= 0:
+                words.push(s.slice(start, i))
+                start = -1
+        else:
+            if start < 0:
+                start = i
+        i = i + 1
+    if start >= 0:
+        words.push(s.slice(start, n))
+    words
+
+# =========================================================================
+# layout_table — basic table layout
+# =========================================================================
+
+pub fn layout_table(node: BeDomNode, ctx: LayoutContext) -> LayoutBox:
+    """Lay out a table node, returning a LayoutBox with row children."""
+    val available_w = ctx.available_width
+    # Find table node (walk down from doc root if needed)
+    val table_node = _find_table_node(node)
+    val row_nodes = _collect_table_rows(table_node)
+    val num_rows = row_nodes.len()
+    if num_rows == 0:
+        return LayoutBox(
+            x: 0, y: 0,
+            width: available_w, height: 0,
+            is_anonymous: false,
+            line_boxes: [],
+            children: []
+        )
+    # Count columns from first row
+    val first_row_cells = _collect_cells(row_nodes[0])
+    val num_cols = _count_logical_columns(first_row_cells)
+    # Compute column widths using distribute-remainder (AD-6)
+    val col_widths = _compute_col_widths(available_w, num_cols, first_row_cells)
+    val cell_h = 20
+    var row_boxes: [LayoutBox] = []
+    var ri = 0
+    var row_y = 0
+    while ri < num_rows:
+        val row_node = row_nodes[ri]
+        ri = ri + 1
+        val cells = _collect_cells(row_node)
+        var cell_boxes: [LayoutBox] = []
+        var cx = 0
+        var ci = 0
+        var col_idx = 0
+        while ci < cells.len():
+            val cell = cells[ci]
+            ci = ci + 1
+            val colspan = _get_colspan(cell)
+            # Sum widths for this cell's colspan
+            var cw = 0
+            var span_i = 0
+            while span_i < colspan:
+                val target_col = col_idx + span_i
+                if target_col < col_widths.len():
+                    cw = cw + col_widths[target_col]
+                span_i = span_i + 1
+            val cell_box = LayoutBox(
+                x: cx, y: row_y,
+                width: cw, height: cell_h,
+                is_anonymous: false,
+                line_boxes: [],
+                children: []
+            )
+            cell_boxes.push(cell_box)
+            cx = cx + cw
+            col_idx = col_idx + colspan
+        val row_box = LayoutBox(
+            x: 0, y: row_y,
+            width: available_w, height: cell_h,
+            is_anonymous: false,
+            line_boxes: [],
+            children: cell_boxes
+        )
+        row_boxes.push(row_box)
+        row_y = row_y + cell_h
+    LayoutBox(
+        x: 0, y: 0,
+        width: available_w,
+        height: row_y,
+        is_anonymous: false,
+        line_boxes: [],
+        children: row_boxes
+    )
+
+fn _find_table_node(node: BeDomNode) -> BeDomNode:
+    """Walk into node to find a table element, or return node itself."""
+    val tag = be_dom_get_tag(node)
+    if tag == "table":
+        return node
+    val kids = be_dom_get_children(node)
+    var i = 0
+    while i < kids.len():
+        val k = kids[i]
+        i = i + 1
+        val found = _find_table_node(k)
+        if be_dom_get_tag(found) == "table":
+            return found
+    node
+
+fn _collect_table_rows(table: BeDomNode) -> [BeDomNode]:
+    """Collect all <tr> elements from a table (including those inside tbody/thead/tfoot)."""
+    var rows: [BeDomNode] = []
+    val kids = be_dom_get_children(table)
+    var i = 0
+    while i < kids.len():
+        val k = kids[i]
+        i = i + 1
+        val t = be_dom_get_tag(k)
+        if t == "tr":
+            rows.push(k)
+        elif t == "tbody" or t == "thead" or t == "tfoot":
+            val tbody_kids = be_dom_get_children(k)
+            var j = 0
+            while j < tbody_kids.len():
+                val r = tbody_kids[j]
+                j = j + 1
+                if be_dom_get_tag(r) == "tr":
+                    rows.push(r)
+    rows
+
+fn _collect_cells(row: BeDomNode) -> [BeDomNode]:
+    """Collect all <td> and <th> from a <tr>."""
+    var cells: [BeDomNode] = []
+    val kids = be_dom_get_children(row)
+    var i = 0
+    while i < kids.len():
+        val k = kids[i]
+        i = i + 1
+        val t = be_dom_get_tag(k)
+        if t == "td" or t == "th":
+            cells.push(k)
+    cells
+
+fn _get_colspan(cell: BeDomNode) -> i32:
+    """Return colspan attribute value, defaulting to 1."""
+    val cs = be_dom_get_attr(cell, "colspan")
+    if cs == "":
+        return 1
+    var v = 0
+    var i = 0
+    while i < cs.len():
+        val ch = cs.char_at(i)
+        i = i + 1
+        if ch >= "0" and ch <= "9":
+            val digit = ch.char_code() - 48
+            v = v * 10 + digit
+    if v <= 0:
+        1
+    else:
+        v
+
+fn _count_logical_columns(cells: [BeDomNode]) -> i32:
+    """Count logical column count from cells (summing colspan)."""
+    var total = 0
+    var i = 0
+    while i < cells.len():
+        total = total + _get_colspan(cells[i])
+        i = i + 1
+    if total == 0: 1 else: total
+
+fn _compute_col_widths(total_w: i32, num_cols: i32, first_row_cells: [BeDomNode]) -> [i32]:
+    """Distribute total_w evenly across num_cols using distribute-remainder (AD-6)."""
+    var widths: [i32] = []
+    if num_cols <= 0:
+        return widths
+    val base = total_w / num_cols
+    val remainder = total_w - (base * num_cols)
+    var i = 0
+    while i < num_cols:
+        val extra = if i < remainder: 1 else: 0
+        widths.push(base + extra)
+        i = i + 1
+    widths
+
 fn _apply_opacity(argb: u32, opacity: f32) -> u32:
     if opacity >= 1.0:
         return argb
