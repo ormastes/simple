@@ -71,7 +71,7 @@ aligned with the current workspace compiler/runtime changes.
 
 ## Writing Tests
 
-Tests use the built-in SSpec BDD framework. No imports needed for `describe`, `it`, `expect`.
+Tests use the built-in SPipe BDD framework. No imports needed for `describe`, `it`, `expect`.
 
 ```simple
 # test/unit/std/example_spec.spl

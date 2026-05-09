@@ -11,7 +11,7 @@ Tests multi-architecture support across 8-bit, 16-bit, 32-bit, and 64-bit target
 | Status | In Progress |
 | Source | `test/feature/usage/architecture_spec.spl` |
 | Updated | 2026-04-07 |
-| Generator | `simple sspec-docgen` (Rust) |
+| Generator | `simple spipe-docgen` (Rust) |
 
 ## Scenario Summary
 

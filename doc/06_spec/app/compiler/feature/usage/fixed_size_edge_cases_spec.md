@@ -11,7 +11,7 @@ This spec exercises the boundary conditions and edge cases of fixed-size arrays 
 | Status | Active |
 | Source | `test/feature/usage/fixed_size_edge_cases_spec.spl` |
 | Updated | 2026-04-07 |
-| Generator | `simple sspec-docgen` (Rust) |
+| Generator | `simple spipe-docgen` (Rust) |
 
 ## Scenario Summary
 

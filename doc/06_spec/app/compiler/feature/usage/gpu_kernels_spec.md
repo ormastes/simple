@@ -12,7 +12,7 @@ GPU kernel support enables compute-intensive operations to run on GPU hardware t
 | Status | Planned |
 | Source | `test/feature/usage/gpu_kernels_spec.spl` |
 | Updated | 2026-04-07 |
-| Generator | `simple sspec-docgen` (Rust) |
+| Generator | `simple spipe-docgen` (Rust) |
 
 ## Scenario Summary
 

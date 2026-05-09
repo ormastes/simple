@@ -11,7 +11,7 @@ Tests for `elif val`/`elif var` pattern binding in conditional branches. Verifie
 | Status | Implemented |
 | Source | `test/feature/usage/elif_val_pattern_binding_spec.spl` |
 | Updated | 2026-04-07 |
-| Generator | `simple sspec-docgen` (Rust) |
+| Generator | `simple spipe-docgen` (Rust) |
 
 ## Scenario Summary
 

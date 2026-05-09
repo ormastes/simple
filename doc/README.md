@@ -49,7 +49,7 @@ All documentation lives under numbered top-level folders.
 ## Recent Major Changes (2026-05)
 
 - **SimpleOS desktop apps:** 30 desktop applications implemented under `src/os/apps/` (calculator, clock, terminal, settings, etc.)
-- **sspec renamed to spipe:** testing framework renamed across the entire codebase
+- **spipe renamed to spipe:** testing framework renamed across the entire codebase
 - **Bug fixes:** HIR type-inference, SIMD/AES-NI, Zstd HUF all resolved
 - **Compiler passes:** suspension analysis and FFI gen stubs implemented
 - **MIR SIMD:** masked/predicated SIMD opcodes and Cranelift Vec16u8 ABI marshalling for AOT

@@ -11,7 +11,7 @@ The `.fdiv()` method provides floor division functionality, replacing the old `/
 | Status | Implemented |
 | Source | `test/feature/usage/floor_division_fdiv_spec.spl` |
 | Updated | 2026-04-07 |
-| Generator | `simple sspec-docgen` (Rust) |
+| Generator | `simple spipe-docgen` (Rust) |
 
 ## Scenario Summary
 

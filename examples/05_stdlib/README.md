@@ -18,7 +18,7 @@ Demonstrations of stdlib features and utilities.
 - **std.path** - Path manipulation
 - **std.platform** - Platform abstraction
 - **std.convert** - Type conversions
-- **std.spec** - SSpec testing framework
+- **std.spec** - SPipe testing framework
 
 ## See Also
 

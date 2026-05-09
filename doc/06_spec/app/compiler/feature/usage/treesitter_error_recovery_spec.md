@@ -11,7 +11,7 @@ Tests error handling and edge cases in the compiler.treesitter outline parser,
 | Status | Implemented |
 | Source | `test/feature/usage/treesitter_error_recovery_spec.spl` |
 | Updated | 2026-04-07 |
-| Generator | `simple sspec-docgen` (Rust) |
+| Generator | `simple spipe-docgen` (Rust) |
 
 ## Scenario Summary
 

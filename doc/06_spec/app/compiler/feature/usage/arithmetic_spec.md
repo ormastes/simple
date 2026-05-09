@@ -12,7 +12,7 @@ Arithmetic operations provide basic mathematical computations on numeric types. 
 | Status | Implemented |
 | Source | `test/feature/usage/arithmetic_spec.spl` |
 | Updated | 2026-04-07 |
-| Generator | `simple sspec-docgen` (Rust) |
+| Generator | `simple spipe-docgen` (Rust) |
 
 ## Scenario Summary
 

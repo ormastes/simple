@@ -12,7 +12,7 @@ This spec covers Simple's trait system using local doubles that mirror the seman
 | Reference | traits.md |
 | Source | `test/specs/traits_spec.spl` |
 | Updated | 2026-04-24 |
-| Generator | `simple sspec-docgen` (Rust) |
+| Generator | `simple spipe-docgen` (Rust) |
 
 ## Scenario Summary
 

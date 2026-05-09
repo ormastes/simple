@@ -11,7 +11,7 @@ Tests for conditional control flow using if/else statements.
 | Status | In Progress |
 | Source | `test/feature/usage/control_flow_if_else_spec.spl` |
 | Updated | 2026-04-07 |
-| Generator | `simple sspec-docgen` (Rust) |
+| Generator | `simple spipe-docgen` (Rust) |
 
 ## Scenario Summary
 

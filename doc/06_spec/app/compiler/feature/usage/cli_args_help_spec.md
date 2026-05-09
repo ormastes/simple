@@ -11,7 +11,7 @@ Tests automatic help text generation from docstrings and option metadata. The cl
 | Status | Draft |
 | Source | `test/feature/usage/cli_args_help_spec.spl` |
 | Updated | 2026-04-07 |
-| Generator | `simple sspec-docgen` (Rust) |
+| Generator | `simple spipe-docgen` (Rust) |
 
 ## Scenario Summary
 

@@ -11,7 +11,7 @@ Tests the note.sdn section in SMF (Simple Module Format) for tracking generic in
 | Status | In Progress |
 | Source | `test/feature/usage/note_sdn_feature_spec.spl` |
 | Updated | 2026-04-07 |
-| Generator | `simple sspec-docgen` (Rust) |
+| Generator | `simple spipe-docgen` (Rust) |
 
 ## Scenario Summary
 

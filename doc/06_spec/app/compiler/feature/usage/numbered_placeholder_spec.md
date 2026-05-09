@@ -10,7 +10,7 @@ Tests numbered placeholder lambda expressions (`_1`, `_2`) which allow explicit 
 | Status | In Progress |
 | Source | `test/feature/usage/numbered_placeholder_spec.spl` |
 | Updated | 2026-04-07 |
-| Generator | `simple sspec-docgen` (Rust) |
+| Generator | `simple spipe-docgen` (Rust) |
 
 ## Scenario Summary
 

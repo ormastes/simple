@@ -11,7 +11,7 @@ Symbols (also called atoms) are immutable, interned identifiers that are compare
 | Status | Implemented |
 | Source | `test/feature/usage/symbols_atoms_spec.spl` |
 | Updated | 2026-04-07 |
-| Generator | `simple sspec-docgen` (Rust) |
+| Generator | `simple spipe-docgen` (Rust) |
 
 ## Scenario Summary
 

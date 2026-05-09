@@ -11,7 +11,7 @@ Lambdas (anonymous functions) and closures enable functional programming pattern
 | Status | Implemented |
 | Source | `test/feature/usage/lambdas_closures_spec.spl` |
 | Updated | 2026-04-07 |
-| Generator | `simple sspec-docgen` (Rust) |
+| Generator | `simple spipe-docgen` (Rust) |
 
 ## Scenario Summary
 

@@ -11,7 +11,7 @@ Reference counted pointers provide safe sharing of data with automatic
 | Status | Implemented |
 | Source | `test/feature/usage/shared_pointers_spec.spl` |
 | Updated | 2026-04-07 |
-| Generator | `simple sspec-docgen` (Rust) |
+| Generator | `simple spipe-docgen` (Rust) |
 
 ## Scenario Summary
 

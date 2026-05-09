@@ -9,7 +9,7 @@ Inputs:
 
 ## Scope
 
-Extend `/spipe` (formerly `/sspec`) into a daily-operating dev pipe with bug-report ingest, multi-provider infra, and a 3-level review pipeline. Plug into the existing ITF adapter pattern (`adapter_jira`, `adapter_github`, `adapter_confluence`) and the `repo_and_pull_req` plugin (sub-skill trees `git/`, `jira/`, `bug/`, `mail/`).
+Extend `/spipe` (formerly `/spipe`) into a daily-operating dev pipe with bug-report ingest, multi-provider infra, and a 3-level review pipeline. Plug into the existing ITF adapter pattern (`adapter_jira`, `adapter_github`, `adapter_confluence`) and the `repo_and_pull_req` plugin (sub-skill trees `git/`, `jira/`, `bug/`, `mail/`).
 
 ## File layout (new code)
 

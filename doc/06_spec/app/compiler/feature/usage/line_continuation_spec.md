@@ -11,7 +11,7 @@ Line continuation allows long expressions and function calls to span multiple li
 | Status | Implemented |
 | Source | `test/feature/usage/line_continuation_spec.spl` |
 | Updated | 2026-04-07 |
-| Generator | `simple sspec-docgen` (Rust) |
+| Generator | `simple spipe-docgen` (Rust) |
 
 ## Scenario Summary
 

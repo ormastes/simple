@@ -12,7 +12,7 @@ Intensive tests for the math expression rendering pipeline:
 | Status | Implemented |
 | Source | `test/feature/usage/math_render_spec.spl` |
 | Updated | 2026-04-07 |
-| Generator | `simple sspec-docgen` (Rust) |
+| Generator | `simple spipe-docgen` (Rust) |
 
 ## Scenario Summary
 

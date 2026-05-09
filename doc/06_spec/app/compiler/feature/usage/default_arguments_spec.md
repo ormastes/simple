@@ -11,7 +11,7 @@ Tests for function default argument values.
 | Status | Implemented |
 | Source | `test/feature/usage/default_arguments_spec.spl` |
 | Updated | 2026-04-07 |
-| Generator | `simple sspec-docgen` (Rust) |
+| Generator | `simple spipe-docgen` (Rust) |
 
 ## Scenario Summary
 

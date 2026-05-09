@@ -6,7 +6,7 @@ Full mapping of all spec files to their generated documentation output.
 **Has docstring:** 221 files
 **Missing docstring:** 75 files (marked with ⚠)
 
-Run `bin/simple sspec-docgen <spec_files...> --output <dir>` to generate docs.
+Run `bin/simple spipe-docgen <spec_files...> --output <dir>` to generate docs.
 
 ---
 
@@ -388,5 +388,5 @@ Run `bin/simple sspec-docgen <spec_files...> --output <dir>` to generate docs.
 
 _To generate all docs, run:_
 ```bash
-bin/simple sspec-docgen $(find test/feature -name '*_spec.spl') --output doc/06_spec/feature
+bin/simple spipe-docgen $(find test/feature -name '*_spec.spl') --output doc/06_spec/feature
 ```

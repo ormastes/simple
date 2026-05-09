@@ -15,7 +15,7 @@ Checks the library surface that should remain usable for the `interpreter(remote
 | Research | [doc/01_research/remote_interpreter_failures_2026-03-12.md](doc/01_research/remote_interpreter_failures_2026-03-12.md) |
 | Source | `test/feature/app/remote_baremetal/remote_baremetal_library_spec.spl` |
 | Updated | 2026-03-30 |
-| Generator | `simple sspec-docgen` (Rust) |
+| Generator | `simple spipe-docgen` (Rust) |
 
 ## Scenario Summary
 

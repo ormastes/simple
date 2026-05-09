@@ -11,7 +11,7 @@ Weak references provide non-owning references to values managed by a global weak
 | Status | Implemented |
 | Source | `test/feature/usage/weak_pointers_spec.spl` |
 | Updated | 2026-04-07 |
-| Generator | `simple sspec-docgen` (Rust) |
+| Generator | `simple spipe-docgen` (Rust) |
 
 ## Scenario Summary
 

@@ -12,7 +12,7 @@ Simple supports multiple comment styles for different purposes: line comments fo
 | Status | Implemented |
 | Source | `test/feature/usage/comments_spec.spl` |
 | Updated | 2026-04-07 |
-| Generator | `simple sspec-docgen` (Rust) |
+| Generator | `simple spipe-docgen` (Rust) |
 
 ## Scenario Summary
 

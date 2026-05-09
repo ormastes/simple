@@ -11,7 +11,7 @@ Context managers provide a way to safely acquire and release resources using
 | Status | Implemented |
 | Source | `test/feature/usage/context_managers_spec.spl` |
 | Updated | 2026-04-07 |
-| Generator | `simple sspec-docgen` (Rust) |
+| Generator | `simple spipe-docgen` (Rust) |
 
 ## Scenario Summary
 

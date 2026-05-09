@@ -11,7 +11,7 @@ Implicit multiplication in m{} math blocks:
 | Status | Implemented |
 | Source | `test/feature/usage/implicit_mul_spec.spl` |
 | Updated | 2026-04-07 |
-| Generator | `simple sspec-docgen` (Rust) |
+| Generator | `simple spipe-docgen` (Rust) |
 
 ## Scenario Summary
 

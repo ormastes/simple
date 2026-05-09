@@ -11,7 +11,7 @@ Tests for the x86 bare-metal boot infrastructure including:
 | Status | In Progress |
 | Source | `test/feature/usage/x86_boot_spec.spl` |
 | Updated | 2026-04-07 |
-| Generator | `simple sspec-docgen` (Rust) |
+| Generator | `simple spipe-docgen` (Rust) |
 
 ## Scenario Summary
 

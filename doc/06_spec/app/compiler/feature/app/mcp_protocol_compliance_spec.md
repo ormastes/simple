@@ -46,7 +46,7 @@ This spec is a contract for documentation and planning completeness while implem
 
 ## Acceptance Contract
 
-The SSpec matrix must enforce:
+The SPipe matrix must enforce:
 
 1. Tool inventory counts and representative names
 2. Full known-gap list presence

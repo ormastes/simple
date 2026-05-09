@@ -124,7 +124,7 @@ upx --best --lzma ../target/bootstrap/simple_runtime
 ## Validation
 
 ✅ All Rust tests pass  
-✅ All Simple/SSpec tests pass (631+ tests)  
+✅ All Simple/SPipe tests pass (631+ tests)  
 ✅ Binary runs normally  
 ✅ Size: 9.3 MB (bootstrap) or ~4.5 MB (with UPX)  
 

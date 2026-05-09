@@ -12,7 +12,7 @@ Validates that the LLVM backend correctly generates code for 32-bit x86 (i686) t
 | Status | In Progress |
 | Source | `test/feature/usage/llvm_backend_i686_spec.spl` |
 | Updated | 2026-04-07 |
-| Generator | `simple sspec-docgen` (Rust) |
+| Generator | `simple spipe-docgen` (Rust) |
 
 ## Scenario Summary
 

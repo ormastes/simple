@@ -11,7 +11,7 @@ Tests the `s{...}` set literal syntax for creating sets with automatic duplicate
 | Status | In Progress |
 | Source | `test/feature/usage/set_literal_spec.spl` |
 | Updated | 2026-04-07 |
-| Generator | `simple sspec-docgen` (Rust) |
+| Generator | `simple spipe-docgen` (Rust) |
 
 ## Scenario Summary
 

@@ -11,7 +11,7 @@ Tests batch conversion between math vector types (Vec3, Vec3d) and flat tensor a
 | Status | Active |
 | Source | `test/feature/usage/tensor_bridge_spec.spl` |
 | Updated | 2026-04-07 |
-| Generator | `simple sspec-docgen` (Rust) |
+| Generator | `simple spipe-docgen` (Rust) |
 
 ## Scenario Summary
 

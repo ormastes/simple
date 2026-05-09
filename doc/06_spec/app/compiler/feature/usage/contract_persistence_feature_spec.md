@@ -11,7 +11,7 @@ Tests consumer-driven contract persistence including serialization to Pact-compa
 | Status | Active |
 | Source | `test/feature/usage/contract_persistence_feature_spec.spl` |
 | Updated | 2026-04-07 |
-| Generator | `simple sspec-docgen` (Rust) |
+| Generator | `simple spipe-docgen` (Rust) |
 
 ## Scenario Summary
 

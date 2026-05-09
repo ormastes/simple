@@ -12,7 +12,7 @@ The Simple language provides a comprehensive Foreign Function Interface (FFI) sy
 | Status | Implemented |
 | Source | `test/feature/usage/rust_simple_ffi_spec.spl` |
 | Updated | 2026-04-07 |
-| Generator | `simple sspec-docgen` (Rust) |
+| Generator | `simple spipe-docgen` (Rust) |
 
 ## Scenario Summary
 

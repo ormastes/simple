@@ -11,7 +11,7 @@ Tests that the parser correctly tokenizes and parses all operators
 | Status | Implemented |
 | Source | `test/feature/usage/parser_operators_spec.spl` |
 | Updated | 2026-04-07 |
-| Generator | `simple sspec-docgen` (Rust) |
+| Generator | `simple spipe-docgen` (Rust) |
 
 ## Scenario Summary
 

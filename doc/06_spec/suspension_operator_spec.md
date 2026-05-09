@@ -10,7 +10,7 @@ This executable spec models suspension behavior with ordinary control flow and l
 | Status | Draft |
 | Source | `test/specs/suspension_operator_spec.spl` |
 | Updated | 2026-04-24 |
-| Generator | `simple sspec-docgen` (Rust) |
+| Generator | `simple spipe-docgen` (Rust) |
 
 ## Scenario Summary
 

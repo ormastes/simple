@@ -11,7 +11,7 @@ Tests subcommand dispatch with the `cli` keyword. Subcommands allow grouping rel
 | Status | Draft |
 | Source | `test/feature/usage/cli_args_subcommand_spec.spl` |
 | Updated | 2026-04-07 |
-| Generator | `simple sspec-docgen` (Rust) |
+| Generator | `simple spipe-docgen` (Rust) |
 
 ## Scenario Summary
 

@@ -14,7 +14,7 @@ The project shall maintain a documented compatibility matrix for HTML, CSS, DOM/
 
 REQ-002: WPT Subset Path
 
-The project shall define a repeatable WPT-subset migration path for browser-facing HTML, CSS, DOM, and rendering behavior, including deterministic SSpec execution and source-suite traceability.
+The project shall define a repeatable WPT-subset migration path for browser-facing HTML, CSS, DOM, and rendering behavior, including deterministic SPipe execution and source-suite traceability.
 
 REQ-003: Test262 Subset Path
 
@@ -22,7 +22,7 @@ The project shall define a repeatable Test262-subset migration path for JavaScri
 
 REQ-004: Supported Feature Evidence
 
-Every feature that the project claims as supported shall have SSpec coverage or a traceable mapping to an external conformance-suite case.
+Every feature that the project claims as supported shall have SPipe coverage or a traceable mapping to an external conformance-suite case.
 
 REQ-005: Unsupported Feature Tracking
 

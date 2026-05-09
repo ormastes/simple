@@ -6,7 +6,7 @@
 |-------|-------|
 | Source | `test/feature/baremetal/ghdl_riscv32_semihost_spec.spl` |
 | Updated | 2026-04-07 |
-| Generator | `simple sspec-docgen` (Rust) |
+| Generator | `simple spipe-docgen` (Rust) |
 
 ## Scenario Summary
 
@@ -20,7 +20,7 @@
 
 ## Overview
 
-Documentation was generated from executable SSpec scenarios.
+Documentation was generated from executable SPipe scenarios.
 
 ## Evidence
 
@@ -41,9 +41,9 @@ Documentation was generated from executable SSpec scenarios.
 - [slow] outputs semihost test success marker
 - [slow] reports test PASSED with exit code 0
 - [slow] reports cycle count
-- [slow] outputs SSpec header
+- [slow] outputs SPipe header
 - [slow] outputs test name
-- [slow] outputs SSpec summary with 0 failures
+- [slow] outputs SPipe summary with 0 failures
 - [slow] reports test PASSED with exit code 0
 - [slow] rejects missing ELF path
 - [slow] rejects malformed ELF (non-RISC-V binary)

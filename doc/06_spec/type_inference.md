@@ -12,7 +12,7 @@ Simple uses a Hindley-Milner-style type inference system that automatically dedu
 | Reference | type_inference.md |
 | Source | `test/specs/type_inference_spec.spl` |
 | Updated | 2026-04-24 |
-| Generator | `simple sspec-docgen` (Rust) |
+| Generator | `simple spipe-docgen` (Rust) |
 
 ## Scenario Summary
 

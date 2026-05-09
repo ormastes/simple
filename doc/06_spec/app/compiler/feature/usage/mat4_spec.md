@@ -12,7 +12,7 @@ Mat4 (f32) and Mat4d (f64) 4x4 transformation matrices with column-major storage
 | Status | Implemented |
 | Source | `test/feature/usage/mat4_spec.spl` |
 | Updated | 2026-04-07 |
-| Generator | `simple sspec-docgen` (Rust) |
+| Generator | `simple spipe-docgen` (Rust) |
 
 ## Scenario Summary
 

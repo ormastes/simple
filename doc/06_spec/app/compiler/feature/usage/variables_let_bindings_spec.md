@@ -11,7 +11,7 @@ Tests for variable declarations including val (immutable) and var (mutable) bind
 | Status | Implemented |
 | Source | `test/feature/usage/variables_let_bindings_spec.spl` |
 | Updated | 2026-04-07 |
-| Generator | `simple sspec-docgen` (Rust) |
+| Generator | `simple spipe-docgen` (Rust) |
 
 ## Scenario Summary
 

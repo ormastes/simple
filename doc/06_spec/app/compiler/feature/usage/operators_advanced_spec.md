@@ -11,7 +11,7 @@ Tests advanced operators and language features including:
 | Status | Implemented |
 | Source | `test/feature/usage/operators_advanced_spec.spl` |
 | Updated | 2026-04-07 |
-| Generator | `simple sspec-docgen` (Rust) |
+| Generator | `simple spipe-docgen` (Rust) |
 
 ## Scenario Summary
 

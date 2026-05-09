@@ -12,7 +12,7 @@ Tests that `loss{}` and `nograd{}` blocks parse, evaluate, and render the same s
 | Status | Implemented |
 | Source | `test/feature/usage/loss_nograd_blocks_spec.spl` |
 | Updated | 2026-04-07 |
-| Generator | `simple sspec-docgen` (Rust) |
+| Generator | `simple spipe-docgen` (Rust) |
 
 ## Scenario Summary
 

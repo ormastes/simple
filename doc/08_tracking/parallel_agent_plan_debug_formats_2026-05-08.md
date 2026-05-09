@@ -253,7 +253,7 @@ Test plan:
 4. Also test macho_inspect() on the same binary
 
 Use BinaryReader/BinaryWriter from std.binary_io for any byte manipulation.
-The test file uses SSpec: describe/it blocks with expect().to_equal().
+The test file uses SPipe: describe/it blocks with expect().to_equal().
 See existing tests at src/lib/nogc_sync_mut/debug/formats/test/ for the pattern.
 
 PREREQUISITE: Agent A must have fixed bytes_to_u* externs first. If

@@ -10,4 +10,4 @@ spec generator, doc generator, formatter, linter, and related tools.
 
 | Spec File | Status | Doc Coverage |
 |-----------|--------|--------------|
-| (run `bin/simple sspec-docgen test/feature/app/**/*_spec.spl --output doc/06_spec/app/compiler/feature/app` to populate) | — | — |
+| (run `bin/simple spipe-docgen test/feature/app/**/*_spec.spl --output doc/06_spec/app/compiler/feature/app` to populate) | — | — |

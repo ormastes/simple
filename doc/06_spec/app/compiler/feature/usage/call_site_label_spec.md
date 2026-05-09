@@ -11,7 +11,7 @@ Call-site labels are postfix keywords attached to arguments at the call site tha
 | Status | Active |
 | Source | `test/feature/usage/call_site_label_spec.spl` |
 | Updated | 2026-04-07 |
-| Generator | `simple sspec-docgen` (Rust) |
+| Generator | `simple spipe-docgen` (Rust) |
 
 ## Scenario Summary
 

@@ -11,7 +11,7 @@ Tests that the parser correctly parses various expression forms including
 | Status | Implemented |
 | Source | `test/feature/usage/parser_expressions_spec.spl` |
 | Updated | 2026-04-07 |
-| Generator | `simple sspec-docgen` (Rust) |
+| Generator | `simple spipe-docgen` (Rust) |
 
 ## Scenario Summary
 

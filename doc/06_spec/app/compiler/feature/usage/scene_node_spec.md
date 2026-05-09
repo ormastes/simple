@@ -12,7 +12,7 @@ SceneNode trait using Transformd for transform hierarchy.
 | Status | Implemented |
 | Source | `test/feature/usage/scene_node_spec.spl` |
 | Updated | 2026-04-07 |
-| Generator | `simple sspec-docgen` (Rust) |
+| Generator | `simple spipe-docgen` (Rust) |
 
 ## Scenario Summary
 

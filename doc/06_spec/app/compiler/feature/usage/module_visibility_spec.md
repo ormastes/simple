@@ -12,7 +12,7 @@ Module visibility system with filename-based auto-public rule. Types matching th
 | Status | In Progress (Core Complete, Integration Pending) |
 | Source | `test/feature/usage/module_visibility_spec.spl` |
 | Updated | 2026-04-07 |
-| Generator | `simple sspec-docgen` (Rust) |
+| Generator | `simple spipe-docgen` (Rust) |
 
 ## Scenario Summary
 

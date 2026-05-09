@@ -11,7 +11,7 @@ Ranges in Simple can be iterated with custom step values. This is primarily
 | Status | Implemented |
 | Source | `test/feature/usage/range_step_by_spec.spl` |
 | Updated | 2026-04-07 |
-| Generator | `simple sspec-docgen` (Rust) |
+| Generator | `simple spipe-docgen` (Rust) |
 
 ## Scenario Summary
 

@@ -11,7 +11,7 @@ Tests the basic TreeSitter.new(source).parse_outline() workflow,
 | Status | Implemented |
 | Source | `test/feature/usage/treesitter_parser_spec.spl` |
 | Updated | 2026-04-07 |
-| Generator | `simple sspec-docgen` (Rust) |
+| Generator | `simple spipe-docgen` (Rust) |
 
 ## Scenario Summary
 

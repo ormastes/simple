@@ -9,7 +9,7 @@
 | Status | Implemented |
 | Source | `test/feature/usage/cmm_lsp/cmm_parse_v4_fixes_spec.spl` |
 | Updated | 2026-04-07 |
-| Generator | `simple sspec-docgen` (Rust) |
+| Generator | `simple spipe-docgen` (Rust) |
 
 ## Scenario Summary
 
@@ -23,7 +23,7 @@
 
 ## Overview
 
-Documentation was generated from executable SSpec scenarios.
+Documentation was generated from executable SPipe scenarios.
 
 ## Evidence
 

@@ -12,7 +12,7 @@ This file contains executable test cases for Simple's macro system. Macros in Si
 | Reference | macro.md |
 | Source | `test/specs/macro_spec.spl` |
 | Updated | 2026-04-24 |
-| Generator | `simple sspec-docgen` (Rust) |
+| Generator | `simple spipe-docgen` (Rust) |
 
 ## Scenario Summary
 

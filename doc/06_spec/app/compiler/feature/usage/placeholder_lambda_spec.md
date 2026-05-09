@@ -11,7 +11,7 @@ Placeholder lambdas let the programmer write concise anonymous functions by usin
 | Status | Active |
 | Source | `test/feature/usage/placeholder_lambda_spec.spl` |
 | Updated | 2026-04-07 |
-| Generator | `simple sspec-docgen` (Rust) |
+| Generator | `simple spipe-docgen` (Rust) |
 
 ## Scenario Summary
 

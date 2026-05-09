@@ -1,6 +1,6 @@
-# SSpec Test Writing Skill
+# SPipe Test Writing Skill
 
-SSpec is Simple's BDD testing framework. `describe`, `it`, `expect` are **built-in** -- no import needed.
+SPipe is Simple's BDD testing framework. `describe`, `it`, `expect` are **built-in** -- no import needed.
 
 ## Quick Start
 

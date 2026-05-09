@@ -10,4 +10,4 @@ text encoding, and platform-specific runtime differences.
 
 | Spec File | Status | Doc Coverage |
 |-----------|--------|--------------|
-| (run `bin/simple sspec-docgen test/feature/platform/**/*_spec.spl --output doc/06_spec/app/compiler/feature/platform` to populate) | — | — |
+| (run `bin/simple spipe-docgen test/feature/platform/**/*_spec.spl --output doc/06_spec/app/compiler/feature/platform` to populate) | — | — |

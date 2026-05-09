@@ -10,7 +10,7 @@
 - **Requested-semantics:**
   Pure-Simple `_pss_bi_mod_exp` against a 2048-bit modulus and 2048-bit
   exponent runs O(bits^3) with the current schoolbook `_pss_bi_mod` doing
-  one shift+subtract per bit per modexp round. In the SSpec interpreter
+  one shift+subtract per bit per modexp round. In the SPipe interpreter
   this exceeds the 60s watchdog for a single sign/verify call. The
   existing `rsa_fallback._bi_mod_exp` has the same shape and is the
   reason `rsa_pkcs1_v15_spec.spl` routes through the FFI hosted backend
@@ -56,4 +56,4 @@
 
   Once compile-mode test execution is reliable, this FR may be
   downgradable; for now it blocks pure-Simple TLS 1.3 sigalg coverage
-  for `rsa_pss_rsae_*` in the SSpec interpreter lane.
+  for `rsa_pss_rsae_*` in the SPipe interpreter lane.

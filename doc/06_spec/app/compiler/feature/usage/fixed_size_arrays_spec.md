@@ -11,7 +11,7 @@ Fixed-size arrays use the `[T; N]` syntax to declare arrays whose length is know
 | Status | Active |
 | Source | `test/feature/usage/fixed_size_arrays_spec.spl` |
 | Updated | 2026-04-07 |
-| Generator | `simple sspec-docgen` (Rust) |
+| Generator | `simple spipe-docgen` (Rust) |
 
 ## Scenario Summary
 

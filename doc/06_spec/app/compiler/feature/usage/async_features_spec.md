@@ -11,7 +11,7 @@ async features - runtime parser cannot handle async/await/spawn/yield/generator 
 | Status | Implemented |
 | Source | `test/feature/usage/async_features_spec.spl` |
 | Updated | 2026-04-07 |
-| Generator | `simple sspec-docgen` (Rust) |
+| Generator | `simple spipe-docgen` (Rust) |
 
 ## Scenario Summary
 

@@ -12,7 +12,7 @@ This spec covers Simple's capability-based effect system, which statically track
 | Reference | capability_effects.md |
 | Source | `test/specs/capability_effects_spec.spl` |
 | Updated | 2026-04-24 |
-| Generator | `simple sspec-docgen` (Rust) |
+| Generator | `simple spipe-docgen` (Rust) |
 
 ## Scenario Summary
 

@@ -11,7 +11,7 @@ Tests the effect system including:
 | Status | Implemented |
 | Source | `test/feature/usage/effect_system_spec.spl` |
 | Updated | 2026-04-07 |
-| Generator | `simple sspec-docgen` (Rust) |
+| Generator | `simple spipe-docgen` (Rust) |
 
 ## Scenario Summary
 

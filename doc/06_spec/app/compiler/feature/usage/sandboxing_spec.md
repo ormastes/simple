@@ -10,7 +10,7 @@ Simple provides two complementary isolation models for secure code execution:
 | Status | Runtime Complete (#916-919), Environment Planned (#920-923) |
 | Source | `test/feature/usage/sandboxing_spec.spl` |
 | Updated | 2026-04-07 |
-| Generator | `simple sspec-docgen` (Rust) |
+| Generator | `simple spipe-docgen` (Rust) |
 
 ## Scenario Summary
 

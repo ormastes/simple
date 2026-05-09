@@ -11,7 +11,7 @@ Tests implicit context parameters declared with `context val` and bound with `wi
 | Status | Active |
 | Source | `test/feature/usage/implicit_context_spec.spl` |
 | Updated | 2026-04-07 |
-| Generator | `simple sspec-docgen` (Rust) |
+| Generator | `simple spipe-docgen` (Rust) |
 
 ## Scenario Summary
 

@@ -99,7 +99,7 @@ These specs remain as architectural reference documentation. Test cases have bee
 
 | Spec | Status | Feature IDs | Description |
 |------|--------|-------------|-------------|
-| **[SSpec Manual](sspec_manual.md)** | ✅ | - | **Complete user guide for SSpec** |
+| **[SPipe Manual](spipe_manual.md)** | ✅ | - | **Complete user guide for SPipe** |
 | [BDD Framework](testing/testing_bdd_framework.md) | ✅ | #302 | BDD testing, matchers, Gherkin |
 | [Doctest](testing/sdoctest.md) | ✅ | #303 | Documentation testing |
 | [Doctest README](doctest_readme.md) | ✅ | #303 | README.md-based doctest discovery |
@@ -274,7 +274,7 @@ graphics_3d/README.md → graphics_3d/scene_graph.md → graphics_3d/rendering.m
 4. Advanced: [Capability Effects](capability_effects.md) - Reference capabilities
 
 ### I want to write tests
-1. **Start: [SSpec Manual](sspec_manual.md) - Complete user guide**
+1. **Start: [SPipe Manual](spipe_manual.md) - Complete user guide**
 2. Reference: [BDD Framework](testing/testing_bdd_framework.md) - Framework specification
 3. Next: [Doctest](testing/sdoctest.md) - Inline documentation tests
 4. Then: [Mock Framework](testing/mock.md) - Test doubles

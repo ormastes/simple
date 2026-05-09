@@ -11,7 +11,7 @@ Tests compile-time and runtime error cases for the cli keyword. The compiler sho
 | Status | Draft |
 | Source | `test/feature/usage/cli_args_error_spec.spl` |
 | Updated | 2026-04-07 |
-| Generator | `simple sspec-docgen` (Rust) |
+| Generator | `simple spipe-docgen` (Rust) |
 
 ## Scenario Summary
 

@@ -40,7 +40,7 @@ Before starting any step, **check if prerequisite artifacts exist**:
 | Requirements | `doc/02_requirements/feature/<feature>.md` | Research first, then generate + ask user to select |
 | UI design | `doc/05_design/<feature>_tui.md` | Create TUI/GUI mockups yourself |
 | Architecture | `doc/04_architecture/<feature>.md` | Design architecture yourself |
-| System tests | `doc/06_spec/app/<app_name>/feature/<feature>_spec.spl` | Create SSpec tests yourself |
+| System tests | `doc/06_spec/app/<app_name>/feature/<feature>_spec.spl` | Create SPipe tests yourself |
 | Detail design | `doc/05_design/<feature>.md` | Create detail design yourself |
 | Implementation | `src/**/<feature>.spl` | Implement the feature |
 
@@ -140,7 +140,7 @@ If missing, do all:
 - Output: `doc/04_architecture/<feature>.md`
 
 ### System Test Design
-- SSpec BDD tests: `doc/06_spec/app/<app_name>/feature/<feature>_spec.spl`
+- SPipe BDD tests: `doc/06_spec/app/<app_name>/feature/<feature>_spec.spl`
 - Test plan: `doc/03_plan/sys_test/<feature>.md`
 - Matchers (built-in only): `to_equal`, `to_be`, `to_be_nil`, `to_contain`, `to_start_with`, `to_end_with`, `to_be_greater_than`, `to_be_less_than`
 
@@ -167,7 +167,7 @@ Production readiness check:
 
 | Check | Fail Condition |
 |-------|---------------|
-| SSpec Tests | `pass_todo`, `expect(true).to_equal(true)`, empty bodies |
+| SPipe Tests | `pass_todo`, `expect(true).to_equal(true)`, empty bodies |
 | Implementation | Stub functions, hardcoded returns, TODO-only bodies |
 | Requirements | REQ-NNN without implementation or test coverage |
 | NFR | Targets without verification mechanism |
@@ -200,7 +200,7 @@ This repo is a registered Gemini CLI extension via `gemini-extension.json`.
 - All requirement options must include pros, cons, and effort estimate
 - User MUST select requirements — never auto-select
 - All code in `.spl` — no Python, no Bash (except 3 bootstrap scripts)
-- SSpec matchers: built-in only (`to_equal`, `to_be`, `to_be_nil`, `to_contain`, etc.)
+- SPipe matchers: built-in only (`to_equal`, `to_be`, `to_be_nil`, `to_contain`, etc.)
 - For MCP, LSP, and tool-server work, design must review startup path, hot request paths, cache or index strategy, invalidation strategy, and startup/latency/RSS targets
 - Production wrappers should execute cached compiled artifacts rather than raw source entrypoints
 - Repeated full-tree scans, repeated rereads, shell-outs, and retry sleeps in hot request handlers require explicit design justification and verification evidence

@@ -12,7 +12,7 @@ Vec3 (f32) and Vec3d (f64) 3D vector types with arithmetic, geometric, and utili
 | Status | Implemented |
 | Source | `test/feature/usage/vec3_spec.spl` |
 | Updated | 2026-04-07 |
-| Generator | `simple sspec-docgen` (Rust) |
+| Generator | `simple spipe-docgen` (Rust) |
 
 ## Scenario Summary
 

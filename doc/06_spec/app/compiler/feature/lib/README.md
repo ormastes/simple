@@ -10,4 +10,4 @@ math utilities, and other stdlib components.
 
 | Spec File | Status | Doc Coverage |
 |-----------|--------|--------------|
-| (run `bin/simple sspec-docgen test/feature/lib/**/*_spec.spl --output doc/06_spec/app/compiler/feature/lib` to populate) | — | — |
+| (run `bin/simple spipe-docgen test/feature/lib/**/*_spec.spl --output doc/06_spec/app/compiler/feature/lib` to populate) | — | — |

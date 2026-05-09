@@ -148,7 +148,7 @@ Complete these repository-facing tasks before drafting final requirements:
 - Identify current backend-related code and tests, including mock BLAS routing and any runtime/native build hooks.
 - Review compiler/runtime support for native shims, CPU feature detection, dynamic symbol loading, and platform-specific package layout.
 - Record hot request/startup paths affected by backend selection, especially MCP/LSP package smoke requirements when `src/lib` or runtime packaging changes.
-- Inventory existing SSpec patterns for optional-environment tests so CUDA/libtorch absence reports cleanly.
+- Inventory existing SPipe patterns for optional-environment tests so CUDA/libtorch absence reports cleanly.
 
 ## Domain Research Checklist
 

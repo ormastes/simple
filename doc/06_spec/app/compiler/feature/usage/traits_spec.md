@@ -12,7 +12,7 @@ Traits define shared behavior that types can implement, enabling polymorphism an
 | Status | Implemented |
 | Source | `test/feature/usage/traits_spec.spl` |
 | Updated | 2026-04-07 |
-| Generator | `simple sspec-docgen` (Rust) |
+| Generator | `simple spipe-docgen` (Rust) |
 
 ## Scenario Summary
 

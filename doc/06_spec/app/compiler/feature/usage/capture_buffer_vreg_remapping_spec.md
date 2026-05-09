@@ -12,7 +12,7 @@ This specification covers advanced virtual register (vreg) remapping and capture
 | Status | Planned |
 | Source | `test/feature/usage/capture_buffer_vreg_remapping_spec.spl` |
 | Updated | 2026-04-07 |
-| Generator | `simple sspec-docgen` (Rust) |
+| Generator | `simple spipe-docgen` (Rust) |
 
 ## Scenario Summary
 

@@ -11,7 +11,7 @@ Named arguments allow passing function arguments by name rather than position.
 | Status | Implemented |
 | Source | `test/feature/usage/named_arg_equals_spec.spl` |
 | Updated | 2026-04-07 |
-| Generator | `simple sspec-docgen` (Rust) |
+| Generator | `simple spipe-docgen` (Rust) |
 
 ## Scenario Summary
 

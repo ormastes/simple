@@ -11,7 +11,7 @@ Tests NVIDIA CUDA backend functionality including device detection and selection
 | Status | In Progress |
 | Source | `test/feature/usage/cuda_spec.spl` |
 | Updated | 2026-04-07 |
-| Generator | `simple sspec-docgen` (Rust) |
+| Generator | `simple spipe-docgen` (Rust) |
 
 ## Scenario Summary
 

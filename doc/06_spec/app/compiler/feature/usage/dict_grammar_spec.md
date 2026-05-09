@@ -11,7 +11,7 @@ Tests for dictionary literal syntax, ensuring correct grammar is used.
 | Status | Complete |
 | Source | `test/feature/usage/dict_grammar_spec.spl` |
 | Updated | 2026-04-07 |
-| Generator | `simple sspec-docgen` (Rust) |
+| Generator | `simple spipe-docgen` (Rust) |
 
 ## Scenario Summary
 

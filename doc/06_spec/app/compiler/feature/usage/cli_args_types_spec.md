@@ -11,7 +11,7 @@ Tests type inference from default values in the `cli` keyword block. The compile
 | Status | Draft |
 | Source | `test/feature/usage/cli_args_types_spec.spl` |
 | Updated | 2026-04-07 |
-| Generator | `simple sspec-docgen` (Rust) |
+| Generator | `simple spipe-docgen` (Rust) |
 
 ## Scenario Summary
 

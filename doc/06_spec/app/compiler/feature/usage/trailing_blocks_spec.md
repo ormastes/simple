@@ -12,7 +12,7 @@ Trailing blocks (also called "trailing lambdas") provide Ruby-style syntax for p
 | Status | Implemented |
 | Source | `test/feature/usage/trailing_blocks_spec.spl` |
 | Updated | 2026-04-07 |
-| Generator | `simple sspec-docgen` (Rust) |
+| Generator | `simple spipe-docgen` (Rust) |
 
 ## Scenario Summary
 

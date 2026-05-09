@@ -1,6 +1,6 @@
 ---
 name: verify
-description: "Codex verification skill (primary verifier in cooperative mode). 6-phase production readiness verification: scope, SSpec quality, implementation stubs, requirements tracing, NFR, docs. STATUS: PASS/FAIL/WARN output. Must PASS before release."
+description: "Codex verification skill (primary verifier in cooperative mode). 6-phase production readiness verification: scope, SPipe quality, implementation stubs, requirements tracing, NFR, docs. STATUS: PASS/FAIL/WARN output. Must PASS before release."
 ---
 
 # Verify — Codex (Primary Verifier)
@@ -27,7 +27,7 @@ description: "Codex verification skill (primary verifier in cooperative mode). 6
 - Map changes to requirements (REQ-NNN)
 - Verify no unrelated changes sneaked in
 
-### Phase 2: SSpec Quality
+### Phase 2: SPipe Quality
 
 - Every `it` block has real assertions (not `pass_todo`, not `expect(true).to_equal(true)`)
 - Edge cases and error paths tested

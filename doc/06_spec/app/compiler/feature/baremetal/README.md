@@ -31,7 +31,7 @@ Pre-built ELF binaries in `examples/09_embedded/baremetal/baremetal/`:
 | Binary | Arch | Purpose |
 |--------|------|---------|
 | `hello_riscv32_semihost.elf` | RV32I | Basic semihosting hello world |
-| `hello_riscv32_sspec.elf` | RV32I | SSpec-format output for test runner |
+| `hello_riscv32_spipe.elf` | RV32I | SPipe-format output for test runner |
 
 Build with: `examples/09_embedded/baremetal/baremetal/build.shs`
 

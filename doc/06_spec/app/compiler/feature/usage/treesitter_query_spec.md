@@ -11,7 +11,7 @@ Tests advanced outline features: type parameters, traits, impls,
 | Status | Implemented |
 | Source | `test/feature/usage/treesitter_query_spec.spl` |
 | Updated | 2026-04-07 |
-| Generator | `simple sspec-docgen` (Rust) |
+| Generator | `simple spipe-docgen` (Rust) |
 
 ## Scenario Summary
 

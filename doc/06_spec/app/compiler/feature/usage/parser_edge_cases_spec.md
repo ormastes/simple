@@ -11,7 +11,7 @@ The Simple parser must handle several non-trivial syntactic forms that are easy 
 | Status | In Progress |
 | Source | `test/feature/usage/parser_edge_cases_spec.spl` |
 | Updated | 2026-04-07 |
-| Generator | `simple sspec-docgen` (Rust) |
+| Generator | `simple spipe-docgen` (Rust) |
 
 ## Scenario Summary
 

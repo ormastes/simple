@@ -11,7 +11,7 @@ Simple treats `skip`, `static`, and `default` as contextual keywords rather than
 | Status | Active |
 | Source | `test/feature/usage/parser_contextual_keywords_simple_spec.spl` |
 | Updated | 2026-04-07 |
-| Generator | `simple sspec-docgen` (Rust) |
+| Generator | `simple spipe-docgen` (Rust) |
 
 ## Scenario Summary
 

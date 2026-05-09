@@ -11,7 +11,7 @@ Simple follows the design decision that collections (arrays and dicts) are mutab
 | Status | Active |
 | Source | `test/feature/usage/mutable_by_default_spec.spl` |
 | Updated | 2026-04-07 |
-| Generator | `simple sspec-docgen` (Rust) |
+| Generator | `simple spipe-docgen` (Rust) |
 
 ## Scenario Summary
 

@@ -12,7 +12,7 @@ Format strings allow defining reusable string patterns with placeholders that ar
 | Status | Implemented |
 | Source | `test/feature/usage/format_string_with_spec.spl` |
 | Updated | 2026-04-07 |
-| Generator | `simple sspec-docgen` (Rust) |
+| Generator | `simple spipe-docgen` (Rust) |
 
 ## Scenario Summary
 

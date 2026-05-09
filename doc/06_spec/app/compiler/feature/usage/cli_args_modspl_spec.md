@@ -11,7 +11,7 @@ Tests embedding the cli keyword in mod.spl module files. When a module's mod.spl
 | Status | Draft |
 | Source | `test/feature/usage/cli_args_modspl_spec.spl` |
 | Updated | 2026-04-07 |
-| Generator | `simple sspec-docgen` (Rust) |
+| Generator | `simple spipe-docgen` (Rust) |
 
 ## Scenario Summary
 

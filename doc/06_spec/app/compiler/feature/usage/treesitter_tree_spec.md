@@ -11,7 +11,7 @@ Tests that TreeSitter parses source into correct OutlineModule structure,
 | Status | Implemented |
 | Source | `test/feature/usage/treesitter_tree_spec.spl` |
 | Updated | 2026-04-07 |
-| Generator | `simple sspec-docgen` (Rust) |
+| Generator | `simple spipe-docgen` (Rust) |
 
 ## Scenario Summary
 

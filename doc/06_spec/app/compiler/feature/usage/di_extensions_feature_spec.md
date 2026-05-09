@@ -10,7 +10,7 @@ Tests the DI Extension Container (CompileContext.extensions) which provides a dy
 | Status | In Progress |
 | Source | `test/feature/usage/di_extensions_feature_spec.spl` |
 | Updated | 2026-04-07 |
-| Generator | `simple sspec-docgen` (Rust) |
+| Generator | `simple spipe-docgen` (Rust) |
 
 ## Scenario Summary
 

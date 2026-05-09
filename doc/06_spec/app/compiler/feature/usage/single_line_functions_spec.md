@@ -11,7 +11,7 @@ Single-line (inline) function definitions allow functions to be defined with
 | Status | Implemented |
 | Source | `test/feature/usage/single_line_functions_spec.spl` |
 | Updated | 2026-04-07 |
-| Generator | `simple sspec-docgen` (Rust) |
+| Generator | `simple spipe-docgen` (Rust) |
 
 ## Scenario Summary
 

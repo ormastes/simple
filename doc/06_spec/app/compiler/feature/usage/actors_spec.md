@@ -11,7 +11,7 @@ The actor model provides a message-passing concurrency primitive where isolated 
 | Status | In Progress |
 | Source | `test/feature/usage/actors_spec.spl` |
 | Updated | 2026-04-07 |
-| Generator | `simple sspec-docgen` (Rust) |
+| Generator | `simple spipe-docgen` (Rust) |
 
 ## Overview
 

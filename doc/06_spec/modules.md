@@ -11,7 +11,7 @@ This file contains executable test cases extracted from modules.md. The original
 | Reference | modules.md |
 | Source | `test/specs/modules_spec.spl` |
 | Updated | 2026-04-24 |
-| Generator | `simple sspec-docgen` (Rust) |
+| Generator | `simple spipe-docgen` (Rust) |
 
 ## Scenario Summary
 

@@ -11,7 +11,7 @@ Tests for semantic unit types that add compile-time dimensional safety to numeri
 | Status | Implemented |
 | Source | `test/feature/usage/unit_types_spec.spl` |
 | Updated | 2026-04-07 |
-| Generator | `simple sspec-docgen` (Rust) |
+| Generator | `simple spipe-docgen` (Rust) |
 
 ## Scenario Summary
 

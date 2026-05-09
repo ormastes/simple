@@ -11,7 +11,7 @@ Tests for various numeric literal formats including hexadecimal, binary, octal, 
 | Status | Implemented |
 | Source | `test/feature/usage/numeric_literals_spec.spl` |
 | Updated | 2026-04-07 |
-| Generator | `simple sspec-docgen` (Rust) |
+| Generator | `simple spipe-docgen` (Rust) |
 
 ## Scenario Summary
 

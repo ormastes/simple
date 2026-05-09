@@ -11,7 +11,7 @@ Safe unwrap operators provide ergonomic ways to extract values from Option<T>
 | Status | Implemented |
 | Source | `test/feature/usage/safe_unwrap_operators_spec.spl` |
 | Updated | 2026-04-07 |
-| Generator | `simple sspec-docgen` (Rust) |
+| Generator | `simple spipe-docgen` (Rust) |
 
 ## Scenario Summary
 

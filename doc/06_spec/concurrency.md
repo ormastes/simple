@@ -12,7 +12,7 @@ This spec covers Simple's concurrency model: actor-based message passing, async-
 | Reference | concurrency.md |
 | Source | `test/specs/concurrency_spec.spl` |
 | Updated | 2026-04-24 |
-| Generator | `simple sspec-docgen` (Rust) |
+| Generator | `simple spipe-docgen` (Rust) |
 
 ## Scenario Summary
 

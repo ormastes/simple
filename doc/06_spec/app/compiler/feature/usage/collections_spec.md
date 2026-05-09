@@ -11,7 +11,7 @@ Tests for collection types including arrays, tuples, dictionaries, and strings. 
 | Status | Implemented |
 | Source | `test/feature/usage/collections_spec.spl` |
 | Updated | 2026-04-07 |
-| Generator | `simple sspec-docgen` (Rust) |
+| Generator | `simple spipe-docgen` (Rust) |
 
 ## Scenario Summary
 

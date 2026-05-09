@@ -10,7 +10,7 @@ Tests that real bitfield syntax is accepted and parsed correctly in the feature 
 | Status | In Progress |
 | Source | `test/feature/usage/bitfield_runtime_compat_spec.spl` |
 | Updated | 2026-04-07 |
-| Generator | `simple sspec-docgen` (Rust) |
+| Generator | `simple spipe-docgen` (Rust) |
 
 ## Scenario Summary
 

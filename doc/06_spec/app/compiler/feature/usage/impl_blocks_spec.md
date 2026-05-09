@@ -12,7 +12,7 @@ Implementation blocks (`impl`) provide a flexible way to define methods for type
 | Status | Implemented |
 | Source | `test/feature/usage/impl_blocks_spec.spl` |
 | Updated | 2026-04-07 |
-| Generator | `simple sspec-docgen` (Rust) |
+| Generator | `simple spipe-docgen` (Rust) |
 
 ## Scenario Summary
 

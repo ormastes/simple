@@ -12,7 +12,7 @@ Tests for the Option type representing values that may or may not be present, in
 | Status | Implemented |
 | Source | `test/feature/usage/option_type_spec.spl` |
 | Updated | 2026-04-07 |
-| Generator | `simple sspec-docgen` (Rust) |
+| Generator | `simple spipe-docgen` (Rust) |
 
 ## Scenario Summary
 

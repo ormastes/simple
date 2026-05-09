@@ -12,7 +12,7 @@ The LLVM backend provides high-performance native code generation for the Simple
 | Status | In Progress |
 | Source | `test/feature/usage/llvm_backend_spec.spl` |
 | Updated | 2026-04-07 |
-| Generator | `simple sspec-docgen` (Rust) |
+| Generator | `simple spipe-docgen` (Rust) |
 
 ## Scenario Summary
 

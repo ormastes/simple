@@ -11,7 +11,7 @@ Tests for underscore (_) as a wildcard placeholder in various contexts:
 | Status | Implemented |
 | Source | `test/feature/usage/underscore_wildcard_spec.spl` |
 | Updated | 2026-04-07 |
-| Generator | `simple sspec-docgen` (Rust) |
+| Generator | `simple spipe-docgen` (Rust) |
 
 ## Scenario Summary
 

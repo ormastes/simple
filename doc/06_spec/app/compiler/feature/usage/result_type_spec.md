@@ -11,7 +11,7 @@ Tests for the Result type representing success or error outcomes, including cons
 | Status | Implemented |
 | Source | `test/feature/usage/result_type_spec.spl` |
 | Updated | 2026-04-07 |
-| Generator | `simple sspec-docgen` (Rust) |
+| Generator | `simple spipe-docgen` (Rust) |
 
 ## Scenario Summary
 

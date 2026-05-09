@@ -26,7 +26,7 @@ description: Create architecture, UI design, system tests, and detail design for
 
 ## Phase 3: System Test Design
 
-- SSpec BDD tests: `doc/06_spec/app/<app_name>/feature/<feature>_spec.spl`
+- SPipe BDD tests: `doc/06_spec/app/<app_name>/feature/<feature>_spec.spl`
 - Test plan: `doc/03_plan/sys_test/<feature>.md`
 - Matchers (built-in only): `to_equal`, `to_be`, `to_be_nil`, `to_contain`, `to_start_with`, `to_end_with`, `to_be_greater_than`, `to_be_less_than`
 - Every REQ-NNN must have at least one test
@@ -39,7 +39,7 @@ description: Create architecture, UI design, system tests, and detail design for
 
 ## Phase 5: Quality Check
 
-- Verify SSpec quality (A grade, real assertions, edge cases)
+- Verify SPipe quality (A grade, real assertions, edge cases)
 - Ask user if architecture/design needs changes
 
 ## Rules

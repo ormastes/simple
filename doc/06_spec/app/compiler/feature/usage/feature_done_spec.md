@@ -11,7 +11,7 @@ This specification documents the living documentation pattern where features
 | Status | Implemented |
 | Source | `test/feature/usage/feature_done_spec.spl` |
 | Updated | 2026-04-07 |
-| Generator | `simple sspec-docgen` (Rust) |
+| Generator | `simple spipe-docgen` (Rust) |
 
 ## Scenario Summary
 

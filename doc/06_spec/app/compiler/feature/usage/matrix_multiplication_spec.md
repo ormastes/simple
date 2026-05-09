@@ -11,7 +11,7 @@ The `@` operator performs matrix multiplication following NumPy semantics:
 | Status | Implemented |
 | Source | `test/feature/usage/matrix_multiplication_spec.spl` |
 | Updated | 2026-04-07 |
-| Generator | `simple sspec-docgen` (Rust) |
+| Generator | `simple spipe-docgen` (Rust) |
 
 ## Scenario Summary
 

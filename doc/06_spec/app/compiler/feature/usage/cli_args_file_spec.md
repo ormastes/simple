@@ -11,7 +11,7 @@ Tests file extension detection and the prefetch directive in the cli keyword. Wh
 | Status | Draft |
 | Source | `test/feature/usage/cli_args_file_spec.spl` |
 | Updated | 2026-04-07 |
-| Generator | `simple sspec-docgen` (Rust) |
+| Generator | `simple spipe-docgen` (Rust) |
 
 ## Scenario Summary
 

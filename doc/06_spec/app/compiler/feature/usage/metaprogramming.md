@@ -12,7 +12,7 @@ This file contains executable test cases for metaprogramming features that are c
 | Reference | metaprogramming.md |
 | Source | `test/feature/usage/metaprogramming_spec.spl` |
 | Updated | 2026-04-07 |
-| Generator | `simple sspec-docgen` (Rust) |
+| Generator | `simple spipe-docgen` (Rust) |
 
 ## Scenario Summary
 

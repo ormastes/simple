@@ -11,7 +11,7 @@ Tests VHDL backend toolchain integration with GHDL and Yosys. Covers GHDL availa
 | Status | In Progress |
 | Source | `test/feature/usage/vhdl_spec.spl` |
 | Updated | 2026-04-07 |
-| Generator | `simple sspec-docgen` (Rust) |
+| Generator | `simple spipe-docgen` (Rust) |
 
 ## Scenario Summary
 

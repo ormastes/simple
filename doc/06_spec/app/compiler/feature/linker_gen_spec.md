@@ -6,7 +6,7 @@
 |-------|-------|
 | Source | `test/feature/app/linker_gen_spec.spl` |
 | Updated | 2026-04-07 |
-| Generator | `simple sspec-docgen` (Rust) |
+| Generator | `simple spipe-docgen` (Rust) |
 
 ## Scenario Summary
 
@@ -20,7 +20,7 @@
 
 ## Overview
 
-Documentation was generated from executable SSpec scenarios.
+Documentation was generated from executable SPipe scenarios.
 
 ## Evidence
 

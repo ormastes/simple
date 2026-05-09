@@ -12,7 +12,7 @@ Integer literals in Simple support multiple base formats (decimal, hexadecimal, 
 | Status | Implemented |
 | Source | `test/feature/usage/basic_types_integer_literals_spec.spl` |
 | Updated | 2026-04-07 |
-| Generator | `simple sspec-docgen` (Rust) |
+| Generator | `simple spipe-docgen` (Rust) |
 
 ## Scenario Summary
 

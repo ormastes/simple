@@ -12,7 +12,7 @@ Tests for mutability control mechanisms including mutable and immutable referenc
 | Status | Planned |
 | Source | `test/feature/usage/mutability_control_spec.spl` |
 | Updated | 2026-04-07 |
-| Generator | `simple sspec-docgen` (Rust) |
+| Generator | `simple spipe-docgen` (Rust) |
 
 ## Scenario Summary
 

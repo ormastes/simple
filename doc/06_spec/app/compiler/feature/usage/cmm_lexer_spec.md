@@ -11,7 +11,7 @@ Tests for the CMM (PRACTICE Script) lexer. Validates tokenization of all CMM lex
 | Status | Implemented |
 | Source | `test/feature/usage/cmm_lsp/cmm_lexer_spec.spl` |
 | Updated | 2026-04-07 |
-| Generator | `simple sspec-docgen` (Rust) |
+| Generator | `simple spipe-docgen` (Rust) |
 
 ## Scenario Summary
 

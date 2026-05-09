@@ -10,7 +10,7 @@ Tests for CMM v2025 version support and command database updates.
 | Status | In Progress |
 | Source | `test/feature/usage/cmm_lsp/cmm_v2025_spec.spl` |
 | Updated | 2026-04-07 |
-| Generator | `simple sspec-docgen` (Rust) |
+| Generator | `simple spipe-docgen` (Rust) |
 
 ## Scenario Summary
 

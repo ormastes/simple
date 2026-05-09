@@ -24,7 +24,7 @@ See: `doc/guide/llm_cooperative_dev_phase.md`
 | `$release` | `.codex/skills/release/SKILL.md` | Version bump + tag |
 | `$architecture` | `.codex/skills/architecture/SKILL.md` | MDSOC, ADR writing |
 | `$mdsoc` | `.codex/skills/mdsoc-architecture-writing/SKILL.md` | MDSOC architecture docs |
-| `$system_test` | `.codex/skills/system_test/SKILL.md` | SSpec test design |
+| `$system_test` | `.codex/skills/system_test/SKILL.md` | SPipe test design |
 | `$coding` | `.codex/skills/coding/SKILL.md` | Simple language rules |
 
 ---
@@ -39,7 +39,7 @@ Before starting any step, **check if prerequisite artifacts exist**:
 | Requirements | `doc/02_requirements/feature/<feature>.md` | Research first, then generate + ask user to select |
 | UI design | `doc/05_design/<feature>_tui.md` | Create TUI/GUI mockups yourself |
 | Architecture | `doc/04_architecture/<feature>.md` | Design architecture yourself |
-| System tests | `doc/06_spec/app/<app_name>/feature/<feature>_spec.spl` | Create SSpec tests yourself |
+| System tests | `doc/06_spec/app/<app_name>/feature/<feature>_spec.spl` | Create SPipe tests yourself |
 | Detail design | `doc/05_design/<feature>.md` | Create detail design yourself |
 | Implementation | `src/**/<feature>.spl` | Implement the feature |
 
@@ -136,7 +136,7 @@ If missing, do all:
 - Output: `doc/04_architecture/<feature>.md`
 
 ### System Test Design
-- SSpec BDD tests: `doc/06_spec/app/<app_name>/feature/<feature>_spec.spl`
+- SPipe BDD tests: `doc/06_spec/app/<app_name>/feature/<feature>_spec.spl`
 - Test plan: `doc/03_plan/sys_test/<feature>.md`
 - Matchers (built-in only): `to_equal`, `to_be`, `to_be_nil`, `to_contain`, `to_start_with`, `to_end_with`, `to_be_greater_than`, `to_be_less_than`
 
@@ -164,7 +164,7 @@ Run `/verify` — production readiness check:
 
 | Check | Fail Condition |
 |-------|---------------|
-| SSpec Tests | `pass_todo`, `expect(true).to_equal(true)`, empty bodies |
+| SPipe Tests | `pass_todo`, `expect(true).to_equal(true)`, empty bodies |
 | Implementation | Stub functions, hardcoded returns, TODO-only bodies |
 | Requirements | REQ-NNN without implementation or test coverage |
 | NFR | Targets without verification mechanism |

@@ -11,7 +11,7 @@ In Simple, the `pass` keyword and the unit literal `()` are semantically equival
 | Status | Active |
 | Source | `test/feature/usage/pass_unit_equivalence_spec.spl` |
 | Updated | 2026-04-07 |
-| Generator | `simple sspec-docgen` (Rust) |
+| Generator | `simple spipe-docgen` (Rust) |
 
 ## Scenario Summary
 

@@ -12,7 +12,7 @@ Validates that the LLVM backend correctly generates code for AArch64 (ARM 64-bit
 | Status | In Progress |
 | Source | `test/feature/usage/llvm_backend_aarch64_spec.spl` |
 | Updated | 2026-04-07 |
-| Generator | `simple sspec-docgen` (Rust) |
+| Generator | `simple spipe-docgen` (Rust) |
 
 ## Scenario Summary
 

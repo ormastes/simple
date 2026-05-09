@@ -12,7 +12,7 @@ Generator state machine codegen provides optimized code generation for generator
 | Status | In Progress |
 | Source | `test/feature/usage/generator_state_machine_codegen_spec.spl` |
 | Updated | 2026-04-07 |
-| Generator | `simple sspec-docgen` (Rust) |
+| Generator | `simple spipe-docgen` (Rust) |
 
 ## Scenario Summary
 

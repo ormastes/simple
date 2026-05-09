@@ -13,7 +13,7 @@ The `.?` operator checks if a value is "present" (non-nil AND non-empty). Return
 | Research | doc/01_research/text_validity_presence_pattern_2026-02-24.md |
 | Source | `test/feature/usage/exists_check_spec.spl` |
 | Updated | 2026-04-07 |
-| Generator | `simple sspec-docgen` (Rust) |
+| Generator | `simple spipe-docgen` (Rust) |
 
 ## Scenario Summary
 

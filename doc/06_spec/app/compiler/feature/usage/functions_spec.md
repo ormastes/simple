@@ -11,7 +11,7 @@ Tests for function definition and invocation.
 | Status | In Progress |
 | Source | `test/feature/usage/functions_spec.spl` |
 | Updated | 2026-04-07 |
-| Generator | `simple sspec-docgen` (Rust) |
+| Generator | `simple spipe-docgen` (Rust) |
 
 ## Scenario Summary
 

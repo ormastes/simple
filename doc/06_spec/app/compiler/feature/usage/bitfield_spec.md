@@ -10,7 +10,7 @@ Tests the bitfield feature plan by verifying parser phase scope, validation phas
 | Status | In Progress |
 | Source | `test/feature/usage/bitfield_spec.spl` |
 | Updated | 2026-04-07 |
-| Generator | `simple sspec-docgen` (Rust) |
+| Generator | `simple spipe-docgen` (Rust) |
 
 ## Scenario Summary
 

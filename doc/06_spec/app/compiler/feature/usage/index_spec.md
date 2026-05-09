@@ -12,7 +12,7 @@ Tests for the sparse package index: parsing SDN entries, computing index paths, 
 | Status | In Progress |
 | Source | `test/feature/usage/index_spec.spl` |
 | Updated | 2026-04-07 |
-| Generator | `simple sspec-docgen` (Rust) |
+| Generator | `simple spipe-docgen` (Rust) |
 
 ## Scenario Summary
 

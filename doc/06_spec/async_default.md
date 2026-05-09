@@ -12,7 +12,7 @@ This document specifies Simple's async-default execution model where functions a
 | Reference | async_default.md |
 | Source | `test/specs/async_default_spec.spl` |
 | Updated | 2026-04-24 |
-| Generator | `simple sspec-docgen` (Rust) |
+| Generator | `simple spipe-docgen` (Rust) |
 
 ## Scenario Summary
 

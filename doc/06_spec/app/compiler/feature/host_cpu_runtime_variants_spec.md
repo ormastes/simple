@@ -21,26 +21,26 @@ real implementation for:
 
 For non-x86 optional runtime detection, the spec intentionally treats v1 as conservative unless an explicit target probe exists. That means this feature is not blocked by missing direct runtime probes for `aarch64_sve` or `aarch64_sve2`, because current shipped behavior collapses those hosts to `aarch64_neon`. It is also not blocked by the lack of `wasm128` runtime probing in this slice. By contrast, `riscv64_rvv` auto-selection is only considered first-class when explicit RVV host probing exists and is verified.
 
-This is still a real black-box command path from SSpec, but it is command-level
+This is still a real black-box command path from SPipe, but it is command-level
 behavioral verification rather than in-process function calls.
 
 ## Why The Spec Does Not Call The Runtime Internals Directly
 
 I attempted to upgrade the spec further by calling a real runtime symbol from
 the `.spl` itself after writing temp config files. That works for `bin/simple -c`
-sources, but the `simple test` runner does not expose that symbol to SSpec
+sources, but the `simple test` runner does not expose that symbol to SPipe
 execution. In other words:
 - the direct runtime hook exists in some Simple execution contexts
-- the SSpec runner used for this file cannot link it today
+- the SPipe runner used for this file cannot link it today
 
 Because of that limitation, the most honest executable route from this spec is:
-1. run a real command from SSpec
+1. run a real command from SPipe
 2. build the current Rust implementation
 3. assert that the relevant implementation tests passed
 
 ## What Still Remains Modeled
 
-Some feature areas are still not observable from SSpec through a stable
+Some feature areas are still not observable from SPipe through a stable
 Simple-facing API:
 - native loader sibling-library probe ordering
 - embedded package `runtime_variants` selection
@@ -57,10 +57,10 @@ visible.
 
 This follow-up was intentionally limited to the spec files, and the repo still
 does not expose stable Simple-callable APIs for:
-- parsing `cpu_config.sdn` through the Rust host-config module from SSpec
+- parsing `cpu_config.sdn` through the Rust host-config module from SPipe
 - asking the native loader for its candidate library list
 - invoking package runtime-variant selection directly
-- querying compiler/module-loader stdlib root candidates directly from SSpec
+- querying compiler/module-loader stdlib root candidates directly from SPipe
 - observing invalid override fallback in-process from the test runner itself
 
 Without those hooks, pretending to verify those paths end-to-end from `.spl`
@@ -78,7 +78,7 @@ would be dishonest, so the remaining sections stay explicitly modeled.
 
 If the repo later exposes stable Simple-facing hooks for host-config reads,
 loader candidate enumeration, package runtime selection, or compiler stdlib
-root resolution inside the SSpec runner, this file should be upgraded again
+root resolution inside the SPipe runner, this file should be upgraded again
 from command-level verification to direct temp-file/env-driven behavioral
 scenarios.
 

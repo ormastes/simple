@@ -11,7 +11,7 @@ This file contains executable test cases extracted from functions.md. The origin
 | Reference | functions.md |
 | Source | `test/specs/functions_spec.spl` |
 | Updated | 2026-04-24 |
-| Generator | `simple sspec-docgen` (Rust) |
+| Generator | `simple spipe-docgen` (Rust) |
 
 ## Scenario Summary
 

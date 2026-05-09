@@ -11,7 +11,7 @@ The functional update operator `->` applies transformations to collections in pl
 | Status | Active |
 | Source | `test/feature/usage/functional_update_spec.spl` |
 | Updated | 2026-04-07 |
-| Generator | `simple sspec-docgen` (Rust) |
+| Generator | `simple spipe-docgen` (Rust) |
 
 ## Scenario Summary
 

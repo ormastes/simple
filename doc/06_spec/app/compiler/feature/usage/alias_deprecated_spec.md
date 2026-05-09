@@ -12,7 +12,7 @@ This specification covers the alias and deprecation features: 1. Type alias: `al
 | Status | In Progress |
 | Source | `test/feature/usage/alias_deprecated_spec.spl` |
 | Updated | 2026-04-07 |
-| Generator | `simple sspec-docgen` (Rust) |
+| Generator | `simple spipe-docgen` (Rust) |
 
 ## Scenario Summary
 

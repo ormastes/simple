@@ -10,7 +10,7 @@
 | LSP (Language Server Protocol) | **IMPLEMENTED** | `src/lib/nogc_sync_mut/lsp/`, `src/app/lsp/` |
 | DAP (Debug Adapter Protocol) | **IMPLEMENTED** | `src/lib/nogc_sync_mut/dap/`, `src/app/dap/` |
 | MCP (Model Context Protocol) | **IMPLEMENTED** (6 servers) | `src/app/mcp/`, `.mcp.json` |
-| BDD Framework (SSpec) | **IMPLEMENTED** | `src/lib/nogc_sync_mut/spec/` |
+| BDD Framework (SPipe) | **IMPLEMENTED** | `src/lib/nogc_sync_mut/spec/` |
 | Doctest Framework | **IMPLEMENTED** | Integrated into test runner |
 | LLM-Friendly Features (#400-410) | **IMPLEMENTED** | Context packs, AST/IR export, structured diagnostics |
 
@@ -33,6 +33,6 @@
 ## Notes
 
 - LSP, DAP, and MCP were originally listed as "pending" but have been production-ready since 2026 Q1.
-- BDD (SSpec) and Doctest were completed as part of the test infrastructure work.
+- BDD (SPipe) and Doctest were completed as part of the test infrastructure work.
 - See `doc/06_spec/generated/feature.md` for the full implemented feature list.
 - See `doc/03_plan/30_pending_features.md` for detailed descriptions of pending items.

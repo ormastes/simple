@@ -12,7 +12,7 @@ Tests for the method_missing dynamic dispatch mechanism that allows objects to h
 | Status | Planned |
 | Source | `test/feature/usage/method_missing_spec.spl` |
 | Updated | 2026-04-07 |
-| Generator | `simple sspec-docgen` (Rust) |
+| Generator | `simple spipe-docgen` (Rust) |
 
 ## Scenario Summary
 

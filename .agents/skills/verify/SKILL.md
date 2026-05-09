@@ -1,6 +1,6 @@
 ---
 name: verify
-description: Production readiness verification. Checks SSpec tests for stubs/dummies, implementation completeness, requirement coverage, NFR targets, and architecture/design doc freshness. Self-sufficient — any LLM can run independently.
+description: Production readiness verification. Checks SPipe tests for stubs/dummies, implementation completeness, requirement coverage, NFR targets, and architecture/design doc freshness. Self-sufficient — any LLM can run independently.
 ---
 
 # Verify — Production Readiness Codex
@@ -15,7 +15,7 @@ description: Production readiness verification. Checks SSpec tests for stubs/dum
 
 ## Checks
 
-### 1. SSpec Tests
+### 1. SPipe Tests
 - Every `it` block has real assertions (not `pass_todo`, not `expect(true).to_equal(true)`)
 - Edge cases and error paths tested
 - Every REQ-NNN has test coverage

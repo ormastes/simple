@@ -11,7 +11,7 @@ The interpreter interface defines how the Simple language runtime executes code,
 | Status | Implemented |
 | Source | `test/feature/usage/interpreter_interface_spec.spl` |
 | Updated | 2026-04-07 |
-| Generator | `simple sspec-docgen` (Rust) |
+| Generator | `simple spipe-docgen` (Rust) |
 
 ## Scenario Summary
 

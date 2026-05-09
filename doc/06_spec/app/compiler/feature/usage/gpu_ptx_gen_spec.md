@@ -12,7 +12,7 @@ PTX code generation tests verify that the CUDA backend correctly translates MIR 
 | Status | In Progress |
 | Source | `test/feature/usage/gpu_ptx_gen_spec.spl` |
 | Updated | 2026-04-07 |
-| Generator | `simple sspec-docgen` (Rust) |
+| Generator | `simple spipe-docgen` (Rust) |
 
 ## Scenario Summary
 

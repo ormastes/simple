@@ -11,7 +11,7 @@ This file contains executable test cases extracted from memory.md. The original 
 | Reference | memory.md |
 | Source | `test/specs/memory_spec.spl` |
 | Updated | 2026-04-24 |
-| Generator | `simple sspec-docgen` (Rust) |
+| Generator | `simple spipe-docgen` (Rust) |
 
 ## Scenario Summary
 

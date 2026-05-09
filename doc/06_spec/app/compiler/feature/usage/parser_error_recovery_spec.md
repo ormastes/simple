@@ -11,7 +11,7 @@ Tests the parser's ability to detect common mistakes from other
 | Status | Implemented |
 | Source | `test/feature/usage/parser_error_recovery_spec.spl` |
 | Updated | 2026-04-07 |
-| Generator | `simple sspec-docgen` (Rust) |
+| Generator | `simple spipe-docgen` (Rust) |
 
 ## Scenario Summary
 

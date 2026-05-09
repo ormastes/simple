@@ -1,6 +1,6 @@
 # Minimal Test Spec
 
-A minimal smoke test that verifies the test runner can load a spec file with a basic describe/it block and execute a trivial assertion. Used as a baseline sanity check for the SSpec framework and test infrastructure.
+A minimal smoke test that verifies the test runner can load a spec file with a basic describe/it block and execute a trivial assertion. Used as a baseline sanity check for the SPipe framework and test infrastructure.
 
 ## At a Glance
 
@@ -11,7 +11,7 @@ A minimal smoke test that verifies the test runner can load a spec file with a b
 | Status | Active |
 | Source | `test/feature/usage/minimal_spec.spl` |
 | Updated | 2026-04-07 |
-| Generator | `simple sspec-docgen` (Rust) |
+| Generator | `simple spipe-docgen` (Rust) |
 
 ## Scenario Summary
 
@@ -27,7 +27,7 @@ A minimal smoke test that verifies the test runner can load a spec file with a b
 
 A minimal smoke test that verifies the test runner can load a spec file
 with a basic describe/it block and execute a trivial assertion. Used as a
-baseline sanity check for the SSpec framework and test infrastructure.
+baseline sanity check for the SPipe framework and test infrastructure.
 
 ## Syntax
 

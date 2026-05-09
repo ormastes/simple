@@ -11,7 +11,7 @@ Tests the `:=` walrus operator as syntactic sugar for `val` declarations creatin
 | Status | Active |
 | Source | `test/feature/usage/walrus_operator_spec.spl` |
 | Updated | 2026-04-07 |
-| Generator | `simple sspec-docgen` (Rust) |
+| Generator | `simple spipe-docgen` (Rust) |
 
 ## Scenario Summary
 

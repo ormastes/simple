@@ -11,7 +11,7 @@ This file contains executable test cases extracted from data_structures.md. The 
 | Reference | data_structures.md |
 | Source | `test/specs/data_structures_spec.spl` |
 | Updated | 2026-04-24 |
-| Generator | `simple sspec-docgen` (Rust) |
+| Generator | `simple spipe-docgen` (Rust) |
 
 ## Scenario Summary
 

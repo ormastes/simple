@@ -1,6 +1,6 @@
 # DAP System Tests
 
-Comprehensive system-level SSpec tests for the Debug Adapter Protocol (DAP) integration.
+Comprehensive system-level SPipe tests for the Debug Adapter Protocol (DAP) integration.
 
 ## Test Suite Overview
 
@@ -137,7 +137,7 @@ simple test --tag=system
 
 ## Test Structure
 
-All tests follow the SSpec format:
+All tests follow the SPipe format:
 
 ```simple
 describe "Feature":
@@ -276,7 +276,7 @@ test-dap:
 When adding new DAP features:
 
 1. **Write tests first** (TDD approach)
-2. **Follow SSpec format**
+2. **Follow SPipe format**
 3. **Test edge cases**
 4. **Include integration tests**
 5. **Update this README**
@@ -301,5 +301,5 @@ describe "New Feature":
 
 - [DAP Debugging Guide](../../../doc/guide/dap_debugging_guide.md)
 - [DAP Quick Reference](../../../doc/guide/quick_reference/dap_quick_reference.md)
-- [SSpec Framework](../../../doc/guide/sspec_guide.md)
+- [SPipe Framework](../../../doc/guide/spipe_guide.md)
 - [Integration Report](../../../doc/report/dap_integration_complete_2026-02-04.md)

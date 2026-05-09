@@ -12,7 +12,7 @@ Type inference automatically deduces types for variables, function parameters, a
 | Status | Implemented |
 | Source | `test/feature/usage/type_inference_spec.spl` |
 | Updated | 2026-04-07 |
-| Generator | `simple sspec-docgen` (Rust) |
+| Generator | `simple spipe-docgen` (Rust) |
 
 ## Scenario Summary
 

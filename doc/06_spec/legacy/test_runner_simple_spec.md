@@ -7,7 +7,7 @@
 
 ## Overview
 
-Documentation was generated from executable SSpec scenarios.
+Documentation was generated from executable SPipe scenarios.
 
 ## Evidence
 

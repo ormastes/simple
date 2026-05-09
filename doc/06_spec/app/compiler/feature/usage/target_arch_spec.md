@@ -12,7 +12,7 @@ Multi-architecture support for bare-metal development including:
 | Status | In Progress |
 | Source | `test/feature/usage/target_arch_spec.spl` |
 | Updated | 2026-04-07 |
-| Generator | `simple sspec-docgen` (Rust) |
+| Generator | `simple spipe-docgen` (Rust) |
 
 ## Scenario Summary
 

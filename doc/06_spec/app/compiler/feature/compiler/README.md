@@ -10,4 +10,4 @@ HIR/MIR lowering, code generation, and optimization.
 
 | Spec File | Status | Doc Coverage |
 |-----------|--------|--------------|
-| (run `bin/simple sspec-docgen test/feature/compiler/**/*_spec.spl --output doc/06_spec/app/compiler/feature/compiler` to populate) | — | — |
+| (run `bin/simple spipe-docgen test/feature/compiler/**/*_spec.spl --output doc/06_spec/app/compiler/feature/compiler` to populate) | — | — |

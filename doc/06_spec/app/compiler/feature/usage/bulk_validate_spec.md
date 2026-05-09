@@ -15,7 +15,7 @@ Tests for path normalization, dot-directory handling, file extension detection, 
 | Research | N/A |
 | Source | `test/feature/usage/cmm_lsp/bulk_validate_spec.spl` |
 | Updated | 2026-04-07 |
-| Generator | `simple sspec-docgen` (Rust) |
+| Generator | `simple spipe-docgen` (Rust) |
 
 ## Scenario Summary
 

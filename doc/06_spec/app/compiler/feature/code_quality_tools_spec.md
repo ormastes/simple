@@ -6,11 +6,11 @@
 |-------|-------|
 | Source | `test/feature/app/code_quality_tools_spec.spl` |
 | Updated | 2026-04-07 |
-| Generator | `simple sspec-docgen` (Rust) |
+| Generator | `simple spipe-docgen` (Rust) |
 
 ## Overview
 
-Documentation was generated from executable SSpec scenarios.
+Documentation was generated from executable SPipe scenarios.
 
 ## Evidence
 

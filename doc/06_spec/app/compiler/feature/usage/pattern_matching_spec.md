@@ -11,7 +11,7 @@ Pattern matching provides a way to extract and deconstruct values using patterns
 | Status | Implemented |
 | Source | `test/feature/usage/pattern_matching_spec.spl` |
 | Updated | 2026-04-07 |
-| Generator | `simple sspec-docgen` (Rust) |
+| Generator | `simple spipe-docgen` (Rust) |
 
 ## Scenario Summary
 

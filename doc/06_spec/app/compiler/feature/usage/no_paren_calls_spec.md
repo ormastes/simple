@@ -12,7 +12,7 @@ No-parentheses function calls allow calling functions without wrapping arguments
 | Status | Implemented |
 | Source | `test/feature/usage/no_paren_calls_spec.spl` |
 | Updated | 2026-04-07 |
-| Generator | `simple sspec-docgen` (Rust) |
+| Generator | `simple spipe-docgen` (Rust) |
 
 ## Scenario Summary
 

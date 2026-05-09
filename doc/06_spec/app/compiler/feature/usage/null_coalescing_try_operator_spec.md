@@ -12,7 +12,7 @@ Tests for the `??` (null coalescing) and `?` (try) operators in various contexts
 | Status | In Progress |
 | Source | `test/feature/usage/null_coalescing_try_operator_spec.spl` |
 | Updated | 2026-04-07 |
-| Generator | `simple sspec-docgen` (Rust) |
+| Generator | `simple spipe-docgen` (Rust) |
 
 ## Scenario Summary
 

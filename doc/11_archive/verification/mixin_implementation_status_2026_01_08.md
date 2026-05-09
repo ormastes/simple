@@ -185,7 +185,7 @@ error[E0425]: cannot find function `type_id_to_cranelift` in this scope
    - Executable specifications
    - Test-first approach
 
-### 📝 Documentation via SSpec (Planned)
+### 📝 Documentation via SPipe (Planned)
 
 Once BDD specs are executable (after Phase 3/4 complete):
 - Auto-generated feature documentation from `.feature` files

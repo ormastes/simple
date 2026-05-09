@@ -11,7 +11,7 @@ Struct field shorthand allows omitting the field name when the variable name
 | Status | Implemented |
 | Source | `test/feature/usage/struct_shorthand_spec.spl` |
 | Updated | 2026-04-07 |
-| Generator | `simple sspec-docgen` (Rust) |
+| Generator | `simple spipe-docgen` (Rust) |
 
 ## Scenario Summary
 

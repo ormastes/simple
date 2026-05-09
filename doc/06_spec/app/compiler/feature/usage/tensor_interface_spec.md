@@ -11,7 +11,7 @@ Tests that tensor interfaces are consistent between core and torch.
 | Status | Complete |
 | Source | `test/feature/usage/tensor_interface_spec.spl` |
 | Updated | 2026-04-07 |
-| Generator | `simple sspec-docgen` (Rust) |
+| Generator | `simple spipe-docgen` (Rust) |
 
 ## Scenario Summary
 

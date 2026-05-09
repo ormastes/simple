@@ -11,7 +11,7 @@ Tests storage of generic function templates in the SMF (Simple Module Format) by
 | Status | In Progress |
 | Source | `test/feature/usage/generic_bytecode_spec.spl` |
 | Updated | 2026-04-07 |
-| Generator | `simple sspec-docgen` (Rust) |
+| Generator | `simple spipe-docgen` (Rust) |
 
 ## Scenario Summary
 

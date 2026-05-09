@@ -15,7 +15,7 @@ Tests that string operations in the CMM LSP toolchain produce correct results af
 | Research | N/A |
 | Source | `test/feature/usage/cmm_lsp/string_efficiency_spec.spl` |
 | Updated | 2026-04-07 |
-| Generator | `simple sspec-docgen` (Rust) |
+| Generator | `simple spipe-docgen` (Rust) |
 
 ## Scenario Summary
 

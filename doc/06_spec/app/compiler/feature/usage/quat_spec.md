@@ -12,7 +12,7 @@ Quat (f32) and Quatd (f64) quaternion types for 3D rotations.
 | Status | Implemented |
 | Source | `test/feature/usage/quat_spec.spl` |
 | Updated | 2026-04-07 |
-| Generator | `simple sspec-docgen` (Rust) |
+| Generator | `simple spipe-docgen` (Rust) |
 
 ## Scenario Summary
 

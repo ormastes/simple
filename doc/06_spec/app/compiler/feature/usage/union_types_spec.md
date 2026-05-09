@@ -11,7 +11,7 @@ Union types allow a variable to hold a value of one of several specified types, 
 | Status | Planned |
 | Source | `test/feature/usage/union_types_spec.spl` |
 | Updated | 2026-04-07 |
-| Generator | `simple sspec-docgen` (Rust) |
+| Generator | `simple spipe-docgen` (Rust) |
 
 ## Scenario Summary
 

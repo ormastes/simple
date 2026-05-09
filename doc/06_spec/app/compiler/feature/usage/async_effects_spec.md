@@ -11,7 +11,7 @@ Asynchronous effects integrate Simple's effect system with async/await concurren
 | Status | In Progress |
 | Source | `test/feature/usage/async_effects_spec.spl` |
 | Updated | 2026-04-07 |
-| Generator | `simple sspec-docgen` (Rust) |
+| Generator | `simple spipe-docgen` (Rust) |
 
 ## Overview
 

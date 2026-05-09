@@ -12,7 +12,7 @@ UFCS (Uniform Function Call Syntax) allows calling free functions using method s
 | Status | Implemented |
 | Source | `test/feature/usage/ufcs_spec.spl` |
 | Updated | 2026-04-07 |
-| Generator | `simple sspec-docgen` (Rust) |
+| Generator | `simple spipe-docgen` (Rust) |
 
 ## Scenario Summary
 

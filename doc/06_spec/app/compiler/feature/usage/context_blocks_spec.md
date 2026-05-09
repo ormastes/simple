@@ -11,7 +11,7 @@ Context blocks provide scoped execution environments that guarantee setup and te
 | Status | In Progress |
 | Source | `test/feature/usage/context_blocks_spec.spl` |
 | Updated | 2026-04-07 |
-| Generator | `simple sspec-docgen` (Rust) |
+| Generator | `simple spipe-docgen` (Rust) |
 
 ## Scenario Summary
 

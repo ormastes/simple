@@ -11,23 +11,23 @@ This plan does not assume "fully Chrome-compatible" is a single implementation t
 ## Current Baseline
 
 - HTML: partial parser/rendering support. No full WHATWG HTML living-standard claim.
-- CSS: partial parser/style/rendering support. Modern `:is()` and `:where()` selector-list support is now covered in SSpec for the browser renderer.
+- CSS: partial parser/style/rendering support. Modern `:is()` and `:where()` selector-list support is now covered in SPipe for the browser renderer.
 - JavaScript: partial ECMAScript support. No full ECMA-262 2025 or Test262 conformance claim.
-- Compatibility suites: existing SSpec coverage exists, but no broad WPT or Test262 migration harness is complete.
+- Compatibility suites: existing SPipe coverage exists, but no broad WPT or Test262 migration harness is complete.
 
 ## Standards And Test Sources
 
 - HTML/CSS/DOM/browser behavior: Web Platform Tests (WPT).
 - JavaScript language behavior: Test262 for ECMA-262.
 - Practical web feature target: Baseline plus current Chrome feature status.
-- Internal test format: SSpec.
+- Internal test format: SPipe.
 
 ## Success Criteria
 
 1. A compatibility matrix exists for HTML, CSS, DOM/rendering, and JavaScript.
 2. A repeatable WPT-subset import path exists for browser-facing tests.
 3. A repeatable Test262-subset path exists for JavaScript parser/interpreter tests.
-4. Every supported feature has SSpec coverage or an explicit external-suite mapping.
+4. Every supported feature has SPipe coverage or an explicit external-suite mapping.
 5. Every unsupported high-value feature has a tracked gap with owner, priority, and acceptance criteria.
 6. Verification can report PASS/WARN/FAIL without relying on manual visual inspection.
 
@@ -36,7 +36,7 @@ This plan does not assume "fully Chrome-compatible" is a single implementation t
 - Feature requirements: `doc/02_requirements/feature/chrome_modern_web_platform_compat.md`
 - NFR requirements: `doc/02_requirements/nfr/chrome_modern_web_platform_compat.md`
 - System test plan and BDD scenarios: `doc/03_plan/sys_test/chrome_modern_web_platform_compat.md`
-- Executable SSpec acceptance tests: `doc/06_spec/app/lib/feature/chrome_modern_web_platform_compat_spec.spl`
+- Executable SPipe acceptance tests: `doc/06_spec/app/lib/feature/chrome_modern_web_platform_compat_spec.spl`
 
 ## Phase 1: Inventory And Compatibility Matrix
 
@@ -74,7 +74,7 @@ Initial subset:
 
 Tasks:
 
-- Build a small importer that converts selected WPT metadata and fixtures into SSpec-compatible fixtures.
+- Build a small importer that converts selected WPT metadata and fixtures into SPipe-compatible fixtures.
 - Keep imported cases curated and deterministic.
 - Store original WPT source reference per migrated test.
 - Avoid claiming full WPT conformance until broad automated coverage exists.
@@ -132,7 +132,7 @@ Prioritized JavaScript:
 
 Exit gate:
 
-- Every implemented feature has focused SSpec plus source-suite traceability.
+- Every implemented feature has focused SPipe plus source-suite traceability.
 
 ## Phase 5: Visual And Pixel Compatibility
 
@@ -157,9 +157,9 @@ Exit gate:
 Required commands:
 
 - `bin/simple check src/lib`
-- Focused browser renderer SSpec.
-- WPT-subset SSpec.
-- Test262-subset SSpec.
+- Focused browser renderer SPipe.
+- WPT-subset SPipe.
+- Test262-subset SPipe.
 - Existing JS compatibility tests.
 
 Final release gate:
@@ -181,4 +181,4 @@ Start with Phase 1 and Phase 2 together:
 
 1. Build the feature matrix.
 2. Create the WPT selector/color subset.
-3. Expand SSpec coverage from the newly supported `:is()` and `:where()` path into `:not()` and specificity/cascade behavior.
+3. Expand SPipe coverage from the newly supported `:is()` and `:where()` path into `:not()` and specificity/cascade behavior.

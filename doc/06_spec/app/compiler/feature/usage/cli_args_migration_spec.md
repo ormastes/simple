@@ -11,7 +11,7 @@ Tests compatibility between the new cli keyword and the existing manual argument
 | Status | Draft |
 | Source | `test/feature/usage/cli_args_migration_spec.spl` |
 | Updated | 2026-04-07 |
-| Generator | `simple sspec-docgen` (Rust) |
+| Generator | `simple spipe-docgen` (Rust) |
 
 ## Scenario Summary
 

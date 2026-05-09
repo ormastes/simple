@@ -1,6 +1,6 @@
 # SPipe Test Writing Skill
 
-SPipe is Simple's BDD testing framework (formerly **SSpec**, renamed 2026-04-26).
+SPipe is Simple's BDD testing framework (formerly **SPipe**, renamed 2026-04-26).
 `describe`, `it`, `expect` are **built-in** -- no import needed.
 
 ## Quick Start

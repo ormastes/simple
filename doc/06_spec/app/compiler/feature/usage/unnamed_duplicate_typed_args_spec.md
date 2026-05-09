@@ -11,7 +11,7 @@ This lint warns when a function has multiple parameters of the same type that
 | Status | Implemented |
 | Source | `test/feature/usage/unnamed_duplicate_typed_args_spec.spl` |
 | Updated | 2026-04-07 |
-| Generator | `simple sspec-docgen` (Rust) |
+| Generator | `simple spipe-docgen` (Rust) |
 
 ## Scenario Summary
 

@@ -2,7 +2,7 @@
 
 ## Created Tests
 
-✅ **SSpec test file created:** `src/app/package/package_spec.spl` (180+ lines)
+✅ **SPipe test file created:** `src/app/package/package_spec.spl` (180+ lines)
 
 ## Test Categories
 
@@ -59,7 +59,7 @@
 
 ### ⏳ Pending (Simple Side)
 
-To make all SSpec tests runnable, we need:
+To make all SPipe tests runnable, we need:
 
 1. **FFI Bindings Exposure**
    - Expose FFI functions to Simple code via extern declarations
@@ -86,7 +86,7 @@ To make all SSpec tests runnable, we need:
      - `process.run()` - execute shell commands
 
 4. **Test Infrastructure**
-   - Verify SSpec test runner can find and run these tests
+   - Verify SPipe test runner can find and run these tests
    - Add test to CI pipeline
 
 ## How to Run Tests (Once Complete)
@@ -159,7 +159,7 @@ cd rust && cargo test --package simple --lib ffi::package
    - Check if all required functions exist
    - Implement missing ones
 
-4. **Run SSpec Tests** (After 1-3)
+4. **Run SPipe Tests** (After 1-3)
    - Execute test suite
    - Fix any failures
    - Add to CI pipeline

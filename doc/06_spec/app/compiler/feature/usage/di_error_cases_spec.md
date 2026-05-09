@@ -10,7 +10,7 @@ Tests the failure paths and edge cases of the DiContainer dependency injection s
 | Status | In Progress |
 | Source | `test/feature/usage/di_error_cases_spec.spl` |
 | Updated | 2026-04-07 |
-| Generator | `simple sspec-docgen` (Rust) |
+| Generator | `simple spipe-docgen` (Rust) |
 
 ## Scenario Summary
 

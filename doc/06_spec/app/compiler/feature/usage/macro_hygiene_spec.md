@@ -11,7 +11,7 @@ Tests for macro hygiene system that prevents variable capture through gensym ren
 | Status | Implemented |
 | Source | `test/feature/usage/macro_hygiene_spec.spl` |
 | Updated | 2026-04-07 |
-| Generator | `simple sspec-docgen` (Rust) |
+| Generator | `simple spipe-docgen` (Rust) |
 
 ## Scenario Summary
 

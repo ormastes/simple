@@ -11,7 +11,7 @@ Tests that macros can be validated without full expansion in LL(1) parsing:
 | Status | Implemented |
 | Source | `test/feature/usage/macro_validation_spec.spl` |
 | Updated | 2026-04-07 |
-| Generator | `simple sspec-docgen` (Rust) |
+| Generator | `simple spipe-docgen` (Rust) |
 
 ## Scenario Summary
 

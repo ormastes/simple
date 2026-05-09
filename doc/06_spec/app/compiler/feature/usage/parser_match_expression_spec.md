@@ -11,7 +11,7 @@ The runtime has two match parsers:
 | Status | In Progress |
 | Source | `test/feature/usage/parser_match_expression_spec.spl` |
 | Updated | 2026-04-07 |
-| Generator | `simple sspec-docgen` (Rust) |
+| Generator | `simple spipe-docgen` (Rust) |
 
 ## Scenario Summary
 

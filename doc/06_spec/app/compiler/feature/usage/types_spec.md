@@ -10,7 +10,7 @@ Executable tests for Simple's type system basics: primitives, mutability, generi
 | Status | Stable (Basic Features) |
 | Source | `test/feature/usage/types_spec.spl` |
 | Updated | 2026-04-07 |
-| Generator | `simple sspec-docgen` (Rust) |
+| Generator | `simple spipe-docgen` (Rust) |
 
 ## Scenario Summary
 

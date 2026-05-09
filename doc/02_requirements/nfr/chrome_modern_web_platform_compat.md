@@ -8,7 +8,7 @@ Migrated WPT and Test262 subset tests shall be deterministic in local runs. Pixe
 
 NFR-002: Traceability
 
-Each migrated compatibility case shall record its local SSpec location and, when derived from WPT or Test262, the source-suite reference.
+Each migrated compatibility case shall record its local SPipe location and, when derived from WPT or Test262, the source-suite reference.
 
 NFR-003: Bounded Scope
 

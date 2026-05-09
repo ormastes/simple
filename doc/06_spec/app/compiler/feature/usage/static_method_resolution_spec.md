@@ -11,7 +11,7 @@ Tests static method resolution and calling in interpreter mode. Uses ClassName.m
 | Status | Active |
 | Source | `test/feature/usage/static_method_resolution_spec.spl` |
 | Updated | 2026-04-07 |
-| Generator | `simple sspec-docgen` (Rust) |
+| Generator | `simple spipe-docgen` (Rust) |
 
 ## Scenario Summary
 

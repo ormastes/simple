@@ -11,7 +11,7 @@ Tests custom collection backend implementations including ArrayList and HashMap.
 | Status | Active |
 | Source | `test/feature/usage/custom_backend_spec.spl` |
 | Updated | 2026-04-07 |
-| Generator | `simple sspec-docgen` (Rust) |
+| Generator | `simple spipe-docgen` (Rust) |
 
 ## Scenario Summary
 
@@ -38,7 +38,7 @@ arr.push(3)
 val map: HashMap = {"a": 1, "b": 2}
 map["b"] = 2
 ```
-Custom Collection Backends - SSpec Tests
+Custom Collection Backends - SPipe Tests
 
 ## Evidence
 

@@ -10,4 +10,4 @@ debouncing, and build triggering.
 
 | Spec File | Status | Doc Coverage |
 |-----------|--------|--------------|
-| (run `bin/simple sspec-docgen test/feature/watcher/**/*_spec.spl --output doc/06_spec/app/compiler/feature/watcher` to populate) | — | — |
+| (run `bin/simple spipe-docgen test/feature/watcher/**/*_spec.spl --output doc/06_spec/app/compiler/feature/watcher` to populate) | — | — |

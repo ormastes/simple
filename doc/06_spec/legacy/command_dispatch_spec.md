@@ -7,7 +7,7 @@
 
 ## Overview
 
-Documentation was generated from executable SSpec scenarios.
+Documentation was generated from executable SPipe scenarios.
 
 ## Evidence
 
@@ -31,7 +31,7 @@ Documentation was generated from executable SSpec scenarios.
 
 - formatter app path
 - lint app path
-- sspec_docgen app path
+- spipe_docgen app path
 - context app path
 - mcp app path
 - verify app path
@@ -117,7 +117,7 @@ Documentation was generated from executable SSpec scenarios.
 - EDGE: slice range
 - EDGE: step slice
 - fmt maps to formatter (not fmt)
-- sspec-docgen maps to sspec_docgen (hyphen to underscore)
+- spipe-docgen maps to spipe_docgen (hyphen to underscore)
 - test maps to test_runner_new (not test)
 - direct name commands: lint, coverage, verify, dashboard, context, mcp, depgraph, lsp, dap
 - EDGE: command name is not always the directory name

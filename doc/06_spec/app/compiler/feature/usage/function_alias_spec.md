@@ -11,7 +11,7 @@ Tests the deprecated `fn name = target` function alias syntax that the desugar p
 | Status | Active |
 | Source | `test/feature/usage/function_alias_spec.spl` |
 | Updated | 2026-04-07 |
-| Generator | `simple sspec-docgen` (Rust) |
+| Generator | `simple spipe-docgen` (Rust) |
 
 ## Scenario Summary
 

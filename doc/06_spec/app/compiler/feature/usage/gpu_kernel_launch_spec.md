@@ -10,7 +10,7 @@ Tests actual GPU kernel launch, device memory allocation, data transfer, and res
 | Status | In Progress |
 | Source | `test/feature/usage/gpu_kernel_launch_spec.spl` |
 | Updated | 2026-04-07 |
-| Generator | `simple sspec-docgen` (Rust) |
+| Generator | `simple spipe-docgen` (Rust) |
 
 ## Scenario Summary
 

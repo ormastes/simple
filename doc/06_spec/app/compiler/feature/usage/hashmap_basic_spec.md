@@ -10,7 +10,7 @@ System tests for basic HashMap operations through the FFI layer.
 | Status | Implemented |
 | Source | `test/feature/usage/hashmap_basic_spec.spl` |
 | Updated | 2026-04-07 |
-| Generator | `simple sspec-docgen` (Rust) |
+| Generator | `simple spipe-docgen` (Rust) |
 
 ## Scenario Summary
 

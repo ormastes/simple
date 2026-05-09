@@ -11,7 +11,7 @@ Tests GPU device detection and basic operations across all backends. Validates b
 | Status | In Progress |
 | Source | `test/feature/usage/gpu_basic_spec.spl` |
 | Updated | 2026-04-07 |
-| Generator | `simple sspec-docgen` (Rust) |
+| Generator | `simple spipe-docgen` (Rust) |
 
 ## Scenario Summary
 

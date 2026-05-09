@@ -11,7 +11,7 @@ Guard clauses (pattern guards) allow conditional matching within pattern match a
 | Status | Implemented |
 | Source | `test/feature/usage/guard_clause_spec.spl` |
 | Updated | 2026-04-07 |
-| Generator | `simple sspec-docgen` (Rust) |
+| Generator | `simple spipe-docgen` (Rust) |
 
 ## Scenario Summary
 

@@ -72,7 +72,7 @@ Registered in the dispatch table. Each maps to `src/app/<module>/main.spl`.
 | `feature-gen` | `feature_gen/` | Generate feature docs from tests |
 | `feature-doc` | `feature_doc/` | Feature documentation |
 | `spec-gen` | `spec_gen/` | Generate spec files |
-| `sspec-docgen` | `sspec_docgen/` | Generate docs from SSpec tests |
+| `spipe-docgen` | `spipe_docgen/` | Generate docs from SPipe tests |
 | `todo-scan` | `todo_scan/` | Scan TODOs in codebase |
 | `todo-gen` | `todo_gen/` | Generate TODO report |
 | `wrapper-gen` | `wrapper_gen/` | Generate FFI wrappers |
@@ -127,7 +127,7 @@ These modules provide shared infrastructure used by the subcommands above.
 | `io/` | SFFI I/O wrappers (file, process, env) |
 | `cli/` | CLI dispatch, arg parsing, entrypoints |
 | `desugar/` | AST desugaring transforms |
-| `test_runner_new/` | SSpec test framework runner |
+| `test_runner_new/` | SPipe test framework runner |
 | `test_analysis/` | Test result analysis |
 | `package/` | Package management core (semver, manifest, lockfile) |
 | `package.registry/` | Package registry client |

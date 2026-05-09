@@ -11,7 +11,7 @@ Tests default command behavior when no subcommand is specified. A cli block can 
 | Status | Draft |
 | Source | `test/feature/usage/cli_args_default_spec.spl` |
 | Updated | 2026-04-07 |
-| Generator | `simple sspec-docgen` (Rust) |
+| Generator | `simple spipe-docgen` (Rust) |
 
 ## Scenario Summary
 

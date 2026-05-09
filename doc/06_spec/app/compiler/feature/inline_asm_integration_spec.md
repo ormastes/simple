@@ -8,7 +8,7 @@ check(code.contains("out dx, al"))
 |-------|-------|
 | Source | `test/feature/baremetal/inline_asm_integration_spec.spl` |
 | Updated | 2026-04-21 |
-| Generator | `simple sspec-docgen` (Rust) |
+| Generator | `simple spipe-docgen` (Rust) |
 
 ## 2026-04-21 Syntax Update
 

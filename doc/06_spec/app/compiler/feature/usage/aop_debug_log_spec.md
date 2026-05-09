@@ -11,7 +11,7 @@ AOP Debug Logger
 | Status | Active |
 | Source | `test/feature/usage/aop_debug_log_spec.spl` |
 | Updated | 2026-04-07 |
-| Generator | `simple sspec-docgen` (Rust) |
+| Generator | `simple spipe-docgen` (Rust) |
 
 ## Scenario Summary
 

@@ -26,7 +26,7 @@ All notable changes to Simple Language will be documented in this file.
 - **Native-build runtime lanes** — non-compiler host binaries now default to the narrow `core-c` lane (`libsimple_runtime.a`), while the broad Rust-hosted lane requires `--runtime-bundle hosted` (legacy alias: `all`) or a compiler-like entrypoint
 - **MCP wrapper default** — runs from `.spl` by default; SMF cache strictly opt-in via `SIMPLE_MCP_USE_CACHE=1`
 - **`bin/simple build`** — clarified that `build` falls through wrapper whitelist; new externs require `scripts/bootstrap/bootstrap-from-scratch.sh --deploy`
-- **SSpec compile pipeline** — documented limitations; `--mode=smf` / `--compile` still produce false-greens; verify in interpreter mode until R2-broader lands
+- **SPipe compile pipeline** — documented limitations; `--mode=smf` / `--compile` still produce false-greens; verify in interpreter mode until R2-broader lands
 - **Release prep workflow** — local `check_release_payload.shs`, `check-mcp-release-assets.shs`, `check-executable-size-budgets.shs`, and `check-loader-dependency-closure.shs` smoke checks before tag
 
 ## [0.9.6] - 2026-04-22

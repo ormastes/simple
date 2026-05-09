@@ -12,7 +12,7 @@ Tests that composite DL equations parse, evaluate correctly, render to LaTeX, an
 | Status | Implemented |
 | Source | `test/feature/usage/math_dl_equations_spec.spl` |
 | Updated | 2026-04-07 |
-| Generator | `simple sspec-docgen` (Rust) |
+| Generator | `simple spipe-docgen` (Rust) |
 
 ## Scenario Summary
 

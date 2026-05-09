@@ -11,7 +11,7 @@ Tests core Hindley-Milner type inference with level-based generalization. Implem
 | Status | In Progress |
 | Source | `test/feature/usage/hm_type_inference_spec.spl` |
 | Updated | 2026-04-07 |
-| Generator | `simple sspec-docgen` (Rust) |
+| Generator | `simple spipe-docgen` (Rust) |
 
 ## Scenario Summary
 

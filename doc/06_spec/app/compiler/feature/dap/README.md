@@ -10,4 +10,4 @@ stepping, variable inspection, and debugger integration.
 
 | Spec File | Status | Doc Coverage |
 |-----------|--------|--------------|
-| (run `bin/simple sspec-docgen test/feature/dap/**/*_spec.spl --output doc/06_spec/app/compiler/feature/dap` to populate) | — | — |
+| (run `bin/simple spipe-docgen test/feature/dap/**/*_spec.spl --output doc/06_spec/app/compiler/feature/dap` to populate) | — | — |

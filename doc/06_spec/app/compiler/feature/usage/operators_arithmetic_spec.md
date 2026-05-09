@@ -12,7 +12,7 @@ Arithmetic operators in Simple provide standard mathematical operations on numer
 | Status | Implemented |
 | Source | `test/feature/usage/operators_arithmetic_spec.spl` |
 | Updated | 2026-04-07 |
-| Generator | `simple sspec-docgen` (Rust) |
+| Generator | `simple spipe-docgen` (Rust) |
 
 ## Scenario Summary
 
