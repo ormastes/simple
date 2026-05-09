@@ -34,6 +34,8 @@
 //! the same lane-array-shaped scalar ABI as Phase 2 seed (33 args).
 
 use super::aes::SBOX;
+use super::core::RuntimeValue;
+use super::objects::{rt_object_field_get, rt_object_field_set, rt_object_new};
 
 // ---------------------------------------------------------------------------
 // Scalar primitives — shared with the scalar fallback below.
@@ -251,15 +253,55 @@ unsafe fn aes_round_last_neon(state: [u8; 16], key: [u8; 16]) -> [u8; 16] {
 }
 
 // ---------------------------------------------------------------------------
-// `pub extern "C"` symbols for compiled-mode linkage parity.
+// RuntimeValue-based `pub extern "C"` symbols for compiled-mode (Cranelift).
 //
-// Mirrors Phase 2 seed's lane-array-shaped ABI: 16 + 16 + *mut u8 = 33 args.
-// Once a Vec16u8 marshalling layer lands, this signature can be tightened.
+// In compiled mode Vec16u8 structs arrive as RuntimeValue handles (I64
+// tagged pointers to heap objects with 16 fields, indices 0..15).  We
+// unpack the 16 u8 lanes, call the lane kernel, and repack into a fresh
+// RuntimeValue object.
+// ---------------------------------------------------------------------------
+
+/// Unpack 16 u8 lanes from a Vec16u8 RuntimeValue object handle.
+fn unpack_vec16u8_rv(v: RuntimeValue) -> [u8; 16] {
+    let mut lanes = [0_u8; 16];
+    for i in 0..16 {
+        lanes[i] = rt_object_field_get(v, i as u32).as_int() as u8;
+    }
+    lanes
+}
+
+/// Pack 16 u8 lanes into a fresh Vec16u8 RuntimeValue object handle.
+fn pack_vec16u8_rv(lanes: [u8; 16]) -> RuntimeValue {
+    let obj = rt_object_new(0, 16);
+    for i in 0..16 {
+        rt_object_field_set(obj, i as u32, RuntimeValue::from_int(lanes[i] as i64));
+    }
+    obj
+}
+
+#[no_mangle]
+pub extern "C" fn rt_simd_aes_round_u8x16(state: RuntimeValue, key: RuntimeValue) -> RuntimeValue {
+    let s = unpack_vec16u8_rv(state);
+    let k = unpack_vec16u8_rv(key);
+    pack_vec16u8_rv(aes_round_u8x16(s, k))
+}
+
+#[no_mangle]
+pub extern "C" fn rt_simd_aes_round_last_u8x16(state: RuntimeValue, key: RuntimeValue) -> RuntimeValue {
+    let s = unpack_vec16u8_rv(state);
+    let k = unpack_vec16u8_rv(key);
+    pack_vec16u8_rv(aes_round_last_u8x16(s, k))
+}
+
+// ---------------------------------------------------------------------------
+// Legacy lane-array-shaped ABI (33 args). Kept for seed/bootstrap parity but
+// no longer registered in RUNTIME_FUNCS — the RuntimeValue wrappers above
+// are the canonical compiled-mode entry points.
 // ---------------------------------------------------------------------------
 
 #[no_mangle]
 #[allow(clippy::too_many_arguments)]
-pub extern "C" fn rt_simd_aes_round_u8x16(
+pub extern "C" fn rt_simd_aes_round_u8x16_lanes(
     s0: u8,
     s1: u8,
     s2: u8,
@@ -307,7 +349,7 @@ pub extern "C" fn rt_simd_aes_round_u8x16(
 
 #[no_mangle]
 #[allow(clippy::too_many_arguments)]
-pub extern "C" fn rt_simd_aes_round_last_u8x16(
+pub extern "C" fn rt_simd_aes_round_last_u8x16_lanes(
     s0: u8,
     s1: u8,
     s2: u8,

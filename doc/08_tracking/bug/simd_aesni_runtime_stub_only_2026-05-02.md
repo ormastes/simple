@@ -1,11 +1,11 @@
 ---
 id: simd_aesni_runtime_stub_only_2026-05-02
-status: MOSTLY-RESOLVED
+status: RESOLVED
 severity: low
 discovered: 2026-05-02
 discovered_by: K1 (Wave K AES SIMD wire-up agent — stalled mid-test)
 updated: 2026-05-09
-updated_by: Bug-fix agent (context-resumed session)
+updated_by: Bug-fix agent (Cranelift AOT marshalling landed)
 related: doc/01_research/cipher_simd_patterns_2026-05-02.md (J2 + L5 corrections)
 related: doc/08_tracking/bug/bug_simd_bulk_copy_blocked_by_spl_array_layout_2026-05-02.md (K2)
 ---
@@ -67,19 +67,15 @@ implementations.
   Unpacks Vec16u8 Value::Object fields, calls `aes_round_u8x16` /
   `aes_round_last_u8x16`, repacks result.
 
-**Cranelift AOT registration (NOT DONE -- remaining blocker):**
-- `src/compiler_rust/compiler/src/codegen/runtime_ffi.rs` has ZERO `rt_simd_*`
-  entries (confirmed by grep). All existing entries use boxed `I64`
-  RuntimeValue ABI.
-- The `extern "C"` functions in `simd_aes_ops.rs:260-354` use a 33-arg
-  lane-array ABI (32 individual u8 lanes + `*mut u8` output pointer).
-- The `.spl` declares `(Vec16u8, Vec16u8) -> Vec16u8` (struct ABI).
-- **Registering in runtime_ffi.rs requires a Vec16u8 marshalling layer in
-  the Cranelift codegen** that decomposes struct fields to individual lane
-  args and reconstructs the result from the output pointer. This layer
-  does not exist for any `rt_simd_*` function.
-- The `tier_of()` function (line 36) routes `rt_vec_*` to Ext tier but has
-  no `rt_simd_*` prefix match -- would need adding alongside the FFI entries.
+**Cranelift AOT registration (DONE):**
+- `rt_simd_aes_round_u8x16` and `rt_simd_aes_round_last_u8x16` added to
+  `RUNTIME_FUNCS` in `runtime_ffi.rs` as `&[I64, I64], &[I64]`.
+- New RuntimeValue-based `extern "C"` wrappers in `simd_aes_ops.rs` unpack
+  Vec16u8 struct fields via `rt_object_field_get`, call the lane kernel,
+  and repack via `rt_object_new` + `rt_object_field_set`.
+- Old 33-arg lane-array ABI functions renamed to `_lanes` suffix (kept for
+  seed/bootstrap parity).
+- `tier_of()` now includes `name.starts_with("rt_simd_")` in the Ext tier.
 
 ### 5. Scalar fallback -- DONE
 
@@ -105,28 +101,20 @@ test value::simd_aes_ops::tests::shift_rows_known_vector ... ok
 test result: ok. 4 passed; 0 failed; 0 ignored
 ```
 
-## Remaining Work
+## Resolution (2026-05-09)
 
-The ONLY remaining item is Cranelift AOT compiled-mode support, which requires:
+All three remaining items are now complete:
 
-1. A Vec16u8 marshalling layer in the Cranelift codegen that maps between the
-   `.spl` struct-level `(Vec16u8, Vec16u8) -> Vec16u8` signature and the
-   `extern "C"` 33-arg lane-array ABI.
-2. Adding `rt_simd_aes_round_u8x16` and `rt_simd_aes_round_last_u8x16` to
-   `RUNTIME_FUNCS` in `runtime_ffi.rs` with the correct lane-decomposed
-   parameter types.
-3. Adding `"rt_simd_"` prefix to `tier_of()` Ext tier (line 36).
+1. **Vec16u8 marshalling layer**: RuntimeValue-based wrappers in `simd_aes_ops.rs`
+   use `rt_object_field_get` / `rt_object_field_set` to unpack/repack Vec16u8
+   struct fields. No Cranelift codegen changes needed — structs are already passed
+   as I64 RuntimeValue handles in compiled mode.
+2. **RUNTIME_FUNCS registration**: `rt_simd_aes_round_u8x16` and
+   `rt_simd_aes_round_last_u8x16` added as `&[I64, I64], &[I64]`.
+3. **tier_of() update**: `"rt_simd_"` prefix added to Ext tier block.
 
-This is the same class of blocker as K2 (zstd bulk-copy SIMD) and affects ALL
-`rt_simd_*` externs uniformly, not just AES. It should be addressed as a single
-infrastructure task covering the Vec16u8/Vec4i/Vec2u64 marshalling layer.
-
-## Proposed Fix
-
-**Bundle with Vec16u8 marshalling infrastructure.** When the Cranelift codegen
-gains a struct-to-lane decomposition pass for SIMD types, all `rt_simd_*`
-externs (AES, CLMUL, Vec4i ops, etc.) can be registered in `runtime_ffi.rs`
-in one sweep. This is not AES-specific work.
+The same RuntimeValue-based marshalling pattern can be applied to other
+`rt_simd_*` externs (add_u8x16, CLMUL, Vec4i) as needed.
 
 ## Citations
 

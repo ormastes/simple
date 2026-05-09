@@ -39,6 +39,7 @@ pub fn tier_of(name: &str) -> RuntimeFuncTier {
         || name.starts_with("rt_vk_")
         || name.starts_with("rt_cranelift_")
         || name.starts_with("rt_par_")
+        || name.starts_with("rt_simd_")
     {
         return Ext;
     }
@@ -336,6 +337,11 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_aes_rcon", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_aes128_encrypt_block_into", &[I64, I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_tls13_aes128_gcm_encrypt", &[I64, I64, I64, I64], &[I64]),
+    // =========================================================================
+    // SIMD AES round intrinsics (Vec16u8 -> Vec16u8, RuntimeValue handles)
+    // =========================================================================
+    RuntimeFuncSpec::new("rt_simd_aes_round_u8x16", &[I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_simd_aes_round_last_u8x16", &[I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_to_string", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_cstring_to_text", &[I64], &[I64]),
     // =========================================================================
@@ -1325,6 +1331,7 @@ mod tests {
         assert_eq!(tier_of("rt_vk_available"), Ext);
         assert_eq!(tier_of("rt_cranelift_module_new"), Ext);
         assert_eq!(tier_of("rt_par_map"), Ext);
+        assert_eq!(tier_of("rt_simd_aes_round_u8x16"), Ext);
     }
 
     #[test]
