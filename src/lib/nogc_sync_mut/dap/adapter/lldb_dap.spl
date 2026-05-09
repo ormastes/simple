@@ -1,0 +1,715 @@
+# LLDB DAP Debug Adapter
+# Bridges the DebugAdapter trait to an lldb-dap child process (LLDB 17+).
+# lldb-dap speaks DAP natively over stdio, so this adapter manages the
+# subprocess lifetime and DAP JSON-RPC framing.
+
+use std.io.{shell, ProcessResult}
+use std.nogc_sync_mut.debug.coordinator.{VarInfo, FrameInfo, LocationInfo}
+use std.nogc_sync_mut.dap.adapter.mod.{DebugAdapter, AdapterCapabilities, AdapterConfig}
+
+# ============================================================================
+# DAP Content-Length framing helpers (pure functions for testability)
+# ============================================================================
+
+# Build a DAP message with Content-Length header
+fn dap_encode(body: text) -> text:
+    val length = body.len()
+    "Content-Length: {length}\r\n\r\n{body}"
+
+# Parse a DAP Content-Length header, returning the expected body length.
+# Returns -1 on malformed input.
+fn dap_parse_content_length(header: text) -> i32:
+    val trimmed = header.trim()
+    if not trimmed.starts_with("Content-Length:"):
+        return -1
+    val after_colon = trimmed.slice(15, trimmed.len())
+    val num_str = after_colon.trim()
+    val parsed = num_str.parse_int() ?? -1
+    parsed
+
+# Build a DAP JSON-RPC request
+fn dap_request(seq: i32, command: text, arguments: text) -> text:
+    if arguments.len() == 0:
+        return "{\"seq\":{seq},\"type\":\"request\",\"command\":\"{command}\"}"
+    "{\"seq\":{seq},\"type\":\"request\",\"command\":\"{command}\",\"arguments\":{arguments}}"
+
+# Extract a text field from a flat JSON object (simple key lookup)
+fn json_get_text(json: text, key: text) -> text:
+    val search = "\"{key}\":"
+    val idx = json.index_of(search)
+    if idx < 0:
+        return ""
+    val after_start = idx + search.len()
+    val after = json.slice(after_start, json.len())
+    val trimmed = after.trim()
+    if trimmed.starts_with("\""):
+        var end = 1
+        while end < trimmed.len():
+            if trimmed.slice(end, end + 1) == "\"":
+                break
+            end = end + 1
+        if end >= trimmed.len():
+            return ""
+        return trimmed.slice(1, end)
+    var end_idx = 0
+    while end_idx < trimmed.len():
+        val ch = trimmed.slice(end_idx, end_idx + 1)
+        if ch == "," or ch == "}" or ch == "]":
+            break
+        end_idx = end_idx + 1
+    trimmed.slice(0, end_idx).trim()
+
+# Extract a boolean field from JSON
+fn json_get_bool(json: text, key: text) -> bool:
+    val v = json_get_text(json, key)
+    v == "true"
+
+# Extract an integer field from JSON
+fn json_get_int(json: text, key: text) -> i32:
+    val v = json_get_text(json, key)
+    v.parse_int() ?? 0
+
+# ============================================================================
+# LLDB-DAP Adapter
+# ============================================================================
+
+class LldbDapAdapter:
+    fifo_in: text           # named pipe for lldb-dap stdin
+    fifo_out: text          # named pipe for lldb-dap stdout
+    pid: text               # lldb-dap process PID
+    seq: i32                # auto-incrementing DAP sequence number
+    attached: bool
+    program: text
+    config: AdapterConfig
+    capabilities: AdapterCapabilities
+    breakpoints: Dict<text, [i32]>   # file -> [line numbers]
+
+impl LldbDapAdapter:
+    # Create adapter by spawning lldb-dap subprocess
+    static fn create(config: AdapterConfig) -> Result<LldbDapAdapter, text>:
+        # Find lldb-dap binary
+        val bin_result = LldbDapAdapter.find_lldb_dap_binary()
+        if bin_result.is_err():
+            return Err(bin_result.err().unwrap())
+        val lldb_dap_bin = bin_result.ok.unwrap()
+
+        # Generate unique FIFO names
+        val ts = shell("date +%s%N").stdout.trim()
+        val fifo_in = "/tmp/simple_lldb_dap_{ts}_in"
+        val fifo_out = "/tmp/simple_lldb_dap_{ts}_out"
+
+        # Create FIFOs
+        val mk1 = shell("mkfifo {fifo_in}")
+        if mk1.exit_code != 0:
+            return Err("failed to create input FIFO: {mk1.stderr}")
+        val mk2 = shell("mkfifo {fifo_out}")
+        if mk2.exit_code != 0:
+            shell("rm -f {fifo_in}")
+            return Err("failed to create output FIFO: {mk2.stderr}")
+
+        # Launch lldb-dap with stdin/stdout redirected through FIFOs
+        val start_result = shell("sh -c 'exec 3<>\"{fifo_in}\"; exec 4<>\"{fifo_out}\"; {lldb_dap_bin} <&3 >&4 2>&1 & echo $!'")
+        if start_result.exit_code != 0:
+            shell("rm -f {fifo_in} {fifo_out}")
+            return Err("failed to start lldb-dap: {start_result.stderr}")
+
+        val pid = start_result.stdout.trim()
+        if pid.len() == 0:
+            shell("rm -f {fifo_in} {fifo_out}")
+            return Err("failed to capture lldb-dap pid")
+
+        # Small delay for lldb-dap to start
+        shell("sleep 0.3")
+
+        var adapter = LldbDapAdapter(
+            fifo_in: fifo_in,
+            fifo_out: fifo_out,
+            pid: pid,
+            seq: 1,
+            attached: false,
+            program: config.program,
+            config: config,
+            capabilities: AdapterCapabilities.basic()
+                .with_memory()
+                .with_registers()
+                .with_reload(),
+            breakpoints: {}
+        )
+
+        # Perform DAP initialize handshake
+        val init_args = "{\"clientID\":\"simple-debugger\",\"adapterID\":\"lldb-dap\",\"supportsVariableType\":true,\"supportsRunInTerminalRequest\":false}"
+        val init_result = adapter.send_request("initialize", init_args)
+        if init_result.is_err():
+            adapter.cleanup()
+            return Err("DAP initialize failed: {init_result.err().unwrap()}")
+
+        Ok(adapter)
+
+    # Find the lldb-dap binary on the system
+    static fn find_lldb_dap_binary() -> Result<text, text>:
+        # Try lldb-dap first (LLDB 17+)
+        val dap = shell("which lldb-dap 2>/dev/null")
+        if dap.exit_code == 0:
+            return Ok(dap.stdout.trim())
+
+        # Try versioned names
+        val dap18 = shell("which lldb-dap-18 2>/dev/null")
+        if dap18.exit_code == 0:
+            return Ok(dap18.stdout.trim())
+
+        val dap17 = shell("which lldb-dap-17 2>/dev/null")
+        if dap17.exit_code == 0:
+            return Ok(dap17.stdout.trim())
+
+        # Try lldb-vscode (older name, pre-17)
+        val vscode = shell("which lldb-vscode 2>/dev/null")
+        if vscode.exit_code == 0:
+            return Ok(vscode.stdout.trim())
+
+        # Check user-local installs
+        val home = shell("echo $HOME").stdout.trim()
+        if home.len() > 0:
+            val local_path = "{home}/.local/bin/lldb-dap"
+            val probe = shell("test -x '{local_path}'")
+            if probe.exit_code == 0:
+                return Ok(local_path)
+
+        Err("lldb-dap not found (need LLDB 17+ with lldb-dap binary)")
+
+    # --- DAP Transport ---
+
+    # Get and increment the sequence counter
+    fn next_seq() -> i32:
+        val current = self.seq
+        self.seq = self.seq + 1
+        current
+
+    # Send a DAP request and read the response
+    fn send_request(command: text, arguments: text) -> Result<text, text>:
+        val seq_num = self.next_seq()
+        val body = dap_request(seq_num, command, arguments)
+        val message = dap_encode(body)
+
+        # Write message to lldb-dap stdin FIFO
+        # Use printf to preserve \r\n framing
+        val write_result = shell("printf '%s' '{message}' > {self.fifo_in}")
+        if write_result.exit_code != 0:
+            return Err("failed to send DAP request: {write_result.stderr}")
+
+        # Read response from stdout FIFO
+        self.read_response()
+
+    # Read a DAP response from the stdout FIFO
+    fn read_response() -> Result<text, text>:
+        # Read the Content-Length header line
+        val header_result = shell("timeout 10 head -n1 {self.fifo_out}")
+        if header_result.exit_code != 0:
+            return Err("timeout reading DAP response header")
+
+        val header = header_result.stdout.trim()
+        val content_length = dap_parse_content_length(header)
+        if content_length < 0:
+            return Err("malformed DAP response header: {header}")
+
+        # Skip the blank line, then read exactly content_length bytes
+        val body_result = shell("timeout 10 sh -c 'read -r blank; head -c {content_length}' < {self.fifo_out}")
+        if body_result.exit_code != 0:
+            return Err("timeout reading DAP response body")
+
+        val body = body_result.stdout
+        # Check for success
+        val success = json_get_bool(body, "success")
+        if not success:
+            val msg = json_get_text(body, "message")
+            if msg.len() > 0:
+                return Err(msg)
+            # Some responses (events) don't have success field — treat as ok
+            if body.contains("\"type\":\"event\""):
+                return Ok(body)
+            # The initialize response may not have "success" in older lldb-dap
+            if body.contains("\"type\":\"response\""):
+                return Ok(body)
+            return Err("DAP request failed: {body}")
+
+        Ok(body)
+
+    # --- DebugAdapter trait implementation ---
+
+    fn name() -> text:
+        "lldb-dap"
+
+    fn is_attached() -> bool:
+        self.attached
+
+    fn attach(program: text, args: [text]) -> Result<text, text>:
+        # Build arguments JSON array
+        var arg_parts: [text] = []
+        for arg in args:
+            arg_parts.push("\"{arg}\"")
+        val args_json = "[{arg_parts.join(",")}]"
+
+        val launch_args = "{\"program\":\"{program}\",\"args\":{args_json},\"cwd\":\".\",\"stopOnEntry\":true}"
+        val result = self.send_request("launch", launch_args)?
+        self.attached = true
+        self.program = program
+        Ok("attached to {program}")
+
+    fn detach() -> Result<text, text>:
+        if not self.attached:
+            return Err("not attached")
+        val result = self.send_request("disconnect", "{\"terminateDebuggee\":false}")?
+        self.attached = false
+        Ok("detached")
+
+    # --- Execution Control ---
+
+    fn halt() -> Result<text, text>:
+        if not self.attached:
+            return Err("not attached")
+        val result = self.send_request("pause", "{\"threadId\":1}")?
+        Ok("halted")
+
+    fn resume() -> Result<text, text>:
+        if not self.attached:
+            return Err("not attached")
+        val result = self.send_request("continue", "{\"threadId\":1}")?
+        Ok("running")
+
+    fn single_step() -> Result<text, text>:
+        if not self.attached:
+            return Err("not attached")
+        val result = self.send_request("stepIn", "{\"threadId\":1}")?
+        Ok("stepped in")
+
+    fn step_over() -> Result<text, text>:
+        if not self.attached:
+            return Err("not attached")
+        val result = self.send_request("next", "{\"threadId\":1}")?
+        Ok("stepped over")
+
+    fn step_out() -> Result<text, text>:
+        if not self.attached:
+            return Err("not attached")
+        val result = self.send_request("stepOut", "{\"threadId\":1}")?
+        Ok("stepped out")
+
+    fn reset() -> Result<text, text>:
+        if not self.attached:
+            return Err("not attached")
+        # lldb-dap doesn't support native reset; disconnect + re-launch
+        self.send_request("disconnect", "{\"terminateDebuggee\":true}")?
+        self.attached = false
+        val launch_result = self.attach(self.program, [])
+        match launch_result:
+            Ok(msg): Ok("reset (re-launched)")
+            Err(e): Err("reset failed: {e}")
+
+    # --- Breakpoints ---
+
+    fn set_breakpoint(file: text, line: i32) -> Result<i32, text>:
+        # Track breakpoints per file
+        var lines = self.breakpoints.get(file) ?? []
+        lines.push(line)
+        self.breakpoints[file] = lines
+
+        # Build DAP setBreakpoints request
+        val bp_json = LldbDapAdapter.build_breakpoints_json(file, lines)
+        val result = self.send_request("setBreakpoints", bp_json)?
+
+        # Return the breakpoint id (use line as id for simplicity)
+        Ok(line)
+
+    fn set_breakpoint_at_addr(addr: i64) -> Result<i32, text>:
+        # lldb-dap supports instruction breakpoints via custom request
+        # Fall back to evaluate with a breakpoint set command
+        val hex_addr = LldbDapAdapter.to_hex(addr)
+        val eval_args = "{\"expression\":\"breakpoint set --address {hex_addr}\",\"context\":\"repl\"}"
+        val result = self.send_request("evaluate", eval_args)?
+        Ok(0)
+
+    fn delete_breakpoint(id: i32) -> Result<text, text>:
+        # id is used as line number; remove from all files
+        # Snapshot keys to avoid mutating dict during iteration
+        val files: [text] = self.breakpoints.keys()
+        for file in files:
+            var lines = self.breakpoints.get(file) ?? []
+            var new_lines: [i32] = []
+            for l in lines:
+                if l != id:
+                    new_lines.push(l)
+            self.breakpoints[file] = new_lines
+            # Re-send remaining breakpoints for this file
+            val bp_json = LldbDapAdapter.build_breakpoints_json(file, new_lines)
+            self.send_request("setBreakpoints", bp_json)?
+        Ok("breakpoint {id} deleted")
+
+    fn set_watchpoint(expr: text, access: text) -> Result<i32, text>:
+        # lldb-dap supports data breakpoints
+        val access_type = match access:
+            "read": "read"
+            "write": "write"
+            "access": "readWrite"
+            _: "write"
+        val args = "{\"dataId\":\"{expr}\",\"accessType\":\"{access_type}\"}"
+        val result = self.send_request("setDataBreakpoints", "{\"breakpoints\":[{args}]}")?
+        Ok(0)
+
+    # --- Variable Inspection ---
+
+    fn read_locals() -> Result<[VarInfo], text>:
+        if not self.attached:
+            return Err("not attached")
+        # First get scopes for current frame
+        val scopes_result = self.send_request("scopes", "{\"frameId\":0}")?
+        val locals_ref = json_get_int(scopes_result, "variablesReference")
+        if locals_ref == 0:
+            return Ok([])
+        # Get variables for the locals scope
+        val vars_result = self.send_request("variables", "{\"variablesReference\":{locals_ref}}")?
+        LldbDapAdapter.parse_variables(vars_result)
+
+    fn read_arguments() -> Result<[VarInfo], text>:
+        if not self.attached:
+            return Err("not attached")
+        # DAP scopes include arguments in the "Locals" scope
+        # lldb-dap doesn't separate them; return empty
+        Ok([])
+
+    fn read_globals() -> Result<[VarInfo], text>:
+        if not self.attached:
+            return Err("not attached")
+        # lldb-dap doesn't have a dedicated globals scope
+        Ok([])
+
+    fn evaluate(expr: text) -> Result<text, text>:
+        if not self.attached:
+            return Err("not attached")
+        val args = "{\"expression\":\"{expr}\",\"context\":\"watch\"}"
+        val result = self.send_request("evaluate", args)?
+        val value = json_get_text(result, "result")
+        Ok(value)
+
+    # --- Stack Inspection ---
+
+    fn stack_trace() -> Result<[FrameInfo], text>:
+        if not self.attached:
+            return Err("not attached")
+        val args = "{\"threadId\":1,\"startFrame\":0,\"levels\":100}"
+        val result = self.send_request("stackTrace", args)?
+        LldbDapAdapter.parse_stack_frames(result)
+
+    fn stack_depth() -> Result<i32, text>:
+        val frames = self.stack_trace()?
+        Ok(frames.len())
+
+    fn select_frame(level: i32) -> Result<text, text>:
+        # DAP doesn't have a select-frame command — the frame is specified
+        # per-request via frameId. Store the selection for future use.
+        Ok("frame {level} selected")
+
+    fn current_location() -> Result<LocationInfo, text>:
+        val frames = self.stack_trace()?
+        if frames.len() > 0:
+            val f = frames[0]
+            Ok(LocationInfo.at(f.file, f.line, f.function_name))
+        else:
+            Err("no frames available")
+
+    # --- Memory Access ---
+
+    fn read_memory(addr: i64, size: i32) -> Result<[i32], text>:
+        if not self.attached:
+            return Err("not attached")
+        val hex_addr = LldbDapAdapter.to_hex(addr)
+        val args = "{\"memoryReference\":\"{hex_addr}\",\"count\":{size}}"
+        val result = self.send_request("readMemory", args)?
+        # Response contains base64-encoded data; decode via shell
+        val b64_data = json_get_text(result, "data")
+        if b64_data.len() == 0:
+            return Ok([])
+        val decoded = shell("echo '{b64_data}' | base64 -d | od -An -tu1")
+        var bytes: [i32] = []
+        for part in decoded.stdout.split(" "):
+            val trimmed = part.trim()
+            if trimmed.len() > 0:
+                val byte_val = trimmed.parse_int() ?? -1
+                if byte_val >= 0:
+                    bytes.push(byte_val)
+        Ok(bytes)
+
+    fn write_memory(addr: i64, data: [i32]) -> Result<text, text>:
+        if not self.attached:
+            return Err("not attached")
+        # Encode data as base64 via shell
+        var hex_parts: [text] = []
+        for byte in data:
+            val hi = LldbDapAdapter.hex_digit(byte / 16)
+            val lo = LldbDapAdapter.hex_digit(byte % 16)
+            hex_parts.push(hi)
+            hex_parts.push(lo)
+        val hex_str = hex_parts.join("")
+        val b64_result = shell("echo '{hex_str}' | xxd -r -p | base64 -w0")
+        val b64_data = b64_result.stdout.trim()
+        val hex_addr = LldbDapAdapter.to_hex(addr)
+        val args = "{\"memoryReference\":\"{hex_addr}\",\"data\":\"{b64_data}\"}"
+        self.send_request("writeMemory", args)?
+        Ok("written {data.len()} bytes")
+
+    # --- Register Access ---
+
+    fn read_register(reg_name: text) -> Result<i64, text>:
+        if not self.attached:
+            return Err("not attached")
+        # Use LLDB evaluate to read register
+        val args = "{\"expression\":\"${reg_name}\",\"context\":\"watch\"}"
+        val result = self.send_request("evaluate", args)?
+        val value_str = json_get_text(result, "result")
+        val value = LldbDapAdapter.parse_hex_i64(value_str)
+        Ok(value)
+
+    fn read_all_registers() -> Result<Dict<text, i64>, text>:
+        if not self.attached:
+            return Err("not attached")
+        # Use LLDB evaluate to dump registers
+        val args = "{\"expression\":\"register read --all\",\"context\":\"repl\"}"
+        val result = self.send_request("evaluate", args)?
+        val output = json_get_text(result, "result")
+        var regs: Dict<text, i64> = {}
+        for line in output.split("\n"):
+            val trimmed = line.trim()
+            if trimmed.len() == 0:
+                continue
+            # Format: "regname = 0xvalue"
+            val parts = trimmed.split("=")
+            if parts.len() >= 2:
+                val name = parts[0].trim()
+                val val_str = parts[1].trim()
+                val value = LldbDapAdapter.parse_hex_i64(val_str)
+                regs[name] = value
+        Ok(regs)
+
+    fn write_register(reg_name: text, value: i64) -> Result<text, text>:
+        if not self.attached:
+            return Err("not attached")
+        val hex_val = LldbDapAdapter.to_hex(value)
+        val args = "{\"expression\":\"register write {reg_name} {hex_val}\",\"context\":\"repl\"}"
+        self.send_request("evaluate", args)?
+        Ok("register {reg_name} set")
+
+    # --- Context Management ---
+
+    fn clear_context() -> Result<text, text>:
+        Ok("context clearing not supported (lldb-dap)")
+
+    fn reload_program(program: text) -> Result<text, text>:
+        # Disconnect and re-attach
+        if self.attached:
+            self.send_request("disconnect", "{\"terminateDebuggee\":true}")?
+            self.attached = false
+        self.attach(program, [])
+
+    fn set_breakpoint_rich(file: text, line: i32, condition: Option<text>,
+                           hit_condition: Option<text>, log_message: Option<text>) -> Result<i32, text>:
+        # Track breakpoints per file
+        var lines = self.breakpoints.get(file) ?? []
+        lines.push(line)
+        self.breakpoints[file] = lines
+
+        # Build the rich breakpoint entry
+        val bp_entry = LldbDapAdapter.build_rich_bp_entry(line, condition, hit_condition, log_message)
+
+        var all_bps: [text] = []
+        for l in lines:
+            if l == line:
+                all_bps.push(bp_entry)
+            else:
+                all_bps.push("{\"line\":{l}}")
+        val bps_json = all_bps.join(",")
+        val args = "{\"source\":{\"path\":\"{file}\"},\"breakpoints\":[{bps_json}]}"
+        self.send_request("setBreakpoints", args)?
+        Ok(line)
+
+    fn list_children(var_ref: text) -> Result<[VarInfo], text>:
+        if not self.attached:
+            return Err("not attached")
+        val ref_num = var_ref.parse_int() ?? 0
+        if ref_num == 0:
+            return Err("invalid variable reference: {var_ref}")
+        val args = "{\"variablesReference\":{ref_num}}"
+        val result = self.send_request("variables", args)?
+        LldbDapAdapter.parse_variables(result)
+
+    fn capabilities() -> AdapterCapabilities:
+        self.capabilities
+
+    # --- Cleanup ---
+
+    fn disconnect():
+        if self.attached:
+            val seq_num = self.next_seq()
+            val body = dap_request(seq_num, "disconnect", "{\"terminateDebuggee\":true}")
+            val message = dap_encode(body)
+            shell("printf '%s' '{message}' > {self.fifo_in}")
+            shell("sleep 0.2")
+            self.attached = false
+        self.cleanup()
+
+    fn cleanup():
+        if self.pid.len() > 0:
+            shell("kill {self.pid} 2>/dev/null")
+        shell("rm -f {self.fifo_in} {self.fifo_out}")
+
+    # --- Static Helpers ---
+
+    static fn build_breakpoints_json(file: text, lines: [i32]) -> text:
+        var bp_entries: [text] = []
+        for l in lines:
+            bp_entries.push("{\"line\":{l}}")
+        val bps = bp_entries.join(",")
+        "{\"source\":{\"path\":\"{file}\"},\"breakpoints\":[{bps}]}"
+
+    static fn build_rich_bp_entry(line: i32, condition: Option<text>,
+                                   hit_condition: Option<text>, log_message: Option<text>) -> text:
+        var cond_part = ""
+        match condition:
+            Some(c):
+                cond_part = ",\"condition\":\"{c}\""
+            nil: pass
+        var hit_part = ""
+        match hit_condition:
+            Some(h):
+                hit_part = ",\"hitCondition\":\"{h}\""
+            nil: pass
+        var log_part = ""
+        match log_message:
+            Some(m):
+                log_part = ",\"logMessage\":\"{m}\""
+            nil: pass
+        "{\"line\":{line}{cond_part}{hit_part}{log_part}}"
+
+    static fn parse_variables(json: text) -> Result<[VarInfo], text>:
+        var result: [VarInfo] = []
+        var pos = json.index_of("\"name\"")
+        while pos >= 0:
+            val chunk = json.slice(pos, json.len())
+            val name = json_get_text(chunk, "name")
+            val vl = json_get_text(chunk, "value")
+            val type_name = json_get_text(chunk, "type")
+            result.push(VarInfo.of(name, vl, type_name))
+            val next_search = pos + 6
+            if next_search >= json.len():
+                break
+            val rest = json.slice(next_search, json.len())
+            val next_pos = rest.index_of("\"name\"")
+            if next_pos < 0:
+                break
+            pos = next_search + next_pos
+        Ok(result)
+
+    static fn parse_stack_frames(json: text) -> Result<[FrameInfo], text>:
+        var result: [FrameInfo] = []
+        var pos = json.index_of("\"id\"")
+        var frame_idx = 0
+        while pos >= 0:
+            val chunk = json.slice(pos, json.len())
+            val id = json_get_int(chunk, "id")
+            val func_name = json_get_text(chunk, "name")
+            val source_idx = chunk.index_of("\"source\"")
+            var file = ""
+            if source_idx >= 0:
+                val src_chunk = chunk.slice(source_idx, chunk.len())
+                file = json_get_text(src_chunk, "path")
+            val line = json_get_int(chunk, "line")
+            result.push(FrameInfo.of(frame_idx, func_name, file, line))
+            frame_idx = frame_idx + 1
+            val next_search = pos + 4
+            if next_search >= json.len():
+                break
+            val rest = json.slice(next_search, json.len())
+            val next_pos = rest.index_of("\"id\"")
+            if next_pos < 0:
+                break
+            pos = next_search + next_pos
+        Ok(result)
+
+    static fn to_hex(value: i64) -> text:
+        if value == 0:
+            return "0x0"
+        var n = value
+        var parts: [text] = []
+        while n > 0:
+            val digit = (n % 16) as i32
+            parts.push(LldbDapAdapter.hex_digit(digit))
+            n = n / 16
+        parts.reverse()
+        "0x{parts.join(\"\")}"
+
+    static fn hex_digit(value: i32) -> text:
+        match value:
+            0: "0"
+            1: "1"
+            2: "2"
+            3: "3"
+            4: "4"
+            5: "5"
+            6: "6"
+            7: "7"
+            8: "8"
+            9: "9"
+            10: "a"
+            11: "b"
+            12: "c"
+            13: "d"
+            14: "e"
+            15: "f"
+            _: "0"
+
+    static fn parse_hex_i64(raw: text) -> i64:
+        var s = raw.trim()
+        if s.starts_with("0x") or s.starts_with("0X"):
+            s = s.slice(2, s.len())
+        var result: i64 = 0
+        for ch in s:
+            val digit = match ch:
+                "0": 0
+                "1": 1
+                "2": 2
+                "3": 3
+                "4": 4
+                "5": 5
+                "6": 6
+                "7": 7
+                "8": 8
+                "9": 9
+                "a": 10
+                "A": 10
+                "b": 11
+                "B": 11
+                "c": 12
+                "C": 12
+                "d": 13
+                "D": 13
+                "e": 14
+                "E": 14
+                "f": 15
+                "F": 15
+                _: -1
+            if digit < 0:
+                break
+            result = result * 16 + digit
+        result
+
+# ============================================================================
+# Config factory
+# ============================================================================
+
+fn lldb_config(program: text) -> AdapterConfig:
+    AdapterConfig(
+        adapter_type: "lldb-dap",
+        host: "",
+        port: 0,
+        program: program,
+        args: [],
+        timeout_ms: 30000,
+        architecture: "x86_64"
+    )

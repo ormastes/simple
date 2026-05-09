@@ -1,0 +1,141 @@
+"""DAP live integration wiring tests.
+
+Verifies adapter capabilities, config construction, coordinator types,
+and DAP variable/evaluate response formatting helpers.
+"""
+
+#![allow(primitive_api)]
+use std.io_runtime
+use std.nogc_sync_mut.spec.{describe, it, expect}
+use std.nogc_sync_mut.dap.adapter.mod.{AdapterCapabilities, AdapterConfig}
+use std.nogc_sync_mut.debug.coordinator.{VarInfo, FrameInfo, LocationInfo}
+
+describe "DAP Live Wiring":
+
+    # --- AdapterCapabilities tests ---
+
+    it "basic capabilities are all false":
+        val caps = AdapterCapabilities.basic()
+        expect(caps.can_reset).to_equal(false)
+        expect(caps.can_reload).to_equal(false)
+        expect(caps.can_clear_context).to_equal(false)
+        expect(caps.supports_memory).to_equal(false)
+        expect(caps.supports_registers).to_equal(false)
+        expect(caps.supports_watchpoints).to_equal(false)
+        expect(caps.supports_threads).to_equal(false)
+        expect(caps.max_watchpoints).to_equal(0)
+
+    it "full capabilities are all true":
+        val caps = AdapterCapabilities.full()
+        expect(caps.can_reset).to_equal(true)
+        expect(caps.can_reload).to_equal(true)
+        expect(caps.can_clear_context).to_equal(true)
+        expect(caps.supports_memory).to_equal(true)
+        expect(caps.supports_registers).to_equal(true)
+        expect(caps.supports_watchpoints).to_equal(true)
+        expect(caps.supports_threads).to_equal(true)
+        expect(caps.max_watchpoints).to_equal(1024)
+
+    it "with_reset enables reset on basic":
+        val caps = AdapterCapabilities.basic().with_reset()
+        expect(caps.can_reset).to_equal(true)
+        expect(caps.can_reload).to_equal(false)
+        expect(caps.supports_memory).to_equal(false)
+
+    it "with_memory enables memory on basic":
+        val caps = AdapterCapabilities.basic().with_memory()
+        expect(caps.supports_memory).to_equal(true)
+        expect(caps.can_reset).to_equal(false)
+
+    it "with_registers enables registers on basic":
+        val caps = AdapterCapabilities.basic().with_registers()
+        expect(caps.supports_registers).to_equal(true)
+        expect(caps.supports_memory).to_equal(false)
+
+    it "with_reload enables reload on basic":
+        val caps = AdapterCapabilities.basic().with_reload()
+        expect(caps.can_reload).to_equal(true)
+        expect(caps.can_reset).to_equal(false)
+
+    it "with_clear_context enables clear_context on basic":
+        val caps = AdapterCapabilities.basic().with_clear_context()
+        expect(caps.can_clear_context).to_equal(true)
+        expect(caps.can_reload).to_equal(false)
+
+    it "with_watchpoints sets capacity":
+        val caps = AdapterCapabilities.basic().with_watchpoints(8)
+        expect(caps.supports_watchpoints).to_equal(true)
+        expect(caps.max_watchpoints).to_equal(8)
+
+    it "chained builders compose correctly":
+        val caps = AdapterCapabilities.basic()
+            .with_reset()
+            .with_reload()
+            .with_clear_context()
+            .with_watchpoints(512)
+        expect(caps.can_reset).to_equal(true)
+        expect(caps.can_reload).to_equal(true)
+        expect(caps.can_clear_context).to_equal(true)
+        expect(caps.supports_watchpoints).to_equal(true)
+        expect(caps.max_watchpoints).to_equal(512)
+        expect(caps.supports_memory).to_equal(false)
+        expect(caps.supports_registers).to_equal(false)
+
+    # --- AdapterConfig tests ---
+
+    it "local config has correct defaults":
+        val cfg = AdapterConfig.local("test.spl")
+        expect(cfg.adapter_type).to_equal("local")
+        expect(cfg.program).to_equal("test.spl")
+        expect(cfg.host).to_equal("")
+        expect(cfg.port).to_equal(0)
+        expect(cfg.architecture).to_equal("x86_64")
+
+    it "gdb config has correct defaults":
+        val cfg = AdapterConfig.gdb("192.168.1.1", 3333, "firmware.elf")
+        expect(cfg.adapter_type).to_equal("gdb")
+        expect(cfg.host).to_equal("192.168.1.1")
+        expect(cfg.port).to_equal(3333)
+        expect(cfg.program).to_equal("firmware.elf")
+        expect(cfg.architecture).to_equal("riscv32")
+
+    it "trace32 config has correct defaults":
+        val cfg = AdapterConfig.trace32("localhost", 20000, "app.elf")
+        expect(cfg.adapter_type).to_equal("trace32")
+        expect(cfg.host).to_equal("localhost")
+        expect(cfg.port).to_equal(20000)
+        expect(cfg.architecture).to_equal("arm")
+
+    # --- Coordinator type construction tests ---
+
+    it "VarInfo.of creates with zero children":
+        val v = VarInfo.of("counter", "42", "i32")
+        expect(v.name).to_equal("counter")
+        expect(v.value).to_equal("42")
+        expect(v.type_name).to_equal("i32")
+        expect(v.num_children).to_equal(0)
+
+    it "FrameInfo.of creates with zero column":
+        val f = FrameInfo.of(0, "main", "test.spl", 10)
+        expect(f.index).to_equal(0)
+        expect(f.function_name).to_equal("main")
+        expect(f.file).to_equal("test.spl")
+        expect(f.line).to_equal(10)
+        expect(f.column).to_equal(0)
+
+    it "LocationInfo.at creates with zero column":
+        val loc = LocationInfo.at("main.spl", 25, "run")
+        expect(loc.file).to_equal("main.spl")
+        expect(loc.line).to_equal(25)
+        expect(loc.function_name).to_equal("run")
+        expect(loc.column).to_equal(0)
+
+    it "multiple FrameInfo instances represent a stack":
+        val top = FrameInfo.of(0, "inner", "lib.spl", 50)
+        val mid = FrameInfo.of(1, "outer", "lib.spl", 30)
+        val bot = FrameInfo.of(2, "main", "main.spl", 5)
+        expect(top.index).to_equal(0)
+        expect(mid.index).to_equal(1)
+        expect(bot.index).to_equal(2)
+        expect(top.function_name).to_equal("inner")
+        expect(bot.function_name).to_equal("main")

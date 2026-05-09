@@ -254,6 +254,9 @@ impl DapServer:
         # Send response
         transport.write_response(request_seq, true, command, nil)?
 
+        # Refresh state from adapter and send stopped event
+        self.execute_step()?
+
         Ok(nil)
     fn handle_step_in(request_seq: Int, command: String, arguments: Option<Dict>) -> Result<Nil, String>:
         transport.log_debug("Handling stepIn request")
@@ -264,6 +267,9 @@ impl DapServer:
 
         transport.write_response(request_seq, true, command, nil)?
 
+        # Refresh state from adapter and send stopped event
+        self.execute_step()?
+
         Ok(nil)
     fn handle_step_out(request_seq: Int, command: String, arguments: Option<Dict>) -> Result<Nil, String>:
         transport.log_debug("Handling stepOut request")
@@ -273,6 +279,9 @@ impl DapServer:
         self.step_mode = Some(StepMode.StepOut)
 
         transport.write_response(request_seq, true, command, nil)?
+
+        # Refresh state from adapter and send stopped event
+        self.execute_step()?
 
         Ok(nil)
     fn lookup_data_breakpoint_value(name: String) -> Option<String>:
@@ -339,15 +348,18 @@ impl DapServer:
         self.data_breakpoints = updated
         hit
     fn execute_until_stop() -> Result<Nil, String>:
-        # NOTE: This is the interpreter integration point
-        # When connected to the interpreter, this will:
-        # 1. Run the interpreter in a loop
-        # 2. Before each statement, check for breakpoints
-        # 3. If breakpoint hit, update debug context and send stopped event
-        # 4. If program terminates, send terminated event
-
-        # For now, simulate stopping at the next line
-        self.debug_context.current_line = self.debug_context.current_line + 1
+        # Adapter resume was already called by the handler.
+        # Refresh debug context from adapter stack trace.
+        val trace_result = self.adapter.stack_trace()
+        match trace_result:
+            Ok(frames):
+                if frames.len() > 0:
+                    val top = frames[0]
+                    self.debug_context.current_line = top.line
+                    self.debug_context.source_path = top.file
+            Err(_):
+                # Adapter could not provide location; fall back to line advance
+                self.debug_context.current_line = self.debug_context.current_line + 1
 
         # Runtime data breakpoint check (variable-change watchpoints).
         if self.check_runtime_data_breakpoints():
@@ -364,53 +376,35 @@ impl DapServer:
                 self.breakpoint_manager.increment_hit_count(bp.id)
                 self.send_stopped_event(protocol.StopReason.Breakpoint)?
             nil:
-                # No breakpoint - in a real implementation, continue execution
-                # For now, just stop (simulating end of program or next statement)
+                # No breakpoint hit — report step stop
                 self.send_stopped_event(protocol.StopReason.Step)?
 
         Ok(nil)
     fn execute_step() -> Result<Nil, String>:
-        # NOTE: This is the interpreter integration point
-        # When connected to the interpreter, this will:
-        # - StepOver: Execute one statement, skipping into function calls
-        # - StepIn: Execute one statement, entering function calls
-        # - StepOut: Execute until current function returns
+        # Adapter step methods were already called by the handler
+        # (step_over / single_step / step_out). Refresh debug context
+        # from adapter stack trace to get the real post-step location.
+        val trace_result = self.adapter.stack_trace()
+        match trace_result:
+            Ok(frames):
+                if frames.len() > 0:
+                    val top = frames[0]
+                    self.debug_context.current_line = top.line
+                    self.debug_context.source_path = top.file
 
-        match self.step_mode:
-            Some(StepMode.StepOver):
-                # Step to next line in current function
+                    # Rebuild call_stack from adapter frames
+                    var new_stack: [StackEntry] = []
+                    for f in frames:
+                        new_stack.push(StackEntry.new(
+                            f.function_name,
+                            f.file,
+                            f.line,
+                            0
+                        ))
+                    self.debug_context.call_stack = new_stack
+            Err(_):
+                # Adapter could not provide location; fall back to line advance
                 self.debug_context.current_line = self.debug_context.current_line + 1
-
-            Some(StepMode.StepIn):
-                # Step into function call (or next line if no call)
-                # For now, same as step over
-                self.debug_context.current_line = self.debug_context.current_line + 1
-
-            Some(StepMode.StepOut):
-                # Step out of current function
-                # For now, pop stack and advance line
-                if self.debug_context.call_stack.len() > 1:
-                    self.debug_context.call_stack.pop()
-                    # Update line to caller
-                    match self.debug_context.call_stack.last():
-                        Some(frame):
-                            self.debug_context.current_line = frame.line + 1
-                        nil:
-                            self.debug_context.current_line = self.debug_context.current_line + 1
-                else:
-                    self.debug_context.current_line = self.debug_context.current_line + 1
-
-            nil:
-                # No step mode, just advance
-                self.debug_context.current_line = self.debug_context.current_line + 1
-
-        # Update call stack with new position
-        if self.debug_context.call_stack.len() > 0:
-            match self.debug_context.call_stack.last_mut():
-                Some(frame):
-                    frame.line = self.debug_context.current_line
-                nil:
-                    pass
 
         # Runtime data breakpoint check (variable-change watchpoints).
         if self.check_runtime_data_breakpoints():

@@ -1,0 +1,86 @@
+# GDB Pretty-Printer Manager
+# Registers and manages GDB pretty-printing for Simple types.
+# Uses -enable-pretty-printing and variable object evaluation.
+
+use std.nogc_sync_mut.debug.remote.protocol.gdb_mi.GdbMiClient
+use std.nogc_sync_mut.debug.remote.feature.features.{FeatureId, FeatureRank}
+use std.nogc_sync_mut.debug.remote.feature.registry.{FeatureRegistry, FeatureHandler}
+
+# Manager for GDB pretty-printer registration and usage
+class GdbPrettyPrinterManager:
+    client: GdbMiClient
+    registered: bool
+    enabled: bool
+
+impl GdbPrettyPrinterManager:
+    # Create a new manager (not yet registered/enabled).
+    static fn create(client: GdbMiClient) -> GdbPrettyPrinterManager:
+        GdbPrettyPrinterManager(client: client, registered: false, enabled: false)
+
+    # Register Simple language pretty printers with GDB.
+    # Sends: -enable-pretty-printing
+    # Sends: -interpreter-exec console "set print pretty on"
+    me register_simple_printers() -> Result<text, text>:
+        self.client.send_command("enable-pretty-printing")?
+        self.client.console_exec("set print pretty on")?
+        self.registered = true
+        self.enabled = true
+        Ok("pretty printers registered")
+
+    # Evaluate a variable with pretty-printed output.
+    # Sends: -var-evaluate-expression {var_name}
+    me format_value(var_name: text) -> Result<text, text>:
+        val data = self.client.send_command("var-evaluate-expression {var_name}")?
+        val value = data.get("value") ?? ""
+        Ok(value)
+
+    # Check whether printers have been registered.
+    fn is_registered() -> bool:
+        self.registered
+
+    # Check whether pretty-printing is enabled.
+    fn is_enabled() -> bool:
+        self.enabled
+
+    # Enable pretty-printing output.
+    me enable() -> Result<text, text>:
+        self.client.console_exec("set print pretty on")?
+        self.enabled = true
+        Ok("pretty printing enabled")
+
+    # Disable pretty-printing output.
+    me disable() -> Result<text, text>:
+        self.client.console_exec("set print pretty off")?
+        self.enabled = false
+        Ok("pretty printing disabled")
+
+    # --- Static command builders (for testing without live GDB) ---
+
+    static fn build_enable_pretty_printing_cmd() -> text:
+        "enable-pretty-printing"
+
+    static fn build_set_pretty_on_cmd() -> text:
+        "set print pretty on"
+
+    static fn build_set_pretty_off_cmd() -> text:
+        "set print pretty off"
+
+    static fn build_var_eval_cmd(var_name: text) -> text:
+        "var-evaluate-expression {var_name}"
+
+# Register the PrettyPrint feature at NATIVE rank.
+fn register_pretty_print_feature(registry: FeatureRegistry, client: GdbMiClient):
+    var manager = GdbPrettyPrinterManager.create(client)
+    registry.register(FeatureHandler.of(
+        FeatureId.PrettyPrint, FeatureRank.NATIVE(), "gdb-pretty",
+        \args: handler_pretty_print(manager, args),
+        "GDB pretty-print variable evaluation"
+    ))
+
+# Handler adapter: first arg is variable name to format.
+fn handler_pretty_print(manager: GdbPrettyPrinterManager, args: [text]) -> Result<text, text>:
+    if args.len() < 1:
+        return Err("PrettyPrint requires [var_name]")
+    if not manager.is_registered():
+        manager.register_simple_printers()?
+    manager.format_value(args[0])
