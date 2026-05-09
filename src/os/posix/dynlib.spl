@@ -1,0 +1,141 @@
+# OOP Dynamic Library Interface — DynLibKind enum dispatch
+#
+# Unified facade over ELF, SMF, and PE dynamic library formats.
+# Dispatches to the kernel dylib_async layer for actual loading.
+# PE support is stubbed (returns Invalid) until WS3 lands.
+
+use os.posix.dylib_async.{dylib_open, dylib_symbol, dylib_close}
+
+struct ElfLibState:
+    """State for a loaded ELF shared object."""
+    handle: i64
+    base: u64
+    path: text
+
+struct SmfLibState:
+    """State for a loaded SMF module."""
+    handle: i64
+    path: text
+    stub_entry: i64
+
+struct PeLibState:
+    """State for a loaded PE/COFF DLL (stub — WS3)."""
+    handle: i64
+    path: text
+    base: u64
+    image_size: u64
+
+enum DynLibKind:
+    """Discriminated union over dynamic library formats."""
+    Elf(state: ElfLibState)
+    Smf(state: SmfLibState)
+    Pe(state: PeLibState)
+    Invalid
+
+fn _sniff_format(path: text) -> text:
+    """Determine library format from file extension."""
+    if path.ends_with(".so"):
+        return "elf"
+    if path.ends_with(".smf"):
+        return "smf"
+    if path.ends_with(".dll"):
+        return "pe"
+    # Absolute paths without known extension default to ELF on POSIX
+    if path.starts_with("/"):
+        return "elf"
+    "unknown"
+
+fn dynlib_open(path: text, mode: u32) -> DynLibKind:
+    """Open a dynamic library, sniffing format from extension.
+
+    .so  -> Elf
+    .smf -> Smf
+    .dll -> Pe (returns Invalid until WS3)
+
+    Returns DynLibKind.Invalid on failure (bad path, unsupported format,
+    or kernel ENOSYS for kernel-backed loads).
+    """
+    val fmt = _sniff_format(path)
+    if fmt == "pe":
+        # PE loading not implemented yet (WS3)
+        return DynLibKind.Invalid
+    if fmt == "unknown":
+        return DynLibKind.Invalid
+
+    val handle = dylib_open(path, mode)
+    if handle < 0:
+        return DynLibKind.Invalid
+
+    if fmt == "elf":
+        return DynLibKind.Elf(state: ElfLibState(
+            handle: handle,
+            base: 0,
+            path: path
+        ))
+    if fmt == "smf":
+        return DynLibKind.Smf(state: SmfLibState(
+            handle: handle,
+            path: path,
+            stub_entry: 0
+        ))
+    DynLibKind.Invalid
+
+fn dynlib_symbol(lib: DynLibKind, name: text) -> i64:
+    """Resolve a named symbol from a loaded library."""
+    match lib:
+        DynLibKind.Elf(state):
+            return dylib_symbol(state.handle, name)
+        DynLibKind.Smf(state):
+            return dylib_symbol(state.handle, name)
+        DynLibKind.Pe(state):
+            return dylib_symbol(state.handle, name)
+        DynLibKind.Invalid:
+            return -1
+
+fn dynlib_close(lib: DynLibKind) -> i64:
+    """Close a loaded dynamic library, releasing kernel resources."""
+    match lib:
+        DynLibKind.Elf(state):
+            return dylib_close(state.handle)
+        DynLibKind.Smf(state):
+            return dylib_close(state.handle)
+        DynLibKind.Pe(state):
+            return dylib_close(state.handle)
+        DynLibKind.Invalid:
+            return -1
+
+fn dynlib_is_valid(lib: DynLibKind) -> bool:
+    """Check whether a DynLibKind holds a valid loaded library."""
+    match lib:
+        DynLibKind.Invalid:
+            return false
+        DynLibKind.Elf(_):
+            return true
+        DynLibKind.Smf(_):
+            return true
+        DynLibKind.Pe(_):
+            return true
+
+fn dynlib_path(lib: DynLibKind) -> text:
+    """Return the filesystem path of the loaded library."""
+    match lib:
+        DynLibKind.Elf(state):
+            return state.path
+        DynLibKind.Smf(state):
+            return state.path
+        DynLibKind.Pe(state):
+            return state.path
+        DynLibKind.Invalid:
+            return ""
+
+fn dynlib_format_name(lib: DynLibKind) -> text:
+    """Return a human-readable format name for the loaded library."""
+    match lib:
+        DynLibKind.Elf(_):
+            return "ELF"
+        DynLibKind.Smf(_):
+            return "SMF"
+        DynLibKind.Pe(_):
+            return "PE"
+        DynLibKind.Invalid:
+            return "Invalid"
