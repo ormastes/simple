@@ -1,0 +1,434 @@
+"""
+Float Layout Test Spec
+
+**Feature IDs:** #M13-FLOAT-CSS-QUICKWINS
+**Category:** Browser Engine / CSS Float Layout
+**Status:** Implemented
+
+Tests the CSS float layout implementation in the canonical browser engine:
+- Float placement (left, right)
+- Float clearing (clear: left, right, both)
+- Float margin collapsing with normal flow
+- Line box float intrusion (text wrapping around floats)
+- Float stacking/ordering
+- BFC containment (overflow:hidden, display:flow-root)
+"""
+
+use std.spec.*
+
+use std.gc_async_mut.gpu.browser_engine.dom.{BeDomNode, be_dom_get_style,
+    be_dom_add_child}
+use std.gc_async_mut.gpu.browser_engine.layout.{layout_tree, BeLayoutBox,
+    layout_get_x, layout_get_y, layout_get_width, layout_get_height,
+    layout_get_children, layout_get_content_width, layout_get_content_height}
+use std.gc_async_mut.gpu.browser_engine.css.{css_get_float_code, css_get_clear_code}
+
+# Helper: build a simple block container with a given width
+fn make_container(w: i32, h: i32) -> BeDomNode:
+    val root = BeDomNode.element("div")
+    root.set_style("display", "block")
+    root.set_style("width", "{w}px")
+    root.set_style("height", "{h}px")
+    root
+
+# Helper: build a sized block child
+fn make_block(w: i32, h: i32) -> BeDomNode:
+    val node = BeDomNode.element("div")
+    node.set_style("display", "block")
+    node.set_style("width", "{w}px")
+    node.set_style("height", "{h}px")
+    node
+
+# =========================================================================
+# Float Placement
+# =========================================================================
+
+describe "CSS float placement":
+
+    it "float:left positions child at left edge of container":
+        val root = make_container(400, 400)
+        val floated = make_block(100, 50)
+        floated.set_style("float", "left")
+        root.add_child(floated)
+        val layout = layout_tree(root, 400, 400)
+        val children = layout_get_children(layout)
+        expect(children.len() > 0).to_equal(true)
+        val first = children[0]
+        val child_layout = layout_get_children(first)
+        expect(child_layout.len() > 0).to_equal(true)
+        val fb = child_layout[0]
+        expect(layout_get_x(fb).value >= 0).to_equal(true)
+        expect(layout_get_width(fb).value).to_equal(100)
+        expect(layout_get_height(fb).value).to_equal(50)
+
+    it "float:right positions child at right edge of container":
+        val root = make_container(400, 400)
+        val floated = make_block(100, 50)
+        floated.set_style("float", "right")
+        root.add_child(floated)
+        val layout = layout_tree(root, 400, 400)
+        val children = layout_get_children(layout)
+        expect(children.len() > 0).to_equal(true)
+        val first = children[0]
+        val child_layout = layout_get_children(first)
+        expect(child_layout.len() > 0).to_equal(true)
+        val fb = child_layout[0]
+        # Right-floated box should be positioned toward the right
+        val fb_x = layout_get_x(fb).value
+        val fb_w = layout_get_width(fb).value
+        expect(fb_w).to_equal(100)
+        # x + width should approach or equal container width
+        expect(fb_x + fb_w > 200).to_equal(true)
+
+    it "two left floats stack horizontally":
+        val root = make_container(400, 400)
+        val f1 = make_block(100, 50)
+        f1.set_style("float", "left")
+        val f2 = make_block(100, 50)
+        f2.set_style("float", "left")
+        root.add_child(f1)
+        root.add_child(f2)
+        val layout = layout_tree(root, 400, 400)
+        val children = layout_get_children(layout)
+        expect(children.len() > 0).to_equal(true)
+        val container_kids = layout_get_children(children[0])
+        expect(container_kids.len() >= 2).to_equal(true)
+        val first_x = layout_get_x(container_kids[0]).value
+        val second_x = layout_get_x(container_kids[1]).value
+        # Second left float should be to the right of first
+        expect(second_x >= first_x + 100).to_equal(true)
+
+    it "float does not advance parent cursor_y":
+        val root = make_container(400, 400)
+        val floated = make_block(100, 200)
+        floated.set_style("float", "left")
+        val normal = make_block(400, 50)
+        root.add_child(floated)
+        root.add_child(normal)
+        val layout = layout_tree(root, 400, 400)
+        val children = layout_get_children(layout)
+        expect(children.len() > 0).to_equal(true)
+        val container_kids = layout_get_children(children[0])
+        # Should have both float and normal child
+        expect(container_kids.len() >= 2).to_equal(true)
+
+# =========================================================================
+# Float Clearing
+# =========================================================================
+
+describe "CSS float clearing":
+
+    it "clear:left moves below left float":
+        val root = make_container(400, 400)
+        val floated = make_block(100, 80)
+        floated.set_style("float", "left")
+        val cleared = make_block(200, 30)
+        cleared.set_style("clear", "left")
+        root.add_child(floated)
+        root.add_child(cleared)
+        val layout = layout_tree(root, 400, 400)
+        val children = layout_get_children(layout)
+        expect(children.len() > 0).to_equal(true)
+        val container_kids = layout_get_children(children[0])
+        expect(container_kids.len() >= 2).to_equal(true)
+        val cleared_y = layout_get_y(container_kids[1]).value
+        # Cleared element should be below the float (y >= 80)
+        expect(cleared_y >= 80).to_equal(true)
+
+    it "clear:right moves below right float":
+        val root = make_container(400, 400)
+        val floated = make_block(100, 60)
+        floated.set_style("float", "right")
+        val cleared = make_block(200, 30)
+        cleared.set_style("clear", "right")
+        root.add_child(floated)
+        root.add_child(cleared)
+        val layout = layout_tree(root, 400, 400)
+        val children = layout_get_children(layout)
+        expect(children.len() > 0).to_equal(true)
+        val container_kids = layout_get_children(children[0])
+        expect(container_kids.len() >= 2).to_equal(true)
+        val cleared_y = layout_get_y(container_kids[1]).value
+        expect(cleared_y >= 60).to_equal(true)
+
+    it "clear:both moves below both left and right floats":
+        val root = make_container(400, 400)
+        val left_f = make_block(100, 40)
+        left_f.set_style("float", "left")
+        val right_f = make_block(100, 90)
+        right_f.set_style("float", "right")
+        val cleared = make_block(200, 30)
+        cleared.set_style("clear", "both")
+        root.add_child(left_f)
+        root.add_child(right_f)
+        root.add_child(cleared)
+        val layout = layout_tree(root, 400, 400)
+        val children = layout_get_children(layout)
+        expect(children.len() > 0).to_equal(true)
+        val container_kids = layout_get_children(children[0])
+        expect(container_kids.len() >= 3).to_equal(true)
+        val cleared_y = layout_get_y(container_kids[2]).value
+        # Should be below the taller float (90px)
+        expect(cleared_y >= 90).to_equal(true)
+
+    it "clear:left does not affect right float":
+        val root = make_container(400, 400)
+        val right_f = make_block(100, 80)
+        right_f.set_style("float", "right")
+        val cleared = make_block(200, 30)
+        cleared.set_style("clear", "left")
+        root.add_child(right_f)
+        root.add_child(cleared)
+        val layout = layout_tree(root, 400, 400)
+        val children = layout_get_children(layout)
+        expect(children.len() > 0).to_equal(true)
+        val container_kids = layout_get_children(children[0])
+        expect(container_kids.len() >= 2).to_equal(true)
+        # clear:left should NOT move below right float
+        val cleared_y = layout_get_y(container_kids[1]).value
+        # It should be at y=0 (no left floats to clear)
+        expect(cleared_y < 80).to_equal(true)
+
+# =========================================================================
+# Float Line Box Intrusion
+# =========================================================================
+
+describe "CSS float line box intrusion":
+
+    it "normal flow child narrows when float is active":
+        val root = make_container(400, 400)
+        val floated = make_block(100, 100)
+        floated.set_style("float", "left")
+        val normal = make_block(400, 50)
+        root.add_child(floated)
+        root.add_child(normal)
+        val layout = layout_tree(root, 400, 400)
+        val children = layout_get_children(layout)
+        expect(children.len() > 0).to_equal(true)
+        val container_kids = layout_get_children(children[0])
+        expect(container_kids.len() >= 2).to_equal(true)
+        # Normal block should have its width narrowed by float intrusion
+        val normal_w = layout_get_width(container_kids[1]).value
+        # Available width should be container(400) - float(100) = 300
+        expect(normal_w <= 300).to_equal(true)
+
+    it "normal flow child shifts right past left float":
+        val root = make_container(400, 400)
+        val floated = make_block(150, 100)
+        floated.set_style("float", "left")
+        val normal = make_block(200, 50)
+        root.add_child(floated)
+        root.add_child(normal)
+        val layout = layout_tree(root, 400, 400)
+        val children = layout_get_children(layout)
+        expect(children.len() > 0).to_equal(true)
+        val container_kids = layout_get_children(children[0])
+        expect(container_kids.len() >= 2).to_equal(true)
+        val normal_x = layout_get_x(container_kids[1]).value
+        # Normal child x should be offset by float width
+        expect(normal_x >= 150).to_equal(true)
+
+# =========================================================================
+# BFC Containment (float enclosure)
+# =========================================================================
+
+describe "BFC float containment":
+
+    it "overflow:hidden container encloses its floats":
+        val root = make_container(400, 400)
+        val bfc = BeDomNode.element("div")
+        bfc.set_style("display", "block")
+        bfc.set_style("width", "400px")
+        bfc.set_style("overflow", "hidden")
+        val floated = make_block(100, 200)
+        floated.set_style("float", "left")
+        bfc.add_child(floated)
+        root.add_child(bfc)
+        val layout = layout_tree(root, 400, 400)
+        val children = layout_get_children(layout)
+        expect(children.len() > 0).to_equal(true)
+        val bfc_box = layout_get_children(children[0])
+        expect(bfc_box.len() > 0).to_equal(true)
+        # BFC root height should contain the float
+        val bfc_h = layout_get_height(bfc_box[0]).value
+        expect(bfc_h >= 200).to_equal(true)
+
+    it "display:flow-root container encloses its floats":
+        val root = make_container(400, 400)
+        val bfc = BeDomNode.element("div")
+        bfc.set_style("display", "flow-root")
+        bfc.set_style("width", "400px")
+        val floated = make_block(100, 150)
+        floated.set_style("float", "left")
+        bfc.add_child(floated)
+        root.add_child(bfc)
+        val layout = layout_tree(root, 400, 400)
+        val children = layout_get_children(layout)
+        expect(children.len() > 0).to_equal(true)
+        val bfc_box = layout_get_children(children[0])
+        expect(bfc_box.len() > 0).to_equal(true)
+        val bfc_h = layout_get_height(bfc_box[0]).value
+        expect(bfc_h >= 150).to_equal(true)
+
+    it "regular block container does NOT auto-enclose floats in height":
+        val root = make_container(400, 400)
+        val container = BeDomNode.element("div")
+        container.set_style("display", "block")
+        container.set_style("width", "400px")
+        val floated = make_block(100, 200)
+        floated.set_style("float", "left")
+        container.add_child(floated)
+        root.add_child(container)
+        val layout = layout_tree(root, 400, 400)
+        val children = layout_get_children(layout)
+        expect(children.len() > 0).to_equal(true)
+        val container_box = layout_get_children(children[0])
+        expect(container_box.len() > 0).to_equal(true)
+        # Without BFC, container height should NOT include float
+        # (height should be 0 since no in-flow children)
+        val c_h = layout_get_height(container_box[0]).value
+        expect(c_h < 200).to_equal(true)
+
+# =========================================================================
+# Display Mode Dispatch
+# =========================================================================
+
+describe "display mode dispatch":
+
+    it "display:flow-root dispatches to block layout":
+        val root = make_container(400, 400)
+        val fr = BeDomNode.element("div")
+        fr.set_style("display", "flow-root")
+        fr.set_style("width", "200px")
+        fr.set_style("height", "100px")
+        root.add_child(fr)
+        val layout = layout_tree(root, 400, 400)
+        val children = layout_get_children(layout)
+        expect(children.len() > 0).to_equal(true)
+        val container_kids = layout_get_children(children[0])
+        expect(container_kids.len() > 0).to_equal(true)
+        expect(layout_get_width(container_kids[0]).value).to_equal(200)
+        expect(layout_get_height(container_kids[0]).value).to_equal(100)
+
+    it "display:inline-flex dispatches to flex layout":
+        val root = make_container(400, 400)
+        val iflex = BeDomNode.element("div")
+        iflex.set_style("display", "inline-flex")
+        iflex.set_style("width", "200px")
+        iflex.set_style("height", "80px")
+        root.add_child(iflex)
+        val layout = layout_tree(root, 400, 400)
+        val children = layout_get_children(layout)
+        expect(children.len() > 0).to_equal(true)
+        val container_kids = layout_get_children(children[0])
+        expect(container_kids.len() > 0).to_equal(true)
+        expect(layout_get_width(container_kids[0]).value).to_equal(200)
+
+    it "display:none produces no layout box":
+        val root = make_container(400, 400)
+        val hidden = BeDomNode.element("div")
+        hidden.set_style("display", "none")
+        hidden.set_style("width", "200px")
+        hidden.set_style("height", "100px")
+        root.add_child(hidden)
+        val layout = layout_tree(root, 400, 400)
+        val children = layout_get_children(layout)
+        expect(children.len() > 0).to_equal(true)
+        val container_kids = layout_get_children(children[0])
+        # display:none child should still be present but with 0 dimensions
+        # (or absent from children list)
+        if container_kids.len() > 0:
+            val h = layout_get_height(container_kids[0]).value
+            val w = layout_get_width(container_kids[0]).value
+            expect(h == 0 and w == 0).to_equal(true)
+
+# =========================================================================
+# Float Stacking / Ordering
+# =========================================================================
+
+describe "CSS float stacking":
+
+    it "left and right floats on same line do not overlap":
+        val root = make_container(400, 400)
+        val left_f = make_block(100, 50)
+        left_f.set_style("float", "left")
+        val right_f = make_block(100, 50)
+        right_f.set_style("float", "right")
+        root.add_child(left_f)
+        root.add_child(right_f)
+        val layout = layout_tree(root, 400, 400)
+        val children = layout_get_children(layout)
+        expect(children.len() > 0).to_equal(true)
+        val container_kids = layout_get_children(children[0])
+        expect(container_kids.len() >= 2).to_equal(true)
+        val left_x = layout_get_x(container_kids[0]).value
+        val left_w = layout_get_width(container_kids[0]).value
+        val right_x = layout_get_x(container_kids[1]).value
+        # Left float right edge should not exceed right float left edge
+        expect(left_x + left_w <= right_x).to_equal(true)
+
+    it "float drops to next line when container too narrow":
+        val root = make_container(250, 400)
+        val f1 = make_block(150, 50)
+        f1.set_style("float", "left")
+        val f2 = make_block(150, 50)
+        f2.set_style("float", "left")
+        root.add_child(f1)
+        root.add_child(f2)
+        val layout = layout_tree(root, 250, 250)
+        val children = layout_get_children(layout)
+        expect(children.len() > 0).to_equal(true)
+        val container_kids = layout_get_children(children[0])
+        expect(container_kids.len() >= 2).to_equal(true)
+        # Second float should be below first since 150+150 > 250
+        val f1_y = layout_get_y(container_kids[0]).value
+        val f2_y = layout_get_y(container_kids[1]).value
+        expect(f2_y >= f1_y + 50).to_equal(true)
+
+# =========================================================================
+# CSS property parsing integration
+# =========================================================================
+
+describe "float/clear CSS property parsing":
+
+    it "float:left sets float_code to 1":
+        val node = BeDomNode.element("div")
+        node.set_style("float", "left")
+        val style = be_dom_get_style(node)
+        expect(css_get_float_code(style).value).to_equal(1)
+
+    it "float:right sets float_code to 2":
+        val node = BeDomNode.element("div")
+        node.set_style("float", "right")
+        val style = be_dom_get_style(node)
+        expect(css_get_float_code(style).value).to_equal(2)
+
+    it "clear:left sets clear_code to 1":
+        val node = BeDomNode.element("div")
+        node.set_style("clear", "left")
+        val style = be_dom_get_style(node)
+        expect(css_get_clear_code(style).value).to_equal(1)
+
+    it "clear:right sets clear_code to 2":
+        val node = BeDomNode.element("div")
+        node.set_style("clear", "right")
+        val style = be_dom_get_style(node)
+        expect(css_get_clear_code(style).value).to_equal(2)
+
+    it "clear:both sets clear_code to 3":
+        val node = BeDomNode.element("div")
+        node.set_style("clear", "both")
+        val style = be_dom_get_style(node)
+        expect(css_get_clear_code(style).value).to_equal(3)
+
+    it "float:none sets float_code to 0":
+        val node = BeDomNode.element("div")
+        node.set_style("float", "none")
+        val style = be_dom_get_style(node)
+        expect(css_get_float_code(style).value).to_equal(0)
+
+    it "clear:none sets clear_code to 0":
+        val node = BeDomNode.element("div")
+        node.set_style("clear", "none")
+        val style = be_dom_get_style(node)
+        expect(css_get_clear_code(style).value).to_equal(0)

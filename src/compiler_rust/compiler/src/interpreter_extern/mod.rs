@@ -460,11 +460,13 @@ pub(crate) fn call_extern_function(
         "rt_bytes_to_text" => conversion::rt_bytes_to_text_fn(&evaluated),
         "rt_gui_get_glyph_8x16" => conversion::rt_gui_get_glyph_8x16_fn(&evaluated),
 
-        // Byte-order conversion (4 functions — used by BinaryReader)
+        // Byte-order conversion (6 functions — used by BinaryReader)
         "bytes_to_u16_le" => conversion::bytes_to_u16_le_fn(&evaluated),
         "bytes_to_u16_be" => conversion::bytes_to_u16_be_fn(&evaluated),
         "bytes_to_u32_le" => conversion::bytes_to_u32_le_fn(&evaluated),
         "bytes_to_u32_be" => conversion::bytes_to_u32_be_fn(&evaluated),
+        "bytes_to_u64_le" => conversion::bytes_to_u64_le_fn(&evaluated),
+        "bytes_to_u64_be" => conversion::bytes_to_u64_be_fn(&evaluated),
 
         // SHA-1 hash functions (for WebSocket handshake)
         "rt_sha1_new" => crypto::rt_sha1_new(&evaluated),

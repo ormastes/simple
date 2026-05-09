@@ -210,6 +210,54 @@ pub fn bytes_to_u32_be_fn(args: &[Value]) -> Result<Value, CompileError> {
     Ok(Value::Int(result as i64))
 }
 
+/// Assemble a [u8] array into a u64 (little-endian).
+///
+/// Callable from Simple as: `bytes_to_u64_le(bytes)`
+pub fn bytes_to_u64_le_fn(args: &[Value]) -> Result<Value, CompileError> {
+    let items = match args.first() {
+        Some(Value::Array(arr)) => arr.as_ref(),
+        Some(Value::FrozenArray(arr)) => arr.as_ref(),
+        Some(Value::Tuple(arr)) => arr.as_ref(),
+        _ => return Ok(Value::Int(0)),
+    };
+    if items.len() < 8 {
+        return Ok(Value::Int(0));
+    }
+    let result = extract_byte(&items[0])
+        | (extract_byte(&items[1]) << 8)
+        | (extract_byte(&items[2]) << 16)
+        | (extract_byte(&items[3]) << 24)
+        | (extract_byte(&items[4]) << 32)
+        | (extract_byte(&items[5]) << 40)
+        | (extract_byte(&items[6]) << 48)
+        | (extract_byte(&items[7]) << 56);
+    Ok(Value::Int(result as i64))
+}
+
+/// Assemble a [u8] array into a u64 (big-endian).
+///
+/// Callable from Simple as: `bytes_to_u64_be(bytes)`
+pub fn bytes_to_u64_be_fn(args: &[Value]) -> Result<Value, CompileError> {
+    let items = match args.first() {
+        Some(Value::Array(arr)) => arr.as_ref(),
+        Some(Value::FrozenArray(arr)) => arr.as_ref(),
+        Some(Value::Tuple(arr)) => arr.as_ref(),
+        _ => return Ok(Value::Int(0)),
+    };
+    if items.len() < 8 {
+        return Ok(Value::Int(0));
+    }
+    let result = (extract_byte(&items[0]) << 56)
+        | (extract_byte(&items[1]) << 48)
+        | (extract_byte(&items[2]) << 40)
+        | (extract_byte(&items[3]) << 32)
+        | (extract_byte(&items[4]) << 24)
+        | (extract_byte(&items[5]) << 16)
+        | (extract_byte(&items[6]) << 8)
+        | extract_byte(&items[7]);
+    Ok(Value::Int(result as i64))
+}
+
 /// Provide a simple 8x16 bitmap glyph for source-mode font rendering.
 pub fn rt_gui_get_glyph_8x16_fn(args: &[Value]) -> Result<Value, CompileError> {
     let codepoint = match args.first() {
