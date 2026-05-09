@@ -1,0 +1,102 @@
+"""FFI Dispatch Layer — Static/Dynamic Dual-Path for 3D Engine
+
+@tag:stdlib
+@tag:gpu
+
+Provides the dual-path FFI dispatch infrastructure for 3D GPU backends.
+Each backend gets a *Ffi3D class that holds either static (extern fn) or
+dynamic (DynLib dlopen) function pointers. At init time, hosted OSes
+try dynamic first; SimpleOS always uses static.
+
+Usage:
+    val mode = default_ffi_mode_3d()
+    val vk = VulkanFfi3D.create(mode)  # auto-selects path
+"""
+
+use std.ffi.dynamic.{DynLib, DynLoader, sffi_call}
+
+# ============================================================================
+# FFI Mode Enum
+# ============================================================================
+
+enum GpuFfiMode3D:
+    Static
+    Dynamic
+
+impl GpuFfiMode3D:
+    fn to_text() -> text:
+        match self:
+            case Static: "Static"
+            case Dynamic: "Dynamic"
+
+# ============================================================================
+# Platform Detection
+# ============================================================================
+
+extern fn rt_env_get(name: text) -> text
+
+fn is_simpleos_3d() -> bool:
+    val os = rt_env_get("SIMPLE_OS_KERNEL")
+    os == "simpleos"
+
+fn default_ffi_mode_3d() -> GpuFfiMode3D:
+    if is_simpleos_3d():
+        GpuFfiMode3D.Static
+    else:
+        GpuFfiMode3D.Dynamic
+
+# ============================================================================
+# FfiDispatchBase3D Trait
+# ============================================================================
+
+trait FfiDispatchBase3D:
+    fn mode() -> GpuFfiMode3D
+    fn is_available() -> bool
+
+# ============================================================================
+# Dynamic Library Path Resolution
+# ============================================================================
+
+fn gpu_lib_path_3d(lib_name: text) -> text:
+    val os = rt_env_get("OS")
+    if os == "Windows_NT":
+        "{lib_name}.dll"
+    else:
+        val uname = rt_env_get("SIMPLE_OS_TYPE")
+        if uname == "Darwin":
+            "lib{lib_name}.dylib"
+        else:
+            "lib{lib_name}.so"
+
+fn gpu_lib_candidates_3d(base_name: text) -> [text]:
+    val os = rt_env_get("OS")
+    var paths: [text] = []
+    if os == "Windows_NT":
+        paths.push("{base_name}.dll")
+    else:
+        val uname = rt_env_get("SIMPLE_OS_TYPE")
+        if uname == "Darwin":
+            paths.push("lib{base_name}.dylib")
+            paths.push("lib{base_name}.1.dylib")
+        else:
+            paths.push("lib{base_name}.so.1")
+            paths.push("lib{base_name}.so")
+    paths
+
+fn try_load_gpu_lib_3d(base_name: text) -> DynLib?:
+    val candidates = gpu_lib_candidates_3d(base_name)
+    var i = 0
+    while i < candidates.len():
+        val lib = DynLib.load(candidates[i])
+        if lib != nil:
+            return lib
+        i = i + 1
+    nil
+
+# ============================================================================
+# FFI Mode Resolution Helper
+# ============================================================================
+
+fn resolve_ffi_mode_3d(backend_name: text) -> GpuFfiMode3D:
+    val mode = default_ffi_mode_3d()
+    mode
