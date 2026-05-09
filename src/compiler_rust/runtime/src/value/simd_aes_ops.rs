@@ -35,7 +35,7 @@
 
 use super::aes::SBOX;
 use super::core::RuntimeValue;
-use super::objects::{rt_object_field_get, rt_object_field_set, rt_object_new};
+use super::ffi::memory::rt_alloc;
 
 // ---------------------------------------------------------------------------
 // Scalar primitives — shared with the scalar fallback below.
@@ -253,44 +253,67 @@ unsafe fn aes_round_last_neon(state: [u8; 16], key: [u8; 16]) -> [u8; 16] {
 }
 
 // ---------------------------------------------------------------------------
-// RuntimeValue-based `pub extern "C"` symbols for compiled-mode (Cranelift).
+// Flat-struct `pub extern "C"` symbols for compiled-mode (Cranelift).
 //
-// In compiled mode Vec16u8 structs arrive as RuntimeValue handles (I64
-// tagged pointers to heap objects with 16 fields, indices 0..15).  We
-// unpack the 16 u8 lanes, call the lane kernel, and repack into a fresh
-// RuntimeValue object.
+// In compiled mode, Vec16u8 structs are allocated via `rt_alloc` as flat
+// memory blocks (NO HeapHeader). Each of the 16 u8 fields occupies an
+// 8-byte-aligned slot at byte offset `field_index * 8`. The struct pointer
+// is passed directly as an i64 (reinterpreted as RuntimeValue).
+//
+// Total struct size: 16 fields * 8 bytes = 128 bytes.
+//
+// IMPORTANT: `rt_object_field_get` CANNOT be used here because `rt_alloc`
+// does not write a HeapHeader with HeapObjectType::Object. The `get_typed_ptr`
+// check inside `rt_object_field_get` would fail and return NIL for every
+// field. We must use raw pointer arithmetic matching the codegen layout
+// produced by `compile_struct_init` in `closures_structs.rs`.
 // ---------------------------------------------------------------------------
 
-/// Unpack 16 u8 lanes from a Vec16u8 RuntimeValue object handle.
-fn unpack_vec16u8_rv(v: RuntimeValue) -> [u8; 16] {
+/// Stride between consecutive fields in a codegen-allocated struct.
+const VEC16U8_FIELD_STRIDE: usize = 8;
+/// Total byte size of a Vec16u8 struct (16 fields * 8 bytes each).
+const VEC16U8_STRUCT_SIZE: u64 = 16 * VEC16U8_FIELD_STRIDE as u64;
+
+/// Unpack 16 u8 lanes from a flat Vec16u8 struct pointer.
+///
+/// The RuntimeValue's raw bits are a pointer to `rt_alloc`-ed memory.
+/// Each field is an i64 at offset `i * 8`; we read the low byte.
+fn unpack_vec16u8_flat(v: RuntimeValue) -> [u8; 16] {
+    let ptr = v.as_int() as *const u8;
     let mut lanes = [0_u8; 16];
     for i in 0..16 {
-        lanes[i] = rt_object_field_get(v, i as u32).as_int() as u8;
+        let field_val = unsafe { (ptr.add(i * VEC16U8_FIELD_STRIDE) as *const i64).read_unaligned() };
+        lanes[i] = field_val as u8;
     }
     lanes
 }
 
-/// Pack 16 u8 lanes into a fresh Vec16u8 RuntimeValue object handle.
-fn pack_vec16u8_rv(lanes: [u8; 16]) -> RuntimeValue {
-    let obj = rt_object_new(0, 16);
+/// Pack 16 u8 lanes into a freshly `rt_alloc`-ed flat Vec16u8 struct.
+///
+/// Allocates 128 bytes via `rt_alloc`, writes each lane as an i64 at
+/// offset `i * 8`, and returns the pointer as a RuntimeValue (raw i64).
+fn pack_vec16u8_flat(lanes: [u8; 16]) -> RuntimeValue {
+    let ptr = rt_alloc(VEC16U8_STRUCT_SIZE);
     for i in 0..16 {
-        rt_object_field_set(obj, i as u32, RuntimeValue::from_int(lanes[i] as i64));
+        unsafe {
+            (ptr.add(i * VEC16U8_FIELD_STRIDE) as *mut i64).write_unaligned(lanes[i] as i64);
+        }
     }
-    obj
+    RuntimeValue::from_int(ptr as i64)
 }
 
 #[no_mangle]
 pub extern "C" fn rt_simd_aes_round_u8x16(state: RuntimeValue, key: RuntimeValue) -> RuntimeValue {
-    let s = unpack_vec16u8_rv(state);
-    let k = unpack_vec16u8_rv(key);
-    pack_vec16u8_rv(aes_round_u8x16(s, k))
+    let s = unpack_vec16u8_flat(state);
+    let k = unpack_vec16u8_flat(key);
+    pack_vec16u8_flat(aes_round_u8x16(s, k))
 }
 
 #[no_mangle]
 pub extern "C" fn rt_simd_aes_round_last_u8x16(state: RuntimeValue, key: RuntimeValue) -> RuntimeValue {
-    let s = unpack_vec16u8_rv(state);
-    let k = unpack_vec16u8_rv(key);
-    pack_vec16u8_rv(aes_round_last_u8x16(s, k))
+    let s = unpack_vec16u8_flat(state);
+    let k = unpack_vec16u8_flat(key);
+    pack_vec16u8_flat(aes_round_last_u8x16(s, k))
 }
 
 // ---------------------------------------------------------------------------
@@ -465,5 +488,53 @@ mod tests {
         let key = [0xff_u8; 16];
         let r2 = aes_round_last_u8x16([0_u8; 16], key);
         assert_eq!(r2, [0x63 ^ 0xff; 16]);
+    }
+
+    /// Exercise the compiled-mode flat-struct wrappers (`rt_simd_aes_round_u8x16`)
+    /// with the same FIPS 197 vector as `fips197_round1_matches`.
+    ///
+    /// This mirrors the exact memory layout that Cranelift codegen produces:
+    /// - `rt_alloc(128)` for 16 fields, each i64 at offset `i * 8`.
+    /// - The extern symbol reads from / writes to this flat layout.
+    #[test]
+    fn flat_struct_wrapper_fips197_round1() {
+        // Build round-1 input state: PT XOR K0
+        let s0 = xor_u8x16(FIPS197_PT, FIPS197_K0);
+
+        // Allocate flat structs matching codegen layout
+        let state_ptr = super::rt_alloc(super::VEC16U8_STRUCT_SIZE);
+        let key_ptr = super::rt_alloc(super::VEC16U8_STRUCT_SIZE);
+        assert!(!state_ptr.is_null());
+        assert!(!key_ptr.is_null());
+
+        // Write lanes as i64 at offset i*8 (matching compile_struct_init)
+        for i in 0..16 {
+            unsafe {
+                (state_ptr.add(i * super::VEC16U8_FIELD_STRIDE) as *mut i64)
+                    .write_unaligned(s0[i] as i64);
+                (key_ptr.add(i * super::VEC16U8_FIELD_STRIDE) as *mut i64)
+                    .write_unaligned(FIPS197_K1[i] as i64);
+            }
+        }
+
+        // Call the extern wrapper with raw pointers as RuntimeValue
+        let state_rv = RuntimeValue::from_int(state_ptr as i64);
+        let key_rv = RuntimeValue::from_int(key_ptr as i64);
+        let result_rv = rt_simd_aes_round_u8x16(state_rv, key_rv);
+
+        // Unpack result from the returned flat struct
+        let result_ptr = result_rv.as_int() as *const u8;
+        assert!(!result_ptr.is_null());
+        let mut result = [0_u8; 16];
+        for i in 0..16 {
+            result[i] = unsafe {
+                (result_ptr.add(i * super::VEC16U8_FIELD_STRIDE) as *const i64).read_unaligned()
+            } as u8;
+        }
+
+        assert_eq!(
+            result, FIPS197_ROUND1_OUT,
+            "flat-struct wrapper must produce same output as lane kernel"
+        );
     }
 }

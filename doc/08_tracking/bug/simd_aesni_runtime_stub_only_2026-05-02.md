@@ -70,9 +70,12 @@ implementations.
 **Cranelift AOT registration (DONE):**
 - `rt_simd_aes_round_u8x16` and `rt_simd_aes_round_last_u8x16` added to
   `RUNTIME_FUNCS` in `runtime_ffi.rs` as `&[I64, I64], &[I64]`.
-- New RuntimeValue-based `extern "C"` wrappers in `simd_aes_ops.rs` unpack
-  Vec16u8 struct fields via `rt_object_field_get`, call the lane kernel,
-  and repack via `rt_object_new` + `rt_object_field_set`.
+- Flat-struct `extern "C"` wrappers in `simd_aes_ops.rs` use raw pointer
+  arithmetic to unpack/repack Vec16u8 fields at byte offset `i * 8`,
+  matching the layout produced by `compile_struct_init` (which uses
+  `rt_alloc` + direct stores, NOT `rt_object_new`). The initial approach
+  using `rt_object_field_get` was incorrect because `rt_alloc` does not
+  write a HeapHeader, so `get_typed_ptr` would fail and return NIL.
 - Old 33-arg lane-array ABI functions renamed to `_lanes` suffix (kept for
   seed/bootstrap parity).
 - `tier_of()` now includes `name.starts_with("rt_simd_")` in the Ext tier.
@@ -93,28 +96,34 @@ as INTERPRETER-WIRED / CRANELIFT-BLOCKED.
 
 ```
 $ cd src/compiler_rust && cargo test -p simple-runtime simd_aes_ops
-running 4 tests
+running 5 tests
 test value::simd_aes_ops::tests::fips197_round1_matches ... ok
+test value::simd_aes_ops::tests::flat_struct_wrapper_fips197_round1 ... ok
 test value::simd_aes_ops::tests::last_round_xors_key ... ok
 test value::simd_aes_ops::tests::shift_rows_identity_on_zero ... ok
 test value::simd_aes_ops::tests::shift_rows_known_vector ... ok
-test result: ok. 4 passed; 0 failed; 0 ignored
+test result: ok. 5 passed; 0 failed; 0 ignored
 ```
 
 ## Resolution (2026-05-09)
 
 All three remaining items are now complete:
 
-1. **Vec16u8 marshalling layer**: RuntimeValue-based wrappers in `simd_aes_ops.rs`
-   use `rt_object_field_get` / `rt_object_field_set` to unpack/repack Vec16u8
-   struct fields. No Cranelift codegen changes needed — structs are already passed
-   as I64 RuntimeValue handles in compiled mode.
+1. **Vec16u8 marshalling layer**: Flat-struct wrappers in `simd_aes_ops.rs`
+   use raw pointer arithmetic (`rt_alloc` + `ptr.add(i * 8).write_unaligned`)
+   to unpack/repack Vec16u8 struct fields, matching the codegen layout from
+   `compile_struct_init`. The initial `rt_object_field_get` approach was
+   wrong because `rt_alloc` produces flat memory without a `HeapHeader`,
+   causing `get_typed_ptr(HeapObjectType::Object)` to fail silently.
 2. **RUNTIME_FUNCS registration**: `rt_simd_aes_round_u8x16` and
    `rt_simd_aes_round_last_u8x16` added as `&[I64, I64], &[I64]`.
 3. **tier_of() update**: `"rt_simd_"` prefix added to Ext tier block.
+4. **Test coverage**: `flat_struct_wrapper_fips197_round1` test exercises the
+   actual extern symbol end-to-end against the FIPS 197 known-good vector,
+   using the same flat-struct memory layout that Cranelift codegen produces.
 
-The same RuntimeValue-based marshalling pattern can be applied to other
-`rt_simd_*` externs (add_u8x16, CLMUL, Vec4i) as needed.
+The same flat-struct marshalling pattern can be applied to other `rt_simd_*`
+externs (add_u8x16, CLMUL, Vec4i) as needed.
 
 ## Citations
 
