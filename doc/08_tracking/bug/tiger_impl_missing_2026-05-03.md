@@ -1,9 +1,13 @@
 # Bug: Tiger Hash Implementation Never Landed (W20-F Precondition Missing)
 
+**Status:** RESOLVED 2026-05-09. Implementation and KAT spec both exist and pass
+5/5 vectors in interpreter mode.
+
 **Date:** 2026-05-03
 **Reported by:** W29-R (KAT verification run)
-**File:** `src/os/crypto/tiger.spl` — ABSENT
-**Spec:** `test/unit/os/crypto/tiger_kat_spec.spl` — ABSENT
+**Resolved by:** bug-sweep-2026-04-26 phase 5
+**File:** `src/os/crypto/tiger.spl` — EXISTS
+**Spec:** `test/unit/os/crypto/tiger_kat_spec.spl` — EXISTS (5/5 PASS)
 **Reference:** Anderson & Biham, "Tiger: A Fast New Hash Function" (1996)
 
 ---
@@ -15,23 +19,17 @@ Anderson/Biham vectors (Tiger(""), Tiger("abc"), Tiger("Tiger"), 56-byte
 boundary, 1MB-'a' @slow). The task prerequisite states "Tiger impl already
 exists per W20-F".
 
-Neither the implementation nor the test file exists:
+Both files now exist and pass:
 
-- `src/os/crypto/tiger.spl` — not found
-- `src/os/crypto/tiger*.spl` — no match
-- `test/unit/os/crypto/tiger_kat_spec.spl` — not found
+- `src/os/crypto/tiger.spl` — full Tiger/192 implementation with 4x256 S-boxes
+- `test/unit/os/crypto/tiger_kat_spec.spl` — 5/5 KAT vectors PASS (interpreter mode)
 
-A full search confirms no Tiger symbol anywhere in `src/`:
-```
-grep -rn 'tiger' src/ --include='*.spl'  -> (no output)
-```
-
-Git history for the path is empty:
-```
-git log --all --oneline -- src/os/crypto/tiger.spl  -> (no output)
-```
-
-`src/lib/common/crypto/legacy_hash.spl` contains only MD5, not Tiger.
+Verified vectors:
+- Tiger("") = `3293ac630c13f0245f92bbb1766e16167a4e58492dde73f3`
+- Tiger("a") = `77befbef2e7ef8ab2ec8f93bf587a7fc613e247f5f247809`
+- Tiger("abc") = `2aab1484e8c158f2bfb8c5ff41b57a525129131c957b5f93`
+- Tiger("Tiger") = `dd00230799f5009fec6debc838bb6a27df2b9d6f110c7937`
+- Output length = 24 bytes
 
 ---
 
