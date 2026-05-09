@@ -434,6 +434,46 @@ impl Lowerer {
         }
     }
 
+    /// Return a human-readable type name for error diagnostics.
+    ///
+    /// Avoids leaking Rust Debug-formatted internal types (e.g.
+    /// `Array { element: TypeId(12), size: None }`) into user-facing error
+    /// messages.  Named types (Struct, Enum, Bitfield, UnitType) return their
+    /// source-level name; structural types return a compact description.
+    fn hir_type_display_name(ty: &HirType) -> String {
+        match ty {
+            HirType::Struct { name, .. } => name.clone(),
+            HirType::Enum { name, .. } => name.clone(),
+            HirType::Bitfield { name, .. } => name.clone(),
+            HirType::UnitType { name, .. } => name.clone(),
+            HirType::Array { .. } => "Array".to_string(),
+            HirType::Simd { lanes, .. } => format!("Simd<{}>", lanes),
+            HirType::Tuple(elems) => format!("Tuple({})", elems.len()),
+            HirType::LabeledTuple(fields) => format!("LabeledTuple({})", fields.len()),
+            HirType::Pointer { .. } => "Pointer".to_string(),
+            HirType::Function { .. } => "Function".to_string(),
+            HirType::Union { .. } => "Union".to_string(),
+            HirType::Promise { .. } => "Promise".to_string(),
+            HirType::Void => "Void".to_string(),
+            HirType::Bool => "Bool".to_string(),
+            HirType::Any => "Any".to_string(),
+            HirType::Char => "Char".to_string(),
+            HirType::Int { bits, signedness } => {
+                let prefix = match signedness {
+                    Signedness::Signed => "i",
+                    Signedness::Unsigned => "u",
+                };
+                format!("{}{}", prefix, bits)
+            }
+            HirType::Float { bits } => format!("f{}", bits),
+            HirType::String => "String".to_string(),
+            HirType::Nil => "Nil".to_string(),
+            HirType::Mixin { name, .. } => name.clone(),
+            HirType::ExternClass { name, .. } => name.clone(),
+            HirType::Unknown => "Unknown".to_string(),
+        }
+    }
+
     pub(super) fn get_field_info(&mut self, struct_ty: TypeId, field: &str) -> LowerResult<(usize, TypeId)> {
         // Handle built-in ANY type - search all known structs for the field
         // When ambiguous, prefer the struct with the most fields (best guess)
@@ -637,7 +677,7 @@ impl Lowerer {
                         }
                     }
                     Err(LowerError::CannotInferFieldType {
-                        struct_name: format!("{:?}", hir_ty),
+                        struct_name: Self::hir_type_display_name(&hir_ty),
                         field: field.to_string(),
                         available_fields: vec![],
                     })
@@ -645,7 +685,7 @@ impl Lowerer {
             }
         } else {
             Err(LowerError::CannotInferFieldType {
-                struct_name: format!("TypeId({:?})", struct_ty),
+                struct_name: format!("unresolved(#{})", struct_ty.0),
                 field: field.to_string(),
                 available_fields: vec![],
             })
