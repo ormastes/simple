@@ -1,0 +1,99 @@
+"""
+# Byte Utilities
+**Feature IDs:** #WAVE2-G10-BYTEUTILS
+**Category:** Kernel loader
+
+Verifies shared little-endian byte helpers used by ELF64, SMF, and
+ELF loader modules.
+"""
+use std.spec.*
+use os.kernel.loader.byte_utils.{
+    byte_at,
+    read_u16_le,
+    read_u32_le,
+    read_u64_le,
+    patch_u32_le,
+    patch_u64_le,
+    has_magic,
+    in_range
+}
+
+fn _sample_bytes() -> [u8]:
+    """Return [0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08]."""
+    var b: [u8] = []
+    b.push(0x01.to_u8())
+    b.push(0x02.to_u8())
+    b.push(0x03.to_u8())
+    b.push(0x04.to_u8())
+    b.push(0x05.to_u8())
+    b.push(0x06.to_u8())
+    b.push(0x07.to_u8())
+    b.push(0x08.to_u8())
+    b
+
+describe "byte_utils":
+    it "byte_at reads individual bytes":
+        val data = _sample_bytes()
+        expect(byte_at(data, 0)).to_equal(0x01.to_u8())
+        expect(byte_at(data, 7)).to_equal(0x08.to_u8())
+
+    it "read_u16_le decodes little-endian u16":
+        val data = _sample_bytes()
+        # 0x01 | (0x02 << 8) = 0x0201 = 513
+        expect(read_u16_le(data, 0)).to_equal(513)
+
+    it "read_u32_le decodes little-endian u32":
+        val data = _sample_bytes()
+        # 0x01 | (0x02 << 8) | (0x03 << 16) | (0x04 << 24) = 0x04030201 = 67305985
+        expect(read_u32_le(data, 0)).to_equal(67305985)
+
+    it "read_u64_le decodes little-endian u64":
+        val data = _sample_bytes()
+        # 0x0807060504030201
+        expect(read_u64_le(data, 0)).to_equal(578437695752307201)
+
+    it "patch_u32_le writes little-endian u32":
+        var data: [u8] = []
+        data.push(0.to_u8())
+        data.push(0.to_u8())
+        data.push(0.to_u8())
+        data.push(0.to_u8())
+        data = patch_u32_le(data, 0, 0x04030201)
+        expect(byte_at(data, 0)).to_equal(0x01.to_u8())
+        expect(byte_at(data, 1)).to_equal(0x02.to_u8())
+        expect(byte_at(data, 2)).to_equal(0x03.to_u8())
+        expect(byte_at(data, 3)).to_equal(0x04.to_u8())
+
+    it "patch_u64_le writes little-endian u64":
+        var data: [u8] = []
+        var i = 0
+        while i < 8:
+            data.push(0.to_u8())
+            i = i + 1
+        data = patch_u64_le(data, 0, 0x0807060504030201)
+        expect(byte_at(data, 0)).to_equal(0x01.to_u8())
+        expect(byte_at(data, 7)).to_equal(0x08.to_u8())
+        expect(read_u64_le(data, 0)).to_equal(578437695752307201)
+
+    it "has_magic checks 4-byte magic at offset":
+        var data: [u8] = []
+        data.push(0x7F.to_u8())
+        data.push(0x45.to_u8())
+        data.push(0x4C.to_u8())
+        data.push(0x46.to_u8())
+        expect(has_magic(data, 0, 0x7F.to_u8(), 0x45.to_u8(), 0x4C.to_u8(), 0x46.to_u8())).to_equal(true)
+        expect(has_magic(data, 0, 0x00.to_u8(), 0x45.to_u8(), 0x4C.to_u8(), 0x46.to_u8())).to_equal(false)
+
+    it "has_magic rejects out-of-bounds offsets":
+        var data: [u8] = []
+        data.push(0x7F.to_u8())
+        expect(has_magic(data, 0, 0x7F.to_u8(), 0x45.to_u8(), 0x4C.to_u8(), 0x46.to_u8())).to_equal(false)
+        expect(has_magic(data, -1, 0x7F.to_u8(), 0x45.to_u8(), 0x4C.to_u8(), 0x46.to_u8())).to_equal(false)
+
+    it "in_range validates byte ranges":
+        val data = _sample_bytes()
+        expect(in_range(data, 0, 8)).to_equal(true)
+        expect(in_range(data, 0, 9)).to_equal(false)
+        expect(in_range(data, 7, 1)).to_equal(true)
+        expect(in_range(data, -1, 1)).to_equal(false)
+        expect(in_range(data, 0, -1)).to_equal(false)

@@ -86,6 +86,108 @@ fn make_smf_wrapped_elf64_exec() -> [u8]:
         bytes.push(0.to_u8())
     bytes
 
+fn _pad_to(buf: [u8], target: i64) -> [u8]:
+    while buf.len() < target:
+        buf.push(0.to_u8())
+    buf
+
+fn make_elf64_with_dynsym() -> [u8]:
+    """Build minimal ELF64 with .dynsym containing symbol 'hello' at 0xBEEF."""
+    var b: [u8] = []
+    # ELF ident
+    b.push(0x7F.to_u8())
+    b.push(0x45.to_u8())
+    b.push(0x4C.to_u8())
+    b.push(0x46.to_u8())
+    b.push(2.to_u8())
+    b.push(1.to_u8())
+    b.push(1.to_u8())
+    b = _pad_to(b, 16)
+    # e_type=ET_EXEC, e_machine=x86_64, e_version=1
+    b = push_u16_le(b, 2)
+    b = push_u16_le(b, 62)
+    b = push_u32_le(b, 1)
+    # e_entry=0x400000
+    b = push_u64_le(b, 0x400000)
+    # e_phoff=64
+    b = push_u64_le(b, 64)
+    # e_shoff=192
+    b = push_u64_le(b, 192)
+    # e_flags=0
+    b = push_u32_le(b, 0)
+    # e_ehsize=64
+    b = push_u16_le(b, 64)
+    # e_phentsize=56, e_phnum=1
+    b = push_u16_le(b, 56)
+    b = push_u16_le(b, 1)
+    # e_shentsize=64, e_shnum=3, e_shstrndx=0
+    b = push_u16_le(b, 64)
+    b = push_u16_le(b, 3)
+    b = push_u16_le(b, 0)
+    # PT_LOAD program header at offset 64
+    b = push_u32_le(b, 1)
+    b = push_u32_le(b, 5)
+    b = push_u64_le(b, 0)
+    b = push_u64_le(b, 0x400000)
+    b = push_u64_le(b, 0x400000)
+    b = push_u64_le(b, 120)
+    b = push_u64_le(b, 120)
+    b = push_u64_le(b, 0x1000)
+    # .strtab at 128: \0 h e l l o \0 = 7 bytes
+    b = _pad_to(b, 128)
+    b.push(0.to_u8())
+    b.push(0x68.to_u8())
+    b.push(0x65.to_u8())
+    b.push(0x6C.to_u8())
+    b.push(0x6C.to_u8())
+    b.push(0x6F.to_u8())
+    b.push(0.to_u8())
+    # .dynsym at 144: null sym (24 bytes) + hello sym (24 bytes)
+    b = _pad_to(b, 144)
+    # null sym
+    b = _pad_to(b, 168)
+    # hello sym: st_name=1, st_info=0x12, st_other=0, st_shndx=1
+    b = push_u32_le(b, 1)
+    b.push(0x12.to_u8())
+    b.push(0.to_u8())
+    b = push_u16_le(b, 1)
+    # st_value=0xBEEF, st_size=8
+    b = push_u64_le(b, 0xBEEF)
+    b = push_u64_le(b, 8)
+    # Section headers at 192: null(64) + .dynsym(64) + .strtab(64)
+    b = _pad_to(b, 192)
+    # SHT_NULL
+    b = _pad_to(b, 256)
+    # .dynsym: sh_name=0, sh_type=11, sh_flags=0, sh_addr=0
+    b = push_u32_le(b, 0)
+    b = push_u32_le(b, 11)
+    b = push_u64_le(b, 0)
+    b = push_u64_le(b, 0)
+    # sh_offset=144, sh_size=48
+    b = push_u64_le(b, 144)
+    b = push_u64_le(b, 48)
+    # sh_link=2 (strtab), sh_info=0
+    b = push_u32_le(b, 2)
+    b = push_u32_le(b, 0)
+    # sh_addralign=0, sh_entsize=24
+    b = push_u64_le(b, 0)
+    b = push_u64_le(b, 24)
+    # .strtab: sh_name=0, sh_type=3, sh_flags=0, sh_addr=0
+    b = push_u32_le(b, 0)
+    b = push_u32_le(b, 3)
+    b = push_u64_le(b, 0)
+    b = push_u64_le(b, 0)
+    # sh_offset=128, sh_size=7
+    b = push_u64_le(b, 128)
+    b = push_u64_le(b, 7)
+    # sh_link=0, sh_info=0
+    b = push_u32_le(b, 0)
+    b = push_u32_le(b, 0)
+    # sh_addralign=0, sh_entsize=0
+    b = push_u64_le(b, 0)
+    b = push_u64_le(b, 0)
+    b
+
 describe "dylib_registry":
     it "registers an ELF64 library and resolves entry symbols":
         dylib_registry_reset_for_test()
@@ -139,3 +241,14 @@ describe "dylib_registry":
         while invalid_smf.len() < 132:
             invalid_smf.push(0.to_u8())
         expect dylib_registry_register("/lib/bad.smf", invalid_smf) == 0 - ENOEXEC as i64
+
+    it "resolves arbitrary symbols via slow path":
+        dylib_registry_reset_for_test()
+        val handle = dylib_registry_register("/lib/dynsym.so", make_elf64_with_dynsym())
+        expect handle > 0
+        # Fast path
+        expect dylib_registry_symbol(handle, "_start") == 0x400000
+        # Slow path — symbol from .dynsym
+        expect dylib_registry_symbol(handle, "hello") == 0xBEEF
+        # Slow path — missing symbol
+        expect dylib_registry_symbol(handle, "missing") == 0 - ENOENT as i64

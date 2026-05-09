@@ -317,19 +317,27 @@ fn elf64_parse_symbols(bytes: [u8], symtab: Elf64SectionHeader) -> [Elf64Symbol]
         idx = idx + 1
     out
 
+fn _elf64_ascii_char(code: i64) -> text:
+    """Convert an ASCII code to a single-character text (printable range)."""
+    val ascii = " !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~"
+    if code < 32 or code > 126:
+        return "?"
+    val idx = code - 32
+    ascii.char_at(idx)
+
 fn elf64_strtab_get(strtab_bytes: [u8], offset: i64) -> text:
     """Extract a NUL-terminated string from a string table byte slice."""
     if offset < 0 or offset >= strtab_bytes.len():
         return ""
-    var result = ""
+    var chars: [text] = []
     var pos = offset
     while pos < strtab_bytes.len():
-        val ch = byte_at(strtab_bytes, pos)
-        if ch == 0.to_u8():
-            return result
-        result = result + (ch as i64).to_char()
+        val ch = strtab_bytes[pos].to_i64()
+        if ch == 0:
+            return chars.join("")
+        chars.push(_elf64_ascii_char(ch))
         pos = pos + 1
-    result
+    chars.join("")
 
 fn _elf64_extract_strtab(bytes: [u8], shdrs: [Elf64SectionHeader], strtab_idx: i64) -> [u8]:
     """Extract the raw bytes for a string table section by index."""
@@ -353,7 +361,7 @@ fn elf64_dynsym_lookup(bytes: [u8], shdrs: [Elf64SectionHeader], name: text) -> 
     # Try .dynsym (SHT_DYNSYM = 11) first
     val dynsym_opt = elf64_find_section_by_type(shdrs, SHT_DYNSYM)
     if dynsym_opt != nil:
-        val dynsym = dynsym_opt
+        val dynsym = dynsym_opt.unwrap()
         val strtab = _elf64_extract_strtab(bytes, shdrs, dynsym.sh_link)
         val syms = elf64_parse_symbols(bytes, dynsym)
         var i = 0
@@ -366,7 +374,7 @@ fn elf64_dynsym_lookup(bytes: [u8], shdrs: [Elf64SectionHeader], name: text) -> 
     # Fall back to .symtab (SHT_SYMTAB = 2)
     val symtab_opt = elf64_find_section_by_type(shdrs, SHT_SYMTAB)
     if symtab_opt != nil:
-        val symtab = symtab_opt
+        val symtab = symtab_opt.unwrap()
         val strtab2 = _elf64_extract_strtab(bytes, shdrs, symtab.sh_link)
         val syms2 = elf64_parse_symbols(bytes, symtab)
         var j = 0
