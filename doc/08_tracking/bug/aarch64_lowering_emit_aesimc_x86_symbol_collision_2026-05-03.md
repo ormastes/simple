@@ -15,6 +15,7 @@ related: src/compiler/70.backend/backend/native/__init__.spl
 **Status:** RESOLVED 2026-05-09. Option A fix (rename to `emit_aesimc_aarch64` /
 `emit_aesmc_aarch64`) already landed. All 24/24 lowering_aarch64_crypto_spec tests
 PASS in interpreter mode including the previously-failing `crypto_aes_inv_round`.
+**md5:** `5ce0feeef43118e03996e086b01c8d96` (`encode_aarch64_crypto.spl`)
 
 ## Summary
 

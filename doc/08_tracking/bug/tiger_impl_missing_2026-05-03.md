@@ -2,6 +2,7 @@
 
 **Status:** RESOLVED 2026-05-09. Implementation and KAT spec both exist and pass
 5/5 vectors in interpreter mode.
+**md5:** `2e1edeefdc14195e8aa991d7d3df725e` (`src/os/crypto/tiger.spl`)
 
 **Date:** 2026-05-03
 **Reported by:** W29-R (KAT verification run)
