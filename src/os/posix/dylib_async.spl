@@ -3,7 +3,8 @@
 # libc dlfcn is a synchronous compatibility wrapper. Native SimpleOS code
 # should use this async request API first, then block only at POSIX boundaries.
 
-use os.posix.errno.{EBADF, EINVAL, EIO, ENOENT, ENOSYS}
+use os.posix.errno.{EBADF, EINVAL, EIO, ENOENT}
+use os.kernel.loader.dylib_registry.{dylib_registry_open, dylib_registry_symbol, dylib_registry_close}
 
 val DYLIB_MAX_REQUESTS: u64 = 64
 val DYLIB_MAIN_HANDLE: i64 = 1
@@ -111,11 +112,13 @@ fn dylib_async_open(path: text, mode: u32) -> u64:
         dylib_req_results[req] = DYLIB_MAIN_HANDLE
         return req
     if backend == DYLIB_BACKEND_KERNEL:
-        # TODO: wire to rt_dlopen(path) once runtime extern lands.
-        # Kernel dylib_registry_register requires pre-loaded bytes;
-        # rt_dlopen should read the file and call the registry internally.
-        dylib_req_states[req] = DYLIB_REQ_ERROR
-        dylib_req_results[req] = 0 - ENOSYS as i64
+        val handle = dylib_registry_open(path)
+        if handle > 0:
+            dylib_req_states[req] = DYLIB_REQ_COMPLETE
+            dylib_req_results[req] = handle
+        else:
+            dylib_req_states[req] = DYLIB_REQ_ERROR
+            dylib_req_results[req] = handle
         return req
     dylib_req_states[req] = DYLIB_REQ_ERROR
     dylib_req_results[req] = 0 - ENOENT as i64
@@ -137,9 +140,13 @@ fn dylib_async_symbol(handle: i64, name: text) -> u64:
             dylib_req_states[req] = DYLIB_REQ_COMPLETE
             dylib_req_results[req] = sym
         return req
-    # TODO: wire to rt_dlsym(handle, name) once runtime extern lands.
-    dylib_req_states[req] = DYLIB_REQ_ERROR
-    dylib_req_results[req] = 0 - ENOSYS as i64
+    val sym = dylib_registry_symbol(handle, name)
+    if sym >= 0:
+        dylib_req_states[req] = DYLIB_REQ_COMPLETE
+        dylib_req_results[req] = sym
+    else:
+        dylib_req_states[req] = DYLIB_REQ_ERROR
+        dylib_req_results[req] = sym
     req
 
 fn dylib_async_close(handle: i64) -> u64:
@@ -153,9 +160,13 @@ fn dylib_async_close(handle: i64) -> u64:
         dylib_req_states[req] = DYLIB_REQ_COMPLETE
         dylib_req_results[req] = 0
         return req
-    # TODO: wire to rt_dlclose(handle) once runtime extern lands.
-    dylib_req_states[req] = DYLIB_REQ_ERROR
-    dylib_req_results[req] = 0 - ENOSYS as i64
+    val rc = dylib_registry_close(handle)
+    if rc >= 0:
+        dylib_req_states[req] = DYLIB_REQ_COMPLETE
+        dylib_req_results[req] = 0
+    else:
+        dylib_req_states[req] = DYLIB_REQ_ERROR
+        dylib_req_results[req] = rc
     req
 
 fn dylib_open(path: text, mode: u32) -> i64:

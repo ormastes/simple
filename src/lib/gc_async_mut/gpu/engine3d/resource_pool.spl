@@ -1,0 +1,215 @@
+"""3D Engine — Resource Pool
+
+@tag:stdlib
+@tag:api
+@tag:gpu
+
+Manages lifecycle of GPU resources: textures, buffers, shaders, pipelines.
+Uses ID-based handles with frame-age tracking for GC of unused resources.
+
+Usage:
+    use std.gpu.engine3d.resource_pool.{ResourcePool3D, TextureHandle3D}
+"""
+
+# ============================================================================
+# Handle Types
+# ============================================================================
+
+class TextureHandle3D:
+    id: i32
+    width: i32
+    height: i32
+    depth: i32
+    format: i32
+    mip_levels: i32
+    last_used_frame: i32
+
+    static fn create(id: i32, width: i32, height: i32, depth: i32, format: i32, mip_levels: i32) -> TextureHandle3D:
+        TextureHandle3D(id: id, width: width, height: height, depth: depth, format: format, mip_levels: mip_levels, last_used_frame: 0)
+
+class BufferHandle3D:
+    id: i32
+    size: i32
+    usage: i32
+    last_used_frame: i32
+
+    static fn create(id: i32, size: i32, usage: i32) -> BufferHandle3D:
+        BufferHandle3D(id: id, size: size, usage: usage, last_used_frame: 0)
+
+class ShaderHandle3D:
+    id: i32
+    vertex_src: text
+    fragment_src: text
+
+    static fn create(id: i32, vertex_src: text, fragment_src: text) -> ShaderHandle3D:
+        ShaderHandle3D(id: id, vertex_src: vertex_src, fragment_src: fragment_src)
+
+class PipelineHandle3D:
+    id: i32
+    shader_id: i32
+    depth_test: bool
+    blend_mode: i32
+    cull_mode: i32
+
+    static fn create(id: i32, shader_id: i32, depth_test: bool, blend_mode: i32, cull_mode: i32) -> PipelineHandle3D:
+        PipelineHandle3D(id: id, shader_id: shader_id, depth_test: depth_test, blend_mode: blend_mode, cull_mode: cull_mode)
+
+# ============================================================================
+# Resource Pool
+# ============================================================================
+
+class ResourcePool3D:
+    _textures: [TextureHandle3D]
+    _buffers: [BufferHandle3D]
+    _shaders: [ShaderHandle3D]
+    _pipelines: [PipelineHandle3D]
+    _next_id: i32
+    _current_frame: i32
+
+    static fn create() -> ResourcePool3D:
+        ResourcePool3D(
+            _textures: [],
+            _buffers: [],
+            _shaders: [],
+            _pipelines: [],
+            _next_id: 1,
+            _current_frame: 0
+        )
+
+    me advance_frame():
+        self._current_frame = self._current_frame + 1
+
+    fn current_frame() -> i32:
+        self._current_frame
+
+    # -- Texture management --
+
+    me allocate_texture(width: i32, height: i32, depth: i32, format: i32, mip_levels: i32) -> TextureHandle3D:
+        val id = self._next_id
+        self._next_id = self._next_id + 1
+        val handle = TextureHandle3D.create(id, width, height, depth, format, mip_levels)
+        self._textures.push(handle)
+        handle
+
+    me free_texture(texture_id: i32):
+        var keep: [TextureHandle3D] = []
+        var i = 0
+        while i < self._textures.len():
+            if self._textures[i].id != texture_id:
+                keep.push(self._textures[i])
+            i = i + 1
+        self._textures = keep
+
+    me touch_texture(texture_id: i32):
+        var i = 0
+        while i < self._textures.len():
+            if self._textures[i].id == texture_id:
+                self._textures[i].last_used_frame = self._current_frame
+            i = i + 1
+
+    fn texture_count() -> i32:
+        self._textures.len()
+
+    fn find_texture(texture_id: i32) -> TextureHandle3D?:
+        var i = 0
+        while i < self._textures.len():
+            if self._textures[i].id == texture_id:
+                return self._textures[i]
+            i = i + 1
+        return nil
+
+    # -- Buffer management --
+
+    me allocate_buffer(size: i32, usage: i32) -> BufferHandle3D:
+        val id = self._next_id
+        self._next_id = self._next_id + 1
+        val handle = BufferHandle3D.create(id, size, usage)
+        self._buffers.push(handle)
+        handle
+
+    me free_buffer(buffer_id: i32):
+        var keep: [BufferHandle3D] = []
+        var i = 0
+        while i < self._buffers.len():
+            if self._buffers[i].id != buffer_id:
+                keep.push(self._buffers[i])
+            i = i + 1
+        self._buffers = keep
+
+    fn buffer_count() -> i32:
+        self._buffers.len()
+
+    # -- Shader management --
+
+    me allocate_shader(vertex_src: text, fragment_src: text) -> ShaderHandle3D:
+        val id = self._next_id
+        self._next_id = self._next_id + 1
+        val handle = ShaderHandle3D.create(id, vertex_src, fragment_src)
+        self._shaders.push(handle)
+        handle
+
+    me free_shader(shader_id: i32):
+        var keep: [ShaderHandle3D] = []
+        var i = 0
+        while i < self._shaders.len():
+            if self._shaders[i].id != shader_id:
+                keep.push(self._shaders[i])
+            i = i + 1
+        self._shaders = keep
+
+    fn shader_count() -> i32:
+        self._shaders.len()
+
+    # -- Pipeline management --
+
+    me allocate_pipeline(shader_id: i32, depth_test: bool, blend_mode: i32, cull_mode: i32) -> PipelineHandle3D:
+        val id = self._next_id
+        self._next_id = self._next_id + 1
+        val handle = PipelineHandle3D.create(id, shader_id, depth_test, blend_mode, cull_mode)
+        self._pipelines.push(handle)
+        handle
+
+    me free_pipeline(pipeline_id: i32):
+        var keep: [PipelineHandle3D] = []
+        var i = 0
+        while i < self._pipelines.len():
+            if self._pipelines[i].id != pipeline_id:
+                keep.push(self._pipelines[i])
+            i = i + 1
+        self._pipelines = keep
+
+    fn pipeline_count() -> i32:
+        self._pipelines.len()
+
+    # -- GC --
+
+    me gc_unused_textures(frame_threshold: i32) -> i32:
+        val cutoff = self._current_frame - frame_threshold
+        var keep: [TextureHandle3D] = []
+        var freed = 0
+        var i = 0
+        while i < self._textures.len():
+            if self._textures[i].last_used_frame >= cutoff:
+                keep.push(self._textures[i])
+            else:
+                freed = freed + 1
+            i = i + 1
+        self._textures = keep
+        freed
+
+    me gc_unused_buffers(frame_threshold: i32) -> i32:
+        val cutoff = self._current_frame - frame_threshold
+        var keep: [BufferHandle3D] = []
+        var freed = 0
+        var i = 0
+        while i < self._buffers.len():
+            if self._buffers[i].last_used_frame >= cutoff:
+                keep.push(self._buffers[i])
+            else:
+                freed = freed + 1
+            i = i + 1
+        self._buffers = keep
+        freed
+
+    fn total_resource_count() -> i32:
+        self._textures.len() + self._buffers.len() + self._shaders.len() + self._pipelines.len()

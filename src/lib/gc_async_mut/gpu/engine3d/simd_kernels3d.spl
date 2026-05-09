@@ -1,0 +1,160 @@
+"""SIMD-Accelerated 3D Math Operations
+
+@tag:stdlib
+@tag:gpu
+
+Provides vectorized matrix multiply, vertex transform, and vector operations
+with runtime CPU feature detection. Falls back to scalar loops when no SIMD.
+
+Usage:
+    val level = detect_simd_level_3d()
+    simd_mat4_mul(result, a, b)
+    simd_transform_vertices(verts, count, mvp)
+"""
+
+# ============================================================================
+# SIMD Level
+# ============================================================================
+
+enum SimdLevel3D:
+    None_
+    Sse42
+    Avx2
+    Avx512
+    Neon
+
+impl SimdLevel3D:
+    fn to_text() -> text:
+        match self:
+            case None_: "None"
+            case Sse42: "SSE4.2"
+            case Avx2: "AVX2"
+            case Avx512: "AVX-512"
+            case Neon: "NEON"
+
+# ============================================================================
+# Runtime externs for CPU feature detection
+# ============================================================================
+
+extern fn rt_cpu_has_sse42() -> bool
+extern fn rt_cpu_has_avx2() -> bool
+extern fn rt_cpu_has_avx512() -> bool
+extern fn rt_cpu_has_neon() -> bool
+
+# ============================================================================
+# Runtime externs for SIMD 3D kernels
+# ============================================================================
+
+extern fn rt_simd_mat4_mul_avx2(dst: [f32], a: [f32], b: [f32])
+extern fn rt_simd_mat4_mul_sse42(dst: [f32], a: [f32], b: [f32])
+extern fn rt_simd_mat4_mul_neon(dst: [f32], a: [f32], b: [f32])
+
+extern fn rt_simd_transform_verts_avx2(positions: [f32], count: i64, mvp: [f32])
+extern fn rt_simd_transform_verts_sse42(positions: [f32], count: i64, mvp: [f32])
+extern fn rt_simd_transform_verts_neon(positions: [f32], count: i64, mvp: [f32])
+
+extern fn rt_simd_vec4_dot_avx2(a: [f32], b: [f32], count: i64, results: [f32])
+extern fn rt_simd_vec4_dot_sse42(a: [f32], b: [f32], count: i64, results: [f32])
+
+extern fn rt_f64_sqrt(x: f64) -> f64
+
+fn _s3d_sqrt(x: f32) -> f32:
+    rt_f64_sqrt(x as f64) as f32
+
+# ============================================================================
+# Detection
+# ============================================================================
+
+fn detect_simd_level_3d() -> SimdLevel3D:
+    if rt_cpu_has_avx512():
+        SimdLevel3D.Avx512
+    else if rt_cpu_has_avx2():
+        SimdLevel3D.Avx2
+    else if rt_cpu_has_neon():
+        SimdLevel3D.Neon
+    else if rt_cpu_has_sse42():
+        SimdLevel3D.Sse42
+    else:
+        SimdLevel3D.None_
+
+# ============================================================================
+# Matrix Multiply
+# ============================================================================
+
+fn simd_mat4_mul(dst: [f32], a: [f32], b: [f32]):
+    val level = detect_simd_level_3d()
+    match level:
+        case Avx2:
+            rt_simd_mat4_mul_avx2(dst, a, b)
+        case Avx512:
+            rt_simd_mat4_mul_avx2(dst, a, b)
+        case Neon:
+            rt_simd_mat4_mul_neon(dst, a, b)
+        case Sse42:
+            rt_simd_mat4_mul_sse42(dst, a, b)
+        else:
+            _scalar_mat4_mul(dst, a, b)
+
+fn _scalar_mat4_mul(dst: [f32], a: [f32], b: [f32]):
+    var col = 0
+    while col < 4:
+        var row = 0
+        while row < 4:
+            var sum: f32 = 0.0
+            var k = 0
+            while k < 4:
+                sum = sum + a[k * 4 + row] * b[col * 4 + k]
+                k = k + 1
+            dst[col * 4 + row] = sum
+            row = row + 1
+        col = col + 1
+
+# ============================================================================
+# Vertex Transform
+# ============================================================================
+
+fn simd_transform_vertices(positions: [f32], count: i32, mvp: [f32]):
+    val level = detect_simd_level_3d()
+    val cnt = count as i64
+    match level:
+        case Avx2:
+            rt_simd_transform_verts_avx2(positions, cnt, mvp)
+        case Avx512:
+            rt_simd_transform_verts_avx2(positions, cnt, mvp)
+        case Neon:
+            rt_simd_transform_verts_neon(positions, cnt, mvp)
+        case Sse42:
+            rt_simd_transform_verts_sse42(positions, cnt, mvp)
+        else:
+            _scalar_transform_vertices(positions, count, mvp)
+
+fn _scalar_transform_vertices(positions: [f32], count: i32, mvp: [f32]):
+    var i = 0
+    while i < count:
+        val base = i * 3
+        val x = positions[base]
+        val y = positions[base + 1]
+        val z = positions[base + 2]
+        positions[base] = mvp[0] * x + mvp[4] * y + mvp[8] * z + mvp[12]
+        positions[base + 1] = mvp[1] * x + mvp[5] * y + mvp[9] * z + mvp[13]
+        positions[base + 2] = mvp[2] * x + mvp[6] * y + mvp[10] * z + mvp[14]
+        i = i + 1
+
+# ============================================================================
+# Vector Normalize Batch
+# ============================================================================
+
+fn simd_vec3_normalize_batch(vectors: [f32], count: i32):
+    var i = 0
+    while i < count:
+        val base = i * 3
+        val x = vectors[base]
+        val y = vectors[base + 1]
+        val z = vectors[base + 2]
+        val len_sq = x * x + y * y + z * z
+        if len_sq > 0.000001:
+            val inv_len = 1.0 / _s3d_sqrt(len_sq)
+            vectors[base] = x * inv_len
+            vectors[base + 1] = y * inv_len
+            vectors[base + 2] = z * inv_len
+        i = i + 1
