@@ -29,7 +29,7 @@ impl Lowerer {
         Some((index, field_ty))
     }
 
-    fn resolve_global_field_info(&mut self, field: &str) -> Option<(usize, TypeId, usize, String)> {
+    pub(super) fn resolve_global_field_info(&mut self, field: &str) -> Option<(usize, TypeId, usize, String)> {
         let mut best_global: Option<(usize, String, usize, String)> = None;
         let global_defs = self.global_struct_defs.clone()?;
         for (struct_name, fields) in global_defs.iter() {

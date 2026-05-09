@@ -993,6 +993,20 @@ pub(crate) fn evaluate_call(
                 return core::exec_function(&func, args, env, functions, classes, enums, impl_methods, None);
             }
 
+            // Builtin text static methods
+            if type_name == "text" && method_name == "from_char_code" {
+                let evaluated_args: Vec<Value> = args
+                    .iter()
+                    .map(|a| evaluate_expr(&a.value, env, functions, classes, enums, impl_methods))
+                    .collect::<Result<Vec<_>, _>>()?;
+                let code = match evaluated_args.first() {
+                    Some(Value::Int(i)) => *i,
+                    _ => 0,
+                };
+                let ch = char::from_u32(code as u32).unwrap_or('\0');
+                return Ok(Value::Str(ch.to_string()));
+            }
+
             // Fallback: if segments[0] is bound as a value (e.g. a module-level
             // `var POS_AGENTS: [...] = ...`), the parser produces a Path expression
             // because the identifier is uppercase, even though the user wrote

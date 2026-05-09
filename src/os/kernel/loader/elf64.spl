@@ -7,8 +7,14 @@
 use os.kernel.memory.vmm.{vmm_mmap, vmm_copy_to_user}
 use os.kernel.types.vmspace_types.{ProcessVmSpace}
 use os.kernel.types.memory_types.{VmFlags, VM_PRESENT, VM_WRITABLE, VM_USER, VM_NO_EXECUTE}
-
-extern fn rt_bytes_u8_at(arr: [u8], idx: i64) -> i64
+use os.kernel.loader.byte_utils.{
+    byte_at,
+    read_u16_le,
+    read_u32_le,
+    read_u64_le,
+    in_range,
+    has_magic
+}
 
 # ELF identification constants
 val ELF64_MAGIC_0: u8 = 0x7F
@@ -33,6 +39,18 @@ val PF_R: i64 = 4   # Read
 # Structs
 # ============================================================================
 
+# Section header type constants
+val SHT_NULL: i64    = 0
+val SHT_SYMTAB: i64  = 2
+val SHT_STRTAB: i64  = 3
+val SHT_DYNSYM: i64  = 11
+
+# ELF64 section header entry size
+val ELF64_SHDR_SIZE: i64 = 64
+
+# ELF64 symbol table entry size
+val ELF64_SYM_SIZE: i64 = 24
+
 @repr("C")
 struct Elf64Header:
     """Parsed summary of an ELF64 executable header."""
@@ -40,6 +58,10 @@ struct Elf64Header:
     e_phoff:     i64   # Offset to program header table
     e_phentsize: i64   # Size of one program header entry
     e_phnum:     i64   # Number of program header entries
+    e_shoff:     i64   # Offset to section header table
+    e_shentsize: i64   # Size of one section header entry
+    e_shnum:     i64   # Number of section header entries
+    e_shstrndx:  i64   # Index of the section name string table
 
 @repr("C")
 struct Elf64ProgramHeader:
@@ -56,29 +78,19 @@ struct Elf64ProgramHeader:
 # ============================================================================
 
 fn _e64_byte_at(data: [u8], off: i64) -> u8:
-    rt_bytes_u8_at(data, off).to_u8()
+    byte_at(data, off)
 
 fn _e64_read_u16(data: [u8], off: i64) -> i64:
-    (_e64_byte_at(data, off) as i64) | ((_e64_byte_at(data, off + 1) as i64) << 8)
+    read_u16_le(data, off)
 
 fn _e64_read_u32(data: [u8], off: i64) -> i64:
-    (_e64_byte_at(data, off) as i64) |
-    ((_e64_byte_at(data, off + 1) as i64) << 8) |
-    ((_e64_byte_at(data, off + 2) as i64) << 16) |
-    ((_e64_byte_at(data, off + 3) as i64) << 24)
+    read_u32_le(data, off)
 
 fn _e64_read_u64(data: [u8], off: i64) -> u64:
-    val lo = _e64_read_u32(data, off)
-    val hi = _e64_read_u32(data, off + 4)
-    (lo | (hi << 32)) as u64
+    read_u64_le(data, off) as u64
 
 fn _e64_in_range(data: [u8], off: i64, size: i64) -> bool:
-    if off < 0 or size < 0:
-        return false
-    val end_ = off + size
-    if end_ < off:
-        return false
-    end_ <= data.len()
+    in_range(data, off, size)
 
 # ============================================================================
 # Public API
@@ -104,15 +116,23 @@ fn elf64_parse_header(bytes: [u8]) -> Elf64Header?:
         return nil
     val e_entry     = _e64_read_u64(bytes, 24)
     val e_phoff     = _e64_read_u64(bytes, 32)
+    val e_shoff     = _e64_read_u64(bytes, 40)
     val e_phentsize = _e64_read_u16(bytes, 54)
     val e_phnum     = _e64_read_u16(bytes, 56)
+    val e_shentsize = _e64_read_u16(bytes, 58)
+    val e_shnum     = _e64_read_u16(bytes, 60)
+    val e_shstrndx  = _e64_read_u16(bytes, 62)
     if e_phentsize != ELF64_PHDR_SIZE:
         return nil
     Some(Elf64Header(
         e_entry:     e_entry,
         e_phoff:     e_phoff,
         e_phentsize: e_phentsize,
-        e_phnum:     e_phnum
+        e_phnum:     e_phnum,
+        e_shoff:     e_shoff,
+        e_shentsize: e_shentsize,
+        e_shnum:     e_shnum,
+        e_shstrndx:  e_shstrndx
     ))
 
 fn elf64_program_headers(bytes: [u8], hdr: Elf64Header) -> [Elf64ProgramHeader]:
@@ -198,3 +218,162 @@ fn elf64_load(bytes: [u8], space: ProcessVmSpace) -> i64:
     if mapped == 0:
         return -8
     hdr.e_entry
+
+# ============================================================================
+# ELF64 magic check
+# ============================================================================
+
+fn elf64_has_magic(bytes: [u8]) -> bool:
+    """Return true if `bytes` starts with the ELF magic 0x7F 'E' 'L' 'F'."""
+    has_magic(bytes, 0, ELF64_MAGIC_0, ELF64_MAGIC_1, ELF64_MAGIC_2, ELF64_MAGIC_3)
+
+# ============================================================================
+# Section header + symbol table structs
+# ============================================================================
+
+@repr("C")
+struct Elf64SectionHeader:
+    """Parsed ELF64 section header entry."""
+    sh_name:    i64   # Index into section name string table
+    sh_type:    i64   # Section type (SHT_*)
+    sh_flags:   u64   # Section flags
+    sh_addr:    u64   # Virtual address in memory
+    sh_offset:  i64   # Offset in file
+    sh_size:    i64   # Size of section in bytes
+    sh_link:    i64   # Link to associated section (e.g. strtab for symtab)
+    sh_entsize: i64   # Size of each entry if section holds a table
+
+@repr("C")
+struct Elf64Symbol:
+    """Parsed ELF64 symbol table entry (Elf64_Sym)."""
+    st_name:  i64   # Index into string table
+    st_info:  u8    # Symbol type and binding
+    st_shndx: i64   # Section header table index
+    st_value: u64   # Symbol value (address)
+    st_size:  u64   # Symbol size
+
+# ============================================================================
+# Section header parsing
+# ============================================================================
+
+fn elf64_parse_section_headers(bytes: [u8], hdr: Elf64Header) -> [Elf64SectionHeader]:
+    """Parse all section headers from an ELF64 image."""
+    var out: [Elf64SectionHeader] = []
+    if hdr.e_shnum <= 0:
+        return out
+    if hdr.e_shentsize < ELF64_SHDR_SIZE:
+        return out
+    if not _e64_in_range(bytes, hdr.e_shoff, hdr.e_shentsize * hdr.e_shnum):
+        return out
+    var idx = 0
+    while idx < hdr.e_shnum:
+        val off = hdr.e_shoff + idx * hdr.e_shentsize
+        out.push(Elf64SectionHeader(
+            sh_name:    _e64_read_u32(bytes, off),
+            sh_type:    _e64_read_u32(bytes, off + 4),
+            sh_flags:   _e64_read_u64(bytes, off + 8),
+            sh_addr:    _e64_read_u64(bytes, off + 16),
+            sh_offset:  _e64_read_u64(bytes, off + 24) as i64,
+            sh_size:    _e64_read_u64(bytes, off + 32) as i64,
+            sh_link:    _e64_read_u32(bytes, off + 40),
+            sh_entsize: _e64_read_u64(bytes, off + 56) as i64
+        ))
+        idx = idx + 1
+    out
+
+fn elf64_find_section_by_type(shdrs: [Elf64SectionHeader], sh_type: i64) -> Elf64SectionHeader?:
+    """Return the first section header matching `sh_type`, or nil."""
+    var idx = 0
+    while idx < shdrs.len():
+        if shdrs[idx].sh_type == sh_type:
+            return Some(shdrs[idx])
+        idx = idx + 1
+    nil
+
+# ============================================================================
+# Symbol table parsing
+# ============================================================================
+
+fn elf64_parse_symbols(bytes: [u8], symtab: Elf64SectionHeader) -> [Elf64Symbol]:
+    """Parse all symbols from a symbol table section (.symtab or .dynsym)."""
+    var out: [Elf64Symbol] = []
+    if symtab.sh_entsize < ELF64_SYM_SIZE:
+        return out
+    if symtab.sh_size <= 0:
+        return out
+    val count = symtab.sh_size / symtab.sh_entsize
+    if not _e64_in_range(bytes, symtab.sh_offset, symtab.sh_size):
+        return out
+    var idx: i64 = 0
+    while idx < count:
+        val off = symtab.sh_offset + idx * symtab.sh_entsize
+        out.push(Elf64Symbol(
+            st_name:  _e64_read_u32(bytes, off),
+            st_info:  _e64_byte_at(bytes, off + 4),
+            st_shndx: _e64_read_u16(bytes, off + 6),
+            st_value: _e64_read_u64(bytes, off + 8),
+            st_size:  _e64_read_u64(bytes, off + 16)
+        ))
+        idx = idx + 1
+    out
+
+fn elf64_strtab_get(strtab_bytes: [u8], offset: i64) -> text:
+    """Extract a NUL-terminated string from a string table byte slice."""
+    if offset < 0 or offset >= strtab_bytes.len():
+        return ""
+    var result = ""
+    var pos = offset
+    while pos < strtab_bytes.len():
+        val ch = byte_at(strtab_bytes, pos)
+        if ch == 0.to_u8():
+            return result
+        result = result + (ch as i64).to_char()
+        pos = pos + 1
+    result
+
+fn _elf64_extract_strtab(bytes: [u8], shdrs: [Elf64SectionHeader], strtab_idx: i64) -> [u8]:
+    """Extract the raw bytes for a string table section by index."""
+    if strtab_idx < 0 or strtab_idx >= shdrs.len():
+        return []
+    val shdr = shdrs[strtab_idx]
+    if not _e64_in_range(bytes, shdr.sh_offset, shdr.sh_size):
+        return []
+    var out: [u8] = []
+    var i: i64 = 0
+    while i < shdr.sh_size:
+        out.push(_e64_byte_at(bytes, shdr.sh_offset + i))
+        i = i + 1
+    out
+
+fn elf64_dynsym_lookup(bytes: [u8], shdrs: [Elf64SectionHeader], name: text) -> u64?:
+    """Look up a symbol by name in .dynsym, then fall back to .symtab.
+
+    Returns the symbol's st_value on match, or nil if not found.
+    """
+    # Try .dynsym (SHT_DYNSYM = 11) first
+    val dynsym_opt = elf64_find_section_by_type(shdrs, SHT_DYNSYM)
+    if dynsym_opt != nil:
+        val dynsym = dynsym_opt
+        val strtab = _elf64_extract_strtab(bytes, shdrs, dynsym.sh_link)
+        val syms = elf64_parse_symbols(bytes, dynsym)
+        var i = 0
+        while i < syms.len():
+            val sym_name = elf64_strtab_get(strtab, syms[i].st_name)
+            if sym_name == name and syms[i].st_value != 0.to_u64():
+                return Some(syms[i].st_value)
+            i = i + 1
+
+    # Fall back to .symtab (SHT_SYMTAB = 2)
+    val symtab_opt = elf64_find_section_by_type(shdrs, SHT_SYMTAB)
+    if symtab_opt != nil:
+        val symtab = symtab_opt
+        val strtab2 = _elf64_extract_strtab(bytes, shdrs, symtab.sh_link)
+        val syms2 = elf64_parse_symbols(bytes, symtab)
+        var j = 0
+        while j < syms2.len():
+            val sym_name2 = elf64_strtab_get(strtab2, syms2[j].st_name)
+            if sym_name2 == name and syms2[j].st_value != 0.to_u64():
+                return Some(syms2[j].st_value)
+            j = j + 1
+
+    nil

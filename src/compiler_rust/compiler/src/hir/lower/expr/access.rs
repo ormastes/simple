@@ -103,6 +103,54 @@ impl Lowerer {
                 }
             }
 
+            // Class 1 fallback: when the receiver identifier names an enum
+            // that was not registered in the local type registry (e.g. the
+            // enum reached this file via re-export but `register_global_enums`
+            // skipped it or ran too early), check `global_enum_defs` directly
+            // and synthesize the variant constructor / unit-variant access.
+            if self.module.types.lookup(recv_name).is_none() {
+                if let Some(ref defs) = self.global_enum_defs.clone() {
+                    if let Some(variant_summary) = defs.get(recv_name) {
+                        // The enum exists globally — register it now so
+                        // subsequent accesses hit the fast path above.
+                        let variants: Vec<(String, Option<Vec<TypeId>>)> = variant_summary
+                            .iter()
+                            .map(|(vname, payload_arity)| {
+                                let payload = payload_arity.map(|n| vec![TypeId::ANY; n]);
+                                (vname.clone(), payload)
+                            })
+                            .collect();
+                        let type_id = self.module.types.register_named(
+                            recv_name.to_string(),
+                            HirType::Enum {
+                                name: recv_name.to_string(),
+                                variants: variants.clone(),
+                                generic_params: vec![],
+                                is_generic_template: false,
+                                type_bindings: std::collections::HashMap::new(),
+                            },
+                        );
+                        self.globals.insert(recv_name.to_string(), type_id);
+                        // Now try to match the field as a variant name
+                        for (vname, vpayload) in &variants {
+                            if vname == field {
+                                return Ok(HirExpr {
+                                    kind: HirExprKind::Global(format!("{}::{}", recv_name, field)),
+                                    ty: type_id,
+                                });
+                            }
+                        }
+                        // Variant not found in global defs — lenient fallback
+                        if self.lenient_types {
+                            return Ok(HirExpr {
+                                kind: HirExprKind::Global(format!("{}::{}", recv_name, field)),
+                                ty: type_id,
+                            });
+                        }
+                    }
+                }
+            }
+
             if self.module.types.lookup(recv_name).is_some() {
                 if let Some(expr) = self.try_lower_static_member_value_with_sugar(recv_name, field, ctx)? {
                     return Ok(expr);
@@ -171,16 +219,16 @@ impl Lowerer {
                 // This preserves the real TypeId for self.field.method() chains — without
                 // this, the field node gets ty=ANY which causes MIR to mangle the wrong
                 // method name and emit a recursive self-call (phase4 STOP marker).
-                for candidate_struct_name in candidate_struct_names {
+                for candidate_struct_name in &candidate_struct_names {
                     if let Some(field_ty) = self
-                        .try_resolve_field_type_by_name(&candidate_struct_name, field)
-                        .or_else(|| self.try_resolve_global_field_type_by_name(&candidate_struct_name, field))
+                        .try_resolve_field_type_by_name(candidate_struct_name, field)
+                        .or_else(|| self.try_resolve_global_field_type_by_name(candidate_struct_name, field))
                     {
                         let field_index = self
                             .get_field_info(recv_hir.ty, field)
                             .ok()
                             .map(|(field_index, _)| field_index)
-                            .or_else(|| self.try_resolve_global_field_index_by_name(&candidate_struct_name, field))
+                            .or_else(|| self.try_resolve_global_field_index_by_name(candidate_struct_name, field))
                             .unwrap_or(0);
                         return Ok(HirExpr {
                             kind: HirExprKind::FieldAccess {
@@ -191,7 +239,7 @@ impl Lowerer {
                         });
                     }
                     if let Some(field_index) =
-                        self.try_resolve_global_field_index_by_name(&candidate_struct_name, field)
+                        self.try_resolve_global_field_index_by_name(candidate_struct_name, field)
                     {
                         return Ok(HirExpr {
                             kind: HirExprKind::FieldAccess {
@@ -202,6 +250,27 @@ impl Lowerer {
                         });
                     }
                 }
+
+                // Class 2 fallback: when the receiver's type is ANY (e.g.
+                // from a call expression like `shell(...)` whose return type
+                // wasn't propagated) and no candidate struct names could be
+                // inferred, search the global struct definitions for any
+                // struct that contains this field. This is the same heuristic
+                // that `get_field_info` uses in its ANY branch but applied
+                // here in the fallback chain where it was previously skipped
+                // because `candidate_struct_names` was empty.
+                if candidate_struct_names.is_empty() && !self.is_ambiguous_global_field(field) {
+                    if let Some((field_index, field_ty, _count, _sname)) = self.resolve_global_field_info(field) {
+                        return Ok(HirExpr {
+                            kind: HirExprKind::FieldAccess {
+                                receiver: recv_hir,
+                                field_index,
+                            },
+                            ty: field_ty,
+                        });
+                    }
+                }
+
                 if !has_known_method {
                     return Err(LowerError::CannotInferFieldType {
                         struct_name,
