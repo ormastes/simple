@@ -198,8 +198,8 @@ if entry != nil:
 ### Programmatic fork+exec Pattern
 
 ```
-# fork() is syscall 57 — returns child PID in parent, 0 in child
-# exec() is syscall 59 — replaces the current image
+# fork() is syscall 57 -- returns child PID in parent, 0 in child
+# exec() is syscall 59 -- replaces the current image
 
 # Currently, fork/exec are kernel-level only (no userlib wrappers yet).
 # Use spawn_path() for the common case of launching a new process.
