@@ -1,0 +1,160 @@
+use std.spec.*
+use std.gc_async_mut.gpu.browser_engine.html_tokenizer.{
+    HtmlTokenizer, HtmlToken, HtmlTokenKind, HtmlAttr,
+    html_tokenizer_new, html_tokenizer_tokenize
+}
+
+fn _tokenize(html: text) -> [HtmlToken]:
+    val t = html_tokenizer_new(html)
+    return html_tokenizer_tokenize(t)
+
+fn _count_tokens(html: text) -> i32:
+    val tokens = _tokenize(html)
+    return tokens.len()
+
+fn _first_start_tag(html: text) -> HtmlToken:
+    val tokens = _tokenize(html)
+    var i = 0
+    while i < tokens.len():
+        val tok = tokens[i]
+        if tok.token_kind == HtmlTokenKind.StartTag:
+            return tok
+        i = i + 1
+    return tokens[0]
+
+fn _first_end_tag(html: text) -> HtmlToken:
+    val tokens = _tokenize(html)
+    var i = 0
+    while i < tokens.len():
+        val tok = tokens[i]
+        if tok.token_kind == HtmlTokenKind.EndTag:
+            return tok
+        i = i + 1
+    return tokens[0]
+
+fn _has_eof(html: text) -> bool:
+    val tokens = _tokenize(html)
+    if tokens.len() == 0:
+        return false
+    val last = tokens[tokens.len() - 1]
+    return last.token_kind == HtmlTokenKind.Eof
+
+fn _attr_value(tok: HtmlToken, name: text) -> text:
+    var i = 0
+    while i < tok.attrs.len():
+        val a = tok.attrs[i]
+        if a.name == name:
+            return a.value
+        i = i + 1
+    return ""
+
+# ============================================================================
+# AC-1: WHATWG tokenizer — basic tags
+# ============================================================================
+
+describe "HtmlTokenizer basic tags":
+    it "AC-1: emits StartTag token for simple open tag":
+        val tok = _first_start_tag("<p>hello</p>")
+        expect(tok.tag_name).to_equal("p")
+
+    it "AC-1: emits EndTag token for close tag":
+        val tok = _first_end_tag("<p>hello</p>")
+        expect(tok.tag_name).to_equal("p")
+
+    it "AC-1: emits EOF as last token":
+        val result = _has_eof("<p>text</p>")
+        expect(result).to_equal(true)
+
+    it "AC-1: tokenizes nested tags producing multiple start tokens":
+        val tokens = _tokenize("<div><span>x</span></div>")
+        val count = _count_tokens("<div><span>x</span></div>")
+        expect(count).to_be_greater_than(3)
+
+# ============================================================================
+# AC-1: WHATWG tokenizer — attributes
+# ============================================================================
+
+describe "HtmlTokenizer attributes":
+    it "AC-1: parses single attribute name and value":
+        val tok = _first_start_tag("<a href=\"http://example.com\">")
+        val val_ = _attr_value(tok, "href")
+        expect(val_).to_equal("http://example.com")
+
+    it "AC-1: parses multiple attributes on one tag":
+        val tok = _first_start_tag("<input type=\"text\" name=\"q\" value=\"\">")
+        val t = _attr_value(tok, "type")
+        expect(t).to_equal("text")
+
+    it "AC-1: parses boolean attribute (no value)":
+        val tok = _first_start_tag("<input disabled>")
+        val n = _attr_value(tok, "disabled")
+        expect(n).to_equal("")
+
+# ============================================================================
+# AC-1: WHATWG tokenizer — self-closing and void elements
+# ============================================================================
+
+describe "HtmlTokenizer self-closing tags":
+    it "AC-1: sets self_closing flag for XHTML-style self-close":
+        val tok = _first_start_tag("<br/>")
+        expect(tok.self_closing).to_equal(true)
+
+    it "AC-1: treats <img> as start tag regardless of no end tag":
+        val tok = _first_start_tag("<img src=\"a.png\">")
+        expect(tok.tag_name).to_equal("img")
+
+# ============================================================================
+# AC-1: WHATWG tokenizer — character data and entities
+# ============================================================================
+
+describe "HtmlTokenizer character data":
+    it "AC-1: emits Character token for text content":
+        val tokens = _tokenize("<p>hello</p>")
+        var found = false
+        var i = 0
+        while i < tokens.len():
+            val tok = tokens[i]
+            if tok.token_kind == HtmlTokenKind.Character:
+                found = true
+            i = i + 1
+        expect(found).to_equal(true)
+
+    it "AC-1: emits Character for &amp; named entity":
+        val tokens = _tokenize("<p>&amp;</p>")
+        var txt = ""
+        var i = 0
+        while i < tokens.len():
+            val tok = tokens[i]
+            if tok.token_kind == HtmlTokenKind.Character:
+                txt = tok.data
+            i = i + 1
+        expect(txt).to_equal("&")
+
+# ============================================================================
+# AC-1: WHATWG tokenizer — script/raw text states
+# ============================================================================
+
+describe "HtmlTokenizer script and raw text states":
+    it "AC-1: treats content of <script> as raw text not tags":
+        val tokens = _tokenize("<script>var x = '<p>';</script>")
+        var inner_start_count = 0
+        var i = 0
+        while i < tokens.len():
+            val tok = tokens[i]
+            if tok.token_kind == HtmlTokenKind.StartTag:
+                if tok.tag_name == "p":
+                    inner_start_count = inner_start_count + 1
+            i = i + 1
+        expect(inner_start_count).to_equal(0)
+
+    it "AC-1: treats content of <style> as raw text":
+        val tokens = _tokenize("<style>a > b { color: red; }</style>")
+        var gt_tag_count = 0
+        var i = 0
+        while i < tokens.len():
+            val tok = tokens[i]
+            if tok.token_kind == HtmlTokenKind.StartTag:
+                if tok.tag_name == "b":
+                    gt_tag_count = gt_tag_count + 1
+            i = i + 1
+        expect(gt_tag_count).to_equal(0)

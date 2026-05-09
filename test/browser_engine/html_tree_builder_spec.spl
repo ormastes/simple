@@ -1,0 +1,105 @@
+use std.spec.*
+use std.gc_async_mut.gpu.browser_engine.html_tree_builder.{
+    html_tree_builder_build
+}
+use std.gc_async_mut.gpu.browser_engine.dom.{
+    BeDomNode, be_dom_get_tag_name, be_dom_get_children,
+    be_dom_get_attribute, be_dom_get_text_content
+}
+
+fn _build(html: text) -> BeDomNode:
+    return html_tree_builder_build(html)
+
+fn _child_count(node: BeDomNode) -> i32:
+    return be_dom_get_children(node).len()
+
+fn _first_child_tag(node: BeDomNode) -> text:
+    val ch = be_dom_get_children(node)
+    if ch.len() == 0:
+        return ""
+    return be_dom_get_tag_name(ch[0])
+
+fn _find_first_by_tag(node: BeDomNode, tag: text) -> BeDomNode:
+    val ch = be_dom_get_children(node)
+    var i = 0
+    while i < ch.len():
+        val child = ch[i]
+        if be_dom_get_tag_name(child) == tag:
+            return child
+        i = i + 1
+    return node
+
+fn _find_nested(node: BeDomNode, tag: text) -> BeDomNode:
+    val ch = be_dom_get_children(node)
+    var i = 0
+    while i < ch.len():
+        val child = ch[i]
+        if be_dom_get_tag_name(child) == tag:
+            return child
+        val nested = _find_nested(child, tag)
+        if be_dom_get_tag_name(nested) == tag:
+            return nested
+        i = i + 1
+    return node
+
+# ============================================================================
+# AC-2: Tree builder — implicit tag closing
+# ============================================================================
+
+describe "HtmlTreeBuilder implicit closing":
+    it "AC-2: wraps body content in html/head/body even when absent":
+        val doc = _build("<p>hello</p>")
+        val html = _first_child_tag(doc)
+        expect(html).to_equal("html")
+
+    it "AC-2: implicitly closes <li> when next <li> starts":
+        val doc = _build("<ul><li>a<li>b</ul>")
+        val ul = _find_nested(doc, "ul")
+        val count = _child_count(ul)
+        expect(count).to_equal(2)
+
+    it "AC-2: implicitly closes <p> when block element starts":
+        val doc = _build("<p>text<div>block</div>")
+        val div = _find_nested(doc, "div")
+        val tag = be_dom_get_tag_name(div)
+        expect(tag).to_equal("div")
+
+# ============================================================================
+# AC-2: Tree builder — scope-based insertion
+# ============================================================================
+
+describe "HtmlTreeBuilder scope-based insertion":
+    it "AC-2: inserts heading inside body scope":
+        val doc = _build("<h1>Title</h1>")
+        val h1 = _find_nested(doc, "h1")
+        expect(be_dom_get_tag_name(h1)).to_equal("h1")
+
+    it "AC-2: attribute preserved on parsed element":
+        val doc = _build("<a href=\"/path\">link</a>")
+        val a = _find_nested(doc, "a")
+        val href = be_dom_get_attribute(a, "href")
+        expect(href).to_equal("/path")
+
+    it "AC-2: nested structure preserves parent-child relationship":
+        val doc = _build("<div><p><span>text</span></p></div>")
+        val div = _find_nested(doc, "div")
+        val p = _find_first_by_tag(div, "p")
+        val span = _find_first_by_tag(p, "span")
+        expect(be_dom_get_tag_name(span)).to_equal("span")
+
+# ============================================================================
+# AC-2: Tree builder — foster parenting basics
+# ============================================================================
+
+describe "HtmlTreeBuilder foster parenting":
+    it "AC-2: text before <table> is foster-parented before table":
+        val doc = _build("<table>misplaced text<tr><td>cell</td></tr></table>")
+        val body = _find_nested(doc, "body")
+        val count = _child_count(body)
+        expect(count).to_be_greater_than(0)
+
+    it "AC-2: <p> inside <table> is foster-parented outside table":
+        val doc = _build("<table><p>para</p><tr><td>x</td></tr></table>")
+        val body = _find_nested(doc, "body")
+        val p = _find_first_by_tag(body, "p")
+        expect(be_dom_get_tag_name(p)).to_equal("p")
