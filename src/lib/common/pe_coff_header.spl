@@ -652,6 +652,65 @@ pub fn pe_first_import_symbol_bindings(data: [u8], limit: i64) -> [PeImportSymbo
         i = i + 1
     bindings
 
+pub fn pe_export_directory_rva(data: [u8]) -> i64:
+    _directory_rva(data, 0)
+
+pub fn pe_export_directory_size(data: [u8]) -> i64:
+    _directory_size(data, 0)
+
+pub fn pe_export_lookup_by_name(data: [u8], name: text) -> i64:
+    """Walk the PE export name table, find `name`, return its address-table RVA or -1."""
+    val summary = parse_pe_header_summary(data)
+    if not summary.ok:
+        return -1
+    val optional_offset = summary.pe_offset + 24
+    val export_rva = _read_u32_le(data, optional_offset + 0x70)
+    val export_size = _read_u32_le(data, optional_offset + 0x70 + 4)
+    if export_rva == 0 or export_size == 0:
+        return -1
+    val export_offset = pe_rva_to_file_offset(data, export_rva)
+    if export_offset < 0 or export_offset + 39 >= data.len():
+        return -1
+    val number_of_names = _read_u32_le(data, export_offset + 24)
+    val address_table_rva = _read_u32_le(data, export_offset + 28)
+    val name_pointer_rva = _read_u32_le(data, export_offset + 32)
+    val ordinal_table_rva = _read_u32_le(data, export_offset + 36)
+    if number_of_names <= 0:
+        return -1
+    var i = 0
+    while i < number_of_names:
+        val name_entry_offset = pe_rva_to_file_offset(data, name_pointer_rva + (i * 4))
+        if name_entry_offset < 0:
+            i = i + 1
+            continue
+        val entry_name_rva = _read_u32_le(data, name_entry_offset)
+        val entry_name_offset = pe_rva_to_file_offset(data, entry_name_rva)
+        if entry_name_offset < 0:
+            i = i + 1
+            continue
+        val entry_name = _read_ascii_z(data, entry_name_offset, 256)
+        if entry_name == name:
+            val ordinal_offset = pe_rva_to_file_offset(data, ordinal_table_rva + (i * 2))
+            if ordinal_offset < 0:
+                return -1
+            val ordinal = _read_u16_le(data, ordinal_offset)
+            val addr_offset = pe_rva_to_file_offset(data, address_table_rva + (ordinal * 4))
+            if addr_offset < 0:
+                return -1
+            return _read_u32_le(data, addr_offset)
+        i = i + 1
+    -1
+
+pub fn pe_image_base(data: [u8]) -> i64:
+    """Return the preferred image base from the PE optional header."""
+    val summary = parse_pe_header_summary(data)
+    if not summary.ok:
+        return 0
+    val optional_offset = summary.pe_offset + 24
+    val lo = _read_u32_le(data, optional_offset + 0x18)
+    val hi = _read_u32_le(data, optional_offset + 0x1c)
+    lo | (hi << 32)
+
 pub fn pe_first_import_thunk_bindings(data: [u8], limit: i64) -> [PeImportThunkBinding]:
     var bindings: [PeImportThunkBinding] = []
     val import_state = pe_import_directory_gate(data)
