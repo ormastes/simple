@@ -374,7 +374,7 @@ MDSOC organises **composition** (capsules, ports, dimensions) but does not presc
 | Kernel (ring 0) | **MDSOC only** — ports, dispatch, capsule stages | ECS overhead + dynamic composition unsafe in kernel |
 | Drivers | **MDSOC capsule per device, no ECS** | Drivers are IO-bound state machines, not entity graphs |
 | Userland services (PM, VM, VFS, netstack, WM, DS, RS, clock, TTY, …) | **MDSOC capsule outside, ECS inside** for domain state | Processes, sockets, windows, files, FDs, connections are entities |
-| Apps (shell, editor, browser, file mgr, …) | **MDSOC capsule outside, ECS inside** for domain/UI state | Scene graphs, documents, tabs, panes = entities |
+| Apps (29 desktop apps + shell — see `src/os/apps/`, `src/os/desktop/`) | **MDSOC capsule outside, ECS inside** for domain/UI state | Scene graphs, documents, tabs, panes = entities; all 29 apps + shell use UISession + widget builder DSL |
 | libc / POSIX shim | Neither (thin ABI veneer) | No state of its own |
 
 ## Canonical ECS Shape
