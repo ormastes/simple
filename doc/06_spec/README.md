@@ -1,39 +1,6 @@
 # Test Specification Index
 
-*Generated: 2026-05-09 02:05:14*
-
-## Coverage Overview
-
-The Simple language test suite uses **spipe** (formerly sspec) as its test/spec framework. Test files use the `_spec.spl` suffix and are organized under `test/`.
-
-### Current Counts
-
-| Metric | Count |
-|--------|-------|
-| Specification documents (`.md` in `doc/06_spec/`) | 677 |
-| Spec source files (`.spl` in `doc/06_spec/`) | 82 |
-| Test spec files (`*_spec.spl` in `test/`) | 13,093 |
-
-### Major Spec Areas
-
-- **Language core** -- syntax, types, data structures, functions, traits, modules, memory, concurrency, metaprogramming
-- **Math DSL** -- `m{}` math block with torch-compatible tensor operations
-- **Async/suspension** -- async default behavior, suspension operator
-- **Sandboxing/capabilities** -- capability effects, sandboxing
-- **Baremetal** -- QEMU RV32, CH32V307, remote baremetal library/runtime
-- **UI/Shell** -- dashboard rendering, shell API, TMUX API
-- **ML/Tensor** -- tensor dimensions, loss/nograd blocks
-- **Bootstrap** -- bootstrap test gates
-
-### Framework
-
-- **Built-in matchers:** `to_equal`, `to_be`, `to_be_nil`, `to_contain`, `to_start_with`, `to_end_with`, `to_be_greater_than`, `to_be_less_than`
-- **Commands:** `bin/simple test` (all), `bin/simple test path/to/spec.spl` (single)
-- **Template:** `.claude/templates/spipe_template.spl`
-
----
-
-## Generated Feature Index
+*Generated: 2026-05-09 10:44:41*
 
 ## Quick Stats
 

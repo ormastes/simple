@@ -1,16 +1,6 @@
 # Test Specification Index
 
-*Generated: 2026-05-09 02:05:14*
-
-## Coverage Overview
-
-- **677** specification documents, **82** spec source files, **13,093** test spec files
-- Framework: **spipe** (formerly sspec) -- see `.claude/templates/spipe_template.spl`
-- Run: `bin/simple test` (all) or `bin/simple test path/to/spec.spl` (single)
-
----
-
-## Generated Feature Index
+*Generated: 2026-05-09 10:44:41*
 
 ## Quick Stats
 
