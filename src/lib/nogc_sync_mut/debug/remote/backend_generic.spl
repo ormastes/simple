@@ -76,6 +76,23 @@ impl RemoteGenericBackend:
             attached: true
         ))
 
+    static fn openocd_gdb_with_serial(cfg_path: text, gdb_port: i32, program: text, target_info: DebugTargetInfo, serial: text) -> Result<RemoteGenericBackend, text>:
+        val config = DebugConfig(host: "localhost", port: gdb_port, target: target_info.arch(), program: program, options: {})
+        val openocd = OpenocdClient.connect(cfg_path, gdb_port, gdb_port + 1000, program, serial)?
+        var registry = FeatureRegistry.empty()
+        register_openocd_features(registry, openocd)
+
+        Ok(RemoteGenericBackend(
+            config: config,
+            registry: registry,
+            gdb: nil,
+            t32: nil,
+            openocd: Some(openocd),
+            t32_gdb: nil,
+            target_info: target_info,
+            attached: true
+        ))
+
     static fn t32_gdb_bridge(config: DebugConfig, target_info: DebugTargetInfo) -> Result<RemoteGenericBackend, text>:
         val t32_gdb = T32GdbBridgeClient.connect(config)?
         var registry = FeatureRegistry.empty()
@@ -114,24 +131,31 @@ impl RemoteGenericBackend:
             Some(gdb):
                 if program_path.len() > 0:
                     gdb.send_command("file-exec-and-symbols {program_path}")?
-                self.attached = true
-                Ok(nil)
-            nil:
-                Err("no GDB connection")
+            nil: pass
+        self.attached = true
+        Ok(nil)
+
+    fn target_name() -> text:
+        self.target_info.name()
 
     fn detach() -> Result<Nil, String>:
         match self.gdb:
             Some(gdb):
                 gdb.disconnect()
-                self.attached = false
-            nil:
-                pass
+            nil: pass
         match self.t32:
             Some(t32):
                 t32.disconnect()
-                self.attached = false
-            nil:
-                pass
+            nil: pass
+        match self.openocd:
+            Some(oc):
+                oc.disconnect()
+            nil: pass
+        match self.t32_gdb:
+            Some(tg):
+                tg.disconnect()
+            nil: pass
+        self.attached = false
         Ok(nil)
 
     fn run() -> Result<Nil, String>:
@@ -215,12 +239,18 @@ impl RemoteGenericBackend:
     fn read_memory(addr: i64, size: i32) -> Result<[i32], text>:
         match self.gdb:
             Some(gdb): gdb.read_memory(addr, size)
-            nil: Err("no GDB connection")
+            nil:
+                match self.openocd:
+                    Some(oc): oc.read_memory(addr, size)
+                    nil: Err("no debug connection for memory read")
 
     fn write_memory(addr: i64, data: [i32]) -> Result<text, text>:
         match self.gdb:
             Some(gdb): gdb.write_memory(addr, data)
-            nil: Err("no GDB connection")
+            nil:
+                match self.openocd:
+                    Some(oc): oc.write_memory(addr, data)
+                    nil: Err("no debug connection for memory write")
 
     fn read_register(name: text) -> Result<i64, text>:
         match self.gdb:
@@ -256,6 +286,39 @@ impl RemoteGenericBackend:
 
     fn watchpoint_capacity() -> i32:
         self.target_info.hw_watchpoint_count()
+
+    fn trace_capture(duration_ms: i32) -> Result<text, text>:
+        use std.common.types.{DurationMs}
+        match self.t32:
+            Some(t32): t32.trace_capture(DurationMs(value: duration_ms))
+            nil:
+                match self.t32_gdb:
+                    Some(tg): tg.trace_capture(DurationMs(value: duration_ms))
+                    nil: Err("trace capture requires Trace32 connection")
+
+    fn coverage_collect(module: text) -> Result<text, text>:
+        match self.t32:
+            Some(t32): t32.coverage_collect(module)
+            nil:
+                match self.t32_gdb:
+                    Some(tg): tg.coverage_collect(module)
+                    nil: Err("coverage collect requires Trace32 connection")
+
+    fn flash_program(elf_path: text) -> Result<text, text>:
+        match self.t32:
+            Some(t32): t32.flash_program(elf_path)
+            nil:
+                match self.openocd:
+                    Some(oc): oc.flash_program(elf_path)
+                    nil:
+                        match self.t32_gdb:
+                            Some(tg): tg.flash_program(elf_path)
+                            nil: Err("flash program requires T32 or OpenOCD connection")
+
+    fn practice_script(script: text) -> Result<text, text>:
+        match self.t32_gdb:
+            Some(tg): tg.practice_script(script)
+            nil: Err("PRACTICE script requires T32 GDB bridge connection")
 
 fn _parse_stack_trace(raw: text) -> Result<[FrameInfo], String>:
     var result: [FrameInfo] = []
