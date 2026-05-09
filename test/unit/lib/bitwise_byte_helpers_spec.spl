@@ -1,0 +1,71 @@
+"""
+B4 (compiler_bugs_for_crypto_2026-04-25.md) — bitfield helpers.
+
+The plan's "do this regardless" part: byte/bit slice helpers in stdlib
+that crypto-port code can call directly instead of writing
+shift-and-mask by hand. These already exist in bitwise_utils.spl —
+this spec is the regression guard for the get/set/extract/insert
+round-trips that B4's acceptance covers (slice get, slice set,
+multi-slice set, aliasing).
+
+The full `int.bits[lo..hi]` syntax sugar is deferred (separate task
+B4-sugar — needs parser + HIR variant; helpers cover the semantics).
+"""
+
+use std.spec
+use std.bitwise_utils.{get_byte, set_byte, extract_bits, insert_bits}
+
+describe "byte helpers (B4)":
+
+    it "get_byte extracts each byte position":
+        val n = 0x1234567890ABCDEF
+        expect(get_byte(n, 0)).to_equal(0xEF)
+        expect(get_byte(n, 1)).to_equal(0xCD)
+        expect(get_byte(n, 2)).to_equal(0xAB)
+        expect(get_byte(n, 3)).to_equal(0x90)
+        expect(get_byte(n, 4)).to_equal(0x78)
+        expect(get_byte(n, 5)).to_equal(0x56)
+        expect(get_byte(n, 6)).to_equal(0x34)
+        expect(get_byte(n, 7)).to_equal(0x12)
+
+    it "set_byte writes each byte position":
+        val n = 0x0
+        expect(set_byte(n, 0, 0xAB)).to_equal(0xAB)
+        expect(set_byte(n, 1, 0xAB)).to_equal(0xAB00)
+        expect(set_byte(n, 3, 0xAB)).to_equal(0xAB000000)
+        expect(set_byte(n, 7, 0xAB)).to_equal(0xAB00000000000000)
+
+    it "set_byte clears the existing byte before writing":
+        val n = 0xFF
+        expect(set_byte(n, 0, 0x12)).to_equal(0x12)
+
+    it "get/set round-trips for every byte position":
+        val n = 0x1234567890ABCDEF
+        var i = 0
+        while i < 8:
+            val b = get_byte(n, i)
+            val updated = set_byte(n, i, b)
+            expect(updated).to_equal(n)
+            i = i + 1
+
+describe "bit slice helpers (B4)":
+
+    it "extract_bits matches plan example":
+        # extract_bits(0b11010110, 2, 3) -> 0b101
+        expect(extract_bits(0b11010110, 2, 3)).to_equal(0b101)
+
+    it "insert_bits matches plan example":
+        # insert_bits(0b11110000, 0b101, 2, 3) -> 0b11110100
+        expect(insert_bits(0b11110000, 0b101, 2, 3)).to_equal(0b11110100)
+
+    it "extract/insert round-trip preserves the field":
+        val target = 0xDEAD_BEEF
+        val v = extract_bits(target, 8, 8)   # second-lowest byte
+        val rewritten = insert_bits(target, v, 8, 8)
+        expect(rewritten).to_equal(target)
+
+    it "multi-slice insert composes (independent fields, no aliasing)":
+        val base = 0
+        val with_lo = insert_bits(base, 0xAB, 0, 8)
+        val with_hi = insert_bits(with_lo, 0xCD, 8, 8)
+        expect(with_hi).to_equal(0xCDAB)
