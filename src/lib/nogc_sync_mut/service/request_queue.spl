@@ -1,0 +1,100 @@
+"""
+# Service Request Queue — Two-lane priority FIFO
+#
+# Lane 0 (low priority) = read-only operations (shared lease)
+# Lane 1 (high priority) = mutating operations (exclusive lease)
+# Drain order: all lane-1 items first, then lane-0.
+"""
+
+use std.io_runtime
+
+struct QueueEntry:
+    id: text
+    payload: text
+    lane: i64
+    enqueued_at_us: i64
+
+struct RequestQueue:
+    high: [QueueEntry]
+    low: [QueueEntry]
+    next_id: i64
+
+extern fn rt_time_now_unix_micros() -> i64
+
+fn request_queue_new() -> RequestQueue:
+    RequestQueue(high: [], low: [], next_id: 1i64)
+
+fn _next_queue_id(q: RequestQueue) -> text:
+    val id = q.next_id
+    q.next_id = q.next_id + 1i64
+    "req-{id}"
+
+# --- Enqueue ---
+
+fn enqueue(q: RequestQueue, payload: text, lane: i64) -> text:
+    val id = _next_queue_id(q)
+    val entry = QueueEntry(
+        id: id,
+        payload: payload,
+        lane: lane,
+        enqueued_at_us: rt_time_now_unix_micros()
+    )
+    if lane == 1i64:
+        q.high.push(entry)
+    else:
+        q.low.push(entry)
+    id
+
+# --- Dequeue (priority: high lane first) ---
+
+fn dequeue(q: RequestQueue) -> QueueEntry:
+    if q.high.len() > 0i64:
+        val entry = q.high[0i64]
+        var rest: [QueueEntry] = []
+        var i = 1i64
+        while i < q.high.len():
+            rest.push(q.high[i])
+            i = i + 1i64
+        q.high = rest
+        return entry
+    if q.low.len() > 0i64:
+        val entry = q.low[0i64]
+        var rest: [QueueEntry] = []
+        var i = 1i64
+        while i < q.low.len():
+            rest.push(q.low[i])
+            i = i + 1i64
+        q.low = rest
+        return entry
+    # Empty queue — return sentinel
+    QueueEntry(id: "", payload: "", lane: -1i64, enqueued_at_us: 0i64)
+
+# --- Query ---
+
+fn queue_len(q: RequestQueue) -> i64:
+    q.high.len() + q.low.len()
+
+fn queue_is_empty(q: RequestQueue) -> bool:
+    q.high.len() == 0i64 and q.low.len() == 0i64
+
+fn queue_high_len(q: RequestQueue) -> i64:
+    q.high.len()
+
+fn queue_low_len(q: RequestQueue) -> i64:
+    q.low.len()
+
+# --- Drain (for shutdown) ---
+
+fn queue_drain(q: RequestQueue) -> [QueueEntry]:
+    var all: [QueueEntry] = []
+    var i = 0i64
+    while i < q.high.len():
+        all.push(q.high[i])
+        i = i + 1i64
+    i = 0i64
+    while i < q.low.len():
+        all.push(q.low[i])
+        i = i + 1i64
+    q.high = []
+    q.low = []
+    all

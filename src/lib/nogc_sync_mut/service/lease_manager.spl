@@ -1,0 +1,179 @@
+"""
+# Service Lease Manager — TTL-based lease allocation with ghost-lock detection
+#
+# Provides exclusive and shared lease semantics for serializing mutations.
+# Ghost-lock reclaim: a lease whose holder PID is dead OR whose TTL has
+# elapsed is reclaimed automatically.
+"""
+
+use std.io_runtime
+
+extern fn rt_time_now_unix_micros() -> i64
+extern fn rt_process_exists(pid: i64) -> bool
+
+# --- Lease Kind Constants ---
+
+val LEASE_EXCLUSIVE: i64 = 0i64
+val LEASE_SHARED: i64 = 1i64
+
+# --- Lease Entry ---
+
+struct LeaseEntry:
+    lease_id: text
+    holder_pid: i64
+    kind: i64
+    ttl_ms: i64
+    granted_at_us: i64
+    expires_at_us: i64
+
+# --- Lease Result ---
+
+struct LeaseResult:
+    ok: bool
+    lease_id: text
+    busy_message: text
+
+# --- Lease Manager ---
+
+struct LeaseManager:
+    leases: [LeaseEntry]
+    next_id: i64
+
+fn lease_manager_new() -> LeaseManager:
+    LeaseManager(leases: [], next_id: 1i64)
+
+# --- Internal: generate lease ID ---
+
+fn _next_lease_id(mgr: LeaseManager) -> text:
+    val id = mgr.next_id
+    mgr.next_id = mgr.next_id + 1i64
+    "lease-{id}"
+
+# --- Internal: check if lease is expired ---
+
+fn _is_expired(entry: LeaseEntry, now_us: i64) -> bool:
+    now_us >= entry.expires_at_us
+
+# --- Internal: check if holder PID is dead ---
+
+fn _is_holder_dead(entry: LeaseEntry) -> bool:
+    not rt_process_exists(entry.holder_pid)
+
+# --- Internal: reclaim ghost leases ---
+
+fn _reclaim_ghosts(mgr: LeaseManager) -> [text]:
+    val now_us = rt_time_now_unix_micros()
+    var reclaimed: [text] = []
+    var kept: [LeaseEntry] = []
+    var i = 0i64
+    while i < mgr.leases.len():
+        val entry = mgr.leases[i]
+        if _is_expired(entry, now_us) or _is_holder_dead(entry):
+            reclaimed.push(entry.lease_id)
+        else:
+            kept.push(entry)
+        i = i + 1i64
+    mgr.leases = kept
+    reclaimed
+
+# --- Internal: has active exclusive lease? ---
+
+fn _has_exclusive(mgr: LeaseManager) -> bool:
+    var i = 0i64
+    while i < mgr.leases.len():
+        val entry = mgr.leases[i]
+        if entry.kind == LEASE_EXCLUSIVE:
+            return true
+        i = i + 1i64
+    false
+
+# --- Internal: find first exclusive lease for busy message ---
+
+fn _first_exclusive(mgr: LeaseManager) -> LeaseEntry:
+    var i = 0i64
+    while i < mgr.leases.len():
+        val entry = mgr.leases[i]
+        if entry.kind == LEASE_EXCLUSIVE:
+            return entry
+        i = i + 1i64
+    # Should not reach here -- caller checks _has_exclusive first
+    mgr.leases[0i64]
+
+# --- Acquire Exclusive Lease ---
+
+fn try_acquire_exclusive(mgr: LeaseManager, pid: i64, ttl_ms: i64) -> LeaseResult:
+    val _reclaimed = _reclaim_ghosts(mgr)
+    if mgr.leases.len() > 0i64:
+        val blocker = mgr.leases[0i64]
+        val b_id = blocker.lease_id
+        val b_pid = blocker.holder_pid
+        val b_ttl = blocker.ttl_ms
+        return LeaseResult(
+            ok: false,
+            lease_id: "",
+            busy_message: "BUSY: lease {b_id} held by pid {b_pid}, expires in {b_ttl}ms"
+        )
+    val now_us = rt_time_now_unix_micros()
+    val lease_id = _next_lease_id(mgr)
+    val entry = LeaseEntry(
+        lease_id: lease_id,
+        holder_pid: pid,
+        kind: LEASE_EXCLUSIVE,
+        ttl_ms: ttl_ms,
+        granted_at_us: now_us,
+        expires_at_us: now_us + (ttl_ms * 1000i64)
+    )
+    mgr.leases.push(entry)
+    LeaseResult(ok: true, lease_id: lease_id, busy_message: "")
+
+# --- Acquire Shared Lease ---
+
+fn try_acquire_shared(mgr: LeaseManager, pid: i64, ttl_ms: i64) -> LeaseResult:
+    val _reclaimed = _reclaim_ghosts(mgr)
+    if _has_exclusive(mgr):
+        val blocker = _first_exclusive(mgr)
+        val b_id = blocker.lease_id
+        val b_pid = blocker.holder_pid
+        return LeaseResult(
+            ok: false,
+            lease_id: "",
+            busy_message: "BUSY: exclusive lease {b_id} held by pid {b_pid}"
+        )
+    val now_us = rt_time_now_unix_micros()
+    val lease_id = _next_lease_id(mgr)
+    val entry = LeaseEntry(
+        lease_id: lease_id,
+        holder_pid: pid,
+        kind: LEASE_SHARED,
+        ttl_ms: ttl_ms,
+        granted_at_us: now_us,
+        expires_at_us: now_us + (ttl_ms * 1000i64)
+    )
+    mgr.leases.push(entry)
+    LeaseResult(ok: true, lease_id: lease_id, busy_message: "")
+
+# --- Release Lease ---
+
+fn release_lease(mgr: LeaseManager, lease_id: text) -> bool:
+    var kept: [LeaseEntry] = []
+    var found = false
+    var i = 0i64
+    while i < mgr.leases.len():
+        val entry = mgr.leases[i]
+        if entry.lease_id == lease_id:
+            found = true
+        else:
+            kept.push(entry)
+        i = i + 1i64
+    mgr.leases = kept
+    found
+
+# --- Query active leases ---
+
+fn active_lease_count(mgr: LeaseManager) -> i64:
+    val _reclaimed = _reclaim_ghosts(mgr)
+    mgr.leases.len()
+
+fn has_active_exclusive(mgr: LeaseManager) -> bool:
+    val _reclaimed = _reclaim_ghosts(mgr)
+    _has_exclusive(mgr)
