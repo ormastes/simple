@@ -38,7 +38,7 @@ fn divide(a: i32, b: i32) -> i32:
 ## Effects: `@pure`, `@io`, `@fs`, `@net`, `@unsafe`
 
 ## EasyFix Rules (9)
-print_in_test_spec, unnamed_duplicate_typed_args, resource_leak, sspec_missing_docstrings, sspec_manual_assertions, non_exhaustive_match, typo_suggestion, parser_contextual_keyword, type_mismatch_coercion
+print_in_test_spec, unnamed_duplicate_typed_args, resource_leak, spipe_missing_docstrings, spipe_manual_assertions, non_exhaustive_match, typo_suggestion, parser_contextual_keyword, type_mismatch_coercion
 
 ## Commands
 ```bash

@@ -74,7 +74,7 @@ Format: `# @cover <src_path> <percentage>%`
 - Point to the **last-layer component** the test exercises
 - The test runner will ERROR if missing. Bypass: `--no-cover-check`
 
-### 4. Template: `cp .claude/templates/sspec_template.spl test/my_spec.spl`
+### 4. Template: `cp .claude/templates/spipe_template.spl test/my_spec.spl`
 
 ## BDD Syntax
 

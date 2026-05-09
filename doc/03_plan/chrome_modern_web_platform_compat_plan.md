@@ -61,7 +61,7 @@ Exit gate:
 
 Create:
 
-- `tools/wpt_to_sspec/`
+- `tools/wpt_to_spipe/`
 - `doc/03_plan/sys_test/wpt_subset_migration.md`
 - `test/web_platform/`
 
@@ -81,13 +81,13 @@ Tasks:
 
 Exit gate:
 
-- At least 25 selected WPT-derived cases run as SSpec and report deterministic PASS/WARN/FAIL.
+- At least 25 selected WPT-derived cases run as SPipe and report deterministic PASS/WARN/FAIL.
 
 ## Phase 3: Test262 Subset Migration
 
 Create:
 
-- `tools/test262_to_sspec/`
+- `tools/test262_to_spipe/`
 - `doc/03_plan/sys_test/test262_subset_migration.md`
 - `test/js/test262_subset/`
 

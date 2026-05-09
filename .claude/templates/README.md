@@ -1,10 +1,10 @@
-# SSpec Templates
+# SPipe Templates
 
-This directory contains templates for creating new SSpec test files.
+This directory contains templates for creating new SPipe test files.
 
 ## Available Templates
 
-### `sspec_template.spl`
+### `spipe_template.spl`
 
 **Purpose:** Standard template for creating feature specification test files.
 
@@ -12,7 +12,7 @@ This directory contains templates for creating new SSpec test files.
 
 ```bash
 # Create a new feature spec
-cp .claude/templates/sspec_template.spl \
+cp .claude/templates/spipe_template.spl \
    simple/test/system/features/my_feature/my_feature_spec.spl
 
 # Edit the file and fill in:
@@ -52,7 +52,7 @@ See `doc/07_guide/testing/testing.md` for full testing guide.
 3. **Write tests** with `describe`/`context`/`it` blocks
 4. **Add docstrings** to document behavior
 5. **Run tests:** `cargo test -p simple-driver simple_stdlib`
-6. **Generate docs:** `cargo run --bin gen-sspec-docs -- path/to/*_spec.spl`
+6. **Generate docs:** `cargo run --bin gen-spipe-docs -- path/to/*_spec.spl`
 
 ## Documentation Requirements
 
@@ -109,6 +109,6 @@ describe "MyFeature":
 
 ## See Also
 
-- `/sspec` skill - Quick reference
-- `doc/07_guide/testing/testing.md` - Testing guide (includes SSpec)
-- `doc/06_spec/sspec_format.md` - Format specification
+- `/spipe` skill - Quick reference
+- `doc/07_guide/testing/testing.md` - Testing guide (includes SPipe)
+- `doc/06_spec/spipe_format.md` - Format specification

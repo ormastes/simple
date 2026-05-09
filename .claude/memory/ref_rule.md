@@ -19,7 +19,7 @@ type: reference
 ## Testing Rules
 - NEVER skip/ignore failing tests without user approval
 - Fix root cause, not symptoms
-- Built-in matchers only (see sspec skill)
+- Built-in matchers only (see spipe skill)
 - Every `*_spec.spl` must have module-level docstring
 
 ## Doc Rules

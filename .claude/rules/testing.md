@@ -23,5 +23,5 @@ scripts/local-container-test.shs unit                     # Container tests
 scripts/local-container-test.shs quick path/to/spec.spl  # Single container test
 ```
 
-## SSpec Template
-See `.claude/templates/sspec_template.spl`
+## SPipe Template
+See `.claude/templates/spipe_template.spl`

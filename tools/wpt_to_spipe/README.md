@@ -1,6 +1,6 @@
-# WPT To SSpec
+# WPT To SPipe
 
-This directory records the local migration surface for selected Web Platform Tests into Simple SSpec.
+This directory records the local migration surface for selected Web Platform Tests into Simple SPipe.
 
 The first subset is hand-curated rather than a full importer:
 
