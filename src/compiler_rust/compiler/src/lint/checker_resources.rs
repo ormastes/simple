@@ -75,6 +75,8 @@ impl LintChecker {
                 Expr::Await(operand) => creates_resource(operand),
                 // Try operator on resource factory
                 Expr::Try(operand) => creates_resource(operand),
+                // Force unwrap on resource factory
+                Expr::ForceUnwrap(operand) => creates_resource(operand),
                 _ => None,
             }
         }

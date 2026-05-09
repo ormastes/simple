@@ -258,6 +258,9 @@ fn has_suspension_in_expr(expr: &Expr) -> bool {
         // Try expression (?)
         Expr::Try(inner) => has_suspension_in_expr(inner),
 
+        // Force unwrap (!)
+        Expr::ForceUnwrap(inner) => has_suspension_in_expr(inner),
+
         // All other expressions (literals, identifiers, etc.) - no suspension
         // This includes: Int, Float, String, Bool, Char, Identifier, SelfRef, Nil, etc.
         _ => false,

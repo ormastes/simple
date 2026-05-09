@@ -184,6 +184,8 @@ impl Lowerer {
             }
             // Try expression: expr? - unwrap Result or propagate error
             Expr::Try(inner) => self.lower_try(inner, ctx),
+            // Force unwrap: expr! - unwrap or panic (lowered same as try for codegen)
+            Expr::ForceUnwrap(inner) => self.lower_try(inner, ctx),
             // Range expression: start..end or start..=end
             Expr::Range { start, end, bound } => self.lower_range(start.as_deref(), end.as_deref(), *bound, ctx),
             _ => {

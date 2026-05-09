@@ -190,6 +190,7 @@ pub fn rt_ast_expr_tag(args: &[Value]) -> Result<Value, CompileError> {
             Expr::FunctionalUpdate { .. } => "FunctionalUpdate",
             Expr::MacroInvocation { .. } => "MacroInvocation",
             Expr::Try(_) => "Try",
+            Expr::ForceUnwrap(_) => "ForceUnwrap",
             Expr::ExistsCheck(_) => "ExistsCheck",
             Expr::UnwrapOr { .. } => "UnwrapOr",
             Expr::UnwrapElse { .. } => "UnwrapElse",

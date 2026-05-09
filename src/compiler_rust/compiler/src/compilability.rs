@@ -435,6 +435,12 @@ fn analyze_expr(expr: &Expr, reasons: &mut Vec<FallbackReason>) {
             add_reason(reasons, FallbackReason::TryOperator);
         }
 
+        // Force unwrap operator
+        Expr::ForceUnwrap(inner) => {
+            analyze_expr(inner, reasons);
+            add_reason(reasons, FallbackReason::TryOperator);
+        }
+
         // Existence check operator
         Expr::ExistsCheck(inner) => {
             analyze_expr(inner, reasons);
