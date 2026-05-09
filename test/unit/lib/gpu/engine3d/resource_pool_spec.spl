@@ -1,0 +1,139 @@
+# @tag: gpu, engine3d, resource
+# @cover src/lib/gc_async_mut/gpu/engine3d/resource_pool.spl 70%
+
+use std.spec.{describe, context, it, expect}
+use std.gpu.engine3d.resource_pool.{
+    ResourcePool3D, TextureHandle3D, BufferHandle3D,
+    ShaderHandle3D, PipelineHandle3D
+}
+use std.gpu.engine3d.texture3d.{TEX_FMT_RGBA8_UNORM}
+
+describe "Engine3D ResourcePool3D":
+
+    context "ResourcePool3D.create":
+
+        it "total_resource_count starts at 0":
+            val pool = ResourcePool3D.create()
+            expect(pool.total_resource_count()).to_equal(0)
+
+    context "allocate_texture":
+
+        it "returns handle with correct width":
+            var pool = ResourcePool3D.create()
+            val h = pool.allocate_texture(512, 256, 1, TEX_FMT_RGBA8_UNORM, 1, 42)
+            expect(h.width).to_equal(512)
+
+        it "returns handle with correct height":
+            var pool = ResourcePool3D.create()
+            val h = pool.allocate_texture(512, 256, 1, TEX_FMT_RGBA8_UNORM, 1, 42)
+            expect(h.height).to_equal(256)
+
+        it "returns handle with correct depth":
+            var pool = ResourcePool3D.create()
+            val h = pool.allocate_texture(512, 256, 4, TEX_FMT_RGBA8_UNORM, 1, 42)
+            expect(h.depth).to_equal(4)
+
+        it "texture_count increments":
+            var pool = ResourcePool3D.create()
+            pool.allocate_texture(64, 64, 1, TEX_FMT_RGBA8_UNORM, 1, 1)
+            expect(pool.texture_count()).to_equal(1)
+
+    context "allocate_buffer":
+
+        it "buffer_count increments":
+            var pool = ResourcePool3D.create()
+            pool.allocate_buffer(1024, 0, 1)
+            expect(pool.buffer_count()).to_equal(1)
+
+    context "allocate_shader":
+
+        it "shader_count increments":
+            var pool = ResourcePool3D.create()
+            pool.allocate_shader("vs_main", "fs_main", 1)
+            expect(pool.shader_count()).to_equal(1)
+
+    context "allocate_pipeline":
+
+        it "pipeline_count increments":
+            var pool = ResourcePool3D.create()
+            pool.allocate_pipeline(1, true, 0, 0, 1)
+            expect(pool.pipeline_count()).to_equal(1)
+
+    context "free_texture":
+
+        it "texture_count decrements":
+            var pool = ResourcePool3D.create()
+            val h = pool.allocate_texture(64, 64, 1, TEX_FMT_RGBA8_UNORM, 1, 1)
+            pool.free_texture(h.id)
+            expect(pool.texture_count()).to_equal(0)
+
+    context "find_texture":
+
+        it "returns handle for valid id":
+            var pool = ResourcePool3D.create()
+            val h = pool.allocate_texture(128, 128, 1, TEX_FMT_RGBA8_UNORM, 1, 5)
+            val found = pool.find_texture(h.id)
+            expect(found.?.width).to_equal(128)
+
+        it "returns nil for invalid id":
+            var pool = ResourcePool3D.create()
+            val found = pool.find_texture(99999)
+            expect(found.is_nil()).to_equal(true)
+
+    context "touch_texture":
+
+        it "updates last_used_frame after advance_frame":
+            var pool = ResourcePool3D.create()
+            val h = pool.allocate_texture(64, 64, 1, TEX_FMT_RGBA8_UNORM, 1, 1)
+            pool.advance_frame()
+            pool.touch_texture(h.id)
+            val found = pool.find_texture(h.id)
+            expect(found.?.last_used_frame).to_equal(1)
+
+    context "gc_unused_textures":
+
+        it "removes old textures":
+            var pool = ResourcePool3D.create()
+            pool.allocate_texture(64, 64, 1, TEX_FMT_RGBA8_UNORM, 1, 1)
+            pool.advance_frame()
+            pool.advance_frame()
+            pool.advance_frame()
+            val freed = pool.gc_unused_textures(2)
+            expect(freed).to_equal(1)
+
+        it "keeps fresh textures":
+            var pool = ResourcePool3D.create()
+            val h = pool.allocate_texture(64, 64, 1, TEX_FMT_RGBA8_UNORM, 1, 1)
+            pool.advance_frame()
+            pool.touch_texture(h.id)
+            val freed = pool.gc_unused_textures(2)
+            expect(freed).to_equal(0)
+
+    context "gpu_id field":
+
+        it "allocated handle has correct gpu_id":
+            var pool = ResourcePool3D.create()
+            val h = pool.allocate_texture(64, 64, 1, TEX_FMT_RGBA8_UNORM, 1, 77)
+            expect(h.gpu_id).to_equal(77)
+
+    context "gc_unused combined":
+
+        it "returns total freed count":
+            var pool = ResourcePool3D.create()
+            pool.allocate_texture(64, 64, 1, TEX_FMT_RGBA8_UNORM, 1, 1)
+            pool.allocate_buffer(256, 0, 1)
+            pool.advance_frame()
+            pool.advance_frame()
+            pool.advance_frame()
+            val freed = pool.gc_unused(2)
+            expect(freed).to_equal(2)
+
+    context "total_resource_count":
+
+        it "sums all resource types":
+            var pool = ResourcePool3D.create()
+            pool.allocate_texture(64, 64, 1, TEX_FMT_RGBA8_UNORM, 1, 1)
+            pool.allocate_buffer(256, 0, 1)
+            pool.allocate_shader("vs", "fs", 1)
+            pool.allocate_pipeline(1, false, 0, 0, 1)
+            expect(pool.total_resource_count()).to_equal(4)

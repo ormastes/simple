@@ -1,0 +1,126 @@
+# @tag: gpu, engine3d, texture, integration
+# @cover src/lib/gc_async_mut/gpu/engine3d/engine.spl 30%
+
+use std.spec.{describe, context, it, expect}
+use std.gpu.engine3d.engine.{Engine3D}
+use std.gpu.engine3d.resource_pool.{TextureHandle3D, ShaderHandle3D, BufferHandle3D, PipelineHandle3D}
+use std.gpu.engine3d.texture3d.{TextureDescriptor3D, SamplerDescriptor3D, TEX_FMT_RGBA8_UNORM, TEX_FMT_DEPTH32_FLOAT, TEX_DIM_2D}
+
+describe "Engine3D Texture Operations":
+
+    context "engine construction":
+
+        it "Engine3D.create creates engine with 320x240":
+            var engine = Engine3D.create(320, 240)
+            expect(engine._w).to_equal(320)
+            expect(engine._h).to_equal(240)
+
+    context "load_texture":
+
+        it "returns handle with correct width and height":
+            var engine = Engine3D.create(320, 240)
+            val pixels: [u32] = [0xFFFFFFFF]
+            val handle = engine.load_texture(64, 64, pixels)
+            expect(handle.width).to_equal(64)
+            expect(handle.height).to_equal(64)
+
+        it "returns handle with gpu_id >= -1 in emu":
+            var engine = Engine3D.create(320, 240)
+            val pixels: [u32] = [0xFFFFFFFF]
+            val handle = engine.load_texture(64, 64, pixels)
+            expect(handle.gpu_id).to_be_greater_than(-2)
+
+    context "load_depth_texture":
+
+        it "returns handle with format TEX_FMT_DEPTH32_FLOAT":
+            var engine = Engine3D.create(320, 240)
+            val handle = engine.load_depth_texture(128, 128)
+            expect(handle.format).to_equal(TEX_FMT_DEPTH32_FLOAT)
+
+    context "load_cubemap":
+
+        it "returns handle with depth 6":
+            var engine = Engine3D.create(320, 240)
+            val face: [u32] = [0xFF000000]
+            val faces: [[u32]] = [face, face, face, face, face, face]
+            val handle = engine.load_cubemap(64, faces)
+            expect(handle.depth).to_equal(6)
+
+    context "unload_texture":
+
+        it "after unload resource_pool texture_count decrements":
+            var engine = Engine3D.create(320, 240)
+            val pixels: [u32] = [0xFFFFFFFF]
+            val handle = engine.load_texture(64, 64, pixels)
+            val before = engine.resource_pool().texture_count()
+            engine.unload_texture(handle)
+            val after = engine.resource_pool().texture_count()
+            expect(after).to_equal(before - 1)
+
+    context "load_shader and unload_shader":
+
+        it "load_shader returns handle with valid id":
+            var engine = Engine3D.create(320, 240)
+            val handle = engine.load_shader("void main(){}", "void main(){}")
+            expect(handle.id).to_be_greater_than(0)
+
+        it "unload_shader frees the shader":
+            var engine = Engine3D.create(320, 240)
+            val handle = engine.load_shader("void main(){}", "void main(){}")
+            val before = engine.resource_pool().shader_count()
+            engine.unload_shader(handle)
+            val after = engine.resource_pool().shader_count()
+            expect(after).to_equal(before - 1)
+
+    context "load_buffer and unload_buffer":
+
+        it "load_buffer returns handle with valid id":
+            var engine = Engine3D.create(320, 240)
+            val handle = engine.load_buffer(1024)
+            expect(handle.id).to_be_greater_than(0)
+
+        it "unload_buffer frees the buffer":
+            var engine = Engine3D.create(320, 240)
+            val handle = engine.load_buffer(1024)
+            val before = engine.resource_pool().buffer_count()
+            engine.unload_buffer(handle)
+            val after = engine.resource_pool().buffer_count()
+            expect(after).to_equal(before - 1)
+
+    context "load_pipeline":
+
+        it "creates pipeline from shader handle":
+            var engine = Engine3D.create(320, 240)
+            val shader = engine.load_shader("void main(){}", "void main(){}")
+            val pipeline = engine.load_pipeline(shader, true, 0, 0)
+            expect(pipeline.id).to_be_greater_than(0)
+
+    context "gc_resources":
+
+        it "after loading and not touching gc removes stale resources":
+            var engine = Engine3D.create(320, 240)
+            val pixels: [u32] = [0xFFFFFFFF]
+            engine.load_texture(32, 32, pixels)
+            engine.resource_pool().advance_frame()
+            engine.resource_pool().advance_frame()
+            engine.gc_resources(1)
+            expect(engine.resource_pool().texture_count()).to_equal(0)
+
+    context "resource_pool total_resource_count":
+
+        it "matches expected count after operations":
+            var engine = Engine3D.create(320, 240)
+            val pixels: [u32] = [0xFFFFFFFF]
+            engine.load_texture(32, 32, pixels)
+            val shader = engine.load_shader("void main(){}", "void main(){}")
+            engine.load_buffer(256)
+            expect(engine.resource_pool().total_resource_count()).to_equal(3)
+
+    context "create_texture_ex":
+
+        it "with TextureDescriptor3D.create_2d returns i32":
+            var engine = Engine3D.create(320, 240)
+            val desc = TextureDescriptor3D.create_2d(64, 64, TEX_FMT_RGBA8_UNORM)
+            val data: [u8] = []
+            val id = engine.create_texture_ex(desc, data)
+            expect(id).to_be_greater_than(-2)

@@ -666,3 +666,241 @@ enum CodegenTarget:
 
 - [GPU Programming Guide](../guide/apps/gpu.md) - Tutorial and examples
 - [GPU Backend Design](../design/gpu_backend_design.md) - Architecture details
+
+---
+
+## 3D Rendering Engine (std.gpu.engine3d)
+
+The `std.gpu.engine3d` module is a multi-backend 3D rendering engine with automatic backend selection. It sits on top of the GPU compute layer and provides a high-level facade for geometry submission, lighting, textures, shadows, post-processing, and compute.
+
+**Module path:** `src/lib/gc_async_mut/gpu/engine3d/`
+
+### Architecture
+
+The engine uses a layered trait hierarchy:
+
+```
+Engine3D (facade)
+    └── RenderBackend3D  (= RenderBackend3DCore + RenderBackend3DAdv)
+            ├── RenderBackend3DCore   — 32 required methods
+            └── RenderBackend3DAdv   — 42 optimized methods (emulatable from Core)
+    └── Engine3DExtended (optional)  — 20 Chrome WebGPU extension methods
+```
+
+- **`RenderBackend3DCore`** (`backend_core.spl`) — the minimum interface every backend must implement. Covers identity, lifecycle, view, clear, submit_triangle, lighting, render state, render targets, pixel transfer, readback, and extended texture ops.
+- **`RenderBackend3DAdv`** (`backend_adv.spl`) — optimized paths. Every method is emulatable via `backend_emu.spl` using only Core methods, so minimal backends get full Adv behavior for free.
+- **`RenderBackend3D`** (`backend.spl`) — combined trait = Core + Adv. Full backends implement this directly.
+- **`Engine3DExtended`** (`backend.spl`) — optional Chrome WebGPU parity extensions: MSAA, ray tracing, variable rate shading, mesh shaders, and bind groups.
+- **`Engine3D`** (`engine.spl`) — public facade. Selects the best backend at init time and delegates all operations.
+
+### Backends
+
+| Backend | File | Description |
+|---------|------|-------------|
+| CPU (rasterizer) | `backend_cpu.spl` | Default software rasterizer, always available |
+| Software | `backend_software.spl` | Pure-software fallback |
+| Emulation | `backend_emu.spl` | Stateless Core→Adv emulation layer |
+| CUDA | `backend_cuda.spl` | NVIDIA CUDA compute path |
+| Vulkan | `backend_vulkan.spl` | Vulkan (SPIR-V) |
+| ROCm | `backend_rocm.spl` | AMD ROCm |
+| Metal | `backend_metal.spl` | Apple Metal |
+| OpenGL | `backend_opengl.spl` | OpenGL |
+| Intel | `backend_intel.spl` | Intel GPU |
+| WebGPU | `backend_webgpu.spl` | Chrome WebGPU (browser + native) |
+| Qualcomm | `backend_qualcomm.spl` | Qualcomm Adreno |
+| Baremetal | `backend_baremetal.spl` | No-alloc baremetal target |
+| VirtioGPU | `backend_virtio_gpu.spl` | VirtIO GPU (QEMU/VM) |
+
+### Quick Start
+
+```simple
+use std.gpu.engine3d.engine.{Engine3D}
+use std.gpu.engine3d.types3d.{Vertex3D, Material3DParams, LightParams3D}
+
+var engine = Engine3D.create(800, 600)
+
+engine.begin_frame()
+engine.clear(0xFF111111)
+
+val v0 = Vertex3D(x: 0.0, y: 0.5, z: 0.0, nx: 0.0, ny: 0.0, nz: 1.0, u: 0.5, v: 0.0, color: 0xFFFF0000)
+val v1 = Vertex3D(x: -0.5, y: -0.5, z: 0.0, nx: 0.0, ny: 0.0, nz: 1.0, u: 0.0, v: 1.0, color: 0xFF00FF00)
+val v2 = Vertex3D(x: 0.5, y: -0.5, z: 0.0, nx: 0.0, ny: 0.0, nz: 1.0, u: 1.0, v: 1.0, color: 0xFF0000FF)
+val mat = Material3DParams(albedo: 0xFFFFFFFF, roughness: 0.5, metallic: 0.0, texture_id: -1, shader_type: 0)
+val identity = [1.0f32, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0]
+engine.submit_triangle(v0, v1, v2, mat, identity)
+
+engine.end_frame()
+engine.present()
+
+val pixels = engine.read_pixels()
+engine.shutdown()
+```
+
+### Core Type Reference
+
+#### Vertex and Geometry Types
+
+| Type | Module | Fields |
+|------|--------|--------|
+| `Vertex3D` | `types3d` | `x, y, z: f32` position; `nx, ny, nz: f32` normal; `u, v: f32` UV; `color: u32` ARGB |
+| `Material3DParams` | `types3d` | `albedo: u32`; `roughness, metallic: f32`; `texture_id: i32`; `shader_type: i32` |
+| `LightParams3D` | `types3d` | `x, y, z: f32` position; `color: u32`; `intensity: f32`; `light_type: i32` |
+
+#### Texture Types
+
+| Type | Module | Key Fields |
+|------|--------|-----------|
+| `TextureDescriptor3D` | `texture3d` | `dimension, format, width, height, depth_or_layers, mip_level_count, sample_count, usage: i32` |
+| `SamplerDescriptor3D` | `texture3d` | `min_filter, mag_filter, mip_filter, address_u, address_v, address_w: i32`; `lod_bias, min_lod, max_lod: f32`; `compare_func: i32` |
+| `TextureView3D` | `texture3d` | `texture_id, dimension, format, base_mip, mip_count, base_layer, layer_count: i32` |
+
+#### Shader and Pipeline Types
+
+| Type | Module | Key Fields |
+|------|--------|-----------|
+| `ShaderModule3D` | `shader3d` | `vertex_src, fragment_src: text`; `compute_src: text` |
+| `VertexAttribute3D` | `shader3d` | `location, format, offset: i32` |
+| `VertexBufferLayout3D` | `shader3d` | `stride: i32`; `attributes: [VertexAttribute3D]` |
+| `RenderPipelineDescriptor3D` | `shader3d` | `shader_id, vertex_layout_id: i32`; `depth_test, cull_mode, blend_mode: i32`; `topology: i32` |
+| `ComputePipelineDescriptor3D` | `shader3d` | `shader_id: i32`; `entry_point: text` |
+
+#### Bind Group Types
+
+| Type | Module | Key Fields |
+|------|--------|-----------|
+| `BindGroupLayoutEntry3D` | `bind_group3d` | `binding, visibility, binding_type, buffer_size: i32` |
+| `BindGroupEntry3D` | `bind_group3d` | `binding, buffer_id, texture_id, sampler_id, offset, size: i32` |
+| `BindGroup3D` | `bind_group3d` | `id, layout_id: i32`; `entries: [BindGroupEntry3D]` |
+
+### Resource Management (ResourcePool3D)
+
+`ResourcePool3D` (`resource_pool.spl`) tracks all GPU resources with frame-age garbage collection. Each handle carries an `id` (pool index) and a `gpu_id` (backend resource ID).
+
+```simple
+use std.gpu.engine3d.resource_pool.{ResourcePool3D, TextureHandle3D, BufferHandle3D, ShaderHandle3D, PipelineHandle3D}
+
+# Textures
+val tex: TextureHandle3D = engine.load_texture(256, 256, pixels)
+val tex3d: TextureHandle3D = engine.load_texture_3d(64, 64, 64, voxels)
+val cube: TextureHandle3D = engine.load_cubemap(512, faces)
+val depth: TextureHandle3D = engine.load_depth_texture(800, 600)
+engine.unload_texture(tex)
+
+# Shaders and pipelines
+val sh: ShaderHandle3D = engine.load_shader(vert_src, frag_src)
+val pl: PipelineHandle3D = engine.load_pipeline(sh, true, 0, 1)
+engine.unload_shader(sh)
+
+# Buffers
+val buf: BufferHandle3D = engine.load_buffer(4096)
+engine.unload_buffer(buf)
+
+# GC resources unused for more than N frames
+engine.gc_resources(3)
+
+# Keep a resource alive for this frame
+engine.touch_resource(tex.id)
+```
+
+Handle fields:
+- `TextureHandle3D` — `id, gpu_id, width, height, depth, format, mip_levels, last_used_frame: i32`
+- `BufferHandle3D` — `id, gpu_id, size, usage, last_used_frame: i32`
+- `ShaderHandle3D` — `id, gpu_id: i32`; `vertex_src, fragment_src: text`
+- `PipelineHandle3D` — `id, gpu_id, shader_id: i32`; `depth_test: bool`; `blend_mode, cull_mode: i32`
+
+### Chrome WebGPU Texture System
+
+**Dimension constants** (`TEX_DIM_*`):
+
+| Constant | Value | Use |
+|----------|-------|-----|
+| `TEX_DIM_2D` | 0 | Standard 2D texture |
+| `TEX_DIM_3D` | 1 | Volume (3D) texture |
+| `TEX_DIM_CUBE` | 2 | Cubemap |
+| `TEX_DIM_2D_ARRAY` | 3 | 2D texture array |
+| `TEX_DIM_CUBE_ARRAY` | 4 | Cubemap array |
+
+**Format constants** (`TEX_FMT_*`):
+
+| Constant | Use |
+|----------|-----|
+| `TEX_FMT_RGBA8_UNORM` | Standard RGBA |
+| `TEX_FMT_RGBA8_SRGB` | sRGB RGBA |
+| `TEX_FMT_BGRA8_UNORM` | Swapped BGRA |
+| `TEX_FMT_RGBA16_FLOAT` | HDR half-float |
+| `TEX_FMT_RGBA32_FLOAT` | HDR full-float |
+| `TEX_FMT_DEPTH32_FLOAT` | Depth buffer |
+| `TEX_FMT_DEPTH24_PLUS_STENCIL8` | Depth + stencil |
+| `TEX_FMT_BC1_UNORM` | BC1 compressed (DXT1) |
+| `TEX_FMT_BC3_UNORM` | BC3 compressed (DXT5) |
+| `TEX_FMT_BC7_UNORM` | BC7 compressed |
+| `TEX_FMT_ETC2_RGB8` | ETC2 (mobile) |
+| `TEX_FMT_ASTC_4X4` | ASTC 4x4 |
+
+**Usage flags** (`TEX_USAGE_*`): `TEXTURE_BINDING` (1), `STORAGE_BINDING` (2), `RENDER_ATTACHMENT` (4), `COPY_SRC` (8), `COPY_DST` (16).
+
+### Color Utilities (color3d.spl)
+
+**Import:** `use std.gpu.engine3d.color3d.{rgba3d, rgb3d, srgb_to_linear, linear_to_srgb, luminance3d, tonemap_reinhard}`
+
+Colors are packed `u32` in ARGB layout: `0xAARRGGBB`.
+
+| Function | Signature | Description |
+|----------|-----------|-------------|
+| `rgba3d` | `(r, g, b, a: i32) -> u32` | Pack RGBA bytes into ARGB u32 |
+| `rgb3d` | `(r, g, b: i32) -> u32` | Pack RGB (alpha=255) |
+| `srgb_to_linear` | `(color: u32) -> [f32]` | Convert packed sRGB to linear `[r,g,b,a]` |
+| `linear_to_srgb` | `(linear: [f32]) -> u32` | Convert linear float array to packed sRGB |
+| `luminance3d` | `(color: u32) -> f32` | BT.709 relative luminance |
+| `luminance_linear` | `(linear: [f32]) -> f32` | Luminance from linear float array |
+| `tonemap_reinhard` | `(hdr: [f32], exposure: f32) -> u32` | Reinhard HDR→LDR tonemapping |
+| `pack_hdr_color` | `(r, g, b, a: f32) -> [f32]` | Pack HDR as float array (no clamp) |
+
+### Compositor (compositor3d.spl)
+
+Multi-pass rendering via ordered `RenderPass3D` layers merged by `Compositor3D`.
+
+```simple
+use std.gpu.engine3d.compositor3d.{RenderPass3D, Compositor3D}
+
+var comp = Compositor3D.create(800, 600)
+
+var bg = RenderPass3D.create("background", 800, 600)
+bg.set_z_order(0)
+
+var fg = RenderPass3D.create("foreground", 800, 600)
+fg.set_z_order(1)
+
+comp.add_pass(bg)
+comp.add_pass(fg)
+comp.sort_passes()
+
+# After rendering each pass into pass.pixels:
+val final_pixels = comp.composite()
+```
+
+`RenderPass3D` fields: `name: text`; `color_target_id, depth_target_id, z_order: i32`; `clear_color: u32`; `clear_depth: f32`; `enabled: bool`; `width, height: i32`; `pixels: [u32]`.
+
+`Compositor3D` methods: `add_pass`, `remove_pass`, `sort_passes`, `composite() -> [u32]`, `pass_count() -> i32`, `output_width/height() -> i32`.
+
+### SIMD Acceleration (simd_kernels3d.spl)
+
+**Import:** `use std.gpu.engine3d.simd_kernels3d.{SimdLevel3D, detect_simd_level_3d, simd_mat4_mul, simd_transform_vertices, simd_normalize_batch}`
+
+```simple
+enum SimdLevel3D:
+    None_     # Scalar fallback
+    Sse42     # SSE 4.2
+    Avx2      # AVX2 (256-bit)
+    Avx512    # AVX-512
+    Neon      # ARM NEON
+```
+
+| Function | Signature | Description |
+|----------|-----------|-------------|
+| `detect_simd_level_3d` | `() -> SimdLevel3D` | Runtime CPU feature detection |
+| `simd_mat4_mul` | `(result: [f32], a: [f32], b: [f32])` | 4x4 matrix multiply (column-major) |
+| `simd_transform_vertices` | `(verts: [f32], count: i32, mvp: [f32])` | Batch vertex transform by MVP matrix |
+| `simd_normalize_batch` | `(vecs: [f32], count: i32)` | Batch normalize 3D vectors |
+
+Falls back to scalar loops when no SIMD instructions are available.
