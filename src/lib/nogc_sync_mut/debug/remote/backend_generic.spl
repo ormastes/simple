@@ -1,0 +1,291 @@
+# Generic Remote Debug Backend
+# Architecture-agnostic DebugBackend implementation.
+# Takes a DebugTargetInfo trait object, eliminating per-arch backend duplication.
+
+use app.debug.coordinator.{DebugBackend, VarInfo, FrameInfo, LocationInfo}
+use app.debug.remote.types.{DebugConfig, Architecture}
+use app.debug.remote.target.target_info.DebugTargetInfo
+use app.debug.remote.feature.features.FeatureId
+use app.debug.remote.feature.registry.{FeatureRegistry, FeatureHandler}
+use app.debug.remote.feature.register_gdb.{register_gdb_features, serialize_vars}
+use app.debug.remote.feature.register_trace32.register_trace32_features
+use app.debug.remote.feature.register_openocd.register_openocd_features
+use app.debug.remote.feature.register_t32_gdb.register_t32_gdb_features
+use app.debug.remote.protocol.gdb_mi.GdbMiClient
+use app.debug.remote.protocol.trace32.Trace32Client
+use app.debug.remote.protocol.openocd.OpenocdClient
+use app.debug.remote.protocol.t32_gdb_bridge.T32GdbBridgeClient
+
+class RemoteGenericBackend:
+    config: DebugConfig
+    registry: FeatureRegistry
+    gdb: Option<GdbMiClient>
+    t32: Option<Trace32Client>
+    openocd: Option<OpenocdClient>
+    t32_gdb: Option<T32GdbBridgeClient>
+    target_info: DebugTargetInfo
+    attached: bool
+
+impl RemoteGenericBackend:
+    static fn gdb_only(config: DebugConfig, target_info: DebugTargetInfo) -> Result<RemoteGenericBackend, text>:
+        val gdb = GdbMiClient.connect(config)?
+        var registry = FeatureRegistry.empty()
+        register_gdb_features(registry, gdb)
+
+        Ok(RemoteGenericBackend(
+            config: config,
+            registry: registry,
+            gdb: Some(gdb),
+            t32: nil,
+            openocd: nil,
+            t32_gdb: nil,
+            target_info: target_info,
+            attached: true
+        ))
+
+    static fn trace32_only(config: DebugConfig, target_info: DebugTargetInfo) -> Result<RemoteGenericBackend, text>:
+        val t32 = Trace32Client.connect(config)?
+        var registry = FeatureRegistry.empty()
+        register_trace32_features(registry, t32)
+
+        Ok(RemoteGenericBackend(
+            config: config,
+            registry: registry,
+            gdb: nil,
+            t32: Some(t32),
+            openocd: nil,
+            t32_gdb: nil,
+            target_info: target_info,
+            attached: true
+        ))
+
+    static fn openocd_gdb(cfg_path: text, gdb_port: i32, program: text, target_info: DebugTargetInfo) -> Result<RemoteGenericBackend, text>:
+        val config = DebugConfig(host: "localhost", port: gdb_port, target: target_info.arch(), program: program, options: {})
+        val openocd = OpenocdClient.connect(cfg_path, gdb_port, gdb_port + 1000, program, "")?
+        var registry = FeatureRegistry.empty()
+        register_openocd_features(registry, openocd)
+
+        Ok(RemoteGenericBackend(
+            config: config,
+            registry: registry,
+            gdb: nil,
+            t32: nil,
+            openocd: Some(openocd),
+            t32_gdb: nil,
+            target_info: target_info,
+            attached: true
+        ))
+
+    static fn t32_gdb_bridge(config: DebugConfig, target_info: DebugTargetInfo) -> Result<RemoteGenericBackend, text>:
+        val t32_gdb = T32GdbBridgeClient.connect(config)?
+        var registry = FeatureRegistry.empty()
+        register_t32_gdb_features(registry, t32_gdb)
+
+        Ok(RemoteGenericBackend(
+            config: config,
+            registry: registry,
+            gdb: nil,
+            t32: nil,
+            openocd: nil,
+            t32_gdb: Some(t32_gdb),
+            target_info: target_info,
+            attached: true
+        ))
+
+    me add_emulation():
+        use app.debug.remote.feature.emulation.register_emulation_features
+        match self.gdb:
+            Some(gdb):
+                register_emulation_features(self.registry, gdb, self.target_info)
+            nil:
+                pass
+
+    fn capabilities() -> text:
+        self.registry.capabilities_report()
+
+    fn supports(feat: FeatureId) -> bool:
+        self.registry.is_supported(feat)
+
+    fn name() -> String:
+        "remote-{self.target_info.arch().to_string()}"
+
+    fn attach(program_path: String, args: [String]) -> Result<Nil, String>:
+        match self.gdb:
+            Some(gdb):
+                if program_path.len() > 0:
+                    gdb.send_command("file-exec-and-symbols {program_path}")?
+                self.attached = true
+                Ok(nil)
+            nil:
+                Err("no GDB connection")
+
+    fn detach() -> Result<Nil, String>:
+        match self.gdb:
+            Some(gdb):
+                gdb.disconnect()
+                self.attached = false
+            nil:
+                pass
+        match self.t32:
+            Some(t32):
+                t32.disconnect()
+                self.attached = false
+            nil:
+                pass
+        Ok(nil)
+
+    fn run() -> Result<Nil, String>:
+        self.registry.execute(FeatureId.Resume, [])?
+        Ok(nil)
+
+    fn pause() -> Result<Nil, String>:
+        self.registry.execute(FeatureId.Halt, [])?
+        Ok(nil)
+
+    fn resume() -> Result<Nil, String>:
+        self.registry.execute(FeatureId.Resume, [])?
+        Ok(nil)
+
+    fn step_over() -> Result<Nil, String>:
+        self.registry.execute(FeatureId.StepOver, [])?
+        Ok(nil)
+
+    fn step_in() -> Result<Nil, String>:
+        self.registry.execute(FeatureId.SingleStep, [])?
+        Ok(nil)
+
+    fn step_out() -> Result<Nil, String>:
+        match self.gdb:
+            Some(gdb):
+                gdb.step_out()?
+                Ok(nil)
+            nil:
+                match self.t32:
+                    Some(t32):
+                        t32.step_out()?
+                        Ok(nil)
+                    nil:
+                        Err("step_out requires GDB or Trace32 connection")
+
+    fn add_breakpoint(file: String, line: Int) -> Result<Int, String>:
+        val location = "{file}:{line}"
+        val result = self.registry.execute(FeatureId.SetBreakpoint, [location])?
+        val id = result.parse_int() ?? 0
+        Ok(id)
+
+    fn remove_breakpoint(file: String, line: Int) -> Result<Nil, String>:
+        match self.gdb:
+            Some(gdb):
+                gdb.send_command("break-delete {line}")?
+                Ok(nil)
+            nil:
+                Err("no GDB connection")
+
+    fn stack_trace() -> Result<[FrameInfo], String>:
+        match self.gdb:
+            Some(gdb):
+                gdb.stack_trace()
+            nil:
+                val result = self.registry.execute(FeatureId.ReadStackTrace, [])?
+                _parse_stack_trace(result)
+
+    fn locals() -> Result<[VarInfo], String>:
+        match self.gdb:
+            Some(gdb):
+                gdb.read_locals()
+            nil:
+                val result = self.registry.execute(FeatureId.ReadLocals, [])?
+                _parse_vars(result)
+
+    fn evaluate(expr: String) -> Result<String, String>:
+        self.registry.execute(FeatureId.EvaluateExpression, [expr])
+
+    fn current_location() -> Result<LocationInfo, String>:
+        match self.gdb:
+            Some(gdb):
+                val frames = gdb.stack_trace()?
+                if frames.len() > 0:
+                    val f = frames[0]
+                    Ok(LocationInfo.at(f.file, f.line, f.function_name))
+                else:
+                    Err("no frames available")
+            nil:
+                Err("no GDB connection")
+
+    fn read_memory(addr: i64, size: i32) -> Result<[i32], text>:
+        match self.gdb:
+            Some(gdb): gdb.read_memory(addr, size)
+            nil: Err("no GDB connection")
+
+    fn write_memory(addr: i64, data: [i32]) -> Result<text, text>:
+        match self.gdb:
+            Some(gdb): gdb.write_memory(addr, data)
+            nil: Err("no GDB connection")
+
+    fn read_register(name: text) -> Result<i64, text>:
+        match self.gdb:
+            Some(gdb): gdb.read_register(name)
+            nil: Err("no GDB connection")
+
+    fn read_all_registers() -> Result<Dict<text, i64>, text>:
+        match self.gdb:
+            Some(gdb): gdb.read_all_registers()
+            nil: Err("no GDB connection")
+
+    fn set_breakpoint_at_addr(addr: i64) -> Result<i32, text>:
+        match self.gdb:
+            Some(gdb): gdb.set_breakpoint_at_addr(addr)
+            nil: Err("no GDB connection")
+
+    fn set_watchpoint(expr: text, access: text) -> Result<i32, text>:
+        match self.gdb:
+            Some(gdb):
+                var gdb_access = access
+                if gdb_access == "readWrite" or gdb_access == "readwrite":
+                    gdb_access = "access"
+                gdb.set_watchpoint(expr, gdb_access)
+            nil:
+                match self.t32:
+                    Some(t32):
+                        var t32_access = access
+                        if t32_access == "access":
+                            t32_access = "readWrite"
+                        t32.set_watchpoint(expr, t32_access)
+                    nil:
+                        Err("no remote debug connection")
+
+    fn watchpoint_capacity() -> i32:
+        self.target_info.hw_watchpoint_count()
+
+fn _parse_stack_trace(raw: text) -> Result<[FrameInfo], String>:
+    var result: [FrameInfo] = []
+    for entry in raw.split(";"):
+        val parts = entry.split(":")
+        if parts.len() >= 4:
+            val index = parts[0].parse_int() ?? 0
+            val func = parts[1]
+            val file = parts[2]
+            val line = parts[3].parse_int() ?? 0
+            result.push(FrameInfo.of(index, func, file, line))
+    Ok(result)
+
+fn _parse_vars(raw: text) -> Result<[VarInfo], String>:
+    var result: [VarInfo] = []
+    for entry in raw.split(";"):
+        val eq_parts = entry.split("=")
+        if eq_parts.len() >= 2:
+            val name = eq_parts[0]
+            var rest_parts: [text] = []
+            var ei = 1
+            while ei < eq_parts.len():
+                rest_parts.push(eq_parts[ei])
+                ei = ei + 1
+            val rest = rest_parts.join("=")
+            val colon_parts = rest.split(":")
+            if colon_parts.len() >= 2:
+                val value = colon_parts[0]
+                val type_name = colon_parts[1]
+                result.push(VarInfo.of(name, value, type_name))
+            else:
+                result.push(VarInfo.of(name, rest, ""))
+    Ok(result)
