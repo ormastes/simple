@@ -1387,6 +1387,31 @@ fn vma_remove(space: ProcessVmSpace, vaddr: u64, len: u64) -> i32:
             # Do NOT advance i — the slot now holds a different (swapped) entry
     0
 
+fn vmm_teardown_user_space(space: ProcessVmSpace):
+    """Tear down all user-space VMAs in the given address space.
+
+    Walks the VMA list, unmaps every user page below the kernel boundary,
+    and resets the VMA list to empty. Called during execve to discard the
+    old process image before mapping the replacement.
+
+    Kernel-space mappings (above VMM_KERNEL_SPACE_START) are left intact
+    because they are shared across all address spaces.
+    """
+    var i: i32 = 0
+    while (i as u64) < space.vma_count:
+        val area = space.areas[i]
+        if area.start < VMM_KERNEL_SPACE_START:
+            val area_end = area.start + area.len
+            var page_addr = (area.start / PAGE_SIZE) * PAGE_SIZE
+            while page_addr < area_end:
+                vmm_unmap_page(VirtAddr(addr: page_addr))
+                page_addr = page_addr + PAGE_SIZE
+        i = i + 1
+    # Reset the VMA list to empty.
+    while space.areas.len() > 0:
+        space.areas.pop()
+    space.vma_count = 0
+
 fn vma_split(space: ProcessVmSpace, vaddr: u64) -> i32:
     """Split whichever VMA contains `vaddr` at that address.
 
