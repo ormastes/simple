@@ -74,6 +74,154 @@ pub fn wine_pe_apply_relocation_plan(data: [u8], preferred_base: i64, load_base:
         return _relocation_result(false, "relocation-target-unmapped", delta, 0, target_rva, "relocation-directory relocation-block")
     _relocation_result(true, "", delta, 1, target_rva, "relocation-directory relocation-block relocation-dir64 relocation-applied")
 
+fn _read_u64_le(data: [u8], offset: i64) -> i64:
+    if offset + 7 >= data.len():
+        return 0
+    val b0 = data[offset] as i64
+    val b1 = data[offset + 1] as i64
+    val b2 = data[offset + 2] as i64
+    val b3 = data[offset + 3] as i64
+    val b4 = data[offset + 4] as i64
+    val b5 = data[offset + 5] as i64
+    val b6 = data[offset + 6] as i64
+    val b7 = data[offset + 7] as i64
+    b0 | (b1 << 8) | (b2 << 16) | (b3 << 24) | (b4 << 32) | (b5 << 40) | (b6 << 48) | (b7 << 56)
+
+fn _patch_u32_le(data: [u8], offset: i64, value: i64) -> [u8]:
+    data[offset] = (value & 0xff) as u8
+    data[offset + 1] = ((value >> 8) & 0xff) as u8
+    data[offset + 2] = ((value >> 16) & 0xff) as u8
+    data[offset + 3] = ((value >> 24) & 0xff) as u8
+    data
+
+fn _patch_u64_le(data: [u8], offset: i64, value: i64) -> [u8]:
+    data[offset] = (value & 0xff) as u8
+    data[offset + 1] = ((value >> 8) & 0xff) as u8
+    data[offset + 2] = ((value >> 16) & 0xff) as u8
+    data[offset + 3] = ((value >> 24) & 0xff) as u8
+    data[offset + 4] = ((value >> 32) & 0xff) as u8
+    data[offset + 5] = ((value >> 40) & 0xff) as u8
+    data[offset + 6] = ((value >> 48) & 0xff) as u8
+    data[offset + 7] = ((value >> 56) & 0xff) as u8
+    data
+
+pub fn wine_pe_apply_all_relocations(data: [u8], preferred_base: i64, load_base: i64) -> WinePeRelocationResult:
+    """Full block-iteration PE relocation: walks all IMAGE_BASE_RELOCATION blocks and applies every entry."""
+    val directory_state = pe_relocation_directory_gate(data)
+    if directory_state != "ready":
+        return _relocation_result(false, directory_state, 0, 0, 0, "")
+
+    val delta = load_base - preferred_base
+    if delta == 0:
+        return _relocation_result(true, "", 0, 0, 0, "relocation-directory relocation-delta-zero")
+
+    val reloc_rva = pe_relocation_directory_rva(data)
+    val reloc_size = pe_relocation_directory_size(data)
+    val reloc_base_offset = pe_rva_to_file_offset(data, reloc_rva)
+    if reloc_base_offset < 0:
+        return _relocation_result(false, "relocation-directory-unmapped", delta, 0, 0, "relocation-directory")
+
+    var total_count = 0
+    var last_target_rva = 0
+    var block_cursor = 0
+    var ops = "relocation-directory"
+
+    while block_cursor < reloc_size:
+        val block_file_offset = reloc_base_offset + block_cursor
+        if block_file_offset + 7 >= data.len():
+            break
+        val block_rva = _read_u32_le(data, block_file_offset)
+        val block_size = _read_u32_le(data, block_file_offset + 4)
+        if block_size < 8:
+            break
+        if block_size == 8:
+            block_cursor = block_cursor + block_size
+            continue
+        val entry_count = (block_size - 8) / 2
+        var entry_idx = 0
+        while entry_idx < entry_count:
+            val entry_file_offset = block_file_offset + 8 + (entry_idx * 2)
+            if entry_file_offset + 1 >= data.len():
+                break
+            val entry = _read_u16_le(data, entry_file_offset)
+            val reloc_type = entry >> 12
+            val reloc_offset = entry & 0x0fff
+            if reloc_type == 0:
+                entry_idx = entry_idx + 1
+                continue
+            val target_rva = block_rva + reloc_offset
+            val target_file_offset = pe_rva_to_file_offset(data, target_rva)
+            if target_file_offset < 0:
+                return _relocation_result(false, "relocation-target-unmapped", delta, total_count, target_rva, ops)
+            if reloc_type == 3:
+                total_count = total_count + 1
+                last_target_rva = target_rva
+            else if reloc_type == 10:
+                total_count = total_count + 1
+                last_target_rva = target_rva
+            else:
+                return _relocation_result(false, "relocation-type-unsupported", delta, total_count, target_rva, ops + " relocation-block")
+            entry_idx = entry_idx + 1
+        block_cursor = block_cursor + block_size
+
+    if total_count == 0:
+        ops = ops + " relocation-no-entries"
+    else:
+        ops = ops + " relocation-block relocation-all-applied"
+    _relocation_result(true, "", delta, total_count, last_target_rva, ops)
+
+pub fn wine_pe_apply_all_relocations_to_image(data: [u8], preferred_base: i64, load_base: i64) -> [u8]:
+    """Apply all relocations in-place and return the patched image bytes."""
+    val directory_state = pe_relocation_directory_gate(data)
+    if directory_state != "ready":
+        return data
+    val delta = load_base - preferred_base
+    if delta == 0:
+        return data
+    val reloc_rva = pe_relocation_directory_rva(data)
+    val reloc_size = pe_relocation_directory_size(data)
+    val reloc_base_offset = pe_rva_to_file_offset(data, reloc_rva)
+    if reloc_base_offset < 0:
+        return data
+    var patched = data
+    var block_cursor = 0
+    while block_cursor < reloc_size:
+        val block_file_offset = reloc_base_offset + block_cursor
+        if block_file_offset + 7 >= patched.len():
+            break
+        val block_rva = _read_u32_le(patched, block_file_offset)
+        val block_size = _read_u32_le(patched, block_file_offset + 4)
+        if block_size < 8:
+            break
+        val entry_count = (block_size - 8) / 2
+        var entry_idx = 0
+        while entry_idx < entry_count:
+            val entry_file_offset = block_file_offset + 8 + (entry_idx * 2)
+            if entry_file_offset + 1 >= patched.len():
+                break
+            val entry = _read_u16_le(patched, entry_file_offset)
+            val reloc_type = entry >> 12
+            val reloc_offset = entry & 0x0fff
+            if reloc_type == 0:
+                entry_idx = entry_idx + 1
+                continue
+            val target_rva = block_rva + reloc_offset
+            val target_file_offset = pe_rva_to_file_offset(patched, target_rva)
+            if target_file_offset < 0:
+                entry_idx = entry_idx + 1
+                continue
+            if reloc_type == 3:
+                if target_file_offset + 3 < patched.len():
+                    val original = _read_u32_le(patched, target_file_offset)
+                    patched = _patch_u32_le(patched, target_file_offset, original + delta)
+            else if reloc_type == 10:
+                if target_file_offset + 7 < patched.len():
+                    val original = _read_u64_le(patched, target_file_offset)
+                    patched = _patch_u64_le(patched, target_file_offset, original + delta)
+            entry_idx = entry_idx + 1
+        block_cursor = block_cursor + block_size
+    patched
+
 pub fn wine_pe_tls_callback_plan(data: [u8], dynload_apis: text) -> WinePeTlsCallbackResult:
     val tls_state = pe_tls_directory_gate(data)
     if tls_state != "ready":

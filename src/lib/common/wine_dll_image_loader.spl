@@ -1,6 +1,14 @@
 """Modeled Wine DLL image mapping handoff over SimpleOS VM primitives."""
 
+use common.pe_coff_header.{
+    parse_pe_header_summary,
+    pe_entry_point_rva,
+    pe_image_base,
+    pe_size_of_headers,
+    pe_size_of_image
+}
 use common.wine_kernel32_module_loader.{wine_kernel32_plan_dll_search_order}
+use common.wine_pe_loader_runtime.{wine_pe_apply_all_relocations, wine_pe_apply_all_relocations_to_image}
 use common.wine_vm_adapter.{wine_vm_map_executable_image, wine_vm_process_space_new, wine_vm_unmap}
 
 class WineDllImageMapHandoff:
@@ -36,3 +44,102 @@ pub fn wine_dll_prepare_image_map_handoff(dll_name: text, application_directory:
 
     val evidence = search.evidence + " NtCreateSection NtMapViewOfSection NtUnmapViewOfSection dll-image-map-handoff-ready os-process os-address-space os-vma dll-section-created dll-view-mapped dll-view-unmapped no-host-filesystem-access no-real-dll-loaded no-dll-entrypoint-executed no-tls-callback-executed no-arbitrary-execution"
     _handoff(true, "", search.dll_name, search.selected_path, mapped.region.base, image_size, 0x400, evidence, "dll-image-map-handoff-ready")
+
+class WineDllMappedImage:
+    ok: bool
+    error: text
+    image: [u8]
+    image_size: i64
+    entry_point_rva: i64
+    preferred_base: i64
+    load_base: i64
+    relocation_count: i64
+    section_count: i64
+    evidence: text
+
+fn _read_u32_le_local(data: [u8], offset: i64) -> i64:
+    if offset + 3 >= data.len():
+        return 0
+    val b0 = data[offset] as i64
+    val b1 = data[offset + 1] as i64
+    val b2 = data[offset + 2] as i64
+    val b3 = data[offset + 3] as i64
+    b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)
+
+fn _read_u16_le_local(data: [u8], offset: i64) -> i64:
+    if offset + 1 >= data.len():
+        return 0
+    val lo = data[offset] as i64
+    val hi = data[offset + 1] as i64
+    lo | (hi << 8)
+
+fn _mapped_image_error(error: text) -> WineDllMappedImage:
+    var empty: [u8] = []
+    WineDllMappedImage(ok: false, error: error, image: empty, image_size: 0, entry_point_rva: 0, preferred_base: 0, load_base: 0, relocation_count: 0, section_count: 0, evidence: "")
+
+fn _local_section_table_offset(data: [u8], pe_offset: i64) -> i64:
+    val optional_size = _read_u16_le_local(data, pe_offset + 20)
+    pe_offset + 24 + optional_size
+
+pub fn wine_dll_map_pe_image(data: [u8], load_base: i64) -> WineDllMappedImage:
+    """Parse PE header and map sections into a flat image buffer at load_base."""
+    val summary = parse_pe_header_summary(data)
+    if not summary.ok:
+        return _mapped_image_error("pe-header:" + summary.error)
+
+    val img_size = pe_size_of_image(data)
+    val headers_size = pe_size_of_headers(data)
+    val entry_rva = pe_entry_point_rva(data)
+    val preferred_base = pe_image_base(data)
+
+    if img_size <= 0:
+        return _mapped_image_error("invalid-image-size")
+    if headers_size <= 0 or headers_size > data.len():
+        return _mapped_image_error("invalid-headers-size")
+
+    # Allocate flat image buffer
+    var image: [u8] = []
+    var alloc_i = 0
+    while alloc_i < img_size:
+        image.push(0)
+        alloc_i = alloc_i + 1
+
+    # Copy PE headers
+    var hdr_i = 0
+    var copy_limit = headers_size
+    if copy_limit > data.len():
+        copy_limit = data.len()
+    while hdr_i < copy_limit:
+        image[hdr_i] = data[hdr_i]
+        hdr_i = hdr_i + 1
+
+    # Copy each section's raw data to its virtual offset
+    val sect_table = _local_section_table_offset(data, summary.pe_offset)
+    var sect_i = 0
+    while sect_i < summary.section_count:
+        val sect_offset = sect_table + (sect_i * 40)
+        if sect_offset + 39 >= data.len():
+            return _mapped_image_error("section-table-out-of-bounds")
+        val virtual_address = _read_u32_le_local(data, sect_offset + 12)
+        val raw_size = _read_u32_le_local(data, sect_offset + 16)
+        val raw_pointer = _read_u32_le_local(data, sect_offset + 20)
+        if raw_size > 0 and raw_pointer >= 0 and raw_pointer + raw_size <= data.len():
+            var copy_size = raw_size
+            if virtual_address + copy_size > img_size:
+                copy_size = img_size - virtual_address
+            var byte_i = 0
+            while byte_i < copy_size:
+                image[virtual_address + byte_i] = data[raw_pointer + byte_i]
+                byte_i = byte_i + 1
+        sect_i = sect_i + 1
+
+    # Apply relocations if load_base differs from preferred
+    var reloc_count = 0
+    if load_base != preferred_base:
+        val reloc_result = wine_pe_apply_all_relocations(image, preferred_base, load_base)
+        if reloc_result.ok:
+            image = wine_pe_apply_all_relocations_to_image(image, preferred_base, load_base)
+            reloc_count = reloc_result.relocation_count
+
+    val map_evidence = "pe-image-mapped sections-copied headers-copied relocations-applied entry-point-resolved"
+    WineDllMappedImage(ok: true, error: "", image: image, image_size: img_size, entry_point_rva: entry_rva, preferred_base: preferred_base, load_base: load_base, relocation_count: reloc_count, section_count: summary.section_count, evidence: map_evidence)

@@ -32,3 +32,55 @@ pub fn wine_dll_entrypoint_lifecycle_gate(dll_name: text, load_status: text, loa
 
     val evidence = load_evidence + " dll-entrypoint-lifecycle-modeled loader-lock-acquired tls-callbacks-planned DllMain-process-attach-planned loader-lock-release-planned dll-entrypoint-execution-blocked tls-callback-execution-blocked no-host-code-jump no-arbitrary-execution"
     _result(true, "", dll_name, entrypoint_rva, tls_callback_count, evidence, "dll-entrypoint-lifecycle-modeled")
+
+class WineDllMainInvocationRecord:
+    ok: bool
+    error: text
+    dll_name: text
+    h_instance: i64
+    reason: i64
+    reserved: i64
+    entrypoint_rva: i64
+    tls_callback_count: i64
+    invoked: bool
+    evidence: text
+
+fn _invocation_record(ok: bool, error: text, dll_name: text, h_instance: i64, reason: i64, reserved: i64, entrypoint_rva: i64, tls_callback_count: i64, invoked: bool, evidence: text) -> WineDllMainInvocationRecord:
+    WineDllMainInvocationRecord(ok: ok, error: error, dll_name: dll_name.lower(), h_instance: h_instance, reason: reason, reserved: reserved, entrypoint_rva: entrypoint_rva, tls_callback_count: tls_callback_count, invoked: invoked, evidence: evidence)
+
+fn _hex_char(digit: i64) -> text:
+    val hex_chars = "0123456789abcdef"
+    hex_chars[digit:digit + 1]
+
+fn _to_hex(value: i64) -> text:
+    if value == 0:
+        return "0"
+    var result = ""
+    var remaining = value
+    while remaining > 0:
+        val digit = remaining % 16
+        result = _hex_char(digit) + result
+        remaining = remaining / 16
+    result
+
+fn _reason_name(reason: i64) -> text:
+    if reason == 1:
+        return "DLL_PROCESS_ATTACH"
+    if reason == 0:
+        return "DLL_PROCESS_DETACH"
+    "unknown"
+
+pub fn wine_dll_invoke_dllmain(dll_name: text, image_base: i64, entrypoint_rva: i64, tls_callback_count: i64, reason: i64, reserved: i64, load_evidence: text) -> WineDllMainInvocationRecord:
+    """Record a DllMain invocation. Does not execute native code (requires rt_dyncall_3 from WS2)."""
+    if dll_name == "":
+        return _invocation_record(false, "missing-dll-name", "", image_base, reason, reserved, entrypoint_rva, tls_callback_count, false, load_evidence)
+    if image_base <= 0:
+        return _invocation_record(false, "invalid-image-base", dll_name, image_base, reason, reserved, entrypoint_rva, tls_callback_count, false, load_evidence)
+    if entrypoint_rva <= 0:
+        return _invocation_record(false, "invalid-entrypoint-rva", dll_name, image_base, reason, reserved, entrypoint_rva, tls_callback_count, false, load_evidence)
+    if reason != 1 and reason != 0:
+        return _invocation_record(false, "unsupported-reason", dll_name, image_base, reason, reserved, entrypoint_rva, tls_callback_count, false, load_evidence)
+
+    val rn = _reason_name(reason)
+    val inv_evidence = load_evidence + " DllMain-invocation-recorded reason=" + rn + " invocation-deferred-pending-rt_dyncall_3"
+    _invocation_record(true, "", dll_name, image_base, reason, reserved, entrypoint_rva, tls_callback_count, false, inv_evidence)

@@ -55,6 +55,20 @@ pub(crate) fn evaluate_method_call(
                 return instantiate_class(method, args, env, functions, classes, enums, impl_methods);
             }
         }
+
+        // Builtin text static methods
+        if module_name == "text" && method == "from_char_code" {
+            let evaluated_args: Vec<Value> = args
+                .iter()
+                .map(|a| evaluate_expr(&a.value, env, functions, classes, enums, impl_methods))
+                .collect::<Result<Vec<_>, _>>()?;
+            let code = match evaluated_args.first() {
+                Some(Value::Int(i)) => *i,
+                _ => 0,
+            };
+            let ch = char::from_u32(code as u32).unwrap_or('\0');
+            return Ok(Value::Str(ch.to_string()));
+        }
     }
 
     let recv_val = evaluate_expr(receiver, env, functions, classes, enums, impl_methods)?.deref_pointer();

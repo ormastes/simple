@@ -153,6 +153,69 @@ fn _bind_file_view_imports_from_relocated(relocated: WineDllViewRelocationResult
     val evidence = relocation_evidence + " dll-import-descriptor-table dll-import-descriptor-thunks-inventoried dll-import-modules-modeled-loaded dll-import-proc-addresses-modeled dll-import-write-window dll-import-write-enabled dll-import-thunk-bytes-written dll-import-thunk-patch-bounded dll-view-rx-restored no-real-dll-loaded no-dll-entrypoint-executed no-tls-callback-executed no-arbitrary-execution"
     _result(true, "", relocated.dll_name, relocated.selected_path, patched, relocated.mapped_base, relocated.mapped_size, modules.len(), proc_addresses.len(), patched_count, first_iat_rva, executable.space, evidence, "dll-view-imports-bound")
 
+class WineDllIatPatchResult:
+    ok: bool
+    error: text
+    patched_image: [u8]
+    patched_count: i64
+    module_count: i64
+    first_iat_rva: i64
+    evidence: text
+
+fn _iat_result(ok: bool, error: text, patched_image: [u8], patched_count: i64, module_count: i64, first_iat_rva: i64, evidence: text) -> WineDllIatPatchResult:
+    WineDllIatPatchResult(ok: ok, error: error, patched_image: patched_image, patched_count: patched_count, module_count: module_count, first_iat_rva: first_iat_rva, evidence: evidence)
+
+pub fn wine_dll_patch_iat_from_mapped_image(image: [u8], descriptor_limit: i64, symbol_limit: i64) -> WineDllIatPatchResult:
+    """Patch IAT in a mapped PE image using known NT API stub addresses."""
+    val import_state = pe_import_descriptor_table_gate(image, descriptor_limit, symbol_limit)
+    if import_state != "ready":
+        return _iat_result(false, "import-descriptor-table:" + import_state, image, 0, 0, 0, "iat-patch-rejected")
+
+    val bindings = pe_import_descriptor_thunk_bindings(image, descriptor_limit, symbol_limit)
+    if bindings.len() == 0:
+        return _iat_result(false, "missing-import-descriptor-thunks", image, 0, 0, 0, "iat-patch-rejected")
+
+    var modules: [text] = []
+    for binding in bindings:
+        if not _module_supported(binding.dll_name):
+            return _iat_result(false, "unsupported-import-module:" + binding.dll_name, image, 0, modules.len(), binding.iat_rva, "iat-patch-rejected")
+        if not _text_seen(modules, binding.dll_name):
+            modules.push(binding.dll_name)
+
+    var table = _known_import_module_table()
+    for module_name in modules:
+        val loaded = wine_kernel32_load_library_ex_w(table, module_name, 0)
+        if not loaded.ok:
+            return _iat_result(false, "import-module-load:" + module_name + ":" + loaded.error, image, 0, modules.len(), 0, "iat-patch-rejected")
+        table = loaded.table
+
+    var proc_addresses: [i64] = []
+    for binding in bindings:
+        val module = wine_kernel32_get_module_handle_w(table, binding.dll_name)
+        if not module.ok:
+            return _iat_result(false, "import-module-handle:" + binding.dll_name + ":" + module.error, image, 0, modules.len(), binding.iat_rva, "iat-patch-rejected")
+        val proc = wine_kernel32_get_proc_address(module.table, module.handle, binding.symbol)
+        if not proc.ok:
+            return _iat_result(false, "import-proc-address:" + binding.dll_name + "!" + binding.symbol + ":" + proc.error, image, 0, modules.len(), binding.iat_rva, "iat-patch-rejected")
+        proc_addresses.push(proc.proc_address)
+
+    var patched = image
+    var patched_count = 0
+    var first_iat_rva = 0
+    var i = 0
+    while i < bindings.len():
+        val thunk_offset = pe_rva_to_file_offset(patched, bindings[i].iat_rva)
+        if thunk_offset < 0 or thunk_offset + 7 >= patched.len():
+            return _iat_result(false, "iat-thunk-offset-unmapped:" + bindings[i].dll_name + "!" + bindings[i].symbol, patched, patched_count, modules.len(), bindings[i].iat_rva, "iat-patch-rejected")
+        if first_iat_rva == 0:
+            first_iat_rva = bindings[i].iat_rva
+        patched = _patch_u64_le(patched, thunk_offset, proc_addresses[i])
+        patched_count = patched_count + 1
+        i = i + 1
+
+    val iat_evidence = "iat-patch-applied dll-import-descriptor-table dll-import-thunks-patched"
+    _iat_result(true, "", patched, patched_count, modules.len(), first_iat_rva, iat_evidence)
+
 fn _peb_teb_vm_write_evidence(vm_writes: WinePebTebVmWriteResult) -> text:
     if not vm_writes.ok:
         return ""
