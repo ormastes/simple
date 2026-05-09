@@ -1184,6 +1184,23 @@ pub(crate) fn evaluate_method_call_with_self_update(
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<(Value, Option<Value>), CompileError> {
+    // Builtin text static methods — intercept before evaluate_expr to avoid
+    // "variable `text` not found" when the receiver is the builtin type name.
+    if let Expr::Identifier(module_name) = receiver.as_ref() {
+        if module_name == "text" && method == "from_char_code" {
+            let evaluated_args: Vec<Value> = args
+                .iter()
+                .map(|a| evaluate_expr(&a.value, env, functions, classes, enums, impl_methods))
+                .collect::<Result<Vec<_>, _>>()?;
+            let code = match evaluated_args.first() {
+                Some(Value::Int(i)) => *i,
+                _ => 0,
+            };
+            let ch = char::from_u32(code as u32).unwrap_or('\0');
+            return Ok((Value::Str(ch.to_string()), None));
+        }
+    }
+
     let recv_val = evaluate_expr(receiver, env, functions, classes, enums, impl_methods)?.deref_pointer();
 
     // Only handle Object methods with self mutation
