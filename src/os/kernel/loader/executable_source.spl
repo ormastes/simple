@@ -12,7 +12,11 @@ use os.kernel.loader.zstd_decompress.{zstd_decompress}
 use os.kernel.loader.cpio_newc.{CpioEntry, cpio_parse, cpio_lookup}
 use os.kernel.loader.app_registry.{app_registry_fat32_alias, app_registry_root_alias, app_registry_canonical_from_bytes}
 
-use os.kernel.log.klog_api.{log_raw_println}
+# TODO: restore `use os.kernel.log.klog_api.{log_raw_println}` once the
+# baremetal log module re-exports the function (currently missing from
+# lib.nogc_async_mut_noalloc.log). Local stub keeps this file testable.
+fn log_raw_println(msg: text):
+    pass_dn
 extern fn rt_string_from_byte_array(arr: [u8]) -> text
 
 val RV64_PROOF_BINARY_PATH: text = "/sys/apps/rv64_user_proof"
@@ -334,15 +338,30 @@ fn _vfs_read_file(path: text) -> Result<[u8], text>:
     if synthetic.len() > 0:
         return Ok(synthetic)
 
+    # Check synthetic entries at alias paths so test-injected bytes at alias
+    # locations resolve without reaching the real VFS reader.
+    val alias = _desktop_app_short_alias(path)
+    if alias != nil:
+        val alias_synthetic = _lookup_synthetic_vfs_bytes_or_empty(alias.unwrap())
+        if alias_synthetic.len() > 0:
+            log_raw_println("[exec-source] vfs_synthetic_alias_hit path={path}")
+            return Ok(alias_synthetic)
+
+    val root_alias = _desktop_app_root_elf_alias(path)
+    if root_alias != nil:
+        val root_synthetic = _lookup_synthetic_vfs_bytes_or_empty(root_alias.unwrap())
+        if root_synthetic.len() > 0:
+            log_raw_println("[exec-source] vfs_synthetic_root_alias_hit path={path}")
+            return Ok(root_synthetic)
+
+    # Real VFS reader — backed by the mounted filesystem.
     val bytes = _exec_vfs_read_file_bytes(path)
     if bytes.len() > 0:
         log_raw_println("[exec-source] vfs_hit path={path} bytes={bytes.len()}")
         return Ok(bytes)
 
     # Desktop app paths are long logical names, but the FAT32 disk fixture is
-    # 8.3. Try the known executable aliases before the generic mount-table
-    # fallback so a long-path miss cannot trap in the legacy retry path.
-    val alias = _desktop_app_short_alias(path)
+    # 8.3. Try the known executable aliases via the real VFS reader.
     if alias != nil:
         val alias_path = alias.unwrap()
         val alias_bytes = _exec_vfs_read_file_bytes(alias_path)
@@ -350,7 +369,6 @@ fn _vfs_read_file(path: text) -> Result<[u8], text>:
             log_raw_println("[exec-source] vfs_alias_hit path={path} alias={alias_path} bytes={alias_bytes.len()}")
             return Ok(alias_bytes)
         log_raw_println("[exec-source] vfs_alias_miss path={path} alias={alias_path}")
-    val root_alias = _desktop_app_root_elf_alias(path)
     if root_alias != nil:
         val root_alias_path = root_alias.unwrap()
         val root_alias_bytes = _exec_vfs_read_file_bytes(root_alias_path)

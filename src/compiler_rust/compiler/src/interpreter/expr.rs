@@ -389,6 +389,24 @@ pub(crate) fn evaluate_expr(
                 }
             }
         }
+        // Force unwrap: expr! - unwrap Option/Result or panic
+        Expr::ForceUnwrap(inner) => {
+            let val = evaluate_expr(inner, env, functions, classes, enums, impl_methods)?;
+            if let Some(unwrapped) = try_unwrap_option_or_result(&val) {
+                Ok(unwrapped)
+            } else {
+                let ctx = ErrorContext::new()
+                    .with_code(codes::INVALID_OPERATION)
+                    .with_help("force unwrap (!) can only be used on Some/Ok values; got None/Err");
+                Err(CompileError::semantic_with_context(
+                    format!(
+                        "force unwrap failed: expected Some or Ok, got {}",
+                        val.to_display_string()
+                    ),
+                    ctx,
+                ))
+            }
+        }
         // Existence check: expr.? - returns bool indicating if value is present
         Expr::ExistsCheck(inner) => {
             let val = evaluate_expr(inner, env, functions, classes, enums, impl_methods)?;

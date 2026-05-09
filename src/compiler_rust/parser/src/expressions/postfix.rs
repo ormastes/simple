@@ -112,19 +112,32 @@ impl<'a> Parser<'a> {
                     expr = self.parse_kernel_launch(expr)?;
                 }
                 TokenKind::Bang => {
-                    // Macro invocation: name!(args)
-                    if let Expr::Identifier(name) = expr {
-                        self.advance(); // consume !
-                        let args = self.parse_macro_args()?;
+                    // Disambiguate: name!(args) is macro invocation,
+                    // expr! (anything else) is force unwrap.
+                    if let Expr::Identifier(ref name) = expr {
+                        // Peek past `!`: if `(` follows → macro invocation,
+                        // otherwise → force unwrap of a bare variable.
+                        let after_bang = self.peek_next();
+                        if after_bang.kind == TokenKind::LParen {
+                            let name = name.clone();
+                            self.advance(); // consume !
+                            let args = self.parse_macro_args()?;
 
-                        // In LL(1) mode, process the macro contract to register introduced symbols
-                        if self.macro_registry.is_ll1_mode() {
-                            self.process_macro_contract_ll1(&name, &args);
+                            // In LL(1) mode, process the macro contract to register introduced symbols
+                            if self.macro_registry.is_ll1_mode() {
+                                self.process_macro_contract_ll1(&name, &args);
+                            }
+
+                            expr = Expr::MacroInvocation { name, args };
+                        } else {
+                            // Force unwrap: variable!
+                            self.advance(); // consume !
+                            expr = Expr::ForceUnwrap(Box::new(expr));
                         }
-
-                        expr = Expr::MacroInvocation { name, args };
                     } else {
-                        break;
+                        // Force unwrap on any non-identifier expression: expr!
+                        self.advance(); // consume !
+                        expr = Expr::ForceUnwrap(Box::new(expr));
                     }
                 }
                 TokenKind::LBracket => {

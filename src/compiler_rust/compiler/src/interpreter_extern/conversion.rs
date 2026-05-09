@@ -130,6 +130,86 @@ pub fn rt_bytes_to_text_fn(args: &[Value]) -> Result<Value, CompileError> {
     }
 }
 
+/// Assemble two bytes into a u16 (little-endian).
+///
+/// Callable from Simple as: `bytes_to_u16_le(b0, b1)`
+pub fn bytes_to_u16_le_fn(args: &[Value]) -> Result<Value, CompileError> {
+    let b0 = match args.get(0) {
+        Some(Value::Int(i)) => *i as u64,
+        _ => 0,
+    };
+    let b1 = match args.get(1) {
+        Some(Value::Int(i)) => *i as u64,
+        _ => 0,
+    };
+    let result = (b0 & 0xFF) | ((b1 & 0xFF) << 8);
+    Ok(Value::Int(result as i64))
+}
+
+/// Assemble two bytes into a u16 (big-endian).
+///
+/// Callable from Simple as: `bytes_to_u16_be(b0, b1)`
+pub fn bytes_to_u16_be_fn(args: &[Value]) -> Result<Value, CompileError> {
+    let b0 = match args.get(0) {
+        Some(Value::Int(i)) => *i as u64,
+        _ => 0,
+    };
+    let b1 = match args.get(1) {
+        Some(Value::Int(i)) => *i as u64,
+        _ => 0,
+    };
+    let result = ((b0 & 0xFF) << 8) | (b1 & 0xFF);
+    Ok(Value::Int(result as i64))
+}
+
+/// Extract a u8 from a Value, defaulting to 0.
+fn extract_byte(v: &Value) -> u64 {
+    match v {
+        Value::Int(i) => (*i as u64) & 0xFF,
+        _ => 0,
+    }
+}
+
+/// Assemble a [u8] array into a u32 (little-endian).
+///
+/// Callable from Simple as: `bytes_to_u32_le(bytes)`
+pub fn bytes_to_u32_le_fn(args: &[Value]) -> Result<Value, CompileError> {
+    let items = match args.first() {
+        Some(Value::Array(arr)) => arr.as_ref(),
+        Some(Value::FrozenArray(arr)) => arr.as_ref(),
+        Some(Value::Tuple(arr)) => arr.as_ref(),
+        _ => return Ok(Value::Int(0)),
+    };
+    if items.len() < 4 {
+        return Ok(Value::Int(0));
+    }
+    let result = extract_byte(&items[0])
+        | (extract_byte(&items[1]) << 8)
+        | (extract_byte(&items[2]) << 16)
+        | (extract_byte(&items[3]) << 24);
+    Ok(Value::Int(result as i64))
+}
+
+/// Assemble a [u8] array into a u32 (big-endian).
+///
+/// Callable from Simple as: `bytes_to_u32_be(bytes)`
+pub fn bytes_to_u32_be_fn(args: &[Value]) -> Result<Value, CompileError> {
+    let items = match args.first() {
+        Some(Value::Array(arr)) => arr.as_ref(),
+        Some(Value::FrozenArray(arr)) => arr.as_ref(),
+        Some(Value::Tuple(arr)) => arr.as_ref(),
+        _ => return Ok(Value::Int(0)),
+    };
+    if items.len() < 4 {
+        return Ok(Value::Int(0));
+    }
+    let result = (extract_byte(&items[0]) << 24)
+        | (extract_byte(&items[1]) << 16)
+        | (extract_byte(&items[2]) << 8)
+        | extract_byte(&items[3]);
+    Ok(Value::Int(result as i64))
+}
+
 /// Provide a simple 8x16 bitmap glyph for source-mode font rendering.
 pub fn rt_gui_get_glyph_8x16_fn(args: &[Value]) -> Result<Value, CompileError> {
     let codepoint = match args.first() {

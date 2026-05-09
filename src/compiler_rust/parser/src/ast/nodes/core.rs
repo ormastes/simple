@@ -643,6 +643,10 @@ pub enum Expr {
     /// Try operator: expr? - unwrap Ok or early return Err
     Try(Box<Expr>),
 
+    /// Force unwrap operator: expr! - unwrap Option/Result or panic
+    /// Extracts the inner value from Some/Ok, panics on None/Err
+    ForceUnwrap(Box<Expr>),
+
     /// Existence check operator: expr.? - returns bool indicating if value is present
     ///
     /// Returns true if:
