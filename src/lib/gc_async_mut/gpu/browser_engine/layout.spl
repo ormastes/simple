@@ -381,7 +381,9 @@ fn layout_block(node: BeDomNode, container: BeLayoutBox, style: StyleProps, pare
     val cont_y = box_y + border_w + s_padding.top
 
     # BFC detection: BFC roots get a fresh FloatContext; non-BFC inherit parent's
-    val is_bfc = float_is_bfc_root(s)
+    val _overflow = s.overflow
+    val _disp = s.display
+    val is_bfc = (_overflow != "visible" and _overflow != "") or _disp == "flow-root" or _disp == "flex" or _disp == "inline-flex"
     var float_ctx = if is_bfc: FloatContext.at_y(cont_y) else: parent_ctx
 
     val can_top_collapse = border_w == 0 and s_padding.top == 0
@@ -404,16 +406,16 @@ fn layout_block(node: BeDomNode, container: BeLayoutBox, style: StyleProps, pare
         _ld("[LB] disp='{child_disp}'")
         if child_disp != "none":
             val child_style = be_dom_get_style(child)
-            val child_fc = css_get_float_code(child_style)
-            val child_cc = css_get_clear_code(child_style)
+            val child_fc = child_style.float_code
+            val child_cc = child_style.clear_code
 
             # Clear: advance cursor_y past cleared floats
-            if child_cc.value > 0:
-                val cleared_y = float_clear_y(child_cc.value, float_ctx)
+            if child_cc > 0:
+                val cleared_y = float_clear_y(child_cc, float_ctx)
                 if cleared_y > cursor_y:
                     cursor_y = cleared_y
 
-            if child_fc.value == 1 or child_fc.value == 2:
+            if child_fc == 1 or child_fc == 2:
                 # Float child: lay out, place, register, do NOT advance cursor_y
                 float_ctx.current_y = cursor_y
                 val float_child_container = BeLayoutBox(
@@ -426,7 +428,7 @@ fn layout_block(node: BeDomNode, container: BeLayoutBox, style: StyleProps, pare
                 val float_child_box = layout_node(child, float_child_container, s, float_ctx)
                 val fw = float_child_box.width
                 val fh = float_child_box.height
-                val fpos = float_place(fw, fh, child_fc.value, float_ctx, content_w)
+                val fpos = float_place(fw, fh, child_fc, float_ctx, content_w)
                 val placed_box = BeLayoutBox(
                     x: fpos.x + cont_x, y: fpos.y,
                     width: fw, height: fh,
@@ -436,8 +438,8 @@ fn layout_block(node: BeDomNode, container: BeLayoutBox, style: StyleProps, pare
                     content_height: float_child_box.content_height,
                     node: child, children: float_child_box.children
                 )
-                val fb = FloatBox(x: fpos.x, y: fpos.y, width: fw, height: fh, side: child_fc.value)
-                if child_fc.value == 1:
+                val fb = FloatBox(x: fpos.x, y: fpos.y, width: fw, height: fh, side: child_fc)
+                if child_fc == 1:
                     float_ctx.left_floats.push(fb)
                 else:
                     float_ctx.right_floats.push(fb)
@@ -453,9 +455,10 @@ fn layout_block(node: BeDomNode, container: BeLayoutBox, style: StyleProps, pare
                     if can_top_collapse and s_margin.top >= 0 and child_mt >= 0:
                         val top_collapse = if s_margin.top < child_mt: s_margin.top else: child_mt
                         cursor_y = cursor_y - top_collapse
-                # Narrow container by active floats at this y
-                val avail_w = float_available_width_at(cursor_y, float_ctx, content_w)
-                val left_off = float_left_offset_at(cursor_y, float_ctx)
+                # Narrow container by active floats at this y (fast path when no floats)
+                val any_floats = float_ctx.left_floats.len() > 0 or float_ctx.right_floats.len() > 0
+                val avail_w = if any_floats: float_available_width_at(cursor_y, float_ctx, content_w) else: content_w
+                val left_off = if any_floats: float_left_offset_at(cursor_y, float_ctx) else: 0
                 val child_cx = cont_x + left_off
                 val child_container = BeLayoutBox(
                     x: child_cx, y: cursor_y,
@@ -695,8 +698,7 @@ fn layout_flex(node: BeDomNode, container: BeLayoutBox, style: StyleProps, paren
                 node: child, children: []
             )
 
-        val flex_child_ctx = FloatContext.create()
-        val child_box = layout_node(child, child_container, style, flex_child_ctx)
+        val child_box = layout_node(child, child_container, style, parent_ctx)
         child_boxes.push(child_box)
 
         if is_row:

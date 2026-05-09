@@ -209,3 +209,68 @@ fn _is_identity_matrix(m: [f64]) -> bool:
 # Issue a present/swap command for the given swapchain.
 fn present_frame(swapchain_id: i64) -> GpuCommand:
     GpuCommand.Present(swapchain_id: swapchain_id)
+
+# ---------------------------------------------------------------------------
+# WebGPU 3D Composite Path
+# ---------------------------------------------------------------------------
+
+fn has_3d_transform(layer: CompositeLayer) -> bool:
+    val t = layer.transform
+    if t.len() < 16:
+        return false
+    val tz = t.get(14)
+    val abs_tz = if tz < 0.0: 0.0 - tz else: tz
+    if abs_tz > 0.0001:
+        return true
+    val r01 = t.get(1)
+    val r02 = t.get(2)
+    val r10 = t.get(4)
+    val r12 = t.get(6)
+    val r20 = t.get(8)
+    val r21 = t.get(9)
+    val sum = r01 * r01 + r02 * r02 + r10 * r10 + r12 * r12 + r20 * r20 + r21 * r21
+    sum > 0.0001
+
+fn generate_webgpu_composite_commands(layers: [CompositeLayer], frame: i64) -> [GpuCommand]:
+    var cmds = [GpuCommand]()
+    cmds.push(GpuCommand.Clear(surface_id: 0, color: white()))
+    for layer in layers:
+        if has_3d_transform(layer):
+            val layer_cmds = rasterize_3d_layer(layer)
+            for cmd in layer_cmds:
+                cmds.push(cmd)
+        else:
+            val layer_cmds = rasterize_layer(layer)
+            for cmd in layer_cmds:
+                cmds.push(cmd)
+    val comp_cmds = composite_layers(layers)
+    for cmd in comp_cmds:
+        cmds.push(cmd)
+    cmds.push(present_frame(0))
+    cmds.push(GpuCommand.Fence(id: frame))
+    cmds
+
+fn rasterize_3d_layer(layer: CompositeLayer) -> [GpuCommand]:
+    var cmds = [GpuCommand]()
+    val transform_cmds = apply_layer_transform(layer)
+    for cmd in transform_cmds:
+        cmds.push(cmd)
+    for item in layer.display_items:
+        match item.op:
+            PaintOp.FillRect(x, y, w, h, color):
+                cmds.push(GpuCommand.DrawQuad(
+                    surface_id: 0,
+                    x: x, y: y, w: w, h: h,
+                    texture_id: -1,
+                    opacity: layer.opacity,
+                ))
+            PaintOp.DrawImage(x, y, w, h, image_id, _):
+                cmds.push(GpuCommand.DrawQuad(
+                    surface_id: 0,
+                    x: x, y: y, w: w, h: h,
+                    texture_id: image_id,
+                    opacity: layer.opacity,
+                ))
+            _:
+                pass_dn
+    cmds
