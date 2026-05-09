@@ -1,22 +1,28 @@
-"""3D Engine — WebGPU Backend
+"""3D Engine — CUDA Backend
 
 @tag:stdlib
 @tag:gpu
 
-GPU-accelerated 3D rendering via WebGPU (Dawn/wgpu).
-Target for Chrome WebGPU 3D features: subgroups, clip distances,
-dual-source blending, float32-blendable.
+GPU-accelerated 3D via CUDA kernels (NVIDIA).
+Currently uses software rasterization fallback identical to the CPU
+backend. Production builds will dispatch to CUDA kernel launches.
+
+Advanced operations (geometry, shadows, post-processing, compute) delegate
+to the stateless emulation layer (backend_emu.spl).
+
+Usage:
+    use std.gpu.engine3d.backend_cuda.{CudaBackend3D}
 """
 
 use std.gpu.engine3d.backend.{RenderBackend3D, Engine3DExtended}
 use std.gpu.engine3d.types3d.{
     Vertex3D, Material3DParams, LightParams3D, RenderStats3D,
     render_stats3d_new, mat4_identity, mat4_mul, mat4_transform_point, mat4_transform_dir,
-    vec3_dot, vec3_normalize,
-    color3d_r, color3d_g, color3d_b, color3d_pack,
-    MATERIAL_UNLIT, MATERIAL_PHONG,
+    vec3_dot, vec3_normalize, vec3_length,
+    color3d_r, color3d_g, color3d_b, color3d_a, color3d_pack,
+    MATERIAL_UNLIT, MATERIAL_PHONG, MATERIAL_PBR,
     LIGHT_DIRECTIONAL, LIGHT_POINT, LIGHT_SPOT,
-    CULL_BACK, CULL_FRONT
+    CULL_NONE, CULL_BACK, CULL_FRONT
 }
 use std.gpu.engine3d.backend_emu.{
     emu_draw_cube, emu_draw_sphere, emu_draw_plane,
@@ -29,108 +35,118 @@ use std.gpu.engine3d.backend_emu.{
 }
 
 extern fn rt_f64_sqrt(x: f64) -> f64
+extern fn rt_f64_sin(x: f64) -> f64
+extern fn rt_f64_cos(x: f64) -> f64
 
-fn _sqrt3d(x: f32) -> f32:
+fn _sqrt_cu(x: f32) -> f32:
     rt_f64_sqrt(x as f64) as f32
 
-fn _clamp3d(v: i32, lo: i32, hi: i32) -> i32:
+# ============================================================================
+# Clamp helpers
+# ============================================================================
+
+fn _clamp_i32_cu(v: i32, lo: i32, hi: i32) -> i32:
     if v < lo:
         lo
+    else if v > hi:
+        hi
     else:
-        if v > hi:
-            hi
-        else:
-            v
+        v
 
-fn _clampf3d(v: f32, lo: f32, hi: f32) -> f32:
+fn _clamp_f32_cu(v: f32, lo: f32, hi: f32) -> f32:
     if v < lo:
         lo
+    else if v > hi:
+        hi
     else:
-        if v > hi:
-            hi
-        else:
-            v
+        v
 
-fn _max3d(a: f32, b: f32) -> f32:
+fn _max_f32_cu(a: f32, b: f32) -> f32:
     if a > b:
         a
     else:
         b
 
-fn _min3d(a: f32, b: f32) -> f32:
+fn _min_f32_cu(a: f32, b: f32) -> f32:
     if a < b:
         a
     else:
         b
 
-fn _min3d_i(a: i32, b: i32) -> i32:
+fn _min_i32_cu(a: i32, b: i32) -> i32:
     if a < b:
         a
     else:
         b
 
-fn _max3d_i(a: i32, b: i32) -> i32:
+fn _max_i32_cu(a: i32, b: i32) -> i32:
     if a > b:
         a
     else:
         b
 
-fn _mask3d_blocks(mask: [u8], mask_w: i32, x: i32, y: i32) -> bool:
-    if mask.len() == 0:
-        false
-    else:
-        val idx = y * mask_w + x
-        if idx >= 0 and idx < mask.len():
-            mask[idx] == 0u8
-        else:
-            false
-
 # ============================================================================
-# WebGPU Backend
+# CUDA Backend
 # ============================================================================
 
-class WebGpuBackend3D:
-    """WebGPU 3D renderer with software rasterization fallback.
+class CudaBackend3D:
+    """CUDA 3D renderer with software rasterization fallback.
 
-    Uses Dawn/wgpu for GPU-accelerated rendering when available.
-    Falls back to CPU scanline rasterization otherwise.
+    Uses flat [u32] color and [f32] depth buffers on the host side.
+    Stencil masks are stored host-side. Production builds will dispatch
+    to CUDA kernels on NVIDIA GPUs.
     """
 
-    _buf: [u32]
-    _depth: [f32]
-    _w: i32
-    _h: i32
-    _view: [f32]
-    _proj: [f32]
-    _lights: [LightParams3D]
-    _ambient_color: u32
-    _ambient_intensity: f32
-    _depth_test: bool
-    _cull_mode: i32
-    _blend_mode: i32
-    _mask: [u8]
-    _mask_w: i32
-    _mask_h: i32
-    _stats: RenderStats3D
-    _initialized: bool
+    buf: [u32]
+    depth: [f32]
+    w: i32
+    h: i32
+    view_mat: [f32]
+    proj_mat: [f32]
+    lights: [LightParams3D]
+    ambient_color: u32
+    ambient_intensity: f32
+    depth_test_on: bool
+    cull_mode: i32
+    blend_mode: i32
+    mask: [u8]
+    mask_w: i32
+    mask_h: i32
+    stats: RenderStats3D
+    initialized: bool
 
-    static fn create() -> WebGpuBackend3D:
-        """Create an uninitialized WebGPU 3D backend. Call init() before drawing."""
-        WebGpuBackend3D(
-            _buf: [], _depth: [], _w: 0, _h: 0,
-            _view: mat4_identity(), _proj: mat4_identity(),
-            _lights: [], _ambient_color: 0xFFFFFFFF, _ambient_intensity: 0.2,
-            _depth_test: true, _cull_mode: 1, _blend_mode: 0,
-            _mask: [], _mask_w: 0, _mask_h: 0,
-            _stats: render_stats3d_new(), _initialized: false
+    static fn create() -> CudaBackend3D:
+        """Create an uninitialized CUDA 3D backend. Call init() before drawing."""
+        CudaBackend3D(
+            buf: [], depth: [], w: 0, h: 0,
+            view_mat: mat4_identity(), proj_mat: mat4_identity(),
+            lights: [], ambient_color: 0xFFFFFFFF, ambient_intensity: 0.2,
+            depth_test_on: true, cull_mode: 1, blend_mode: 0,
+            mask: [], mask_w: 0, mask_h: 0,
+            stats: render_stats3d_new(), initialized: false
         )
+
+# ============================================================================
+# Stencil Mask Helper
+# ============================================================================
+
+fn _mask_blocks_cu(backend: CudaBackend3D, x: i32, y: i32) -> bool:
+    """Return true if the stencil mask blocks pixel (x, y)."""
+    if backend.mask.len() == 0:
+        return false
+    if x < 0 or y < 0 or x >= backend.mask_w or y >= backend.mask_h:
+        return false
+    val idx = y * backend.mask_w + x
+    if idx >= backend.mask.len():
+        return false
+    backend.mask[idx] == 0
 
 # ============================================================================
 # Per-Vertex Lighting
 # ============================================================================
 
-fn _wgpu_shade_vertex(
-    backend: WebGpuBackend3D,
+fn _shade_vertex_cu(
+    backend: CudaBackend3D,
     wx: f32, wy: f32, wz: f32,
     nx: f32, ny: f32, nz: f32,
     material: Material3DParams
@@ -144,17 +160,17 @@ fn _wgpu_shade_vertex(
         return [base_r, base_g, base_b]
 
     # Ambient contribution
-    val amb_r = color3d_r(backend._ambient_color)
-    val amb_g = color3d_g(backend._ambient_color)
-    val amb_b = color3d_b(backend._ambient_color)
-    var out_r: f32 = (base_r as f32) * (amb_r as f32) / 255.0 * backend._ambient_intensity
-    var out_g: f32 = (base_g as f32) * (amb_g as f32) / 255.0 * backend._ambient_intensity
-    var out_b: f32 = (base_b as f32) * (amb_b as f32) / 255.0 * backend._ambient_intensity
+    val amb_r = color3d_r(backend.ambient_color)
+    val amb_g = color3d_g(backend.ambient_color)
+    val amb_b = color3d_b(backend.ambient_color)
+    var out_r: f32 = (base_r as f32) * (amb_r as f32) / 255.0 * backend.ambient_intensity
+    var out_g: f32 = (base_g as f32) * (amb_g as f32) / 255.0 * backend.ambient_intensity
+    var out_b: f32 = (base_b as f32) * (amb_b as f32) / 255.0 * backend.ambient_intensity
 
     # Accumulate per-light contributions
     var li = 0
-    while li < backend._lights.len():
-        val light = backend._lights[li]
+    while li < backend.lights.len():
+        val light = backend.lights[li]
         val lc_r = color3d_r(light.color) as f32
         val lc_g = color3d_g(light.color) as f32
         val lc_b = color3d_b(light.color) as f32
@@ -173,7 +189,7 @@ fn _wgpu_shade_vertex(
             val dx = light.px - wx
             val dy = light.py - wy
             val dz = light.pz - wz
-            val dist = _sqrt3d(dx * dx + dy * dy + dz * dz)
+            val dist = vec3_length(dx, dy, dz)
             if dist > 0.0001:
                 lx = dx / dist
                 ly = dy / dist
@@ -184,22 +200,27 @@ fn _wgpu_shade_vertex(
                 atten = 1.0 / (1.0 + dist * dist)
 
         # Diffuse (N dot L)
-        val ndl = _max3d(0.0, vec3_dot(nx, ny, nz, lx, ly, lz))
+        val ndl = _max_f32_cu(0.0, vec3_dot(nx, ny, nz, lx, ly, lz))
         val diff = ndl * light.intensity * atten
 
         out_r = out_r + diff * lc_r / 255.0 * (base_r as f32)
         out_g = out_g + diff * lc_g / 255.0 * (base_g as f32)
         out_b = out_b + diff * lc_b / 255.0 * (base_b as f32)
 
-        # Specular (Phong)
-        if material.kind == MATERIAL_PHONG:
-            val shininess = material.shininess
-            # Half-vector H = normalize(L + V), approximate V as (0,0,1)
+        # Specular (Phong or simplified PBR)
+        if material.kind == MATERIAL_PHONG or material.kind == MATERIAL_PBR:
+            var shininess = material.shininess
+            if material.kind == MATERIAL_PBR:
+                val rough = _clamp_f32_cu(material.roughness, 0.01, 1.0)
+                shininess = 2.0 / (rough * rough) - 2.0
+                if shininess < 1.0:
+                    shininess = 1.0
+
             val hx = lx + 0.0
             val hy = ly + 0.0
             val hz = lz + 1.0
             val hv = vec3_normalize(hx, hy, hz)
-            val ndh = _max3d(0.0, vec3_dot(nx, ny, nz, hv[0], hv[1], hv[2]))
+            val ndh = _max_f32_cu(0.0, vec3_dot(nx, ny, nz, hv[0], hv[1], hv[2]))
             var spec: f32 = 1.0
             var pow_i = 0
             val pow_target = (shininess as i32)
@@ -217,23 +238,22 @@ fn _wgpu_shade_vertex(
 
         li = li + 1
 
-    val cr = _clamp3d((out_r as i32), 0, 255)
-    val cg = _clamp3d((out_g as i32), 0, 255)
-    val cb = _clamp3d((out_b as i32), 0, 255)
+    val cr = _clamp_i32_cu((out_r as i32), 0, 255)
+    val cg = _clamp_i32_cu((out_g as i32), 0, 255)
+    val cb = _clamp_i32_cu((out_b as i32), 0, 255)
     [cr, cg, cb]
 
 # ============================================================================
 # Scanline Triangle Rasterizer
 # ============================================================================
 
-fn _wgpu_rasterize_triangle(
-    backend: WebGpuBackend3D,
+fn _rasterize_triangle_cu(
+    backend: CudaBackend3D,
     sx0: i32, sy0: i32, sz0: f32, r0: i32, g0: i32, b0: i32,
     sx1: i32, sy1: i32, sz1: f32, r1: i32, g1: i32, b1: i32,
     sx2: i32, sy2: i32, sz2: f32, r2: i32, g2: i32, b2: i32
 ):
     """Scanline-fill a screen-space triangle with depth testing and color interpolation."""
-    # Sort by y coordinate (v0.y <= v1.y <= v2.y)
     var vx0 = sx0
     var vy0 = sy0
     var vz0 = sz0
@@ -316,8 +336,8 @@ fn _wgpu_rasterize_triangle(
     if total_h == 0:
         return
 
-    var y = _max3d_i(vy0, 0)
-    val y_end = _min3d_i(vy2, backend._h - 1)
+    var y = _max_i32_cu(vy0, 0)
+    val y_end = _min_i32_cu(vy2, backend.h - 1)
 
     while y <= y_end:
         val second_half = y > vy1 or vy0 == vy1
@@ -329,14 +349,12 @@ fn _wgpu_rasterize_triangle(
             else:
                 ((y - vy0) as f32) / (seg_h as f32)
 
-            # Long edge interpolation (v0 -> v2)
             var ax: f32 = (vx0 as f32) + ((vx2 - vx0) as f32) * alpha
             var az: f32 = vz0 + (vz2 - vz0) * alpha
             var ar: f32 = (vr0 as f32) + ((vr2 - vr0) as f32) * alpha
             var ag: f32 = (vg0 as f32) + ((vg2 - vg0) as f32) * alpha
             var ab: f32 = (vb0 as f32) + ((vb2 - vb0) as f32) * alpha
 
-            # Short edge interpolation
             var bx: f32 = 0.0
             var bz: f32 = 0.0
             var br: f32 = 0.0
@@ -355,7 +373,6 @@ fn _wgpu_rasterize_triangle(
                 bg_val = (vg0 as f32) + ((vg1 - vg0) as f32) * beta
                 bb = (vb0 as f32) + ((vb1 - vb0) as f32) * beta
 
-            # Ensure ax <= bx for left-to-right walk
             if ax > bx:
                 var tmp = ax
                 ax = bx
@@ -373,30 +390,30 @@ fn _wgpu_rasterize_triangle(
                 ab = bb
                 bb = tmp
 
-            val x_start = _max3d_i((ax as i32), 0)
-            val x_end = _min3d_i((bx as i32), backend._w - 1)
+            val x_start = _max_i32_cu((ax as i32), 0)
+            val x_end = _min_i32_cu((bx as i32), backend.w - 1)
             val span = bx - ax
             if span >= 0.5:
                 var x = x_start
                 while x <= x_end:
                     val t: f32 = if span > 0.5: ((x as f32) - ax) / span else: 0.0
                     val z = az + (bz - az) * t
-                    val idx = y * backend._w + x
+                    val idx = y * backend.w + x
 
                     var do_write = true
-                    if backend._depth_test:
-                        if z >= backend._depth[idx]:
+                    if backend.depth_test_on:
+                        if z >= backend.depth[idx]:
                             do_write = false
-                    if do_write and _mask3d_blocks(backend._mask, backend._mask_w, x, y):
+                    if do_write and _mask_blocks_cu(backend, x, y):
                         do_write = false
 
                     if do_write:
-                        val pr = _clamp3d(((ar + (br - ar) * t) as i32), 0, 255)
-                        val pg = _clamp3d(((ag + (bg_val - ag) * t) as i32), 0, 255)
-                        val pb = _clamp3d(((ab + (bb - ab) * t) as i32), 0, 255)
+                        val pr = _clamp_i32_cu(((ar + (br - ar) * t) as i32), 0, 255)
+                        val pg = _clamp_i32_cu(((ag + (bg_val - ag) * t) as i32), 0, 255)
+                        val pb = _clamp_i32_cu(((ab + (bb - ab) * t) as i32), 0, 255)
 
-                        backend._buf[idx] = color3d_pack(pr, pg, pb, 255)
-                        backend._depth[idx] = z
+                        backend.buf[idx] = color3d_pack(pr, pg, pb, 255)
+                        backend.depth[idx] = z
                     x = x + 1
         y = y + 1
 
@@ -404,72 +421,74 @@ fn _wgpu_rasterize_triangle(
 # Trait Implementation
 # ============================================================================
 
-impl RenderBackend3D for WebGpuBackend3D:
+impl RenderBackend3D for CudaBackend3D:
 
     fn name() -> text:
-        "webgpu3d"
+        "cuda3d"
 
     me init(width: i32, height: i32) -> bool:
-        self._w = width
-        self._h = height
+        self.w = width
+        self.h = height
         val total = width * height
-        self._buf = [0u32; total]
-        self._depth = [1.0; total]
-        self._view = mat4_identity()
-        self._proj = mat4_identity()
-        self._lights = []
-        self._ambient_color = 0xFFFFFFFF
-        self._ambient_intensity = 0.2
-        self._depth_test = true
-        self._cull_mode = CULL_BACK
-        self._blend_mode = 0
-        self._mask = []
-        self._mask_w = 0
-        self._mask_h = 0
-        self._stats = render_stats3d_new()
-        self._initialized = true
+        self.buf = [0u32; total]
+        self.depth = [1.0; total]
+        self.view_mat = mat4_identity()
+        self.proj_mat = mat4_identity()
+        self.lights = []
+        self.ambient_color = 0xFFFFFFFF
+        self.ambient_intensity = 0.2
+        self.depth_test_on = true
+        self.cull_mode = CULL_BACK
+        self.blend_mode = 0
+        self.mask = []
+        self.mask_w = 0
+        self.mask_h = 0
+        self.stats = render_stats3d_new()
+        self.initialized = true
         true
 
     me shutdown():
-        self._buf = []
-        self._depth = []
-        self._w = 0
-        self._h = 0
-        self._initialized = false
+        self.buf = []
+        self.depth = []
+        self.w = 0
+        self.h = 0
+        self.initialized = false
 
     me begin_frame():
-        self._stats = render_stats3d_new()
+        self.stats = render_stats3d_new()
 
     me end_frame():
-        self._stats.frame_time_us = 0
+        self.stats.frame_time_us = 0
 
     me present():
-        self._stats.draw_calls = self._stats.draw_calls
+        # GPU would display via CUDA/OpenGL interop — no-op in software fallback
+        self.stats.draw_calls = self.stats.draw_calls
 
     me set_camera(view: [f32], proj: [f32]):
-        self._view = view
-        self._proj = proj
+        self.view_mat = view
+        self.proj_mat = proj
 
     me set_viewport(x: i32, y: i32, w: i32, h: i32):
-        self._stats.draw_calls = self._stats.draw_calls
+        # CUDA backend uses full framebuffer; viewport is ignored in fallback
+        self.stats.draw_calls = self.stats.draw_calls
 
     me clear(color: u32):
-        val total = self._w * self._h
+        val total = self.w * self.h
         var i = 0
         while i < total:
-            self._buf[i] = color
+            self.buf[i] = color
             i = i + 1
 
     me clear_depth():
-        val total = self._w * self._h
+        val total = self.w * self.h
         var i = 0
         while i < total:
-            self._depth[i] = 1.0
+            self.depth[i] = 1.0
             i = i + 1
 
     me submit_triangle(v0: Vertex3D, v1: Vertex3D, v2: Vertex3D, material: Material3DParams, model: [f32]):
-        self._stats.draw_calls = self._stats.draw_calls + 1
-        self._stats.triangles = self._stats.triangles + 1
+        self.stats.draw_calls = self.stats.draw_calls + 1
+        self.stats.triangles = self.stats.triangles + 1
 
         # Transform positions to world space
         val wp0 = mat4_transform_point(model, v0.px, v0.py, v0.pz)
@@ -485,13 +504,13 @@ impl RenderBackend3D for WebGpuBackend3D:
         val wn2 = vec3_normalize(wn2_raw[0], wn2_raw[1], wn2_raw[2])
 
         # Per-vertex lighting
-        val col0 = _wgpu_shade_vertex(self, wp0[0], wp0[1], wp0[2], wn0[0], wn0[1], wn0[2], material)
-        val col1 = _wgpu_shade_vertex(self, wp1[0], wp1[1], wp1[2], wn1[0], wn1[1], wn1[2], material)
-        val col2 = _wgpu_shade_vertex(self, wp2[0], wp2[1], wp2[2], wn2[0], wn2[1], wn2[2], material)
+        val col0 = _shade_vertex_cu(self, wp0[0], wp0[1], wp0[2], wn0[0], wn0[1], wn0[2], material)
+        val col1 = _shade_vertex_cu(self, wp1[0], wp1[1], wp1[2], wn1[0], wn1[1], wn1[2], material)
+        val col2 = _shade_vertex_cu(self, wp2[0], wp2[1], wp2[2], wn2[0], wn2[1], wn2[2], material)
 
         # Compute MVP = proj * view * model
-        val mv = mat4_mul(self._view, model)
-        val mvp = mat4_mul(self._proj, mv)
+        val mv = mat4_mul(self.view_mat, model)
+        val mvp = mat4_mul(self.proj_mat, mv)
 
         # Project to clip space
         val cx0 = mvp[0] * v0.px + mvp[4] * v0.py + mvp[8] * v0.pz + mvp[12]
@@ -525,8 +544,8 @@ impl RenderBackend3D for WebGpuBackend3D:
         val nz2 = cz2 / cw2
 
         # Map to screen coordinates
-        val half_w: f32 = (self._w as f32) / 2.0
-        val half_h: f32 = (self._h as f32) / 2.0
+        val half_w: f32 = (self.w as f32) / 2.0
+        val half_h: f32 = (self.h as f32) / 2.0
         val scx0 = ((nx0 + 1.0) * half_w) as i32
         val scy0 = ((1.0 - ny0) * half_h) as i32
         val scx1 = ((nx1 + 1.0) * half_w) as i32
@@ -546,15 +565,15 @@ impl RenderBackend3D for WebGpuBackend3D:
         val edge2y = scy2 - scy0
         val cross_z = edge1x * edge2y - edge1y * edge2x
 
-        if self._cull_mode == CULL_BACK:
+        if self.cull_mode == CULL_BACK:
             if cross_z >= 0:
                 return
-        else if self._cull_mode == CULL_FRONT:
+        else if self.cull_mode == CULL_FRONT:
             if cross_z <= 0:
                 return
 
         # Rasterize
-        _wgpu_rasterize_triangle(
+        _rasterize_triangle_cu(
             self,
             scx0, scy0, d0, col0[0], col0[1], col0[2],
             scx1, scy1, d1, col1[0], col1[1], col1[2],
@@ -562,40 +581,40 @@ impl RenderBackend3D for WebGpuBackend3D:
         )
 
     me set_lights(lights: [LightParams3D]):
-        self._lights = lights
+        self.lights = lights
 
     me set_ambient(color: u32, intensity: f32):
-        self._ambient_color = color
-        self._ambient_intensity = intensity
+        self.ambient_color = color
+        self.ambient_intensity = intensity
 
     me set_depth_test(enabled: bool):
-        self._depth_test = enabled
+        self.depth_test_on = enabled
 
     me set_cull_mode(mode: i32):
-        self._cull_mode = mode
+        self.cull_mode = mode
 
     me set_blend_mode(mode: i32):
-        self._blend_mode = mode
+        self.blend_mode = mode
 
     me set_stencil_mask(mask: [u8], w: i32, h: i32):
-        self._mask = mask
-        self._mask_w = w
-        self._mask_h = h
+        self.mask = mask
+        self.mask_w = w
+        self.mask_h = h
 
     me clear_stencil_mask():
-        self._mask = []
-        self._mask_w = 0
-        self._mask_h = 0
+        self.mask = []
+        self.mask_w = 0
+        self.mask_h = 0
 
     me set_render_target(pixels: [u32], w: i32, h: i32):
-        self._buf = pixels
-        self._w = w
-        self._h = h
+        self.buf = pixels
+        self.w = w
+        self.h = h
 
     me reset_render_target():
-        val total = self._w * self._h
-        self._buf = [0u32; total]
-        self._depth = [1.0; total]
+        val total = self.w * self.h
+        self.buf = [0u32; total]
+        self.depth = [1.0; total]
 
     me draw_image(x: i32, y: i32, w: i32, h: i32, pixels: [u32]):
         var row = 0
@@ -604,34 +623,34 @@ impl RenderBackend3D for WebGpuBackend3D:
             while col < w:
                 val px = x + col
                 val py = y + row
-                if px >= 0 and px < self._w and py >= 0 and py < self._h:
+                if px >= 0 and px < self.w and py >= 0 and py < self.h:
                     val src_idx = row * w + col
                     if src_idx < pixels.len():
-                        self._buf[py * self._w + px] = pixels[src_idx]
+                        self.buf[py * self.w + px] = pixels[src_idx]
                 col = col + 1
             row = row + 1
 
     fn read_pixels() -> [u32]:
-        var copy: [u32] = [0u32; self._w * self._h]
+        var copy: [u32] = [0u32; self.w * self.h]
         var i = 0
-        while i < self._w * self._h:
-            copy[i] = self._buf[i]
+        while i < self.w * self.h:
+            copy[i] = self.buf[i]
             i = i + 1
         copy
 
     fn read_depth() -> [f32]:
-        var copy: [f32] = [1.0; self._w * self._h]
+        var copy: [f32] = [1.0; self.w * self.h]
         var i = 0
-        while i < self._w * self._h:
-            copy[i] = self._depth[i]
+        while i < self.w * self.h:
+            copy[i] = self.depth[i]
             i = i + 1
         copy
 
     fn width() -> i32:
-        self._w
+        self.w
 
     fn height() -> i32:
-        self._h
+        self.h
 
     # -- Built-in geometry (delegate to emulation layer) --
 
@@ -701,29 +720,3 @@ impl RenderBackend3D for WebGpuBackend3D:
 
     me dispatch_compute(kernel_id: i32, x: i32, y: i32, z: i32):
         emu_dispatch_compute(self, kernel_id, x, y, z)
-
-# ============================================================================
-# Engine3DExtended — Chrome WebGPU 3D Features
-# ============================================================================
-
-impl Engine3DExtended for WebGpuBackend3D:
-
-    me enable_msaa(samples: i32):
-        # WebGPU: GPURenderPipelineDescriptor.multisample.count = samples
-        self._stats.draw_calls = self._stats.draw_calls
-
-    me set_clip_planes(planes: [[f32]]):
-        # WebGPU: enable "clip-distances" feature, set clip_distances[] in vertex output
-        self._stats.draw_calls = self._stats.draw_calls
-
-    me enable_subgroup_ops(enabled: bool):
-        # WebGPU: enable "subgroups" feature for SIMD parallelism in compute/fragment
-        self._stats.draw_calls = self._stats.draw_calls
-
-    me set_dual_source_blend(enabled: bool):
-        # WebGPU: enable "dual-source-blending", @blend_src attribute at @location(0)
-        self._stats.draw_calls = self._stats.draw_calls
-
-    me enable_hdr_render_target(enabled: bool):
-        # WebGPU: enable "float32-blendable" for 32-bit float render target blending
-        self._stats.draw_calls = self._stats.draw_calls

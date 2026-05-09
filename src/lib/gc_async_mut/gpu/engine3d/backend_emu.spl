@@ -532,6 +532,188 @@ fn emu_apply_tonemap(core: RenderBackend3DCore, exposure: f32):
     core.draw_image(0, 0, w, h, result)
 
 # ============================================================================
+# Texture Operations — Host-side stubs
+# ============================================================================
+
+fn emu_bind_texture(core: RenderBackend3DCore, slot: i32, texture_id: i32):
+    # TODO(gpu-tex): GPU texture binding
+    return
+
+fn emu_create_depth_texture(core: RenderBackend3DCore, w: i32, h: i32) -> i32:
+    # TODO(gpu-tex): GPU depth texture
+    return -1
+
+fn emu_create_cubemap(core: RenderBackend3DCore, size: i32, faces: [[u32]]) -> i32:
+    # TODO(gpu-tex): GPU cubemap
+    return -1
+
+fn emu_generate_mipmaps(core: RenderBackend3DCore, texture_id: i32):
+    # TODO(gpu-tex): GPU mipmap generation
+    return
+
+# ============================================================================
+# Shader / Pipeline — Not supported in emulation
+# ============================================================================
+
+fn emu_create_shader(core: RenderBackend3DCore, vertex_src: text, fragment_src: text) -> i32:
+    # TODO(gpu-pipe): GPU shader compilation
+    return -1
+
+fn emu_delete_shader(core: RenderBackend3DCore, shader_id: i32):
+    return
+
+fn emu_create_pipeline(core: RenderBackend3DCore, shader_id: i32, depth_test: bool, blend_mode: i32, cull_mode: i32) -> i32:
+    # TODO(gpu-pipe): GPU pipeline state object
+    return -1
+
+fn emu_bind_pipeline(core: RenderBackend3DCore, pipeline_id: i32):
+    # TODO(gpu-pipe): GPU pipeline binding
+    return
+
+# ============================================================================
+# Buffer Management — Not supported in emulation
+# ============================================================================
+
+fn emu_create_storage_buffer(core: RenderBackend3DCore, size: i32) -> i32:
+    # TODO(gpu-buf): GPU storage buffer
+    return -1
+
+fn emu_update_buffer(core: RenderBackend3DCore, buffer_id: i32, data: [u8]):
+    # TODO(gpu-buf): GPU buffer upload
+    return
+
+fn emu_read_buffer(core: RenderBackend3DCore, buffer_id: i32) -> [u8]:
+    # TODO(gpu-buf): GPU buffer readback
+    return []
+
+# ============================================================================
+# Render Pass — Simplified emulation
+# ============================================================================
+
+fn emu_begin_render_pass(core: RenderBackend3DCore, color_target: i32, depth_target: i32):
+    # TODO(gpu-pass): GPU render pass begin
+    return
+
+fn emu_end_render_pass(core: RenderBackend3DCore):
+    # TODO(gpu-pass): GPU render pass end
+    return
+
+# ============================================================================
+# Post-Processing — SSAO, FXAA, SSR
+# ============================================================================
+
+fn emu_apply_ssao(core: RenderBackend3DCore, radius: f32, bias: f32, intensity: f32):
+    # Simplified depth-edge darkening
+    val w = core.width()
+    val h = core.height()
+    val pixels = core.read_pixels()
+    val depth = core.read_depth()
+    var result: [u32] = []
+    var i = 0
+    while i < pixels.len():
+        result.push(pixels[i])
+        i = i + 1
+    var y = 1
+    while y < h - 1:
+        var x = 1
+        while x < w - 1:
+            val idx = y * w + x
+            val d = depth[idx]
+            val dl = depth[idx - 1]
+            val dr = depth[idx + 1]
+            val du = depth[idx - w]
+            val dd = depth[idx + w]
+            val diff = ((d - dl) * (d - dl) + (d - dr) * (d - dr) + (d - du) * (d - du) + (d - dd) * (d - dd)) * intensity * 1000.0
+            val occ = _emu3_clamp_f32(1.0 - diff, 0.3, 1.0)
+            val p = pixels[idx]
+            val rr = _emu3_clamp_i32((color3d_r(p) as f32 * occ) as i32, 0, 255)
+            val rg = _emu3_clamp_i32((color3d_g(p) as f32 * occ) as i32, 0, 255)
+            val rb = _emu3_clamp_i32((color3d_b(p) as f32 * occ) as i32, 0, 255)
+            result[idx] = color3d_pack(rr, rg, rb, color3d_a(p))
+            x = x + 1
+        y = y + 1
+    core.draw_image(0, 0, w, h, result)
+
+fn emu_apply_fxaa(core: RenderBackend3DCore):
+    # Simplified edge-detect + 3-pixel average
+    val w = core.width()
+    val h = core.height()
+    val pixels = core.read_pixels()
+    var result: [u32] = []
+    var i = 0
+    while i < pixels.len():
+        result.push(pixels[i])
+        i = i + 1
+    var y = 1
+    while y < h - 1:
+        var x = 1
+        while x < w - 1:
+            val idx = y * w + x
+            val c = pixels[idx]
+            val l = pixels[idx - 1]
+            val r = pixels[idx + 1]
+            val cr = color3d_r(c)
+            val lr = color3d_r(l)
+            val rr = color3d_r(r)
+            val edge = (cr - lr) * (cr - lr) + (cr - rr) * (cr - rr)
+            if edge > 1000:
+                val ar = (cr + lr + rr) / 3
+                val ag = (color3d_g(c) + color3d_g(l) + color3d_g(r)) / 3
+                val ab = (color3d_b(c) + color3d_b(l) + color3d_b(r)) / 3
+                result[idx] = color3d_pack(ar, ag, ab, color3d_a(c))
+            x = x + 1
+        y = y + 1
+    core.draw_image(0, 0, w, h, result)
+
+fn emu_apply_ssr(core: RenderBackend3DCore, max_steps: i32, thickness: f32):
+    # TODO(gpu-ssr): screen-space reflections require ray marching in depth buffer
+    return
+
+# ============================================================================
+# Occlusion Query — Brute-force emulation
+# ============================================================================
+
+fn emu_occlusion_query(core: RenderBackend3DCore, x: i32, y: i32, w: i32, h: i32) -> i32:
+    val fw = core.width()
+    val pixels = core.read_pixels()
+    var count = 0
+    var row = y
+    while row < y + h:
+        var col = x
+        while col < x + w:
+            if row >= 0 and row < core.height() and col >= 0 and col < fw:
+                val idx = row * fw + col
+                if idx >= 0 and idx < pixels.len():
+                    if pixels[idx] != 0xFF000000:
+                        count = count + 1
+            col = col + 1
+        row = row + 1
+    count
+
+# ============================================================================
+# Animation — Host-side stub
+# ============================================================================
+
+fn emu_upload_bone_transforms(core: RenderBackend3DCore, bones: [[f32]], count: i32):
+    # TODO(gpu-anim): GPU skeletal animation
+    return
+
+# ============================================================================
+# GPU-Driven Rendering — Not supported in emulation
+# ============================================================================
+
+fn emu_draw_indirect(core: RenderBackend3DCore, buffer_id: i32, offset: i32, count: i32):
+    # TODO(gpu-indirect): GPU indirect draw
+    return
+
+# ============================================================================
+# Synchronization — Not needed in emulation
+# ============================================================================
+
+fn emu_pipeline_barrier(core: RenderBackend3DCore):
+    return
+
+# ============================================================================
 # Compute — Not supported in emulation
 # ============================================================================
 
@@ -539,5 +721,4 @@ fn emu_create_compute_kernel(core: RenderBackend3DCore, src: text) -> i32:
     return -1
 
 fn emu_dispatch_compute(core: RenderBackend3DCore, kernel_id: i32, x: i32, y: i32, z: i32):
-    # Compute not supported in emulation mode — intentional no-op
     return

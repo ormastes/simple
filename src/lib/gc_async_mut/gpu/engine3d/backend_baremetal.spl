@@ -1,14 +1,13 @@
-"""3D Engine — WebGPU Backend
+"""3D Engine — Baremetal Backend
 
 @tag:stdlib
 @tag:gpu
 
-GPU-accelerated 3D rendering via WebGPU (Dawn/wgpu).
-Target for Chrome WebGPU 3D features: subgroups, clip distances,
-dual-source blending, float32-blendable.
+OS framebuffer driver bridge for baremetal 3D rendering.
+Software fallback for systems without GPU drivers.
 """
 
-use std.gpu.engine3d.backend.{RenderBackend3D, Engine3DExtended}
+use std.gpu.engine3d.backend.{RenderBackend3D}
 use std.gpu.engine3d.types3d.{
     Vertex3D, Material3DParams, LightParams3D, RenderStats3D,
     render_stats3d_new, mat4_identity, mat4_mul, mat4_transform_point, mat4_transform_dir,
@@ -86,14 +85,14 @@ fn _mask3d_blocks(mask: [u8], mask_w: i32, x: i32, y: i32) -> bool:
             false
 
 # ============================================================================
-# WebGPU Backend
+# Baremetal Backend
 # ============================================================================
 
-class WebGpuBackend3D:
-    """WebGPU 3D renderer with software rasterization fallback.
+class BaremetalBackend3D:
+    """Baremetal 3D renderer with software rasterization fallback.
 
-    Uses Dawn/wgpu for GPU-accelerated rendering when available.
-    Falls back to CPU scanline rasterization otherwise.
+    Bridges to OS framebuffer drivers for direct pixel output.
+    Falls back to CPU scanline rasterization for systems without GPU.
     """
 
     _buf: [u32]
@@ -114,9 +113,9 @@ class WebGpuBackend3D:
     _stats: RenderStats3D
     _initialized: bool
 
-    static fn create() -> WebGpuBackend3D:
-        """Create an uninitialized WebGPU 3D backend. Call init() before drawing."""
-        WebGpuBackend3D(
+    static fn create() -> BaremetalBackend3D:
+        """Create an uninitialized baremetal 3D backend. Call init() before drawing."""
+        BaremetalBackend3D(
             _buf: [], _depth: [], _w: 0, _h: 0,
             _view: mat4_identity(), _proj: mat4_identity(),
             _lights: [], _ambient_color: 0xFFFFFFFF, _ambient_intensity: 0.2,
@@ -129,8 +128,8 @@ class WebGpuBackend3D:
 # Per-Vertex Lighting
 # ============================================================================
 
-fn _wgpu_shade_vertex(
-    backend: WebGpuBackend3D,
+fn _bm_shade_vertex(
+    backend: BaremetalBackend3D,
     wx: f32, wy: f32, wz: f32,
     nx: f32, ny: f32, nz: f32,
     material: Material3DParams
@@ -194,7 +193,6 @@ fn _wgpu_shade_vertex(
         # Specular (Phong)
         if material.kind == MATERIAL_PHONG:
             val shininess = material.shininess
-            # Half-vector H = normalize(L + V), approximate V as (0,0,1)
             val hx = lx + 0.0
             val hy = ly + 0.0
             val hz = lz + 1.0
@@ -226,14 +224,13 @@ fn _wgpu_shade_vertex(
 # Scanline Triangle Rasterizer
 # ============================================================================
 
-fn _wgpu_rasterize_triangle(
-    backend: WebGpuBackend3D,
+fn _bm_rasterize_triangle(
+    backend: BaremetalBackend3D,
     sx0: i32, sy0: i32, sz0: f32, r0: i32, g0: i32, b0: i32,
     sx1: i32, sy1: i32, sz1: f32, r1: i32, g1: i32, b1: i32,
     sx2: i32, sy2: i32, sz2: f32, r2: i32, g2: i32, b2: i32
 ):
     """Scanline-fill a screen-space triangle with depth testing and color interpolation."""
-    # Sort by y coordinate (v0.y <= v1.y <= v2.y)
     var vx0 = sx0
     var vy0 = sy0
     var vz0 = sz0
@@ -329,14 +326,12 @@ fn _wgpu_rasterize_triangle(
             else:
                 ((y - vy0) as f32) / (seg_h as f32)
 
-            # Long edge interpolation (v0 -> v2)
             var ax: f32 = (vx0 as f32) + ((vx2 - vx0) as f32) * alpha
             var az: f32 = vz0 + (vz2 - vz0) * alpha
             var ar: f32 = (vr0 as f32) + ((vr2 - vr0) as f32) * alpha
             var ag: f32 = (vg0 as f32) + ((vg2 - vg0) as f32) * alpha
             var ab: f32 = (vb0 as f32) + ((vb2 - vb0) as f32) * alpha
 
-            # Short edge interpolation
             var bx: f32 = 0.0
             var bz: f32 = 0.0
             var br: f32 = 0.0
@@ -355,7 +350,6 @@ fn _wgpu_rasterize_triangle(
                 bg_val = (vg0 as f32) + ((vg1 - vg0) as f32) * beta
                 bb = (vb0 as f32) + ((vb1 - vb0) as f32) * beta
 
-            # Ensure ax <= bx for left-to-right walk
             if ax > bx:
                 var tmp = ax
                 ax = bx
@@ -404,10 +398,10 @@ fn _wgpu_rasterize_triangle(
 # Trait Implementation
 # ============================================================================
 
-impl RenderBackend3D for WebGpuBackend3D:
+impl RenderBackend3D for BaremetalBackend3D:
 
     fn name() -> text:
-        "webgpu3d"
+        "baremetal3d"
 
     me init(width: i32, height: i32) -> bool:
         self._w = width
@@ -471,12 +465,10 @@ impl RenderBackend3D for WebGpuBackend3D:
         self._stats.draw_calls = self._stats.draw_calls + 1
         self._stats.triangles = self._stats.triangles + 1
 
-        # Transform positions to world space
         val wp0 = mat4_transform_point(model, v0.px, v0.py, v0.pz)
         val wp1 = mat4_transform_point(model, v1.px, v1.py, v1.pz)
         val wp2 = mat4_transform_point(model, v2.px, v2.py, v2.pz)
 
-        # Transform normals to world space
         val wn0_raw = mat4_transform_dir(model, v0.nx, v0.ny, v0.nz)
         val wn1_raw = mat4_transform_dir(model, v1.nx, v1.ny, v1.nz)
         val wn2_raw = mat4_transform_dir(model, v2.nx, v2.ny, v2.nz)
@@ -484,16 +476,13 @@ impl RenderBackend3D for WebGpuBackend3D:
         val wn1 = vec3_normalize(wn1_raw[0], wn1_raw[1], wn1_raw[2])
         val wn2 = vec3_normalize(wn2_raw[0], wn2_raw[1], wn2_raw[2])
 
-        # Per-vertex lighting
-        val col0 = _wgpu_shade_vertex(self, wp0[0], wp0[1], wp0[2], wn0[0], wn0[1], wn0[2], material)
-        val col1 = _wgpu_shade_vertex(self, wp1[0], wp1[1], wp1[2], wn1[0], wn1[1], wn1[2], material)
-        val col2 = _wgpu_shade_vertex(self, wp2[0], wp2[1], wp2[2], wn2[0], wn2[1], wn2[2], material)
+        val col0 = _bm_shade_vertex(self, wp0[0], wp0[1], wp0[2], wn0[0], wn0[1], wn0[2], material)
+        val col1 = _bm_shade_vertex(self, wp1[0], wp1[1], wp1[2], wn1[0], wn1[1], wn1[2], material)
+        val col2 = _bm_shade_vertex(self, wp2[0], wp2[1], wp2[2], wn2[0], wn2[1], wn2[2], material)
 
-        # Compute MVP = proj * view * model
         val mv = mat4_mul(self._view, model)
         val mvp = mat4_mul(self._proj, mv)
 
-        # Project to clip space
         val cx0 = mvp[0] * v0.px + mvp[4] * v0.py + mvp[8] * v0.pz + mvp[12]
         val cy0 = mvp[1] * v0.px + mvp[5] * v0.py + mvp[9] * v0.pz + mvp[13]
         val cz0 = mvp[2] * v0.px + mvp[6] * v0.py + mvp[10] * v0.pz + mvp[14]
@@ -509,11 +498,9 @@ impl RenderBackend3D for WebGpuBackend3D:
         val cz2 = mvp[2] * v2.px + mvp[6] * v2.py + mvp[10] * v2.pz + mvp[14]
         val cw2 = mvp[3] * v2.px + mvp[7] * v2.py + mvp[11] * v2.pz + mvp[15]
 
-        # Cull behind near plane
         if cw0 <= 0.0 or cw1 <= 0.0 or cw2 <= 0.0:
             return
 
-        # Perspective divide
         val nx0 = cx0 / cw0
         val ny0 = cy0 / cw0
         val nz0 = cz0 / cw0
@@ -524,7 +511,6 @@ impl RenderBackend3D for WebGpuBackend3D:
         val ny2 = cy2 / cw2
         val nz2 = cz2 / cw2
 
-        # Map to screen coordinates
         val half_w: f32 = (self._w as f32) / 2.0
         val half_h: f32 = (self._h as f32) / 2.0
         val scx0 = ((nx0 + 1.0) * half_w) as i32
@@ -534,12 +520,10 @@ impl RenderBackend3D for WebGpuBackend3D:
         val scx2 = ((nx2 + 1.0) * half_w) as i32
         val scy2 = ((1.0 - ny2) * half_h) as i32
 
-        # Normalized depth
         val d0 = (nz0 + 1.0) / 2.0
         val d1 = (nz1 + 1.0) / 2.0
         val d2 = (nz2 + 1.0) / 2.0
 
-        # Backface culling
         val edge1x = scx1 - scx0
         val edge1y = scy1 - scy0
         val edge2x = scx2 - scx0
@@ -553,8 +537,7 @@ impl RenderBackend3D for WebGpuBackend3D:
             if cross_z <= 0:
                 return
 
-        # Rasterize
-        _wgpu_rasterize_triangle(
+        _bm_rasterize_triangle(
             self,
             scx0, scy0, d0, col0[0], col0[1], col0[2],
             scx1, scy1, d1, col1[0], col1[1], col1[2],
@@ -701,29 +684,3 @@ impl RenderBackend3D for WebGpuBackend3D:
 
     me dispatch_compute(kernel_id: i32, x: i32, y: i32, z: i32):
         emu_dispatch_compute(self, kernel_id, x, y, z)
-
-# ============================================================================
-# Engine3DExtended — Chrome WebGPU 3D Features
-# ============================================================================
-
-impl Engine3DExtended for WebGpuBackend3D:
-
-    me enable_msaa(samples: i32):
-        # WebGPU: GPURenderPipelineDescriptor.multisample.count = samples
-        self._stats.draw_calls = self._stats.draw_calls
-
-    me set_clip_planes(planes: [[f32]]):
-        # WebGPU: enable "clip-distances" feature, set clip_distances[] in vertex output
-        self._stats.draw_calls = self._stats.draw_calls
-
-    me enable_subgroup_ops(enabled: bool):
-        # WebGPU: enable "subgroups" feature for SIMD parallelism in compute/fragment
-        self._stats.draw_calls = self._stats.draw_calls
-
-    me set_dual_source_blend(enabled: bool):
-        # WebGPU: enable "dual-source-blending", @blend_src attribute at @location(0)
-        self._stats.draw_calls = self._stats.draw_calls
-
-    me enable_hdr_render_target(enabled: bool):
-        # WebGPU: enable "float32-blendable" for 32-bit float render target blending
-        self._stats.draw_calls = self._stats.draw_calls
