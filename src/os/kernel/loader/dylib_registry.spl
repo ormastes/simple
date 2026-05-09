@@ -6,7 +6,12 @@
 # entry symbols `_start` and `main` to the stored entry-point address.
 
 use os.posix.errno.{EBADF, EINVAL, ENOENT, ENOEXEC}
-use os.kernel.loader.elf64.{elf64_parse_header}
+use os.kernel.loader.elf64.{
+    elf64_parse_header,
+    elf64_parse_section_headers,
+    elf64_dynsym_lookup,
+    Elf64Header
+}
 use os.kernel.loader.smf.{smf_extract_executable_stub, smf_has_header}
 
 val DYLIB_ENTRY_START: text = "_start"
@@ -138,14 +143,51 @@ fn dylib_registry_close(handle: i64) -> i64:
     _remove_entry_at(idx)
     0
 
+fn _get_elf_bytes(entry: DylibRegistryEntry) -> [u8]:
+    """Extract the raw ELF bytes from a registry entry, unwrapping SMF if needed."""
+    val bytes = entry.bytes
+    val hdr_opt = elf64_parse_header(bytes)
+    if hdr_opt != nil:
+        return bytes
+    if smf_has_header(bytes):
+        val stub = smf_extract_executable_stub(bytes)
+        if stub.is_err():
+            return []
+        return stub.unwrap()
+    []
+
+fn _dylib_lookup_symbol_slow(bytes: [u8], name: text) -> i64:
+    """Slow path: parse section headers and search .dynsym/.symtab for `name`."""
+    if bytes.len() == 0:
+        return 0 - ENOENT as i64
+    val hdr_opt = elf64_parse_header(bytes)
+    if hdr_opt == nil:
+        return 0 - ENOENT as i64
+    val hdr = hdr_opt.unwrap()
+    val shdrs = elf64_parse_section_headers(bytes, hdr)
+    if shdrs.len() == 0:
+        return 0 - ENOENT as i64
+    val sym_opt = elf64_dynsym_lookup(bytes, shdrs, name)
+    if sym_opt != nil:
+        return sym_opt.unwrap() as i64
+    0 - ENOENT as i64
+
 fn dylib_registry_symbol(handle: i64, name: text) -> i64:
-    """Resolve the minimal entry-symbol set for a loaded library."""
+    """Resolve a named symbol from a loaded library.
+
+    Fast path: _start and main return the stored entry-point.
+    Slow path: parse .dynsym then .symtab for arbitrary symbols.
+    """
     if handle <= 0:
         return 0 - EBADF as i64
     val idx = _find_entry_by_handle(handle)
     if idx < 0:
         return 0 - EBADF as i64
 
+    # Fast path for entry symbols
     if name == DYLIB_ENTRY_START or name == DYLIB_ENTRY_MAIN:
         return dylib_registry_entries[idx].entry_point
-    0 - ENOENT as i64
+
+    # Slow path: parse ELF section headers for full symbol resolution
+    val elf_bytes = _get_elf_bytes(dylib_registry_entries[idx])
+    _dylib_lookup_symbol_slow(elf_bytes, name)
