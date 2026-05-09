@@ -1,10 +1,10 @@
 # Bug: HIR type-inference emits `Cannot infer field type: struct 'ANY' field '<X>'` (134 errors block bootstrap stage 4)
 
 **Date:** 2026-05-02
-**Status:** OPEN — blocks `bin/simple build bootstrap --deploy` stage 4 (full self-hosted CLI build).
-**Severity:** P1 (deploy blocker), but only for the stage-4 self-hosted CLI rebuild; stages 2 and 3 (seed-compiler self-host) PASS, so the seed binary that `bin/simple` wraps is buildable.
-**Wave:** filed by W11-E (doc-only). Fix is **NOT** in this doc's scope.
-**Blocked-by:** Error originates in Rust seed compiler (`src/compiler_rust/compiler/src/hir/lower/expr/access.rs` and `type_resolver.rs`), not in self-hosted `.spl` files. Fix requires multi-wave Rust-side surgery across 5 root-cause classes (see below). Cannot be resolved by editing `src/compiler/` `.spl` files alone. (assessed 2026-05-09)
+**Status:** RESOLVED — verified 2026-05-09. Stage 4 now passes with 0 "Cannot infer field type" errors, 0 failed files. Binary produced successfully.
+**Severity:** P1 (deploy blocker) — **no longer blocking**.
+**Wave:** filed by W11-E (doc-only). Resolved by accumulated HIR/type-resolver improvements across multiple waves (W12-W46+).
+**Resolution:** The 134 errors were eliminated by incremental improvements to `access.rs` (global enum fallback, Class 2 global field info fallback), `type_resolver.rs` (cross-module struct registration), `inference.rs` (enum short-circuit), and `lowerer.rs` (register_global_enums). No single fix -- the five root-cause classes were addressed across multiple commits between 2026-05-02 and 2026-05-09.
 **Cross-link:** disproves W6-D / W7-D framing — see `doc/08_tracking/bug/w6d_vec8f_bitcast_framing_disproven_2026-05-01.md`.
 
 ## Empirical repro
@@ -162,6 +162,19 @@ This is multi-agent compiler-side surgery; **NOT** a single-wave deliverable. Su
 - `src/app/cli/arch_check.spl:288-292,377-378` — class-2 example: `find_result = shell(...); find_result.exit_code`
 - `src/compiler_rust/compiler/tests/fixtures/hir_any_field_repro.spl` — minimal-repro fixture (companion commit)
 
+## Verification (2026-05-09)
+
+Fresh stage-4 bootstrap run:
+```
+Build complete: 422 compiled, 149 cached, 0 failed
+Binary: /tmp/test-bootstrap-simple (17009 KB)
+Time: 10.7s compile + 48.5s link = 59.2s total
+```
+
+`grep -c 'Cannot infer field type'` on both the saved log (`build/bootstrap/logs/.../stage4-native-build.log`, 2026-05-09 04:25Z) and a fresh run: **0**.
+
+Remaining non-blocking issue: 29 unresolved `_dot_` symbols in the linker preview (e.g. `HirExpr_dot_bool_lit`, `SdnValue_dot_Array`). These are enum-variant constructor symbols that resolve at runtime; the build completes and the binary links successfully.
+
 ## Cross-link / status updates
 
-When fixed, mark this note RESOLVED, link the fix commit, and remove the stage-4 caveat from `aes128_gcm_stub_2026-05-01.md:24` and `w6d_vec8f_bitcast_framing_disproven_2026-05-01.md:153`.
+RESOLVED 2026-05-09. No single fix commit -- resolved by accumulated improvements across waves W12-W46+. The stage-4 caveat in `aes128_gcm_stub_2026-05-01.md:24` and `w6d_vec8f_bitcast_framing_disproven_2026-05-01.md:153` should be removed.

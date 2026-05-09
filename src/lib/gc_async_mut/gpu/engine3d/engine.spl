@@ -20,6 +20,10 @@
 use std.gpu.engine3d.backend.{RenderBackend3D}
 use std.gpu.engine3d.backend_cpu.{CpuBackend3D}
 use std.gpu.engine3d.types3d.{Vertex3D, Material3DParams, LightParams3D}
+use std.gpu.engine3d.resource_pool.{ResourcePool3D, TextureHandle3D, BufferHandle3D, ShaderHandle3D, PipelineHandle3D}
+use std.gpu.engine3d.texture3d.{TextureDescriptor3D, SamplerDescriptor3D, TextureView3D}
+use std.gpu.engine3d.texture3d.{TEX_DIM_2D, TEX_DIM_3D, TEX_DIM_CUBE, TEX_FMT_RGBA8_UNORM, TEX_FMT_DEPTH32_FLOAT}
+use std.gpu.engine3d.texture3d.{TEX_USAGE_TEXTURE_BINDING, TEX_USAGE_COPY_DST}
 
 # ============================================================================
 # Engine3D
@@ -48,6 +52,7 @@ class Engine3D:
     _backend_name: text
     _w: i32
     _h: i32
+    _resources: ResourcePool3D
 
     # ========================================================================
     # Constructors
@@ -82,7 +87,7 @@ class Engine3D:
         # For now, all paths lead to CPU backend
         var cpu = CpuBackend3D.create()
         cpu.init(width, height)
-        Engine3D(_cpu: cpu, _backend_name: "cpu", _w: width, _h: height)
+        Engine3D(_cpu: cpu, _backend_name: "cpu", _w: width, _h: height, _resources: ResourcePool3D.create())
 
     # ========================================================================
     # Backend Info
@@ -383,3 +388,55 @@ class Engine3D:
 
     me pipeline_barrier():
         self._cpu.pipeline_barrier()
+
+    # ========================================================================
+    # Resource Pool — High-Level API
+    # ========================================================================
+
+    me load_texture(w: i32, h: i32, pixels: [u32]) -> TextureHandle3D:
+        val gpu_id = self._cpu.create_texture(w, h, pixels)
+        self._resources.allocate_texture(w, h, 1, TEX_FMT_RGBA8_UNORM, 1, gpu_id)
+
+    me load_texture_3d(w: i32, h: i32, depth: i32, pixels: [u32]) -> TextureHandle3D:
+        val gpu_id = self._cpu.create_texture(w, h, pixels)
+        self._resources.allocate_texture(w, h, depth, TEX_FMT_RGBA8_UNORM, 1, gpu_id)
+
+    me load_cubemap(size: i32, faces: [[u32]]) -> TextureHandle3D:
+        val gpu_id = self._cpu.create_cubemap(size, faces)
+        self._resources.allocate_texture(size, size, 6, TEX_FMT_RGBA8_UNORM, 1, gpu_id)
+
+    me load_depth_texture(w: i32, h: i32) -> TextureHandle3D:
+        val gpu_id = self._cpu.create_depth_texture(w, h)
+        self._resources.allocate_texture(w, h, 1, TEX_FMT_DEPTH32_FLOAT, 1, gpu_id)
+
+    me unload_texture(handle: TextureHandle3D):
+        self._cpu.delete_texture(handle.gpu_id)
+        self._resources.free_texture(handle.id)
+
+    me load_shader(vertex_src: text, fragment_src: text) -> ShaderHandle3D:
+        val gpu_id = self._cpu.create_shader(vertex_src, fragment_src)
+        self._resources.allocate_shader(vertex_src, fragment_src, gpu_id)
+
+    me unload_shader(handle: ShaderHandle3D):
+        self._cpu.delete_shader(handle.gpu_id)
+        self._resources.free_shader(handle.id)
+
+    me load_pipeline(shader: ShaderHandle3D, depth_test: bool, blend_mode: i32, cull_mode: i32) -> PipelineHandle3D:
+        val gpu_id = self._cpu.create_pipeline(shader.gpu_id, depth_test, blend_mode, cull_mode)
+        self._resources.allocate_pipeline(shader.gpu_id, depth_test, blend_mode, cull_mode, gpu_id)
+
+    me load_buffer(size: i32) -> BufferHandle3D:
+        val gpu_id = self._cpu.create_storage_buffer(size)
+        self._resources.allocate_buffer(size, 0, gpu_id)
+
+    me unload_buffer(handle: BufferHandle3D):
+        self._resources.free_buffer(handle.id)
+
+    me gc_resources(frame_threshold: i32):
+        self._resources.gc_unused(frame_threshold)
+
+    me touch_resource(id: i32):
+        self._resources.touch(id)
+
+    fn resource_pool() -> ResourcePool3D:
+        self._resources
