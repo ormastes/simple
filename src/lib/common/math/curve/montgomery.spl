@@ -1,0 +1,78 @@
+# Montgomery x-only ladder step — generic helper for Curve25519.
+#
+# This module implements the differential addition-and-doubling step
+# of the Montgomery ladder. It operates on projective x-only
+# coordinates (X : Z) and uses only field add/sub/mul/sq.
+#
+# The implementation mirrors `src/os/crypto/curve25519.spl::_ladder_step`
+# but imports field arithmetic from the unified `std.math.field.fe25519`
+# module instead of the co-located `os.crypto` copy.
+#
+# Reference: RFC 7748 (Elliptic Curves for Security)
+# Reference: P. L. Montgomery, "Speeding the Pollard and Elliptic Curve
+#            Methods of Factorization", 1987.
+# ============================================================================
+
+use std.math.field.fe25519.{
+    Fe25519, fe_add, fe_sub, fe_mul, fe_sq, fe_mul_scalar,
+    fe_cond_swap
+}
+
+# ============================================================================
+# Constants
+# ============================================================================
+
+# a24 = (486662 - 2) / 4 = 121665  (Montgomery curve constant for Curve25519)
+val A24: u128 = 121665
+
+# ============================================================================
+# Ladder Step
+# ============================================================================
+
+fn ladder_step(x2: Fe25519, z2: Fe25519, x3: Fe25519, z3: Fe25519, x1: Fe25519) -> (Fe25519, Fe25519, Fe25519, Fe25519):
+    """One step of the Montgomery ladder.
+
+    Computes differential addition and doubling:
+      (x2, z2) = 2 * (x2, z2)
+      (x3, z3) = (x2, z2) + (x3, z3)  [differential, using x1]
+
+    Returns (new_x2, new_z2, new_x3, new_z3).
+    All operations are straight-line (no branches on point values).
+    """
+    # A = x2 + z2
+    val a = fe_add(x2, z2)
+    # AA = A^2
+    val aa = fe_sq(a)
+    # B = x2 - z2
+    val b = fe_sub(x2, z2)
+    # BB = B^2
+    val bb = fe_sq(b)
+    # E = AA - BB
+    val e = fe_sub(aa, bb)
+    # C = x3 + z3
+    val c = fe_add(x3, z3)
+    # D = x3 - z3
+    val d = fe_sub(x3, z3)
+    # DA = D * A
+    val da = fe_mul(d, a)
+    # CB = C * B
+    val cb = fe_mul(c, b)
+
+    # x5 = (DA + CB)^2
+    val sum_dc = fe_add(da, cb)
+    val new_x3 = fe_sq(sum_dc)
+
+    # z5 = x1 * (DA - CB)^2
+    val diff_dc = fe_sub(da, cb)
+    val diff_sq = fe_sq(diff_dc)
+    val new_z3 = fe_mul(x1, diff_sq)
+
+    # x4 = AA * BB
+    val new_x2 = fe_mul(aa, bb)
+
+    # z4 = E * (AA + a24 * E)
+    val a24_e = fe_mul_scalar(e, A24)
+    val aa_plus = fe_add(aa, a24_e)
+    val new_z2 = fe_mul(e, aa_plus)
+
+    (new_x2, new_z2, new_x3, new_z3)

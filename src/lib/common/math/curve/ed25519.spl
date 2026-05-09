@@ -1,0 +1,645 @@
+# Ed25519 Digital Signatures (RFC 8032) — pure Simple, no FFI.
+#
+# Monomorphized specialization of Edwards curve arithmetic over Fe25519.
+# Imports field arithmetic from `std.math.field.fe25519` and point
+# operations from `std.math.curve.edwards`.
+#
+# Public API:
+#   ed25519_keypair_from_seed(seed) -> ([u8], [u8])
+#   ed25519_sign(private_seed, public_key, message) -> [u8]
+#   ed25519_verify(public_key, message, signature) -> bool
+#
+# Constant-time: scalar multiplication uses always-add-and-select
+# (no branch on scalar bits). SHA-512 is pure Simple (FIPS 180-4).
+#
+# Reference: RFC 8032 (Edwards-Curve Digital Signature Algorithm)
+# Reference: HWCD08 (Twisted Edwards Curves Revisited)
+# ============================================================================
+
+use std.math.field.fe25519.{
+    Fe25519, fe_zero, fe_one,
+    fe_add, fe_sub, fe_mul, fe_sq,
+    fe_neg, fe_reduce, fe_invert,
+    fe_from_bytes, fe_to_bytes,
+    fe_cond_select, fe_is_zero
+}
+use std.math.curve.edwards.{
+    EdPoint, ed_point_identity, ed_point_add, ed_point_double,
+    ed_point_cselect, ed_scalar_mul
+}
+use std.crypto.sha512.sha512_bytes
+
+# ============================================================================
+# Ed25519-specific field helpers
+# ============================================================================
+
+fn fe_is_negative(a: Fe25519) -> bool:
+    """Check if the field element is "negative" (low bit of canonical form is 1)."""
+    val bytes = fe_to_bytes(a)
+    (bytes[0] & 1) == 1
+
+fn fe_pow2252m3(u: Fe25519) -> Fe25519:
+    """Compute u^(2^252 - 3) mod p.
+
+    This is used for square root computation on Curve25519's field.
+    Uses the same addition-chain structure as fe_invert.
+    """
+    var z2 = fe_sq(u)
+    var t = fe_sq(z2)
+    t = fe_sq(t)
+    var z9 = fe_mul(t, u)
+    var z11 = fe_mul(z9, z2)
+    t = fe_sq(z11)
+    var z_2_5_0 = fe_mul(t, z9)
+
+    t = fe_sq(z_2_5_0)
+    var i: u64 = 1
+    while i < 5:
+        t = fe_sq(t)
+        i = i + 1
+    var z_2_10_0 = fe_mul(t, z_2_5_0)
+
+    t = fe_sq(z_2_10_0)
+    i = 1
+    while i < 10:
+        t = fe_sq(t)
+        i = i + 1
+    var z_2_20_0 = fe_mul(t, z_2_10_0)
+
+    t = fe_sq(z_2_20_0)
+    i = 1
+    while i < 20:
+        t = fe_sq(t)
+        i = i + 1
+    t = fe_mul(t, z_2_20_0)
+
+    i = 0
+    while i < 10:
+        t = fe_sq(t)
+        i = i + 1
+    var z_2_50_0 = fe_mul(t, z_2_10_0)
+
+    t = fe_sq(z_2_50_0)
+    i = 1
+    while i < 50:
+        t = fe_sq(t)
+        i = i + 1
+    var z_2_100_0 = fe_mul(t, z_2_50_0)
+
+    t = fe_sq(z_2_100_0)
+    i = 1
+    while i < 100:
+        t = fe_sq(t)
+        i = i + 1
+    t = fe_mul(t, z_2_100_0)
+
+    i = 0
+    while i < 50:
+        t = fe_sq(t)
+        i = i + 1
+    t = fe_mul(t, z_2_50_0)
+
+    t = fe_sq(t)
+    t = fe_sq(t)
+
+    fe_mul(t, u)
+
+fn _fe_sqrt_m1() -> Fe25519:
+    """Compute sqrt(-1) mod p = 2^((p-1)/4) mod p.
+
+    Precomputed constant:
+    sqrt(-1) = 0x2b8324804fc1df0b2b4d00993dfbd7a72f431806ad2fe478bac7c24529d6
+    In little-endian bytes.
+    """
+    var bytes: [u8] = [
+        0xb0, 0xa0, 0x0e, 0x4a, 0x27, 0x1b, 0xee, 0xc4,
+        0x78, 0xe4, 0x2f, 0xad, 0x06, 0x18, 0x43, 0x2f,
+        0xa7, 0xd7, 0xfb, 0x3d, 0x99, 0x00, 0x4d, 0x2b,
+        0x0b, 0xdf, 0xc1, 0x4f, 0x80, 0x24, 0x83, 0x2b
+    ]
+    fe_from_bytes(bytes)
+
+fn fe_sqrt(u: Fe25519) -> Fe25519:
+    """Compute the square root of u mod p, if it exists.
+
+    Uses u^((p+3)/8) with adjustment by sqrt(-1) if needed.
+    Returns a root r such that r^2 = u. If u is not a quadratic residue,
+    the result is unspecified (caller should verify r^2 == u).
+    """
+    val r_base = fe_mul(u, fe_pow2252m3(u))
+    val r_sq = fe_sq(r_base)
+    val check = fe_reduce(fe_sub(r_sq, u))
+
+    if check.l0 == 0:
+        if check.l1 == 0:
+            if check.l2 == 0:
+                if check.l3 == 0:
+                    if check.l4 == 0:
+                        return r_base
+
+    val sqrt_m1 = _fe_sqrt_m1()
+    fe_mul(r_base, sqrt_m1)
+
+# ============================================================================
+# Curve Constants
+# ============================================================================
+
+fn _ed25519_d() -> Fe25519:
+    """Curve constant d = -121665/121666 mod p."""
+    var bytes: [u8] = [
+        0xa3, 0x78, 0x59, 0x13, 0xca, 0x4d, 0xeb, 0x75,
+        0xab, 0xd8, 0x41, 0x41, 0x4d, 0x0a, 0x70, 0x00,
+        0x98, 0xe8, 0x79, 0x77, 0x79, 0x40, 0xc7, 0x8c,
+        0x73, 0xfe, 0x6f, 0x2b, 0xee, 0x6c, 0x03, 0x52
+    ]
+    fe_from_bytes(bytes)
+
+fn _ed25519_base_point() -> EdPoint:
+    """Return the Ed25519 base point B.
+
+    B has y = 4/5 mod p, and x is the positive (even) square root.
+    """
+    var bx_bytes: [u8] = [
+        0x1a, 0xd5, 0x25, 0x8f, 0x60, 0x2d, 0x56, 0xc9,
+        0xb2, 0xa7, 0x25, 0x95, 0x60, 0xc7, 0x2c, 0x69,
+        0x5c, 0xdc, 0xd6, 0xfd, 0x31, 0xe2, 0xa4, 0xc0,
+        0xfe, 0x53, 0x6e, 0xcd, 0xd3, 0x36, 0x69, 0x21
+    ]
+    var by_bytes: [u8] = [
+        0x58, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66,
+        0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66,
+        0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66,
+        0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66
+    ]
+    val bx = fe_from_bytes(bx_bytes)
+    val by = fe_from_bytes(by_bytes)
+    EdPoint(
+        x: bx,
+        y: by,
+        z: fe_one(),
+        t: fe_mul(bx, by)
+    )
+
+# ============================================================================
+# Point Encoding / Decoding (RFC 8032 section 5.1.2)
+# ============================================================================
+
+fn ed_point_encode(p: EdPoint) -> [u8]:
+    """Encode a point to 32 bytes.
+
+    Encoding: y-coordinate in little-endian, with top bit of last byte
+    set to the sign (low bit) of the x-coordinate.
+    """
+    val z_inv = fe_invert(p.z)
+    val x = fe_mul(p.x, z_inv)
+    val y = fe_mul(p.y, z_inv)
+    var encoded = fe_to_bytes(y)
+    if fe_is_negative(x):
+        encoded[31] = encoded[31] | 0x80
+    encoded
+
+fn ed_point_decode(bytes: [u8]) -> EdPoint:
+    """Decode a 32-byte encoding to a point on the curve.
+
+    Extracts y from the low 255 bits, recovers x from the curve equation,
+    and uses the top bit to select the sign of x.
+    """
+    val x_sign: u64 = (bytes[31].to_u64() >> 7) & 1
+    var y_bytes: [u8] = []
+    var i: u64 = 0
+    while i < 32:
+        y_bytes.push(bytes[i])
+        i = i + 1
+    y_bytes[31] = y_bytes[31] & 0x7F
+    val y = fe_from_bytes(y_bytes)
+
+    val y_sq = fe_sq(y)
+    val d = _ed25519_d()
+    val u = fe_sub(y_sq, fe_one())
+    val v = fe_add(fe_mul(d, y_sq), fe_one())
+
+    val v_sq = fe_sq(v)
+    val v_cubed = fe_mul(v_sq, v)
+    val v4 = fe_sq(v_sq)
+    val v7 = fe_mul(v4, v_cubed)
+    val uv7 = fe_mul(u, v7)
+    val uv7_pow = fe_pow2252m3(uv7)
+    var x = fe_mul(fe_mul(u, v_cubed), uv7_pow)
+
+    val vx2 = fe_mul(v, fe_sq(x))
+    val check = fe_reduce(fe_sub(vx2, u))
+
+    # If v*x^2 != u, try multiplying x by sqrt(-1)
+    if check.l0 != 0:
+        val sqrt_m1 = _fe_sqrt_m1()
+        x = fe_mul(x, sqrt_m1)
+    else:
+        if check.l1 != 0:
+            val sqrt_m1 = _fe_sqrt_m1()
+            x = fe_mul(x, sqrt_m1)
+        else:
+            if check.l2 != 0:
+                val sqrt_m1 = _fe_sqrt_m1()
+                x = fe_mul(x, sqrt_m1)
+            else:
+                if check.l3 != 0:
+                    val sqrt_m1 = _fe_sqrt_m1()
+                    x = fe_mul(x, sqrt_m1)
+                else:
+                    if check.l4 != 0:
+                        val sqrt_m1 = _fe_sqrt_m1()
+                        x = fe_mul(x, sqrt_m1)
+
+    if fe_is_negative(x) != (x_sign == 1):
+        x = fe_neg(x)
+
+    val t = fe_mul(x, y)
+    EdPoint(x: x, y: y, z: fe_one(), t: t)
+
+# ============================================================================
+# Scalar Arithmetic modulo L (Ed25519 Group Order)
+# ============================================================================
+# L = 2^252 + 27742317777372353535851937790883648493
+# In hex: L = 0x1000000000000000000000000000000014def9dea2f79cd65812631a5cf5d3ed
+
+fn _sc_L() -> [u32]:
+    """Return the group order L as 8 u32 limbs (little-endian)."""
+    var l: [u32] = []
+    l.push(0x5cf5d3ed)
+    l.push(0x5812631a)
+    l.push(0xa2f79cd6)
+    l.push(0x14def9de)
+    l.push(0x00000000)
+    l.push(0x00000000)
+    l.push(0x00000000)
+    l.push(0x10000000)
+    l
+
+fn _bytes_to_limbs32(b: [u8], count: u64) -> [u32]:
+    """Convert byte array to u32 limbs (little-endian)."""
+    var limbs: [u32] = []
+    var i: u64 = 0
+    while i < count:
+        val idx = i * 4
+        var val_u32: u32 = 0
+        if idx < b.len():
+            val_u32 = val_u32 | b[idx].to_u32()
+        if (idx + 1) < b.len():
+            val_u32 = val_u32 | (b[idx + 1].to_u32() << 8)
+        if (idx + 2) < b.len():
+            val_u32 = val_u32 | (b[idx + 2].to_u32() << 16)
+        if (idx + 3) < b.len():
+            val_u32 = val_u32 | (b[idx + 3].to_u32() << 24)
+        limbs.push(val_u32)
+        i = i + 1
+    limbs
+
+fn _limbs32_to_bytes(limbs: [u32], byte_count: u64) -> [u8]:
+    """Convert u32 limbs (little-endian) to byte array."""
+    var result: [u8] = []
+    var i: u64 = 0
+    while i < byte_count:
+        val limb_idx = i / 4
+        val byte_idx = i % 4
+        var byte_val: u8 = 0
+        if limb_idx < limbs.len():
+            byte_val = ((limbs[limb_idx].to_u64() >> (byte_idx * 8)) & 0xFF).to_u8()
+        result.push(byte_val)
+        i = i + 1
+    result
+
+fn _sc_sub_L(a: [u32]) -> [u32]:
+    """Subtract L from a (8 limbs). Returns 9 limbs where limb[8] is borrow."""
+    val l = _sc_L()
+    var result: [u32] = []
+    var borrow: u64 = 0
+    var i: u64 = 0
+    while i < 8:
+        val ai: u64 = a[i].to_u64()
+        val li: u64 = l[i].to_u64()
+        val diff: u64 = ai - li - borrow
+        result.push((diff & 0xFFFFFFFF).to_u32())
+        if ai < (li + borrow):
+            borrow = 1
+        else:
+            borrow = 0
+        i = i + 1
+    result.push(borrow.to_u32())
+    result
+
+fn sc_reduce(s: [u8]) -> [u8]:
+    """Reduce a 64-byte scalar modulo L to 32 bytes."""
+    var limbs = _bytes_to_limbs32(s, 16)
+    var bit: u64 = 511
+    val l = _sc_L()
+
+    while bit >= 252:
+        val limb_idx = bit / 32
+        val bit_idx = bit % 32
+        val is_set = (limbs[limb_idx].to_u64() >> bit_idx) & 1
+
+        if is_set == 1:
+            val shift = bit - 252
+            val word_shift = shift / 32
+            val bit_shift = shift % 32
+
+            var borrow: u64 = 0
+            var j: u64 = 0
+            while j < 9:
+                val target = j + word_shift
+                if target < 16:
+                    var l_val: u64 = 0
+                    if j < 8:
+                        l_val = l[j].to_u64() << bit_shift
+                    if bit_shift > 0:
+                        if j > 0:
+                            if (j - 1) < 8:
+                                l_val = l_val | (l[j - 1].to_u64() >> (32 - bit_shift))
+                    val cur: u64 = limbs[target].to_u64()
+                    val sub_val = (l_val & 0xFFFFFFFF) + borrow
+                    if cur >= sub_val:
+                        limbs[target] = (cur - sub_val).to_u32()
+                        borrow = 0
+                    else:
+                        limbs[target] = ((cur + 0x100000000) - sub_val).to_u32()
+                        borrow = 1
+                j = j + 1
+
+        if bit == 252:
+            break
+        bit = bit - 1
+
+    var low8: [u32] = []
+    var k: u64 = 0
+    while k < 8:
+        low8.push(limbs[k])
+        k = k + 1
+
+    val sub_result = _sc_sub_L(low8)
+    if sub_result[8] == 0:
+        var final_limbs: [u32] = []
+        k = 0
+        while k < 8:
+            final_limbs.push(sub_result[k])
+            k = k + 1
+        return _limbs32_to_bytes(final_limbs, 32)
+
+    _limbs32_to_bytes(low8, 32)
+
+fn sc_muladd(a_bytes: [u8], b_bytes: [u8], c_bytes: [u8]) -> [u8]:
+    """Compute (a * b + c) mod L, where a, b, c are 32-byte scalars."""
+    val a = _bytes_to_limbs32(a_bytes, 8)
+    val b = _bytes_to_limbs32(b_bytes, 8)
+    val c = _bytes_to_limbs32(c_bytes, 8)
+
+    var product: [u64] = []
+    var i: u64 = 0
+    while i < 16:
+        product.push(0)
+        i = i + 1
+
+    i = 0
+    while i < 8:
+        var carry: u64 = 0
+        var j: u64 = 0
+        while j < 8:
+            val idx = i + j
+            val mul_val: u64 = a[i].to_u64() * b[j].to_u64()
+            val sum: u64 = product[idx] + mul_val + carry
+            product[idx] = sum & 0xFFFFFFFF
+            carry = sum >> 32
+            j = j + 1
+        product[i + 8] = product[i + 8] + carry
+        i = i + 1
+
+    var add_carry: u64 = 0
+    i = 0
+    while i < 8:
+        val sum: u64 = product[i] + c[i].to_u64() + add_carry
+        product[i] = sum & 0xFFFFFFFF
+        add_carry = sum >> 32
+        i = i + 1
+    while add_carry > 0:
+        if i >= 16:
+            break
+        val sum: u64 = product[i] + add_carry
+        product[i] = sum & 0xFFFFFFFF
+        add_carry = sum >> 32
+        i = i + 1
+
+    var prod_bytes: [u8] = []
+    i = 0
+    while i < 16:
+        val limb = product[i]
+        prod_bytes.push((limb & 0xFF).to_u8())
+        prod_bytes.push(((limb >> 8) & 0xFF).to_u8())
+        prod_bytes.push(((limb >> 16) & 0xFF).to_u8())
+        prod_bytes.push(((limb >> 24) & 0xFF).to_u8())
+        i = i + 1
+
+    sc_reduce(prod_bytes)
+
+# ============================================================================
+# SHA-512 Bridge ([u8] <-> list)
+# ============================================================================
+
+fn _sha512_u8(data: [u8]) -> [u8]:
+    """SHA-512 over [u8], returning [u8].
+
+    Wraps `std.crypto.sha512.sha512_bytes` (pure-Simple, FIPS 180-4).
+    """
+    var lst: list = []
+    var i: u64 = 0
+    while i < data.len():
+        lst.push(data[i].to_i64())
+        i = i + 1
+    val h_lst = sha512_bytes(lst)
+    var out: [u8] = []
+    var j: i64 = 0
+    while j < h_lst.len():
+        out.push((h_lst[j] & 0xFF).to_u8())
+        j = j + 1
+    out
+
+fn _sha512_modl(data: [u8]) -> [u8]:
+    """Compute SHA-512(data) then reduce the 64-byte result modulo L."""
+    val hash = _sha512_u8(data)
+    sc_reduce(hash)
+
+# ============================================================================
+# Scalar Clamping
+# ============================================================================
+
+fn _ed25519_clamp(h: [u8]) -> [u8]:
+    """Clamp the first 32 bytes of a SHA-512 hash per RFC 8032 section 5.1.5."""
+    var a: [u8] = []
+    var i: u64 = 0
+    while i < 32:
+        a.push(h[i])
+        i = i + 1
+    a[0] = a[0] & 248u8
+    a[31] = a[31] & 127u8
+    a[31] = a[31] | 64u8
+    a
+
+# ============================================================================
+# Internal helpers
+# ============================================================================
+
+fn _sc_is_geq_L(s: [u8]) -> bool:
+    """Check if a 32-byte scalar s >= L."""
+    val limbs = _bytes_to_limbs32(s, 8)
+    val sub = _sc_sub_L(limbs)
+    sub[8] == 0
+
+fn _bytes_equal(a: [u8], b: [u8]) -> bool:
+    """Constant-time comparison of two byte arrays."""
+    if a.len() != b.len():
+        return false
+    var diff: u8 = 0
+    var i: u64 = 0
+    while i < a.len():
+        diff = diff | (a[i] ^ b[i])
+        i = i + 1
+    diff == 0
+
+# ============================================================================
+# Public API — pure Simple, RFC 8032 section 5.1 conformant
+# ============================================================================
+
+fn ed25519_keypair_from_seed(seed: [u8]) -> ([u8], [u8]):
+    """Derive (private_seed, public_key) from a 32-byte seed.
+
+    Per RFC 8032 section 5.1.5:
+      1. h = SHA-512(seed)
+      2. a = clamp(h[0..32])
+      3. A = a * B
+      4. encode A as 32 bytes
+    """
+    val h = _sha512_u8(seed)
+    val a = _ed25519_clamp(h)
+    val d = _ed25519_d()
+    val big_a = ed_scalar_mul(a, _ed25519_base_point(), d)
+    val pk = ed_point_encode(big_a)
+    (seed, pk)
+
+fn ed25519_sign(private_seed: [u8], public_key: [u8], message: [u8]) -> [u8]:
+    """Sign a message with Ed25519. Returns a 64-byte signature (R || S).
+
+    Per RFC 8032 section 5.1.6:
+      h = SHA-512(seed)
+      a = clamp(h[0..32]); prefix = h[32..64]
+      r = SHA-512(prefix || M) mod L
+      R = r * B
+      k = SHA-512(encode(R) || A || M) mod L
+      S = (r + k * a) mod L
+      signature = encode(R) || S
+    """
+    val h = _sha512_u8(private_seed)
+    val a = _ed25519_clamp(h)
+    val d = _ed25519_d()
+
+    var prefix: [u8] = []
+    var i: u64 = 32
+    while i < 64:
+        prefix.push(h[i])
+        i = i + 1
+
+    var prefix_msg: [u8] = []
+    i = 0
+    while i < prefix.len():
+        prefix_msg.push(prefix[i])
+        i = i + 1
+    i = 0
+    while i < message.len():
+        prefix_msg.push(message[i])
+        i = i + 1
+    val r = _sha512_modl(prefix_msg)
+
+    val big_r = ed_scalar_mul(r, _ed25519_base_point(), d)
+    val r_enc = ed_point_encode(big_r)
+
+    var k_input: [u8] = []
+    i = 0
+    while i < r_enc.len():
+        k_input.push(r_enc[i])
+        i = i + 1
+    i = 0
+    while i < public_key.len():
+        k_input.push(public_key[i])
+        i = i + 1
+    i = 0
+    while i < message.len():
+        k_input.push(message[i])
+        i = i + 1
+    val k = _sha512_modl(k_input)
+
+    val s = sc_muladd(k, a, r)
+
+    var sig: [u8] = []
+    i = 0
+    while i < r_enc.len():
+        sig.push(r_enc[i])
+        i = i + 1
+    i = 0
+    while i < s.len():
+        sig.push(s[i])
+        i = i + 1
+    sig
+
+fn ed25519_verify(public_key: [u8], message: [u8], signature: [u8]) -> bool:
+    """Verify an Ed25519 signature. Returns true on success.
+
+    Per RFC 8032 section 5.1.7:
+      parse R = signature[0..32], S = signature[32..64]
+      reject if S >= L
+      A = decode(public_key)
+      R' = decode(R)
+      k = SHA-512(R || A || M) mod L
+      check  S * B  ==  R + k * A
+    """
+    if signature.len() != 64:
+        return false
+    if public_key.len() != 32:
+        return false
+
+    var r_bytes: [u8] = []
+    var i: u64 = 0
+    while i < 32:
+        r_bytes.push(signature[i])
+        i = i + 1
+    var s_bytes: [u8] = []
+    i = 32
+    while i < 64:
+        s_bytes.push(signature[i])
+        i = i + 1
+
+    if _sc_is_geq_L(s_bytes):
+        return false
+
+    val big_a = ed_point_decode(public_key)
+    val big_r = ed_point_decode(r_bytes)
+    val d = _ed25519_d()
+
+    var k_input: [u8] = []
+    i = 0
+    while i < r_bytes.len():
+        k_input.push(r_bytes[i])
+        i = i + 1
+    i = 0
+    while i < public_key.len():
+        k_input.push(public_key[i])
+        i = i + 1
+    i = 0
+    while i < message.len():
+        k_input.push(message[i])
+        i = i + 1
+    val k = _sha512_modl(k_input)
+
+    val sb = ed_scalar_mul(s_bytes, _ed25519_base_point(), d)
+    val ka = ed_scalar_mul(k, big_a, d)
+    val rhs = ed_point_add(big_r, ka, d)
+
+    val sb_enc = ed_point_encode(sb)
+    val rhs_enc = ed_point_encode(rhs)
+    _bytes_equal(sb_enc, rhs_enc)

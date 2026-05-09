@@ -1,0 +1,117 @@
+# X25519 Diffie-Hellman (RFC 7748) — pure Simple, no FFI.
+#
+# Monomorphized specialization of the Montgomery ladder over Fe25519.
+# Imports field arithmetic from `std.math.field.fe25519` and the ladder
+# step from `std.math.curve.montgomery`.
+#
+# Public API:
+#   x25519(scalar, u_coord) -> [u8]   — general scalar mult
+#   x25519_base(scalar) -> [u8]       — scalar * base point (u=9)
+#
+# Constant-time: the ladder iterates all 255 bits with `fe_cond_swap`;
+# no branch on scalar bits.
+#
+# Reference: RFC 7748 (Elliptic Curves for Security)
+# ============================================================================
+
+use std.math.field.fe25519.{
+    Fe25519, fe_zero, fe_one,
+    fe_add, fe_sub, fe_mul, fe_sq, fe_mul_scalar,
+    fe_invert, fe_reduce,
+    fe_from_bytes, fe_to_bytes,
+    fe_cond_swap
+}
+use std.math.curve.montgomery.{ladder_step}
+
+# ============================================================================
+# Scalar Clamping (RFC 7748 Section 5)
+# ============================================================================
+
+fn _clamp_scalar(scalar: [u8]) -> [u8]:
+    """Apply the Curve25519 scalar clamping per RFC 7748."""
+    var clamped: [u8] = []
+    var i: u64 = 0
+    while i < scalar.len():
+        clamped.push(scalar[i])
+        i = i + 1
+    clamped[0] = clamped[0] & 248u8
+    clamped[31] = clamped[31] & 127u8
+    clamped[31] = clamped[31] | 64u8
+    clamped
+
+fn _mask_u_coord(u_coord: [u8]) -> [u8]:
+    """Mask the high bit of the u-coordinate per RFC 7748."""
+    var masked: [u8] = []
+    var i: u64 = 0
+    while i < u_coord.len():
+        masked.push(u_coord[i])
+        i = i + 1
+    masked[31] = masked[31] & 127u8
+    masked
+
+# ============================================================================
+# X25519 Scalar Multiplication
+# ============================================================================
+
+fn x25519(scalar: [u8], u_coord: [u8]) -> [u8]:
+    """X25519 scalar multiplication.
+
+    Returns scalar * u_coord as 32 bytes (little-endian).
+    Constant-time: iterates all 255 bits with conditional swap.
+    """
+    val k = _clamp_scalar(scalar)
+    val u = _mask_u_coord(u_coord)
+    val x1 = fe_from_bytes(u)
+
+    var x_2 = fe_one()
+    var z_2 = fe_zero()
+    var x_3 = fe_from_bytes(u)
+    var z_3 = fe_one()
+    var swap: u64 = 0
+
+    var bit_pos: u64 = 254
+    while bit_pos >= 0:
+        val byte_idx = bit_pos / 8
+        val bit_idx = bit_pos - byte_idx * 8
+        val k_t: u64 = (k[byte_idx].to_u64() >> bit_idx) & 1
+
+        swap = swap ^ k_t
+        val swapped = fe_cond_swap(x_2, x_3, swap)
+        x_2 = swapped.0
+        x_3 = swapped.1
+        val swapped_z = fe_cond_swap(z_2, z_3, swap)
+        z_2 = swapped_z.0
+        z_3 = swapped_z.1
+        swap = k_t
+
+        val step = ladder_step(x_2, z_2, x_3, z_3, x1)
+        x_2 = step.0
+        z_2 = step.1
+        x_3 = step.2
+        z_3 = step.3
+
+        if bit_pos == 0:
+            break
+        bit_pos = bit_pos - 1
+
+    # Final conditional swap
+    val final_swap = fe_cond_swap(x_2, x_3, swap)
+    x_2 = final_swap.0
+    x_3 = final_swap.1
+    val final_swap_z = fe_cond_swap(z_2, z_3, swap)
+    z_2 = final_swap_z.0
+    z_3 = final_swap_z.1
+
+    val z_inv = fe_invert(z_2)
+    val result = fe_mul(x_2, z_inv)
+    fe_to_bytes(result)
+
+fn x25519_base(scalar: [u8]) -> [u8]:
+    """X25519 scalar multiplication with the standard base point u=9."""
+    var base_point: [u8] = []
+    base_point.push(9u8)
+    var i: u64 = 1
+    while i < 32:
+        base_point.push(0u8)
+        i = i + 1
+    x25519(scalar: scalar, u_coord: base_point)
