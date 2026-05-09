@@ -4,6 +4,7 @@ use os.userlib.syscall_raw
 use std.nogc_sync_mut.binary_io.{bytes_to_string}
 use os.kernel.types.syscall_types(SignalKind)
 use os.kernel.types.syscall_types.{new_task_info_buf}
+use os.sosix.process.{sosix_marshal_string_vector}
 
 class ProcessEntry:
     pid: u64
@@ -103,3 +104,54 @@ fn set_priority(pid: u64, priority: u8) -> Result<bool, text>:
     if result < 0:
         return Err("set_priority failed with code {result}")
     Ok(true)
+
+# ============================================================================
+# Path-based spawn with argv/envp
+# ============================================================================
+
+fn spawn_path(path: text, argv: [text], envp: [text]) -> Result<u32, i32>:
+    """Spawn an executable by filesystem path with argument and environment vectors.
+
+    Marshals the path, argv, and envp into contiguous byte buffers and
+    invokes syscall 13 (SpawnBinary). When argv is empty it defaults to
+    [path] so the child always sees at least argv[0].
+
+    Syscall 13 ABI:
+      arg0 = path_ptr
+      arg1 = path_len
+      arg2 = argv_ptr (marshaled string vector, or 0)
+      arg3 = envp_ptr (marshaled string vector, or 0)
+
+    The current kernel handler only reads arg0/arg1/arg2-as-priority.
+    A future kernel ABI update will consume arg2/arg3 as argv/envp
+    pointers. Until then the marshaled buffers are prepared but the
+    kernel ignores them.
+
+    Returns Ok(pid) on success, Err(errno) on failure.
+    """
+    if path.len() == 0:
+        return Err(22)  # EINVAL
+
+    # Default argv to [path] when caller passes empty
+    var effective_argv: [text] = []
+    if argv.len() == 0:
+        effective_argv.push(path)
+    else:
+        var i: u64 = 0
+        while i < argv.len().to_u64():
+            effective_argv.push(argv[i])
+            i = i + 1
+
+    val argv_buf = sosix_marshal_string_vector(effective_argv)
+    val envp_buf = sosix_marshal_string_vector(envp)
+
+    val path_ptr = rt_string_data(path) as u64
+    val path_len = path.len() as u64
+
+    # Syscall 13: arg0=path_ptr, arg1=path_len, arg2=argv_ptr, arg3=envp_ptr
+    val argv_ptr = if argv_buf.len() > 0: argv_buf.ptr() as u64 else: 0u64
+    val envp_ptr = if envp_buf.len() > 0: envp_buf.ptr() as u64 else: 0u64
+    val result = syscall(13, path_ptr, path_len, argv_ptr, envp_ptr, 0)
+    if result < 0:
+        return Err(result as i32)
+    Ok(result as u32)

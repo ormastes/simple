@@ -184,3 +184,109 @@ fn sosix_process_wait_request(req: u64) -> i64:
     val result = sosix_process_result(req)
     sosix_process_free_request(req)
     result
+
+# ============================================================================
+# Argv / envp marshaling helpers
+# ============================================================================
+
+fn sosix_marshal_string_vector(strings: [text]) -> [u8]:
+    """Pack an array of text strings into a contiguous byte buffer for kernel consumption.
+
+    Layout:
+      [string_0 bytes, NUL, string_1 bytes, NUL, ..., string_N bytes, NUL,
+       offset_0 (8 bytes LE), offset_1 (8 bytes LE), ..., offset_N (8 bytes LE),
+       NULL_terminator (8 bytes of zeroes)]
+
+    Each offset entry records the byte position of the corresponding string
+    within the buffer. The kernel adds the buffer base address to recover
+    absolute pointers suitable for a C-style char** array.
+
+    This variant uses char_at() for interpreter compatibility. The kernel-
+    side sosix_marshal_string_vector_kern() uses rt_copy_user_byte for
+    baremetal contexts where char_at may not be available.
+
+    Returns an empty buffer when the input is empty.
+    """
+    if strings.len() == 0:
+        return []
+
+    # Phase 1: concatenate null-terminated strings, recording offsets
+    var buf: [u8] = []
+    var offsets: [u64] = []
+    var si: u64 = 0
+    while si < strings.len().to_u64():
+        offsets.push(buf.len().to_u64())
+        val s = strings[si]
+        for ci in 0..s.len():
+            buf.push(s.char_at(ci) as u8)
+        buf.push(0)  # NUL terminator
+        si = si + 1
+
+    # Phase 2: append pointer/offset table (little-endian u64 entries)
+    var oi: u64 = 0
+    while oi < offsets.len().to_u64():
+        val offset = offsets[oi]
+        buf.push((offset & 0xFF) as u8)
+        buf.push(((offset >> 8) & 0xFF) as u8)
+        buf.push(((offset >> 16) & 0xFF) as u8)
+        buf.push(((offset >> 24) & 0xFF) as u8)
+        buf.push(((offset >> 32) & 0xFF) as u8)
+        buf.push(((offset >> 40) & 0xFF) as u8)
+        buf.push(((offset >> 48) & 0xFF) as u8)
+        buf.push(((offset >> 56) & 0xFF) as u8)
+        oi = oi + 1
+
+    # NULL terminator pointer entry
+    var ni: u64 = 0
+    while ni < 8:
+        buf.push(0)
+        ni = ni + 1
+
+    buf
+
+fn sosix_marshal_string_vector_kern(strings: [text]) -> [u8]:
+    """Kernel-side variant using rt_copy_user_byte for baremetal byte access."""
+    if strings.len() == 0:
+        return []
+
+    var buf: [u8] = []
+    var offsets: [u64] = []
+    var si: u64 = 0
+    while si < strings.len().to_u64():
+        offsets.push(buf.len().to_u64())
+        val s = strings[si]
+        val s_ptr = rt_string_data(s) as u64
+        var ci: u64 = 0
+        while ci < s.len().to_u64():
+            buf.push(rt_copy_user_byte(s_ptr + ci))
+            ci = ci + 1
+        buf.push(0)
+        si = si + 1
+
+    var oi: u64 = 0
+    while oi < offsets.len().to_u64():
+        val offset = offsets[oi]
+        buf.push((offset & 0xFF) as u8)
+        buf.push(((offset >> 8) & 0xFF) as u8)
+        buf.push(((offset >> 16) & 0xFF) as u8)
+        buf.push(((offset >> 24) & 0xFF) as u8)
+        buf.push(((offset >> 32) & 0xFF) as u8)
+        buf.push(((offset >> 40) & 0xFF) as u8)
+        buf.push(((offset >> 48) & 0xFF) as u8)
+        buf.push(((offset >> 56) & 0xFF) as u8)
+        oi = oi + 1
+
+    var ni: u64 = 0
+    while ni < 8:
+        buf.push(0)
+        ni = ni + 1
+
+    buf
+
+fn sosix_marshal_string_vector_size(count: u64, total_string_bytes: u64) -> u64:
+    """Compute the expected buffer size for a given number of strings.
+
+    total_string_bytes is the sum of all string lengths (without NULs).
+    Result = total_string_bytes + count (NULs) + (count + 1) * 8 (offset table).
+    """
+    total_string_bytes + count + (count + 1) * 8
