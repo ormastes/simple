@@ -1,0 +1,372 @@
+"""DWARF line number program specification tests."""
+
+use std.debug.formats.dwarf_line_program.{DwarfLineHeader, dwarf_parse_line_header, dwarf_decode_line_program}
+
+# ============================================================================
+# Helper: build a minimal DWARF v3 .debug_line header with NO file names
+# ============================================================================
+# This avoids triggering text.from_char_code in _read_null_terminated_string
+# which fails in the interpreter.
+
+fn _build_minimal_header_bytes() -> [u8]:
+    var prologue: [u8] = []
+    prologue = prologue.push(1)   # min_instruction_length
+    prologue = prologue.push(1)   # default_is_stmt
+    prologue = prologue.push(251) # line_base = -5 (signed)
+    prologue = prologue.push(14)  # line_range
+    prologue = prologue.push(13)  # opcode_base
+    # 12 standard opcode lengths
+    prologue = prologue.push(0)
+    prologue = prologue.push(1)
+    prologue = prologue.push(1)
+    prologue = prologue.push(1)
+    prologue = prologue.push(1)
+    prologue = prologue.push(0)
+    prologue = prologue.push(0)
+    prologue = prologue.push(0)
+    prologue = prologue.push(1)
+    prologue = prologue.push(0)
+    prologue = prologue.push(0)
+    prologue = prologue.push(1)
+    # include_directories: empty (terminated by 0x00)
+    prologue = prologue.push(0x00)
+    # file_names: empty (terminated by 0x00)
+    prologue = prologue.push(0x00)
+
+    val header_length = prologue.len()
+    val total_after_unit_length = 2 + 4 + header_length
+
+    var b: [u8] = []
+    # unit_length (u32 LE)
+    b = b.push((total_after_unit_length % 256) as u8)
+    b = b.push(((total_after_unit_length / 256) % 256) as u8)
+    b = b.push(0x00)
+    b = b.push(0x00)
+    # version (u16 LE) = 3
+    b = b.push(0x03)
+    b = b.push(0x00)
+    # header_length (u32 LE)
+    b = b.push((header_length % 256) as u8)
+    b = b.push(((header_length / 256) % 256) as u8)
+    b = b.push(0x00)
+    b = b.push(0x00)
+    # prologue body
+    var pi = 0
+    while pi < prologue.len():
+        b = b.push(prologue[pi])
+        pi = pi + 1
+    b
+
+# ============================================================================
+# Helper: make a standard DwarfLineHeader struct for decode tests
+# ============================================================================
+
+fn _make_header(prog_offset: i64, prog_end: i64) -> DwarfLineHeader:
+    DwarfLineHeader(
+        unit_length: 0,
+        version: 3,
+        header_length: 0,
+        min_instruction_length: 1,
+        maximum_ops_per_instruction: 1,
+        default_is_stmt: true,
+        line_base: -5,
+        line_range: 14,
+        opcode_base: 13,
+        standard_opcode_lengths: [0, 1, 1, 1, 1, 0, 0, 0, 1, 0, 0, 1],
+        include_directories: [],
+        file_names: ["test.spl"],
+        file_dir_indices: [0],
+        program_offset: prog_offset,
+        program_end: prog_end,
+    )
+
+# ============================================================================
+# Header Parsing Tests
+# ============================================================================
+
+describe "DWARF Line Header Parsing":
+    it "parses version and basic fields":
+        val data = _build_minimal_header_bytes()
+        val result = dwarf_parse_line_header(data, 0, 4)
+        expect(result.is_ok()).to_equal(true)
+        val hdr = result.ok()!
+        expect(hdr.version).to_equal(3)
+        expect(hdr.min_instruction_length).to_equal(1)
+        expect(hdr.default_is_stmt).to_equal(true)
+        expect(hdr.line_base).to_equal(-5)
+        expect(hdr.line_range).to_equal(14)
+        expect(hdr.opcode_base).to_equal(13)
+
+    it "parses standard opcode lengths":
+        val data = _build_minimal_header_bytes()
+        val hdr = dwarf_parse_line_header(data, 0, 4).ok()!
+        expect(hdr.standard_opcode_lengths.len()).to_equal(12)
+        expect(hdr.standard_opcode_lengths[0]).to_equal(0)
+        expect(hdr.standard_opcode_lengths[1]).to_equal(1)
+
+    it "reports empty file and directory tables":
+        val data = _build_minimal_header_bytes()
+        val hdr = dwarf_parse_line_header(data, 0, 4).ok()!
+        expect(hdr.file_names.len()).to_equal(0)
+        expect(hdr.include_directories.len()).to_equal(0)
+
+    it "rejects truncated data":
+        val data: [u8] = [0x01, 0x00]
+        val result = dwarf_parse_line_header(data, 0, 4)
+        expect(result.is_err()).to_equal(true)
+
+    it "rejects unsupported version":
+        var data: [u8] = []
+        # unit_length = 20
+        data = data.push(0x14)
+        data = data.push(0x00)
+        data = data.push(0x00)
+        data = data.push(0x00)
+        # version = 1 (unsupported)
+        data = data.push(0x01)
+        data = data.push(0x00)
+        # pad to satisfy unit_length
+        var pad = 0
+        while pad < 20:
+            data = data.push(0x00)
+            pad = pad + 1
+        val result = dwarf_parse_line_header(data, 0, 4)
+        expect(result.is_err()).to_equal(true)
+
+    it "computes correct program_offset and program_end":
+        val data = _build_minimal_header_bytes()
+        val hdr = dwarf_parse_line_header(data, 0, 4).ok()!
+        # program_offset = 10 (fixed header) + header_length
+        # program_end = 4 + unit_length
+        expect(hdr.program_offset).to_be_greater_than(0)
+        expect(hdr.program_end).to_equal(data.len())
+
+# ============================================================================
+# Line Program Decode Tests (using directly-constructed DwarfLineHeader)
+# ============================================================================
+
+describe "DWARF Line Program Decoding":
+    it "returns empty list for empty program":
+        val header = _make_header(0, 0)
+        val data: [u8] = []
+        val entries = dwarf_decode_line_program(data, header, 4)
+        expect(entries.len()).to_equal(0)
+
+    it "decodes DW_LNE_end_sequence only":
+        val header = _make_header(0, 3)
+        # DW_LNE_end_sequence: 0x00 len=1 opcode=0x01
+        var prog: [u8] = [0x00, 0x01, 0x01]
+        val entries = dwarf_decode_line_program(prog, header, 4)
+        expect(entries.len()).to_equal(1)
+        expect(entries[0].end_sequence).to_equal(true)
+        expect(entries[0].address).to_equal(0)
+        expect(entries[0].location.line).to_equal(1)
+
+    it "decodes set_address + copy + end_sequence":
+        var prog: [u8] = []
+        # DW_LNE_set_address(0x1000) addr_size=4
+        prog = prog.push(0x00)
+        prog = prog.push(0x05) # ext_len = 5 (1 + 4)
+        prog = prog.push(0x02) # DW_LNE_set_address
+        prog = prog.push(0x00) # 0x1000 LE
+        prog = prog.push(0x10)
+        prog = prog.push(0x00)
+        prog = prog.push(0x00)
+        # DW_LNS_copy
+        prog = prog.push(0x01)
+        # DW_LNE_end_sequence
+        prog = prog.push(0x00)
+        prog = prog.push(0x01)
+        prog = prog.push(0x01)
+
+        val header = _make_header(0, prog.len())
+        val entries = dwarf_decode_line_program(prog, header, 4)
+        expect(entries.len()).to_equal(2)
+        # First entry: copy row
+        expect(entries[0].address).to_equal(0x1000)
+        expect(entries[0].location.line).to_equal(1)
+        expect(entries[0].end_sequence).to_equal(false)
+        # Second entry: end_sequence
+        expect(entries[1].end_sequence).to_equal(true)
+
+    it "decodes advance_line + advance_pc":
+        var prog: [u8] = []
+        # DW_LNE_set_address(0x2000) addr_size=4
+        prog = prog.push(0x00)
+        prog = prog.push(0x05)
+        prog = prog.push(0x02)
+        prog = prog.push(0x00)
+        prog = prog.push(0x20)
+        prog = prog.push(0x00)
+        prog = prog.push(0x00)
+        # DW_LNS_advance_line +9 (line 1 -> 10)
+        prog = prog.push(0x03)
+        prog = prog.push(0x09)
+        # DW_LNS_copy (emit row: addr=0x2000, line=10)
+        prog = prog.push(0x01)
+        # DW_LNS_advance_pc +16
+        prog = prog.push(0x02)
+        prog = prog.push(0x10)
+        # DW_LNS_advance_line +5 (line 10 -> 15)
+        prog = prog.push(0x03)
+        prog = prog.push(0x05)
+        # DW_LNS_copy (emit row: addr=0x2010, line=15)
+        prog = prog.push(0x01)
+        # DW_LNE_end_sequence
+        prog = prog.push(0x00)
+        prog = prog.push(0x01)
+        prog = prog.push(0x01)
+
+        val header = _make_header(0, prog.len())
+        val entries = dwarf_decode_line_program(prog, header, 4)
+        expect(entries.len()).to_equal(3)
+        expect(entries[0].address).to_equal(0x2000)
+        expect(entries[0].location.line).to_equal(10)
+        expect(entries[1].address).to_equal(0x2010)
+        expect(entries[1].location.line).to_equal(15)
+        expect(entries[2].end_sequence).to_equal(true)
+
+    it "decodes special opcodes correctly":
+        # special opcode = (line_inc - line_base) + (line_range * addr_inc) + opcode_base
+        # line_inc=1, addr_inc=2 -> (1-(-5)) + (14*2) + 13 = 6+28+13 = 47 = 0x2f
+        var prog: [u8] = []
+        # DW_LNE_set_address(0x3000)
+        prog = prog.push(0x00)
+        prog = prog.push(0x05)
+        prog = prog.push(0x02)
+        prog = prog.push(0x00)
+        prog = prog.push(0x30)
+        prog = prog.push(0x00)
+        prog = prog.push(0x00)
+        # special opcode 0x2f
+        prog = prog.push(0x2f)
+        # end sequence
+        prog = prog.push(0x00)
+        prog = prog.push(0x01)
+        prog = prog.push(0x01)
+
+        val header = _make_header(0, prog.len())
+        val entries = dwarf_decode_line_program(prog, header, 4)
+        expect(entries.len()).to_equal(2)
+        # adjusted = 0x2f - 13 = 34
+        # addr_increment = (34 / 14) * 1 = 2
+        # line_increment = -5 + (34 % 14) = -5 + 6 = 1
+        # address = 0x3000 + 2 = 0x3002, line = 1 + 1 = 2
+        expect(entries[0].address).to_equal(0x3002)
+        expect(entries[0].location.line).to_equal(2)
+        expect(entries[0].end_sequence).to_equal(false)
+
+    it "decodes set_file opcode":
+        var prog: [u8] = []
+        # DW_LNE_set_address(0x1000)
+        prog = prog.push(0x00)
+        prog = prog.push(0x05)
+        prog = prog.push(0x02)
+        prog = prog.push(0x00)
+        prog = prog.push(0x10)
+        prog = prog.push(0x00)
+        prog = prog.push(0x00)
+        # DW_LNS_set_file = file 2
+        prog = prog.push(0x04)
+        prog = prog.push(0x02)
+        # DW_LNS_copy
+        prog = prog.push(0x01)
+        # end sequence
+        prog = prog.push(0x00)
+        prog = prog.push(0x01)
+        prog = prog.push(0x01)
+
+        val header = DwarfLineHeader(
+            unit_length: 0,
+            version: 3,
+            header_length: 0,
+            min_instruction_length: 1,
+            maximum_ops_per_instruction: 1,
+            default_is_stmt: true,
+            line_base: -5,
+            line_range: 14,
+            opcode_base: 13,
+            standard_opcode_lengths: [0, 1, 1, 1, 1, 0, 0, 0, 1, 0, 0, 1],
+            include_directories: [],
+            file_names: ["a.spl", "b.spl"],
+            file_dir_indices: [0, 0],
+            program_offset: 0,
+            program_end: prog.len(),
+        )
+        val entries = dwarf_decode_line_program(prog, header, 4)
+        expect(entries.len()).to_equal(2)
+        expect(entries[0].location.file).to_equal("b.spl")
+
+    it "decodes negate_stmt opcode":
+        var prog: [u8] = []
+        # DW_LNE_set_address(0x1000)
+        prog = prog.push(0x00)
+        prog = prog.push(0x05)
+        prog = prog.push(0x02)
+        prog = prog.push(0x00)
+        prog = prog.push(0x10)
+        prog = prog.push(0x00)
+        prog = prog.push(0x00)
+        # DW_LNS_negate_stmt (0x06) — flips is_stmt from true to false
+        prog = prog.push(0x06)
+        # DW_LNS_copy
+        prog = prog.push(0x01)
+        # end sequence
+        prog = prog.push(0x00)
+        prog = prog.push(0x01)
+        prog = prog.push(0x01)
+
+        val header = _make_header(0, prog.len())
+        val entries = dwarf_decode_line_program(prog, header, 4)
+        expect(entries.len()).to_equal(2)
+        # default_is_stmt is true, negate makes it false
+        expect(entries[0].is_stmt).to_equal(false)
+
+    it "decodes set_column opcode":
+        var prog: [u8] = []
+        # DW_LNE_set_address(0x1000)
+        prog = prog.push(0x00)
+        prog = prog.push(0x05)
+        prog = prog.push(0x02)
+        prog = prog.push(0x00)
+        prog = prog.push(0x10)
+        prog = prog.push(0x00)
+        prog = prog.push(0x00)
+        # DW_LNS_set_column = 5
+        prog = prog.push(0x05)
+        prog = prog.push(0x05)
+        # DW_LNS_copy
+        prog = prog.push(0x01)
+        # end sequence
+        prog = prog.push(0x00)
+        prog = prog.push(0x01)
+        prog = prog.push(0x01)
+
+        val header = _make_header(0, prog.len())
+        val entries = dwarf_decode_line_program(prog, header, 4)
+        expect(entries.len()).to_equal(2)
+        expect(entries[0].location.column).to_equal(5)
+
+    it "decodes set_prologue_end opcode":
+        var prog: [u8] = []
+        # DW_LNE_set_address(0x1000)
+        prog = prog.push(0x00)
+        prog = prog.push(0x05)
+        prog = prog.push(0x02)
+        prog = prog.push(0x00)
+        prog = prog.push(0x10)
+        prog = prog.push(0x00)
+        prog = prog.push(0x00)
+        # DW_LNS_set_prologue_end (0x0a)
+        prog = prog.push(0x0a)
+        # DW_LNS_copy
+        prog = prog.push(0x01)
+        # end sequence
+        prog = prog.push(0x00)
+        prog = prog.push(0x01)
+        prog = prog.push(0x01)
+
+        val header = _make_header(0, prog.len())
+        val entries = dwarf_decode_line_program(prog, header, 4)
+        expect(entries.len()).to_equal(2)
+        expect(entries[0].prologue_end).to_equal(true)

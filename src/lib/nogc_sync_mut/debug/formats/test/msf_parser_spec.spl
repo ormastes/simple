@@ -1,13 +1,11 @@
 """MSF container parser specification tests.
 
-Note: msf_parse() and msf_parse_header() use BinaryReader.read_u32() internally,
-which calls the bytes_to_u32_le extern that is not registered in the interpreter.
-These tests verify the magic-check logic directly using _check_msf_magic via
-msf_parse error paths (which fail before reaching BinaryReader calls).
-See bug: interpreter_missing_bytes_to_u32_extern_2026-05-08.md
+Tests magic checking, msf_parse() error paths, and msf_parse_header()
+with hand-crafted MSF data. The bytes_to_u32_le extern is now available.
 """
 
 use std.debug.formats.pdb_constants.{MSF_MAGIC_LEN}
+use std.debug.formats.msf_parser.{msf_parse, msf_parse_header, msf_stream_count, msf_stream_size}
 
 fn check_msf_magic(data: [u8]) -> bool:
     if data.len() < MSF_MAGIC_LEN:
@@ -53,3 +51,104 @@ describe "MSF Magic Check":
 
     it "MSF_MAGIC_LEN is 32":
         expect(MSF_MAGIC_LEN).to_equal(32)
+
+# ============================================================================
+# Helpers
+# ============================================================================
+
+fn u32_le(v: i64) -> [u8]:
+    [
+        (v & 0xff) as u8,
+        ((v >> 8) & 0xff) as u8,
+        ((v >> 16) & 0xff) as u8,
+        ((v >> 24) & 0xff) as u8,
+    ]
+
+fn concat_bytes(a: [u8], b: [u8]) -> [u8]:
+    var result = a
+    for byte in b:
+        result = result.push(byte)
+    result
+
+fn zeros(n: i64) -> [u8]:
+    var result: [u8] = []
+    var i = 0
+    while i < n:
+        result = result.push(0x00)
+        i = i + 1
+    result
+
+fn msf_magic_bytes() -> [u8]:
+    [
+        0x4d, 0x69, 0x63, 0x72, 0x6f, 0x73, 0x6f, 0x66,
+        0x74, 0x20, 0x43, 0x2f, 0x43, 0x2b, 0x2b, 0x20,
+        0x4d, 0x53, 0x46, 0x20, 0x37, 0x2e, 0x30, 0x30,
+        0x0d, 0x0a, 0x1a, 0x44, 0x53, 0x00, 0x00, 0x00,
+    ]
+
+# ============================================================================
+# msf_parse Error Paths
+# ============================================================================
+
+describe "msf_parse error paths":
+    it "rejects empty data":
+        val result = msf_parse([])
+        expect(result.is_err()).to_equal(true)
+
+    it "rejects data with bad magic":
+        var data = zeros(128)
+        val result = msf_parse(data)
+        expect(result.is_err()).to_equal(true)
+        expect(result.err()!).to_contain("magic")
+
+    it "rejects truncated header (magic only, no fields)":
+        val data = msf_magic_bytes()
+        val result = msf_parse(data)
+        expect(result.is_err()).to_equal(true)
+
+# ============================================================================
+# msf_parse_header
+# ============================================================================
+
+describe "msf_parse_header":
+    it "rejects bad magic":
+        val result = msf_parse_header(zeros(64))
+        expect(result.is_err()).to_equal(true)
+
+    it "rejects truncated header":
+        val data = msf_magic_bytes()
+        val result = msf_parse_header(data)
+        expect(result.is_err()).to_equal(true)
+        expect(result.err()!).to_contain("truncated")
+
+    it "parses valid header fields":
+        var data = msf_magic_bytes()
+        # page_size = 4096 (0x1000)
+        data = concat_bytes(data, u32_le(4096))
+        # free_page_map = 1
+        data = concat_bytes(data, u32_le(1))
+        # pages_used = 16
+        data = concat_bytes(data, u32_le(16))
+        # directory_size = 32
+        data = concat_bytes(data, u32_le(32))
+        # reserved (4 bytes)
+        data = concat_bytes(data, u32_le(0))
+        val result = msf_parse_header(data)
+        expect(result.is_ok()).to_equal(true)
+        val hdr = result.ok()!
+        expect(hdr.page_size).to_equal(4096)
+        expect(hdr.free_page_map).to_equal(1)
+        expect(hdr.pages_used).to_equal(16)
+        expect(hdr.directory_size).to_equal(32)
+
+    it "rejects zero page_size":
+        var data = msf_magic_bytes()
+        # page_size = 0
+        data = concat_bytes(data, u32_le(0))
+        data = concat_bytes(data, u32_le(1))
+        data = concat_bytes(data, u32_le(1))
+        data = concat_bytes(data, u32_le(0))
+        data = concat_bytes(data, u32_le(0))
+        val result = msf_parse_header(data)
+        expect(result.is_err()).to_equal(true)
+        expect(result.err()!).to_contain("page_size")

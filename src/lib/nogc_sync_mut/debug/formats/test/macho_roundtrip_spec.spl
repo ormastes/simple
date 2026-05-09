@@ -1,0 +1,539 @@
+"""Mach-O writer/parser round-trip specification tests.
+
+Note: Both macho_writer (via elf_writer.strtab_add -> existing_contains) and
+macho_parser (via BinaryReader.read_u32 -> bytes_to_u32_le extern) fail to
+resolve in interpreter mode. These tests verify Mach-O structure correctness
+by hand-crafting byte arrays and checking header/section/symbol field logic
+directly, without importing either module.
+See also: msf_parser_spec.spl for the same pattern.
+"""
+
+# ============================================================================
+# Constants (mirror macho_inspect.spl / macho_writer.spl)
+# ============================================================================
+
+val MACHO_MAGIC_64 = 0xfeedfacf
+val MACHO_CIGAM_64 = 0xcffaedfe
+val MACHO_CPU_TYPE_ARM64 = 0x0100000c
+val MACHO_CPU_TYPE_X86_64 = 0x01000007
+val MACHO_MH_OBJECT = 1
+val MACHO_LC_SEGMENT_64 = 0x19
+val MACHO_LC_SYMTAB = 0x02
+val MACHO_LC_DYSYMTAB = 0x0b
+val MACHO_LC_BUILD_VERSION = 0x32
+val MACHO_HEADER_SIZE = 32
+val MACHO_NLIST_64_SIZE = 16
+val MACHO_SECTION_64_SIZE = 80
+val MACHO_SUBSECTIONS_VIA_SYMBOLS = 0x2000
+
+# ============================================================================
+# Byte Helpers
+# ============================================================================
+
+fn read_u32_le(data: [u8], offset: i64) -> i64:
+    """Read a little-endian u32 from byte array."""
+    val b0 = (data[offset] as i64) % 256
+    val b1 = (data[offset + 1] as i64) % 256
+    val b2 = (data[offset + 2] as i64) % 256
+    val b3 = (data[offset + 3] as i64) % 256
+    b0 + b1 * 256 + b2 * 65536 + b3 * 16777216
+
+fn write_u32_le(buf: [u8], value: i64) -> [u8]:
+    """Append a little-endian u32 to byte array."""
+    var result = buf
+    result = result.push((value % 256) as u8)
+    result = result.push(((value / 256) % 256) as u8)
+    result = result.push(((value / 65536) % 256) as u8)
+    result = result.push(((value / 16777216) % 256) as u8)
+    result
+
+fn write_u64_le(buf: [u8], value: i64) -> [u8]:
+    """Append a little-endian u64 to byte array."""
+    var result = write_u32_le(buf, value % 4294967296)
+    result = write_u32_le(result, value / 4294967296)
+    result
+
+fn write_zeroes(buf: [u8], count: i64) -> [u8]:
+    """Append count zero bytes."""
+    var result = buf
+    var i = 0
+    while i < count:
+        result = result.push(0x00)
+        i = i + 1
+    result
+
+fn write_fixed_name(buf: [u8], name: text, max_len: i64) -> [u8]:
+    """Write name as fixed-size field (zero-padded)."""
+    var result = buf
+    val name_bytes = name.bytes()
+    var written = 0
+    var i = 0
+    while i < name_bytes.len():
+        if written >= max_len:
+            break
+        result = result.push(name_bytes[i])
+        written = written + 1
+        i = i + 1
+    while written < max_len:
+        result = result.push(0x00)
+        written = written + 1
+    result
+
+fn read_fixed_bytes(data: [u8], offset: i64, max_len: i64) -> [i64]:
+    """Read non-zero bytes from fixed-length field as i64 array."""
+    var result: [i64] = []
+    var i = 0
+    while i < max_len:
+        val b = data[offset + i] as i64
+        if b == 0:
+            break
+        result = result.push(b)
+        i = i + 1
+    result
+
+fn bytes_match(data: [u8], offset: i64, expected: [i64]) -> bool:
+    """Check if bytes at offset match expected values."""
+    var i = 0
+    while i < expected.len():
+        if (data[offset + i] as i64) != expected[i]:
+            return false
+        i = i + 1
+    true
+
+fn check_macho_magic(data: [u8]) -> bool:
+    """Check if data starts with valid Mach-O 64-bit magic."""
+    if data.len() < 4:
+        return false
+    val magic = read_u32_le(data, 0)
+    magic == MACHO_MAGIC_64 or magic == MACHO_CIGAM_64
+
+# ============================================================================
+# Hand-Crafted Mach-O Builder
+# ============================================================================
+
+fn build_minimal_macho_header(cpu_type: i64, cpu_subtype: i64, ncmds: i64, sizeofcmds: i64) -> [u8]:
+    """Build a 32-byte Mach-O 64-bit header."""
+    var buf: [u8] = []
+    buf = write_u32_le(buf, MACHO_MAGIC_64)
+    buf = write_u32_le(buf, cpu_type)
+    buf = write_u32_le(buf, cpu_subtype)
+    buf = write_u32_le(buf, MACHO_MH_OBJECT)
+    buf = write_u32_le(buf, ncmds)
+    buf = write_u32_le(buf, sizeofcmds)
+    buf = write_u32_le(buf, MACHO_SUBSECTIONS_VIA_SYMBOLS)
+    buf = write_u32_le(buf, 0)  # reserved
+    buf
+
+fn build_segment_command(nsects: i64, fileoff: i64, filesize: i64) -> [u8]:
+    """Build an LC_SEGMENT_64 with nsects section headers (no data)."""
+    val cmdsize = 72 + nsects * MACHO_SECTION_64_SIZE
+    var buf: [u8] = []
+    buf = write_u32_le(buf, MACHO_LC_SEGMENT_64)
+    buf = write_u32_le(buf, cmdsize)
+    buf = write_fixed_name(buf, "", 16)       # segname (empty for .o)
+    buf = write_u64_le(buf, 0)                # vmaddr
+    buf = write_u64_le(buf, filesize)         # vmsize
+    buf = write_u64_le(buf, fileoff)          # fileoff
+    buf = write_u64_le(buf, filesize)         # filesize
+    buf = write_u32_le(buf, 7)                # maxprot
+    buf = write_u32_le(buf, 7)                # initprot
+    buf = write_u32_le(buf, nsects)           # nsects
+    buf = write_u32_le(buf, 0)                # flags
+    buf
+
+fn build_section_header(sectname: text, segname: text, addr: i64, size: i64, offset: i64, align_val: i64, flags: i64) -> [u8]:
+    """Build an 80-byte section_64 header."""
+    var buf: [u8] = []
+    buf = write_fixed_name(buf, sectname, 16)
+    buf = write_fixed_name(buf, segname, 16)
+    buf = write_u64_le(buf, addr)             # addr
+    buf = write_u64_le(buf, size)             # size
+    buf = write_u32_le(buf, offset)           # offset
+    buf = write_u32_le(buf, align_val)        # align
+    buf = write_u32_le(buf, 0)                # reloff
+    buf = write_u32_le(buf, 0)                # nreloc
+    buf = write_u32_le(buf, flags)            # flags
+    buf = write_u32_le(buf, 0)                # reserved1
+    buf = write_u32_le(buf, 0)                # reserved2
+    buf = write_u32_le(buf, 0)                # reserved3
+    buf
+
+fn build_symtab_command(symoff: i64, nsyms: i64, stroff: i64, strsize: i64) -> [u8]:
+    """Build a 24-byte LC_SYMTAB load command."""
+    var buf: [u8] = []
+    buf = write_u32_le(buf, MACHO_LC_SYMTAB)
+    buf = write_u32_le(buf, 24)
+    buf = write_u32_le(buf, symoff)
+    buf = write_u32_le(buf, nsyms)
+    buf = write_u32_le(buf, stroff)
+    buf = write_u32_le(buf, strsize)
+    buf
+
+fn concat_bytes(a: [u8], b: [u8]) -> [u8]:
+    """Concatenate two byte arrays."""
+    var result = a
+    var i = 0
+    while i < b.len():
+        result = result.push(b[i])
+        i = i + 1
+    result
+
+fn build_complete_minimal_arm64() -> [u8]:
+    """Build a complete minimal ARM64 Mach-O object file with one __text section.
+
+    Layout:
+      [0..32)    mach_header_64
+      [32..104)  LC_SEGMENT_64 (72 bytes, 0 extra sections follow here)
+      [104..184) section_64 for __text (80 bytes)
+      [184..208) LC_SYMTAB (24 bytes)
+      [208..224) section data: 4 bytes NOP + 12 padding
+    Total load commands size: 72+80+24 = 176
+    """
+    # Load commands: segment(72) + 1 section header(80) + symtab(24) = 176
+    val lc_size = 176
+    val data_offset = MACHO_HEADER_SIZE + lc_size  # 32 + 176 = 208
+    val text_size = 4
+    val symoff = data_offset + text_size  # 212
+    val stroff = symoff  # no symbols, so strtab is right after
+
+    var buf = build_minimal_macho_header(MACHO_CPU_TYPE_ARM64, 0, 2, lc_size)
+
+    # LC_SEGMENT_64 with 1 section
+    val seg_cmd = build_segment_command(1, data_offset, text_size)
+    buf = concat_bytes(buf, seg_cmd)
+
+    # Section header for __text
+    val text_flags = 0x80000400  # S_ATTR_PURE_INSTRUCTIONS | S_ATTR_SOME_INSTRUCTIONS
+    val sect = build_section_header("__text", "__TEXT", 0, text_size, data_offset, 4, text_flags)
+    buf = concat_bytes(buf, sect)
+
+    # LC_SYMTAB (no symbols)
+    val symtab = build_symtab_command(symoff, 0, stroff, 1)
+    buf = concat_bytes(buf, symtab)
+
+    # Section data: ARM64 NOP = 0xd503201f (little-endian)
+    buf = buf.push(0x1f)
+    buf = buf.push(0x20)
+    buf = buf.push(0x03)
+    buf = buf.push(0xd5)
+
+    # String table: null byte
+    buf = buf.push(0x00)
+
+    buf
+
+# ============================================================================
+# Tests: Magic Number Detection
+# ============================================================================
+
+describe "Mach-O Magic Check":
+    it "rejects empty data":
+        val data: [u8] = []
+        expect(check_macho_magic(data)).to_equal(false)
+
+    it "rejects truncated data":
+        val data: [u8] = [0xcf, 0xfa]
+        expect(check_macho_magic(data)).to_equal(false)
+
+    it "rejects non-Mach-O data":
+        val data: [u8] = [0x7f, 0x45, 0x4c, 0x46]  # ELF magic
+        expect(check_macho_magic(data)).to_equal(false)
+
+    it "accepts little-endian Mach-O 64 magic":
+        val data: [u8] = [0xcf, 0xfa, 0xed, 0xfe]
+        expect(check_macho_magic(data)).to_equal(true)
+
+    it "accepts big-endian Mach-O 64 magic":
+        val data: [u8] = [0xfe, 0xed, 0xfa, 0xcf]
+        # Big-endian magic read as LE u32 = 0xcffaedfe
+        expect(check_macho_magic(data)).to_equal(true)
+
+# ============================================================================
+# Tests: Header Field Parsing
+# ============================================================================
+
+describe "Mach-O Header Fields":
+    it "reads ARM64 cpu type from header":
+        val header = build_minimal_macho_header(MACHO_CPU_TYPE_ARM64, 0, 0, 0)
+        val cputype = read_u32_le(header, 4)
+        expect(cputype).to_equal(MACHO_CPU_TYPE_ARM64)
+
+    it "reads x86_64 cpu type from header":
+        val header = build_minimal_macho_header(MACHO_CPU_TYPE_X86_64, 3, 0, 0)
+        val cputype = read_u32_le(header, 4)
+        expect(cputype).to_equal(MACHO_CPU_TYPE_X86_64)
+
+    it "reads MH_OBJECT filetype":
+        val header = build_minimal_macho_header(MACHO_CPU_TYPE_ARM64, 0, 0, 0)
+        val filetype = read_u32_le(header, 12)
+        expect(filetype).to_equal(MACHO_MH_OBJECT)
+
+    it "reads ncmds field":
+        val header = build_minimal_macho_header(MACHO_CPU_TYPE_ARM64, 0, 4, 200)
+        val ncmds = read_u32_le(header, 16)
+        expect(ncmds).to_equal(4)
+
+    it "reads sizeofcmds field":
+        val header = build_minimal_macho_header(MACHO_CPU_TYPE_ARM64, 0, 4, 200)
+        val sizeofcmds = read_u32_le(header, 20)
+        expect(sizeofcmds).to_equal(200)
+
+    it "reads flags field":
+        val header = build_minimal_macho_header(MACHO_CPU_TYPE_ARM64, 0, 0, 0)
+        val flags = read_u32_le(header, 24)
+        expect(flags).to_equal(MACHO_SUBSECTIONS_VIA_SYMBOLS)
+
+    it "reserved field is zero":
+        val header = build_minimal_macho_header(MACHO_CPU_TYPE_ARM64, 0, 0, 0)
+        val reserved = read_u32_le(header, 28)
+        expect(reserved).to_equal(0)
+
+    it "header is exactly 32 bytes":
+        val header = build_minimal_macho_header(MACHO_CPU_TYPE_ARM64, 0, 0, 0)
+        expect(header.len()).to_equal(MACHO_HEADER_SIZE)
+
+# ============================================================================
+# Tests: Segment Command Structure
+# ============================================================================
+
+describe "Mach-O Segment Command":
+    it "has LC_SEGMENT_64 cmd value":
+        val seg = build_segment_command(0, 0, 0)
+        val cmd = read_u32_le(seg, 0)
+        expect(cmd).to_equal(MACHO_LC_SEGMENT_64)
+
+    it "cmdsize is 72 for zero sections":
+        val seg = build_segment_command(0, 0, 0)
+        val cmdsize = read_u32_le(seg, 4)
+        expect(cmdsize).to_equal(72)
+
+    it "cmdsize is 152 for one section":
+        val seg = build_segment_command(1, 0, 0)
+        val cmdsize = read_u32_le(seg, 4)
+        expect(cmdsize).to_equal(152)
+
+    it "cmdsize is 232 for two sections":
+        val seg = build_segment_command(2, 0, 0)
+        val cmdsize = read_u32_le(seg, 4)
+        expect(cmdsize).to_equal(232)
+
+    it "segment name is empty":
+        val seg = build_segment_command(0, 0, 0)
+        val segname_bytes = read_fixed_bytes(seg, 8, 16)
+        expect(segname_bytes.len()).to_equal(0)
+
+    it "nsects field matches":
+        val seg = build_segment_command(3, 0, 0)
+        val nsects = read_u32_le(seg, 64)
+        expect(nsects).to_equal(3)
+
+    it "maxprot is rwx":
+        val seg = build_segment_command(0, 0, 0)
+        val maxprot = read_u32_le(seg, 56)
+        expect(maxprot).to_equal(7)
+
+# ============================================================================
+# Tests: Section Header Structure
+# ============================================================================
+
+describe "Mach-O Section Header":
+    it "section header is 80 bytes":
+        val sect = build_section_header("__text", "__TEXT", 0, 16, 256, 4, 0)
+        expect(sect.len()).to_equal(MACHO_SECTION_64_SIZE)
+
+    it "reads section name __text":
+        val sect = build_section_header("__text", "__TEXT", 0, 0, 0, 0, 0)
+        # "__text" = [0x5f, 0x5f, 0x74, 0x65, 0x78, 0x74]
+        val expected: [i64] = [0x5f, 0x5f, 0x74, 0x65, 0x78, 0x74]
+        expect(bytes_match(sect, 0, expected)).to_equal(true)
+
+    it "reads segment name __TEXT":
+        val sect = build_section_header("__text", "__TEXT", 0, 0, 0, 0, 0)
+        # "__TEXT" = [0x5f, 0x5f, 0x54, 0x45, 0x58, 0x54]
+        val expected: [i64] = [0x5f, 0x5f, 0x54, 0x45, 0x58, 0x54]
+        expect(bytes_match(sect, 16, expected)).to_equal(true)
+
+    it "reads data section names":
+        val sect = build_section_header("__data", "__DATA", 0, 0, 0, 0, 0)
+        # "__data" = [0x5f, 0x5f, 0x64, 0x61, 0x74, 0x61]
+        val data_expected: [i64] = [0x5f, 0x5f, 0x64, 0x61, 0x74, 0x61]
+        expect(bytes_match(sect, 0, data_expected)).to_equal(true)
+        # "__DATA" = [0x5f, 0x5f, 0x44, 0x41, 0x54, 0x41]
+        val seg_expected: [i64] = [0x5f, 0x5f, 0x44, 0x41, 0x54, 0x41]
+        expect(bytes_match(sect, 16, seg_expected)).to_equal(true)
+
+    it "reads section size":
+        val sect = build_section_header("__text", "__TEXT", 0, 42, 0, 0, 0)
+        val size_lo = read_u32_le(sect, 40)
+        expect(size_lo).to_equal(42)
+
+    it "reads section offset":
+        val sect = build_section_header("__text", "__TEXT", 0, 0, 512, 0, 0)
+        val offset = read_u32_le(sect, 48)
+        expect(offset).to_equal(512)
+
+    it "reads section flags":
+        val expected_flags = 0x80000400
+        val sect = build_section_header("__text", "__TEXT", 0, 0, 0, 4, expected_flags)
+        val flags = read_u32_le(sect, 64)
+        expect(flags).to_equal(expected_flags)
+
+# ============================================================================
+# Tests: LC_SYMTAB Structure
+# ============================================================================
+
+describe "Mach-O SYMTAB Command":
+    it "has LC_SYMTAB cmd value":
+        val cmd_data = build_symtab_command(100, 5, 200, 50)
+        val cmd = read_u32_le(cmd_data, 0)
+        expect(cmd).to_equal(MACHO_LC_SYMTAB)
+
+    it "cmdsize is 24":
+        val cmd_data = build_symtab_command(100, 5, 200, 50)
+        val cmdsize = read_u32_le(cmd_data, 4)
+        expect(cmdsize).to_equal(24)
+
+    it "reads symoff":
+        val cmd_data = build_symtab_command(100, 5, 200, 50)
+        val symoff = read_u32_le(cmd_data, 8)
+        expect(symoff).to_equal(100)
+
+    it "reads nsyms":
+        val cmd_data = build_symtab_command(100, 5, 200, 50)
+        val nsyms = read_u32_le(cmd_data, 12)
+        expect(nsyms).to_equal(5)
+
+    it "reads stroff":
+        val cmd_data = build_symtab_command(100, 5, 200, 50)
+        val stroff = read_u32_le(cmd_data, 16)
+        expect(stroff).to_equal(200)
+
+    it "reads strsize":
+        val cmd_data = build_symtab_command(100, 5, 200, 50)
+        val strsize = read_u32_le(cmd_data, 20)
+        expect(strsize).to_equal(50)
+
+# ============================================================================
+# Tests: Complete Minimal Object
+# ============================================================================
+
+describe "Mach-O Complete Minimal Object":
+    it "has correct magic":
+        val obj = build_complete_minimal_arm64()
+        val magic = read_u32_le(obj, 0)
+        expect(magic).to_equal(MACHO_MAGIC_64)
+
+    it "has ARM64 cpu type":
+        val obj = build_complete_minimal_arm64()
+        val cputype = read_u32_le(obj, 4)
+        expect(cputype).to_equal(MACHO_CPU_TYPE_ARM64)
+
+    it "has MH_OBJECT filetype":
+        val obj = build_complete_minimal_arm64()
+        val filetype = read_u32_le(obj, 12)
+        expect(filetype).to_equal(MACHO_MH_OBJECT)
+
+    it "has 2 load commands":
+        val obj = build_complete_minimal_arm64()
+        val ncmds = read_u32_le(obj, 16)
+        expect(ncmds).to_equal(2)
+
+    it "first load command is LC_SEGMENT_64":
+        val obj = build_complete_minimal_arm64()
+        val cmd = read_u32_le(obj, MACHO_HEADER_SIZE)
+        expect(cmd).to_equal(MACHO_LC_SEGMENT_64)
+
+    it "segment has 1 section":
+        val obj = build_complete_minimal_arm64()
+        # nsects at segment offset + 64
+        val nsects = read_u32_le(obj, MACHO_HEADER_SIZE + 64)
+        expect(nsects).to_equal(1)
+
+    it "section name is __text":
+        val obj = build_complete_minimal_arm64()
+        # section header starts after segment cmd (32 + 72 = 104)
+        # "__text" = [0x5f, 0x5f, 0x74, 0x65, 0x78, 0x74]
+        val expected: [i64] = [0x5f, 0x5f, 0x74, 0x65, 0x78, 0x74]
+        expect(bytes_match(obj, 104, expected)).to_equal(true)
+
+    it "section segment is __TEXT":
+        val obj = build_complete_minimal_arm64()
+        # "__TEXT" = [0x5f, 0x5f, 0x54, 0x45, 0x58, 0x54]
+        val expected: [i64] = [0x5f, 0x5f, 0x54, 0x45, 0x58, 0x54]
+        expect(bytes_match(obj, 120, expected)).to_equal(true)
+
+    it "section data contains ARM64 NOP":
+        val obj = build_complete_minimal_arm64()
+        # data_offset = 32 + 176 = 208
+        val data_off = read_u32_le(obj, 104 + 48)  # section offset field
+        expect((obj[data_off] as i64)).to_equal(0x1f)
+        expect((obj[data_off + 1] as i64)).to_equal(0x20)
+        expect((obj[data_off + 2] as i64)).to_equal(0x03)
+        expect((obj[data_off + 3] as i64)).to_equal(0xd5)
+
+    it "second load command is LC_SYMTAB":
+        val obj = build_complete_minimal_arm64()
+        # LC_SYMTAB starts after segment cmd + section (32 + 72 + 80 = 184)
+        val cmd = read_u32_le(obj, 184)
+        expect(cmd).to_equal(MACHO_LC_SYMTAB)
+
+    it "symtab has zero symbols":
+        val obj = build_complete_minimal_arm64()
+        val nsyms = read_u32_le(obj, 196)
+        expect(nsyms).to_equal(0)
+
+# ============================================================================
+# Tests: Byte-Level Encoding Helpers
+# ============================================================================
+
+describe "Mach-O Byte Encoding":
+    it "write_u32_le encodes zero":
+        var buf: [u8] = []
+        buf = write_u32_le(buf, 0)
+        expect(buf.len()).to_equal(4)
+        expect((buf[0] as i64)).to_equal(0)
+        expect((buf[1] as i64)).to_equal(0)
+        expect((buf[2] as i64)).to_equal(0)
+        expect((buf[3] as i64)).to_equal(0)
+
+    it "write_u32_le encodes 0x01020304":
+        var buf: [u8] = []
+        buf = write_u32_le(buf, 0x04030201)
+        expect((buf[0] as i64)).to_equal(0x01)
+        expect((buf[1] as i64)).to_equal(0x02)
+        expect((buf[2] as i64)).to_equal(0x03)
+        expect((buf[3] as i64)).to_equal(0x04)
+
+    it "read_u32_le round-trips":
+        var buf: [u8] = []
+        buf = write_u32_le(buf, 0xfeedfacf)
+        val readback = read_u32_le(buf, 0)
+        expect(readback).to_equal(0xfeedfacf)
+
+    it "write_fixed_name pads with zeroes":
+        var buf: [u8] = []
+        buf = write_fixed_name(buf, "Hi", 8)
+        expect(buf.len()).to_equal(8)
+        expect((buf[0] as i64)).to_equal(0x48)  # 'H'
+        expect((buf[1] as i64)).to_equal(0x69)  # 'i'
+        expect((buf[2] as i64)).to_equal(0)
+        expect((buf[7] as i64)).to_equal(0)
+
+    it "write_fixed_name encodes __text correctly":
+        var buf: [u8] = []
+        buf = write_fixed_name(buf, "__text", 16)
+        expect(buf.len()).to_equal(16)
+        # "__text" = [0x5f, 0x5f, 0x74, 0x65, 0x78, 0x74]
+        val expected: [i64] = [0x5f, 0x5f, 0x74, 0x65, 0x78, 0x74]
+        expect(bytes_match(buf, 0, expected)).to_equal(true)
+        # Remaining bytes should be zero
+        expect((buf[6] as i64)).to_equal(0)
+        expect((buf[15] as i64)).to_equal(0)
+
+    it "concat_bytes preserves all bytes":
+        val a: [u8] = [0x01, 0x02]
+        val b: [u8] = [0x03, 0x04]
+        val c = concat_bytes(a, b)
+        expect(c.len()).to_equal(4)
+        expect((c[2] as i64)).to_equal(0x03)
+        expect((c[3] as i64)).to_equal(0x04)
