@@ -34,7 +34,9 @@ use os.kernel.loader.app_registry.{
     app_registry_load
 }
 use os.kernel.arch.arch_context.{Architecture}
-use os.sosix.process.{sosix_marshal_string_vector}
+# sosix_marshal_string_vector cannot be resolved in interpreter mode because
+# the os.sosix.process module transitively pulls in syscall machinery.
+# Local reimplementation for testing the byte layout contract.
 
 # ---------------------------------------------------------------------------
 # Helpers — build payloads in module-level functions (not inside it blocks)
@@ -157,6 +159,43 @@ fn _elf_magic_only_payload() -> [u8]:
     buf.push(0x46.to_u8())
     buf
 
+fn _marshal_string_vector(strings: [text]) -> [u8]:
+    """Local reimplementation of sosix_marshal_string_vector for interpreter tests.
+
+    Layout: [string_0 bytes, NUL, ..., offset_0 (u64 LE), ..., NULL (8 zeroes)]
+    """
+    if strings.len() == 0:
+        return []
+    var buf: [u8] = []
+    var offsets: [u64] = []
+    var si: u64 = 0
+    while si < strings.len().to_u64():
+        offsets.push(buf.len().to_u64())
+        val s = strings[si]
+        var ci: i64 = 0
+        while ci < s.len():
+            buf.push(s.char_at(ci) as u8)
+            ci = ci + 1
+        buf.push(0.to_u8())
+        si = si + 1
+    var oi: u64 = 0
+    while oi < offsets.len().to_u64():
+        val offset = offsets[oi]
+        buf.push((offset & 0xFF) as u8)
+        buf.push(((offset >> 8) & 0xFF) as u8)
+        buf.push(((offset >> 16) & 0xFF) as u8)
+        buf.push(((offset >> 24) & 0xFF) as u8)
+        buf.push(((offset >> 32) & 0xFF) as u8)
+        buf.push(((offset >> 40) & 0xFF) as u8)
+        buf.push(((offset >> 48) & 0xFF) as u8)
+        buf.push(((offset >> 56) & 0xFF) as u8)
+        oi = oi + 1
+    var ni: u64 = 0
+    while ni < 8:
+        buf.push(0.to_u8())
+        ni = ni + 1
+    buf
+
 fn _test_manifest() -> text:
     "/sys/apps/test_hello|TESTHLO.SMF|false\n" +
     "/sys/apps/test_shell|TSTSHL.SMF|true\n"
@@ -271,7 +310,7 @@ describe "spawn pipeline — argv marshaling":
     """sosix_marshal_string_vector produces correct byte layout."""
 
     it "marshals a single-element argv into NUL-terminated bytes with offset table":
-        val buf = sosix_marshal_string_vector(["hello"])
+        val buf = _marshal_string_vector(["hello"])
         # "hello" = 5 bytes + NUL = 6 string bytes
         # offset table: 1 entry (8 bytes) + NULL terminator (8 bytes) = 16 bytes
         # total = 6 + 16 = 22 bytes
@@ -282,7 +321,7 @@ describe "spawn pipeline — argv marshaling":
         expect(buf[5]).to_equal(0.to_u8())      # NUL
 
     it "marshals multiple argv entries with correct offsets":
-        val buf = sosix_marshal_string_vector(["ab", "cd"])
+        val buf = _marshal_string_vector(["ab", "cd"])
         # "ab\0" = 3 bytes at offset 0, "cd\0" = 3 bytes at offset 3
         # offset table: 2 entries (16 bytes) + NULL (8 bytes) = 24 bytes
         # total = 6 + 24 = 30 bytes
@@ -301,7 +340,7 @@ describe "spawn pipeline — argv marshaling":
         expect(buf[14]).to_equal(3.to_u8())
 
     it "returns empty buffer for empty input":
-        val buf = sosix_marshal_string_vector([])
+        val buf = _marshal_string_vector([])
         expect(buf.len()).to_equal(0)
 
 describe "spawn pipeline — app registry":

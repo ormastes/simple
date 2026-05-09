@@ -1,0 +1,540 @@
+"""3D Engine — Stateless Emulation Layer
+
+@tag:stdlib
+@tag:api
+@tag:gpu
+
+Implements every RenderBackend3DAdv operation using ONLY RenderBackend3DCore
+methods. All functions are stateless: no mutable module state, no caches,
+no internal buffers. Each function receives the core backend and operation
+parameters, composes Core calls, and returns.
+
+A backend that implements only RenderBackend3DCore gets full advanced
+rendering by routing through these functions.
+
+Usage:
+    # In a Core-only backend wrapper:
+    emu_draw_cube(core_backend, mat4_identity(), material_unlit(0xFFFF0000))
+    emu_draw_sphere(core_backend, mat4_identity(), material_phong(0xFF00FF00, 0xFFFFFFFF, 32.0), 16)
+"""
+
+use std.gpu.engine3d.backend_core.{RenderBackend3DCore}
+use std.gpu.engine3d.types3d.{Vertex3D, Material3DParams, vertex3d, vertex3d_pos_normal, material_unlit, mat4_identity, mat4_transform_point, vec3_cross, vec3_normalize, color3d_r, color3d_g, color3d_b, color3d_a, color3d_pack}
+
+# ============================================================================
+# Internal math helpers
+# ============================================================================
+
+extern fn rt_f64_sin(x: f64) -> f64
+extern fn rt_f64_cos(x: f64) -> f64
+extern fn rt_f64_sqrt(x: f64) -> f64
+
+fn _emu3_sin(x: f32) -> f32:
+    rt_f64_sin(x as f64) as f32
+
+fn _emu3_cos(x: f32) -> f32:
+    rt_f64_cos(x as f64) as f32
+
+fn _emu3_sqrt(x: f32) -> f32:
+    rt_f64_sqrt(x as f64) as f32
+
+fn _emu3_pi() -> f32:
+    3.14159265
+
+fn _emu3_clamp_i32(v: i32, lo: i32, hi: i32) -> i32:
+    if v < lo:
+        lo
+    else if v > hi:
+        hi
+    else:
+        v
+
+fn _emu3_clamp_f32(v: f32, lo: f32, hi: f32) -> f32:
+    if v < lo:
+        lo
+    else if v > hi:
+        hi
+    else:
+        v
+
+fn _emu3_max_i32(a: i32, b: i32) -> i32:
+    if a > b:
+        a
+    else:
+        b
+
+# ============================================================================
+# Cube — 12 triangles (6 faces × 2)
+# ============================================================================
+
+fn emu_draw_cube(core: RenderBackend3DCore, model: [f32], material: Material3DParams):
+    # Front face (z = +0.5, normal 0,0,1)
+    val v0 = vertex3d(-0.5, -0.5, 0.5, 0.0, 0.0, 1.0, 0.0, 0.0, 0xFFFFFFFF)
+    val v1 = vertex3d(0.5, -0.5, 0.5, 0.0, 0.0, 1.0, 1.0, 0.0, 0xFFFFFFFF)
+    val v2 = vertex3d(0.5, 0.5, 0.5, 0.0, 0.0, 1.0, 1.0, 1.0, 0xFFFFFFFF)
+    val v3 = vertex3d(-0.5, 0.5, 0.5, 0.0, 0.0, 1.0, 0.0, 1.0, 0xFFFFFFFF)
+    core.submit_triangle(v0, v1, v2, material, model)
+    core.submit_triangle(v0, v2, v3, material, model)
+
+    # Back face (z = -0.5, normal 0,0,-1)
+    val b0 = vertex3d(0.5, -0.5, -0.5, 0.0, 0.0, -1.0, 0.0, 0.0, 0xFFFFFFFF)
+    val b1 = vertex3d(-0.5, -0.5, -0.5, 0.0, 0.0, -1.0, 1.0, 0.0, 0xFFFFFFFF)
+    val b2 = vertex3d(-0.5, 0.5, -0.5, 0.0, 0.0, -1.0, 1.0, 1.0, 0xFFFFFFFF)
+    val b3 = vertex3d(0.5, 0.5, -0.5, 0.0, 0.0, -1.0, 0.0, 1.0, 0xFFFFFFFF)
+    core.submit_triangle(b0, b1, b2, material, model)
+    core.submit_triangle(b0, b2, b3, material, model)
+
+    # Right face (x = +0.5, normal 1,0,0)
+    val r0 = vertex3d(0.5, -0.5, 0.5, 1.0, 0.0, 0.0, 0.0, 0.0, 0xFFFFFFFF)
+    val r1 = vertex3d(0.5, -0.5, -0.5, 1.0, 0.0, 0.0, 1.0, 0.0, 0xFFFFFFFF)
+    val r2 = vertex3d(0.5, 0.5, -0.5, 1.0, 0.0, 0.0, 1.0, 1.0, 0xFFFFFFFF)
+    val r3 = vertex3d(0.5, 0.5, 0.5, 1.0, 0.0, 0.0, 0.0, 1.0, 0xFFFFFFFF)
+    core.submit_triangle(r0, r1, r2, material, model)
+    core.submit_triangle(r0, r2, r3, material, model)
+
+    # Left face (x = -0.5, normal -1,0,0)
+    val l0 = vertex3d(-0.5, -0.5, -0.5, -1.0, 0.0, 0.0, 0.0, 0.0, 0xFFFFFFFF)
+    val l1 = vertex3d(-0.5, -0.5, 0.5, -1.0, 0.0, 0.0, 1.0, 0.0, 0xFFFFFFFF)
+    val l2 = vertex3d(-0.5, 0.5, 0.5, -1.0, 0.0, 0.0, 1.0, 1.0, 0xFFFFFFFF)
+    val l3 = vertex3d(-0.5, 0.5, -0.5, -1.0, 0.0, 0.0, 0.0, 1.0, 0xFFFFFFFF)
+    core.submit_triangle(l0, l1, l2, material, model)
+    core.submit_triangle(l0, l2, l3, material, model)
+
+    # Top face (y = +0.5, normal 0,1,0)
+    val t0 = vertex3d(-0.5, 0.5, 0.5, 0.0, 1.0, 0.0, 0.0, 0.0, 0xFFFFFFFF)
+    val t1 = vertex3d(0.5, 0.5, 0.5, 0.0, 1.0, 0.0, 1.0, 0.0, 0xFFFFFFFF)
+    val t2 = vertex3d(0.5, 0.5, -0.5, 0.0, 1.0, 0.0, 1.0, 1.0, 0xFFFFFFFF)
+    val t3 = vertex3d(-0.5, 0.5, -0.5, 0.0, 1.0, 0.0, 0.0, 1.0, 0xFFFFFFFF)
+    core.submit_triangle(t0, t1, t2, material, model)
+    core.submit_triangle(t0, t2, t3, material, model)
+
+    # Bottom face (y = -0.5, normal 0,-1,0)
+    val d0 = vertex3d(-0.5, -0.5, -0.5, 0.0, -1.0, 0.0, 0.0, 0.0, 0xFFFFFFFF)
+    val d1 = vertex3d(0.5, -0.5, -0.5, 0.0, -1.0, 0.0, 1.0, 0.0, 0xFFFFFFFF)
+    val d2 = vertex3d(0.5, -0.5, 0.5, 0.0, -1.0, 0.0, 1.0, 1.0, 0xFFFFFFFF)
+    val d3 = vertex3d(-0.5, -0.5, 0.5, 0.0, -1.0, 0.0, 0.0, 1.0, 0xFFFFFFFF)
+    core.submit_triangle(d0, d1, d2, material, model)
+    core.submit_triangle(d0, d2, d3, material, model)
+
+# ============================================================================
+# Sphere — UV sphere with latitude/longitude subdivision
+# ============================================================================
+
+fn emu_draw_sphere(core: RenderBackend3DCore, model: [f32], material: Material3DParams, segments: i32):
+    val seg = _emu3_max_i32(segments, 4)
+    val pi = _emu3_pi()
+
+    var lat: i32 = 0
+    while lat < seg:
+        val theta0 = pi * (lat as f32) / (seg as f32)
+        val theta1 = pi * ((lat + 1) as f32) / (seg as f32)
+        val st0 = _emu3_sin(theta0)
+        val ct0 = _emu3_cos(theta0)
+        val st1 = _emu3_sin(theta1)
+        val ct1 = _emu3_cos(theta1)
+
+        var lon: i32 = 0
+        while lon < seg:
+            val phi0 = 2.0 * pi * (lon as f32) / (seg as f32)
+            val phi1 = 2.0 * pi * ((lon + 1) as f32) / (seg as f32)
+            val sp0 = _emu3_sin(phi0)
+            val cp0 = _emu3_cos(phi0)
+            val sp1 = _emu3_sin(phi1)
+            val cp1 = _emu3_cos(phi1)
+
+            # 4 corners of the quad on the sphere surface
+            val x00 = st0 * cp0
+            val y00 = ct0
+            val z00 = st0 * sp0
+
+            val x10 = st1 * cp0
+            val y10 = ct1
+            val z10 = st1 * sp0
+
+            val x01 = st0 * cp1
+            val y01 = ct0
+            val z01 = st0 * sp1
+
+            val x11 = st1 * cp1
+            val y11 = ct1
+            val z11 = st1 * sp1
+
+            # Normals = position for a unit sphere
+            val va = vertex3d_pos_normal(x00, y00, z00, x00, y00, z00)
+            val vb = vertex3d_pos_normal(x10, y10, z10, x10, y10, z10)
+            val vc = vertex3d_pos_normal(x11, y11, z11, x11, y11, z11)
+            val vd = vertex3d_pos_normal(x01, y01, z01, x01, y01, z01)
+
+            # First triangle
+            if lat != 0:
+                core.submit_triangle(va, vb, vc, material, model)
+
+            # Second triangle
+            if lat != seg - 1:
+                core.submit_triangle(va, vc, vd, material, model)
+
+            lon = lon + 1
+        lat = lat + 1
+
+# ============================================================================
+# Plane — 2 triangles in XZ at Y=0
+# ============================================================================
+
+fn emu_draw_plane(core: RenderBackend3DCore, model: [f32], material: Material3DParams):
+    val v0 = vertex3d(-0.5, 0.0, -0.5, 0.0, 1.0, 0.0, 0.0, 0.0, 0xFFFFFFFF)
+    val v1 = vertex3d(0.5, 0.0, -0.5, 0.0, 1.0, 0.0, 1.0, 0.0, 0xFFFFFFFF)
+    val v2 = vertex3d(0.5, 0.0, 0.5, 0.0, 1.0, 0.0, 1.0, 1.0, 0xFFFFFFFF)
+    val v3 = vertex3d(-0.5, 0.0, 0.5, 0.0, 1.0, 0.0, 0.0, 1.0, 0xFFFFFFFF)
+    core.submit_triangle(v0, v1, v2, material, model)
+    core.submit_triangle(v0, v2, v3, material, model)
+
+# ============================================================================
+# Cylinder — Side quads + top/bottom cap fans
+# ============================================================================
+
+fn emu_draw_cylinder(core: RenderBackend3DCore, model: [f32], material: Material3DParams, segments: i32):
+    val seg = _emu3_max_i32(segments, 4)
+    val pi = _emu3_pi()
+    val half = 0.5
+
+    var i: i32 = 0
+    while i < seg:
+        val a0 = 2.0 * pi * (i as f32) / (seg as f32)
+        val a1 = 2.0 * pi * ((i + 1) as f32) / (seg as f32)
+        val c0 = _emu3_cos(a0)
+        val s0 = _emu3_sin(a0)
+        val c1 = _emu3_cos(a1)
+        val s1 = _emu3_sin(a1)
+
+        # Side quad — normals point outward radially
+        val sb0 = vertex3d(c0 * half, -half, s0 * half, c0, 0.0, s0, 0.0, 0.0, 0xFFFFFFFF)
+        val sb1 = vertex3d(c1 * half, -half, s1 * half, c1, 0.0, s1, 1.0, 0.0, 0xFFFFFFFF)
+        val st0 = vertex3d(c0 * half, half, s0 * half, c0, 0.0, s0, 0.0, 1.0, 0xFFFFFFFF)
+        val st1 = vertex3d(c1 * half, half, s1 * half, c1, 0.0, s1, 1.0, 1.0, 0xFFFFFFFF)
+        core.submit_triangle(sb0, sb1, st1, material, model)
+        core.submit_triangle(sb0, st1, st0, material, model)
+
+        # Top cap fan — normal up
+        val tc = vertex3d(0.0, half, 0.0, 0.0, 1.0, 0.0, 0.5, 0.5, 0xFFFFFFFF)
+        val te0 = vertex3d(c0 * half, half, s0 * half, 0.0, 1.0, 0.0, 0.0, 0.0, 0xFFFFFFFF)
+        val te1 = vertex3d(c1 * half, half, s1 * half, 0.0, 1.0, 0.0, 1.0, 0.0, 0xFFFFFFFF)
+        core.submit_triangle(tc, te0, te1, material, model)
+
+        # Bottom cap fan — normal down
+        val bc = vertex3d(0.0, -half, 0.0, 0.0, -1.0, 0.0, 0.5, 0.5, 0xFFFFFFFF)
+        val be0 = vertex3d(c1 * half, -half, s1 * half, 0.0, -1.0, 0.0, 1.0, 0.0, 0xFFFFFFFF)
+        val be1 = vertex3d(c0 * half, -half, s0 * half, 0.0, -1.0, 0.0, 0.0, 0.0, 0xFFFFFFFF)
+        core.submit_triangle(bc, be0, be1, material, model)
+
+        i = i + 1
+
+# ============================================================================
+# Cone — Triangles from apex to base circle + bottom cap fan
+# ============================================================================
+
+fn emu_draw_cone(core: RenderBackend3DCore, model: [f32], material: Material3DParams, segments: i32):
+    val seg = _emu3_max_i32(segments, 4)
+    val pi = _emu3_pi()
+    val half = 0.5
+    # Cone side normal slope: for unit cone radius=0.5, height=1.0
+    # The normal tilts outward at angle atan(0.5/1.0)
+    val ny_side = 0.4472  # 1/sqrt(5) approximation
+    val nr_side = 0.8944  # 2/sqrt(5) approximation
+
+    var i: i32 = 0
+    while i < seg:
+        val a0 = 2.0 * pi * (i as f32) / (seg as f32)
+        val a1 = 2.0 * pi * ((i + 1) as f32) / (seg as f32)
+        val c0 = _emu3_cos(a0)
+        val s0 = _emu3_sin(a0)
+        val c1 = _emu3_cos(a1)
+        val s1 = _emu3_sin(a1)
+
+        # Side triangle — apex at top center
+        val apex = vertex3d(0.0, half, 0.0, 0.0, ny_side, 0.0, 0.5, 0.0, 0xFFFFFFFF)
+        val base0 = vertex3d(c0 * half, -half, s0 * half, c0 * nr_side, ny_side, s0 * nr_side, 0.0, 1.0, 0xFFFFFFFF)
+        val base1 = vertex3d(c1 * half, -half, s1 * half, c1 * nr_side, ny_side, s1 * nr_side, 1.0, 1.0, 0xFFFFFFFF)
+        core.submit_triangle(apex, base0, base1, material, model)
+
+        # Bottom cap fan — normal down
+        val bc = vertex3d(0.0, -half, 0.0, 0.0, -1.0, 0.0, 0.5, 0.5, 0xFFFFFFFF)
+        val be0 = vertex3d(c1 * half, -half, s1 * half, 0.0, -1.0, 0.0, 1.0, 0.0, 0xFFFFFFFF)
+        val be1 = vertex3d(c0 * half, -half, s0 * half, 0.0, -1.0, 0.0, 0.0, 0.0, 0xFFFFFFFF)
+        core.submit_triangle(bc, be0, be1, material, model)
+
+        i = i + 1
+
+# ============================================================================
+# Line 3D — Thin quad (2 triangles) along the line direction
+# ============================================================================
+
+fn emu_draw_line_3d(core: RenderBackend3DCore, x1: f32, y1: f32, z1: f32, x2: f32, y2: f32, z2: f32, color: u32, thickness: f32):
+    val mat = material_unlit(color)
+    val identity = mat4_identity()
+
+    # Direction vector
+    val dx = x2 - x1
+    val dy = y2 - y1
+    val dz = z2 - z1
+
+    # Find a perpendicular vector for the quad width
+    # Try cross with Y-up; fall back to X-axis if line is nearly vertical
+    var px: f32 = 0.0
+    var py: f32 = 0.0
+    var pz: f32 = 0.0
+    val cross_y = vec3_cross(dx, dy, dz, 0.0, 1.0, 0.0)
+    val cx_len = _emu3_sqrt(cross_y[0] * cross_y[0] + cross_y[1] * cross_y[1] + cross_y[2] * cross_y[2])
+    if cx_len > 0.001:
+        val n = vec3_normalize(cross_y[0], cross_y[1], cross_y[2])
+        px = n[0]
+        py = n[1]
+        pz = n[2]
+    else:
+        val cross_x = vec3_cross(dx, dy, dz, 1.0, 0.0, 0.0)
+        val n = vec3_normalize(cross_x[0], cross_x[1], cross_x[2])
+        px = n[0]
+        py = n[1]
+        pz = n[2]
+
+    val ht = thickness / 2.0
+    val ox = px * ht
+    val oy = py * ht
+    val oz = pz * ht
+
+    val va = vertex3d_pos_normal(x1 - ox, y1 - oy, z1 - oz, px, py, pz)
+    val vb = vertex3d_pos_normal(x1 + ox, y1 + oy, z1 + oz, px, py, pz)
+    val vc = vertex3d_pos_normal(x2 + ox, y2 + oy, z2 + oz, px, py, pz)
+    val vd = vertex3d_pos_normal(x2 - ox, y2 - oy, z2 - oz, px, py, pz)
+
+    core.submit_triangle(va, vb, vc, mat, identity)
+    core.submit_triangle(va, vc, vd, mat, identity)
+
+# ============================================================================
+# Wireframe — Draw edges of each triangle as 3D lines
+# ============================================================================
+
+fn emu_draw_wireframe(core: RenderBackend3DCore, vertices: [Vertex3D], indices: [u32], model: [f32], color: u32):
+    val n = indices.len()
+    var i: i32 = 0
+    while i + 2 < n:
+        val i0 = indices[i] as i32
+        val i1 = indices[i + 1] as i32
+        val i2 = indices[i + 2] as i32
+        val va = vertices[i0]
+        val vb = vertices[i1]
+        val vc = vertices[i2]
+
+        # Transform positions by model matrix
+        val pa = mat4_transform_point(model, va.px, va.py, va.pz)
+        val pb = mat4_transform_point(model, vb.px, vb.py, vb.pz)
+        val pc = mat4_transform_point(model, vc.px, vc.py, vc.pz)
+
+        emu_draw_line_3d(core, pa[0], pa[1], pa[2], pb[0], pb[1], pb[2], color, 1.0)
+        emu_draw_line_3d(core, pb[0], pb[1], pb[2], pc[0], pc[1], pc[2], color, 1.0)
+        emu_draw_line_3d(core, pc[0], pc[1], pc[2], pa[0], pa[1], pa[2], color, 1.0)
+        i = i + 3
+
+# ============================================================================
+# Indexed Mesh Submission — Unpack index triplets to submit_triangle
+# ============================================================================
+
+fn emu_submit_indexed_mesh(core: RenderBackend3DCore, vertices: [Vertex3D], indices: [u32], material: Material3DParams, model: [f32]):
+    val n = indices.len()
+    var i: i32 = 0
+    while i + 2 < n:
+        val i0 = indices[i] as i32
+        val i1 = indices[i + 1] as i32
+        val i2 = indices[i + 2] as i32
+        core.submit_triangle(vertices[i0], vertices[i1], vertices[i2], material, model)
+        i = i + 3
+
+# ============================================================================
+# Instanced Mesh Submission — Repeat indexed mesh for each transform
+# ============================================================================
+
+fn emu_submit_mesh_instanced(core: RenderBackend3DCore, vertices: [Vertex3D], indices: [u32], transforms: [[f32]], count: i32, material: Material3DParams):
+    var i: i32 = 0
+    while i < count:
+        emu_submit_indexed_mesh(core, vertices, indices, material, transforms[i])
+        i = i + 1
+
+# ============================================================================
+# Textures — Not supported in emulation
+# ============================================================================
+
+fn emu_create_texture(core: RenderBackend3DCore, w: i32, h: i32, pixels: [u32]) -> i32:
+    return -1
+
+fn emu_delete_texture(core: RenderBackend3DCore, id: i32):
+    pass_do_nothing
+
+# ============================================================================
+# Shadow Pass — Simplified emulation using camera override
+# ============================================================================
+
+fn emu_begin_shadow_pass(core: RenderBackend3DCore, light_view_proj: [f32], shadow_map_size: i32):
+    # Set camera to the light's view; in emulation this is a simplified approach
+    val identity = mat4_identity()
+    core.set_camera(light_view_proj, identity)
+
+fn emu_end_shadow_pass(core: RenderBackend3DCore):
+    pass_do_nothing
+
+fn emu_submit_shadow_caster(core: RenderBackend3DCore, vertices: [Vertex3D], indices: [u32], model: [f32]):
+    val black = material_unlit(0xFF000000)
+    emu_submit_indexed_mesh(core, vertices, indices, black, model)
+
+# ============================================================================
+# Post-Processing: Fog — Depth-based lerp toward fog color
+# ============================================================================
+
+fn emu_apply_fog(core: RenderBackend3DCore, color: u32, density: f32, near: f32, far: f32):
+    val w = core.width()
+    val h = core.height()
+    if w <= 0 or h <= 0:
+        return
+    val pixels = core.read_pixels()
+    val depth = core.read_depth()
+    val fr = color3d_r(color)
+    val fg = color3d_g(color)
+    val fb = color3d_b(color)
+    val fa = color3d_a(color)
+    val range = far - near
+    var result: [u32] = [0u32; w * h]
+
+    var py: i32 = 0
+    while py < h:
+        var px: i32 = 0
+        while px < w:
+            val idx = py * w + px
+            val d = depth[idx]
+            val p = pixels[idx]
+            # Compute linear fog factor: 0 at near, 1 at far
+            var factor: f32 = 0.0
+            if range > 0.0001:
+                factor = (d - near) / range
+            factor = _emu3_clamp_f32(factor * density, 0.0, 1.0)
+            val fi = (factor * 255.0) as i32
+            val inv = 255 - fi
+            val pr = color3d_r(p)
+            val pg = color3d_g(p)
+            val pb = color3d_b(p)
+            val pa = color3d_a(p)
+            val rr = (pr * inv + fr * fi) / 255
+            val rg = (pg * inv + fg * fi) / 255
+            val rb = (pb * inv + fb * fi) / 255
+            result[idx] = color3d_pack(rr, rg, rb, pa)
+            px = px + 1
+        py = py + 1
+    core.draw_image(0, 0, w, h, result)
+
+# ============================================================================
+# Post-Processing: Bloom — Extract bright, blur, additive composite
+# ============================================================================
+
+fn emu_apply_bloom(core: RenderBackend3DCore, threshold: f32, intensity: f32):
+    val w = core.width()
+    val h = core.height()
+    if w <= 0 or h <= 0:
+        return
+    val pixels = core.read_pixels()
+    val thresh_i = (threshold * 255.0) as i32
+
+    # Extract bright pixels
+    var bright: [u32] = [0u32; w * h]
+    var i: i32 = 0
+    while i < w * h:
+        val p = pixels[i]
+        val pr = color3d_r(p)
+        val pg = color3d_g(p)
+        val pb = color3d_b(p)
+        val lum = (pr * 77 + pg * 150 + pb * 29) / 256
+        if lum > thresh_i:
+            bright[i] = p
+        else:
+            bright[i] = 0xFF000000
+        i = i + 1
+
+    # Simple 3x3 box blur on bright pixels
+    var blurred: [u32] = [0u32; w * h]
+    var py: i32 = 0
+    while py < h:
+        var px: i32 = 0
+        while px < w:
+            var sr: i32 = 0
+            var sg: i32 = 0
+            var sb: i32 = 0
+            var cnt: i32 = 0
+            var ky: i32 = -1
+            while ky <= 1:
+                var kx: i32 = -1
+                while kx <= 1:
+                    val fx = px + kx
+                    val fy = py + ky
+                    if fx >= 0 and fx < w and fy >= 0 and fy < h:
+                        val bp = bright[fy * w + fx]
+                        sr = sr + color3d_r(bp)
+                        sg = sg + color3d_g(bp)
+                        sb = sb + color3d_b(bp)
+                        cnt = cnt + 1
+                    kx = kx + 1
+                ky = ky + 1
+            if cnt > 0:
+                blurred[py * w + px] = color3d_pack(sr / cnt, sg / cnt, sb / cnt, 255)
+            px = px + 1
+        py = py + 1
+
+    # Additive composite: original + blurred * intensity
+    val int_i = (intensity * 255.0) as i32
+    var result: [u32] = [0u32; w * h]
+    var j: i32 = 0
+    while j < w * h:
+        val op = pixels[j]
+        val bp = blurred[j]
+        val rr = _emu3_clamp_i32(color3d_r(op) + color3d_r(bp) * int_i / 255, 0, 255)
+        val rg = _emu3_clamp_i32(color3d_g(op) + color3d_g(bp) * int_i / 255, 0, 255)
+        val rb = _emu3_clamp_i32(color3d_b(op) + color3d_b(bp) * int_i / 255, 0, 255)
+        result[j] = color3d_pack(rr, rg, rb, color3d_a(op))
+        j = j + 1
+    core.draw_image(0, 0, w, h, result)
+
+# ============================================================================
+# Post-Processing: Tonemap — Reinhard operator
+# ============================================================================
+
+fn emu_apply_tonemap(core: RenderBackend3DCore, exposure: f32):
+    val w = core.width()
+    val h = core.height()
+    if w <= 0 or h <= 0:
+        return
+    val pixels = core.read_pixels()
+    var result: [u32] = [0u32; w * h]
+
+    var i: i32 = 0
+    while i < w * h:
+        val p = pixels[i]
+        val pr = (color3d_r(p) as f32) / 255.0
+        val pg = (color3d_g(p) as f32) / 255.0
+        val pb = (color3d_b(p) as f32) / 255.0
+
+        # Reinhard: c' = c * exposure / (1 + c * exposure)
+        val tr = pr * exposure / (1.0 + pr * exposure)
+        val tg = pg * exposure / (1.0 + pg * exposure)
+        val tb = pb * exposure / (1.0 + pb * exposure)
+
+        val rr = _emu3_clamp_i32((tr * 255.0) as i32, 0, 255)
+        val rg = _emu3_clamp_i32((tg * 255.0) as i32, 0, 255)
+        val rb = _emu3_clamp_i32((tb * 255.0) as i32, 0, 255)
+        result[i] = color3d_pack(rr, rg, rb, color3d_a(p))
+        i = i + 1
+    core.draw_image(0, 0, w, h, result)
+
+# ============================================================================
+# Compute — Not supported in emulation
+# ============================================================================
+
+fn emu_create_compute_kernel(core: RenderBackend3DCore, src: text) -> i32:
+    return -1
+
+fn emu_dispatch_compute(core: RenderBackend3DCore, kernel_id: i32, x: i32, y: i32, z: i32):
+    pass_do_nothing

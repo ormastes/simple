@@ -1,0 +1,736 @@
+"""3D Engine — CPU Software Backend (Reference Rasterizer)
+
+@tag:stdlib
+@tag:api
+@tag:gpu
+
+Pure software 3D rendering backend using flat [u32] color and [f32] depth
+buffers. Implements a scanline triangle rasterizer with Phong lighting,
+depth testing, backface culling, and stencil masking.
+
+Always available as the fallback — no external GPU dependencies.
+Advanced operations (geometry, shadows, post-processing, compute) delegate
+to the stateless emulation layer (backend_emu.spl).
+
+Usage:
+    use std.gpu.engine3d.backend_cpu.{CpuBackend3D}
+"""
+
+use std.gpu.engine3d.backend.{RenderBackend3D, Engine3DExtended}
+use std.gpu.engine3d.types3d.{
+    Vertex3D, Material3DParams, LightParams3D, RenderStats3D,
+    render_stats3d_new, mat4_identity, mat4_mul, mat4_transform_point, mat4_transform_dir,
+    vec3_dot, vec3_normalize, vec3_length,
+    color3d_r, color3d_g, color3d_b, color3d_a, color3d_pack,
+    MATERIAL_UNLIT, MATERIAL_PHONG, MATERIAL_PBR,
+    LIGHT_DIRECTIONAL, LIGHT_POINT, LIGHT_SPOT,
+    CULL_NONE, CULL_BACK, CULL_FRONT
+}
+use std.gpu.engine3d.backend_emu.{
+    emu_draw_cube, emu_draw_sphere, emu_draw_plane,
+    emu_draw_cylinder, emu_draw_cone, emu_draw_line_3d,
+    emu_draw_wireframe, emu_submit_indexed_mesh, emu_submit_mesh_instanced,
+    emu_create_texture, emu_delete_texture,
+    emu_begin_shadow_pass, emu_end_shadow_pass, emu_submit_shadow_caster,
+    emu_apply_fog, emu_apply_bloom, emu_apply_tonemap,
+    emu_create_compute_kernel, emu_dispatch_compute
+}
+
+extern fn rt_cpu_present_pixels(pixels: [u32], w: i32, h: i32) -> bool
+extern fn rt_f64_sqrt(x: f64) -> f64
+
+fn _sqrt(x: f32) -> f32:
+    rt_f64_sqrt(x as f64) as f32
+
+# ============================================================================
+# Clamp helpers
+# ============================================================================
+
+fn _clamp_i32(v: i32, lo: i32, hi: i32) -> i32:
+    if v < lo:
+        lo
+    else if v > hi:
+        hi
+    else:
+        v
+
+fn _clamp_f32(v: f32, lo: f32, hi: f32) -> f32:
+    if v < lo:
+        lo
+    else if v > hi:
+        hi
+    else:
+        v
+
+fn _max_f32(a: f32, b: f32) -> f32:
+    if a > b:
+        a
+    else:
+        b
+
+fn _min_f32(a: f32, b: f32) -> f32:
+    if a < b:
+        a
+    else:
+        b
+
+fn _min_i32(a: i32, b: i32) -> i32:
+    if a < b:
+        a
+    else:
+        b
+
+fn _max_i32(a: i32, b: i32) -> i32:
+    if a > b:
+        a
+    else:
+        b
+
+# ============================================================================
+# CPU Backend
+# ============================================================================
+
+class CpuBackend3D:
+    """Software 3D renderer backed by flat color and depth buffers.
+
+    This backend requires no GPU or external libraries. It is always
+    available and serves as the reference rasterizer for correctness
+    testing and headless rendering.
+    """
+
+    buf: [u32]
+    depth: [f32]
+    w: i32
+    h: i32
+    view_mat: [f32]
+    proj_mat: [f32]
+    lights: [LightParams3D]
+    ambient_color: u32
+    ambient_intensity: f32
+    depth_test_on: bool
+    cull_mode: i32
+    blend_mode: i32
+    mask: [u8]
+    mask_w: i32
+    mask_h: i32
+    stats: RenderStats3D
+    initialized: bool
+
+    static fn create() -> CpuBackend3D:
+        """Create an uninitialized CPU 3D backend. Call init() before drawing."""
+        CpuBackend3D(
+            buf: [], depth: [], w: 0, h: 0,
+            view_mat: mat4_identity(), proj_mat: mat4_identity(),
+            lights: [], ambient_color: 0xFFFFFFFF, ambient_intensity: 0.2,
+            depth_test_on: true, cull_mode: 1, blend_mode: 0,
+            mask: [], mask_w: 0, mask_h: 0,
+            stats: render_stats3d_new(), initialized: false
+        )
+
+# ============================================================================
+# Stencil Mask Helper
+# ============================================================================
+
+fn _mask_blocks_3d(backend: CpuBackend3D, x: i32, y: i32) -> bool:
+    """Return true if the stencil mask blocks pixel (x, y)."""
+    if backend.mask.len() == 0:
+        return false
+    if x < 0 or y < 0 or x >= backend.mask_w or y >= backend.mask_h:
+        return false
+    val idx = y * backend.mask_w + x
+    if idx >= backend.mask.len():
+        return false
+    backend.mask[idx] == 0
+
+# ============================================================================
+# Per-Vertex Lighting
+# ============================================================================
+
+fn _shade_vertex(
+    backend: CpuBackend3D,
+    wx: f32, wy: f32, wz: f32,
+    nx: f32, ny: f32, nz: f32,
+    material: Material3DParams
+) -> [i32]:
+    """Compute lit RGB [r, g, b] for a single vertex (0-255 each)."""
+    val base_r = color3d_r(material.albedo)
+    val base_g = color3d_g(material.albedo)
+    val base_b = color3d_b(material.albedo)
+
+    if material.kind == MATERIAL_UNLIT:
+        return [base_r, base_g, base_b]
+
+    # Ambient contribution
+    val amb_r = color3d_r(backend.ambient_color)
+    val amb_g = color3d_g(backend.ambient_color)
+    val amb_b = color3d_b(backend.ambient_color)
+    var out_r: f32 = (base_r as f32) * (amb_r as f32) / 255.0 * backend.ambient_intensity
+    var out_g: f32 = (base_g as f32) * (amb_g as f32) / 255.0 * backend.ambient_intensity
+    var out_b: f32 = (base_b as f32) * (amb_b as f32) / 255.0 * backend.ambient_intensity
+
+    # Accumulate per-light contributions
+    var li = 0
+    while li < backend.lights.len():
+        val light = backend.lights[li]
+        val lc_r = color3d_r(light.color) as f32
+        val lc_g = color3d_g(light.color) as f32
+        val lc_b = color3d_b(light.color) as f32
+
+        var lx: f32 = 0.0
+        var ly: f32 = 0.0
+        var lz: f32 = 0.0
+        var atten: f32 = 1.0
+
+        if light.kind == LIGHT_DIRECTIONAL:
+            val nd = vec3_normalize(-light.dx, -light.dy, -light.dz)
+            lx = nd[0]
+            ly = nd[1]
+            lz = nd[2]
+        else if light.kind == LIGHT_POINT or light.kind == LIGHT_SPOT:
+            val dx = light.px - wx
+            val dy = light.py - wy
+            val dz = light.pz - wz
+            val dist = vec3_length(dx, dy, dz)
+            if dist > 0.0001:
+                lx = dx / dist
+                ly = dy / dist
+                lz = dz / dist
+            if light.range > 0.0:
+                atten = 1.0 / (1.0 + dist * dist / (light.range * light.range))
+            else:
+                atten = 1.0 / (1.0 + dist * dist)
+
+        # Diffuse (N dot L)
+        val ndl = _max_f32(0.0, vec3_dot(nx, ny, nz, lx, ly, lz))
+        val diff = ndl * light.intensity * atten
+
+        out_r = out_r + diff * lc_r / 255.0 * (base_r as f32)
+        out_g = out_g + diff * lc_g / 255.0 * (base_g as f32)
+        out_b = out_b + diff * lc_b / 255.0 * (base_b as f32)
+
+        # Specular (Phong or simplified PBR)
+        if material.kind == MATERIAL_PHONG or material.kind == MATERIAL_PBR:
+            var shininess = material.shininess
+            if material.kind == MATERIAL_PBR:
+                # Map roughness to shininess: lower roughness → higher shininess
+                val rough = _clamp_f32(material.roughness, 0.01, 1.0)
+                shininess = 2.0 / (rough * rough) - 2.0
+                if shininess < 1.0:
+                    shininess = 1.0
+
+            # Half-vector H = normalize(L + V), approximate V as (0,0,1)
+            val hx = lx + 0.0
+            val hy = ly + 0.0
+            val hz = lz + 1.0
+            val hv = vec3_normalize(hx, hy, hz)
+            val ndh = _max_f32(0.0, vec3_dot(nx, ny, nz, hv[0], hv[1], hv[2]))
+            # Integer power approximation for specular
+            var spec: f32 = ndh
+            var pow_i = 1
+            val pow_target = (shininess as i32)
+            while pow_i < pow_target:
+                spec = spec * ndh
+                pow_i = pow_i * 2
+            spec = spec * light.intensity * atten
+
+            val spec_r = color3d_r(material.specular) as f32
+            val spec_g = color3d_g(material.specular) as f32
+            val spec_b = color3d_b(material.specular) as f32
+            out_r = out_r + spec * spec_r / 255.0
+            out_g = out_g + spec * spec_g / 255.0
+            out_b = out_b + spec * spec_b / 255.0
+
+        li = li + 1
+
+    val cr = _clamp_i32((out_r as i32), 0, 255)
+    val cg = _clamp_i32((out_g as i32), 0, 255)
+    val cb = _clamp_i32((out_b as i32), 0, 255)
+    [cr, cg, cb]
+
+# ============================================================================
+# Scanline Triangle Rasterizer
+# ============================================================================
+
+fn _rasterize_triangle(
+    backend: CpuBackend3D,
+    sx0: i32, sy0: i32, sz0: f32, r0: i32, g0: i32, b0: i32,
+    sx1: i32, sy1: i32, sz1: f32, r1: i32, g1: i32, b1: i32,
+    sx2: i32, sy2: i32, sz2: f32, r2: i32, g2: i32, b2: i32
+):
+    """Scanline-fill a screen-space triangle with depth testing and color interpolation."""
+    # Sort by y coordinate (v0.y <= v1.y <= v2.y)
+    var vx0 = sx0
+    var vy0 = sy0
+    var vz0 = sz0
+    var vr0 = r0
+    var vg0 = g0
+    var vb0 = b0
+    var vx1 = sx1
+    var vy1 = sy1
+    var vz1 = sz1
+    var vr1 = r1
+    var vg1 = g1
+    var vb1 = b1
+    var vx2 = sx2
+    var vy2 = sy2
+    var vz2 = sz2
+    var vr2 = r2
+    var vg2 = g2
+    var vb2 = b2
+
+    # Bubble sort by y
+    if vy0 > vy1:
+        var tx = vx0
+        var ty = vy0
+        var tz = vz0
+        var tr = vr0
+        var tg = vg0
+        var tb = vb0
+        vx0 = vx1
+        vy0 = vy1
+        vz0 = vz1
+        vr0 = vr1
+        vg0 = vg1
+        vb0 = vb1
+        vx1 = tx
+        vy1 = ty
+        vz1 = tz
+        vr1 = tr
+        vg1 = tg
+        vb1 = tb
+    if vy1 > vy2:
+        var tx = vx1
+        var ty = vy1
+        var tz = vz1
+        var tr = vr1
+        var tg = vg1
+        var tb = vb1
+        vx1 = vx2
+        vy1 = vy2
+        vz1 = vz2
+        vr1 = vr2
+        vg1 = vg2
+        vb1 = vb2
+        vx2 = tx
+        vy2 = ty
+        vz2 = tz
+        vr2 = tr
+        vg2 = tg
+        vb2 = tb
+    if vy0 > vy1:
+        var tx = vx0
+        var ty = vy0
+        var tz = vz0
+        var tr = vr0
+        var tg = vg0
+        var tb = vb0
+        vx0 = vx1
+        vy0 = vy1
+        vz0 = vz1
+        vr0 = vr1
+        vg0 = vg1
+        vb0 = vb1
+        vx1 = tx
+        vy1 = ty
+        vz1 = tz
+        vr1 = tr
+        vg1 = tg
+        vb1 = tb
+
+    val total_h = vy2 - vy0
+    if total_h == 0:
+        return
+
+    var y = _max_i32(vy0, 0)
+    val y_end = _min_i32(vy2, backend.h - 1)
+
+    while y <= y_end:
+        # Determine if in upper or lower half of triangle
+        val second_half = y > vy1 or vy0 == vy1
+        val seg_h = if second_half: vy2 - vy1 else: vy1 - vy0
+        if seg_h == 0:
+            y = y + 1
+            continue
+
+        # Interpolation factors
+        val alpha: f32 = ((y - vy0) as f32) / (total_h as f32)
+        val beta: f32 = if second_half:
+            ((y - vy1) as f32) / (seg_h as f32)
+        else:
+            ((y - vy0) as f32) / (seg_h as f32)
+
+        # Long edge interpolation (v0 -> v2)
+        var ax: f32 = (vx0 as f32) + ((vx2 - vx0) as f32) * alpha
+        var az: f32 = vz0 + (vz2 - vz0) * alpha
+        var ar: f32 = (vr0 as f32) + ((vr2 - vr0) as f32) * alpha
+        var ag: f32 = (vg0 as f32) + ((vg2 - vg0) as f32) * alpha
+        var ab: f32 = (vb0 as f32) + ((vb2 - vb0) as f32) * alpha
+
+        # Short edge interpolation
+        var bx: f32 = 0.0
+        var bz: f32 = 0.0
+        var br: f32 = 0.0
+        var bg_val: f32 = 0.0
+        var bb: f32 = 0.0
+        if second_half:
+            bx = (vx1 as f32) + ((vx2 - vx1) as f32) * beta
+            bz = vz1 + (vz2 - vz1) * beta
+            br = (vr1 as f32) + ((vr2 - vr1) as f32) * beta
+            bg_val = (vg1 as f32) + ((vg2 - vg1) as f32) * beta
+            bb = (vb1 as f32) + ((vb2 - vb1) as f32) * beta
+        else:
+            bx = (vx0 as f32) + ((vx1 - vx0) as f32) * beta
+            bz = vz0 + (vz1 - vz0) * beta
+            br = (vr0 as f32) + ((vr1 - vr0) as f32) * beta
+            bg_val = (vg0 as f32) + ((vg1 - vg0) as f32) * beta
+            bb = (vb0 as f32) + ((vb1 - vb0) as f32) * beta
+
+        # Ensure ax <= bx for left-to-right walk
+        if ax > bx:
+            var tmp = ax
+            ax = bx
+            bx = tmp
+            tmp = az
+            az = bz
+            bz = tmp
+            tmp = ar
+            ar = br
+            br = tmp
+            tmp = ag
+            ag = bg_val
+            bg_val = tmp
+            tmp = ab
+            ab = bb
+            bb = tmp
+
+        val x_start = _max_i32((ax as i32), 0)
+        val x_end = _min_i32((bx as i32), backend.w - 1)
+        val span = bx - ax
+        if span < 0.5:
+            y = y + 1
+            continue
+
+        var x = x_start
+        while x <= x_end:
+            val t: f32 = if span > 0.5: ((x as f32) - ax) / span else: 0.0
+            val z = az + (bz - az) * t
+            val idx = y * backend.w + x
+
+            # Depth test
+            if backend.depth_test_on:
+                if z >= backend.depth[idx]:
+                    x = x + 1
+                    continue
+
+            # Stencil mask test
+            if _mask_blocks_3d(backend, x, y):
+                x = x + 1
+                continue
+
+            # Interpolate color
+            val pr = _clamp_i32(((ar + (br - ar) * t) as i32), 0, 255)
+            val pg = _clamp_i32(((ag + (bg_val - ag) * t) as i32), 0, 255)
+            val pb = _clamp_i32(((ab + (bb - ab) * t) as i32), 0, 255)
+
+            backend.buf[idx] = color3d_pack(pr, pg, pb, 255)
+            backend.depth[idx] = z
+            x = x + 1
+        y = y + 1
+
+# ============================================================================
+# Trait Implementation
+# ============================================================================
+
+impl RenderBackend3D for CpuBackend3D:
+
+    fn name() -> text:
+        "cpu3d"
+
+    me init(width: i32, height: i32) -> bool:
+        self.w = width
+        self.h = height
+        val total = width * height
+        self.buf = [0u32; total]
+        self.depth = [1.0; total]
+        self.view_mat = mat4_identity()
+        self.proj_mat = mat4_identity()
+        self.lights = []
+        self.ambient_color = 0xFFFFFFFF
+        self.ambient_intensity = 0.2
+        self.depth_test_on = true
+        self.cull_mode = CULL_BACK
+        self.blend_mode = 0
+        self.mask = []
+        self.mask_w = 0
+        self.mask_h = 0
+        self.stats = render_stats3d_new()
+        self.initialized = true
+        true
+
+    me shutdown():
+        self.buf = []
+        self.depth = []
+        self.w = 0
+        self.h = 0
+        self.initialized = false
+
+    me begin_frame():
+        self.stats = render_stats3d_new()
+
+    me end_frame():
+        pass_do_nothing
+
+    me present():
+        rt_cpu_present_pixels(self.buf, self.w, self.h)
+
+    me set_camera(view: [f32], proj: [f32]):
+        self.view_mat = view
+        self.proj_mat = proj
+
+    me set_viewport(x: i32, y: i32, w: i32, h: i32):
+        pass_do_nothing
+
+    me clear(color: u32):
+        val total = self.w * self.h
+        var i = 0
+        while i < total:
+            self.buf[i] = color
+            i = i + 1
+
+    me clear_depth():
+        val total = self.w * self.h
+        var i = 0
+        while i < total:
+            self.depth[i] = 1.0
+            i = i + 1
+
+    me submit_triangle(v0: Vertex3D, v1: Vertex3D, v2: Vertex3D, material: Material3DParams, model: [f32]):
+        self.stats.draw_calls = self.stats.draw_calls + 1
+        self.stats.triangles = self.stats.triangles + 1
+
+        # Transform positions to world space
+        val wp0 = mat4_transform_point(model, v0.px, v0.py, v0.pz)
+        val wp1 = mat4_transform_point(model, v1.px, v1.py, v1.pz)
+        val wp2 = mat4_transform_point(model, v2.px, v2.py, v2.pz)
+
+        # Transform normals to world space (direction only, then normalize)
+        val wn0_raw = mat4_transform_dir(model, v0.nx, v0.ny, v0.nz)
+        val wn1_raw = mat4_transform_dir(model, v1.nx, v1.ny, v1.nz)
+        val wn2_raw = mat4_transform_dir(model, v2.nx, v2.ny, v2.nz)
+        val wn0 = vec3_normalize(wn0_raw[0], wn0_raw[1], wn0_raw[2])
+        val wn1 = vec3_normalize(wn1_raw[0], wn1_raw[1], wn1_raw[2])
+        val wn2 = vec3_normalize(wn2_raw[0], wn2_raw[1], wn2_raw[2])
+
+        # Per-vertex lighting
+        val col0 = _shade_vertex(self, wp0[0], wp0[1], wp0[2], wn0[0], wn0[1], wn0[2], material)
+        val col1 = _shade_vertex(self, wp1[0], wp1[1], wp1[2], wn1[0], wn1[1], wn1[2], material)
+        val col2 = _shade_vertex(self, wp2[0], wp2[1], wp2[2], wn2[0], wn2[1], wn2[2], material)
+
+        # Compute MVP = proj * view * model
+        val mv = mat4_mul(self.view_mat, model)
+        val mvp = mat4_mul(self.proj_mat, mv)
+
+        # Project to clip space (with w component for perspective divide)
+        val cx0 = mvp[0] * v0.px + mvp[4] * v0.py + mvp[8] * v0.pz + mvp[12]
+        val cy0 = mvp[1] * v0.px + mvp[5] * v0.py + mvp[9] * v0.pz + mvp[13]
+        val cz0 = mvp[2] * v0.px + mvp[6] * v0.py + mvp[10] * v0.pz + mvp[14]
+        val cw0 = mvp[3] * v0.px + mvp[7] * v0.py + mvp[11] * v0.pz + mvp[15]
+
+        val cx1 = mvp[0] * v1.px + mvp[4] * v1.py + mvp[8] * v1.pz + mvp[12]
+        val cy1 = mvp[1] * v1.px + mvp[5] * v1.py + mvp[9] * v1.pz + mvp[13]
+        val cz1 = mvp[2] * v1.px + mvp[6] * v1.py + mvp[10] * v1.pz + mvp[14]
+        val cw1 = mvp[3] * v1.px + mvp[7] * v1.py + mvp[11] * v1.pz + mvp[15]
+
+        val cx2 = mvp[0] * v2.px + mvp[4] * v2.py + mvp[8] * v2.pz + mvp[12]
+        val cy2 = mvp[1] * v2.px + mvp[5] * v2.py + mvp[9] * v2.pz + mvp[13]
+        val cz2 = mvp[2] * v2.px + mvp[6] * v2.py + mvp[10] * v2.pz + mvp[14]
+        val cw2 = mvp[3] * v2.px + mvp[7] * v2.py + mvp[11] * v2.pz + mvp[15]
+
+        # Cull behind near plane (w <= 0 means vertex is behind camera)
+        if cw0 <= 0.0 or cw1 <= 0.0 or cw2 <= 0.0:
+            return
+
+        # Perspective divide → NDC
+        val nx0 = cx0 / cw0
+        val ny0 = cy0 / cw0
+        val nz0 = cz0 / cw0
+        val nx1 = cx1 / cw1
+        val ny1 = cy1 / cw1
+        val nz1 = cz1 / cw1
+        val nx2 = cx2 / cw2
+        val ny2 = cy2 / cw2
+        val nz2 = cz2 / cw2
+
+        # Map to screen coordinates
+        val half_w: f32 = (self.w as f32) / 2.0
+        val half_h: f32 = (self.h as f32) / 2.0
+        val scx0 = ((nx0 + 1.0) * half_w) as i32
+        val scy0 = ((1.0 - ny0) * half_h) as i32
+        val scx1 = ((nx1 + 1.0) * half_w) as i32
+        val scy1 = ((1.0 - ny1) * half_h) as i32
+        val scx2 = ((nx2 + 1.0) * half_w) as i32
+        val scy2 = ((1.0 - ny2) * half_h) as i32
+
+        # Normalized depth (0 = near, 1 = far)
+        val d0 = (nz0 + 1.0) / 2.0
+        val d1 = (nz1 + 1.0) / 2.0
+        val d2 = (nz2 + 1.0) / 2.0
+
+        # Backface culling: screen-space signed area (cross product of edges)
+        val edge1x = scx1 - scx0
+        val edge1y = scy1 - scy0
+        val edge2x = scx2 - scx0
+        val edge2y = scy2 - scy0
+        val cross_z = edge1x * edge2y - edge1y * edge2x
+
+        if self.cull_mode == CULL_BACK:
+            if cross_z >= 0:
+                return
+        else if self.cull_mode == CULL_FRONT:
+            if cross_z <= 0:
+                return
+
+        # Rasterize
+        _rasterize_triangle(
+            self,
+            scx0, scy0, d0, col0[0], col0[1], col0[2],
+            scx1, scy1, d1, col1[0], col1[1], col1[2],
+            scx2, scy2, d2, col2[0], col2[1], col2[2]
+        )
+
+    me set_lights(lights: [LightParams3D]):
+        self.lights = lights
+
+    me set_ambient(color: u32, intensity: f32):
+        self.ambient_color = color
+        self.ambient_intensity = intensity
+
+    me set_depth_test(enabled: bool):
+        self.depth_test_on = enabled
+
+    me set_cull_mode(mode: i32):
+        self.cull_mode = mode
+
+    me set_blend_mode(mode: i32):
+        self.blend_mode = mode
+
+    me set_stencil_mask(mask: [u8], w: i32, h: i32):
+        self.mask = mask
+        self.mask_w = w
+        self.mask_h = h
+
+    me clear_stencil_mask():
+        self.mask = []
+        self.mask_w = 0
+        self.mask_h = 0
+
+    me set_render_target(pixels: [u32], w: i32, h: i32):
+        pass_do_nothing
+
+    me reset_render_target():
+        pass_do_nothing
+
+    me draw_image(x: i32, y: i32, w: i32, h: i32, pixels: [u32]):
+        var row = 0
+        while row < h:
+            var col = 0
+            while col < w:
+                val px = x + col
+                val py = y + row
+                if px >= 0 and px < self.w and py >= 0 and py < self.h:
+                    val src_idx = row * w + col
+                    if src_idx < pixels.len():
+                        self.buf[py * self.w + px] = pixels[src_idx]
+                col = col + 1
+            row = row + 1
+
+    fn read_pixels() -> [u32]:
+        var copy: [u32] = [0u32; self.w * self.h]
+        var i = 0
+        while i < self.w * self.h:
+            copy[i] = self.buf[i]
+            i = i + 1
+        copy
+
+    fn read_depth() -> [f32]:
+        var copy: [f32] = [1.0; self.w * self.h]
+        var i = 0
+        while i < self.w * self.h:
+            copy[i] = self.depth[i]
+            i = i + 1
+        copy
+
+    fn width() -> i32:
+        self.w
+
+    fn height() -> i32:
+        self.h
+
+    # -- Built-in geometry (delegate to emulation layer) --
+
+    me draw_cube(model: [f32], material: Material3DParams):
+        emu_draw_cube(self, model, material)
+
+    me draw_sphere(model: [f32], material: Material3DParams, segments: i32):
+        emu_draw_sphere(self, model, material, segments)
+
+    me draw_plane(model: [f32], material: Material3DParams):
+        emu_draw_plane(self, model, material)
+
+    me draw_cylinder(model: [f32], material: Material3DParams, segments: i32):
+        emu_draw_cylinder(self, model, material, segments)
+
+    me draw_cone(model: [f32], material: Material3DParams, segments: i32):
+        emu_draw_cone(self, model, material, segments)
+
+    me draw_line_3d(x1: f32, y1: f32, z1: f32, x2: f32, y2: f32, z2: f32, color: u32, thickness: f32):
+        emu_draw_line_3d(self, x1, y1, z1, x2, y2, z2, color, thickness)
+
+    me draw_wireframe(vertices: [Vertex3D], indices: [u32], model: [f32], color: u32):
+        emu_draw_wireframe(self, vertices, indices, model, color)
+
+    # -- Batch mesh submission --
+
+    me submit_indexed_mesh(vertices: [Vertex3D], indices: [u32], material: Material3DParams, model: [f32]):
+        emu_submit_indexed_mesh(self, vertices, indices, material, model)
+
+    me submit_mesh_instanced(vertices: [Vertex3D], indices: [u32], transforms: [[f32]], count: i32, material: Material3DParams):
+        emu_submit_mesh_instanced(self, vertices, indices, transforms, count, material)
+
+    # -- Textures --
+
+    me create_texture(w: i32, h: i32, pixels: [u32]) -> i32:
+        emu_create_texture(self, w, h, pixels)
+
+    me delete_texture(id: i32):
+        emu_delete_texture(self, id)
+
+    # -- Shadows --
+
+    me begin_shadow_pass(light_view_proj: [f32], shadow_map_size: i32):
+        emu_begin_shadow_pass(self, light_view_proj, shadow_map_size)
+
+    me end_shadow_pass():
+        emu_end_shadow_pass(self)
+
+    me submit_shadow_caster(vertices: [Vertex3D], indices: [u32], model: [f32]):
+        emu_submit_shadow_caster(self, vertices, indices, model)
+
+    # -- Post-processing --
+
+    me apply_fog(color: u32, density: f32, near: f32, far: f32):
+        emu_apply_fog(self, color, density, near, far)
+
+    me apply_bloom(threshold: f32, intensity: f32):
+        emu_apply_bloom(self, threshold, intensity)
+
+    me apply_tonemap(exposure: f32):
+        emu_apply_tonemap(self, exposure)
+
+    # -- Compute --
+
+    me create_compute_kernel(src: text) -> i32:
+        emu_create_compute_kernel(self, src)
+
+    me dispatch_compute(kernel_id: i32, x: i32, y: i32, z: i32):
+        emu_dispatch_compute(self, kernel_id, x, y, z)
