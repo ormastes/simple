@@ -278,8 +278,13 @@ const VEC16U8_STRUCT_SIZE: u64 = 16 * VEC16U8_FIELD_STRIDE as u64;
 ///
 /// The RuntimeValue's raw bits are a pointer to `rt_alloc`-ed memory.
 /// Each field is an i64 at offset `i * 8`; we read the low byte.
+///
+/// IMPORTANT: We use `to_raw()` (bit-preserving) instead of `as_int()`
+/// because Cranelift passes raw `rt_alloc` pointers directly as i64 vregs
+/// with NO tagging. `as_int()` would right-shift by 3 (tag extraction),
+/// corrupting the pointer.
 fn unpack_vec16u8_flat(v: RuntimeValue) -> [u8; 16] {
-    let ptr = v.as_int() as *const u8;
+    let ptr = v.to_raw() as *const u8;
     let mut lanes = [0_u8; 16];
     for i in 0..16 {
         let field_val = unsafe { (ptr.add(i * VEC16U8_FIELD_STRIDE) as *const i64).read_unaligned() };
@@ -291,7 +296,12 @@ fn unpack_vec16u8_flat(v: RuntimeValue) -> [u8; 16] {
 /// Pack 16 u8 lanes into a freshly `rt_alloc`-ed flat Vec16u8 struct.
 ///
 /// Allocates 128 bytes via `rt_alloc`, writes each lane as an i64 at
-/// offset `i * 8`, and returns the pointer as a RuntimeValue (raw i64).
+/// offset `i * 8`, and returns the pointer as a RuntimeValue.
+///
+/// IMPORTANT: We use `from_raw()` (bit-preserving) instead of `from_int()`
+/// because Cranelift expects the return value to be a raw pointer in the
+/// i64 vreg with NO tagging. `from_int()` would left-shift by 3 (integer
+/// tagging), corrupting the pointer.
 fn pack_vec16u8_flat(lanes: [u8; 16]) -> RuntimeValue {
     let ptr = rt_alloc(VEC16U8_STRUCT_SIZE);
     for i in 0..16 {
@@ -299,7 +309,7 @@ fn pack_vec16u8_flat(lanes: [u8; 16]) -> RuntimeValue {
             (ptr.add(i * VEC16U8_FIELD_STRIDE) as *mut i64).write_unaligned(lanes[i] as i64);
         }
     }
-    RuntimeValue::from_int(ptr as i64)
+    RuntimeValue::from_raw(ptr as u64)
 }
 
 #[no_mangle]
@@ -496,6 +506,9 @@ mod tests {
     /// This mirrors the exact memory layout that Cranelift codegen produces:
     /// - `rt_alloc(128)` for 16 fields, each i64 at offset `i * 8`.
     /// - The extern symbol reads from / writes to this flat layout.
+    /// - Raw pointers are passed as `RuntimeValue::from_raw(ptr as u64)`,
+    ///   matching how Cranelift stores raw `rt_alloc` pointers in i64 vregs
+    ///   with NO tagging (NOT `from_int` which would left-shift by 3).
     #[test]
     fn flat_struct_wrapper_fips197_round1() {
         // Build round-1 input state: PT XOR K0
@@ -517,13 +530,15 @@ mod tests {
             }
         }
 
-        // Call the extern wrapper with raw pointers as RuntimeValue
-        let state_rv = RuntimeValue::from_int(state_ptr as i64);
-        let key_rv = RuntimeValue::from_int(key_ptr as i64);
+        // Call the extern wrapper with raw pointers as RuntimeValue.
+        // Use from_raw() (bit-preserving) to match Cranelift's untagged pointer ABI.
+        let state_rv = RuntimeValue::from_raw(state_ptr as u64);
+        let key_rv = RuntimeValue::from_raw(key_ptr as u64);
         let result_rv = rt_simd_aes_round_u8x16(state_rv, key_rv);
 
-        // Unpack result from the returned flat struct
-        let result_ptr = result_rv.as_int() as *const u8;
+        // Unpack result from the returned flat struct.
+        // Use to_raw() (bit-preserving) to extract the untagged pointer.
+        let result_ptr = result_rv.to_raw() as *const u8;
         assert!(!result_ptr.is_null());
         let mut result = [0_u8; 16];
         for i in 0..16 {

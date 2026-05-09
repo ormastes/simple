@@ -107,7 +107,7 @@ test result: ok. 5 passed; 0 failed; 0 ignored
 
 ## Resolution (2026-05-09)
 
-All three remaining items are now complete:
+All remaining items are now complete:
 
 1. **Vec16u8 marshalling layer**: Flat-struct wrappers in `simd_aes_ops.rs`
    use raw pointer arithmetic (`rt_alloc` + `ptr.add(i * 8).write_unaligned`)
@@ -118,9 +118,14 @@ All three remaining items are now complete:
 2. **RUNTIME_FUNCS registration**: `rt_simd_aes_round_u8x16` and
    `rt_simd_aes_round_last_u8x16` added as `&[I64, I64], &[I64]`.
 3. **tier_of() update**: `"rt_simd_"` prefix added to Ext tier block.
-4. **Test coverage**: `flat_struct_wrapper_fips197_round1` test exercises the
+4. **RuntimeValue ABI fix**: Wrappers use `to_raw()`/`from_raw()` (bit-preserving)
+   instead of `as_int()`/`from_int()` (which apply 3-bit tag shifting). In
+   compiled mode, Cranelift passes raw `rt_alloc` pointers directly as i64
+   vregs with NO tagging; `as_int()` would right-shift by 3 (corrupting the
+   pointer) and `from_int()` would left-shift by 3 (corrupting the return).
+5. **Test coverage**: `flat_struct_wrapper_fips197_round1` test exercises the
    actual extern symbol end-to-end against the FIPS 197 known-good vector,
-   using the same flat-struct memory layout that Cranelift codegen produces.
+   using `from_raw()`/`to_raw()` to match the real Cranelift calling convention.
 
 The same flat-struct marshalling pattern can be applied to other `rt_simd_*`
 externs (add_u8x16, CLMUL, Vec4i) as needed.
