@@ -1,7 +1,7 @@
 # Bug: MIR missing MaskFromCmp, MaskedAdd/Mul/Fma, PredicatedAdd/Mul/Fma opcodes
 
 **Date:** 2026-05-02
-**Status:** OPEN
+**Status:** FIXED (opcodes added 2026-05-09; fusion pass body + tests remain for Wave I2)
 **Component:** `src/compiler/50.mir/mir_instructions.spl`, `src/compiler/60.mir_opt/mir_opt/predicate_promote.spl`
 
 ## Summary
