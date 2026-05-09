@@ -298,12 +298,157 @@ class SuspensionVisitor:
         live_vars
 
     fn is_used_after_suspension(var_name: text, after_expr: Expr) -> bool:
-        """Check if variable is used after given expression."""
-        pass_todo("STUB-012: implement proper AST-based liveness analysis")
+        """Check if variable is used after given expression.
+
+        Walks the expression AST looking for any identifier reference
+        that matches var_name.
+        """
+        self.expr_contains_ident(after_expr, var_name)
+
+    fn expr_contains_ident(expr: Expr, name: text) -> bool:
+        """Recursively check if expression tree references a given identifier."""
+        match expr_kind(expr):
+            case exprkind_Ident(ident_name):
+                return ident_name == name
+
+            case exprkind_Call(func, args):
+                if self.expr_contains_ident(func, name):
+                    return true
+                for arg in args:
+                    if self.expr_contains_ident(arg.value, name):
+                        return true
+                return false
+
+            case exprkind_Binary(left, op, right):
+                return self.expr_contains_ident(left, name) or self.expr_contains_ident(right, name)
+
+            case exprkind_Unary(op, operand):
+                return self.expr_contains_ident(operand, name)
+
+            case exprkind_Field(object_, field):
+                return self.expr_contains_ident(object_, name)
+
+            case exprkind_Index(array, index):
+                return self.expr_contains_ident(array, name) or self.expr_contains_ident(index, name)
+
+            case exprkind_Await(awaited):
+                return self.expr_contains_ident(awaited, name)
+
+            case exprkind_If(condition, then_block, else_block):
+                if self.expr_contains_ident(condition, name):
+                    return true
+                if self.block_contains_ident(then_block, name):
+                    return true
+                if else_block != nil:
+                    if self.block_contains_ident(else_block, name):
+                        return true
+                return false
+
+            case exprkind_Block(block):
+                return self.block_contains_ident(block, name)
+
+            case exprkind_MatchCase(scrutinee, arms):
+                if self.expr_contains_ident(scrutinee, name):
+                    return true
+                var arm_idx = 0
+                while arm_idx < arms.len():
+                    val arm: MatchArm = arms[arm_idx]
+                    if arm.has_guard:
+                        if self.expr_contains_ident(arm.guard, name):
+                            return true
+                    if self.block_contains_ident(arm.body, name):
+                        return true
+                    arm_idx = arm_idx + 1
+                return false
+
+            case _:
+                return false
+
+    fn block_contains_ident(block: Block, name: text) -> bool:
+        """Check if any statement in a block references a given identifier."""
+        for stmt in block.stmts:
+            if self.stmt_contains_ident(stmt, name):
+                return true
+        false
+
+    fn stmt_contains_ident(stmt: Stmt, name: text) -> bool:
+        """Check if a statement references a given identifier."""
+        match stmt_kind(stmt):
+            case stmtkind_Expr(expr):
+                return self.expr_contains_ident(expr, name)
+
+            case stmtkind_Val(vname, type_, value):
+                return self.expr_contains_ident(value, name)
+
+            case stmtkind_Var(vname, type_, value):
+                if value != nil:
+                    return self.expr_contains_ident(value, name)
+                return false
+
+            case stmtkind_Assign(target, op, value):
+                return self.expr_contains_ident(target, name) or self.expr_contains_ident(value, name)
+
+            case stmtkind_While(condition, body):
+                return self.expr_contains_ident(condition, name) or self.block_contains_ident(body, name)
+
+            case stmtkind_For(var_name, iterable, body):
+                return self.expr_contains_ident(iterable, name) or self.block_contains_ident(body, name)
+
+            case stmtkind_Return(value):
+                if value != nil:
+                    return self.expr_contains_ident(value, name)
+                return false
+
+            case _:
+                return false
 
     fn expr_to_string(expr: Expr) -> text:
-        """Convert expression to string for simple analysis."""
-        pass_todo("STUB-012: implement proper AST-based liveness analysis")
+        """Convert expression to a readable string representation."""
+        match expr_kind(expr):
+            case exprkind_Ident(name):
+                return name
+
+            case exprkind_IntLit(value):
+                return "{value}"
+
+            case exprkind_FloatLit(value):
+                return "{value}"
+
+            case exprkind_StringLit(value, _):
+                return "\"{value}\""
+
+            case exprkind_BoolLit(value):
+                if value:
+                    return "true"
+                return "false"
+
+            case exprkind_Await(awaited):
+                return "await " + self.expr_to_string(awaited)
+
+            case exprkind_Call(func, args):
+                var result = self.expr_to_string(func) + "("
+                var i = 0
+                for arg in args:
+                    if i > 0:
+                        result = result + ", "
+                    result = result + self.expr_to_string(arg.value)
+                    i = i + 1
+                return result + ")"
+
+            case exprkind_Binary(left, op, right):
+                return self.expr_to_string(left) + " op " + self.expr_to_string(right)
+
+            case exprkind_Unary(op, operand):
+                return "op " + self.expr_to_string(operand)
+
+            case exprkind_Field(object_, field):
+                return self.expr_to_string(object_) + ".field"
+
+            case exprkind_Index(array, index):
+                return self.expr_to_string(array) + "[" + self.expr_to_string(index) + "]"
+
+            case _:
+                return "<expr>"
 
 # ================================================================
 # Utility Functions
