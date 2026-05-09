@@ -33,9 +33,9 @@ if dynlib_is_valid(lib):
 
 | Variant | Extension | Backend | Status |
 |---------|-----------|---------|--------|
-| `Elf`   | `.so`     | Kernel dylib_registry | Stub (ENOSYS) |
-| `Smf`   | `.smf`    | Kernel dylib_registry | Stub (ENOSYS) |
-| `Pe`    | `.dll`    | WS3 PE loader | Not implemented |
+| `Elf`   | `.so`     | Kernel dylib_registry | Wired (pre-registered libraries) |
+| `Smf`   | `.smf`    | Kernel dylib_registry | Wired (pre-registered libraries) |
+| `Pe`    | `.dll`    | Wine PE loader | Implemented (image mapping + relocations) |
 | `Invalid` | — | — | Error sentinel |
 
 ## API Reference
@@ -55,10 +55,9 @@ if dynlib_is_valid(lib):
 
 ## Current Limitations
 
-- **Kernel-backed loads return ENOSYS**: `rt_dlopen`/`rt_dlsym`/`rt_dlclose`
-  runtime externs are not yet implemented. ELF and SMF paths will open but
-  return `DynLibKind.Invalid` until the runtime bridge lands.
-- **PE not implemented**: `.dll` paths always return `Invalid` (WS3 scope).
+- **Libraries must be pre-registered**: `dylib_async_open` calls
+  `dylib_registry_open(path)`, which only finds libraries previously registered
+  via `dylib_registry_register(path, bytes)`. Unregistered paths return ENOENT.
 - **rt_dyncall_N not in runtime**: the extern declarations are forward contracts;
   calling them before runtime support will trap.
 
