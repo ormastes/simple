@@ -1,5 +1,6 @@
 use app.svim.core.*
 use app.lsp.parser_adapter.{ParserAdapter, ParseDiagnostic}
+use std.editor.services.diagnostics.{EditorDiagnostic}
 
 
 class SvimLanguagePort:
@@ -23,10 +24,16 @@ impl SvimLanguagePort:
         val idx = _svim_language_buffer_index(session, buffer_id)
         if idx < 0:
             return 0
+        val path = session.buffers[idx].path ?? ""
         val result = self.parser.parse(session.buffers[idx].piece_table.to_text())
-        var diagnostics: [DiagnosticItem] = []
+        # Build EditorDiagnostic list as the canonical intermediate type
+        var editor_diags: [EditorDiagnostic] = []
         for diag in result.diagnostics:
-            diagnostics.push(_svim_language_diag(diag))
+            editor_diags.push(_svim_language_editor_diag(diag, path))
+        # Map to DiagnosticItem for SvimSession (which owns its own buffer store)
+        var diagnostics: [DiagnosticItem] = []
+        for ed in editor_diags:
+            diagnostics.push(DiagnosticItem(row: ed.line, col: ed.col, severity: ed.severity, message: ed.message))
         session.replace_diagnostics(buffer_id, diagnostics)
         diagnostics.len()
 
@@ -39,12 +46,17 @@ fn _svim_language_buffer_index(session: SvimSession, buffer_id: BufferId) -> i64
         i = i + 1
     -1
 
-fn _svim_language_diag(diag: ParseDiagnostic) -> DiagnosticItem:
-    DiagnosticItem(
-        row: diag.line,
+fn _svim_language_editor_diag(diag: ParseDiagnostic, path: text) -> EditorDiagnostic:
+    val sev = _svim_language_severity(diag.severity)
+    EditorDiagnostic(
+        path: path,
+        line: diag.line,
         col: diag.column,
-        severity: _svim_language_severity(diag.severity),
-        message: diag.message
+        end_line: diag.line,
+        end_col: diag.column,
+        severity: sev,
+        message: diag.message,
+        source: "svim"
     )
 
 fn _svim_language_severity(severity: i64) -> text:
