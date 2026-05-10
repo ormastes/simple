@@ -1,0 +1,89 @@
+# SReplay VM — Virtual Timer Device
+#
+# Deterministic timer: value derived from cycle count, not real time.
+# Fires interrupt at configurable interval.
+
+# ============================================================================
+# Virtual Timer
+# ============================================================================
+
+class VirtualTimer:
+    name_val: text
+    compare_value: i64      # fire interrupt when counter reaches this
+    counter: i64            # incremented by tick()
+    interval: i64           # auto-reload interval (0 = one-shot)
+    irq: i32
+    irq_pending: bool
+    enabled: bool
+
+impl VirtualTimer:
+    static fn create(name: text, irq: i32) -> VirtualTimer:
+        VirtualTimer(
+            name_val: name,
+            compare_value: 0,
+            counter: 0,
+            interval: 10000,
+            irq: irq,
+            irq_pending: false,
+            enabled: false
+        )
+
+    fn name() -> text:
+        self.name_val
+
+    fn mmio_read(offset: i64, size: i32) -> Result<i64, text>:
+        match offset:
+            0x00: Ok(self.counter)             # MTIME low
+            0x04: Ok(self.counter / 0x100000000) # MTIME high
+            0x08: Ok(self.compare_value)        # MTIMECMP low
+            0x0C: Ok(self.compare_value / 0x100000000) # MTIMECMP high
+            _: Ok(0)
+
+    fn mmio_write(offset: i64, value: i64, size: i32) -> Result<Nil, text>:
+        match offset:
+            0x08:
+                self.compare_value = value
+                self.irq_pending = false
+            0x10:
+                self.interval = value
+            0x14:
+                self.enabled = value != 0
+            _: pass
+        Ok(nil)
+
+    fn tick(cycles: i64):
+        if not self.enabled:
+            return
+        self.counter = self.counter + cycles
+        if self.compare_value > 0 and self.counter >= self.compare_value:
+            self.irq_pending = true
+            if self.interval > 0:
+                self.compare_value = self.compare_value + self.interval
+
+    fn pending_irq() -> i32:
+        if self.irq_pending: self.irq else: -1
+
+    fn acknowledge_irq():
+        self.irq_pending = false
+
+    fn snapshot() -> [i32]:
+        var data: [i32] = []
+        # Simplified: store counter and compare as i32 pairs
+        data.push((self.counter & 0xFFFFFFFF) as i32)
+        data.push((self.counter / 0x100000000) as i32)
+        data.push((self.compare_value & 0xFFFFFFFF) as i32)
+        data.push((self.compare_value / 0x100000000) as i32)
+        data.push(if self.enabled: 1 else: 0)
+        data.push(if self.irq_pending: 1 else: 0)
+        data
+
+    fn restore(data: [i32]):
+        if data.len() < 6:
+            return
+        self.counter = (data[0] as i64) + (data[1] as i64) * 0x100000000
+        self.compare_value = (data[2] as i64) + (data[3] as i64) * 0x100000000
+        self.enabled = data[4] != 0
+        self.irq_pending = data[5] != 0
+
+    fn is_deterministic() -> bool:
+        true

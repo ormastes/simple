@@ -1,0 +1,119 @@
+# SReplay VM — Device Bus + ReplayableDevice Trait
+#
+# MMIO dispatch table routing address ranges to devices.
+# All devices implement ReplayableDevice for snapshot/replay.
+
+use std.nogc_sync_mut.replay.vm.vm_types.{DeviceConfig, DeviceIoEvent, DeviceIoKind}
+
+# ============================================================================
+# ReplayableDevice Trait
+# ============================================================================
+
+trait ReplayableDevice:
+    fn name() -> text
+    fn mmio_read(offset: i64, size: i32) -> Result<i64, text>
+    fn mmio_write(offset: i64, value: i64, size: i32) -> Result<Nil, text>
+    fn tick(cycles: i64)
+    fn pending_irq() -> i32    # -1 = none
+    fn snapshot() -> [i32]
+    fn restore(data: [i32])
+    fn is_deterministic() -> bool
+
+# ============================================================================
+# Device Bus Entry
+# ============================================================================
+
+struct BusEntry:
+    name: text
+    base_addr: i64
+    size: i64
+    irq: i32
+
+# ============================================================================
+# Device Bus
+# ============================================================================
+
+class DeviceBus:
+    entries: [BusEntry]
+    io_log: [DeviceIoEvent]
+    recording: bool
+    log_seq: i64
+
+impl DeviceBus:
+    static fn create() -> DeviceBus:
+        DeviceBus(
+            entries: [],
+            io_log: [],
+            recording: false,
+            log_seq: 0
+        )
+
+    fn register_device(config: DeviceConfig):
+        self.entries.push(BusEntry(
+            name: config.name,
+            base_addr: config.base_addr,
+            size: config.size,
+            irq: config.irq
+        ))
+
+    fn start_recording():
+        self.recording = true
+        self.io_log = []
+        self.log_seq = 0
+
+    fn stop_recording():
+        self.recording = false
+
+    fn find_device(addr: i64) -> Option<BusEntry>:
+        for entry in self.entries:
+            if addr >= entry.base_addr and addr < entry.base_addr + entry.size:
+                return Some(entry)
+        None
+
+    fn log_mmio_read(device_name: text, offset: i64, size: i32, value: i64, cycles: i64):
+        if not self.recording:
+            return
+        self.io_log.push(DeviceIoEvent(
+            seq: self.log_seq,
+            device_name: device_name,
+            kind: DeviceIoKind.MmioRead,
+            timestamp_cycles: cycles,
+            offset: offset,
+            size: size,
+            value: value
+        ))
+        self.log_seq = self.log_seq + 1
+
+    fn log_mmio_write(device_name: text, offset: i64, size: i32, value: i64, cycles: i64):
+        if not self.recording:
+            return
+        self.io_log.push(DeviceIoEvent(
+            seq: self.log_seq,
+            device_name: device_name,
+            kind: DeviceIoKind.MmioWrite,
+            timestamp_cycles: cycles,
+            offset: offset,
+            size: size,
+            value: value
+        ))
+        self.log_seq = self.log_seq + 1
+
+    fn log_interrupt(device_name: text, irq: i32, cycles: i64):
+        if not self.recording:
+            return
+        self.io_log.push(DeviceIoEvent(
+            seq: self.log_seq,
+            device_name: device_name,
+            kind: DeviceIoKind.Interrupt,
+            timestamp_cycles: cycles,
+            offset: 0,
+            size: 0,
+            value: irq as i64
+        ))
+        self.log_seq = self.log_seq + 1
+
+    fn event_count() -> i64:
+        self.io_log.len()
+
+    fn get_events() -> [DeviceIoEvent]:
+        self.io_log

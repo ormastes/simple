@@ -1,0 +1,140 @@
+# SReplay — Semantic Trace Writer
+#
+# Ring-buffer trace emitter for .sst (Simple Semantic Trace) files.
+# Injected runtime code calls the global instance via emit_global().
+
+use std.io.{shell}
+use std.nogc_sync_mut.replay.codec.{encode_i64, encode_i32}
+use std.nogc_sync_mut.replay.semantic.trace_events.{SemanticEvent, SEMANTIC_EVENT_SIZE}
+
+# ============================================================================
+# Trace Writer
+# ============================================================================
+
+class TraceWriter:
+    buffer: [i32]          # byte buffer (ring semantics)
+    buffer_capacity: i64   # max bytes
+    write_pos: i64         # current write position
+    event_count: i64       # total events emitted
+    output_path: text      # .sst file path
+    next_seq: i64          # monotonic sequence counter
+
+    static fn create(output_path: text, buffer_capacity: i64) -> TraceWriter:
+        TraceWriter(
+            buffer: [],
+            buffer_capacity: buffer_capacity,
+            write_pos: 0,
+            event_count: 0,
+            output_path: output_path,
+            next_seq: 0
+        )
+
+    fn emit(event: SemanticEvent):
+        """Append a semantic event to the ring buffer."""
+        var ev = event
+        ev.seq = self.next_seq
+        self.next_seq = self.next_seq + 1
+
+        # Encode the 68-byte record
+        var record: [i32] = []
+        encode_i64(record, ev.seq)
+        encode_i64(record, ev.thread_id)
+        encode_i32(record, ev.kind)
+        encode_i64(record, ev.timestamp_ns)
+        encode_i32(record, ev.source_file_id)
+        encode_i32(record, ev.source_line)
+        encode_i32(record, ev.source_column)
+        encode_i32(record, ev.name_id)
+        encode_i64(record, ev.object_id)
+        encode_i64(record, ev.payload_a)
+        encode_i64(record, ev.payload_b)
+
+        # Append to buffer (ring: if full, flush first)
+        if self.write_pos + SEMANTIC_EVENT_SIZE as i64 > self.buffer_capacity:
+            self.flush()
+
+        for b in record:
+            self.buffer.push(b)
+        self.write_pos = self.write_pos + SEMANTIC_EVENT_SIZE as i64
+        self.event_count = self.event_count + 1
+
+    fn flush() -> Result<Nil, text>:
+        """Write buffer contents to file and reset."""
+        if self.buffer.len() == 0:
+            return Ok(nil)
+
+        var hex_parts: [text] = []
+        for b in self.buffer:
+            val hi = hex_digit(b / 16)
+            val lo = hex_digit(b % 16)
+            hex_parts.push(hi)
+            hex_parts.push(lo)
+        val hex_str = hex_parts.join("")
+
+        val result = shell("echo -n '{hex_str}' | xxd -r -p >> '{self.output_path}'")
+        if result.exit_code != 0:
+            return Err("failed to write trace to {self.output_path}")
+
+        self.buffer = []
+        self.write_pos = 0
+        Ok(nil)
+
+    fn finalize() -> Result<text, text>:
+        """Flush remaining buffer, close, and return output path."""
+        self.flush()?
+        print "[sreplay] Wrote {self.event_count} semantic events to {self.output_path}"
+        Ok(self.output_path)
+
+# ============================================================================
+# Global Instance
+# ============================================================================
+
+var GLOBAL_WRITER: Option<TraceWriter> = None
+
+fn init_global_writer(output_path: text, buffer_capacity: i64):
+    """Initialize the global trace writer. Called once at program start."""
+    # Ensure output file is empty/created
+    shell("truncate -s 0 '{output_path}' 2>/dev/null || touch '{output_path}'")
+    GLOBAL_WRITER = Some(TraceWriter.create(output_path, buffer_capacity))
+
+fn emit_global(event: SemanticEvent):
+    """Emit a semantic event via the global writer. No-op if not initialized."""
+    match GLOBAL_WRITER:
+        case Some(writer):
+            writer.emit(event)
+        case None:
+            pass_dn
+
+fn finalize_global_writer() -> Result<text, text>:
+    """Finalize the global writer, returning the output path."""
+    match GLOBAL_WRITER:
+        case Some(writer):
+            val path = writer.finalize()?
+            GLOBAL_WRITER = None
+            Ok(path)
+        case None:
+            Err("global trace writer not initialized")
+
+# ============================================================================
+# Hex helper
+# ============================================================================
+
+fn hex_digit(v: i32) -> text:
+    match v:
+        case 0: "0"
+        case 1: "1"
+        case 2: "2"
+        case 3: "3"
+        case 4: "4"
+        case 5: "5"
+        case 6: "6"
+        case 7: "7"
+        case 8: "8"
+        case 9: "9"
+        case 10: "a"
+        case 11: "b"
+        case 12: "c"
+        case 13: "d"
+        case 14: "e"
+        case 15: "f"
+        case _: "0"

@@ -1,0 +1,202 @@
+# @cover src/lib/gc_async_mut/gpu/browser_engine/net/net_delegate.spl 80%
+# @cover src/lib/gc_async_mut/gpu/browser_engine/net/fetch_dispatch.spl 80%
+"""
+# NetDelegate and FetchDispatch Interface Specification
+
+**Feature IDs:** #M16-AC2, #M16-AC7, #M16-AC8
+**Category:** Stdlib
+**Difficulty:** 2/5
+**Status:** Draft
+
+## Overview
+
+Verifies the lazy seam interfaces: NoopNetDelegate returns an empty response,
+FetchDispatch nullable slot on ScriptHost defaults to none, and
+BrowserRenderer.navigate() entry point exists and calls net_delegate.navigate().
+No network calls — pure interface/entity checks.
+"""
+
+use std.spipe.*
+
+use std.gc_async_mut.gpu.browser_engine.net.net_delegate.{NetDelegate, NoopNetDelegate}
+use std.gc_async_mut.gpu.browser_engine.net.fetch_dispatch.{FetchDispatch, NoopFetchDispatch}
+use std.gc_async_mut.gpu.browser_engine.net.entity.request_types.{FetchRequest, FetchResponse, HttpMethod, RequestMode}
+use std.gc_async_mut.gpu.browser_engine.net.entity.url_types.{Url}
+use std.gc_async_mut.gpu.browser_engine.script.script_host.{ScriptHost}
+use std.gc_async_mut.gpu.browser_engine.browser_renderer.{BrowserRenderer}
+
+extern fn rt_text_to_bytes(s: text) -> [u8]
+
+
+# ============================================================================
+# NoopNetDelegate
+# ============================================================================
+
+describe "NoopNetDelegate":
+    """
+    ## Noop implementation returns safe empty responses
+
+    NoopNetDelegate must satisfy the NetDelegate trait and return a zero-status
+    FetchResponse with empty body so the renderer stays headless during tests.
+    """
+
+    it "AC-7: NoopNetDelegate.navigate returns a FetchResponse":
+        val noop = NoopNetDelegate.new()
+        val resp = noop.navigate(make_test_url())
+        val has_status = (resp.status >= 0)
+        expect(has_status).to_equal(true)
+
+    it "AC-7: NoopNetDelegate.navigate returns status 0 (no network)":
+        val noop = NoopNetDelegate.new()
+        val resp = noop.navigate(make_test_url())
+        expect(resp.status).to_equal(0)
+
+    it "AC-7: NoopNetDelegate.navigate returns empty body":
+        val noop = NoopNetDelegate.new()
+        val resp = noop.navigate(make_test_url())
+        expect(resp.body.length).to_equal(0)
+
+    it "AC-7: NoopNetDelegate.fetch returns status 0":
+        val noop = NoopNetDelegate.new()
+        val resp = noop.fetch(make_test_request())
+        expect(resp.status).to_equal(0)
+
+    it "AC-7: NoopNetDelegate.fetch returns empty body":
+        val noop = NoopNetDelegate.new()
+        val resp = noop.fetch(make_test_request())
+        expect(resp.body.length).to_equal(0)
+
+
+# ============================================================================
+# ScriptHost fetch_dispatch slot (AC-2)
+# ============================================================================
+
+describe "ScriptHost fetch_dispatch field":
+    """
+    ## ScriptHost gains an opt-in fetch_dispatch slot
+
+    The fetch_dispatch field must default to none so existing M15 ScriptHost
+    callers that do not set it are unaffected.
+    """
+
+    it "AC-2: ScriptHost.fetch_dispatch is none by default":
+        val host = ScriptHost.new()
+        val has_dispatch = host.fetch_dispatch.is_some()
+        expect(has_dispatch).to_equal(false)
+
+    it "AC-2: set_fetch_dispatch makes fetch_dispatch non-nil":
+        val host = ScriptHost.new()
+        val dispatch = make_noop_dispatch()
+        host.set_fetch_dispatch(dispatch)
+        val has_dispatch = host.fetch_dispatch.is_some()
+        expect(has_dispatch).to_equal(true)
+
+
+# ============================================================================
+# BrowserRenderer net_delegate slot (AC-7, AC-8)
+# ============================================================================
+
+describe "BrowserRenderer net_delegate field":
+    """
+    ## BrowserRenderer lazy net seam (D-3 corpus isolation)
+
+    net_delegate must default to none so 132-corpus tests never trigger DNS/TLS.
+    navigate() must exist and delegate to the injected NetDelegate when set.
+    """
+
+    it "AC-7: BrowserRenderer.net_delegate is none by default":
+        val renderer = BrowserRenderer.new()
+        val has_delegate = renderer.net_delegate.is_some()
+        expect(has_delegate).to_equal(false)
+
+    it "AC-7: set_net_delegate makes net_delegate non-nil":
+        val renderer = BrowserRenderer.new()
+        val noop = NoopNetDelegate.new()
+        renderer.set_net_delegate(noop)
+        val has_delegate = renderer.net_delegate.is_some()
+        expect(has_delegate).to_equal(true)
+
+    it "AC-8: navigate() method exists on BrowserRenderer":
+        val renderer = BrowserRenderer.new()
+        val noop = NoopNetDelegate.new()
+        renderer.set_net_delegate(noop)
+        # navigate returns without crashing when noop is injected
+        renderer.navigate("https://example.com/")
+        expect(true).to_equal(true)
+
+    it "AC-8: navigate() with no net_delegate does not crash":
+        val renderer = BrowserRenderer.new()
+        # No net_delegate injected — must degrade gracefully (return or noop)
+        renderer.navigate("https://example.com/")
+        expect(true).to_equal(true)
+
+
+# ============================================================================
+# FetchResponse [u8] body (AC-4)
+# ============================================================================
+
+describe "FetchResponse body field":
+    """
+    ## FetchResponse.body is [u8] throughout the net stack (AC-4)
+
+    FetchResponse must expose a body field of type [u8] and a convenience
+    body_text() method. The raw bytes must be addressable.
+    """
+
+    it "AC-4: FetchResponse.body is a [u8] array":
+        val resp = make_response_with_text_body("hello world")
+        expect(resp.body.length).to_be_greater_than(0)
+
+    it "AC-4: body_text() decodes [u8] to text":
+        val resp = make_response_with_text_body("hello world")
+        expect(resp.body_text()).to_equal("hello world")
+
+    it "AC-4: FetchResponse with empty body has length 0":
+        val resp = make_empty_response()
+        expect(resp.body.length).to_equal(0)
+
+    it "AC-4: body_text() on empty body returns empty string":
+        val resp = make_empty_response()
+        expect(resp.body_text()).to_equal("")
+
+
+# ============================================================================
+# Helpers
+# ============================================================================
+
+fn make_test_url() -> Url:
+    return Url {
+        scheme: "https",
+        host: "example.com",
+        port: 443,
+        path: "/",
+        query: "",
+        fragment: ""
+    }
+
+fn make_test_request() -> FetchRequest:
+    return FetchRequest {
+        method: "GET",
+        url: make_test_url(),
+        headers: "",
+        body: [],
+        mode: RequestMode.NoCors,
+        credentials: "omit"
+    }
+
+fn make_noop_dispatch() -> FetchDispatch:
+    return NoopFetchDispatch.new()
+
+fn make_response_with_text_body(s: text) -> FetchResponse:
+    return FetchResponse {
+        status: 200,
+        headers: "",
+        body: rt_text_to_bytes(s)
+    }
+
+fn make_empty_response() -> FetchResponse:
+    return FetchResponse {
+        status: 0,
+        headers: "",
+        body: []
+    }

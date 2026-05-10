@@ -1,0 +1,189 @@
+# SReplay — QEMU CLI subcommand implementations
+
+use std.io.{shell}
+use std.nogc_sync_mut.replay.types.{ReplayConfig, Arch, ReplayMode}
+use std.nogc_sync_mut.replay.qemu_replay.{QemuReplayBackend}
+
+# ============================================================================
+# Argument parsing helper
+# ============================================================================
+
+fn parse_flag(args: [text], flag: text) -> text:
+    var i = 0
+    while i < args.len() - 1:
+        if args[i] == flag:
+            return args[i + 1]
+        i = i + 1
+    ""
+
+# ============================================================================
+# simple qemu record
+# ============================================================================
+
+fn cmd_record(args: [text]):
+    val arch_str = parse_flag(args, "--arch")
+    val kernel = parse_flag(args, "--kernel")
+    val trace = parse_flag(args, "--trace")
+    val machine = parse_flag(args, "--machine")
+    val memory = parse_flag(args, "--memory")
+
+    if kernel.len() == 0:
+        print "[sreplay] Error: --kernel is required"
+        return
+    if trace.len() == 0:
+        print "[sreplay] Error: --trace is required"
+        return
+
+    val arch = if arch_str.len() > 0:
+        Arch.from_text(arch_str)
+    else:
+        Arch.X86_64
+
+    var config = ReplayConfig.for_record(arch, kernel, trace)
+    if machine.len() > 0:
+        config.machine = machine
+    if memory.len() > 0:
+        config.memory = memory
+
+    print "[sreplay] Recording {arch.to_text()} execution..."
+    print "[sreplay] Kernel: {kernel}"
+    print "[sreplay] Trace:  {trace}"
+
+    var backend = QemuReplayBackend.create()
+    val result = backend.start_recording(config)
+    match result:
+        case Ok(session):
+            print "[sreplay] Recording started (session: {session.session_id})"
+            print "[sreplay] Run your workload, then press Ctrl+C to stop."
+            # Wait for QEMU to exit
+            while backend.is_running():
+                shell("sleep 1")
+            val stop_result = backend.stop()
+            print "[sreplay] Recording stopped. Trace: {trace}"
+        case Err(msg):
+            print "[sreplay] Error: {msg}"
+
+# ============================================================================
+# simple qemu replay
+# ============================================================================
+
+fn cmd_replay(args: [text]):
+    val arch_str = parse_flag(args, "--arch")
+    val kernel = parse_flag(args, "--kernel")
+    val trace = parse_flag(args, "--trace")
+    val port_str = parse_flag(args, "--gdb-port")
+    val machine = parse_flag(args, "--machine")
+    val memory = parse_flag(args, "--memory")
+
+    if kernel.len() == 0:
+        print "[sreplay] Error: --kernel is required"
+        return
+    if trace.len() == 0:
+        print "[sreplay] Error: --trace is required"
+        return
+
+    val arch = if arch_str.len() > 0:
+        Arch.from_text(arch_str)
+    else:
+        Arch.X86_64
+
+    var config = ReplayConfig.for_replay(arch, kernel, trace)
+    if port_str.len() > 0:
+        config.gdb_port = port_str.parse_int() ?? 1234
+    if machine.len() > 0:
+        config.machine = machine
+    if memory.len() > 0:
+        config.memory = memory
+
+    print "[sreplay] Replaying {arch.to_text()} execution..."
+    print "[sreplay] Kernel: {kernel}"
+    print "[sreplay] Trace:  {trace}"
+
+    var backend = QemuReplayBackend.create()
+    val result = backend.start_replay(config)
+    match result:
+        case Ok(session):
+            print "[sreplay] Replay started (session: {session.session_id})"
+            print "[sreplay] QEMU is halted — connect GDB to start replay."
+            # Wait for QEMU to exit
+            while backend.is_running():
+                shell("sleep 1")
+            val stop_result = backend.stop()
+            print "[sreplay] Replay complete."
+        case Err(msg):
+            print "[sreplay] Error: {msg}"
+
+# ============================================================================
+# simple qemu checkpoint
+# ============================================================================
+
+fn cmd_checkpoint(args: [text]):
+    if args.len() < 1:
+        print "[sreplay] Usage: simple qemu checkpoint save|restore|list <name>"
+        return
+
+    val action = args[0]
+    val name = if args.len() > 1: args[1] else: ""
+
+    # Checkpoint requires a running backend — connect to existing QMP socket
+    val qmp_sock = parse_flag(args, "--qmp")
+    if qmp_sock.len() == 0:
+        print "[sreplay] Error: --qmp <socket_path> required for checkpoint operations"
+        return
+
+    var backend = QemuReplayBackend.create()
+    # Connect to existing QEMU via QMP
+    use std.nogc_sync_mut.qemu.{qmp_connect, qmp_savevm, qmp_loadvm}
+    val client = qmp_connect(qmp_sock)
+    if client.fd < 0:
+        print "[sreplay] Error: cannot connect to QMP at {qmp_sock}"
+        return
+
+    match action:
+        "save":
+            if name.len() == 0:
+                print "[sreplay] Error: checkpoint name required"
+                return
+            val ok = qmp_savevm(client, name)
+            if ok:
+                print "[sreplay] Checkpoint '{name}' saved"
+            else:
+                print "[sreplay] Error: failed to save checkpoint"
+        "restore":
+            if name.len() == 0:
+                print "[sreplay] Error: checkpoint name required"
+                return
+            val ok = qmp_loadvm(client, name)
+            if ok:
+                print "[sreplay] Checkpoint '{name}' restored"
+            else:
+                print "[sreplay] Error: failed to restore checkpoint"
+        "list":
+            print "[sreplay] Listing checkpoints via QMP..."
+            use std.nogc_sync_mut.qemu.{qmp_query_status}
+            val status = qmp_query_status(client)
+            print status
+        _:
+            print "[sreplay] Unknown checkpoint action: {action}"
+            print "Usage: simple qemu checkpoint save|restore|list <name>"
+
+# ============================================================================
+# simple qemu status
+# ============================================================================
+
+fn cmd_status(args: [text]):
+    val qmp_sock = parse_flag(args, "--qmp")
+    if qmp_sock.len() == 0:
+        print "[sreplay] No active session found."
+        print "Use --qmp <socket_path> to query a running QEMU instance."
+        return
+
+    use std.nogc_sync_mut.qemu.{qmp_connect, qmp_query_status, qmp_disconnect}
+    val client = qmp_connect(qmp_sock)
+    if client.fd < 0:
+        print "[sreplay] Cannot connect to QMP at {qmp_sock}"
+        return
+
+    val status = qmp_query_status(client)
+    print "[sreplay] QEMU status: {status}"
+    qmp_disconnect(client)

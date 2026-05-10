@@ -1,0 +1,72 @@
+# SReplay — Container-Level Replay Driver
+#
+# Combines container checkpoint with event log for forward replay
+# after restore. Enables reverse debugging across process boundaries.
+
+use os.kernel.replay.checkpoint.checkpoint_types.{ContainerCheckpoint}
+use os.kernel.replay.checkpoint.container_restore.{restore_container}
+use os.kernel.replay.log_buffer.{replay_read_next, replay_event_count}
+use os.kernel.replay.event_kinds.{ReplayEntry, EventKind}
+
+# ============================================================================
+# Container Replay Session
+# ============================================================================
+
+class ContainerReplaySession:
+    checkpoint: ContainerCheckpoint
+    current_event: i64
+    target_event: i64
+    events_replayed: i64
+
+impl ContainerReplaySession:
+    static fn create(checkpoint: ContainerCheckpoint) -> ContainerReplaySession:
+        ContainerReplaySession(
+            checkpoint: checkpoint,
+            current_event: checkpoint.replay_event_id,
+            target_event: 0,
+            events_replayed: 0
+        )
+
+    fn restore_to_checkpoint() -> Result<Nil, text>:
+        restore_container(self.checkpoint)?
+        self.current_event = self.checkpoint.replay_event_id
+        self.events_replayed = 0
+        Ok(nil)
+
+    fn replay_forward_to(target: i64) -> Result<i64, text>:
+        self.target_event = target
+        var replayed: i64 = 0
+
+        while self.current_event < target:
+            match replay_read_next():
+                case Some(entry):
+                    self.current_event = entry.event_id
+                    replayed = replayed + 1
+                case None:
+                    break
+
+        self.events_replayed = replayed
+        Ok(replayed)
+
+    fn replay_one_event() -> Option<ReplayEntry>:
+        match replay_read_next():
+            case Some(entry):
+                self.current_event = entry.event_id
+                self.events_replayed = self.events_replayed + 1
+                Some(entry)
+            case None:
+                None
+
+    fn summary() -> text:
+        "Container replay: checkpoint={self.checkpoint.checkpoint_id} current={self.current_event} replayed={self.events_replayed}"
+
+# ============================================================================
+# Reverse Debug Support
+# ============================================================================
+
+fn reverse_to_checkpoint(session: ContainerReplaySession, target_event: i64) -> Result<Nil, text>:
+    # Restore checkpoint, then replay forward to just before target
+    session.restore_to_checkpoint()?
+    if target_event > session.current_event:
+        session.replay_forward_to(target_event)?
+    Ok(nil)

@@ -1,0 +1,140 @@
+# SReplay VM — Replay Driver
+#
+# Records device I/O events during VM execution and replays them
+# deterministically. Checkpoint + forward replay for reverse seek.
+
+use std.nogc_sync_mut.replay.vm.vm_types.{VmConfig, VmState, VmReplayMode, DeviceIoEvent, DeviceIoKind}
+use std.nogc_sync_mut.replay.vm.vcpu.{Rv32iCpu}
+use std.nogc_sync_mut.replay.vm.vmem.{VirtualMemory}
+use std.nogc_sync_mut.replay.vm.device_bus.{DeviceBus}
+
+# ============================================================================
+# VM Snapshot
+# ============================================================================
+
+struct VmSnapshot:
+    snapshot_id: i32
+    cycle_count: i64
+    cpu_regs: Dict<text, i64>
+    cpu_pc: i64
+    dirty_page_addrs: [i64]
+    device_states: [[i32]]
+
+# ============================================================================
+# VM Replay Driver
+# ============================================================================
+
+class VmReplayDriver:
+    cpu: Rv32iCpu
+    memory: VirtualMemory
+    bus: DeviceBus
+    config: VmConfig
+    state: VmState
+    snapshots: [VmSnapshot]
+    snapshot_counter: i32
+
+impl VmReplayDriver:
+    static fn create(config: VmConfig) -> VmReplayDriver:
+        val mem_bytes = config.memory_mb * 1024 * 1024
+        # Cap memory for initial prototype (16MB max)
+        val actual_bytes = if mem_bytes > 16777216: 16777216 else: mem_bytes
+
+        var cpu = Rv32iCpu.create()
+        var memory = VirtualMemory.create(actual_bytes, 4096)
+        var bus = DeviceBus.create()
+
+        for dev in config.devices:
+            bus.register_device(dev)
+
+        VmReplayDriver(
+            cpu: cpu,
+            memory: memory,
+            bus: bus,
+            config: config,
+            state: VmState.Stopped,
+            snapshots: [],
+            snapshot_counter: 0
+        )
+
+    fn start(entry_addr: i64):
+        self.cpu.set_pc(entry_addr)
+        self.state = VmState.Running
+        if self.config.replay_mode == VmReplayMode.Record:
+            self.bus.start_recording()
+
+    fn stop():
+        self.state = VmState.Stopped
+        self.bus.stop_recording()
+
+    fn step() -> VmState:
+        if self.state != VmState.Running:
+            return self.state
+
+        # Memory callbacks for CPU
+        val mem = self.memory
+        val mem_read = fn(addr: i64, size: i32) -> i64:
+            mem.read(addr, size)
+        val mem_write = fn(addr: i64, value: i64, size: i32):
+            mem.write(addr, value, size)
+
+        self.state = self.cpu.step(mem_read, mem_write)
+        self.state
+
+    fn run_steps(count: i64) -> VmState:
+        var i: i64 = 0
+        while i < count:
+            val s = self.step()
+            if s == VmState.Stopped:
+                return VmState.Stopped
+            i = i + 1
+        self.state
+
+    fn load_binary(addr: i64, data: [i32]):
+        self.memory.load_binary(addr, data)
+
+    fn save_snapshot() -> i32:
+        val id = self.snapshot_counter
+        self.snapshot_counter = self.snapshot_counter + 1
+        val snap = VmSnapshot(
+            snapshot_id: id,
+            cycle_count: self.cpu.cycle_count,
+            cpu_regs: self.cpu.read_all_registers(),
+            cpu_pc: self.cpu.get_pc(),
+            dirty_page_addrs: self.memory.get_dirty_page_addrs(),
+            device_states: []
+        )
+        self.snapshots.push(snap)
+        self.memory.clear_dirty()
+        id
+
+    fn restore_snapshot(id: i32) -> Result<Nil, text>:
+        for snap in self.snapshots:
+            if snap.snapshot_id == id:
+                # Restore CPU state
+                self.cpu.set_pc(snap.cpu_pc)
+                val regs = snap.cpu_regs
+                var i = 0
+                while i < 32:
+                    val name = "x{i}"
+                    val value = regs.get(name) ?? 0
+                    self.cpu.write_register(i, value)
+                    i = i + 1
+                self.cpu.cycle_count = snap.cycle_count
+                self.state = VmState.Running
+                return Ok(nil)
+        Err("snapshot {id} not found")
+
+    fn get_pc() -> i64:
+        self.cpu.get_pc()
+
+    fn get_cycle_count() -> i64:
+        self.cpu.cycle_count
+
+    fn read_register(idx: i32) -> i64:
+        self.cpu.read_register(idx)
+
+    fn read_memory(addr: i64, size: i32) -> i64:
+        self.memory.read(addr, size)
+
+    fn io_event_count() -> i64:
+        self.bus.event_count()

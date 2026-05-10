@@ -1,0 +1,265 @@
+# SReplay — Process Trace I/O (.srr format)
+#
+# Reads and writes process-level replay traces.
+# Trace directory layout:
+#   manifest.sdn       — metadata (arch, event count, command, etc.)
+#   events.bin          — concatenated 60-byte ProcessReplayEvent records
+#   strace_raw.log      — original strace output (optional)
+#
+# Uses shell + xxd for binary I/O (same pattern as event_log.spl).
+
+use std.io.{shell}
+use std.nogc_sync_mut.replay.process.event_types.{ProcessReplayEvent, ProcessEventKind}
+
+# ============================================================================
+# Constants
+# ============================================================================
+
+val PROCESS_EVENT_SIZE: i64 = 60  # bytes per record
+
+# ============================================================================
+# Trace Metadata
+# ============================================================================
+
+struct ProcessTraceMetadata:
+    format_version: i32
+    command: text
+    event_count: i64
+    arch: text
+    recorded_at: text
+
+impl ProcessTraceMetadata:
+    static fn create(command: text) -> ProcessTraceMetadata:
+        ProcessTraceMetadata(
+            format_version: 1,
+            command: command,
+            event_count: 0,
+            arch: "x86_64",
+            recorded_at: ""
+        )
+
+    fn to_sdn() -> text:
+        var lines: [text] = []
+        lines.push("process_trace:")
+        lines.push("  format: \"simple-replay-process\"")
+        lines.push("  version: {self.format_version}")
+        lines.push("")
+        lines.push("recording:")
+        lines.push("  command: \"{self.command}\"")
+        lines.push("  arch: \"{self.arch}\"")
+        lines.push("  event_count: {self.event_count}")
+        if self.recorded_at.len() > 0:
+            lines.push("  recorded_at: \"{self.recorded_at}\"")
+        lines.join("\n")
+
+# ============================================================================
+# Primitive Encoders (little-endian, same as codec.spl)
+# ============================================================================
+
+fn encode_i64(bytes: [i32], value: i64):
+    bytes.push((value % 256) as i32)
+    bytes.push(((value / 256) % 256) as i32)
+    bytes.push(((value / 65536) % 256) as i32)
+    bytes.push(((value / 16777216) % 256) as i32)
+    bytes.push(((value / 4294967296) % 256) as i32)
+    bytes.push(((value / 1099511627776) % 256) as i32)
+    bytes.push(((value / 281474976710656) % 256) as i32)
+    bytes.push(((value / 72057594037927936) % 256) as i32)
+
+fn encode_i32(bytes: [i32], value: i32):
+    bytes.push(value % 256)
+    bytes.push((value / 256) % 256)
+    bytes.push((value / 65536) % 256)
+    bytes.push((value / 16777216) % 256)
+
+fn decode_i64(bytes: [i32], offset: i64) -> i64:
+    var result: i64 = 0
+    result = result + bytes[offset] as i64
+    result = result + (bytes[offset + 1] as i64) * 256
+    result = result + (bytes[offset + 2] as i64) * 65536
+    result = result + (bytes[offset + 3] as i64) * 16777216
+    result = result + (bytes[offset + 4] as i64) * 4294967296
+    result = result + (bytes[offset + 5] as i64) * 1099511627776
+    result = result + (bytes[offset + 6] as i64) * 281474976710656
+    result = result + (bytes[offset + 7] as i64) * 72057594037927936
+    result
+
+fn decode_i32(bytes: [i32], offset: i64) -> i32:
+    var result: i32 = 0
+    result = result + bytes[offset]
+    result = result + bytes[offset + 1] * 256
+    result = result + bytes[offset + 2] * 65536
+    result = result + bytes[offset + 3] * 16777216
+    result
+
+# ============================================================================
+# Encode / Decode ProcessReplayEvent (60 bytes)
+# ============================================================================
+
+fn encode_process_event(ev: ProcessReplayEvent) -> [i32]:
+    var bytes: [i32] = []
+    encode_i64(bytes, ev.seq)           # 8
+    encode_i64(bytes, ev.tid)           # 8
+    encode_i32(bytes, ev.kind)          # 4
+    encode_i64(bytes, ev.timestamp_ns)  # 8
+    encode_i64(bytes, ev.payload_a)     # 8
+    encode_i64(bytes, ev.payload_b)     # 8
+    encode_i64(bytes, ev.payload_c)     # 8
+    encode_i64(bytes, ev.payload_d)     # 8  = 60 total
+    bytes
+
+fn decode_process_event(bytes: [i32], offset: i64) -> Result<ProcessReplayEvent, text>:
+    if bytes.len() - offset < PROCESS_EVENT_SIZE:
+        return Err("insufficient bytes for ProcessReplayEvent")
+    var pos = offset
+    val seq = decode_i64(bytes, pos)
+    pos = pos + 8
+    val tid = decode_i64(bytes, pos)
+    pos = pos + 8
+    val kind = decode_i32(bytes, pos)
+    pos = pos + 4
+    val timestamp_ns = decode_i64(bytes, pos)
+    pos = pos + 8
+    val payload_a = decode_i64(bytes, pos)
+    pos = pos + 8
+    val payload_b = decode_i64(bytes, pos)
+    pos = pos + 8
+    val payload_c = decode_i64(bytes, pos)
+    pos = pos + 8
+    val payload_d = decode_i64(bytes, pos)
+
+    Ok(ProcessReplayEvent(
+        seq: seq,
+        tid: tid,
+        kind: kind,
+        timestamp_ns: timestamp_ns,
+        payload_a: payload_a,
+        payload_b: payload_b,
+        payload_c: payload_c,
+        payload_d: payload_d
+    ))
+
+# ============================================================================
+# Hex Helpers
+# ============================================================================
+
+fn hex_digit(v: i32) -> text:
+    match v:
+        0: "0"
+        1: "1"
+        2: "2"
+        3: "3"
+        4: "4"
+        5: "5"
+        6: "6"
+        7: "7"
+        8: "8"
+        9: "9"
+        10: "a"
+        11: "b"
+        12: "c"
+        13: "d"
+        14: "e"
+        15: "f"
+        _: "0"
+
+fn hex_value(ch: text) -> i32:
+    match ch:
+        "0": 0
+        "1": 1
+        "2": 2
+        "3": 3
+        "4": 4
+        "5": 5
+        "6": 6
+        "7": 7
+        "8": 8
+        "9": 9
+        "a": 10
+        "A": 10
+        "b": 11
+        "B": 11
+        "c": 12
+        "C": 12
+        "d": 13
+        "D": 13
+        "e": 14
+        "E": 14
+        "f": 15
+        "F": 15
+        _: 0
+
+# ============================================================================
+# File I/O
+# ============================================================================
+
+fn write_process_trace(dir_path: text, events: [ProcessReplayEvent], metadata: ProcessTraceMetadata) -> Result<Nil, text>:
+    # Create trace directory
+    val mkdir_res = shell("mkdir -p '{dir_path}'")
+    if mkdir_res.exit_code != 0:
+        return Err("failed to create trace directory: {dir_path}")
+
+    # Update event count and write manifest
+    var meta = metadata
+    meta.event_count = events.len()
+    val manifest_path = "{dir_path}/manifest.sdn"
+    val sdn_content = meta.to_sdn()
+    val write_manifest = shell("cat > '{manifest_path}' << 'SREPLAY_EOF'\n{sdn_content}\nSREPLAY_EOF")
+    if write_manifest.exit_code != 0:
+        return Err("failed to write manifest: {manifest_path}")
+
+    # Encode events to binary
+    val events_path = "{dir_path}/events.bin"
+    var all_bytes: [i32] = []
+    for ev in events:
+        val encoded = encode_process_event(ev)
+        for b in encoded:
+            all_bytes.push(b)
+
+    # Write via xxd
+    if all_bytes.len() > 0:
+        var hex_parts: [text] = []
+        for b in all_bytes:
+            val hi = hex_digit(b / 16)
+            val lo = hex_digit(b % 16)
+            hex_parts.push(hi)
+            hex_parts.push(lo)
+        val hex_str = hex_parts.join("")
+        val write_events = shell("echo -n '{hex_str}' | xxd -r -p > '{events_path}'")
+        if write_events.exit_code != 0:
+            return Err("failed to write events: {events_path}")
+    else:
+        shell("touch '{events_path}'")
+
+    print "[sreplay] Wrote {events.len()} process events to {dir_path}/"
+    Ok(nil)
+
+fn read_process_trace(dir_path: text) -> Result<[ProcessReplayEvent], text>:
+    val events_path = "{dir_path}/events.bin"
+
+    # Read events.bin as hex
+    val hex_result = shell("xxd -p '{events_path}' 2>/dev/null | tr -d '\\n'")
+    if hex_result.exit_code != 0 or hex_result.stdout.trim().len() == 0:
+        return Ok([])
+
+    val hex_str = hex_result.stdout.trim()
+    var bytes: [i32] = []
+    var i = 0
+    while i + 1 < hex_str.len():
+        val hi = hex_value(hex_str[i])
+        val lo = hex_value(hex_str[i + 1])
+        bytes.push(hi * 16 + lo)
+        i = i + 2
+
+    # Decode events
+    var events: [ProcessReplayEvent] = []
+    var offset: i64 = 0
+    while offset + PROCESS_EVENT_SIZE <= bytes.len():
+        match decode_process_event(bytes, offset):
+            case Ok(ev):
+                events.push(ev)
+            case Err(_):
+                break
+        offset = offset + PROCESS_EVENT_SIZE
+
+    Ok(events)

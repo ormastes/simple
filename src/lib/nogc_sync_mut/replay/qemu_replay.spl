@@ -1,0 +1,227 @@
+# SReplay — QEMU Full-System Replay Backend
+#
+# Wraps QEMU's -icount rr=record|replay for deterministic full-system
+# replay. Composes QemuInstance (lifecycle), QmpClient (checkpoints),
+# and GdbMiClient (reverse execution during replay).
+
+use std.io.{shell}
+use std.nogc_sync_mut.replay.types.{ReplayConfig, ReplaySessionInfo, ReplayMode, Arch}
+use std.nogc_sync_mut.replay.backend.{ReplayBackend}
+use std.nogc_sync_mut.qemu.{QmpClient, qmp_connect, qmp_disconnect, qmp_savevm, qmp_loadvm, qmp_query_status}
+use std.nogc_async_mut_noalloc.qemu.mod.{QemuConfig, QemuArch, QemuInstance}
+use types.{PortNumber, Millis}
+
+# ============================================================================
+# Arch conversion helper
+# ============================================================================
+
+fn replay_arch_to_qemu(arch: Arch) -> QemuArch:
+    match arch:
+        case Arch.X86_32: QemuArch.X86
+        case Arch.X86_64: QemuArch.X86_64
+        case Arch.ARM32: QemuArch.ARM32
+        case Arch.AARCH64: QemuArch.ARM64
+        case Arch.RISCV32: QemuArch.RiscV32
+        case Arch.RISCV64: QemuArch.RiscV64
+
+# ============================================================================
+# QEMU Replay Backend
+# ============================================================================
+
+class QemuReplayBackend:
+    instance: Option<QemuInstance>
+    qmp: Option<QmpClient>
+    session: Option<ReplaySessionInfo>
+    config: Option<ReplayConfig>
+    checkpoint_counter: i32
+
+impl QemuReplayBackend:
+    static fn create() -> QemuReplayBackend:
+        QemuReplayBackend(
+            instance: None,
+            qmp: None,
+            session: None,
+            config: None,
+            checkpoint_counter: 0
+        )
+
+    fn start_recording(config: ReplayConfig) -> Result<ReplaySessionInfo, text>:
+        val qemu_arch = replay_arch_to_qemu(config.arch)
+
+        # Generate QMP socket path if not provided
+        val ts = shell("date +%s%N").stdout.trim()
+        val qmp_sock = if config.qmp_socket.len() > 0:
+            config.qmp_socket
+        else:
+            "/tmp/sreplay_qmp_{ts}.sock"
+
+        val qemu_config = QemuConfig.for_replay_record(
+            qemu_arch,
+            config.kernel_path,
+            config.trace_path,
+            qmp_sock
+        )
+
+        # Apply custom machine/memory if provided
+        if config.machine.len() > 0:
+            qemu_config.machine = config.machine
+        if config.memory.len() > 0:
+            qemu_config.memory = config.memory
+
+        # Start QEMU in record mode
+        val instance_result = QemuInstance.start(qemu_config)
+        match instance_result:
+            case Ok(inst):
+                self.instance = Some(inst)
+            case Err(msg):
+                return Err("failed to start QEMU record: {msg}")
+
+        # Connect QMP for checkpoint control
+        val qmp_client = qmp_connect(qmp_sock)
+        if qmp_client.fd >= 0:
+            self.qmp = Some(qmp_client)
+
+        val session = ReplaySessionInfo(
+            session_id: "qemu-record-{ts}",
+            mode: ReplayMode.Record,
+            arch: config.arch,
+            trace_path: config.trace_path,
+            checkpoint_count: 0
+        )
+        self.session = Some(session)
+        self.config = Some(config)
+        Ok(session)
+
+    fn start_replay(config: ReplayConfig) -> Result<ReplaySessionInfo, text>:
+        val qemu_arch = replay_arch_to_qemu(config.arch)
+
+        # Generate socket path
+        val ts = shell("date +%s%N").stdout.trim()
+        val qmp_sock = if config.qmp_socket.len() > 0:
+            config.qmp_socket
+        else:
+            "/tmp/sreplay_qmp_{ts}.sock"
+
+        val gdb_port = if config.gdb_port > 0: config.gdb_port else: 1234
+
+        val qemu_config = QemuConfig.for_replay_replay(
+            qemu_arch,
+            config.kernel_path,
+            config.trace_path,
+            qmp_sock,
+            gdb_port
+        )
+
+        if config.machine.len() > 0:
+            qemu_config.machine = config.machine
+        if config.memory.len() > 0:
+            qemu_config.memory = config.memory
+
+        # Start QEMU in replay mode
+        val instance_result = QemuInstance.start(qemu_config)
+        match instance_result:
+            case Ok(inst):
+                self.instance = Some(inst)
+            case Err(msg):
+                return Err("failed to start QEMU replay: {msg}")
+
+        # Connect QMP
+        val qmp_client = qmp_connect(qmp_sock)
+        if qmp_client.fd >= 0:
+            self.qmp = Some(qmp_client)
+
+        val session = ReplaySessionInfo(
+            session_id: "qemu-replay-{ts}",
+            mode: ReplayMode.Replay,
+            arch: config.arch,
+            trace_path: config.trace_path,
+            checkpoint_count: 0
+        )
+        self.session = Some(session)
+        self.config = Some(config)
+
+        print "[sreplay] Replay started. GDB port: {gdb_port}"
+        print "[sreplay] Connect with: gdb -ex 'target remote :{gdb_port}' {config.kernel_path}"
+
+        Ok(session)
+
+    fn stop() -> Result<Nil, text>:
+        # Disconnect QMP
+        match self.qmp:
+            case Some(client):
+                qmp_disconnect(client)
+                self.qmp = None
+            case None:
+                pass
+
+        # Stop QEMU
+        match self.instance:
+            case Some(inst):
+                inst.stop()
+                self.instance = None
+            case None:
+                pass
+
+        self.session = None
+        Ok(nil)
+
+    fn save_checkpoint(name: text) -> Result<text, text>:
+        match self.qmp:
+            case Some(client):
+                val ok = qmp_savevm(client, name)
+                if ok:
+                    self.checkpoint_counter = self.checkpoint_counter + 1
+                    match self.session:
+                        case Some(s):
+                            s.checkpoint_count = self.checkpoint_counter
+                        case None:
+                            pass
+                    Ok("checkpoint '{name}' saved")
+                else:
+                    Err("failed to save checkpoint '{name}'")
+            case None:
+                Err("QMP not connected")
+
+    fn restore_checkpoint(name: text) -> Result<text, text>:
+        match self.qmp:
+            case Some(client):
+                val ok = qmp_loadvm(client, name)
+                if ok:
+                    Ok("checkpoint '{name}' restored")
+                else:
+                    Err("failed to restore checkpoint '{name}'")
+            case None:
+                Err("QMP not connected")
+
+    fn list_checkpoints() -> Result<[text], text>:
+        match self.qmp:
+            case Some(client):
+                val result = shell("echo 'info snapshots' | socat - UNIX:{client.socket_path} 2>/dev/null")
+                var names: [text] = []
+                for line in result.stdout.split("\n"):
+                    val trimmed = line.trim()
+                    if trimmed.len() > 0 and not trimmed.starts_with("List"):
+                        names.push(trimmed)
+                Ok(names)
+            case None:
+                Err("QMP not connected")
+
+    fn status() -> text:
+        match self.qmp:
+            case Some(client):
+                qmp_query_status(client)
+            case None:
+                "not connected"
+
+    fn session_info() -> Option<ReplaySessionInfo>:
+        self.session
+
+    fn is_running() -> bool:
+        match self.instance:
+            case Some(inst): inst.is_running()
+            case None: false
+
+    fn gdb_port() -> i32:
+        match self.config:
+            case Some(c): c.gdb_port
+            case None: 0

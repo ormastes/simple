@@ -1,0 +1,138 @@
+# SReplay — Process-Level Replayer
+#
+# Loads a recorded process trace and steps through events,
+# reporting matches or divergence versus a new execution.
+
+use std.io.{shell}
+use std.nogc_sync_mut.replay.process.event_types.{ProcessEventKind, ProcessReplayEvent}
+use std.nogc_sync_mut.replay.process.trace_io.{read_process_trace}
+
+# ============================================================================
+# Replay Result
+# ============================================================================
+
+enum ReplayVerdict:
+    Match
+    Diverged
+    Incomplete
+
+impl ReplayVerdict:
+    fn to_text() -> text:
+        match self:
+            case ReplayVerdict.Match: "match"
+            case ReplayVerdict.Diverged: "diverged"
+            case ReplayVerdict.Incomplete: "incomplete"
+
+struct ReplayStepResult:
+    event_seq: i64
+    verdict: ReplayVerdict
+    message: text
+
+# ============================================================================
+# ProcessReplayer
+# ============================================================================
+
+struct ProcessReplayer:
+    trace_dir: text
+    events: [ProcessReplayEvent]
+    cursor: i64                     # current position in event stream
+    total_matched: i64
+    total_diverged: i64
+
+impl ProcessReplayer:
+    static fn create(trace_dir: text) -> ProcessReplayer:
+        ProcessReplayer(
+            trace_dir: trace_dir,
+            events: [],
+            cursor: 0,
+            total_matched: 0,
+            total_diverged: 0
+        )
+
+    # Load events from trace directory
+    fn load() -> Result<Nil, text>:
+        val result = read_process_trace(self.trace_dir)
+        match result:
+            case Ok(loaded_events):
+                self.events = loaded_events
+                self.cursor = 0
+                print "[sreplay] Loaded {self.events.len()} events from {self.trace_dir}"
+                Ok(nil)
+            case Err(e):
+                Err("failed to load trace: {e}")
+
+    # Step forward one event
+    fn step_forward() -> Option<ReplayStepResult>:
+        if self.cursor >= self.events.len():
+            return None
+        val ev = self.events[self.cursor]
+        self.cursor = self.cursor + 1
+        Some(ReplayStepResult(
+            event_seq: ev.seq,
+            verdict: ReplayVerdict.Match,
+            message: ev.summary()
+        ))
+
+    # Step forward N events
+    fn step_n(count: i64) -> [ReplayStepResult]:
+        var results: [ReplayStepResult] = []
+        var i: i64 = 0
+        while i < count:
+            val step = self.step_forward()
+            match step:
+                case Some(r):
+                    results.push(r)
+                case None:
+                    break
+            i = i + 1
+        results
+
+    # Check if a recorded event matches a live event
+    fn check_event(recorded: ProcessReplayEvent, live: ProcessReplayEvent) -> ReplayStepResult:
+        if recorded.kind != live.kind:
+            self.total_diverged = self.total_diverged + 1
+            val rec_kind = ProcessEventKind.from_i32(recorded.kind).to_text()
+            val live_kind = ProcessEventKind.from_i32(live.kind).to_text()
+            return ReplayStepResult(
+                event_seq: recorded.seq,
+                verdict: ReplayVerdict.Diverged,
+                message: "kind mismatch: recorded={rec_kind} live={live_kind}"
+            )
+        if recorded.payload_a != live.payload_a:
+            self.total_diverged = self.total_diverged + 1
+            return ReplayStepResult(
+                event_seq: recorded.seq,
+                verdict: ReplayVerdict.Diverged,
+                message: "payload_a mismatch: recorded={recorded.payload_a} live={live.payload_a}"
+            )
+        self.total_matched = self.total_matched + 1
+        ReplayStepResult(
+            event_seq: recorded.seq,
+            verdict: ReplayVerdict.Match,
+            message: recorded.summary()
+        )
+
+    # Get current position
+    fn position() -> i64:
+        self.cursor
+
+    # Get total event count
+    fn event_count() -> i64:
+        self.events.len()
+
+    # Has more events
+    fn has_more() -> bool:
+        self.cursor < self.events.len()
+
+    # Print summary of replay
+    fn print_summary():
+        print "[sreplay] Replay summary:"
+        print "  Total events: {self.events.len()}"
+        print "  Position: {self.cursor}"
+        print "  Matched: {self.total_matched}"
+        print "  Diverged: {self.total_diverged}"
+
+    # Print all events
+    fn print_events():
+        for ev in self.events:
+            print "  {ev.summary()}"

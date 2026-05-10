@@ -1,0 +1,70 @@
+# SReplay — Container Checkpoint File Format (.scc)
+#
+# Binary serialization for ContainerCheckpoint.
+# Layout: header (SDN) + process snapshots + IPC state + fs overlay
+
+use std.io.{shell}
+use os.kernel.replay.checkpoint.checkpoint_types.{ContainerCheckpoint}
+use os.kernel.replay.checkpoint.container_checkpoint.{checkpoint_summary}
+
+# ============================================================================
+# Write Checkpoint
+# ============================================================================
+
+fn write_checkpoint(dir_path: text, checkpoint: ContainerCheckpoint) -> Result<Nil, text>:
+    val mkdir_result = shell("mkdir -p '{dir_path}'")
+    if mkdir_result.exit_code != 0:
+        return Err("failed to create checkpoint directory")
+
+    # Write manifest
+    val manifest = checkpoint_manifest(checkpoint)
+    val manifest_path = "{dir_path}/manifest.sdn"
+    val write_result = shell("cat > '{manifest_path}' << 'SCC_EOF'\n{manifest}\nSCC_EOF")
+    if write_result.exit_code != 0:
+        return Err("failed to write manifest")
+
+    # Write summary
+    val summary = checkpoint_summary(checkpoint)
+    print summary
+
+    Ok(nil)
+
+# ============================================================================
+# Read Checkpoint
+# ============================================================================
+
+fn read_checkpoint(dir_path: text) -> Result<ContainerCheckpoint, text>:
+    val manifest_path = "{dir_path}/manifest.sdn"
+    val result = shell("cat '{manifest_path}' 2>/dev/null")
+    if result.exit_code != 0:
+        return Err("checkpoint manifest not found: {manifest_path}")
+
+    # Parse container ID from manifest
+    var container_id = ""
+    for line in result.stdout.split("\n"):
+        val trimmed = line.trim()
+        if trimmed.starts_with("container_id:"):
+            container_id = trimmed.replace("container_id:", "").trim().replace("\"", "")
+
+    Ok(ContainerCheckpoint.create(container_id, 0))
+
+# ============================================================================
+# Manifest Generation
+# ============================================================================
+
+fn checkpoint_manifest(cp: ContainerCheckpoint) -> text:
+    var lines: [text] = []
+    lines.push("checkpoint:")
+    lines.push("  format: \"simple-container-checkpoint\"")
+    lines.push("  version: 1")
+    lines.push("  checkpoint_id: {cp.checkpoint_id}")
+    lines.push("  container_id: \"{cp.container_id}\"")
+    lines.push("  timestamp_ns: {cp.timestamp_ns}")
+    lines.push("")
+    lines.push("contents:")
+    lines.push("  process_count: {cp.process_count()}")
+    lines.push("  total_pages: {cp.total_pages()}")
+    lines.push("  ipc_queues: {cp.ipc_state.message_queues.len()}")
+    lines.push("  fs_overlay_entries: {cp.fs_overlay.len()}")
+    lines.push("  replay_event_id: {cp.replay_event_id}")
+    lines.join("\n")

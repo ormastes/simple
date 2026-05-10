@@ -1,0 +1,242 @@
+# SReplay VM — Virtual CPU (RV32I)
+#
+# Minimal fetch-decode-execute loop for RISC-V 32-bit base integer ISA.
+# Sufficient for smoke tests; full ISA coverage is follow-on work.
+
+use std.nogc_sync_mut.replay.vm.vm_types.{VmState}
+
+# ============================================================================
+# RV32I Virtual CPU
+# ============================================================================
+
+class Rv32iCpu:
+    regs: [i64]        # x0-x31 (x0 always 0)
+    pc: i64
+    cycle_count: i64
+    halted: bool
+    pending_irq: i32   # -1 = none
+
+impl Rv32iCpu:
+    static fn create() -> Rv32iCpu:
+        var regs: [i64] = []
+        var i = 0
+        while i < 32:
+            regs.push(0)
+            i = i + 1
+        Rv32iCpu(
+            regs: regs,
+            pc: 0,
+            cycle_count: 0,
+            halted: false,
+            pending_irq: -1
+        )
+
+    fn reset():
+        var i = 0
+        while i < 32:
+            self.regs[i] = 0
+            i = i + 1
+        self.pc = 0
+        self.cycle_count = 0
+        self.halted = false
+        self.pending_irq = -1
+
+    fn set_pc(addr: i64):
+        self.pc = addr
+
+    fn get_pc() -> i64:
+        self.pc
+
+    fn read_register(idx: i32) -> i64:
+        if idx < 0 or idx >= 32:
+            return 0
+        if idx == 0:
+            return 0
+        self.regs[idx]
+
+    fn write_register(idx: i32, value: i64):
+        if idx <= 0 or idx >= 32:
+            return
+        self.regs[idx] = value & 0xFFFFFFFF
+
+    fn interrupt(irq: i32):
+        self.pending_irq = irq
+
+    fn read_all_registers() -> Dict<text, i64>:
+        var result: Dict<text, i64> = {}
+        var i = 0
+        while i < 32:
+            result["x{i}"] = self.regs[i]
+            i = i + 1
+        result["pc"] = self.pc
+        result
+
+    # Execute one instruction. Returns new VmState.
+    # memory_read and memory_write are callbacks.
+    fn step(mem_read: fn(i64, i32) -> i64, mem_write: fn(i64, i64, i32)) -> VmState:
+        if self.halted:
+            return VmState.Stopped
+
+        # Fetch 32-bit instruction (little-endian)
+        val insn = mem_read(self.pc, 4)
+
+        # Decode opcode (bits 6:0)
+        val opcode = (insn & 0x7F) as i32
+
+        # Decode common fields
+        val rd = ((insn / 128) & 0x1F) as i32         # bits 11:7
+        val funct3 = ((insn / 4096) & 0x7) as i32     # bits 14:12
+        val rs1 = ((insn / 32768) & 0x1F) as i32      # bits 19:15
+        val rs2 = ((insn / 1048576) & 0x1F) as i32    # bits 24:20
+        val funct7 = ((insn / 33554432) & 0x7F) as i32 # bits 31:25
+
+        match opcode:
+            # LUI
+            0x37:
+                val imm = insn & 0xFFFFF000
+                self.write_register(rd, imm)
+                self.pc = self.pc + 4
+
+            # AUIPC
+            0x17:
+                val imm = insn & 0xFFFFF000
+                self.write_register(rd, self.pc + imm)
+                self.pc = self.pc + 4
+
+            # JAL
+            0x6F:
+                val imm = decode_j_imm(insn)
+                self.write_register(rd, self.pc + 4)
+                self.pc = self.pc + imm
+
+            # JALR
+            0x67:
+                val imm = decode_i_imm(insn)
+                val target = (self.read_register(rs1) + imm) & 0xFFFFFFFE
+                self.write_register(rd, self.pc + 4)
+                self.pc = target
+
+            # Branch
+            0x63:
+                val imm = decode_b_imm(insn)
+                val v1 = self.read_register(rs1)
+                val v2 = self.read_register(rs2)
+                val taken = match funct3:
+                    0: v1 == v2          # BEQ
+                    1: v1 != v2          # BNE
+                    4: v1 < v2           # BLT (signed)
+                    5: v1 >= v2          # BGE (signed)
+                    _: false
+                if taken:
+                    self.pc = self.pc + imm
+                else:
+                    self.pc = self.pc + 4
+
+            # Load
+            0x03:
+                val imm = decode_i_imm(insn)
+                val addr = self.read_register(rs1) + imm
+                val width = match funct3:
+                    0: 1    # LB
+                    1: 2    # LH
+                    2: 4    # LW
+                    _: 4
+                val value = mem_read(addr, width)
+                self.write_register(rd, value)
+                self.pc = self.pc + 4
+
+            # Store
+            0x23:
+                val imm = decode_s_imm(insn)
+                val addr = self.read_register(rs1) + imm
+                val value = self.read_register(rs2)
+                val width = match funct3:
+                    0: 1    # SB
+                    1: 2    # SH
+                    2: 4    # SW
+                    _: 4
+                mem_write(addr, value, width)
+                self.pc = self.pc + 4
+
+            # ALU immediate
+            0x13:
+                val imm = decode_i_imm(insn)
+                val src = self.read_register(rs1)
+                val result = match funct3:
+                    0: src + imm           # ADDI
+                    2: if src < imm: 1 else: 0  # SLTI
+                    4: src ^ imm           # XORI
+                    6: src | imm           # ORI
+                    7: src & imm           # ANDI
+                    1: src * (1 << (imm & 0x1F))  # SLLI (left shift)
+                    5:
+                        if funct7 == 0x20:
+                            src / (1 << (imm & 0x1F))  # SRAI
+                        else:
+                            (src & 0xFFFFFFFF) / (1 << (imm & 0x1F))  # SRLI
+                    _: 0
+                self.write_register(rd, result)
+                self.pc = self.pc + 4
+
+            # ALU register
+            0x33:
+                val v1 = self.read_register(rs1)
+                val v2 = self.read_register(rs2)
+                val result = match funct3:
+                    0:
+                        if funct7 == 0x20: v1 - v2  # SUB
+                        else: v1 + v2                # ADD
+                    1: v1 * (1 << (v2 & 0x1F))      # SLL
+                    2: if v1 < v2: 1 else: 0         # SLT
+                    4: v1 ^ v2                       # XOR
+                    5:
+                        if funct7 == 0x20:
+                            v1 / (1 << (v2 & 0x1F))  # SRA
+                        else:
+                            (v1 & 0xFFFFFFFF) / (1 << (v2 & 0x1F))  # SRL
+                    6: v1 | v2                       # OR
+                    7: v1 & v2                       # AND
+                    _: 0
+                self.write_register(rd, result)
+                self.pc = self.pc + 4
+
+            # ECALL/EBREAK
+            0x73:
+                self.halted = true
+
+            # Unknown opcode — halt
+            _:
+                self.halted = true
+
+        self.cycle_count = self.cycle_count + 1
+        if self.halted: VmState.Stopped else: VmState.Running
+
+# ============================================================================
+# Immediate Decoders
+# ============================================================================
+
+fn decode_i_imm(insn: i64) -> i64:
+    val raw = (insn / 1048576) & 0xFFF
+    if raw >= 2048: raw - 4096 else: raw
+
+fn decode_s_imm(insn: i64) -> i64:
+    val lo = (insn / 128) & 0x1F
+    val hi = (insn / 33554432) & 0x7F
+    val raw = (hi * 32) + lo
+    if raw >= 2048: raw - 4096 else: raw
+
+fn decode_b_imm(insn: i64) -> i64:
+    val b11 = (insn / 128) & 1
+    val b4_1 = (insn / 256) & 0xF
+    val b10_5 = (insn / 33554432) & 0x3F
+    val b12 = (insn / 2147483648) & 1
+    val raw = (b12 * 4096) + (b11 * 2048) + (b10_5 * 32) + (b4_1 * 2)
+    if raw >= 4096: raw - 8192 else: raw
+
+fn decode_j_imm(insn: i64) -> i64:
+    val b19_12 = (insn / 4096) & 0xFF
+    val b11 = (insn / 1048576) & 1
+    val b10_1 = (insn / 2097152) & 0x3FF
+    val b20 = (insn / 2147483648) & 1
+    val raw = (b20 * 1048576) + (b19_12 * 4096) + (b11 * 2048) + (b10_1 * 2)
+    if raw >= 1048576: raw - 2097152 else: raw

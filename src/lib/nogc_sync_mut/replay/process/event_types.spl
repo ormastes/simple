@@ -1,0 +1,122 @@
+# SReplay — Process-Level Replay Event Types
+#
+# Defines the event kinds and fixed-size event struct used by the
+# process-level recorder and replayer.
+
+# ============================================================================
+# Event Kind Enum
+# ============================================================================
+
+enum ProcessEventKind:
+    SyscallEntry    # syscall number + args
+    SyscallExit     # return value
+    Signal          # signal number
+    MmapResult      # addr, len, prot
+    TimeQuery       # clock_id, sec, nsec
+    RandomBytes     # entropy data
+    Checkpoint      # checkpoint marker
+    ThreadSwitch    # thread schedule order
+    ProcessCreate   # fork/spawn
+    ProcessExit     # exit code
+
+impl ProcessEventKind:
+    fn to_i32() -> i32:
+        match self:
+            case ProcessEventKind.SyscallEntry: 0
+            case ProcessEventKind.SyscallExit: 1
+            case ProcessEventKind.Signal: 2
+            case ProcessEventKind.MmapResult: 3
+            case ProcessEventKind.TimeQuery: 4
+            case ProcessEventKind.RandomBytes: 5
+            case ProcessEventKind.Checkpoint: 6
+            case ProcessEventKind.ThreadSwitch: 7
+            case ProcessEventKind.ProcessCreate: 8
+            case ProcessEventKind.ProcessExit: 9
+
+    static fn from_i32(v: i32) -> ProcessEventKind:
+        match v:
+            0: ProcessEventKind.SyscallEntry
+            1: ProcessEventKind.SyscallExit
+            2: ProcessEventKind.Signal
+            3: ProcessEventKind.MmapResult
+            4: ProcessEventKind.TimeQuery
+            5: ProcessEventKind.RandomBytes
+            6: ProcessEventKind.Checkpoint
+            7: ProcessEventKind.ThreadSwitch
+            8: ProcessEventKind.ProcessCreate
+            9: ProcessEventKind.ProcessExit
+            _: ProcessEventKind.SyscallEntry
+
+    fn to_text() -> text:
+        match self:
+            case ProcessEventKind.SyscallEntry: "syscall_entry"
+            case ProcessEventKind.SyscallExit: "syscall_exit"
+            case ProcessEventKind.Signal: "signal"
+            case ProcessEventKind.MmapResult: "mmap_result"
+            case ProcessEventKind.TimeQuery: "time_query"
+            case ProcessEventKind.RandomBytes: "random_bytes"
+            case ProcessEventKind.Checkpoint: "checkpoint"
+            case ProcessEventKind.ThreadSwitch: "thread_switch"
+            case ProcessEventKind.ProcessCreate: "process_create"
+            case ProcessEventKind.ProcessExit: "process_exit"
+
+# ============================================================================
+# Process Replay Event (fixed 60-byte record)
+# ============================================================================
+#
+# Layout:  seq(8) + tid(8) + kind(4) + timestamp_ns(8) +
+#          payload_a(8) + payload_b(8) + payload_c(8) + payload_d(8) = 60 bytes
+
+struct ProcessReplayEvent:
+    seq: i64              # monotonic sequence number
+    tid: i64              # thread ID
+    kind: i32             # ProcessEventKind.to_i32()
+    timestamp_ns: i64     # monotonic timestamp
+    payload_a: i64        # kind-specific field
+    payload_b: i64
+    payload_c: i64
+    payload_d: i64
+
+impl ProcessReplayEvent:
+    static fn syscall_entry(seq: i64, tid: i64, ts: i64, syscall_nr: i64, arg0: i64, arg1: i64) -> ProcessReplayEvent:
+        ProcessReplayEvent(
+            seq: seq, tid: tid,
+            kind: ProcessEventKind.SyscallEntry.to_i32(),
+            timestamp_ns: ts,
+            payload_a: syscall_nr, payload_b: arg0,
+            payload_c: arg1, payload_d: 0
+        )
+
+    static fn syscall_exit(seq: i64, tid: i64, ts: i64, retval: i64) -> ProcessReplayEvent:
+        ProcessReplayEvent(
+            seq: seq, tid: tid,
+            kind: ProcessEventKind.SyscallExit.to_i32(),
+            timestamp_ns: ts,
+            payload_a: retval, payload_b: 0,
+            payload_c: 0, payload_d: 0
+        )
+
+    static fn signal_event(seq: i64, tid: i64, ts: i64, signum: i64) -> ProcessReplayEvent:
+        ProcessReplayEvent(
+            seq: seq, tid: tid,
+            kind: ProcessEventKind.Signal.to_i32(),
+            timestamp_ns: ts,
+            payload_a: signum, payload_b: 0,
+            payload_c: 0, payload_d: 0
+        )
+
+    static fn exit_event(seq: i64, tid: i64, ts: i64, exit_code: i64) -> ProcessReplayEvent:
+        ProcessReplayEvent(
+            seq: seq, tid: tid,
+            kind: ProcessEventKind.ProcessExit.to_i32(),
+            timestamp_ns: ts,
+            payload_a: exit_code, payload_b: 0,
+            payload_c: 0, payload_d: 0
+        )
+
+    fn event_kind() -> ProcessEventKind:
+        ProcessEventKind.from_i32(self.kind)
+
+    fn summary() -> text:
+        val kind_name = self.event_kind().to_text()
+        "[{self.seq}] tid={self.tid} {kind_name} a={self.payload_a} b={self.payload_b}"

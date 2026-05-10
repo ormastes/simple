@@ -1,0 +1,94 @@
+# SReplay VM — Virtual Block Device
+#
+# Sector-level block I/O with read recording for replay.
+
+# ============================================================================
+# Virtual Block Device
+# ============================================================================
+
+class VirtualBlock:
+    name_val: text
+    irq: i32
+    sectors: [[i32]]       # sector data (512 bytes each)
+    sector_size: i32
+    # Request registers
+    req_sector: i64         # sector number to read/write
+    req_count: i32          # number of sectors
+    req_op: i32             # 0=idle, 1=read, 2=write
+    req_status: i32         # 0=ok, 1=busy, 2=error
+    irq_pending: bool
+
+impl VirtualBlock:
+    static fn create(name: text, irq: i32, num_sectors: i64) -> VirtualBlock:
+        var sectors: [[i32]] = []
+        var i: i64 = 0
+        while i < num_sectors:
+            var sector: [i32] = []
+            var j = 0
+            while j < 512:
+                sector.push(0)
+                j = j + 1
+            sectors.push(sector)
+            i = i + 1
+        VirtualBlock(
+            name_val: name,
+            irq: irq,
+            sectors: sectors,
+            sector_size: 512,
+            req_sector: 0,
+            req_count: 0,
+            req_op: 0,
+            req_status: 0,
+            irq_pending: false
+        )
+
+    fn name() -> text:
+        self.name_val
+
+    fn mmio_read(offset: i64, size: i32) -> Result<i64, text>:
+        match offset:
+            0x00: Ok(self.req_status as i64)
+            0x04: Ok(self.sectors.len() as i64)
+            0x08: Ok(self.sector_size as i64)
+            _: Ok(0)
+
+    fn mmio_write(offset: i64, value: i64, size: i32) -> Result<Nil, text>:
+        match offset:
+            0x00: self.req_sector = value
+            0x04: self.req_count = value as i32
+            0x08: self.req_op = value as i32
+            _: pass
+        Ok(nil)
+
+    fn read_sector(sector_num: i64) -> Result<[i32], text>:
+        if sector_num < 0 or sector_num >= self.sectors.len():
+            return Err("sector {sector_num} out of range")
+        Ok(self.sectors[sector_num])
+
+    fn write_sector(sector_num: i64, data: [i32]) -> Result<Nil, text>:
+        if sector_num < 0 or sector_num >= self.sectors.len():
+            return Err("sector {sector_num} out of range")
+        self.sectors[sector_num] = data
+        Ok(nil)
+
+    fn tick(cycles: i64):
+        pass
+
+    fn pending_irq() -> i32:
+        if self.irq_pending: self.irq else: -1
+
+    fn acknowledge_irq():
+        self.irq_pending = false
+
+    fn snapshot() -> [i32]:
+        var data: [i32] = []
+        data.push(self.sectors.len() as i32)
+        data.push(self.req_status)
+        data
+
+    fn restore(data: [i32]):
+        if data.len() >= 2:
+            self.req_status = data[1]
+
+    fn is_deterministic() -> bool:
+        true

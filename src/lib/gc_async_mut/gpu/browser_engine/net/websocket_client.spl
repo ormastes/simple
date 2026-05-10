@@ -1,0 +1,1325 @@
+#![allow(REQC001)]
+#![allow(REQC004)]
+#![allow(unnamed_duplicate_typed_args)]
+# WebSocket client for the Simple Browser Platform.
+# Implements RFC 6455 WebSocket protocol including the opening handshake,
+# frame encoding/decoding with masking, extended payload lengths (16-bit
+# and 64-bit), control frames (ping/pong/close), and connection state machine.
+# Plain ws:// socket I/O delegates to hosted TCP primitives.
+
+use std.gc_async_mut.gpu.browser_engine.net.entity.url_types.Url
+use std.gc_async_mut.gpu.browser_engine.net.tls.{TlsManager, TlsConnection}
+use std.gc_async_mut.gpu.browser_engine.net.dns.DnsResolver
+use std.gc_async_mut.gpu.browser_engine.shared.error.{BrowserResult, BrowserError, network_error, parse_error}
+use std.gc_async_mut.gpu.browser_engine.shared.logging.{Logger, LogLevel}
+use std.common.string_core.{char_from_code}
+use std.js.types.pair.{Pair}
+
+extern fn rt_io_tcp_connect_timeout(addr: text, ms: i64) -> i64
+extern fn rt_io_tcp_read(fd: i64, size: i64) -> [u8]
+extern fn rt_io_tcp_write_text(fd: i64, data: text) -> i64
+extern fn rt_io_tcp_flush(fd: i64) -> bool
+extern fn rt_io_tcp_close(fd: i64) -> bool
+extern fn rt_io_tcp_set_nodelay(fd: i64, enabled: bool) -> bool
+extern fn rt_io_tcp_set_read_timeout(fd: i64, ms: i64?) -> bool
+extern fn rt_io_tcp_set_write_timeout(fd: i64, ms: i64?) -> bool
+extern fn rt_bytes_to_text(data: [u8]) -> text
+extern fn rt_random_hex(len: i64) -> text
+
+# --- Constants ---
+
+# WebSocket magic GUID used in Sec-WebSocket-Accept validation (RFC 6455 Section 4.2.2)
+val WS_MAGIC_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
+
+# WebSocket protocol version
+val WS_VERSION = 13
+
+# Maximum payload for a control frame (RFC 6455 Section 5.5)
+val WS_MAX_CONTROL_PAYLOAD = 125
+
+# Extended payload length thresholds
+val WS_PAYLOAD_LEN_16BIT = 126   # Use 16-bit extended length
+val WS_PAYLOAD_LEN_64BIT = 127   # Use 64-bit extended length
+val WS_MAX_16BIT_PAYLOAD = 65535  # Maximum value for 16-bit payload length
+var _ws_random_counter = 0
+
+# Close status codes (RFC 6455 Section 7.4.1)
+val WS_CLOSE_NORMAL = 1000
+val WS_CLOSE_GOING_AWAY = 1001
+val WS_CLOSE_PROTOCOL_ERROR = 1002
+val WS_CLOSE_UNSUPPORTED_DATA = 1003
+val WS_CLOSE_NO_STATUS = 1005
+val WS_CLOSE_ABNORMAL = 1006
+val WS_CLOSE_INVALID_PAYLOAD = 1007
+val WS_CLOSE_POLICY_VIOLATION = 1008
+val WS_CLOSE_MESSAGE_TOO_BIG = 1009
+val WS_CLOSE_MANDATORY_EXTENSION = 1010
+val WS_CLOSE_INTERNAL_ERROR = 1011
+
+fn close_code_name(code: i64) -> text:
+    if code == WS_CLOSE_NORMAL: return "Normal Closure"
+    if code == WS_CLOSE_GOING_AWAY: return "Going Away"
+    if code == WS_CLOSE_PROTOCOL_ERROR: return "Protocol Error"
+    if code == WS_CLOSE_UNSUPPORTED_DATA: return "Unsupported Data"
+    if code == WS_CLOSE_NO_STATUS: return "No Status Received"
+    if code == WS_CLOSE_ABNORMAL: return "Abnormal Closure"
+    if code == WS_CLOSE_INVALID_PAYLOAD: return "Invalid Payload Data"
+    if code == WS_CLOSE_POLICY_VIOLATION: return "Policy Violation"
+    if code == WS_CLOSE_MESSAGE_TOO_BIG: return "Message Too Big"
+    if code == WS_CLOSE_MANDATORY_EXTENSION: return "Mandatory Extension"
+    if code == WS_CLOSE_INTERNAL_ERROR: return "Internal Error"
+    "Unknown ({code})"
+
+# --- Opcodes (RFC 6455 Section 5.2) ---
+
+enum WsOpcode:
+    Continuation  # 0x0
+    Text          # 0x1
+    Binary        # 0x2
+    Close         # 0x8
+    Ping          # 0x9
+    Pong          # 0xA
+
+fn opcode_to_id(op: WsOpcode) -> i64:
+    match op:
+        WsOpcode.Continuation: 0
+        WsOpcode.Text: 1
+        WsOpcode.Binary: 2
+        WsOpcode.Close: 8
+        WsOpcode.Ping: 9
+        WsOpcode.Pong: 10
+
+fn id_to_opcode(id: i64) -> Result<WsOpcode>:
+    if id == 0: return Ok(WsOpcode.Continuation)
+    if id == 1: return Ok(WsOpcode.Text)
+    if id == 2: return Ok(WsOpcode.Binary)
+    if id == 8: return Ok(WsOpcode.Close)
+    if id == 9: return Ok(WsOpcode.Ping)
+    if id == 10: return Ok(WsOpcode.Pong)
+    Err(parse_error("ws: unknown opcode: {id}"))
+
+fn opcode_name(op: WsOpcode) -> text:
+    match op:
+        WsOpcode.Continuation: "CONTINUATION"
+        WsOpcode.Text: "TEXT"
+        WsOpcode.Binary: "BINARY"
+        WsOpcode.Close: "CLOSE"
+        WsOpcode.Ping: "PING"
+        WsOpcode.Pong: "PONG"
+
+fn is_control_opcode(op: WsOpcode) -> bool:
+    match op:
+        WsOpcode.Close: true
+        WsOpcode.Ping: true
+        WsOpcode.Pong: true
+        _: false
+
+# --- WsFrame ---
+
+class WsFrame:
+    fin: bool
+    opcode: WsOpcode
+    masked: bool
+    mask_key: [i64]
+    payload: text
+    length: i64
+
+    static fn create(fin: bool, opcode: WsOpcode, payload: text) -> WsFrame:
+        WsFrame(
+            fin: fin,
+            opcode: opcode,
+            masked: false,
+            mask_key: [],
+            payload: payload,
+            length: payload.len()
+        )
+
+    static fn text_frame(data: text) -> WsFrame:
+        WsFrame.create(true, WsOpcode.Text, data)
+
+    static fn binary_frame(data: text) -> WsFrame:
+        WsFrame.create(true, WsOpcode.Binary, data)
+
+    static fn close_frame(code: i64, reason: text) -> WsFrame:
+        val payload = encode_close_payload(code, reason)
+        WsFrame.create(true, WsOpcode.Close, payload)
+
+    static fn ping_frame() -> WsFrame:
+        WsFrame.create(true, WsOpcode.Ping, "")
+
+    static fn pong_frame(data: text) -> WsFrame:
+        WsFrame.create(true, WsOpcode.Pong, data)
+
+    fn is_control() -> bool:
+        is_control_opcode(self.opcode)
+
+    fn description() -> text:
+        val mask_str = if self.masked: "masked" else: "unmasked"
+        val fin_str = if self.fin: "FIN" else: "..."
+        "{opcode_name(self.opcode)} [{fin_str}] {mask_str} len={self.length}"
+
+# --- Connection state machine ---
+
+enum WsState:
+    Connecting  # Handshake in progress
+    Open        # Connection established, data transfer
+    Closing     # Close handshake initiated
+    Closed      # Connection terminated
+
+fn ws_state_name(state: WsState) -> text:
+    match state:
+        WsState.Connecting: "CONNECTING"
+        WsState.Open: "OPEN"
+        WsState.Closing: "CLOSING"
+        WsState.Closed: "CLOSED"
+
+# --- WsConnection ---
+
+class WsConnection:
+    url: Url
+    state: WsState
+    logger: Logger
+    protocol: text
+    extensions: [text]
+    tls_conn: TlsConnection?
+    tcp_fd: i64
+    fragment_buffer: text
+
+    static fn create(url: Url, logger: Logger) -> WsConnection:
+        WsConnection(
+            url: url,
+            state: WsState.Connecting,
+            logger: logger,
+            protocol: "",
+            extensions: [text](),
+            tls_conn: nil,
+            tcp_fd: -1,
+            fragment_buffer: ""
+        )
+
+    fn is_open() -> bool:
+        match self.state:
+            WsState.Open: true
+            _: false
+
+    fn is_closed() -> bool:
+        match self.state:
+            WsState.Closed: true
+            _: false
+
+    fn description() -> text:
+        val proto_str = if self.protocol.len() > 0: " proto={self.protocol}" else: ""
+        "ws:{self.url.host}:{self.url.port} [{ws_state_name(self.state)}]{proto_str}"
+
+# --- WebSocketClient ---
+
+class WebSocketClient:
+    logger: Logger
+    dns: DnsResolver
+    tls: TlsManager
+
+    static fn new(logger: Logger, dns: DnsResolver, tls: TlsManager) -> WebSocketClient:
+        WebSocketClient(
+            logger: logger,
+            dns: dns,
+            tls: tls
+        )
+
+    # Perform the WebSocket opening handshake and return an open connection.
+    me connect(url: Url, protocols: [text]) -> Result<WsConnection>:
+        val is_secure = url.scheme == "wss"
+        val port = get_ws_port(url)
+        val host = url.host
+
+        self.logger.info("ws: connecting to {host}:{port}")
+
+        # DNS resolution
+        val addresses = self.dns.resolve(host)?
+        if addresses.is_empty():
+            return Err(network_error("ws: DNS resolution returned no addresses for {host}"))
+
+        # Create connection
+        var conn = WsConnection.create(url, self.logger)
+
+        # TLS handshake if wss://
+        if is_secure:
+            val tls_conn = self.tls.handshake(host, port)?
+            conn.tls_conn = tls_conn
+            self.logger.debug("ws: TLS established for {host}:{port}")
+        else:
+            val addr = "{addresses.get(0)}:{port}"
+            val fd = rt_io_tcp_connect_timeout(addr, 5000)
+            if fd < 0:
+                return Err(network_error("ws: TCP connect failed to {addr}"))
+            rt_io_tcp_set_nodelay(fd, true)
+            rt_io_tcp_set_read_timeout(fd, 5000)
+            rt_io_tcp_set_write_timeout(fd, 5000)
+            conn.tcp_fd = fd
+
+        # Generate WebSocket key
+        val ws_key = generate_ws_key()
+
+        # Build the HTTP upgrade request (exercising the handshake logic)
+        val upgrade_request = build_upgrade_request(host, port, ws_request_path(url), ws_key, protocols)
+        self.logger.trace("ws: prepared upgrade request:\n{upgrade_request}")
+
+        val written = ws_write_transport(conn, upgrade_request)
+        if written < upgrade_request.len():
+            ws_close_transport(conn)
+            return Err(network_error("ws: short write during opening handshake to {host}:{port}"))
+
+        val raw_response = read_ws_response_text(conn)
+        val handshake = validate_handshake_response(raw_response, ws_key, protocols)?
+
+        # Update connection state
+        conn.state = WsState.Open
+        conn.protocol = handshake.protocol
+        conn.extensions = handshake.extensions
+
+        self.logger.info("ws: connected to {host}:{port} (protocol: {conn.protocol})")
+        Ok(conn)
+
+    # Send a text message as a single text frame.
+    me send(conn: WsConnection, data: text) -> Result<()>:
+        if not conn.is_open():
+            return Err(network_error("ws: cannot send on {ws_state_name(conn.state)} connection"))
+
+        self.logger.debug("ws: sending text frame ({data.len()} bytes)")
+
+        val frame = WsFrame.text_frame(data)
+        val mask = generate_mask_key()
+        val masked_frame = apply_client_mask(frame, mask)
+        val encoded = encode_frame(masked_frame)
+
+        val written = ws_write_transport(conn, encoded)
+        if written < encoded.len():
+            return Err(network_error("ws: short write sending text frame"))
+        Ok(())
+
+    # Send binary data as a single binary frame.
+    me send_binary(conn: WsConnection, data: text) -> Result<()>:
+        if not conn.is_open():
+            return Err(network_error("ws: cannot send on {ws_state_name(conn.state)} connection"))
+
+        self.logger.debug("ws: sending binary frame ({data.len()} bytes)")
+
+        val frame = WsFrame.binary_frame(data)
+        val mask = generate_mask_key()
+        val masked_frame = apply_client_mask(frame, mask)
+        val encoded = encode_frame(masked_frame)
+
+        val written = ws_write_transport(conn, encoded)
+        if written < encoded.len():
+            return Err(network_error("ws: short write sending binary frame"))
+        Ok(())
+
+    # Receive the next frame from the connection.
+    me recv(conn: WsConnection) -> Result<WsFrame>:
+        if not conn.is_open() and conn.state != WsState.Closing:
+            return Err(network_error("ws: cannot receive on {ws_state_name(conn.state)} connection"))
+        val raw = ws_read_transport(conn, 8192)
+        if raw.len() == 0:
+            return Err(network_error("ws: no frame data available"))
+        val frame = decode_frame(raw)?
+
+        self.logger.debug("ws: received {frame.description()}")
+
+        # If the frame is masked (server-to-client should NOT be masked per RFC,
+        # but we handle it gracefully), unmask it
+        if frame.masked and frame.mask_key.len() == 4:
+            val unmasked = apply_mask(frame.payload, frame.mask_key)
+            return Ok(WsFrame(
+                fin: frame.fin,
+                opcode: frame.opcode,
+                masked: false,
+                mask_key: [],
+                payload: unmasked,
+                length: frame.length
+            ))
+
+        # Handle control frames transparently
+        match frame.opcode:
+            WsOpcode.Ping:
+                # Automatically respond with PONG.
+                self.logger.trace("ws: auto-responding to PING")
+                val pong = WsFrame.pong_frame(frame.payload)
+                val mask = generate_mask_key()
+                val masked_pong = apply_client_mask(pong, mask)
+                val encoded = encode_frame(masked_pong)
+                ws_write_transport(conn, encoded)
+            WsOpcode.Close:
+                # Received close frame, transition to closing
+                conn.state = WsState.Closing
+                self.logger.info("ws: received close frame, transitioning to CLOSING")
+            WsOpcode.Pong:
+                # Keepalive response — no action required
+                self.logger.trace("ws: received PONG (keepalive response)")
+            WsOpcode.Continuation:
+                # Accumulate fragmented message payload
+                conn.fragment_buffer = conn.fragment_buffer + frame.payload
+                self.logger.trace("ws: accumulated CONTINUATION fragment ({frame.length} bytes, total={conn.fragment_buffer.len()})")
+                if frame.fin:
+                    # Final fragment — reassemble and return as complete frame
+                    val full_payload = conn.fragment_buffer
+                    conn.fragment_buffer = ""
+                    self.logger.debug("ws: CONTINUATION sequence complete, total payload={full_payload.len()} bytes")
+                    return Ok(WsFrame.create(true, WsOpcode.Text, full_payload))
+            _:
+                # Text and Binary opcodes: already returned by the caller path above
+                pass_dn
+
+        Ok(frame)
+
+    # Initiate the close handshake.
+    me close(conn: WsConnection, code: i64, reason: text) -> Result<()>:
+        if conn.is_closed():
+            return Ok(())
+
+        self.logger.info("ws: closing with code {code}: {reason}")
+
+        # Build close frame (exercising the encoding logic)
+        val frame = WsFrame.close_frame(code, reason)
+        val mask = generate_mask_key()
+        val masked_frame = apply_client_mask(frame, mask)
+        val encoded = encode_frame(masked_frame)
+
+        ws_write_transport(conn, encoded)
+        ws_close_transport(conn)
+        conn.state = WsState.Closing
+
+        conn.state = WsState.Closed
+        self.logger.info("ws: connection closed (code: {code}, reason: {reason})")
+
+        Ok(())
+
+    # Send a ping frame to test connectivity.
+    me ping(conn: WsConnection) -> Result<()>:
+        if not conn.is_open():
+            return Err(network_error("ws: cannot ping on {ws_state_name(conn.state)} connection"))
+
+        self.logger.debug("ws: sending ping")
+
+        val frame = WsFrame.ping_frame()
+        val mask = generate_mask_key()
+        val masked_frame = apply_client_mask(frame, mask)
+        val encoded = encode_frame(masked_frame)
+
+        val written = ws_write_transport(conn, encoded)
+        if written < encoded.len():
+            return Err(network_error("ws: short write sending ping"))
+        Ok(())
+
+# --- Handshake ---
+
+fn build_upgrade_request(host: text, port: i64, path: text, key: text, protocols: [text]) -> text:
+    # Build the HTTP/1.1 upgrade request for the WebSocket handshake.
+    # RFC 6455 Section 4.1
+    val request_path = if path.len() > 0: path else: "/"
+    val host_header = if port == 80 or port == 443: host else: "{host}:{port}"
+
+    var request = "GET {request_path} HTTP/1.1\r\n"
+    request = request + "Host: {host_header}\r\n"
+    request = request + "Upgrade: websocket\r\n"
+    request = request + "Connection: Upgrade\r\n"
+    request = request + "Sec-WebSocket-Key: {key}\r\n"
+    request = request + "Sec-WebSocket-Version: {WS_VERSION}\r\n"
+
+    # Add subprotocols if requested
+    if not protocols.is_empty():
+        val proto_str = join_text(protocols, ", ")
+        request = request + "Sec-WebSocket-Protocol: {proto_str}\r\n"
+
+    request = request + "Origin: https://{host}\r\n"
+    request = request + "User-Agent: SimpleBrowser/1.0\r\n"
+    request = request + "\r\n"
+
+    request
+
+fn ws_request_path(url: Url) -> text:
+    val path = if url.path.len() > 0: url.path else: "/"
+    val query = if url.query.len() > 0: "?{url.query}" else: ""
+    "{path}{query}"
+
+fn read_ws_response_text(conn: WsConnection) -> text:
+    var response = ""
+    var done = false
+    while not done:
+        val chunk = ws_read_transport(conn, 8192)
+        if chunk.len() == 0:
+            done = true
+        else:
+            response = response + chunk
+            if response.contains("\r\n\r\n"):
+                done = true
+    response
+
+fn ws_write_transport(conn: WsConnection, data: text) -> i64:
+    if val tls_conn = conn.tls_conn:
+        return tls_conn.write_text(data)
+    if conn.tcp_fd < 0:
+        return -1
+    val written = rt_io_tcp_write_text(conn.tcp_fd, data)
+    if written > 0:
+        rt_io_tcp_flush(conn.tcp_fd)
+    written
+
+fn ws_read_transport(conn: WsConnection, max_bytes: i64) -> text:
+    if val tls_conn = conn.tls_conn:
+        return tls_conn.read_text(max_bytes)
+    if conn.tcp_fd < 0:
+        return ""
+    rt_bytes_to_text(rt_io_tcp_read(conn.tcp_fd, max_bytes))
+
+fn ws_close_transport(conn: WsConnection):
+    if val tls_conn = conn.tls_conn:
+        tls_conn.close()
+        conn.tls_conn = nil
+    if conn.tcp_fd >= 0:
+        rt_io_tcp_close(conn.tcp_fd)
+        conn.tcp_fd = -1
+
+# Handshake validation result
+class HandshakeResult:
+    protocol: text
+    extensions: [text]
+
+    static fn create(protocol: text, extensions: [text]) -> HandshakeResult:
+        HandshakeResult(protocol, extensions)
+
+fn validate_handshake_response(raw: text, key: text, requested_protocols: [text]) -> Result<HandshakeResult>:
+    # Validate the server's handshake response per RFC 6455 Section 4.2.2.
+    # 1. Status must be 101 Switching Protocols
+    # 2. Upgrade header must be "websocket"
+    # 3. Connection header must include "Upgrade"
+    # 4. Sec-WebSocket-Accept must match the expected hash
+    # 5. Sec-WebSocket-Protocol must be one of the requested protocols (if any)
+
+    # Split into header and body
+    val header_body = split_response_header_body(raw)
+    val header_section = header_body.first
+
+    # Parse status line
+    val lines = split_crlf(header_section)
+    if lines.is_empty():
+        return Err(network_error("ws: empty handshake response"))
+
+    val status_line = lines.get(0)
+
+    # Validate HTTP 101 status
+    if not status_line.contains("101"):
+        return Err(network_error("ws: expected 101 Switching Protocols, got: {status_line}"))
+
+    # Parse headers
+    var headers: [Pair<text, text>] = []
+    var i = 1
+    while i < lines.len():
+        val line = lines.get(i)
+        if line.len() > 0:
+            val parsed = parse_header_line(line)
+            if val p = parsed:
+                headers.push(p)
+        i = i + 1
+
+    # Validate Upgrade header
+    val upgrade = find_header(headers, "upgrade")
+    if val u = upgrade:
+        if ws_ascii_lower(u) != "websocket":
+            return Err(network_error("ws: invalid Upgrade header: {u}"))
+    else:
+        return Err(network_error("ws: missing Upgrade header"))
+
+    # Validate Connection header
+    val connection = find_header(headers, "connection")
+    if val c = connection:
+        if not ws_ascii_lower(c).contains("upgrade"):
+            return Err(network_error("ws: Connection header does not include Upgrade: {c}"))
+    else:
+        return Err(network_error("ws: missing Connection header"))
+
+    # Validate Sec-WebSocket-Accept
+    val accept = find_header(headers, "sec-websocket-accept")
+    if val a = accept:
+        val expected = compute_accept_key(key)
+        if a != expected:
+            return Err(network_error("ws: Sec-WebSocket-Accept mismatch: got '{a}', expected '{expected}'"))
+    else:
+        return Err(network_error("ws: missing Sec-WebSocket-Accept header"))
+
+    # Extract negotiated protocol
+    var negotiated_protocol = ""
+    var proto_header = find_header(headers, "sec-websocket-protocol")
+    if not proto_header.?:
+        proto_header = find_header_in_lines(lines, "sec-websocket-protocol")
+    match proto_header:
+        Some(ph):
+            # Verify the server chose one of our requested protocols
+            if not requested_protocols.is_empty():
+                var found = false
+                for rp in requested_protocols:
+                    if rp == ph:
+                        found = true
+                if not found:
+                    return Err(network_error("ws: server selected unrequested protocol: {ph}"))
+            negotiated_protocol = ph
+        None:
+            pass_dn
+
+    # Extract extensions
+    var extensions: [text] = []
+    val ext_header = find_header(headers, "sec-websocket-extensions")
+    match ext_header:
+        Some(eh):
+            val ext_parts = eh.split(",")
+            for ext in ext_parts:
+                val trimmed = ext.trim()
+                if trimmed.len() > 0:
+                    extensions.push(trimmed)
+        None:
+            pass_dn
+
+    Ok(HandshakeResult(negotiated_protocol, extensions))
+
+# --- Key generation and validation ---
+
+fn generate_ws_key() -> text:
+    # Generate a random 16-byte value encoded as base64 for Sec-WebSocket-Key.
+    # The key must be a nonce consisting of a randomly selected 16-byte value
+    # that has been base64-encoded (RFC 6455 Section 4.1).
+    var bytes = ws_hex_to_bytes(rt_random_hex(16))
+    _ws_random_counter = _ws_random_counter + 1
+    bytes = ws_mix_counter(bytes, _ws_random_counter)
+    ws_base64_encode(bytes)
+
+fn compute_accept_key(key: text) -> text:
+    # Compute the expected Sec-WebSocket-Accept value.
+    # accept = base64(SHA-1(key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"))
+    # RFC 6455 Section 4.2.2
+    val concatenated = key + WS_MAGIC_GUID
+    ws_base64_encode(ws_sha1(concatenated))
+
+fn generate_mask_key() -> [i64]:
+    # Generate a random 4-byte masking key for client-to-server frames.
+    # RFC 6455 Section 5.3: client MUST mask all frames.
+    var bytes = ws_hex_to_bytes(rt_random_hex(4))
+    _ws_random_counter = _ws_random_counter + 1
+    bytes = ws_mix_counter(bytes, _ws_random_counter)
+    var mask = []
+    var i = 0
+    while i < 4:
+        if i < bytes.len():
+            mask.push(bytes[i])
+        else:
+            mask.push(0)
+        i = i + 1
+    mask
+
+# --- Frame encoding (RFC 6455 Section 5.2) ---
+
+fn encode_frame(frame: WsFrame) -> text:
+    # Encode a WebSocket frame into its wire format.
+    #
+    # Wire format:
+    #   0                   1                   2                   3
+    #   0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
+    #  +-+-+-+-+-------+-+-------------+-------------------------------+
+    #  |F|R|R|R| opcode|M| Payload len |    Extended payload length    |
+    #  |I|S|S|S|  (4)  |A|     (7)     |             (16/64)           |
+    #  |N|V|V|V|       |S|             |   (if payload len==126/127)   |
+    #  | |1|2|3|       |K|             |                               |
+    #  +-+-+-+-+-------+-+-------------+ - - - - - - - - - - - - - - - +
+    #  |     Extended payload length continued, if payload len == 127  |
+    #  + - - - - - - - - - - - - - - - +-------------------------------+
+    #  |                               |Masking-key, if MASK set to 1  |
+    #  +-------------------------------+-------------------------------+
+    #  | Masking-key (continued)       |          Payload Data         |
+    #  +-------------------------------- - - - - - - - - - - - - - - - +
+    #  :                     Payload Data continued ...                :
+    #  + - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - +
+    #  |                     Payload Data (continued)                  |
+    #  +---------------------------------------------------------------+
+
+    var result = ""
+
+    # Byte 1: FIN + RSV1-3 + Opcode
+    val fin_bit = if frame.fin: 128 else: 0  # 0x80
+    val opcode_val = opcode_to_id(frame.opcode)
+    val byte1 = fin_bit + opcode_val
+    result = result + encode_byte(byte1)
+
+    # Byte 2: MASK + Payload length
+    val mask_bit = if frame.masked: 128 else: 0  # 0x80
+    val payload_len = frame.payload.len()
+
+    if payload_len < WS_PAYLOAD_LEN_16BIT:
+        # 7-bit length
+        val byte2 = mask_bit + payload_len
+        result = result + encode_byte(byte2)
+    else:
+        if payload_len <= WS_MAX_16BIT_PAYLOAD:
+            # 16-bit extended length
+            val byte2 = mask_bit + WS_PAYLOAD_LEN_16BIT
+            result = result + encode_byte(byte2)
+            # 2 bytes big-endian
+            val len_hi = (payload_len / 256) % 256
+            val len_lo = payload_len % 256
+            result = result + encode_byte(len_hi)
+            result = result + encode_byte(len_lo)
+        else:
+            # 64-bit extended length
+            val byte2 = mask_bit + WS_PAYLOAD_LEN_64BIT
+            result = result + encode_byte(byte2)
+            # 8 bytes big-endian (high 4 bytes are 0 for reasonable payload sizes)
+            result = result + encode_byte(0)
+            result = result + encode_byte(0)
+            result = result + encode_byte(0)
+            result = result + encode_byte(0)
+            val b3 = (payload_len / 16777216) % 256
+            val b2 = (payload_len / 65536) % 256
+            val b1 = (payload_len / 256) % 256
+            val b0 = payload_len % 256
+            result = result + encode_byte(b3)
+            result = result + encode_byte(b2)
+            result = result + encode_byte(b1)
+            result = result + encode_byte(b0)
+
+    # Masking key (4 bytes, only if masked)
+    if frame.masked and frame.mask_key.len() == 4:
+        result = result + encode_byte(frame.mask_key.get(0))
+        result = result + encode_byte(frame.mask_key.get(1))
+        result = result + encode_byte(frame.mask_key.get(2))
+        result = result + encode_byte(frame.mask_key.get(3))
+
+    # Payload data
+    if frame.masked and frame.mask_key.len() == 4:
+        # Apply mask to payload
+        val masked_payload = apply_mask(frame.payload, frame.mask_key)
+        result = result + masked_payload
+    else:
+        result = result + frame.payload
+
+    result
+
+fn decode_frame(data: text) -> Result<WsFrame>:
+    # Decode a WebSocket frame from raw wire data.
+    if data.len() < 2:
+        return Err(parse_error("ws: frame too short ({data.len()} bytes, need at least 2)"))
+
+    var pos = 0
+
+    # Byte 1: FIN + Opcode
+    val byte1 = decode_byte_val(data, pos)
+    pos = pos + 1
+    val fin = (byte1 / 128) >= 1  # Bit 7
+    val opcode_val = byte1 % 16   # Bits 0-3
+    val opcode = id_to_opcode(opcode_val)?
+
+    # Byte 2: MASK + Payload length
+    val byte2 = decode_byte_val(data, pos)
+    pos = pos + 1
+    val masked = (byte2 / 128) >= 1  # Bit 7
+    var payload_len = byte2 % 128      # Bits 0-6
+
+    # Extended payload length
+    if payload_len == WS_PAYLOAD_LEN_16BIT:
+        # 16-bit extended length
+        if data.len() < pos + 2:
+            return Err(parse_error("ws: frame too short for 16-bit payload length"))
+        val len_hi = decode_byte_val(data, pos)
+        val len_lo = decode_byte_val(data, pos + 1)
+        payload_len = len_hi * 256 + len_lo
+        pos = pos + 2
+    else:
+        if payload_len == WS_PAYLOAD_LEN_64BIT:
+            # 64-bit extended length
+            if data.len() < pos + 8:
+                return Err(parse_error("ws: frame too short for 64-bit payload length"))
+            # Read the lower 4 bytes (ignore upper 4 for practical sizes)
+            val b7 = decode_byte_val(data, pos)
+            val b6 = decode_byte_val(data, pos + 1)
+            val b5 = decode_byte_val(data, pos + 2)
+            val b4 = decode_byte_val(data, pos + 3)
+            val b3 = decode_byte_val(data, pos + 4)
+            val b2 = decode_byte_val(data, pos + 5)
+            val b1 = decode_byte_val(data, pos + 6)
+            val b0 = decode_byte_val(data, pos + 7)
+            # For practical purposes, use lower 32 bits
+            payload_len = b3 * 16777216 + b2 * 65536 + b1 * 256 + b0
+            pos = pos + 8
+
+    # Masking key (4 bytes if masked)
+    var mask_key = []
+    if masked:
+        if data.len() < pos + 4:
+            return Err(parse_error("ws: frame too short for masking key"))
+        mask_key.push(decode_byte_val(data, pos))
+        mask_key.push(decode_byte_val(data, pos + 1))
+        mask_key.push(decode_byte_val(data, pos + 2))
+        mask_key.push(decode_byte_val(data, pos + 3))
+        pos = pos + 4
+
+    # Payload data
+    if data.len() < pos + payload_len:
+        return Err(parse_error("ws: frame too short for payload (need {pos + payload_len}, have {data.len()})"))
+
+    val payload = if payload_len > 0:
+        ws_substring(data, pos, pos + payload_len)
+    else:
+        ""
+
+    Ok(WsFrame(
+        fin: fin,
+        opcode: opcode,
+        masked: masked,
+        mask_key: mask_key,
+        payload: payload,
+        length: payload_len
+    ))
+
+# --- Masking (RFC 6455 Section 5.3) ---
+
+fn apply_mask(data: text, mask: [i64]) -> text:
+    # Apply XOR masking to payload data.
+    # j = i MOD 4
+    # transformed-octet-i = original-octet-i XOR masking-key-octet-j
+    #
+    # This is its own inverse: masking masked data produces the original.
+    if mask.len() != 4:
+        return data
+
+    var result = ""
+    var i = 0
+    while i < data.len():
+        val original_byte = decode_byte_val(data, i)
+        val mask_byte = mask.get(i % 4)
+        val transformed = xor_bytes(original_byte, mask_byte)
+        result = result + encode_byte(transformed)
+        i = i + 1
+    result
+
+fn apply_client_mask(frame: WsFrame, mask: [i64]) -> WsFrame:
+    # Apply a masking key to a frame, marking it as masked.
+    # Client-to-server frames MUST be masked (RFC 6455 Section 5.1).
+    WsFrame(
+        fin: frame.fin,
+        opcode: frame.opcode,
+        masked: true,
+        mask_key: mask,
+        payload: frame.payload,
+        length: frame.length
+    )
+
+fn xor_bytes(a: i64, b: i64) -> i64:
+    # XOR two byte values (0-255).
+    # Implemented using bit decomposition since Simple doesn't have a native XOR operator.
+    var result = 0
+    var bit_value = 1
+    var va = a
+    var vb = b
+
+    # Process each of the 8 bits
+    var bit = 0
+    while bit < 8:
+        val bit_a = va % 2
+        val bit_b = vb % 2
+
+        # XOR: result bit is 1 if bits differ
+        if bit_a != bit_b:
+            result = result + bit_value
+
+        va = va / 2
+        vb = vb / 2
+        bit_value = bit_value * 2
+        bit = bit + 1
+
+    result
+
+# --- Close frame payload ---
+
+fn encode_close_payload(code: i64, reason: text) -> text:
+    # Encode a close frame payload: 2-byte status code + optional reason text.
+    # RFC 6455 Section 5.5.1
+    var payload = ""
+
+    # Status code (2 bytes, big-endian)
+    val code_hi = (code / 256) % 256
+    val code_lo = code % 256
+    payload = payload + encode_byte(code_hi)
+    payload = payload + encode_byte(code_lo)
+
+    # Reason text (must keep total payload <= 125 bytes)
+    if reason.len() > 0:
+        val max_reason_len = WS_MAX_CONTROL_PAYLOAD - 2
+        val truncated = if reason.len() > max_reason_len:
+            ws_substring(reason, 0, max_reason_len)
+        else:
+            reason
+        payload = payload + truncated
+
+    payload
+
+fn decode_close_payload(payload: text) -> Pair<i64, text>:
+    # Decode a close frame payload into (status_code, reason).
+    if payload.len() < 2:
+        return Pair(WS_CLOSE_NO_STATUS, "")
+
+    val code_hi = decode_byte_val(payload, 0)
+    val code_lo = decode_byte_val(payload, 1)
+    val code = code_hi * 256 + code_lo
+
+    var reason = ""
+    if payload.len() > 2:
+        reason = ws_substring(payload, 2, payload.len())
+
+    Pair(code, reason)
+
+# --- Helper utilities ---
+
+fn get_ws_port(url: Url) -> i64:
+    # Determine the port for a WebSocket URL.
+    # Default: 80 for ws://, 443 for wss://
+    if url.port > 0:
+        return url.port
+    if url.scheme == "wss":
+        return 443
+    80
+
+fn find_header(headers: [Pair<text, text>], name: text) -> text?:
+    # Find the first header value matching the given name (case-insensitive).
+    val name_lower = ws_ascii_lower(name)
+    for header in headers:
+        if ws_ascii_lower(header.first) == name_lower:
+            return header.second
+    nil
+
+fn find_header_in_lines(lines: [text], name: text) -> text?:
+    val name_lower = ws_ascii_lower(name)
+    var i = 1
+    while i < lines.len():
+        val parsed = parse_header_line(lines.get(i))
+        match parsed:
+            Some(header):
+                if ws_ascii_lower(header.first) == name_lower:
+                    return header.second
+            None:
+                pass_dn
+        i = i + 1
+    nil
+
+fn parse_header_line(line: text) -> Pair<text, text>?:
+    # Parse a single header line: "Name: value"
+    val colon_pos = find_char_pos(line, ":")
+    if colon_pos < 0:
+        return nil
+    val name = ws_substring(line, 0, colon_pos).trim()
+    var value = ""
+    if colon_pos + 1 < line.len():
+        value = ws_substring(line, colon_pos + 1, line.len()).trim()
+    if name.len() == 0:
+        return nil
+    Pair(name, value)
+
+fn split_response_header_body(raw: text) -> Pair<text, text>:
+    # Split an HTTP response into header section and body at \r\n\r\n.
+    var i = 0
+    while i < raw.len() - 3:
+        if (decode_byte_val(raw, i) == 13 and decode_byte_val(raw, i + 1) == 10
+            and decode_byte_val(raw, i + 2) == 13 and decode_byte_val(raw, i + 3) == 10):
+            val headers = ws_substring(raw, 0, i)
+            val body = ws_substring(raw, i + 4, raw.len())
+            return Pair(headers, body)
+        i = i + 1
+    Pair(raw, "")
+
+fn split_crlf(s: text) -> [text]:
+    # Split a string by \r\n line endings.
+    var lines: [text] = []
+    var start = 0
+    var i = 0
+    while i < s.len() - 1:
+        if decode_byte_val(s, i) == 13 and decode_byte_val(s, i + 1) == 10:
+            lines.push(ws_substring(s, start, i))
+            start = i + 2
+            i = i + 2
+        else:
+            i = i + 1
+    if start < s.len():
+        lines.push(ws_substring(s, start, s.len()))
+    lines
+
+fn find_char_pos(s: text, ch: text) -> i64:
+    # Find the index of the first occurrence of ch in s.
+    var i = 0
+    while i < s.len():
+        if s[i] == ch:
+            return i
+        i = i + 1
+    -1
+
+fn join_text(items: [text], sep: text) -> text:
+    # Join a list of strings with a separator.
+    var result = ""
+    var i = 0
+    for item in items:
+        if i > 0:
+            result = result + sep
+        result = result + item
+        i = i + 1
+    result
+
+fn encode_byte(value: i64) -> text:
+    # Encode a single byte (0-255) as a one-character text.
+    val clamped = if value < 0 then 0 else if value > 255 then 255 else value
+    _ws_byte_to_char(clamped)
+
+fn decode_byte_val(data: text, pos: i64) -> i64:
+    # Decode a single byte from text at the given position as an integer (0-255).
+    if pos < 0 or pos >= data.length():
+        return 0
+    val ch = ws_substring(data, pos, pos + 1)
+    _ws_char_to_byte(ch)
+
+# --- Byte encoding helpers ---
+
+fn _ws_byte_to_char(value: i64) -> text:
+    if value == 0: return "\0"
+    if value == 1: return "\x01"
+    if value == 2: return "\x02"
+    if value == 3: return "\x03"
+    if value == 4: return "\x04"
+    if value == 5: return "\x05"
+    if value == 6: return "\x06"
+    if value == 7: return "\x07"
+    if value == 8: return "\x08"
+    if value == 9: return "\t"
+    if value == 10: return "\n"
+    if value == 13: return "\r"
+    if value == 32: return " "
+    if value >= 33 and value <= 47:
+        val chars = "!\"#$%&'()*+,-./"
+        return ws_substring(chars, value - 33, value - 32)
+    if value >= 48 and value <= 57:
+        val chars = "0123456789"
+        return ws_substring(chars, value - 48, value - 47)
+    if value >= 58 and value <= 64:
+        val chars = ":;<=>?@"
+        return ws_substring(chars, value - 58, value - 57)
+    if value >= 65 and value <= 90:
+        val chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+        return ws_substring(chars, value - 65, value - 64)
+    if value >= 91 and value <= 96:
+        val chars = "[\\]^_`"
+        return ws_substring(chars, value - 91, value - 90)
+    if value >= 97 and value <= 122:
+        val chars = "abcdefghijklmnopqrstuvwxyz"
+        return ws_substring(chars, value - 97, value - 96)
+    if value >= 123 and value <= 126:
+        val chars = "{|}~"
+        return ws_substring(chars, value - 123, value - 122)
+    if value == 127: return "\x7F"
+    if value == 128: return "\x80"
+    if value == 129: return "\x81"
+    if value == 130: return "\x82"
+    if value == 254: return "\xFE"
+    if value == 255: return "\xFF"
+    if value >= 0 and value <= 255:
+        return char_from_code(value)
+    "\uFFFD"
+
+fn _ws_char_to_byte(ch: text) -> i64:
+    if ch.length() == 0: return 0
+    if ch == "\0": return 0
+    if ch == "\x01": return 1
+    if ch == "\x02": return 2
+    if ch == "\x03": return 3
+    if ch == "\x04": return 4
+    if ch == "\x05": return 5
+    if ch == "\x06": return 6
+    if ch == "\x07": return 7
+    if ch == "\x08": return 8
+    if ch == "\t": return 9
+    if ch == "\n": return 10
+    if ch == "\r": return 13
+    if ch == " ": return 32
+    if ch == "\x7F": return 127
+    if ch == "\x80": return 128
+    if ch == "\x81": return 129
+    if ch == "\x82": return 130
+    if ch == "\xFE": return 254
+    if ch == "\xFF": return 255
+    # Search printable ASCII range
+    val printable = "!\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~"
+    var i = 0
+    while i < printable.length():
+        if ws_substring(printable, i, i + 1) == ch:
+            return 33 + i
+        i = i + 1
+    val code = ch.char_code_at(0)
+    if code >= 0 and code <= 255:
+        return code
+    0
+
+fn ws_substring(s: text, start: i64, end: i64) -> text:
+    var result = ""
+    var i = if start < 0: 0 else: start
+    val limit = if end > s.len(): s.len() else: end
+    while i < limit:
+        result = result + s[i]
+        i = i + 1
+    result
+
+fn ws_ascii_lower(s: text) -> text:
+    var result = ""
+    var i = 0
+    while i < s.len():
+        result = result + ws_ascii_lower_char(s[i])
+        i = i + 1
+    result
+
+fn ws_ascii_lower_char(ch: text) -> text:
+    if ch == "A": return "a"
+    if ch == "B": return "b"
+    if ch == "C": return "c"
+    if ch == "D": return "d"
+    if ch == "E": return "e"
+    if ch == "F": return "f"
+    if ch == "G": return "g"
+    if ch == "H": return "h"
+    if ch == "I": return "i"
+    if ch == "J": return "j"
+    if ch == "K": return "k"
+    if ch == "L": return "l"
+    if ch == "M": return "m"
+    if ch == "N": return "n"
+    if ch == "O": return "o"
+    if ch == "P": return "p"
+    if ch == "Q": return "q"
+    if ch == "R": return "r"
+    if ch == "S": return "s"
+    if ch == "T": return "t"
+    if ch == "U": return "u"
+    if ch == "V": return "v"
+    if ch == "W": return "w"
+    if ch == "X": return "x"
+    if ch == "Y": return "y"
+    if ch == "Z": return "z"
+    ch
+
+fn ws_base64_encode(bytes: [i64]) -> text:
+    val alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+    var result = ""
+    var i = 0
+    while i < bytes.len():
+        val b1 = bytes[i]
+        var b2 = 0
+        var b3 = 0
+        var has_b2 = false
+        var has_b3 = false
+        if i + 1 < bytes.len():
+            b2 = bytes[i + 1]
+            has_b2 = true
+        if i + 2 < bytes.len():
+            b3 = bytes[i + 2]
+            has_b3 = true
+
+        result = result + ws_base64_char(alphabet, b1 / 4)
+        var idx2 = (b1 % 4) * 16
+        if has_b2:
+            idx2 = idx2 + (b2 / 16)
+        result = result + ws_base64_char(alphabet, idx2)
+
+        if has_b2:
+            var idx3 = (b2 % 16) * 4
+            if has_b3:
+                idx3 = idx3 + (b3 / 64)
+            result = result + ws_base64_char(alphabet, idx3)
+        else:
+            result = result + "="
+
+        if has_b3:
+            result = result + ws_base64_char(alphabet, b3 % 64)
+        else:
+            result = result + "="
+
+        i = i + 3
+    result
+
+fn ws_base64_char(alphabet: text, index: i64) -> text:
+    ws_substring(alphabet, index, index + 1)
+
+fn ws_sha1(input: text) -> [i64]:
+    val bytes = ws_text_to_bytes(input)
+    val padded = ws_sha1_pad(bytes)
+    var h0 = 0x67452301
+    var h1 = 0xEFCDAB89
+    var h2 = 0x98BADCFE
+    var h3 = 0x10325476
+    var h4 = 0xC3D2E1F0
+    var block_idx = 0
+    val num_blocks = padded.len() / 64
+
+    while block_idx < num_blocks:
+        var block = []
+        val offset = block_idx * 64
+        var i = 0
+        while i < 64:
+            block.push(padded[offset + i])
+            i = i + 1
+
+        val hash_values = ws_sha1_process_block(block, h0, h1, h2, h3, h4)
+        h0 = hash_values[0]
+        h1 = hash_values[1]
+        h2 = hash_values[2]
+        h3 = hash_values[3]
+        h4 = hash_values[4]
+        block_idx = block_idx + 1
+
+    var result = []
+    val words = [h0, h1, h2, h3, h4]
+    var i = 0
+    while i < words.len():
+        val word_bytes = ws_word_to_bytes(words[i])
+        var j = 0
+        while j < word_bytes.len():
+            result.push(word_bytes[j])
+            j = j + 1
+        i = i + 1
+    result
+
+fn ws_text_to_bytes(input: text) -> [i64]:
+    var result = []
+    var i = 0
+    while i < input.len():
+        result.push(decode_byte_val(input, i))
+        i = i + 1
+    result
+
+fn ws_sha1_pad(bytes: [i64]) -> [i64]:
+    var result = []
+    var i = 0
+    while i < bytes.len():
+        result.push(bytes[i])
+        i = i + 1
+
+    result.push(128)
+    val msg_len_bits = bytes.len() * 8
+    val current_len = result.len()
+    val target_len = ((current_len + 8) / 64 + 1) * 64
+    while result.len() < target_len - 8:
+        result.push(0)
+
+    result.push(0)
+    result.push(0)
+    result.push(0)
+    result.push(0)
+    result.push((msg_len_bits >> 24) & 0xFF)
+    result.push((msg_len_bits >> 16) & 0xFF)
+    result.push((msg_len_bits >> 8) & 0xFF)
+    result.push(msg_len_bits & 0xFF)
+    result
+
+fn ws_sha1_process_block(block: [i64], h0: i64, h1: i64, h2: i64, h3: i64, h4: i64) -> [i64]:
+    var w = []
+    var i = 0
+    while i < 16:
+        val offset = i * 4
+        w.push(ws_bytes_to_word(block[offset], block[offset + 1], block[offset + 2], block[offset + 3]))
+        i = i + 1
+
+    while i < 80:
+        val x = w[i - 3] ^ w[i - 8] ^ w[i - 14] ^ w[i - 16]
+        w.push(ws_rotl32(x, 1))
+        i = i + 1
+
+    var a = h0
+    var b = h1
+    var c = h2
+    var d = h3
+    var e = h4
+
+    i = 0
+    while i < 80:
+        var f = 0
+        var k = 0
+        if i < 20:
+            f = (b & c) | ((~b & 0xFFFFFFFF) & d)
+            k = 0x5A827999
+        else:
+            if i < 40:
+                f = b ^ c ^ d
+                k = 0x6ED9EBA1
+            else:
+                if i < 60:
+                    f = (b & c) | (b & d) | (c & d)
+                    k = 0x8F1BBCDC
+                else:
+                    f = b ^ c ^ d
+                    k = 0xCA62C1D6
+
+        val temp = ws_u32(ws_u32(ws_u32(ws_u32(ws_rotl32(a, 5) + f) + e) + k) + w[i])
+        e = d
+        d = c
+        c = ws_rotl32(b, 30)
+        b = a
+        a = temp
+        i = i + 1
+
+    [ws_u32(h0 + a), ws_u32(h1 + b), ws_u32(h2 + c), ws_u32(h3 + d), ws_u32(h4 + e)]
+
+fn ws_rotl32(value: i64, bits: i64) -> i64:
+    ws_u32((value << bits) | ((value & 0xFFFFFFFF) >> (32 - bits)))
+
+fn ws_u32(value: i64) -> i64:
+    value & 0xFFFFFFFF
+
+fn ws_bytes_to_word(b0: i64, b1: i64, b2: i64, b3: i64) -> i64:
+    ((b0 & 0xFF) << 24) | ((b1 & 0xFF) << 16) | ((b2 & 0xFF) << 8) | (b3 & 0xFF)
+
+fn ws_word_to_bytes(word: i64) -> [i64]:
+    [(word >> 24) & 0xFF, (word >> 16) & 0xFF, (word >> 8) & 0xFF, word & 0xFF]
+
+fn ws_hex_to_bytes(hex: text) -> [i64]:
+    var bytes = []
+    var i = 0
+    while i + 1 < hex.len():
+        val hi = ws_hex_digit(hex[i])
+        val lo = ws_hex_digit(hex[i + 1])
+        if hi >= 0 and lo >= 0:
+            bytes.push(hi * 16 + lo)
+        i = i + 2
+    bytes
+
+fn ws_mix_counter(bytes: [i64], counter: i64) -> [i64]:
+    # Mix a monotonic counter into runtime-random bytes to prevent duplicate
+    # WebSocket nonces/masks if the host RNG is called faster than its source updates.
+    var result = []
+    var i = 0
+    while i < bytes.len():
+        var byte = bytes[i]
+        if i == bytes.len() - 1:
+            byte = byte ^ (counter & 0xFF)
+        else:
+            if i == bytes.len() - 2:
+                byte = byte ^ ((counter >> 8) & 0xFF)
+        result.push(byte & 0xFF)
+        i = i + 1
+    result
+
+fn ws_hex_digit(ch: text) -> i64:
+    val lower = ws_ascii_lower_char(ch)
+    if lower == "0": return 0
+    if lower == "1": return 1
+    if lower == "2": return 2
+    if lower == "3": return 3
+    if lower == "4": return 4
+    if lower == "5": return 5
+    if lower == "6": return 6
+    if lower == "7": return 7
+    if lower == "8": return 8
+    if lower == "9": return 9
+    if lower == "a": return 10
+    if lower == "b": return 11
+    if lower == "c": return 12
+    if lower == "d": return 13
+    if lower == "e": return 14
+    if lower == "f": return 15
+    -1

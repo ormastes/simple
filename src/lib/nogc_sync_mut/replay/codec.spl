@@ -1,0 +1,133 @@
+# SReplay — Binary Event Codec
+#
+# Serializes/deserializes ReplayEntry structs for trace files.
+# Each entry is a fixed 80-byte record.
+
+use os.kernel.replay.event_kinds.{ReplayEntry, EventKind}
+
+# ============================================================================
+# Serialization
+# ============================================================================
+
+fn encode_entry(entry: ReplayEntry) -> [i32]:
+    var bytes: [i32] = []
+    encode_i64(bytes, entry.event_id)
+    encode_i64(bytes, entry.logical_time)
+    encode_i64(bytes, entry.thread_id)
+    encode_i64(bytes, entry.process_id)
+    encode_i32(bytes, entry.cpu_id)
+    encode_i32(bytes, entry.kind)
+    encode_i32(bytes, entry.flags)
+    encode_i64(bytes, entry.payload_a)
+    encode_i64(bytes, entry.payload_b)
+    encode_i64(bytes, entry.payload_c)
+    encode_i64(bytes, entry.payload_d)
+    encode_i32(bytes, entry.crc32)
+    bytes
+
+fn decode_entry(bytes: [i32], offset: i64) -> Result<ReplayEntry, text>:
+    if bytes.len() - offset < 80:
+        return Err("insufficient bytes for ReplayEntry")
+    var pos = offset
+    val event_id = decode_i64(bytes, pos)
+    pos = pos + 8
+    val logical_time = decode_i64(bytes, pos)
+    pos = pos + 8
+    val thread_id = decode_i64(bytes, pos)
+    pos = pos + 8
+    val process_id = decode_i64(bytes, pos)
+    pos = pos + 8
+    val cpu_id = decode_i32(bytes, pos)
+    pos = pos + 4
+    val kind = decode_i32(bytes, pos)
+    pos = pos + 4
+    val flags = decode_i32(bytes, pos)
+    pos = pos + 4
+    val payload_a = decode_i64(bytes, pos)
+    pos = pos + 8
+    val payload_b = decode_i64(bytes, pos)
+    pos = pos + 8
+    val payload_c = decode_i64(bytes, pos)
+    pos = pos + 8
+    val payload_d = decode_i64(bytes, pos)
+    pos = pos + 8
+    val crc32 = decode_i32(bytes, pos)
+
+    Ok(ReplayEntry(
+        event_id: event_id,
+        logical_time: logical_time,
+        thread_id: thread_id,
+        process_id: process_id,
+        cpu_id: cpu_id,
+        kind: kind,
+        flags: flags,
+        payload_a: payload_a,
+        payload_b: payload_b,
+        payload_c: payload_c,
+        payload_d: payload_d,
+        crc32: crc32
+    ))
+
+# ============================================================================
+# Encode batch
+# ============================================================================
+
+fn encode_entries(entries: [ReplayEntry]) -> [i32]:
+    var bytes: [i32] = []
+    for entry in entries:
+        val encoded = encode_entry(entry)
+        for b in encoded:
+            bytes.push(b)
+    bytes
+
+fn decode_entries(bytes: [i32]) -> [ReplayEntry]:
+    var entries: [ReplayEntry] = []
+    var offset: i64 = 0
+    while offset + 80 <= bytes.len():
+        match decode_entry(bytes, offset):
+            case Ok(entry):
+                entries.push(entry)
+            case Err(_):
+                break
+        offset = offset + 80
+    entries
+
+# ============================================================================
+# Primitive Encoders (little-endian)
+# ============================================================================
+
+fn encode_i64(bytes: [i32], value: i64):
+    bytes.push((value % 256) as i32)
+    bytes.push(((value / 256) % 256) as i32)
+    bytes.push(((value / 65536) % 256) as i32)
+    bytes.push(((value / 16777216) % 256) as i32)
+    bytes.push(((value / 4294967296) % 256) as i32)
+    bytes.push(((value / 1099511627776) % 256) as i32)
+    bytes.push(((value / 281474976710656) % 256) as i32)
+    bytes.push(((value / 72057594037927936) % 256) as i32)
+
+fn encode_i32(bytes: [i32], value: i32):
+    bytes.push(value % 256)
+    bytes.push((value / 256) % 256)
+    bytes.push((value / 65536) % 256)
+    bytes.push((value / 16777216) % 256)
+
+fn decode_i64(bytes: [i32], offset: i64) -> i64:
+    var result: i64 = 0
+    result = result + bytes[offset] as i64
+    result = result + (bytes[offset + 1] as i64) * 256
+    result = result + (bytes[offset + 2] as i64) * 65536
+    result = result + (bytes[offset + 3] as i64) * 16777216
+    result = result + (bytes[offset + 4] as i64) * 4294967296
+    result = result + (bytes[offset + 5] as i64) * 1099511627776
+    result = result + (bytes[offset + 6] as i64) * 281474976710656
+    result = result + (bytes[offset + 7] as i64) * 72057594037927936
+    result
+
+fn decode_i32(bytes: [i32], offset: i64) -> i32:
+    var result: i32 = 0
+    result = result + bytes[offset]
+    result = result + bytes[offset + 1] * 256
+    result = result + bytes[offset + 2] * 65536
+    result = result + bytes[offset + 3] * 16777216
+    result

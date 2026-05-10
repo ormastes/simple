@@ -1,0 +1,176 @@
+# SimpleOS Kernel Replay — Event Kind Definitions
+#
+# Architecture-neutral event types with fixed-size payloads.
+# Each event fits in 80 bytes (ReplayEntry).
+
+# ============================================================================
+# Event Kind Enum
+# ============================================================================
+
+enum EventKind:
+    Schedule           # 0 — context switch
+    SyscallEnter       # 1 — syscall entry
+    SyscallExit        # 2 — syscall return
+    InterruptDeliver   # 3 — IRQ delivery
+    IpcSend            # 4 — message sent
+    IpcReceive         # 5 — message received
+    TimerRead          # 6 — timer/clock read
+    ThreadCreate       # 7 — new task
+    ThreadExit         # 8 — task exit
+    MemoryMap          # 9 — mmap
+    PageFault          # 10 — page fault
+    RandomSeed         # 11 — entropy source read
+    DeviceIo           # 12 — MMIO/port I/O
+    Checkpoint         # 13 — checkpoint marker
+
+impl EventKind:
+    fn to_i32() -> i32:
+        match self:
+            case EventKind.Schedule: 0
+            case EventKind.SyscallEnter: 1
+            case EventKind.SyscallExit: 2
+            case EventKind.InterruptDeliver: 3
+            case EventKind.IpcSend: 4
+            case EventKind.IpcReceive: 5
+            case EventKind.TimerRead: 6
+            case EventKind.ThreadCreate: 7
+            case EventKind.ThreadExit: 8
+            case EventKind.MemoryMap: 9
+            case EventKind.PageFault: 10
+            case EventKind.RandomSeed: 11
+            case EventKind.DeviceIo: 12
+            case EventKind.Checkpoint: 13
+
+    static fn from_i32(v: i32) -> EventKind:
+        match v:
+            0: EventKind.Schedule
+            1: EventKind.SyscallEnter
+            2: EventKind.SyscallExit
+            3: EventKind.InterruptDeliver
+            4: EventKind.IpcSend
+            5: EventKind.IpcReceive
+            6: EventKind.TimerRead
+            7: EventKind.ThreadCreate
+            8: EventKind.ThreadExit
+            9: EventKind.MemoryMap
+            10: EventKind.PageFault
+            11: EventKind.RandomSeed
+            12: EventKind.DeviceIo
+            _: EventKind.Checkpoint
+
+    fn to_text() -> text:
+        match self:
+            case EventKind.Schedule: "schedule"
+            case EventKind.SyscallEnter: "syscall-enter"
+            case EventKind.SyscallExit: "syscall-exit"
+            case EventKind.InterruptDeliver: "interrupt"
+            case EventKind.IpcSend: "ipc-send"
+            case EventKind.IpcReceive: "ipc-receive"
+            case EventKind.TimerRead: "timer-read"
+            case EventKind.ThreadCreate: "thread-create"
+            case EventKind.ThreadExit: "thread-exit"
+            case EventKind.MemoryMap: "memory-map"
+            case EventKind.PageFault: "page-fault"
+            case EventKind.RandomSeed: "random-seed"
+            case EventKind.DeviceIo: "device-io"
+            case EventKind.Checkpoint: "checkpoint"
+
+# ============================================================================
+# Replay Entry — Fixed 80 bytes
+# ============================================================================
+
+struct ReplayEntry:
+    event_id: i64       # 8 — monotonic sequence number
+    logical_time: i64   # 8 — logical clock
+    thread_id: i64      # 8
+    process_id: i64     # 8
+    cpu_id: i32         # 4
+    kind: i32           # 4 — EventKind.to_i32()
+    flags: i32          # 4
+    # payload fields vary by kind; stored as generic i64 slots
+    payload_a: i64      # 8
+    payload_b: i64      # 8
+    payload_c: i64      # 8
+    payload_d: i64      # 8
+    crc32: i32          # 4
+                        # total = 80
+
+impl ReplayEntry:
+    static fn create(kind: EventKind, tid: i64, pid: i64, cpu: i32) -> ReplayEntry:
+        ReplayEntry(
+            event_id: 0,
+            logical_time: 0,
+            thread_id: tid,
+            process_id: pid,
+            cpu_id: cpu,
+            kind: kind.to_i32(),
+            flags: 0,
+            payload_a: 0,
+            payload_b: 0,
+            payload_c: 0,
+            payload_d: 0,
+            crc32: 0
+        )
+
+    fn event_kind() -> EventKind:
+        EventKind.from_i32(self.kind)
+
+# ============================================================================
+# Schedule Event Payload Layout
+# ============================================================================
+#   payload_a = old_tid
+#   payload_b = new_tid
+#   payload_c = reason (i64 encoding of ScheduleReason)
+#   payload_d = preempt_count
+
+# ============================================================================
+# Syscall Event Payload Layout
+# ============================================================================
+#   SyscallEnter:
+#     payload_a = syscall_number
+#     payload_b = arg0
+#     payload_c = arg1
+#     payload_d = arg2
+#   SyscallExit:
+#     payload_a = syscall_number
+#     payload_b = return_value
+#     payload_c = 0
+#     payload_d = 0
+
+# ============================================================================
+# Interrupt Event Payload Layout
+# ============================================================================
+#   payload_a = irq_vector
+#   payload_b = delivery_time (logical)
+#   payload_c = controller_state_hash
+#   payload_d = 0
+
+# ============================================================================
+# Timer Read Event Payload Layout
+# ============================================================================
+#   payload_a = clock_source_id
+#   payload_b = value
+#   payload_c = 0
+#   payload_d = 0
+
+# ============================================================================
+# Thread Create/Exit Payload Layout
+# ============================================================================
+#   ThreadCreate:
+#     payload_a = parent_tid
+#     payload_b = child_tid
+#     payload_c = entry_addr
+#     payload_d = 0
+#   ThreadExit:
+#     payload_a = exit_code
+#     payload_b = 0
+#     payload_c = 0
+#     payload_d = 0
+
+# ============================================================================
+# IPC Send/Receive Payload Layout
+# ============================================================================
+#   payload_a = src_or_dst_task_id
+#   payload_b = port_id
+#   payload_c = message_length
+#   payload_d = 0

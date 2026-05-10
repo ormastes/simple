@@ -1,0 +1,82 @@
+# SReplay — CLI Record Session Handler
+#
+# Handles `simple record ./app` — records a process execution via strace
+# and writes the trace to a .srr directory.
+
+use std.io.{shell}
+use std.nogc_sync_mut.replay.process.recorder.{ProcessRecorder}
+use std.nogc_sync_mut.replay.process.trace_io.{write_process_trace, ProcessTraceMetadata}
+
+# ============================================================================
+# CLI Entry Point
+# ============================================================================
+
+fn run_record(args: [text]):
+    if args.len() == 0:
+        print_record_help()
+        return
+
+    # Parse arguments
+    var command = ""
+    var output_dir = ""
+    var i = 0
+    while i < args.len():
+        val arg = args[i]
+        if arg == "--help" or arg == "-h":
+            print_record_help()
+            return
+        elif arg == "-o" or arg == "--output":
+            if i + 1 < args.len():
+                i = i + 1
+                output_dir = args[i]
+            else:
+                print "Error: -o requires an argument"
+                return
+        else:
+            # Everything else is the command to record
+            if command.len() > 0:
+                command = command + " " + arg
+            else:
+                command = arg
+        i = i + 1
+
+    if command.len() == 0:
+        print "Error: no command specified"
+        print_record_help()
+        return
+
+    # Default output directory
+    if output_dir.len() == 0:
+        output_dir = "trace.srr"
+
+    # Record
+    print "[sreplay] Recording command: {command}"
+    print "[sreplay] Output: {output_dir}"
+
+    var recorder = ProcessRecorder.create(command, output_dir)
+    val result = recorder.record()
+    match result:
+        case Ok(events):
+            # Write trace
+            val metadata = ProcessTraceMetadata.create(command)
+            val write_res = write_process_trace(output_dir, events, metadata)
+            match write_res:
+                case Ok(_):
+                    print "[sreplay] Recording complete: {events.len()} events -> {output_dir}/"
+                case Err(e):
+                    print "Error writing trace: {e}"
+        case Err(e):
+            print "Error recording: {e}"
+
+fn print_record_help():
+    print "Usage: simple record [options] <command>"
+    print ""
+    print "Record a process execution for deterministic replay."
+    print ""
+    print "Options:"
+    print "  -o, --output <dir>   Output directory (default: trace.srr)"
+    print "  -h, --help           Show this help"
+    print ""
+    print "Examples:"
+    print "  simple record ./my_app"
+    print "  simple record -o my_trace.srr ./my_app arg1 arg2"

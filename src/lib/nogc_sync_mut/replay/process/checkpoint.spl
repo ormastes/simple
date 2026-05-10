@@ -1,0 +1,109 @@
+# SReplay — Page-Level Checkpoint Types
+#
+# Captures process memory state at a given point in the event stream
+# for reverse execution. Stores dirty pages + register state.
+
+use std.nogc_sync_mut.replay.process.event_types.{ProcessReplayEvent}
+
+# ============================================================================
+# Dirty Page
+# ============================================================================
+
+struct DirtyPage:
+    addr: i64          # page-aligned virtual address
+    data: [i32]        # page contents as byte values (0-255)
+
+impl DirtyPage:
+    static fn create(addr: i64, data: [i32]) -> DirtyPage:
+        DirtyPage(addr: addr, data: data)
+
+    fn page_size() -> i64:
+        self.data.len()
+
+    fn summary() -> text:
+        "page@0x{self.addr} size={self.data.len()}"
+
+# ============================================================================
+# Register Entry (name -> value pair)
+# ============================================================================
+
+struct RegisterEntry:
+    name: text
+    value: i64
+
+impl RegisterEntry:
+    static fn create(name: text, value: i64) -> RegisterEntry:
+        RegisterEntry(name: name, value: value)
+
+# ============================================================================
+# Page Checkpoint
+# ============================================================================
+
+struct PageCheckpoint:
+    checkpoint_id: i32
+    event_seq: i64              # event at which checkpoint was taken
+    register_state: [RegisterEntry]   # register name -> value
+    dirty_pages: [DirtyPage]
+
+impl PageCheckpoint:
+    static fn create(id: i32, event_seq: i64) -> PageCheckpoint:
+        PageCheckpoint(
+            checkpoint_id: id,
+            event_seq: event_seq,
+            register_state: [],
+            dirty_pages: []
+        )
+
+    fn add_register(name: text, value: i64):
+        self.register_state.push(RegisterEntry.create(name, value))
+
+    fn add_dirty_page(addr: i64, data: [i32]):
+        self.dirty_pages.push(DirtyPage.create(addr, data))
+
+    fn get_register(name: text) -> Option<i64>:
+        for reg in self.register_state:
+            if reg.name == name:
+                return Some(reg.value)
+        None
+
+    fn summary() -> text:
+        "checkpoint#{self.checkpoint_id} seq={self.event_seq} regs={self.register_state.len()} pages={self.dirty_pages.len()}"
+
+# ============================================================================
+# Checkpoint Manager
+# ============================================================================
+
+struct CheckpointManager:
+    checkpoints: [PageCheckpoint]
+    next_id: i32
+
+impl CheckpointManager:
+    static fn create() -> CheckpointManager:
+        CheckpointManager(checkpoints: [], next_id: 0)
+
+    fn take_checkpoint(event_seq: i64) -> PageCheckpoint:
+        val cp = PageCheckpoint.create(self.next_id, event_seq)
+        self.next_id = self.next_id + 1
+        self.checkpoints.push(cp)
+        cp
+
+    fn find_checkpoint(id: i32) -> Option<PageCheckpoint>:
+        for cp in self.checkpoints:
+            if cp.checkpoint_id == id:
+                return Some(cp)
+        None
+
+    fn nearest_before(event_seq: i64) -> Option<PageCheckpoint>:
+        var best: Option<PageCheckpoint> = None
+        for cp in self.checkpoints:
+            if cp.event_seq <= event_seq:
+                match best:
+                    case Some(prev):
+                        if cp.event_seq > prev.event_seq:
+                            best = Some(cp)
+                    case None:
+                        best = Some(cp)
+        best
+
+    fn count() -> i32:
+        self.checkpoints.len() as i32

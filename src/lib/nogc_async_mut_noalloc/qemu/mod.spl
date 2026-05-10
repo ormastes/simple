@@ -101,6 +101,12 @@ class QemuConfig:
     # Timeout
     timeout_ms: Millis
 
+    # Replay configuration (SReplay)
+    replay_mode: text        # "" (none), "record", "replay"
+    replay_file: text        # Path to .srrq replay log
+    icount_shift: text       # "auto" or numeric icount shift value
+    qmp_socket: text         # Unix socket path for QMP control
+
 impl QemuConfig:
     # Create minimal config for remote debugging
     static fn for_remote_debug(arch: QemuArch, elf_path: text, port: i32) -> QemuConfig:
@@ -119,7 +125,11 @@ impl QemuConfig:
             no_graphic: true,
             no_display: false,
             extra_args: [],
-            timeout_ms: Millis(value: 30000)
+            timeout_ms: Millis(value: 30000),
+            replay_mode: "",
+            replay_file: "",
+            icount_shift: "",
+            qmp_socket: ""
         )
 
     # Create config for bare-metal testing
@@ -139,7 +149,59 @@ impl QemuConfig:
             no_graphic: false,
             no_display: true,        # No display needed
             extra_args: [],
-            timeout_ms: Millis(value: 30000)
+            timeout_ms: Millis(value: 30000),
+            replay_mode: "",
+            replay_file: "",
+            icount_shift: "",
+            qmp_socket: ""
+        )
+
+    # Create config for replay recording
+    static fn for_replay_record(arch: QemuArch, elf_path: text, rrfile: text, qmp_sock: text) -> QemuConfig:
+        QemuConfig(
+            arch: arch,
+            binary_path: elf_path,
+            machine: arch.default_machine(),
+            memory: arch.default_memory(),
+            gdb_enabled: false,
+            gdb_port: PortNumber(value: 0),
+            gdb_wait: false,
+            serial_stdio: false,
+            serial_file: "",
+            debug_exit: false,
+            no_reboot: true,
+            no_graphic: true,
+            no_display: false,
+            extra_args: [],
+            timeout_ms: Millis(value: 120000),
+            replay_mode: "record",
+            replay_file: rrfile,
+            icount_shift: "auto",
+            qmp_socket: qmp_sock
+        )
+
+    # Create config for replay playback with GDB
+    static fn for_replay_replay(arch: QemuArch, elf_path: text, rrfile: text, qmp_sock: text, gdb_port: i32) -> QemuConfig:
+        QemuConfig(
+            arch: arch,
+            binary_path: elf_path,
+            machine: arch.default_machine(),
+            memory: arch.default_memory(),
+            gdb_enabled: true,
+            gdb_port: PortNumber(value: gdb_port),
+            gdb_wait: true,
+            serial_stdio: false,
+            serial_file: "",
+            debug_exit: false,
+            no_reboot: true,
+            no_graphic: true,
+            no_display: false,
+            extra_args: [],
+            timeout_ms: Millis(value: 120000),
+            replay_mode: "replay",
+            replay_file: rrfile,
+            icount_shift: "auto",
+            qmp_socket: qmp_sock
         )
 
     # Build QEMU command-line arguments
@@ -192,6 +254,22 @@ impl QemuConfig:
         # No reboot
         if self.no_reboot:
             args.push("-no-reboot")
+
+        # Replay configuration — must come before extra_args
+        if self.replay_mode.len() > 0:
+            # Force TCG (KVM is incompatible with icount/replay)
+            args.push("-accel")
+            args.push("tcg")
+
+            # icount + record/replay
+            val shift = if self.icount_shift.len() > 0: self.icount_shift else: "auto"
+            args.push("-icount")
+            args.push("shift={shift},rr={self.replay_mode},rrfile={self.replay_file}")
+
+            # QMP control socket for checkpoint save/restore
+            if self.qmp_socket.len() > 0:
+                args.push("-qmp")
+                args.push("unix:{self.qmp_socket},server,wait=off")
 
         # Extra arguments
         for arg in self.extra_args:

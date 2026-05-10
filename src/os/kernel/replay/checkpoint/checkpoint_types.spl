@@ -1,0 +1,196 @@
+# SimpleOS — Container Checkpoint Types
+#
+# Architecture-neutral checkpoint format. Addresses stored as i64
+# (zero-extended for 32-bit targets).
+
+# ============================================================================
+# KernelObjectCheckpoint Trait
+# ============================================================================
+
+trait KernelObjectCheckpoint:
+    fn freeze() -> Result<Nil, text>
+    fn snapshot() -> Result<[i32], text>
+    fn restore(data: [i32]) -> Result<Nil, text>
+    fn thaw() -> Result<Nil, text>
+
+# ============================================================================
+# File Descriptor State
+# ============================================================================
+
+enum FdKind:
+    File
+    Pipe
+    Socket
+    Ipc
+    Device
+
+impl FdKind:
+    fn to_i32() -> i32:
+        match self:
+            case FdKind.File: 0
+            case FdKind.Pipe: 1
+            case FdKind.Socket: 2
+            case FdKind.Ipc: 3
+            case FdKind.Device: 4
+
+    static fn from_i32(v: i32) -> FdKind:
+        match v:
+            0: FdKind.File
+            1: FdKind.Pipe
+            2: FdKind.Socket
+            3: FdKind.Ipc
+            _: FdKind.Device
+
+struct FdEntry:
+    fd: i32
+    kind: FdKind
+    offset: i64
+    flags: i32
+    path: text         # file path, socket endpoint, or pipe id
+
+# ============================================================================
+# Memory Page Snapshot
+# ============================================================================
+
+struct MemoryPage:
+    virt_addr: i64     # page-aligned virtual address
+    phys_addr: i64     # physical address (if known)
+    flags: i32         # page table flags (rwx, present, etc.)
+    data: [i32]        # page contents as bytes
+
+# ============================================================================
+# Process Snapshot
+# ============================================================================
+
+struct ProcessSnapshot:
+    task_id: i64
+    parent_id: i64
+    state: i32              # task state enum value
+    priority: i32
+    # Register state stored as name -> value pairs
+    register_names: [text]
+    register_values: [i64]
+    # Memory
+    memory_pages: [MemoryPage]
+    # File descriptors
+    fd_table: [FdEntry]
+    # Address space metadata
+    heap_start: i64
+    heap_end: i64
+    stack_top: i64
+    stack_bottom: i64
+
+impl ProcessSnapshot:
+    static fn create(task_id: i64, parent_id: i64) -> ProcessSnapshot:
+        ProcessSnapshot(
+            task_id: task_id,
+            parent_id: parent_id,
+            state: 0,
+            priority: 0,
+            register_names: [],
+            register_values: [],
+            memory_pages: [],
+            fd_table: [],
+            heap_start: 0,
+            heap_end: 0,
+            stack_top: 0,
+            stack_bottom: 0
+        )
+
+    fn add_register(name: text, value: i64):
+        self.register_names.push(name)
+        self.register_values.push(value)
+
+    fn add_page(page: MemoryPage):
+        self.memory_pages.push(page)
+
+    fn add_fd(entry: FdEntry):
+        self.fd_table.push(entry)
+
+# ============================================================================
+# IPC Snapshot
+# ============================================================================
+
+struct QueueSnapshot:
+    port_id: i64
+    message_count: i32
+    total_bytes: i64
+    data: [i32]        # serialized message data
+
+struct NotifSnapshot:
+    notif_id: i64
+    pending: bool
+    waiters: [i64]     # task IDs waiting
+
+struct SharedRegionSnapshot:
+    region_id: i64
+    phys_addr: i64
+    size: i64
+    owner_task: i64
+    mapped_tasks: [i64]
+    data: [i32]
+
+struct IpcSnapshot:
+    message_queues: [QueueSnapshot]
+    notifications: [NotifSnapshot]
+    shared_regions: [SharedRegionSnapshot]
+
+impl IpcSnapshot:
+    static fn create() -> IpcSnapshot:
+        IpcSnapshot(
+            message_queues: [],
+            notifications: [],
+            shared_regions: []
+        )
+
+# ============================================================================
+# Filesystem Overlay
+# ============================================================================
+
+struct FsOverlayEntry:
+    path: text
+    mode: i32          # file permissions
+    size: i64
+    data: [i32]        # file contents as bytes
+    is_deleted: bool   # true if file was deleted vs modified
+
+# ============================================================================
+# Container Checkpoint
+# ============================================================================
+
+struct ContainerCheckpoint:
+    checkpoint_id: i32
+    timestamp_ns: i64
+    container_id: text
+    # Process tree
+    processes: [ProcessSnapshot]
+    # IPC state
+    ipc_state: IpcSnapshot
+    # Filesystem overlay (modified files within container rootfs)
+    fs_overlay: [FsOverlayEntry]
+    # Replay cursor — event ID at which checkpoint was taken
+    replay_event_id: i64
+
+impl ContainerCheckpoint:
+    static fn create(container_id: text, checkpoint_id: i32) -> ContainerCheckpoint:
+        ContainerCheckpoint(
+            checkpoint_id: checkpoint_id,
+            timestamp_ns: 0,
+            container_id: container_id,
+            processes: [],
+            ipc_state: IpcSnapshot.create(),
+            fs_overlay: [],
+            replay_event_id: 0
+        )
+
+    fn add_process(snapshot: ProcessSnapshot):
+        self.processes.push(snapshot)
+
+    fn process_count() -> i32:
+        self.processes.len() as i32
+
+    fn total_pages() -> i64:
+        var total: i64 = 0
+        for p in self.processes:
+            total = total + p.memory_pages.len()
+        total

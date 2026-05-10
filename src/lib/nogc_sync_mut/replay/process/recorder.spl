@@ -1,0 +1,169 @@
+# SReplay — Ptrace-Based Process Recorder
+#
+# Records syscall results and signals from a Linux process using strace.
+# Phase 1: shell("strace ...") to capture a trace file, then parse it.
+# Phase 2 (future): direct ptrace FFI for lower overhead.
+
+use std.io.{shell}
+use std.nogc_sync_mut.replay.process.event_types.{ProcessEventKind, ProcessReplayEvent}
+
+# ============================================================================
+# ProcessRecorder
+# ============================================================================
+
+struct ProcessRecorder:
+    command: text                    # command to record
+    trace_dir: text                 # output directory for .srr
+    events: [ProcessReplayEvent]    # recorded events
+    next_seq: i64                   # monotonic counter
+    strace_path: text               # path to raw strace output
+
+impl ProcessRecorder:
+    static fn create(command: text, trace_dir: text) -> ProcessRecorder:
+        ProcessRecorder(
+            command: command,
+            trace_dir: trace_dir,
+            events: [],
+            next_seq: 0,
+            strace_path: ""
+        )
+
+    # Run the target command under strace and collect raw trace
+    fn record() -> Result<[ProcessReplayEvent], text>:
+        # Create output directory
+        val mkdir_res = shell("mkdir -p '{self.trace_dir}'")
+        if mkdir_res.exit_code != 0:
+            return Err("failed to create trace dir: {self.trace_dir}")
+
+        # Run strace
+        val strace_out = "{self.trace_dir}/strace_raw.log"
+        self.strace_path = strace_out
+        val strace_cmd = "strace -f -tt -T -e trace=all -o '{strace_out}' {self.command} 2>&1"
+        print "[sreplay] Recording: {self.command}"
+        val run_res = shell(strace_cmd)
+
+        # Parse strace output into events
+        val parse_result = self.parse_strace_output(strace_out)
+        match parse_result:
+            case Ok(parsed_events):
+                self.events = parsed_events
+                print "[sreplay] Recorded {self.events.len()} events"
+                Ok(self.events)
+            case Err(e):
+                Err("strace parse failed: {e}")
+
+    # Parse raw strace output into ProcessReplayEvent list
+    fn parse_strace_output(path: text) -> Result<[ProcessReplayEvent], text>:
+        val cat_res = shell("cat '{path}' 2>/dev/null")
+        if cat_res.exit_code != 0:
+            return Err("cannot read strace output: {path}")
+
+        var events: [ProcessReplayEvent] = []
+        var seq: i64 = 0
+        val lines = cat_res.stdout.split("\n")
+        for line in lines:
+            val trimmed = line.trim()
+            if trimmed.len() == 0:
+                continue
+
+            # Parse pid from lines like "12345 12:00:00.123 write(...) = 5"
+            val parsed = parse_strace_line(trimmed, seq)
+            match parsed:
+                case Some(ev):
+                    events.push(ev)
+                    seq = seq + 1
+                case None:
+                    pass_dn
+
+        Ok(events)
+
+# ============================================================================
+# Strace Line Parser
+# ============================================================================
+
+fn parse_strace_line(line: text, seq: i64) -> Option<ProcessReplayEvent>:
+    # Lines look like:
+    #   12345 12:34:56.789 syscall(...) = result <time>
+    #   12345 12:34:56.789 --- SIGCHLD ... ---
+    #   12345 12:34:56.789 +++ exited with 0 +++
+
+    # Detect signals
+    if line.contains("--- SIG"):
+        val tid = extract_pid(line)
+        return Some(ProcessReplayEvent.signal_event(seq, tid, 0, 0))
+
+    # Detect exit
+    if line.contains("+++ exited with"):
+        val tid = extract_pid(line)
+        val exit_code = extract_exit_code(line)
+        return Some(ProcessReplayEvent.exit_event(seq, tid, 0, exit_code))
+
+    # Detect syscall entry/exit (combined in strace output)
+    if line.contains("(") and line.contains("="):
+        val tid = extract_pid(line)
+        val syscall_nr = extract_syscall_nr(line)
+        val retval = extract_retval(line)
+
+        # Emit entry + exit as a pair
+        return Some(ProcessReplayEvent.syscall_exit(seq, tid, 0, retval))
+
+    None
+
+fn extract_pid(line: text) -> i64:
+    # First token before space is the PID
+    var num_str = ""
+    for ch in line:
+        if ch == " " or ch == "\t":
+            break
+        if ch >= "0" and ch <= "9":
+            num_str = num_str + ch
+    if num_str.len() > 0:
+        num_str.to_i64()
+    else:
+        0
+
+fn extract_exit_code(line: text) -> i64:
+    # Parse "+++ exited with N +++"
+    val marker = "exited with "
+    val idx = line.index_of(marker)
+    if idx < 0:
+        return 0
+    val after = line.slice(idx + marker.len(), line.len())
+    var num_str = ""
+    for ch in after:
+        if ch >= "0" and ch <= "9":
+            num_str = num_str + ch
+        else:
+            break
+    if num_str.len() > 0:
+        num_str.to_i64()
+    else:
+        0
+
+fn extract_syscall_nr(line: text) -> i64:
+    # For now, return 0 — full syscall number mapping is a future enhancement
+    0
+
+fn extract_retval(line: text) -> i64:
+    # Find "= <value>" at end of line
+    val eq_idx = line.last_index_of("= ")
+    if eq_idx < 0:
+        return 0
+    val after = line.slice(eq_idx + 2, line.len())
+    val trimmed = after.trim()
+    # Handle negative return values and hex
+    var num_str = ""
+    var is_neg = false
+    for ch in trimmed:
+        if ch == "-":
+            is_neg = true
+        elif ch >= "0" and ch <= "9":
+            num_str = num_str + ch
+        else:
+            break
+    if num_str.len() == 0:
+        return 0
+    var result = num_str.to_i64()
+    if is_neg:
+        result = 0 - result
+    result

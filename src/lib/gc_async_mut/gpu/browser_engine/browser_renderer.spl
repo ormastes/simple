@@ -30,6 +30,7 @@ use std.gc_async_mut.gpu.engine2d.glyph.{glyph_data, glyph_advance}
 use common.text_layout.font_renderer.{FontRenderer, CachedGlyph, ensure_browser_font_face_sources}
 use std.nogc_sync_mut.ffi.spl_fonts.{SubpixelGlyphBitmap}
 use std.nogc_sync_mut.ffi.system.{env_get}
+use std.gc_async_mut.gpu.browser_engine.net.net_delegate.{NetDelegate}
 
 # Bulk allocator for ARGB pixel buffers — replaces 40K-iteration interpreter
 # push loop with a single Rust-side `vec![]` (~300x speedup per
@@ -104,6 +105,17 @@ class BrowserRenderer:
     viewport_h: i32
     bg_color: u32
     engine: Engine2D?
+    net_delegate: NetDelegate?
+
+    static fn new() -> BrowserRenderer:
+        """Create a default BrowserRenderer with no viewport (for testing)."""
+        return BrowserRenderer(
+            viewport_w: 800,
+            viewport_h: 600,
+            bg_color: 0xFFFFFFFF,
+            engine: nil,
+            net_delegate: nil
+        )
 
     static fn create(w: i32, h: i32) -> BrowserRenderer:
         """Create a browser renderer with the given viewport size.
@@ -113,7 +125,8 @@ class BrowserRenderer:
             viewport_w: w,
             viewport_h: h,
             bg_color: 0xFFFFFFFF,
-            engine: nil
+            engine: nil,
+            net_delegate: nil
         )
 
     static fn create_with_engine(w: i32, h: i32, engine: Engine2D) -> BrowserRenderer:
@@ -122,7 +135,8 @@ class BrowserRenderer:
             viewport_w: w,
             viewport_h: h,
             bg_color: 0xFFFFFFFF,
-            engine: engine
+            engine: engine,
+            net_delegate: nil
         )
 
     static fn create_with_backend(w: i32, h: i32, backend: text) -> BrowserRenderer:
@@ -147,6 +161,25 @@ class BrowserRenderer:
     me set_background(color: u32):
         """Set the background clear color."""
         self.bg_color = color
+
+    me set_net_delegate(d: NetDelegate):
+        """Inject a NetDelegate for navigation. Default is none (headless)."""
+        self.net_delegate = Some(d)
+
+    me navigate(url: text):
+        """Navigate to a URL. Delegates to net_delegate if set; no-op otherwise."""
+        if val Some(delegate) = self.net_delegate:
+            use std.gc_async_mut.gpu.browser_engine.net.entity.url_types.{Url}
+            val nav_url = Url {
+                scheme: "https",
+                host: url,
+                port: 443,
+                path: "/",
+                query: "",
+                fragment: ""
+            }
+            delegate.navigate(nav_url)
+            pass_do_nothing
 
     me render_dom(root: BeDomNode) -> BeRenderResult:
         """Render a DOM tree to a RenderScene.

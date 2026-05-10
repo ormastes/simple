@@ -1,0 +1,183 @@
+# SimpleOS Kernel Replay — Hook Functions
+#
+# Called from kernel subsystems (scheduler, syscall, IPC, interrupts, timer).
+# Each hook checks replay_is_off() first — single load + branch, zero cost
+# when replay is disabled.
+
+use os.kernel.replay.mode.{replay_is_off, replay_is_recording, replay_mode, KernelReplayMode}
+use os.kernel.replay.event_kinds.{ReplayEntry, EventKind}
+use os.kernel.replay.log_buffer.{replay_log_event, replay_read_next}
+
+# ============================================================================
+# Schedule Hook
+# ============================================================================
+
+fn replay_hook_schedule(old_tid: i64, new_tid: i64, tick: i64):
+    if replay_is_off():
+        return
+
+    if replay_is_recording():
+        var entry = ReplayEntry.create(EventKind.Schedule, old_tid, 0, 0)
+        entry.payload_a = old_tid
+        entry.payload_b = new_tid
+        entry.payload_c = tick
+        replay_log_event(entry)
+
+# ============================================================================
+# Syscall Hooks
+# ============================================================================
+
+fn replay_hook_syscall_enter(task_id: i64, syscall_id: i64, arg0: i64, arg1: i64, arg2: i64):
+    if replay_is_off():
+        return
+
+    if replay_is_recording():
+        var entry = ReplayEntry.create(EventKind.SyscallEnter, task_id, 0, 0)
+        entry.payload_a = syscall_id
+        entry.payload_b = arg0
+        entry.payload_c = arg1
+        entry.payload_d = arg2
+        replay_log_event(entry)
+
+fn replay_hook_syscall_exit(task_id: i64, syscall_id: i64, retval: i64):
+    if replay_is_off():
+        return
+
+    if replay_is_recording():
+        var entry = ReplayEntry.create(EventKind.SyscallExit, task_id, 0, 0)
+        entry.payload_a = syscall_id
+        entry.payload_b = retval
+        replay_log_event(entry)
+
+# ============================================================================
+# Interrupt Hook
+# ============================================================================
+
+fn replay_hook_irq(vector: i64, task_id: i64, timestamp: i64):
+    if replay_is_off():
+        return
+
+    if replay_is_recording():
+        var entry = ReplayEntry.create(EventKind.InterruptDeliver, task_id, 0, 0)
+        entry.payload_a = vector
+        entry.payload_b = timestamp
+        replay_log_event(entry)
+
+# ============================================================================
+# IPC Hooks
+# ============================================================================
+
+fn replay_hook_ipc_send(src_task: i64, dst_port: i64, msg_len: i64):
+    if replay_is_off():
+        return
+
+    if replay_is_recording():
+        var entry = ReplayEntry.create(EventKind.IpcSend, src_task, 0, 0)
+        entry.payload_a = src_task
+        entry.payload_b = dst_port
+        entry.payload_c = msg_len
+        replay_log_event(entry)
+
+fn replay_hook_ipc_recv(dst_task: i64, src_port: i64, msg_len: i64):
+    if replay_is_off():
+        return
+
+    if replay_is_recording():
+        var entry = ReplayEntry.create(EventKind.IpcReceive, dst_task, 0, 0)
+        entry.payload_a = dst_task
+        entry.payload_b = src_port
+        entry.payload_c = msg_len
+        replay_log_event(entry)
+
+# ============================================================================
+# Timer Hook
+# ============================================================================
+
+fn replay_hook_timer_read(source_id: i64, value: i64) -> i64:
+    if replay_is_off():
+        return value
+
+    if replay_is_recording():
+        var entry = ReplayEntry.create(EventKind.TimerRead, 0, 0, 0)
+        entry.payload_a = source_id
+        entry.payload_b = value
+        replay_log_event(entry)
+        return value
+
+    # Replay mode: return logged value instead of hardware
+    match replay_mode():
+        case KernelReplayMode.Replay:
+            match replay_read_next():
+                case Some(entry):
+                    if entry.kind == EventKind.TimerRead.to_i32():
+                        return entry.payload_b
+                    return value
+                case None:
+                    return value
+        case _:
+            return value
+    value
+
+# ============================================================================
+# Thread Lifecycle Hooks
+# ============================================================================
+
+fn replay_hook_thread_create(parent_tid: i64, child_tid: i64, entry_addr: i64):
+    if replay_is_off():
+        return
+
+    if replay_is_recording():
+        var entry = ReplayEntry.create(EventKind.ThreadCreate, parent_tid, 0, 0)
+        entry.payload_a = parent_tid
+        entry.payload_b = child_tid
+        entry.payload_c = entry_addr
+        replay_log_event(entry)
+
+fn replay_hook_thread_exit(task_id: i64, exit_code: i64):
+    if replay_is_off():
+        return
+
+    if replay_is_recording():
+        var entry = ReplayEntry.create(EventKind.ThreadExit, task_id, 0, 0)
+        entry.payload_a = exit_code
+        replay_log_event(entry)
+
+# ============================================================================
+# Random/Entropy Hook
+# ============================================================================
+
+fn replay_hook_random_read(task_id: i64, value: i64) -> i64:
+    if replay_is_off():
+        return value
+
+    if replay_is_recording():
+        var entry = ReplayEntry.create(EventKind.RandomSeed, task_id, 0, 0)
+        entry.payload_a = value
+        replay_log_event(entry)
+        return value
+
+    match replay_mode():
+        case KernelReplayMode.Replay:
+            match replay_read_next():
+                case Some(entry):
+                    if entry.kind == EventKind.RandomSeed.to_i32():
+                        return entry.payload_a
+                    return value
+                case None:
+                    return value
+        case _:
+            return value
+    value
+
+# ============================================================================
+# Checkpoint Marker
+# ============================================================================
+
+fn replay_hook_checkpoint(checkpoint_id: i64):
+    if replay_is_off():
+        return
+
+    if replay_is_recording():
+        var entry = ReplayEntry.create(EventKind.Checkpoint, 0, 0, 0)
+        entry.payload_a = checkpoint_id
+        replay_log_event(entry)

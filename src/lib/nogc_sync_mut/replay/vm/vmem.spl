@@ -1,0 +1,92 @@
+# SReplay VM — Virtual Memory
+#
+# Flat physical memory with page-level dirty tracking.
+# No MMU/page table emulation yet — flat address space.
+
+# ============================================================================
+# Virtual Memory
+# ============================================================================
+
+class VirtualMemory:
+    memory: [i32]         # byte-addressable memory
+    size: i64             # total bytes
+    page_size: i64
+    dirty_mask: [bool]    # one entry per page
+
+impl VirtualMemory:
+    static fn create(size_bytes: i64, page_size: i64) -> VirtualMemory:
+        var mem: [i32] = []
+        var i: i64 = 0
+        while i < size_bytes:
+            mem.push(0)
+            i = i + 1
+        val num_pages = size_bytes / page_size
+        var dirty: [bool] = []
+        i = 0
+        while i < num_pages:
+            dirty.push(false)
+            i = i + 1
+        VirtualMemory(
+            memory: mem,
+            size: size_bytes,
+            page_size: page_size,
+            dirty_mask: dirty
+        )
+
+    fn read_byte(addr: i64) -> i32:
+        if addr < 0 or addr >= self.size:
+            return 0
+        self.memory[addr]
+
+    fn write_byte(addr: i64, value: i32):
+        if addr < 0 or addr >= self.size:
+            return
+        self.memory[addr] = value & 0xFF
+        val page_idx = addr / self.page_size
+        if page_idx < self.dirty_mask.len():
+            self.dirty_mask[page_idx] = true
+
+    fn read(addr: i64, width: i32) -> i64:
+        var result: i64 = 0
+        var i = 0
+        while i < width:
+            val byte = self.read_byte(addr + i) as i64
+            result = result + (byte * (1 << (i * 8)))
+            i = i + 1
+        result
+
+    fn write(addr: i64, value: i64, width: i32):
+        var i = 0
+        var v = value
+        while i < width:
+            self.write_byte(addr + i, (v & 0xFF) as i32)
+            v = v / 256
+            i = i + 1
+
+    fn load_binary(addr: i64, data: [i32]):
+        var i: i64 = 0
+        for byte in data:
+            self.write_byte(addr + i, byte)
+            i = i + 1
+
+    fn dirty_page_count() -> i64:
+        var count: i64 = 0
+        for d in self.dirty_mask:
+            if d:
+                count = count + 1
+        count
+
+    fn clear_dirty():
+        var i: i64 = 0
+        while i < self.dirty_mask.len():
+            self.dirty_mask[i] = false
+            i = i + 1
+
+    fn get_dirty_page_addrs() -> [i64]:
+        var addrs: [i64] = []
+        var i: i64 = 0
+        while i < self.dirty_mask.len():
+            if self.dirty_mask[i]:
+                addrs.push(i * self.page_size)
+            i = i + 1
+        addrs
