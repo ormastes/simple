@@ -506,17 +506,13 @@ fn wots_sign_128s(message_n_bytes: [u8], sk_seed: [u8], pk_seed: [u8], adrs_in: 
     wots_sign_p(message_n_bytes, sk_seed, pk_seed, adrs_in, _slh_n_128s(), _slh_hash_sha256())
 
 # ============================================================================
-# WOTS+_pkFromSig (FIPS 205 Algorithm 8) — SHA2-128s
+# WOTS+_pkFromSig (FIPS 205 Algorithm 8) — parameterized
 # ============================================================================
-#
-# Recovers the WOTS+ public key from a signature + message by completing
-# each chain from step `digit_i` for `(w-1) - digit_i` further iterations,
-# then T_len-compressing the recovered terminal values.
 
-fn wots_pk_from_sig_128s(message_n_bytes: [u8], signature: [u8], pk_seed: [u8], adrs_in: [u8]) -> [u8]:
-    val len = 35
+fn wots_pk_from_sig_p(message_n_bytes: [u8], signature: [u8], pk_seed: [u8], adrs_in: [u8], n: u64, hash_id: i64) -> [u8]:
+    val len = _slh_wots_len(n)
     val w_minus_1 = 15
-    val digits = wots_msg_to_digits_128s(message_n_bytes)
+    val digits = wots_msg_to_digits_p(message_n_bytes, n)
     var adrs_wots = adrs_copy(adrs_in)
     val keypair_b = (adrs_wots[20u64].to_i64() << 24)
         | (adrs_wots[21u64].to_i64() << 16)
@@ -526,24 +522,26 @@ fn wots_pk_from_sig_128s(message_n_bytes: [u8], signature: [u8], pk_seed: [u8], 
     var tmp: [u8] = [0u8; 0]
     var i = 0
     while i < len:
-        # Slice n bytes of signature for chain i.
         var sig_i: [u8] = [0u8; 0]
         var k: u64 = 0u64
-        val base_off: u64 = i.to_u64() * _slh_n_128s()
-        while k < _slh_n_128s():
+        val base_off: u64 = i.to_u64() * n
+        while k < n:
             sig_i.push(signature[base_off + k])
             k = k + 1
         var adrs_chain = adrs_set_type(adrs_wots, adrs_type_wots_hash())
         adrs_chain = adrs_set_keypair_address(adrs_chain, keypair_b)
         adrs_chain = adrs_set_chain_address(adrs_chain, i)
         val msg_digit = digits.get(i)
-        val tip = wots_chain(sig_i, msg_digit, w_minus_1 - msg_digit, pk_seed, adrs_chain)
+        val tip = wots_chain_p(sig_i, msg_digit, w_minus_1 - msg_digit, pk_seed, adrs_chain, n, hash_id)
         var k2: u64 = 0u64
-        while k2 < _slh_n_128s():
+        while k2 < n:
             tmp.push(tip[k2])
             k2 = k2 + 1
         i = i + 1
 
     var adrs_pk = adrs_set_type(adrs_wots, adrs_type_wots_pk())
     adrs_pk = adrs_set_keypair_address(adrs_pk, keypair_b)
-    slh_T_l_128s(pk_seed, adrs_pk, tmp)
+    slh_T_l(pk_seed, adrs_pk, tmp, n, hash_id)
+
+fn wots_pk_from_sig_128s(message_n_bytes: [u8], signature: [u8], pk_seed: [u8], adrs_in: [u8]) -> [u8]:
+    wots_pk_from_sig_p(message_n_bytes, signature, pk_seed, adrs_in, _slh_n_128s(), _slh_hash_sha256())

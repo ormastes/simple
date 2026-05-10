@@ -1,0 +1,119 @@
+# Physics2 Breakout — System Test
+#
+# Verifies: circle-AABB collision, kinematic bodies, BVH (many colliders),
+# elastic bounce, velocity magnitude preservation.
+# Uses module-level helper fns for stepping.
+
+use std.io_runtime
+use std.spec.{describe, it, expect}
+use std.common.math.{math_sqrt, math_abs}
+use std.common.engine.ids.{NodeId, RawHandle}
+use std.common.engine.math2d.{Vec2}
+use std.nogc_sync_mut.engine.physics2.config.{default_physics_config_2d}
+use std.nogc_sync_mut.engine.physics2.world2d.{PhysicsWorld2D}
+
+fn make_node(idx: i64) -> NodeId:
+    NodeId(raw: RawHandle.new(idx, 1))
+
+fn make_breakout_world() -> PhysicsWorld2D:
+    var config = default_physics_config_2d()
+    config.gravity = Vec2(x: 0.0, y: 0.0)
+    config.restitution = 1.0
+    config.friction = 0.0
+    var world = PhysicsWorld2D.create(config)
+    # Walls: top, left, right (no bottom — ball can escape)
+    world.add_static_body(make_node(100), 0.0, 6.0)
+    world.add_box_collider(make_node(100), 5.0, 0.5)
+    world.add_static_body(make_node(101), -5.0, 3.0)
+    world.add_box_collider(make_node(101), 0.5, 4.0)
+    world.add_static_body(make_node(102), 5.0, 3.0)
+    world.add_box_collider(make_node(102), 0.5, 4.0)
+    # Bricks: 5x3 grid (15 bricks, nodes 10-24)
+    var row = 0
+    while row < 3:
+        var col = 0
+        while col < 5:
+            val nid = 10 + row * 5 + col
+            val bx = -3.0 + col.to_f64() * 1.5
+            val by = 4.0 + row.to_f64() * 0.8
+            world.add_static_body(make_node(nid), bx, by)
+            world.add_box_collider(make_node(nid), 0.6, 0.3)
+            col = col + 1
+        row = row + 1
+    # Ball: dynamic circle
+    world.add_dynamic_body(make_node(0), 0.0, 1.0, 1.0)
+    world.add_circle_collider(make_node(0), 0.3)
+    world
+
+fn step_n(world: PhysicsWorld2D, n: i64):
+    var i = 0
+    while i < n:
+        world.step(0.016)
+        i = i + 1
+
+fn get_speed(world: PhysicsWorld2D) -> f64:
+    val vel = world.get_velocity(make_node(0))
+    math_sqrt(vel.x * vel.x + vel.y * vel.y)
+
+describe "Physics2 Breakout System":
+    it "ball moves after launch":
+        var world = make_breakout_world()
+        world.apply_impulse(make_node(0), 2.0, 4.0)
+        step_n(world, 20)
+        val pos = world.get_position(make_node(0))
+        expect(pos.y > 1.5).to_equal(true)
+        world.destroy()
+
+    it "ball stays within world bounds":
+        var world = make_breakout_world()
+        world.apply_impulse(make_node(0), 3.0, 4.0)
+        step_n(world, 80)
+        val pos = world.get_position(make_node(0))
+        expect(pos.x > -6.0).to_equal(true)
+        expect(pos.x < 6.0).to_equal(true)
+        expect(pos.y < 8.0).to_equal(true)
+        world.destroy()
+
+    it "ball speed approximately preserved":
+        var world = make_breakout_world()
+        world.apply_impulse(make_node(0), 0.5, 4.0)
+        step_n(world, 30)
+        val speed_after = get_speed(world)
+        expect(speed_after > 1.0).to_equal(true)
+        world.destroy()
+
+    it "BVH active with many colliders":
+        var world = make_breakout_world()
+        expect(world.colliders.count > 4).to_equal(true)
+        expect(world.use_bvh).to_equal(true)
+        world.destroy()
+
+    it "deterministic simulation":
+        var config = default_physics_config_2d()
+        config.gravity = Vec2(x: 0.0, y: 0.0)
+        config.restitution = 1.0
+        config.friction = 0.0
+        var w1 = PhysicsWorld2D.create(config)
+        w1.add_dynamic_body(make_node(0), 0.0, 1.0, 1.0)
+        w1.add_circle_collider(make_node(0), 0.3)
+        w1.add_static_body(make_node(100), 0.0, 5.0)
+        w1.add_box_collider(make_node(100), 3.0, 0.5)
+        w1.apply_impulse(make_node(0), 1.0, 4.0)
+        step_n(w1, 50)
+        val p1 = w1.get_position(make_node(0))
+        w1.destroy()
+        var config2 = default_physics_config_2d()
+        config2.gravity = Vec2(x: 0.0, y: 0.0)
+        config2.restitution = 1.0
+        config2.friction = 0.0
+        var w2 = PhysicsWorld2D.create(config2)
+        w2.add_dynamic_body(make_node(0), 0.0, 1.0, 1.0)
+        w2.add_circle_collider(make_node(0), 0.3)
+        w2.add_static_body(make_node(100), 0.0, 5.0)
+        w2.add_box_collider(make_node(100), 3.0, 0.5)
+        w2.apply_impulse(make_node(0), 1.0, 4.0)
+        step_n(w2, 50)
+        val p2 = w2.get_position(make_node(0))
+        w2.destroy()
+        expect(p1.x).to_equal(p2.x)
+        expect(p1.y).to_equal(p2.y)

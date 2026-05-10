@@ -43,13 +43,19 @@ mod os.crypto.slh_dsa
 use os.crypto.slh_dsa_wots.{
     adrs_new, adrs_set_layer, adrs_set_tree_address,
     adrs_set_keypair_address,
+    _slh_hash_sha256, _slh_hash_sha512,
 }
 use os.crypto.slh_dsa_xmss.{xmss_node}
 use os.crypto.slh_dsa_fors.{
     fors_pk_gen, fors_sign, fors_pk_from_sig,
+    fors_sign_p, fors_pk_from_sig_p,
 }
-use os.crypto.slh_dsa_hypertree.{ht_sign, ht_verify, ht_pk_root}
+use os.crypto.slh_dsa_hypertree.{
+    ht_sign, ht_verify, ht_pk_root,
+    ht_sign_p, ht_verify_p, ht_pk_root_p,
+}
 use os.crypto.sha256.{sha256, sha256_hmac}
+use os.crypto.sha512.{sha512, sha512_hmac}
 
 fn _slh_n_128s() -> u64:
     16u64
@@ -86,16 +92,22 @@ fn _concat(a: [u8], b: [u8]) -> [u8]:
         j = j + 1
     out
 
-# PRF_msg: HMAC-SHA-256 truncated to n bytes.
-fn slh_prf_msg(sk_prf: [u8], opt_rand: [u8], message: [u8]) -> [u8]:
+# PRF_msg: HMAC truncated to n bytes.
+# 128s uses HMAC-SHA-256; 192s/256s use HMAC-SHA-512 (FIPS 205 §11.2.1 Table 4).
+fn slh_prf_msg_p(sk_prf: [u8], opt_rand: [u8], message: [u8], n: u64, hash_id: i64) -> [u8]:
     val full_msg = _concat(opt_rand, message)
-    val mac = sha256_hmac(sk_prf, full_msg)
-    _trunc_n(mac, _slh_n_128s())
+    var mac: [u8] = [0u8; 0]
+    if hash_id == _slh_hash_sha256():
+        mac = sha256_hmac(sk_prf, full_msg)
+    else:
+        mac = sha512_hmac(sk_prf, full_msg)
+    _trunc_n(mac, n)
 
-# MGF1-SHA-256 (PKCS#1 §B.2.1): produce `out_len` bytes from seed by
-# hashing seed || I2OSP(counter, 4) for counter = 0, 1, 2, ... and
-# concatenating the digests until out_len bytes are produced.
-fn _mgf1_sha256(seed: [u8], out_len: i64) -> [u8]:
+fn slh_prf_msg(sk_prf: [u8], opt_rand: [u8], message: [u8]) -> [u8]:
+    slh_prf_msg_p(sk_prf, opt_rand, message, _slh_n_128s(), _slh_hash_sha256())
+
+# MGF1 (PKCS#1 §B.2.1): produce `out_len` bytes from seed, parameterized by hash.
+fn _mgf1(seed: [u8], out_len: i64, hash_id: i64) -> [u8]:
     var out: [u8] = [0u8; 0]
     var counter: i64 = 0
     while out.len() < out_len.to_u64():
@@ -109,7 +121,11 @@ fn _mgf1_sha256(seed: [u8], out_len: i64) -> [u8]:
         seeded.push(((counter >> 16) & 0xff).to_u8())
         seeded.push(((counter >> 8) & 0xff).to_u8())
         seeded.push((counter & 0xff).to_u8())
-        val block = sha256(seeded)
+        var block: [u8] = [0u8; 0]
+        if hash_id == _slh_hash_sha256():
+            block = sha256(seeded)
+        else:
+            block = sha512(seeded)
         var b: u64 = 0u64
         while b < block.len() and out.len() < out_len.to_u64():
             out.push(block[b])
@@ -117,8 +133,11 @@ fn _mgf1_sha256(seed: [u8], out_len: i64) -> [u8]:
         counter = counter + 1
     out
 
-# H_msg: MGF1-SHA-256 over (R || PK.seed || PK.root || M), m bytes out.
-fn slh_h_msg(r: [u8], pk_seed: [u8], pk_root: [u8], message: [u8], m: i64) -> [u8]:
+fn _mgf1_sha256(seed: [u8], out_len: i64) -> [u8]:
+    _mgf1(seed, out_len, _slh_hash_sha256())
+
+# H_msg: MGF1 over (R || PK.seed || PK.root || M), m bytes out — parameterized.
+fn slh_h_msg_p(r: [u8], pk_seed: [u8], pk_root: [u8], message: [u8], m: i64, hash_id: i64) -> [u8]:
     var seed: [u8] = [0u8; 0]
     var i: u64 = 0u64
     while i < r.len():
@@ -136,7 +155,10 @@ fn slh_h_msg(r: [u8], pk_seed: [u8], pk_root: [u8], message: [u8], m: i64) -> [u
     while l < message.len():
         seed.push(message[l])
         l = l + 1
-    _mgf1_sha256(seed, m)
+    _mgf1(seed, m, hash_id)
+
+fn slh_h_msg(r: [u8], pk_seed: [u8], pk_root: [u8], message: [u8], m: i64) -> [u8]:
+    slh_h_msg_p(r, pk_seed, pk_root, message, m, _slh_hash_sha256())
 
 # ============================================================================
 # Digest splitting (FIPS 205 §10.2)
@@ -184,15 +206,40 @@ fn slh_split_digest(digest: [u8], h: i64, d: i64, a: i64, k: i64) -> tuple:
     (md, idx_tree, idx_leaf)
 
 # ============================================================================
-# slh_keygen_internal (FIPS 205 Algorithm 18) — parameterised
+# slh_keygen_internal (FIPS 205 Algorithm 18) — fully parameterised
 # ============================================================================
-#
-# Inputs:  SK.seed (n bytes), SK.prf (n bytes), PK.seed (n bytes)
-# Outputs: PK = (PK.seed || PK.root)  -- 2n bytes
-#          SK = (SK.seed || SK.prf || PK.seed || PK.root)  -- 4n bytes
-#
-# PK.root = root of the top XMSS subtree (layer d-1, tree address 0)
-# computed via xmss_node at height h_prime.
+
+fn slh_keygen_internal_p(sk_seed: [u8], sk_prf: [u8], pk_seed: [u8],
+                          d: i64, h_prime: i64, n: u64, hash_id: i64) -> tuple:
+    val pk_root = ht_pk_root_p(sk_seed, pk_seed, d, h_prime, n, hash_id)
+    var pk: [u8] = [0u8; 0]
+    var i: u64 = 0u64
+    while i < pk_seed.len():
+        pk.push(pk_seed[i])
+        i = i + 1
+    var j: u64 = 0u64
+    while j < pk_root.len():
+        pk.push(pk_root[j])
+        j = j + 1
+
+    var sk: [u8] = [0u8; 0]
+    var k: u64 = 0u64
+    while k < sk_seed.len():
+        sk.push(sk_seed[k])
+        k = k + 1
+    var l: u64 = 0u64
+    while l < sk_prf.len():
+        sk.push(sk_prf[l])
+        l = l + 1
+    var m: u64 = 0u64
+    while m < pk_seed.len():
+        sk.push(pk_seed[m])
+        m = m + 1
+    var p: u64 = 0u64
+    while p < pk_root.len():
+        sk.push(pk_root[p])
+        p = p + 1
+    (pk, sk)
 
 fn slh_keygen_internal(sk_seed: [u8], sk_prf: [u8], pk_seed: [u8],
                         d: i64, h_prime: i64) -> tuple:
@@ -242,6 +289,63 @@ fn slh_keygen_internal(sk_seed: [u8], sk_prf: [u8], pk_seed: [u8],
 #   sig_FORS = fors_sign(md, sk_seed, pk_seed, ADRS, k, a)
 #   PK_FORS  = fors_pkFromSig(sig_FORS, md, pk_seed, ADRS, k, a)
 #   sig_HT   = ht_sign(PK_FORS, sk_seed, pk_seed, idx_tree, idx_leaf, d, h_prime)
+
+fn slh_sign_internal_p(message: [u8], sk: [u8], opt_rand: [u8],
+                        d: i64, h_prime: i64, a: i64, k: i64,
+                        n: u64, m_len: i64, hash_id: i64) -> [u8]:
+    # Slice SK fields.
+    var sk_seed: [u8] = [0u8; 0]
+    var i: u64 = 0u64
+    while i < n:
+        sk_seed.push(sk[i])
+        i = i + 1
+    var sk_prf: [u8] = [0u8; 0]
+    var j: u64 = 0u64
+    while j < n:
+        sk_prf.push(sk[n + j])
+        j = j + 1
+    var pk_seed: [u8] = [0u8; 0]
+    var p: u64 = 0u64
+    while p < n:
+        pk_seed.push(sk[2u64 * n + p])
+        p = p + 1
+    var pk_root: [u8] = [0u8; 0]
+    var q: u64 = 0u64
+    while q < n:
+        pk_root.push(sk[3u64 * n + q])
+        q = q + 1
+
+    val r = slh_prf_msg_p(sk_prf, opt_rand, message, n, hash_id)
+    val digest = slh_h_msg_p(r, pk_seed, pk_root, message, m_len, hash_id)
+    val h = d * h_prime
+    val parts = slh_split_digest(digest, h, d, a, k)
+    val md = parts.0
+    val idx_tree = parts.1
+    val idx_leaf = parts.2
+
+    var adrs_fors = adrs_new()
+    adrs_fors = adrs_set_layer(adrs_fors, 0)
+    adrs_fors = adrs_set_tree_address(adrs_fors, idx_tree)
+    adrs_fors = adrs_set_keypair_address(adrs_fors, idx_leaf)
+
+    val sig_fors = fors_sign_p(md, sk_seed, pk_seed, adrs_fors, k, a, n, hash_id)
+    val pk_fors = fors_pk_from_sig_p(sig_fors, md, pk_seed, adrs_fors, k, a, n, hash_id)
+    val sig_ht = ht_sign_p(pk_fors, sk_seed, pk_seed, idx_tree, idx_leaf, d, h_prime, n, hash_id)
+
+    var out: [u8] = [0u8; 0]
+    var c: u64 = 0u64
+    while c < r.len():
+        out.push(r[c])
+        c = c + 1
+    var f: u64 = 0u64
+    while f < sig_fors.len():
+        out.push(sig_fors[f])
+        f = f + 1
+    var hbb: u64 = 0u64
+    while hbb < sig_ht.len():
+        out.push(sig_ht[hbb])
+        hbb = hbb + 1
+    out
 
 fn slh_sign_internal(message: [u8], sk: [u8], opt_rand: [u8],
                       d: i64, h_prime: i64, a: i64, k: i64) -> [u8]:
@@ -306,6 +410,61 @@ fn slh_sign_internal(message: [u8], sk: [u8], opt_rand: [u8],
 # ============================================================================
 # slh_verify_internal (FIPS 205 Algorithm 20) — parameterised
 # ============================================================================
+
+fn slh_verify_internal_p(message: [u8], signature: [u8], pk: [u8],
+                          d: i64, h_prime: i64, a: i64, k: i64,
+                          n: u64, m_len: i64, hash_id: i64) -> bool:
+    val wots_len = _slh_wots_len(n)
+    val fors_bytes: u64 = (k.to_u64()) * (1u64 + a.to_u64()) * n
+    val ht_bytes: u64 = (d.to_u64()) * ((wots_len + h_prime).to_u64()) * n
+    val expected_sig_len: u64 = n + fors_bytes + ht_bytes
+    if signature.len() != expected_sig_len: return false
+
+    var pk_seed: [u8] = [0u8; 0]
+    var i: u64 = 0u64
+    while i < n:
+        pk_seed.push(pk[i])
+        i = i + 1
+    var pk_root: [u8] = [0u8; 0]
+    var j: u64 = 0u64
+    while j < n:
+        pk_root.push(pk[n + j])
+        j = j + 1
+
+    var r: [u8] = [0u8; 0]
+    var p: u64 = 0u64
+    while p < n:
+        r.push(signature[p])
+        p = p + 1
+    var sig_fors: [u8] = [0u8; 0]
+    var q: u64 = 0u64
+    while q < fors_bytes:
+        sig_fors.push(signature[n + q])
+        q = q + 1
+    var sig_ht: [u8] = [0u8; 0]
+    var s: u64 = 0u64
+    while s < ht_bytes:
+        sig_ht.push(signature[n + fors_bytes + s])
+        s = s + 1
+
+    val digest = slh_h_msg_p(r, pk_seed, pk_root, message, m_len, hash_id)
+    val h = d * h_prime
+    val parts = slh_split_digest(digest, h, d, a, k)
+    val md = parts.0
+    val idx_tree = parts.1
+    val idx_leaf = parts.2
+
+    var adrs_fors = adrs_new()
+    adrs_fors = adrs_set_layer(adrs_fors, 0)
+    adrs_fors = adrs_set_tree_address(adrs_fors, idx_tree)
+    adrs_fors = adrs_set_keypair_address(adrs_fors, idx_leaf)
+    val pk_fors = fors_pk_from_sig_p(sig_fors, md, pk_seed, adrs_fors, k, a, n, hash_id)
+
+    ht_verify_p(pk_fors, sig_ht, pk_seed, idx_tree, idx_leaf, pk_root,
+                d, h_prime, n, hash_id)
+
+fn _slh_wots_len(n: u64) -> i64:
+    (2u64 * n).to_i64() + 3
 
 fn slh_verify_internal(message: [u8], signature: [u8], pk: [u8],
                         d: i64, h_prime: i64, a: i64, k: i64) -> bool:
@@ -385,3 +544,59 @@ fn slh_dsa_128s_sign(sk: [u8], message: [u8]) -> [u8]:
 
 fn slh_dsa_128s_verify(pk: [u8], message: [u8], signature: [u8]) -> bool:
     slh_verify_internal(message, signature, pk, 7, 9, 12, 14)
+
+# ============================================================================
+# Public API — SLH-DSA-SHA2-192s (FIPS 205 §11 Table 2)
+# ============================================================================
+#
+# Parameters: n=24, h=63, d=7, h'=9, a=14, k=17, m=39, hash=SHA-512
+#
+# FIPS 205 §11.2.1 Table 4: 192s uses SHA-512 for F/H/T_l/PRF/PRF_msg/H_msg.
+
+fn _slh_n_192s() -> u64:
+    24u64
+
+fn _slh_m_192s() -> i64:
+    39
+
+fn slh_dsa_192s_keygen(sk_seed: [u8], sk_prf: [u8], pk_seed: [u8]) -> tuple:
+    slh_keygen_internal_p(sk_seed, sk_prf, pk_seed, 7, 9, _slh_n_192s(), _slh_hash_sha512())
+
+fn slh_dsa_192s_sign(sk: [u8], message: [u8]) -> [u8]:
+    val n = _slh_n_192s()
+    var pk_seed: [u8] = [0u8; 0]
+    var i: u64 = 0u64
+    while i < n:
+        pk_seed.push(sk[2u64 * n + i])
+        i = i + 1
+    slh_sign_internal_p(message, sk, pk_seed, 7, 9, 14, 17, n, _slh_m_192s(), _slh_hash_sha512())
+
+fn slh_dsa_192s_verify(pk: [u8], message: [u8], signature: [u8]) -> bool:
+    slh_verify_internal_p(message, signature, pk, 7, 9, 14, 17, _slh_n_192s(), _slh_m_192s(), _slh_hash_sha512())
+
+# ============================================================================
+# Public API — SLH-DSA-SHA2-256s (FIPS 205 §11 Table 2)
+# ============================================================================
+#
+# Parameters: n=32, h=64, d=8, h'=8, a=14, k=22, m=49, hash=SHA-512
+
+fn _slh_n_256s() -> u64:
+    32u64
+
+fn _slh_m_256s() -> i64:
+    49
+
+fn slh_dsa_256s_keygen(sk_seed: [u8], sk_prf: [u8], pk_seed: [u8]) -> tuple:
+    slh_keygen_internal_p(sk_seed, sk_prf, pk_seed, 8, 8, _slh_n_256s(), _slh_hash_sha512())
+
+fn slh_dsa_256s_sign(sk: [u8], message: [u8]) -> [u8]:
+    val n = _slh_n_256s()
+    var pk_seed: [u8] = [0u8; 0]
+    var i: u64 = 0u64
+    while i < n:
+        pk_seed.push(sk[2u64 * n + i])
+        i = i + 1
+    slh_sign_internal_p(message, sk, pk_seed, 8, 8, 14, 22, n, _slh_m_256s(), _slh_hash_sha512())
+
+fn slh_dsa_256s_verify(pk: [u8], message: [u8], signature: [u8]) -> bool:
+    slh_verify_internal_p(message, signature, pk, 8, 8, 14, 22, _slh_n_256s(), _slh_m_256s(), _slh_hash_sha512())

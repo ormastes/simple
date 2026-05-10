@@ -22,7 +22,9 @@ use os.crypto.slh_dsa_wots.{
     adrs_copy, adrs_set_type,
     adrs_set_tree_height, adrs_set_tree_index,
     adrs_type_fors_tree, adrs_type_fors_roots, adrs_type_fors_prf,
+    _slh_hash_sha256, _slh_hash_sha512,
     slh_H_128s, slh_F_128s, slh_T_l_128s, slh_PRF_128s,
+    slh_H, slh_F, slh_T_l, slh_PRF,
 }
 
 fn _slh_n_128s() -> u64:
@@ -36,13 +38,14 @@ fn _slh_n_128s() -> u64:
 # value at FORS leaf `idx` (within the kt-leaf flat layout: tree i,
 # in-tree position j, idx = i * 2^a + j).
 
-fn fors_sk_gen(sk_seed: [u8], pk_seed: [u8], adrs_in: [u8], idx: i64) -> [u8]:
+fn fors_sk_gen_p(sk_seed: [u8], pk_seed: [u8], adrs_in: [u8], idx: i64, n: u64, hash_id: i64) -> [u8]:
     var adrs_prf = adrs_copy(adrs_in)
     adrs_prf = adrs_set_type(adrs_prf, adrs_type_fors_prf())
-    # Per §8.1, FORS_PRF carries the keyPairAddress from the calling FORS
-    # context unchanged; the tree-index field stores the leaf index.
     adrs_prf = adrs_set_tree_index(adrs_prf, idx)
-    slh_PRF_128s(pk_seed, sk_seed, adrs_prf)
+    slh_PRF(pk_seed, sk_seed, adrs_prf, n, hash_id)
+
+fn fors_sk_gen(sk_seed: [u8], pk_seed: [u8], adrs_in: [u8], idx: i64) -> [u8]:
+    fors_sk_gen_p(sk_seed, pk_seed, adrs_in, idx, _slh_n_128s(), _slh_hash_sha256())
 
 # ============================================================================
 # fors_node (FIPS 205 Algorithm 15)
@@ -51,22 +54,25 @@ fn fors_sk_gen(sk_seed: [u8], pk_seed: [u8], adrs_in: [u8], idx: i64) -> [u8]:
 # fors_node(SK.seed, i, z, PK.seed, ADRS) — z = 0 returns F over the leaf
 # secret; otherwise recursively H-combines the two children.
 
-fn fors_node(sk_seed: [u8], i: i64, z: i64, pk_seed: [u8], adrs_in: [u8]) -> [u8]:
+fn fors_node_p(sk_seed: [u8], i: i64, z: i64, pk_seed: [u8], adrs_in: [u8], n: u64, hash_id: i64) -> [u8]:
     if z == 0:
-        val sk_i = fors_sk_gen(sk_seed, pk_seed, adrs_in, i)
+        val sk_i = fors_sk_gen_p(sk_seed, pk_seed, adrs_in, i, n, hash_id)
         var adrs_f = adrs_copy(adrs_in)
         adrs_f = adrs_set_type(adrs_f, adrs_type_fors_tree())
         adrs_f = adrs_set_tree_height(adrs_f, 0)
         adrs_f = adrs_set_tree_index(adrs_f, i)
-        slh_F_128s(pk_seed, adrs_f, sk_i)
+        slh_F(pk_seed, adrs_f, sk_i, n, hash_id)
     else:
-        val left  = fors_node(sk_seed, 2 * i,     z - 1, pk_seed, adrs_in)
-        val right = fors_node(sk_seed, 2 * i + 1, z - 1, pk_seed, adrs_in)
+        val left  = fors_node_p(sk_seed, 2 * i,     z - 1, pk_seed, adrs_in, n, hash_id)
+        val right = fors_node_p(sk_seed, 2 * i + 1, z - 1, pk_seed, adrs_in, n, hash_id)
         var adrs_h = adrs_copy(adrs_in)
         adrs_h = adrs_set_type(adrs_h, adrs_type_fors_tree())
         adrs_h = adrs_set_tree_height(adrs_h, z)
         adrs_h = adrs_set_tree_index(adrs_h, i)
-        slh_H_128s(pk_seed, adrs_h, left, right)
+        slh_H(pk_seed, adrs_h, left, right, n, hash_id)
+
+fn fors_node(sk_seed: [u8], i: i64, z: i64, pk_seed: [u8], adrs_in: [u8]) -> [u8]:
+    fors_node_p(sk_seed, i, z, pk_seed, adrs_in, _slh_n_128s(), _slh_hash_sha256())
 
 # ============================================================================
 # Helpers — message-to-FORS-indices conversion
@@ -104,32 +110,25 @@ fn fors_message_to_indices(md: [u8], k: i64, a: i64) -> list:
 # leaf within tree t is `idx_t` from the message indices; its absolute
 # position is t * 2^a + idx_t.
 
-fn fors_sign(message_md: [u8], sk_seed: [u8], pk_seed: [u8],
-             adrs_in: [u8], k: i64, a: i64) -> [u8]:
-    val n = _slh_n_128s()
+fn fors_sign_p(message_md: [u8], sk_seed: [u8], pk_seed: [u8],
+               adrs_in: [u8], k: i64, a: i64, n: u64, hash_id: i64) -> [u8]:
     val indices = fors_message_to_indices(message_md, k, a)
     var sig: [u8] = [0u8; 0]
     var t = 0
     while t < k:
         val idx_t = indices.get(t)
         val abs_leaf = t * (1 << a) + idx_t
-        # Append the FORS leaf secret key sk_t.
-        val sk_t = fors_sk_gen(sk_seed, pk_seed, adrs_in, abs_leaf)
+        val sk_t = fors_sk_gen_p(sk_seed, pk_seed, adrs_in, abs_leaf, n, hash_id)
         var i: u64 = 0u64
         while i < n:
             sig.push(sk_t[i])
             i = i + 1
-        # Append a-level authentication path siblings.
         var k_lvl = 0
         while k_lvl < a:
-            # Sibling within tree t at level k_lvl, mapped to absolute
-            # forest coordinates: at level k_lvl the tree has 2^(a-k_lvl)
-            # nodes; tree-t's nodes at level k_lvl occupy absolute
-            # indices [t*2^(a-k_lvl), (t+1)*2^(a-k_lvl)).
             val sibling_in_tree = (idx_t >> k_lvl) ^ 1
             val sibling_node_idx = t * (1 << (a - k_lvl)) + sibling_in_tree
-            val node = fors_node(sk_seed, sibling_node_idx, k_lvl,
-                                 pk_seed, adrs_in)
+            val node = fors_node_p(sk_seed, sibling_node_idx, k_lvl,
+                                   pk_seed, adrs_in, n, hash_id)
             var j: u64 = 0u64
             while j < n:
                 sig.push(node[j])
@@ -138,6 +137,10 @@ fn fors_sign(message_md: [u8], sk_seed: [u8], pk_seed: [u8],
         t = t + 1
     sig
 
+fn fors_sign(message_md: [u8], sk_seed: [u8], pk_seed: [u8],
+             adrs_in: [u8], k: i64, a: i64) -> [u8]:
+    fors_sign_p(message_md, sk_seed, pk_seed, adrs_in, k, a, _slh_n_128s(), _slh_hash_sha256())
+
 # ============================================================================
 # fors_pkFromSig (FIPS 205 Algorithm 17)
 # ============================================================================
@@ -145,16 +148,14 @@ fn fors_sign(message_md: [u8], sk_seed: [u8], pk_seed: [u8],
 # Recovers the FORS public key (T_k compression of the k FORS roots)
 # from the signature plus the k message indices.
 
-fn fors_pk_from_sig(sig_fors: [u8], message_md: [u8], pk_seed: [u8],
-                    adrs_in: [u8], k: i64, a: i64) -> [u8]:
-    val n = _slh_n_128s()
+fn fors_pk_from_sig_p(sig_fors: [u8], message_md: [u8], pk_seed: [u8],
+                      adrs_in: [u8], k: i64, a: i64, n: u64, hash_id: i64) -> [u8]:
     val indices = fors_message_to_indices(message_md, k, a)
     val per_tree_bytes: u64 = (1u64 + a.to_u64()) * n
     var roots: [u8] = [0u8; 0]
     var t = 0
     while t < k:
         val tree_off: u64 = (t.to_u64()) * per_tree_bytes
-        # Slice sk leaf secret.
         var sk_leaf: [u8] = [0u8; 0]
         var i: u64 = 0u64
         while i < n:
@@ -162,12 +163,11 @@ fn fors_pk_from_sig(sig_fors: [u8], message_md: [u8], pk_seed: [u8],
             i = i + 1
         val idx_t = indices.get(t)
         val abs_leaf = t * (1 << a) + idx_t
-        # Compute leaf F-hash.
         var adrs_f = adrs_copy(adrs_in)
         adrs_f = adrs_set_type(adrs_f, adrs_type_fors_tree())
         adrs_f = adrs_set_tree_height(adrs_f, 0)
         adrs_f = adrs_set_tree_index(adrs_f, abs_leaf)
-        var node = slh_F_128s(pk_seed, adrs_f, sk_leaf)
+        var node = slh_F(pk_seed, adrs_f, sk_leaf, n, hash_id)
 
         var k_lvl = 0
         while k_lvl < a:
@@ -180,26 +180,27 @@ fn fors_pk_from_sig(sig_fors: [u8], message_md: [u8], pk_seed: [u8],
             var adrs_h = adrs_copy(adrs_in)
             adrs_h = adrs_set_type(adrs_h, adrs_type_fors_tree())
             adrs_h = adrs_set_tree_height(adrs_h, k_lvl + 1)
-            # Parent-node absolute index at level k_lvl+1 within FORS forest.
             val parent_in_tree = idx_t >> (k_lvl + 1)
             val parent_node = t * (1 << (a - k_lvl - 1)) + parent_in_tree
             adrs_h = adrs_set_tree_index(adrs_h, parent_node)
             if ((idx_t >> k_lvl) & 1) == 0:
-                node = slh_H_128s(pk_seed, adrs_h, node, sibling)
+                node = slh_H(pk_seed, adrs_h, node, sibling, n, hash_id)
             else:
-                node = slh_H_128s(pk_seed, adrs_h, sibling, node)
+                node = slh_H(pk_seed, adrs_h, sibling, node, n, hash_id)
             k_lvl = k_lvl + 1
-        # Append recovered root for this tree.
         var r: u64 = 0u64
         while r < n:
             roots.push(node[r])
             r = r + 1
         t = t + 1
 
-    # T_k compression with FORS_ROOTS type.
     var adrs_pk = adrs_copy(adrs_in)
     adrs_pk = adrs_set_type(adrs_pk, adrs_type_fors_roots())
-    slh_T_l_128s(pk_seed, adrs_pk, roots)
+    slh_T_l(pk_seed, adrs_pk, roots, n, hash_id)
+
+fn fors_pk_from_sig(sig_fors: [u8], message_md: [u8], pk_seed: [u8],
+                    adrs_in: [u8], k: i64, a: i64) -> [u8]:
+    fors_pk_from_sig_p(sig_fors, message_md, pk_seed, adrs_in, k, a, _slh_n_128s(), _slh_hash_sha256())
 
 # ============================================================================
 # fors_pk_gen — derive FORS public key directly from sk_seed (used by KeyGen)
@@ -210,15 +211,12 @@ fn fors_pk_from_sig(sig_fors: [u8], message_md: [u8], pk_seed: [u8],
 # tree t, fors_node returns the tree-t root (top of the forest at level
 # z=a, absolute index t), then T_k compress".
 
-fn fors_pk_gen(sk_seed: [u8], pk_seed: [u8],
-               adrs_in: [u8], k: i64, a: i64) -> [u8]:
-    val n = _slh_n_128s()
+fn fors_pk_gen_p(sk_seed: [u8], pk_seed: [u8],
+                 adrs_in: [u8], k: i64, a: i64, n: u64, hash_id: i64) -> [u8]:
     var roots: [u8] = [0u8; 0]
     var t = 0
     while t < k:
-        # Tree t's root sits at level z=a, absolute index `t` (one root
-        # per tree at the top of the FORS forest).
-        val root = fors_node(sk_seed, t, a, pk_seed, adrs_in)
+        val root = fors_node_p(sk_seed, t, a, pk_seed, adrs_in, n, hash_id)
         var i: u64 = 0u64
         while i < n:
             roots.push(root[i])
@@ -226,11 +224,18 @@ fn fors_pk_gen(sk_seed: [u8], pk_seed: [u8],
         t = t + 1
     var adrs_pk = adrs_copy(adrs_in)
     adrs_pk = adrs_set_type(adrs_pk, adrs_type_fors_roots())
-    slh_T_l_128s(pk_seed, adrs_pk, roots)
+    slh_T_l(pk_seed, adrs_pk, roots, n, hash_id)
+
+fn fors_pk_gen(sk_seed: [u8], pk_seed: [u8],
+               adrs_in: [u8], k: i64, a: i64) -> [u8]:
+    fors_pk_gen_p(sk_seed, pk_seed, adrs_in, k, a, _slh_n_128s(), _slh_hash_sha256())
 
 # ============================================================================
 # Convenience: total FORS signature length in bytes (k * (1 + a) * n)
 # ============================================================================
+
+fn fors_sig_len_p(k: i64, a: i64, n: u64) -> u64:
+    (k * (1 + a)).to_u64() * n
 
 fn fors_sig_len_128s(k: i64, a: i64) -> i64:
     k * (1 + a) * 16
