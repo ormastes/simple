@@ -588,5 +588,7 @@ impl LintChecker {
         "immutable",
         "no_gc",
         "variant",
+        // Determinism guard (GAME-DET-LINT-001): #[deterministic]
+        "deterministic",
     ];
 }
