@@ -51,8 +51,8 @@ feature
 - [x] 2-research (Analyst) — 2026-05-10
 - [x] 3-arch (Architect) — 2026-05-10
 - [x] 4-spec (QA Lead) — 2026-05-10
-- [ ] 5-implement (Engineer)
-- [ ] 6-refactor (Tech Lead)
+- [x] 5-implement (Engineer) — 2026-05-10
+- [x] 6-refactor (Tech Lead) — 2026-05-10
 - [ ] 7-verify (QA)
 - [ ] 8-ship (Release Mgr)
 
@@ -785,10 +785,60 @@ Cycle check:
 | AC-10 | `webgpu_backend3d_spec.spl` | command recording tests (trait+composition, no inheritance) | Failing (no impl) |
 
 ### 5-implement
-<pending>
+Completed by 6 parallel agent streams. 13 new files + 3 modified files written.
 
 ### 6-refactor
-<pending>
+Cross-stream consistency audit complete. Issues found and fixed:
+
+**CRITICAL — Circular import (backend3d.spl ↔ backend files):**
+- `backend3d.spl` imported `software_backend3d`, `vulkan_backend3d`, `webgpu_backend3d` for `AnyRenderBackend3D`, but those files import `backend3d.spl` for the trait.
+- Fix: moved `AnyRenderBackend3D` + its `impl AnyRenderBackend3D: RenderBackend3D` block to new file `any_backend3d.spl`. Removed the 3 backend `use` statements from `backend3d.spl`. No cycle remains.
+
+**webgpu_commands.spl — unsafe named-field multi-payload enum variant syntax:**
+- Stream C wrote `BeginRenderPass(color_tex: i64, depth_tex: i64)` — named-field multi-payload enum variant. Only single-field named variants like `CUDA(id: i32)` are confirmed to work in Simple. Stream B chose the kind-tag workaround for Vulkan instead.
+- Fix: rewrote `webgpu_commands.spl` to match the kind-tag flat-class pattern of `vulkan_commands.spl` (enum `WebGpuCommand3DKind` + flat class `WebGpuCommand3D` + 8 constructor fns).
+
+**webgpu_backend3d.spl — stale comment + old enum construction/matching:**
+- Stale comment claiming backend3d.spl has stub lines 171-240 (no such stubs exist). Removed.
+- Recording methods used old enum-variant constructor syntax `WebGpuCommand3D.BeginRenderPass(color_tex: ...)`. Updated to use constructor fns `wgpu_cmd3d_begin_render_pass(...)`.
+- `end_frame()` drain used `match` over enum variants with named destructuring. Replaced with `if cmd.kind == WebGpuCommand3DKind.*` + field access (matches kind-tag pattern).
+- Import updated to pull in `WebGpuCommand3DKind` + all 8 constructor fns.
+
+**Spec files — both command specs used wrong construction/comparison syntax:**
+- `vulkan_backend3d_spec.spl`: used `VulkanCommand3D.BeginRenderPass(color_image: 10, ...)` (enum variant syntax) — but `VulkanCommand3D` is a flat class. Updated to use `vk_cmd3d_*` constructor fns + `cmd.kind == VulkanCommand3DKind.*` + field assertions.
+- `webgpu_backend3d_spec.spl`: same issue with `WebGpuCommand3D.*` variant syntax. Updated to use `wgpu_cmd3d_*` constructor fns + kind/field assertions.
+- `backend3d_spec.spl`: imported `AnyRenderBackend3D` from `backend3d` (no longer exported there). Fixed import to use `any_backend3d`.
+
+**__init__.spl — new phase-5 modules not exported:**
+- Added exports for: `any_backend3d`, `vulkan_commands`, `vulkan_backend3d`, `webgpu_commands`, `webgpu_backend3d`, `gpu_mesh3d`, `gpu_lighting3d`, `shader_compile`, `wgsl_emitter`, `texture3d`, `texture_atlas3d`.
+
+**No issues found:**
+- `me` vs `self`: all methods consistently use `self` (trait methods bind immutably, mutation happens through parallel-array pushes which are valid).
+- `pass_dn` vs `pass_todo`: not misused in any file.
+- `f32 vs f64`: `LightUniform` correctly uses `f32` for GPU-compatible layout.
+- Constructor pattern: `static fn create()` used by Vulkan and WebGPU backends, `SoftwareRenderBackend3D` uses direct struct constructor — acceptable variation.
+- Import cycles: verified none remain after the backend3d fix.
+- No existing functions were removed from the 3 modified files (gpu_bridge.spl, shader_compile.spl, material3d.spl).
+
+**Pass keyword renames (cross-stream consistency audit):**
+- `pass` is a reserved keyword in Simple — cannot be used as variable name or parameter name.
+- Renamed `pass` → `rph` (RenderPassHandle) in all extern fn declarations, impl method signatures, and function bodies across: `vulkan_backend3d.spl`, `webgpu_backend3d.spl`, `material3d.spl`, `gpu_mesh3d.spl`, `gpu_lighting3d.spl`, and both spec files.
+
+**Impl syntax fixes:**
+- `impl X: Trait:` is gc_async_mut syntax; nogc_sync_mut layer uses `impl Trait for X:` (confirmed from `allocator.spl`).
+- Fixed all four backends: `vulkan_backend3d.spl`, `webgpu_backend3d.spl`, `software_backend3d.spl`, `any_backend3d.spl`.
+
+**Empty-list constructor fix (webgpu_backend3d.spl):**
+- `[WebGpuCommand3D]()` and `[i64]()` typed empty-list constructors are invalid (interpreter tries to call the type as fn). Fixed to plain `[]`.
+
+**Remaining known failures (out of Phase 6 scope):**
+- FOLLOW-UP A: GPU extern stubs needed — `rt_vulkan_init_graphics`, `rt_wgpu_3d_*` etc. are not registered in `signatures.rs` / interpreter. Tests for `create_pipeline`, `create_*_buffer`, `begin_frame`, `begin_render_pass` fail with "unknown extern function" in interpreter mode. Fix: add stubs to `src/compiler_rust/compiler/src/interpreter_extern/signatures.rs` (or add a dedicated GPU stub module).
+- FOLLOW-UP B: Self-mutation pattern — `fn method(self)` trait impl methods cannot mutate `self.cmds`, `self.next_id` etc. in interpreter. Fails with "cannot modify self.X in immutable fn". Architectural fix needed: either introduce `var self` receiver form (compiler feature request) or refactor command recording to module-level fn helpers that receive and return the backend struct by value.
+
+**Test state at Phase 6 completion:**
+- `backend3d_spec.spl`: 22 passing, 7 failing (self.renderer mutation pattern)
+- `vulkan_backend3d_spec.spl`: 17 passing, 9 failing (5 extern stubs + 4 self-mutation)
+- `webgpu_backend3d_spec.spl`: 18 passing, 8 failing (all extern unavailable in interpreter)
 
 ### 7-verify
 <pending>

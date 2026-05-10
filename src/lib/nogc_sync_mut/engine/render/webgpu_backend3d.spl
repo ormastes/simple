@@ -14,17 +14,19 @@
 #
 # Key difference from Vulkan backend: create_pipeline takes WGSL text via
 # desc.vertex_shader_wgsl / desc.fragment_shader_wgsl (not SPIR-V bytes).
-#
-# Integration note: backend3d.spl contains a placeholder stub class and
-# impl named WebGpuRenderBackend3D (lines 171-240). That stub must be
-# removed when this file is integrated so the two definitions don't clash.
 
 use std.nogc_sync_mut.engine.render.backend3d.{
     PipelineHandle, BufferHandle, TextureHandle, RenderPassHandle,
     PipelineDesc3D, TextureFormat3D, RenderBackend3D
 }
 use std.nogc_sync_mut.engine.render.capability3d.{RenderCapability3D, capability_webgpu_3d}
-use std.nogc_sync_mut.engine.render.webgpu_commands.{WebGpuCommand3D}
+use std.nogc_sync_mut.engine.render.webgpu_commands.{
+    WebGpuCommand3D, WebGpuCommand3DKind,
+    wgpu_cmd3d_begin_render_pass, wgpu_cmd3d_set_pipeline,
+    wgpu_cmd3d_bind_vertex_buffer, wgpu_cmd3d_bind_index_buffer,
+    wgpu_cmd3d_bind_texture, wgpu_cmd3d_bind_uniform_buffer,
+    wgpu_cmd3d_draw_indexed, wgpu_cmd3d_end_render_pass
+}
 
 # ============================================================================
 # rt_wgpu_3d_* extern declarations — 3D WebGPU surface
@@ -38,13 +40,13 @@ extern fn rt_wgpu_3d_upload_texture(handle: i64, data: [u8])
 extern fn rt_wgpu_3d_create_pipeline(wgsl_vert: text, wgsl_frag: text) -> i64
 extern fn rt_wgpu_3d_begin_frame()
 extern fn rt_wgpu_3d_begin_render_pass(color: i64, depth: i64) -> i64
-extern fn rt_wgpu_3d_end_render_pass(pass: i64)
-extern fn rt_wgpu_3d_cmd_set_pipeline(pass: i64, pipeline: i64)
-extern fn rt_wgpu_3d_cmd_bind_vertex_buffer(pass: i64, buf: i64, slot: i64)
-extern fn rt_wgpu_3d_cmd_bind_index_buffer(pass: i64, buf: i64)
-extern fn rt_wgpu_3d_cmd_bind_texture(pass: i64, tex: i64, slot: i64)
-extern fn rt_wgpu_3d_cmd_bind_uniform_buffer(pass: i64, buf: i64, slot: i64)
-extern fn rt_wgpu_3d_cmd_draw_indexed(pass: i64, index_count: i64, base_vertex: i64)
+extern fn rt_wgpu_3d_end_render_pass(rph: i64)
+extern fn rt_wgpu_3d_cmd_set_pipeline(rph: i64, pipeline: i64)
+extern fn rt_wgpu_3d_cmd_bind_vertex_buffer(rph: i64, buf: i64, slot: i64)
+extern fn rt_wgpu_3d_cmd_bind_index_buffer(rph: i64, buf: i64)
+extern fn rt_wgpu_3d_cmd_bind_texture(rph: i64, tex: i64, slot: i64)
+extern fn rt_wgpu_3d_cmd_bind_uniform_buffer(rph: i64, buf: i64, slot: i64)
+extern fn rt_wgpu_3d_cmd_draw_indexed(rph: i64, index_count: i64, base_vertex: i64)
 extern fn rt_wgpu_3d_end_frame()
 extern fn rt_wgpu_3d_present()
 extern fn rt_wgpu_3d_shutdown()
@@ -79,14 +81,14 @@ class WebGpuRenderBackend3D:
 
     static fn create() -> WebGpuRenderBackend3D:
         WebGpuRenderBackend3D(
-            cmds:            [WebGpuCommand3D](),
+            cmds:            [],
             cap:             capability_webgpu_3d(),
-            pipeline_ids:    [i64](),
-            pipeline_native: [i64](),
-            buffer_ids:      [i64](),
-            buffer_native:   [i64](),
-            texture_ids:     [i64](),
-            texture_native:  [i64](),
+            pipeline_ids:    [],
+            pipeline_native: [],
+            buffer_ids:      [],
+            buffer_native:   [],
+            texture_ids:     [],
+            texture_native:  [],
             next_id:         1,
             width:           0,
             height:          0
@@ -124,10 +126,10 @@ fn _find_native_texture(ids: [i64], natives: [i64], id: i64) -> i64:
     found
 
 # ============================================================================
-# impl WebGpuRenderBackend3D: RenderBackend3D
+# impl RenderBackend3D for WebGpuRenderBackend3D
 # ============================================================================
 
-impl WebGpuRenderBackend3D: RenderBackend3D:
+impl RenderBackend3D for WebGpuRenderBackend3D:
 
     fn capabilities(self) -> RenderCapability3D:
         self.cap
@@ -206,88 +208,83 @@ impl WebGpuRenderBackend3D: RenderBackend3D:
 
     fn begin_render_pass(self, color_tex: TextureHandle, depth_tex: TextureHandle) -> RenderPassHandle:
         val pass_id = self.cmds.len() as i64
-        self.cmds.push(WebGpuCommand3D.BeginRenderPass(
-            color_tex: color_tex.id,
-            depth_tex: depth_tex.id
-        ))
+        self.cmds.push(wgpu_cmd3d_begin_render_pass(color_tex.id, depth_tex.id))
         RenderPassHandle(id: pass_id)
 
-    fn set_pipeline(self, pass: RenderPassHandle, pipeline: PipelineHandle):
-        val _ = pass
-        self.cmds.push(WebGpuCommand3D.SetPipeline(pipeline_id: pipeline.id))
+    fn set_pipeline(self, rph: RenderPassHandle, pipeline: PipelineHandle):
+        val _ = rph
+        self.cmds.push(wgpu_cmd3d_set_pipeline(pipeline.id))
 
-    fn bind_vertex_buffer(self, pass: RenderPassHandle, buf: BufferHandle, slot: i64):
-        val _ = pass
-        self.cmds.push(WebGpuCommand3D.BindVertexBuffer(buffer_id: buf.id, slot: slot))
+    fn bind_vertex_buffer(self, rph: RenderPassHandle, buf: BufferHandle, slot: i64):
+        val _ = rph
+        self.cmds.push(wgpu_cmd3d_bind_vertex_buffer(buf.id, slot))
 
-    fn bind_index_buffer(self, pass: RenderPassHandle, buf: BufferHandle):
-        val _ = pass
-        self.cmds.push(WebGpuCommand3D.BindIndexBuffer(buffer_id: buf.id))
+    fn bind_index_buffer(self, rph: RenderPassHandle, buf: BufferHandle):
+        val _ = rph
+        self.cmds.push(wgpu_cmd3d_bind_index_buffer(buf.id))
 
-    fn bind_texture(self, pass: RenderPassHandle, tex: TextureHandle, slot: i64):
-        val _ = pass
-        self.cmds.push(WebGpuCommand3D.BindTexture(texture_id: tex.id, slot: slot))
+    fn bind_texture(self, rph: RenderPassHandle, tex: TextureHandle, slot: i64):
+        val _ = rph
+        self.cmds.push(wgpu_cmd3d_bind_texture(tex.id, slot))
 
-    fn bind_uniform_buffer(self, pass: RenderPassHandle, buf: BufferHandle, slot: i64):
-        val _ = pass
-        self.cmds.push(WebGpuCommand3D.BindUniformBuffer(buffer_id: buf.id, slot: slot))
+    fn bind_uniform_buffer(self, rph: RenderPassHandle, buf: BufferHandle, slot: i64):
+        val _ = rph
+        self.cmds.push(wgpu_cmd3d_bind_uniform_buffer(buf.id, slot))
 
-    fn draw_indexed(self, pass: RenderPassHandle, index_count: i64, base_vertex: i64):
-        val _ = pass
-        self.cmds.push(WebGpuCommand3D.DrawIndexed(index_count: index_count, base_vertex: base_vertex))
+    fn draw_indexed(self, rph: RenderPassHandle, index_count: i64, base_vertex: i64):
+        val _ = rph
+        self.cmds.push(wgpu_cmd3d_draw_indexed(index_count, base_vertex))
 
-    fn end_render_pass(self, pass: RenderPassHandle):
-        val _ = pass
-        self.cmds.push(WebGpuCommand3D.EndRenderPass)
+    fn end_render_pass(self, rph: RenderPassHandle):
+        val _ = rph
+        self.cmds.push(wgpu_cmd3d_end_render_pass())
 
     # --- end_frame: drain cmds[], dispatch to rt_wgpu_3d_cmd_* externs ---
+    # Uses kind-tag field access (WebGpuCommand3DKind) — no enum destructuring.
 
     fn end_frame(self):
-        # Drain the command list. We need a native pass handle once
-        # BeginRenderPass is encountered; subsequent commands use it.
         var active_pass = -1 as i64
         var i = 0
         while i < self.cmds.len():
             val cmd = self.cmds[i]
-            match cmd:
-                WebGpuCommand3D.BeginRenderPass(color_tex, depth_tex):
-                    val color_native = _find_native_texture(
-                        self.texture_ids, self.texture_native, color_tex)
-                    val depth_native = _find_native_texture(
-                        self.texture_ids, self.texture_native, depth_tex)
-                    active_pass = rt_wgpu_3d_begin_render_pass(color_native, depth_native)
-                WebGpuCommand3D.SetPipeline(pipeline_id):
-                    val p_native = _find_native_pipeline(
-                        self.pipeline_ids, self.pipeline_native, pipeline_id)
-                    if active_pass >= 0 and p_native >= 0:
-                        rt_wgpu_3d_cmd_set_pipeline(active_pass, p_native)
-                WebGpuCommand3D.BindVertexBuffer(buffer_id, slot):
-                    val b_native = _find_native_buffer(
-                        self.buffer_ids, self.buffer_native, buffer_id)
-                    if active_pass >= 0 and b_native >= 0:
-                        rt_wgpu_3d_cmd_bind_vertex_buffer(active_pass, b_native, slot)
-                WebGpuCommand3D.BindIndexBuffer(buffer_id):
-                    val b_native = _find_native_buffer(
-                        self.buffer_ids, self.buffer_native, buffer_id)
-                    if active_pass >= 0 and b_native >= 0:
-                        rt_wgpu_3d_cmd_bind_index_buffer(active_pass, b_native)
-                WebGpuCommand3D.BindTexture(texture_id, slot):
-                    val t_native = _find_native_texture(
-                        self.texture_ids, self.texture_native, texture_id)
-                    if active_pass >= 0 and t_native >= 0:
-                        rt_wgpu_3d_cmd_bind_texture(active_pass, t_native, slot)
-                WebGpuCommand3D.BindUniformBuffer(buffer_id, slot):
-                    val b_native = _find_native_buffer(
-                        self.buffer_ids, self.buffer_native, buffer_id)
-                    if active_pass >= 0 and b_native >= 0:
-                        rt_wgpu_3d_cmd_bind_uniform_buffer(active_pass, b_native, slot)
-                WebGpuCommand3D.DrawIndexed(index_count, base_vertex):
-                    if active_pass >= 0:
-                        rt_wgpu_3d_cmd_draw_indexed(active_pass, index_count, base_vertex)
-                WebGpuCommand3D.EndRenderPass:
-                    if active_pass >= 0:
-                        rt_wgpu_3d_end_render_pass(active_pass)
-                        active_pass = -1
+            if cmd.kind == WebGpuCommand3DKind.BeginRenderPass:
+                val color_native = _find_native_texture(
+                    self.texture_ids, self.texture_native, cmd.color_tex_id)
+                val depth_native = _find_native_texture(
+                    self.texture_ids, self.texture_native, cmd.depth_tex_id)
+                active_pass = rt_wgpu_3d_begin_render_pass(color_native, depth_native)
+            else: if cmd.kind == WebGpuCommand3DKind.SetPipeline:
+                val p_native = _find_native_pipeline(
+                    self.pipeline_ids, self.pipeline_native, cmd.pipeline_id)
+                if (active_pass >= 0 and p_native >= 0):
+                    rt_wgpu_3d_cmd_set_pipeline(active_pass, p_native)
+            else: if cmd.kind == WebGpuCommand3DKind.BindVertexBuffer:
+                val b_native = _find_native_buffer(
+                    self.buffer_ids, self.buffer_native, cmd.buffer_id)
+                if (active_pass >= 0 and b_native >= 0):
+                    rt_wgpu_3d_cmd_bind_vertex_buffer(active_pass, b_native, cmd.slot)
+            else: if cmd.kind == WebGpuCommand3DKind.BindIndexBuffer:
+                val b_native = _find_native_buffer(
+                    self.buffer_ids, self.buffer_native, cmd.buffer_id)
+                if (active_pass >= 0 and b_native >= 0):
+                    rt_wgpu_3d_cmd_bind_index_buffer(active_pass, b_native)
+            else: if cmd.kind == WebGpuCommand3DKind.BindTexture:
+                val t_native = _find_native_texture(
+                    self.texture_ids, self.texture_native, cmd.texture_id)
+                if (active_pass >= 0 and t_native >= 0):
+                    rt_wgpu_3d_cmd_bind_texture(active_pass, t_native, cmd.slot)
+            else: if cmd.kind == WebGpuCommand3DKind.BindUniformBuffer:
+                val b_native = _find_native_buffer(
+                    self.buffer_ids, self.buffer_native, cmd.buffer_id)
+                if (active_pass >= 0 and b_native >= 0):
+                    rt_wgpu_3d_cmd_bind_uniform_buffer(active_pass, b_native, cmd.slot)
+            else: if cmd.kind == WebGpuCommand3DKind.DrawIndexed:
+                if active_pass >= 0:
+                    rt_wgpu_3d_cmd_draw_indexed(active_pass, cmd.index_count, cmd.base_vertex)
+            else: if cmd.kind == WebGpuCommand3DKind.EndRenderPass:
+                if active_pass >= 0:
+                    rt_wgpu_3d_end_render_pass(active_pass)
+                    active_pass = -1
             i = i + 1
         self.cmds = [WebGpuCommand3D]()
         rt_wgpu_3d_end_frame()
