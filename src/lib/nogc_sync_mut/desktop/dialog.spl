@@ -1,0 +1,122 @@
+# Native OS file dialogs via shell commands.
+
+use common.ui.capability.{Capability, NotSupported}
+use std.nogc_sync_mut.ffi.system.{process_run}
+
+extern fn rt_platform_name() -> text
+
+struct DialogFilter:
+    name: text
+    patterns: [text]
+
+struct DialogOptions:
+    title: text
+    default_path: text
+    filters: [DialogFilter]
+    multiple: bool
+
+fn open_file_dialog(opts: DialogOptions) -> Result<[text], NotSupported>:
+    val platform = rt_platform_name()
+    if platform == "linux":
+        var args: [text] = ["--file-selection"]
+        if opts.title != "":
+            args = args + ["--title", opts.title]
+        if opts.multiple:
+            args = args + ["--multiple", "--separator", "\n"]
+        if opts.default_path != "":
+            args = args + ["--filename", opts.default_path]
+        for f in opts.filters:
+            var pattern_str = f.name + " |"
+            for p in f.patterns:
+                pattern_str = pattern_str + " " + p
+            args = args + ["--file-filter", pattern_str]
+        val result = process_run("zenity", args)
+        if result.2 != 0:
+            return Ok([])
+        var paths: [text] = []
+        var current = ""
+        for ch in result.0:
+            if ch == '\n':
+                if current != "":
+                    paths = paths + [current]
+                current = ""
+            else:
+                current = current + "{ch}"
+        if current != "":
+            paths = paths + [current]
+        Ok(paths)
+    elif platform == "macos":
+        var script = "choose file with prompt \"{opts.title}\""
+        if opts.multiple:
+            script = script + " with multiple selections allowed"
+        val result = process_run("osascript", ["-e", script])
+        if result.2 != 0:
+            return Ok([])
+        Ok([result.0])
+    else:
+        Err(NotSupported.new("file dialogs not supported on {platform}"))
+
+fn save_file_dialog(opts: DialogOptions) -> Result<text, NotSupported>:
+    val platform = rt_platform_name()
+    if platform == "linux":
+        var args: [text] = ["--file-selection", "--save", "--confirm-overwrite"]
+        if opts.title != "":
+            args = args + ["--title", opts.title]
+        if opts.default_path != "":
+            args = args + ["--filename", opts.default_path]
+        val result = process_run("zenity", args)
+        if result.2 != 0:
+            return Ok("")
+        var path = result.0
+        if path.ends_with("\n"):
+            path = path.slice(0, path.length() - 1)
+        Ok(path)
+    elif platform == "macos":
+        var script = "choose file name with prompt \"{opts.title}\""
+        val result = process_run("osascript", ["-e", script])
+        if result.2 != 0:
+            return Ok("")
+        Ok(result.0)
+    else:
+        Err(NotSupported.new("file dialogs not supported on {platform}"))
+
+fn open_directory_dialog(opts: DialogOptions) -> Result<text, NotSupported>:
+    val platform = rt_platform_name()
+    if platform == "linux":
+        var args: [text] = ["--file-selection", "--directory"]
+        if opts.title != "":
+            args = args + ["--title", opts.title]
+        val result = process_run("zenity", args)
+        if result.2 != 0:
+            return Ok("")
+        var path = result.0
+        if path.ends_with("\n"):
+            path = path.slice(0, path.length() - 1)
+        Ok(path)
+    elif platform == "macos":
+        var script = "choose folder with prompt \"{opts.title}\""
+        val result = process_run("osascript", ["-e", script])
+        if result.2 != 0:
+            return Ok("")
+        Ok(result.0)
+    else:
+        Err(NotSupported.new("directory dialogs not supported on {platform}"))
+
+fn message_dialog(title: text, body: text, kind: text) -> Result<bool, NotSupported>:
+    val platform = rt_platform_name()
+    if platform == "linux":
+        var type_flag = "--info"
+        if kind == "warning":
+            type_flag = "--warning"
+        elif kind == "error":
+            type_flag = "--error"
+        elif kind == "question":
+            type_flag = "--question"
+        val result = process_run("zenity", [type_flag, "--title", title, "--text", body])
+        Ok(result.2 == 0)
+    elif platform == "macos":
+        var script = "display dialog \"{body}\" with title \"{title}\" buttons {\"OK\"}"
+        val result = process_run("osascript", ["-e", script])
+        Ok(result.2 == 0)
+    else:
+        Err(NotSupported.new("message dialogs not supported on {platform}"))

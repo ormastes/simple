@@ -1,0 +1,80 @@
+# Power and battery status monitoring.
+
+use common.ui.capability.{NotSupported}
+use std.nogc_sync_mut.ffi.system.{process_run}
+
+extern fn rt_platform_name() -> text
+
+enum PowerState:
+    AC
+    Battery
+    Unknown
+
+struct BatteryInfo:
+    state: PowerState
+    level: i64
+    time_remaining_seconds: i64
+    is_charging: bool
+
+fn get_power_state() -> Result<PowerState, NotSupported>:
+    val platform = rt_platform_name()
+    if platform == "linux":
+        val result = process_run("/bin/sh", ["-c", "cat /sys/class/power_supply/AC0/online 2>/dev/null || cat /sys/class/power_supply/ACAD/online 2>/dev/null || echo -1"])
+        val output = result.0
+        if output.starts_with("1"):
+            Ok(PowerState.AC)
+        elif output.starts_with("0"):
+            Ok(PowerState.Battery)
+        else:
+            Ok(PowerState.Unknown)
+    elif platform == "macos":
+        val result = process_run("pmset", ["-g", "batt"])
+        val output = result.0
+        if output.contains("AC Power"):
+            Ok(PowerState.AC)
+        elif output.contains("Battery Power"):
+            Ok(PowerState.Battery)
+        else:
+            Ok(PowerState.Unknown)
+    else:
+        Err(NotSupported.new("power monitoring not supported on {platform}"))
+
+fn get_battery_info() -> Result<BatteryInfo, NotSupported>:
+    val platform = rt_platform_name()
+    if platform == "linux":
+        val cap_result = process_run("/bin/sh", ["-c", "cat /sys/class/power_supply/BAT0/capacity 2>/dev/null || echo -1"])
+        val status_result = process_run("/bin/sh", ["-c", "cat /sys/class/power_supply/BAT0/status 2>/dev/null || echo Unknown"])
+        var level = -1
+        var cap_str = cap_result.0
+        if cap_str.ends_with("\n"):
+            cap_str = cap_str.slice(0, cap_str.length() - 1)
+        level = cap_str.to_i64()
+        var status_str = status_result.0
+        if status_str.ends_with("\n"):
+            status_str = status_str.slice(0, status_str.length() - 1)
+        var charging = status_str == "Charging"
+        var state = PowerState.Unknown
+        if status_str == "Charging" or status_str == "Full":
+            state = PowerState.AC
+        elif status_str == "Discharging" or status_str == "Not charging":
+            state = PowerState.Battery
+        Ok(BatteryInfo(state: state, level: level, time_remaining_seconds: -1, is_charging: charging))
+    elif platform == "macos":
+        val result = process_run("pmset", ["-g", "batt"])
+        var state = PowerState.Unknown
+        var charging = false
+        if result.0.contains("AC Power"):
+            state = PowerState.AC
+        elif result.0.contains("Battery Power"):
+            state = PowerState.Battery
+        if result.0.contains("charging"):
+            charging = true
+        Ok(BatteryInfo(state: state, level: -1, time_remaining_seconds: -1, is_charging: charging))
+    else:
+        Err(NotSupported.new("battery info not supported on {platform}"))
+
+fn is_on_battery() -> Result<bool, NotSupported>:
+    val state = get_power_state()?
+    match state:
+        PowerState.Battery: Ok(true)
+        _: Ok(false)

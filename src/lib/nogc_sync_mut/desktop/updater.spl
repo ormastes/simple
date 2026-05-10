@@ -1,0 +1,71 @@
+# Application auto-update mechanism.
+# Checks a feed URL for new versions, downloads, and applies updates.
+
+use common.ui.capability.{NotSupported}
+use std.nogc_sync_mut.ffi.system.{process_run}
+
+extern fn rt_platform_name() -> text
+
+struct UpdateInfo:
+    version: text
+    url: text
+    release_notes: text
+    mandatory: bool
+
+struct UpdateConfig:
+    feed_url: text
+    current_version: text
+    auto_download: bool
+
+fn check_for_update(config: UpdateConfig) -> Result<UpdateInfo, NotSupported>:
+    val result = process_run("curl", ["-s", "-f", config.feed_url])
+    if result.2 != 0:
+        return Err(NotSupported.new("failed to fetch update feed: {result.1}"))
+    val body = result.0
+    var version = ""
+    var url = ""
+    var notes = ""
+    var mandatory = false
+    var lines = split_lines(body)
+    for line in lines:
+        if line.starts_with("version:"):
+            version = line.slice(8, line.length()).trim()
+        elif line.starts_with("url:"):
+            url = line.slice(4, line.length()).trim()
+        elif line.starts_with("notes:"):
+            notes = line.slice(6, line.length()).trim()
+        elif line.starts_with("mandatory:"):
+            val flag = line.slice(10, line.length()).trim()
+            mandatory = flag == "true"
+    if version == "":
+        return Err(NotSupported.new("no version found in update feed"))
+    if version == config.current_version:
+        return Err(NotSupported.new("already up to date"))
+    Ok(UpdateInfo(version: version, url: url, release_notes: notes, mandatory: mandatory))
+
+fn download_update(info: UpdateInfo, dest_path: text) -> Result<bool, NotSupported>:
+    if info.url == "":
+        return Err(NotSupported.new("no download URL in update info"))
+    val result = process_run("curl", ["-s", "-f", "-o", dest_path, info.url])
+    if result.2 != 0:
+        return Err(NotSupported.new("download failed: {result.1}"))
+    Ok(true)
+
+fn apply_update(binary_path: text) -> Result<bool, NotSupported>:
+    val result = process_run("chmod", ["+x", binary_path])
+    if result.2 != 0:
+        return Err(NotSupported.new("failed to make update executable"))
+    Ok(true)
+
+fn split_lines(input: text) -> [text]:
+    var lines: [text] = []
+    var current = ""
+    for ch in input:
+        if ch == '\n':
+            lines = lines + [current]
+            current = ""
+        else:
+            current = current + "{ch}"
+    if current != "":
+        lines = lines + [current]
+    lines

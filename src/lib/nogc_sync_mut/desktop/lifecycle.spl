@@ -1,0 +1,95 @@
+# Application lifecycle management and single-instance lock.
+
+use common.ui.capability.{NotSupported}
+use std.nogc_sync_mut.ffi.system.{process_run, env_get}
+
+extern fn rt_platform_name() -> text
+extern fn rt_getpid() -> i64
+
+enum LifecycleEvent:
+    Ready
+    BeforeQuit
+    WillQuit
+    Activate
+    Deactivate
+    Suspend
+    Resume
+
+enum AppPhase:
+    Initializing
+    Running
+    ShuttingDown
+
+class AppLifecycle:
+    phase: AppPhase
+    app_id: text
+    lock_path: text
+    handlers: [(LifecycleEvent, text)]
+
+    static fn new(app_id: text) -> AppLifecycle:
+        val runtime_dir = env_get("XDG_RUNTIME_DIR")
+        var lock = "/tmp/simple-{app_id}.lock"
+        if runtime_dir != "":
+            lock = "{runtime_dir}/simple-{app_id}.lock"
+        AppLifecycle(
+            phase: AppPhase.Initializing,
+            app_id: app_id,
+            lock_path: lock,
+            handlers: []
+        )
+
+    fn on(self, ev: LifecycleEvent, handler_id: text) -> AppLifecycle:
+        AppLifecycle(
+            phase: self.phase,
+            app_id: self.app_id,
+            lock_path: self.lock_path,
+            handlers: self.handlers + [(ev, handler_id)]
+        )
+
+    fn get_handlers(self, ev: LifecycleEvent) -> [text]:
+        var result: [text] = []
+        val ev_name = lifecycle_event_name(ev)
+        for pair in self.handlers:
+            if lifecycle_event_name(pair.0) == ev_name:
+                result = result + [pair.1]
+        result
+
+    fn set_phase(self, new_phase: AppPhase) -> AppLifecycle:
+        AppLifecycle(
+            phase: new_phase,
+            app_id: self.app_id,
+            lock_path: self.lock_path,
+            handlers: self.handlers
+        )
+
+fn lifecycle_event_name(ev: LifecycleEvent) -> text:
+    match ev:
+        LifecycleEvent.Ready: "Ready"
+        LifecycleEvent.BeforeQuit: "BeforeQuit"
+        LifecycleEvent.WillQuit: "WillQuit"
+        LifecycleEvent.Activate: "Activate"
+        LifecycleEvent.Deactivate: "Deactivate"
+        LifecycleEvent.Suspend: "Suspend"
+        LifecycleEvent.Resume: "Resume"
+
+fn acquire_single_instance_lock(lifecycle: AppLifecycle) -> Result<bool, NotSupported>:
+    val pid = rt_getpid()
+    val result = process_run("/bin/sh", ["-c", "echo {pid} > {lifecycle.lock_path}"])
+    if result.2 == 0:
+        Ok(true)
+    else:
+        Ok(false)
+
+fn release_single_instance_lock(lifecycle: AppLifecycle) -> Result<bool, NotSupported>:
+    val result = process_run("/bin/sh", ["-c", "rm -f {lifecycle.lock_path}"])
+    Ok(result.2 == 0)
+
+fn is_single_instance(lifecycle: AppLifecycle) -> bool:
+    val result = process_run("/bin/sh", ["-c", "test -f {lifecycle.lock_path} && cat {lifecycle.lock_path}"])
+    if result.2 != 0:
+        return true
+    val existing_pid = result.0
+    if existing_pid == "":
+        return true
+    val check = process_run("/bin/sh", ["-c", "kill -0 {existing_pid} 2>/dev/null"])
+    check.2 != 0

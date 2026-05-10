@@ -322,3 +322,47 @@ A set of standalone `emu_*` functions that implement every RenderBackendAdv oper
 ## GpuFfiMode (Engine2D)
 
 Enum with two variants: `Static` (extern fn resolved at link time against Rust runtime) and `Dynamic` (DynLib.load via dlopen at runtime). SimpleOS defaults to Static (no dynamic loader); hosted OSes default to Dynamic with graceful fallback. Defined in `src/lib/gc_async_mut/gpu/engine2d/ffi_dispatch.spl`.
+
+## SReplay
+
+Simple Replay Debugger. A deterministic replay and reverse debugging system spanning 6 tracks: QEMU full-system replay, SimpleOS kernel event log, process-level rr, Simple language semantic trace, container checkpoint/replay, and Simple-native VM replay. All tracks share the `ReplayBackend` trait and unified trace format. Guide: `doc/07_guide/sreplay.md`. Core library: `src/lib/nogc_sync_mut/replay/`.
+
+## ReplayBackend (SReplay)
+
+Shared trait implemented by all 6 SReplay tracks. Defines the interface for `start_recording`, `start_replay`, `stop`, `save_checkpoint`, `restore_checkpoint`, `list_checkpoints`, `reverse_step`, `reverse_continue`, and `session_info`. Defined in `src/lib/nogc_sync_mut/replay/backend.spl`.
+
+## ReplayConfig (SReplay)
+
+Configuration struct for replay sessions. Contains target architecture (`Arch`), mode (Record/Replay), kernel path, trace file path, QEMU machine type, memory size, GDB port, QMP socket path, and extra arguments. Defined in `src/lib/nogc_sync_mut/replay/types.spl`.
+
+## Reverse Execution (SReplay)
+
+NOT literal backward instruction execution. SReplay reverse debugging works by: (1) finding the nearest checkpoint before the target, (2) restoring that checkpoint, (3) replaying forward to the target event. Exposed via GDB MI `reverse-step`/`reverse-continue` and DAP `stepBack`/`reverseContinue`.
+
+## Checkpoint (SReplay)
+
+A saved snapshot of execution state (registers, memory, ring buffer position) that enables fast restore during replay. QEMU checkpoints use QMP `savevm`/`loadvm`. Process checkpoints use page-level CoW via `/proc/<pid>/pagemap`. Baremetal checkpoints store cycle count, PC, SP, and ring buffer state.
+
+## Semantic Trace (SReplay)
+
+Compiler-generated debug events injected at MIR level (Track 4). Four instrumentation levels: `none` (production), `functions` (enter/exit), `objects` (+ alloc/drop/move), `full` (+ variable writes, borrows, async). Injected by `src/compiler/50.mir/mir_debug_trace_injection.spl`. Controlled by `--debug-trace` flag.
+
+## Chaos Scheduler (SReplay)
+
+Process-level replay scheduler (Track 3) with 4 strategies: RoundRobin, Random, YieldHeavy, StarvationProbe. Used with `simple record --chaos ./app` to expose concurrency bugs by randomizing thread scheduling. Defined in `src/lib/nogc_sync_mut/replay/process/chaos_scheduler.spl`.
+
+## Divergence Detection (SReplay)
+
+Kernel replay verification (Track 2). Compares recorded events against live execution during replay. Reports mismatches as `DivergenceRecord` with kind (ScheduleMismatch, SyscallResultMismatch, TimerValueDrift, etc.), expected/actual values, and cycle count. Defined in `src/os/kernel/replay/divergence.spl`.
+
+## Event Ring Buffer (SReplay)
+
+Fixed-size pre-allocated ring buffer for recording nondeterministic events. Kernel version uses BSS allocation (64K entries, no heap). Baremetal version stores kind, timestamp, val_a, val_b per entry. FIFO order. Defined in `src/os/kernel/replay/log_buffer.spl` (kernel) and `src/lib/nogc_async_mut_noalloc/replay/bm_replay_core.spl` (baremetal).
+
+## Trace Package (SReplay)
+
+Unified trace format (`.sr/` directory) shared across all 6 tracks. Contains: `manifest.sdn` (metadata), `events/` (compressed event streams), `payloads/` (large binary data), `checkpoints/` (register state + memory deltas), `indexes/` (B-tree indexes for memory writes, source lines, object history, schedule). Defined in `src/lib/nogc_sync_mut/replay/trace_format.spl`.
+
+## Address (SReplay)
+
+Architecture-neutral address representation: `struct Address { bits: i32, value: i64 }`. The `bits` field is 32 or 64; upper bits are zero for 32-bit targets. Never use raw pointers in trace formats. Defined in `src/lib/nogc_sync_mut/replay/types.spl`.
