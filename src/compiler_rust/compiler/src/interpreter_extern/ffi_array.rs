@@ -263,3 +263,46 @@ pub fn rt_array_len_fn(args: &[Value]) -> Result<Value, CompileError> {
     let len = rt_array_len(arr);
     Ok(Value::Int(len))
 }
+
+/// Bulk-append `count` elements from `src` into `dst`.
+///
+/// Operates on heap-backed (raw pointer) arrays — the same arrays produced by
+/// `rt_array_new` / `rt_array_new_with_cap`.  This is the SIMD bulk-copy
+/// workaround for the SplValue slot layout limitation
+/// (bug_simd_bulk_copy_blocked_by_spl_array_layout, Option B).
+pub fn rt_array_extend_i64_fn(args: &[Value]) -> Result<Value, CompileError> {
+    let dst_raw = args
+        .first()
+        .ok_or_else(|| {
+            CompileError::semantic_with_context(
+                "rt_array_extend_i64 expects 3 arguments".to_string(),
+                ErrorContext::new().with_code(codes::ARGUMENT_COUNT_MISMATCH),
+            )
+        })?
+        .as_int()?;
+
+    let src_raw = args
+        .get(1)
+        .ok_or_else(|| {
+            CompileError::semantic_with_context(
+                "rt_array_extend_i64 expects 3 arguments".to_string(),
+                ErrorContext::new().with_code(codes::ARGUMENT_COUNT_MISMATCH),
+            )
+        })?
+        .as_int()?;
+
+    let count = args
+        .get(2)
+        .ok_or_else(|| {
+            CompileError::semantic_with_context(
+                "rt_array_extend_i64 expects 3 arguments".to_string(),
+                ErrorContext::new().with_code(codes::ARGUMENT_COUNT_MISMATCH),
+            )
+        })?
+        .as_int()?;
+
+    let dst_rv = RuntimeValue::from_raw(dst_raw as u64);
+    let src_rv = RuntimeValue::from_raw(src_raw as u64);
+    let result = rt_array_extend_i64(dst_rv, src_rv, count);
+    Ok(Value::Bool(result))
+}

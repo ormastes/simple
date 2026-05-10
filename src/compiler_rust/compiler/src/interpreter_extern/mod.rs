@@ -1479,6 +1479,8 @@ pub(crate) fn call_extern_function(
         "rt_array_pop" => ffi_array::rt_array_pop_fn(&evaluated),
         "rt_array_clear" => ffi_array::rt_array_clear_fn(&evaluated),
         "rt_array_len" => ffi_array::rt_array_len_fn(&evaluated),
+        // `rt_array_extend_i64(dst, src, count)` — bulk-append from src into dst (SIMD bulk-copy workaround).
+        "rt_array_extend_i64" => ffi_array::rt_array_extend_i64_fn(&evaluated),
         // `rt_bytes_u8_at(arr, idx)` — index into a Value::Array byte buffer.
         "rt_bytes_u8_at" => ffi_array::rt_bytes_u8_at_fn(&evaluated),
 
