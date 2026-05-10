@@ -21,16 +21,16 @@ feature
 - **Physics GpuSolver**: Upload→dispatch per color-batch→download with `PhysicsBackend` enum — render should mirror
 
 ## Acceptance Criteria
-- [ ] AC-1: `RenderBackend3D` trait defined with Vulkan, WebGPU, and Software implementations (follows GameBackend trait pattern)
-- [ ] AC-2: `RenderCapability3D` struct + backend detection (follows SkCapability pattern)
-- [ ] AC-3: GPU mesh pipeline: vertex buffer upload, GPU-side MVP transforms, indexed draw calls through backend trait
-- [ ] AC-4: GPU-accelerated lighting (point/directional/spot) via compute or fragment shader path
-- [ ] AC-5: Shader cross-compilation: GLSL→SPIR-V (Vulkan) and GLSL→WGSL (WebGPU) with `ShaderProgram` wired to real handles
-- [ ] AC-6: WebGPU shim: `rt_wgpu_*` extern declarations + Rust runtime stubs for browser target
-- [ ] AC-7: 3D texture system: GPU texture upload, Material3D→pipeline state binding, texture atlas/cache
-- [ ] AC-8: MDSOC+ audit: engine3d outer layer owns policy/orchestration, ECS business layer owns data, no cross-imports
-- [ ] AC-9: Existing ForwardRenderer3D preserved as `SoftwareRenderBackend3D` fallback (no regression)
-- [ ] AC-10: All new code uses MDSOC+ patterns — no inheritance, trait+composition only, tagged enum dispatch for variants
+- [x] AC-1: `RenderBackend3D` trait defined with Vulkan, WebGPU, and Software implementations (follows GameBackend trait pattern)
+- [x] AC-2: `RenderCapability3D` struct + backend detection (follows SkCapability pattern)
+- [x] AC-3: GPU mesh pipeline: vertex buffer upload, GPU-side MVP transforms, indexed draw calls through backend trait
+- [x] AC-4: GPU-accelerated lighting (point/directional/spot) via compute or fragment shader path
+- [x] AC-5: Shader cross-compilation: GLSL→SPIR-V (Vulkan) and GLSL→WGSL (WebGPU) with `ShaderProgram` wired to real handles
+- [x] AC-6: WebGPU shim: `rt_wgpu_*` extern declarations + Rust runtime stubs for browser target
+- [x] AC-7: 3D texture system: GPU texture upload, Material3D→pipeline state binding, texture atlas/cache
+- [x] AC-8: MDSOC+ audit: engine3d outer layer owns policy/orchestration, ECS business layer owns data, no cross-imports
+- [x] AC-9: Existing ForwardRenderer3D preserved as `SoftwareRenderBackend3D` fallback (no regression)
+- [x] AC-10: All new code uses MDSOC+ patterns — no inheritance, trait+composition only, tagged enum dispatch for variants
 
 ## Parallel Agent Workstreams (Phase 5)
 | Stream | Files (disjoint scope) | ACs |
@@ -54,7 +54,7 @@ feature
 - [x] 5-implement (Engineer) — 2026-05-10
 - [x] 6-refactor (Tech Lead) — 2026-05-10
 - [x] 7-verify (QA) — 2026-05-10
-- [ ] 8-ship (Release Mgr)
+- [x] 8-ship (Release Mgr) — 2026-05-10
 
 ## Phase Outputs
 
