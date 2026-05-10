@@ -1,209 +1,473 @@
-# Physics System — Joint Constraints
+# Physics2 — 2D Joint Types
 #
-# Pure Simple joint constraints. Joints connect two physics bodies
-# with position correction solved iteratively each physics step.
-#
-# Supported joint types:
-#   0 = revolute (hinge) — bodies rotate around anchor
-#   1 = fixed (weld)     — bodies locked relative to each other
-#   2 = spring (distance) — spring force between bodies
-#
-# Usage:
-#   val jid = physics_add_revolute(world, body_a, body_b, Vec2(x: 0.0, y: 0.0))
-#   physics_remove_joint(world, jid)
+# Joint constraints for connecting rigid bodies: distance, revolute (hinge),
+# prismatic (slider), spring, and weld joints. Each joint computes forces
+# to maintain its constraint during the physics step.
 
-use std.common.engine.ids.{NodeId}
-use std.common.engine.math2d.{Vec2, _sqrt}
-use std.nogc_sync_mut.engine.physics.body2d.{InternalBody2D}
-use std.nogc_sync_mut.engine.physics.world.{PhysicsWorld2D, Joint2D}
+use std.common.math.{math_sqrt}
 
-# ============================================================================
-# JointId — Opaque handle to a physics joint
-# ============================================================================
+# --------------------------------------------------------------------------
+# Identifiers
+# --------------------------------------------------------------------------
 
 struct JointId:
-    handle: i64
+    id: i32
 
 impl JointId:
-    fn is_valid() -> bool:
-        self.handle >= 0
+    static fn null() -> JointId:
+        JointId(id: -1)
 
-    static fn invalid() -> JointId:
-        JointId(handle: -1)
+    fn is_null(self) -> bool:
+        self.id < 0
 
-# ============================================================================
-# Joint Creation Functions
-# ============================================================================
+struct BodyRef:
+    body_id: i32
 
-fn physics_add_revolute(world: PhysicsWorld2D, node_a: NodeId, node_b: NodeId, anchor: Vec2) -> JointId:
-    """Add a revolute (hinge) joint between two bodies at the given anchor point."""
-    val idx_a = world._find_body_index(node_a)
-    val idx_b = world._find_body_index(node_b)
-    if idx_a < 0 or idx_b < 0:
-        return JointId.invalid()
+# --------------------------------------------------------------------------
+# Joint force result
+# --------------------------------------------------------------------------
 
-    val joint = Joint2D(
-        joint_type: 0,
-        node_a: node_a,
-        node_b: node_b,
-        anchor_a: anchor,
-        anchor_b: anchor,
-        rest_length: 0.0,
-        stiffness: 1.0,
-        damping: 0.0,
-        offset: Vec2.zero()
-    )
-    val id = world.joint_storage.add(joint)
-    JointId(handle: id)
+struct JointForce:
+    fx: f64
+    fy: f64
+    torque_a: f64
+    torque_b: f64
 
-fn physics_add_fixed(world: PhysicsWorld2D, node_a: NodeId, node_b: NodeId) -> JointId:
-    """Add a fixed (weld) joint between two bodies — locks relative position and rotation."""
-    val idx_a = world._find_body_index(node_a)
-    val idx_b = world._find_body_index(node_b)
-    if idx_a < 0 or idx_b < 0:
-        return JointId.invalid()
+impl JointForce:
+    static fn zero() -> JointForce:
+        JointForce(fx: 0.0, fy: 0.0, torque_a: 0.0, torque_b: 0.0)
 
-    val pb_a = world.bodies[idx_a]
-    val pb_b = world.bodies[idx_b]
-    val ib_a = world.internal_bodies[pb_a.body_index]
-    val ib_b = world.internal_bodies[pb_b.body_index]
-    val offset = ib_b.position.sub(ib_a.position)
+# --------------------------------------------------------------------------
+# Distance Joint
+# --------------------------------------------------------------------------
 
-    val joint = Joint2D(
-        joint_type: 1,
-        node_a: node_a,
-        node_b: node_b,
-        anchor_a: Vec2.zero(),
-        anchor_b: Vec2.zero(),
-        rest_length: 0.0,
-        stiffness: 1.0,
-        damping: 0.0,
-        offset: offset
-    )
-    val id = world.joint_storage.add(joint)
-    JointId(handle: id)
+struct DistanceJoint:
+    id: JointId
+    body_a: BodyRef
+    body_b: BodyRef
+    anchor_a_x: f64
+    anchor_a_y: f64
+    anchor_b_x: f64
+    anchor_b_y: f64
+    rest_length: f64
+    stiffness: f64
+    damping: f64
 
-fn physics_add_spring(world: PhysicsWorld2D, node_a: NodeId, node_b: NodeId, rest_length: f64, stiffness: f64, damping: f64) -> JointId:
-    """Add a spring (distance) joint between two bodies."""
-    val idx_a = world._find_body_index(node_a)
-    val idx_b = world._find_body_index(node_b)
-    if idx_a < 0 or idx_b < 0:
-        return JointId.invalid()
+impl DistanceJoint:
+    static fn new(body_a: BodyRef, body_b: BodyRef, rest_length: f64) -> DistanceJoint:
+        DistanceJoint(
+            id: JointId.null(),
+            body_a: body_a,
+            body_b: body_b,
+            anchor_a_x: 0.0, anchor_a_y: 0.0,
+            anchor_b_x: 0.0, anchor_b_y: 0.0,
+            rest_length: rest_length,
+            stiffness: 1.0,
+            damping: 0.0
+        )
 
-    val joint = Joint2D(
-        joint_type: 2,
-        node_a: node_a,
-        node_b: node_b,
-        anchor_a: Vec2.zero(),
-        anchor_b: Vec2.zero(),
-        rest_length: rest_length,
-        stiffness: stiffness,
-        damping: damping,
-        offset: Vec2.zero()
-    )
-    val id = world.joint_storage.add(joint)
-    JointId(handle: id)
+    fn compute_force(self, pos_a_x: f64, pos_a_y: f64, pos_b_x: f64, pos_b_y: f64) -> JointForce:
+        val dx = (pos_b_x + self.anchor_b_x) - (pos_a_x + self.anchor_a_x)
+        val dy = (pos_b_y + self.anchor_b_y) - (pos_a_y + self.anchor_a_y)
+        val dist = math_sqrt(dx * dx + dy * dy)
+        if dist < 0.0001:
+            return JointForce.zero()
+        val inv_dist = 1.0 / dist
+        val nx = dx * inv_dist
+        val ny = dy * inv_dist
+        val stretch = dist - self.rest_length
+        val force_mag = stretch * self.stiffness
+        val fx = nx * force_mag
+        val fy = ny * force_mag
+        JointForce(fx: fx, fy: fy, torque_a: 0.0, torque_b: 0.0)
 
-# ============================================================================
-# Joint Removal
-# ============================================================================
+# --------------------------------------------------------------------------
+# Revolute (Hinge) Joint
+# --------------------------------------------------------------------------
 
-fn physics_remove_joint(world: PhysicsWorld2D, joint_id: JointId) -> bool:
-    """Remove a joint from the physics world."""
-    if not joint_id.is_valid():
-        return false
-    world.joint_storage.remove(joint_id.handle)
+struct RevoluteJoint:
+    id: JointId
+    body_a: BodyRef
+    body_b: BodyRef
+    anchor_x: f64
+    anchor_y: f64
+    enable_limit: bool
+    lower_angle: f64
+    upper_angle: f64
+    enable_motor: bool
+    motor_speed: f64
+    max_motor_torque: f64
 
-# ============================================================================
-# Joint Solver — called each physics step by the user
-# ============================================================================
+impl RevoluteJoint:
+    static fn new(body_a: BodyRef, body_b: BodyRef, anchor_x: f64, anchor_y: f64) -> RevoluteJoint:
+        RevoluteJoint(
+            id: JointId.null(),
+            body_a: body_a,
+            body_b: body_b,
+            anchor_x: anchor_x,
+            anchor_y: anchor_y,
+            enable_limit: false,
+            lower_angle: 0.0,
+            upper_angle: 0.0,
+            enable_motor: false,
+            motor_speed: 0.0,
+            max_motor_torque: 0.0
+        )
 
-fn solve_joints(world: PhysicsWorld2D, dt: f64):
-    """Iteratively solve all joints. Call after world.step() for joint constraints.
-    Uses 4 solver iterations for stability."""
-    var iteration = 0
-    while iteration < 4:
+    static fn with_limits(body_a: BodyRef, body_b: BodyRef, anchor_x: f64, anchor_y: f64, lower: f64, upper: f64) -> RevoluteJoint:
+        RevoluteJoint(
+            id: JointId.null(),
+            body_a: body_a,
+            body_b: body_b,
+            anchor_x: anchor_x,
+            anchor_y: anchor_y,
+            enable_limit: true,
+            lower_angle: lower,
+            upper_angle: upper,
+            enable_motor: false,
+            motor_speed: 0.0,
+            max_motor_torque: 0.0
+        )
+
+    static fn with_motor(body_a: BodyRef, body_b: BodyRef, anchor_x: f64, anchor_y: f64, speed: f64, max_torque: f64) -> RevoluteJoint:
+        RevoluteJoint(
+            id: JointId.null(),
+            body_a: body_a,
+            body_b: body_b,
+            anchor_x: anchor_x,
+            anchor_y: anchor_y,
+            enable_limit: false,
+            lower_angle: 0.0,
+            upper_angle: 0.0,
+            enable_motor: true,
+            motor_speed: speed,
+            max_motor_torque: max_torque
+        )
+
+# --------------------------------------------------------------------------
+# Prismatic (Slider) Joint
+# --------------------------------------------------------------------------
+
+struct PrismaticJoint:
+    id: JointId
+    body_a: BodyRef
+    body_b: BodyRef
+    anchor_x: f64
+    anchor_y: f64
+    axis_x: f64
+    axis_y: f64
+    enable_limit: bool
+    lower_translation: f64
+    upper_translation: f64
+    enable_motor: bool
+    motor_speed: f64
+    max_motor_force: f64
+
+impl PrismaticJoint:
+    static fn new(body_a: BodyRef, body_b: BodyRef, anchor_x: f64, anchor_y: f64, axis_x: f64, axis_y: f64) -> PrismaticJoint:
+        # Normalize the axis
+        val len = math_sqrt(axis_x * axis_x + axis_y * axis_y)
+        var norm_x = axis_x
+        var norm_y = axis_y
+        if len > 0.0001:
+            norm_x = axis_x / len
+            norm_y = axis_y / len
+        PrismaticJoint(
+            id: JointId.null(),
+            body_a: body_a,
+            body_b: body_b,
+            anchor_x: anchor_x,
+            anchor_y: anchor_y,
+            axis_x: norm_x,
+            axis_y: norm_y,
+            enable_limit: false,
+            lower_translation: 0.0,
+            upper_translation: 0.0,
+            enable_motor: false,
+            motor_speed: 0.0,
+            max_motor_force: 0.0
+        )
+
+# --------------------------------------------------------------------------
+# Spring Joint
+# --------------------------------------------------------------------------
+
+struct SpringJoint:
+    id: JointId
+    body_a: BodyRef
+    body_b: BodyRef
+    anchor_a_x: f64
+    anchor_a_y: f64
+    anchor_b_x: f64
+    anchor_b_y: f64
+    rest_length: f64
+    stiffness: f64
+    damping: f64
+
+impl SpringJoint:
+    static fn new(body_a: BodyRef, body_b: BodyRef, stiffness: f64, damping: f64) -> SpringJoint:
+        SpringJoint(
+            id: JointId.null(),
+            body_a: body_a,
+            body_b: body_b,
+            anchor_a_x: 0.0, anchor_a_y: 0.0,
+            anchor_b_x: 0.0, anchor_b_y: 0.0,
+            rest_length: 0.0,
+            stiffness: stiffness,
+            damping: damping
+        )
+
+    fn compute_spring_force(self, pos_a_x: f64, pos_a_y: f64, pos_b_x: f64, pos_b_y: f64) -> JointForce:
+        val ax = pos_a_x + self.anchor_a_x
+        val ay = pos_a_y + self.anchor_a_y
+        val bx = pos_b_x + self.anchor_b_x
+        val by = pos_b_y + self.anchor_b_y
+        val dx = bx - ax
+        val dy = by - ay
+        val dist = math_sqrt(dx * dx + dy * dy)
+        if dist < 0.0001:
+            return JointForce.zero()
+        val inv_dist = 1.0 / dist
+        val nx = dx * inv_dist
+        val ny = dy * inv_dist
+        # Hooke's law: F = -k * (x - rest) - c * v_along_spring
+        val stretch = dist - self.rest_length
+        val spring_force = self.stiffness * stretch
+        # Damping approximation (velocity would need body velocities;
+        # here we apply pure positional spring force)
+        val fx = nx * spring_force
+        val fy = ny * spring_force
+        JointForce(fx: fx, fy: fy, torque_a: 0.0, torque_b: 0.0)
+
+# --------------------------------------------------------------------------
+# Weld Joint
+# --------------------------------------------------------------------------
+
+struct WeldJoint:
+    id: JointId
+    body_a: BodyRef
+    body_b: BodyRef
+    anchor_x: f64
+    anchor_y: f64
+    reference_angle: f64
+    stiffness: f64
+    damping: f64
+
+impl WeldJoint:
+    static fn new(body_a: BodyRef, body_b: BodyRef, anchor_x: f64, anchor_y: f64) -> WeldJoint:
+        WeldJoint(
+            id: JointId.null(),
+            body_a: body_a,
+            body_b: body_b,
+            anchor_x: anchor_x,
+            anchor_y: anchor_y,
+            reference_angle: 0.0,
+            stiffness: 0.0,
+            damping: 0.0
+        )
+
+# --------------------------------------------------------------------------
+# Joint Type Enum & Registry
+# --------------------------------------------------------------------------
+
+enum JointType:
+    DistanceType
+    RevoluteType
+    PrismaticType
+    SpringType
+    WeldType
+
+struct JointEntry:
+    joint_type: JointType
+    joint_id: JointId
+    body_a_id: i32
+    body_b_id: i32
+    active: bool
+
+class JointRegistry:
+    entries: [JointEntry]
+    distances: [DistanceJoint]
+    revolutes: [RevoluteJoint]
+    prismatics: [PrismaticJoint]
+    springs: [SpringJoint]
+    welds: [WeldJoint]
+    next_id: i32
+
+impl JointRegistry:
+    static fn new() -> JointRegistry:
+        JointRegistry(
+            entries: [],
+            distances: [],
+            revolutes: [],
+            prismatics: [],
+            springs: [],
+            welds: [],
+            next_id: 0
+        )
+
+    me add_distance(joint: DistanceJoint) -> JointId:
+        val jid = JointId(id: self.next_id)
+        self.next_id = self.next_id + 1
+        var j = joint
+        j = DistanceJoint(
+            id: jid,
+            body_a: j.body_a, body_b: j.body_b,
+            anchor_a_x: j.anchor_a_x, anchor_a_y: j.anchor_a_y,
+            anchor_b_x: j.anchor_b_x, anchor_b_y: j.anchor_b_y,
+            rest_length: j.rest_length,
+            stiffness: j.stiffness, damping: j.damping
+        )
+        self.distances.push(j)
+        val entry = JointEntry(
+            joint_type: JointType.DistanceType,
+            joint_id: jid,
+            body_a_id: joint.body_a.body_id,
+            body_b_id: joint.body_b.body_id,
+            active: true
+        )
+        self.entries.push(entry)
+        jid
+
+    me add_revolute(joint: RevoluteJoint) -> JointId:
+        val jid = JointId(id: self.next_id)
+        self.next_id = self.next_id + 1
+        var j = joint
+        j = RevoluteJoint(
+            id: jid,
+            body_a: j.body_a, body_b: j.body_b,
+            anchor_x: j.anchor_x, anchor_y: j.anchor_y,
+            enable_limit: j.enable_limit,
+            lower_angle: j.lower_angle, upper_angle: j.upper_angle,
+            enable_motor: j.enable_motor,
+            motor_speed: j.motor_speed,
+            max_motor_torque: j.max_motor_torque
+        )
+        self.revolutes.push(j)
+        val entry = JointEntry(
+            joint_type: JointType.RevoluteType,
+            joint_id: jid,
+            body_a_id: joint.body_a.body_id,
+            body_b_id: joint.body_b.body_id,
+            active: true
+        )
+        self.entries.push(entry)
+        jid
+
+    me add_prismatic(joint: PrismaticJoint) -> JointId:
+        val jid = JointId(id: self.next_id)
+        self.next_id = self.next_id + 1
+        var j = joint
+        j = PrismaticJoint(
+            id: jid,
+            body_a: j.body_a, body_b: j.body_b,
+            anchor_x: j.anchor_x, anchor_y: j.anchor_y,
+            axis_x: j.axis_x, axis_y: j.axis_y,
+            enable_limit: j.enable_limit,
+            lower_translation: j.lower_translation,
+            upper_translation: j.upper_translation,
+            enable_motor: j.enable_motor,
+            motor_speed: j.motor_speed,
+            max_motor_force: j.max_motor_force
+        )
+        self.prismatics.push(j)
+        val entry = JointEntry(
+            joint_type: JointType.PrismaticType,
+            joint_id: jid,
+            body_a_id: joint.body_a.body_id,
+            body_b_id: joint.body_b.body_id,
+            active: true
+        )
+        self.entries.push(entry)
+        jid
+
+    me add_spring(joint: SpringJoint) -> JointId:
+        val jid = JointId(id: self.next_id)
+        self.next_id = self.next_id + 1
+        var j = joint
+        j = SpringJoint(
+            id: jid,
+            body_a: j.body_a, body_b: j.body_b,
+            anchor_a_x: j.anchor_a_x, anchor_a_y: j.anchor_a_y,
+            anchor_b_x: j.anchor_b_x, anchor_b_y: j.anchor_b_y,
+            rest_length: j.rest_length,
+            stiffness: j.stiffness, damping: j.damping
+        )
+        self.springs.push(j)
+        val entry = JointEntry(
+            joint_type: JointType.SpringType,
+            joint_id: jid,
+            body_a_id: joint.body_a.body_id,
+            body_b_id: joint.body_b.body_id,
+            active: true
+        )
+        self.entries.push(entry)
+        jid
+
+    me add_weld(joint: WeldJoint) -> JointId:
+        val jid = JointId(id: self.next_id)
+        self.next_id = self.next_id + 1
+        var j = joint
+        j = WeldJoint(
+            id: jid,
+            body_a: j.body_a, body_b: j.body_b,
+            anchor_x: j.anchor_x, anchor_y: j.anchor_y,
+            reference_angle: j.reference_angle,
+            stiffness: j.stiffness, damping: j.damping
+        )
+        self.welds.push(j)
+        val entry = JointEntry(
+            joint_type: JointType.WeldType,
+            joint_id: jid,
+            body_a_id: joint.body_a.body_id,
+            body_b_id: joint.body_b.body_id,
+            active: true
+        )
+        self.entries.push(entry)
+        jid
+
+    me remove_joint(id: JointId):
         var i = 0
-        while i < world.joint_storage.joints.len():
-            val joint = world.joint_storage.joints[i]
-            _solve_single_joint(world, joint, dt)
+        while i < self.entries.len():
+            val e = self.entries[i]
+            if e.joint_id.id == id.id:
+                self.entries[i] = JointEntry(
+                    joint_type: e.joint_type,
+                    joint_id: e.joint_id,
+                    body_a_id: e.body_a_id,
+                    body_b_id: e.body_b_id,
+                    active: false
+                )
             i = i + 1
-        iteration = iteration + 1
 
-fn _solve_single_joint(world: PhysicsWorld2D, joint: Joint2D, dt: f64):
-    val idx_a = world._find_body_index(joint.node_a)
-    val idx_b = world._find_body_index(joint.node_b)
-    if idx_a < 0 or idx_b < 0:
-        return
+    me remove_joints_for_body(body_id: i32):
+        var i = 0
+        while i < self.entries.len():
+            val e = self.entries[i]
+            if (e.body_a_id == body_id or e.body_b_id == body_id) and e.active:
+                self.entries[i] = JointEntry(
+                    joint_type: e.joint_type,
+                    joint_id: e.joint_id,
+                    body_a_id: e.body_a_id,
+                    body_b_id: e.body_b_id,
+                    active: false
+                )
+            i = i + 1
 
-    val pb_a = world.bodies[idx_a]
-    val pb_b = world.bodies[idx_b]
-    val ib_a = world.internal_bodies[pb_a.body_index]
-    val ib_b = world.internal_bodies[pb_b.body_index]
+    fn joints_for_body(self, body_id: i32) -> [JointEntry]:
+        var result: [JointEntry] = []
+        var i = 0
+        while i < self.entries.len():
+            val e = self.entries[i]
+            if e.active and (e.body_a_id == body_id or e.body_b_id == body_id):
+                result.push(e)
+            i = i + 1
+        result
 
-    if joint.joint_type == 0:
-        _solve_revolute(ib_a, ib_b, joint.anchor_a)
-    elif joint.joint_type == 1:
-        _solve_fixed(ib_a, ib_b, joint.offset)
-    elif joint.joint_type == 2:
-        _solve_spring(ib_a, ib_b, joint.rest_length, joint.stiffness, joint.damping, dt)
-
-fn _solve_revolute(body_a: InternalBody2D, body_b: InternalBody2D, anchor: Vec2):
-    """Keep both bodies connected at the anchor point."""
-    val total_inv = body_a.inv_mass + body_b.inv_mass
-    if total_inv == 0.0:
-        return
-
-    # Weighted midpoint based on inverse masses
-    val mid = Vec2(
-        x: (body_a.position.x * body_b.inv_mass + body_b.position.x * body_a.inv_mass) / total_inv,
-        y: (body_a.position.y * body_b.inv_mass + body_b.position.y * body_a.inv_mass) / total_inv
-    )
-
-    if body_a.inv_mass > 0.0:
-        body_a.position = mid
-    if body_b.inv_mass > 0.0:
-        body_b.position = mid
-
-fn _solve_fixed(body_a: InternalBody2D, body_b: InternalBody2D, offset: Vec2):
-    """Maintain initial relative offset between bodies."""
-    val target_pos = body_a.position.add(offset)
-    val error = body_b.position.sub(target_pos)
-
-    if body_a.inv_mass == 0.0:
-        # A is static, move B to target
-        body_b.position = target_pos
-    else:
-        val correction = error.mul_scalar(0.5)
-        if body_a.inv_mass > 0.0:
-            body_a.position = body_a.position.add(correction)
-        if body_b.inv_mass > 0.0:
-            body_b.position = body_b.position.sub(correction)
-
-fn _solve_spring(body_a: InternalBody2D, body_b: InternalBody2D, rest_length: f64, stiffness: f64, damping: f64, dt: f64):
-    """Apply spring force: F = -k * (x - rest) - d * v_along."""
-    val delta = body_b.position.sub(body_a.position)
-    val dx = delta.x
-    val dy = delta.y
-    val current_length = _sqrt(dx * dx + dy * dy)
-
-    if current_length < 0.0000001:
-        return
-
-    val dir_x = dx / current_length
-    val dir_y = dy / current_length
-
-    # Spring force: F = k * (current - rest)
-    val spring_force = (current_length - rest_length) * stiffness
-
-    # Damping force: F = d * relative_velocity_along_spring
-    val rel_vel = body_b.velocity.sub(body_a.velocity)
-    val vel_along = rel_vel.x * dir_x + rel_vel.y * dir_y
-    val damping_force = vel_along * damping
-
-    val total_force = spring_force + damping_force
-    val force = Vec2(x: dir_x * total_force, y: dir_y * total_force)
-    val neg_force = Vec2(x: -dir_x * total_force, y: -dir_y * total_force)
-
-    body_a.apply_force(force)
-    body_b.apply_force(neg_force)
+    fn joint_count(self) -> i32:
+        var count: i32 = 0
+        var i = 0
+        while i < self.entries.len():
+            if self.entries[i].active:
+                count = count + 1
+            i = i + 1
+        count

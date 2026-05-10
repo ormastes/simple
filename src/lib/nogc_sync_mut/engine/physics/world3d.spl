@@ -1,544 +1,304 @@
-# Physics System — PhysicsWorld3D
+# Physics2 — PhysicsWorld3D (Multi-Backend)
 #
-# Main physics world with a pure Simple 3D physics engine.
-# Bodies are identified by NodeId, so the scene graph and physics world
-# stay synchronized. Uses a fixed-timestep accumulator for deterministic
-# simulation, and diffs contact pairs each step to emit start/end signals.
-#
-# No external FFI dependencies — all collision detection, contact resolution,
-# and integration are implemented in pure Simple.
-#
-# Usage:
-#   var world = PhysicsWorld3D.create(default_physics_config_3d())
-#   world.add_dynamic_body(player_id, 0.0, 5.0, 0.0)
-#   world.add_sphere_collider(player_id, 0.5)
-#   world.step(dt)
-#   val transforms = world.get_all_dynamic_transforms()
+# 3D physics world with the same backend dispatch as world2d.
+# Uses quaternion rotation, 3D collision detection, and TGS solver.
 
 use std.common.engine.ids.{NodeId}
-use std.common.engine.math3d.{Vec3, Quaternion}
-use std.common.engine.signal.signal.{Signal}
-use std.common.engine.units.{Seconds, Distance}
-use std.nogc_sync_mut.engine.physics.types3d.{CollisionEvent3D, PhysicsBody3D, PhysicsCollider3D, PhysicsConfig3D}
-use std.nogc_sync_mut.engine.physics.body3d.{InternalBody3D}
-use std.nogc_sync_mut.engine.physics.shapes3d.{ColliderShape3D}
-use std.nogc_sync_mut.engine.physics.collision3d.{Contact3D, collide_sphere_sphere, collide_aabb_aabb, collide_sphere_aabb, collide_obb_obb, collide_sphere_capsule}
-use std.nogc_sync_mut.engine.physics.contact3d.{resolve_contact_3d}
+use std.common.math.{math_sqrt, math_abs}
+use std.nogc_sync_mut.engine.physics.config.{PhysicsConfig3D, Vec3}
+use std.nogc_sync_mut.engine.physics.backend.{PhysicsBackend, select_backend}
+use std.nogc_sync_mut.engine.physics.data.solver_body3d.{SolverBodyStore3D}
+use std.nogc_sync_mut.engine.physics.data.constraint.{ContactConstraintSoA}
+use std.nogc_sync_mut.engine.physics.narrowphase.collision3d.{collide_sphere_sphere, collide_aabb_aabb_3d, NarrowContact3D}
 
-# ============================================================================
-# Joint3D — Internal joint representation
-# ============================================================================
+enum ShapeType3D:
+    Sphere
+    Box
+    Capsule
 
-class Joint3D:
-    joint_type: i64        # 0=ball_socket, 1=fixed, 2=spring
-    node_a: NodeId
-    node_b: NodeId
-    anchor: Vec3           # World-space anchor for ball socket
-    rest_length: f64       # For spring joints
-    stiffness: f64         # For spring joints
-    damping: f64           # For spring joints
-    offset: Vec3           # Initial offset for fixed joints
+struct Collider3D:
+    body_index: i64
+    node_id: NodeId
+    shape_type: ShapeType3D
+    radius: f64
+    half_x: f64
+    half_y: f64
+    half_z: f64
 
-# ============================================================================
-# JointStorage3D — manages all joints in the world
-# ============================================================================
-
-class JointStorage3D:
-    joints: [Joint3D]
-    next_id: i64
-
-impl JointStorage3D:
-    static fn create() -> JointStorage3D:
-        JointStorage3D(joints: [], next_id: 0)
-
-    me add(joint: Joint3D) -> i64:
-        val id = self.next_id
-        self.joints.push(joint)
-        self.next_id = self.next_id + 1
-        id
-
-    me remove(idx: i64) -> bool:
-        if idx < 0 or idx >= self.joints.len():
-            return false
-        var new_joints: [Joint3D] = []
-        var i = 0
-        while i < self.joints.len():
-            if i != idx:
-                new_joints.push(self.joints[i])
-            i = i + 1
-        self.joints = new_joints
-        true
-
-# ============================================================================
-# PhysicsWorld3D
-# ============================================================================
+struct Transform3D:
+    node_id: NodeId
+    x: f64
+    y: f64
+    z: f64
+    rot_w: f64
+    rot_x: f64
+    rot_y: f64
+    rot_z: f64
 
 class PhysicsWorld3D:
     config: PhysicsConfig3D
-    bodies: [PhysicsBody3D]
-    colliders: [PhysicsCollider3D]
-    internal_bodies: [InternalBody3D]
-    shapes: [ColliderShape3D]
+    active_backend: PhysicsBackend
+    bodies: SolverBodyStore3D
+    colliders: [Collider3D]
+    collider_count: i64
+    constraints: ContactConstraintSoA
     accumulator: f64
-    on_contact_start: Signal
-    on_contact_end: Signal
-    prev_contact_keys: [text]
-    restitution: f64
-    friction: f64
-    joint_storage: JointStorage3D
+    node_to_body: [i64]
+    max_node_index: i64
 
 impl PhysicsWorld3D:
-
-    # ------------------------------------------------------------------
-    # Construction / Destruction
-    # ------------------------------------------------------------------
-
     static fn create(config: PhysicsConfig3D) -> PhysicsWorld3D:
+        val backend = select_backend(config.backend)
         PhysicsWorld3D(
             config: config,
-            bodies: [],
+            active_backend: backend,
+            bodies: SolverBodyStore3D.create(),
             colliders: [],
-            internal_bodies: [],
-            shapes: [],
+            collider_count: 0,
+            constraints: ContactConstraintSoA.create(),
             accumulator: 0.0,
-            on_contact_start: Signal(name: "on_contact_start_3d", connections: [], next_id: 0, enabled: true),
-            on_contact_end: Signal(name: "on_contact_end_3d", connections: [], next_id: 0, enabled: true),
-            prev_contact_keys: [],
-            restitution: 0.3,
-            friction: 0.4,
-            joint_storage: JointStorage3D.create()
+            node_to_body: [],
+            max_node_index: 0
         )
+
+    me add_dynamic_body(node_id: NodeId, x: f64, y: f64, z: f64, mass: f64) -> i64:
+        val idx = self.bodies.add_dynamic(node_id, x, y, z, mass)
+        self.ensure_node_map(node_id.to_index())
+        self.node_to_body[node_id.to_index()] = idx
+        idx
+
+    me add_static_body(node_id: NodeId, x: f64, y: f64, z: f64) -> i64:
+        val idx = self.bodies.add_static(node_id, x, y, z)
+        self.ensure_node_map(node_id.to_index())
+        self.node_to_body[node_id.to_index()] = idx
+        idx
+
+    me add_sphere_collider(node_id: NodeId, radius: f64) -> i64:
+        val body_idx = self.node_to_body[node_id.to_index()]
+        val c = Collider3D(
+            body_index: body_idx, node_id: node_id,
+            shape_type: ShapeType3D.Sphere,
+            radius: radius, half_x: radius, half_y: radius, half_z: radius
+        )
+        self.colliders.push(c)
+        val idx = self.collider_count
+        self.collider_count = self.collider_count + 1
+        idx
+
+    me add_box_collider(node_id: NodeId, hx: f64, hy: f64, hz: f64) -> i64:
+        val body_idx = self.node_to_body[node_id.to_index()]
+        val c = Collider3D(
+            body_index: body_idx, node_id: node_id,
+            shape_type: ShapeType3D.Box,
+            radius: 0.0, half_x: hx, half_y: hy, half_z: hz
+        )
+        self.colliders.push(c)
+        val idx = self.collider_count
+        self.collider_count = self.collider_count + 1
+        idx
+
+    me step(dt: f64):
+        self.accumulator = self.accumulator + dt
+        val fixed_dt = self.config.fixed_timestep
+        while self.accumulator >= fixed_dt:
+            self.bodies.save_prev_transforms()
+            self.fixed_step(fixed_dt)
+            self.accumulator = self.accumulator - fixed_dt
+
+    me fixed_step(dt: f64):
+        val sub_dt = dt / self.config.sub_steps.to_f64()
+        var sub = 0
+        while sub < self.config.sub_steps:
+            self.bodies.integrate(sub_dt, self.config.gravity.x, self.config.gravity.y, self.config.gravity.z)
+            self.detect_contacts()
+            self.solve_contacts()
+            sub = sub + 1
+
+    me detect_contacts():
+        self.constraints.clear()
+        var i = 0
+        while i < self.collider_count:
+            var j = i + 1
+            while j < self.collider_count:
+                val ca = self.colliders[i]
+                val cb = self.colliders[j]
+                val ai = ca.body_index
+                val bi = cb.body_index
+                if self.bodies.inv_mass[ai] == 0.0 and self.bodies.inv_mass[bi] == 0.0:
+                    j = j + 1
+                    continue
+                val contact = self.collide_3d(ca, cb)
+                if contact.has_contact:
+                    self.constraints.add(
+                        ai, bi,
+                        contact.normal_x, contact.normal_y,
+                        contact.point_x, contact.point_y,
+                        contact.penetration,
+                        self.config.restitution,
+                        self.config.friction,
+                        contact.feature_id_a, contact.feature_id_b
+                    )
+                j = j + 1
+            i = i + 1
+
+    me collide_3d(ca: Collider3D, cb: Collider3D) -> NarrowContact3D:
+        val ax = self.bodies.pos_x[ca.body_index]
+        val ay = self.bodies.pos_y[ca.body_index]
+        val az = self.bodies.pos_z[ca.body_index]
+        val bx = self.bodies.pos_x[cb.body_index]
+        val by = self.bodies.pos_y[cb.body_index]
+        val bz = self.bodies.pos_z[cb.body_index]
+        if ca.shape_type == ShapeType3D.Sphere and cb.shape_type == ShapeType3D.Sphere:
+            return collide_sphere_sphere(ax, ay, az, ca.radius, bx, by, bz, cb.radius)
+        if ca.shape_type == ShapeType3D.Box and cb.shape_type == ShapeType3D.Box:
+            return collide_aabb_aabb_3d(ax, ay, az, ca.half_x, ca.half_y, ca.half_z, bx, by, bz, cb.half_x, cb.half_y, cb.half_z)
+        NarrowContact3D(
+            point_x: 0.0, point_y: 0.0, point_z: 0.0,
+            normal_x: 0.0, normal_y: 1.0, normal_z: 0.0,
+            penetration: 0.0, feature_id_a: 0, feature_id_b: 0,
+            has_contact: false
+        )
+
+    me solve_contacts():
+        if self.constraints.count == 0:
+            return
+        self.solve_velocity_inline_3d(self.config.velocity_iterations)
+        self.solve_position_inline_3d(self.config.position_iterations, self.config.baumgarte_factor, self.config.slop)
+
+    me solve_velocity_inline_3d(iterations: i64):
+        var iter = 0
+        while iter < iterations:
+            var ci = 0
+            while ci < self.constraints.count:
+                val a = self.constraints.body_a[ci]
+                val b = self.constraints.body_b[ci]
+                val nx = self.constraints.normal_x[ci]
+                val ny = self.constraints.normal_y[ci]
+                val px = self.constraints.point_x[ci]
+                val py = self.constraints.point_y[ci]
+                val ra_x = px - self.bodies.pos_x[a]
+                val ra_y = py - self.bodies.pos_y[a]
+                val rb_x = px - self.bodies.pos_x[b]
+                val rb_y = py - self.bodies.pos_y[b]
+                val va_x = self.bodies.vel_x[a] + (-self.bodies.ang_vel_z[a] * ra_y)
+                val va_y = self.bodies.vel_y[a] + (self.bodies.ang_vel_z[a] * ra_x)
+                val vb_x = self.bodies.vel_x[b] + (-self.bodies.ang_vel_z[b] * rb_y)
+                val vb_y = self.bodies.vel_y[b] + (self.bodies.ang_vel_z[b] * rb_x)
+                val rel_vx = vb_x - va_x
+                val rel_vy = vb_y - va_y
+                val vn = rel_vx * nx + rel_vy * ny
+                val ra_cross_n = ra_x * ny - ra_y * nx
+                val rb_cross_n = rb_x * ny - rb_y * nx
+                val eff_mass = self.bodies.inv_mass[a] + self.bodies.inv_mass[b] + (ra_cross_n * ra_cross_n * self.bodies.inv_inertia_z[a]) + (rb_cross_n * rb_cross_n * self.bodies.inv_inertia_z[b])
+                if eff_mass > 0.0:
+                    val restitution = self.constraints.restitution[ci]
+                    val bias = if vn < -1.0: restitution * vn else: 0.0
+                    val lambda_raw = -(vn + bias) / eff_mass
+                    val old_lambda = self.constraints.lambda_n[ci]
+                    var new_lambda = old_lambda + lambda_raw
+                    if new_lambda < 0.0:
+                        new_lambda = 0.0
+                    self.constraints.lambda_n[ci] = new_lambda
+                    val j = new_lambda - old_lambda
+                    val jx = nx * j
+                    val jy = ny * j
+                    self.bodies.vel_x[a] = self.bodies.vel_x[a] - jx * self.bodies.inv_mass[a]
+                    self.bodies.vel_y[a] = self.bodies.vel_y[a] - jy * self.bodies.inv_mass[a]
+                    self.bodies.ang_vel_z[a] = self.bodies.ang_vel_z[a] - ra_cross_n * j * self.bodies.inv_inertia_z[a]
+                    self.bodies.vel_x[b] = self.bodies.vel_x[b] + jx * self.bodies.inv_mass[b]
+                    self.bodies.vel_y[b] = self.bodies.vel_y[b] + jy * self.bodies.inv_mass[b]
+                    self.bodies.ang_vel_z[b] = self.bodies.ang_vel_z[b] + rb_cross_n * j * self.bodies.inv_inertia_z[b]
+                    val tx = rel_vx - vn * nx
+                    val ty = rel_vy - vn * ny
+                    val t_len_sq = tx * tx + ty * ty
+                    if t_len_sq > 0.0000001:
+                        val t_len = math_sqrt(t_len_sq)
+                        val tnx = tx / t_len
+                        val tny = ty / t_len
+                        val vt = rel_vx * tnx + rel_vy * tny
+                        val ra_cross_t = ra_x * tny - ra_y * tnx
+                        val rb_cross_t = rb_x * tny - rb_y * tnx
+                        val eff_mass_t = self.bodies.inv_mass[a] + self.bodies.inv_mass[b] + (ra_cross_t * ra_cross_t * self.bodies.inv_inertia_z[a]) + (rb_cross_t * rb_cross_t * self.bodies.inv_inertia_z[b])
+                        if eff_mass_t > 0.0:
+                            val friction = self.constraints.friction[ci]
+                            val max_friction = math_abs(new_lambda) * friction
+                            val jt_raw = -vt / eff_mass_t
+                            val old_lambda_t = self.constraints.lambda_t[ci]
+                            var new_lambda_t = old_lambda_t + jt_raw
+                            if new_lambda_t > max_friction:
+                                new_lambda_t = max_friction
+                            if new_lambda_t < -max_friction:
+                                new_lambda_t = -max_friction
+                            self.constraints.lambda_t[ci] = new_lambda_t
+                            val jt = new_lambda_t - old_lambda_t
+                            self.bodies.vel_x[a] = self.bodies.vel_x[a] - tnx * jt * self.bodies.inv_mass[a]
+                            self.bodies.vel_y[a] = self.bodies.vel_y[a] - tny * jt * self.bodies.inv_mass[a]
+                            self.bodies.ang_vel_z[a] = self.bodies.ang_vel_z[a] - ra_cross_t * jt * self.bodies.inv_inertia_z[a]
+                            self.bodies.vel_x[b] = self.bodies.vel_x[b] + tnx * jt * self.bodies.inv_mass[b]
+                            self.bodies.vel_y[b] = self.bodies.vel_y[b] + tny * jt * self.bodies.inv_mass[b]
+                            self.bodies.ang_vel_z[b] = self.bodies.ang_vel_z[b] + rb_cross_t * jt * self.bodies.inv_inertia_z[b]
+                ci = ci + 1
+            iter = iter + 1
+
+    me solve_position_inline_3d(iterations: i64, baumgarte: f64, slop: f64):
+        var iter = 0
+        while iter < iterations:
+            var ci = 0
+            while ci < self.constraints.count:
+                val pen = self.constraints.penetration[ci]
+                if pen > slop:
+                    val a = self.constraints.body_a[ci]
+                    val b = self.constraints.body_b[ci]
+                    val nx = self.constraints.normal_x[ci]
+                    val ny = self.constraints.normal_y[ci]
+                    val inv_mass_sum = self.bodies.inv_mass[a] + self.bodies.inv_mass[b]
+                    if inv_mass_sum > 0.0:
+                        val correction = (pen - slop) * baumgarte / inv_mass_sum
+                        self.bodies.pos_x[a] = self.bodies.pos_x[a] - nx * correction * self.bodies.inv_mass[a]
+                        self.bodies.pos_y[a] = self.bodies.pos_y[a] - ny * correction * self.bodies.inv_mass[a]
+                        self.bodies.pos_x[b] = self.bodies.pos_x[b] + nx * correction * self.bodies.inv_mass[b]
+                        self.bodies.pos_y[b] = self.bodies.pos_y[b] + ny * correction * self.bodies.inv_mass[b]
+                ci = ci + 1
+            iter = iter + 1
+
+    me get_position(node_id: NodeId) -> Vec3:
+        val idx = self.node_to_body[node_id.to_index()]
+        self.bodies.get_position(idx)
+
+    me get_velocity(node_id: NodeId) -> Vec3:
+        val idx = self.node_to_body[node_id.to_index()]
+        self.bodies.get_velocity(idx)
+
+    me apply_force(node_id: NodeId, fx: f64, fy: f64, fz: f64):
+        val idx = self.node_to_body[node_id.to_index()]
+        self.bodies.apply_force_at(idx, fx, fy, fz)
+
+    me get_all_dynamic_transforms() -> [Transform3D]:
+        var result: [Transform3D] = []
+        var i = 0
+        while i < self.bodies.body_count:
+            if self.bodies.is_dynamic(i):
+                result.push(Transform3D(
+                    node_id: self.bodies.node_ids[i],
+                    x: self.bodies.pos_x[i],
+                    y: self.bodies.pos_y[i],
+                    z: self.bodies.pos_z[i],
+                    rot_w: self.bodies.rot_w[i],
+                    rot_x: self.bodies.rot_x[i],
+                    rot_y: self.bodies.rot_y[i],
+                    rot_z: self.bodies.rot_z[i]
+                ))
+            i = i + 1
+        result
+
+    me body_count() -> i64:
+        self.bodies.body_count
 
     me destroy():
-        self.bodies = []
-        self.colliders = []
-        self.internal_bodies = []
-        self.shapes = []
+        pass_dn
 
-    # ------------------------------------------------------------------
-    # Body Management
-    # ------------------------------------------------------------------
-
-    me add_dynamic_body(node_id: NodeId, x: f64, y: f64, z: f64) -> bool:
-        val pos = Vec3(x: x, y: y, z: z)
-        val ib = InternalBody3D.create_dynamic(pos, 1.0)
-        val idx = self.internal_bodies.len()
-        self.internal_bodies.push(ib)
-        val pb = PhysicsBody3D(
-            node_id: node_id,
-            body_index: idx,
-            body_type_code: 2,
-            gravity_scale: 1.0
-        )
-        self.bodies.push(pb)
-        true
-
-    me add_static_body(node_id: NodeId, x: f64, y: f64, z: f64) -> bool:
-        val pos = Vec3(x: x, y: y, z: z)
-        val ib = InternalBody3D.create_static(pos)
-        val idx = self.internal_bodies.len()
-        self.internal_bodies.push(ib)
-        val pb = PhysicsBody3D(
-            node_id: node_id,
-            body_index: idx,
-            body_type_code: 0,
-            gravity_scale: 1.0
-        )
-        self.bodies.push(pb)
-        true
-
-    me add_kinematic_body(node_id: NodeId, x: f64, y: f64, z: f64) -> bool:
-        val pos = Vec3(x: x, y: y, z: z)
-        val ib = InternalBody3D.create_kinematic(pos)
-        val idx = self.internal_bodies.len()
-        self.internal_bodies.push(ib)
-        val pb = PhysicsBody3D(
-            node_id: node_id,
-            body_index: idx,
-            body_type_code: 1,
-            gravity_scale: 1.0
-        )
-        self.bodies.push(pb)
-        true
-
-    me remove_body(node_id: NodeId) -> bool:
-        val idx = self._find_body_index(node_id)
-        if idx < 0:
-            return false
-        var new_bodies: [PhysicsBody3D] = []
-        var i = 0
-        while i < self.bodies.len():
-            if i != idx:
-                new_bodies.push(self.bodies[i])
-            i = i + 1
-        self.bodies = new_bodies
-        # Also remove associated colliders
-        var new_colliders: [PhysicsCollider3D] = []
-        for c in self.colliders:
-            if not c.node_id.eq(node_id):
-                new_colliders.push(c)
-        self.colliders = new_colliders
-        true
-
-    # ------------------------------------------------------------------
-    # Collider Management
-    # ------------------------------------------------------------------
-
-    me add_sphere_collider(node_id: NodeId, radius: f64) -> bool:
-        val idx = self._find_body_index(node_id)
-        if idx < 0:
-            return false
-        val shape = ColliderShape3D.sphere(radius)
-        val shape_idx = self.shapes.len()
-        self.shapes.push(shape)
-        val pc = PhysicsCollider3D(
-            node_id: node_id,
-            collider_index: shape_idx,
-            shape_code: 0,
-            is_sensor: false
-        )
-        self.colliders.push(pc)
-        true
-
-    me add_box_collider(node_id: NodeId, hx: f64, hy: f64, hz: f64) -> bool:
-        val idx = self._find_body_index(node_id)
-        if idx < 0:
-            return false
-        val shape = ColliderShape3D.box_shape(hx, hy, hz)
-        val shape_idx = self.shapes.len()
-        self.shapes.push(shape)
-        val pc = PhysicsCollider3D(
-            node_id: node_id,
-            collider_index: shape_idx,
-            shape_code: 1,
-            is_sensor: false
-        )
-        self.colliders.push(pc)
-        true
-
-    me add_capsule_collider(node_id: NodeId, radius: f64, half_height: f64) -> bool:
-        val idx = self._find_body_index(node_id)
-        if idx < 0:
-            return false
-        val shape = ColliderShape3D.capsule(radius, half_height)
-        val shape_idx = self.shapes.len()
-        self.shapes.push(shape)
-        val pc = PhysicsCollider3D(
-            node_id: node_id,
-            collider_index: shape_idx,
-            shape_code: 2,
-            is_sensor: false
-        )
-        self.colliders.push(pc)
-        true
-
-    me set_sensor(node_id: NodeId, is_sensor: bool) -> bool:
-        var found = false
-        var updated_colliders: [PhysicsCollider3D] = []
-        for c in self.colliders:
-            var next = c
-            if c.node_id.eq(node_id):
-                next = PhysicsCollider3D(
-                    node_id: c.node_id,
-                    collider_index: c.collider_index,
-                    shape_code: c.shape_code,
-                    is_sensor: is_sensor
-                )
-                found = true
-            updated_colliders.push(next)
-        self.colliders = updated_colliders
-        found
-
-    # ------------------------------------------------------------------
-    # Simulation Step — Fixed-Timestep Accumulator
-    # ------------------------------------------------------------------
-
-    me step(dt: Seconds):
-        self.accumulator = self.accumulator + dt.value
-
-        while self.accumulator >= self.config.fixed_timestep.value:
-            self._fixed_step(self.config.fixed_timestep.value)
-            self.accumulator = self.accumulator - self.config.fixed_timestep.value
-
-    me _fixed_step(dt: f64):
-        # 1. Apply gravity to dynamic bodies
-        var i = 0
-        while i < self.bodies.len():
-            val pb = self.bodies[i]
-            if pb.body_type_code == 2:
-                val ib = self.internal_bodies[pb.body_index]
-                val gx = self.config.gravity.x * ib.gravity_scale * ib.mass
-                val gy = self.config.gravity.y * ib.gravity_scale * ib.mass
-                val gz = self.config.gravity.z * ib.gravity_scale * ib.mass
-                val gravity_force = Vec3(x: gx, y: gy, z: gz)
-                ib.apply_force(gravity_force)
-            i = i + 1
-
-        # 2. Integrate all bodies
-        var j = 0
-        while j < self.internal_bodies.len():
-            self.internal_bodies[j].integrate(dt)
-            j = j + 1
-
-        # 3. Narrow-phase collision detection and resolution
-        self._detect_and_resolve_collisions()
-
-        # 4. Contact diffing for signals
-        self._process_contacts()
-
-    # ------------------------------------------------------------------
-    # Collision Detection and Resolution
-    # ------------------------------------------------------------------
-
-    me _detect_and_resolve_collisions():
-        val n = self.colliders.len()
-        var i = 0
-        while i < n:
-            var j = i + 1
-            while j < n:
-                val col_a = self.colliders[i]
-                val col_b = self.colliders[j]
-
-                # Find bodies for each collider
-                val body_idx_a = self._find_body_index(col_a.node_id)
-                val body_idx_b = self._find_body_index(col_b.node_id)
-
-                if body_idx_a >= 0 and body_idx_b >= 0:
-                    val pb_a = self.bodies[body_idx_a]
-                    val pb_b = self.bodies[body_idx_b]
-                    val ib_a = self.internal_bodies[pb_a.body_index]
-                    val ib_b = self.internal_bodies[pb_b.body_index]
-                    val shape_a = self.shapes[col_a.collider_index]
-                    val shape_b = self.shapes[col_b.collider_index]
-
-                    val contact = self._narrow_phase(ib_a, shape_a, ib_b, shape_b)
-                    if val c = contact:
-                        if not col_a.is_sensor and not col_b.is_sensor:
-                            resolve_contact_3d(ib_a, ib_b, c, self.restitution, self.friction)
-                j = j + 1
-            i = i + 1
-
-    fn _narrow_phase(body_a: InternalBody3D, shape_a: ColliderShape3D, body_b: InternalBody3D, shape_b: ColliderShape3D) -> Option<Contact3D>:
-        # Sphere vs Sphere
-        if shape_a.is_sphere() and shape_b.is_sphere():
-            return collide_sphere_sphere(
-                body_a.position, shape_a.sphere.radius,
-                body_b.position, shape_b.sphere.radius
-            )
-
-        # Box vs Box
-        if shape_a.is_box() and shape_b.is_box():
-            val rot_a = body_a.rotation
-            val rot_b = body_b.rotation
-            # Use AABB if both have identity rotation
-            val is_identity_a = rot_a.x == 0.0 and rot_a.y == 0.0 and rot_a.z == 0.0
-            val is_identity_b = rot_b.x == 0.0 and rot_b.y == 0.0 and rot_b.z == 0.0
-            if is_identity_a and is_identity_b:
-                val ha = Vec3(x: shape_a.box_shape.half_x, y: shape_a.box_shape.half_y, z: shape_a.box_shape.half_z)
-                val hb = Vec3(x: shape_b.box_shape.half_x, y: shape_b.box_shape.half_y, z: shape_b.box_shape.half_z)
-                return collide_aabb_aabb(body_a.position, ha, body_b.position, hb)
-            val ha = Vec3(x: shape_a.box_shape.half_x, y: shape_a.box_shape.half_y, z: shape_a.box_shape.half_z)
-            val hb = Vec3(x: shape_b.box_shape.half_x, y: shape_b.box_shape.half_y, z: shape_b.box_shape.half_z)
-            return collide_obb_obb(body_a.position, ha, rot_a, body_b.position, hb, rot_b)
-
-        # Sphere vs Box
-        if shape_a.is_sphere() and shape_b.is_box():
-            val hb = Vec3(x: shape_b.box_shape.half_x, y: shape_b.box_shape.half_y, z: shape_b.box_shape.half_z)
-            return collide_sphere_aabb(
-                body_a.position, shape_a.sphere.radius,
-                body_b.position, hb
-            )
-
-        # Box vs Sphere (swap and flip normal)
-        if shape_a.is_box() and shape_b.is_sphere():
-            val ha = Vec3(x: shape_a.box_shape.half_x, y: shape_a.box_shape.half_y, z: shape_a.box_shape.half_z)
-            val result = collide_sphere_aabb(
-                body_b.position, shape_b.sphere.radius,
-                body_a.position, ha
-            )
-            if val c = result:
-                return Contact3D(
-                    point: c.point,
-                    normal: c.normal.mul_scalar(-1.0),
-                    penetration: c.penetration
-                )
-            return nil
-
-        # Sphere vs Capsule
-        if shape_a.is_sphere() and shape_b.is_capsule():
-            return collide_sphere_capsule(
-                body_a.position, shape_a.sphere.radius,
-                body_b.position, body_b.rotation,
-                shape_b.capsule.radius, shape_b.capsule.half_height
-            )
-
-        # Capsule vs Sphere (swap and flip normal)
-        if shape_a.is_capsule() and shape_b.is_sphere():
-            val result = collide_sphere_capsule(
-                body_b.position, shape_b.sphere.radius,
-                body_a.position, body_a.rotation,
-                shape_a.capsule.radius, shape_a.capsule.half_height
-            )
-            if val c = result:
-                return Contact3D(
-                    point: c.point,
-                    normal: c.normal.mul_scalar(-1.0),
-                    penetration: c.penetration
-                )
-            return nil
-
-        nil
-
-    # ------------------------------------------------------------------
-    # Contact Diffing — emit start/end signals
-    # ------------------------------------------------------------------
-
-    me _process_contacts():
-        var current_keys: [text] = []
-
-        val n = self.colliders.len()
-        var i = 0
-        while i < n:
-            var j = i + 1
-            while j < n:
-                val col_a = self.colliders[i]
-                val col_b = self.colliders[j]
-                val body_idx_a = self._find_body_index(col_a.node_id)
-                val body_idx_b = self._find_body_index(col_b.node_id)
-
-                if body_idx_a >= 0 and body_idx_b >= 0:
-                    val pb_a = self.bodies[body_idx_a]
-                    val pb_b = self.bodies[body_idx_b]
-                    val ib_a = self.internal_bodies[pb_a.body_index]
-                    val ib_b = self.internal_bodies[pb_b.body_index]
-                    val shape_a = self.shapes[col_a.collider_index]
-                    val shape_b = self.shapes[col_b.collider_index]
-
-                    val contact = self._narrow_phase(ib_a, shape_a, ib_b, shape_b)
-                    if val c = contact:
-                        val a_idx = col_a.node_id.to_index()
-                        val b_idx = col_b.node_id.to_index()
-                        var key = ""
-                        if a_idx <= b_idx:
-                            key = "{a_idx}_{b_idx}"
-                        else:
-                            key = "{b_idx}_{a_idx}"
-                        current_keys.push(key)
-                j = j + 1
-            i = i + 1
-
-        # Emit on_contact_start for new contacts
-        for key in current_keys:
-            if not self._key_in_list(key, self.prev_contact_keys):
-                self.on_contact_start.emit(key)
-
-        # Emit on_contact_end for removed contacts
-        for key in self.prev_contact_keys:
-            if not self._key_in_list(key, current_keys):
-                self.on_contact_end.emit(key)
-
-        self.prev_contact_keys = current_keys
-
-    fn _key_in_list(key: text, list: [text]) -> bool:
-        for item in list:
-            if item == key:
-                return true
-        false
-
-    # ------------------------------------------------------------------
-    # Position / Velocity / Rotation Queries
-    # ------------------------------------------------------------------
-
-    fn get_position(node_id: NodeId) -> Vec3:
-        val idx = self._find_body_index(node_id)
-        if idx < 0:
-            return Vec3.zero()
-        val pb = self.bodies[idx]
-        val ib = self.internal_bodies[pb.body_index]
-        ib.position
-
-    fn get_rotation(node_id: NodeId) -> Quaternion:
-        val idx = self._find_body_index(node_id)
-        if idx < 0:
-            return Quaternion.identity()
-        val pb = self.bodies[idx]
-        val ib = self.internal_bodies[pb.body_index]
-        ib.rotation
-
-    me set_position(node_id: NodeId, pos: Vec3) -> bool:
-        val idx = self._find_body_index(node_id)
-        if idx < 0:
-            return false
-        val pb = self.bodies[idx]
-        self.internal_bodies[pb.body_index].position = pos
-        true
-
-    me set_rotation(node_id: NodeId, rot: Quaternion) -> bool:
-        val idx = self._find_body_index(node_id)
-        if idx < 0:
-            return false
-        val pb = self.bodies[idx]
-        self.internal_bodies[pb.body_index].rotation = rot
-        true
-
-    me apply_force(node_id: NodeId, force: Vec3) -> bool:
-        val idx = self._find_body_index(node_id)
-        if idx < 0:
-            return false
-        val pb = self.bodies[idx]
-        self.internal_bodies[pb.body_index].apply_force(force)
-        true
-
-    me apply_impulse(node_id: NodeId, impulse: Vec3) -> bool:
-        val idx = self._find_body_index(node_id)
-        if idx < 0:
-            return false
-        val pb = self.bodies[idx]
-        self.internal_bodies[pb.body_index].apply_impulse(impulse)
-        true
-
-    me set_velocity(node_id: NodeId, vel: Vec3) -> bool:
-        val idx = self._find_body_index(node_id)
-        if idx < 0:
-            return false
-        val pb = self.bodies[idx]
-        self.internal_bodies[pb.body_index].velocity = vel
-        true
-
-    fn get_velocity(node_id: NodeId) -> Vec3:
-        val idx = self._find_body_index(node_id)
-        if idx < 0:
-            return Vec3.zero()
-        val pb = self.bodies[idx]
-        val ib = self.internal_bodies[pb.body_index]
-        ib.velocity
-
-    # ------------------------------------------------------------------
-    # Bulk Query — for syncing physics back to scene graph
-    # ------------------------------------------------------------------
-
-    fn get_all_dynamic_transforms() -> [(NodeId, Vec3, Quaternion)]:
-        var results: [(NodeId, Vec3, Quaternion)] = []
-        for pb in self.bodies:
-            if pb.body_type_code == 2:
-                val ib = self.internal_bodies[pb.body_index]
-                results.push((pb.node_id, ib.position, ib.rotation))
-        results
-
-    # ------------------------------------------------------------------
-    # Internal Helpers
-    # ------------------------------------------------------------------
-
-    fn _find_body_index(node_id: NodeId) -> i64:
-        var i = 0
-        while i < self.bodies.len():
-            if self.bodies[i].node_id.eq(node_id):
-                return i
-            i = i + 1
-        -1
-
-    fn _find_node_by_collider_index(collider_index: i64) -> NodeId:
-        for c in self.colliders:
-            if c.collider_index == collider_index:
-                return c.node_id
-        NodeId.invalid()
+    me ensure_node_map(idx: i64):
+        while self.node_to_body.len() <= idx:
+            self.node_to_body.push(-1)
+        if idx >= self.max_node_index:
+            self.max_node_index = idx + 1

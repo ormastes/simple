@@ -47,7 +47,7 @@ The Simple engine has **117+ engine files** covering: rendering (GPU pipeline, p
 | 25 | Timeline/Sequencer | L | Cinematic tool, keyframes + editor |
 | 26 | Terrain/Landscape | L | Heightmap mesh, LOD, texture splatting |
 | 27 | Cloth Simulation | L | GPU compute or FFI |
-| 28 | Vehicle Physics | M | Specialized constraints on physics2 |
+| 28 | Vehicle Physics | M | Specialized constraints on physics |
 | 29 | Foliage/Instancing | M | GPU instanced draw calls |
 | 30 | In-Game Console | S | TUI framework exists |
 | 31 | Scriptable Objects | S | SDN-backed data assets |
