@@ -46,3 +46,145 @@ impl CompletionState:
 
     fn item_count() -> i64:
         self.items.len()
+
+fn completion_handle_response(state: CompletionState, result_json: text, prefix: text):
+    val items = _completion_parse_items(result_json)
+    if items.len() > 0:
+        state.show(items, prefix)
+    else:
+        state.hide()
+
+fn _completion_parse_items(json: text) -> [CompletionItem]:
+    var items: [CompletionItem] = []
+    val arr_start = _completion_find_items_array(json)
+    if arr_start < 0:
+        return items
+    val entries = _completion_split_entries(json, arr_start)
+    for entry in entries:
+        val label = _completion_extract_string(entry, "\"label\"")
+        val kind_num = _completion_extract_int(entry, "\"kind\"")
+        val kind = _completion_kind_name(kind_num)
+        val detail = _completion_extract_string(entry, "\"detail\"")
+        val insert = _completion_extract_string(entry, "\"insertText\"")
+        val insert_text = if insert != "" then insert else: label
+        items.push(CompletionItem(label: label, kind: kind, detail: detail, insert_text: insert_text))
+    items
+
+fn _completion_find_items_array(json: text) -> i64:
+    val marker = "\"items\":"
+    var i = 0
+    while i < json.len():
+        if json.slice(i, json.len()).starts_with(marker):
+            var j = i + marker.len()
+            while j < json.len() and json.char_at(j) == " ":
+                j = j + 1
+            if j < json.len() and json.char_at(j) == "[":
+                return j
+        i = i + 1
+    if json.len() > 0 and json.char_at(0) == "[":
+        return 0
+    -1
+
+fn _completion_split_entries(json: text, arr_start: i64) -> [text]:
+    var entries: [text] = []
+    var depth = 0
+    var entry_start = -1
+    var i = arr_start
+    var in_str = false
+    while i < json.len():
+        val ch = json.char_at(i)
+        if in_str:
+            if ch == "\\":
+                i = i + 1
+            elif ch == "\"":
+                in_str = false
+        else:
+            if ch == "\"":
+                in_str = true
+            elif ch == "{":
+                if depth == 1 and entry_start < 0:
+                    entry_start = i
+                depth = depth + 1
+            elif ch == "}":
+                depth = depth - 1
+                if depth == 1 and entry_start >= 0:
+                    entries.push(json.slice(entry_start, i + 1))
+                    entry_start = -1
+            elif ch == "[":
+                depth = depth + 1
+            elif ch == "]":
+                depth = depth - 1
+                if depth == 0:
+                    break
+        i = i + 1
+    entries
+
+fn _completion_kind_name(code: i64) -> text:
+    if code == 1:
+        return "text"
+    if code == 2:
+        return "method"
+    if code == 3:
+        return "function"
+    if code == 4:
+        return "constructor"
+    if code == 5:
+        return "field"
+    if code == 6:
+        return "variable"
+    if code == 7:
+        return "class"
+    if code == 8:
+        return "interface"
+    if code == 9:
+        return "module"
+    if code == 10:
+        return "property"
+    if code == 13:
+        return "enum"
+    if code == 14:
+        return "keyword"
+    if code == 15:
+        return "snippet"
+    "text"
+
+fn _completion_extract_string(json: text, field: text) -> text:
+    var i = 0
+    while i < json.len():
+        if json.slice(i, json.len()).starts_with(field):
+            var j = i + field.len()
+            while j < json.len() and (json.char_at(j) == " " or json.char_at(j) == ":"):
+                j = j + 1
+            if j < json.len() and json.char_at(j) == "\"":
+                var result = ""
+                j = j + 1
+                while j < json.len() and json.char_at(j) != "\"":
+                    if json.char_at(j) == "\\":
+                        j = j + 1
+                        if j < json.len():
+                            result = result + json.char_at(j)
+                    else:
+                        result = result + json.char_at(j)
+                    j = j + 1
+                return result
+        i = i + 1
+    ""
+
+fn _completion_extract_int(json: text, field: text) -> i64:
+    var i = 0
+    while i < json.len():
+        if json.slice(i, json.len()).starts_with(field):
+            var j = i + field.len()
+            while j < json.len() and (json.char_at(j) == " " or json.char_at(j) == ":"):
+                j = j + 1
+            var num = ""
+            while j < json.len():
+                val ch = json.char_at(j)
+                if ch == "0" or ch == "1" or ch == "2" or ch == "3" or ch == "4" or ch == "5" or ch == "6" or ch == "7" or ch == "8" or ch == "9":
+                    num = num + ch
+                else:
+                    break
+                j = j + 1
+            return num.to_i64() ?? 0
+        i = i + 1
+    0

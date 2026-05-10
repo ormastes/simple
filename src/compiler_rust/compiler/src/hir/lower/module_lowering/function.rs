@@ -12,7 +12,9 @@ use crate::hir::types::{
 ///
 /// A body is a stub when it is:
 /// - Empty (zero statements), OR
-/// - A single `pass_todo` / `pass_do_nothing` / `pass_dn` call expression.
+/// - A single `pass` statement (`Node::Pass`), OR
+/// - A single bare `pass_todo` / `pass_do_nothing` / `pass_dn` identifier expression, OR
+/// - A single `pass_todo(...)` / `pass_do_nothing(...)` / `pass_dn(...)` call expression.
 ///
 /// Any real statement (val binding, return, assignment, …) disqualifies the body
 /// so that hand-written registrations are never silently overwritten.
@@ -20,15 +22,30 @@ fn is_stub_body(body: &ast::Block) -> bool {
     match body.statements.len() {
         0 => true,
         1 => {
-            if let ast::Node::Expression(ast::Expr::Call { callee, .. }) = &body.statements[0] {
-                if let ast::Expr::Identifier(name) = callee.as_ref() {
-                    return matches!(
+            match &body.statements[0] {
+                // `pass` keyword as a statement
+                ast::Node::Pass(_) => true,
+                ast::Node::Expression(expr) => match expr {
+                    // pass_todo("…") / pass_do_nothing() / pass_dn() — call form
+                    ast::Expr::Call { callee, .. } => {
+                        if let ast::Expr::Identifier(name) = callee.as_ref() {
+                            matches!(
+                                name.as_str(),
+                                "pass_todo" | "pass_do_nothing" | "pass_dn" | "todo"
+                            )
+                        } else {
+                            false
+                        }
+                    }
+                    // bare `pass_todo` / `pass_do_nothing` / `pass_dn` with no parens
+                    ast::Expr::Identifier(name) => matches!(
                         name.as_str(),
                         "pass_todo" | "pass_do_nothing" | "pass_dn" | "todo"
-                    );
-                }
+                    ),
+                    _ => false,
+                },
+                _ => false,
             }
-            false
         }
         _ => false,
     }
@@ -64,8 +81,9 @@ fn driver_ops_arg(attrs: &[ast::Attribute]) -> Option<ast::Expr> {
 /// return register_static_driver(m, ops)
 /// ```
 ///
-/// `fn_name` is used to derive the driver name string (the function name itself,
-/// not stripped — callers can override via a `name=` arg in future).
+/// `fn_name` is used verbatim as the manifest name (the function name, not stripped).
+/// Future work: add a `name=` named arg to `@driver(...)` so callers can supply an
+/// explicit manifest name instead of having it derived from the registration function.
 ///
 /// The manifest args are lifted directly from the `@driver(...)` attribute's
 /// `named_args` list, falling back to positional `args` in declaration order:

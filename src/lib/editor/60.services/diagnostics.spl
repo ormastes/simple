@@ -80,3 +80,153 @@ fn diagnostic_severity_icon(severity: text) -> text:
     if severity == "info":
         return "I"
     "H"
+
+fn diagnostics_handle_publish(store: DiagnosticStore, params_json: text):
+    val uri = _diag_extract_uri(params_json)
+    val path = lsp_uri_to_path(uri)
+    val diags = _diag_parse_diagnostics(params_json, path)
+    store.set_diagnostics(path, diags)
+
+fn _diag_extract_uri(json: text) -> text:
+    val marker = "\"uri\":"
+    var i = 0
+    while i < json.len():
+        if json.slice(i, json.len()).starts_with(marker):
+            var j = i + marker.len()
+            while j < json.len() and json.char_at(j) == " ":
+                j = j + 1
+            if j < json.len() and json.char_at(j) == "\"":
+                var result = ""
+                j = j + 1
+                while j < json.len() and json.char_at(j) != "\"":
+                    result = result + json.char_at(j)
+                    j = j + 1
+                return result
+        i = i + 1
+    ""
+
+fn _diag_parse_diagnostics(json: text, path: text) -> [EditorDiagnostic]:
+    var diags: [EditorDiagnostic] = []
+    val diags_start = _diag_find_diagnostics_array(json)
+    if diags_start < 0:
+        return diags
+    var entries = _diag_split_array_entries(json, diags_start)
+    for entry in entries:
+        val diag = _diag_parse_single(entry, path)
+        diags.push(diag)
+    diags
+
+fn _diag_find_diagnostics_array(json: text) -> i64:
+    val marker = "\"diagnostics\":"
+    var i = 0
+    while i < json.len():
+        if json.slice(i, json.len()).starts_with(marker):
+            var j = i + marker.len()
+            while j < json.len() and json.char_at(j) == " ":
+                j = j + 1
+            if j < json.len() and json.char_at(j) == "[":
+                return j
+        i = i + 1
+    -1
+
+fn _diag_split_array_entries(json: text, arr_start: i64) -> [text]:
+    var entries: [text] = []
+    var depth = 0
+    var entry_start = -1
+    var i = arr_start
+    var in_str = false
+    while i < json.len():
+        val ch = json.char_at(i)
+        if in_str:
+            if ch == "\\":
+                i = i + 1
+            elif ch == "\"":
+                in_str = false
+        else:
+            if ch == "\"":
+                in_str = true
+            elif ch == "{":
+                if depth == 1 and entry_start < 0:
+                    entry_start = i
+                depth = depth + 1
+            elif ch == "}":
+                depth = depth - 1
+                if depth == 1 and entry_start >= 0:
+                    entries.push(json.slice(entry_start, i + 1))
+                    entry_start = -1
+            elif ch == "[":
+                depth = depth + 1
+            elif ch == "]":
+                depth = depth - 1
+                if depth == 0:
+                    break
+        i = i + 1
+    entries
+
+fn _diag_parse_single(entry: text, path: text) -> EditorDiagnostic:
+    val line = _diag_extract_int(entry, "\"line\"")
+    val col = _diag_extract_int(entry, "\"character\"")
+    val sev_num = _diag_extract_int(entry, "\"severity\"")
+    val severity = _diag_severity_from_lsp(sev_num)
+    val message = _diag_extract_string(entry, "\"message\"")
+    val source = _diag_extract_string(entry, "\"source\"")
+    EditorDiagnostic(
+        path: path,
+        line: line,
+        col: col,
+        end_line: line,
+        end_col: col,
+        severity: severity,
+        message: message,
+        source: source
+    )
+
+fn _diag_severity_from_lsp(code: i64) -> text:
+    if code == 1:
+        return "error"
+    if code == 2:
+        return "warning"
+    if code == 3:
+        return "info"
+    "hint"
+
+fn _diag_extract_int(json: text, field: text) -> i64:
+    var i = 0
+    while i < json.len():
+        if json.slice(i, json.len()).starts_with(field):
+            var j = i + field.len()
+            while j < json.len() and (json.char_at(j) == " " or json.char_at(j) == ":"):
+                j = j + 1
+            var num = ""
+            while j < json.len():
+                val ch = json.char_at(j)
+                if ch == "0" or ch == "1" or ch == "2" or ch == "3" or ch == "4" or ch == "5" or ch == "6" or ch == "7" or ch == "8" or ch == "9":
+                    num = num + ch
+                else:
+                    break
+                j = j + 1
+            return num.to_i64() ?? 0
+        i = i + 1
+    0
+
+fn _diag_extract_string(json: text, field: text) -> text:
+    var i = 0
+    while i < json.len():
+        if json.slice(i, json.len()).starts_with(field):
+            var j = i + field.len()
+            while j < json.len() and (json.char_at(j) == " " or json.char_at(j) == ":"):
+                j = j + 1
+            if j < json.len() and json.char_at(j) == "\"":
+                var result = ""
+                j = j + 1
+                while j < json.len() and json.char_at(j) != "\"":
+                    if json.char_at(j) == "\\":
+                        j = j + 1
+                        if j < json.len():
+                            result = result + json.char_at(j)
+                    else:
+                        result = result + json.char_at(j)
+                    j = j + 1
+                return result
+        i = i + 1
+    ""
