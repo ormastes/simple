@@ -24,6 +24,7 @@ use std.gc_async_mut.gpu.browser_engine.dom.{BeDomNode, be_dom_get_style,
 use std.gc_async_mut.gpu.browser_engine.css.{StyleProps, CssValue, BoxEdges, BoxShadow,
     be_default_style, CssPx, CssColor, CssOpacity,
     FloatCode, ClearCode, css_get_float_code, css_get_clear_code, css_get_overflow}
+use std.gc_async_mut.gpu.browser_engine.style.render_state.{RenderState}
 use common.text_layout.text_layout.{measure_text, text_char_width, text_line_height}
 use common.render_scene.scene.{SceneCommand, RenderScene, render_scene,
     scene_fill_rect, scene_stroke_rect, scene_text, scene_rounded_rect,
@@ -1769,3 +1770,81 @@ fn _apply_opacity(argb: u32, opacity: f32) -> u32:
     if new_a > 255:
         new_a = 255
     return (new_a << 24) | (argb & 0x00FFFFFF)
+
+# =========================================================================
+# Position: Sticky Fixup Pass
+# =========================================================================
+
+pub fn apply_sticky_fixup(root: BeLayoutBox, scroll_x: f64, scroll_y: f64):
+    """Post-layout pass: adjust position:sticky boxes so they stay within
+    their containing block bounds while clamped at their threshold offset.
+
+    For each sticky box, the adjusted position is:
+      max(normal_flow_y, min(scroll_y + top_threshold, containing_block_bottom - box_height))
+
+    Modifies layout box coordinates in-place."""
+    _sticky_fixup_box(root, root, scroll_x, scroll_y)
+
+fn _sticky_fixup_box(box: BeLayoutBox, containing: BeLayoutBox, scroll_x: f64, scroll_y: f64):
+    val node = box.node
+    val style = be_dom_get_style(node)
+    val pos = style.position
+
+    if pos == "sticky":
+        val normal_y = box.y
+        val normal_x = box.x
+
+        val top_offset = if style.top.is_auto(): -999999 else: style.top.value_as_i32()
+        val left_offset = if style.left.is_auto(): -999999 else: style.left.value_as_i32()
+        val bottom_offset = if style.bottom.is_auto(): -999999 else: style.bottom.value_as_i32()
+        val right_offset = if style.right.is_auto(): -999999 else: style.right.value_as_i32()
+
+        val cont_top = containing.content_y
+        val cont_bottom = containing.content_y + containing.content_height
+        val cont_left = containing.content_x
+        val cont_right = containing.content_x + containing.content_width
+
+        var sticky_y = normal_y
+        if top_offset > -999999:
+            val threshold_y = scroll_y.to_i32() + top_offset
+            val max_y = cont_bottom - box.height
+            sticky_y = if threshold_y > normal_y: threshold_y else: normal_y
+            if sticky_y > max_y:
+                sticky_y = max_y
+        else if bottom_offset > -999999:
+            val viewport_bottom = scroll_y.to_i32() + containing.height
+            val threshold_y = viewport_bottom - bottom_offset - box.height
+            val min_y = cont_top
+            sticky_y = if threshold_y < normal_y: threshold_y else: normal_y
+            if sticky_y < min_y:
+                sticky_y = min_y
+
+        var sticky_x = normal_x
+        if left_offset > -999999:
+            val threshold_x = scroll_x.to_i32() + left_offset
+            val max_x = cont_right - box.width
+            sticky_x = if threshold_x > normal_x: threshold_x else: normal_x
+            if sticky_x > max_x:
+                sticky_x = max_x
+        else if right_offset > -999999:
+            val viewport_right = scroll_x.to_i32() + containing.width
+            val threshold_x = viewport_right - right_offset - box.width
+            val min_x = cont_left
+            sticky_x = if threshold_x < normal_x: threshold_x else: normal_x
+            if sticky_x < min_x:
+                sticky_x = min_x
+
+        val dy = sticky_y - normal_y
+        val dx = sticky_x - normal_x
+        box.x = normal_x + dx
+        box.y = normal_y + dy
+        box.content_x = box.content_x + dx
+        box.content_y = box.content_y + dy
+
+    var ci = 0
+    while ci < box.children.len():
+        val child = box.children[ci]
+        ci = ci + 1
+        val child_pos = be_dom_get_style(child.node).position
+        val next_containing = if child_pos == "sticky" or child_pos == "static" or child_pos == "relative": box else: containing
+        _sticky_fixup_box(child, next_containing, scroll_x, scroll_y)

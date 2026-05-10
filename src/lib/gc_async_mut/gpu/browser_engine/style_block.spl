@@ -22,6 +22,9 @@ use std.gc_async_mut.gpu.browser_engine.dom.{BeDomNode,
 use std.gc_async_mut.gpu.browser_engine.css.{parse_css_value, BoxEdges,
     BorderProps, CssValue}
 use common.string_builder.{StringBuilder}
+use std.gc_async_mut.gpu.browser_engine.style.supports.{eval_supports_query}
+use std.gc_async_mut.gpu.browser_engine.style.custom_properties.{has_var_reference, parse_var_function}
+use std.gc_async_mut.gpu.browser_engine.style.animation.{Keyframe, CSSValue, CSSDeclaration}
 
 # =========================================================================
 # CSS Rule types
@@ -51,6 +54,115 @@ pub fn css_decls_contain(decls: [CssDecl], property: text, value: text) -> bool:
     false
 
 # =========================================================================
+# @keyframes registry
+# =========================================================================
+
+pub class KeyframeEntry:
+    name: text
+    frames: [Keyframe]
+
+pub class KeyframeRegistry:
+    entries: [KeyframeEntry]
+
+    static fn new() -> KeyframeRegistry:
+        val empty: [KeyframeEntry] = []
+        KeyframeRegistry(entries: empty)
+
+    me add(name: text, frames: [Keyframe]):
+        self.entries.push(KeyframeEntry(name: name, frames: frames))
+
+pub fn extract_keyframes(css: text) -> KeyframeRegistry:
+    val registry = KeyframeRegistry.new()
+    val lower = css.lower()
+    var pos = 0
+    while pos < css.len():
+        val kf_pos = sb_find(lower, "@keyframes", pos)
+        if kf_pos >= 999999999:
+            break
+        val after_kw = kf_pos + 10
+        val open = sb_find(css, "{", after_kw)
+        if open >= 999999999:
+            break
+        val name_raw = css.slice(after_kw, open)
+        val anim_name = name_raw.trim()
+        val close = find_matching_brace(css, open)
+        if close >= 999999999:
+            break
+        val body = css.slice(open + 1, close)
+        val frames = _parse_keyframe_body(body)
+        registry.add(anim_name, frames)
+        pos = close + 1
+    registry
+
+fn _parse_keyframe_body(body: text) -> [Keyframe]:
+    var frames: [Keyframe] = []
+    var pos = 0
+    while pos < body.len():
+        val open = sb_find(body, "{", pos)
+        if open >= 999999999:
+            break
+        val offset_text = body.slice(pos, open).trim()
+        val close = find_matching_brace(body, open)
+        if close >= 999999999:
+            break
+        val decl_text = body.slice(open + 1, close).trim()
+        val raw_decls = parse_declarations(decl_text)
+        var css_decls: [CSSDeclaration] = []
+        var di = 0
+        while di < raw_decls.len():
+            val d = raw_decls[di]
+            di = di + 1
+            css_decls.push(CSSDeclaration(property: d.property, value: CSSValue.Keyword(v: d.value), important: false))
+        val offsets = sb_split_selector_list(offset_text)
+        var oi = 0
+        while oi < offsets.len():
+            val off_raw = offsets[oi]
+            oi = oi + 1
+            val off = off_raw.trim()
+            val offset_val = _parse_keyframe_offset(off)
+            frames.push(Keyframe.create(offset_val, css_decls))
+        pos = close + 1
+    frames
+
+fn _parse_keyframe_offset(off: text) -> f64:
+    if off == "from":
+        return 0.0
+    if off == "to":
+        return 1.0
+    if off.ends_with("%"):
+        val num_text = off.slice(0, off.len() - 1).trim()
+        val pct = num_text.to_f64()
+        return pct / 100.0
+    0.0
+
+fn flatten_supports_blocks(css_text: text) -> text:
+    val lower = css_text.lower()
+    var out = ""
+    var pos = 0
+    while pos < css_text.len():
+        val sup_pos = sb_find(lower, "@supports", pos)
+        if sup_pos >= 999999999:
+            out = out + css_text.slice(pos, css_text.len())
+            break
+        out = out + css_text.slice(pos, sup_pos)
+        val after_kw = sup_pos + 9
+        val open = sb_find(css_text, "{", after_kw)
+        if open >= 999999999:
+            out = out + css_text.slice(sup_pos, css_text.len())
+            break
+        val condition = css_text.slice(after_kw, open).trim()
+        val close = find_matching_brace(css_text, open)
+        if close >= 999999999:
+            out = out + css_text.slice(sup_pos, css_text.len())
+            break
+        if eval_supports_query(condition):
+            val inner = css_text.slice(open + 1, close).trim()
+            if inner.len() > 0:
+                out = out + "\n" + inner + "\n"
+        pos = close + 1
+    out
+
+# =========================================================================
 # Extract <style> blocks from HTML
 # =========================================================================
 
@@ -78,10 +190,33 @@ fn extract_style_blocks(html: text) -> [text]:
 # Parse CSS text into rules
 # =========================================================================
 
+fn strip_keyframe_blocks(css_text: text) -> text:
+    val lower = css_text.lower()
+    var out = ""
+    var pos = 0
+    while pos < css_text.len():
+        val kf_pos = sb_find(lower, "@keyframes", pos)
+        if kf_pos >= 999999999:
+            out = out + css_text.slice(pos, css_text.len())
+            break
+        out = out + css_text.slice(pos, kf_pos)
+        val open = sb_find(css_text, "{", kf_pos + 10)
+        if open >= 999999999:
+            out = out + css_text.slice(kf_pos, css_text.len())
+            break
+        val close = find_matching_brace(css_text, open)
+        if close >= 999999999:
+            out = out + css_text.slice(kf_pos, css_text.len())
+            break
+        pos = close + 1
+    out
+
 fn parse_css_rules(css_text: text) -> [CssRule]:
     var rules: [CssRule] = []
     var pos = 0
-    val normalized_css = flatten_simple_nested_rules(flatten_layer_blocks(css_text))
+    val after_supports = flatten_supports_blocks(css_text)
+    val after_keyframes = strip_keyframe_blocks(after_supports)
+    val normalized_css = flatten_simple_nested_rules(flatten_layer_blocks(after_keyframes))
     val len = normalized_css.len()
 
     while pos < len:
@@ -258,14 +393,56 @@ fn collect_css_vars(rules: [CssRule]) -> [CssDecl]:
                     vars.push(decl)
     vars
 
-fn resolve_css_vars_in_value(value: text, vars: [CssDecl]) -> text:
-    var resolved = value
+fn _find_var_call_end(value: text, var_start: i64) -> i64:
+    var depth = 0
+    var pos = var_start
+    while pos < value.len():
+        val ch = value.char_at(pos)
+        if ch == "(":
+            depth = depth + 1
+        elif ch == ")":
+            depth = depth - 1
+            if depth == 0:
+                return pos
+        pos = pos + 1
+    999999999
+
+fn _lookup_css_var(name: text, vars: [CssDecl]) -> text:
     var vi = 0
     while vi < vars.len():
         val v = vars[vi]
         vi = vi + 1
-        resolved = resolved.replace("var(" + v.property + ")", v.value)
-        resolved = resolved.replace("var(" + v.property + " )", v.value)
+        if v.property == name:
+            return v.value
+    ""
+
+fn resolve_css_vars_in_value(value: text, vars: [CssDecl]) -> text:
+    var resolved = value
+    var depth_guard = 0
+    while has_var_reference(resolved) and depth_guard < 32:
+        depth_guard = depth_guard + 1
+        val parsed = parse_var_function(resolved)
+        val var_name = parsed.first
+        val fallback = parsed.second
+        if var_name.len() == 0:
+            break
+        val looked_up = _lookup_css_var(var_name, vars)
+        var replacement = ""
+        if looked_up.len() > 0:
+            replacement = looked_up
+        elif fallback.len() > 0:
+            replacement = fallback
+        else:
+            break
+        val var_start = sb_find(resolved, "var(", 0)
+        if var_start >= 999999999:
+            break
+        val var_end = _find_var_call_end(resolved, var_start)
+        if var_end >= 999999999:
+            break
+        val before = resolved.slice(0, var_start)
+        val after = resolved.slice(var_end + 1, resolved.len())
+        resolved = before + replacement + after
     resolved
 
 fn resolve_css_vars_in_rules(rules: [CssRule], vars: [CssDecl]) -> [CssRule]:
@@ -962,6 +1139,7 @@ pub fn process_style_blocks(root: BeDomNode, html: text):
     while bl_idx < blocks.len():
         val block = blocks[bl_idx]
         bl_idx = bl_idx + 1
+        val _kf_registry = extract_keyframes(block)
         val rules = parse_css_rules(block)
         val vars = collect_css_vars(rules)
         var vi = 0

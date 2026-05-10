@@ -12,6 +12,8 @@ use common.render_scene.scene.{SceneCommand, RenderScene, render_scene,
     scene_fill_rect, scene_stroke_rect, scene_text, scene_rounded_rect,
     scene_gradient_rect, scene_image, rgba_to_argb}
 use common.text_layout.text_layout.{text_line_height}
+use std.gc_async_mut.gpu.browser_engine.style.transform.{parse_transform, transforms_to_matrix}
+use examples.browser.shared.matrix4.Matrix4
 
 # =========================================================================
 # Paint Command
@@ -356,3 +358,166 @@ fn paint_tree_to_scene(layout: BeLayoutBox, viewport_w: i32, viewport_h: i32) ->
     """Convenience: generate paint commands from layout tree and convert to scene."""
     val commands = generate_paint_list(layout)
     paint_commands_to_scene(commands, viewport_w, viewport_h)
+
+# =========================================================================
+# Object-Fit / Object-Position
+# =========================================================================
+
+class ObjectFitResult:
+    """Destination rect for a replaced element after applying object-fit."""
+    dest_x: f64
+    dest_y: f64
+    dest_width: f64
+    dest_height: f64
+
+pub fn compute_object_fit(obj_width: f64, obj_height: f64, box_width: f64, box_height: f64, fit: text, position: text) -> ObjectFitResult:
+    """Compute the destination rect for a replaced element (e.g. img) given its
+    natural size, the box size, and the object-fit / object-position values."""
+    var dest_w = box_width
+    var dest_h = box_height
+    var dest_x = 0.0
+    var dest_y = 0.0
+
+    if fit == "fill" or fit == "":
+        dest_w = box_width
+        dest_h = box_height
+    else if fit == "none":
+        dest_w = obj_width
+        dest_h = obj_height
+    else if fit == "contain":
+        if obj_width > 0.0 and obj_height > 0.0:
+            val scale_x = box_width / obj_width
+            val scale_y = box_height / obj_height
+            val scale = if scale_x < scale_y: scale_x else: scale_y
+            dest_w = obj_width * scale
+            dest_h = obj_height * scale
+    else if fit == "cover":
+        if obj_width > 0.0 and obj_height > 0.0:
+            val scale_x = box_width / obj_width
+            val scale_y = box_height / obj_height
+            val scale = if scale_x > scale_y: scale_x else: scale_y
+            dest_w = obj_width * scale
+            dest_h = obj_height * scale
+    else if fit == "scale-down":
+        if obj_width > 0.0 and obj_height > 0.0:
+            val scale_x = box_width / obj_width
+            val scale_y = box_height / obj_height
+            val scale_contain = if scale_x < scale_y: scale_x else: scale_y
+            val scale = if scale_contain < 1.0: scale_contain else: 1.0
+            dest_w = obj_width * scale
+            dest_h = obj_height * scale
+
+    # Apply object-position (default "50% 50%")
+    val pos = if position == "": "50% 50%" else: position
+    val space_idx = pos.index_of(" ")
+    var pos_x_str = "50%"
+    var pos_y_str = "50%"
+    if space_idx >= 0:
+        pos_x_str = pos.slice(0, space_idx).trim()
+        pos_y_str = pos.slice(space_idx + 1, pos.len()).trim()
+
+    val offset_x = _resolve_position_axis(pos_x_str, box_width, dest_w)
+    val offset_y = _resolve_position_axis(pos_y_str, box_height, dest_h)
+    dest_x = offset_x
+    dest_y = offset_y
+
+    return ObjectFitResult(dest_x: dest_x, dest_y: dest_y, dest_width: dest_w, dest_height: dest_h)
+
+fn _resolve_position_axis(value: text, box_dim: f64, dest_dim: f64) -> f64:
+    val free = box_dim - dest_dim
+    if value == "left" or value == "top" or value == "0%":
+        return 0.0
+    if value == "right" or value == "bottom" or value == "100%":
+        return free
+    if value == "center" or value == "50%":
+        return free * 0.5
+    if value.ends_with("%"):
+        val pct_str = value.slice(0, value.len() - 1)
+        val pct = pct_str.to_f64() / 100.0
+        return free * pct
+    if value.ends_with("px"):
+        val px_str = value.slice(0, value.len() - 2)
+        return px_str.to_f64()
+    return free * 0.5
+
+# =========================================================================
+# Scrollbar Rendering
+# =========================================================================
+
+pub fn paint_scrollbar(x: f64, y: f64, width: f64, height: f64, content_height: f64, scroll_y: f64) -> [PaintCommand]:
+    """Generate paint commands for a vertical scrollbar.
+    Renders a track rect and a proportional thumb based on scroll position."""
+    var cmds: [PaintCommand] = []
+    val bar_w = 8
+    val track_x = (x + width - bar_w.to_f64()).to_i32()
+    val track_y = y.to_i32()
+    val track_h = height.to_i32()
+    val track_color: u32 = 0xFFEEEEEE
+
+    var track_cmd = PaintCommand.rect(track_x, track_y, bar_w, track_h, track_color)
+    cmds.push(track_cmd)
+
+    if content_height > height and content_height > 0.0:
+        val ratio = height / content_height
+        val thumb_h_f = height * ratio
+        val thumb_h = if thumb_h_f < 16.0: 16 else: thumb_h_f.to_i32()
+        val max_scroll = content_height - height
+        val scroll_ratio = if max_scroll > 0.0: scroll_y / max_scroll else: 0.0
+        val max_thumb_offset = height - thumb_h.to_f64()
+        val thumb_offset = (max_thumb_offset * scroll_ratio).to_i32()
+        val thumb_y = track_y + thumb_offset
+        val thumb_color: u32 = 0xFF888888
+        var thumb_cmd = PaintCommand.rect(track_x, thumb_y, bar_w, thumb_h, thumb_color)
+        cmds.push(thumb_cmd)
+
+    return cmds
+
+# =========================================================================
+# Transform Painting
+# =========================================================================
+
+pub fn apply_transform_to_commands(cmds: [PaintCommand], transform: text, origin_x: f64, origin_y: f64) -> [PaintCommand]:
+    """Apply a CSS transform to a list of paint commands by adjusting their positions.
+    Transforms each command's top-left and bottom-right corners through the matrix."""
+    if transform == "" or transform == "none":
+        return cmds
+
+    val fns = parse_transform(transform)
+    if fns.len() == 0:
+        return cmds
+
+    val mat = transforms_to_matrix(fns)
+
+    var result: [PaintCommand] = []
+    var i = 0
+    while i < cmds.len():
+        val cmd = cmds[i]
+        i = i + 1
+
+        val local_x = cmd.x.to_f64() - origin_x
+        val local_y = cmd.y.to_f64() - origin_y
+        val tl = mat.transform_point(local_x, local_y)
+        val new_x = (origin_x + tl[0]).to_i32()
+        val new_y = (origin_y + tl[1]).to_i32()
+
+        val local_br_x = local_x + cmd.width.to_f64()
+        val local_br_y = local_y + cmd.height.to_f64()
+        val br = mat.transform_point(local_br_x, local_br_y)
+        val new_w = ((origin_x + br[0]) - new_x.to_f64()).to_i32()
+        val new_h = ((origin_y + br[1]) - new_y.to_f64()).to_i32()
+
+        var new_cmd = PaintCommand(
+            kind: cmd.kind,
+            x: new_x, y: new_y,
+            width: new_w, height: new_h,
+            color: cmd.color,
+            text_val: cmd.text_val,
+            font_size: cmd.font_size,
+            border_radius: cmd.border_radius,
+            border_width: cmd.border_width,
+            border_color: cmd.border_color,
+            opacity: cmd.opacity
+        )
+        result.push(new_cmd)
+
+    return result
