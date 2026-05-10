@@ -6,7 +6,9 @@
 - **Filed-by:** W14-E (RSA-PSS sign/verify wave)
 - **Target:** crypto / interpreter perf
 - **Priority:** P1
-- **Status:** Open
+- **Status:** IMPLEMENTED 2026-05-10 — sliding-window w=4 `mod_exp` added to
+  `src/lib/common/math/bignum/bignat.spl`; `rt_bigint_mod_exp` extern declared in
+  `src/lib/nogc_sync_mut/io/signature_ffi.spl` for the runtime-accelerated path.
 - **Requested-semantics:**
   Pure-Simple `_pss_bi_mod_exp` against a 2048-bit modulus and 2048-bit
   exponent runs O(bits^3) with the current schoolbook `_pss_bi_mod` doing

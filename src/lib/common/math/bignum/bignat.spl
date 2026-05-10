@@ -366,6 +366,84 @@ fn to_bytes_le(a: [i64], length: i64) -> [u8]:
         pos = pos + 1
     result
 
+# ----------------------------------------------------------------------
+# Modular exponentiation — FR-CRYPTO-0001
+# (doc/08_tracking/feature_request/rsa_pss_pure_simple_modexp_perf_2026-05-02.md)
+# ----------------------------------------------------------------------
+
+fn mod_exp(base: [i64], exp: [i64], m: [i64]) -> [i64]:
+    """Left-to-right sliding-window modular exponentiation.
+
+    Window size w=4 reduces multiplications for a 2048-bit exponent from
+    ~2*2048 (binary square-and-multiply) to roughly ~1.25*2048 squarings
+    plus ~2048/4 multiplications — fast enough for RSA-2048 in the
+    interpreter test budget (FR-CRYPTO-0001).
+
+    Precomputes the odd-window table g[0..2^(w-1)-1] where g[i] = base^(2i+1) mod m,
+    then scans the exponent MSB-to-LSB, squaring at every step and multiplying
+    when a window is consumed.
+
+    PUBLIC-VALUES only: branches on exponent bits (variable-time).
+    """
+    if is_zero(m) or is_zero(base):
+        return bn_zero()
+    if is_zero(exp):
+        return bn_one()
+
+    val W: i64 = 4          # window width
+    val TABLE_SIZE: i64 = 8 # 2^(W-1): odd-indexed powers base^1, base^3, ..., base^15
+    # Precompute base mod m, then base^2 mod m, then the odd powers.
+    val b = modulo(base, m)
+    val b2 = modulo(mul(b, b), m)
+    # table[i] = base^(2*i+1) mod m for i in [0, TABLE_SIZE)
+    var table: [[i64]] = []
+    var i = 0
+    while i < TABLE_SIZE:
+        table.push(bn_zero())
+        i = i + 1
+    table[0] = b
+    i = 1
+    while i < TABLE_SIZE:
+        table[i] = modulo(mul(table[i - 1], b2), m)
+        i = i + 1
+
+    # Collect exponent bits MSB-first.
+    val nbits = bit_length(exp)
+    var result = bn_one()
+    var idx = nbits - 1
+    while idx >= 0:
+        if get_bit(exp, idx) == 0:
+            # Zero bit: just square.
+            result = modulo(mul(result, result), m)
+            idx = idx - 1
+        else:
+            # Non-zero: find the longest window of width <= W starting here
+            # such that the least-significant bit of the window is 1.
+            val wstart = if idx - W + 1 >= 0: idx - W + 1 else: 0
+            var wend = idx
+            # Extend window downward until we hit a set bit (max W bits).
+            while wend > wstart and get_bit(exp, wend - 1) == 0:
+                wend = wend - 1
+            # The window is bits [wend..idx] (inclusive), all processed now.
+            val wbits = idx - wend + 1
+            # Square `wbits` times and multiply by the appropriate table entry.
+            var s = 0
+            while s < wbits:
+                result = modulo(mul(result, result), m)
+                s = s + 1
+            # Collect the window value (odd because we stopped at a set bit).
+            var window_val: i64 = 0
+            var b_idx = wend
+            while b_idx <= idx:
+                window_val = (window_val << 1) | get_bit(exp, b_idx)
+                b_idx = b_idx + 1
+            # window_val is odd; table index = (window_val - 1) / 2
+            val tidx = (window_val - 1) / 2
+            result = modulo(mul(result, table[tidx]), m)
+            idx = wend - 1
+
+    result
+
 fn _div_mod_i64(a: [i64], n: i64) -> [[i64]]:
     # Internal helper: divide BigNat by small i64 n (assumed > 0).
     # Returns [quotient_bignat, remainder_as_singleton_bignat].

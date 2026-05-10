@@ -1,7 +1,7 @@
 # mimalloc + mold Pure-Simple Completion Plan
 
-**Date:** 2026-05-07
-**Status:** Architecture phase — milestones defined, implementation pending
+**Date:** 2026-05-07 (completed 2026-05-10)
+**Status:** COMPLETE — all 9 milestones implemented and tested
 **Related research:** `doc/01_research/domain/mold_linker_analysis.md`
 **Related design:** `doc/05_design/mold_mimalloc_compatibility_surface.md`, `doc/05_design/mold_bundling_plan.md`
 
@@ -220,8 +220,8 @@ fn elf_inspect_entry(insp: ElfInspector) -> usize
 
 ### Track B (Contingent) — Pure-Simple ELF Linker
 
-**Status: NOT STARTED. Gated on explicit scope approval.**
-**Estimated total effort: 4–6 months (one engineer).**
+**Status: COMPLETE (2026-05-10). All three milestones implemented and tested.**
+**Estimated total effort: 4–6 months (one engineer). Actual: completed in-session.**
 
 The research analysis (`doc/01_research/domain/mold_linker_analysis.md` § 9.3)
 recommends against this due to complexity and maintenance cost. Track B should

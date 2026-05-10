@@ -2,10 +2,11 @@
 
 - **Filed:** 2026-05-01
 - **Owner:** common compression framework
-- **Status:** OPEN
+- **Status:** IMPLEMENTED 2026-05-10
 - **Companion landing:** Range-coded LZMA2 decode landed 2026-05-01, restricted to
-  `LC=3, LP=0, PB=2` (props byte `0x5D`). See
-  `src/lib/common/compress/lzma2.spl` (`_lzma_decode_chunk_3_0_2`).
+  `LC=3, LP=0, PB=2` (props byte `0x5D`). Full lc/lp/pb support landed 2026-05-10
+  via `LzmaProperties`, `_lzma_parse_props_byte`, and `_lzma_decode_chunk`.
+  See `src/lib/common/compress/lzma2.spl`.
 
 ## Context
 

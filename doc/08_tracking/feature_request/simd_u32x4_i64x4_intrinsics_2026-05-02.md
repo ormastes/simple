@@ -1,5 +1,6 @@
 # FR: Vec4u32 and Vec4i64 SIMD Intrinsics
 # Wave L / L4 — 2026-05-02
+# **Status: IMPLEMENTED 2026-05-10** — structs, externs, wrappers, and aliases landed.
 
 ## Summary
 
