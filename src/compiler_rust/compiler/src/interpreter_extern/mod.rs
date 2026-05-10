@@ -962,6 +962,7 @@ pub(crate) fn call_extern_function(
         // SIMD Byte (u8x16) Intrinsics — Phase 2 seed
         // ====================================================================
         "rt_simd_add_u8x16" => simd::rt_simd_add_u8x16(&evaluated),
+        "rt_simd_xor_u8x16" => simd::rt_simd_xor_u8x16(&evaluated),
 
         // ====================================================================
         // SIMD AES Round Intrinsics — Phase 2 (AES-NI / NEON / scalar)

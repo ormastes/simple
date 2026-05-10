@@ -22,7 +22,7 @@ use simple_runtime::value::simd_aes_ops::{
 use simple_runtime::value::db_accel_bitmap_ops::{
     bitmap_and_words as ffi_bitmap_and_words, bitmap_or_words as ffi_bitmap_or_words,
 };
-use simple_runtime::value::simd_byte_ops::add_u8x16 as ffi_add_u8x16;
+use simple_runtime::value::simd_byte_ops::{add_u8x16 as ffi_add_u8x16, xor_u8x16 as ffi_xor_u8x16};
 use simple_runtime::value::simd_clmul_ops::{
     clmul_hi_u64 as ffi_clmul_hi_u64, clmul_lo_u64 as ffi_clmul_lo_u64, xor_u64x2 as ffi_xor_u64x2,
 };
@@ -962,6 +962,10 @@ where
 
 pub fn rt_simd_add_u8x16(args: &[Value]) -> Result<Value, CompileError> {
     binop_u8x16("rt_simd_add_u8x16", args, ffi_add_u8x16)
+}
+
+pub fn rt_simd_xor_u8x16(args: &[Value]) -> Result<Value, CompileError> {
+    binop_u8x16("rt_simd_xor_u8x16", args, ffi_xor_u8x16)
 }
 
 pub fn rt_simd_aes_round_u8x16(args: &[Value]) -> Result<Value, CompileError> {
