@@ -29,6 +29,10 @@ function M.setup(opts)
     require("simple.lsp").setup(M.config.lsp)
   end
 
+  if M.config.md_lsp.enabled then
+    require("simple.md_lsp").setup(M.config.md_lsp)
+  end
+
   if M.config.math.enabled then
     require("simple.math").setup(M.config.math)
   end

@@ -45,6 +45,13 @@ M.defaults = {
     settings = {},
     on_attach = nil,
   },
+  md_lsp = {
+    enabled = true,
+    cmd = { "bin/simple", "run", "src/app/md_lsp/md_lsp_main.spl" },
+    root_markers = { "simple.sdn", ".git" },
+    settings = {},
+    on_attach = nil,
+  },
   math = {
     enabled = true,
     conceal = true,

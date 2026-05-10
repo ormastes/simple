@@ -26,6 +26,7 @@ import { SimpleTestController } from './testing/testController';
 import { EditorMarkerManager } from './testing/editorMarkers';
 import { TestWorkspacePanel } from './testing/testWorkspacePanel';
 import { analyzeDocument } from './analysis/simpleAnalysisIndex';
+import { activateMdLspClient } from './mdLspClient';
 
 const SIMPLE_SELECTOR: vscode.DocumentSelector = [
     { scheme: 'file', language: 'simple' },
@@ -364,6 +365,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
             });
         }),
     );
+
+    activateMdLspClient(context);
 
     void lspSurface.bootstrapClient(vscode.window.activeTextEditor?.document.uri.fsPath).then((result) => {
         if (!result.ok) {
