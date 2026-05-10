@@ -311,6 +311,13 @@ int64_t  rt_process_wait(int64_t pid, int64_t timeout_ms);
 bool     rt_process_is_running(int64_t pid);
 bool     rt_process_kill(int64_t pid);
 
+/* ===== Process Piped (editor LSP transport) ===== */
+
+int64_t     rt_process_spawn_piped(const char* cmd, SplArray* args);
+bool        rt_process_write_stdin(int64_t pid, const char* data);
+const char* rt_process_read_stdout(int64_t pid);
+bool        rt_process_is_alive(int64_t pid);
+
 /* ===== Environment ===== */
 
 const char* spl_env_get(const char* key);

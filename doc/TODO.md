@@ -26,7 +26,7 @@
 
 ### codegen
 
-- **#33** [codegen][P1] field accesses on `result` (loop variable of
+- **#27** [codegen][P1] field accesses on `result` (loop variable of
   - File: `./src/app/io/cli_commands.spl:225`
   - Status: open
 
