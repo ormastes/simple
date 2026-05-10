@@ -60,39 +60,50 @@ fn gui_shell_handle_event(state: GuiShellState, event_kind: text, event_data: te
     elif event_kind == "resize":
         _gui_handle_resize(state, event_data)
     elif event_kind == "close":
-        state.running = false
+        state.ctrl.running = false
     elif event_kind == "file-tree-select":
         _gui_handle_file_tree_select(state, event_data)
     elif event_kind == "tab-select":
         _gui_handle_tab_select(state, event_data)
 
 fn _gui_handle_key(state: GuiShellState, key: text):
-    val buffer = state.session.active_buffer()
-    if state.session.mode == EditorMode.Insert:
-        if key == "Escape":
-            state.session.mode = EditorMode.Normal
-            return
-        if buffer != nil:
-            buffer.insert_at_cursor(key)
-    elif state.session.mode == EditorMode.Normal:
-        if key == "i":
-            state.session.mode = EditorMode.Insert
-        elif key == "Ctrl+B":
-            state.file_tree_visible = if state.file_tree_visible then false else: true
-        elif key == "Ctrl+P":
-            state.status_message = "command palette"
-        elif key == "Ctrl+S":
-            state.session.save_active()
-            state.status_message = "saved"
-        elif key == "Ctrl+O":
-            state.status_message = "open dialog"
+    val gui_key = _gui_translate_key(key)
+    if gui_key == "":
+        return
+    if gui_key == "Ctrl+P":
+        state.ctrl.status_msg = "command palette"
+        return
+    if gui_key == "Ctrl+S":
+        state.ctrl.session.save_active()
+        state.ctrl.status_msg = "saved"
+        return
+    if gui_key == "Ctrl+O":
+        state.ctrl.status_msg = "open dialog"
+        return
+    val rects = editor_layout_compute_rects(state.ctrl.session.layout, state.config.initial_width, state.config.initial_height)
+    state.ctrl.handle_key(gui_key, rects)
+
+fn _gui_translate_key(key: text) -> text:
+    if key == "Escape":
+        return "\x1b"
+    if key == "Enter":
+        return "\r"
+    if key == "Backspace":
+        return "\x7f"
+    if key == "Ctrl+B":
+        return "\x02"
+    if key == "Ctrl+W":
+        return "\x17"
+    if key == "Tab":
+        return "\t"
+    key
 
 fn _gui_handle_resize(state: GuiShellState, data: text):
     pass_dn
 
 fn _gui_handle_file_tree_select(state: GuiShellState, path: text):
-    state.session.open_file(path)
-    state.focus_panel = "editor"
+    state.ctrl.session.open_file(path)
+    state.ctrl.focus_panel = "editor"
 
 fn _gui_handle_tab_select(state: GuiShellState, tab_index_str: text):
     pass_dn
@@ -104,7 +115,7 @@ fn _drag_state_new() -> DragState:
     DragState(active: false, source_panel_id: "", source_zone: -1, mouse_x: 0, mouse_y: 0, drop_target_zone: -1)
 
 fn gui_handle_mouse_down(state: GuiShellState, drag: DragState, x: i64, y: i64) -> DragState:
-    val dock = state.session.dock_layout
+    val dock = state.ctrl.session.dock_layout
     val zones: [i64] = [DOCK_LEFT, DOCK_RIGHT, DOCK_BOTTOM]
     var zi = 0
     while zi < zones.len():
@@ -127,7 +138,7 @@ fn gui_handle_mouse_up(state: GuiShellState, drag: DragState) -> DragState:
     if not drag.active:
         return drag
     if drag.drop_target_zone >= 0 and drag.drop_target_zone != drag.source_zone:
-        val dock = state.session.dock_layout
+        val dock = state.ctrl.session.dock_layout
         val panels = dock.visible_panels_in(drag.source_zone)
         var found_label = ""
         var found_icon = ""
@@ -182,17 +193,17 @@ fn _drag_hit_zone_tab(state: GuiShellState, zone: i64, x: i64, y: i64) -> text:
     if zone == DOCK_LEFT:
         zone_x = 0
         zone_y = 0
-        zone_w = state.session.dock_layout.left_width * w / 100
+        zone_w = state.ctrl.session.dock_layout.left_width * w / 100
     elif zone == DOCK_RIGHT:
-        zone_w = state.session.dock_layout.right_width * w / 100
+        zone_w = state.ctrl.session.dock_layout.right_width * w / 100
         zone_x = w - zone_w
         zone_y = 0
     elif zone == DOCK_BOTTOM:
         zone_x = 0
-        zone_y = h - state.session.dock_layout.bottom_height * h / 100
+        zone_y = h - state.ctrl.session.dock_layout.bottom_height * h / 100
         zone_w = w
     if x >= zone_x and x < zone_x + zone_w and y >= zone_y and y < zone_y + tab_h:
-        val panels = state.session.dock_layout.visible_panels_in(zone)
+        val panels = state.ctrl.session.dock_layout.visible_panels_in(zone)
         if panels.len() > 0:
             return panels[0].id
     ""
@@ -205,22 +216,22 @@ struct GuiFrame:
     status_html: text
 
 fn gui_shell_render_frame(state: GuiShellState) -> GuiFrame:
-    val buffer = state.session.active_buffer()
-    val tab_bar = gui_render_tab_bar_html(state.session)
+    val buffer = state.ctrl.active_buffer()
+    val tab_bar = gui_render_tab_bar_html(state.ctrl.session)
     var file_tree_html = ""
-    if state.file_tree_visible:
-        file_tree_html = gui_render_file_tree_html(state.file_tree)
+    if state.ctrl.file_tree_visible:
+        file_tree_html = gui_render_file_tree_html(state.ctrl.file_tree)
     var editor_html = ""
     if buffer != nil:
-        val doc = state.session.active_document()
+        val doc = state.ctrl.session.active_document()
         var lang = "text"
         if doc != nil:
             lang = doc.language_id
         editor_html = gui_render_editor_area(buffer, lang, buffer.viewport)
     else:
         editor_html = "<div class=\"empty\">No file open</div>"
-    val mode_str = editor_mode_name(state.session.mode)
-    val status_html = "<div class=\"status\">" + mode_str + " | " + state.status_message + "</div>"
+    val mode_str = editor_mode_name(state.ctrl.session.mode)
+    val status_html = "<div class=\"status\">" + mode_str + " | " + state.ctrl.status_msg + "</div>"
     GuiFrame(
         tab_bar_html: tab_bar,
         file_tree_html: file_tree_html,
