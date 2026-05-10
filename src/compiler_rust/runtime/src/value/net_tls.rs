@@ -93,56 +93,24 @@ fn runtime_value_to_path_string(v: crate::value::RuntimeValue) -> Option<String>
     std::str::from_utf8(slice).ok().map(|s| s.to_string())
 }
 
-// TODO: [runtime][P3] replace this inline PEM parser with rustls-pemfile 2 once vendored
-fn parse_pem_blocks(data: &str) -> Vec<(String, Vec<u8>)> {
-    use base64::Engine;
-    let engine = base64::engine::general_purpose::STANDARD;
-    let mut blocks = Vec::new();
-    let mut it = data.lines();
-    while let Some(line) = it.next() {
-        let trimmed = line.trim();
-        let label = match trimmed.strip_prefix("-----BEGIN ").and_then(|s| s.strip_suffix("-----")) {
-            Some(l) => l.to_string(),
-            None => continue,
-        };
-        let mut b64 = String::new();
-        for inner in it.by_ref() {
-            let inner_trim = inner.trim();
-            if inner_trim.starts_with("-----END ") { break; }
-            b64.push_str(inner_trim);
-        }
-        if let Ok(bytes) = engine.decode(&b64) {
-            blocks.push((label, bytes));
-        }
-    }
-    blocks
-}
-
 fn load_tls_certs(path: &std::path::Path) -> Result<Vec<rustls::pki_types::CertificateDer<'static>>, String> {
-    let data = std::fs::read_to_string(path).map_err(|e| format!("cert open {:?}: {}", path, e))?;
-    let mut out = Vec::new();
-    for (label, bytes) in parse_pem_blocks(&data) {
-        if label == "CERTIFICATE" {
-            out.push(rustls::pki_types::CertificateDer::from(bytes));
-        }
-    }
-    if out.is_empty() {
+    let file = std::fs::File::open(path).map_err(|e| format!("cert open {:?}: {}", path, e))?;
+    let mut rd = std::io::BufReader::new(file);
+    let certs: Vec<_> = rustls_pemfile::certs(&mut rd)
+        .collect::<Result<_, _>>()
+        .map_err(|e| format!("cert parse {:?}: {}", path, e))?;
+    if certs.is_empty() {
         return Err("no CERTIFICATE blocks found in PEM".into());
     }
-    Ok(out)
+    Ok(certs)
 }
 
 fn load_tls_key(path: &std::path::Path) -> Result<rustls::pki_types::PrivateKeyDer<'static>, String> {
-    let data = std::fs::read_to_string(path).map_err(|e| format!("key open {:?}: {}", path, e))?;
-    for (label, bytes) in parse_pem_blocks(&data) {
-        match label.as_str() {
-            "PRIVATE KEY" => return Ok(rustls::pki_types::PrivateKeyDer::Pkcs8(bytes.into())),
-            "RSA PRIVATE KEY" => return Ok(rustls::pki_types::PrivateKeyDer::Pkcs1(bytes.into())),
-            "EC PRIVATE KEY" => return Ok(rustls::pki_types::PrivateKeyDer::Sec1(bytes.into())),
-            _ => continue,
-        }
-    }
-    Err("no PRIVATE KEY / RSA PRIVATE KEY / EC PRIVATE KEY block found".into())
+    let file = std::fs::File::open(path).map_err(|e| format!("key open {:?}: {}", path, e))?;
+    let mut rd = std::io::BufReader::new(file);
+    rustls_pemfile::private_key(&mut rd)
+        .map_err(|e| format!("key parse {:?}: {}", path, e))?
+        .ok_or_else(|| "no PRIVATE KEY / RSA PRIVATE KEY / EC PRIVATE KEY block found".into())
 }
 
 fn read_text_from_stream(handle: i64, max_bytes: i64) -> crate::value::RuntimeValue {

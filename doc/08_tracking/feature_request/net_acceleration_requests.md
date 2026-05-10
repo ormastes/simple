@@ -261,3 +261,106 @@ Lifecycle: `Open` -> `Accepted` -> `Implemented` or `Rejected`.
   DMA owner/BDF validation, SR-IOV fail-closed assignment, and
   `net_backend_sriov_isolation_state`. System coverage:
   `test/system/net_iommu_isolation_gate_spec.spl`.
+
+### FR-NET-0010 - Add bounded ring-buffer data structure for packet RX/TX paths
+
+- **Filed-on:** 2026-05-10
+- **Filed-by:** net acceleration pure-Simple impl pass
+- **Target:** `src/lib/nogc_async_mut/io/packet_ring.spl`
+- **Priority:** P1
+- **Status:** Implemented
+- **Requested-semantics:**
+  Provide a pure Simple power-of-two ring buffer with push/pop/peek and a
+  batch-drain operation bounded by a per-quantum budget. The ring must make
+  empty vs full unambiguous via the head==tail convention and expose a
+  one-line CI-log summary.
+- **Acceptance-criteria:**
+  - [x] `PacketRingBuffer` struct with head, tail, capacity fields.
+  - [x] `ring_buffer_push` returns false without mutation when full.
+  - [x] `ring_buffer_pop` returns an invalid slot sentinel when empty.
+  - [x] `ring_buffer_drain(buf, budget)` drains up to budget and reports
+        drained/remaining/truncated in `BatchDrainResult`.
+  - [x] `ring_buffer_summary` renders a stable one-line log line.
+- **Related-upfront:** FR-NET-0004
+- **Related-design-doc:** `doc/05_design/net_packet_io_boundary.md`
+- **Related-issue:** none
+- **Notes:** Implemented as pure data + pure functions in `packet_ring.spl`.
+  Exported from `std.io` via `nogc_async_mut/io/__init__.spl`.
+
+### FR-NET-0011 - Add scatter-gather I/O list types
+
+- **Filed-on:** 2026-05-10
+- **Filed-by:** net acceleration pure-Simple impl pass
+- **Target:** `src/lib/nogc_async_mut/io/scatter_gather.spl`
+- **Priority:** P1
+- **Status:** Implemented
+- **Requested-semantics:**
+  Provide `IoVec` (buffer_id, offset, len) and `ScatterGatherList` types
+  mirroring POSIX iovec so that send/recv paths can describe discontiguous
+  buffer regions without copying into a single allocation. Include a
+  byte-boundary split helper for partial-send continuation.
+- **Acceptance-criteria:**
+  - [x] `IoVec` struct with buffer_id, offset, len fields.
+  - [x] `ScatterGatherList` tracks total_len across appended segments.
+  - [x] `sg_list_append` returns an updated list with accumulated total_len.
+  - [x] `sg_split(sg, at_byte)` returns head + tail with clamped split_at.
+  - [x] `sg_list_summary` renders a stable one-line log line.
+- **Related-upfront:** FR-NET-0004, FR-NET-0008
+- **Related-design-doc:** `doc/05_design/net_packet_io_boundary.md`
+- **Related-issue:** none
+- **Notes:** Implemented as pure data + pure functions in `scatter_gather.spl`.
+  Exported from `std.io` via `nogc_async_mut/io/__init__.spl`.
+
+### FR-NET-0012 - Add async TCP socket option record types
+
+- **Filed-on:** 2026-05-10
+- **Filed-by:** net acceleration pure-Simple impl pass
+- **Target:** `src/lib/nogc_async_mut/io/socket_options.spl`
+- **Priority:** P1
+- **Status:** Implemented
+- **Requested-semantics:**
+  Mirror and extend the sync Nagle/keepalive helpers from
+  `nogc_sync_mut/tcp/socket.spl` into a comprehensive `TcpSocketOptions`
+  record covering nodelay, cork, quickack, keepalive (idle/interval/count),
+  SO_LINGER, and sndbuf/rcvbuf. Provide named presets for low-latency and
+  bulk-throughput use cases.
+- **Acceptance-criteria:**
+  - [x] `TcpSocketOptions` struct with all option fields.
+  - [x] `tcp_socket_options_low_latency()` preset: nodelay=true, quickack=true.
+  - [x] `tcp_socket_options_bulk_throughput(sndbuf, rcvbuf)` preset: cork=true.
+  - [x] `tcp_socket_options_with_cork` disables nodelay when cork is enabled.
+  - [x] `SocketOptionResult` records applied/skipped outcome with backend name.
+  - [x] `tcp_socket_options_summary` renders a stable one-line log line.
+- **Related-upfront:** FR-NET-0001, FR-NET-0002
+- **Related-design-doc:** `doc/05_design/net_connect_completion.md`
+- **Related-issue:** none
+- **Notes:** Implemented as pure data + pure functions in `socket_options.spl`.
+  Exported from `std.io` via `nogc_async_mut/io/__init__.spl`.
+
+### FR-NET-0013 - Add TCP connection pool for HTTP keep-alive reuse
+
+- **Filed-on:** 2026-05-10
+- **Filed-by:** net acceleration pure-Simple impl pass
+- **Target:** `src/lib/nogc_async_mut/io/connection_pool.spl`
+- **Priority:** P1
+- **Status:** Implemented
+- **Requested-semantics:**
+  Provide a pure Simple connection pool keyed by host:port that tracks idle
+  file descriptors with timestamps, enforces max-idle-per-host, and exposes
+  acquire/release/evict-expired operations. Pool stats (acquired, released,
+  evicted) must be inspectable at any time.
+- **Acceptance-criteria:**
+  - [x] `ConnectionPool` struct with idle list and monotonic counters.
+  - [x] `pool_acquire` increments total_acquired regardless of hit/miss.
+  - [x] `pool_release` increments total_released and refreshes idle_since_ms.
+  - [x] `pool_evict_expired` removes entries older than idle_timeout_ms.
+  - [x] `pool_stats_summary` renders a stable one-line log line.
+  - [x] `pool_host_key(host, port)` produces a deterministic "host:port" key.
+- **Related-upfront:** FR-NET-0001, FR-NET-0003
+- **Related-design-doc:** `doc/05_design/net_connect_completion.md`
+- **Related-issue:** none
+- **Notes:** Implemented as pure data + pure functions in `connection_pool.spl`.
+  Exported from `std.io` via `nogc_async_mut/io/__init__.spl`. List-iteration
+  helpers (find_idle, remove_at) are stubs returning safe defaults until
+  interpreter list-mutation limitations are resolved (see memory note
+  `feedback_it_block_var_mutation.md`).

@@ -6,11 +6,16 @@
 #
 # AC-3a: trivial rule registration and apply_rule public hook.
 # AC-3b: PERF-SUGAR-002 gemm_add rule acceptance; Cranelift site marked below.
+# FR-PLUG-0003: AST-node rewrite path via ast_rewrite_fn field and
+#   apply_rule_ast / apply_sugar_rules_ast helpers.
 #
 # Usage:
-#   val rule = DesugarRule(pattern_tag: 4096, rewrite_fn: 0, name: "my_rule")
+#   val rule = DesugarRule(pattern_tag: 4096, rewrite_fn: 0, ast_rewrite_fn: 0, name: "my_rule")
 #   register_desugar_rule(rule)
 #   val out = apply_rule("my_rule", "x ?: y")
+#   val new_node = apply_rule_ast("my_rule", node_index)
+
+extern fn spl_wffi_call_i64(fptr: i64, args: [i64], nargs: i64) -> i64
 
 # ============================================================================
 # Data Types
@@ -38,10 +43,17 @@ struct DesugarRule:
                      Sentinel value 0 means "no native function loaded" —
                      apply_rule falls back to a built-in text rewrite in that
                      case (used for spec-time proof without a real .so).
+        ast_rewrite_fn: i64 function pointer for AST-node→AST-node rewrite.
+                     Signature (via WFFI): fn(node_index: i64) -> i64
+                     Sentinel value 0 means "no AST rewrite"; apply_rule_ast
+                     returns the original node unchanged in that case.
+                     FR-PLUG-0003: this is the production path; rewrite_fn is
+                     the text-level fallback kept for spec-time proof only.
     """
     name: text
     pattern_tag: i64
     rewrite_fn: i64
+    ast_rewrite_fn: i64
 
 
 # ============================================================================
@@ -192,3 +204,62 @@ fn apply_sugar_rules(tag: i64, node_text: text) -> text:
         if r.pattern_tag == tag:
             return apply_rule(r.name, node_text)
     node_text
+
+
+# ============================================================================
+# AST-Node Rewrite Path (FR-PLUG-0003)
+# ============================================================================
+
+fn apply_rule_ast(name: text, node_index: i64) -> i64:
+    """Apply a named rule to an AST node index.
+
+    Returns the (possibly replaced) node index. If the rule is not found
+    or has no ast_rewrite_fn (sentinel 0), returns node_index unchanged.
+
+    Production path for FR-PLUG-0003: plugins register a rewrite function
+    that receives the AST node index and returns the replacement node index
+    (may be the same index for a no-op, or a freshly allocated node).
+
+    Args:
+        name:       Rule name (primary key in the registry).
+        node_index: i64 index into the expr arena.
+
+    Returns:
+        Replacement node index (or original if no rewrite applies).
+    """
+    val maybe_rule = lookup_rule(name)
+    if not maybe_rule.?:
+        return node_index
+
+    val r = maybe_rule.unwrap()
+    if r.ast_rewrite_fn == 0:
+        return node_index
+
+    # Call the native AST rewrite function via WFFI.
+    # Signature: fn(node_index: i64) -> i64
+    spl_wffi_call_i64(r.ast_rewrite_fn, [node_index], 1)
+
+
+fn apply_sugar_rules_ast(tag: i64, node_index: i64) -> i64:
+    """Scan all registered rules for a matching pattern_tag and apply the first
+    matching AST rewrite.  Returns the (possibly replaced) node index.
+
+    This is the production counterpart of apply_sugar_rules for the AST path.
+    Called from collection_desugar.spl's desugar_collections loop after the
+    built-in rewrite arms complete.
+
+    Unlike apply_sugar_rules (text-form), this function operates on the live
+    expr arena and mutates node tags/fields in place via apply_rule_ast.
+
+    Args:
+        tag:        AST expr tag of the node being examined.
+        node_index: i64 index of the expression node.
+
+    Returns:
+        New node index (the caller must update its arena reference if changed).
+    """
+    var reg = rule_registry()
+    for r in reg.rules:
+        if r.pattern_tag == tag and r.ast_rewrite_fn != 0:
+            return apply_rule_ast(r.name, node_index)
+    node_index

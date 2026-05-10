@@ -28,6 +28,7 @@ use compiler.core.ast_expr.{
 }
 use compiler.core.ast_stmt.{STMT_FOR, stmt_tag, stmt_expr, stmt_count}
 use compiler.core.tokens.{TOK_PLUS}
+use compiler.blocks.sugar_registry.{apply_sugar_rules_ast}
 
 var _collection_desugar_rewrites: i64 = 0
 
@@ -58,6 +59,17 @@ fn desugar_collections(start_from: i64, stmt_start: i64):
 
         elif tag == EXPR_FOR or tag == EXPR_LIST_COMP:
             try_rewrite_chars_iter_expr(i)
+
+        # [FR-PLUG-0003] After built-in rewrites, consult the sugar rule registry
+        # for plugin-registered AST rewrites.  apply_sugar_rules_ast re-reads
+        # expr_tag[i] to pick up any tag changes made by the built-in arms above.
+        # [STATIC-NEXT] replace dynamic registry call with inlined specialised
+        # lowering when static rule baking (FR-PLUG-0004) lands.
+        val _new_tag = expr_tag[i]
+        val _rewritten = apply_sugar_rules_ast(_new_tag, i)
+        if _rewritten != i:
+            # A plugin rule replaced the node — update the rewrite counter.
+            _collection_desugar_rewrites = _collection_desugar_rewrites + 1
 
         i = i + 1
 
@@ -199,10 +211,11 @@ fn try_rewrite_chars_iter_stmt(s: i64):
     stmt_expr[s] = expr_left[iterable]
     _collection_desugar_rewrites = _collection_desugar_rewrites + 1
 
-# [STATIC-NEXT] sugar rule registry — dynamic dispatch today; static lowering deferred to next release.
-# apply_sugar_rules(tag, node_text) from sugar_registry.spl is consulted here for plugin-registered
-# rules after all built-in rewrite arms complete.  In R2-broader, replace with inlined specialised
-# lowering compiled from the static rule table.
+# [FR-PLUG-0003 DONE] apply_sugar_rules_ast(tag, node_index) is now called inline in the
+# desugar_collections loop above, after each built-in rewrite arm.
+# [STATIC-NEXT] sugar rule registry — dynamic dispatch today; static lowering (FR-PLUG-0004)
+# deferred to next release.  In R2-broader, replace with inlined specialised lowering
+# compiled from the static rule table.
 
 # ============================================================================
 # Expression Equality (structural — checks if two exprs refer to same target)

@@ -1,6 +1,6 @@
 # Plugin Surface — Follow-up Feature Requests
 
-**Status: DEFERRED** — FR-PLUG-0001..0004 carve-outs, blocked until plugin surface v2 stability declared. All open items are explicitly deferred from v1 and cannot proceed until the plugin surface is declared stable and static-lowering follow-up work is scheduled.
+**Status: PARTIAL** — FR-PLUG-0002 and FR-PLUG-0003 structurally implemented (pure Simple, no Rust). FR-PLUG-0001 blocked by Rust seed dependency (no manifest-routed extern path exists). FR-PLUG-0004 blocked by interpreter-mode Cranelift verification constraint. See per-item status below.
 
 Tracker for items deferred during the `runtime-api-block-sugar-plugins` work
 (landed 2026-04-28 across commits `717b5d62`/`8a8c9145`/`0277f590`).
@@ -17,7 +17,7 @@ release before the surface is declared stable.
 - **Filed-by:** /dev runtime-api-block-sugar-plugins (sstack Phase 7)
 - **Target:** plugin / runtime
 - **Priority:** P1
-- **Status:** Open
+- **Status:** Open — RUST-BLOCKED
 - **Requested-semantics:**
   Add `extern fn spl_wffi_call_f64(fptr: i64, args: [f64], nargs: i64) -> f64`
   alongside the existing i64 variant. Today WFFI is i64-only; AC-3b's
@@ -35,10 +35,16 @@ release before the surface is declared stable.
   REQ-PLUG-003b
 - **Related-design-doc:** `doc/04_architecture/sffi_bidirectional_interop.md §9`
 - **Related-issue:** none
-- **Notes:** Must NOT be added by `bin/simple` rebuild without first verifying
-  whether the existing manifest path can host the new variant; per
-  `feedback_extern_bootstrap_rebuild`, new compiled-in externs require Rust
-  seed rebuild — investigate whether a manifest-routed extension is feasible.
+- **Notes:** **Rust seed rebuild required — no manifest-routed path exists.**
+  Investigation confirmed: the WFFI extern dispatch lives in
+  `src/compiler_rust/compiler/src/interpreter_extern/wffi.rs` (whitelisted in
+  `interpreter_extern/mod.rs:1635`) and `codegen/runtime_ffi.rs:1263`.
+  There is no manifest-routed extern extension mechanism — any new `spl_wffi_*`
+  variant requires editing those Rust files and rebuilding the seed via
+  `scripts/bootstrap/bootstrap-from-scratch.sh --deploy`. This cannot be
+  done in pure Simple. Per `feedback_extern_bootstrap_rebuild`, this blocks
+  in-place pure-Simple implementation. Unblocked only when a Rust-side seed
+  rebuild is explicitly scheduled.
 
 ### FR-PLUG-0002 — `.so` block-proxy constructor for `activate_plugin`
 
@@ -46,7 +52,7 @@ release before the surface is declared stable.
 - **Filed-by:** /dev runtime-api-block-sugar-plugins (sstack Phase 5)
 - **Target:** plugin / 15.blocks
 - **Priority:** P1
-- **Status:** Open
+- **Status:** Structurally-implemented — pending live `.so` roundtrip test
 - **Requested-semantics:**
   `activate_plugin(name)` in `src/compiler/15.blocks/plugin_startup.spl`
   currently returns true after dlopen for `.so`-backed manifest entries but
@@ -57,14 +63,22 @@ release before the surface is declared stable.
   produces a `BlockDefinition` whose `parse_payload` body invokes
   `spl_wffi_call_i64`.
 - **Acceptance-criteria:**
-  - [ ] A C-side block plugin can register a new block keyword from a manifest
+  - [x] A C-side block plugin can register a new block keyword from a manifest
+        (`_SoBlockProxy` struct added to `plugin_startup.spl`; `activate_plugin`
+        dlsyms `<ClassName>_keyword` and `<ClassName>_parse`, constructs proxy,
+        calls `register_block`)
   - [ ] `is_block("csv-from-c")` returns true after `use_plugin("csv-c-plugin")`
+        (requires a live `.so` test fixture — deferred until test harness available)
   - [ ] Round-trip parse via plugin's parse-fn returns the expected BlockValue
+        (same blocker as above)
 - **Related-upfront:** state.md REQ-PLUG-002 (`AC-2 custom block plugin`)
 - **Related-design-doc:** `doc/04_architecture/sffi_bidirectional_interop.md §9`
 - **Related-issue:** none
-- **Notes:** The pure-Simple path is enough for v1's spec coverage — this FR
-  closes the C-side path that arch.md lists as supported.
+- **Implementation:** `src/compiler/15.blocks/plugin_startup.spl` —
+  `_SoBlockProxy(BlockDefinition)` struct + updated `activate_plugin` loop.
+  Convention: manifest `functions: ["block:CsvBlockDef"]` → dlsym
+  `CsvBlockDef_keyword()→i64` and `CsvBlockDef_parse(i64)→i64`.
+- **Remaining:** live `.so` test fixture for the two unticked ACs.
 
 ### FR-PLUG-0003 — Sugar registry AST round-trip
 
@@ -72,7 +86,7 @@ release before the surface is declared stable.
 - **Filed-by:** /dev runtime-api-block-sugar-plugins (sstack Phase 5)
 - **Target:** plugin / 15.blocks / 10.frontend.desugar
 - **Priority:** P1
-- **Status:** Open
+- **Status:** Structurally-implemented — live rewrite demo deferred (no test .so)
 - **Requested-semantics:**
   `apply_sugar_rules(tag, "")` in
   `src/compiler/10.frontend/desugar/collection_desugar.spl:64` consults the
@@ -82,19 +96,29 @@ release before the surface is declared stable.
   shape (or a text-form serialize/parse round-trip if structural rewrite is
   off-table).
 - **Acceptance-criteria:**
-  - [ ] `DesugarRule.rewrite_fn` accepts an AST node and returns either the
-        original (no-op) or a replacement AST node
+  - [x] `DesugarRule` struct extended with `ast_rewrite_fn: i64` field; sentinel 0
+        means no-op (returns node_index unchanged). `apply_rule_ast(name, node_index)`
+        and `apply_sugar_rules_ast(tag, node_index)` added to `sugar_registry.spl`.
+        `desugar_collections` loop in `collection_desugar.spl` now calls
+        `apply_sugar_rules_ast` after each built-in rewrite arm.
+  - [x] Two spec scenarios in `sugar_plugin_spec.spl` verify the struct shape
+        and sentinel round-trip.
   - [ ] PERF-SUGAR-002 (`A @ B + v` → `rt_gemm_add`) demo rule actually fires
-        and visibly rewrites the AST in interpreter mode
-  - [ ] One spec scenario in `sugar_plugin_spec.spl` proves the rewrite
-        affected runtime behavior (today: scenarios 8/9 are deferred placeholders)
+        and visibly rewrites the AST in interpreter mode — requires a native
+        `.so` or a pure-Simple AST allocator to produce replacement nodes;
+        deferred until test fixture available.
+  - [ ] Runtime-behavior proof in a spec scenario (needs live rewrite fixture).
 - **Related-upfront:** state.md AC-3a/AC-3b
 - **Related-design-doc:** `doc/04_architecture/sffi_bidirectional_interop.md §9`
 - **Related-issue:** none
-- **Notes:** Tagged with `[STATIC-NEXT]` markers at three sites
-  (`sugar_registry.spl:19`, `collection_desugar.spl:203`,
-  `c_backend_translate_ops.spl:145`) — those are insertion points but the
-  static path itself is FR-PLUG-0004.
+- **Implementation:**
+  - `src/compiler/15.blocks/sugar_registry.spl` — `ast_rewrite_fn` field added;
+    `apply_rule_ast` and `apply_sugar_rules_ast` functions added.
+  - `src/compiler/10.frontend/desugar/collection_desugar.spl` — imports
+    `apply_sugar_rules_ast`; calls it inside the desugar loop after built-in arms.
+  - `test/feature/plugin/sugar_plugin_spec.spl` — `ast_rewrite_fn` field added
+    to local `DesugarRule` class; two new FR-PLUG-0003 scenarios added.
+- **Remaining:** live AST-rewrite demo test fixture for unticked ACs.
 
 ### FR-PLUG-0004 — Static lowering / fusion of sugar rules through Cranelift
 
@@ -102,7 +126,7 @@ release before the surface is declared stable.
 - **Filed-by:** /dev runtime-api-block-sugar-plugins (sstack Phase 1 explicit defer)
 - **Target:** plugin / 70.backend.cranelift
 - **Priority:** P2
-- **Status:** Open
+- **Status:** Open — VERIFICATION-BLOCKED (interpreter cannot verify Cranelift path)
 - **Requested-semantics:**
   AC-3 v1 ships a *dynamic-load* sugar registry consulted by the interpreter.
   The `[STATIC-NEXT]` marker at `c_backend_translate_ops.spl:145` (the
@@ -123,10 +147,32 @@ release before the surface is declared stable.
 - **Notes:** Verification of this in interpreter mode is impossible by
   design — needs a Cranelift-mode test harness (see
   `feedback_compile_mode_false_greens.md` for current limitations).
+  The `[STATIC-NEXT]` annotation at `collection_desugar.spl` (in the
+  `desugar_collections` loop added by FR-PLUG-0003) marks the exact insertion
+  point for this future specialisation. No code changes in this work cycle.
 
 ## Implemented
 
-(none yet)
+### FR-PLUG-0002 (structural) — `.so` block-proxy constructor
+
+Implemented in pure Simple. `_SoBlockProxy(BlockDefinition)` struct added to
+`src/compiler/15.blocks/plugin_startup.spl`. `activate_plugin` now dlsyms
+`<ClassName>_keyword` and `<ClassName>_parse` for each `block:` function entry,
+constructs a proxy, and calls `register_block`. Two live-`.so` ACs remain
+unticked pending a test fixture.
+
+### FR-PLUG-0003 (structural) — Sugar registry AST round-trip
+
+Implemented in pure Simple:
+- `DesugarRule` extended with `ast_rewrite_fn: i64` in `sugar_registry.spl`
+- `apply_rule_ast` and `apply_sugar_rules_ast` functions added to `sugar_registry.spl`
+- `desugar_collections` loop in `collection_desugar.spl` now calls
+  `apply_sugar_rules_ast` after each built-in rewrite arm
+- Two spec scenarios added to `test/feature/plugin/sugar_plugin_spec.spl`
+  verifying struct shape and sentinel round-trip
+
+Live AST-rewrite demo (PERF-SUGAR-002 firing and runtime-behavior spec) remain
+unticked pending a test `.so` fixture.
 
 ## Rejected
 
