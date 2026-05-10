@@ -1,136 +1,113 @@
-module std.replay.adapters.remote_replay
 
-enum RemoteReplayMode {
-    Off,
-    Record,
-    Replay,
+use std.nogc_sync_mut.debug.remote.replay.memory_snapshot.MemorySnapshot
 
-    fn to_text(self) -> text {
-        match self {
-            RemoteReplayMode::Off => "off",
-            RemoteReplayMode::Record => "record",
-            RemoteReplayMode::Replay => "replay",
-        }
-    }
-}
+enum RemoteReplayMode:
+    Off
+    Record
+    Replay
 
-struct RemoteReplayEvent {
-    seq_id: i64,
-    kind: text,
-    addr: i64,
-    name: text,
-    value: i64,
-    timestamp: i64,
-}
+    fn to_text(self) -> text:
+        match self:
+            RemoteReplayMode::Off => "off"
+            RemoteReplayMode::Record => "record"
+            RemoteReplayMode::Replay => "replay"
 
-struct RemoteCheckpoint {
-    id: i32,
-    event_index: i64,
-    gdb_checkpoint_id: text,
-}
+struct RemoteReplayEvent:
+    seq_id: i64
+    kind: text
+    addr: i64
+    name: text
+    value: i64
+    timestamp: i64
 
-class RemoteReplayAdapter {
-    mode: RemoteReplayMode,
-    events: [RemoteReplayEvent],
-    checkpoints: [RemoteCheckpoint],
-    _seq: i64,
+struct RemoteCheckpoint:
+    id: i32
+    event_index: i64
+    gdb_checkpoint_id: text
+    registers: [i64]
+    memory_regions: [MemorySnapshot]
 
-    fn create(mode: RemoteReplayMode) -> RemoteReplayAdapter {
-        RemoteReplayAdapter {
+class RemoteReplayAdapter:
+    mode: RemoteReplayMode
+    events: [RemoteReplayEvent]
+    checkpoints: [RemoteCheckpoint]
+    _seq: i64
+
+    static fn create(mode: RemoteReplayMode) -> RemoteReplayAdapter:
+        RemoteReplayAdapter(
             mode: mode,
             events: [],
             checkpoints: [],
-            _seq: 0,
-        }
-    }
+            _seq: 0
+        )
 
-    fn push_event(self, kind: text, addr: i64, name: text, value: i64) {
-        let ev = RemoteReplayEvent {
+    me fn push_event(kind: text, addr: i64, name: text, value: i64):
+        val ev = RemoteReplayEvent(
             seq_id: self._seq,
             kind: kind,
             addr: addr,
             name: name,
             value: value,
-            timestamp: 0,
-        }
+            timestamp: 0
+        )
         self.events.push(ev)
         self._seq = self._seq + 1
-    }
 
-    fn on_register_read(self, name: text, value: i64) {
-        match self.mode {
-            RemoteReplayMode::Record => self.push_event("register_read", 0, name, value),
-            _ => {},
-        }
-    }
+    me fn on_register_read(name: text, value: i64):
+        match self.mode:
+            RemoteReplayMode::Record => self.push_event("register_read", 0, name, value)
+            _ => pass_dn
 
-    fn on_memory_read(self, addr: i64, size: i32, data: i64) {
-        match self.mode {
-            RemoteReplayMode::Record => self.push_event("memory_read", addr, "", data),
-            _ => {},
-        }
-    }
+    me fn on_memory_read(addr: i64, size: i32, data: i64):
+        match self.mode:
+            RemoteReplayMode::Record => self.push_event("memory_read", addr, "", data)
+            _ => pass_dn
 
-    fn on_breakpoint_hit(self, addr: i64, file: text, line: i32) {
-        match self.mode {
-            RemoteReplayMode::Record => self.push_event("breakpoint_hit", addr, file, line as i64),
-            _ => {},
-        }
-    }
+    me fn on_breakpoint_hit(addr: i64, file: text, line: i32):
+        match self.mode:
+            RemoteReplayMode::Record => self.push_event("breakpoint_hit", addr, file, line as i64)
+            _ => pass_dn
 
-    fn on_step_complete(self, pc: i64, file: text, line: i32) {
-        match self.mode {
-            RemoteReplayMode::Record => self.push_event("step_complete", pc, file, line as i64),
-            _ => {},
-        }
-    }
+    me fn on_step_complete(pc: i64, file: text, line: i32):
+        match self.mode:
+            RemoteReplayMode::Record => self.push_event("step_complete", pc, file, line as i64)
+            _ => pass_dn
 
-    fn save_checkpoint(self, name: text) {
-        let id = self.checkpoints.len() as i32
-        let cp = RemoteCheckpoint {
+    me fn save_checkpoint(name: text):
+        val id = self.checkpoints.len() as i32
+        val cp = RemoteCheckpoint(
             id: id,
             event_index: self.events.len() as i64,
             gdb_checkpoint_id: name,
-        }
+            registers: [],
+            memory_regions: []
+        )
         self.checkpoints.push(cp)
-    }
 
-    fn restore_checkpoint(self, name: text) {
-        let mut i = 0
-        while i < self.checkpoints.len() {
-            let cp = self.checkpoints[i]
-            if cp.gdb_checkpoint_id == name {
-                let target = cp.event_index as i32
-                while self.events.len() > target {
+    me fn restore_checkpoint(name: text):
+        var i = 0
+        while i < self.checkpoints.len():
+            val cp = self.checkpoints[i]
+            if cp.gdb_checkpoint_id == name:
+                val target = cp.event_index as i32
+                while self.events.len() > target:
                     self.events.pop()
-                }
                 return
-            }
             i = i + 1
-        }
-    }
 
-    fn reverse_step(self) {
-        if self.events.len() > 0 {
+    me fn reverse_step():
+        if self.events.len() > 0:
             self.events.pop()
-        }
-    }
 
-    fn reverse_continue(self) {
-        let mut i = self.events.len() - 1
-        while i > 0 {
-            let ev = self.events[i]
-            if ev.kind == "breakpoint_hit" {
-                while self.events.len() > i {
+    me fn reverse_continue():
+        var i = self.events.len() - 1
+        while i > 0:
+            val ev = self.events[i]
+            if ev.kind == "breakpoint_hit":
+                while self.events.len() > i:
                     self.events.pop()
-                }
                 return
-            }
             i = i - 1
-        }
-    }
 
-    fn event_count(self) -> i64 {
+    fn event_count() -> i64:
         self.events.len() as i64
-    }
-}

@@ -1,0 +1,110 @@
+
+use std.nogc_sync_mut.replay.adapters.remote_replay.{RemoteReplayAdapter, RemoteReplayMode, RemoteCheckpoint}
+use std.nogc_sync_mut.debug.remote.replay.memory_snapshot.{MemorySnapshot, WatchRegion}
+
+class HardwareReplayController:
+    adapter: RemoteReplayAdapter
+    gp_reg_count: i32
+    watch_regions: [WatchRegion]
+    checkpoints: [HardwareCheckpoint]
+    read_register_fn: fn(i32) -> Result<i64, text>
+    write_register_fn: fn(i32, i64) -> Result<text, text>
+    read_code_fn: fn(i64, i32) -> Result<[i32], text>
+    write_code_fn: fn(i64, [i32]) -> Result<text, text>
+
+    static fn create(
+        gp_reg_count: i32,
+        read_reg: fn(i32) -> Result<i64, text>,
+        write_reg: fn(i32, i64) -> Result<text, text>,
+        read_mem: fn(i64, i32) -> Result<[i32], text>,
+        write_mem: fn(i64, [i32]) -> Result<text, text>
+    ) -> HardwareReplayController:
+        HardwareReplayController(
+            adapter: RemoteReplayAdapter.create(RemoteReplayMode::Off),
+            gp_reg_count: gp_reg_count,
+            watch_regions: [],
+            checkpoints: [],
+            read_register_fn: read_reg,
+            write_register_fn: write_reg,
+            read_code_fn: read_mem,
+            write_code_fn: write_mem
+        )
+
+    me fn set_mode(mode: RemoteReplayMode):
+        self.adapter.mode = mode
+
+    me fn add_watch_region(addr: i64, size: i64):
+        self.watch_regions.push(WatchRegion.of(addr, size))
+
+    me fn save_checkpoint(name: text) -> Result<i32, text>:
+        # Capture all GP registers
+        var registers: [i64] = []
+        var i = 0
+        while i < self.gp_reg_count:
+            val reg_result = (self.read_register_fn)(i)
+            match reg_result:
+                Ok(reg_val) => registers.push(reg_val)
+                Err(msg) => return Err(msg)
+            i = i + 1
+
+        # Capture watched memory regions
+        var memory: [MemorySnapshot] = []
+        for region in self.watch_regions:
+            val data_result = (self.read_code_fn)(region.addr, region.size as i32)
+            match data_result:
+                Ok(data) => memory.push(MemorySnapshot.capture(region.addr, data))
+                Err(msg) => return Err(msg)
+
+        val cp_id = self.checkpoints.len() as i32
+        val checkpoint = HardwareCheckpoint(
+            id: cp_id,
+            name: name,
+            registers: registers,
+            memory_regions: memory
+        )
+        self.checkpoints.push(checkpoint)
+        self.adapter.save_checkpoint(name)
+        Ok(cp_id)
+
+    me fn restore_checkpoint(cp_id: i32) -> Result<text, text>:
+        if cp_id < 0 or cp_id >= self.checkpoints.len() as i32:
+            return Err("invalid checkpoint id")
+        val checkpoint = self.checkpoints[cp_id]
+
+        # Restore registers
+        var i = 0
+        while i < checkpoint.registers.len():
+            val write_result = (self.write_register_fn)(i as i32, checkpoint.registers[i])
+            match write_result:
+                Ok(_) => pass_dn
+                Err(msg) => return Err(msg)
+            i = i + 1
+
+        # Restore memory
+        for snap in checkpoint.memory_regions:
+            val write_result = (self.write_code_fn)(snap.addr, snap.data)
+            match write_result:
+                Ok(_) => pass_dn
+                Err(msg) => return Err(msg)
+
+        self.adapter.restore_checkpoint(checkpoint.name)
+        Ok("checkpoint restored")
+
+    me fn reverse_step():
+        self.adapter.reverse_step()
+
+    me fn reverse_continue():
+        self.adapter.reverse_continue()
+
+    fn checkpoint_count() -> i32:
+        self.checkpoints.len() as i32
+
+    fn mode() -> RemoteReplayMode:
+        self.adapter.mode
+
+
+class HardwareCheckpoint:
+    id: i32
+    name: text
+    registers: [i64]
+    memory_regions: [MemorySnapshot]

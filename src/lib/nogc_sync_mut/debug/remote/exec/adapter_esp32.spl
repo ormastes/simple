@@ -1,37 +1,36 @@
-# STM32H7 Adapter
+# ESP32 Adapter
 #
-# ExecTarget implementation for STM32H7 real hardware via OpenOCD telnet.
-# This follows the same control model already proven in the STM32H7 E2E spec:
-# reset halt -> write SRAM -> set registers -> resume -> read back result.
+# ExecTarget implementation for ESP32 (dual-core Xtensa LX6)
+# via OpenOCD telnet over ESP-USB-Bridge. Targets PRO_CPU only.
 #
-# Feature ID: #RJE-011
-
+# DRAM: 0x3FFB0000–0x3FFFFFFF (320 KB) — used for code+data upload.
+#   code_start: 0x3FFB2000, code_end: 0x3FFD0000
+#   data_start: 0x3FFD0000, data_end: 0x3FFFC000
+#   stack_top:  0x3FFFC000
+#
+# Feature ID: #RJE-020
+#
 use std.io_runtime.{shell}
 use std.nogc_sync_mut.debug.remote.exec.types.{
-    MemoryMap, Architecture, arm_reg_name
+    MemoryMap, Architecture, xtensa_reg_name
 }
 use std.nogc_sync_mut.debug.remote.exec.manager.{RemoteExecutionManager}
-use std.nogc_sync_mut.jit.jit_util.{hex_0x_i64, hex_i32, parse_i64, parse_hex, extract_reg_value, parse_mdw_bytes}
-use std.nogc_sync_mut.debug.remote.exec.capability_report.{CapabilityReport, probe_openocd}
-use std.nogc_sync_mut.debug.remote.replay.hardware_replay_controller.{HardwareReplayController}
+use std.nogc_sync_mut.jit.jit_util.{hex_0x_i64, hex_i32, parse_i64, extract_reg_value, parse_mdw_bytes}
 
-fn default_stm32h7_gdb_port() -> i32:
-    23333
+fn default_esp32_gdb_port() -> i32:
+    26333
 
-fn default_stm32h7_telnet_port() -> i32:
-    24444
+fn default_esp32_telnet_port() -> i32:
+    26444
 
-fn default_stm32h7_tcl_port() -> i32:
+fn default_esp32_tcl_port() -> i32:
     26666
 
-fn stm32h7_board_cfg() -> text:
-    "board/stm32h7x3i_eval.cfg"
+fn esp32_openocd_args() -> text:
+    "-f interface/esp_usb_bridge.cfg -f target/esp32.cfg"
 
-fn stm32h7_stlink_serial() -> text:
-    "002600213137510833333639"
-
-class Stm32H7Adapter:
-    """STM32H7 adapter using OpenOCD telnet for SRAM execution."""
+pub class Esp32Adapter:
+    """ESP32 adapter using OpenOCD telnet for SRAM execution (PRO_CPU, Xtensa LX6)."""
     openocd_pid: i64
     gdb_port: i32
     telnet_port: i32
@@ -39,23 +38,23 @@ class Stm32H7Adapter:
     memory_map: MemoryMap
     connected: bool
 
-    static fn new() -> Stm32H7Adapter:
-        Stm32H7Adapter(
+    static fn new() -> Esp32Adapter:
+        Esp32Adapter(
             openocd_pid: 0,
-            gdb_port: default_stm32h7_gdb_port(),
-            telnet_port: default_stm32h7_telnet_port(),
-            tcl_port: default_stm32h7_tcl_port(),
-            memory_map: MemoryMap.stm32h7(),
+            gdb_port: default_esp32_gdb_port(),
+            telnet_port: default_esp32_telnet_port(),
+            tcl_port: default_esp32_tcl_port(),
+            memory_map: MemoryMap.esp32(),
             connected: false
         )
 
-    static fn with_ports(gdb_port: i32, telnet_port: i32) -> Stm32H7Adapter:
-        Stm32H7Adapter(
+    static fn with_ports(gdb_port: i32, telnet_port: i32) -> Esp32Adapter:
+        Esp32Adapter(
             openocd_pid: 0,
             gdb_port: gdb_port,
             telnet_port: telnet_port,
-            tcl_port: default_stm32h7_tcl_port(),
-            memory_map: MemoryMap.stm32h7(),
+            tcl_port: default_esp32_tcl_port(),
+            memory_map: MemoryMap.esp32(),
             connected: false
         )
 
@@ -63,20 +62,17 @@ class Stm32H7Adapter:
         val result = shell("command -v openocd >/dev/null 2>&1")
         result.exit_code == 0
 
-    fn capability_report() -> CapabilityReport:
-        probe_openocd()
-
     me connect() -> Result<text, text>:
         if not self.is_available():
             return Err("openocd not available")
 
-        val cmd = "openocd -f {stm32h7_board_cfg()} -c 'adapter serial {stm32h7_stlink_serial()}' -c 'gdb_port {self.gdb_port}' -c 'telnet_port {self.telnet_port}' -c 'tcl_port {self.tcl_port}' >/dev/null 2>&1 & echo $!"
+        val cmd = "openocd {esp32_openocd_args()} -c 'gdb_port {self.gdb_port}' -c 'telnet_port {self.telnet_port}' -c 'tcl_port {self.tcl_port}' >/dev/null 2>&1 & echo $!"
         val start = shell(cmd)
         val pid_text = start.stdout.trim()
         self.openocd_pid = if pid_text.len() > 0: parse_i64(pid_text) else: -1
 
         if self.openocd_pid <= 0:
-            return Err("failed to launch OpenOCD")
+            return Err("failed to launch OpenOCD for ESP32")
 
         var tries = 0
         while tries < 25:
@@ -84,11 +80,11 @@ class Stm32H7Adapter:
             val halt = self.telnet_cmd("reset halt")
             if halt.contains("halted"):
                 self.connected = true
-                return Ok("connected to STM32H7 via OpenOCD telnet on port {self.telnet_port}")
+                return Ok("connected to ESP32 (Xtensa LX6) via ESP-USB-Bridge on port {self.telnet_port}")
             tries = tries + 1
 
         self.stop_openocd()
-        Err("OpenOCD telnet port did not become ready")
+        Err("OpenOCD telnet port did not become ready for ESP32")
 
     me disconnect():
         self.stop_openocd()
@@ -141,7 +137,7 @@ class Stm32H7Adapter:
     fn write_register(reg: i64, value: i64) -> Result<text, text>:
         if not self.connected:
             return Err("not connected")
-        val name = arm_reg_name(reg)
+        val name = xtensa_reg_name(reg)
         val out = self.telnet_cmd("reg {name} {hex_0x_i64(value)}")
         if out.lower().contains("error"):
             return Err(out.trim())
@@ -150,7 +146,7 @@ class Stm32H7Adapter:
     fn read_register(reg: i64) -> Result<i64, text>:
         if not self.connected:
             return Err("not connected")
-        val name = arm_reg_name(reg)
+        val name = xtensa_reg_name(reg)
         val out = self.telnet_cmd("reg {name}")
         val value = extract_reg_value(out)
         if value < 0:
@@ -177,7 +173,7 @@ class Stm32H7Adapter:
             return Err("not connected — call connect() first")
 
         Ok(RemoteExecutionManager.new(
-            arch: Architecture.Arm32,
+            arch: Architecture.Xtensa,
             memory_map: self.memory_map,
             write_code_fn: \addr, bytes: self.write_code(addr, bytes),
             read_code_fn: \addr, size: self.read_code(addr, size),
@@ -186,12 +182,3 @@ class Stm32H7Adapter:
             resume_fn: \: self.resume(),
             wait_halt_fn: \timeout: self.wait_halt(timeout)
         ))
-
-    fn create_replay_controller() -> HardwareReplayController:
-        HardwareReplayController.create(
-            16,
-            \reg: self.read_register(reg as i64),
-            \reg, val_: self.write_register(reg as i64, val_),
-            \addr, size: self.read_code(addr, size as i64),
-            \addr, bytes: self.write_code(addr, bytes)
-        )
