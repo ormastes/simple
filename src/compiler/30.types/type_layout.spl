@@ -516,6 +516,31 @@ fn align_of_type(type_: HirType) -> i64:
     val name = type__to_text(type_)
     primitive_align(name) ?? 8  # Default to pointer alignment
 
+# Reorder struct fields by size descending (insertion sort, stable).
+fn reorder_fields_by_size(fields: [HirField]) -> [HirField]:
+    var indices: [i64] = []
+    var sizes: [i64] = []
+    var i: i64 = 0
+    while i < fields.len():
+        indices.push(i)
+        sizes.push(size_of_type(fields[i].type_))
+        i = i + 1
+
+    i = 1
+    while i < indices.len():
+        var j = i
+        while j > 0 and sizes[indices[j - 1]] < sizes[indices[j]]:
+            val tmp = indices[j]
+            indices[j] = indices[j - 1]
+            indices[j - 1] = tmp
+            j = j - 1
+        i = i + 1
+
+    var result: [HirField] = []
+    for idx in indices:
+        result.push(fields[idx])
+    result
+
 # Compute layout for a struct
 fn compute_struct_layout(fields: [HirField], attr: LayoutAttr) -> TypeLayout:
     match attr.layout_kind:
@@ -526,8 +551,12 @@ fn compute_struct_layout(fields: [HirField], attr: LayoutAttr) -> TypeLayout:
         case LayoutKind.Transparent:
             compute_transparent_layout(fields)
         case LayoutKind.Simple:
-            # Default layout (may reorder fields for optimization)
-            compute_c_layout(fields, attr)  # Use C layout for now
+            if attr.is_compactq:
+                compute_packed_layout(if attr.is_preserve_order: fields else: reorder_fields_by_size(fields))
+            elif attr.is_preserve_order:
+                compute_c_layout(fields, attr)
+            else:
+                compute_c_layout(reorder_fields_by_size(fields), attr)
 
 # Packed layout: no padding, alignment = 1
 fn compute_packed_layout(fields: [HirField]) -> TypeLayout:
@@ -838,6 +867,31 @@ fn align_of_type_for_arch(type_: HirType, arch: TargetArch) -> i64:
 
 # --- Architecture-Aware Struct Layout ---
 
+# Reorder struct fields by arch-aware size descending.
+fn reorder_fields_by_size_for_arch(fields: [HirField], arch: TargetArch) -> [HirField]:
+    var indices: [i64] = []
+    var sizes: [i64] = []
+    var i: i64 = 0
+    while i < fields.len():
+        indices.push(i)
+        sizes.push(size_of_type_for_arch(fields[i].type_, arch))
+        i = i + 1
+
+    i = 1
+    while i < indices.len():
+        var j = i
+        while j > 0 and sizes[indices[j - 1]] < sizes[indices[j]]:
+            val tmp = indices[j]
+            indices[j] = indices[j - 1]
+            indices[j - 1] = tmp
+            j = j - 1
+        i = i + 1
+
+    var result: [HirField] = []
+    for idx in indices:
+        result.push(fields[idx])
+    result
+
 # Compute struct layout for a specific architecture
 fn compute_struct_layout_for_arch(fields: [HirField], attr: LayoutAttr, arch: TargetArch) -> TypeLayout:
     match attr.layout_kind:
@@ -848,7 +902,12 @@ fn compute_struct_layout_for_arch(fields: [HirField], attr: LayoutAttr, arch: Ta
         case LayoutKind.Transparent:
             compute_transparent_layout_for_arch(fields, arch)
         case LayoutKind.Simple:
-            compute_c_layout_for_arch(fields, attr, arch)
+            if attr.is_compactq:
+                compute_packed_layout_for_arch(if attr.is_preserve_order: fields else: reorder_fields_by_size_for_arch(fields, arch), arch)
+            elif attr.is_preserve_order:
+                compute_c_layout_for_arch(fields, attr, arch)
+            else:
+                compute_c_layout_for_arch(reorder_fields_by_size_for_arch(fields, arch), attr, arch)
 
 fn compute_packed_layout_for_arch(fields: [HirField], arch: TargetArch) -> TypeLayout:
     var field_layouts: [FieldLayout] = []

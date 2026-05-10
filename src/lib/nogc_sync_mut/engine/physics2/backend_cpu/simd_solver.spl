@@ -1,0 +1,158 @@
+# Physics2 — CPU SIMD Batched Solver
+#
+# Processes constraints grouped by graph color. Within a color batch,
+# all constraints are independent (no shared bodies) — enabling SIMD
+# vectorization. Uses tight loops over contiguous arrays that the
+# compiler can auto-vectorize (SoA + no data dependencies).
+#
+# In interpreter mode, this runs as scalar loops but with the correct
+# graph-colored batching structure. In compiled mode with SIMD, the
+# inner loops vectorize across the lane width.
+
+use std.common.math.{math_abs, math_sqrt}
+use std.nogc_sync_mut.engine.physics2.data.solver_body2d.{SolverBodyStore2D}
+use std.nogc_sync_mut.engine.physics2.data.constraint.{ContactConstraintSoA}
+use std.nogc_sync_mut.engine.physics2.data.aosoa.{ConstraintBatch, extract_color_batch, writeback_lambdas}
+use std.nogc_sync_mut.engine.physics2.graph.graph_coloring.{ColorAssignment, greedy_color}
+use std.nogc_sync_mut.engine.physics2.config.{PhysicsConfig2D}
+
+struct CpuSimdSolver:
+    velocity_iterations: i64
+    position_iterations: i64
+    baumgarte: f64
+    slop: f64
+
+impl CpuSimdSolver:
+    static fn from_config(config: PhysicsConfig2D) -> CpuSimdSolver:
+        CpuSimdSolver(
+            velocity_iterations: config.velocity_iterations,
+            position_iterations: config.position_iterations,
+            baumgarte: config.baumgarte_factor,
+            slop: config.slop
+        )
+
+    me solve(bodies: SolverBodyStore2D, constraints: ContactConstraintSoA):
+        if constraints.count == 0:
+            return
+        val coloring = greedy_color(constraints, bodies.body_count)
+        self.solve_velocity_batched(bodies, constraints, coloring)
+        self.solve_position_batched(bodies, constraints, coloring)
+
+    me solve_velocity_batched(bodies: SolverBodyStore2D, constraints: ContactConstraintSoA, coloring: ColorAssignment):
+        var iter = 0
+        while iter < self.velocity_iterations:
+            var color = 0
+            while color < coloring.num_colors:
+                var batch = extract_color_batch(constraints, coloring, color)
+                self.solve_velocity_batch(bodies, batch)
+                writeback_lambdas(constraints, coloring, color, batch)
+                color = color + 1
+            iter = iter + 1
+
+    me solve_velocity_batch(bodies: SolverBodyStore2D, batch: ConstraintBatch):
+        var i = 0
+        while i < batch.count:
+            val a = batch.body_a[i]
+            val b = batch.body_b[i]
+            val nx = batch.normal_x[i]
+            val ny = batch.normal_y[i]
+            val px = batch.point_x[i]
+            val py = batch.point_y[i]
+
+            val ra_x = px - bodies.pos_x[a]
+            val ra_y = py - bodies.pos_y[a]
+            val rb_x = px - bodies.pos_x[b]
+            val rb_y = py - bodies.pos_y[b]
+
+            val va_x = bodies.vel_x[a] + (-bodies.ang_vel[a] * ra_y)
+            val va_y = bodies.vel_y[a] + (bodies.ang_vel[a] * ra_x)
+            val vb_x = bodies.vel_x[b] + (-bodies.ang_vel[b] * rb_y)
+            val vb_y = bodies.vel_y[b] + (bodies.ang_vel[b] * rb_x)
+
+            val rel_vx = vb_x - va_x
+            val rel_vy = vb_y - va_y
+            val vn = rel_vx * nx + rel_vy * ny
+
+            val ra_cross_n = ra_x * ny - ra_y * nx
+            val rb_cross_n = rb_x * ny - rb_y * nx
+            val eff_mass = bodies.inv_mass[a] + bodies.inv_mass[b] + (ra_cross_n * ra_cross_n * bodies.inv_inertia[a]) + (rb_cross_n * rb_cross_n * bodies.inv_inertia[b])
+
+            if eff_mass > 0.0:
+                val restitution = batch.restitution[i]
+                val bias = if vn < -1.0: restitution * vn else: 0.0
+                val lambda_raw = -(vn + bias) / eff_mass
+
+                val old_lambda = batch.lambda_n[i]
+                var new_lambda = old_lambda + lambda_raw
+                if new_lambda < 0.0:
+                    new_lambda = 0.0
+                batch.lambda_n[i] = new_lambda
+                val j = new_lambda - old_lambda
+
+                val jx = nx * j
+                val jy = ny * j
+                bodies.vel_x[a] = bodies.vel_x[a] - jx * bodies.inv_mass[a]
+                bodies.vel_y[a] = bodies.vel_y[a] - jy * bodies.inv_mass[a]
+                bodies.ang_vel[a] = bodies.ang_vel[a] - ra_cross_n * j * bodies.inv_inertia[a]
+                bodies.vel_x[b] = bodies.vel_x[b] + jx * bodies.inv_mass[b]
+                bodies.vel_y[b] = bodies.vel_y[b] + jy * bodies.inv_mass[b]
+                bodies.ang_vel[b] = bodies.ang_vel[b] + rb_cross_n * j * bodies.inv_inertia[b]
+
+                # Friction
+                val tx = rel_vx - vn * nx
+                val ty = rel_vy - vn * ny
+                val t_len_sq = tx * tx + ty * ty
+                if t_len_sq > 0.0000001:
+                    val t_len = math_sqrt(t_len_sq)
+                    val tnx = tx / t_len
+                    val tny = ty / t_len
+                    val vt = rel_vx * tnx + rel_vy * tny
+                    val ra_cross_t = ra_x * tny - ra_y * tnx
+                    val rb_cross_t = rb_x * tny - rb_y * tnx
+                    val eff_mass_t = bodies.inv_mass[a] + bodies.inv_mass[b] + (ra_cross_t * ra_cross_t * bodies.inv_inertia[a]) + (rb_cross_t * rb_cross_t * bodies.inv_inertia[b])
+                    if eff_mass_t > 0.0:
+                        val friction = batch.friction[i]
+                        val max_friction = math_abs(new_lambda) * friction
+                        val jt_raw = -vt / eff_mass_t
+                        val old_lambda_t = batch.lambda_t[i]
+                        var new_lambda_t = old_lambda_t + jt_raw
+                        if new_lambda_t > max_friction:
+                            new_lambda_t = max_friction
+                        if new_lambda_t < -max_friction:
+                            new_lambda_t = -max_friction
+                        batch.lambda_t[i] = new_lambda_t
+                        val jt = new_lambda_t - old_lambda_t
+                        bodies.vel_x[a] = bodies.vel_x[a] - tnx * jt * bodies.inv_mass[a]
+                        bodies.vel_y[a] = bodies.vel_y[a] - tny * jt * bodies.inv_mass[a]
+                        bodies.ang_vel[a] = bodies.ang_vel[a] - ra_cross_t * jt * bodies.inv_inertia[a]
+                        bodies.vel_x[b] = bodies.vel_x[b] + tnx * jt * bodies.inv_mass[b]
+                        bodies.vel_y[b] = bodies.vel_y[b] + tny * jt * bodies.inv_mass[b]
+                        bodies.ang_vel[b] = bodies.ang_vel[b] + rb_cross_t * jt * bodies.inv_inertia[b]
+            i = i + 1
+
+    me solve_position_batched(bodies: SolverBodyStore2D, constraints: ContactConstraintSoA, coloring: ColorAssignment):
+        var iter = 0
+        while iter < self.position_iterations:
+            var color = 0
+            while color < coloring.num_colors:
+                val start = coloring.batch_starts[color]
+                val count = coloring.batch_counts[color]
+                var i = 0
+                while i < count:
+                    val ci = coloring.sorted_indices[start + i]
+                    val pen = constraints.penetration[ci]
+                    if pen > self.slop:
+                        val a = constraints.body_a[ci]
+                        val b = constraints.body_b[ci]
+                        val nx = constraints.normal_x[ci]
+                        val ny = constraints.normal_y[ci]
+                        val inv_mass_sum = bodies.inv_mass[a] + bodies.inv_mass[b]
+                        if inv_mass_sum > 0.0:
+                            val correction = (pen - self.slop) * self.baumgarte / inv_mass_sum
+                            bodies.pos_x[a] = bodies.pos_x[a] - nx * correction * bodies.inv_mass[a]
+                            bodies.pos_y[a] = bodies.pos_y[a] - ny * correction * bodies.inv_mass[a]
+                            bodies.pos_x[b] = bodies.pos_x[b] + nx * correction * bodies.inv_mass[b]
+                            bodies.pos_y[b] = bodies.pos_y[b] + ny * correction * bodies.inv_mass[b]
+                    i = i + 1
+                color = color + 1
+            iter = iter + 1

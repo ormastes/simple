@@ -44,6 +44,8 @@ pub struct FieldLayout {
 impl StructLayout {
     /// Create a new struct layout with computed offsets.
     /// Uses C ABI rules for alignment and padding.
+    /// Fields are reordered by size descending (largest first) to minimize
+    /// padding, unless `preserve_order` is true.
     pub fn new(
         name: String,
         fields: &[(String, TypeId)],
@@ -51,15 +53,37 @@ impl StructLayout {
         has_vtable: bool,
         type_id: u32,
     ) -> Self {
-        let mut field_layouts = Vec::with_capacity(fields.len());
-        let mut current_offset: u32 = if has_vtable { 8 } else { 0 }; // vtable ptr is 8 bytes
+        Self::new_with_options(name, fields, registry, has_vtable, type_id, false, false)
+    }
+
+    pub fn new_with_options(
+        name: String,
+        fields: &[(String, TypeId)],
+        registry: &TypeRegistry,
+        has_vtable: bool,
+        type_id: u32,
+        preserve_order: bool,
+        compactq: bool,
+    ) -> Self {
+        let ordered: Vec<(String, TypeId)> = if preserve_order {
+            fields.to_vec()
+        } else {
+            let mut indexed: Vec<(usize, u32)> = fields.iter().enumerate()
+                .map(|(i, (_, ty))| (i, Self::type_size_align(*ty, registry).0))
+                .collect();
+            indexed.sort_by(|a, b| b.1.cmp(&a.1));
+            indexed.iter().map(|(i, _)| fields[*i].clone()).collect()
+        };
+
+        let mut field_layouts = Vec::with_capacity(ordered.len());
+        let mut current_offset: u32 = if has_vtable { 8 } else { 0 };
         let mut max_align: u8 = if has_vtable { 8 } else { 1 };
 
-        for (field_name, field_ty) in fields {
+        for (field_name, field_ty) in &ordered {
             let (size, align) = Self::type_size_align(*field_ty, registry);
 
-            // Align current offset
-            let align_u32 = align as u32;
+            let effective_align = if compactq { 1 } else { align };
+            let align_u32 = effective_align as u32;
             let padding = (align_u32 - (current_offset % align_u32)) % align_u32;
             current_offset += padding;
 
@@ -74,8 +98,8 @@ impl StructLayout {
             max_align = max_align.max(align);
         }
 
-        // Pad struct to alignment
-        let max_align_u32 = max_align as u32;
+        let effective_max = if compactq { 1 } else { max_align };
+        let max_align_u32 = effective_max as u32;
         let final_padding = (max_align_u32 - (current_offset % max_align_u32)) % max_align_u32;
         let total_size = current_offset + final_padding;
 
@@ -83,7 +107,7 @@ impl StructLayout {
             name,
             fields: field_layouts,
             size: total_size,
-            alignment: max_align,
+            alignment: effective_max,
             has_vtable,
             type_id,
         }

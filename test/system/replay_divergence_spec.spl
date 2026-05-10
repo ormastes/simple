@@ -1,0 +1,229 @@
+use std.spec
+use os.kernel.replay.divergence.{DivergenceKind, DivergenceRecord, report_divergence, get_divergence_count, get_divergence, clear_divergences, has_diverged}
+
+# ============================================================================
+# DivergenceKind enum round-trips
+# ============================================================================
+
+describe "DivergenceKind to_i32 round-trip":
+    it "ScheduleMismatch round-trips":
+        val v = DivergenceKind.ScheduleMismatch.to_i32()
+        expect(v).to_equal(0)
+        expect(DivergenceKind.from_i32(v).to_i32()).to_equal(0)
+
+    it "SyscallMismatch round-trips":
+        val v = DivergenceKind.SyscallMismatch.to_i32()
+        expect(v).to_equal(1)
+        expect(DivergenceKind.from_i32(v).to_i32()).to_equal(1)
+
+    it "IrqMismatch round-trips":
+        val v = DivergenceKind.IrqMismatch.to_i32()
+        expect(v).to_equal(2)
+        expect(DivergenceKind.from_i32(v).to_i32()).to_equal(2)
+
+    it "TimerMismatch round-trips":
+        val v = DivergenceKind.TimerMismatch.to_i32()
+        expect(v).to_equal(3)
+        expect(DivergenceKind.from_i32(v).to_i32()).to_equal(3)
+
+    it "RandomMismatch round-trips":
+        val v = DivergenceKind.RandomMismatch.to_i32()
+        expect(v).to_equal(4)
+        expect(DivergenceKind.from_i32(v).to_i32()).to_equal(4)
+
+    it "IpcMismatch round-trips":
+        val v = DivergenceKind.IpcMismatch.to_i32()
+        expect(v).to_equal(5)
+        expect(DivergenceKind.from_i32(v).to_i32()).to_equal(5)
+
+    it "ThreadMismatch round-trips":
+        val v = DivergenceKind.ThreadMismatch.to_i32()
+        expect(v).to_equal(6)
+        expect(DivergenceKind.from_i32(v).to_i32()).to_equal(6)
+
+    it "CheckpointMismatch round-trips":
+        val v = DivergenceKind.CheckpointMismatch.to_i32()
+        expect(v).to_equal(7)
+        expect(DivergenceKind.from_i32(v).to_i32()).to_equal(7)
+
+describe "DivergenceKind to_text":
+    it "ScheduleMismatch to_text":
+        expect(DivergenceKind.ScheduleMismatch.to_text()).to_equal("schedule-mismatch")
+
+    it "SyscallMismatch to_text":
+        expect(DivergenceKind.SyscallMismatch.to_text()).to_equal("syscall-mismatch")
+
+    it "IrqMismatch to_text":
+        expect(DivergenceKind.IrqMismatch.to_text()).to_equal("irq-mismatch")
+
+    it "CheckpointMismatch to_text":
+        expect(DivergenceKind.CheckpointMismatch.to_text()).to_equal("checkpoint-mismatch")
+
+# ============================================================================
+# DivergenceRecord construction
+# ============================================================================
+
+describe "DivergenceRecord":
+    it "fields are accessible after construction":
+        clear_divergences()
+        report_divergence(DivergenceKind.ScheduleMismatch, 42, 100, 200)
+        val rec = get_divergence(0)
+        match rec:
+            case Some(r):
+                expect(r.event_id).to_equal(42)
+                expect(r.expected).to_equal(100)
+                expect(r.actual).to_equal(200)
+                expect(r.kind.to_i32()).to_equal(DivergenceKind.ScheduleMismatch.to_i32())
+            case None:
+                expect(false).to_equal(true)
+
+# ============================================================================
+# report_divergence logs correctly
+# ============================================================================
+
+describe "report_divergence":
+    it "logs a single divergence":
+        clear_divergences()
+        report_divergence(DivergenceKind.SyscallMismatch, 10, 50, 60)
+        expect(get_divergence_count()).to_equal(1)
+
+    it "records expected and actual values":
+        clear_divergences()
+        report_divergence(DivergenceKind.IrqMismatch, 7, 300, 400)
+        val rec = get_divergence(0)
+        match rec:
+            case Some(r):
+                expect(r.expected).to_equal(300)
+                expect(r.actual).to_equal(400)
+            case None:
+                expect(false).to_equal(true)
+
+# ============================================================================
+# get_divergence_count
+# ============================================================================
+
+describe "get_divergence_count":
+    it "starts at zero after clear":
+        clear_divergences()
+        expect(get_divergence_count()).to_equal(0)
+
+    it "increments on each report":
+        clear_divergences()
+        report_divergence(DivergenceKind.TimerMismatch, 1, 10, 20)
+        expect(get_divergence_count()).to_equal(1)
+        report_divergence(DivergenceKind.RandomMismatch, 2, 30, 40)
+        expect(get_divergence_count()).to_equal(2)
+
+# ============================================================================
+# get_divergence retrieves by index
+# ============================================================================
+
+describe "get_divergence":
+    it "returns Some for valid index":
+        clear_divergences()
+        report_divergence(DivergenceKind.IpcMismatch, 5, 77, 88)
+        val rec = get_divergence(0)
+        match rec:
+            case Some(r):
+                expect(r.kind.to_i32()).to_equal(DivergenceKind.IpcMismatch.to_i32())
+            case None:
+                expect(false).to_equal(true)
+
+    it "returns None for out-of-bounds index":
+        clear_divergences()
+        val rec = get_divergence(99)
+        match rec:
+            case Some(r):
+                expect(false).to_equal(true)
+            case None:
+                expect(true).to_equal(true)
+
+    it "returns None for negative index":
+        clear_divergences()
+        val rec = get_divergence(-1)
+        match rec:
+            case Some(r):
+                expect(false).to_equal(true)
+            case None:
+                expect(true).to_equal(true)
+
+# ============================================================================
+# clear_divergences
+# ============================================================================
+
+describe "clear_divergences":
+    it "resets count to zero":
+        clear_divergences()
+        report_divergence(DivergenceKind.ThreadMismatch, 1, 10, 20)
+        report_divergence(DivergenceKind.CheckpointMismatch, 2, 30, 40)
+        expect(get_divergence_count()).to_equal(2)
+        clear_divergences()
+        expect(get_divergence_count()).to_equal(0)
+
+    it "clears the log so get_divergence returns None":
+        clear_divergences()
+        report_divergence(DivergenceKind.ScheduleMismatch, 1, 5, 6)
+        clear_divergences()
+        val rec = get_divergence(0)
+        match rec:
+            case Some(r):
+                expect(false).to_equal(true)
+            case None:
+                expect(true).to_equal(true)
+
+# ============================================================================
+# has_diverged
+# ============================================================================
+
+describe "has_diverged":
+    it "returns false when no divergences reported":
+        clear_divergences()
+        expect(has_diverged()).to_equal(false)
+
+    it "returns true after a divergence is reported":
+        clear_divergences()
+        report_divergence(DivergenceKind.SyscallMismatch, 1, 10, 20)
+        expect(has_diverged()).to_equal(true)
+
+    it "returns false after clear":
+        clear_divergences()
+        report_divergence(DivergenceKind.IrqMismatch, 1, 10, 20)
+        expect(has_diverged()).to_equal(true)
+        clear_divergences()
+        expect(has_diverged()).to_equal(false)
+
+# ============================================================================
+# Multiple divergences accumulate
+# ============================================================================
+
+describe "multiple divergences":
+    it "accumulate in order":
+        clear_divergences()
+        report_divergence(DivergenceKind.ScheduleMismatch, 1, 10, 11)
+        report_divergence(DivergenceKind.SyscallMismatch, 2, 20, 22)
+        report_divergence(DivergenceKind.IrqMismatch, 3, 30, 33)
+        expect(get_divergence_count()).to_equal(3)
+
+        val first = get_divergence(0)
+        match first:
+            case Some(r):
+                expect(r.kind.to_i32()).to_equal(DivergenceKind.ScheduleMismatch.to_i32())
+                expect(r.event_id).to_equal(1)
+            case None:
+                expect(false).to_equal(true)
+
+        val second = get_divergence(1)
+        match second:
+            case Some(r):
+                expect(r.kind.to_i32()).to_equal(DivergenceKind.SyscallMismatch.to_i32())
+                expect(r.event_id).to_equal(2)
+            case None:
+                expect(false).to_equal(true)
+
+        val third = get_divergence(2)
+        match third:
+            case Some(r):
+                expect(r.kind.to_i32()).to_equal(DivergenceKind.IrqMismatch.to_i32())
+                expect(r.event_id).to_equal(3)
+            case None:
+                expect(false).to_equal(true)

@@ -1,0 +1,80 @@
+# Physics2 — GPU Solver Orchestrator
+#
+# Coordinates GPU physics dispatch: upload body/constraint data,
+# launch one kernel per graph color batch, download results.
+# Falls back to CpuSimd if GPU is unavailable at runtime.
+
+use std.nogc_sync_mut.engine.physics2.data.solver_body2d.{SolverBodyStore2D}
+use std.nogc_sync_mut.engine.physics2.data.constraint.{ContactConstraintSoA}
+use std.nogc_sync_mut.engine.physics2.backend_gpu.gpu_buffers.{GpuPhysicsBuffers}
+use std.nogc_sync_mut.engine.physics2.graph.graph_coloring.{ColorAssignment, greedy_color}
+use std.nogc_sync_mut.engine.physics2.config.{PhysicsConfig2D}
+
+enum GpuBackend:
+    Cuda
+    Vulkan
+
+struct GpuSolver:
+    gpu_backend: GpuBackend
+    velocity_iterations: i64
+    position_iterations: i64
+    buffers: GpuPhysicsBuffers
+    baumgarte: f64
+    slop: f64
+
+impl GpuSolver:
+    static fn create_cuda(config: PhysicsConfig2D) -> GpuSolver:
+        GpuSolver(
+            gpu_backend: GpuBackend.Cuda,
+            velocity_iterations: config.velocity_iterations,
+            position_iterations: config.position_iterations,
+            buffers: GpuPhysicsBuffers.create(),
+            baumgarte: config.baumgarte_factor,
+            slop: config.slop
+        )
+
+    static fn create_vulkan(config: PhysicsConfig2D) -> GpuSolver:
+        GpuSolver(
+            gpu_backend: GpuBackend.Vulkan,
+            velocity_iterations: config.velocity_iterations,
+            position_iterations: config.position_iterations,
+            buffers: GpuPhysicsBuffers.create(),
+            baumgarte: config.baumgarte_factor,
+            slop: config.slop
+        )
+
+    me solve(bodies: SolverBodyStore2D, constraints: ContactConstraintSoA):
+        if constraints.count == 0:
+            return
+        val coloring = greedy_color(constraints, bodies.body_count)
+        self.upload_bodies(bodies)
+        self.upload_constraints(constraints)
+        self.dispatch_velocity_solve(coloring)
+        self.dispatch_position_solve(coloring)
+        self.download_results(bodies)
+
+    me upload_bodies(bodies: SolverBodyStore2D):
+        # TODO: Phase 5 — rt_cuda_malloc + rt_cuda_memcpy_h2d for body arrays
+        self.buffers.body_count = bodies.body_count
+
+    me upload_constraints(constraints: ContactConstraintSoA):
+        # TODO: Phase 5 — upload constraint SoA to device
+        self.buffers.constraint_count = constraints.count
+
+    me dispatch_velocity_solve(coloring: ColorAssignment):
+        # TODO: Phase 5 — for each color: launch kernel(batch_offset, batch_count)
+        # Each thread handles one constraint, no data races within a color
+        var color = 0
+        while color < coloring.num_colors:
+            # rt_cuda_launch_kernel(kernel_ptr, grid, block, args)
+            color = color + 1
+
+    me dispatch_position_solve(coloring: ColorAssignment):
+        # TODO: Phase 5 — position correction kernel per color batch
+        var color = 0
+        while color < coloring.num_colors:
+            color = color + 1
+
+    me download_results(bodies: SolverBodyStore2D):
+        # TODO: Phase 5 — rt_cuda_memcpy_d2h velocity/position arrays back
+        pass_dn

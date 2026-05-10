@@ -1,0 +1,214 @@
+# Physics2 — PhysicsWorld3D (Multi-Backend)
+#
+# 3D physics world with the same backend dispatch as world2d.
+# Uses quaternion rotation, 3D collision detection, and TGS solver.
+
+use std.common.engine.ids.{NodeId}
+use std.nogc_sync_mut.engine.physics2.config.{PhysicsConfig3D, Vec3}
+use std.nogc_sync_mut.engine.physics2.backend.{PhysicsBackend, select_backend}
+use std.nogc_sync_mut.engine.physics2.data.solver_body3d.{SolverBodyStore3D}
+use std.nogc_sync_mut.engine.physics2.data.constraint.{ContactConstraintSoA}
+use std.nogc_sync_mut.engine.physics2.narrowphase.collision3d.{collide_sphere_sphere, collide_aabb_aabb_3d, NarrowContact3D}
+use std.nogc_sync_mut.engine.physics2.solver.tgs_solver.{solve_velocity_constraints, solve_position_constraints}
+
+enum ShapeType3D:
+    Sphere
+    Box
+    Capsule
+
+struct Collider3D:
+    body_index: i64
+    node_id: NodeId
+    shape_type: ShapeType3D
+    radius: f64
+    half_x: f64
+    half_y: f64
+    half_z: f64
+
+struct Transform3D:
+    node_id: NodeId
+    x: f64
+    y: f64
+    z: f64
+    rot_w: f64
+    rot_x: f64
+    rot_y: f64
+    rot_z: f64
+
+class PhysicsWorld3D:
+    config: PhysicsConfig3D
+    active_backend: PhysicsBackend
+    bodies: SolverBodyStore3D
+    colliders: [Collider3D]
+    collider_count: i64
+    constraints: ContactConstraintSoA
+    accumulator: f64
+    node_to_body: [i64]
+    max_node_index: i64
+
+impl PhysicsWorld3D:
+    static fn create(config: PhysicsConfig3D) -> PhysicsWorld3D:
+        val backend = select_backend(config.backend)
+        PhysicsWorld3D(
+            config: config,
+            active_backend: backend,
+            bodies: SolverBodyStore3D.create(),
+            colliders: [],
+            collider_count: 0,
+            constraints: ContactConstraintSoA.create(),
+            accumulator: 0.0,
+            node_to_body: [],
+            max_node_index: 0
+        )
+
+    me add_dynamic_body(node_id: NodeId, x: f64, y: f64, z: f64, mass: f64) -> i64:
+        val idx = self.bodies.add_dynamic(node_id, x, y, z, mass)
+        self.ensure_node_map(node_id.to_index())
+        self.node_to_body[node_id.to_index()] = idx
+        idx
+
+    me add_static_body(node_id: NodeId, x: f64, y: f64, z: f64) -> i64:
+        val idx = self.bodies.add_static(node_id, x, y, z)
+        self.ensure_node_map(node_id.to_index())
+        self.node_to_body[node_id.to_index()] = idx
+        idx
+
+    me add_sphere_collider(node_id: NodeId, radius: f64) -> i64:
+        val body_idx = self.node_to_body[node_id.to_index()]
+        val c = Collider3D(
+            body_index: body_idx, node_id: node_id,
+            shape_type: ShapeType3D.Sphere,
+            radius: radius, half_x: radius, half_y: radius, half_z: radius
+        )
+        self.colliders.push(c)
+        val idx = self.collider_count
+        self.collider_count = self.collider_count + 1
+        idx
+
+    me add_box_collider(node_id: NodeId, hx: f64, hy: f64, hz: f64) -> i64:
+        val body_idx = self.node_to_body[node_id.to_index()]
+        val c = Collider3D(
+            body_index: body_idx, node_id: node_id,
+            shape_type: ShapeType3D.Box,
+            radius: 0.0, half_x: hx, half_y: hy, half_z: hz
+        )
+        self.colliders.push(c)
+        val idx = self.collider_count
+        self.collider_count = self.collider_count + 1
+        idx
+
+    me step(dt: f64):
+        self.accumulator = self.accumulator + dt
+        val fixed_dt = self.config.fixed_timestep
+        while self.accumulator >= fixed_dt:
+            self.bodies.save_prev_transforms()
+            self.fixed_step(fixed_dt)
+            self.accumulator = self.accumulator - fixed_dt
+
+    me fixed_step(dt: f64):
+        val sub_dt = dt / self.config.sub_steps.to_f64()
+        var sub = 0
+        while sub < self.config.sub_steps:
+            self.bodies.integrate(sub_dt, self.config.gravity.x, self.config.gravity.y, self.config.gravity.z)
+            self.detect_contacts()
+            self.solve_contacts()
+            sub = sub + 1
+
+    me detect_contacts():
+        self.constraints.clear()
+        var i = 0
+        while i < self.collider_count:
+            var j = i + 1
+            while j < self.collider_count:
+                val ca = self.colliders[i]
+                val cb = self.colliders[j]
+                val ai = ca.body_index
+                val bi = cb.body_index
+                if self.bodies.inv_mass[ai] == 0.0 and self.bodies.inv_mass[bi] == 0.0:
+                    j = j + 1
+                    continue
+                val contact = self.collide_3d(ca, cb)
+                if contact.has_contact:
+                    self.constraints.add(
+                        ai, bi,
+                        contact.normal_x, contact.normal_y,
+                        contact.point_x, contact.point_y,
+                        contact.penetration,
+                        self.config.restitution,
+                        self.config.friction,
+                        contact.feature_id_a, contact.feature_id_b
+                    )
+                j = j + 1
+            i = i + 1
+
+    me collide_3d(ca: Collider3D, cb: Collider3D) -> NarrowContact3D:
+        val ax = self.bodies.pos_x[ca.body_index]
+        val ay = self.bodies.pos_y[ca.body_index]
+        val az = self.bodies.pos_z[ca.body_index]
+        val bx = self.bodies.pos_x[cb.body_index]
+        val by = self.bodies.pos_y[cb.body_index]
+        val bz = self.bodies.pos_z[cb.body_index]
+        if ca.shape_type == ShapeType3D.Sphere and cb.shape_type == ShapeType3D.Sphere:
+            return collide_sphere_sphere(ax, ay, az, ca.radius, bx, by, bz, cb.radius)
+        if ca.shape_type == ShapeType3D.Box and cb.shape_type == ShapeType3D.Box:
+            return collide_aabb_aabb_3d(ax, ay, az, ca.half_x, ca.half_y, ca.half_z, bx, by, bz, cb.half_x, cb.half_y, cb.half_z)
+        NarrowContact3D(
+            point_x: 0.0, point_y: 0.0, point_z: 0.0,
+            normal_x: 0.0, normal_y: 1.0, normal_z: 0.0,
+            penetration: 0.0, feature_id_a: 0, feature_id_b: 0,
+            has_contact: false
+        )
+
+    me solve_contacts():
+        if self.constraints.count == 0:
+            return
+        # 3D solver uses 2D constraint SoA (normal projected to XY for now)
+        # Full 3D solver in next iteration
+        solve_velocity_constraints(self.bodies_as_2d_proxy(), self.constraints, self.config.velocity_iterations)
+
+    me bodies_as_2d_proxy() -> SolverBodyStore3D:
+        # Pass-through: TGS solver works on pos_x/pos_y/vel_x/vel_y arrays
+        # which are the same field names in SolverBodyStore3D
+        self.bodies
+
+    me get_position(node_id: NodeId) -> Vec3:
+        val idx = self.node_to_body[node_id.to_index()]
+        self.bodies.get_position(idx)
+
+    me get_velocity(node_id: NodeId) -> Vec3:
+        val idx = self.node_to_body[node_id.to_index()]
+        self.bodies.get_velocity(idx)
+
+    me apply_force(node_id: NodeId, fx: f64, fy: f64, fz: f64):
+        val idx = self.node_to_body[node_id.to_index()]
+        self.bodies.apply_force_at(idx, fx, fy, fz)
+
+    me get_all_dynamic_transforms() -> [Transform3D]:
+        var result: [Transform3D] = []
+        var i = 0
+        while i < self.bodies.body_count:
+            if self.bodies.is_dynamic(i):
+                result.push(Transform3D(
+                    node_id: self.bodies.node_ids[i],
+                    x: self.bodies.pos_x[i],
+                    y: self.bodies.pos_y[i],
+                    z: self.bodies.pos_z[i],
+                    rot_w: self.bodies.rot_w[i],
+                    rot_x: self.bodies.rot_x[i],
+                    rot_y: self.bodies.rot_y[i],
+                    rot_z: self.bodies.rot_z[i]
+                ))
+            i = i + 1
+        result
+
+    me body_count() -> i64:
+        self.bodies.body_count
+
+    me destroy():
+        pass_dn
+
+    me ensure_node_map(idx: i64):
+        while self.node_to_body.len() <= idx:
+            self.node_to_body.push(-1)
+        if idx >= self.max_node_index:
+            self.max_node_index = idx + 1

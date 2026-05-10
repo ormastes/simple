@@ -1,0 +1,66 @@
+# Physics2 — AoSoA Block Utilities
+#
+# Helpers for packing constraint data into SIMD-friendly blocks.
+# A "block" holds lane_width constraints with their data in parallel arrays.
+# Within a block, all constraints are independent (same graph color).
+
+use std.nogc_sync_mut.engine.physics2.data.constraint.{ContactConstraintSoA}
+use std.nogc_sync_mut.engine.physics2.graph.graph_coloring.{ColorAssignment}
+
+struct ConstraintBatch:
+    body_a: [i64]
+    body_b: [i64]
+    normal_x: [f64]
+    normal_y: [f64]
+    point_x: [f64]
+    point_y: [f64]
+    penetration: [f64]
+    restitution: [f64]
+    friction: [f64]
+    lambda_n: [f64]
+    lambda_t: [f64]
+    count: i64
+
+impl ConstraintBatch:
+    static fn create(capacity: i64) -> ConstraintBatch:
+        ConstraintBatch(
+            body_a: [], body_b: [],
+            normal_x: [], normal_y: [],
+            point_x: [], point_y: [],
+            penetration: [],
+            restitution: [], friction: [],
+            lambda_n: [], lambda_t: [],
+            count: 0
+        )
+
+fn extract_color_batch(constraints: ContactConstraintSoA, coloring: ColorAssignment, color: i64) -> ConstraintBatch:
+    var batch = ConstraintBatch.create(0)
+    val start = coloring.batch_starts[color]
+    val count = coloring.batch_counts[color]
+    var i = 0
+    while i < count:
+        val ci = coloring.sorted_indices[start + i]
+        batch.body_a.push(constraints.body_a[ci])
+        batch.body_b.push(constraints.body_b[ci])
+        batch.normal_x.push(constraints.normal_x[ci])
+        batch.normal_y.push(constraints.normal_y[ci])
+        batch.point_x.push(constraints.point_x[ci])
+        batch.point_y.push(constraints.point_y[ci])
+        batch.penetration.push(constraints.penetration[ci])
+        batch.restitution.push(constraints.restitution[ci])
+        batch.friction.push(constraints.friction[ci])
+        batch.lambda_n.push(constraints.lambda_n[ci])
+        batch.lambda_t.push(constraints.lambda_t[ci])
+        batch.count = batch.count + 1
+        i = i + 1
+    batch
+
+fn writeback_lambdas(constraints: ContactConstraintSoA, coloring: ColorAssignment, color: i64, batch: ConstraintBatch):
+    val start = coloring.batch_starts[color]
+    val count = coloring.batch_counts[color]
+    var i = 0
+    while i < count:
+        val ci = coloring.sorted_indices[start + i]
+        constraints.lambda_n[ci] = batch.lambda_n[i]
+        constraints.lambda_t[ci] = batch.lambda_t[i]
+        i = i + 1

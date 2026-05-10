@@ -1,0 +1,49 @@
+# Physics2 Backend Equivalence — Scalar vs SIMD must produce same results
+
+use std.io_runtime
+use std.spec.{describe, it, expect}
+use std.common.engine.ids.{NodeId, RawHandle}
+use std.nogc_sync_mut.engine.physics2.config.{default_physics_config_2d, PhysicsConfig2D}
+use std.nogc_sync_mut.engine.physics2.backend.{PhysicsBackend}
+use std.nogc_sync_mut.engine.physics2.world2d.{PhysicsWorld2D}
+
+fn make_node(idx: i64) -> NodeId:
+    NodeId(raw: RawHandle.new(idx, 1))
+
+fn run_stacking_scene(backend: PhysicsBackend) -> (f64, f64):
+    var config = default_physics_config_2d()
+    config.backend = backend
+    var world = PhysicsWorld2D.create(config)
+    val floor = make_node(0)
+    world.add_static_body(floor, 0.0, 0.0)
+    world.add_box_collider(floor, 10.0, 0.5)
+    val box1 = make_node(1)
+    world.add_dynamic_body(box1, 0.0, 3.0, 1.0)
+    world.add_box_collider(box1, 0.5, 0.5)
+    val box2 = make_node(2)
+    world.add_dynamic_body(box2, 0.0, 5.0, 1.0)
+    world.add_box_collider(box2, 0.5, 0.5)
+    var step = 0
+    while step < 100:
+        world.step(0.016)
+        step = step + 1
+    val p1 = world.get_position(box1)
+    val p2 = world.get_position(box2)
+    world.destroy()
+    (p1.y, p2.y)
+
+describe "Backend Equivalence":
+    it "scalar and simd produce same stacking result":
+        val scalar_result = run_stacking_scene(PhysicsBackend.CpuScalar)
+        val simd_result = run_stacking_scene(PhysicsBackend.CpuSimd)
+        val diff1 = scalar_result.0 - simd_result.0
+        val diff2 = scalar_result.1 - simd_result.1
+        val abs_diff1 = if diff1 < 0.0: -diff1 else: diff1
+        val abs_diff2 = if diff2 < 0.0: -diff2 else: diff2
+        expect(abs_diff1 < 0.001).to_equal(true)
+        expect(abs_diff2 < 0.001).to_equal(true)
+
+    it "boxes land on floor (not fall through)":
+        val result = run_stacking_scene(PhysicsBackend.CpuSimd)
+        expect(result.0 > -2.0).to_equal(true)
+        expect(result.1 > -2.0).to_equal(true)
