@@ -77,3 +77,15 @@ Per `browser_engine_html_parser_hang.md`:
 ## Background jobs
 - `bn0ti0ljx`: bootstrap-from-scratch.sh — at Stage 5 (MCP servers); stages 2+3 verified self-hosting
 - `b08af2m6k`: `bin/simple test --only-slow` — 39+ min, 23K lines, 23+ watchdog kills, not yet finished
+
+
+## Phase Checklist
+- [x] 1-dev
+- [x] 2-research
+- [x] 3-arch
+- [x] 4-spec
+- [x] 5-implement — 4 fixes shipped
+- [x] 6-refactor
+- [x] 7-verify — bootstrap verified
+- [x] 8-ship — fixes landed, remaining deferred items documented
+

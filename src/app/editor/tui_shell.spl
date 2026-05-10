@@ -1,7 +1,6 @@
 # Editor TUI Shell
 #
-# Terminal UI shell for the editor. Handles rendering and key input.
-# Uses std.tui for terminal control and ANSI rendering.
+# Terminal UI shell for the editor. Uses EditorController for shared logic.
 # Layout: [tab bar] [file tree | editor] [status bar] [command line]
 
 use std.tui.terminal.*
@@ -14,188 +13,100 @@ fn editor_tui_run(session: EditSession):
     terminal_enter_raw_mode()
     terminal_hide_cursor()
 
-    var status_msg = "ready"
-    var commandline = ""
-    var running = true
-    var file_tree_visible = false
-    var file_tree = FileTreeState.new(".")
-    var focus_panel = "editor"
+    var ctrl = EditorController.new(session)
 
-    while running:
+    while ctrl.is_running():
         val size = terminal_get_size()
-        val tree_width = if file_tree_visible then 30 else: 0
-        val editor_area_height = size.rows - 3
-        val editor_width = size.cols - tree_width
-        val buffer = session.active_buffer()
+        val zones = ctrl_compute_zones(ctrl, size.cols, size.rows)
+        val buffer = ctrl.active_buffer()
         if buffer != nil:
-            buffer.viewport.width = editor_width
-            buffer.viewport.height = editor_area_height
+            buffer.viewport.width = zones.editor_w
+            buffer.viewport.height = zones.editor_h
             buffer.ensure_cursor_visible()
 
-        _tui_render_frame(session, file_tree, file_tree_visible, focus_panel, status_msg, commandline, size)
+        _tui_render_frame(ctrl, zones, size)
         terminal_flush()
 
         val key = stdin_read_char()
-        if key == "":
-            continue
-
-        if session.mode == EditorMode.Command:
-            val cmd_result = _tui_handle_command_key(key, commandline)
-            commandline = cmd_result.commandline
-            if cmd_result.done:
-                val parsed = editor_parse_commandline(commandline)
-                val result = editor_dispatch_session(session, parsed)
-                status_msg = result.message
-                if result.quit:
-                    running = false
-                session.mode = EditorMode.Normal
-                commandline = ""
-            elif cmd_result.cancelled:
-                session.mode = EditorMode.Normal
-                commandline = ""
-                status_msg = ""
-            continue
-
-        if session.mode == EditorMode.Normal:
-            if key == "\x02":
-                file_tree_visible = if file_tree_visible then false else: true
-                if file_tree_visible:
-                    focus_panel = "file_tree"
-                else:
-                    focus_panel = "editor"
-                continue
-            if key == "\t":
-                if file_tree_visible:
-                    focus_panel = if focus_panel == "editor" then "file_tree" else: "editor"
-                continue
-            if focus_panel == "file_tree":
-                _tui_handle_file_tree_key(session, file_tree, key)
-                if key == "\x1b":
-                    focus_panel = "editor"
-                elif key == "\r" or key == "\n":
-                    if file_tree.selected_is_dir() == false:
-                        focus_panel = "editor"
-                        val fpath = file_tree.selected_path()
-                        status_msg = "opened " + fpath
-                elif key == ":":
-                    session.mode = EditorMode.Command
-                    commandline = ""
-                elif key == "q":
-                    running = false
-                continue
-            if buffer == nil:
-                if key == ":":
-                    session.mode = EditorMode.Command
-                    commandline = ""
-                elif key == "q":
-                    running = false
-                continue
-            val result = _tui_handle_normal_key(buffer, key)
-            status_msg = result.message
-            if result.quit:
-                running = false
-            if result.enter_insert:
-                session.mode = EditorMode.Insert
-                status_msg = "-- INSERT --"
-            if result.enter_command:
-                session.mode = EditorMode.Command
-                commandline = ""
-            continue
-
-        if session.mode == EditorMode.Insert:
-            if buffer == nil:
-                session.mode = EditorMode.Normal
-                continue
-            val result = _tui_handle_insert_key(buffer, key)
-            status_msg = result.message
-            if result.exit_insert:
-                session.mode = EditorMode.Normal
-                status_msg = ""
+        val rects = editor_layout_compute_rects(ctrl.session.layout, zones.editor_x, zones.editor_y, zones.editor_w, zones.editor_h)
+        val action = ctrl.handle_key(key, rects)
 
     terminal_show_cursor()
     terminal_exit_raw_mode()
     terminal_exit_alt_screen()
 
 
-fn _tui_handle_file_tree_key(session: EditSession, file_tree: FileTreeState, key: text):
-    if key == "j":
-        file_tree.select_next()
-    elif key == "k":
-        file_tree.select_prev()
-    elif key == "\r" or key == "\n":
-        if file_tree.selected_is_dir():
-            file_tree.toggle_expand()
-        else:
-            val fpath = file_tree.selected_path()
-            session.open_file(fpath)
-
-
-fn _tui_render_frame(session: EditSession, file_tree: FileTreeState, file_tree_visible: bool, focus_panel: text, status_msg: text, commandline: text, size: TerminalSize):
+fn _tui_render_frame(ctrl: EditorController, zones: LayoutZones, size: TerminalSize):
     terminal_clear_screen()
-    val tree_width = if file_tree_visible then 30 else: 0
-    val editor_left = tree_width
-    val editor_width = size.cols - tree_width
-    val editor_area_height = size.rows - 3
     val line_num_width = 4
-    val buffer = session.active_buffer()
-    val multi_pane = session.layout.tree.leaf_count() > 1
+    val buffer = ctrl.active_buffer()
+    val multi_pane = ctrl.session.layout.tree.leaf_count() > 1
 
-    _tui_render_tab_bar(session, size.cols)
+    _tui_render_tab_bar(ctrl.session, size.cols)
 
-    if file_tree_visible:
-        val ft_focused = focus_panel == "file_tree"
-        _tui_render_file_tree(file_tree, 1, editor_area_height, tree_width, ft_focused)
+    if ctrl.file_tree_visible:
+        val ft_focused = ctrl.focus_panel == "file_tree"
+        _tui_render_file_tree(ctrl.file_tree, zones.sidebar_y, zones.sidebar_h, zones.sidebar_w, ft_focused)
 
     if multi_pane:
-        val rects = editor_layout_compute_rects(session.layout, editor_left, 1, editor_width, editor_area_height)
+        val rects = editor_layout_compute_rects(ctrl.session.layout, zones.editor_x, zones.editor_y, zones.editor_w, zones.editor_h)
         var ri = 0
         while ri < rects.len():
             val rect = rects[ri]
-            val gidx = _layout_find_group_index_local(session.layout.groups, rect.group_id)
+            val gidx = _layout_find_group_index_local(ctrl.session.layout.groups, rect.group_id)
             if gidx >= 0:
-                val grp = session.layout.groups[gidx]
-                val is_active = rect.group_id == session.layout.active_group_id
+                val grp = ctrl.session.layout.groups[gidx]
+                val is_active = rect.group_id == ctrl.session.layout.active_group_id
                 _tui_render_pane_tabs(grp, rect, is_active)
-                val pane_buf = _group_active_buffer(session, gidx)
+                val pane_buf = _group_active_buffer(ctrl.session, gidx)
                 val content_y = rect.y + 1
                 val content_h = rect.h - 1
                 _tui_render_pane_content(pane_buf, rect.x, content_y, rect.w, content_h, line_num_width)
             ri = ri + 1
-        _tui_render_split_borders(session.layout.tree, rects, session.layout.active_group_id, editor_left, 1, editor_width, editor_area_height)
+        _tui_render_split_borders(ctrl.session.layout.tree, rects, ctrl.session.layout.active_group_id, zones.editor_x, zones.editor_y, zones.editor_w, zones.editor_h)
     else:
-        var row = 0
-        while row < editor_area_height:
-            val screen_row = row + 1
-            terminal_move_cursor(screen_row, editor_left)
-            if buffer != nil:
-                val file_row = buffer.viewport.top_row + row
-                if file_row < buffer.line_count():
-                    val num_str = str(file_row + 1)
-                    var padding = ""
-                    var p = 0
-                    while p < line_num_width - num_str.len():
-                        padding = padding + " "
-                        p = p + 1
-                    terminal_write(padding + num_str + " ")
-                    val line = buffer.line_at(file_row)
-                    val visible_start = buffer.viewport.left_col
-                    val visible_end = visible_start + editor_width - line_num_width - 1
-                    if visible_start < line.len():
-                        val end_idx = if visible_end < line.len() then visible_end else: line.len()
-                        val display = line.slice(visible_start, end_idx)
-                        terminal_write(display)
-                else:
-                    terminal_write("~")
-            else:
-                if row == editor_area_height / 2:
-                    terminal_write("  No file open. Press :e <path> to open a file.")
-                else:
-                    terminal_write("~")
-            row = row + 1
+        _tui_render_single_pane(buffer, zones.editor_x, zones.editor_y, zones.editor_w, zones.editor_h, line_num_width)
 
-    val status_row = size.rows - 2
-    terminal_move_cursor(status_row, 0)
-    val mode_str = editor_mode_name(session.mode)
+    _tui_render_status_bar(ctrl, zones, size.cols)
+    _tui_render_command_line(ctrl, zones)
+    _tui_render_cursor(ctrl, buffer, zones, line_num_width)
+
+
+fn _tui_render_single_pane(buffer: EditorBuffer, x: i64, y: i64, w: i64, h: i64, line_num_width: i64):
+    var row = 0
+    while row < h:
+        val screen_row = y + row
+        terminal_move_cursor(screen_row, x)
+        if buffer != nil:
+            val file_row = buffer.viewport.top_row + row
+            if file_row < buffer.line_count():
+                val num_str = str(file_row + 1)
+                var padding = ""
+                var p = 0
+                while p < line_num_width - num_str.len():
+                    padding = padding + " "
+                    p = p + 1
+                terminal_write(padding + num_str + " ")
+                val line = buffer.line_at(file_row)
+                val visible_start = buffer.viewport.left_col
+                val visible_end = visible_start + w - line_num_width - 1
+                if visible_start < line.len():
+                    val end_idx = if visible_end < line.len() then visible_end else: line.len()
+                    terminal_write(line.slice(visible_start, end_idx))
+            else:
+                terminal_write("~")
+        else:
+            if row == h / 2:
+                terminal_write("  No file open. Press :e <path> to open a file.")
+            else:
+                terminal_write("~")
+        row = row + 1
+
+
+fn _tui_render_status_bar(ctrl: EditorController, zones: LayoutZones, width: i64):
+    terminal_move_cursor(zones.status_y, 0)
+    val buffer = ctrl.active_buffer()
+    val mode_str = editor_mode_name(ctrl.session.mode)
     var path_str = "[No Name]"
     var dirty_str = ""
     var pos_str = "0,0"
@@ -206,28 +117,31 @@ fn _tui_render_frame(session: EditSession, file_tree: FileTreeState, file_tree_v
         val cr = buffer.cursor_row + 1
         val cc = buffer.cursor_col + 1
         pos_str = "{cr},{cc}"
-    val doc_count = session.document_count()
+    val doc_count = ctrl.session.document_count()
     val left_status = " {mode_str} | {path_str}{dirty_str} | {doc_count} files"
     val right_status = "{pos_str} "
     var fill = ""
     var f = 0
-    val fill_len = size.cols - left_status.len() - right_status.len()
+    val fill_len = width - left_status.len() - right_status.len()
     while f < fill_len:
         fill = fill + " "
         f = f + 1
     terminal_write("\x1b[7m" + left_status + fill + right_status + "\x1b[0m")
 
-    val cmd_row = size.rows - 1
-    terminal_move_cursor(cmd_row, 0)
-    if session.mode == EditorMode.Command:
-        terminal_write(":" + commandline)
-    else:
-        terminal_write(status_msg)
 
+fn _tui_render_command_line(ctrl: EditorController, zones: LayoutZones):
+    terminal_move_cursor(zones.command_y, 0)
+    if ctrl.session.mode == EditorMode.Command:
+        terminal_write(":" + ctrl.commandline)
+    else:
+        terminal_write(ctrl.status_msg)
+
+
+fn _tui_render_cursor(ctrl: EditorController, buffer: EditorBuffer, zones: LayoutZones, line_num_width: i64):
     if buffer != nil:
-        if focus_panel == "editor":
-            val cursor_screen_row = buffer.cursor_row - buffer.viewport.top_row + 1
-            val cursor_screen_col = buffer.cursor_col - buffer.viewport.left_col + line_num_width + 1 + editor_left
+        if ctrl.focus_panel == "editor":
+            val cursor_screen_row = buffer.cursor_row - buffer.viewport.top_row + zones.editor_y
+            val cursor_screen_col = buffer.cursor_col - buffer.viewport.left_col + line_num_width + 1 + zones.editor_x
             terminal_move_cursor(cursor_screen_row, cursor_screen_col)
     terminal_show_cursor()
 
@@ -309,106 +223,6 @@ fn _tui_render_file_tree(file_tree: FileTreeState, start_row: i64, height: i64, 
         terminal_write("\x1b[2m|\x1b[0m")
         sep_row = sep_row + 1
 
-
-struct NormalKeyResult:
-    message: text
-    quit: bool
-    enter_insert: bool
-    enter_command: bool
-
-fn _tui_handle_normal_key(buffer: EditorBuffer, key: text) -> NormalKeyResult:
-    if key == "q":
-        return NormalKeyResult(message: "quit", quit: true, enter_insert: false, enter_command: false)
-    if key == "i":
-        return NormalKeyResult(message: "-- INSERT --", quit: false, enter_insert: true, enter_command: false)
-    if key == "a":
-        buffer.move_relative(0, 1)
-        return NormalKeyResult(message: "-- INSERT --", quit: false, enter_insert: true, enter_command: false)
-    if key == "o":
-        buffer.move_to_line_end()
-        buffer.insert_at_cursor("\n")
-        return NormalKeyResult(message: "-- INSERT --", quit: false, enter_insert: true, enter_command: false)
-    if key == ":":
-        return NormalKeyResult(message: "", quit: false, enter_insert: false, enter_command: true)
-    if key == "h":
-        val result = editor_dispatch(buffer, editor_cmd("move-left"))
-        return NormalKeyResult(message: result.message, quit: false, enter_insert: false, enter_command: false)
-    if key == "j":
-        val result = editor_dispatch(buffer, editor_cmd("move-down"))
-        return NormalKeyResult(message: result.message, quit: false, enter_insert: false, enter_command: false)
-    if key == "k":
-        val result = editor_dispatch(buffer, editor_cmd("move-up"))
-        return NormalKeyResult(message: result.message, quit: false, enter_insert: false, enter_command: false)
-    if key == "l":
-        val result = editor_dispatch(buffer, editor_cmd("move-right"))
-        return NormalKeyResult(message: result.message, quit: false, enter_insert: false, enter_command: false)
-    if key == "0":
-        buffer.move_to_line_start()
-        return NormalKeyResult(message: "home", quit: false, enter_insert: false, enter_command: false)
-    if key == "$":
-        buffer.move_to_line_end()
-        return NormalKeyResult(message: "end", quit: false, enter_insert: false, enter_command: false)
-    if key == "G":
-        buffer.move_cursor(buffer.line_count() - 1, 0)
-        return NormalKeyResult(message: "bottom", quit: false, enter_insert: false, enter_command: false)
-    if key == "g":
-        buffer.move_cursor(0, 0)
-        return NormalKeyResult(message: "top", quit: false, enter_insert: false, enter_command: false)
-    if key == "x":
-        val result = editor_dispatch(buffer, editor_cmd("delete"))
-        return NormalKeyResult(message: result.message, quit: false, enter_insert: false, enter_command: false)
-    if key == "u":
-        val result = editor_dispatch(buffer, editor_cmd("undo"))
-        return NormalKeyResult(message: result.message, quit: false, enter_insert: false, enter_command: false)
-    if key == "\x12":
-        val result = editor_dispatch(buffer, editor_cmd("redo"))
-        return NormalKeyResult(message: result.message, quit: false, enter_insert: false, enter_command: false)
-    NormalKeyResult(message: "", quit: false, enter_insert: false, enter_command: false)
-
-
-struct InsertKeyResult:
-    message: text
-    exit_insert: bool
-
-fn _tui_handle_insert_key(buffer: EditorBuffer, key: text) -> InsertKeyResult:
-    if key == "\x1b":
-        return InsertKeyResult(message: "", exit_insert: true)
-    if key == "\x7f" or key == "\b":
-        editor_dispatch(buffer, editor_cmd("backspace"))
-        return InsertKeyResult(message: "-- INSERT --", exit_insert: false)
-    if key == "\r" or key == "\n":
-        editor_dispatch(buffer, editor_cmd("newline"))
-        return InsertKeyResult(message: "-- INSERT --", exit_insert: false)
-    if key.len() == 1:
-        val code = key.char_code_at(0)
-        if code >= 32:
-            editor_dispatch(buffer, editor_cmd_with("insert-text", key))
-        return InsertKeyResult(message: "-- INSERT --", exit_insert: false)
-    InsertKeyResult(message: "-- INSERT --", exit_insert: false)
-
-
-struct CommandKeyResult:
-    commandline: text
-    done: bool
-    cancelled: bool
-
-fn _tui_handle_command_key(key: text, commandline: text) -> CommandKeyResult:
-    if key == "\x1b":
-        return CommandKeyResult(commandline: "", done: false, cancelled: true)
-    if key == "\r" or key == "\n":
-        return CommandKeyResult(commandline: commandline, done: true, cancelled: false)
-    if key == "\x7f" or key == "\b":
-        if commandline.len() > 0:
-            return CommandKeyResult(commandline: commandline.slice(0, commandline.len() - 1), done: false, cancelled: false)
-        return CommandKeyResult(commandline: "", done: false, cancelled: true)
-    if key.len() == 1:
-        val code = key.char_code_at(0)
-        if code >= 32:
-            return CommandKeyResult(commandline: commandline + key, done: false, cancelled: false)
-    CommandKeyResult(commandline: commandline, done: false, cancelled: false)
-
-
-# --- Split border rendering (Phase 3) ---
 
 fn _tui_render_split_borders(tree: SplitTree, rects: [SplitRect], active_group_id: i64, area_x: i64, area_y: i64, area_w: i64, area_h: i64):
     _tui_draw_borders_for_node(tree.nodes, tree.root_id, rects, active_group_id, area_x, area_y, area_w, area_h)

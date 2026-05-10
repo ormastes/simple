@@ -126,6 +126,15 @@ impl LintChecker {
             Node::Loop(s) => {
                 self.check_block_for_non_det(&s.body, fn_name, fn_span);
             }
+            Node::Match(s) => {
+                self.check_expr_for_non_det(&s.subject, fn_name, fn_span);
+                for arm in &s.arms {
+                    if let Some(guard) = &arm.guard {
+                        self.check_expr_for_non_det(guard, fn_name, fn_span);
+                    }
+                    self.check_block_for_non_det(&arm.body, fn_name, fn_span);
+                }
+            }
             _ => {}
         }
     }
@@ -161,11 +170,11 @@ impl LintChecker {
                     self.check_expr_for_non_det(&arg.value, fn_name, fn_span);
                 }
             }
-            Expr::BinaryOp { left, right, .. } => {
+            Expr::Binary { left, right, .. } => {
                 self.check_expr_for_non_det(left, fn_name, fn_span);
                 self.check_expr_for_non_det(right, fn_name, fn_span);
             }
-            Expr::UnaryOp { operand, .. } => {
+            Expr::Unary { operand, .. } => {
                 self.check_expr_for_non_det(operand, fn_name, fn_span);
             }
             Expr::FieldAccess { receiver, .. } => {

@@ -1693,4 +1693,119 @@ fn f5():
         assert!(all.contains(&LintName::UnknownDecorator));
         assert!(all.contains(&LintName::UnknownAttribute));
     }
+
+    // =========================================================================
+    // @deterministic lint tests (GAME-DET-LINT-001)
+    // =========================================================================
+
+    #[test]
+    fn test_deterministic_decorator_flags_now_call() {
+        let code = r#"
+@deterministic
+fn tick(state: GameState) -> GameState:
+    let t = now()
+    return state
+"#;
+        let diagnostics = check_code(code);
+        let det_diags: Vec<_> = diagnostics
+            .iter()
+            .filter(|d| d.lint == LintName::NonDetCallInDetFn)
+            .collect();
+        assert_eq!(det_diags.len(), 1, "expected one NonDetCallInDetFn diagnostic");
+        assert!(det_diags[0].message.contains("now"));
+        assert!(det_diags[0].message.contains("tick"));
+    }
+
+    #[test]
+    fn test_deterministic_decorator_flags_rand_call() {
+        let code = r#"
+@deterministic
+fn spawn_enemy(state: GameState) -> GameState:
+    let x = rand()
+    return state
+"#;
+        let diagnostics = check_code(code);
+        assert!(
+            diagnostics.iter().any(|d| d.lint == LintName::NonDetCallInDetFn),
+            "rand() inside @deterministic should be flagged"
+        );
+    }
+
+    #[test]
+    fn test_non_deterministic_fn_without_decorator_no_warning() {
+        let code = r#"
+fn tick(state: GameState) -> GameState:
+    let t = now()
+    return state
+"#;
+        let diagnostics = check_code(code);
+        assert!(
+            diagnostics.iter().all(|d| d.lint != LintName::NonDetCallInDetFn),
+            "non-annotated function should not trigger NonDetCallInDetFn"
+        );
+    }
+
+    #[test]
+    fn test_deterministic_decorator_benign_call_no_warning() {
+        let code = r#"
+@deterministic
+fn add(a: i64, b: i64) -> i64:
+    return a + b
+"#;
+        let diagnostics = check_code(code);
+        assert!(
+            diagnostics.iter().all(|d| d.lint != LintName::NonDetCallInDetFn),
+            "benign call inside @deterministic should not be flagged"
+        );
+    }
+
+    #[test]
+    fn test_deterministic_attribute_flags_non_det_call() {
+        // #[deterministic] legacy form
+        let code = format!(
+            r#"
+{}
+fn update(state: GameState) -> GameState:
+    let t = rt_time_now_seconds()
+    return state
+"#,
+            "#[deterministic]"
+        );
+        let diagnostics = check_code(&code);
+        assert!(
+            diagnostics.iter().any(|d| d.lint == LintName::NonDetCallInDetFn),
+            "#[deterministic] attribute should also trigger the lint"
+        );
+    }
+
+    #[test]
+    fn test_deterministic_lint_name_round_trip() {
+        assert_eq!(
+            LintName::parse("non_det_call_in_det_fn"),
+            Some(LintName::NonDetCallInDetFn)
+        );
+        assert_eq!(LintName::NonDetCallInDetFn.as_str(), "non_det_call_in_det_fn");
+        assert_eq!(LintName::NonDetCallInDetFn.default_level(), LintLevel::Warn);
+    }
+
+    #[test]
+    fn test_all_lints_includes_non_det_call_in_det_fn() {
+        let all = LintName::all_lints();
+        assert!(all.contains(&LintName::NonDetCallInDetFn));
+    }
+
+    #[test]
+    fn test_deterministic_flags_rt_fs_prefix() {
+        let code = r#"
+@deterministic
+fn load(state: GameState) -> GameState:
+    rt_fs_read_file(path: "save.dat")
+    return state
+"#;
+        let diagnostics = check_code(code);
+        assert!(
+            diagnostics.iter().any(|d| d.lint == LintName::NonDetCallInDetFn),
+            "rt_fs_* calls inside @deterministic should be flagged"
+        );
+    }
 }

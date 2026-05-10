@@ -144,3 +144,15 @@ Committed: 2026-04-24
 
 All patterns migrated or handled. `chars()` remains `@deprecated` (`.chars().len()` / `.chars().map()` still allocate).
 `rust_provider.spl:292` (Rust SFFI `.chars().enumerate()`) is intentionally out of scope.
+
+
+## Phase Checklist
+- [x] 1-dev
+- [x] 2-research
+- [x] 3-arch
+- [x] 4-spec
+- [x] 5-implement
+- [x] 6-refactor
+- [x] 7-verify
+- [x] 8-ship — all 4 waves complete, status COMPLETE
+
