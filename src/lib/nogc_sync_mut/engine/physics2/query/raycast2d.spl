@@ -1,0 +1,137 @@
+# Physics2 — 2D Raycasting
+#
+# Raycast queries against the physics world. Returns closest hit
+# with body index, normal, and distance.
+
+use std.common.math.{math_abs, math_sqrt}
+use std.common.engine.ids.{NodeId}
+use std.nogc_sync_mut.engine.physics2.narrowphase.shapes2d.{Collider2D, ColliderStore2D, ShapeType2D}
+use std.nogc_sync_mut.engine.physics2.data.solver_body2d.{SolverBodyStore2D}
+
+struct RayHit2D:
+    body_index: i64
+    collider_index: i64
+    hit_x: f64
+    hit_y: f64
+    normal_x: f64
+    normal_y: f64
+    distance: f64
+    has_hit: bool
+
+impl RayHit2D:
+    static fn none() -> RayHit2D:
+        RayHit2D(
+            body_index: -1, collider_index: -1,
+            hit_x: 0.0, hit_y: 0.0,
+            normal_x: 0.0, normal_y: 0.0,
+            distance: 0.0, has_hit: false
+        )
+
+fn raycast_2d(
+    origin_x: f64, origin_y: f64,
+    dir_x: f64, dir_y: f64,
+    max_dist: f64,
+    bodies: SolverBodyStore2D,
+    colliders: ColliderStore2D
+) -> RayHit2D:
+    var closest = RayHit2D.none()
+    var best_t = max_dist
+    var i = 0
+    while i < colliders.count:
+        val c = colliders.colliders[i]
+        val bi = c.body_index
+        val bx = bodies.pos_x[bi]
+        val by = bodies.pos_y[bi]
+        val hit = ray_vs_collider(origin_x, origin_y, dir_x, dir_y, c, bx, by)
+        if hit.has_hit and hit.distance < best_t:
+            best_t = hit.distance
+            closest = hit
+            closest.collider_index = i
+        i = i + 1
+    closest
+
+fn ray_vs_collider(
+    ox: f64, oy: f64, dx: f64, dy: f64,
+    collider: Collider2D, bx: f64, by: f64
+) -> RayHit2D:
+    if collider.shape_type == ShapeType2D.Circle:
+        return ray_vs_circle(ox, oy, dx, dy, bx, by, collider.radius)
+    ray_vs_aabb(ox, oy, dx, dy, bx, by, collider.half_width, collider.half_height)
+
+fn ray_vs_circle(
+    ox: f64, oy: f64, dx: f64, dy: f64,
+    cx: f64, cy: f64, radius: f64
+) -> RayHit2D:
+    val lx = cx - ox
+    val ly = cy - oy
+    val tca = lx * dx + ly * dy
+    val d2 = lx * lx + ly * ly - tca * tca
+    val r2 = radius * radius
+    if d2 > r2:
+        return RayHit2D.none()
+    val thc = math_sqrt(r2 - d2)
+    var t = tca - thc
+    if t < 0.0:
+        t = tca + thc
+    if t < 0.0:
+        return RayHit2D.none()
+    val hx = ox + dx * t
+    val hy = oy + dy * t
+    val nx = (hx - cx) / radius
+    val ny = (hy - cy) / radius
+    RayHit2D(
+        body_index: -1, collider_index: -1,
+        hit_x: hx, hit_y: hy,
+        normal_x: nx, normal_y: ny,
+        distance: t, has_hit: true
+    )
+
+fn ray_vs_aabb(
+    ox: f64, oy: f64, dx: f64, dy: f64,
+    bx: f64, by: f64, hw: f64, hh: f64
+) -> RayHit2D:
+    val min_x = bx - hw
+    val max_x = bx + hw
+    val min_y = by - hh
+    val max_y = by + hh
+    var tmin = -999999999.0
+    var tmax = 999999999.0
+    var nx = 0.0
+    var ny = 0.0
+    if math_abs(dx) > 0.000001:
+        val t1 = (min_x - ox) / dx
+        val t2 = (max_x - ox) / dx
+        val ta = if t1 < t2: t1 else: t2
+        val tb = if t1 > t2: t1 else: t2
+        if ta > tmin:
+            tmin = ta
+            nx = if dx > 0.0: -1.0 else: 1.0
+            ny = 0.0
+        if tb < tmax:
+            tmax = tb
+    else:
+        if ox < min_x or ox > max_x:
+            return RayHit2D.none()
+    if math_abs(dy) > 0.000001:
+        val t1 = (min_y - oy) / dy
+        val t2 = (max_y - oy) / dy
+        val ta = if t1 < t2: t1 else: t2
+        val tb = if t1 > t2: t1 else: t2
+        if ta > tmin:
+            tmin = ta
+            nx = 0.0
+            ny = if dy > 0.0: -1.0 else: 1.0
+        if tb < tmax:
+            tmax = tb
+    else:
+        if oy < min_y or oy > max_y:
+            return RayHit2D.none()
+    if tmin > tmax or tmax < 0.0:
+        return RayHit2D.none()
+    val t = if tmin >= 0.0: tmin else: tmax
+    RayHit2D(
+        body_index: -1, collider_index: -1,
+        hit_x: ox + dx * t, hit_y: oy + dy * t,
+        normal_x: nx, normal_y: ny,
+        distance: t, has_hit: true
+    )
