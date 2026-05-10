@@ -34,6 +34,7 @@ use compiler.semantics.const_fold.{run_const_fold_pass}
 use compiler.common.config.*
 use compiler.frontend.core.aop.{weave_function, weavingconfig_all_rules, WeavingConfig, MirBlockInfo, InstructionInfo}
 use compiler.mir.mir_aop_injection.{extract_mir_block_info, apply_weaving_result}
+use compiler.mir.mir_debug_trace_injection.{inject_debug_trace}
 use compiler.mdsoc.weaving.weaving_config.{weavingconfig_from_hir_advices}
 use compiler.frontend.core.aop_conflict_detect.{detect_advice_conflicts}
 use compiler.frontend.core.aop_predicate_parser.{validate_predicate, validate_advice_form}
@@ -1238,6 +1239,9 @@ pub class CompilerDriver:
         # AOP weaving (after optimization, before codegen)
         self.weave_aop()
 
+        # Debug trace injection (after AOP, before codegen)
+        self.apply_debug_trace()
+
         # JIT compile
         var pipeline = CodegenPipeline.jit()
         var last_compiled: CompiledModule? = nil
@@ -1341,6 +1345,11 @@ pub class CompilerDriver:
         log_phase("aot:weave_aop:start")
         self.weave_aop()
         log_phase("aot:weave_aop:done")
+
+        # Debug trace injection (after AOP, before codegen)
+        log_phase("aot:debug_trace:start")
+        self.apply_debug_trace()
+        log_phase("aot:debug_trace:done")
 
         # Determine output file
         log_phase("aot:output:start")
@@ -1670,6 +1679,26 @@ pub class CompilerDriver:
                         self.ctx.errors.push("[AOP] {diag.message}")
                     elif diag.is_warning():
                         self.ctx.warnings.push("[AOP] {diag.message}")
+
+    # --------------------------------------------------------------------------
+    # Debug Trace Injection
+    # --------------------------------------------------------------------------
+
+    me apply_debug_trace():
+        """Apply semantic trace injection to all MIR modules.
+
+        Reads self.ctx.options.debug_trace_level (text).  If empty or
+        "none", this is a no-op.  Otherwise injects __spl_trace_* calls
+        into every MIR function, gated by the requested level."""
+        val level = self.ctx.options.debug_trace_level
+        if level == "" or level == "none":
+            return
+
+        log_debug("debug trace injection: level={level}")
+        for name in self.ctx.mir_modules.keys():
+            val mir_module = self.ctx.mir_modules[name]
+            val instrumented = inject_debug_trace(mir_module, level)
+            self.ctx.mir_modules[name] = instrumented
 
     fn get_optimization_config() -> OptimizationConfig:
         """Get optimization config from compiler options."""

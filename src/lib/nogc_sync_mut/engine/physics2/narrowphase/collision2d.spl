@@ -1,0 +1,156 @@
+# Physics2 — 2D Narrow-Phase Collision Detection
+#
+# Detects contacts between pairs of colliders. Returns contact point,
+# normal, and penetration depth for the constraint solver.
+
+use std.common.math.{math_sqrt, math_abs}
+use std.nogc_sync_mut.engine.physics2.narrowphase.shapes2d.{Collider2D, ShapeType2D}
+
+struct NarrowContact:
+    point_x: f64
+    point_y: f64
+    normal_x: f64
+    normal_y: f64
+    penetration: f64
+    feature_id_a: i64
+    feature_id_b: i64
+    has_contact: bool
+
+fn no_contact() -> NarrowContact:
+    NarrowContact(
+        point_x: 0.0, point_y: 0.0,
+        normal_x: 0.0, normal_y: 1.0,
+        penetration: 0.0,
+        feature_id_a: 0, feature_id_b: 0,
+        has_contact: false
+    )
+
+fn collide_pair(ca: Collider2D, ax: f64, ay: f64, cb: Collider2D, bx: f64, by: f64) -> NarrowContact:
+    val sa = ca.shape_type
+    val sb = cb.shape_type
+    if sa == ShapeType2D.Circle and sb == ShapeType2D.Circle:
+        return collide_circle_circle(ax + ca.offset_x, ay + ca.offset_y, ca.radius, bx + cb.offset_x, by + cb.offset_y, cb.radius)
+    if sa == ShapeType2D.Box and sb == ShapeType2D.Box:
+        return collide_aabb_aabb(ax + ca.offset_x, ay + ca.offset_y, ca.half_width, ca.half_height, bx + cb.offset_x, by + cb.offset_y, cb.half_width, cb.half_height)
+    if sa == ShapeType2D.Circle and sb == ShapeType2D.Box:
+        return collide_circle_aabb(ax + ca.offset_x, ay + ca.offset_y, ca.radius, bx + cb.offset_x, by + cb.offset_y, cb.half_width, cb.half_height)
+    if sa == ShapeType2D.Box and sb == ShapeType2D.Circle:
+        val result = collide_circle_aabb(bx + cb.offset_x, by + cb.offset_y, cb.radius, ax + ca.offset_x, ay + ca.offset_y, ca.half_width, ca.half_height)
+        if result.has_contact:
+            return NarrowContact(
+                point_x: result.point_x, point_y: result.point_y,
+                normal_x: -result.normal_x, normal_y: -result.normal_y,
+                penetration: result.penetration,
+                feature_id_a: result.feature_id_b, feature_id_b: result.feature_id_a,
+                has_contact: true
+            )
+        return result
+    no_contact()
+
+fn collide_circle_circle(ax: f64, ay: f64, ar: f64, bx: f64, by: f64, br: f64) -> NarrowContact:
+    val dx = bx - ax
+    val dy = by - ay
+    val dist_sq = dx * dx + dy * dy
+    val sum_r = ar + br
+    if dist_sq >= sum_r * sum_r:
+        return no_contact()
+    val dist = math_sqrt(dist_sq)
+    if dist < 0.0001:
+        return NarrowContact(
+            point_x: ax, point_y: ay,
+            normal_x: 0.0, normal_y: 1.0,
+            penetration: sum_r,
+            feature_id_a: 0, feature_id_b: 0,
+            has_contact: true
+        )
+    val nx = dx / dist
+    val ny = dy / dist
+    val pen = sum_r - dist
+    val px = ax + nx * ar
+    val py = ay + ny * ar
+    NarrowContact(
+        point_x: px, point_y: py,
+        normal_x: nx, normal_y: ny,
+        penetration: pen,
+        feature_id_a: 0, feature_id_b: 0,
+        has_contact: true
+    )
+
+fn collide_aabb_aabb(ax: f64, ay: f64, ahw: f64, ahh: f64, bx: f64, by: f64, bhw: f64, bhh: f64) -> NarrowContact:
+    val dx = bx - ax
+    val dy = by - ay
+    val overlap_x = (ahw + bhw) - math_abs(dx)
+    if overlap_x <= 0.0:
+        return no_contact()
+    val overlap_y = (ahh + bhh) - math_abs(dy)
+    if overlap_y <= 0.0:
+        return no_contact()
+    if overlap_x < overlap_y:
+        val sign_x = if dx < 0.0: -1.0 else: 1.0
+        return NarrowContact(
+            point_x: ax + sign_x * ahw, point_y: ay,
+            normal_x: sign_x, normal_y: 0.0,
+            penetration: overlap_x,
+            feature_id_a: if dx < 0.0: 1 else: 2,
+            feature_id_b: if dx < 0.0: 2 else: 1,
+            has_contact: true
+        )
+    val sign_y = if dy < 0.0: -1.0 else: 1.0
+    NarrowContact(
+        point_x: ax, point_y: ay + sign_y * ahh,
+        normal_x: 0.0, normal_y: sign_y,
+        penetration: overlap_y,
+        feature_id_a: if dy < 0.0: 3 else: 4,
+        feature_id_b: if dy < 0.0: 4 else: 3,
+        has_contact: true
+    )
+
+fn collide_circle_aabb(cx: f64, cy: f64, cr: f64, bx: f64, by: f64, bhw: f64, bhh: f64) -> NarrowContact:
+    val dx = cx - bx
+    val dy = cy - by
+    var closest_x = dx
+    var closest_y = dy
+    if closest_x > bhw:
+        closest_x = bhw
+    if closest_x < -bhw:
+        closest_x = -bhw
+    if closest_y > bhh:
+        closest_y = bhh
+    if closest_y < -bhh:
+        closest_y = -bhh
+    val diff_x = dx - closest_x
+    val diff_y = dy - closest_y
+    val dist_sq = diff_x * diff_x + diff_y * diff_y
+    if dist_sq >= cr * cr:
+        return no_contact()
+    val dist = math_sqrt(dist_sq)
+    if dist < 0.0001:
+        val pen_x = bhw - math_abs(dx)
+        val pen_y = bhh - math_abs(dy)
+        if pen_x < pen_y:
+            val nx = if dx < 0.0: -1.0 else: 1.0
+            return NarrowContact(
+                point_x: bx + nx * bhw, point_y: cy,
+                normal_x: nx, normal_y: 0.0,
+                penetration: pen_x + cr,
+                feature_id_a: 0, feature_id_b: if dx < 0.0: 1 else: 2,
+                has_contact: true
+            )
+        val ny = if dy < 0.0: -1.0 else: 1.0
+        return NarrowContact(
+            point_x: cx, point_y: by + ny * bhh,
+            normal_x: 0.0, normal_y: ny,
+            penetration: pen_y + cr,
+            feature_id_a: 0, feature_id_b: if dy < 0.0: 3 else: 4,
+            has_contact: true
+        )
+    val nx = diff_x / dist
+    val ny = diff_y / dist
+    val pen = cr - dist
+    NarrowContact(
+        point_x: cx - nx * cr, point_y: cy - ny * cr,
+        normal_x: nx, normal_y: ny,
+        penetration: pen,
+        feature_id_a: 0, feature_id_b: 5,
+        has_contact: true
+    )

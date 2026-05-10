@@ -1,0 +1,108 @@
+# @platform: baremetal
+#
+# Task Control Block and fixed-size task table.
+
+val TASK_STATE_IDLE: i32 = 0
+val TASK_STATE_READY: i32 = 1
+val TASK_STATE_RUNNING: i32 = 2
+val TASK_STATE_BLOCKED: i32 = 3
+val TASK_STATE_SUSPENDED: i32 = 4
+
+val MAX_TASKS: i32 = 16
+val INVALID_TASK: i32 = -1
+
+class TCB:
+    """Task Control Block — fixed-size, no heap."""
+    id: i32
+    priority: i32
+    state: i32
+    stack_ptr: u64
+    entry_fn: u64
+    deadline_tick: u64
+    stack_base: u64
+    stack_size: u32
+    name: text
+
+    static fn empty(slot: i32) -> TCB:
+        TCB(
+            id: slot,
+            priority: 7,
+            state: TASK_STATE_IDLE,
+            stack_ptr: 0u64,
+            entry_fn: 0u64,
+            deadline_tick: 0u64,
+            stack_base: 0u64,
+            stack_size: 0u32,
+            name: ""
+        )
+
+var task_table: [TCB] = []
+var task_count: i32 = 0
+var table_initialized: bool = false
+
+fn task_table_init():
+    """Initialize the fixed task table with empty slots."""
+    if table_initialized:
+        return
+    task_table = []
+    var i = 0
+    while i < MAX_TASKS:
+        task_table.push(TCB.empty(i))
+        i = i + 1
+    task_count = 0
+    table_initialized = true
+
+fn task_create(priority: i32, entry: u64, stack_base: u64, stack_size: u32, name: text) -> i32:
+    """Create a task. Returns task ID (0..15) or INVALID_TASK if table full."""
+    if not table_initialized:
+        task_table_init()
+    if task_count >= MAX_TASKS:
+        return INVALID_TASK
+    if priority < 0 or priority >= 8:
+        return INVALID_TASK
+
+    var i = 0
+    while i < MAX_TASKS:
+        if task_table[i].state == TASK_STATE_IDLE:
+            task_table[i].priority = priority
+            task_table[i].state = TASK_STATE_READY
+            task_table[i].entry_fn = entry
+            task_table[i].stack_base = stack_base
+            task_table[i].stack_ptr = stack_base + stack_size.to_u64()
+            task_table[i].stack_size = stack_size
+            task_table[i].deadline_tick = 0u64
+            task_table[i].name = name
+            task_count = task_count + 1
+            return i
+        i = i + 1
+    INVALID_TASK
+
+fn task_delete(id: i32):
+    """Mark task slot as idle."""
+    if id < 0 or id >= MAX_TASKS:
+        return
+    if task_table[id].state == TASK_STATE_IDLE:
+        return
+    task_table[id].state = TASK_STATE_IDLE
+    task_table[id].entry_fn = 0u64
+    task_table[id].stack_ptr = 0u64
+    task_count = task_count - 1
+
+fn task_get(id: i32) -> TCB:
+    """Get task by ID. Caller must ensure 0 <= id < MAX_TASKS."""
+    task_table[id]
+
+fn task_set_state(id: i32, state: i32):
+    """Set task state."""
+    if id >= 0 and id < MAX_TASKS:
+        task_table[id].state = state
+
+fn task_set_stack_ptr(id: i32, sp: u64):
+    """Update saved stack pointer for context switch."""
+    if id >= 0 and id < MAX_TASKS:
+        task_table[id].stack_ptr = sp
+
+fn task_set_deadline(id: i32, tick: u64):
+    """Set absolute deadline tick for the task."""
+    if id >= 0 and id < MAX_TASKS:
+        task_table[id].deadline_tick = tick

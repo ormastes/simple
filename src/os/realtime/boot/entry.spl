@@ -1,0 +1,55 @@
+# @platform: baremetal
+#
+# Unified boot entry for the Realtime Simple OS.
+# Called from main() via runtime_minimal.spl boot chain.
+# Initializes timer, scheduler, and starts the first task.
+
+use std.baremetal.system_api (semi_print)
+
+fn rtos_entry(arch: i32):
+    """Main RTOS entry point. Call from main() with the target arch constant.
+
+    arch: TIMER_ARCH_ARM (0), TIMER_ARCH_RISCV (1), TIMER_ARCH_X86_64 (2)
+    """
+    semi_print("RTOS: initializing\n")
+
+    task_table_init()
+    sched_init()
+    timer_init(arch, 1000u32)
+    snapshot_init()
+
+    semi_print("RTOS: kernel ready\n")
+
+fn rtos_start():
+    """Start the scheduler. Call after creating tasks with task_create().
+    This function does not return — it enters the first task."""
+    val first = sched_pick()
+    if first < 0:
+        semi_print("RTOS: no tasks to run\n")
+        return
+
+    sched_set_current(first)
+    task_set_state(first, TASK_STATE_RUNNING)
+
+    semi_print("RTOS: starting scheduler\n")
+
+    # Platform-specific first-task launch:
+    # The context restore will jump to the task's entry function.
+    val task = task_get(first)
+    rtos_jump_to_task(task.stack_ptr, task.entry_fn)
+
+extern fn rt_rtos_jump_to_task(stack_ptr: u64, entry: u64)
+
+fn rtos_jump_to_task(stack_ptr: u64, entry: u64):
+    """Jump to the first task. Implemented per-arch in C runtime."""
+    rt_rtos_jump_to_task(stack_ptr, entry)
+
+fn rtos_create_task(priority: i32, entry: u64, stack_base: u64, stack_size: u32, name: text) -> i32:
+    """Convenience wrapper: create task + add to scheduler."""
+    val id = task_create(priority, entry, stack_base, stack_size, name)
+    if id >= 0:
+        # Initialize stack frame per architecture
+        val adjusted_sp = stack_base + stack_size.to_u64()
+        task_set_stack_ptr(id, adjusted_sp)
+        sched_add(id, priority)
+    id

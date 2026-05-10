@@ -1,0 +1,221 @@
+# Physics2 — PhysicsWorld2D (Multi-Backend)
+#
+# Top-level 2D physics world with backend dispatch. API-compatible with
+# the original engine/physics/world.spl but uses SoA data layout and
+# supports multiple solver backends (CPU scalar, CPU SIMD, CUDA, Vulkan).
+#
+# Usage:
+#   var world = PhysicsWorld2D.create(default_physics_config_2d())
+#   world.add_dynamic_body(player_id, 0.0, 5.0, 1.0)
+#   world.add_box_collider(player_id, 0.5, 0.5)
+#   world.step(dt)
+#   val transforms = world.get_all_dynamic_transforms()
+
+use std.common.engine.ids.{NodeId}
+use std.common.engine.math2d.{Vec2}
+use std.nogc_sync_mut.engine.physics2.config.{PhysicsConfig2D}
+use std.nogc_sync_mut.engine.physics2.backend.{PhysicsBackend, select_backend}
+use std.nogc_sync_mut.engine.physics2.data.solver_body2d.{SolverBodyStore2D}
+use std.nogc_sync_mut.engine.physics2.data.constraint.{ContactConstraintSoA}
+use std.nogc_sync_mut.engine.physics2.narrowphase.shapes2d.{Collider2D, ColliderStore2D, ShapeType2D}
+use std.nogc_sync_mut.engine.physics2.narrowphase.collision2d.{collide_pair, NarrowContact}
+use std.nogc_sync_mut.engine.physics2.backend_cpu.scalar_solver.{CpuScalarSolver}
+
+struct Transform2D:
+    node_id: NodeId
+    x: f64
+    y: f64
+    rotation: f64
+
+struct InterpolatedTransform2D:
+    node_id: NodeId
+    x: f64
+    y: f64
+    rotation: f64
+
+class PhysicsWorld2D:
+    config: PhysicsConfig2D
+    active_backend: PhysicsBackend
+    bodies: SolverBodyStore2D
+    colliders: ColliderStore2D
+    constraints: ContactConstraintSoA
+    scalar_solver: CpuScalarSolver
+    accumulator: f64
+    node_to_body: [i64]
+    node_to_collider: [i64]
+    max_node_index: i64
+
+impl PhysicsWorld2D:
+
+    static fn create(config: PhysicsConfig2D) -> PhysicsWorld2D:
+        val backend = select_backend(config.backend)
+        PhysicsWorld2D(
+            config: config,
+            active_backend: backend,
+            bodies: SolverBodyStore2D.create(),
+            colliders: ColliderStore2D.create(),
+            constraints: ContactConstraintSoA.create(),
+            scalar_solver: CpuScalarSolver.from_config(config),
+            accumulator: 0.0,
+            node_to_body: [],
+            node_to_collider: [],
+            max_node_index: 0
+        )
+
+    me add_dynamic_body(node_id: NodeId, x: f64, y: f64, mass: f64) -> i64:
+        val idx = self.bodies.add_dynamic(node_id, x, y, mass)
+        self.ensure_node_map(node_id.to_index())
+        self.node_to_body[node_id.to_index()] = idx
+        idx
+
+    me add_static_body(node_id: NodeId, x: f64, y: f64) -> i64:
+        val idx = self.bodies.add_static(node_id, x, y)
+        self.ensure_node_map(node_id.to_index())
+        self.node_to_body[node_id.to_index()] = idx
+        idx
+
+    me add_kinematic_body(node_id: NodeId, x: f64, y: f64) -> i64:
+        val idx = self.bodies.add_kinematic(node_id, x, y)
+        self.ensure_node_map(node_id.to_index())
+        self.node_to_body[node_id.to_index()] = idx
+        idx
+
+    me add_box_collider(node_id: NodeId, half_w: f64, half_h: f64) -> i64:
+        val body_idx = self.node_to_body[node_id.to_index()]
+        val c = Collider2D.box_shape(body_idx, node_id, half_w, half_h)
+        val idx = self.colliders.add(c)
+        self.node_to_collider[node_id.to_index()] = idx
+        idx
+
+    me add_circle_collider(node_id: NodeId, radius: f64) -> i64:
+        val body_idx = self.node_to_body[node_id.to_index()]
+        val c = Collider2D.circle(body_idx, node_id, radius)
+        val idx = self.colliders.add(c)
+        self.node_to_collider[node_id.to_index()] = idx
+        idx
+
+    me step(dt: f64):
+        self.accumulator = self.accumulator + dt
+        val fixed_dt = self.config.fixed_timestep
+        while self.accumulator >= fixed_dt:
+            self.bodies.save_prev_transforms()
+            self.fixed_step(fixed_dt)
+            self.accumulator = self.accumulator - fixed_dt
+
+    me fixed_step(dt: f64):
+        val sub_dt = dt / self.config.sub_steps.to_f64()
+        var sub = 0
+        while sub < self.config.sub_steps:
+            self.bodies.integrate(sub_dt, self.config.gravity.x, self.config.gravity.y)
+            self.detect_contacts()
+            self.solve_contacts()
+            sub = sub + 1
+
+    me detect_contacts():
+        self.constraints.clear()
+        var i = 0
+        while i < self.colliders.count:
+            var j = i + 1
+            while j < self.colliders.count:
+                val ca = self.colliders.colliders[i]
+                val cb = self.colliders.colliders[j]
+                val ai = ca.body_index
+                val bi = cb.body_index
+                if self.bodies.inv_mass[ai] == 0.0 and self.bodies.inv_mass[bi] == 0.0:
+                    j = j + 1
+                    continue
+                val ax = self.bodies.pos_x[ai]
+                val ay = self.bodies.pos_y[ai]
+                val bx = self.bodies.pos_x[bi]
+                val by = self.bodies.pos_y[bi]
+                val contact = collide_pair(ca, ax, ay, cb, bx, by)
+                if contact.has_contact:
+                    self.constraints.add(
+                        ai, bi,
+                        contact.normal_x, contact.normal_y,
+                        contact.point_x, contact.point_y,
+                        contact.penetration,
+                        self.config.restitution,
+                        self.config.friction,
+                        contact.feature_id_a,
+                        contact.feature_id_b
+                    )
+                j = j + 1
+            i = i + 1
+
+    me solve_contacts():
+        match self.active_backend:
+            PhysicsBackend.CpuScalar => self.scalar_solver.solve(self.bodies, self.constraints)
+            PhysicsBackend.CpuSimd => self.scalar_solver.solve(self.bodies, self.constraints)
+            PhysicsBackend.Cuda => self.scalar_solver.solve(self.bodies, self.constraints)
+            PhysicsBackend.VulkanCompute => self.scalar_solver.solve(self.bodies, self.constraints)
+            PhysicsBackend.Auto => self.scalar_solver.solve(self.bodies, self.constraints)
+
+    me get_all_dynamic_transforms() -> [Transform2D]:
+        var result: [Transform2D] = []
+        var i = 0
+        while i < self.bodies.body_count:
+            if self.bodies.is_dynamic(i):
+                result.push(Transform2D(
+                    node_id: self.bodies.node_ids[i],
+                    x: self.bodies.pos_x[i],
+                    y: self.bodies.pos_y[i],
+                    rotation: self.bodies.rotation[i]
+                ))
+            i = i + 1
+        result
+
+    me get_interpolated_transforms(alpha: f64) -> [InterpolatedTransform2D]:
+        val a = if self.config.fixed_timestep > 0.0: self.accumulator / self.config.fixed_timestep else: 1.0
+        var result: [InterpolatedTransform2D] = []
+        var i = 0
+        while i < self.bodies.body_count:
+            if self.bodies.is_dynamic(i):
+                val ix = self.bodies.prev_pos_x[i] * (1.0 - a) + self.bodies.pos_x[i] * a
+                val iy = self.bodies.prev_pos_y[i] * (1.0 - a) + self.bodies.pos_y[i] * a
+                val ir = self.bodies.prev_rotation[i] * (1.0 - a) + self.bodies.rotation[i] * a
+                result.push(InterpolatedTransform2D(
+                    node_id: self.bodies.node_ids[i],
+                    x: ix, y: iy, rotation: ir
+                ))
+            i = i + 1
+        result
+
+    me get_position(node_id: NodeId) -> Vec2:
+        val idx = self.node_to_body[node_id.to_index()]
+        self.bodies.get_position(idx)
+
+    me get_velocity(node_id: NodeId) -> Vec2:
+        val idx = self.node_to_body[node_id.to_index()]
+        self.bodies.get_velocity(idx)
+
+    me set_position(node_id: NodeId, x: f64, y: f64):
+        val idx = self.node_to_body[node_id.to_index()]
+        self.bodies.set_position(idx, x, y)
+
+    me set_velocity(node_id: NodeId, vx: f64, vy: f64):
+        val idx = self.node_to_body[node_id.to_index()]
+        self.bodies.set_velocity(idx, vx, vy)
+
+    me apply_force(node_id: NodeId, fx: f64, fy: f64):
+        val idx = self.node_to_body[node_id.to_index()]
+        self.bodies.apply_force_at(idx, fx, fy)
+
+    me apply_impulse(node_id: NodeId, ix: f64, iy: f64):
+        val idx = self.node_to_body[node_id.to_index()]
+        self.bodies.apply_impulse_at(idx, ix, iy)
+
+    me body_count() -> i64:
+        self.bodies.body_count
+
+    me destroy():
+        pass_dn
+
+    # --- Private ---
+
+    me ensure_node_map(idx: i64):
+        while self.node_to_body.len() <= idx:
+            self.node_to_body.push(-1)
+            self.node_to_collider.push(-1)
+        if idx >= self.max_node_index:
+            self.max_node_index = idx + 1

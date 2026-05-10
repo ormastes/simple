@@ -1,0 +1,119 @@
+# Physics2 — Graph Coloring for Parallel Constraint Solving
+#
+# Greedy graph coloring assigns each constraint a color such that no two
+# constraints sharing a body have the same color. Within a color batch,
+# all constraints are independent and can be solved in parallel (SIMD/GPU).
+#
+# Typical physics contact graphs need 4-8 colors.
+
+use std.nogc_sync_mut.engine.physics2.data.constraint.{ContactConstraintSoA}
+
+struct ColorAssignment:
+    colors: [i64]
+    num_colors: i64
+    batch_starts: [i64]
+    batch_counts: [i64]
+    sorted_indices: [i64]
+
+impl ColorAssignment:
+    static fn empty() -> ColorAssignment:
+        ColorAssignment(
+            colors: [],
+            num_colors: 0,
+            batch_starts: [],
+            batch_counts: [],
+            sorted_indices: []
+        )
+
+fn greedy_color(constraints: ContactConstraintSoA, body_count: i64) -> ColorAssignment:
+    val n = constraints.count
+    if n == 0:
+        return ColorAssignment.empty()
+
+    var colors: [i64] = []
+    var i = 0
+    while i < n:
+        colors.push(-1)
+        i = i + 1
+
+    # For each body, track last color assigned to a constraint touching it
+    var body_last_color: [i64] = []
+    i = 0
+    while i < body_count:
+        body_last_color.push(-1)
+        i = i + 1
+
+    var max_color = 0
+    i = 0
+    while i < n:
+        val a = constraints.body_a[i]
+        val b = constraints.body_b[i]
+
+        # Find smallest color not used by neighbors
+        # A constraint conflicts if it shares body_a or body_b
+        # Use forbidden array (reused across iterations via body_last_color trick)
+        var color = 0
+        var found = false
+        while not found:
+            val a_blocked = if a < body_count: body_last_color[a] == color else: false
+            val b_blocked = if b < body_count: body_last_color[b] == color else: false
+            if not a_blocked and not b_blocked:
+                found = true
+            else:
+                color = color + 1
+        colors[i] = color
+        if a < body_count:
+            body_last_color[a] = color
+        if b < body_count:
+            body_last_color[b] = color
+        if color >= max_color:
+            max_color = color + 1
+        i = i + 1
+
+    # Build sorted indices grouped by color
+    var batch_counts: [i64] = []
+    var c = 0
+    while c < max_color:
+        batch_counts.push(0)
+        c = c + 1
+
+    i = 0
+    while i < n:
+        batch_counts[colors[i]] = batch_counts[colors[i]] + 1
+        i = i + 1
+
+    var batch_starts: [i64] = []
+    var offset = 0
+    c = 0
+    while c < max_color:
+        batch_starts.push(offset)
+        offset = offset + batch_counts[c]
+        c = c + 1
+
+    var sorted_indices: [i64] = []
+    i = 0
+    while i < n:
+        sorted_indices.push(0)
+        i = i + 1
+
+    # Fill sorted_indices using write cursors per color
+    var cursors: [i64] = []
+    c = 0
+    while c < max_color:
+        cursors.push(batch_starts[c])
+        c = c + 1
+
+    i = 0
+    while i < n:
+        val col = colors[i]
+        sorted_indices[cursors[col]] = i
+        cursors[col] = cursors[col] + 1
+        i = i + 1
+
+    ColorAssignment(
+        colors: colors,
+        num_colors: max_color,
+        batch_starts: batch_starts,
+        batch_counts: batch_counts,
+        sorted_indices: sorted_indices
+    )

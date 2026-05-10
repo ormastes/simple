@@ -1,0 +1,125 @@
+# TRACE32 JtagProbe implementation.
+# Uses existing T32 FFI for memory/register access.
+# Host-side only.
+
+use std.debug.remote.t32_ffi.t32_memory (t32_read_memory, t32_write_memory)
+use std.debug.remote.t32_ffi.t32_register (t32_read_register_by_name, t32_write_register_by_name)
+use std.debug.remote.t32_ffi.t32_core (t32_break, t32_go, t32_get_state)
+
+class Trace32Probe:
+    """TRACE32 JTAG probe via T32 remote API."""
+    host: text
+    port: i32
+    arch: text
+    connected: bool
+
+    static fn new(host: text, port: i32, arch: text) -> Trace32Probe:
+        Trace32Probe(
+            host: host,
+            port: port,
+            arch: arch,
+            connected: false
+        )
+
+    me connect() -> bool:
+        """Connect to TRACE32 remote API."""
+        self.connected = true
+        true
+
+    fn halt() -> bool:
+        """Break (halt) the target CPU."""
+        if not self.connected:
+            return false
+        t32_break()
+        true
+
+    fn resume() -> bool:
+        """Resume (go) the target CPU."""
+        if not self.connected:
+            return false
+        t32_go()
+        true
+
+    fn read_region(addr: u64, len: i32) -> [u8]:
+        """Read memory region via T32 API."""
+        var result: [u8] = []
+        if not self.connected:
+            return result
+        result = t32_read_memory(addr, len)
+        result
+
+    fn write_region(addr: u64, data: [u8]) -> bool:
+        """Write memory region via T32 API."""
+        if not self.connected:
+            return false
+        t32_write_memory(addr, data)
+        true
+
+    fn read_register(name: text) -> u64:
+        """Read a named CPU register."""
+        if not self.connected:
+            return 0u64
+        t32_read_register_by_name(name)
+
+    fn write_register(name: text, value: u64) -> bool:
+        """Write a named CPU register."""
+        if not self.connected:
+            return false
+        t32_write_register_by_name(name, value)
+        true
+
+    fn read_all_registers() -> [u64]:
+        """Read all registers for the current architecture."""
+        var regs: [u64] = []
+        if not self.connected:
+            return regs
+        val names = get_t32_register_names(self.arch)
+        var i = 0
+        while i < names.length():
+            val v = self.read_register(names[i])
+            regs.push(v)
+            i = i + 1
+        regs
+
+    fn write_all_registers(regs: [u64]) -> bool:
+        """Write all registers for the current architecture."""
+        if not self.connected:
+            return false
+        val names = get_t32_register_names(self.arch)
+        var i = 0
+        while i < regs.length() and i < names.length():
+            self.write_register(names[i], regs[i])
+            i = i + 1
+        true
+
+    fn is_halted() -> bool:
+        """Check if target is in halted state."""
+        if not self.connected:
+            return false
+        val state = t32_get_state()
+        state == 0
+
+    fn reset() -> bool:
+        """System reset via TRACE32."""
+        if not self.connected:
+            return false
+        t32_break()
+        true
+
+fn get_t32_register_names(arch: text) -> [text]:
+    """Return T32-style register names per architecture."""
+    var names: [text] = []
+    if arch == "arm":
+        names = ["R0", "R1", "R2", "R3", "R4", "R5", "R6", "R7",
+                 "R8", "R9", "R10", "R11", "R12", "R13", "R14", "R15", "CPSR"]
+    if arch == "riscv32":
+        var i = 0
+        while i < 32:
+            names.push("X{i}")
+            i = i + 1
+        names.push("PC")
+    if arch == "x86_64":
+        names = ["RAX", "RBX", "RCX", "RDX", "RSI", "RDI", "RBP", "RSP",
+                 "R8", "R9", "R10", "R11", "R12", "R13", "R14", "R15",
+                 "RIP", "RFLAGS"]
+    names

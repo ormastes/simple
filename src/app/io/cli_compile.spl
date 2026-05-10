@@ -63,7 +63,7 @@ fn cli_print_shared_optimization_inventory(command: text):
         print "  - Release MIR/self-hosted builds normalize to standard unless --opt-level overrides it."
 
 # Pure Simple compiler implementation (no Rust FFI dependency)
-fn cli_compile_pure_simple(source_file: text, output_file: text, output_format: text, backend: text, verbose: bool, release: bool, low_memory: bool, opt_level: i64, profile: text, target_opt_ctx: TargetOptContext) -> i64:
+fn cli_compile_pure_simple(source_file: text, output_file: text, output_format: text, backend: text, verbose: bool, release: bool, low_memory: bool, opt_level: i64, profile: text, target_opt_ctx: TargetOptContext, debug_trace_level: text) -> i64:
     var out = output_file
     if out == "":
         # Default output based on format
@@ -106,6 +106,8 @@ fn cli_compile_pure_simple(source_file: text, output_file: text, output_format: 
     if backend != "" and backend != "auto":
         options.backend = backend
     options.target_opt_ctx = target_opt_ctx
+    if debug_trace_level != "":
+        options.debug_trace_level = debug_trace_level
     options = compileoptions_normalize_mir_optimization(options)
 
     val driver = CompilerDriver.create(options)
@@ -137,7 +139,7 @@ fn cli_compile_dynamic_driver_library(source_file: text, output_file: text, back
         source_file.replace(".spl", ".lsm")
     val smf_out = out + ".smf.tmp"
 
-    val compile_status = cli_compile_pure_simple(source_file, smf_out, "smf", backend, verbose, release, low_memory, 2, if release: "prod" else: "dev", target_opt_context_default())
+    val compile_status = cli_compile_pure_simple(source_file, smf_out, "smf", backend, verbose, release, low_memory, 2, if release: "prod" else: "dev", target_opt_context_default(), "")
     if compile_status != 0:
         return compile_status
 
@@ -233,6 +235,7 @@ fn cli_compile(args: [text]) -> i64:
     var opt_level: i64 = 0
     var optimization_requested: bool = false
     var profile: text = "dev"
+    var debug_trace_level: text = ""
 
     var i = 0
     if args.len() > 0 and args[0] == "compile":
@@ -259,6 +262,7 @@ fn cli_compile(args: [text]) -> i64:
             print "  --release             Release build (optimized, prefers LLVM)"
             print "  --release-optimized   Max optimization: -O3 + x86-64-v3 + ThinLTO"
             cli_print_shared_opt_level_help()
+            print "  --debug-trace=<level> Semantic trace instrumentation: functions, objects, full"
             print "  --profile=<name>      Compile profile: dev, test, prod"
             print "  --list-optimizations  Print implemented optimization groups and levels"
             print "  --lto                 Enable ThinLTO (+2-3% speed)"
@@ -376,6 +380,13 @@ fn cli_compile(args: [text]) -> i64:
             else:
                 _cli_eprint("Error: --profile requires an argument")
                 return 1
+        elif arg.starts_with("--debug-trace="):
+            val trace_val = arg.substring(14)
+            if trace_val != "functions" and trace_val != "objects" and trace_val != "full":
+                _cli_eprint("Error: Unknown trace level: {trace_val}")
+                _cli_eprint("Valid levels: functions, objects, full")
+                return 1
+            debug_trace_level = trace_val
         elif arg == "--lto":
             use_lto = true
         elif arg.starts_with("--march="):
@@ -453,7 +464,7 @@ fn cli_compile(args: [text]) -> i64:
             out = source_file.replace(".spl", "")
         # Use Pure Simple compiler driver for all LLVM backends
         if backend == "llvm-lib" or backend == "llvmlib":
-            return cli_compile_pure_simple(source_file, out, output_format, backend, verbose, release, low_memory, opt_level, profile, _compile_target_opt_ctx)
+            return cli_compile_pure_simple(source_file, out, output_format, backend, verbose, release, low_memory, opt_level, profile, _compile_target_opt_ctx, debug_trace_level)
         return compile_native(source_file, out, verbose, "", false, backend, release, opt_level, use_lto, march_target)
 
     if target.starts_with("baremetal-"):
@@ -475,7 +486,7 @@ fn cli_compile(args: [text]) -> i64:
         return cli_compile_via_runtime(args)
 
     # Use Pure Simple compiler driver for all compilation
-    return cli_compile_pure_simple(source_file, output_file, output_format, backend, verbose, release, low_memory, opt_level, profile, _compile_target_opt_ctx)
+    return cli_compile_pure_simple(source_file, output_file, output_format, backend, verbose, release, low_memory, opt_level, profile, _compile_target_opt_ctx, debug_trace_level)
 
 fn compile_baremetal(source_file: text, target: text, emit: text, output_file: text, verbose: bool) -> i64:
     if verbose:
