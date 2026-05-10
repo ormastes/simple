@@ -16,10 +16,15 @@ use std.gc_async_mut.gpu.browser_engine.dom.{BeDomNode,
 use std.gc_async_mut.gpu.browser_engine.css.{be_default_style, CssValue, BoxEdges, StyleProps, BorderProps, CssPx}
 use std.gc_async_mut.gpu.browser_engine.layout.{BeLayoutBox, layout_tree,
     layout_get_height, layout_get_width, layout_get_content_width, layout_get_content_height,
-    layout_to_scene}
+    layout_to_scene, apply_sticky_fixup}
 use std.gc_async_mut.gpu.browser_engine.paint.{PaintCommand,
-    generate_paint_list, paint_commands_to_scene}
-use std.gc_async_mut.gpu.browser_engine.style_block.{process_style_blocks_result}
+    generate_paint_list, paint_commands_to_scene,
+    apply_transform_to_commands, paint_scrollbar, compute_object_fit}
+use std.gc_async_mut.gpu.browser_engine.style_block.{process_style_blocks_result, extract_keyframes, KeyframeRegistry}
+use std.gc_async_mut.gpu.browser_engine.style.render_state.{RenderState}
+use std.gc_async_mut.gpu.browser_engine.style.animation.{AnimationEngine}
+use std.gc_async_mut.gpu.browser_engine.style.animation_controller.{AnimationController}
+use std.gc_async_mut.gpu.browser_engine.shared.logging.{Logger, LogLevel}
 use common.render_scene.scene.{RenderScene, SceneCommand, rgba_to_argb}
 use common.render_scene.executor.{execute_scene_to_buffer, select_effect_engine}
 use common.render_scene.engine2d_executor.{execute_scene_to_engine2d,
@@ -105,37 +110,61 @@ class BrowserRenderer:
     bg_color: u32
     engine: Engine2D?
     net_delegate: NetDelegate?
+    render_state: RenderState
+    animation_engine: AnimationEngine
+    animation_controller: AnimationController
 
     static fn new() -> BrowserRenderer:
         """Create a default BrowserRenderer with no viewport (for testing)."""
+        val rs = RenderState.new()
+        val logger = Logger.new("browser_renderer", LogLevel.Warn)
+        val anim_engine = AnimationEngine.new(logger)
+        val anim_ctrl = AnimationController.new(anim_engine, logger)
         return BrowserRenderer(
             viewport_w: 800,
             viewport_h: 600,
             bg_color: 0xFFFFFFFF,
             engine: nil,
-            net_delegate: nil
+            net_delegate: nil,
+            render_state: rs,
+            animation_engine: anim_engine,
+            animation_controller: anim_ctrl
         )
 
     static fn create(w: i32, h: i32) -> BrowserRenderer:
         """Create a browser renderer with the given viewport size.
         Uses the deterministic software rasterizer.
         """
+        val rs = RenderState.create(0.0, w.to_f64(), h.to_f64())
+        val logger = Logger.new("browser_renderer", LogLevel.Warn)
+        val anim_engine = AnimationEngine.new(logger)
+        val anim_ctrl = AnimationController.new(anim_engine, logger)
         return BrowserRenderer(
             viewport_w: w,
             viewport_h: h,
             bg_color: 0xFFFFFFFF,
             engine: nil,
-            net_delegate: nil
+            net_delegate: nil,
+            render_state: rs,
+            animation_engine: anim_engine,
+            animation_controller: anim_ctrl
         )
 
     static fn create_with_engine(w: i32, h: i32, engine: Engine2D) -> BrowserRenderer:
         """Create a browser renderer backed by an Engine2D instance."""
+        val rs = RenderState.create(0.0, w.to_f64(), h.to_f64())
+        val logger = Logger.new("browser_renderer", LogLevel.Warn)
+        val anim_engine = AnimationEngine.new(logger)
+        val anim_ctrl = AnimationController.new(anim_engine, logger)
         return BrowserRenderer(
             viewport_w: w,
             viewport_h: h,
             bg_color: 0xFFFFFFFF,
             engine: engine,
-            net_delegate: nil
+            net_delegate: nil,
+            render_state: rs,
+            animation_engine: anim_engine,
+            animation_controller: anim_ctrl
         )
 
     static fn create_with_backend(w: i32, h: i32, backend: text) -> BrowserRenderer:
@@ -185,11 +214,34 @@ class BrowserRenderer:
 
         Pipeline: DOM -> Layout -> Paint -> SceneCommands
         """
+        # Advance render state — frame_count * 16.0 gives deterministic ms clock
+        val next_time = self.render_state.frame_count.to_f64() * 16.0
+        self.render_state.advance(next_time)
+        self.render_state.set_scroll(0.0, 0.0)
+
+        # Tick animation engine
+        val anim_updates = self.animation_engine.tick(self.render_state.current_time)
+
         # Layout
         val layout = layout_tree(root, self.viewport_w, self.viewport_h)
 
+        # Sticky positioning fixup after layout
+        apply_sticky_fixup(layout, self.render_state.scroll_x, self.render_state.scroll_y)
+
         # Paint -> scene bridge
-        val commands = generate_paint_list(layout)
+        var commands = generate_paint_list(layout)
+
+        # Post-pass: apply CSS transforms (no-op when transform is empty)
+        commands = apply_transform_to_commands(commands, "", 0.0, 0.0)
+
+        # Append scrollbar commands for root overflow (no-op when content fits)
+        val content_h = layout_get_content_height(layout)
+        val viewport_h_f = self.viewport_h.to_f64()
+        if content_h > viewport_h_f:
+            val sb_cmds = paint_scrollbar(0.0, 0.0, self.viewport_w.to_f64(), viewport_h_f, content_h, self.render_state.scroll_y)
+            for sb_cmd in sb_cmds:
+                commands.push(sb_cmd)
+
         val scene = paint_commands_to_scene(commands, self.viewport_w, self.viewport_h)
 
         # Count nodes
