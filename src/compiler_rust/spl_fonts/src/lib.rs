@@ -370,7 +370,7 @@ fn rasterize_subpixel_with_freetype(ch: char, font_size_px: i64) -> Option<Glyph
             };
             return Some(GlyphSlot { metrics, bitmap: Vec::new() });
         }
-        if bitmap_ref.buffer.is_null() || bitmap_ref.width % 3 != 0 {
+        if bitmap_ref.buffer.is_null() || !bitmap_ref.width.is_multiple_of(3) {
             return None;
         }
         let visual_width = (bitmap_ref.width / 3) as usize;
@@ -514,12 +514,12 @@ pub extern "C" fn rt_fonts_layout_text(text_ptr: i64, text_len: i64, font_size_p
         Some(f) => f,
         None => return -1,
     };
-    let mut settings = LayoutSettings::default();
-    settings.x = 0.0;
-    settings.y = 0.0;
-    if max_width_px > 0 {
-        settings.max_width = Some(max_width_px as f32);
-    }
+    let settings = LayoutSettings {
+        x: 0.0,
+        y: 0.0,
+        max_width: if max_width_px > 0 { Some(max_width_px as f32) } else { None },
+        ..Default::default()
+    };
     let mut layout = Layout::new(CoordinateSystem::PositiveYDown);
     layout.reset(&settings);
     layout.append(&[font], &TextStyle::new(text, font_size_px as f32, 0));
@@ -606,7 +606,7 @@ pub extern "C" fn rt_fonts_glyph_pixel(handle: i64, x: i64, y: i64) -> i64 {
 /// Return RGB subpixel coverage (0..=255) for pixel (x,y), channel 0..2.
 #[no_mangle]
 pub extern "C" fn rt_fonts_glyph_subpixel_pixel(handle: i64, x: i64, y: i64, channel: i64) -> i64 {
-    if handle != 1 || x < 0 || y < 0 || channel < 0 || channel > 2 {
+    if handle != 1 || x < 0 || y < 0 || !(0..=2).contains(&channel) {
         return 0;
     }
     let guard = match GLYPH_SLOT.lock() {

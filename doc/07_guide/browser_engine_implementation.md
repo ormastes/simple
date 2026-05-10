@@ -2,7 +2,7 @@
 
 The Simple browser engine is a GPU-accelerated HTML/CSS renderer in the canonical engine at `src/lib/gc_async_mut/gpu/browser_engine/`. It targets Chromium-class rendering fidelity through incremental milestone delivery.
 
-**Status**: M13 complete (float layout + CSS quick wins). 132/132 corpus pixel-exact. WPT ~49-54%.
+**Status**: M13 complete (float layout + CSS quick wins). 132/132 corpus pixel-exact. WPT 104/104 (100%).
 
 ## Source Files
 

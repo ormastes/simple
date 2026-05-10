@@ -177,7 +177,7 @@ pub fn bytes_to_u32_le_fn(args: &[Value]) -> Result<Value, CompileError> {
     let items = match args.first() {
         Some(Value::Array(arr)) => arr.as_ref(),
         Some(Value::FrozenArray(arr)) => arr.as_ref(),
-        Some(Value::Tuple(arr)) => arr.as_ref(),
+        Some(Value::Tuple(arr)) => arr,
         _ => return Ok(Value::Int(0)),
     };
     if items.len() < 4 {
@@ -197,7 +197,7 @@ pub fn bytes_to_u32_be_fn(args: &[Value]) -> Result<Value, CompileError> {
     let items = match args.first() {
         Some(Value::Array(arr)) => arr.as_ref(),
         Some(Value::FrozenArray(arr)) => arr.as_ref(),
-        Some(Value::Tuple(arr)) => arr.as_ref(),
+        Some(Value::Tuple(arr)) => arr,
         _ => return Ok(Value::Int(0)),
     };
     if items.len() < 4 {
@@ -217,7 +217,7 @@ pub fn bytes_to_u64_le_fn(args: &[Value]) -> Result<Value, CompileError> {
     let items = match args.first() {
         Some(Value::Array(arr)) => arr.as_ref(),
         Some(Value::FrozenArray(arr)) => arr.as_ref(),
-        Some(Value::Tuple(arr)) => arr.as_ref(),
+        Some(Value::Tuple(arr)) => arr,
         _ => return Ok(Value::Int(0)),
     };
     if items.len() < 8 {
@@ -241,7 +241,7 @@ pub fn bytes_to_u64_be_fn(args: &[Value]) -> Result<Value, CompileError> {
     let items = match args.first() {
         Some(Value::Array(arr)) => arr.as_ref(),
         Some(Value::FrozenArray(arr)) => arr.as_ref(),
-        Some(Value::Tuple(arr)) => arr.as_ref(),
+        Some(Value::Tuple(arr)) => arr,
         _ => return Ok(Value::Int(0)),
     };
     if items.len() < 8 {
