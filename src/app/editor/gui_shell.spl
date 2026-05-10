@@ -1,7 +1,8 @@
 # Editor GUI Shell
 #
 # GUI shell using Surface system and UISession for graphical rendering.
-# Creates surfaces, registers event handlers, manages GUI event loop.
+# Creates surfaces for tab bar, file tree, editor area, status bar.
+# Routes editing through the same EditSession as TUI mode.
 
 struct GuiShellState:
     session: EditSession
@@ -9,6 +10,10 @@ struct GuiShellState:
     platform_config: PlatformConfig
     extension_host: ExtensionHost
     running: bool
+    file_tree_visible: bool
+    file_tree: FileTreeState
+    focus_panel: text
+    status_message: text
 
 fn gui_shell_new(session: EditSession) -> GuiShellState:
     GuiShellState(
@@ -16,12 +21,28 @@ fn gui_shell_new(session: EditSession) -> GuiShellState:
         config: gui_backend_default_config(),
         platform_config: platform_default_config(EditorPlatform.Desktop),
         extension_host: ExtensionHost.new(),
-        running: true
+        running: true,
+        file_tree_visible: true,
+        file_tree: FileTreeState.new("."),
+        focus_panel: "editor",
+        status_message: "ready"
     )
 
 fn gui_shell_init(state: GuiShellState):
     state.extension_host.activate("simple-language")
     state.extension_host.activate("markdown-language")
+
+fn gui_shell_run(session: EditSession):
+    var state = gui_shell_new(session)
+    gui_shell_init(state)
+
+    while state.running:
+        val frame = gui_shell_render_frame(state)
+        gui_shell_present_frame(frame)
+
+        val event = gui_shell_poll_event()
+        if event.kind != "":
+            gui_shell_handle_event(state, event.kind, event.data)
 
 fn gui_shell_handle_event(state: GuiShellState, event_kind: text, event_data: text):
     if event_kind == "key":
@@ -30,19 +51,80 @@ fn gui_shell_handle_event(state: GuiShellState, event_kind: text, event_data: te
         _gui_handle_resize(state, event_data)
     elif event_kind == "close":
         state.running = false
+    elif event_kind == "file-tree-select":
+        _gui_handle_file_tree_select(state, event_data)
+    elif event_kind == "tab-select":
+        _gui_handle_tab_select(state, event_data)
 
 fn _gui_handle_key(state: GuiShellState, key: text):
     val buffer = state.session.active_buffer()
-    if buffer == nil:
-        return
     if state.session.mode == EditorMode.Insert:
         if key == "Escape":
             state.session.mode = EditorMode.Normal
             return
-        buffer.insert_at_cursor(key)
+        if buffer != nil:
+            buffer.insert_at_cursor(key)
     elif state.session.mode == EditorMode.Normal:
         if key == "i":
             state.session.mode = EditorMode.Insert
+        elif key == "Ctrl+B":
+            state.file_tree_visible = if state.file_tree_visible then false else: true
+        elif key == "Ctrl+P":
+            state.status_message = "command palette"
+        elif key == "Ctrl+S":
+            state.session.save_active()
+            state.status_message = "saved"
+        elif key == "Ctrl+O":
+            state.status_message = "open dialog"
 
 fn _gui_handle_resize(state: GuiShellState, data: text):
     pass_dn
+
+fn _gui_handle_file_tree_select(state: GuiShellState, path: text):
+    state.session.open_file(path)
+    state.focus_panel = "editor"
+
+fn _gui_handle_tab_select(state: GuiShellState, tab_index_str: text):
+    pass_dn
+
+
+struct GuiFrame:
+    tab_bar_html: text
+    file_tree_html: text
+    editor_html: text
+    status_html: text
+
+fn gui_shell_render_frame(state: GuiShellState) -> GuiFrame:
+    val buffer = state.session.active_buffer()
+    val tab_bar = gui_render_tab_bar_html(state.session)
+    var file_tree_html = ""
+    if state.file_tree_visible:
+        file_tree_html = gui_render_file_tree_html(state.file_tree)
+    var editor_html = ""
+    if buffer != nil:
+        val doc = state.session.active_document()
+        var lang = "text"
+        if doc != nil:
+            lang = doc.language_id
+        editor_html = gui_render_editor_area(buffer, lang, buffer.viewport)
+    else:
+        editor_html = "<div class=\"empty\">No file open</div>"
+    val mode_str = editor_mode_name(state.session.mode)
+    val status_html = "<div class=\"status\">" + mode_str + " | " + state.status_message + "</div>"
+    GuiFrame(
+        tab_bar_html: tab_bar,
+        file_tree_html: file_tree_html,
+        editor_html: editor_html,
+        status_html: status_html
+    )
+
+fn gui_shell_present_frame(frame: GuiFrame):
+    pass_dn
+
+
+struct GuiEvent:
+    kind: text
+    data: text
+
+fn gui_shell_poll_event() -> GuiEvent:
+    GuiEvent(kind: "", data: "")

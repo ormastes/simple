@@ -2,6 +2,7 @@
 #
 # Terminal UI shell for the editor. Handles rendering and key input.
 # Uses std.tui for terminal control and ANSI rendering.
+# Layout: [tab bar] [file tree | editor] [status bar] [command line]
 
 use std.tui.terminal.*
 use std.tui.style.*
@@ -16,16 +17,22 @@ fn editor_tui_run(session: EditSession):
     var status_msg = "ready"
     var commandline = ""
     var running = true
+    var file_tree_visible = false
+    var file_tree = FileTreeState.new(".")
+    var focus_panel = "editor"
 
     while running:
         val size = terminal_get_size()
+        val tree_width = if file_tree_visible then 30 else: 0
+        val editor_area_height = size.rows - 3
+        val editor_width = size.cols - tree_width
         val buffer = session.active_buffer()
         if buffer != nil:
-            buffer.viewport.width = size.cols
-            buffer.viewport.height = size.rows - 2
+            buffer.viewport.width = editor_width
+            buffer.viewport.height = editor_area_height
             buffer.ensure_cursor_visible()
 
-        _tui_render_frame(session, status_msg, commandline, size)
+        _tui_render_frame(session, file_tree, file_tree_visible, focus_panel, status_msg, commandline, size)
         terminal_flush()
 
         val key = stdin_read_char()
@@ -50,6 +57,32 @@ fn editor_tui_run(session: EditSession):
             continue
 
         if session.mode == EditorMode.Normal:
+            if key == "\x02":
+                file_tree_visible = if file_tree_visible then false else: true
+                if file_tree_visible:
+                    focus_panel = "file_tree"
+                else:
+                    focus_panel = "editor"
+                continue
+            if key == "\t":
+                if file_tree_visible:
+                    focus_panel = if focus_panel == "editor" then "file_tree" else: "editor"
+                continue
+            if focus_panel == "file_tree":
+                _tui_handle_file_tree_key(session, file_tree, key)
+                if key == "\x1b":
+                    focus_panel = "editor"
+                elif key == "\r" or key == "\n":
+                    if file_tree.selected_is_dir() == false:
+                        focus_panel = "editor"
+                        val fpath = file_tree.selected_path()
+                        status_msg = "opened " + fpath
+                elif key == ":":
+                    session.mode = EditorMode.Command
+                    commandline = ""
+                elif key == "q":
+                    running = false
+                continue
             if buffer == nil:
                 if key == ":":
                     session.mode = EditorMode.Command
@@ -84,15 +117,38 @@ fn editor_tui_run(session: EditSession):
     terminal_exit_alt_screen()
 
 
-fn _tui_render_frame(session: EditSession, status_msg: text, commandline: text, size: TerminalSize):
+fn _tui_handle_file_tree_key(session: EditSession, file_tree: FileTreeState, key: text):
+    if key == "j":
+        file_tree.select_next()
+    elif key == "k":
+        file_tree.select_prev()
+    elif key == "\r" or key == "\n":
+        if file_tree.selected_is_dir():
+            file_tree.toggle_expand()
+        else:
+            val fpath = file_tree.selected_path()
+            session.open_file(fpath)
+
+
+fn _tui_render_frame(session: EditSession, file_tree: FileTreeState, file_tree_visible: bool, focus_panel: text, status_msg: text, commandline: text, size: TerminalSize):
     terminal_clear_screen()
-    val editor_height = size.rows - 2
+    val tree_width = if file_tree_visible then 30 else: 0
+    val editor_left = tree_width
+    val editor_width = size.cols - tree_width
+    val editor_area_height = size.rows - 3
     val line_num_width = 4
     val buffer = session.active_buffer()
 
+    _tui_render_tab_bar(session, size.cols)
+
+    if file_tree_visible:
+        val ft_focused = focus_panel == "file_tree"
+        _tui_render_file_tree(file_tree, 1, editor_area_height, tree_width, ft_focused)
+
     var row = 0
-    while row < editor_height:
-        terminal_move_cursor(row, 0)
+    while row < editor_area_height:
+        val screen_row = row + 1
+        terminal_move_cursor(screen_row, editor_left)
         if buffer != nil:
             val file_row = buffer.viewport.top_row + row
             if file_row < buffer.line_count():
@@ -105,7 +161,7 @@ fn _tui_render_frame(session: EditSession, status_msg: text, commandline: text, 
                 terminal_write(padding + num_str + " ")
                 val line = buffer.line_at(file_row)
                 val visible_start = buffer.viewport.left_col
-                val visible_end = visible_start + size.cols - line_num_width - 1
+                val visible_end = visible_start + editor_width - line_num_width - 1
                 if visible_start < line.len():
                     val end_idx = if visible_end < line.len() then visible_end else: line.len()
                     val display = line.slice(visible_start, end_idx)
@@ -113,7 +169,7 @@ fn _tui_render_frame(session: EditSession, status_msg: text, commandline: text, 
             else:
                 terminal_write("~")
         else:
-            if row == editor_height / 2:
+            if row == editor_area_height / 2:
                 terminal_write("  No file open. Press :e <path> to open a file.")
             else:
                 terminal_write("~")
@@ -132,7 +188,8 @@ fn _tui_render_frame(session: EditSession, status_msg: text, commandline: text, 
         val cr = buffer.cursor_row + 1
         val cc = buffer.cursor_col + 1
         pos_str = "{cr},{cc}"
-    val left_status = " {mode_str} | {path_str}{dirty_str}"
+    val doc_count = session.document_count()
+    val left_status = " {mode_str} | {path_str}{dirty_str} | {doc_count} files"
     val right_status = "{pos_str} "
     var fill = ""
     var f = 0
@@ -150,10 +207,89 @@ fn _tui_render_frame(session: EditSession, status_msg: text, commandline: text, 
         terminal_write(status_msg)
 
     if buffer != nil:
-        val cursor_screen_row = buffer.cursor_row - buffer.viewport.top_row
-        val cursor_screen_col = buffer.cursor_col - buffer.viewport.left_col + line_num_width + 1
-        terminal_move_cursor(cursor_screen_row, cursor_screen_col)
+        if focus_panel == "editor":
+            val cursor_screen_row = buffer.cursor_row - buffer.viewport.top_row + 1
+            val cursor_screen_col = buffer.cursor_col - buffer.viewport.left_col + line_num_width + 1 + editor_left
+            terminal_move_cursor(cursor_screen_row, cursor_screen_col)
     terminal_show_cursor()
+
+
+fn _tui_render_tab_bar(session: EditSession, width: i64):
+    terminal_move_cursor(0, 0)
+    val group_idx = session.layout.active_group_index
+    if group_idx < 0 or group_idx >= session.layout.groups.len():
+        var empty_bar = ""
+        var ei = 0
+        while ei < width:
+            empty_bar = empty_bar + " "
+            ei = ei + 1
+        terminal_write("\x1b[7m" + empty_bar + "\x1b[0m")
+        return
+    val group = session.layout.groups[group_idx]
+    var tab_line = ""
+    var t = 0
+    while t < group.tabs.len():
+        val tab = group.tabs[t]
+        val label = tab.label
+        val doc_idx = session._find_doc_index(tab.doc_id)
+        var dirty = ""
+        if doc_idx >= 0:
+            val doc = session.documents[doc_idx]
+            if doc.buffer.dirty:
+                dirty = "[+]"
+        val entry = " " + label + dirty + " "
+        if t == group.active_tab_index:
+            tab_line = tab_line + "\x1b[1;7m" + entry + "\x1b[0m"
+        else:
+            tab_line = tab_line + "\x1b[2m" + entry + "\x1b[0m"
+        if t < group.tabs.len() - 1:
+            tab_line = tab_line + "|"
+        t = t + 1
+    terminal_write(tab_line)
+
+
+fn _tui_render_file_tree(file_tree: FileTreeState, start_row: i64, height: i64, width: i64, focused: bool):
+    val visible = file_tree.visible_nodes()
+    var row = 0
+    while row < height:
+        terminal_move_cursor(start_row + row, 0)
+        if row < visible.len():
+            val node = visible[row]
+            var indent = ""
+            var d = 0
+            while d < node.depth:
+                indent = indent + "  "
+                d = d + 1
+            val prefix = if node.is_dir then (if node.expanded then "v " else: "> ") else: "  "
+            val name = node.name
+            var line = indent + prefix + name
+            if line.len() > width - 1:
+                line = line.slice(0, width - 1)
+            var pad = ""
+            var pi = 0
+            while pi < width - 1 - line.len():
+                pad = pad + " "
+                pi = pi + 1
+            if row == file_tree.selected_index:
+                if focused:
+                    terminal_write("\x1b[7m" + line + pad + "\x1b[0m")
+                else:
+                    terminal_write("\x1b[2;7m" + line + pad + "\x1b[0m")
+            else:
+                terminal_write(line + pad)
+        else:
+            var blank = ""
+            var bi = 0
+            while bi < width - 1:
+                blank = blank + " "
+                bi = bi + 1
+            terminal_write(blank)
+        row = row + 1
+    var sep_row = 0
+    while sep_row < height:
+        terminal_move_cursor(start_row + sep_row, width - 1)
+        terminal_write("\x1b[2m|\x1b[0m")
+        sep_row = sep_row + 1
 
 
 struct NormalKeyResult:

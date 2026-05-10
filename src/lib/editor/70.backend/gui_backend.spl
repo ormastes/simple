@@ -2,6 +2,7 @@
 #
 # Integrates editor with UISession and Surface system for GUI rendering.
 # Markdown blocks render as HTML in GUI mode.
+# Provides render functions for tab bar, file tree, editor area.
 
 struct GuiBackendConfig:
     window_title: text
@@ -26,29 +27,78 @@ struct GuiRenderBlock:
 
 fn gui_render_markdown_block(block: RenderBlock) -> GuiRenderBlock:
     var html = ""
+    val escaped_content = _gui_escape_html(block.content)
     match block.kind:
         "heading":
             val level = _gui_heading_level(block.content)
             val text_content = _gui_strip_heading(block.content)
-            html = "<h{level}>{_gui_escape_html(text_content)}</h{level}>"
+            val escaped_heading = _gui_escape_html(text_content)
+            val lv = str(level)
+            html = "<h" + lv + ">" + escaped_heading + "</h" + lv + ">"
         "code":
-            html = "<pre><code>{_gui_escape_html(block.content)}</code></pre>"
+            html = "<pre><code>" + escaped_content + "</code></pre>"
         "paragraph":
-            html = "<p>{_gui_escape_html(block.content)}</p>"
+            html = "<p>" + escaped_content + "</p>"
         "list":
             html = "<ul>"
             for line in block.rendered_lines:
                 val item = line.trim()
                 if item.starts_with("- ") or item.starts_with("* "):
-                    html = html + "<li>{_gui_escape_html(item.slice(2, item.len()))}</li>"
+                    val li_text = _gui_escape_html(item.slice(2, item.len()))
+                    html = html + "<li>" + li_text + "</li>"
                 else:
-                    html = html + "<li>{_gui_escape_html(item)}</li>"
+                    val li_text = _gui_escape_html(item)
+                    html = html + "<li>" + li_text + "</li>"
             html = html + "</ul>"
         "table":
-            html = "<table>{_gui_escape_html(block.content)}</table>"
+            html = "<table>" + escaped_content + "</table>"
         _:
-            html = "<div>{_gui_escape_html(block.content)}</div>"
+            html = "<div>" + escaped_content + "</div>"
     GuiRenderBlock(block_id: block.id, kind: block.kind, html: html, from_line: block.from_line, to_line: block.to_line)
+
+fn gui_render_editor_area(buffer: EditorBuffer, language_id: text, viewport: EditorViewport) -> text:
+    var html = "<div class=\"editor-area\">"
+    var row = 0
+    while row < viewport.height:
+        val file_row = viewport.top_row + row
+        if file_row < buffer.line_count():
+            val line_content = buffer.line_at(file_row)
+            val escaped = _gui_escape_html(line_content)
+            val line_num = str(file_row + 1)
+            html = html + "<div class=\"line\"><span class=\"line-num\">" + line_num + "</span><span class=\"content\">" + escaped + "</span></div>"
+        row = row + 1
+    html = html + "</div>"
+    html
+
+fn gui_render_tab_bar_html(session: EditSession) -> text:
+    var html = "<div class=\"tab-bar\">"
+    val group_idx = session.layout.active_group_index
+    if group_idx >= 0 and group_idx < session.layout.groups.len():
+        val group = session.layout.groups[group_idx]
+        var t = 0
+        while t < group.tabs.len():
+            val tab = group.tabs[t]
+            val label = _gui_escape_html(tab.label)
+            val active_class = if t == group.active_tab_index then " active" else: ""
+            html = html + "<div class=\"tab" + active_class + "\">" + label + "</div>"
+            t = t + 1
+    html = html + "</div>"
+    html
+
+fn gui_render_file_tree_html(file_tree: FileTreeState) -> text:
+    var html = "<div class=\"file-tree\">"
+    val visible = file_tree.visible_nodes()
+    var i = 0
+    while i < visible.len():
+        val node = visible[i]
+        val name = _gui_escape_html(node.name)
+        val selected_class = if i == file_tree.selected_index then " selected" else: ""
+        val icon = if node.is_dir then "folder" else: "file"
+        html = html + "<div class=\"tree-node " + icon + selected_class + "\">" + name + "</div>"
+        i = i + 1
+    html = html + "</div>"
+    html
+
 
 fn _gui_escape_html(s: text) -> text:
     var result = ""
