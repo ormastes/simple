@@ -8,7 +8,7 @@ use common.ui.widget.{WidgetNode, UITree, UIState}
 use common.ui.glass.theme.{is_glass_theme}
 use common.ui.theme_registry.{ThemeId, theme_id_key}
 use common.string_builder.{StringBuilder}
-use std.gc_async_mut.gpu.browser_engine.dom.{BeDomNode, be_dom_get_tag}
+use std.gc_async_mut.gpu.browser_engine.dom.{BeDomNode, be_dom_get_tag, be_dom_add_child}
 use std.gc_async_mut.gpu.browser_engine.css.{StyleProps, CssValue, BoxEdges,
     BorderProps, be_default_style}
 
@@ -618,6 +618,107 @@ class WidgetToDomApi:
 
     static fn html_string_to_dom(html: text) -> BeDomNode:
         html_string_to_dom(html)
+
+# =========================================================================
+# Browser Renderer Widget -> DOM conversion
+# =========================================================================
+
+fn browser_renderer_ui_tree_to_dom(tree: UITree, state: UIState) -> BeDomNode:
+    """Local UITree conversion avoids an extra cross-module symbol in standalone SMF runs."""
+    val root_widget = tree.root_node()
+    var root_dom = BeDomNode.element("div")
+    root_dom.id = "ui-root"
+    root_dom.classes = ["ui-container"]
+
+    var s = root_dom.style
+    s.display = "flex"
+    s.flex_direction = "column"
+    s.width = CssValue.pct(100.0)
+    s.height = CssValue.pct(100.0)
+    root_dom.style = s
+
+    val content = browser_renderer_widget_to_dom(root_widget, state)
+    be_dom_add_child(root_dom,content)
+    root_dom
+
+fn browser_renderer_widget_to_dom(node: WidgetNode, state: UIState) -> BeDomNode:
+    val kind = node.kind_name()
+    val tag = widget_kind_to_tag(kind)
+
+    var dom = BeDomNode.element(tag)
+    dom.id = node.id
+    browser_renderer_apply_widget_props(dom, node, kind)
+
+    if node.id == state.focused_id:
+        dom.classes.push("focused")
+        var s = dom.style
+        s.border = BorderProps.solid(2, 0x58A6FFFF)
+        dom.style = s
+
+    var wchild_idx = 0
+    val wchildren = node.children()
+    while wchild_idx < wchildren.len():
+        val child = wchildren[wchild_idx]
+        wchild_idx = wchild_idx + 1
+        be_dom_add_child(dom,browser_renderer_widget_to_dom(child, state))
+
+    dom
+
+fn browser_renderer_apply_widget_props(dom: BeDomNode, node: WidgetNode, kind: text):
+    dom.classes.push(kind)
+    val title = node.get_prop("title")
+    if title.len() > 0:
+        dom.set_attr("title", title)
+    val text_content = node.get_prop("text")
+    if text_content.len() > 0:
+        be_dom_add_child(dom,BeDomNode.text(text_content))
+    val value = node.get_prop("value")
+    if value.len() > 0:
+        dom.set_attr("value", value)
+    val placeholder = node.get_prop("placeholder")
+    if placeholder.len() > 0:
+        dom.set_attr("placeholder", placeholder)
+    val layout = node.layout_name()
+    if layout == "hbox":
+        var s = dom.style
+        s.display = "flex"
+        s.flex_direction = "row"
+        dom.style = s
+    elif layout == "vbox":
+        var s = dom.style
+        s.display = "flex"
+        s.flex_direction = "column"
+        dom.style = s
+    elif layout == "grid":
+        var s = dom.style
+        s.display = "grid"
+        dom.style = s
+    val width_val = node.get_prop("width")
+    if width_val.len() > 0:
+        dom.set_style("width", width_val)
+    val height_val = node.get_prop("height")
+    if height_val.len() > 0:
+        dom.set_style("height", height_val)
+    val flex_val = node.get_prop("flex")
+    if flex_val.len() > 0:
+        var s = dom.style
+        s.display = "flex"
+        s.flex_direction = flex_val
+        dom.style = s
+    val gap_val = node.get_prop("gap")
+    if gap_val.len() > 0:
+        dom.set_style("gap", gap_val)
+    val bg_val = node.get_prop("background")
+    if bg_val.len() > 0:
+        dom.set_style("background-color", bg_val)
+    else:
+        val bg2_val = node.get_prop("bg")
+        if bg2_val.len() > 0:
+            dom.set_style("background-color", bg2_val)
+    if not node.is_visible():
+        var s = dom.style
+        s.display = "none"
+        dom.style = s
 
 # =========================================================================
 # Exports
