@@ -1,0 +1,71 @@
+# Physics2 XPBD Solver — Unit Tests
+
+use std.io_runtime
+use std.spec.{describe, it, expect}
+use std.nogc_sync_mut.engine.physics2.solver.xpbd_solver.{XpbdWorld}
+
+describe "XpbdWorld":
+    it "creates empty world":
+        val world = XpbdWorld.create(4)
+        expect(world.particle_count).to_equal(0)
+
+    it "adds particles":
+        var world = XpbdWorld.create(4)
+        val a = world.add_particle(0.0, 0.0, 0.0, 1.0)
+        val b = world.add_particle(1.0, 0.0, 0.0, 1.0)
+        expect(world.particle_count).to_equal(2)
+        expect(a).to_equal(0)
+        expect(b).to_equal(1)
+
+    it "fixed particle does not move":
+        var world = XpbdWorld.create(4)
+        val fixed = world.add_fixed_particle(5.0, 5.0, 5.0)
+        world.step(0.016)
+        val pos = world.get_position(fixed)
+        expect(pos.0).to_equal(5.0)
+        expect(pos.1).to_equal(5.0)
+        expect(pos.2).to_equal(5.0)
+
+    it "free particle falls under gravity":
+        var world = XpbdWorld.create(4)
+        val p = world.add_particle(0.0, 10.0, 0.0, 1.0)
+        world.step(0.1)
+        val pos = world.get_position(p)
+        expect(pos.1 < 10.0).to_equal(true)
+
+    it "distance constraint maintains rest length":
+        var world = XpbdWorld.create(8)
+        world.gravity_y = 0.0
+        val a = world.add_particle(0.0, 0.0, 0.0, 1.0)
+        val b = world.add_particle(2.0, 0.0, 0.0, 1.0)
+        world.add_distance_constraint(a, b, 1000.0)
+        # Pull particle b away
+        var pb = world.particles[b]
+        pb.pos_x = 3.0
+        world.particles[b] = pb
+        world.step(0.016)
+        val pos_b = world.get_position(b)
+        val dx = pos_b.0 - 0.0
+        # Should pull back toward rest length of 2.0
+        expect(dx < 3.0).to_equal(true)
+        expect(dx > 1.5).to_equal(true)
+
+    it "cloth-like chain hangs under gravity":
+        var world = XpbdWorld.create(8)
+        val p0 = world.add_fixed_particle(0.0, 10.0, 0.0)
+        val p1 = world.add_particle(1.0, 10.0, 0.0, 1.0)
+        val p2 = world.add_particle(2.0, 10.0, 0.0, 1.0)
+        val p3 = world.add_particle(3.0, 10.0, 0.0, 1.0)
+        world.add_distance_constraint(p0, p1, 500.0)
+        world.add_distance_constraint(p1, p2, 500.0)
+        world.add_distance_constraint(p2, p3, 500.0)
+        var step = 0
+        while step < 50:
+            world.step(0.016)
+            step = step + 1
+        val pos3 = world.get_position(p3)
+        # End particle should hang below start height
+        expect(pos3.1 < 10.0).to_equal(true)
+        # Fixed particle stays
+        val pos0 = world.get_position(p0)
+        expect(pos0.1).to_equal(10.0)
