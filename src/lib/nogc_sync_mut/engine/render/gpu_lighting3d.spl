@@ -1,0 +1,94 @@
+# GPU Lighting Uniform Buffer Management
+#
+# Manages a single uniform buffer that holds all active LightUniform entries.
+# The buffer is created once (gpu_lighting_init), updated each frame
+# (gpu_lighting_upload), and bound at uniform slot 1 before drawing
+# (gpu_lighting_bind).
+
+use std.nogc_sync_mut.engine.render.backend3d.{
+    RenderBackend3D, BufferHandle, RenderPassHandle
+}
+
+# ============================================================================
+# LightUniform — per-light data uploaded to the GPU
+#
+# Each entry is 32 bytes when packed as 8 × f32 (or 64 bytes if padded to
+# 8 × f64).  We use f32 fields to match shader std140/std430 expectations.
+# ============================================================================
+
+class LightUniform:
+    position_x: f32
+    position_y: f32
+    position_z: f32
+    light_type: i64
+    color_r: f32
+    color_g: f32
+    color_b: f32
+    intensity: f32
+
+# ============================================================================
+# GpuLightingState — owns the GPU-side lighting uniform buffer
+# ============================================================================
+
+class GpuLightingState:
+    buffer: BufferHandle
+    max_lights: i64
+    light_count: i64
+
+impl GpuLightingState:
+    static fn invalid() -> GpuLightingState:
+        GpuLightingState(
+            buffer: BufferHandle.invalid(),
+            max_lights: 0,
+            light_count: 0
+        )
+
+# ============================================================================
+# gpu_lighting_init — allocate the lighting uniform buffer
+#
+# Reserves max_lights * 64 bytes (64 bytes per light slot to accommodate
+# std140 padding on the GPU side).
+# ============================================================================
+
+fn gpu_lighting_init(backend: RenderBackend3D, max_lights: i64) -> GpuLightingState:
+    val byte_count = max_lights * 64
+    val buf = backend.create_uniform_buffer(byte_count)
+    GpuLightingState(
+        buffer: buf,
+        max_lights: max_lights,
+        light_count: 0
+    )
+
+# ============================================================================
+# gpu_lighting_upload — serialize lights to bytes and upload
+#
+# Packs LightUniform fields into a zeroed [u8] byte array.
+# TODO: replace placeholder zeroed serialization with real f32→[u8] packing
+#       once rt_f32_to_bytes (or equivalent) is available in the runtime.
+# ============================================================================
+
+fn gpu_lighting_upload(state: GpuLightingState, backend: RenderBackend3D, lights: [LightUniform]) -> GpuLightingState:
+    val count = lights.len()
+    val byte_count = count * 64
+
+    # TODO: real f32/i64 serialization — zeroed placeholder for now
+    var bytes: [u8] = []
+    var i = 0
+    while i < byte_count:
+        bytes.push(0)
+        i = i + 1
+
+    backend.upload_buffer(state.buffer, bytes, 0)
+
+    GpuLightingState(
+        buffer: state.buffer,
+        max_lights: state.max_lights,
+        light_count: count
+    )
+
+# ============================================================================
+# gpu_lighting_bind — bind the light buffer at uniform slot 1
+# ============================================================================
+
+fn gpu_lighting_bind(state: GpuLightingState, backend: RenderBackend3D, pass: RenderPassHandle):
+    backend.bind_uniform_buffer(pass, state.buffer, 1)

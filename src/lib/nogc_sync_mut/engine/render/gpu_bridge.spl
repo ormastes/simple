@@ -19,6 +19,9 @@ use std.gc_async_mut.gpu.graphics.{
 }
 use std.nogc_sync_mut.engine.render.gpu_pipeline.{SpriteBatch, GpuVertex2D}
 use std.nogc_sync_mut.engine.render.types.{DrawStats}
+use std.nogc_sync_mut.engine.render.backend3d.{
+    RenderBackend3D, TextureHandle, RenderPassHandle
+}
 
 # ============================================================================
 # GPU Render State — persistent resources for a frame
@@ -144,6 +147,45 @@ fn destroy_gpu_render_state(ctx: Context, state: GpuRenderState):
     if not state.is_initialized:
         return
     ctx.destroy_texture(state.color_texture)
+
+# ============================================================================
+# Batch Data Conversion
+# ============================================================================
+
+# ============================================================================
+# Backend3D Frame Helpers — RenderBackend3D-based frame lifecycle
+#
+# These parallel the Context-based begin/end_gpu_frame above but dispatch
+# through the RenderBackend3D trait so any backend (Software, Vulkan, WebGpu)
+# can drive a 3D frame without needing a gc_async_mut GPU Context.
+# ============================================================================
+
+# GpuFrame3D — transient per-frame state for a RenderBackend3D frame
+class GpuFrame3D:
+    pass_handle: RenderPassHandle
+    is_active: bool
+
+impl GpuFrame3D:
+    static fn inactive() -> GpuFrame3D:
+        GpuFrame3D(
+            pass_handle: RenderPassHandle(id: -1),
+            is_active: false
+        )
+
+fn begin_gpu_frame_3d(backend: RenderBackend3D, color_tex: TextureHandle, depth_tex: TextureHandle, clear_color: EngineColor) -> GpuFrame3D:
+    backend.begin_frame()
+    val pass = backend.begin_render_pass(color_tex, depth_tex)
+    GpuFrame3D(
+        pass_handle: pass,
+        is_active: true
+    )
+
+fn end_gpu_frame_3d(backend: RenderBackend3D, frame: GpuFrame3D):
+    if not frame.is_active:
+        return
+    backend.end_render_pass(frame.pass_handle)
+    backend.end_frame()
+    backend.present()
 
 # ============================================================================
 # Batch Data Conversion

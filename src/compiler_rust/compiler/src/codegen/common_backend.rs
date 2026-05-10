@@ -526,28 +526,26 @@ impl<M: Module> CodegenBackend<M> {
             // Determine linkage and symbol name.
             //
             // `main` handling depends on is_entry_module:
-            //   - Entry module main:     symbol = "spl_main",      linkage = Preemptible
+            //   - Entry module main:     symbol = "spl_main",      linkage = Export
             //   - Non-entry module main: symbol = mangled name,    linkage = Local
             //
-            // All other functions with bodies get Preemptible linkage so they're
-            // visible across modules in multi-file builds. The mangled name avoids
-            // collisions between same-named functions in different modules.
+            // All other functions with bodies get Export linkage (STB_GLOBAL in ELF)
+            // so they override weak crt0 boot-stubs in freestanding builds.
             let has_body = !func.blocks.is_empty();
 
             let (symbol_name, linkage) = if func.name == "main" && has_body {
                 if self.is_entry_module {
-                    ("spl_main".to_string(), cranelift_module::Linkage::Preemptible)
+                    ("spl_main".to_string(), cranelift_module::Linkage::Export)
                 } else {
                     (self.mangle_name(&func.name), cranelift_module::Linkage::Local)
                 }
             } else if !has_body {
                 (self.sanitize_symbol(&func.name), cranelift_module::Linkage::Import)
             } else {
-                // All functions with bodies get mangled names + Preemptible linkage.
-                // This prevents symbol collisions when multiple modules define
-                // same-named functions (e.g., get_version(), init()).
-                // Cross-module calls are resolved via the import map in calls.rs.
-                (self.mangle_name(&func.name), cranelift_module::Linkage::Preemptible)
+                // Export (STB_GLOBAL) so symbols override weak crt0 boot-stubs and
+                // are visible to the freestanding --defsym linker mechanism.
+                // Mangled names prevent cross-module collisions.
+                (self.mangle_name(&func.name), cranelift_module::Linkage::Export)
             };
 
             let func_id = self

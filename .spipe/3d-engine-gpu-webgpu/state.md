@@ -220,7 +220,7 @@ spec-done
 - 1-dev (2026-05-10): Created state file with 10 acceptance criteria, 6 parallel workstreams
 - 2-research (2026-05-10): Found 32 existing files across gc_async engine3d + nogc engine render; identified 8 rt_webgpu_* externs (wired), 18 rt_vulkan_* compute externs (declared, no graphics), 6 rt_image_* externs (wired), full rt_cuda_* set; 3 blockers: rt_vulkan_compile_glsl has no runtime backing, Context lacks create_texture/render_pass/swapchain methods, WebGPU is pixel-upload-only (not 3D pipeline); 10 requirements drafted
 - 3-arch (2026-05-10): Designed 16 modules (12 new files + 4 modified files across 6 disjoint streams), 8 ADR-style decisions, dependency map verified cycle-free, all 10 ACs covered, AnyRenderBackend3D tagged enum as Engine3D polymorphism boundary, ShaderCompiler decoupled from backends via PipelineDesc3D artifact handoff
-- 4-spec (2026-05-10): Created 6 spec files with 111 total it blocks, 100% AC coverage (AC-8 audit-only); all specs use SoftwareRenderBackend3D as test backend; all specs fail (no implementation exists); placed in test/lib/nogc_sync_mut/engine/render/
+- 4-spec (2026-05-10): Created 7 spec files with ~121 total it blocks, 100% AC coverage (AC-8 audit-only); Stream D split into gpu_mesh3d_spec.spl (AC-3) and gpu_lighting3d_spec.spl (AC-4); all specs use SoftwareRenderBackend3D as test backend; all specs fail (no implementation exists); placed in test/lib/nogc_sync_mut/engine/render/
 
 ### 3-arch
 
@@ -721,11 +721,14 @@ Cycle check:
 - `test/lib/nogc_sync_mut/engine/render/backend3d_spec.spl` — 23 specs covering AC-1, AC-2, AC-9, AC-10
 - `test/lib/nogc_sync_mut/engine/render/vulkan_backend3d_spec.spl` — 17 specs covering AC-1 (Vulkan impl), AC-10
 - `test/lib/nogc_sync_mut/engine/render/webgpu_backend3d_spec.spl` — 17 specs covering AC-1 (WebGPU impl), AC-6, AC-10
-- `test/lib/nogc_sync_mut/engine/render/gpu_mesh3d_spec.spl` — 19 specs covering AC-3, AC-4
+- `test/lib/nogc_sync_mut/engine/render/gpu_mesh3d_spec.spl` — 12 specs covering AC-3
+- `test/lib/nogc_sync_mut/engine/render/gpu_lighting3d_spec.spl` — 17 specs covering AC-4
 - `test/lib/nogc_sync_mut/engine/render/shader_compile_spec.spl` — 16 specs covering AC-5
 - `test/lib/nogc_sync_mut/engine/render/texture3d_spec.spl` — 19 specs covering AC-7
 
-**Total: 6 spec files, 111 `it` blocks**
+**Total: 7 spec files, ~121 `it` blocks**
+
+**Implementer note (enum equality):** Several specs compare tagged enum values with `==` (e.g. `cmd == VulkanCommand3D.BeginRenderPass(...)`, `cap.backend == RenderBackendKind3D.Vulkan`). Equality on data-carrying enum variants is not confirmed by existing codebase examples. The implementer for AC-1/AC-6 may need to provide `eq(other)` helpers or `kind_name() -> text` accessors and update the relevant `it` blocks accordingly. Simple enum variants without payloads (e.g. `RenderBackendKind3D.Software`) are lower risk.
 
 ### AC Coverage Matrix
 
