@@ -1,0 +1,161 @@
+# Editor Buffer
+#
+# Wraps piece table + undo stack + dirty flag + file path.
+# Single unit of text editing with undo/redo support.
+
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_write_text(path: text, content: text) -> bool
+
+class EditorBuffer:
+    id: EditorBufferId
+    path: text
+    piece_table: EditorPieceTable
+    undo_stack: UndoStack
+    dirty: bool
+    cursor_row: i64
+    cursor_col: i64
+    viewport: EditorViewport
+
+impl EditorBuffer:
+
+    static fn from_text(id: EditorBufferId, content: text) -> EditorBuffer:
+        EditorBuffer(
+            id: id,
+            path: "",
+            piece_table: EditorPieceTable.from_text(content),
+            undo_stack: UndoStack.new(),
+            dirty: false,
+            cursor_row: 0,
+            cursor_col: 0,
+            viewport: EditorViewport(top_row: 0, left_col: 0, width: 80, height: 24)
+        )
+
+    static fn from_file(id: EditorBufferId, path: text) -> EditorBuffer:
+        val content = rt_file_read_text(path) ?? ""
+        var buf = EditorBuffer.from_text(id, content)
+        buf.path = path
+        buf
+
+    fn to_text() -> text:
+        self.piece_table.to_text()
+
+    fn line_count() -> i64:
+        self.piece_table.line_count()
+
+    fn line_at(row: i64) -> text:
+        self.piece_table.line_at(row)
+
+    fn line_starts() -> [i64]:
+        self.piece_table.line_starts()
+
+    me insert_at_cursor(content: text):
+        val starts = self.line_starts()
+        val offset = pt_row_col_to_offset(starts, self.cursor_row, self.cursor_col)
+        self.undo_stack.push(self.to_text(), self.cursor_row, self.cursor_col)
+        self.piece_table.insert(offset, content)
+        self.dirty = true
+        val stats = _buf_insert_stats(content)
+        if stats.newlines == 0:
+            self.cursor_col = self.cursor_col + content.len()
+        else:
+            self.cursor_row = self.cursor_row + stats.newlines
+            self.cursor_col = stats.last_line_len
+
+    me delete_before_cursor():
+        if self.cursor_row == 0 and self.cursor_col == 0:
+            return
+        val starts = self.line_starts()
+        val offset = pt_row_col_to_offset(starts, self.cursor_row, self.cursor_col)
+        if offset <= 0:
+            return
+        self.undo_stack.push(self.to_text(), self.cursor_row, self.cursor_col)
+        val prev = pt_offset_to_cursor(starts, offset - 1)
+        self.piece_table.delete(offset - 1, offset)
+        self.cursor_row = prev.row
+        self.cursor_col = prev.col
+        self.dirty = true
+
+    me delete_at_cursor():
+        val starts = self.line_starts()
+        val offset = pt_row_col_to_offset(starts, self.cursor_row, self.cursor_col)
+        if offset >= self.piece_table.len():
+            return
+        self.undo_stack.push(self.to_text(), self.cursor_row, self.cursor_col)
+        self.piece_table.delete(offset, offset + 1)
+        self.dirty = true
+
+    me move_cursor(row: i64, col: i64):
+        val content = self.to_text()
+        val starts = _pt_compute_line_starts(content)
+        val max_row = if starts.len() > 0 then starts.len() - 1 else: 0
+        self.cursor_row = _pt_clamp(row, 0, max_row)
+        val line_len = pt_line_length(content, starts, self.cursor_row)
+        self.cursor_col = _pt_clamp(col, 0, line_len)
+
+    me move_relative(delta_row: i64, delta_col: i64):
+        self.move_cursor(self.cursor_row + delta_row, self.cursor_col + delta_col)
+
+    me move_to_line_start():
+        self.cursor_col = 0
+
+    me move_to_line_end():
+        val content = self.to_text()
+        val starts = _pt_compute_line_starts(content)
+        val line_len = pt_line_length(content, starts, self.cursor_row)
+        self.cursor_col = line_len
+
+    me undo():
+        if not self.undo_stack.can_undo():
+            return
+        val entry = self.undo_stack.undo(self.to_text(), self.cursor_row, self.cursor_col)
+        self.piece_table = EditorPieceTable.from_text(entry.content)
+        self.cursor_row = entry.cursor_row
+        self.cursor_col = entry.cursor_col
+        self.dirty = true
+
+    me redo():
+        if not self.undo_stack.can_redo():
+            return
+        val entry = self.undo_stack.redo(self.to_text(), self.cursor_row, self.cursor_col)
+        self.piece_table = EditorPieceTable.from_text(entry.content)
+        self.cursor_row = entry.cursor_row
+        self.cursor_col = entry.cursor_col
+        self.dirty = true
+
+    me save() -> bool:
+        if self.path == "":
+            return false
+        val ok = rt_file_write_text(self.path, self.to_text())
+        if ok:
+            self.dirty = false
+        ok
+
+    me save_as(path: text) -> bool:
+        self.path = path
+        self.save()
+
+    me ensure_cursor_visible():
+        if self.cursor_row < self.viewport.top_row:
+            self.viewport.top_row = self.cursor_row
+        elif self.cursor_row >= self.viewport.top_row + self.viewport.height:
+            self.viewport.top_row = self.cursor_row - self.viewport.height + 1
+        if self.viewport.top_row < 0:
+            self.viewport.top_row = 0
+
+
+struct InsertStats:
+    newlines: i64
+    last_line_len: i64
+
+fn _buf_insert_stats(content: text) -> InsertStats:
+    var newlines = 0
+    var last_line_len = 0
+    var i = 0
+    while i < content.len():
+        if content.char_at(i) == "\n":
+            newlines = newlines + 1
+            last_line_len = 0
+        else:
+            last_line_len = last_line_len + 1
+        i = i + 1
+    InsertStats(newlines: newlines, last_line_len: last_line_len)

@@ -1,0 +1,226 @@
+# Editor TUI Shell
+#
+# Terminal UI shell for the editor. Handles rendering and key input.
+# Uses std.tui for terminal control and ANSI rendering.
+
+use std.tui.terminal.*
+use std.tui.style.*
+
+extern fn stdin_read_char() -> text
+
+fn editor_tui_run(buffer: EditorBuffer):
+    terminal_enter_alt_screen()
+    terminal_enter_raw_mode()
+    terminal_hide_cursor()
+
+    var mode = EditorMode.Normal
+    var status_msg = "ready"
+    var commandline = ""
+    var running = true
+
+    while running:
+        val size = terminal_get_size()
+        buffer.viewport.width = size.cols
+        buffer.viewport.height = size.rows - 2
+        buffer.ensure_cursor_visible()
+
+        _tui_render_frame(buffer, mode, status_msg, commandline, size)
+        terminal_flush()
+
+        val key = stdin_read_char()
+        if key == "":
+            continue
+
+        if mode == EditorMode.Command:
+            val cmd_result = _tui_handle_command_key(key, commandline)
+            commandline = cmd_result.commandline
+            if cmd_result.done:
+                val parsed = editor_parse_commandline(commandline)
+                val result = editor_dispatch(buffer, parsed)
+                status_msg = result.message
+                if result.quit:
+                    running = false
+                mode = EditorMode.Normal
+                commandline = ""
+            elif cmd_result.cancelled:
+                mode = EditorMode.Normal
+                commandline = ""
+                status_msg = ""
+            continue
+
+        if mode == EditorMode.Normal:
+            val result = _tui_handle_normal_key(buffer, key)
+            status_msg = result.message
+            if result.quit:
+                running = false
+            if result.enter_insert:
+                mode = EditorMode.Insert
+                status_msg = "-- INSERT --"
+            if result.enter_command:
+                mode = EditorMode.Command
+                commandline = ""
+            continue
+
+        if mode == EditorMode.Insert:
+            val result = _tui_handle_insert_key(buffer, key)
+            status_msg = result.message
+            if result.exit_insert:
+                mode = EditorMode.Normal
+                status_msg = ""
+
+    terminal_show_cursor()
+    terminal_exit_raw_mode()
+    terminal_exit_alt_screen()
+
+
+fn _tui_render_frame(buffer: EditorBuffer, mode: EditorMode, status_msg: text, commandline: text, size: TerminalSize):
+    terminal_clear_screen()
+    val editor_height = size.rows - 2
+    val line_num_width = 4
+
+    var row = 0
+    while row < editor_height:
+        val file_row = buffer.viewport.top_row + row
+        terminal_move_cursor(row, 0)
+        if file_row < buffer.line_count():
+            val num_str = str(file_row + 1)
+            var padding = ""
+            var p = 0
+            while p < line_num_width - num_str.len():
+                padding = padding + " "
+                p = p + 1
+            terminal_write(padding + num_str + " ")
+            val line = buffer.line_at(file_row)
+            val visible_start = buffer.viewport.left_col
+            val visible_end = visible_start + size.cols - line_num_width - 1
+            val display = if visible_start < line.len() then line.slice(visible_start, if visible_end < line.len() then visible_end else: line.len()) else: ""
+            terminal_write(display)
+        else:
+            terminal_write("~")
+        row = row + 1
+
+    val status_row = size.rows - 2
+    terminal_move_cursor(status_row, 0)
+    val mode_str = editor_mode_name(mode)
+    val path_str = if buffer.path != "" then buffer.path else: "[No Name]"
+    val dirty_str = if buffer.dirty then " [+]" else: ""
+    val pos_str = "{buffer.cursor_row + 1},{buffer.cursor_col + 1}"
+    val left_status = " {mode_str} | {path_str}{dirty_str}"
+    val right_status = "{pos_str} "
+    var fill = ""
+    var f = 0
+    val fill_len = size.cols - left_status.len() - right_status.len()
+    while f < fill_len:
+        fill = fill + " "
+        f = f + 1
+    terminal_write("\x1b[7m" + left_status + fill + right_status + "\x1b[0m")
+
+    val cmd_row = size.rows - 1
+    terminal_move_cursor(cmd_row, 0)
+    if mode == EditorMode.Command:
+        terminal_write(":" + commandline)
+    else:
+        terminal_write(status_msg)
+
+    val cursor_screen_row = buffer.cursor_row - buffer.viewport.top_row
+    val cursor_screen_col = buffer.cursor_col - buffer.viewport.left_col + line_num_width + 1
+    terminal_move_cursor(cursor_screen_row, cursor_screen_col)
+    terminal_show_cursor()
+
+
+struct NormalKeyResult:
+    message: text
+    quit: bool
+    enter_insert: bool
+    enter_command: bool
+
+fn _tui_handle_normal_key(buffer: EditorBuffer, key: text) -> NormalKeyResult:
+    if key == "q":
+        return NormalKeyResult(message: "quit", quit: true, enter_insert: false, enter_command: false)
+    if key == "i":
+        return NormalKeyResult(message: "-- INSERT --", quit: false, enter_insert: true, enter_command: false)
+    if key == "a":
+        buffer.move_relative(0, 1)
+        return NormalKeyResult(message: "-- INSERT --", quit: false, enter_insert: true, enter_command: false)
+    if key == "o":
+        buffer.move_to_line_end()
+        buffer.insert_at_cursor("\n")
+        return NormalKeyResult(message: "-- INSERT --", quit: false, enter_insert: true, enter_command: false)
+    if key == ":":
+        return NormalKeyResult(message: "", quit: false, enter_insert: false, enter_command: true)
+    if key == "h":
+        val result = editor_dispatch(buffer, editor_cmd("move-left"))
+        return NormalKeyResult(message: result.message, quit: false, enter_insert: false, enter_command: false)
+    if key == "j":
+        val result = editor_dispatch(buffer, editor_cmd("move-down"))
+        return NormalKeyResult(message: result.message, quit: false, enter_insert: false, enter_command: false)
+    if key == "k":
+        val result = editor_dispatch(buffer, editor_cmd("move-up"))
+        return NormalKeyResult(message: result.message, quit: false, enter_insert: false, enter_command: false)
+    if key == "l":
+        val result = editor_dispatch(buffer, editor_cmd("move-right"))
+        return NormalKeyResult(message: result.message, quit: false, enter_insert: false, enter_command: false)
+    if key == "0":
+        buffer.move_to_line_start()
+        return NormalKeyResult(message: "home", quit: false, enter_insert: false, enter_command: false)
+    if key == "$":
+        buffer.move_to_line_end()
+        return NormalKeyResult(message: "end", quit: false, enter_insert: false, enter_command: false)
+    if key == "G":
+        buffer.move_cursor(buffer.line_count() - 1, 0)
+        return NormalKeyResult(message: "bottom", quit: false, enter_insert: false, enter_command: false)
+    if key == "g":
+        buffer.move_cursor(0, 0)
+        return NormalKeyResult(message: "top", quit: false, enter_insert: false, enter_command: false)
+    if key == "x":
+        val result = editor_dispatch(buffer, editor_cmd("delete"))
+        return NormalKeyResult(message: result.message, quit: false, enter_insert: false, enter_command: false)
+    if key == "u":
+        val result = editor_dispatch(buffer, editor_cmd("undo"))
+        return NormalKeyResult(message: result.message, quit: false, enter_insert: false, enter_command: false)
+    if key == "\x12":
+        val result = editor_dispatch(buffer, editor_cmd("redo"))
+        return NormalKeyResult(message: result.message, quit: false, enter_insert: false, enter_command: false)
+    NormalKeyResult(message: "", quit: false, enter_insert: false, enter_command: false)
+
+
+struct InsertKeyResult:
+    message: text
+    exit_insert: bool
+
+fn _tui_handle_insert_key(buffer: EditorBuffer, key: text) -> InsertKeyResult:
+    if key == "\x1b":
+        return InsertKeyResult(message: "", exit_insert: true)
+    if key == "\x7f" or key == "\b":
+        editor_dispatch(buffer, editor_cmd("backspace"))
+        return InsertKeyResult(message: "-- INSERT --", exit_insert: false)
+    if key == "\r" or key == "\n":
+        editor_dispatch(buffer, editor_cmd("newline"))
+        return InsertKeyResult(message: "-- INSERT --", exit_insert: false)
+    if key.len() == 1:
+        val code = key.char_code_at(0)
+        if code >= 32:
+            editor_dispatch(buffer, editor_cmd_with("insert-text", key))
+        return InsertKeyResult(message: "-- INSERT --", exit_insert: false)
+    InsertKeyResult(message: "-- INSERT --", exit_insert: false)
+
+
+struct CommandKeyResult:
+    commandline: text
+    done: bool
+    cancelled: bool
+
+fn _tui_handle_command_key(key: text, commandline: text) -> CommandKeyResult:
+    if key == "\x1b":
+        return CommandKeyResult(commandline: "", done: false, cancelled: true)
+    if key == "\r" or key == "\n":
+        return CommandKeyResult(commandline: commandline, done: true, cancelled: false)
+    if key == "\x7f" or key == "\b":
+        if commandline.len() > 0:
+            return CommandKeyResult(commandline: commandline.slice(0, commandline.len() - 1), done: false, cancelled: false)
+        return CommandKeyResult(commandline: "", done: false, cancelled: true)
+    if key.len() == 1:
+        val code = key.char_code_at(0)
+        if code >= 32:
+            return CommandKeyResult(commandline: commandline + key, done: false, cancelled: false)
+    CommandKeyResult(commandline: commandline, done: false, cancelled: false)
