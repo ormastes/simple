@@ -3,6 +3,7 @@
 **Date:** 2026-05-02  
 **Severity:** Medium (blocks KAT verification in interpreter mode)  
 **Affects:** `test/unit/os/crypto/eax_kat_spec.spl`, `test/unit/os/crypto/ocb3_kat_spec.spl`
+**Status:** FIXED 2026-05-10 — verified: OCB3 spec passes (all tests pass, 10s).
 
 ## Symptom
 

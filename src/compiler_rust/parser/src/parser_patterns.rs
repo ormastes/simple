@@ -8,6 +8,42 @@ use crate::parser_impl::core::Parser;
 use crate::token::TokenKind;
 
 impl<'a> Parser<'a> {
+    // === Enum Payload Helpers ===
+
+    /// Parse the argument list of an enum variant pattern: `(pat, pat, ...)`
+    /// Supports both positional `(v)` and named-field `(field: v)` syntax.
+    /// Named fields are consumed and discarded — the binding is positional.
+    /// NOTE: field-name reordering is not honored; bindings follow source order.
+    pub(crate) fn parse_enum_payload_patterns(&mut self) -> Result<Vec<Pattern>, ParseError> {
+        self.expect(&TokenKind::LParen)?;
+        let mut patterns = Vec::new();
+        while !self.check(&TokenKind::RParen) {
+            // Check for named-field binding: `field_name: binding_pattern`
+            // Inside enum payload parens, `Ident :` is unambiguously a named-field binding.
+            if let TokenKind::Identifier { .. } = &self.current.kind {
+                let next = self.peek_next();
+                if next.kind == TokenKind::Colon {
+                    self.advance(); // consume field name (discarded)
+                    self.advance(); // consume colon
+                    // Now parse the actual binding pattern
+                    patterns.push(self.parse_single_pattern()?);
+                    if !self.check(&TokenKind::RParen) {
+                        self.expect(&TokenKind::Comma)?;
+                    }
+                    continue;
+                }
+            }
+            // Positional pattern (no field name)
+            // Use parse_single_pattern to avoid comma being consumed as or-pattern
+            patterns.push(self.parse_single_pattern()?);
+            if !self.check(&TokenKind::RParen) {
+                self.expect(&TokenKind::Comma)?;
+            }
+        }
+        self.expect(&TokenKind::RParen)?;
+        Ok(patterns)
+    }
+
     // === Pattern Parsing ===
 
     pub(crate) fn parse_pattern(&mut self) -> Result<Pattern, ParseError> {

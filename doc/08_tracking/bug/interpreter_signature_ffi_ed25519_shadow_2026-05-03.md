@@ -2,6 +2,7 @@
 
 **Filed:** 2026-05-03  
 **Discovered during:** COSE RFC 9052 KAT spec fix (cose_rfc9052_kat_spec.spl)
+**Status:** FIXED 2026-05-10 — verified: dual import of ed25519_sign + ecdsa_p256 no longer shadows.
 
 ## Symptom
 
