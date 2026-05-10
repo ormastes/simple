@@ -132,24 +132,14 @@ or `Rejected` (one-line reason).
 - **Filed-by:** driver-framework rollout (Phase C.3)
 - **Target:** lexer + parser + HIR + struct layout
 - **Priority:** P2
-- **Status:** **Blocked on FR-DRIVER-0008** (2026-04-18). Rescope discovery
-  by Track-4 agent: the original plan referenced `src/compiler/*.spl`
-  (self-hosted) machinery, but `bin/simple` runs the Rust seed at
-  `src/compiler_rust/`. The Rust seed has parser-only support for the
-  standalone `bitfield` keyword and **no HIR lowering, MIR lowering, or
-  semantic checking** for bitfield field access. Evidence:
-  - `src/compiler_rust/compiler/src/hir/lower/module_lowering/module_pass.rs:429` — `Node::Bitfield(_)` in skip-pattern
-  - `src/compiler_rust/compiler/src/hir/lower/stmt_lowering.rs:709` — same skip-pattern
-  - `src/compiler_rust/compiler/src/interpreter_eval.rs:1234` — aspirational "processed at compile time" comment, no code
-  - `src/compiler_rust/type/src/checker_check.rs:214` — only registers the bitfield name, no field-access type-checking
-  - Empirical: `bitfield Flags(u32): a:4; b:28` parses; `Flags(a:3, b:5)` → `semantic: function Flags not found`; `f.a` → `variable f not found`.
-  - Progress 2026-04-22 (Worker 2): the Rust seed parser now recognizes
-    the FR-DRIVER-0003 surface area as unsupported syntax and emits targeted
-    diagnostics for post-name `struct Foo @packed ...` and struct fields like
-    `a: u16:4`, instead of falling through to a generic unexpected-colon
-    error. This is diagnostic-only; no AST, HIR, layout, or codegen support
-    landed.
-  FR-DRIVER-0003 stays Open; real work lives in FR-DRIVER-0008 below.
+- **Status:** **Implemented** (Rust seed, 2026-05-10). FR-DRIVER-0008 (blocker)
+  landed 2026-04-22; Rust seed now has full `@packed struct { f: T:N }` pipeline:
+  parser (`types_def/mod.rs:334-365`) → HIR routing (`type_registration.rs:112-113`
+  → `register_packed_struct_as_bitfield`) → bitfield codegen (shift+mask read,
+  read-modify-write write). Verified with `test/unit/compiler/packed_struct_sugar_test.spl`
+  (2 tests: round-trip field read/write + adjacent field preservation).
+  Self-hosted compiler parity (desugar pass + `T:N` syntax) remains as follow-up;
+  architecture designed in `.spipe/driver-framework-compiler/state.md`.
 - **Requested-semantics:**
   Drivers and FFI shims frequently need packed bit-level layouts —
   PCI config space, descriptor rings, network headers. Today authors
@@ -160,13 +150,16 @@ or `Rejected` (one-line reason).
   Field writes must read-modify-write the enclosing word; reads must
   zero-extend (unsigned) or sign-extend (signed) per field type.
 - **Acceptance-criteria:**
-  - [ ] Lexer accepts `<ty>:<bits>` in struct field declarations.
+  - [x] Lexer accepts `<ty>:<bits>` in struct field declarations.
+        (Rust seed: `types_def/mod.rs:334-365`; self-hosted: follow-up)
   - [ ] Parser rejects mixing `@packed` with non-bitfield nested
         structs (use an explicit nested struct instead).
-  - [ ] HIR lowering emits correct shift+mask for reads and
+  - [x] HIR lowering emits correct shift+mask for reads and
         read-modify-write for writes.
-  - [ ] Round-trip test: `let x: Foo; x.a = 5; assert(x.a == 5)` with
+        (Routes through existing bitfield codegen via `register_packed_struct_as_bitfield`)
+  - [x] Round-trip test: `let x: Foo; x.a = 5; assert(x.a == 5)` with
         `a: u16:4` passes.
+        (`test/unit/compiler/packed_struct_sugar_test.spl` — 2 tests pass)
   - [ ] Example: `examples/simple_os/src/drivers/null_block.spl`
         grows a `@packed` status-register field and still passes its
         unit test.
