@@ -1,0 +1,363 @@
+# RISC-V Device Tree Blob (DTB/FDT) Generation Helpers
+#
+# Generates Flattened Device Tree (FDT) blobs for firmware handoff.
+# A DTB describes the hardware to the bootloader (OpenSBI / U-Boot)
+# and the Linux kernel.
+#
+# FDT binary format (big-endian):
+#   Header (40 bytes):
+#     magic         (u32) = 0xD00DFEED
+#     totalsize     (u32)
+#     off_dt_struct (u32)
+#     off_dt_strings(u32)
+#     off_mem_rsvmap(u32)
+#     version       (u32) = 17
+#     last_comp_ver (u32) = 16
+#     boot_cpuid    (u32) = 0
+#     size_dt_strings(u32)
+#     size_dt_struct (u32)
+#
+#   Memory reservation block
+#   Structure block (tokens + property data)
+#   Strings block (property name strings)
+#
+# Token types:
+#   FDT_BEGIN_NODE = 1
+#   FDT_END_NODE   = 2
+#   FDT_PROP       = 3
+#   FDT_NOP        = 4
+#   FDT_END        = 9
+#
+# Reference: Devicetree Specification v0.4
+#
+# ============================================================================
+# FDT Constants
+# ============================================================================
+
+val FDT_MAGIC: u64 = 0xD00DFEED
+val FDT_VERSION: u64 = 17
+val FDT_LAST_COMP_VERSION: u64 = 16
+
+# FDT Tokens
+val FDT_BEGIN_NODE: u64 = 1
+val FDT_END_NODE: u64 = 2
+val FDT_PROP: u64 = 3
+val FDT_NOP: u64 = 4
+val FDT_END: u64 = 9
+
+# FDT Header size (10 x u32 = 40 bytes)
+val FDT_HEADER_SIZE: u64 = 40
+
+# Memory reservation entry size (2 x u64 = 16 bytes)
+val FDT_MEM_RSV_ENTRY_SIZE: u64 = 16
+
+# ============================================================================
+# Big-Endian Encoding Helpers
+# ============================================================================
+#
+# FDT uses big-endian byte order.  These helpers write multi-byte
+# values in BE order into a u8 buffer at a given offset.
+
+fn write_be32(buf: [u8], offset: u64, value: u64) -> u64:
+    """Write a 32-bit big-endian value into buf at offset. Returns new offset."""
+    buf[offset] = ((value >> 24) & 0xFF) as u8
+    buf[offset + 1] = ((value >> 16) & 0xFF) as u8
+    buf[offset + 2] = ((value >> 8) & 0xFF) as u8
+    buf[offset + 3] = (value & 0xFF) as u8
+    offset + 4
+
+fn write_be64(buf: [u8], offset: u64, value: u64) -> u64:
+    """Write a 64-bit big-endian value into buf at offset. Returns new offset."""
+    var off = write_be32(buf, offset, (value >> 32) & 0xFFFFFFFF)
+    off = write_be32(buf, off, value & 0xFFFFFFFF)
+    off
+
+fn read_be32(buf: [u8], offset: u64) -> u64:
+    """Read a 32-bit big-endian value from buf at offset."""
+    val b0 = buf[offset] as u64
+    val b1 = buf[offset + 1] as u64
+    val b2 = buf[offset + 2] as u64
+    val b3 = buf[offset + 3] as u64
+    (b0 << 24) | (b1 << 16) | (b2 << 8) | b3
+
+# ============================================================================
+# FDT String Table
+# ============================================================================
+#
+# Property names are stored once in the strings block and referenced
+# by offset.  FdtStrings tracks the growing strings block.
+
+struct FdtStrings:
+    """FDT string table accumulator."""
+    data: [u8]
+    count: u64
+
+impl FdtStrings:
+    fn new() -> FdtStrings:
+        FdtStrings(data: [], count: 0)
+
+    fn add(self, name: text) -> u64:
+        """Add a string to the table, return its offset."""
+        val off = self.count
+        for ch in name:
+            self.data = self.data + [ch as u8]
+            self.count = self.count + 1
+        # Null terminator
+        self.data = self.data + [0]
+        self.count = self.count + 1
+        off
+
+    fn size(self) -> u64:
+        """Return the current size of the strings block."""
+        self.count
+
+# ============================================================================
+# FDT Builder
+# ============================================================================
+#
+# Builds an FDT blob incrementally.  Usage:
+#
+#   var b = FdtBuilder.new()
+#   b = b.begin_node("")           # root node
+#   b = b.prop_u32("#address-cells", 2)
+#   b = b.prop_u32("#size-cells", 2)
+#   b = b.prop_string("compatible", "riscv-virtio")
+#   b = b.begin_node("cpus")
+#   ...
+#   b = b.end_node()
+#   b = b.end_node()
+#   val blob = b.finish()
+
+struct FdtBuilder:
+    """Incremental FDT blob builder."""
+    struct_data: [u8]
+    struct_size: u64
+    strings: FdtStrings
+
+impl FdtBuilder:
+    fn new() -> FdtBuilder:
+        FdtBuilder(struct_data: [], struct_size: 0, strings: FdtStrings.new())
+
+    fn write_token(self, token: u64) -> FdtBuilder:
+        """Append a 4-byte BE token to the structure block."""
+        var sd = self.struct_data
+        sd = sd + [((token >> 24) & 0xFF) as u8]
+        sd = sd + [((token >> 16) & 0xFF) as u8]
+        sd = sd + [((token >> 8) & 0xFF) as u8]
+        sd = sd + [(token & 0xFF) as u8]
+        FdtBuilder(struct_data: sd, struct_size: self.struct_size + 4, strings: self.strings)
+
+    fn write_bytes(self, data: [u8]) -> FdtBuilder:
+        """Append raw bytes to the structure block."""
+        var sd = self.struct_data + data
+        FdtBuilder(struct_data: sd, struct_size: self.struct_size + data.len(), strings: self.strings)
+
+    fn pad_to_align(self) -> FdtBuilder:
+        """Pad the structure block to 4-byte alignment."""
+        var b = self
+        while b.struct_size % 4 != 0:
+            b = b.write_bytes([0])
+        b
+
+    fn begin_node(self, name: text) -> FdtBuilder:
+        """Begin a new device tree node."""
+        var b = self.write_token(FDT_BEGIN_NODE)
+        # Write node name + null terminator
+        var name_bytes: [u8] = []
+        for ch in name:
+            name_bytes = name_bytes + [ch as u8]
+        name_bytes = name_bytes + [0]
+        b = b.write_bytes(name_bytes)
+        b = b.pad_to_align()
+        b
+
+    fn end_node(self) -> FdtBuilder:
+        """End the current device tree node."""
+        self.write_token(FDT_END_NODE)
+
+    fn prop_raw(self, name: text, value: [u8]) -> FdtBuilder:
+        """Add a property with raw byte data."""
+        val name_offset = self.strings.add(name)
+        var b = self.write_token(FDT_PROP)
+        # Property header: len (u32) + nameoff (u32)
+        var hdr: [u8] = []
+        hdr = hdr + [((value.len() >> 24) & 0xFF) as u8]
+        hdr = hdr + [((value.len() >> 16) & 0xFF) as u8]
+        hdr = hdr + [((value.len() >> 8) & 0xFF) as u8]
+        hdr = hdr + [(value.len() & 0xFF) as u8]
+        hdr = hdr + [((name_offset >> 24) & 0xFF) as u8]
+        hdr = hdr + [((name_offset >> 16) & 0xFF) as u8]
+        hdr = hdr + [((name_offset >> 8) & 0xFF) as u8]
+        hdr = hdr + [(name_offset & 0xFF) as u8]
+        b = b.write_bytes(hdr)
+        b = b.write_bytes(value)
+        b = b.pad_to_align()
+        b
+
+    fn prop_u32(self, name: text, value: u64) -> FdtBuilder:
+        """Add a u32 property."""
+        var data: [u8] = []
+        data = data + [((value >> 24) & 0xFF) as u8]
+        data = data + [((value >> 16) & 0xFF) as u8]
+        data = data + [((value >> 8) & 0xFF) as u8]
+        data = data + [(value & 0xFF) as u8]
+        self.prop_raw(name, data)
+
+    fn prop_u64(self, name: text, value: u64) -> FdtBuilder:
+        """Add a u64 property (as two u32 cells)."""
+        var data: [u8] = []
+        val high = (value >> 32) & 0xFFFFFFFF
+        val low = value & 0xFFFFFFFF
+        data = data + [((high >> 24) & 0xFF) as u8]
+        data = data + [((high >> 16) & 0xFF) as u8]
+        data = data + [((high >> 8) & 0xFF) as u8]
+        data = data + [(high & 0xFF) as u8]
+        data = data + [((low >> 24) & 0xFF) as u8]
+        data = data + [((low >> 16) & 0xFF) as u8]
+        data = data + [((low >> 8) & 0xFF) as u8]
+        data = data + [(low & 0xFF) as u8]
+        self.prop_raw(name, data)
+
+    fn prop_string(self, name: text, value: text) -> FdtBuilder:
+        """Add a string property."""
+        var data: [u8] = []
+        for ch in value:
+            data = data + [ch as u8]
+        data = data + [0]
+        self.prop_raw(name, data)
+
+    fn prop_empty(self, name: text) -> FdtBuilder:
+        """Add an empty property (flag property with no value)."""
+        self.prop_raw(name, [])
+
+    fn finish(self) -> [u8]:
+        """Finalize the FDT blob and return the complete binary.
+
+        Writes FDT_END token, constructs header, memory reservation
+        block (empty, terminated), and concatenates header + mem_rsv +
+        struct + strings.
+        """
+        # Finalize structure block with FDT_END
+        var b = self.write_token(FDT_END)
+
+        # Memory reservation block: just the terminator (16 zero bytes)
+        var mem_rsv: [u8] = []
+        var i: u64 = 0
+        while i < 16:
+            mem_rsv = mem_rsv + [0]
+            i = i + 1
+
+        # Calculate offsets
+        val off_mem_rsvmap = FDT_HEADER_SIZE
+        val off_dt_struct = off_mem_rsvmap + 16  # one empty entry
+        val off_dt_strings = off_dt_struct + b.struct_size
+        val totalsize = off_dt_strings + b.strings.size()
+
+        # Build header (10 x u32 in big-endian)
+        var header: [u8] = []
+        var j: u64 = 0
+        while j < FDT_HEADER_SIZE:
+            header = header + [0]
+            j = j + 1
+
+        var off: u64 = 0
+        off = write_be32(header, off, FDT_MAGIC)
+        off = write_be32(header, off, totalsize)
+        off = write_be32(header, off, off_dt_struct)
+        off = write_be32(header, off, off_dt_strings)
+        off = write_be32(header, off, off_mem_rsvmap)
+        off = write_be32(header, off, FDT_VERSION)
+        off = write_be32(header, off, FDT_LAST_COMP_VERSION)
+        off = write_be32(header, off, 0)  # boot_cpuid_phys
+        off = write_be32(header, off, b.strings.size())
+        off = write_be32(header, off, b.struct_size)
+
+        # Concatenate: header + mem_rsv + struct + strings
+        header + mem_rsv + b.struct_data + b.strings.data
+
+# ============================================================================
+# Pre-Built DTB Templates for Common Configurations
+# ============================================================================
+
+fn build_riscv_virt_dtb(num_cpus: u64, ram_base: u64, ram_size: u64) -> [u8]:
+    """Build a minimal DTB for a RISC-V QEMU virt-like machine.
+
+    Includes root node, /cpus with hart nodes, /memory, and /chosen.
+    Suitable for OpenSBI -> U-Boot -> Linux handoff.
+    """
+    var b = FdtBuilder.new()
+
+    # Root node
+    b = b.begin_node("")
+    b = b.prop_u32("#address-cells", 2)
+    b = b.prop_u32("#size-cells", 2)
+    b = b.prop_string("compatible", "riscv-virtio")
+    b = b.prop_string("model", "riscv-virtio,qemu")
+
+    # /cpus node
+    b = b.begin_node("cpus")
+    b = b.prop_u32("#address-cells", 1)
+    b = b.prop_u32("#size-cells", 0)
+    b = b.prop_u32("timebase-frequency", 10000000)
+
+    # Per-CPU nodes
+    var cpu_idx: u64 = 0
+    while cpu_idx < num_cpus:
+        val cpu_name = "cpu@{cpu_idx}"
+        b = b.begin_node(cpu_name)
+        b = b.prop_string("device_type", "cpu")
+        b = b.prop_u32("reg", cpu_idx)
+        b = b.prop_string("compatible", "riscv")
+        b = b.prop_string("riscv,isa", "rv64imafdc")
+        b = b.prop_string("mmu-type", "riscv,sv39")
+        b = b.prop_string("status", "okay")
+
+        # Interrupt controller sub-node
+        b = b.begin_node("interrupt-controller")
+        b = b.prop_u32("#interrupt-cells", 1)
+        b = b.prop_empty("interrupt-controller")
+        b = b.prop_string("compatible", "riscv,cpu-intc")
+        b = b.end_node()
+
+        b = b.end_node()
+        cpu_idx = cpu_idx + 1
+
+    b = b.end_node()  # /cpus
+
+    # /memory node
+    b = b.begin_node("memory@{ram_base}")
+    b = b.prop_string("device_type", "memory")
+    # reg = <base_high base_low size_high size_low>
+    var reg_data: [u8] = []
+    var off: u64 = 0
+    # Write base as two u32s
+    var tmp: [u8] = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+    off = write_be32(tmp, 0, (ram_base >> 32) & 0xFFFFFFFF)
+    off = write_be32(tmp, off, ram_base & 0xFFFFFFFF)
+    off = write_be32(tmp, off, (ram_size >> 32) & 0xFFFFFFFF)
+    off = write_be32(tmp, off, ram_size & 0xFFFFFFFF)
+    b = b.prop_raw("reg", tmp)
+    b = b.end_node()  # /memory
+
+    # /chosen node (used by OpenSBI/U-Boot/Linux)
+    b = b.begin_node("chosen")
+    b = b.prop_string("bootargs", "earlycon=sbi console=ttyS0")
+    b = b.prop_string("stdout-path", "/soc/serial@10000000")
+    b = b.end_node()
+
+    b = b.end_node()  # root
+
+    b.finish()
+
+fn dtb_verify_magic(blob: [u8]) -> bool:
+    """Verify that a blob starts with the FDT magic number."""
+    if blob.len() < 4:
+        return false
+    val magic = read_be32(blob, 0)
+    magic == FDT_MAGIC
+
+fn dtb_total_size(blob: [u8]) -> u64:
+    """Read the totalsize field from an FDT header."""
+    if blob.len() < 8:
+        return 0
+    read_be32(blob, 4)

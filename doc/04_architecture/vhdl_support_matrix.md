@@ -1,6 +1,6 @@
 # VHDL Backend Support Matrix
 
-**Date:** 2026-04-23
+**Date:** 2026-05-10
 **Status:** Active
 **Canonical reference for VHDL backend support claims.**
 
@@ -145,7 +145,7 @@ The VHDL backend compiles a documented hardware-oriented Simple subset to synthe
 | Pure Simple source facade | Conservative single-function compatibility path: fixed-width integers, bools, arithmetic, comparisons, boolean logic, literal shifts, unary neg/not, casts, simple muxes, `@hardware`, labeled tuple output ports, deterministic anonymous tuple output ports, named/nested bundle input flattening, sanitized port collision diagnostics, payload-free enum coverage where compiler metadata exists, narrow slice/concat support, and hard diagnostics for unsupported implicit-width behavior. Structured `@generic` and `@clocked` metadata are now owned by the compiler VHDL path instead of the source facade. | **supported** |
 | Labeled multi-return hardware outputs | `@hardware fn f(...) -> (sum: bool, carry: bool)` lowers labels to VHDL `out` ports; duplicate labels after VHDL identifier sanitization are rejected | **supported** |
 | Anonymous hardware outputs | Source-facade hardware tuple returns without field labels lower to deterministic `out_N` output ports, validate collisions before VHDL emission, and are covered by GHDL analysis/elaboration | **supported** |
-| Pure Simple compiler VHDL path | `simple compile --backend=vhdl` owns the runnable scalar entity, tuple-output ABI, direct hardware-call instance/port-map, selected pure combinational helpers expressed as explicit `@hardware` entities, deterministic temp-signal, field-access, typed signed comparison, explicit fixed-point-by-fixed-width-integer contract, unsigned fixed-width literal shift, fixed-width slice/concat, structured `@generic` declarations, structured `@clocked` process metadata including sync/async/no-reset named-domain forms, E0710 cross-domain rejection, stale-artifact cleanup on failed lowering, actionable bare-float diagnostics, and GHDL analyze/elaborate checks. Ordinary-function helper inference and broader HLS behavior remain deferred with hard diagnostics. | **partial** |
+| Pure Simple compiler VHDL path | `simple compile --backend=vhdl` owns the runnable scalar entity, tuple-output ABI, direct hardware-call instance/port-map, selected pure combinational helpers expressed as explicit `@hardware` entities, deterministic temp-signal, field-access, typed signed comparison, explicit fixed-point-by-fixed-width-integer contract, unsigned fixed-width literal shift, fixed-width slice/concat, structured `@generic` declarations, structured `@clocked` process metadata including sync/async/no-reset named-domain forms, E0710 cross-domain rejection, stale-artifact cleanup on failed lowering, actionable bare-float diagnostics, byte-stable VHDL output, and GHDL analyze/elaborate/synth acceptance. Ordinary-function helper inference and broader HLS behavior remain deferred with hard diagnostics. | **supported** |
 | GHDL `-a --std=08` | Analysis | **supported** |
 | GHDL `-e --std=08` | Elaboration | **supported** |
 | GHDL `-r` | Simulation | **supported** |
@@ -184,9 +184,11 @@ hardware entities, tuple output ABI, direct hardware-call `port map` lowering,
 selected pure combinational helpers expressed as explicit `@hardware` entities,
 hard diagnostics for ordinary-function helper inference, deterministic temp
 signals, labeled field access, typed signed comparisons, unsigned fixed-width
-literal shifts, fixed-width slice/concat, stale-artifact cleanup on failed
-lowering, and GHDL analyze/elaborate checks. Remaining skipped examples track
-structured `@generic`/`@clocked` metadata, domain semantics, and broad HLS
+literal shifts, fixed-width slice/concat, structured `@generic` declarations,
+structured `@clocked` process metadata including sync/async/no-reset
+named-domain forms, E0710 cross-domain rejection, stale-artifact cleanup on
+failed lowering, byte-stable VHDL output verification, and GHDL
+analyze/elaborate/synth acceptance. Remaining deferred work is broad HLS
 ownership other than the helper-inference hard-error boundary.
 
 ## Simulation Targets
