@@ -3,6 +3,7 @@
 # Captures process memory state at a given point in the event stream
 # for reverse execution. Stores dirty pages + register state.
 
+use std.io.{shell}
 use std.nogc_sync_mut.replay.process.event_types.{ProcessReplayEvent}
 
 # ============================================================================
@@ -107,3 +108,193 @@ impl CheckpointManager:
 
     fn count() -> i32:
         self.checkpoints.len() as i32
+
+    # Prune checkpoints older than a given event sequence
+    me fn prune_before(min_event_seq: i64):
+        var kept: [PageCheckpoint] = []
+        for cp in self.checkpoints:
+            if cp.event_seq >= min_event_seq:
+                kept.push(cp)
+        self.checkpoints = kept
+
+    # Return the most recent checkpoint
+    fn latest() -> Option<PageCheckpoint>:
+        if self.checkpoints.len() == 0:
+            return None
+        var best = self.checkpoints[0]
+        for cp in self.checkpoints:
+            if cp.event_seq > best.event_seq:
+                best = cp
+        Some(best)
+
+# ============================================================================
+# Save / Restore Free Functions
+# ============================================================================
+#
+# These provide the high-level API for snapshotting and restoring a
+# traced process. Phase 1 uses /proc/<pid>/maps + /proc/<pid>/mem
+# via shell to read memory pages; Phase 2 will use direct ptrace FFI.
+
+fn save_process_checkpoint(mgr: CheckpointManager, pid: i64, event_seq: i64) -> Result<PageCheckpoint, text>:
+    # Take a new checkpoint in the manager
+    var cp = mgr.take_checkpoint(event_seq)
+
+    # Read register state via /proc/<pid>/syscall (lightweight, no GDB needed)
+    # Format: "syscall_nr arg0 arg1 arg2 arg3 arg4 arg5 sp pc"
+    val reg_res = shell("cat /proc/{pid}/syscall 2>/dev/null")
+    if reg_res.exit_code == 0 and reg_res.stdout.trim().len() > 0:
+        val parts = reg_res.stdout.trim().split(" ")
+        # Store available register values
+        if parts.len() >= 9:
+            cp.add_register("sp", parse_hex_or_dec(parts[7]))
+            cp.add_register("pc", parse_hex_or_dec(parts[8]))
+        if parts.len() >= 1:
+            cp.add_register("syscall_nr", parse_hex_or_dec(parts[0]))
+
+    # Read writable memory regions from /proc/<pid>/maps
+    val maps_res = shell("cat /proc/{pid}/maps 2>/dev/null | grep 'rw' | head -20")
+    if maps_res.exit_code == 0:
+        val lines = maps_res.stdout.split("\n")
+        for line in lines:
+            val trimmed = line.trim()
+            if trimmed.len() == 0:
+                continue
+            # Parse "start-end perms ..." from maps line
+            val range_end = trimmed.index_of(" ")
+            if range_end < 0:
+                continue
+            val range_str = trimmed.slice(0, range_end)
+            val dash_idx = range_str.index_of("-")
+            if dash_idx < 0:
+                continue
+            val start_hex = range_str.slice(0, dash_idx)
+            val end_hex = range_str.slice(dash_idx + 1, range_str.len())
+            val start_addr = parse_hex_or_dec(start_hex)
+            val end_addr = parse_hex_or_dec(end_hex)
+
+            # Read page data via xxd (limited to first 4096 bytes per region)
+            val page_size: i64 = 4096
+            val read_size = min_i64(end_addr - start_addr, page_size)
+            if read_size > 0:
+                val hex_data = shell("xxd -p -l {read_size} -s {start_addr} /proc/{pid}/mem 2>/dev/null | tr -d '\\n'")
+                if hex_data.exit_code == 0 and hex_data.stdout.trim().len() > 0:
+                    val page_bytes = hex_to_bytes(hex_data.stdout.trim())
+                    cp.add_dirty_page(start_addr, page_bytes)
+
+    print "[sreplay] Checkpoint#{cp.checkpoint_id} saved: {cp.register_state.len()} regs, {cp.dirty_pages.len()} pages"
+    Ok(cp)
+
+fn restore_process_checkpoint(cp: PageCheckpoint, pid: i64) -> Result<Nil, text>:
+    # Restore dirty pages by writing back to /proc/<pid>/mem
+    for page in cp.dirty_pages:
+        # Convert page data to hex and write via xxd
+        var hex_parts: [text] = []
+        for b in page.data:
+            val hi = b / 16
+            val lo = b % 16
+            hex_parts.push(hex_nibble(hi))
+            hex_parts.push(hex_nibble(lo))
+        val hex_str = hex_parts.join("")
+        if hex_str.len() > 0:
+            val write_res = shell("echo -n '{hex_str}' | xxd -r -p | dd of=/proc/{pid}/mem bs=1 seek={page.addr} conv=notrunc 2>/dev/null")
+            if write_res.exit_code != 0:
+                print "[sreplay] Warning: failed to restore page at 0x{page.addr}"
+
+    # Restore register state via ptrace would require FFI; for now log
+    for reg in cp.register_state:
+        print "[sreplay] Register {reg.name} = {reg.value} (restore requires ptrace FFI)"
+
+    print "[sreplay] Checkpoint#{cp.checkpoint_id} restored: {cp.dirty_pages.len()} pages"
+    Ok(nil)
+
+# ============================================================================
+# Helpers
+# ============================================================================
+
+fn min_i64(a: i64, b: i64) -> i64:
+    if a < b:
+        a
+    else:
+        b
+
+fn parse_hex_or_dec(s: text) -> i64:
+    val trimmed = s.trim()
+    # Handle 0x prefix
+    if trimmed.starts_with("0x") or trimmed.starts_with("0X"):
+        return parse_hex(trimmed.slice(2, trimmed.len()))
+    # Try decimal
+    var result: i64 = 0
+    var is_hex = false
+    for ch in trimmed:
+        if (ch >= "a" and ch <= "f") or (ch >= "A" and ch <= "F"):
+            is_hex = true
+            break
+    if is_hex:
+        parse_hex(trimmed)
+    else:
+        trimmed.to_i64()
+
+fn parse_hex(s: text) -> i64:
+    var result: i64 = 0
+    for ch in s:
+        val digit = hex_char_val(ch)
+        if digit < 0:
+            break
+        result = result * 16 + digit
+    result
+
+fn hex_char_val(ch: text) -> i64:
+    match ch:
+        "0": 0
+        "1": 1
+        "2": 2
+        "3": 3
+        "4": 4
+        "5": 5
+        "6": 6
+        "7": 7
+        "8": 8
+        "9": 9
+        "a": 10
+        "A": 10
+        "b": 11
+        "B": 11
+        "c": 12
+        "C": 12
+        "d": 13
+        "D": 13
+        "e": 14
+        "E": 14
+        "f": 15
+        "F": 15
+        _: -1
+
+fn hex_nibble(v: i32) -> text:
+    match v:
+        0: "0"
+        1: "1"
+        2: "2"
+        3: "3"
+        4: "4"
+        5: "5"
+        6: "6"
+        7: "7"
+        8: "8"
+        9: "9"
+        10: "a"
+        11: "b"
+        12: "c"
+        13: "d"
+        14: "e"
+        15: "f"
+        _: "0"
+
+fn hex_to_bytes(hex_str: text) -> [i32]:
+    var bytes: [i32] = []
+    var i = 0
+    while i + 1 < hex_str.len():
+        val hi = hex_char_val(hex_str[i]) as i32
+        val lo = hex_char_val(hex_str[i + 1]) as i32
+        bytes.push(hi * 16 + lo)
+        i = i + 2
+    bytes

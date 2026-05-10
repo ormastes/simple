@@ -2,10 +2,13 @@
 #
 # Loads a recorded process trace and steps through events,
 # reporting matches or divergence versus a new execution.
+# Supports forward stepping, syscall-level replay verification,
+# and reverse execution via checkpoint restore + replay-forward.
 
 use std.io.{shell}
 use std.nogc_sync_mut.replay.process.event_types.{ProcessEventKind, ProcessReplayEvent}
 use std.nogc_sync_mut.replay.process.trace_io.{read_process_trace}
+use std.nogc_sync_mut.replay.process.checkpoint.{PageCheckpoint, CheckpointManager}
 
 # ============================================================================
 # Replay Result
@@ -19,9 +22,9 @@ enum ReplayVerdict:
 impl ReplayVerdict:
     fn to_text() -> text:
         match self:
-            case ReplayVerdict.Match: "match"
-            case ReplayVerdict.Diverged: "diverged"
-            case ReplayVerdict.Incomplete: "incomplete"
+            case ReplayVerdict::Match: "match"
+            case ReplayVerdict::Diverged: "diverged"
+            case ReplayVerdict::Incomplete: "incomplete"
 
 struct ReplayStepResult:
     event_seq: i64
@@ -38,6 +41,8 @@ struct ProcessReplayer:
     cursor: i64                     # current position in event stream
     total_matched: i64
     total_diverged: i64
+    checkpoint_mgr: CheckpointManager   # manages periodic checkpoints
+    checkpoint_interval: i64             # take checkpoint every N events
 
 impl ProcessReplayer:
     static fn create(trace_dir: text) -> ProcessReplayer:
@@ -46,11 +51,13 @@ impl ProcessReplayer:
             events: [],
             cursor: 0,
             total_matched: 0,
-            total_diverged: 0
+            total_diverged: 0,
+            checkpoint_mgr: CheckpointManager.create(),
+            checkpoint_interval: 500
         )
 
     # Load events from trace directory
-    fn load() -> Result<Nil, text>:
+    me fn load() -> Result<Nil, text>:
         val result = read_process_trace(self.trace_dir)
         match result:
             case Ok(loaded_events):
@@ -61,20 +68,26 @@ impl ProcessReplayer:
             case Err(e):
                 Err("failed to load trace: {e}")
 
+    # ------------------------------------------------------------------
+    # Forward stepping
+    # ------------------------------------------------------------------
+
     # Step forward one event
-    fn step_forward() -> Option<ReplayStepResult>:
+    me fn step_forward() -> Option<ReplayStepResult>:
         if self.cursor >= self.events.len():
             return None
         val ev = self.events[self.cursor]
         self.cursor = self.cursor + 1
+        # Auto-checkpoint at intervals
+        self.maybe_take_checkpoint()
         Some(ReplayStepResult(
             event_seq: ev.seq,
-            verdict: ReplayVerdict.Match,
+            verdict: ReplayVerdict::Match,
             message: ev.summary()
         ))
 
     # Step forward N events
-    fn step_n(count: i64) -> [ReplayStepResult]:
+    me fn step_n(count: i64) -> [ReplayStepResult]:
         var results: [ReplayStepResult] = []
         var i: i64 = 0
         while i < count:
@@ -87,30 +100,157 @@ impl ProcessReplayer:
             i = i + 1
         results
 
+    # Replay all remaining events from cursor to end
+    me fn replay_all():
+        while self.cursor < self.events.len():
+            self.cursor = self.cursor + 1
+            self.maybe_take_checkpoint()
+        print "[sreplay] Replayed to end ({self.events.len()} events)"
+
+    # Replay a single event (alias for step_forward, used by debug backend)
+    me fn replay_one() -> Option<ReplayStepResult>:
+        self.step_forward()
+
+    # ------------------------------------------------------------------
+    # Syscall-level replay verification
+    # ------------------------------------------------------------------
+
+    # Verify that the next recorded event matches an expected syscall.
+    # Returns the recorded return value if the syscall number matches,
+    # or an error if the trace diverges.
+    me fn replay_syscall(expected_id: i64) -> Result<i64, text>:
+        if self.cursor >= self.events.len():
+            return Err("end of trace: no more events to replay")
+
+        val ev = self.events[self.cursor]
+        val kind = ProcessEventKind.from_i32(ev.kind)
+
+        # We expect a SyscallExit event whose entry was expected_id.
+        # In the strace-based recorder, each parsed line is a combined
+        # entry+exit recorded as SyscallExit with payload_a = retval.
+        # For the stream API, entry and exit are separate events.
+        match kind:
+            case ProcessEventKind::SyscallEntry:
+                # Consume entry, verify syscall number
+                if ev.payload_a != expected_id:
+                    self.total_diverged = self.total_diverged + 1
+                    return Err("syscall divergence at event {ev.seq}: expected nr={expected_id}, got nr={ev.payload_a}")
+                self.cursor = self.cursor + 1
+                self.maybe_take_checkpoint()
+                # Now consume the matching exit
+                if self.cursor >= self.events.len():
+                    return Err("trace ends after syscall entry without exit")
+                val exit_ev = self.events[self.cursor]
+                self.cursor = self.cursor + 1
+                self.total_matched = self.total_matched + 1
+                self.maybe_take_checkpoint()
+                Ok(exit_ev.payload_a)
+            case ProcessEventKind::SyscallExit:
+                # Combined entry+exit from strace parser
+                self.cursor = self.cursor + 1
+                self.total_matched = self.total_matched + 1
+                self.maybe_take_checkpoint()
+                Ok(ev.payload_a)
+            _:
+                self.total_diverged = self.total_diverged + 1
+                val actual_kind = kind.to_text()
+                Err("expected syscall at event {ev.seq}, got {actual_kind}")
+
+    # ------------------------------------------------------------------
+    # Reverse execution
+    # ------------------------------------------------------------------
+
+    # Reverse-continue to a target event index.
+    # Strategy: find the nearest checkpoint before target_event,
+    # restore that checkpoint, then replay forward to the target.
+    me fn reverse_continue(target_event: i64) -> Result<text, text>:
+        if target_event < 0:
+            return Err("target event index cannot be negative")
+        if target_event >= self.events.len():
+            return Err("target event {target_event} beyond trace length {self.events.len()}")
+        if target_event >= self.cursor:
+            return Err("target {target_event} is not before current position {self.cursor}")
+
+        # Find nearest checkpoint at or before the target
+        val cp_opt = self.checkpoint_mgr.nearest_before(target_event)
+        var restore_point: i64 = 0
+        match cp_opt:
+            case Some(cp):
+                restore_point = cp.event_seq
+                print "[sreplay] Restoring checkpoint#{cp.checkpoint_id} at event {cp.event_seq}"
+            case None:
+                # No checkpoint available; replay from the beginning
+                restore_point = 0
+                print "[sreplay] No checkpoint found, replaying from start"
+
+        # Reset cursor to the restore point
+        self.cursor = restore_point
+
+        # Replay forward to target
+        while self.cursor < target_event:
+            self.cursor = self.cursor + 1
+            self.maybe_take_checkpoint()
+
+        print "[sreplay] Reverse-continued to event {self.cursor}"
+        Ok("at event {self.cursor}")
+
+    # Reverse-step: go back one event
+    me fn reverse_step() -> Result<text, text>:
+        if self.cursor <= 0:
+            return Err("already at start of trace")
+        self.reverse_continue(self.cursor - 1)
+
+    # ------------------------------------------------------------------
+    # Event verification
+    # ------------------------------------------------------------------
+
     # Check if a recorded event matches a live event
-    fn check_event(recorded: ProcessReplayEvent, live: ProcessReplayEvent) -> ReplayStepResult:
+    me fn check_event(recorded: ProcessReplayEvent, live: ProcessReplayEvent) -> ReplayStepResult:
         if recorded.kind != live.kind:
             self.total_diverged = self.total_diverged + 1
             val rec_kind = ProcessEventKind.from_i32(recorded.kind).to_text()
             val live_kind = ProcessEventKind.from_i32(live.kind).to_text()
             return ReplayStepResult(
                 event_seq: recorded.seq,
-                verdict: ReplayVerdict.Diverged,
+                verdict: ReplayVerdict::Diverged,
                 message: "kind mismatch: recorded={rec_kind} live={live_kind}"
             )
         if recorded.payload_a != live.payload_a:
             self.total_diverged = self.total_diverged + 1
             return ReplayStepResult(
                 event_seq: recorded.seq,
-                verdict: ReplayVerdict.Diverged,
+                verdict: ReplayVerdict::Diverged,
                 message: "payload_a mismatch: recorded={recorded.payload_a} live={live.payload_a}"
             )
         self.total_matched = self.total_matched + 1
         ReplayStepResult(
             event_seq: recorded.seq,
-            verdict: ReplayVerdict.Match,
+            verdict: ReplayVerdict::Match,
             message: recorded.summary()
         )
+
+    # ------------------------------------------------------------------
+    # Checkpoint management
+    # ------------------------------------------------------------------
+
+    # Take a checkpoint if we've reached an interval boundary
+    me fn maybe_take_checkpoint():
+        if self.checkpoint_interval <= 0:
+            return
+        if self.cursor > 0 and (self.cursor % self.checkpoint_interval) == 0:
+            self.checkpoint_mgr.take_checkpoint(self.cursor)
+
+    # Force a checkpoint at the current position
+    me fn force_checkpoint() -> PageCheckpoint:
+        self.checkpoint_mgr.take_checkpoint(self.cursor)
+
+    # Set the checkpoint interval (events between auto-checkpoints)
+    me fn set_checkpoint_interval(interval: i64):
+        self.checkpoint_interval = interval
+
+    # ------------------------------------------------------------------
+    # Queries
+    # ------------------------------------------------------------------
 
     # Get current position
     fn position() -> i64:
@@ -124,6 +264,18 @@ impl ProcessReplayer:
     fn has_more() -> bool:
         self.cursor < self.events.len()
 
+    # Get the event at the current cursor (without advancing)
+    fn current_event() -> Option<ProcessReplayEvent>:
+        if self.cursor >= self.events.len():
+            return None
+        Some(self.events[self.cursor])
+
+    # Get event at a specific index
+    fn event_at(index: i64) -> Option<ProcessReplayEvent>:
+        if index < 0 or index >= self.events.len():
+            return None
+        Some(self.events[index])
+
     # Print summary of replay
     fn print_summary():
         print "[sreplay] Replay summary:"
@@ -131,6 +283,7 @@ impl ProcessReplayer:
         print "  Position: {self.cursor}"
         print "  Matched: {self.total_matched}"
         print "  Diverged: {self.total_diverged}"
+        print "  Checkpoints: {self.checkpoint_mgr.count()}"
 
     # Print all events
     fn print_events():

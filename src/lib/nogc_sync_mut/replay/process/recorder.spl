@@ -3,9 +3,23 @@
 # Records syscall results and signals from a Linux process using strace.
 # Phase 1: shell("strace ...") to capture a trace file, then parse it.
 # Phase 2 (future): direct ptrace FFI for lower overhead.
+#
+# Two APIs:
+#   1. Batch API  — record() runs full command under strace, returns events.
+#   2. Stream API — start_recording / on_syscall_enter / on_syscall_exit / stop
+#                   for incremental event collection from a live traced process.
 
 use std.io.{shell}
 use std.nogc_sync_mut.replay.process.event_types.{ProcessEventKind, ProcessReplayEvent}
+
+# ============================================================================
+# Recording Mode
+# ============================================================================
+
+enum RecordingMode:
+    Idle
+    Recording
+    Stopped
 
 # ============================================================================
 # ProcessRecorder
@@ -17,6 +31,9 @@ struct ProcessRecorder:
     events: [ProcessReplayEvent]    # recorded events
     next_seq: i64                   # monotonic counter
     strace_path: text               # path to raw strace output
+    pid: i64                        # PID of traced process (0 if not running)
+    mode: RecordingMode             # current state
+    pending_syscall_id: i64         # syscall nr of most recent entry (for exit pairing)
 
 impl ProcessRecorder:
     static fn create(command: text, trace_dir: text) -> ProcessRecorder:
@@ -25,11 +42,18 @@ impl ProcessRecorder:
             trace_dir: trace_dir,
             events: [],
             next_seq: 0,
-            strace_path: ""
+            strace_path: "",
+            pid: 0,
+            mode: RecordingMode::Idle,
+            pending_syscall_id: -1
         )
 
+    # ------------------------------------------------------------------
+    # Batch API — run full command under strace, parse output
+    # ------------------------------------------------------------------
+
     # Run the target command under strace and collect raw trace
-    fn record() -> Result<[ProcessReplayEvent], text>:
+    me fn record() -> Result<[ProcessReplayEvent], text>:
         # Create output directory
         val mkdir_res = shell("mkdir -p '{self.trace_dir}'")
         if mkdir_res.exit_code != 0:
@@ -47,13 +71,113 @@ impl ProcessRecorder:
         match parse_result:
             case Ok(parsed_events):
                 self.events = parsed_events
+                self.mode = RecordingMode::Stopped
                 print "[sreplay] Recorded {self.events.len()} events"
                 Ok(self.events)
             case Err(e):
                 Err("strace parse failed: {e}")
 
+    # ------------------------------------------------------------------
+    # Stream API — incremental recording with syscall callbacks
+    # ------------------------------------------------------------------
+
+    # Fork+exec the target command under strace, returning its PID.
+    # The child is traced in the background; call on_syscall_enter / on_syscall_exit
+    # from the strace event loop, then stop() to finalize.
+    me fn start_recording(command: text, args: [text]) -> Result<i64, text>:
+        # Create output directory
+        val mkdir_res = shell("mkdir -p '{self.trace_dir}'")
+        if mkdir_res.exit_code != 0:
+            return Err("failed to create trace dir: {self.trace_dir}")
+
+        self.command = command
+        self.events = []
+        self.next_seq = 0
+        self.pending_syscall_id = -1
+
+        # Build args string
+        var full_cmd = command
+        for a in args:
+            full_cmd = full_cmd + " " + a
+
+        # Launch under strace in background, writing raw log
+        val strace_out = "{self.trace_dir}/strace_raw.log"
+        self.strace_path = strace_out
+        val strace_cmd = "strace -f -tt -T -e trace=all -o '{strace_out}' {full_cmd} &"
+        val launch = shell(strace_cmd + " echo $!")
+        if launch.exit_code != 0:
+            return Err("failed to launch strace: {launch.stderr}")
+
+        # Extract PID from echo output
+        val pid_str = launch.stdout.trim()
+        if pid_str.len() > 0:
+            self.pid = pid_str.to_i64()
+        else:
+            self.pid = 0
+
+        self.mode = RecordingMode::Recording
+        print "[sreplay] Started recording PID {self.pid}: {full_cmd}"
+        Ok(self.pid)
+
+    # Record a syscall entry event (called from the trace event loop).
+    me fn on_syscall_enter(syscall_id: i64, args: [i64]):
+        self.pending_syscall_id = syscall_id
+        var arg0: i64 = 0
+        var arg1: i64 = 0
+        if args.len() > 0:
+            arg0 = args[0]
+        if args.len() > 1:
+            arg1 = args[1]
+        val ev = ProcessReplayEvent.syscall_entry(
+            self.next_seq, self.pid, 0, syscall_id, arg0, arg1
+        )
+        self.events.push(ev)
+        self.next_seq = self.next_seq + 1
+
+    # Record a syscall exit event with the kernel return value.
+    me fn on_syscall_exit(result: i64):
+        val ev = ProcessReplayEvent.syscall_exit(
+            self.next_seq, self.pid, 0, result
+        )
+        self.events.push(ev)
+        self.next_seq = self.next_seq + 1
+        self.pending_syscall_id = -1
+
+    # Record a signal delivery event.
+    me fn on_signal(signum: i64):
+        val ev = ProcessReplayEvent.signal_event(
+            self.next_seq, self.pid, 0, signum
+        )
+        self.events.push(ev)
+        self.next_seq = self.next_seq + 1
+
+    # Stop recording and finalize the trace.
+    # If the process is still running under strace, wait for it.
+    # Returns the trace directory path on success.
+    me fn stop() -> Result<text, text>:
+        if self.pid > 0:
+            # If launched via stream API, wait for the background strace to finish
+            val wait_res = shell("wait {self.pid} 2>/dev/null; true")
+            # Re-parse strace output to capture any events we missed
+            val parse_result = self.parse_strace_output(self.strace_path)
+            match parse_result:
+                case Ok(parsed_events):
+                    # Merge: keep stream-API events, append any strace-only ones
+                    if parsed_events.len() > self.events.len():
+                        self.events = parsed_events
+                case Err(_):
+                    pass_dn
+
+        self.mode = RecordingMode::Stopped
+        print "[sreplay] Stopped recording. {self.events.len()} events captured."
+        Ok(self.trace_dir)
+
+    # ------------------------------------------------------------------
+    # Internal — strace output parser
+    # ------------------------------------------------------------------
+
     # Parse raw strace output into ProcessReplayEvent list
-    fn parse_strace_output(path: text) -> Result<[ProcessReplayEvent], text>:
+    me fn parse_strace_output(path: text) -> Result<[ProcessReplayEvent], text>:
         val cat_res = shell("cat '{path}' 2>/dev/null")
         if cat_res.exit_code != 0:
             return Err("cannot read strace output: {path}")

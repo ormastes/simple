@@ -1,70 +1,397 @@
-# SReplay — Container Checkpoint File Format (.scc)
+# SReplay — Container Checkpoint Format
 #
-# Binary serialization for ContainerCheckpoint.
-# Layout: header (SDN) + process snapshots + IPC state + fs overlay
-
-use std.io.{shell}
-use os.kernel.replay.checkpoint.checkpoint_types.{ContainerCheckpoint}
-use os.kernel.replay.checkpoint.container_checkpoint.{checkpoint_summary}
-
-# ============================================================================
-# Write Checkpoint
-# ============================================================================
-
-fn write_checkpoint(dir_path: text, checkpoint: ContainerCheckpoint) -> Result<Nil, text>:
-    val mkdir_result = shell("mkdir -p '{dir_path}'")
-    if mkdir_result.exit_code != 0:
-        return Err("failed to create checkpoint directory")
-
-    # Write manifest
-    val manifest = checkpoint_manifest(checkpoint)
-    val manifest_path = "{dir_path}/manifest.sdn"
-    val write_result = shell("cat > '{manifest_path}' << 'SCC_EOF'\n{manifest}\nSCC_EOF")
-    if write_result.exit_code != 0:
-        return Err("failed to write manifest")
-
-    # Write summary
-    val summary = checkpoint_summary(checkpoint)
-    print summary
-
-    Ok(nil)
+# Host-side checkpoint types for container-level replay debugger (Track 5).
+# These are lighter-weight than kernel-side types: memory pages use
+# data_offset references into a separate blob rather than embedded data,
+# and registers are a flat [i64] array.
+#
+# Serialization convention for i64 in [i32]:
+#   lo = value as i32            (lower 32 bits)
+#   hi = (value / 4294967296) as i32  (upper 32 bits, arithmetic shift)
+#   Stored as [lo, hi] (little-endian pair).
 
 # ============================================================================
-# Read Checkpoint
+# Dirty Page
 # ============================================================================
 
-fn read_checkpoint(dir_path: text) -> Result<ContainerCheckpoint, text>:
-    val manifest_path = "{dir_path}/manifest.sdn"
-    val result = shell("cat '{manifest_path}' 2>/dev/null")
-    if result.exit_code != 0:
-        return Err("checkpoint manifest not found: {manifest_path}")
-
-    # Parse container ID from manifest
-    var container_id = ""
-    for line in result.stdout.split("\n"):
-        val trimmed = line.trim()
-        if trimmed.starts_with("container_id:"):
-            container_id = trimmed.replace("container_id:", "").trim().replace("\"", "")
-
-    Ok(ContainerCheckpoint.create(container_id, 0))
+struct DirtyPage:
+    address: i64        # page-aligned virtual address
+    size: i32           # page size in bytes (typically 4096)
+    data_offset: i64    # offset into external data blob
 
 # ============================================================================
-# Manifest Generation
+# File Descriptor Entry
 # ============================================================================
 
-fn checkpoint_manifest(cp: ContainerCheckpoint) -> text:
-    var lines: [text] = []
-    lines.push("checkpoint:")
-    lines.push("  format: \"simple-container-checkpoint\"")
-    lines.push("  version: 1")
-    lines.push("  checkpoint_id: {cp.checkpoint_id}")
-    lines.push("  container_id: \"{cp.container_id}\"")
-    lines.push("  timestamp_ns: {cp.timestamp_ns}")
-    lines.push("")
-    lines.push("contents:")
-    lines.push("  process_count: {cp.process_count()}")
-    lines.push("  total_pages: {cp.total_pages()}")
-    lines.push("  ipc_queues: {cp.ipc_state.message_queues.len()}")
-    lines.push("  fs_overlay_entries: {cp.fs_overlay.len()}")
-    lines.push("  replay_event_id: {cp.replay_event_id}")
-    lines.join("\n")
+struct FdEntry:
+    fd: i32
+    path: text
+    offset: i64
+    flags: i32
+
+# ============================================================================
+# Process Snapshot
+# ============================================================================
+
+struct ProcessSnapshot:
+    pid: i64
+    registers: [i64]
+    memory_pages: [DirtyPage]
+    fd_table: [FdEntry]
+    fd_count: i32
+
+impl ProcessSnapshot:
+    static fn create(pid: i64) -> ProcessSnapshot:
+        ProcessSnapshot(
+            pid: pid,
+            registers: [],
+            memory_pages: [],
+            fd_table: [],
+            fd_count: 0
+        )
+
+    fn add_register(value: i64):
+        self.registers.push(value)
+
+    fn add_page(page: DirtyPage):
+        self.memory_pages.push(page)
+
+    fn add_fd(entry: FdEntry):
+        self.fd_table.push(entry)
+        self.fd_count = self.fd_table.len() as i32
+
+# ============================================================================
+# IPC Message
+# ============================================================================
+
+struct IpcMessage:
+    sender: i64
+    data_len: i32
+    data_offset: i64
+
+# ============================================================================
+# IPC Snapshot
+# ============================================================================
+
+struct IpcSnapshot:
+    queue_id: i64
+    messages: [IpcMessage]
+
+impl IpcSnapshot:
+    static fn create(queue_id: i64) -> IpcSnapshot:
+        IpcSnapshot(queue_id: queue_id, messages: [])
+
+    fn add_message(msg: IpcMessage):
+        self.messages.push(msg)
+
+# ============================================================================
+# Container Checkpoint
+# ============================================================================
+
+struct ContainerCheckpoint:
+    id: i32
+    timestamp: i64
+    processes: [ProcessSnapshot]
+    ipc: [IpcSnapshot]
+    fs_overlay_count: i32
+
+impl ContainerCheckpoint:
+    static fn create(id: i32, timestamp: i64) -> ContainerCheckpoint:
+        ContainerCheckpoint(
+            id: id,
+            timestamp: timestamp,
+            processes: [],
+            ipc: [],
+            fs_overlay_count: 0
+        )
+
+    fn add_process(snap: ProcessSnapshot):
+        self.processes.push(snap)
+
+    fn add_ipc(snapshot: IpcSnapshot):
+        self.ipc.push(snapshot)
+
+    fn process_count() -> i32:
+        self.processes.len() as i32
+
+    fn total_pages() -> i64:
+        var total: i64 = 0
+        for p in self.processes:
+            total = total + p.memory_pages.len()
+        total
+
+    fn summary() -> text:
+        var lines: [text] = []
+        lines.push("ContainerCheckpoint id={self.id} ts={self.timestamp}")
+        lines.push("  processes: {self.processes.len()}")
+        lines.push("  ipc_queues: {self.ipc.len()}")
+        lines.push("  fs_overlay_count: {self.fs_overlay_count}")
+        lines.push("  total_pages: {self.total_pages()}")
+        lines.join("\n")
+
+# ============================================================================
+# i64 Encoding Helpers (lo/hi split into two i32 values)
+# ============================================================================
+
+fn encode_i64(buf: [i32], value: i64):
+    val lo = (value % 4294967296) as i32
+    val hi = (value / 4294967296) as i32
+    buf.push(lo)
+    buf.push(hi)
+
+fn decode_i64(data: [i32], offset: i32) -> i64:
+    val lo = data[offset] as i64
+    val hi = data[offset + 1] as i64
+    hi * 4294967296 + lo
+
+# ============================================================================
+# Text Encoding Helpers
+# ============================================================================
+
+fn encode_text(buf: [i32], s: text):
+    val chars = s.chars()
+    buf.push(chars.len() as i32)
+    for ch in chars:
+        buf.push(ch as i32)
+
+fn decode_text(data: [i32], offset: i32) -> text:
+    val length = data[offset]
+    var result = ""
+    var i: i32 = 0
+    while i < length:
+        val ch = data[offset + 1 + i]
+        result = result + ch.to_char().to_text()
+        i = i + 1
+    result
+
+fn text_encoded_len(s: text) -> i32:
+    1 + s.chars().len() as i32
+
+# ============================================================================
+# Encode Checkpoint
+# ============================================================================
+
+fn encode_checkpoint(cp: ContainerCheckpoint) -> [i32]:
+    var buf: [i32] = []
+
+    # Header: magic, version, id, timestamp
+    buf.push(0x53434300)    # "SCC\0" magic
+    buf.push(1)             # version
+    buf.push(cp.id)
+    encode_i64(buf, cp.timestamp)
+    buf.push(cp.fs_overlay_count)
+
+    # Process count
+    buf.push(cp.processes.len() as i32)
+
+    # Encode each process
+    for proc in cp.processes:
+        encode_process(buf, proc)
+
+    # IPC snapshot count
+    buf.push(cp.ipc.len() as i32)
+
+    # Encode each IPC snapshot
+    for ipc_snap in cp.ipc:
+        encode_ipc_snapshot(buf, ipc_snap)
+
+    buf
+
+fn encode_process(buf: [i32], proc: ProcessSnapshot):
+    encode_i64(buf, proc.pid)
+    buf.push(proc.fd_count)
+
+    # Registers
+    buf.push(proc.registers.len() as i32)
+    for reg in proc.registers:
+        encode_i64(buf, reg)
+
+    # Memory pages
+    buf.push(proc.memory_pages.len() as i32)
+    for page in proc.memory_pages:
+        encode_i64(buf, page.address)
+        buf.push(page.size)
+        encode_i64(buf, page.data_offset)
+
+    # FD table
+    buf.push(proc.fd_table.len() as i32)
+    for fd_entry in proc.fd_table:
+        buf.push(fd_entry.fd)
+        encode_text(buf, fd_entry.path)
+        encode_i64(buf, fd_entry.offset)
+        buf.push(fd_entry.flags)
+
+fn encode_ipc_snapshot(buf: [i32], ipc_snap: IpcSnapshot):
+    encode_i64(buf, ipc_snap.queue_id)
+    buf.push(ipc_snap.messages.len() as i32)
+    for msg in ipc_snap.messages:
+        encode_i64(buf, msg.sender)
+        buf.push(msg.data_len)
+        encode_i64(buf, msg.data_offset)
+
+# ============================================================================
+# Decode Checkpoint
+# ============================================================================
+
+fn decode_checkpoint(data: [i32]) -> Result<ContainerCheckpoint, text>:
+    if data.len() < 7:
+        return Err("checkpoint data too short")
+
+    var pos: i32 = 0
+
+    # Header
+    val magic = data[pos]
+    pos = pos + 1
+    if magic != 0x53434300:
+        return Err("invalid checkpoint magic")
+
+    val version = data[pos]
+    pos = pos + 1
+    if version != 1:
+        return Err("unsupported checkpoint version: {version}")
+
+    val id = data[pos]
+    pos = pos + 1
+
+    val timestamp = decode_i64(data, pos)
+    pos = pos + 2
+
+    val fs_overlay_count = data[pos]
+    pos = pos + 1
+
+    var cp = ContainerCheckpoint.create(id, timestamp)
+    cp.fs_overlay_count = fs_overlay_count
+
+    # Processes
+    val proc_count = data[pos]
+    pos = pos + 1
+
+    var pi: i32 = 0
+    while pi < proc_count:
+        val proc_result = decode_process(data, pos)
+        match proc_result:
+            case Ok(pair):
+                cp.add_process(pair.snapshot)
+                pos = pair.next_pos
+            case Err(msg):
+                return Err("process decode error: {msg}")
+        pi = pi + 1
+
+    # IPC snapshots
+    if pos >= data.len():
+        return Ok(cp)
+
+    val ipc_count = data[pos]
+    pos = pos + 1
+
+    var ii: i32 = 0
+    while ii < ipc_count:
+        val ipc_result = decode_ipc_snapshot(data, pos)
+        match ipc_result:
+            case Ok(pair):
+                cp.add_ipc(pair.snapshot)
+                pos = pair.next_pos
+            case Err(msg):
+                return Err("ipc decode error: {msg}")
+        ii = ii + 1
+
+    Ok(cp)
+
+# ============================================================================
+# Decode Helpers — use pair structs to return value + new offset
+# ============================================================================
+
+struct ProcessDecodePair:
+    snapshot: ProcessSnapshot
+    next_pos: i32
+
+struct IpcDecodePair:
+    snapshot: IpcSnapshot
+    next_pos: i32
+
+fn decode_process(data: [i32], start: i32) -> Result<ProcessDecodePair, text>:
+    var pos = start
+
+    if pos + 3 >= data.len():
+        return Err("unexpected end in process data")
+
+    val pid = decode_i64(data, pos)
+    pos = pos + 2
+
+    val fd_count = data[pos]
+    pos = pos + 1
+
+    var proc = ProcessSnapshot.create(pid)
+    proc.fd_count = fd_count
+
+    # Registers
+    val reg_count = data[pos]
+    pos = pos + 1
+
+    var ri: i32 = 0
+    while ri < reg_count:
+        val value = decode_i64(data, pos)
+        pos = pos + 2
+        proc.add_register(value)
+        ri = ri + 1
+
+    # Memory pages
+    val page_count = data[pos]
+    pos = pos + 1
+
+    var mi: i32 = 0
+    while mi < page_count:
+        val address = decode_i64(data, pos)
+        pos = pos + 2
+        val size = data[pos]
+        pos = pos + 1
+        val data_offset = decode_i64(data, pos)
+        pos = pos + 2
+        proc.add_page(DirtyPage(address: address, size: size, data_offset: data_offset))
+        mi = mi + 1
+
+    # FD table
+    val fd_table_count = data[pos]
+    pos = pos + 1
+
+    var fi: i32 = 0
+    while fi < fd_table_count:
+        val fd = data[pos]
+        pos = pos + 1
+        val path = decode_text(data, pos)
+        pos = pos + 1 + data[pos]   # 1 for length + N chars
+        val offset = decode_i64(data, pos)
+        pos = pos + 2
+        val flags = data[pos]
+        pos = pos + 1
+        proc.add_fd(FdEntry(fd: fd, path: path, offset: offset, flags: flags))
+        fi = fi + 1
+
+    Ok(ProcessDecodePair(snapshot: proc, next_pos: pos))
+
+fn decode_ipc_snapshot(data: [i32], start: i32) -> Result<IpcDecodePair, text>:
+    var pos = start
+
+    if pos + 3 >= data.len():
+        return Err("unexpected end in ipc data")
+
+    val queue_id = decode_i64(data, pos)
+    pos = pos + 2
+
+    var ipc_snap = IpcSnapshot.create(queue_id)
+
+    val msg_count = data[pos]
+    pos = pos + 1
+
+    var mi: i32 = 0
+    while mi < msg_count:
+        val sender = decode_i64(data, pos)
+        pos = pos + 2
+        val data_len = data[pos]
+        pos = pos + 1
+        val data_offset = decode_i64(data, pos)
+        pos = pos + 2
+        ipc_snap.add_message(IpcMessage(sender: sender, data_len: data_len, data_offset: data_offset))
+        mi = mi + 1
+
+    Ok(IpcDecodePair(snapshot: ipc_snap, next_pos: pos))

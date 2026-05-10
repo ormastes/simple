@@ -22,6 +22,27 @@ fn replay_hook_schedule(old_tid: i64, new_tid: i64, tick: i64):
         entry.payload_b = new_tid
         entry.payload_c = tick
         replay_log_event(entry)
+        return
+
+    # Replay/Verify: consume the schedule event from the log
+    match replay_mode():
+        case KernelReplayMode.Replay:
+            match replay_read_next():
+                case Some(entry):
+                    # Caller should use entry.payload_b as the forced next-tid
+                    pass_dn
+                case None:
+                    pass_dn
+        case KernelReplayMode.Verify:
+            match replay_read_next():
+                case Some(entry):
+                    # Verify recorded schedule matches live decision
+                    if entry.payload_b != new_tid:
+                        pass_dn  # TODO: divergence callback
+                case None:
+                    pass_dn
+        case _:
+            pass_dn
 
 # ============================================================================
 # Syscall Hooks
@@ -38,6 +59,24 @@ fn replay_hook_syscall_enter(task_id: i64, syscall_id: i64, arg0: i64, arg1: i64
         entry.payload_c = arg1
         entry.payload_d = arg2
         replay_log_event(entry)
+        return
+
+    match replay_mode():
+        case KernelReplayMode.Replay:
+            match replay_read_next():
+                case Some(entry):
+                    pass_dn  # consumed — replayer drives syscall from log
+                case None:
+                    pass_dn
+        case KernelReplayMode.Verify:
+            match replay_read_next():
+                case Some(entry):
+                    if entry.payload_a != syscall_id:
+                        pass_dn  # TODO: divergence callback
+                case None:
+                    pass_dn
+        case _:
+            pass_dn
 
 fn replay_hook_syscall_exit(task_id: i64, syscall_id: i64, retval: i64):
     if replay_is_off():
@@ -48,6 +87,24 @@ fn replay_hook_syscall_exit(task_id: i64, syscall_id: i64, retval: i64):
         entry.payload_a = syscall_id
         entry.payload_b = retval
         replay_log_event(entry)
+        return
+
+    match replay_mode():
+        case KernelReplayMode.Replay:
+            match replay_read_next():
+                case Some(entry):
+                    pass_dn  # caller uses entry.payload_b as forced retval
+                case None:
+                    pass_dn
+        case KernelReplayMode.Verify:
+            match replay_read_next():
+                case Some(entry):
+                    if entry.payload_b != retval:
+                        pass_dn  # TODO: divergence callback
+                case None:
+                    pass_dn
+        case _:
+            pass_dn
 
 # ============================================================================
 # Interrupt Hook
@@ -62,6 +119,24 @@ fn replay_hook_irq(vector: i64, task_id: i64, timestamp: i64):
         entry.payload_a = vector
         entry.payload_b = timestamp
         replay_log_event(entry)
+        return
+
+    match replay_mode():
+        case KernelReplayMode.Replay:
+            match replay_read_next():
+                case Some(entry):
+                    pass_dn  # replayer injects IRQ at logged point
+                case None:
+                    pass_dn
+        case KernelReplayMode.Verify:
+            match replay_read_next():
+                case Some(entry):
+                    if entry.payload_a != vector:
+                        pass_dn  # TODO: divergence callback
+                case None:
+                    pass_dn
+        case _:
+            pass_dn
 
 # ============================================================================
 # IPC Hooks
@@ -77,6 +152,24 @@ fn replay_hook_ipc_send(src_task: i64, dst_port: i64, msg_len: i64):
         entry.payload_b = dst_port
         entry.payload_c = msg_len
         replay_log_event(entry)
+        return
+
+    match replay_mode():
+        case KernelReplayMode.Replay:
+            match replay_read_next():
+                case Some(entry):
+                    pass_dn  # consumed from log
+                case None:
+                    pass_dn
+        case KernelReplayMode.Verify:
+            match replay_read_next():
+                case Some(entry):
+                    if entry.payload_b != dst_port:
+                        pass_dn  # TODO: divergence callback
+                case None:
+                    pass_dn
+        case _:
+            pass_dn
 
 fn replay_hook_ipc_recv(dst_task: i64, src_port: i64, msg_len: i64):
     if replay_is_off():
@@ -88,6 +181,24 @@ fn replay_hook_ipc_recv(dst_task: i64, src_port: i64, msg_len: i64):
         entry.payload_b = src_port
         entry.payload_c = msg_len
         replay_log_event(entry)
+        return
+
+    match replay_mode():
+        case KernelReplayMode.Replay:
+            match replay_read_next():
+                case Some(entry):
+                    pass_dn  # consumed from log
+                case None:
+                    pass_dn
+        case KernelReplayMode.Verify:
+            match replay_read_next():
+                case Some(entry):
+                    if entry.payload_b != src_port:
+                        pass_dn  # TODO: divergence callback
+                case None:
+                    pass_dn
+        case _:
+            pass_dn
 
 # ============================================================================
 # Timer Hook
@@ -104,13 +215,22 @@ fn replay_hook_timer_read(source_id: i64, value: i64) -> i64:
         replay_log_event(entry)
         return value
 
-    # Replay mode: return logged value instead of hardware
     match replay_mode():
         case KernelReplayMode.Replay:
+            # Return logged value instead of hardware read
             match replay_read_next():
                 case Some(entry):
                     if entry.kind == EventKind.TimerRead.to_i32():
                         return entry.payload_b
+                    return value
+                case None:
+                    return value
+        case KernelReplayMode.Verify:
+            # Compare live value against logged, return live
+            match replay_read_next():
+                case Some(entry):
+                    if entry.payload_b != value:
+                        pass_dn  # TODO: divergence callback
                     return value
                 case None:
                     return value
@@ -132,6 +252,24 @@ fn replay_hook_thread_create(parent_tid: i64, child_tid: i64, entry_addr: i64):
         entry.payload_b = child_tid
         entry.payload_c = entry_addr
         replay_log_event(entry)
+        return
+
+    match replay_mode():
+        case KernelReplayMode.Replay:
+            match replay_read_next():
+                case Some(entry):
+                    pass_dn  # replayer forces child_tid from log
+                case None:
+                    pass_dn
+        case KernelReplayMode.Verify:
+            match replay_read_next():
+                case Some(entry):
+                    if entry.payload_b != child_tid:
+                        pass_dn  # TODO: divergence callback
+                case None:
+                    pass_dn
+        case _:
+            pass_dn
 
 fn replay_hook_thread_exit(task_id: i64, exit_code: i64):
     if replay_is_off():
@@ -141,6 +279,24 @@ fn replay_hook_thread_exit(task_id: i64, exit_code: i64):
         var entry = ReplayEntry.create(EventKind.ThreadExit, task_id, 0, 0)
         entry.payload_a = exit_code
         replay_log_event(entry)
+        return
+
+    match replay_mode():
+        case KernelReplayMode.Replay:
+            match replay_read_next():
+                case Some(entry):
+                    pass_dn  # consumed
+                case None:
+                    pass_dn
+        case KernelReplayMode.Verify:
+            match replay_read_next():
+                case Some(entry):
+                    if entry.payload_a != exit_code:
+                        pass_dn  # TODO: divergence callback
+                case None:
+                    pass_dn
+        case _:
+            pass_dn
 
 # ============================================================================
 # Random/Entropy Hook
@@ -158,10 +314,20 @@ fn replay_hook_random_read(task_id: i64, value: i64) -> i64:
 
     match replay_mode():
         case KernelReplayMode.Replay:
+            # Return logged entropy instead of hardware RNG
             match replay_read_next():
                 case Some(entry):
                     if entry.kind == EventKind.RandomSeed.to_i32():
                         return entry.payload_a
+                    return value
+                case None:
+                    return value
+        case KernelReplayMode.Verify:
+            # Compare live entropy against logged, return live
+            match replay_read_next():
+                case Some(entry):
+                    if entry.payload_a != value:
+                        pass_dn  # TODO: divergence callback
                     return value
                 case None:
                     return value
@@ -181,3 +347,21 @@ fn replay_hook_checkpoint(checkpoint_id: i64):
         var entry = ReplayEntry.create(EventKind.Checkpoint, 0, 0, 0)
         entry.payload_a = checkpoint_id
         replay_log_event(entry)
+        return
+
+    match replay_mode():
+        case KernelReplayMode.Replay:
+            match replay_read_next():
+                case Some(entry):
+                    pass_dn  # checkpoint marker consumed
+                case None:
+                    pass_dn
+        case KernelReplayMode.Verify:
+            match replay_read_next():
+                case Some(entry):
+                    if entry.payload_a != checkpoint_id:
+                        pass_dn  # TODO: divergence callback
+                case None:
+                    pass_dn
+        case _:
+            pass_dn

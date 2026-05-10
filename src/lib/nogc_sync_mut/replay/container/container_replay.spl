@@ -1,72 +1,130 @@
-# SReplay — Container-Level Replay Driver
+# SReplay — Container Replay Driver
 #
-# Combines container checkpoint with event log for forward replay
-# after restore. Enables reverse debugging across process boundaries.
+# Manages container-level checkpoints for the replay debugger (Track 5).
+# Supports saving, restoring, listing, and searching checkpoints.
+# Uses the local checkpoint format types (not OS-kernel types).
 
-use os.kernel.replay.checkpoint.checkpoint_types.{ContainerCheckpoint}
-use os.kernel.replay.checkpoint.container_restore.{restore_container}
-use os.kernel.replay.log_buffer.{replay_read_next, replay_event_count}
-use os.kernel.replay.event_kinds.{ReplayEntry, EventKind}
+use std.nogc_sync_mut.replay.container.checkpoint_format.{
+    ContainerCheckpoint, ProcessSnapshot, DirtyPage, FdEntry,
+    IpcSnapshot, IpcMessage, encode_checkpoint, decode_checkpoint
+}
 
 # ============================================================================
-# Container Replay Session
+# Container Replay Driver
 # ============================================================================
 
-class ContainerReplaySession:
-    checkpoint: ContainerCheckpoint
-    current_event: i64
-    target_event: i64
-    events_replayed: i64
+class ContainerReplayDriver:
+    mode: text                          # "record" or "replay"
+    checkpoints: [ContainerCheckpoint]
+    event_index: i64                    # current replay cursor position
+    container_id: text
 
-impl ContainerReplaySession:
-    static fn create(checkpoint: ContainerCheckpoint) -> ContainerReplaySession:
-        ContainerReplaySession(
-            checkpoint: checkpoint,
-            current_event: checkpoint.replay_event_id,
-            target_event: 0,
-            events_replayed: 0
+    static fn create(mode: text, container_id: text) -> ContainerReplayDriver:
+        ContainerReplayDriver(
+            mode: mode,
+            checkpoints: [],
+            event_index: 0,
+            container_id: container_id
         )
 
-    fn restore_to_checkpoint() -> Result<Nil, text>:
-        restore_container(self.checkpoint)?
-        self.current_event = self.checkpoint.replay_event_id
-        self.events_replayed = 0
-        Ok(nil)
+    # ------------------------------------------------------------------
+    # save_checkpoint — capture current state as a numbered checkpoint
+    # ------------------------------------------------------------------
 
-    fn replay_forward_to(target: i64) -> Result<i64, text>:
-        self.target_event = target
-        var replayed: i64 = 0
+    me fn save_checkpoint(id: i32) -> Result<text, text>:
+        if self.mode != "record":
+            return Err("cannot save checkpoint in {self.mode} mode")
 
-        while self.current_event < target:
-            match replay_read_next():
-                case Some(entry):
-                    self.current_event = entry.event_id
-                    replayed = replayed + 1
-                case None:
-                    break
+        # Check for duplicate checkpoint IDs
+        for cp in self.checkpoints:
+            if cp.id == id:
+                return Err("checkpoint {id} already exists")
 
-        self.events_replayed = replayed
-        Ok(replayed)
+        val cp = ContainerCheckpoint.create(id, self.event_index)
+        self.checkpoints.push(cp)
 
-    fn replay_one_event() -> Option<ReplayEntry>:
-        match replay_read_next():
-            case Some(entry):
-                self.current_event = entry.event_id
-                self.events_replayed = self.events_replayed + 1
-                Some(entry)
+        val msg = "checkpoint {id} saved at event {self.event_index} for container {self.container_id}"
+        Ok(msg)
+
+    # ------------------------------------------------------------------
+    # restore_checkpoint — roll back to a previously saved checkpoint
+    # ------------------------------------------------------------------
+
+    me fn restore_checkpoint(id: i32) -> Result<text, text>:
+        var found: Option<ContainerCheckpoint> = None
+
+        for cp in self.checkpoints:
+            if cp.id == id:
+                found = Some(cp)
+
+        match found:
+            case Some(cp):
+                self.event_index = cp.timestamp
+                val msg = "restored to checkpoint {id} at event {cp.timestamp} for container {self.container_id}"
+                Ok(msg)
             case None:
-                None
+                Err("checkpoint {id} not found")
 
-    fn summary() -> text:
-        "Container replay: checkpoint={self.checkpoint.checkpoint_id} current={self.current_event} replayed={self.events_replayed}"
+    # ------------------------------------------------------------------
+    # list_checkpoints — return summary strings for all checkpoints
+    # ------------------------------------------------------------------
 
-# ============================================================================
-# Reverse Debug Support
-# ============================================================================
+    fn list_checkpoints() -> [text]:
+        var result: [text] = []
+        for cp in self.checkpoints:
+            val entry = "id={cp.id} ts={cp.timestamp} procs={cp.processes.len()} ipc={cp.ipc.len()}"
+            result.push(entry)
+        result
 
-fn reverse_to_checkpoint(session: ContainerReplaySession, target_event: i64) -> Result<Nil, text>:
-    # Restore checkpoint, then replay forward to just before target
-    session.restore_to_checkpoint()?
-    if target_event > session.current_event:
-        session.replay_forward_to(target_event)?
-    Ok(nil)
+    # ------------------------------------------------------------------
+    # find_checkpoint_before — find the latest checkpoint at or before
+    # the given timestamp
+    # ------------------------------------------------------------------
+
+    fn find_checkpoint_before(timestamp: i64) -> Option<ContainerCheckpoint>:
+        var best: Option<ContainerCheckpoint> = None
+        var best_ts: i64 = -1
+
+        for cp in self.checkpoints:
+            if cp.timestamp <= timestamp and cp.timestamp > best_ts:
+                best = Some(cp)
+                best_ts = cp.timestamp
+
+        best
+
+    # ------------------------------------------------------------------
+    # Convenience helpers
+    # ------------------------------------------------------------------
+
+    fn checkpoint_count() -> i32:
+        self.checkpoints.len() as i32
+
+    me fn advance_event():
+        self.event_index = self.event_index + 1
+
+    fn info() -> text:
+        "ContainerReplayDriver container={self.container_id} mode={self.mode} checkpoints={self.checkpoints.len()} event={self.event_index}"
+
+    # ------------------------------------------------------------------
+    # Serialization round-trip for a specific checkpoint
+    # ------------------------------------------------------------------
+
+    fn serialize_checkpoint(id: i32) -> Result<[i32], text>:
+        for cp in self.checkpoints:
+            if cp.id == id:
+                return Ok(encode_checkpoint(cp))
+        Err("checkpoint {id} not found")
+
+    me fn load_checkpoint(data: [i32]) -> Result<text, text>:
+        val cp = decode_checkpoint(data)?
+        # Replace if same id exists, otherwise append
+        var replaced = false
+        var idx: i32 = 0
+        while idx < self.checkpoints.len():
+            if self.checkpoints[idx].id == cp.id:
+                self.checkpoints[idx] = cp
+                replaced = true
+            idx = idx + 1
+        if not replaced:
+            self.checkpoints.push(cp)
+        Ok("loaded checkpoint {cp.id}")
