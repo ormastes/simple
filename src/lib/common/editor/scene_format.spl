@@ -1,0 +1,192 @@
+# Scene Format — serialize/deserialize scene graphs to SDN text
+#
+# Provides SceneNodeData for individual node state and SceneFile
+# for managing a complete scene graph with parent-child relationships.
+
+# ============================================================================
+# SceneNodeData — flat representation of one scene node
+# ============================================================================
+
+struct SceneNodeData:
+    node_id: i32
+    name: text
+    parent_id: i32
+    transform_x: f64
+    transform_y: f64
+    transform_rotation: f64
+    transform_scale_x: f64
+    transform_scale_y: f64
+    sprite_texture: text
+    has_physics: bool
+    physics_body_type: text
+    physics_mass: f64
+    has_audio: bool
+    audio_clip_path: text
+    audio_group: text
+    audio_spatial: bool
+
+impl SceneNodeData:
+    static fn empty(node_id: i32, name: text) -> SceneNodeData:
+        """Create a node with sensible defaults: no parent, origin transform, unit scale, no components."""
+        SceneNodeData(
+            node_id: node_id,
+            name: name,
+            parent_id: -1,
+            transform_x: 0.0,
+            transform_y: 0.0,
+            transform_rotation: 0.0,
+            transform_scale_x: 1.0,
+            transform_scale_y: 1.0,
+            sprite_texture: "",
+            has_physics: false,
+            physics_body_type: "static",
+            physics_mass: 1.0,
+            has_audio: false,
+            audio_clip_path: "",
+            audio_group: "master",
+            audio_spatial: false
+        )
+
+    static fn default_transform(node_id: i32, name: text, x: f64, y: f64) -> SceneNodeData:
+        """Helper: positioned node with default rotation and scale."""
+        SceneNodeData(
+            node_id: node_id,
+            name: name,
+            parent_id: -1,
+            transform_x: x,
+            transform_y: y,
+            transform_rotation: 0.0,
+            transform_scale_x: 1.0,
+            transform_scale_y: 1.0,
+            sprite_texture: "",
+            has_physics: false,
+            physics_body_type: "static",
+            physics_mass: 1.0,
+            has_audio: false,
+            audio_clip_path: "",
+            audio_group: "master",
+            audio_spatial: false
+        )
+
+    fn to_sdn(self) -> text:
+        """Serialize this node to a multi-line SDN text block."""
+        var out = "node {\n"
+        out = out + "  node_id: " + self.node_id.to_text() + "\n"
+        out = out + "  name: \"" + self.name + "\"\n"
+        out = out + "  parent_id: " + self.parent_id.to_text() + "\n"
+        out = out + "  transform {\n"
+        out = out + "    x: " + self.transform_x.to_text() + "\n"
+        out = out + "    y: " + self.transform_y.to_text() + "\n"
+        out = out + "    rotation: " + self.transform_rotation.to_text() + "\n"
+        out = out + "    scale_x: " + self.transform_scale_x.to_text() + "\n"
+        out = out + "    scale_y: " + self.transform_scale_y.to_text() + "\n"
+        out = out + "  }\n"
+        if self.sprite_texture != "":
+            out = out + "  sprite {\n"
+            out = out + "    texture: \"" + self.sprite_texture + "\"\n"
+            out = out + "  }\n"
+        if self.has_physics:
+            out = out + "  physics {\n"
+            out = out + "    body_type: \"" + self.physics_body_type + "\"\n"
+            out = out + "    mass: " + self.physics_mass.to_text() + "\n"
+            out = out + "  }\n"
+        if self.has_audio:
+            out = out + "  audio {\n"
+            out = out + "    clip_path: \"" + self.audio_clip_path + "\"\n"
+            out = out + "    group: \"" + self.audio_group + "\"\n"
+            var spatial_text = "false"
+            if self.audio_spatial:
+                spatial_text = "true"
+            out = out + "    spatial: " + spatial_text + "\n"
+            out = out + "  }\n"
+        out = out + "}"
+        out
+
+# ============================================================================
+# SceneFile — complete scene graph with node management
+# ============================================================================
+
+class SceneFile:
+    name: text
+    nodes: [SceneNodeData]
+    next_node_id: i32
+
+impl SceneFile:
+    static fn new(name: text) -> SceneFile:
+        """Create an empty scene."""
+        SceneFile(
+            name: name,
+            nodes: [],
+            next_node_id: 0
+        )
+
+    me add_node(name: text, parent_id: i32) -> SceneNodeData:
+        """Add a node with auto-assigned ID, returns the created node."""
+        val id = self.next_node_id
+        self.next_node_id = self.next_node_id + 1
+        var node = SceneNodeData.empty(id, name)
+        node = SceneNodeData(
+            node_id: node.node_id,
+            name: node.name,
+            parent_id: parent_id,
+            transform_x: node.transform_x,
+            transform_y: node.transform_y,
+            transform_rotation: node.transform_rotation,
+            transform_scale_x: node.transform_scale_x,
+            transform_scale_y: node.transform_scale_y,
+            sprite_texture: node.sprite_texture,
+            has_physics: node.has_physics,
+            physics_body_type: node.physics_body_type,
+            physics_mass: node.physics_mass,
+            has_audio: node.has_audio,
+            audio_clip_path: node.audio_clip_path,
+            audio_group: node.audio_group,
+            audio_spatial: node.audio_spatial
+        )
+        self.nodes = self.nodes.push(node)
+        node
+
+    me remove_node(node_id: i32):
+        """Remove a node by ID."""
+        var kept: [SceneNodeData] = []
+        for n in self.nodes:
+            if n.node_id != node_id:
+                kept = kept.push(n)
+        self.nodes = kept
+
+    fn find_node(self, node_id: i32) -> SceneNodeData?:
+        """Find a node by ID, returns none if not found."""
+        for n in self.nodes:
+            if n.node_id == node_id:
+                return n
+        none
+
+    fn children_of(self, parent_id: i32) -> [SceneNodeData]:
+        """Return all direct children of the given parent."""
+        var result: [SceneNodeData] = []
+        for n in self.nodes:
+            if n.parent_id == parent_id:
+                result = result.push(n)
+        result
+
+    fn root_nodes(self) -> [SceneNodeData]:
+        """Return all nodes with no parent (parent_id == -1)."""
+        var result: [SceneNodeData] = []
+        for n in self.nodes:
+            if n.parent_id == -1:
+                result = result.push(n)
+        result
+
+    fn to_sdn(self) -> text:
+        """Serialize entire scene to SDN text."""
+        var out = "scene {\n"
+        out = out + "  name: \"" + self.name + "\"\n"
+        out = out + "  node_count: " + self.nodes.len().to_text() + "\n"
+        out = out + "}\n\n"
+        for n in self.nodes:
+            out = out + n.to_sdn() + "\n\n"
+        out
+
+    fn node_count(self) -> i32:
+        """Return the number of nodes in the scene."""
+        self.nodes.len()

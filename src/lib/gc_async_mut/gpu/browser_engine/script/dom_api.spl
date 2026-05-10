@@ -1,0 +1,253 @@
+"""
+# DOM API
+
+Simple-script DOM manipulation API for the browser engine.
+Thin forwarding layer over BeDomNode methods and be_dom_* helpers.
+
+JS Equivalent → Simple Function:
+    document.querySelector()     → document_query_selector()
+    document.querySelectorAll()  → document_query_selector_all()
+    document.getElementById()    → document_get_element_by_id()
+    document.createElement()     → document_create_element()
+    document.createTextNode()    → document_create_text_node()
+    node.appendChild()           → node_append_child()
+    node.removeChild()           → node_remove_child()
+    node.insertBefore()          → node_insert_before()
+    node.setAttribute()          → node_set_attribute()
+    node.getAttribute()          → node_get_attribute()
+    node.removeAttribute()       → node_remove_attribute()
+    node.textContent (set)       → node_set_text_content()
+    node.textContent (get)       → node_get_text_content()
+    node.innerHTML (set)         → node_set_inner_html()
+    node.classList.add()         → node_class_list_add()
+    node.classList.remove()      → node_class_list_remove()
+    node.classList.toggle()      → node_class_list_toggle()
+    node.classList.contains()    → node_class_list_contains()
+    node.style.setProperty()     → node_set_style_property()
+    node.style.getPropertyValue()→ node_get_style_property()
+    node.parentNode              → node_parent()
+    node.children                → node_children()
+    node.tagName                 → node_tag_name()
+"""
+
+#![allow(REQC001)]
+
+use std.gc_async_mut.gpu.browser_engine.dom.{
+    BeDomNode, be_dom_query_selector, be_dom_find_by_id,
+    be_dom_get_tag, be_dom_get_text_content, be_dom_get_children,
+    be_dom_get_attr, be_dom_get_classes, be_dom_add_child,
+    be_dom_set_children
+}
+
+# =========================================================================
+# Query Functions
+# =========================================================================
+
+pub fn document_query_selector(root: BeDomNode, sel: text) -> BeDomNode?:
+    """Return the first node matching a simple selector (tag, #id, .class)."""
+    be_dom_query_selector(root, sel)
+
+pub fn document_query_selector_all(root: BeDomNode, sel: text) -> [BeDomNode]:
+    """Return all nodes matching a simple selector (tag, #id, .class)."""
+    var results: [BeDomNode] = []
+    _collect_matching(root, sel, results)
+    results
+
+fn _collect_matching(node: BeDomNode, sel: text, results: [BeDomNode]):
+    """Recursively collect all nodes matching the selector."""
+    if _node_matches_selector(node, sel):
+        results.push(node)
+    var i = 0
+    while i < node.children.len():
+        _collect_matching(node.children[i], sel, results)
+        i = i + 1
+
+fn _node_matches_selector(node: BeDomNode, sel: text) -> bool:
+    """Check if a node matches a simple selector."""
+    if sel.starts_with("#"):
+        val id = sel.slice(1, sel.len())
+        return node.id == id
+    if sel.starts_with("."):
+        val cls = sel.slice(1, sel.len())
+        var j = 0
+        while j < node.classes.len():
+            if node.classes[j] == cls:
+                return true
+            j = j + 1
+        return false
+    node.tag == sel
+
+pub fn document_get_element_by_id(root: BeDomNode, id: text) -> BeDomNode?:
+    """Return the first node with the given id, or nil."""
+    be_dom_find_by_id(root, id)
+
+# =========================================================================
+# Node Creation
+# =========================================================================
+
+pub fn document_create_element(tag: text) -> BeDomNode:
+    """Create a new element node with the given tag name."""
+    BeDomNode.element(tag)
+
+pub fn document_create_text_node(content: text) -> BeDomNode:
+    """Create a new text node with the given content."""
+    BeDomNode.text(content)
+
+# =========================================================================
+# Tree Manipulation
+# =========================================================================
+
+pub fn node_append_child(parent: BeDomNode, child: BeDomNode):
+    """Append a child node to the parent."""
+    be_dom_add_child(parent, child)
+
+pub fn node_remove_child(parent: BeDomNode, idx: i32):
+    """Remove child at the given index from the parent."""
+    var new_children: [BeDomNode] = []
+    var i = 0
+    while i < parent.children.len():
+        if i != idx:
+            new_children.push(parent.children[i])
+        i = i + 1
+    be_dom_set_children(parent, new_children)
+
+pub fn node_insert_before(parent: BeDomNode, child: BeDomNode, ref_idx: i32):
+    """Insert a child before the node at ref_idx."""
+    var new_children: [BeDomNode] = []
+    var i = 0
+    var inserted = false
+    while i < parent.children.len():
+        if i == ref_idx and not inserted:
+            new_children.push(child)
+            inserted = true
+        new_children.push(parent.children[i])
+        i = i + 1
+    if not inserted:
+        new_children.push(child)
+    be_dom_set_children(parent, new_children)
+
+# =========================================================================
+# Attribute Manipulation
+# =========================================================================
+
+pub fn node_set_attribute(node: BeDomNode, name: text, value: text):
+    """Set an attribute on the node."""
+    node.set_attr(name, value)
+
+pub fn node_get_attribute(node: BeDomNode, name: text) -> text?:
+    """Get an attribute value. Returns nil if not present."""
+    val v = be_dom_get_attr(node, name)
+    if v == "":
+        return nil
+    Some(v)
+
+pub fn node_remove_attribute(node: BeDomNode, name: text):
+    """Remove an attribute from the node."""
+    node.remove_attr(name)
+
+# =========================================================================
+# Text Content
+# =========================================================================
+
+pub fn node_set_text_content(node: BeDomNode, content: text):
+    """Set the text content of a node, replacing all children with a text node."""
+    val text_node = BeDomNode.text(content)
+    be_dom_set_children(node, [text_node])
+
+pub fn node_get_text_content(node: BeDomNode) -> text:
+    """Get the concatenated text content of a node and its descendants."""
+    be_dom_get_text_content(node)
+
+pub fn node_set_inner_html(node: BeDomNode, html: text):
+    """Set inner HTML by re-parsing the HTML string into child nodes.
+
+    NOTE: Full HTML parsing would require importing the tree builder,
+    creating a circular dependency. For now, this handles simple text content.
+    For full re-parse, use the tree builder externally and set children.
+    """
+    # Simple case: treat as text content
+    val text_node = BeDomNode.text(html)
+    be_dom_set_children(node, [text_node])
+
+# =========================================================================
+# Class List
+# =========================================================================
+
+pub fn node_class_list_add(node: BeDomNode, cls: text):
+    """Add a CSS class to the node if not already present."""
+    var j = 0
+    while j < node.classes.len():
+        if node.classes[j] == cls:
+            return
+        j = j + 1
+    node.classes.push(cls)
+
+pub fn node_class_list_remove(node: BeDomNode, cls: text):
+    """Remove a CSS class from the node."""
+    var new_classes: [text] = []
+    var j = 0
+    while j < node.classes.len():
+        if node.classes[j] != cls:
+            new_classes.push(node.classes[j])
+        j = j + 1
+    node.classes = new_classes
+
+pub fn node_class_list_toggle(node: BeDomNode, cls: text) -> bool:
+    """Toggle a CSS class. Returns true if added, false if removed."""
+    var found = false
+    var j = 0
+    while j < node.classes.len():
+        if node.classes[j] == cls:
+            found = true
+        j = j + 1
+    if found:
+        node_class_list_remove(node, cls)
+        return false
+    node.classes.push(cls)
+    true
+
+pub fn node_class_list_contains(node: BeDomNode, cls: text) -> bool:
+    """Check if the node has a CSS class."""
+    var j = 0
+    while j < node.classes.len():
+        if node.classes[j] == cls:
+            return true
+        j = j + 1
+    false
+
+# =========================================================================
+# Style Properties
+# =========================================================================
+
+pub fn node_set_style_property(node: BeDomNode, prop: text, value: text):
+    """Set an inline style property on the node."""
+    node.set_style(prop, value)
+
+pub fn node_get_style_property(node: BeDomNode, prop: text) -> text:
+    """Get an inline style property value. Returns empty string if not set.
+
+    NOTE: Currently returns the display property only; extend as needed.
+    """
+    val s = node.style
+    if prop == "display":
+        return s.display
+    ""
+
+# =========================================================================
+# Tree Traversal
+# =========================================================================
+
+pub fn node_parent(node: BeDomNode) -> BeDomNode?:
+    """Return the parent node. Not tracked in BeDomNode; returns nil.
+
+    Parent tracking requires a back-reference or tree-walk from root.
+    """
+    nil
+
+pub fn node_children(node: BeDomNode) -> [BeDomNode]:
+    """Return the children of the node."""
+    be_dom_get_children(node)
+
+pub fn node_tag_name(node: BeDomNode) -> text:
+    """Return the tag name of the node."""
+    be_dom_get_tag(node)

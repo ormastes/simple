@@ -1,0 +1,180 @@
+"""
+# Script Runner
+
+Engine that executes Simple language code from <script> tags.
+Wraps source into a temp .spl file with DOM API imports, writes it to disk,
+and calls interpret_file from the compiler driver.
+
+Architecture:
+    1. ScriptRunner receives raw Simple source from a <script> tag body
+    2. It wraps the source with necessary imports (DOM API, console, etc.)
+    3. Writes to a temp .spl file
+    4. Calls interpret_file(path) to execute
+    5. Collects results and marks DOM dirty if mutations occurred
+"""
+
+#![allow(REQC001)]
+
+use std.gc_async_mut.gpu.browser_engine.dom.{BeDomNode}
+use std.gc_async_mut.gpu.browser_engine.script.console_buffer.{ConsoleBuffer}
+use std.gc_async_mut.gpu.browser_engine.script.event_loop.{EventLoop}
+use std.gc_async_mut.gpu.browser_engine.script.storage_api.{BrowserStorage}
+use std.gc_async_mut.gpu.browser_engine.script.clipboard_api.{BrowserClipboard}
+use std.gc_async_mut.gpu.browser_engine.script.location_api.{BrowserLocation, BrowserHistory}
+
+extern fn rt_file_write_text(path: text, content: text)
+extern fn rt_file_exists(path: text) -> bool
+
+# =========================================================================
+# Module-level shared state — the bridge between host and script
+# =========================================================================
+
+var _current_dom_root: BeDomNode? = nil
+var _current_console: ConsoleBuffer? = nil
+var _current_event_loop: EventLoop? = nil
+var _script_counter: i64 = 0
+
+# =========================================================================
+# ScriptRunner
+# =========================================================================
+
+pub class ScriptRunner:
+    """Executes Simple scripts in the context of a DOM tree.
+
+    Fields:
+        dom_root       - reference to the DOM root node
+        console_buffer - console output buffer
+        event_loop     - timer/rAF event loop
+        storage        - localStorage equivalent
+        clipboard      - clipboard buffer
+        location       - current page location
+        history        - navigation history
+        _dom_dirty     - true if scripts have mutated the DOM
+    """
+    dom_root: BeDomNode
+    console_buffer: ConsoleBuffer
+    event_loop: EventLoop
+    storage: BrowserStorage
+    clipboard: BrowserClipboard
+    location: BrowserLocation
+    history: BrowserHistory
+    _dom_dirty: bool
+
+    static fn new() -> ScriptRunner:
+        """Create a ScriptRunner with default state."""
+        ScriptRunner(
+            dom_root: BeDomNode.element("div"),
+            console_buffer: ConsoleBuffer.new(),
+            event_loop: EventLoop.new(),
+            storage: BrowserStorage.new(),
+            clipboard: BrowserClipboard.new(),
+            location: BrowserLocation(
+                href: "about:blank",
+                protocol: "",
+                host: "",
+                pathname: "/",
+                search: "",
+                hash: ""
+            ),
+            history: BrowserHistory.new("about:blank"),
+            _dom_dirty: false
+        )
+
+pub fn run_script(runner: ScriptRunner, source: text):
+    """Execute a Simple script against the runner's DOM tree.
+
+    Wraps the source with browser API imports and executes it via
+    the compiler's interpret_file. The source runs in a fresh interpreter
+    instance — DOM mutations flow through module-level state.
+
+    NOTE: Full interpret_file integration requires that module-level state
+    is shared across interpreter instances. If not, this operates as a
+    structural placeholder and scripts run in isolation.
+    """
+    if source.trim().len() == 0:
+        return
+
+    # Set up shared state for the script to access
+    _current_dom_root = Some(runner.dom_root)
+    _current_console = Some(runner.console_buffer)
+    _current_event_loop = Some(runner.event_loop)
+
+    # Generate a unique temp file path
+    _script_counter = _script_counter + 1
+    val tmp_path = "/tmp/_simple_script_{_script_counter}.spl"
+
+    # Build wrapped source with imports
+    val wrapped = _wrap_script_source(source)
+
+    # Write and execute
+    rt_file_write_text(tmp_path, wrapped)
+
+    # Call interpret_file through lazy import
+    use lazy compiler.driver.driver_api_interpret.{interpret_file}
+    val result = interpret_file(tmp_path)
+
+    # Mark DOM dirty — scripts may have mutated the tree
+    runner._dom_dirty = true
+
+pub fn run_script_file(runner: ScriptRunner, path: text):
+    """Execute a Simple script file (for <script src="...">).
+
+    Reads and executes the script at the given path.
+    """
+    if not rt_file_exists(path):
+        return
+    extern fn rt_file_read_text(p: text) -> text
+    val source = rt_file_read_text(path)
+    run_script(runner, source)
+
+pub fn script_runner_dom_dirty(runner: ScriptRunner) -> bool:
+    """Check if scripts have mutated the DOM."""
+    runner._dom_dirty
+
+pub fn script_runner_clear_dirty(runner: ScriptRunner):
+    """Clear the DOM dirty flag."""
+    runner._dom_dirty = false
+
+# =========================================================================
+# Shared State Accessors — called by scripts via module-level functions
+# =========================================================================
+
+pub fn get_script_dom_root() -> BeDomNode?:
+    """Return the current DOM root set by the runner, or nil."""
+    _current_dom_root
+
+pub fn get_script_console() -> ConsoleBuffer?:
+    """Return the current console buffer, or nil."""
+    _current_console
+
+pub fn get_script_event_loop() -> EventLoop?:
+    """Return the current event loop, or nil."""
+    _current_event_loop
+
+# =========================================================================
+# Internal: Wrap script source with imports
+# =========================================================================
+
+fn _wrap_script_source(source: text) -> text:
+    """Wrap raw script source with browser API imports.
+
+    Prepends use-statements so the script can call DOM/console/timer
+    functions directly.
+    """
+    val imports = "# Auto-generated script wrapper
+use std.gc_async_mut.gpu.browser_engine.script.dom_api.*
+use std.gc_async_mut.gpu.browser_engine.script.console_api.*
+use std.gc_async_mut.gpu.browser_engine.script.timer_api.*
+use std.gc_async_mut.gpu.browser_engine.script.event_api.*
+use std.gc_async_mut.gpu.browser_engine.script.storage_api.*
+use std.gc_async_mut.gpu.browser_engine.script.canvas_api.*
+use std.gc_async_mut.gpu.browser_engine.script.form_api.*
+use std.gc_async_mut.gpu.browser_engine.script.clipboard_api.*
+use std.gc_async_mut.gpu.browser_engine.script.network_api.*
+use std.gc_async_mut.gpu.browser_engine.script.worker_api.*
+use std.gc_async_mut.gpu.browser_engine.script.location_api.*
+use std.gc_async_mut.gpu.browser_engine.script.script_runner.{get_script_dom_root, get_script_console, get_script_event_loop}
+use std.gc_async_mut.gpu.browser_engine.dom.{BeDomNode, BeDomEvent}
+
+"
+    "{imports}{source}\n"

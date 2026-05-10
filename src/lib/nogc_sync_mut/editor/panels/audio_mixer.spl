@@ -1,0 +1,156 @@
+# AudioMixerPanel — visual mixer for audio groups
+#
+# Shows the AudioGroup tree with volume sliders, mute/solo buttons,
+# and VU meter levels.
+
+use std.nogc_sync_mut.editor.typed_event_bus.{EditorEvent, EventQueue}
+
+# ============================================================================
+# MixerChannel — one strip in the mixer
+# ============================================================================
+
+struct MixerChannel:
+    group_name: text
+    display_name: text
+    volume: f64
+    muted: bool
+    solo: bool
+    level_left: f64
+    level_right: f64
+    depth: i32
+
+# ============================================================================
+# AudioMixerPanel
+# ============================================================================
+
+class AudioMixerPanel:
+    channels: [MixerChannel]
+    event_queue: EventQueue
+    master_volume: f64
+    scroll_offset: f64
+
+impl AudioMixerPanel:
+    static fn new() -> AudioMixerPanel:
+        AudioMixerPanel(
+            channels: [],
+            event_queue: EventQueue.new(),
+            master_volume: 1.0,
+            scroll_offset: 0.0
+        )
+
+    me set_channels(channels: [MixerChannel]):
+        self.channels = channels
+
+    me set_volume(group_name: text, volume: f64):
+        var clamped = volume
+        if clamped < 0.0:
+            clamped = 0.0
+        if clamped > 1.0:
+            clamped = 1.0
+        var updated: [MixerChannel] = []
+        for ch in self.channels:
+            if ch.group_name == group_name:
+                val new_ch = MixerChannel(
+                    group_name: ch.group_name,
+                    display_name: ch.display_name,
+                    volume: clamped,
+                    muted: ch.muted,
+                    solo: ch.solo,
+                    level_left: ch.level_left,
+                    level_right: ch.level_right,
+                    depth: ch.depth
+                )
+                updated = updated.push(new_ch)
+            else:
+                updated = updated.push(ch)
+        self.channels = updated
+
+    me toggle_mute(group_name: text):
+        var updated: [MixerChannel] = []
+        for ch in self.channels:
+            if ch.group_name == group_name:
+                val new_ch = MixerChannel(
+                    group_name: ch.group_name,
+                    display_name: ch.display_name,
+                    volume: ch.volume,
+                    muted: not ch.muted,
+                    solo: ch.solo,
+                    level_left: ch.level_left,
+                    level_right: ch.level_right,
+                    depth: ch.depth
+                )
+                updated = updated.push(new_ch)
+            else:
+                updated = updated.push(ch)
+        self.channels = updated
+
+    me toggle_solo(group_name: text):
+        var updated: [MixerChannel] = []
+        for ch in self.channels:
+            if ch.group_name == group_name:
+                val new_ch = MixerChannel(
+                    group_name: ch.group_name,
+                    display_name: ch.display_name,
+                    volume: ch.volume,
+                    muted: ch.muted,
+                    solo: not ch.solo,
+                    level_left: ch.level_left,
+                    level_right: ch.level_right,
+                    depth: ch.depth
+                )
+                updated = updated.push(new_ch)
+            else:
+                updated = updated.push(ch)
+        self.channels = updated
+
+    me set_master_volume(volume: f64):
+        var clamped = volume
+        if clamped < 0.0:
+            clamped = 0.0
+        if clamped > 1.0:
+            clamped = 1.0
+        self.master_volume = clamped
+
+    me update_levels(group_name: text, left: f64, right: f64):
+        # Clamp VU meter levels to 0.0..1.0
+        var clamped_left = left
+        if clamped_left < 0.0:
+            clamped_left = 0.0
+        if clamped_left > 1.0:
+            clamped_left = 1.0
+        var clamped_right = right
+        if clamped_right < 0.0:
+            clamped_right = 0.0
+        if clamped_right > 1.0:
+            clamped_right = 1.0
+        var updated: [MixerChannel] = []
+        for ch in self.channels:
+            if ch.group_name == group_name:
+                val new_ch = MixerChannel(
+                    group_name: ch.group_name,
+                    display_name: ch.display_name,
+                    volume: ch.volume,
+                    muted: ch.muted,
+                    solo: ch.solo,
+                    level_left: clamped_left,
+                    level_right: clamped_right,
+                    depth: ch.depth
+                )
+                updated = updated.push(new_ch)
+            else:
+                updated = updated.push(ch)
+        self.channels = updated
+
+    fn channel_count(self) -> i32:
+        self.channels.len()
+
+    fn get_channel(self, group_name: text) -> MixerChannel?:
+        for ch in self.channels:
+            if ch.group_name == group_name:
+                return ch
+        none
+
+    me scroll_by(delta: f64):
+        self.scroll_offset = self.scroll_offset + delta
+        if self.scroll_offset < 0.0:
+            self.scroll_offset = 0.0

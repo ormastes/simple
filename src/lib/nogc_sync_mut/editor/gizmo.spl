@@ -1,0 +1,279 @@
+# Gizmo — visual transform handles for selected nodes
+#
+# Provides translate/rotate/scale gizmo with axis detection,
+# drag tracking, snapping support, and delta computation.
+
+use std.common.drawing.vector.{SkPoint}
+
+# ============================================================================
+# GizmoMode — which transform the gizmo controls
+# ============================================================================
+
+enum GizmoMode:
+    Translate
+    Rotate
+    Scale
+
+impl GizmoMode:
+    fn to_text(self) -> text:
+        match self:
+            GizmoMode.Translate => "Translate"
+            GizmoMode.Rotate => "Rotate"
+            GizmoMode.Scale => "Scale"
+
+# ============================================================================
+# GizmoAxis — which axis is active
+# ============================================================================
+
+enum GizmoAxis:
+    AxisNone
+    AxisX
+    AxisY
+    AxisXY
+
+impl GizmoAxis:
+    fn to_text(self) -> text:
+        match self:
+            GizmoAxis.AxisNone => "None"
+            GizmoAxis.AxisX => "X"
+            GizmoAxis.AxisY => "Y"
+            GizmoAxis.AxisXY => "XY"
+
+    fn eq(self, other: GizmoAxis) -> bool:
+        self.to_text() == other.to_text()
+
+    fn is_none(self) -> bool:
+        self.eq(GizmoAxis.AxisNone)
+
+# ============================================================================
+# GizmoDelta — result of a completed drag operation
+# ============================================================================
+
+struct GizmoDelta:
+    mode: GizmoMode
+    dx: f64
+    dy: f64
+    d_rotation: f64
+    d_scale_x: f64
+    d_scale_y: f64
+
+impl GizmoDelta:
+    static fn zero() -> GizmoDelta:
+        """A delta with no change."""
+        GizmoDelta(
+            mode: GizmoMode.Translate,
+            dx: 0.0,
+            dy: 0.0,
+            d_rotation: 0.0,
+            d_scale_x: 0.0,
+            d_scale_y: 0.0
+        )
+
+    fn has_change(self) -> bool:
+        """Return true if any component is non-zero."""
+        val threshold = 0.0001
+        var adx = self.dx
+        if adx < 0.0:
+            adx = -adx
+        var ady = self.dy
+        if ady < 0.0:
+            ady = -ady
+        var adr = self.d_rotation
+        if adr < 0.0:
+            adr = -adr
+        var adsx = self.d_scale_x
+        if adsx < 0.0:
+            adsx = -adsx
+        var adsy = self.d_scale_y
+        if adsy < 0.0:
+            adsy = -adsy
+        (adx > threshold or ady > threshold or adr > threshold or
+         adsx > threshold or adsy > threshold)
+
+# ============================================================================
+# GizmoConfig — appearance and snapping settings
+# ============================================================================
+
+struct GizmoConfig:
+    handle_size: f64
+    axis_length: f64
+    snap_translate: f64
+    snap_rotate: f64
+    snap_scale: f64
+    snapping: bool
+
+fn default_gizmo_config() -> GizmoConfig:
+    """Default config: 8px handles, 60px axes, no snapping."""
+    GizmoConfig(
+        handle_size: 8.0,
+        axis_length: 60.0,
+        snap_translate: 1.0,
+        snap_rotate: 15.0,
+        snap_scale: 0.1,
+        snapping: false
+    )
+
+# ============================================================================
+# Gizmo — interactive transform manipulator
+# ============================================================================
+
+class Gizmo:
+    mode: GizmoMode
+    active_axis: GizmoAxis
+    config: GizmoConfig
+    dragging: bool
+    drag_start_x: f64
+    drag_start_y: f64
+    drag_current_x: f64
+    drag_current_y: f64
+    origin_x: f64
+    origin_y: f64
+
+impl Gizmo:
+    static fn new() -> Gizmo:
+        """Create a gizmo in translate mode at the origin."""
+        Gizmo(
+            mode: GizmoMode.Translate,
+            active_axis: GizmoAxis.AxisNone,
+            config: default_gizmo_config(),
+            dragging: false,
+            drag_start_x: 0.0,
+            drag_start_y: 0.0,
+            drag_current_x: 0.0,
+            drag_current_y: 0.0,
+            origin_x: 0.0,
+            origin_y: 0.0
+        )
+
+    me set_mode(mode: GizmoMode):
+        """Switch gizmo mode (translate/rotate/scale)."""
+        self.mode = mode
+
+    me set_origin(x: f64, y: f64):
+        """Move the gizmo to a new origin (typically the selected node's position)."""
+        self.origin_x = x
+        self.origin_y = y
+
+    me begin_drag(x: f64, y: f64):
+        """Start a drag interaction at the given screen point."""
+        self.dragging = true
+        self.drag_start_x = x
+        self.drag_start_y = y
+        self.drag_current_x = x
+        self.drag_current_y = y
+
+    me update_drag(x: f64, y: f64):
+        """Update the current drag position."""
+        self.drag_current_x = x
+        self.drag_current_y = y
+
+    me end_drag() -> GizmoDelta:
+        """End the drag and compute the resulting delta."""
+        self.dragging = false
+        val raw_dx = self.drag_current_x - self.drag_start_x
+        val raw_dy = self.drag_current_y - self.drag_start_y
+
+        match self.mode:
+            GizmoMode.Translate:
+                var dx = raw_dx
+                var dy = raw_dy
+                if self.config.snapping:
+                    val snap = self.config.snap_translate
+                    # Round to nearest snap increment
+                    dx = (dx / snap).round() * snap
+                    dy = (dy / snap).round() * snap
+                # Constrain to active axis
+                match self.active_axis:
+                    GizmoAxis.AxisX:
+                        dy = 0.0
+                    GizmoAxis.AxisY:
+                        dx = 0.0
+                    _ =>
+                        pass_dn
+                GizmoDelta(
+                    mode: GizmoMode.Translate,
+                    dx: dx, dy: dy,
+                    d_rotation: 0.0,
+                    d_scale_x: 0.0, d_scale_y: 0.0
+                )
+            GizmoMode.Rotate:
+                # Compute angle from drag distance (180 degrees per 200 pixels)
+                val dist = ((raw_dx * raw_dx + raw_dy * raw_dy) ** 0.5)
+                var angle = dist * 0.9
+                if raw_dx < 0.0:
+                    angle = -angle
+                if self.config.snapping:
+                    val snap = self.config.snap_rotate
+                    angle = (angle / snap).round() * snap
+                GizmoDelta(
+                    mode: GizmoMode.Rotate,
+                    dx: 0.0, dy: 0.0,
+                    d_rotation: angle,
+                    d_scale_x: 0.0, d_scale_y: 0.0
+                )
+            GizmoMode.Scale:
+                var sx = raw_dx / 100.0
+                var sy = raw_dy / 100.0
+                if self.config.snapping:
+                    val snap = self.config.snap_scale
+                    sx = (sx / snap).round() * snap
+                    sy = (sy / snap).round() * snap
+                match self.active_axis:
+                    GizmoAxis.AxisX:
+                        sy = 0.0
+                    GizmoAxis.AxisY:
+                        sx = 0.0
+                    _ =>
+                        pass_dn
+                GizmoDelta(
+                    mode: GizmoMode.Scale,
+                    dx: 0.0, dy: 0.0,
+                    d_rotation: 0.0,
+                    d_scale_x: sx, d_scale_y: sy
+                )
+
+    fn hit_test(self, px: f64, py: f64) -> GizmoAxis:
+        """Check if a point is near an axis handle. Returns the closest axis or AxisNone."""
+        val hs = self.config.handle_size
+        val al = self.config.axis_length
+
+        # Distance from origin
+        val rel_x = px - self.origin_x
+        val rel_y = py - self.origin_y
+
+        # Check X axis handle (at end of X axis line)
+        var dx_to_x_handle = rel_x - al
+        if dx_to_x_handle < 0.0:
+            dx_to_x_handle = -dx_to_x_handle
+        var dy_to_x_handle = rel_y
+        if dy_to_x_handle < 0.0:
+            dy_to_x_handle = -dy_to_x_handle
+        if dx_to_x_handle < hs and dy_to_x_handle < hs:
+            return GizmoAxis.AxisX
+
+        # Check Y axis handle (at end of Y axis line)
+        var dx_to_y_handle = rel_x
+        if dx_to_y_handle < 0.0:
+            dx_to_y_handle = -dx_to_y_handle
+        var dy_to_y_handle = rel_y - al
+        if dy_to_y_handle < 0.0:
+            dy_to_y_handle = -dy_to_y_handle
+        if dx_to_y_handle < hs and dy_to_y_handle < hs:
+            return GizmoAxis.AxisY
+
+        # Check center square (XY handle)
+        val center_size = hs * 2.0
+        var arx = rel_x
+        if arx < 0.0:
+            arx = -arx
+        var ary = rel_y
+        if ary < 0.0:
+            ary = -ary
+        if arx < center_size and ary < center_size:
+            return GizmoAxis.AxisXY
+
+        GizmoAxis.AxisNone
+
+    fn is_active(self) -> bool:
+        """Return true if a drag is in progress."""
+        self.dragging

@@ -1,0 +1,173 @@
+# HierarchyPanel — tree view of scene nodes
+#
+# Displays the scene graph as a collapsible tree. Emits selection
+# events when nodes are clicked. Supports expand/collapse per node.
+
+use std.nogc_sync_mut.editor.selection.{NodeId, SelectionState}
+use std.nogc_sync_mut.editor.typed_event_bus.{EditorEvent, EventQueue}
+use std.common.editor.scene_format.{SceneNodeData, SceneFile}
+
+# ============================================================================
+# HierarchyEntry — one row in the hierarchy tree
+# ============================================================================
+
+struct HierarchyEntry:
+    node_id: NodeId
+    name: text
+    depth: i32
+    expanded: bool
+    has_children: bool
+    selected: bool
+
+# ============================================================================
+# HierarchyPanel
+# ============================================================================
+
+class HierarchyPanel:
+    entries: [HierarchyEntry]
+    event_queue: EventQueue
+    scroll_offset: f64
+    filter_text: text
+
+impl HierarchyPanel:
+    static fn new() -> HierarchyPanel:
+        HierarchyPanel(
+            entries: [],
+            event_queue: EventQueue.new(),
+            scroll_offset: 0.0,
+            filter_text: ""
+        )
+
+    me rebuild(nodes: [HierarchyEntry]):
+        self.entries = nodes
+
+    me toggle_expand(node_id: NodeId):
+        var updated: [HierarchyEntry] = []
+        for entry in self.entries:
+            if entry.node_id.eq(node_id):
+                val toggled = HierarchyEntry(
+                    node_id: entry.node_id,
+                    name: entry.name,
+                    depth: entry.depth,
+                    expanded: not entry.expanded,
+                    has_children: entry.has_children,
+                    selected: entry.selected
+                )
+                updated = updated.push(toggled)
+            else:
+                updated = updated.push(entry)
+        self.entries = updated
+
+    me select_node(node_id: NodeId):
+        var updated: [HierarchyEntry] = []
+        for entry in self.entries:
+            if entry.node_id.eq(node_id):
+                val sel = HierarchyEntry(
+                    node_id: entry.node_id,
+                    name: entry.name,
+                    depth: entry.depth,
+                    expanded: entry.expanded,
+                    has_children: entry.has_children,
+                    selected: true
+                )
+                updated = updated.push(sel)
+            else:
+                val desel = HierarchyEntry(
+                    node_id: entry.node_id,
+                    name: entry.name,
+                    depth: entry.depth,
+                    expanded: entry.expanded,
+                    has_children: entry.has_children,
+                    selected: false
+                )
+                updated = updated.push(desel)
+        self.entries = updated
+        self.event_queue.push(EditorEvent.SelectionChanged(node_ids: [node_id]))
+
+    me set_filter(filter: text):
+        self.filter_text = filter
+
+    fn visible_entries(self) -> [HierarchyEntry]:
+        # Collect entries that pass the filter and whose ancestors are expanded.
+        # First, build a set of collapsed ancestor node IDs by tracking depth.
+        var result: [HierarchyEntry] = []
+        var skip_below_depth = -1
+
+        for entry in self.entries:
+            # If we are skipping collapsed children, check depth
+            if skip_below_depth >= 0:
+                if entry.depth > skip_below_depth:
+                    # This entry is a child of a collapsed node — skip
+                    continue
+                else:
+                    # We've exited the collapsed subtree
+                    skip_below_depth = -1
+
+            # Apply text filter
+            if self.filter_text != "":
+                if not entry.name.contains(self.filter_text):
+                    continue
+
+            result = result.push(entry)
+
+            # If this entry has children but is not expanded, skip its subtree
+            if entry.has_children and not entry.expanded:
+                skip_below_depth = entry.depth
+
+        result
+
+    fn entry_count(self) -> i32:
+        self.entries.len()
+
+    me scroll_by(delta: f64):
+        self.scroll_offset = self.scroll_offset + delta
+        if self.scroll_offset < 0.0:
+            self.scroll_offset = 0.0
+
+# ============================================================================
+# build_hierarchy_entries — walk scene graph depth-first
+# ============================================================================
+
+fn walk_children(scene: SceneFile, parent_id: i32, depth: i32, selection: SelectionState, out: [HierarchyEntry]) -> [HierarchyEntry]:
+    val children = scene.children_of(parent_id)
+    var result = out
+    for child in children:
+        val child_node_id = NodeId(id: child.node_id)
+        val grandchildren = scene.children_of(child.node_id)
+        val has_kids = grandchildren.len() > 0
+        val is_selected = selection.contains(child_node_id)
+        val entry = HierarchyEntry(
+            node_id: child_node_id,
+            name: child.name,
+            depth: depth,
+            expanded: true,
+            has_children: has_kids,
+            selected: is_selected
+        )
+        result = result.push(entry)
+        if has_kids:
+            result = walk_children(scene, child.node_id, depth + 1, selection, result)
+    result
+
+fn build_hierarchy_entries(scene: SceneFile, selection: SelectionState) -> [HierarchyEntry]:
+    # Walk scene nodes depth-first, building HierarchyEntry list.
+    # Mark selected nodes based on SelectionState.
+    val roots = scene.root_nodes()
+    var result: [HierarchyEntry] = []
+    for root in roots:
+        val root_node_id = NodeId(id: root.node_id)
+        val children = scene.children_of(root.node_id)
+        val has_kids = children.len() > 0
+        val is_selected = selection.contains(root_node_id)
+        val entry = HierarchyEntry(
+            node_id: root_node_id,
+            name: root.name,
+            depth: 0,
+            expanded: true,
+            has_children: has_kids,
+            selected: is_selected
+        )
+        result = result.push(entry)
+        if has_kids:
+            result = walk_children(scene, root.node_id, 1, selection, result)
+    result

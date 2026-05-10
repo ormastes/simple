@@ -52,6 +52,18 @@ pub class EventLoop:
             i = i + 1
         self._timers = new_timers
 
+    me schedule_timer(callback_id: i64, deadline_micros: i64, interval_micros: i64) -> i64:
+        """Schedule a timer and return its id. interval_micros=0 for one-shot."""
+        val tid = self._next_id
+        self._next_id = self._next_id + 1
+        self._timers.push(MacroTask(
+            timer_id: tid,
+            callback_id: callback_id,
+            deadline_micros: deadline_micros,
+            interval_micros: interval_micros
+        ))
+        tid
+
     me expired_timer_count_before(now_micros: i64) -> i32:
         """Return how many pending timers have deadline <= now_micros."""
         var count = 0
@@ -61,3 +73,34 @@ pub class EventLoop:
                 count = count + 1
             i = i + 1
         count
+
+    me drain_expired(now_micros: i64) -> [i64]:
+        """Remove and return callback_ids for all expired timers.
+
+        Interval timers are re-queued with an updated deadline.
+        """
+        var fired: [i64] = []
+        var keep: [MacroTask] = []
+        var i = 0
+        while i < self._timers.len():
+            val t = self._timers[i]
+            if t.deadline_micros <= now_micros:
+                fired.push(t.callback_id)
+                if t.interval_micros > 0:
+                    keep.push(MacroTask(
+                        timer_id: t.timer_id,
+                        callback_id: t.callback_id,
+                        deadline_micros: now_micros + t.interval_micros,
+                        interval_micros: t.interval_micros
+                    ))
+            else:
+                keep.push(t)
+            i = i + 1
+        self._timers = keep
+        fired
+
+    me drain_raf() -> [i64]:
+        """Remove and return all pending rAF callback ids."""
+        val slots = self._raf_slots
+        self._raf_slots = []
+        slots
