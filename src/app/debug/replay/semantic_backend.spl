@@ -1,27 +1,55 @@
-# SReplay — Semantic Trace Debug Backend
+# SReplay — Semantic Replay Backend (Track 4)
 #
 # Overlays semantic trace events onto a debug session.
-# Enables object lifecycle queries, ownership tracking, and
-# "who wrote this field?" reverse lookups.
+# Loads .sst semantic trace files and provides:
+#   - Object lifecycle queries (show_object, show_lifetime, show_borrows)
+#   - Reverse-to-field-write capability
+#   - Integration with the debug coordinator via DebugBackend trait
 
+use std.nogc_sync_mut.debug.coordinator.{DebugBackend, FrameInfo, VarInfo, LocationInfo}
 use std.nogc_sync_mut.replay.semantic.trace_events.{SemanticEventKind, SemanticEvent}
 use std.nogc_sync_mut.replay.semantic.trace_reader.{read_semantic_trace}
 use std.nogc_sync_mut.replay.semantic.object_identity.{ObjectId, ObjectRegistry}
 
 # ============================================================================
-# Semantic Debug Backend
+# Object Lifetime Summary
 # ============================================================================
 
-class SemanticDebugBackend:
+struct ObjectLifetime:
+    obj_id: i64
+    alloc_event: Option<SemanticEvent>
+    drop_event: Option<SemanticEvent>
+    writes: [SemanticEvent]
+    borrows: [SemanticEvent]
+    transfers: [SemanticEvent]
+
+impl ObjectLifetime:
+    fn is_alive() -> bool:
+        match self.drop_event:
+            case Some(_): false
+            case None: true
+
+    fn event_count() -> i64:
+        var count: i64 = 0
+        if self.alloc_event.?: count = count + 1
+        if self.drop_event.?: count = count + 1
+        count = count + self.writes.len() + self.borrows.len() + self.transfers.len()
+        count
+
+# ============================================================================
+# Semantic Replay Backend
+# ============================================================================
+
+class SemanticReplayBackend:
     trace_path: text
     events: [SemanticEvent]
     registry: ObjectRegistry
     current_idx: i64
     loaded: bool
 
-impl SemanticDebugBackend:
-    static fn create(trace_path: text) -> SemanticDebugBackend:
-        SemanticDebugBackend(
+impl SemanticReplayBackend:
+    static fn create(trace_path: text) -> SemanticReplayBackend:
+        SemanticReplayBackend(
             trace_path: trace_path,
             events: [],
             registry: ObjectRegistry.create(),
@@ -29,14 +57,171 @@ impl SemanticDebugBackend:
             loaded: false
         )
 
-    fn load() -> Result<Nil, text>:
+    # ------------------------------------------------------------------
+    # Loading
+    # ------------------------------------------------------------------
+
+    me fn load() -> Result<Nil, text>:
         self.events = read_semantic_trace(self.trace_path)?
         self.loaded = true
         self.current_idx = 0
+        # Build registry from alloc events
+        for ev in self.events:
+            if ev.event_kind() == SemanticEventKind.ObjectAlloc:
+                self.registry.register(ev.name_id, ev.source_file_id, ev.source_line)
+            else if ev.event_kind() == SemanticEventKind.ObjectDrop:
+                self.registry.mark_dropped(ev.object_id)
         Ok(nil)
 
     fn event_count() -> i64:
         self.events.len()
+
+    # ------------------------------------------------------------------
+    # DebugBackend trait methods
+    # ------------------------------------------------------------------
+
+    fn name() -> text:
+        "semantic-replay"
+
+    me fn attach(program_path: text, args: [text]) -> Result<Nil, text>:
+        self.load()
+
+    me fn detach() -> Result<Nil, text>:
+        self.events = []
+        self.registry = ObjectRegistry.create()
+        self.current_idx = 0
+        self.loaded = false
+        Ok(nil)
+
+    me fn run() -> Result<Nil, text>:
+        # Advance to end of trace
+        self.current_idx = self.events.len()
+        Ok(nil)
+
+    fn pause() -> Result<Nil, text>:
+        # Replay is deterministic; pause is a no-op
+        Ok(nil)
+
+    me fn resume() -> Result<Nil, text>:
+        self.run()
+
+    me fn step_over() -> Result<Nil, text>:
+        if self.current_idx < self.events.len():
+            self.current_idx = self.current_idx + 1
+            Ok(nil)
+        else:
+            Err("end of trace")
+
+    me fn step_in() -> Result<Nil, text>:
+        self.step_over()
+
+    me fn step_out() -> Result<Nil, text>:
+        # Skip forward to the next FunctionExit at the same depth
+        val start_idx = self.current_idx
+        var depth: i64 = 0
+        while self.current_idx < self.events.len():
+            val ev = self.events[self.current_idx]
+            if ev.event_kind() == SemanticEventKind.FunctionEnter:
+                depth = depth + 1
+            else if ev.event_kind() == SemanticEventKind.FunctionExit:
+                if depth == 0:
+                    self.current_idx = self.current_idx + 1
+                    return Ok(nil)
+                depth = depth - 1
+            self.current_idx = self.current_idx + 1
+        Err("no matching FunctionExit found")
+
+    me fn reverse_step() -> Result<Nil, text>:
+        if self.current_idx > 0:
+            self.current_idx = self.current_idx - 1
+            Ok(nil)
+        else:
+            Err("already at start of trace")
+
+    me fn reverse_continue() -> Result<Nil, text>:
+        self.current_idx = 0
+        Ok(nil)
+
+    fn add_breakpoint(file: text, line: i32) -> Result<i32, text>:
+        # Semantic trace doesn't have direct breakpoint support
+        Ok(0)
+
+    fn remove_breakpoint(file: text, line: i32) -> Result<Nil, text>:
+        Ok(nil)
+
+    fn stack_trace() -> Result<[FrameInfo], text>:
+        # Reconstruct call stack from FunctionEnter/Exit events up to current_idx
+        var stack: [FrameInfo] = []
+        var frame_idx: i32 = 0
+        var i: i64 = 0
+        while i < self.current_idx:
+            val ev = self.events[i]
+            if ev.event_kind() == SemanticEventKind.FunctionEnter:
+                stack.push(FrameInfo(
+                    index: frame_idx,
+                    function_name: "fn#{ev.name_id}",
+                    file: "file#{ev.source_file_id}",
+                    line: ev.source_line,
+                    column: ev.source_column
+                ))
+                frame_idx = frame_idx + 1
+            else if ev.event_kind() == SemanticEventKind.FunctionExit:
+                if stack.len() > 0:
+                    stack.pop()
+                    frame_idx = frame_idx - 1
+            i = i + 1
+        Ok(stack)
+
+    fn locals() -> Result<[VarInfo], text>:
+        # Collect most recent VariableWrite events in the current function scope
+        var vars: [VarInfo] = []
+        var scope_start: i64 = 0
+        # Find where the current function began
+        var depth: i64 = 0
+        var i = self.current_idx - 1
+        while i >= 0:
+            val ev = self.events[i]
+            if ev.event_kind() == SemanticEventKind.FunctionExit:
+                depth = depth + 1
+            else if ev.event_kind() == SemanticEventKind.FunctionEnter:
+                if depth == 0:
+                    scope_start = i
+                    i = -1  # break
+                else:
+                    depth = depth - 1
+            i = i - 1
+        # Gather variable writes in this scope
+        i = scope_start
+        while i < self.current_idx:
+            val ev = self.events[i]
+            if ev.event_kind() == SemanticEventKind.VariableWrite:
+                vars.push(VarInfo(
+                    name: "var#{ev.name_id}",
+                    value: "{ev.payload_a}",
+                    type_name: "type#{ev.payload_b}",
+                    num_children: 0
+                ))
+            i = i + 1
+        Ok(vars)
+
+    fn evaluate(expr: text) -> Result<text, text>:
+        Err("evaluate not supported in semantic replay mode")
+
+    fn current_location() -> Result<LocationInfo, text>:
+        if self.current_idx >= 0 and self.current_idx < self.events.len():
+            val ev = self.events[self.current_idx]
+            Ok(LocationInfo(
+                file: "file#{ev.source_file_id}",
+                line: ev.source_line,
+                column: ev.source_column,
+                function_name: "fn#{ev.name_id}"
+            ))
+        else:
+            Err("no current event")
+
+    # ------------------------------------------------------------------
+    # Event navigation
+    # ------------------------------------------------------------------
 
     fn current_event() -> Option<SemanticEvent>:
         if self.current_idx >= 0 and self.current_idx < self.events.len():
@@ -44,7 +229,7 @@ impl SemanticDebugBackend:
         else:
             None
 
-    fn advance() -> Option<SemanticEvent>:
+    me fn advance() -> Option<SemanticEvent>:
         if self.current_idx < self.events.len():
             val ev = self.events[self.current_idx]
             self.current_idx = self.current_idx + 1
@@ -52,63 +237,132 @@ impl SemanticDebugBackend:
         else:
             None
 
-    fn seek_to_event(idx: i64) -> Result<Nil, text>:
+    me fn seek_to_event(idx: i64) -> Result<Nil, text>:
         if idx < 0 or idx >= self.events.len():
             return Err("event index {idx} out of range")
         self.current_idx = idx
         Ok(nil)
 
+    # ------------------------------------------------------------------
+    # Object lifecycle queries
+    # ------------------------------------------------------------------
+
+    fn show_object(obj_id: i64) -> Option<ObjectId>:
+        """Look up an object's identity from the registry."""
+        self.registry.lookup(obj_id)
+
+    fn show_lifetime(obj_id: i64) -> ObjectLifetime:
+        """Build a complete lifetime summary for an object."""
+        var alloc_ev: Option<SemanticEvent> = None
+        var drop_ev: Option<SemanticEvent> = None
+        var writes: [SemanticEvent] = []
+        var borrows: [SemanticEvent] = []
+        var transfers: [SemanticEvent] = []
+        for ev in self.events:
+            if ev.object_id == obj_id:
+                match ev.event_kind():
+                    case SemanticEventKind.ObjectAlloc:
+                        alloc_ev = Some(ev)
+                    case SemanticEventKind.ObjectDrop:
+                        drop_ev = Some(ev)
+                    case SemanticEventKind.VariableWrite:
+                        writes.push(ev)
+                    case SemanticEventKind.BorrowStart:
+                        borrows.push(ev)
+                    case SemanticEventKind.BorrowEnd:
+                        borrows.push(ev)
+                    case SemanticEventKind.OwnershipTransfer:
+                        transfers.push(ev)
+                    case _:
+                        pass_dn
+        ObjectLifetime(
+            obj_id: obj_id,
+            alloc_event: alloc_ev,
+            drop_event: drop_ev,
+            writes: writes,
+            borrows: borrows,
+            transfers: transfers
+        )
+
+    fn show_borrows(obj_id: i64) -> [SemanticEvent]:
+        """Return all borrow start/end events for an object."""
+        var result: [SemanticEvent] = []
+        for ev in self.events:
+            if ev.object_id == obj_id:
+                if ev.event_kind() == SemanticEventKind.BorrowStart or ev.event_kind() == SemanticEventKind.BorrowEnd:
+                    result.push(ev)
+        result
+
+    # ------------------------------------------------------------------
+    # Reverse-to-field-write
+    # ------------------------------------------------------------------
+
+    fn reverse_to_field_write(obj_id: i64, name_hash: i32) -> Option<SemanticEvent>:
+        """Find the most recent VariableWrite for a specific field on an object,
+        searching backward from the current position."""
+        var i = self.current_idx - 1
+        while i >= 0:
+            val ev = self.events[i]
+            if ev.object_id == obj_id and ev.name_id == name_hash:
+                if ev.event_kind() == SemanticEventKind.VariableWrite:
+                    return Some(ev)
+            i = i - 1
+        None
+
+    fn reverse_to_any_write(name_hash: i32) -> Option<SemanticEvent>:
+        """Find the most recent VariableWrite with the given name hash,
+        searching backward from the current position (any object)."""
+        var i = self.current_idx - 1
+        while i >= 0:
+            val ev = self.events[i]
+            if ev.name_id == name_hash and ev.event_kind() == SemanticEventKind.VariableWrite:
+                return Some(ev)
+            i = i - 1
+        None
+
+    # ------------------------------------------------------------------
+    # Ownership tracking
+    # ------------------------------------------------------------------
+
+    fn find_ownership_transfers(obj_id: i64) -> [SemanticEvent]:
+        var result: [SemanticEvent] = []
+        for ev in self.events:
+            if ev.object_id == obj_id and ev.event_kind() == SemanticEventKind.OwnershipTransfer:
+                result.push(ev)
+        result
+
     fn find_object_alloc(obj_id: i64) -> Option<SemanticEvent>:
         for ev in self.events:
-            if ev.kind == SemanticEventKind.ObjectAlloc and ev.obj_id == obj_id:
+            if ev.event_kind() == SemanticEventKind.ObjectAlloc and ev.object_id == obj_id:
                 return Some(ev)
         None
 
     fn find_object_drop(obj_id: i64) -> Option<SemanticEvent>:
         for ev in self.events:
-            if ev.kind == SemanticEventKind.ObjectDrop and ev.obj_id == obj_id:
+            if ev.event_kind() == SemanticEventKind.ObjectDrop and ev.object_id == obj_id:
                 return Some(ev)
         None
 
-    fn find_object_lifecycle(obj_id: i64) -> [SemanticEvent]:
-        var result: [SemanticEvent] = []
-        for ev in self.events:
-            if ev.obj_id == obj_id:
-                result.push(ev)
-        result
-
-    fn find_last_variable_write(name_hash: i64) -> Option<SemanticEvent>:
-        var last: Option<SemanticEvent> = None
-        for ev in self.events:
-            if ev.kind == SemanticEventKind.VariableWrite and ev.name_hash == name_hash:
-                last = Some(ev)
-        last
-
-    fn find_ownership_transfers(obj_id: i64) -> [SemanticEvent]:
-        var result: [SemanticEvent] = []
-        for ev in self.events:
-            if ev.obj_id == obj_id and ev.kind == SemanticEventKind.OwnershipTransfer:
-                result.push(ev)
-        result
-
-    fn find_borrows(obj_id: i64) -> [SemanticEvent]:
-        var result: [SemanticEvent] = []
-        for ev in self.events:
-            if ev.obj_id == obj_id:
-                if ev.kind == SemanticEventKind.BorrowStart or ev.kind == SemanticEventKind.BorrowEnd:
-                    result.push(ev)
-        result
+    # ------------------------------------------------------------------
+    # Async task queries
+    # ------------------------------------------------------------------
 
     fn find_async_task_events(spawn_id: i64) -> [SemanticEvent]:
         var result: [SemanticEvent] = []
         for ev in self.events:
-            if ev.spawn_id == spawn_id:
-                result.push(ev)
+            if ev.payload_a == spawn_id:
+                val kind = ev.event_kind()
+                if kind == SemanticEventKind.AsyncSpawn or kind == SemanticEventKind.AsyncYield or kind == SemanticEventKind.AsyncResume or kind == SemanticEventKind.AsyncComplete:
+                    result.push(ev)
         result
 
-    fn find_function_calls(name_hash: i64) -> [SemanticEvent]:
+    # ------------------------------------------------------------------
+    # Function call queries
+    # ------------------------------------------------------------------
+
+    fn find_function_calls(name_hash: i32) -> [SemanticEvent]:
         var result: [SemanticEvent] = []
         for ev in self.events:
-            if ev.kind == SemanticEventKind.FunctionEnter and ev.name_hash == name_hash:
+            if ev.event_kind() == SemanticEventKind.FunctionEnter and ev.name_id == name_hash:
                 result.push(ev)
         result

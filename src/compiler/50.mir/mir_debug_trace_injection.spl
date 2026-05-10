@@ -1,10 +1,18 @@
 # MIR Debug Trace Injection — Semantic Trace Call Insertion
 #
-# Stub/skeleton for the MIR rewrite pass that instruments compiled code
-# with semantic trace calls. Follows the mir_aop_injection.spl pattern.
+# MIR rewrite pass that instruments compiled code with semantic trace calls.
+# Follows the mir_aop_injection.spl pattern. Injected functions are:
+#   __spl_trace_fn_enter   — at function entry (block 0)
+#   __spl_trace_fn_exit    — before Return terminators
+#   __spl_trace_var_write  — after Store instructions
+#   __spl_trace_obj_alloc  — after Alloc instructions
 #
-# The actual MIR rewriting is complex and will be done iteratively.
-# This file defines the injection API and level-gating predicates.
+# The runtime implementations live in
+#   src/lib/nogc_sync_mut/replay/semantic/trace_writer.spl
+# and emit SemanticEvent records to the global ring-buffer writer.
+
+use compiler.mir.mir_instructions.*
+use compiler.mir.mir_types.{MirConstValue, MirType, MirTypeKind, MirSignature}
 
 # ============================================================================
 # Trace Injection Config
@@ -51,3 +59,204 @@ fn should_inject_borrow_events(config: TraceInjectionConfig) -> bool:
 fn should_inject_async_events(config: TraceInjectionConfig) -> bool:
     """AsyncSpawn/Yield/Resume/Complete: injected at level >= Full (3)."""
     config.enabled and config.level >= 3
+
+# ============================================================================
+# Level Parsing
+# ============================================================================
+
+fn parse_trace_level(level: text) -> i32:
+    """Convert a text trace level to its integer representation.
+    "none" -> 0, "functions" -> 1, "objects" -> 2, "full" -> 3."""
+    if level == "none":
+        0
+    else if level == "functions":
+        1
+    else if level == "objects":
+        2
+    else if level == "full":
+        3
+    else:
+        # Unknown level defaults to none
+        0
+
+# ============================================================================
+# Main Entry Point
+# ============================================================================
+
+fn inject_debug_trace(mir: MirModule, level: text) -> MirModule:
+    """Instrument a MIR module with semantic trace calls.
+
+    Walks every function in the module and, depending on the trace level,
+    inserts calls to the __spl_trace_* runtime hooks:
+      "none"      — no instrumentation
+      "functions" — FunctionEnter / FunctionExit only
+      "objects"   — + ObjectAlloc (after Alloc instructions)
+      "full"      — + VariableWrite (after Store instructions)
+    """
+    val level_int = parse_trace_level(level)
+    val config = TraceInjectionConfig.create(level_int)
+
+    if not config.enabled:
+        return mir
+
+    # Rebuild the functions dict with instrumented versions
+    var new_functions: Dict<SymbolId, MirFunction> = {}
+    for symbol in mir.functions.keys():
+        val func = mir.functions[symbol]
+        val instrumented = inject_trace_into_function(func, config)
+        new_functions[symbol] = instrumented
+
+    MirModule(..mir, functions: new_functions)
+
+# ============================================================================
+# Function-Level Injection
+# ============================================================================
+
+fn inject_trace_into_function(func: MirFunction, config: TraceInjectionConfig) -> MirFunction:
+    """Instrument a single MIR function with trace calls based on config."""
+    var new_blocks: [MirBlock] = []
+    var bi = 0
+    while bi < func.blocks.len():
+        var block = func.blocks[bi]
+
+        # Phase 1: Function enter at entry block (block index 0)
+        if bi == 0 and should_inject_function_enter(config):
+            block = inject_trace_function_enter(block)
+
+        # Phase 2: Function exit before Return terminators
+        if should_inject_function_exit(config):
+            block = inject_trace_function_exit(block)
+
+        # Phase 3: Object alloc after Alloc instructions
+        if should_inject_object_alloc(config):
+            block = inject_trace_object_alloc(block)
+
+        # Phase 4: Variable write after Store instructions
+        if should_inject_variable_write(config):
+            block = inject_trace_variable_write(block)
+
+        new_blocks.push(block)
+        bi = bi + 1
+
+    MirFunction(..func, blocks: new_blocks)
+
+# ============================================================================
+# Block-Level Injection — Function Enter
+# ============================================================================
+
+fn inject_trace_function_enter(block: MirBlock) -> MirBlock:
+    """Prepend a __spl_trace_fn_enter call at the beginning of the entry block.
+
+    The runtime function records a FunctionEnter event with the current
+    function name and source location into the semantic trace ring buffer."""
+    val call_inst = make_trace_call_inst("__spl_trace_fn_enter")
+    var new_insts: [MirInst] = [call_inst]
+    for inst in block.instructions:
+        new_insts.push(inst)
+    MirBlock(
+        id: block.id,
+        label: block.label,
+        instructions: new_insts,
+        terminator: block.terminator
+    )
+
+# ============================================================================
+# Block-Level Injection — Function Exit
+# ============================================================================
+
+fn inject_trace_function_exit(block: MirBlock) -> MirBlock:
+    """Insert a __spl_trace_fn_exit call before every Return terminator.
+
+    Only modifies blocks that terminate with Return; all other blocks
+    pass through unchanged. The runtime function records a FunctionExit
+    event capturing the return timestamp."""
+    match block.terminator:
+        case Return(_):
+            val call_inst = make_trace_call_inst("__spl_trace_fn_exit")
+            var new_insts: [MirInst] = []
+            for inst in block.instructions:
+                new_insts.push(inst)
+            new_insts.push(call_inst)
+            MirBlock(
+                id: block.id,
+                label: block.label,
+                instructions: new_insts,
+                terminator: block.terminator
+            )
+        case _:
+            block
+
+# ============================================================================
+# Block-Level Injection — Variable Write
+# ============================================================================
+
+fn inject_trace_variable_write(block: MirBlock) -> MirBlock:
+    """Insert a __spl_trace_var_write call after every Store instruction.
+
+    Scans instructions sequentially. When a Store is found, the trace
+    call is appended immediately after it. The runtime function records
+    a VariableWrite event with the target address and new value."""
+    var new_insts: [MirInst] = []
+    for inst in block.instructions:
+        new_insts.push(inst)
+        match inst.kind:
+            case Store(_, _):
+                val call_inst = make_trace_call_inst("__spl_trace_var_write")
+                new_insts.push(call_inst)
+            case _:
+                pass_dn
+    MirBlock(
+        id: block.id,
+        label: block.label,
+        instructions: new_insts,
+        terminator: block.terminator
+    )
+
+# ============================================================================
+# Block-Level Injection — Object Alloc
+# ============================================================================
+
+fn inject_trace_object_alloc(block: MirBlock) -> MirBlock:
+    """Insert a __spl_trace_obj_alloc call after every Alloc instruction.
+
+    Scans instructions sequentially. When an Alloc is found, the trace
+    call is appended immediately after it. The runtime function records
+    an ObjectAlloc event with the allocated object identity and type."""
+    var new_insts: [MirInst] = []
+    for inst in block.instructions:
+        new_insts.push(inst)
+        match inst.kind:
+            case Alloc(_, _):
+                val call_inst = make_trace_call_inst("__spl_trace_obj_alloc")
+                new_insts.push(call_inst)
+            case _:
+                pass_dn
+    MirBlock(
+        id: block.id,
+        label: block.label,
+        instructions: new_insts,
+        terminator: block.terminator
+    )
+
+# ============================================================================
+# Helpers
+# ============================================================================
+
+fn make_trace_call_inst(trace_fn_name: text) -> MirInst:
+    """Create a MIR Call instruction to a trace runtime function (void -> void).
+
+    The generated instruction is a direct call to the named runtime symbol.
+    At link time, the symbol resolves to the corresponding function in
+    src/lib/nogc_sync_mut/replay/semantic/trace_writer.spl."""
+    val func_operand = MirOperand(kind: MirOperandKind.Const(
+        MirConstValue.Str(trace_fn_name),
+        MirType(kind: MirTypeKind.FuncPtr(MirSignature(
+            params: [],
+            return_type: MirType.unit(),
+            is_variadic: false
+        )))
+    ))
+    MirInst(
+        kind: MirInstKind.Call(nil, func_operand, []),
+        span: nil
+    )
