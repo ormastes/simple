@@ -1,0 +1,114 @@
+# Export Image — flatten drawing document to pixel buffer for saving
+#
+# Validates and prepares export parameters. Actual pixel compositing
+# would require runtime FFI (stb_image_write) which is out of scope here.
+
+use std.common.drawing.document.{DrawingDocument, DrawingLayer, BlendMode, LayerKind}
+
+# ============================================================================
+# Export Format
+# ============================================================================
+
+enum ExportFormat:
+    PNG
+    BMP
+    RAW
+
+# ============================================================================
+# Export Config
+# ============================================================================
+
+struct ExportConfig:
+    format: ExportFormat
+    quality: i32
+    scale: f64
+
+fn default_export_config() -> ExportConfig:
+    """Default config: PNG, quality 100, scale 1.0."""
+    ExportConfig(
+        format: ExportFormat.PNG,
+        quality: 100,
+        scale: 1.0
+    )
+
+# ============================================================================
+# Export Dimensions
+# ============================================================================
+
+struct ExportDimensions:
+    width: i32
+    height: i32
+    pixel_count: i32
+
+fn compute_export_dimensions(width: i32, height: i32, scale: f64) -> ExportDimensions:
+    """Compute output dimensions applying the given scale factor."""
+    val w_f = width.to_f64() * scale
+    val h_f = height.to_f64() * scale
+    val out_w = w_f.to_i32()
+    val out_h = h_f.to_i32()
+    ExportDimensions(
+        width: out_w,
+        height: out_h,
+        pixel_count: out_w * out_h
+    )
+
+# ============================================================================
+# Export Result
+# ============================================================================
+
+struct ExportResult:
+    width: i32
+    height: i32
+    format: ExportFormat
+    success: bool
+    error_message: text
+
+impl ExportResult:
+    static fn ok(width: i32, height: i32, format: ExportFormat) -> ExportResult:
+        """Create a successful export result."""
+        ExportResult(
+            width: width,
+            height: height,
+            format: format,
+            success: true,
+            error_message: ""
+        )
+
+    static fn fail(msg: text) -> ExportResult:
+        """Create a failed export result."""
+        ExportResult(
+            width: 0,
+            height: 0,
+            format: ExportFormat.PNG,
+            success: false,
+            error_message: msg
+        )
+
+# ============================================================================
+# Export Entry Point
+# ============================================================================
+
+fn prepare_export(doc: DrawingDocument, config: ExportConfig) -> ExportResult:
+    """Validate the document and compute output dimensions.
+
+    Returns an ExportResult indicating whether the export can proceed.
+    Actual pixel rendering is deferred to runtime FFI (stb_image_write).
+    """
+    val w = doc.width
+    val h = doc.height
+    if w <= 0 or h <= 0:
+        return ExportResult.fail("Document has zero or negative dimensions")
+
+    val sc = config.scale
+    if sc <= 0.0:
+        return ExportResult.fail("Scale must be positive")
+
+    val lc = doc.layer_count()
+    if lc == 0:
+        return ExportResult.fail("Document has no layers")
+
+    val dims = compute_export_dimensions(w, h, sc)
+    val dw = dims.width
+    val dh = dims.height
+    val fmt = config.format
+    ExportResult.ok(dw, dh, fmt)
