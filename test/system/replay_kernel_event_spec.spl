@@ -1,0 +1,159 @@
+use std.spec
+use os.kernel.replay.mode.{KernelReplayMode, replay_mode, replay_set_mode, replay_is_off, replay_is_recording}
+use os.kernel.replay.event_kinds.{EventKind, ReplayEntry}
+use os.kernel.replay.log_buffer.{replay_buffer_init, replay_log_event, replay_event_count, replay_buffer_reset, replay_read_next}
+
+describe "KernelReplayMode":
+    it "default is Off":
+        replay_set_mode(KernelReplayMode.Off)
+        expect(replay_mode().to_i32()).to_equal(KernelReplayMode.Off.to_i32())
+
+    it "replay_is_off default true":
+        replay_set_mode(KernelReplayMode.Off)
+        expect(replay_is_off()).to_equal(true)
+
+    it "replay_set_mode to Record — replay_is_recording returns true":
+        replay_set_mode(KernelReplayMode.Record)
+        expect(replay_is_recording()).to_equal(true)
+        replay_set_mode(KernelReplayMode.Off)
+
+    it "replay_set_mode to Off — replay_is_off true again":
+        replay_set_mode(KernelReplayMode.Record)
+        replay_set_mode(KernelReplayMode.Off)
+        expect(replay_is_off()).to_equal(true)
+
+    it "replay_is_recording is false when Off":
+        replay_set_mode(KernelReplayMode.Off)
+        expect(replay_is_recording()).to_equal(false)
+
+    it "ChaosRecord also counts as recording":
+        replay_set_mode(KernelReplayMode.ChaosRecord)
+        expect(replay_is_recording()).to_equal(true)
+        replay_set_mode(KernelReplayMode.Off)
+
+describe "EventKind to_i32 round-trip":
+    it "Schedule round-trips":
+        val v = EventKind.Schedule.to_i32()
+        expect(v).to_equal(0)
+        expect(EventKind.from_i32(v).to_i32()).to_equal(0)
+
+    it "SyscallEnter round-trips":
+        val v = EventKind.SyscallEnter.to_i32()
+        expect(v).to_equal(1)
+        expect(EventKind.from_i32(v).to_i32()).to_equal(1)
+
+    it "SyscallExit round-trips":
+        val v = EventKind.SyscallExit.to_i32()
+        expect(v).to_equal(2)
+        expect(EventKind.from_i32(v).to_i32()).to_equal(2)
+
+    it "InterruptDeliver round-trips":
+        val v = EventKind.InterruptDeliver.to_i32()
+        expect(v).to_equal(3)
+        expect(EventKind.from_i32(v).to_i32()).to_equal(3)
+
+    it "TimerRead round-trips":
+        val v = EventKind.TimerRead.to_i32()
+        expect(v).to_equal(6)
+        expect(EventKind.from_i32(v).to_i32()).to_equal(6)
+
+describe "EventKind to_text":
+    it "Schedule to_text":
+        expect(EventKind.Schedule.to_text()).to_equal("schedule")
+
+    it "SyscallEnter to_text":
+        expect(EventKind.SyscallEnter.to_text()).to_equal("syscall-enter")
+
+    it "SyscallExit to_text":
+        expect(EventKind.SyscallExit.to_text()).to_equal("syscall-exit")
+
+    it "InterruptDeliver to_text":
+        expect(EventKind.InterruptDeliver.to_text()).to_equal("interrupt")
+
+    it "TimerRead to_text":
+        expect(EventKind.TimerRead.to_text()).to_equal("timer-read")
+
+describe "ReplayEntry creation":
+    it "create sets kind field":
+        val entry = ReplayEntry.create(EventKind.SyscallEnter, 42, 1, 0)
+        expect(entry.kind).to_equal(EventKind.SyscallEnter.to_i32())
+
+    it "create sets thread_id field":
+        val entry = ReplayEntry.create(EventKind.Schedule, 99, 2, 0)
+        expect(entry.thread_id).to_equal(99)
+
+    it "create sets process_id field":
+        val entry = ReplayEntry.create(EventKind.Schedule, 1, 77, 0)
+        expect(entry.process_id).to_equal(77)
+
+    it "create sets event_id to 0":
+        val entry = ReplayEntry.create(EventKind.TimerRead, 1, 1, 0)
+        expect(entry.event_id).to_equal(0)
+
+    it "event_kind() returns correct kind":
+        val entry = ReplayEntry.create(EventKind.SyscallExit, 1, 1, 0)
+        expect(entry.event_kind().to_i32()).to_equal(EventKind.SyscallExit.to_i32())
+
+describe "replay ring buffer":
+    it "replay_buffer_init — event_count is 0":
+        replay_set_mode(KernelReplayMode.Off)
+        replay_buffer_reset()
+        replay_buffer_init()
+        expect(replay_event_count()).to_equal(0)
+
+    it "replay_log_event — event_count becomes 1":
+        replay_buffer_reset()
+        replay_set_mode(KernelReplayMode.Record)
+        val entry = ReplayEntry.create(EventKind.Schedule, 1, 1, 0)
+        replay_log_event(entry)
+        expect(replay_event_count()).to_equal(1)
+        replay_set_mode(KernelReplayMode.Off)
+        replay_buffer_reset()
+
+    it "replay_log_event multiple — count matches":
+        replay_buffer_reset()
+        replay_set_mode(KernelReplayMode.Record)
+        var i = 0
+        while i < 5:
+            val entry = ReplayEntry.create(EventKind.Schedule, i, 1, 0)
+            replay_log_event(entry)
+            i = i + 1
+        expect(replay_event_count()).to_equal(5)
+        replay_set_mode(KernelReplayMode.Off)
+        replay_buffer_reset()
+
+    it "replay_buffer_reset — count returns to 0":
+        replay_set_mode(KernelReplayMode.Record)
+        val entry = ReplayEntry.create(EventKind.TimerRead, 1, 1, 0)
+        replay_log_event(entry)
+        replay_buffer_reset()
+        expect(replay_event_count()).to_equal(0)
+        replay_set_mode(KernelReplayMode.Off)
+
+    it "replay_read_next — returns logged entry fields":
+        replay_buffer_reset()
+        replay_set_mode(KernelReplayMode.Record)
+        var entry = ReplayEntry.create(EventKind.SyscallEnter, 55, 7, 2)
+        entry.payload_a = 123
+        replay_log_event(entry)
+        replay_set_mode(KernelReplayMode.Replay)
+        match replay_read_next():
+            case Some(got):
+                expect(got.kind).to_equal(EventKind.SyscallEnter.to_i32())
+                expect(got.thread_id).to_equal(55)
+                expect(got.payload_a).to_equal(123)
+            case None:
+                expect("read_next returned None").to_equal("expected Some")
+        replay_set_mode(KernelReplayMode.Off)
+        replay_buffer_reset()
+
+    it "replay_read_next on empty buffer returns None":
+        replay_buffer_reset()
+        replay_set_mode(KernelReplayMode.Replay)
+        match replay_read_next():
+            case Some(_):
+                expect("expected None but got Some").to_equal("None")
+            case None:
+                expect(true).to_equal(true)
+        replay_set_mode(KernelReplayMode.Off)
+        replay_buffer_reset()

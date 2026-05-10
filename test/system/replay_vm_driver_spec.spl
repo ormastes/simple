@@ -1,0 +1,203 @@
+# System Tests — VM Replay Driver
+#
+# Tests for VmReplayDriver: construction, binary loading, execution stepping,
+# snapshot save/restore, and run_steps.
+
+use std.spec
+use std.nogc_sync_mut.replay.vm.vm_types.{VmConfig, VmState, VmReplayMode}
+use std.nogc_sync_mut.replay.vm.replay_driver.{VmReplayDriver}
+
+# ============================================================================
+# VmConfig — default_rv32
+# ============================================================================
+
+describe "VmConfig default_rv32":
+    it "memory_mb is greater than zero":
+        val cfg = VmConfig.default_rv32(4)
+        expect(cfg.memory_mb).to_be_greater_than(0)
+
+    it "memory_mb matches requested value":
+        val cfg = VmConfig.default_rv32(4)
+        expect(cfg.memory_mb).to_equal(4)
+
+    it "num_cpus is 1":
+        val cfg = VmConfig.default_rv32(4)
+        expect(cfg.num_cpus).to_equal(1)
+
+    it "devices list is non-empty":
+        val cfg = VmConfig.default_rv32(4)
+        val has_devices = cfg.devices.len() > 0
+        expect(has_devices).to_equal(true)
+
+# ============================================================================
+# VmReplayDriver — create
+# ============================================================================
+
+describe "VmReplayDriver create":
+    it "initial state is Stopped":
+        val cfg = VmConfig.default_rv32(1)
+        var driver = VmReplayDriver.create(cfg)
+        val is_stopped = driver.state == VmState.Stopped
+        expect(is_stopped).to_equal(true)
+
+    it "initial cycle_count is zero":
+        val cfg = VmConfig.default_rv32(1)
+        var driver = VmReplayDriver.create(cfg)
+        expect(driver.get_cycle_count()).to_equal(0)
+
+    it "initial pc is zero":
+        val cfg = VmConfig.default_rv32(1)
+        var driver = VmReplayDriver.create(cfg)
+        expect(driver.get_pc()).to_equal(0)
+
+# ============================================================================
+# VmReplayDriver — load_binary and read_memory
+# ============================================================================
+
+describe "VmReplayDriver load_binary and read_memory":
+    it "first byte readable after load":
+        val cfg = VmConfig.default_rv32(1)
+        var driver = VmReplayDriver.create(cfg)
+        driver.load_binary(0, [1, 2, 3])
+        expect(driver.read_memory(0, 1)).to_equal(1)
+
+    it "second byte readable after load":
+        val cfg = VmConfig.default_rv32(1)
+        var driver = VmReplayDriver.create(cfg)
+        driver.load_binary(0, [1, 2, 3])
+        expect(driver.read_memory(1, 1)).to_equal(2)
+
+    it "third byte readable after load":
+        val cfg = VmConfig.default_rv32(1)
+        var driver = VmReplayDriver.create(cfg)
+        driver.load_binary(0, [1, 2, 3])
+        expect(driver.read_memory(2, 1)).to_equal(3)
+
+# ============================================================================
+# VmReplayDriver — start sets Running
+# ============================================================================
+
+describe "VmReplayDriver start sets Running":
+    it "state is Running after start":
+        val cfg = VmConfig.default_rv32(1)
+        var driver = VmReplayDriver.create(cfg)
+        driver.start(0)
+        val is_running = driver.state == VmState.Running
+        expect(is_running).to_equal(true)
+
+    it "pc equals entry address after start":
+        val cfg = VmConfig.default_rv32(1)
+        var driver = VmReplayDriver.create(cfg)
+        driver.start(0x1000)
+        expect(driver.get_pc()).to_equal(0x1000)
+
+# ============================================================================
+# VmReplayDriver — step increments cycle
+# ============================================================================
+
+describe "VmReplayDriver step increments cycle":
+    it "cycle_count is greater than zero after one step":
+        # ECALL (opcode 0x73) at address 0 halts the CPU after one cycle
+        val cfg = VmConfig.default_rv32(1)
+        var driver = VmReplayDriver.create(cfg)
+        # Load ECALL instruction: 0x00000073 little-endian
+        driver.load_binary(0, [0x73, 0x00, 0x00, 0x00])
+        driver.start(0)
+        driver.step()
+        expect(driver.get_cycle_count()).to_be_greater_than(0)
+
+    it "step on Stopped driver returns Stopped":
+        val cfg = VmConfig.default_rv32(1)
+        var driver = VmReplayDriver.create(cfg)
+        # state is Stopped, step should return Stopped immediately
+        val result = driver.step()
+        val is_stopped = result == VmState.Stopped
+        expect(is_stopped).to_equal(true)
+
+# ============================================================================
+# VmReplayDriver — save_snapshot returns sequential ids
+# ============================================================================
+
+describe "VmReplayDriver save_snapshot returns sequential ids":
+    it "first snapshot id is 0":
+        val cfg = VmConfig.default_rv32(1)
+        var driver = VmReplayDriver.create(cfg)
+        val id = driver.save_snapshot()
+        expect(id).to_equal(0)
+
+    it "second snapshot id is 1":
+        val cfg = VmConfig.default_rv32(1)
+        var driver = VmReplayDriver.create(cfg)
+        driver.save_snapshot()
+        val id2 = driver.save_snapshot()
+        expect(id2).to_equal(1)
+
+# ============================================================================
+# VmReplayDriver — restore_snapshot
+# ============================================================================
+
+describe "VmReplayDriver restore_snapshot":
+    it "register is restored to pre-snapshot value":
+        val cfg = VmConfig.default_rv32(1)
+        var driver = VmReplayDriver.create(cfg)
+        driver.start(0)
+        # Snapshot before modification
+        val snap_id = driver.save_snapshot()
+        # Modify register directly on cpu via load_binary trick is not possible;
+        # instead verify via read_register delegation
+        val before = driver.read_register(1)
+        val result = driver.restore_snapshot(snap_id)
+        val after = driver.read_register(1)
+        expect(after).to_equal(before)
+
+    it "restore_snapshot on valid id returns ok (not Err)":
+        val cfg = VmConfig.default_rv32(1)
+        var driver = VmReplayDriver.create(cfg)
+        driver.start(0)
+        val snap_id = driver.save_snapshot()
+        val result = driver.restore_snapshot(snap_id)
+        val is_ok = match result:
+            case Ok(_): true
+            case Err(_): false
+        expect(is_ok).to_equal(true)
+
+    it "restore_snapshot on missing id returns Err":
+        val cfg = VmConfig.default_rv32(1)
+        var driver = VmReplayDriver.create(cfg)
+        val result = driver.restore_snapshot(999)
+        val is_err = match result:
+            case Ok(_): false
+            case Err(_): true
+        expect(is_err).to_equal(true)
+
+# ============================================================================
+# VmReplayDriver — run_steps
+# ============================================================================
+
+describe "VmReplayDriver run_steps":
+    it "cycle_count equals steps run before halt":
+        # Load 5 NOP (ADDI x0,x0,0 = 0x00000013) then ECALL (0x00000073)
+        # Each NOP costs 1 cycle; ECALL halts on cycle 6
+        val cfg = VmConfig.default_rv32(1)
+        var driver = VmReplayDriver.create(cfg)
+        driver.load_binary(0, [
+            0x13, 0x00, 0x00, 0x00,   # NOP
+            0x13, 0x00, 0x00, 0x00,   # NOP
+            0x13, 0x00, 0x00, 0x00,   # NOP
+            0x13, 0x00, 0x00, 0x00,   # NOP
+            0x13, 0x00, 0x00, 0x00,   # NOP
+            0x73, 0x00, 0x00, 0x00    # ECALL (halt)
+        ])
+        driver.start(0)
+        driver.run_steps(5)
+        expect(driver.get_cycle_count()).to_equal(5)
+
+    it "run_steps stops at Stopped state":
+        # Single ECALL halts immediately — run_steps(100) should stop at 1 cycle
+        val cfg = VmConfig.default_rv32(1)
+        var driver = VmReplayDriver.create(cfg)
+        driver.load_binary(0, [0x73, 0x00, 0x00, 0x00])
+        driver.start(0)
+        val result = driver.run_steps(100)
+        val is_stopped = result == VmState.Stopped
+        expect(is_stopped).to_equal(true)

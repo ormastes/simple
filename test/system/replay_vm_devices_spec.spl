@@ -1,0 +1,358 @@
+# System Tests — VM Virtual Devices
+#
+# Tests for VirtualTimer, VirtualSerial, and VirtualBlock devices.
+
+use std.spec
+use std.nogc_sync_mut.replay.vm.devices.timer.{VirtualTimer}
+use std.nogc_sync_mut.replay.vm.devices.serial.{VirtualSerial}
+use std.nogc_sync_mut.replay.vm.devices.block.{VirtualBlock}
+
+# ============================================================================
+# VirtualTimer — create
+# ============================================================================
+
+describe "VirtualTimer create":
+    it "counter is zero after create":
+        var timer = VirtualTimer.create("timer0", 7)
+        expect(timer.counter).to_equal(0)
+
+    it "irq matches constructor arg":
+        var timer = VirtualTimer.create("timer0", 7)
+        expect(timer.irq).to_equal(7)
+
+    it "enabled is false after create":
+        var timer = VirtualTimer.create("timer0", 7)
+        expect(timer.enabled).to_equal(false)
+
+    it "no pending irq after create":
+        var timer = VirtualTimer.create("timer0", 7)
+        expect(timer.pending_irq()).to_equal(-1)
+
+# ============================================================================
+# VirtualTimer — tick increments counter when enabled
+# ============================================================================
+
+describe "VirtualTimer tick increments counter":
+    it "counter equals tick cycles when enabled":
+        var timer = VirtualTimer.create("timer0", 7)
+        # Enable via mmio_write offset 0x14, value 1
+        timer.mmio_write(0x14, 1, 4)
+        timer.tick(100)
+        expect(timer.counter).to_equal(100)
+
+    it "counter stays zero when disabled":
+        var timer = VirtualTimer.create("timer0", 7)
+        timer.tick(100)
+        expect(timer.counter).to_equal(0)
+
+    it "counter accumulates across multiple ticks":
+        var timer = VirtualTimer.create("timer0", 7)
+        timer.mmio_write(0x14, 1, 4)
+        timer.tick(50)
+        timer.tick(50)
+        expect(timer.counter).to_equal(100)
+
+# ============================================================================
+# VirtualTimer — interrupt fires at compare_value
+# ============================================================================
+
+describe "VirtualTimer interrupt fires at compare":
+    it "no irq before compare_value is reached":
+        var timer = VirtualTimer.create("timer0", 7)
+        timer.mmio_write(0x14, 1, 4)    # enable
+        timer.mmio_write(0x08, 200, 4)  # compare_value = 200
+        timer.tick(100)
+        expect(timer.pending_irq()).to_equal(-1)
+
+    it "irq fires once compare_value is reached":
+        var timer = VirtualTimer.create("timer0", 7)
+        timer.mmio_write(0x14, 1, 4)    # enable
+        timer.mmio_write(0x08, 100, 4)  # compare_value = 100
+        timer.tick(100)
+        val irq = timer.pending_irq()
+        expect(irq).to_equal(7)
+
+    it "irq number matches constructor irq":
+        var timer = VirtualTimer.create("timer0", 42)
+        timer.mmio_write(0x14, 1, 4)
+        timer.mmio_write(0x08, 10, 4)
+        timer.tick(10)
+        expect(timer.pending_irq()).to_equal(42)
+
+    it "acknowledge_irq clears pending irq":
+        var timer = VirtualTimer.create("timer0", 7)
+        timer.mmio_write(0x14, 1, 4)
+        timer.mmio_write(0x08, 10, 4)
+        timer.tick(10)
+        timer.acknowledge_irq()
+        expect(timer.pending_irq()).to_equal(-1)
+
+# ============================================================================
+# VirtualTimer — snapshot and restore
+# ============================================================================
+
+describe "VirtualTimer snapshot and restore":
+    it "snapshot returns non-empty data":
+        var timer = VirtualTimer.create("timer0", 7)
+        timer.mmio_write(0x14, 1, 4)
+        timer.tick(50)
+        val data = timer.snapshot()
+        expect(data.len()).to_be_greater_than(0)
+
+    it "snapshot has at least 6 entries":
+        var timer = VirtualTimer.create("timer0", 7)
+        val data = timer.snapshot()
+        expect(data.len()).to_be_greater_than(5)
+
+    it "counter is restored from snapshot":
+        var timer = VirtualTimer.create("timer0", 7)
+        timer.mmio_write(0x14, 1, 4)
+        timer.tick(77)
+        val data = timer.snapshot()
+        # Reset and restore
+        var timer2 = VirtualTimer.create("timer0", 7)
+        timer2.restore(data)
+        expect(timer2.counter).to_equal(77)
+
+    it "enabled flag is restored from snapshot":
+        var timer = VirtualTimer.create("timer0", 7)
+        timer.mmio_write(0x14, 1, 4)  # enable
+        val data = timer.snapshot()
+        var timer2 = VirtualTimer.create("timer0", 7)
+        timer2.restore(data)
+        expect(timer2.enabled).to_equal(true)
+
+# ============================================================================
+# VirtualSerial — create
+# ============================================================================
+
+describe "VirtualSerial create":
+    it "tx_buffer is empty after create":
+        var serial = VirtualSerial.create("uart0", 10)
+        expect(serial.tx_buffer.len()).to_equal(0)
+
+    it "rx_buffer is empty after create":
+        var serial = VirtualSerial.create("uart0", 10)
+        expect(serial.rx_buffer.len()).to_equal(0)
+
+    it "irq matches constructor arg":
+        var serial = VirtualSerial.create("uart0", 10)
+        expect(serial.irq).to_equal(10)
+
+    it "no pending irq after create":
+        var serial = VirtualSerial.create("uart0", 10)
+        expect(serial.pending_irq()).to_equal(-1)
+
+# ============================================================================
+# VirtualSerial — mmio_write TX
+# ============================================================================
+
+describe "VirtualSerial mmio_write TX":
+    it "write byte to offset 0x00 appends to tx_buffer":
+        var serial = VirtualSerial.create("uart0", 10)
+        serial.mmio_write(0x00, 0x41, 1)
+        expect(serial.tx_buffer.len()).to_equal(1)
+
+    it "written byte value is in tx_buffer":
+        var serial = VirtualSerial.create("uart0", 10)
+        serial.mmio_write(0x00, 0x41, 1)
+        expect(serial.tx_buffer[0]).to_equal(0x41)
+
+    it "multiple writes accumulate in tx_buffer":
+        var serial = VirtualSerial.create("uart0", 10)
+        serial.mmio_write(0x00, 0x41, 1)
+        serial.mmio_write(0x00, 0x42, 1)
+        expect(serial.tx_buffer.len()).to_equal(2)
+
+# ============================================================================
+# VirtualSerial — mmio_read RX
+# ============================================================================
+
+describe "VirtualSerial mmio_read RX":
+    it "reading offset 0x00 with no input returns 0":
+        var serial = VirtualSerial.create("uart0", 10)
+        val result = serial.mmio_read(0x00, 1)
+        val byte_val = match result:
+            case Ok(v): v
+            case Err(_): -1
+        expect(byte_val).to_equal(0)
+
+    it "inject_input then read returns injected byte":
+        var serial = VirtualSerial.create("uart0", 10)
+        serial.inject_input([0x48])
+        val result = serial.mmio_read(0x00, 1)
+        val byte_val = match result:
+            case Ok(v): v
+            case Err(_): -1
+        expect(byte_val).to_equal(0x48)
+
+    it "second inject_input byte readable after first consumed":
+        var serial = VirtualSerial.create("uart0", 10)
+        serial.inject_input([0x41, 0x42])
+        serial.mmio_read(0x00, 1)
+        val result = serial.mmio_read(0x00, 1)
+        val byte_val = match result:
+            case Ok(v): v
+            case Err(_): -1
+        expect(byte_val).to_equal(0x42)
+
+# ============================================================================
+# VirtualSerial — get_output
+# ============================================================================
+
+describe "VirtualSerial get_output":
+    it "get_output contains H from byte 72":
+        var serial = VirtualSerial.create("uart0", 10)
+        serial.mmio_write(0x00, 72, 1)   # H
+        val out = serial.get_output()
+        expect(out).to_contain("H")
+
+    it "get_output contains Hello from bytes 72 101 108 108 111":
+        var serial = VirtualSerial.create("uart0", 10)
+        serial.mmio_write(0x00, 72, 1)   # H
+        serial.mmio_write(0x00, 101, 1)  # e
+        serial.mmio_write(0x00, 108, 1)  # l
+        serial.mmio_write(0x00, 108, 1)  # l
+        serial.mmio_write(0x00, 111, 1)  # o
+        val out = serial.get_output()
+        expect(out).to_contain("Hello")
+
+    it "get_output is empty string when nothing written":
+        var serial = VirtualSerial.create("uart0", 10)
+        val out = serial.get_output()
+        expect(out).to_equal("")
+
+# ============================================================================
+# VirtualBlock — create
+# ============================================================================
+
+describe "VirtualBlock create":
+    it "sectors.len() equals num_sectors":
+        var blk = VirtualBlock.create("vblk0", 5, 4)
+        expect(blk.sectors.len()).to_equal(4)
+
+    it "sector_size is 512":
+        var blk = VirtualBlock.create("vblk0", 5, 4)
+        expect(blk.sector_size).to_equal(512)
+
+    it "irq matches constructor arg":
+        var blk = VirtualBlock.create("vblk0", 5, 4)
+        expect(blk.irq).to_equal(5)
+
+# ============================================================================
+# VirtualBlock — read empty sector
+# ============================================================================
+
+describe "VirtualBlock read empty sector":
+    it "read_sector(0) returns Ok":
+        var blk = VirtualBlock.create("vblk0", 5, 4)
+        val result = blk.read_sector(0)
+        val is_ok = match result:
+            case Ok(_): true
+            case Err(_): false
+        expect(is_ok).to_equal(true)
+
+    it "empty sector first byte is zero":
+        var blk = VirtualBlock.create("vblk0", 5, 4)
+        val result = blk.read_sector(0)
+        val first = match result:
+            case Ok(data): data[0]
+            case Err(_): -1
+        expect(first).to_equal(0)
+
+    it "empty sector has 512 bytes":
+        var blk = VirtualBlock.create("vblk0", 5, 4)
+        val result = blk.read_sector(0)
+        val length = match result:
+            case Ok(data): data.len()
+            case Err(_): 0
+        expect(length).to_equal(512)
+
+# ============================================================================
+# VirtualBlock — write and read sector
+# ============================================================================
+
+describe "VirtualBlock write and read sector":
+    it "written byte appears when sector read back":
+        var blk = VirtualBlock.create("vblk0", 5, 4)
+        var sec: [i32] = []
+        var i = 0
+        while i < 512:
+            sec.push(0)
+            i = i + 1
+        sec[0] = 0xAB
+        blk.write_sector(0, sec)
+        val result = blk.read_sector(0)
+        val first = match result:
+            case Ok(data): data[0]
+            case Err(_): -1
+        expect(first).to_equal(0xAB)
+
+    it "write_sector to valid index returns Ok":
+        var blk = VirtualBlock.create("vblk0", 5, 4)
+        var sec: [i32] = []
+        var i = 0
+        while i < 512:
+            sec.push(0)
+            i = i + 1
+        val result = blk.write_sector(0, sec)
+        val is_ok = match result:
+            case Ok(_): true
+            case Err(_): false
+        expect(is_ok).to_equal(true)
+
+    it "sectors are independent after separate writes":
+        var blk = VirtualBlock.create("vblk0", 5, 4)
+        var sec0: [i32] = []
+        var sec1: [i32] = []
+        var i = 0
+        while i < 512:
+            sec0.push(0xAA)
+            sec1.push(0xBB)
+            i = i + 1
+        blk.write_sector(0, sec0)
+        blk.write_sector(1, sec1)
+        val r0 = blk.read_sector(0)
+        val byte0 = match r0:
+            case Ok(data): data[0]
+            case Err(_): -1
+        val r1 = blk.read_sector(1)
+        val byte1 = match r1:
+            case Ok(data): data[0]
+            case Err(_): -1
+        expect(byte0).to_equal(0xAA)
+        expect(byte1).to_equal(0xBB)
+
+# ============================================================================
+# VirtualBlock — out of range
+# ============================================================================
+
+describe "VirtualBlock out of range":
+    it "read_sector(999) returns Err":
+        var blk = VirtualBlock.create("vblk0", 5, 4)
+        val result = blk.read_sector(999)
+        val is_err = match result:
+            case Ok(_): false
+            case Err(_): true
+        expect(is_err).to_equal(true)
+
+    it "write_sector(999) returns Err":
+        var blk = VirtualBlock.create("vblk0", 5, 4)
+        var sec: [i32] = []
+        var i = 0
+        while i < 512:
+            sec.push(0)
+            i = i + 1
+        val result = blk.write_sector(999, sec)
+        val is_err = match result:
+            case Ok(_): false
+            case Err(_): true
+        expect(is_err).to_equal(true)
+
+    it "read_sector(-1) returns Err":
+        var blk = VirtualBlock.create("vblk0", 5, 4)
+        val result = blk.read_sector(-1)
+        val is_err = match result:
+            case Ok(_): false
+            case Err(_): true
+        expect(is_err).to_equal(true)

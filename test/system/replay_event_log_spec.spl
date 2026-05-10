@@ -1,0 +1,126 @@
+use std.spec
+use std.nogc_sync_mut.replay.event_log.{TraceHeader, EventLog}
+use std.nogc_sync_mut.replay.types.{Arch, Endian, TargetDesc}
+use os.kernel.replay.event_kinds.{EventKind, ReplayEntry}
+
+describe "Arch":
+    it "X86_64 to_text":
+        expect(Arch.X86_64.to_text()).to_equal("x86_64")
+
+    it "RISCV32 to_text":
+        expect(Arch.RISCV32.to_text()).to_equal("riscv32")
+
+    it "ARM32 to_text":
+        expect(Arch.ARM32.to_text()).to_equal("arm32")
+
+    it "Arch.from_text riscv32":
+        expect(Arch.from_text("riscv32").to_text()).to_equal("riscv32")
+
+    it "Arch.from_text x86_64":
+        expect(Arch.from_text("x86_64").to_text()).to_equal("x86_64")
+
+    it "Arch.from_text amd64 maps to x86_64":
+        expect(Arch.from_text("amd64").to_text()).to_equal("x86_64")
+
+    it "X86_64 pointer_bits is 64":
+        expect(Arch.X86_64.pointer_bits()).to_equal(64)
+
+    it "RISCV32 pointer_bits is 32":
+        expect(Arch.RISCV32.pointer_bits()).to_equal(32)
+
+    it "ARM32 pointer_bits is 32":
+        expect(Arch.ARM32.pointer_bits()).to_equal(32)
+
+    it "RISCV64 pointer_bits is 64":
+        expect(Arch.RISCV64.pointer_bits()).to_equal(64)
+
+describe "TargetDesc":
+    it "for_arch X86_64 has correct arch":
+        val desc = TargetDesc.for_arch(Arch.X86_64)
+        expect(desc.arch.to_text()).to_equal("x86_64")
+
+    it "for_arch RISCV32 has correct arch":
+        val desc = TargetDesc.for_arch(Arch.RISCV32)
+        expect(desc.arch.to_text()).to_equal("riscv32")
+
+    it "for_arch X86_64 has page_size 4096":
+        val desc = TargetDesc.for_arch(Arch.X86_64)
+        expect(desc.page_size).to_equal(4096)
+
+    it "for_arch X86_64 has non-empty register_schema_id":
+        val desc = TargetDesc.for_arch(Arch.X86_64)
+        expect(desc.register_schema_id.len() > 0).to_equal(true)
+
+describe "TraceHeader":
+    it "create sets magic to SRPL":
+        val desc = TargetDesc.for_arch(Arch.X86_64)
+        val header = TraceHeader.create(desc)
+        expect(header.magic).to_equal("SRPL")
+
+    it "create sets version to 1":
+        val desc = TargetDesc.for_arch(Arch.X86_64)
+        val header = TraceHeader.create(desc)
+        expect(header.version).to_equal(1)
+
+    it "create sets event_count to 0":
+        val desc = TargetDesc.for_arch(Arch.X86_64)
+        val header = TraceHeader.create(desc)
+        expect(header.event_count).to_equal(0)
+
+    it "to_sdn contains SRPL magic":
+        val desc = TargetDesc.for_arch(Arch.X86_64)
+        val header = TraceHeader.create(desc)
+        val sdn = header.to_sdn()
+        expect(sdn).to_contain("SRPL")
+
+    it "to_sdn contains arch name":
+        val desc = TargetDesc.for_arch(Arch.X86_64)
+        val header = TraceHeader.create(desc)
+        val sdn = header.to_sdn()
+        expect(sdn).to_contain("x86_64")
+
+    it "to_sdn contains event_count stat":
+        val desc = TargetDesc.for_arch(Arch.X86_64)
+        val header = TraceHeader.create(desc)
+        val sdn = header.to_sdn()
+        expect(sdn).to_contain("event_count")
+
+describe "EventLog":
+    it "create sets initial event_count to 0":
+        val log = EventLog.create(Arch.X86_64)
+        expect(log.header.event_count).to_equal(0)
+
+    it "add_event increments event_count":
+        var log = EventLog.create(Arch.X86_64)
+        val entry = ReplayEntry.create(EventKind.Schedule, 1, 1, 0)
+        log.add_event(entry)
+        expect(log.header.event_count).to_equal(1)
+
+    it "add_event multiple times — count matches":
+        var log = EventLog.create(Arch.RISCV32)
+        var i = 0
+        while i < 4:
+            val entry = ReplayEntry.create(EventKind.TimerRead, i, 1, 0)
+            log.add_event(entry)
+            i = i + 1
+        expect(log.header.event_count).to_equal(4)
+
+    it "entries.len matches header.event_count after add_event":
+        var log = EventLog.create(Arch.X86_64)
+        val e0 = ReplayEntry.create(EventKind.SyscallEnter, 1, 1, 0)
+        val e1 = ReplayEntry.create(EventKind.SyscallExit, 2, 1, 0)
+        log.add_event(e0)
+        log.add_event(e1)
+        expect(log.entries.len()).to_equal(log.header.event_count)
+
+    it "add_events batch sets count correctly":
+        var log = EventLog.create(Arch.ARM32)
+        val e0 = ReplayEntry.create(EventKind.Schedule, 1, 1, 0)
+        val e1 = ReplayEntry.create(EventKind.SyscallEnter, 2, 1, 0)
+        val e2 = ReplayEntry.create(EventKind.SyscallExit, 3, 1, 0)
+        log.add_events([e0, e1, e2])
+        expect(log.header.event_count).to_equal(3)
+
+    it "header arch matches create argument":
+        val log = EventLog.create(Arch.RISCV32)
+        expect(log.header.target.arch.to_text()).to_equal("riscv32")
