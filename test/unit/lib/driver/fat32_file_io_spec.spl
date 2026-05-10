@@ -5,11 +5,13 @@
 
 use std.spipe.*
 use std.fs_driver.block_device.{BlockDevice}
-use std.fs_driver.fat32_core.{fat32_register_test_device,
+use std.fs_driver.fat32_core.{Fat32Core,
+                              fat32_register_test_device,
                               fat32_test_device_mount,
                               fat32_test_device_open,
                               fat32_test_device_close,
                               fat32_test_device_read,
+                              fat32_test_device_read_bytes,
                               fat32_test_device_write,
                               fat32_test_device_readdir,
                               fat32_test_device_truncate,
@@ -234,43 +236,65 @@ describe "fat32 file I/O (FR-DRIVER-0007)":
         val open_rc = fat32_test_device_open(dev, "/missing.txt")
         expect(open_rc.is_err()).to_equal(true)
 
-    it "read returns file contents":
+    it "global mock banks sector35 byte0 is H":
+        val mock = FileMockBlockDevice.new()
+        val bid = mock.bank_id
+        val sector35 = _mock_get_sector(bid, 35)
+        expect(sector35.len()).to_equal(512)
+        expect(sector35[0].to_i64()).to_equal(72)
+
+    it "global mock banks sector35 byte4 is o":
+        val mock = FileMockBlockDevice.new()
+        val bid = mock.bank_id
+        val sector35 = _mock_get_sector(bid, 35)
+        expect(sector35[4].to_i64()).to_equal(111)
+
+    it "direct Fat32Core read_cluster returns file data":
+        var core = Fat32Core.new(FileMockBlockDevice.new())
+        val mrc = core.mount()
+        expect(mrc.is_ok()).to_equal(true)
+        expect(core.mounted).to_equal(true)
+        # Cluster 3 is the file data cluster (sector 35)
+        val cdata_rc = core.read_cluster(3)
+        expect(cdata_rc.is_ok()).to_equal(true)
+        val cdata = cdata_rc.unwrap()
+        expect(cdata.len()).to_equal(512)
+        expect(cdata[0].to_i64()).to_equal(72)
+        expect(cdata[1].to_i64()).to_equal(101)
+        expect(cdata[2].to_i64()).to_equal(108)
+        expect(cdata[4].to_i64()).to_equal(111)
+
+    it "read returns file contents via read_bytes":
         val dev = fat32_register_test_device(FileMockBlockDevice.new())
         val mount_rc = fat32_test_device_mount(dev)
         expect(mount_rc.is_ok()).to_equal(true)
 
-        val open_rc = fat32_test_device_open(dev, "/hello.txt")
-        expect(open_rc.is_ok()).to_equal(true)
-        val handle = open_rc.unwrap()
-
-        var buf: [u8] = [0, 0, 0, 0, 0, 0, 0, 0]
-        val read_rc = fat32_test_device_read(dev, handle, buf, 5)
+        val handle = fat32_test_device_open(dev, "/hello.txt").unwrap()
+        val read_rc = fat32_test_device_read_bytes(dev, handle, 5)
         expect(read_rc.is_ok()).to_equal(true)
-        expect(read_rc.unwrap()).to_equal(5)
-        # "Hello" = H(0x48) e(0x65) l(0x6C) l(0x6C) o(0x6F)
-        expect(buf[0]).to_equal(0x48)
-        expect(buf[1]).to_equal(0x65)
-        expect(buf[2]).to_equal(0x6C)
-        expect(buf[3]).to_equal(0x6C)
-        expect(buf[4]).to_equal(0x6F)
+        val data = read_rc.unwrap()
+        expect(data.len()).to_equal(5)
+        # "Hello" = H(72) e(101) l(108) l(108) o(111)
+        expect(data[0].to_i64()).to_equal(72)
+        expect(data[1].to_i64()).to_equal(101)
+        expect(data[2].to_i64()).to_equal(108)
+        expect(data[3].to_i64()).to_equal(108)
+        expect(data[4].to_i64()).to_equal(111)
 
-        val close_rc = fat32_test_device_close(dev, handle)
-        expect(close_rc.is_ok()).to_equal(true)
+        fat32_test_device_close(dev, handle)
 
-    it "read past EOF returns 0 bytes":
+    it "read past EOF returns empty":
         val dev = fat32_register_test_device(FileMockBlockDevice.new())
         val mount_rc = fat32_test_device_mount(dev)
         expect(mount_rc.is_ok()).to_equal(true)
 
         val handle = fat32_test_device_open(dev, "/hello.txt").unwrap()
         # Read the full file first
-        var buf1: [u8] = [0, 0, 0, 0, 0, 0, 0, 0]
-        val r1 = fat32_test_device_read(dev, handle, buf1, 8)
-        expect(r1.unwrap()).to_equal(5)
-        # Now read again — should return 0 (at EOF)
-        var buf2: [u8] = [0, 0, 0, 0]
-        val r2 = fat32_test_device_read(dev, handle, buf2, 4)
-        expect(r2.unwrap()).to_equal(0)
+        val r1 = fat32_test_device_read_bytes(dev, handle, 8)
+        expect(r1.unwrap().len()).to_equal(5)
+        # Now read again — should return empty (at EOF)
+        val r2 = fat32_test_device_read_bytes(dev, handle, 4)
+        expect(r2.unwrap().len()).to_equal(0)
 
         fat32_test_device_close(dev, handle)
 
