@@ -793,15 +793,11 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_rsa_sha512_verify",
     "rt_ed25519_verify",
     "rt_ecdsa_p256_verify",
-    "rt_ecdsa_p384_verify",
-    "rt_ecdsa_p521_verify",
-    // Signature generation (RFC 8332 RSA + RFC 5656 ECDSA-P256/384/521) for SSH host keys
+    // Signature generation (RFC 8332 RSA + RFC 5656 ECDSA-P256) for SSH host keys
     "rt_rsa_sha256_sign",
     "rt_rsa_sha512_sign",
     "rt_ed25519_sign",
     "rt_ecdsa_p256_sign",
-    "rt_ecdsa_p384_sign",
-    "rt_ecdsa_p521_sign",
     // PBKDF2-HMAC native helpers (FR pbkdf2_native_runtime_helpers_2026-05-01)
     "rt_pbkdf2_hmac_sha1",
     "rt_pbkdf2_hmac_sha256",

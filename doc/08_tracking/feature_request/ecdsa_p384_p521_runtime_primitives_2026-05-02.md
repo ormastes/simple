@@ -12,9 +12,16 @@
 **Severity:** P2 (TLS 1.3 RFC 8446 §4.2.3 sigalg coverage; ECDSA-P-256
 + Ed25519 + RSA-PSS already cover the common case).
 **Status:** PARTIAL — Path A FFI extern declarations + wrappers landed 2026-05-10;
-runtime backend implementation (step 2) and dispatch wiring (cert_verify.spl,
-handshake13.spl) remain open. Bootstrap rebuild required before externs resolve
-(see feedback_extern_bootstrap_rebuild.md).
+Path B pure-Simple primitives landed 2026-05-10:
+- `src/os/crypto/ecdsa_p384.spl` — thin wrapper over `os.crypto.p384` engine
+  (SHA-384 + `p384_ecdsa_sign`/`p384_ecdsa_verify`; RFC 6979; no FFI).
+- `src/os/crypto/ecdsa_p521.spl` — full BigNat-based ECDSA P-521 (RFC 6979,
+  SHA-512, Jacobian point ops using `std.math.bignum.bignat`; no FFI).
+  Note: interpreter-mode scalar multiplication is multi-second (BigNat cost);
+  compile-mode KAT tests are gated on feedback_compile_mode_false_greens.md.
+Remaining open: dispatch wiring (cert_verify.spl lines 784-789, handshake13.spl
+`_build_ext_sig_algs`); NIST CAVP KAT spec; custom-limb P-521 engine for
+interpreter-mode performance (Path B step 2 of the original plan).
 
 ## Context
 
@@ -23,8 +30,8 @@ RFC 8446 §4.2.3 SignatureScheme registry for TLS 1.3 includes:
 | Code   | Scheme                       | Status in tree |
 |--------|------------------------------|----------------|
 | 0x0403 | `ecdsa_secp256r1_sha256`     | Implemented (FFI; `ecdsa_p256.spl`) |
-| 0x0503 | `ecdsa_secp384r1_sha384`     | **MISSING — typed-Err** |
-| 0x0603 | `ecdsa_secp521r1_sha512`     | **MISSING — typed-Err** |
+| 0x0503 | `ecdsa_secp384r1_sha384`     | Primitive landed (`ecdsa_p384.spl`); dispatch wiring open |
+| 0x0603 | `ecdsa_secp521r1_sha512`     | Primitive landed (`ecdsa_p521.spl`); dispatch wiring open |
 | 0x0807 | `ed25519`                    | Implemented (FFI) |
 | 0x0808 | `ed448`                      | MISSING — separate FR |
 | 0x0804 | `rsa_pss_rsae_sha256`        | Implemented (FFI) |

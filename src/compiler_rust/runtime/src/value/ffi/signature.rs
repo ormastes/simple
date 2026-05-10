@@ -14,7 +14,6 @@ use ring::signature::{
     ED25519, RSA_PKCS1_2048_8192_SHA256, RSA_PKCS1_2048_8192_SHA512, RSA_PKCS1_SHA256, RSA_PKCS1_SHA512,
     RSA_PSS_2048_8192_SHA256, RSA_PSS_2048_8192_SHA384, RSA_PSS_2048_8192_SHA512,
 };
-use ::signature::{Signer, Verifier};
 
 // ---------------------------------------------------------------------------
 // Internal helpers
@@ -359,60 +358,6 @@ pub extern "C" fn rt_ecdsa_p256_verify(pubkey: RuntimeValue, message: RuntimeVal
     }
 }
 
-/// Verify an ECDSA P-384 SHA-384 fixed-width signature (RFC 5656
-/// `ecdsa-sha2-nistp384` raw `r‖s`, 96 bytes).
-///
-/// `pubkey` is a raw uncompressed SEC1 point (0x04 || X || Y, 97 bytes).
-#[no_mangle]
-pub extern "C" fn rt_ecdsa_p384_verify(pubkey: RuntimeValue, message: RuntimeValue, signature: RuntimeValue) -> i64 {
-    let Some(pk_bytes) = runtime_byte_array_to_vec(pubkey) else {
-        return 0;
-    };
-    let Some(msg_bytes) = runtime_byte_array_to_vec(message) else {
-        return 0;
-    };
-    let Some(sig_bytes) = runtime_byte_array_to_vec(signature) else {
-        return 0;
-    };
-    let Ok(vk) = p384::ecdsa::VerifyingKey::from_sec1_bytes(&pk_bytes) else {
-        return 0;
-    };
-    let Ok(sig) = p384::ecdsa::Signature::from_slice(&sig_bytes) else {
-        return 0;
-    };
-    match vk.verify(&msg_bytes, &sig) {
-        Ok(()) => 1,
-        Err(_) => 0,
-    }
-}
-
-/// Verify an ECDSA P-521 SHA-512 fixed-width signature (RFC 5656
-/// `ecdsa-sha2-nistp521` raw `r‖s`, 132 bytes).
-///
-/// `pubkey` is a raw uncompressed SEC1 point (0x04 || X || Y, 133 bytes).
-#[no_mangle]
-pub extern "C" fn rt_ecdsa_p521_verify(pubkey: RuntimeValue, message: RuntimeValue, signature: RuntimeValue) -> i64 {
-    let Some(pk_bytes) = runtime_byte_array_to_vec(pubkey) else {
-        return 0;
-    };
-    let Some(msg_bytes) = runtime_byte_array_to_vec(message) else {
-        return 0;
-    };
-    let Some(sig_bytes) = runtime_byte_array_to_vec(signature) else {
-        return 0;
-    };
-    let Ok(vk) = p521::ecdsa::VerifyingKey::from_sec1_bytes(&pk_bytes) else {
-        return 0;
-    };
-    let Ok(sig) = p521::ecdsa::Signature::from_slice(&sig_bytes) else {
-        return 0;
-    };
-    match vk.verify(&msg_bytes, &sig) {
-        Ok(()) => 1,
-        Err(_) => 0,
-    }
-}
-
 fn _empty_bytes() -> RuntimeValue {
     // Return an empty `[u8]` so Simple callers can uniformly check
     // `len() == 0` for errors (returning NIL would surface as an i64
@@ -535,56 +480,6 @@ pub extern "C" fn rt_ecdsa_p256_sign(pkcs8: RuntimeValue, message: RuntimeValue)
         return _empty_bytes();
     };
     let bytes = sig.as_ref();
-    unsafe { crate::value::collections::rt_string_new(bytes.as_ptr(), bytes.len() as u64) }
-}
-
-/// Sign `message` with ECDSA P-384 SHA-384 using a PKCS#8-v1 DER
-/// private key (RFC 5656 `ecdsa-sha2-nistp384`).
-///
-/// Output is fixed-width 96-byte `r‖s`.
-///
-/// Non-deterministic: signature bytes differ per call (random nonce).
-///
-/// Hosted-only.
-#[no_mangle]
-pub extern "C" fn rt_ecdsa_p384_sign(pkcs8: RuntimeValue, message: RuntimeValue) -> RuntimeValue {
-    use p384::pkcs8::DecodePrivateKey;
-    let Some(key_bytes) = runtime_byte_array_to_vec(pkcs8) else {
-        return _empty_bytes();
-    };
-    let Some(msg_bytes) = runtime_byte_array_to_vec(message) else {
-        return _empty_bytes();
-    };
-    let Ok(key) = p384::ecdsa::SigningKey::from_pkcs8_der(&key_bytes) else {
-        return _empty_bytes();
-    };
-    let sig: p384::ecdsa::Signature = key.sign(&msg_bytes);
-    let bytes = sig.to_bytes();
-    unsafe { crate::value::collections::rt_string_new(bytes.as_ptr(), bytes.len() as u64) }
-}
-
-/// Sign `message` with ECDSA P-521 SHA-512 using a PKCS#8-v1 DER
-/// private key (RFC 5656 `ecdsa-sha2-nistp521`).
-///
-/// Output is fixed-width 132-byte `r‖s`.
-///
-/// Non-deterministic: signature bytes differ per call (random nonce).
-///
-/// Hosted-only.
-#[no_mangle]
-pub extern "C" fn rt_ecdsa_p521_sign(pkcs8: RuntimeValue, message: RuntimeValue) -> RuntimeValue {
-    use p521::pkcs8::DecodePrivateKey;
-    let Some(key_bytes) = runtime_byte_array_to_vec(pkcs8) else {
-        return _empty_bytes();
-    };
-    let Some(msg_bytes) = runtime_byte_array_to_vec(message) else {
-        return _empty_bytes();
-    };
-    let Ok(key) = p521::ecdsa::SigningKey::from_pkcs8_der(&key_bytes) else {
-        return _empty_bytes();
-    };
-    let sig: p521::ecdsa::Signature = key.sign(&msg_bytes);
-    let bytes = sig.to_bytes();
     unsafe { crate::value::collections::rt_string_new(bytes.as_ptr(), bytes.len() as u64) }
 }
 
