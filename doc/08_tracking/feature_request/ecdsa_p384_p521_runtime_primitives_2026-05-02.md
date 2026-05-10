@@ -11,7 +11,10 @@
 - `src/os/tls13/handshake13.spl` (`_build_ext_sig_algs`, line 383)
 **Severity:** P2 (TLS 1.3 RFC 8446 §4.2.3 sigalg coverage; ECDSA-P-256
 + Ed25519 + RSA-PSS already cover the common case).
-**Status:** OPEN
+**Status:** PARTIAL — Path A FFI extern declarations + wrappers landed 2026-05-10;
+runtime backend implementation (step 2) and dispatch wiring (cert_verify.spl,
+handshake13.spl) remain open. Bootstrap rebuild required before externs resolve
+(see feedback_extern_bootstrap_rebuild.md).
 
 ## Context
 

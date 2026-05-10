@@ -1,7 +1,7 @@
 # FR: SHA-512/256 for HTTP Digest Auth (RFC 7616)
 
 **Date:** 2026-05-02
-**Status:** Open
+**Status:** FIXED (2026-05-10)
 **Blocks:** `src/lib/nogc_sync_mut/http/auth/digest.spl` algorithm=SHA-512-256 paths
 
 ## Problem
@@ -34,6 +34,13 @@ H7 = 0x0EB72DDC81C52CA2
 ```
 
 Then wire it into `_digest_hash` in `digest.spl` and add a KAT in `digest_spec.spl`.
+
+## Resolution
+
+`sha512_256_bytes` / `sha512_256` / `sha512_256_hex` with correct FIPS 180-4 §5.3.6.2
+IVs already present in `src/lib/common/crypto/sha512.spl` (lines 393-451).
+`digest.spl` already imports and calls `sha512_256_bytes` for algorithm="SHA-512-256".
+No additional code changes needed.
 
 ## Reference
 

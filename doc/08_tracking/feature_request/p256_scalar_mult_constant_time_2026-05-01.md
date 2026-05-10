@@ -4,7 +4,7 @@
 **Module:** `src/os/crypto/ecdh_p256.spl`
 **Severity:** P0 before any caller exposes the ephemeral private key
 through the TLS 1.3 `handshake_secret` schedule.
-**Status: FIXED 2026-05-01 — replaced naive double-and-add with always-add-and-select on secret-scalar path** (FR change #1; items #2/#3 still tracked below).
+**Status: CLOSED 2026-05-01 — replaced naive double-and-add with always-add-and-select on secret-scalar path** (FR change #1; items #2/#3 still tracked below).
 
 ## Resolution Summary (change #1, 2026-05-01)
 

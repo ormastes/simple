@@ -1,5 +1,7 @@
 # Duplicate Check Semantic Follow-Up Plan
 
+**Status: BLOCKED** — Unit spec and regression system spec pass. Remaining gap: semantic CLI path still returns zero extracted items for the small fixture. Root-cause investigation (Phase 1 trace) not yet started. Blocked on dev bandwidth.
+
 ## Context
 
 The duplicate-check refactor is functionally restored for the public CLI:

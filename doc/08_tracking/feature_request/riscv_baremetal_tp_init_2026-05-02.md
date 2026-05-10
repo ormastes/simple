@@ -1,5 +1,7 @@
 # FR-RISCV-TP-INIT-2026-05-02: Wire tp Register at Baremetal Boot for Per-CPU Base
 
+**Status:** Implemented (2026-05-10)
+
 ## Why
 
 AC-4 of `riscv_smp_cache_hal_phase1` requires that each hart writes its per-CPU
@@ -66,13 +68,14 @@ This matches the `TrapFrameTest.regs[4]` index verified in `per_cpu_tp_spec.spl`
 
 ## When
 
-Apply this change after both of the following are true:
+Both conditions were met (2026-05-10):
 
 1. `examples/simple_os/arch/riscv64/boot/baremetal_stubs.c` and
    `examples/simple_os/arch/riscv64/boot/ghdl_boot_info_runtime.c` are clean
-   (not modified by any in-flight track) on main.
-2. A `per_cpu_base_array` symbol (or equivalent) is defined in the kernel BSS
-   by the linker script.
+   on main (confirmed via `git status`).
+2. `per_cpu_base_array` symbol defined in
+   `src/lib/nogc_async_mut_noalloc/baremetal/riscv/startup.spl` as
+   `var per_cpu_base_array: [u64; MAX_HARTS]` with `@align(8)`.
 
 ## Acceptance
 
@@ -83,5 +86,13 @@ AC-4 in `.sstack/riscv_smp_cache_hal_phase1/state.md` flips from:
 to:
 
 > DONE — tp wired at baremetal boot; trap frame saves/restores x4.
+
+Implemented in `src/lib/nogc_async_mut_noalloc/baremetal/riscv/startup.spl`:
+- Added `per_cpu_base_array: [u64; MAX_HARTS]` (rv64 pointer array, 4-hart max).
+- Hart 0 `_start`: reads `mhartid`, loads `per_cpu_base_array[hart_id]`, sets `tp`.
+- Secondary harts: spin on `per_cpu_base_array[mhartid]` being non-zero, then set `tp` before entering `main`.
+- `trap_vector`: replaced `# ... save x3-x31 ...` placeholder with full explicit
+  `sd x3..x31` / `ld x3..x31` sequences; `x4 (tp)` is explicitly saved at offset 24
+  and restored at trap exit.
 
 Cross-link: `src/os/kernel/arch/riscv64/per_cpu.spl` (helpers), `test/unit/os/kernel/arch/riscv/per_cpu_tp_spec.spl` (specs).

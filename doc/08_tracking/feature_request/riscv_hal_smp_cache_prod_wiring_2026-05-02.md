@@ -1,5 +1,7 @@
 # FR-RISCV-HAL-PROD-WIRING-2026-05-02: Wire Real Production Bodies for HalSmp/HalCache
 
+**Status: BLOCKED** — AC-1 (HalSmp production bodies missing) and AC-2 (HalCache production bodies missing) are unimplemented. Only test-seam variants exist; real SBI/CMO instruction bodies are absent. Unblocks when SBI/DTB integration work resumes.
+
 ## Why
 
 Phase 7 verify of `riscv_smp_cache_hal_phase1` found that AC-1 and AC-2 are

@@ -1,5 +1,7 @@
 # SPipe Review-Loop Dogfood Checklist — 2026-04-26
 
+**Status: PENDING** — Dogfood runs (L2 + L3) have not been executed yet. Checklist items remain open. No state.json evidence captured; no real-PR runs recorded.
+
 Scope:
 - `tools/claude-plugin/repo-and-pull-req/agents/review_loop.md`
 - `tools/claude-plugin/repo-and-pull-req/agents/review_loop_codex_first.md`

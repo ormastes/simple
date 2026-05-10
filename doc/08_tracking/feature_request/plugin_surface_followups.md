@@ -1,5 +1,7 @@
 # Plugin Surface — Follow-up Feature Requests
 
+**Status: PENDING/BLOCKED** — All open items (FR-PLUG-0001..0004) are explicitly deferred carve-outs from v1. Blocked until the plugin surface is declared stable and static-lowering follow-up work is scheduled.
+
 Tracker for items deferred during the `runtime-api-block-sugar-plugins` work
 (landed 2026-04-28 across commits `717b5d62`/`8a8c9145`/`0277f590`).
 

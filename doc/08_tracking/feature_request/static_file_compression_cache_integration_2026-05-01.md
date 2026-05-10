@@ -7,7 +7,7 @@ Accept-Encoding`, and any compression `Err` falls back to plain identity.
 Integration spec: `test/unit/lib/nogc_async_mut/http_server/static_file_compression_cache_spec.spl` (7/7 passing).
 
 **Date:** 2026-05-01
-**Status:** Pending — cache class shipped, integration deferred.
+**Status:** CLOSED — fully landed 2026-05-01; cache class + StaticFileHandler integration both shipped.
 
 ## What was done
 
