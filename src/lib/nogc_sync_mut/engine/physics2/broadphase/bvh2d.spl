@@ -1,0 +1,225 @@
+# Physics2 — Dynamic BVH Broad-Phase (2D)
+#
+# Dynamic AABB tree for O(n log n) pair detection. Uses SoA layout for
+# node data to avoid chained indexed field assignment limitation.
+
+use std.common.math.{math_abs}
+
+struct AABB2D:
+    min_x: f64
+    min_y: f64
+    max_x: f64
+    max_y: f64
+
+impl AABB2D:
+    static fn empty() -> AABB2D:
+        AABB2D(min_x: 0.0, min_y: 0.0, max_x: 0.0, max_y: 0.0)
+
+    fn overlaps(other: AABB2D) -> bool:
+        if self.max_x < other.min_x or self.min_x > other.max_x:
+            return false
+        if self.max_y < other.min_y or self.min_y > other.max_y:
+            return false
+        true
+
+    fn merged(other: AABB2D) -> AABB2D:
+        val mnx = if self.min_x < other.min_x: self.min_x else: other.min_x
+        val mny = if self.min_y < other.min_y: self.min_y else: other.min_y
+        val mxx = if self.max_x > other.max_x: self.max_x else: other.max_x
+        val mxy = if self.max_y > other.max_y: self.max_y else: other.max_y
+        AABB2D(min_x: mnx, min_y: mny, max_x: mxx, max_y: mxy)
+
+    fn perimeter() -> f64:
+        val w = self.max_x - self.min_x
+        val h = self.max_y - self.min_y
+        2.0 * (w + h)
+
+    fn contains(other: AABB2D) -> bool:
+        (self.min_x <= other.min_x and self.min_y <= other.min_y and
+         self.max_x >= other.max_x and self.max_y >= other.max_y)
+
+    fn fattened(margin: f64) -> AABB2D:
+        AABB2D(
+            min_x: self.min_x - margin,
+            min_y: self.min_y - margin,
+            max_x: self.max_x + margin,
+            max_y: self.max_y + margin
+        )
+
+val NULL_NODE: i64 = -1
+
+# SoA node storage — avoids self.nodes[idx].field = x limitation
+struct DynamicBvh2D:
+    nd_min_x: [f64]
+    nd_min_y: [f64]
+    nd_max_x: [f64]
+    nd_max_y: [f64]
+    nd_left: [i64]
+    nd_right: [i64]
+    nd_parent: [i64]
+    nd_body: [i64]
+    nd_height: [i64]
+    root: i64
+    node_count: i64
+    free_list: [i64]
+    fat_margin: f64
+    body_to_leaf: [i64]
+
+impl DynamicBvh2D:
+    static fn create(fat_margin: f64) -> DynamicBvh2D:
+        DynamicBvh2D(
+            nd_min_x: [], nd_min_y: [],
+            nd_max_x: [], nd_max_y: [],
+            nd_left: [], nd_right: [],
+            nd_parent: [], nd_body: [], nd_height: [],
+            root: NULL_NODE,
+            node_count: 0,
+            free_list: [],
+            fat_margin: fat_margin,
+            body_to_leaf: []
+        )
+
+    me get_aabb(idx: i64) -> AABB2D:
+        AABB2D(min_x: self.nd_min_x[idx], min_y: self.nd_min_y[idx], max_x: self.nd_max_x[idx], max_y: self.nd_max_y[idx])
+
+    me set_aabb(idx: i64, aabb: AABB2D):
+        self.nd_min_x[idx] = aabb.min_x
+        self.nd_min_y[idx] = aabb.min_y
+        self.nd_max_x[idx] = aabb.max_x
+        self.nd_max_y[idx] = aabb.max_y
+
+    me alloc_node() -> i64:
+        if self.free_list.len() > 0:
+            val idx = self.free_list[self.free_list.len() - 1]
+            self.free_list = self.free_list[0 : self.free_list.len() - 1]
+            return idx
+        val idx = self.node_count
+        self.nd_min_x.push(0.0)
+        self.nd_min_y.push(0.0)
+        self.nd_max_x.push(0.0)
+        self.nd_max_y.push(0.0)
+        self.nd_left.push(NULL_NODE)
+        self.nd_right.push(NULL_NODE)
+        self.nd_parent.push(NULL_NODE)
+        self.nd_body.push(-1)
+        self.nd_height.push(0)
+        self.node_count = self.node_count + 1
+        idx
+
+    me insert(aabb: AABB2D, body_index: i64) -> i64:
+        val leaf = self.alloc_node()
+        val fat = aabb.fattened(self.fat_margin)
+        self.set_aabb(leaf, fat)
+        self.nd_body[leaf] = body_index
+        self.nd_height[leaf] = 0
+        self.nd_left[leaf] = NULL_NODE
+        self.nd_right[leaf] = NULL_NODE
+
+        while self.body_to_leaf.len() <= body_index:
+            self.body_to_leaf.push(NULL_NODE)
+        self.body_to_leaf[body_index] = leaf
+
+        if self.root == NULL_NODE:
+            self.root = leaf
+            self.nd_parent[leaf] = NULL_NODE
+            return leaf
+
+        var sibling = self.root
+        while self.nd_left[sibling] != NULL_NODE:
+            val left = self.nd_left[sibling]
+            val right = self.nd_right[sibling]
+            val sib_aabb = self.get_aabb(sibling)
+            val combined = sib_aabb.merged(fat)
+            val cost_here = combined.perimeter()
+            val left_aabb = self.get_aabb(left)
+            val right_aabb = self.get_aabb(right)
+            val left_cost = left_aabb.merged(fat).perimeter()
+            val right_cost = right_aabb.merged(fat).perimeter()
+            if cost_here < left_cost and cost_here < right_cost:
+                break
+            if left_cost < right_cost:
+                sibling = left
+            else:
+                sibling = right
+
+        val old_parent = self.nd_parent[sibling]
+        val new_parent = self.alloc_node()
+        self.nd_parent[new_parent] = old_parent
+        val sib_aabb2 = self.get_aabb(sibling)
+        self.set_aabb(new_parent, sib_aabb2.merged(fat))
+        self.nd_height[new_parent] = self.nd_height[sibling] + 1
+        self.nd_left[new_parent] = sibling
+        self.nd_right[new_parent] = leaf
+        self.nd_body[new_parent] = -1
+        self.nd_parent[sibling] = new_parent
+        self.nd_parent[leaf] = new_parent
+
+        if old_parent == NULL_NODE:
+            self.root = new_parent
+        else:
+            if self.nd_left[old_parent] == sibling:
+                self.nd_left[old_parent] = new_parent
+            else:
+                self.nd_right[old_parent] = new_parent
+
+        self.refit_ancestors(new_parent)
+        leaf
+
+    me query_all_pairs() -> [(i64, i64)]:
+        var pairs: [(i64, i64)] = []
+        if self.root == NULL_NODE:
+            return pairs
+        var leaves: [i64] = []
+        self.collect_leaves(self.root, leaves)
+        var i = 0
+        while i < leaves.len():
+            val leaf = leaves[i]
+            val leaf_aabb = self.get_aabb(leaf)
+            val leaf_body = self.nd_body[leaf]
+            self.query_node(self.root, leaf_aabb, leaf_body, pairs)
+            i = i + 1
+        var deduped: [(i64, i64)] = []
+        var pi = 0
+        while pi < pairs.len():
+            val pa = pairs[pi]
+            if pa.0 < pa.1:
+                deduped.push(pa)
+            pi = pi + 1
+        deduped
+
+    me collect_leaves(node: i64, leaves_out: [i64]):
+        if node == NULL_NODE:
+            return
+        if self.nd_left[node] == NULL_NODE:
+            leaves_out.push(node)
+            return
+        self.collect_leaves(self.nd_left[node], leaves_out)
+        self.collect_leaves(self.nd_right[node], leaves_out)
+
+    me query_node(node: i64, aabb: AABB2D, exclude_body: i64, pairs_out: [(i64, i64)]):
+        if node == NULL_NODE:
+            return
+        val node_aabb = self.get_aabb(node)
+        if not node_aabb.overlaps(aabb):
+            return
+        if self.nd_left[node] == NULL_NODE:
+            val body = self.nd_body[node]
+            if body != exclude_body:
+                pairs_out.push((exclude_body, body))
+            return
+        self.query_node(self.nd_left[node], aabb, exclude_body, pairs_out)
+        self.query_node(self.nd_right[node], aabb, exclude_body, pairs_out)
+
+    me refit_ancestors(node: i64):
+        var current = node
+        while current != NULL_NODE:
+            val left = self.nd_left[current]
+            val right = self.nd_right[current]
+            if left != NULL_NODE and right != NULL_NODE:
+                val left_aabb = self.get_aabb(left)
+                val right_aabb = self.get_aabb(right)
+                self.set_aabb(current, left_aabb.merged(right_aabb))
+                val lh = self.nd_height[left]
+                val rh = self.nd_height[right]
+                self.nd_height[current] = (if lh > rh: lh else: rh) + 1
+            current = self.nd_parent[current]

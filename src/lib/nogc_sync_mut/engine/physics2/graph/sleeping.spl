@@ -1,0 +1,39 @@
+# Physics2 — Sleep/Wake Detection
+#
+# Bodies below the kinetic energy threshold for a sustained duration
+# are put to sleep. Sleeping bodies skip integration and solver.
+# Any external force or contact with an awake body wakes the island.
+
+use std.nogc_sync_mut.engine.physics2.data.solver_body2d.{SolverBodyStore2D}
+use std.nogc_sync_mut.engine.physics2.graph.island_manager.{IslandManager}
+
+fn compute_kinetic_energy_2d(vx: f64, vy: f64, ang_vel: f64, mass: f64, inertia: f64) -> f64:
+    val linear = 0.5 * mass * (vx * vx + vy * vy)
+    val angular = 0.5 * inertia * ang_vel * ang_vel
+    linear + angular
+
+fn update_sleeping(bodies: SolverBodyStore2D, islands: IslandManager, dt: f64):
+    var i = 0
+    while i < bodies.body_count:
+        if bodies.body_type[i] == 2:
+            val mass = if bodies.inv_mass[i] > 0.0: 1.0 / bodies.inv_mass[i] else: 0.0
+            val inertia = if bodies.inv_inertia[i] > 0.0: 1.0 / bodies.inv_inertia[i] else: 0.0
+            val ke = compute_kinetic_energy_2d(
+                bodies.vel_x[i], bodies.vel_y[i],
+                bodies.ang_vel[i], mass, inertia
+            )
+            islands.update_sleep(i, ke, dt)
+        i = i + 1
+
+fn wake_bodies_in_contact(constraints_body_a: [i64], constraints_body_b: [i64], count: i64, islands: IslandManager):
+    var i = 0
+    while i < count:
+        val a = constraints_body_a[i]
+        val b = constraints_body_b[i]
+        val a_sleeping = islands.is_island_sleeping(a)
+        val b_sleeping = islands.is_island_sleeping(b)
+        if a_sleeping and not b_sleeping:
+            islands.wake_island(a)
+        if b_sleeping and not a_sleeping:
+            islands.wake_island(b)
+        i = i + 1
