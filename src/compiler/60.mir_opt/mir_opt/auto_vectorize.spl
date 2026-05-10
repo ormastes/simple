@@ -33,11 +33,12 @@
 use compiler.mir.mir_data.{MirInst, MirInstKind, MirTerminator, MirOperand, MirOperandKind, MirBinOp, LocalId, BlockId}
 use compiler.mir.mir_instructions.{MirModule, MirFunction, MirBlock}
 use compiler.backend.feature_caps.{x86_caps_from_target, preferred_lane_count_x86}
+use compiler.frontend.parser_types.{Attribute}
 
 # Shared types (cycle-free base module)
 use compiler.mir_opt.auto_vectorize_types.{LoopInfo, ArrayAccess}
 # Re-import from sub-modules for coordinator use and re-export
-use compiler.mir_opt.auto_vectorize_analysis.{DependencyAnalysisResult, LoopBounds, analyze_loop_dependencies, is_simple_loop, detect_array_accesses, get_operand_local}
+use compiler.mir_opt.auto_vectorize_analysis.{DependencyAnalysisResult, LoopBounds, analyze_loop_dependencies, is_simple_loop, detect_array_accesses, get_operand_local, detect_loop_bounds_only}
 use compiler.mir_opt.auto_vectorize_validate.{VectorizabilityResult, check_vectorizability, get_vectorizable_type}
 use compiler.mir_opt.auto_vectorize_cost.{CostEstimate, estimate_vectorization_cost, should_vectorize_loop}
 use compiler.mir_opt.auto_vectorize_codegen.{VectorizeContext, VectorizedLoop, create_vector_loop, create_alignment_check_block, create_peeling_block, create_vector_loop_block}
@@ -254,26 +255,31 @@ struct VectorRecipe:
       output_base   — LocalId of GEP base for store destination (None for reductions)
       accumulator   — LocalId of scalar accumulator register (Some for reductions,
                        None for elementwise)
-      chunk_width   — SIMD lane count as u32 (power-of-two; same value as vector_width
-                       but typed as i64 here for uniformity; e.g. 4 for Vec4i)
-      index_locals  — Locals used as stride-1 indices for each memory access
-      store_value   — LocalId stored back to memory (Some for elementwise / outer-product)
+      chunk_width      — SIMD lane count as u32 (power-of-two; same value as vector_width
+                          but typed as i64 here for uniformity; e.g. 4 for Vec4i)
+      index_locals     — Locals used as stride-1 indices for each memory access
+      store_value      — LocalId stored back to memory (Some for elementwise / outer-product)
+      induction_update — LocalId of the dest of BinOp(Add, %i, 1); the post-increment
+                          value.  Distinct from induction_var (which is the same dest in K3
+                          but may differ once a proper phi/SSA pass lands).  The rewriter
+                          uses this to emit the +VF induction step in the vector header.
     """
-    kind:          VectorRecipeKind
-    header_block:  BlockId
-    induction_var: LocalId
-    trip_count:    i64
-    element_type:  text
-    vector_width:  i64
-    op_name:       text
-    note:          text
+    kind:             VectorRecipeKind
+    header_block:     BlockId
+    induction_var:    LocalId
+    trip_count:       i64
+    element_type:     text
+    vector_width:     i64
+    op_name:          text
+    note:             text
     # W-recipe fields: operand bases for the future rewriter
-    input_bases:   [LocalId]
-    output_base:   LocalId?
-    accumulator:   LocalId?
-    chunk_width:   i64
-    index_locals:  [LocalId]
-    store_value:   LocalId?
+    input_bases:      [LocalId]
+    output_base:      LocalId?
+    accumulator:      LocalId?
+    chunk_width:      i64
+    index_locals:     [LocalId]
+    store_value:      LocalId?
+    induction_update: LocalId
 
 # ============================================================================
 # K3 Wave — Pattern matcher: trivial elementwise loop
@@ -388,20 +394,21 @@ fn mir_pattern_match_elementwise_loop(block: MirBlock) -> VectorRecipe?:
 
     # Build recipe — trip count unknown until SCEV lands (Wave L)
     Some(VectorRecipe(
-        kind:          VectorRecipeKind.Elementwise,
-        header_block:  block.id,
-        induction_var: induction,
-        trip_count:    -1,
-        element_type:  element_type_hint,
-        vector_width:  elem_width,
-        op_name:       "{last_binop_op}_elementwise",
-        note:          "K3 structural match: {load_count} loads, {store_count} stores, op={last_binop_op}",
-        input_bases:   input_bases,
-        output_base:   output_base,
-        accumulator:   nil,
-        chunk_width:   elem_width,
-        index_locals:  [induction],
-        store_value:   nil
+        kind:             VectorRecipeKind.Elementwise,
+        header_block:     block.id,
+        induction_var:    induction,
+        trip_count:       -1,
+        element_type:     element_type_hint,
+        vector_width:     elem_width,
+        op_name:          "{last_binop_op}_elementwise",
+        note:             "K3 structural match: {load_count} loads, {store_count} stores, op={last_binop_op}",
+        input_bases:      input_bases,
+        output_base:      output_base,
+        accumulator:      nil,
+        chunk_width:      elem_width,
+        index_locals:     [induction],
+        store_value:      nil,
+        induction_update: induction
     ))
 
 # ============================================================================
@@ -528,20 +535,21 @@ fn mir_pattern_match_reduction(block: MirBlock, has_fast_math: bool) -> VectorRe
     val red_width = get_simd_width(red_elem_type)
 
     Some(VectorRecipe(
-        kind:          VectorRecipeKind.Reduction,
-        header_block:  block.id,
-        induction_var: induction,
-        trip_count:    -1,
-        element_type:  red_elem_type,
-        vector_width:  red_width,
-        op_name:       "{last_binop_op}_reduction",
-        note:          "K3 structural match: {load_count} loads, accumulator op={last_binop_op}",
-        input_bases:   input_bases,
-        output_base:   nil,
-        accumulator:   accumulator_dest,
-        chunk_width:   red_width,
-        index_locals:  [induction],
-        store_value:   nil
+        kind:             VectorRecipeKind.Reduction,
+        header_block:     block.id,
+        induction_var:    induction,
+        trip_count:       -1,
+        element_type:     red_elem_type,
+        vector_width:     red_width,
+        op_name:          "{last_binop_op}_reduction",
+        note:             "K3 structural match: {load_count} loads, accumulator op={last_binop_op}",
+        input_bases:      input_bases,
+        output_base:      nil,
+        accumulator:      accumulator_dest,
+        chunk_width:      red_width,
+        index_locals:     [induction],
+        store_value:      nil,
+        induction_update: induction
     ))
 
 fn mir_pattern_match_matrix_kernel(block: MirBlock, has_fast_math: bool) -> VectorRecipe?:
@@ -604,20 +612,21 @@ fn mir_pattern_match_matrix_kernel(block: MirBlock, has_fast_math: bool) -> Vect
             output_base = Some(access.base_array)
 
     Some(VectorRecipe(
-        kind:          VectorRecipeKind.MatrixKernel,
-        header_block:  block.id,
-        induction_var: induction,
-        trip_count:    -1,
-        element_type:  "f32",
-        vector_width:  get_simd_width("f32"),
-        op_name:       if store_count > 0: "matrix_outer_product" else: "matrix_dot",
-        note:          "matrix-kernel structural match: loads={load_count}, stores={store_count}",
-        input_bases:   input_bases,
-        output_base:   output_base,
-        accumulator:   accumulator_dest,
-        chunk_width:   get_simd_width("f32"),
-        index_locals:  [induction],
-        store_value:   accumulator_dest
+        kind:             VectorRecipeKind.MatrixKernel,
+        header_block:     block.id,
+        induction_var:    induction,
+        trip_count:       -1,
+        element_type:     "f32",
+        vector_width:     get_simd_width("f32"),
+        op_name:          if store_count > 0: "matrix_outer_product" else: "matrix_dot",
+        note:             "matrix-kernel structural match: loads={load_count}, stores={store_count}",
+        input_bases:      input_bases,
+        output_base:      output_base,
+        accumulator:      accumulator_dest,
+        chunk_width:      get_simd_width("f32"),
+        index_locals:     [induction],
+        store_value:      accumulator_dest,
+        induction_update: induction
     ))
 
 # ============================================================================
@@ -847,6 +856,122 @@ fn _log_recipe(func_name: text, recipe: VectorRecipe):
     # Intentional no-op — diagnostic logging is deferred
     # The recipe exists in memory and can be inspected by unit tests
     pass_do_nothing
+
+# ============================================================================
+# Gap 2 (W-scev) — detect_loop_bounds adapter
+# ============================================================================
+# Thin wrapper that locates the header block in a MirFunction by BlockId, then
+# extracts the loop condition operand from the block terminator, and delegates
+# to detect_loop_bounds_only in auto_vectorize_analysis.spl.
+#
+# Signature uses codebase types (BlockId / MirFunction) rather than the
+# hypothetical BasicBlockId/MirCfg names from the design doc, following
+# the "patterns already in the codebase" rule.
+
+fn detect_loop_bounds(loop_header: BlockId, func: MirFunction) -> LoopBounds?:
+    """
+    Extract canonical loop bounds from a loop header block inside a function.
+
+    Finds the MirBlock with id == loop_header, reads the If-terminator
+    condition operand, and delegates to detect_loop_bounds_only for the
+    actual SCEV-lite extraction.
+
+    Returns Some(LoopBounds) for a canonical  for-i-in-0..n  shape
+    (step=1, lower=0, upper expressed as local or constant text).
+    Returns nil conservatively for any other shape.
+    """
+    # Locate the header block
+    var header_block: MirBlock? = nil
+    for block in func.blocks:
+        if block.id.id == loop_header.id:
+            header_block = Some(block)
+
+    if not header_block.?:
+        return nil
+
+    val header = header_block.unwrap()
+
+    # Extract the condition operand and exit block from the If terminator
+    var cond_op: MirOperand? = nil
+    var exit_block: BlockId? = nil
+
+    match header.terminator:
+        case If(cond, then_, else_):
+            cond_op = Some(cond)
+            # Conservatively treat else_ as exit (loop body is then_)
+            exit_block = Some(else_)
+        case _:
+            return nil
+
+    if not cond_op.? or not exit_block.?:
+        return nil
+
+    detect_loop_bounds_only(func, header, cond_op.unwrap(), exit_block.unwrap())
+
+# ============================================================================
+# Gap 3 (W-cfg) — CFG splice helper
+# ============================================================================
+# Replaces a scalar loop body block in a function with a vectorized version
+# plus a scalar remainder (peel) block.  Wires:
+#   - blocks before original  → unchanged
+#   - vectorized block        → inserted at original position
+#   - remainder block         → follows vectorized block
+#   - blocks after original   → unchanged (preserved as continuation/exit)
+#
+# This is the same splicing pattern used by rewrite_elementwise_add but
+# exposed as a reusable primitive for the Wave L3b rewriter.
+
+fn splice_vectorized_block(
+    original:   BlockId,
+    vectorized: MirBlock,
+    remainder:  MirBlock,
+    func:       MirFunction
+) -> MirFunction:
+    """
+    Replace the block at `original` with `vectorized` + `remainder`.
+
+    Block ordering in result:
+      [blocks with id < original.id]
+      vectorized
+      remainder
+      [blocks with id > original.id]
+
+    The caller is responsible for setting correct terminators on
+    `vectorized` and `remainder` before passing them in.
+    """
+    var new_blocks: [MirBlock] = []
+
+    for block in func.blocks:
+        if block.id.id < original.id:
+            new_blocks.push(block)
+
+    new_blocks.push(vectorized)
+    new_blocks.push(remainder)
+
+    for block in func.blocks:
+        if block.id.id > original.id:
+            new_blocks.push(block)
+
+    MirFunction(..func, blocks: new_blocks)
+
+# ============================================================================
+# Gap 4 (W-fastmath) — has_fast_math attribute checker
+# ============================================================================
+# Checks whether a list of Attribute annotations contains the @fast_math
+# attribute.  Used during HIR→MIR lowering to populate MirFunction.has_fast_math.
+# FP reductions are refused unless this returns true (§8 failure mode F3).
+
+fn has_fast_math(fn_attrs: [Attribute]) -> bool:
+    """
+    Return true if fn_attrs contains an @fast_math attribute.
+
+    Scans the attribute list for any entry whose name field equals
+    "fast_math".  Case-sensitive match per Simple attribute convention.
+    """
+    for attr in fn_attrs:
+        if attr.name == "fast_math":
+            return true
+    false
 
 # ============================================================================
 # Exports (re-export all public API for backward compatibility)

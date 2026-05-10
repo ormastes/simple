@@ -45,6 +45,29 @@ fn approx(a: f64, b: f64) -> bool:
     val abs_diff = if diff < 0.0: -diff else: diff
     abs_diff < 0.01
 
+fn find_opacity_approx(updates: [StyleUpdate], expected: f64) -> bool:
+    for u in updates:
+        if u.property == "opacity":
+            val is_match = match u.value:
+                CSSValue.Number(v): approx(v, expected)
+                _: false
+            if is_match:
+                return true
+    return false
+
+fn count_prop_updates(updates: [StyleUpdate], prop: text) -> i64:
+    var count = 0
+    for u in updates:
+        if u.property == prop:
+            count = count + 1
+    count
+
+fn has_prop_update(updates: [StyleUpdate], prop: text) -> bool:
+    for u in updates:
+        if u.property == prop:
+            return true
+    return false
+
 # ============================================================================
 # Spec
 # ============================================================================
@@ -186,22 +209,8 @@ describe "AnimationEngine tick — state machine":
             current_time: 0.0
         )
         engine.add_animation(anim)
-        # Tick at 500ms (50% progress)
         val updates = engine.tick(500.0)
-        # Should get opacity=0.5
-        var found_opacity = false
-        var i = 0
-        while i < updates.len():
-            val maybe_u = updates.get(i)
-            if val u = maybe_u:
-                if u.property == "opacity":
-                    val is_mid = match u.value:
-                        CSSValue.Number(v): approx(v, 0.5)
-                        _: false
-                    if is_mid:
-                        found_opacity = true
-            i = i + 1
-        expect(found_opacity).to_equal(true)
+        expect(find_opacity_approx(updates, 0.5)).to_equal(true)
 
     it "animation marks Finished after full duration":
         val engine = make_engine()
@@ -224,16 +233,7 @@ describe "AnimationEngine tick — state machine":
         engine.tick(1500.0)
         # Animation list should be in Finished state — engine no longer emits it
         val updates = engine.tick(2000.0)
-        # After finishing, no more updates for this animation
-        var opacity_update_count = 0
-        var i = 0
-        while i < updates.len():
-            val maybe_u2 = updates.get(i)
-            if val u2 = maybe_u2:
-                if u2.property == "opacity":
-                    opacity_update_count = opacity_update_count + 1
-            i = i + 1
-        expect(opacity_update_count).to_equal(0)
+        expect(count_prop_updates(updates, "opacity")).to_equal(0)
 
     it "animation with delay does not run before delay elapses":
         val engine = make_engine()
@@ -254,14 +254,7 @@ describe "AnimationEngine tick — state machine":
         engine.add_animation(anim)
         # Tick at 200ms — still in delay period (delay=500ms)
         val updates = engine.tick(200.0)
-        # No property updates while in delay
-        var opacity_found = false
-        var i = 0
-        while i < updates.len():
-            if updates.get(i).property == "opacity":
-                opacity_found = true
-            i = i + 1
-        expect(opacity_found).to_equal(false)
+        expect(has_prop_update(updates, "opacity")).to_equal(false)
 
 
 describe "AnimationState enum values":

@@ -8,64 +8,75 @@ use std.tui.style.*
 
 extern fn stdin_read_char() -> text
 
-fn editor_tui_run(buffer: EditorBuffer):
+fn editor_tui_run(session: EditSession):
     terminal_enter_alt_screen()
     terminal_enter_raw_mode()
     terminal_hide_cursor()
 
-    var mode = EditorMode.Normal
     var status_msg = "ready"
     var commandline = ""
     var running = true
 
     while running:
         val size = terminal_get_size()
-        buffer.viewport.width = size.cols
-        buffer.viewport.height = size.rows - 2
-        buffer.ensure_cursor_visible()
+        val buffer = session.active_buffer()
+        if buffer != nil:
+            buffer.viewport.width = size.cols
+            buffer.viewport.height = size.rows - 2
+            buffer.ensure_cursor_visible()
 
-        _tui_render_frame(buffer, mode, status_msg, commandline, size)
+        _tui_render_frame(session, status_msg, commandline, size)
         terminal_flush()
 
         val key = stdin_read_char()
         if key == "":
             continue
 
-        if mode == EditorMode.Command:
+        if session.mode == EditorMode.Command:
             val cmd_result = _tui_handle_command_key(key, commandline)
             commandline = cmd_result.commandline
             if cmd_result.done:
                 val parsed = editor_parse_commandline(commandline)
-                val result = editor_dispatch(buffer, parsed)
+                val result = editor_dispatch_session(session, parsed)
                 status_msg = result.message
                 if result.quit:
                     running = false
-                mode = EditorMode.Normal
+                session.mode = EditorMode.Normal
                 commandline = ""
             elif cmd_result.cancelled:
-                mode = EditorMode.Normal
+                session.mode = EditorMode.Normal
                 commandline = ""
                 status_msg = ""
             continue
 
-        if mode == EditorMode.Normal:
+        if session.mode == EditorMode.Normal:
+            if buffer == nil:
+                if key == ":":
+                    session.mode = EditorMode.Command
+                    commandline = ""
+                elif key == "q":
+                    running = false
+                continue
             val result = _tui_handle_normal_key(buffer, key)
             status_msg = result.message
             if result.quit:
                 running = false
             if result.enter_insert:
-                mode = EditorMode.Insert
+                session.mode = EditorMode.Insert
                 status_msg = "-- INSERT --"
             if result.enter_command:
-                mode = EditorMode.Command
+                session.mode = EditorMode.Command
                 commandline = ""
             continue
 
-        if mode == EditorMode.Insert:
+        if session.mode == EditorMode.Insert:
+            if buffer == nil:
+                session.mode = EditorMode.Normal
+                continue
             val result = _tui_handle_insert_key(buffer, key)
             status_msg = result.message
             if result.exit_insert:
-                mode = EditorMode.Normal
+                session.mode = EditorMode.Normal
                 status_msg = ""
 
     terminal_show_cursor()
@@ -73,38 +84,54 @@ fn editor_tui_run(buffer: EditorBuffer):
     terminal_exit_alt_screen()
 
 
-fn _tui_render_frame(buffer: EditorBuffer, mode: EditorMode, status_msg: text, commandline: text, size: TerminalSize):
+fn _tui_render_frame(session: EditSession, status_msg: text, commandline: text, size: TerminalSize):
     terminal_clear_screen()
     val editor_height = size.rows - 2
     val line_num_width = 4
+    val buffer = session.active_buffer()
 
     var row = 0
     while row < editor_height:
-        val file_row = buffer.viewport.top_row + row
         terminal_move_cursor(row, 0)
-        if file_row < buffer.line_count():
-            val num_str = str(file_row + 1)
-            var padding = ""
-            var p = 0
-            while p < line_num_width - num_str.len():
-                padding = padding + " "
-                p = p + 1
-            terminal_write(padding + num_str + " ")
-            val line = buffer.line_at(file_row)
-            val visible_start = buffer.viewport.left_col
-            val visible_end = visible_start + size.cols - line_num_width - 1
-            val display = if visible_start < line.len() then line.slice(visible_start, if visible_end < line.len() then visible_end else: line.len()) else: ""
-            terminal_write(display)
+        if buffer != nil:
+            val file_row = buffer.viewport.top_row + row
+            if file_row < buffer.line_count():
+                val num_str = str(file_row + 1)
+                var padding = ""
+                var p = 0
+                while p < line_num_width - num_str.len():
+                    padding = padding + " "
+                    p = p + 1
+                terminal_write(padding + num_str + " ")
+                val line = buffer.line_at(file_row)
+                val visible_start = buffer.viewport.left_col
+                val visible_end = visible_start + size.cols - line_num_width - 1
+                if visible_start < line.len():
+                    val end_idx = if visible_end < line.len() then visible_end else: line.len()
+                    val display = line.slice(visible_start, end_idx)
+                    terminal_write(display)
+            else:
+                terminal_write("~")
         else:
-            terminal_write("~")
+            if row == editor_height / 2:
+                terminal_write("  No file open. Press :e <path> to open a file.")
+            else:
+                terminal_write("~")
         row = row + 1
 
     val status_row = size.rows - 2
     terminal_move_cursor(status_row, 0)
-    val mode_str = editor_mode_name(mode)
-    val path_str = if buffer.path != "" then buffer.path else: "[No Name]"
-    val dirty_str = if buffer.dirty then " [+]" else: ""
-    val pos_str = "{buffer.cursor_row + 1},{buffer.cursor_col + 1}"
+    val mode_str = editor_mode_name(session.mode)
+    var path_str = "[No Name]"
+    var dirty_str = ""
+    var pos_str = "0,0"
+    if buffer != nil:
+        val bp = buffer.path
+        path_str = if bp != "" then bp else: "[No Name]"
+        dirty_str = if buffer.dirty then " [+]" else: ""
+        val cr = buffer.cursor_row + 1
+        val cc = buffer.cursor_col + 1
+        pos_str = "{cr},{cc}"
     val left_status = " {mode_str} | {path_str}{dirty_str}"
     val right_status = "{pos_str} "
     var fill = ""
@@ -117,14 +144,15 @@ fn _tui_render_frame(buffer: EditorBuffer, mode: EditorMode, status_msg: text, c
 
     val cmd_row = size.rows - 1
     terminal_move_cursor(cmd_row, 0)
-    if mode == EditorMode.Command:
+    if session.mode == EditorMode.Command:
         terminal_write(":" + commandline)
     else:
         terminal_write(status_msg)
 
-    val cursor_screen_row = buffer.cursor_row - buffer.viewport.top_row
-    val cursor_screen_col = buffer.cursor_col - buffer.viewport.left_col + line_num_width + 1
-    terminal_move_cursor(cursor_screen_row, cursor_screen_col)
+    if buffer != nil:
+        val cursor_screen_row = buffer.cursor_row - buffer.viewport.top_row
+        val cursor_screen_col = buffer.cursor_col - buffer.viewport.left_col + line_num_width + 1
+        terminal_move_cursor(cursor_screen_row, cursor_screen_col)
     terminal_show_cursor()
 
 

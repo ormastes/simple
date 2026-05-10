@@ -1,5 +1,6 @@
 # Bug / Audit: SIMD Extern Stub Survey — simd.spl
 # 2026-05-02  (Wave L / L5)
+# **Status:** FIXED 2026-05-10 — rt_simd_xor_u8x16 wired through full stack (runtime + interpreter + Simple extern decl)
 
 **Purpose:** Provide a complete, cited map of every `extern fn rt_simd_*`
 declared in `src/lib/nogc_sync_mut/simd.spl` and its actual wiring status, so

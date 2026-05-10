@@ -2,7 +2,7 @@
 
 **Date:** 2026-05-02
 **Wave:** L3 (MIR rewriter)
-**Status:** BLOCKED — stop condition met; no rewrite code written
+**Status:** FIXED 2026-05-10 — all 4 infrastructure gaps filled: VectorRecipe.induction_update field, detect_loop_bounds(), splice_vectorized_block(), has_fast_math()
 **Filed by:** L3 agent (Wave L)
 
 ## Summary

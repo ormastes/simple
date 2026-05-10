@@ -1,4 +1,5 @@
 # Bug: SIMD Bulk Copy (J3 Rec 1) Blocked by SplArray<SplValue> Layout
+# **Status:** FIXED 2026-05-10 — rt_array_extend_i64 bulk-append extern added (Option B workaround); xxHash64 chunk_width fixed in zstd.spl
 
 **Date:** 2026-05-02
 **Reporter:** Wave K / K2
