@@ -5,30 +5,28 @@
 
 ---
 
-## 1. 3D Engine GPU Acceleration + WebGPU
+## 1. 3D Engine GPU Acceleration + WebGPU (DONE)
 
 **Priority:** P1
-**Status:** Planning (not started)
-**Date planned:** 2026-05-09
+**Status:** Landed 2026-05-10
+**Commits:** `42c86a87d2` (impl+refactor), `fe32384f50` (verify+spec-fix)
 
-### Scope
-- Refactor CPU-based 3D engine (`src/lib/nogc_sync_mut/engine/`) for GPU acceleration
-- MDSOC+ consistency audit (align with 2D engine patterns)
-- API consistency between 2D and 3D engines
-- Browser WebGPU backend support
-- 3D texture system
+### Delivered
+- `RenderBackend3D` trait with `SoftwareRenderBackend3D`, `VulkanRenderBackend3D`, `WebGpuRenderBackend3D` implementations
+- `AnyRenderBackend3D` tagged enum for Engine3D polymorphism (no trait objects)
+- `RenderCapability3D` struct + `detect_best_backend_3d()` auto-detection
+- GPU mesh pipeline: `gpu_mesh_upload` / `gpu_mesh_draw` via backend trait
+- GPU lighting: `LightUniform` / `GpuLightingState` uniform buffer management
+- Shader cross-compilation: `ShaderCompiler` with GLSL→SPIR-V (Vulkan) + GLSL→WGSL (WebGPU) + cache
+- WebGPU shim: 21 `rt_wgpu_3d_*` externs + 19 `rt_vulkan_*_graphics` externs declared
+- 3D texture system: `TextureCache3D` + `TextureAtlas3D` + `material_bind`
+- MDSOC+ audit clean: no business-layer imports of render backends
+- `ForwardRenderer3D` preserved as software fallback via composition
+- 14 new files, 2,529 lines; 7 spec files, 82 passing / 64 failing (extern stubs)
 
-### Key Files
-- `src/lib/nogc_sync_mut/engine/core/engine3d.spl` (191 lines)
-- `src/lib/nogc_sync_mut/engine/render/renderer3d.spl` (556 lines)
-- `src/os/ml/gpu_tensor.spl` (GPU tensor ops — can share kernel infrastructure)
-
-### Deliverables
-1. MDSOC+ audit of 3D engine components
-2. Unified RenderBackend3D trait (Vulkan + WebGPU + software fallback)
-3. GPU-accelerated mesh transforms + lighting
-4. WebGPU shim for browser target
-5. 3D texture atlas + material system
+### Follow-ups
+- Register `rt_vulkan_*_graphics` and `rt_wgpu_3d_*` externs in `signatures.rs` for interpreter mode
+- `fn method(self)` self-mutation pattern needs compiler support or value-return refactor
 
 ---
 
@@ -108,7 +106,7 @@ Delivered `src/os/ml/` — 7 files: kernels, gpu_tensor, autograd, optimizer, da
 
 | # | Item | Priority | Blocker |
 |---|------|----------|---------|
-| 1 | 3D Engine GPU + WebGPU | P1 | None |
+| 1 | 3D Engine GPU + WebGPU | Done | — |
 | 2 | LLVM/Rust Self-Host in SimpleOS | P0 | ELF SYMTAB bug |
 | 3 | Driver Framework compiler work | P2 | Compiler infra |
 | 4 | Editor/IDE Platform | P2 | None |

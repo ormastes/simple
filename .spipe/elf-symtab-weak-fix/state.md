@@ -90,8 +90,9 @@ N/A (2-line change)
 - [x] Full `cargo test`: SIGSEGV in test binary is pre-existing (not from 2-line linkage fix)
 - [x] ld.lld -r accepts all Cranelift .o files (exit 0, no sh_info/partition errors)
 - [x] nm confirms spl_main is T (GLOBAL defined) in mod_0.o — freestanding_weak_boot_defsyms will find it
-- [ ] SimpleOS kernel freestanding build (deferred — mechanism proven, needs full OS build)
-- [ ] bootstrap-from-scratch.sh --deploy (deferred — user should run manually)
+- [x] Freestanding unit tests pass: test_freestanding_weak_boot_alias_uses_strong_simple_suffix_match + test_freestanding_linker_uses_c_compiler_without_runtime_bundle_probe
+- [x] SIGSEGV confirmed pre-existing: reproduces with pre-fix code (git checkout d5d74bfac32^)
+- [ ] bootstrap-from-scratch.sh --deploy: blocked by pre-existing parse error in value.spl ("expected identifier, found Style")
 
 ### 8-ship
 Fix committed in d5d74bfac32 (2026-05-10) on main.

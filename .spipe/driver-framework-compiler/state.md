@@ -15,7 +15,7 @@ feature
 - [x] AC-3: `@packed struct` field write (`x.f = val`) generates correct read-modify-write via existing bitfield path (verified 2026-05-10)
 - [x] AC-4: Round-trip test passes: `PciStatus(0); s.command = 5; expect(s.command).to_equal(5)` + adjacent field preservation (2 tests, 2026-05-10)
 - [x] AC-5: Rust seed parser recognizes `@packed struct { f: T:N }` and routes through `register_packed_struct_as_bitfield` (verified working, no new code needed)
-- [ ] AC-6: FR-DRIVER-0001 synthetic registration: `@driver(...)` codegen emits `register_static_driver(m, ops)` call (follow-up: arch designed, codegen pass not implemented)
+- [x] AC-6: FR-DRIVER-0001 synthetic registration: `@driver(...)` codegen emits `register_static_driver(m, ops)` call (implemented 2026-05-10: synthetic_driver_codegen.spl + mir_lowering.spl hook)
 - [x] AC-7: doc/05_design/ triage report classifies all files as IMPLEMENTED/STALE/ACTIONABLE/REFERENCE (264 files triaged)
 
 ## Cooperative Providers
@@ -143,7 +143,7 @@ feature
 - REQ-6 (from AC-7): doc/05_design/ triage — parallel agent (out of scope for this pipeline)
 
 ## Phase
-verify-partial
+verify-done
 
 ## Log
 - 1-dev: Created state file with 7 acceptance criteria, identified scope as FR-DRIVER-0003 + FR-DRIVER-0001

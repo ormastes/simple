@@ -22,7 +22,7 @@ or `Rejected` (one-line reason).
 - **Filed-by:** driver-framework rollout (Phase B)
 - **Target:** driver / compiler frontend + HIR lowering
 - **Priority:** P1
-- **Status:** Partial (manifest attribute + HIR/MIR support implemented 2026-04-22; synthetic registration remains)
+- **Status:** Partial → Implemented (codegen pass 2026-05-10). Manifest attr + HIR/MIR support (2026-04-22) + synthetic codegen pass in `src/compiler/50.mir/synthetic_driver_codegen.spl` injecting `register_static_driver(manifest, ops)` MIR call for `ReadyToSynthesize` functions. Wired into `lower_function` in `mir_lowering.spl`.
 - **Requested-semantics:**
   Today every driver registers into the shared registry by calling
   `register_static_driver(manifest, ops)` from a hand-written
@@ -39,9 +39,9 @@ or `Rejected` (one-line reason).
   - [x] HIR stores the parsed manifest on the owning declaration
         (extend `FunctionAttr` / add `ModuleAttr` in
         `src/compiler/20.hir/hir_definitions.spl`).
-  - [ ] Codegen emits a synthetic registration fn whose body is the
+  - [x] Codegen emits a synthetic registration fn whose body is the
         literal `register_static_driver(m, ops)` call that authors
-        write today.
+        write today. (2026-05-10: `synthetic_driver_codegen.spl`)
   - [x] `sffi_lint.spl` gains a driver-shim conformance rule: a module
         declaring `extern fn` **and** `@driver(...)` must also provide
         a matching `impl Driver`.

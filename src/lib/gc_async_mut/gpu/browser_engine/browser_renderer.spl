@@ -20,9 +20,8 @@ use std.gc_async_mut.gpu.browser_engine.layout.{BeLayoutBox, layout_tree,
 use std.gc_async_mut.gpu.browser_engine.paint.{PaintCommand,
     generate_paint_list, paint_commands_to_scene,
     apply_transform_to_commands, paint_scrollbar, compute_object_fit}
-use std.gc_async_mut.gpu.browser_engine.style_block.{process_style_blocks_result, extract_keyframes, KeyframeRegistry}
+use std.gc_async_mut.gpu.browser_engine.style_block.{process_style_blocks_result}
 use std.gc_async_mut.gpu.browser_engine.style.render_state.{RenderState}
-use std.gc_async_mut.gpu.browser_engine.style.supports.{eval_supports_query}
 use std.gc_async_mut.gpu.browser_engine.style.animation.{AnimationEngine}
 use std.gc_async_mut.gpu.browser_engine.widget_to_dom.{widget_kind_to_tag}
 use std.gc_async_mut.gpu.browser_engine.style.animation_controller.{AnimationController}
@@ -32,13 +31,14 @@ use common.render_scene.executor.{execute_scene_to_buffer, select_effect_engine}
 use gc_async_mut.render_scene.engine2d_executor.{execute_scene_to_engine2d,
     execute_scene_to_engine2d_pixels}
 use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
-use std.gc_async_mut.gpu.engine2d.glyph.{glyph_data, glyph_advance}
-use common.text_layout.font_renderer.{FontRenderer, CachedGlyph, ensure_browser_font_face_sources}
-use std.nogc_sync_mut.ffi.spl_fonts.{SubpixelGlyphBitmap}
-use std.nogc_sync_mut.ffi.system.{env_get}
 use std.gc_async_mut.gpu.browser_engine.net.net_delegate.{NetDelegate}
 
 # Imports from extracted modules
+use std.gc_async_mut.gpu.browser_engine.browser_renderer_utils.{
+    browser_renderer_find_char, br_find_str,
+    browser_renderer_split_spaces,
+    br_tag_attr_value, br_merge_style_text,
+    br_style_property_value, br_style_px_or_default}
 use std.gc_async_mut.gpu.browser_engine.render_fixtures.{
     br_is_block_boxes_fixture, br_render_block_boxes_pixels,
     br_is_list_fixture, br_render_list_pixels,
@@ -61,8 +61,6 @@ use std.gc_async_mut.gpu.browser_engine.render_fixtures.{
     br_first_background_argb, br_hex_value, br_parse_rgb_hex6,
     br_fill_rect, br_stroke_rect,
     br_style_background_argb, br_style_color_argb,
-    br_body_background_argb_or_default, br_body_margin_px,
-    br_body_color_argb, br_body_font_size_px, br_combined_body_style,
     br_background_color_value, br_background_shorthand_color_value,
     br_rgba_to_opaque_page_argb}
 use std.gc_async_mut.gpu.browser_engine.style_rule_index.{
@@ -85,8 +83,6 @@ use std.gc_async_mut.gpu.browser_engine.style_rule_index.{
     br_style_block_rule_for_nth_child_self,
     br_style_block_rule_for_multi_class,
     br_style_block_rule_for_selector}
-use std.gc_async_mut.gpu.browser_engine.selector_matcher.{
-    br_tag_name_from_content}
 use std.gc_async_mut.gpu.browser_engine.text_painter.{
     br_draw_font_renderer_text, br_draw_font_renderer_layout_text,
     br_draw_font_renderer_layout_text_for_bg}
@@ -95,7 +91,6 @@ use std.gc_async_mut.gpu.browser_engine.text_painter.{
 # push loop with a single Rust-side `vec![]` (~300x speedup per
 # pixel_verify_browser_glass_runtime_per_call_2026-04-28.md, B2 family).
 extern fn rt_u32_alloc_filled(len: u64, fill: u32) -> [u32]
-extern fn rt_file_read_bytes(path: text) -> [u8]
 
 # =========================================================================
 # Render Result
@@ -564,18 +559,39 @@ fn br_render_simple_block_fallback_pixels(html: text, width: i32, height: i32) -
         val matched_style = br_merge_style_text(br_merge_style_text(br_merge_style_text(br_merge_style_text(br_merge_style_text(br_merge_style_text(br_merge_style_text(br_merge_style_text(br_merge_style_text(br_merge_style_text(br_merge_style_text(br_merge_style_text(br_merge_style_text(br_merge_style_text(br_merge_style_text(br_merge_style_text(br_merge_style_text(br_merge_style_text(br_merge_style_text(universal_style, tag_style), class_style), compound_class_style), multi_class_style), id_style), tag_id_style), body_child_style), descendant_style), ancestor_child_style), adjacent_sibling_style), general_sibling_style), attr_style), empty_style), first_child_style), last_child_style), only_child_style), nth_child_style), has_style), not_style)
         val style = br_merge_style_text(matched_style, inline_style)
         val block_w = br_style_px_or_default(style, "width", width - margin * 2)
-        val text_val = br_div_fallback_text(html, tag_end + 1)
+        var text_val = br_div_fallback_text(html, tag_end + 1)
+        val before_text = br_pseudo_content_text(html, "div", class_value, id_value, "before")
+        val after_text = br_pseudo_content_text(html, "div", class_value, id_value, "after")
+        text_val = before_text + text_val + after_text
         var block_h = br_style_px_or_default(style, "height", 0)
+        val text_style = br_merge_style_text(style, br_first_span_style_before_div_close(html, tag_end + 1, tag_content))
+        val font_size = br_style_px_or_default(text_style, "font-size", br_body_font_size_px(html))
+        val has_ellipsis = br_style_property_value(style, "text-overflow") == "ellipsis"
+        val has_wrap = br_should_wrap_text(style)
+        var line_count = 1
+        if text_val.len() > 0 and has_wrap and not has_ellipsis:
+            val wrapped = br_fallback_wrap_lines(text_val, block_w, font_size)
+            line_count = wrapped.len()
         if block_h <= 0 and text_val.len() > 0:
-            block_h = br_style_px_or_default(style, "font-size", br_body_font_size_px(html)) + 4
+            block_h = (font_size + 4) * line_count
         val block_bg = br_style_background_argb(html, style)
         if block_w > 0 and block_h > 0 and block_bg != 0x00000000u32:
             pixels = br_fill_rect(pixels, width, height, margin, cursor_y, block_w, block_h, block_bg)
         if text_val.len() > 0:
-            val text_style = br_merge_style_text(style, br_first_span_style_before_div_close(html, tag_end + 1, tag_content))
             val text_color = br_style_color_argb(html, text_style, br_body_color_argb(html))
-            val font_size = br_style_px_or_default(text_style, "font-size", br_body_font_size_px(html))
-            pixels = br_draw_font_renderer_text(pixels, width, height, margin, cursor_y, text_val, text_color, font_size)
+            if has_ellipsis:
+                val truncated = br_apply_text_overflow_ellipsis(text_val, block_w, font_size)
+                pixels = br_draw_font_renderer_text(pixels, width, height, margin, cursor_y, truncated, text_color, font_size)
+            else if has_wrap:
+                val lines = br_fallback_wrap_lines(text_val, block_w, font_size)
+                var li = 0
+                while li < lines.len():
+                    val line = lines[li]
+                    val line_y = cursor_y + li * (font_size + 4)
+                    pixels = br_draw_font_renderer_text(pixels, width, height, margin, line_y, line, text_color, font_size)
+                    li = li + 1
+            else:
+                pixels = br_draw_font_renderer_text(pixels, width, height, margin, cursor_y, text_val, text_color, font_size)
         if block_h > 0:
             cursor_y = cursor_y + block_h
         div_index = div_index + 1
@@ -592,6 +608,83 @@ fn br_count_fallback_divs(lower_html: text) -> i32:
         count = count + 1
         search_pos = div_pos + 4
     count
+
+fn br_char_advance_px(font_size: i32) -> i32:
+    if font_size <= 8:
+        return 5
+    8
+
+fn br_strip_css_quoted_string(value: text) -> text:
+    val trimmed = value.trim()
+    if trimmed.len() < 2:
+        return ""
+    val first = trimmed.char_at(0)
+    val last = trimmed.char_at(trimmed.len() - 1)
+    if (first == "\"" and last == "\"") or (first == "'" and last == "'"):
+        return trimmed.slice(1, trimmed.len() - 1)
+    ""
+
+fn br_pseudo_content_text(html: text, tag: text, class_value: text, id_value: text, position: text) -> text:
+    var merged = ""
+    val tag_sel = tag + "::" + position
+    val tag_rule = br_style_block_rule_for_selector(html, tag_sel)
+    if tag_rule.len() > 0:
+        merged = br_merge_style_text(merged, tag_rule)
+    if class_value.len() > 0:
+        val cls_sel = "." + class_value + "::" + position
+        val cls_rule = br_style_block_rule_for_selector(html, cls_sel)
+        if cls_rule.len() > 0:
+            merged = br_merge_style_text(merged, cls_rule)
+        val tc_sel = tag + "." + class_value + "::" + position
+        val tc_rule = br_style_block_rule_for_selector(html, tc_sel)
+        if tc_rule.len() > 0:
+            merged = br_merge_style_text(merged, tc_rule)
+    if id_value.len() > 0:
+        val id_sel = "#" + id_value + "::" + position
+        val id_rule = br_style_block_rule_for_selector(html, id_sel)
+        if id_rule.len() > 0:
+            merged = br_merge_style_text(merged, id_rule)
+    if merged.len() == 0:
+        return ""
+    val content_val = br_style_property_value(merged, "content")
+    if content_val.len() == 0 or content_val == "none":
+        return ""
+    br_strip_css_quoted_string(content_val)
+
+fn br_apply_text_overflow_ellipsis(text_val: text, block_w: i32, font_size: i32) -> text:
+    val adv = br_char_advance_px(font_size)
+    val max_chars = block_w / adv
+    if max_chars <= 3:
+        return "..."
+    if text_val.len() > max_chars:
+        return text_val.slice(0, max_chars - 3) + "..."
+    text_val
+
+fn br_should_wrap_text(style: text) -> bool:
+    val wb = br_style_property_value(style, "word-break")
+    if wb == "break-all":
+        return true
+    val ow = br_style_property_value(style, "overflow-wrap")
+    ow == "break-word"
+
+fn br_fallback_wrap_lines(text_val: text, block_w: i32, font_size: i32) -> [text]:
+    val adv = br_char_advance_px(font_size)
+    if adv <= 0 or block_w <= 0:
+        return [text_val]
+    val chars_per_line = block_w / adv
+    if chars_per_line <= 0:
+        return [text_val]
+    if text_val.len() <= chars_per_line:
+        return [text_val]
+    var lines: [text] = []
+    var pos: i64 = 0
+    while pos < text_val.len():
+        var end = pos + chars_per_line
+        if end > text_val.len():
+            end = text_val.len()
+        lines.push(text_val.slice(pos, end))
+        pos = end
+    lines
 
 fn br_body_background_argb_or_default(html: text, fallback: u32) -> u32:
     val body_style = br_combined_body_style(html)
@@ -616,13 +709,6 @@ fn br_body_font_size_px(html: text) -> i32:
 fn br_combined_body_style(html: text) -> text:
     br_merge_style_text(br_style_block_rule_for_tag(html, "body"), br_first_tag_attr_value(html, "body", "style"))
 
-fn br_merge_style_text(base_style: text, override_style: text) -> text:
-    if base_style.len() == 0:
-        return override_style
-    if override_style.len() == 0:
-        return base_style
-    base_style + ";" + override_style
-
 # =========================================================================
 # HTML attribute / style parsing helpers
 # =========================================================================
@@ -636,169 +722,6 @@ fn br_first_tag_attr_value(html: text, tag: text, attr: text) -> text:
     if tag_end >= 999999999:
         return ""
     br_tag_attr_value(html.slice(pos + 1, tag_end), attr)
-
-fn br_tag_attr_value(tag_content: text, attr: text) -> text:
-    val parts = browser_renderer_split_tag_parts(tag_content)
-    var idx = 1
-    while idx < parts.len():
-        val part = parts[idx]
-        val eq_pos = browser_renderer_find_char(part, "=", 0)
-        if eq_pos > 0:
-            val key = part.slice(0, eq_pos).trim().lower()
-            var value = part.slice(eq_pos + 1, part.len()).trim()
-            if value.starts_with("\"") and value.ends_with("\""):
-                value = value.slice(1, value.len() - 1)
-            elif value.starts_with("'") and value.ends_with("'"):
-                value = value.slice(1, value.len() - 1)
-            if key == attr:
-                return value
-        idx = idx + 1
-    ""
-
-fn br_tag_has_attr(tag_content: text, attr: text) -> bool:
-    val parts = browser_renderer_split_tag_parts(tag_content)
-    var idx = 1
-    while idx < parts.len():
-        val part = parts[idx]
-        val eq_pos = browser_renderer_find_char(part, "=", 0)
-        var key = part.trim().lower()
-        if eq_pos > 0:
-            key = part.slice(0, eq_pos).trim().lower()
-        if key == attr:
-            return true
-        idx = idx + 1
-    false
-
-fn br_unquote_attr_value(value: text) -> text:
-    if value.len() >= 2:
-        if (value.starts_with("\"") and value.ends_with("\"")) or (value.starts_with("'") and value.ends_with("'")):
-            return value.slice(1, value.len() - 1)
-    value
-
-fn br_find_custom_property_in_all_styles(html: text, name: text) -> text:
-    val lower_html = html.lower()
-    var search_pos: i64 = 0
-    while search_pos < html.len():
-        val style_pos = br_find_str(lower_html, "<style", search_pos)
-        if style_pos >= 999999999:
-            break
-        val style_open_end = browser_renderer_find_char(html, ">", style_pos)
-        if style_open_end >= 999999999:
-            break
-        val style_close = br_find_str(lower_html, "</style", style_open_end + 1)
-        if style_close >= 999999999:
-            break
-        val css = html.slice(style_open_end + 1, style_close)
-        var rule_start: i64 = 0
-        while rule_start < css.len():
-            val open = browser_renderer_find_char(css, "{", rule_start)
-            if open >= 999999999:
-                break
-            val close = browser_renderer_find_char(css, "}", open + 1)
-            if close >= 999999999:
-                break
-            val body = css.slice(open + 1, close).trim()
-            val found = br_style_property_value(body, name)
-            if found.len() > 0:
-                return found
-            rule_start = close + 1
-        search_pos = style_close + 1
-    ""
-
-fn br_resolve_css_var(html: text, value: text) -> text:
-    br_resolve_css_var_with_style(html, value, "")
-
-fn br_resolve_css_var_with_style(html: text, value: text, style: text) -> text:
-    val trimmed = value.trim()
-    val lower = trimmed.lower()
-    if not lower.starts_with("var("):
-        return trimmed
-    val open = browser_renderer_find_char(trimmed, "(", 0)
-    if open >= 999999999:
-        return trimmed
-    val close = br_find_matching_paren(trimmed, open)
-    if close >= 999999999:
-        return trimmed
-    val raw_args = trimmed.slice(open + 1, close).trim()
-    val fallback_comma = browser_renderer_find_char(raw_args, ",", 0)
-    var name = raw_args
-    var fallback_value = ""
-    if fallback_comma < 999999999:
-        name = raw_args.slice(0, fallback_comma).trim()
-        fallback_value = raw_args.slice(fallback_comma + 1, raw_args.len()).trim()
-    if style.len() > 0:
-        val from_style = br_style_property_value(style, name)
-        if from_style.len() > 0:
-            return from_style
-    val root_style = br_style_block_rule_for_selector(html, ":root")
-    val resolved = br_style_property_value(root_style, name)
-    if resolved.len() > 0:
-        return resolved
-    val from_all = br_find_custom_property_in_all_styles(html, name)
-    if from_all.len() > 0:
-        return from_all
-    if fallback_value.len() > 0:
-        return br_resolve_css_var_with_style(html, fallback_value, style)
-    trimmed
-
-fn br_style_px_or_default(style: text, prop: text, fallback: i32) -> i32:
-    val value = br_style_property_value(style, prop)
-    if value.len() == 0:
-        return fallback
-    br_parse_px_i32(value, fallback)
-
-fn br_style_property_value(style: text, prop: text) -> text:
-    val declarations = browser_renderer_split_semicolons(style)
-    var idx = declarations.len() - 1
-    while idx >= 0:
-        val decl = declarations[idx]
-        val colon = browser_renderer_find_char(decl, ":", 0)
-        if colon > 0:
-            val key = decl.slice(0, colon).trim().lower()
-            if key == prop:
-                return decl.slice(colon + 1, decl.len()).trim()
-        idx = idx - 1
-    ""
-
-fn br_parse_px_i32(value: text, fallback: i32) -> i32:
-    val lower = value.trim().lower()
-    if lower.starts_with("calc("):
-        return br_parse_calc_px_i32(lower, fallback)
-    var numeric = ""
-    var idx = 0
-    while idx < lower.len():
-        val ch = lower.char_at(idx)
-        if (ch >= "0" and ch <= "9") or ch == "-":
-            numeric = numeric + ch
-        elif ch == ".":
-            return if numeric.len() > 0: numeric.to_i32() else: fallback
-        elif numeric.len() > 0:
-            return numeric.to_i32()
-        idx = idx + 1
-    if numeric.len() > 0:
-        return numeric.to_i32()
-    fallback
-
-fn br_parse_calc_px_i32(value: text, fallback: i32) -> i32:
-    val open = browser_renderer_find_char(value, "(", 0)
-    val close = browser_renderer_find_char(value, ")", open + 1)
-    if open >= 999999999 or close >= 999999999:
-        return fallback
-    val expr = value.slice(open + 1, close).trim()
-    var op = "+"
-    var op_pos = browser_renderer_find_char(expr, "+", 0)
-    if op_pos >= 999999999:
-        op = "-"
-        op_pos = browser_renderer_find_char(expr, "-", 1)
-    if op_pos >= 999999999:
-        return br_parse_px_i32(expr, fallback)
-    val left = br_parse_px_i32(expr.slice(0, op_pos).trim(), 999999999)
-    val right = br_parse_px_i32(expr.slice(op_pos + 1, expr.len()).trim(), 999999999)
-    if left >= 999999999 or right >= 999999999:
-        return fallback
-    if op == "-":
-        return left - right
-    left + right
 
 fn br_div_direct_text(html: text, content_start: i64) -> text:
     val lower = html.lower()
@@ -920,20 +843,6 @@ fn _find_body_bg_color(node: BeDomNode) -> u32:
             return bg
     return 0x00000000
 
-fn br_find_matching_paren(s: text, open_pos: i64) -> i64:
-    var depth = 1
-    var i = open_pos + 1
-    while i < s.len():
-        val ch = s.char_at(i)
-        if ch == "(":
-            depth = depth + 1
-        elif ch == ")":
-            depth = depth - 1
-            if depth == 0:
-                return i
-        i = i + 1
-    999999999
-
 # =========================================================================
 # Widget -> DOM conversion
 # =========================================================================
@@ -1044,606 +953,12 @@ pub fn render_html_to_pixels_with_viewport(html: text, width: i32, height: i32) 
     val renderer = BrowserRenderer.create(width, height)
     renderer.render_html_to_pixels(br_normalize_style_blocks_in_html(html))
 
-# =========================================================================
-# Legacy HTML string parser
-# =========================================================================
-
-fn br_stack_pop_and_add(stack: [BeDomNode]) -> [BeDomNode]:
-    """Pop last element from stack, add it as child to new top. Returns new stack."""
-    if stack.len() <= 1:
-        return stack
-    val completed = stack[stack.len() - 1]
-    var next_stack = stack.slice(0, stack.len() - 1)
-    if next_stack.len() > 0:
-        var new_parent = next_stack[next_stack.len() - 1]
-        br_append_child(new_parent, completed)
-        next_stack[next_stack.len() - 1] = new_parent
-    next_stack
-
-fn br_append_child(parent: BeDomNode, child: BeDomNode):
-    var kids = be_dom_get_children(parent)
-    kids.push(child)
-    parent.children = kids
-
-fn browser_renderer_html_string_to_dom(html: text) -> BeDomNode:
-    var root = BeDomNode.element("div")
-    root.id = "html-root"
-    val raw_html = html
-    var stack: [BeDomNode] = [root]
-    var pos = 0
-    val len = html.len()
-    while pos < len:
-        val ch = html.char_at(pos)
-        if ch == "<":
-            var is_comment = false
-            if pos + 3 < len:
-                val comment_prefix = html.slice(pos, pos + 4)
-                if comment_prefix == "<!--":
-                    val comment_end = br_find_str(html, "-->", pos + 4)
-                    if comment_end < 999999999:
-                        pos = comment_end + 3
-                    else:
-                        pos = len
-                    is_comment = true
-            if is_comment:
-                continue
-            val tag_end = browser_renderer_find_char(html, ">", pos)
-            if tag_end >= 999999999:
-                val remaining = html.slice(pos, len)
-                val txt = BeDomNode.text(remaining)
-                if stack.len() > 0:
-                    var parent = stack[stack.len() - 1]
-                    br_append_child(parent, txt)
-                    stack[stack.len() - 1] = parent
-                break
-            val tag_content = html.slice(pos + 1, tag_end)
-            if tag_content.starts_with("!DOCTYPE") or tag_content.starts_with("!doctype"):
-                pos = tag_end + 1
-                continue
-            if tag_content.starts_with("/"):
-                val (next_pos, next_stack) = br_handle_close_tag_and_pop(tag_content, tag_end, stack)
-                pos = next_pos
-                stack = next_stack
-            else:
-                val (next_pos, next_stack) = br_handle_open_tag(tag_content, html, tag_end, len, stack)
-                pos = next_pos
-                stack = next_stack
-        else:
-            val (next_pos, next_stack) = br_handle_text(html, pos, len, stack)
-            pos = next_pos
-            stack = next_stack
-    while stack.len() > 1:
-        br_stack_pop_and_add(stack)
-    var result = root
-    if stack.len() > 0:
-        result = stack[0]
-    br_apply_ua_defaults(result)
-    br_materialize_font_faces_if_requested(raw_html)
-    result = process_style_blocks_result(result, raw_html)
-    result
-
-fn br_materialize_font_faces_if_requested(html: text):
-    if env_get("SIMPLE_BROWSER_AUTO_DOWNLOAD_FONTS") != "1":
-        return
-    ensure_browser_font_face_sources(html, true)
-
-fn br_handle_close_tag_and_pop(tag_content: text, tag_end: i64, stack: [BeDomNode]) -> (i64, [BeDomNode]):
-    val close_raw = tag_content.slice(1, tag_content.len())
-    val close_trimmed = close_raw.trim()
-    val close_tag = close_trimmed.lower()
-    if close_tag == "html" or close_tag == "head" or close_tag == "body" or close_tag == "style":
-        return (tag_end + 1, stack)
-    if stack.len() > 1:
-        val completed = stack[stack.len() - 1]
-        stack = stack.slice(0, stack.len() - 1)
-        var new_parent = stack[stack.len() - 1]
-        br_append_child(new_parent, completed)
-        stack[stack.len() - 1] = new_parent
-    return (tag_end + 1, stack)
-
-fn br_handle_open_tag(tag_content: text, html: text, tag_end: i64, len: i64, stack: [BeDomNode]) -> (i64, [BeDomNode]):
-    val is_self_closing = tag_content.ends_with("/")
-    var clean_content = tag_content.trim()
-    if is_self_closing:
-        val trimmed_sc = tag_content.slice(0, tag_content.len() - 1)
-        clean_content = trimmed_sc.trim()
-    var new_node = browser_renderer_parse_tag(clean_content)
-    val raw_tag = be_dom_get_tag(new_node)
-    val tag_lower = raw_tag.lower()
-    if tag_lower == "html" or tag_lower == "head" or tag_lower == "title" or tag_lower == "link" or tag_lower == "meta" or tag_lower == "script":
-        if tag_lower == "title" or tag_lower == "script":
-            val close_needle = "</{tag_lower}"
-            val html_lc = html.lower()
-            val close_pos = br_find_str(html_lc, close_needle, tag_end + 1)
-            if close_pos < 999999999:
-                val close_end = browser_renderer_find_char(html, ">", close_pos)
-                if close_end < 999999999:
-                    return (close_end + 1, stack)
-                return (close_pos + 8, stack)
-            return (tag_end + 1, stack)
-        return (tag_end + 1, stack)
-    if tag_lower == "body":
-        if stack.len() > 0:
-            var root_node = stack[0]
-            val body_parts = browser_renderer_split_tag_parts(clean_content)
-            var bi = 1
-            while bi < body_parts.len():
-                val bpart = body_parts[bi]
-                val beq = browser_renderer_find_char(bpart, "=", 0)
-                if beq > 0:
-                    val bkey = bpart.slice(0, beq)
-                    var bval = bpart.slice(beq + 1, bpart.len())
-                    if bval.starts_with("\"") and bval.ends_with("\""):
-                        bval = bval.slice(1, bval.len() - 1)
-                    elif bval.starts_with("'") and bval.ends_with("'"):
-                        bval = bval.slice(1, bval.len() - 1)
-                    if bkey == "style":
-                        browser_renderer_apply_inline_style(root_node, bval)
-                bi = bi + 1
-            root_node.tag = "body"
-            stack[0] = root_node
-        return (tag_end + 1, stack)
-    if tag_lower == "style":
-        val html_lower = html.lower()
-        val style_close = br_find_str(html_lower, "</style", tag_end + 1)
-        if style_close < 999999999:
-            val style_tag_end = browser_renderer_find_char(html, ">", style_close)
-            if style_tag_end < 999999999:
-                return (style_tag_end + 1, stack)
-            return (style_close + 8, stack)
-        return (len, stack)
-    val node_tag_for_void = be_dom_get_tag(new_node)
-    if is_self_closing or browser_renderer_is_void_element(node_tag_for_void):
-        if stack.len() > 0:
-            var parent_v = stack[stack.len() - 1]
-            br_append_child(parent_v, new_node)
-            stack[stack.len() - 1] = parent_v
-        return (tag_end + 1, stack)
-    return (tag_end + 1, stack + [new_node])
-
-fn br_handle_text(html: text, pos: i64, len: i64, stack: [BeDomNode]) -> (i64, [BeDomNode]):
-    val text_end = browser_renderer_find_char(html, "<", pos)
-    val end_pos = if text_end >= 999999999: len else: text_end
-    val text_raw = html.slice(pos, end_pos)
-    val text_content = text_raw.trim()
-    if text_content.len() > 0:
-        val txt = BeDomNode.text(text_content)
-        if stack.len() > 0:
-            var parent = stack[stack.len() - 1]
-            br_append_child(parent, txt)
-            stack[stack.len() - 1] = parent
-    return (end_pos, stack)
-
-fn browser_renderer_parse_tag(content: text) -> BeDomNode:
-    val parts = browser_renderer_split_tag_parts(content)
-    if parts.len() == 0:
-        return BeDomNode.element("div")
-    val tag_name = parts[0]
-    var node = BeDomNode.element(tag_name)
-    var i = 1
-    while i < parts.len():
-        val part = parts[i]
-        val eq_pos = browser_renderer_find_char(part, "=", 0)
-        if eq_pos > 0:
-            val key = part.slice(0, eq_pos)
-            var value = part.slice(eq_pos + 1, part.len())
-            if value.starts_with("\"") and value.ends_with("\""):
-                value = value.slice(1, value.len() - 1)
-            elif value.starts_with("'") and value.ends_with("'"):
-                value = value.slice(1, value.len() - 1)
-            if key == "id":
-                node.id = value
-            elif key == "class":
-                node.classes = browser_renderer_split_spaces(value)
-            elif key == "style":
-                browser_renderer_apply_inline_style(node, value)
-            else:
-                node.set_attr(key, value)
-        i = i + 1
-    node
-
-fn browser_renderer_split_tag_parts(s: text) -> [text]:
-    var parts: [text] = []
-    var in_quote = false
-    var quote_char = ""
-    var segment_start = -1
-    var idx_1 = 0
-    val len = s.len()
-    while idx_1 < len:
-        val ch = s.char_at(idx_1)
-        if in_quote:
-            if ch == quote_char:
-                in_quote = false
-        elif ch == "\"" or ch == "'":
-            if segment_start < 0:
-                segment_start = idx_1
-            in_quote = true
-            quote_char = ch
-        else:
-            val is_whitespace = ch == " " or ch == "\t" or ch == "\n" or ch == "\r"
-            if is_whitespace:
-                if segment_start >= 0:
-                    parts.push(s.slice(segment_start, idx_1))
-                    segment_start = -1
-            elif segment_start < 0:
-                segment_start = idx_1
-        idx_1 = idx_1 + 1
-    if segment_start >= 0:
-        parts.push(s.slice(segment_start, len))
-    parts
-
-fn browser_renderer_split_spaces(s: text) -> [text]:
-    var parts: [text] = []
-    var segment_start = -1
-    var idx_2 = 0
-    val len = s.len()
-    while idx_2 < len:
-        val ch = s.char_at(idx_2)
-        val is_whitespace = ch == " " or ch == "\t" or ch == "\n" or ch == "\r"
-        if is_whitespace:
-            if segment_start >= 0:
-                parts.push(s.slice(segment_start, idx_2))
-                segment_start = -1
-        elif segment_start < 0:
-            segment_start = idx_2
-        idx_2 = idx_2 + 1
-    if segment_start >= 0:
-        parts.push(s.slice(segment_start, len))
-    parts
-
-fn browser_renderer_apply_inline_style(node: BeDomNode, style_str: text):
-    val declarations = browser_renderer_split_semicolons(style_str)
-    var decl_idx = 0
-    while decl_idx < declarations.len():
-        val decl = declarations[decl_idx]
-        decl_idx = decl_idx + 1
-        val colon_pos = browser_renderer_find_char(decl, ":", 0)
-        if colon_pos > 0:
-            val prop_raw = decl.slice(0, colon_pos)
-            val prop = prop_raw.trim()
-            if prop == "color":
-                val value_raw = decl.slice(colon_pos + 1, decl.len())
-                val value = value_raw.trim()
-                node.set_style(prop, value)
-    decl_idx = 0
-    while decl_idx < declarations.len():
-        val decl = declarations[decl_idx]
-        decl_idx = decl_idx + 1
-        val colon_pos = browser_renderer_find_char(decl, ":", 0)
-        if colon_pos > 0:
-            val prop_raw = decl.slice(0, colon_pos)
-            val prop = prop_raw.trim()
-            if prop != "color":
-                val value_raw = decl.slice(colon_pos + 1, decl.len())
-                val value = value_raw.trim()
-                node.set_style(prop, value)
-
-fn browser_renderer_split_semicolons(s: text) -> [text]:
-    var parts: [text] = []
-    var segment_start = 0
-    var idx_3 = 0
-    val len = s.len()
-    while idx_3 < len:
-        val ch = s.char_at(idx_3)
-        if ch == ";":
-            val raw = s.slice(segment_start, idx_3)
-            val trimmed = raw.trim()
-            if trimmed.len() > 0:
-                parts.push(trimmed)
-            segment_start = idx_3 + 1
-        idx_3 = idx_3 + 1
-    val tail = s.slice(segment_start, len)
-    val tail_trimmed = tail.trim()
-    if tail_trimmed.len() > 0:
-        parts.push(tail_trimmed)
-    parts
-
-fn browser_renderer_find_char(s: text, target: text, start: i64) -> i64:
-    var i = start
-    val slen = s.len()
-    while i < slen:
-        val c = s.char_at(i)
-        if c == target:
-            return i
-        i = i + 1
-    999999999
-
-fn browser_renderer_is_void_element(tag: text) -> bool:
-    match tag:
-        "br" => true
-        "hr" => true
-        "img" => true
-        "input" => true
-        "meta" => true
-        "link" => true
-        _ => false
-
-fn br_find_str(s: text, needle: text, start: i64) -> i64:
-    """Find substring in s starting at start. Returns 999999999 if not found."""
-    val nlen = needle.len()
-    var i = start
-    val slen = s.len()
-    while i + nlen <= slen:
-        var matches = true
-        var j = 0
-        while j < nlen:
-            if s.char_at(i + j) != needle.char_at(j):
-                matches = false
-                break
-            j = j + 1
-        if matches:
-            return i
-        i = i + 1
-    999999999
-
-# =========================================================================
-# Style normalization
-# =========================================================================
-
-fn br_flatten_supports_blocks(css_text: text) -> text:
-    val lower = css_text.lower()
-    var out = ""
-    var pos: i64 = 0
-    while pos < css_text.len():
-        val sup_pos = br_find_str(lower, "@supports", pos)
-        if sup_pos >= 999999999:
-            out = out + css_text.slice(pos, css_text.len())
-            break
-        out = out + css_text.slice(pos, sup_pos)
-        val open = browser_renderer_find_char(css_text, "{", sup_pos + 9)
-        if open >= 999999999:
-            out = out + css_text.slice(sup_pos, css_text.len())
-            break
-        val condition = css_text.slice(sup_pos + 9, open).trim()
-        val close = br_find_matching_brace(css_text, open)
-        if close >= 999999999:
-            out = out + css_text.slice(sup_pos, css_text.len())
-            break
-        if eval_supports_query(condition):
-            val inner = css_text.slice(open + 1, close).trim()
-            if inner.len() > 0:
-                out = out + "\n" + inner + "\n"
-        pos = close + 1
-    out
-
-fn br_flatten_layer_blocks(css_text: text) -> text:
-    """Expose simple @layer wrappers and bounded nesting to flat rule scans."""
-    val lower = css_text.lower()
-    var out = ""
-    var pos: i64 = 0
-    while pos < css_text.len():
-        val layer_pos = br_find_str(lower, "@layer", pos)
-        if layer_pos >= 999999999:
-            out = out + css_text.slice(pos, css_text.len())
-            break
-        out = out + css_text.slice(pos, layer_pos)
-        val open = browser_renderer_find_char(css_text, "{", layer_pos)
-        if open >= 999999999:
-            out = out + css_text.slice(layer_pos, css_text.len())
-            break
-        val close = br_find_matching_brace(css_text, open)
-        if close >= 999999999:
-            out = out + css_text.slice(layer_pos, css_text.len())
-            break
-        val inner = css_text.slice(open + 1, close).trim()
-        if inner.len() > 0:
-            out = out + "\n" + inner + "\n"
-        pos = close + 1
-    br_flatten_simple_nested_rules(out)
-
-pub fn browser_renderer_normalize_style_rules(css_text: text) -> text:
-    br_flatten_supports_blocks(br_flatten_layer_blocks(css_text))
-
-pub fn browser_renderer_normalize_style_blocks(html: text) -> text:
-    br_normalize_style_blocks_in_html(html)
-
-fn br_normalize_style_blocks_in_html(html: text) -> text:
-    val lower = html.lower()
-    var out = ""
-    var pos: i64 = 0
-    while pos < html.len():
-        val style_pos = br_find_str(lower, "<style", pos)
-        if style_pos >= 999999999:
-            out = out + html.slice(pos, html.len())
-            break
-        val style_open_end = browser_renderer_find_char(html, ">", style_pos)
-        if style_open_end >= 999999999:
-            out = out + html.slice(pos, html.len())
-            break
-        val style_close = br_find_str(lower, "</style", style_open_end + 1)
-        if style_close >= 999999999:
-            out = out + html.slice(pos, html.len())
-            break
-        out = out + html.slice(pos, style_open_end + 1)
-        out = out + br_flatten_layer_blocks(html.slice(style_open_end + 1, style_close))
-        pos = style_close
-    out
-
-fn br_html_style_contains_parent_nesting(html: text) -> bool:
-    val lower = html.lower()
-    var pos: i64 = 0
-    while pos < html.len():
-        val style_pos = br_find_str(lower, "<style", pos)
-        if style_pos >= 999999999:
-            return false
-        val style_open_end = browser_renderer_find_char(html, ">", style_pos)
-        if style_open_end >= 999999999:
-            return false
-        val style_close = br_find_str(lower, "</style", style_open_end + 1)
-        if style_close >= 999999999:
-            return false
-        if html.slice(style_open_end + 1, style_close).contains("&"):
-            return true
-        pos = style_close + 1
-    false
-
-fn br_flatten_simple_nested_rules(css_text: text) -> text:
-    var out = ""
-    var pos: i64 = 0
-    while pos < css_text.len():
-        val open = browser_renderer_find_char(css_text, "{", pos)
-        if open >= 999999999:
-            out = out + css_text.slice(pos, css_text.len())
-            break
-        val close = br_find_matching_brace(css_text, open)
-        if close >= 999999999:
-            out = out + css_text.slice(pos, css_text.len())
-            break
-        val selector = css_text.slice(pos, open).trim()
-        val body = css_text.slice(open + 1, close)
-        if selector.len() > 0 and not selector.starts_with("@") and body.contains("&"):
-            out = out + br_flatten_one_nested_rule(selector, body)
-        else:
-            out = out + css_text.slice(pos, close + 1)
-        pos = close + 1
-    out
-
-fn br_flatten_one_nested_rule(selector: text, body: text) -> text:
-    var direct_body = ""
-    var nested_rules = ""
-    var pos: i64 = 0
-    while pos < body.len():
-        val open = browser_renderer_find_char(body, "{", pos)
-        if open >= 999999999:
-            direct_body = direct_body + body.slice(pos, body.len())
-            break
-        val nested_start = br_last_nested_selector_start(body, pos, open)
-        val close = br_find_matching_brace(body, open)
-        if close >= 999999999:
-            direct_body = direct_body + body.slice(pos, body.len())
-            break
-        val nested_selector = body.slice(nested_start, open).trim()
-        val nested_body = body.slice(open + 1, close).trim()
-        val combined = br_combine_nested_selector(selector, nested_selector)
-        direct_body = direct_body + body.slice(pos, nested_start)
-        if combined.len() > 0 and nested_body.len() > 0:
-            nested_rules = nested_rules + "\n" + combined + " " + 123.chr() + " " + nested_body + " " + 125.chr() + "\n"
-        pos = close + 1
-    val direct = direct_body.trim()
-    var out = ""
-    if direct.len() > 0:
-        out = selector + " " + 123.chr() + " " + direct + " " + 125.chr() + "\n"
-    out + nested_rules
-
-fn br_last_nested_selector_start(body: text, start: i64, nested_open: i64) -> i64:
-    var pos = nested_open - 1
-    while pos >= start:
-        val ch = body.char_at(pos)
-        if ch == ";" or ch == "}":
-            return pos + 1
-        pos = pos - 1
-    start
-
-fn br_combine_nested_selector(parent: text, nested_selector: text) -> text:
-    val nested = nested_selector.trim()
-    if nested.len() == 0 or nested.starts_with("@") or not nested.contains("&"):
-        return ""
-    nested.replace("&", parent.trim()).trim()
-
-fn br_find_matching_brace(text_val: text, open: i64) -> i64:
-    var depth = 0
-    var pos = open
-    while pos < text_val.len():
-        val ch = text_val.char_at(pos)
-        if ch == "{":
-            depth = depth + 1
-        elif ch == "}":
-            depth = depth - 1
-            if depth == 0:
-                return pos
-        pos = pos + 1
-    999999999
-
-# =========================================================================
-# UA Defaults
-# =========================================================================
-
-fn br_apply_ua_defaults(node: BeDomNode):
-    """Apply user-agent default styles to common HTML elements."""
-    if be_dom_get_is_text(node):
-        return
-    val tag = be_dom_get_tag(node)
-    if tag == "body":
-        node.set_style("margin", "8px")
-    elif tag == "p":
-        node.set_style("display", "block")
-        node.set_style("margin-top", "16px")
-        node.set_style("margin-bottom", "16px")
-    elif tag == "h1":
-        node.set_style("display", "block")
-        node.set_style("font-size", "32px")
-        node.set_style("font-weight", "bold")
-        node.set_style("margin-top", "21px")
-        node.set_style("margin-bottom", "21px")
-    elif tag == "h2":
-        node.set_style("display", "block")
-        node.set_style("font-size", "24px")
-        node.set_style("font-weight", "bold")
-        node.set_style("margin-top", "19px")
-        node.set_style("margin-bottom", "19px")
-    elif tag == "h3":
-        node.set_style("display", "block")
-        node.set_style("font-size", "19px")
-        node.set_style("font-weight", "bold")
-    elif tag == "h4":
-        node.set_style("display", "block")
-        node.set_style("font-size", "16px")
-        node.set_style("font-weight", "bold")
-    elif tag == "h5":
-        node.set_style("display", "block")
-        node.set_style("font-size", "13px")
-        node.set_style("font-weight", "bold")
-    elif tag == "h6":
-        node.set_style("display", "block")
-        node.set_style("font-size", "11px")
-        node.set_style("font-weight", "bold")
-    elif tag == "ul" or tag == "ol":
-        node.set_style("display", "block")
-        node.set_style("padding-left", "40px")
-        node.set_style("margin-top", "16px")
-        node.set_style("margin-bottom", "16px")
-    elif tag == "li":
-        node.set_style("display", "block")
-    elif tag == "dl":
-        node.set_style("display", "block")
-        node.set_style("margin-top", "16px")
-        node.set_style("margin-bottom", "16px")
-    elif tag == "dt":
-        node.set_style("display", "block")
-    elif tag == "dd":
-        node.set_style("display", "block")
-        node.set_style("margin-left", "40px")
-    elif tag == "span" or tag == "a" or tag == "em" or tag == "strong" or tag == "b" or tag == "i":
-        node.set_style("display", "inline")
-    elif tag == "blockquote":
-        node.set_style("display", "block")
-        node.set_style("margin", "16px")
-        node.set_style("margin-left", "40px")
-    elif tag == "pre":
-        node.set_style("display", "block")
-    elif tag == "table":
-        node.set_style("display", "block")
-    elif tag == "form":
-        node.set_style("display", "block")
-    elif tag == "section" or tag == "article" or tag == "nav" or tag == "aside" or tag == "header" or tag == "footer" or tag == "main":
-        node.set_style("display", "block")
-
-    val ua_kids = be_dom_get_children(node)
-    var ua_idx = 0
-    while ua_idx < ua_kids.len():
-        val child = ua_kids[ua_idx]
-        ua_idx = ua_idx + 1
-        br_apply_ua_defaults(child)
-
-# =========================================================================
-# M14: WHATWG parser toggle (AD-4)
-# =========================================================================
-
-use std.gc_async_mut.gpu.browser_engine.html_tree_builder.{html_tree_builder_build}
-
-pub fn browser_renderer_parse_html(html: text, use_legacy: bool) -> BeDomNode:
-    """Parse HTML using either the new WHATWG parser or the legacy string-scan parser.
-    Set use_legacy=true or env SIMPLE_BROWSER_LEGACY_PARSER=1 to use the old parser."""
-    if use_legacy:
-        return browser_renderer_html_string_to_dom(html)
-    html_tree_builder_build(html)
+# Imported from html_string_parser
+use std.gc_async_mut.gpu.browser_engine.html_string_parser.{
+    browser_renderer_html_string_to_dom,
+    browser_renderer_normalize_style_rules,
+    browser_renderer_normalize_style_blocks,
+    br_normalize_style_blocks_in_html,
+    br_html_style_contains_parent_nesting,
+    browser_renderer_parse_html,
+    br_materialize_font_faces_if_requested}
