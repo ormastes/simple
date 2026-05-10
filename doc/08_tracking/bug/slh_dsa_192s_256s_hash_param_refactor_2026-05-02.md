@@ -13,10 +13,12 @@ green** — see `test/unit/lib/crypto/sha512_extern_dispatch_spec.spl`
 description. This bug captures the exact surface so the next attempt
 can land it cleanly.
 
-**Reviewed 2026-05-08:** Status confirmed open/blocked. No partial fix applied —
-Option A (sibling files) or Option B (tag-dispatched generic) must be chosen and
-implemented as a dedicated wave. The 128s code is correct; only additive work
-is needed for 192s/256s support.
+**Resolved 2026-05-10:** Option B (tag-dispatch) implemented. All SLH-DSA internal
+functions now have parameterized `_p` variants accepting `(n: u64, hash_id: i64)`.
+Existing `_128s` functions are thin wrappers. New public API added:
+`slh_dsa_192s_{keygen,sign,verify}` and `slh_dsa_256s_{keygen,sign,verify}`.
+`sha512_hmac` added to `src/os/crypto/sha512.spl` for 192s/256s PRF_msg.
+KAT specs for 192s/256s deferred to follow-up wave.
 
 ## Problem
 
