@@ -29,19 +29,6 @@ The `m{}` math block supports torch-compatible tensor operations for numerical c
 The `m{}` math block supports torch-compatible tensor operations for numerical computing.
 Each math block is a self-contained DSL expression that returns a Block value.
 
-## Evidence
-
-| Category | Count |
-|----------|------:|
-| Artifacts | 2 |
-
-### Artifacts
-
-| Item | Kind | Path |
-|------|------|------|
-| `result.json` | JSON artifact | `build/test-artifacts/feature/usage/math_blocks/result.json` |
-| `summary.txt` | Text artifact | `build/test-artifacts/feature/usage/math_blocks/summary.txt` |
-
 ## Scenarios
 
 - evaluates addition

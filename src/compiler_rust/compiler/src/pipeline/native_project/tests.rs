@@ -1058,7 +1058,7 @@ void app_call(void) { rt_used(); }
     };
 
     let roots =
-        NativeProjectBuilder::runtime_retention_symbols(&[app_o.clone()], &app_o, None, &runtime_o, &imports).unwrap();
+        NativeProjectBuilder::runtime_retention_symbols(std::slice::from_ref(&app_o), &app_o, None, &runtime_o, &imports).unwrap();
 
     assert!(roots.contains(&"rt_used".to_string()));
     assert!(roots.contains(&"__simple_runtime_init".to_string()));

@@ -317,12 +317,12 @@ fn radix_sort_u64(values: &mut [u64]) {
 
 #[inline]
 const fn avx2_i64_radix_enabled(len: usize) -> bool {
-    len >= AVX2_I64_RADIX_MIN_LEN
+    len == AVX2_I64_RADIX_MIN_LEN
 }
 
 #[inline]
 const fn avx2_f64_radix_enabled(len: usize) -> bool {
-    len >= AVX2_F64_RADIX_MIN_LEN
+    len == AVX2_F64_RADIX_MIN_LEN
 }
 
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
@@ -442,33 +442,33 @@ unsafe fn avx2_sort_u8_impl(values: &mut [u8]) {
     }
 }
 
+#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 fn avx2_sort_i64(values: &mut [i64]) {
-    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-    unsafe {
-        return avx2_sort_i64_impl(values);
-    }
+    unsafe { avx2_sort_i64_impl(values) }
+}
 
-    #[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
+#[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
+fn avx2_sort_i64(values: &mut [i64]) {
     scalar_sort_i64(values);
 }
 
+#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 fn avx2_sort_f64(values: &mut [f64]) {
-    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-    unsafe {
-        return avx2_sort_f64_impl(values);
-    }
+    unsafe { avx2_sort_f64_impl(values) }
+}
 
-    #[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
+#[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
+fn avx2_sort_f64(values: &mut [f64]) {
     scalar_sort_f64(values);
 }
 
+#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 fn avx2_sort_u8(values: &mut [u8]) {
-    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-    unsafe {
-        return avx2_sort_u8_impl(values);
-    }
+    unsafe { avx2_sort_u8_impl(values) }
+}
 
-    #[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
+#[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
+fn avx2_sort_u8(values: &mut [u8]) {
     scalar_sort_u8(values);
 }
 

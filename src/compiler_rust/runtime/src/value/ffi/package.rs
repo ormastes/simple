@@ -74,7 +74,7 @@ pub unsafe extern "C" fn rt_package_create_tarball(source_dir: *const c_char, ou
         let _ = source_dir;
         let _ = output_path;
         package_compression_unavailable("rt_package_create_tarball");
-        return -1;
+        -1
     }
 
     #[cfg(feature = "packaging-compression")]
@@ -137,7 +137,7 @@ pub unsafe extern "C" fn rt_package_extract_tarball(tarball_path: *const c_char,
         let _ = tarball_path;
         let _ = dest_dir;
         package_compression_unavailable("rt_package_extract_tarball");
-        return -1;
+        -1
     }
 
     #[cfg(feature = "packaging-compression")]

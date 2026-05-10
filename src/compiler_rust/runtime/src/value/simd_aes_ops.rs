@@ -286,9 +286,9 @@ const VEC16U8_STRUCT_SIZE: u64 = 16 * VEC16U8_FIELD_STRIDE as u64;
 fn unpack_vec16u8_flat(v: RuntimeValue) -> [u8; 16] {
     let ptr = v.to_raw() as *const u8;
     let mut lanes = [0_u8; 16];
-    for i in 0..16 {
+    for (i, lane) in lanes.iter_mut().enumerate() {
         let field_val = unsafe { (ptr.add(i * VEC16U8_FIELD_STRIDE) as *const i64).read_unaligned() };
-        lanes[i] = field_val as u8;
+        *lane = field_val as u8;
     }
     lanes
 }
@@ -304,9 +304,9 @@ fn unpack_vec16u8_flat(v: RuntimeValue) -> [u8; 16] {
 /// tagging), corrupting the pointer.
 fn pack_vec16u8_flat(lanes: [u8; 16]) -> RuntimeValue {
     let ptr = rt_alloc(VEC16U8_STRUCT_SIZE);
-    for i in 0..16 {
+    for (i, &lane) in lanes.iter().enumerate() {
         unsafe {
-            (ptr.add(i * VEC16U8_FIELD_STRIDE) as *mut i64).write_unaligned(lanes[i] as i64);
+            (ptr.add(i * VEC16U8_FIELD_STRIDE) as *mut i64).write_unaligned(lane as i64);
         }
     }
     RuntimeValue::from_raw(ptr as u64)

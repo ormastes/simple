@@ -1,6 +1,7 @@
 //! Runtime profiler tests
 
 #[cfg(test)]
+#[allow(clippy::module_inception)]
 mod tests {
     use super::super::*;
     use crate::hir::LayoutPhase;

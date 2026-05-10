@@ -54,6 +54,7 @@ where
 // =============================================================================
 
 #[no_mangle]
+#[allow(clippy::needless_return)]
 pub extern "C" fn rt_simd_has_sse() -> bool {
     #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
     {

@@ -86,6 +86,11 @@ pub(crate) fn effective_target() -> simple_common::target::Target {
         .unwrap_or_else(simple_common::target::Target::host)
 }
 
+/// Grouped duplicate struct definitions: bare type name → list of field-lists.
+type DuplicateStructDefs = std::sync::Arc<std::collections::HashMap<String, Vec<Vec<(String, String)>>>>;
+/// Enum definitions: enum name → list of (variant name, optional payload arity).
+type EnumDefs = std::sync::Arc<std::collections::HashMap<String, Vec<(String, Option<usize>)>>>;
+
 /// Cross-module import resolution data shared across compilation units.
 ///
 /// Groups the four `Arc`-wrapped maps that are always passed together during
@@ -106,7 +111,7 @@ pub(crate) struct ModuleImports {
     /// Duplicate global struct/class definitions grouped by bare type name.
     /// Used only for bounded field-name disambiguation when `struct_defs`
     /// lost information due to same-name collisions across modules.
-    pub duplicate_struct_defs: std::sync::Arc<std::collections::HashMap<String, Vec<Vec<(String, String)>>>>,
+    pub duplicate_struct_defs: DuplicateStructDefs,
     /// Global enum definitions: enum_name -> [(variant_name, payload_arity)].
     /// Shared across all compilation units. The HIR lowerer consumes this in
     /// `compile_file_to_object` to eagerly seed `module.types.name_to_id` and
@@ -115,7 +120,7 @@ pub(crate) struct ModuleImports {
     /// `expr/access.rs::lower_field_access` was emitting `Global(EnumName)`
     /// with `ty=ANY` because the enum reached the file via re-export but
     /// not via a direct `use` chain that triggered `preregister_imported_type_names`).
-    pub enum_defs: std::sync::Arc<std::collections::HashMap<String, Vec<(String, Option<usize>)>>>,
+    pub enum_defs: EnumDefs,
     /// Set of mangled names that correspond to module-level data (`val`/`var`/
     /// `const`/`static`) rather than functions. Consulted by the cranelift
     /// backend so cross-module imported data constants are declared as

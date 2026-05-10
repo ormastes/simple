@@ -683,7 +683,7 @@ impl CompilerPipeline {
         }
     }
 
-    fn rewrite_hir_simd_stmts(&self, types: &hir::TypeRegistry, stmts: &mut Vec<HirStmt>) {
+    fn rewrite_hir_simd_stmts(&self, types: &hir::TypeRegistry, stmts: &mut [HirStmt]) {
         for stmt in stmts.iter_mut() {
             match stmt {
                 HirStmt::For {
