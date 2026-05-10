@@ -1,0 +1,153 @@
+# Split Tree
+#
+# Array-based binary split tree for editor pane layout.
+# Each node is either a leaf (holds a group_id) or a split
+# (holds direction, ratio, and two child node indices).
+
+val SPLIT_VERTICAL: i64 = 0
+val SPLIT_HORIZONTAL: i64 = 1
+val NODE_LEAF: i64 = 0
+val NODE_SPLIT: i64 = 1
+
+struct SplitNode:
+    kind: i64
+    group_id: i64
+    direction: i64
+    ratio: i64
+    left_id: i64
+    right_id: i64
+
+fn split_node_leaf(group_id: i64) -> SplitNode:
+    SplitNode(kind: NODE_LEAF, group_id: group_id, direction: 0, ratio: 50, left_id: -1, right_id: -1)
+
+fn split_node_split(direction: i64, ratio: i64, left_id: i64, right_id: i64) -> SplitNode:
+    SplitNode(kind: NODE_SPLIT, group_id: 0, direction: direction, ratio: ratio, left_id: left_id, right_id: right_id)
+
+class SplitTree:
+    nodes: [SplitNode]
+    root_id: i64
+
+impl SplitTree:
+
+    static fn new(group_id: i64) -> SplitTree:
+        SplitTree(nodes: [split_node_leaf(group_id)], root_id: 0)
+
+    fn leaf_count() -> i64:
+        var count = 0
+        var i = 0
+        while i < self.nodes.len():
+            if self.nodes[i].kind == NODE_LEAF:
+                count = count + 1
+            i = i + 1
+        count
+
+    fn find_leaf(group_id: i64) -> i64:
+        var i = 0
+        while i < self.nodes.len():
+            if self.nodes[i].kind == NODE_LEAF and self.nodes[i].group_id == group_id:
+                return i
+            i = i + 1
+        -1
+
+    fn flatten() -> [i64]:
+        var result: [i64] = []
+        _split_tree_flatten_node(self.nodes, self.root_id, result)
+        result
+
+    me split(target_group_id: i64, direction: i64, new_group_id: i64):
+        val leaf_idx = self.find_leaf(target_group_id)
+        if leaf_idx < 0:
+            return
+        val left_leaf = split_node_leaf(target_group_id)
+        val right_leaf = split_node_leaf(new_group_id)
+        val left_id = self.nodes.len()
+        self.nodes.push(left_leaf)
+        val right_id = self.nodes.len()
+        self.nodes.push(right_leaf)
+        self.nodes[leaf_idx] = split_node_split(direction, 50, left_id, right_id)
+
+    me close_leaf(group_id: i64):
+        if self.leaf_count() <= 1:
+            return
+        val leaf_idx = self.find_leaf(group_id)
+        if leaf_idx < 0:
+            return
+        val parent_idx = self._find_parent(leaf_idx)
+        if parent_idx < 0:
+            return
+        val parent = self.nodes[parent_idx]
+        val sibling_idx = if parent.left_id == leaf_idx then parent.right_id else: parent.left_id
+        val sibling = self.nodes[sibling_idx]
+        self.nodes[parent_idx] = SplitNode(
+            kind: sibling.kind,
+            group_id: sibling.group_id,
+            direction: sibling.direction,
+            ratio: sibling.ratio,
+            left_id: sibling.left_id,
+            right_id: sibling.right_id
+        )
+
+    me resize(group_id: i64, delta: i64):
+        val leaf_idx = self.find_leaf(group_id)
+        if leaf_idx < 0:
+            return
+        val parent_idx = self._find_parent(leaf_idx)
+        if parent_idx < 0:
+            return
+        val parent = self.nodes[parent_idx]
+        var new_ratio = parent.ratio + delta
+        if new_ratio < 10:
+            new_ratio = 10
+        if new_ratio > 90:
+            new_ratio = 90
+        self.nodes[parent_idx] = SplitNode(
+            kind: parent.kind,
+            group_id: parent.group_id,
+            direction: parent.direction,
+            ratio: new_ratio,
+            left_id: parent.left_id,
+            right_id: parent.right_id
+        )
+
+    me swap(group_id_a: i64, group_id_b: i64):
+        val idx_a = self.find_leaf(group_id_a)
+        val idx_b = self.find_leaf(group_id_b)
+        if idx_a < 0 or idx_b < 0:
+            return
+        self.nodes[idx_a] = split_node_leaf(group_id_b)
+        self.nodes[idx_b] = split_node_leaf(group_id_a)
+
+    me equalize():
+        var i = 0
+        while i < self.nodes.len():
+            if self.nodes[i].kind == NODE_SPLIT:
+                val n = self.nodes[i]
+                self.nodes[i] = SplitNode(
+                    kind: n.kind,
+                    group_id: n.group_id,
+                    direction: n.direction,
+                    ratio: 50,
+                    left_id: n.left_id,
+                    right_id: n.right_id
+                )
+            i = i + 1
+
+    fn _find_parent(child_idx: i64) -> i64:
+        var i = 0
+        while i < self.nodes.len():
+            val node = self.nodes[i]
+            if node.kind == NODE_SPLIT:
+                if node.left_id == child_idx or node.right_id == child_idx:
+                    return i
+            i = i + 1
+        -1
+
+fn _split_tree_flatten_node(nodes: [SplitNode], node_id: i64, result: [i64]):
+    if node_id < 0 or node_id >= nodes.len():
+        return
+    val node = nodes[node_id]
+    if node.kind == NODE_LEAF:
+        result.push(node.group_id)
+        return
+    _split_tree_flatten_node(nodes, node.left_id, result)
+    _split_tree_flatten_node(nodes, node.right_id, result)

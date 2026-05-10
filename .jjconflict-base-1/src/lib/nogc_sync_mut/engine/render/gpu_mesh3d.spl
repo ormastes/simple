@@ -1,0 +1,87 @@
+# GPU Mesh Upload and Draw Dispatch
+#
+# Provides GpuMeshHandle and helpers to upload vertex/index data to the GPU
+# and dispatch indexed draw calls through RenderBackend3D.
+
+use std.nogc_sync_mut.engine.render.backend3d.{
+    RenderBackend3D, BufferHandle, RenderPassHandle, PipelineHandle
+}
+
+# ============================================================================
+# GpuMeshHandle — opaque handles to vertex and index buffers on the GPU
+# ============================================================================
+
+class GpuMeshHandle:
+    vbuf: BufferHandle
+    ibuf: BufferHandle
+    index_count: i64
+
+    static fn invalid() -> GpuMeshHandle:
+        GpuMeshHandle(
+            vbuf: BufferHandle.invalid(),
+            ibuf: BufferHandle.invalid(),
+            index_count: 0
+        )
+
+# ============================================================================
+# gpu_mesh_upload — allocate and upload vertex + index buffers
+#
+# vertices: flat f32 array (x, y, z, nx, ny, nz, u, v per vertex — 8 floats)
+# indices:  flat i64 array of triangle indices
+#
+# Byte conversion: Simple has no f32→[u8] primitive.  We allocate a zero-filled
+# [u8] of the required size and pass it to the backend.  Real float serialization
+# must be wired once the runtime provides an rt_f32_to_bytes or equivalent.
+# TODO: replace placeholder zeroed byte buffers with real float serialization
+# ============================================================================
+
+fn gpu_mesh_upload(backend: RenderBackend3D, vertices: [f32], indices: [i64]) -> GpuMeshHandle:
+    # Each f32 is 4 bytes; each i64 index is 4 bytes (GPU i32 index buffer)
+    val vbyte_count = vertices.len() * 4
+    val ibyte_count = indices.len() * 4
+
+    val vbuf = backend.create_vertex_buffer(vbyte_count)
+    val ibuf = backend.create_index_buffer(ibyte_count)
+
+    # TODO: real float serialization — build zeroed placeholder bytes for now
+    var vbytes: [u8] = []
+    var vi = 0
+    while vi < vbyte_count:
+        vbytes.push(0)
+        vi = vi + 1
+
+    var ibytes: [u8] = []
+    var ii = 0
+    while ii < ibyte_count:
+        ibytes.push(0)
+        ii = ii + 1
+
+    backend.upload_buffer(vbuf, vbytes, 0)
+    backend.upload_buffer(ibuf, ibytes, 0)
+
+    GpuMeshHandle(
+        vbuf: vbuf,
+        ibuf: ibuf,
+        index_count: indices.len()
+    )
+
+# ============================================================================
+# gpu_mesh_draw — bind buffers and issue an indexed draw call
+#
+# Binds vertex buffer at slot 0, index buffer, MVP uniform at slot 0,
+# then draws all indices.
+# ============================================================================
+
+fn gpu_mesh_draw(backend: RenderBackend3D, rph: RenderPassHandle, mesh: GpuMeshHandle, mvp_buf: BufferHandle, pipeline: PipelineHandle):
+    backend.set_pipeline(rph, pipeline)
+    backend.bind_vertex_buffer(rph, mesh.vbuf, 0)
+    backend.bind_index_buffer(rph, mesh.ibuf)
+    backend.bind_uniform_buffer(rph, mvp_buf, 0)
+    backend.draw_indexed(rph, mesh.index_count, 0)
+
+# ============================================================================
+# gpu_mesh_free — invalidate handles (GPU-side cleanup is backend-managed)
+# ============================================================================
+
+fn gpu_mesh_free(handle: GpuMeshHandle) -> GpuMeshHandle:
+    GpuMeshHandle.invalid()

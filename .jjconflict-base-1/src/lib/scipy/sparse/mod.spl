@@ -1,0 +1,88 @@
+use std.ndarray.*
+
+struct CooMatrix:
+    shape: Shape
+    row_indices: [Index]
+    col_indices: [Index]
+    values: [Float64]
+
+    fn nnz(self) -> Index:
+        Index.new(self.values.len())
+
+    fn to_dense(self) -> Result<NDArray, NdarrayError>:
+        coo_to_dense(self)
+
+    fn matvec(self, vector: NDArray) -> Result<NDArray, NdarrayError>:
+        coo_matvec(self, vector)
+
+fn coo_from_dense(values: NDArray) -> Result<CooMatrix, NdarrayError>:
+    if values.dtype != DType.F64:
+        return Err(NdarrayError.UnsupportedDType)
+    if values.shape.dims.len() != 2:
+        return Err(NdarrayError.InvalidShape)
+    var row_indices: [Index] = []
+    var col_indices: [Index] = []
+    var out_values: [Float64] = []
+    var row = 0
+    while row < values.rows().value:
+        var col = 0
+        while col < values.cols().value:
+            val current = values.get_f64_at([Index.new(row), Index.new(col)])
+            if current.value != 0.0:
+                row_indices.push(Index.new(row))
+                col_indices.push(Index.new(col))
+                out_values.push(current)
+            col = col + 1
+        row = row + 1
+    Ok(CooMatrix(shape: values.shape, row_indices: row_indices, col_indices: col_indices, values: out_values))
+
+fn coo_to_dense(matrix: CooMatrix) -> Result<NDArray, NdarrayError>:
+    if matrix.shape.dims.len() != 2:
+        return Err(NdarrayError.InvalidShape)
+    if matrix.row_indices.len() != matrix.col_indices.len() or matrix.row_indices.len() != matrix.values.len():
+        return Err(NdarrayError.ShapeMismatch)
+    val rows = matrix.shape.dims[0].value
+    val cols = matrix.shape.dims[1].value
+    var out: [Float64] = []
+    var i = 0
+    while i < rows * cols:
+        out.push(Float64.new(0.0))
+        i = i + 1
+    i = 0
+    while i < matrix.values.len():
+        val row = matrix.row_indices[i].value
+        val col = matrix.col_indices[i].value
+        if row < 0 or row >= rows or col < 0 or col >= cols:
+            return Err(NdarrayError.IndexOutOfBounds)
+        val offset = row * cols + col
+        out[offset] = Float64.new(out[offset].value + matrix.values[i].value)
+        i = i + 1
+    Ok(array(out).reshape(matrix.shape))
+
+fn coo_matvec(matrix: CooMatrix, vector: NDArray) -> Result<NDArray, NdarrayError>:
+    if matrix.shape.dims.len() != 2:
+        return Err(NdarrayError.InvalidShape)
+    if matrix.row_indices.len() != matrix.col_indices.len() or matrix.row_indices.len() != matrix.values.len():
+        return Err(NdarrayError.ShapeMismatch)
+    if vector.dtype != DType.F64:
+        return Err(NdarrayError.UnsupportedDType)
+    if vector.shape.dims.len() != 1:
+        return Err(NdarrayError.InvalidShape)
+    val rows = matrix.shape.dims[0].value
+    val cols = matrix.shape.dims[1].value
+    if vector.len().value != cols:
+        return Err(NdarrayError.ShapeMismatch)
+    var out: [Float64] = []
+    var i = 0
+    while i < rows:
+        out.push(Float64.new(0.0))
+        i = i + 1
+    i = 0
+    while i < matrix.values.len():
+        val row = matrix.row_indices[i].value
+        val col = matrix.col_indices[i].value
+        if row < 0 or row >= rows or col < 0 or col >= cols:
+            return Err(NdarrayError.IndexOutOfBounds)
+        out[row] = Float64.new(out[row].value + matrix.values[i].value * vector.flat_f64(col).value)
+        i = i + 1
+    Ok(array(out))

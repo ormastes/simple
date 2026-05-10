@@ -1,0 +1,221 @@
+# SkRegion — integer-coordinate, YX-banded multi-rectangle region.
+#
+# Mirrors Skia's SkRegion. Internally stored as a sorted list of non-overlapping
+# integer rects (banded by Y). Used for complex clips where a single SkRect is
+# insufficient (e.g. window occlusion, scroll clip-path cutouts).
+#
+# Operations: set, union, intersect, difference, contains(point), intersects(rect).
+
+use std.skia.entity.geometry.{SkIRect, sk_irect}
+
+# ============================================================================
+# SkRegion
+# ============================================================================
+
+class SkRegion:
+    rects: [SkIRect]
+
+fn sk_region_empty() -> SkRegion:
+    SkRegion(rects: [])
+
+fn sk_region_from_rect(r: SkIRect) -> SkRegion:
+    if r.left >= r.right or r.top >= r.bottom:
+        return SkRegion(rects: [])
+    SkRegion(rects: [r])
+
+# ============================================================================
+# Private helpers
+# ============================================================================
+
+fn _i64_min(a: i64, b: i64) -> i64:
+    if a < b:
+        return a
+    b
+
+fn _i64_max(a: i64, b: i64) -> i64:
+    if a > b:
+        return a
+    b
+
+fn _rect_is_empty(r: SkIRect) -> bool:
+    r.left >= r.right or r.top >= r.bottom
+
+fn _rect_equals(a: SkIRect, b: SkIRect) -> bool:
+    a.left == b.left and a.top == b.top and a.right == b.right and a.bottom == b.bottom
+
+fn _rect_intersects_ir(a: SkIRect, b: SkIRect) -> bool:
+    a.left < b.right and a.right > b.left and a.top < b.bottom and a.bottom > b.top
+
+fn _rect_contains_point(r: SkIRect, x: i64, y: i64) -> bool:
+    x >= r.left and x < r.right and y >= r.top and y < r.bottom
+
+# Intersection of two integer rects. Returns None if disjoint or empty.
+fn _rect_intersect(a: SkIRect, b: SkIRect) -> SkIRect?:
+    val l = _i64_max(a.left, b.left)
+    val t = _i64_max(a.top, b.top)
+    val r = _i64_min(a.right, b.right)
+    val bt = _i64_min(a.bottom, b.bottom)
+    if l >= r or t >= bt:
+        return None
+    Some(sk_irect(l, t, r, bt))
+
+# "a minus b" — returns up to 4 residual rects (top, bottom, left, right bands).
+# If b fully covers a, returns []. If b is disjoint from a, returns [a].
+fn _rect_diff(a: SkIRect, b: SkIRect) -> [SkIRect]:
+    if _rect_is_empty(a):
+        return []
+    if not _rect_intersects_ir(a, b):
+        return [a]
+    # Compute clipped b inside a so bands align.
+    val bl = _i64_max(a.left, b.left)
+    val bt = _i64_max(a.top, b.top)
+    val br = _i64_min(a.right, b.right)
+    val bb = _i64_min(a.bottom, b.bottom)
+    val out: [SkIRect] = []
+    # Top band: from a.top to bt, full width of a.
+    if a.top < bt:
+        out.append(sk_irect(a.left, a.top, a.right, bt))
+    # Bottom band: from bb to a.bottom, full width of a.
+    if bb < a.bottom:
+        out.append(sk_irect(a.left, bb, a.right, a.bottom))
+    # Left band: from a.left to bl, height between bt and bb.
+    if a.left < bl and bt < bb:
+        out.append(sk_irect(a.left, bt, bl, bb))
+    # Right band: from br to a.right, height between bt and bb.
+    if br < a.right and bt < bb:
+        out.append(sk_irect(br, bt, a.right, bb))
+    out
+
+# Simple O(N^2) coalesce: drop empty rects and remove exact duplicates.
+# Does NOT attempt full Skia YX-banding optimization.
+fn _coalesce(rects: [SkIRect]) -> [SkIRect]:
+    val out: [SkIRect] = []
+    val n = rects.len()
+    var i = 0
+    while i < n:
+        val r = rects[i]
+        if not _rect_is_empty(r):
+            var j = 0
+            var dup = false
+            val m = out.len()
+            while j < m:
+                if _rect_equals(out[j], r):
+                    dup = true
+                    break
+                j = j + 1
+            if not dup:
+                out.append(r)
+        i = i + 1
+    out
+
+# ============================================================================
+# SkRegion methods
+# ============================================================================
+
+impl SkRegion:
+    fn is_empty() -> bool:
+        self.rects.len() == 0
+
+    fn is_rect() -> bool:
+        self.rects.len() == 1
+
+    fn bounds() -> SkIRect:
+        val n = self.rects.len()
+        if n == 0:
+            return sk_irect(0, 0, 0, 0)
+        val first = self.rects[0]
+        var l = first.left
+        var t = first.top
+        var r = first.right
+        var b = first.bottom
+        var i = 1
+        while i < n:
+            val cur = self.rects[i]
+            l = _i64_min(l, cur.left)
+            t = _i64_min(t, cur.top)
+            r = _i64_max(r, cur.right)
+            b = _i64_max(b, cur.bottom)
+            i = i + 1
+        sk_irect(l, t, r, b)
+
+    fn contains(x: i64, y: i64) -> bool:
+        val n = self.rects.len()
+        var i = 0
+        while i < n:
+            if _rect_contains_point(self.rects[i], x, y):
+                return true
+            i = i + 1
+        false
+
+    fn intersects_rect(r: SkIRect) -> bool:
+        val n = self.rects.len()
+        var i = 0
+        while i < n:
+            if _rect_intersects_ir(self.rects[i], r):
+                return true
+            i = i + 1
+        false
+
+    fn set_rect(r: SkIRect):
+        if _rect_is_empty(r):
+            self.rects = []
+        else:
+            self.rects = [r]
+
+    fn op_union(other: SkRegion) -> SkRegion:
+        val combined: [SkIRect] = []
+        var i = 0
+        val n1 = self.rects.len()
+        while i < n1:
+            combined.append(self.rects[i])
+            i = i + 1
+        var j = 0
+        val n2 = other.rects.len()
+        while j < n2:
+            combined.append(other.rects[j])
+            j = j + 1
+        SkRegion(rects: _coalesce(combined))
+
+    fn op_intersect(other: SkRegion) -> SkRegion:
+        val out: [SkIRect] = []
+        var i = 0
+        val n1 = self.rects.len()
+        while i < n1:
+            var j = 0
+            val n2 = other.rects.len()
+            while j < n2:
+                val maybe = _rect_intersect(self.rects[i], other.rects[j])
+                match maybe:
+                    Some(r):
+                        out.append(r)
+                    None:
+                        pass_do_nothing
+                j = j + 1
+            i = i + 1
+        SkRegion(rects: _coalesce(out))
+
+    fn op_difference(other: SkRegion) -> SkRegion:
+        var current: [SkIRect] = []
+        var i = 0
+        val n1 = self.rects.len()
+        while i < n1:
+            current.append(self.rects[i])
+            i = i + 1
+        var k = 0
+        val nk = other.rects.len()
+        while k < nk:
+            val sub = other.rects[k]
+            val next_list: [SkIRect] = []
+            var m = 0
+            val nm = current.len()
+            while m < nm:
+                val pieces = _rect_diff(current[m], sub)
+                var p = 0
+                val np = pieces.len()
+                while p < np:
+                    next_list.append(pieces[p])
+                    p = p + 1
+                m = m + 1
+            current = next_list
+            k = k + 1
+        SkRegion(rects: _coalesce(current))

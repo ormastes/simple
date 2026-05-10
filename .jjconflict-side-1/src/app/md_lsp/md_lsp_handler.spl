@@ -1,17 +1,13 @@
 # Request handler/dispatcher for the Simple language markdown LSP server.
 #
 # Dispatches LSP requests and builds JSON responses using hand-built JSON
-# (same pattern as lsp_transport.spl and json_helpers.spl).
+# (same pattern as json_helpers.spl / lsp_transport.spl).
 
 use std.common.markdown
-use std.lib.editor.services.lsp_transport.{
-    _lsp_find_field, _lsp_extract_string, _lsp_extract_number,
-    _lsp_extract_value, lsp_uri_to_path, _lsp_transport_escape
-}
 use .md_lsp_workspace.{MdWorkspace, MdDocument}
 
 # ---------------------------------------------------------------------------
-# JSON building primitives (inline — no external dependency needed)
+# JSON building helpers (inline, identical pattern to json_helpers.spl)
 # ---------------------------------------------------------------------------
 
 fn _q() -> text:
@@ -44,6 +40,113 @@ fn _jp(key: text, value: text) -> text:
     _q() + key + _q() + ":" + value
 
 # ---------------------------------------------------------------------------
+# JSON field extraction helpers
+# (mirrors _lsp_find_field / _lsp_extract_* from lsp_transport.spl)
+# ---------------------------------------------------------------------------
+
+fn _mh_char_at(s: text, i: i64) -> text:
+    s.char_at(i)
+
+fn _mh_is_ws(ch: text) -> bool:
+    ch == " " or ch == "\n" or ch == "\r" or ch == "\t"
+
+fn _lsp_find_field(json: text, field: text) -> i64:
+    var i = 0
+    while i < json.len():
+        if json.slice(i, json.len()).starts_with(field):
+            var j = i + field.len()
+            while j < json.len() and (_mh_char_at(json, j) == " " or _mh_char_at(json, j) == ":"):
+                j = j + 1
+            return j
+        i = i + 1
+    -1
+
+fn _lsp_extract_number(json: text, start: i64) -> i64:
+    var num_str = ""
+    var i = start
+    while i < json.len():
+        val ch = _mh_char_at(json, i)
+        if ch == "0" or ch == "1" or ch == "2" or ch == "3" or ch == "4" or ch == "5" or ch == "6" or ch == "7" or ch == "8" or ch == "9":
+            num_str = num_str + ch
+        else:
+            break
+        i = i + 1
+    num_str.to_i64() ?? -1
+
+fn _lsp_extract_string(json: text, start: i64) -> text:
+    if start >= json.len() or _mh_char_at(json, start) != "\"":
+        return ""
+    var result = ""
+    var i = start + 1
+    while i < json.len():
+        val ch = _mh_char_at(json, i)
+        if ch == "\"":
+            return result
+        if ch == "\\":
+            i = i + 1
+            if i < json.len():
+                val next = _mh_char_at(json, i)
+                if next == "n":
+                    result = result + "\n"
+                elif next == "r":
+                    result = result + "\r"
+                elif next == "t":
+                    result = result + "\t"
+                else:
+                    result = result + next
+        else:
+            result = result + ch
+        i = i + 1
+    result
+
+fn _lsp_extract_balanced(json: text, start: i64, open_ch: text) -> text:
+    val close_ch = if open_ch == "{" then "}" else "]"
+    var depth = 0
+    var i = start
+    var in_str = false
+    while i < json.len():
+        val ch = _mh_char_at(json, i)
+        if in_str:
+            if ch == "\\":
+                i = i + 1
+            elif ch == "\"":
+                in_str = false
+        else:
+            if ch == "\"":
+                in_str = true
+            elif ch == open_ch:
+                depth = depth + 1
+            elif ch == close_ch:
+                depth = depth - 1
+                if depth == 0:
+                    return json.slice(start, i + 1)
+        i = i + 1
+    json.slice(start, json.len())
+
+fn _lsp_extract_value(json: text, start: i64) -> text:
+    if start >= json.len():
+        return ""
+    val ch = _mh_char_at(json, start)
+    if ch == "{" or ch == "[":
+        return _lsp_extract_balanced(json, start, ch)
+    if ch == "\"":
+        return "\"" + _lsp_extract_string(json, start) + "\""
+    var result = ""
+    var i = start
+    while i < json.len():
+        val c = _mh_char_at(json, i)
+        if c == "," or c == "}" or c == "]":
+            return result.trim()
+        result = result + c
+        i = i + 1
+    result.trim()
+
+fn lsp_uri_to_path(uri: text) -> text:
+    if uri.starts_with("file://"):
+        return uri.slice(7, uri.len())
+    uri
+
+# ---------------------------------------------------------------------------
 # Response builders
 # ---------------------------------------------------------------------------
 
@@ -55,18 +158,18 @@ fn _md_lsp_error_response(req_id: i64, code: i64, message: text) -> text:
     "{" + _jp("jsonrpc", _js("2.0")) + "," + _jp("id", str(req_id)) + "," + _jp("error", err) + "}"
 
 # ---------------------------------------------------------------------------
-# JSON field extraction helpers (wrappers around lsp_transport helpers)
+# Params extraction helpers
 # ---------------------------------------------------------------------------
 
 fn _md_lsp_extract_uri(params_json: text) -> text:
-    # Try textDocument.uri path: find "textDocument" object then "uri" inside it
+    # Try textDocument.uri
     val td_start = _lsp_find_field(params_json, "\"textDocument\"")
     if td_start >= 0:
         val td_obj = _lsp_extract_value(params_json, td_start)
         val uri_start = _lsp_find_field(td_obj, "\"uri\"")
         if uri_start >= 0:
             return _lsp_extract_string(td_obj, uri_start)
-    # Fallback: direct "uri" field
+    # Fallback: direct "uri"
     val uri_start2 = _lsp_find_field(params_json, "\"uri\"")
     if uri_start2 >= 0:
         return _lsp_extract_string(params_json, uri_start2)
@@ -84,7 +187,6 @@ fn _md_lsp_extract_position(params_json: text) -> (i64, i64):
     (line_num, char_num)
 
 fn _md_lsp_extract_version(params_json: text) -> i64:
-    # Try textDocument.version first
     val td_start = _lsp_find_field(params_json, "\"textDocument\"")
     if td_start >= 0:
         val td_obj = _lsp_extract_value(params_json, td_start)
@@ -104,7 +206,7 @@ fn _md_lsp_extract_content(params_json: text) -> text:
         val text_start = _lsp_find_field(td_obj, "\"text\"")
         if text_start >= 0:
             return _lsp_extract_string(td_obj, text_start)
-    # didChange: contentChanges[0].text — find first "text" in contentChanges
+    # didChange: contentChanges[0].text
     val cc_start = _lsp_find_field(params_json, "\"contentChanges\"")
     if cc_start >= 0:
         val cc_arr = _lsp_extract_value(params_json, cc_start)
@@ -114,7 +216,7 @@ fn _md_lsp_extract_content(params_json: text) -> text:
     ""
 
 # ---------------------------------------------------------------------------
-# Line utilities
+# Line utility
 # ---------------------------------------------------------------------------
 
 fn _md_lsp_get_line(content: text, line_num: i64) -> text:
@@ -128,10 +230,10 @@ fn _md_lsp_get_line(content: text, line_num: i64) -> text:
 # ---------------------------------------------------------------------------
 
 fn md_lsp_initialize(req_id: i64) -> text:
+    val trigger_chars = "[" + _js("[") + "," + _js("#") + "," + _js("(") + "]"
+    val completion_provider = "{" + _jp("triggerCharacters", trigger_chars) + "}"
     var caps = "{"
-    # completionProvider
-    var trigger_chars = "[" + _js("[") + "," + _js("#") + "," + _js("(") + "]"
-    caps = caps + _jp("completionProvider", "{" + _jp("triggerCharacters", trigger_chars) + "}")
+    caps = caps + _jp("completionProvider", completion_provider)
     caps = caps + "," + _jp("hoverProvider", "true")
     caps = caps + "," + _jp("definitionProvider", "true")
     caps = caps + "," + _jp("documentSymbolProvider", "true")
@@ -157,8 +259,8 @@ fn md_lsp_completion(params_json: text, req_id: i64, workspace: MdWorkspace) -> 
     var items = "["
     var first = true
 
-    # Heading reference completion: line contains "#" before cursor
     if prefix.contains("#"):
+        # Heading reference completion
         val headings = doc.headings
         var i = 0
         val count = headings.length()
@@ -173,9 +275,8 @@ fn md_lsp_completion(params_json: text, req_id: i64, workspace: MdWorkspace) -> 
             items = items + item
             first = false
             i = i + 1
-
-    # Wikilink completion: line contains "[[" before cursor
     elif prefix.contains("[["):
+        # Wikilink completion — list open document URIs
         val all_uris = workspace.all_uris()
         var i = 0
         val count = all_uris.length()
@@ -188,17 +289,15 @@ fn md_lsp_completion(params_json: text, req_id: i64, workspace: MdWorkspace) -> 
             items = items + item
             first = false
             i = i + 1
-
-    # Link anchor completion: line contains "](" before cursor
     elif prefix.contains("]("):
+        # Link anchor completion — heading slugs
         val headings = doc.headings
         var i = 0
         val count = headings.length()
         while i < count:
             val heading = headings.get(i)
             val heading_text = heading.1
-            val slug = slugify(heading_text)
-            val anchor = "#" + slug
+            val anchor = "#" + slugify(heading_text)
             val item = "{" + _jp("label", _js(anchor)) + "," + _jp("kind", "15") + "," + _jp("detail", _js(heading_text)) + "}"
             if not first:
                 items = items + ","
@@ -223,8 +322,8 @@ fn md_lsp_hover(params_json: text, req_id: i64, workspace: MdWorkspace) -> text:
 
     var hover_text = ""
 
-    # Check if cursor is on a heading line
     if line.starts_with("#"):
+        # Heading line: report level
         var level = 0
         var i = 0
         while i < line.len() and line.char_at(i) == "#":
@@ -232,10 +331,10 @@ fn md_lsp_hover(params_json: text, req_id: i64, workspace: MdWorkspace) -> text:
             i = i + 1
         hover_text = "Heading level " + str(level)
     elif line.contains("]("):
-        # Extract URL from link [text](url)
-        val paren_pos = line.index_of("](") ?? -1
-        if paren_pos >= 0:
-            var url_start = paren_pos + 2
+        # Link: extract URL from [text](url)
+        val paren_idx = line.index_of("](") ?? -1
+        if paren_idx >= 0:
+            var url_start = paren_idx + 2
             var url_end = url_start
             while url_end < line.len() and line.char_at(url_end) != ")":
                 url_end = url_end + 1
@@ -256,16 +355,13 @@ fn md_lsp_definition(params_json: text, req_id: i64, workspace: MdWorkspace) -> 
     val uri = _md_lsp_extract_uri(params_json)
     val pos = _md_lsp_extract_position(params_json)
     val line_num = pos.0
-    val char_num = pos.1
     val doc = workspace.get_document(uri)
     val line = _md_lsp_get_line(doc.content, line_num)
 
-    # Look for [text](#anchor) pattern — extract anchor
-    val hash_in_link = line.contains("](#")
-    if not hash_in_link:
+    # Only handle [text](#anchor) links
+    if not line.contains("](#"):
         return _md_lsp_ok_response(req_id, "null")
 
-    # Find "#" position inside link
     val hash_pos = line.index_of("](#") ?? -1
     if hash_pos < 0:
         return _md_lsp_ok_response(req_id, "null")
@@ -276,36 +372,24 @@ fn md_lsp_definition(params_json: text, req_id: i64, workspace: MdWorkspace) -> 
         anchor_end = anchor_end + 1
     val anchor = line.substring(anchor_start, anchor_end)
 
-    # Find the heading with matching slug
-    val headings = doc.headings
-    val lines = split_lines(doc.content)
+    # Find the line number of the heading whose slug matches
+    val doc_lines = split_lines(doc.content)
     var found_line: i64 = -1
-    var i = 0
-    val count = headings.length()
-    while i < count:
-        val heading = headings.get(i)
-        val heading_text = heading.1
-        val slug = slugify(heading_text)
-        if slug == anchor:
-            # Find the actual line number of this heading in the document
-            var j = 0
-            val line_count = lines.length()
-            while j < line_count:
-                val l = lines.get(j)
-                if l.starts_with("#"):
-                    # Extract heading text from the line
-                    var k = 0
-                    while k < l.len() and l.char_at(k) == "#":
-                        k = k + 1
-                    while k < l.len() and l.char_at(k) == " ":
-                        k = k + 1
-                    val line_heading_text = l.substring(k, l.len())
-                    if slugify(line_heading_text) == anchor:
-                        found_line = j
-                        j = line_count
-                j = j + 1
-            i = count
-        i = i + 1
+    var j = 0
+    val line_count = doc_lines.length()
+    while j < line_count:
+        val l = doc_lines.get(j)
+        if l.starts_with("#"):
+            var k = 0
+            while k < l.len() and l.char_at(k) == "#":
+                k = k + 1
+            while k < l.len() and l.char_at(k) == " ":
+                k = k + 1
+            val heading_text = l.substring(k, l.len())
+            if slugify(heading_text) == anchor:
+                found_line = j
+                j = line_count
+        j = j + 1
 
     if found_line < 0:
         return _md_lsp_ok_response(req_id, "null")
@@ -323,20 +407,14 @@ fn md_lsp_definition(params_json: text, req_id: i64, workspace: MdWorkspace) -> 
 fn md_lsp_document_symbol(params_json: text, req_id: i64, workspace: MdWorkspace) -> text:
     val uri = _md_lsp_extract_uri(params_json)
     val doc = workspace.get_document(uri)
-    val headings = doc.headings
-    val lines = split_lines(doc.content)
+    val doc_lines = split_lines(doc.content)
 
     var symbols = "["
     var first = true
-    var i = 0
-    val count = headings.length()
-
-    # Walk lines to find heading positions matching the headings list
-    var heading_index = 0
     var j = 0
-    val line_count = lines.length()
-    while j < line_count and heading_index < count:
-        val l = lines.get(j)
+    val line_count = doc_lines.length()
+    while j < line_count:
+        val l = doc_lines.get(j)
         if l.starts_with("#"):
             var k = 0
             while k < l.len() and l.char_at(k) == "#":
@@ -348,13 +426,12 @@ fn md_lsp_document_symbol(params_json: text, req_id: i64, workspace: MdWorkspace
             val end_pos = "{" + _jp("line", str(j)) + "," + _jp("character", str(l.len())) + "}"
             val range = "{" + _jp("start", start_pos) + "," + _jp("end", end_pos) + "}"
             val location = "{" + _jp("uri", _js(uri)) + "," + _jp("range", range) + "}"
-            # kind 25 = "key" — closest available for headings/sections in LSP SymbolKind
+            # LSP SymbolKind 25 = "key" — used for headings/sections per spec
             val symbol = "{" + _jp("name", _js(heading_text)) + "," + _jp("kind", "25") + "," + _jp("location", location) + "}"
             if not first:
                 symbols = symbols + ","
             symbols = symbols + symbol
             first = false
-            heading_index = heading_index + 1
         j = j + 1
 
     symbols = symbols + "]"
@@ -387,11 +464,10 @@ fn md_lsp_folding_range(params_json: text, req_id: i64, workspace: MdWorkspace) 
         first = false
         i = i + 1
     items = items + "]"
-
     _md_lsp_ok_response(req_id, items)
 
 # ---------------------------------------------------------------------------
-# Notification handler
+# Notification handler (no response)
 # ---------------------------------------------------------------------------
 
 fn md_lsp_handle_notification(method: text, params_json: text, workspace: MdWorkspace):
@@ -413,10 +489,10 @@ fn md_lsp_handle_notification(method: text, params_json: text, workspace: MdWork
         val uri = _md_lsp_extract_uri(params_json)
         workspace.close_document(uri)
         return
-    # "exit" and unknown notifications: no-op
+    # "exit" and all other notifications: no-op
 
 # ---------------------------------------------------------------------------
-# Main dispatcher
+# Main request dispatcher
 # ---------------------------------------------------------------------------
 
 fn md_lsp_handle_request(method: text, params_json: text, req_id: i64, workspace: MdWorkspace) -> text:

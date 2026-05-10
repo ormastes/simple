@@ -1,0 +1,101 @@
+## E2E gate: Simple compiler running from FAT32 inside SimpleOS.
+##
+## THIS SPEC IS EXPECTED TO FAIL until the following tracks land:
+##   - Track F  : kernel links with FAT32 + ELF loader + userspace exec
+##   - Track B''': SMF format baked onto disk image at /usr/bin/simple
+##                 (or /SIMPLSTC.SMF fallback at FAT32 root)
+##
+## When those tracks land, set SIMPLEOS_SIMPLE_FS_E2E=1 and supply a
+## built disk image (SIMPLEOS_DISK_IMAGE or default build/os/simpleos_disk.img)
+## to obtain end-to-end confirmation.
+##
+## Marker contract (for the bake/init agent that writes the disk init script):
+##   After kernel boots, the init script MUST run, in order:
+##     1. simple --version        → emit "Simple " followed by a version digit on COM1
+##     2. simple /tmp/hello.spl   → emit "ok" on COM1
+##   The init script pre-seeds /tmp/hello.spl with:
+##     fn main(): print("ok\n")
+##   No wrapper tags are needed; the spec matches natural substrings.
+##
+## Run (gated, env-driven):
+##   bin/simple test test/os/e2e/simple_from_fs_spec.spl
+##   SIMPLEOS_SIMPLE_FS_E2E=1 bin/simple test test/os/e2e/simple_from_fs_spec.spl
+##
+## @platform: baremetal(x86_64)
+## @tag: os,qemu,e2e,simple-from-fs
+
+use std.spec
+use os.qemu_runner.{boot_disk_image_serial}
+
+extern fn rt_env_get(key: text) -> text
+extern fn rt_file_exists(path: text) -> bool
+
+## Cached serial capture — QEMU boots once, all it-blocks share the result.
+var _serial_cache: text = ""
+var _boot_attempted: bool = false
+
+fn _gate() -> text:
+    """Return SIMPLEOS_SIMPLE_FS_E2E env var, or empty string if unset."""
+    val v = rt_env_get("SIMPLEOS_SIMPLE_FS_E2E")
+    if v == nil:
+        ""
+    else:
+        v
+
+fn _disk_image_path() -> text:
+    """Resolve disk image: SIMPLEOS_DISK_IMAGE env override, else default."""
+    val override = rt_env_get("SIMPLEOS_DISK_IMAGE")
+    if override == nil or override == "":
+        "build/os/simpleos_disk.img"
+    else:
+        override
+
+fn ensure_serial() -> text:
+    """Boot QEMU once and cache serial output; subsequent calls return cache."""
+    if _boot_attempted:
+        return _serial_cache
+    _boot_attempted = true
+    val image = _disk_image_path()
+    if not rt_file_exists(image):
+        _serial_cache = "[boot-error: disk image not found: " + image + "]"
+        return _serial_cache
+    ## 240 s watchdog — matches @qemu per-test timeout (see commit 5687e84287).
+    val (stdout, stderr, _exit) = boot_disk_image_serial(image, 240000)
+    _serial_cache = stdout + stderr
+    _serial_cache
+
+describe "E2E: Simple compiler runs from FAT32 on SimpleOS":
+    """
+    Two-step end-to-end gate:
+      step 1 — `simple --version` emits a version banner on COM1.
+      step 2 — `simple /tmp/hello.spl` prints "ok" to COM1.
+
+    Both steps are gated on SIMPLEOS_SIMPLE_FS_E2E=1 and a built disk image.
+    All it-blocks skip cleanly (return a skip-reason string) when the gate
+    env var is absent — this is intentional until Tracks F and B''' land.
+    """
+
+    it "step 1 [simple-fs-version]: simple --version prints a version banner on COM1":
+        """
+        The kernel init script runs `simple --version` after boot.
+        Expected: serial output contains "Simple " (natural version prefix).
+        FAILS UNTIL: Track F (kernel link) + Track B''' (SMF on disk) land.
+        """
+        val gate = _gate()
+        if gate == "":
+            return "skip: SIMPLEOS_SIMPLE_FS_E2E not set"
+        val serial = ensure_serial()
+        serial.to_contain("Simple ")
+
+    it "step 2 [simple-fs-hello]: simple /tmp/hello.spl prints ok on COM1":
+        """
+        The kernel init script pre-seeds /tmp/hello.spl with `fn main(): print("ok\n")`
+        and then runs `simple /tmp/hello.spl`.
+        Expected: serial output contains "ok".
+        FAILS UNTIL: Track F (kernel link) + Track B''' (SMF on disk) land.
+        """
+        val gate = _gate()
+        if gate == "":
+            return "skip: SIMPLEOS_SIMPLE_FS_E2E not set"
+        val serial = ensure_serial()
+        serial.to_contain("ok")

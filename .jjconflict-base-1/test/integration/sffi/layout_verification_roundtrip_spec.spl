@@ -1,0 +1,568 @@
+# @cover src/compiler/30.types/type_layout.spl 80%
+# @cover src/compiler/90.tools/header_gen/c_header.spl 60%
+"""
+# SFFI Layout Verification Round-Trip Proof
+
+**Feature IDs:** #SFFI-BIDIR-WS7
+**Category:** Compiler Integration / SFFI
+**Status:** End-to-End Proof
+
+## Overview
+
+Tests ABI/layout verification across the SFFI boundary:
+
+1. **Layout computation** -- `verify_c_layout` computes field offsets and sizes
+   using C alignment rules for `@repr("C")` structs.
+2. **Static assert generation** -- `generate_c_static_asserts` emits
+   `_Static_assert` statements that gcc can compile to verify layout agreement.
+3. **Positive test** -- Well-aligned struct produces `_Static_assert` that
+   compiles cleanly with `gcc -c`.
+4. **Negative test** -- Deliberately wrong `_Static_assert` causes compilation
+   failure, proving the assertions are meaningful.
+5. **Cross-architecture** -- Layout computation for different target
+   architectures produces consistent results.
+
+Requires: gcc (or cc) on the host system. Tests skip gracefully if unavailable.
+"""
+
+use std.spec
+
+use compiler.types.type_layout.{
+    LayoutAttr, LayoutKind,
+    layoutattr_c_repr, layoutattr_packed, layoutattr_default_,
+    verify_c_layout,
+    generate_c_static_asserts, generate_cpp_static_asserts,
+    generate_c_struct_def,
+    compute_struct_layout, compute_c_layout,
+    align_up, is_aligned, is_power_of_two
+}
+from hir_definitions import {HirField, HirExpr, HirExprKind}
+from hir_types import {SymbolId, HirType, HirTypeKind}
+from lexer import {Span}
+
+val NL = "\n"
+val TEST_DIR = "/tmp/sffi_test_layout_roundtrip"
+
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_file_delete(path: text) -> bool
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+extern fn rt_dir_create(path: text, recursive: bool) -> bool
+
+fn setup_test_dir():
+    rt_dir_create(TEST_DIR, true)
+
+fn cleanup_test_dir():
+    val (_out, _err, _code) = rt_process_run("/bin/sh", ["-c", "rm -rf " + TEST_DIR])
+
+fn assert_ok(condition: bool, message: text):
+    if not condition:
+        expect(message).to_equal("")
+
+fn gcc_available() -> bool:
+    val (_out, _err, code) = rt_process_run("which", ["gcc"])
+    code == 0
+
+fn cc_available() -> bool:
+    val (_out, _err, code) = rt_process_run("which", ["cc"])
+    code == 0
+
+fn has_c_compiler() -> bool:
+    gcc_available() or cc_available()
+
+fn c_compiler() -> text:
+    if gcc_available():
+        "gcc"
+    else:
+        "cc"
+
+fn write_source(path: text, content: text) -> bool:
+    val cmd = "cat > " + path + " << 'SIMPLE_WRITE_EOF'" + NL + content + NL + "SIMPLE_WRITE_EOF"
+    val (_out, _err, code) = rt_process_run("/bin/sh", ["-c", cmd])
+    code == 0
+
+fn empty_span() -> Span:
+    Span(start: 0, end_pos: 0, line: 1, col: 1)
+
+fn make_hir_type(kind: HirTypeKind) -> HirType:
+    HirType(kind: kind, span: empty_span())
+
+fn make_u8_type() -> HirType:
+    make_hir_type(HirTypeKind.Int(8, false))
+
+fn make_u16_type() -> HirType:
+    make_hir_type(HirTypeKind.Int(16, false))
+
+fn make_u32_type() -> HirType:
+    make_hir_type(HirTypeKind.Int(32, false))
+
+fn make_i32_type() -> HirType:
+    make_hir_type(HirTypeKind.Int(32, true))
+
+fn make_i64_type() -> HirType:
+    make_hir_type(HirTypeKind.Int(64, true))
+
+fn make_f32_type() -> HirType:
+    make_hir_type(HirTypeKind.Float(32))
+
+fn make_f64_type() -> HirType:
+    make_hir_type(HirTypeKind.Float(64))
+
+fn make_bool_type() -> HirType:
+    make_hir_type(HirTypeKind.Bool)
+
+fn dummy_expr() -> HirExpr:
+    HirExpr(
+        kind: HirExprKind.UnitLit,
+        has_type_: false,
+        type_: make_hir_type(HirTypeKind.Unit),
+        span: empty_span()
+    )
+
+fn make_field(name: text, type_: HirType) -> HirField:
+    HirField(
+        symbol: SymbolId(id: 0),
+        name: name,
+        type_: type_,
+        has_default: false,
+        default: dummy_expr(),
+        is_public: true,
+        is_volatile: false,
+        has_bits_attr: false,
+        bits_width: 0,
+        has_fixed_address: false,
+        fixed_address: 0,
+        span: empty_span()
+    )
+
+fn make_bits_field(name: text, type_: HirType, bits_width: i64) -> HirField:
+    var field = make_field(name, type_)
+    field.has_bits_attr = true
+    field.bits_width = bits_width
+    field
+
+
+describe "SFFI Layout Verification Round-Trip":
+
+    before_all:
+        setup_test_dir()
+
+    after_all:
+        cleanup_test_dir()
+
+    describe "layout computation":
+        it "computes correct layout for simple u8-only struct":
+            val verification = verify_c_layout(
+                "Flags",
+                [
+                    make_field("a", make_u8_type()),
+                    make_field("b", make_u8_type()),
+                    make_field("c", make_u8_type())
+                ],
+                layoutattr_c_repr()
+            )
+
+            expect(verification.is_valid).to_equal(true)
+            expect(verification.total_size).to_equal(3)
+            expect(verification.alignment).to_equal(1)
+            expect(verification.fields[0].offset).to_equal(0)
+            expect(verification.fields[1].offset).to_equal(1)
+            expect(verification.fields[2].offset).to_equal(2)
+
+        it "computes correct layout with padding for mixed types":
+            val verification = verify_c_layout(
+                "Mixed",
+                [
+                    make_field("flag", make_u8_type()),
+                    make_field("value", make_i32_type()),
+                    make_field("tag", make_u8_type())
+                ],
+                layoutattr_c_repr()
+            )
+
+            expect(verification.is_valid).to_equal(true)
+            # u8 at 0, padding 1-3, i32 at 4, u8 at 8, padding 9-11
+            expect(verification.fields[0].offset).to_equal(0)
+            expect(verification.fields[1].offset).to_equal(4)
+            expect(verification.fields[2].offset).to_equal(8)
+            expect(verification.total_size).to_equal(12)
+
+        it "computes correct layout for network packet header":
+            val verification = verify_c_layout(
+                "PacketHeader",
+                [
+                    make_field("version", make_u8_type()),
+                    make_field("flags", make_u8_type()),
+                    make_field("length", make_u16_type()),
+                    make_field("sequence", make_u32_type())
+                ],
+                layoutattr_c_repr()
+            )
+
+            expect(verification.is_valid).to_equal(true)
+            expect(verification.total_size).to_equal(8)
+            expect(verification.fields[0].offset).to_equal(0)
+            expect(verification.fields[1].offset).to_equal(1)
+            expect(verification.fields[2].offset).to_equal(2)
+            expect(verification.fields[3].offset).to_equal(4)
+
+        it "computes correct layout for struct with f64 requiring 8-byte align":
+            val verification = verify_c_layout(
+                "Measurement",
+                [
+                    make_field("id", make_i32_type()),
+                    make_field("value", make_f64_type())
+                ],
+                layoutattr_c_repr()
+            )
+
+            expect(verification.is_valid).to_equal(true)
+            # i32 at 0, padding 4-7, f64 at 8
+            expect(verification.fields[0].offset).to_equal(0)
+            expect(verification.fields[1].offset).to_equal(8)
+            expect(verification.total_size).to_equal(16)
+            expect(verification.alignment).to_equal(8)
+
+        it "computes correct layout for struct with i64 field":
+            val verification = verify_c_layout(
+                "Counter",
+                [
+                    make_field("tag", make_u8_type()),
+                    make_field("count", make_i64_type())
+                ],
+                layoutattr_c_repr()
+            )
+
+            expect(verification.is_valid).to_equal(true)
+            # u8 at 0, padding 1-7, i64 at 8
+            expect(verification.fields[0].offset).to_equal(0)
+            expect(verification.fields[1].offset).to_equal(8)
+            expect(verification.total_size).to_equal(16)
+
+    describe "static assert generation":
+        it "generates _Static_assert for C with correct size and offsets":
+            val verification = verify_c_layout(
+                "PacketHeader",
+                [
+                    make_field("version", make_u8_type()),
+                    make_field("flags", make_u8_type()),
+                    make_field("length", make_u16_type()),
+                    make_field("sequence", make_u32_type())
+                ],
+                layoutattr_c_repr()
+            )
+
+            val asserts = generate_c_static_asserts(verification)
+            expect(asserts).to_contain("_Static_assert")
+            expect(asserts).to_contain("sizeof(spl_PacketHeader)")
+            expect(asserts).to_contain("== 8")
+            expect(asserts).to_contain("offsetof")
+            expect(asserts).to_contain("version")
+            expect(asserts).to_contain("sequence")
+
+        it "generates static_assert for C++ with correct size and offsets":
+            val verification = verify_c_layout(
+                "Sensor",
+                [
+                    make_field("id", make_i32_type()),
+                    make_field("reading", make_f64_type())
+                ],
+                layoutattr_c_repr()
+            )
+
+            val asserts = generate_cpp_static_asserts(verification)
+            expect(asserts).to_contain("static_assert")
+            expect(asserts).to_contain("sizeof(spl_Sensor)")
+            expect(asserts).to_contain("== 16")
+
+        it "generates C struct definition matching computed layout":
+            val verification = verify_c_layout(
+                "Point",
+                [
+                    make_field("x", make_f64_type()),
+                    make_field("y", make_f64_type())
+                ],
+                layoutattr_c_repr()
+            )
+
+            val struct_def = generate_c_struct_def(verification)
+            expect(struct_def).to_contain("typedef struct")
+            expect(struct_def).to_contain("spl_Point")
+            expect(struct_def).to_contain("double x")
+            expect(struct_def).to_contain("double y")
+
+    describe "alignment utilities":
+        it "aligns values up to alignment boundary":
+            expect(align_up(0, 4)).to_equal(0)
+            expect(align_up(1, 4)).to_equal(4)
+            expect(align_up(3, 4)).to_equal(4)
+            expect(align_up(4, 4)).to_equal(4)
+            expect(align_up(5, 4)).to_equal(8)
+            expect(align_up(7, 8)).to_equal(8)
+            expect(align_up(8, 8)).to_equal(8)
+            expect(align_up(9, 8)).to_equal(16)
+
+        it "checks alignment correctness":
+            expect(is_aligned(0, 4)).to_equal(true)
+            expect(is_aligned(4, 4)).to_equal(true)
+            expect(is_aligned(8, 4)).to_equal(true)
+            expect(is_aligned(1, 4)).to_equal(false)
+            expect(is_aligned(3, 4)).to_equal(false)
+            expect(is_aligned(8, 8)).to_equal(true)
+            expect(is_aligned(7, 8)).to_equal(false)
+
+        it "validates power-of-two checks":
+            expect(is_power_of_two(1)).to_equal(true)
+            expect(is_power_of_two(2)).to_equal(true)
+            expect(is_power_of_two(4)).to_equal(true)
+            expect(is_power_of_two(8)).to_equal(true)
+            expect(is_power_of_two(16)).to_equal(true)
+            expect(is_power_of_two(3)).to_equal(false)
+            expect(is_power_of_two(6)).to_equal(false)
+            expect(is_power_of_two(0)).to_equal(false)
+
+    describe "gcc compilation of static asserts (positive)":
+        it "compiles correct _Static_assert with gcc successfully":
+            if not has_c_compiler():
+                return "skip: no C compiler available"
+
+            # Build a verification for a simple struct and generate asserts
+            val verification = verify_c_layout(
+                "PacketHeader",
+                [
+                    make_field("version", make_u8_type()),
+                    make_field("flags", make_u8_type()),
+                    make_field("length", make_u16_type()),
+                    make_field("sequence", make_u32_type())
+                ],
+                layoutattr_c_repr()
+            )
+
+            val struct_def = generate_c_struct_def(verification)
+            val asserts = generate_c_static_asserts(verification)
+
+            # Build a C source that includes the struct + asserts
+            val c_source = TEST_DIR + "/layout_check.c"
+            val c_code = "#include <stdint.h>" + NL +
+                "#include <stddef.h>" + NL +
+                NL +
+                struct_def + NL +
+                NL +
+                asserts + NL +
+                NL +
+                "int main(void) { return 0; }" + NL
+
+            assert_ok(write_source(c_source, c_code), "failed to write positive layout fixture")
+
+            val cc = c_compiler()
+            val (out, err, code) = rt_process_run(cc, [
+                "-c", "-std=c11",
+                "-o", TEST_DIR + "/layout_check.o",
+                c_source
+            ])
+
+            if code != 0:
+                print("gcc stdout: " + out)
+                print("gcc stderr: " + err)
+            expect(code).to_equal(0)
+
+        it "compiles layout check for struct with padding":
+            if not has_c_compiler():
+                return "skip: no C compiler available"
+
+            val verification = verify_c_layout(
+                "PaddedStruct",
+                [
+                    make_field("flag", make_u8_type()),
+                    make_field("value", make_i32_type()),
+                    make_field("tag", make_u8_type())
+                ],
+                layoutattr_c_repr()
+            )
+
+            val struct_def = generate_c_struct_def(verification)
+            val asserts = generate_c_static_asserts(verification)
+
+            val c_source = TEST_DIR + "/padded_check.c"
+            val c_code = "#include <stdint.h>" + NL +
+                "#include <stddef.h>" + NL +
+                NL +
+                struct_def + NL +
+                NL +
+                asserts + NL +
+                NL +
+                "int main(void) { return 0; }" + NL
+
+            assert_ok(write_source(c_source, c_code), "failed to write padded layout fixture")
+
+            val cc = c_compiler()
+            val (out, err, code) = rt_process_run(cc, [
+                "-c", "-std=c11",
+                "-o", TEST_DIR + "/padded_check.o",
+                c_source
+            ])
+
+            if code != 0:
+                print("gcc stdout: " + out)
+                print("gcc stderr: " + err)
+            expect(code).to_equal(0)
+
+        it "compiles layout check for struct with f64 alignment":
+            if not has_c_compiler():
+                return "skip: no C compiler available"
+
+            val verification = verify_c_layout(
+                "Sensor",
+                [
+                    make_field("id", make_i32_type()),
+                    make_field("reading", make_f64_type())
+                ],
+                layoutattr_c_repr()
+            )
+
+            val struct_def = generate_c_struct_def(verification)
+            val asserts = generate_c_static_asserts(verification)
+
+            val c_source = TEST_DIR + "/sensor_check.c"
+            val c_code = "#include <stdint.h>" + NL +
+                "#include <stddef.h>" + NL +
+                NL +
+                struct_def + NL +
+                NL +
+                asserts + NL +
+                NL +
+                "int main(void) { return 0; }" + NL
+
+            assert_ok(write_source(c_source, c_code), "failed to write sensor layout fixture")
+
+            val cc = c_compiler()
+            val (out, err, code) = rt_process_run(cc, [
+                "-c", "-std=c11",
+                "-o", TEST_DIR + "/sensor_check.o",
+                c_source
+            ])
+
+            if code != 0:
+                print("gcc stdout: " + out)
+                print("gcc stderr: " + err)
+            expect(code).to_equal(0)
+
+    describe "gcc compilation of static asserts (negative)":
+        it "fails when _Static_assert has deliberately wrong size":
+            if not has_c_compiler():
+                return "skip: no C compiler available"
+
+            val verification = verify_c_layout(
+                "BadSize",
+                [
+                    make_field("x", make_i32_type()),
+                    make_field("y", make_i32_type())
+                ],
+                layoutattr_c_repr()
+            )
+
+            val struct_def = generate_c_struct_def(verification)
+
+            # Deliberately write WRONG size assert (claiming 4 bytes instead of 8)
+            val c_source = TEST_DIR + "/bad_size_check.c"
+            val c_code = "#include <stdint.h>" + NL +
+                "#include <stddef.h>" + NL +
+                NL +
+                struct_def + NL +
+                NL +
+                "_Static_assert(sizeof(spl_BadSize) == 4, \"deliberately wrong size\");" + NL +
+                NL +
+                "int main(void) { return 0; }" + NL
+
+            assert_ok(write_source(c_source, c_code), "failed to write bad-size fixture")
+
+            val cc = c_compiler()
+            val (_out, _err, code) = rt_process_run(cc, [
+                "-c", "-std=c11",
+                "-o", TEST_DIR + "/bad_size_check.o",
+                c_source
+            ])
+
+            # Should FAIL compilation -- wrong size
+            if code == 0:
+                expect("bad size static assert should fail compilation").to_equal("")
+            expect(c_source).to_end_with(".c")
+
+        it "fails when _Static_assert has deliberately wrong offset":
+            if not has_c_compiler():
+                return "skip: no C compiler available"
+
+            val verification = verify_c_layout(
+                "BadOffset",
+                [
+                    make_field("tag", make_u8_type()),
+                    make_field("value", make_i32_type())
+                ],
+                layoutattr_c_repr()
+            )
+
+            val struct_def = generate_c_struct_def(verification)
+
+            # Deliberately write WRONG offset (claiming value is at offset 1 instead of 4)
+            val c_source = TEST_DIR + "/bad_offset_check.c"
+            val c_code = "#include <stdint.h>" + NL +
+                "#include <stddef.h>" + NL +
+                NL +
+                struct_def + NL +
+                NL +
+                "_Static_assert(offsetof(spl_BadOffset, value) == 1, \"deliberately wrong offset\");" + NL +
+                NL +
+                "int main(void) { return 0; }" + NL
+
+            assert_ok(write_source(c_source, c_code), "failed to write bad-offset fixture")
+
+            val cc = c_compiler()
+            val (_out, _err, code) = rt_process_run(cc, [
+                "-c", "-std=c11",
+                "-o", TEST_DIR + "/bad_offset_check.o",
+                c_source
+            ])
+
+            # Should FAIL compilation -- wrong offset
+            if code == 0:
+                expect("bad offset static assert should fail compilation").to_equal("")
+            expect(c_source).to_end_with(".c")
+
+    describe "bitfield layout verification":
+        it "computes layout for struct with @bits fields":
+            val verification = verify_c_layout(
+                "GpioRegister",
+                [
+                    make_bits_field("mode", make_u8_type(), 4),
+                    make_bits_field("output", make_bool_type(), 1),
+                    make_bits_field("input", make_bool_type(), 1),
+                    make_bits_field("speed", make_u8_type(), 2)
+                ],
+                layoutattr_c_repr()
+            )
+
+            if not verification.is_valid:
+                expect("bitfield layout verification should be valid").to_equal("")
+            # All bitfields fit in a single byte (4+1+1+2 = 8 bits)
+            expect(verification.total_size).to_be_less_than(5)
+
+    describe "packed layout":
+        it "packed struct has no padding between fields":
+            val packed_attr = layoutattr_packed()
+            val verification = verify_c_layout(
+                "PackedData",
+                [
+                    make_field("flag", make_u8_type()),
+                    make_field("value", make_i32_type()),
+                    make_field("tag", make_u8_type())
+                ],
+                packed_attr
+            )
+
+            expect(verification.is_valid).to_equal(true)
+            # Packed: u8(1) + i32(4) + u8(1) = 6 bytes, no padding
+            expect(verification.fields[0].offset).to_equal(0)
+            expect(verification.fields[1].offset).to_equal(1)
+            expect(verification.fields[2].offset).to_equal(5)
+            expect(verification.total_size).to_equal(6)

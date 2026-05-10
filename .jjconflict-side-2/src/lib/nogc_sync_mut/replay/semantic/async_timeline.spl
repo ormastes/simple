@@ -1,0 +1,120 @@
+# SReplay — Async Task Timeline
+#
+# Correlates async spawn/yield/resume/complete events
+# into per-task timelines for debugging and visualization.
+
+use std.nogc_sync_mut.replay.semantic.trace_events.{SemanticEventKind, SemanticEvent}
+
+# ============================================================================
+# Async Task State
+# ============================================================================
+
+enum AsyncTaskState:
+    Spawned
+    Running
+    Yielded
+    Completed
+
+# ============================================================================
+# Timeline Entry
+# ============================================================================
+
+struct TimelineEntry:
+    event_idx: i64
+    timestamp: i64
+    state: AsyncTaskState
+
+# ============================================================================
+# Async Task Timeline
+# ============================================================================
+
+class AsyncTaskTimeline:
+    spawn_id: i64
+    task_name_hash: i64
+    entries: [TimelineEntry]
+    final_state: AsyncTaskState
+
+impl AsyncTaskTimeline:
+    static fn create(spawn_id: i64, task_name_hash: i64) -> AsyncTaskTimeline:
+        AsyncTaskTimeline(
+            spawn_id: spawn_id,
+            task_name_hash: task_name_hash,
+            entries: [],
+            final_state: AsyncTaskState.Spawned
+        )
+
+    fn add_entry(event_idx: i64, timestamp: i64, state: AsyncTaskState):
+        self.entries.push(TimelineEntry(
+            event_idx: event_idx,
+            timestamp: timestamp,
+            state: state
+        ))
+        self.final_state = state
+
+    fn is_complete() -> bool:
+        self.final_state == AsyncTaskState.Completed
+
+    fn yield_count() -> i64:
+        var count: i64 = 0
+        for entry in self.entries:
+            if entry.state == AsyncTaskState.Yielded:
+                count = count + 1
+        count
+
+    fn duration() -> i64:
+        if self.entries.len() < 2:
+            return 0
+        val first = self.entries[0]
+        val last = self.entries[self.entries.len() - 1]
+        last.timestamp - first.timestamp
+
+# ============================================================================
+# Timeline Builder
+# ============================================================================
+
+class AsyncTimelineBuilder:
+    timelines: [AsyncTaskTimeline]
+
+impl AsyncTimelineBuilder:
+    static fn create() -> AsyncTimelineBuilder:
+        AsyncTimelineBuilder(timelines: [])
+
+    fn build_from_events(events: [SemanticEvent]) -> [AsyncTaskTimeline]:
+        var idx: i64 = 0
+        for ev in events:
+            match ev.kind:
+                SemanticEventKind.AsyncSpawn:
+                    var tl = AsyncTaskTimeline.create(ev.spawn_id, ev.name_hash)
+                    tl.add_entry(idx, ev.timestamp, AsyncTaskState.Spawned)
+                    self.timelines.push(tl)
+                SemanticEventKind.AsyncYield:
+                    self.update_task(ev.spawn_id, idx, ev.timestamp, AsyncTaskState.Yielded)
+                SemanticEventKind.AsyncResume:
+                    self.update_task(ev.spawn_id, idx, ev.timestamp, AsyncTaskState.Running)
+                SemanticEventKind.AsyncComplete:
+                    self.update_task(ev.spawn_id, idx, ev.timestamp, AsyncTaskState.Completed)
+                _:
+                    pass
+            idx = idx + 1
+        self.timelines
+
+    fn update_task(spawn_id: i64, event_idx: i64, timestamp: i64, state: AsyncTaskState):
+        for tl in self.timelines:
+            if tl.spawn_id == spawn_id:
+                tl.add_entry(event_idx, timestamp, state)
+                return
+
+    fn find_task(spawn_id: i64) -> Option<AsyncTaskTimeline>:
+        for tl in self.timelines:
+            if tl.spawn_id == spawn_id:
+                return Some(tl)
+        None
+
+    fn active_tasks_at(timestamp: i64) -> [AsyncTaskTimeline]:
+        var result: [AsyncTaskTimeline] = []
+        for tl in self.timelines:
+            if tl.entries.len() > 0:
+                val first = tl.entries[0]
+                if first.timestamp <= timestamp and not tl.is_complete():
+                    result.push(tl)
+        result

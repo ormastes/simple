@@ -1,0 +1,281 @@
+"""Wine PE/DLL loader BDD specification.
+
+Tests full block-iteration relocation, PE export lookup, and image mapping.
+"""
+
+# @cover src/lib/common/wine_pe_loader_runtime.spl 80%
+# @cover src/lib/common/pe_coff_header.spl 60%
+# @cover src/lib/common/wine_dll_image_loader.spl 70%
+# @cover src/lib/common/wine_dll_entrypoint_lifecycle.spl 70%
+
+use common.pe_coff_header.{pe_export_lookup_by_name, pe_image_base, pe_size_of_image}
+use common.wine_pe_loader_runtime.{wine_pe_apply_all_relocations, wine_pe_apply_all_relocations_to_image}
+use common.wine_dll_image_loader.{wine_dll_map_pe_image}
+use common.wine_dll_entrypoint_lifecycle.{wine_dll_invoke_dllmain}
+
+fn _zero_bytes(count: i64) -> [u8]:
+    var out: [u8] = []
+    var i = 0
+    while i < count:
+        out.push(0)
+        i = i + 1
+    out
+
+fn _put_u16_le(data: [u8], offset: i64, value: i64) -> [u8]:
+    data[offset] = (value & 0xff) as u8
+    data[offset + 1] = ((value >> 8) & 0xff) as u8
+    data
+
+fn _put_u32_le(data: [u8], offset: i64, value: i64) -> [u8]:
+    data[offset] = (value & 0xff) as u8
+    data[offset + 1] = ((value >> 8) & 0xff) as u8
+    data[offset + 2] = ((value >> 16) & 0xff) as u8
+    data[offset + 3] = ((value >> 24) & 0xff) as u8
+    data
+
+fn _put_u64_le(data: [u8], offset: i64, value: i64) -> [u8]:
+    data[offset] = (value & 0xff) as u8
+    data[offset + 1] = ((value >> 8) & 0xff) as u8
+    data[offset + 2] = ((value >> 16) & 0xff) as u8
+    data[offset + 3] = ((value >> 24) & 0xff) as u8
+    data[offset + 4] = ((value >> 32) & 0xff) as u8
+    data[offset + 5] = ((value >> 40) & 0xff) as u8
+    data[offset + 6] = ((value >> 48) & 0xff) as u8
+    data[offset + 7] = ((value >> 56) & 0xff) as u8
+    data
+
+fn _read_u64_le(data: [u8], offset: i64) -> i64:
+    if offset + 7 >= data.len():
+        return 0
+    val b0 = data[offset] as i64
+    val b1 = data[offset + 1] as i64
+    val b2 = data[offset + 2] as i64
+    val b3 = data[offset + 3] as i64
+    val b4 = data[offset + 4] as i64
+    val b5 = data[offset + 5] as i64
+    val b6 = data[offset + 6] as i64
+    val b7 = data[offset + 7] as i64
+    b0 | (b1 << 8) | (b2 << 16) | (b3 << 24) | (b4 << 32) | (b5 << 40) | (b6 << 48) | (b7 << 56)
+
+fn _put_ascii(data: [u8], offset: i64, text_val: text) -> [u8]:
+    var i = 0
+    while i < text_val.len():
+        val ch = text_val[i:i + 1]
+        val chars = " !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~"
+        var j = 0
+        while j < chars.len():
+            if chars[j:j + 1] == ch:
+                data[offset + i] = (j + 32) as u8
+                break
+            j = j + 1
+        i = i + 1
+    data
+
+# Build a minimal PE64 image with relocation directory containing one block with two DIR64 entries.
+fn _reloc_image() -> [u8]:
+    var data = _zero_bytes(1024)
+    data[0] = 0x4d
+    data[1] = 0x5a
+    data = _put_u32_le(data, 0x3c, 0x80)
+    data[0x80] = 0x50
+    data[0x81] = 0x45
+    data = _put_u16_le(data, 0x84, 0x8664)
+    data = _put_u16_le(data, 0x86, 1)
+    data = _put_u16_le(data, 0x94, 0xf0)
+    data = _put_u16_le(data, 0x98, 0x20b)
+    data = _put_u32_le(data, 0x98 + 0x10, 0x2010)
+    data = _put_u32_le(data, 0x98 + 0x18, 0x400000)
+    data = _put_u32_le(data, 0x98 + 0x1c, 0)
+    data = _put_u32_le(data, 0x98 + 0x38, 0x5000)
+    data = _put_u32_le(data, 0x98 + 0x3c, 0x200)
+    data = _put_u16_le(data, 0x98 + 0x5c, 3)
+    data = _put_u32_le(data, 0x98 + 0x6c, 16)
+    data = _put_u32_le(data, 0x98 + 0x70 + 8, 0x2020)
+    data = _put_u32_le(data, 0x98 + 0x70 + 12, 0x40)
+    data = _put_u32_le(data, 0x98 + 0x70 + 40, 0x2160)
+    data = _put_u32_le(data, 0x98 + 0x70 + 44, 0x10)
+    data = _put_u32_le(data, 0x98 + 0x70 + 72, 0x2170)
+    data = _put_u32_le(data, 0x98 + 0x70 + 76, 0x28)
+    val section_offset = 0x188
+    data = _put_u32_le(data, section_offset + 8, 0x300)
+    data = _put_u32_le(data, section_offset + 12, 0x2000)
+    data = _put_u32_le(data, section_offset + 16, 0x200)
+    data = _put_u32_le(data, section_offset + 20, 0x200)
+    data = _put_u32_le(data, section_offset + 36, 0x60000020)
+    data = _put_u32_le(data, 0x220, 0x2060)
+    data = _put_u32_le(data, 0x220 + 12, 0x2050)
+    data = _put_u32_le(data, 0x220 + 16, 0x2060)
+    data = _put_u32_le(data, 0x234, 0)
+    data = _put_u32_le(data, 0x238, 0)
+    data = _put_u32_le(data, 0x23c, 0)
+    data = _put_u32_le(data, 0x240, 0)
+    data = _put_u32_le(data, 0x244, 0)
+    data = _put_ascii(data, 0x250, "kernel32.dll")
+    data = _put_u32_le(data, 0x260, 0x2080)
+    data = _put_u32_le(data, 0x264, 0)
+    data = _put_u32_le(data, 0x268, 0)
+    data = _put_u32_le(data, 0x26c, 0)
+    data = _put_u16_le(data, 0x280, 0)
+    data = _put_ascii(data, 0x282, "ExitProcess")
+    data = _put_u32_le(data, 0x360, 0x2000)
+    data = _put_u32_le(data, 0x364, 0x0c)
+    data = _put_u16_le(data, 0x368, 0xa018)
+    data = _put_u16_le(data, 0x36a, 0xa028)
+    data = _put_u64_le(data, 0x218, 0x400100)
+    data = _put_u64_le(data, 0x228, 0x400200)
+    data = _put_u32_le(data, 0x370 + 24, 0x2190)
+    data = _put_u32_le(data, 0x390, 0x2010)
+    data
+
+# Build a PE64 image with an export directory.
+fn _export_image() -> [u8]:
+    var data = _zero_bytes(1024)
+    data[0] = 0x4d
+    data[1] = 0x5a
+    data = _put_u32_le(data, 0x3c, 0x80)
+    data[0x80] = 0x50
+    data[0x81] = 0x45
+    data = _put_u16_le(data, 0x84, 0x8664)
+    data = _put_u16_le(data, 0x86, 1)
+    data = _put_u16_le(data, 0x94, 0xf0)
+    data = _put_u16_le(data, 0x98, 0x20b)
+    data = _put_u32_le(data, 0x98 + 0x10, 0x2010)
+    data = _put_u32_le(data, 0x98 + 0x18, 0x400000)
+    data = _put_u32_le(data, 0x98 + 0x1c, 0)
+    data = _put_u32_le(data, 0x98 + 0x38, 0x5000)
+    data = _put_u32_le(data, 0x98 + 0x3c, 0x200)
+    data = _put_u16_le(data, 0x98 + 0x5c, 3)
+    data = _put_u32_le(data, 0x98 + 0x6c, 16)
+    data = _put_u32_le(data, 0x98 + 0x70, 0x20a0)
+    data = _put_u32_le(data, 0x98 + 0x70 + 4, 0x60)
+    data = _put_u32_le(data, 0x98 + 0x70 + 8, 0x2020)
+    data = _put_u32_le(data, 0x98 + 0x70 + 12, 0x40)
+    data = _put_u32_le(data, 0x98 + 0x70 + 40, 0x2160)
+    data = _put_u32_le(data, 0x98 + 0x70 + 44, 0x08)
+    data = _put_u32_le(data, 0x98 + 0x70 + 72, 0x2170)
+    data = _put_u32_le(data, 0x98 + 0x70 + 76, 0x28)
+    val section_offset = 0x188
+    data = _put_u32_le(data, section_offset + 8, 0x300)
+    data = _put_u32_le(data, section_offset + 12, 0x2000)
+    data = _put_u32_le(data, section_offset + 16, 0x200)
+    data = _put_u32_le(data, section_offset + 20, 0x200)
+    data = _put_u32_le(data, section_offset + 36, 0x60000020)
+    data = _put_u32_le(data, 0x220, 0x2060)
+    data = _put_u32_le(data, 0x220 + 12, 0x2050)
+    data = _put_u32_le(data, 0x220 + 16, 0x2060)
+    data = _put_u32_le(data, 0x234, 0)
+    data = _put_u32_le(data, 0x238, 0)
+    data = _put_u32_le(data, 0x23c, 0)
+    data = _put_u32_le(data, 0x240, 0)
+    data = _put_u32_le(data, 0x244, 0)
+    data = _put_ascii(data, 0x250, "kernel32.dll")
+    data = _put_u32_le(data, 0x260, 0x2080)
+    data = _put_u32_le(data, 0x264, 0)
+    data = _put_u32_le(data, 0x268, 0)
+    data = _put_u32_le(data, 0x26c, 0)
+    data = _put_u16_le(data, 0x280, 0)
+    data = _put_ascii(data, 0x282, "ExitProcess")
+    data = _put_u32_le(data, 0x360, 0x2000)
+    data = _put_u32_le(data, 0x364, 0x08)
+    data = _put_u32_le(data, 0x370 + 24, 0)
+    # Export directory at RVA 0x20a0 => file offset 0x2a0
+    data = _put_u32_le(data, 0x2a0 + 20, 2)
+    data = _put_u32_le(data, 0x2a0 + 24, 2)
+    data = _put_u32_le(data, 0x2a0 + 28, 0x20d0)
+    data = _put_u32_le(data, 0x2a0 + 32, 0x20d8)
+    data = _put_u32_le(data, 0x2a0 + 36, 0x20e0)
+    data = _put_u32_le(data, 0x2d0, 0x2010)
+    data = _put_u32_le(data, 0x2d4, 0x2030)
+    data = _put_u32_le(data, 0x2d8, 0x20e8)
+    data = _put_u32_le(data, 0x2dc, 0x20f0)
+    data = _put_u16_le(data, 0x2e0, 0)
+    data = _put_u16_le(data, 0x2e2, 1)
+    data = _put_ascii(data, 0x2e8, "Alpha")
+    data[0x2ed] = 0
+    data = _put_ascii(data, 0x2f0, "Beta")
+    data[0x2f4] = 0
+    data
+
+describe "Wine PE/DLL loader":
+    it "applies DIR64 relocations with full block iteration and verifies patched values":
+        val image = _reloc_image()
+        val result = wine_pe_apply_all_relocations(image, 0x400000, 0x500000)
+        expect(result.ok).to_equal(true)
+        expect(result.delta).to_equal(0x100000)
+        expect(result.relocation_count).to_equal(2)
+        expect(result.operations).to_contain("relocation-all-applied")
+
+    it "applies relocations to image bytes and verifies patched u64 values":
+        val image = _reloc_image()
+        val patched = wine_pe_apply_all_relocations_to_image(image, 0x400000, 0x500000)
+        val val1 = _read_u64_le(patched, 0x218)
+        val val2 = _read_u64_le(patched, 0x228)
+        expect(val1).to_equal(0x500100)
+        expect(val2).to_equal(0x500200)
+
+    it "skips ABSOLUTE (type 0) relocation entries":
+        var image = _reloc_image()
+        image = _put_u16_le(image, 0x36a, 0x0028)
+        val result = wine_pe_apply_all_relocations(image, 0x400000, 0x500000)
+        expect(result.ok).to_equal(true)
+        expect(result.relocation_count).to_equal(1)
+
+    it "handles empty relocation directory with zero delta":
+        val image = _reloc_image()
+        val result = wine_pe_apply_all_relocations(image, 0x400000, 0x400000)
+        expect(result.ok).to_equal(true)
+        expect(result.relocation_count).to_equal(0)
+        expect(result.operations).to_contain("relocation-delta-zero")
+
+    it "looks up PE exports by name":
+        val image = _export_image()
+        val alpha_rva = pe_export_lookup_by_name(image, "Alpha")
+        expect(alpha_rva).to_equal(0x2010)
+        val beta_rva = pe_export_lookup_by_name(image, "Beta")
+        expect(beta_rva).to_equal(0x2030)
+
+    it "returns -1 for unknown export name":
+        val image = _export_image()
+        val missing = pe_export_lookup_by_name(image, "NonExistent")
+        expect(missing).to_equal(-1)
+
+    it "maps PE image with correct size and section count":
+        val image = _reloc_image()
+        val mapped = wine_dll_map_pe_image(image, 0x400000)
+        expect(mapped.ok).to_equal(true)
+        expect(mapped.image_size).to_equal(0x5000)
+        expect(mapped.section_count).to_equal(1)
+        expect(mapped.entry_point_rva).to_equal(0x2010)
+        expect(mapped.image.len()).to_equal(0x5000)
+
+    it "maps PE image at different base and applies relocations":
+        val image = _reloc_image()
+        val mapped = wine_dll_map_pe_image(image, 0x500000)
+        expect(mapped.ok).to_equal(true)
+        expect(mapped.preferred_base).to_equal(0x400000)
+        expect(mapped.load_base).to_equal(0x500000)
+        expect(mapped.relocation_count).to_equal(2)
+
+    it "records DllMain invocation without executing native code":
+        val record = wine_dll_invoke_dllmain("test.dll", 0x400000, 0x2010, 0, 1, 0, "modeled-loaded-image")
+        expect(record.ok).to_equal(true)
+        expect(record.dll_name).to_equal("test.dll")
+        expect(record.h_instance).to_equal(0x400000)
+        expect(record.reason).to_equal(1)
+        expect(record.invoked).to_equal(false)
+        expect(record.evidence).to_contain("DllMain-invocation-recorded")
+        expect(record.evidence).to_contain("DLL_PROCESS_ATTACH")
+        expect(record.evidence).to_contain("invocation-deferred-pending-rt_dyncall_3")
+
+    it "rejects DllMain invocation with invalid parameters":
+        val no_name = wine_dll_invoke_dllmain("", 0x400000, 0x2010, 0, 1, 0, "")
+        expect(no_name.ok).to_equal(false)
+        expect(no_name.error).to_equal("missing-dll-name")
+
+        val no_base = wine_dll_invoke_dllmain("test.dll", 0, 0x2010, 0, 1, 0, "")
+        expect(no_base.ok).to_equal(false)
+        expect(no_base.error).to_equal("invalid-image-base")
+
+        val bad_reason = wine_dll_invoke_dllmain("test.dll", 0x400000, 0x2010, 0, 5, 0, "")
+        expect(bad_reason.ok).to_equal(false)
+        expect(bad_reason.error).to_equal("unsupported-reason")

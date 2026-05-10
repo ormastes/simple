@@ -1,0 +1,187 @@
+# FFI Wrapper Generator - Workspace and Cargo.toml Generation
+#
+# Generates workspace Cargo.toml and crate Cargo.toml files.
+#
+# Usage:
+#   import app.ffi_gen.workspace_gen (generate_cargo_toml, generate_workspace_toml)
+
+use compiler.tools.ffi_gen.types*
+
+# ============================================================================
+# Cargo.toml Generation
+# ============================================================================
+
+# Generate a complete Cargo.toml from CargoSpec
+fn generate_cargo_toml(spec: CargoSpec) -> text:
+    var parts: [text] = []
+
+    # [package] section
+    parts.push("[package]\n")
+    parts.push("name = \"{spec.name}\"\n")
+    parts.push("version = \"{spec.version}\"\n")
+    parts.push("edition = \"{spec.edition}\"\n")
+
+    if spec.description != "":
+        parts.push("description = \"{spec.description}\"\n")
+    if spec.license != "":
+        parts.push("license = \"{spec.license}\"\n")
+    if spec.authors.len() > 0:
+        val authors_str = spec.authors.map(\a: "\"{a}\"").join(", ")
+        parts.push("authors = [{authors_str}]\n")
+
+    parts.push("\n")
+
+    # [lib] section for crate type
+    if spec.crate_type != "" and spec.crate_type != "lib":
+        parts.push("[lib]\n")
+        # Generate lib name with underscores (Rust convention)
+        val lib_name = spec.name.replace("-", "_")
+        parts.push("name = \"{lib_name}\"\n")
+        # When building cdylib, also add rlib for workspace dependency linking
+        if spec.crate_type == "cdylib":
+            parts.push("crate-type = [\"cdylib\", \"rlib\"]\n")
+        else:
+            parts.push("crate-type = [\"{spec.crate_type}\"]\n")
+        parts.push("\n")
+
+    # [dependencies]
+    if spec.dependencies.len() > 0:
+        parts.push("[dependencies]\n")
+        for dep in spec.dependencies:
+            parts.push(generate_dependency(dep))
+        parts.push("\n")
+
+    # [dev-dependencies]
+    if spec.dev_dependencies.len() > 0:
+        parts.push("[dev-dependencies]\n")
+        for dep in spec.dev_dependencies:
+            parts.push(generate_dependency(dep))
+        parts.push("\n")
+
+    # [build-dependencies]
+    if spec.build_dependencies.len() > 0:
+        parts.push("[build-dependencies]\n")
+        for dep in spec.build_dependencies:
+            parts.push(generate_dependency(dep))
+        parts.push("\n")
+
+    # [features]
+    if spec.features.len() > 0:
+        parts.push("[features]\n")
+        for feature_entry in spec.features:
+            for fname in feature_entry.keys():
+                val deps = feature_entry[fname]
+                val deps_str = deps.map(\d: "\"{d}\"").join(", ")
+                parts.push("{fname} = [{deps_str}]\n")
+        parts.push("\n")
+
+    # Raw TOML content
+    if spec.raw_toml != "":
+        parts.push(spec.raw_toml)
+
+    parts.push("\n")
+    parts.push("[profile.release]\n")
+    parts.push("opt-level = 3\n")
+    parts.push("lto = \"thin\"\n")
+    parts.push("codegen-units = 1\n")
+
+    parts.join("")
+
+# Generate a single dependency line
+fn generate_dependency(dep: CrateDependency) -> text:
+    if dep.path != "":
+        # Path dependency
+        if dep.features.len() > 0:
+            val features_str = dep.features.map(\f: "\"{f}\"").join(", ")
+            "{dep.name} = {{ path = \"{dep.path}\", features = [{features_str}] }}\n"
+        else:
+            "{dep.name} = {{ path = \"{dep.path}\" }}\n"
+    elif dep.git != "":
+        # Git dependency
+        if dep.features.len() > 0:
+            val features_str = dep.features.map(\f: "\"{f}\"").join(", ")
+            "{dep.name} = {{ git = \"{dep.git}\", features = [{features_str}] }}\n"
+        else:
+            "{dep.name} = {{ git = \"{dep.git}\" }}\n"
+    elif dep.features.len() > 0:
+        # Version with features
+        val features_str = dep.features.map(\f: "\"{f}\"").join(", ")
+        "{dep.name} = {{ version = \"{dep.version}\", features = [{features_str}] }}\n"
+    elif dep.optional:
+        "{dep.name} = {{ version = \"{dep.version}\", optional = true }}\n"
+    else:
+        # Simple version
+        "{dep.name} = \"{dep.version}\"\n"
+
+# ============================================================================
+# Workspace Cargo.toml Generation
+# ============================================================================
+
+# Generate a workspace Cargo.toml
+fn generate_workspace_toml(spec: WorkspaceSpec) -> text:
+    var parts: [text] = []
+
+    parts.push("[workspace]\n")
+    parts.push("resolver = \"{spec.resolver}\"\n")
+
+    if spec.members.len() > 0:
+        parts.push("members = [\n")
+        for member in spec.members:
+            parts.push("    \"{member}\",\n")
+        parts.push("]\n")
+
+    parts.push("\n")
+
+    # Workspace dependencies
+    if spec.workspace_dependencies.len() > 0:
+        parts.push("[workspace.dependencies]\n")
+        for dep in spec.workspace_dependencies:
+            parts.push(generate_dependency(dep))
+
+    parts.join("")
+
+# ============================================================================
+# lib.rs Generation
+# ============================================================================
+
+# Generate lib.rs content
+fn generate_lib_rs(modules: [text]) -> text:
+    var parts: [text] = []
+    parts.push("//! FFI Generated Crate\n")
+    parts.push("//!\n")
+    parts.push("//! Auto-generated by: simple ffi-gen --gen-all\n")
+    parts.push("//! Do not edit manually.\n")
+    parts.push("\n")
+
+    # Module declarations
+    for mod_name in modules:
+        parts.push("pub mod {mod_name};\n")
+
+    parts.push("\n")
+
+    # Re-exports
+    for mod_name in modules:
+        parts.push("pub use {mod_name}::*;\n")
+
+    parts.join("")
+
+# ============================================================================
+# Convenience Functions
+# ============================================================================
+
+# Create a simple library crate spec
+fn simple_lib(name: text, version: text, deps: [CrateDependency]) -> CargoSpec:
+    var spec = CargoSpec.library(name, version)
+    spec.dependencies = deps
+    spec
+
+# Create the FFI gen crate spec for Simple runtime
+fn ffi_gen_crate() -> CargoSpec:
+    var spec = CargoSpec.cdylib("simple-ffi-gen", "0.1.0")
+    spec.description = "Generated FFI wrappers for Simple runtime"
+
+    spec.dependencies = [
+        CrateDependency.version("bdwgc-alloc", "0.6"),
+    ]
+
+    spec

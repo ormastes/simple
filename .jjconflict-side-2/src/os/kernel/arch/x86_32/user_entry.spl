@@ -1,0 +1,84 @@
+# x86_32 User Entry Bridge
+#
+# Owns the ring-3 handoff path for i386 so the architecture-neutral syscall
+# dispatcher does not pull x86_32 context-switch code into other kernel targets.
+#
+# The assembly stub `rt_x86_32_enter_user_first` is intentionally separate
+# (lives in examples/simple_os/arch/x86_32/boot/enter_user_first.s) and is
+# blocked until an i686-capable freestanding native-build lane is available.
+# This file provides the pure-Simple wrapper and syscall-14 dispatch so the
+# x86_32 process-backed path mirrors the x86_64 lane at the Simple layer.
+
+use os.kernel.arch.x86_32.context.{X86_32ContextSwitch}
+use os.kernel.scheduler.scheduler.{Scheduler}
+use os.kernel.types.task_types.{TaskId, TaskContext}
+use os.kernel.log.klog_api.{log_raw_println}
+
+# ============================================================================
+# FR-SOS-025 — ring-3 first-dispatch helper (x86_32).
+#
+# Will be implemented in examples/simple_os/arch/x86_32/boot/enter_user_first.s
+# as a standalone .s file.  Passes the i386 iret frame fields as explicit u32
+# arguments (cdecl), zeroes user GPRs internally, does not return.
+# Blocked until an i686 freestanding native-build lane is available.
+# ============================================================================
+extern fn rt_x86_32_enter_user_first(
+    eip: u32,
+    esp: u32,
+    cs: u32,
+    ss: u32,
+    eflags: u32,
+    cr3_phys: u32
+)
+
+fn arch_x86_32_enter_user_task(ctx: TaskContext, cr3_phys: u32):
+    """Convenience wrapper: pull ring-3 iret frame fields out of `ctx` and
+    jump into user mode via `rt_x86_32_enter_user_first`. Never returns.
+
+    TaskContext uses u64 fields for portability; values are truncated to u32
+    for the i386 iret path. Callers must ensure entry point and stack pointer
+    fit within 32-bit address space.
+    """
+    rt_x86_32_enter_user_first(
+        ctx.rip as u32,
+        ctx.rsp as u32,
+        ctx.cs as u32,
+        ctx.ss as u32,
+        ctx.rflags as u32,
+        cr3_phys
+    )
+
+fn dispatch_enter_user_blocking_x86_32(pid_hint: u64, scheduler: Scheduler) -> i64:
+    """Syscall 14: EnterUserBlocking (x86_32 path) — look up a user TCB and
+    jump to ring-3 via the i386 iret path.
+
+    Mirrors `dispatch_enter_user_blocking` in the x86_64 user_entry module,
+    but truncates address-space and context fields to 32 bits and calls the
+    i386 entry helper.  Returns -22 (EINVAL) on any validation failure and
+    also as the nominal dead-path return after a successful iret (never
+    reached in live execution).
+    """
+    log_raw_println("[syscall14-x86_32] dispatch_enter_user_blocking_x86_32 enter")
+    var sched = scheduler
+
+    val tcb = sched.get_user_handoff_task(pid_hint)
+    if tcb == nil:
+        log_raw_println("[syscall14-x86_32] handoff task not found pid_hint={pid_hint}")
+        return -22
+
+    val task = tcb.unwrap()
+    val target_pid = task.id.id
+    if not task.is_user:
+        log_raw_println("[syscall14-x86_32] task is not a user task pid={target_pid}")
+        return -22
+
+    val uctx = task.user_context
+    if uctx == nil:
+        log_raw_println("[syscall14-x86_32] task has no user_context pid={target_pid}")
+        return -22
+
+    val ctx: TaskContext = uctx.unwrap()
+    val cr3 = task.address_space as u32
+    log_raw_println("[syscall14-x86_32] entering ring-3 pid={target_pid} eip={ctx.rip} cr3={cr3}")
+    arch_x86_32_enter_user_task(ctx, cr3)
+    -22

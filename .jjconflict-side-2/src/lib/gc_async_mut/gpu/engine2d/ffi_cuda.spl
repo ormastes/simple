@@ -1,0 +1,170 @@
+"""CUDA FFI Dispatch — Static/Dynamic Dual-Path
+
+@tag:stdlib
+@tag:gpu
+
+Wraps CUDA Driver API functions behind a CudaFfi class supporting
+both static (extern fn rt_cuda_*) and dynamic (DynLib libcuda.so) dispatch.
+
+Usage:
+    val ffi = CudaFfi.create(GpuFfiMode.Dynamic)
+    if ffi.is_available():
+        ffi.init()
+"""
+
+use std.ffi.dynamic.{DynLib}
+use std.gpu.engine2d.ffi_dispatch.{GpuFfiMode, FfiDispatchBase, try_load_gpu_lib}
+
+# ============================================================================
+# Static extern declarations
+# ============================================================================
+
+extern fn rt_cuda_available() -> bool
+extern fn rt_cuda_init() -> bool
+extern fn rt_cuda_shutdown() -> bool
+extern fn rt_cuda_device_count() -> i64
+extern fn rt_cuda_device_get(id: i64) -> i64
+extern fn rt_cuda_ctx_create(device: i64) -> i64
+extern fn rt_cuda_ctx_destroy(ctx: i64) -> bool
+extern fn rt_cuda_module_load(ptx: text) -> i64
+extern fn rt_cuda_module_unload(module: i64) -> bool
+extern fn rt_cuda_kernel_get(module: i64, name: text) -> i64
+extern fn rt_cuda_launch_kernel(kernel: i64, gx: i64, gy: i64, gz: i64, bx: i64, by: i64, bz: i64, shared_mem: i64, args_ptr: i64) -> bool
+extern fn rt_cuda_mem_alloc(size: i64) -> i64
+extern fn rt_cuda_mem_free(ptr: i64) -> bool
+extern fn rt_cuda_memcpy_htod(dst: i64, src: [u8], size: i64) -> bool
+extern fn rt_cuda_memcpy_dtoh(dst: [u8], src: i64, size: i64) -> bool
+extern fn rt_cuda_synchronize() -> bool
+
+# ============================================================================
+# CudaFfi
+# ============================================================================
+
+class CudaFfi:
+    _mode: GpuFfiMode
+    _dyn_lib: DynLib?
+
+impl CudaFfi: FfiDispatchBase
+
+    fn mode() -> GpuFfiMode:
+        self._mode
+
+    fn api_name() -> text:
+        "CUDA Driver API"
+
+    static fn create_static() -> CudaFfi:
+        CudaFfi(_mode: GpuFfiMode.Static, _dyn_lib: nil)
+
+    static fn create_dynamic() -> CudaFfi?:
+        val lib = try_load_gpu_lib("cuda")
+        if lib == nil:
+            return nil
+        CudaFfi(_mode: GpuFfiMode.Dynamic, _dyn_lib: lib)
+
+    static fn create_dynamic_from(path: text) -> CudaFfi?:
+        val lib = DynLib.load(path)
+        if lib == nil:
+            return nil
+        CudaFfi(_mode: GpuFfiMode.Dynamic, _dyn_lib: lib)
+
+    static fn create(ffi_mode: GpuFfiMode) -> CudaFfi?:
+        match ffi_mode:
+            case Dynamic:
+                val dyn_ffi = CudaFfi.create_dynamic()
+                if dyn_ffi != nil:
+                    return dyn_ffi
+                CudaFfi.create_static()
+            case Static:
+                CudaFfi.create_static()
+
+    fn is_available() -> bool:
+        match self._mode:
+            case Static: rt_cuda_available()
+            case Dynamic:
+                if self._dyn_lib != nil:
+                    val result = self._dyn_lib.call0("cuInit")
+                    result == 0
+                else:
+                    false
+
+    fn init() -> bool:
+        match self._mode:
+            case Static: rt_cuda_init()
+            case Dynamic:
+                if self._dyn_lib != nil:
+                    val result = self._dyn_lib.call1("cuInit", 0)
+                    result == 0
+                else:
+                    false
+
+    fn shutdown() -> bool:
+        match self._mode:
+            case Static: rt_cuda_shutdown()
+            case Dynamic: true
+
+    fn device_count() -> i64:
+        match self._mode:
+            case Static: rt_cuda_device_count()
+            case Dynamic:
+                if self._dyn_lib != nil:
+                    self._dyn_lib.call0("cuDeviceGetCount")
+                else:
+                    0
+
+    fn ctx_create(device: i64) -> i64:
+        match self._mode:
+            case Static: rt_cuda_ctx_create(device)
+            case Dynamic:
+                if self._dyn_lib != nil:
+                    self._dyn_lib.call2("cuCtxCreate", 0, device)
+                else:
+                    0
+
+    fn module_load_ptx(ptx: text) -> i64:
+        match self._mode:
+            case Static: rt_cuda_module_load(ptx)
+            case Dynamic: 0
+
+    fn kernel_get(module: i64, name: text) -> i64:
+        match self._mode:
+            case Static: rt_cuda_kernel_get(module, name)
+            case Dynamic: 0
+
+    fn launch_kernel(kernel: i64, gx: i64, gy: i64, gz: i64, bx: i64, by: i64, bz: i64, shared_mem: i64, args_ptr: i64) -> bool:
+        match self._mode:
+            case Static: rt_cuda_launch_kernel(kernel, gx, gy, gz, bx, by, bz, shared_mem, args_ptr)
+            case Dynamic:
+                if self._dyn_lib != nil:
+                    val result = self._dyn_lib.call_n("cuLaunchKernel", [kernel, gx, gy, gz, bx, by, bz, shared_mem, 0, args_ptr])
+                    result == 0
+                else:
+                    false
+
+    fn mem_alloc(size: i64) -> i64:
+        match self._mode:
+            case Static: rt_cuda_mem_alloc(size)
+            case Dynamic:
+                if self._dyn_lib != nil:
+                    self._dyn_lib.call1("cuMemAlloc", size)
+                else:
+                    0
+
+    fn mem_free(ptr: i64) -> bool:
+        match self._mode:
+            case Static: rt_cuda_mem_free(ptr)
+            case Dynamic:
+                if self._dyn_lib != nil:
+                    val result = self._dyn_lib.call1("cuMemFree", ptr)
+                    result == 0
+                else:
+                    false
+
+    fn synchronize() -> bool:
+        match self._mode:
+            case Static: rt_cuda_synchronize()
+            case Dynamic:
+                if self._dyn_lib != nil:
+                    val result = self._dyn_lib.call0("cuCtxSynchronize")
+                    result == 0
+                else:
+                    false

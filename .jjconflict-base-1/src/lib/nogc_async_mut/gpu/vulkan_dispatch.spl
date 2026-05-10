@@ -1,0 +1,76 @@
+"""Vulkan dispatch table: per-device/instance function pointer table (M5, REQ-9).
+
+In interpreter mode, the table is a modeled record. In compiled mode, each
+slot would hold a real vkGetDeviceProcAddr result.
+"""
+
+# ============================================================================
+# Types
+# ============================================================================
+
+class VulkanDispatch:
+    instance_handle: i64
+    device_handle:   i64
+    create_swapchain: bool
+    queue_submit:     bool
+    queue_present:    bool
+
+# ============================================================================
+# Storage
+# ============================================================================
+
+var _vd_tables:   [VulkanDispatch] = []
+var _vd_alive:    [bool]           = []
+var _vd_ctr:      i64              = 0
+
+fn _vd_find(handle: i64) -> i64:
+    val n = _vd_tables.len()
+    var i: i64 = 0
+    while i < n:
+        if _vd_alive[i] and _vd_tables[i].instance_handle == handle:
+            return i
+        i = i + 1
+    -1
+
+# ============================================================================
+# Public API
+# ============================================================================
+
+pub fn vulkan_dispatch_create(instance: i64, device: i64) -> i64:
+    """Create a dispatch table for the given instance/device pair.
+
+    Returns:
+        Positive handle > 0.
+    """
+    _vd_ctr = _vd_ctr + 1
+    val entry = VulkanDispatch(
+        instance_handle: instance,
+        device_handle: device,
+        create_swapchain: true,
+        queue_submit: true,
+        queue_present: true
+    )
+    _vd_tables.push(entry)
+    _vd_alive.push(true)
+    _vd_ctr
+
+pub fn vulkan_dispatch_has_swapchain(handle: i64) -> bool:
+    """Return true if the dispatch table has a valid swapchain slot.
+
+    Args:
+        handle: dispatch table handle
+    """
+    val row = _vd_find(handle)
+    if row == -1:
+        return false
+    _vd_tables[row].create_swapchain
+
+pub fn vulkan_dispatch_destroy(handle: i64):
+    """Release a dispatch table handle.
+
+    Args:
+        handle: dispatch table handle
+    """
+    val row = _vd_find(handle)
+    if row != -1:
+        _vd_alive[row] = false

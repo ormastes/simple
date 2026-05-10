@@ -1,0 +1,78 @@
+# CLI Socket Client
+#
+# TCP client that connects to a running session's socket server.
+# Provides helper functions for common commands.
+
+use std.nogc_sync_mut.io.tcp.{TcpStream}
+
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_exists(path: text) -> bool
+
+# =========================================================================
+# Connection Helper
+# =========================================================================
+
+fn _connect_to_session(pid: i64) -> Result<TcpStream, text>:
+    """Connect to a running session by PID using the discovery file."""
+    val discovery_path = "/tmp/simple-ui-{pid}.sock"
+    if not rt_file_exists(discovery_path):
+        return Err("Discovery file not found: {discovery_path}")
+    val addr = rt_file_read_text(discovery_path).trim()
+    if addr == "":
+        return Err("Empty discovery file")
+    return TcpStream.connect(addr)
+
+fn _send_command(stream: TcpStream, cmd: text) -> Result<text, text>:
+    """Send a command and read the response."""
+    val line = "{cmd}\n"
+    match stream.write_text(line):
+        Err(e):
+            return Err("Write error: {e}")
+        Ok(()):
+            pass_dn
+    match stream.read_line():
+        Err(e):
+            return Err("Read error: {e}")
+        Ok(response):
+            return Ok(response)
+
+# =========================================================================
+# Public API
+# =========================================================================
+
+fn cli_get_state(pid: i64) -> Result<text, text>:
+    """Get the current state from a running session."""
+    match _connect_to_session(pid):
+        Err(e): return Err(e)
+        Ok(stream):
+            val result = _send_command(stream, "{\"command\": \"get_state\"}")
+            match stream.close():
+                Err(_): pass_dn
+                Ok(()): pass_dn
+            return result
+
+fn cli_get_changes(pid: i64, count: i32) -> Result<text, text>:
+    """Get recent changes from a running session."""
+    match _connect_to_session(pid):
+        Err(e): return Err(e)
+        Ok(stream):
+            val result = _send_command(stream, "{\"command\": \"get_changes\", \"count\": {count}}")
+            match stream.close():
+                Err(_): pass_dn
+                Ok(()): pass_dn
+            return result
+
+fn cli_subscribe(pid: i64) -> Result<TcpStream, text>:
+    """Subscribe to a running session (returns open stream for reading)."""
+    match _connect_to_session(pid):
+        Err(e): return Err(e)
+        Ok(stream):
+            match _send_command(stream, "{\"command\": \"subscribe\"}"):
+                Err(e):
+                    match stream.close():
+                        Err(_): pass_dn
+                        Ok(()): pass_dn
+                    return Err(e)
+                Ok(initial):
+                    # Stream stays open for subsequent events
+                    return Ok(stream)

@@ -1,0 +1,537 @@
+# Skia Vulkan Backend
+#
+# GPU-accelerated rendering via Vulkan.
+# PaintOp→vkCmd translator: pipeline cache, triangulation, command buffer recording.
+# Actual vkQueueSubmit / ioctl edge is pass_todo in submit().
+
+use std.skia.entity.canvas.{SkCanvas, sk_canvas_make}
+use std.skia.entity.image.{SkImage, SkImageInfo, sk_image_info_n32_premul}
+use std.skia.entity.geometry.{SkIRect, SkRect, SkPoint}
+use std.skia.entity.picture.{SkPicture, SkPictureOp, SkPictureOpKind}
+use std.skia.entity.paint.{SkPaint, sk_paint_new}
+use std.skia.entity.path.{SkPath, SkPathVerb, SkPathSegment}
+use std.skia.entity.enums.{SkBlendMode, SkPaintStyle}
+use std.skia.capability.{SkCapability, sk_capability_vulkan}
+
+# ============================================================================
+# SkVulkanContext — opaque Vulkan device/queue context
+# ============================================================================
+
+class SkVulkanContext:
+    device_index: i64
+    is_initialized: bool
+
+fn sk_vulkan_context_default() -> SkVulkanContext:
+    SkVulkanContext(device_index: 0, is_initialized: false)
+
+fn sk_vulkan_context_init(device_index: i64) -> SkVulkanContext:
+    pass_todo
+
+impl SkVulkanContext:
+    fn is_valid() -> bool:
+        self.is_initialized
+
+    fn flush() -> SkVulkanContext:
+        pass_todo
+
+    fn wait() -> SkVulkanContext:
+        pass_todo
+
+# ============================================================================
+# SkVulkanSurface — Vulkan-backed rendering surface
+# ============================================================================
+
+class SkVulkanSurface:
+    info: SkImageInfo
+    context: SkVulkanContext
+    canvas: SkCanvas
+
+fn sk_vulkan_surface_make(ctx: SkVulkanContext, width: i64, height: i64) -> SkVulkanSurface:
+    pass_todo
+
+impl SkVulkanSurface:
+    fn canvas() -> SkCanvas:
+        self.canvas
+
+    fn capability() -> SkCapability:
+        sk_capability_vulkan()
+
+    fn width() -> i64:
+        self.info.width
+
+    fn height() -> i64:
+        self.info.height
+
+    fn snapshot() -> SkImage:
+        pass_todo
+
+    fn read_pixels(dst_rect: SkIRect) -> [i64]:
+        pass_todo
+
+    fn flush() -> SkVulkanSurface:
+        pass_todo
+
+# ============================================================================
+# ShaderKind — which shader variant to use for a given paint
+# ============================================================================
+
+enum ShaderKind:
+    SolidColor
+    LinearGradient
+    RadialGradient
+    Pattern
+
+# ============================================================================
+# PipelineKey — hashable cache key derived from SkPaint state
+# ============================================================================
+
+class PipelineKey:
+    blend_mode: SkBlendMode
+    style: SkPaintStyle
+    shader_kind: ShaderKind
+
+fn _blend_mode_to_i64(bm: SkBlendMode) -> i64:
+    if bm == SkBlendMode.Clear:       0
+    else: if bm == SkBlendMode.Src:   1
+    else: if bm == SkBlendMode.Dst:   2
+    else: if bm == SkBlendMode.SrcOver: 3
+    else: if bm == SkBlendMode.DstOver: 4
+    else: if bm == SkBlendMode.SrcIn:  5
+    else: if bm == SkBlendMode.DstIn:  6
+    else: if bm == SkBlendMode.SrcOut: 7
+    else: if bm == SkBlendMode.DstOut: 8
+    else: if bm == SkBlendMode.SrcATop: 9
+    else: if bm == SkBlendMode.DstATop: 10
+    else: if bm == SkBlendMode.Xor:    11
+    else: if bm == SkBlendMode.Plus:   12
+    else: if bm == SkBlendMode.Modulate: 13
+    else: if bm == SkBlendMode.Screen:  14
+    else: if bm == SkBlendMode.Overlay: 15
+    else: if bm == SkBlendMode.Darken:  16
+    else: if bm == SkBlendMode.Lighten: 17
+    else: if bm == SkBlendMode.Multiply: 18
+    else: 99
+
+fn _style_to_i64(s: SkPaintStyle) -> i64:
+    if s == SkPaintStyle.Fill:          0
+    else: if s == SkPaintStyle.Stroke:  1
+    else:                               2
+
+fn _shader_kind_to_i64(sk: ShaderKind) -> i64:
+    if sk == ShaderKind.SolidColor:      0
+    else: if sk == ShaderKind.LinearGradient: 1
+    else: if sk == ShaderKind.RadialGradient: 2
+    else:                                3
+
+impl PipelineKey:
+    fn hash() -> i64:
+        val bm_i  = _blend_mode_to_i64(self.blend_mode)
+        val sty_i = _style_to_i64(self.style)
+        val shd_i = _shader_kind_to_i64(self.shader_kind)
+        bm_i * 10000 + sty_i * 100 + shd_i
+
+    fn equals(other: PipelineKey) -> bool:
+        (self.blend_mode == other.blend_mode) and
+        (self.style == other.style) and
+        (self.shader_kind == other.shader_kind)
+
+# ============================================================================
+# ShaderModule — which shader was selected (pure data record)
+# ============================================================================
+
+class ShaderModule:
+    kind: ShaderKind
+    blend_mode: SkBlendMode
+    vert_entry: text
+    frag_entry: text
+
+# ============================================================================
+# Pipeline — compiled pipeline entry
+# ============================================================================
+
+class Pipeline:
+    key: PipelineKey
+    shader: ShaderModule
+    pipeline_id: i64
+
+# ============================================================================
+# PipelineCacheEntry — single slot in the cache
+# ============================================================================
+
+class PipelineCacheEntry:
+    key: PipelineKey
+    pipeline: Pipeline
+
+# ============================================================================
+# Vertex — 2D position for GPU triangles
+# ============================================================================
+
+class Vertex:
+    x: f64
+    y: f64
+
+# ============================================================================
+# VertexBuffer — GPU vertex buffer (pure data)
+# ============================================================================
+
+class VertexBuffer:
+    vertices: [Vertex]
+    byte_count: i64
+
+# ============================================================================
+# DescriptorSet — descriptor set record
+# ============================================================================
+
+class DescriptorSet:
+    key: PipelineKey
+    set_id: i64
+
+# ============================================================================
+# RenderPassDesc — render pass descriptor for a save-layer
+# ============================================================================
+
+class RenderPassDesc:
+    bounds: SkRect
+    load_op: text
+    store_op: text
+
+# ============================================================================
+# VkCommand — a single recorded Vulkan-like command
+# ============================================================================
+
+enum VkCommandKind:
+    BindPipeline
+    BindVertexBuffer
+    BindDescriptorSet
+    Draw
+    BeginRenderPass
+    EndRenderPass
+
+class VkCommand:
+    kind: VkCommandKind
+    pipeline_id: i64
+    vertex_count: i64
+    descriptor_set_id: i64
+    render_pass_bounds: SkRect
+
+# ============================================================================
+# CommandBufferRecord — the output of render_picture
+# ============================================================================
+
+class CommandBufferRecord:
+    commands: [VkCommand]
+    pipeline_cache_hits: i64
+    unique_pipelines: i64
+
+# ============================================================================
+# Internal helpers
+# ============================================================================
+
+fn _paint_to_shader_kind(paint: SkPaint) -> ShaderKind:
+    # For now every paint resolves to SolidColor (no gradient shader attached)
+    ShaderKind.SolidColor
+
+fn _paint_to_pipeline_key(paint: SkPaint) -> PipelineKey:
+    val kind = _paint_to_shader_kind(paint)
+    PipelineKey(blend_mode: paint.blend_mode, style: paint.style, shader_kind: kind)
+
+fn _compile_pipeline(key: PipelineKey, id: i64) -> Pipeline:
+    val shader = ShaderModule(
+        kind: key.shader_kind,
+        blend_mode: key.blend_mode,
+        vert_entry: "vs_main",
+        frag_entry: "fs_main"
+    )
+    Pipeline(key: key, shader: shader, pipeline_id: id)
+
+fn _find_cached_pipeline(cache: [PipelineCacheEntry], key: PipelineKey) -> Option<Pipeline>:
+    var i = 0
+    var result = None as Option<Pipeline>
+    while i < cache.len():
+        val entry = cache[i]
+        if entry.key.equals(key):
+            result = Some(entry.pipeline)
+        i = i + 1
+    result
+
+# ============================================================================
+# Path flattening — collect polygon vertices from SkPath segments
+# ============================================================================
+
+fn _flatten_path(path: SkPath) -> [Vertex]:
+    var pts = [Vertex]()
+    var cur_x = 0.0
+    var cur_y = 0.0
+    var start_x = 0.0
+    var start_y = 0.0
+    var i = 0
+    while i < path.segments.len():
+        val seg = path.segments[i]
+        if seg.verb == SkPathVerb.Move:
+            cur_x = seg.pts[0].x
+            cur_y = seg.pts[0].y
+            start_x = cur_x
+            start_y = cur_y
+            pts.push(Vertex(x: cur_x, y: cur_y))
+        else:
+            if seg.verb == SkPathVerb.Line:
+                cur_x = seg.pts[0].x
+                cur_y = seg.pts[0].y
+                pts.push(Vertex(x: cur_x, y: cur_y))
+            else:
+                if seg.verb == SkPathVerb.Close:
+                    cur_x = start_x
+                    cur_y = start_y
+                else:
+                    if seg.verb == SkPathVerb.Quad:
+                        val p1x = seg.pts[0].x
+                        val p1y = seg.pts[0].y
+                        val p2x = seg.pts[1].x
+                        val p2y = seg.pts[1].y
+                        var step = 1
+                        var prev_x = cur_x
+                        var prev_y = cur_y
+                        while step <= 8:
+                            val t = (step as f64) / 8.0
+                            val mt = 1.0 - t
+                            val nx = mt * mt * cur_x + 2.0 * mt * t * p1x + t * t * p2x
+                            val ny = mt * mt * cur_y + 2.0 * mt * t * p1y + t * t * p2y
+                            pts.push(Vertex(x: nx, y: ny))
+                            prev_x = nx
+                            prev_y = ny
+                            step = step + 1
+                        cur_x = p2x
+                        cur_y = p2y
+                    else:
+                        if seg.verb == SkPathVerb.Cubic:
+                            val p1x = seg.pts[0].x
+                            val p1y = seg.pts[0].y
+                            val p2x = seg.pts[1].x
+                            val p2y = seg.pts[1].y
+                            val p3x = seg.pts[2].x
+                            val p3y = seg.pts[2].y
+                            var step = 1
+                            var prev_x = cur_x
+                            var prev_y = cur_y
+                            while step <= 16:
+                                val t = (step as f64) / 16.0
+                                val mt = 1.0 - t
+                                val nx = mt*mt*mt*cur_x + 3.0*mt*mt*t*p1x + 3.0*mt*t*t*p2x + t*t*t*p3x
+                                val ny = mt*mt*mt*cur_y + 3.0*mt*mt*t*p1y + 3.0*mt*t*t*p2y + t*t*t*p3y
+                                pts.push(Vertex(x: nx, y: ny))
+                                prev_x = nx
+                                prev_y = ny
+                                step = step + 1
+                            cur_x = p3x
+                            cur_y = p3y
+                        else:
+                            pass_do_nothing
+        i = i + 1
+    pts
+
+# ============================================================================
+# Ear-clipping triangulation helpers
+# ============================================================================
+
+fn _cross2d(ax: f64, ay: f64, bx: f64, by: f64, cx: f64, cy: f64) -> f64:
+    (bx - ax) * (cy - ay) - (by - ay) * (cx - ax)
+
+fn _point_in_triangle(px: f64, py: f64, ax: f64, ay: f64, bx: f64, by: f64, cx: f64, cy: f64) -> bool:
+    val d1 = _cross2d(ax, ay, bx, by, px, py)
+    val d2 = _cross2d(bx, by, cx, cy, px, py)
+    val d3 = _cross2d(cx, cy, ax, ay, px, py)
+    val has_neg = (d1 < 0.0) or (d2 < 0.0) or (d3 < 0.0)
+    val has_pos = (d1 > 0.0) or (d2 > 0.0) or (d3 > 0.0)
+    not (has_neg and has_pos)
+
+fn _is_ear(poly: [Vertex], i: i64, indices: [i64]) -> bool:
+    val n = indices.len()
+    if n < 3:
+        false
+    else:
+        var prev_idx = 0
+        var next_idx = 0
+        var k = 0
+        while k < n:
+            if indices[k] == i:
+                prev_idx = if k == 0: indices[n - 1] else: indices[k - 1]
+                next_idx = if k == n - 1: indices[0] else: indices[k + 1]
+            k = k + 1
+        val ax = poly[prev_idx].x
+        val ay = poly[prev_idx].y
+        val bx = poly[i].x
+        val by = poly[i].y
+        val cx = poly[next_idx].x
+        val cy = poly[next_idx].y
+        val cross = _cross2d(ax, ay, bx, by, cx, cy)
+        if cross <= 0.0:
+            false
+        else:
+            var any_inside = false
+            var j = 0
+            while j < poly.len():
+                if j != prev_idx and j != i and j != next_idx:
+                    val px = poly[j].x
+                    val py = poly[j].y
+                    if _point_in_triangle(px, py, ax, ay, bx, by, cx, cy):
+                        any_inside = true
+                j = j + 1
+            not any_inside
+
+fn _remove_at(lst: [i64], pos: i64) -> [i64]:
+    var result = [i64]()
+    var k = 0
+    while k < lst.len():
+        if k != pos:
+            result.push(lst[k])
+        k = k + 1
+    result
+
+# ============================================================================
+# triangulate_path — ear-clipping over flattened path polygon
+# ============================================================================
+
+fn triangulate_path(path: SkPath) -> [Vertex]:
+    val poly = _flatten_path(path)
+    val n = poly.len()
+    if n < 3:
+        [Vertex]()
+    else:
+        var indices = [i64]()
+        var k = 0
+        while k < n:
+            indices.push(k)
+            k = k + 1
+        var triangles = [Vertex]()
+        var safety = n * n + 10
+        var iter = 0
+        while indices.len() >= 3 and iter < safety:
+            val m = indices.len()
+            var ear_found = false
+            var ei = 0
+            while ei < m and not ear_found:
+                val idx = indices[ei]
+                if _is_ear(poly, idx, indices):
+                    var prev_pos = if ei == 0: m - 1 else: ei - 1
+                    var next_pos = if ei == m - 1: 0 else: ei + 1
+                    val prev_idx = indices[prev_pos]
+                    val next_idx = indices[next_pos]
+                    triangles.push(poly[prev_idx])
+                    triangles.push(poly[idx])
+                    triangles.push(poly[next_idx])
+                    indices = _remove_at(indices, ei)
+                    ear_found = true
+                ei = ei + 1
+            if not ear_found:
+                # degenerate — force remove first to avoid infinite loop
+                indices = _remove_at(indices, 0)
+            iter = iter + 1
+        triangles
+
+# ============================================================================
+# build_vertex_buffer — wrap triangle list with byte count
+# Each vertex is 2 × f64 = 16 bytes
+# ============================================================================
+
+fn build_vertex_buffer(triangles: [Vertex]) -> VertexBuffer:
+    val byte_count = triangles.len() * 16
+    VertexBuffer(vertices: triangles, byte_count: byte_count)
+
+# ============================================================================
+# compile_shader_module — select shader based on paint state (pure data)
+# ============================================================================
+
+fn compile_shader_module(paint: SkPaint) -> ShaderModule:
+    val kind = _paint_to_shader_kind(paint)
+    ShaderModule(
+        kind: kind,
+        blend_mode: paint.blend_mode,
+        vert_entry: "vs_main",
+        frag_entry: "fs_main"
+    )
+
+# ============================================================================
+# allocate_descriptor_set — allocate a descriptor set for a pipeline key
+# ============================================================================
+
+fn allocate_descriptor_set(key: PipelineKey) -> DescriptorSet:
+    val set_id = key.hash()
+    DescriptorSet(key: key, set_id: set_id)
+
+# ============================================================================
+# render_pass_for_save_layer — build render pass descriptor for bounds
+# ============================================================================
+
+fn render_pass_for_save_layer(bounds: SkRect) -> RenderPassDesc:
+    RenderPassDesc(bounds: bounds, load_op: "clear", store_op: "store")
+
+# ============================================================================
+# VulkanBackend — main translator: PaintOp → vkCmd
+# ============================================================================
+
+class VulkanBackend:
+    pipeline_cache: [PipelineCacheEntry]
+    next_pipeline_id: i64
+
+fn vk_backend_new() -> VulkanBackend:
+    VulkanBackend(pipeline_cache: [PipelineCacheEntry](), next_pipeline_id: 1)
+
+impl VulkanBackend:
+    # Look up or compile a pipeline for the given paint
+    me get_or_compile_pipeline(paint: SkPaint) -> Pipeline:
+        val key = _paint_to_pipeline_key(paint)
+        val cached = _find_cached_pipeline(me.pipeline_cache, key)
+        if val p = cached:
+            p
+        else:
+            val id = me.next_pipeline_id
+            val pipeline = _compile_pipeline(key, id)
+            val entry = PipelineCacheEntry(key: key, pipeline: pipeline)
+            me.pipeline_cache.push(entry)
+            me.next_pipeline_id = me.next_pipeline_id + 1
+            pipeline
+
+    # Render a recorded picture into a CommandBufferRecord
+    me render_picture(picture: SkPicture, cull: SkRect) -> CommandBufferRecord:
+        var commands = [VkCommand]()
+        var cache_hits = 0 as i64
+        var op_idx = 0
+        # Walk op_count ops — for each op emit pipeline bind + draw
+        # (SkPicture stores op_count; actual ops would come from a real recorder)
+        while op_idx < picture.op_count:
+            val paint = sk_paint_new()
+            val key = _paint_to_pipeline_key(paint)
+            val cached = _find_cached_pipeline(me.pipeline_cache, key)
+            val pipeline = if val p = cached:
+                cache_hits = cache_hits + 1
+                p
+            else:
+                val p2 = me.get_or_compile_pipeline(paint)
+                p2
+            val bind_cmd = VkCommand(
+                kind: VkCommandKind.BindPipeline,
+                pipeline_id: pipeline.pipeline_id,
+                vertex_count: 0,
+                descriptor_set_id: 0,
+                render_pass_bounds: cull
+            )
+            commands.push(bind_cmd)
+            val draw_cmd = VkCommand(
+                kind: VkCommandKind.Draw,
+                pipeline_id: pipeline.pipeline_id,
+                vertex_count: 3,
+                descriptor_set_id: 0,
+                render_pass_bounds: cull
+            )
+            commands.push(draw_cmd)
+            op_idx = op_idx + 1
+        val unique = me.pipeline_cache.len() as i64
+        CommandBufferRecord(
+            commands: commands,
+            pipeline_cache_hits: cache_hits,
+            unique_pipelines: unique
+        )
+
+    # Submit is the ioctl edge — real GPU submission is pass_todo
+    me submit(cb: CommandBufferRecord):
+        pass_todo

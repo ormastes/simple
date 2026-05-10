@@ -1,0 +1,106 @@
+# SimpleOS Kernel Replay — Divergence Tracking
+#
+# When Verify mode detects a mismatch between a recorded event and the
+# live value, hooks call report_divergence() to log the discrepancy.
+# The divergence log is a simple growable array — no heap-free ring
+# needed because divergence tracking is a diagnostic feature, not a
+# hot recording path.
+
+# ============================================================================
+# Divergence Kind Enum
+# ============================================================================
+
+enum DivergenceKind:
+    ScheduleMismatch
+    SyscallMismatch
+    IrqMismatch
+    TimerMismatch
+    RandomMismatch
+    IpcMismatch
+    ThreadMismatch
+    CheckpointMismatch
+
+impl DivergenceKind:
+    fn to_i32() -> i32:
+        match self:
+            case DivergenceKind.ScheduleMismatch: 0
+            case DivergenceKind.SyscallMismatch: 1
+            case DivergenceKind.IrqMismatch: 2
+            case DivergenceKind.TimerMismatch: 3
+            case DivergenceKind.RandomMismatch: 4
+            case DivergenceKind.IpcMismatch: 5
+            case DivergenceKind.ThreadMismatch: 6
+            case DivergenceKind.CheckpointMismatch: 7
+
+    static fn from_i32(v: i32) -> DivergenceKind:
+        match v:
+            case 0: DivergenceKind.ScheduleMismatch
+            case 1: DivergenceKind.SyscallMismatch
+            case 2: DivergenceKind.IrqMismatch
+            case 3: DivergenceKind.TimerMismatch
+            case 4: DivergenceKind.RandomMismatch
+            case 5: DivergenceKind.IpcMismatch
+            case 6: DivergenceKind.ThreadMismatch
+            case _: DivergenceKind.CheckpointMismatch
+
+    fn to_text() -> text:
+        match self:
+            case DivergenceKind.ScheduleMismatch: "schedule-mismatch"
+            case DivergenceKind.SyscallMismatch: "syscall-mismatch"
+            case DivergenceKind.IrqMismatch: "irq-mismatch"
+            case DivergenceKind.TimerMismatch: "timer-mismatch"
+            case DivergenceKind.RandomMismatch: "random-mismatch"
+            case DivergenceKind.IpcMismatch: "ipc-mismatch"
+            case DivergenceKind.ThreadMismatch: "thread-mismatch"
+            case DivergenceKind.CheckpointMismatch: "checkpoint-mismatch"
+
+# ============================================================================
+# Divergence Record
+# ============================================================================
+
+struct DivergenceRecord:
+    kind: DivergenceKind
+    event_id: i64
+    expected: i64
+    actual: i64
+    timestamp: i64
+
+# ============================================================================
+# Global Divergence Log
+# ============================================================================
+
+var divergence_log: [DivergenceRecord] = []
+var divergence_count: i64 = 0
+
+# ============================================================================
+# Public API
+# ============================================================================
+
+fn report_divergence(kind: DivergenceKind, event_id: i64, expected: i64, actual: i64):
+    val record = DivergenceRecord(
+        kind: kind,
+        event_id: event_id,
+        expected: expected,
+        actual: actual,
+        timestamp: divergence_count
+    )
+    divergence_log.push(record)
+    divergence_count = divergence_count + 1
+
+fn get_divergence_count() -> i64:
+    divergence_count
+
+fn get_divergence(index: i32) -> Option<DivergenceRecord>:
+    if index < 0:
+        return None
+    val idx = index as i64
+    if idx >= divergence_log.len():
+        return None
+    Some(divergence_log[idx])
+
+fn clear_divergences():
+    divergence_log = []
+    divergence_count = 0
+
+fn has_diverged() -> bool:
+    divergence_count > 0

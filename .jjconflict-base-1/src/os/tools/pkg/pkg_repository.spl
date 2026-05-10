@@ -1,0 +1,220 @@
+# Package Repository — Index Management
+# MDSOC: feature dimension, apps layer
+
+use os.tools.pkg.pkg_manifest.{PackageManifest, parse_manifest}
+use os.userlib.fs.{read_text, write_text}
+use os.userlib.net.{IpAddr, SockAddr, Socket, socket, connect, send, recv}
+use app.ui.web.tls_client.{TlsClient}
+
+struct Repository:
+    name: text
+    url: text
+
+struct PackageIndex:
+    packages: [PackageManifest]
+
+fn load_repositories() -> Result<[Repository], text>:
+    """Load repository list from /etc/pkg/repos.sdn."""
+    val content = read_text("/etc/pkg/repos.sdn")
+    if content == "":
+        return Result.Ok([Repository(name: "local", url: "/pkg/repo/local")])
+
+    var repos: [Repository] = []
+    val lines = content.split("\n")
+    for line in lines:
+        val trimmed = line.trim()
+        if trimmed == "" or trimmed.starts_with("#") or trimmed.starts_with("["):
+            pass_dn
+        else:
+            # Format: name = "url"
+            val eq_idx = trimmed.index_of("=")
+            if eq_idx > 0:
+                val name = trimmed.slice(0, eq_idx).trim()
+                var url = trimmed.slice(eq_idx + 1, trimmed.len()).trim()
+                if url.starts_with("\""):
+                    url = url.slice(1, url.len())
+                if url.ends_with("\""):
+                    url = url.slice(0, url.len() - 1)
+                repos.push(Repository(name: name, url: url))
+
+    return Result.Ok(repos)
+
+fn parse_http_url(url: text) -> (text, i32, text):
+    """Parse an HTTP URL into (host, port, path).
+
+    Examples:
+      "http://repo.example.com/index.sdn"      -> ("repo.example.com", 80, "/index.sdn")
+      "http://repo.example.com:8080/index.sdn" -> ("repo.example.com", 8080, "/index.sdn")
+      "http://repo.example.com"                -> ("repo.example.com", 80, "/")
+    """
+    var rest = url
+    if rest.starts_with("http://"):
+        rest = rest.slice(7, rest.len())
+    elif rest.starts_with("https://"):
+        rest = rest.slice(8, rest.len())
+
+    var host_port = rest
+    var path = "/"
+    val slash_idx = rest.index_of("/")
+    if slash_idx >= 0:
+        host_port = rest.slice(0, slash_idx)
+        path = rest.slice(slash_idx, rest.len())
+
+    var host = host_port
+    var port: i32 = 80
+    if url.starts_with("https://"):
+        port = 443
+    val colon_idx = host_port.index_of(":")
+    if colon_idx >= 0:
+        host = host_port.slice(0, colon_idx)
+        val port_text = host_port.slice(colon_idx + 1, host_port.len())
+        port = port_text.parse_i32()
+
+    return (host, port, path)
+
+fn _http_get(host: text, port: i32, path: text) -> Result<text, text>:
+    """Perform HTTP GET and return the response body."""
+    val ip_result = IpAddr.from_text(host)
+    if val Err(msg) = ip_result:
+        return Result.Err("Cannot resolve host '{host}': {msg}")
+    val ip = ip_result.unwrap()
+
+    val sock_result = socket(2, 1)
+    if val Err(msg) = sock_result:
+        return Result.Err("socket: {msg}")
+    val sock = sock_result.unwrap()
+
+    val addr = SockAddr(ip: ip, port: port as u16)
+    val conn_result = connect(sock, addr)
+    if val Err(msg) = conn_result:
+        return Result.Err("connect: {msg}")
+
+    val request = "GET {path} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n"
+    val send_result = send(sock, request.as_bytes())
+    if val Err(msg) = send_result:
+        return Result.Err("send: {msg}")
+
+    val recv_result = recv(sock, 65536)
+    if val Err(msg) = recv_result:
+        return Result.Err("recv: {msg}")
+    val raw = recv_result.unwrap().as_text()
+
+    val separator = "\r\n\r\n"
+    val sep_idx = raw.index_of(separator)
+    if sep_idx >= 0:
+        return Result.Ok(raw.slice(sep_idx + 4, raw.len()))
+    return Result.Ok(raw)
+
+fn _https_get(host: text, port: i32, path: text) -> Result<text, text>:
+    """Perform HTTPS GET via TlsClient and return the response body."""
+    val handle_result = TlsClient.connect(host, port)
+    if val Err(msg) = handle_result:
+        return Result.Err("TLS connect: {msg}")
+    val handle = handle_result.unwrap()
+
+    val request = "GET {path} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n"
+    val write_result = TlsClient.write(handle, request)
+    if val Err(msg) = write_result:
+        TlsClient.close(handle)
+        return Result.Err("TLS write: {msg}")
+
+    val read_result = TlsClient.read(handle, 65536)
+    TlsClient.close(handle)
+    if val Err(msg) = read_result:
+        return Result.Err("TLS read: {msg}")
+    val raw = read_result.unwrap()
+
+    val separator = "\r\n\r\n"
+    val sep_idx = raw.index_of(separator)
+    if sep_idx >= 0:
+        return Result.Ok(raw.slice(sep_idx + 4, raw.len()))
+    return Result.Ok(raw)
+
+fn fetch_index(repo: Repository) -> Result<PackageIndex, text>:
+    """Fetch package index from a repository.
+
+    For local repos: reads /pkg/repo/<name>/index.sdn
+    For remote repos: HTTP GET <url>/index.sdn
+    """
+    if repo.url.starts_with("http://") or repo.url.starts_with("https://"):
+        val parsed = parse_http_url(repo.url)
+        val host = parsed.0
+        val port = parsed.1
+        var path = parsed.2
+        # Append /index.sdn if path is just "/"
+        if path == "/" or path == "":
+            path = "/index.sdn"
+
+        var body_result: Result<text, text>
+        if repo.url.starts_with("https://"):
+            body_result = _https_get(host, port, path)
+        else:
+            body_result = _http_get(host, port, path)
+        if val Err(msg) = body_result:
+            return Result.Err("fetch_index: {msg}")
+        val body = body_result.unwrap()
+        if body == "":
+            return Result.Ok(PackageIndex(packages: []))
+        return _parse_index(body)
+
+    # Local repository
+    val index_path = "{repo.url}/index.sdn"
+    val content = read_text(index_path)
+    if content == "":
+        return Result.Ok(PackageIndex(packages: []))
+
+    return _parse_index(content)
+
+fn search(index: PackageIndex, query: text) -> [PackageManifest]:
+    """Search packages by name or description."""
+    var results: [PackageManifest] = []
+    val lower_query = query.lower()
+    for pkg in index.packages:
+        val name_match = pkg.name.lower().contains(lower_query)
+        val desc_match = pkg.description.lower().contains(lower_query)
+        if name_match or desc_match:
+            results.push(pkg)
+    return results
+
+fn load_local_index() -> Result<PackageIndex, text>:
+    """Load the local (bundled) package index from /pkg/repo/local/index.sdn."""
+    val content = read_text("/pkg/repo/local/index.sdn")
+    if content == "":
+        return Result.Ok(PackageIndex(packages: []))
+    return _parse_index(content)
+
+fn save_index_cache(repo_name: text, index: PackageIndex) -> Result<bool, text>:
+    """Cache a fetched index to /var/cache/pkg/<name>/index.sdn."""
+    var content = ""
+    for pkg in index.packages:
+        content = content + "[package]\n"
+        content = content + "name = \"{pkg.name}\"\n"
+        content = content + "version = \"{pkg.version.to_text()}\"\n"
+        content = content + "description = \"{pkg.description}\"\n"
+        content = content + "\n"
+
+    val cache_path = "/var/cache/pkg/{repo_name}/index.sdn"
+    write_text(cache_path, content)
+    return Result.Ok(true)
+
+fn _parse_index(content: text) -> Result<PackageIndex, text>:
+    """Parse a multi-package index file.
+
+    Each package separated by [package] headers.
+    """
+    var packages: [PackageManifest] = []
+    val sections = content.split("[package]")
+
+    for section in sections:
+        val trimmed = section.trim()
+        if trimmed == "":
+            pass_dn
+        else:
+            # Re-add the header for the parser
+            val manifest_text = "[package]\n{trimmed}"
+            val result = parse_manifest(manifest_text)
+            if val Ok(manifest) = result:
+                packages.push(manifest)
+            # Skip malformed entries silently
+
+    return Result.Ok(PackageIndex(packages: packages))

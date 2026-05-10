@@ -1,0 +1,593 @@
+# BSON (Binary JSON) Encoder / Decoder
+# Implements the BSON specification: https://bsonspec.org/spec.html
+#
+# Supported types:
+#   0x01 Double (f64) — NOTE: deferred; Simple lacks IEEE-754 bit-level access.
+#          Encodes as 8 zero bytes; decodes to Double(0.0). File a feature
+#          request for rt_f64_to_bits / rt_f64_from_bits to unblock.
+#   0x02 String (text)
+#   0x03 Document (embedded doc)
+#   0x04 Array (subdocument with keys "0","1",...)
+#   0x05 Binary (subtype byte + raw bytes)
+#   0x06 Undefined (deprecated, parsed as Undefined)
+#   0x07 ObjectId (12 bytes)
+#   0x08 Boolean
+#   0x09 UTC Datetime (i64 ms since epoch)
+#   0x0A Null
+#   0x0B Regex (pattern cstring + options cstring)
+#   0x10 Int32
+#   0x11 Timestamp (8 bytes, MongoDB internal — stored as i64)
+#   0x12 Int64
+#   0x13 Decimal128 — NOTE: deferred; 16 opaque bytes, stored as [u8].
+#   0xFF MinKey (no payload)
+#   0x7F MaxKey (no payload)
+#
+# NOTE: All numeric types are stored as i64 internally for interpreter
+# compatibility. i32 values use the low 32 bits.
+#
+# NOTE: BSON is LITTLE-ENDIAN throughout (unlike CBOR/MsgPack which are big-endian).
+#
+# NOTE: All module-level helper functions are used to avoid the it-block
+# var-mutation footgun (see .claude/memory/feedback_it_block_var_mutation.md).
+#
+# NOTE: Enum variants use positional (unnamed) fields because the interpreter
+# does not support case Variant(field: bind) destructuring in fn bodies.
+# Named-field match patterns are a known parser regression affecting all
+# encoding modules (bencode, msgpack, protobuf_wire, bson). Use positional.
+#
+# Usage:
+#   use std.encoding.bson.{BsonValue, BsonError, bson_encode, bson_decode}
+#   val encoded = bson_encode(BsonValue.Doc([("x", BsonValue.Int32(1))]))
+#   val r = bson_decode(encoded)
+
+# ============================================================================
+# Bit helpers (interpreter-safe)
+# ============================================================================
+# The interpreter uses arithmetic right-shift (sign-extending). For logical
+# right-shifts we mask the top bits explicitly so sign-extension doesn't
+# pollute the lower bytes we care about.
+
+fn _bson_mask8(x: i64) -> i64:
+    x & 0xFF
+
+fn _bson_shr8(x: i64) -> i64:
+    (x >> 8) & 0xFFFFFFFFFFFFFF
+
+fn _bson_shr16(x: i64) -> i64:
+    (x >> 16) & 0xFFFFFFFFFFFF
+
+fn _bson_shr24(x: i64) -> i64:
+    (x >> 24) & 0xFFFFFFFFFF
+
+fn _bson_shr32(x: i64) -> i64:
+    (x >> 32) & 0xFFFFFFFF
+
+fn _bson_shr40(x: i64) -> i64:
+    (x >> 40) & 0xFFFFFF
+
+fn _bson_shr48(x: i64) -> i64:
+    (x >> 48) & 0xFFFF
+
+fn _bson_shr56(x: i64) -> i64:
+    (x >> 56) & 0xFF
+
+# ============================================================================
+# Public types
+# ============================================================================
+
+enum BsonValue:
+    """Represents any BSON value.
+
+    Variants (all positional fields — named-field match is a known parser regression):
+      Double(f64)                     — 0x01 IEEE 754 double (deferred: always 0.0)
+      Str(text)                       — 0x02 UTF-8 string
+      Doc([(text, BsonValue)])        — 0x03 embedded document / top-level
+      Array([BsonValue])              — 0x04 array (keys "0","1",... automatically)
+      Bin(i64, [u8])                  — 0x05 binary: subtype, bytes
+      Undefined                       — 0x06 deprecated undefined
+      ObjectId([u8])                  — 0x07 12-byte ObjectId
+      Bool(bool)                      — 0x08 boolean
+      DateTime(i64)                   — 0x09 UTC datetime ms since epoch
+      Null                            — 0x0A null
+      Regex(text, text)               — 0x0B pattern cstring, options cstring
+      Int32(i64)                      — 0x10 32-bit integer (low 32 bits)
+      Timestamp(i64)                  — 0x11 MongoDB internal timestamp
+      Int64(i64)                      — 0x12 64-bit integer
+      Decimal128([u8])                — 0x13 16-byte decimal128 (deferred, opaque)
+      MinKey                          — 0xFF min key sentinel
+      MaxKey                          — 0x7F max key sentinel
+    """
+    Double(f64)
+    Str(text)
+    Doc([(text, BsonValue)])
+    Array([BsonValue])
+    Bin(i64, [u8])
+    Undefined
+    ObjectId([u8])
+    Bool(bool)
+    DateTime(i64)
+    Null
+    Regex(text, text)
+    Int32(i64)
+    Timestamp(i64)
+    Int64(i64)
+    Decimal128([u8])
+    MinKey
+    MaxKey
+
+enum BsonError:
+    """Represents a BSON encode/decode error.
+
+    Variants:
+      NotADocument         — top-level value is not a Doc
+      UnexpectedEnd        — buffer ends before document is complete
+      LengthMismatch       — declared document length differs from buffer size
+      InvalidTypeByte(i64) — unknown element type byte
+      InvalidCString       — cstring not null-terminated within bounds
+      InvalidBool          — boolean byte is not 0x00 or 0x01
+    """
+    NotADocument
+    UnexpectedEnd
+    LengthMismatch
+    InvalidTypeByte(i64)
+    InvalidCString
+    InvalidBool
+
+# ============================================================================
+# Internal decode result struct (avoids enum destructuring in fn body)
+# ============================================================================
+
+struct _BsonDecResult:
+    ok: bool
+    value: BsonValue
+    consumed: i64
+    error: BsonError
+
+fn _bson_ok(v: BsonValue, n: i64) -> _BsonDecResult:
+    _BsonDecResult(ok: true, value: v, consumed: n, error: BsonError.UnexpectedEnd)
+
+fn _bson_err(e: BsonError) -> _BsonDecResult:
+    _BsonDecResult(ok: false, value: BsonValue.Null, consumed: 0, error: e)
+
+fn _bson_need(bytes: [u8], pos: i64, n: i64) -> bool:
+    """Return true if at least n bytes are available from pos."""
+    (pos + n) <= bytes.len()
+
+fn _bson_read_u8(bytes: [u8], pos: i64) -> i64:
+    bytes[pos].to_i64() & 0xFF
+
+# ============================================================================
+# Little-endian integer helpers
+# ============================================================================
+
+fn _bson_encode_i32_le(v: i64) -> [u8]:
+    """Encode a 32-bit value in little-endian order (4 bytes)."""
+    var result: [u8] = []
+    result.push(_bson_mask8(v))
+    result.push(_bson_mask8(_bson_shr8(v)))
+    result.push(_bson_mask8(_bson_shr16(v)))
+    result.push(_bson_mask8(_bson_shr24(v)))
+    result
+
+fn _bson_encode_i64_le(v: i64) -> [u8]:
+    """Encode a 64-bit value in little-endian order (8 bytes)."""
+    var result: [u8] = []
+    result.push(_bson_mask8(v))
+    result.push(_bson_mask8(_bson_shr8(v)))
+    result.push(_bson_mask8(_bson_shr16(v)))
+    result.push(_bson_mask8(_bson_shr24(v)))
+    result.push(_bson_mask8(_bson_shr32(v)))
+    result.push(_bson_mask8(_bson_shr40(v)))
+    result.push(_bson_mask8(_bson_shr48(v)))
+    result.push(_bson_mask8(_bson_shr56(v)))
+    result
+
+fn _bson_decode_i32_le(bytes: [u8], pos: i64) -> i64:
+    """Read 4 bytes little-endian as a 32-bit signed value (sign-extended to i64)."""
+    val u = _bson_read_u8(bytes, pos) |
+        (_bson_read_u8(bytes, pos + 1) << 8) |
+        (_bson_read_u8(bytes, pos + 2) << 16) |
+        (_bson_read_u8(bytes, pos + 3) << 24)
+    if u >= 2147483648:
+        u - 4294967296
+    else:
+        u
+
+fn _bson_decode_u32_le(bytes: [u8], pos: i64) -> i64:
+    """Read 4 bytes little-endian as an unsigned 32-bit value (returned as i64)."""
+    _bson_read_u8(bytes, pos) |
+    (_bson_read_u8(bytes, pos + 1) << 8) |
+    (_bson_read_u8(bytes, pos + 2) << 16) |
+    (_bson_read_u8(bytes, pos + 3) << 24)
+
+fn _bson_decode_i64_le(bytes: [u8], pos: i64) -> i64:
+    """Read 8 bytes little-endian as a 64-bit value."""
+    _bson_read_u8(bytes, pos) |
+    (_bson_read_u8(bytes, pos + 1) << 8) |
+    (_bson_read_u8(bytes, pos + 2) << 16) |
+    (_bson_read_u8(bytes, pos + 3) << 24) |
+    (_bson_read_u8(bytes, pos + 4) << 32) |
+    (_bson_read_u8(bytes, pos + 5) << 40) |
+    (_bson_read_u8(bytes, pos + 6) << 48) |
+    (_bson_read_u8(bytes, pos + 7) << 56)
+
+# ============================================================================
+# Encoder helpers
+# ============================================================================
+
+fn _bson_append(dest: [u8], src: [u8]):
+    """Append all bytes from src into dest in-place."""
+    var i = 0
+    while i < src.len():
+        dest.push(src[i])
+        i = i + 1
+
+fn _bson_encode_cstring(s: text) -> [u8]:
+    """Encode a cstring: UTF-8 bytes + null terminator."""
+    var result: [u8] = []
+    var i = 0
+    val slen = s.length()
+    while i < slen:
+        val ch = s[i]
+        result.push(_bson_mask8(ch.ord()))
+        i = i + 1
+    result.push(0x00)
+    result
+
+fn _bson_encode_string(s: text) -> [u8]:
+    """Encode a BSON string: int32(len_with_null) + bytes + 0x00."""
+    var body: [u8] = []
+    var i = 0
+    val slen = s.length()
+    while i < slen:
+        val ch = s[i]
+        body.push(_bson_mask8(ch.ord()))
+        i = i + 1
+    # string length includes the null terminator
+    val byte_len = body.len() + 1
+    var result: [u8] = []
+    _bson_append(result, _bson_encode_i32_le(byte_len))
+    _bson_append(result, body)
+    result.push(0x00)
+    result
+
+fn _bson_encode_element(key: text, v: BsonValue) -> [u8]:
+    """Encode a single BSON element: type_byte + cstring(key) + value_bytes."""
+    var result: [u8] = []
+    val key_bytes = _bson_encode_cstring(key)
+    match v:
+        case BsonValue.Double(dv_ignored):
+            result.push(0x01)
+            _bson_append(result, key_bytes)
+            # Deferred: encode as 8 zero bytes
+            var j = 0
+            while j < 8:
+                result.push(0x00)
+                j = j + 1
+        case BsonValue.Str(s):
+            result.push(0x02)
+            _bson_append(result, key_bytes)
+            _bson_append(result, _bson_encode_string(s))
+        case BsonValue.Doc(ps):
+            result.push(0x03)
+            _bson_append(result, key_bytes)
+            _bson_append(result, _bson_encode_doc_body(ps))
+        case BsonValue.Array(arr):
+            result.push(0x04)
+            _bson_append(result, key_bytes)
+            # Array is a subdocument with keys "0", "1", ...
+            var arr_pairs: [(text, BsonValue)] = []
+            var idx = 0
+            while idx < arr.len():
+                arr_pairs.push((idx.to_string(), arr[idx]))
+                idx = idx + 1
+            _bson_append(result, _bson_encode_doc_body(arr_pairs))
+        case BsonValue.Bin(st, bd):
+            result.push(0x05)
+            _bson_append(result, key_bytes)
+            _bson_append(result, _bson_encode_i32_le(bd.len()))
+            result.push(_bson_mask8(st))
+            _bson_append(result, bd)
+        case BsonValue.Undefined:
+            result.push(0x06)
+            _bson_append(result, key_bytes)
+        case BsonValue.ObjectId(oid):
+            result.push(0x07)
+            _bson_append(result, key_bytes)
+            _bson_append(result, oid)
+        case BsonValue.Bool(b):
+            result.push(0x08)
+            _bson_append(result, key_bytes)
+            if b:
+                result.push(0x01)
+            else:
+                result.push(0x00)
+        case BsonValue.DateTime(ms_val):
+            result.push(0x09)
+            _bson_append(result, key_bytes)
+            _bson_append(result, _bson_encode_i64_le(ms_val))
+        case BsonValue.Null:
+            result.push(0x0A)
+            _bson_append(result, key_bytes)
+        case BsonValue.Regex(pat, opt):
+            result.push(0x0B)
+            _bson_append(result, key_bytes)
+            _bson_append(result, _bson_encode_cstring(pat))
+            _bson_append(result, _bson_encode_cstring(opt))
+        case BsonValue.Int32(n32):
+            result.push(0x10)
+            _bson_append(result, key_bytes)
+            _bson_append(result, _bson_encode_i32_le(n32))
+        case BsonValue.Timestamp(ts_val):
+            result.push(0x11)
+            _bson_append(result, key_bytes)
+            _bson_append(result, _bson_encode_i64_le(ts_val))
+        case BsonValue.Int64(n64):
+            result.push(0x12)
+            _bson_append(result, key_bytes)
+            _bson_append(result, _bson_encode_i64_le(n64))
+        case BsonValue.Decimal128(d128):
+            result.push(0x13)
+            _bson_append(result, key_bytes)
+            _bson_append(result, d128)
+        case BsonValue.MinKey:
+            result.push(0xFF)
+            _bson_append(result, key_bytes)
+        case BsonValue.MaxKey:
+            result.push(0x7F)
+            _bson_append(result, key_bytes)
+    result
+
+fn _bson_encode_doc_body(doc_pairs: [(text, BsonValue)]) -> [u8]:
+    """Encode a document body with length prefix and null terminator.
+    total_length = 4 (int32 self) + elements_bytes + 1 (terminator)."""
+    var body: [u8] = []
+    var i = 0
+    while i < doc_pairs.len():
+        val pair = doc_pairs[i]
+        val elem_bytes = _bson_encode_element(pair.0, pair.1)
+        _bson_append(body, elem_bytes)
+        i = i + 1
+    val total = 4 + body.len() + 1
+    var result: [u8] = []
+    _bson_append(result, _bson_encode_i32_le(total))
+    _bson_append(result, body)
+    result.push(0x00)
+    result
+
+# ============================================================================
+# Public encoder
+# ============================================================================
+
+fn bson_encode(doc: BsonValue) -> Result<[u8], BsonError>:
+    """Encode a BsonValue::Doc to BSON bytes.
+    The top-level value must be a Doc; returns Err(NotADocument) otherwise."""
+    match doc:
+        case BsonValue.Doc(ps):
+            Ok(_bson_encode_doc_body(ps))
+        case _:
+            Err(BsonError.NotADocument)
+
+# ============================================================================
+# Decoder helpers
+# ============================================================================
+
+fn _bson_extract_str(v: BsonValue) -> text:
+    """Extract text from a BsonValue.Str, returning empty string for other variants."""
+    match v:
+        case BsonValue.Str(sv):
+            sv
+        case _:
+            ""
+
+fn _bson_extract_doc_pairs(v: BsonValue) -> [(text, BsonValue)]:
+    """Extract pairs from a BsonValue.Doc, returning empty list for other variants."""
+    match v:
+        case BsonValue.Doc(ps):
+            ps
+        case _:
+            []
+
+fn _bson_decode_cstring(bytes: [u8], pos: i64) -> _BsonDecResult:
+    """Decode a cstring from bytes at pos. Returns Str(text) with consumed = len + 1."""
+    var parts: [text] = []
+    var cur = pos
+    var found = false
+    while not found:
+        if cur >= bytes.len():
+            return _bson_err(BsonError.InvalidCString)
+        val b = _bson_read_u8(bytes, cur)
+        if b == 0:
+            found = true
+        else:
+            parts.push(b.chr())
+            cur = cur + 1
+    val consumed = (cur - pos) + 1
+    _bson_ok(BsonValue.Str(parts.join("")), consumed)
+
+fn _bson_decode_string(bytes: [u8], pos: i64) -> _BsonDecResult:
+    """Decode a BSON string: int32(len) + bytes + 0x00. Returns Str(text)."""
+    if not _bson_need(bytes, pos, 4):
+        return _bson_err(BsonError.UnexpectedEnd)
+    val slen = _bson_decode_u32_le(bytes, pos)
+    if not _bson_need(bytes, pos + 4, slen):
+        return _bson_err(BsonError.UnexpectedEnd)
+    var parts: [text] = []
+    var i: i64 = 0
+    while i < slen - 1:
+        val b = _bson_read_u8(bytes, pos + 4 + i)
+        parts.push(b.chr())
+        i = i + 1
+    # slen includes null terminator which we skip
+    val consumed = 4 + slen
+    _bson_ok(BsonValue.Str(parts.join("")), consumed)
+
+fn _bson_decode_doc_at(bytes: [u8], pos: i64) -> _BsonDecResult:
+    """Decode a BSON document starting at pos. Returns Doc with consumed = total_length."""
+    if not _bson_need(bytes, pos, 4):
+        return _bson_err(BsonError.UnexpectedEnd)
+    val doc_len = _bson_decode_i32_le(bytes, pos)
+    if doc_len < 5:
+        return _bson_err(BsonError.UnexpectedEnd)
+    if not _bson_need(bytes, pos, doc_len):
+        return _bson_err(BsonError.UnexpectedEnd)
+    var doc_pairs: [(text, BsonValue)] = []
+    var cur = pos + 4
+    var done = false
+    while not done:
+        if cur >= bytes.len():
+            return _bson_err(BsonError.UnexpectedEnd)
+        val type_byte = _bson_read_u8(bytes, cur)
+        if type_byte == 0:
+            done = true
+        else:
+            cur = cur + 1
+            # decode key cstring
+            val kr = _bson_decode_cstring(bytes, cur)
+            if not kr.ok:
+                return _bson_err(kr.error)
+            val key_text = _bson_extract_str(kr.value)
+            cur = cur + kr.consumed
+            # decode value
+            val vr = _bson_decode_value(bytes, cur, type_byte)
+            if not vr.ok:
+                return _bson_err(vr.error)
+            doc_pairs.push((key_text, vr.value))
+            cur = cur + vr.consumed
+    _bson_ok(BsonValue.Doc(doc_pairs), doc_len)
+
+fn _bson_decode_value(bytes: [u8], pos: i64, type_byte: i64) -> _BsonDecResult:
+    """Decode a BSON value of the given type_byte starting at pos."""
+    if type_byte == 0x01:
+        # Double — deferred: read 8 bytes, return Double(0.0)
+        if not _bson_need(bytes, pos, 8):
+            return _bson_err(BsonError.UnexpectedEnd)
+        _bson_ok(BsonValue.Double(0.0), 8)
+    elif type_byte == 0x02:
+        # String
+        _bson_decode_string(bytes, pos)
+    elif type_byte == 0x03:
+        # Embedded document
+        _bson_decode_doc_at(bytes, pos)
+    elif type_byte == 0x04:
+        # Array — decode as doc, then convert keys to array
+        val dr = _bson_decode_doc_at(bytes, pos)
+        if not dr.ok:
+            return _bson_err(dr.error)
+        var arr_items: [BsonValue] = []
+        val arr_pairs = _bson_extract_doc_pairs(dr.value)
+        var i = 0
+        while i < arr_pairs.len():
+            arr_items.push(arr_pairs[i].1)
+            i = i + 1
+        _bson_ok(BsonValue.Array(arr_items), dr.consumed)
+    elif type_byte == 0x05:
+        # Binary: int32(len) + subtype(1) + bytes
+        if not _bson_need(bytes, pos, 5):
+            return _bson_err(BsonError.UnexpectedEnd)
+        val bin_len = _bson_decode_u32_le(bytes, pos)
+        val bin_subtype = _bson_read_u8(bytes, pos + 4)
+        if not _bson_need(bytes, pos + 5, bin_len):
+            return _bson_err(BsonError.UnexpectedEnd)
+        var bin_data: [u8] = []
+        var i: i64 = 0
+        while i < bin_len:
+            bin_data.push(bytes[pos + 5 + i])
+            i = i + 1
+        _bson_ok(BsonValue.Bin(bin_subtype, bin_data), 4 + 1 + bin_len)
+    elif type_byte == 0x06:
+        # Undefined (deprecated)
+        _bson_ok(BsonValue.Undefined, 0)
+    elif type_byte == 0x07:
+        # ObjectId — 12 bytes
+        if not _bson_need(bytes, pos, 12):
+            return _bson_err(BsonError.UnexpectedEnd)
+        var oid: [u8] = []
+        var i: i64 = 0
+        while i < 12:
+            oid.push(bytes[pos + i])
+            i = i + 1
+        _bson_ok(BsonValue.ObjectId(oid), 12)
+    elif type_byte == 0x08:
+        # Boolean — 1 byte
+        if not _bson_need(bytes, pos, 1):
+            return _bson_err(BsonError.UnexpectedEnd)
+        val bv = _bson_read_u8(bytes, pos)
+        if bv == 0x00:
+            _bson_ok(BsonValue.Bool(false), 1)
+        elif bv == 0x01:
+            _bson_ok(BsonValue.Bool(true), 1)
+        else:
+            _bson_err(BsonError.InvalidBool)
+    elif type_byte == 0x09:
+        # UTC Datetime — int64
+        if not _bson_need(bytes, pos, 8):
+            return _bson_err(BsonError.UnexpectedEnd)
+        _bson_ok(BsonValue.DateTime(_bson_decode_i64_le(bytes, pos)), 8)
+    elif type_byte == 0x0A:
+        # Null — no payload
+        _bson_ok(BsonValue.Null, 0)
+    elif type_byte == 0x0B:
+        # Regex — two cstrings: pattern + options
+        val pr = _bson_decode_cstring(bytes, pos)
+        if not pr.ok:
+            return _bson_err(pr.error)
+        val rx_pat = _bson_extract_str(pr.value)
+        val or2 = _bson_decode_cstring(bytes, pos + pr.consumed)
+        if not or2.ok:
+            return _bson_err(or2.error)
+        val rx_opts = _bson_extract_str(or2.value)
+        _bson_ok(BsonValue.Regex(rx_pat, rx_opts), pr.consumed + or2.consumed)
+    elif type_byte == 0x10:
+        # Int32 — 4 bytes LE
+        if not _bson_need(bytes, pos, 4):
+            return _bson_err(BsonError.UnexpectedEnd)
+        _bson_ok(BsonValue.Int32(_bson_decode_i32_le(bytes, pos)), 4)
+    elif type_byte == 0x11:
+        # Timestamp — 8 bytes LE (MongoDB internal)
+        if not _bson_need(bytes, pos, 8):
+            return _bson_err(BsonError.UnexpectedEnd)
+        _bson_ok(BsonValue.Timestamp(_bson_decode_i64_le(bytes, pos)), 8)
+    elif type_byte == 0x12:
+        # Int64 — 8 bytes LE
+        if not _bson_need(bytes, pos, 8):
+            return _bson_err(BsonError.UnexpectedEnd)
+        _bson_ok(BsonValue.Int64(_bson_decode_i64_le(bytes, pos)), 8)
+    elif type_byte == 0x13:
+        # Decimal128 — 16 bytes (deferred, stored opaque)
+        if not _bson_need(bytes, pos, 16):
+            return _bson_err(BsonError.UnexpectedEnd)
+        var d128: [u8] = []
+        var i: i64 = 0
+        while i < 16:
+            d128.push(bytes[pos + i])
+            i = i + 1
+        _bson_ok(BsonValue.Decimal128(d128), 16)
+    elif type_byte == 0xFF:
+        # MinKey — no payload
+        _bson_ok(BsonValue.MinKey, 0)
+    elif type_byte == 0x7F:
+        # MaxKey — no payload
+        _bson_ok(BsonValue.MaxKey, 0)
+    else:
+        _bson_err(BsonError.InvalidTypeByte(type_byte))
+
+# ============================================================================
+# Public decoder
+# ============================================================================
+
+fn bson_decode(bytes: [u8]) -> Result<BsonValue, BsonError>:
+    """Decode a BSON document from bytes.
+    Returns Ok(BsonValue.Doc(...)) or Err(BsonError).
+    Err(LengthMismatch) if declared length != buffer length.
+    Err(UnexpectedEnd) if buffer is too short."""
+    if bytes.len() < 5:
+        return Err(BsonError.UnexpectedEnd)
+    val declared = _bson_decode_i32_le(bytes, 0)
+    if declared != bytes.len():
+        return Err(BsonError.LengthMismatch)
+    val r = _bson_decode_doc_at(bytes, 0)
+    if r.ok:
+        Ok(r.value)
+    else:
+        Err(r.error)

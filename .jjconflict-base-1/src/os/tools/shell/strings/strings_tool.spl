@@ -1,0 +1,62 @@
+# strings — Extract printable strings from files
+# MDSOC: feature dimension, shell layer
+
+use os.apps.terminal.terminal.{Terminal}
+use os.services.vfs.vfs.{VfsManager}
+use os.tools.shell.shell_helpers.{resolve_path, write_line, write_error}
+
+fn tool_strings(vfs: VfsManager?, cwd: text, args: [text], terminal: Terminal) -> i32:
+    """Print strings of printable characters from a file.
+
+    Usage: strings [-n MIN_LENGTH] FILE
+    Default minimum length: 4 characters.
+    """
+    var min_len: i32 = 4
+    var file_path = ""
+    var i = 0
+
+    while i < args.len():
+        if args[i] == "-n" and i + 1 < args.len():
+            i = i + 1
+            min_len = _strings_parse_int(args[i])
+            if min_len <= 0:
+                min_len = 4
+        elif not args[i].starts_with("-"):
+            file_path = args[i]
+        i = i + 1
+
+    if file_path == "":
+        write_error(terminal, "strings: missing file operand")
+        return 1
+    if vfs == nil:
+        write_error(terminal, "strings: no filesystem mounted")
+        return 1
+
+    val path = resolve_path(cwd, file_path)
+    val result = vfs.read_text(path)
+    if result.is_err():
+        write_error(terminal, "strings: {path}: {result.unwrap_err()}")
+        return 1
+
+    val content = result.unwrap()
+    var current = ""
+
+    for ch in content:
+        val code = ch.to_i32()
+        if code >= 32 and code < 127:
+            current = "{current}{ch}"
+        else:
+            if current.len() as i32 >= min_len:
+                write_line(terminal, current)
+            current = ""
+    # Flush remaining
+    if current.len() as i32 >= min_len:
+        write_line(terminal, current)
+    return 0
+
+fn _strings_parse_int(s: text) -> i32:
+    var result: i32 = 0
+    for ch in s:
+        if ch >= "0" and ch <= "9":
+            result = result * 10 + (ch.to_i32() - "0".to_i32())
+    return result

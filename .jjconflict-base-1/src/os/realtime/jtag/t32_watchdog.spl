@@ -1,0 +1,188 @@
+# T32 Watchdog — hang detection and auto-recovery for TRACE32 probe.
+#
+# Problem: T32 operations can hang indefinitely (USB disconnect, target
+# power loss, PRACTICE script deadlock, JTAG cable issue). Without a
+# watchdog, the test session blocks forever.
+#
+# Solution: wrap every T32 call with a timeout check. On hang:
+#   1. Attempt T32_Ping (fast liveness check)
+#   2. If ping fails, T32_Terminate + T32_Exit (graceful shutdown)
+#   3. If that hangs too, kill the T32 process (last resort)
+#   4. Auto-reconnect if configured
+
+use std.debug.remote.t32_ffi.t32_core (
+    t32_ping, t32_init, t32_attach, t32_terminate, t32_exit,
+    t32_stop, t32_config, t32_get_state
+)
+use std.io (shell)
+
+class T32WatchdogConfig:
+    """Watchdog configuration — loaded from config/simple.test.sdn."""
+    ping_timeout_ms: i64
+    operation_timeout_ms: i64
+    max_retries: i32
+    auto_reconnect: bool
+    kill_on_hang: bool
+    host: text
+    port: i32
+
+    static fn defaults() -> T32WatchdogConfig:
+        T32WatchdogConfig(
+            ping_timeout_ms: 3000,
+            operation_timeout_ms: 10000,
+            max_retries: 3,
+            auto_reconnect: true,
+            kill_on_hang: false,
+            host: "localhost",
+            port: 20000
+        )
+
+    static fn from_sdn(ping_ms: i64, op_ms: i64, retries: i32, reconnect: bool, kill: bool, host: text, port: i32) -> T32WatchdogConfig:
+        T32WatchdogConfig(
+            ping_timeout_ms: ping_ms,
+            operation_timeout_ms: op_ms,
+            max_retries: retries,
+            auto_reconnect: reconnect,
+            kill_on_hang: kill,
+            host: host,
+            port: port
+        )
+
+val T32_ALIVE: i32 = 0
+val T32_SUSPECT: i32 = 1
+val T32_HUNG: i32 = 2
+val T32_DEAD: i32 = 3
+
+class T32Watchdog:
+    """Monitors T32 liveness and recovers from hangs."""
+    config: T32WatchdogConfig
+    state: i32
+    consecutive_failures: i32
+    total_hangs: i32
+    total_recoveries: i32
+    connected: bool
+
+    static fn new(config: T32WatchdogConfig) -> T32Watchdog:
+        T32Watchdog(
+            config: config,
+            state: T32_ALIVE,
+            consecutive_failures: 0,
+            total_hangs: 0,
+            total_recoveries: 0,
+            connected: false
+        )
+
+    me connect() -> bool:
+        """Connect to T32 with watchdog protection."""
+        val port_str = "{self.config.port}"
+        match t32_config("NODE", self.config.host):
+            Ok(_): pass_dn
+            Err(_): return false
+        match t32_config("PORT", port_str):
+            Ok(_): pass_dn
+            Err(_): return false
+        match t32_init():
+            Ok(_): pass_dn
+            Err(_): return false
+        match t32_attach(1):
+            Ok(_):
+                self.connected = true
+                self.state = T32_ALIVE
+                self.consecutive_failures = 0
+                true
+            Err(_):
+                false
+
+    me check_alive() -> bool:
+        """Ping T32 to verify liveness. Fast check."""
+        if not self.connected:
+            return false
+
+        match t32_ping():
+            Ok(_):
+                self.state = T32_ALIVE
+                self.consecutive_failures = 0
+                true
+            Err(_):
+                self.consecutive_failures = self.consecutive_failures + 1
+                if self.consecutive_failures >= self.config.max_retries:
+                    self.state = T32_HUNG
+                    self.total_hangs = self.total_hangs + 1
+                else:
+                    self.state = T32_SUSPECT
+                false
+
+    me recover() -> bool:
+        """Attempt to recover from a hung T32 session."""
+        if self.state != T32_HUNG:
+            return true
+
+        # Step 1: Try graceful terminate
+        match t32_terminate():
+            Ok(_): pass_dn
+            Err(_): pass_dn
+
+        # Step 2: Try exit
+        match t32_exit():
+            Ok(_): pass_dn
+            Err(_): pass_dn
+
+        self.connected = false
+
+        # Step 3: Kill process if configured and still hung
+        if self.config.kill_on_hang:
+            t32_kill_process()
+
+        # Step 4: Auto-reconnect if configured
+        if self.config.auto_reconnect:
+            val ok = self.connect()
+            if ok:
+                self.state = T32_ALIVE
+                self.total_recoveries = self.total_recoveries + 1
+                return true
+
+        self.state = T32_DEAD
+        false
+
+    me disconnect():
+        """Graceful disconnect."""
+        if not self.connected:
+            return
+        match t32_terminate():
+            Ok(_): pass_dn
+            Err(_): pass_dn
+        match t32_exit():
+            Ok(_): pass_dn
+            Err(_): pass_dn
+        self.connected = false
+        self.state = T32_DEAD
+
+    me guarded_op(op_name: text, op_fn: fn() -> bool) -> bool:
+        """Execute a T32 operation with hang guard. On failure, recover."""
+        if not self.connected:
+            return false
+
+        if self.state == T32_HUNG or self.state == T32_DEAD:
+            if not self.recover():
+                return false
+
+        val ok = op_fn()
+        if not ok:
+            if not self.check_alive():
+                self.recover()
+                return false
+        ok
+
+    fn is_alive() -> bool:
+        self.state == T32_ALIVE
+
+    fn is_hung() -> bool:
+        self.state == T32_HUNG
+
+    fn stats_text() -> text:
+        "hangs={self.total_hangs} recoveries={self.total_recoveries} state={self.state}"
+
+fn t32_kill_process():
+    """Last resort: kill the T32 process."""
+    shell("pkill -f t32m 2>/dev/null || true")
+    shell("pkill -f t32a 2>/dev/null || true")

@@ -1,0 +1,94 @@
+# Electron Window Manager
+#
+# Launches a desktop WM in Electron with system bar, dock, and
+# multiple application windows. The Electron shell renders app windows
+# inside the main WM surface instead of creating separate BrowserWindows.
+
+use app.ui.ipc.protocol.{parse_ipc_message, build_ipc_render, build_ipc_open_window, build_ipc_close_window, build_ipc_render_window, escape_ipc_json}
+use common.ui.widget.{UIEvent}
+use app.ui.web.html.{generate_css}
+use os.compositor.simple_web_window_renderer.{themed_simple_web_html_with_theme}
+use common.ui.theme_package.{default_theme_id, resolve_theme_alias}
+use common.ui.window.{WindowManager, WindowInfo, new_window_manager}
+
+extern fn rt_stdin_read_line() -> text?
+extern fn rt_thread_sleep(ms: i64)
+extern fn rt_env_get(key: text) -> text
+
+fn _resolve_theme() -> text:
+    val env_val = rt_env_get("SIMPLE_THEME") ?? ""
+    if env_val == "":
+        return default_theme_id()
+    resolve_theme_alias(env_val)
+
+fn _build_desktop_html(css: text) -> text:
+    """Build the desktop chrome (system bar + dock only). Floating windows
+    live in the host Electron shell's persistent #wm-desktop container and
+    are drawn by SimpleWindowManager — do NOT include #wm-desktop here,
+    otherwise the render path would wipe the window state on every render."""
+    val bar_html = "<div class=\"widget-menubar\" id=\"sysbar\" style=\"position:absolute;top:0;left:0;right:0;z-index:5;pointer-events:auto;\"><span class=\"menu-item\">File</span><span class=\"menu-item\">Edit</span><span class=\"menu-item\">View</span><span class=\"menu-item\">Go</span><span class=\"menu-item\">Window</span><span class=\"menu-item\">Help</span></div>"
+    val dock_html = "<div class=\"widget-tab-bar\" id=\"dock\" style=\"position:absolute;bottom:64px;left:50%;transform:translateX(-50%);z-index:5;pointer-events:auto;\"><div class=\"tab-bar-item tab-bar-item-active\" data-action=\"app_terminal\"><span class=\"tab-bar-icon\">&gt;</span><span class=\"tab-bar-label\">Terminal</span></div><div class=\"tab-bar-item\" data-action=\"app_editor\"><span class=\"tab-bar-icon\">E</span><span class=\"tab-bar-label\">Editor</span></div><div class=\"tab-bar-item\" data-action=\"app_browser\"><span class=\"tab-bar-icon\">W</span><span class=\"tab-bar-label\">Browser</span></div><div class=\"tab-bar-item\" data-action=\"app_files\"><span class=\"tab-bar-icon\">D</span><span class=\"tab-bar-label\">Files</span></div><div class=\"tab-bar-item\" data-action=\"app_calc\"><span class=\"tab-bar-icon\">#</span><span class=\"tab-bar-label\">Calc</span></div><div class=\"tab-bar-item\" data-action=\"app_settings\"><span class=\"tab-bar-icon\">*</span><span class=\"tab-bar-label\">Settings</span></div></div>"
+    return "<html><head><style>" + css + "</style></head><body>" + bar_html + dock_html + "</body></html>"
+
+fn _build_app_html(title: text, content: text, theme: text) -> text:
+    """Build app-window HTML through the same theme wrapper used by the pure
+    Simple Web renderer. Electron/Chromium and Simple Web therefore consume
+    one resolved package CSS path."""
+    themed_simple_web_html_with_theme(theme, title, content)
+
+fn _pre_block(text_content: text, theme: text) -> text:
+    """Wrap plain-text content in a padded <pre> so _build_app_html's body
+    stays HTML-mode (letting callers swap in iframes)."""
+    return "<pre style=\"margin:0;padding:16px;overflow:auto;white-space:pre-wrap;font-family:'Fira Code','Cascadia Code','SF Mono',monospace;font-size:13px;line-height:1.6;\">" + text_content + "</pre>"
+
+fn main() -> i64:
+    # Stitch-aligned themes (pulled from Stitch project 12496218458601315145
+    # for dark / 14134637940805933672 "Celestial Ether" for light, via
+    # mcp__stitch__list_projects 2026-04-12 / 2026-04-15).
+    # Snapshot: doc/05_design/stitch_snapshots/12496218458601315145/design_systems/obsidian_active.sdn
+    val theme = _resolve_theme()
+    val css = generate_css(theme)
+
+    # Render desktop (system bar + dock)
+    val desktop_html = _build_desktop_html(css)
+    print build_ipc_render(desktop_html)
+
+    rt_thread_sleep(300)
+
+    # Open application windows at specific positions
+    val term_html = _build_app_html("TERMINAL", _pre_block("$ simple --version\nSimple Language v0.9.5\n\n$ _", theme), theme)
+    print build_ipc_open_window("terminal", "Terminal", term_html, 50, 60, 600, 400)
+
+    rt_thread_sleep(100)
+
+    val editor_html = _build_app_html("EDITOR", _pre_block("# hello.spl\n\nfn main() -> i64:\n    print \"Hello, World!\"\n    return 0", theme), theme)
+    print build_ipc_open_window("editor", "Editor", editor_html, 40, 500, 700, 400)
+
+    rt_thread_sleep(100)
+
+    # Real browser app — iframe into the running Web WM on localhost:3333.
+    # This is a genuine, navigable web view (not a static HTML blob).
+    val browser_url = rt_env_get("SIMPLE_BROWSER_URL") ?? "http://localhost:3333"
+    val browser_body = "<iframe src=\"" + browser_url + "\" style=\"flex:1;width:100%;height:100%;border:none;background:transparent;\" sandbox=\"allow-scripts allow-same-origin allow-forms allow-popups\"></iframe>"
+    val browser_html = _build_app_html("BROWSER — " + browser_url, browser_body, theme)
+    print build_ipc_open_window("browser", "Browser", browser_html, 670, 60, 650, 450)
+
+    rt_thread_sleep(100)
+
+    val files_html = _build_app_html("FILE MANAGER", _pre_block("src/\n  compiler/\n  lib/\n  app/\nexamples/\n  ui/\n  simple_os/", theme), theme)
+    print build_ipc_open_window("files", "File Manager", files_html, 700, 520, 550, 350)
+
+    # Main IPC loop
+    var running = true
+    while running:
+        val line = rt_stdin_read_line()
+        if line != nil and line != "":
+            val event = parse_ipc_message(line)
+            if event != nil:
+                match event:
+                    UIEvent.Quit:
+                        running = false
+                    _:
+                        pass_dn
+
+    return 0

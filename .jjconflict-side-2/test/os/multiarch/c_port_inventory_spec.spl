@@ -1,0 +1,88 @@
+# Multi-arch harden: AC-1 + AC-2 — C inventory + zero owned-code .c gate.
+#
+# Run:
+#   bin/simple test test/os/multiarch/c_port_inventory_spec.spl
+#
+# This spec is RED until Phase 5 lands the inventory/manifest artefacts and
+# Phase 7 confirms zero owned-code .c compiles.
+#
+# @cover doc/08_tracking/simpleos/c_to_simple_inventory.md
+# @cover scripts/bootstrap/bootstrap-from-scratch.sh
+# @cover doc/04_architecture/simpleos_multiarch_hal.md
+
+use std.spec
+use std.io_runtime.{file_exists, file_read}
+
+val INVENTORY_PATH: text = "doc/08_tracking/simpleos/c_to_simple_inventory.md"
+val ARCH_DOC_PATH: text  = "doc/04_architecture/simpleos_multiarch_hal.md"
+val OWNED_C_REPORT: text = "build/multiarch/owned_c_report.json"
+
+describe "AC-1 — C → Simple inventory artefact":
+    """The inventory file must exist, be non-empty, and enumerate the
+    high-priority C port targets called out in the architecture doc."""
+
+    it "inventory file exists":
+        expect(file_exists(INVENTORY_PATH)).to_equal(true)
+
+    it "inventory file is non-empty":
+        val body: text = file_read(INVENTORY_PATH)
+        expect(body.length() > 0).to_equal(true)
+
+    it "inventory lists the runtime_minimal critical-path entry":
+        """Phase 2 inventory must call out runtime_minimal.c (246 LoC,
+        Wave 1 port target) by name."""
+        val body: text = file_read(INVENTORY_PATH)
+        expect(body.contains("runtime_minimal")).to_equal(true)
+
+    it "inventory lists simpleos_crt0 and simpleos_setjmp":
+        """The two assembly files HalCstart will replace must appear in
+        the inventory so the port map is auditable."""
+        val body: text = file_read(INVENTORY_PATH)
+        expect(body.contains("simpleos_crt0")).to_equal(true)
+        expect(body.contains("simpleos_setjmp")).to_equal(true)
+
+    it "inventory documents the EXCLUDED vendor + bootstrap allow-list":
+        """AC-2 says residual C is restricted to vendor + 3 bootstrap
+        scripts only. The inventory must say so explicitly."""
+        val body: text = file_read(INVENTORY_PATH)
+        expect(body.contains("vendor")).to_equal(true)
+
+describe "AC-2 — zero owned-code .c compiles for SimpleOS":
+    """Phase 7 generates an owned-C compile manifest at
+    build/multiarch/owned_c_report.json after `bin/simple build
+    --target=simpleos-x86_64`. The report lists every .c that hit the
+    compiler outside the documented allow-list."""
+
+    it "owned-C compile report exists after a SimpleOS build":
+        """RED today: the build does not yet emit this report. Phase 5
+        wires the manifest writer into qemu_runner.spl."""
+        expect(file_exists(OWNED_C_REPORT)).to_equal(true)
+
+    it "owned-C report shows zero entries outside the allow-list":
+        val report: text = file_read(OWNED_C_REPORT)
+        expect(report.contains("\"violations\": []")).to_equal(true)
+
+    it "report explicitly names the documented allow-list paths":
+        """Allow-list members per architecture §3 + CLAUDE.md:
+        src/compiler_rust/vendor, src/runtime/vendor,
+        runtime/miniaudio.h, runtime/stb_image.h, runtime/stb_truetype.h,
+        and the 3 bootstrap shell scripts."""
+        val report: text = file_read(OWNED_C_REPORT)
+        expect(report.contains("vendor")).to_equal(true)
+        expect(report.contains("miniaudio")).to_equal(true)
+        expect(report.contains("stb_image")).to_equal(true)
+        expect(report.contains("stb_truetype")).to_equal(true)
+
+    it "no new owned .c file appears outside the locked allow-list":
+        """Regression guard: scripts/audit/arch_loc_report.shs writes
+        scan results; the residual_c key must equal the locked count."""
+        val report: text = file_read(OWNED_C_REPORT)
+        expect(report.contains("\"residual_c_count\": 0")).to_equal(true)
+
+describe "AC-1/AC-2 cross-link to architecture doc":
+    """The architecture doc must reference the inventory so the audit
+    chain (doc → inventory → owned_c_report) is auditable end-to-end."""
+
+    it "architecture doc references the inventory file":
+        val body: text = file_read(ARCH_DOC_PATH)
+        expect(body.contains("c_to_simple_inventory")).to_equal(true)

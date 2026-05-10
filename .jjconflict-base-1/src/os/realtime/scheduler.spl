@@ -1,0 +1,149 @@
+# @platform: baremetal
+#
+# Fixed-priority preemptive scheduler.
+# 8 priority levels (0=highest, 7=idle). Per-priority ready queue.
+# O(P) pick where P=8. No dynamic allocation.
+
+use std.baremetal.collections.ring_buffer (RingBuffer)
+
+val NUM_PRIORITIES: i32 = 8
+val READY_QUEUE_SIZE: i32 = 16
+val NO_TASK: i32 = -1
+
+var ready_queues: [RingBuffer] = []
+var current_task_id: i32 = NO_TASK
+var tick_count: u64 = 0u64
+var scheduler_running: bool = false
+var priority_bitmap: i32 = 0
+var need_reschedule: bool = false
+
+fn sched_init():
+    """Initialize scheduler. Must call before any other sched_* function."""
+    ready_queues = []
+    var i = 0
+    while i < NUM_PRIORITIES:
+        ready_queues.push(RingBuffer.new(READY_QUEUE_SIZE))
+        i = i + 1
+    current_task_id = NO_TASK
+    tick_count = 0u64
+    scheduler_running = false
+    priority_bitmap = 0
+    need_reschedule = false
+
+fn sched_add(task_id: i32, priority: i32):
+    """Add task to its priority ready queue."""
+    if priority < 0 or priority >= NUM_PRIORITIES:
+        return
+    ready_queues[priority].enqueue(task_id.to_i64())
+    priority_bitmap = priority_bitmap | (1 << priority)
+    task_set_state(task_id, TASK_STATE_READY)
+
+fn sched_pick() -> i32:
+    """Pick highest-priority ready task. Returns NO_TASK if none."""
+    var p = 0
+    while p < NUM_PRIORITIES:
+        if (priority_bitmap & (1 << p)) != 0:
+            if not ready_queues[p].is_empty():
+                val id = ready_queues[p].dequeue()
+                if ready_queues[p].is_empty():
+                    priority_bitmap = priority_bitmap & ~(1 << p)
+                return id.to_i32()
+        p = p + 1
+    NO_TASK
+
+fn sched_yield():
+    """Current task voluntarily yields. Re-enqueues at same priority."""
+    if current_task_id == NO_TASK:
+        return
+    val task = task_get(current_task_id)
+    sched_add(current_task_id, task.priority)
+    need_reschedule = true
+
+fn sched_block(task_id: i32):
+    """Block a task (e.g. waiting for I/O or event)."""
+    task_set_state(task_id, TASK_STATE_BLOCKED)
+    if task_id == current_task_id:
+        need_reschedule = true
+
+fn sched_unblock(task_id: i32):
+    """Unblock a task and place it back in ready queue."""
+    val task = task_get(task_id)
+    if task.state != TASK_STATE_BLOCKED:
+        return
+    sched_add(task_id, task.priority)
+    val current = task_get(current_task_id)
+    if task.priority < current.priority:
+        need_reschedule = true
+
+fn sched_tick():
+    """Called from timer ISR every tick. Checks preemption and deadlines."""
+    tick_count = tick_count + 1u64
+
+    if current_task_id == NO_TASK:
+        need_reschedule = true
+        return
+
+    val current = task_get(current_task_id)
+
+    if current.deadline_tick > 0u64 and tick_count >= current.deadline_tick:
+        sched_add(current_task_id, current.priority)
+        need_reschedule = true
+        return
+
+    var p = 0
+    while p < current.priority:
+        if (priority_bitmap & (1 << p)) != 0:
+            sched_add(current_task_id, current.priority)
+            need_reschedule = true
+            return
+        p = p + 1
+
+fn sched_switch():
+    """Perform the actual task switch. Called after ISR decides to reschedule.
+    Platform-specific context save/restore wraps this call."""
+    if not need_reschedule:
+        return
+
+    need_reschedule = false
+    val next_id = sched_pick()
+    if next_id == NO_TASK:
+        return
+    if next_id == current_task_id:
+        task_set_state(current_task_id, TASK_STATE_RUNNING)
+        return
+
+    if current_task_id != NO_TASK:
+        val prev = task_get(current_task_id)
+        if prev.state == TASK_STATE_RUNNING:
+            task_set_state(current_task_id, TASK_STATE_READY)
+
+    current_task_id = next_id
+    task_set_state(next_id, TASK_STATE_RUNNING)
+
+fn sched_get_current() -> i32:
+    """Return current running task ID."""
+    current_task_id
+
+fn sched_get_tick() -> u64:
+    """Return current tick count."""
+    tick_count
+
+fn sched_needs_switch() -> bool:
+    """Check if a context switch is pending."""
+    need_reschedule
+
+fn sched_set_tick(t: u64):
+    """Restore tick count from snapshot."""
+    tick_count = t
+
+fn sched_set_current(id: i32):
+    """Restore current task from snapshot."""
+    current_task_id = id
+
+fn sched_get_bitmap() -> i32:
+    """Return priority bitmap for snapshot."""
+    priority_bitmap
+
+fn sched_set_bitmap(bm: i32):
+    """Restore priority bitmap from snapshot."""
+    priority_bitmap = bm

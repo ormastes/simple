@@ -1,0 +1,554 @@
+# MessagePack Encoder / Decoder
+# Implements the MessagePack specification: https://msgpack.org/
+#
+# Supported formats:
+#   Nil:           0xC0
+#   Bool:          false=0xC2, true=0xC3
+#   Positive fixint: 0x00-0x7F (value in single byte)
+#   Negative fixint: 0xE0-0xFF (value = byte as signed, range -32..-1)
+#   uint8/16/32/64:  0xCC/0xCD/0xCE/0xCF + big-endian bytes
+#   int8/16/32/64:   0xD0/0xD1/0xD2/0xD3 + big-endian bytes
+#   fixstr:          0xA0-0xBF (length in low 5 bits) + UTF-8 bytes
+#   str8/16/32:      0xD9/0xDA/0xDB + length + UTF-8 bytes
+#   bin8/16/32:      0xC4/0xC5/0xC6 + length + raw bytes
+#   fixarray:        0x90-0x9F (count in low 4 bits) + N items
+#   array16/32:      0xDC/0xDD + count + N items
+#   fixmap:          0x80-0x8F (count in low 4 bits) + N key-value pairs
+#   map16/32:        0xDE/0xDF + count + N key-value pairs
+#
+# NOTE: String encoding uses ASCII (ch.ord()) per character.
+# Full multi-byte UTF-8 codepoint encoding is deferred — it requires
+# a unicode codepoint API. ASCII covers the common test-vector cases.
+#
+# NOTE: All numeric types are stored as i64 internally for interpreter
+# compatibility.
+#
+# NOTE: MessagePack is BIG-ENDIAN throughout (unlike BSON which is little-endian).
+#
+# NOTE: All module-level helper functions are used to avoid the it-block
+# var-mutation footgun (see .claude/memory/feedback_it_block_var_mutation.md).
+#
+# Usage:
+#   use std.encoding.msgpack.{msgpack_encode_nil, msgpack_encode_bool,
+#       msgpack_encode_int, msgpack_encode_str, msgpack_encode_bin,
+#       msgpack_encode_array_header, msgpack_encode_map_header,
+#       msgpack_decode_type, msgpack_decode_int, msgpack_decode_str}
+
+# ============================================================================
+# Bit helpers (interpreter-safe, big-endian oriented)
+# ============================================================================
+# The interpreter uses arithmetic right-shift (sign-extending). Mask the
+# top bits explicitly so sign-extension doesn't pollute bytes we care about.
+
+fn _mp_mask8(x: i64) -> i64:
+    x & 0xFF
+
+fn _mp_shr8(x: i64) -> i64:
+    (x >> 8) & 0xFFFFFFFFFFFFFF
+
+fn _mp_shr16(x: i64) -> i64:
+    (x >> 16) & 0xFFFFFFFFFFFF
+
+fn _mp_shr24(x: i64) -> i64:
+    (x >> 24) & 0xFFFFFFFFFF
+
+fn _mp_shr32(x: i64) -> i64:
+    (x >> 32) & 0xFFFFFFFF
+
+fn _mp_shr40(x: i64) -> i64:
+    (x >> 40) & 0xFFFFFF
+
+fn _mp_shr48(x: i64) -> i64:
+    (x >> 48) & 0xFFFF
+
+fn _mp_shr56(x: i64) -> i64:
+    (x >> 56) & 0xFF
+
+fn _mp_read_u8(data: [u8], pos: i64) -> i64:
+    data[pos].to_i64() & 0xFF
+
+# ============================================================================
+# Internal big-endian integer helpers
+# ============================================================================
+
+fn _mp_encode_u16_be(v: i64) -> [u8]:
+    """Encode a 16-bit unsigned value in big-endian order (2 bytes)."""
+    var result: [u8] = []
+    result.push(_mp_mask8(_mp_shr8(v)))
+    result.push(_mp_mask8(v))
+    result
+
+fn _mp_encode_u32_be(v: i64) -> [u8]:
+    """Encode a 32-bit value in big-endian order (4 bytes)."""
+    var result: [u8] = []
+    result.push(_mp_mask8(_mp_shr24(v)))
+    result.push(_mp_mask8(_mp_shr16(v)))
+    result.push(_mp_mask8(_mp_shr8(v)))
+    result.push(_mp_mask8(v))
+    result
+
+fn _mp_encode_u64_be(v: i64) -> [u8]:
+    """Encode a 64-bit value in big-endian order (8 bytes)."""
+    var result: [u8] = []
+    result.push(_mp_mask8(_mp_shr56(v)))
+    result.push(_mp_mask8(_mp_shr48(v)))
+    result.push(_mp_mask8(_mp_shr40(v)))
+    result.push(_mp_mask8(_mp_shr32(v)))
+    result.push(_mp_mask8(_mp_shr24(v)))
+    result.push(_mp_mask8(_mp_shr16(v)))
+    result.push(_mp_mask8(_mp_shr8(v)))
+    result.push(_mp_mask8(v))
+    result
+
+fn _mp_decode_u16_be(data: [u8], pos: i64) -> i64:
+    """Read 2 bytes big-endian as unsigned 16-bit value."""
+    (_mp_read_u8(data, pos) << 8) | _mp_read_u8(data, pos + 1)
+
+fn _mp_decode_u32_be(data: [u8], pos: i64) -> i64:
+    """Read 4 bytes big-endian as unsigned 32-bit value."""
+    (_mp_read_u8(data, pos) << 24) |
+    (_mp_read_u8(data, pos + 1) << 16) |
+    (_mp_read_u8(data, pos + 2) << 8) |
+    _mp_read_u8(data, pos + 3)
+
+fn _mp_decode_i8_signed(v: i64) -> i64:
+    """Sign-extend an 8-bit value to i64."""
+    if v >= 128:
+        v - 256
+    else:
+        v
+
+fn _mp_decode_i16_signed(v: i64) -> i64:
+    """Sign-extend a 16-bit value to i64."""
+    if v >= 32768:
+        v - 65536
+    else:
+        v
+
+fn _mp_decode_i32_signed(v: i64) -> i64:
+    """Sign-extend a 32-bit value to i64."""
+    if v >= 2147483648:
+        v - 4294967296
+    else:
+        v
+
+fn _mp_append(dest: [u8], src: [u8]):
+    """Append all bytes from src into dest in-place."""
+    var i = 0
+    while i < src.len():
+        dest.push(src[i])
+        i = i + 1
+
+# ============================================================================
+# Public encoder functions
+# ============================================================================
+
+fn msgpack_encode_nil() -> [u8]:
+    """Encode nil as a single byte 0xC0."""
+    var result: [u8] = []
+    result.push(0xC0)
+    result
+
+fn msgpack_encode_bool(v: bool) -> [u8]:
+    """Encode a boolean: false=0xC2, true=0xC3."""
+    var result: [u8] = []
+    if v:
+        result.push(0xC3)
+    else:
+        result.push(0xC2)
+    result
+
+fn msgpack_encode_int(n: i64) -> [u8]:
+    """Encode an integer using the smallest MessagePack representation.
+
+    Encoding table:
+      [0, 127]            → positive fixint (1 byte)
+      [-32, -1]           → negative fixint (1 byte)
+      [128, 255]          → uint8  (0xCC + 1 byte)
+      [256, 65535]        → uint16 (0xCD + 2 bytes BE)
+      [65536, 4294967295] → uint32 (0xCE + 4 bytes BE)
+      > 4294967295        → uint64 (0xCF + 8 bytes BE)
+      [-128, -33]         → int8   (0xD0 + 1 byte)
+      [-32768, -129]      → int16  (0xD1 + 2 bytes BE)
+      [-2147483648, -32769] → int32 (0xD2 + 4 bytes BE)
+      < -2147483648       → int64  (0xD3 + 8 bytes BE)
+    """
+    var result: [u8] = []
+    if n >= 0 and n <= 127:
+        # positive fixint
+        result.push(_mp_mask8(n))
+    elif n >= -32 and n <= -1:
+        # negative fixint: store as unsigned byte 0xE0..0xFF
+        result.push(_mp_mask8(n + 256))
+    elif n >= 128 and n <= 255:
+        # uint8
+        result.push(0xCC)
+        result.push(_mp_mask8(n))
+    elif n >= 256 and n <= 65535:
+        # uint16
+        result.push(0xCD)
+        _mp_append(result, _mp_encode_u16_be(n))
+    elif n >= 65536 and n <= 4294967295:
+        # uint32
+        result.push(0xCE)
+        _mp_append(result, _mp_encode_u32_be(n))
+    elif n > 4294967295:
+        # uint64
+        result.push(0xCF)
+        _mp_append(result, _mp_encode_u64_be(n))
+    elif n >= -128 and n <= -33:
+        # int8
+        result.push(0xD0)
+        result.push(_mp_mask8(n + 256))
+    elif n >= -32768 and n <= -129:
+        # int16: store two's complement big-endian
+        result.push(0xD1)
+        val u16 = n + 65536
+        _mp_append(result, _mp_encode_u16_be(u16))
+    elif n >= -2147483648 and n <= -32769:
+        # int32
+        result.push(0xD2)
+        val u32 = n + 4294967296
+        _mp_append(result, _mp_encode_u32_be(u32))
+    else:
+        # int64 (n < -2147483648)
+        result.push(0xD3)
+        _mp_append(result, _mp_encode_u64_be(n))
+    result
+
+fn msgpack_encode_str(s: text) -> [u8]:
+    """Encode a string using the smallest MessagePack str representation.
+
+    Uses ASCII encoding (ch.ord() per character). Full multi-byte UTF-8
+    codepoint encoding is deferred pending a unicode codepoint API.
+
+    Format selection (byte length):
+      [0, 31]    → fixstr  (0xA0 | len)
+      [32, 255]  → str8    (0xD9 + 1-byte length)
+      [256, 65535] → str16 (0xDA + 2-byte BE length)
+      larger     → str32   (0xDB + 4-byte BE length)
+    """
+    # Build UTF-8 bytes (ASCII only for now)
+    var body: [u8] = []
+    val slen = s.length()
+    var i = 0
+    while i < slen:
+        val ch = s[i]
+        body.push(_mp_mask8(ch.ord()))
+        i = i + 1
+    val blen = body.len()
+    var result: [u8] = []
+    if blen <= 31:
+        # fixstr
+        result.push(_mp_mask8(0xA0 | blen))
+    elif blen <= 255:
+        # str8
+        result.push(0xD9)
+        result.push(_mp_mask8(blen))
+    elif blen <= 65535:
+        # str16
+        result.push(0xDA)
+        _mp_append(result, _mp_encode_u16_be(blen))
+    else:
+        # str32
+        result.push(0xDB)
+        _mp_append(result, _mp_encode_u32_be(blen))
+    _mp_append(result, body)
+    result
+
+fn msgpack_encode_bin(data: [u8]) -> [u8]:
+    """Encode binary data using bin8/bin16/bin32 format.
+
+    Format selection (byte length):
+      [0, 255]   → bin8  (0xC4 + 1-byte length)
+      [256, 65535] → bin16 (0xC5 + 2-byte BE length)
+      larger     → bin32  (0xC6 + 4-byte BE length)
+    """
+    val dlen = data.len()
+    var result: [u8] = []
+    if dlen <= 255:
+        result.push(0xC4)
+        result.push(_mp_mask8(dlen))
+    elif dlen <= 65535:
+        result.push(0xC5)
+        _mp_append(result, _mp_encode_u16_be(dlen))
+    else:
+        result.push(0xC6)
+        _mp_append(result, _mp_encode_u32_be(dlen))
+    _mp_append(result, data)
+    result
+
+fn msgpack_encode_array_header(count: i64) -> [u8]:
+    """Encode just the array header (count bytes); caller appends N encoded items.
+
+    Format selection:
+      [0, 15]    → fixarray  (0x90 | count)
+      [16, 65535] → array16  (0xDC + 2-byte BE count)
+      larger     → array32   (0xDD + 4-byte BE count)
+    """
+    var result: [u8] = []
+    if count <= 15:
+        result.push(_mp_mask8(0x90 | count))
+    elif count <= 65535:
+        result.push(0xDC)
+        _mp_append(result, _mp_encode_u16_be(count))
+    else:
+        result.push(0xDD)
+        _mp_append(result, _mp_encode_u32_be(count))
+    result
+
+fn msgpack_encode_map_header(count: i64) -> [u8]:
+    """Encode just the map header (count pairs); caller appends N key-value pairs.
+
+    Format selection:
+      [0, 15]    → fixmap   (0x80 | count)
+      [16, 65535] → map16   (0xDE + 2-byte BE count)
+      larger     → map32    (0xDF + 4-byte BE count)
+    """
+    var result: [u8] = []
+    if count <= 15:
+        result.push(_mp_mask8(0x80 | count))
+    elif count <= 65535:
+        result.push(0xDE)
+        _mp_append(result, _mp_encode_u16_be(count))
+    else:
+        result.push(0xDF)
+        _mp_append(result, _mp_encode_u32_be(count))
+    result
+
+# ============================================================================
+# Public decoder functions
+# ============================================================================
+
+fn msgpack_decode_type(data: [u8], pos: i64) -> list:
+    """Decode the type at position pos. Returns [type_tag, value_or_length, new_pos].
+
+    type_tag is the format byte (0..255) as i64.
+    value_or_length:
+      - nil/bool/fixint: the decoded value (0 for nil, 0/1 for bool, integer value)
+      - str/bin: the byte length of the payload
+      - array/map: the element/pair count
+    new_pos: position after consuming the header (not the payload).
+    On error, returns [0xFF, -1, pos] (0xFF is not a valid msgpack format byte)."""
+    var result = []
+    if pos >= data.len():
+        result.push(0xFF)
+        result.push(-1)
+        result.push(pos)
+        return result
+    val fb = _mp_read_u8(data, pos)
+    if fb <= 0x7F:
+        # positive fixint
+        result.push(fb)
+        result.push(fb)
+        result.push(pos + 1)
+    elif fb >= 0xE0:
+        # negative fixint: sign-extend from 8-bit
+        result.push(fb)
+        result.push(fb - 256)
+        result.push(pos + 1)
+    elif fb == 0xC0:
+        # nil
+        result.push(fb)
+        result.push(0)
+        result.push(pos + 1)
+    elif fb == 0xC2:
+        # false
+        result.push(fb)
+        result.push(0)
+        result.push(pos + 1)
+    elif fb == 0xC3:
+        # true
+        result.push(fb)
+        result.push(1)
+        result.push(pos + 1)
+    elif fb == 0xCC:
+        # uint8
+        result.push(fb)
+        result.push(_mp_read_u8(data, pos + 1))
+        result.push(pos + 2)
+    elif fb == 0xCD:
+        # uint16
+        result.push(fb)
+        result.push(_mp_decode_u16_be(data, pos + 1))
+        result.push(pos + 3)
+    elif fb == 0xCE:
+        # uint32
+        result.push(fb)
+        result.push(_mp_decode_u32_be(data, pos + 1))
+        result.push(pos + 5)
+    elif fb == 0xD0:
+        # int8
+        result.push(fb)
+        result.push(_mp_decode_i8_signed(_mp_read_u8(data, pos + 1)))
+        result.push(pos + 2)
+    elif fb == 0xD1:
+        # int16
+        result.push(fb)
+        result.push(_mp_decode_i16_signed(_mp_decode_u16_be(data, pos + 1)))
+        result.push(pos + 3)
+    elif fb == 0xD2:
+        # int32
+        result.push(fb)
+        result.push(_mp_decode_i32_signed(_mp_decode_u32_be(data, pos + 1)))
+        result.push(pos + 5)
+    elif fb >= 0xA0 and fb <= 0xBF:
+        # fixstr
+        val slen = fb & 0x1F
+        result.push(fb)
+        result.push(slen)
+        result.push(pos + 1)
+    elif fb == 0xD9:
+        # str8
+        result.push(fb)
+        result.push(_mp_read_u8(data, pos + 1))
+        result.push(pos + 2)
+    elif fb == 0xDA:
+        # str16
+        result.push(fb)
+        result.push(_mp_decode_u16_be(data, pos + 1))
+        result.push(pos + 3)
+    elif fb == 0xC4:
+        # bin8
+        result.push(fb)
+        result.push(_mp_read_u8(data, pos + 1))
+        result.push(pos + 2)
+    elif fb == 0xC5:
+        # bin16
+        result.push(fb)
+        result.push(_mp_decode_u16_be(data, pos + 1))
+        result.push(pos + 3)
+    elif fb >= 0x90 and fb <= 0x9F:
+        # fixarray
+        val acnt = fb & 0x0F
+        result.push(fb)
+        result.push(acnt)
+        result.push(pos + 1)
+    elif fb == 0xDC:
+        # array16
+        result.push(fb)
+        result.push(_mp_decode_u16_be(data, pos + 1))
+        result.push(pos + 3)
+    elif fb >= 0x80 and fb <= 0x8F:
+        # fixmap
+        val mcnt = fb & 0x0F
+        result.push(fb)
+        result.push(mcnt)
+        result.push(pos + 1)
+    elif fb == 0xDE:
+        # map16
+        result.push(fb)
+        result.push(_mp_decode_u16_be(data, pos + 1))
+        result.push(pos + 3)
+    else:
+        # unknown / unsupported format byte
+        result.push(0xFF)
+        result.push(-1)
+        result.push(pos)
+    result
+
+fn msgpack_decode_int(data: [u8], pos: i64) -> list:
+    """Decode an integer at position pos. Returns [value, new_pos].
+
+    Handles: positive fixint, negative fixint, uint8/16/32, int8/16/32/64.
+    uint64 is limited to values that fit in i64 (positive range).
+    On error, returns [-1, pos]."""
+    var result = []
+    if pos >= data.len():
+        result.push(-1)
+        result.push(pos)
+        return result
+    val fb = _mp_read_u8(data, pos)
+    if fb <= 0x7F:
+        # positive fixint
+        result.push(fb)
+        result.push(pos + 1)
+    elif fb >= 0xE0:
+        # negative fixint
+        result.push(fb - 256)
+        result.push(pos + 1)
+    elif fb == 0xCC:
+        # uint8
+        result.push(_mp_read_u8(data, pos + 1))
+        result.push(pos + 2)
+    elif fb == 0xCD:
+        # uint16
+        result.push(_mp_decode_u16_be(data, pos + 1))
+        result.push(pos + 3)
+    elif fb == 0xCE:
+        # uint32
+        result.push(_mp_decode_u32_be(data, pos + 1))
+        result.push(pos + 5)
+    elif fb == 0xCF:
+        # uint64 — read 8 bytes as i64 (positive values only)
+        val hi = _mp_decode_u32_be(data, pos + 1)
+        val lo = _mp_decode_u32_be(data, pos + 5)
+        result.push((hi << 32) | lo)
+        result.push(pos + 9)
+    elif fb == 0xD0:
+        # int8
+        result.push(_mp_decode_i8_signed(_mp_read_u8(data, pos + 1)))
+        result.push(pos + 2)
+    elif fb == 0xD1:
+        # int16
+        result.push(_mp_decode_i16_signed(_mp_decode_u16_be(data, pos + 1)))
+        result.push(pos + 3)
+    elif fb == 0xD2:
+        # int32
+        result.push(_mp_decode_i32_signed(_mp_decode_u32_be(data, pos + 1)))
+        result.push(pos + 5)
+    elif fb == 0xD3:
+        # int64 — read 8 bytes as two's complement i64
+        val hi64 = _mp_decode_u32_be(data, pos + 1)
+        val lo64 = _mp_decode_u32_be(data, pos + 5)
+        result.push((hi64 << 32) | lo64)
+        result.push(pos + 9)
+    else:
+        result.push(-1)
+        result.push(pos)
+    result
+
+fn msgpack_decode_str(data: [u8], pos: i64) -> list:
+    """Decode a string at position pos. Returns [string_as_text, new_pos].
+
+    Handles: fixstr, str8, str16, str32.
+    Decodes bytes as ASCII characters (b.chr()). Multi-byte UTF-8 is deferred.
+    On error, returns ["", pos]."""
+    var result = []
+    if pos >= data.len():
+        result.push("")
+        result.push(pos)
+        return result
+    val fb = _mp_read_u8(data, pos)
+    var blen = 0
+    var payload_pos = 0
+    if fb >= 0xA0 and fb <= 0xBF:
+        # fixstr
+        blen = fb & 0x1F
+        payload_pos = pos + 1
+    elif fb == 0xD9:
+        # str8
+        blen = _mp_read_u8(data, pos + 1)
+        payload_pos = pos + 2
+    elif fb == 0xDA:
+        # str16
+        blen = _mp_decode_u16_be(data, pos + 1)
+        payload_pos = pos + 3
+    elif fb == 0xDB:
+        # str32
+        blen = _mp_decode_u32_be(data, pos + 1)
+        payload_pos = pos + 5
+    else:
+        result.push("")
+        result.push(pos)
+        return result
+    # decode bytes as ASCII
+    var parts: [text] = []
+    var i = 0
+    while i < blen:
+        val b = _mp_read_u8(data, payload_pos + i)
+        parts.push(b.chr())
+        i = i + 1
+    result.push(parts.join(""))
+    result.push(payload_pos + blen)
+    result

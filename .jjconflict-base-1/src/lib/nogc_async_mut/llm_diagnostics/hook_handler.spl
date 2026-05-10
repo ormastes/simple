@@ -1,0 +1,234 @@
+# LLM Diagnostics — Hook Handler
+#
+# Parses Claude Code hook JSON from stdin and emits typed DiagEvents.
+# Hook protocol: JSON on stdin, exit 0 = allow, exit 2 = block.
+
+use std.nogc_async_mut.llm_diagnostics.types.{
+    DiagEvent, ToolCall, new_diag_event, new_tool_call,
+    EVENT_SESSION_START, EVENT_SESSION_END,
+    EVENT_TOOL_PRE, EVENT_TOOL_POST, EVENT_TOOL_FAILURE,
+    EVENT_SUBAGENT_START, EVENT_SUBAGENT_STOP,
+    EVENT_ELICITATION, EVENT_ELICITATION_RESULT,
+    EVENT_PERMISSION_REQUEST, EVENT_PERMISSION_DENIED,
+    EVENT_USER_PROMPT, EVENT_PRE_COMPACT,
+    EVENT_NOTIFICATION, EVENT_STOP, EVENT_TASK_COMPLETED
+}
+use std.nogc_async_mut.llm_diagnostics.token_estimator.{estimate_json_tokens}
+
+extern fn rt_stdin_read_all() -> text
+extern fn rt_time_millis() -> i64
+
+# --- JSON Extraction Helpers ---
+# Reuse the index_of + substring pattern from mcp_sdk
+
+fn Q() -> text:
+    "\""
+
+fn extract_str(json: text, key: text) -> text:
+    val search = Q() + key + Q() + ":"
+    val idx_opt = json.index_of(search)
+    var idx = -1
+    match idx_opt:
+        Some(i):
+            idx = i
+        nil:
+            idx = -1
+    if idx < 0:
+        return ""
+    val after_key = idx + search.len()
+    # skip whitespace
+    var start = after_key
+    while start < json.len() and (json.char_at(start) == " " or json.char_at(start) == "\t"):
+        start = start + 1
+    if start >= json.len():
+        return ""
+    if json.char_at(start) != Q():
+        return ""
+    start = start + 1
+    var end_idx = start
+    while end_idx < json.len():
+        val ch = json.char_at(end_idx)
+        if ch == "\\":
+            end_idx = end_idx + 2
+        elif ch == Q():
+            return json.slice(start, end_idx)
+        else:
+            end_idx = end_idx + 1
+    ""
+
+fn extract_int(json: text, key: text) -> i64:
+    val search = Q() + key + Q() + ":"
+    val idx_opt = json.index_of(search)
+    var idx = -1
+    match idx_opt:
+        Some(i):
+            idx = i
+        nil:
+            idx = -1
+    if idx < 0:
+        return 0
+    val after_key = idx + search.len()
+    var start = after_key
+    while start < json.len() and (json.char_at(start) == " " or json.char_at(start) == "\t"):
+        start = start + 1
+    var end_idx = start
+    while end_idx < json.len():
+        val ch = json.char_at(end_idx)
+        if ch >= "0" and ch <= "9":
+            end_idx = end_idx + 1
+        elif ch == "-" and end_idx == start:
+            end_idx = end_idx + 1
+        else:
+            break
+    if end_idx == start:
+        return 0
+    val num_str = json.slice(start, end_idx)
+    num_str.to_i64() ?? 0
+
+# --- MCP Tool Name Parser ---
+
+fn parse_mcp_tool_name(name: text) -> (text, text):
+    """Extract (server_name, tool_name) from mcp__<server>__<tool> format."""
+    if not name.starts_with("mcp__"):
+        return ("", name)
+    val rest = name.slice(5, name.len())
+    val sep = rest.index_of("__")
+    match sep:
+        Some(i):
+            return (rest.slice(0, i), rest.slice(i + 2, rest.len()))
+        nil:
+            return ("", name)
+
+fn is_mcp_tool(name: text) -> bool:
+    name.starts_with("mcp__")
+
+# --- Event Parsers ---
+
+fn parse_hook_json(json: text) -> DiagEvent:
+    """Parse any Claude Code hook JSON into a DiagEvent."""
+    val now = rt_time_millis()
+    val event_name = extract_str(json, "hook_event_name")
+    val session_id = extract_str(json, "session_id")
+
+    var event = new_diag_event(map_event_name(event_name), session_id)
+    event.timestamp = now
+    event.data = json
+    event
+
+fn map_event_name(hook_name: text) -> text:
+    """Map Claude Code hook event name to our internal event type."""
+    match hook_name:
+        "PreToolUse":
+            EVENT_TOOL_PRE
+        "PostToolUse":
+            EVENT_TOOL_POST
+        "PostToolUseFailure":
+            EVENT_TOOL_FAILURE
+        "SessionStart":
+            EVENT_SESSION_START
+        "SessionEnd":
+            EVENT_SESSION_END
+        "SubagentStart":
+            EVENT_SUBAGENT_START
+        "SubagentStop":
+            EVENT_SUBAGENT_STOP
+        "Elicitation":
+            EVENT_ELICITATION
+        "ElicitationResult":
+            EVENT_ELICITATION_RESULT
+        "PermissionRequest":
+            EVENT_PERMISSION_REQUEST
+        "PermissionDenied":
+            EVENT_PERMISSION_DENIED
+        "UserPromptSubmit":
+            EVENT_USER_PROMPT
+        "PreCompact":
+            EVENT_PRE_COMPACT
+        "Notification":
+            EVENT_NOTIFICATION
+        "Stop":
+            EVENT_STOP
+        "TaskCompleted":
+            EVENT_TASK_COMPLETED
+        _:
+            hook_name
+
+fn parse_tool_call_from_pre(json: text) -> ToolCall:
+    """Extract ToolCall from PreToolUse hook JSON."""
+    val tool_name = extract_str(json, "tool_name")
+    val tool_use_id = extract_str(json, "tool_use_id")
+    val tool_input = extract_str(json, "tool_input")
+
+    var tc = new_tool_call(tool_use_id, tool_name)
+    tc.start_time = rt_time_millis()
+    tc.is_mcp = is_mcp_tool(tool_name)
+    tc.request_payload = tool_input
+    tc.estimated_request_tokens = estimate_json_tokens(tool_input)
+
+    if tc.is_mcp:
+        val parsed = parse_mcp_tool_name(tool_name)
+        tc.server_name = parsed.0
+    tc
+
+fn parse_tool_call_from_post(json: text) -> ToolCall:
+    """Extract ToolCall from PostToolUse hook JSON."""
+    val tool_name = extract_str(json, "tool_name")
+    val tool_use_id = extract_str(json, "tool_use_id")
+    val tool_input = extract_str(json, "tool_input")
+    val tool_response = extract_str(json, "tool_response")
+
+    var tc = new_tool_call(tool_use_id, tool_name)
+    tc.end_time = rt_time_millis()
+    tc.is_mcp = is_mcp_tool(tool_name)
+    tc.request_payload = tool_input
+    tc.response_payload = tool_response
+    tc.estimated_request_tokens = estimate_json_tokens(tool_input)
+    tc.estimated_response_tokens = estimate_json_tokens(tool_response)
+
+    if tc.is_mcp:
+        val parsed = parse_mcp_tool_name(tool_name)
+        tc.server_name = parsed.0
+    tc
+
+fn parse_tool_call_from_failure(json: text) -> ToolCall:
+    """Extract ToolCall from PostToolUseFailure hook JSON."""
+    val tool_name = extract_str(json, "tool_name")
+    val tool_use_id = extract_str(json, "tool_use_id")
+    val tool_input = extract_str(json, "tool_input")
+    val error = extract_str(json, "error")
+
+    var tc = new_tool_call(tool_use_id, tool_name)
+    tc.end_time = rt_time_millis()
+    tc.is_mcp = is_mcp_tool(tool_name)
+    tc.request_payload = tool_input
+    tc.error = error
+    tc.estimated_request_tokens = estimate_json_tokens(tool_input)
+
+    if tc.is_mcp:
+        val parsed = parse_mcp_tool_name(tool_name)
+        tc.server_name = parsed.0
+    tc
+
+fn parse_subagent_start(json: text) -> (text, text):
+    """Extract (agent_id, agent_type) from SubagentStart hook JSON."""
+    val agent_id = extract_str(json, "agent_id")
+    val agent_type = extract_str(json, "agent_type")
+    (agent_id, agent_type)
+
+fn parse_subagent_stop(json: text) -> (text, text, text):
+    """Extract (agent_id, transcript_path, last_message) from SubagentStop."""
+    val agent_id = extract_str(json, "agent_id")
+    val transcript_path = extract_str(json, "transcript_path")
+    val last_message = extract_str(json, "last_message")
+    (agent_id, transcript_path, last_message)
+
+fn parse_session_start_info(json: text) -> (text, text, text):
+    """Extract (session_id, cwd, permission_mode) from SessionStart."""
+    val session_id = extract_str(json, "session_id")
+    val cwd = extract_str(json, "cwd")
+    val permission_mode = extract_str(json, "permission_mode")
+    (session_id, cwd, permission_mode)
+
+fn read_hook_stdin() -> text:
+    """Read all of stdin (Claude Code sends JSON as single blob)."""
+    rt_stdin_read_all()

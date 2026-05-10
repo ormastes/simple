@@ -1,0 +1,429 @@
+# ITF CLI — Microsoft Graph mail adapter (curl shellout fallback)
+#
+# Runtime path for issue #10 until the pure-Simple http_client transport
+# extern lands (issue #11). Mirrors the Jira/Bitbucket curl adapters:
+# acquire OAuth2 app-only token via curl, cache it on disk for ~1h, then
+# call Microsoft Graph under /users/{shared_mailbox_upn}/...
+
+use std.nogc_sync_mut.io.process_ops.{process_run}
+use std.nogc_sync_mut.file_system.file_ops.{file_read_text, file_write_text, file_exists, file_rename, file_delete}
+use std.nogc_sync_mut.file_system.permissions.{file_set_mode}
+use std.nogc_sync_mut.env.{env_get}
+use std.nogc_sync_mut.io.time_ops.{current_time_unix}
+use std.nogc_sync_mut.http_client.types.{url_encode}
+use std.common.json.{json_parse, json_object_get, json_array_get, json_array_length, json_serialize}
+
+
+val OUTLOOK_CURL_GRAPH_BASE: text = "https://graph.microsoft.com/v1.0"
+val OUTLOOK_CURL_DEFAULT_TOP: i64 = 50
+val OUTLOOK_CURL_DEFAULT_SCOPE: text = "https://graph.microsoft.com/.default"
+val OUTLOOK_CURL_DEFAULT_SELECT_MESSAGES: text = "id,subject,from,receivedDateTime,bodyPreview,hasAttachments"
+val OUTLOOK_CURL_CACHE_FILE_MODE: i64 = 0o600
+val OUTLOOK_CURL_CACHE_SAFETY_MARGIN: i64 = 60
+
+
+class OutlookCurlClient:
+    access_token: text
+    mailbox_upn: text
+    base_url: text
+    curl_path: text
+
+
+class OutlookFolder:
+    id: text
+    display_name: text
+    parent_folder_id: text
+    total_item_count: i64
+    unread_item_count: i64
+
+
+class OutlookMessage:
+    id: text
+    subject: text
+    from_address: text
+    from_name: text
+    received: text
+    body_preview: text
+    has_attachments: bool
+
+
+fn outlook_curl_client_from_token(access_token: text, mailbox_upn: text) -> OutlookCurlClient:
+    OutlookCurlClient(
+        access_token: access_token,
+        mailbox_upn: mailbox_upn,
+        base_url: OUTLOOK_CURL_GRAPH_BASE,
+        curl_path: "curl",
+    )
+
+
+fn outlook_curl_client_acquire(tenant_id: text, client_id: text, secret_env_var: text, mailbox_upn: text, cache_path: text) -> (bool, OutlookCurlClient):
+    val secret = env_get(secret_env_var)
+    if secret == "":
+        return (false, outlook_curl_client_from_token("", mailbox_upn))
+    val (ok, token) = outlook_curl_get_token_with_secret(tenant_id, client_id, secret, cache_path)
+    if not ok:
+        return (false, outlook_curl_client_from_token("", mailbox_upn))
+    (true, outlook_curl_client_from_token(token, mailbox_upn))
+
+
+fn outlook_curl_get_token_with_secret(tenant_id: text, client_id: text, client_secret: text, cache_path: text) -> (bool, text):
+    val now = current_time_unix()
+    if cache_path != "":
+        val (cached_tok, cached_exp) = outlook_curl_token_cache_load(cache_path)
+        if cached_tok != "" and outlook_curl_token_cache_is_fresh(cached_exp, now):
+            return (true, cached_tok)
+
+    val curl_path = "curl"
+    val url = "https://login.microsoftonline.com/{tenant_id}/oauth2/v2.0/token"
+    val body = "grant_type=client_credentials&client_id={_url_form_encode(client_id)}&client_secret={_url_form_encode(client_secret)}&scope={_url_form_encode(OUTLOOK_CURL_DEFAULT_SCOPE)}"
+    val argv = _build_curl_argv_token(url, body)
+    val (status, resp_body, stderr) = _run_curl(curl_path, argv)
+    if status != 200:
+        return (false, "")
+    val parsed = json_parse(resp_body)
+    if parsed == nil:
+        return (false, "")
+    val token = _ostr(parsed, "access_token")
+    if token == "":
+        return (false, "")
+    val expires_in = _oint(parsed, "expires_in")
+    val expires_at = if expires_in > 0: now + expires_in else: now + 3600
+    if cache_path != "":
+        val _ = stderr
+        outlook_curl_token_cache_save(cache_path, token, expires_at)
+    (true, token)
+
+
+fn outlook_curl_folder_list_url(client: OutlookCurlClient) -> text:
+    _outlook_user_path(client, "/mailFolders?$top={OUTLOOK_CURL_DEFAULT_TOP}")
+
+
+fn outlook_curl_messages_url(client: OutlookCurlClient, folder_id: text, filter: text, top: i64) -> text:
+    val effective_top = if top <= 0: OUTLOOK_CURL_DEFAULT_TOP else: top
+    val select = url_encode(OUTLOOK_CURL_DEFAULT_SELECT_MESSAGES)
+    var path = "/mailFolders/{url_encode(folder_id)}/messages?$top={effective_top}&$select={select}"
+    if filter != "":
+        path = path + "&$filter={url_encode(filter)}"
+    _outlook_user_path(client, path)
+
+
+fn outlook_curl_list_folders(client: OutlookCurlClient) -> (bool, [OutlookFolder], text):
+    var url = outlook_curl_folder_list_url(client)
+    var first_body = ""
+    var folders: [OutlookFolder] = []
+
+    while url != "":
+        val (status, body, _stderr) = _graph_get(client, url)
+        if first_body == "":
+            first_body = body
+        if not _status_ok(status):
+            return (false, folders, _status_message(status, body))
+        val parsed = json_parse(body)
+        if parsed == nil:
+            return (false, folders, "invalid JSON response")
+        val arr = json_object_get(parsed, "value")
+        if arr != nil:
+            val n = json_array_length(arr)
+            var i = 0
+            while i < n:
+                folders.push(_parse_folder(json_array_get(arr, i)))
+                i = i + 1
+        val next = json_object_get(parsed, "@odata.nextLink")
+        url = _json_text(next)
+
+    (true, folders, first_body)
+
+
+fn outlook_curl_list_messages(client: OutlookCurlClient, folder_id: text, filter: text, top: i64) -> (bool, [OutlookMessage], text):
+    var url = outlook_curl_messages_url(client, folder_id, filter, top)
+    var first_body = ""
+    var messages: [OutlookMessage] = []
+
+    while url != "":
+        val (status, body, _stderr) = _graph_get(client, url)
+        if first_body == "":
+            first_body = body
+        if not _status_ok(status):
+            return (false, messages, _status_message(status, body))
+        val parsed = json_parse(body)
+        if parsed == nil:
+            return (false, messages, "invalid JSON response")
+        val arr = json_object_get(parsed, "value")
+        if arr != nil:
+            val n = json_array_length(arr)
+            var i = 0
+            while i < n:
+                messages.push(_parse_message(json_array_get(arr, i)))
+                i = i + 1
+        val next = json_object_get(parsed, "@odata.nextLink")
+        url = _json_text(next)
+
+    (true, messages, first_body)
+
+
+fn outlook_curl_get_message(client: OutlookCurlClient, msg_id: text) -> (bool, OutlookMessage, text):
+    val empty = OutlookMessage(
+        id: "", subject: "", from_address: "", from_name: "",
+        received: "", body_preview: "", has_attachments: false,
+    )
+    val url = _outlook_user_path(client, "/messages/{url_encode(msg_id)}")
+    val (status, body, _stderr) = _graph_get(client, url)
+    if not _status_ok(status):
+        return (false, empty, _status_message(status, body))
+    val parsed = json_parse(body)
+    if parsed == nil:
+        return (false, empty, "invalid JSON response")
+    (true, _parse_message(parsed), body)
+
+
+fn outlook_curl_token_cache_is_fresh(expires_at: i64, now: i64) -> bool:
+    expires_at > now + OUTLOOK_CURL_CACHE_SAFETY_MARGIN
+
+
+fn outlook_curl_render_token_cache(token: text, expires_at: i64) -> text:
+    "# itf outlook curl token cache (auto-managed; do not edit)\n" +
+    "access_token: \"{_escape_sdn_value(token)}\"\n" +
+    "expires_at: {expires_at}\n"
+
+
+fn outlook_curl_parse_token_cache(content: text) -> (text, i64):
+    if content == nil or content == "":
+        return ("", 0)
+    var token = ""
+    var expires_at: i64 = 0
+    val lines = content.split("\n")
+    for line in lines:
+        val trimmed = line.trim()
+        if trimmed == "" or trimmed.starts_with("#"):
+            pass_dn
+        else if trimmed.starts_with("access_token:"):
+            token = _strip_sdn_value(trimmed.split(":", 2)[1])
+        else if trimmed.starts_with("expires_at:"):
+            expires_at = _parse_i64(_strip_sdn_value(trimmed.split(":", 2)[1]))
+    (token, expires_at)
+
+
+fn outlook_curl_token_cache_load(path: text) -> (text, i64):
+    if path == "" or not file_exists(path):
+        return ("", 0)
+    val content = file_read_text(path)
+    if content == nil:
+        return ("", 0)
+    outlook_curl_parse_token_cache(content)
+
+
+fn outlook_curl_token_cache_save(path: text, token: text, expires_at: i64) -> bool:
+    if path == "":
+        return false
+    val tmp_path = "{path}.tmp"
+    val payload = outlook_curl_render_token_cache(token, expires_at)
+    if not file_write_text(tmp_path, payload):
+        return false
+    if not file_set_mode(tmp_path, OUTLOOK_CURL_CACHE_FILE_MODE):
+        file_delete(tmp_path)
+        return false
+    if not file_rename(tmp_path, path):
+        file_delete(tmp_path)
+        return false
+    true
+
+
+fn _build_curl_argv_token(url: text, body: text) -> [text]:
+    [
+        "-s", "-S",
+        "-X", "POST",
+        "-H", "Content-Type: application/x-www-form-urlencoded",
+        "-H", "Accept: application/json",
+        "-d", body,
+        "-w", "\n%\{http_code\}",
+        url,
+    ]
+
+
+fn _build_curl_argv_get(auth: text, url: text) -> [text]:
+    [
+        "-s", "-S",
+        "-H", "Authorization: Bearer {auth}",
+        "-H", "Accept: application/json",
+        "-w", "\n%\{http_code\}",
+        url,
+    ]
+
+
+fn _run_curl(curl_path: text, argv: [text]) -> (i64, text, text):
+    val (stdout, stderr, exit_code) = process_run(curl_path, argv)
+    if exit_code != 0:
+        return (0, "", "curl exit {exit_code}: {stderr}")
+    val (body, code) = _split_response(stdout)
+    (code, body, stderr)
+
+
+fn _split_response(stdout: text) -> (text, i64):
+    if stdout == "":
+        return ("", 0)
+    var idx = stdout.len() - 1
+    var found = -1
+    while idx >= 0:
+        if stdout[idx] == "\n":
+            found = idx
+            break
+        idx = idx - 1
+    if found < 0:
+        val code = _parse_status(stdout.trim())
+        if code > 0:
+            return ("", code)
+        return (stdout, 0)
+    val body = stdout[0:found]
+    val tail = stdout[found + 1:stdout.len()].trim()
+    (body, _parse_status(tail))
+
+
+fn _parse_status(s: text) -> i64:
+    val t = s.trim()
+    if t.len() < 3:
+        return 0
+    var n: i64 = 0
+    var i = 0
+    while i < t.len():
+        val ch = t[i]
+        if ch < "0" or ch > "9":
+            return 0
+        n = n * 10 + (ch.to_i64() - "0".to_i64())
+        i = i + 1
+    n
+
+
+fn _status_ok(code: i64) -> bool:
+    code >= 200 and code < 300
+
+
+fn _status_message(code: i64, body: text) -> text:
+    if code == 401 or code == 403:
+        return "authentication required (HTTP {code})"
+    if code == 404:
+        return "not found (HTTP {code})"
+    if code == 429:
+        return "rate limited (HTTP {code})"
+    if code >= 500:
+        return "server error (HTTP {code}): {body}"
+    if code == 0:
+        return "transport error: {body}"
+    "API error (HTTP {code}): {body}"
+
+
+fn _graph_get(client: OutlookCurlClient, url: text) -> (i64, text, text):
+    _run_curl(client.curl_path, _build_curl_argv_get(client.access_token, url))
+
+
+fn _outlook_user_path(client: OutlookCurlClient, suffix: text) -> text:
+    "{client.base_url}/users/{url_encode(client.mailbox_upn)}{suffix}"
+
+
+fn _parse_folder(obj: any) -> OutlookFolder:
+    OutlookFolder(
+        id: _ostr(obj, "id"),
+        display_name: _ostr(obj, "displayName"),
+        parent_folder_id: _ostr(obj, "parentFolderId"),
+        total_item_count: _oint(obj, "totalItemCount"),
+        unread_item_count: _oint(obj, "unreadItemCount"),
+    )
+
+
+fn _parse_message(obj: any) -> OutlookMessage:
+    var from_addr = ""
+    var from_name = ""
+    val from_obj = json_object_get(obj, "from")
+    if from_obj != nil:
+        val email_addr = json_object_get(from_obj, "emailAddress")
+        if email_addr != nil:
+            from_addr = _ostr(email_addr, "address")
+            from_name = _ostr(email_addr, "name")
+    OutlookMessage(
+        id: _ostr(obj, "id"),
+        subject: _ostr(obj, "subject"),
+        from_address: from_addr,
+        from_name: from_name,
+        received: _ostr(obj, "receivedDateTime"),
+        body_preview: _ostr(obj, "bodyPreview"),
+        has_attachments: _obool(obj, "hasAttachments"),
+    )
+
+
+fn _ostr(obj: any, key: text) -> text:
+    if obj == nil:
+        return ""
+    _json_text(json_object_get(obj, key))
+
+
+fn _oint(obj: any, key: text) -> i64:
+    if obj == nil:
+        return 0
+    _parse_i64(_json_text(json_object_get(obj, key)))
+
+
+fn _obool(obj: any, key: text) -> bool:
+    if obj == nil:
+        return false
+    val v = json_object_get(obj, key)
+    if v == nil:
+        return false
+    json_serialize(v).trim().to_lower() == "true"
+
+
+fn _json_text(value: any) -> text:
+    if value == nil:
+        return ""
+    val s = json_serialize(value)
+    if s.starts_with("\"") and s.ends_with("\"") and s.len() >= 2:
+        return s[1:s.len() - 1]
+    s
+
+
+fn _parse_i64(s: text) -> i64:
+    val t = s.trim()
+    if t == "":
+        return 0
+    var n: i64 = 0
+    var any = false
+    for ch in t:
+        if ch >= "0" and ch <= "9":
+            n = n * 10 + (ch.to_i64() - "0".to_i64())
+            any = true
+        else if any:
+            return n
+        else:
+            return 0
+    if any: n else: 0
+
+
+fn _strip_sdn_value(raw: text) -> text:
+    val s = raw.trim()
+    if s.starts_with("\"") and s.ends_with("\"") and s.len() >= 2:
+        return s[1:s.len() - 1]
+    s
+
+
+fn _escape_sdn_value(s: text) -> text:
+    val s1 = s.replace("\\", "\\\\")
+    s1.replace("\"", "\\\"")
+
+
+fn _url_form_encode(s: text) -> text:
+    var out: [text] = []
+    var i = 0
+    val len = s.length()
+    while i < len:
+        val ch = s.char_at(i)
+        val code = s.char_code_at(i)
+        val is_alpha = (code >= 65 and code <= 90) or (code >= 97 and code <= 122)
+        val is_digit = code >= 48 and code <= 57
+        val is_unreserved = is_alpha or is_digit or ch == "-" or ch == "_" or ch == "." or ch == "~"
+        if is_unreserved:
+            out.push(ch)
+        else:
+            var hex = code.to_string(16).upper()
+            if hex.length() == 1:
+                hex = "0" + hex
+            out.push("%" + hex)
+        i = i + 1
+    out.join("")

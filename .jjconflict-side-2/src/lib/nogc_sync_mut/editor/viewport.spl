@@ -1,0 +1,156 @@
+# Viewport — camera control, grid rendering, and debug overlays
+#
+# Manages the viewport camera (pan, zoom, coordinate conversion),
+# background grid, and debug-overlay toggles for physics/audio.
+
+use std.common.drawing.vector.{SkPoint, SkRect}
+use std.nogc_sync_mut.editor.mode.{EditorMode}
+
+# ============================================================================
+# GridConfig — background grid settings
+# ============================================================================
+
+struct GridConfig:
+    cell_size: f64
+    major_every: i32
+    visible: bool
+
+fn default_grid_config() -> GridConfig:
+    """Default grid: 32px cells, major line every 8 cells, visible."""
+    GridConfig(cell_size: 32.0, major_every: 8, visible: true)
+
+# ============================================================================
+# ViewportCamera — pan, zoom, and coordinate transforms
+# ============================================================================
+
+class ViewportCamera:
+    x: f64
+    y: f64
+    zoom: f64
+    rotation: f64
+    mode: EditorMode
+
+impl ViewportCamera:
+    static fn new_2d() -> ViewportCamera:
+        """Camera centered at origin for 2D editing."""
+        ViewportCamera(
+            x: 0.0,
+            y: 0.0,
+            zoom: 1.0,
+            rotation: 0.0,
+            mode: EditorMode.Edit2D
+        )
+
+    static fn new_3d() -> ViewportCamera:
+        """Camera positioned for 3D perspective editing."""
+        ViewportCamera(
+            x: 0.0,
+            y: -200.0,
+            zoom: 1.0,
+            rotation: 0.0,
+            mode: EditorMode.Edit3D
+        )
+
+    me pan(dx: f64, dy: f64):
+        """Move the camera by the given world-space delta."""
+        self.x = self.x + dx
+        self.y = self.y + dy
+
+    me zoom_by(factor: f64):
+        """Scale the zoom level, clamped to [0.1, 10.0]."""
+        var new_zoom = self.zoom * factor
+        if new_zoom < 0.1:
+            new_zoom = 0.1
+        if new_zoom > 10.0:
+            new_zoom = 10.0
+        self.zoom = new_zoom
+
+    me reset():
+        """Reset camera to origin with default zoom."""
+        self.x = 0.0
+        self.y = 0.0
+        self.zoom = 1.0
+        self.rotation = 0.0
+
+    fn screen_to_world(self, screen_x: f64, screen_y: f64) -> SkPoint:
+        """Convert screen coordinates to world coordinates accounting for pan and zoom."""
+        val world_x = (screen_x / self.zoom) + self.x
+        val world_y = (screen_y / self.zoom) + self.y
+        SkPoint(x: world_x, y: world_y)
+
+    fn world_to_screen(self, world_x: f64, world_y: f64) -> SkPoint:
+        """Convert world coordinates to screen coordinates."""
+        val screen_x = (world_x - self.x) * self.zoom
+        val screen_y = (world_y - self.y) * self.zoom
+        SkPoint(x: screen_x, y: screen_y)
+
+    fn visible_rect(self, screen_width: f64, screen_height: f64) -> SkRect:
+        """Compute the world-space rectangle visible on screen."""
+        val w = screen_width / self.zoom
+        val h = screen_height / self.zoom
+        SkRect.from_xywh(self.x, self.y, w, h)
+
+# ============================================================================
+# Viewport — camera + overlays + screen dimensions
+# ============================================================================
+
+class Viewport:
+    camera: ViewportCamera
+    grid: GridConfig
+    show_gizmos: bool
+    show_physics_debug: bool
+    show_audio_ranges: bool
+    screen_width: f64
+    screen_height: f64
+
+impl Viewport:
+    static fn new(width: f64, height: f64) -> Viewport:
+        """Create a viewport with default 2D camera and grid."""
+        Viewport(
+            camera: ViewportCamera.new_2d(),
+            grid: default_grid_config(),
+            show_gizmos: true,
+            show_physics_debug: false,
+            show_audio_ranges: false,
+            screen_width: width,
+            screen_height: height
+        )
+
+    me resize(width: f64, height: f64):
+        """Update the screen dimensions."""
+        self.screen_width = width
+        self.screen_height = height
+
+    me toggle_grid():
+        """Toggle grid visibility."""
+        val was_visible = self.grid.visible
+        if was_visible:
+            self.grid = GridConfig(
+                cell_size: self.grid.cell_size,
+                major_every: self.grid.major_every,
+                visible: false
+            )
+        else:
+            self.grid = GridConfig(
+                cell_size: self.grid.cell_size,
+                major_every: self.grid.major_every,
+                visible: true
+            )
+
+    me toggle_physics_debug():
+        """Toggle physics debug overlay."""
+        if self.show_physics_debug:
+            self.show_physics_debug = false
+        else:
+            self.show_physics_debug = true
+
+    me toggle_audio_ranges():
+        """Toggle audio range visualization."""
+        if self.show_audio_ranges:
+            self.show_audio_ranges = false
+        else:
+            self.show_audio_ranges = true
+
+    fn visible_world_rect(self) -> SkRect:
+        """Return the world-space rectangle currently visible."""
+        self.camera.visible_rect(self.screen_width, self.screen_height)

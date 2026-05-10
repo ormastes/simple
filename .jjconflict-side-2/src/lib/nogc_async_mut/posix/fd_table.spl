@@ -1,0 +1,194 @@
+# POSIX FD Table — per-process file descriptor management (M2, REQ-2/REQ-8).
+#
+# File descriptor allocation (monotonic), open, close, dup.
+# fd_read / fd_write dispatch through fd kind (null, pipe, file).
+# Stdio: fd 0=stdin, 1=stdout, 2=stderr pre-allocated in each new table.
+#
+# Uses parallel tombstone arrays (same pattern as process_table).
+#
+# @cover fd_table
+
+# ============================================================================
+# FD kinds
+# ============================================================================
+
+var FD_KIND_NULL:  i64 = 0
+var FD_KIND_FILE:  i64 = 1
+var FD_KIND_PIPE:  i64 = 2
+var FD_KIND_STDIO: i64 = 3
+
+# ============================================================================
+# FD Table handle
+# ============================================================================
+
+struct FdTable:
+    """Opaque handle returned by fd_table_new. is_valid=true when usable."""
+    is_valid: bool
+    id:       i64
+
+# ============================================================================
+# Table storage — parallel arrays, module-level (tombstone pattern)
+# ============================================================================
+
+var _fdt_table_ids:  [i64]  = []  # which FdTable.id each row belongs to
+var _fdt_fds:        [i64]  = []  # file descriptor number
+var _fdt_kinds:      [i64]  = []  # FD_KIND_*
+var _fdt_paths:      [text] = []  # path (for file/null kinds)
+var _fdt_alive:      [bool] = []  # false = closed/tombstone
+var _fdt_table_ctr:  i64    = 0   # monotonic table ID counter
+var _fdt_fd_ctr:     i64    = 2   # next fd to allocate (0/1/2 are stdio)
+
+# ============================================================================
+# Internal helpers
+# ============================================================================
+
+fn _fdt_alloc_fd() -> i64:
+    _fdt_fd_ctr = _fdt_fd_ctr + 1
+    _fdt_fd_ctr
+
+fn _fdt_find(table_id: i64, fd: i64) -> i64:
+    """Return row index or -1 if not found."""
+    val n = _fdt_fds.len()
+    var i: i64 = 0
+    while i < n:
+        if (_fdt_alive[i] and
+            _fdt_table_ids[i] == table_id and
+            _fdt_fds[i] == fd):
+            return i
+        i = i + 1
+    -1
+
+fn _fdt_insert(table_id: i64, fd: i64, kind: i64, path: text):
+    _fdt_table_ids.push(table_id)
+    _fdt_fds.push(fd)
+    _fdt_kinds.push(kind)
+    _fdt_paths.push(path)
+    _fdt_alive.push(true)
+
+# ============================================================================
+# Public API
+# ============================================================================
+
+pub fn fd_table_new() -> FdTable:
+    """Create a new per-process FD table with stdin/stdout/stderr pre-wired.
+
+    Returns:
+        FdTable with is_valid=true.
+    """
+    _fdt_table_ctr = _fdt_table_ctr + 1
+    val id = _fdt_table_ctr
+    # Pre-allocate stdio
+    _fdt_insert(id, 0, FD_KIND_STDIO, "stdin")
+    _fdt_insert(id, 1, FD_KIND_STDIO, "stdout")
+    _fdt_insert(id, 2, FD_KIND_STDIO, "stderr")
+    FdTable(is_valid: true, id: id)
+
+pub fn fd_open(fdt: FdTable, path: text, flags: i64) -> i64:
+    """Open a path and assign a new file descriptor.
+
+    /dev/null is silently accepted. Other paths are treated as files.
+
+    Args:
+        fdt:   FdTable from fd_table_new()
+        path:  Path string (e.g. "/dev/null")
+        flags: Open flags (ignored in interpreter mode)
+
+    Returns:
+        New file descriptor >= 3, or -1 on error.
+    """
+    if not fdt.is_valid:
+        return -1
+    val kind = if path == "/dev/null":
+        FD_KIND_NULL
+    else:
+        FD_KIND_FILE
+    val fd = _fdt_alloc_fd()
+    _fdt_insert(fdt.id, fd, kind, path)
+    fd
+
+pub fn fd_read(fdt: FdTable, fd: i64, buf: text, count: i64) -> i64:
+    """Read up to count bytes from fd into buf (stub: returns 0 for null fd).
+
+    Args:
+        fdt:   FdTable handle
+        fd:    File descriptor
+        buf:   Buffer name (interpreter-mode: unused)
+        count: Maximum bytes to read
+
+    Returns:
+        Bytes read (0 for /dev/null, -1 on EBADF).
+    """
+    if not fdt.is_valid:
+        return -1
+    val row = _fdt_find(fdt.id, fd)
+    if row == -1:
+        return -1
+    val kind = _fdt_kinds[row]
+    if kind == FD_KIND_NULL:
+        return 0
+    if kind == FD_KIND_STDIO:
+        return 0
+    0
+
+pub fn fd_write(fdt: FdTable, fd: i64, buf: text, count: i64) -> i64:
+    """Write count bytes from buf to fd.
+
+    For /dev/null and stdio, all bytes are accepted (discarded or forwarded).
+
+    Args:
+        fdt:   FdTable handle
+        fd:    File descriptor
+        buf:   Data to write (text)
+        count: Number of bytes to write
+
+    Returns:
+        Bytes written (== count for null/stdio), or -1 on EBADF.
+    """
+    if not fdt.is_valid:
+        return -1
+    val row = _fdt_find(fdt.id, fd)
+    if row == -1:
+        return -1
+    val kind = _fdt_kinds[row]
+    if kind == FD_KIND_NULL:
+        return count
+    if kind == FD_KIND_STDIO:
+        return count
+    count
+
+pub fn fd_close(fdt: FdTable, fd: i64) -> bool:
+    """Close a file descriptor and mark its table row as dead.
+
+    Args:
+        fdt: FdTable handle
+        fd:  File descriptor to close
+
+    Returns:
+        true on success, false if fd was not found (EBADF).
+    """
+    if not fdt.is_valid:
+        return false
+    val row = _fdt_find(fdt.id, fd)
+    if row == -1:
+        return false
+    _fdt_alive[row] = false
+    true
+
+pub fn fd_dup(fdt: FdTable, old_fd: i64) -> i64:
+    """Duplicate old_fd to a new file descriptor.
+
+    Args:
+        fdt:    FdTable handle
+        old_fd: Existing file descriptor
+
+    Returns:
+        New file descriptor, or -1 on error.
+    """
+    if not fdt.is_valid:
+        return -1
+    val row = _fdt_find(fdt.id, old_fd)
+    if row == -1:
+        return -1
+    val new_fd = _fdt_alloc_fd()
+    _fdt_insert(fdt.id, new_fd, _fdt_kinds[row], _fdt_paths[row])
+    new_fd

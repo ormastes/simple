@@ -1,0 +1,490 @@
+# TCP networking for Simple language using monoio
+# Provides async TCP server and client capabilities
+# Feature: #1753 (Simple Language TCP API)
+
+use core.result
+use core.option
+use net.{NetError, error_from_code}
+use units.net.ShutdownMode
+use units.size.ByteCount
+use units.time.Seconds
+
+# External TCP functions
+extern fn monoio_tcp_listen(addr: text) -> i64
+extern fn monoio_tcp_accept(listener_handle: i64) -> i64
+extern fn monoio_tcp_connect(addr: text) -> i64
+extern fn monoio_tcp_read(stream_handle: i64, buffer: any, max_len: i64) -> i64
+extern fn monoio_tcp_write(stream_handle: i64, buffer: any) -> i64
+extern fn monoio_tcp_flush(stream_handle: i64) -> i64
+extern fn monoio_tcp_shutdown(stream_handle: i64, how: i64) -> i64
+extern fn monoio_tcp_close(stream_handle: i64) -> i64
+extern fn monoio_tcp_listener_close(listener_handle: i64) -> i64
+extern fn monoio_tcp_local_addr(stream_handle: i64) -> Option<text>
+extern fn monoio_tcp_peer_addr(stream_handle: i64) -> Option<text>
+extern fn monoio_tcp_set_nodelay(stream_handle: i64, nodelay: i64) -> i64
+extern fn monoio_tcp_set_keepalive(stream_handle: i64, keepalive_secs: i64) -> i64
+
+# TCP listener for accepting incoming connections
+pub struct TcpListener:
+    handle: i64
+    local_addr: text
+
+    # Bind to an address and start listening for connections
+    # Feature #1745: TCP server implementation
+    #
+    # Example:
+    #   val listener = await TcpListener.bind("127.0.0.1:8080")?
+    pub async fn bind(addr: text) -> Result<TcpListener, NetError>:
+        val handle = monoio_tcp_listen(addr)
+        if handle < 0:
+            return Err(error_from_code(handle))
+
+        return Ok(TcpListener {handle: handle, local_addr: addr})
+
+    # Accept an incoming connection
+    # Returns a TcpStream for the new connection
+    #
+    # Example:
+    #   val stream = await listener.accept()?
+    pub async fn accept(self) -> Result<TcpStream, NetError>:
+        val stream_handle = monoio_tcp_accept(self.handle)
+        if stream_handle < 0:
+            return Err(error_from_code(stream_handle))
+
+        # Get peer and local addresses
+        val peer = monoio_tcp_peer_addr(stream_handle)
+        val local = monoio_tcp_local_addr(stream_handle)
+
+        return Ok(TcpStream {
+            handle: stream_handle,
+            peer_addr: peer,
+            local_addr: local
+        })
+
+    # Get the local address this listener is bound to
+    pub fn local_addr(self) -> text:
+        return self.local_addr
+
+    # Close the listener and stop accepting connections
+    pub fn close(self) -> Result<(), NetError>:
+        val result = monoio_tcp_listener_close(self.handle)
+        if result < 0:
+            return Err(error_from_code(result))
+        return Ok(())
+
+    # Check if listener has valid handle
+    pub fn is_valid(self) -> bool:
+        """Check if listener handle is valid.
+
+        Returns:
+            True if handle is valid (non-negative)
+        """
+        return self.handle >= 0
+
+    # Get listener summary
+    pub fn summary(self) -> text:
+        """Get listener summary.
+
+        Returns:
+            Human-readable summary
+
+        Example:
+            listener.summary()
+            # → "TcpListener: 127.0.0.1:8080"
+        """
+        return "TcpListener: " + self.local_addr
+
+# TCP stream for reading and writing data
+pub struct TcpStream:
+    handle: i64
+    peer_addr: Option<text>
+    local_addr: Option<text>
+
+    # Connect to a remote TCP server
+    # Feature #1746: TCP client implementation
+    #
+    # Example:
+    #   val stream = await TcpStream.connect("127.0.0.1:8080")?
+    pub async fn connect(addr: text) -> Result<TcpStream, NetError>:
+        val handle = monoio_tcp_connect(addr)
+        if handle < 0:
+            return Err(error_from_code(handle))
+
+        # Get peer and local addresses
+        val peer = monoio_tcp_peer_addr(handle)
+        val local = monoio_tcp_local_addr(handle)
+
+        return Ok(TcpStream {
+            handle: handle,
+            peer_addr: peer,
+            local_addr: local
+        })
+
+    # Read data from the stream into a buffer
+    # Feature #1747: Zero-copy TCP read
+    #
+    # Returns number of bytes read (0 means EOF)
+    #
+    # Example:
+    #   var buffer = Bytes.with_capacity(1024_bytes)
+    #   val n = await stream.read(&mut buffer, 1024_bytes)?
+    pub async fn read(self, buffer: &mut any, max_len: ByteCount) -> Result<ByteCount, NetError>:
+        val max_len_i64 = max_len.value() as i64
+        val n = monoio_tcp_read(self.handle, buffer, max_len_i64)
+        if n < 0:
+            return Err(error_from_code(n))
+        val bytes_read = ByteCount.from_i64(n)
+        return Ok(bytes_read)
+
+    # Write data from a buffer to the stream
+    # Feature #1748: Zero-copy TCP write
+    #
+    # Returns number of bytes written
+    #
+    # Example:
+    #   val data = "Hello, world!".as_bytes()
+    #   val n = await stream.write(data)?
+    pub async fn write(self, buffer: any) -> Result<ByteCount, NetError>:
+        val n = monoio_tcp_write(self.handle, buffer)
+        if n < 0:
+            return Err(error_from_code(n))
+        val bytes_written = ByteCount.from_i64(n)
+        return Ok(bytes_written)
+
+    # Flush pending writes to the stream
+    pub async fn flush(self) -> Result<(), NetError>:
+        val result = monoio_tcp_flush(self.handle)
+        if result < 0:
+            return Err(error_from_code(result))
+        return Ok(())
+
+    # Write all data from buffer (convenience method)
+    # Keeps writing until all data is sent
+    pub async fn write_all(self, buffer: any) -> Result<(), NetError>:
+        val total_len = len(buffer)
+        var written = 0
+
+        while written < total_len:
+            val n = await self.write(buffer[written:])?
+            val n_val = n.value() as i32
+            if n_val == 0:
+                return Err(NetError.WriteZero)
+            written = written + n_val
+
+        await self.flush()?
+        return Ok(())
+
+    # Read exact amount of data (convenience method)
+    # Keeps reading until buffer is full
+    pub async fn read_exact(self, buffer: &mut any, len: ByteCount) -> Result<(), NetError>:
+        var total_read = 0
+        val len_val = len.value() as i64
+
+        while total_read < len_val:
+            val remaining = len_val - total_read
+            val remaining_bytes = ByteCount.from_i64(remaining)
+            val n = await self.read(buffer[total_read:], remaining_bytes)?
+            val n_val = n.value() as i64
+            if n_val == 0:
+                return Err(NetError.ConnectionReset)
+            total_read = total_read + n_val
+
+        return Ok(())
+
+    # Shutdown the connection (read, write, or both)
+    # Feature #1749: TCP connection management
+    pub fn shutdown(self, mode: ShutdownMode) -> Result<(), NetError>:
+        val result = monoio_tcp_shutdown(self.handle, mode.to_i64())
+        if result < 0:
+            return Err(error_from_code(result))
+        return Ok(())
+
+    # Close the connection
+    pub fn close(self) -> Result<(), NetError>:
+        val result = monoio_tcp_close(self.handle)
+        if result < 0:
+            return Err(error_from_code(result))
+        return Ok(())
+
+    # Get peer address (who we're connected to)
+    pub fn peer_addr(self) -> Option<text>:
+        return self.peer_addr
+
+    # Get local address (our endpoint)
+    pub fn local_addr(self) -> Option<text>:
+        return self.local_addr
+
+    # Set TCP_NODELAY option (disable Nagle's algorithm)
+    # When enabled, sends data immediately instead of buffering
+    pub fn set_nodelay(self, nodelay: bool) -> Result<(), NetError>:
+        val value = if nodelay: 1 else: 0
+        val result = monoio_tcp_set_nodelay(self.handle, value)
+        if result < 0:
+            return Err(error_from_code(result))
+        return Ok(())
+
+    # Set TCP keepalive interval
+    # Sends keepalive probes after period of inactivity
+    pub fn set_keepalive(self, secs: Option<Seconds>) -> Result<(), NetError>:
+        val value = match secs:
+            case Some(s):
+                s.value() as i64
+            case None:
+                0
+
+        val result = monoio_tcp_set_keepalive(self.handle, value)
+        if result < 0:
+            return Err(error_from_code(result))
+        return Ok(())
+
+    # Check if stream has peer address
+    pub fn has_peer_addr(self) -> bool:
+        """Check if peer address is available.
+
+        Returns:
+            True if peer_addr is Some
+
+        Example:
+            if stream.has_peer_addr():
+                print("Connected to: " + stream.peer_addr().unwrap())
+        """
+        match self.peer_addr:
+            case Some(_):
+                return true
+            case None:
+                return false
+
+    # Check if stream has local address
+    pub fn has_local_addr(self) -> bool:
+        """Check if local address is available.
+
+        Returns:
+            True if local_addr is Some
+        """
+        match self.local_addr:
+            case Some(_):
+                return true
+            case None:
+                return false
+
+    # Check if stream has valid handle
+    pub fn is_valid(self) -> bool:
+        """Check if stream handle is valid.
+
+        Returns:
+            True if handle is valid (non-negative)
+        """
+        return self.handle >= 0
+
+    # Get stream summary
+    pub fn summary(self) -> text:
+        """Get stream summary.
+
+        Returns:
+            Human-readable summary
+
+        Example:
+            stream.summary()
+            # → "TcpStream: 127.0.0.1:12345 → 192.168.1.1:8080"
+        """
+        val local_str = match self.local_addr:
+            case Some(addr):
+                addr
+            case None:
+                "(unknown)"
+
+        val peer_str = match self.peer_addr:
+            case Some(addr):
+                addr
+            case None:
+                "(unknown)"
+
+        return "TcpStream: " + local_str + " → " + peer_str
+
+# Shutdown modes for TCP connections
+pub enum ShutdownMode:
+    Read       # Shutdown read half
+    Write      # Shutdown write half
+    Both       # Shutdown both halves
+
+    pub fn to_string(self) -> text:
+        """Convert shutdown mode to string.
+
+        Returns:
+            Mode name
+
+        Example:
+            ShutdownMode.Read.to_string()  # → "read"
+        """
+        match self:
+            case ShutdownMode.Read:
+                return "read"
+            case ShutdownMode.Write:
+                return "write"
+            case ShutdownMode.Both:
+                return "both"
+
+    pub fn description(self) -> text:
+        """Get mode description.
+
+        Returns:
+            Human-readable description
+
+        Example:
+            ShutdownMode.Both.description()
+            # → "Shutdown both read and write"
+        """
+        match self:
+            case ShutdownMode.Read:
+                return "Shutdown read half"
+            case ShutdownMode.Write:
+                return "Shutdown write half"
+            case ShutdownMode.Both:
+                return "Shutdown both read and write"
+
+    pub fn to_int(self) -> i64:
+        """Convert to integer for FFI.
+
+        Returns:
+            Integer value (0=read, 1=write, 2=both)
+        """
+        match self:
+            case ShutdownMode.Read:
+                return 0
+            case ShutdownMode.Write:
+                return 1
+            case ShutdownMode.Both:
+                return 2
+
+    pub fn is_read(self) -> bool:
+        """Check if mode shuts down reading.
+
+        Returns:
+            True for Read or Both
+        """
+        match self:
+            case ShutdownMode.Read:
+                return true
+            case ShutdownMode.Write:
+                return false
+            case ShutdownMode.Both:
+                return true
+
+    pub fn is_write(self) -> bool:
+        """Check if mode shuts down writing.
+
+        Returns:
+            True for Write or Both
+        """
+        match self:
+            case ShutdownMode.Read:
+                return false
+            case ShutdownMode.Write:
+                return true
+            case ShutdownMode.Both:
+                return true
+
+    # =========================================================================
+    # Helper Methods
+    # =========================================================================
+
+    pub fn is_read_only(self) -> bool:
+        """Check if mode is Read only.
+
+        Returns:
+            True if exactly Read (not Both)
+        """
+        match self:
+            case ShutdownMode.Read:
+                return true
+            case _:
+                return false
+
+    pub fn is_write_only(self) -> bool:
+        """Check if mode is Write only.
+
+        Returns:
+            True if exactly Write (not Both)
+        """
+        match self:
+            case ShutdownMode.Write:
+                return true
+            case _:
+                return false
+
+    pub fn is_both(self) -> bool:
+        """Check if mode is Both.
+
+        Returns:
+            True if Both
+        """
+        match self:
+            case ShutdownMode.Both:
+                return true
+            case _:
+                return false
+
+    pub fn is_partial(self) -> bool:
+        """Check if mode is partial shutdown (Read or Write only).
+
+        Returns:
+            True if Read or Write only
+        """
+        match self:
+            case ShutdownMode.Both:
+                return false
+            case _:
+                return true
+
+    pub fn is_complete(self) -> bool:
+        """Check if mode is complete shutdown (Both).
+
+        Returns:
+            True if Both
+        """
+        return self.is_both()
+
+    pub fn affects_reading(self) -> bool:
+        """Check if mode affects reading.
+
+        Returns:
+            True for Read or Both
+        """
+        return self.is_read()
+
+    pub fn affects_writing(self) -> bool:
+        """Check if mode affects writing.
+
+        Returns:
+            True for Write or Both
+        """
+        return self.is_write()
+
+    pub fn summary(self) -> text:
+        """Get summary of shutdown mode.
+
+        Returns:
+            Human-readable summary
+
+        Example:
+            ShutdownMode.Both.summary()
+            # → "ShutdownMode: both (affects read and write)"
+        """
+        val name = self.to_string()
+        val affects = []
+        if self.affects_reading():
+            affects.push("read")
+        if self.affects_writing():
+            affects.push("write")
+        val affects_str = " and ".join(affects)
+        return "ShutdownMode: {name} (affects {affects_str})"
+
+# Convert ShutdownMode to integer for FFI
+fn shutdown_mode_to_int(mode: ShutdownMode) -> i64:
+    match mode:
+        case ShutdownMode.Read:
+            return 0
+        case ShutdownMode.Write:
+            return 1
+        case ShutdownMode.Both:
+            return 2

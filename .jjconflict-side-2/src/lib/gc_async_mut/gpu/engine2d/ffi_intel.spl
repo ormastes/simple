@@ -1,0 +1,167 @@
+"""Intel oneAPI Level Zero FFI Dispatch — Dynamic-First Dual-Path
+
+@tag:stdlib
+@tag:gpu
+
+Wraps Level Zero API functions behind an IntelFfi class. Dynamic-first
+since no Rust runtime exists for rt_intel_*. The static path resolves
+to extern fn stubs that will link-error unless the runtime is built.
+
+Usage:
+    val ffi = IntelFfi.create(GpuFfiMode.Dynamic)  # primary path
+    if ffi != nil and ffi.is_available():
+        ffi.init()
+"""
+
+use std.ffi.dynamic.{DynLib}
+use std.gpu.engine2d.ffi_dispatch.{GpuFfiMode, FfiDispatchBase, try_load_gpu_lib}
+
+# ============================================================================
+# Static extern declarations (no runtime impl yet — will link-error)
+# ============================================================================
+
+extern fn rt_intel_init() -> bool
+extern fn rt_intel_shutdown() -> bool
+extern fn rt_intel_is_available() -> bool
+extern fn rt_intel_driver_count() -> i64
+extern fn rt_intel_device_count() -> i64
+extern fn rt_intel_device_get(id: i64) -> i64
+extern fn rt_intel_command_list_create() -> i64
+extern fn rt_intel_command_list_close(handle: i64) -> bool
+extern fn rt_intel_command_list_destroy(handle: i64) -> bool
+extern fn rt_intel_command_queue_execute(queue: i64, cmd: i64) -> bool
+extern fn rt_intel_module_create(spirv: [u8]) -> i64
+extern fn rt_intel_module_destroy(module: i64) -> bool
+extern fn rt_intel_kernel_create(module: i64, name: text) -> i64
+extern fn rt_intel_kernel_destroy(kernel: i64) -> bool
+extern fn rt_intel_kernel_set_arg(kernel: i64, index: i64, value: i64) -> bool
+extern fn rt_intel_launch_kernel(cmd: i64, kernel: i64, gx: i64, gy: i64, gz: i64) -> bool
+extern fn rt_intel_mem_alloc(size: i64) -> i64
+extern fn rt_intel_mem_free(ptr: i64) -> bool
+extern fn rt_intel_fence_create() -> i64
+extern fn rt_intel_fence_wait(fence: i64) -> bool
+extern fn rt_intel_fence_destroy(fence: i64) -> bool
+
+# ============================================================================
+# IntelFfi
+# ============================================================================
+
+class IntelFfi:
+    _mode: GpuFfiMode
+    _dyn_lib: DynLib?
+
+impl IntelFfi: FfiDispatchBase
+
+    fn mode() -> GpuFfiMode:
+        self._mode
+
+    static fn create_static() -> IntelFfi:
+        IntelFfi(_mode: GpuFfiMode.Static, _dyn_lib: nil)
+
+    static fn create_dynamic() -> IntelFfi?:
+        val lib = try_load_gpu_lib("ze_loader")
+        if lib == nil:
+            return nil
+        IntelFfi(_mode: GpuFfiMode.Dynamic, _dyn_lib: lib)
+
+    static fn create_dynamic_from(path: text) -> IntelFfi?:
+        val lib = DynLib.load(path)
+        if lib == nil:
+            return nil
+        IntelFfi(_mode: GpuFfiMode.Dynamic, _dyn_lib: lib)
+
+    static fn create(ffi_mode: GpuFfiMode) -> IntelFfi?:
+        match ffi_mode:
+            case Dynamic:
+                val dyn_ffi = IntelFfi.create_dynamic()
+                if dyn_ffi != nil:
+                    return dyn_ffi
+                nil
+            case Static:
+                IntelFfi.create_static()
+
+    fn is_available() -> bool:
+        match self._mode:
+            case Static: rt_intel_is_available()
+            case Dynamic:
+                if self._dyn_lib != nil:
+                    val result = self._dyn_lib.call1("zeInit", 0)
+                    result == 0
+                else:
+                    false
+
+    fn init() -> bool:
+        match self._mode:
+            case Static: rt_intel_init()
+            case Dynamic:
+                if self._dyn_lib != nil:
+                    val result = self._dyn_lib.call1("zeInit", 0)
+                    result == 0
+                else:
+                    false
+
+    fn shutdown() -> bool:
+        match self._mode:
+            case Static: rt_intel_shutdown()
+            case Dynamic: true
+
+    fn driver_count() -> i64:
+        match self._mode:
+            case Static: rt_intel_driver_count()
+            case Dynamic:
+                if self._dyn_lib != nil:
+                    self._dyn_lib.call0("zeDriverGet")
+                else:
+                    0
+
+    fn device_count() -> i64:
+        match self._mode:
+            case Static: rt_intel_device_count()
+            case Dynamic:
+                if self._dyn_lib != nil:
+                    self._dyn_lib.call0("zeDeviceGet")
+                else:
+                    0
+
+    fn command_list_create() -> i64:
+        match self._mode:
+            case Static: rt_intel_command_list_create()
+            case Dynamic:
+                if self._dyn_lib != nil:
+                    self._dyn_lib.call0("zeCommandListCreate")
+                else:
+                    0
+
+    fn kernel_create(module: i64, name: text) -> i64:
+        match self._mode:
+            case Static: rt_intel_kernel_create(module, name)
+            case Dynamic: 0
+
+    fn launch_kernel(cmd: i64, kernel: i64, gx: i64, gy: i64, gz: i64) -> bool:
+        match self._mode:
+            case Static: rt_intel_launch_kernel(cmd, kernel, gx, gy, gz)
+            case Dynamic:
+                if self._dyn_lib != nil:
+                    val result = self._dyn_lib.call_n("zeCommandListAppendLaunchKernel", [cmd, kernel, gx, gy, gz])
+                    result == 0
+                else:
+                    false
+
+    fn mem_alloc(size: i64) -> i64:
+        match self._mode:
+            case Static: rt_intel_mem_alloc(size)
+            case Dynamic:
+                if self._dyn_lib != nil:
+                    self._dyn_lib.call1("zeMemAllocDevice", size)
+                else:
+                    0
+
+    fn mem_free(ptr: i64) -> bool:
+        match self._mode:
+            case Static: rt_intel_mem_free(ptr)
+            case Dynamic:
+                if self._dyn_lib != nil:
+                    val result = self._dyn_lib.call1("zeMemFree", ptr)
+                    result == 0
+                else:
+                    false

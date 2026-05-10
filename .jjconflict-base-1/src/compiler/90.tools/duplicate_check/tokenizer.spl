@@ -1,0 +1,163 @@
+# Tokenizer for duplication detection
+# Uses pure Simple lexer for performance
+
+use compiler.tools.duplicate_check.config (DuplicationConfig)
+
+enum SimpleTokenKind:
+    Identifier
+    Keyword
+    Operator
+    Literal
+    Punctuation
+    Comment
+    Whitespace
+
+struct SimpleToken:
+    kind: SimpleTokenKind
+    value: text
+    line: i64
+    column: i64
+    start_offset: i64
+    end_offset: i64
+
+fn token_to_string(token: SimpleToken) -> text:
+    "{token.kind}:{token.value}"
+
+fn is_keyword_text(value: text) -> bool:
+    value == "fn" or value == "val" or value == "var" or value == "if" or value == "else" or value == "while" or value == "for" or value == "match" or value == "case" or value == "return" or value == "break" or value == "continue" or value == "class" or value == "struct" or value == "enum" or value == "use" or value == "export"
+
+fn match_operator(source: text, source_len: i64, index: i64) -> text:
+    if index >= source_len:
+        return ""
+    val ch = source[index:index+1]
+    val has_next = index + 1 < source_len
+    val next = if has_next: source[index + 1:index + 2] else: ""
+
+    if ch == "=" and next == "=":
+        return "=="
+    if ch == "!" and next == "=":
+        return "!="
+    if ch == "<" and next == "=":
+        return "<="
+    if ch == ">" and next == "=":
+        return ">="
+    if ch == "-" and next == ">":
+        return "->"
+    if ch == "+" or ch == "-" or ch == "*" or ch == "/" or ch == "=" or ch == "<" or ch == ">" or ch == ":" or ch == "." or ch == "," or ch == "(" or ch == ")" or ch == "[" or ch == "]" or ch == "{" or ch == "}":
+        return ch
+    ""
+
+fn tokenize(source: text, config: DuplicationConfig) -> [SimpleToken]:
+    """Tokenize source code for duplication detection."""
+    var result: [SimpleToken] = []
+    var i = 0
+    var line = 1
+    var column = 1
+    val source_len = source.len()
+
+    while i < source_len:
+        val ch = source[i:i+1]
+        var handled = false
+
+        if ch == "\n":
+            if not config.ignore_whitespace:
+                result.push(SimpleToken(kind: SimpleTokenKind.Whitespace, value: "\n", line: line, column: column, start_offset: i, end_offset: i + 1))
+            line = line + 1
+            column = 1
+            i = i + 1
+            handled = true
+
+        if not handled:
+            if ch == " " or ch == "\t":
+                if not config.ignore_whitespace:
+                    result.push(SimpleToken(kind: SimpleTokenKind.Whitespace, value: ch, line: line, column: column, start_offset: i, end_offset: i + 1))
+                i = i + 1
+                column = column + 1
+                handled = true
+
+        if not handled:
+            if ch == "#":
+                while i < source.len() and source[i:i+1] != "\n":
+                    i = i + 1
+                handled = true
+
+        if not handled:
+            val is_letter = (ch >= "a" and ch <= "z") or (ch >= "A" and ch <= "Z") or ch == "_"
+            if is_letter:
+                val start_idx = i
+                var ident_parts: [text] = []
+                var start_col = column
+                while i < source_len:
+                    val c = source[i:i+1]
+                    val is_alnum = (c >= "a" and c <= "z") or (c >= "A" and c <= "Z") or (c >= "0" and c <= "9") or c == "_"
+                    if not is_alnum:
+                        break
+                    ident_parts.push(c)
+                    i = i + 1
+                    column = column + 1
+                val ident = ident_parts.join("")
+
+                val is_keyword = is_keyword_text(ident)
+
+                val kind = if is_keyword: SimpleTokenKind.Keyword else: SimpleTokenKind.Identifier
+                val value = if kind == SimpleTokenKind.Identifier and config.ignore_identifiers then "IDENTIFIER" else ident
+
+                result.push(SimpleToken(kind: kind, value: value, line: line, column: start_col, start_offset: start_idx, end_offset: i))
+                handled = true
+
+        if not handled:
+            val is_digit = ch >= "0" and ch <= "9"
+            if is_digit:
+                val start_idx = i
+                var num_parts: [text] = []
+                var start_col = column
+                while i < source_len:
+                    val c = source[i:i+1]
+                    val is_numchar = (c >= "0" and c <= "9") or c == "."
+                    if not is_numchar:
+                        break
+                    num_parts.push(c)
+                    i = i + 1
+                    column = column + 1
+                val num = num_parts.join("")
+
+                val value = if config.ignore_literals then "LITERAL" else num
+
+                result.push(SimpleToken(kind: SimpleTokenKind.Literal, value: value, line: line, column: start_col, start_offset: start_idx, end_offset: i))
+                handled = true
+
+        if not handled:
+            if ch == "\"":
+                val start_idx = i
+                var str_parts: [text] = ["\""]
+                var start_col = column
+                i = i + 1
+                column = column + 1
+                while i < source_len and source[i:i+1] != "\"":
+                    str_parts.push(source[i:i+1])
+                    i = i + 1
+                    column = column + 1
+                if i < source_len:
+                    str_parts.push("\"")
+                    i = i + 1
+                    column = column + 1
+                val str_val = str_parts.join("")
+
+                val value = if config.ignore_literals then "LITERAL" else str_val
+
+                result.push(SimpleToken(kind: SimpleTokenKind.Literal, value: value, line: line, column: start_col, start_offset: start_idx, end_offset: i))
+                handled = true
+
+        if not handled:
+            val op = match_operator(source, source_len, i)
+            if op.len() > 0:
+                result.push(SimpleToken(kind: SimpleTokenKind.Operator, value: op, line: line, column: column, start_offset: i, end_offset: i + op.len()))
+                i = i + op.len()
+                column = column + op.len()
+                handled = true
+
+        if not handled:
+            i = i + 1
+            column = column + 1
+
+    result

@@ -1,0 +1,233 @@
+# VHDL register file template renderer.
+#
+# Generates synthesizable VHDL for multi-port register files suitable for
+# RV32I and similar architectures. The template produces deterministic,
+# vendor-safe code with explicit reset, write-enable, and zero-register
+# hardwiring (x0 = 0 for RISC-V).
+#
+# Callers pass already-sanitized signal names and VHDL type expressions.
+
+use compiler.backend.vhdl.vhdl_builder.VhdlBuilder
+use .vhdl_builder.{VhdlBuilder}
+
+# ============================================================================
+# Register File Template Structures
+# ============================================================================
+
+struct VhdlRegisterFileDiagnostic:
+    """Diagnostic for register file template validation errors."""
+    code: text
+    message: text
+
+struct VhdlRegisterFileArtifact:
+    """Rendered register file VHDL artifact."""
+    entity_name: text
+    declarations: text
+    body: text
+    vhdl: text
+
+struct VhdlRegisterFileTemplate:
+    """Template for a 2-read-port, 1-write-port register file.
+
+    Generates a clocked entity with:
+    - Two asynchronous (combinational) read ports
+    - One synchronous write port (rising-edge)
+    - Optional zero-register hardwiring (index 0 always reads zero)
+    - Synchronous reset (all registers to zero)
+
+    Standard RV32I configuration:
+        depth=32, data_width=32, zero_register=true
+    """
+    name: text
+    depth: i64
+    data_width: i64
+    clock: text
+    reset: text
+    write_enable: text
+    write_addr: text
+    write_data: text
+    read_addr1: text
+    read_addr2: text
+    read_data1: text
+    read_data2: text
+    zero_register: bool
+
+# ============================================================================
+# Validation
+# ============================================================================
+
+fn regfile_diagnostic(code: text, message: text) -> VhdlRegisterFileDiagnostic:
+    VhdlRegisterFileDiagnostic(code: code, message: message)
+
+fn validate_register_file_template(template: VhdlRegisterFileTemplate) -> Result<(), VhdlRegisterFileDiagnostic>:
+    """Validate register file template parameters before VHDL emission."""
+    if template.depth <= 0:
+        return Err(regfile_diagnostic(
+            "VHDL-REGFILE-DEPTH",
+            "Register file `{template.name}` must have positive depth, got {template.depth}"
+        ))
+    if template.data_width <= 0:
+        return Err(regfile_diagnostic(
+            "VHDL-REGFILE-WIDTH",
+            "Register file `{template.name}` must have positive data width, got {template.data_width}"
+        ))
+    if template.depth > 1024:
+        return Err(regfile_diagnostic(
+            "VHDL-REGFILE-DEPTH-LIMIT",
+            "Register file `{template.name}` depth {template.depth} exceeds synthesis-safe limit of 1024"
+        ))
+    if template.data_width > 128:
+        return Err(regfile_diagnostic(
+            "VHDL-REGFILE-WIDTH-LIMIT",
+            "Register file `{template.name}` data width {template.data_width} exceeds synthesis-safe limit of 128"
+        ))
+    Ok(())
+
+# ============================================================================
+# Address Width Calculation
+# ============================================================================
+
+fn addr_width_for_depth(depth: i64) -> i64:
+    """Calculate minimum address width for a given depth.
+
+    Returns ceil(log2(depth)), minimum 1.
+    """
+    if depth <= 1:
+        return 1
+    var width = 0
+    var remaining = depth - 1
+    while remaining > 0:
+        width = width + 1
+        remaining = remaining / 2
+    width
+
+# ============================================================================
+# Register File Renderer
+# ============================================================================
+
+fn render_register_file_template(template: VhdlRegisterFileTemplate) -> Result<VhdlRegisterFileArtifact, VhdlRegisterFileDiagnostic>:
+    """Render a synthesizable 2R1W register file as a VHDL entity.
+
+    Produces a complete entity/architecture pair with:
+    - Asynchronous read ports (combinational, no clock delay)
+    - Synchronous write port (single rising-edge)
+    - Optional x0 hardwire (zero_register=true forces index 0 to read zero)
+    - Synchronous reset clears all registers
+
+    The generated VHDL is deterministic and vendor-safe.
+    """
+    val validation = validate_register_file_template(template)
+    if validation.is_err():
+        return Err(validation.unwrap_err())
+
+    val addr_w = addr_width_for_depth(template.depth)
+    val data_w = template.data_width
+    val dw_hi = data_w - 1
+    val aw_hi = addr_w - 1
+    val type_name = "{template.name}_array_t"
+
+    val builder = VhdlBuilder.create(template.name)
+
+    # Library header
+    builder.emit_library_header()
+
+    # Entity declaration
+    builder.emit_entity_begin(template.name)
+    builder.emit_port_begin()
+    builder.emit_port(template.clock, "in", "std_logic", false)
+    builder.emit_port(template.reset, "in", "std_logic", false)
+    builder.emit_port(template.write_enable, "in", "std_logic", false)
+    builder.emit_port(template.write_addr, "in", "unsigned({aw_hi} downto 0)", false)
+    builder.emit_port(template.write_data, "in", "std_logic_vector({dw_hi} downto 0)", false)
+    builder.emit_port(template.read_addr1, "in", "unsigned({aw_hi} downto 0)", false)
+    builder.emit_port(template.read_addr2, "in", "unsigned({aw_hi} downto 0)", false)
+    builder.emit_port(template.read_data1, "out", "std_logic_vector({dw_hi} downto 0)", false)
+    builder.emit_port(template.read_data2, "out", "std_logic_vector({dw_hi} downto 0)", true)
+    builder.emit_port_end()
+    builder.emit_entity_end(template.name)
+
+    # Architecture
+    builder.emit_architecture_begin(template.name, "rtl")
+
+    # Type and signal declarations
+    builder.emit_type_decl(type_name, "array (0 to {template.depth - 1}) of std_logic_vector({dw_hi} downto 0)")
+    builder.emit_signal_decl("regs", type_name, Some("(others => (others => '0'))"))
+
+    builder.emit_architecture_body_begin()
+
+    # Combinational read ports
+    builder.emit_comment("Asynchronous read port 1")
+    if template.zero_register:
+        builder.emit_signal_assign(template.read_data1, "(others => '0') when to_integer({template.read_addr1}) = 0 else regs(to_integer({template.read_addr1}))")
+    else:
+        builder.emit_signal_assign(template.read_data1, "regs(to_integer({template.read_addr1}))")
+
+    builder.emit_comment("Asynchronous read port 2")
+    if template.zero_register:
+        builder.emit_signal_assign(template.read_data2, "(others => '0') when to_integer({template.read_addr2}) = 0 else regs(to_integer({template.read_addr2}))")
+    else:
+        builder.emit_signal_assign(template.read_data2, "regs(to_integer({template.read_addr2}))")
+
+    # Synchronous write process with reset
+    builder.emit_clocked_process_begin(Some("{template.name}_write"), template.clock, Some(template.reset))
+    builder.emit_process_body_begin()
+
+    # Reset branch
+    builder.emit_if_begin("{template.reset} = '1'")
+    builder.emit_for_loop_begin("i", 0, template.depth - 1)
+    builder.emit_signal_assign("regs(i)", "(others => '0')")
+    builder.emit_for_loop_end()
+    builder.emit_elsif("rising_edge({template.clock})")
+
+    # Write branch
+    builder.emit_if_begin("{template.write_enable} = '1'")
+    if template.zero_register:
+        builder.emit_comment("x0 is hardwired to zero; writes to index 0 are ignored")
+        builder.emit_if_begin("to_integer({template.write_addr}) /= 0")
+        builder.emit_signal_assign("regs(to_integer({template.write_addr}))", template.write_data)
+        builder.emit_if_end()
+    else:
+        builder.emit_signal_assign("regs(to_integer({template.write_addr}))", template.write_data)
+    builder.emit_if_end()
+
+    builder.emit_if_end()
+    builder.emit_process_end(Some("{template.name}_write"))
+
+    builder.emit_architecture_end("rtl")
+
+    val vhdl = builder.build()
+
+    Ok(VhdlRegisterFileArtifact(
+        entity_name: template.name,
+        declarations: "",
+        body: "",
+        vhdl: vhdl
+    ))
+
+# ============================================================================
+# RV32I Standard Register File
+# ============================================================================
+
+fn rv32i_register_file_template() -> VhdlRegisterFileTemplate:
+    """Create a standard RV32I 32x32 register file template.
+
+    Uses RISC-V conventions:
+    - 32 registers, 32-bit wide
+    - x0 hardwired to zero
+    - Standard signal names matching RISC-V documentation
+    """
+    VhdlRegisterFileTemplate(
+        name: "rv32i_regfile",
+        depth: 32,
+        data_width: 32,
+        clock: "clk",
+        reset: "rst",
+        write_enable: "reg_we",
+        write_addr: "rd_addr",
+        write_data: "rd_data",
+        read_addr1: "rs1_addr",
+        read_addr2: "rs2_addr",
+        read_data1: "rs1_data",
+        read_data2: "rs2_data",
+        zero_register: true
+    )

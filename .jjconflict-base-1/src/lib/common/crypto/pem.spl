@@ -1,0 +1,190 @@
+# PEM Parser Module
+#
+# Parses PEM-encoded certificates and private keys into DER bytes.
+# PEM format wraps base64-encoded DER data between BEGIN/END markers.
+#
+# Example PEM block:
+#   -----BEGIN CERTIFICATE-----
+#   MIIDXTCCAkWgAwIBAgIJAJC1HiIAZAiUMA0G...
+#   -----END CERTIFICATE-----
+
+# ============================================================================
+# PemBlock — one parsed PEM section
+# ============================================================================
+
+class PemBlock:
+    """A single PEM-encoded block with its label and decoded DER bytes."""
+    label: text       # e.g. "CERTIFICATE", "PRIVATE KEY", "RSA PRIVATE KEY"
+    der_bytes: [u8]   # decoded DER binary data
+
+# ============================================================================
+# Internal helpers
+# ============================================================================
+
+fn _b64_decode_to_u8(b64_text: text) -> [u8]:
+    """Decode base64 text to [u8] bytes.
+
+    Inline implementation to produce [u8] directly without text-byte-cliff.
+    Mirrors the proven pattern from x509_typed.spl.
+    """
+    # Strip whitespace — use intermediate vars (chained methods broken in interpreter)
+    val no_lf = b64_text.replace("\n", "")
+    val no_cr = no_lf.replace("\r", "")
+    val clean = no_cr.replace(" ", "")
+
+    val alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+    var result: [u8] = []
+    var i: i64 = 0
+    val clen = clean.length()
+
+    while i < clen - 3:
+        val c0 = clean.char_at(i)
+        val c1 = clean.char_at(i + 1)
+        val c2 = clean.char_at(i + 2)
+        val c3 = clean.char_at(i + 3)
+        val v0 = alphabet.index_of(c0)
+        val v1 = alphabet.index_of(c1)
+        val v2 = if c2 == "=": 0 else: alphabet.index_of(c2)
+        val v3 = if c3 == "=": 0 else: alphabet.index_of(c3)
+        result.push(((v0 << 2) | (v1 >> 4)).to_u8())
+        if c2 != "=":
+            result.push((((v1 & 0x0F) << 4) | (v2 >> 2)).to_u8())
+        if c3 != "=":
+            result.push((((v2 & 0x03) << 6) | v3).to_u8())
+        i = i + 4
+
+    result
+
+fn _find_begin_marker(text_content: text, start_pos: i64) -> i64:
+    """Find the next '-----BEGIN ' marker starting from start_pos.
+
+    Returns the index or -1 if not found.
+    """
+    val marker = "-----BEGIN "
+    val sub = text_content.substring(start_pos, text_content.length())
+    val idx = sub.index_of(marker)
+    if idx < 0:
+        return -1
+    start_pos + idx
+
+fn _extract_label(text_content: text, begin_pos: i64) -> text:
+    """Extract the label from a BEGIN marker line.
+
+    Given '-----BEGIN CERTIFICATE-----', returns 'CERTIFICATE'.
+    """
+    val prefix = "-----BEGIN "
+    val suffix = "-----"
+    val after_prefix = begin_pos + prefix.length()
+    val rest = text_content.substring(after_prefix, text_content.length())
+    val suffix_pos = rest.index_of(suffix)
+    if suffix_pos < 0:
+        return ""
+    rest.substring(0, suffix_pos)
+
+fn _find_end_marker(text_content: text, label: text, start_pos: i64) -> i64:
+    """Find the matching END marker for a given label.
+
+    Returns the index or -1 if not found.
+    """
+    val marker = "-----END " + label + "-----"
+    val sub = text_content.substring(start_pos, text_content.length())
+    val idx = sub.index_of(marker)
+    if idx < 0:
+        return -1
+    start_pos + idx
+
+# ============================================================================
+# Public API
+# ============================================================================
+
+fn parse_pem(pem_text: text) -> [PemBlock]:
+    """Parse PEM text and return all PEM blocks found.
+
+    Handles multiple blocks (e.g. certificate chains).
+    Each block is decoded from base64 to DER bytes.
+
+    Example:
+        val blocks = parse_pem(pem_string)
+        for block in blocks:
+            print(block.label)        # "CERTIFICATE"
+            print(block.der_bytes.len())  # DER byte count
+    """
+    var blocks: [PemBlock] = []
+    var pos: i64 = 0
+    val total_len = pem_text.length()
+
+    while pos < total_len:
+        val begin_pos = _find_begin_marker(pem_text, pos)
+        if begin_pos < 0:
+            break
+
+        val label = _extract_label(pem_text, begin_pos)
+        if label == "":
+            break
+
+        val header_line = "-----BEGIN " + label + "-----"
+        val body_start = begin_pos + header_line.length()
+
+        val end_pos = _find_end_marker(pem_text, label, body_start)
+        if end_pos < 0:
+            break
+
+        val b64_body = pem_text.substring(body_start, end_pos)
+        val der = _b64_decode_to_u8(b64_body)
+
+        val footer_line = "-----END " + label + "-----"
+        blocks.push(PemBlock(label: label, der_bytes: der))
+
+        pos = end_pos + footer_line.length()
+
+    blocks
+
+fn parse_pem_certs(pem_text: text) -> [PemBlock]:
+    """Parse PEM text and return only CERTIFICATE blocks.
+
+    Filters out private keys and other block types.
+
+    Example:
+        val certs = parse_pem_certs(chain_pem)
+        # Returns only blocks with label "CERTIFICATE"
+    """
+    val all_blocks = parse_pem(pem_text)
+    var certs: [PemBlock] = []
+    for block in all_blocks:
+        if block.label == "CERTIFICATE":
+            certs.push(block)
+    certs
+
+fn parse_pem_key(pem_text: text) -> PemBlock:
+    """Parse PEM text and return the first private key block.
+
+    Recognizes: PRIVATE KEY, RSA PRIVATE KEY, EC PRIVATE KEY.
+    Returns an empty PemBlock (label="", der_bytes=[]) if no key is found.
+
+    Example:
+        val key = parse_pem_key(key_pem)
+        if key.label != "":
+            # key.der_bytes contains the DER-encoded key
+    """
+    val all_blocks = parse_pem(pem_text)
+    for block in all_blocks:
+        if block.label == "PRIVATE KEY":
+            return block
+        if block.label == "RSA PRIVATE KEY":
+            return block
+        if block.label == "EC PRIVATE KEY":
+            return block
+    # No key found — return empty sentinel
+    PemBlock(label: "", der_bytes: [])
+
+fn is_pem(text_content: text) -> bool:
+    """Check if text looks like PEM-encoded data.
+
+    Returns true if the text contains at least one -----BEGIN ... ----- marker.
+
+    Example:
+        is_pem("-----BEGIN CERTIFICATE-----\\n...")  # true
+        is_pem("not pem data")                       # false
+    """
+    val idx = text_content.index_of("-----BEGIN ")
+    idx >= 0

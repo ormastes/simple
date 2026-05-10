@@ -1,0 +1,600 @@
+# DateTime - Date and time types for Simple
+# Provides DateTime, Date, Time, and Duration types for temporal operations
+
+# Extern declarations for datetime FFI
+extern fn rt_time_now_unix_micros() -> i32
+extern fn rt_timestamp_get_year(micros: i32) -> i32
+extern fn rt_timestamp_get_month(micros: i32) -> i32
+extern fn rt_timestamp_get_day(micros: i32) -> i32
+extern fn rt_timestamp_get_hour(micros: i32) -> i32
+extern fn rt_timestamp_get_minute(micros: i32) -> i32
+extern fn rt_timestamp_get_second(micros: i32) -> i32
+extern fn rt_timestamp_get_microsecond(micros: i32) -> i32
+extern fn rt_timestamp_from_components(year: i32, month: i32, day: i32, hour: i32, minute: i32, second: i32, microsecond: i32) -> i32
+extern fn rt_timestamp_add_days(micros: i32, days: i32) -> i32
+extern fn rt_timestamp_diff_days(micros1: i32, micros2: i32) -> i32
+
+# Duration - represents a time span
+pub struct Duration:
+    days: i32
+    seconds: i32
+    microseconds: i32
+
+    static fn new(days: i32 = 0, hours: i32 = 0, minutes: i32 = 0,
+               seconds: i32 = 0, milliseconds: i32 = 0, microseconds: i32 = 0) -> Duration:
+        # Normalize all values to days, seconds, microseconds
+        val total_seconds = hours * 3600 + minutes * 60 + seconds
+        val total_microseconds = milliseconds * 1000 + microseconds
+
+        # Normalize microseconds to seconds
+        val extra_seconds = total_microseconds / 1_000_000
+        val final_microseconds = total_microseconds % 1_000_000
+
+        # Normalize seconds to days
+        val final_total_seconds = total_seconds + extra_seconds
+        val extra_days = final_total_seconds / 86400
+        val final_seconds = final_total_seconds % 86400
+
+        return Duration {
+            days: days + extra_days,
+            seconds: final_seconds,
+            microseconds: final_microseconds
+        }
+
+    pub fn total_seconds(self) -> i32:
+        return self.days * 86400 + self.seconds
+
+    pub fn total_microseconds(self) -> i32:
+        return (self.days * 86400 + self.seconds) * 1_000_000 + self.microseconds
+
+    pub fn add(self, other: Duration) -> Duration:
+        return Duration.new(
+            days=self.days + other.days,
+            seconds=self.seconds + other.seconds,
+            microseconds=self.microseconds + other.microseconds
+        )
+
+    pub fn subtract(self, other: Duration) -> Duration:
+        val total_us = self.total_microseconds() - other.total_microseconds()
+        val days = total_us / (86400 * 1_000_000)
+        val remaining = total_us % (86400 * 1_000_000)
+        val seconds = remaining / 1_000_000
+        val microseconds = remaining % 1_000_000
+
+        return Duration {
+            days: days,
+            seconds: seconds,
+            microseconds: microseconds
+        }
+
+    pub fn multiply(self, scalar: i32) -> Duration:
+        val total_us = self.total_microseconds() * scalar
+        val days = total_us / (86400 * 1_000_000)
+        val remaining = total_us % (86400 * 1_000_000)
+        val seconds = remaining / 1_000_000
+        val microseconds = remaining % 1_000_000
+
+        return Duration {
+            days: days,
+            seconds: seconds,
+            microseconds: microseconds
+        }
+
+    pub fn to_string(self) -> text:
+        if self.days != 0:
+            return self.days + " days, " + self.seconds + " seconds"
+        elif self.seconds != 0:
+            return self.seconds + " seconds"
+        else:
+            return self.microseconds + " microseconds"
+
+    # =========================================================================
+    # Helper Methods
+    # =========================================================================
+
+    pub fn is_zero(self) -> bool:
+        return self.days == 0 and self.seconds == 0 and self.microseconds == 0
+
+    pub fn is_positive(self) -> bool:
+        return self.total_microseconds() > 0
+
+    pub fn is_negative(self) -> bool:
+        return self.total_microseconds() < 0
+
+    pub fn abs(self) -> Duration:
+        val total_us = self.total_microseconds()
+        if total_us < 0:
+            return self.multiply(-1)
+        return self
+
+    pub fn summary(self) -> text:
+        return "Duration: {self.days} days, {self.seconds} seconds, {self.microseconds} microseconds"
+
+# Time - represents time of day (no date component)
+pub struct Time:
+    hour: i32        # 0-23
+    minute: i32      # 0-59
+    second: i32      # 0-59
+    microsecond: i32 # 0-999999
+
+    static fn new(hour: i32 = 0, minute: i32 = 0, second: i32 = 0, microsecond: i32 = 0) -> Time:
+        # Validate ranges
+        if hour < 0 or hour > 23:
+            print("Error: hour must be 0-23")
+            return Time { hour: 0, minute: 0, second: 0, microsecond: 0 }
+        if minute < 0 or minute > 59:
+            print("Error: minute must be 0-59")
+            return Time { hour: 0, minute: 0, second: 0, microsecond: 0 }
+        if second < 0 or second > 59:
+            print("Error: second must be 0-59")
+            return Time { hour: 0, minute: 0, second: 0, microsecond: 0 }
+        if microsecond < 0 or microsecond > 999999:
+            print("Error: microsecond must be 0-999999")
+            return Time { hour: 0, minute: 0, second: 0, microsecond: 0 }
+
+        return Time {
+            hour: hour,
+            minute: minute,
+            second: second,
+            microsecond: microsecond
+        }
+
+    static fn now() -> Time:
+        val micros = rt_time_now_unix_micros()
+        return Time.new(
+            hour=rt_timestamp_get_hour(micros),
+            minute=rt_timestamp_get_minute(micros),
+            second=rt_timestamp_get_second(micros),
+            microsecond=rt_timestamp_get_microsecond(micros)
+        )
+
+    pub fn to_seconds(self) -> i32:
+        return self.hour * 3600 + self.minute * 60 + self.second
+
+    pub fn to_string(self) -> text:
+        val h = if self.hour < 10: "0" + self.hour else: self.hour
+        val m = if self.minute < 10: "0" + self.minute else: self.minute
+        val s = if self.second < 10: "0" + self.second else: self.second
+        return h + ":" + m + ":" + s
+
+    pub fn to_iso_format(self) -> text:
+        val h = if self.hour < 10: "0" + self.hour else: self.hour
+        val m = if self.minute < 10: "0" + self.minute else: self.minute
+        val s = if self.second < 10: "0" + self.second else: self.second
+        val us = self.microsecond
+        return h + ":" + m + ":" + s + "." + us
+
+    # =========================================================================
+    # Helper Methods
+    # =========================================================================
+
+    pub fn is_midnight(self) -> bool:
+        return self.hour == 0 and self.minute == 0 and self.second == 0 and self.microsecond == 0
+
+    pub fn is_noon(self) -> bool:
+        return self.hour == 12 and self.minute == 0 and self.second == 0 and self.microsecond == 0
+
+    pub fn is_am(self) -> bool:
+        return self.hour < 12
+
+    pub fn is_pm(self) -> bool:
+        return self.hour >= 12
+
+    pub fn summary(self) -> text:
+        return "Time: " + self.to_iso_format()
+
+# Date - represents a calendar date (no time component)
+pub struct Date:
+    year: i32
+    month: i32  # 1-12
+    day: i32    # 1-31
+
+    static fn new(year: i32, month: i32, day: i32) -> Date:
+        # Basic validation
+        if month < 1 or month > 12:
+            print("Error: month must be 1-12")
+            return Date { year: 1970, month: 1, day: 1 }
+        if day < 1 or day > 31:
+            print("Error: day must be 1-31")
+            return Date { year: 1970, month: 1, day: 1 }
+
+        return Date {
+            year: year,
+            month: month,
+            day: day
+        }
+
+    static fn today() -> Date:
+        val micros = rt_time_now_unix_micros()
+        return Date.new(
+            rt_timestamp_get_year(micros),
+            rt_timestamp_get_month(micros),
+            rt_timestamp_get_day(micros)
+        )
+
+    static fn is_leap_year(year: i32) -> bool:
+        if year % 400 == 0:
+            return true
+        if year % 100 == 0:
+            return false
+        if year % 4 == 0:
+            return true
+        return false
+
+    pub fn days_in_month(self) -> i32:
+        if self.month == 2:
+            if Date.is_leap_year(self.year):
+                return 29
+            else:
+                return 28
+        elif self.month in [4, 6, 9, 11]:
+            return 30
+        else:
+            return 31
+
+    pub fn weekday(self) -> i32:
+        # Zeller's congruence algorithm
+        # Returns 0=Monday, 1=Tuesday, ..., 6=Sunday
+        var y = self.year
+        var m = self.month
+
+        if m < 3:
+            m = m + 12
+            y = y - 1
+
+        val k = y % 100
+        val j = y / 100
+
+        val h = (self.day + ((13 * (m + 1)) / 5) + k + (k / 4) + (j / 4) - (2 * j)) % 7
+
+        # Convert to Monday=0 format
+        return (h + 5) % 7
+
+    pub fn weekday_name(self) -> text:
+        val day = self.weekday()
+        if day == 0:
+            return "Monday"
+        elif day == 1:
+            return "Tuesday"
+        elif day == 2:
+            return "Wednesday"
+        elif day == 3:
+            return "Thursday"
+        elif day == 4:
+            return "Friday"
+        elif day == 5:
+            return "Saturday"
+        else:
+            return "Sunday"
+
+    pub fn weekday_abbr(self) -> text:
+        val day = self.weekday()
+        if day == 0:
+            return "Mon"
+        elif day == 1:
+            return "Tue"
+        elif day == 2:
+            return "Wed"
+        elif day == 3:
+            return "Thu"
+        elif day == 4:
+            return "Fri"
+        elif day == 5:
+            return "Sat"
+        else:
+            return "Sun"
+
+    pub fn to_string(self) -> text:
+        return self.year + "-" + self.month + "-" + self.day
+
+    pub fn to_iso_format(self) -> text:
+        val m = if self.month < 10: "0" + self.month else: self.month
+        val d = if self.day < 10: "0" + self.day else: self.day
+        return self.year + "-" + m + "-" + d
+
+    pub fn add_days(self, days: i32) -> Date:
+        # Convert to timestamp, add days, convert back
+        val micros = rt_timestamp_from_components(self.year, self.month, self.day, 0, 0, 0, 0)
+        val new_micros = rt_timestamp_add_days(micros, days)
+        return Date.new(
+            rt_timestamp_get_year(new_micros),
+            rt_timestamp_get_month(new_micros),
+            rt_timestamp_get_day(new_micros)
+        )
+
+    pub fn subtract(self, other: Date) -> i32:
+        # Return difference in days
+        val micros1 = rt_timestamp_from_components(self.year, self.month, self.day, 0, 0, 0, 0)
+        val micros2 = rt_timestamp_from_components(other.year, other.month, other.day, 0, 0, 0, 0)
+        return rt_timestamp_diff_days(micros1, micros2)
+
+# DateTime - represents a specific point in time
+pub struct DateTime:
+    year: i32
+    month: i32
+    day: i32
+    hour: i32
+    minute: i32
+    second: i32
+    microsecond: i32
+
+    static fn new(year: i32, month: i32, day: i32,
+               hour: i32 = 0, minute: i32 = 0, second: i32 = 0,
+               microsecond: i32 = 0) -> DateTime:
+        return DateTime {
+            year: year,
+            month: month,
+            day: day,
+            hour: hour,
+            minute: minute,
+            second: second,
+            microsecond: microsecond
+        }
+
+    static fn now() -> DateTime:
+        val micros = rt_time_now_unix_micros()
+        return DateTime.new(
+            rt_timestamp_get_year(micros),
+            rt_timestamp_get_month(micros),
+            rt_timestamp_get_day(micros),
+            rt_timestamp_get_hour(micros),
+            rt_timestamp_get_minute(micros),
+            rt_timestamp_get_second(micros),
+            rt_timestamp_get_microsecond(micros)
+        )
+
+    static fn from_timestamp(timestamp: i32) -> DateTime:
+        # Convert Unix timestamp (microseconds) to DateTime
+        return DateTime.new(
+            rt_timestamp_get_year(timestamp),
+            rt_timestamp_get_month(timestamp),
+            rt_timestamp_get_day(timestamp),
+            rt_timestamp_get_hour(timestamp),
+            rt_timestamp_get_minute(timestamp),
+            rt_timestamp_get_second(timestamp),
+            rt_timestamp_get_microsecond(timestamp)
+        )
+
+    pub fn timestamp(self) -> i32:
+        # Convert to Unix timestamp (microseconds)
+        return rt_timestamp_from_components(
+            self.year, self.month, self.day,
+            self.hour, self.minute, self.second, self.microsecond
+        )
+
+    pub fn date(self) -> Date:
+        return Date.new(self.year, self.month, self.day)
+
+    pub fn time(self) -> Time:
+        return Time.new(self.hour, self.minute, self.second, self.microsecond)
+
+    pub fn add(self, duration: Duration) -> DateTime:
+        # Add duration to datetime with proper overflow handling
+        val current_micros = self.timestamp()
+        val duration_micros = duration.total_microseconds()
+        val new_micros = current_micros + duration_micros
+        return DateTime.from_timestamp(new_micros)
+
+    pub fn subtract_duration(self, duration: Duration) -> DateTime:
+        # Subtract duration from datetime with proper underflow handling
+        val current_micros = self.timestamp()
+        val duration_micros = duration.total_microseconds()
+        val new_micros = current_micros - duration_micros
+        return DateTime.from_timestamp(new_micros)
+
+    pub fn subtract_datetime(self, other: DateTime) -> Duration:
+        # Calculate difference between two datetimes
+        val micros1 = self.timestamp()
+        val micros2 = other.timestamp()
+        val diff_micros = micros1 - micros2
+
+        # Convert microseconds to days, seconds, microseconds
+        val days = diff_micros / (86400 * 1_000_000)
+        val remaining = diff_micros % (86400 * 1_000_000)
+        val seconds = remaining / 1_000_000
+        val microseconds = remaining % 1_000_000
+
+        return Duration {
+            days: days,
+            seconds: seconds,
+            microseconds: microseconds
+        }
+
+    pub fn to_string(self) -> text:
+        return "{self.year}-{self.month}-{self.day} {self.hour}:{self.minute}:{self.second}"
+
+    pub fn to_iso_format(self) -> text:
+        # ISO 8601 format: YYYY-MM-DDTHH:MM:SS.mmmmmm
+        val m = if self.month < 10: "0" + self.month else: self.month
+        val d = if self.day < 10: "0" + self.day else: self.day
+        val h = if self.hour < 10: "0" + self.hour else: self.hour
+        val min = if self.minute < 10: "0" + self.minute else: self.minute
+        val s = if self.second < 10: "0" + self.second else: self.second
+
+        return self.year + "-" + m + "-" + d + "T" + h + ":" + min + ":" + s
+
+    pub fn format(self, fmt: text) -> text:
+        # Format datetime according to format string
+        # Supported codes (common strftime subset):
+        # %Y - year (4 digits)
+        # %y - year (2 digits, 00-99)
+        # %m - month (01-12)
+        # %B - full month name
+        # %b - abbreviated month name
+        # %d - day (01-31)
+        # %A - full weekday name
+        # %a - abbreviated weekday name
+        # %H - hour (00-23)
+        # %I - hour (01-12, 12-hour format)
+        # %p - AM/PM
+        # %M - minute (00-59)
+        # %S - second (00-59)
+        # %% - literal %
+
+        var result = fmt
+
+        # Year formats
+        result = result.replace("%Y", self.year.to_str())
+        result = result.replace("%y", (self.year % 100).to_str())
+
+        # Month formats
+        val month_str = if self.month < 10: "0" + self.month.to_str() else: self.month.to_str()
+        result = result.replace("%m", month_str)
+        result = result.replace("%B", self.month_name())
+        result = result.replace("%b", self.month_abbr())
+
+        # Day formats
+        val day_str = if self.day < 10: "0" + self.day.to_str() else: self.day.to_str()
+        result = result.replace("%d", day_str)
+
+        # Weekday formats
+        val date = self.date()
+        result = result.replace("%A", date.weekday_name())
+        result = result.replace("%a", date.weekday_abbr())
+
+        # Hour formats
+        val hour_str = if self.hour < 10: "0" + self.hour.to_str() else: self.hour.to_str()
+        result = result.replace("%H", hour_str)
+
+        # 12-hour format
+        val hour_12 = if self.hour == 0: 12 elif self.hour > 12: self.hour - 12 else: self.hour
+        val hour_12_str = if hour_12 < 10: "0" + hour_12.to_str() else: hour_12.to_str()
+        result = result.replace("%I", hour_12_str)
+        result = result.replace("%p", if self.hour < 12: "AM" else: "PM")
+
+        # Minute and second
+        val min_str = if self.minute < 10: "0" + self.minute.to_str() else: self.minute.to_str()
+        val sec_str = if self.second < 10: "0" + self.second.to_str() else: self.second.to_str()
+        result = result.replace("%M", min_str)
+        result = result.replace("%S", sec_str)
+
+        # Literal %
+        result = result.replace("%%", "%")
+
+        return result
+
+    # Helper: Get full month name
+    fn month_name() -> text:
+        match self.month:
+            case 1: "January"
+            case 2: "February"
+            case 3: "March"
+            case 4: "April"
+            case 5: "May"
+            case 6: "June"
+            case 7: "July"
+            case 8: "August"
+            case 9: "September"
+            case 10: "October"
+            case 11: "November"
+            case 12: "December"
+            case _: "Unknown"
+
+    # Helper: Get abbreviated month name
+    fn month_abbr() -> text:
+        match self.month:
+            case 1: "Jan"
+            case 2: "Feb"
+            case 3: "Mar"
+            case 4: "Apr"
+            case 5: "May"
+            case 6: "Jun"
+            case 7: "Jul"
+            case 8: "Aug"
+            case 9: "Sep"
+            case 10: "Oct"
+            case 11: "Nov"
+            case 12: "Dec"
+            case _: "Unk"
+
+# Parse ISO 8601 date string (YYYY-MM-DD)
+pub fn parse_date(s: text) -> Option<Date>:
+    # Simple parser for ISO format
+    val parts = s.split("-")
+    if parts.len() != 3:
+        return nil
+
+    # Parse integer components using parse_int from core
+    val year = parse_int(parts[0])
+    val month = parse_int(parts[1])
+    val day = parse_int(parts[2])
+
+    # Validate ranges
+    if year < 1970 or year > 9999:
+        return nil
+    if month < 1 or month > 12:
+        return nil
+    if day < 1 or day > 31:
+        return nil
+
+    # Create and return date
+    return Some(Date.new(year as i32, month as i32, day as i32))
+
+# Parse ISO 8601 datetime string (YYYY-MM-DDTHH:MM:SS or YYYY-MM-DDTHH:MM:SS.mmmmmm)
+pub fn parse_datetime(s: text) -> Option<DateTime>:
+    # Split on 'T' to separate date and time
+    val parts = s.split("T")
+    if parts.len() != 2:
+        return nil
+
+    # Parse date part (YYYY-MM-DD)
+    val date_parts = parts[0].split("-")
+    if date_parts.len() != 3:
+        return nil
+
+    val year = parse_int(date_parts[0])
+    val month = parse_int(date_parts[1])
+    val day = parse_int(date_parts[2])
+
+    # Validate date ranges
+    if year < 1970 or year > 9999:
+        return nil
+    if month < 1 or month > 12:
+        return nil
+    if day < 1 or day > 31:
+        return nil
+
+    # Parse time part (HH:MM:SS or HH:MM:SS.mmmmmm)
+    var time_str = parts[1]
+    var microsecond = 0
+
+    # Check for microseconds
+    if time_str.contains("."):
+        val time_parts_with_micros = time_str.split(".")
+        if time_parts_with_micros.len() != 2:
+            return nil
+        time_str = time_parts_with_micros[0]
+        microsecond = parse_int(time_parts_with_micros[1])
+        # Pad or truncate microseconds to 6 digits
+        if microsecond < 0 or microsecond > 999999:
+            return nil
+
+    # Parse HH:MM:SS
+    val time_parts = time_str.split(":")
+    if time_parts.len() != 3:
+        return nil
+
+    val hour = parse_int(time_parts[0])
+    val minute = parse_int(time_parts[1])
+    val second = parse_int(time_parts[2])
+
+    # Validate time ranges
+    if hour < 0 or hour > 23:
+        return nil
+    if minute < 0 or minute > 59:
+        return nil
+    if second < 0 or second > 59:
+        return nil
+
+    # Create and return datetime
+    return Some(DateTime.new(
+        year as i32,
+        month as i32,
+        day as i32,
+        hour as i32,
+        minute as i32,
+        second as i32,
+        microsecond as i32
+    ))
+
+# Types are exported by pub modifier

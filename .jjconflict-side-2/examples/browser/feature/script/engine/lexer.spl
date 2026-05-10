@@ -1,0 +1,694 @@
+#![allow(REQC001)]
+#![allow(REQC004)]
+#![allow(unnamed_duplicate_typed_args)]
+# JavaScript lexer/tokenizer for the Simple Browser Platform.
+# Converts JS source text into a stream of BrowserLegacyJsToken values.
+# Handles numbers (int, float, hex, binary, octal), strings (single/double/template),
+# identifiers, keywords, and multi-character operators.
+
+use browser.shared.logging.Logger
+use browser.shared.logging.LogLevel
+
+# ── Token kinds ──────────────────────────────────────────────────────────
+
+enum BrowserLegacyJsTokenKind:
+    # Literals
+    Number
+    String
+    Identifier
+    Boolean
+    Null
+    Undefined
+    TemplateLiteral
+
+    # Arithmetic
+    Plus
+    Minus
+    Star
+    Slash
+    Percent
+    StarStar
+
+    # Assignment
+    Eq
+    PlusEq
+    MinusEq
+    StarEq
+    SlashEq
+
+    # Comparison / equality
+    EqEq
+    EqEqEq
+    BangEq
+    BangEqEq
+    Lt
+    Gt
+    LtEq
+    GtEq
+
+    # Logical
+    AmpersandAmpersand
+    PipePipe
+    QuestionQuestion
+    Bang
+
+    # Bitwise
+    Tilde
+    Ampersand
+    Pipe
+    Caret
+
+    # Increment / decrement
+    PlusPlus
+    MinusMinus
+
+    # Dot variants
+    Dot
+    DotDotDot
+    QuestionDot
+
+    # Delimiters
+    OpenParen
+    CloseParen
+    OpenBrace
+    CloseBrace
+    OpenBracket
+    CloseBracket
+
+    # Punctuation
+    Semicolon
+    Comma
+    Colon
+    Arrow
+    Question
+
+    # Variable declarations
+    Var
+    Let
+    Const
+
+    # Control flow
+    Function
+    Return
+    If
+    Else
+    While
+    For
+    Do
+    Break
+    Continue
+    Switch
+    Case
+    Default
+
+    # Error handling
+    Throw
+    Try
+    Catch
+    Finally
+
+    # Operators as keywords
+    New
+    Delete
+    Typeof
+    Instanceof
+    In
+    Of
+    Void
+
+    # OOP
+    Class
+    Extends
+    Super
+    This
+
+    # Modules
+    Import
+    Export
+    From
+    As
+
+    # Async
+    Async
+    Await
+    Yield
+
+    # Boolean / null keywords
+    True
+    False
+    NullKw
+
+    # Special
+    Eof
+    Invalid
+
+# ── Token ────────────────────────────────────────────────────────────────
+
+class BrowserLegacyJsToken:
+    kind: BrowserLegacyJsTokenKind
+    value: text
+    line: i64
+    col: i64
+
+    static fn eof(line: i64, col: i64) -> BrowserLegacyJsToken:
+        BrowserLegacyJsToken(kind: BrowserLegacyJsTokenKind.Eof, value: "", line: line, col: col)
+
+    static fn invalid(value: text, line: i64, col: i64) -> BrowserLegacyJsToken:
+        BrowserLegacyJsToken(kind: BrowserLegacyJsTokenKind.Invalid, value: value, line: line, col: col)
+
+# ── Keyword table ────────────────────────────────────────────────────────
+
+fn browser_legacy_is_keyword(word: text) -> Option<BrowserLegacyJsTokenKind>:
+    if word == "var":        return Some(BrowserLegacyJsTokenKind.Var)
+    if word == "let":        return Some(BrowserLegacyJsTokenKind.Let)
+    if word == "const":      return Some(BrowserLegacyJsTokenKind.Const)
+    if word == "function":   return Some(BrowserLegacyJsTokenKind.Function)
+    if word == "return":     return Some(BrowserLegacyJsTokenKind.Return)
+    if word == "if":         return Some(BrowserLegacyJsTokenKind.If)
+    if word == "else":       return Some(BrowserLegacyJsTokenKind.Else)
+    if word == "while":      return Some(BrowserLegacyJsTokenKind.While)
+    if word == "for":        return Some(BrowserLegacyJsTokenKind.For)
+    if word == "do":         return Some(BrowserLegacyJsTokenKind.Do)
+    if word == "break":      return Some(BrowserLegacyJsTokenKind.Break)
+    if word == "continue":   return Some(BrowserLegacyJsTokenKind.Continue)
+    if word == "switch":     return Some(BrowserLegacyJsTokenKind.Switch)
+    if word == "case":       return Some(BrowserLegacyJsTokenKind.Case)
+    if word == "default":    return Some(BrowserLegacyJsTokenKind.Default)
+    if word == "throw":      return Some(BrowserLegacyJsTokenKind.Throw)
+    if word == "try":        return Some(BrowserLegacyJsTokenKind.Try)
+    if word == "catch":      return Some(BrowserLegacyJsTokenKind.Catch)
+    if word == "finally":    return Some(BrowserLegacyJsTokenKind.Finally)
+    if word == "new":        return Some(BrowserLegacyJsTokenKind.New)
+    if word == "delete":     return Some(BrowserLegacyJsTokenKind.Delete)
+    if word == "typeof":     return Some(BrowserLegacyJsTokenKind.Typeof)
+    if word == "instanceof": return Some(BrowserLegacyJsTokenKind.Instanceof)
+    if word == "in":         return Some(BrowserLegacyJsTokenKind.In)
+    if word == "of":         return Some(BrowserLegacyJsTokenKind.Of)
+    if word == "void":       return Some(BrowserLegacyJsTokenKind.Void)
+    if word == "class":      return Some(BrowserLegacyJsTokenKind.Class)
+    if word == "extends":    return Some(BrowserLegacyJsTokenKind.Extends)
+    if word == "super":      return Some(BrowserLegacyJsTokenKind.Super)
+    if word == "this":       return Some(BrowserLegacyJsTokenKind.This)
+    if word == "import":     return Some(BrowserLegacyJsTokenKind.Import)
+    if word == "export":     return Some(BrowserLegacyJsTokenKind.Export)
+    if word == "from":       return Some(BrowserLegacyJsTokenKind.From)
+    if word == "as":         return Some(BrowserLegacyJsTokenKind.As)
+    if word == "async":      return Some(BrowserLegacyJsTokenKind.Async)
+    if word == "await":      return Some(BrowserLegacyJsTokenKind.Await)
+    if word == "yield":      return Some(BrowserLegacyJsTokenKind.Yield)
+    if word == "true":       return Some(BrowserLegacyJsTokenKind.True)
+    if word == "false":      return Some(BrowserLegacyJsTokenKind.False)
+    if word == "null":       return Some(BrowserLegacyJsTokenKind.NullKw)
+    if word == "undefined":  return Some(BrowserLegacyJsTokenKind.Undefined)
+    return None
+
+# ── Character predicates ─────────────────────────────────────────────────
+
+fn browser_legacy_is_digit(c: text) -> bool:
+    c == "0" or c == "1" or c == "2" or c == "3" or c == "4" or c == "5" or c == "6" or c == "7" or c == "8" or c == "9"
+
+fn browser_legacy_is_hex_digit(c: text) -> bool:
+    val is_d = browser_legacy_is_digit(c)
+    val is_upper = c == "A" or c == "B" or c == "C" or c == "D" or c == "E" or c == "F"
+    val is_lower = c == "a" or c == "b" or c == "c" or c == "d" or c == "e" or c == "f"
+    is_d or is_upper or is_lower
+
+fn browser_legacy_is_octal_digit(c: text) -> bool:
+    c == "0" or c == "1" or c == "2" or c == "3" or c == "4" or c == "5" or c == "6" or c == "7"
+
+fn browser_legacy_is_binary_digit(c: text) -> bool:
+    c == "0" or c == "1"
+
+fn browser_legacy_is_alpha(c: text) -> bool:
+    val code = c.char_code_at(0)
+    val is_upper = code >= 65 and code <= 90
+    val is_lower = code >= 97 and code <= 122
+    is_upper or is_lower
+
+fn browser_legacy_is_ident_start(c: text) -> bool:
+    if c == "":
+        return false
+    val is_a = browser_legacy_is_alpha(c)
+    c == "_" or c == "$" or is_a
+
+fn browser_legacy_is_ident_part(c: text) -> bool:
+    if c == "":
+        return false
+    val is_a = browser_legacy_is_alpha(c)
+    val is_d = browser_legacy_is_digit(c)
+    c == "_" or c == "$" or is_a or is_d
+
+# ── Escape handling ──────────────────────────────────────────────────────
+
+fn browser_legacy_unescape_string(raw: text) -> text:
+    var result = ""
+    var i = 0
+    val len = raw.len()
+    while i < len:
+        val c = raw.char_at(i)
+        if c == "\\":
+            i = i + 1
+            if i >= len:
+                result = result + "\\"
+                break
+            val next = raw.char_at(i)
+            if next == "n":
+                result = result + "\n"
+            else if next == "t":
+                result = result + "\t"
+            else if next == "r":
+                result = result + "\r"
+            else if next == "\\":
+                result = result + "\\"
+            else if next == "\"":
+                result = result + "\""
+            else if next == "'":
+                result = result + "'"
+            else if next == "0":
+                result = result + "\0"
+            else if next == "u":
+                # \uXXXX — parse 4 hex digits
+                if i + 4 < len:
+                    val hex = raw.slice(i + 1, i + 5)
+                    val code_val = browser_legacy_parse_hex_int(hex)
+                    result = result + text.from_char_code(code_val)
+                    i = i + 4
+                else:
+                    result = result + "u"
+            else:
+                result = result + next
+        else:
+            result = result + c
+        i = i + 1
+    result
+
+fn browser_legacy_parse_hex_int(s: text) -> i64:
+    var result = 0
+    var i = 0
+    val len = s.len()
+    while i < len:
+        val c = s.char_at(i)
+        val code = c.char_code_at(0)
+        result = result * 16
+        if code >= 48 and code <= 57:
+            result = result + (code - 48)
+        else if code >= 65 and code <= 70:
+            result = result + (code - 55)
+        else if code >= 97 and code <= 102:
+            result = result + (code - 87)
+        i = i + 1
+    result
+
+# ── Lexer ────────────────────────────────────────────────────────────────
+
+class BrowserLegacyJsLexer:
+    input: text
+    pos: i64
+    line: i64
+    col: i64
+    input_len: i64
+    logger: Logger
+
+    static fn new(input: text, logger: Logger) -> BrowserLegacyJsLexer:
+        BrowserLegacyJsLexer(
+            input: input,
+            pos: 0,
+            line: 1,
+            col: 1,
+            input_len: input.len(),
+            logger: logger,
+        )
+
+    # Peek at the current character without consuming
+    fn peek() -> text:
+        if self.pos >= self.input_len:
+            return ""
+        self.input.char_at(self.pos)
+
+    # Peek at the character n positions ahead
+    fn peek_at(n: i64) -> text:
+        val target = self.pos + n
+        if target >= self.input_len:
+            return ""
+        self.input.char_at(target)
+
+    # Consume the current character and advance position
+    me consume() -> text:
+        if self.pos >= self.input_len:
+            return ""
+        val c = self.input.char_at(self.pos)
+        self.pos = self.pos + 1
+        if c == "\n":
+            self.line = self.line + 1
+            self.col = 1
+        else:
+            self.col = self.col + 1
+        c
+
+    # Skip whitespace (spaces, tabs, newlines, carriage returns)
+    me skip_whitespace():
+        while self.pos < self.input_len:
+            val c = self.peek()
+            val is_ws = c == " " or c == "\t" or c == "\n" or c == "\r"
+            if not is_ws:
+                break
+            self.consume()
+
+    # Skip single-line comment (// ...)
+    me skip_line_comment():
+        while self.pos < self.input_len:
+            val c = self.consume()
+            if c == "\n":
+                break
+
+    # Skip block comment (/* ... */)
+    me skip_block_comment():
+        while self.pos < self.input_len:
+            val c = self.consume()
+            if c == "*":
+                val next = self.peek()
+                if next == "/":
+                    self.consume()
+                    return
+
+    # Read a number literal — integer, float, hex, binary, octal
+    me read_number() -> BrowserLegacyJsToken:
+        val start_line = self.line
+        val start_col = self.col
+        var num_str = ""
+
+        val first = self.peek()
+        if first == "0":
+            num_str = num_str + self.consume()
+            val second = self.peek()
+            if second == "x" or second == "X":
+                # Hex literal 0x...
+                num_str = num_str + self.consume()
+                while self.pos < self.input_len:
+                    val c = self.peek()
+                    if not browser_legacy_is_hex_digit(c):
+                        break
+                    num_str = num_str + self.consume()
+                return BrowserLegacyJsToken(kind: BrowserLegacyJsTokenKind.Number, value: num_str, line: start_line, col: start_col)
+            if second == "b" or second == "B":
+                # Binary literal 0b...
+                num_str = num_str + self.consume()
+                while self.pos < self.input_len:
+                    val c = self.peek()
+                    if not browser_legacy_is_binary_digit(c):
+                        break
+                    num_str = num_str + self.consume()
+                return BrowserLegacyJsToken(kind: BrowserLegacyJsTokenKind.Number, value: num_str, line: start_line, col: start_col)
+            if second == "o" or second == "O":
+                # Octal literal 0o...
+                num_str = num_str + self.consume()
+                while self.pos < self.input_len:
+                    val c = self.peek()
+                    if not browser_legacy_is_octal_digit(c):
+                        break
+                    num_str = num_str + self.consume()
+                return BrowserLegacyJsToken(kind: BrowserLegacyJsTokenKind.Number, value: num_str, line: start_line, col: start_col)
+
+        # Regular decimal integer or float
+        while self.pos < self.input_len:
+            val c = self.peek()
+            if not browser_legacy_is_digit(c):
+                break
+            num_str = num_str + self.consume()
+
+        # Decimal part
+        if self.peek() == ".":
+            val after_dot = self.peek_at(1)
+            if browser_legacy_is_digit(after_dot):
+                num_str = num_str + self.consume()  # consume '.'
+                while self.pos < self.input_len:
+                    val c = self.peek()
+                    if not browser_legacy_is_digit(c):
+                        break
+                    num_str = num_str + self.consume()
+
+        # Exponent part
+        val exp_c = self.peek()
+        if exp_c == "e" or exp_c == "E":
+            num_str = num_str + self.consume()
+            val sign = self.peek()
+            if sign == "+" or sign == "-":
+                num_str = num_str + self.consume()
+            while self.pos < self.input_len:
+                val c = self.peek()
+                if not browser_legacy_is_digit(c):
+                    break
+                num_str = num_str + self.consume()
+
+        BrowserLegacyJsToken(kind: BrowserLegacyJsTokenKind.Number, value: num_str, line: start_line, col: start_col)
+
+    # Read a string literal with given quote character
+    me read_string(quote: text) -> BrowserLegacyJsToken:
+        val start_line = self.line
+        val start_col = self.col
+        self.consume()  # consume opening quote
+        var raw = ""
+        while self.pos < self.input_len:
+            val c = self.peek()
+            if c == quote:
+                self.consume()  # consume closing quote
+                val unescaped = browser_legacy_unescape_string(raw)
+                return BrowserLegacyJsToken(kind: BrowserLegacyJsTokenKind.String, value: unescaped, line: start_line, col: start_col)
+            if c == "\\":
+                raw = raw + self.consume()  # consume backslash
+                if self.pos < self.input_len:
+                    raw = raw + self.consume()  # consume escaped char
+            else:
+                raw = raw + self.consume()
+        # Unterminated string
+        self.logger.warn("Unterminated string literal at line {start_line}")
+        val unescaped = browser_legacy_unescape_string(raw)
+        BrowserLegacyJsToken(kind: BrowserLegacyJsTokenKind.String, value: unescaped, line: start_line, col: start_col)
+
+    # Read a template literal (backtick)
+    me read_template_string() -> BrowserLegacyJsToken:
+        val start_line = self.line
+        val start_col = self.col
+        self.consume()  # consume opening backtick
+        var raw = ""
+        while self.pos < self.input_len:
+            val c = self.peek()
+            if c == "`":
+                self.consume()  # consume closing backtick
+                return BrowserLegacyJsToken(kind: BrowserLegacyJsTokenKind.TemplateLiteral, value: raw, line: start_line, col: start_col)
+            if c == "\\":
+                raw = raw + self.consume()
+                if self.pos < self.input_len:
+                    raw = raw + self.consume()
+            else:
+                raw = raw + self.consume()
+        self.logger.warn("Unterminated template literal at line {start_line}")
+        BrowserLegacyJsToken(kind: BrowserLegacyJsTokenKind.TemplateLiteral, value: raw, line: start_line, col: start_col)
+
+    # Read an identifier or keyword
+    me read_identifier() -> BrowserLegacyJsToken:
+        val start_line = self.line
+        val start_col = self.col
+        var ident = ""
+        while self.pos < self.input_len:
+            val c = self.peek()
+            if not browser_legacy_is_ident_part(c):
+                break
+            ident = ident + self.consume()
+
+        # Check if it is a keyword
+        val kw = browser_legacy_is_keyword(ident)
+        if val Some(kind) = kw:
+            return BrowserLegacyJsToken(kind: kind, value: ident, line: start_line, col: start_col)
+
+        BrowserLegacyJsToken(kind: BrowserLegacyJsTokenKind.Identifier, value: ident, line: start_line, col: start_col)
+
+    # Read an operator token — handles multi-character operators
+    me read_operator() -> BrowserLegacyJsToken:
+        val start_line = self.line
+        val start_col = self.col
+        val c = self.consume()
+        val next = self.peek()
+
+        # Two+ character operators
+        if c == "=":
+            if next == "=":
+                self.consume()
+                val third = self.peek()
+                if third == "=":
+                    self.consume()
+                    return BrowserLegacyJsToken(kind: BrowserLegacyJsTokenKind.EqEqEq, value: "===", line: start_line, col: start_col)
+                return BrowserLegacyJsToken(kind: BrowserLegacyJsTokenKind.EqEq, value: "==", line: start_line, col: start_col)
+            if next == ">":
+                self.consume()
+                return BrowserLegacyJsToken(kind: BrowserLegacyJsTokenKind.Arrow, value: "=>", line: start_line, col: start_col)
+            return BrowserLegacyJsToken(kind: BrowserLegacyJsTokenKind.Eq, value: "=", line: start_line, col: start_col)
+
+        if c == "!":
+            if next == "=":
+                self.consume()
+                val third = self.peek()
+                if third == "=":
+                    self.consume()
+                    return BrowserLegacyJsToken(kind: BrowserLegacyJsTokenKind.BangEqEq, value: "!==", line: start_line, col: start_col)
+                return BrowserLegacyJsToken(kind: BrowserLegacyJsTokenKind.BangEq, value: "!=", line: start_line, col: start_col)
+            return BrowserLegacyJsToken(kind: BrowserLegacyJsTokenKind.Bang, value: "!", line: start_line, col: start_col)
+
+        if c == "<":
+            if next == "=":
+                self.consume()
+                return BrowserLegacyJsToken(kind: BrowserLegacyJsTokenKind.LtEq, value: "<=", line: start_line, col: start_col)
+            return BrowserLegacyJsToken(kind: BrowserLegacyJsTokenKind.Lt, value: "<", line: start_line, col: start_col)
+
+        if c == ">":
+            if next == "=":
+                self.consume()
+                return BrowserLegacyJsToken(kind: BrowserLegacyJsTokenKind.GtEq, value: ">=", line: start_line, col: start_col)
+            return BrowserLegacyJsToken(kind: BrowserLegacyJsTokenKind.Gt, value: ">", line: start_line, col: start_col)
+
+        if c == "+":
+            if next == "+":
+                self.consume()
+                return BrowserLegacyJsToken(kind: BrowserLegacyJsTokenKind.PlusPlus, value: "++", line: start_line, col: start_col)
+            if next == "=":
+                self.consume()
+                return BrowserLegacyJsToken(kind: BrowserLegacyJsTokenKind.PlusEq, value: "+=", line: start_line, col: start_col)
+            return BrowserLegacyJsToken(kind: BrowserLegacyJsTokenKind.Plus, value: "+", line: start_line, col: start_col)
+
+        if c == "-":
+            if next == "-":
+                self.consume()
+                return BrowserLegacyJsToken(kind: BrowserLegacyJsTokenKind.MinusMinus, value: "--", line: start_line, col: start_col)
+            if next == "=":
+                self.consume()
+                return BrowserLegacyJsToken(kind: BrowserLegacyJsTokenKind.MinusEq, value: "-=", line: start_line, col: start_col)
+            return BrowserLegacyJsToken(kind: BrowserLegacyJsTokenKind.Minus, value: "-", line: start_line, col: start_col)
+
+        if c == "*":
+            if next == "*":
+                self.consume()
+                return BrowserLegacyJsToken(kind: BrowserLegacyJsTokenKind.StarStar, value: "**", line: start_line, col: start_col)
+            if next == "=":
+                self.consume()
+                return BrowserLegacyJsToken(kind: BrowserLegacyJsTokenKind.StarEq, value: "*=", line: start_line, col: start_col)
+            return BrowserLegacyJsToken(kind: BrowserLegacyJsTokenKind.Star, value: "*", line: start_line, col: start_col)
+
+        if c == "/":
+            if next == "=":
+                self.consume()
+                return BrowserLegacyJsToken(kind: BrowserLegacyJsTokenKind.SlashEq, value: "/=", line: start_line, col: start_col)
+            return BrowserLegacyJsToken(kind: BrowserLegacyJsTokenKind.Slash, value: "/", line: start_line, col: start_col)
+
+        if c == "%":
+            return BrowserLegacyJsToken(kind: BrowserLegacyJsTokenKind.Percent, value: "%", line: start_line, col: start_col)
+
+        if c == "&":
+            if next == "&":
+                self.consume()
+                return BrowserLegacyJsToken(kind: BrowserLegacyJsTokenKind.AmpersandAmpersand, value: "&&", line: start_line, col: start_col)
+            return BrowserLegacyJsToken(kind: BrowserLegacyJsTokenKind.Ampersand, value: "&", line: start_line, col: start_col)
+
+        if c == "|":
+            if next == "|":
+                self.consume()
+                return BrowserLegacyJsToken(kind: BrowserLegacyJsTokenKind.PipePipe, value: "||", line: start_line, col: start_col)
+            return BrowserLegacyJsToken(kind: BrowserLegacyJsTokenKind.Pipe, value: "|", line: start_line, col: start_col)
+
+        if c == "?":
+            if next == "?":
+                self.consume()
+                return BrowserLegacyJsToken(kind: BrowserLegacyJsTokenKind.QuestionQuestion, value: "??", line: start_line, col: start_col)
+            if next == ".":
+                self.consume()
+                return BrowserLegacyJsToken(kind: BrowserLegacyJsTokenKind.QuestionDot, value: "?.", line: start_line, col: start_col)
+            return BrowserLegacyJsToken(kind: BrowserLegacyJsTokenKind.Question, value: "?", line: start_line, col: start_col)
+
+        if c == ".":
+            if next == ".":
+                val third = self.peek_at(1)
+                if third == ".":
+                    self.consume()
+                    self.consume()
+                    return BrowserLegacyJsToken(kind: BrowserLegacyJsTokenKind.DotDotDot, value: "...", line: start_line, col: start_col)
+            return BrowserLegacyJsToken(kind: BrowserLegacyJsTokenKind.Dot, value: ".", line: start_line, col: start_col)
+
+        if c == "^":
+            return BrowserLegacyJsToken(kind: BrowserLegacyJsTokenKind.Caret, value: "^", line: start_line, col: start_col)
+
+        if c == "~":
+            return BrowserLegacyJsToken(kind: BrowserLegacyJsTokenKind.Tilde, value: "~", line: start_line, col: start_col)
+
+        # Delimiters
+        if c == "(":
+            return BrowserLegacyJsToken(kind: BrowserLegacyJsTokenKind.OpenParen, value: "(", line: start_line, col: start_col)
+        if c == ")":
+            return BrowserLegacyJsToken(kind: BrowserLegacyJsTokenKind.CloseParen, value: ")", line: start_line, col: start_col)
+        if c == "{":
+            return BrowserLegacyJsToken(kind: BrowserLegacyJsTokenKind.OpenBrace, value: "{", line: start_line, col: start_col)
+        if c == "}":
+            return BrowserLegacyJsToken(kind: BrowserLegacyJsTokenKind.CloseBrace, value: "}", line: start_line, col: start_col)
+        if c == "[":
+            return BrowserLegacyJsToken(kind: BrowserLegacyJsTokenKind.OpenBracket, value: "[", line: start_line, col: start_col)
+        if c == "]":
+            return BrowserLegacyJsToken(kind: BrowserLegacyJsTokenKind.CloseBracket, value: "]", line: start_line, col: start_col)
+
+        # Punctuation
+        if c == ";":
+            return BrowserLegacyJsToken(kind: BrowserLegacyJsTokenKind.Semicolon, value: ";", line: start_line, col: start_col)
+        if c == ",":
+            return BrowserLegacyJsToken(kind: BrowserLegacyJsTokenKind.Comma, value: ",", line: start_line, col: start_col)
+        if c == ":":
+            return BrowserLegacyJsToken(kind: BrowserLegacyJsTokenKind.Colon, value: ":", line: start_line, col: start_col)
+
+        # Unknown character
+        BrowserLegacyJsToken.invalid(c, start_line, start_col)
+
+    # Main tokenizer — returns the next token from the input
+    me next_token() -> BrowserLegacyJsToken:
+        # Skip whitespace and comments
+        while self.pos < self.input_len:
+            self.skip_whitespace()
+            if self.pos >= self.input_len:
+                break
+            val c = self.peek()
+            val next = self.peek_at(1)
+            if c == "/" and next == "/":
+                self.skip_line_comment()
+                continue
+            if c == "/" and next == "*":
+                self.consume()
+                self.consume()
+                self.skip_block_comment()
+                continue
+            break
+
+        # Check for end of input
+        if self.pos >= self.input_len:
+            return BrowserLegacyJsToken.eof(self.line, self.col)
+
+        val c = self.peek()
+
+        # Number literal
+        if browser_legacy_is_digit(c):
+            return self.read_number()
+
+        # String literal — single or double quote
+        if c == "\"" or c == "'":
+            return self.read_string(c)
+
+        # Template literal — backtick
+        if c == "`":
+            return self.read_template_string()
+
+        # Identifier or keyword
+        if browser_legacy_is_ident_start(c):
+            return self.read_identifier()
+
+        # Dot followed by digit is a number (.5 etc.)
+        if c == ".":
+            val next = self.peek_at(1)
+            if browser_legacy_is_digit(next):
+                return self.read_number()
+
+        # Operators and punctuation
+        self.read_operator()

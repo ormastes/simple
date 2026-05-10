@@ -1,0 +1,113 @@
+# Physics2 — Collision Layer Filtering
+#
+# Bitmask-based collision filtering. Each body has a category bitmask
+# (which layers it belongs to) and a mask bitmask (which layers it
+# interacts with). Two bodies collide only when each accepts the other's
+# category.
+
+# --------------------------------------------------------------------------
+# Collision filter
+# --------------------------------------------------------------------------
+
+struct CollisionFilter:
+    category: i32
+    mask: i32
+
+impl CollisionFilter:
+    static fn all() -> CollisionFilter:
+        CollisionFilter(category: 1, mask: 0x7FFFFFFF)
+
+    static fn none() -> CollisionFilter:
+        CollisionFilter(category: 0, mask: 0)
+
+    static fn layer(layer_bit: i32) -> CollisionFilter:
+        CollisionFilter(category: layer_bit, mask: 0x7FFFFFFF)
+
+    static fn with_mask(category: i32, mask: i32) -> CollisionFilter:
+        CollisionFilter(category: category, mask: mask)
+
+    fn should_collide(self, other: CollisionFilter) -> bool:
+        val a_in_b = self.category & other.mask
+        val b_in_a = other.category & self.mask
+        a_in_b != 0 and b_in_a != 0
+
+# --------------------------------------------------------------------------
+# Predefined layer constants
+# --------------------------------------------------------------------------
+
+fn layer_default() -> i32:
+    1
+
+fn layer_player() -> i32:
+    2
+
+fn layer_enemy() -> i32:
+    4
+
+fn layer_projectile() -> i32:
+    8
+
+fn layer_terrain() -> i32:
+    16
+
+fn layer_trigger() -> i32:
+    32
+
+fn layer_ui() -> i32:
+    64
+
+# --------------------------------------------------------------------------
+# Collision matrix — per-layer-pair override rules
+# --------------------------------------------------------------------------
+
+struct CollisionRule:
+    layer_a: i32
+    layer_b: i32
+    collides: bool
+
+class CollisionMatrix:
+    rules: [CollisionRule]
+
+impl CollisionMatrix:
+    static fn all_collide() -> CollisionMatrix:
+        CollisionMatrix(rules: [])
+
+    me set_collision(layer_a: i32, layer_b: i32, collides: bool):
+        # Update existing rule or add new one
+        var i = 0
+        while i < self.rules.len():
+            val r = self.rules[i]
+            val match_fwd = r.layer_a == layer_a and r.layer_b == layer_b
+            val match_rev = r.layer_a == layer_b and r.layer_b == layer_a
+            if match_fwd or match_rev:
+                self.rules[i] = CollisionRule(
+                    layer_a: layer_a,
+                    layer_b: layer_b,
+                    collides: collides
+                )
+                return
+            i = i + 1
+        self.rules.push(CollisionRule(
+            layer_a: layer_a,
+            layer_b: layer_b,
+            collides: collides
+        ))
+
+    fn should_collide(self, filter_a: CollisionFilter, filter_b: CollisionFilter) -> bool:
+        # First check bitmask filter
+        if not filter_a.should_collide(filter_b):
+            return false
+        # Then check explicit rules (overrides)
+        var i = 0
+        while i < self.rules.len():
+            val r = self.rules[i]
+            # Check if the rule applies to these two filters
+            val a_matches_a = (filter_a.category & r.layer_a) != 0
+            val b_matches_b = (filter_b.category & r.layer_b) != 0
+            val a_matches_b = (filter_a.category & r.layer_b) != 0
+            val b_matches_a = (filter_b.category & r.layer_a) != 0
+            if (a_matches_a and b_matches_b) or (a_matches_b and b_matches_a):
+                return r.collides
+            i = i + 1
+        # No override rule found — use bitmask result (already passed above)
+        true

@@ -1,0 +1,269 @@
+# Lightweight lint/fmt/fix entry point for `simple lint|fmt|fix`
+#
+# This file loads only the minimal imports needed to run lint/fmt/fix,
+# avoiding the overhead of loading the full CLI with all its modules.
+#
+# Usage:
+#   bin/simple run src/app/cli/lint_entry.spl lint [options] [path]
+#   bin/simple run src/app/cli/lint_entry.spl fmt [options] [path]
+#   bin/simple run src/app/cli/lint_entry.spl fix [options] [path]
+
+use std.cli.cli_util (get_cli_args)
+use compiler.tools.lint.main.{Linter, LintLevel}
+use compiler.tools.formatter.main.{make_formatter, check_formatting, format_file_inplace, read_file, print_diff}
+use compiler.tools.fix.main.{collect_fixes_from_source, FixApplicator}
+use std.nogc_sync_mut.io.file_ops.{file_exists, file_read}
+use app.io.cli_ops.{_cli_eprint, _cli_process_run}
+
+fn lint_entry_run_lint(args: [text]) -> i64:
+    var files: [text] = []
+    var run_mcp_perf = false
+    for arg in args:
+        if arg == "lint":
+            val _ = 0
+        elif arg == "--mcp-perf" or arg == "--all":
+            run_mcp_perf = true
+        elif not arg.starts_with("-"):
+            files.push(arg)
+
+    var exit_code = 0
+    if run_mcp_perf:
+        val (stdout, stderr, perf_exit) = _cli_process_run("python3", ["scripts/mcp_performance_guard.py", "static-audit", "--strict", "--context", "lint"])
+        if stdout.len() > 0:
+            print(stdout)
+        if stderr.len() > 0:
+            _cli_eprint(stderr)
+        if files.len() == 0:
+            return perf_exit
+        if perf_exit != 0:
+            exit_code = 1
+
+    if files.len() == 0:
+        print "Usage: simple lint <file.spl> [file2.spl ...] [--mcp-perf]"
+        print ""
+        print "Runs lint passes on Simple source files."
+        print "Checks for:"
+        print "  - Collection performance anti-patterns (COLL001-COLL008)"
+        print "  - Duplicate typed arguments (DTYP001)"
+        print "  - Bare primitive types in public APIs"
+        print "  - MCP wrapper, hot-path, and invalidation regressions (--mcp-perf)"
+        return 1
+
+    var total_warnings = 0
+    for file_path in files:
+        if not file_exists(file_path):
+            _cli_eprint("Error: File not found: {file_path}")
+            exit_code = 1
+            continue
+
+        val source = file_read(file_path)
+        var linter = Linter.new()
+        val results = linter.lint_source(file_path, source)
+        var visible_fix_count = 0
+        for result in results:
+            visible_fix_count = visible_fix_count + 1
+            var level_text = "info"
+            match result.lint.level:
+                case LintLevel.Deny:
+                    level_text = "error"
+                case LintLevel.Warn:
+                    level_text = "warning"
+                case LintLevel.Allow:
+                    level_text = "info"
+            print "{file_path}:{result.line}: {level_text}[{result.lint.code}]: {result.lint.message}"
+
+        if visible_fix_count == 0:
+            print "lint: {file_path} OK"
+        else:
+            _cli_eprint("lint: {file_path} has issues")
+            exit_code = 1
+            total_warnings = total_warnings + 1
+
+    if total_warnings > 0:
+        print ""
+        print "Lint found issues in {total_warnings} file(s)"
+    elif exit_code == 0:
+        print ""
+        print "Lint passed: all files clean"
+    exit_code
+
+fn lint_entry_run_fmt(args: [text]) -> i64:
+    var check_mode = false
+    var write_mode = false
+    var diff_mode = false
+    var files: [text] = []
+    for arg in args:
+        if arg == "--check":
+            check_mode = true
+        elif arg == "--write":
+            write_mode = true
+        elif arg == "--diff":
+            diff_mode = true
+        elif arg == "fmt":
+            val _ = 0
+        elif not arg.starts_with("-"):
+            files.push(arg)
+
+    if files.len() == 0:
+        print "Usage: simple fmt <file.spl> [--check] [--write] [--diff]"
+        print ""
+        print "Options:"
+        print "  --check   Check if file is formatted (exit 1 if not)"
+        print "  --write   Format file in place"
+        print "  --diff    Show formatting diff"
+        return 1
+
+    var exit_code = 0
+    for file_path in files:
+        if not file_exists(file_path):
+            _cli_eprint("Error: File not found: {file_path}")
+            exit_code = 1
+            continue
+
+        if check_mode:
+            val result = check_formatting(file_path)
+            match result:
+                case Ok(is_formatted):
+                    if is_formatted:
+                        print "OK {file_path} is formatted"
+                    else:
+                        print "FAIL {file_path} needs formatting"
+                        exit_code = 1
+                case Err(e):
+                    _cli_eprint("Error: {e}")
+                    exit_code = 1
+        elif write_mode:
+            val result = format_file_inplace(file_path)
+            match result:
+                case Ok(_):
+                    print "OK Formatted {file_path}"
+                case Err(e):
+                    _cli_eprint("Error: {e}")
+                    exit_code = 1
+        elif diff_mode:
+            val fmt = make_formatter()
+            val orig_result = read_file(file_path)
+            match orig_result:
+                case Err(e):
+                    _cli_eprint("Error reading file: {e}")
+                    exit_code = 1
+                case Ok(original):
+                    val fmt_result = fmt.format_source(original)
+                    match fmt_result:
+                        case Err(e):
+                            _cli_eprint("Error: {e}")
+                            exit_code = 1
+                        case Ok(formatted):
+                            if original == formatted:
+                                print "OK {file_path} is correctly formatted"
+                            else:
+                                print_diff(original, formatted, file_path)
+                                exit_code = 1
+        else:
+            val fmt = make_formatter()
+            val result = fmt.format_file(file_path)
+            match result:
+                case Ok(formatted):
+                    print formatted
+                case Err(e):
+                    _cli_eprint("Error: {e}")
+                    exit_code = 1
+    exit_code
+
+fn lint_entry_run_fix(args: [text]) -> i64:
+    var dry_run = false
+    var fix_all = false
+    var files: [text] = []
+    for arg in args:
+        if arg == "--dry-run":
+            dry_run = true
+        elif arg == "--fix-all":
+            fix_all = true
+        elif arg == "fix":
+            val _ = 0
+        elif not arg.starts_with("-"):
+            files.push(arg)
+
+    if files.len() == 0:
+        print "Usage: simple fix <file.spl> [--dry-run] [--fix-all]"
+        print ""
+        print "Options:"
+        print "  --dry-run   Show what would be fixed without applying"
+        print "  --fix-all   Apply all fixes regardless of confidence"
+        return 1
+
+    var exit_code = 0
+    for file_path in files:
+        if not file_exists(file_path):
+            _cli_eprint("Error: File not found: {file_path}")
+            exit_code = 1
+            continue
+
+        val source = file_read(file_path)
+        if source == "":
+            _cli_eprint("Error: Could not read file: {file_path}")
+            exit_code = 1
+            continue
+
+        val fixes = collect_fixes_from_source(file_path, source)
+        if fixes.len() == 0:
+            print "No fixes available for {file_path}"
+            continue
+
+        var filtered = []
+        if fix_all:
+            filtered = fixes
+        else:
+            for fix in fixes:
+                if fix.is_safe():
+                    filtered.push(fix)
+
+        if filtered.len() == 0:
+            print "No applicable fixes found for {file_path}"
+            continue
+
+        var sources: Dict<text, text> = {}
+        sources[file_path] = source
+
+        val result = FixApplicator.apply_to_disk(filtered, sources, dry_run)
+        match result:
+            case Ok(report):
+                if dry_run:
+                    print "Dry run for {file_path}:"
+                else:
+                    print "Applied fixes to {file_path}:"
+                print "  {report.applied} fix(es) applied"
+                for detail in report.details:
+                    print "  {detail}"
+            case Err(e):
+                _cli_eprint("Error applying fixes to {file_path}: {e}")
+                exit_code = 1
+    exit_code
+
+fn main() -> i64:
+    val all_args = get_cli_args()
+
+    var filtered_args = []
+    var i = 0
+    if all_args.len() > 0:
+        i = 1
+
+    while i < all_args.len():
+        filtered_args.push(all_args[i])
+        i = i + 1
+
+    if filtered_args.len() == 0:
+        print "Usage: simple lint|fmt|fix [options] [path]"
+        return 1
+
+    val command = filtered_args[0]
+
+    if command == "lint":
+        return lint_entry_run_lint(filtered_args)
+    elif command == "fmt":
+        return lint_entry_run_fmt(filtered_args)
+    elif command == "fix":
+        return lint_entry_run_fix(filtered_args)
+    else:
+        print "Unknown command: {command}"
+        return 1

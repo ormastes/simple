@@ -1,0 +1,50 @@
+# NvfsPosixDriver — concrete implementation of NvfsPosixOps for the POSIX shim.
+#
+# Provides the three NvfsPosixOps methods:
+#   set_nonblock — delegates to rt_socket_set_nonblocking (works on any fd).
+#   dup          — pass_todo stub; requires fd_table refcounting (Phase 9 B3+).
+#   shim_name    — returns 'nvfs-posix-v1'.
+#
+# The driver holds no fd_table state in B2; FileHandle.id is treated as a raw
+# fd for the purposes of set_nonblock.
+#
+# Phase 9 B2 — doc/05_design/nvfs_posix_wrapper.md §3.
+
+use std.fs.nvfs_posix.api.{NvfsPosixOps, FdId}
+use std.fs_driver.types.{FileHandle}
+use std.fs_driver.error.{FsError}
+
+# FFI — works on any open fd, not just sockets.
+extern fn rt_socket_set_nonblocking(fd: i64, enabled: bool) -> bool
+
+# NvfsPosixDriver — stateless B2 shim.
+#
+# fd_table is deferred to Phase 9 B3+; FileHandle.id carries the raw fd
+# directly until the table is introduced.
+struct NvfsPosixDriver:
+    """Stateless POSIX shim driver for Phase 9 B2.
+
+    Implements NvfsPosixOps over raw fds stored in FileHandle.id.
+    dup() and full fd_table management are deferred to B3+.
+    """
+    name: text
+
+    static fn new() -> NvfsPosixDriver:
+        NvfsPosixDriver(name: "nvfs-posix-v1")
+
+impl NvfsPosixOps for NvfsPosixDriver:
+    fn dup(handle: FileHandle) -> Result<FileHandle, FsError>:
+        # TODO(Phase 9 B3): implement fd_table refcount dup.
+        pass_todo
+
+    fn set_nonblock(handle: FileHandle, enable: bool) -> Result<(), FsError>:
+        """Set or clear O_NONBLOCK on the raw fd carried by handle."""
+        var fd: i64 = handle.id as i64
+        var ok: bool = rt_socket_set_nonblocking(fd, enable)
+        if ok:
+            Ok(())
+        else:
+            Err(IoError(code: 0))
+
+    fn shim_name() -> text:
+        self.name

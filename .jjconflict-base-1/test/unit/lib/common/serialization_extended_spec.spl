@@ -1,0 +1,754 @@
+# @covers src/lib/common/serialization/utilities.spl 70%
+"""
+# Serialization Extended Edge Cases Coverage Specification
+
+**Feature IDs:** #SERIAL-COV-EXTENDED
+**Category:** Stdlib
+**Difficulty:** 2/5
+**Status:** Implemented
+
+## Overview
+
+Extended edge-case and additional branch coverage:
+- Compression/encryption markers extended
+- Pretty print, collections, binary list, SDN conversions extended
+- Schema and validation edge cases
+- is_numeric_text, type tag, version, parse_int_safe, char_to_digit_safe edge cases
+- Compound condition branch coverage for detect_format, is_valid_sdn, hex_to_digit
+"""
+
+use serialization.*
+
+
+describe "pretty_print extended":
+    """
+    ## Extended Pretty Printing Coverage
+
+    Exercise deeper indentation levels and mixed content.
+    """
+
+    it "pretty prints nested list at indent 2":
+        val result = pretty_list(["inner"], 2)
+        expect(result).to_start_with("[\n")
+        expect(result).to_contain("inner")
+
+    it "pretty prints nested tuple at indent 1":
+        val result = pretty_tuple(["a", "b", "c"], 1)
+        expect(result).to_start_with("(\n")
+        expect(result).to_contain(",")
+
+    it "pretty prints nested dict at indent 1":
+        val result = pretty_dict([("x", "1"), ("y", "2"), ("z", "3")], 1)
+        expect(result).to_start_with("{\n")
+        expect(result).to_contain(",")
+
+    it "indents at level 3":
+        val result = pretty_print_indent("test", 3)
+        expect(result).to_equal("      test")
+
+describe "serialize collections extended":
+    """
+    ## Extended Collection Serialization Coverage
+
+    Exercise list/tuple/dict with more varied inputs.
+    """
+
+    it "serializes four-item list":
+        val result = serialize_list(["a", "b", "c", "d"])
+        expect(result).to_equal("[a, b, c, d]")
+
+    it "serializes three-value tuple":
+        val result = serialize_tuple_text(["x", "y", "z"])
+        expect(result).to_equal("(x, y, z)")
+
+    it "serializes three-entry dict":
+        val result = serialize_dict([("a", "1"), ("b", "2"), ("c", "3")])
+        expect(result).to_equal("\{a: 1, b: 2, c: 3\}")
+
+    it "serializes int list with negative values":
+        val result = serialize_int_list([-1, 0, 1])
+        expect(result).to_equal("[-1, 0, 1]")
+
+    it "serializes text list with special chars":
+        val result = serialize_text_list(["hello world"])
+        expect(result).to_contain("hello world")
+
+    it "serializes bool list with single item":
+        val result = serialize_bool_list([true])
+        expect(result).to_equal("[true]")
+
+describe "binary list serialization extended":
+    """
+    ## Extended Binary List Serialization Coverage
+    """
+
+    it "encodes non-empty int list bytes":
+        val result = serialize_int_list_bytes([10, 20])
+        expect(result[0]).to_equal(type_list())
+        expect(result.len()).to_be_greater_than(3)
+
+    it "encodes non-empty text list bytes":
+        val result = serialize_text_list_bytes(["hi"])
+        expect(result[0]).to_equal(type_list())
+        expect(result.len()).to_be_greater_than(2)
+
+describe "SDN conversions extended":
+    """
+    ## Extended SDN Conversion Coverage
+    """
+
+    it "converts large negative integer to SDN":
+        expect(to_sdn_int(-999)).to_equal("-999")
+
+    it "converts list with three items":
+        expect(to_sdn_list(["a", "b", "c"])).to_equal("[a, b, c]")
+
+    it "converts tuple with three items":
+        expect(to_sdn_tuple(["1", "2", "3"])).to_equal("(1, 2, 3)")
+
+    it "converts dict with two entries":
+        expect(to_sdn_dict([("x", "1"), ("y", "2")])).to_equal("\{x: 1, y: 2\}")
+
+describe "define_schema extended":
+    """
+    ## Extended Schema Coverage
+    """
+
+    it "defines single-field schema":
+        val result = define_schema([("id", "int")])
+        expect(result).to_contain("id: int")
+
+    it "defines three-field schema":
+        val result = define_schema([("name", "text"), ("age", "int"), ("active", "bool")])
+        expect(result).to_contain("name: text")
+        expect(result).to_contain("active: bool")
+
+describe "validate_field_type extended":
+    """
+    ## Extended Field Validation Coverage
+    """
+
+    it "validates negative int":
+        expect(validate_field_type("-5", "int")).to_equal(true)
+
+    it "validates text with escape":
+        expect(validate_field_type("\"ab\\nc\"", "text")).to_equal(true)
+
+    it "validates list with items":
+        expect(validate_field_type("[1, 2, 3]", "list")).to_equal(true)
+
+    it "validates empty tuple":
+        expect(validate_field_type("()", "tuple")).to_equal(true)
+
+    it "validates empty dict":
+        val input = "\{" + "\}"
+        expect(validate_field_type(input, "dict")).to_equal(true)
+
+# ============================================================================
+# Test Group: Additional Branch Coverage - Edge Cases
+# ============================================================================
+
+describe "validate_field_type unknown type":
+    """
+    ## Unknown Type Falls Through to Default True
+    """
+
+    it "returns true for unknown type":
+        expect(validate_field_type("anything", "unknown_type")).to_equal(true)
+
+    it "returns false for wrong int":
+        expect(validate_field_type("abc", "int")).to_equal(false)
+
+    it "returns false for wrong bool":
+        expect(validate_field_type("yes", "bool")).to_equal(false)
+
+    it "returns false for wrong nil":
+        expect(validate_field_type("none", "nil")).to_equal(false)
+
+    it "returns false for wrong text":
+        expect(validate_field_type("abc", "text")).to_equal(false)
+
+    it "returns false for wrong list":
+        expect(validate_field_type("abc", "list")).to_equal(false)
+
+    it "returns false for wrong tuple":
+        expect(validate_field_type("abc", "tuple")).to_equal(false)
+
+    it "returns false for wrong dict":
+        expect(validate_field_type("abc", "dict")).to_equal(false)
+
+describe "is_numeric_text edge cases":
+    """
+    ## Numeric Detection False Branches
+    """
+
+    it "returns false for just minus sign":
+        expect(is_numeric_text("-")).to_equal(false)
+
+    it "returns true for single digit zero":
+        expect(is_numeric_text("0")).to_equal(true)
+
+    it "returns false for plus sign prefix":
+        expect(is_numeric_text("+5")).to_equal(false)
+
+    it "returns false for letter only":
+        expect(is_numeric_text("a")).to_equal(false)
+
+    it "returns true for negative single digit":
+        expect(is_numeric_text("-1")).to_equal(true)
+
+describe "get_type_tag edge cases":
+    """
+    ## Type Tag Extraction Edge Cases
+    """
+
+    it "returns nil for empty string":
+        val result = get_type_tag("")
+        expect(result).to_be_nil()
+
+    it "returns nil for single char":
+        val result = get_type_tag("a")
+        expect(result).to_be_nil()
+
+    it "returns nil for two chars":
+        val result = get_type_tag("ab")
+        expect(result).to_be_nil()
+
+    it "returns nil for non-at prefix":
+        val result = get_type_tag("hello\{x\}")
+        expect(result).to_be_nil()
+
+describe "strip_type_tag edge cases":
+    """
+    ## Tag Stripping when No Tag or No Brace
+    """
+
+    it "returns original for non-tagged string":
+        val result = strip_type_tag("hello")
+        expect(result).to_equal("hello")
+
+    it "returns original for empty string":
+        val result = strip_type_tag("")
+        expect(result).to_equal("")
+
+    it "returns original for at-sign without brace":
+        val result = strip_type_tag("@NoClose")
+        expect(result).to_equal("@NoClose")
+
+    it "handles brace at very end":
+        val result = strip_type_tag("@T\{")
+        expect(result).to_equal("@T\{")
+
+describe "get_version edge cases":
+    """
+    ## Version Extraction with Missing Parts
+    """
+
+    it "returns nil for empty string":
+        val result = get_version("")
+        expect(result).to_be_nil()
+
+    it "returns nil for non-versioned input":
+        val result = get_version("just text")
+        expect(result).to_be_nil()
+
+    it "returns nil for partial prefix":
+        val result = get_version("\{v:")
+        expect(result).to_be_nil()
+
+describe "strip_version edge cases":
+    """
+    ## Version Stripping with Various Inputs
+    """
+
+    it "returns original for non-versioned string":
+        val result = strip_version("hello world")
+        expect(result).to_equal("hello world")
+
+    it "returns original for empty string":
+        val result = strip_version("")
+        expect(result).to_equal("")
+
+describe "parse_int_safe edge cases":
+    """
+    ## Integer Parsing Edge Cases
+    """
+
+    it "returns 0 for empty string":
+        expect(parse_int_safe("")).to_equal(0)
+
+    it "returns 0 for just minus sign":
+        expect(parse_int_safe("-")).to_equal(0)
+
+    it "parses zero":
+        expect(parse_int_safe("0")).to_equal(0)
+
+    it "stops at non-digit immediately":
+        expect(parse_int_safe("abc")).to_equal(0)
+
+describe "char_to_digit_safe edge cases":
+    """
+    ## Digit Conversion Fallback
+    """
+
+    it "returns 0 for non-digit char":
+        expect(char_to_digit_safe("x")).to_equal(0)
+
+    it "returns correct value for 5":
+        expect(char_to_digit_safe("5")).to_equal(5)
+
+describe "read_bytes boundary cases":
+    """
+    ## Reading Beyond Array Bounds
+    """
+
+    it "handles zero length read":
+        val result = read_bytes([1, 2, 3], 0, 0)
+        val data = result.0
+        expect(data.len()).to_equal(0)
+
+    it "reads exactly all bytes":
+        val data = [10, 20, 30]
+        val result = read_bytes(data, 0, 3)
+        val bytes = result.0
+        expect(bytes.len()).to_equal(3)
+        expect(bytes[0]).to_equal(10)
+        expect(bytes[2]).to_equal(30)
+
+    it "reads partially beyond array end":
+        val data = [10, 20]
+        val result = read_bytes(data, 0, 4)
+        val bytes = result.0
+        # Only 2 of 4 requested bytes are in bounds
+        expect(result.1).to_equal(4)
+
+describe "read_bytes_with_length edge cases":
+    """
+    ## Length-Prefixed Byte Reading
+    """
+
+    it "reads empty data":
+        val data = [0]
+        val result = read_bytes_with_length(data, 0)
+        val bytes = result.0
+        expect(bytes.len()).to_equal(0)
+
+    it "reads single byte data":
+        val data = [1, 42]
+        val result = read_bytes_with_length(data, 0)
+        val bytes = result.0
+        expect(bytes.len()).to_equal(1)
+        expect(bytes[0]).to_equal(42)
+
+describe "write_varint edge single byte":
+    """
+    ## Varint Encoding for Values Exactly at Boundary
+    """
+
+    it "encodes 1 as single byte":
+        val result = write_varint(1)
+        expect(result.len()).to_equal(1)
+        expect(result[0]).to_equal(1)
+
+    it "encodes 127 as single byte":
+        val result = write_varint(127)
+        expect(result.len()).to_equal(1)
+        expect(result[0]).to_equal(127)
+
+    it "encodes -1 with sign marker":
+        val result = write_varint(-1)
+        expect(result[0]).to_equal(255)
+
+describe "escape_string empty":
+    """
+    ## Empty and Single-Char Escaping
+    """
+
+    it "escapes empty string":
+        expect(escape_string("")).to_equal("")
+
+    it "escapes newline alone":
+        expect(escape_string("\n")).to_equal("\\n")
+
+describe "unescape_string edge":
+    """
+    ## Unescape Edge Cases
+    """
+
+    it "unescapes empty string":
+        expect(unescape_string("")).to_equal("")
+
+    it "unescapes tab escape":
+        expect(unescape_string("\\t")).to_equal("\t")
+
+    it "unescapes carriage return escape":
+        expect(unescape_string("\\r")).to_equal("\r")
+
+describe "unquote_string empty":
+    """
+    ## Unquote with Empty and Short Input
+    """
+
+    it "returns empty string unchanged":
+        expect(unquote_string("")).to_equal("")
+
+describe "detect_format all branches":
+    """
+    ## All Format Detection Branches
+    """
+
+    it "detects tagged format":
+        expect(detect_format("@Type\{data\}")).to_equal("tagged")
+
+    it "detects sdn for curly brace":
+        expect(detect_format("\{key: val\}")).to_equal("sdn")
+
+    it "detects sdn for bracket":
+        expect(detect_format("[1, 2]")).to_equal("sdn")
+
+    it "detects sdn for quoted string":
+        expect(detect_format("\"hello\"")).to_equal("sdn")
+
+    it "detects sdn for true literal":
+        expect(detect_format("true")).to_equal("sdn")
+
+    it "detects sdn for false literal":
+        expect(detect_format("false")).to_equal("sdn")
+
+    it "detects sdn for nil literal":
+        expect(detect_format("nil")).to_equal("sdn")
+
+    it "detects sdn for positive number":
+        expect(detect_format("42")).to_equal("sdn")
+
+    it "detects sdn for zero":
+        expect(detect_format("0")).to_equal("sdn")
+
+    it "returns unknown for empty":
+        expect(detect_format("")).to_equal("unknown")
+
+    it "returns unknown for random text":
+        expect(detect_format("hello")).to_equal("unknown")
+
+describe "is_valid_sdn all branches":
+    """
+    ## SDN Validity with All Format Branches
+    """
+
+    it "accepts tagged format as valid":
+        expect(is_valid_sdn("@T\{x\}")).to_equal(true)
+
+    it "accepts list as valid":
+        expect(is_valid_sdn("[1]")).to_equal(true)
+
+    it "rejects unknown format":
+        expect(is_valid_sdn("~weird~")).to_equal(false)
+
+describe "pretty_print empty collections":
+    """
+    ## Pretty Print Empty Collection Branches
+    """
+
+    it "pretty prints empty list":
+        expect(pretty_list([], 0)).to_equal("[]")
+
+    it "pretty prints empty tuple":
+        expect(pretty_tuple([], 0)).to_equal("()")
+
+    it "pretty prints empty dict":
+        expect(pretty_dict([], 0)).to_equal("\{\}")
+
+    it "pretty prints single-item list":
+        val result = pretty_list(["x"], 0)
+        expect(result).to_contain("x")
+
+    it "pretty prints single-item tuple":
+        val result = pretty_tuple(["x"], 0)
+        expect(result).to_contain("x")
+
+    it "pretty prints single-entry dict":
+        val result = pretty_dict([("k", "v")], 0)
+        expect(result).to_contain("k: v")
+
+describe "pretty_print_indent level zero":
+    """
+    ## Indentation at Level Zero
+    """
+
+    it "does not indent at level 0":
+        expect(pretty_print_indent("test", 0)).to_equal("test")
+
+    it "indents one level":
+        expect(pretty_print_indent("x", 1)).to_equal("  x")
+
+describe "serialize empty collections":
+    """
+    ## Empty Collection Serialization Branches
+    """
+
+    it "serializes empty list":
+        expect(serialize_list([])).to_equal("[]")
+
+    it "serializes empty tuple":
+        expect(serialize_tuple_text([])).to_equal("()")
+
+    it "serializes empty dict":
+        expect(serialize_dict([])).to_equal("\{\}")
+
+    it "serializes single-item list":
+        expect(serialize_list(["a"])).to_equal("[a]")
+
+    it "serializes single-value tuple":
+        expect(serialize_tuple_text(["x"])).to_equal("(x)")
+
+    it "serializes single-entry dict":
+        val result = serialize_dict([("k", "v")])
+        expect(result).to_equal("\{k: v\}")
+
+describe "serialize_int_list empty":
+    """
+    ## Empty List Serialization Helpers
+    """
+
+    it "serializes empty int list":
+        expect(serialize_int_list([])).to_equal("[]")
+
+    it "serializes empty text list":
+        expect(serialize_text_list([])).to_equal("[]")
+
+    it "serializes empty bool list":
+        expect(serialize_bool_list([])).to_equal("[]")
+
+describe "binary list serialization empty":
+    """
+    ## Empty Binary List Serialization
+    """
+
+    it "serializes empty int list bytes":
+        val result = serialize_int_list_bytes([])
+        expect(result[0]).to_equal(type_list())
+        expect(result.len()).to_equal(2)
+
+    it "serializes empty text list bytes":
+        val result = serialize_text_list_bytes([])
+        expect(result[0]).to_equal(type_list())
+        expect(result.len()).to_equal(2)
+
+describe "SDN empty collections":
+    """
+    ## SDN Conversion Empty Collection Branches
+    """
+
+    it "converts empty list to SDN":
+        expect(to_sdn_list([])).to_equal("[]")
+
+    it "converts empty tuple to SDN":
+        expect(to_sdn_tuple([])).to_equal("()")
+
+    it "converts empty dict to SDN":
+        expect(to_sdn_dict([])).to_equal("\{\}")
+
+describe "type tags and compression cross-check":
+    """
+    ## Cross-Type Tag Checks
+    """
+
+    it "tag_type creates proper format":
+        val result = tag_type("content", "MyType")
+        expect(result).to_equal("@MyType\{content\}")
+
+    it "is_compressed returns false for empty string":
+        expect(is_compressed("")).to_equal(false)
+
+    it "is_encrypted returns false for empty string":
+        expect(is_encrypted("")).to_equal(false)
+
+    it "is_compressed with non-at-sign prefix":
+        expect(is_compressed("hello world")).to_equal(false)
+
+    it "is_encrypted with non-at-sign prefix":
+        expect(is_encrypted("hello world")).to_equal(false)
+
+describe "deep clone functions":
+    """
+    ## Clone Function Coverage
+    """
+
+    it "deep clones integer":
+        expect(deep_clone_int(42)).to_equal(42)
+
+    it "deep clones boolean true":
+        expect(deep_clone_bool(true)).to_equal(true)
+
+    it "deep clones boolean false":
+        expect(deep_clone_bool(false)).to_equal(false)
+
+    it "deep clones text":
+        expect(deep_clone_text("hello")).to_equal("hello")
+
+    it "deep clones empty int list":
+        val result = deep_clone_list_int([])
+        expect(result.len()).to_equal(0)
+
+    it "deep clones empty text list":
+        val result = deep_clone_list_text([])
+        expect(result.len()).to_equal(0)
+
+    it "shallow clones int list":
+        val result = shallow_clone_list_int([1, 2])
+        expect(result.len()).to_equal(2)
+
+    it "shallow clones text list":
+        val result = shallow_clone_list_text(["a"])
+        expect(result.len()).to_equal(1)
+
+describe "deep_equal edge cases":
+    """
+    ## Deep Equal Additional Coverage
+    """
+
+    it "compares equal empty int lists":
+        expect(deep_equal_list_int([], [])).to_equal(true)
+
+    it "compares equal empty text lists":
+        expect(deep_equal_list_text([], [])).to_equal(true)
+
+    it "returns false for different length int lists":
+        expect(deep_equal_list_int([1], [1, 2])).to_equal(false)
+
+    it "returns false for different length text lists":
+        expect(deep_equal_list_text(["a"], ["a", "b"])).to_equal(false)
+
+    it "deep_equal_int true":
+        expect(deep_equal_int(5, 5)).to_equal(true)
+
+    it "deep_equal_int false":
+        expect(deep_equal_int(5, 6)).to_equal(false)
+
+    it "deep_equal_bool true":
+        expect(deep_equal_bool(true, true)).to_equal(true)
+
+    it "deep_equal_bool false":
+        expect(deep_equal_bool(true, false)).to_equal(false)
+
+    it "deep_equal_text true":
+        expect(deep_equal_text("a", "a")).to_equal(true)
+
+    it "deep_equal_text false":
+        expect(deep_equal_text("a", "b")).to_equal(false)
+
+describe "hex digit coverage complete":
+    """
+    ## Ensure All digit_to_hex Branches Hit
+    """
+
+    it "digit_to_hex out of range returns 0":
+        expect(digit_to_hex(16)).to_equal("0")
+
+    it "digit_to_hex negative returns 0":
+        expect(digit_to_hex(-1)).to_equal("0")
+
+    it "hex_to_digit unknown char returns 0":
+        expect(hex_to_digit("z")).to_equal(0)
+
+    it "hex_to_digit uppercase A":
+        expect(hex_to_digit("A")).to_equal(10)
+
+    it "hex_to_digit uppercase F":
+        expect(hex_to_digit("F")).to_equal(15)
+
+describe "serialize_bool text":
+    """
+    ## Boolean Text Serialization Both Branches
+    """
+
+    it "serializes true":
+        expect(serialize_bool(true)).to_equal("true")
+
+    it "serializes false":
+        expect(serialize_bool(false)).to_equal("false")
+
+describe "to_sdn_bool both branches":
+    """
+    ## SDN Boolean Both Branches
+    """
+
+    it "converts true to SDN":
+        expect(to_sdn_bool(true)).to_equal("true")
+
+    it "converts false to SDN":
+        expect(to_sdn_bool(false)).to_equal("false")
+
+describe "add_version and schema":
+    """
+    ## Version Addition and Schema Definition
+    """
+
+    it "adds version to simple data":
+        val result = add_version("data", 1)
+        expect(result).to_contain("v: 1")
+        expect(result).to_contain("data")
+
+    it "defines empty schema":
+        val result = define_schema([])
+        expect(result).to_equal("\{\}")
+
+describe "serialize_nil text":
+    """
+    ## Nil Serialization
+    """
+
+    it "returns nil string":
+        expect(serialize_nil()).to_equal("nil")
+
+describe "to_sdn_nil":
+    """
+    ## SDN Nil
+    """
+
+    it "returns nil string":
+        expect(to_sdn_nil()).to_equal("nil")
+
+describe "char_code_safe special symbols":
+    """
+    ## Remaining Special Symbol Branches
+    """
+
+    it "handles dollar sign":
+        expect(char_code_safe("$")).to_equal(36)
+
+    it "handles percent":
+        expect(char_code_safe("%")).to_equal(37)
+
+    it "handles ampersand":
+        expect(char_code_safe("&")).to_equal(38)
+
+    it "handles single quote":
+        expect(char_code_safe("'")).to_equal(39)
+
+    it "handles open paren":
+        expect(char_code_safe("(")).to_equal(40)
+
+    it "handles close paren":
+        expect(char_code_safe(")")).to_equal(41)
+
+    it "handles asterisk":
+        expect(char_code_safe("*")).to_equal(42)
+
+    it "handles plus":
+        expect(char_code_safe("+")).to_equal(43)
+
+    it "handles comma":
+        expect(char_code_safe(",")).to_equal(44)
+
+    it "handles hyphen":
+        expect(char_code_safe("-")).to_equal(45)
+
+    it "handles period":
+        expect(char_code_safe(".")).to_equal(46)
+
+    it "handles slash":
+        expect(char_code_safe("/")).to_equal(47)
+
+# ============================================================================
+# Test Group: Compound Condition Branch Coverage

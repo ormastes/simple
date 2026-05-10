@@ -1,0 +1,72 @@
+"""CUDA FFI — 3D Engine Kernels
+
+@tag:stdlib
+@tag:gpu
+
+CUDA extern declarations for 3D rendering kernels: vertex transform,
+triangle rasterization, depth testing, texture sampling.
+
+Usage:
+    val ffi = CudaFfi3D.create_static()
+    if ffi.is_available():
+        ffi.init()
+"""
+
+use std.gpu.engine3d.ffi_dispatch3d.{GpuFfiMode3D, FfiDispatchBase3D, try_load_gpu_lib_3d}
+use std.ffi.dynamic.{DynLib}
+
+# ============================================================================
+# Static extern declarations
+# ============================================================================
+
+extern fn rt_cuda3d_available() -> bool
+extern fn rt_cuda3d_init() -> bool
+extern fn rt_cuda3d_shutdown() -> bool
+extern fn rt_cuda3d_transform_vertices(device_ptr: i64, count: i64, mvp: [f32]) -> bool
+extern fn rt_cuda3d_rasterize_triangles(verts: i64, tri_count: i64, fb: i64, depth: i64, w: i64, h: i64) -> bool
+extern fn rt_cuda3d_clear_framebuffer(fb: i64, w: i64, h: i64, color: u32) -> bool
+extern fn rt_cuda3d_clear_depth(depth: i64, w: i64, h: i64, value: f32) -> bool
+extern fn rt_cuda3d_texture_sample(tex: i64, u: f32, v: f32) -> u32
+extern fn rt_cuda3d_apply_fog(fb: i64, depth: i64, w: i64, h: i64, color: u32, density: f32) -> bool
+extern fn rt_cuda3d_apply_bloom(fb: i64, w: i64, h: i64, threshold: f32, intensity: f32) -> bool
+
+# ============================================================================
+# CudaFfi3D
+# ============================================================================
+
+class CudaFfi3D:
+    _mode: GpuFfiMode3D
+    _dyn_lib: DynLib?
+
+impl CudaFfi3D: FfiDispatchBase3D
+
+    fn mode() -> GpuFfiMode3D:
+        self._mode
+
+    fn is_available() -> bool:
+        if self._mode == GpuFfiMode3D.Static:
+            rt_cuda3d_available()
+        else:
+            self._dyn_lib != nil
+
+    static fn create_static() -> CudaFfi3D:
+        CudaFfi3D(_mode: GpuFfiMode3D.Static, _dyn_lib: nil)
+
+    static fn create_dynamic() -> CudaFfi3D?:
+        val lib = try_load_gpu_lib_3d("cuda")
+        if lib == nil:
+            return nil
+        CudaFfi3D(_mode: GpuFfiMode3D.Dynamic, _dyn_lib: lib)
+
+    static fn create(mode_pref: GpuFfiMode3D) -> CudaFfi3D:
+        if mode_pref == GpuFfiMode3D.Dynamic:
+            val dyn_result = CudaFfi3D.create_dynamic()
+            if dyn_result != nil:
+                return dyn_result
+        CudaFfi3D.create_static()
+
+    me init() -> bool:
+        rt_cuda3d_init()
+
+    me shutdown() -> bool:
+        rt_cuda3d_shutdown()

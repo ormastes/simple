@@ -1,0 +1,181 @@
+"""Steam/Proton Launcher ECS components and world (M5, REQ-10, MDSOC+).
+
+Defines the ECS World for the Steam/Proton Launcher capsule.
+Components: AppRecord, PrefixRecord, ContainerRef, RuntimeRef,
+ShaderCacheRef, ControllerState (reference), LaunchSessionRecord.
+"""
+
+# ============================================================================
+# ECS Component types
+# ============================================================================
+
+class AppRecord:
+    app_id: text
+    name:   text
+
+class PrefixRecord:
+    path: text
+    arch: text
+
+class ContainerRef:
+    container_id: i64
+
+class RuntimeRef:
+    runtime_path: text
+
+class ShaderCacheRef:
+    cache_path: text
+
+class LaunchSessionRecord:
+    pid:   i64
+    phase: text
+
+# ============================================================================
+# ECS World (MDSOC+ capsule-internal)
+# ============================================================================
+
+class _SteamEcsEntity:
+    entity_id:   i64
+    app:         AppRecord
+    prefix:      PrefixRecord
+    container:   ContainerRef
+    runtime:     RuntimeRef
+    cache:        ShaderCacheRef
+    session:     LaunchSessionRecord
+    alive:       bool
+
+var _ecs_entities: [_SteamEcsEntity] = []
+var _ecs_ctr:      i64               = 0
+
+fn _ecs_find(entity_id: i64) -> i64:
+    val n = _ecs_entities.len()
+    var i: i64 = 0
+    while i < n:
+        if _ecs_entities[i].alive and _ecs_entities[i].entity_id == entity_id:
+            return i
+        i = i + 1
+    -1
+
+# ============================================================================
+# Public API
+# ============================================================================
+
+pub fn steam_ecs_create_session(app_id: text, app_name: text, prefix_path: text) -> i64:
+    """Create a new ECS entity for a Steam launch session.
+
+    Args:
+        app_id:      Steam app ID string
+        app_name:    Human-readable app name
+        prefix_path: Wine compat prefix path
+
+    Returns:
+        Positive entity_id on success, 0 on invalid input.
+    """
+    if app_id == "" or prefix_path == "":
+        return 0
+    _ecs_ctr = _ecs_ctr + 1
+    val eid = _ecs_ctr
+    val entity = _SteamEcsEntity(
+        entity_id: eid,
+        app: AppRecord(app_id: app_id, name: app_name),
+        prefix: PrefixRecord(path: prefix_path, arch: "x86_64"),
+        container: ContainerRef(container_id: 0),
+        runtime: RuntimeRef(runtime_path: ""),
+        cache: ShaderCacheRef(cache_path: "/cache/shaders"),
+        session: LaunchSessionRecord(pid: 0, phase: "created"),
+        alive: true
+    )
+    _ecs_entities.push(entity)
+    eid
+
+pub fn steam_ecs_set_container(entity_id: i64, container_id: i64):
+    """Bind a pressure-vessel container to a session entity.
+
+    Args:
+        entity_id:    handle from steam_ecs_create_session
+        container_id: handle from pressure_vessel_create
+    """
+    val row = _ecs_find(entity_id)
+    if row == -1:
+        return
+    val old = _ecs_entities[row]
+    _ecs_entities[row] = _SteamEcsEntity(
+        entity_id: old.entity_id,
+        app: old.app,
+        prefix: old.prefix,
+        container: ContainerRef(container_id: container_id),
+        runtime: old.runtime,
+        cache: old.cache,
+        session: old.session,
+        alive: old.alive
+    )
+
+pub fn steam_ecs_set_phase(entity_id: i64, phase: text):
+    """Update the launch phase for a session entity.
+
+    Args:
+        entity_id: handle from steam_ecs_create_session
+        phase:     new phase name (e.g. "container-ready", "exec-ready", "running")
+    """
+    val row = _ecs_find(entity_id)
+    if row == -1:
+        return
+    val old = _ecs_entities[row]
+    _ecs_entities[row] = _SteamEcsEntity(
+        entity_id: old.entity_id,
+        app: old.app,
+        prefix: old.prefix,
+        container: old.container,
+        runtime: old.runtime,
+        cache: old.cache,
+        session: LaunchSessionRecord(pid: old.session.pid, phase: phase),
+        alive: old.alive
+    )
+
+pub fn steam_ecs_get_phase(entity_id: i64) -> text:
+    """Return the current launch phase for a session entity.
+
+    Args:
+        entity_id: handle from steam_ecs_create_session
+
+    Returns:
+        Phase string, or "" when entity is not found.
+    """
+    val row = _ecs_find(entity_id)
+    if row == -1:
+        return ""
+    _ecs_entities[row].session.phase
+
+pub fn steam_ecs_get_app_id(entity_id: i64) -> text:
+    """Return the app ID for a session entity.
+
+    Args:
+        entity_id: handle from steam_ecs_create_session
+
+    Returns:
+        App ID string, or "" when entity is not found.
+    """
+    val row = _ecs_find(entity_id)
+    if row == -1:
+        return ""
+    _ecs_entities[row].app.app_id
+
+pub fn steam_ecs_destroy(entity_id: i64):
+    """Remove a session entity from the ECS world.
+
+    Args:
+        entity_id: handle from steam_ecs_create_session
+    """
+    val row = _ecs_find(entity_id)
+    if row != -1:
+        val old = _ecs_entities[row]
+        _ecs_entities[row] = _SteamEcsEntity(
+            entity_id: old.entity_id,
+            app: old.app,
+            prefix: old.prefix,
+            container: old.container,
+            runtime: old.runtime,
+            cache: old.cache,
+            session: old.session,
+            alive: false
+        )

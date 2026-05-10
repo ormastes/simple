@@ -1,0 +1,112 @@
+# FFI Signature Validation
+#
+# Manifest-based validation for dynamically loaded libraries.
+# Verifies expected functions exist and match declared arg counts.
+
+use std.ffi.dynamic_versioned.{VersionedDynLib}
+
+# ============================================================================
+# Signature Declaration
+# ============================================================================
+
+struct FfiSignature:
+    name: text
+    arg_count: i64
+    return_type: text
+
+# ============================================================================
+# Manifest
+# ============================================================================
+
+class FfiManifest:
+    entries: {text: FfiSignature}
+
+impl FfiManifest:
+    static fn create() -> FfiManifest:
+        FfiManifest(entries: {})
+
+    me add(name: text, arg_count: i64, return_type: text):
+        self.entries[name] = FfiSignature(name: name, arg_count: arg_count, return_type: return_type)
+
+    fn get(name: text) -> FfiSignature?:
+        if self.entries.contains(name):
+            return self.entries[name]
+        nil
+
+    fn count() -> i64:
+        self.entries.len()
+
+    fn names() -> [text]:
+        var result: [text] = []
+        for key in self.entries:
+            result.push(key)
+        result
+
+# ============================================================================
+# Validation Result
+# ============================================================================
+
+struct FfiValidationResult:
+    total: i64
+    found: i64
+    missing: [text]
+    present: [text]
+
+fn validation_summary(result: FfiValidationResult) -> text:
+    "{result.found}/{result.total} functions found, {result.missing.len()} missing"
+
+# ============================================================================
+# Validation Functions
+# ============================================================================
+
+fn validate_library(lib: VersionedDynLib, manifest: FfiManifest) -> FfiValidationResult:
+    var found: i64 = 0
+    var missing: [text] = []
+    var present: [text] = []
+    val names = manifest.names()
+    var i = 0
+    while i < names.len():
+        if lib.has_symbol(names[i]):
+            found = found + 1
+            present.push(names[i])
+        else:
+            missing.push(names[i])
+        i = i + 1
+    FfiValidationResult(total: manifest.count(), found: found, missing: missing, present: present)
+
+fn validate_subset(lib: VersionedDynLib, manifest: FfiManifest, required_names: [text]) -> FfiValidationResult:
+    var found: i64 = 0
+    var missing: [text] = []
+    var present: [text] = []
+    var i = 0
+    while i < required_names.len():
+        if lib.has_symbol(required_names[i]):
+            found = found + 1
+            present.push(required_names[i])
+        else:
+            missing.push(required_names[i])
+        i = i + 1
+    FfiValidationResult(total: required_names.len(), found: found, missing: missing, present: present)
+
+fn has_required_symbols(lib: VersionedDynLib, required_names: [text]) -> bool:
+    var i = 0
+    while i < required_names.len():
+        if not lib.has_symbol(required_names[i]):
+            return false
+        i = i + 1
+    true
+
+fn classify_api_groups(lib: VersionedDynLib, groups: {text: [text]}) -> [text]:
+    var supported: [text] = []
+    for group_name in groups:
+        val funcs = groups[group_name]
+        var all_present = true
+        var i = 0
+        while i < funcs.len():
+            if not lib.has_symbol(funcs[i]):
+                all_present = false
+                i = funcs.len()
+            i = i + 1
+        if all_present:
+            supported.push(group_name)
+    supported

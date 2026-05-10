@@ -1,0 +1,203 @@
+# @tag: rendering, screenshot, glass, e2e
+# @cover src/lib/common/ui/glass_test_page.spl 80%
+# @cover src/lib/gc_async_mut/gpu/browser_engine/browser_renderer.spl 80%
+#
+# Glass Theme End-to-End Rendering Tests
+#
+# Verifies that glass test pages render correctly through the browser engine
+# pipeline: HTML generation -> DOM parsing -> layout -> paint -> pixels.
+# Covers dark/light themes, stress tests, effect engine parity, and
+# deterministic rendering.
+
+use std.spec.{describe, context, it, expect}
+use common.ui.glass_test_page.{generate_glass_test_html, build_rendering_stress_html}
+use std.gc_async_mut.gpu.browser_engine.browser_renderer.{BrowserRenderer, BeRenderResult}
+use os.compositor.screenshot_compare.{compare_pixel_buffers, compare_exact}
+use std.gc_async_mut.gpu.browser_engine.backend_screenshot_capture.{
+    BackendCapture, capture_with_effect_engine}
+
+# ============================================================================
+# Constants
+# ============================================================================
+
+val W: i32 = 400
+val H: i32 = 300
+val PIXEL_COUNT: i32 = W * H
+
+# ============================================================================
+# Helpers
+# ============================================================================
+
+fn pixel_near_color(pixel: u32, target: u32, tolerance: i32) -> bool:
+    """Check if a pixel is within tolerance of a target ARGB color."""
+    val pr: i32 = ((pixel >> 16) & 0xFF).to_i32()
+    val pg: i32 = ((pixel >> 8) & 0xFF).to_i32()
+    val pb: i32 = (pixel & 0xFF).to_i32()
+    val tr: i32 = ((target >> 16) & 0xFF).to_i32()
+    val tg: i32 = ((target >> 8) & 0xFF).to_i32()
+    val tb: i32 = (target & 0xFF).to_i32()
+    val dr = if pr > tr: pr - tr else: tr - pr
+    val dg = if pg > tg: pg - tg else: tg - pg
+    val db = if pb > tb: pb - tb else: tb - pb
+    dr <= tolerance and dg <= tolerance and db <= tolerance
+
+fn count_pixels_near(pixels: [u32], start: i32, end: i32, target: u32, tolerance: i32) -> i32:
+    """Count pixels in a range that are near a target color."""
+    var count = 0
+    var i = start
+    while i < end and i < pixels.len():
+        if pixel_near_color(pixels[i], target, tolerance):
+            count = count + 1
+        i = i + 1
+    count
+
+fn count_unique_colors(pixels: [u32], sample_step: i32) -> i32:
+    """Count approximate unique colors by sampling every sample_step pixels."""
+    var seen: [u32] = []
+    var i = 0
+    while i < pixels.len():
+        val p = pixels[i]
+        var found = false
+        for s in seen:
+            if s == p:
+                found = true
+                break
+        if not found:
+            seen = seen + [p]
+            # Cap at 256 to avoid unbounded growth
+            if seen.len() >= 256:
+                return seen.len()
+        i = i + sample_step
+    seen.len()
+
+# ============================================================================
+# Tests
+# ============================================================================
+
+describe "Glass Theme End-to-End Rendering":
+
+    context "glass_dark theme":
+
+        it "generates non-empty HTML":
+            val html = generate_glass_test_html("glass_dark")
+            expect(html.len()).to_be_greater_than(100)
+            # Should contain key structural elements
+            expect(html).to_contain("glass-window")
+            expect(html).to_contain("glass-titlebar")
+            expect(html).to_contain("widget-button")
+
+        it "renders to non-empty pixel buffer":
+            val html = generate_glass_test_html("glass_dark")
+            var renderer = BrowserRenderer.create(W, H)
+            val result = renderer.render_html_to_pixels(html)
+            expect(result.pixel_data.len()).to_equal(PIXEL_COUNT)
+            expect(result.format).to_equal("pixels")
+
+        it "pixels contain dark background colors":
+            val html = generate_glass_test_html("glass_dark")
+            var renderer = BrowserRenderer.create(W, H)
+            val result = renderer.render_html_to_pixels(html)
+            expect(result.pixel_data.len()).to_equal(PIXEL_COUNT)
+            # Dark background is #0A0A0F -> 0xFF0A0A0F in ARGB
+            # Check first row for dark pixels (within tolerance of 30)
+            val dark_bg: u32 = 0xFF0A0A0F
+            val dark_count = count_pixels_near(result.pixel_data, 0, W, dark_bg, 30)
+            # At least some pixels in the first row should be near the bg color
+            expect(dark_count).to_be_greater_than(0)
+
+        it "pixels contain glass accent blue":
+            val html = generate_glass_test_html("glass_dark")
+            var renderer = BrowserRenderer.create(W, H)
+            val result = renderer.render_html_to_pixels(html)
+            expect(result.pixel_data.len()).to_equal(PIXEL_COUNT)
+            # iOS blue accent #007AFF -> 0xFF007AFF or #0A84FF -> 0xFF0A84FF
+            # Search full buffer for blue accent pixels (tolerance 40)
+            val blue1: u32 = 0xFF007AFF
+            val blue2: u32 = 0xFF0A84FF
+            val blue_count_1 = count_pixels_near(result.pixel_data, 0, PIXEL_COUNT, blue1, 40)
+            val blue_count_2 = count_pixels_near(result.pixel_data, 0, PIXEL_COUNT, blue2, 40)
+            val total_blue = blue_count_1 + blue_count_2
+            # At least some accent-blue pixels should be present (buttons, dock, etc.)
+            expect(total_blue).to_be_greater_than(0)
+
+    context "glass_light theme":
+
+        it "renders to non-empty pixel buffer":
+            val html = generate_glass_test_html("glass_light")
+            var renderer = BrowserRenderer.create(W, H)
+            val result = renderer.render_html_to_pixels(html)
+            expect(result.pixel_data.len()).to_equal(PIXEL_COUNT)
+            expect(result.format).to_equal("pixels")
+
+        it "light theme differs from dark theme":
+            val dark_html = generate_glass_test_html("glass_dark")
+            val light_html = generate_glass_test_html("glass_light")
+            var renderer_d = BrowserRenderer.create(W, H)
+            var renderer_l = BrowserRenderer.create(W, H)
+            val dark_result = renderer_d.render_html_to_pixels(dark_html)
+            val light_result = renderer_l.render_html_to_pixels(light_html)
+            expect(dark_result.pixel_data.len()).to_equal(PIXEL_COUNT)
+            expect(light_result.pixel_data.len()).to_equal(PIXEL_COUNT)
+            # They should NOT be identical — different backgrounds and colors
+            val cmp = compare_pixel_buffers(
+                dark_result.pixel_data, light_result.pixel_data, W, H, 0)
+            # Match should be below 50% (very different themes)
+            expect(cmp.match_percentage).to_be_less_than(5000)
+
+    context "rendering stress test":
+
+        it "stress test renders without crash":
+            val html = build_rendering_stress_html()
+            expect(html.len()).to_be_greater_than(100)
+            var renderer = BrowserRenderer.create(W, H)
+            val result = renderer.render_html_to_pixels(html)
+            expect(result.pixel_data.len()).to_equal(PIXEL_COUNT)
+            expect(result.format).to_equal("pixels")
+
+        it "stress test produces varied pixels":
+            val html = build_rendering_stress_html()
+            var renderer = BrowserRenderer.create(W, H)
+            val result = renderer.render_html_to_pixels(html)
+            expect(result.pixel_data.len()).to_equal(PIXEL_COUNT)
+            # Should have multiple distinct colors (gradients, overlapping alpha, etc.)
+            val unique = count_unique_colors(result.pixel_data, 50)
+            # Stress test has gradients/alpha/text — should have many colors
+            expect(unique).to_be_greater_than(3)
+
+    context "float vs int effect engine rendering":
+
+        it "both engines produce non-empty output for glass_dark":
+            val html = generate_glass_test_html("glass_dark")
+            val int_cap = capture_with_effect_engine(html, W, H, "int")
+            val float_cap = capture_with_effect_engine(html, W, H, "float")
+            expect(int_cap.success).to_equal(true)
+            expect(float_cap.success).to_equal(true)
+            expect(int_cap.pixels.len()).to_equal(PIXEL_COUNT)
+            expect(float_cap.pixels.len()).to_equal(PIXEL_COUNT)
+
+        it "float and int engines produce similar output":
+            val html = generate_glass_test_html("glass_dark")
+            val int_cap = capture_with_effect_engine(html, W, H, "int")
+            val float_cap = capture_with_effect_engine(html, W, H, "float")
+            expect(int_cap.success).to_equal(true)
+            expect(float_cap.success).to_equal(true)
+            # Compare with per-channel threshold of 3
+            val result = compare_pixel_buffers(
+                int_cap.pixels, float_cap.pixels, W, H, 3)
+            # match_percentage is 0-10000 (100.00% * 100)
+            # 99.50% = 9950
+            expect(result.match_percentage).to_be_greater_than(9949)
+
+    context "deterministic rendering":
+
+        it "same HTML renders identically twice":
+            val html = generate_glass_test_html("glass_dark")
+            var renderer1 = BrowserRenderer.create(W, H)
+            var renderer2 = BrowserRenderer.create(W, H)
+            val result1 = renderer1.render_html_to_pixels(html)
+            val result2 = renderer2.render_html_to_pixels(html)
+            expect(result1.pixel_data.len()).to_equal(PIXEL_COUNT)
+            expect(result2.pixel_data.len()).to_equal(PIXEL_COUNT)
+            # Exact match — deterministic software rendering
+            val cmp = compare_exact(result1.pixel_data, result2.pixel_data, W, H)
+            expect(cmp.match_percentage).to_equal(10000)

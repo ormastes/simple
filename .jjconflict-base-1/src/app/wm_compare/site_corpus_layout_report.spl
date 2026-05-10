@@ -1,0 +1,204 @@
+# Simple/Chrome wrapped-line report for the deterministic famous-site corpus.
+
+use std.cli.cli_util.{get_cli_args}
+use app.wm_compare.site_corpus.{
+    SiteSample, build_famous_site_sample_corpus,
+    famous_site_sample_chrome_metrics_path}
+use std.gc_async_mut.gpu.browser_engine.browser_renderer.{
+    br_famous_site_corpus_layout_lines,
+    br_famous_site_corpus_layout_line_widths_sdn}
+
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_exists(path: text) -> bool
+
+struct SiteCorpusLayoutOpts:
+    only: text
+    limit: i32
+    layout_width: i32
+    help: bool
+
+fn default_site_corpus_layout_opts() -> SiteCorpusLayoutOpts:
+    SiteCorpusLayoutOpts(only: "", limit: 0, layout_width: 122, help: false)
+
+fn _parse_kv(arg: text, key: text) -> text:
+    val prefix = key + "="
+    if arg.starts_with(prefix):
+        return arg.substring(prefix.len())
+    ""
+
+fn parse_site_corpus_layout_opts(args: [text]) -> SiteCorpusLayoutOpts:
+    var opts = default_site_corpus_layout_opts()
+    for arg in args:
+        if arg == "-h" or arg == "--help":
+            opts.help = true
+        else:
+            val v_only = _parse_kv(arg, "--only")
+            if v_only != "":
+                opts.only = v_only
+            else:
+                val v_limit = _parse_kv(arg, "--limit")
+                if v_limit != "":
+                    opts.limit = v_limit.to_i32()
+                else:
+                    val v_layout_width = _parse_kv(arg, "--layout-width")
+                    if v_layout_width != "":
+                        opts.layout_width = v_layout_width.to_i32()
+    opts
+
+fn print_site_corpus_layout_help():
+    print "Usage: simple run src/app/wm_compare/site_corpus_layout_report.spl [options]"
+    print ""
+    print "Reports Simple wrapped-line decisions against Chrome metrics sidecars."
+    print ""
+    print "Options:"
+    print "  --only=<sample_id>  Report one corpus sample"
+    print "  --limit=<n>         Stop after n selected samples (0 means all)"
+    print "  --layout-width=<n>  Simple layout width to probe (default 122)"
+    print "  -h, --help          Show this help"
+
+fn _matches_selected(sample: SiteSample, opts: SiteCorpusLayoutOpts) -> bool:
+    opts.only == "" or sample.id == opts.only
+
+fn _simple_lines_match_chrome_metrics(sample: SiteSample, metrics: text, layout_width: i32) -> bool:
+    val simple_lines = br_famous_site_corpus_layout_lines(sample.html, 16, layout_width)
+    if simple_lines.len() == 0:
+        return false
+    for line in simple_lines:
+        if not metrics.contains("\"text\": \"" + line + "\""):
+            return false
+    true
+
+fn _first_missing_line(sample: SiteSample, metrics: text, layout_width: i32) -> text:
+    val simple_lines = br_famous_site_corpus_layout_lines(sample.html, 16, layout_width)
+    for line in simple_lines:
+        if not metrics.contains("\"text\": \"" + line + "\""):
+            return line
+    ""
+
+fn _chrome_text_lines_sdn(metrics: text) -> text:
+    val marker = "\"textLines\""
+    val start = metrics.index_of(marker)
+    if start == -1:
+        return "(chrome_lines count: 0)"
+    val metrics_tail = metrics.substring(start)
+    val canvas_idx = metrics_tail.index_of("\"canvasTextMetrics\"")
+    val section = if canvas_idx >= 0: metrics_tail.substring(0, canvas_idx) else: metrics_tail
+    var out = "(chrome_lines"
+    var count = 0
+    var pos = 0
+    val index_marker = "\"index\": "
+    val text_marker = "\"text\": \""
+    while pos < section.len():
+        val search = section.substring(pos)
+        val index_rel = search.index_of(index_marker)
+        if index_rel == -1:
+            break
+        val after_index_pos = pos + index_rel + index_marker.len()
+        val after_index = section.substring(after_index_pos)
+        val rel = after_index.index_of(text_marker)
+        if rel == -1:
+            break
+        val value_start = after_index_pos + rel + text_marker.len()
+        val rest = section.substring(value_start)
+        val end_rel = rest.index_of("\"")
+        if end_rel == -1:
+            break
+        val line = rest.substring(0, end_rel)
+        out = out + " (line index: " + count.to_string() + " text: \"" + line + "\")"
+        count = count + 1
+        pos = value_start + end_rel + 1
+    out + " count: " + count.to_string() + ")"
+
+fn _chrome_canvas_widths_sdn(metrics: text) -> text:
+    val marker = "\"canvasTextMetrics\""
+    val start = metrics.index_of(marker)
+    if start == -1:
+        return "(chrome_canvas_widths count: 0)"
+    val section = metrics.substring(start)
+    var out = "(chrome_canvas_widths"
+    var count = 0
+    var pos = 0
+    val index_marker = "\"index\": "
+    val text_marker = "\"text\": \""
+    val width_marker = "\"width\": "
+    while pos < section.len():
+        val search = section.substring(pos)
+        val index_rel = search.index_of(index_marker)
+        if index_rel == -1:
+            break
+        val after_index_pos = pos + index_rel + index_marker.len()
+        val after_index = section.substring(after_index_pos)
+        val text_rel = after_index.index_of(text_marker)
+        if text_rel == -1:
+            break
+        val text_start = after_index_pos + text_rel + text_marker.len()
+        val text_rest = section.substring(text_start)
+        val text_end_rel = text_rest.index_of("\"")
+        if text_end_rel == -1:
+            break
+        val line = text_rest.substring(0, text_end_rel)
+        val after_text_pos = text_start + text_end_rel
+        val after_text = section.substring(after_text_pos)
+        val width_rel = after_text.index_of(width_marker)
+        if width_rel == -1:
+            break
+        val width_start = after_text_pos + width_rel + width_marker.len()
+        val width_rest = section.substring(width_start)
+        var width_end = 0
+        while width_end < width_rest.len():
+            val c = width_rest.char_at(width_end)
+            if not ((c >= "0" and c <= "9") or c == "."):
+                break
+            width_end = width_end + 1
+        val width_text = width_rest.substring(0, width_end)
+        out = out + " (line index: " + count.to_string() + " width: " + width_text + " text: \"" + line + "\")"
+        count = count + 1
+        pos = width_start + width_end
+    out + " count: " + count.to_string() + ")"
+
+fn build_site_corpus_layout_report(opts: SiteCorpusLayoutOpts) -> text:
+    val samples = build_famous_site_sample_corpus()
+    var selected = 0
+    var missing_metrics = 0
+    var matched = 0
+    var mismatched = 0
+    var first_mismatch = ""
+    var first_mismatch_widths = ""
+    var body = "(famous_site_corpus_layout_report\n"
+    for sample in samples:
+        if _matches_selected(sample, opts):
+            if opts.limit == 0 or selected < opts.limit:
+                selected = selected + 1
+                val metrics_path = famous_site_sample_chrome_metrics_path(sample.id)
+                if not rt_file_exists(metrics_path):
+                    missing_metrics = missing_metrics + 1
+                    body = body + "  (sample id: \"" + sample.id + "\" status: missing_metrics metrics: \"" + metrics_path + "\")\n"
+                else:
+                    val metrics = rt_file_read_text(metrics_path)
+                    val ok = _simple_lines_match_chrome_metrics(sample, metrics, opts.layout_width)
+                    if ok:
+                        matched = matched + 1
+                        body = body + "  (sample id: \"" + sample.id + "\" status: matched)\n"
+                    else:
+                        mismatched = mismatched + 1
+                        val missing_line = _first_missing_line(sample, metrics, opts.layout_width)
+                        val widths = br_famous_site_corpus_layout_line_widths_sdn(sample.html, 16, opts.layout_width)
+                        val chrome_lines = _chrome_text_lines_sdn(metrics)
+                        val chrome_widths = _chrome_canvas_widths_sdn(metrics)
+                        if first_mismatch == "":
+                            first_mismatch = sample.id
+                            first_mismatch_widths = widths
+                        body = body + "  (sample id: \"" + sample.id + "\" status: mismatched missing_simple_line: \"" + missing_line + "\" chrome_lines: " + chrome_lines + " chrome_widths: " + chrome_widths + " simple_widths: " + widths + ")\n"
+    body = body + "  summary: (selected: " + selected.to_string() + " matched: " + matched.to_string() + " mismatched: " + mismatched.to_string() + " missing_metrics: " + missing_metrics.to_string() + " layout_width: " + opts.layout_width.to_string() + " first_mismatch: \"" + first_mismatch + "\")\n"
+    if first_mismatch_widths != "":
+        body = body + "  first_mismatch_widths: " + first_mismatch_widths + "\n"
+    body + ")\n"
+
+fn main() -> i64:
+    val args = get_cli_args()
+    val opts = parse_site_corpus_layout_opts(args)
+    if opts.help:
+        print_site_corpus_layout_help()
+        return 0
+    print build_site_corpus_layout_report(opts)
+    0

@@ -1,0 +1,112 @@
+#![allow(REQC001)]
+#![allow(REQC004)]
+#![allow(unnamed_duplicate_typed_args)]
+"""
+# Websocket Client
+
+Tests for websocket_client functionality.
+"""
+
+use std.spec
+use std.common.string_core.{char_from_code}
+use examples.browser.feature.net.websocket_client.{WsFrame, apply_mask, build_upgrade_request, decode_frame, encode_frame, validate_handshake_response, generate_ws_key, compute_accept_key, generate_mask_key}
+
+fn _byte(value: i64) -> text:
+    if value == 0:
+        return "\0"
+    if value == 127:
+        return "\x7F"
+    if value == 128:
+        return "\x80"
+    if value == 255:
+        return "\xFF"
+    char_from_code(value)
+
+fn _bytes(values: [i64]) -> text:
+    var out = ""
+    var i = 0
+    while i < values.len():
+        out = out + _byte(values[i])
+        i = i + 1
+    out
+
+describe "WebSocket opening handshake":
+    it "builds an RFC 6455 upgrade request":
+        val key = generate_ws_key()
+        val raw = build_upgrade_request("example.com", 80, "/chat?room=1", key, ["chat"])
+
+        expect(raw).to_start_with("GET /chat?room=1 HTTP/1.1\r\n")
+        expect(raw).to_contain("Host: example.com\r\n")
+        expect(raw).to_contain("Upgrade: websocket\r\n")
+        expect(raw).to_contain("Connection: Upgrade\r\n")
+        expect(raw).to_contain("Sec-WebSocket-Key: {key}\r\n")
+        expect(raw).to_contain("Sec-WebSocket-Version: 13\r\n")
+        expect(raw).to_contain("Sec-WebSocket-Protocol: chat\r\n")
+
+    it "validates a successful server handshake":
+        val key = "dGhlIHNhbXBsZSBub25jZQ=="
+        val raw = "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Protocol: chat\r\nSec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=\r\n\r\n"
+        val result = validate_handshake_response(raw, key, ["chat"])
+
+        match result:
+            Ok(_):
+                expect(true).to_equal(true)
+            Err(e):
+                expect(e.message).to_equal("ok")
+
+    it "rejects a non-upgrade response":
+        val key = generate_ws_key()
+        val raw = "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n"
+        val result = validate_handshake_response(raw, key, [])
+        val is_err = match result:
+            Ok(_): false
+            Err(_): true
+        expect(is_err).to_equal(true)
+
+    it "computes the RFC sample accept key":
+        val accept = compute_accept_key("dGhlIHNhbXBsZSBub25jZQ==")
+        expect(accept).to_equal("s3pPLMBiTxaQ9kYGzzhZRbK+xOo=")
+
+    it "generates fresh nonce and mask material":
+        val first_key = generate_ws_key()
+        val second_key = generate_ws_key()
+        val first_mask = generate_mask_key()
+        val second_mask = generate_mask_key()
+
+        expect(first_key.len()).to_equal(24)
+        expect(second_key.len()).to_equal(24)
+        if first_key == second_key:
+            expect("fresh nonce").to_equal("duplicate nonce")
+        else:
+            expect(true).to_equal(true)
+        expect(first_mask.len()).to_equal(4)
+        expect(second_mask.len()).to_equal(4)
+        val same_mask = first_mask[0] == second_mask[0] and first_mask[1] == second_mask[1] and first_mask[2] == second_mask[2] and first_mask[3] == second_mask[3]
+        if same_mask:
+            expect("fresh mask").to_equal("duplicate mask")
+        else:
+            expect(true).to_equal(true)
+
+describe "WebSocket frame bytes":
+    it "round trips binary frames with high-bit header bytes":
+        val payload = _bytes([65, 66, 67])
+        val encoded = encode_frame(WsFrame.binary_frame(payload))
+        val decoded = decode_frame(encoded)
+
+        expect(encoded[0:1].char_code_at(0)).to_equal(130)
+        expect(encoded[1:2].char_code_at(0)).to_equal(3)
+        match decoded:
+            Ok(frame):
+                expect(frame.payload.len()).to_equal(3)
+                expect(frame.payload).to_equal("ABC")
+            Err(e):
+                expect(e.message).to_equal("decoded")
+
+    it "preserves payload bytes through masking and unmasking":
+        val payload = _bytes([65, 66, 67, 68])
+        val mask = [1, 2, 3, 4]
+        val masked = apply_mask(payload, mask)
+        val restored = apply_mask(masked, mask)
+
+        expect(restored.len()).to_equal(payload.len())
+        expect(restored).to_equal("ABCD")

@@ -1,0 +1,398 @@
+# Fixed-length constant-time bignum layer.
+#
+# `Fixed { n, limbs }` is the secret-dependent counterpart to BigNat.
+# Every operation here is straight-line on its declared lengths — control
+# flow and memory access depend only on the public `n` field, never on
+# limb values. Carry/borrow signals that feed into selects are wrapped
+# through `rt_black_box` to break optimiser-level branchification.
+#
+# Deviation from R-B's design (#1, #6 in i3_bignum_done.md):
+#   - `Fixed<N: i64>` const-numeric generic is not in active use in the
+#     codebase; we ship a plain `struct Fixed { n, limbs }` instead. The
+#     CT property is preserved because `n` is a public, compile-time
+#     parameter at every call site (`FIXED_256`, `FIXED_2048`, ...).
+#   - `add_fixed` / `sub_fixed` return `[Fixed; 2]` (sum/diff + 1-limb
+#     carry/borrow Fixed) rather than a tuple — no tuple-return precedent
+#     for `(Fixed, i64)`. The carry/borrow is wrapped via `rt_black_box`.
+#
+# Constructor-rebind discipline (CRITICAL):
+#   `obj.field[i] = x` does NOT persist in the interpreter (caller-side
+#   or module-global). Every "mutating" function in this file rebuilds
+#   a fresh `[i64]` and returns `Fixed(n: ..., limbs: fresh)`. Do NOT
+#   mutate `a.limbs[i]` and return `a`.
+
+use std.math.bignum.limb.{
+    LIMB_BITS, LIMB_BASE, LIMB_MASK,
+    rt_black_box,
+    add_limbs, sub_limbs, mul_add_limb
+}
+use std.math.bignum.bignat.{
+    bn_zero, normalize, mul as bn_mul
+}
+
+
+# ----------------------------------------------------------------------
+# Type
+# ----------------------------------------------------------------------
+struct Fixed:
+    """Fixed-length N-limb bignum at base 2^30. Length never branches.
+
+    `n` is a public, compile-time-fixed parameter (`FIXED_256`,
+    `FIXED_2048`, etc.) at every call site. `limbs` always has exactly
+    `n` entries, including leading zeros. Never normalize a Fixed.
+    """
+    n: i64
+    limbs: [i64]
+
+
+# ----------------------------------------------------------------------
+# Constructors
+# ----------------------------------------------------------------------
+fn fx_zero(n: i64) -> Fixed:
+    var limbs: [i64] = []
+    var i = 0
+    while i < n:
+        limbs.push(0)
+        i = i + 1
+    Fixed(n: n, limbs: limbs)
+
+fn fx_one(n: i64) -> Fixed:
+    var limbs: [i64] = []
+    var i = 0
+    while i < n:
+        limbs.push(0)
+        i = i + 1
+    if n > 0:
+        limbs[0] = 1
+    Fixed(n: n, limbs: limbs)
+
+fn fx_clone(a: Fixed) -> Fixed:
+    var limbs: [i64] = []
+    var i = 0
+    while i < a.n:
+        limbs.push(a.limbs[i])
+        i = i + 1
+    Fixed(n: a.n, limbs: limbs)
+
+fn fx_from_bignat(a: [i64], n: i64) -> Fixed:
+    # Pad/truncate `a` to exactly `n` limbs.
+    var limbs: [i64] = []
+    var i = 0
+    while i < n:
+        if i < a.len():
+            limbs.push(a[i])
+        else:
+            limbs.push(0)
+        i = i + 1
+    Fixed(n: n, limbs: limbs)
+
+fn fx_to_bignat(a: Fixed) -> [i64]:
+    # Drop trailing zeros via normalize.
+    var out: [i64] = []
+    var i = 0
+    while i < a.n:
+        out.push(a.limbs[i])
+        i = i + 1
+    normalize(out)
+
+fn fx_eq(a: Fixed, b: Fixed) -> bool:
+    # Structural equality on Fixed values. Uses cmp_fixed under the
+    # hood, which is CT in shape; this helper just hides the `== 0`.
+    cmp_fixed(a, b) == 0
+
+
+# ----------------------------------------------------------------------
+# Arithmetic — return [sum_or_diff, carry_or_borrow_as_1_limb_Fixed]
+# ----------------------------------------------------------------------
+fn add_fixed(a: Fixed, b: Fixed) -> [Fixed]:
+    # Fixed-width add. Returns [sum, carry_out] where carry_out is a
+    # 1-limb Fixed carrying the final carry through `rt_black_box`.
+    var sum_limbs: [i64] = []
+    var i = 0
+    while i < a.n:
+        sum_limbs.push(0)
+        i = i + 1
+    var carry = 0
+    i = 0
+    while i < a.n:
+        val pair = add_limbs(a.limbs[i], b.limbs[i], carry)
+        sum_limbs[i] = pair[0]
+        carry = pair[1]
+        i = i + 1
+    # Wrap carry through rt_black_box at the boundary so any subsequent
+    # `select(carry, ...)` cannot be optimised back into a branch.
+    val carry_ct = rt_black_box(carry)
+    val sum_fx = Fixed(n: a.n, limbs: sum_limbs)
+    val carry_fx = Fixed(n: 1, limbs: [carry_ct])
+    [sum_fx, carry_fx]
+
+fn sub_fixed(a: Fixed, b: Fixed) -> [Fixed]:
+    # Fixed-width sub. Returns [diff, borrow_out] where borrow_out is
+    # a 1-limb Fixed wrapping the final borrow through `rt_black_box`.
+    var diff_limbs: [i64] = []
+    var i = 0
+    while i < a.n:
+        diff_limbs.push(0)
+        i = i + 1
+    var borrow = 0
+    i = 0
+    while i < a.n:
+        val pair = sub_limbs(a.limbs[i], b.limbs[i], borrow)
+        diff_limbs[i] = pair[0]
+        borrow = pair[1]
+        i = i + 1
+    val borrow_ct = rt_black_box(borrow)
+    val diff_fx = Fixed(n: a.n, limbs: diff_limbs)
+    val borrow_fx = Fixed(n: 1, limbs: [borrow_ct])
+    [diff_fx, borrow_fx]
+
+fn mul_fixed(a: Fixed, b: Fixed) -> Fixed:
+    # Full-width product; result has 2n limbs (no overflow).
+    val out_n = a.n + b.n
+    var limbs: [i64] = []
+    var k = 0
+    while k < out_n:
+        limbs.push(0)
+        k = k + 1
+    var i = 0
+    while i < a.n:
+        var carry = 0
+        var j = 0
+        while j < b.n:
+            val pair = mul_add_limb(a.limbs[i], b.limbs[j], limbs[i + j], carry)
+            limbs[i + j] = pair[0]
+            carry = pair[1]
+            j = j + 1
+        if i + b.n < out_n:
+            limbs[i + b.n] = limbs[i + b.n] + carry
+        i = i + 1
+    Fixed(n: out_n, limbs: limbs)
+
+
+# ----------------------------------------------------------------------
+# Comparison and predicates
+# ----------------------------------------------------------------------
+fn cmp_fixed(a: Fixed, b: Fixed) -> i64:
+    # Returns -1 / 0 / 1 in CT shape: subtract a-b, then read sign.
+    # We compute both `a - b` and `b - a` borrow signals so the final
+    # answer is purely a function of the limb pattern, not of an
+    # early-exit traversal.
+    var borrow_ab = 0
+    var borrow_ba = 0
+    var i = 0
+    while i < a.n:
+        val pair_ab = sub_limbs(a.limbs[i], b.limbs[i], borrow_ab)
+        borrow_ab = pair_ab[1]
+        val pair_ba = sub_limbs(b.limbs[i], a.limbs[i], borrow_ba)
+        borrow_ba = pair_ba[1]
+        i = i + 1
+    val ba = rt_black_box(borrow_ab)
+    val ab = rt_black_box(borrow_ba)
+    if ba == 1:
+        return -1
+    if ab == 1:
+        return 1
+    0
+
+fn is_zero_ct(a: Fixed) -> bool:
+    # OR-fold all limbs through rt_black_box, then compare with zero.
+    var acc = 0
+    var i = 0
+    while i < a.n:
+        acc = acc | a.limbs[i]
+        i = i + 1
+    val acc_ct = rt_black_box(acc)
+    acc_ct == 0
+
+
+# ----------------------------------------------------------------------
+# Conditional swap / select (mask-based, CT)
+# ----------------------------------------------------------------------
+fn cond_swap(a: Fixed, b: Fixed, swap: i64) -> [Fixed]:
+    # If `swap` is non-zero, swap a and b in CT shape. Mask is built
+    # from `rt_black_box(swap)` once at entry.
+    val swap_ct = rt_black_box(swap)
+    var mask = 0
+    if swap_ct != 0:
+        mask = LIMB_MASK | (LIMB_MASK << LIMB_BITS)
+    # Build the masks separately so the limb traversal does not branch.
+    var a_out: [i64] = []
+    var b_out: [i64] = []
+    var i = 0
+    while i < a.n:
+        a_out.push(0)
+        b_out.push(0)
+        i = i + 1
+    i = 0
+    while i < a.n:
+        val xa = a.limbs[i]
+        val xb = b.limbs[i]
+        val diff = (xa ^ xb) & mask
+        a_out[i] = xa ^ diff
+        b_out[i] = xb ^ diff
+        i = i + 1
+    [Fixed(n: a.n, limbs: a_out), Fixed(n: a.n, limbs: b_out)]
+
+fn cond_select(cond: i64, a: Fixed, b: Fixed) -> Fixed:
+    # Returns `a` if `cond != 0`, `b` otherwise — CT, mask-based.
+    val cond_ct = rt_black_box(cond)
+    var mask_a = 0
+    var mask_b = 0
+    if cond_ct != 0:
+        mask_a = LIMB_MASK | (LIMB_MASK << LIMB_BITS)
+    else:
+        mask_b = LIMB_MASK | (LIMB_MASK << LIMB_BITS)
+    var out: [i64] = []
+    var i = 0
+    while i < a.n:
+        out.push(0)
+        i = i + 1
+    i = 0
+    while i < a.n:
+        out[i] = (a.limbs[i] & mask_a) | (b.limbs[i] & mask_b)
+        i = i + 1
+    Fixed(n: a.n, limbs: out)
+
+
+# ----------------------------------------------------------------------
+# Modular reduction (minimal: 2-step conditional subtract)
+# ----------------------------------------------------------------------
+fn mod_reduce_ct(a: Fixed, m: Fixed) -> Fixed:
+    """Reduce `a` mod `m` via at most two conditional subtracts.
+
+    Precondition: `a < 2 * m`. Used after a single fixed-width add to
+    bring the result back into [0, m). Real RSA / curve reductions
+    use Barrett or Montgomery; this is a minimal building block —
+    full reductions are queued for the migration step (R-B §5 step 3).
+    """
+    val pair1 = sub_fixed(a, m)
+    val borrow1 = pair1[1].limbs[0]
+    val cand1 = pair1[0]
+    val out1 = cond_select(rt_black_box(1 - borrow1), cand1, a)
+    val pair2 = sub_fixed(out1, m)
+    val borrow2 = pair2[1].limbs[0]
+    val cand2 = pair2[0]
+    cond_select(rt_black_box(1 - borrow2), cand2, out1)
+
+
+# ----------------------------------------------------------------------
+# Modular exponentiation / inversion
+# ----------------------------------------------------------------------
+fn mod_exp_ct(base: Fixed, exp: Fixed, m: Fixed) -> Fixed:
+    """Constant-shape modular exponentiation over fixed-width limbs.
+
+    Uses square-and-multiply-always over a real modular multiply path,
+    so the upper half of the schoolbook product is preserved via modular
+    reduction instead of being truncated.
+    """
+    val n = m.n
+    if is_zero_ct(m):
+        return fx_zero(n)
+    val total_bits = exp.n * LIMB_BITS
+    var result = _mod_normalize_ct(fx_one(n), m)
+    val base_red = _mod_normalize_ct(base, m)
+    var i = total_bits - 1
+    while i >= 0:
+        val sq = _mod_mul_ct(result, result, m)
+        val cand = _mod_mul_ct(sq, base_red, m)
+        val bit_ct = rt_black_box(_fx_get_bit(exp, i))
+        result = cond_select(bit_ct, cand, sq)
+        i = i - 1
+    result
+
+fn mod_inv_ct(a: Fixed, m: Fixed) -> Fixed:
+    """Fermat-style inversion via the real modular exponentiation path.
+
+    Precondition: `m` is prime and `a` is non-zero modulo `m`.
+    """
+    val n = m.n
+    if is_zero_ct(m):
+        return fx_zero(n)
+    var two_limbs: [i64] = []
+    var i = 0
+    while i < n:
+        two_limbs.push(0)
+        i = i + 1
+    if n > 0:
+        two_limbs[0] = 2
+    val two = Fixed(n: n, limbs: two_limbs)
+    val pair = sub_fixed(m, two)
+    val exp = pair[0]
+    mod_exp_ct(a, exp, m)
+
+fn _mod_normalize_ct(a: Fixed, m: Fixed) -> Fixed:
+    # Reduce an arbitrary n-limb value modulo m by bit-scanning. This
+    # keeps the old constant-shape property without truncating the
+    # high half of any intermediate product.
+    val n = m.n
+    if is_zero_ct(m):
+        return fx_zero(n)
+    var result = fx_zero(n)
+    var i = a.n * LIMB_BITS - 1
+    while i >= 0:
+        result = _mod_add_ct(result, result, m)
+        val bit = rt_black_box(_fx_get_bit(a, i))
+        val one = cond_select(bit, fx_one(n), fx_zero(n))
+        result = _mod_add_ct(result, one, m)
+        i = i - 1
+    result
+
+fn _mod_mul_ct(a: Fixed, b: Fixed, m: Fixed) -> Fixed:
+    # Bit-by-bit modular multiply over fixed public loop bounds.
+    val n = m.n
+    if is_zero_ct(m):
+        return fx_zero(n)
+    var result = fx_zero(n)
+    var addend = _mod_normalize_ct(a, m)
+    var i = 0
+    val total_bits = b.n * LIMB_BITS
+    while i < total_bits:
+        val cand = _mod_add_ct(result, addend, m)
+        val bit_ct = rt_black_box(_fx_get_bit(b, i))
+        result = cond_select(bit_ct, cand, result)
+        addend = _mod_add_ct(addend, addend, m)
+        i = i + 1
+    result
+
+fn _mod_add_ct(a: Fixed, b: Fixed, m: Fixed) -> Fixed:
+    # Add two canonical residues modulo m without truncating overflow.
+    val ext_n = m.n + 1
+    val ext_a = _fx_extend(a, ext_n)
+    val ext_b = _fx_extend(b, ext_n)
+    val ext_m = _fx_extend(m, ext_n)
+    val sum = add_fixed(ext_a, ext_b)[0]
+    val reduced = sub_fixed(sum, ext_m)
+    val borrow = reduced[1].limbs[0]
+    val out = cond_select(rt_black_box(1 - borrow), reduced[0], sum)
+    _fx_truncate(out, m.n)
+
+fn _fx_extend(a: Fixed, out_n: i64) -> Fixed:
+    var out: [i64] = []
+    var i = 0
+    while i < out_n:
+        if i < a.n:
+            out.push(a.limbs[i])
+        else:
+            out.push(0)
+        i = i + 1
+    Fixed(n: out_n, limbs: out)
+
+fn _fx_truncate(a: Fixed, out_n: i64) -> Fixed:
+    var out: [i64] = []
+    var i = 0
+    while i < out_n:
+        if i < a.n:
+            out.push(a.limbs[i])
+        else:
+            out.push(0)
+        i = i + 1
+    Fixed(n: out_n, limbs: out)
+
+fn _fx_get_bit(a: Fixed, idx: i64) -> i64:
+    if idx < 0:
+        return 0
+    val limb_idx = idx / LIMB_BITS
+    val bit_idx = idx - limb_idx * LIMB_BITS
+    if limb_idx >= a.n:
+        return 0
+    (a.limbs[limb_idx] >> bit_idx) & 1

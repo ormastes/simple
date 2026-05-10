@@ -1,0 +1,127 @@
+# ============================================================================
+# Spec: RISC-V Common — Instruction Decode
+# ============================================================================
+
+use std.nogc_async_mut_noalloc.baremetal.riscv_common.decode.{decode, DecodedInsn, bits, sign_extend, extract_i_imm, extract_s_imm, extract_b_imm, extract_u_imm, extract_j_imm, OP_LUI, OP_AUIPC, OP_JAL, OP_JALR, OP_BRANCH, OP_LOAD, OP_STORE, OP_OP_IMM, OP_OP, OP_SYSTEM}
+
+describe "bits extraction":
+    it "extracts single bit":
+        expect bits(0x80000000, 31, 31) == 1
+        expect bits(0x80000000, 30, 30) == 0
+
+    it "extracts multi-bit field":
+        # bits [6:0] of 0x37 (LUI opcode)
+        expect bits(0x37, 6, 0) == 0x37
+        # bits [14:12] = funct3
+        expect bits(0x00A00093, 14, 12) == 0
+
+    it "extracts rd field":
+        # ADDI x1, x0, 10 = 0x00A00093
+        # rd = bits [11:7] = 00001 = 1
+        expect bits(0x00A00093, 11, 7) == 1
+
+describe "sign_extend":
+    it "sign-extends positive 12-bit":
+        expect sign_extend(0x7FF, 12) == 0x7FF
+
+    it "sign-extends negative 12-bit":
+        val result = sign_extend(0x800, 12)
+        expect result < 0
+
+    it "sign-extends zero":
+        expect sign_extend(0, 12) == 0
+
+describe "decode LUI":
+    it "decodes LUI instruction":
+        # LUI x1, 0x12345  ->  0x12345037
+        val insn = 0x12345037
+        val d = decode(insn)
+        expect d.opcode == OP_LUI
+        expect d.rd == 0
+        # LUI rd is bits[11:7]; let's use a different encoding
+        # LUI x5, 0x12345 = 0x123450B7 (rd=5 -> bits[11:7]=00101)
+
+    it "decodes LUI with specific rd":
+        # LUI x5, 0x12345 -> rd=5, opcode=0x37
+        # Encoding: imm[31:12]=0x12345, rd=00101, opcode=0110111
+        val insn = 0x12345000 | (5 << 7) | 0x37
+        val d = decode(insn)
+        expect d.opcode == OP_LUI
+        expect d.rd == 5
+
+describe "decode ADDI (I-type)":
+    it "decodes ADDI x1, x0, 10":
+        # ADDI x1, x0, 10 = 0x00A00093
+        val d = decode(0x00A00093)
+        expect d.opcode == OP_OP_IMM
+        expect d.rd == 1
+        expect d.rs1 == 0
+        expect d.funct3 == 0
+        expect d.imm == 10
+
+    it "decodes ADDI with negative immediate":
+        # ADDI x1, x0, -1 = 0xFFF00093
+        val d = decode(0xFFF00093)
+        expect d.opcode == OP_OP_IMM
+        expect d.rd == 1
+        expect d.imm == -1
+
+describe "decode ADD (R-type)":
+    it "decodes ADD x1, x2, x3":
+        # ADD x1, x2, x3 = 0x003100B3
+        val d = decode(0x003100B3)
+        expect d.opcode == OP_OP
+        expect d.rd == 1
+        expect d.rs1 == 2
+        expect d.rs2 == 3
+        expect d.funct3 == 0
+        expect d.funct7 == 0
+
+describe "decode BRANCH (B-type)":
+    it "decodes BEQ with positive offset":
+        # BEQ x1, x2, +8 = 0x00208463
+        val d = decode(0x00208463)
+        expect d.opcode == OP_BRANCH
+        expect d.is_branch() == true
+
+describe "decode JAL (J-type)":
+    it "decodes JAL as jump":
+        # JAL x1, 0 = 0x000000EF
+        val d = decode(0x000000EF)
+        expect d.opcode == OP_JAL
+        expect d.is_jump() == true
+        expect d.rd == 1
+
+describe "decode LOAD/STORE":
+    it "identifies load instructions":
+        # LW x1, 0(x2) = 0x00012083
+        val d = decode(0x00012083)
+        expect d.opcode == OP_LOAD
+        expect d.is_load() == true
+
+    it "identifies store instructions":
+        # SW x1, 0(x2) = 0x00112023
+        val d = decode(0x00112023)
+        expect d.opcode == OP_STORE
+        expect d.is_store() == true
+
+describe "decode SYSTEM":
+    it "identifies ECALL":
+        # ECALL = 0x00000073
+        val d = decode(0x00000073)
+        expect d.is_system() == true
+        expect d.is_ecall() == true
+        expect d.is_ebreak() == false
+
+    it "identifies EBREAK":
+        # EBREAK = 0x00100073
+        val d = decode(0x00100073)
+        expect d.is_system() == true
+        expect d.is_ebreak() == true
+        expect d.is_ecall() == false
+
+describe "DecodedInsn summary":
+    it "produces a non-empty summary string":
+        val d = decode(0x00A00093)
+        val s = d.summary()
+        expect s.len() > 0

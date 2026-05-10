@@ -1,0 +1,1298 @@
+# Style Block Processor — <style> tag CSS rule extraction and application
+#
+# Extracts CSS rules from <style> blocks in HTML, parses simple selectors
+# (tag, .class, #id, compound), and applies matched styles to DOM nodes.
+#
+# Supports:
+#   - Tag selectors: div, span, p, h1-h6, etc.
+#   - Class selectors: .container, .active
+#   - ID selectors: #main, #header
+#   - Attribute selectors: [data-state], div[data-state="active"], prefix/suffix/substring/token/dash operators, i/s flags (partial)
+#   - Compound: div.active, span.highlight
+#   - Comma-separated: div, span { ... }
+#   - Descendant: div span { ... } (limited — matches if ANY ancestor matches)
+#   - Pseudo-classes: :nth-child(N/odd/even/common an+b forms) (bounded), :first-child, :last-child, :only-child, :empty, :is(), :where(), :not(), :has()
+#     :has() supports simple descendant options and bounded relative child options (`> .class`, `> tag`, `> #id`).
+#   - Shorthand properties: flex, border, background, margin multi-value
+
+use std.gc_async_mut.gpu.browser_engine.dom.{BeDomNode,
+    be_dom_get_tag, be_dom_get_id, be_dom_get_classes, be_dom_get_children,
+    be_dom_get_is_text, be_dom_get_text, be_dom_set_children, be_dom_get_bg_color,
+    be_dom_get_attr, be_dom_has_attr, parse_color_value}
+use std.gc_async_mut.gpu.browser_engine.css.{parse_css_value, BoxEdges,
+    BorderProps, CssValue}
+use common.string_builder.{StringBuilder}
+use std.gc_async_mut.gpu.browser_engine.style.supports.{eval_supports_query}
+use std.gc_async_mut.gpu.browser_engine.style.custom_properties.{has_var_reference, parse_var_function}
+use std.gc_async_mut.gpu.browser_engine.style.animation.{Keyframe, CSSValue, CSSDeclaration}
+
+# =========================================================================
+# CSS Rule types
+# =========================================================================
+
+pub class CssRule:
+    selector: text
+    declarations: [CssDecl]
+
+pub class CssDecl:
+    property: text
+    value: text
+
+pub fn css_decl_property(decl: CssDecl) -> text:
+    decl.property
+
+pub fn css_decl_value(decl: CssDecl) -> text:
+    decl.value
+
+pub fn css_decls_contain(decls: [CssDecl], property: text, value: text) -> bool:
+    var i = 0
+    while i < decls.len():
+        val decl = decls[i]
+        i = i + 1
+        if decl.property == property and decl.value == value:
+            return true
+    false
+
+# =========================================================================
+# @keyframes registry
+# =========================================================================
+
+pub class KeyframeEntry:
+    name: text
+    frames: [Keyframe]
+
+pub class KeyframeRegistry:
+    entries: [KeyframeEntry]
+
+    static fn new() -> KeyframeRegistry:
+        val empty: [KeyframeEntry] = []
+        KeyframeRegistry(entries: empty)
+
+    me add(name: text, frames: [Keyframe]):
+        self.entries.push(KeyframeEntry(name: name, frames: frames))
+
+pub fn extract_keyframes(css: text) -> KeyframeRegistry:
+    val registry = KeyframeRegistry.new()
+    val lower = css.lower()
+    var pos = 0
+    while pos < css.len():
+        val kf_pos = sb_find(lower, "@keyframes", pos)
+        if kf_pos >= 999999999:
+            break
+        val after_kw = kf_pos + 10
+        val open = sb_find(css, "{", after_kw)
+        if open >= 999999999:
+            break
+        val name_raw = css.slice(after_kw, open)
+        val anim_name = name_raw.trim()
+        val close = find_matching_brace(css, open)
+        if close >= 999999999:
+            break
+        val body = css.slice(open + 1, close)
+        val frames = _parse_keyframe_body(body)
+        registry.add(anim_name, frames)
+        pos = close + 1
+    registry
+
+fn _parse_keyframe_body(body: text) -> [Keyframe]:
+    var frames: [Keyframe] = []
+    var pos = 0
+    while pos < body.len():
+        val open = sb_find(body, "{", pos)
+        if open >= 999999999:
+            break
+        val offset_text = body.slice(pos, open).trim()
+        val close = find_matching_brace(body, open)
+        if close >= 999999999:
+            break
+        val decl_text = body.slice(open + 1, close).trim()
+        val raw_decls = parse_declarations(decl_text)
+        var css_decls: [CSSDeclaration] = []
+        var di = 0
+        while di < raw_decls.len():
+            val d = raw_decls[di]
+            di = di + 1
+            css_decls.push(CSSDeclaration(property: d.property, value: CSSValue.Keyword(v: d.value), important: false))
+        val offsets = sb_split_selector_list(offset_text)
+        var oi = 0
+        while oi < offsets.len():
+            val off_raw = offsets[oi]
+            oi = oi + 1
+            val off = off_raw.trim()
+            val offset_val = _parse_keyframe_offset(off)
+            frames.push(Keyframe.create(offset_val, css_decls))
+        pos = close + 1
+    frames
+
+fn _parse_keyframe_offset(off: text) -> f64:
+    if off == "from":
+        return 0.0
+    if off == "to":
+        return 1.0
+    if off.ends_with("%"):
+        val num_text = off.slice(0, off.len() - 1).trim()
+        val pct = num_text.to_f64()
+        return pct / 100.0
+    0.0
+
+fn flatten_supports_blocks(css_text: text) -> text:
+    val lower = css_text.lower()
+    var out = ""
+    var pos = 0
+    while pos < css_text.len():
+        val sup_pos = sb_find(lower, "@supports", pos)
+        if sup_pos >= 999999999:
+            out = out + css_text.slice(pos, css_text.len())
+            break
+        out = out + css_text.slice(pos, sup_pos)
+        val after_kw = sup_pos + 9
+        val open = sb_find(css_text, "{", after_kw)
+        if open >= 999999999:
+            out = out + css_text.slice(sup_pos, css_text.len())
+            break
+        val condition = css_text.slice(after_kw, open).trim()
+        val close = find_matching_brace(css_text, open)
+        if close >= 999999999:
+            out = out + css_text.slice(sup_pos, css_text.len())
+            break
+        if eval_supports_query(condition):
+            val inner = css_text.slice(open + 1, close).trim()
+            if inner.len() > 0:
+                out = out + "\n" + inner + "\n"
+        pos = close + 1
+    out
+
+# =========================================================================
+# Extract <style> blocks from HTML
+# =========================================================================
+
+fn extract_style_blocks(html: text) -> [text]:
+    var blocks: [text] = []
+    var pos = 0
+    val lower = html.lower()
+    while pos < lower.len():
+        val style_open = sb_find(lower, "<style", pos)
+        if style_open >= 999999999:
+            break
+        val gt = sb_find(html, ">", style_open)
+        if gt >= 999999999:
+            break
+        val content_start = gt + 1
+        val style_close = sb_find(lower, "</style", content_start)
+        if style_close >= 999999999:
+            break
+        val block = html.slice(content_start, style_close)
+        blocks.push(block)
+        pos = style_close + 8
+    blocks
+
+# =========================================================================
+# Parse CSS text into rules
+# =========================================================================
+
+fn strip_keyframe_blocks(css_text: text) -> text:
+    val lower = css_text.lower()
+    var out = ""
+    var pos = 0
+    while pos < css_text.len():
+        val kf_pos = sb_find(lower, "@keyframes", pos)
+        if kf_pos >= 999999999:
+            out = out + css_text.slice(pos, css_text.len())
+            break
+        out = out + css_text.slice(pos, kf_pos)
+        val open = sb_find(css_text, "{", kf_pos + 10)
+        if open >= 999999999:
+            out = out + css_text.slice(kf_pos, css_text.len())
+            break
+        val close = find_matching_brace(css_text, open)
+        if close >= 999999999:
+            out = out + css_text.slice(kf_pos, css_text.len())
+            break
+        pos = close + 1
+    out
+
+fn parse_css_rules(css_text: text) -> [CssRule]:
+    var rules: [CssRule] = []
+    var pos = 0
+    val after_supports = flatten_supports_blocks(css_text)
+    val after_keyframes = strip_keyframe_blocks(after_supports)
+    val normalized_css = flatten_simple_nested_rules(flatten_layer_blocks(after_keyframes))
+    val len = normalized_css.len()
+
+    while pos < len:
+        pos = sb_skip_ws_comments(normalized_css, pos)
+        if pos >= len:
+            break
+        val brace_open = sb_find(normalized_css, "{", pos)
+        if brace_open >= 999999999:
+            break
+        val selector_raw = normalized_css.slice(pos, brace_open)
+        val selector_text = selector_raw.trim()
+        if selector_text.len() == 0:
+            pos = brace_open + 1
+            continue
+        val brace_close = sb_find(normalized_css, "}", brace_open + 1)
+        if brace_close >= 999999999:
+            break
+        val decl_raw = normalized_css.slice(brace_open + 1, brace_close)
+        val decl_text = decl_raw.trim()
+        val declarations = parse_declarations(decl_text)
+        val selectors = sb_split_selector_list(selector_text)
+        var sel_idx = 0
+        while sel_idx < selectors.len():
+            val sel = selectors[sel_idx]
+            sel_idx = sel_idx + 1
+            val trimmed = sel.trim()
+            if trimmed.len() > 0:
+                rules.push(CssRule(selector: trimmed, declarations: declarations))
+        pos = brace_close + 1
+
+    rules
+
+fn flatten_layer_blocks(css_text: text) -> text:
+    """Expose simple @layer wrapper contents to the existing flat rule parser."""
+    val lower = css_text.lower()
+    var out = ""
+    var pos = 0
+    while pos < css_text.len():
+        val layer_pos = sb_find(lower, "@layer", pos)
+        if layer_pos >= 999999999:
+            out = out + css_text.slice(pos, css_text.len())
+            break
+        out = out + css_text.slice(pos, layer_pos)
+        val open = sb_find(css_text, "{", layer_pos)
+        if open >= 999999999:
+            out = out + css_text.slice(layer_pos, css_text.len())
+            break
+        val close = find_matching_brace(css_text, open)
+        if close >= 999999999:
+            out = out + css_text.slice(layer_pos, css_text.len())
+            break
+        val inner = css_text.slice(open + 1, close).trim()
+        if inner.len() > 0:
+            out = out + "\n" + inner + "\n"
+        pos = close + 1
+    out
+
+fn flatten_simple_nested_rules(css_text: text) -> text:
+    """Expose bounded parent-referencing CSS nesting to the flat rule parser."""
+    var out = ""
+    var pos = 0
+    while pos < css_text.len():
+        val open = sb_find(css_text, "{", pos)
+        if open >= 999999999:
+            out = out + css_text.slice(pos, css_text.len())
+            break
+        val close = find_matching_brace(css_text, open)
+        if close >= 999999999:
+            out = out + css_text.slice(pos, css_text.len())
+            break
+        val selector = css_text.slice(pos, open).trim()
+        val body = css_text.slice(open + 1, close)
+        if selector.len() > 0 and not selector.starts_with("@") and body.contains("&"):
+            out = out + flatten_one_nested_rule(selector, body)
+        else:
+            out = out + css_text.slice(pos, close + 1)
+        pos = close + 1
+    out
+
+fn flatten_one_nested_rule(selector: text, body: text) -> text:
+    var direct_body = ""
+    var nested_rules = ""
+    var pos = 0
+    while pos < body.len():
+        val open = sb_find(body, "{", pos)
+        if open >= 999999999:
+            direct_body = direct_body + body.slice(pos, body.len())
+            break
+        val nested_start = last_nested_selector_start(body, pos, open)
+        val close = find_matching_brace(body, open)
+        if close >= 999999999:
+            direct_body = direct_body + body.slice(pos, body.len())
+            break
+        val nested_selector = body.slice(nested_start, open).trim()
+        val nested_body = body.slice(open + 1, close).trim()
+        val combined = combine_nested_selector(selector, nested_selector)
+        direct_body = direct_body + body.slice(pos, nested_start)
+        if combined.len() > 0 and nested_body.len() > 0:
+            nested_rules = nested_rules + "\n" + combined + " " + 123.chr() + " " + nested_body + " " + 125.chr() + "\n"
+        pos = close + 1
+    val direct = direct_body.trim()
+    var out = ""
+    if direct.len() > 0:
+        out = selector + " " + 123.chr() + " " + direct + " " + 125.chr() + "\n"
+    out + nested_rules
+
+fn last_nested_selector_start(body: text, start: i32, nested_open: i32) -> i32:
+    var pos = nested_open - 1
+    while pos >= start:
+        val ch = body.char_at(pos)
+        if ch == ";" or ch == "}":
+            return pos + 1
+        pos = pos - 1
+    start
+
+fn combine_nested_selector(parent: text, nested_selector: text) -> text:
+    val nested = nested_selector.trim()
+    if nested.len() == 0 or nested.starts_with("@") or not nested.contains("&"):
+        return ""
+    nested.replace("&", parent.trim()).trim()
+
+fn find_matching_brace(text_val: text, open: i32) -> i32:
+    var depth = 0
+    var pos = open
+    while pos < text_val.len():
+        val ch = text_val.char_at(pos)
+        if ch == "{":
+            depth = depth + 1
+        elif ch == "}":
+            depth = depth - 1
+            if depth == 0:
+                return pos
+        pos = pos + 1
+    999999999
+
+fn parse_declarations(text_val: text) -> [CssDecl]:
+    var decls: [CssDecl] = []
+    val parts = sb_split_char(text_val, ";")
+    var pt_idx = 0
+    while pt_idx < parts.len():
+        val part = parts[pt_idx]
+        pt_idx = pt_idx + 1
+        val trimmed = part.trim()
+        if trimmed.len() == 0:
+            continue
+        val colon = sb_find(trimmed, ":", 0)
+        if colon <= 0 or colon >= 999999999:
+            continue
+        val prop_raw = trimmed.slice(0, colon)
+        val prop = prop_raw.trim()
+        val value_raw = trimmed.slice(colon + 1, trimmed.len())
+        val value = value_raw.trim()
+        if prop.len() > 0 and value.len() > 0:
+            val expanded = expand_shorthand(prop, value)
+            var ex_idx = 0
+            while ex_idx < expanded.len():
+                val e = expanded[ex_idx]
+                ex_idx = ex_idx + 1
+                decls.push(e)
+    decls
+
+fn collect_css_vars(rules: [CssRule]) -> [CssDecl]:
+    var vars: [CssDecl] = []
+    var ri = 0
+    while ri < rules.len():
+        val rule = rules[ri]
+        ri = ri + 1
+        if rule.selector == ":root" or rule.selector == "html":
+            var di = 0
+            while di < rule.declarations.len():
+                val decl = rule.declarations[di]
+                di = di + 1
+                if decl.property.starts_with("--"):
+                    vars.push(decl)
+    vars
+
+fn _find_var_call_end(value: text, var_start: i64) -> i64:
+    var depth = 0
+    var pos = var_start
+    while pos < value.len():
+        val ch = value.char_at(pos)
+        if ch == "(":
+            depth = depth + 1
+        elif ch == ")":
+            depth = depth - 1
+            if depth == 0:
+                return pos
+        pos = pos + 1
+    999999999
+
+fn _lookup_css_var(name: text, vars: [CssDecl]) -> text:
+    var vi = 0
+    while vi < vars.len():
+        val v = vars[vi]
+        vi = vi + 1
+        if v.property == name:
+            return v.value
+    ""
+
+fn resolve_css_vars_in_value(value: text, vars: [CssDecl]) -> text:
+    var resolved = value
+    var depth_guard = 0
+    while has_var_reference(resolved) and depth_guard < 32:
+        depth_guard = depth_guard + 1
+        val parsed = parse_var_function(resolved)
+        val var_name = parsed.first
+        val fallback = parsed.second
+        if var_name.len() == 0:
+            break
+        val looked_up = _lookup_css_var(var_name, vars)
+        var replacement = ""
+        if looked_up.len() > 0:
+            replacement = looked_up
+        elif fallback.len() > 0:
+            replacement = fallback
+        else:
+            break
+        val var_start = sb_find(resolved, "var(", 0)
+        if var_start >= 999999999:
+            break
+        val var_end = _find_var_call_end(resolved, var_start)
+        if var_end >= 999999999:
+            break
+        val before = resolved.slice(0, var_start)
+        val after = resolved.slice(var_end + 1, resolved.len())
+        resolved = before + replacement + after
+    resolved
+
+fn resolve_css_vars_in_rules(rules: [CssRule], vars: [CssDecl]) -> [CssRule]:
+    if vars.len() == 0:
+        return rules
+    var out: [CssRule] = []
+    var ri = 0
+    while ri < rules.len():
+        val rule = rules[ri]
+        ri = ri + 1
+        var decls: [CssDecl] = []
+        var di = 0
+        while di < rule.declarations.len():
+            val decl = rule.declarations[di]
+            di = di + 1
+            decls.push(CssDecl(
+                property: decl.property,
+                value: resolve_css_vars_in_value(decl.value, vars)
+            ))
+        out.push(CssRule(selector: rule.selector, declarations: decls))
+    out
+
+# =========================================================================
+# Shorthand expansion
+# =========================================================================
+
+fn expand_shorthand(prop: text, value: text) -> [CssDecl]:
+    if prop == "flex":
+        return expand_flex(value)
+    if prop == "flex-flow":
+        return expand_flex_flow(value)
+    if prop == "border":
+        return expand_border(value)
+    if prop == "background":
+        return expand_background(value)
+    if prop == "margin" or prop == "padding":
+        return expand_box_shorthand(prop, value)
+    if prop == "font":
+        return expand_font(value)
+    [CssDecl(property: prop, value: value)]
+
+pub fn expand_flex_flow(value: text) -> [CssDecl]:
+    val parts = sb_split_ws(value)
+    var direction = "row"
+    var wrap = "nowrap"
+    var fp_idx = 0
+    while fp_idx < parts.len():
+        val part = parts[fp_idx]
+        fp_idx = fp_idx + 1
+        if part == "row" or part == "column" or part == "row-reverse" or part == "column-reverse":
+            direction = part
+        elif part == "wrap" or part == "nowrap" or part == "wrap-reverse":
+            wrap = part
+    [CssDecl(property: "flex-direction", value: direction),
+     CssDecl(property: "flex-wrap", value: wrap)]
+
+fn expand_font(value: text) -> [CssDecl]:
+    """Extract font-size from font shorthand (simplified)."""
+    val parts = sb_split_ws(value)
+    var decls: [CssDecl] = []
+    var fp2_idx = 0
+    while fp2_idx < parts.len():
+        val part = parts[fp2_idx]
+        fp2_idx = fp2_idx + 1
+        if part.ends_with("px") or part.ends_with("em") or part.ends_with("rem") or part.ends_with("pt"):
+            decls.push(CssDecl(property: "font-size", value: part))
+        elif part.ends_with("%"):
+            decls.push(CssDecl(property: "font-size", value: part))
+        elif part == "bold" or part == "bolder":
+            decls.push(CssDecl(property: "font-weight", value: part))
+        elif part == "italic":
+            pass_dn
+    if decls.len() == 0:
+        decls = [CssDecl(property: "font", value: value)]
+    decls
+
+fn expand_flex(value: text) -> [CssDecl]:
+    if value == "none":
+        return [
+            CssDecl(property: "flex-grow", value: "0"),
+            CssDecl(property: "flex-shrink", value: "0"),
+            CssDecl(property: "flex-basis", value: "auto")
+        ]
+    val parts = sb_split_ws(value)
+    if parts.len() == 1:
+        # flex: N means flex-grow: N, flex-shrink: 1, flex-basis: 0%
+        return [
+            CssDecl(property: "flex-grow", value: parts[0]),
+            CssDecl(property: "flex-shrink", value: "1"),
+            CssDecl(property: "flex-basis", value: "0%")
+        ]
+    if parts.len() == 2:
+        return [
+            CssDecl(property: "flex-grow", value: parts[0]),
+            CssDecl(property: "flex-shrink", value: parts[1]),
+            CssDecl(property: "flex-basis", value: "0%")
+        ]
+    if parts.len() >= 3:
+        return [
+            CssDecl(property: "flex-grow", value: parts[0]),
+            CssDecl(property: "flex-shrink", value: parts[1]),
+            CssDecl(property: "flex-basis", value: parts[2])
+        ]
+    [CssDecl(property: "flex-grow", value: value)]
+
+fn expand_border(value: text) -> [CssDecl]:
+    val parts = sb_split_ws(value)
+    var width = "1px"
+    var style = "solid"
+    var color = "black"
+    var bp_idx = 0
+    while bp_idx < parts.len():
+        val part = parts[bp_idx]
+        bp_idx = bp_idx + 1
+        if part.ends_with("px") or part.ends_with("em") or part == "thin" or part == "medium" or part == "thick":
+            width = part
+            if part == "thin":
+                width = "1px"
+            if part == "medium":
+                width = "3px"
+            if part == "thick":
+                width = "5px"
+        elif part == "solid" or part == "dashed" or part == "dotted" or part == "none" or part == "double":
+            style = part
+        else:
+            color = part
+    [
+        CssDecl(property: "border-width", value: width),
+        CssDecl(property: "border-style", value: style),
+        CssDecl(property: "border-color", value: color)
+    ]
+
+fn expand_background(value: text) -> [CssDecl]:
+    val trimmed = value.trim()
+    if not trimmed.starts_with("linear-gradient") and not trimmed.starts_with("radial-gradient"):
+        val color = sb_background_shorthand_color_value(trimmed)
+        if color.len() > 0:
+            return [CssDecl(property: "background-color", value: color)]
+    [CssDecl(property: "background", value: value)]
+
+fn sb_background_shorthand_color_value(value: text) -> text:
+    val trimmed = value.trim()
+    if trimmed.len() == 0:
+        return ""
+    var pos = 0
+    while pos < trimmed.len():
+        while pos < trimmed.len() and trimmed.char_at(pos) == " ":
+            pos = pos + 1
+        if pos >= trimmed.len():
+            break
+        val token = sb_background_token_from(trimmed, pos)
+        if token.len() == 0:
+            break
+        val lower = token.lower()
+        if lower.starts_with("url(") or lower.starts_with("linear-gradient") or lower.starts_with("radial-gradient"):
+            pos = pos + token.len()
+            continue
+        if token.starts_with("#") or lower.starts_with("rgb(") or lower.starts_with("rgba(") or lower.starts_with("hsl(") or lower.starts_with("hsla(") or lower == "transparent" or lower == "currentcolor":
+            return token
+        val parsed = parse_color_value(token)
+        if parsed != 0x000000FF or lower == "black":
+            return token
+        pos = pos + token.len()
+    ""
+
+fn sb_background_token_from(value: text, start: i32) -> text:
+    var end = start
+    var depth: i32 = 0
+    while end < value.len():
+        val ch = value.char_at(end)
+        if ch == "(":
+            depth = depth + 1
+        elif ch == ")":
+            if depth > 0:
+                depth = depth - 1
+        elif ch == " " and depth == 0:
+            break
+        end = end + 1
+    val raw = value.slice(start, end)
+    raw.trim()
+
+fn expand_box_shorthand(prop: text, value: text) -> [CssDecl]:
+    val parts = sb_split_ws(value)
+    if parts.len() == 1:
+        return [CssDecl(property: prop, value: parts[0])]
+    if parts.len() == 2:
+        return [
+            CssDecl(property: "{prop}-top", value: parts[0]),
+            CssDecl(property: "{prop}-right", value: parts[1]),
+            CssDecl(property: "{prop}-bottom", value: parts[0]),
+            CssDecl(property: "{prop}-left", value: parts[1])
+        ]
+    if parts.len() == 3:
+        return [
+            CssDecl(property: "{prop}-top", value: parts[0]),
+            CssDecl(property: "{prop}-right", value: parts[1]),
+            CssDecl(property: "{prop}-bottom", value: parts[2]),
+            CssDecl(property: "{prop}-left", value: parts[1])
+        ]
+    if parts.len() >= 4:
+        return [
+            CssDecl(property: "{prop}-top", value: parts[0]),
+            CssDecl(property: "{prop}-right", value: parts[1]),
+            CssDecl(property: "{prop}-bottom", value: parts[2]),
+            CssDecl(property: "{prop}-left", value: parts[3])
+        ]
+    [CssDecl(property: prop, value: value)]
+
+# =========================================================================
+# Selector matching
+# =========================================================================
+
+fn selector_matches(selector: text, node: BeDomNode, parent: BeDomNode?, nth: i32, sibling_count: i32) -> bool:
+    val trimmed = selector.trim()
+    if trimmed.len() == 0:
+        return false
+
+    # Bounded child combinator: ".parent > child". The caller supplies the
+    # immediate parent while walking the DOM, so keep this strict instead of
+    # letting whitespace tokenization degrade it into descendant-like matching.
+    val child_pos = sb_find_top_level_child_combinator(trimmed)
+    if child_pos < 999999999:
+        val parent_selector = trimmed.slice(0, child_pos).trim()
+        val child_selector = trimmed.slice(child_pos + 1, trimmed.len()).trim()
+        if parent_selector.len() == 0 or child_selector.len() == 0:
+            return false
+        if not simple_selector_matches(child_selector, node, nth, sibling_count):
+            return false
+        match parent:
+            case Some(parent_node):
+                return simple_selector_matches(parent_selector, parent_node, 1, 1)
+            case None:
+                return false
+
+    # Descendant combinator: "div span" — check if any ancestor matches first part
+    val space_parts = sb_split_ws(trimmed)
+    if space_parts.len() > 1:
+        # Last part must match the node itself
+        val last = space_parts[space_parts.len() - 1]
+        if not simple_selector_matches(last, node, nth, sibling_count):
+            return false
+        # For descendant, we just check if node matches the last selector
+        # Full descendant matching would require walking ancestors, but the
+        # caller walks the tree so parents are available
+        return true
+
+    simple_selector_matches(trimmed, node, nth, sibling_count)
+
+fn simple_selector_matches(selector: text, node: BeDomNode, nth: i32, sibling_count: i32) -> bool:
+    val sel = selector.trim()
+    if sel.len() == 0:
+        return false
+    if sel == "*":
+        return node.is_element()
+    if sb_find(sel, "[", 0) < 999999999:
+        return attribute_selector_matches(sel, node, nth, sibling_count)
+
+    # Modern forgiving selector-list pseudos. Specificity differences do not
+    # matter in this order-only style applicator, so :is() and :where() share
+    # matching behavior here.
+    if sel.starts_with(":is(") or sel.starts_with(":where("):
+        return functional_selector_list_matches(sel, node, nth, sibling_count)
+    if sel.starts_with(":not("):
+        return not_selector_list_matches(sel, node, nth, sibling_count)
+    if sel.starts_with(":has("):
+        return has_descendant_selector_list_match(sel, node)
+    if sel == ":first-child":
+        return node.is_element() and nth == 1
+    if sel == ":last-child":
+        return node.is_element() and nth == sibling_count
+    if sel == ":only-child":
+        return node.is_element() and nth == 1 and sibling_count == 1
+    if sel == ":empty":
+        return node_is_empty(node)
+
+    # Handle :nth-child pseudo
+    val nth_pos = sb_find(sel, ":nth-child(", 0)
+    if nth_pos < 999999999:
+        val base_sel = sel.slice(0, nth_pos)
+        val paren_end = sb_find(sel, ")", nth_pos)
+        if paren_end > 0 and paren_end < 999999999:
+            val n_raw = sel.slice(nth_pos + 11, paren_end)
+            val n_str = n_raw.trim()
+            if not nth_child_argument_matches(n_str, nth):
+                return false
+            if base_sel.len() == 0:
+                return node.is_element()
+            return simple_selector_matches(base_sel, node, nth, sibling_count)
+
+    val pseudo_empty_pos = sb_find(sel, ":empty", 0)
+    if pseudo_empty_pos > 0 and pseudo_empty_pos < 999999999:
+        if pseudo_empty_pos + 6 != sel.len():
+            return false
+        val base = sel.slice(0, pseudo_empty_pos)
+        return simple_selector_matches(base, node, nth, sibling_count) and node_is_empty(node)
+    val pseudo_first_child_pos = sb_find(sel, ":first-child", 0)
+    if pseudo_first_child_pos > 0 and pseudo_first_child_pos < 999999999:
+        if pseudo_first_child_pos + 12 != sel.len():
+            return false
+        val base2 = sel.slice(0, pseudo_first_child_pos)
+        return simple_selector_matches(base2, node, nth, sibling_count) and nth == 1
+    val pseudo_last_child_pos = sb_find(sel, ":last-child", 0)
+    if pseudo_last_child_pos > 0 and pseudo_last_child_pos < 999999999:
+        if pseudo_last_child_pos + 11 != sel.len():
+            return false
+        val base3 = sel.slice(0, pseudo_last_child_pos)
+        return simple_selector_matches(base3, node, nth, sibling_count) and nth == sibling_count
+    val pseudo_only_child_pos = sb_find(sel, ":only-child", 0)
+    if pseudo_only_child_pos > 0 and pseudo_only_child_pos < 999999999:
+        if pseudo_only_child_pos + 11 != sel.len():
+            return false
+        val base4 = sel.slice(0, pseudo_only_child_pos)
+        return simple_selector_matches(base4, node, nth, sibling_count) and nth == 1 and sibling_count == 1
+
+    # ID selector: #foo
+    if sel.starts_with("#"):
+        val id = sel.slice(1, sel.len())
+        return be_dom_get_id(node) == id
+
+    # Class selector: .foo
+    if sel.starts_with("."):
+        return selector_class_chain_matches(sel, node)
+
+    # Compound: tag.class or tag#id
+    val pseudo_is_pos = sb_find(sel, ":is(", 0)
+    if pseudo_is_pos > 0 and pseudo_is_pos < 999999999:
+        val base = sel.slice(0, pseudo_is_pos)
+        val pseudo = sel.slice(pseudo_is_pos, sel.len())
+        return simple_selector_matches(base, node, nth, sibling_count) and functional_selector_list_matches(pseudo, node, nth, sibling_count)
+    val pseudo_where_pos = sb_find(sel, ":where(", 0)
+    if pseudo_where_pos > 0 and pseudo_where_pos < 999999999:
+        val base = sel.slice(0, pseudo_where_pos)
+        val pseudo = sel.slice(pseudo_where_pos, sel.len())
+        return simple_selector_matches(base, node, nth, sibling_count) and functional_selector_list_matches(pseudo, node, nth, sibling_count)
+    val pseudo_not_pos = sb_find(sel, ":not(", 0)
+    if pseudo_not_pos > 0 and pseudo_not_pos < 999999999:
+        val base = sel.slice(0, pseudo_not_pos)
+        val pseudo = sel.slice(pseudo_not_pos, sel.len())
+        return simple_selector_matches(base, node, nth, sibling_count) and not_selector_list_matches(pseudo, node, nth, sibling_count)
+    val pseudo_has_pos = sb_find(sel, ":has(", 0)
+    if pseudo_has_pos > 0 and pseudo_has_pos < 999999999:
+        val base = sel.slice(0, pseudo_has_pos)
+        val pseudo = sel.slice(pseudo_has_pos, sel.len())
+        return simple_selector_matches(base, node, nth, sibling_count) and has_descendant_selector_list_match(pseudo, node)
+
+    val dot_pos = sb_find(sel, ".", 0)
+    if dot_pos > 0 and dot_pos < 999999999:
+        val tag = sel.slice(0, dot_pos)
+        val ntag = be_dom_get_tag(node)
+        return ntag == tag and selector_class_chain_matches(sel.slice(dot_pos, sel.len()), node)
+
+    val hash_pos = sb_find(sel, "#", 0)
+    if hash_pos > 0 and hash_pos < 999999999:
+        val tag = sel.slice(0, hash_pos)
+        val id = sel.slice(hash_pos + 1, sel.len())
+        val ntag2 = be_dom_get_tag(node)
+        val nid = be_dom_get_id(node)
+        return ntag2 == tag and nid == id
+
+    # Plain tag selector
+    val ntag3 = be_dom_get_tag(node)
+    ntag3 == sel
+
+fn nth_child_argument_matches(arg: text, nth: i32) -> bool:
+    val trimmed = nth_child_remove_ws(arg.trim().lower())
+    if trimmed == "odd":
+        return nth % 2 == 1
+    if trimmed == "even":
+        return nth % 2 == 0
+    val n_pos = sb_find(trimmed, "n", 0)
+    if n_pos < 999999999:
+        return nth_child_common_formula_matches(trimmed, nth)
+    val target_n = sb_parse_int(trimmed)
+    nth == target_n
+
+fn nth_child_common_formula_matches(formula: text, nth: i32) -> bool:
+    if formula == "2n" or formula == "even":
+        return nth % 2 == 0
+    if formula == "2n+1" or formula == "2n-1" or formula == "odd":
+        return nth % 2 == 1
+    if formula == "n+3":
+        return nth >= 3
+    if formula == "-n+3":
+        return nth <= 3
+    false
+
+fn nth_child_remove_ws(value: text) -> text:
+    var out = ""
+    var idx = 0
+    while idx < value.len():
+        val ch = value.char_at(idx)
+        if ch != " " and ch != "\t" and ch != "\n" and ch != "\r":
+            out = out + ch
+        idx = idx + 1
+    out
+
+fn selector_class_chain_matches(selector: text, node: BeDomNode) -> bool:
+    val trimmed = selector.trim()
+    if not trimmed.starts_with("."):
+        return false
+    var saw_class = false
+    var segment_start = 1
+    var idx = 1
+    while idx <= trimmed.len():
+        if idx == trimmed.len() or trimmed.char_at(idx) == ".":
+            val cls = trimmed.slice(segment_start, idx).trim()
+            if cls.len() == 0 or not sb_has_class(node, cls):
+                return false
+            saw_class = true
+            segment_start = idx + 1
+        idx = idx + 1
+    saw_class
+
+fn node_is_empty(node: BeDomNode) -> bool:
+    val children = be_dom_get_children(node)
+    var idx = 0
+    while idx < children.len():
+        val child = children[idx]
+        if be_dom_get_is_text(child):
+            if be_dom_get_text(child).trim().len() > 0:
+                return false
+        else:
+            return false
+        idx = idx + 1
+    true
+
+fn attribute_selector_matches(selector: text, node: BeDomNode, nth: i32, sibling_count: i32) -> bool:
+    val open = sb_find(selector, "[", 0)
+    if open >= 999999999:
+        return false
+    val close = sb_find(selector, "]", open + 1)
+    if close >= 999999999:
+        return false
+    val base = selector.slice(0, open).trim()
+    if base.len() > 0 and not simple_selector_matches(base, node, nth, sibling_count):
+        return false
+    val body = selector.slice(open + 1, close).trim()
+    if body.len() == 0:
+        return false
+    val eq_pos = sb_find(body, "=", 0)
+    if eq_pos >= 999999999:
+        return be_dom_has_attr(node, body.lower())
+    val op = sb_attr_operator(body, eq_pos)
+    var key_end = eq_pos
+    if op != "=":
+        key_end = eq_pos - 1
+    val key = body.slice(0, key_end).trim().lower()
+    val raw_expected = body.slice(eq_pos + 1, body.len()).trim()
+    val insensitive = sb_attr_has_i_flag(raw_expected)
+    val expected = sb_unquote_attr_value(sb_attr_value_without_flag(raw_expected))
+    if key.len() == 0:
+        return false
+    if not be_dom_has_attr(node, key):
+        return false
+    sb_attr_value_matches(be_dom_get_attr(node, key), op, expected, insensitive)
+
+fn sb_attr_operator(body: text, eq_pos: i32) -> text:
+    if eq_pos > 0:
+        val marker = body.char_at(eq_pos - 1)
+        if marker == "^" or marker == "$" or marker == "*" or marker == "~" or marker == "|":
+            return marker + "="
+    "="
+
+fn sb_attr_value_matches(actual: text, op: text, expected: text, insensitive: bool) -> bool:
+    var actual_cmp = actual
+    var expected_cmp = expected
+    if insensitive:
+        actual_cmp = actual.lower()
+        expected_cmp = expected.lower()
+    if op == "=":
+        return actual_cmp == expected_cmp
+    if op == "^=":
+        return actual_cmp.starts_with(expected_cmp)
+    if op == "$=":
+        return actual_cmp.ends_with(expected_cmp)
+    if op == "*=":
+        return actual_cmp.contains(expected_cmp)
+    if op == "~=":
+        return sb_attr_token_contains(actual_cmp, expected_cmp)
+    if op == "|=":
+        return actual_cmp == expected_cmp or actual_cmp.starts_with(expected_cmp + "-")
+    false
+
+fn sb_attr_has_i_flag(value: text) -> bool:
+    value.ends_with(" i") or value.ends_with(" I")
+
+fn sb_attr_has_s_flag(value: text) -> bool:
+    value.ends_with(" s") or value.ends_with(" S")
+
+fn sb_attr_value_without_flag(value: text) -> text:
+    if sb_attr_has_i_flag(value) or sb_attr_has_s_flag(value):
+        return value.slice(0, value.len() - 2).trim()
+    value
+
+fn sb_attr_token_contains(actual: text, expected: text) -> bool:
+    val parts = sb_split_ws(actual)
+    var idx = 0
+    while idx < parts.len():
+        if parts[idx] == expected:
+            return true
+        idx = idx + 1
+    false
+
+fn sb_unquote_attr_value(value: text) -> text:
+    if value.len() >= 2:
+        if (value.starts_with("\"") and value.ends_with("\"")) or (value.starts_with("'") and value.ends_with("'")):
+            return value.slice(1, value.len() - 1)
+    value
+
+fn functional_selector_list_matches(selector: text, node: BeDomNode, nth: i32, sibling_count: i32) -> bool:
+    val open = sb_find(selector, "(", 0)
+    if open >= 999999999:
+        return false
+    val close = sb_find(selector, ")", open + 1)
+    if close >= 999999999:
+        return false
+    val inner = selector.slice(open + 1, close)
+    val options = sb_split_selector_list(inner)
+    var idx = 0
+    while idx < options.len():
+        val option = options[idx].trim()
+        if option.len() > 0 and simple_selector_matches(option, node, nth, sibling_count):
+            return true
+        idx = idx + 1
+    false
+
+fn not_selector_list_matches(selector: text, node: BeDomNode, nth: i32, sibling_count: i32) -> bool:
+    val open = sb_find(selector, "(", 0)
+    if open >= 999999999:
+        return false
+    val close = sb_find(selector, ")", open + 1)
+    if close >= 999999999:
+        return false
+    val inner = selector.slice(open + 1, close)
+    val options = sb_split_selector_list(inner)
+    var idx = 0
+    var saw_option = false
+    while idx < options.len():
+        val option = options[idx].trim()
+        if option.len() > 0:
+            saw_option = true
+            if simple_selector_matches(option, node, nth, sibling_count):
+                return false
+        idx = idx + 1
+    saw_option
+
+fn has_descendant_selector_list_match(selector: text, node: BeDomNode) -> bool:
+    val open = sb_find(selector, "(", 0)
+    if open >= 999999999:
+        return false
+    val close = sb_find(selector, ")", open + 1)
+    if close >= 999999999:
+        return false
+    val inner = selector.slice(open + 1, close)
+    val options = sb_split_selector_list(inner)
+    var idx = 0
+    while idx < options.len():
+        val option = options[idx].trim()
+        if option.len() > 0 and node_has_relative_has_option_matching(node, option):
+            return true
+        idx = idx + 1
+    false
+
+fn node_has_relative_has_option_matching(node: BeDomNode, selector: text) -> bool:
+    val trimmed = selector.trim()
+    if trimmed.starts_with(">"):
+        val child_selector = trimmed.slice(1, trimmed.len()).trim()
+        if child_selector.len() == 0:
+            return false
+        return node_has_direct_child_matching(node, child_selector)
+    node_has_descendant_matching(node, trimmed)
+
+fn node_has_direct_child_matching(node: BeDomNode, selector: text) -> bool:
+    val children = be_dom_get_children(node)
+    var sibling_count = 0
+    var count_idx = 0
+    while count_idx < children.len():
+        if not be_dom_get_is_text(children[count_idx]):
+            sibling_count = sibling_count + 1
+        count_idx = count_idx + 1
+    var idx = 0
+    var nth = 1
+    while idx < children.len():
+        val child = children[idx]
+        if not be_dom_get_is_text(child):
+            if simple_selector_matches(selector, child, nth, sibling_count):
+                return true
+            nth = nth + 1
+        idx = idx + 1
+    false
+
+fn node_has_descendant_matching(node: BeDomNode, selector: text) -> bool:
+    val children = be_dom_get_children(node)
+    var sibling_count = 0
+    var count_idx = 0
+    while count_idx < children.len():
+        if not be_dom_get_is_text(children[count_idx]):
+            sibling_count = sibling_count + 1
+        count_idx = count_idx + 1
+    var idx = 0
+    var nth = 1
+    while idx < children.len():
+        val child = children[idx]
+        if not be_dom_get_is_text(child):
+            if simple_selector_matches(selector, child, nth, sibling_count):
+                return true
+            if node_has_descendant_matching(child, selector):
+                return true
+            nth = nth + 1
+        idx = idx + 1
+    false
+
+fn sb_has_class(node: BeDomNode, name: text) -> bool:
+    """Cross-module class membership check using be_dom_get_classes accessor."""
+    val classes = be_dom_get_classes(node)
+    for cls in classes:
+        if cls == name:
+            return true
+    false
+
+# =========================================================================
+# Apply rules to DOM tree
+# =========================================================================
+
+fn apply_css_rules_to_tree(root: BeDomNode, rules: [CssRule]):
+    apply_rules_to_node(root, rules, nil, 1, 1)
+
+fn apply_rules_to_node(node: BeDomNode, rules: [CssRule], parent: BeDomNode?, nth: i32, sibling_count: i32):
+    if be_dom_get_is_text(node):
+        return
+
+    # Skip style/link/meta/title/head/html/!doctype elements
+    val tag = be_dom_get_tag(node)
+    if tag == "style" or tag == "link" or tag == "meta" or tag == "title" or tag == "head":
+        return
+
+    var color_ru_idx = 0
+    while color_ru_idx < rules.len():
+        val rule = rules[color_ru_idx]
+        color_ru_idx = color_ru_idx + 1
+        if selector_matches(rule.selector, node, parent, nth, sibling_count):
+            var dc_idx = 0
+            while dc_idx < rule.declarations.len():
+                val decl = rule.declarations[dc_idx]
+                dc_idx = dc_idx + 1
+                if decl.property == "color":
+                    node.set_style(decl.property, decl.value)
+    var ru_idx = 0
+    while ru_idx < rules.len():
+        val rule = rules[ru_idx]
+        ru_idx = ru_idx + 1
+        if selector_matches(rule.selector, node, parent, nth, sibling_count):
+            var dc_idx = 0
+            while dc_idx < rule.declarations.len():
+                val decl = rule.declarations[dc_idx]
+                dc_idx = dc_idx + 1
+                if decl.property != "color":
+                    node.set_style(decl.property, decl.value)
+
+    # Recurse to children with nth tracking, rebuilding the children array.
+    # The interpreter copies class instances on array index/push, so the
+    # `child` we fetch from children[i] is a detached copy. We style it,
+    # recurse (which rebuilds its grandchildren in turn), then push the
+    # styled copy into a new array and write the new array back via
+    # be_dom_set_children so the parent sees the changes.
+    var child_nth = 1
+    val sb_kids = be_dom_get_children(node)
+    var child_count = 0
+    var count_idx = 0
+    while count_idx < sb_kids.len():
+        if not be_dom_get_is_text(sb_kids[count_idx]):
+            child_count = child_count + 1
+        count_idx = count_idx + 1
+    var new_kids: [BeDomNode] = []
+    var sc_idx = 0
+    while sc_idx < sb_kids.len():
+        var child = sb_kids[sc_idx]
+        sc_idx = sc_idx + 1
+        apply_rules_to_node(child, rules, node, child_nth, child_count)
+        new_kids.push(child)
+        if not be_dom_get_is_text(child):
+            child_nth = child_nth + 1
+    be_dom_set_children(node, new_kids)
+
+# =========================================================================
+# Public API: process HTML with <style> blocks
+# =========================================================================
+
+pub fn process_style_blocks(root: BeDomNode, html: text):
+    val blocks = extract_style_blocks(html)
+    var all_rules: [CssRule] = []
+    var all_vars: [CssDecl] = []
+    var bl_idx = 0
+    while bl_idx < blocks.len():
+        val block = blocks[bl_idx]
+        bl_idx = bl_idx + 1
+        val _kf_registry = extract_keyframes(block)
+        val rules = parse_css_rules(block)
+        val vars = collect_css_vars(rules)
+        var vi = 0
+        while vi < vars.len():
+            all_vars.push(vars[vi])
+            vi = vi + 1
+        var ri_idx = 0
+        while ri_idx < rules.len():
+            val r = rules[ri_idx]
+            ri_idx = ri_idx + 1
+            all_rules.push(r)
+    if all_rules.len() > 0:
+        val resolved_rules = resolve_css_vars_in_rules(all_rules, all_vars)
+        apply_css_rules_to_tree(root, resolved_rules)
+
+pub fn process_style_blocks_result(root: BeDomNode, html: text) -> BeDomNode:
+    process_style_blocks(root, html)
+    root
+
+# =========================================================================
+# Helpers
+# =========================================================================
+
+fn sb_find(s: text, target: text, start: i64) -> i64:
+    var i = start
+    val tlen = target.len()
+    val slen = s.len()
+    while i + tlen <= slen:
+        if s.slice(i, i + tlen) == target:
+            return i
+        i = i + 1
+    999999999
+
+fn sb_split_char(s: text, delimiter: text) -> [text]:
+    var parts: [text] = []
+    val sb = StringBuilder.new()
+    var idx = 0
+    while idx < s.len():
+        val ch = s.char_at(idx)
+        if ch == delimiter:
+            parts.push(sb.to_text())
+            sb.clear()
+        else:
+            sb.push(ch)
+        idx = idx + 1
+    if not sb.is_empty():
+        parts.push(sb.to_text())
+    parts
+
+fn sb_split_selector_list(s: text) -> [text]:
+    var parts: [text] = []
+    val sb = StringBuilder.new()
+    var idx = 0
+    var paren_depth = 0
+    while idx < s.len():
+        val ch = s.char_at(idx)
+        if ch == "(":
+            paren_depth = paren_depth + 1
+            sb.push(ch)
+        elif ch == ")" and paren_depth > 0:
+            paren_depth = paren_depth - 1
+            sb.push(ch)
+        elif ch == "," and paren_depth == 0:
+            parts.push(sb.to_text())
+            sb.clear()
+        else:
+            sb.push(ch)
+        idx = idx + 1
+    if not sb.is_empty():
+        parts.push(sb.to_text())
+    parts
+
+fn sb_find_top_level_child_combinator(s: text) -> i64:
+    var idx = 0
+    var paren_depth = 0
+    while idx < s.len():
+        val ch = s.char_at(idx)
+        if ch == "(":
+            paren_depth = paren_depth + 1
+        elif ch == ")" and paren_depth > 0:
+            paren_depth = paren_depth - 1
+        elif ch == ">" and paren_depth == 0:
+            return idx
+        idx = idx + 1
+    999999999
+
+fn sb_split_ws(s: text) -> [text]:
+    var parts: [text] = []
+    val sb = StringBuilder.new()
+    var idx = 0
+    while idx < s.len():
+        val ch = s.char_at(idx)
+        if ch == " " or ch == "\t" or ch == "\n" or ch == "\r":
+            if not sb.is_empty():
+                parts.push(sb.to_text())
+                sb.clear()
+        else:
+            sb.push(ch)
+        idx = idx + 1
+    if not sb.is_empty():
+        parts.push(sb.to_text())
+    parts
+
+fn sb_skip_ws_comments(s: text, start: i64) -> i64:
+    var pos = start
+    val slen = s.len()
+    while pos < slen:
+        val ch = s.char_at(pos)
+        if ch == " " or ch == "\t" or ch == "\n" or ch == "\r":
+            pos = pos + 1
+            continue
+        # CSS comment: /* ... */
+        if pos + 1 < slen and s.slice(pos, pos + 2) == "/*":
+            val end = sb_find(s, "*/", pos + 2)
+            if end < 999999999:
+                pos = end + 2
+                continue
+            break
+        break
+    pos
+
+fn sb_parse_int(s: text) -> i32:
+    """Manual integer parser avoiding optional type bugs in Cranelift."""
+    val t = s.trim()
+    if t.len() == 0:
+        return 0
+    var neg = false
+    var start = 0
+    if t.slice(0, 1) == "-":
+        neg = true
+        start = 1
+    elif t.slice(0, 1) == "+":
+        start = 1
+    var result = 0
+    var idx = start
+    val slen = t.len()
+    while idx < slen:
+        val ch = t.char_at(idx)
+        var digit = -1
+        if ch == "0": digit = 0
+        elif ch == "1": digit = 1
+        elif ch == "2": digit = 2
+        elif ch == "3": digit = 3
+        elif ch == "4": digit = 4
+        elif ch == "5": digit = 5
+        elif ch == "6": digit = 6
+        elif ch == "7": digit = 7
+        elif ch == "8": digit = 8
+        elif ch == "9": digit = 9
+        if digit < 0:
+            break
+        result = result * 10 + digit
+        idx = idx + 1
+    if neg:
+        return 0 - result
+    result

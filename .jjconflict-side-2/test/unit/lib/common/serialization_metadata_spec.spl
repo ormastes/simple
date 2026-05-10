@@ -1,0 +1,583 @@
+# @covers src/lib/common/serialization/utilities.spl 70%
+"""
+# Serialization Metadata Coverage Specification
+
+**Feature IDs:** #SERIAL-COV-METADATA
+**Category:** Stdlib
+**Difficulty:** 2/5
+**Status:** Implemented
+
+## Overview
+
+Branch-coverage tests for metadata, tagging, versioning, schema, cloning, hashing,
+compression/encryption markers, binary I/O, and hex encoding:
+- Type tagging: tag_type, get_type_tag, strip_type_tag (utilities.spl)
+- Schema validation: define_schema, validate_field_type (utilities.spl)
+- Versioning: add_version, get_version, strip_version (utilities.spl)
+- Deep cloning, equality, structural hashing (utilities.spl)
+- Compression/encryption markers (utilities.spl)
+- Binary I/O: write_bytes, read_bytes (serialize.spl)
+- Hex encoding: int_to_hex, bytes_to_hex, hex_to_bytes (serialize.spl)
+"""
+
+use serialization.*
+
+# ============================================================================
+# Test Group 13: Type Tagging (utilities.spl)
+# ============================================================================
+
+describe "tag_type":
+    """
+    ## Type Tagging
+    """
+
+    it "wraps content with type annotation":
+        val result = tag_type("payload", "MyType")
+        expect(result).to_equal("@MyType\{payload\}")
+
+describe "get_type_tag":
+    """
+    ## Type Tag Extraction
+
+    Tests valid tagged, too short, missing @, no brace, and nil return.
+    """
+
+    it "extracts tag from tagged string":
+        val result = get_type_tag("@MyType\{payload\}")
+        expect(result).to_equal("MyType")
+
+    it "returns nil for short string":
+        val result = get_type_tag("ab")
+        expect(result).to_be_nil()
+
+    it "returns nil when not starting with @":
+        val result = get_type_tag("NoAt\{payload\}")
+        expect(result).to_be_nil()
+
+    it "returns nil when no opening brace":
+        val result = get_type_tag("@NobraceHere")
+        expect(result).to_be_nil()
+
+describe "strip_type_tag":
+    """
+    ## Type Tag Stripping
+
+    Tests tagged input, untagged input, and edge cases.
+    """
+
+    it "strips tag and returns inner content":
+        val result = strip_type_tag("@MyType\{payload\}")
+        expect(result).to_equal("payload")
+
+    it "returns original when no tag present":
+        val result = strip_type_tag("notatag")
+        expect(result).to_equal("notatag")
+
+    it "returns original for short input":
+        val result = strip_type_tag("ab")
+        expect(result).to_equal("ab")
+
+# ============================================================================
+# Test Group 14: Schema Validation (utilities.spl)
+# ============================================================================
+
+describe "define_schema":
+    """
+    ## Schema Definition
+    """
+
+    it "creates dict representation of schema":
+        val result = define_schema([("name", "text"), ("age", "int")])
+        expect(result).to_contain("name: text")
+        expect(result).to_contain("age: int")
+
+describe "validate_field_type":
+    """
+    ## Field Type Validation
+
+    Tests all type branches: int, bool, nil, text, list, tuple, dict, and unknown.
+    """
+
+    it "validates int type":
+        expect(validate_field_type("42", "int")).to_equal(true)
+
+    it "rejects non-numeric as int":
+        expect(validate_field_type("abc", "int")).to_equal(false)
+
+    it "validates true as bool":
+        expect(validate_field_type("true", "bool")).to_equal(true)
+
+    it "validates false as bool":
+        expect(validate_field_type("false", "bool")).to_equal(true)
+
+    it "rejects non-bool as bool":
+        expect(validate_field_type("42", "bool")).to_equal(false)
+
+    it "validates nil type":
+        expect(validate_field_type("nil", "nil")).to_equal(true)
+
+    it "rejects non-nil as nil":
+        expect(validate_field_type("42", "nil")).to_equal(false)
+
+    it "validates text type by leading quote":
+        expect(validate_field_type("\"hello\"", "text")).to_equal(true)
+
+    it "rejects non-quoted as text":
+        expect(validate_field_type("hello", "text")).to_equal(false)
+
+    it "validates list type by leading bracket":
+        expect(validate_field_type("[1, 2]", "list")).to_equal(true)
+
+    it "rejects non-list as list":
+        expect(validate_field_type("42", "list")).to_equal(false)
+
+    it "validates tuple type by leading paren":
+        expect(validate_field_type("(1, 2)", "tuple")).to_equal(true)
+
+    it "rejects non-tuple as tuple":
+        expect(validate_field_type("42", "tuple")).to_equal(false)
+
+    it "validates dict type by leading brace":
+        expect(validate_field_type("{k: v}", "dict")).to_equal(true)
+
+    it "rejects non-dict as dict":
+        expect(validate_field_type("42", "dict")).to_equal(false)
+
+    it "returns true for unknown type":
+        expect(validate_field_type("anything", "custom_type")).to_equal(true)
+
+# ============================================================================
+# Test Group 15: Versioning (utilities.spl)
+# ============================================================================
+
+describe "add_version":
+    """
+    ## Version Wrapper
+    """
+
+    it "wraps data with version number":
+        val result = add_version("[1, 2]", 3)
+        expect(result).to_contain("v: 3")
+        expect(result).to_contain("data: [1, 2]")
+
+describe "get_version":
+    """
+    ## Version Extraction
+
+    Tests valid versioned string, non-versioned string, and nil return.
+    """
+
+    it "extracts version from versioned string":
+        val versioned = add_version("data", 5)
+        val result = get_version(versioned)
+        expect(result).to_equal(5)
+
+    it "returns nil for non-versioned string":
+        val result = get_version("not versioned")
+        expect(result).to_be_nil()
+
+    it "returns nil for empty string":
+        val result = get_version("")
+        expect(result).to_be_nil()
+
+describe "strip_version":
+    """
+    ## Version Stripping
+
+    Tests versioned input and non-versioned input.
+    """
+
+    it "strips version and returns inner data":
+        val versioned = add_version("[1, 2]", 1)
+        val result = strip_version(versioned)
+        expect(result).to_equal("[1, 2]")
+
+    it "returns original for non-versioned input":
+        val result = strip_version("plain data")
+        expect(result).to_equal("plain data")
+
+describe "parse_int_safe":
+    """
+    ## Safe Integer Parsing
+
+    Tests empty, positive, negative, non-digit, and zero.
+    """
+
+    it "returns 0 for empty string":
+        expect(parse_int_safe("")).to_equal(0)
+
+    it "parses positive integer":
+        expect(parse_int_safe("42")).to_equal(42)
+
+    it "parses negative integer":
+        expect(parse_int_safe("-7")).to_equal(-7)
+
+    it "stops parsing at non-digit":
+        expect(parse_int_safe("12abc")).to_equal(12)
+
+    it "parses zero":
+        expect(parse_int_safe("0")).to_equal(0)
+
+describe "char_to_digit_safe":
+    """
+    ## Character to Digit Conversion
+
+    Tests all digit characters and fallback.
+    """
+
+    it "converts all digit characters":
+        expect(char_to_digit_safe("0")).to_equal(0)
+        expect(char_to_digit_safe("1")).to_equal(1)
+        expect(char_to_digit_safe("2")).to_equal(2)
+        expect(char_to_digit_safe("3")).to_equal(3)
+        expect(char_to_digit_safe("4")).to_equal(4)
+        expect(char_to_digit_safe("5")).to_equal(5)
+        expect(char_to_digit_safe("6")).to_equal(6)
+        expect(char_to_digit_safe("7")).to_equal(7)
+        expect(char_to_digit_safe("8")).to_equal(8)
+        expect(char_to_digit_safe("9")).to_equal(9)
+
+    it "returns 0 for non-digit":
+        expect(char_to_digit_safe("x")).to_equal(0)
+
+# ============================================================================
+# Test Group 16: Deep Cloning (utilities.spl)
+# ============================================================================
+
+describe "Deep Cloning":
+    """
+    ## Deep Clone Functions
+    """
+
+    it "clones integer":
+        expect(deep_clone_int(42)).to_equal(42)
+
+    it "clones boolean true":
+        expect(deep_clone_bool(true)).to_equal(true)
+
+    it "clones boolean false":
+        expect(deep_clone_bool(false)).to_equal(false)
+
+    it "clones text":
+        expect(deep_clone_text("hello")).to_equal("hello")
+
+    it "clones int list":
+        val original = [1, 2, 3]
+        val cloned = deep_clone_list_int(original)
+        expect(deep_equal_list_int(original, cloned)).to_equal(true)
+
+    it "clones text list":
+        val original = ["a", "b"]
+        val cloned = deep_clone_list_text(original)
+        expect(deep_equal_list_text(original, cloned)).to_equal(true)
+
+    it "clones empty int list":
+        val cloned = deep_clone_list_int([])
+        expect(cloned.len()).to_equal(0)
+
+    it "clones empty text list":
+        val cloned = deep_clone_list_text([])
+        expect(cloned.len()).to_equal(0)
+
+describe "Shallow Cloning":
+    """
+    ## Shallow Clone Functions (delegate to deep clone)
+    """
+
+    it "shallow clones int list":
+        val original = [10, 20]
+        val cloned = shallow_clone_list_int(original)
+        expect(deep_equal_list_int(original, cloned)).to_equal(true)
+
+    it "shallow clones text list":
+        val original = ["x", "y"]
+        val cloned = shallow_clone_list_text(original)
+        expect(deep_equal_list_text(original, cloned)).to_equal(true)
+
+# ============================================================================
+# Test Group 17: Deep Equality (utilities.spl)
+# ============================================================================
+
+describe "Deep Equality":
+    """
+    ## Deep Equality Comparisons
+
+    Tests equal and unequal cases for each type, plus length mismatch branch.
+    """
+
+    it "compares equal integers":
+        expect(deep_equal_int(5, 5)).to_equal(true)
+
+    it "compares unequal integers":
+        expect(deep_equal_int(5, 6)).to_equal(false)
+
+    it "compares equal booleans":
+        expect(deep_equal_bool(true, true)).to_equal(true)
+
+    it "compares unequal booleans":
+        expect(deep_equal_bool(true, false)).to_equal(false)
+
+    it "compares equal text":
+        expect(deep_equal_text("abc", "abc")).to_equal(true)
+
+    it "compares unequal text":
+        expect(deep_equal_text("abc", "xyz")).to_equal(false)
+
+    it "compares equal int lists":
+        expect(deep_equal_list_int([1, 2], [1, 2])).to_equal(true)
+
+    it "compares unequal int lists by element":
+        expect(deep_equal_list_int([1, 2], [1, 3])).to_equal(false)
+
+    it "compares int lists of different lengths":
+        expect(deep_equal_list_int([1], [1, 2])).to_equal(false)
+
+    it "compares empty int lists":
+        expect(deep_equal_list_int([], [])).to_equal(true)
+
+    it "compares equal text lists":
+        expect(deep_equal_list_text(["a", "b"], ["a", "b"])).to_equal(true)
+
+    it "compares unequal text lists by element":
+        expect(deep_equal_list_text(["a"], ["b"])).to_equal(false)
+
+    it "compares text lists of different lengths":
+        expect(deep_equal_list_text(["a"], ["a", "b"])).to_equal(false)
+
+    it "compares empty text lists":
+        expect(deep_equal_list_text([], [])).to_equal(true)
+
+# ============================================================================
+# Test Group 18: Structural Hashing (utilities.spl)
+# ============================================================================
+
+describe "Structural Hashing":
+    """
+    ## Hash Functions
+
+    Tests determinism, different inputs produce different hashes, and combine_hashes.
+    """
+
+    it "hashes integer deterministically":
+        val h1 = structural_hash_int(42)
+        val h2 = structural_hash_int(42)
+        expect(h1).to_equal(h2)
+
+    it "hashes different integers differently":
+        val h1 = structural_hash_int(1)
+        val h2 = structural_hash_int(2)
+        expect(h1 == h2).to_equal(false)
+
+    it "hashes true and false differently":
+        val h_true = structural_hash_bool(true)
+        val h_false = structural_hash_bool(false)
+        expect(h_true == h_false).to_equal(false)
+
+    it "hashes bool true to 1":
+        expect(structural_hash_bool(true)).to_equal(1)
+
+    it "hashes bool false to 0":
+        expect(structural_hash_bool(false)).to_equal(0)
+
+    it "hashes empty text to seed value":
+        val h = structural_hash_text("")
+        expect(h).to_equal(2166136261)
+
+    it "hashes single char text without overflow":
+        val h = structural_hash_text("a")
+        expect(h == 0).to_equal(false)
+
+    it "hashes empty int list to seed value":
+        val h = structural_hash_list_int([])
+        expect(h).to_equal(2166136261)
+
+    it "hashes single element int list":
+        val h = structural_hash_list_int([1])
+        expect(h == 0).to_equal(false)
+
+    it "hashes empty text list to seed value":
+        val h = structural_hash_list_text([])
+        expect(h).to_equal(2166136261)
+
+    it "combines hashes":
+        val combined = combine_hashes(100, 200)
+        expect(combined).to_equal(100 * 31 + 200)
+
+# ============================================================================
+# Test Group 19: Compression/Encryption Markers (utilities.spl)
+# ============================================================================
+
+describe "Compression Markers":
+    """
+    ## Compression Marker Functions
+
+    Tests marking and checking, plus negative cases.
+    """
+
+    it "marks data as compressed":
+        val result = mark_compressed("payload")
+        expect(result).to_equal("@Compressed\{payload\}")
+
+    it "detects compressed data":
+        val marked = mark_compressed("payload")
+        expect(is_compressed(marked)).to_equal(true)
+
+    it "returns false for non-compressed data":
+        expect(is_compressed("plain")).to_equal(false)
+
+    it "returns false for short input":
+        expect(is_compressed("ab")).to_equal(false)
+
+describe "Encryption Markers":
+    """
+    ## Encryption Marker Functions
+
+    Tests marking and checking, plus negative cases.
+    """
+
+    it "marks data as encrypted":
+        val result = mark_encrypted("payload")
+        expect(result).to_equal("@Encrypted\{payload\}")
+
+    it "detects encrypted data":
+        val marked = mark_encrypted("payload")
+        expect(is_encrypted(marked)).to_equal(true)
+
+    it "returns false for non-encrypted data":
+        expect(is_encrypted("plain")).to_equal(false)
+
+    it "returns false for short input":
+        expect(is_encrypted("ab")).to_equal(false)
+
+# ============================================================================
+# Test Group 20: Byte Array Utilities (utilities.spl)
+# ============================================================================
+
+describe "write_bytes":
+    """
+    ## Byte Array Writing
+    """
+
+    it "prepends length as varint":
+        val result = write_bytes([10, 20, 30])
+        expect(result[0]).to_equal(3)
+        expect(result.len()).to_equal(4)
+
+    it "writes empty byte array":
+        val result = write_bytes([])
+        expect(result[0]).to_equal(0)
+        expect(result.len()).to_equal(1)
+
+describe "read_bytes":
+    """
+    ## Byte Array Reading
+
+    Tests normal read, read beyond bounds, and empty read.
+    """
+
+    it "reads specified number of bytes":
+        val data = [10, 20, 30, 40, 50]
+        val result = read_bytes(data, 1, 3)
+        val bytes = result.0
+        expect(bytes.len()).to_equal(3)
+        expect(bytes[0]).to_equal(20)
+        expect(bytes[1]).to_equal(30)
+        expect(bytes[2]).to_equal(40)
+
+    it "handles read beyond array bounds":
+        val data = [10, 20]
+        val result = read_bytes(data, 0, 5)
+        val bytes = result.0
+        expect(bytes.len()).to_equal(2)
+
+    it "reads zero bytes":
+        val result = read_bytes([1, 2, 3], 0, 0)
+        val bytes = result.0
+        expect(bytes.len()).to_equal(0)
+
+describe "read_bytes_with_length":
+    """
+    ## Length-Prefixed Byte Reading
+
+    Roundtrip test with write_bytes.
+    """
+
+    it "roundtrips with write_bytes":
+        val original = [65, 66, 67]
+        val written = write_bytes(original)
+        val result = read_bytes_with_length(written, 0)
+        val data = result.0
+        val consumed = result.1
+        expect(data.len()).to_equal(3)
+        expect(data[0]).to_equal(65)
+        expect(data[1]).to_equal(66)
+        expect(data[2]).to_equal(67)
+
+# ============================================================================
+# Test Group 21: Hex Conversion (utilities.spl)
+# ============================================================================
+
+describe "int_to_hex":
+    """
+    ## Integer to Hex Conversion
+    """
+
+    it "converts zero":
+        expect(int_to_hex(0)).to_equal("00")
+
+    it "converts single digit":
+        expect(int_to_hex(10)).to_equal("0a")
+
+    it "converts 255":
+        expect(int_to_hex(255)).to_equal("ff")
+
+    it "converts mid-range value":
+        expect(int_to_hex(171)).to_equal("ab")
+
+describe "bytes_to_hex":
+    """
+    ## Byte Array to Hex String
+    """
+
+    it "converts empty byte array":
+        expect(bytes_to_hex([])).to_equal("")
+
+    it "converts single byte":
+        expect(bytes_to_hex([255])).to_equal("ff")
+
+    it "converts multiple bytes":
+        expect(bytes_to_hex([0, 171, 255])).to_equal("00abff")
+
+describe "hex_to_bytes":
+    """
+    ## Hex String to Byte Array
+
+    Tests even-length, odd-length (trailing nibble), and empty.
+    """
+
+    it "converts empty hex string":
+        val result = hex_to_bytes("")
+        expect(result.len()).to_equal(0)
+
+    it "converts valid hex pairs":
+        val result = hex_to_bytes("00abff")
+        expect(result.len()).to_equal(3)
+        expect(result[0]).to_equal(0)
+        expect(result[1]).to_equal(171)
+        expect(result[2]).to_equal(255)
+
+    it "handles uppercase hex":
+        val result = hex_to_bytes("AB")
+        expect(result.len()).to_equal(1)
+        expect(result[0]).to_equal(171)
+
+    it "handles odd-length hex string by skipping trailing nibble":
+        val result = hex_to_bytes("abc")
+        expect(result.len()).to_equal(1)
+        expect(result[0]).to_equal(171)
+
+    it "roundtrips with bytes_to_hex":
+        val original = [0, 42, 255, 128]
+        val roundtripped = hex_to_bytes(bytes_to_hex(original))
+        expect(deep_equal_list_int(original, roundtripped)).to_equal(true)
+

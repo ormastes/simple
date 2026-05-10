@@ -1,0 +1,165 @@
+# SimpleOS Device Filesystem Service (G7)
+#
+# ECS-backed device node registry. Each entity represents one device
+# node in /dev. Components store the device name, numeric id, kind
+# (char/block), permission mode, and backend IPC endpoint.
+
+use std.ecs.entity.{Entity, EntityAllocator}
+use std.ecs.component_store.{ComponentStore}
+use std.ecs.world.{WorldBase}
+use os.posix.errno.{ENOENT}
+
+# ============================================================================
+# Device kind constants
+# ============================================================================
+
+val DEV_CHAR: u32 = 0
+val DEV_BLOCK: u32 = 1
+
+# ============================================================================
+# Components
+# ============================================================================
+
+struct DevName:
+    """Human-readable name of the device node (e.g. 'tty0')."""
+    text: text
+
+struct DevId:
+    """Numeric device identifier assigned by the driver."""
+    value: u32
+
+struct DevKind:
+    """DEV_CHAR (0) for character devices, DEV_BLOCK (1) for block devices."""
+    kind: u32
+
+struct Permissions:
+    """POSIX permission mode bits (e.g. 0o644)."""
+    mode: u32
+
+struct BackendEndpoint:
+    """IPC endpoint address for the driver backing this device."""
+    ep: u64
+
+# ============================================================================
+# DevfsWorld — ECS world
+# ============================================================================
+
+struct DevfsWorld:
+    """ECS world owning all /dev entity data."""
+    base:      WorldBase
+    names:     ComponentStore<DevName>
+    ids:       ComponentStore<DevId>
+    kinds:     ComponentStore<DevKind>
+    perms:     ComponentStore<Permissions>
+    backends:  ComponentStore<BackendEndpoint>
+
+# ============================================================================
+# DevfsService — public API
+# ============================================================================
+
+class DevfsService:
+    """Device filesystem service.
+
+    Owns a DevfsWorld (ECS world) internally. Provides registration,
+    lookup, and enumeration of /dev device nodes. Each node is backed
+    by a driver IPC endpoint stored in BackendEndpoint.
+    """
+    world: DevfsWorld
+
+impl DevfsService:
+    static fn new() -> DevfsService:
+        """Create an empty DevfsService with no registered devices."""
+        DevfsService(
+            world: DevfsWorld(
+                base:     WorldBase.new(),
+                names:    ComponentStore.new(),
+                ids:      ComponentStore.new(),
+                kinds:    ComponentStore.new(),
+                perms:    ComponentStore.new(),
+                backends: ComponentStore.new()
+            )
+        )
+
+    me dev_register(name: text, dev_id: u32, kind: u32, mode: u32, backend: u64) -> Entity:
+        """Register a new device node and return its entity handle.
+
+        Creates an ECS entity and inserts all five components. The caller
+        is responsible for ensuring the name is unique before calling.
+        """
+        val e = self.world.base.spawn()
+        val tick = self.world.base.now()
+        self.world.names.insert(e,    DevName(text: name),               tick)
+        self.world.ids.insert(e,      DevId(value: dev_id),              tick)
+        self.world.kinds.insert(e,    DevKind(kind: kind),               tick)
+        self.world.perms.insert(e,    Permissions(mode: mode),           tick)
+        self.world.backends.insert(e, BackendEndpoint(ep: backend),      tick)
+        e
+
+    me dev_unregister(name: text):
+        """Remove the device node with the given name, if it exists.
+
+        Iterates all name entries to find a match, then despawns the
+        entity and removes all component data. No-op if not found.
+        """
+        val count = self.world.names.len()
+        var i = 0
+        var found_id: i32 = -1
+        while i < count:
+            val eid_raw = self.world.names.entity_at(i)
+            val e = Entity(id: eid_raw, generation: 1)
+            val slot = self.world.names.get_slot(e)
+            if slot >= 0:
+                if self.world.names.dense[slot].text == name:
+                    found_id = eid_raw
+            i = i + 1
+        if found_id >= 0:
+            val e = Entity(id: found_id, generation: 1)
+            self.world.names.remove(e)
+            self.world.ids.remove(e)
+            self.world.kinds.remove(e)
+            self.world.perms.remove(e)
+            self.world.backends.remove(e)
+            self.world.base.despawn(e)
+
+    fn dev_lookup(name: text) -> i64:
+        """Return the backend endpoint for a device by name.
+
+        Returns the endpoint value (>= 0) on success, or -ENOENT (-2)
+        if no device with that name is registered.
+        """
+        val count = self.world.names.len()
+        var i = 0
+        while i < count:
+            val eid_raw = self.world.names.entity_at(i)
+            val e = Entity(id: eid_raw, generation: 1)
+            val nslot = self.world.names.get_slot(e)
+            if nslot >= 0:
+                if self.world.names.dense[nslot].text == name:
+                    val bslot = self.world.backends.get_slot(e)
+                    if bslot >= 0:
+                        return self.world.backends.dense[bslot].ep as i64
+            i = i + 1
+        return 0 - ENOENT as i64
+
+    fn dev_list_count() -> i32:
+        """Return the number of currently registered device nodes."""
+        self.world.names.len()
+
+    fn dev_permissions_of(name: text) -> u32:
+        """Return the permission mode for the named device.
+
+        Returns the mode bits on success, or 0 if not found.
+        """
+        val count = self.world.names.len()
+        var i = 0
+        while i < count:
+            val eid_raw = self.world.names.entity_at(i)
+            val e = Entity(id: eid_raw, generation: 1)
+            val nslot = self.world.names.get_slot(e)
+            if nslot >= 0:
+                if self.world.names.dense[nslot].text == name:
+                    val pslot = self.world.perms.get_slot(e)
+                    if pslot >= 0:
+                        return self.world.perms.dense[pslot].mode
+            i = i + 1
+        return 0
