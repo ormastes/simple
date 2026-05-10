@@ -1,6 +1,7 @@
 # Bug — Interpreter rejects `!` (unwrap) operator on variables and in non-terminal positions
 
 **Filed:** 2026-05-08 (debug format library test failures)
+**Status:** FIXED 2026-05-10 -- verified by interpreter repro (all Cases A/B/C pass)
 **Severity:** High — blocks any interpreter-mode code using `variable!`, `x!.field`, or `fn(expr!)` patterns.
 
 ## Symptom

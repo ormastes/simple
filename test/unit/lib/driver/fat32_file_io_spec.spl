@@ -1,0 +1,390 @@
+# FR-DRIVER-0007: Fat32Core file I/O surface tests.
+#
+# Tests open, read, write, readdir, truncate on Fat32Core via the
+# test-device registration helpers (same pattern as fat32_driver_adapter_test).
+
+use std.spipe.*
+use std.fs_driver.block_device.{BlockDevice}
+use std.fs_driver.fat32_core.{fat32_register_test_device,
+                              fat32_test_device_mount,
+                              fat32_test_device_open,
+                              fat32_test_device_close,
+                              fat32_test_device_read,
+                              fat32_test_device_write,
+                              fat32_test_device_readdir,
+                              fat32_test_device_truncate,
+                              fat32_test_device_is_mounted}
+use std.fs_driver.types.{FileHandle}
+
+# --- Mock block device with a minimal FAT32 image ---
+#
+# Layout (512 bytes/sector, 1 sector/cluster):
+#   sector 0:  BPB/boot sector
+#   sector 32: FAT sector 0 (reserved_sectors = 32)
+#   sector 33: FAT sector 1 (second FAT copy, num_fats = 2)
+#   sector 34: data cluster 2 (root directory)
+#   sector 35: data cluster 3 (file "hello.txt" data)
+#
+# data_start_sector = reserved_sectors + num_fats * fat_size = 32 + 2*1 = 34
+# total_sectors = 4096
+# total_clusters = (4096 - 34) / 1 = 4062
+
+class FileMockBlockDevice:
+    sectors: [[u8]]
+
+impl FileMockBlockDevice:
+    static fn new() -> FileMockBlockDevice:
+        var sectors: [[u8]] = []
+        # Allocate 40 sectors (enough for BPB + FAT + root dir + data)
+        var s = 0
+        while s < 40:
+            var sector: [u8] = []
+            var i = 0
+            while i < 512:
+                sector.push(0)
+                i = i + 1
+            sectors.push(sector)
+            s = s + 1
+
+        # --- Sector 0: BPB ---
+        var bpb = sectors[0]
+        # bytes_per_sector = 512 (0x0200) at offset 11-12
+        bpb[11] = 0x00
+        bpb[12] = 0x02
+        # sectors_per_cluster = 1
+        bpb[13] = 0x01
+        # reserved_sectors = 32 (0x0020) at offset 14-15
+        bpb[14] = 0x20
+        bpb[15] = 0x00
+        # num_fats = 2
+        bpb[16] = 0x02
+        # total_sectors_32 = 4096 (0x00001000) at offset 32-35
+        bpb[32] = 0x00
+        bpb[33] = 0x10
+        bpb[34] = 0x00
+        bpb[35] = 0x00
+        # fat_size_32 = 1 (0x00000001) at offset 36-39
+        bpb[36] = 0x01
+        bpb[37] = 0x00
+        bpb[38] = 0x00
+        bpb[39] = 0x00
+        # root_cluster = 2 (0x00000002) at offset 44-47
+        bpb[44] = 0x02
+        bpb[45] = 0x00
+        bpb[46] = 0x00
+        bpb[47] = 0x00
+        # boot signature
+        bpb[510] = 0x55
+        bpb[511] = 0xAA
+        sectors[0] = bpb
+
+        # --- Sector 32: FAT ---
+        var fat = sectors[32]
+        # cluster 0: media byte (0x0FFFFFF8)
+        fat[0] = 0xF8
+        fat[1] = 0xFF
+        fat[2] = 0xFF
+        fat[3] = 0x0F
+        # cluster 1: EOC (0x0FFFFFFF)
+        fat[4] = 0xFF
+        fat[5] = 0xFF
+        fat[6] = 0xFF
+        fat[7] = 0x0F
+        # cluster 2: root dir, EOC (0x0FFFFFF8)
+        fat[8] = 0xF8
+        fat[9] = 0xFF
+        fat[10] = 0xFF
+        fat[11] = 0x0F
+        # cluster 3: file data, EOC (0x0FFFFFF8)
+        fat[12] = 0xF8
+        fat[13] = 0xFF
+        fat[14] = 0xFF
+        fat[15] = 0x0F
+        # clusters 4+: free (0x00000000) — already zero
+        sectors[32] = fat
+
+        # --- Sector 34: Root directory (cluster 2) ---
+        # data_start_sector = 32 + 2*1 = 34
+        # cluster 2 -> sector 34
+        var root = sectors[34]
+        # Entry 0: "HELLO   TXT" — 8.3 short name for "hello.txt"
+        # name[0..7] = "HELLO   "
+        root[0] = 0x48   # H
+        root[1] = 0x45   # E
+        root[2] = 0x4C   # L
+        root[3] = 0x4C   # L
+        root[4] = 0x4F   # O
+        root[5] = 0x20   # space
+        root[6] = 0x20   # space
+        root[7] = 0x20   # space
+        # ext[8..10] = "TXT"
+        root[8] = 0x54   # T
+        root[9] = 0x58   # X
+        root[10] = 0x54  # T
+        # attr = 0x20 (ARCHIVE) at offset 11
+        root[11] = 0x20
+        # cluster high word = 0 at offset 20-21
+        root[20] = 0x00
+        root[21] = 0x00
+        # cluster low word = 3 at offset 26-27
+        root[26] = 0x03
+        root[27] = 0x00
+        # file size = 5 at offset 28-31
+        root[28] = 0x05
+        root[29] = 0x00
+        root[30] = 0x00
+        root[31] = 0x00
+
+        # Entry 1: "SUBDIR  " — a subdirectory
+        root[32] = 0x53  # S
+        root[33] = 0x55  # U
+        root[34] = 0x42  # B
+        root[35] = 0x44  # D
+        root[36] = 0x49  # I
+        root[37] = 0x52  # R
+        root[38] = 0x20  # space
+        root[39] = 0x20  # space
+        root[40] = 0x20  # space (ext)
+        root[41] = 0x20  # space
+        root[42] = 0x20  # space
+        # attr = DIRECTORY (0x10)
+        root[43] = 0x10
+        # cluster high = 0
+        root[52] = 0x00
+        root[53] = 0x00
+        # cluster low = 4
+        root[58] = 0x04
+        root[59] = 0x00
+        # size = 0 for directories
+        root[60] = 0x00
+        root[61] = 0x00
+        root[62] = 0x00
+        root[63] = 0x00
+
+        # End of dir marker: entry 2 starts at offset 64, first byte = 0x00
+        # Already zero.
+        sectors[34] = root
+
+        # --- Sector 35: File data (cluster 3) ---
+        # "Hello" = [0x48, 0x65, 0x6C, 0x6C, 0x6F]
+        var fdata = sectors[35]
+        fdata[0] = 0x48
+        fdata[1] = 0x65
+        fdata[2] = 0x6C
+        fdata[3] = 0x6C
+        fdata[4] = 0x6F
+        sectors[35] = fdata
+
+        FileMockBlockDevice(sectors: sectors)
+
+impl BlockDevice for FileMockBlockDevice:
+    fn read_sector(lba: u64, buffer: [u8]) -> Result<bool, text>:
+        val idx = lba.to_i32()
+        if idx < 0 or idx >= self.sectors.len():
+            var i = 0
+            while i < buffer.len():
+                buffer[i] = 0
+                i = i + 1
+            return Result.Ok(true)
+        val src = self.sectors[idx]
+        var i = 0
+        while i < buffer.len() and i < src.len():
+            buffer[i] = src[i]
+            i = i + 1
+        Result.Ok(true)
+
+    fn write_sector(lba: u64, data: [u8]) -> Result<bool, text>:
+        val idx = lba.to_i32()
+        if idx < 0:
+            return Result.Err("invalid sector")
+        # Extend if needed
+        while idx >= self.sectors.len():
+            var empty: [u8] = []
+            var i = 0
+            while i < 512:
+                empty.push(0)
+                i = i + 1
+            self.sectors.push(empty)
+        var dest = self.sectors[idx]
+        var i = 0
+        while i < data.len() and i < dest.len():
+            dest[i] = data[i]
+            i = i + 1
+        self.sectors[idx] = dest
+        Result.Ok(true)
+
+    fn sector_size() -> u32:
+        512
+
+
+describe "fat32 file I/O (FR-DRIVER-0007)":
+    it "mount persists via test device helpers":
+        val dev = fat32_register_test_device(FileMockBlockDevice.new())
+        val mount_rc = fat32_test_device_mount(dev)
+        var mount_err = ""
+        match mount_rc:
+            Result.Ok(_) -> mount_err = "none"
+            Result.Err(e) -> mount_err = e
+        expect(mount_err).to_equal("none")
+        val is_m = fat32_test_device_is_mounted(dev)
+        expect(is_m.unwrap()).to_equal(true)
+
+    it "open returns a valid handle for an existing file":
+        val dev = fat32_register_test_device(FileMockBlockDevice.new())
+        val mount_rc = fat32_test_device_mount(dev)
+        expect(mount_rc.is_ok()).to_equal(true)
+
+        val open_rc = fat32_test_device_open(dev, "/hello.txt")
+        var open_err = ""
+        match open_rc:
+            Result.Ok(_) -> open_err = "none"
+            Result.Err(e) -> open_err = e
+        expect(open_err).to_equal("none")
+        if open_rc.is_ok():
+            val handle = open_rc.unwrap()
+            expect(handle.id).to_be_greater_than(0)
+            val close_rc = fat32_test_device_close(dev, handle)
+            expect(close_rc.is_ok()).to_equal(true)
+
+    it "open returns error for non-existent file":
+        val dev = fat32_register_test_device(FileMockBlockDevice.new())
+        val mount_rc = fat32_test_device_mount(dev)
+        expect(mount_rc.is_ok()).to_equal(true)
+
+        val open_rc = fat32_test_device_open(dev, "/missing.txt")
+        expect(open_rc.is_err()).to_equal(true)
+
+    it "read returns file contents":
+        val dev = fat32_register_test_device(FileMockBlockDevice.new())
+        val mount_rc = fat32_test_device_mount(dev)
+        expect(mount_rc.is_ok()).to_equal(true)
+
+        val open_rc = fat32_test_device_open(dev, "/hello.txt")
+        expect(open_rc.is_ok()).to_equal(true)
+        val handle = open_rc.unwrap()
+
+        var buf: [u8] = [0, 0, 0, 0, 0, 0, 0, 0]
+        val read_rc = fat32_test_device_read(dev, handle, buf, 5)
+        expect(read_rc.is_ok()).to_equal(true)
+        expect(read_rc.unwrap()).to_equal(5)
+        # "Hello" = H(0x48) e(0x65) l(0x6C) l(0x6C) o(0x6F)
+        expect(buf[0]).to_equal(0x48)
+        expect(buf[1]).to_equal(0x65)
+        expect(buf[2]).to_equal(0x6C)
+        expect(buf[3]).to_equal(0x6C)
+        expect(buf[4]).to_equal(0x6F)
+
+        val close_rc = fat32_test_device_close(dev, handle)
+        expect(close_rc.is_ok()).to_equal(true)
+
+    it "read past EOF returns 0 bytes":
+        val dev = fat32_register_test_device(FileMockBlockDevice.new())
+        val mount_rc = fat32_test_device_mount(dev)
+        expect(mount_rc.is_ok()).to_equal(true)
+
+        val handle = fat32_test_device_open(dev, "/hello.txt").unwrap()
+        # Read the full file first
+        var buf1: [u8] = [0, 0, 0, 0, 0, 0, 0, 0]
+        val r1 = fat32_test_device_read(dev, handle, buf1, 8)
+        expect(r1.unwrap()).to_equal(5)
+        # Now read again — should return 0 (at EOF)
+        var buf2: [u8] = [0, 0, 0, 0]
+        val r2 = fat32_test_device_read(dev, handle, buf2, 4)
+        expect(r2.unwrap()).to_equal(0)
+
+        fat32_test_device_close(dev, handle)
+
+    it "write stores data and read retrieves it":
+        val dev = fat32_register_test_device(FileMockBlockDevice.new())
+        val mount_rc = fat32_test_device_mount(dev)
+        expect(mount_rc.is_ok()).to_equal(true)
+
+        val handle = fat32_test_device_open(dev, "/hello.txt").unwrap()
+        # Write "AB" at position 0 (after open, position is 0)
+        var wbuf: [u8] = [0x41, 0x42]
+        val write_rc = fat32_test_device_write(dev, handle, wbuf, 2)
+        expect(write_rc.is_ok()).to_equal(true)
+        expect(write_rc.unwrap()).to_equal(2)
+
+        fat32_test_device_close(dev, handle)
+
+        # Re-open and read back
+        val handle2 = fat32_test_device_open(dev, "/hello.txt").unwrap()
+        var rbuf: [u8] = [0, 0, 0, 0, 0, 0, 0, 0]
+        val read_rc = fat32_test_device_read(dev, handle2, rbuf, 5)
+        expect(read_rc.is_ok()).to_equal(true)
+        # First two bytes should be overwritten
+        expect(rbuf[0]).to_equal(0x41)
+        expect(rbuf[1]).to_equal(0x42)
+        # Remaining bytes from original "llo"
+        expect(rbuf[2]).to_equal(0x6C)
+
+        fat32_test_device_close(dev, handle2)
+
+    it "readdir lists root directory entries":
+        val dev = fat32_register_test_device(FileMockBlockDevice.new())
+        val mount_rc = fat32_test_device_mount(dev)
+        expect(mount_rc.is_ok()).to_equal(true)
+
+        val dir_rc = fat32_test_device_readdir(dev, "/")
+        expect(dir_rc.is_ok()).to_equal(true)
+        val entries = dir_rc.unwrap()
+        expect(entries.len()).to_equal(2)
+        expect(entries[0].name).to_equal("hello.txt")
+        expect(entries[0].is_dir).to_equal(false)
+        expect(entries[1].name).to_equal("subdir")
+        expect(entries[1].is_dir).to_equal(true)
+
+    it "readdir on non-directory returns error":
+        val dev = fat32_register_test_device(FileMockBlockDevice.new())
+        val mount_rc = fat32_test_device_mount(dev)
+        expect(mount_rc.is_ok()).to_equal(true)
+
+        val dir_rc = fat32_test_device_readdir(dev, "/hello.txt")
+        expect(dir_rc.is_err()).to_equal(true)
+
+    it "truncate to zero clears file":
+        val dev = fat32_register_test_device(FileMockBlockDevice.new())
+        val mount_rc = fat32_test_device_mount(dev)
+        expect(mount_rc.is_ok()).to_equal(true)
+
+        val handle = fat32_test_device_open(dev, "/hello.txt").unwrap()
+        val trunc_rc = fat32_test_device_truncate(dev, handle, 0)
+        expect(trunc_rc.is_ok()).to_equal(true)
+
+        # Read should return 0 after truncation
+        var buf: [u8] = [0, 0, 0, 0]
+        val read_rc = fat32_test_device_read(dev, handle, buf, 4)
+        expect(read_rc.is_ok()).to_equal(true)
+        expect(read_rc.unwrap()).to_equal(0)
+
+        fat32_test_device_close(dev, handle)
+
+    it "truncate to smaller size preserves prefix":
+        val dev = fat32_register_test_device(FileMockBlockDevice.new())
+        val mount_rc = fat32_test_device_mount(dev)
+        expect(mount_rc.is_ok()).to_equal(true)
+
+        val handle = fat32_test_device_open(dev, "/hello.txt").unwrap()
+        # Truncate 5-byte file to 3 bytes
+        val trunc_rc = fat32_test_device_truncate(dev, handle, 3)
+        expect(trunc_rc.is_ok()).to_equal(true)
+
+        # Read should only return 3 bytes
+        var buf: [u8] = [0, 0, 0, 0, 0, 0, 0, 0]
+        val read_rc = fat32_test_device_read(dev, handle, buf, 8)
+        expect(read_rc.is_ok()).to_equal(true)
+        expect(read_rc.unwrap()).to_equal(3)
+        expect(buf[0]).to_equal(0x48)
+        expect(buf[1]).to_equal(0x65)
+        expect(buf[2]).to_equal(0x6C)
+
+        fat32_test_device_close(dev, handle)
+
+    it "close on invalid handle returns error":
+        val dev = fat32_register_test_device(FileMockBlockDevice.new())
+        val mount_rc = fat32_test_device_mount(dev)
+        expect(mount_rc.is_ok()).to_equal(true)
+
+        val close_rc = fat32_test_device_close(dev, FileHandle(id: 9999))
+        expect(close_rc.is_err()).to_equal(true)

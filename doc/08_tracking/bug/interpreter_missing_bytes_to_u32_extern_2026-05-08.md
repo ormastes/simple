@@ -1,6 +1,7 @@
 # Bug — Interpreter missing `bytes_to_u32_le`/`bytes_to_u32_be` externs
 
 **Filed:** 2026-05-08 (debug format library test failures)
+**Status:** FIXED 2026-05-10 -- verified by interpreter repro (all bytes_to_u16/u32/u64 le/be externs registered and returning correct values)
 **Severity:** High — blocks any interpreter-mode code using `BinaryReader.read_u16()`, `read_u32()`, `read_u64()`, and any code that imports modules calling these methods.
 
 ## Symptom

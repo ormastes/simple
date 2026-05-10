@@ -228,6 +228,60 @@ fn _sha512_padded_len(data_len: u64) -> u64:
     else:
         total_without_pad + (128 - remainder)
 
+# ============================================================================
+# HMAC-SHA-512 (RFC 2104)
+# ============================================================================
+
+fn _normalize_hmac512_key(key: [u8], key_len: u64) -> [u8]:
+    val block_size: u64 = 128
+    var k_prime: [u8] = []
+    if key_len > block_size:
+        val hashed_key = sha512(key)
+        var j: u64 = 0
+        while j < 64:
+            k_prime.push(hashed_key[j])
+            j = j + 1
+    else:
+        var j: u64 = 0
+        while j < key_len:
+            k_prime.push(key[j])
+            j = j + 1
+
+    while k_prime.len() < block_size:
+        k_prime.push(0x00)
+
+    k_prime
+
+fn _sha512_hmac_with_norm_key(k_prime: [u8], data: [u8], data_len: u64) -> [u8]:
+    val block_size: u64 = 128
+    var inner_input: [u8] = []
+    var i: u64 = 0
+    while i < block_size:
+        inner_input.push((k_prime[i] ^ 0x36).to_u8())
+        i = i + 1
+    i = 0
+    while i < data_len:
+        inner_input.push(data[i])
+        i = i + 1
+
+    val inner_hash = sha512(inner_input)
+
+    var outer_input: [u8] = []
+    i = 0
+    while i < block_size:
+        outer_input.push((k_prime[i] ^ 0x5c).to_u8())
+        i = i + 1
+    i = 0
+    while i < 64:
+        outer_input.push(inner_hash[i])
+        i = i + 1
+
+    sha512(outer_input)
+
+fn sha512_hmac(key: [u8], data: [u8]) -> [u8]:
+    val k_prime = _normalize_hmac512_key(key, key.len().to_u64())
+    _sha512_hmac_with_norm_key(k_prime, data, data.len().to_u64())
+
 fn _sha512_pure_simple(data: [u8]) -> [u8]:
     """Original Pure Simple SHA-512 — disabled in baremetal."""
     val padded = sha512_pad(data)

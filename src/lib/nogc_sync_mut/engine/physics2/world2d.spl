@@ -13,6 +13,7 @@
 
 use std.common.engine.ids.{NodeId}
 use std.common.engine.math2d.{Vec2}
+use std.common.math.{math_sqrt, math_abs}
 use std.nogc_sync_mut.engine.physics2.config.{PhysicsConfig2D}
 use std.nogc_sync_mut.engine.physics2.backend.{PhysicsBackend, select_backend}
 use std.nogc_sync_mut.engine.physics2.data.solver_body2d.{SolverBodyStore2D}
@@ -208,12 +209,104 @@ impl PhysicsWorld2D:
             i = i + 1
 
     me solve_contacts():
-        match self.active_backend:
-            PhysicsBackend.CpuScalar => self.scalar_solver.solve(self.bodies, self.constraints)
-            PhysicsBackend.CpuSimd => self.simd_solver.solve(self.bodies, self.constraints)
-            PhysicsBackend.Cuda => self.simd_solver.solve(self.bodies, self.constraints)
-            PhysicsBackend.VulkanCompute => self.simd_solver.solve(self.bodies, self.constraints)
-            PhysicsBackend.Auto => self.simd_solver.solve(self.bodies, self.constraints)
+        self.solve_velocity_inline(self.scalar_solver.velocity_iterations)
+        self.solve_position_inline(self.scalar_solver.position_iterations, self.scalar_solver.baumgarte, self.scalar_solver.slop)
+
+    me solve_velocity_inline(iterations: i64):
+        var iter = 0
+        while iter < iterations:
+            var ci = 0
+            while ci < self.constraints.count:
+                val a = self.constraints.body_a[ci]
+                val b = self.constraints.body_b[ci]
+                val nx = self.constraints.normal_x[ci]
+                val ny = self.constraints.normal_y[ci]
+                val px = self.constraints.point_x[ci]
+                val py = self.constraints.point_y[ci]
+                val ra_x = px - self.bodies.pos_x[a]
+                val ra_y = py - self.bodies.pos_y[a]
+                val rb_x = px - self.bodies.pos_x[b]
+                val rb_y = py - self.bodies.pos_y[b]
+                val va_x = self.bodies.vel_x[a] + (-self.bodies.ang_vel[a] * ra_y)
+                val va_y = self.bodies.vel_y[a] + (self.bodies.ang_vel[a] * ra_x)
+                val vb_x = self.bodies.vel_x[b] + (-self.bodies.ang_vel[b] * rb_y)
+                val vb_y = self.bodies.vel_y[b] + (self.bodies.ang_vel[b] * rb_x)
+                val rel_vx = vb_x - va_x
+                val rel_vy = vb_y - va_y
+                val vn = rel_vx * nx + rel_vy * ny
+                val ra_cross_n = ra_x * ny - ra_y * nx
+                val rb_cross_n = rb_x * ny - rb_y * nx
+                val eff_mass = self.bodies.inv_mass[a] + self.bodies.inv_mass[b] + (ra_cross_n * ra_cross_n * self.bodies.inv_inertia[a]) + (rb_cross_n * rb_cross_n * self.bodies.inv_inertia[b])
+                if eff_mass > 0.0:
+                    val restitution = self.constraints.restitution[ci]
+                    val bias = if vn < -1.0: restitution * vn else: 0.0
+                    val lambda_raw = -(vn + bias) / eff_mass
+                    val old_lambda = self.constraints.lambda_n[ci]
+                    var new_lambda = old_lambda + lambda_raw
+                    if new_lambda < 0.0:
+                        new_lambda = 0.0
+                    self.constraints.lambda_n[ci] = new_lambda
+                    val j = new_lambda - old_lambda
+                    val jx = nx * j
+                    val jy = ny * j
+                    self.bodies.vel_x[a] = self.bodies.vel_x[a] - jx * self.bodies.inv_mass[a]
+                    self.bodies.vel_y[a] = self.bodies.vel_y[a] - jy * self.bodies.inv_mass[a]
+                    self.bodies.ang_vel[a] = self.bodies.ang_vel[a] - ra_cross_n * j * self.bodies.inv_inertia[a]
+                    self.bodies.vel_x[b] = self.bodies.vel_x[b] + jx * self.bodies.inv_mass[b]
+                    self.bodies.vel_y[b] = self.bodies.vel_y[b] + jy * self.bodies.inv_mass[b]
+                    self.bodies.ang_vel[b] = self.bodies.ang_vel[b] + rb_cross_n * j * self.bodies.inv_inertia[b]
+                    val tx = rel_vx - vn * nx
+                    val ty = rel_vy - vn * ny
+                    val t_len_sq = tx * tx + ty * ty
+                    if t_len_sq > 0.0000001:
+                        val t_len = math_sqrt(t_len_sq)
+                        val tnx = tx / t_len
+                        val tny = ty / t_len
+                        val vt = rel_vx * tnx + rel_vy * tny
+                        val ra_cross_t = ra_x * tny - ra_y * tnx
+                        val rb_cross_t = rb_x * tny - rb_y * tnx
+                        val eff_mass_t = self.bodies.inv_mass[a] + self.bodies.inv_mass[b] + (ra_cross_t * ra_cross_t * self.bodies.inv_inertia[a]) + (rb_cross_t * rb_cross_t * self.bodies.inv_inertia[b])
+                        if eff_mass_t > 0.0:
+                            val friction = self.constraints.friction[ci]
+                            val max_friction = math_abs(new_lambda) * friction
+                            val jt_raw = -vt / eff_mass_t
+                            val old_lambda_t = self.constraints.lambda_t[ci]
+                            var new_lambda_t = old_lambda_t + jt_raw
+                            if new_lambda_t > max_friction:
+                                new_lambda_t = max_friction
+                            if new_lambda_t < -max_friction:
+                                new_lambda_t = -max_friction
+                            self.constraints.lambda_t[ci] = new_lambda_t
+                            val jt = new_lambda_t - old_lambda_t
+                            self.bodies.vel_x[a] = self.bodies.vel_x[a] - tnx * jt * self.bodies.inv_mass[a]
+                            self.bodies.vel_y[a] = self.bodies.vel_y[a] - tny * jt * self.bodies.inv_mass[a]
+                            self.bodies.ang_vel[a] = self.bodies.ang_vel[a] - ra_cross_t * jt * self.bodies.inv_inertia[a]
+                            self.bodies.vel_x[b] = self.bodies.vel_x[b] + tnx * jt * self.bodies.inv_mass[b]
+                            self.bodies.vel_y[b] = self.bodies.vel_y[b] + tny * jt * self.bodies.inv_mass[b]
+                            self.bodies.ang_vel[b] = self.bodies.ang_vel[b] + rb_cross_t * jt * self.bodies.inv_inertia[b]
+                ci = ci + 1
+            iter = iter + 1
+
+    me solve_position_inline(iterations: i64, baumgarte: f64, slop: f64):
+        var iter = 0
+        while iter < iterations:
+            var ci = 0
+            while ci < self.constraints.count:
+                val pen = self.constraints.penetration[ci]
+                if pen > slop:
+                    val a = self.constraints.body_a[ci]
+                    val b = self.constraints.body_b[ci]
+                    val nx = self.constraints.normal_x[ci]
+                    val ny = self.constraints.normal_y[ci]
+                    val inv_mass_sum = self.bodies.inv_mass[a] + self.bodies.inv_mass[b]
+                    if inv_mass_sum > 0.0:
+                        val correction = (pen - slop) * baumgarte / inv_mass_sum
+                        self.bodies.pos_x[a] = self.bodies.pos_x[a] - nx * correction * self.bodies.inv_mass[a]
+                        self.bodies.pos_y[a] = self.bodies.pos_y[a] - ny * correction * self.bodies.inv_mass[a]
+                        self.bodies.pos_x[b] = self.bodies.pos_x[b] + nx * correction * self.bodies.inv_mass[b]
+                        self.bodies.pos_y[b] = self.bodies.pos_y[b] + ny * correction * self.bodies.inv_mass[b]
+                ci = ci + 1
+            iter = iter + 1
 
     me get_all_dynamic_transforms() -> [Transform2D]:
         var result: [Transform2D] = []
