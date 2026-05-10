@@ -895,6 +895,51 @@ pub(crate) fn call_extern_function(
         "rt_webgpu_compute_draw" => gpu::rt_webgpu_compute_draw_fn(&evaluated),
 
         // ====================================================================
+        // Vulkan graphics 3D Functions (18 stubs + 1 shader compile)
+        // ====================================================================
+        "rt_vulkan_init_graphics" => gpu::rt_vulkan_init_graphics_fn(&evaluated),
+        "rt_vulkan_create_graphics_buffer" => gpu::rt_vulkan_create_graphics_buffer_fn(&evaluated),
+        "rt_vulkan_upload_graphics_buffer" => gpu::rt_vulkan_upload_graphics_buffer_fn(&evaluated),
+        "rt_vulkan_create_image" => gpu::rt_vulkan_create_image_fn(&evaluated),
+        "rt_vulkan_upload_image" => gpu::rt_vulkan_upload_image_fn(&evaluated),
+        "rt_vulkan_create_graphics_pipeline" => gpu::rt_vulkan_create_graphics_pipeline_fn(&evaluated),
+        "rt_vulkan_begin_graphics_frame" => gpu::rt_vulkan_begin_graphics_frame_fn(&evaluated),
+        "rt_vulkan_begin_render_pass" => gpu::rt_vulkan_begin_render_pass_fn(&evaluated),
+        "rt_vulkan_end_render_pass" => gpu::rt_vulkan_end_render_pass_fn(&evaluated),
+        "rt_vulkan_cmd_set_pipeline" => gpu::rt_vulkan_cmd_set_pipeline_fn(&evaluated),
+        "rt_vulkan_cmd_bind_vertex_buffer" => gpu::rt_vulkan_cmd_bind_vertex_buffer_fn(&evaluated),
+        "rt_vulkan_cmd_bind_index_buffer" => gpu::rt_vulkan_cmd_bind_index_buffer_fn(&evaluated),
+        "rt_vulkan_cmd_bind_texture" => gpu::rt_vulkan_cmd_bind_texture_fn(&evaluated),
+        "rt_vulkan_cmd_bind_uniform_buffer" => gpu::rt_vulkan_cmd_bind_uniform_buffer_fn(&evaluated),
+        "rt_vulkan_cmd_draw_indexed" => gpu::rt_vulkan_cmd_draw_indexed_fn(&evaluated),
+        "rt_vulkan_end_graphics_frame" => gpu::rt_vulkan_end_graphics_frame_fn(&evaluated),
+        "rt_vulkan_graphics_present" => gpu::rt_vulkan_graphics_present_fn(&evaluated),
+        "rt_vulkan_shutdown_graphics" => gpu::rt_vulkan_shutdown_graphics_fn(&evaluated),
+        "rt_vulkan_compile_glsl" => gpu::rt_vulkan_compile_glsl_fn(&evaluated),
+
+        // ====================================================================
+        // WebGPU 3D Functions (19 stubs)
+        // ====================================================================
+        "rt_wgpu_3d_init" => gpu::rt_wgpu_3d_init_fn(&evaluated),
+        "rt_wgpu_3d_create_buffer" => gpu::rt_wgpu_3d_create_buffer_fn(&evaluated),
+        "rt_wgpu_3d_upload_buffer" => gpu::rt_wgpu_3d_upload_buffer_fn(&evaluated),
+        "rt_wgpu_3d_create_texture" => gpu::rt_wgpu_3d_create_texture_fn(&evaluated),
+        "rt_wgpu_3d_upload_texture" => gpu::rt_wgpu_3d_upload_texture_fn(&evaluated),
+        "rt_wgpu_3d_create_pipeline" => gpu::rt_wgpu_3d_create_pipeline_fn(&evaluated),
+        "rt_wgpu_3d_begin_frame" => gpu::rt_wgpu_3d_begin_frame_fn(&evaluated),
+        "rt_wgpu_3d_begin_render_pass" => gpu::rt_wgpu_3d_begin_render_pass_fn(&evaluated),
+        "rt_wgpu_3d_end_render_pass" => gpu::rt_wgpu_3d_end_render_pass_fn(&evaluated),
+        "rt_wgpu_3d_cmd_set_pipeline" => gpu::rt_wgpu_3d_cmd_set_pipeline_fn(&evaluated),
+        "rt_wgpu_3d_cmd_bind_vertex_buffer" => gpu::rt_wgpu_3d_cmd_bind_vertex_buffer_fn(&evaluated),
+        "rt_wgpu_3d_cmd_bind_index_buffer" => gpu::rt_wgpu_3d_cmd_bind_index_buffer_fn(&evaluated),
+        "rt_wgpu_3d_cmd_bind_texture" => gpu::rt_wgpu_3d_cmd_bind_texture_fn(&evaluated),
+        "rt_wgpu_3d_cmd_bind_uniform_buffer" => gpu::rt_wgpu_3d_cmd_bind_uniform_buffer_fn(&evaluated),
+        "rt_wgpu_3d_cmd_draw_indexed" => gpu::rt_wgpu_3d_cmd_draw_indexed_fn(&evaluated),
+        "rt_wgpu_3d_end_frame" => gpu::rt_wgpu_3d_end_frame_fn(&evaluated),
+        "rt_wgpu_3d_present" => gpu::rt_wgpu_3d_present_fn(&evaluated),
+        "rt_wgpu_3d_shutdown" => gpu::rt_wgpu_3d_shutdown_fn(&evaluated),
+
+        // ====================================================================
         // SIMD Capability Functions (7 functions)
         // ====================================================================
         "rt_simd_has_sse" => simd::rt_simd_has_sse(&evaluated),

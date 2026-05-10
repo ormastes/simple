@@ -846,3 +846,201 @@ pub fn rt_vk_kernel_launch_1d_fn(args: &[Value]) -> Result<Value, CompileError> 
 pub fn rt_webgpu_compute_draw_fn(_args: &[Value]) -> Result<Value, CompileError> {
     Ok(Value::Int(0))
 }
+
+// ============================================================================
+// Vulkan graphics 3D externs — stubs for interpreter mode
+// (rt_vulkan_* graphics pipeline, not the compute rt_vk_* externs above)
+// All return 0 / empty so callers can detect absence and fall through.
+// ============================================================================
+
+/// `rt_vulkan_init_graphics(width: i64, height: i64) -> i64`
+pub fn rt_vulkan_init_graphics_fn(_args: &[Value]) -> Result<Value, CompileError> {
+    Ok(Value::Int(0))
+}
+
+/// `rt_vulkan_create_graphics_buffer(byte_count: i64, usage: i64) -> i64`
+pub fn rt_vulkan_create_graphics_buffer_fn(_args: &[Value]) -> Result<Value, CompileError> {
+    Ok(Value::Int(0))
+}
+
+/// `rt_vulkan_upload_graphics_buffer(handle: i64, data: [u8], offset: i64)`
+pub fn rt_vulkan_upload_graphics_buffer_fn(_args: &[Value]) -> Result<Value, CompileError> {
+    Ok(Value::Int(0))
+}
+
+/// `rt_vulkan_create_image(width: i64, height: i64, format: i64) -> i64`
+pub fn rt_vulkan_create_image_fn(_args: &[Value]) -> Result<Value, CompileError> {
+    Ok(Value::Int(0))
+}
+
+/// `rt_vulkan_upload_image(handle: i64, data: [u8])`
+pub fn rt_vulkan_upload_image_fn(_args: &[Value]) -> Result<Value, CompileError> {
+    Ok(Value::Int(0))
+}
+
+/// `rt_vulkan_create_graphics_pipeline(spirv_vert: [u8], spirv_frag: [u8], stride: i64) -> i64`
+pub fn rt_vulkan_create_graphics_pipeline_fn(_args: &[Value]) -> Result<Value, CompileError> {
+    Ok(Value::Int(0))
+}
+
+/// `rt_vulkan_begin_graphics_frame()`
+pub fn rt_vulkan_begin_graphics_frame_fn(_args: &[Value]) -> Result<Value, CompileError> {
+    Ok(Value::Int(0))
+}
+
+/// `rt_vulkan_begin_render_pass(color: i64, depth: i64) -> i64`
+pub fn rt_vulkan_begin_render_pass_fn(_args: &[Value]) -> Result<Value, CompileError> {
+    Ok(Value::Int(0))
+}
+
+/// `rt_vulkan_end_render_pass(rph: i64)`
+pub fn rt_vulkan_end_render_pass_fn(_args: &[Value]) -> Result<Value, CompileError> {
+    Ok(Value::Int(0))
+}
+
+/// `rt_vulkan_cmd_set_pipeline(rph: i64, pipeline: i64)`
+pub fn rt_vulkan_cmd_set_pipeline_fn(_args: &[Value]) -> Result<Value, CompileError> {
+    Ok(Value::Int(0))
+}
+
+/// `rt_vulkan_cmd_bind_vertex_buffer(rph: i64, buf: i64, slot: i64)`
+pub fn rt_vulkan_cmd_bind_vertex_buffer_fn(_args: &[Value]) -> Result<Value, CompileError> {
+    Ok(Value::Int(0))
+}
+
+/// `rt_vulkan_cmd_bind_index_buffer(rph: i64, buf: i64)`
+pub fn rt_vulkan_cmd_bind_index_buffer_fn(_args: &[Value]) -> Result<Value, CompileError> {
+    Ok(Value::Int(0))
+}
+
+/// `rt_vulkan_cmd_bind_texture(rph: i64, image: i64, slot: i64)`
+pub fn rt_vulkan_cmd_bind_texture_fn(_args: &[Value]) -> Result<Value, CompileError> {
+    Ok(Value::Int(0))
+}
+
+/// `rt_vulkan_cmd_bind_uniform_buffer(rph: i64, buf: i64, slot: i64)`
+pub fn rt_vulkan_cmd_bind_uniform_buffer_fn(_args: &[Value]) -> Result<Value, CompileError> {
+    Ok(Value::Int(0))
+}
+
+/// `rt_vulkan_cmd_draw_indexed(rph: i64, index_count: i64, base_vertex: i64)`
+pub fn rt_vulkan_cmd_draw_indexed_fn(_args: &[Value]) -> Result<Value, CompileError> {
+    Ok(Value::Int(0))
+}
+
+/// `rt_vulkan_end_graphics_frame()`
+pub fn rt_vulkan_end_graphics_frame_fn(_args: &[Value]) -> Result<Value, CompileError> {
+    Ok(Value::Int(0))
+}
+
+/// `rt_vulkan_graphics_present()`
+pub fn rt_vulkan_graphics_present_fn(_args: &[Value]) -> Result<Value, CompileError> {
+    Ok(Value::Int(0))
+}
+
+/// `rt_vulkan_shutdown_graphics()`
+pub fn rt_vulkan_shutdown_graphics_fn(_args: &[Value]) -> Result<Value, CompileError> {
+    Ok(Value::Int(0))
+}
+
+/// `rt_vulkan_compile_glsl(source: text, stage: i64) -> [u8]`
+/// Returns empty byte array — no GLSL compiler in interpreter mode.
+pub fn rt_vulkan_compile_glsl_fn(_args: &[Value]) -> Result<Value, CompileError> {
+    use std::sync::Arc;
+    Ok(Value::Array(Arc::new(Vec::new())))
+}
+
+// ============================================================================
+// WebGPU 3D externs — stubs for interpreter mode
+// (rt_wgpu_3d_* 3D surface, not the compute rt_webgpu_* above)
+// ============================================================================
+
+/// `rt_wgpu_3d_init(width: i64, height: i64) -> i64`
+pub fn rt_wgpu_3d_init_fn(_args: &[Value]) -> Result<Value, CompileError> {
+    Ok(Value::Int(0))
+}
+
+/// `rt_wgpu_3d_create_buffer(byte_count: i64, usage: i64) -> i64`
+pub fn rt_wgpu_3d_create_buffer_fn(_args: &[Value]) -> Result<Value, CompileError> {
+    Ok(Value::Int(0))
+}
+
+/// `rt_wgpu_3d_upload_buffer(handle: i64, data: [u8], offset: i64)`
+pub fn rt_wgpu_3d_upload_buffer_fn(_args: &[Value]) -> Result<Value, CompileError> {
+    Ok(Value::Int(0))
+}
+
+/// `rt_wgpu_3d_create_texture(width: i64, height: i64, format: i64) -> i64`
+pub fn rt_wgpu_3d_create_texture_fn(_args: &[Value]) -> Result<Value, CompileError> {
+    Ok(Value::Int(0))
+}
+
+/// `rt_wgpu_3d_upload_texture(handle: i64, data: [u8])`
+pub fn rt_wgpu_3d_upload_texture_fn(_args: &[Value]) -> Result<Value, CompileError> {
+    Ok(Value::Int(0))
+}
+
+/// `rt_wgpu_3d_create_pipeline(wgsl_vert: text, wgsl_frag: text) -> i64`
+pub fn rt_wgpu_3d_create_pipeline_fn(_args: &[Value]) -> Result<Value, CompileError> {
+    Ok(Value::Int(0))
+}
+
+/// `rt_wgpu_3d_begin_frame()`
+pub fn rt_wgpu_3d_begin_frame_fn(_args: &[Value]) -> Result<Value, CompileError> {
+    Ok(Value::Int(0))
+}
+
+/// `rt_wgpu_3d_begin_render_pass(color: i64, depth: i64) -> i64`
+pub fn rt_wgpu_3d_begin_render_pass_fn(_args: &[Value]) -> Result<Value, CompileError> {
+    Ok(Value::Int(0))
+}
+
+/// `rt_wgpu_3d_end_render_pass(rph: i64)`
+pub fn rt_wgpu_3d_end_render_pass_fn(_args: &[Value]) -> Result<Value, CompileError> {
+    Ok(Value::Int(0))
+}
+
+/// `rt_wgpu_3d_cmd_set_pipeline(rph: i64, pipeline: i64)`
+pub fn rt_wgpu_3d_cmd_set_pipeline_fn(_args: &[Value]) -> Result<Value, CompileError> {
+    Ok(Value::Int(0))
+}
+
+/// `rt_wgpu_3d_cmd_bind_vertex_buffer(rph: i64, buf: i64, slot: i64)`
+pub fn rt_wgpu_3d_cmd_bind_vertex_buffer_fn(_args: &[Value]) -> Result<Value, CompileError> {
+    Ok(Value::Int(0))
+}
+
+/// `rt_wgpu_3d_cmd_bind_index_buffer(rph: i64, buf: i64)`
+pub fn rt_wgpu_3d_cmd_bind_index_buffer_fn(_args: &[Value]) -> Result<Value, CompileError> {
+    Ok(Value::Int(0))
+}
+
+/// `rt_wgpu_3d_cmd_bind_texture(rph: i64, tex: i64, slot: i64)`
+pub fn rt_wgpu_3d_cmd_bind_texture_fn(_args: &[Value]) -> Result<Value, CompileError> {
+    Ok(Value::Int(0))
+}
+
+/// `rt_wgpu_3d_cmd_bind_uniform_buffer(rph: i64, buf: i64, slot: i64)`
+pub fn rt_wgpu_3d_cmd_bind_uniform_buffer_fn(_args: &[Value]) -> Result<Value, CompileError> {
+    Ok(Value::Int(0))
+}
+
+/// `rt_wgpu_3d_cmd_draw_indexed(rph: i64, index_count: i64, base_vertex: i64)`
+pub fn rt_wgpu_3d_cmd_draw_indexed_fn(_args: &[Value]) -> Result<Value, CompileError> {
+    Ok(Value::Int(0))
+}
+
+/// `rt_wgpu_3d_end_frame()`
+pub fn rt_wgpu_3d_end_frame_fn(_args: &[Value]) -> Result<Value, CompileError> {
+    Ok(Value::Int(0))
+}
+
+/// `rt_wgpu_3d_present()`
+pub fn rt_wgpu_3d_present_fn(_args: &[Value]) -> Result<Value, CompileError> {
+    Ok(Value::Int(0))
+}
+
+/// `rt_wgpu_3d_shutdown()`
+pub fn rt_wgpu_3d_shutdown_fn(_args: &[Value]) -> Result<Value, CompileError> {
+    Ok(Value::Int(0))
+}
