@@ -58,8 +58,24 @@ val FDT_MEM_RSV_ENTRY_SIZE: u64 = 16
 # FDT uses big-endian byte order.  These helpers write multi-byte
 # values in BE order into a u8 buffer at a given offset.
 
+fn be32_bytes(value: u64) -> [u8]:
+    """Return 4 bytes encoding a 32-bit big-endian value."""
+    [((value >> 24) & 0xFF) as u8,
+     ((value >> 16) & 0xFF) as u8,
+     ((value >> 8) & 0xFF) as u8,
+     (value & 0xFF) as u8]
+
+fn be64_bytes(value: u64) -> [u8]:
+    """Return 8 bytes encoding a 64-bit big-endian value."""
+    be32_bytes((value >> 32) & 0xFFFFFFFF) + be32_bytes(value & 0xFFFFFFFF)
+
 fn write_be32(buf: [u8], offset: u64, value: u64) -> u64:
-    """Write a 32-bit big-endian value into buf at offset. Returns new offset."""
+    """Write a 32-bit big-endian value into buf at offset. Returns new offset.
+
+    NOTE: In interpreter mode, buf is passed by value so the caller's
+    copy is NOT mutated.  For building blobs use be32_bytes() + concat.
+    This function exists for API compatibility; prefer be32_bytes().
+    """
     buf[offset] = ((value >> 24) & 0xFF) as u8
     buf[offset + 1] = ((value >> 16) & 0xFF) as u8
     buf[offset + 2] = ((value >> 8) & 0xFF) as u8
@@ -96,20 +112,20 @@ impl FdtStrings:
     fn new() -> FdtStrings:
         FdtStrings(data: [], count: 0)
 
-    fn add(name: text) -> u64:
-        """Add a string to the table, return its offset."""
-        val off = self.count
-        for ch in name:
-            self.data = self.data + [ch as u8]
-            self.count = self.count + 1
-        # Null terminator
-        self.data = self.data + [0]
-        self.count = self.count + 1
-        off
-
     fn size() -> u64:
         """Return the current size of the strings block."""
         self.count
+
+fn fdt_strings_add(s: FdtStrings, name: text) -> (FdtStrings, u64):
+    """Add a string to the table, return (new_strings, offset)."""
+    val off = s.count
+    var new_data = s.data
+    for ch in name:
+        new_data = new_data + [ch as u8]
+    # Null terminator
+    new_data = new_data + [0]
+    val new_count = s.count + name.len() + 1
+    (FdtStrings(data: new_data, count: new_count), off)
 
 # ============================================================================
 # FDT Builder
