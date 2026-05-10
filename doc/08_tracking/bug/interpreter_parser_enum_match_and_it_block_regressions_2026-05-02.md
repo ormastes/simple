@@ -3,6 +3,7 @@
 **Date:** 2026-05-02
 **Severity:** High (blocks writing idiomatic encoding/decoding modules and spec tests)
 **Affected modes:** Interpreter (all three bugs); compiled mode not verified
+**Status:** FIXED 2026-05-10 — Bug 1 (named-field enum match) fixed in parser_patterns.rs; Bugs 2+3 (it-block) already fixed.
 
 ---
 
