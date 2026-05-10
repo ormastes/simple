@@ -427,6 +427,59 @@ pub extern "C" fn rt_array_push_grow(array: RuntimeValue, value: RuntimeValue) -
     }
 }
 
+/// Bulk-append `count` elements from `src` array into `dst` array.
+///
+/// Copies `count` `RuntimeValue` slots (8 bytes each) from `src.data` into
+/// `dst`, growing `dst` as needed.  This bypasses the SplValue slot layout
+/// limitation for SIMD packed-byte bulk copy (bug_simd_bulk_copy_blocked_by_spl_array_layout
+/// workaround Option B).
+///
+/// Returns `false` if either pointer is invalid or allocation fails.
+#[no_mangle]
+pub extern "C" fn rt_array_extend_i64(dst: RuntimeValue, src: RuntimeValue, count: i64) -> bool {
+    if count <= 0 {
+        return true;
+    }
+    let n = count as u64;
+    let dst_arr = as_typed_ptr!(mut dst, HeapObjectType::Array, RuntimeArray, false);
+    let src_arr = as_typed_ptr!(src, HeapObjectType::Array, RuntimeArray, false);
+    unsafe {
+        let src_len = (*src_arr).len;
+        if n > src_len {
+            return false;
+        }
+        let needed = (*dst_arr).len + n;
+        if needed > (*dst_arr).capacity {
+            let old_cap = (*dst_arr).capacity;
+            let new_cap = needed.max(old_cap * 2).max(4);
+            let old_layout = array_data_layout(old_cap);
+            let new_size = array_data_layout(new_cap).size();
+            let new_data = if (*dst_arr).data.is_null() {
+                std::alloc::alloc_zeroed(array_data_layout(new_cap)) as *mut RuntimeValue
+            } else {
+                std::alloc::realloc((*dst_arr).data as *mut u8, old_layout, new_size) as *mut RuntimeValue
+            };
+            if new_data.is_null() {
+                return false;
+            }
+            let old_len_bytes = old_cap as usize * std::mem::size_of::<RuntimeValue>();
+            let new_tail_bytes = new_size - old_len_bytes;
+            if new_tail_bytes > 0 {
+                std::ptr::write_bytes((new_data as *mut u8).add(old_len_bytes), 0, new_tail_bytes);
+            }
+            (*dst_arr).data = new_data;
+            (*dst_arr).capacity = new_cap;
+        }
+        std::ptr::copy_nonoverlapping(
+            (*src_arr).data,
+            (*dst_arr).data.add((*dst_arr).len as usize),
+            n as usize,
+        );
+        (*dst_arr).len += n;
+        true
+    }
+}
+
 /// Push element without grow (legacy behavior)
 #[no_mangle]
 pub extern "C" fn rt_array_push_no_grow(array: RuntimeValue, value: RuntimeValue) -> bool {

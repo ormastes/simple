@@ -9,6 +9,7 @@ use simple_runtime::value::RuntimeValue;
 // Import actual FFI functions from runtime
 use simple_runtime::value::{
     rt_array_new, rt_array_push, rt_array_get, rt_array_set, rt_array_pop, rt_array_clear, rt_array_len,
+    rt_array_extend_i64,
 };
 
 fn interpreter_byte_at(value: &Value) -> i64 {
