@@ -269,8 +269,10 @@ fn deprecated(func: Any, msg: text = "") -> DeprecatedFunction:
     )
 
 # ============================================================================
-# TimeoutFunction - Timeout Decorator (Stub Implementation)
+# TimeoutFunction - Timeout Decorator (Cooperative Monitoring)
 # ============================================================================
+
+extern fn rt_time_now_monotonic_ms() -> i64
 
 class TimeoutResult:
     """Result wrapper for timeout operations."""
@@ -286,45 +288,55 @@ class TimeoutResult:
         self.value
 
 class TimeoutFunction:
-    """Function wrapper with timeout (stub - no actual timeout enforcement).
-    
-    NOTE: This is a placeholder until threading support is available.
-    Currently just calls the function without timeout.
+    """Function wrapper with cooperative timeout monitoring.
+
+    Runs the function synchronously and records whether elapsed time
+    exceeded the timeout. Does not interrupt — reports via TimeoutResult.success
+    or eprint warning.
     """
     wrapped_fn: Any
     timeout_seconds: i64
 
     me __call__(arg1: Any = nil, arg2: Any = nil, arg3: Any = nil, arg4: Any = nil, arg5: Any = nil) -> Any:
-        """Call the wrapped function (no timeout enforcement)."""
-        # Use two-step pattern
+        """Call the wrapped function with timeout monitoring."""
         val fn_ref = self.wrapped_fn
-        
-        if arg1 == nil:
-            return fn_ref()
+        val timeout_ms = self.timeout_seconds * 1000
+        val start = rt_time_now_monotonic_ms()
+
+        val result = if arg1 == nil:
+            fn_ref()
         elif arg2 == nil:
-            return fn_ref(arg1)
+            fn_ref(arg1)
         elif arg3 == nil:
-            return fn_ref(arg1, arg2)
+            fn_ref(arg1, arg2)
         elif arg4 == nil:
-            return fn_ref(arg1, arg2, arg3)
+            fn_ref(arg1, arg2, arg3)
         elif arg5 == nil:
-            return fn_ref(arg1, arg2, arg3, arg4)
+            fn_ref(arg1, arg2, arg3, arg4)
         else:
-            return fn_ref(arg1, arg2, arg3, arg4, arg5)
+            fn_ref(arg1, arg2, arg3, arg4, arg5)
+
+        val elapsed = rt_time_now_monotonic_ms() - start
+        if elapsed > timeout_ms:
+            eprint("Warning: timeout function exceeded timeout_seconds")
+
+        result
 
     me call_with_result(arg1: Any = nil, arg2: Any = nil, arg3: Any = nil) -> TimeoutResult:
-        """Call function and return TimeoutResult."""
-        # Use two-step pattern
+        """Call function and return TimeoutResult with timeout check."""
         val fn_ref = self.wrapped_fn
-        
+        val timeout_ms = self.timeout_seconds * 1000
+        val start = rt_time_now_monotonic_ms()
+
         val result = if arg1 == nil:
             fn_ref()
         elif arg2 == nil:
             fn_ref(arg1)
         else:
             fn_ref(arg1, arg2)
-        
-        TimeoutResult(value: result, success: true)
+
+        val elapsed = rt_time_now_monotonic_ms() - start
+        TimeoutResult(value: result, success: elapsed <= timeout_ms)
 
 impl TimeoutFunction:
     static fn create(func: Any, timeout: i64) -> TimeoutFunction:

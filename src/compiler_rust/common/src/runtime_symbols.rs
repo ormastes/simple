@@ -182,6 +182,7 @@ pub fn symbol_tier_of(name: &str) -> RuntimeSymbolTier {
         || name.starts_with("rt_tls13_")
         || name.starts_with("rt_neighbor_load")
         || name.starts_with("rt_gpu_")
+        || name.starts_with("rt_cuda_")
         || name.starts_with("rt_vk_")
         || name.starts_with("rt_cranelift_")
         || name.starts_with("rt_par_")
@@ -812,6 +813,13 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_tls13_x25519_public_key",
     "rt_tls13_x25519_shared_secret",
     "rt_ssh_userauth_password_only_failure_payload",
+    // Signal handling
+    "rt_signal_install",
+    "rt_signal_check",
+    "rt_atexit_install",
+    "rt_atexit_check",
+    // CUDA availability check
+    "rt_cuda_available",
 ];
 
 #[cfg(test)]

@@ -19,6 +19,7 @@
 #include <stdarg.h>
 #include <ctype.h>
 #include <errno.h>
+#include <signal.h>
 #include <sys/stat.h>
 
 /* ================================================================
@@ -1379,4 +1380,57 @@ void spl_panic(const char* msg) {
     }
 
     exit(1);
+}
+
+/* ================================================================
+ * Signal Handling
+ * ================================================================ */
+
+static volatile sig_atomic_t _signal_flags[32] = {0};
+static volatile sig_atomic_t _atexit_flag = 0;
+
+static void _spl_signal_handler(int signum) {
+    if (signum >= 0 && signum < 32) {
+        _signal_flags[signum] = 1;
+    }
+}
+
+static void _spl_atexit_handler(void) {
+    _atexit_flag = 1;
+}
+
+int64_t rt_signal_install(int64_t signal_num) {
+    if (signal_num < 0 || signal_num >= 32) return 0;
+    struct sigaction sa;
+    sa.sa_handler = _spl_signal_handler;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = SA_RESTART;
+    if (sigaction((int)signal_num, &sa, NULL) == -1) return 0;
+    return 1;
+}
+
+int64_t rt_signal_check(int64_t signal_num) {
+    if (signal_num < 0 || signal_num >= 32) return 0;
+    if (_signal_flags[signal_num]) {
+        _signal_flags[signal_num] = 0;
+        return 1;
+    }
+    return 0;
+}
+
+int64_t rt_atexit_install(void) {
+    static int installed = 0;
+    if (!installed) {
+        atexit(_spl_atexit_handler);
+        installed = 1;
+    }
+    return 1;
+}
+
+int64_t rt_atexit_check(void) {
+    if (_atexit_flag) {
+        _atexit_flag = 0;
+        return 1;
+    }
+    return 0;
 }
