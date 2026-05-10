@@ -9,6 +9,9 @@
 #   lo = value as i32            (lower 32 bits)
 #   hi = (value / 4294967296) as i32  (upper 32 bits, arithmetic shift)
 #   Stored as [lo, hi] (little-endian pair).
+#
+# Array-passing: Simple passes arrays by value, so encode helpers
+# take and return [i32] using b = b.push(x) pattern.
 
 # ============================================================================
 # Dirty Page
@@ -133,11 +136,13 @@ impl ContainerCheckpoint:
 # i64 Encoding Helpers (lo/hi split into two i32 values)
 # ============================================================================
 
-fn encode_i64(buf: [i32], value: i64):
+fn encode_i64(buf: [i32], value: i64) -> [i32]:
+    var b = buf
     val lo = (value % 4294967296) as i32
     val hi = (value / 4294967296) as i32
-    buf.push(lo)
-    buf.push(hi)
+    b = b.push(lo)
+    b = b.push(hi)
+    b
 
 fn decode_i64(data: [i32], offset: i32) -> i64:
     val lo = data[offset] as i64
@@ -148,11 +153,13 @@ fn decode_i64(data: [i32], offset: i32) -> i64:
 # Text Encoding Helpers
 # ============================================================================
 
-fn encode_text(buf: [i32], s: text):
+fn encode_text(buf: [i32], s: text) -> [i32]:
+    var b = buf
     val chars = s.chars()
-    buf.push(chars.len() as i32)
+    b = b.push(chars.len() as i32)
     for ch in chars:
-        buf.push(ch as i32)
+        b = b.push(ch as i32)
+    b
 
 fn decode_text(data: [i32], offset: i32) -> text:
     val length = data[offset]
@@ -175,59 +182,64 @@ fn encode_checkpoint(cp: ContainerCheckpoint) -> [i32]:
     var buf: [i32] = []
 
     # Header: magic, version, id, timestamp
-    buf.push(0x53434300)    # "SCC\0" magic
-    buf.push(1)             # version
-    buf.push(cp.id)
-    encode_i64(buf, cp.timestamp)
-    buf.push(cp.fs_overlay_count)
+    buf = buf.push(0x53434300)    # "SCC\0" magic
+    buf = buf.push(1)             # version
+    buf = buf.push(cp.id)
+    buf = encode_i64(buf, cp.timestamp)
+    buf = buf.push(cp.fs_overlay_count)
 
     # Process count
-    buf.push(cp.processes.len() as i32)
+    buf = buf.push(cp.processes.len() as i32)
 
     # Encode each process
     for proc in cp.processes:
-        encode_process(buf, proc)
+        buf = encode_process(buf, proc)
 
     # IPC snapshot count
-    buf.push(cp.ipc.len() as i32)
+    buf = buf.push(cp.ipc.len() as i32)
 
     # Encode each IPC snapshot
     for ipc_snap in cp.ipc:
-        encode_ipc_snapshot(buf, ipc_snap)
+        buf = encode_ipc_snapshot(buf, ipc_snap)
 
     buf
 
-fn encode_process(buf: [i32], proc: ProcessSnapshot):
-    encode_i64(buf, proc.pid)
-    buf.push(proc.fd_count)
+fn encode_process(buf: [i32], proc: ProcessSnapshot) -> [i32]:
+    var b = buf
+    b = encode_i64(b, proc.pid)
+    b = b.push(proc.fd_count)
 
     # Registers
-    buf.push(proc.registers.len() as i32)
+    b = b.push(proc.registers.len() as i32)
     for reg in proc.registers:
-        encode_i64(buf, reg)
+        b = encode_i64(b, reg)
 
     # Memory pages
-    buf.push(proc.memory_pages.len() as i32)
+    b = b.push(proc.memory_pages.len() as i32)
     for page in proc.memory_pages:
-        encode_i64(buf, page.address)
-        buf.push(page.size)
-        encode_i64(buf, page.data_offset)
+        b = encode_i64(b, page.address)
+        b = b.push(page.size)
+        b = encode_i64(b, page.data_offset)
 
     # FD table
-    buf.push(proc.fd_table.len() as i32)
+    b = b.push(proc.fd_table.len() as i32)
     for fd_entry in proc.fd_table:
-        buf.push(fd_entry.fd)
-        encode_text(buf, fd_entry.path)
-        encode_i64(buf, fd_entry.offset)
-        buf.push(fd_entry.flags)
+        b = b.push(fd_entry.fd)
+        b = encode_text(b, fd_entry.path)
+        b = encode_i64(b, fd_entry.offset)
+        b = b.push(fd_entry.flags)
 
-fn encode_ipc_snapshot(buf: [i32], ipc_snap: IpcSnapshot):
-    encode_i64(buf, ipc_snap.queue_id)
-    buf.push(ipc_snap.messages.len() as i32)
+    b
+
+fn encode_ipc_snapshot(buf: [i32], ipc_snap: IpcSnapshot) -> [i32]:
+    var b = buf
+    b = encode_i64(b, ipc_snap.queue_id)
+    b = b.push(ipc_snap.messages.len() as i32)
     for msg in ipc_snap.messages:
-        encode_i64(buf, msg.sender)
-        buf.push(msg.data_len)
-        encode_i64(buf, msg.data_offset)
+        b = encode_i64(b, msg.sender)
+        b = b.push(msg.data_len)
+        b = encode_i64(b, msg.data_offset)
+    b
 
 # ============================================================================
 # Decode Checkpoint

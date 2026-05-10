@@ -152,17 +152,21 @@ impl ProcessRecorder:
         self.next_seq = self.next_seq + 1
 
     # Stop recording and finalize the trace.
-    # If the process is still running under strace, wait for it.
+    # Waits for the strace log to be written, then re-parses it to
+    # capture the full event stream.  Because each shell() call runs
+    # in a fresh subprocess, we poll for the strace sentinel
+    # ("+++ exited") instead of using wait(2).
     # Returns the trace directory path on success.
     me fn stop() -> Result<text, text>:
-        if self.pid > 0:
-            # If launched via stream API, wait for the background strace to finish
-            val wait_res = shell("wait {self.pid} 2>/dev/null; true")
-            # Re-parse strace output to capture any events we missed
+        if self.pid > 0 and self.strace_path.len() > 0:
+            # Poll until strace log contains the exit sentinel (max 30s)
+            shell("for i in $(seq 1 30); do grep -q '+++' '{self.strace_path}' 2>/dev/null && break; sleep 1; done")
+
+            # Re-parse strace output to capture the full event stream
             val parse_result = self.parse_strace_output(self.strace_path)
             match parse_result:
                 case Ok(parsed_events):
-                    # Merge: keep stream-API events, append any strace-only ones
+                    # Use strace-parsed events as the canonical source
                     if parsed_events.len() > self.events.len():
                         self.events = parsed_events
                 case Err(_):
