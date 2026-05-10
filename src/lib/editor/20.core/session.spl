@@ -1,0 +1,160 @@
+# Edit Session
+#
+# Central state container for the editor. Manages documents, layout, tabs,
+# and ID generation. All document operations go through the session.
+
+extern fn rt_file_read_text(path: text) -> text
+
+class EditSession:
+    documents: [EditorDocument]
+    layout: EditorLayout
+    mode: EditorMode
+    next_doc_id: i64
+    next_buf_id: i64
+    next_tab_id: i64
+    next_group_id: i64
+    status_message: text
+
+impl EditSession:
+
+    static fn new() -> EditSession:
+        EditSession(
+            documents: [],
+            layout: editor_layout_new(),
+            mode: EditorMode.Normal,
+            next_doc_id: 1,
+            next_buf_id: 1,
+            next_tab_id: 1,
+            next_group_id: 2,
+            status_message: ""
+        )
+
+    me open_file(path: text) -> EditorDocumentId:
+        var i = 0
+        while i < self.documents.len():
+            if self.documents[i].path() == path:
+                self._focus_doc(self.documents[i].id)
+                return self.documents[i].id
+            i = i + 1
+        val doc_id = EditorDocumentId(value: self.next_doc_id)
+        self.next_doc_id = self.next_doc_id + 1
+        val buf_id = EditorBufferId(value: self.next_buf_id)
+        self.next_buf_id = self.next_buf_id + 1
+        val doc = EditorDocument.open_file(doc_id, buf_id, path)
+        self.documents.push(doc)
+        self._add_tab_for_doc(doc_id, doc.display_name())
+        doc_id
+
+    me open_empty() -> EditorDocumentId:
+        val doc_id = EditorDocumentId(value: self.next_doc_id)
+        self.next_doc_id = self.next_doc_id + 1
+        val buf_id = EditorBufferId(value: self.next_buf_id)
+        self.next_buf_id = self.next_buf_id + 1
+        val doc = EditorDocument.empty(doc_id, buf_id)
+        self.documents.push(doc)
+        self._add_tab_for_doc(doc_id, doc.display_name())
+        doc_id
+
+    me close_tab():
+        val group_idx = self.layout.active_group_index
+        if group_idx < 0 or group_idx >= self.layout.groups.len():
+            return
+        var group = self.layout.groups[group_idx]
+        val tab_idx = group.active_tab_index
+        group.close_tab(tab_idx)
+        self.layout.groups[group_idx] = group
+        if group.tabs.len() == 0 and self.layout.groups.len() > 1:
+            self.layout = editor_layout_close_group(self.layout, group_idx)
+
+    me save_active() -> bool:
+        val doc = self.active_document()
+        if doc == nil:
+            return false
+        val doc_idx = self._find_doc_index(self.active_doc_id())
+        if doc_idx < 0:
+            return false
+        var d = self.documents[doc_idx]
+        val ok = d.buffer.save()
+        self.documents[doc_idx] = d
+        ok
+
+    me switch_tab(delta: i64):
+        val group_idx = self.layout.active_group_index
+        if group_idx < 0 or group_idx >= self.layout.groups.len():
+            return
+        var group = self.layout.groups[group_idx]
+        if delta > 0:
+            group.next_tab()
+        else:
+            group.prev_tab()
+        self.layout.groups[group_idx] = group
+
+    me split_editor():
+        self.layout = editor_layout_split(self.layout, self.next_group_id)
+        self.next_group_id = self.next_group_id + 1
+        val active_id = self.active_doc_id()
+        if active_id.value > 0:
+            val doc_idx = self._find_doc_index(active_id)
+            if doc_idx >= 0:
+                self._add_tab_for_doc(active_id, self.documents[doc_idx].display_name())
+
+    me focus_next_group():
+        self.layout = editor_layout_focus_next(self.layout)
+
+    me focus_prev_group():
+        self.layout = editor_layout_focus_prev(self.layout)
+
+    fn active_document() -> EditorDocument:
+        val doc_id = self.active_doc_id()
+        val idx = self._find_doc_index(doc_id)
+        if idx < 0:
+            return nil
+        self.documents[idx]
+
+    fn active_doc_id() -> EditorDocumentId:
+        val group = editor_layout_active_group(self.layout)
+        val tab = group.active_tab()
+        tab.doc_id
+
+    fn active_buffer() -> EditorBuffer:
+        val doc = self.active_document()
+        if doc == nil:
+            return nil
+        doc.buffer
+
+    fn document_count() -> i64:
+        self.documents.len()
+
+    fn group_count() -> i64:
+        editor_layout_group_count(self.layout)
+
+    me _focus_doc(doc_id: EditorDocumentId):
+        val group_idx = self.layout.active_group_index
+        if group_idx < 0 or group_idx >= self.layout.groups.len():
+            return
+        var group = self.layout.groups[group_idx]
+        var i = 0
+        while i < group.tabs.len():
+            if group.tabs[i].doc_id.value == doc_id.value:
+                group.select_tab(i)
+                self.layout.groups[group_idx] = group
+                return
+            i = i + 1
+
+    me _add_tab_for_doc(doc_id: EditorDocumentId, label: text):
+        val tab_id = EditorTabId(value: self.next_tab_id)
+        self.next_tab_id = self.next_tab_id + 1
+        val tab = EditorTab(id: tab_id, doc_id: doc_id, label: label, is_preview: false)
+        val group_idx = self.layout.active_group_index
+        if group_idx >= 0 and group_idx < self.layout.groups.len():
+            var group = self.layout.groups[group_idx]
+            group.add_tab(tab)
+            self.layout.groups[group_idx] = group
+
+    fn _find_doc_index(doc_id: EditorDocumentId) -> i64:
+        var i = 0
+        while i < self.documents.len():
+            if self.documents[i].id.value == doc_id.value:
+                return i
+            i = i + 1
+        -1
