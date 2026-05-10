@@ -329,6 +329,7 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
                     default: None,
                     mutability: simple_parser::ast::Mutability::Immutable,
                     visibility: simple_parser::ast::Visibility::Public,
+                    bit_width: None,
                 };
                 env.insert(
                     nt.name.clone(),

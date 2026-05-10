@@ -488,6 +488,7 @@ fn create_field_from_stub(
         default: None,
         mutability: Mutability::Mutable,
         visibility: Visibility::Private,
+        bit_width: None,
     })
 }
 

@@ -430,6 +430,7 @@ fn internal():
                     default: None,
                     mutability: Mutability::Immutable,
                     visibility: Visibility::Private,
+                    bit_width: None,
                 },
                 Field {
                     span: Span::new(0, 0, 0, 0),
@@ -438,6 +439,7 @@ fn internal():
                     default: None,
                     mutability: Mutability::Immutable,
                     visibility: Visibility::Private,
+                    bit_width: None,
                 },
                 Field {
                     span: Span::new(0, 0, 0, 0),
@@ -446,6 +448,7 @@ fn internal():
                     default: None,
                     mutability: Mutability::Immutable,
                     visibility: Visibility::Private,
+                    bit_width: None,
                 },
             ],
             methods: vec![],
@@ -516,6 +519,7 @@ fn internal():
                         default: None,
                         mutability: Mutability::Immutable,
                         visibility: Visibility::Private,
+                        bit_width: None,
                     },
                     Field {
                         span: Span::new(0, 0, 0, 0),
@@ -524,6 +528,7 @@ fn internal():
                         default: None,
                         mutability: Mutability::Immutable,
                         visibility: Visibility::Private,
+                        bit_width: None,
                     },
                 ],
                 methods: vec![],

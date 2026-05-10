@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use simple_parser::ast::{AssignOp, BinOp, ClassDef, Expr, FunctionDef, Node, Type};
+use simple_parser::ast::{AssignOp, BinOp, BitfieldDef, BitfieldField, ClassDef, Expr, FunctionDef, Node, Type};
 use crate::error::{codes, CompileError, ErrorContext};
 use crate::value::{Env, Value};
 use super::core_types::{Control, Enums, ImplMethods, get_identifier_name, get_pattern_name, is_immutable_by_pattern};
@@ -464,6 +464,7 @@ pub(crate) fn exec_node(
                 default: None,
                 mutability: simple_parser::ast::Mutability::Immutable,
                 visibility: simple_parser::ast::Visibility::Public,
+                bit_width: None,
             };
             let synth_class = ClassDef {
                 span: nt.span,

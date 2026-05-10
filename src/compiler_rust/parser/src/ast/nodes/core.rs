@@ -1007,6 +1007,9 @@ pub struct Field {
     pub default: Option<Expr>,
     pub mutability: Mutability,
     pub visibility: Visibility,
+    /// Bit width annotation for `@packed` struct fields: `field: Type:N`
+    /// `None` for ordinary fields; `Some(n)` for bitfield-packed fields.
+    pub bit_width: Option<u8>,
 }
 
 /// A field in an enum variant, can be named or positional

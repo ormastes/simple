@@ -114,6 +114,7 @@ fn test_generic_struct_def() {
             default: None,
             mutability: Mutability::Immutable,
             visibility: Visibility::Private,
+            bit_width: None,
         }],
         methods: vec![],
         visibility: Visibility::Private,

@@ -520,6 +520,7 @@ mod tests {
                     default: None,
                     mutability: Mutability::Mutable,
                     visibility: Visibility::Public,
+                    bit_width: None,
                 },
                 Field {
                     span: Span::new(0, 0, 0, 0),
@@ -528,6 +529,7 @@ mod tests {
                     default: None,
                     mutability: Mutability::Mutable,
                     visibility: Visibility::Public,
+                    bit_width: None,
                 },
             ],
             methods: vec![FunctionDef {

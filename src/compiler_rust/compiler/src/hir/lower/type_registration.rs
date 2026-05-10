@@ -102,6 +102,17 @@ impl Lowerer {
     }
 
     pub(crate) fn register_struct(&mut self, s: &ast::StructDef) -> LowerResult<TypeId> {
+        // If this struct has `@packed` attribute and any field has a bit-width annotation,
+        // desugar it into a `HirType::Bitfield` so that FR-DRIVER-0008's shift/mask
+        // codegen applies.  A struct with `@packed` but no bit-width fields stays a
+        // regular struct (dense layout, no bitfield packing).
+        let is_packed = s.attributes.iter().any(|a| a.name == "packed");
+        let has_bitwidth_fields = s.fields.iter().any(|f| f.bit_width.is_some());
+
+        if is_packed && has_bitwidth_fields {
+            return self.register_packed_struct_as_bitfield(s);
+        }
+
         let mut fields = Vec::new();
         for field in &s.fields {
             match self.resolve_type(&field.ty) {
@@ -142,6 +153,90 @@ impl Lowerer {
             self.module.type_invariants.insert(s.name.clone(), hir_invariant);
         }
 
+        Ok(type_id)
+    }
+
+    /// Desugar an `@packed struct` with bit-width fields into `HirType::Bitfield`.
+    ///
+    /// The backing type is inferred from the struct fields: we find the first
+    /// field whose type is a named integer type (u8/u16/u32/u64/i8 etc.) and use
+    /// that as the backing storage.  All fields must have a `bit_width` annotation.
+    /// Fields without a bit-width on an `@packed` struct are an error.
+    ///
+    /// Example:
+    /// ```simple
+    /// @packed
+    /// struct StatusReg:
+    ///     carry: u32:1
+    ///     zero: u32:1
+    ///     mode: u32:4
+    /// ```
+    /// This desugars to `HirType::Bitfield { backing: u32, fields: [...] }`.
+    fn register_packed_struct_as_bitfield(&mut self, s: &ast::StructDef) -> LowerResult<TypeId> {
+        // Determine the backing type from the fields.
+        // All bit-width fields must share the same base type; we use the first.
+        let backing = {
+            let first = s.fields.iter().find(|f| f.bit_width.is_some()).ok_or_else(|| {
+                LowerError::Unsupported(format!(
+                    "@packed struct '{}' has no bit-width annotated fields",
+                    s.name
+                ))
+            })?;
+            let ty = self.resolve_type(&first.ty)?;
+            if self.bit_width_for_type(ty).is_none() {
+                return Err(LowerError::Unsupported(format!(
+                    "@packed struct '{}' field '{}' must have an integer base type for bitfield packing",
+                    s.name, first.name
+                )));
+            }
+            ty
+        };
+
+        let backing_bits = self.bit_width_for_type(backing).unwrap();
+
+        let mut offset = 0u32;
+        let mut hir_fields = Vec::new();
+        for field in &s.fields {
+            let width = match field.bit_width {
+                Some(w) => w as u32,
+                None => {
+                    return Err(LowerError::Unsupported(format!(
+                        "@packed struct '{}' field '{}' is missing a bit-width annotation (`field: Type:N`)",
+                        s.name, field.name
+                    )));
+                }
+            };
+
+            if offset + width > backing_bits {
+                return Err(LowerError::Unsupported(format!(
+                    "@packed struct '{}' uses {} bits but backing type only has {} bits",
+                    s.name,
+                    offset + width,
+                    backing_bits
+                )));
+            }
+
+            let is_reserved = field.name.starts_with('_');
+            hir_fields.push(HirBitfieldField {
+                name: field.name.clone(),
+                bit_offset: offset,
+                bit_width: width,
+                is_reserved,
+                ty: backing,
+            });
+            offset += width;
+        }
+
+        let hir_type = HirType::Bitfield {
+            name: s.name.clone(),
+            backing,
+            fields: hir_fields,
+            generic_params: s.generic_params.clone(),
+            is_generic_template: s.is_generic_template,
+            type_bindings: std::collections::HashMap::new(),
+        };
+
+        let type_id = self.module.types.update_named(s.name.clone(), hir_type);
         Ok(type_id)
     }
 

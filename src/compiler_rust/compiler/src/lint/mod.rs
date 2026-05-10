@@ -368,6 +368,7 @@ pub fn raw_bytes(count: i32) -> i32:
                     default: None,
                     mutability: Mutability::Immutable,
                     visibility: simple_parser::ast::Visibility::Public,
+                    bit_width: None,
                 },
                 Field {
                     span: Span::new(0, 0, 0, 0),
@@ -376,6 +377,7 @@ pub fn raw_bytes(count: i32) -> i32:
                     default: None,
                     mutability: Mutability::Immutable,
                     visibility: simple_parser::ast::Visibility::Private,
+                    bit_width: None,
                 },
             ],
             methods: vec![],

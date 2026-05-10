@@ -51,10 +51,10 @@ impl<'a> Parser<'a> {
         {
             return Err(ParseError::contextual_error_with_help(
                 "packed struct declaration",
-                "post-name @packed struct syntax is recognized but not implemented yet",
+                "post-name @packed struct syntax is not supported",
                 self.current.span,
-                Some("use prefix @packed before struct for byte-packed layout; keep bitfield fields as manual shift/mask until FR-DRIVER-0003 lands".to_string()),
-                "FR-DRIVER-0003 tracks native `struct Foo @packed { a: u16:4 }` support in parser, HIR, and layout",
+                Some("place @packed before the struct keyword: `@packed\\nstruct Name:`".to_string()),
+                "only prefix @packed is supported (FR-DRIVER-0003); post-name form is not valid",
             ));
         }
 
@@ -330,19 +330,41 @@ impl<'a> Parser<'a> {
             crate::ast::Type::Simple("any".to_string())
         };
 
-        if self.check(&TokenKind::Colon) {
-            return Err(ParseError::contextual_error_with_help(
-                "struct field bit width",
-                "packed struct bitfield syntax `field: Type:bits` is recognized but not implemented yet",
-                self.current.span,
-                Some("use a standalone `bitfield Name(uN): field: bits` declaration or explicit shift/mask helpers until FR-DRIVER-0003 lands".to_string()),
-                "the Rust seed parser has bitfield declarations, but struct-field bit widths still need AST/HIR/layout support",
-            ));
-        }
+        // Parse optional bit-width annotation: `field: Type:N`
+        // This is only meaningful on `@packed` structs, but we accept it at the
+        // parse level and let HIR lowering emit an error if the struct is not @packed.
+        let bit_width = if self.check(&TokenKind::Colon) {
+            self.advance();
+            match &self.current.kind {
+                TokenKind::Integer(n) => {
+                    let bits = *n as u8;
+                    self.advance();
+                    Some(bits)
+                }
+                _ => {
+                    return Err(ParseError::unexpected_token(
+                        "integer bit width after `:`",
+                        format!("{:?}", self.current.kind),
+                        self.current.span,
+                    ));
+                }
+            }
+        } else {
+            None
+        };
 
-        let default = if self.check(&TokenKind::Assign) {
+        // Bit-width fields may not have default values (ambiguous parse, not useful)
+        let default = if bit_width.is_none() && self.check(&TokenKind::Assign) {
             self.advance();
             Some(self.parse_expression()?)
+        } else if bit_width.is_some() && self.check(&TokenKind::Assign) {
+            return Err(ParseError::contextual_error_with_help(
+                "bitfield default value",
+                "default values are not supported on bitfield fields",
+                self.current.span,
+                Some("remove the `= expr` part; initialize bitfield structs at call sites instead".to_string()),
+                "bit-width annotated fields (`field: Type:N`) do not support `= default` syntax",
+            ));
         } else {
             None
         };
@@ -358,6 +380,7 @@ impl<'a> Parser<'a> {
             default,
             mutability,
             visibility,
+            bit_width,
         })
     }
 
