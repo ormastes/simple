@@ -4,6 +4,12 @@
 # StdioTransport is a stub awaiting rt_process_spawn_piped runtime support.
 # WebSocket transport can be wired via std.nogc_sync_mut.websocket.
 
+extern fn rt_process_spawn_piped(cmd: text, args: [text]) -> i64
+extern fn rt_process_write_stdin(pid: i64, data: text) -> bool
+extern fn rt_process_read_stdout(pid: i64) -> text
+extern fn rt_process_is_alive(pid: i64) -> bool
+extern fn rt_process_kill(pid: i64) -> bool
+
 struct LspTransportConfig:
     server_command: text
     server_args: [text]
@@ -250,6 +256,46 @@ fn _lsp_extract_balanced(json: text, start: i64, open_ch: text) -> text:
                     return json.slice(start, i + 1)
         i = i + 1
     json.slice(start, json.len())
+
+class StdioProcessTransport:
+    pid: i64
+    server_cmd: text
+    server_args: [text]
+    buffer: text
+
+impl StdioProcessTransport:
+
+    static fn new(cmd: text, args: [text]) -> StdioProcessTransport:
+        val pid = rt_process_spawn_piped(cmd, args)
+        StdioProcessTransport(
+            pid: pid,
+            server_cmd: cmd,
+            server_args: args,
+            buffer: ""
+        )
+
+    me send(message: text) -> bool:
+        if not rt_process_is_alive(self.pid):
+            return false
+        val framed = lsp_frame_message(message)
+        rt_process_write_stdin(self.pid, framed)
+
+    me receive() -> text:
+        val chunk = rt_process_read_stdout(self.pid)
+        self.buffer = self.buffer + chunk
+        val result = lsp_parse_frame(self.buffer)
+        val json = result.0
+        val consumed = result.1
+        if json == "":
+            return ""
+        self.buffer = self.buffer.slice(consumed, self.buffer.len())
+        json
+
+    fn is_connected() -> bool:
+        rt_process_is_alive(self.pid)
+
+    me close():
+        rt_process_kill(self.pid)
 
 fn _lsp_transport_escape(s: text) -> text:
     var result = ""

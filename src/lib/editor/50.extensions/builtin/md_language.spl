@@ -30,3 +30,191 @@ fn md_file_extensions() -> [text]:
 
 fn md_block_kinds() -> [text]:
     ["heading", "paragraph", "code", "list", "table"]
+
+struct MdDiagnostic:
+    line: i64
+    col: i64
+    message: text
+    severity: text
+
+struct MdCompletion:
+    label: text
+    kind: text
+    detail: text
+
+# Split content into lines
+fn _md_split_lines(content: text) -> [text]:
+    var lines: [text] = []
+    var start = 0
+    var i = 0
+    while i < content.len():
+        if content.char_at(i) == "\n":
+            lines.push(content.slice(start, i))
+            start = i + 1
+        i = i + 1
+    if start <= content.len():
+        lines.push(content.slice(start, content.len()))
+    lines
+
+# Count leading # characters in a line
+fn _md_heading_level(line: text) -> i64:
+    var count = 0
+    var i = 0
+    while i < line.len():
+        if line.char_at(i) == "#":
+            count = count + 1
+        else:
+            i = line.len()
+        i = i + 1
+    count
+
+# Check if a line has trailing whitespace
+fn _md_has_trailing_space(line: text) -> bool:
+    if line.len() == 0:
+        return false
+    line.char_at(line.len() - 1) == " "
+
+fn md_language_diagnose(content: text) -> [MdDiagnostic]:
+    var result: [MdDiagnostic] = []
+    val lines = _md_split_lines(content)
+    var fence_count = 0
+    var i = 0
+    while i < lines.len():
+        val line = lines[i]
+        val trimmed = line.trim()
+        # Check heading without space after #
+        if trimmed.starts_with("#"):
+            val level = _md_heading_level(trimmed)
+            if level < trimmed.len():
+                if trimmed.char_at(level) != " ":
+                    result.push(MdDiagnostic(
+                        line: i,
+                        col: level,
+                        message: "Heading requires a space after '#'",
+                        severity: "warning"
+                    ))
+            else:
+                result.push(MdDiagnostic(
+                    line: i,
+                    col: level,
+                    message: "Heading requires a space after '#'",
+                    severity: "warning"
+                ))
+        # Check trailing whitespace
+        if _md_has_trailing_space(line):
+            result.push(MdDiagnostic(
+                line: i,
+                col: line.len() - 1,
+                message: "Trailing whitespace",
+                severity: "hint"
+            ))
+        # Check empty links [text]()
+        if (line.contains("[") and line.contains("]()")):
+            result.push(MdDiagnostic(
+                line: i,
+                col: 0,
+                message: "Empty link target",
+                severity: "warning"
+            ))
+        # Count code fence markers
+        if trimmed.starts_with("```"):
+            fence_count = fence_count + 1
+        i = i + 1
+    # Check unclosed code fences (odd number)
+    if fence_count % 2 != 0:
+        result.push(MdDiagnostic(
+            line: lines.len() - 1,
+            col: 0,
+            message: "Unclosed code fence",
+            severity: "error"
+        ))
+    result
+
+fn md_language_complete(content: text, line: i64, col: i64) -> [MdCompletion]:
+    var result: [MdCompletion] = []
+    val lines = _md_split_lines(content)
+    if line < 0 or line >= lines.len():
+        return result
+    val current_line = lines[line]
+    val before_cursor = current_line.slice(0, col)
+    val trimmed_before = before_cursor.trim()
+    # After # at start of line → suggest heading levels
+    if trimmed_before == "#" or trimmed_before.starts_with("# "):
+        result.push(MdCompletion(label: "## ", kind: "keyword", detail: "Heading level 2"))
+        result.push(MdCompletion(label: "### ", kind: "keyword", detail: "Heading level 3"))
+        result.push(MdCompletion(label: "#### ", kind: "keyword", detail: "Heading level 4"))
+    # After [ → suggest link template
+    if before_cursor.ends_with("["):
+        result.push(MdCompletion(label: "[text](url)", kind: "snippet", detail: "Inline link"))
+    # After ``` → suggest common languages
+    if before_cursor.trim() == "```" or before_cursor.ends_with("```"):
+        result.push(MdCompletion(label: "simple", kind: "value", detail: "Simple language"))
+        result.push(MdCompletion(label: "bash", kind: "value", detail: "Bash shell"))
+        result.push(MdCompletion(label: "json", kind: "value", detail: "JSON"))
+        result.push(MdCompletion(label: "python", kind: "value", detail: "Python"))
+    result
+
+fn md_language_hover(content: text, line: i64, col: i64) -> text:
+    val lines = _md_split_lines(content)
+    if line < 0 or line >= lines.len():
+        return ""
+    val current_line = lines[line]
+    val trimmed = current_line.trim()
+    # On a heading line → return heading level
+    if trimmed.starts_with("#"):
+        val level = _md_heading_level(trimmed)
+        return "Heading level " + _md_int_to_text(level)
+    # On a code fence line → return language name
+    if trimmed.starts_with("```"):
+        val lang = trimmed.slice(3, trimmed.len()).trim()
+        if lang != "":
+            return lang
+        return "code"
+    # Check if cursor is on a link → extract URL
+    val link_url = _md_find_link_url(current_line, col)
+    if link_url != "":
+        return link_url
+    ""
+
+fn _md_int_to_text(n: i64) -> text:
+    if n == 1:
+        return "1"
+    if n == 2:
+        return "2"
+    if n == 3:
+        return "3"
+    if n == 4:
+        return "4"
+    if n == 5:
+        return "5"
+    if n == 6:
+        return "6"
+    "0"
+
+# Find link URL at cursor position: scan for [...](url) patterns
+fn _md_find_link_url(line: text, col: i64) -> text:
+    var i = 0
+    while i < line.len():
+        if line.char_at(i) == "[":
+            # Find closing ]
+            var j = i + 1
+            while j < line.len():
+                if line.char_at(j) == "]":
+                    # Check for (
+                    if j + 1 < line.len():
+                        if line.char_at(j + 1) == "(":
+                            # Find closing )
+                            var k = j + 2
+                            while k < line.len():
+                                if line.char_at(k) == ")":
+                                    # Is cursor within the link span?
+                                    if col >= i and col <= k:
+                                        val url = line.slice(j + 2, k)
+                                        if url != "":
+                                            return url
+                                    k = line.len()
+                                k = k + 1
+                    j = line.len()
+                j = j + 1
+        i = i + 1
+    ""

@@ -1,7 +1,18 @@
 # Built-in Simple Language Extension
 #
 # Provides Simple language support: file association, syntax highlighting,
-# comment toggling, bracket matching.
+# comment toggling, bracket matching, diagnostics, completions, and hover.
+
+struct SplDiagnostic:
+    line: i64
+    col: i64
+    message: text
+    severity: text
+
+struct SplCompletion:
+    label: text
+    kind: text
+    detail: text
 
 fn spl_language_manifest() -> ExtensionManifest:
     ExtensionManifest(
@@ -42,3 +53,172 @@ fn spl_keyword_completions(prefix: text) -> [text]:
             result.push(keywords[i])
         i = i + 1
     result
+
+fn spl_count_char(s: text, ch: text) -> i64:
+    var count = 0
+    var i = 0
+    while i < s.len():
+        if s.char_at(i) == ch:
+            count = count + 1
+        i = i + 1
+    count
+
+fn spl_line_has_tab(s: text) -> bool:
+    var i = 0
+    while i < s.len():
+        if s.char_at(i) == "\t":
+            return true
+        i = i + 1
+    false
+
+fn spl_line_has_trailing_space(s: text) -> bool:
+    val n = s.len()
+    if n == 0:
+        return false
+    val last = s.char_at(n - 1)
+    last == " " or last == "\t"
+
+fn spl_split_lines(content: text) -> [text]:
+    var lines: [text] = []
+    var start = 0
+    var i = 0
+    while i < content.len():
+        if content.char_at(i) == "\n":
+            lines.push(content.slice(start, i))
+            start = i + 1
+        i = i + 1
+    if start <= content.len():
+        lines.push(content.slice(start, content.len()))
+    lines
+
+fn spl_language_diagnose(content: text) -> [SplDiagnostic]:
+    var result: [SplDiagnostic] = []
+    val lines = spl_split_lines(content)
+    var line_num = 0
+    while line_num < lines.len():
+        val ln = lines[line_num]
+        if spl_line_has_tab(ln):
+            result.push(SplDiagnostic(
+                line: line_num,
+                col: 0,
+                message: "Tab character found; Simple uses spaces for indentation",
+                severity: "warning"
+            ))
+        if spl_line_has_trailing_space(ln):
+            result.push(SplDiagnostic(
+                line: line_num,
+                col: ln.len() - 1,
+                message: "Trailing whitespace",
+                severity: "warning"
+            ))
+        val trimmed = ln
+        if (trimmed.starts_with("fn ") or trimmed.starts_with("me ")) and not trimmed.contains(":"):
+            result.push(SplDiagnostic(
+                line: line_num,
+                col: 0,
+                message: "Signature line may be missing ':' at end",
+                severity: "warning"
+            ))
+        val quote_count = spl_count_char(ln, "\"")
+        if quote_count > 0 and (quote_count - (quote_count / 2) * 2) != 0:
+            result.push(SplDiagnostic(
+                line: line_num,
+                col: 0,
+                message: "Possible unclosed string literal (odd number of quotes)",
+                severity: "error"
+            ))
+        if trimmed.starts_with("var ") and not trimmed.contains("="):
+            result.push(SplDiagnostic(
+                line: line_num,
+                col: 0,
+                message: "Consider using 'val' if this binding is never reassigned",
+                severity: "hint"
+            ))
+        line_num = line_num + 1
+    result
+
+fn spl_language_complete(content: text, line: i64, col: i64) -> [SplCompletion]:
+    var result: [SplCompletion] = []
+    val lines = spl_split_lines(content)
+    var current_line = ""
+    if line >= 0 and line < lines.len():
+        current_line = lines[line]
+    val prefix = current_line.slice(0, col)
+    val trimmed = prefix
+    if trimmed == "" or trimmed == " " or col == 0:
+        val keywords = ["fn", "me", "val", "var", "if", "elif", "else", "while", "return", "struct", "class", "impl", "use", "extern"]
+        var i = 0
+        while i < keywords.len():
+            result.push(SplCompletion(
+                label: keywords[i],
+                kind: "keyword",
+                detail: ""
+            ))
+            i = i + 1
+        return result
+    if trimmed.contains("use ") and not trimmed.contains("std."):
+        result.push(SplCompletion(label: "std.", kind: "snippet", detail: "Standard library prefix"))
+        return result
+    if trimmed.contains("fn ") or trimmed.contains("me "):
+        result.push(SplCompletion(label: "fn name() -> text:", kind: "snippet", detail: "Function template"))
+        result.push(SplCompletion(label: "me name():", kind: "snippet", detail: "Mutable method template"))
+        return result
+    val keywords2 = ["fn", "me", "val", "var", "if", "elif", "else", "while", "return", "struct", "class", "impl", "use", "extern"]
+    var j = 0
+    while j < keywords2.len():
+        result.push(SplCompletion(
+            label: keywords2[j],
+            kind: "keyword",
+            detail: ""
+        ))
+        j = j + 1
+    result
+
+fn spl_language_hover(content: text, line: i64, col: i64) -> text:
+    val lines = spl_split_lines(content)
+    if line < 0 or line >= lines.len():
+        return ""
+    val ln = lines[line]
+    val word_start = col
+    if word_start < 0 or word_start >= ln.len():
+        return ""
+    var start = word_start
+    while start > 0 and ln.char_at(start - 1) != " " and ln.char_at(start - 1) != "\t":
+        start = start - 1
+    var end = word_start
+    while end < ln.len() and ln.char_at(end) != " " and ln.char_at(end) != "\t":
+        end = end + 1
+    val word = ln.slice(start, end)
+    if word == "val":
+        return "Immutable binding"
+    if word == "var":
+        return "Mutable binding"
+    if word == "fn":
+        return "Immutable method or free function"
+    if word == "me":
+        return "Mutable method (modifies self)"
+    if word == "extern":
+        return "Runtime-provided function declaration"
+    if word == "struct":
+        return "Value type (plain data record)"
+    if word == "class":
+        return "Mutable aggregate type"
+    if word == "impl":
+        return "Implementation block for a class"
+    if word == "use":
+        return "Import a module or symbol"
+    if word == "match":
+        return "Pattern matching expression"
+    if word == "return":
+        return "Return a value from a function"
+    if word == "if":
+        return "Conditional branch"
+    if word == "elif":
+        return "Else-if conditional branch"
+    if word == "else":
+        return "Fallback branch"
+    if word == "while":
+        return "Loop while condition is true"
+    if word == "for":
+        return "Iterate over a collection"
+    ""
