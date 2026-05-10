@@ -2129,7 +2129,7 @@ fn br_style_background_argb(html: text, style: text) -> u32:
         if colon > 0:
             val key = decl.slice(0, colon).trim().lower()
             var value = decl.slice(colon + 1, decl.len()).trim()
-            value = br_resolve_css_var(html, value)
+            value = br_resolve_css_var_with_style(html, value, style)
             if key == "background-color":
                 val parsed = parse_color_value(value)
                 if parsed != 0x00000000u32:
@@ -2147,20 +2147,72 @@ fn br_style_color_argb(html: text, style: text, fallback: u32) -> u32:
     val raw = br_style_property_value(style, "color")
     if raw.len() == 0:
         return fallback
-    val value = br_resolve_css_var(html, raw)
+    val value = br_resolve_css_var_with_style(html, raw, style)
     val parsed = parse_color_value(value)
     if parsed != 0x00000000u32:
         return br_rgba_to_opaque_page_argb(parsed)
     fallback
 
+fn br_find_matching_paren(s: text, open_pos: i64) -> i64:
+    var depth = 1
+    var i = open_pos + 1
+    while i < s.len():
+        val ch = s.char_at(i)
+        if ch == "(":
+            depth = depth + 1
+        elif ch == ")":
+            depth = depth - 1
+            if depth == 0:
+                return i
+        i = i + 1
+    999999999
+
+fn br_find_custom_property_in_all_styles(html: text, name: text) -> text:
+    val lower_html = html.lower()
+    var search_pos: i64 = 0
+    while search_pos < html.len():
+        val style_pos = br_find_str(lower_html, "<style", search_pos)
+        if style_pos >= 999999999:
+            break
+        val style_open_end = browser_renderer_find_char(html, ">", style_pos)
+        if style_open_end >= 999999999:
+            break
+        val style_close = br_find_str(lower_html, "</style", style_open_end + 1)
+        if style_close >= 999999999:
+            break
+        val css = html.slice(style_open_end + 1, style_close)
+        val prop_val = br_style_property_value(css, name)
+        if prop_val.len() > 0:
+            return prop_val
+        val declarations = browser_renderer_split_semicolons(css)
+        var idx = 0
+        while idx < declarations.len():
+            val decl = declarations[idx].trim()
+            val open = browser_renderer_find_char(decl, "{", 0)
+            if open < 999999999:
+                val close = browser_renderer_find_char(decl, "}", open + 1)
+                if close < 999999999:
+                    val inner = decl.slice(open + 1, close)
+                    val found = br_style_property_value(inner, name)
+                    if found.len() > 0:
+                        return found
+            idx = idx + 1
+        search_pos = style_close + 1
+    ""
+
 fn br_resolve_css_var(html: text, value: text) -> text:
+    br_resolve_css_var_with_style(html, value, "")
+
+fn br_resolve_css_var_with_style(html: text, value: text, style: text) -> text:
     val trimmed = value.trim()
     val lower = trimmed.lower()
     if not lower.starts_with("var("):
         return trimmed
     val open = browser_renderer_find_char(trimmed, "(", 0)
-    val close = browser_renderer_find_char(trimmed, ")", open + 1)
-    if open >= 999999999 or close >= 999999999:
+    if open >= 999999999:
+        return trimmed
+    val close = br_find_matching_paren(trimmed, open)
+    if close >= 999999999:
         return trimmed
     val raw_args = trimmed.slice(open + 1, close).trim()
     val fallback_comma = browser_renderer_find_char(raw_args, ",", 0)
@@ -2169,12 +2221,19 @@ fn br_resolve_css_var(html: text, value: text) -> text:
     if fallback_comma < 999999999:
         name = raw_args.slice(0, fallback_comma).trim()
         fallback_value = raw_args.slice(fallback_comma + 1, raw_args.len()).trim()
+    if style.len() > 0:
+        val from_style = br_style_property_value(style, name)
+        if from_style.len() > 0:
+            return from_style
     val root_style = br_style_block_rule_for_selector(html, ":root")
     val resolved = br_style_property_value(root_style, name)
     if resolved.len() > 0:
         return resolved
+    val from_all = br_find_custom_property_in_all_styles(html, name)
+    if from_all.len() > 0:
+        return from_all
     if fallback_value.len() > 0:
-        return fallback_value
+        return br_resolve_css_var_with_style(html, fallback_value, style)
     trimmed
 
 fn br_style_px_or_default(style: text, prop: text, fallback: i32) -> i32:

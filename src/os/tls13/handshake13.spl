@@ -75,13 +75,9 @@ val CIPHER_CHACHA20_POLY1305_SHA256: u16 = 0x1303
 val GROUP_X25519: u16              = 0x001D
 val GROUP_SECP256R1: u16           = 0x0017
 val SIG_ED25519: u16               = 0x0807
-# Decode-recognised TLS 1.3 SignatureScheme codes (RFC 8446 §4.2.3) for
-# which we do NOT yet have a verify primitive in tree. These are NOT
-# advertised by `_build_ext_sig_algs` — advertising would let the peer
-# pick a scheme we cannot verify, breaking the handshake. Named here so
-# parser/log sites can refer to them by symbol; dispatch in
-# `cert_verify.spl` returns a typed Err for both. See FR
-# `doc/08_tracking/feature_request/ecdsa_p384_p521_runtime_primitives_2026-05-02.md`.
+# TLS 1.3 SignatureScheme codes (RFC 8446 §4.2.3) for ECDSA-P-384 and ECDSA-P-521.
+# Both are now advertised by `_build_ext_sig_algs` and wired in `cert_verify.spl`
+# using the pure-Simple primitives in os.crypto.ecdsa_p384 / os.crypto.ecdsa_p521.
 val SIG_ECDSA_SECP384R1_SHA384: u16 = 0x0503
 val SIG_ECDSA_SECP521R1_SHA512: u16 = 0x0603
 
@@ -389,16 +385,23 @@ fn _build_ext_sni(host: text) -> [u8]:
     out
 
 fn _build_ext_sig_algs() -> [u8]:
-    """Build signature_algorithms extension: Ed25519 only."""
-    # algorithms list: 1 algorithm = 2 bytes, prefixed with 2-byte list length
-    val alg_bytes = _put_u16_be(SIG_ED25519)
+    """Build signature_algorithms extension: Ed25519 + ECDSA-P-384 + ECDSA-P-521."""
+    # algorithms list: 3 algorithms = 6 bytes, prefixed with 2-byte list length
+    # Order: most-preferred first (Ed25519, then P-384, then P-521)
+    var alg_bytes: [u8] = []
+    val ed_bytes = _put_u16_be(SIG_ED25519)
+    _append_into(alg_bytes, ed_bytes)
+    val p384_bytes = _put_u16_be(SIG_ECDSA_SECP384R1_SHA384)
+    _append_into(alg_bytes, p384_bytes)
+    val p521_bytes = _put_u16_be(SIG_ECDSA_SECP521R1_SHA512)
+    _append_into(alg_bytes, p521_bytes)
     val list_len = _put_u16_be(alg_bytes.len().to_u16())
-    var alg_list: [u8] = _byte_buf(4)
+    var alg_list: [u8] = _byte_buf(alg_bytes.len() + 2)
     _append_into(alg_list, list_len)
     _append_into(alg_list, alg_bytes)
     val ext_type = _put_u16_be(EXT_SIG_ALGS)
     val ext_len = _put_u16_be(alg_list.len().to_u16())
-    var out: [u8] = _byte_buf(8)
+    var out: [u8] = _byte_buf(alg_list.len() + 4)
     _append_into(out, ext_type)
     _append_into(out, ext_len)
     _append_into(out, alg_list)
