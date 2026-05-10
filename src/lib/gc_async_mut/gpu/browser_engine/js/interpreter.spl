@@ -1,0 +1,745 @@
+"""
+# JS Interpreter
+
+Tree-walking interpreter for the browser engine JS engine.
+Evaluates AST nodes (JsStmt / JsExpr) against a scope chain.
+Covers ES5 subset: variables, functions, control flow, basic objects.
+"""
+
+#![allow(REQC001)]
+#![allow(REQC004)]
+#![allow(unnamed_duplicate_typed_args)]
+
+use std.gc_async_mut.gpu.browser_engine.js.values.{
+    JsVal, JsObj, JsProp, JsFunc, JsHeap,
+    js_to_bool, js_to_number, js_to_string, js_typeof, js_strict_equal
+}
+use std.gc_async_mut.gpu.browser_engine.js.ast.{
+    JsExpr, JsStmt, JsBinOp, JsUnaryOp, JsAssignOp,
+    JsSwitchCase, JsProgram
+}
+use std.gc_async_mut.gpu.browser_engine.js.parser.{js_parse}
+
+# =========================================================================
+# Scope (variable environment)
+# =========================================================================
+
+pub class JsBinding:
+    """A single variable binding in a scope."""
+    name: text
+    value: JsVal
+    is_const: bool
+
+pub class JsScope:
+    """A single scope level in the scope chain."""
+    bindings: [JsBinding]
+
+    static fn new() -> JsScope:
+        """Create an empty scope."""
+        JsScope(bindings: [])
+
+    me get(name: text) -> JsVal:
+        """Lookup a variable in this scope. Returns Undefined if not found."""
+        var i = 0
+        while i < self.bindings.len():
+            if self.bindings[i].name == name:
+                return self.bindings[i].value
+            i = i + 1
+        JsVal.Undefined
+
+    me has(name: text) -> bool:
+        """Check if a binding exists in this scope."""
+        var i = 0
+        while i < self.bindings.len():
+            if self.bindings[i].name == name:
+                return true
+            i = i + 1
+        false
+
+    me set(name: text, value: JsVal):
+        """Set a binding. Overwrites if exists, inserts otherwise."""
+        var i = 0
+        while i < self.bindings.len():
+            if self.bindings[i].name == name:
+                self.bindings[i] = JsBinding(name: name, value: value, is_const: self.bindings[i].is_const)
+                return
+            i = i + 1
+        self.bindings.push(JsBinding(name: name, value: value, is_const: false))
+
+    me declare(name: text, value: JsVal, is_const: bool):
+        """Declare a new binding in this scope."""
+        self.bindings.push(JsBinding(name: name, value: value, is_const: is_const))
+
+# =========================================================================
+# Control flow signals
+# =========================================================================
+
+pub enum JsSignal:
+    """Control flow signals for return/break/continue/throw."""
+    None
+    Return(value: JsVal)
+    Break
+    Continue
+    Throw(value: JsVal)
+
+# =========================================================================
+# Console output collector
+# =========================================================================
+
+pub class JsConsoleLog:
+    """Collects console.log output during evaluation."""
+    messages: [text]
+
+    static fn new() -> JsConsoleLog:
+        """Create an empty log collector."""
+        JsConsoleLog(messages: [])
+
+    me add(msg: text):
+        """Append a message."""
+        self.messages.push(msg)
+
+# =========================================================================
+# Interpreter
+# =========================================================================
+
+pub class JsInterp:
+    """Tree-walking JavaScript interpreter.
+
+    Manages scope chain, object heap, and function bodies.
+    Use eval_source() for end-to-end evaluation from JS source text.
+    """
+    _scopes: [JsScope]
+    _heap: JsHeap
+    _func_bodies: [[JsStmt]]
+    _signal: JsSignal
+    console: JsConsoleLog
+
+    static fn new() -> JsInterp:
+        """Create a fresh interpreter with a global scope."""
+        var global = JsScope.new()
+        JsInterp(
+            _scopes: [global],
+            _heap: JsHeap.new(),
+            _func_bodies: [],
+            _signal: JsSignal.None,
+            console: JsConsoleLog.new()
+        )
+
+    # -----------------------------------------------------------------
+    # Public API
+    # -----------------------------------------------------------------
+
+    me eval_source(source: text) -> JsVal:
+        """Parse and evaluate JS source. Returns the last expression value."""
+        val program = js_parse(source)
+        self._eval_program(program)
+
+    me get_var(name: text) -> JsVal:
+        """Get a variable's value from the scope chain."""
+        self._scope_lookup(name)
+
+    me get_console_output() -> [text]:
+        """Return all console.log messages."""
+        self.console.messages
+
+    # -----------------------------------------------------------------
+    # Scope chain
+    # -----------------------------------------------------------------
+
+    me _push_scope():
+        """Enter a new scope."""
+        self._scopes.push(JsScope.new())
+
+    me _pop_scope():
+        """Leave the current scope."""
+        if self._scopes.len() > 1:
+            self._scopes.pop()
+
+    me _scope_lookup(name: text) -> JsVal:
+        """Walk the scope chain from innermost to outermost."""
+        var i = self._scopes.len() - 1
+        while i >= 0:
+            if self._scopes[i].has(name):
+                return self._scopes[i].get(name)
+            i = i - 1
+        JsVal.Undefined
+
+    me _scope_set(name: text, value: JsVal):
+        """Set a variable in the first scope that has it, or global."""
+        var i = self._scopes.len() - 1
+        while i >= 0:
+            if self._scopes[i].has(name):
+                self._scopes[i].set(name, value)
+                return
+            i = i - 1
+        # Set in global scope
+        self._scopes[0].set(name, value)
+
+    me _scope_declare(name: text, value: JsVal, is_const: bool):
+        """Declare a variable in the current (innermost) scope."""
+        val top = self._scopes.len() - 1
+        self._scopes[top].declare(name, value, is_const)
+
+    # -----------------------------------------------------------------
+    # Program evaluation
+    # -----------------------------------------------------------------
+
+    me _eval_program(program: JsProgram) -> JsVal:
+        """Evaluate all statements in a program."""
+        var last = JsVal.Undefined
+        var i = 0
+        while i < program.body.len():
+            last = self._eval_stmt(program.body[i])
+            match self._signal:
+                JsSignal.None => pass_do_nothing
+                _ => return last
+            i = i + 1
+        last
+
+    # -----------------------------------------------------------------
+    # Statement evaluation
+    # -----------------------------------------------------------------
+
+    me _eval_stmt(stmt: JsStmt) -> JsVal:
+        """Evaluate a single statement."""
+        match stmt:
+            JsStmt.ExprStmt(expr) => self._eval_expr(expr)
+            JsStmt.VarDecl(kind, name, init) => self._eval_var_decl(kind, name, init)
+            JsStmt.Block(body) => self._eval_block(body)
+            JsStmt.IfStmt(test, consequent, alternate) => self._eval_if(test, consequent, alternate)
+            JsStmt.WhileStmt(test, body) => self._eval_while(test, body)
+            JsStmt.DoWhileStmt(test, body) => self._eval_do_while(test, body)
+            JsStmt.ForStmt(init, test, update, body) => self._eval_for(init, test, update, body)
+            JsStmt.ForInStmt(left, right, body) => self._eval_for_in(left, right, body)
+            JsStmt.ReturnStmt(value) => self._eval_return(value)
+            JsStmt.BreakStmt =>
+                self._signal = JsSignal.Break
+                JsVal.Undefined
+            JsStmt.ContinueStmt =>
+                self._signal = JsSignal.Continue
+                JsVal.Undefined
+            JsStmt.ThrowStmt(value) =>
+                val v = self._eval_expr(value)
+                self._signal = JsSignal.Throw(v)
+                JsVal.Undefined
+            JsStmt.TryCatch(body, catch_param, catch_body, finally_body) =>
+                self._eval_try(body, catch_param, catch_body, finally_body)
+            JsStmt.SwitchStmt(disc, cases) => self._eval_switch(disc, cases)
+            JsStmt.FuncDecl(name, params, body) => self._eval_func_decl(name, params, body)
+            JsStmt.EmptyStmt => JsVal.Undefined
+            JsStmt.DebuggerStmt => JsVal.Undefined
+
+    me _eval_var_decl(kind: text, name: text, init: JsExpr?) -> JsVal:
+        """Evaluate a variable declaration."""
+        var value = JsVal.Undefined
+        if init != nil:
+            value = self._eval_expr(init)
+        self._scope_declare(name, value, kind == "const")
+        JsVal.Undefined
+
+    me _eval_block(body: [JsStmt]) -> JsVal:
+        """Evaluate a block of statements in a new scope."""
+        self._push_scope()
+        var last = JsVal.Undefined
+        var i = 0
+        while i < body.len():
+            last = self._eval_stmt(body[i])
+            match self._signal:
+                JsSignal.None => pass_do_nothing
+                _ =>
+                    self._pop_scope()
+                    return last
+            i = i + 1
+        self._pop_scope()
+        last
+
+    me _eval_if(test: JsExpr, consequent: JsStmt, alternate: JsStmt?) -> JsVal:
+        """Evaluate an if statement."""
+        val cond = self._eval_expr(test)
+        if js_to_bool(cond):
+            return self._eval_stmt(consequent)
+        if alternate != nil:
+            return self._eval_stmt(alternate)
+        JsVal.Undefined
+
+    me _eval_while(test: JsExpr, body: JsStmt) -> JsVal:
+        """Evaluate a while loop."""
+        var last = JsVal.Undefined
+        while js_to_bool(self._eval_expr(test)):
+            last = self._eval_stmt(body)
+            match self._signal:
+                JsSignal.Break =>
+                    self._signal = JsSignal.None
+                    break
+                JsSignal.Continue =>
+                    self._signal = JsSignal.None
+                JsSignal.None => pass_do_nothing
+                _ => return last
+        last
+
+    me _eval_do_while(test: JsExpr, body: JsStmt) -> JsVal:
+        """Evaluate a do-while loop."""
+        var last = JsVal.Undefined
+        var running = true
+        while running:
+            last = self._eval_stmt(body)
+            match self._signal:
+                JsSignal.Break =>
+                    self._signal = JsSignal.None
+                    break
+                JsSignal.Continue =>
+                    self._signal = JsSignal.None
+                JsSignal.None => pass_do_nothing
+                _ => return last
+            if not js_to_bool(self._eval_expr(test)):
+                running = false
+        last
+
+    me _eval_for(init: JsStmt?, test: JsExpr?, update: JsExpr?, body: JsStmt) -> JsVal:
+        """Evaluate a for loop."""
+        self._push_scope()
+        if init != nil:
+            self._eval_stmt(init)
+        var last = JsVal.Undefined
+        while true:
+            if test != nil:
+                if not js_to_bool(self._eval_expr(test)):
+                    break
+            last = self._eval_stmt(body)
+            match self._signal:
+                JsSignal.Break =>
+                    self._signal = JsSignal.None
+                    break
+                JsSignal.Continue =>
+                    self._signal = JsSignal.None
+                JsSignal.None => pass_do_nothing
+                _ =>
+                    self._pop_scope()
+                    return last
+            if update != nil:
+                self._eval_expr(update)
+        self._pop_scope()
+        last
+
+    me _eval_for_in(left: text, right: JsExpr, body: JsStmt) -> JsVal:
+        """Evaluate a for-in loop."""
+        val obj = self._eval_expr(right)
+        match obj:
+            JsVal.Obj(id) =>
+                val o = self._heap.get_object(id)
+                if o != nil:
+                    val keys = o.prop_keys()
+                    var i = 0
+                    while i < keys.len():
+                        self._scope_set(left, JsVal.Str(keys[i]))
+                        self._eval_stmt(body)
+                        match self._signal:
+                            JsSignal.Break =>
+                                self._signal = JsSignal.None
+                                break
+                            JsSignal.Continue =>
+                                self._signal = JsSignal.None
+                            JsSignal.None => pass_do_nothing
+                            _ => return JsVal.Undefined
+                        i = i + 1
+            _ => pass_do_nothing
+        JsVal.Undefined
+
+    me _eval_return(value: JsExpr?) -> JsVal:
+        """Evaluate a return statement."""
+        var result = JsVal.Undefined
+        if value != nil:
+            result = self._eval_expr(value)
+        self._signal = JsSignal.Return(result)
+        result
+
+    me _eval_try(body: JsStmt, catch_param: text, catch_body: JsStmt, finally_body: JsStmt?) -> JsVal:
+        """Evaluate a try/catch/finally."""
+        var result = self._eval_stmt(body)
+        match self._signal:
+            JsSignal.Throw(thrown) =>
+                self._signal = JsSignal.None
+                self._push_scope()
+                self._scope_declare(catch_param, thrown, false)
+                result = self._eval_stmt(catch_body)
+                self._pop_scope()
+            _ => pass_do_nothing
+        if finally_body != nil:
+            self._eval_stmt(finally_body)
+        result
+
+    me _eval_switch(disc: JsExpr, cases: [JsSwitchCase]) -> JsVal:
+        """Evaluate a switch statement."""
+        val disc_val = self._eval_expr(disc)
+        var matched = false
+        var last = JsVal.Undefined
+        var i = 0
+        while i < cases.len():
+            val c = cases[i]
+            if not matched:
+                if c.test != nil:
+                    val test_val = self._eval_expr(c.test)
+                    if js_strict_equal(disc_val, test_val):
+                        matched = true
+                else:
+                    matched = true
+            if matched:
+                var j = 0
+                while j < c.body.len():
+                    last = self._eval_stmt(c.body[j])
+                    match self._signal:
+                        JsSignal.Break =>
+                            self._signal = JsSignal.None
+                            return last
+                        JsSignal.None => pass_do_nothing
+                        _ => return last
+                    j = j + 1
+            i = i + 1
+        last
+
+    me _eval_func_decl(name: text, params: [text], body: [JsStmt]) -> JsVal:
+        """Evaluate a function declaration — binds name in current scope."""
+        val depth = self._scopes.len()
+        val fid = self._heap.alloc_func(name, params, depth)
+        # Store body for later invocation
+        self._store_func_body(fid, body)
+        self._scope_declare(name, JsVal.Func(fid), false)
+        JsVal.Undefined
+
+    # -----------------------------------------------------------------
+    # Expression evaluation
+    # -----------------------------------------------------------------
+
+    me _eval_expr(expr: JsExpr) -> JsVal:
+        """Evaluate a single expression."""
+        match expr:
+            JsExpr.NumLit(v) => JsVal.Num(v)
+            JsExpr.StrLit(v) => JsVal.Str(v)
+            JsExpr.BoolLit(v) => JsVal.Bool(v)
+            JsExpr.NullLit => JsVal.Null
+            JsExpr.UndefinedLit => JsVal.Undefined
+            JsExpr.Ident(name) => self._scope_lookup(name)
+            JsExpr.This => self._scope_lookup("this")
+            JsExpr.Unary(op, operand) => self._eval_unary(op, operand)
+            JsExpr.Binary(op, left, right) => self._eval_binary(op, left, right)
+            JsExpr.Assign(op, target, value) => self._eval_assign(op, target, value)
+            JsExpr.Conditional(test, cons, alt) =>
+                if js_to_bool(self._eval_expr(test)):
+                    self._eval_expr(cons)
+                else:
+                    self._eval_expr(alt)
+            JsExpr.Call(callee, args) => self._eval_call(callee, args)
+            JsExpr.MemberDot(obj, prop) => self._eval_member_dot(obj, prop)
+            JsExpr.MemberBracket(obj, prop) => self._eval_member_bracket(obj, prop)
+            JsExpr.NewExpr(callee, args) => self._eval_new(callee, args)
+            JsExpr.Array(elements) => self._eval_array(elements)
+            JsExpr.ObjectExpr(keys, values) => self._eval_object(keys, values)
+            JsExpr.FuncExpr(name, params, body) => self._eval_func_expr(name, params, body)
+            JsExpr.Sequence(exprs) =>
+                var last = JsVal.Undefined
+                var i = 0
+                while i < exprs.len():
+                    last = self._eval_expr(exprs[i])
+                    i = i + 1
+                last
+            JsExpr.Update(op, prefix, argument) => self._eval_update(op, prefix, argument)
+            JsExpr.Typeof(argument) =>
+                val v = self._eval_expr(argument)
+                JsVal.Str(js_typeof(v))
+
+    me _eval_unary(op: JsUnaryOp, operand: JsExpr) -> JsVal:
+        """Evaluate a unary expression."""
+        val v = self._eval_expr(operand)
+        match op:
+            JsUnaryOp.Neg => JsVal.Num(0.0 - js_to_number(v))
+            JsUnaryOp.Pos => JsVal.Num(js_to_number(v))
+            JsUnaryOp.Not => JsVal.Bool(not js_to_bool(v))
+            JsUnaryOp.BitNot => JsVal.Num(0.0)
+            JsUnaryOp.TypeOf => JsVal.Str(js_typeof(v))
+            JsUnaryOp.Void => JsVal.Undefined
+
+    me _eval_binary(op: JsBinOp, left: JsExpr, right: JsExpr) -> JsVal:
+        """Evaluate a binary expression."""
+        # Short-circuit for && and ||
+        match op:
+            JsBinOp.And =>
+                val lv = self._eval_expr(left)
+                if not js_to_bool(lv):
+                    return lv
+                return self._eval_expr(right)
+            JsBinOp.Or =>
+                val lv = self._eval_expr(left)
+                if js_to_bool(lv):
+                    return lv
+                return self._eval_expr(right)
+            _ => pass_do_nothing
+
+        val lv = self._eval_expr(left)
+        val rv = self._eval_expr(right)
+
+        match op:
+            JsBinOp.Add =>
+                # String concatenation if either side is a string
+                match lv:
+                    JsVal.Str(ls) => JsVal.Str(ls + js_to_string(rv))
+                    _ =>
+                        match rv:
+                            JsVal.Str(rs) => JsVal.Str(js_to_string(lv) + rs)
+                            _ => JsVal.Num(js_to_number(lv) + js_to_number(rv))
+            JsBinOp.Sub => JsVal.Num(js_to_number(lv) - js_to_number(rv))
+            JsBinOp.Mul => JsVal.Num(js_to_number(lv) * js_to_number(rv))
+            JsBinOp.Div =>
+                val d = js_to_number(rv)
+                if d == 0.0:
+                    JsVal.Num(0.0)
+                else:
+                    JsVal.Num(js_to_number(lv) / d)
+            JsBinOp.Mod =>
+                val d = js_to_number(rv)
+                if d == 0.0:
+                    JsVal.Num(0.0)
+                else:
+                    JsVal.Num(js_to_number(lv) % d)
+            JsBinOp.Eq => JsVal.Bool(js_strict_equal(lv, rv))
+            JsBinOp.Neq => JsVal.Bool(not js_strict_equal(lv, rv))
+            JsBinOp.StrictEq => JsVal.Bool(js_strict_equal(lv, rv))
+            JsBinOp.StrictNeq => JsVal.Bool(not js_strict_equal(lv, rv))
+            JsBinOp.Lt => JsVal.Bool(js_to_number(lv) < js_to_number(rv))
+            JsBinOp.Gt => JsVal.Bool(js_to_number(lv) > js_to_number(rv))
+            JsBinOp.Le => JsVal.Bool(js_to_number(lv) <= js_to_number(rv))
+            JsBinOp.Ge => JsVal.Bool(js_to_number(lv) >= js_to_number(rv))
+            JsBinOp.And => rv
+            JsBinOp.Or => rv
+            JsBinOp.BitAnd => JsVal.Num(0.0)
+            JsBinOp.BitOr => JsVal.Num(0.0)
+            JsBinOp.BitXor => JsVal.Num(0.0)
+            JsBinOp.Shl => JsVal.Num(0.0)
+            JsBinOp.Shr => JsVal.Num(0.0)
+            JsBinOp.UShr => JsVal.Num(0.0)
+            JsBinOp.In => JsVal.Bool(false)
+            JsBinOp.InstanceOf => JsVal.Bool(false)
+
+    me _eval_assign(op: JsAssignOp, target: JsExpr, value: JsExpr) -> JsVal:
+        """Evaluate an assignment expression."""
+        val rhs = self._eval_expr(value)
+        match target:
+            JsExpr.Ident(name) =>
+                match op:
+                    JsAssignOp.Assign =>
+                        self._scope_set(name, rhs)
+                        return rhs
+                    _ =>
+                        val cur = self._scope_lookup(name)
+                        val result = self._apply_compound_assign(op, cur, rhs)
+                        self._scope_set(name, result)
+                        return result
+            JsExpr.MemberDot(obj_expr, prop) =>
+                val obj_val = self._eval_expr(obj_expr)
+                match obj_val:
+                    JsVal.Obj(id) =>
+                        match op:
+                            JsAssignOp.Assign =>
+                                self._heap.set_object_prop(id, prop, rhs)
+                                return rhs
+                            _ =>
+                                val cur = self._heap.get_object_prop(id, prop)
+                                val result = self._apply_compound_assign(op, cur, rhs)
+                                self._heap.set_object_prop(id, prop, result)
+                                return result
+                    _ => pass_do_nothing
+            _ => pass_do_nothing
+        rhs
+
+    me _apply_compound_assign(op: JsAssignOp, cur: JsVal, rhs: JsVal) -> JsVal:
+        """Apply a compound assignment operator."""
+        match op:
+            JsAssignOp.AddAssign => JsVal.Num(js_to_number(cur) + js_to_number(rhs))
+            JsAssignOp.SubAssign => JsVal.Num(js_to_number(cur) - js_to_number(rhs))
+            JsAssignOp.MulAssign => JsVal.Num(js_to_number(cur) * js_to_number(rhs))
+            JsAssignOp.DivAssign =>
+                val d = js_to_number(rhs)
+                if d == 0.0:
+                    JsVal.Num(0.0)
+                else:
+                    JsVal.Num(js_to_number(cur) / d)
+            JsAssignOp.ModAssign =>
+                val d = js_to_number(rhs)
+                if d == 0.0:
+                    JsVal.Num(0.0)
+                else:
+                    JsVal.Num(js_to_number(cur) % d)
+            JsAssignOp.Assign => rhs
+
+    me _eval_call(callee: JsExpr, args: [JsExpr]) -> JsVal:
+        """Evaluate a function call."""
+        # Special case: console.log
+        match callee:
+            JsExpr.MemberDot(obj, prop) =>
+                match obj:
+                    JsExpr.Ident(name) =>
+                        if name == "console" and prop == "log":
+                            var msg_parts: [text] = []
+                            var i = 0
+                            while i < args.len():
+                                msg_parts.push(js_to_string(self._eval_expr(args[i])))
+                                i = i + 1
+                            val msg = _join_with_space(msg_parts)
+                            self.console.add(msg)
+                            return JsVal.Undefined
+                    _ => pass_do_nothing
+            _ => pass_do_nothing
+
+        val callee_val = self._eval_expr(callee)
+        var arg_vals: [JsVal] = []
+        var i = 0
+        while i < args.len():
+            arg_vals.push(self._eval_expr(args[i]))
+            i = i + 1
+
+        match callee_val:
+            JsVal.Func(fid) =>
+                val func = self._heap.get_func(fid)
+                if func != nil:
+                    return self._invoke_func(func, arg_vals)
+            _ => pass_do_nothing
+        JsVal.Undefined
+
+    me _invoke_func(func: JsFunc, args: [JsVal]) -> JsVal:
+        """Invoke a user function with the given arguments."""
+        if func.is_native:
+            return JsVal.Undefined
+
+        val body = self._get_func_body(func.id)
+        if body.len() == 0:
+            return JsVal.Undefined
+
+        self._push_scope()
+        # Bind parameters
+        var i = 0
+        while i < func.params.len():
+            var arg_val = JsVal.Undefined
+            if i < args.len():
+                arg_val = args[i]
+            self._scope_declare(func.params[i], arg_val, false)
+            i = i + 1
+
+        # Evaluate body
+        var result = JsVal.Undefined
+        i = 0
+        while i < body.len():
+            result = self._eval_stmt(body[i])
+            match self._signal:
+                JsSignal.Return(rv) =>
+                    self._signal = JsSignal.None
+                    self._pop_scope()
+                    return rv
+                JsSignal.None => pass_do_nothing
+                _ =>
+                    self._pop_scope()
+                    return result
+            i = i + 1
+        self._pop_scope()
+        result
+
+    me _eval_member_dot(obj: JsExpr, prop: text) -> JsVal:
+        """Evaluate obj.prop access."""
+        val obj_val = self._eval_expr(obj)
+        match obj_val:
+            JsVal.Obj(id) => self._heap.get_object_prop(id, prop)
+            JsVal.Str(s) =>
+                if prop == "length":
+                    return JsVal.Num(s.len() * 1.0)
+                JsVal.Undefined
+            _ => JsVal.Undefined
+
+    me _eval_member_bracket(obj: JsExpr, prop: JsExpr) -> JsVal:
+        """Evaluate obj[prop] access."""
+        val obj_val = self._eval_expr(obj)
+        val prop_val = self._eval_expr(prop)
+        val key = js_to_string(prop_val)
+        match obj_val:
+            JsVal.Obj(id) => self._heap.get_object_prop(id, key)
+            _ => JsVal.Undefined
+
+    me _eval_new(callee: JsExpr, args: [JsExpr]) -> JsVal:
+        """Evaluate a new expression."""
+        val obj_id = self._heap.alloc_object()
+        JsVal.Obj(obj_id)
+
+    me _eval_array(elements: [JsExpr]) -> JsVal:
+        """Evaluate an array literal."""
+        val obj_id = self._heap.alloc_object()
+        var i = 0
+        while i < elements.len():
+            val v = self._eval_expr(elements[i])
+            self._heap.set_object_prop(obj_id, "{i}", v)
+            i = i + 1
+        self._heap.set_object_prop(obj_id, "length", JsVal.Num(elements.len() * 1.0))
+        JsVal.Obj(obj_id)
+
+    me _eval_object(keys: [text], values: [JsExpr]) -> JsVal:
+        """Evaluate an object literal."""
+        val obj_id = self._heap.alloc_object()
+        var i = 0
+        while i < keys.len():
+            val v = self._eval_expr(values[i])
+            self._heap.set_object_prop(obj_id, keys[i], v)
+            i = i + 1
+        JsVal.Obj(obj_id)
+
+    me _eval_func_expr(name: text, params: [text], body: [JsStmt]) -> JsVal:
+        """Evaluate a function expression."""
+        val depth = self._scopes.len()
+        val fid = self._heap.alloc_func(name, params, depth)
+        self._store_func_body(fid, body)
+        JsVal.Func(fid)
+
+    me _eval_update(op: text, prefix: bool, argument: JsExpr) -> JsVal:
+        """Evaluate ++/-- update expressions."""
+        match argument:
+            JsExpr.Ident(name) =>
+                val cur = js_to_number(self._scope_lookup(name))
+                var new_val = cur
+                if op == "++":
+                    new_val = cur + 1.0
+                else:
+                    new_val = cur - 1.0
+                self._scope_set(name, JsVal.Num(new_val))
+                if prefix:
+                    return JsVal.Num(new_val)
+                return JsVal.Num(cur)
+            _ => JsVal.Undefined
+
+    # -----------------------------------------------------------------
+    # Function body storage
+    # -----------------------------------------------------------------
+
+    me _store_func_body(fid: i64, body: [JsStmt]):
+        """Store a function's body indexed by function id."""
+        # Extend the array to accommodate the fid
+        while self._func_bodies.len() <= fid:
+            var empty: [JsStmt] = []
+            self._func_bodies.push(empty)
+        self._func_bodies[fid] = body
+
+    me _get_func_body(fid: i64) -> [JsStmt]:
+        """Retrieve a function's body by id."""
+        if fid >= 0 and fid < self._func_bodies.len():
+            return self._func_bodies[fid]
+        var empty: [JsStmt] = []
+        empty
+
+# =========================================================================
+# Helper functions
+# =========================================================================
+
+fn _join_with_space(parts: [text]) -> text:
+    """Join text parts with spaces."""
+    var result = ""
+    var i = 0
+    while i < parts.len():
+        if i > 0:
+            result = result + " "
+        result = result + parts[i]
+        i = i + 1
+    result

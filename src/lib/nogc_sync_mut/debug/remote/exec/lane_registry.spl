@@ -10,8 +10,9 @@ use std.nogc_sync_mut.debug.remote.exec.lane_descriptor.{
     LaneDescriptor, LaneStatus, ProofClass, AdapterKind, ResultChannelKind
 }
 use std.nogc_sync_mut.debug.remote.exec.capability_report.{
-    CapabilityReport, probe_qemu_rv32, probe_qemu_arm, probe_wlink,
-    probe_openocd, probe_trace32, probe_ghdl, probe_ghdl_mailbox, probe_external_formal
+    CapabilityReport, probe_qemu_rv32, probe_qemu_rv64, probe_qemu_arm, probe_wlink,
+    probe_openocd, probe_trace32, probe_ghdl, probe_ghdl_mailbox, probe_external_formal,
+    probe_cmsis_dap
 }
 
 # ============================================================================
@@ -24,6 +25,15 @@ pub fn probe_for_lane(lane: LaneDescriptor) -> CapabilityReport:
         AdapterKind.qemu_gdb:
             if lane.target_arch == "arm32":
                 val report = probe_qemu_arm()
+                CapabilityReport(
+                    lane_id: lane.lane_id,
+                    status: report.status,
+                    tool_name: report.tool_name,
+                    detail: report.detail,
+                    probe_duration_ms: report.probe_duration_ms
+                )
+            elif lane.target_arch == "riscv64":
+                val report = probe_qemu_rv64()
                 CapabilityReport(
                     lane_id: lane.lane_id,
                     status: report.status,
@@ -50,14 +60,24 @@ pub fn probe_for_lane(lane: LaneDescriptor) -> CapabilityReport:
                 probe_duration_ms: report.probe_duration_ms
             )
         AdapterKind.openocd_gdb:
-            val report = probe_openocd()
-            CapabilityReport(
-                lane_id: lane.lane_id,
-                status: report.status,
-                tool_name: report.tool_name,
-                detail: report.detail,
-                probe_duration_ms: report.probe_duration_ms
-            )
+            if lane.lane_id == "arduino_r4_cmsis_dap":
+                val report = probe_cmsis_dap()
+                CapabilityReport(
+                    lane_id: lane.lane_id,
+                    status: report.status,
+                    tool_name: report.tool_name,
+                    detail: report.detail,
+                    probe_duration_ms: report.probe_duration_ms
+                )
+            else:
+                val report = probe_openocd()
+                CapabilityReport(
+                    lane_id: lane.lane_id,
+                    status: report.status,
+                    tool_name: report.tool_name,
+                    detail: report.detail,
+                    probe_duration_ms: report.probe_duration_ms
+                )
         AdapterKind.trace32:
             val report = probe_trace32()
             CapabilityReport(
@@ -244,6 +264,39 @@ pub class LaneRegistry:
                 fallback_result_channel: nil,
                 authoritative_spec_path: "test/system/hardware/rv32_external_formal_harness_spec.spl",
                 status: LaneStatus.transport_only
+            ),
+            # 13. stm32wb_openocd — host-aware OpenOCD lane for STM32WB
+            LaneDescriptor(
+                lane_id: "stm32wb_openocd",
+                target_arch: "arm32",
+                adapter_kind: AdapterKind.openocd_gdb,
+                proof_class: ProofClass.compiled,
+                primary_result_channel: ResultChannelKind.register_readback,
+                fallback_result_channel: Some(ResultChannelKind.ram_sentinel),
+                authoritative_spec_path: "test/integration/remote_jit/stm32wb_composite_runner_spec.spl",
+                status: LaneStatus.host_aware
+            ),
+            # 14. qemu_rv64_semihost — stable QEMU RISC-V 64 semihosting lane
+            LaneDescriptor(
+                lane_id: "qemu_rv64_semihost",
+                target_arch: "riscv64",
+                adapter_kind: AdapterKind.qemu_gdb,
+                proof_class: ProofClass.compiled,
+                primary_result_channel: ResultChannelKind.semihost_text,
+                fallback_result_channel: Some(ResultChannelKind.exit_code),
+                authoritative_spec_path: "",
+                status: LaneStatus.in_progress
+            ),
+            # 15. arduino_r4_cmsis_dap — host-aware Arduino UNO R4 WiFi via CMSIS-DAP
+            LaneDescriptor(
+                lane_id: "arduino_r4_cmsis_dap",
+                target_arch: "arm32",
+                adapter_kind: AdapterKind.openocd_gdb,
+                proof_class: ProofClass.compiled,
+                primary_result_channel: ResultChannelKind.register_readback,
+                fallback_result_channel: Some(ResultChannelKind.ram_sentinel),
+                authoritative_spec_path: "",
+                status: LaneStatus.host_aware
             )
         ]
         LaneRegistry(lanes: all_lanes)

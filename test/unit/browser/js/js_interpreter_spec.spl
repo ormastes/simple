@@ -1,0 +1,229 @@
+"""
+# JS Interpreter Specification
+
+**Category:** Stdlib
+**Difficulty:** 2/5
+**Status:** Draft
+
+## Overview
+
+Tests for JsInterp tree-walking interpreter in
+`src/lib/gc_async_mut/gpu/browser_engine/js/interpreter.spl`.
+
+## Key Behaviors
+
+- Evaluates numeric/string/boolean literals
+- Variable declarations and lookups
+- Binary arithmetic and comparison operators
+- String concatenation
+- Function declarations and calls
+- Control flow: if/else, while, for, return
+- console.log captures output
+- Object literals and property access
+"""
+
+use std.spec.*
+use std.gc_async_mut.gpu.browser_engine.js.interpreter.{JsInterp}
+use std.gc_async_mut.gpu.browser_engine.js.values.{JsVal, js_to_number, js_to_string, js_to_bool}
+
+# ===========================================================================
+# Helper functions
+# ===========================================================================
+
+fn _eval(source: text) -> JsVal:
+    var interp = JsInterp.new()
+    return interp.eval_source(source)
+
+fn _eval_num(source: text) -> f64:
+    val v = _eval(source)
+    return js_to_number(v)
+
+fn _eval_str(source: text) -> text:
+    val v = _eval(source)
+    return js_to_string(v)
+
+fn _eval_bool(source: text) -> bool:
+    val v = _eval(source)
+    return js_to_bool(v)
+
+fn _eval_var(source: text, name: text) -> JsVal:
+    var interp = JsInterp.new()
+    interp.eval_source(source)
+    return interp.get_var(name)
+
+fn _eval_var_num(source: text, name: text) -> f64:
+    val v = _eval_var(source, name)
+    return js_to_number(v)
+
+fn _eval_var_str(source: text, name: text) -> text:
+    val v = _eval_var(source, name)
+    return js_to_string(v)
+
+fn _eval_console(source: text) -> [text]:
+    var interp = JsInterp.new()
+    interp.eval_source(source)
+    return interp.get_console_output()
+
+fn _eval_console_first(source: text) -> text:
+    val msgs = _eval_console(source)
+    if msgs.len() > 0:
+        return msgs[0]
+    return ""
+
+fn _eval_console_count(source: text) -> i32:
+    val msgs = _eval_console(source)
+    return msgs.len()
+
+# ===========================================================================
+# Specs
+# ===========================================================================
+
+describe "JsInterp":
+    describe "literals":
+        it "number literal evaluates to Num":
+            val result = _eval_num("42;")
+            expect(result).to_equal(42.0)
+
+        it "string literal evaluates to Str":
+            val result = _eval_str("\"hello\";")
+            expect(result).to_equal("hello")
+
+        it "true literal evaluates to true":
+            val result = _eval_bool("true;")
+            expect(result).to_equal(true)
+
+        it "false literal evaluates to false":
+            val result = _eval_bool("false;")
+            expect(result).to_equal(false)
+
+    describe "arithmetic":
+        it "addition 2 + 3 = 5":
+            val result = _eval_num("2 + 3;")
+            expect(result).to_equal(5.0)
+
+        it "subtraction 10 - 4 = 6":
+            val result = _eval_num("10 - 4;")
+            expect(result).to_equal(6.0)
+
+        it "multiplication 3 * 7 = 21":
+            val result = _eval_num("3 * 7;")
+            expect(result).to_equal(21.0)
+
+        it "division 15 / 3 = 5":
+            val result = _eval_num("15 / 3;")
+            expect(result).to_equal(5.0)
+
+        it "modulo 10 % 3 = 1":
+            val result = _eval_num("10 % 3;")
+            expect(result).to_equal(1.0)
+
+    describe "string concatenation":
+        it "string + string concatenates":
+            val result = _eval_str("\"hello\" + \" world\";")
+            expect(result).to_equal("hello world")
+
+        it "string + number coerces to string":
+            val result = _eval_str("\"count: \" + 42;")
+            expect(result).to_equal("count: 42.0")
+
+    describe "comparison":
+        it "5 > 3 is true":
+            val result = _eval_bool("5 > 3;")
+            expect(result).to_equal(true)
+
+        it "2 < 1 is false":
+            val result = _eval_bool("2 < 1;")
+            expect(result).to_equal(false)
+
+        it "3 === 3 is true":
+            val result = _eval_bool("3 === 3;")
+            expect(result).to_equal(true)
+
+        it "3 !== 4 is true":
+            val result = _eval_bool("3 !== 4;")
+            expect(result).to_equal(true)
+
+    describe "variables":
+        it "var declaration and lookup":
+            val result = _eval_var_num("var x = 10;", "x")
+            expect(result).to_equal(10.0)
+
+        it "var reassignment":
+            val result = _eval_var_num("var x = 1; x = 5;", "x")
+            expect(result).to_equal(5.0)
+
+        it "compound assignment +=":
+            val result = _eval_var_num("var x = 10; x += 5;", "x")
+            expect(result).to_equal(15.0)
+
+    describe "if/else":
+        it "if true branch":
+            val result = _eval_var_num("var x = 0; if (true) { x = 1; }", "x")
+            expect(result).to_equal(1.0)
+
+        it "if false goes to else":
+            val result = _eval_var_num("var x = 0; if (false) { x = 1; } else { x = 2; }", "x")
+            expect(result).to_equal(2.0)
+
+    describe "while loop":
+        it "while loop accumulates":
+            val result = _eval_var_num("var sum = 0; var i = 0; while (i < 5) { sum = sum + i; i = i + 1; }", "sum")
+            expect(result).to_equal(10.0)
+
+    describe "for loop":
+        it "for loop counts":
+            val result = _eval_var_num("var sum = 0; for (var i = 1; i <= 5; i++) { sum = sum + i; }", "sum")
+            expect(result).to_equal(15.0)
+
+    describe "functions":
+        it "function declaration and call":
+            val result = _eval_var_num("function double(x) { return x * 2; } var r = double(5);", "r")
+            expect(result).to_equal(10.0)
+
+        it "function with multiple params":
+            val result = _eval_var_num("function add(a, b) { return a + b; } var r = add(3, 4);", "r")
+            expect(result).to_equal(7.0)
+
+        it "recursive function":
+            val result = _eval_var_num("function fact(n) { if (n <= 1) { return 1; } return n * fact(n - 1); } var r = fact(5);", "r")
+            expect(result).to_equal(120.0)
+
+    describe "console.log":
+        it "console.log captures string":
+            val result = _eval_console_first("console.log(\"hello\");")
+            expect(result).to_equal("hello")
+
+        it "console.log captures number":
+            val result = _eval_console_first("console.log(42);")
+            expect(result).to_equal("42.0")
+
+        it "multiple console.log calls captured":
+            val result = _eval_console_count("console.log(1); console.log(2); console.log(3);")
+            expect(result).to_equal(3)
+
+    describe "ternary operator":
+        it "ternary true branch":
+            val result = _eval_num("true ? 1 : 2;")
+            expect(result).to_equal(1.0)
+
+        it "ternary false branch":
+            val result = _eval_num("false ? 1 : 2;")
+            expect(result).to_equal(2.0)
+
+    describe "unary operators":
+        it "negation":
+            val result = _eval_num("-5;")
+            expect(result).to_equal(-5.0)
+
+        it "logical not true":
+            val result = _eval_bool("!true;")
+            expect(result).to_equal(false)
+
+        it "logical not false":
+            val result = _eval_bool("!false;")
+            expect(result).to_equal(true)
+
+    describe "break and continue":
+        it "break exits while loop":
+            val result = _eval_var_num("var x = 0; while (true) { x = x + 1; if (x === 3) { break; } }", "x")
+            expect(result).to_equal(3.0)
