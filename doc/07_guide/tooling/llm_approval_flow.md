@@ -7,7 +7,7 @@ This guide walks a single "banking LLM asks to open a window" request end-to-end
 ## Actors
 
 - **LLM service** — the model (Claude/Codex/Gemini) or an MCP tool acting on its behalf.
-- **MCP dispatcher** — `src/lib/nogc_sync_mut/mcp/dispatch.spl`. Tools opt-in via `DispatchRegistry.register`.
+- **MCP dispatcher** — `src/lib/nogc_async_mut/mcp/dispatch.spl`. Tools opt-in via `DispatchRegistry.register`.
 - **SPM (Simple Process Manager)** — `src/app/simple_process_manager/…`. Owns privilege, approval, gate.
 - **SWM (Simple Window Manager)** — `src/os/compositor/*`. Draws. Never authorizes.
 - **User** — presented with a signed approval dialog.
@@ -46,7 +46,7 @@ This guide walks a single "banking LLM asks to open a window" request end-to-end
 | LLM dashboard HTTP emit | `src/app/web_dashboard/server.spl` | Body passes through `filter_response_body`. |
 | LLM dashboard main | `src/app/llm_dashboard/main.spl` | `gate_llm_emit(body, token)` helper. |
 | MCP wiki tool | `src/app/mcp/wiki_keyword/wiki_tool.spl` | Returns `Content{body, authority}`. |
-| MCP dispatcher | `src/lib/nogc_sync_mut/mcp/dispatch.spl` | `dispatch_wrap` runs privilege check + gate. |
+| MCP dispatcher | `src/lib/nogc_async_mut/mcp/dispatch.spl` | `dispatch_wrap` runs privilege check + gate. |
 | WM create/destroy | `src/os/compositor/hosted_backend.spl` | Calls `notify_window_created/destroyed`. |
 | WM ↔ web bridge | `src/app/ui.web/wm_bridge.spl` | `resolveWinFsPath(app, wid) → text`. |
 

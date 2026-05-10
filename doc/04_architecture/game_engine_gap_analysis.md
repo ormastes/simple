@@ -63,7 +63,7 @@ The Simple engine has **117+ engine files** covering: rendering (GPU pipeline, p
 **Unique differentiator** — neither Unity nor Unreal ships native LLM integration. Simple already has:
 - LLM providers: Claude CLI, OpenAI API, Gemini API (`src/lib/nogc_async_mut/llm/`)
 - MCP SDK: full Model Context Protocol (`src/lib/nogc_sync_mut/mcp_sdk/`)
-- MCP handlers: API, debug, diagnostics (`src/lib/nogc_sync_mut/mcp/handlers/`)
+- MCP handlers: API, debug, diagnostics (`src/lib/nogc_async_mut/mcp/handlers/`)
 
 ### LLM Features to Build
 

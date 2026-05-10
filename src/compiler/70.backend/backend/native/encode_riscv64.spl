@@ -18,7 +18,7 @@ use compiler.backend.backend.backend_types.{CodegenTarget}
 use compiler.backend.backend.riscv_target.{RiscvTargetContract, riscv_linux_target_contract}
 use compiler.backend.native.operand_utils.{get_phys_reg_id, get_mem_base_id, get_mem_offset, get_imm_value, get_label_id, get_sym_name}
 use compiler.backend.native.encode_common.{encode_module_with}
-use compiler.backend.native.riscv_encoding.{riscv_emit_u32_le, riscv_encode_r_type, riscv_encode_i_type, riscv_encode_s_type, riscv_encode_b_type, riscv_encode_u_type, riscv_encode_j_type, riscv_alu_funct7, riscv_alu_funct3, riscv_branch_funct3, emit_rol_riscv64, emit_ror_riscv64, emit_clz_riscv64, emit_ctz_riscv64, emit_rev8_riscv64}
+use compiler.backend.native.riscv_encoding.{riscv_emit_u32_le, riscv_encode_r_type, riscv_encode_i_type, riscv_encode_s_type, riscv_encode_b_type, riscv_encode_u_type, riscv_encode_j_type, riscv_alu_funct7, riscv_alu_funct3, riscv_branch_funct3, emit_rol_riscv64, emit_ror_riscv64, emit_clz_riscv64, emit_ctz_riscv64, emit_rev8_riscv64, riscv_encode_common_inst}
 
 # ============================================================================
 # Encode Context
@@ -139,80 +139,8 @@ fn encode_inst_riscv64(ectx: Rv64EncodeContext, inst: MachInst) -> Rv64EncodeCon
         val rs = get_phys_reg_id(inst.operands[1])
         code = code + emit_rev8_riscv64(rd, rs)
 
-    elif inst.opcode == RV_OP_ADD or inst.opcode == RV_OP_SUB or inst.opcode == RV_OP_MUL or inst.opcode == RV_OP_DIV or inst.opcode == RV_OP_REM or inst.opcode == RV_OP_AND or inst.opcode == RV_OP_OR or inst.opcode == RV_OP_XOR or inst.opcode == RV_OP_SLL or inst.opcode == RV_OP_SRA or inst.opcode == RV_OP_SRL or inst.opcode == RV_OP_SLT or inst.opcode == RV_OP_SLTU:
-        # R-type ALU: rd, rs1, rs2 with varying funct7/funct3
-        val rd = get_phys_reg_id(inst.operands[0])
-        val rs1 = get_phys_reg_id(inst.operands[1])
-        val rs2 = get_phys_reg_id(inst.operands[2])
-        val funct7 = riscv_alu_funct7(inst.opcode)
-        val funct3 = riscv_alu_funct3(inst.opcode)
-        val enc = riscv_encode_r_type(funct7, rs2, rs1, funct3, rd, 0x33)
-        code = riscv_emit_u32_le(code, enc)
-
-    elif inst.opcode == RV_OP_ADDI:
-        # ADDI rd, rs1, imm12: I-type funct3=0x0, opcode=0x13
-        val rd = get_phys_reg_id(inst.operands[0])
-        val rs1 = get_phys_reg_id(inst.operands[1])
-        val imm12 = get_imm_value(inst.operands[2])
-        val enc = riscv_encode_i_type(imm12 and 0xFFF, rs1, 0, rd, 0x13)
-        code = riscv_emit_u32_le(code, enc)
-
-    elif inst.opcode == RV_OP_NEG:
-        # NEG rd, rs = SUB rd, x0, rs
-        val rd = get_phys_reg_id(inst.operands[0])
-        val rs = get_phys_reg_id(inst.operands[1])
-        val enc = riscv_encode_r_type(0x20, rs, RV_X0, 0, rd, 0x33)
-        code = riscv_emit_u32_le(code, enc)
-
-    elif inst.opcode == RV_OP_NOT:
-        # NOT rd, rs = XORI rd, rs, -1
-        val rd = get_phys_reg_id(inst.operands[0])
-        val rs = get_phys_reg_id(inst.operands[1])
-        val enc = riscv_encode_i_type(0xFFF, rs, 4, rd, 0x13)
-        code = riscv_emit_u32_le(code, enc)
-
-    elif inst.opcode == RV_OP_SEQZ:
-        # SEQZ rd, rs = SLTIU rd, rs, 1
-        val rd = get_phys_reg_id(inst.operands[0])
-        val rs = get_phys_reg_id(inst.operands[1])
-        val enc = riscv_encode_i_type(1, rs, 3, rd, 0x13)
-        code = riscv_emit_u32_le(code, enc)
-
-    elif inst.opcode == RV_OP_SNEZ:
-        # SNEZ rd, rs = SLTU rd, x0, rs
-        val rd = get_phys_reg_id(inst.operands[0])
-        val rs = get_phys_reg_id(inst.operands[1])
-        val enc = riscv_encode_r_type(0x00, rs, RV_X0, 3, rd, 0x33)
-        code = riscv_emit_u32_le(code, enc)
-
-    elif inst.opcode == RV_OP_LUI:
-        # LUI rd, imm20: U-type opcode=0x37
-        val rd = get_phys_reg_id(inst.operands[0])
-        val imm20 = get_imm_value(inst.operands[1])
-        val enc = riscv_encode_u_type(imm20, rd, 0x37)
-        code = riscv_emit_u32_le(code, enc)
-
-    elif inst.opcode == RV_OP_AUIPC:
-        # AUIPC rd, imm20: U-type opcode=0x17
-        val rd = get_phys_reg_id(inst.operands[0])
-        match inst.operands[1].kind:
-            case Sym(name):
-                val reloc_offset = code_len(code)
-                val enc = riscv_encode_u_type(0, rd, 0x17)
-                code = riscv_emit_u32_le(code, enc)
-                val reloc = EncodedReloc(
-                    offset: reloc_offset,
-                    symbol_name: name,
-                    reloc_type: R_RISCV_CALL_PLT,
-                    addend: 0
-                )
-                relocs.push(reloc)
-            case Imm(v):
-                val enc = riscv_encode_u_type(v, rd, 0x17)
-                code = riscv_emit_u32_le(code, enc)
-            case _:
-                val enc = riscv_encode_u_type(0, rd, 0x17)
-                code = riscv_emit_u32_le(code, enc)
+    elif val updated = riscv_encode_common_inst(inst, code, relocs, R_RISCV_CALL_PLT):
+        code = updated
 
     elif inst.opcode == RV_OP_LD:
         # LD rd, offset(rs1): I-type funct3=0x3, opcode=0x03

@@ -881,7 +881,7 @@ src/lib/
   sdn/                     #   1 file  - SDN format
 ```
 
-**Note:** This category-based organization was adopted since 2026-02-16. Within each category, modules are organized by domain (e.g., `common/json/`, `common/crypto/`, `nogc_sync_mut/mcp/`).
+**Note:** This category-based organization was adopted since 2026-02-16. Within each category, modules are organized by domain (e.g., `common/json/`, `common/crypto/`, `nogc_async_mut/mcp/`).
 
 **Remaining improvement:** Within `common/` (676 files), some naming inconsistencies persist (`*_utils.spl` overuse).
 

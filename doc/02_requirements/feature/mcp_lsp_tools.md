@@ -186,7 +186,7 @@ The typed API in `src/compiler/90.tools/query_api.spl` defines interfaces for al
 
 ## Related
 
-- [MCP Server](../../src/lib/nogc_sync_mut/mcp/main_lazy.spl) -- Server entry point
+- [MCP Server](../../src/lib/nogc_async_mut/mcp/main_lazy.spl) -- Server entry point
 - [Query CLI](../../src/app/cli/query.spl) -- CLI subcommands
 - [AST Query Engine](../../src/app/cli/query_ast_query.spl) -- S-expression pattern matching
 - [Semantic Query Engine](../../src/app/cli/query_sem_query.spl) -- SQL-like semantic queries

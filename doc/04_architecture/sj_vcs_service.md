@@ -375,7 +375,7 @@ affect local op log, not remote).
 
 Four-priority migration order (from R-C recommendations):
 
-1. **`src/lib/nogc_sync_mut/mcp/jj/jj_runner.spl:17`** — single chokepoint; one-line swap
+1. **`src/lib/nogc_async_mut/mcp/jj/jj_runner.spl:17`** — single chokepoint; one-line swap
    migrates ~15 MCP tools atomically. Verify `JjResult.exit_code` contract preserved.
 2. **`src/compiler_rust/.../vcs_collector.spl:47-71`** — read-only `jj log/status`; validates
    the read-bypass lane in isolation.
