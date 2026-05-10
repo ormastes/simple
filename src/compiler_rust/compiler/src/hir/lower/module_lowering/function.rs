@@ -8,6 +8,172 @@ use crate::hir::types::{
     ConcurrencyMode, FunctionLayoutHint, HirContract, HirFunction, LayoutAnchor, LayoutPhase, LocalVar, TypeId,
 };
 
+/// Returns true when a Block represents a stub body that auto-synthesis may replace.
+///
+/// A body is a stub when it is:
+/// - Empty (zero statements), OR
+/// - A single `pass_todo` / `pass_do_nothing` / `pass_dn` call expression.
+///
+/// Any real statement (val binding, return, assignment, …) disqualifies the body
+/// so that hand-written registrations are never silently overwritten.
+fn is_stub_body(body: &ast::Block) -> bool {
+    match body.statements.len() {
+        0 => true,
+        1 => {
+            if let ast::Node::Expression(ast::Expr::Call { callee, .. }) = &body.statements[0] {
+                if let ast::Expr::Identifier(name) = callee.as_ref() {
+                    return matches!(
+                        name.as_str(),
+                        "pass_todo" | "pass_do_nothing" | "pass_dn" | "todo"
+                    );
+                }
+            }
+            false
+        }
+        _ => false,
+    }
+}
+
+/// Extract the `ops=<expr>` named argument from a `@driver(...)` attribute.
+///
+/// Returns `Some(expr)` when the attribute is named `"driver"` and has an
+/// `ops` key in its `named_args`. Returns `None` otherwise.
+fn driver_ops_arg(attrs: &[ast::Attribute]) -> Option<ast::Expr> {
+    for attr in attrs {
+        if attr.name != "driver" {
+            continue;
+        }
+        if let Some(named) = &attr.named_args {
+            for (key, val) in named {
+                if key == "ops" {
+                    return Some(val.clone());
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Build the synthesized registration body for a `@driver(ops=X)` function.
+///
+/// The generated body is semantically equivalent to the hand-written pattern:
+///
+/// ```spl
+/// val m = DriverManifest.for_driver(<name>, <version>, <class>, <vendor>, <device_ids>)
+/// val ops = <ops_expr>
+/// return register_static_driver(m, ops)
+/// ```
+///
+/// `fn_name` is used to derive the driver name string (the function name itself,
+/// not stripped — callers can override via a `name=` arg in future).
+///
+/// The manifest args are lifted directly from the `@driver(...)` attribute's
+/// `named_args` list, falling back to positional `args` in declaration order:
+///   positional[0] = class, [1] = vendor, [2] = device_ids, [3] = version
+/// The same order is used by the existing Rust-seed text scanner in `compile.rs`.
+fn synthesize_driver_registration_body(
+    fn_name: &str,
+    attrs: &[ast::Attribute],
+    ops_expr: ast::Expr,
+    span: ast::Span,
+) -> ast::Block {
+    // Helper: build a zero-span Argument (positional).
+    let pos_arg = |value: ast::Expr| ast::Argument {
+        name: None,
+        value,
+        span,
+        label: None,
+    };
+
+    // Helper: look up a named arg value from the attribute, then fall back to
+    // the positional args list at `fallback_idx`.
+    let find_arg = |attr: &ast::Attribute, key: &str, fallback_idx: usize| -> Option<ast::Expr> {
+        if let Some(named) = &attr.named_args {
+            for (k, v) in named {
+                if k == key {
+                    return Some(v.clone());
+                }
+            }
+        }
+        attr.args.as_ref()?.get(fallback_idx).cloned()
+    };
+
+    // Locate the @driver attribute (guaranteed present — caller already checked).
+    let driver_attr = attrs.iter().find(|a| a.name == "driver").unwrap();
+
+    // --- Recover manifest args ---
+    // class: positional[0] or named `class`/`dclass`
+    let class_expr = find_arg(driver_attr, "class", 0)
+        .or_else(|| find_arg(driver_attr, "dclass", 0))
+        .unwrap_or(ast::Expr::Integer(0));
+
+    // vendor: positional[1] or named `vendor`
+    let vendor_expr = find_arg(driver_attr, "vendor", 1).unwrap_or(ast::Expr::Integer(0));
+
+    // device_ids: positional[2] or named `device`/`devices`
+    let device_expr = find_arg(driver_attr, "device", 2)
+        .or_else(|| find_arg(driver_attr, "devices", 2))
+        .unwrap_or_else(|| ast::Expr::Array(vec![]));
+
+    // version: positional[3] or named `version`
+    let version_expr = find_arg(driver_attr, "version", 3)
+        .unwrap_or_else(|| ast::Expr::String("0.1".to_string()));
+
+    // --- Build: val m = DriverManifest.for_driver(fn_name, version, class, vendor, device_ids) ---
+    let manifest_call = ast::Expr::MethodCall {
+        receiver: Box::new(ast::Expr::Identifier("DriverManifest".to_string())),
+        method: "for_driver".to_string(),
+        args: vec![
+            pos_arg(ast::Expr::String(fn_name.to_string())),
+            pos_arg(version_expr),
+            pos_arg(class_expr),
+            pos_arg(vendor_expr),
+            pos_arg(device_expr),
+        ],
+        generic_args: vec![],
+    };
+    let let_m = ast::Node::Let(ast::LetStmt {
+        span,
+        pattern: ast::Pattern::Identifier("m".to_string()),
+        ty: None,
+        value: Some(manifest_call),
+        mutability: ast::Mutability::Immutable,
+        storage_class: ast::StorageClass::Auto,
+        is_ghost: false,
+        is_suspend: false,
+    });
+
+    // --- Build: val ops = <ops_expr> ---
+    let let_ops = ast::Node::Let(ast::LetStmt {
+        span,
+        pattern: ast::Pattern::Identifier("ops".to_string()),
+        ty: None,
+        value: Some(ops_expr),
+        mutability: ast::Mutability::Immutable,
+        storage_class: ast::StorageClass::Auto,
+        is_ghost: false,
+        is_suspend: false,
+    });
+
+    // --- Build: return register_static_driver(m, ops) ---
+    let register_call = ast::Expr::Call {
+        callee: Box::new(ast::Expr::Identifier("register_static_driver".to_string())),
+        args: vec![
+            pos_arg(ast::Expr::Identifier("m".to_string())),
+            pos_arg(ast::Expr::Identifier("ops".to_string())),
+        ],
+    };
+    let return_stmt = ast::Node::Return(ast::ReturnStmt {
+        span,
+        value: Some(register_call),
+    });
+
+    ast::Block {
+        span,
+        statements: vec![let_m, let_ops, return_stmt],
+    }
+}
+
 impl Lowerer {
     /// Parse concurrency mode from function attributes
     /// Returns Actor mode (default) if no attribute is found
@@ -211,9 +377,34 @@ impl Lowerer {
         let params: Vec<LocalVar> = ctx.locals.clone();
         let params_len = params.len();
 
-        let body = self.lower_block(&f.body, &mut ctx)?;
+        // FR-DRIVER-0001: auto-synthesize the registration body when
+        //   1. the function has a @driver(..., ops=X) attribute, AND
+        //   2. the existing body is a stub (empty or single pass_todo/pass_dn call).
+        // This lets drivers declare their registration with just:
+        //   @driver(class=DriverClass.Block, vendor=0, device=[0], version="0.1", ops=my_ops)
+        //   fn register_my_driver() -> Result<i32, DriverError>:
+        //     pass_todo("auto-synthesized")
+        // Any real body is left untouched so hand-written registrations keep working.
+        let driver_synthesized: Option<ast::Block> =
+            if is_stub_body(&f.body) {
+                driver_ops_arg(&f.attributes).map(|ops_expr| {
+                    synthesize_driver_registration_body(
+                        &f.name,
+                        &f.attributes,
+                        ops_expr,
+                        f.span,
+                    )
+                })
+            } else {
+                None
+            };
+        let effective_body: &ast::Block = driver_synthesized.as_ref().unwrap_or(&f.body);
 
-        // Detect suspension operators in function body for async/sync validation
+        let body = self.lower_block(effective_body, &mut ctx)?;
+
+        // Detect suspension operators in function body for async/sync validation.
+        // Synthesized bodies (from @driver ops= auto-synthesis) never contain
+        // suspension operators, so using the original body is correct in all cases.
         let has_suspension = simple_parser::effect_inference::has_suspension_in_body(&f.body);
 
         // Lower contract if present, or create one for type invariants

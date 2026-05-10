@@ -72,6 +72,9 @@ fn null_block_ioctl(h: DriverHandle, cmd: IoctlCmd) -> Result<i64, DriverError>:
 # manifest fields land on the AST in the same order as DriverManifest's
 # binary layout (manifest.spl), so FR-DRIVER-0004 can emit .drv_manifest
 # bytes without waiting on named-arg support in Attribute's schema.
+#
+# Hand-written version (reference path — kept so the procedural path
+# keeps working byte-for-byte and the test passes unchanged).
 @driver(0, 0, [0], "0.1")
 fn register_null_block_driver() -> Result<i32, DriverError>:
     val m: DriverManifest = DriverManifest.for_driver(
@@ -88,6 +91,32 @@ fn register_null_block_driver() -> Result<i32, DriverError>:
         ioctl_fn:   null_block_ioctl,
     )
     return register_static_driver(m, ops)
+
+# Auto-synthesis demo — FR-DRIVER-0001 `ops=` form.
+# When the compiler sees `ops=<expr>` in @driver(...) and the body is a
+# stub (empty or pass_todo), it synthesizes the same three-statement body
+# that register_null_block_driver above contains by hand:
+#   val m = DriverManifest.for_driver(fn_name, version, class, vendor, device_ids)
+#   val ops = <ops_expr>
+#   return register_static_driver(m, ops)
+# The ops= expression is evaluated inside the synthesized body at call time,
+# so it can be any expression valid in that scope — a helper fn call works well.
+fn null_block_make_ops() -> DriverOps:
+    return DriverOps(
+        self_ptr: 0,
+        manifest_abi: null_block_abi_rev,
+        init_fn:   null_block_init,
+        probe_fn:  null_block_probe,
+        attach_fn: null_block_attach,
+        detach_fn: null_block_detach,
+        suspend_fn: null_block_suspend,
+        resume_fn:  null_block_resume,
+        ioctl_fn:   null_block_ioctl,
+    )
+
+@driver(class=DriverClass.Block, vendor=0, device=[0], version="0.1", ops=null_block_make_ops())
+fn register_null_block_driver_auto() -> Result<i32, DriverError>:
+    pass_todo("body synthesized by @driver(ops=) — see hir/lower/module_lowering/function.rs")
 
 fn null_block_smoke() -> i32:
     # Convenience for hosts without a full kernel: run it and return the
