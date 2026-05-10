@@ -49,7 +49,7 @@ feature
 ## Phase Checklist
 - [x] 1-dev (Developer Lead) — 2026-05-10
 - [x] 2-research (Analyst) — 2026-05-10
-- [ ] 3-arch (Architect)
+- [x] 3-arch (Architect) — 2026-05-10
 - [ ] 4-spec (QA Lead)
 - [ ] 5-implement (Engineer)
 - [ ] 6-refactor (Tech Lead)
@@ -214,14 +214,502 @@ feature
 - REQ-10 (from AC-10): All new files use trait+composition, no inheritance, tagged enum for backend dispatch — pattern: `GpuSolver` + `RenderBackend3DCore` from gc_async
 
 ## Phase
-research-done
+arch-done
 
 ## Log
 - 1-dev (2026-05-10): Created state file with 10 acceptance criteria, 6 parallel workstreams
 - 2-research (2026-05-10): Found 32 existing files across gc_async engine3d + nogc engine render; identified 8 rt_webgpu_* externs (wired), 18 rt_vulkan_* compute externs (declared, no graphics), 6 rt_image_* externs (wired), full rt_cuda_* set; 3 blockers: rt_vulkan_compile_glsl has no runtime backing, Context lacks create_texture/render_pass/swapchain methods, WebGPU is pixel-upload-only (not 3D pipeline); 10 requirements drafted
+- 3-arch (2026-05-10): Designed 16 modules (12 new files + 4 modified files across 6 disjoint streams), 8 ADR-style decisions, dependency map verified cycle-free, all 10 ACs covered, AnyRenderBackend3D tagged enum as Engine3D polymorphism boundary, ShaderCompiler decoupled from backends via PipelineDesc3D artifact handoff
 
 ### 3-arch
-<pending>
+
+## Architecture
+
+### Module Plan
+
+All paths are relative to `src/lib/nogc_sync_mut/engine/render/` unless otherwise noted.
+
+| Module | Path (from src/lib/nogc_sync_mut/) | Role | Stream | New/Modified |
+|--------|-------------------------------------|------|--------|--------------|
+| Handle types + RenderBackend3D trait | `engine/render/backend3d.spl` | Opaque handle types, PipelineDesc3D, AnyRenderBackend3D tagged enum, trait definition | A | New |
+| RenderCapability3D | `engine/render/capability3d.spl` | Feature-flag struct + factory fns + detect_best_backend() | A | New |
+| SoftwareRenderBackend3D | `engine/render/software_backend3d.spl` | Wraps ForwardRenderer3D via composition; implements RenderBackend3D | A | New |
+| VulkanRenderBackend3D | `engine/render/vulkan_backend3d.spl` | Records VulkanCommand3D, submits via rt_vulkan_* graphics externs; extern fn declarations | B | New |
+| VulkanCommand3D enum | `engine/render/vulkan_commands.spl` | Tagged command-buffer enum (no deps on other new modules) | B | New |
+| WebGpuRenderBackend3D | `engine/render/webgpu_backend3d.spl` | Records WebGpuCommand3D, submits via rt_wgpu_* 3D externs; extern fn declarations | C | New |
+| WebGpuCommand3D enum | `engine/render/webgpu_commands.spl` | Tagged command-buffer enum (no deps on other new modules) | C | New |
+| GpuMesh3D | `engine/render/gpu_mesh3d.spl` | MeshData → vertex/index buffer upload + draw dispatch via RenderBackend3D | D | New |
+| GpuLighting3D | `engine/render/gpu_lighting3d.spl` | LightUniform layout + uniform buffer upload + bind via RenderBackend3D | D | New |
+| gpu_bridge.spl update | `engine/render/gpu_bridge.spl` | Wire GpuRenderState to RenderBackend3D handles; remove Context stub calls | D | Modified |
+| ShaderCompiler | `engine/render/shader_compile.spl` | GLSL→SPIR-V and GLSL→WGSL compilation cache; extern rt_vulkan_compile_glsl declaration | E | New |
+| WgslEmitter | `engine/render/wgsl_emitter.spl` | Token-level GLSL→WGSL transpiler; text in, text out; no new-module deps | E | New |
+| shader.spl update | `engine/render/shader.spl` | Wire ShaderSource through ShaderCompiler; fill ShaderProgram.handle with real artifact | E | Modified |
+| TextureCache3D | `engine/render/texture3d.spl` | GPU texture upload via RenderBackend3D; id-keyed cache replacing gpu_texture_cache stubs | F | New |
+| TextureAtlas3D | `engine/render/texture_atlas3d.spl` | Atlas bin-packing + UV rect lookup; depends on texture3d.spl | F | New |
+| material3d.spl update | `engine/render/material3d.spl` | Map Material3D.albedo_texture id → TextureHandle; pipeline state bind helper | F | Modified |
+
+**File-scope enforcement:** No two streams touch the same file. `gpu_bridge.spl` → D only. `shader.spl` → E only. `material3d.spl` → F only. `engine3d.spl` and `game_loop3d.spl` are NOT modified by any stream — they reference `AnyRenderBackend3D` from `backend3d.spl` at call sites only.
+
+---
+
+### Opaque Handle Types (defined in backend3d.spl, imported by all other new files)
+
+```spl
+class PipelineHandle:
+    id: i64
+    static fn invalid() -> PipelineHandle
+
+class BufferHandle:
+    id: i64
+    static fn invalid() -> BufferHandle
+
+class TextureHandle:
+    id: i64
+    static fn invalid() -> TextureHandle
+
+class RenderPassHandle:
+    id: i64
+    static fn invalid() -> RenderPassHandle
+```
+
+All three backends return the same handle types. Vulkan/WebGPU backends maintain internal parallel-array maps `id → native_handle: i64`. Software backend maps `id → CPU buffer index`.
+
+---
+
+### RenderBackend3D Trait API (backend3d.spl)
+
+Pattern: `trait GameBackend` in `game2d/backend/trait.spl` — standalone `impl <Class>: RenderBackend3D` blocks at each backend's declaration site.
+
+```spl
+class PipelineDesc3D:
+    vertex_shader_spirv: [u8]
+    fragment_shader_spirv: [u8]
+    vertex_shader_wgsl: text
+    fragment_shader_wgsl: text
+    vertex_stride: i64
+    cull_back_faces: bool
+    depth_write: bool
+    depth_test: bool
+
+enum TextureFormat3D:
+    Rgba8Unorm
+    Rgba8Srgb
+    R8Unorm
+    Depth32Float
+
+trait RenderBackend3D:
+    fn capabilities(self) -> RenderCapability3D
+    fn init(self, width: i64, height: i64) -> bool
+    fn create_pipeline(self, desc: PipelineDesc3D) -> PipelineHandle
+    fn create_vertex_buffer(self, byte_count: i64) -> BufferHandle
+    fn create_index_buffer(self, byte_count: i64) -> BufferHandle
+    fn create_uniform_buffer(self, byte_count: i64) -> BufferHandle
+    fn upload_buffer(self, buf: BufferHandle, data: [u8], offset: i64)
+    fn create_texture(self, width: i64, height: i64, format: TextureFormat3D) -> TextureHandle
+    fn upload_texture(self, tex: TextureHandle, data: [u8])
+    fn begin_frame(self)
+    fn begin_render_pass(self, color_tex: TextureHandle, depth_tex: TextureHandle) -> RenderPassHandle
+    fn set_pipeline(self, pass: RenderPassHandle, pipeline: PipelineHandle)
+    fn bind_vertex_buffer(self, pass: RenderPassHandle, buf: BufferHandle, slot: i64)
+    fn bind_index_buffer(self, pass: RenderPassHandle, buf: BufferHandle)
+    fn bind_texture(self, pass: RenderPassHandle, tex: TextureHandle, slot: i64)
+    fn bind_uniform_buffer(self, pass: RenderPassHandle, buf: BufferHandle, slot: i64)
+    fn draw_indexed(self, pass: RenderPassHandle, index_count: i64, base_vertex: i64)
+    fn end_render_pass(self, pass: RenderPassHandle)
+    fn end_frame(self)
+    fn present(self)
+    fn shutdown(self)
+
+# Tagged-enum wrapper — allows Engine3D outer layer to hold any backend without boxing
+enum AnyRenderBackend3D:
+    Software(SoftwareRenderBackend3D)
+    Vulkan(VulkanRenderBackend3D)
+    WebGpu(WebGpuRenderBackend3D)
+```
+
+`AnyRenderBackend3D` is the polymorphism boundary. `Engine3D` stores one field of this type. All dispatch goes through match + trait call.
+
+---
+
+### RenderCapability3D (capability3d.spl)
+
+Pattern: `SkCapability` in `skia/capability.spl` — plain class + factory fns, no methods except to_string.
+
+```spl
+enum RenderBackendKind3D:
+    Software
+    Vulkan
+    WebGpu
+
+class RenderCapability3D:
+    backend: RenderBackendKind3D
+    supports_compute_shaders: bool
+    supports_msaa: bool
+    supports_mip_maps: bool
+    max_texture_size: i64
+    max_color_attachments: i64
+    supports_wgsl: bool
+
+fn capability_software_3d() -> RenderCapability3D
+fn capability_vulkan_3d() -> RenderCapability3D
+fn capability_webgpu_3d() -> RenderCapability3D
+fn detect_best_backend_3d() -> RenderBackendKind3D
+    # calls rt_vulkan_is_available(), rt_webgpu_is_available() — falls back to Software
+```
+
+---
+
+### SoftwareRenderBackend3D (software_backend3d.spl) — AC-9
+
+```spl
+class SoftwareRenderBackend3D:
+    renderer: ForwardRenderer3D    # composition — renderer3d.spl is NOT modified
+    cap: RenderCapability3D
+    # CPU buffer store: buf_ids: [i64], buf_data: [[u8]]   (parallel arrays)
+    # CPU texture store: tex_ids: [i64], tex_data: [[u8]], tex_widths: [i64], tex_heights: [i64]
+    next_id: i64
+
+impl SoftwareRenderBackend3D: RenderBackend3D
+    # upload_buffer → copies into buf_data at matching id
+    # draw_indexed  → decodes vertex/index data from CPU store, calls renderer rasterize path
+    # GPU-only ops (compute) → no-op with # TODO: software backend does not support compute
+```
+
+`ForwardRenderer3D` is wrapped, never extended. Zero lines changed in `renderer3d.spl`.
+
+---
+
+### VulkanRenderBackend3D (vulkan_backend3d.spl + vulkan_commands.spl) — B
+
+```spl
+# vulkan_commands.spl — pure enum, no deps
+enum VulkanCommand3D:
+    BeginRenderPass { color_image: i64, depth_image: i64 }
+    SetPipeline { pipeline_id: i64 }
+    BindVertexBuffer { buffer_id: i64, slot: i64 }
+    BindIndexBuffer { buffer_id: i64 }
+    BindTexture { image_id: i64, slot: i64 }
+    BindUniformBuffer { buffer_id: i64, slot: i64 }
+    DrawIndexed { index_count: i64, base_vertex: i64 }
+    EndRenderPass
+
+# vulkan_backend3d.spl — graphics externs (new; compute externs stay in ffi_vulkan.spl)
+extern fn rt_vulkan_init_graphics(width: i64, height: i64) -> i64
+extern fn rt_vulkan_create_graphics_buffer(byte_count: i64, usage: i64) -> i64
+extern fn rt_vulkan_upload_graphics_buffer(handle: i64, data: [u8], offset: i64)
+extern fn rt_vulkan_create_image(width: i64, height: i64, format: i64) -> i64
+extern fn rt_vulkan_upload_image(handle: i64, data: [u8])
+extern fn rt_vulkan_create_graphics_pipeline(spirv_vert: [u8], spirv_frag: [u8], stride: i64) -> i64
+extern fn rt_vulkan_begin_graphics_frame()
+extern fn rt_vulkan_begin_render_pass(color: i64, depth: i64) -> i64
+extern fn rt_vulkan_end_render_pass(pass: i64)
+extern fn rt_vulkan_cmd_set_pipeline(pass: i64, pipeline: i64)
+extern fn rt_vulkan_cmd_bind_vertex_buffer(pass: i64, buf: i64, slot: i64)
+extern fn rt_vulkan_cmd_bind_index_buffer(pass: i64, buf: i64)
+extern fn rt_vulkan_cmd_bind_texture(pass: i64, image: i64, slot: i64)
+extern fn rt_vulkan_cmd_bind_uniform_buffer(pass: i64, buf: i64, slot: i64)
+extern fn rt_vulkan_cmd_draw_indexed(pass: i64, index_count: i64, base_vertex: i64)
+extern fn rt_vulkan_end_graphics_frame()
+extern fn rt_vulkan_graphics_present()
+extern fn rt_vulkan_shutdown_graphics()
+
+class VulkanRenderBackend3D:
+    cmds: [VulkanCommand3D]
+    cap: RenderCapability3D
+    # handle maps: pipeline_ids: [i64], pipeline_native: [i64]  (parallel arrays per resource type)
+    next_id: i64
+
+impl VulkanRenderBackend3D: RenderBackend3D
+    # records commands into cmds[]
+    # end_frame() drains cmds[] and calls rt_vulkan_cmd_* externs
+```
+
+Note: existing `rt_vulkan_*` compute externs in `gc_async_mut/gpu/engine2d/ffi_vulkan.spl` are separate and untouched. New graphics externs use `rt_vulkan_*_graphics` names to avoid collisions.
+
+---
+
+### WebGpuRenderBackend3D (webgpu_backend3d.spl + webgpu_commands.spl) — C
+
+```spl
+# webgpu_commands.spl — pure enum, no deps
+enum WebGpuCommand3D:
+    BeginRenderPass { color_tex: i64, depth_tex: i64 }
+    SetPipeline { pipeline_id: i64 }
+    BindVertexBuffer { buffer_id: i64, slot: i64 }
+    BindIndexBuffer { buffer_id: i64 }
+    BindTexture { texture_id: i64, slot: i64 }
+    BindUniformBuffer { buffer_id: i64, slot: i64 }
+    DrawIndexed { index_count: i64, base_vertex: i64 }
+    EndRenderPass
+
+# webgpu_backend3d.spl — 3D-specific rt_wgpu_* externs (extend existing 2D pixel-upload surface)
+extern fn rt_wgpu_3d_init(width: i64, height: i64) -> i64
+extern fn rt_wgpu_3d_create_buffer(byte_count: i64, usage: i64) -> i64
+extern fn rt_wgpu_3d_upload_buffer(handle: i64, data: [u8], offset: i64)
+extern fn rt_wgpu_3d_create_texture(width: i64, height: i64, format: i64) -> i64
+extern fn rt_wgpu_3d_upload_texture(handle: i64, data: [u8])
+extern fn rt_wgpu_3d_create_pipeline(wgsl_vert: text, wgsl_frag: text) -> i64
+extern fn rt_wgpu_3d_begin_frame()
+extern fn rt_wgpu_3d_begin_render_pass(color: i64, depth: i64) -> i64
+extern fn rt_wgpu_3d_end_render_pass(pass: i64)
+extern fn rt_wgpu_3d_cmd_set_pipeline(pass: i64, pipeline: i64)
+extern fn rt_wgpu_3d_cmd_bind_vertex_buffer(pass: i64, buf: i64, slot: i64)
+extern fn rt_wgpu_3d_cmd_bind_index_buffer(pass: i64, buf: i64)
+extern fn rt_wgpu_3d_cmd_bind_texture(pass: i64, tex: i64, slot: i64)
+extern fn rt_wgpu_3d_cmd_bind_uniform_buffer(pass: i64, buf: i64, slot: i64)
+extern fn rt_wgpu_3d_cmd_draw_indexed(pass: i64, index_count: i64, base_vertex: i64)
+extern fn rt_wgpu_3d_end_frame()
+extern fn rt_wgpu_3d_present()
+extern fn rt_wgpu_3d_shutdown()
+
+class WebGpuRenderBackend3D:
+    cmds: [WebGpuCommand3D]
+    cap: RenderCapability3D
+    next_id: i64
+
+impl WebGpuRenderBackend3D: RenderBackend3D
+    # identical command-buffer record/drain pattern as Vulkan
+```
+
+Existing `rt_webgpu_*` (2D pixel-upload) externs in `engine2d/backend_webgpu.spl` are untouched. New 3D externs use `rt_wgpu_3d_*` prefix. Rust runtime stubs are added to `src/runtime/hosted/webgpu.rs` by Stream C.
+
+---
+
+### GPU Mesh Pipeline (gpu_mesh3d.spl) — D, AC-3
+
+Data flow:
+```
+MeshData { vertices: [f32], indices: [u32] }
+  → gpu_mesh_upload(backend: RenderBackend3D, mesh: MeshData) -> GpuMeshHandle
+       backend.create_vertex_buffer(vertex_byte_count)
+       backend.upload_buffer(vbuf, raw_f32_bytes, 0)
+       backend.create_index_buffer(index_byte_count)
+       backend.upload_buffer(ibuf, raw_u32_bytes, 0)
+
+  → gpu_mesh_draw(backend, pass, handle, mvp_buf, pipeline)
+       backend.bind_vertex_buffer(pass, vbuf, 0)
+       backend.bind_index_buffer(pass, ibuf)
+       backend.bind_uniform_buffer(pass, mvp_buf, 0)   # MVP 4x4 f32 column-major
+       backend.draw_indexed(pass, index_count, 0)
+```
+
+```spl
+class GpuMeshHandle:
+    vbuf: BufferHandle
+    ibuf: BufferHandle
+    index_count: i64
+    static fn invalid() -> GpuMeshHandle
+
+fn gpu_mesh_upload(backend: RenderBackend3D, vertices: [f32], indices: [u32]) -> GpuMeshHandle
+fn gpu_mesh_draw(backend: RenderBackend3D, pass: RenderPassHandle, mesh: GpuMeshHandle, mvp_buf: BufferHandle, pipeline: PipelineHandle)
+fn gpu_mesh_free(handle: GpuMeshHandle)   # marks handles invalid; GPU resource lifetime managed by backend
+```
+
+MVP matrix (16 f32, 64 bytes) is computed by Engine3D outer layer (MDSOC policy), uploaded to `mvp_buf` before draw. GPU vertex shader reads from uniform binding slot 0.
+
+---
+
+### GPU Lighting Pipeline (gpu_lighting3d.spl) — D, AC-4
+
+```spl
+class LightUniform:
+    position_x: f32
+    position_y: f32
+    position_z: f32
+    light_type: i64     # 0=directional 1=point 2=spot
+    color_r: f32
+    color_g: f32
+    color_b: f32
+    intensity: f32
+
+class GpuLightingState:
+    light_buf: BufferHandle
+    max_lights: i64
+    light_count: i64
+
+fn gpu_lighting_init(backend: RenderBackend3D, max_lights: i64) -> GpuLightingState
+fn gpu_lighting_upload(state: GpuLightingState, backend: RenderBackend3D, lights: [LightUniform])
+fn gpu_lighting_bind(state: GpuLightingState, backend: RenderBackend3D, pass: RenderPassHandle)
+    # binds to uniform slot 1 (slot 0 = MVP)
+```
+
+Fragment shader reads lights from binding slot 1. Software backend decodes LightUniform from CPU buffer and passes to ForwardRenderer3D existing Phong path.
+
+---
+
+### Shader Pipeline (shader_compile.spl + wgsl_emitter.spl) — E, AC-5
+
+Data flow:
+```
+ShaderSource { glsl_vertex: text, glsl_fragment: text }
+  → shader_compiler_get_or_compile_spirv(compiler, src) -> ShaderArtifact
+       hash = hash_text(src.glsl_vertex + src.glsl_fragment)
+       cache lookup → miss → rt_vulkan_compile_glsl(text, stage) -> [u8]
+       returns ShaderArtifact { spirv_vertex, spirv_fragment, is_compiled }
+
+  → shader_compiler_get_or_compile_wgsl(compiler, src) -> ShaderArtifact
+       hash = same key
+       cache lookup → miss → WgslEmitter.emit(glsl_text) -> text
+       returns ShaderArtifact { wgsl_vertex, wgsl_fragment, is_compiled }
+```
+
+```spl
+class ShaderArtifact:
+    spirv_vertex: [u8]
+    spirv_fragment: [u8]
+    wgsl_vertex: text
+    wgsl_fragment: text
+    is_compiled: bool
+    error_msg: text
+
+class ShaderCache:
+    keys: [i64]         # hash keys (parallel array)
+    artifacts: [ShaderArtifact]
+
+class ShaderCompiler:
+    cache: ShaderCache
+
+fn shader_compiler_new() -> ShaderCompiler
+fn shader_compiler_get_or_compile_spirv(compiler: ShaderCompiler, src: ShaderSource) -> ShaderArtifact
+fn shader_compiler_get_or_compile_wgsl(compiler: ShaderCompiler, src: ShaderSource) -> ShaderArtifact
+
+# Extern — declared here; backing symbol added to src/runtime/hosted/ by Stream E
+extern fn rt_vulkan_compile_glsl(source: text, stage: i64) -> [u8]
+    # stage: 0=vertex 1=fragment; returns SPIR-V bytes; empty [] on failure
+
+class WgslEmitter:    # in wgsl_emitter.spl
+    # stateless; pure text→text
+
+fn wgsl_emit_vertex(glsl: text) -> text
+fn wgsl_emit_fragment(glsl: text) -> text
+```
+
+Backends do NOT import `shader_compile.spl`. They receive pre-compiled `PipelineDesc3D { spirv_vertex, wgsl_vertex, ... }` from the Engine3D outer (policy) layer. This severs the E→B/C dependency.
+
+---
+
+### Texture / Material Pipeline (texture3d.spl + texture_atlas3d.spl) — F, AC-7
+
+Data flow:
+```
+rt_image_load(path) -> pixel handle: i64
+  → texture_cache_upload(cache, backend, width, height, format, pixel_bytes) -> texture_id: i64
+       backend.create_texture(w, h, format)
+       backend.upload_texture(handle, data)
+       store handle at texture_id
+
+Material3D { albedo_texture: TextureId }
+  → material_bind(mat, cache, backend, pass)
+       h = texture_cache_get(cache, mat.albedo_texture.id)
+       backend.bind_texture(pass, h, 0)   # albedo = slot 0
+       backend.bind_texture(pass, normal_h, 1) if has normal
+       backend.set_pipeline(pass, pipeline_for_mat_type(mat.mat_type))
+```
+
+```spl
+class TextureCache3D:
+    ids: [i64]
+    handles: [TextureHandle]
+    widths: [i64]
+    heights: [i64]
+    next_id: i64
+
+fn texture_cache_new() -> TextureCache3D
+fn texture_cache_upload(cache: TextureCache3D, backend: RenderBackend3D, width: i64, height: i64, format: TextureFormat3D, data: [u8]) -> i64
+fn texture_cache_get(cache: TextureCache3D, id: i64) -> TextureHandle
+fn texture_cache_evict(cache: TextureCache3D, id: i64)
+
+class AtlasRect:
+    x: i64
+    y: i64
+    width: i64
+    height: i64
+    u0: f32
+    v0: f32
+    u1: f32
+    v1: f32
+
+class TextureAtlas3D:
+    atlas_texture: TextureHandle
+    rects: [AtlasRect]
+    ids: [i64]
+    atlas_width: i64
+    atlas_height: i64
+
+fn atlas_new(backend: RenderBackend3D, width: i64, height: i64) -> TextureAtlas3D
+fn atlas_pack(atlas: TextureAtlas3D, backend: RenderBackend3D, id: i64, data: [u8], w: i64, h: i64) -> AtlasRect
+fn atlas_lookup(atlas: TextureAtlas3D, id: i64) -> AtlasRect
+
+# material3d.spl additions (existing file, stream F only):
+fn material_bind(mat: Material3D, cache: TextureCache3D, backend: RenderBackend3D, pass: RenderPassHandle)
+fn pipeline_for_mat_type(mat_type: Material3DType) -> PipelineHandle   # lookup from Engine3D pipeline cache
+```
+
+---
+
+### Dependency Map
+
+```
+backend3d.spl          → (no deps on other new modules; defines base types only)
+capability3d.spl       → backend3d.spl (RenderBackendKind3D)
+software_backend3d.spl → backend3d.spl, capability3d.spl, engine/render/renderer3d.spl (ForwardRenderer3D)
+vulkan_commands.spl    → (no deps; pure enum)
+vulkan_backend3d.spl   → backend3d.spl, capability3d.spl, vulkan_commands.spl
+webgpu_commands.spl    → (no deps; pure enum)
+webgpu_backend3d.spl   → backend3d.spl, capability3d.spl, webgpu_commands.spl
+gpu_mesh3d.spl         → backend3d.spl
+gpu_lighting3d.spl     → backend3d.spl
+gpu_bridge.spl (mod)   → backend3d.spl, gpu_mesh3d.spl, gpu_lighting3d.spl
+wgsl_emitter.spl       → (no deps on new modules; text → text)
+shader_compile.spl     → engine/render/shader.spl (ShaderSource only), wgsl_emitter.spl
+shader.spl (mod)       → shader_compile.spl
+texture3d.spl          → backend3d.spl
+texture_atlas3d.spl    → texture3d.spl, backend3d.spl
+material3d.spl (mod)   → texture3d.spl, backend3d.spl
+
+Cycle check:
+  B/C (vulkan/webgpu backends) do NOT import shader_compile.spl — they consume ShaderArtifact bytes
+  via PipelineDesc3D passed in by the Engine3D outer layer. E has no dependency on B or C.
+  F does not import D. D does not import E or F.
+  No circular dependencies: verified.
+```
+
+---
+
+### Architecture Decisions
+
+- **D-1: RenderBackend3D as trait with standalone impl blocks, not enum dispatch** — Context: need polymorphism across 3 backends without inheritance. Decision: `trait RenderBackend3D` + `impl <Class>: RenderBackend3D` at each backend site, exactly matching `GameBackend` in `game2d/backend/trait.spl`. Consequences: new backends (Metal, OpenGL) can be added without touching the trait file; all backends are independently testable.
+
+- **D-2: Opaque i64-wrapped handle types (PipelineHandle, BufferHandle, TextureHandle, RenderPassHandle)** — Context: three backends have incompatible native handle types (VkPipeline, WGPURenderPipeline, CPU array index). Decision: all wrapped as `class X { id: i64 }`. Each backend keeps internal parallel-array id→native maps. Consequences: trait methods unify across all backends; no backend leaks its native type into the trait surface.
+
+- **D-3: Command-buffer recording, not immediate-mode submission** — Context: Skia `VkCommand` enum is proven in this codebase. Decision: Vulkan/WebGPU backends accumulate tagged enums in `cmds: []`, drain on `end_frame()`. Software backend executes immediately (no buffering overhead). Consequences: enables validation, deferred execution, and future command reuse without changing the trait.
+
+- **D-4: ShaderCompiler decoupled from backends — artifacts only at pipeline creation** — Context: if backends import `shader_compile.spl`, E→B/C creates a cycle or forces serial implementation. Decision: Engine3D outer (MDSOC policy) layer calls `shader_compiler_get_or_compile_*()` before calling `backend.create_pipeline(desc)`. Backends receive `PipelineDesc3D { spirv_vertex: [u8], wgsl_vertex: text }` — compiled artifacts, not source. Consequences: E depends on nothing in B/C; B/C depend on nothing in E; shader cache lives in policy layer.
+
+- **D-5: SoftwareRenderBackend3D wraps ForwardRenderer3D via composition, no modification to renderer3d.spl** — Context: AC-9 requires zero regression on existing CPU rasterizer. Decision: `SoftwareRenderBackend3D` holds `renderer: ForwardRenderer3D` as a value field; draw_indexed decodes vertex/index from CPU buffer store and calls existing renderer path. Consequences: `renderer3d.spl` (555 lines) is not touched by any stream.
+
+- **D-6: New graphics externs use distinct name prefixes to avoid collision with existing compute externs** — Context: `rt_vulkan_*` compute externs already declared in `gc_async_mut/gpu/engine2d/ffi_vulkan.spl`; `rt_webgpu_*` 2D externs already in `engine2d/backend_webgpu.spl`. Decision: new 3D Vulkan graphics externs use `rt_vulkan_*_graphics` or `rt_vulkan_cmd_*` variants; WebGPU 3D externs use `rt_wgpu_3d_*` prefix. All new extern declarations start with `is_compiled: false` stubs. Consequences: no naming collision; existing code compiles unchanged.
+
+- **D-7: MDSOC+ boundary — Engine3D outer layer owns all policy decisions, ECS business layer holds only data** — Context: AC-8. Decision: `Engine3D` (outer/policy) holds `AnyRenderBackend3D`, `ShaderCompiler`, `TextureCache3D`, `GpuLightingState`; it calls `begin_frame/end_frame/present`. `ComponentRegistry3D`, `NodeStore3D` (business layer) hold no references to any `backend3d.spl` types. No business-layer file imports `backend3d.spl`. Consequences: business layer remains pure data; Engine3D orchestrates all GPU resource lifecycle.
+
+- **D-8: AnyRenderBackend3D tagged enum as the Engine3D polymorphism boundary** — Context: Simple has no trait objects / dynamic dispatch boxes. Decision: `enum AnyRenderBackend3D { Software(SoftwareRenderBackend3D), Vulkan(VulkanRenderBackend3D), WebGpu(WebGpuRenderBackend3D) }` defined in `backend3d.spl`. Engine3D stores one field of this type; all frame calls go through `match + trait fn`. Consequences: all three backends are statically dispatched; no allocation needed; adding a 4th backend requires extending this enum only.
+
+---
+
+### Requirement Coverage
+
+| AC | Module(s) |
+|----|-----------|
+| AC-1 (RenderBackend3D trait + 3 impls) | `backend3d.spl` (A), `software_backend3d.spl` (A), `vulkan_backend3d.spl` (B), `webgpu_backend3d.spl` (C) |
+| AC-2 (RenderCapability3D + detection) | `capability3d.spl` (A) |
+| AC-3 (GPU mesh pipeline) | `gpu_mesh3d.spl` (D), `gpu_bridge.spl` update (D) |
+| AC-4 (GPU lighting) | `gpu_lighting3d.spl` (D) |
+| AC-5 (GLSL→SPIR-V/WGSL cross-compile) | `shader_compile.spl` (E), `wgsl_emitter.spl` (E), `shader.spl` update (E) |
+| AC-6 (rt_wgpu_* externs + Rust stubs) | `webgpu_backend3d.spl` extern block (C); `src/runtime/hosted/webgpu.rs` stubs (C) |
+| AC-7 (3D texture system) | `texture3d.spl` (F), `texture_atlas3d.spl` (F), `material3d.spl` update (F) |
+| AC-8 (MDSOC+ audit) | D-7: Engine3D outer policy; no business-layer file imports backend3d.spl |
+| AC-9 (ForwardRenderer3D preserved) | `software_backend3d.spl` wraps via composition (D-5); renderer3d.spl unchanged |
+| AC-10 (no inheritance, trait+composition, tagged enums) | D-1, D-3, D-5, D-8 enforced across all streams; AnyRenderBackend3D tagged enum |
 
 ### 4-spec
 <pending>
