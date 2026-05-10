@@ -411,6 +411,16 @@ impl Lowerer {
         // Register the type alias name to map to the base type
         self.module.types.register_alias(ta.name.clone(), base_type);
 
+        // Record the binding in the module log (FR-COMPILER-007)
+        let alias_type_id = self.module.types.lookup(&ta.name).unwrap_or(base_type);
+        self.module.type_bindings_log.push(TypeBinding {
+            name: ta.name.clone(),
+            source: alias_type_id,
+            target: base_type,
+            kind: BindingKind::Alias,
+            scope: BindingScope::Module,
+        });
+
         Ok(base_type)
     }
 

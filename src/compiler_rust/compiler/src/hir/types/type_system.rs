@@ -328,6 +328,49 @@ impl HirType {
     }
 }
 
+//==============================================================================
+// Type Binding Infrastructure (FR-COMPILER-007)
+//==============================================================================
+
+/// How a type binding was introduced.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BindingKind {
+    /// `type Alias = Original` — transparent alias, same runtime representation.
+    Alias,
+    /// Newtype wrapper — distinct type at the type-checker level, same layout.
+    Newtype,
+    /// Generic instantiation — `Foo<T>` resolved with concrete type arguments.
+    GenericInst,
+}
+
+/// Scope in which a type binding is visible.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BindingScope {
+    /// Visible throughout the entire module.
+    Module,
+    /// Visible only within a single function or block.
+    Local,
+}
+
+/// A resolved type binding: records how one named type maps to another.
+///
+/// Used to track aliases, newtypes, and generic instantiations through
+/// the compilation pipeline so that diagnostics, documentation, and
+/// downstream analysis can surface the original names.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TypeBinding {
+    /// Human-readable alias / instantiation name (e.g. `PosI64`, `Vec<i32>`).
+    pub name: String,
+    /// The source type (alias/newtype side).
+    pub source: TypeId,
+    /// The target (underlying) type.
+    pub target: TypeId,
+    /// How the binding was introduced.
+    pub kind: BindingKind,
+    /// Where the binding is visible.
+    pub scope: BindingScope,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PointerKind {
     Unique,

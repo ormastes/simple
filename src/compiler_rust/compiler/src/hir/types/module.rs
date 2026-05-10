@@ -173,6 +173,11 @@ pub struct HirModule {
     /// These should NOT become global variables in MIR — they are only used
     /// for type resolution during HIR lowering.
     pub imported_function_names: HashSet<String>,
+    /// Recorded type bindings for this module (FR-COMPILER-007).
+    /// Populated during HIR lowering when type aliases, newtypes, and generic
+    /// instantiations are registered.  Consumers (diagnostics, doc-gen) read
+    /// this log to surface original names alongside resolved TypeIds.
+    pub type_bindings_log: Vec<TypeBinding>,
 }
 
 impl HirModule {
@@ -198,6 +203,7 @@ impl HirModule {
             impls: Vec::new(),
             extern_fn_names: HashSet::new(),
             imported_function_names: HashSet::new(),
+            type_bindings_log: Vec::new(),
         }
     }
 

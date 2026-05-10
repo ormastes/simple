@@ -19,6 +19,7 @@ pub mod token;
 mod parser_impl;
 
 // Parser submodules (split from parser.rs for maintainability)
+mod domain_blocks;
 mod expressions;
 mod parser_helpers;
 mod parser_patterns;

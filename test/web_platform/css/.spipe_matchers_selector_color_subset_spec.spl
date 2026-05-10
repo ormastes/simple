@@ -1,6 +1,7 @@
 use std.spec.*
 
-use std.gc_async_mut.gpu.browser_engine.browser_renderer.{render_html_to_pixels_with_viewport}
+use std.gc_async_mut.gpu.browser_engine.browser_renderer.{render_html_to_pixels_with_viewport,
+    browser_renderer_normalize_style_rules}
 
 val WIDTH: i32 = 32
 val HEIGHT: i32 = 24
@@ -15,7 +16,8 @@ fn _count_color(pixels: [u32], color: u32) -> i32:
     count
 
 fn _renders_color(style: text, body: text, color: u32) -> bool:
-    val html = "<html><head><style>body { margin: 0; background-color: #ffffff; } " + style + "</style></head><body>" + body + "</body></html>"
+    val css = "body { margin: 0; background-color: #ffffff; } " + browser_renderer_normalize_style_rules(style)
+    val html = "<html><head><style>" + css + "</style></head><body>" + body + "</body></html>"
     val pixels = render_html_to_pixels_with_viewport(html, WIDTH, HEIGHT).pixel_data
     _count_color(pixels, color) > 0
 
@@ -30,6 +32,9 @@ describe "WPT-derived CSS selector and color subset":
 
         it "covers type selector matching":
             expect _renders_color("div { width: 12px; height: 8px; background-color: #2563eb; }", "<div></div>", 0xFF2563EBu32) == true
+
+        it "covers universal selector matching":
+            expect _renders_color("* { width: 12px; height: 8px; background-color: #0f766e; }", "<div></div>", 0xFF0F766Eu32) == true
 
         it "covers class selector matching":
             expect _renders_color(".card { width: 12px; height: 8px; background-color: #16a34a; }", "<div class='card'></div>", 0xFF16A34Au32) == true
@@ -67,6 +72,40 @@ describe "WPT-derived CSS selector and color subset":
         it "covers partial :has descendant matching":
             expect _renders_color("div:has(.badge) { width: 12px; height: 8px; background-color: #7c3aed; }", "<div><span class='badge'></span></div>", 0xFF7C3AEDu32) == true
 
+        it "covers partial :has direct child matching":
+            expect _renders_color("div:has(> .badge) { width: 12px; height: 8px; background-color: #0e7490; }", "<div><span class='badge'></span></div>", 0xFF0E7490u32) == true
+            expect _renders_color("div:has(> .badge) { width: 12px; height: 8px; background-color: #0e7490; }", "<div><section><span class='badge'></span></section></div>", 0xFF0E7490u32) == false
+
+        it "covers descendant combinator matching":
+            expect _renders_color(".scope .target { width: 12px; height: 8px; background-color: #2563eb; }", "<section class='scope'><div class='target'></div></section>", 0xFF2563EBu32) == true
+
+        it "covers descendant combinator sibling rejection":
+            expect _renders_color(".scope .target { width: 12px; height: 8px; background-color: #ea580c; }", "<section class='scope'></section><div class='target'></div>", 0xFFEA580Cu32) == false
+
+        it "covers direct child combinator matching":
+            expect _renders_color("body > .target { width: 12px; height: 8px; background-color: #16a34a; }", "<div class='target'></div>", 0xFF16A34Au32) == true
+
+        it "covers ancestor child combinator matching":
+            expect _renders_color(".scope > .target { width: 12px; height: 8px; background-color: #0891b2; }", "<section class='scope'><div class='target'></div></section>", 0xFF0891B2u32) == true
+
+        it "covers ancestor child combinator nested descendant rejection":
+            expect _renders_color(".scope > .target { width: 12px; height: 8px; background-color: #be123c; }", "<section class='scope'><article><div class='target'></div></article></section>", 0xFFBE123Cu32) == false
+
+        it "covers direct child combinator nested descendant rejection":
+            expect _renders_color("body > .target { width: 12px; height: 8px; background-color: #dc2626; }", "<section><div class='target'></div></section>", 0xFFDC2626u32) == false
+
+        it "covers adjacent sibling combinator matching":
+            expect _renders_color(".source + .target { width: 12px; height: 8px; background-color: #7c3aed; }", "<div class='source'></div><div class='target'></div>", 0xFF7C3AEDu32) == true
+
+        it "covers adjacent sibling combinator non-adjacent rejection":
+            expect _renders_color(".source + .target { width: 12px; height: 8px; background-color: #be123c; }", "<div class='source'></div><section></section><div class='target'></div>", 0xFFBE123Cu32) == false
+
+        it "covers general sibling combinator matching":
+            expect _renders_color(".source ~ .target { width: 12px; height: 8px; background-color: #0d9488; }", "<div class='source'></div><section></section><div class='target'></div>", 0xFF0D9488u32) == true
+
+        it "covers general sibling combinator preceding-source rejection":
+            expect _renders_color(".source ~ .target { width: 12px; height: 8px; background-color: #e11d48; }", "<div class='target'></div><div class='source'></div>", 0xFFE11D48u32) == false
+
         it "covers partial :empty selector matching":
             expect _renders_color("div:empty { width: 12px; height: 8px; background-color: #0f766e; }", "<div></div>", 0xFF0F766Eu32) == true
 
@@ -79,8 +118,21 @@ describe "WPT-derived CSS selector and color subset":
         it "covers partial :only-child selector matching":
             expect _renders_color(".target:only-child { width: 12px; height: 8px; background-color: #9333ea; }", "<div class='target'></div>", 0xFF9333EAu32) == true
 
+        it "covers partial :nth-child odd and even matching":
+            expect _renders_color("div:nth-child(even) { width: 12px; height: 8px; background-color: #0e7490; }", "<div></div><div></div>", 0xFF0E7490u32) == true
+            expect _renders_color(".target:nth-child(odd) { width: 12px; height: 8px; background-color: #0e7490; }", "<div></div><div class='target'></div>", 0xFF0E7490u32) == false
+
+        it "covers partial :nth-child an plus b matching":
+            val positive_formula = "2n" + r"+1"
+            val positive_rule = ".target:nth-child(" + positive_formula + ") { width: 12px; height: 8px; background-color: #7c2d12; }"
+            expect _renders_color(positive_rule, "<div></div><div></div><div class='target'></div>", 0xFF7C2D12u32) == true
+            expect _renders_color(positive_rule, "<div></div><div class='target'></div><div></div>", 0xFF7C2D12u32) == false
+
         it "covers simple rules nested inside CSS layer blocks":
             expect _renders_color("@layer components { .card { width: 12px; height: 8px; background-color: #0f766e; } }", "<div class='card'></div>", 0xFF0F766Eu32) == true
+
+        it "covers simple parent selector CSS nesting":
+            expect _renders_color(".card { &.primary { width: 12px; height: 8px; background-color: #7e22ce; } }", "<div class='card primary'></div>", 0xFF7E22CEu32) == true
 
         it "covers attribute presence selector matching":
             expect _renders_color("[data-card] { width: 12px; height: 8px; background-color: #0e7490; }", "<div data-card='true'></div>", 0xFF0E7490u32) == true
@@ -88,8 +140,15 @@ describe "WPT-derived CSS selector and color subset":
         it "covers exact attribute value selector matching":
             expect _renders_color("div[data-state='active'] { width: 12px; height: 8px; background-color: #4d7c0f; }", "<div data-state='active'></div>", 0xFF4D7C0Fu32) == true
 
+        it "covers exact quoted attribute value selectors containing spaces":
+            expect _renders_color("[data-label='primary action'] { width: 12px; height: 8px; background-color: #0f766e; }", "<div data-label='primary action'></div>", 0xFF0F766Eu32) == true
+
         it "covers attribute prefix selector matching":
             expect _renders_color("div[data-route^='/app'] { width: 12px; height: 8px; background-color: #0f5e9c; }", "<div data-route='/app/home'></div>", 0xFF0F5E9Cu32) == true
+
+        it "covers attribute suffix selector matching":
+            expect _renders_color("div[data-route$='/settings'] { width: 12px; height: 8px; background-color: #065f46; }", "<div data-route='/app/settings'></div>", 0xFF065F46u32) == true
+            expect _renders_color("div[data-route$='/settings'] { width: 12px; height: 8px; background-color: #065f46; }", "<div data-route='/app/settings/profile'></div>", 0xFF065F46u32) == false
 
         it "covers attribute substring selector matching":
             expect _renders_color("[data-tags*='beta'] { width: 12px; height: 8px; background-color: #9d174d; }", "<div data-tags='alpha-beta-release'></div>", 0xFF9D174Du32) == true
@@ -140,6 +199,12 @@ describe "WPT-derived CSS selector and color subset":
 
         it "covers url background shorthand fallback color":
             expect _body_renders_color("background:url(hero.png) #0f8 no-repeat", 0xFF00FF88u32) == true
+
+        it "covers CSS custom property fallback colors":
+            expect _renders_color(".card { width: 12px; height: 8px; background-color: var(--missing-panel, #2563eb); }", "<div class='card'></div>", 0xFF2563EBu32) == true
+
+        it "covers CSS custom property fallback colors in background shorthand":
+            expect _renders_color(".card { width: 12px; height: 8px; background: var(--missing-panel, #0891b2) no-repeat; }", "<div class='card'></div>", 0xFF0891B2u32) == true
 
         it "covers later background-color overriding shorthand":
             expect _body_renders_color("background:#0f8; background-color:rebeccapurple", 0xFF663399u32) == true

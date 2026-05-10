@@ -351,12 +351,19 @@ fn test_region_domain_custom_blocks() {
 }
 
 #[test]
-fn test_region_domain_names_stay_identifiers_without_block_brace() {
+fn test_region_domain_keywords_without_block_brace() {
+    // Without an immediately-following `{`, domain words emit keyword tokens
+    // (FR-COMPILER-005). The `kind{payload}` raw-payload form is handled by
+    // try_scan_custom_block before the keyword match, so there is no ambiguity.
     let result = tokenize("schema style music bim cad city rtl ui");
-
-    for token in result.iter().take(8) {
-        assert!(matches!(token, TokenKind::Identifier { .. }));
-    }
+    assert!(matches!(result[0], TokenKind::Schema));
+    assert!(matches!(result[1], TokenKind::Style));
+    assert!(matches!(result[2], TokenKind::Music));
+    assert!(matches!(result[3], TokenKind::Bim));
+    assert!(matches!(result[4], TokenKind::Cad));
+    assert!(matches!(result[5], TokenKind::City));
+    assert!(matches!(result[6], TokenKind::Rtl));
+    assert!(matches!(result[7], TokenKind::Ui));
 }
 
 #[test]

@@ -106,6 +106,22 @@ impl<'a> Parser<'a> {
                 }
                 Ok(node)
             }
+            // Domain block declarations (FR-COMPILER-005): pub schema/style/ui/...
+            TokenKind::Schema
+            | TokenKind::Style
+            | TokenKind::Ui
+            | TokenKind::Music
+            | TokenKind::Bim
+            | TokenKind::City
+            | TokenKind::Cad
+            | TokenKind::Rtl => {
+                let mut node = self.parse_domain_from_kind()?;
+                if let Node::DomainBlock(ref mut d) = node {
+                    d.doc_comment = doc_comment.or(d.doc_comment.take());
+                    d.visibility = visibility;
+                }
+                Ok(node)
+            }
             _ => self.parse_pub_item_with_visibility(visibility),
         }
     }

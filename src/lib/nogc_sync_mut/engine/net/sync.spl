@@ -1,0 +1,102 @@
+# State Synchronization — entity state replication
+
+struct SyncField:
+    name: text
+    value: text
+    dirty: bool
+    last_sync_tick: i32
+
+struct EntitySync:
+    entity_id: i32
+    owner_id: i32
+    fields: [SyncField]
+    authority: text
+
+class StateSync:
+    entities: [EntitySync]
+    sync_interval: i32
+    current_tick: i32
+
+impl StateSync:
+    static fn new(sync_interval: i32) -> StateSync:
+        StateSync(entities: [], sync_interval: sync_interval, current_tick: 0)
+
+    me register_entity(entity_id: i32, owner_id: i32) -> bool:
+        var i = 0
+        while i < self.entities.len():
+            if self.entities[i].entity_id == entity_id:
+                return false
+            i = i + 1
+        val es = EntitySync(
+            entity_id: entity_id, owner_id: owner_id,
+            fields: [], authority: "server"
+        )
+        self.entities.push(es)
+        true
+
+    me set_field(entity_id: i32, name: text, value: text):
+        var i = 0
+        while i < self.entities.len():
+            if self.entities[i].entity_id == entity_id:
+                var j = 0
+                var found = false
+                while j < self.entities[i].fields.len():
+                    if self.entities[i].fields[j].name == name:
+                        self.entities[i].fields[j] = SyncField(
+                            name: name, value: value, dirty: true,
+                            last_sync_tick: self.entities[i].fields[j].last_sync_tick
+                        )
+                        found = true
+                    j = j + 1
+                if not found:
+                    val sf = SyncField(name: name, value: value, dirty: true, last_sync_tick: 0)
+                    self.entities[i].fields.push(sf)
+                return
+            i = i + 1
+
+    me tick():
+        self.current_tick = self.current_tick + 1
+
+    me mark_synced(entity_id: i32):
+        var i = 0
+        while i < self.entities.len():
+            if self.entities[i].entity_id == entity_id:
+                var j = 0
+                while j < self.entities[i].fields.len():
+                    val old = self.entities[i].fields[j]
+                    self.entities[i].fields[j] = SyncField(
+                        name: old.name, value: old.value, dirty: false,
+                        last_sync_tick: self.current_tick
+                    )
+                    j = j + 1
+                return
+            i = i + 1
+
+    fn entity_count() -> i32:
+        self.entities.len().to_i32()
+
+    fn get_dirty_count(entity_id: i32) -> i32:
+        var i = 0
+        while i < self.entities.len():
+            if self.entities[i].entity_id == entity_id:
+                var count = 0
+                var j = 0
+                while j < self.entities[i].fields.len():
+                    if self.entities[i].fields[j].dirty:
+                        count = count + 1
+                    j = j + 1
+                return count
+            i = i + 1
+        0
+
+    fn get_field_value(entity_id: i32, name: text) -> text:
+        var i = 0
+        while i < self.entities.len():
+            if self.entities[i].entity_id == entity_id:
+                var j = 0
+                while j < self.entities[i].fields.len():
+                    if self.entities[i].fields[j].name == name:
+                        return self.entities[i].fields[j].value
+                    j = j + 1
+            i = i + 1
+        ""

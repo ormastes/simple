@@ -461,6 +461,18 @@ impl<'a> Parser<'a> {
             TokenKind::Union => self.parse_union_with_doc(doc_comment),
             TokenKind::Trait => self.parse_trait_with_doc(doc_comment),
             TokenKind::Mixin => self.parse_mixin(),
+            // Domain-specific block declarations (FR-COMPILER-005).
+            // These tokens are only emitted when the domain word is NOT followed
+            // immediately by `{`; the `kind{payload}` form is already consumed
+            // as CustomBlock by the lexer before keyword matching runs.
+            TokenKind::Schema => self.parse_schema_block(),
+            TokenKind::Style => self.parse_style_block(),
+            TokenKind::Ui => self.parse_ui_block(),
+            TokenKind::Music => self.parse_music_block(),
+            TokenKind::Bim => self.parse_bim_block(),
+            TokenKind::City => self.parse_city_block(),
+            TokenKind::Cad => self.parse_cad_block(),
+            TokenKind::Rtl => self.parse_rtl_block(),
             TokenKind::Impl => self.parse_impl(),
             TokenKind::Actor => self.parse_actor(),
             TokenKind::Pub => {

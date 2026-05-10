@@ -148,6 +148,94 @@ pub struct ResolvedModule {
     pub manifest: Option<DirectoryManifest>,
 }
 
+//==============================================================================
+// Module Lifecycle Management (FR-COMPILER-010)
+//==============================================================================
+
+/// Lifecycle state of a module in the compilation pipeline.
+///
+/// States advance monotonically: Unloaded → Loading → Parsed → TypeChecked
+/// → Lowered → Compiled.  The `Loading` state guards against circular imports.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum ModuleState {
+    /// Module has not been encountered yet.
+    Unloaded,
+    /// Module is currently being parsed/lowered (cycle guard).
+    Loading,
+    /// Source file has been parsed into an AST.
+    Parsed,
+    /// Types have been resolved and checked.
+    TypeChecked,
+    /// HIR has been lowered from the AST.
+    Lowered,
+    /// Machine code / bytecode has been emitted.
+    Compiled,
+}
+
+impl ModuleState {
+    /// Returns `true` if the module has progressed at least to `Lowered`.
+    pub fn is_lowered(&self) -> bool {
+        *self >= ModuleState::Lowered
+    }
+
+    /// Returns `true` while the module is actively being processed (cycle guard).
+    pub fn is_loading(&self) -> bool {
+        *self == ModuleState::Loading
+    }
+}
+
+/// Tracks the lifecycle state for each module seen during a compilation run.
+///
+/// Wraps the raw `loaded_modules: HashSet<PathBuf>` already stored in
+/// `Lowerer` by recording the fine-grained state instead of a boolean.
+/// The `Lowerer` can delegate its duplicate-loading checks to this tracker.
+#[derive(Debug, Default)]
+pub struct ModuleLifecycle {
+    states: HashMap<PathBuf, ModuleState>,
+}
+
+impl ModuleLifecycle {
+    /// Create an empty lifecycle tracker.
+    pub fn new() -> Self {
+        Self { states: HashMap::new() }
+    }
+
+    /// Return the current state of a module, defaulting to `Unloaded`.
+    pub fn state(&self, path: &Path) -> ModuleState {
+        self.states.get(path).copied().unwrap_or(ModuleState::Unloaded)
+    }
+
+    /// Advance a module to the given state.  Silently ignores regressions
+    /// (a state can never move backwards).
+    pub fn advance(&mut self, path: PathBuf, new_state: ModuleState) {
+        let entry = self.states.entry(path).or_insert(ModuleState::Unloaded);
+        if new_state > *entry {
+            *entry = new_state;
+        }
+    }
+
+    /// Returns `true` if the module is already loaded (at or past `Lowered`).
+    pub fn is_loaded(&self, path: &Path) -> bool {
+        self.state(path).is_lowered()
+    }
+
+    /// Returns `true` if the module is currently mid-load (cycle guard).
+    pub fn is_loading(&self, path: &Path) -> bool {
+        self.state(path).is_loading()
+    }
+
+    /// Mark a module as `Loading` to begin processing it.  Returns `false`
+    /// if the module is already being loaded (circular import detected).
+    pub fn begin_loading(&mut self, path: PathBuf) -> bool {
+        let current = self.state(&path);
+        if current == ModuleState::Loading || current.is_lowered() {
+            return false;
+        }
+        self.advance(path, ModuleState::Loading);
+        true
+    }
+}
+
 /// Module resolver that maps module paths to filesystem locations
 #[derive(Debug)]
 pub struct ModuleResolver {
