@@ -14,6 +14,7 @@ use std.nogc_sync_mut.engine.render.batch.{sort_commands_by_z}
 use std.nogc_sync_mut.engine.render.types.{Vertex2D, DrawStats}
 use std.gc_async_mut.gpu.context.{Context}
 use std.nogc_sync_mut.engine.render.gpu_bridge.{GpuRenderState, init_gpu_render_state, begin_gpu_frame, submit_gpu_batch, end_gpu_frame, destroy_gpu_render_state}
+use std.nogc_sync_mut.engine.render.font_atlas.{FontAtlas, GlyphInfo}
 
 # GPU vertex for 2D rendering (position + UV + color)
 class GpuVertex2D:
@@ -69,6 +70,8 @@ class GpuRenderer2D:
     stats: DrawStats
     max_quads_per_batch: i64
     gpu_state: GpuRenderState
+    # Default monospace grid atlas used for DrawText when no font texture is loaded.
+    font_atlas: FontAtlas
 
 impl GpuRenderer2D:
     static fn create(width: i64, height: i64) -> GpuRenderer2D:
@@ -79,7 +82,8 @@ impl GpuRenderer2D:
             current_batch: SpriteBatch.create(0),
             stats: DrawStats.zero(),
             max_quads_per_batch: 1024,
-            gpu_state: GpuRenderState.uninitialized()
+            gpu_state: GpuRenderState.uninitialized(),
+            font_atlas: FontAtlas.default_monospace()
         )
 
     me resize(width: i64, height: i64):
@@ -242,10 +246,38 @@ impl GpuRenderer2D:
                     vertices: self.stats.vertices + 4
                 )
             case DrawText(font, content, pos, color, z_order):
-                # Deferred: needs glyph atlas (GAME-RENDER-002). DrawText has no GPU-side
-                # vertex data to emit without a loaded font; emitting a placeholder quad
-                # would produce incorrect geometry. No-op is the correct GPU behaviour here.
-                pass_do_nothing
+                # Emit one textured quad per character using the default monospace grid atlas.
+                # Texture handle 0 = solid-color pass; UVs carry atlas coordinates so a real
+                # atlas texture can be bound later without changing geometry (GAME-RENDER-003).
+                self._ensure_batch(0)
+                val chars = content.chars()
+                var ci = 0
+                var char_count = 0
+                var cursor_x = pos.x
+                val cursor_y = pos.y
+                while ci < chars.len():
+                    val ch = chars[ci]
+                    val cp = ch.codepoint()
+                    if cp == 10:
+                        # newline — advance cursor down, reset x
+                        cursor_x = pos.x
+                    else:
+                        val g = self.font_atlas.glyph(cp)
+                        self.current_batch.add_quad(
+                            cursor_x, cursor_y,
+                            cursor_x + g.w, cursor_y + g.h,
+                            g.u0, g.v0, g.u1, g.v1,
+                            color
+                        )
+                        cursor_x = cursor_x + g.advance_x
+                        char_count = char_count + 1
+                    ci = ci + 1
+                self._check_batch_flush()
+                self.stats = DrawStats(
+                    draw_calls: self.stats.draw_calls + char_count,
+                    triangles: self.stats.triangles + char_count * 2,
+                    vertices: self.stats.vertices + char_count * 4
+                )
 
     me _ensure_batch(tex_handle: i64):
         # If current batch has a different texture, flush and start new

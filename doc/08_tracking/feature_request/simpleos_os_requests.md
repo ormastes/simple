@@ -1,5 +1,7 @@
 # SimpleOS Scheduler, Process, and SOSIX Feature Requests
 
+**Status: DEFERRED** — blocked on kernel process abstraction layer. No scheduler, process lifecycle, or SOSIX sharing work can proceed until the kernel process abstraction layer is in place.
+
 Secondary channel for follow-up requests against SimpleOS scheduler, process
 lifecycle, and SOSIX sharing surfaces.
 

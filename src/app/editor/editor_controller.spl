@@ -33,6 +33,8 @@ class EditorController:
     commandline: text
     pending_prefix: text
     running: bool
+    config: EditorConfig
+    settings_view: SettingsViewState
 
 impl EditorController:
 
@@ -45,12 +47,17 @@ impl EditorController:
             status_msg: "ready",
             commandline: "",
             pending_prefix: "",
-            running: true
+            running: true,
+            config: editor_config_default(),
+            settings_view: nil
         )
 
     me handle_key(key: text, rects: [SplitRect]) -> EditorAction:
         if key == "":
             return EditorAction(redraw: false, quit: false, status_msg: self.status_msg)
+
+        if self.settings_view != nil:
+            return self._dispatch_settings_key(key)
 
         if self.session.mode == EditorMode.Command:
             return self._dispatch_command_key(key)
@@ -83,11 +90,58 @@ impl EditorController:
     fn is_running() -> bool:
         self.running
 
+    me settings_open():
+        self.settings_view = SettingsViewState.new(full_settings_schema())
+
+    me settings_close():
+        self.settings_view = nil
+
+    me _dispatch_settings_key(key: text) -> EditorAction:
+        val sv = self.settings_view
+        if key == "j":
+            sv.select_next()
+        elif key == "k":
+            sv.select_prev()
+        elif key == "\t":
+            sv.next_category()
+        elif key == "h":
+            sv.prev_category()
+        elif key == "l":
+            sv.next_category()
+        elif key == "\r" or key == "\n":
+            if not sv.editing:
+                val sd = sv.current_setting()
+                if sd.setting_type == "bool":
+                    val cur = editor_config_get_by_key(self.config, sd.key)
+                    val toggled = if cur == "true" then "false" else: "true"
+                    self.config = editor_config_set_by_key(self.config, sd.key, toggled)
+                    self.status_msg = sd.key + " = " + toggled
+                else:
+                    val cur2 = editor_config_get_by_key(self.config, sd.key)
+                    sv.start_edit(cur2)
+        elif key == "\x1b":
+            if sv.editing:
+                sv.cancel_edit()
+            else:
+                self.settings_close()
+        elif key == "q":
+            self.settings_close()
+        elif key == "/":
+            sv.search_query = ""
+            sv.editing = false
+        EditorAction(redraw: true, quit: not self.running, status_msg: self.status_msg)
+
     me _dispatch_command_key(key: text) -> EditorAction:
         val result = ctrl_handle_command_key(key, self.commandline)
         self.commandline = result.commandline
         if result.done:
             val parsed = editor_parse_commandline(self.commandline)
+            if parsed.name == "settings":
+                self.settings_open()
+                self.session.mode = EditorMode.Normal
+                self.commandline = ""
+                self.status_msg = "settings"
+                return EditorAction(redraw: true, quit: false, status_msg: self.status_msg)
             val dispatch_result = editor_dispatch_session(self.session, parsed)
             self.status_msg = dispatch_result.message
             if dispatch_result.quit:

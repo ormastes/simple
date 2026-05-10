@@ -1,6 +1,6 @@
 # Network Acceleration Feature Requests
 
-**Status: BLOCKED** — RDMA, SR-IOV, and packet I/O acceleration depend on kernel driver framework and netstack SMP safety work that is not yet complete. Individual FR-NET items within are Implemented where noted; the overall acceleration surface is blocked pending those foundations.
+**Status: DEFERRED** — blocked on kernel driver framework + netstack SMP safety (architectural prerequisites). RDMA, SR-IOV, and packet I/O acceleration cannot proceed until those foundations are complete. Individual FR-NET items within are Implemented where noted; the overall acceleration surface is deferred pending those foundations.
 
 Tracker for follow-up requests against the SimpleOS pure Simple TCP/IP stack,
 async HTTP server, and optional high-performance network backends. The current

@@ -1,10 +1,10 @@
 # Bug: GPU Pipeline Missing Arms (GAME-RENDER-002)
 
-**Status:** PARTIAL — GPU outlined arms shipped 2026-05-10. DrawText remains deferred
-pending glyph atlas (see below).
+**Status:** RESOLVED — all GPU pipeline arms implemented.
 **Date:** 2026-04-25
 **Partial fix:** 2026-04-25 (software-pipeline outlined shapes)
 **GPU outlined fix:** 2026-05-10 (`DrawRectOutlined` 4-edge quads + `DrawCircleOutlined` bounding quad in `gpu_pipeline.spl`)
+**DrawText fix:** 2026-05-10 (default monospace grid atlas, per-char quads, UVs in gpu_pipeline.spl)
 **Deferred by:** bug-sweep-2026-04-26 phase 2 (research)
 **Resumed:** 2026-05-10
 
@@ -39,20 +39,17 @@ GPU-pipeline arms completed in `src/lib/nogc_sync_mut/engine/render/gpu_pipeline
 
 ---
 
-## Remaining Arms (deferred)
+## DrawText GPU Arm (2026-05-10)
 
-1. **DrawText** -- Requires a 5x7 glyph atlas or font vendoring. Cannot be
-   done without either embedding a bitmap font or adding a font-loading
-   dependency. GPU arm kept as `pass_do_nothing` — emitting a placeholder quad
-   would produce incorrect geometry with no atlas to consult.
+Implemented in `src/lib/nogc_sync_mut/engine/render/gpu_pipeline.spl` using
+a new minimal atlas module `src/lib/nogc_sync_mut/engine/render/font_atlas.spl`:
 
----
+- `GlyphInfo` struct: per-glyph screen size (`w`, `h`, `advance_x`, `advance_y`) + UV rectangle (`u0`, `v0`, `u1`, `v1`).
+- `FontAtlas` class: default 16×8 monospace grid covering ASCII 32–126, 8×8 px cells, 128×64 virtual atlas. Out-of-range codepoints fall back to `?` (63).
+- DrawText arm: iterates `content.chars()`, looks up each glyph, emits one quad per printable character via `add_quad`. Newlines (`\n`, cp=10) reset `cursor_x`. Stats: `draw_calls/triangles/vertices` scaled by character count.
+- Texture handle 0 is used so the existing solid-color GPU pass renders glyphs as tinted cells. Real texture binding is tracked as GAME-RENDER-003.
 
-## Why Deferred
-
-Per sprint scope rule, the remaining arms exceed the 5-file guard for this
-iteration. DrawText needs font infrastructure; GPU arms need vertex-buffer
-and shader plumbing. Both are tracked for a future game2d sprint.
+`GpuRenderer2D` gained a `font_atlas: FontAtlas` field initialised to `FontAtlas.default_monospace()` in `create()`.
 
 ---
 

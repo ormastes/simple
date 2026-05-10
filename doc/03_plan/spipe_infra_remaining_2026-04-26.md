@@ -3,6 +3,7 @@
 **Origin**: GitHub issue #10 (https://github.com/ormastes/simple/issues/10)
 **Status snapshot (2026-04-26)**: 7 commits on `origin/main` (38e6ee6e → c4c7f1902a), 246 unit tests + 11 live tests passing, 4 follow-up issues filed (#11/#12/#13/#14).
 **Review (2026-05-10)**: Items §4 (#11–#14) are runtime/compiler bugs requiring Rust-layer changes; none are implementable in .spl. They remain filed as separate issues and do not gate #10 closure. Item §5 Simple-language bugs are pre-existing interpreter/runtime regressions to be filed via `gh issue create`. No .spl-level changes are possible for §4 or §5 in this session.
+**Status: DEFERRED** — items #11-14 require Rust-layer runtime changes, not implementable in .spl.
 
 This plan tracks what is **not yet done** but in scope for closing issue #10. Each item names the unblock condition.
 

@@ -21,7 +21,8 @@
 #   hal_smp_get_boot_args(ap_id)            — read ApBootArgs slot
 #   hal_smp_get_pending_ipi(target)         — read PENDING_IPI slot
 
-use os.kernel.arch.riscv64.sbi.{sbi_hart_start, sbi_call, SBI_SUCCESS}
+use os.kernel.arch.riscv64.sbi.{sbi_hart_start, SBI_SUCCESS}
+use std.nogc_async_mut_noalloc.baremetal.riscv.{sbi_probe_then_send_ipi}
 
 # ============================================================================
 # Constants
@@ -152,9 +153,6 @@ fn hal_smp_ipi_broadcast_with_mock(mock: SbiMockSmp, vector: u32):
 # Canonical trait methods — production-callable (AC-1)
 # ============================================================================
 
-# SBI IPI extension EID (v0.3+): 0x735049 = "IPI"
-val SBI_EXT_IPI: u64 = 0x735049u64
-
 fn hal_smp_cpu_start(ap_id: u32, entry: u64, stack: u64, arg: u64) -> bool:
     """Start AP hart via SBI HSM. Populates boot args slot before calling SBI."""
     if ap_id < MAX_HARTS:
@@ -163,14 +161,14 @@ fn hal_smp_cpu_start(ap_id: u32, entry: u64, stack: u64, arg: u64) -> bool:
     ret.error == SBI_SUCCESS
 
 fn hal_smp_ipi_send(target: u32, vector: u32):
-    """Send IPI to target hart: write vector to PENDING_IPI slot then SBI ecall."""
+    """Send IPI to target hart: write vector to PENDING_IPI slot then call sbi_probe_then_send_ipi."""
     if target < MAX_HARTS:
         HAL_SMP_PENDING_IPI[target] = vector
     val hart_mask = 1u64 << target as u64
-    sbi_call(SBI_EXT_IPI, 0u64, hart_mask, 0u64, 0u64, 0u64, 0u64, 0u64)
+    sbi_probe_then_send_ipi(hart_mask, 0u64)
 
 fn hal_smp_ipi_broadcast(vector: u32):
-    """Broadcast IPI to all non-self harts (self = hart 0)."""
+    """Broadcast IPI to all non-self harts (self = hart 0) via sbi_probe_then_send_ipi."""
     val self_id = 0u32
     val count = HAL_SMP_CPU_COUNT_STATE
     var i: u32 = 0u32
@@ -181,4 +179,4 @@ fn hal_smp_ipi_broadcast(vector: u32):
             mask = mask | (1u64 << i as u64)
         i = i + 1u32
     if mask != 0u64:
-        sbi_call(SBI_EXT_IPI, 0u64, mask, 0u64, 0u64, 0u64, 0u64, 0u64)
+        sbi_probe_then_send_ipi(mask, 0u64)

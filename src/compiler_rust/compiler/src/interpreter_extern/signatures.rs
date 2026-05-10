@@ -25,6 +25,7 @@ use ring::signature::{
     RSA_PSS_2048_8192_SHA256, RSA_PSS_2048_8192_SHA384, RSA_PSS_2048_8192_SHA512,
 };
 use std::sync::Arc;
+use ::signature::{Signer, Verifier};
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -366,4 +367,88 @@ pub fn rt_ecdsa_p256_verify(args: &[Value]) -> Result<Value, CompileError> {
     };
     let key = UnparsedPublicKey::new(&ECDSA_P256_SHA256_FIXED, pk);
     Ok(Value::Int(if key.verify(&msg, &sig).is_ok() { 1 } else { 0 }))
+}
+
+// ---------------------------------------------------------------------------
+// ECDSA P-384 sign / verify (fixed-width 96-byte r‖s on the FFI boundary)
+// ---------------------------------------------------------------------------
+
+/// `rt_ecdsa_p384_sign(pkcs8: [u8], message: [u8]) -> [u8]` (96-byte r‖s)
+pub fn rt_ecdsa_p384_sign(args: &[Value]) -> Result<Value, CompileError> {
+    let Some(pkcs8) = extract_bytes(args, 0) else {
+        return Ok(empty_bytes());
+    };
+    let Some(msg) = extract_bytes(args, 1) else {
+        return Ok(empty_bytes());
+    };
+    use p384::pkcs8::DecodePrivateKey;
+    let Ok(key) = p384::ecdsa::SigningKey::from_pkcs8_der(&pkcs8) else {
+        return Ok(empty_bytes());
+    };
+    let sig: p384::ecdsa::Signature = key.sign(&msg);
+    Ok(bytes_to_value(sig.to_bytes().as_slice()))
+}
+
+/// `rt_ecdsa_p384_verify(pubkey: [u8], message: [u8], signature: [u8]) -> i64`
+///
+/// `pubkey` is a raw uncompressed SEC1 point (0x04 || X || Y, 97 bytes).
+pub fn rt_ecdsa_p384_verify(args: &[Value]) -> Result<Value, CompileError> {
+    let Some(pk) = extract_bytes(args, 0) else {
+        return Ok(Value::Int(0));
+    };
+    let Some(msg) = extract_bytes(args, 1) else {
+        return Ok(Value::Int(0));
+    };
+    let Some(sig_bytes) = extract_bytes(args, 2) else {
+        return Ok(Value::Int(0));
+    };
+    let Ok(vk) = p384::ecdsa::VerifyingKey::from_sec1_bytes(&pk) else {
+        return Ok(Value::Int(0));
+    };
+    let Ok(sig) = p384::ecdsa::Signature::from_slice(&sig_bytes) else {
+        return Ok(Value::Int(0));
+    };
+    Ok(Value::Int(if vk.verify(&msg, &sig).is_ok() { 1 } else { 0 }))
+}
+
+// ---------------------------------------------------------------------------
+// ECDSA P-521 sign / verify (fixed-width 132-byte r‖s on the FFI boundary)
+// ---------------------------------------------------------------------------
+
+/// `rt_ecdsa_p521_sign(pkcs8: [u8], message: [u8]) -> [u8]` (132-byte r‖s)
+pub fn rt_ecdsa_p521_sign(args: &[Value]) -> Result<Value, CompileError> {
+    let Some(pkcs8) = extract_bytes(args, 0) else {
+        return Ok(empty_bytes());
+    };
+    let Some(msg) = extract_bytes(args, 1) else {
+        return Ok(empty_bytes());
+    };
+    use p521::pkcs8::DecodePrivateKey;
+    let Ok(key) = p521::ecdsa::SigningKey::from_pkcs8_der(&pkcs8) else {
+        return Ok(empty_bytes());
+    };
+    let sig: p521::ecdsa::Signature = key.sign(&msg);
+    Ok(bytes_to_value(sig.to_bytes().as_slice()))
+}
+
+/// `rt_ecdsa_p521_verify(pubkey: [u8], message: [u8], signature: [u8]) -> i64`
+///
+/// `pubkey` is a raw uncompressed SEC1 point (0x04 || X || Y, 133 bytes).
+pub fn rt_ecdsa_p521_verify(args: &[Value]) -> Result<Value, CompileError> {
+    let Some(pk) = extract_bytes(args, 0) else {
+        return Ok(Value::Int(0));
+    };
+    let Some(msg) = extract_bytes(args, 1) else {
+        return Ok(Value::Int(0));
+    };
+    let Some(sig_bytes) = extract_bytes(args, 2) else {
+        return Ok(Value::Int(0));
+    };
+    let Ok(vk) = p521::ecdsa::VerifyingKey::from_sec1_bytes(&pk) else {
+        return Ok(Value::Int(0));
+    };
+    let Ok(sig) = p521::ecdsa::Signature::from_slice(&sig_bytes) else {
+        return Ok(Value::Int(0));
+    };
+    Ok(Value::Int(if vk.verify(&msg, &sig).is_ok() { 1 } else { 0 }))
 }

@@ -23,6 +23,8 @@
 #   portable_numeric_capabilities_has_riscv_zicbom() -> bool
 #   portable_numeric_capabilities_has_riscv_zicbom_default() -> bool
 
+use std.nogc_async_mut_noalloc.baremetal.riscv.{fence_i, cbo_flush, cbo_clean, cbo_inval}
+
 # ============================================================================
 # CmoCapSnapshot — capability probe result
 # (also exported from cmo.spl; duplicated here for standalone import)
@@ -168,7 +170,7 @@ fn hal_cache_invalidate_dcache_with_log(caps: CmoCapSnapshot, addr: u64, len: u6
 
 # ============================================================================
 # Canonical trait methods — production-callable (AC-2)
-# Delegate to _with_log helpers using module-level ZICBOM_STATE + default stride.
+# Call real CMO instructions (fence_i, cbo_flush, cbo_clean, cbo_inval).
 # ============================================================================
 
 fn current_cmo_caps() -> CmoCapSnapshot:
@@ -180,21 +182,35 @@ fn current_cacheline_stride() -> u32:
     64u32
 
 fn hal_cache_sync_icache(addr: u64, len: u64):
-    """Sync icache: cbo.flush per-line (if Zicbom) then fence.i. Delegates to _with_log."""
-    val caps = current_cmo_caps()
-    val log = hal_cache_sync_icache_with_log(caps, addr, len)
+    """Sync icache: cbo.flush per-line (if Zicbom) then fence.i."""
+    val stride = current_cacheline_stride()
+    if ZICBOM_STATE:
+        var cur = addr
+        val end_addr = addr + len
+        while cur < end_addr:
+            cbo_flush(cur)
+            cur = cur + stride as u64
+    fence_i()
 
 fn hal_cache_clean_dcache(addr: u64, len: u64):
-    """Clean dcache: cbo.clean per-line when Zicbom=true, else diagnostic. Delegates to _with_log."""
-    val caps = current_cmo_caps()
+    """Clean dcache: cbo.clean per-line when Zicbom=true, else emit diagnostic."""
     val stride = current_cacheline_stride()
-    val log = hal_cache_clean_dcache_with_log(caps, addr, len, stride)
+    if ZICBOM_STATE:
+        var cur = addr
+        val end_addr = addr + len
+        while cur < end_addr:
+            cbo_clean(cur)
+            cur = cur + stride as u64
 
 fn hal_cache_invalidate_dcache(addr: u64, len: u64):
-    """Invalidate dcache: cbo.inval per-line when Zicbom=true, else diagnostic. Delegates to _with_log."""
-    val caps = current_cmo_caps()
+    """Invalidate dcache: cbo.inval per-line when Zicbom=true, else emit diagnostic."""
     val stride = current_cacheline_stride()
-    val log = hal_cache_invalidate_dcache_with_log(caps, addr, len, stride)
+    if ZICBOM_STATE:
+        var cur = addr
+        val end_addr = addr + len
+        while cur < end_addr:
+            cbo_inval(cur)
+            cur = cur + stride as u64
 
 # ============================================================================
 # AC-3: export ZICBOM state for compiler backend registry query
