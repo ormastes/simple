@@ -1,0 +1,167 @@
+module std.replay.core.replay_engine
+
+use std.replay.core.replay_event.ReplayEventKind
+use std.replay.core.replay_event.ReplayEvent
+use std.replay.core.replay_hook.ReplayHook
+
+class ReplayEngine {
+    mode: text,
+    events: [ReplayEvent],
+    event_index: i64,
+    seq_counter: i64,
+
+    fn create(mode: text) -> ReplayEngine {
+        ReplayEngine {
+            mode: mode,
+            events: [],
+            event_index: 0,
+            seq_counter: 0,
+        }
+    }
+
+    fn next_seq(self) -> i64 {
+        let s = self.seq_counter
+        self.seq_counter = self.seq_counter + 1
+        s
+    }
+
+    fn push_event(self, kind: ReplayEventKind, timestamp: i64, file_hash: i64, line: i32, name_hash: i64, value_a: i64, value_b: i64) {
+        let ev = ReplayEvent {
+            seq_id: self.next_seq(),
+            kind: kind,
+            timestamp: timestamp,
+            file_hash: file_hash,
+            line: line,
+            name_hash: name_hash,
+            value_a: value_a,
+            value_b: value_b,
+        }
+        self.events.push(ev)
+    }
+
+    fn pop_event(self) -> Option<ReplayEvent> {
+        if self.event_index >= self.events.len() as i64 {
+            None
+        } else {
+            let ev = self.events[self.event_index as i32]
+            self.event_index = self.event_index + 1
+            Some(ev)
+        }
+    }
+
+    impl ReplayHook {
+        fn on_function_enter(self, name: text, module: text) {
+            if self.mode == "record" {
+                self.push_event(ReplayEventKind::FunctionEnter, 0, 0, 0, 0, 0, 0)
+            }
+        }
+
+        fn on_function_exit(self, name: text, return_type: text) {
+            if self.mode == "record" {
+                self.push_event(ReplayEventKind::FunctionExit, 0, 0, 0, 0, 0, 0)
+            }
+        }
+
+        fn on_step(self, file: text, line: i32, column: i32) {
+            if self.mode == "record" {
+                self.push_event(ReplayEventKind::Step, 0, 0, line, 0, 0, 0)
+            }
+        }
+
+        fn on_variable_write(self, name: text, type_name: text, old_hash: i64, new_hash: i64) {
+            if self.mode == "record" {
+                self.push_event(ReplayEventKind::VariableWrite, 0, 0, 0, 0, old_hash, new_hash)
+            }
+        }
+
+        fn on_breakpoint_hit(self, file: text, line: i32) {
+            if self.mode == "record" {
+                self.push_event(ReplayEventKind::BreakpointHit, 0, 0, line, 0, 0, 0)
+            }
+        }
+
+        fn on_syscall(self, syscall_id: i64, arg0: i64, arg1: i64, result: i64) {
+            if self.mode == "record" {
+                self.push_event(ReplayEventKind::Syscall, 0, 0, 0, syscall_id, arg0, result)
+            }
+        }
+
+        fn on_interrupt(self, vector: i64, timestamp: i64) {
+            if self.mode == "record" {
+                self.push_event(ReplayEventKind::Interrupt, timestamp, 0, 0, 0, vector, 0)
+            }
+        }
+
+        fn on_timer_read(self, source_id: i64, value: i64) -> i64 {
+            if self.mode == "record" {
+                self.push_event(ReplayEventKind::TimerRead, 0, 0, 0, source_id, value, 0)
+                value
+            } else if self.mode == "replay" {
+                match self.pop_event() {
+                    Some(ev) => ev.value_a,
+                    None => value,
+                }
+            } else {
+                value
+            }
+        }
+
+        fn on_io_read(self, addr: i64, size: i32, value: i64) -> i64 {
+            if self.mode == "record" {
+                self.push_event(ReplayEventKind::IoRead, 0, 0, size, 0, addr, value)
+                value
+            } else if self.mode == "replay" {
+                match self.pop_event() {
+                    Some(ev) => ev.value_b,
+                    None => value,
+                }
+            } else {
+                value
+            }
+        }
+
+        fn on_io_write(self, addr: i64, size: i32, value: i64) {
+            if self.mode == "record" {
+                self.push_event(ReplayEventKind::IoWrite, 0, 0, size, 0, addr, value)
+            }
+        }
+
+        fn on_checkpoint_save(self, id: i32) {
+            if self.mode == "record" {
+                self.push_event(ReplayEventKind::CheckpointSave, 0, 0, id, 0, 0, 0)
+            }
+        }
+
+        fn on_checkpoint_restore(self, id: i32) {
+            if self.mode == "record" {
+                self.push_event(ReplayEventKind::CheckpointRestore, 0, 0, id, 0, 0, 0)
+            }
+        }
+
+        fn is_recording(self) -> bool {
+            self.mode == "record"
+        }
+
+        fn is_replaying(self) -> bool {
+            self.mode == "replay"
+        }
+
+        fn is_off(self) -> bool {
+            self.mode == "off"
+        }
+    }
+}
+
+var _g_engine: Option<ReplayEngine> = None
+
+fn replay_init(mode: text) {
+    _g_engine = Some(ReplayEngine::create(mode))
+}
+
+fn replay_shutdown() {
+    _g_engine = None
+}
+
+fn replay_get() -> Option<ReplayEngine> {
+    _g_engine
+}

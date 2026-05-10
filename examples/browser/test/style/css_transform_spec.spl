@@ -1,0 +1,245 @@
+#![allow(REQC001)]
+#![allow(REQC004)]
+"""
+# CSS Transform Specification
+
+Tests for transform property parsing and Matrix4 composition.
+Pure math — no rendering required.
+
+Run with: bin/simple test examples/browser/test/style/css_transform_spec.spl
+"""
+
+use std.spec
+use examples.browser.feature.style.transform.{
+    TransformFunction, parse_transform, transforms_to_matrix
+}
+use examples.browser.shared.matrix4.Matrix4
+
+# ============================================================================
+# Helpers
+# ============================================================================
+
+fn approx(a: f64, b: f64) -> bool:
+    val diff = a - b
+    val abs_diff = if diff < 0.0: -diff else: diff
+    abs_diff < 0.001
+
+fn matrix_at(m: Matrix4, idx: i64) -> f64:
+    m.data.get(idx)
+
+fn identity_data() -> [f64]:
+    [1.0, 0.0, 0.0, 0.0,
+     0.0, 1.0, 0.0, 0.0,
+     0.0, 0.0, 1.0, 0.0,
+     0.0, 0.0, 0.0, 1.0]
+
+fn matrix_approx_equal(m: Matrix4, expected: [f64]) -> bool:
+    var ok = true
+    var i = 0
+    while i < 16:
+        val a = m.data.get(i)
+        val b = expected.get(i)
+        val diff = a - b
+        val abs_diff = if diff < 0.0: -diff else: diff
+        if abs_diff >= 0.001:
+            ok = false
+        i = i + 1
+    ok
+
+# ============================================================================
+# Spec
+# ============================================================================
+
+describe "CSS Transform Parsing":
+    """
+    Validates parse_transform() tokenises CSS transform strings into
+    TransformFunction lists with correct name and args.
+    """
+
+    context "none / empty":
+        it "none returns empty list":
+            val fns = parse_transform("none")
+            expect(fns.len()).to_equal(0)
+
+        it "empty string returns empty list":
+            val fns = parse_transform("")
+            expect(fns.len()).to_equal(0)
+
+    context "translate":
+        it "translate(10px, 20px) has name translate and 2 args":
+            val fns = parse_transform("translate(10px, 20px)")
+            expect(fns.len()).to_equal(1)
+            val f = fns.get(0)
+            expect(f.name).to_equal("translate")
+            expect(f.args.len()).to_equal(2)
+
+        it "translate(10px, 20px) args are 10 and 20":
+            val fns = parse_transform("translate(10px, 20px)")
+            val f = fns.get(0)
+            expect(approx(f.args.get(0), 10.0)).to_equal(true)
+            expect(approx(f.args.get(1), 20.0)).to_equal(true)
+
+        it "translateX(50px) has name translateX and arg 50":
+            val fns = parse_transform("translateX(50px)")
+            expect(fns.len()).to_equal(1)
+            val f = fns.get(0)
+            expect(f.name).to_equal("translateX")
+            expect(approx(f.args.get(0), 50.0)).to_equal(true)
+
+        it "translateY(30px) has name translateY and arg 30":
+            val fns = parse_transform("translateY(30px)")
+            val f = fns.get(0)
+            expect(f.name).to_equal("translateY")
+            expect(approx(f.args.get(0), 30.0)).to_equal(true)
+
+    context "rotate":
+        it "rotate(45deg) has name rotate and arg 45":
+            val fns = parse_transform("rotate(45deg)")
+            expect(fns.len()).to_equal(1)
+            val f = fns.get(0)
+            expect(f.name).to_equal("rotate")
+            expect(approx(f.args.get(0), 45.0)).to_equal(true)
+
+        it "rotate(0deg) has arg 0":
+            val fns = parse_transform("rotate(0deg)")
+            val f = fns.get(0)
+            expect(approx(f.args.get(0), 0.0)).to_equal(true)
+
+        it "rotate(-90deg) has arg -90":
+            val fns = parse_transform("rotate(-90deg)")
+            val f = fns.get(0)
+            expect(approx(f.args.get(0), -90.0)).to_equal(true)
+
+    context "scale":
+        it "scale(2) has name scale":
+            val fns = parse_transform("scale(2)")
+            expect(fns.len()).to_equal(1)
+            expect(fns.get(0).name).to_equal("scale")
+
+        it "scale(2,3) has 2 args":
+            val fns = parse_transform("scale(2, 3)")
+            val f = fns.get(0)
+            expect(approx(f.args.get(0), 2.0)).to_equal(true)
+            expect(approx(f.args.get(1), 3.0)).to_equal(true)
+
+        it "scaleX(1.5) arg is 1.5":
+            val fns = parse_transform("scaleX(1.5)")
+            expect(approx(fns.get(0).args.get(0), 1.5)).to_equal(true)
+
+    context "skew":
+        it "skewX(30deg) has name skewX and arg 30":
+            val fns = parse_transform("skewX(30deg)")
+            val f = fns.get(0)
+            expect(f.name).to_equal("skewX")
+            expect(approx(f.args.get(0), 30.0)).to_equal(true)
+
+        it "skew(10deg, 20deg) has 2 args":
+            val fns = parse_transform("skew(10deg, 20deg)")
+            val f = fns.get(0)
+            expect(approx(f.args.get(0), 10.0)).to_equal(true)
+            expect(approx(f.args.get(1), 20.0)).to_equal(true)
+
+    context "multiple transforms":
+        it "rotate(45deg) translate(10px, 20px) produces 2 functions":
+            val fns = parse_transform("rotate(45deg) translate(10px, 20px)")
+            expect(fns.len()).to_equal(2)
+
+        it "order is preserved: first is rotate":
+            val fns = parse_transform("rotate(45deg) translate(10px, 20px)")
+            expect(fns.get(0).name).to_equal("rotate")
+            expect(fns.get(1).name).to_equal("translate")
+
+        it "scale(2) skewX(15deg) produces 2 functions":
+            val fns = parse_transform("scale(2) skewX(15deg)")
+            expect(fns.len()).to_equal(2)
+
+
+describe "CSS Transform Matrix Composition":
+    """
+    Validates transforms_to_matrix() produces correct Matrix4 values.
+    Identity, translation, scaling, rotation, skew.
+    """
+
+    context "identity — none":
+        it "empty list composes to identity matrix":
+            val fns = parse_transform("none")
+            val m = transforms_to_matrix(fns)
+            expect(matrix_approx_equal(m, identity_data())).to_equal(true)
+
+    context "translate":
+        it "translate(10, 20) sets tx=10, ty=20 in column-major data":
+            # Column-major: tx at data[12], ty at data[13]
+            val fns = parse_transform("translate(10px, 20px)")
+            val m = transforms_to_matrix(fns)
+            expect(approx(matrix_at(m, 12), 10.0)).to_equal(true)
+            expect(approx(matrix_at(m, 13), 20.0)).to_equal(true)
+
+        it "translate(0, 0) is identity":
+            val fns = parse_transform("translate(0px, 0px)")
+            val m = transforms_to_matrix(fns)
+            expect(matrix_approx_equal(m, identity_data())).to_equal(true)
+
+        it "translateX(100) sets tx=100":
+            val fns = parse_transform("translateX(100px)")
+            val m = transforms_to_matrix(fns)
+            expect(approx(matrix_at(m, 12), 100.0)).to_equal(true)
+            expect(approx(matrix_at(m, 13), 0.0)).to_equal(true)
+
+        it "translateY(50) sets ty=50":
+            val fns = parse_transform("translateY(50px)")
+            val m = transforms_to_matrix(fns)
+            expect(approx(matrix_at(m, 12), 0.0)).to_equal(true)
+            expect(approx(matrix_at(m, 13), 50.0)).to_equal(true)
+
+    context "scale":
+        it "scale(2) sets sx=sy=2 on diagonal":
+            # Column-major: data[0]=sx, data[5]=sy
+            val fns = parse_transform("scale(2)")
+            val m = transforms_to_matrix(fns)
+            expect(approx(matrix_at(m, 0), 2.0)).to_equal(true)
+            expect(approx(matrix_at(m, 5), 2.0)).to_equal(true)
+
+        it "scale(1) is identity":
+            val fns = parse_transform("scale(1)")
+            val m = transforms_to_matrix(fns)
+            expect(matrix_approx_equal(m, identity_data())).to_equal(true)
+
+        it "scaleX(3) sets data[0]=3, data[5]=1":
+            val fns = parse_transform("scaleX(3)")
+            val m = transforms_to_matrix(fns)
+            expect(approx(matrix_at(m, 0), 3.0)).to_equal(true)
+            expect(approx(matrix_at(m, 5), 1.0)).to_equal(true)
+
+    context "rotate":
+        it "rotate(0deg) is identity":
+            val fns = parse_transform("rotate(0deg)")
+            val m = transforms_to_matrix(fns)
+            expect(matrix_approx_equal(m, identity_data())).to_equal(true)
+
+        it "rotate(90deg) cos=0, sin=1 — data[0]=0, data[4]=-1, data[1]=1, data[5]=0":
+            # Column-major rotate_z: [c, s, 0, 0, -s, c, 0, 0, ...]
+            val fns = parse_transform("rotate(90deg)")
+            val m = transforms_to_matrix(fns)
+            expect(approx(matrix_at(m, 0), 0.0)).to_equal(true)
+            expect(approx(matrix_at(m, 1), 1.0)).to_equal(true)
+            expect(approx(matrix_at(m, 4), -1.0)).to_equal(true)
+            expect(approx(matrix_at(m, 5), 0.0)).to_equal(true)
+
+        it "rotate(180deg) cos=-1, sin=0":
+            val fns = parse_transform("rotate(180deg)")
+            val m = transforms_to_matrix(fns)
+            expect(approx(matrix_at(m, 0), -1.0)).to_equal(true)
+            expect(approx(matrix_at(m, 5), -1.0)).to_equal(true)
+
+    context "matrix multiplication — chained transforms":
+        it "translate then scale: matrix product is non-identity":
+            val fns = parse_transform("translate(10px, 0px) scale(2)")
+            val m = transforms_to_matrix(fns)
+            # After translate then scale, data[0] should be 2 (scaled x)
+            expect(approx(matrix_at(m, 0), 2.0)).to_equal(true)
+
+        it "two translates combine additively":
+            val fns = parse_transform("translate(10px, 0px) translate(5px, 0px)")
+            val m = transforms_to_matrix(fns)
+            # translate(10) * translate(5) = translate(20) in column-major
+            expect(approx(matrix_at(m, 12), 20.0)).to_equal(true)

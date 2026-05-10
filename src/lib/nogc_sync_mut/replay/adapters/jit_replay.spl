@@ -1,0 +1,139 @@
+module std.replay.adapters.jit_replay
+
+use std.replay.adapters.jit_replay_event.JitReplayEventKind
+use std.replay.adapters.jit_replay_event.JitReplayEvent
+
+enum JitReplayMode {
+    Off,
+    Record,
+    Replay,
+
+    fn to_text(self) -> text {
+        match self {
+            JitReplayMode::Off => "off",
+            JitReplayMode::Record => "record",
+            JitReplayMode::Replay => "replay",
+        }
+    }
+}
+
+struct JitCheckpoint {
+    id: i32,
+    event_index: i64,
+}
+
+class JitReplayAdapter {
+    mode: JitReplayMode,
+    events: [JitReplayEvent],
+    checkpoints: [JitCheckpoint],
+    trace_path: text,
+    _seq: i64,
+
+    fn create(mode: JitReplayMode, trace_path: text) -> JitReplayAdapter {
+        JitReplayAdapter {
+            mode: mode,
+            events: [],
+            checkpoints: [],
+            trace_path: trace_path,
+            _seq: 0,
+        }
+    }
+
+    fn on_jit_compile(self, fn_name: text, module: text) {
+        match self.mode {
+            JitReplayMode::Record => {
+                let ev = JitReplayEvent {
+                    seq_id: self._seq,
+                    kind: JitReplayEventKind::Compile,
+                    function_hash: 0,
+                    module_hash: 0,
+                    args_hash: 0,
+                    result: 0,
+                    timestamp: 0,
+                }
+                self.events.push(ev)
+                self._seq = self._seq + 1
+            },
+            _ => {},
+        }
+    }
+
+    fn on_jit_execute(self, fn_name: text, args_hash: i64) -> i64 {
+        match self.mode {
+            JitReplayMode::Record => {
+                let ev = JitReplayEvent {
+                    seq_id: self._seq,
+                    kind: JitReplayEventKind::Execute,
+                    function_hash: 0,
+                    module_hash: 0,
+                    args_hash: args_hash,
+                    result: 0,
+                    timestamp: 0,
+                }
+                self.events.push(ev)
+                self._seq = self._seq + 1
+                0
+            },
+            JitReplayMode::Replay => {
+                // return recorded result
+                0
+            },
+            JitReplayMode::Off => 0,
+        }
+    }
+
+    fn save_checkpoint(self) -> i32 {
+        let id = self.checkpoints.len() as i32
+        let cp = JitCheckpoint {
+            id: id,
+            event_index: self.events.len() as i64,
+        }
+        self.checkpoints.push(cp)
+        id
+    }
+
+    fn restore_checkpoint(self, id: i32) {
+        let mut i = 0
+        while i < self.checkpoints.len() {
+            let cp = self.checkpoints[i]
+            if cp.id == id {
+                let target = cp.event_index as i32
+                while self.events.len() > target {
+                    self.events.pop()
+                }
+                return
+            }
+            i = i + 1
+        }
+    }
+
+    fn reverse_to_call(self, fn_name: text) {
+        // walk back to last Execute event
+        let mut i = self.events.len() - 1
+        while i > 0 {
+            let ev = self.events[i]
+            match ev.kind {
+                JitReplayEventKind::Execute => {
+                    while self.events.len() > i {
+                        self.events.pop()
+                    }
+                    return
+                },
+                _ => {},
+            }
+            i = i - 1
+        }
+    }
+
+    fn event_count(self) -> i64 {
+        self.events.len() as i64
+    }
+
+    fn save_trace(self) {
+        pass_dn
+    }
+
+    fn load_trace(self) {
+        pass_dn
+    }
+}

@@ -1,0 +1,171 @@
+#![allow(REQC001)]
+#![allow(REQC004)]
+"""
+# CSS Timing Functions Specification
+
+Tests for cubic-bezier, ease, linear, ease-in, ease-out, ease-in-out timing functions.
+Pure math — no rendering required.
+
+Run with: bin/simple test examples/browser/test/style/css_timing_spec.spl
+"""
+
+use std.spec
+use examples.browser.feature.style.animation.{
+    ease_value, cubic_bezier, bezier_component, TimingFunction
+}
+
+# ============================================================================
+# Helpers
+# ============================================================================
+
+fn approx_eq(a: f64, b: f64, tol: f64) -> bool:
+    val diff = a - b
+    val abs_diff = if diff < 0.0: -diff else: diff
+    abs_diff <= tol
+
+fn tol_check(actual: f64, expected: f64) -> bool:
+    approx_eq(actual, expected, 0.001)
+
+# ============================================================================
+# Spec
+# ============================================================================
+
+describe "CSS Timing Functions":
+    """
+    Validates cubic-bezier math and named easing aliases.
+    All tests are pure arithmetic — no DOM, no layout, no rendering.
+    """
+
+    context "linear":
+        it "linear returns t unchanged at 0.0":
+            val result = ease_value(0.0, TimingFunction.Linear)
+            expect(tol_check(result, 0.0)).to_equal(true)
+
+        it "linear returns t unchanged at 1.0":
+            val result = ease_value(1.0, TimingFunction.Linear)
+            expect(tol_check(result, 1.0)).to_equal(true)
+
+        it "linear returns t unchanged at 0.5":
+            val result = ease_value(0.5, TimingFunction.Linear)
+            expect(tol_check(result, 0.5)).to_equal(true)
+
+        it "linear returns t unchanged at 0.25":
+            val result = ease_value(0.25, TimingFunction.Linear)
+            expect(tol_check(result, 0.25)).to_equal(true)
+
+    context "ease boundary values":
+        it "ease returns 0.0 at t=0.0":
+            val result = ease_value(0.0, TimingFunction.Ease)
+            expect(tol_check(result, 0.0)).to_equal(true)
+
+        it "ease returns 1.0 at t=1.0":
+            val result = ease_value(1.0, TimingFunction.Ease)
+            expect(tol_check(result, 1.0)).to_equal(true)
+
+        it "ease midpoint is greater than 0.5 (fast start, slow end)":
+            # ease = cubic-bezier(0.25, 0.1, 0.25, 1.0) — accelerates then decelerates
+            val result = ease_value(0.5, TimingFunction.Ease)
+            expect(result > 0.5).to_equal(true)
+
+    context "ease-in":
+        it "ease-in returns 0.0 at t=0.0":
+            val result = ease_value(0.0, TimingFunction.EaseIn)
+            expect(tol_check(result, 0.0)).to_equal(true)
+
+        it "ease-in returns 1.0 at t=1.0":
+            val result = ease_value(1.0, TimingFunction.EaseIn)
+            expect(tol_check(result, 1.0)).to_equal(true)
+
+        it "ease-in midpoint is less than 0.5 (slow start)":
+            # ease-in = cubic-bezier(0.42, 0, 1, 1) — slow start, fast end
+            val result = ease_value(0.5, TimingFunction.EaseIn)
+            expect(result < 0.5).to_equal(true)
+
+    context "ease-out":
+        it "ease-out returns 0.0 at t=0.0":
+            val result = ease_value(0.0, TimingFunction.EaseOut)
+            expect(tol_check(result, 0.0)).to_equal(true)
+
+        it "ease-out returns 1.0 at t=1.0":
+            val result = ease_value(1.0, TimingFunction.EaseOut)
+            expect(tol_check(result, 1.0)).to_equal(true)
+
+        it "ease-out midpoint is greater than 0.5 (fast start)":
+            # ease-out = cubic-bezier(0, 0, 0.58, 1) — fast start, slow end
+            val result = ease_value(0.5, TimingFunction.EaseOut)
+            expect(result > 0.5).to_equal(true)
+
+    context "ease-in-out":
+        it "ease-in-out returns 0.0 at t=0.0":
+            val result = ease_value(0.0, TimingFunction.EaseInOut)
+            expect(tol_check(result, 0.0)).to_equal(true)
+
+        it "ease-in-out returns 1.0 at t=1.0":
+            val result = ease_value(1.0, TimingFunction.EaseInOut)
+            expect(tol_check(result, 1.0)).to_equal(true)
+
+        it "ease-in-out is symmetric around 0.5":
+            # cubic-bezier(0.42, 0, 0.58, 1) — S-curve
+            val r1 = ease_value(0.25, TimingFunction.EaseInOut)
+            val r2 = ease_value(0.75, TimingFunction.EaseInOut)
+            val sym = approx_eq(r1, 1.0 - r2, 0.01)
+            expect(sym).to_equal(true)
+
+    context "cubic-bezier — named control points":
+        it "cubic-bezier(0,0,1,1) is linear":
+            # Degenerate case: all control points on diagonal
+            val r = ease_value(0.5, TimingFunction.CubicBezier(0.0, 0.0, 1.0, 1.0))
+            expect(tol_check(r, 0.5)).to_equal(true)
+
+        it "cubic-bezier boundaries return 0 and 1":
+            val r0 = ease_value(0.0, TimingFunction.CubicBezier(0.25, 0.1, 0.25, 1.0))
+            val r1 = ease_value(1.0, TimingFunction.CubicBezier(0.25, 0.1, 0.25, 1.0))
+            expect(tol_check(r0, 0.0)).to_equal(true)
+            expect(tol_check(r1, 1.0)).to_equal(true)
+
+        it "cubic-bezier(0.42,0,1,1) matches ease-in at 0.5":
+            val via_enum = ease_value(0.5, TimingFunction.EaseIn)
+            val via_bezier = ease_value(0.5, TimingFunction.CubicBezier(0.42, 0.0, 1.0, 1.0))
+            expect(tol_check(via_enum, via_bezier)).to_equal(true)
+
+        it "cubic-bezier(0,0,0.58,1) matches ease-out at 0.5":
+            val via_enum = ease_value(0.5, TimingFunction.EaseOut)
+            val via_bezier = ease_value(0.5, TimingFunction.CubicBezier(0.0, 0.0, 0.58, 1.0))
+            expect(tol_check(via_enum, via_bezier)).to_equal(true)
+
+    context "bezier_component math":
+        it "bezier_component at t=0 is 0":
+            val r = bezier_component(0.0, 0.5, 0.5)
+            expect(tol_check(r, 0.0)).to_equal(true)
+
+        it "bezier_component at t=1 is 1":
+            val r = bezier_component(1.0, 0.5, 0.5)
+            expect(tol_check(r, 1.0)).to_equal(true)
+
+        it "bezier_component at t=0.5 with p1=p2=0.5 is 0.5":
+            # B(0.5) = 3*(0.5)^2*(0.5)*0.5 + 3*(0.5)*(0.5)^2*0.5 + (0.5)^3
+            #        = 3*0.25*0.5*0.5 + 3*0.5*0.25*0.5 + 0.125 = 0.1875+0.1875+0.125 = 0.5
+            val r = bezier_component(0.5, 0.5, 0.5)
+            expect(tol_check(r, 0.5)).to_equal(true)
+
+    context "steps timing function":
+        it "steps(4) at t=0 returns 0":
+            val result = ease_value(0.0, TimingFunction.Steps(4, false))
+            expect(tol_check(result, 0.0)).to_equal(true)
+
+        it "steps(4) at t=1 returns 1":
+            val result = ease_value(1.0, TimingFunction.Steps(4, false))
+            expect(tol_check(result, 1.0)).to_equal(true)
+
+        it "steps(4,jump-start) at t=0.1 advances one step":
+            # jump-start: t=0 immediately jumps to 0.25
+            val result = ease_value(0.1, TimingFunction.Steps(4, true))
+            expect(tol_check(result, 0.25)).to_equal(true)
+
+        it "steps(4) at t=0.6 is at step 2 (0.5)":
+            val result = ease_value(0.6, TimingFunction.Steps(4, false))
+            expect(tol_check(result, 0.5)).to_equal(true)
+
+        it "steps(2) at t=0.5 steps to 0.5":
+            val result = ease_value(0.5, TimingFunction.Steps(2, false))
+            expect(tol_check(result, 0.5)).to_equal(true)

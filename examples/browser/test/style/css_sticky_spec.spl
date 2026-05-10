@@ -1,0 +1,184 @@
+#![allow(REQC001)]
+#![allow(REQC004)]
+"""
+# CSS position:sticky Clamping Specification
+
+Tests for the sticky-position clamping algorithm:
+given scroll offset, element position, sticky inset values, and
+scroll container bounds, compute the final clamped position.
+Pure arithmetic — no DOM or rendering.
+
+Run with: bin/simple test examples/browser/test/style/css_sticky_spec.spl
+"""
+
+use std.spec
+
+# ============================================================================
+# Pure sticky-clamping algorithm.
+# Extracted here as module-level fns so the spec can exercise the logic
+# independently of the layout pass.  Implementation will live in layout.spl.
+#
+# compute_sticky_top:
+#   normal_y      — element's normal flow y position (relative to scroll container)
+#   scroll_offset — current scroll_offset_y of the scroll container
+#   inset_top     — value of `top` property for sticky element
+#   container_top — top edge of the scroll container (in viewport coords)
+#   container_bottom — bottom edge of the scroll container (in viewport coords)
+#   elem_height   — element's height (for bottom containment)
+#
+# Returns final y position (relative to scroll container origin).
+# ============================================================================
+
+fn compute_sticky_top(
+    normal_y: f64,
+    scroll_offset: f64,
+    inset_top: f64,
+    container_top: f64,
+    container_bottom: f64,
+    elem_height: f64
+) -> f64:
+    # Sticky threshold: element's viewport position would be normal_y - scroll_offset
+    # If that falls above inset_top, clamp to inset_top (relative to scroll container).
+    val viewport_y = normal_y - scroll_offset
+    val stick_threshold = container_top + inset_top
+    val stick_bottom = container_bottom - elem_height
+
+    # Minimum y in scroll-container coords to keep element at inset_top from viewport top
+    val min_y = scroll_offset + inset_top - container_top
+
+    # Maximum y in scroll-container coords to stay within container bottom
+    val max_y = stick_bottom
+
+    if normal_y < min_y:
+        # Before sticky zone: use normal position
+        return normal_y
+
+    if normal_y > max_y:
+        # Past container bottom: cap at container bottom
+        return max_y
+
+    # In sticky zone: clamp to min_y
+    if min_y > normal_y:
+        return min_y
+
+    normal_y
+
+fn compute_sticky_left(
+    normal_x: f64,
+    scroll_offset_x: f64,
+    inset_left: f64,
+    container_left: f64,
+    container_right: f64,
+    elem_width: f64
+) -> f64:
+    val min_x = scroll_offset_x + inset_left - container_left
+    val max_x = container_right - elem_width
+
+    if normal_x < min_x:
+        return normal_x
+
+    if normal_x > max_x:
+        return max_x
+
+    if min_x > normal_x:
+        return min_x
+
+    normal_x
+
+fn approx(a: f64, b: f64) -> bool:
+    val diff = a - b
+    val abs_diff = if diff < 0.0: -diff else: diff
+    abs_diff < 0.5
+
+# ============================================================================
+# Spec
+# ============================================================================
+
+describe "CSS position:sticky — top clamping":
+    """
+    Validates the sticky-top clamping pass.
+    scroll_offset=0 means no scrolling yet.
+    """
+
+    it "no scroll: element above sticky threshold stays at normal position":
+        # container at top=0, inset_top=20, element at y=100, no scroll
+        val y = compute_sticky_top(100.0, 0.0, 20.0, 0.0, 500.0, 50.0)
+        expect(approx(y, 100.0)).to_equal(true)
+
+    it "scrolled past element: element sticks at inset_top":
+        # Element at normal_y=100, scrolled 120px, inset_top=20
+        # viewport_y = 100-120 = -20 < inset_top=20 — should stick
+        # min_y = 120 + 20 - 0 = 140
+        val y = compute_sticky_top(100.0, 120.0, 20.0, 0.0, 500.0, 50.0)
+        expect(approx(y, 140.0)).to_equal(true)
+
+    it "element at exact sticky threshold stays at normal":
+        # min_y = 0 + 20 - 0 = 20, normal_y = 20 — no clamping needed
+        val y = compute_sticky_top(20.0, 0.0, 20.0, 0.0, 500.0, 50.0)
+        expect(approx(y, 20.0)).to_equal(true)
+
+    it "element past container bottom is capped at container bottom":
+        # container_bottom=300, elem_height=50 → max_y=250
+        # normal_y=280 > max_y=250 → capped
+        val y = compute_sticky_top(280.0, 0.0, 20.0, 0.0, 300.0, 50.0)
+        expect(approx(y, 250.0)).to_equal(true)
+
+    it "inset_top=0: element sticks at container top edge":
+        # inset_top=0, scrolled 50px, normal_y=30
+        # min_y = 50 + 0 - 0 = 50 > normal_y=30 → stick at 50
+        val y = compute_sticky_top(30.0, 50.0, 0.0, 0.0, 400.0, 40.0)
+        expect(approx(y, 50.0)).to_equal(true)
+
+    it "large inset_top: threshold is pushed further from viewport edge":
+        # inset_top=100, scroll=200, min_y=200+100=300, normal_y=250 < 300 → normal
+        val y = compute_sticky_top(250.0, 200.0, 100.0, 0.0, 1000.0, 50.0)
+        expect(approx(y, 250.0)).to_equal(true)
+
+    it "zero scroll: y is always normal_y when element fits before threshold":
+        val y = compute_sticky_top(50.0, 0.0, 10.0, 0.0, 600.0, 30.0)
+        expect(approx(y, 50.0)).to_equal(true)
+
+
+describe "CSS position:sticky — left clamping":
+    """
+    Validates the horizontal sticky-left clamping (mirrors top logic).
+    """
+
+    it "no horizontal scroll: element stays at normal x":
+        val x = compute_sticky_left(100.0, 0.0, 10.0, 0.0, 400.0, 80.0)
+        expect(approx(x, 100.0)).to_equal(true)
+
+    it "scrolled past element: element sticks at inset_left":
+        # normal_x=100, scroll_x=120, inset_left=10
+        # min_x = 120 + 10 - 0 = 130 > normal_x → stick
+        val x = compute_sticky_left(100.0, 120.0, 10.0, 0.0, 400.0, 80.0)
+        expect(approx(x, 130.0)).to_equal(true)
+
+    it "element past container right is capped":
+        # container_right=400, elem_width=80 → max_x=320
+        # normal_x=350 > 320 → capped
+        val x = compute_sticky_left(350.0, 0.0, 10.0, 0.0, 400.0, 80.0)
+        expect(approx(x, 320.0)).to_equal(true)
+
+
+describe "CSS position:sticky — scroll offset relationships":
+    """
+    Property-based checks: sticky position must always lie within the
+    scroll container, and must not be less than normal position when not stuck.
+    """
+
+    it "sticky y never less than container top (inset_top)":
+        val y = compute_sticky_top(0.0, 300.0, 20.0, 0.0, 500.0, 50.0)
+        expect(y >= 0.0).to_equal(true)
+
+    it "sticky y never greater than container_bottom minus elem_height":
+        val y = compute_sticky_top(490.0, 0.0, 20.0, 0.0, 500.0, 50.0)
+        expect(y <= 450.0).to_equal(true)
+
+    it "sticky y is continuous: small scroll change produces bounded y change":
+        val y1 = compute_sticky_top(100.0, 80.0, 20.0, 0.0, 600.0, 40.0)
+        val y2 = compute_sticky_top(100.0, 81.0, 20.0, 0.0, 600.0, 40.0)
+        val delta = y2 - y1
+        val abs_delta = if delta < 0.0: -delta else: delta
+        # Change in y must be at most 1px for a 1px scroll change
+        expect(abs_delta <= 1.0).to_equal(true)

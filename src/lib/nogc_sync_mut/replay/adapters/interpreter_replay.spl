@@ -1,0 +1,98 @@
+module std.replay.adapters.interpreter_replay
+
+use std.replay.adapters.interpreter_replay_event.InterpreterReplayEventKind
+use std.replay.adapters.interpreter_replay_event.InterpreterReplayEvent
+
+struct InterpreterCheckpoint {
+    checkpoint_id: i32,
+    event_index: i64,
+    debug_state: text,
+}
+
+class InterpreterReplayAdapter {
+    mode: text,
+    events: [InterpreterReplayEvent],
+    checkpoints: [InterpreterCheckpoint],
+    _seq: i64,
+
+    fn create(mode: text) -> InterpreterReplayAdapter {
+        InterpreterReplayAdapter {
+            mode: mode,
+            events: [],
+            checkpoints: [],
+            _seq: 0,
+        }
+    }
+
+    fn wrap_step(self) {
+        if self.mode == "record" {
+            let ev = InterpreterReplayEvent {
+                seq_id: self._seq,
+                kind: InterpreterReplayEventKind::Step,
+                file: "",
+                line: 0,
+                name: "",
+                value: "",
+                timestamp: 0,
+            }
+            self.events.push(ev)
+            self._seq = self._seq + 1
+        }
+    }
+
+    fn save_checkpoint(self) -> i32 {
+        let id = self.checkpoints.len() as i32
+        let cp = InterpreterCheckpoint {
+            checkpoint_id: id,
+            event_index: self.events.len() as i64,
+            debug_state: "",
+        }
+        self.checkpoints.push(cp)
+        id
+    }
+
+    fn restore_checkpoint(self, id: i32) {
+        // find checkpoint by id and reset event index
+        let mut i = 0
+        while i < self.checkpoints.len() {
+            let cp = self.checkpoints[i]
+            if cp.checkpoint_id == id {
+                // truncate events to checkpoint
+                let target = cp.event_index as i32
+                while self.events.len() > target {
+                    self.events.pop()
+                }
+                return
+            }
+            i = i + 1
+        }
+    }
+
+    fn reverse_step(self) {
+        if self.events.len() > 0 {
+            self.events.pop()
+        }
+    }
+
+    fn reverse_continue(self) {
+        // walk back to previous breakpoint event
+        let mut i = self.events.len() - 1
+        while i > 0 {
+            let ev = self.events[i]
+            match ev.kind {
+                InterpreterReplayEventKind::BreakpointHit => {
+                    while self.events.len() > i {
+                        self.events.pop()
+                    }
+                    return
+                },
+                _ => {},
+            }
+            i = i - 1
+        }
+    }
+
+    fn event_count(self) -> i64 {
+        self.events.len() as i64
+    }
+}
