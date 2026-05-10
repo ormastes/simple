@@ -25,7 +25,7 @@ feature
 ## Phase Checklist
 - [x] 1-dev (Developer Lead) — 2026-05-10
 - [x] 2-research (Analyst) — 2026-05-10
-- [ ] 3-arch (Architect)
+- [x] 3-arch (Architect) — 2026-05-10
 - [ ] 4-spec (QA Lead)
 - [ ] 5-implement (Engineer)
 - [ ] 6-refactor (Tech Lead)
@@ -143,11 +143,12 @@ feature
 - REQ-6 (from AC-7): doc/05_design/ triage — parallel agent (out of scope for this pipeline)
 
 ## Phase
-research-done
+arch-done
 
 ## Log
 - 1-dev: Created state file with 7 acceptance criteria, identified scope as FR-DRIVER-0003 + FR-DRIVER-0001
 - 2-research: Found Rust seed already has @packed struct routing (type_registration.rs); self-hosted lacks it. Planner for FR-DRIVER-0001 fully tested; codegen emission is the gap. 6 requirements mapped, 3 open questions for Architect
+- 3-arch: Designed 8 modules (2 new, 6 modified), 7 decisions, no circular deps. Key decisions: post-parse desugar pass for self-hosted (D-1), backing type derived from total bits (D-2), MIR-level codegen injection for FR-0001 (D-5), explicit ops= binding on @driver attr (D-6). Detect packed by all-fields-have-bits heuristic to avoid flat AST modification (Integration Point 1).
 
 ### 3-arch
 
