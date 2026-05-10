@@ -1,0 +1,114 @@
+# SReplay — Semantic Trace Debug Backend
+#
+# Overlays semantic trace events onto a debug session.
+# Enables object lifecycle queries, ownership tracking, and
+# "who wrote this field?" reverse lookups.
+
+use std.nogc_sync_mut.replay.semantic.trace_events.{SemanticEventKind, SemanticEvent}
+use std.nogc_sync_mut.replay.semantic.trace_reader.{read_semantic_trace}
+use std.nogc_sync_mut.replay.semantic.object_identity.{ObjectId, ObjectRegistry}
+
+# ============================================================================
+# Semantic Debug Backend
+# ============================================================================
+
+class SemanticDebugBackend:
+    trace_path: text
+    events: [SemanticEvent]
+    registry: ObjectRegistry
+    current_idx: i64
+    loaded: bool
+
+impl SemanticDebugBackend:
+    static fn create(trace_path: text) -> SemanticDebugBackend:
+        SemanticDebugBackend(
+            trace_path: trace_path,
+            events: [],
+            registry: ObjectRegistry.create(),
+            current_idx: 0,
+            loaded: false
+        )
+
+    fn load() -> Result<Nil, text>:
+        self.events = read_semantic_trace(self.trace_path)?
+        self.loaded = true
+        self.current_idx = 0
+        Ok(nil)
+
+    fn event_count() -> i64:
+        self.events.len()
+
+    fn current_event() -> Option<SemanticEvent>:
+        if self.current_idx >= 0 and self.current_idx < self.events.len():
+            Some(self.events[self.current_idx])
+        else:
+            None
+
+    fn advance() -> Option<SemanticEvent>:
+        if self.current_idx < self.events.len():
+            val ev = self.events[self.current_idx]
+            self.current_idx = self.current_idx + 1
+            Some(ev)
+        else:
+            None
+
+    fn seek_to_event(idx: i64) -> Result<Nil, text>:
+        if idx < 0 or idx >= self.events.len():
+            return Err("event index {idx} out of range")
+        self.current_idx = idx
+        Ok(nil)
+
+    fn find_object_alloc(obj_id: i64) -> Option<SemanticEvent>:
+        for ev in self.events:
+            if ev.kind == SemanticEventKind.ObjectAlloc and ev.obj_id == obj_id:
+                return Some(ev)
+        None
+
+    fn find_object_drop(obj_id: i64) -> Option<SemanticEvent>:
+        for ev in self.events:
+            if ev.kind == SemanticEventKind.ObjectDrop and ev.obj_id == obj_id:
+                return Some(ev)
+        None
+
+    fn find_object_lifecycle(obj_id: i64) -> [SemanticEvent]:
+        var result: [SemanticEvent] = []
+        for ev in self.events:
+            if ev.obj_id == obj_id:
+                result.push(ev)
+        result
+
+    fn find_last_variable_write(name_hash: i64) -> Option<SemanticEvent>:
+        var last: Option<SemanticEvent> = None
+        for ev in self.events:
+            if ev.kind == SemanticEventKind.VariableWrite and ev.name_hash == name_hash:
+                last = Some(ev)
+        last
+
+    fn find_ownership_transfers(obj_id: i64) -> [SemanticEvent]:
+        var result: [SemanticEvent] = []
+        for ev in self.events:
+            if ev.obj_id == obj_id and ev.kind == SemanticEventKind.OwnershipTransfer:
+                result.push(ev)
+        result
+
+    fn find_borrows(obj_id: i64) -> [SemanticEvent]:
+        var result: [SemanticEvent] = []
+        for ev in self.events:
+            if ev.obj_id == obj_id:
+                if ev.kind == SemanticEventKind.BorrowStart or ev.kind == SemanticEventKind.BorrowEnd:
+                    result.push(ev)
+        result
+
+    fn find_async_task_events(spawn_id: i64) -> [SemanticEvent]:
+        var result: [SemanticEvent] = []
+        for ev in self.events:
+            if ev.spawn_id == spawn_id:
+                result.push(ev)
+        result
+
+    fn find_function_calls(name_hash: i64) -> [SemanticEvent]:
+        var result: [SemanticEvent] = []
+        for ev in self.events:
+            if ev.kind == SemanticEventKind.FunctionEnter and ev.name_hash == name_hash:
+                result.push(ev)
+        result
