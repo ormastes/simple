@@ -1,11 +1,13 @@
 # Bug: GPU Pipeline Missing Arms (GAME-RENDER-002)
 
-**Status:** OPEN -- deferred. Partial resolution 2026-04-25 shipped
-`DrawRectOutlined` + `DrawCircleOutlined` software-pipeline arms. Remaining
-arms require glyph atlas (DrawText) and GPU vertex-buffer construction.
+**Status:** IN PROGRESS — being implemented 2026-05-10. Previously deferred/blocked.
+Partial resolution 2026-04-25 shipped `DrawRectOutlined` + `DrawCircleOutlined`
+software-pipeline arms. Remaining arms require glyph atlas (DrawText) and GPU
+vertex-buffer construction.
 **Date:** 2026-04-25
 **Partial fix:** 2026-04-25 (software-pipeline outlined shapes)
 **Deferred by:** bug-sweep-2026-04-26 phase 2 (research)
+**Resumed:** 2026-05-10
 
 ---
 

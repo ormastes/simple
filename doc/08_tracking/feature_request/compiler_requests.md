@@ -397,7 +397,7 @@ An entry may not move to `Implemented` without a `Related-design-doc` or
 - **Filed-by:** Codex / all-regions research session
 - **Target:** compiler — parser, AST, Tree-sitter outline, HIR metadata
 - **Priority:** P0
-- **Status:** Accepted / partial implementation (Rust parser + HIR metadata, 2026-04-22)
+- **Status:** Accepted / partial implementation (Rust parser + HIR metadata done 2026-04-22; Tree-sitter/LSP surfacing + Simple parser parity still open)
 - **Requested-semantics:**
   Add contextual top-level raw capture for approved domain block names
   (`schema`, `style`, `ui`, `music`, `bim`, `cad`, `city`, `rtl`) without making

@@ -1,11 +1,12 @@
 # Bug: Compile-Time Lint for `#[deterministic]` Guard (GAME-DET-LINT-001)
 
-**Status:** OPEN -- deferred. Needs `#[deterministic]` attribute parsing in
-lint-rule infrastructure. Runtime guard at
-`src/lib/nogc_sync_mut/game2d/time/det_guard.spl` already closes the safety
-gap at runtime. No focused fix possible without new compiler infra.
+**Status:** IN PROGRESS — being implemented 2026-05-10. Previously deferred.
+Needs `#[deterministic]` attribute parsing in lint-rule infrastructure. Runtime
+guard at `src/lib/nogc_sync_mut/game2d/time/det_guard.spl` already closes the
+safety gap at runtime. No focused fix possible without new compiler infra.
 **Date:** 2026-04-25
 **Deferred by:** bug-sweep-2026-04-26 phase 2 (research)
+**Resumed:** 2026-05-10
 
 ---
 
