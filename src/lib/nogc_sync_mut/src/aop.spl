@@ -1,6 +1,7 @@
-# AOP Module - Aspect-Oriented Programming (Stub)
+# AOP Module - Aspect-Oriented Programming
 
 use config.AopConfig
+use std.common.pure.runtime.{time_now_ms}
 
 enum AdviceKind:
     Before
@@ -56,7 +57,21 @@ impl AspectRegistry:
     fn find_aspects(join_point: JoinPoint) -> [Aspect]:
         if not self.enabled:
             return []
-        return []
+        var matched: [Aspect] = []
+        var i = 0
+        while i < self.aspects.len():
+            val aspect = self.aspects[i]
+            i = i + 1
+            if not aspect.enabled:
+                continue
+            val pattern = aspect.pointcut.pattern
+            val effective_pattern = if pattern.is_some(): pattern.unwrap() else: "*"
+            val matches = _match_join_point(aspect.pointcut.kind, effective_pattern, join_point)
+            if matches:
+                matched = matched.push(aspect)
+        # Sort by priority, highest first
+        matched = matched.sort_by(\a, b: b.priority - a.priority)
+        return matched
 
     me enable():
         self.enabled = true
@@ -83,8 +98,154 @@ impl AspectWeaver:
         AspectWeaver(registry: registry)
 
     fn wrap<T>(join_point: JoinPoint, func: fn() -> T) -> Result<T, text>:
+        val aspects = self.registry.find_aspects(join_point)
+        if aspects.len() == 0:
+            val result = func()
+            return Ok(result)
+        val fn_name = _join_point_name(join_point)
+        val start = time_now_ms()
+        val before_ctx = AdviceContext(
+            function_name: fn_name,
+            class_name: nil,
+            module_name: nil,
+            args: [],
+            result: nil,
+            error: nil,
+            start_time: start,
+            end_time: nil
+        )
+        # Execute Before and Around advice
+        var j = 0
+        while j < aspects.len():
+            val aspect = aspects[j]
+            j = j + 1
+            match aspect.advice.kind:
+                case Before:
+                    val res = aspect.advice.handler(before_ctx)
+                    if res.is_err():
+                        return Err(res.unwrap_err())
+                case Around:
+                    # Around handler runs as a pre-hook; proceed callback
+                    # not available because handler signature lacks it.
+                    val res = aspect.advice.handler(before_ctx)
+                    if res.is_err():
+                        return Err(res.unwrap_err())
+                case After:
+                    pass_do_nothing
+                case AfterError:
+                    pass_do_nothing
+        # Call the actual function
         val result = func()
+        val end = time_now_ms()
+        val after_ctx = AdviceContext(
+            function_name: fn_name,
+            class_name: nil,
+            module_name: nil,
+            args: [],
+            result: result,
+            error: nil,
+            start_time: start,
+            end_time: end
+        )
+        # Execute After advice
+        var k = 0
+        while k < aspects.len():
+            val aspect = aspects[k]
+            k = k + 1
+            match aspect.advice.kind:
+                case After:
+                    val res = aspect.advice.handler(after_ctx)
+                    if res.is_err():
+                        return Err(res.unwrap_err())
+                case Before:
+                    pass_do_nothing
+                case Around:
+                    pass_do_nothing
+                case AfterError:
+                    # AfterError unreachable here: Simple has no try/catch,
+                    # so func() cannot throw. Kept for future Result-returning wrappers.
+                    pass_do_nothing
         Ok(result)
+
+# ============================================================================
+# Internal helpers
+# ============================================================================
+
+fn _join_point_name(jp: JoinPoint) -> text:
+    match jp:
+        case FunctionCall(name):
+            return name
+        case MethodCall(class_name, method_name):
+            return class_name + "." + method_name
+        case ModuleLoad(module_name):
+            return module_name
+        case All:
+            return "*"
+
+fn _match_join_point(pointcut_kind: JoinPoint, pattern: text, join_point: JoinPoint) -> bool:
+    """Check whether a pointcut kind + pattern matches a given join point."""
+    match pointcut_kind:
+        case All:
+            # All pointcut matches every join point
+            return _glob_match(pattern, _join_point_name(join_point))
+        case FunctionCall(pc_name):
+            match join_point:
+                case FunctionCall(name):
+                    return _glob_match(pattern, name)
+                case _:
+                    return false
+        case MethodCall(pc_class, pc_method):
+            match join_point:
+                case MethodCall(class_name, method_name):
+                    val full = class_name + "." + method_name
+                    return _glob_match(pattern, full)
+                case _:
+                    return false
+        case ModuleLoad(pc_module):
+            match join_point:
+                case ModuleLoad(module_name):
+                    return _glob_match(pattern, module_name)
+                case _:
+                    return false
+
+fn _glob_match(pattern: text, value: text) -> bool:
+    """Match a glob pattern against a value. Supports '*' as wildcard."""
+    if pattern == "*":
+        return true
+    if pattern == value:
+        return true
+    # Split pattern on '*' and check segments appear in order
+    val parts = pattern.split("*")
+    if parts.len() == 1:
+        # No wildcard, exact match only (already checked above)
+        return false
+    var pos = 0
+    var idx = 0
+    while idx < parts.len():
+        val seg = parts[idx]
+        if seg.len() == 0:
+            # Empty segment from leading/trailing/consecutive '*'
+            idx = idx + 1
+            continue
+        if idx == 0:
+            # First segment must anchor at start
+            if not value.starts_with(seg):
+                return false
+            pos = seg.len()
+        elif idx == parts.len() - 1:
+            # Last segment must anchor at end
+            if not value.ends_with(seg):
+                return false
+            pos = value.len()
+        else:
+            # Middle segment: find next occurrence after pos
+            val remaining = value.slice(pos, value.len())
+            val found = remaining.index_of(seg)
+            if found < 0:
+                return false
+            pos = pos + found + seg.len()
+        idx = idx + 1
+    return true
 
 var global_registry: AspectRegistry? = nil
 var global_weaver: AspectWeaver? = nil

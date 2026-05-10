@@ -85,3 +85,14 @@ These are needed after startup for normal tool calls. They can be ported after s
 - `scripts/check-mcp-native-smoke.shs` now validates MCP JSON-lines and Simple LSP MCP framed `Content-Length` output; package outputs report `mcp_tools_count=144` and `lsp_tools_count=11` with valid schemas.
 - `scripts/check-simple-core-runtime-smoke.shs` now provides a repeatable explicit `simple-core` gate for hello, the generated standalone TUI wrapper, and the real `run_tui("examples/ui/minimal.ui.sdn")` app path, with closure checks for hosted-runtime and unwind markers.
 - Core C runtime now implements the compiled Simple array ABI used by core-lane entry closures (`rt_array_push` returns success, `rt_array_get`/`rt_index_get` return raw runtime values, and `rt_len` recognizes raw arrays). A native `[text]` probe verifies push/len/index on explicit `simple-core`.
+
+## Progress 2026-05-10
+
+- Pure-Simple implementations added to `src/runtime/simple_core/` for the First Port/Gate Order #3 (startup diagnostics) and #4 (file/env helpers for read-only workspace tools):
+  - `core_env.spl`: `rt_env_get` (libc `getenv`), `rt_env_set` (libc `setenv`), `rt_env_cwd` (libc `getcwd`).
+  - `core_fs.spl`: `rt_file_exists` (fopen probe), `rt_file_read_text` (fopen/fseek/ftell/fread), `rt_file_write_text` (fopen "w"), `rt_file_append_text` (fopen "ab"), `rt_file_delete` (libc `remove`), `rt_file_size` (fseek/ftell), `rt_dir_create_all`/`rt_mkdir_p` (walk-and-mkdir).
+  - `core_process.spl` extended: `rt_time_now_unix_micros` (libc `gettimeofday`), `rt_time_now_nanos`/`rt_time_now_micros` (libc `clock_gettime` CLOCK_MONOTONIC).
+- All new symbols remain classified `HostedOnly` in the Rust symbol classifier — no change to `CORE_REQUIRED_RUNTIME_SYMBOLS`. The pure-Simple wrappers provide simple-core archive coverage so these symbols can be resolved from the simple-core tree without requiring `libsimple_native_all.a`.
+- MCP startup_log's full extern set (`rt_env_get`, `rt_env_cwd`, `rt_file_append_text`, `rt_file_exists`, `rt_time_now_unix_micros`, `rt_dir_create_all`) is now covered by pure-Simple implementations.
+- Hot request path file helpers (`rt_file_read_text`, `rt_file_write_text`) are now covered for read-only workspace tools.
+- Remaining hosted-only: `rt_process_run`, `rt_process_spawn_async`, `rt_process_is_running`, `rt_process_kill`, `rt_dir_list` — explicitly tool-only per the inventory classification.

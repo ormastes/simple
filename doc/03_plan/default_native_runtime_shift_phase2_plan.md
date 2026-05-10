@@ -255,6 +255,16 @@ Port the runtime and service dependencies used by `src/app/mcp` and `src/app/sim
 - MCP JSON-lines `tools/list` returns 144 tools with valid schemas; Simple LSP MCP framed `tools/list` returns 11 tools with valid schemas.
 - The pure-Simple `simple-core` archive now supplies the framed stdio and string/array/value ABI needed by the startup and tools/list paths; hosted remains an explicit compatibility lane for broader tool behavior outside this phase.
 
+### Progress 2026-05-10
+
+- Pure-Simple env/fs/time wrappers added to `src/runtime/simple_core/` for the inventory's First Port/Gate Order #3-4 (startup diagnostics and file/env workspace helpers):
+  - `core_env.spl`: `rt_env_get`, `rt_env_set`, `rt_env_cwd` via libc `getenv`/`setenv`/`getcwd`.
+  - `core_fs.spl`: `rt_file_exists`, `rt_file_read_text`, `rt_file_write_text`, `rt_file_append_text`, `rt_file_delete`, `rt_file_size`, `rt_dir_create_all`, `rt_mkdir_p` via libc `fopen`/`fread`/`fwrite`/`fclose`/`remove`/`ftell`/`mkdir`.
+  - `core_process.spl` extended with `rt_time_now_unix_micros` (via `gettimeofday`), `rt_time_now_nanos`, `rt_time_now_micros` (via `clock_gettime` CLOCK_MONOTONIC).
+- These symbols remain classified `HostedOnly` in `src/compiler_rust/common/src/runtime_symbols.rs` — the Rust classifier is deliberately unchanged. The pure-Simple implementations provide simple-core archive coverage for MCP/LSP startup diagnostics and read-only workspace tools without requiring `libsimple_native_all.a`.
+- MCP startup_log's full extern set (`rt_env_get`, `rt_env_cwd`, `rt_file_append_text`, `rt_file_exists`, `rt_time_now_unix_micros`, `rt_dir_create_all`) now has pure-Simple implementations in the simple-core tree.
+- Process execution (`rt_process_run`) and async process/session control remain explicitly hosted-only per the inventory classification.
+
 ## Workstream 3: Package MCP/LSP Binaries On Core Lanes
 
 ### Objective
