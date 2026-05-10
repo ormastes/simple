@@ -231,11 +231,15 @@ impl RiscvFpgaLane:
 
     fn boot_products_id(board_name: text) -> text:
         """Product ID for manifest boot products."""
-        "{board_name}_{self.xlen.to_text()}_linux"
+        val xl = self.xlen.to_text()
+        "{board_name}_{xl}_linux"
 
     fn summary_token() -> text:
         """Short summary token for readiness reports."""
-        "{self.xlen.to_text()}:{self.status.to_text()}:{self.qemu.to_id()}"
+        val xl = self.xlen.to_text()
+        val st = self.status.to_text()
+        val qi = self.qemu.to_id()
+        "{xl}:{st}:{qi}"
 
 # ============================================================================
 # FPGA Linux Manifest
@@ -263,32 +267,39 @@ impl RiscvFpgaLinuxManifest:
         Returns a Vivado TCL plan snippet referencing the board's
         constraint file and target part.
         """
+        val bname = self.board.name
+        val bpart = self.board.part
+        val bconst = self.board.constraint_path
         var lines: [text] = []
-        lines = lines.push("# Vivado TCL Plan for {self.board.name}")
-        lines = lines.push("set_property PART {self.board.part} [current_project]")
-        if self.board.constraint_path != "":
-            lines = lines.push("add_files -fileset constrs_1 {self.board.constraint_path}")
+        lines = lines.push("# Vivado TCL Plan for {bname}")
+        lines = lines.push("set_property PART {bpart} [current_project]")
+        if bconst != "":
+            lines = lines.push("add_files -fileset constrs_1 {bconst}")
         for lane in self.lanes:
             val rtl_file = lane.xlen.core_file_name()
-            lines = lines.push("add_files -fileset sources_1 {lane.rtl_dir_name()}/rtl/{rtl_file}")
+            val rdir = lane.rtl_dir_name()
+            lines = lines.push("add_files -fileset sources_1 {rdir}/rtl/{rtl_file}")
         return lines.join("\n")
 
     fn board_linux_boot_products_manifest_text(output_dir: text) -> text:
         """
         Generates the boot products manifest in SDN format for all lanes.
         """
+        val bname = self.board.name
         var lines: [text] = []
         lines = lines.push("# Board Linux Boot Products Manifest")
-        lines = lines.push("# Board: {self.board.name}")
+        lines = lines.push("# Board: {bname}")
         lines = lines.push("")
         for lane in self.lanes:
-            val product_id = lane.boot_products_id(self.board.name)
+            val product_id = lane.boot_products_id(bname)
+            val xl = lane.xlen.to_text()
+            val isa = lane.xlen.isa_string()
             lines = lines.push("[[product]]")
             lines = lines.push("product_id = \"{product_id}\"")
-            lines = lines.push("xlen = \"{lane.xlen.to_text()}\"")
-            lines = lines.push("isa = \"{lane.xlen.isa_string()}\"")
-            lines = lines.push("board = \"{self.board.name}\"")
-            lines = lines.push("boot_script = \"scripts/{self.board.name}_generated_linux_boot.shs\"")
+            lines = lines.push("xlen = \"{xl}\"")
+            lines = lines.push("isa = \"{isa}\"")
+            lines = lines.push("board = \"{bname}\"")
+            lines = lines.push("boot_script = \"scripts/{bname}_generated_linux_boot.shs\"")
             lines = lines.push("validation_kind = \"linux-uart-markers\"")
             lines = lines.push("expected_markers = \"OpenSBI|Linux version|OF: fdt|Freeing unused kernel memory|init started\"")
             lines = lines.push("")
@@ -351,11 +362,14 @@ fn write_manifest_file(output_dir: text, board_name: text, lanes: [RiscvFpgaLane
         lines = lines.push("board = \"{board_name}\"")
     lines = lines.push("")
     for lane in lanes:
-        lines = lines.push("[[lane]]")
-        lines = lines.push("proof_lane = \"{lane.proof_lane().to_text()}\"")
-        lines = lines.push("xlen = \"{lane.xlen.to_text()}\"")
+        val pl = lane.proof_lane().to_text()
+        val xl = lane.xlen.to_text()
         val rtl_file = lane.xlen.core_file_name()
-        lines = lines.push("authoritative_file = \"{output_dir}/{lane.rtl_dir_name()}/rtl/{rtl_file}\"")
+        val rdir = lane.rtl_dir_name()
+        lines = lines.push("[[lane]]")
+        lines = lines.push("proof_lane = \"{pl}\"")
+        lines = lines.push("xlen = \"{xl}\"")
+        lines = lines.push("authoritative_file = \"{output_dir}/{rdir}/rtl/{rtl_file}\"")
         lines = lines.push("")
     rt_fs_write_text(path, lines.join("\n"))
     return path
@@ -392,11 +406,14 @@ fn write_bundle_readme(output_dir: text) -> text:
 fn write_stub_rtl(output_dir: text, lanes: [RiscvFpgaLane]):
     """Creates stub RTL directories and placeholder core files."""
     for lane in lanes:
-        val rtl_dir = "{output_dir}/{lane.rtl_dir_name()}/rtl"
+        val rdir = lane.rtl_dir_name()
+        val rtl_dir = "{output_dir}/{rdir}/rtl"
         rt_fs_mkdir_p(rtl_dir)
-        val core_file = "{rtl_dir}/{lane.xlen.core_file_name()}"
+        val cfname = lane.xlen.core_file_name()
+        val core_file = "{rtl_dir}/{cfname}"
         if not rt_fs_exists(core_file):
-            var content = "# Stub RTL core for {lane.xlen.to_text()} — generated by Simple compiler\n"
+            val xl = lane.xlen.to_text()
+            var content = "# Stub RTL core for {xl} — generated by Simple compiler\n"
             content = content + "# Replace with actual synthesizable RTL when ready\n"
             rt_fs_write_text(core_file, content)
 

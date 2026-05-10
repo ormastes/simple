@@ -52,12 +52,17 @@ impl SynthesisProject:
 
     fn tcl_create_project() -> text:
         """Generates TCL commands to create the Vivado project."""
+        val bname = self.board.name
+        val bpart = self.board.part
+        val pname = self.project_name
+        val odir = self.output_dir
+        val top = self.top_module
         var lines: [text] = []
         lines = lines.push("# Auto-generated Vivado TCL script")
-        lines = lines.push("# Board: {self.board.name}")
-        lines = lines.push("# Part: {self.board.part}")
+        lines = lines.push("# Board: {bname}")
+        lines = lines.push("# Part: {bpart}")
         lines = lines.push("")
-        lines = lines.push("create_project {self.project_name} {self.output_dir}/{self.project_name} -part {self.board.part}")
+        lines = lines.push("create_project {pname} {odir}/{pname} -part {bpart}")
         lines = lines.push("")
 
         # Add RTL sources
@@ -75,12 +80,15 @@ impl SynthesisProject:
             lines = lines.push("")
 
         # Set top module
-        lines = lines.push("set_property top {self.top_module} [current_fileset]")
+        lines = lines.push("set_property top {top} [current_fileset]")
         lines = lines.push("")
         return lines.join("\n")
 
     fn tcl_run_synthesis() -> text:
         """Generates TCL commands to run synthesis + implementation."""
+        val odir = self.output_dir
+        val pname = self.project_name
+        val top = self.top_module
         var lines: [text] = []
         lines = lines.push("# Synthesis and Implementation")
         lines = lines.push("launch_runs synth_1")
@@ -90,8 +98,8 @@ impl SynthesisProject:
         lines = lines.push("wait_on_run impl_1")
         lines = lines.push("")
         lines = lines.push("# Export bitstream")
-        val bitstream_path = "{self.output_dir}/{self.project_name}.bit"
-        lines = lines.push("file copy -force {self.output_dir}/{self.project_name}/{self.project_name}.runs/impl_1/{self.top_module}.bit {bitstream_path}")
+        val bitstream_path = "{odir}/{pname}.bit"
+        lines = lines.push("file copy -force {odir}/{pname}/{pname}.runs/impl_1/{top}.bit {bitstream_path}")
         lines = lines.push("")
         return lines.join("\n")
 
@@ -156,7 +164,10 @@ impl SocTopConfig:
 
     fn vhdl_architecture_stub() -> text:
         """Generates a stub architecture body for the SoC wrapper."""
-        val data_width = if self.xlen == Xlen.Rv32: 32 else: 64
+        var data_width = 64
+        match self.xlen:
+            case Rv32: data_width = 32
+            case Rv64: data_width = 64
         var lines: [text] = []
         lines = lines.push("")
         lines = lines.push("architecture rtl of simple_soc_top is")
@@ -171,11 +182,13 @@ impl SocTopConfig:
         lines = lines.push("  rst_i <= not sys_rst_n;")
         lines = lines.push("  led   <= led_reg;")
         lines = lines.push("")
+        val mem = self.memory_kb
+        val baud = self.uart_baud
         lines = lines.push("  -- CPU core instantiation placeholder")
         lines = lines.push("  -- Data width: {data_width} bits")
-        lines = lines.push("  -- Memory: {self.memory_kb} KB")
+        lines = lines.push("  -- Memory: {mem} KB")
         if self.has_uart:
-            lines = lines.push("  -- UART: {self.uart_baud} baud")
+            lines = lines.push("  -- UART: {baud} baud")
         lines = lines.push("")
         lines = lines.push("end architecture rtl;")
         return lines.join("\n")
@@ -204,15 +217,17 @@ pub fn create_synthesis_flow(board_id: text, output_dir: text) -> Result<Synthes
     val xdc_result = generate_xdc_for_board(board_id)
     if xdc_result.is_ok():
         val xdc = xdc_result.unwrap()
-        val xdc_path = "{output_dir}/constraints/{board_id}.xdc"
-        rt_fs_mkdir_p("{output_dir}/constraints")
+        val cdir = "{output_dir}/constraints"
+        val xdc_path = "{cdir}/{board_id}.xdc"
+        rt_fs_mkdir_p(cdir)
         xdc.write_to(xdc_path)
         project.add_constraint_file(xdc_path)
 
     # Generate top-level wrapper for RV32 (primary target for Artix-7)
     val soc_config = SocTopConfig.default_for(board, Xlen.Rv32)
-    val top_path = "{output_dir}/rtl/simple_soc_top.vhd"
-    rt_fs_mkdir_p("{output_dir}/rtl")
+    val rtl_dir = "{output_dir}/rtl"
+    val top_path = "{rtl_dir}/simple_soc_top.vhd"
+    rt_fs_mkdir_p(rtl_dir)
     rt_fs_write_text(top_path, soc_config.full_vhdl())
     project.add_rtl_source(top_path)
 

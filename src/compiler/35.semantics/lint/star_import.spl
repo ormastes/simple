@@ -1,14 +1,16 @@
-# Star Import Lint
+# Star Wildcard Lint
 #
-# Detects wildcard imports (`use module.*`) that import all symbols.
-# Wildcard imports make it hard to track where symbols come from
-# and can cause unexpected name collisions.
+# Detects wildcard imports (`use module.*`) and exports (`export module.*`).
+# Wildcards make it hard to track where symbols come from and can cause
+# unexpected name collisions.
 #
-# W0406: Wildcard import used — prefer explicit named imports        WARNING
+# W0406: Wildcard import — prefer explicit named imports               WARNING
+# W0407: Wildcard export — prefer explicit named exports               WARNING
 #
 # Does NOT flag:
-# - Named imports (use module.{a, b, c})
-# - Re-export modules (__init__.spl, mod.spl) when using file-aware check
+# - Named imports/exports (use module.{a, b, c})
+# - Facade modules (__init__.spl, mod.spl) when using file-aware check
+# - Pure facade files (only wildcard use+export declarations)
 #
 # Works with the arena-based core AST (integer-tagged nodes).
 
@@ -18,29 +20,31 @@ use compiler.core.ast.{
 }
 
 # ============================================================================
-# Warning Struct
+# Shared
 # ============================================================================
 
-struct StarImportWarning:
+struct StarWildcardWarning:
     code: text
     severity: text
     message: text
     module_path: text
 
     fn fmt() -> text:
-        "[{self.code}] {self.severity}: {self.message} — 'use {self.module_path}.*'"
+        "[{self.code}] {self.severity}: {self.message} — '{self.module_path}.*'"
+
+fn _is_facade_file(file_path: text) -> bool:
+    if file_path.ends_with("__init__.spl"):
+        return true
+    if file_path.ends_with("mod.spl"):
+        return true
+    false
 
 # ============================================================================
-# Main Entry Points
+# Star Import (W0406)
 # ============================================================================
 
-fn check_star_import(decl_indices: [i64]) -> [StarImportWarning]:
-    """Run star-import lint on module declarations.
-
-    For each use declaration, checks whether it is a wildcard import
-    (empty import list = `use module.*`). Emits W0406 for each one.
-    """
-    var warnings: [StarImportWarning] = []
+fn check_star_import(decl_indices: [i64]) -> [StarWildcardWarning]:
+    var warnings: [StarWildcardWarning] = []
     var all_decl_use = decl_indices.len() > 0
     var all_use_star = decl_indices.len() > 0
 
@@ -53,24 +57,18 @@ fn check_star_import(decl_indices: [i64]) -> [StarImportWarning]:
             all_use_star = false
         endif
 
-    # Pure facade shims that contain only wildcard re-exports do not need
-    # a local suppression marker; their structure already makes the intent clear.
     if all_decl_use and all_use_star:
         return []
 
     for idx in decl_indices:
         val tag = decl_tag[idx]
-
-        # Only check use declarations
         if tag != DECL_USE:
             continue
 
         val imported = decl_imports[idx]
-
-        # Wildcard imports have an empty import list
         if imported.len() == 0:
             val mod_path = decl_name[idx]
-            warnings.push(StarImportWarning(
+            warnings.push(StarWildcardWarning(
                 code: "W0406",
                 severity: "WARNING",
                 message: "wildcard import — prefer explicit named imports",
@@ -79,33 +77,17 @@ fn check_star_import(decl_indices: [i64]) -> [StarImportWarning]:
 
     warnings
 
-fn check_star_import_file(decl_indices: [i64], file_path: text) -> [StarImportWarning]:
-    """Run star-import lint with file-based filtering.
-
-    Skips the check entirely for __init__.spl and mod.spl files,
-    which are re-export facade modules where wildcard imports are expected.
-    """
-    if file_path.ends_with("__init__.spl"):
-        return []
-    if file_path.ends_with("mod.spl"):
+fn check_star_import_file(decl_indices: [i64], file_path: text) -> [StarWildcardWarning]:
+    if _is_facade_file(file_path):
         return []
     check_star_import(decl_indices)
 
 # ============================================================================
-# Star Export Lint (W0407)
+# Star Export (W0407)
 # ============================================================================
 
-struct StarExportWarning:
-    code: text
-    severity: text
-    message: text
-    module_path: text
-
-    fn fmt() -> text:
-        "[{self.code}] {self.severity}: {self.message} — 'export {self.module_path}.*'"
-
-fn check_star_export(decl_indices: [i64]) -> [StarExportWarning]:
-    var warnings: [StarExportWarning] = []
+fn check_star_export(decl_indices: [i64]) -> [StarWildcardWarning]:
+    var warnings: [StarWildcardWarning] = []
     var all_facade = decl_indices.len() > 0
     var has_any_export = false
 
@@ -136,7 +118,7 @@ fn check_star_export(decl_indices: [i64]) -> [StarExportWarning]:
         for n in names:
             if n.ends_with(".*"):
                 val mod_path = n.slice(0, n.len() - 2)
-                warnings.push(StarExportWarning(
+                warnings.push(StarWildcardWarning(
                     code: "W0407",
                     severity: "WARNING",
                     message: "wildcard export — prefer explicit named exports",
@@ -145,13 +127,14 @@ fn check_star_export(decl_indices: [i64]) -> [StarExportWarning]:
 
     warnings
 
-fn check_star_export_file(decl_indices: [i64], file_path: text) -> [StarExportWarning]:
-    if file_path.ends_with("__init__.spl"):
-        return []
-    if file_path.ends_with("mod.spl"):
+fn check_star_export_file(decl_indices: [i64], file_path: text) -> [StarWildcardWarning]:
+    if _is_facade_file(file_path):
         return []
     check_star_export(decl_indices)
 
 # ============================================================================
-# Exports
+# Backwards-compatible type aliases
 # ============================================================================
+
+val StarImportWarning = StarWildcardWarning
+val StarExportWarning = StarWildcardWarning

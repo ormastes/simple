@@ -1,26 +1,38 @@
-# Lint: Export Star Warning & Critical File Guard
+# Lint: Star Wildcard Warnings & Critical File Guard
 
-## W0407: Wildcard Export Warning
+## Star Wildcard Lint (`star_import.spl`)
 
-Detects `export module.*` in non-facade files. Wildcard re-exports obscure symbol provenance.
+Unified module detecting both wildcard imports and exports using a single
+`StarWildcardWarning` struct and shared `_is_facade_file()` helper.
+
+| Code | Pattern | Message |
+|------|---------|---------|
+| W0406 | `use module.*` | wildcard import — prefer explicit named imports |
+| W0407 | `export module.*` | wildcard export — prefer explicit named exports |
 
 ### Behavior
-- Fires on any `export X.*` in regular `.spl` files
-- **Exempt**: `__init__.spl` and `mod.spl` (facade modules)
-- **Exempt**: Files containing ONLY wildcard use+export declarations (pure facades)
+- Fires on any `use X.*` or `export X.*` in regular `.spl` files
+- **Exempt**: `__init__.spl` and `mod.spl` (facade modules via `_is_facade_file()`)
+- **Exempt**: Pure facade files (only wildcard use+export declarations)
 
 ### Fix
-Replace `export some_module.*` with explicit named exports:
+Replace wildcards with explicit named symbols:
 ```
-# Before (triggers W0407)
+# Before (triggers W0406/W0407)
+use some_module.*
 export some_module.*
 
 # After
+use some_module.{MyClass, my_function}
 export MyClass, my_function, CONSTANT
 ```
 
-### Configuration
-The warning has no suppression mechanism yet. Use `__init__.spl` or `mod.spl` naming for legitimate re-export facades.
+### Architecture
+- `StarWildcardWarning` — single struct for both W0406 and W0407
+- `_is_facade_file(path)` — shared helper (deduplicates __init__/mod check)
+- `_emit_wildcard_warnings(warnings, lines, file, format, keyword)` — shared emit in query_lint
+- `_find_decl_line_in_source(lines, keyword, path)` — generic line finder
+- Backwards-compatible aliases: `StarImportWarning = StarWildcardWarning`, `StarExportWarning = StarWildcardWarning`
 
 ---
 

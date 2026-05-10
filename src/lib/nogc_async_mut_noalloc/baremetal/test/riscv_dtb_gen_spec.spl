@@ -1,0 +1,170 @@
+# ============================================================================
+# Spec: RISC-V DTB Generation — FDT Builder, Big-Endian Helpers, Templates
+# ============================================================================
+
+use std.nogc_async_mut_noalloc.baremetal.riscv.dtb_gen.{
+    FDT_MAGIC, FDT_VERSION, FDT_LAST_COMP_VERSION,
+    FDT_BEGIN_NODE, FDT_END_NODE, FDT_PROP, FDT_NOP, FDT_END,
+    FDT_HEADER_SIZE,
+    write_be32, write_be64, read_be32,
+    FdtStrings, FdtBuilder,
+    build_riscv_virt_dtb, dtb_verify_magic, dtb_total_size
+}
+
+describe "FDT Constants":
+    it "has correct magic number":
+        expect FDT_MAGIC == 0xD00DFEED
+
+    it "has correct version":
+        expect FDT_VERSION == 17
+        expect FDT_LAST_COMP_VERSION == 16
+
+    it "has correct token values":
+        expect FDT_BEGIN_NODE == 1
+        expect FDT_END_NODE == 2
+        expect FDT_PROP == 3
+        expect FDT_NOP == 4
+        expect FDT_END == 9
+
+    it "has correct header size":
+        expect FDT_HEADER_SIZE == 40
+
+describe "Big-Endian Helpers":
+    it "writes and reads BE32":
+        var buf: [u8] = [0, 0, 0, 0, 0, 0, 0, 0]
+        write_be32(buf, 0, 0xDEADBEEF)
+        expect buf[0] == 0xDE
+        expect buf[1] == 0xAD
+        expect buf[2] == 0xBE
+        expect buf[3] == 0xEF
+        expect read_be32(buf, 0) == 0xDEADBEEF
+
+    it "writes BE32 at offset":
+        var buf: [u8] = [0, 0, 0, 0, 0, 0, 0, 0]
+        write_be32(buf, 4, 0x12345678)
+        expect buf[4] == 0x12
+        expect buf[5] == 0x34
+        expect buf[6] == 0x56
+        expect buf[7] == 0x78
+        expect read_be32(buf, 4) == 0x12345678
+
+    it "writes BE64":
+        var buf: [u8] = [0, 0, 0, 0, 0, 0, 0, 0]
+        write_be64(buf, 0, 0x0000000080000000)
+        expect read_be32(buf, 0) == 0x00000000
+        expect read_be32(buf, 4) == 0x80000000
+
+    it "returns new offset after write":
+        var buf: [u8] = [0, 0, 0, 0, 0, 0, 0, 0]
+        val off = write_be32(buf, 0, 0xFF)
+        expect off == 4
+
+describe "FdtStrings":
+    it "starts empty":
+        val s = FdtStrings.new()
+        expect s.size() == 0
+
+    it "adds strings with null terminators":
+        var s = FdtStrings.new()
+        val off1 = s.add("compatible")
+        expect off1 == 0
+        # "compatible" = 10 chars + 1 null = 11 bytes
+        expect s.size() == 11
+
+    it "returns increasing offsets":
+        var s = FdtStrings.new()
+        val off1 = s.add("abc")
+        val off2 = s.add("def")
+        expect off1 == 0
+        expect off2 == 4   # "abc\0" = 4 bytes
+
+describe "FdtBuilder":
+    it "creates a minimal valid DTB":
+        var b = FdtBuilder.new()
+        b = b.begin_node("")       # root
+        b = b.end_node()
+        val blob = b.finish()
+
+        # Verify magic
+        expect dtb_verify_magic(blob) == true
+
+        # Verify totalsize matches blob length
+        val total = dtb_total_size(blob)
+        expect total == blob.len()
+
+    it "produces correct FDT header magic":
+        var b = FdtBuilder.new()
+        b = b.begin_node("")
+        b = b.end_node()
+        val blob = b.finish()
+        expect blob[0] == 0xD0
+        expect blob[1] == 0x0D
+        expect blob[2] == 0xFE
+        expect blob[3] == 0xED
+
+    it "includes string properties":
+        var b = FdtBuilder.new()
+        b = b.begin_node("")
+        b = b.prop_string("compatible", "test")
+        b = b.end_node()
+        val blob = b.finish()
+        expect dtb_verify_magic(blob) == true
+        expect blob.len() > FDT_HEADER_SIZE
+
+    it "includes u32 properties":
+        var b = FdtBuilder.new()
+        b = b.begin_node("")
+        b = b.prop_u32("#address-cells", 2)
+        b = b.end_node()
+        val blob = b.finish()
+        expect dtb_verify_magic(blob) == true
+
+    it "handles nested nodes":
+        var b = FdtBuilder.new()
+        b = b.begin_node("")
+        b = b.begin_node("cpus")
+        b = b.begin_node("cpu@0")
+        b = b.prop_string("device_type", "cpu")
+        b = b.end_node()
+        b = b.end_node()
+        b = b.end_node()
+        val blob = b.finish()
+        expect dtb_verify_magic(blob) == true
+
+    it "handles empty properties":
+        var b = FdtBuilder.new()
+        b = b.begin_node("")
+        b = b.prop_empty("interrupt-controller")
+        b = b.end_node()
+        val blob = b.finish()
+        expect dtb_verify_magic(blob) == true
+
+describe "RISC-V Virt DTB Template":
+    it "builds valid DTB for single CPU":
+        val blob = build_riscv_virt_dtb(1, 0x80000000, 128 * 1024 * 1024)
+        expect dtb_verify_magic(blob) == true
+        expect dtb_total_size(blob) == blob.len()
+        expect blob.len() > FDT_HEADER_SIZE
+
+    it "builds valid DTB for 4 CPUs":
+        val blob = build_riscv_virt_dtb(4, 0x80000000, 256 * 1024 * 1024)
+        expect dtb_verify_magic(blob) == true
+        expect dtb_total_size(blob) == blob.len()
+
+    it "multi-cpu blob is larger than single-cpu":
+        val blob1 = build_riscv_virt_dtb(1, 0x80000000, 128 * 1024 * 1024)
+        val blob4 = build_riscv_virt_dtb(4, 0x80000000, 128 * 1024 * 1024)
+        expect blob4.len() > blob1.len()
+
+describe "DTB Verification":
+    it "rejects empty blob":
+        expect dtb_verify_magic([]) == false
+
+    it "rejects short blob":
+        expect dtb_verify_magic([0xD0, 0x0D]) == false
+
+    it "rejects wrong magic":
+        expect dtb_verify_magic([0x00, 0x00, 0x00, 0x00]) == false
+
+    it "total size returns zero for short blob":
+        expect dtb_total_size([0xD0]) == 0

@@ -15,7 +15,7 @@ use compiler.semantics.lint.argument_count.{check_argument_count}
 use compiler.semantics.lint.collection_patterns.{check_collection_patterns}
 use compiler.semantics.lint.duplicate_typed_args.{check_duplicate_typed_args}
 use compiler.semantics.lint.stub_impl.{check_stub_impl}
-use compiler.semantics.lint.star_import.{check_star_import_file, check_star_export_file}
+use compiler.semantics.lint.star_import.{StarWildcardWarning, check_star_import_file, check_star_export_file}
 use compiler.semantics.lint.critical_file_guard.{check_all_critical_files}
 use compiler.semantics.lint.wide_public.{check_wide_public_file}
 
@@ -312,28 +312,35 @@ fn _find_fn_line_in_source(lines: [text], fn_name: text) -> i64:
         li = li + 1
     1
 
-fn _find_use_line_in_source(lines: [text], module_path: text) -> i64:
-    """Find the 1-based line number of a use/import statement by module path.
-    Returns 1 if not found.
-    """
+fn _emit_wildcard_warnings(warnings: [StarWildcardWarning], lines: [text], file: text, format: text, keyword: text) -> i64:
+    var count = 0
+    for w in warnings:
+        val line_num = _find_decl_line_in_source(lines, keyword, w.module_path)
+        if format == "json":
+            val msg = _escape_json(w.message)
+            _diag_emit_or_collect("{\"severity\":2,\"code\":\"{w.code}\",\"message\":\"{msg}\",\"line\":{line_num},\"col\":1,\"end_line\":{line_num},\"end_col\":1,\"tags\":[],\"source\":\"simple-lint\"}")
+        else:
+            print "{file}:{line_num}: warning[{w.code}]: {w.message}"
+        count = count + 1
+    count
+
+fn _find_decl_line_in_source(lines: [text], keyword: text, module_path: text) -> i64:
     var li = 0
     while li < lines.len():
         val trimmed = lines[li].trim()
-        if trimmed.starts_with("use ") and trimmed.contains(module_path):
-            return li + 1
-        if trimmed.starts_with("import ") and trimmed.contains(module_path):
+        if trimmed.starts_with(keyword) and trimmed.contains(module_path):
             return li + 1
         li = li + 1
     1
 
+fn _find_use_line_in_source(lines: [text], module_path: text) -> i64:
+    val line = _find_decl_line_in_source(lines, "use ", module_path)
+    if line > 1:
+        return line
+    _find_decl_line_in_source(lines, "import ", module_path)
+
 fn _find_export_line_in_source(lines: [text], module_path: text) -> i64:
-    var li = 0
-    while li < lines.len():
-        val trimmed = lines[li].trim()
-        if trimmed.starts_with("export ") and trimmed.contains(module_path):
-            return li + 1
-        li = li + 1
-    1
+    _find_decl_line_in_source(lines, "export ", module_path)
 
 fn _severity_text_to_json(severity: text) -> i64:
     """Convert severity string to LSP severity number.
@@ -422,27 +429,11 @@ fn _run_ast_lint_passes(source: text, file: text, format: text) -> i64:
             print "{file}:{line_num}: {w.severity}[{w.code}]: {w.message}"
         count = count + 1
 
-    # --- C5a: Star import warnings (W0406) ---
+    # --- C5a/C5c: Star wildcard warnings (W0406 import, W0407 export) ---
     val star_warnings = check_star_import_file(decl_indices, file)
-    for w in star_warnings:
-        val line_num = _find_use_line_in_source(lines, w.module_path)
-        if format == "json":
-            val msg = _escape_json(w.message)
-            _diag_emit_or_collect("{\"severity\":2,\"code\":\"{w.code}\",\"message\":\"{msg}\",\"line\":{line_num},\"col\":1,\"end_line\":{line_num},\"end_col\":1,\"tags\":[],\"source\":\"simple-lint\"}")
-        else:
-            print "{file}:{line_num}: warning[{w.code}]: {w.message}"
-        count = count + 1
-
-    # --- C5c: Star export warnings (W0407) ---
+    count = count + _emit_wildcard_warnings(star_warnings, lines, file, format, "use ")
     val star_export_warnings = check_star_export_file(decl_indices, file)
-    for w in star_export_warnings:
-        val line_num = _find_export_line_in_source(lines, w.module_path)
-        if format == "json":
-            val msg = _escape_json(w.message)
-            _diag_emit_or_collect("{\"severity\":2,\"code\":\"{w.code}\",\"message\":\"{msg}\",\"line\":{line_num},\"col\":1,\"end_line\":{line_num},\"end_col\":1,\"tags\":[],\"source\":\"simple-lint\"}")
-        else:
-            print "{file}:{line_num}: warning[{w.code}]: {w.message}"
-        count = count + 1
+    count = count + _emit_wildcard_warnings(star_export_warnings, lines, file, format, "export ")
 
     # --- C5b: Wide public API warnings (W0404) ---
     val wide_warnings = check_wide_public_file(decl_indices, file)

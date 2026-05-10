@@ -1,6 +1,6 @@
 # Pure Simple VHDL Source-of-Truth Migration
 
-**Status:** Partial implementation
+**Status:** Complete (all workers done)
 **Owner model:** parallel implementation workers with tests/docs coordination
 **Acceptance specs:** `test/system/compiler/pure_simple_vhdl_source_of_truth_spec.spl`
 
@@ -78,15 +78,15 @@ Acceptance:
 - `pure Simple VHDL backend lowers named clock domains and reset policies from structured metadata`
 - `pure Simple VHDL backend rejects implicit clock-domain crossing reads`
 
-### Worker 5: GHDL and Artifact Discipline
+### Worker 5: GHDL and Artifact Discipline (DONE)
 
 Owns generated-file acceptance and diagnostics.
 
 - Run GHDL analyze/elaborate for pure Simple full_add and caller/callee fixtures. **Runnable coverage exists.**
-- Extend pure Simple GHDL verification to synth where supported.
+- Extend pure Simple GHDL verification to synth where supported. **Runnable coverage exists.**
 - Ensure failed VHDL lowering does not leave stale or partial artifacts.
   **Runnable coverage exists.**
-- Keep outputs byte-stable for repeated compilation.
+- Keep outputs byte-stable for repeated compilation. **Runnable coverage exists.**
 
 Acceptance:
 - `pure Simple VHDL backend generated multi-entity design passes GHDL analyze elaborate and synth`
@@ -94,7 +94,7 @@ Acceptance:
 - `generated pure Simple add2 caller callee VHDL passes GHDL analyze elaborate and synth`
 - `pure Simple diagnostics prevent writing stale or partial VHDL files`
 
-### Worker 6: Specs and Migration Docs
+### Worker 6: Specs and Migration Docs (DONE)
 
 Owns docs/tests only.
 
@@ -116,7 +116,7 @@ Acceptance:
 - `pure Simple VHDL backend lowers selected pure combinational helpers as explicit hardware entities`
 - `pure Simple VHDL backend rejects broad HLS helper inference outside explicit hardware helpers`
 
-### Worker 8 Wave 2: Source-Facade Broad-HLS Deferral Diagnostics
+### Worker 8 Wave 2: Source-Facade Broad-HLS Deferral Diagnostics (DONE)
 
 Owns the narrow compatibility guardrail for source-facade behavior while broad
 Python-HDL/HLS ownership remains deferred from pure Simple lowering.
