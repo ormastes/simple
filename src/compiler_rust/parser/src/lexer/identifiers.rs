@@ -139,6 +139,17 @@ impl<'a> super::Lexer<'a> {
             "struct" => TokenKind::Struct,
             "class" => TokenKind::Class,
             "enum" => TokenKind::Enum,
+            // Domain-specific block keywords (FR-COMPILER-005).
+            // try_scan_custom_block fires before this match, so these arms
+            // are only reached when the word is NOT immediately followed by `{`.
+            "schema" => TokenKind::Schema,
+            "style" => TokenKind::Style,
+            "ui" => TokenKind::Ui,
+            "music" => TokenKind::Music,
+            "bim" => TokenKind::Bim,
+            "city" => TokenKind::City,
+            "cad" => TokenKind::Cad,
+            "rtl" => TokenKind::Rtl,
             "union" => TokenKind::Union,
             "trait" => TokenKind::Trait,
             "impl" => TokenKind::Impl,

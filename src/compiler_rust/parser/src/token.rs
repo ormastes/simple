@@ -242,6 +242,19 @@ pub enum TokenKind {
     Literal,       // literal (for literal fn definitions)
     Alias,         // alias (for type/class aliasing: alias NewName = OldName)
     Label(String), // 'label (tick-prefixed identifier for labeled break/continue)
+
+    // Domain-specific block keywords (FR-COMPILER-005)
+    // try_scan_custom_block fires before keyword matching, so kind{payload} forms
+    // are already consumed as CustomBlock before these arms are reached.
+    Schema, // schema Name: field: Type ...
+    Style,  // style Name: property declarations
+    Ui,     // ui Name: component declarations
+    Music,  // music Name: note/beat declarations
+    Bim,    // bim Name: building information model
+    City,   // city Name: urban model declarations
+    Cad,    // cad Name: computer-aided design model
+    Rtl,    // rtl Name: register-transfer level model
+
     // Note: "lean" is NOT a keyword - it's parsed contextually as lean{...} custom block
     // or "lean import" statement to avoid breaking existing module paths
     // Note: 'allow' is parsed as identifier (not a keyword) to avoid conflict with
@@ -492,6 +505,14 @@ impl TokenKind {
             TokenKind::Newtype => Some("newtype"),
             TokenKind::Extend => Some("extend"),
             TokenKind::Comptime => Some("comptime"),
+            TokenKind::Schema => Some("schema"),
+            TokenKind::Style => Some("style"),
+            TokenKind::Ui => Some("ui"),
+            TokenKind::Music => Some("music"),
+            TokenKind::Bim => Some("bim"),
+            TokenKind::City => Some("city"),
+            TokenKind::Cad => Some("cad"),
+            TokenKind::Rtl => Some("rtl"),
             TokenKind::Struct => Some("struct"),
             TokenKind::Enum => Some("enum"),
             TokenKind::Class => Some("class"),

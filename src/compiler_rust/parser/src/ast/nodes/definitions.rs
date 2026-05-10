@@ -885,6 +885,49 @@ pub struct MacroInvocation {
     pub args: Vec<MacroArg>,
 }
 
+// ---------------------------------------------------------------------------
+// Domain-specific block declarations (FR-COMPILER-005)
+// ---------------------------------------------------------------------------
+
+/// Which domain keyword introduced this block.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DomainKind {
+    Schema,
+    Style,
+    Ui,
+    Music,
+    Bim,
+    City,
+    Cad,
+    Rtl,
+}
+
+/// A single field inside a domain block: `name: Type`
+#[derive(Debug, Clone, PartialEq)]
+pub struct DomainField {
+    pub span: Span,
+    pub name: String,
+    pub ty: Type,
+}
+
+/// A domain-specific block declaration.
+///
+/// ```simple
+/// schema MyModel:
+///     id: Uuid
+///     name: text
+/// ```
+#[derive(Debug, Clone, PartialEq)]
+pub struct DomainBlockDef {
+    pub span: Span,
+    pub kind: DomainKind,
+    pub name: String,
+    pub fields: Vec<DomainField>,
+    pub attributes: Vec<Attribute>,
+    pub doc_comment: Option<DocComment>,
+    pub visibility: Visibility,
+}
+
 /// Literal function definition for custom string suffix handling.
 ///
 /// Syntax: `literal fn _suffix(param: text) -> ReturnType: body`

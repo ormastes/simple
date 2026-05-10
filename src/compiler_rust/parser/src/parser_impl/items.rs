@@ -189,6 +189,21 @@ impl<'a> Parser<'a> {
                 }
                 Ok(node)
             }
+            // Domain block declarations (FR-COMPILER-005): pub schema/style/ui/...
+            TokenKind::Schema
+            | TokenKind::Style
+            | TokenKind::Ui
+            | TokenKind::Music
+            | TokenKind::Bim
+            | TokenKind::City
+            | TokenKind::Cad
+            | TokenKind::Rtl => {
+                let mut node = self.parse_domain_from_kind()?;
+                if let Node::DomainBlock(ref mut d) = node {
+                    d.visibility = visibility;
+                }
+                Ok(node)
+            }
             TokenKind::Actor => {
                 let mut node = self.parse_actor()?;
                 if let Node::Actor(ref mut a) = node {
@@ -511,6 +526,21 @@ impl<'a> Parser<'a> {
             TokenKind::Mixin => self.parse_mixin_with_attrs(attributes),
             TokenKind::Enum => self.parse_enum_with_attrs(attributes),
             TokenKind::Union => self.parse_union_with_attrs(attributes),
+            // Domain block declarations (FR-COMPILER-005): @attr schema/style/ui/...
+            TokenKind::Schema
+            | TokenKind::Style
+            | TokenKind::Ui
+            | TokenKind::Music
+            | TokenKind::Bim
+            | TokenKind::City
+            | TokenKind::Cad
+            | TokenKind::Rtl => {
+                let mut node = self.parse_domain_from_kind()?;
+                if let Node::DomainBlock(ref mut d) = node {
+                    d.attributes = attributes;
+                }
+                Ok(node)
+            }
             TokenKind::Impl => self.parse_impl_with_attrs(attributes),
             TokenKind::Pub => {
                 self.advance();
@@ -596,6 +626,22 @@ impl<'a> Parser<'a> {
                 let mut node = self.parse_union_with_attrs(attributes)?;
                 if let Node::Enum(ref mut e) = node {
                     e.visibility = Visibility::Public;
+                }
+                Ok(node)
+            }
+            // Domain block declarations (FR-COMPILER-005): pub @attr schema/style/ui/...
+            TokenKind::Schema
+            | TokenKind::Style
+            | TokenKind::Ui
+            | TokenKind::Music
+            | TokenKind::Bim
+            | TokenKind::City
+            | TokenKind::Cad
+            | TokenKind::Rtl => {
+                let mut node = self.parse_domain_from_kind()?;
+                if let Node::DomainBlock(ref mut d) = node {
+                    d.attributes = attributes;
+                    d.visibility = Visibility::Public;
                 }
                 Ok(node)
             }

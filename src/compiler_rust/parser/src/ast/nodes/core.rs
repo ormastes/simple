@@ -39,6 +39,9 @@ pub enum Node {
     HandlePool(HandlePoolDef),
     /// Literal function definition: `literal fn _suffix(s: text) -> Type: body`
     LiteralFunction(LiteralFunctionDef),
+    /// Domain-specific block declaration (FR-COMPILER-005):
+    /// schema/style/ui/music/bim/city/cad/rtl Name: field: Type ...
+    DomainBlock(DomainBlockDef),
 
     // Module system (Features #104-111)
     ModDecl(ModDecl),

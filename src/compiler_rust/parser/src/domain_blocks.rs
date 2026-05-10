@@ -142,6 +142,25 @@ impl<'a> Parser<'a> {
         }))
     }
 
+    /// Dispatch to the correct domain block parser based on the current token.
+    ///
+    /// Called from `items.rs` when a domain keyword is encountered inside
+    /// `pub` or attribute contexts. The current token must be one of the
+    /// eight domain keyword variants.
+    pub(crate) fn parse_domain_from_kind(&mut self) -> Result<Node, ParseError> {
+        match &self.current.kind {
+            TokenKind::Schema => self.parse_schema_block(),
+            TokenKind::Style => self.parse_style_block(),
+            TokenKind::Ui => self.parse_ui_block(),
+            TokenKind::Music => self.parse_music_block(),
+            TokenKind::Bim => self.parse_bim_block(),
+            TokenKind::City => self.parse_city_block(),
+            TokenKind::Cad => self.parse_cad_block(),
+            TokenKind::Rtl => self.parse_rtl_block(),
+            _ => unreachable!("parse_domain_from_kind called with non-domain token"),
+        }
+    }
+
     /// Parse a single domain field: `name: Type NEWLINE`
     fn parse_domain_field(&mut self) -> Result<DomainField, ParseError> {
         let start_span = self.current.span;
@@ -167,7 +186,6 @@ impl<'a> Parser<'a> {
             ),
             name,
             ty,
-            doc_comment: None,
         })
     }
 }
