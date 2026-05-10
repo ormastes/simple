@@ -1407,6 +1407,10 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
                     );
                 }
             }
+            Node::DomainBlock(_) => {
+                // Domain block declarations (schema/style/ui/music/bim/city/cad/rtl)
+                // are compile-time type declarations — no-op in the interpreter
+            }
         }
     }
 

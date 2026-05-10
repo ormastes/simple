@@ -1,18 +1,23 @@
 # Editor Layout
 #
-# Manages split pane layout. An EditorLayout holds multiple EditorGroups
-# arranged horizontally or vertically.
+# Manages split pane layout backed by a binary SplitTree.
+# The groups array and active_group_index are maintained for
+# backward compatibility with existing session/shell code.
 
 struct EditorLayout:
+    tree: SplitTree
     groups: [EditorGroup]
     active_group_index: i64
+    active_group_id: i64
     split_direction: text
 
 fn editor_layout_new() -> EditorLayout:
     val group = EditorGroup.new(EditorGroupId(value: 1))
     EditorLayout(
+        tree: SplitTree.new(1),
         groups: [group],
         active_group_index: 0,
+        active_group_id: 1,
         split_direction: "horizontal"
     )
 
@@ -22,18 +27,38 @@ fn editor_layout_active_group(layout: EditorLayout) -> EditorGroup:
     layout.groups[layout.active_group_index]
 
 fn editor_layout_split(layout: EditorLayout, next_group_id: i64) -> EditorLayout:
+    layout.tree.split(layout.active_group_id, SPLIT_VERTICAL, next_group_id)
     var groups = layout.groups
     val new_group = EditorGroup.new(EditorGroupId(value: next_group_id))
     groups.push(new_group)
+    val new_index = groups.len() - 1
     EditorLayout(
+        tree: layout.tree,
         groups: groups,
-        active_group_index: groups.len() - 1,
+        active_group_index: new_index,
+        active_group_id: next_group_id,
+        split_direction: layout.split_direction
+    )
+
+fn editor_layout_split_h(layout: EditorLayout, next_group_id: i64) -> EditorLayout:
+    layout.tree.split(layout.active_group_id, SPLIT_HORIZONTAL, next_group_id)
+    var groups = layout.groups
+    val new_group = EditorGroup.new(EditorGroupId(value: next_group_id))
+    groups.push(new_group)
+    val new_index = groups.len() - 1
+    EditorLayout(
+        tree: layout.tree,
+        groups: groups,
+        active_group_index: new_index,
+        active_group_id: next_group_id,
         split_direction: layout.split_direction
     )
 
 fn editor_layout_close_group(layout: EditorLayout, index: i64) -> EditorLayout:
     if layout.groups.len() <= 1 or index < 0 or index >= layout.groups.len():
         return layout
+    val closing_id = layout.groups[index].id.value
+    layout.tree.close_leaf(closing_id)
     var new_groups: [EditorGroup] = []
     var i = 0
     while i < layout.groups.len():
@@ -43,18 +68,24 @@ fn editor_layout_close_group(layout: EditorLayout, index: i64) -> EditorLayout:
     var active = layout.active_group_index
     if active >= new_groups.len():
         active = new_groups.len() - 1
+    val active_id = if active >= 0 and active < new_groups.len() then new_groups[active].id.value else: 0
     EditorLayout(
+        tree: layout.tree,
         groups: new_groups,
         active_group_index: active,
+        active_group_id: active_id,
         split_direction: layout.split_direction
     )
 
 fn editor_layout_focus_group(layout: EditorLayout, index: i64) -> EditorLayout:
     if index < 0 or index >= layout.groups.len():
         return layout
+    val gid = layout.groups[index].id.value
     EditorLayout(
+        tree: layout.tree,
         groups: layout.groups,
         active_group_index: index,
+        active_group_id: gid,
         split_direction: layout.split_direction
     )
 
@@ -70,5 +101,25 @@ fn editor_layout_focus_prev(layout: EditorLayout) -> EditorLayout:
     val prev = (layout.active_group_index - 1 + layout.groups.len()) % layout.groups.len()
     editor_layout_focus_group(layout, prev)
 
+fn editor_layout_focus_direction(layout: EditorLayout, direction: text, rects: [SplitRect]) -> EditorLayout:
+    val neighbor_id = split_find_neighbor(rects, layout.active_group_id, direction)
+    if neighbor_id < 0:
+        return layout
+    val idx = _layout_find_group_index(layout.groups, neighbor_id)
+    if idx < 0:
+        return layout
+    editor_layout_focus_group(layout, idx)
+
 fn editor_layout_group_count(layout: EditorLayout) -> i64:
     layout.groups.len()
+
+fn editor_layout_compute_rects(layout: EditorLayout, x: i64, y: i64, w: i64, h: i64) -> [SplitRect]:
+    split_compute_rects(layout.tree, x, y, w, h)
+
+fn _layout_find_group_index(groups: [EditorGroup], group_id: i64) -> i64:
+    var i = 0
+    while i < groups.len():
+        if groups[i].id.value == group_id:
+            return i
+        i = i + 1
+    -1

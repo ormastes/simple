@@ -545,7 +545,8 @@ impl Lowerer {
                 | Node::ErrDefer(_)
                 | Node::InlineAsm(_)
                 | Node::Newtype(_)
-                | Node::Extend(_) => {}
+                | Node::Extend(_)
+                | Node::DomainBlock(_) => {}
             }
         }
 
