@@ -1,0 +1,105 @@
+#![allow(primitive_api)]
+
+# Synthesis Wrapper Spec
+#
+# Tests synthesis project generation, TCL script output, and
+# SoC top-level wrapper VHDL generation.
+
+use std.io_runtime
+use std.nogc_sync_mut.spec.{describe, it, expect}
+use hardware.fpga_linux.riscv_fpga_linux.{XilinxBoardProfile, Xlen}
+use hardware.fpga_linux.synthesis_wrapper.{
+    SynthesisProject, SocTopConfig, create_synthesis_flow
+}
+
+fn main():
+    # -----------------------------------------------------------------
+    # Synthesis Project
+    # -----------------------------------------------------------------
+    describe("SynthesisProject"):
+        it("creates project with board and name"):
+            val board = XilinxBoardProfile.from_id("mlk_s02_100t").ok().unwrap()
+            val project = SynthesisProject.create("test_soc", board, "/tmp/synth")
+            expect(project.project_name).to_equal("test_soc")
+            expect(project.top_module).to_equal("simple_soc_top")
+
+        it("generates TCL with create_project and part"):
+            val board = XilinxBoardProfile.from_id("mlk_s02_100t").ok().unwrap()
+            val project = SynthesisProject.create("test_soc", board, "/tmp/synth")
+            val tcl = project.tcl_create_project()
+            expect(tcl).to_contain("create_project test_soc")
+            expect(tcl).to_contain("-part xc7a100tfgg484-2")
+
+        it("adds RTL sources to TCL"):
+            val board = XilinxBoardProfile.from_id("mlk_s02_100t").ok().unwrap()
+            var project = SynthesisProject.create("test_soc", board, "/tmp/synth")
+            project.add_rtl_source("rtl/top.vhd")
+            val tcl = project.tcl_create_project()
+            expect(tcl).to_contain("add_files -fileset sources_1 rtl/top.vhd")
+
+        it("adds constraint files to TCL"):
+            val board = XilinxBoardProfile.from_id("mlk_s02_100t").ok().unwrap()
+            var project = SynthesisProject.create("test_soc", board, "/tmp/synth")
+            project.add_constraint_file("constraints/board.xdc")
+            val tcl = project.tcl_create_project()
+            expect(tcl).to_contain("add_files -fileset constrs_1 constraints/board.xdc")
+
+        it("sets top module"):
+            val board = XilinxBoardProfile.from_id("mlk_s02_100t").ok().unwrap()
+            var project = SynthesisProject.create("test_soc", board, "/tmp/synth")
+            project.set_top_module("my_top")
+            val tcl = project.tcl_create_project()
+            expect(tcl).to_contain("set_property top my_top")
+
+        it("generates synthesis run TCL"):
+            val board = XilinxBoardProfile.from_id("mlk_s02_100t").ok().unwrap()
+            val project = SynthesisProject.create("test_soc", board, "/tmp/synth")
+            val tcl = project.tcl_run_synthesis()
+            expect(tcl).to_contain("launch_runs synth_1")
+            expect(tcl).to_contain("wait_on_run synth_1")
+            expect(tcl).to_contain("launch_runs impl_1 -to_step write_bitstream")
+
+    # -----------------------------------------------------------------
+    # SoC Top Config — VHDL generation
+    # -----------------------------------------------------------------
+    describe("SocTopConfig"):
+        it("generates entity with clock and reset"):
+            val board = XilinxBoardProfile.from_id("mlk_s02_100t").ok().unwrap()
+            val config = SocTopConfig.default_for(board, Xlen.Rv32)
+            val vhdl = config.vhdl_entity()
+            expect(vhdl).to_contain("entity simple_soc_top is")
+            expect(vhdl).to_contain("sys_clk")
+            expect(vhdl).to_contain("sys_rst_n")
+
+        it("includes UART ports by default"):
+            val board = XilinxBoardProfile.from_id("mlk_s02_100t").ok().unwrap()
+            val config = SocTopConfig.default_for(board, Xlen.Rv32)
+            val vhdl = config.vhdl_entity()
+            expect(vhdl).to_contain("uart_txd")
+            expect(vhdl).to_contain("uart_rxd")
+
+        it("generates architecture stub with correct data width"):
+            val board = XilinxBoardProfile.from_id("mlk_s02_100t").ok().unwrap()
+            val config = SocTopConfig.default_for(board, Xlen.Rv32)
+            val vhdl = config.vhdl_architecture_stub()
+            expect(vhdl).to_contain("architecture rtl of simple_soc_top is")
+            expect(vhdl).to_contain("Data width: 32 bits")
+
+        it("generates full VHDL with entity and architecture"):
+            val board = XilinxBoardProfile.from_id("mlk_s02_100t").ok().unwrap()
+            val config = SocTopConfig.default_for(board, Xlen.Rv32)
+            val vhdl = config.full_vhdl()
+            expect(vhdl).to_contain("entity simple_soc_top is")
+            expect(vhdl).to_contain("architecture rtl of simple_soc_top is")
+
+    # -----------------------------------------------------------------
+    # High-Level Synthesis Flow
+    # -----------------------------------------------------------------
+    describe("create_synthesis_flow"):
+        it("creates project for mlk_s02_100t"):
+            val result = create_synthesis_flow("mlk_s02_100t", "/tmp/synth_flow_test")
+            expect(result.is_ok()).to_equal(true)
+
+        it("returns error for unknown board"):
+            val result = create_synthesis_flow("nonexistent", "/tmp/synth_flow_test")
+            expect(result.is_err()).to_equal(true)
