@@ -474,3 +474,87 @@ void rt_sdl2_warp_mouse(int64_t handle, int64_t x, int64_t y) {
     SDL_Window* win = (SDL_Window*)(uintptr_t)handle;
     SDL_WarpMouseInWindow(win, (int)x, (int)y);
 }
+
+/* ===== Clipboard ===== */
+
+const char* rt_sdl2_clipboard_get(void) {
+    char* text = SDL_GetClipboardText();
+    if (!text) return "";
+    char* copy = strdup(text);
+    SDL_free(text);
+    return copy ? copy : "";
+}
+
+bool rt_sdl2_clipboard_set(const char* text) {
+    return SDL_SetClipboardText(text) == 0;
+}
+
+bool rt_sdl2_clipboard_has_text(void) {
+    return SDL_HasClipboardText() == SDL_TRUE;
+}
+
+/* ===== Display Info ===== */
+
+int64_t rt_sdl2_get_num_displays(void) {
+    int n = SDL_GetNumVideoDisplays();
+    return n > 0 ? (int64_t)n : 0;
+}
+
+const char* rt_sdl2_get_display_name(int64_t index) {
+    const char* name = SDL_GetDisplayName((int)index);
+    return name ? name : "Unknown";
+}
+
+int64_t rt_sdl2_get_display_bounds_x(int64_t index) {
+    SDL_Rect r;
+    if (SDL_GetDisplayBounds((int)index, &r) != 0) return 0;
+    return (int64_t)r.x;
+}
+
+int64_t rt_sdl2_get_display_bounds_y(int64_t index) {
+    SDL_Rect r;
+    if (SDL_GetDisplayBounds((int)index, &r) != 0) return 0;
+    return (int64_t)r.y;
+}
+
+int64_t rt_sdl2_get_display_bounds_w(int64_t index) {
+    SDL_Rect r;
+    if (SDL_GetDisplayBounds((int)index, &r) != 0) return 0;
+    return (int64_t)r.w;
+}
+
+int64_t rt_sdl2_get_display_bounds_h(int64_t index) {
+    SDL_Rect r;
+    if (SDL_GetDisplayBounds((int)index, &r) != 0) return 0;
+    return (int64_t)r.h;
+}
+
+double rt_sdl2_get_display_dpi(int64_t index) {
+    float ddpi = 0.0f;
+    if (SDL_GetDisplayDPI((int)index, &ddpi, NULL, NULL) != 0) return 96.0;
+    return (double)ddpi;
+}
+
+int64_t rt_sdl2_get_display_usable_x(int64_t index) {
+    SDL_Rect r;
+    if (SDL_GetDisplayUsableBounds((int)index, &r) != 0) return 0;
+    return (int64_t)r.x;
+}
+
+int64_t rt_sdl2_get_display_usable_y(int64_t index) {
+    SDL_Rect r;
+    if (SDL_GetDisplayUsableBounds((int)index, &r) != 0) return 0;
+    return (int64_t)r.y;
+}
+
+int64_t rt_sdl2_get_display_usable_w(int64_t index) {
+    SDL_Rect r;
+    if (SDL_GetDisplayUsableBounds((int)index, &r) != 0) return 0;
+    return (int64_t)r.w;
+}
+
+int64_t rt_sdl2_get_display_usable_h(int64_t index) {
+    SDL_Rect r;
+    if (SDL_GetDisplayUsableBounds((int)index, &r) != 0) return 0;
+    return (int64_t)r.h;
+}

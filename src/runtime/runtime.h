@@ -567,6 +567,24 @@ void     rt_sdl2_set_cursor_visible(int64_t visible);
 void     rt_sdl2_set_cursor_grab(int64_t handle, int64_t grab);
 void     rt_sdl2_warp_mouse(int64_t handle, int64_t x, int64_t y);
 
+/* Clipboard */
+const char* rt_sdl2_clipboard_get(void);
+bool     rt_sdl2_clipboard_set(const char* text);
+bool     rt_sdl2_clipboard_has_text(void);
+
+/* Display info */
+int64_t  rt_sdl2_get_num_displays(void);
+const char* rt_sdl2_get_display_name(int64_t index);
+int64_t  rt_sdl2_get_display_bounds_x(int64_t index);
+int64_t  rt_sdl2_get_display_bounds_y(int64_t index);
+int64_t  rt_sdl2_get_display_bounds_w(int64_t index);
+int64_t  rt_sdl2_get_display_bounds_h(int64_t index);
+double   rt_sdl2_get_display_dpi(int64_t index);
+int64_t  rt_sdl2_get_display_usable_x(int64_t index);
+int64_t  rt_sdl2_get_display_usable_y(int64_t index);
+int64_t  rt_sdl2_get_display_usable_w(int64_t index);
+int64_t  rt_sdl2_get_display_usable_h(int64_t index);
+
 /* ===== Panic / Abort ===== */
 
 #ifdef _MSC_VER
