@@ -161,18 +161,26 @@ class AnimationEngine:
     # Returns a list of style property updates to apply.
     me tick(current_time_ms: f64) -> [StyleUpdate]:
         var updates: [StyleUpdate] = []
+        var new_animations: [Animation] = []
 
-        # Process animations
-        var anim_idx = 0
-        while anim_idx < self.animations.len():
-            var anim = self.animations.get(anim_idx)
-
+        # Process animations — rebuild list with updated states
+        for anim in self.animations:
+            var next_anim = anim
             match anim.state:
                 AnimationState.Idle:
                     # Start the animation
-                    anim.state = AnimationState.Running
-                    anim.current_time = current_time_ms
-                    self.animations.set(anim_idx, anim)
+                    next_anim = Animation(
+                        name: anim.name,
+                        keyframes: anim.keyframes,
+                        duration_ms: anim.duration_ms,
+                        delay_ms: anim.delay_ms,
+                        timing: anim.timing,
+                        iteration_count: anim.iteration_count,
+                        direction: anim.direction,
+                        fill_mode: anim.fill_mode,
+                        state: AnimationState.Running,
+                        current_time: current_time_ms
+                    )
                 AnimationState.Running:
                     val elapsed = current_time_ms - anim.current_time - anim.delay_ms
                     if elapsed < 0.0:
@@ -181,8 +189,18 @@ class AnimationEngine:
                     else:
                         val total_duration = anim.duration_ms * anim.iteration_count
                         if elapsed >= total_duration:
-                            anim.state = AnimationState.Finished
-                            self.animations.set(anim_idx, anim)
+                            next_anim = Animation(
+                                name: anim.name,
+                                keyframes: anim.keyframes,
+                                duration_ms: anim.duration_ms,
+                                delay_ms: anim.delay_ms,
+                                timing: anim.timing,
+                                iteration_count: anim.iteration_count,
+                                direction: anim.direction,
+                                fill_mode: anim.fill_mode,
+                                state: AnimationState.Finished,
+                                current_time: anim.current_time
+                            )
                         else:
                             # Compute progress within current iteration
                             val iteration_progress = elapsed / anim.duration_ms
@@ -205,19 +223,26 @@ class AnimationEngine:
                     pass_dn
                 AnimationState.Finished:
                     pass_dn
+            new_animations.push(next_anim)
 
-            anim_idx = anim_idx + 1
+        self.animations = new_animations
 
-        # Process transitions
-        var trans_idx = 0
-        while trans_idx < self.transitions.len():
-            var trans = self.transitions.get(trans_idx)
-
+        # Process transitions — rebuild list with updated states
+        var new_transitions: [Transition] = []
+        for trans in self.transitions:
+            var next_trans = trans
             match trans.state:
                 AnimationState.Idle:
-                    trans.state = AnimationState.Running
-                    trans.start_time = current_time_ms
-                    self.transitions.set(trans_idx, trans)
+                    next_trans = Transition(
+                        property: trans.property,
+                        from_value: trans.from_value,
+                        to_value: trans.to_value,
+                        duration_ms: trans.duration_ms,
+                        delay_ms: trans.delay_ms,
+                        timing: trans.timing,
+                        start_time: current_time_ms,
+                        state: AnimationState.Running
+                    )
                 AnimationState.Running:
                     val elapsed = current_time_ms - trans.start_time - trans.delay_ms
                     if elapsed < 0.0:
@@ -225,8 +250,16 @@ class AnimationEngine:
                     else if elapsed >= trans.duration_ms:
                         # Transition complete — snap to final value
                         updates.push(StyleUpdate.create(0, trans.property, trans.to_value))
-                        trans.state = AnimationState.Finished
-                        self.transitions.set(trans_idx, trans)
+                        next_trans = Transition(
+                            property: trans.property,
+                            from_value: trans.from_value,
+                            to_value: trans.to_value,
+                            duration_ms: trans.duration_ms,
+                            delay_ms: trans.delay_ms,
+                            timing: trans.timing,
+                            start_time: trans.start_time,
+                            state: AnimationState.Finished
+                        )
                     else:
                         val raw_progress = elapsed / trans.duration_ms
                         val eased = ease_value(raw_progress, trans.timing)
@@ -236,8 +269,9 @@ class AnimationEngine:
                     pass_dn
                 AnimationState.Finished:
                     pass_dn
+            new_transitions.push(next_trans)
 
-            trans_idx = trans_idx + 1
+        self.transitions = new_transitions
 
         self.logger.trace("tick at {current_time_ms}ms produced {updates.len()} updates")
         updates
@@ -379,33 +413,59 @@ fn interpolate_keyframes(keyframes: [Keyframe], progress: f64) -> [StyleUpdate]:
         return updates
 
     if keyframes.len() == 1:
-        for decl in keyframes.get(0).properties:
-            updates.push(StyleUpdate.create(0, decl.property, decl.value))
+        # Single keyframe — use for loop to avoid chained get().properties
+        for kf in keyframes:
+            for decl in kf.properties:
+                updates.push(StyleUpdate.create(0, decl.property, decl.value))
         return updates
 
-    # Find surrounding keyframes
-    var from_kf = keyframes.get(0)
-    var to_kf = keyframes.get(keyframes.len() - 1)
+    # Find surrounding keyframes using for-loop pairs
+    # Collect all keyframes into local vars first
+    var kf_list: [Keyframe] = []
+    for kf in keyframes:
+        kf_list.push(kf)
 
-    var idx = 0
-    while idx < keyframes.len() - 1:
-        val current = keyframes.get(idx)
-        val next = keyframes.get(idx + 1)
-        if progress >= current.offset and progress <= next.offset:
-            from_kf = current
-            to_kf = next
-            idx = keyframes.len()
-        idx = idx + 1
+    # Unwrap initial from/to with safe defaults via for-loop
+    var from_offset = 0.0
+    var from_props: [CSSDeclaration] = []
+    var to_offset = 1.0
+    var to_props: [CSSDeclaration] = []
+    var first = true
+    for kf in kf_list:
+        if first:
+            from_offset = kf.offset
+            from_props = kf.properties
+            to_offset = kf.offset
+            to_props = kf.properties
+            first = false
+        else:
+            to_offset = kf.offset
+            to_props = kf.properties
+
+    # Find surrounding segment
+    var prev_offset = from_offset
+    var prev_props = from_props
+    var found_segment = false
+    for kf in kf_list:
+        if not found_segment:
+            if progress >= prev_offset and progress <= kf.offset:
+                from_offset = prev_offset
+                from_props = prev_props
+                to_offset = kf.offset
+                to_props = kf.properties
+                found_segment = true
+            prev_offset = kf.offset
+            prev_props = kf.properties
 
     # Compute local progress between the two keyframes
-    val range = to_kf.offset - from_kf.offset
+    val range = to_offset - from_offset
     var local_t = 0.0
     if range > 0.0:
-        local_t = (progress - from_kf.offset) / range
+        local_t = (progress - from_offset) / range
 
     # Interpolate matching properties
-    for from_decl in from_kf.properties:
-        for to_decl in to_kf.properties:
+    for from_decl in from_props:
+        for to_decl in to_props:
             if from_decl.property == to_decl.property:
                 val interp = interpolate(from_decl.value, to_decl.value, local_t)
                 updates.push(StyleUpdate.create(0, from_decl.property, interp))

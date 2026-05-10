@@ -50,14 +50,20 @@ class CustomPropertyStore:
             self.logger.warn("attempted to set non-custom property '{name}' as custom property")
             return
 
-        # Replace existing property if it exists for this node
-        var idx = 0
+        # Replace existing property if it exists for this node — rebuild list
+        var found = false
+        var new_props: [CustomProperty] = []
         for prop in self.properties:
             if prop.node_id == node_id and prop.name == name:
-                self.properties.set(idx, CustomProperty.create(name, value, node_id))
-                self.logger.trace("custom property updated: {name} = {value} on node {node_id}")
-                return
-            idx = idx + 1
+                new_props.push(CustomProperty.create(name, value, node_id))
+                found = true
+            else:
+                new_props.push(prop)
+
+        if found:
+            self.properties = new_props
+            self.logger.trace("custom property updated: {name} = {value} on node {node_id}")
+            return
 
         # Add new property
         self.properties.push(CustomProperty.create(name, value, node_id))
@@ -65,11 +71,19 @@ class CustomPropertyStore:
 
     # Get the value of a custom property for a node.
     # Searches the node first, then ancestors via inherited properties.
+    # Returns nil if not found.
     fn get_property(node_id: i64, name: text) -> text?:
         for prop in self.properties:
             if prop.node_id == node_id and prop.name == name:
                 return prop.value
         return nil
+
+    # Internal: get property value as text, returning "" if not found.
+    fn _get_property_or_empty(node_id: i64, name: text) -> text:
+        for prop in self.properties:
+            if prop.node_id == node_id and prop.name == name:
+                return prop.value
+        ""
 
     # Resolve a var(--name, fallback) reference to a concrete CSSValue.
     # The input value is the raw text containing var().
@@ -82,12 +96,12 @@ class CustomPropertyStore:
         val fallback = parsed.second
 
         # Look up the custom property
-        val resolved = self.get_property(node_id, var_name)
-        if val v = resolved:
+        val prop_val = self._get_property_or_empty(node_id, var_name)
+        if prop_val.len() > 0:
             # Recursively resolve if the value itself contains var()
-            if has_var_reference(v):
-                return self.resolve_var(v, node_id)
-            return CSSValue.Keyword(v: v)
+            if has_var_reference(prop_val):
+                return self.resolve_var(prop_val, node_id)
+            return CSSValue.Keyword(v: prop_val)
 
         # Use fallback if provided
         if fallback.len() > 0:

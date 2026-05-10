@@ -1,0 +1,230 @@
+use std.spec
+use std.noalloc.replay.bm_replay_core.{bm_replay_is_off, bm_replay_set_mode, bm_ring_init, bm_ring_push, bm_ring_count, bm_ring_pop_kind, bm_ring_pop_timestamp, bm_ring_pop_val_a, bm_ring_pop_val_b}
+use std.noalloc.replay.bm_checkpoint.{BmCheckpoint, bm_save_checkpoint, bm_restore_checkpoint, bm_find_checkpoint_before}
+
+describe "bm_replay mode":
+    it "bm_replay default is off":
+        bm_replay_set_mode(0)
+        expect(bm_replay_is_off()).to_equal(true)
+
+    it "bm_replay set mode to record — is_off returns false":
+        bm_replay_set_mode(1)
+        expect(bm_replay_is_off()).to_equal(false)
+        bm_replay_set_mode(0)
+
+    it "bm_replay set mode back to 0 — is_off returns true again":
+        bm_replay_set_mode(1)
+        bm_replay_set_mode(0)
+        expect(bm_replay_is_off()).to_equal(true)
+
+    it "bm_replay set mode to replay (2) — is_off returns false":
+        bm_replay_set_mode(2)
+        expect(bm_replay_is_off()).to_equal(false)
+        bm_replay_set_mode(0)
+
+describe "bm_ring init and count":
+    it "bm_ring_init sets count to zero":
+        bm_ring_init()
+        expect(bm_ring_count()).to_equal(0)
+
+    it "bm_ring_count after init is 0":
+        bm_ring_init()
+        val c = bm_ring_count()
+        expect(c).to_equal(0)
+
+describe "bm_ring push and count":
+    it "push 1 event — count is 1":
+        bm_ring_init()
+        bm_ring_push(1, 100, 42, 99)
+        expect(bm_ring_count()).to_equal(1)
+
+    it "push 3 events — count is 3":
+        bm_ring_init()
+        bm_ring_push(1, 10, 1, 2)
+        bm_ring_push(2, 20, 3, 4)
+        bm_ring_push(3, 30, 5, 6)
+        expect(bm_ring_count()).to_equal(3)
+
+describe "bm_ring push and pop":
+    it "pop_kind returns pushed kind and decrements count":
+        bm_ring_init()
+        bm_ring_push(1, 100, 42, 99)
+        val k = bm_ring_pop_kind()
+        expect(k).to_equal(1)
+        expect(bm_ring_count()).to_equal(0)
+
+    it "pop_timestamp returns pushed timestamp":
+        bm_ring_init()
+        bm_ring_push(1, 100, 42, 99)
+        val ts = bm_ring_pop_timestamp()
+        expect(ts).to_equal(100)
+
+    it "pop_val_a returns pushed val_a":
+        bm_ring_init()
+        bm_ring_push(1, 100, 42, 99)
+        val a = bm_ring_pop_val_a()
+        expect(a).to_equal(42)
+
+    it "pop_val_b returns pushed val_b":
+        bm_ring_init()
+        bm_ring_push(1, 100, 42, 99)
+        val b = bm_ring_pop_val_b()
+        expect(b).to_equal(99)
+
+    it "pop_kind on empty ring returns 0":
+        bm_ring_init()
+        val k = bm_ring_pop_kind()
+        expect(k).to_equal(0)
+
+    it "pop_timestamp on empty ring returns 0":
+        bm_ring_init()
+        val ts = bm_ring_pop_timestamp()
+        expect(ts).to_equal(0)
+
+    it "pop_val_a on empty ring returns 0":
+        bm_ring_init()
+        val a = bm_ring_pop_val_a()
+        expect(a).to_equal(0)
+
+    it "pop_val_b on empty ring returns 0":
+        bm_ring_init()
+        val b = bm_ring_pop_val_b()
+        expect(b).to_equal(0)
+
+    it "FIFO order: first pushed is first popped":
+        bm_ring_init()
+        bm_ring_push(10, 1000, 11, 12)
+        bm_ring_push(20, 2000, 21, 22)
+        val k1 = bm_ring_pop_kind()
+        val k2 = bm_ring_pop_kind()
+        expect(k1).to_equal(10)
+        expect(k2).to_equal(20)
+
+describe "bm_ring reset via init":
+    it "bm_ring_init after pushes resets count to 0":
+        bm_ring_init()
+        bm_ring_push(1, 10, 1, 2)
+        bm_ring_push(2, 20, 3, 4)
+        bm_ring_init()
+        expect(bm_ring_count()).to_equal(0)
+
+    it "pop after reset returns 0":
+        bm_ring_init()
+        bm_ring_push(5, 50, 55, 66)
+        bm_ring_init()
+        val k = bm_ring_pop_kind()
+        expect(k).to_equal(0)
+
+describe "bm_save_checkpoint":
+    it "bm_save_checkpoint stores and bm_restore_checkpoint retrieves by id":
+        bm_ring_init()
+        bm_save_checkpoint(1, 500, 0x1000, 0x2000)
+        val r = bm_restore_checkpoint(1)
+        val ok = match r {
+            Ok(cp) => cp.cycle == 500,
+            Err(_) => false,
+        }
+        expect(ok).to_equal(true)
+
+    it "bm_restore_checkpoint retrieves correct pc":
+        bm_ring_init()
+        bm_save_checkpoint(2, 100, 0xABCD, 0xEF00)
+        val r = bm_restore_checkpoint(2)
+        val ok = match r {
+            Ok(cp) => cp.pc == 0xABCD,
+            Err(_) => false,
+        }
+        expect(ok).to_equal(true)
+
+    it "bm_restore_checkpoint retrieves correct sp":
+        bm_ring_init()
+        bm_save_checkpoint(3, 200, 0x100, 0x900)
+        val r = bm_restore_checkpoint(3)
+        val ok = match r {
+            Ok(cp) => cp.sp == 0x900,
+            Err(_) => false,
+        }
+        expect(ok).to_equal(true)
+
+    it "bm_restore_checkpoint for unknown id returns Err":
+        val r = bm_restore_checkpoint(999)
+        val is_err = match r {
+            Ok(_) => false,
+            Err(_) => true,
+        }
+        expect(is_err).to_equal(true)
+
+    it "bm_save_checkpoint updates existing id":
+        bm_ring_init()
+        bm_save_checkpoint(10, 100, 0x100, 0x200)
+        bm_save_checkpoint(10, 200, 0x300, 0x400)
+        val r = bm_restore_checkpoint(10)
+        val ok = match r {
+            Ok(cp) => cp.cycle == 200,
+            Err(_) => false,
+        }
+        expect(ok).to_equal(true)
+
+describe "bm_restore_checkpoint cycle and pc match":
+    it "save then restore — cycle and pc match":
+        bm_ring_init()
+        bm_save_checkpoint(20, 999, 0xDEAD, 0xBEEF)
+        val r = bm_restore_checkpoint(20)
+        val cycle_ok = match r {
+            Ok(cp) => cp.cycle == 999,
+            Err(_) => false,
+        }
+        expect(cycle_ok).to_equal(true)
+        val r2 = bm_restore_checkpoint(20)
+        val pc_ok = match r2 {
+            Ok(cp) => cp.pc == 0xDEAD,
+            Err(_) => false,
+        }
+        expect(pc_ok).to_equal(true)
+
+describe "bm_find_checkpoint_before":
+    it "finds checkpoint with highest cycle <= target":
+        bm_ring_init()
+        bm_save_checkpoint(31, 100, 0x100, 0x200)
+        bm_save_checkpoint(32, 200, 0x300, 0x400)
+        bm_save_checkpoint(33, 300, 0x500, 0x600)
+        val maybe = bm_find_checkpoint_before(250)
+        val ok = match maybe {
+            Some(cp) => cp.cycle == 200,
+            None => false,
+        }
+        expect(ok).to_equal(true)
+
+    it "finds checkpoint exactly at cycle boundary":
+        bm_ring_init()
+        bm_save_checkpoint(41, 100, 0x10, 0x20)
+        bm_save_checkpoint(42, 200, 0x30, 0x40)
+        val maybe = bm_find_checkpoint_before(200)
+        val ok = match maybe {
+            Some(cp) => cp.cycle == 200,
+            None => false,
+        }
+        expect(ok).to_equal(true)
+
+    it "returns None when all checkpoints are after target":
+        bm_ring_init()
+        bm_save_checkpoint(51, 500, 0x10, 0x20)
+        bm_save_checkpoint(52, 600, 0x30, 0x40)
+        val maybe = bm_find_checkpoint_before(100)
+        val is_none = match maybe {
+            Some(_) => false,
+            None => true,
+        }
+        expect(is_none).to_equal(true)
+
+    it "finds highest cycle — 3 checkpoints at 100/200/300, before 250 gives 200":
+        bm_ring_init()
+        bm_save_checkpoint(61, 100, 0xA, 0xB)
+        bm_save_checkpoint(62, 200, 0xC, 0xD)
+        bm_save_checkpoint(63, 300, 0xE, 0xF)
+        val maybe = bm_find_checkpoint_before(250)
+        val cycle = match maybe {
+            Some(cp) => cp.cycle,
+            None => -1,
+        }
+        expect(cycle).to_equal(200)
