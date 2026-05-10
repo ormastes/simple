@@ -136,16 +136,7 @@ impl<'a> Parser<'a> {
 
         // Check for enum variant with payload: Const(dest, _, _)
         if self.check(&TokenKind::LParen) {
-            self.advance(); // consume '('
-            let mut patterns = Vec::new();
-            while !self.check(&TokenKind::RParen) {
-                // Use parse_single_pattern to avoid comma being consumed as or-pattern
-                patterns.push(self.parse_single_pattern()?);
-                if !self.check(&TokenKind::RParen) {
-                    self.expect(&TokenKind::Comma)?;
-                }
-            }
-            self.expect(&TokenKind::RParen)?;
+            let patterns = self.parse_enum_payload_patterns()?;
             return Ok(Pattern::Enum {
                 name: "_".to_string(),
                 variant: name.to_string(),
@@ -163,17 +154,7 @@ impl<'a> Parser<'a> {
             let variant = path.pop().unwrap();
             let enum_name = path.join(".");
             let payload = if self.check(&TokenKind::LParen) {
-                self.advance();
-                let mut patterns = Vec::new();
-                while !self.check(&TokenKind::RParen) {
-                    // Use parse_single_pattern to avoid comma being consumed as or-pattern
-                    patterns.push(self.parse_single_pattern()?);
-                    if !self.check(&TokenKind::RParen) {
-                        self.expect(&TokenKind::Comma)?;
-                    }
-                }
-                self.expect(&TokenKind::RParen)?;
-                Some(patterns)
+                Some(self.parse_enum_payload_patterns()?)
             } else {
                 None
             };
@@ -235,16 +216,7 @@ impl<'a> Parser<'a> {
                 }
                 // Check for enum variant pattern: Move(...)
                 if self.check(&TokenKind::LParen) {
-                    self.advance();
-                    let mut patterns = Vec::new();
-                    while !self.check(&TokenKind::RParen) {
-                        // Use parse_single_pattern to avoid comma being consumed as or-pattern
-                        patterns.push(self.parse_single_pattern()?);
-                        if !self.check(&TokenKind::RParen) {
-                            self.expect(&TokenKind::Comma)?;
-                        }
-                    }
-                    self.expect(&TokenKind::RParen)?;
+                    let patterns = self.parse_enum_payload_patterns()?;
                     return Ok(Pattern::Enum {
                         name: "_".to_string(),
                         variant: "Move".to_string(),
@@ -344,17 +316,7 @@ impl<'a> Parser<'a> {
                     let enum_name = path.join(".");
 
                     let payload = if self.check(&TokenKind::LParen) {
-                        self.advance();
-                        let mut patterns = Vec::new();
-                        while !self.check(&TokenKind::RParen) {
-                            // Use parse_single_pattern to avoid comma being consumed as or-pattern
-                            patterns.push(self.parse_single_pattern()?);
-                            if !self.check(&TokenKind::RParen) {
-                                self.expect(&TokenKind::Comma)?;
-                            }
-                        }
-                        self.expect(&TokenKind::RParen)?;
-                        Some(patterns)
+                        Some(self.parse_enum_payload_patterns()?)
                     } else {
                         None
                     };
@@ -387,16 +349,7 @@ impl<'a> Parser<'a> {
                         // The interpreter will resolve based on the value being matched
                         _ => ("_".to_string(), name.clone()),
                     };
-                    self.advance(); // consume LParen
-                    let mut patterns = Vec::new();
-                    while !self.check(&TokenKind::RParen) {
-                        // Use parse_single_pattern to avoid comma being consumed as or-pattern
-                        patterns.push(self.parse_single_pattern()?);
-                        if !self.check(&TokenKind::RParen) {
-                            self.expect(&TokenKind::Comma)?;
-                        }
-                    }
-                    self.expect(&TokenKind::RParen)?;
+                    let patterns = self.parse_enum_payload_patterns()?;
                     return Ok(Pattern::Enum {
                         name: enum_name,
                         variant,
