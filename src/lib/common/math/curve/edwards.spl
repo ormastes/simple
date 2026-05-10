@@ -1,0 +1,161 @@
+# Extended Edwards point arithmetic — generic helpers for Ed25519.
+#
+# Implements point operations on twisted Edwards curves in extended
+# coordinates (X, Y, Z, T) where T = X*Y/Z. Uses the HWCD08 unified
+# addition formula for a = -1 curves.
+#
+# This module imports Fe25519 directly (monomorphized specialization)
+# rather than dispatching through a trait, because Simple's trait system
+# does not yet support associated types.
+#
+# Reference: HWCD08 (Twisted Edwards Curves Revisited)
+# Reference: RFC 8032 (Edwards-Curve Digital Signature Algorithm)
+# ============================================================================
+
+use std.math.field.fe25519.{
+    Fe25519, fe_zero, fe_one,
+    fe_add, fe_sub, fe_mul, fe_sq,
+    fe_cond_select
+}
+
+# ============================================================================
+# Extended Point Type
+# ============================================================================
+
+struct EdPoint:
+    """Point on a twisted Edwards curve in extended coordinates (X:Y:Z:T).
+    Invariant: T = X*Y/Z (maintained by all point operations).
+    The identity is (0, 1, 1, 0).
+    """
+    x: Fe25519
+    y: Fe25519
+    z: Fe25519
+    t: Fe25519
+
+# ============================================================================
+# Point Constructors
+# ============================================================================
+
+fn ed_point_identity() -> EdPoint:
+    """Return the neutral element (identity point): (0, 1, 1, 0)."""
+    EdPoint(x: fe_zero(), y: fe_one(), z: fe_one(), t: fe_zero())
+
+# ============================================================================
+# Unified Addition (HWCD08, a = -1)
+# ============================================================================
+
+fn ed_point_add(p1: EdPoint, p2: EdPoint, d: Fe25519) -> EdPoint:
+    """Add two points in extended coordinates.
+
+    Uses unified addition formula from HWCD08 for twisted Edwards curve
+    -x^2 + y^2 = 1 + d*x^2*y^2 (a = -1).
+
+    A = X1*X2, B = Y1*Y2, C = T1*d*T2, D = Z1*Z2
+    E = (X1+Y1)*(X2+Y2) - A - B
+    F = D - C, G = D + C, H = B + A  (+ because a=-1: B - a*A = B+A)
+    X3 = E*F, Y3 = G*H, T3 = E*H, Z3 = F*G
+
+    The curve constant `d` is passed as a parameter so the same code
+    can serve Ed25519 and any future a=-1 Edwards-form curve.
+    """
+    val a = fe_mul(p1.x, p2.x)
+    val b = fe_mul(p1.y, p2.y)
+    val c = fe_mul(fe_mul(p1.t, p2.t), d)
+    val dd = fe_mul(p1.z, p2.z)
+
+    val x1_plus_y1 = fe_add(p1.x, p1.y)
+    val x2_plus_y2 = fe_add(p2.x, p2.y)
+    val e = fe_sub(fe_sub(fe_mul(x1_plus_y1, x2_plus_y2), a), b)
+
+    val f = fe_sub(dd, c)
+    val g = fe_add(dd, c)
+    val h = fe_add(b, a)
+
+    EdPoint(
+        x: fe_mul(e, f),
+        y: fe_mul(g, h),
+        z: fe_mul(f, g),
+        t: fe_mul(e, h)
+    )
+
+# ============================================================================
+# Dedicated Doubling (HWCD08, a = -1)
+# ============================================================================
+
+fn ed_point_double(p1: EdPoint) -> EdPoint:
+    """Double a point in extended coordinates.
+
+    Uses dedicated doubling formula from HWCD08 for a = -1:
+    A = X1^2, B = Y1^2, C = 2*Z1^2
+    D = -A (since a = -1), E = (X1+Y1)^2 - A - B
+    G = D + B, F = G - C, H = D - B
+    X3 = E*F, Y3 = G*H, T3 = E*H, Z3 = F*G
+    """
+    val a = fe_sq(p1.x)
+    val b = fe_sq(p1.y)
+    val c = fe_add(fe_sq(p1.z), fe_sq(p1.z))
+
+    val d = fe_sub(fe_zero(), a)
+    val x_plus_y = fe_add(p1.x, p1.y)
+    val e = fe_sub(fe_sub(fe_sq(x_plus_y), a), b)
+
+    val g = fe_add(d, b)
+    val f = fe_sub(g, c)
+    val h = fe_sub(d, b)
+
+    EdPoint(
+        x: fe_mul(e, f),
+        y: fe_mul(g, h),
+        z: fe_mul(f, g),
+        t: fe_mul(e, h)
+    )
+
+# ============================================================================
+# Constant-Time Point Select
+# ============================================================================
+
+fn ed_point_cselect(p0: EdPoint, p1: EdPoint, choose_p1: u64) -> EdPoint:
+    """Constant-time point select: returns p1 if choose_p1=1, else p0.
+
+    Uses the XOR-mask pattern: out = a ^ (mask & (a ^ b))
+    where mask = 0 - choose_p1 (all-ones if 1, all-zeros if 0).
+
+    No branches on `choose_p1`.
+    """
+    EdPoint(
+        x: fe_cond_select(p0.x, p1.x, choose_p1),
+        y: fe_cond_select(p0.y, p1.y, choose_p1),
+        z: fe_cond_select(p0.z, p1.z, choose_p1),
+        t: fe_cond_select(p0.t, p1.t, choose_p1)
+    )
+
+# ============================================================================
+# Constant-Time Scalar Multiplication
+# ============================================================================
+
+fn ed_scalar_mul(scalar: [u8], base: EdPoint, d: Fe25519) -> EdPoint:
+    """Constant-time scalar multiplication using always-add-and-select.
+
+    Iterates all 256 bits of the scalar. For each bit:
+      Q = 2*Q
+      T = Q + base
+      Q = select(bit, T, Q)
+
+    No data-dependent branch on scalar bits; runtime is independent
+    of scalar Hamming weight.
+
+    The curve constant `d` is passed through for point addition.
+    """
+    var q = ed_point_identity()
+    var bit_pos: u64 = 255
+    while bit_pos >= 0:
+        q = ed_point_double(q)
+        val sum = ed_point_add(q, base, d)
+        val byte_idx = bit_pos / 8
+        val bit_idx = bit_pos - byte_idx * 8
+        val bit: u64 = (scalar[byte_idx].to_u64() >> bit_idx) & 1
+        q = ed_point_cselect(q, sum, bit)
+        if bit_pos == 0:
+            break
+        bit_pos = bit_pos - 1
+    q

@@ -1,0 +1,131 @@
+# Kernel VM Fault Handler — demand-paging page-fault handler (M1, REQ-4).
+#
+# Manages VMAs (virtual memory areas) and simulates demand paging
+# in interpreter mode. Production implementation maps physical frames.
+#
+# @cover vm_fault
+
+# ============================================================================
+# VmaKind constants
+# ============================================================================
+
+struct _VmaKindConsts:
+    """Virtual memory area kind constants singleton."""
+    anonymous:     i64
+    guard:         i64
+    copy_on_write: i64
+    file_backed:   i64
+
+var VmaKind = _VmaKindConsts(
+    anonymous:     0,
+    guard:         1,
+    copy_on_write: 2,
+    file_backed:   3
+)
+
+# ============================================================================
+# VMA table storage (tombstone-based)
+# ============================================================================
+
+var _vma_base_list:  [u64]  = []
+var _vma_size_list:  [u64]  = []
+var _vma_kind_list:  [i64]  = []
+var _vma_alive_list: [bool] = []
+
+# Physical frame counter (simulated — starts above zero)
+var _phys_frame_counter: u64 = 0x1000000
+
+# ============================================================================
+# Internal helpers
+# ============================================================================
+
+fn _vma_find(vaddr: u64) -> i64:
+    """Find the index of the VMA containing vaddr, or -1 if none."""
+    val n = _vma_base_list.len()
+    var i: i64 = 0
+    while i < n:
+        if _vma_alive_list[i]:
+            val base = _vma_base_list[i]
+            val top  = base + _vma_size_list[i]
+            if vaddr >= base and vaddr < top:
+                return i
+        i = i + 1
+    -1
+
+# ============================================================================
+# Public API
+# ============================================================================
+
+fn vm_fault_register_vma(base: u64, size: u64, kind: i64) -> bool:
+    """Register a virtual memory area.
+
+    Args:
+        base: virtual base address
+        size: region size in bytes (must be > 0)
+        kind: VmaKind constant
+
+    Returns:
+        true on success, false if size is zero.
+    """
+    if size == 0:
+        return false
+    _vma_base_list.push(base)
+    _vma_size_list.push(size)
+    _vma_kind_list.push(kind)
+    _vma_alive_list.push(true)
+    true
+
+fn vm_fault_unregister_vma(base: u64, size: u64):
+    """Unregister a VMA by base address and size.
+
+    Args:
+        base: virtual base address used during registration
+        size: size used during registration
+    """
+    val n = _vma_base_list.len()
+    var i: i64 = 0
+    while i < n:
+        if _vma_alive_list[i] and _vma_base_list[i] == base and _vma_size_list[i] == size:
+            _vma_alive_list[i] = false
+            return
+        i = i + 1
+
+fn vm_fault_map_anonymous(vaddr: u64) -> u64:
+    """Demand-map an anonymous page at vaddr.
+
+    If vaddr falls in a guard VMA, returns 0 (access fault).
+    Otherwise allocates and returns a simulated physical frame address.
+
+    Args:
+        vaddr: faulting virtual address
+
+    Returns:
+        Non-zero physical frame address on success, 0 for guard fault.
+    """
+    val idx = _vma_find(vaddr)
+    if idx < 0:
+        # No VMA — allocate a frame anyway (anonymous allocation)
+        _phys_frame_counter = _phys_frame_counter + 4096
+        return _phys_frame_counter
+    if _vma_kind_list[idx] == VmaKind.guard:
+        return 0
+    _phys_frame_counter = _phys_frame_counter + 4096
+    _phys_frame_counter
+
+fn vm_fault_handle(vaddr: u64, is_write: bool) -> text:
+    """Dispatch a page fault for vaddr.
+
+    Returns:
+        "mapped"    — fault handled, page is now mapped
+        "kill"      — guard page fault; process should be killed
+        "unhandled" — no VMA covers vaddr
+    """
+    val idx = _vma_find(vaddr)
+    if idx < 0:
+        return "unhandled"
+    val kind = _vma_kind_list[idx]
+    if kind == VmaKind.guard:
+        return "kill"
+    # anonymous, copy_on_write, file_backed: map the page
+    _phys_frame_counter = _phys_frame_counter + 4096
+    "mapped"

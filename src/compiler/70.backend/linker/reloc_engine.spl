@@ -1,0 +1,279 @@
+# Relocation Engine
+#
+# Applies ELF relocation formulas to section bytes. Pure computation —
+# caller owns the output buffer. Covers x86_64 core types; aarch64 and
+# RISC-V scaffolded with common types only.
+
+use std.linker.elf_parser.{ElfRelocation, elf_reloc_sym, elf_reloc_type}
+
+# ============================================================================
+# x86_64 Relocation Types (elf.h R_X86_64_*)
+# ============================================================================
+
+val R_X86_64_NONE: i64       = 0
+val R_X86_64_64: i64         = 1   # S + A
+val R_X86_64_PC32: i64       = 2   # S + A - P
+val R_X86_64_GOT32: i64      = 3
+val R_X86_64_PLT32: i64      = 4   # L + A - P (treated as S + A - P for static)
+val R_X86_64_32: i64         = 10  # S + A (truncated u32)
+val R_X86_64_32S: i64        = 11  # S + A (truncated s32)
+val R_X86_64_GOTPCREL: i64   = 9   # G + GOT + A - P
+
+# ============================================================================
+# AArch64 Relocation Types (subset)
+# ============================================================================
+
+val R_AARCH64_NONE: i64      = 0
+val R_AARCH64_ABS64: i64     = 257  # S + A
+val R_AARCH64_ABS32: i64     = 258  # S + A (u32)
+val R_AARCH64_CALL26: i64    = 283  # S + A - P (bits 27:2)
+val R_AARCH64_ADR_PREL_PG_HI21: i64 = 275  # Page(S+A) - Page(P)
+
+# ============================================================================
+# RISC-V Relocation Types (subset)
+# ============================================================================
+
+val R_RISCV_NONE: i64        = 0
+val R_RISCV_32: i64          = 1   # S + A (u32)
+val R_RISCV_64: i64          = 2   # S + A
+val R_RISCV_CALL: i64        = 18  # S + A - P (auipc+jalr pair)
+val R_RISCV_PCREL_HI20: i64  = 23  # S + A - P (bits 31:12)
+val R_RISCV_PCREL_LO12_I: i64 = 24 # S - referenced HI20 base
+val R_RISCV_HI20: i64        = 26  # S + A (bits 31:12)
+val R_RISCV_LO12_I: i64      = 27  # S + A (bits 11:0)
+
+# ============================================================================
+# Architecture Enum
+# ============================================================================
+
+enum RelocArch:
+    X86_64
+    AArch64
+    Riscv32
+    Riscv64
+
+# ============================================================================
+# Relocation Target
+# ============================================================================
+
+struct RelocTarget:
+    address: i64
+    addend: i64
+
+struct RelocResult:
+    success: bool
+    offset: i64
+    value: i64
+    error: text
+
+# ============================================================================
+# Byte patch helpers (little-endian)
+# ============================================================================
+
+fn patch_u32_le(bytes: [i64], offset: i64, value: i64) -> [i64]:
+    val b0 = value & 0xff
+    val b1 = (value >> 8) & 0xff
+    val b2 = (value >> 16) & 0xff
+    val b3 = (value >> 24) & 0xff
+    var result: [i64] = []
+    var i = 0
+    while i < bytes.len():
+        if i == offset:
+            result = result.push(b0)
+        else if i == offset + 1:
+            result = result.push(b1)
+        else if i == offset + 2:
+            result = result.push(b2)
+        else if i == offset + 3:
+            result = result.push(b3)
+        else:
+            result = result.push(bytes[i])
+        i = i + 1
+    result
+
+fn patch_u64_le(bytes: [i64], offset: i64, value: i64) -> [i64]:
+    val b0 = value & 0xff
+    val b1 = (value >> 8) & 0xff
+    val b2 = (value >> 16) & 0xff
+    val b3 = (value >> 24) & 0xff
+    val b4 = (value >> 32) & 0xff
+    val b5 = (value >> 40) & 0xff
+    val b6 = (value >> 48) & 0xff
+    val b7 = (value >> 56) & 0xff
+    var result: [i64] = []
+    var i = 0
+    while i < bytes.len():
+        if i == offset:
+            result = result.push(b0)
+        else if i == offset + 1:
+            result = result.push(b1)
+        else if i == offset + 2:
+            result = result.push(b2)
+        else if i == offset + 3:
+            result = result.push(b3)
+        else if i == offset + 4:
+            result = result.push(b4)
+        else if i == offset + 5:
+            result = result.push(b5)
+        else if i == offset + 6:
+            result = result.push(b6)
+        else if i == offset + 7:
+            result = result.push(b7)
+        else:
+            result = result.push(bytes[i])
+        i = i + 1
+    result
+
+fn read_u32_le(bytes: [i64], offset: i64) -> i64:
+    bytes[offset] | (bytes[offset + 1] << 8) | (bytes[offset + 2] << 16) | (bytes[offset + 3] << 24)
+
+# ============================================================================
+# x86_64 Relocation Application
+# ============================================================================
+
+# reason: positional linker reloc_engine API
+fn reloc_apply_x86_64(bytes: [i64], offset: i64, rtype: i64, s: i64, a: i64, p: i64) -> RelocResult:
+    if rtype == R_X86_64_NONE:
+        return RelocResult(success: true, offset: offset, value: 0, error: "")
+
+    if rtype == R_X86_64_64:
+        val v = s + a
+        return RelocResult(success: true, offset: offset, value: v, error: "")
+
+    if rtype == R_X86_64_PC32 or rtype == R_X86_64_PLT32:
+        val v = s + a - p
+        return RelocResult(success: true, offset: offset, value: v, error: "")
+
+    if rtype == R_X86_64_32:
+        val v = s + a
+        return RelocResult(success: true, offset: offset, value: v & 0xffffffff, error: "")
+
+    if rtype == R_X86_64_32S:
+        val v = s + a
+        return RelocResult(success: true, offset: offset, value: v, error: "")
+
+    if rtype == R_X86_64_GOTPCREL:
+        val v = s + a - p
+        return RelocResult(success: true, offset: offset, value: v, error: "")
+
+    RelocResult(success: false, offset: offset, value: 0, error: "unsupported x86_64 reloc type {rtype}")
+
+# ============================================================================
+# AArch64 Relocation Application (scaffold)
+# ============================================================================
+
+# reason: positional linker reloc_engine API
+fn reloc_apply_aarch64(bytes: [i64], offset: i64, rtype: i64, s: i64, a: i64, p: i64) -> RelocResult:
+    if rtype == R_AARCH64_NONE:
+        return RelocResult(success: true, offset: offset, value: 0, error: "")
+
+    if rtype == R_AARCH64_ABS64:
+        val v = s + a
+        return RelocResult(success: true, offset: offset, value: v, error: "")
+
+    if rtype == R_AARCH64_ABS32:
+        val v = s + a
+        return RelocResult(success: true, offset: offset, value: v & 0xffffffff, error: "")
+
+    if rtype == R_AARCH64_CALL26:
+        val v = (s + a - p) >> 2
+        return RelocResult(success: true, offset: offset, value: v & 0x3ffffff, error: "")
+
+    RelocResult(success: false, offset: offset, value: 0, error: "unsupported aarch64 reloc type {rtype}")
+
+# ============================================================================
+# RISC-V Relocation Application (scaffold)
+# ============================================================================
+
+# reason: positional linker reloc_engine API
+fn reloc_apply_riscv(bytes: [i64], offset: i64, rtype: i64, s: i64, a: i64, p: i64) -> RelocResult:
+    if rtype == R_RISCV_NONE:
+        return RelocResult(success: true, offset: offset, value: 0, error: "")
+
+    if rtype == R_RISCV_32:
+        val v = s + a
+        return RelocResult(success: true, offset: offset, value: v & 0xffffffff, error: "")
+
+    if rtype == R_RISCV_64:
+        val v = s + a
+        return RelocResult(success: true, offset: offset, value: v, error: "")
+
+    if rtype == R_RISCV_HI20:
+        val v = s + a
+        return RelocResult(success: true, offset: offset, value: (v + 0x800) >> 12, error: "")
+
+    if rtype == R_RISCV_LO12_I:
+        val v = s + a
+        return RelocResult(success: true, offset: offset, value: v & 0xfff, error: "")
+
+    RelocResult(success: false, offset: offset, value: 0, error: "unsupported riscv reloc type {rtype}")
+
+# ============================================================================
+# Unified dispatch
+# ============================================================================
+
+# reason: positional linker reloc_engine API
+fn reloc_apply(arch: RelocArch, bytes: [i64], offset: i64, rtype: i64, s: i64, a: i64, p: i64) -> RelocResult:
+    match arch:
+        case X86_64:
+            reloc_apply_x86_64(bytes, offset, rtype, s, a, p)
+        case AArch64:
+            reloc_apply_aarch64(bytes, offset, rtype, s, a, p)
+        case Riscv32:
+            reloc_apply_riscv(bytes, offset, rtype, s, a, p)
+        case Riscv64:
+            reloc_apply_riscv(bytes, offset, rtype, s, a, p)
+
+# reason: positional linker reloc_engine API
+fn reloc_patch_bytes(arch: RelocArch, bytes: [i64], offset: i64, rtype: i64, s: i64, a: i64, p: i64) -> [i64]:
+    val result = reloc_apply(arch, bytes, offset, rtype, s, a, p)
+    if not result.success:
+        return bytes
+
+    match arch:
+        case X86_64:
+            if rtype == R_X86_64_64:
+                patch_u64_le(bytes, offset, result.value)
+            else:
+                patch_u32_le(bytes, offset, result.value)
+        case AArch64:
+            if rtype == R_AARCH64_ABS64:
+                patch_u64_le(bytes, offset, result.value)
+            else if rtype == R_AARCH64_CALL26:
+                val insn = read_u32_le(bytes, offset)
+                val patched = (insn & 0xfc000000) | (result.value & 0x3ffffff)
+                patch_u32_le(bytes, offset, patched)
+            else:
+                patch_u32_le(bytes, offset, result.value)
+        case Riscv32:
+            patch_u32_le(bytes, offset, result.value)
+        case Riscv64:
+            if rtype == R_RISCV_64:
+                patch_u64_le(bytes, offset, result.value)
+            else:
+                patch_u32_le(bytes, offset, result.value)
+
+fn reloc_arch_from_machine(machine: i64) -> RelocArch:
+    if machine == 62:
+        RelocArch.X86_64
+    else if machine == 183:
+        RelocArch.AArch64
+    else if machine == 243:
+        RelocArch.Riscv64
+    else:
+        RelocArch.X86_64
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export RelocArch, RelocTarget, RelocResult
+export reloc_apply, reloc_apply_x86_64, reloc_apply_aarch64, reloc_apply_riscv
+export reloc_patch_bytes, reloc_arch_from_machine
+export patch_u32_le, patch_u64_le, read_u32_le
+export R_X86_64_NONE, R_X86_64_64, R_X86_64_PC32, R_X86_64_GOT32
+export R_X86_64_PLT32, R_X86_64_32, R_X86_64_32S, R_X86_64_GOTPCREL
+export R_AARCH64_NONE, R_AARCH64_ABS64, R_AARCH64_ABS32, R_AARCH64_CALL26
+export R_AARCH64_ADR_PREL_PG_HI21
+export R_RISCV_NONE, R_RISCV_32, R_RISCV_64, R_RISCV_CALL
+export R_RISCV_PCREL_HI20, R_RISCV_PCREL_LO12_I, R_RISCV_HI20, R_RISCV_LO12_I
