@@ -1,0 +1,101 @@
+# Netcode spec — server, client, sync, RPC
+
+use std.spec.{describe, it, expect}
+
+describe "GameServer":
+    it "connects clients and tracks count":
+        var srv = GameServer.new(4, 60)
+        srv.start()
+        val c1 = srv.connect_client("10.0.0.1")
+        val c2 = srv.connect_client("10.0.0.2")
+        expect(c1).to_be_greater_than(0)
+        expect(c2).to_be_greater_than(0)
+        expect(srv.client_count()).to_equal(2)
+
+    it "rejects clients when full":
+        var srv = GameServer.new(1, 60)
+        srv.start()
+        val c1 = srv.connect_client("10.0.0.1")
+        val c2 = srv.connect_client("10.0.0.2")
+        expect(c1).to_be_greater_than(0)
+        expect(c2).to_equal(-1)
+
+    it "disconnects client":
+        var srv = GameServer.new(4, 60)
+        srv.start()
+        val cid = srv.connect_client("10.0.0.1")
+        expect(srv.client_count()).to_equal(1)
+        srv.disconnect_client(cid)
+        expect(srv.client_count()).to_equal(0)
+
+    it "advances tick":
+        var srv = GameServer.new(4, 60)
+        srv.start()
+        srv.tick()
+        srv.tick()
+        srv.tick()
+        expect(srv.get_tick()).to_equal(3)
+
+describe "GameClient":
+    it "connects and tracks state":
+        var cl = GameClient.new("127.0.0.1")
+        expect(cl.is_connected()).to_equal(false)
+        cl.connect(42)
+        expect(cl.is_connected()).to_equal(true)
+
+    it "buffers input commands":
+        var cl = GameClient.new("127.0.0.1")
+        cl.connect(1)
+        cl.send_input(1.0, 0.0, 0.0)
+        cl.send_input(0.0, 1.0, 0.0)
+        expect(cl.input_count()).to_equal(2)
+
+    it "receives server state snapshots":
+        var cl = GameClient.new("127.0.0.1")
+        cl.connect(1)
+        cl.receive_state(10, 5.0, 0.0, 3.0, 1.0, 0.0, 0.0)
+        expect(cl.state_count()).to_equal(1)
+        expect(cl.get_server_tick()).to_equal(10)
+
+describe "StateSync":
+    it "registers entities and sets fields":
+        var ss = StateSync.new(10)
+        ss.register_entity(1, 0)
+        ss.set_field(1, "hp", "100")
+        expect(ss.entity_count()).to_equal(1)
+        expect(ss.get_field_value(1, "hp")).to_equal("100")
+
+    it "tracks dirty fields":
+        var ss = StateSync.new(10)
+        ss.register_entity(1, 0)
+        ss.set_field(1, "hp", "100")
+        ss.set_field(1, "mana", "50")
+        expect(ss.get_dirty_count(1)).to_equal(2)
+        ss.mark_synced(1)
+        expect(ss.get_dirty_count(1)).to_equal(0)
+
+describe "RPCDispatcher":
+    it "registers and dispatches calls":
+        var rpc = RPCDispatcher.new(100)
+        rpc.register("fire", "server", true)
+        rpc.register("jump", "client", false)
+        expect(rpc.registration_count()).to_equal(2)
+        var args: [text] = []
+        args.push("weapon1")
+        val ok = rpc.dispatch("fire", 1, args, 0.016)
+        expect(ok).to_equal(true)
+        expect(rpc.call_count()).to_equal(1)
+
+    it "rejects unregistered method":
+        var rpc = RPCDispatcher.new(100)
+        var args: [text] = []
+        val ok = rpc.dispatch("nonexistent", 1, args, 0.0)
+        expect(ok).to_equal(false)
+        expect(rpc.call_count()).to_equal(0)
+
+    it "unregisters methods":
+        var rpc = RPCDispatcher.new(100)
+        rpc.register("fire", "server", true)
+        expect(rpc.is_registered("fire")).to_equal(true)
+        rpc.unregister("fire")
+        expect(rpc.is_registered("fire")).to_equal(false)
