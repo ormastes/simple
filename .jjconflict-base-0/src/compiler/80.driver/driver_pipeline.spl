@@ -32,228 +32,232 @@ use compiler.driver.driver_source_loading.{_format_nll_error}
 
 extern fn rt_env_get(key: text) -> text
 
-# --------------------------------------------------------------------------
-# Mode: JIT Compile and Run
-# --------------------------------------------------------------------------
+fn _extract_pipeline_ctx(driver: CompilerDriver) -> CompileContext:
+    driver.ctx
 
-me CompilerDriver.jit_compile_and_run() -> CompileResult:
-    # Lower to MIR
-    if not self.lower_to_mir():
-        val first_err = self.ctx.errors.first()
-        val msg = if first_err != nil: first_err else: "MIR lowering failed"
-        return CompileResult.CodegenError(msg)
+impl CompilerDriver:
+    # --------------------------------------------------------------------------
+    # Mode: JIT Compile and Run
+    # --------------------------------------------------------------------------
 
-    # Evict HIR modules (no longer needed after MIR lowering)
-    if self.ctx.options.low_memory:
-        self.ctx.evict_hir()
+    me jit_compile_and_run() -> CompileResult:
+        # Lower to MIR
+        if not self.lower_to_mir():
+            val first_err = self.ctx.errors.first()
+            val msg = if first_err != nil: first_err else: "MIR lowering failed"
+            return CompileResult.CodegenError(msg)
 
-    # Borrow checking
-    if not self.borrow_check():
-        return CompileResult.BorrowError(self.ctx.errors)
+        # Evict HIR modules (no longer needed after MIR lowering)
+        if self.ctx.options.low_memory:
+            self.ctx.evict_hir()
 
-    # Process async functions (generate state machines for await/yield)
-    val _async_state_machines = self.process_async()
+        # Borrow checking
+        if not self.borrow_check():
+            return CompileResult.BorrowError(self.ctx.errors)
 
-    # Optimize MIR (speed optimization for JIT)
-    self.optimize_mir(optimizationconfig_speed())
+        # Process async functions (generate state machines for await/yield)
+        val _async_state_machines = self.process_async()
 
-    # AOP weaving (after optimization, before codegen)
-    self.weave_aop()
+        # Optimize MIR (speed optimization for JIT)
+        self.optimize_mir(optimizationconfig_speed())
 
-    # Debug trace injection (after AOP, before codegen)
-    self.apply_debug_trace()
+        # AOP weaving (after optimization, before codegen)
+        self.weave_aop()
 
-    # JIT compile
-    var pipeline = CodegenPipeline.jit()
-    var last_compiled: CompiledModule? = nil
+        # Debug trace injection (after AOP, before codegen)
+        self.apply_debug_trace()
 
-    for name in self.ctx.mir_modules.keys():
-        val mir_module = self.ctx.mir_modules[name]
-        match pipeline.compile_module(mir_module):
-            case Ok(compiled):
-                last_compiled = Some(compiled)
+        # JIT compile
+        var pipeline = CodegenPipeline.jit()
+        var last_compiled: CompiledModule? = nil
+
+        for name in self.ctx.mir_modules.keys():
+            val mir_module = self.ctx.mir_modules[name]
+            match pipeline.compile_module(mir_module):
+                case Ok(compiled):
+                    last_compiled = Some(compiled)
+                case Err(e):
+                    return CompileResult.CodegenError("JIT compile error in {name}: {e.message}")
+
+        if last_compiled == nil:
+            return CompileResult.RuntimeError("No modules compiled")
+
+        val compiled = last_compiled.unwrap()
+        match compiled.call("main", []):
+            case Ok(result):
+                compiled.cleanup()
+                CompileResult.Success(result)
             case Err(e):
-                return CompileResult.CodegenError("JIT compile error in {name}: {e.message}")
+                compiled.cleanup()
+                CompileResult.RuntimeError(e.message)
 
-    if last_compiled == nil:
-        return CompileResult.RuntimeError("No modules compiled")
+    # --------------------------------------------------------------------------
+    # Mode: SMF Exec (load and execute pre-compiled SMF)
+    # --------------------------------------------------------------------------
 
-    val compiled = last_compiled.unwrap()
-    match compiled.call("main", []):
-        case Ok(result):
-            compiled.cleanup()
-            CompileResult.Success(result)
-        case Err(e):
-            compiled.cleanup()
-            CompileResult.RuntimeError(e.message)
+    me execute_smf() -> CompileResult:
+        """Load a pre-compiled SMF file and execute its main function.
 
-# --------------------------------------------------------------------------
-# Mode: SMF Exec (load and execute pre-compiled SMF)
-# --------------------------------------------------------------------------
+        Uses JIT infrastructure to map SMF code into executable memory.
+        Falls back to interpret mode if SMF loading fails.
+        """
+        val smf_path = self.ctx.options.input_files[0]
+        log_debug("execute_smf: loading {smf_path}")
 
-me CompilerDriver.execute_smf() -> CompileResult:
-    """Load a pre-compiled SMF file and execute its main function.
+        # Use JIT pipeline to load and execute the SMF
+        var pipeline = CodegenPipeline.jit()
+        match pipeline.load_smf_and_execute(smf_path):
+            case Ok(result):
+                CompileResult.Success(result)
+            case Err(e):
+                # Fallback: log and return error (caller can retry with interpret)
+                log_warn("SMF exec failed: {e}, falling back")
+                CompileResult.RuntimeError("SMF execution failed: {e}")
 
-    Uses JIT infrastructure to map SMF code into executable memory.
-    Falls back to interpret mode if SMF loading fails.
-    """
-    val smf_path = self.ctx.options.input_files[0]
-    log_debug("execute_smf: loading {smf_path}")
+    # --------------------------------------------------------------------------
+    # Borrow Checking
+    # --------------------------------------------------------------------------
 
-    # Use JIT pipeline to load and execute the SMF
-    var pipeline = CodegenPipeline.jit()
-    match pipeline.load_smf_and_execute(smf_path):
-        case Ok(result):
-            CompileResult.Success(result)
-        case Err(e):
-            # Fallback: log and return error (caller can retry with interpret)
-            log_warn("SMF exec failed: {e}, falling back")
-            CompileResult.RuntimeError("SMF execution failed: {e}")
+    me borrow_check() -> bool:
+        """Run borrow checking on all MIR modules.
 
-# --------------------------------------------------------------------------
-# Borrow Checking
-# --------------------------------------------------------------------------
+        Uses the NLL (Non-Lexical Lifetimes) borrow checker to detect:
+        - Conflicting borrows (E0502)
+        - Use after move
+        - Assignment while borrowed
+        Errors include relatedInformation for first borrow location.
+        """
+        if self.ctx.options.no_borrow_check:
+            log_debug("borrow checking skipped (--no-borrow-check)")
+            return true
+        log_debug("running borrow check")
+        var checker = BorrowChecker.create()
+        for name in self.ctx.mir_modules.keys():
+            val mir_module = self.ctx.mir_modules[name]
+            val all_errors = check_mir_module(mir_module)
+            for err in all_errors:
+                self.ctx.add_error(_format_nll_error(err))
+        self.ctx.errors.len() == 0
 
-me CompilerDriver.borrow_check() -> bool:
-    """Run borrow checking on all MIR modules.
+    fn format_borrow_error(err: NLLError) -> text:
+        """Format a borrow error for display."""
+        _format_nll_error(err)
 
-    Uses the NLL (Non-Lexical Lifetimes) borrow checker to detect:
-    - Conflicting borrows (E0502)
-    - Use after move
-    - Assignment while borrowed
-    Errors include relatedInformation for first borrow location.
-    """
-    if self.ctx.options.no_borrow_check:
-        log_debug("borrow checking skipped (--no-borrow-check)")
-        return true
-    log_debug("running borrow check")
-    var checker = BorrowChecker.create()
-    for name in self.ctx.mir_modules.keys():
-        val mir_module = self.ctx.mir_modules[name]
-        val all_errors = check_mir_module(mir_module)
-        for err in all_errors:
-            self.ctx.add_error(_format_nll_error(err))
-    self.ctx.errors.len() == 0
+    # --------------------------------------------------------------------------
+    # Async Processing
+    # --------------------------------------------------------------------------
 
-fn CompilerDriver.format_borrow_error(err: NLLError) -> text:
-    """Format a borrow error for display."""
-    _format_nll_error(err)
+    me process_async() -> Dict<text, AsyncStateMachine>:
+        """Process async functions and generate state machines.
 
-# --------------------------------------------------------------------------
-# Async Processing
-# --------------------------------------------------------------------------
+        This is called after MIR lowering to analyze and transform async functions.
+        State machines are used by codegen for async execution.
+        """
+        val log = self.ctx.logger
+        log_debug("processing async functions")
 
-me CompilerDriver.process_async() -> Dict<text, AsyncStateMachine>:
-    """Process async functions and generate state machines.
+        val state_machines = process_async_mir(self.ctx.mir_modules)
 
-    This is called after MIR lowering to analyze and transform async functions.
-    State machines are used by codegen for async execution.
-    """
-    val log = self.ctx.logger
-    log_debug("processing async functions")
+        log_debug("generated async state machines")
+        state_machines
 
-    val state_machines = process_async_mir(self.ctx.mir_modules)
+    # --------------------------------------------------------------------------
+    # MIR Optimization
+    # --------------------------------------------------------------------------
 
-    log_debug("generated async state machines")
-    state_machines
+    me optimize_mir(config: OptimizationConfig):
+        """Apply MIR optimization passes to all modules."""
+        val log = self.ctx.logger
+        log_debug("optimizing MIR modules")
 
-# --------------------------------------------------------------------------
-# MIR Optimization
-# --------------------------------------------------------------------------
+        for name in self.ctx.mir_modules.keys():
+            val mir_module = self.ctx.mir_modules[name]
+            val optimized = optimize_mir_module(mir_module, config)
+            # Direct mutation (avoids copy-modify-reassign bug in compiled mode)
+            self.ctx.mir_modules[name] = optimized
 
-me CompilerDriver.optimize_mir(config: OptimizationConfig):
-    """Apply MIR optimization passes to all modules."""
-    val log = self.ctx.logger
-    log_debug("optimizing MIR modules")
+    # --------------------------------------------------------------------------
+    # AOP Weaving
+    # --------------------------------------------------------------------------
 
-    for name in self.ctx.mir_modules.keys():
-        val mir_module = self.ctx.mir_modules[name]
-        val optimized = optimize_mir_module(mir_module, config)
-        # Direct mutation (avoids copy-modify-reassign bug in compiled mode)
-        self.ctx.mir_modules[name] = optimized
+    me weave_aop():
+        """Apply AOP weaving to all MIR modules using advice from HIR modules."""
+        # Collect all AOP advices from HIR modules
+        var all_advices: [HirAopAdvice] = []
+        for name in self.ctx.hir_modules.keys():
+            val hir_mod = self.ctx.hir_modules[name]
+            for advice in hir_mod.aop_advices:
+                all_advices.push(advice)
 
-# --------------------------------------------------------------------------
-# AOP Weaving
-# --------------------------------------------------------------------------
+        if all_advices.len() == 0:
+            log_debug("AOP weaving: no advice declarations found, skipping")
+            return
 
-me CompilerDriver.weave_aop():
-    """Apply AOP weaving to all MIR modules using advice from HIR modules."""
-    # Collect all AOP advices from HIR modules
-    var all_advices: [HirAopAdvice] = []
-    for name in self.ctx.hir_modules.keys():
-        val hir_mod = self.ctx.hir_modules[name]
-        for advice in hir_mod.aop_advices:
-            all_advices.push(advice)
+        # Validate predicates and advice forms
+        for advice in all_advices:
+            val pred_err = validate_predicate(advice.predicate_text)
+            if pred_err.len() > 0:
+                self.ctx.errors.push("[AOP] {pred_err} in advice '{advice.advice_function}'")
+            val form_err = validate_advice_form(advice.form)
+            if form_err.len() > 0:
+                self.ctx.errors.push("[AOP] {form_err} in advice '{advice.advice_function}'")
 
-    if all_advices.len() == 0:
-        log_debug("AOP weaving: no advice declarations found, skipping")
-        return
+        # Build weaving config from collected advices
+        val config = weavingconfig_from_hir_advices(all_advices)
+        if not config.enabled:
+            return
 
-    # Validate predicates and advice forms
-    for advice in all_advices:
-        val pred_err = validate_predicate(advice.predicate_text)
-        if pred_err.len() > 0:
-            self.ctx.errors.push("[AOP] {pred_err} in advice '{advice.advice_function}'")
-        val form_err = validate_advice_form(advice.form)
-        if form_err.len() > 0:
-            self.ctx.errors.push("[AOP] {form_err} in advice '{advice.advice_function}'")
+        val all_rules = weavingconfig_all_rules(config)
+        val rule_count = all_rules.len()
+        log_debug("AOP weaving")
 
-    # Build weaving config from collected advices
-    val config = weavingconfig_from_hir_advices(all_advices)
-    if not config.enabled:
-        return
+        # Detect advice conflicts (E1504, E1506)
+        val conflicts = detect_advice_conflicts(all_rules)
+        for conflict in conflicts:
+            if conflict.is_error():
+                self.ctx.errors.push("[AOP] {conflict.message}")
+            elif conflict.is_warning():
+                self.ctx.warnings.push("[AOP] {conflict.message}")
 
-    val all_rules = weavingconfig_all_rules(config)
-    val rule_count = all_rules.len()
-    log_debug("AOP weaving")
+        # Weave each MIR function
+        for mod_name in self.ctx.mir_modules.keys():
+            val mir_module = self.ctx.mir_modules[mod_name]
+            for func in mir_module.functions:
+                # Extract block info for AOP matching
+                val blocks = extract_mir_block_info(func.blocks)
+                # Run weaving analysis
+                val result = weave_function(config, func.name, mod_name, [], [], blocks)
+                # Apply advice insertions to MIR
+                if result.advices_inserted > 0:
+                    val woven_func = apply_weaving_result(func, result)
+                    mir_module.functions[func.name] = woven_func
+                # Report diagnostics
+                for diag in result.diagnostics:
+                    if diag.is_error():
+                        self.ctx.errors.push("[AOP] {diag.message}")
+                    elif diag.is_warning():
+                        self.ctx.warnings.push("[AOP] {diag.message}")
 
-    # Detect advice conflicts (E1504, E1506)
-    val conflicts = detect_advice_conflicts(all_rules)
-    for conflict in conflicts:
-        if conflict.is_error():
-            self.ctx.errors.push("[AOP] {conflict.message}")
-        elif conflict.is_warning():
-            self.ctx.warnings.push("[AOP] {conflict.message}")
+    # --------------------------------------------------------------------------
+    # Debug Trace Injection
+    # --------------------------------------------------------------------------
 
-    # Weave each MIR function
-    for mod_name in self.ctx.mir_modules.keys():
-        val mir_module = self.ctx.mir_modules[mod_name]
-        for func in mir_module.functions:
-            # Extract block info for AOP matching
-            val blocks = extract_mir_block_info(func.blocks)
-            # Run weaving analysis
-            val result = weave_function(config, func.name, mod_name, [], [], blocks)
-            # Apply advice insertions to MIR
-            if result.advices_inserted > 0:
-                val woven_func = apply_weaving_result(func, result)
-                mir_module.functions[func.name] = woven_func
-            # Report diagnostics
-            for diag in result.diagnostics:
-                if diag.is_error():
-                    self.ctx.errors.push("[AOP] {diag.message}")
-                elif diag.is_warning():
-                    self.ctx.warnings.push("[AOP] {diag.message}")
+    me apply_debug_trace():
+        """Apply semantic trace injection to all MIR modules.
 
-# --------------------------------------------------------------------------
-# Debug Trace Injection
-# --------------------------------------------------------------------------
+        Reads self.ctx.options.debug_trace_level (text).  If empty or
+        "none", this is a no-op.  Otherwise injects __spl_trace_* calls
+        into every MIR function, gated by the requested level."""
+        val level = self.ctx.options.debug_trace_level
+        if level == "" or level == "none":
+            return
 
-me CompilerDriver.apply_debug_trace():
-    """Apply semantic trace injection to all MIR modules.
+        log_debug("debug trace injection: level={level}")
+        for name in self.ctx.mir_modules.keys():
+            val mir_module = self.ctx.mir_modules[name]
+            val instrumented = inject_debug_trace(mir_module, level)
+            self.ctx.mir_modules[name] = instrumented
 
-    Reads self.ctx.options.debug_trace_level (text).  If empty or
-    "none", this is a no-op.  Otherwise injects __spl_trace_* calls
-    into every MIR function, gated by the requested level."""
-    val level = self.ctx.options.debug_trace_level
-    if level == "" or level == "none":
-        return
-
-    log_debug("debug trace injection: level={level}")
-    for name in self.ctx.mir_modules.keys():
-        val mir_module = self.ctx.mir_modules[name]
-        val instrumented = inject_debug_trace(mir_module, level)
-        self.ctx.mir_modules[name] = instrumented
-
-fn CompilerDriver.get_optimization_config() -> OptimizationConfig:
-    """Get optimization config from compiler options."""
-    optimizationconfig_speed()
+    fn get_optimization_config() -> OptimizationConfig:
+        """Get optimization config from compiler options."""
+        optimizationconfig_speed()
