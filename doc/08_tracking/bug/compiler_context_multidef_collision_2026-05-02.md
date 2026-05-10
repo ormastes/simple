@@ -3,6 +3,7 @@
 **Filed:** 2026-05-02 by W15-K agent
 **Discovered during:** W15-K HIR class 3b source-side typo fixes
 **Reclassified from:** W13-H class 3b → actually class 3a (multi-def collision)
+**Status:** FIXED 2026-05-10. Renamed `src/compiler/80.driver/init.spl` CompilerContext → DriverContext to eliminate name collision with the two loader CompilerContext definitions.
 
 ## Symptom
 
