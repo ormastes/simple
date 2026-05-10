@@ -1,74 +1,120 @@
-# TRACE32 JtagProbe implementation.
-# Uses existing T32 FFI for memory/register access.
+# TRACE32 JtagProbe implementation with watchdog hang recovery.
+# Uses T32Watchdog for liveness monitoring and auto-reconnect.
 # Host-side only.
 
 use std.debug.remote.t32_ffi.t32_memory (t32_read_memory, t32_write_memory)
 use std.debug.remote.t32_ffi.t32_register (t32_read_register_by_name, t32_write_register_by_name)
 use std.debug.remote.t32_ffi.t32_core (t32_break, t32_go, t32_get_state)
+use std.os.realtime.jtag.t32_watchdog (T32Watchdog, T32WatchdogConfig)
 
 class Trace32Probe:
-    """TRACE32 JTAG probe via T32 remote API."""
+    """TRACE32 JTAG probe with watchdog-guarded T32 remote API."""
     host: text
     port: i32
     arch: text
     connected: bool
+    watchdog: T32Watchdog
 
-    static fn new(host: text, port: i32, arch: text) -> Trace32Probe:
+    static fn with_watchdog(host: text, port: i32, arch: text, config: T32WatchdogConfig) -> Trace32Probe:
         Trace32Probe(
             host: host,
             port: port,
             arch: arch,
-            connected: false
+            connected: false,
+            watchdog: T32Watchdog.new(config)
         )
 
+    static fn new(host: text, port: i32, arch: text) -> Trace32Probe:
+        val config = T32WatchdogConfig(
+            ping_timeout_ms: 3000,
+            operation_timeout_ms: 10000,
+            max_retries: 3,
+            auto_reconnect: true,
+            kill_on_hang: false,
+            host: host,
+            port: port
+        )
+        Trace32Probe.with_watchdog(host, port, arch, config)
+
     me connect() -> bool:
-        """Connect to TRACE32 remote API."""
-        self.connected = true
-        true
+        """Connect to TRACE32 via watchdog-protected path."""
+        val ok = self.watchdog.connect()
+        self.connected = ok
+        ok
 
-    fn halt() -> bool:
-        """Break (halt) the target CPU."""
+    me disconnect():
+        """Graceful disconnect with watchdog cleanup."""
+        self.watchdog.disconnect()
+        self.connected = false
+
+    me halt() -> bool:
+        """Break (halt) the target CPU via guarded op."""
         if not self.connected:
             return false
-        t32_break()
-        true
+        self.watchdog.guarded_op("halt", fn() -> bool:
+            t32_break()
+            true
+        )
 
-    fn resume() -> bool:
-        """Resume (go) the target CPU."""
+    me resume() -> bool:
+        """Resume (go) the target CPU via guarded op."""
         if not self.connected:
             return false
-        t32_go()
-        true
+        self.watchdog.guarded_op("resume", fn() -> bool:
+            t32_go()
+            true
+        )
 
-    fn read_region(addr: u64, len: i32) -> [u8]:
-        """Read memory region via T32 API."""
+    me reset() -> bool:
+        """System reset via guarded op."""
+        if not self.connected:
+            return false
+        self.watchdog.guarded_op("reset", fn() -> bool:
+            t32_break()
+            true
+        )
+
+    me read_region(addr: u64, len: i32) -> [u8]:
+        """Read memory region with watchdog liveness check."""
         var result: [u8] = []
         if not self.connected:
+            return result
+        if not self.watchdog.is_alive():
+            self.watchdog.check_alive()
             return result
         result = t32_read_memory(addr, len)
         result
 
-    fn write_region(addr: u64, data: [u8]) -> bool:
-        """Write memory region via T32 API."""
+    me write_region(addr: u64, data: [u8]) -> bool:
+        """Write memory region with watchdog liveness check."""
         if not self.connected:
+            return false
+        if not self.watchdog.is_alive():
+            self.watchdog.check_alive()
             return false
         t32_write_memory(addr, data)
         true
 
-    fn read_register(name: text) -> u64:
-        """Read a named CPU register."""
+    me read_register(name: text) -> u64:
+        """Read a named CPU register with watchdog liveness check."""
         if not self.connected:
+            return 0u64
+        if not self.watchdog.is_alive():
+            self.watchdog.check_alive()
             return 0u64
         t32_read_register_by_name(name)
 
-    fn write_register(name: text, value: u64) -> bool:
-        """Write a named CPU register."""
+    me write_register(name: text, value: u64) -> bool:
+        """Write a named CPU register with watchdog liveness check."""
         if not self.connected:
+            return false
+        if not self.watchdog.is_alive():
+            self.watchdog.check_alive()
             return false
         t32_write_register_by_name(name, value)
         true
 
-    fn read_all_registers() -> [u64]:
+    me read_all_registers() -> [u64]:
         """Read all registers for the current architecture."""
         var regs: [u64] = []
         if not self.connected:
@@ -81,7 +127,7 @@ class Trace32Probe:
             i = i + 1
         regs
 
-    fn write_all_registers(regs: [u64]) -> bool:
+    me write_all_registers(regs: [u64]) -> bool:
         """Write all registers for the current architecture."""
         if not self.connected:
             return false
@@ -99,12 +145,9 @@ class Trace32Probe:
         val state = t32_get_state()
         state == 0
 
-    fn reset() -> bool:
-        """System reset via TRACE32."""
-        if not self.connected:
-            return false
-        t32_break()
-        true
+    fn is_connected() -> bool:
+        """Check connection status including watchdog liveness."""
+        self.connected and self.watchdog.is_alive()
 
 fn get_t32_register_names(arch: text) -> [text]:
     """Return T32-style register names per architecture."""

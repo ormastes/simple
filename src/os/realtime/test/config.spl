@@ -4,13 +4,127 @@
 # Default: replay=off, no fuzz, no session sharing (fast unit tests).
 # Session and fuzz modes are opt-in via config presets.
 #
+# Runtime-changeable config via module-level mutable globals:
+#   g_rtos_config  — current RtosTestConfig
+#   g_jtag_config  — current RtosJtagConfig (OpenOCD or TRACE32)
+#
 # jj integration: checkpoint IDs are stable across runs so `jj` can
 # track which checkpoint corresponds to which test baseline.
+
+use std.os.realtime.jtag.t32_watchdog (T32WatchdogConfig)
+
+# --- Profile constants ---
 
 val TEST_PROFILE_FAST: i32 = 0
 val TEST_PROFILE_SESSION: i32 = 1
 val TEST_PROFILE_FUZZ: i32 = 2
 val TEST_PROFILE_VERIFY: i32 = 3
+
+# --- JTAG probe type constants ---
+
+val JTAG_PROBE_OPENOCD: i32 = 0
+val JTAG_PROBE_TRACE32: i32 = 1
+
+# --- JTAG config class ---
+
+class RtosJtagConfig:
+    """JTAG probe configuration for RTOS test sessions."""
+    probe_type: i32
+    host: text
+    port: i32
+    t32_ping_timeout_ms: i64
+    t32_operation_timeout_ms: i64
+    t32_max_retries: i32
+    t32_auto_reconnect: bool
+    t32_kill_on_hang: bool
+
+    static fn default_openocd() -> RtosJtagConfig:
+        """OpenOCD defaults: localhost:3333, T32 fields zeroed."""
+        RtosJtagConfig(
+            probe_type: JTAG_PROBE_OPENOCD,
+            host: "localhost",
+            port: 3333,
+            t32_ping_timeout_ms: 0,
+            t32_operation_timeout_ms: 0,
+            t32_max_retries: 0,
+            t32_auto_reconnect: false,
+            t32_kill_on_hang: false
+        )
+
+    static fn default_trace32() -> RtosJtagConfig:
+        """TRACE32 defaults matching config/simple.test.sdn."""
+        RtosJtagConfig(
+            probe_type: JTAG_PROBE_TRACE32,
+            host: "localhost",
+            port: 20000,
+            t32_ping_timeout_ms: 3000,
+            t32_operation_timeout_ms: 10000,
+            t32_max_retries: 3,
+            t32_auto_reconnect: true,
+            t32_kill_on_hang: false
+        )
+
+# --- Module-level mutable globals (runtime-changeable config) ---
+
+var g_rtos_config: RtosTestConfig = RtosTestConfig(
+    arch: 0,
+    replay_mode: RTOS_REPLAY_OFF,
+    session_mode: SESSION_RESET,
+    timeout_ms: 5000,
+    chaos_seed: 0u64,
+    fuzz_iterations: 0,
+    fuzz_enabled: false,
+    checkpoint_id: 0
+)
+
+var g_jtag_config: RtosJtagConfig = RtosJtagConfig(
+    probe_type: JTAG_PROBE_OPENOCD,
+    host: "localhost",
+    port: 3333,
+    t32_ping_timeout_ms: 0,
+    t32_operation_timeout_ms: 0,
+    t32_max_retries: 0,
+    t32_auto_reconnect: false,
+    t32_kill_on_hang: false
+)
+
+# --- Getters / setters ---
+
+fn rtos_config_get() -> RtosTestConfig:
+    """Return the current global RTOS test config."""
+    g_rtos_config
+
+fn rtos_config_set(cfg: RtosTestConfig):
+    """Replace the global RTOS test config."""
+    g_rtos_config = cfg
+
+fn rtos_config_set_profile(profile: i32):
+    """Set the global config from a profile constant."""
+    g_rtos_config = RtosTestDefaults.for_profile(profile)
+
+fn jtag_config_get() -> RtosJtagConfig:
+    """Return the current global JTAG config."""
+    g_jtag_config
+
+fn jtag_config_set(cfg: RtosJtagConfig):
+    """Replace the global JTAG config."""
+    g_jtag_config = cfg
+
+# --- Bridge: JTAG config -> T32WatchdogConfig ---
+
+fn jtag_to_t32_watchdog_config(cfg: RtosJtagConfig) -> T32WatchdogConfig:
+    """Convert an RtosJtagConfig to T32WatchdogConfig for the watchdog subsystem."""
+    T32WatchdogConfig(
+        ping_timeout_ms: cfg.t32_ping_timeout_ms,
+        operation_timeout_ms: cfg.t32_operation_timeout_ms,
+        max_retries: cfg.t32_max_retries,
+        auto_reconnect: cfg.t32_auto_reconnect,
+        kill_on_hang: cfg.t32_kill_on_hang,
+        host: cfg.host,
+        port: cfg.port
+    )
+
+# --- Profile factory (pure — does NOT set globals) ---
 
 class RtosTestDefaults:
     """Default test configuration factory."""
@@ -64,13 +178,13 @@ class RtosTestDefaults:
 #   - Session state = kernel checkpoint (process table, IPC queues, etc.)
 #
 # Shared pattern:
-#   1. Boot → checkpoint(baseline)
-#   2. For each test: restore(baseline) → run → verify
-#   3. Fuzz: for each seed: restore(baseline) → chaos_run → check
+#   1. Boot -> checkpoint(baseline)
+#   2. For each test: restore(baseline) -> run -> verify
+#   3. Fuzz: for each seed: restore(baseline) -> chaos_run -> check
 #
 # jj workflow:
 #   - Checkpoint data lives in .rtos_state section (on-target) or
-#     kernel replay log (host) — NOT tracked in jj
+#     kernel replay log (host) -- NOT tracked in jj
 #   - Test configs (.sdn) ARE tracked in jj
 #   - `bin/simple test --profile=session` to run session tests
 #   - `bin/simple test --profile=fuzz` to run fuzz tests (default off)
@@ -93,5 +207,17 @@ class RtosTestDefaults:
 #     session {
 #         mode: "reset"          # reset | checkpoint
 #         checkpoint_id: 1
+#     }
+#     jtag {
+#         probe: "openocd"       # openocd | trace32
+#         host: "localhost"
+#         port: 3333
+#         trace32 {
+#             ping_timeout_ms: 3000
+#             operation_timeout_ms: 10000
+#             max_retries: 3
+#             auto_reconnect: true
+#             kill_on_hang: false
+#         }
 #     }
 # }

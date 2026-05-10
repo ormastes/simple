@@ -21,6 +21,9 @@ use std.nogc_sync_mut.engine.physics2.narrowphase.shapes2d.{Collider2D, Collider
 use std.nogc_sync_mut.engine.physics2.narrowphase.collision2d.{collide_pair, NarrowContact}
 use std.nogc_sync_mut.engine.physics2.backend_cpu.scalar_solver.{CpuScalarSolver}
 use std.nogc_sync_mut.engine.physics2.backend_cpu.simd_solver.{CpuSimdSolver}
+use std.nogc_sync_mut.engine.physics2.broadphase.bvh2d.{DynamicBvh2D, AABB2D}
+use std.nogc_sync_mut.engine.physics2.graph.island_manager.{IslandManager}
+use std.nogc_sync_mut.engine.physics2.graph.sleeping.{SleepTracker}
 
 struct Transform2D:
     node_id: NodeId
@@ -42,10 +45,14 @@ class PhysicsWorld2D:
     constraints: ContactConstraintSoA
     scalar_solver: CpuScalarSolver
     simd_solver: CpuSimdSolver
+    bvh: DynamicBvh2D
+    islands: IslandManager
+    sleep_tracker: SleepTracker
     accumulator: f64
     node_to_body: [i64]
     node_to_collider: [i64]
     max_node_index: i64
+    use_bvh: bool
 
 impl PhysicsWorld2D:
 
@@ -59,10 +66,14 @@ impl PhysicsWorld2D:
             constraints: ContactConstraintSoA.create(),
             scalar_solver: CpuScalarSolver.from_config(config),
             simd_solver: CpuSimdSolver.from_config(config),
+            bvh: DynamicBvh2D.create(0.1),
+            islands: IslandManager.create(256),
+            sleep_tracker: SleepTracker.create(256, 0.01, 0.5),
             accumulator: 0.0,
             node_to_body: [],
             node_to_collider: [],
-            max_node_index: 0
+            max_node_index: 0,
+            use_bvh: true
         )
 
     me add_dynamic_body(node_id: NodeId, x: f64, y: f64, mass: f64) -> i64:
@@ -116,6 +127,57 @@ impl PhysicsWorld2D:
 
     me detect_contacts():
         self.constraints.clear()
+        if self.use_bvh and self.colliders.count > 4:
+            self.detect_contacts_bvh()
+        else:
+            self.detect_contacts_bruteforce()
+
+    me detect_contacts_bvh():
+        self.bvh = DynamicBvh2D.create(0.1)
+        var i = 0
+        while i < self.colliders.count:
+            val c = self.colliders.colliders[i]
+            val bi = c.body_index
+            val bx = self.bodies.pos_x[bi]
+            val by = self.bodies.pos_y[bi]
+            val aabb = AABB2D(
+                min_x: bx - c.half_width,
+                min_y: by - c.half_height,
+                max_x: bx + c.half_width,
+                max_y: by + c.half_height
+            )
+            self.bvh.insert(aabb, i)
+            i = i + 1
+        val pairs = self.bvh.query_all_pairs()
+        var pi = 0
+        while pi < pairs.len():
+            val pair = pairs[pi]
+            val ca = self.colliders.colliders[pair.0]
+            val cb = self.colliders.colliders[pair.1]
+            val ai = ca.body_index
+            val bi = cb.body_index
+            if self.bodies.inv_mass[ai] == 0.0 and self.bodies.inv_mass[bi] == 0.0:
+                pi = pi + 1
+                continue
+            val ax = self.bodies.pos_x[ai]
+            val ay = self.bodies.pos_y[ai]
+            val bx = self.bodies.pos_x[bi]
+            val by = self.bodies.pos_y[bi]
+            val contact = collide_pair(ca, ax, ay, cb, bx, by)
+            if contact.has_contact:
+                self.constraints.add(
+                    ai, bi,
+                    contact.normal_x, contact.normal_y,
+                    contact.point_x, contact.point_y,
+                    contact.penetration,
+                    self.config.restitution,
+                    self.config.friction,
+                    contact.feature_id_a,
+                    contact.feature_id_b
+                )
+            pi = pi + 1
+
+    me detect_contacts_bruteforce():
         var i = 0
         while i < self.colliders.count:
             var j = i + 1

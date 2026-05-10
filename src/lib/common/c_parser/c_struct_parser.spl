@@ -1,0 +1,322 @@
+# C Struct Parser
+#
+# Extracts struct, union, class, enum, and typedef definitions from C tokens.
+# Operates on tokenized (post-preprocessor) C header source.
+
+fn c_parse_all(tokens: [CToken]) -> CParseResult:
+    var structs: [CStruct] = []
+    var enums: [CEnum] = []
+    var typedefs: [CTypedef] = []
+    var defines: [CDefine] = []
+    var errors: [text] = []
+    var pos = 0
+
+    while pos < tokens.length:
+        val tok = tokens[pos]
+
+        if tok.kind == "pp_define":
+            val d = parse_define_token(tok)
+            if d.name != "":
+                defines.push(d)
+            pos = pos + 1
+            continue
+
+        if tok.kind == "kw_typedef":
+            val result = parse_typedef(tokens, pos)
+            if result.0 != nil:
+                val td = result.0
+                if td.name != "" and td.target_type != "":
+                    typedefs.push(td)
+                elif td.name != "":
+                    typedefs.push(td)
+            for s in result.1:
+                structs.push(s)
+            for e in result.2:
+                enums.push(e)
+            pos = result.3
+            continue
+
+        if tok.kind == "kw_struct" or tok.kind == "kw_class" or tok.kind == "kw_union":
+            val result = parse_struct_or_union(tokens, pos)
+            if result.0 != nil:
+                structs.push(result.0)
+            pos = result.1
+            continue
+
+        if tok.kind == "kw_enum":
+            val result = parse_enum(tokens, pos)
+            if result.0 != nil:
+                enums.push(result.0)
+            pos = result.1
+            continue
+
+        pos = pos + 1
+
+    CParseResult(structs: structs, enums: enums, typedefs: typedefs, defines: defines, errors: errors)
+
+fn parse_define_token(tok: CToken) -> CDefine:
+    val parts = tok.value.trim()
+    var name = ""
+    var i = 0
+    while i < parts.length:
+        val ch = parts[i]
+        if (ch >= "a" and ch <= "z") or (ch >= "A" and ch <= "Z") or ch == "_" or (ch >= "0" and ch <= "9"):
+            name = name + ch
+        else:
+            break
+        i = i + 1
+    var value = ""
+    if i < parts.length:
+        value = parts.substring(i, parts.length).trim()
+    pp_make_c_define(name, value)
+
+fn parse_struct_or_union(tokens: [CToken], start: i32) -> (CStruct, i32):
+    val keyword = tokens[start]
+    val is_union = keyword.kind == "kw_union"
+    val is_class = keyword.kind == "kw_class"
+    var pos = start + 1
+
+    var name = ""
+    if pos < tokens.length and tokens[pos].kind == "ident":
+        name = tokens[pos].value
+        pos = pos + 1
+
+    if pos >= tokens.length or tokens[pos].kind != "lbrace":
+        return (nil, pos)
+
+    pos = pos + 1
+    var fields: [CField] = []
+
+    while pos < tokens.length and tokens[pos].kind != "rbrace":
+        if tokens[pos].kind == "kw_public" or tokens[pos].kind == "kw_private" or tokens[pos].kind == "kw_protected":
+            pos = pos + 1
+            if pos < tokens.length and tokens[pos].kind == "colon":
+                pos = pos + 1
+            continue
+
+        if tokens[pos].kind == "kw_struct" or tokens[pos].kind == "kw_union":
+            val nested = parse_struct_or_union(tokens, pos)
+            pos = nested.1
+            if pos < tokens.length and tokens[pos].kind == "semicolon":
+                pos = pos + 1
+            continue
+
+        val field_result = parse_field(tokens, pos)
+        if field_result.0 != nil:
+            fields.push(field_result.0)
+        pos = field_result.1
+
+    if pos < tokens.length and tokens[pos].kind == "rbrace":
+        pos = pos + 1
+
+    if pos < tokens.length and tokens[pos].kind == "semicolon":
+        pos = pos + 1
+
+    val s = CStruct(name: name, fields: fields, is_union: is_union, is_class: is_class)
+    (s, pos)
+
+fn parse_field(tokens: [CToken], start: i32) -> (CField, i32):
+    var pos = start
+
+    while pos < tokens.length and (tokens[pos].kind == "kw_const" or tokens[pos].kind == "kw_volatile" or tokens[pos].kind == "kw_static" or tokens[pos].kind == "kw_extern" or tokens[pos].kind == "kw_inline"):
+        pos = pos + 1
+
+    var type_name = ""
+    var is_unsigned = false
+    var is_signed = false
+
+    if pos < tokens.length and tokens[pos].kind == "kw_unsigned":
+        is_unsigned = true
+        pos = pos + 1
+    elif pos < tokens.length and tokens[pos].kind == "kw_signed":
+        is_signed = true
+        pos = pos + 1
+
+    if pos < tokens.length and is_c_type_token(tokens[pos]):
+        type_name = tokens[pos].value
+        pos = pos + 1
+        if type_name == "long" and pos < tokens.length and (tokens[pos].value == "long" or tokens[pos].value == "int" or tokens[pos].value == "double"):
+            type_name = type_name + " " + tokens[pos].value
+            pos = pos + 1
+        elif type_name == "short" and pos < tokens.length and tokens[pos].value == "int":
+            type_name = type_name + " int"
+            pos = pos + 1
+    elif pos < tokens.length and tokens[pos].kind == "ident":
+        type_name = tokens[pos].value
+        pos = pos + 1
+    else:
+        return (nil, skip_to_semicolon(tokens, pos))
+
+    if is_unsigned:
+        type_name = "unsigned " + type_name
+    elif is_signed:
+        type_name = "signed " + type_name
+
+    while pos < tokens.length and tokens[pos].kind == "kw_const":
+        pos = pos + 1
+
+    var is_pointer = false
+    while pos < tokens.length and tokens[pos].kind == "star":
+        is_pointer = true
+        pos = pos + 1
+
+    while pos < tokens.length and tokens[pos].kind == "kw_const":
+        pos = pos + 1
+
+    if pos >= tokens.length or tokens[pos].kind == "semicolon" or tokens[pos].kind == "rbrace":
+        if pos < tokens.length and tokens[pos].kind == "semicolon":
+            pos = pos + 1
+        return (nil, pos)
+
+    if tokens[pos].kind == "lparen":
+        return (nil, skip_to_semicolon(tokens, pos))
+
+    if tokens[pos].kind != "ident":
+        return (nil, skip_to_semicolon(tokens, pos))
+
+    val field_name = tokens[pos].value
+    pos = pos + 1
+
+    var array_size: i32 = -1
+    if pos < tokens.length and tokens[pos].kind == "lbracket":
+        pos = pos + 1
+        if pos < tokens.length and tokens[pos].kind == "number":
+            array_size = (tokens[pos].value.parse_int() ?? -1).to_i32()
+            pos = pos + 1
+        if pos < tokens.length and tokens[pos].kind == "rbracket":
+            pos = pos + 1
+
+    var bit_width: i32 = -1
+    if pos < tokens.length and tokens[pos].kind == "colon":
+        pos = pos + 1
+        if pos < tokens.length and tokens[pos].kind == "number":
+            bit_width = (tokens[pos].value.parse_int() ?? -1).to_i32()
+            pos = pos + 1
+
+    if pos < tokens.length and tokens[pos].kind == "semicolon":
+        pos = pos + 1
+
+    val field = CField(name: field_name, c_type: type_name, bit_width: bit_width, is_pointer: is_pointer, array_size: array_size)
+    (field, pos)
+
+fn parse_enum(tokens: [CToken], start: i32) -> (CEnum, i32):
+    var pos = start + 1
+
+    var name = ""
+    if pos < tokens.length and tokens[pos].kind == "ident":
+        name = tokens[pos].value
+        pos = pos + 1
+
+    if pos >= tokens.length or tokens[pos].kind != "lbrace":
+        return (nil, pos)
+
+    pos = pos + 1
+    var values: [CEnumValue] = []
+    var next_value: i64 = 0
+
+    while pos < tokens.length and tokens[pos].kind != "rbrace":
+        if tokens[pos].kind == "ident":
+            val val_name = tokens[pos].value
+            pos = pos + 1
+            if pos < tokens.length and tokens[pos].kind == "equals":
+                pos = pos + 1
+                if pos < tokens.length and tokens[pos].kind == "number":
+                    next_value = tokens[pos].value.parse_int() ?? next_value
+                    pos = pos + 1
+            values.push(CEnumValue(name: val_name, value: next_value))
+            next_value = next_value + 1
+            if pos < tokens.length and tokens[pos].kind == "comma":
+                pos = pos + 1
+        else:
+            pos = pos + 1
+
+    if pos < tokens.length and tokens[pos].kind == "rbrace":
+        pos = pos + 1
+    if pos < tokens.length and tokens[pos].kind == "semicolon":
+        pos = pos + 1
+
+    (CEnum(name: name, values: values), pos)
+
+fn parse_typedef(tokens: [CToken], start: i32) -> (CTypedef, [CStruct], [CEnum], i32):
+    var pos = start + 1
+    var inline_structs: [CStruct] = []
+    var inline_enums: [CEnum] = []
+
+    if pos < tokens.length and (tokens[pos].kind == "kw_struct" or tokens[pos].kind == "kw_union" or tokens[pos].kind == "kw_class"):
+        val result = parse_struct_or_union(tokens, pos)
+        var s = result.0
+        pos = result.1
+
+        if pos < tokens.length and tokens[pos].kind == "ident":
+            val alias_name = tokens[pos].value
+            pos = pos + 1
+            if s != nil and s.name == "":
+                s = CStruct(name: alias_name, fields: s.fields, is_union: s.is_union, is_class: s.is_class)
+            if s != nil:
+                inline_structs.push(s)
+            if pos < tokens.length and tokens[pos].kind == "semicolon":
+                pos = pos + 1
+            val target = if s != nil: s.name else: alias_name
+            return (CTypedef(name: alias_name, target_type: target), inline_structs, inline_enums, pos)
+
+        if s != nil:
+            inline_structs.push(s)
+        if pos < tokens.length and tokens[pos].kind == "semicolon":
+            pos = pos + 1
+        return (nil, inline_structs, inline_enums, pos)
+
+    if pos < tokens.length and tokens[pos].kind == "kw_enum":
+        val result = parse_enum(tokens, pos)
+        var e = result.0
+        pos = result.1
+
+        if pos < tokens.length and tokens[pos].kind == "ident":
+            val alias_name = tokens[pos].value
+            pos = pos + 1
+            if e != nil and e.name == "":
+                e = CEnum(name: alias_name, values: e.values)
+            if e != nil:
+                inline_enums.push(e)
+            if pos < tokens.length and tokens[pos].kind == "semicolon":
+                pos = pos + 1
+            val target = if e != nil: e.name else: alias_name
+            return (CTypedef(name: alias_name, target_type: target), inline_structs, inline_enums, pos)
+
+        if e != nil:
+            inline_enums.push(e)
+        if pos < tokens.length and tokens[pos].kind == "semicolon":
+            pos = pos + 1
+        return (nil, inline_structs, inline_enums, pos)
+
+    var type_parts = ""
+    while pos < tokens.length and tokens[pos].kind != "semicolon" and tokens[pos].kind != "eof":
+        val tok = tokens[pos]
+        if (pos + 1) < tokens.length and tokens[pos + 1].kind == "semicolon":
+            val alias_name = tok.value
+            if pos < tokens.length and tokens[pos].kind == "semicolon":
+                pos = pos + 1
+            return (CTypedef(name: alias_name, target_type: type_parts.trim()), inline_structs, inline_enums, pos + 1)
+        if type_parts != "":
+            type_parts = type_parts + " "
+        type_parts = type_parts + tok.value
+        pos = pos + 1
+
+    if pos < tokens.length and tokens[pos].kind == "semicolon":
+        pos = pos + 1
+    (nil, inline_structs, inline_enums, pos)
+
+fn is_c_type_token(tok: CToken) -> bool:
+    tok.kind == "kw_int" or tok.kind == "kw_char" or tok.kind == "kw_short" or tok.kind == "kw_long" or tok.kind == "kw_float" or tok.kind == "kw_double" or tok.kind == "kw_void" or tok.kind == "kw_bool" or tok.kind == "kw_unsigned" or tok.kind == "kw_signed"
+
+fn skip_to_semicolon(tokens: [CToken], start: i32) -> i32:
+    var pos = start
+    var depth = 0
+    while pos < tokens.length:
+        if tokens[pos].kind == "lbrace" or tokens[pos].kind == "lparen":
+            depth = depth + 1
+        elif tokens[pos].kind == "rbrace" or tokens[pos].kind == "rparen":
+            depth = depth - 1
+        elif tokens[pos].kind == "semicolon" and depth <= 0:
+            return pos + 1
+        pos = pos + 1
+    pos

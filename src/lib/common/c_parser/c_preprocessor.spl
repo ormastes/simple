@@ -1,0 +1,214 @@
+# C Preprocessor
+#
+# Handles #define, #ifdef/#ifndef/#if/#else/#endif, #include (within src/include/).
+# Processes conditional compilation and collects define constants.
+
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_exists(path: text) -> bool
+
+fn c_preprocess(source: text, initial_defines: {text: text}) -> (text, [CDefine]):
+    c_preprocess_with_include_root(source, initial_defines, "src/include")
+
+fn c_preprocess_with_include_root(source: text, initial_defines: {text: text}, include_root: text) -> (text, [CDefine]):
+    var defines: {text: text} = {}
+    for key in initial_defines.keys():
+        defines[key] = initial_defines[key]
+
+    var collected_defines: [CDefine] = []
+    val lines = source.split("\n")
+    var output_lines: [text] = []
+    var condition_stack: [bool] = []
+    var skip_depth = 0
+
+    var i = 0
+    while i < lines.length:
+        var line = lines[i]
+
+        while line.ends_with("\\") and (i + 1) < lines.length:
+            line = line.substring(0, line.length - 1) + lines[i + 1]
+            i = i + 1
+
+        val trimmed = line.trim()
+
+        if trimmed.starts_with("#"):
+            val directive_text = trimmed.substring(1, trimmed.length).trim()
+            val directive = pp_extract_directive(directive_text)
+            val directive_arg = pp_extract_arg(directive_text, directive.length)
+
+            if directive == "ifdef":
+                condition_stack.push(skip_depth == 0)
+                if skip_depth > 0:
+                    skip_depth = skip_depth + 1
+                elif not defines.contains_key(directive_arg.trim()):
+                    skip_depth = 1
+
+            elif directive == "ifndef":
+                condition_stack.push(skip_depth == 0)
+                if skip_depth > 0:
+                    skip_depth = skip_depth + 1
+                elif defines.contains_key(directive_arg.trim()):
+                    skip_depth = 1
+
+            elif directive == "if":
+                condition_stack.push(skip_depth == 0)
+                if skip_depth > 0:
+                    skip_depth = skip_depth + 1
+                elif not pp_eval_condition(directive_arg.trim(), defines):
+                    skip_depth = 1
+
+            elif directive == "elif":
+                if skip_depth == 1 and condition_stack.length > 0:
+                    if pp_eval_condition(directive_arg.trim(), defines):
+                        skip_depth = 0
+                elif skip_depth == 0:
+                    skip_depth = 1
+
+            elif directive == "else":
+                if skip_depth == 1 and condition_stack.length > 0:
+                    skip_depth = 0
+                elif skip_depth == 0:
+                    skip_depth = 1
+
+            elif directive == "endif":
+                if condition_stack.length > 0:
+                    val was_active = condition_stack.pop()
+                    if skip_depth > 0:
+                        skip_depth = skip_depth - 1
+
+            elif skip_depth == 0:
+                if directive == "define":
+                    val def_parts = pp_parse_define(directive_arg)
+                    val def_name = def_parts.0
+                    val def_value = def_parts.1
+                    if def_name != "":
+                        defines[def_name] = def_value
+                        val cd = pp_make_c_define(def_name, def_value)
+                        collected_defines.push(cd)
+
+                elif directive == "include":
+                    val inc_path = pp_parse_include_path(directive_arg)
+                    if inc_path != "":
+                        val full_path = include_root + "/" + inc_path
+                        if rt_file_exists(full_path):
+                            val inc_source = rt_file_read_text(full_path) ?? ""
+                            val inc_result = c_preprocess_with_include_root(inc_source, defines, include_root)
+                            output_lines.push(inc_result.0)
+                            for d in inc_result.1:
+                                collected_defines.push(d)
+                        else:
+                            output_lines.push("/* error: include not found: " + inc_path + " */")
+
+            i = i + 1
+            continue
+
+        if skip_depth == 0:
+            var expanded = line
+            for key in defines.keys():
+                if expanded.contains(key):
+                    expanded = pp_replace_ident(expanded, key, defines[key])
+            output_lines.push(expanded)
+        i = i + 1
+
+    val out_text = output_lines.join("\n")
+    (out_text, collected_defines)
+
+fn pp_extract_directive(text_after_hash: text) -> text:
+    var result = ""
+    var i = 0
+    while i < text_after_hash.length:
+        val ch = text_after_hash[i]
+        if (ch >= "a" and ch <= "z") or (ch >= "A" and ch <= "Z") or ch == "_":
+            result = result + ch
+        else:
+            break
+        i = i + 1
+    result
+
+fn pp_extract_arg(text_after_hash: text, directive_len: i32) -> text:
+    if directive_len >= text_after_hash.length:
+        return ""
+    text_after_hash.substring(directive_len, text_after_hash.length).trim()
+
+fn pp_parse_define(arg: text) -> (text, text):
+    val trimmed = arg.trim()
+    var name = ""
+    var i = 0
+    while i < trimmed.length:
+        val ch = trimmed[i]
+        if (ch >= "a" and ch <= "z") or (ch >= "A" and ch <= "Z") or ch == "_" or (ch >= "0" and ch <= "9"):
+            name = name + ch
+        else:
+            break
+        i = i + 1
+    if i < trimmed.length and trimmed[i] == "(":
+        while i < trimmed.length and trimmed[i] != ")":
+            i = i + 1
+        if i < trimmed.length:
+            i = i + 1
+    var value = ""
+    if i < trimmed.length:
+        value = trimmed.substring(i, trimmed.length).trim()
+    (name, value)
+
+fn pp_parse_include_path(arg: text) -> text:
+    val trimmed = arg.trim()
+    if trimmed.starts_with("\"") and trimmed.ends_with("\""):
+        return trimmed.substring(1, trimmed.length - 1)
+    if trimmed.starts_with("<") and trimmed.ends_with(">"):
+        return trimmed.substring(1, trimmed.length - 1)
+    ""
+
+fn pp_eval_condition(expr: text, defines: {text: text}) -> bool:
+    val trimmed = expr.trim()
+    if trimmed.starts_with("defined(") and trimmed.ends_with(")"):
+        val name = trimmed.substring(8, trimmed.length - 1).trim()
+        return defines.contains_key(name)
+    if trimmed.starts_with("defined "):
+        val name = trimmed.substring(8, trimmed.length).trim()
+        return defines.contains_key(name)
+    if trimmed == "0":
+        return false
+    if trimmed == "1":
+        return true
+    if defines.contains_key(trimmed):
+        val v = defines[trimmed]
+        return v != "0" and v != ""
+    false
+
+fn pp_make_c_define(name: text, value: text) -> CDefine:
+    var is_int = false
+    var int_val: i64 = 0
+    val trimmed = value.trim()
+    if trimmed.length > 0:
+        var all_digits = true
+        var j = 0
+        val start = if trimmed[0] == "-": 1 else: 0
+        while j < trimmed.length:
+            if j >= start and not (trimmed[j] >= "0" and trimmed[j] <= "9"):
+                all_digits = false
+                break
+            j = j + 1
+        if all_digits and trimmed.length > start:
+            is_int = true
+            int_val = trimmed.parse_int() ?? 0
+    CDefine(name: name, value: value, is_integer: is_int, int_value: int_val)
+
+fn pp_replace_ident(source: text, name: text, replacement: text) -> text:
+    var result = ""
+    var i = 0
+    val name_len = name.length
+    val src_len = source.length
+    while i < src_len:
+        if (i + name_len) <= src_len and source.substring(i, i + name_len) == name:
+            val before_ok = i == 0 or not pp_is_ident_char(source[i - 1])
+            val after_ok = (i + name_len) >= src_len or not pp_is_ident_char(source[i + name_len])
+            if before_ok and after_ok:
+                result = result + replacement
+                i = i + name_len
+                continue
+        result = result + source[i]
+        i = i + 1
+    result
+
+fn pp_is_ident_char(ch: text) -> bool:
+    (ch >= "a" and ch <= "z") or (ch >= "A" and ch <= "Z") or ch == "_" or (ch >= "0" and ch <= "9")
