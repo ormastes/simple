@@ -419,6 +419,9 @@ impl LintChecker {
 
         // Check for resource leaks
         self.check_resource_leaks(items);
+
+        // Check for non-deterministic calls inside @deterministic functions
+        self.check_deterministic_calls(items);
     }
 
     /// Collect function definitions for call-site checking
@@ -559,6 +562,8 @@ impl LintChecker {
         "align",
         // GPU decorators
         "gpu_intrinsic",
+        // Determinism guard (GAME-DET-LINT-001)
+        "deterministic",
     ];
 
     /// Known attribute names (whitelist)

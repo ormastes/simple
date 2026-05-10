@@ -23,7 +23,7 @@ SStack is a full-lifecycle development pipeline that combines three frameworks:
 
 1. You (the orchestrator) run Phase 1 **inline** to refine the user request
 2. For Phases 2-8, you spawn a **fresh Agent** per phase (GSD: fresh context)
-3. Each agent reads `.sstack/<feature>/state.md`, does its work, writes updated state
+3. Each agent reads `.spipe/<feature>/state.md`, does its work, writes updated state
 4. After each agent returns, you read the state file and verify exit criteria
 5. If exit criteria fail, re-run the phase (max 2 retries)
 
@@ -31,14 +31,14 @@ SStack is a full-lifecycle development pipeline that combines three frameworks:
 
 | # | Phase | Role | Agent Definition | Cooperative Skill |
 |---|-------|------|-----------------|-------------------|
-| 1 | dev | Developer Lead | `.claude/agents/sstack/dev.md` | (inline) |
-| 2 | research | Analyst | `.claude/agents/sstack/research.md` | `/research` + `/research_codex` |
-| 3 | arch | Architect | `.claude/agents/sstack/arch.md` | `/design` + `/gemini_ui_design` |
-| 4 | spec | QA Lead | `.claude/agents/sstack/spec.md` | `/spipe` |
-| 5 | implement | Engineer | `.claude/agents/sstack/implement.md` | `/coding` |
-| 6 | refactor | Tech Lead | `.claude/agents/sstack/refactor.md` | `/refactor` |
-| 7 | verify | QA | `.claude/agents/sstack/verify.md` | `/verify` |
-| 8 | ship | Release Mgr | `.claude/agents/sstack/ship.md` | `/sync` |
+| 1 | dev | Developer Lead | `.claude/agents/spipe/dev.md` | (inline) |
+| 2 | research | Analyst | `.claude/agents/spipe/research.md` | `/research` + `/research_codex` |
+| 3 | arch | Architect | `.claude/agents/spipe/arch.md` | `/design` + `/gemini_ui_design` |
+| 4 | spec | QA Lead | `.claude/agents/spipe/spec.md` | `/spipe` |
+| 5 | implement | Engineer | `.claude/agents/spipe/implement.md` | `/coding` |
+| 6 | refactor | Tech Lead | `.claude/agents/spipe/refactor.md` | `/refactor` |
+| 7 | verify | QA | `.claude/agents/spipe/verify.md` | `/verify` |
+| 8 | ship | Release Mgr | `.claude/agents/spipe/ship.md` | `/sync` |
 
 ## Cooperative Workflow Integration
 
@@ -87,8 +87,8 @@ The pipeline **never blocks** on missing providers. Every phase is self-sufficie
 ### Step 0: Setup
 
 1. Derive `<feature>` slug from the user request (lowercase, hyphens, e.g. `add-csv-export`)
-2. Create directory `.sstack/<feature>/`
-3. Create `.sstack/<feature>/state.md` with the initial template (see State File Format below)
+2. Create directory `.spipe/<feature>/`
+3. Create `.spipe/<feature>/state.md` with the initial template (see State File Format below)
 
 ### Step 1: Dev (inline -- do NOT spawn agent)
 
@@ -108,15 +108,15 @@ Run Phase 1 yourself:
 For each phase N (2 through 8):
 
 1. **Check cooperative availability** (Phase 2-3 only): detect Codex/Gemini. If unavailable, note fallback in state file
-2. **Read** `.sstack/<feature>/state.md` to get current state
-3. **Read** the phase definitions from `.claude/skills/lib/sstack_phases.md` for phase N's entry/exit criteria
+2. **Read** `.spipe/<feature>/state.md` to get current state
+3. **Read** the phase definitions from `.claude/skills/lib/spipe_phases.md` for phase N's entry/exit criteria
 4. **Verify entry criteria** -- if the previous phase output is missing or incomplete, re-run the previous phase
 5. **Spawn a fresh Agent** with this prompt:
 
 ```
-Read .claude/agents/sstack/<phase-name>.md and follow its instructions.
+Read .claude/agents/spipe/<phase-name>.md and follow its instructions.
 
-State file: .sstack/<feature>/state.md
+State file: .spipe/<feature>/state.md
 Feature: <feature>
 Phase: <N>-<phase-name>
 Cooperative: <available providers or "solo">
@@ -124,11 +124,11 @@ Cooperative: <available providers or "solo">
 Read the state file, perform your role, then update the state file with:
 - Your output summary under ## Phase Outputs / ### <N>-<phase-name>
 - Mark your phase done in ## Phase Checklist
-- Ensure exit criteria from .claude/skills/lib/sstack_phases.md are met
+- Ensure exit criteria from .claude/skills/lib/spipe_phases.md are met
 ```
 
-6. **After agent returns**, read `.sstack/<feature>/state.md`
-7. **Verify exit criteria** for phase N (from sstack_phases.md)
+6. **After agent returns**, read `.spipe/<feature>/state.md`
+7. **Verify exit criteria** for phase N (from spipe_phases.md)
 8. If exit criteria fail: re-run the agent (max 2 retries), then escalate to user
 9. Proceed to next phase
 
@@ -142,7 +142,7 @@ After Phase 8 (ship) succeeds:
 
 ## State File Format
 
-Create `.sstack/<feature>/state.md` with this template:
+Create `.spipe/<feature>/state.md` with this template:
 
 ```markdown
 # SStack State: <feature>
@@ -211,13 +211,13 @@ Each agent phase must stay under **40% context window usage**. The orchestrator 
 Between every phase transition, verify:
 1. State file has the phase marked done with a date
 2. Phase output section is non-empty and substantive
-3. Exit criteria from `sstack_phases.md` are satisfied
+3. Exit criteria from `spipe_phases.md` are satisfied
 4. No regression -- previous phase outputs are still intact in the state file
 
 ## Autonomous Mode
 
 SStack can run autonomously via `scripts/sstack-orchestrator.shs`.
-- Reads tasks from `.sstack/TASKS.md`
+- Reads tasks from `.spipe/TASKS.md`
 - Runs full pipeline for each task
 - Monitor: `scripts/sstack-monitor.shs`
 - Status: `.agent/STATUS.json`

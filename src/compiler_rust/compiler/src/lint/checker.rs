@@ -20,4 +20,7 @@ mod checker_args;
 #[path = "checker_resources.rs"]
 mod checker_resources;
 
+#[path = "checker_deterministic.rs"]
+mod checker_deterministic;
+
 pub use checker_core::LintChecker;

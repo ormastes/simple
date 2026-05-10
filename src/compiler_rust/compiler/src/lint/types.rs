@@ -89,6 +89,8 @@ pub enum LintName {
     UnknownAttribute,
     /// Function has too many parameters (> 7)
     TooManyArguments,
+    /// Non-deterministic call inside a @deterministic-annotated function
+    NonDetCallInDetFn,
 }
 
 impl LintName {
@@ -121,6 +123,7 @@ impl LintName {
             LintName::UnknownDecorator => "unknown_decorator",
             LintName::UnknownAttribute => "unknown_attribute",
             LintName::TooManyArguments => "too_many_arguments",
+            LintName::NonDetCallInDetFn => "non_det_call_in_det_fn",
         }
     }
 
@@ -153,6 +156,7 @@ impl LintName {
             "unknown_decorator" => Some(LintName::UnknownDecorator),
             "unknown_attribute" => Some(LintName::UnknownAttribute),
             "too_many_arguments" | "too_many_args" => Some(LintName::TooManyArguments),
+            "non_det_call_in_det_fn" => Some(LintName::NonDetCallInDetFn),
             "unknown_annotation" => {
                 // Meta-lint: suppresses both unknown_decorator and unknown_attribute
                 // Handled specially in config.rs apply_attributes
@@ -192,6 +196,7 @@ impl LintName {
             LintName::UnknownDecorator => LintLevel::Warn,
             LintName::UnknownAttribute => LintLevel::Warn,
             LintName::TooManyArguments => LintLevel::Warn,
+            LintName::NonDetCallInDetFn => LintLevel::Warn,
         }
     }
 
@@ -743,6 +748,32 @@ Directory structure controls visibility:
 
 This lint cannot be suppressed. All exports must be in __init__.spl files.
 "#.to_string(),
+            LintName::NonDetCallInDetFn => r#"Lint: non_det_call_in_det_fn
+Level: warn (default)
+
+=== What it checks ===
+
+Warns when a function annotated with @deterministic (or #[deterministic])
+calls a non-deterministic API directly in its body.
+
+Non-deterministic APIs include: now(), rand(), random_u64(), random_f64(),
+rt_time_now_seconds(), print(), and functions whose names start with rt_fs_,
+rt_net_, or rt_http_.
+
+=== Why it matters ===
+
+Game2D tick/render callbacks must be fully deterministic for replay and
+netcode to work. A @deterministic annotation documents this contract; the
+lint enforces it at compile time so violations are caught before runtime.
+
+=== How to fix ===
+
+- Replace now() / rand() with the seeded det_guard equivalents provided by
+  std.game2d.time (enter_callback sets the simulated step time).
+- Move I/O or network calls outside the deterministic boundary.
+- If a call is genuinely safe, suppress with a concrete reason:
+    #![allow(non_det_call_in_det_fn)] // reason: ...
+"#.to_string(),
             LintName::TooManyArguments => r#"Lint: too_many_arguments
 Level: warn (default)
 
@@ -814,6 +845,7 @@ scoped suppression with a concrete reason.
             LintName::UnknownDecorator,
             LintName::UnknownAttribute,
             LintName::TooManyArguments,
+            LintName::NonDetCallInDetFn,
         ]
     }
 }
