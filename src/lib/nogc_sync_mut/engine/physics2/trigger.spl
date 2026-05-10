@@ -1,0 +1,258 @@
+# Physics2 — Trigger / Sensor System
+#
+# Sensor bodies that detect overlap without generating physical response.
+# Produces Enter/Stay/Exit events each physics step.
+
+use std.common.math.{math_sqrt}
+
+# --------------------------------------------------------------------------
+# Identifiers
+# --------------------------------------------------------------------------
+
+struct TriggerId:
+    id: i32
+
+impl TriggerId:
+    static fn null() -> TriggerId:
+        TriggerId(id: -1)
+
+    fn is_null(self) -> bool:
+        self.id < 0
+
+# --------------------------------------------------------------------------
+# Trigger shape — enum with associated data
+# --------------------------------------------------------------------------
+
+enum TriggerShape:
+    CircleTrigger(radius: f64)
+    RectTrigger(half_width: f64, half_height: f64)
+
+# --------------------------------------------------------------------------
+# Trigger zone
+# --------------------------------------------------------------------------
+
+struct TriggerZone:
+    id: TriggerId
+    shape: TriggerShape
+    x: f64
+    y: f64
+    layer_mask: i32
+    active: bool
+    tag: text
+
+impl TriggerZone:
+    static fn circle(x: f64, y: f64, radius: f64, tag: text) -> TriggerZone:
+        TriggerZone(
+            id: TriggerId.null(),
+            shape: TriggerShape.CircleTrigger(radius: radius),
+            x: x, y: y,
+            layer_mask: 0x7FFFFFFF,
+            active: true,
+            tag: tag
+        )
+
+    static fn rect(x: f64, y: f64, hw: f64, hh: f64, tag: text) -> TriggerZone:
+        TriggerZone(
+            id: TriggerId.null(),
+            shape: TriggerShape.RectTrigger(half_width: hw, half_height: hh),
+            x: x, y: y,
+            layer_mask: 0x7FFFFFFF,
+            active: true,
+            tag: tag
+        )
+
+    fn contains_point(self, px: f64, py: f64) -> bool:
+        val dx = px - self.x
+        val dy = py - self.y
+        if self.shape.kind == TriggerShapeKind.CircleTrigger:
+            return dx * dx + dy * dy <= self.shape.radius * self.shape.radius
+        # Rect
+        var adx = dx
+        if adx < 0.0:
+            adx = -adx
+        var ady = dy
+        if ady < 0.0:
+            ady = -ady
+        adx <= self.shape.half_width and ady <= self.shape.half_height
+
+    fn overlaps_circle(self, cx: f64, cy: f64, r: f64) -> bool:
+        val dx = cx - self.x
+        val dy = cy - self.y
+        if self.shape.kind == TriggerShapeKind.CircleTrigger:
+            val dist = math_sqrt(dx * dx + dy * dy)
+            return dist <= r + self.shape.radius
+        # Rect vs circle
+        var closest_x = dx
+        var closest_y = dy
+        if closest_x < -self.shape.half_width:
+            closest_x = -self.shape.half_width
+        elif closest_x > self.shape.half_width:
+            closest_x = self.shape.half_width
+        if closest_y < -self.shape.half_height:
+            closest_y = -self.shape.half_height
+        elif closest_y > self.shape.half_height:
+            closest_y = self.shape.half_height
+        val ex = dx - closest_x
+        val ey = dy - closest_y
+        ex * ex + ey * ey <= r * r
+
+# --------------------------------------------------------------------------
+# Trigger events
+# --------------------------------------------------------------------------
+
+enum TriggerEventType:
+    Enter
+    Stay
+    Exit
+
+struct TriggerEvent:
+    trigger_id: TriggerId
+    body_id: i32
+    trigger_tag: text
+    event_type: TriggerEventType
+
+struct TriggerOverlap:
+    trigger_id: TriggerId
+    body_id: i32
+
+struct BodyPosition:
+    body_id: i32
+    x: f64
+    y: f64
+    radius: f64
+
+# --------------------------------------------------------------------------
+# Trigger system
+# --------------------------------------------------------------------------
+
+class TriggerSystem:
+    zones: [TriggerZone]
+    active_overlaps: [TriggerOverlap]
+    events: [TriggerEvent]
+    next_id: i32
+
+impl TriggerSystem:
+    static fn new() -> TriggerSystem:
+        TriggerSystem(
+            zones: [],
+            active_overlaps: [],
+            events: [],
+            next_id: 0
+        )
+
+    me add_zone(zone: TriggerZone) -> TriggerId:
+        val tid = TriggerId(id: self.next_id)
+        self.next_id = self.next_id + 1
+        val z = TriggerZone(
+            id: tid,
+            shape: zone.shape,
+            x: zone.x, y: zone.y,
+            layer_mask: zone.layer_mask,
+            active: zone.active,
+            tag: zone.tag
+        )
+        self.zones.push(z)
+        tid
+
+    me remove_zone(id: TriggerId):
+        var i = 0
+        while i < self.zones.len():
+            val z = self.zones[i]
+            if z.id.id == id.id:
+                self.zones[i] = TriggerZone(
+                    id: z.id, shape: z.shape,
+                    x: z.x, y: z.y,
+                    layer_mask: z.layer_mask,
+                    active: false,
+                    tag: z.tag
+                )
+            i = i + 1
+
+    me update(bodies: [BodyPosition]):
+        # Clear previous events
+        self.events = []
+        var new_overlaps: [TriggerOverlap] = []
+
+        # Test each zone against each body
+        var zi = 0
+        while zi < self.zones.len():
+            val zone = self.zones[zi]
+            if zone.active:
+                var bi = 0
+                while bi < bodies.len():
+                    val body = bodies[bi]
+                    val overlapping = zone.overlaps_circle(body.x, body.y, body.radius)
+                    if overlapping:
+                        val overlap = TriggerOverlap(trigger_id: zone.id, body_id: body.body_id)
+                        new_overlaps.push(overlap)
+                        # Check if was already overlapping (Stay) or new (Enter)
+                        val was_active = _find_overlap(self.active_overlaps, zone.id, body.body_id)
+                        if was_active:
+                            self.events.push(TriggerEvent(
+                                trigger_id: zone.id,
+                                body_id: body.body_id,
+                                trigger_tag: zone.tag,
+                                event_type: TriggerEventType.Stay
+                            ))
+                        else:
+                            self.events.push(TriggerEvent(
+                                trigger_id: zone.id,
+                                body_id: body.body_id,
+                                trigger_tag: zone.tag,
+                                event_type: TriggerEventType.Enter
+                            ))
+                    bi = bi + 1
+            zi = zi + 1
+
+        # Generate Exit events for overlaps that no longer exist
+        var oi = 0
+        while oi < self.active_overlaps.len():
+            val prev = self.active_overlaps[oi]
+            val still_active = _find_overlap(new_overlaps, prev.trigger_id, prev.body_id)
+            if not still_active:
+                # Find the tag for the trigger
+                val tag = _find_zone_tag(self.zones, prev.trigger_id)
+                self.events.push(TriggerEvent(
+                    trigger_id: prev.trigger_id,
+                    body_id: prev.body_id,
+                    trigger_tag: tag,
+                    event_type: TriggerEventType.Exit
+                ))
+            oi = oi + 1
+
+        self.active_overlaps = new_overlaps
+
+    me drain_events() -> [TriggerEvent]:
+        val result = self.events
+        self.events = []
+        result
+
+    fn zone_count(self) -> i32:
+        var count: i32 = 0
+        var i = 0
+        while i < self.zones.len():
+            if self.zones[i].active:
+                count = count + 1
+            i = i + 1
+        count
+
+# --------------------------------------------------------------------------
+# Internal helpers
+# --------------------------------------------------------------------------
+
+fn _find_overlap(overlaps: [TriggerOverlap], trigger_id: TriggerId, body_id: i32) -> bool:
+    var i = 0
+    while i < overlaps.len():
+        val o = overlaps[i]
+        if o.trigger_id.id == trigger_id.id and o.body_id == body_id:
+            return true
+        i = i + 1
+    false
+
+fn _find_zone_tag(zones: [TriggerZone], trigger_id: TriggerId) -> text:
+    var i = 0
+    while i < zones.len():
+        if zones[i].id.id == trigger_id.id:
+            return zones[i].tag
+        i = i + 1
+    ""

@@ -1,0 +1,92 @@
+# Editor Configuration
+#
+# Layered config: defaults -> user (~/.simple-editor/settings.sdn) -> workspace.
+# All config stored in SDN format.
+
+extern fn rt_file_read_text(path: text) -> text
+
+struct EditorConfig:
+    theme: text
+    font_size: i64
+    tab_size: i64
+    insert_spaces: bool
+    word_wrap: bool
+    line_numbers: bool
+    minimap: bool
+    auto_save: bool
+    auto_save_delay_ms: i64
+
+fn editor_config_default() -> EditorConfig:
+    EditorConfig(
+        theme: "dark",
+        font_size: 14,
+        tab_size: 4,
+        insert_spaces: true,
+        word_wrap: false,
+        line_numbers: true,
+        minimap: false,
+        auto_save: false,
+        auto_save_delay_ms: 30000
+    )
+
+fn editor_config_load(user_path: text, workspace_path: text) -> EditorConfig:
+    var config = editor_config_default()
+    val user_content = rt_file_read_text(user_path) ?? ""
+    if user_content != "":
+        config = _ec_apply_sdn(config, user_content)
+    val ws_content = rt_file_read_text(workspace_path) ?? ""
+    if ws_content != "":
+        config = _ec_apply_sdn(config, ws_content)
+    config
+
+fn _ec_apply_sdn(config: EditorConfig, content: text) -> EditorConfig:
+    var result = config
+    var start = 0
+    var i = 0
+    while i < content.len():
+        if content.char_at(i) == "\n":
+            val line = content.slice(start, i).trim()
+            result = _ec_apply_line(result, line)
+            start = i + 1
+        i = i + 1
+    if start < content.len():
+        result = _ec_apply_line(result, content.slice(start, content.len()).trim())
+    result
+
+fn _ec_apply_line(config: EditorConfig, line: text) -> EditorConfig:
+    if line == "" or line.starts_with("#"):
+        return config
+    val eq = _ec_find_char(line, ":")
+    if eq < 0:
+        return config
+    val key = line.slice(0, eq).trim()
+    val value = line.slice(eq + 1, line.len()).trim()
+    if key == "theme":
+        return EditorConfig(theme: value, font_size: config.font_size, tab_size: config.tab_size, insert_spaces: config.insert_spaces, word_wrap: config.word_wrap, line_numbers: config.line_numbers, minimap: config.minimap, auto_save: config.auto_save, auto_save_delay_ms: config.auto_save_delay_ms)
+    if key == "tab_size":
+        val n = _ec_parse_int(value)
+        if n > 0:
+            return EditorConfig(theme: config.theme, font_size: config.font_size, tab_size: n, insert_spaces: config.insert_spaces, word_wrap: config.word_wrap, line_numbers: config.line_numbers, minimap: config.minimap, auto_save: config.auto_save, auto_save_delay_ms: config.auto_save_delay_ms)
+    if key == "line_numbers":
+        return EditorConfig(theme: config.theme, font_size: config.font_size, tab_size: config.tab_size, insert_spaces: config.insert_spaces, word_wrap: config.word_wrap, line_numbers: value == "true", minimap: config.minimap, auto_save: config.auto_save, auto_save_delay_ms: config.auto_save_delay_ms)
+    if key == "auto_save":
+        return EditorConfig(theme: config.theme, font_size: config.font_size, tab_size: config.tab_size, insert_spaces: config.insert_spaces, word_wrap: config.word_wrap, line_numbers: config.line_numbers, minimap: config.minimap, auto_save: value == "true", auto_save_delay_ms: config.auto_save_delay_ms)
+    config
+
+fn _ec_find_char(s: text, ch: text) -> i64:
+    var i = 0
+    while i < s.len():
+        if s.char_at(i) == ch:
+            return i
+        i = i + 1
+    -1
+
+fn _ec_parse_int(s: text) -> i64:
+    var result = 0
+    var i = 0
+    while i < s.len():
+        val code = s.char_code_at(i)
+        if code >= 48 and code <= 57:
+            result = result * 10 + (code - 48)
+        i = i + 1
+    result

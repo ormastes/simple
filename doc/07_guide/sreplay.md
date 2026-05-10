@@ -270,19 +270,31 @@ Replay adapters bridge the core replay engine to different execution contexts:
 
 ## Tests
 
+32 spec files covering all 6 tracks. Run all at once:
+
 ```bash
 # Run all replay specs
-bin/simple test test/system/replay_baremetal_core_spec.spl
-bin/simple test test/system/replay_cli_dispatch_spec.spl
-bin/simple test test/system/replay_feature_registry_spec.spl
-bin/simple test test/system/replay_divergence_spec.spl
-bin/simple test test/system/replay_codec_roundtrip_spec.spl
-bin/simple test test/system/replay_semantic_event_spec.spl
-bin/simple test test/system/replay_vm_types_spec.spl
-bin/simple test test/system/replay_checkpoint_types_spec.spl
-bin/simple test test/system/replay_process_event_spec.spl
-bin/simple test test/system/replay_chaos_scheduler_spec.spl
+for f in test/system/replay_*_spec.spl; do bin/simple test "$f"; done
 ```
+
+Key spec categories:
+
+| Category | Specs | Coverage |
+|----------|-------|----------|
+| Baremetal core | `replay_baremetal_core_spec` | Ring buffer, checkpoints, mode switching |
+| CLI dispatch | `replay_cli_dispatch_spec` | QEMU command routing, parse_flag |
+| QEMU E2E | `replay_qemu_e2e_spec`, `replay_qemu_arch_spec` | Config, arch matrix, target desc |
+| Process rr | `replay_process_e2e_spec`, `replay_process_event_spec`, `replay_process_rr_spec` | Recorder, replayer, checkpoint, events |
+| Chaos scheduler | `replay_chaos_scheduler_spec`, `replay_thread_chaos_spec` | 4 strategies, thread recording |
+| Semantic trace | `replay_semantic_event_spec`, `replay_semantic_trace_spec`, `replay_scenario_spec` | Events, writer, BDD correlation |
+| Kernel replay | `replay_kernel_event_spec`, `replay_event_log_spec`, `replay_divergence_spec` | Event kinds, log buffer, divergence |
+| Container | `replay_container_checkpoint_spec`, `replay_checkpoint_types_spec` | Snapshot, restore, types |
+| VM replay | `replay_rv32i_vm_spec`, `replay_vm_types_spec`, `replay_vm_devices_spec`, `replay_vm_driver_spec` | vCPU, vmem, devices, driver |
+| Integration | `replay_integration_spec`, `replay_feature_registry_spec` | Cross-track session, features |
+| Adapters | `replay_jit_adapter_spec`, `replay_interpreter_adapter_spec`, `replay_remote_adapter_spec`, `replay_test_runner_adapter_spec` | All 5 adapters |
+| Codecs/formats | `replay_codec_spec`, `replay_codec_roundtrip_spec`, `replay_trace_format_spec` | Serialization, trace package |
+| Overhead | `replay_offmode_overhead_spec` | Off-mode < 100ms for 1000 hook calls |
+| Core | `replay_core_spec` | ReplayBackend, session management |
 
 ## 32-bit Architecture Rules
 

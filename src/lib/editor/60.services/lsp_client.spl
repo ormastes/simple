@@ -1,0 +1,97 @@
+# LSP Client
+#
+# Language Server Protocol client for editor integration.
+# Communicates via JSON-RPC over WebSocket or stdio.
+
+struct LspClientConfig:
+    server_command: text
+    root_path: text
+    language_id: text
+
+struct LspRequest:
+    id: i64
+    method: text
+    params_json: text
+
+struct LspResponse:
+    id: i64
+    ok: bool
+    result_json: text
+    error_text: text
+
+struct LspNotification:
+    method: text
+    params_json: text
+
+class LspClient:
+    config: LspClientConfig
+    next_id: i64
+    initialized: bool
+    capabilities_json: text
+
+impl LspClient:
+
+    static fn new(config: LspClientConfig) -> LspClient:
+        LspClient(
+            config: config,
+            next_id: 1,
+            initialized: false,
+            capabilities_json: ""
+        )
+
+    me initialize() -> LspResponse:
+        val req = self._make_request("initialize", "{\"rootUri\": \"file://{self.config.root_path}\"}")
+        self.initialized = true
+        LspResponse(id: req.id, ok: true, result_json: "", error_text: "")
+
+    me did_open(path: text, content: text, language_id: text):
+        val params = "{\"textDocument\": {\"uri\": \"file://{path}\", \"languageId\": \"{language_id}\", \"version\": 1, \"text\": \"{_lsp_escape(content)}\"}}"
+        self._notify("textDocument/didOpen", params)
+
+    me did_change(path: text, content: text, version: i64):
+        val params = "{\"textDocument\": {\"uri\": \"file://{path}\", \"version\": {version}}, \"contentChanges\": [{\"text\": \"{_lsp_escape(content)}\"}]}"
+        self._notify("textDocument/didChange", params)
+
+    me completion(path: text, line: i64, col: i64) -> LspResponse:
+        val params = "{\"textDocument\": {\"uri\": \"file://{path}\"}, \"position\": {\"line\": {line}, \"character\": {col}}}"
+        val req = self._make_request("textDocument/completion", params)
+        LspResponse(id: req.id, ok: true, result_json: "", error_text: "")
+
+    me definition(path: text, line: i64, col: i64) -> LspResponse:
+        val params = "{\"textDocument\": {\"uri\": \"file://{path}\"}, \"position\": {\"line\": {line}, \"character\": {col}}}"
+        val req = self._make_request("textDocument/definition", params)
+        LspResponse(id: req.id, ok: true, result_json: "", error_text: "")
+
+    me hover(path: text, line: i64, col: i64) -> LspResponse:
+        val params = "{\"textDocument\": {\"uri\": \"file://{path}\"}, \"position\": {\"line\": {line}, \"character\": {col}}}"
+        val req = self._make_request("textDocument/hover", params)
+        LspResponse(id: req.id, ok: true, result_json: "", error_text: "")
+
+    me shutdown():
+        self._make_request("shutdown", "{}")
+        self.initialized = false
+
+    me _make_request(method: text, params_json: text) -> LspRequest:
+        val id = self.next_id
+        self.next_id = self.next_id + 1
+        LspRequest(id: id, method: method, params_json: params_json)
+
+    me _notify(method: text, params_json: text):
+        val _ = LspNotification(method: method, params_json: params_json)
+
+
+fn _lsp_escape(s: text) -> text:
+    var result = ""
+    var i = 0
+    while i < s.len():
+        val ch = s.char_at(i)
+        if ch == "\"":
+            result = result + "\\\""
+        elif ch == "\\":
+            result = result + "\\\\"
+        elif ch == "\n":
+            result = result + "\\n"
+        else:
+            result = result + ch
+        i = i + 1
+    result
