@@ -89,31 +89,6 @@ pub fn rt_bytes_u8_at_fn(args: &[Value]) -> Result<Value, CompileError> {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::{interpreter_byte_at, rt_bytes_u8_at_fn};
-    use crate::value::Value;
-
-    #[test]
-    fn interpreter_byte_at_reads_u8_values_through_wrappers() {
-        assert_eq!(interpreter_byte_at(&Value::UInt { value: 0x2d, width: 8 }), 0x2d);
-        assert_eq!(
-            interpreter_byte_at(&Value::Union {
-                type_index: 0,
-                inner: Box::new(Value::UInt { value: 0x2d, width: 8 }),
-            }),
-            0x2d
-        );
-    }
-
-    #[test]
-    fn rt_bytes_u8_at_reads_u8_array_entries() {
-        let arr = Value::array(vec![Value::UInt { value: 0x2d, width: 8 }]);
-        let result = rt_bytes_u8_at_fn(&[arr, Value::Int(0)]).expect("byte lookup should succeed");
-        assert_eq!(result, Value::Int(0x2d));
-    }
-}
-
 // ============================================================================
 // Array Manipulation
 // ============================================================================
@@ -305,4 +280,29 @@ pub fn rt_array_extend_i64_fn(args: &[Value]) -> Result<Value, CompileError> {
     let src_rv = RuntimeValue::from_raw(src_raw as u64);
     let result = rt_array_extend_i64(dst_rv, src_rv, count);
     Ok(Value::Bool(result))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{interpreter_byte_at, rt_bytes_u8_at_fn};
+    use crate::value::Value;
+
+    #[test]
+    fn interpreter_byte_at_reads_u8_values_through_wrappers() {
+        assert_eq!(interpreter_byte_at(&Value::UInt { value: 0x2d, width: 8 }), 0x2d);
+        assert_eq!(
+            interpreter_byte_at(&Value::Union {
+                type_index: 0,
+                inner: Box::new(Value::UInt { value: 0x2d, width: 8 }),
+            }),
+            0x2d
+        );
+    }
+
+    #[test]
+    fn rt_bytes_u8_at_reads_u8_array_entries() {
+        let arr = Value::array(vec![Value::UInt { value: 0x2d, width: 8 }]);
+        let result = rt_bytes_u8_at_fn(&[arr, Value::Int(0)]).expect("byte lookup should succeed");
+        assert_eq!(result, Value::Int(0x2d));
+    }
 }

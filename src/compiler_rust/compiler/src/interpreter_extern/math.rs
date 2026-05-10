@@ -160,48 +160,6 @@ pub fn pow(args: &[Value]) -> Result<Value, CompileError> {
     Ok(Value::Int(base.pow(exp as u32)))
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_abs() {
-        assert_eq!(abs(&[Value::Int(42)]).unwrap(), Value::Int(42));
-        assert_eq!(abs(&[Value::Int(-42)]).unwrap(), Value::Int(42));
-    }
-
-    #[test]
-    fn test_min() {
-        assert_eq!(min(&[Value::Int(10), Value::Int(20)]).unwrap(), Value::Int(10));
-        assert_eq!(min(&[Value::Int(20), Value::Int(10)]).unwrap(), Value::Int(10));
-    }
-
-    #[test]
-    fn test_max() {
-        assert_eq!(max(&[Value::Int(10), Value::Int(20)]).unwrap(), Value::Int(20));
-        assert_eq!(max(&[Value::Int(20), Value::Int(10)]).unwrap(), Value::Int(20));
-    }
-
-    #[test]
-    fn test_sqrt() {
-        assert_eq!(sqrt(&[Value::Int(16)]).unwrap(), Value::Int(4));
-        assert_eq!(sqrt(&[Value::Int(25)]).unwrap(), Value::Int(5));
-    }
-
-    #[test]
-    fn test_floor_ceil() {
-        // For integers, floor and ceil are identity operations
-        assert_eq!(floor(&[Value::Int(42)]).unwrap(), Value::Int(42));
-        assert_eq!(ceil(&[Value::Int(42)]).unwrap(), Value::Int(42));
-    }
-
-    #[test]
-    fn test_pow() {
-        assert_eq!(pow(&[Value::Int(2), Value::Int(3)]).unwrap(), Value::Int(8));
-        assert_eq!(pow(&[Value::Int(5), Value::Int(2)]).unwrap(), Value::Int(25));
-    }
-}
-
 // ============================================================================
 // Float Math FFI Wrappers
 // ============================================================================
@@ -544,4 +502,46 @@ pub fn rt_math_is_finite_fn(args: &[Value]) -> Result<Value, CompileError> {
         })?
         .as_float()?;
     Ok(Value::Bool(rt_math_is_finite(x)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_abs() {
+        assert_eq!(abs(&[Value::Int(42)]).unwrap(), Value::Int(42));
+        assert_eq!(abs(&[Value::Int(-42)]).unwrap(), Value::Int(42));
+    }
+
+    #[test]
+    fn test_min() {
+        assert_eq!(min(&[Value::Int(10), Value::Int(20)]).unwrap(), Value::Int(10));
+        assert_eq!(min(&[Value::Int(20), Value::Int(10)]).unwrap(), Value::Int(10));
+    }
+
+    #[test]
+    fn test_max() {
+        assert_eq!(max(&[Value::Int(10), Value::Int(20)]).unwrap(), Value::Int(20));
+        assert_eq!(max(&[Value::Int(20), Value::Int(10)]).unwrap(), Value::Int(20));
+    }
+
+    #[test]
+    fn test_sqrt() {
+        assert_eq!(sqrt(&[Value::Int(16)]).unwrap(), Value::Int(4));
+        assert_eq!(sqrt(&[Value::Int(25)]).unwrap(), Value::Int(5));
+    }
+
+    #[test]
+    fn test_floor_ceil() {
+        // For integers, floor and ceil are identity operations
+        assert_eq!(floor(&[Value::Int(42)]).unwrap(), Value::Int(42));
+        assert_eq!(ceil(&[Value::Int(42)]).unwrap(), Value::Int(42));
+    }
+
+    #[test]
+    fn test_pow() {
+        assert_eq!(pow(&[Value::Int(2), Value::Int(3)]).unwrap(), Value::Int(8));
+        assert_eq!(pow(&[Value::Int(5), Value::Int(2)]).unwrap(), Value::Int(25));
+    }
 }

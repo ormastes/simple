@@ -331,6 +331,15 @@ impl ProjectContext {
     }
 }
 
+/// Helper to extract a string array from a TOML value
+fn extract_string_array(value: &toml::Value, key: &str) -> Vec<String> {
+    value
+        .get(key)
+        .and_then(|v| v.as_array())
+        .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+        .unwrap_or_default()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -509,13 +518,4 @@ name = "myapp"
         // Without [lint] section, defaults apply
         assert_eq!(ctx.lint_config.get_level(LintName::PrimitiveApi), LintLevel::Warn);
     }
-}
-
-/// Helper to extract a string array from a TOML value
-fn extract_string_array(value: &toml::Value, key: &str) -> Vec<String> {
-    value
-        .get(key)
-        .and_then(|v| v.as_array())
-        .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
-        .unwrap_or_default()
 }

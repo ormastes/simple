@@ -517,307 +517,6 @@ pub fn resolve_module_path(parts: &[String], base_dir: &Path) -> Result<PathBuf,
     result
 }
 
-#[cfg(test)]
-mod tests {
-    use super::{compute_cache_key, normalize_base_dir, resolve_module_path};
-    use simple_simd::{host_cpu_config, reset_host_cpu_config_cache_for_tests, HostCpuConfig, SimdTier};
-    use std::fs;
-    use std::path::{Path, PathBuf};
-    use std::sync::{Mutex, OnceLock};
-
-    fn simd_tier_env_lock() -> &'static Mutex<()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
-    }
-
-    fn with_simd_tier_env<T>(value: &str, f: impl FnOnce() -> T) -> T {
-        let _guard = simd_tier_env_lock().lock().unwrap();
-        let previous = std::env::var("SIMPLE_SIMD_TIER").ok();
-        std::env::set_var("SIMPLE_SIMD_TIER", value);
-        reset_host_cpu_config_cache_for_tests();
-        let result = f();
-        reset_host_cpu_config_cache_for_tests();
-        match previous.as_deref() {
-            Some(value) => std::env::set_var("SIMPLE_SIMD_TIER", value),
-            None => std::env::remove_var("SIMPLE_SIMD_TIER"),
-        }
-        reset_host_cpu_config_cache_for_tests();
-        result
-    }
-
-    fn with_simd_envs<T>(simd_tier: Option<&str>, cpu_config_path: Option<&Path>, f: impl FnOnce() -> T) -> T {
-        let _guard = simd_tier_env_lock().lock().unwrap();
-        let previous_simd_tier = std::env::var("SIMPLE_SIMD_TIER").ok();
-        let previous_cpu_config_path = std::env::var("SIMPLE_CPU_CONFIG_PATH").ok();
-
-        match simd_tier {
-            Some(value) => std::env::set_var("SIMPLE_SIMD_TIER", value),
-            None => std::env::remove_var("SIMPLE_SIMD_TIER"),
-        }
-
-        match cpu_config_path {
-            Some(path) => std::env::set_var("SIMPLE_CPU_CONFIG_PATH", path),
-            None => std::env::remove_var("SIMPLE_CPU_CONFIG_PATH"),
-        }
-
-        reset_host_cpu_config_cache_for_tests();
-        let result = f();
-        reset_host_cpu_config_cache_for_tests();
-
-        match previous_simd_tier.as_deref() {
-            Some(value) => std::env::set_var("SIMPLE_SIMD_TIER", value),
-            None => std::env::remove_var("SIMPLE_SIMD_TIER"),
-        }
-
-        match previous_cpu_config_path.as_deref() {
-            Some(value) => std::env::set_var("SIMPLE_CPU_CONFIG_PATH", value),
-            None => std::env::remove_var("SIMPLE_CPU_CONFIG_PATH"),
-        }
-
-        reset_host_cpu_config_cache_for_tests();
-        result
-    }
-
-    fn render_string_list(values: &[String]) -> String {
-        format!(
-            "[{}]",
-            values
-                .iter()
-                .map(|value| format!("\"{value}\""))
-                .collect::<Vec<_>>()
-                .join(", ")
-        )
-    }
-
-    fn render_tier_list(values: &[SimdTier]) -> String {
-        format!(
-            "[{}]",
-            values
-                .iter()
-                .map(|value| format!("\"{}\"", value.as_str()))
-                .collect::<Vec<_>>()
-                .join(", ")
-        )
-    }
-
-    fn instruction_sets_for_tier(tier: SimdTier) -> &'static [&'static str] {
-        match tier {
-            SimdTier::Scalar => &[],
-            SimdTier::X86_64Sse2 => &["sse2"],
-            SimdTier::X86_64Avx2 => &["sse2", "avx2"],
-            SimdTier::X86_64Avx512 => &["sse2", "avx2", "avx512f"],
-            SimdTier::Aarch64Neon => &["neon"],
-            SimdTier::Aarch64Sve => &["neon", "sve"],
-            SimdTier::Aarch64Sve2 => &["neon", "sve", "sve2"],
-            SimdTier::Riscv64Rvv => &["rvv"],
-            SimdTier::Wasm128 => &["wasm128"],
-        }
-    }
-
-    fn config_document(base: &HostCpuConfig, enabled_tier: SimdTier) -> String {
-        let enabled_instruction_sets = instruction_sets_for_tier(enabled_tier)
-            .iter()
-            .filter(|instruction_set| {
-                base.simple_support
-                    .instruction_sets
-                    .iter()
-                    .any(|supported| supported == **instruction_set)
-            })
-            .map(|instruction_set| (*instruction_set).to_string())
-            .collect::<Vec<_>>();
-
-        format!(
-            concat!(
-                "version: 1\n",
-                "target_triple: \"{}\"\n",
-                "generated_by: \"test\"\n",
-                "support:\n",
-                "    simd_tier: \"{}\"\n",
-                "    instruction_sets: {}\n",
-                "simple_support:\n",
-                "    simd_tier_fallbacks: {}\n",
-                "    instruction_sets: {}\n",
-                "enabled:\n",
-                "    simd_tier: \"{}\"\n",
-                "    instruction_sets: {}\n"
-            ),
-            base.target_triple,
-            base.support.simd_tier.as_str(),
-            render_string_list(&base.support.instruction_sets),
-            render_tier_list(&base.simple_support.simd_tier_fallbacks),
-            render_string_list(&base.simple_support.instruction_sets),
-            enabled_tier.as_str(),
-            render_string_list(&enabled_instruction_sets),
-        )
-    }
-
-    #[test]
-    fn normalizes_relative_base_dirs_to_absolute_paths() {
-        let normalized = normalize_base_dir(Path::new("src/lib/nogc_sync_mut/test_runner"));
-        assert!(normalized.is_absolute());
-        assert!(normalized.ends_with("src/lib/nogc_sync_mut/test_runner"));
-    }
-
-    #[test]
-    fn resolves_std_io_from_relative_base_dir() {
-        let parts = vec!["std".to_string(), "io".to_string()];
-        let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .and_then(|p| p.parent())
-            .and_then(|p| p.parent())
-            .unwrap()
-            .to_path_buf();
-        let base_dir = repo_root.join("src/lib/nogc_sync_mut/test_runner");
-        let resolved = resolve_module_path(&parts, &base_dir).unwrap();
-        assert!(
-            resolved.ends_with("src/compiler_rust/lib/std/src/io/__init__.spl")
-                || resolved.ends_with("src/lib/nogc_sync_mut/io/__init__.spl")
-                || resolved.ends_with("src/std/nogc_sync_mut/io/__init__.spl"),
-            "resolved path was {:?}",
-            resolved
-        );
-    }
-
-    #[test]
-    fn prefers_variant_std_io_for_nogc_sync_mut_callers() {
-        let parts = vec!["std".to_string(), "io".to_string()];
-        let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .and_then(|p| p.parent())
-            .and_then(|p| p.parent())
-            .unwrap()
-            .to_path_buf();
-        let base_dir = repo_root.join("src/lib/nogc_sync_mut/test_runner");
-        let resolved = resolve_module_path(&parts, &base_dir).unwrap();
-
-        assert!(
-            resolved.ends_with("src/lib/nogc_sync_mut/io/__init__.spl")
-                || resolved.ends_with("src/std/nogc_sync_mut/io/__init__.spl"),
-            "resolved path was {:?}",
-            resolved
-        );
-    }
-
-    #[test]
-    fn resolves_compiler_driver_for_external_callers() {
-        let parts = vec!["compiler".to_string(), "driver".to_string()];
-        let resolved = resolve_module_path(&parts, Path::new("/tmp")).unwrap();
-        assert!(
-            resolved.ends_with("src/compiler/80.driver/__init__.spl")
-                || resolved.ends_with("src/compiler/driver/__init__.spl"),
-            "resolved path was {:?}",
-            resolved
-        );
-    }
-
-    #[test]
-    fn resolves_core_ast_for_external_callers() {
-        let parts = vec!["core".to_string(), "ast".to_string()];
-        let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .and_then(|p| p.parent())
-            .and_then(|p| p.parent())
-            .unwrap()
-            .to_path_buf();
-        let base_dir = repo_root.join("test/unit/core");
-        let resolved = resolve_module_path(&parts, &base_dir).unwrap();
-
-        assert!(
-            resolved.ends_with("src/compiler/10.frontend/core/ast.spl"),
-            "resolved path was {:?}",
-            resolved
-        );
-    }
-
-    #[test]
-    fn cache_key_changes_with_simd_tier() {
-        let parts = vec!["std".to_string(), "io".to_string()];
-        let base_dir = Path::new("/tmp/project/src");
-
-        let scalar = with_simd_tier_env("scalar", || compute_cache_key(&parts, base_dir));
-        let avx2 = with_simd_tier_env("x86_64_avx2", || compute_cache_key(&parts, base_dir));
-
-        assert_ne!(scalar, avx2);
-    }
-
-    #[test]
-    fn cache_key_changes_with_configured_active_tier_without_override() {
-        let temp = tempfile::tempdir().unwrap();
-        let scalar_path = temp.path().join("scalar_cpu_config.sdn");
-        let configured_path = temp.path().join("configured_cpu_config.sdn");
-        let base = with_simd_envs(None, Some(&scalar_path), || host_cpu_config().unwrap());
-        let Some(configured_tier) = base
-            .simple_support
-            .simd_tier_fallbacks
-            .iter()
-            .copied()
-            .find(|tier| !tier.is_scalar())
-        else {
-            return;
-        };
-        fs::write(&scalar_path, config_document(&base, SimdTier::Scalar)).unwrap();
-        fs::write(&configured_path, config_document(&base, configured_tier)).unwrap();
-
-        let parts = vec!["std".to_string(), "io".to_string()];
-        let base_dir = Path::new("/tmp/project/src");
-
-        let scalar = with_simd_envs(None, Some(&scalar_path), || compute_cache_key(&parts, base_dir));
-        let configured = with_simd_envs(None, Some(&configured_path), || compute_cache_key(&parts, base_dir));
-
-        assert_ne!(scalar, configured);
-    }
-
-    #[test]
-    fn resolve_module_path_uses_configured_variant_roots_without_override() {
-        let temp = tempfile::tempdir().unwrap();
-        let project_root = temp.path();
-        let base_dir = project_root.join("src/app");
-        let scalar_config = project_root.join("scalar_cpu_config.sdn");
-        let variant_config = project_root.join("variant_cpu_config.sdn");
-        let base = with_simd_envs(None, Some(&scalar_config), || host_cpu_config().unwrap());
-        let Some(variant_tier) = base
-            .simple_support
-            .simd_tier_fallbacks
-            .iter()
-            .copied()
-            .find(|tier| !tier.is_scalar())
-        else {
-            return;
-        };
-        let variant_name = variant_tier.as_str();
-
-        fs::create_dir_all(base_dir.as_path()).unwrap();
-        fs::create_dir_all(project_root.join("src/lib/std/src/io")).unwrap();
-        fs::create_dir_all(project_root.join(format!("src/lib/std/variants/{variant_name}/src/io"))).unwrap();
-        fs::write(
-            project_root.join("src/lib/std/src/io/__init__.spl"),
-            "fn scalar() -> i64:\n    return 0\n",
-        )
-        .unwrap();
-        fs::write(
-            project_root.join(format!("src/lib/std/variants/{variant_name}/src/io/__init__.spl")),
-            "fn sse2() -> i64:\n    return 1\n",
-        )
-        .unwrap();
-        fs::write(&scalar_config, config_document(&base, SimdTier::Scalar)).unwrap();
-        fs::write(&variant_config, config_document(&base, variant_tier)).unwrap();
-
-        let parts = vec!["std".to_string(), "io".to_string()];
-        let scalar = with_simd_envs(None, Some(&scalar_config), || {
-            resolve_module_path(&parts, &base_dir).unwrap()
-        });
-        let variant = with_simd_envs(None, Some(&variant_config), || {
-            resolve_module_path(&parts, &base_dir).unwrap()
-        });
-
-        assert_eq!(scalar, project_root.join("src/lib/std/src/io/__init__.spl"));
-        assert_eq!(
-            variant,
-            project_root.join(format!("src/lib/std/variants/{variant_name}/src/io/__init__.spl"))
-        );
-    }
-}
-
 fn resolve_module_path_uncached(parts: &[String], base_dir: &Path) -> Result<PathBuf, CompileError> {
     // `unit.*` well-known namespace (see .sstack/unit-system-consolidation).
     // The full unit-tree lives under `src/unit/simple-lang/...` and is resolved
@@ -1139,4 +838,305 @@ fn resolve_module_path_uncached(parts: &[String], base_dir: &Path) -> Result<Pat
     }
 
     Err(crate::error::factory::cannot_resolve_module(&parts.join(".")))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{compute_cache_key, normalize_base_dir, resolve_module_path};
+    use simple_simd::{host_cpu_config, reset_host_cpu_config_cache_for_tests, HostCpuConfig, SimdTier};
+    use std::fs;
+    use std::path::{Path, PathBuf};
+    use std::sync::{Mutex, OnceLock};
+
+    fn simd_tier_env_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    fn with_simd_tier_env<T>(value: &str, f: impl FnOnce() -> T) -> T {
+        let _guard = simd_tier_env_lock().lock().unwrap();
+        let previous = std::env::var("SIMPLE_SIMD_TIER").ok();
+        std::env::set_var("SIMPLE_SIMD_TIER", value);
+        reset_host_cpu_config_cache_for_tests();
+        let result = f();
+        reset_host_cpu_config_cache_for_tests();
+        match previous.as_deref() {
+            Some(value) => std::env::set_var("SIMPLE_SIMD_TIER", value),
+            None => std::env::remove_var("SIMPLE_SIMD_TIER"),
+        }
+        reset_host_cpu_config_cache_for_tests();
+        result
+    }
+
+    fn with_simd_envs<T>(simd_tier: Option<&str>, cpu_config_path: Option<&Path>, f: impl FnOnce() -> T) -> T {
+        let _guard = simd_tier_env_lock().lock().unwrap();
+        let previous_simd_tier = std::env::var("SIMPLE_SIMD_TIER").ok();
+        let previous_cpu_config_path = std::env::var("SIMPLE_CPU_CONFIG_PATH").ok();
+
+        match simd_tier {
+            Some(value) => std::env::set_var("SIMPLE_SIMD_TIER", value),
+            None => std::env::remove_var("SIMPLE_SIMD_TIER"),
+        }
+
+        match cpu_config_path {
+            Some(path) => std::env::set_var("SIMPLE_CPU_CONFIG_PATH", path),
+            None => std::env::remove_var("SIMPLE_CPU_CONFIG_PATH"),
+        }
+
+        reset_host_cpu_config_cache_for_tests();
+        let result = f();
+        reset_host_cpu_config_cache_for_tests();
+
+        match previous_simd_tier.as_deref() {
+            Some(value) => std::env::set_var("SIMPLE_SIMD_TIER", value),
+            None => std::env::remove_var("SIMPLE_SIMD_TIER"),
+        }
+
+        match previous_cpu_config_path.as_deref() {
+            Some(value) => std::env::set_var("SIMPLE_CPU_CONFIG_PATH", value),
+            None => std::env::remove_var("SIMPLE_CPU_CONFIG_PATH"),
+        }
+
+        reset_host_cpu_config_cache_for_tests();
+        result
+    }
+
+    fn render_string_list(values: &[String]) -> String {
+        format!(
+            "[{}]",
+            values
+                .iter()
+                .map(|value| format!("\"{value}\""))
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    }
+
+    fn render_tier_list(values: &[SimdTier]) -> String {
+        format!(
+            "[{}]",
+            values
+                .iter()
+                .map(|value| format!("\"{}\"", value.as_str()))
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    }
+
+    fn instruction_sets_for_tier(tier: SimdTier) -> &'static [&'static str] {
+        match tier {
+            SimdTier::Scalar => &[],
+            SimdTier::X86_64Sse2 => &["sse2"],
+            SimdTier::X86_64Avx2 => &["sse2", "avx2"],
+            SimdTier::X86_64Avx512 => &["sse2", "avx2", "avx512f"],
+            SimdTier::Aarch64Neon => &["neon"],
+            SimdTier::Aarch64Sve => &["neon", "sve"],
+            SimdTier::Aarch64Sve2 => &["neon", "sve", "sve2"],
+            SimdTier::Riscv64Rvv => &["rvv"],
+            SimdTier::Wasm128 => &["wasm128"],
+        }
+    }
+
+    fn config_document(base: &HostCpuConfig, enabled_tier: SimdTier) -> String {
+        let enabled_instruction_sets = instruction_sets_for_tier(enabled_tier)
+            .iter()
+            .filter(|instruction_set| {
+                base.simple_support
+                    .instruction_sets
+                    .iter()
+                    .any(|supported| supported == **instruction_set)
+            })
+            .map(|instruction_set| (*instruction_set).to_string())
+            .collect::<Vec<_>>();
+
+        format!(
+            concat!(
+                "version: 1\n",
+                "target_triple: \"{}\"\n",
+                "generated_by: \"test\"\n",
+                "support:\n",
+                "    simd_tier: \"{}\"\n",
+                "    instruction_sets: {}\n",
+                "simple_support:\n",
+                "    simd_tier_fallbacks: {}\n",
+                "    instruction_sets: {}\n",
+                "enabled:\n",
+                "    simd_tier: \"{}\"\n",
+                "    instruction_sets: {}\n"
+            ),
+            base.target_triple,
+            base.support.simd_tier.as_str(),
+            render_string_list(&base.support.instruction_sets),
+            render_tier_list(&base.simple_support.simd_tier_fallbacks),
+            render_string_list(&base.simple_support.instruction_sets),
+            enabled_tier.as_str(),
+            render_string_list(&enabled_instruction_sets),
+        )
+    }
+
+    #[test]
+    fn normalizes_relative_base_dirs_to_absolute_paths() {
+        let normalized = normalize_base_dir(Path::new("src/lib/nogc_sync_mut/test_runner"));
+        assert!(normalized.is_absolute());
+        assert!(normalized.ends_with("src/lib/nogc_sync_mut/test_runner"));
+    }
+
+    #[test]
+    fn resolves_std_io_from_relative_base_dir() {
+        let parts = vec!["std".to_string(), "io".to_string()];
+        let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(|p| p.parent())
+            .and_then(|p| p.parent())
+            .unwrap()
+            .to_path_buf();
+        let base_dir = repo_root.join("src/lib/nogc_sync_mut/test_runner");
+        let resolved = resolve_module_path(&parts, &base_dir).unwrap();
+        assert!(
+            resolved.ends_with("src/compiler_rust/lib/std/src/io/__init__.spl")
+                || resolved.ends_with("src/lib/nogc_sync_mut/io/__init__.spl")
+                || resolved.ends_with("src/std/nogc_sync_mut/io/__init__.spl"),
+            "resolved path was {:?}",
+            resolved
+        );
+    }
+
+    #[test]
+    fn prefers_variant_std_io_for_nogc_sync_mut_callers() {
+        let parts = vec!["std".to_string(), "io".to_string()];
+        let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(|p| p.parent())
+            .and_then(|p| p.parent())
+            .unwrap()
+            .to_path_buf();
+        let base_dir = repo_root.join("src/lib/nogc_sync_mut/test_runner");
+        let resolved = resolve_module_path(&parts, &base_dir).unwrap();
+
+        assert!(
+            resolved.ends_with("src/lib/nogc_sync_mut/io/__init__.spl")
+                || resolved.ends_with("src/std/nogc_sync_mut/io/__init__.spl"),
+            "resolved path was {:?}",
+            resolved
+        );
+    }
+
+    #[test]
+    fn resolves_compiler_driver_for_external_callers() {
+        let parts = vec!["compiler".to_string(), "driver".to_string()];
+        let resolved = resolve_module_path(&parts, Path::new("/tmp")).unwrap();
+        assert!(
+            resolved.ends_with("src/compiler/80.driver/__init__.spl")
+                || resolved.ends_with("src/compiler/driver/__init__.spl"),
+            "resolved path was {:?}",
+            resolved
+        );
+    }
+
+    #[test]
+    fn resolves_core_ast_for_external_callers() {
+        let parts = vec!["core".to_string(), "ast".to_string()];
+        let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(|p| p.parent())
+            .and_then(|p| p.parent())
+            .unwrap()
+            .to_path_buf();
+        let base_dir = repo_root.join("test/unit/core");
+        let resolved = resolve_module_path(&parts, &base_dir).unwrap();
+
+        assert!(
+            resolved.ends_with("src/compiler/10.frontend/core/ast.spl"),
+            "resolved path was {:?}",
+            resolved
+        );
+    }
+
+    #[test]
+    fn cache_key_changes_with_simd_tier() {
+        let parts = vec!["std".to_string(), "io".to_string()];
+        let base_dir = Path::new("/tmp/project/src");
+
+        let scalar = with_simd_tier_env("scalar", || compute_cache_key(&parts, base_dir));
+        let avx2 = with_simd_tier_env("x86_64_avx2", || compute_cache_key(&parts, base_dir));
+
+        assert_ne!(scalar, avx2);
+    }
+
+    #[test]
+    fn cache_key_changes_with_configured_active_tier_without_override() {
+        let temp = tempfile::tempdir().unwrap();
+        let scalar_path = temp.path().join("scalar_cpu_config.sdn");
+        let configured_path = temp.path().join("configured_cpu_config.sdn");
+        let base = with_simd_envs(None, Some(&scalar_path), || host_cpu_config().unwrap());
+        let Some(configured_tier) = base
+            .simple_support
+            .simd_tier_fallbacks
+            .iter()
+            .copied()
+            .find(|tier| !tier.is_scalar())
+        else {
+            return;
+        };
+        fs::write(&scalar_path, config_document(&base, SimdTier::Scalar)).unwrap();
+        fs::write(&configured_path, config_document(&base, configured_tier)).unwrap();
+
+        let parts = vec!["std".to_string(), "io".to_string()];
+        let base_dir = Path::new("/tmp/project/src");
+
+        let scalar = with_simd_envs(None, Some(&scalar_path), || compute_cache_key(&parts, base_dir));
+        let configured = with_simd_envs(None, Some(&configured_path), || compute_cache_key(&parts, base_dir));
+
+        assert_ne!(scalar, configured);
+    }
+
+    #[test]
+    fn resolve_module_path_uses_configured_variant_roots_without_override() {
+        let temp = tempfile::tempdir().unwrap();
+        let project_root = temp.path();
+        let base_dir = project_root.join("src/app");
+        let scalar_config = project_root.join("scalar_cpu_config.sdn");
+        let variant_config = project_root.join("variant_cpu_config.sdn");
+        let base = with_simd_envs(None, Some(&scalar_config), || host_cpu_config().unwrap());
+        let Some(variant_tier) = base
+            .simple_support
+            .simd_tier_fallbacks
+            .iter()
+            .copied()
+            .find(|tier| !tier.is_scalar())
+        else {
+            return;
+        };
+        let variant_name = variant_tier.as_str();
+
+        fs::create_dir_all(base_dir.as_path()).unwrap();
+        fs::create_dir_all(project_root.join("src/lib/std/src/io")).unwrap();
+        fs::create_dir_all(project_root.join(format!("src/lib/std/variants/{variant_name}/src/io"))).unwrap();
+        fs::write(
+            project_root.join("src/lib/std/src/io/__init__.spl"),
+            "fn scalar() -> i64:\n    return 0\n",
+        )
+        .unwrap();
+        fs::write(
+            project_root.join(format!("src/lib/std/variants/{variant_name}/src/io/__init__.spl")),
+            "fn sse2() -> i64:\n    return 1\n",
+        )
+        .unwrap();
+        fs::write(&scalar_config, config_document(&base, SimdTier::Scalar)).unwrap();
+        fs::write(&variant_config, config_document(&base, variant_tier)).unwrap();
+
+        let parts = vec!["std".to_string(), "io".to_string()];
+        let scalar = with_simd_envs(None, Some(&scalar_config), || {
+            resolve_module_path(&parts, &base_dir).unwrap()
+        });
+        let variant = with_simd_envs(None, Some(&variant_config), || {
+            resolve_module_path(&parts, &base_dir).unwrap()
+        });
+
+        assert_eq!(scalar, project_root.join("src/lib/std/src/io/__init__.spl"));
+        assert_eq!(
+            variant,
+            project_root.join(format!("src/lib/std/variants/{variant_name}/src/io/__init__.spl"))
+        );
+    }
 }

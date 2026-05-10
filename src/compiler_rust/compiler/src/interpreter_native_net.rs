@@ -514,7 +514,7 @@ pub fn rt_io_tcp_connect_timeout_interp(args: &[Value]) -> Result<Value, Compile
 }
 
 pub fn rt_dns_lookup_interp(args: &[Value]) -> Result<Value, CompileError> {
-    let host = match args.get(0) {
+    let host = match args.first() {
         Some(Value::Str(s)) => s.as_str(),
         _ => return Ok(Value::Str(String::new())),
     };

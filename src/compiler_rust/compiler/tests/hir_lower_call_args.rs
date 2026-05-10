@@ -395,7 +395,7 @@ main = 0
 
     // We expect at least one BuiltinCall with 1 arg.
     assert!(
-        builtin_call_arg_counts.iter().any(|&c| c == 1),
+        builtin_call_arg_counts.contains(&1),
         "print(msg) must lower to a 1-arg BuiltinCall; got: {:?}",
         builtin_call_arg_counts
     );

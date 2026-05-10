@@ -239,10 +239,10 @@ mod tests {
             0x27, 0x4f, 0xc1, 0xa8, 0x36, 0xba, 0x3c, 0x23, 0xa3, 0xfe, 0xeb, 0xbd, 0x45, 0x4d, 0x44, 0x23, 0x64, 0x3c,
             0xe8, 0x0e, 0x2a, 0x9a, 0xc9, 0x4f, 0xa5, 0x4c, 0xa4, 0x9f,
         ];
-        for i in 0..64 {
+        for (i, &expected_byte) in expected.iter().enumerate() {
             let v = rt_sha512_byte(&[Value::Int(i as i64)]).expect("byte ok");
             match v {
-                Value::Int(b) => assert_eq!(b as u8, expected[i], "mismatch at byte {i}"),
+                Value::Int(b) => assert_eq!(b as u8, expected_byte, "mismatch at byte {i}"),
                 _ => panic!("expected Int"),
             }
         }
@@ -253,13 +253,13 @@ mod tests {
         match rt_sha512_k(&[Value::Int(0)]).expect("K[0]") {
             Value::UInt { value, width } => {
                 assert_eq!(width, 64);
-                assert_eq!(value as u64, 0x428a2f98d728ae22u64);
+                assert_eq!(value, 0x428a2f98d728ae22u64);
             }
             _ => panic!("expected UInt"),
         }
         match rt_sha512_k(&[Value::Int(79)]).expect("K[79]") {
             Value::UInt { value, .. } => {
-                assert_eq!(value as u64, 0x6c44198c4a475817u64);
+                assert_eq!(value, 0x6c44198c4a475817u64);
             }
             _ => panic!("expected UInt"),
         }
@@ -268,11 +268,11 @@ mod tests {
     #[test]
     fn sha512_h_first_and_last() {
         match rt_sha512_h(&[Value::Int(0)]).expect("H[0]") {
-            Value::UInt { value, .. } => assert_eq!(value as u64, 0x6a09e667f3bcc908u64),
+            Value::UInt { value, .. } => assert_eq!(value, 0x6a09e667f3bcc908u64),
             _ => panic!("expected UInt"),
         }
         match rt_sha512_h(&[Value::Int(7)]).expect("H[7]") {
-            Value::UInt { value, .. } => assert_eq!(value as u64, 0x5be0cd19137e2179u64),
+            Value::UInt { value, .. } => assert_eq!(value, 0x5be0cd19137e2179u64),
             _ => panic!("expected UInt"),
         }
     }

@@ -93,5 +93,5 @@ pub(super) fn build_mir_func(name: &str, build: impl FnOnce(&mut MirFunction)) -
 
 /// Helper: check if any instruction in a function matches a predicate.
 pub(super) fn func_has_inst(func: &MirFunction, pred: impl Fn(&MirInst) -> bool) -> bool {
-    func.blocks.iter().flat_map(|b| b.instructions.iter()).any(|i| pred(i))
+    func.blocks.iter().flat_map(|b| b.instructions.iter()).any(pred)
 }

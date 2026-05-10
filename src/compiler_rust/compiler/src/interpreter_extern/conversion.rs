@@ -134,7 +134,7 @@ pub fn rt_bytes_to_text_fn(args: &[Value]) -> Result<Value, CompileError> {
 ///
 /// Callable from Simple as: `bytes_to_u16_le(b0, b1)`
 pub fn bytes_to_u16_le_fn(args: &[Value]) -> Result<Value, CompileError> {
-    let b0 = match args.get(0) {
+    let b0 = match args.first() {
         Some(Value::Int(i)) => *i as u64,
         _ => 0,
     };
@@ -150,7 +150,7 @@ pub fn bytes_to_u16_le_fn(args: &[Value]) -> Result<Value, CompileError> {
 ///
 /// Callable from Simple as: `bytes_to_u16_be(b0, b1)`
 pub fn bytes_to_u16_be_fn(args: &[Value]) -> Result<Value, CompileError> {
-    let b0 = match args.get(0) {
+    let b0 = match args.first() {
         Some(Value::Int(i)) => *i as u64,
         _ => 0,
     };

@@ -102,7 +102,7 @@ fn run_pipeline(source: &str, file_path: &std::path::Path) -> (Stage, Option<Str
 
     // 5. Codegen (Cranelift AOT) - only if BATCH_CODEGEN=1
     //    Creating a Codegen per file is slow (~300ms each), so this is opt-in.
-    if std::env::var("BATCH_CODEGEN").map_or(false, |v| v == "1") {
+    if std::env::var("BATCH_CODEGEN").is_ok_and(|v| v == "1") {
         match Codegen::new() {
             Ok(codegen) => match codegen.compile_module(&mir_module) {
                 Ok(_object_code) => (Stage::Done, None),

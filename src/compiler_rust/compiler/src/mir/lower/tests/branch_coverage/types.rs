@@ -137,7 +137,7 @@ fn unit_type_with_repr_and_constraint() {
     });
 
     let mir = crate::mir::lower::lower_to_mir(&hir_module).unwrap();
-    assert!(mir.functions.len() >= 1);
+    assert!(!mir.functions.is_empty());
 }
 
 #[test]
