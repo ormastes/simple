@@ -3,7 +3,7 @@
  * Test CodeLens Provider
  *
  * Shows "▶ Run Test" / "▶ Run File" CodeLens above:
- * - `describe "...":`  - SSpec test groups
+ * - `describe "...":`  - SPipe test groups
  * - `it "...":`        - Individual test examples
  * - `context "...":`   - Test context groups
  * - `""" sdoctest:`    - Inline documentation tests
