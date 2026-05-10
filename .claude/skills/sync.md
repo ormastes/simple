@@ -45,6 +45,35 @@ if [ "$FILE_COUNT_AFTER" -lt "$FILE_COUNT_BEFORE" ]; then
   # Abort if unexpected — restore with: jj op restore <op_id>
 fi
 
+# 5b. Critical file guard — check protected files from config/critical_files.sdn
+CRITICAL_CONFIG="config/critical_files.sdn"
+if [ -f "$CRITICAL_CONFIG" ]; then
+  DELETED_FILES=$(git diff --name-status HEAD~1..HEAD 2>/dev/null | grep '^D' | awk '{print $2}')
+  if [ -n "$DELETED_FILES" ]; then
+    while IFS= read -r deleted; do
+      if grep -q "$deleted" "$CRITICAL_CONFIG"; then
+        echo "CRITICAL: Protected file deleted in rebase: $deleted"
+        echo "Aborting — restore with: jj op restore <op_id>"
+        exit 1
+      fi
+    done <<< "$DELETED_FILES"
+  fi
+  # 5c. Check shrinkage of critical files
+  grep "path:" "$CRITICAL_CONFIG" | grep -v "protected_dirs" | awk '{print $NF}' | while read cfile; do
+    if [ -f "$cfile" ]; then
+      LINES_NOW=$(wc -l < "$cfile" | tr -d ' ')
+      LINES_BEFORE=$(git show HEAD~1:"$cfile" 2>/dev/null | wc -l 2>/dev/null | tr -d ' ')
+      if [ -n "$LINES_BEFORE" ] && [ "$LINES_BEFORE" -gt 0 ]; then
+        RATIO=$((LINES_NOW * 100 / LINES_BEFORE))
+        if [ "$RATIO" -lt 50 ]; then
+          echo "CRITICAL: $cfile shrunk from $LINES_BEFORE to $LINES_NOW lines (${RATIO}%)"
+          echo "Review with: jj diff $cfile"
+        fi
+      fi
+    fi
+  done
+fi
+
 # 6. Push
 jj bookmark set main -r @-
 jj git push --bookmark main

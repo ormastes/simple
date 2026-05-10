@@ -1,0 +1,622 @@
+# VHDL testbench converter.
+#
+# Translates Simple hardware test source text into testbench IR
+# (VhdlTestbenchSuite) that the renderer in vhdl_testbench.spl consumes.
+#
+# Slice 1 scope:
+# - Single @hardware DUT with scalar ports
+# - Literal bool, integer, bit-vector stimuli
+# - expect(actual).to_equal(expected) assertions only
+# - Optional clock/reset from @clocked metadata
+#
+# Unsupported constructs are rejected with a diagnostic before any IR
+# is emitted.
+
+use compiler.backend.backend.vhdl.vhdl_testbench.{
+    VhdlTestbenchSuite,
+    VhdlTestbenchDut,
+    VhdlTestbenchPhase,
+    VhdlTestbenchPort,
+    VhdlTestbenchAssignment,
+    VhdlTestbenchAssertion,
+    VhdlTestbenchDiagnostic,
+    vhdl_testbench_diagnostic
+}
+
+# ============================================================================
+# Converter options
+# ============================================================================
+
+struct VhdlTestbenchConvertOptions:
+    clock_period_ns: i64
+
+fn default_convert_options() -> VhdlTestbenchConvertOptions:
+    VhdlTestbenchConvertOptions(clock_period_ns: 10)
+
+# ============================================================================
+# Parsed intermediate structures (internal to converter)
+# ============================================================================
+
+struct ParsedDut:
+    name: text
+    ports: [VhdlTestbenchPort]
+    is_clocked: bool
+    clock_name: text
+    reset_name: text
+    reset_polarity: text
+
+struct ParsedStimulus:
+    target: text
+    literal: text
+    source_line: i64
+
+struct ParsedAssertion:
+    actual: text
+    expected: text
+    source_line: i64
+
+struct ParsedTest:
+    test_name: text
+    test_source_line: i64
+    dut: ParsedDut
+    stimuli: [ParsedStimulus]
+    assertions: [ParsedAssertion]
+
+# ============================================================================
+# Public API
+# ============================================================================
+
+fn convert_simple_test_to_testbench(source: text, test_name: text) -> Result<VhdlTestbenchSuite, VhdlTestbenchDiagnostic>:
+    """Convert a Simple hardware test into VHDL testbench IR.
+
+    The source must contain exactly one @hardware DUT reference and use only
+    literal stimuli and expect(...).to_equal(...) assertions. Unsupported
+    constructs are rejected with a diagnostic.
+    """
+    convert_simple_test_to_testbench_with_options(source, test_name, default_convert_options())
+
+fn convert_simple_test_to_testbench_with_options(source: text, test_name: text, options: VhdlTestbenchConvertOptions) -> Result<VhdlTestbenchSuite, VhdlTestbenchDiagnostic>:
+    """Convert with explicit options."""
+    val lines = source.split("\n")
+
+    # Step 1: Find DUT declarations
+    val duts = _extract_dut_declarations(lines)
+    if duts.len() == 0:
+        return Err(vhdl_testbench_diagnostic(
+            "VHDL-TB-CONV-NO-DUT",
+            "No @hardware DUT declaration found in test '{test_name}'",
+            1
+        ))
+    if duts.len() > 1:
+        return Err(vhdl_testbench_diagnostic(
+            "VHDL-TB-CONV-MULTI-DUT",
+            "Multiple @hardware DUT declarations found in test '{test_name}'; slice 1 supports exactly one DUT",
+            duts[1].source_line
+        ))
+
+    # Step 2: Reject unsupported constructs
+    val reject = _reject_unsupported_constructs(lines, test_name)
+    if reject.?:
+        return Err(reject.unwrap())
+
+    # Step 3: Extract stimuli and assertions
+    val stimuli = _extract_stimuli(lines)
+    val assertions = _extract_assertions(lines, test_name)
+
+    if assertions.len() == 0:
+        return Err(vhdl_testbench_diagnostic(
+            "VHDL-TB-CONV-NO-ASSERT",
+            "No expect(...).to_equal(...) assertions found in test '{test_name}'",
+            1
+        ))
+
+    # Step 4: Build DUT info
+    val raw_dut = duts[0]
+    val dut_ports = _extract_dut_ports(lines, raw_dut.name)
+    val parsed_dut = ParsedDut(
+        name: raw_dut.name,
+        ports: dut_ports,
+        is_clocked: raw_dut.is_clocked,
+        clock_name: raw_dut.clock_name,
+        reset_name: raw_dut.reset_name,
+        reset_polarity: raw_dut.reset_polarity
+    )
+
+    if dut_ports.len() == 0:
+        return Err(vhdl_testbench_diagnostic(
+            "VHDL-TB-CONV-NO-PORTS",
+            "DUT '{parsed_dut.name}' has no declared ports in test '{test_name}'",
+            raw_dut.source_line
+        ))
+
+    # Step 5: Build testbench IR
+    val tb_name = _sanitize_tb_name(test_name)
+    val tb_assertions = _build_tb_assertions(assertions, test_name)
+    val tb_stimuli = _build_tb_stimuli(stimuli)
+
+    val clock_name = if parsed_dut.is_clocked: parsed_dut.clock_name else: ""
+    val reset_name = if parsed_dut.is_clocked: parsed_dut.reset_name else: ""
+    val reset_asserted = if parsed_dut.is_clocked: parsed_dut.reset_polarity else: ""
+
+    val suite = VhdlTestbenchSuite(
+        testbench_name: "{tb_name}_tb",
+        test_name: test_name,
+        test_source_line: raw_dut.source_line,
+        duts: [
+            VhdlTestbenchDut(
+                instance_name: "dut",
+                entity: parsed_dut.name,
+                ports: parsed_dut.ports,
+                source_line: raw_dut.source_line
+            )
+        ],
+        phases: [
+            VhdlTestbenchPhase(
+                name: test_name,
+                source_line: raw_dut.source_line,
+                stimuli: tb_stimuli,
+                assertions: tb_assertions,
+                wait_for: ""
+            )
+        ],
+        clock_name: clock_name,
+        reset_name: reset_name,
+        reset_asserted: reset_asserted
+    )
+
+    Ok(suite)
+
+# ============================================================================
+# DUT extraction
+# ============================================================================
+
+struct RawDutDecl:
+    name: text
+    source_line: i64
+    is_clocked: bool
+    clock_name: text
+    reset_name: text
+    reset_polarity: text
+
+fn _extract_dut_declarations(lines: [text]) -> [RawDutDecl]:
+    """Find @hardware DUT references in the test source."""
+    var duts: [RawDutDecl] = []
+    var line_no = 0
+    while line_no < lines.len():
+        val line = lines[line_no].trim()
+        if line.contains("@hardware"):
+            val dut_name = _extract_identifier_after(line, "@hardware")
+            if dut_name != "":
+                val is_clocked = _line_has_clocked(lines, line_no)
+                var clock_name = "clk"
+                var reset_name = "rst"
+                var reset_polarity = "'0'"
+                if is_clocked:
+                    val clock_info = _extract_clock_info(lines, line_no)
+                    clock_name = clock_info.clock_name
+                    reset_name = clock_info.reset_name
+                    reset_polarity = clock_info.reset_polarity
+                duts = duts.push(RawDutDecl(
+                    name: dut_name,
+                    source_line: line_no + 1,
+                    is_clocked: is_clocked,
+                    clock_name: clock_name,
+                    reset_name: reset_name,
+                    reset_polarity: reset_polarity
+                ))
+        line_no = line_no + 1
+    duts
+
+fn _extract_identifier_after(line: text, marker: text) -> text:
+    """Extract the first identifier after a marker in a line."""
+    val idx = line.index_of(marker)
+    if idx < 0:
+        return ""
+    var pos = idx + marker.len()
+    # skip whitespace
+    while pos < line.len() and line.substring(pos, pos + 1) == " ":
+        pos = pos + 1
+    # skip optional 'fn' keyword
+    if pos + 3 <= line.len() and line.substring(pos, pos + 3) == "fn ":
+        pos = pos + 3
+    # skip whitespace again
+    while pos < line.len() and line.substring(pos, pos + 1) == " ":
+        pos = pos + 1
+    # read identifier chars
+    var ident = ""
+    while pos < line.len():
+        val ch = line.substring(pos, pos + 1)
+        if _is_ident_char(ch):
+            ident = ident + ch
+            pos = pos + 1
+        else:
+            break
+    ident
+
+fn _is_ident_char(ch: text) -> bool:
+    if ch == "_":
+        return true
+    if ch >= "a" and ch <= "z":
+        return true
+    if ch >= "A" and ch <= "Z":
+        return true
+    if ch >= "0" and ch <= "9":
+        return true
+    false
+
+# ============================================================================
+# Clock/reset extraction
+# ============================================================================
+
+struct ClockInfo:
+    clock_name: text
+    reset_name: text
+    reset_polarity: text
+
+fn _line_has_clocked(lines: [text], dut_line: i64) -> bool:
+    """Check if a @clocked annotation appears near the @hardware declaration."""
+    # Check same line
+    if lines[dut_line].contains("@clocked"):
+        return true
+    # Check preceding line
+    if dut_line > 0 and lines[dut_line - 1].trim().contains("@clocked"):
+        return true
+    false
+
+fn _extract_clock_info(lines: [text], dut_line: i64) -> ClockInfo:
+    """Extract clock/reset info from @clocked annotation."""
+    var clock_line = ""
+    if lines[dut_line].contains("@clocked"):
+        clock_line = lines[dut_line]
+    elif dut_line > 0 and lines[dut_line - 1].trim().contains("@clocked"):
+        clock_line = lines[dut_line - 1]
+
+    var clock_name = "clk"
+    var reset_name = "rst"
+    var reset_polarity = "'0'"
+
+    # Parse @clocked(clock=xxx, reset=yyy, polarity=zzz)
+    if clock_line.contains("clock="):
+        val ck = _extract_param_value(clock_line, "clock=")
+        if ck != "":
+            clock_name = ck
+    if clock_line.contains("reset="):
+        val rs = _extract_param_value(clock_line, "reset=")
+        if rs != "":
+            reset_name = rs
+    if clock_line.contains("polarity="):
+        val pol = _extract_param_value(clock_line, "polarity=")
+        if pol == "high":
+            reset_polarity = "'1'"
+
+    ClockInfo(clock_name: clock_name, reset_name: reset_name, reset_polarity: reset_polarity)
+
+fn _extract_param_value(line: text, param: text) -> text:
+    """Extract a parameter value from @clocked(..., param=value, ...)."""
+    val idx = line.index_of(param)
+    if idx < 0:
+        return ""
+    var pos = idx + param.len()
+    var value = ""
+    while pos < line.len():
+        val ch = line.substring(pos, pos + 1)
+        if ch == "," or ch == ")" or ch == " ":
+            break
+        value = value + ch
+        pos = pos + 1
+    value
+
+# ============================================================================
+# Port extraction
+# ============================================================================
+
+fn _extract_dut_ports(lines: [text], dut_name: text) -> [VhdlTestbenchPort]:
+    """Extract port declarations from the source.
+
+    Looks for port annotations in the form:
+        # port: name direction type
+    or port declarations in @hardware function signatures.
+    """
+    var ports: [VhdlTestbenchPort] = []
+    var line_no = 0
+    while line_no < lines.len():
+        val line = lines[line_no].trim()
+        if line.starts_with("# port:") or line.starts_with("#port:"):
+            val port = _parse_port_comment(line, line_no + 1)
+            if port.?:
+                ports = ports.push(port.unwrap())
+        elif line.starts_with("@port"):
+            val port = _parse_port_annotation(line, line_no + 1)
+            if port.?:
+                ports = ports.push(port.unwrap())
+        line_no = line_no + 1
+    ports
+
+fn _parse_port_comment(line: text, source_line: i64) -> VhdlTestbenchPort?:
+    """Parse a port comment like: # port: a in std_logic"""
+    val content = if line.starts_with("# port:"): line.substring(7, line.len()).trim()
+                  else: line.substring(6, line.len()).trim()
+    val parts = content.split(" ")
+    if parts.len() < 3:
+        return nil
+    val name = parts[0].trim()
+    val direction = parts[1].trim()
+    var type_name = ""
+    var i = 2
+    while i < parts.len():
+        if i > 2:
+            type_name = type_name + " "
+        type_name = type_name + parts[i].trim()
+        i = i + 1
+    Some(VhdlTestbenchPort(
+        name: name,
+        direction: direction,
+        type_name: type_name,
+        source_line: source_line
+    ))
+
+fn _parse_port_annotation(line: text, source_line: i64) -> VhdlTestbenchPort?:
+    """Parse @port(name, direction, type) annotation."""
+    val paren_start = line.index_of("(")
+    val paren_end = line.index_of(")")
+    if paren_start < 0 or paren_end < 0:
+        return nil
+    val content = line.substring(paren_start + 1, paren_end)
+    val parts = content.split(",")
+    if parts.len() < 3:
+        return nil
+    Some(VhdlTestbenchPort(
+        name: parts[0].trim(),
+        direction: parts[1].trim(),
+        type_name: parts[2].trim(),
+        source_line: source_line
+    ))
+
+# ============================================================================
+# Stimulus extraction
+# ============================================================================
+
+fn _extract_stimuli(lines: [text]) -> [ParsedStimulus]:
+    """Extract stimulus assignments from the test source.
+
+    Recognizes patterns like:
+        set a = '1'
+        a <= "1010"
+        a = 42
+    """
+    var stimuli: [ParsedStimulus] = []
+    var line_no = 0
+    while line_no < lines.len():
+        val line = lines[line_no].trim()
+        # Pattern: set target = literal
+        if line.starts_with("set "):
+            val stim = _parse_set_stimulus(line, line_no + 1)
+            if stim.?:
+                stimuli = stimuli.push(stim.unwrap())
+        # Pattern: target <= literal (VHDL-style in comments/test DSL)
+        elif line.contains(" <= ") and not line.starts_with("#") and not line.starts_with("//"):
+            val stim = _parse_assign_stimulus(line, line_no + 1)
+            if stim.?:
+                stimuli = stimuli.push(stim.unwrap())
+        line_no = line_no + 1
+    stimuli
+
+fn _parse_set_stimulus(line: text, source_line: i64) -> ParsedStimulus?:
+    """Parse: set target = literal"""
+    val content = line.substring(4, line.len()).trim()
+    val eq_idx = content.index_of("=")
+    if eq_idx < 0:
+        return nil
+    val target = content.substring(0, eq_idx).trim()
+    val literal = content.substring(eq_idx + 1, content.len()).trim()
+    if target == "" or literal == "":
+        return nil
+    Some(ParsedStimulus(target: target, literal: literal, source_line: source_line))
+
+fn _parse_assign_stimulus(line: text, source_line: i64) -> ParsedStimulus?:
+    """Parse: target <= literal"""
+    val idx = line.index_of(" <= ")
+    if idx < 0:
+        return nil
+    val target = line.substring(0, idx).trim()
+    val literal = line.substring(idx + 4, line.len()).trim()
+    if target == "" or literal == "":
+        return nil
+    Some(ParsedStimulus(target: target, literal: literal, source_line: source_line))
+
+# ============================================================================
+# Assertion extraction
+# ============================================================================
+
+fn _extract_assertions(lines: [text], test_name: text) -> [ParsedAssertion]:
+    """Extract expect(...).to_equal(...) assertions from the test source."""
+    var assertions: [ParsedAssertion] = []
+    var line_no = 0
+    while line_no < lines.len():
+        val line = lines[line_no].trim()
+        if line.contains("expect(") and line.contains(".to_equal("):
+            val parsed = _parse_expect_to_equal(line, line_no + 1)
+            if parsed.?:
+                assertions = assertions.push(parsed.unwrap())
+        line_no = line_no + 1
+    assertions
+
+fn _parse_expect_to_equal(line: text, source_line: i64) -> ParsedAssertion?:
+    """Parse: expect(actual).to_equal(expected)"""
+    val expect_idx = line.index_of("expect(")
+    if expect_idx < 0:
+        return nil
+    # Find the actual value inside expect(...)
+    val actual_start = expect_idx + 7
+    val actual_end = _find_matching_paren(line, actual_start - 1)
+    if actual_end < 0:
+        return nil
+    val actual = line.substring(actual_start, actual_end).trim()
+
+    # Find .to_equal(expected)
+    val to_equal_idx = line.index_of(".to_equal(")
+    if to_equal_idx < 0:
+        return nil
+    val expected_start = to_equal_idx + 10
+    val expected_end = _find_matching_paren(line, expected_start - 1)
+    if expected_end < 0:
+        return nil
+    val expected = line.substring(expected_start, expected_end).trim()
+
+    if actual == "" or expected == "":
+        return nil
+    Some(ParsedAssertion(actual: actual, expected: expected, source_line: source_line))
+
+fn _find_matching_paren(line: text, open_pos: i64) -> i64:
+    """Find the position of the closing parenthesis matching the one at open_pos."""
+    var depth = 0
+    var pos = open_pos
+    while pos < line.len():
+        val ch = line.substring(pos, pos + 1)
+        if ch == "(":
+            depth = depth + 1
+        elif ch == ")":
+            depth = depth - 1
+            if depth == 0:
+                return pos
+        pos = pos + 1
+    -1
+
+# ============================================================================
+# Unsupported construct rejection
+# ============================================================================
+
+fn _reject_unsupported_constructs(lines: [text], test_name: text) -> VhdlTestbenchDiagnostic?:
+    """Reject source-test shapes that slice 1 cannot convert."""
+    var line_no = 0
+    while line_no < lines.len():
+        val line = lines[line_no].trim()
+        # Reject unsupported matchers
+        if line.contains("expect(") and not line.contains(".to_equal("):
+            if line.contains(".to_contain("):
+                return Some(vhdl_testbench_diagnostic(
+                    "VHDL-TB-CONV-UNSUPPORTED",
+                    "Unsupported matcher 'to_contain' in test '{test_name}'; slice 1 supports only to_equal",
+                    line_no + 1
+                ))
+            if line.contains(".to_be_greater_than("):
+                return Some(vhdl_testbench_diagnostic(
+                    "VHDL-TB-CONV-UNSUPPORTED",
+                    "Unsupported matcher 'to_be_greater_than' in test '{test_name}'; slice 1 supports only to_equal",
+                    line_no + 1
+                ))
+            if line.contains(".to_be_less_than("):
+                return Some(vhdl_testbench_diagnostic(
+                    "VHDL-TB-CONV-UNSUPPORTED",
+                    "Unsupported matcher 'to_be_less_than' in test '{test_name}'; slice 1 supports only to_equal",
+                    line_no + 1
+                ))
+            if line.contains(".to_start_with("):
+                return Some(vhdl_testbench_diagnostic(
+                    "VHDL-TB-CONV-UNSUPPORTED",
+                    "Unsupported matcher 'to_start_with' in test '{test_name}'; slice 1 supports only to_equal",
+                    line_no + 1
+                ))
+            if line.contains(".to_be_nil"):
+                return Some(vhdl_testbench_diagnostic(
+                    "VHDL-TB-CONV-UNSUPPORTED",
+                    "Unsupported matcher 'to_be_nil' in test '{test_name}'; slice 1 supports only to_equal",
+                    line_no + 1
+                ))
+        # Reject loops
+        if line.starts_with("for ") and line.contains(" in "):
+            return Some(vhdl_testbench_diagnostic(
+                "VHDL-TB-CONV-UNSUPPORTED",
+                "For-loop in test '{test_name}' is not supported in slice 1 testbench conversion",
+                line_no + 1
+            ))
+        if line.starts_with("while "):
+            return Some(vhdl_testbench_diagnostic(
+                "VHDL-TB-CONV-UNSUPPORTED",
+                "While-loop in test '{test_name}' is not supported in slice 1 testbench conversion",
+                line_no + 1
+            ))
+        # Reject branches (if/else in test body, not in annotations)
+        if line.starts_with("if ") and not line.starts_with("if val"):
+            # Allow 'if val' pattern bindings but reject conditional branches
+            if not line.contains("@"):
+                return Some(vhdl_testbench_diagnostic(
+                    "VHDL-TB-CONV-UNSUPPORTED",
+                    "Conditional branch in test '{test_name}' is not supported in slice 1 testbench conversion",
+                    line_no + 1
+                ))
+        # Reject randomization
+        if line.contains("random(") or line.contains("rand(") or line.contains("Random."):
+            return Some(vhdl_testbench_diagnostic(
+                "VHDL-TB-CONV-UNSUPPORTED",
+                "Randomization in test '{test_name}' is not supported in slice 1 testbench conversion",
+                line_no + 1
+            ))
+        # Reject file I/O
+        if line.contains("File.open") or line.contains("File.read") or line.contains("File.write"):
+            return Some(vhdl_testbench_diagnostic(
+                "VHDL-TB-CONV-UNSUPPORTED",
+                "File I/O in test '{test_name}' is not supported in slice 1 testbench conversion",
+                line_no + 1
+            ))
+        line_no = line_no + 1
+    nil
+
+# ============================================================================
+# IR builders
+# ============================================================================
+
+fn _build_tb_assertions(assertions: [ParsedAssertion], test_name: text) -> [VhdlTestbenchAssertion]:
+    """Convert parsed assertions into testbench IR assertions."""
+    var result: [VhdlTestbenchAssertion] = []
+    var idx = 0
+    while idx < assertions.len():
+        val a = assertions[idx]
+        result = result.push(VhdlTestbenchAssertion(
+            actual: a.actual,
+            expected: a.expected,
+            test_name: test_name,
+            expectation_index: idx + 1,
+            source_line: a.source_line
+        ))
+        idx = idx + 1
+    result
+
+fn _build_tb_stimuli(stimuli: [ParsedStimulus]) -> [VhdlTestbenchAssignment]:
+    """Convert parsed stimuli into testbench IR assignments."""
+    var result: [VhdlTestbenchAssignment] = []
+    for s in stimuli:
+        result = result.push(VhdlTestbenchAssignment(
+            target: s.target,
+            literal: s.literal,
+            source_line: s.source_line
+        ))
+    result
+
+# ============================================================================
+# Name sanitization
+# ============================================================================
+
+fn _sanitize_tb_name(name: text) -> text:
+    """Produce a deterministic VHDL-safe testbench entity name."""
+    var result = name.trim()
+    if result.len() == 0:
+        result = "unnamed"
+    result = result.replace(" ", "_")
+    result = result.replace("-", "_")
+    result = result.replace(".", "_")
+    result = result.replace(":", "_")
+    result = result.replace("/", "_")
+    result = result.replace("\\", "_")
+    result = result.replace("(", "_")
+    result = result.replace(")", "_")
+    result = result.replace("[", "_")
+    result = result.replace("]", "_")
+    result = result.replace("'", "_")
+    result = result.replace("\"", "_")
+    # VHDL identifiers must start with a letter
+    if result.len() > 0:
+        val first = result.substring(0, 1)
+        if not (first >= "a" and first <= "z") and not (first >= "A" and first <= "Z"):
+            result = "tb_{result}"
+    result

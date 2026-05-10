@@ -1,0 +1,380 @@
+# VHDL Subprogram Emission Specification
+#
+# Tests VHDL function/procedure emission in VhdlBuilder and verifies
+# subprogram helper definitions in vhdl_helpers.spl via text-grep.
+#
+# **Feature IDs:** #vhdl-subprogram-emission, VHDL-PARITY-010
+# **Category:** Backend / VHDL
+# **Difficulty:** 3/5
+
+"""
+@cover src/compiler/70.backend/backend/vhdl/vhdl_builder.spl 80%
+@cover src/compiler/70.backend/backend/vhdl/vhdl_helpers.spl 80%
+
+# VHDL Subprogram Emission
+
+## Overview
+
+Verifies that VhdlBuilder emits correct VHDL function and procedure
+blocks, and that the helpers module provides subprogram eligibility,
+naming, and collision detection utilities.
+
+## Syntax
+
+- `emit_function_begin(name, params, return_type)` emits a VHDL function header
+- `emit_procedure_begin(name, params)` emits a VHDL procedure header
+- Helper functions: `vhdl_subprogram_name`, `vhdl_helper_is_subprogram_eligible`
+
+## Key Concepts
+
+- Pure combinational helpers lower to VHDL functions
+- Multi-output helpers lower to VHDL procedures with out parameters
+- @hardware / @clocked helpers remain entities (not subprograms)
+- Subprogram names use `simple_fn_` prefix for collision safety
+
+## Behavior
+
+- Function declarations include typed parameter list and return type
+- Procedure declarations include directional parameter list
+- Names are sanitized and prefixed to avoid VHDL reserved word collisions
+
+## Related Specifications
+
+- `test/unit/compiler/backend/vhdl_builder_spec.spl`
+- `test/unit/compiler/backend/vhdl_backend_spec.spl`
+
+## Implementation Notes
+
+Text-grep based — reads source files and checks generated VHDL text.
+Does not depend on full compilation pipeline.
+"""
+
+use compiler.backend.backend.vhdl.vhdl_builder.VhdlBuilder
+
+extern fn rt_file_read_text(path: text) -> text
+
+fn check(condition: bool):
+    expect(condition).to_equal(true)
+
+# ============================================================================
+# Test Group 1: VHDL Function Emission
+# ============================================================================
+
+describe "VHDL Subprogram Emission - functions":
+    """
+    ## Function Emission
+
+    Verifies that VhdlBuilder emits syntactically correct VHDL function
+    declarations with parameters, return types, body begin/end, and return
+    statements.
+    """
+
+    it "emits a parameterless function":
+        var builder = VhdlBuilder.create("test_mod")
+        builder.emit_function_begin("simple_fn_get_zero", [], "integer")
+        builder.emit_function_body_begin()
+        builder.emit_function_return("0")
+        builder.emit_function_end("simple_fn_get_zero")
+
+        val vhdl = builder.build()
+
+        check(vhdl.contains("function simple_fn_get_zero return integer is"))
+        check(vhdl.contains("begin"))
+        check(vhdl.contains("return 0;"))
+        check(vhdl.contains("end function simple_fn_get_zero;"))
+
+    it "emits a single-parameter function":
+        var builder = VhdlBuilder.create("test_mod")
+        builder.emit_function_begin(
+            "simple_fn_invert",
+            ["a : std_logic_vector(7 downto 0)"],
+            "std_logic_vector(7 downto 0)"
+        )
+        builder.emit_function_body_begin()
+        builder.emit_function_return("not a")
+        builder.emit_function_end("simple_fn_invert")
+
+        val vhdl = builder.build()
+
+        check(vhdl.contains("function simple_fn_invert(a : std_logic_vector(7 downto 0)) return std_logic_vector(7 downto 0) is"))
+        check(vhdl.contains("return not a;"))
+        check(vhdl.contains("end function simple_fn_invert;"))
+
+    it "emits a multi-parameter function":
+        var builder = VhdlBuilder.create("test_mod")
+        builder.emit_function_begin(
+            "simple_fn_test_add",
+            ["a : signed(31 downto 0)", "b : signed(31 downto 0)"],
+            "signed(31 downto 0)"
+        )
+        builder.emit_function_body_begin()
+        builder.emit_function_return("a + b")
+        builder.emit_function_end("simple_fn_test_add")
+
+        val vhdl = builder.build()
+
+        check(vhdl.contains("function simple_fn_test_add(a : signed(31 downto 0); b : signed(31 downto 0)) return signed(31 downto 0) is"))
+        check(vhdl.contains("return a + b;"))
+        check(vhdl.contains("end function simple_fn_test_add;"))
+
+    it "emits a function with local variables":
+        var builder = VhdlBuilder.create("test_mod")
+        builder.emit_function_begin(
+            "simple_fn_clamp",
+            ["x : integer", "lo : integer", "hi : integer"],
+            "integer"
+        )
+        builder.emit_process_var("result", "integer", nil)
+        builder.emit_function_body_begin()
+        builder.emit_if_begin("x < lo")
+        builder.emit_var_assign("result", "lo")
+        builder.emit_elsif("x > hi")
+        builder.emit_var_assign("result", "hi")
+        builder.emit_else()
+        builder.emit_var_assign("result", "x")
+        builder.emit_if_end()
+        builder.emit_function_return("result")
+        builder.emit_function_end("simple_fn_clamp")
+
+        val vhdl = builder.build()
+
+        check(vhdl.contains("function simple_fn_clamp(x : integer; lo : integer; hi : integer) return integer is"))
+        check(vhdl.contains("variable result : integer;"))
+        check(vhdl.contains("if x < lo then"))
+        check(vhdl.contains("result := lo;"))
+        check(vhdl.contains("elsif x > hi then"))
+        check(vhdl.contains("result := hi;"))
+        check(vhdl.contains("return result;"))
+        check(vhdl.contains("end function simple_fn_clamp;"))
+
+    it "places function in architecture declarative region":
+        var builder = VhdlBuilder.create("arch_test")
+        builder.emit_library_header()
+        builder.emit_entity_begin("top")
+        builder.emit_port_begin()
+        builder.emit_port("clk", "in", "std_logic", true)
+        builder.emit_port_end()
+        builder.emit_entity_end("top")
+        builder.emit_architecture_begin("top", "rtl")
+        # Function goes in declarative region (before begin)
+        builder.emit_function_begin("simple_fn_helper", ["x : integer"], "integer")
+        builder.emit_function_body_begin()
+        builder.emit_function_return("x + 1")
+        builder.emit_function_end("simple_fn_helper")
+        builder.emit_architecture_body_begin()
+        builder.emit_comment("architecture body uses the function")
+        builder.emit_architecture_end("rtl")
+
+        val vhdl = builder.build()
+
+        check(vhdl.contains("architecture rtl of top is"))
+        check(vhdl.contains("function simple_fn_helper(x : integer) return integer is"))
+        check(vhdl.contains("end function simple_fn_helper;"))
+        check(vhdl.contains("end architecture rtl;"))
+
+# ============================================================================
+# Test Group 2: VHDL Procedure Emission
+# ============================================================================
+
+describe "VHDL Subprogram Emission - procedures":
+    """
+    ## Procedure Emission
+
+    Verifies that VhdlBuilder emits syntactically correct VHDL procedure
+    declarations with directional parameters (in/out/inout).
+    """
+
+    it "emits a parameterless procedure":
+        var builder = VhdlBuilder.create("test_mod")
+        builder.emit_procedure_begin("simple_fn_noop", [])
+        builder.emit_procedure_body_begin()
+        builder.emit_comment("no-op")
+        builder.emit_procedure_end("simple_fn_noop")
+
+        val vhdl = builder.build()
+
+        check(vhdl.contains("procedure simple_fn_noop is"))
+        check(vhdl.contains("begin"))
+        check(vhdl.contains("-- no-op"))
+        check(vhdl.contains("end procedure simple_fn_noop;"))
+
+    it "emits a procedure with out parameters":
+        var builder = VhdlBuilder.create("test_mod")
+        builder.emit_procedure_begin(
+            "simple_fn_split",
+            [
+                "x : in signed(31 downto 0)",
+                "hi : out signed(15 downto 0)",
+                "lo : out signed(15 downto 0)"
+            ]
+        )
+        builder.emit_procedure_body_begin()
+        builder.emit_var_assign("hi", "x(31 downto 16)")
+        builder.emit_var_assign("lo", "x(15 downto 0)")
+        builder.emit_procedure_end("simple_fn_split")
+
+        val vhdl = builder.build()
+
+        check(vhdl.contains("procedure simple_fn_split(x : in signed(31 downto 0); hi : out signed(15 downto 0); lo : out signed(15 downto 0)) is"))
+        check(vhdl.contains("hi := x(31 downto 16);"))
+        check(vhdl.contains("lo := x(15 downto 0);"))
+        check(vhdl.contains("end procedure simple_fn_split;"))
+
+    it "emits a procedure with inout parameter":
+        var builder = VhdlBuilder.create("test_mod")
+        builder.emit_procedure_begin(
+            "simple_fn_increment",
+            ["counter : inout integer"]
+        )
+        builder.emit_procedure_body_begin()
+        builder.emit_var_assign("counter", "counter + 1")
+        builder.emit_procedure_end("simple_fn_increment")
+
+        val vhdl = builder.build()
+
+        check(vhdl.contains("procedure simple_fn_increment(counter : inout integer) is"))
+        check(vhdl.contains("counter := counter + 1;"))
+        check(vhdl.contains("end procedure simple_fn_increment;"))
+
+    it "places procedure in architecture declarative region":
+        var builder = VhdlBuilder.create("arch_test")
+        builder.emit_architecture_begin("top", "rtl")
+        builder.emit_procedure_begin(
+            "simple_fn_swap",
+            ["a : inout integer", "b : inout integer"]
+        )
+        builder.emit_process_var("tmp", "integer", nil)
+        builder.emit_procedure_body_begin()
+        builder.emit_var_assign("tmp", "a")
+        builder.emit_var_assign("a", "b")
+        builder.emit_var_assign("b", "tmp")
+        builder.emit_procedure_end("simple_fn_swap")
+        builder.emit_architecture_body_begin()
+        builder.emit_architecture_end("rtl")
+
+        val vhdl = builder.build()
+
+        check(vhdl.contains("architecture rtl of top is"))
+        check(vhdl.contains("procedure simple_fn_swap(a : inout integer; b : inout integer) is"))
+        check(vhdl.contains("variable tmp : integer;"))
+        check(vhdl.contains("end procedure simple_fn_swap;"))
+        check(vhdl.contains("end architecture rtl;"))
+
+# ============================================================================
+# Test Group 3: Text-grep Helpers Verification
+# ============================================================================
+
+describe "VHDL Subprogram Emission - helpers source verification":
+    """
+    ## Helpers Source Verification
+
+    Text-grep verification that vhdl_helpers.spl contains the required
+    subprogram eligibility, naming, and collision detection functions.
+    """
+
+    it "defines vhdl_helper_is_subprogram_eligible function":
+        val source = rt_file_read_text("src/compiler/70.backend/backend/vhdl/vhdl_helpers.spl") ?? ""
+        check(source.len() > 0)
+        check(source.contains("fn vhdl_helper_is_subprogram_eligible"))
+        check(source.contains("has_vhdl_metadata"))
+        check(source.contains("is_hardware"))
+        check(source.contains("has_clocked"))
+
+    it "defines vhdl_subprogram_name with simple_fn_ prefix":
+        val source = rt_file_read_text("src/compiler/70.backend/backend/vhdl/vhdl_helpers.spl") ?? ""
+        check(source.contains("fn vhdl_subprogram_name"))
+        check(source.contains("simple_fn_"))
+        check(source.contains("vhdl_sanitize_identifier"))
+
+    it "defines vhdl_subprogram_name_plan returning VhdlHelperNamePlan":
+        val source = rt_file_read_text("src/compiler/70.backend/backend/vhdl/vhdl_helpers.spl") ?? ""
+        check(source.contains("fn vhdl_subprogram_name_plan"))
+        check(source.contains("VhdlHelperNamePlan"))
+
+    it "defines collision detection with reserved word checks":
+        val source = rt_file_read_text("src/compiler/70.backend/backend/vhdl/vhdl_helpers.spl") ?? ""
+        check(source.contains("fn vhdl_check_name_collisions"))
+        check(source.contains("fn vhdl_is_reserved_word"))
+        check(source.contains("collides with a VHDL reserved word"))
+
+    it "defines vhdl_helper_collision_message for diagnostics":
+        val source = rt_file_read_text("src/compiler/70.backend/backend/vhdl/vhdl_helpers.spl") ?? ""
+        check(source.contains("fn vhdl_helper_collision_message"))
+        check(source.contains("Duplicate VHDL helper subprogram name"))
+
+    it "defines vhdl_helper_is_procedure check":
+        val source = rt_file_read_text("src/compiler/70.backend/backend/vhdl/vhdl_helpers.spl") ?? ""
+        check(source.contains("fn vhdl_helper_is_procedure"))
+        check(source.contains("MirTypeKind.Unit"))
+
+# ============================================================================
+# Test Group 4: Builder Source Verification
+# ============================================================================
+
+describe "VHDL Subprogram Emission - builder source verification":
+    """
+    ## Builder Source Verification
+
+    Text-grep verification that vhdl_builder.spl contains the new
+    subprogram emission methods.
+    """
+
+    it "defines function emission methods":
+        val source = rt_file_read_text("src/compiler/70.backend/backend/vhdl/vhdl_builder.spl") ?? ""
+        check(source.len() > 0)
+        check(source.contains("me emit_function_begin"))
+        check(source.contains("me emit_function_body_begin"))
+        check(source.contains("me emit_function_return"))
+        check(source.contains("me emit_function_end"))
+
+    it "defines procedure emission methods":
+        val source = rt_file_read_text("src/compiler/70.backend/backend/vhdl/vhdl_builder.spl") ?? ""
+        check(source.contains("me emit_procedure_begin"))
+        check(source.contains("me emit_procedure_body_begin"))
+        check(source.contains("me emit_procedure_end"))
+
+    it "function begin emits correct VHDL keyword":
+        val source = rt_file_read_text("src/compiler/70.backend/backend/vhdl/vhdl_builder.spl") ?? ""
+        # Verify the template uses "function" and "return" VHDL keywords
+        check(source.contains("function"))
+        check(source.contains("return_type"))
+        check(source.contains("param_list"))
+
+    it "procedure begin emits correct VHDL keyword":
+        val source = rt_file_read_text("src/compiler/70.backend/backend/vhdl/vhdl_builder.spl") ?? ""
+        # Verify the template uses "procedure" VHDL keyword
+        check(source.contains("procedure"))
+        check(source.contains("end procedure"))
+
+# ============================================================================
+# Test Group 5: Identifier Sanitization
+# ============================================================================
+
+describe "VHDL Subprogram Emission - identifier sanitization":
+    """
+    ## Identifier Sanitization
+
+    Text-grep verification that vhdl_helpers.spl contains proper identifier
+    sanitization for VHDL-safe names.
+    """
+
+    it "sanitizer replaces unsafe characters":
+        val source = rt_file_read_text("src/compiler/70.backend/backend/vhdl/vhdl_helpers.spl") ?? ""
+        check(source.contains("fn vhdl_sanitize_identifier"))
+        # Must replace common unsafe chars
+        check(source.contains(".replace(\" \", \"_\")"))
+        check(source.contains(".replace(\"-\", \"_\")"))
+        check(source.contains(".replace(\".\", \"_\")"))
+        check(source.contains(".replace(\":\", \"_\")"))
+
+    it "covers VHDL-2008 reserved words":
+        val source = rt_file_read_text("src/compiler/70.backend/backend/vhdl/vhdl_helpers.spl") ?? ""
+        check(source.contains("fn vhdl_is_reserved_word"))
+        # Spot-check critical reserved words
+        check(source.contains("\"signal\""))
+        check(source.contains("\"process\""))
+        check(source.contains("\"entity\""))
+        check(source.contains("\"architecture\""))
+        check(source.contains("\"function\""))
+        check(source.contains("\"procedure\""))
+        check(source.contains("\"variable\""))

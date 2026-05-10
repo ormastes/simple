@@ -1,0 +1,446 @@
+# RISC-V FPGA Linux Integration
+#
+# Dual-arch (RV32 + RV64) orchestration layer for RISC-V FPGA boards
+# running Linux. Manages board profiles, lane contracts, manifests,
+# RTL bundle generation, and boot product metadata.
+#
+# Tracks plan items 1-6 from doc/03_plan/agent_tasks/riscv_fpga_linux.md:
+#   1. Preparation contract and executable lane validation
+#   2. Helper-proof surface preservation
+#   3. Generated RV32/RV64 Linux lanes in manifests
+#   4. DTB and boot ROM packaging
+#   5. Vivado materialization for Xilinx board profiles
+#   6. Hardware boot-test runners
+
+extern fn rt_fs_write_text(path: text, content: text) -> bool
+extern fn rt_fs_read_text(path: text) -> text
+extern fn rt_fs_mkdir_p(path: text) -> bool
+extern fn rt_fs_exists(path: text) -> bool
+
+# ============================================================================
+# Readiness Status
+# ============================================================================
+
+pub enum RiscvReadinessStatus:
+    """Tracks the lifecycle stage of a generated RISC-V Linux lane."""
+    Contract
+    QemuValidated
+    FpgaSynthesized
+    HardwareBooted
+
+impl RiscvReadinessStatus:
+    fn to_text() -> text:
+        match self:
+            case Contract: "contract"
+            case QemuValidated: "qemu_validated"
+            case FpgaSynthesized: "fpga_synthesized"
+            case HardwareBooted: "hardware_booted"
+
+# ============================================================================
+# XLEN — Architecture Width
+# ============================================================================
+
+pub enum Xlen:
+    """RISC-V register width selector."""
+    Rv32
+    Rv64
+
+impl Xlen:
+    fn to_text() -> text:
+        match self:
+            case Rv32: "rv32"
+            case Rv64: "rv64"
+
+    fn linux_policy() -> text:
+        """Returns the repo-native Linux policy string for this xlen."""
+        match self:
+            case Rv32: "repo-native-rv32-linux"
+            case Rv64: "repo-native-rv64-linux"
+
+    fn core_file_name() -> text:
+        """Returns the RTL core filename for this xlen."""
+        match self:
+            case Rv32: "simple_rv32gc_core.spl"
+            case Rv64: "simple_rv64gc_core.vhd"
+
+    fn isa_string() -> text:
+        match self:
+            case Rv32: "rv32gc"
+            case Rv64: "rv64gc"
+
+# ============================================================================
+# Proof Lane Identifier
+# ============================================================================
+
+pub struct ProofLane:
+    """Identifies a generated proof lane for manifest tracking."""
+    name: text
+
+impl ProofLane:
+    fn to_text() -> text:
+        self.name
+
+# ============================================================================
+# QEMU Machine Profile
+# ============================================================================
+
+pub struct QemuMachineProfile:
+    """QEMU virt machine configuration for simulation-based validation."""
+    machine: text
+    memory: text
+    smp: i64
+
+impl QemuMachineProfile:
+    static fn default_for(xlen: Xlen) -> QemuMachineProfile:
+        match xlen:
+            case Rv32:
+                QemuMachineProfile(machine: "virt", memory: "128M", smp: 1)
+            case Rv64:
+                QemuMachineProfile(machine: "virt", memory: "256M", smp: 2)
+
+    fn qemu_binary() -> text:
+        if self.machine == "virt" and self.smp <= 1:
+            "qemu-system-riscv32"
+        else:
+            "qemu-system-riscv64"
+
+    fn to_id() -> text:
+        """Short identifier for manifest summaries."""
+        match self.qemu_binary():
+            case "qemu-system-riscv32": "qemu_virt_rv32"
+            case _: "qemu_virt_rv64"
+
+# ============================================================================
+# Xilinx Board Profile
+# ============================================================================
+
+pub struct XilinxBoardProfile:
+    """
+    Board support package for a specific Xilinx FPGA board.
+    Contains part number, clock frequency, programmer type,
+    and constraint file path.
+    """
+    name: text
+    part: text
+    clock_hz: i64
+    programmer: text
+    constraint_path: text
+
+impl XilinxBoardProfile:
+    static fn generic() -> XilinxBoardProfile:
+        """
+        Generic Xilinx profile with no specific part selected.
+        Passes prepare validation but blocks hardware boot.
+        """
+        XilinxBoardProfile(
+            name: "xilinx_generic",
+            part: "",
+            clock_hz: 0,
+            programmer: "",
+            constraint_path: ""
+        )
+
+    static fn from_id(board_id: text) -> Result<XilinxBoardProfile, text>:
+        """
+        Look up a concrete board profile by ID.
+        Currently supports: mlk_s02_100t
+        """
+        if board_id == "mlk_s02_100t":
+            Ok(XilinxBoardProfile(
+                name: "mlk_s02_100t",
+                part: "xc7a100tfgg484-2",
+                clock_hz: 25000000,
+                programmer: "openFPGALoader",
+                constraint_path: "examples/09_embedded/fpga_riscv/constraints/mlk_s02_100t.xdc"
+            ))
+        else:
+            Err("unknown board id: {board_id}")
+
+    fn validate_for_prepare() -> [text]:
+        """
+        Validation errors for the prepare phase. Generic profiles pass
+        since no hardware-specific config is needed for RTL generation.
+        """
+        var errors: [text] = []
+        # Prepare phase only needs a valid name
+        if self.name == "":
+            errors = errors.push("board name must not be empty")
+        return errors
+
+    fn validate_for_hardware_boot() -> text:
+        """
+        Validation message for hardware boot. Returns empty string if valid,
+        otherwise returns the blocking reason.
+        """
+        if self.part == "":
+            return "xilinx part must be selected before hardware boot"
+        if self.clock_hz <= 0:
+            return "clock frequency must be set before hardware boot"
+        if self.programmer == "":
+            return "programmer must be configured before hardware boot"
+        return ""
+
+    fn xdc_path() -> text:
+        """Returns the XDC constraint file path for this board."""
+        self.constraint_path
+
+# ============================================================================
+# RISC-V FPGA Lane
+# ============================================================================
+
+pub struct RiscvFpgaLane:
+    """
+    A single architecture lane (RV32 or RV64) in the FPGA Linux pipeline.
+    Tracks readiness status, proof lane identifier, QEMU profile,
+    and boot artifact paths.
+    """
+    xlen: Xlen
+    status: RiscvReadinessStatus
+    qemu: QemuMachineProfile
+
+impl RiscvFpgaLane:
+    static fn rv32_default() -> RiscvFpgaLane:
+        """Default RV32 lane at Contract readiness."""
+        RiscvFpgaLane(
+            xlen: Xlen.Rv32,
+            status: RiscvReadinessStatus.Contract,
+            qemu: QemuMachineProfile.default_for(Xlen.Rv32)
+        )
+
+    static fn rv64_default() -> RiscvFpgaLane:
+        """Default RV64 lane at Contract readiness."""
+        RiscvFpgaLane(
+            xlen: Xlen.Rv64,
+            status: RiscvReadinessStatus.Contract,
+            qemu: QemuMachineProfile.default_for(Xlen.Rv64)
+        )
+
+    fn readiness_status() -> RiscvReadinessStatus:
+        self.status
+
+    fn proof_lane() -> ProofLane:
+        """Returns the proof lane identifier for this architecture."""
+        match self.xlen:
+            case Rv32:
+                ProofLane(name: "generated_rv32_linux")
+            case Rv64:
+                ProofLane(name: "generated_rv64_linux")
+
+    fn rtl_dir_name() -> text:
+        self.xlen.to_text()
+
+    fn boot_products_id(board_name: text) -> text:
+        """Product ID for manifest boot products."""
+        "{board_name}_{self.xlen.to_text()}_linux"
+
+    fn summary_token() -> text:
+        """Short summary token for readiness reports."""
+        "{self.xlen.to_text()}:{self.status.to_text()}:{self.qemu.to_id()}"
+
+# ============================================================================
+# FPGA Linux Manifest
+# ============================================================================
+
+pub struct RiscvFpgaLinuxManifest:
+    """
+    Dual-arch manifest for RISC-V FPGA Linux integration.
+    Contains board profile, both architecture lanes, and methods
+    for generating machine-readable manifests and boot products.
+    """
+    board: XilinxBoardProfile
+    lanes: [RiscvFpgaLane]
+
+impl RiscvFpgaLinuxManifest:
+    fn readiness_summary() -> text:
+        """Human-readable summary of lane readiness states."""
+        var parts: [text] = []
+        for lane in self.lanes:
+            parts = parts.push(lane.summary_token())
+        return parts.join(", ")
+
+    fn vivado_tcl_plan() -> text:
+        """
+        Returns a Vivado TCL plan snippet referencing the board's
+        constraint file and target part.
+        """
+        var lines: [text] = []
+        lines = lines.push("# Vivado TCL Plan for {self.board.name}")
+        lines = lines.push("set_property PART {self.board.part} [current_project]")
+        if self.board.constraint_path != "":
+            lines = lines.push("add_files -fileset constrs_1 {self.board.constraint_path}")
+        for lane in self.lanes:
+            val rtl_file = lane.xlen.core_file_name()
+            lines = lines.push("add_files -fileset sources_1 {lane.rtl_dir_name()}/rtl/{rtl_file}")
+        return lines.join("\n")
+
+    fn board_linux_boot_products_manifest_text(output_dir: text) -> text:
+        """
+        Generates the boot products manifest in SDN format for all lanes.
+        """
+        var lines: [text] = []
+        lines = lines.push("# Board Linux Boot Products Manifest")
+        lines = lines.push("# Board: {self.board.name}")
+        lines = lines.push("")
+        for lane in self.lanes:
+            val product_id = lane.boot_products_id(self.board.name)
+            lines = lines.push("[[product]]")
+            lines = lines.push("product_id = \"{product_id}\"")
+            lines = lines.push("xlen = \"{lane.xlen.to_text()}\"")
+            lines = lines.push("isa = \"{lane.xlen.isa_string()}\"")
+            lines = lines.push("board = \"{self.board.name}\"")
+            lines = lines.push("boot_script = \"scripts/{self.board.name}_generated_linux_boot.shs\"")
+            lines = lines.push("validation_kind = \"linux-uart-markers\"")
+            lines = lines.push("expected_markers = \"OpenSBI|Linux version|OF: fdt|Freeing unused kernel memory|init started\"")
+            lines = lines.push("")
+        return lines.join("\n")
+
+# ============================================================================
+# RTL Bundle
+# ============================================================================
+
+pub struct RtlBundle:
+    """Result of RTL bundle generation — paths to generated artifacts."""
+    output_dir: text
+    manifest_path: text
+    board_linux_boot_products_manifest_path: text
+    bundle_readme_path: text
+
+# ============================================================================
+# Manifest Factory Functions
+# ============================================================================
+
+pub fn create_default_riscv_fpga_linux_manifest() -> RiscvFpgaLinuxManifest:
+    """
+    Creates the default dual-arch manifest with generic board profile
+    and both RV32+RV64 lanes at Contract readiness.
+    """
+    RiscvFpgaLinuxManifest(
+        board: XilinxBoardProfile.generic(),
+        lanes: [RiscvFpgaLane.rv32_default(), RiscvFpgaLane.rv64_default()]
+    )
+
+pub fn create_riscv_fpga_linux_manifest_for_board(board_id: text) -> Result<RiscvFpgaLinuxManifest, text>:
+    """
+    Creates a board-specific dual-arch manifest.
+    Returns Err if board_id is not recognized.
+    """
+    val board_result = XilinxBoardProfile.from_id(board_id)
+    if board_result.is_err():
+        return Err(board_result.unwrap_err())
+    val board = board_result.unwrap()
+    Ok(RiscvFpgaLinuxManifest(
+        board: board,
+        lanes: [RiscvFpgaLane.rv32_default(), RiscvFpgaLane.rv64_default()]
+    ))
+
+# ============================================================================
+# RTL Bundle Generation
+# ============================================================================
+
+fn write_manifest_file(output_dir: text, board_name: text, lanes: [RiscvFpgaLane]) -> text:
+    """Writes the main RTL manifest to disk and returns its path."""
+    val path = "{output_dir}/manifest.sdn"
+    var lines: [text] = []
+    lines = lines.push("# RISC-V FPGA Linux RTL Manifest")
+    lines = lines.push("# Auto-generated by Simple compiler")
+    lines = lines.push("")
+    lines = lines.push("[provenance]")
+    lines = lines.push("authoritative_rtl_provenance = \"simple-compiler-generated\"")
+    lines = lines.push("pure_simple_authoritative_rtl = \"true\"")
+    if board_name != "xilinx_generic":
+        lines = lines.push("board = \"{board_name}\"")
+    lines = lines.push("")
+    for lane in lanes:
+        lines = lines.push("[[lane]]")
+        lines = lines.push("proof_lane = \"{lane.proof_lane().to_text()}\"")
+        lines = lines.push("xlen = \"{lane.xlen.to_text()}\"")
+        val rtl_file = lane.xlen.core_file_name()
+        lines = lines.push("authoritative_file = \"{output_dir}/{lane.rtl_dir_name()}/rtl/{rtl_file}\"")
+        lines = lines.push("")
+    rt_fs_write_text(path, lines.join("\n"))
+    return path
+
+fn write_boot_products_file(output_dir: text, manifest: RiscvFpgaLinuxManifest) -> text:
+    """Writes the boot products manifest to disk and returns its path."""
+    val path = "{output_dir}/board_linux_boot_products.sdn"
+    val content = manifest.board_linux_boot_products_manifest_text(output_dir)
+    rt_fs_write_text(path, content)
+    return path
+
+fn write_bundle_readme(output_dir: text) -> text:
+    """Writes the bundle README to disk and returns its path."""
+    val path = "{output_dir}/README.md"
+    var lines: [text] = []
+    lines = lines.push("# RISC-V FPGA Linux RTL Bundle")
+    lines = lines.push("")
+    lines = lines.push("Auto-generated dual-arch RTL bundle for RISC-V FPGA Linux integration.")
+    lines = lines.push("")
+    lines = lines.push("## Contents")
+    lines = lines.push("")
+    lines = lines.push("- `manifest.sdn` — machine-readable lane manifest with provenance")
+    lines = lines.push("- per-arch boot products manifest: `board_linux_boot_products.sdn`")
+    lines = lines.push("- `rv32/rtl/` — RV32 synthesizable RTL sources")
+    lines = lines.push("- `rv64/rtl/` — RV64 synthesizable RTL sources")
+    lines = lines.push("")
+    lines = lines.push("## Provenance")
+    lines = lines.push("")
+    lines = lines.push("The machine-readable authoritative subset is listed explicitly by `authoritative_file` entries in the manifest and `provenance.authoritativeFiles` in the debug sidecar.")
+    lines = lines.push("")
+    rt_fs_write_text(path, lines.join("\n"))
+    return path
+
+fn write_stub_rtl(output_dir: text, lanes: [RiscvFpgaLane]):
+    """Creates stub RTL directories and placeholder core files."""
+    for lane in lanes:
+        val rtl_dir = "{output_dir}/{lane.rtl_dir_name()}/rtl"
+        rt_fs_mkdir_p(rtl_dir)
+        val core_file = "{rtl_dir}/{lane.xlen.core_file_name()}"
+        if not rt_fs_exists(core_file):
+            var content = "# Stub RTL core for {lane.xlen.to_text()} — generated by Simple compiler\n"
+            content = content + "# Replace with actual synthesizable RTL when ready\n"
+            rt_fs_write_text(core_file, content)
+
+pub fn generate_default_riscv_fpga_rtl_bundle(output_dir: text) -> Result<RtlBundle, text>:
+    """
+    Generates the default dual-arch RTL bundle (generic board) at the
+    given output directory. Creates manifest, boot products, README,
+    and stub RTL directories.
+    """
+    val manifest = create_default_riscv_fpga_linux_manifest()
+    rt_fs_mkdir_p(output_dir)
+    write_stub_rtl(output_dir, manifest.lanes)
+    val manifest_path = write_manifest_file(output_dir, manifest.board.name, manifest.lanes)
+    val products_path = write_boot_products_file(output_dir, manifest)
+    val readme_path = write_bundle_readme(output_dir)
+    Ok(RtlBundle(
+        output_dir: output_dir,
+        manifest_path: manifest_path,
+        board_linux_boot_products_manifest_path: products_path,
+        bundle_readme_path: readme_path
+    ))
+
+pub fn generate_riscv_fpga_rtl_bundle_for_board(output_dir: text, board_id: text) -> Result<RtlBundle, text>:
+    """
+    Generates a board-specific RTL bundle at the given output directory.
+    """
+    val manifest_result = create_riscv_fpga_linux_manifest_for_board(board_id)
+    if manifest_result.is_err():
+        return Err(manifest_result.unwrap_err())
+    val manifest = manifest_result.unwrap()
+    rt_fs_mkdir_p(output_dir)
+    write_stub_rtl(output_dir, manifest.lanes)
+    val manifest_path = write_manifest_file(output_dir, manifest.board.name, manifest.lanes)
+    val products_path = write_boot_products_file(output_dir, manifest)
+    val readme_path = write_bundle_readme(output_dir)
+    Ok(RtlBundle(
+        output_dir: output_dir,
+        manifest_path: manifest_path,
+        board_linux_boot_products_manifest_path: products_path,
+        bundle_readme_path: readme_path
+    ))
+
+pub fn read_generated_riscv_fpga_rtl_file(path: text) -> text:
+    """Reads a generated RTL file from disk. Returns empty string on failure."""
+    if rt_fs_exists(path):
+        return rt_fs_read_text(path)
+    return ""

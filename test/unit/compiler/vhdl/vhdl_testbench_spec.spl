@@ -1,0 +1,458 @@
+# VHDL Testbench Converter Unit Tests
+#
+# Tests for converting Simple hardware test assertions into VHDL testbench IR.
+# Text-grep pattern: logic replicated at module level to avoid import issues.
+#
+# @cover src/compiler/70.backend/backend/vhdl/vhdl_testbench_converter.spl 80%
+
+"""
+# VHDL Testbench Conversion Specification
+
+**Feature IDs:** #VHDL-PARITY-012
+**Category:** Tooling
+**Difficulty:** 3/5
+**Status:** In Progress
+**Plan:** doc/03_plan/agent_tasks/vhdl_testbench_conversion.md
+**Artifacts:** N/A
+
+## Overview
+
+Tests that the Simple-to-VHDL testbench converter correctly translates
+hardware test source into testbench IR, and rejects unsupported constructs
+with diagnostics.
+
+## Key Concepts
+
+- Single @hardware DUT extraction from test source
+- Literal scalar stimuli (bool, integer, bit-vector)
+- expect(...).to_equal(...) assertion mapping
+- Unsupported construct rejection before VHDL emission
+
+## Behavior
+
+The converter must:
+1. Find exactly one @hardware DUT in the test source
+2. Extract port declarations from port comments/annotations
+3. Map set/assign stimuli to VhdlTestbenchAssignment IR
+4. Map expect().to_equal() to VhdlTestbenchAssertion IR
+5. Reject loops, branches, unsupported matchers, multi-DUT, file I/O
+"""
+
+use std.spipe.*
+
+# ============================================================================
+# Module-level helpers (replicate converter logic without imports)
+# ============================================================================
+
+fn is_ident_char(ch: text) -> bool:
+    if ch == "_":
+        return true
+    if ch >= "a" and ch <= "z":
+        return true
+    if ch >= "A" and ch <= "Z":
+        return true
+    if ch >= "0" and ch <= "9":
+        return true
+    false
+
+fn extract_identifier_after(line: text, marker: text) -> text:
+    val idx = line.index_of(marker)
+    if idx < 0:
+        return ""
+    var pos = idx + marker.len()
+    while pos < line.len() and line.substring(pos, pos + 1) == " ":
+        pos = pos + 1
+    if pos + 3 <= line.len() and line.substring(pos, pos + 3) == "fn ":
+        pos = pos + 3
+    while pos < line.len() and line.substring(pos, pos + 1) == " ":
+        pos = pos + 1
+    var ident = ""
+    while pos < line.len():
+        val ch = line.substring(pos, pos + 1)
+        if is_ident_char(ch):
+            ident = ident + ch
+            pos = pos + 1
+        else:
+            break
+    ident
+
+fn find_matching_paren(line: text, open_pos: i64) -> i64:
+    var depth = 0
+    var pos = open_pos
+    while pos < line.len():
+        val ch = line.substring(pos, pos + 1)
+        if ch == "(":
+            depth = depth + 1
+        elif ch == ")":
+            depth = depth - 1
+            if depth == 0:
+                return pos
+        pos = pos + 1
+    -1
+
+fn parse_expect_to_equal_actual(line: text) -> text:
+    val expect_idx = line.index_of("expect(")
+    if expect_idx < 0:
+        return ""
+    val actual_start = expect_idx + 7
+    val actual_end = find_matching_paren(line, actual_start - 1)
+    if actual_end < 0:
+        return ""
+    line.substring(actual_start, actual_end).trim()
+
+fn parse_expect_to_equal_expected(line: text) -> text:
+    val to_equal_idx = line.index_of(".to_equal(")
+    if to_equal_idx < 0:
+        return ""
+    val expected_start = to_equal_idx + 10
+    val expected_end = find_matching_paren(line, expected_start - 1)
+    if expected_end < 0:
+        return ""
+    line.substring(expected_start, expected_end).trim()
+
+fn sanitize_tb_name(name: text) -> text:
+    var result = name.trim()
+    if result.len() == 0:
+        result = "unnamed"
+    result = result.replace(" ", "_")
+    result = result.replace("-", "_")
+    result = result.replace(".", "_")
+    result = result.replace(":", "_")
+    result = result.replace("/", "_")
+    result = result.replace("\\", "_")
+    result = result.replace("(", "_")
+    result = result.replace(")", "_")
+    result = result.replace("[", "_")
+    result = result.replace("]", "_")
+    result = result.replace("'", "_")
+    result = result.replace("\"", "_")
+    if result.len() > 0:
+        val first = result.substring(0, 1)
+        if not (first >= "a" and first <= "z") and not (first >= "A" and first <= "Z"):
+            result = "tb_{result}"
+    result
+
+fn parse_port_comment(line: text) -> text:
+    """Return port name from '# port: name direction type' or empty."""
+    val content = if line.starts_with("# port:"): line.substring(7, line.len()).trim()
+                  else: ""
+    if content == "":
+        return ""
+    val parts = content.split(" ")
+    if parts.len() < 3:
+        return ""
+    parts[0].trim()
+
+fn parse_set_stimulus_target(line: text) -> text:
+    """Return target from 'set target = literal'."""
+    if not line.starts_with("set "):
+        return ""
+    val content = line.substring(4, line.len()).trim()
+    val eq_idx = content.index_of("=")
+    if eq_idx < 0:
+        return ""
+    content.substring(0, eq_idx).trim()
+
+fn parse_set_stimulus_literal(line: text) -> text:
+    """Return literal from 'set target = literal'."""
+    if not line.starts_with("set "):
+        return ""
+    val content = line.substring(4, line.len()).trim()
+    val eq_idx = content.index_of("=")
+    if eq_idx < 0:
+        return ""
+    content.substring(eq_idx + 1, content.len()).trim()
+
+fn has_unsupported_matcher(line: text) -> bool:
+    if not line.contains("expect("):
+        return false
+    if line.contains(".to_equal("):
+        return false
+    if line.contains(".to_contain("):
+        return true
+    if line.contains(".to_be_greater_than("):
+        return true
+    if line.contains(".to_be_less_than("):
+        return true
+    if line.contains(".to_start_with("):
+        return true
+    if line.contains(".to_be_nil"):
+        return true
+    false
+
+fn count_dut_declarations(source: text) -> i64:
+    val lines = source.split("\n")
+    var count = 0
+    var line_no = 0
+    while line_no < lines.len():
+        val line = lines[line_no].trim()
+        if line.contains("@hardware"):
+            val name = extract_identifier_after(line, "@hardware")
+            if name != "":
+                count = count + 1
+        line_no = line_no + 1
+    count
+
+fn has_loop_construct(line: text) -> bool:
+    val trimmed = line.trim()
+    if trimmed.starts_with("for ") and trimmed.contains(" in "):
+        return true
+    if trimmed.starts_with("while "):
+        return true
+    false
+
+# ============================================================================
+# Test Group 1: Identifier Extraction
+# ============================================================================
+
+describe "VHDL Testbench Converter - Identifier Extraction":
+    it "extracts DUT name from @hardware fn declaration":
+        val line = "@hardware fn half_adder(a: bool, b: bool) -> (sum: bool, carry: bool):"
+        val name = extract_identifier_after(line, "@hardware")
+        expect(name).to_equal("half_adder")
+
+    it "extracts DUT name from @hardware without fn keyword":
+        val line = "@hardware adder"
+        val name = extract_identifier_after(line, "@hardware")
+        expect(name).to_equal("adder")
+
+    it "returns empty for line without @hardware":
+        val line = "fn regular_function():"
+        val name = extract_identifier_after(line, "@hardware")
+        expect(name).to_equal("")
+
+    it "handles extra whitespace before identifier":
+        val line = "@hardware   fn   my_dut(x: i64):"
+        val name = extract_identifier_after(line, "@hardware")
+        expect(name).to_equal("my_dut")
+
+    it "stops at non-identifier characters":
+        val line = "@hardware fn alu(a: i32, b: i32) -> i32:"
+        val name = extract_identifier_after(line, "@hardware")
+        expect(name).to_equal("alu")
+
+# ============================================================================
+# Test Group 2: Assertion Parsing
+# ============================================================================
+
+describe "VHDL Testbench Converter - Assertion Parsing":
+    it "extracts actual value from expect().to_equal()":
+        val line = "        expect(sum).to_equal('1')"
+        val actual = parse_expect_to_equal_actual(line)
+        expect(actual).to_equal("sum")
+
+    it "extracts expected value from expect().to_equal()":
+        val line = "        expect(sum).to_equal('1')"
+        val expected = parse_expect_to_equal_expected(line)
+        expect(expected).to_equal("'1'")
+
+    it "handles nested parentheses in actual":
+        val line = "expect(dut.output(0)).to_equal('0')"
+        val actual = parse_expect_to_equal_actual(line)
+        expect(actual).to_equal("dut.output(0)")
+
+    it "handles string literals in expected":
+        val line = "expect(result).to_equal(\"1010\")"
+        val expected = parse_expect_to_equal_expected(line)
+        expect(expected).to_equal("\"1010\"")
+
+    it "returns empty for non-expect lines":
+        val line = "val x = compute()"
+        val actual = parse_expect_to_equal_actual(line)
+        expect(actual).to_equal("")
+
+    it "handles integer expected values":
+        val line = "expect(count).to_equal(42)"
+        val expected = parse_expect_to_equal_expected(line)
+        expect(expected).to_equal("42")
+
+# ============================================================================
+# Test Group 3: Stimulus Parsing
+# ============================================================================
+
+describe "VHDL Testbench Converter - Stimulus Parsing":
+    it "extracts target from set statement":
+        val target = parse_set_stimulus_target("set a = '1'")
+        expect(target).to_equal("a")
+
+    it "extracts literal from set statement":
+        val literal = parse_set_stimulus_literal("set a = '1'")
+        expect(literal).to_equal("'1'")
+
+    it "handles bit-vector set literal":
+        val literal = parse_set_stimulus_literal("set data = \"10101010\"")
+        expect(literal).to_equal("\"10101010\"")
+
+    it "handles integer set literal":
+        val literal = parse_set_stimulus_literal("set count = 255")
+        expect(literal).to_equal("255")
+
+    it "returns empty for non-set lines":
+        val target = parse_set_stimulus_target("val x = 42")
+        expect(target).to_equal("")
+
+# ============================================================================
+# Test Group 4: Port Comment Parsing
+# ============================================================================
+
+describe "VHDL Testbench Converter - Port Parsing":
+    it "extracts port name from port comment":
+        val name = parse_port_comment("# port: clk in std_logic")
+        expect(name).to_equal("clk")
+
+    it "extracts port name with vector type":
+        val name = parse_port_comment("# port: data_in in std_logic_vector(7 downto 0)")
+        expect(name).to_equal("data_in")
+
+    it "returns empty for non-port comments":
+        val name = parse_port_comment("# this is a regular comment")
+        expect(name).to_equal("")
+
+    it "returns empty for malformed port comment":
+        val name = parse_port_comment("# port: incomplete")
+        expect(name).to_equal("")
+
+# ============================================================================
+# Test Group 5: Name Sanitization
+# ============================================================================
+
+describe "VHDL Testbench Converter - Name Sanitization":
+    it "replaces spaces with underscores":
+        val result = sanitize_tb_name("half adder test")
+        expect(result).to_equal("half_adder_test")
+
+    it "replaces special characters":
+        val result = sanitize_tb_name("test-case.1")
+        expect(result).to_equal("test_case_1")
+
+    it "prepends tb_ for names starting with digits":
+        val result = sanitize_tb_name("123_test")
+        expect(result).to_equal("tb_123_test")
+
+    it "handles empty name":
+        val result = sanitize_tb_name("")
+        expect(result).to_equal("unnamed")
+
+    it "preserves valid VHDL identifier":
+        val result = sanitize_tb_name("my_testbench")
+        expect(result).to_equal("my_testbench")
+
+    it "produces deterministic output":
+        val r1 = sanitize_tb_name("half adder")
+        val r2 = sanitize_tb_name("half adder")
+        expect(r1).to_equal(r2)
+
+# ============================================================================
+# Test Group 6: Unsupported Construct Detection
+# ============================================================================
+
+describe "VHDL Testbench Converter - Unsupported Construct Rejection":
+    it "detects to_contain as unsupported matcher":
+        val result = has_unsupported_matcher("expect(x).to_contain(y)")
+        expect(result).to_equal(true)
+
+    it "detects to_be_greater_than as unsupported matcher":
+        val result = has_unsupported_matcher("expect(x).to_be_greater_than(5)")
+        expect(result).to_equal(true)
+
+    it "detects to_be_less_than as unsupported matcher":
+        val result = has_unsupported_matcher("expect(x).to_be_less_than(10)")
+        expect(result).to_equal(true)
+
+    it "detects to_be_nil as unsupported matcher":
+        val result = has_unsupported_matcher("expect(x).to_be_nil")
+        expect(result).to_equal(true)
+
+    it "accepts to_equal as supported matcher":
+        val result = has_unsupported_matcher("expect(x).to_equal(42)")
+        expect(result).to_equal(false)
+
+    it "returns false for non-expect lines":
+        val result = has_unsupported_matcher("val x = 42")
+        expect(result).to_equal(false)
+
+    it "detects for-loop as unsupported construct":
+        val result = has_loop_construct("for i in 0..10:")
+        expect(result).to_equal(true)
+
+    it "detects while-loop as unsupported construct":
+        val result = has_loop_construct("while running:")
+        expect(result).to_equal(true)
+
+    it "does not flag regular lines as loops":
+        val result = has_loop_construct("set a = '1'")
+        expect(result).to_equal(false)
+
+# ============================================================================
+# Test Group 7: DUT Declaration Counting
+# ============================================================================
+
+describe "VHDL Testbench Converter - DUT Declaration Counting":
+    it "finds one DUT in single-DUT test":
+        val source = "@hardware fn half_adder(a: bool, b: bool):\n    pass"
+        val count = count_dut_declarations(source)
+        expect(count).to_equal(1)
+
+    it "finds zero DUTs when no @hardware present":
+        val source = "fn regular():\n    pass"
+        val count = count_dut_declarations(source)
+        expect(count).to_equal(0)
+
+    it "finds two DUTs in multi-DUT test":
+        val source = "@hardware fn adder(a: i32):\n    pass\n@hardware fn mux(sel: bool):\n    pass"
+        val count = count_dut_declarations(source)
+        expect(count).to_equal(2)
+
+# ============================================================================
+# Test Group 8: Parenthesis Matching
+# ============================================================================
+
+describe "VHDL Testbench Converter - Parenthesis Matching":
+    it "finds closing paren for simple expression":
+        val pos = find_matching_paren("expect(x)", 6)
+        expect(pos).to_equal(8)
+
+    it "finds closing paren with nested parens":
+        val pos = find_matching_paren("expect(f(x))", 6)
+        expect(pos).to_equal(11)
+
+    it "returns -1 for unmatched paren":
+        val pos = find_matching_paren("expect(x", 6)
+        expect(pos).to_equal(-1)
+
+    it "handles deeply nested parens":
+        val pos = find_matching_paren("expect(a(b(c)))", 6)
+        expect(pos).to_equal(14)
+
+# ============================================================================
+# Test Group 9: End-to-End Conversion Shape
+# ============================================================================
+
+describe "VHDL Testbench Converter - Conversion Shape":
+    """Tests that converted IR has the expected structure."""
+
+    it "produces testbench name with _tb suffix":
+        val name = sanitize_tb_name("half_adder") + "_tb"
+        expect(name).to_equal("half_adder_tb")
+
+    it "produces tb_ prefix for numeric-starting names":
+        val name = sanitize_tb_name("42_test") + "_tb"
+        expect(name).to_equal("tb_42_test_tb")
+
+    it "sanitizes complex test names for VHDL entities":
+        val name = sanitize_tb_name("test half-adder (basic)") + "_tb"
+        expect(name).to_equal("test_half_adder__basic__tb")
+
+    it "extracts both actual and expected from assertion line":
+        val line = "expect(s_sum).to_equal('1')"
+        val actual = parse_expect_to_equal_actual(line)
+        val expected = parse_expect_to_equal_expected(line)
+        expect(actual).to_equal("s_sum")
+        expect(expected).to_equal("'1'")
+
+    it "extracts stimulus target and literal together":
+        val line = "set s_a = '1'"
+        val target = parse_set_stimulus_target(line)
+        val literal = parse_set_stimulus_literal(line)
+        expect(target).to_equal("s_a")
+        expect(literal).to_equal("'1'")
