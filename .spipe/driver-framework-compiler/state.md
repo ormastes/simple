@@ -148,7 +148,7 @@ arch-done
 ## Log
 - 1-dev: Created state file with 7 acceptance criteria, identified scope as FR-DRIVER-0003 + FR-DRIVER-0001
 - 2-research: Found Rust seed already has @packed struct routing (type_registration.rs); self-hosted lacks it. Planner for FR-DRIVER-0001 fully tested; codegen emission is the gap. 6 requirements mapped, 3 open questions for Architect
-- 3-arch: Designed 8 modules (2 new, 6 modified), 7 decisions, no circular deps. Key decisions: post-parse desugar pass for self-hosted (D-1), backing type derived from total bits (D-2), MIR-level codegen injection for FR-0001 (D-5), explicit ops= binding on @driver attr (D-6). Detect packed by all-fields-have-bits heuristic to avoid flat AST modification (Integration Point 1).
+- 3-arch: Designed 9 modules (2 new, 7 modified), 9 decisions, no circular deps. Key decisions: post-parse desugar pass for self-hosted (D-1), backing type from first field's declared type matching Rust seed (D-2 corrected), self-hosted must add T:N syntax per AC-1 (D-3 corrected), MIR-level codegen injection for FR-0001 (D-5), ops= binding on @driver is scope addition (D-6 noted). Added D-8 (@packed decorator dispatch) and D-9 (explicit @packed required, not heuristic-only). Revised Integration Point 1 to require both @packed flag and all-fields-have-bits.
 
 ### 3-arch
 
@@ -178,6 +178,10 @@ arch-done
 
 - **D-7: Manifest value construction at MIR level uses attribute fields directly.** The `DriverManifestAttr` struct already contains `driver_class`, `vendor`, `device_ids`, `version`, `abi`. The codegen pass constructs a `DriverManifest` struct literal from these fields as MIR constant operations, avoiding the need to reify them as HIR expressions.
 
+- **D-8: Self-hosted `@packed` decorator dispatch must route to `parse_struct_decl`.** The decorator dispatch in `parser_decls.spl` (line 906+) currently recognizes `gpu_kernel`, `gpu`, `simd`, `derive` but NOT `packed`. Add a new `elif decorator_name == "packed":` branch that stores a `is_packed_decorator = true` flag, then expects `par_kind_get() == 23` (struct keyword) and calls `parse_struct_decl()` with the packed flag propagated. Without this, `@packed\nstruct Foo:` in the self-hosted compiler would fail to parse. — Because the decorator dispatch is the entry point for all `@name` tokens at module level.
+
+- **D-9: Heuristic detection guard — `@packed` without bit-width fields emits diagnostic.** If the desugar pass encounters a struct where `@packed` attribute is present but NOT all fields have `has_bits == true`, emit a warning diagnostic: "@packed struct has fields without bit-width annotations; treating as layout-packed only, not bitfield." Conversely, if ALL fields have `has_bits == true` but NO `@packed` attribute is present (after D-8 routes the attribute), skip bitfield conversion — require `@packed` explicitly. This avoids the blind spot where a non-`@packed` struct with all `@bits` fields would silently convert to bitfield. The heuristic is: `@packed` attribute present AND all fields have `has_bits == true`. — Because implicit conversion would be surprising; `@packed` is an explicit opt-in.
+
 ### Module Plan
 
 | Module | Path | Role | New/Modified |
@@ -189,12 +193,13 @@ arch-done
 | mir_lowering | `src/compiler/50.mir/mir_lowering.spl` | Call `apply_synthetic_driver_codegen()` in `lower_function` after body lowering when `has_driver_manifest_attr` | Modified (around line 453) |
 | types_def/mod.rs | `src/compiler_rust/parser/src/types_def/mod.rs` | Add `@packed` struct → `Node::Bitfield` conversion at end of `parse_struct_with_attrs` (~line 95) | Modified |
 | mir/__init__ | `src/compiler/50.mir/__init__.spl` | Export `synthetic_driver_codegen` symbols | Modified |
+| parser_decls | `src/compiler/10.frontend/core/parser_decls.spl` | Add `T:N` field syntax (D-3), `@packed` decorator dispatch (D-8) | Modified |
 | frontend/__init__ | `src/compiler/10.frontend/__init__.spl` | Export `packed_struct_desugar` | Modified |
 
 ### Dependency Map
 
+- `parser_decls` → no new deps (extends existing field parsing + decorator dispatch)
 - `packed_struct_desugar` → `compiler.frontend.parser_types` (Struct, Bitfield, BitfieldField, Field, Module types)
-- `packed_struct_desugar` → `compiler.common.attributes` (parse_layout_attrs to detect @packed)
 - `flat_ast_bridge` → no new deps (just populate existing `Struct.attributes` field)
 - `synth_driver_codegen` → `compiler.mir.synthetic_driver_registration` (plan_synthetic_driver_registration, SyntheticDriverRegistrationPlan)
 - `synth_driver_codegen` → `compiler.mir.mir_instructions` (MIR call instruction construction)
@@ -206,7 +211,7 @@ arch-done
 ### Public API
 
 **packed_struct_desugar.spl:**
-- `fn desugar_packed_structs(module: Module) -> Module` — scans `module.structs` for `@packed` attribute + fields with `has_bits == true`; moves matching structs to `module.bitfields` as `Bitfield` nodes; returns updated Module
+- `fn desugar_packed_structs(module: Module) -> Module` — scans `module.structs` for `is_packed == true` AND all fields with `has_bits == true`; derives backing type from first field's declared type (D-2); validates total bits fit; moves matching structs to `module.bitfields` as `Bitfield` nodes; emits diagnostic for `@packed` structs where not all fields have bit-widths (D-9); returns updated Module
 
 **synth_driver_codegen.spl:**
 - `fn apply_synthetic_driver_codegen(fn_: HirFunction, mir_blocks: [MirBlock], symbols: SymbolTable) -> [MirBlock]` — calls planner; if `ReadyToSynthesize`, appends MIR call `register_static_driver(manifest, ops)` to the last block; returns updated block list
@@ -221,12 +226,16 @@ arch-done
 
 **FR-DRIVER-0003 (`@packed struct`) — Self-hosted path:**
 ```
-Source: @packed\nstruct Foo:\n    f: u16 @bits(4)\n    g: u16 @bits(12)
-  → parse_struct_decl() → decl_struct_def(field_bits=[4,12])
-  → flat_ast_bridge → Struct(fields=[Field(has_bits=true, bits=4), ...], attributes=[])
-  → [NEW] flat_ast_bridge modified: attributes populated from flat AST attrs
+Source: @packed\nstruct Foo:\n    f: u16:4\n    g: u16:12
+  → decorator dispatch recognizes @packed (D-8) → sets packed flag
+  → parse_struct_decl() with packed flag → field parsing accepts T:N syntax (D-3)
+  → decl_struct_def(field_bits=[4,12], is_packed=true)
+  → flat_ast_bridge → Struct(fields=[Field(has_bits=true, bits=4, type_=u16), ...], is_packed=true)
   → [NEW] desugar_packed_structs(module)
-      detects @packed + has_bits fields → synthesizes Bitfield(backing_type=u16, fields=[BitfieldField(bits=4), ...])
+      detects is_packed + ALL has_bits fields (D-9)
+      backing_type = first field's type (u16) (D-2)
+      validates total bits <= backing_type width (4+12=16 <= 16)
+      synthesizes Bitfield(backing_type=u16, fields=[BitfieldField(bits=4), ...])
       moves from module.structs["Foo"] to module.bitfields["Foo"]
   → lower_module() → lower_bitfield(bf) [EXISTING] → HirBitfield
   → MIR/backend bitfield codegen [EXISTING] → shift+mask read/write
@@ -265,11 +274,16 @@ Source: @driver(class = DriverClass.Block, vendor = 0x1234, ops = my_ops)\nfn in
 
 ### Integration Points
 
-1. **flat_ast_bridge.spl:778** — change `attributes: []` to pass through actual attributes from the flat AST. Requires checking if `decl_struct_def` stores attributes (currently it does not — only name, fields, types, defaults, bits, span). Two options: (a) extend `decl_struct_def` to accept attributes, or (b) have `desugar_packed_structs` detect packed structs by field bits alone (any struct with ALL fields having `has_bits == true` is treated as packed). **Decision: use option (b)** — if ALL fields have `has_bits == true`, the struct is a bitfield candidate regardless of explicit `@packed`. This avoids modifying the flat AST infrastructure and is functionally equivalent since bit-width fields are only meaningful on bitfields.
+1. **flat_ast_bridge.spl:778 + decorator dispatch (parser_decls.spl:906+)** — Two coordinated changes: (a) The decorator dispatch must recognize `@packed` (D-8) and propagate a flag to `parse_struct_decl` so the resulting struct is marked as packed in the flat AST. The simplest mechanism: extend `decl_struct_def` to accept an `is_packed` flag (6th arg becomes packed flag, shift span arg), or use a side-channel global `var current_struct_is_packed: bool`. (b) The `flat_ast_bridge` must pass through this packed flag to the `Struct` node's attributes (or a dedicated `is_packed` field). The desugar pass then requires BOTH `is_packed == true` AND all fields having `has_bits == true` to convert to bitfield (D-9). This avoids the blind spot of the previous heuristic-only approach. If extending `decl_struct_def` is too invasive, a module-level side-channel (`packed_struct_names: [text]`) set during parsing and read during desugar is acceptable.
 
 2. **Module pipeline insertion point** — `desugar_packed_structs` must run AFTER `flat_ast_bridge` builds the Module and BEFORE HIR lowering. The existing desugar passes (desugar_async.spl, desugar_coroutine.spl, etc.) run in this window. Add the call in the same desugar pipeline.
 
 3. **MIR injection in `lower_function`** — must run AFTER body lowering produces MIR blocks, BEFORE the blocks are finalized. Insert at ~line 467 (after `lower_function:bootstrap:done` for bootstrap mode, or after the normal body lowering return point).
+
+### Notes for Later Phases
+
+- **D-9 parity gap (Phase 6/7):** D-9 says "emit warning" for `@packed` structs with mixed bit-width/non-bit-width fields. Rust seed returns `LowerError::Unsupported` (hard error) in the same case. Phase 4 specs should not assert error behavior for this edge case; Phase 6/7 should decide whether to harmonize.
+- **D-4 dead code (Phase 6):** Once `parse_struct_with_attrs` routes `@packed`+bitfields to `Node::Bitfield` at parse time, the HIR lowering hits `register_bitfield` instead of `register_packed_struct_as_bitfield`. The latter becomes unreachable. Phase 6 refactor should either remove it or keep it as a tested fallback — document the decision.
 
 ### 4-spec
 <pending>

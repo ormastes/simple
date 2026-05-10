@@ -50,7 +50,7 @@ feature
 - [x] 1-dev (Developer Lead) — 2026-05-10
 - [x] 2-research (Analyst) — 2026-05-10
 - [x] 3-arch (Architect) — 2026-05-10
-- [ ] 4-spec (QA Lead)
+- [x] 4-spec (QA Lead) — 2026-05-10
 - [ ] 5-implement (Engineer)
 - [ ] 6-refactor (Tech Lead)
 - [ ] 7-verify (QA)
@@ -214,12 +214,13 @@ feature
 - REQ-10 (from AC-10): All new files use trait+composition, no inheritance, tagged enum for backend dispatch — pattern: `GpuSolver` + `RenderBackend3DCore` from gc_async
 
 ## Phase
-arch-done
+spec-done
 
 ## Log
 - 1-dev (2026-05-10): Created state file with 10 acceptance criteria, 6 parallel workstreams
 - 2-research (2026-05-10): Found 32 existing files across gc_async engine3d + nogc engine render; identified 8 rt_webgpu_* externs (wired), 18 rt_vulkan_* compute externs (declared, no graphics), 6 rt_image_* externs (wired), full rt_cuda_* set; 3 blockers: rt_vulkan_compile_glsl has no runtime backing, Context lacks create_texture/render_pass/swapchain methods, WebGPU is pixel-upload-only (not 3D pipeline); 10 requirements drafted
 - 3-arch (2026-05-10): Designed 16 modules (12 new files + 4 modified files across 6 disjoint streams), 8 ADR-style decisions, dependency map verified cycle-free, all 10 ACs covered, AnyRenderBackend3D tagged enum as Engine3D polymorphism boundary, ShaderCompiler decoupled from backends via PipelineDesc3D artifact handoff
+- 4-spec (2026-05-10): Created 6 spec files with 111 total it blocks, 100% AC coverage (AC-8 audit-only); all specs use SoftwareRenderBackend3D as test backend; all specs fail (no implementation exists); placed in test/lib/nogc_sync_mut/engine/render/
 
 ### 3-arch
 
@@ -712,7 +713,73 @@ Cycle check:
 | AC-10 (no inheritance, trait+composition, tagged enums) | D-1, D-3, D-5, D-8 enforced across all streams; AnyRenderBackend3D tagged enum |
 
 ### 4-spec
-<pending>
+
+## Specs
+
+### Spec Files
+
+- `test/lib/nogc_sync_mut/engine/render/backend3d_spec.spl` — 23 specs covering AC-1, AC-2, AC-9, AC-10
+- `test/lib/nogc_sync_mut/engine/render/vulkan_backend3d_spec.spl` — 17 specs covering AC-1 (Vulkan impl), AC-10
+- `test/lib/nogc_sync_mut/engine/render/webgpu_backend3d_spec.spl` — 17 specs covering AC-1 (WebGPU impl), AC-6, AC-10
+- `test/lib/nogc_sync_mut/engine/render/gpu_mesh3d_spec.spl` — 19 specs covering AC-3, AC-4
+- `test/lib/nogc_sync_mut/engine/render/shader_compile_spec.spl` — 16 specs covering AC-5
+- `test/lib/nogc_sync_mut/engine/render/texture3d_spec.spl` — 19 specs covering AC-7
+
+**Total: 6 spec files, 111 `it` blocks**
+
+### AC Coverage Matrix
+
+| AC | Spec File | it block | Status |
+|----|-----------|----------|--------|
+| AC-1 | `backend3d_spec.spl` | "invalid() returns id of -1" (×4 handle types) | Failing (no impl) |
+| AC-1 | `backend3d_spec.spl` | "vertex_stride field is stored" | Failing (no impl) |
+| AC-1 | `backend3d_spec.spl` | "init returns true for software backend" | Failing (no impl) |
+| AC-1 | `backend3d_spec.spl` | "create_vertex_buffer returns valid handle" | Failing (no impl) |
+| AC-1 | `backend3d_spec.spl` | "begin_frame then end_frame does not crash" | Failing (no impl) |
+| AC-1 | `vulkan_backend3d_spec.spl` | "VulkanCommand3D enum construction" (×8 variants) | Failing (no impl) |
+| AC-1 | `vulkan_backend3d_spec.spl` | "create_vertex_buffer returns non-invalid handle" | Failing (no impl) |
+| AC-1 | `vulkan_backend3d_spec.spl` | "full recording sequence does not crash" | Failing (no impl) |
+| AC-1 | `webgpu_backend3d_spec.spl` | "WebGpuCommand3D enum construction" (×8 variants) | Failing (no impl) |
+| AC-1 | `webgpu_backend3d_spec.spl` | "full recording sequence does not crash" | Failing (no impl) |
+| AC-2 | `backend3d_spec.spl` | "capability_software_3d backend kind is Software" | Failing (no impl) |
+| AC-2 | `backend3d_spec.spl` | "capability_vulkan_3d backend kind is Vulkan" | Failing (no impl) |
+| AC-2 | `backend3d_spec.spl` | "capability_webgpu_3d backend kind is WebGpu" | Failing (no impl) |
+| AC-2 | `backend3d_spec.spl` | "detect_best_backend_3d returns valid kind" | Failing (no impl) |
+| AC-3 | `gpu_mesh3d_spec.spl` | "invalid() vbuf/ibuf id is -1" | Failing (no impl) |
+| AC-3 | `gpu_mesh3d_spec.spl` | "vbuf id is valid after upload" | Failing (no impl) |
+| AC-3 | `gpu_mesh3d_spec.spl` | "index_count equals number of indices" | Failing (no impl) |
+| AC-3 | `gpu_mesh3d_spec.spl` | "gpu_mesh_draw does not crash" | Failing (no impl) |
+| AC-3 | `gpu_mesh3d_spec.spl` | "after free, vbuf/ibuf ids are -1" | Failing (no impl) |
+| AC-4 | `gpu_mesh3d_spec.spl` | "light_type is 0 for directional" | Failing (no impl) |
+| AC-4 | `gpu_mesh3d_spec.spl` | "light_buf id is valid after init" | Failing (no impl) |
+| AC-4 | `gpu_mesh3d_spec.spl` | "gpu_lighting_upload does not crash" | Failing (no impl) |
+| AC-4 | `gpu_mesh3d_spec.spl` | "gpu_lighting_bind does not crash" | Failing (no impl) |
+| AC-5 | `shader_compile_spec.spl` | "is_compiled is false when not compiled" | Failing (no impl) |
+| AC-5 | `shader_compile_spec.spl` | "creates compiler with empty cache" | Failing (no impl) |
+| AC-5 | `shader_compile_spec.spl` | "second call returns cached result (cache size stable)" | Failing (no impl) |
+| AC-5 | `shader_compile_spec.spl` | "different sources produce separate cache entries" | Failing (no impl) |
+| AC-5 | `shader_compile_spec.spl` | "wgsl_emit_vertex output contains @vertex" | Failing (no impl) |
+| AC-5 | `shader_compile_spec.spl` | "gl_Position replaced by builtin position annotation" | Failing (no impl) |
+| AC-5 | `shader_compile_spec.spl` | "wgsl_emit_fragment output contains @fragment" | Failing (no impl) |
+| AC-5 | `shader_compile_spec.spl` | "gl_FragColor not present in WGSL output" | Failing (no impl) |
+| AC-6 | `webgpu_backend3d_spec.spl` | "backend kind is WebGpu" | Failing (no impl) |
+| AC-6 | `webgpu_backend3d_spec.spl` | "supports_wgsl is true for WebGpu" | Failing (no impl) |
+| AC-6 | `webgpu_backend3d_spec.spl` | "create_pipeline returns non-invalid handle for WGSL desc" | Failing (no impl) |
+| AC-7 | `texture3d_spec.spl` | "upload returns id >= 0" | Failing (no impl) |
+| AC-7 | `texture3d_spec.spl` | "two uploads produce distinct ids" | Failing (no impl) |
+| AC-7 | `texture3d_spec.spl` | "get returns valid handle for uploaded id" | Failing (no impl) |
+| AC-7 | `texture3d_spec.spl` | "get for unknown id returns invalid handle" | Failing (no impl) |
+| AC-7 | `texture3d_spec.spl` | "evict removes entry from cache" | Failing (no impl) |
+| AC-7 | `texture3d_spec.spl` | "atlas pack returns rect with correct width/height" | Failing (no impl) |
+| AC-7 | `texture3d_spec.spl` | "atlas lookup returns same rect as pack" | Failing (no impl) |
+| AC-7 | `texture3d_spec.spl` | "material_bind does not crash with valid albedo" | Failing (no impl) |
+| AC-8 | (audit-only) | MDSOC+ audit — no it block; enforced via D-7 arch constraint | Audit-only |
+| AC-9 | `backend3d_spec.spl` | "init returns true for software backend" | Failing (no impl) |
+| AC-9 | `backend3d_spec.spl` | "capabilities returns Software kind" | Failing (no impl) |
+| AC-9 | `backend3d_spec.spl` | "upload_buffer does not panic for valid handle" | Failing (no impl) |
+| AC-10 | `backend3d_spec.spl` | "Software variant holds SoftwareRenderBackend3D" | Failing (no impl) |
+| AC-10 | `vulkan_backend3d_spec.spl` | command recording tests (trait+composition, no inheritance) | Failing (no impl) |
+| AC-10 | `webgpu_backend3d_spec.spl` | command recording tests (trait+composition, no inheritance) | Failing (no impl) |
 
 ### 5-implement
 <pending>
