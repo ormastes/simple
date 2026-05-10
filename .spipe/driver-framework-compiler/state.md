@@ -24,7 +24,7 @@ feature
 
 ## Phase Checklist
 - [x] 1-dev (Developer Lead) — 2026-05-10
-- [ ] 2-research (Analyst)
+- [x] 2-research (Analyst) — 2026-05-10
 - [ ] 3-arch (Architect)
 - [ ] 4-spec (QA Lead)
 - [ ] 5-implement (Engineer)

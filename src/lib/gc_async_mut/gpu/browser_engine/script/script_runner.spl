@@ -31,6 +31,7 @@ use std.gc_async_mut.gpu.browser_engine.script.js_transpiler.{js_transpile, js_i
 extern fn rt_file_write_text(path: text, content: text)
 extern fn rt_file_read_text(path: text) -> text
 extern fn rt_file_exists(path: text) -> bool
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
 
 # =========================================================================
 # Module-level shared state — the bridge between host and script
@@ -110,12 +111,9 @@ pub fn run_script(runner: ScriptRunner, source: text):
     """Execute a Simple script against the runner's DOM tree.
 
     Wraps the source with browser API imports and executes it via
-    the compiler's interpret_file. The source runs in a fresh interpreter
-    instance — DOM mutations flow through module-level state.
-
-    NOTE: Full interpret_file integration requires that module-level state
-    is shared across interpreter instances. If not, this operates as a
-    structural placeholder and scripts run in isolation.
+    subprocess rt_process_run. Console output is captured into the
+    console buffer. DOM mutations from scripts do not cross process
+    boundary — in-process execution requires a future rt_interpret_file extern.
     """
     if source.trim().len() == 0:
         return
@@ -132,14 +130,18 @@ pub fn run_script(runner: ScriptRunner, source: text):
     # Build wrapped source with imports
     val wrapped = _wrap_script_source(source)
 
-    # Write and execute
+    # Write and execute via subprocess (DOM mutations don't cross process boundary)
     rt_file_write_text(tmp_path, wrapped)
 
-    # Call interpret_file through lazy import
-    use lazy compiler.driver.driver_api_interpret.{interpret_file}
-    val result = interpret_file(tmp_path)
+    val result = rt_process_run("bin/simple", ["run", tmp_path])
+    val stdout = result.0
+    val stderr = result.1
+    val exit_code = result.2
 
-    # Mark DOM dirty — scripts may have mutated the tree
+    # Capture stdout into console buffer
+    if stdout.trim().len() > 0:
+        runner.console_buffer.append("log", stdout.trim(), 0)
+
     runner._dom_dirty = true
 
 pub fn run_script_file(runner: ScriptRunner, path: text):
