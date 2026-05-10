@@ -1,7 +1,7 @@
 # Bug: Compile-Time Lint for `#[deterministic]` Guard (GAME-DET-LINT-001)
 
-**Status:** IN PROGRESS — being implemented 2026-05-10. Previously deferred.
-Needs `#[deterministic]` attribute parsing in lint-rule infrastructure. Runtime
+**Status:** FIXED 2026-05-10. NonDetCallInDetFn lint added in checker_deterministic.rs with 7 tests.
+Supports both `@deterministic` and `#[deterministic]` attribute forms. Runtime
 guard at `src/lib/nogc_sync_mut/game2d/time/det_guard.spl` already closes the
 safety gap at runtime. No focused fix possible without new compiler infra.
 **Date:** 2026-04-25
