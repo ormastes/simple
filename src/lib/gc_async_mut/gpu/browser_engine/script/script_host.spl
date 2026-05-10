@@ -1,8 +1,11 @@
 """
 # ScriptHost
 
-Top-level JS integration host for the browser engine (M15 / REQ-1 / AC-1).
-Owns ConsoleBuffer and EventLoop; exposes execute/tick/inject_dom_event surface.
+Top-level Simple-script integration host for the browser engine (M15).
+Owns ConsoleBuffer, EventLoop, and ScriptRunner; exposes execute/tick/inject_dom_event surface.
+
+Replaces the JS engine approach — instead reuses the Simple compiler/interpreter
+to run <script> tag content as Simple language code.
 """
 
 #![allow(REQC001)]
@@ -10,22 +13,26 @@ Owns ConsoleBuffer and EventLoop; exposes execute/tick/inject_dom_event surface.
 use std.gc_async_mut.gpu.browser_engine.dom.{BeDomNode, BeDomEvent}
 use std.gc_async_mut.gpu.browser_engine.script.console_buffer.{ConsoleBuffer}
 use std.gc_async_mut.gpu.browser_engine.script.event_loop.{EventLoop}
+use std.gc_async_mut.gpu.browser_engine.script.script_runner.{ScriptRunner, run_script, run_script_file, script_runner_dom_dirty, script_runner_clear_dirty}
+use std.gc_async_mut.gpu.browser_engine.script.event_api.{event_dispatch}
 use std.gc_async_mut.gpu.browser_engine.net.fetch_dispatch.{FetchDispatch}
 
 pub class ScriptHost:
-    """Host that manages JS execution, event loop, and console buffer.
+    """Host that manages Simple-script execution, event loop, and console buffer.
 
     Fields:
         _dom_root      - current DOM root (updated on execute)
         _event_loop    - macrotask/rAF queue
         _console_buf   - bounded console.log ring buffer
-        _dom_dirty     - true if JS has mutated the DOM since last clear
-        fetch_dispatch - optional FetchDispatch for JS fetch() API (D-4)
+        _dom_dirty     - true if scripts have mutated the DOM since last clear
+        _runner        - ScriptRunner that executes Simple code
+        fetch_dispatch - optional FetchDispatch for fetch() API (D-4)
     """
     _dom_root: BeDomNode
     _event_loop: EventLoop
     _console_buf: ConsoleBuffer
     _dom_dirty: bool
+    _runner: ScriptRunner
     fetch_dispatch: FetchDispatch?
 
     static fn new() -> ScriptHost:
@@ -35,30 +42,62 @@ pub class ScriptHost:
             _event_loop: EventLoop.new(),
             _console_buf: ConsoleBuffer.new(),
             _dom_dirty: false,
+            _runner: ScriptRunner.new(),
             fetch_dispatch: nil
         )
 
     me execute(source: text, dom_root: BeDomNode):
-        """Parse and run a script block against dom_root.
+        """Parse and run a Simple script block against dom_root.
 
-        Stores dom_root as the current root. Empty source is a no-op.
+        Stores dom_root as the current root. Delegates to ScriptRunner
+        which wraps source with imports and calls interpret_file.
+        Empty source is a no-op.
         """
         self._dom_root = dom_root
+        if source.trim().len() == 0:
+            return
+        # Update the runner's DOM root and subsystems
+        self._runner.dom_root = dom_root
+        self._runner.console_buffer = self._console_buf
+        self._runner.event_loop = self._event_loop
+        run_script(self._runner, source)
+        self._dom_dirty = true
+
+    me execute_file(path: text, dom_root: BeDomNode):
+        """Execute a Simple script file (for <script src="...">)."""
+        self._dom_root = dom_root
+        self._runner.dom_root = dom_root
+        self._runner.console_buffer = self._console_buf
+        self._runner.event_loop = self._event_loop
+        run_script_file(self._runner, path)
+        self._dom_dirty = true
 
     me tick(now_micros: i64):
-        """Fire expired timers, drain microtasks, flush rAF callbacks."""
-        pass_do_nothing
+        """Fire expired timers, drain microtasks, flush rAF callbacks.
+
+        Drains expired timers and rAF slots from the event loop.
+        Callback execution is logged but not dispatched (no callback registry yet).
+        """
+        val fired_timers = self._event_loop.drain_expired(now_micros)
+        val fired_rafs = self._event_loop.drain_raf()
+        if fired_timers.len() > 0 or fired_rafs.len() > 0:
+            self._dom_dirty = true
 
     me inject_dom_event(event: BeDomEvent):
-        """Dispatch a DOM event into registered JS event listeners."""
-        pass_do_nothing
+        """Dispatch a DOM event into registered event listeners.
+
+        Collects triggered action strings from target-phase dispatch.
+        """
+        val actions = event_dispatch(self._dom_root, event)
+        if actions.len() > 0:
+            self._dom_dirty = true
 
     me dom_root() -> BeDomNode:
-        """Return the current (possibly JS-mutated) DOM root."""
+        """Return the current (possibly script-mutated) DOM root."""
         self._dom_root
 
     me dom_dirty() -> bool:
-        """True if JS has mutated the DOM since last clear_dirty."""
+        """True if scripts have mutated the DOM since last clear_dirty."""
         self._dom_dirty
 
     me clear_dirty():
@@ -69,6 +108,14 @@ pub class ScriptHost:
         """Read-only access to the console log buffer."""
         self._console_buf
 
+    me event_loop() -> EventLoop:
+        """Access to the event loop for timer inspection."""
+        self._event_loop
+
+    me runner() -> ScriptRunner:
+        """Access to the underlying ScriptRunner."""
+        self._runner
+
     me set_fetch_dispatch(d: FetchDispatch):
-        """Wire a FetchDispatch implementation for JS fetch() calls (D-4)."""
+        """Wire a FetchDispatch implementation for fetch() calls (D-4)."""
         self.fetch_dispatch = Some(d)

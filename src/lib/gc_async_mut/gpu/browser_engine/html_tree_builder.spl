@@ -167,10 +167,35 @@ fn _apply_attrs(node: BeDomNode, attrs: [HtmlAttr]) -> BeDomNode:
         n.set_attr(attr.name, attr.value)
     n
 
+pub class TreeBuilderResult:
+    """Result from html_tree_builder_build_with_scripts.
+
+    Fields:
+        doc       - the built DOM tree (#document node)
+        scripts   - collected <script> bodies in document order
+        src_paths - collected <script src="..."> paths in document order
+    """
+    doc: BeDomNode
+    scripts: [text]
+    src_paths: [text]
+
 pub fn html_tree_builder_build(html_text: text) -> BeDomNode:
     """Build a BeDomNode tree. Returns a #document node with an html child."""
+    val result = html_tree_builder_build_with_scripts(html_text)
+    result.doc
+
+pub fn html_tree_builder_build_with_scripts(html_text: text) -> TreeBuilderResult:
+    """Build a BeDomNode tree and collect <script> content.
+
+    Returns a TreeBuilderResult with the DOM tree and any inline script
+    bodies or external script src paths found during parsing.
+    """
     val tokenizer = html_tokenizer_new(html_text)
     val tokens = html_tokenizer_tokenize(tokenizer)
+
+    # Collected script content
+    var script_bodies: [text] = []
+    var script_src_paths: [text] = []
 
     # Stack: [#document, html, head] initially
     # We'll switch from head-mode to body-mode on first body content
@@ -185,6 +210,9 @@ pub fn html_tree_builder_build(html_text: text) -> BeDomNode:
     stack.push(head_el)
 
     var in_body = false
+    var in_script = false
+    var script_content = ""
+    var script_src = ""
 
     val ntok = tokens.len()
     var ti = 0
@@ -220,8 +248,29 @@ pub fn html_tree_builder_build(html_text: text) -> BeDomNode:
                 val he = _apply_attrs(he_raw, tok.attrs)
                 stack = _stk_append(stack, he)
 
-            elif t == "style" or t == "script" or t == "noscript":
-                pass_dn  # skip in M14
+            elif t == "script":
+                # M15: Collect script content for execution
+                if not in_body:
+                    stack = _stk_pop_and_append(stack)
+                    stack.push(body_el)
+                    in_body = true
+                in_script = true
+                script_content = ""
+                # Check for src attribute
+                script_src = ""
+                var sa = 0
+                while sa < tok.attrs.len():
+                    val attr = tok.attrs[sa]
+                    if attr.name == "src":
+                        script_src = attr.value
+                    sa = sa + 1
+                # Push script element onto stack
+                val script_el = BeDomNode.element("script")
+                val script_node = _apply_attrs(script_el, tok.attrs)
+                stack.push(script_node)
+
+            elif t == "style" or t == "noscript":
+                pass_dn  # skip raw text elements
 
             else:
                 # Switch to body if not yet
@@ -277,14 +326,33 @@ pub fn html_tree_builder_build(html_text: text) -> BeDomNode:
 
         elif tok.token_kind == HtmlTokenKind.EndTag:
             val et = tok.tag_name
-            if et == "html" or et == "body" or et == "head":
+            if et == "script" and in_script:
+                # M15: Close script tag — collect content
+                in_script = false
+                if script_src != "":
+                    script_src_paths.push(script_src)
+                elif script_content.trim().len() > 0:
+                    script_bodies.push(script_content)
+                # Store content in the script node's text_content
+                var top = stack[stack.len() - 1]
+                top.text_content = script_content
+                stack[stack.len() - 1] = top
+                # Pop script node and append to parent
+                if _stk_find_tag(stack, "script") >= 0:
+                    stack = _stk_pop_and_append(stack)
+                script_content = ""
+                script_src = ""
+            elif et == "html" or et == "body" or et == "head":
                 pass_dn  # handled in drain
             elif _stk_find_tag(stack, et) >= 0:
                 stack = _stk_pop_until_incl(stack, et)
 
         elif tok.token_kind == HtmlTokenKind.Character:
             val data = tok.data
-            if not in_body:
+            # M15: Accumulate text inside <script> tags
+            if in_script:
+                script_content = "{script_content}{data}"
+            elif not in_body:
                 if data.trim().len() > 0:
                     # Non-whitespace before body — switch to body
                     stack = _stk_pop_and_append(stack)  # close head
@@ -302,6 +370,5 @@ pub fn html_tree_builder_build(html_text: text) -> BeDomNode:
 
     # stack[0] is now doc_node with html as only child (after drain)
     # But since we modified stack[0] in place, we need to return it
-    if stack.len() > 0:
-        return stack[0]
-    doc_node
+    val final_doc = if stack.len() > 0: stack[0] else: doc_node
+    TreeBuilderResult(doc: final_doc, scripts: script_bodies, src_paths: script_src_paths)
