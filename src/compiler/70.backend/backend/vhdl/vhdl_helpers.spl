@@ -34,3 +34,181 @@ fn vhdl_helper_is_procedure(func: MirFunction) -> bool:
 fn vhdl_helper_collision_message(name: text, first: text, second: text) -> text:
     "Duplicate VHDL helper subprogram name after sanitization: `{name}` from `{first}` and `{second}`"
 
+# ============================================================================
+# Subprogram eligibility and naming (VHDL-PARITY-010)
+# ============================================================================
+
+fn vhdl_helper_is_subprogram_eligible(func: MirFunction) -> bool:
+    """Return true when a MIR function may lower to a VHDL function or procedure.
+
+    A helper is subprogram-eligible when ALL of these hold:
+    - It is NOT a public @hardware entity boundary.
+    - It is NOT @clocked (no sequential/reset/domain semantics).
+    - It has VHDL metadata present (otherwise it is not in the hardware path).
+    - Its return type is scalar or Unit (compound record returns are future work).
+
+    Entity lowering remains the conservative fallback for anything rejected here.
+    """
+    # Must be part of the hardware path
+    if not func.has_vhdl_metadata:
+        return false
+    # Public @hardware boundaries stay as entities
+    if func.vhdl_metadata.is_hardware:
+        return false
+    # Clocked/reset/domain helpers stay as entities or processes
+    if func.vhdl_metadata.has_clocked:
+        return false
+    true
+
+fn vhdl_subprogram_name(module_name: text, func_name: text) -> text:
+    """Build a deterministic VHDL subprogram name with module prefix.
+
+    Uses the `simple_fn_` prefix to avoid collisions with entity names,
+    signal names, record types, and VHDL reserved words.
+    """
+    val sanitized_module = vhdl_sanitize_identifier(module_name)
+    val sanitized_func = vhdl_sanitize_identifier(func_name)
+    "simple_fn_{sanitized_module}_{sanitized_func}"
+
+fn vhdl_subprogram_name_plan(module_name: text, func: MirFunction) -> VhdlHelperNamePlan:
+    """Build a VhdlHelperNamePlan for a subprogram-eligible function."""
+    val vhdl_name = vhdl_subprogram_name(module_name, func.name)
+    VhdlHelperNamePlan(
+        source_name: func.name,
+        vhdl_name: vhdl_name
+    )
+
+fn vhdl_is_reserved_word(name: text) -> bool:
+    """Check whether a name collides with a VHDL-2008 reserved word."""
+    val lower = name.to_lower()
+    # VHDL-2008 reserved words (IEEE 1076-2008, section 15.10)
+    if lower == "abs": return true
+    if lower == "access": return true
+    if lower == "after": return true
+    if lower == "alias": return true
+    if lower == "all": return true
+    if lower == "and": return true
+    if lower == "architecture": return true
+    if lower == "array": return true
+    if lower == "assert": return true
+    if lower == "attribute": return true
+    if lower == "begin": return true
+    if lower == "block": return true
+    if lower == "body": return true
+    if lower == "buffer": return true
+    if lower == "bus": return true
+    if lower == "case": return true
+    if lower == "component": return true
+    if lower == "configuration": return true
+    if lower == "constant": return true
+    if lower == "disconnect": return true
+    if lower == "downto": return true
+    if lower == "else": return true
+    if lower == "elsif": return true
+    if lower == "end": return true
+    if lower == "entity": return true
+    if lower == "exit": return true
+    if lower == "file": return true
+    if lower == "for": return true
+    if lower == "function": return true
+    if lower == "generate": return true
+    if lower == "generic": return true
+    if lower == "group": return true
+    if lower == "guarded": return true
+    if lower == "if": return true
+    if lower == "impure": return true
+    if lower == "in": return true
+    if lower == "inertial": return true
+    if lower == "inout": return true
+    if lower == "is": return true
+    if lower == "label": return true
+    if lower == "library": return true
+    if lower == "linkage": return true
+    if lower == "literal": return true
+    if lower == "loop": return true
+    if lower == "map": return true
+    if lower == "mod": return true
+    if lower == "nand": return true
+    if lower == "new": return true
+    if lower == "next": return true
+    if lower == "nor": return true
+    if lower == "not": return true
+    if lower == "null": return true
+    if lower == "of": return true
+    if lower == "on": return true
+    if lower == "open": return true
+    if lower == "or": return true
+    if lower == "others": return true
+    if lower == "out": return true
+    if lower == "package": return true
+    if lower == "parameter": return true
+    if lower == "port": return true
+    if lower == "postponed": return true
+    if lower == "procedure": return true
+    if lower == "process": return true
+    if lower == "pure": return true
+    if lower == "range": return true
+    if lower == "record": return true
+    if lower == "register": return true
+    if lower == "reject": return true
+    if lower == "rem": return true
+    if lower == "report": return true
+    if lower == "return": return true
+    if lower == "rol": return true
+    if lower == "ror": return true
+    if lower == "select": return true
+    if lower == "severity": return true
+    if lower == "signal": return true
+    if lower == "shared": return true
+    if lower == "sla": return true
+    if lower == "sll": return true
+    if lower == "sra": return true
+    if lower == "srl": return true
+    if lower == "subtype": return true
+    if lower == "then": return true
+    if lower == "to": return true
+    if lower == "transport": return true
+    if lower == "type": return true
+    if lower == "unaffected": return true
+    if lower == "units": return true
+    if lower == "until": return true
+    if lower == "use": return true
+    if lower == "variable": return true
+    if lower == "wait": return true
+    if lower == "when": return true
+    if lower == "while": return true
+    if lower == "with": return true
+    if lower == "xnor": return true
+    if lower == "xor": return true
+    false
+
+fn vhdl_check_name_collisions(plans: [VhdlHelperNamePlan], existing_names: [text]) -> [text]:
+    """Check for collisions among subprogram name plans and existing names.
+
+    Returns a list of diagnostic messages for each collision found.
+    Checks:
+    - Collisions between generated subprogram names
+    - Collisions with existing entity/signal/type names
+    - Collisions with VHDL reserved words
+    """
+    var diagnostics: [text] = []
+    # Check reserved word collisions
+    for plan in plans:
+        if vhdl_is_reserved_word(plan.vhdl_name):
+            diagnostics = diagnostics.push("VHDL subprogram name `{plan.vhdl_name}` (from `{plan.source_name}`) collides with a VHDL reserved word")
+    # Check inter-plan collisions
+    var i = 0
+    while i < plans.len():
+        var j = i + 1
+        while j < plans.len():
+            if plans[i].vhdl_name == plans[j].vhdl_name:
+                diagnostics = diagnostics.push(vhdl_helper_collision_message(plans[i].vhdl_name, plans[i].source_name, plans[j].source_name))
+            j = j + 1
+        i = i + 1
+    # Check collisions with existing names
+    for plan in plans:
+        for existing in existing_names:
+            if plan.vhdl_name == existing:
+                diagnostics = diagnostics.push("VHDL subprogram name `{plan.vhdl_name}` (from `{plan.source_name}`) collides with existing name `{existing}`")
+    diagnostics
+
