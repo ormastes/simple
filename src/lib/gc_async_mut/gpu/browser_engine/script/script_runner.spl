@@ -1,16 +1,21 @@
 """
 # Script Runner
 
-Engine that executes Simple language code from <script> tags.
-Wraps source into a temp .spl file with DOM API imports, writes it to disk,
-and calls interpret_file from the compiler driver.
+Engine that executes scripts from <script> tags in the browser engine.
+Supports both Simple scripts (type="text/simple") and JavaScript
+(type="text/javascript" or no type attribute, which defaults to JS).
+
+JavaScript sources are transpiled to Simple via js_transpiler before
+execution. The transpiler handles common JS patterns (var/let/const,
+arrow functions, DOM API calls, template literals, etc.).
 
 Architecture:
-    1. ScriptRunner receives raw Simple source from a <script> tag body
-    2. It wraps the source with necessary imports (DOM API, console, etc.)
-    3. Writes to a temp .spl file
-    4. Calls interpret_file(path) to execute
-    5. Collects results and marks DOM dirty if mutations occurred
+    1. ScriptRunner receives script source and type from a <script> tag
+    2. If JavaScript, it runs js_transpile() to convert to Simple
+    3. It wraps the source with necessary imports (DOM API, console, etc.)
+    4. Writes to a temp .spl file
+    5. Calls interpret_file(path) to execute
+    6. Collects results and marks DOM dirty if mutations occurred
 """
 
 #![allow(REQC001)]
@@ -21,6 +26,7 @@ use std.gc_async_mut.gpu.browser_engine.script.event_loop.{EventLoop}
 use std.gc_async_mut.gpu.browser_engine.script.storage_api.{BrowserStorage}
 use std.gc_async_mut.gpu.browser_engine.script.clipboard_api.{BrowserClipboard}
 use std.gc_async_mut.gpu.browser_engine.script.location_api.{BrowserLocation, BrowserHistory}
+use std.gc_async_mut.gpu.browser_engine.script.js_transpiler.{js_transpile, js_is_javascript, js_is_simple}
 
 extern fn rt_file_write_text(path: text, content: text)
 extern fn rt_file_read_text(path: text) -> text
@@ -80,6 +86,25 @@ pub class ScriptRunner:
             history: BrowserHistory.new("about:blank"),
             _dom_dirty: false
         )
+
+pub fn run_script_with_type(runner: ScriptRunner, source: text, script_type: text):
+    """Execute a script with type detection and optional JS transpilation.
+
+    If script_type indicates JavaScript (empty, "text/javascript", etc.),
+    the source is first transpiled from JS to Simple via js_transpile().
+    If script_type is "text/simple", runs directly as Simple code.
+
+    Args:
+        runner      - the ScriptRunner context
+        source      - raw script source (JS or Simple)
+        script_type - the type attribute from the <script> tag
+    """
+    if source.trim().len() == 0:
+        return
+    var effective_source = source
+    if js_is_javascript(script_type):
+        effective_source = js_transpile(source)
+    run_script(runner, effective_source)
 
 pub fn run_script(runner: ScriptRunner, source: text):
     """Execute a Simple script against the runner's DOM tree.
@@ -173,6 +198,7 @@ use std.gc_async_mut.gpu.browser_engine.script.clipboard_api.*
 use std.gc_async_mut.gpu.browser_engine.script.network_api.*
 use std.gc_async_mut.gpu.browser_engine.script.worker_api.*
 use std.gc_async_mut.gpu.browser_engine.script.location_api.*
+use std.gc_async_mut.gpu.browser_engine.script.js_compat.*
 use std.gc_async_mut.gpu.browser_engine.script.script_runner.{get_script_dom_root, get_script_console, get_script_event_loop}
 use std.gc_async_mut.gpu.browser_engine.dom.{BeDomNode, BeDomEvent}
 
