@@ -44,6 +44,13 @@ fn _tui_render_frame(ctrl: EditorController, zones: LayoutZones, size: TerminalS
 
     _tui_render_tab_bar(ctrl.session, size.cols)
 
+    if ctrl.settings_view != nil:
+        _tui_render_settings(ctrl, zones)
+        _tui_render_status_bar(ctrl, zones, size.cols)
+        _tui_render_command_line(ctrl, zones)
+        terminal_show_cursor()
+        return
+
     if ctrl.file_tree_visible:
         val ft_focused = ctrl.focus_panel == "file_tree"
         _tui_render_file_tree(ctrl.file_tree, zones.sidebar_y, zones.sidebar_h, zones.sidebar_w, ft_focused)
@@ -333,6 +340,80 @@ fn _layout_find_group_index_local(groups: [EditorGroup], group_id: i64) -> i64:
             return i
         i = i + 1
     -1
+
+fn _tui_render_settings(ctrl: EditorController, zones: LayoutZones):
+    val sv = ctrl.settings_view
+    val left_w = 20
+    val right_x = left_w + 1
+    val right_w = zones.editor_w - left_w - 1
+    val area_y = zones.editor_y
+    val area_h = zones.editor_h
+
+    # left column: category list
+    var row = 0
+    while row < area_h:
+        terminal_move_cursor(area_y + row, zones.editor_x)
+        if row < sv.categories.len():
+            val cat = sv.categories[row]
+            var line = " " + cat
+            if line.len() > left_w:
+                line = line.slice(0, left_w)
+            var pad = ""
+            var pi = 0
+            while pi < left_w - line.len():
+                pad = pad + " "
+                pi = pi + 1
+            if row == sv.category_index:
+                terminal_write("\x1b[7m" + line + pad + "\x1b[0m")
+            else:
+                terminal_write(line + pad)
+        else:
+            var blank = ""
+            var bi = 0
+            while bi < left_w:
+                blank = blank + " "
+                bi = bi + 1
+            terminal_write(blank)
+        terminal_move_cursor(area_y + row, zones.editor_x + left_w)
+        terminal_write("\x1b[2m|\x1b[0m")
+        row = row + 1
+
+    # right column: filtered settings list
+    var srow = 0
+    while srow < area_h:
+        terminal_move_cursor(area_y + srow, zones.editor_x + right_x)
+        if srow < sv.filtered.len():
+            val sd = sv.filtered[srow]
+            val cur_val = editor_config_get_by_key(ctrl.config, sd.key)
+            var entry = " " + sd.label + ": " + cur_val
+            if entry.len() > right_w - 1:
+                entry = entry.slice(0, right_w - 1)
+            var epad = ""
+            var epi = 0
+            while epi < right_w - 1 - entry.len():
+                epad = epad + " "
+                epi = epi + 1
+            if srow == sv.selected_index:
+                if sv.editing:
+                    val edit_line = " " + sd.label + ": [" + sv.edit_value + "]"
+                    terminal_write("\x1b[1;7m" + edit_line + "\x1b[0m")
+                else:
+                    terminal_write("\x1b[7m" + entry + epad + "\x1b[0m")
+                # show description below if space
+                if area_y + srow + 1 < area_y + area_h:
+                    terminal_move_cursor(area_y + srow + 1, zones.editor_x + right_x)
+                    val desc = "   " + sd.description
+                    terminal_write("\x1b[2m" + desc + "\x1b[0m")
+            else:
+                terminal_write(entry + epad)
+        else:
+            var sblank = ""
+            var sbi = 0
+            while sbi < right_w - 1:
+                sblank = sblank + " "
+                sbi = sbi + 1
+            terminal_write(sblank)
+        srow = srow + 1
 
 fn _group_active_buffer(session: EditSession, group_idx: i64) -> EditorBuffer:
     if group_idx < 0 or group_idx >= session.layout.groups.len():

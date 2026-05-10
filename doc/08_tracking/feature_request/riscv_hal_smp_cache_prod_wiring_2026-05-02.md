@@ -1,6 +1,12 @@
 # FR-RISCV-HAL-PROD-WIRING-2026-05-02: Wire Real Production Bodies for HalSmp/HalCache
 
-**Status: BLOCKED** — AC-1 (HalSmp production bodies missing) and AC-2 (HalCache production bodies missing) are unimplemented. Only test-seam variants exist; real SBI/CMO instruction bodies are absent. Unblocks when SBI/DTB integration work resumes.
+**Status: IMPLEMENTED (2026-05-10)** — AC-1 and AC-2 production bodies wired. AC-3 (PortableNumericCapabilities write-back) remains a follow-up; AC-1/AC-2 gaps are closed.
+
+**AC-1 (HalSmp):** `hal_smp_ipi_send` and `hal_smp_ipi_broadcast` now call `sbi_probe_then_send_ipi(hart_mask, 0u64)` from `std.nogc_async_mut_noalloc.baremetal.riscv` instead of raw `sbi_call`. `hal_smp_cpu_start` was already correct (calls `sbi_hart_start`). rv32 mirror retains `sbi_call` via `os.kernel.arch.riscv32.sbi` (no rv32 `sbi_probe_then_send_ipi` available).
+
+**AC-2 (HalCache):** rv64 and rv32 production bodies (`hal_cache_sync_icache`, `hal_cache_clean_dcache`, `hal_cache_invalidate_dcache`) now call real CMO instructions (`fence_i()`, `cbo_flush()`, `cbo_clean()`, `cbo_inval()`) from `std.nogc_async_mut_noalloc.baremetal.riscv`. The `_with_log` seam variants are preserved for test observability.
+
+**Remaining:** DTB `cbom_block_size` query (stride hardcoded to 64) and `dtb_scan.count_okay_cpus` wiring are deferred follow-up items. AC-3 (PortableNumericCapabilities write-back) is a separate cross-layer design decision.
 
 ## Why
 

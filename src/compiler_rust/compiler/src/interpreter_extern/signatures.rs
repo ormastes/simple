@@ -10,6 +10,8 @@
 //! - `rt_rsa_sha256_sign` / `rt_rsa_sha512_sign`  — RFC 8332 PKCS#1 v1.5
 //! - `rt_rsa_sha512_verify`                       — RFC 8332 PKCS#1 v1.5
 //! - `rt_ecdsa_p256_sign` / `rt_ecdsa_p256_verify` — RFC 5656 SEC1 fixed r‖s
+//! - `rt_ecdsa_p384_sign` / `rt_ecdsa_p384_verify` — RFC 5656 SEC1 fixed r‖s (96 bytes)
+//! - `rt_ecdsa_p521_sign` / `rt_ecdsa_p521_verify` — RFC 5656 SEC1 fixed r‖s (132 bytes)
 //!
 //! # Error convention (kept in sync with runtime/signature.rs)
 //! - Sign: returns `Value::Array(empty)` on any error (malformed PKCS#8,
