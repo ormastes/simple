@@ -1,0 +1,100 @@
+#!/usr/bin/env bash
+# bb — Bitbucket Cloud CLI (mirrors gh)
+# Usage: bb <command> [...]
+#   auth login                    Interactive setup (workspace + username + App Password)
+#   auth status                   Show current login
+#   me                            Whoami
+#   workspace list                List accessible workspaces
+#   repo list [--workspace W]     List repos
+#   repo view <full_name>         View repo
+#   pr list [<repo>]              List pull requests
+#   pr view <repo> <id>           View a PR
+#   pr create <repo>              Create PR (opens $EDITOR for body)
+#   api <path>                    Raw API call
+
+set -euo pipefail
+
+SELF="$0"
+while [ -L "$SELF" ]; do
+  DIR="$(cd "$(dirname "$SELF")" && pwd)"
+  SELF="$(readlink "$SELF")"
+  case "$SELF" in /*) ;; *) SELF="${DIR}/${SELF}" ;; esac
+done
+BIN_DIR="$(cd "$(dirname "$SELF")" && pwd)"
+LIB_DIR="$(cd "${BIN_DIR}/../lib" && pwd)"
+
+. "${LIB_DIR}/config.shs"
+. "${LIB_DIR}/api.shs"
+
+for cmd in curl jq; do
+  command -v "$cmd" >/dev/null 2>&1 || { echo "error: ${cmd} required" >&2; exit 1; }
+done
+
+cmd_auth_login() {
+  bb_config_dir
+  printf "Username (Bitbucket login, e.g. ormastes): "; read -r BB_USER
+  printf "Workspace (often same as username): ";        read -r BB_WS
+  printf "App Password (input hidden): ";               stty -echo; read -r BB_TOK; stty echo; echo
+  cat > "$CONFIG_FILE" <<JSON
+{ "username": "${BB_USER}", "workspace": "${BB_WS}", "token": "${BB_TOK}" }
+JSON
+  chmod 600 "$CONFIG_FILE"
+  echo "Saved to ${CONFIG_FILE}"
+  cmd_auth_status
+}
+
+cmd_auth_status() {
+  bb_load_auth || return 1
+  local resp; resp=$(curl -sS -u "${BB_USER}:${BB_TOKEN}" -H "Accept: application/json" \
+    "${BB_API_BASE}/user" 2>/dev/null || true)
+  if echo "$resp" | jq -e '.username' >/dev/null 2>&1; then
+    echo "✓ Logged in as $(echo "$resp" | jq -r '.username') ($(echo "$resp" | jq -r '.display_name'))"
+    echo "  workspace: ${BB_WORKSPACE}"
+  else
+    echo "✗ Auth failed"
+    echo "$resp" | head -c 300; echo
+    return 1
+  fi
+}
+
+cmd_me()           { bb_api /user; }
+cmd_workspaces()   { bb_api /workspaces --jq '.values[] | "\(.slug)\t\(.name)"'; }
+cmd_repo_list() {
+  local ws="${BB_WORKSPACE}"
+  [ "${1:-}" = "--workspace" ] && ws="$2"
+  bb_load_auth || return 1
+  bb_api "/repositories/${ws}" --jq '.values[] | "\(.full_name)\t\(.is_private)\t\(.scm)\t\(.description // "")"'
+}
+cmd_repo_view()    { bb_api "/repositories/$1"; }
+cmd_pr_list() {
+  local repo="${1:?repo (workspace/slug) required}"
+  bb_api "/repositories/${repo}/pullrequests" --jq '.values[] | "\(.id)\t\(.state)\t\(.title)"'
+}
+cmd_pr_view()      { bb_api "/repositories/$1/pullrequests/$2"; }
+
+case "${1:-help}" in
+  auth)
+    case "${2:-}" in
+      login)  cmd_auth_login ;;
+      status) cmd_auth_status ;;
+      *) echo "Usage: bb auth {login|status}" ;;
+    esac
+    ;;
+  me)        cmd_me ;;
+  workspace) shift; case "${1:-list}" in list) cmd_workspaces ;; *) echo "bb workspace list" ;; esac ;;
+  repo)      shift; case "${1:-list}" in
+                list) shift; cmd_repo_list "$@" ;;
+                view) shift; cmd_repo_view "$@" ;;
+                *) echo "bb repo {list|view}" ;;
+              esac ;;
+  pr)        shift; case "${1:-list}" in
+                list) shift; cmd_pr_list "$@" ;;
+                view) shift; cmd_pr_view "$@" ;;
+                *) echo "bb pr {list|view <repo> <id>}" ;;
+              esac ;;
+  api)       shift; bb_api "$@" ;;
+  version)   echo "bb-cli 0.1.0" ;;
+  help|*)
+    sed -n '2,12p' "$0"
+    ;;
+esac

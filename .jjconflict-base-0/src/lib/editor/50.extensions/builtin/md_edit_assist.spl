@@ -1,0 +1,290 @@
+# Markdown Edit Assist
+#
+# Smart editing helpers for Markdown files: list auto-continue,
+# table navigation, code fence closing, smart paste, task toggle,
+# and heading level adjustment.
+
+# Convert a non-negative i64 to text (decimal digits)
+fn _md_assist_int_to_text(n: i64) -> text:
+    if n == 0:
+        return "0"
+    var digits: [text] = []
+    var remaining = n
+    while remaining > 0:
+        val d = remaining - (remaining / 10) * 10
+        if d == 0:
+            digits.push("0")
+        elif d == 1:
+            digits.push("1")
+        elif d == 2:
+            digits.push("2")
+        elif d == 3:
+            digits.push("3")
+        elif d == 4:
+            digits.push("4")
+        elif d == 5:
+            digits.push("5")
+        elif d == 6:
+            digits.push("6")
+        elif d == 7:
+            digits.push("7")
+        elif d == 8:
+            digits.push("8")
+        else:
+            digits.push("9")
+        remaining = remaining / 10
+    # digits are in reverse order — reverse them
+    var result = ""
+    var i = digits.len() - 1
+    while i >= 0:
+        result = result + digits[i]
+        i = i - 1
+    result
+
+# Count leading spaces in a line (for indentation preservation)
+fn _md_assist_leading_spaces(line: text) -> i64:
+    var count = 0
+    while count < line.len():
+        if line.char_at(count) == " ":
+            count = count + 1
+        else:
+            return count
+    count
+
+# Build a text of n spaces
+fn _md_assist_spaces(n: i64) -> text:
+    var result = ""
+    var i = 0
+    while i < n:
+        result = result + " "
+        i = i + 1
+    result
+
+# Parse a leading integer from a text like "23. item" — returns -1 if none found.
+# Only reads digits; stops at first non-digit.
+fn _md_assist_parse_leading_int(s: text) -> i64:
+    if s.len() == 0:
+        return -1
+    val ch = s.char_at(0)
+    if (ch == "0" or ch == "1" or ch == "2" or ch == "3" or ch == "4" or
+        ch == "5" or ch == "6" or ch == "7" or ch == "8" or ch == "9"):
+        var n = 0
+        var i = 0
+        while i < s.len():
+            val c = s.char_at(i)
+            if c == "0":
+                n = n * 10 + 0
+            elif c == "1":
+                n = n * 10 + 1
+            elif c == "2":
+                n = n * 10 + 2
+            elif c == "3":
+                n = n * 10 + 3
+            elif c == "4":
+                n = n * 10 + 4
+            elif c == "5":
+                n = n * 10 + 5
+            elif c == "6":
+                n = n * 10 + 6
+            elif c == "7":
+                n = n * 10 + 7
+            elif c == "8":
+                n = n * 10 + 8
+            elif c == "9":
+                n = n * 10 + 9
+            else:
+                return n
+            i = i + 1
+        return n
+    -1
+
+# 1. List auto-continue
+#
+# When the user presses Enter at the end of a list item, return the prefix
+# for the next line. Returns "" for non-list lines or empty-marker lines
+# (signal to clear the marker).
+#
+# Handled forms (after leading whitespace):
+#   - [ ] text   →  "  - [ ] "  (task, unchecked)
+#   - [x] text   →  "  - [ ] "  (task, always produces unchecked next)
+#   - item       →  "  - "
+#   * [ ] text   →  "  * [ ] "
+#   * [x] text   →  "  * [ ] "
+#   * item       →  "  * "
+#   + item       →  "  + "
+#   N. item      →  "  N+1. "
+#   Empty marker (just "- ", "* ", "+ ", "N. " with no text after) → ""
+fn md_assist_on_enter(line: text, cursor_col: i64) -> text:
+    val indent_n = _md_assist_leading_spaces(line)
+    val indent = _md_assist_spaces(indent_n)
+    val trimmed = line.slice(indent_n, line.len())
+    # Ordered list: digits followed by ". "
+    val first_num = _md_assist_parse_leading_int(trimmed)
+    if first_num >= 0:
+        val num_text = _md_assist_int_to_text(first_num)
+        val after_num = trimmed.slice(num_text.len(), trimmed.len())
+        if after_num.starts_with(". "):
+            val content = after_num.slice(2, after_num.len())
+            if content == "":
+                return ""
+            val next_num = _md_assist_int_to_text(first_num + 1)
+            return indent + next_num + ". "
+    # Task list variants: "- [ ] " / "- [x] " / "* [ ] " / "* [x] "
+    if (trimmed.starts_with("- [ ] ") or trimmed.starts_with("- [x] ")):
+        val task_prefix = trimmed.slice(0, 6)
+        val content = trimmed.slice(6, trimmed.len())
+        if content == "":
+            return ""
+        return indent + "- [ ] "
+    if (trimmed.starts_with("* [ ] ") or trimmed.starts_with("* [x] ")):
+        val content = trimmed.slice(6, trimmed.len())
+        if content == "":
+            return ""
+        return indent + "* [ ] "
+    # Bullet list markers: "- ", "* ", "+ "
+    if trimmed.starts_with("- "):
+        val content = trimmed.slice(2, trimmed.len())
+        if content == "":
+            return ""
+        return indent + "- "
+    if trimmed.starts_with("* "):
+        val content = trimmed.slice(2, trimmed.len())
+        if content == "":
+            return ""
+        return indent + "* "
+    if trimmed.starts_with("+ "):
+        val content = trimmed.slice(2, trimmed.len())
+        if content == "":
+            return ""
+        return indent + "+ "
+    ""
+
+# 2. Table cell navigation
+#
+# If cursor is inside a table row (line starts with "|"), return the column
+# of the next "|" + 2 (skip the pipe and space). Returns -1 if at the last cell.
+fn md_assist_on_tab(line: text, cursor_col: i64) -> i64:
+    val trimmed = line.trim()
+    if not trimmed.starts_with("|"):
+        return -1
+    var i = cursor_col + 1
+    while i < line.len():
+        if line.char_at(i) == "|":
+            return i + 2
+        i = i + 1
+    -1
+
+# 3. Auto-close code fence
+#
+# If line (after optional whitespace) starts with ```, return "\n```".
+# Otherwise return "".
+fn md_assist_auto_close_fence(line: text) -> text:
+    val trimmed = line.trim()
+    if trimmed.starts_with("```"):
+        return "\n```"
+    ""
+
+# 4. Smart paste
+#
+# If clipboard is a URL and selected_text is non-empty, return markdown link.
+# Otherwise return "" (no transformation).
+fn md_assist_smart_paste(selected_text: text, clipboard: text) -> text:
+    if selected_text == "":
+        return ""
+    val is_http = clipboard.starts_with("http://")
+    val is_https = clipboard.starts_with("https://")
+    if is_http or is_https:
+        return "[" + selected_text + "](" + clipboard + ")"
+    ""
+
+# 5. Toggle task checkbox
+#
+# - [ ]  →  - [x]
+# - [x]  →  - [ ]
+# * [ ]  →  * [x]
+# * [x]  →  * [ ]
+# Non-task lines → returned unchanged.
+fn md_assist_toggle_task(line: text) -> text:
+    if line.contains("- [ ] "):
+        val idx = _md_assist_find_marker(line, "- [ ] ")
+        if idx >= 0:
+            val before = line.slice(0, idx)
+            val after = line.slice(idx + 6, line.len())
+            return before + "- [x] " + after
+    if line.contains("- [x] "):
+        val idx = _md_assist_find_marker(line, "- [x] ")
+        if idx >= 0:
+            val before = line.slice(0, idx)
+            val after = line.slice(idx + 6, line.len())
+            return before + "- [ ] " + after
+    if line.contains("* [ ] "):
+        val idx = _md_assist_find_marker(line, "* [ ] ")
+        if idx >= 0:
+            val before = line.slice(0, idx)
+            val after = line.slice(idx + 6, line.len())
+            return before + "* [x] " + after
+    if line.contains("* [x] "):
+        val idx = _md_assist_find_marker(line, "* [x] ")
+        if idx >= 0:
+            val before = line.slice(0, idx)
+            val after = line.slice(idx + 6, line.len())
+            return before + "* [ ] " + after
+    line
+
+# Find the first occurrence of pattern in s; returns -1 if not found.
+fn _md_assist_find_marker(s: text, pattern: text) -> i64:
+    if pattern.len() == 0:
+        return 0
+    var i = 0
+    while i + pattern.len() <= s.len():
+        var match = true
+        var j = 0
+        while j < pattern.len():
+            if s.char_at(i + j) != pattern.char_at(j):
+                match = false
+                j = pattern.len()
+            j = j + 1
+        if match:
+            return i
+        i = i + 1
+    -1
+
+# Count leading '#' characters in a line
+fn _md_assist_heading_level(line: text) -> i64:
+    var count = 0
+    while count < line.len():
+        if line.char_at(count) == "#":
+            count = count + 1
+        else:
+            return count
+    count
+
+# 6. Increase/decrease heading level
+#
+# If line starts with '#', adjust count by delta (clamped to 1–6).
+# If new level would be 0, strip the heading prefix entirely.
+# If line is not a heading and delta > 0, prepend "# ".
+# If line is not a heading and delta <= 0, return unchanged.
+fn md_assist_change_heading(line: text, delta: i64) -> text:
+    val current = _md_assist_heading_level(line)
+    if current == 0:
+        if delta > 0:
+            return "# " + line
+        return line
+    val new_level = current + delta
+    if new_level <= 0:
+        # Strip heading prefix: skip '#' chars and the space that follows
+        val rest_start = current + 1
+        if rest_start <= line.len():
+            return line.slice(rest_start, line.len())
+        return ""
+    var clamped = new_level
+    if clamped > 6:
+        clamped = 6
+    val after_hashes = line.slice(current, line.len())
+    var hashes = ""
+    var i = 0
+    while i < clamped:
+        hashes = hashes + "#"
+        i = i + 1
+    hashes + after_hashes

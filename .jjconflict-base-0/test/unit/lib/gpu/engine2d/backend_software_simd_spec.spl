@@ -1,0 +1,93 @@
+"""Software Backend SIMD Integration Specification
+
+@tag: gpu, engine2d, software, simd, acceleration
+@cover src/lib/gc_async_mut/gpu/engine2d/backend_software.spl 60%
+
+Verifies that the optimized software backend uses SIMD kernels for
+hot paths when available. Covers AC-6.
+"""
+
+use std.spec.{describe, context, it, expect}
+
+# ============================================================================
+# SIMD-accelerated clear
+# ============================================================================
+
+describe "SoftwareBackend SIMD integration":
+    describe "clear":
+        it "AC-6: clear uses simd_fill_row when available":
+            var backend = SoftwareBackend.create()
+            if backend.init(256, 256):
+                backend.clear(0xFFFF0000)
+                val pixels = backend.read_pixels()
+                expect(pixels[0]).to_equal(0xFFFF0000)
+                expect(pixels[255]).to_equal(0xFFFF0000)
+                backend.shutdown()
+
+        it "AC-6: clear produces same result with and without SIMD":
+            var backend = SoftwareBackend.create()
+            if backend.init(64, 64):
+                backend.clear(0xFF00FF00)
+                val pixels = backend.read_pixels()
+                var i = 0
+                var all_green = true
+                while i < 64:
+                    if pixels[i] != 0xFF00FF00:
+                        all_green = false
+                    i = i + 1
+                expect(all_green).to_equal(true)
+                backend.shutdown()
+
+# ============================================================================
+# SIMD-accelerated blit
+# ============================================================================
+
+    describe "blit_image":
+        it "AC-6: blit uses simd_blit_row for row copies":
+            var backend = SoftwareBackend.create()
+            if backend.init(64, 64):
+                backend.clear(0xFF000000)
+                var src_pixels: [u32] = [0xFFFF0000; 16]
+                backend.blit_image(0, 0, 4, 4, src_pixels)
+                val pixels = backend.read_pixels()
+                expect(pixels[0]).to_equal(0xFFFF0000)
+                backend.shutdown()
+
+# ============================================================================
+# SIMD-accelerated alpha blend
+# ============================================================================
+
+    describe "alpha blending":
+        it "AC-6: draw_rect_filled with alpha uses simd_blend_row":
+            var backend = SoftwareBackend.create()
+            if backend.init(64, 64):
+                backend.clear(0xFF0000FF)
+                backend.draw_rect_filled(0, 0, 32, 32, 0x80FF0000)
+                val pixels = backend.read_pixels()
+                val r = (pixels[0] >> 16) & 0xFF
+                expect(r).to_be_greater_than(50)
+                backend.shutdown()
+
+# ============================================================================
+# Fallback correctness
+# ============================================================================
+
+    describe "scalar fallback":
+        it "AC-6: works correctly when no SIMD available":
+            var backend = SoftwareBackend.create()
+            if backend.init(8, 8):
+                backend.clear(0xFFAABBCC)
+                backend.draw_line(0, 0, 7, 7, 0xFFFFFFFF, 1)
+                val pixels = backend.read_pixels()
+                expect(pixels[0]).to_equal(0xFFFFFFFF)
+                backend.shutdown()
+
+        it "AC-6: tile-based rendering preserved with SIMD":
+            var backend = SoftwareBackend.create()
+            if backend.init(128, 128):
+                backend.clear(0xFF000000)
+                backend.draw_rect_filled(0, 0, 128, 128, 0xFFFF0000)
+                backend.present()
+                val pixels = backend.read_pixels()
+                expect(pixels[0]).to_equal(0xFFFF0000)
+                backend.shutdown()

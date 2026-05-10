@@ -1,0 +1,70 @@
+use std.linalg.*
+
+describe "linalg backend diagnostics":
+    it "reports the configured backend without requiring native libraries":
+        val status = linalg_backend_status()
+        if status.requested == "mock":
+            expect(status.selected).to_equal("mock")
+            expect(status.available).to_equal(true)
+            expect(status.real_native).to_equal(false)
+        if status.requested == "cuda":
+            match require_linalg_backend("cuda"):
+                case Ok(required):
+                    expect(required.selected).to_equal("cuda")
+                case Err(BackendError.BackendUnavailable(name)):
+                    expect(name).to_equal("cuda")
+                case _:
+                    expect(false).to_equal(true)
+        if status.requested == "torch" or status.requested == "pytorch":
+            match require_linalg_backend(status.requested):
+                case Ok(required):
+                    expect(required.selected).to_equal("pytorch")
+                case Err(BackendError.BackendUnavailable(name)):
+                    expect(name).to_equal(status.requested)
+                case _:
+                    expect(false).to_equal(true)
+        if status.requested == "auto":
+            expect(status.selected).to_equal("scalar")
+            expect(status.available).to_equal(true)
+        if status.requested == "openblas":
+            match require_linalg_backend("openblas"):
+                case Ok(required):
+                    expect(required.selected).to_equal("openblas")
+                case Err(BackendError.BackendUnavailable(name)):
+                    expect(name).to_equal("openblas")
+                case _:
+                    expect(false).to_equal(true)
+
+    it "returns typed unavailable errors for optional accelerator backends":
+        val openblas = require_linalg_backend("openblas")
+        match openblas:
+            case Ok(status):
+                expect(status.selected).to_equal("openblas")
+                expect(status.available).to_equal(true)
+            case Err(BackendError.BackendUnavailable(name)):
+                expect(name).to_equal("openblas")
+            case _:
+                expect(false).to_equal(true)
+
+        val cuda = require_linalg_backend("cuda")
+        match cuda:
+            case Err(BackendError.BackendUnavailable(name)):
+                expect(name).to_equal("cuda")
+            case _:
+                expect(false).to_equal(true)
+
+    it "returns typed missing-symbol errors for backend symbol probes":
+        val missing = check_linalg_symbol("mock", "rt_blas_dgemm", false)
+        match missing:
+            case Err(BackendError.MissingRuntimeSymbol(symbol)):
+                expect(symbol).to_equal("rt_blas_dgemm")
+            case _:
+                expect(false).to_equal(true)
+
+    it "returns typed unsupported errors for unknown backend names":
+        val unknown = require_linalg_backend("not-a-backend")
+        match unknown:
+            case Err(BackendError.UnsupportedBackend(name)):
+                expect(name).to_equal("not-a-backend")
+            case _:
+                expect(false).to_equal(true)

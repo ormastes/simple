@@ -1,0 +1,89 @@
+# Tests for blink::PaintController — chunk splitting on property changes.
+
+use std.lib.blink.feature.paint.paint_controller.{PaintController}
+use std.lib.blink.entity.paint_artifact.{PaintChunkProperties}
+use examples.browser.entity.dom.paint_types.{DisplayItem, PaintOp}
+
+describe "PaintController":
+    it "commit on empty controller yields zero chunks":
+        val ctrl = PaintController.new()
+        val artifact = ctrl.commit()
+        expect(artifact.chunk_count()).to_equal(0)
+
+    it "single property set with three items yields one chunk":
+        val ctrl = PaintController.new()
+        val props = PaintChunkProperties(transform_id: 0, clip_id: 0, effect_id: 0)
+        ctrl.update_properties(props)
+        ctrl.record_item(DisplayItem.create(0, PaintOp.PopClip))
+        ctrl.record_item(DisplayItem.create(0, PaintOp.PopClip))
+        ctrl.record_item(DisplayItem.create(0, PaintOp.PopClip))
+        val artifact = ctrl.commit()
+        expect(artifact.chunk_count()).to_equal(1)
+
+    it "one chunk spans items 0..3":
+        val ctrl = PaintController.new()
+        val props = PaintChunkProperties(transform_id: 0, clip_id: 0, effect_id: 0)
+        ctrl.update_properties(props)
+        ctrl.record_item(DisplayItem.create(0, PaintOp.PopClip))
+        ctrl.record_item(DisplayItem.create(0, PaintOp.PopClip))
+        ctrl.record_item(DisplayItem.create(0, PaintOp.PopClip))
+        val artifact = ctrl.commit()
+        val chunk = artifact.chunks.get(0).unwrap()
+        expect(chunk.begin_index).to_equal(0)
+        expect(chunk.end_index).to_equal(3)
+
+    it "switching properties produces two chunks":
+        val ctrl = PaintController.new()
+        val props_a = PaintChunkProperties(transform_id: 0, clip_id: 0, effect_id: 0)
+        val props_b = PaintChunkProperties(transform_id: 1, clip_id: 0, effect_id: 0)
+        ctrl.update_properties(props_a)
+        ctrl.record_item(DisplayItem.create(0, PaintOp.PopClip))
+        ctrl.record_item(DisplayItem.create(0, PaintOp.PopClip))
+        ctrl.record_item(DisplayItem.create(0, PaintOp.PopClip))
+        ctrl.update_properties(props_b)
+        ctrl.record_item(DisplayItem.create(0, PaintOp.PopClip))
+        ctrl.record_item(DisplayItem.create(0, PaintOp.PopClip))
+        val artifact = ctrl.commit()
+        expect(artifact.chunk_count()).to_equal(2)
+
+    it "first chunk covers items 0..3, second chunk covers 3..5":
+        val ctrl = PaintController.new()
+        val props_a = PaintChunkProperties(transform_id: 0, clip_id: 0, effect_id: 0)
+        val props_b = PaintChunkProperties(transform_id: 1, clip_id: 0, effect_id: 0)
+        ctrl.update_properties(props_a)
+        ctrl.record_item(DisplayItem.create(0, PaintOp.PopClip))
+        ctrl.record_item(DisplayItem.create(0, PaintOp.PopClip))
+        ctrl.record_item(DisplayItem.create(0, PaintOp.PopClip))
+        ctrl.update_properties(props_b)
+        ctrl.record_item(DisplayItem.create(0, PaintOp.PopClip))
+        ctrl.record_item(DisplayItem.create(0, PaintOp.PopClip))
+        val artifact = ctrl.commit()
+        val chunk0 = artifact.chunks.get(0).unwrap()
+        val chunk1 = artifact.chunks.get(1).unwrap()
+        expect(chunk0.begin_index).to_equal(0)
+        expect(chunk0.end_index).to_equal(3)
+        expect(chunk1.begin_index).to_equal(3)
+        expect(chunk1.end_index).to_equal(5)
+
+    it "second chunk carries the new transform_id":
+        val ctrl = PaintController.new()
+        val props_a = PaintChunkProperties(transform_id: 0, clip_id: 0, effect_id: 0)
+        val props_b = PaintChunkProperties(transform_id: 7, clip_id: 2, effect_id: 3)
+        ctrl.update_properties(props_a)
+        ctrl.record_item(DisplayItem.create(0, PaintOp.PopClip))
+        ctrl.update_properties(props_b)
+        ctrl.record_item(DisplayItem.create(0, PaintOp.PopClip))
+        val artifact = ctrl.commit()
+        val chunk1 = artifact.chunks.get(1).unwrap()
+        expect(chunk1.properties.transform_id).to_equal(7)
+        expect(chunk1.properties.clip_id).to_equal(2)
+        expect(chunk1.properties.effect_id).to_equal(3)
+
+    it "item_count matches total recorded items":
+        val ctrl = PaintController.new()
+        val props = PaintChunkProperties(transform_id: 0, clip_id: 0, effect_id: 0)
+        ctrl.update_properties(props)
+        ctrl.record_item(DisplayItem.create(0, PaintOp.PopClip))
+        ctrl.record_item(DisplayItem.create(0, PaintOp.PopClip))
+        val artifact = ctrl.commit()
+        expect(artifact.item_count()).to_equal(2)

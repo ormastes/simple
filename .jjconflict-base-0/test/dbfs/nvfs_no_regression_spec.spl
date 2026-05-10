@@ -1,0 +1,101 @@
+# Maps to: AC-4, AC-9
+# Run: bin/simple test test/dbfs/nvfs_no_regression_spec.spl
+
+"""
+NVFS No-Regression Specification
+
+Verifies the live NVFS driver surfaces still work after the blob-backend refactor:
+  - native NvfsDriver open/read/write/stat
+  - Posix shim open/pwrite/ftruncate/stat
+"""
+
+use std.spipe.*
+use std.fs_driver.ops.{FsDriver}
+use std.fs_driver.types.{Path, OpenFlags, MountOptions}
+use examples.nvfs.src.driver.fs_driver_impl.{NvfsDriver}
+use examples.nvfs.src.posix.fs_driver_impl.{NvfsPosixDriver}
+
+fn make_nvfs() -> NvfsDriver:
+    var d = NvfsDriver.new("nvfs-regression")
+    d.mounted = true
+    d.read_only = false
+    d
+
+fn make_nvfs_posix() -> NvfsPosixDriver:
+    var d = NvfsPosixDriver.new("nvfs-posix-regression")
+    d.mount(MountOptions.default()).unwrap()
+    d
+
+describe "NVFS no-regression — NvfsDriver":
+    it "NvfsDriver mounts and exposes the root inode":
+        val d = make_nvfs()
+        val root = d.root().unwrap()
+        expect(root.id).to_equal(1)
+
+    it "NvfsDriver open + write + read round-trips bytes":
+        val d = make_nvfs()
+        val fh = d.open(Path(raw: "/nvfs_reg.bin"), OpenFlags(bits: 2)).unwrap()
+        val payload: [u8] = [110, 118, 102, 115, 45, 111, 107]
+        d.write(fh, 0, payload).unwrap()
+        var got: [u8] = [0, 0, 0, 0, 0, 0, 0]
+        val n = d.read(fh, 0, got).unwrap()
+        expect(n).to_equal(7)
+        expect(got[0]).to_equal(110)
+        expect(got[6]).to_equal(107)
+
+    it "NvfsDriver stat returns correct size after write":
+        val d = make_nvfs()
+        val fh = d.open(Path(raw: "/size_test.bin"), OpenFlags(bits: 2)).unwrap()
+        val payload: [u8] = [49, 50, 51, 52, 53]
+        d.write(fh, 0, payload).unwrap()
+        d.close(fh).unwrap()
+        val stat = d.stat(Path(raw: "/size_test.bin")).unwrap()
+        expect(stat.size).to_equal(5)
+
+    it "NvfsDriver rejects non-append positional overwrite on the native driver":
+        val d = make_nvfs()
+        val fh = d.open(Path(raw: "/append_only.bin"), OpenFlags(bits: 2)).unwrap()
+        val payload: [u8] = [1, 2, 3, 4]
+        d.write(fh, 0, payload).unwrap()
+        val patch: [u8] = [9]
+        val res = d.pwrite(fh, 1, patch)
+        expect(res.is_err()).to_equal(true)
+
+describe "NVFS no-regression — NvfsPosixDriver":
+    it "NvfsPosixDriver mounts and exposes the root inode":
+        val d = make_nvfs_posix()
+        val root = d.root().unwrap()
+        expect(root.id).to_equal(1)
+
+    it "NvfsPosixDriver open + write + read round-trips bytes":
+        val d = make_nvfs_posix()
+        val fh = d.open(Path(raw: "/posix_reg.txt"), OpenFlags.write_only().with_append()).unwrap()
+        val payload: [u8] = [112, 111, 115, 105, 120, 45, 111, 107]
+        d.write(fh, 0, payload).unwrap()
+        var got: [u8] = [0, 0, 0, 0, 0, 0, 0, 0]
+        val n = d.read(fh, 0, got).unwrap()
+        expect(n).to_equal(8)
+        expect(got[0]).to_equal(112)
+        expect(got[7]).to_equal(107)
+
+    it "NvfsPosixDriver pwrite updates bytes in place":
+        val d = make_nvfs_posix()
+        val fh = d.open(Path(raw: "/rewrite.txt"), OpenFlags.write_only().with_append()).unwrap()
+        val seed: [u8] = [65, 65, 65, 65]
+        d.write(fh, 0, seed).unwrap()
+        val patch: [u8] = [66, 66]
+        d.pwrite(fh, 2, patch).unwrap()
+        var got: [u8] = [0, 0, 0, 0]
+        val n = d.pread(fh, 0, got).unwrap()
+        expect(n).to_equal(4)
+        expect(got[0]).to_equal(65)
+        expect(got[2]).to_equal(66)
+
+    it "NvfsPosixDriver stat returns updated size after ftruncate":
+        val d = make_nvfs_posix()
+        val fh = d.open(Path(raw: "/file.txt"), OpenFlags.write_only().with_append()).unwrap()
+        val payload: [u8] = [1, 2, 3, 4]
+        d.write(fh, 0, payload).unwrap()
+        d.ftruncate(fh, 10).unwrap()
+        val stat = d.fstat(fh).unwrap()
+        expect(stat.size).to_equal(10)

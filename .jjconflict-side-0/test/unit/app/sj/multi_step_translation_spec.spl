@@ -1,0 +1,119 @@
+"""
+# Multi-Step Translation Specification
+#
+# Tests git verbs that expand to multiple jj commands.
+"""
+
+use std.io_runtime
+
+# --- Inline constants ---
+val LEASE_EXCLUSIVE: i64 = 0i64
+val LEASE_SHARED: i64 = 1i64
+
+# --- Inline translation types ---
+
+struct TranslationPlan:
+    classification: text
+    lease_kind: i64
+    commands: [text]
+    warning: text
+
+fn _tail(argv: [text], start: i64) -> [text]:
+    var out: [text] = []
+    var i = start
+    while i < argv.len():
+        out.push(argv[i])
+        i = i + 1i64
+    out
+
+fn _join(argv: [text]) -> text:
+    argv.join(" ")
+
+fn _direct(command: text, lease_kind: i64) -> TranslationPlan:
+    TranslationPlan(classification: "direct_jj", lease_kind: lease_kind, commands: [command], warning: "")
+
+fn translate(argv: [text]) -> TranslationPlan:
+    if argv.len() == 0i64:
+        return _direct("jj", LEASE_SHARED)
+    if argv[0i64] != "git":
+        return _direct("jj " + _join(argv), LEASE_EXCLUSIVE)
+    val verb = argv[1i64]
+    if verb == "commit" and argv.len() > 2i64 and argv[2i64] == "--amend":
+        return _direct("jj describe " + _join(_tail(argv, 2i64)), LEASE_EXCLUSIVE)
+    if verb == "commit":
+        return TranslationPlan(
+            classification: "multi_step",
+            lease_kind: LEASE_EXCLUSIVE,
+            commands: ["jj describe " + _join(_tail(argv, 2i64)), "jj new"],
+            warning: ""
+        )
+    if verb == "checkout" and argv.len() > 3i64 and argv[2i64] == "-b":
+        val branch = argv[3i64]
+        val base = if argv.len() > 4i64:
+            "jj new " + _join(_tail(argv, 4i64))
+        else:
+            "jj new"
+        return TranslationPlan(
+            classification: "multi_step",
+            lease_kind: LEASE_EXCLUSIVE,
+            commands: [base, "jj bookmark create {branch} -r @"],
+            warning: ""
+        )
+    if verb == "pull":
+        return TranslationPlan(
+            classification: "multi_step",
+            lease_kind: LEASE_EXCLUSIVE,
+            commands: ["jj git fetch", "jj rebase -d main@origin"],
+            warning: ""
+        )
+    _direct("jj " + _join(argv), LEASE_EXCLUSIVE)
+
+# ============================================================================
+# Tests
+# ============================================================================
+
+describe "Multi-Step Translation - Commit":
+    it "translates git commit -m to describe + new":
+        val plan = translate(["git", "commit", "-m", "my message"])
+        expect(plan.classification).to_equal("multi_step")
+        expect(plan.commands.len()).to_equal(2i64)
+        expect(plan.commands[0i64]).to_contain("jj describe")
+        expect(plan.commands[1i64]).to_equal("jj new")
+        expect(plan.lease_kind).to_equal(LEASE_EXCLUSIVE)
+
+    it "translates git commit --amend to describe":
+        val plan = translate(["git", "commit", "--amend"])
+        expect(plan.classification).to_equal("direct_jj")
+        expect(plan.commands[0i64]).to_contain("jj describe")
+
+describe "Multi-Step Translation - Checkout -b":
+    it "translates git checkout -b to new + bookmark create":
+        val plan = translate(["git", "checkout", "-b", "feature-x"])
+        expect(plan.classification).to_equal("multi_step")
+        expect(plan.commands.len()).to_equal(2i64)
+        expect(plan.commands[0i64]).to_equal("jj new")
+        expect(plan.commands[1i64]).to_contain("bookmark create feature-x")
+        expect(plan.lease_kind).to_equal(LEASE_EXCLUSIVE)
+
+    it "translates git checkout -b with base to new <base> + bookmark":
+        val plan = translate(["git", "checkout", "-b", "feature-y", "main"])
+        expect(plan.commands[0i64]).to_equal("jj new main")
+        expect(plan.commands[1i64]).to_contain("bookmark create feature-y")
+
+describe "Multi-Step Translation - Pull":
+    it "translates git pull to fetch + rebase":
+        val plan = translate(["git", "pull"])
+        expect(plan.classification).to_equal("multi_step")
+        expect(plan.commands.len()).to_equal(2i64)
+        expect(plan.commands[0i64]).to_equal("jj git fetch")
+        expect(plan.commands[1i64]).to_equal("jj rebase -d main@origin")
+        expect(plan.lease_kind).to_equal(LEASE_EXCLUSIVE)
+
+describe "Multi-Step Translation - Lease Sharing":
+    it "all multi-step commands use exclusive leases":
+        val commit_plan = translate(["git", "commit", "-m", "x"])
+        val pull_plan = translate(["git", "pull"])
+        val branch_plan = translate(["git", "checkout", "-b", "test"])
+        expect(commit_plan.lease_kind).to_equal(LEASE_EXCLUSIVE)
+        expect(pull_plan.lease_kind).to_equal(LEASE_EXCLUSIVE)
+        expect(branch_plan.lease_kind).to_equal(LEASE_EXCLUSIVE)

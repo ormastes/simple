@@ -1,0 +1,242 @@
+# @cover src/hardware/fpga_linux/fpga_linux_manifest.spl 80%
+# @cover src/compiler/35.semantics/lint/riscv_rtl_debuggability_lint.spl 80%
+"""
+# Debug Sidecar JSON Key-Order Specification
+
+**Feature IDs:** #rtl-mdsoc-reorg
+**Category:** Infrastructure
+**Difficulty:** 3/5
+**Status:** Draft
+**Requirements:** doc/02_requirements/feature/rtl_riscv_mdsoc_reorg.md
+**Design:** doc/05_design/rtl_riscv_mdsoc_capsules.md
+**Artifacts:** doc/09_report/verify/rtl_mdsoc_baseline_2026-05-02.md
+
+## Overview
+
+Verifies that the generated `*.debug.json` sidecar files produced by the FPGA
+Linux generation scripts maintain their exact key order after the MDSOC
+capsule reorganization.
+
+The `debug_sidecar_json` function in `fpga_linux_manifest.spl` emits JSON via
+string concatenation in literal source order. This is an immutable contract —
+no serializer, no key shuffling allowed.
+
+## Key Order Contract (AC-3, D-4)
+
+Expected JSON key order:
+1. `reportMarkers`
+2. `runnerSuccessMarkers`
+3. `sourceMap`
+4. `proofLane` (header field)
+
+The exact expected order is recorded in the baseline at:
+`doc/09_report/verify/rtl_mdsoc_baseline_2026-05-02.md`
+
+Pending: tests that require the baseline are gated on SA-1 creating it.
+
+## Acceptance Criteria
+
+- AC-3: *.debug.json sidecar contract preserved (reportMarkers,
+  runnerSuccessMarkers byte-equivalent)
+- AC-8: Verify in interpreter mode
+"""
+
+use std.spec
+
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_file_read_text(path: text) -> text?
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+
+fn check_msg(condition: bool, msg: text):
+    if not condition:
+        expect(msg).to_equal("")
+
+fn read_file(path: text) -> text:
+    rt_file_read_text(path) ?? ""
+
+fn baseline_path() -> text:
+    "doc/09_report/verify/rtl_mdsoc_baseline_2026-05-02.md"
+
+fn rv32_build_dir() -> text:
+    "build/rtl_linux/generated_rv32"
+
+fn rv64_build_dir() -> text:
+    "build/rtl_linux/generated_rv64"
+
+fn manifest_src_path() -> text:
+    "src/hardware/fpga_linux/fpga_linux_manifest.spl"
+
+fn orchestrator_src_path() -> text:
+    "src/hardware/fpga_linux/fpga_linux_orchestrator.spl"
+
+fn json_key_byte_offset(file_path: text, key: text) -> i64:
+    # Use grep to find the byte offset of `"key":` in file_path.
+    # Returns -1 if not found or on error.
+    val search = "\"" + key + "\":"
+    val cmd = "grep -boa '" + search + "' '" + file_path + "' 2>/dev/null | head -1 | cut -d: -f1"
+    val (stdout, _stderr, code) = rt_process_run("sh", ["-c", cmd])
+    if code != 0:
+        return -1
+    val trimmed = stdout.trim()
+    if trimmed == "":
+        return -1
+    trimmed.to_i64() ?? -1
+
+fn json_key_offset_in_content(content: text, key: text) -> i64:
+    # Write content to a temp file and grep for key offset.
+    # Avoids char-by-char scanning entirely.
+    val tmpfile = "/tmp/dbg_json_order_spec_" + key + ".tmp"
+    val write_cmd = "printf '%s' \"$CONTENT\" > '" + tmpfile + "'"
+    # Use process-substitution-safe approach: echo content via env var
+    val cmd = "echo \"$CONTENT\" | grep -boa '\"" + key + "\":' | head -1 | cut -d: -f1"
+    # We cannot pass arbitrary content safely through env this way in all shells.
+    # Fall back to searching the manifest source file directly for source-contract tests.
+    return -1
+
+fn source_key_offset(key: text) -> i64:
+    # Find byte offset of `"key":` in fpga_linux_manifest.spl source.
+    val path = manifest_src_path()
+    if not rt_file_exists(path):
+        return -1
+    json_key_byte_offset(path, key)
+
+fn find_first_debug_json(dir: text) -> text:
+    # Returns the path of the first *.debug.json file found in dir, or "".
+    val cmd = "find '" + dir + "' -name '*.debug.json' 2>/dev/null | sort | head -1"
+    val (stdout, _stderr, _code) = rt_process_run("sh", ["-c", cmd])
+    stdout.trim()
+
+fn debug_json_key_offset(dir: text, key: text) -> i64:
+    # Find byte offset of key in first debug.json under dir. Returns -1 if absent.
+    val json_path = find_first_debug_json(dir)
+    if json_path == "":
+        return -1
+    json_key_byte_offset(json_path, key)
+
+describe "Debug Sidecar JSON Key Order: source contract (AC-3, D-4)":
+    """
+    ## JSON Key-Order Source Contract
+
+    Verifies that the manifest source file (fpga_linux_manifest.spl)
+    contains `reportMarkers` before `runnerSuccessMarkers` before `sourceMap`
+    in the `debug_sidecar_json` function body.
+    These are static text-grep assertions that do not require SA-1 baseline.
+    """
+
+    it "AC-3: fpga_linux_manifest.spl contains reportMarkers key string":
+        val path = manifest_src_path()
+        check_msg(rt_file_exists(path), "file not found (SA-3 not run yet): " + path)
+        val content = read_file(path)
+        val has_key = content.contains("reportMarkers")
+        expect(has_key).to_equal(true)
+
+    it "AC-3: fpga_linux_manifest.spl contains runnerSuccessMarkers key string":
+        val path = manifest_src_path()
+        check_msg(rt_file_exists(path), "file not found (SA-3 not run yet): " + path)
+        val content = read_file(path)
+        val has_key = content.contains("runnerSuccessMarkers")
+        expect(has_key).to_equal(true)
+
+    it "AC-3: reportMarkers appears before runnerSuccessMarkers in manifest source":
+        val path = manifest_src_path()
+        check_msg(rt_file_exists(path), "file not found (SA-3 not run yet): " + path)
+        val pos_report = source_key_offset("reportMarkers")
+        val pos_runner = source_key_offset("runnerSuccessMarkers")
+        check_msg(pos_report >= 0, "reportMarkers not found in manifest source")
+        check_msg(pos_runner >= 0, "runnerSuccessMarkers not found in manifest source")
+        check_msg(pos_report < pos_runner, "reportMarkers must appear before runnerSuccessMarkers in source")
+        expect(pos_report).to_be_less_than(pos_runner)
+
+    it "AC-3: sourceMap appears after runnerSuccessMarkers in manifest source":
+        val path = manifest_src_path()
+        check_msg(rt_file_exists(path), "file not found (SA-3 not run yet): " + path)
+        val pos_runner = source_key_offset("runnerSuccessMarkers")
+        val pos_source_map = source_key_offset("sourceMap")
+        check_msg(pos_runner >= 0, "runnerSuccessMarkers not found in manifest source")
+        check_msg(pos_source_map >= 0, "sourceMap not found in manifest source")
+        check_msg(pos_runner < pos_source_map, "runnerSuccessMarkers must appear before sourceMap in source")
+        expect(pos_runner).to_be_less_than(pos_source_map)
+
+    it "AC-3: D-4 invariant — no json_ helper functions exist outside fpga_linux_manifest.spl":
+        # The D-4 decision states all json_* helpers live exclusively in
+        # fpga_linux_manifest.spl. Verify that fpga_linux_orchestrator.spl
+        # does not contain json_ helper definitions.
+        val path = orchestrator_src_path()
+        check_msg(rt_file_exists(path), "file not found (SA-3 not run yet): " + path)
+        val content = read_file(path)
+        val has_json_helper = content.contains("fn json_")
+        check_msg(not has_json_helper, "D-4 violation: json_ helper defined in orchestrator, must be in manifest only")
+        expect(has_json_helper).to_equal(false)
+
+describe "Debug Sidecar JSON Key Order: generated output (AC-3)":
+    """
+    ## Generated JSON Key Order in Build Output
+
+    Tests that parse actual generated *.debug.json files from the build
+    directory and verify key ordering. Pending until SA-1 baseline exists
+    and SA-3 split is complete.
+    """
+
+    it "AC-3: RV32 generated debug.json key-order check is pending until SA-3 complete":
+        pending("SA-3 gate — build output not yet generated by split scripts")
+
+    it "AC-3: RV32 generated debug.json has reportMarkers key":
+        if not rt_file_exists(rv32_build_dir()):
+            pending("SA-3 gate — build output not yet generated")
+        val pos = debug_json_key_offset(rv32_build_dir(), "reportMarkers")
+        check_msg(pos >= 0, "reportMarkers missing from generated debug.json in " + rv32_build_dir())
+        expect(pos).to_be_greater_than(-1)
+
+    it "AC-3: RV32 generated debug.json has runnerSuccessMarkers key":
+        if not rt_file_exists(rv32_build_dir()):
+            pending("SA-3 gate — build output not yet generated")
+        val pos = debug_json_key_offset(rv32_build_dir(), "runnerSuccessMarkers")
+        check_msg(pos >= 0, "runnerSuccessMarkers missing from generated debug.json in " + rv32_build_dir())
+        expect(pos).to_be_greater_than(-1)
+
+    it "AC-3: RV32 generated debug.json reportMarkers precedes runnerSuccessMarkers":
+        if not rt_file_exists(rv32_build_dir()):
+            pending("SA-3 gate — build output not yet generated")
+        val pos_report = debug_json_key_offset(rv32_build_dir(), "reportMarkers")
+        val pos_runner = debug_json_key_offset(rv32_build_dir(), "runnerSuccessMarkers")
+        check_msg(pos_report >= 0, "reportMarkers not found in generated json")
+        check_msg(pos_runner >= 0, "runnerSuccessMarkers not found in generated json")
+        expect(pos_report).to_be_less_than(pos_runner)
+
+    it "AC-3: RV64 generated debug.json key-order check is pending until SA-3 complete":
+        pending("SA-3 gate — build output not yet generated by split scripts")
+
+    it "AC-3: RV64 generated debug.json has reportMarkers key":
+        if not rt_file_exists(rv64_build_dir()):
+            pending("SA-3 gate — build output not yet generated")
+        val pos = debug_json_key_offset(rv64_build_dir(), "reportMarkers")
+        check_msg(pos >= 0, "reportMarkers missing from generated debug.json in " + rv64_build_dir())
+        expect(pos).to_be_greater_than(-1)
+
+    it "AC-3: RV64 generated debug.json reportMarkers precedes runnerSuccessMarkers":
+        if not rt_file_exists(rv64_build_dir()):
+            pending("SA-3 gate — build output not yet generated")
+        val pos_report = debug_json_key_offset(rv64_build_dir(), "reportMarkers")
+        val pos_runner = debug_json_key_offset(rv64_build_dir(), "runnerSuccessMarkers")
+        check_msg(pos_report >= 0, "reportMarkers not found in generated json")
+        check_msg(pos_runner >= 0, "runnerSuccessMarkers not found in generated json")
+        expect(pos_report).to_be_less_than(pos_runner)
+
+describe "Debug Sidecar JSON Order: baseline comparison (AC-3)":
+    """
+    ## Baseline sha256 Comparison for Sidecar Files
+
+    Compares sha256 of generated debug.json files against the SA-1 baseline.
+    Pending until baseline file exists.
+    """
+
+    it "AC-3: debug.json sha256 comparison is pending until SA-1 baseline exists":
+        pending("SA-1 baseline gate — doc/09_report/verify/rtl_mdsoc_baseline_2026-05-02.md not yet created")
+
+    it "AC-3: baseline contains debug.json section when present":
+        if not rt_file_exists(baseline_path()):
+            pending("SA-1 baseline gate — " + baseline_path() + " not yet created")
+        val baseline = read_file(baseline_path())
+        val has_json_section = baseline.contains("debug.json")
+        check_msg(has_json_section, "baseline missing debug.json section — SA-1 must record sidecar sha256")
+        expect(has_json_section).to_equal(true)

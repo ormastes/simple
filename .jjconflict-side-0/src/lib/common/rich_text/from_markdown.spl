@@ -1,0 +1,204 @@
+# Markdown → RichDocument Converter
+#
+# Converts markdown text to typed RichDocument via the common/markdown parser.
+# Reverse of to_markdown.spl.
+
+fn markdown_to_rich_document(content: text) -> RichDocument:
+    val lines = split_lines(content)
+    val blocks = parse_blocks(lines)
+    val title = _fmd_extract_title(blocks)
+    val doc_blocks = _fmd_convert_blocks(blocks)
+    RichDocument(title: title, blocks: doc_blocks, metadata: {})
+
+
+fn _fmd_extract_title(blocks: array) -> text:
+    var i = 0
+    var len = blocks.length()
+    while i < len:
+        val block = blocks.get(i)
+        val kind = block.0
+        if kind == "heading":
+            val level = block.1
+            if level == 1:
+                val tokens = block.2
+                return _fmd_tokens_to_plain(tokens)
+        i = i + 1
+    ""
+
+
+fn _fmd_convert_blocks(blocks: array) -> [DocBlock]:
+    var result: [DocBlock] = []
+    var i = 0
+    var len = blocks.length()
+    while i < len:
+        val block = blocks.get(i)
+        val kind = block.0
+        if kind == "heading":
+            val level = block.1
+            val tokens = block.2
+            val spans = _fmd_tokens_to_spans(tokens, [])
+            result.push(DocBlock.Heading(level: level, spans: spans))
+        elif kind == "paragraph":
+            val tokens = block.1
+            val spans = _fmd_tokens_to_spans(tokens, [])
+            result.push(DocBlock.Paragraph(spans: spans))
+        elif kind == "code_block":
+            val lang = block.1
+            val code = block.2
+            result.push(DocBlock.CodeBlock(language: lang, code: code))
+        elif kind == "blockquote":
+            val child_blocks = block.1
+            val inner = _fmd_convert_blocks(child_blocks)
+            result.push(DocBlock.Quote(blocks: inner))
+        elif kind == "unordered_list":
+            val items = block.1
+            val span_items = _fmd_convert_list_items(items)
+            result.push(DocBlock.BulletList(items: span_items))
+        elif kind == "ordered_list":
+            val start_num = block.1
+            val items = block.2
+            val span_items = _fmd_convert_list_items(items)
+            result.push(DocBlock.NumberedList(items: span_items, start: start_num))
+        elif kind == "horizontal_rule":
+            result.push(DocBlock.HorizontalRule)
+        elif kind == "table":
+            val spans = _fmd_table_to_spans(block)
+            result.push(DocBlock.Paragraph(spans: spans))
+        i = i + 1
+    result
+
+
+fn _fmd_convert_list_items(items: array) -> [[TextSpan]]:
+    var result: [[TextSpan]] = []
+    var i = 0
+    var len = items.length()
+    while i < len:
+        val item_tokens = items.get(i)
+        val spans = _fmd_tokens_to_spans(item_tokens, [])
+        result.push(spans)
+        i = i + 1
+    result
+
+
+fn _fmd_tokens_to_spans(tokens: array, parent_styles: [InlineStyle]) -> [TextSpan]:
+    var result: [TextSpan] = []
+    var i = 0
+    var len = tokens.length()
+    while i < len:
+        val token = tokens.get(i)
+        val kind = token.0
+        if kind == "text":
+            val content = token.1
+            result.push(TextSpan(content: content, styles: parent_styles))
+        elif kind == "bold":
+            var styles: [InlineStyle] = []
+            for s in parent_styles:
+                styles.push(s)
+            styles.push(InlineStyle.Bold)
+            val inner = token.1
+            val inner_spans = _fmd_tokens_to_spans(inner, styles)
+            for span in inner_spans:
+                result.push(span)
+        elif kind == "italic":
+            var styles: [InlineStyle] = []
+            for s in parent_styles:
+                styles.push(s)
+            styles.push(InlineStyle.Italic)
+            val inner = token.1
+            val inner_spans = _fmd_tokens_to_spans(inner, styles)
+            for span in inner_spans:
+                result.push(span)
+        elif kind == "code":
+            val content = token.1
+            var styles: [InlineStyle] = []
+            for s in parent_styles:
+                styles.push(s)
+            styles.push(InlineStyle.Code)
+            result.push(TextSpan(content: content, styles: styles))
+        elif kind == "strikethrough":
+            var styles: [InlineStyle] = []
+            for s in parent_styles:
+                styles.push(s)
+            styles.push(InlineStyle.Strikethrough)
+            val inner = token.1
+            val inner_spans = _fmd_tokens_to_spans(inner, styles)
+            for span in inner_spans:
+                result.push(span)
+        elif kind == "link":
+            val text_tokens = token.1
+            val url = token.2
+            var styles: [InlineStyle] = []
+            for s in parent_styles:
+                styles.push(s)
+            styles.push(InlineStyle.Link(url: url))
+            val inner_spans = _fmd_tokens_to_spans(text_tokens, styles)
+            for span in inner_spans:
+                result.push(span)
+        elif kind == "image":
+            val alt = token.1
+            result.push(TextSpan(content: alt, styles: parent_styles))
+        elif kind == "autolink":
+            val url = token.1
+            var styles: [InlineStyle] = []
+            for s in parent_styles:
+                styles.push(s)
+            styles.push(InlineStyle.Link(url: url))
+            result.push(TextSpan(content: url, styles: styles))
+        i = i + 1
+    result
+
+
+fn _fmd_tokens_to_plain(tokens: array) -> text:
+    var parts: [text] = []
+    var i = 0
+    var len = tokens.length()
+    while i < len:
+        val token = tokens.get(i)
+        val kind = token.0
+        if kind == "text":
+            parts.push(token.1)
+        elif kind == "bold" or kind == "italic" or kind == "strikethrough":
+            val inner = token.1
+            parts.push(_fmd_tokens_to_plain(inner))
+        elif kind == "code":
+            parts.push(token.1)
+        elif kind == "link":
+            val text_tokens = token.1
+            parts.push(_fmd_tokens_to_plain(text_tokens))
+        elif kind == "image":
+            parts.push(token.1)
+        elif kind == "autolink":
+            parts.push(token.1)
+        i = i + 1
+    parts.join("")
+
+
+fn _fmd_table_to_spans(block: tuple) -> [TextSpan]:
+    val headers = block.1
+    val rows = block.3
+    var parts: [text] = []
+    var hi = 0
+    var hlen = headers.length()
+    while hi < hlen:
+        val h = headers.get(hi)
+        parts.push(h)
+        if hi + 1 < hlen:
+            parts.push(" | ")
+        hi = hi + 1
+    var ri = 0
+    var rlen = rows.length()
+    while ri < rlen:
+        parts.push("\n")
+        val row = rows.get(ri)
+        var ci = 0
+        var clen = row.length()
+        while ci < clen:
+            val cell = row.get(ci)
+            parts.push(cell)
+            if ci + 1 < clen:
+                parts.push(" | ")
+            ci = ci + 1
+        ri = ri + 1
+    var result: [TextSpan] = []
+    result.push(TextSpan(content: parts.join(""), styles: []))
+    result

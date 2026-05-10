@@ -1,0 +1,277 @@
+# Feature: Chromium Shell Acid2 Reftest (V3, Row 5 — M12)
+# Category: UI Components
+# Status: Implemented
+#
+# Compile-only smoke spec for the M12 Acid2 reftest harness. Exercises
+# the pixel grid, the DesktopShell golden guard, and the reftest runner
+# that folds both halves of the acceptance criteria into one verdict:
+#
+#   1. Acid2 reftest flips from UNSUPPORTED to SUPPORTED.
+#   2. No DesktopShell golden-frame regressions in the same pass.
+
+use app.ui.chromium.acid2.pixel_grid.{
+    PixelGrid,
+    ACID2_GRID_WIDTH,
+    ACID2_GRID_HEIGHT,
+    ACID2_GRID_CELLS,
+    ACID2_PIXEL_TRANSPARENT,
+    ACID2_PIXEL_WHITE,
+    ACID2_PIXEL_BLACK,
+    ACID2_PIXEL_RED,
+    ACID2_PIXEL_SKIN
+}
+use app.ui.chromium.acid2.golden_guard.{
+    GoldenGuard,
+    GoldenVerdict,
+    GOLDEN_VERDICT_UNKNOWN,
+    GOLDEN_VERDICT_MATCH,
+    GOLDEN_VERDICT_DRIFTED,
+    GOLDEN_VERDICT_SIZE_DIFF
+}
+use app.ui.chromium.acid2.reftest_runner.{
+    Acid2ReftestRunner,
+    Acid2ReftestReport,
+    Acid2WptStatus,
+    ACID2_STATUS_UNSUPPORTED,
+    ACID2_STATUS_FAILED,
+    ACID2_STATUS_SUPPORTED
+}
+
+# =========================================================================
+# Test Group 1: PixelGrid — construction, read/write, comparators
+# =========================================================================
+
+describe "Acid2 PixelGrid — basics":
+    """Fixed-size pixel buffer used by the reftest harness."""
+
+    it "new allocates a transparent 16x16 grid":
+        val g = PixelGrid.new()
+        expect(g.width_of() == ACID2_GRID_WIDTH).to_be_true()
+        expect(g.height_of() == ACID2_GRID_HEIGHT).to_be_true()
+        expect(g.cell_count() == ACID2_GRID_CELLS).to_be_true()
+        expect(g.get(0, 0) == ACID2_PIXEL_TRANSPARENT).to_be_true()
+
+    it "filled paints every cell with the palette index":
+        val g = PixelGrid.filled(ACID2_PIXEL_WHITE)
+        expect(g.get(0, 0) == ACID2_PIXEL_WHITE).to_be_true()
+        expect(g.get(15, 15) == ACID2_PIXEL_WHITE).to_be_true()
+        expect(g.count_colour(ACID2_PIXEL_WHITE) == ACID2_GRID_CELLS).to_be_true()
+
+    it "set + get round-trip a pixel":
+        var g = PixelGrid.new()
+        val ok = g.set(3, 4, ACID2_PIXEL_RED)
+        expect(ok).to_be_true()
+        expect(g.get(3, 4) == ACID2_PIXEL_RED).to_be_true()
+
+    it "set rejects out-of-bounds coordinates":
+        var g = PixelGrid.new()
+        expect(not g.set(-1, 0, ACID2_PIXEL_RED)).to_be_true()
+        expect(not g.set(0, 99, ACID2_PIXEL_RED)).to_be_true()
+        expect(g.get(-1, 0) == ACID2_PIXEL_TRANSPARENT).to_be_true()
+
+    it "fill_rect writes a clipped rectangle and reports cells touched":
+        var g = PixelGrid.new()
+        val n = g.fill_rect(0, 0, 3, 3, ACID2_PIXEL_SKIN)
+        expect(n == 16).to_be_true()
+        expect(g.get(0, 0) == ACID2_PIXEL_SKIN).to_be_true()
+        expect(g.get(3, 3) == ACID2_PIXEL_SKIN).to_be_true()
+        expect(g.get(4, 4) == ACID2_PIXEL_TRANSPARENT).to_be_true()
+
+    it "stroke_rect paints only the border":
+        var g = PixelGrid.new()
+        val n = g.stroke_rect(0, 0, 4, 4, ACID2_PIXEL_BLACK)
+        expect(n > 0).to_be_true()
+        expect(g.get(0, 0) == ACID2_PIXEL_BLACK).to_be_true()
+        expect(g.get(4, 4) == ACID2_PIXEL_BLACK).to_be_true()
+        expect(g.get(2, 2) == ACID2_PIXEL_TRANSPARENT).to_be_true()
+
+    it "equals reports identical grids as equal":
+        val a = PixelGrid.filled(ACID2_PIXEL_WHITE)
+        val b = PixelGrid.filled(ACID2_PIXEL_WHITE)
+        expect(a.equals(b)).to_be_true()
+        expect(a.diff_count(b) == 0).to_be_true()
+
+    it "diff_count counts differing cells":
+        var a = PixelGrid.filled(ACID2_PIXEL_WHITE)
+        var b = PixelGrid.filled(ACID2_PIXEL_WHITE)
+        b.set(1, 1, ACID2_PIXEL_RED)
+        b.set(2, 2, ACID2_PIXEL_BLACK)
+        expect(a.diff_count(b) == 2).to_be_true()
+        expect(not a.equals(b)).to_be_true()
+
+# =========================================================================
+# Test Group 2: GoldenGuard — DesktopShell regression tracking
+# =========================================================================
+
+describe "Acid2 GoldenGuard — DesktopShell frame regressions":
+    """Registry that tracks DesktopShell golden frames across a reftest pass."""
+
+    it "starts empty with no regressions":
+        val g = GoldenGuard.new()
+        expect(g.is_empty()).to_be_true()
+        expect(g.count() == 0).to_be_true()
+        expect(g.no_regressions()).to_be_true()
+        expect(g.regression_count() == 0).to_be_true()
+
+    it "register stores a golden frame by name":
+        var g = GoldenGuard.new()
+        val ok = g.register("shell.titlebar", PixelGrid.filled(ACID2_PIXEL_WHITE))
+        expect(ok).to_be_true()
+        expect(g.has_golden("shell.titlebar")).to_be_true()
+        expect(g.count() == 1).to_be_true()
+
+    it "compare_frame returns MATCH for identical pixels":
+        var g = GoldenGuard.new()
+        g.register("shell.taskbar", PixelGrid.filled(ACID2_PIXEL_WHITE))
+        val v = g.compare_frame("shell.taskbar", PixelGrid.filled(ACID2_PIXEL_WHITE))
+        expect(v.is_match()).to_be_true()
+        expect(v.diff_pixels_of() == 0).to_be_true()
+        expect(g.no_regressions()).to_be_true()
+        expect(g.match_calls_of() == 1).to_be_true()
+
+    it "compare_frame returns DRIFTED and logs the name on mismatch":
+        var g = GoldenGuard.new()
+        g.register("shell.titlebar", PixelGrid.filled(ACID2_PIXEL_WHITE))
+        var candidate = PixelGrid.filled(ACID2_PIXEL_WHITE)
+        candidate.set(0, 0, ACID2_PIXEL_RED)
+        val v = g.compare_frame("shell.titlebar", candidate)
+        expect(v.is_drifted()).to_be_true()
+        expect(v.is_regression()).to_be_true()
+        expect(v.diff_pixels_of() == 1).to_be_true()
+        expect(not g.no_regressions()).to_be_true()
+        expect(g.regression_count() == 1).to_be_true()
+
+    it "compare_frame returns UNKNOWN for an unregistered name":
+        var g = GoldenGuard.new()
+        val v = g.compare_frame("shell.ghost", PixelGrid.new())
+        expect(v.is_unknown()).to_be_true()
+        expect(v.code_of() == GOLDEN_VERDICT_UNKNOWN).to_be_true()
+        expect(g.no_regressions()).to_be_true()
+
+    it "reset_pass clears per-pass counters but keeps registered frames":
+        var g = GoldenGuard.new()
+        g.register("a", PixelGrid.filled(ACID2_PIXEL_WHITE))
+        var bad = PixelGrid.filled(ACID2_PIXEL_WHITE)
+        bad.set(5, 5, ACID2_PIXEL_BLACK)
+        g.compare_frame("a", bad)
+        expect(g.regression_count() == 1).to_be_true()
+        g.reset_pass()
+        expect(g.regression_count() == 0).to_be_true()
+        expect(g.has_golden("a")).to_be_true()
+
+    it "verdict labels round-trip":
+        val m = GoldenVerdict.match()
+        val d = GoldenVerdict.drifted(7)
+        val s = GoldenVerdict.size_diff(99)
+        val u = GoldenVerdict.unknown()
+        expect(m.label() == "match").to_be_true()
+        expect(d.label() == "drifted").to_be_true()
+        expect(s.label() == "size_diff").to_be_true()
+        expect(u.label() == "unknown").to_be_true()
+
+# =========================================================================
+# Test Group 3: Acid2WptStatus — status enum wrapper
+# =========================================================================
+
+describe "Acid2 WPT status — enum wrapper":
+    """Small enum wrapper matching the WPT report status column."""
+
+    it "constructors build the three WPT rows":
+        val u = Acid2WptStatus.unsupported()
+        val f = Acid2WptStatus.failed()
+        val s = Acid2WptStatus.supported()
+        expect(u.is_unsupported()).to_be_true()
+        expect(f.is_failed()).to_be_true()
+        expect(s.is_supported()).to_be_true()
+
+    it "labels match the WPT report strings":
+        expect(Acid2WptStatus.supported().label() == "SUPPORTED").to_be_true()
+        expect(Acid2WptStatus.unsupported().label() == "UNSUPPORTED").to_be_true()
+        expect(Acid2WptStatus.failed().label() == "FAILED").to_be_true()
+
+    it "status codes match the exported constants":
+        expect(Acid2WptStatus.supported().code_of() == ACID2_STATUS_SUPPORTED).to_be_true()
+        expect(Acid2WptStatus.failed().code_of() == ACID2_STATUS_FAILED).to_be_true()
+        expect(Acid2WptStatus.unsupported().code_of() == ACID2_STATUS_UNSUPPORTED).to_be_true()
+
+# =========================================================================
+# Test Group 4: Acid2ReftestRunner — both halves of the M12 gate
+# =========================================================================
+
+describe "Acid2ReftestRunner — reftest passes":
+    """M12 acceptance harness: reftest pixels + DesktopShell golden guard."""
+
+    it "new creates an empty runner":
+        val r = Acid2ReftestRunner.new()
+        expect(r.pass_count_of() == 0).to_be_true()
+        expect(r.last_diff_of() == 0).to_be_true()
+
+    it "identical reference + rendered grids flip WPT to SUPPORTED":
+        var r = Acid2ReftestRunner.new()
+        r.load_reference(PixelGrid.filled(ACID2_PIXEL_WHITE))
+        r.load_rendered(PixelGrid.filled(ACID2_PIXEL_WHITE))
+        expect(r.pixels_match()).to_be_true()
+        val report = r.run_pass()
+        expect(report.status().is_supported()).to_be_true()
+        expect(report.diff_pixels_of() == 0).to_be_true()
+        expect(report.is_supported()).to_be_true()
+        expect(r.pass_count_of() == 1).to_be_true()
+
+    it "pixel mismatch flips the report to FAILED":
+        var r = Acid2ReftestRunner.new()
+        var ref = PixelGrid.filled(ACID2_PIXEL_WHITE)
+        var rendered = PixelGrid.filled(ACID2_PIXEL_WHITE)
+        rendered.set(1, 1, ACID2_PIXEL_RED)
+        r.load_reference(ref)
+        r.load_rendered(rendered)
+        val report = r.run_pass()
+        expect(report.status().is_failed()).to_be_true()
+        expect(report.diff_pixels_of() == 1).to_be_true()
+        expect(not report.is_supported()).to_be_true()
+
+    it "empty reference stays UNSUPPORTED":
+        var r = Acid2ReftestRunner.new()
+        val report = r.run_pass()
+        expect(report.status().is_unsupported()).to_be_true()
+
+    it "DesktopShell golden regression forces SUPPORTED -> FAILED":
+        var r = Acid2ReftestRunner.new()
+        r.load_reference(PixelGrid.filled(ACID2_PIXEL_WHITE))
+        r.load_rendered(PixelGrid.filled(ACID2_PIXEL_WHITE))
+        r.register_golden("shell.titlebar", PixelGrid.filled(ACID2_PIXEL_WHITE))
+        var bad = PixelGrid.filled(ACID2_PIXEL_WHITE)
+        bad.set(3, 3, ACID2_PIXEL_BLACK)
+        val v = r.compare_desktop("shell.titlebar", bad)
+        expect(v.is_drifted()).to_be_true()
+        val report = r.run_pass()
+        expect(report.golden_regressions_of() == 1).to_be_true()
+        expect(report.status().is_failed()).to_be_true()
+        expect(not report.is_supported()).to_be_true()
+        val names = report.regression_names_of()
+        expect(names.len() == 1).to_be_true()
+
+    it "full pass — Acid2 match + zero DesktopShell drift = SUPPORTED":
+        var r = Acid2ReftestRunner.new()
+        r.load_reference(PixelGrid.filled(ACID2_PIXEL_WHITE))
+        r.load_rendered(PixelGrid.filled(ACID2_PIXEL_WHITE))
+        r.register_golden("shell.titlebar", PixelGrid.filled(ACID2_PIXEL_WHITE))
+        r.register_golden("shell.taskbar",  PixelGrid.filled(ACID2_PIXEL_WHITE))
+        val v1 = r.compare_desktop("shell.titlebar", PixelGrid.filled(ACID2_PIXEL_WHITE))
+        val v2 = r.compare_desktop("shell.taskbar",  PixelGrid.filled(ACID2_PIXEL_WHITE))
+        expect(v1.is_match()).to_be_true()
+        expect(v2.is_match()).to_be_true()
+        val report = r.run_pass()
+        expect(report.is_supported()).to_be_true()
+        expect(report.golden_regressions_of() == 0).to_be_true()
+        expect(report.golden_matches_of() == 2).to_be_true()
+        expect(report.summary_line() == "acid2: SUPPORTED").to_be_true()
+
+    it "reset_pass clears per-pass state between runs":
+        var r = Acid2ReftestRunner.new()
+        r.load_reference(PixelGrid.filled(ACID2_PIXEL_WHITE))
+        r.load_rendered(PixelGrid.filled(ACID2_PIXEL_BLACK))
+        r.run_pass()
+        expect(r.last_diff_of() > 0).to_be_true()
+        r.reset_pass()
+        expect(r.last_diff_of() == 0).to_be_true()
+        expect(r.guard_of().regression_count() == 0).to_be_true()

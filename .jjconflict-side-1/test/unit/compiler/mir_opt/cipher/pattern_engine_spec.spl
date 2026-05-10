@@ -1,0 +1,131 @@
+# Pattern Rule Engine + Cipher Rule Table — Schema Contract Tests
+#
+# Feature ID: #COMPILER-MIROPT-PATTERN-ENGINE
+# Category:   Compiler | MIR Optimization | Pattern Rule Engine
+# Status:     Schema only — Rule struct fields, cipher_rule_table registry,
+#             lookup_rule_for_callee dispatch, PatternCost comparator
+#
+# Interpreter-mode note (per .claude/rules/testing.md):
+#   The test runner in interpreter mode only verifies file loading and
+#   describe/it block reachability.  The assertions inside it-blocks are not
+#   executed.  Compiled-mode execution will exercise them.
+
+use compiler.mir_opt.pattern.rule_engine.{
+    Rule, MatchHit, create_rule, rule_summary
+}
+use compiler.mir_opt.pattern.rules_crypto.{
+    cipher_rule_table, lookup_rule_for_callee
+}
+use compiler.mir_opt.pattern.cost_model.{
+    PatternCost, pattern_cost_default, pattern_cost_better, pattern_cost_total
+}
+use compiler.mir.intrinsics.{
+    CRYPTO_AES_ROUND, CRYPTO_SHA256_RNDS2
+}
+
+# ============================================================================
+# Rule schema — create_rule + rule_summary
+# ============================================================================
+
+describe "Rule schema — create_rule + rule_summary":
+    it "create_rule fills name, intrinsic, requires, cost_delta correctly":
+        val r = create_rule("test_rule_aes", "crypto_aes_round", "aes", -3)
+        expect(r.name).to_equal("test_rule_aes")
+        expect(r.intrinsic).to_equal("crypto_aes_round")
+        expect(r.requires).to_equal("aes")
+        expect(r.cost_delta).to_equal(-3)
+
+    it "rule_summary contains rule name and intrinsic substring":
+        val r = create_rule("match_aes_round_software", "crypto_aes_round", "aes", -3)
+        val summary = rule_summary(r)
+        expect(summary.len() > 0).to_equal(true)
+        expect(summary).to_contain("match_aes_round_software")
+        expect(summary).to_contain("crypto_aes_round")
+
+# ============================================================================
+# cipher_rule_table — registry contents
+# ============================================================================
+
+describe "cipher_rule_table — registry contents":
+    it "returns at least 5 rules":
+        val table = cipher_rule_table()
+        expect(table.len() >= 5).to_equal(true)
+
+    it "each rule has non-empty name, non-empty intrinsic, non-empty requires":
+        val table = cipher_rule_table()
+        var i = 0
+        while i < table.len():
+            val r = table[i]
+            expect(r.name.len() > 0).to_equal(true)
+            expect(r.intrinsic.len() > 0).to_equal(true)
+            expect(r.requires.len() > 0).to_equal(true)
+            i = i + 1
+
+    it "first rule is the AES round rule with intrinsic crypto_aes_round":
+        val table = cipher_rule_table()
+        val first = table[0]
+        expect(first.intrinsic).to_equal(CRYPTO_AES_ROUND)
+
+    it "each rule cost_delta is negative (cheaper than scalar software)":
+        val table = cipher_rule_table()
+        var i = 0
+        while i < table.len():
+            val r = table[i]
+            expect(r.cost_delta < 0).to_equal(true)
+            i = i + 1
+
+# ============================================================================
+# lookup_rule_for_callee — known and unknown callees
+# ============================================================================
+
+describe "lookup_rule_for_callee — known software callees":
+    it "aes_round_software callee returns Some(rule) with intrinsic crypto_aes_round":
+        val result = lookup_rule_for_callee("std.common.aes.cipher.aes_round_software")
+        expect(result.?).to_equal(true)
+        val r = result.unwrap()
+        expect(r.intrinsic).to_equal(CRYPTO_AES_ROUND)
+
+    it "sha256 compress_block callee returns Some with crypto_sha256_rounds2":
+        val result = lookup_rule_for_callee("std.common.crypto.sha256.compress_block")
+        expect(result.?).to_equal(true)
+        val r = result.unwrap()
+        expect(r.intrinsic).to_equal(CRYPTO_SHA256_RNDS2)
+
+    it "unrecognised symbol returns nil":
+        val result = lookup_rule_for_callee("std.common.totally.unknown.callee")
+        expect(result.?).to_equal(false)
+
+# ============================================================================
+# PatternCost — comparator and scalar summary
+# ============================================================================
+
+describe "PatternCost — comparator":
+    it "lower-latency cost ranks better than higher-latency":
+        val cheap = PatternCost(latency: 2, code_size: 0, reg_pressure: 0, tail_cost: 0)
+        val expensive = PatternCost(latency: 8, code_size: 0, reg_pressure: 0, tail_cost: 0)
+        expect(pattern_cost_better(cheap, expensive)).to_equal(true)
+        expect(pattern_cost_better(expensive, cheap)).to_equal(false)
+
+    it "identical costs are not better than each other":
+        val a = PatternCost(latency: 4, code_size: 1, reg_pressure: 2, tail_cost: 0)
+        val b = PatternCost(latency: 4, code_size: 1, reg_pressure: 2, tail_cost: 0)
+        expect(pattern_cost_better(a, b)).to_equal(false)
+
+    it "pattern_cost_total weights latency more than reg_pressure":
+        val high_latency = PatternCost(latency: 4, code_size: 0, reg_pressure: 0, tail_cost: 0)
+        val high_pressure = PatternCost(latency: 0, code_size: 0, reg_pressure: 4, tail_cost: 0)
+        # latency weight=4, reg_pressure weight=2 → 4*4=16 vs 4*2=8
+        val total_lat = pattern_cost_total(high_latency)
+        val total_pres = pattern_cost_total(high_pressure)
+        expect(total_lat > total_pres).to_equal(true)
+
+    it "pattern_cost_default returns a zero-cost tuple":
+        val c = pattern_cost_default()
+        expect(c.latency).to_equal(0)
+        expect(c.code_size).to_equal(0)
+        expect(c.reg_pressure).to_equal(0)
+        expect(c.tail_cost).to_equal(0)
+
+    it "pattern_cost_total of default is zero":
+        val c = pattern_cost_default()
+        expect(pattern_cost_total(c)).to_equal(0)

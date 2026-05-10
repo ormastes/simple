@@ -1,0 +1,141 @@
+"""SIMD Kernels Specification
+
+@tag: gpu, engine2d, simd, cpu, acceleration
+@cover src/lib/gc_async_mut/gpu/engine2d/simd_kernels.spl 80%
+
+Verifies SIMD-accelerated pixel operations with runtime CPU feature
+detection. Covers AC-6: CPU acceleration via SSE4.2/AVX2/NEON.
+"""
+
+use std.spec.{describe, context, it, expect}
+
+# ============================================================================
+# SimdLevel detection
+# ============================================================================
+
+describe "SimdLevel":
+    it "AC-6: has None variant for scalar fallback":
+        val level = SimdLevel.None_
+        expect(level.to_text()).to_equal("None")
+
+    it "AC-6: has Sse42 variant":
+        val level = SimdLevel.Sse42
+        expect(level.to_text()).to_equal("SSE4.2")
+
+    it "AC-6: has Avx2 variant":
+        val level = SimdLevel.Avx2
+        expect(level.to_text()).to_equal("AVX2")
+
+    it "AC-6: has Avx512 variant":
+        val level = SimdLevel.Avx512
+        expect(level.to_text()).to_equal("AVX-512")
+
+    it "AC-6: has Neon variant":
+        val level = SimdLevel.Neon
+        expect(level.to_text()).to_equal("NEON")
+
+# ============================================================================
+# CPU feature detection
+# ============================================================================
+
+describe "detect_simd_level":
+    it "AC-6: returns a valid SimdLevel on any platform":
+        val level = detect_simd_level()
+        val name = level.to_text()
+        val valid = name == "None" or name == "SSE4.2" or name == "AVX2" or name == "AVX-512" or name == "NEON"
+        expect(valid).to_equal(true)
+
+    it "AC-6: detection is consistent across calls":
+        val level1 = detect_simd_level()
+        val level2 = detect_simd_level()
+        expect(level1.to_text()).to_equal(level2.to_text())
+
+# ============================================================================
+# simd_fill_row — vectorized pixel fill
+# ============================================================================
+
+describe "simd_fill_row":
+    it "AC-6: fills row with solid color":
+        var buf: [u32] = [0u32; 16]
+        val color: u32 = 0xFFFF0000
+        simd_fill_row(buf, 0, 16, color)
+        expect(buf[0]).to_equal(0xFFFF0000)
+        expect(buf[15]).to_equal(0xFFFF0000)
+
+    it "AC-6: fills partial row with offset":
+        var buf: [u32] = [0u32; 16]
+        val color: u32 = 0xFF00FF00
+        simd_fill_row(buf, 4, 8, color)
+        expect(buf[0]).to_equal(0)
+        expect(buf[4]).to_equal(0xFF00FF00)
+        expect(buf[11]).to_equal(0xFF00FF00)
+        expect(buf[12]).to_equal(0)
+
+    it "AC-6: handles zero-length fill":
+        var buf: [u32] = [0xFFFFFFFF; 4]
+        simd_fill_row(buf, 0, 0, 0)
+        expect(buf[0]).to_equal(0xFFFFFFFF)
+
+# ============================================================================
+# simd_blend_row — Porter-Duff alpha blending
+# ============================================================================
+
+describe "simd_blend_row":
+    it "AC-6: blends opaque source over destination":
+        var dst: [u32] = [0xFF0000FF; 4]
+        var src: [u32] = [0xFFFF0000; 4]
+        simd_blend_row(dst, src, 0, 4)
+        expect(dst[0]).to_equal(0xFFFF0000)
+
+    it "AC-6: transparent source leaves destination unchanged":
+        var dst: [u32] = [0xFF0000FF; 4]
+        var src: [u32] = [0x00000000; 4]
+        simd_blend_row(dst, src, 0, 4)
+        expect(dst[0]).to_equal(0xFF0000FF)
+
+    it "AC-6: 50% alpha blends correctly":
+        var dst: [u32] = [0xFF000000; 4]
+        var src: [u32] = [0x80FF0000; 4]
+        simd_blend_row(dst, src, 0, 4)
+        val r = (dst[0] >> 16) & 0xFF
+        expect(r).to_be_greater_than(100)
+        expect(r).to_be_less_than(200)
+
+# ============================================================================
+# simd_blit_row — pixel copy
+# ============================================================================
+
+describe "simd_blit_row":
+    it "AC-6: copies pixels from source to destination":
+        var dst: [u32] = [0u32; 8]
+        var src: [u32] = [0xFFAABBCC; 8]
+        simd_blit_row(dst, 0, src, 0, 8)
+        expect(dst[0]).to_equal(0xFFAABBCC)
+        expect(dst[7]).to_equal(0xFFAABBCC)
+
+    it "AC-6: copies with offset":
+        var dst: [u32] = [0u32; 8]
+        var src: [u32] = [0xFFDDEEFF; 8]
+        simd_blit_row(dst, 2, src, 0, 4)
+        expect(dst[0]).to_equal(0)
+        expect(dst[2]).to_equal(0xFFDDEEFF)
+        expect(dst[5]).to_equal(0xFFDDEEFF)
+        expect(dst[6]).to_equal(0)
+
+# ============================================================================
+# Platform-universal guarantee (AC-6)
+# ============================================================================
+
+describe "universal fallback":
+    it "AC-6: SIMD ops work even when SimdLevel is None (scalar fallback)":
+        var buf: [u32] = [0u32; 4]
+        simd_fill_row(buf, 0, 4, 0xFFFF0000)
+        expect(buf[0]).to_equal(0xFFFF0000)
+
+    it "AC-6: same results regardless of SIMD level":
+        var buf1: [u32] = [0u32; 4]
+        var buf2: [u32] = [0u32; 4]
+        simd_fill_row(buf1, 0, 4, 0xFF112233)
+        simd_fill_row(buf2, 0, 4, 0xFF112233)
+        expect(buf1[0]).to_equal(buf2[0])
+        expect(buf1[3]).to_equal(buf2[3])

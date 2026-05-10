@@ -1,0 +1,27 @@
+use common.wine_advapi32_registry.{wine_advapi32_execute_registry_roundtrip}
+
+describe "Wine ADVAPI32 registry bridge":
+    it "executes a bounded registry create-open-set-query-close roundtrip":
+        val result = wine_advapi32_execute_registry_roundtrip(["RegCreateKeyExW", "RegOpenKeyExW", "RegSetValueExW", "RegQueryValueExW", "RegCloseKey"], "HKEY_CURRENT_USER", "Software\\SimpleOS\\Wine", "InstallRoot", "C:\\simple")
+        expect(result.ok).to_equal(true)
+        expect(result.root).to_equal("HKEY_CURRENT_USER")
+        expect(result.key).to_equal("Software\\SimpleOS\\Wine")
+        expect(result.name).to_equal("InstallRoot")
+        expect(result.value).to_equal("C:\\simple")
+        expect(result.handle).to_be_greater_than(0)
+        expect(result.operations).to_contain("RegCreateKeyExW")
+        expect(result.operations).to_contain("RegQueryValueExW")
+        expect(result.operations).to_contain("RegCloseKey")
+
+    it "keeps registry dispatch ordered and bounded":
+        val out_of_order = wine_advapi32_execute_registry_roundtrip(["RegOpenKeyExW", "RegCreateKeyExW", "RegSetValueExW", "RegQueryValueExW", "RegCloseKey"], "HKEY_CURRENT_USER", "Software", "Name", "Value")
+        expect(out_of_order.ok).to_equal(false)
+        expect(out_of_order.error).to_equal("advapi32-registry-sequence-expected:RegCreateKeyExW")
+
+        val unsupported = wine_advapi32_execute_registry_roundtrip(["RegCreateKeyExW", "RegOpenKeyExW", "RegSetValueExW", "GetMessageW", "RegCloseKey"], "HKEY_CURRENT_USER", "Software", "Name", "Value")
+        expect(unsupported.ok).to_equal(false)
+        expect(unsupported.error).to_equal("bridge-unsupported:GetMessageW")
+
+        val invalid = wine_advapi32_execute_registry_roundtrip(["RegCreateKeyExW", "RegOpenKeyExW", "RegSetValueExW", "RegQueryValueExW", "RegCloseKey"], "HKEY_CLASSES_ROOT", "Software", "Name", "Value")
+        expect(invalid.ok).to_equal(false)
+        expect(invalid.error).to_equal("unsupported-root:HKEY_CLASSES_ROOT")

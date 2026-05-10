@@ -1,0 +1,301 @@
+use std.spec.{describe, it, expect}
+use os.kernel.ipc.syscall.{syscall_handler}
+use os.kernel.types.syscall_types.{SyscallArgs}
+use os.kernel.scheduler.scheduler.{Scheduler}
+use os.kernel.ipc.ipc.{IpcManager}
+use os.kernel.log.klog.{KernelLog}
+use os.kernel.types.task_types.{TaskId, TaskPriority}
+use os.kernel.types.capability_types.{CapabilitySet}
+use os.kernel.loader.executable_source.{_set_synthetic_vfs_file_for_test, _clear_synthetic_vfs_for_test}
+use os.kernel.memory.vmm.{vmm_teardown_user_space, vmm_new_process_space}
+use os.kernel.types.vmspace_types.{ProcessVmSpace, VmArea, VMA_READ, VMA_WRITE, VMA_EXEC, VMA_ANON}
+use os.posix.fd_table.{fd_table_init, fd_activate_task}
+
+extern fn rt_string_data(s: text) -> i64
+extern fn rt_alloc(size: i64) -> i64
+extern fn rt_free(ptr: i64)
+extern fn rt_ptr_write_i64(addr: i64, offset: i64, value: i64)
+
+"""
+Execve Syscall Specification
+
+Tests for the execve (sys_exec, syscall 59) implementation that replaces
+the current process image in-place while preserving PID and file descriptors.
+"""
+
+# ============================================================================
+# ELF helpers (minimal x86_64 ELF with one PT_LOAD segment)
+# ============================================================================
+
+fn _push_u16_le(buf: [u8], value: i64) -> [u8]:
+    var out: [u8] = buf
+    out.push((value & 0xFF).to_u8())
+    out.push(((value >> 8) & 0xFF).to_u8())
+    out
+
+fn _push_u32_le(buf: [u8], value: i64) -> [u8]:
+    var out: [u8] = buf
+    out.push((value & 0xFF).to_u8())
+    out.push(((value >> 8) & 0xFF).to_u8())
+    out.push(((value >> 16) & 0xFF).to_u8())
+    out.push(((value >> 24) & 0xFF).to_u8())
+    out
+
+fn _push_u64_le(buf: [u8], value: i64) -> [u8]:
+    var out: [u8] = buf
+    out = _push_u32_le(out, value & 0xFFFFFFFF)
+    out = _push_u32_le(out, (value >> 32) & 0xFFFFFFFF)
+    out
+
+fn _make_x86_64_exec() -> [u8]:
+    """Build a minimal valid x86_64 ELF binary with one PT_LOAD segment."""
+    var bytes: [u8] = []
+    # ELF magic
+    bytes.push(0x7F.to_u8())
+    bytes.push(0x45.to_u8())
+    bytes.push(0x4C.to_u8())
+    bytes.push(0x46.to_u8())
+    # EI_CLASS=64, EI_DATA=LE, EI_VERSION=1, EI_OSABI=0
+    bytes.push(2.to_u8())
+    bytes.push(1.to_u8())
+    bytes.push(1.to_u8())
+    bytes.push(0.to_u8())
+    bytes.push(0.to_u8())
+    while bytes.len() < 16:
+        bytes.push(0.to_u8())
+    # e_type=ET_EXEC, e_machine=EM_X86_64
+    bytes = _push_u16_le(bytes, 2)
+    bytes = _push_u16_le(bytes, 62)
+    # e_version
+    bytes = _push_u32_le(bytes, 1)
+    # e_entry
+    bytes = _push_u64_le(bytes, 0x400000)
+    # e_phoff (program header at offset 64)
+    bytes = _push_u64_le(bytes, 64)
+    # e_shoff
+    bytes = _push_u64_le(bytes, 0)
+    # e_flags
+    bytes = _push_u32_le(bytes, 0)
+    # e_ehsize, e_phentsize, e_phnum
+    bytes = _push_u16_le(bytes, 64)
+    bytes = _push_u16_le(bytes, 56)
+    bytes = _push_u16_le(bytes, 1)
+    # e_shentsize, e_shnum, e_shstrndx
+    bytes = _push_u16_le(bytes, 0)
+    bytes = _push_u16_le(bytes, 0)
+    bytes = _push_u16_le(bytes, 0)
+    # Program header: PT_LOAD
+    bytes = _push_u32_le(bytes, 1)    # p_type = PT_LOAD
+    bytes = _push_u32_le(bytes, 5)    # p_flags = PF_R | PF_X
+    bytes = _push_u64_le(bytes, 0x1000)    # p_offset
+    bytes = _push_u64_le(bytes, 0x400000)  # p_vaddr
+    bytes = _push_u64_le(bytes, 0x400000)  # p_paddr
+    bytes = _push_u64_le(bytes, 4)         # p_filesz
+    bytes = _push_u64_le(bytes, 4)         # p_memsz
+    bytes = _push_u64_le(bytes, 0x1000)    # p_align
+    # Pad to file offset 0x1000
+    while bytes.len() < 0x1000:
+        bytes.push(0.to_u8())
+    # RET instruction at entry
+    bytes.push(0xC3.to_u8())
+    bytes
+
+fn _setup_test_scheduler() -> Scheduler:
+    """Create a scheduler with a spawned initial task for exec testing."""
+    fd_table_init()
+    var sched = Scheduler.new()
+    val path = "/sys/apps/hello_world"
+    _clear_synthetic_vfs_for_test()
+    _set_synthetic_vfs_file_for_test(path, _make_x86_64_exec())
+    # Spawn a task via syscall 13 (SpawnBinary) so we have a running process
+    val result = syscall_handler(
+        SyscallArgs(id: 13, arg0: rt_string_data(path) as u64, arg1: path.len() as u64, arg2: 2, arg3: 0, arg4: 0, arg5: 0),
+        sched,
+        IpcManager.new(),
+        KernelLog.new(16)
+    )
+    sched
+
+# ============================================================================
+# Test Group 1: Exec dispatch and success path
+# ============================================================================
+
+describe "execve syscall":
+    it "dispatches exec (syscall 59) with valid path and replaces process image":
+        fd_table_init()
+        val path = "/sys/apps/hello_world"
+        _clear_synthetic_vfs_for_test()
+        _set_synthetic_vfs_file_for_test(path, _make_x86_64_exec())
+
+        # First spawn a process that will call exec
+        var sched = Scheduler.new()
+        val spawn_result = syscall_handler(
+            SyscallArgs(id: 13, arg0: rt_string_data(path) as u64, arg1: path.len() as u64, arg2: 2, arg3: 0, arg4: 0, arg5: 0),
+            sched,
+            IpcManager.new(),
+            KernelLog.new(16)
+        )
+        expect(spawn_result.value).to_be_greater_than(0)
+        val spawned_pid = spawn_result.value as u64
+
+        # Now call exec (syscall 59) to replace the image
+        val exec_result = syscall_handler(
+            SyscallArgs(id: 59, arg0: rt_string_data(path) as u64, arg1: path.len() as u64, arg2: 0, arg3: 0, arg4: 0, arg5: 0),
+            sched,
+            IpcManager.new(),
+            KernelLog.new(16)
+        )
+        # exec returns 0 on success
+        expect(exec_result.value).to_equal(0)
+        _clear_synthetic_vfs_for_test()
+
+# ============================================================================
+# Test Group 2: Exec error paths
+# ============================================================================
+
+describe "execve error handling":
+    it "returns ENOENT for non-existent executable path":
+        fd_table_init()
+        _clear_synthetic_vfs_for_test()
+        val bad_path = "/sys/apps/does_not_exist"
+        var sched = Scheduler.new()
+        val result = syscall_handler(
+            SyscallArgs(id: 59, arg0: rt_string_data(bad_path) as u64, arg1: bad_path.len() as u64, arg2: 0, arg3: 0, arg4: 0, arg5: 0),
+            sched,
+            IpcManager.new(),
+            KernelLog.new(16)
+        )
+        # -2 is ENOENT (file not found)
+        expect(result.value).to_equal(-2)
+        _clear_synthetic_vfs_for_test()
+
+    it "returns ENOEXEC for invalid ELF data":
+        fd_table_init()
+        _clear_synthetic_vfs_for_test()
+        val path = "/sys/apps/bad_binary"
+        # Register a file with invalid ELF content (just random bytes)
+        var bad_bytes: [u8] = []
+        var bi = 0
+        while bi < 64:
+            bad_bytes.push(0xDE.to_u8())
+            bi = bi + 1
+        _set_synthetic_vfs_file_for_test(path, bad_bytes)
+
+        var sched = Scheduler.new()
+        val result = syscall_handler(
+            SyscallArgs(id: 59, arg0: rt_string_data(path) as u64, arg1: path.len() as u64, arg2: 0, arg3: 0, arg4: 0, arg5: 0),
+            sched,
+            IpcManager.new(),
+            KernelLog.new(16)
+        )
+        # -8 is ENOEXEC (exec format error, image build failed)
+        expect(result.value).to_equal(-8)
+        _clear_synthetic_vfs_for_test()
+
+    it "returns EINVAL when path pointer is null":
+        fd_table_init()
+        var sched = Scheduler.new()
+        val result = syscall_handler(
+            SyscallArgs(id: 59, arg0: 0, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0),
+            sched,
+            IpcManager.new(),
+            KernelLog.new(16)
+        )
+        # arg0==0 or arg1==0 returns -EINVAL
+        expect(result.value).to_be_less_than(0)
+
+    it "returns ENAMETOOLONG when path exceeds maximum length":
+        fd_table_init()
+        var sched = Scheduler.new()
+        # Path length > MAX_BINARY_PATH_LEN (256)
+        val result = syscall_handler(
+            SyscallArgs(id: 59, arg0: 1, arg1: 1024, arg2: 0, arg3: 0, arg4: 0, arg5: 0),
+            sched,
+            IpcManager.new(),
+            KernelLog.new(16)
+        )
+        expect(result.value).to_be_less_than(0)
+
+# ============================================================================
+# Test Group 3: PID preservation
+# ============================================================================
+
+describe "execve PID preservation":
+    it "preserves task PID across exec (structural assertion)":
+        fd_table_init()
+        val path = "/sys/apps/hello_world"
+        _clear_synthetic_vfs_for_test()
+        _set_synthetic_vfs_file_for_test(path, _make_x86_64_exec())
+
+        # Spawn a task first
+        var sched = Scheduler.new()
+        val spawn_result = syscall_handler(
+            SyscallArgs(id: 13, arg0: rt_string_data(path) as u64, arg1: path.len() as u64, arg2: 2, arg3: 0, arg4: 0, arg5: 0),
+            sched,
+            IpcManager.new(),
+            KernelLog.new(16)
+        )
+        expect(spawn_result.value).to_be_greater_than(0)
+        val pid_before = spawn_result.value as u64
+        val tcb_before = sched.get_task(TaskId(id: pid_before))
+        expect(tcb_before == nil).to_equal(false)
+
+        # Exec replaces the image; scheduler.exec_image preserves TaskId
+        val exec_result = syscall_handler(
+            SyscallArgs(id: 59, arg0: rt_string_data(path) as u64, arg1: path.len() as u64, arg2: 0, arg3: 0, arg4: 0, arg5: 0),
+            sched,
+            IpcManager.new(),
+            KernelLog.new(16)
+        )
+        expect(exec_result.value).to_equal(0)
+
+        # The task at the same PID slot must still exist
+        val tcb_after = sched.get_task(TaskId(id: pid_before))
+        expect(tcb_after == nil).to_equal(false)
+        if tcb_after != nil:
+            val task = tcb_after
+            expect(task.id.id).to_equal(pid_before)
+            expect(task.is_user).to_equal(true)
+        _clear_synthetic_vfs_for_test()
+
+# ============================================================================
+# Test Group 4: VMM teardown
+# ============================================================================
+
+describe "vmm_teardown_user_space":
+    it "clears all VMAs from a process address space":
+        var space = vmm_new_process_space(0, 1)
+        # Add some test VMAs
+        space.areas.push(VmArea(
+            start: 0x400000,
+            len: 0x1000,
+            kind: VMA_ANON,
+            flags: VMA_READ | VMA_EXEC,
+            backing: 0,
+            backing_offset: 0
+        ))
+        space.vma_count = 1
+        space.areas.push(VmArea(
+            start: 0x7FFF0000,
+            len: 0x10000,
+            kind: VMA_ANON,
+            flags: VMA_READ | VMA_WRITE,
+            backing: 0,
+            backing_offset: 0
+        ))
+        space.vma_count = 2
+
+        expect(space.vma_count as i64).to_equal(2)
+        expect(space.areas.len()).to_equal(2)
+
+        vmm_teardown_user_space(space)
+
+        expect(space.vma_count as i64).to_equal(0)
+        expect(space.areas.len()).to_equal(0)
+
+    it "handles an already-empty address space":
+        var space = vmm_new_process_space(0, 2)
+        expect(space.vma_count as i64).to_equal(0)
+        vmm_teardown_user_space(space)
+        expect(space.vma_count as i64).to_equal(0)
+        expect(space.areas.len()).to_equal(0)

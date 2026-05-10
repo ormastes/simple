@@ -1,0 +1,161 @@
+# Desktop Shell Remote Window Integration Spec
+#
+# Verifies that DesktopShell applies launcher-owned identity metadata to
+# remote windows and keeps launcher bookkeeping coherent as windows open
+# and close.
+
+use std.spec
+use os.desktop.shell.{DesktopShell}
+use os.compositor.compositor.{Compositor}
+use os.compositor.browser_compositor_backend.{BrowserCompositorBackend}
+use os.compositor.input_backend.{InputBackend}
+use os.drivers.input.ps2_keyboard.{KeyEvent, Key}
+use os.drivers.input.ps2_mouse.{MouseEvent}
+use os.services.launcher.launcher.{
+    launcher_init, launcher_record_process,
+    launcher_get_process_window_count, launcher_get_process_app_id_for_pid,
+    launcher_note_task_probe, launcher_get_process_state,
+    launcher_get_running_process_count
+}
+use os.services.wm.wm_service.{WmAction}
+
+class SilentInputBackend:
+    _unused: bool
+
+impl InputBackend for SilentInputBackend:
+    me poll_key() -> KeyEvent?:
+        nil
+
+    me poll_mouse() -> MouseEvent?:
+        nil
+
+    fn alt_held() -> bool:
+        false
+
+    fn shift_held() -> bool:
+        false
+
+    fn ctrl_held() -> bool:
+        false
+
+    fn key_to_char(key: Key) -> text?:
+        nil
+
+impl SilentInputBackend:
+    static fn new() -> SilentInputBackend:
+        SilentInputBackend(_unused: false)
+
+describe "DesktopShell remote windows":
+    it "resolves remote create-window identity from launcher process metadata":
+        launcher_init()
+        expect(launcher_record_process(4101, 0, "running", 0, 0, true)).to_be(true)
+
+        var shell = _make_test_shell()
+        shell.apply_wm_action(_create_window_action("Hello World", 4101, 91))
+
+        expect(shell.compositor.window_count()).to_equal(1)
+        val ids = shell.compositor.windows_for_process(4101)
+        expect(ids.len()).to_equal(1)
+        val wid = ids[0]
+        expect(shell.compositor.window_owner_port(wid)).to_equal(91)
+        expect(shell.compositor.window_process_id(wid)).to_equal(4101)
+        expect(shell.compositor.window_app_id(wid)).to_equal("/sys/apps/hello_world")
+        expect(shell.wm.window_owner_process_id(wid)).to_equal(4101)
+        expect(shell.wm.window_owner_app_id(wid)).to_equal("/sys/apps/hello_world")
+        expect(launcher_get_process_app_id_for_pid(4101)).to_equal("/sys/apps/hello_world")
+        expect(launcher_get_process_window_count(0)).to_equal(1)
+
+    it "groups multiple remote windows under one manifest app_id and unwinds on destroy":
+        launcher_init()
+        expect(launcher_record_process(5202, 3, "running", 0, 0, true)).to_be(true)
+
+        var shell = _make_test_shell()
+        shell.apply_wm_action(_create_window_action("Browser Demo", 5202, 101))
+        shell.apply_wm_action(_create_window_action("Browser Demo Inspector", 5202, 102))
+
+        expect(shell.compositor.window_count()).to_equal(2)
+        expect(shell.compositor.window_count_for_process(5202)).to_equal(2)
+        expect(shell.compositor.window_count_for_app("/sys/apps/browser_demo")).to_equal(2)
+        expect(shell.wm.window_count_for_process(5202)).to_equal(2)
+        expect(shell.wm.window_count_for_app("/sys/apps/browser_demo")).to_equal(2)
+        expect(launcher_get_process_window_count(0)).to_equal(2)
+
+        val ids = shell.compositor.windows_for_app("/sys/apps/browser_demo")
+        expect(ids.len()).to_equal(2)
+
+        shell.apply_wm_action(WmAction(
+            kind: "destroy_window",
+            window_id: ids[0],
+            title: "",
+            x: 0,
+            y: 0,
+            width: 0,
+            height: 0,
+            content: "",
+            process_id: 0,
+            app_id: "",
+            owner_port: 0,
+            src_port: 101
+        ))
+
+        expect(shell.compositor.window_count()).to_equal(1)
+        expect(shell.compositor.window_count_for_app("/sys/apps/browser_demo")).to_equal(1)
+        expect(shell.wm.window_count_for_app("/sys/apps/browser_demo")).to_equal(1)
+        expect(launcher_get_process_window_count(0)).to_equal(1)
+
+    it "reaps crashed remote windows via the dead-process reconcile path":
+        launcher_init()
+        expect(launcher_record_process(6303, 0, "running", 0, 0, true)).to_be(true)
+
+        var shell = _make_test_shell()
+        shell.apply_wm_action(_create_window_action("Hello World", 6303, 201))
+        expect(shell.compositor.window_count()).to_equal(1)
+        expect(shell.wm.window_count_for_process(6303)).to_equal(1)
+
+        # Simulate an unexpected process death (nonzero exit).
+        launcher_note_task_probe(6303, false, 137)
+        expect(launcher_get_process_state(0)).to_equal("crashed")
+        expect(launcher_get_running_process_count()).to_equal(0)
+
+        shell.reconcile_dead_process_windows()
+        expect(shell.compositor.window_count()).to_equal(0)
+        expect(shell.wm.window_count_for_process(6303)).to_equal(0)
+
+    it "reaps graceful exits on reconcile without misclassifying as crashes":
+        launcher_init()
+        expect(launcher_record_process(6404, 0, "running", 0, 0, true)).to_be(true)
+
+        var shell = _make_test_shell()
+        shell.apply_wm_action(_create_window_action("Hello World", 6404, 202))
+        expect(shell.compositor.window_count()).to_equal(1)
+
+        launcher_note_task_probe(6404, false, 0)
+        expect(launcher_get_process_state(0)).to_equal("exited")
+
+        shell.reconcile_dead_process_windows()
+        expect(shell.compositor.window_count()).to_equal(0)
+        expect(shell.wm.window_count_for_process(6404)).to_equal(0)
+
+fn _make_test_shell() -> DesktopShell:
+    val backend = BrowserCompositorBackend.new(1024, 768)
+    val input = SilentInputBackend.new()
+    val compositor = Compositor.with_backends(backend, input, 1024, 768)
+    var shell = DesktopShell.new(compositor)
+    shell.set_task_reaper_enabled(false)
+    shell
+
+fn _create_window_action(title: text, process_id: u64, owner_port: u64) -> WmAction:
+    WmAction(
+        kind: "create_window",
+        window_id: 0,
+        title: title,
+        x: 32,
+        y: 48,
+        width: 640,
+        height: 480,
+        content: "",
+        process_id: process_id,
+        app_id: "",
+        owner_port: owner_port,
+        src_port: owner_port
+    )

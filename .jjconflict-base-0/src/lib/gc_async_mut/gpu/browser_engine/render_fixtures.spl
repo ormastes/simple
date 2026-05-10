@@ -10,8 +10,10 @@
 #
 # Extracted from browser_renderer.spl to stay within the 800-line module limit.
 
-use std.gc_async_mut.gpu.browser_engine.browser_renderer.{
-    browser_renderer_find_char, br_find_str}
+use std.gc_async_mut.gpu.browser_engine.browser_renderer_utils.{
+    browser_renderer_find_char, br_find_str,
+    browser_renderer_split_semicolons, br_style_property_value,
+    br_find_matching_paren}
 use std.gc_async_mut.gpu.browser_engine.text_painter.{
     br_draw_font_renderer_layout_text_for_bg,
     br_famous_site_corpus_label}
@@ -465,9 +467,73 @@ fn br_parse_rgb_hex6(hex: text) -> u32:
 
 use std.gc_async_mut.gpu.browser_engine.dom.{parse_color_value}
 use common.render_scene.scene.{rgba_to_argb}
-use std.gc_async_mut.gpu.browser_engine.browser_renderer.{
-    browser_renderer_split_semicolons, br_style_property_value,
-    br_find_matching_paren, br_resolve_css_var_with_style}
+use std.gc_async_mut.gpu.browser_engine.style_rule_index.{br_style_block_rule_for_selector}
+
+fn br_find_custom_property_in_all_styles(html: text, name: text) -> text:
+    val lower_html = html.lower()
+    var search_pos: i64 = 0
+    while search_pos < html.len():
+        val style_pos = br_find_str(lower_html, "<style", search_pos)
+        if style_pos >= 999999999:
+            break
+        val style_open_end = browser_renderer_find_char(html, ">", style_pos)
+        if style_open_end >= 999999999:
+            break
+        val style_close = br_find_str(lower_html, "</style", style_open_end + 1)
+        if style_close >= 999999999:
+            break
+        val css = html.slice(style_open_end + 1, style_close)
+        var rule_start: i64 = 0
+        while rule_start < css.len():
+            val open = browser_renderer_find_char(css, "{", rule_start)
+            if open >= 999999999:
+                break
+            val close = browser_renderer_find_char(css, "}", open + 1)
+            if close >= 999999999:
+                break
+            val body = css.slice(open + 1, close).trim()
+            val found = br_style_property_value(body, name)
+            if found.len() > 0:
+                return found
+            rule_start = close + 1
+        search_pos = style_close + 1
+    ""
+
+fn br_resolve_css_var(html: text, value: text) -> text:
+    br_resolve_css_var_with_style(html, value, "")
+
+fn br_resolve_css_var_with_style(html: text, value: text, style: text) -> text:
+    val trimmed = value.trim()
+    val lower = trimmed.lower()
+    if not lower.starts_with("var("):
+        return trimmed
+    val open = browser_renderer_find_char(trimmed, "(", 0)
+    if open >= 999999999:
+        return trimmed
+    val close = br_find_matching_paren(trimmed, open)
+    if close >= 999999999:
+        return trimmed
+    val raw_args = trimmed.slice(open + 1, close).trim()
+    val fallback_comma = browser_renderer_find_char(raw_args, ",", 0)
+    var name = raw_args
+    var fallback_value = ""
+    if fallback_comma < 999999999:
+        name = raw_args.slice(0, fallback_comma).trim()
+        fallback_value = raw_args.slice(fallback_comma + 1, raw_args.len()).trim()
+    if style.len() > 0:
+        val from_style = br_style_property_value(style, name)
+        if from_style.len() > 0:
+            return from_style
+    val root_style = br_style_block_rule_for_selector(html, ":root")
+    val resolved = br_style_property_value(root_style, name)
+    if resolved.len() > 0:
+        return resolved
+    val from_all = br_find_custom_property_in_all_styles(html, name)
+    if from_all.len() > 0:
+        return from_all
+    if fallback_value.len() > 0:
+        return br_resolve_css_var_with_style(html, fallback_value, style)
+    trimmed
 
 fn br_first_background_argb(html: text) -> u32:
     val lower = html.lower()

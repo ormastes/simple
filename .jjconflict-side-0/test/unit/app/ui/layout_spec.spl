@@ -1,0 +1,232 @@
+# UI Layout Engine Specification
+#
+# Tests compute_layout() for VBox, HBox, Grid, Fixed, and Panel modes.
+# Validates flex sizing, fixed sizing, border insets, and rect lookup.
+
+use std.spec.*
+
+use common.ui.layout.{compute_layout, find_rect}
+use common.ui.builder.{column, row, panel, text_widget, statusbar, menubar, with_width, with_height, with_flex, with_visible, build_tree}
+use common.ui.widget.{WidgetNode, WidgetRect, UITree}
+
+# ============================================================================
+# Layout: Single Widget
+# ============================================================================
+
+describe "compute_layout single widget":
+
+    it "assigns full rect to a single text widget":
+        val root = text_widget("t1", "Hello")
+        val rects = compute_layout(root, 0, 0, 80, 24)
+        val r = find_rect(rects, "t1")
+        expect(r != nil).to_equal(true)
+        if r != nil:
+            expect(r.x).to_equal(0)
+            expect(r.y).to_equal(0)
+            expect(r.w).to_equal(80)
+            expect(r.h).to_equal(24)
+
+# ============================================================================
+# Layout: VBox
+# ============================================================================
+
+describe "compute_layout vbox":
+
+    it "splits height evenly between two equal children":
+        val root = column("vbox1", [
+            text_widget("v_a", "A"),
+            text_widget("v_b", "B")
+        ])
+        val rects = compute_layout(root, 0, 0, 80, 24)
+        # Panel border: inner area is x+1, y+1, w-2, h-2 => 1,1,78,22
+        # Two flex children split 22 evenly => 11 each
+        val ra = find_rect(rects, "v_a")
+        val rb = find_rect(rects, "v_b")
+        expect(ra != nil).to_equal(true)
+        expect(rb != nil).to_equal(true)
+        if ra != nil:
+            expect(ra.h).to_equal(11)
+            expect(ra.w).to_equal(78)
+        if rb != nil:
+            expect(rb.h).to_equal(11)
+            expect(rb.y).to_equal(ra.y + 11)
+
+    it "gives statusbar height 1 and remaining to flex child":
+        val root = column("vbox2", [
+            text_widget("v_content", "Content"),
+            statusbar("v_status", "left", "right")
+        ])
+        val rects = compute_layout(root, 0, 0, 80, 24)
+        # Inner area: 1,1,78,22. StatusBar fixed h=1, flex child gets 21
+        val rc = find_rect(rects, "v_content")
+        val rs = find_rect(rects, "v_status")
+        expect(rc != nil).to_equal(true)
+        expect(rs != nil).to_equal(true)
+        if rc != nil:
+            expect(rc.h).to_equal(21)
+        if rs != nil:
+            expect(rs.h).to_equal(1)
+
+# ============================================================================
+# Layout: HBox
+# ============================================================================
+
+describe "compute_layout hbox":
+
+    it "splits width evenly between two equal children":
+        val root = row("hbox1", [
+            text_widget("h_a", "A"),
+            text_widget("h_b", "B")
+        ])
+        val rects = compute_layout(root, 0, 0, 80, 24)
+        # Inner area: 1,1,78,22. Two flex=1 children => 39 each
+        val ra = find_rect(rects, "h_a")
+        val rb = find_rect(rects, "h_b")
+        expect(ra != nil).to_equal(true)
+        expect(rb != nil).to_equal(true)
+        if ra != nil:
+            expect(ra.w).to_equal(39)
+            expect(ra.h).to_equal(22)
+        if rb != nil:
+            expect(rb.w).to_equal(39)
+            expect(rb.x).to_equal(ra.x + 39)
+
+    it "gives fixed-width child exact width and flex child the remainder":
+        val fixed_child = with_width(text_widget("h_fixed", "Fixed"), 20)
+        val flex_child = text_widget("h_flex", "Flex")
+        val root = row("hbox2", [fixed_child, flex_child])
+        val rects = compute_layout(root, 0, 0, 80, 24)
+        # Inner area: 1,1,78,22. fixed=20, flex gets 78-20=58
+        val rf = find_rect(rects, "h_fixed")
+        val rx = find_rect(rects, "h_flex")
+        expect(rf != nil).to_equal(true)
+        expect(rx != nil).to_equal(true)
+        if rf != nil:
+            expect(rf.w).to_equal(20)
+        if rx != nil:
+            expect(rx.w).to_equal(58)
+
+# ============================================================================
+# Layout: Panel Border
+# ============================================================================
+
+describe "compute_layout panel":
+
+    it "reserves 1-char border for panel children":
+        val child = text_widget("p_inner", "Inner")
+        val root = panel("p_outer", "Title", [child])
+        val rects = compute_layout(root, 0, 0, 40, 20)
+        # Outer panel rect: 0,0,40,20 (kind=panel => border)
+        # Inner area: 1,1,38,18
+        # Child panel is also kind=panel with its own border
+        # But text_widget is kind=text (no border) so it gets inner area directly
+        val ri = find_rect(rects, "p_inner")
+        expect(ri != nil).to_equal(true)
+        if ri != nil:
+            # panel -> inner 1,1,38,18 -> child gets full inner
+            expect(ri.x).to_equal(1)
+            expect(ri.y).to_equal(1)
+            expect(ri.w).to_equal(38)
+            expect(ri.h).to_equal(18)
+
+# ============================================================================
+# Layout: Grid
+# ============================================================================
+
+describe "compute_layout grid":
+
+    it "arranges 4 children into a 2x2 grid":
+        val root = builder.grid("grid1", [
+            text_widget("g_a", "A"),
+            text_widget("g_b", "B"),
+            text_widget("g_c", "C"),
+            text_widget("g_d", "D")
+        ])
+        val rects = compute_layout(root, 0, 0, 80, 24)
+        # Inner area: 1,1,78,22. 4 children => cols=2, rows=2
+        # cell_w = 78/2 = 39, cell_h = 22/2 = 11
+        val ra = find_rect(rects, "g_a")
+        val rb = find_rect(rects, "g_b")
+        val rc = find_rect(rects, "g_c")
+        val rd = find_rect(rects, "g_d")
+        expect(ra != nil).to_equal(true)
+        expect(rb != nil).to_equal(true)
+        expect(rc != nil).to_equal(true)
+        expect(rd != nil).to_equal(true)
+        if ra != nil:
+            expect(ra.x).to_equal(1)
+            expect(ra.y).to_equal(1)
+            expect(ra.w).to_equal(39)
+            expect(ra.h).to_equal(11)
+        if rb != nil:
+            expect(rb.x).to_equal(40)
+            expect(rb.y).to_equal(1)
+        if rc != nil:
+            expect(rc.x).to_equal(1)
+            expect(rc.y).to_equal(12)
+        if rd != nil:
+            expect(rd.x).to_equal(40)
+            expect(rd.y).to_equal(12)
+
+# ============================================================================
+# Layout: find_rect
+# ============================================================================
+
+describe "find_rect":
+
+    it "locates a rect by id":
+        val root = text_widget("find_me", "Find me")
+        val rects = compute_layout(root, 5, 10, 60, 30)
+        val r = find_rect(rects, "find_me")
+        expect(r != nil).to_equal(true)
+        if r != nil:
+            expect(r.id).to_equal("find_me")
+            expect(r.x).to_equal(5)
+            expect(r.y).to_equal(10)
+
+    it "returns nil for a missing id":
+        val root = text_widget("exists", "Hello")
+        val rects = compute_layout(root, 0, 0, 80, 24)
+        val r = find_rect(rects, "does_not_exist")
+        expect(r).to_be_nil()
+
+# ============================================================================
+# Layout: Visibility
+# ============================================================================
+
+describe "compute_layout visibility":
+
+    it "does not lay out invisible children":
+        val visible_child = text_widget("vis_child", "Visible")
+        val invisible_child = with_visible(text_widget("invis_child", "Hidden"), false)
+        val root = column("vis_root", [visible_child, invisible_child])
+        val rects = compute_layout(root, 0, 0, 80, 24)
+        # The invisible child should not appear in the child layout rects
+        # (it is excluded by get_visible_children)
+        # The visible child should get the full inner height
+        val rv = find_rect(rects, "vis_child")
+        expect(rv != nil).to_equal(true)
+        if rv != nil:
+            expect(rv.h).to_equal(22)
+
+# ============================================================================
+# Layout: MenuBar
+# ============================================================================
+
+describe "compute_layout menubar":
+
+    it "gives menubar height 1 by default":
+        val root = column("menu_root", [
+            menubar("menu_bar", ["File", "Edit"]),
+            text_widget("menu_body", "Body")
+        ])
+        val rects = compute_layout(root, 0, 0, 80, 24)
+        # Inner area: 1,1,78,22. MenuBar fixed h=1, flex child gets 21
+        val rm = find_rect(rects, "menu_bar")
+        val rb = find_rect(rects, "menu_body")
+        expect(rm != nil).to_equal(true)
+        expect(rb != nil).to_equal(true)
+        if rm != nil:
+            expect(rm.h).to_equal(1)
+        if rb != nil:
+            expect(rb.h).to_equal(21)

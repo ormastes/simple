@@ -1,0 +1,105 @@
+# @tag: rendering, screenshot, glass, pipeline
+# @cover src/lib/gc_async_mut/gpu/browser_engine/glass_pipeline_compare.spl 80%
+#
+# Glass Pipeline Screenshot Comparison Tests
+#
+# Compares web HTML pipeline vs widget-to-DOM pipeline pixel output
+# using the existing glass_pipeline_compare module. Also tests
+# cross-backend rendering of the same glass theme.
+
+use std.spec.{describe, context, it, expect}
+use os.compositor.screenshot_compare.{
+    compare_pixel_buffers, print_comparison_report, compare_with_tolerance}
+use std.gc_async_mut.gpu.browser_engine.glass_pipeline_compare.{
+    render_both_pipelines, PipelineOutput}
+use std.gc_async_mut.gpu.browser_engine.glass_demo_registry.{
+    list_core_glass_demos, GlassDemo}
+use std.gc_async_mut.gpu.browser_engine.backend_screenshot_capture.{
+    BackendCapture, capture_with_backend}
+use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
+use common.ui.glass_test_page.{generate_glass_test_html}
+
+# ============================================================================
+# Constants
+# ============================================================================
+
+val W: i32 = 400
+val H: i32 = 300
+val THRESHOLD_PIPELINE: i32 = 5
+val MIN_PCT_PIPELINE: i64 = 9800    # 98.00%
+val THRESHOLD_GPU: i32 = 2
+val MIN_PCT_GPU: i64 = 9990         # 99.90%
+
+# ============================================================================
+# Tests
+# ============================================================================
+
+describe "Glass Pipeline Screenshot Comparison":
+
+    context "glass test page cross-backend":
+
+        it "glass_dark software vs software_rasterizer produce pixels":
+            val html = generate_glass_test_html("glass_dark")
+            val sw = capture_with_backend(html, W, H, "software")
+            expect(sw.success).to_equal(true)
+            expect(sw.pixels.len()).to_equal(W * H)
+            # Verify non-empty (not all black)
+            var non_black = 0
+            var i = 0
+            while i < sw.pixels.len() and i < 1000:
+                if sw.pixels[i] != 0xFF000000:
+                    non_black = non_black + 1
+                i = i + 1
+            expect(non_black).to_be_greater_than(0)
+
+        it "glass_light renders non-empty pixels":
+            val html = generate_glass_test_html("glass_light")
+            val sw = capture_with_backend(html, W, H, "software")
+            expect(sw.success).to_equal(true)
+            expect(sw.pixels.len()).to_equal(W * H)
+
+    context "core demos web vs engine pipeline":
+
+        it "renders both pipelines for a demo":
+            # Use a minimal demo if available
+            val demos = list_core_glass_demos()
+            if demos.len() > 0:
+                val demo = demos[0]
+                val output = render_both_pipelines(demo.path, "glass_dark", W, H)
+                if output.error == "":
+                    expect(output.web_pixels.len()).to_be_greater_than(0)
+                    expect(output.engine_pixels.len()).to_be_greater_than(0)
+                    val result = compare_pixel_buffers(
+                        output.web_pixels, output.engine_pixels, W, H, THRESHOLD_PIPELINE)
+                    expect(result.match_percentage).to_be_greater_than(MIN_PCT_PIPELINE - 1)
+                    if result.match_percentage < 10000:
+                        print "Pipeline comparison for {demo.path}:"
+                        print_comparison_report(result)
+
+    context "cross-backend rendering consistency":
+
+        it "software backend produces same pixels on repeated renders":
+            val html = generate_glass_test_html("glass_dark")
+            val first = capture_with_backend(html, W, H, "software")
+            val second = capture_with_backend(html, W, H, "software")
+            expect(first.success).to_equal(true)
+            expect(second.success).to_equal(true)
+            # Repeated renders must be deterministic
+            val result = compare_pixel_buffers(first.pixels, second.pixels, W, H, 0)
+            expect(result.match_percentage).to_equal(10000)
+
+        it "software vs cuda for glass_dark if cuda available":
+            val backends = Engine2D.list_backends()
+            var has_cuda = false
+            for b in backends:
+                if b == "cuda":
+                    has_cuda = true
+            if not has_cuda:
+                return
+            val html = generate_glass_test_html("glass_dark")
+            val sw = capture_with_backend(html, W, H, "software")
+            val cuda = capture_with_backend(html, W, H, "cuda")
+            expect(sw.success).to_equal(true)
+            expect(cuda.success).to_equal(true)
+            val result = compare_pixel_buffers(sw.pixels, cuda.pixels, W, H, THRESHOLD_GPU)
+            expect(result.match_percentage).to_be_greater_than(MIN_PCT_GPU - 1)

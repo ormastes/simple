@@ -1,0 +1,219 @@
+# Driver — Source Loading and Error Formatting
+#
+# Extracted from driver.spl. Contains:
+# - Source file collection from paths/directories
+# - Module name derivation from file paths
+# - Structured error formatting helpers for type, borrow, coherence, and trait errors
+
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.types.type_infer.*
+use compiler.types.dim_constraints_types.{DimError}
+use compiler.borrow.borrow_check.*
+use compiler.traits.trait_coherence.{CoherenceError}
+use compiler.traits.trait_validation.{TraitError}
+
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_env_get(key: text) -> text
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+
+# Directories to skip during source collection
+val _skip_dirs = ["test", "tests", "doc", "docs", "verification", "resources", "scripts", "build"]
+
+pub fn _driver_should_skip_dir(name: text) -> bool:
+    var i = 0
+    while i < _skip_dirs.len():
+        if name == _skip_dirs[i]:
+            return true
+        i = i + 1
+    false
+
+pub fn _driver_is_bootstrap_entry_source(path: text, module_name: text) -> bool:
+    path.ends_with("/app/cli/bootstrap_main.spl") or path == "./src/app/cli/bootstrap_main.spl" or module_name == "app.cli.bootstrap_main"
+
+pub fn _driver_module_name_from_path(path: text) -> text:
+    var mod_path = path
+    while mod_path.starts_with("../"):
+        mod_path = mod_path.substring(3)
+    if mod_path.starts_with("./"):
+        mod_path = mod_path.substring(2)
+    if mod_path.starts_with("src/"):
+        mod_path = mod_path.substring(4)
+    mod_path = mod_path.replace(".spl", "")
+    mod_path = mod_path.replace(".sdn", "")
+    mod_path.replace("/", ".")
+
+pub fn _driver_module_aliases(path: text, content: text, module_name: text) -> [SourceFile]:
+    var aliases: [SourceFile] = [SourceFile(path: path, content: content, module_name: module_name)]
+    if module_name.starts_with("compiler.10.frontend.core."):
+        val core_alias = "compiler.core." + module_name.substring("compiler.10.frontend.core.".len())
+        aliases = aliases + [SourceFile(path: path, content: content, module_name: core_alias)]
+    aliases
+
+pub fn _driver_collect_sources(p: text) -> [SourceFile]:
+    """Collect source files from a path (file or directory). Returns list of SourceFile."""
+    var result: [SourceFile] = []
+    if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") != "1":
+        print "[collect_sources] path {p}"
+    if p.ends_with(".spl"):
+        if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") != "1":
+            print "[collect_sources] file {p}"
+        # It's a source file
+        if p.ends_with("/check.spl") or p.ends_with("\\check.spl"):
+            return result
+        if p.ends_with("/20.hir/hir_lowering/__init__.spl") or p.ends_with("\\20.hir\\hir_lowering\\__init__.spl"):
+            return result
+        if p.contains("/test/") or p.contains("/tests/") or p.contains("/testdata/") or p.contains("/doc/") or p.contains("/verification/"):
+            return result
+        if p.contains("/test_") or p.contains("/core/interpreter/") or p.contains("/10.frontend/parser/") or p.contains("/10.frontend/treesitter") or p.contains("/hir_lowering/async"):
+            return result
+        if p.contains("/10.frontend/core/"):
+            val core_allowed = p.contains("/lexer") or p.contains("/parser") or p.contains("/ast") or p.contains("/tokens")
+            val core_allowed2 = core_allowed or p.contains("/types") or p.contains("/backend_types") or p.contains("/error") or p.contains("/frontend")
+            val core_allowed3 = core_allowed2 or p.ends_with("/__init__.spl")
+            if not core_allowed3:
+                return result
+        val content = rt_file_read_text(p) ?? ""
+        if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") != "1":
+            print "[collect_sources] content_len {content.len()}"
+        if content != "":
+            val module_name = _driver_module_name_from_path(p)
+            val aliases = _driver_module_aliases(p, content, module_name)
+            if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") != "1":
+                print "[collect_sources] file_result {aliases.len()}"
+            return aliases
+    else:
+        if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") != "1":
+            print "[collect_sources] dir {p}"
+        # Use find for directory roots. The generated bootstrap compiler corrupts
+        # some static arrays used by the old recursive walker.
+        val cmd = "find {p} -type f -name '*.spl' 2>/dev/null"
+        val (stdout, _, code) = rt_process_run("sh", ["-c", cmd])
+        if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") != "1":
+            print "[collect_sources] find_code {code} stdout_len {stdout.len()}"
+        if code != 0 or stdout == "":
+            return result
+        val lines = stdout.split("\n")
+        for line in lines:
+            val path = line.trim()
+            if path == "":
+                continue
+            if path.contains("/test/") or path.contains("/tests/") or path.contains("/testdata/") or path.contains("/doc/") or path.contains("/verification/"):
+                continue
+            if path.contains("/test_") or path.contains("/core/interpreter/") or path.contains("/10.frontend/parser/") or path.contains("/10.frontend/treesitter") or path.contains("/hir_lowering/async"):
+                continue
+            if path.contains("/10.frontend/core/"):
+                val core_allowed = path.contains("/lexer") or path.contains("/parser") or path.contains("/ast") or path.contains("/tokens")
+                val core_allowed2 = core_allowed or path.contains("/types") or path.contains("/backend_types") or path.contains("/error") or path.contains("/frontend")
+                val core_allowed3 = core_allowed2 or path.ends_with("/__init__.spl")
+                if not core_allowed3:
+                    continue
+            val loaded = _driver_collect_sources(path)
+            for s in loaded:
+                result.push(s)
+    result
+
+pub fn _driver_collect_sources_via_find(paths: [text]) -> [SourceFile]:
+    var result: [SourceFile] = []
+    val cmd = "find src/app src/lib src/compiler src/runtime -type f -name '*.spl' 2>/dev/null"
+    val (stdout, _, code) = rt_process_run("sh", ["-c", cmd])
+    if code != 0 or stdout == "":
+        return result
+    val lines = stdout.split("\n")
+    for line in lines:
+        val path = line.trim()
+        if path == "":
+            continue
+        if path.contains("/test/") or path.contains("/tests/") or path.contains("/testdata/") or path.contains("/doc/") or path.contains("/verification/"):
+            continue
+        if path.contains("/test_") or path.contains("/core/interpreter/") or path.contains("/10.frontend/parser/") or path.contains("/10.frontend/treesitter") or path.contains("/hir_lowering/async"):
+            continue
+        if path.contains("/10.frontend/core/"):
+            val core_allowed = path.contains("/lexer") or path.contains("/parser") or path.contains("/ast") or path.contains("/tokens")
+            val core_allowed2 = core_allowed or path.contains("/types") or path.contains("/backend_types") or path.contains("/error") or path.contains("/frontend")
+            val core_allowed3 = core_allowed2 or path.ends_with("/__init__.spl")
+            if not core_allowed3:
+                continue
+        val loaded = _driver_collect_sources(path)
+        for s in loaded:
+            result.push(s)
+    result
+
+# ------------------------------------------------------------------------------
+# Structured Error Formatting Helpers
+# ------------------------------------------------------------------------------
+# Errors are encoded as: "line:col: message" with optional related info
+# appended as "|||RELATED:line:col:message" segments and optional help
+# appended as "|||HELP:message".
+
+pub fn _format_type_infer_error(err: TypeInferError) -> text:
+    """Format a TypeInferError into a structured error string with related info."""
+    val span = err.span()
+    val msg = err.message()
+    var result = "{span.line}:{span.col}: {msg}"
+    # Add related information based on error variant
+    match err:
+        case TypeInferError.Mismatch(expected, found, s):
+            if expected.span.line > 0:
+                result = result + "|||RELATED:{expected.span.line}:{expected.span.col}:expected type defined here"
+            if found.span.line > 0 and found.span.line != s.line:
+                result = result + "|||RELATED:{found.span.line}:{found.span.col}:found type originates here"
+        case TypeInferError.OccursCheck(var_id, ty, s):
+            if ty.span.line > 0:
+                result = result + "|||RELATED:{ty.span.line}:{ty.span.col}:recursive type reference here"
+            result = result + "|||HELP:break the recursive type by using an explicit type annotation"
+        case TypeInferError.TraitNotImplemented(ty, trait_name, s):
+            if ty.span.line > 0:
+                result = result + "|||RELATED:{ty.span.line}:{ty.span.col}:type that needs to implement '{trait_name}'"
+            result = result + "|||HELP:add an impl block: impl {trait_name} for {ty.kind}"
+        case TypeInferError.DimensionError(dim_err):
+            val de: DimError = dim_err
+            for note in de.notes:
+                if note.span.?:
+                    val note_span = note.span.unwrap()
+                    result = result + "|||RELATED:{note_span.line}:{note_span.col}:{note.message}"
+            if de.help.?:
+                result = result + "|||HELP:{de.help.unwrap()}"
+        case TypeInferError.Undefined(name, s):
+            result = result + "|||HELP:check spelling or add an import for '{name}'"
+        case TypeInferError.Other(message, s):
+            pass_do_nothing
+    result
+
+pub fn _format_nll_error(err: NLLError) -> text:
+    """Format an NLLError into a structured error string with related info."""
+    val primary = if err.has_primary_span: err.primary_span else: 0
+    var result = "{primary}:1: {err.message}"
+    for span_label in err.secondary_spans:
+        result = result + "|||RELATED:{span_label.span}:1:{span_label.label}"
+    if err.has_help:
+        result = result + "|||HELP:{err.help}"
+    result
+
+pub fn _format_coherence_error(err: CoherenceError) -> text:
+    """Format a CoherenceError into a structured error string."""
+    val msg = err.message()
+    "1:1: {msg}"
+
+pub fn _format_trait_error(err: TraitError) -> text:
+    """Format a TraitError into a structured error string with related info."""
+    val span = err.span()
+    val msg = err.message()
+    var result = "{span.line}:{span.col}: {msg}"
+    match err:
+        case TraitError.MissingMethod(trait_, method, ty, s):
+            result = result + "|||HELP:add method '{method}' to the impl block"
+        case TraitError.UndefinedTrait(name, s):
+            result = result + "|||HELP:check spelling or add an import for the trait"
+        case TraitError.Unsatisfied(obligation):
+            if obligation.span.line > 0:
+                result = result + "|||RELATED:{obligation.span.line}:{obligation.span.col}:required by this bound"
+        case TraitError.MissingAssocType(trait_, assoc_name, ty, s):
+            result = result + "|||HELP:add 'type {assoc_name} = ...' to the impl block"
+        case TraitError.AssocTypeMismatch(trait_, assoc_name, expected, actual, s):
+            if expected.span.line > 0:
+                result = result + "|||RELATED:{expected.span.line}:{expected.span.col}:expected type defined here"
+            if actual.span.line > 0:
+                result = result + "|||RELATED:{actual.span.line}:{actual.span.col}:actual type found here"
+        case _:
+            pass_do_nothing
+    result

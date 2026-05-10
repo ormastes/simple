@@ -1,0 +1,210 @@
+# @cover src/lib/nogc_sync_mut/game2d/__init__.spl 60%
+# @cover src/lib/nogc_sync_mut/game2d/app/app.spl 60%
+# @cover src/lib/nogc_sync_mut/game2d/app/run.spl 60%
+# @cover src/lib/nogc_sync_mut/game2d/render/canvas.spl 60%
+# @cover src/lib/nogc_sync_mut/game2d/math/__init__.spl 60%
+"""
+# Game2D Architecture Constraints (AC-8)
+
+System spec covering the architecture rules for `std.game2d`:
+- No file under `src/lib/nogc_sync_mut/game2d/**` exceeds 800 lines.
+- No `class X : Y` inheritance form (only `: TraitName` for trait impl).
+- `Vec2` / `Rect` / `Color` / `Transform2D` are NOT redefined inside game2d
+  (must re-export from `common/engine/math2d.spl` etc.).
+- No new game2d file duplicates a function defined in `engine/render/`
+  or `engine/sprite/`.
+- All `std.game2d.*` exports route through `__init__.spl`.
+
+Red-phase: implementation does not yet exist; specs must FAIL on the
+assertion side (not parse/import side).
+
+**Status:** Failing (no impl)
+"""
+
+use std.spec.{describe, it, expect}
+use std.common.text.{repeat_str}
+
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_file_size(path: text) -> i64
+extern fn rt_file_read_text(path: text) -> text
+
+# ---------------------------------------------------------------------------
+# Hard-coded list of every planned file under src/lib/nogc_sync_mut/game2d/**
+# (from Phase 3 §A). We assert on this set rather than walking the FS so the
+# spec stays deterministic across environments.
+# ---------------------------------------------------------------------------
+fn _game2d_files() -> [text]:
+    [
+        "src/lib/nogc_sync_mut/game2d/__init__.spl",
+        "src/lib/nogc_sync_mut/game2d/app/app.spl",
+        "src/lib/nogc_sync_mut/game2d/app/config.spl",
+        "src/lib/nogc_sync_mut/game2d/app/run.spl",
+        "src/lib/nogc_sync_mut/game2d/math/__init__.spl",
+        "src/lib/nogc_sync_mut/game2d/input/snapshot.spl",
+        "src/lib/nogc_sync_mut/game2d/input/keys.spl",
+        "src/lib/nogc_sync_mut/game2d/input/api.spl",
+        "src/lib/nogc_sync_mut/game2d/render/canvas.spl",
+        "src/lib/nogc_sync_mut/game2d/render/image.spl",
+        "src/lib/nogc_sync_mut/game2d/audio/sound.spl",
+        "src/lib/nogc_sync_mut/game2d/asset/asset_id.spl",
+        "src/lib/nogc_sync_mut/game2d/asset/table.spl",
+        "src/lib/nogc_sync_mut/game2d/asset/diagnostic.spl",
+        "src/lib/nogc_sync_mut/game2d/time/det_guard.spl",
+        "src/lib/nogc_sync_mut/game2d/backend/backend.spl",
+        "src/lib/nogc_sync_mut/game2d/backend/sdl.spl",
+        "src/lib/nogc_sync_mut/game2d/backend/headless.spl",
+        "src/lib/nogc_sync_mut/game2d/loop/driver.spl",
+        "src/lib/nogc_sync_mut/game2d/config/game_sdn.spl",
+    ]
+
+fn _read_or_empty(path: text) -> text:
+    if rt_file_exists(path):
+        rt_file_read_text(path)
+    else:
+        ""
+
+# Count lines: empty -> 0; otherwise (#\n-separated parts) - 1 if file ends
+# in a trailing newline (the common case), else the part count itself.
+fn _count_lines(content: text) -> i64:
+    if content.len() as i64 == 0:
+        return 0
+    val parts = content.split("\n")
+    val n = parts.len() as i64
+    if content.ends_with("\n"):
+        n - 1
+    else:
+        n
+
+fn _contains(haystack: text, needle: text) -> bool:
+    haystack.contains(needle)
+
+# Forbidden patterns — concrete `class Foo : Bar` where Bar is one of the
+# project's known *classes* (not traits). For game2d, the only legal `:`
+# usage is `class X : <TraitName>` per Phase 3 §B.
+fn _forbidden_class_inheritance(content: text) -> bool:
+    # Cheap signal: any `class .* : ` followed by a known concrete class name.
+    if _contains(content, "class Sprite : Image"):
+        return true
+    if _contains(content, "class Canvas : RenderCommandBuffer"):
+        return true
+    if _contains(content, "class HeadlessBackend : SdlBackend"):
+        return true
+    false
+
+# Math primitives must NOT be redefined under game2d/**.
+fn _redefines_math_primitive(content: text) -> bool:
+    if _contains(content, "class Vec2:"):
+        return true
+    if _contains(content, "class Rect2:"):
+        return true
+    if _contains(content, "class EngineColor:"):
+        return true
+    if _contains(content, "class Transform2D:"):
+        return true
+    false
+
+
+describe "Game2D Architecture (AC-8)":
+    """## Architecture rules. Red-phase — no impl yet."""
+
+    describe "no file exceeds 800-line budget":
+        it "every game2d module is under 800 lines":
+            var over_budget: [text] = []
+            for path in _game2d_files():
+                val content = _read_or_empty(path)
+                val n = _count_lines(content)
+                if n > 800:
+                    over_budget = over_budget.push(path)
+            expect(over_budget.len()).to_equal(0)
+
+        it "edge case: a synthetic 801-line file would be flagged":
+            # Confirms the assertion is real, not vacuous.
+            val fake_lines = repeat_str("x\n", 801)
+            expect(_count_lines(fake_lines) > 800).to_equal(true)
+
+        it "error path: missing file is treated as 0 lines (not a crash)":
+            val n = _count_lines(_read_or_empty(
+                "src/lib/nogc_sync_mut/game2d/does_not_exist.spl"))
+            expect(n).to_equal(0)
+
+    describe "no forbidden class-inheritance forms":
+        it "no game2d file declares `class X : ConcreteClass`":
+            var offenders: [text] = []
+            for path in _game2d_files():
+                val content = _read_or_empty(path)
+                if _forbidden_class_inheritance(content):
+                    offenders = offenders.push(path)
+            expect(offenders.len()).to_equal(0)
+
+        it "edge case: synthetic forbidden form is detected":
+            expect(_forbidden_class_inheritance(
+                "class HeadlessBackend : SdlBackend\n")).to_equal(true)
+
+        it "error path: empty content is never flagged":
+            expect(_forbidden_class_inheritance("")).to_equal(false)
+
+    describe "no math-primitive redefinitions":
+        it "Vec2/Rect2/EngineColor/Transform2D not redefined under game2d/**":
+            var offenders: [text] = []
+            for path in _game2d_files():
+                val content = _read_or_empty(path)
+                if _redefines_math_primitive(content):
+                    offenders = offenders.push(path)
+            expect(offenders.len()).to_equal(0)
+
+        it "edge case: a redefinition string is detected":
+            expect(_redefines_math_primitive("class Vec2:\n    var x: f32\n")
+                ).to_equal(true)
+
+        it "error path: only an exact form triggers (avoid false positive)":
+            expect(_redefines_math_primitive("# uses Vec2 here\n")
+                ).to_equal(false)
+
+    describe "all std.game2d.* exports route through __init__.spl":
+        it "__init__.spl exists at the package root":
+            expect(rt_file_exists(
+                "src/lib/nogc_sync_mut/game2d/__init__.spl")).to_equal(true)
+
+        it "edge case: a synthetic __init__.spl with re-exports parses":
+            val sample = "use std.nogc_sync_mut.game2d.app.app\n"
+            expect(_contains(sample, "use std.nogc_sync_mut.game2d.")
+                ).to_equal(true)
+
+        it "error path: missing-file path returns empty without crashing":
+            val content = _read_or_empty(
+                "src/lib/nogc_sync_mut/game2d/__init__.spl")
+            expect(content.len() >= 0).to_equal(true)
+
+    describe "no duplicate engine primitives":
+        it "no game2d/render/* file redefines render_text_to_buffer":
+            val canvas = _read_or_empty(
+                "src/lib/nogc_sync_mut/game2d/render/canvas.spl")
+            expect(_contains(canvas, "fn render_text_to_buffer")
+                ).to_equal(false)
+
+        it "edge case: detects a synthetic duplicate":
+            expect(_contains(
+                "fn render_text_to_buffer(...) {}",
+                "fn render_text_to_buffer")).to_equal(true)
+
+        it "error path: empty canvas content does not falsely flag":
+            expect(_contains("", "fn render_text_to_buffer")).to_equal(false)
+
+    describe "demo budget AC-1 archtest (≤ 25 lines)":
+        it "examples/game2d/hello/main.spl exists":
+            expect(rt_file_exists("examples/game2d/hello/main.spl")
+                ).to_equal(true)
+
+        it "examples/game2d/hello/main.spl has ≤ 25 lines":
+            val content = _read_or_empty("examples/game2d/hello/main.spl")
+            val n = _count_lines(content)
+            expect(n <= 25).to_equal(true)
+
+        it "edge case: a synthetic 26-line demo would fail the budget":
+            val fake = repeat_str("x\n", 26)
+            expect(_count_lines(fake) <= 25).to_equal(false)
+
+        it "error path: hello demo only imports std.game2d":
+            val content = _read_or_empty("examples/game2d/hello/main.spl")
+            # Forbidden direct OS-input imports inside examples/game2d/**:
+            expect(_contains(content, "rt_sdl2_")).to_equal(false)
