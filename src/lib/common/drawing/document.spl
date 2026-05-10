@@ -1,0 +1,171 @@
+# DrawingDocument — layered raster/vector document model
+#
+# Provides layer management for a drawing application.
+# Each layer can be raster (pixel) or vector, with blend modes,
+# opacity, visibility, and lock controls.
+
+# ============================================================================
+# Blend Modes
+# ============================================================================
+
+enum BlendMode:
+    Normal
+    Multiply
+    Screen
+    Overlay
+    Darken
+    Lighten
+
+impl BlendMode:
+    fn to_text(self) -> text:
+        match self:
+            case Normal: "Normal"
+            case Multiply: "Multiply"
+            case Screen: "Screen"
+            case Overlay: "Overlay"
+            case Darken: "Darken"
+            case Lighten: "Lighten"
+
+# ============================================================================
+# Layer Kind
+# ============================================================================
+
+enum LayerKind:
+    Raster(width: i32, height: i32)
+    Vector
+
+# ============================================================================
+# Drawing Layer
+# ============================================================================
+
+struct DrawingLayer:
+    name: text
+    visible: bool
+    locked: bool
+    opacity: f64
+    blend_mode: BlendMode
+    kind: LayerKind
+
+impl DrawingLayer:
+    static fn new_raster(name: text, width: i32, height: i32) -> DrawingLayer:
+        """Create a new raster layer with full opacity."""
+        DrawingLayer(
+            name: name,
+            visible: true,
+            locked: false,
+            opacity: 1.0,
+            blend_mode: BlendMode.Normal,
+            kind: LayerKind.Raster(width: width, height: height)
+        )
+
+    static fn new_vector(name: text) -> DrawingLayer:
+        """Create a new vector layer with full opacity."""
+        DrawingLayer(
+            name: name,
+            visible: true,
+            locked: false,
+            opacity: 1.0,
+            blend_mode: BlendMode.Normal,
+            kind: LayerKind.Vector
+        )
+
+    fn is_raster(self) -> bool:
+        match self.kind:
+            case Raster: true
+            case Vector: false
+
+    fn is_vector(self) -> bool:
+        match self.kind:
+            case Raster: false
+            case Vector: true
+
+    fn is_editable(self) -> bool:
+        """A layer is editable when visible and not locked."""
+        self.visible and not self.locked
+
+# ============================================================================
+# Drawing Document
+# ============================================================================
+
+class DrawingDocument:
+    width: i32
+    height: i32
+    layers: [DrawingLayer]
+    active_layer_index: i32
+
+    static fn new(width: i32, height: i32) -> DrawingDocument:
+        """Create a new document with one default raster background layer."""
+        val bg = DrawingLayer.new_raster("Background", width, height)
+        DrawingDocument(
+            width: width,
+            height: height,
+            layers: [bg],
+            active_layer_index: 0
+        )
+
+    me add_layer(layer: DrawingLayer):
+        """Add a layer on top of the stack."""
+        self.layers = self.layers.push(layer)
+
+    me remove_layer(index: i32):
+        """Remove the layer at the given index."""
+        if index < 0 or index >= self.layers.len():
+            return
+        var result: [DrawingLayer] = []
+        var i = 0
+        for layer in self.layers:
+            if i != index:
+                result = result.push(layer)
+            i = i + 1
+        self.layers = result
+        # Adjust active index
+        if self.active_layer_index >= self.layers.len():
+            self.active_layer_index = self.layers.len() - 1
+        if self.active_layer_index < 0:
+            self.active_layer_index = 0
+
+    me move_layer(from_index: i32, to_index: i32):
+        """Move a layer from one position to another."""
+        if from_index < 0 or from_index >= self.layers.len():
+            return
+        if to_index < 0 or to_index >= self.layers.len():
+            return
+        if from_index == to_index:
+            return
+        val moving = self.layers[from_index]
+        var without: [DrawingLayer] = []
+        var i = 0
+        for layer in self.layers:
+            if i != from_index:
+                without = without.push(layer)
+            i = i + 1
+        var result: [DrawingLayer] = []
+        var j = 0
+        var inserted = false
+        for layer in without:
+            if j == to_index and not inserted:
+                result = result.push(moving)
+                inserted = true
+            result = result.push(layer)
+            j = j + 1
+        if not inserted:
+            result = result.push(moving)
+        self.layers = result
+        self.active_layer_index = to_index
+
+    me set_active_layer(index: i32):
+        """Set the active layer by index."""
+        if index >= 0 and index < self.layers.len():
+            self.active_layer_index = index
+
+    fn active_layer(self) -> DrawingLayer?:
+        """Return the currently active layer, if any."""
+        if self.layers.len() == 0:
+            return none
+        if self.active_layer_index >= 0 and self.active_layer_index < self.layers.len():
+            return self.layers[self.active_layer_index]
+        return none
+
+    fn layer_count(self) -> i32:
+        """Return the number of layers."""
+        self.layers.len()

@@ -1,6 +1,7 @@
 
 use std.replay.adapters.jit_replay_event.JitReplayEventKind
 use std.replay.adapters.jit_replay_event.JitReplayEvent
+use std.io.{shell}
 
 enum JitReplayMode:
     Off
@@ -98,8 +99,203 @@ class JitReplayAdapter:
     fn event_count() -> i64:
         self.events.len() as i64
 
-    fn save_trace():
-        pass_dn
+    # Encode one JitReplayEvent as 52 bytes (little-endian):
+    #   seq_id:i64, kind:i32, function_hash:i64, module_hash:i64,
+    #   args_hash:i64, result:i64, timestamp:i64
+    me fn save_trace():
+        val mkdir_res = shell("mkdir -p '{self.trace_path}'")
+        if mkdir_res.exit_code != 0:
+            return
+        val events_path = "{self.trace_path}/jit_events.bin"
+        var all_bytes: [i32] = []
+        for ev in self.events:
+            # seq_id (i64, 8 bytes)
+            val s = ev.seq_id
+            all_bytes.push((s % 256) as i32)
+            all_bytes.push(((s / 256) % 256) as i32)
+            all_bytes.push(((s / 65536) % 256) as i32)
+            all_bytes.push(((s / 16777216) % 256) as i32)
+            all_bytes.push(((s / 4294967296) % 256) as i32)
+            all_bytes.push(((s / 1099511627776) % 256) as i32)
+            all_bytes.push(((s / 281474976710656) % 256) as i32)
+            all_bytes.push(((s / 72057594037927936) % 256) as i32)
+            # kind (i32, 4 bytes)
+            val k = ev.kind.to_i32()
+            all_bytes.push(k % 256)
+            all_bytes.push((k / 256) % 256)
+            all_bytes.push((k / 65536) % 256)
+            all_bytes.push((k / 16777216) % 256)
+            # function_hash (i64, 8 bytes)
+            val fh = ev.function_hash
+            all_bytes.push((fh % 256) as i32)
+            all_bytes.push(((fh / 256) % 256) as i32)
+            all_bytes.push(((fh / 65536) % 256) as i32)
+            all_bytes.push(((fh / 16777216) % 256) as i32)
+            all_bytes.push(((fh / 4294967296) % 256) as i32)
+            all_bytes.push(((fh / 1099511627776) % 256) as i32)
+            all_bytes.push(((fh / 281474976710656) % 256) as i32)
+            all_bytes.push(((fh / 72057594037927936) % 256) as i32)
+            # module_hash (i64, 8 bytes)
+            val mh = ev.module_hash
+            all_bytes.push((mh % 256) as i32)
+            all_bytes.push(((mh / 256) % 256) as i32)
+            all_bytes.push(((mh / 65536) % 256) as i32)
+            all_bytes.push(((mh / 16777216) % 256) as i32)
+            all_bytes.push(((mh / 4294967296) % 256) as i32)
+            all_bytes.push(((mh / 1099511627776) % 256) as i32)
+            all_bytes.push(((mh / 281474976710656) % 256) as i32)
+            all_bytes.push(((mh / 72057594037927936) % 256) as i32)
+            # args_hash (i64, 8 bytes)
+            val ah = ev.args_hash
+            all_bytes.push((ah % 256) as i32)
+            all_bytes.push(((ah / 256) % 256) as i32)
+            all_bytes.push(((ah / 65536) % 256) as i32)
+            all_bytes.push(((ah / 16777216) % 256) as i32)
+            all_bytes.push(((ah / 4294967296) % 256) as i32)
+            all_bytes.push(((ah / 1099511627776) % 256) as i32)
+            all_bytes.push(((ah / 281474976710656) % 256) as i32)
+            all_bytes.push(((ah / 72057594037927936) % 256) as i32)
+            # result (i64, 8 bytes)
+            val r = ev.result
+            all_bytes.push((r % 256) as i32)
+            all_bytes.push(((r / 256) % 256) as i32)
+            all_bytes.push(((r / 65536) % 256) as i32)
+            all_bytes.push(((r / 16777216) % 256) as i32)
+            all_bytes.push(((r / 4294967296) % 256) as i32)
+            all_bytes.push(((r / 1099511627776) % 256) as i32)
+            all_bytes.push(((r / 281474976710656) % 256) as i32)
+            all_bytes.push(((r / 72057594037927936) % 256) as i32)
+            # timestamp (i64, 8 bytes)
+            val t = ev.timestamp
+            all_bytes.push((t % 256) as i32)
+            all_bytes.push(((t / 256) % 256) as i32)
+            all_bytes.push(((t / 65536) % 256) as i32)
+            all_bytes.push(((t / 16777216) % 256) as i32)
+            all_bytes.push(((t / 4294967296) % 256) as i32)
+            all_bytes.push(((t / 1099511627776) % 256) as i32)
+            all_bytes.push(((t / 281474976710656) % 256) as i32)
+            all_bytes.push(((t / 72057594037927936) % 256) as i32)
+        if all_bytes.len() > 0:
+            var hex_parts: [text] = []
+            for b in all_bytes:
+                val hi_v = b / 16
+                val lo_v = b % 16
+                val hi_c = if hi_v < 10: hi_v.to_text() else if hi_v == 10: "a" else if hi_v == 11: "b" else if hi_v == 12: "c" else if hi_v == 13: "d" else if hi_v == 14: "e" else: "f"
+                val lo_c = if lo_v < 10: lo_v.to_text() else if lo_v == 10: "a" else if lo_v == 11: "b" else if lo_v == 12: "c" else if lo_v == 13: "d" else if lo_v == 14: "e" else: "f"
+                hex_parts.push(hi_c)
+                hex_parts.push(lo_c)
+            val hex_str = hex_parts.join("")
+            shell("echo -n '{hex_str}' | xxd -r -p > '{events_path}'")
+        else:
+            shell("touch '{events_path}'")
 
-    fn load_trace():
-        pass_dn
+    # Decode 52-byte records from jit_events.bin back into self.events.
+    me fn load_trace():
+        val events_path = "{self.trace_path}/jit_events.bin"
+        val hex_result = shell("xxd -p '{events_path}' 2>/dev/null | tr -d '\\n'")
+        if hex_result.exit_code != 0:
+            return
+        val hex_str = hex_result.stdout.trim()
+        if hex_str.len() == 0:
+            return
+        # Parse hex into bytes
+        var bytes: [i32] = []
+        var i = 0
+        while i + 1 < hex_str.len():
+            val hi_c = hex_str[i]
+            val lo_c = hex_str[i + 1]
+            val hi_v = if hi_c == "0": 0 else if hi_c == "1": 1 else if hi_c == "2": 2 else if hi_c == "3": 3 else if hi_c == "4": 4 else if hi_c == "5": 5 else if hi_c == "6": 6 else if hi_c == "7": 7 else if hi_c == "8": 8 else if hi_c == "9": 9 else if hi_c == "a" or hi_c == "A": 10 else if hi_c == "b" or hi_c == "B": 11 else if hi_c == "c" or hi_c == "C": 12 else if hi_c == "d" or hi_c == "D": 13 else if hi_c == "e" or hi_c == "E": 14 else: 15
+            val lo_v = if lo_c == "0": 0 else if lo_c == "1": 1 else if lo_c == "2": 2 else if lo_c == "3": 3 else if lo_c == "4": 4 else if lo_c == "5": 5 else if lo_c == "6": 6 else if lo_c == "7": 7 else if lo_c == "8": 8 else if lo_c == "9": 9 else if lo_c == "a" or lo_c == "A": 10 else if lo_c == "b" or lo_c == "B": 11 else if lo_c == "c" or lo_c == "C": 12 else if lo_c == "d" or lo_c == "D": 13 else if lo_c == "e" or lo_c == "E": 14 else: 15
+            bytes.push(hi_v * 16 + lo_v)
+            i = i + 2
+        # Decode 52-byte records
+        val record_size: i64 = 52
+        self.events = []
+        var offset: i64 = 0
+        while offset + record_size <= bytes.len():
+            var pos = offset
+            # seq_id
+            var seq: i64 = 0
+            seq = seq + bytes[pos] as i64
+            seq = seq + (bytes[pos + 1] as i64) * 256
+            seq = seq + (bytes[pos + 2] as i64) * 65536
+            seq = seq + (bytes[pos + 3] as i64) * 16777216
+            seq = seq + (bytes[pos + 4] as i64) * 4294967296
+            seq = seq + (bytes[pos + 5] as i64) * 1099511627776
+            seq = seq + (bytes[pos + 6] as i64) * 281474976710656
+            seq = seq + (bytes[pos + 7] as i64) * 72057594037927936
+            pos = pos + 8
+            # kind
+            var kind_i: i32 = 0
+            kind_i = kind_i + bytes[pos]
+            kind_i = kind_i + bytes[pos + 1] * 256
+            kind_i = kind_i + bytes[pos + 2] * 65536
+            kind_i = kind_i + bytes[pos + 3] * 16777216
+            pos = pos + 4
+            val kind = JitReplayEventKind::from_i32(kind_i)
+            # function_hash
+            var fh: i64 = 0
+            fh = fh + bytes[pos] as i64
+            fh = fh + (bytes[pos + 1] as i64) * 256
+            fh = fh + (bytes[pos + 2] as i64) * 65536
+            fh = fh + (bytes[pos + 3] as i64) * 16777216
+            fh = fh + (bytes[pos + 4] as i64) * 4294967296
+            fh = fh + (bytes[pos + 5] as i64) * 1099511627776
+            fh = fh + (bytes[pos + 6] as i64) * 281474976710656
+            fh = fh + (bytes[pos + 7] as i64) * 72057594037927936
+            pos = pos + 8
+            # module_hash
+            var mh: i64 = 0
+            mh = mh + bytes[pos] as i64
+            mh = mh + (bytes[pos + 1] as i64) * 256
+            mh = mh + (bytes[pos + 2] as i64) * 65536
+            mh = mh + (bytes[pos + 3] as i64) * 16777216
+            mh = mh + (bytes[pos + 4] as i64) * 4294967296
+            mh = mh + (bytes[pos + 5] as i64) * 1099511627776
+            mh = mh + (bytes[pos + 6] as i64) * 281474976710656
+            mh = mh + (bytes[pos + 7] as i64) * 72057594037927936
+            pos = pos + 8
+            # args_hash
+            var ah: i64 = 0
+            ah = ah + bytes[pos] as i64
+            ah = ah + (bytes[pos + 1] as i64) * 256
+            ah = ah + (bytes[pos + 2] as i64) * 65536
+            ah = ah + (bytes[pos + 3] as i64) * 16777216
+            ah = ah + (bytes[pos + 4] as i64) * 4294967296
+            ah = ah + (bytes[pos + 5] as i64) * 1099511627776
+            ah = ah + (bytes[pos + 6] as i64) * 281474976710656
+            ah = ah + (bytes[pos + 7] as i64) * 72057594037927936
+            pos = pos + 8
+            # result
+            var res: i64 = 0
+            res = res + bytes[pos] as i64
+            res = res + (bytes[pos + 1] as i64) * 256
+            res = res + (bytes[pos + 2] as i64) * 65536
+            res = res + (bytes[pos + 3] as i64) * 16777216
+            res = res + (bytes[pos + 4] as i64) * 4294967296
+            res = res + (bytes[pos + 5] as i64) * 1099511627776
+            res = res + (bytes[pos + 6] as i64) * 281474976710656
+            res = res + (bytes[pos + 7] as i64) * 72057594037927936
+            pos = pos + 8
+            # timestamp
+            var ts: i64 = 0
+            ts = ts + bytes[pos] as i64
+            ts = ts + (bytes[pos + 1] as i64) * 256
+            ts = ts + (bytes[pos + 2] as i64) * 65536
+            ts = ts + (bytes[pos + 3] as i64) * 16777216
+            ts = ts + (bytes[pos + 4] as i64) * 4294967296
+            ts = ts + (bytes[pos + 5] as i64) * 1099511627776
+            ts = ts + (bytes[pos + 6] as i64) * 281474976710656
+            ts = ts + (bytes[pos + 7] as i64) * 72057594037927936
+            val ev = JitReplayEvent(
+                seq_id: seq,
+                kind: kind,
+                function_hash: fh,
+                module_hash: mh,
+                args_hash: ah,
+                result: res,
+                timestamp: ts
+            )
+            self.events.push(ev)
+            self._seq = seq + 1
+            offset = offset + record_size

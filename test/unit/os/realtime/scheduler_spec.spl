@@ -1,0 +1,174 @@
+use std.spipe.*
+# Flat-array scheduler for interpreter-mode testing
+# Avoids: array[idx].field assignment, class methods on indexed items, var mutation in loops
+val TASK_STATE_IDLE: i64 = 0
+val TASK_STATE_READY: i64 = 1
+val TASK_STATE_RUNNING: i64 = 2
+val TASK_STATE_BLOCKED: i64 = 3
+val NUM_PRIORITIES: i64 = 8
+val QUEUE_CAP: i64 = 16
+val NO_TASK: i64 = -1
+# Flat arrays: task_state[id], task_priority[id]
+var task_state: [i64] = [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]
+var task_priority: [i64] = [7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7]
+# Per-priority queues stored as a flat [i64] with markers
+# queues[p] is a list of task ids; we use 8 separate vars
+var q0: [i64] = []
+var q1: [i64] = []
+var q2: [i64] = []
+var q3: [i64] = []
+var q4: [i64] = []
+var q5: [i64] = []
+var q6: [i64] = []
+var q7: [i64] = []
+var current_task_id: i64 = NO_TASK
+var priority_bitmap: i64 = 0
+fn make_slots() -> [i64]:
+    [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]
+fn make_pris() -> [i64]:
+    [7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7]
+fn sched_init():
+    task_state = make_slots()
+    task_priority = make_pris()
+    current_task_id = NO_TASK
+    priority_bitmap = 0
+    q0 = []
+    q1 = []
+    q2 = []
+    q3 = []
+    q4 = []
+    q5 = []
+    q6 = []
+    q7 = []
+fn q_get(p: i64) -> [i64]:
+    if p == 0: return q0
+    if p == 1: return q1
+    if p == 2: return q2
+    if p == 3: return q3
+    if p == 4: return q4
+    if p == 5: return q5
+    if p == 6: return q6
+    q7
+fn q_set(p: i64, v: [i64]):
+    if p == 0: q0 = v
+    if p == 1: q1 = v
+    if p == 2: q2 = v
+    if p == 3: q3 = v
+    if p == 4: q4 = v
+    if p == 5: q5 = v
+    if p == 6: q6 = v
+    if p == 7: q7 = v
+fn q_size(p: i64) -> i64:
+    q_get(p).len()
+fn q_empty(p: i64) -> bool:
+    q_get(p).len() == 0
+fn sched_add(tid: i64, pri: i64):
+    if pri < 0 or pri >= NUM_PRIORITIES: return
+    val cur = q_get(pri)
+    q_set(pri, cur + [tid])
+    priority_bitmap = priority_bitmap | (1 << pri)
+    task_state = set_at(task_state, tid, TASK_STATE_READY)
+    task_priority = set_at(task_priority, tid, pri)
+fn set_at(arr: [i64], idx: i64, v: i64) -> [i64]:
+    if idx == 0: return [v] + arr[1..]
+    if idx == 1: return arr[0..1] + [v] + arr[2..]
+    if idx == 2: return arr[0..2] + [v] + arr[3..]
+    if idx == 3: return arr[0..3] + [v] + arr[4..]
+    if idx == 4: return arr[0..4] + [v] + arr[5..]
+    if idx == 5: return arr[0..5] + [v] + arr[6..]
+    if idx == 6: return arr[0..6] + [v] + arr[7..]
+    if idx == 7: return arr[0..7] + [v] + arr[8..]
+    if idx == 8: return arr[0..8] + [v] + arr[9..]
+    arr[0..idx] + [v] + arr[(idx+1)..]
+fn sched_pick() -> i64:
+    if not q_empty(0): return pop_front(0)
+    if not q_empty(1): return pop_front(1)
+    if not q_empty(2): return pop_front(2)
+    if not q_empty(3): return pop_front(3)
+    if not q_empty(4): return pop_front(4)
+    if not q_empty(5): return pop_front(5)
+    if not q_empty(6): return pop_front(6)
+    if not q_empty(7): return pop_front(7)
+    NO_TASK
+fn pop_front(p: i64) -> i64:
+    val cur = q_get(p)
+    val first = cur[0]
+    q_set(p, cur[1..])
+    if q_get(p).len() == 0:
+        priority_bitmap = priority_bitmap & ~(1 << p)
+    first
+fn sched_yield():
+    if current_task_id == NO_TASK: return
+    val pri = task_priority[current_task_id]
+    sched_add(current_task_id, pri)
+fn sched_block(tid: i64):
+    task_state = set_at(task_state, tid, TASK_STATE_BLOCKED)
+fn sched_unblock(tid: i64):
+    if task_state[tid] != TASK_STATE_BLOCKED: return
+    val pri = task_priority[tid]
+    sched_add(tid, pri)
+fn get_task_state(tid: i64) -> i64:
+    task_state[tid]
+
+describe "Scheduler":
+    it "sched_init starts clean":
+        sched_init()
+        expect(current_task_id).to_equal(NO_TASK)
+        expect(priority_bitmap).to_equal(0)
+        expect(q_empty(0)).to_equal(true)
+        expect(q_empty(7)).to_equal(true)
+    it "sched_add puts task in correct queue":
+        sched_init()
+        sched_add(0, 3)
+        expect(q_size(3)).to_equal(1)
+        expect(task_state[0]).to_equal(TASK_STATE_READY)
+    it "sched_pick returns highest priority task":
+        sched_init()
+        sched_add(5, 4)
+        sched_add(2, 1)
+        sched_add(8, 6)
+        expect(sched_pick()).to_equal(2)
+    it "priority 0 runs before priority 7":
+        sched_init()
+        sched_add(3, 7)
+        sched_add(1, 0)
+        expect(sched_pick()).to_equal(1)
+        expect(sched_pick()).to_equal(3)
+    it "empty queue returns NO_TASK":
+        sched_init()
+        expect(sched_pick()).to_equal(NO_TASK)
+    it "FIFO within same priority":
+        sched_init()
+        sched_add(0, 2)
+        sched_add(1, 2)
+        sched_add(4, 2)
+        expect(sched_pick()).to_equal(0)
+        expect(sched_pick()).to_equal(1)
+        expect(sched_pick()).to_equal(4)
+    it "sched_yield re-queues current task":
+        sched_init()
+        sched_add(0, 2)
+        current_task_id = sched_pick()
+        expect(current_task_id).to_equal(0)
+        sched_yield()
+        expect(q_size(2)).to_equal(1)
+        expect(sched_pick()).to_equal(0)
+    it "sched_block sets state to BLOCKED":
+        sched_init()
+        sched_add(3, 1)
+        sched_block(3)
+        expect(get_task_state(3)).to_equal(TASK_STATE_BLOCKED)
+    it "sched_unblock returns task to ready queue":
+        sched_init()
+        sched_add(5, 4)
+        sched_block(5)
+        expect(get_task_state(5)).to_equal(TASK_STATE_BLOCKED)
+        sched_unblock(5)
+        expect(get_task_state(5)).to_equal(TASK_STATE_READY)
+        expect(sched_pick()).to_equal(5)
+    it "sched_unblock ignores non-blocked task":
+        sched_init()
+        sched_add(2, 3)
+        val before_size = q_size(3)
+        sched_unblock(2)
+        expect(q_size(3)).to_equal(before_size)

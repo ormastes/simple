@@ -1,56 +1,62 @@
 
-class QemuReplayAdapter {
-    qmp_socket: text,
-    gdb_port: i32,
-    recording: bool,
-    replaying: bool,
+use std.io.{shell}
 
-    fn create_from_backend(qmp_socket: text, gdb_port: i32) -> QemuReplayAdapter {
-        QemuReplayAdapter {
+class QemuReplayAdapter:
+    qmp_socket: text
+    gdb_port: i32
+    recording: bool
+    replaying: bool
+
+    static fn create_from_backend(qmp_socket: text, gdb_port: i32) -> QemuReplayAdapter:
+        QemuReplayAdapter(
             qmp_socket: qmp_socket,
             gdb_port: gdb_port,
             recording: false,
-            replaying: false,
-        }
-    }
+            replaying: false
+        )
 
-    fn start_record(self, kernel: text, arch: text, trace: text) {
+    me fn start_record(krnl: text, arch: text, trace: text):
         self.recording = true
         self.replaying = false
-    }
 
-    fn start_replay(self, trace: text) {
+    me fn start_replay(trace: text):
         self.recording = false
         self.replaying = true
-    }
 
-    fn reverse_step(self) {
-        // send reverse-step via QMP/GDB
-        pass_dn
-    }
+    # Send GDB MI "reverse-step" to the QEMU GDB stub on gdb_port.
+    # Returns Ok on success or Err if GDB command fails.
+    me fn reverse_step() -> Result<text, text>:
+        val cmd = "gdb --batch --ex 'target remote :{self.gdb_port}' --ex 'record full' --ex 'reverse-step' --ex 'quit' 2>&1"
+        val res = shell(cmd)
+        if res.exit_code == 0:
+            Ok("reverse stepped")
+        else:
+            Err("reverse-step failed (gdb_port={self.gdb_port}): {res.stderr.trim()}")
 
-    fn reverse_continue(self) {
-        // send reverse-continue via QMP/GDB
-        pass_dn
-    }
+    # Send GDB MI "reverse-continue" to the QEMU GDB stub on gdb_port.
+    # Returns Ok on success or Err if GDB command fails.
+    me fn reverse_continue() -> Result<text, text>:
+        val cmd = "gdb --batch --ex 'target remote :{self.gdb_port}' --ex 'record full' --ex 'reverse-continue' --ex 'quit' 2>&1"
+        val res = shell(cmd)
+        if res.exit_code == 0:
+            Ok("reverse continued")
+        else:
+            Err("reverse-continue failed (gdb_port={self.gdb_port}): {res.stderr.trim()}")
 
-    fn save_vm_checkpoint(self, name: text) {
-        // send savevm QMP command
-        pass_dn
-    }
+    # Save a VM snapshot via QMP savevm command over qmp_socket.
+    me fn save_vm_checkpoint(name: text):
+        val qmp_cmd = "{\"execute\": \"human-monitor-command\", \"arguments\": {\"command-line\": \"savevm {name}\"}}"
+        shell("echo '{qmp_cmd}' | socat - UNIX-CONNECT:{self.qmp_socket} 2>/dev/null")
 
-    fn restore_vm_checkpoint(self, name: text) {
-        // send loadvm QMP command
-        pass_dn
-    }
+    # Restore a VM snapshot via QMP loadvm command over qmp_socket.
+    me fn restore_vm_checkpoint(name: text):
+        val qmp_cmd = "{\"execute\": \"human-monitor-command\", \"arguments\": {\"command-line\": \"loadvm {name}\"}}"
+        shell("echo '{qmp_cmd}' | socat - UNIX-CONNECT:{self.qmp_socket} 2>/dev/null")
 
-    fn status(self) -> text {
-        if self.recording {
+    fn status() -> text:
+        if self.recording:
             "recording"
-        } else if self.replaying {
+        else if self.replaying:
             "replaying"
-        } else {
+        else:
             "off"
-        }
-    }
-}

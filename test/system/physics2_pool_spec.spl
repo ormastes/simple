@@ -1,0 +1,151 @@
+# Physics2 Pool/Billiards — System Test
+#
+# Verifies: circle-circle collision, TGS solver, friction,
+# restitution, sleeping, island manager, energy decay.
+
+use std.io_runtime
+use std.spec.{describe, it, expect}
+use std.common.math.{math_sqrt, math_abs}
+use std.common.engine.ids.{NodeId, RawHandle}
+use std.common.engine.math2d.{Vec2}
+use std.nogc_sync_mut.engine.physics2.config.{default_physics_config_2d, PhysicsConfig2D}
+use std.nogc_sync_mut.engine.physics2.world2d.{PhysicsWorld2D}
+
+fn make_node(idx: i64) -> NodeId:
+    NodeId(raw: RawHandle.new(idx, 1))
+
+fn make_pool_world() -> PhysicsWorld2D:
+    var config = default_physics_config_2d()
+    config.gravity = Vec2(x: 0.0, y: 0.0)
+    config.restitution = 0.9
+    config.friction = 0.3
+    var world = PhysicsWorld2D.create(config)
+    # Table walls (static AABB bodies)
+    val left_wall = make_node(100)
+    world.add_static_body(left_wall, -5.0, 0.0)
+    world.add_box_collider(left_wall, 0.5, 4.0)
+    val right_wall = make_node(101)
+    world.add_static_body(right_wall, 5.0, 0.0)
+    world.add_box_collider(right_wall, 0.5, 4.0)
+    val top_wall = make_node(102)
+    world.add_static_body(top_wall, 0.0, 4.0)
+    world.add_box_collider(top_wall, 5.0, 0.5)
+    val bottom_wall = make_node(103)
+    world.add_static_body(bottom_wall, 0.0, -4.0)
+    world.add_box_collider(bottom_wall, 5.0, 0.5)
+    # Place balls in triangle + cue ball
+    # Cue ball at (-3, 0)
+    val cue = make_node(0)
+    world.add_dynamic_body(cue, -3.0, 0.0, 1.0)
+    world.add_circle_collider(cue, 0.2)
+    # Triangle of 10 balls starting at (1.5, 0)
+    var ball_id = 1
+    var row = 0
+    while row < 4:
+        var col = 0
+        while col <= row:
+            val bx = 1.5 + row.to_f64() * 0.45
+            val by = (col.to_f64() - row.to_f64() / 2.0) * 0.45
+            val node = make_node(ball_id)
+            world.add_dynamic_body(node, bx, by, 1.0)
+            world.add_circle_collider(node, 0.2)
+            ball_id = ball_id + 1
+            col = col + 1
+        row = row + 1
+    world
+
+fn compute_total_ke(world: PhysicsWorld2D, ball_count: i64) -> f64:
+    var total = 0.0
+    var i = 0
+    while i < ball_count:
+        val node = make_node(i)
+        val vel = world.get_velocity(node)
+        total = total + 0.5 * (vel.x * vel.x + vel.y * vel.y)
+        i = i + 1
+    total
+
+fn all_balls_in_bounds(world: PhysicsWorld2D, ball_count: i64) -> bool:
+    var i = 0
+    while i < ball_count:
+        val node = make_node(i)
+        val pos = world.get_position(node)
+        if pos.x < -4.5 or pos.x > 4.5:
+            return false
+        if pos.y < -3.5 or pos.y > 3.5:
+            return false
+        i = i + 1
+    true
+
+describe "Physics2 Pool System":
+    it "all balls stay within table bounds":
+        var world = make_pool_world()
+        world.apply_impulse(make_node(0), 8.0, 0.5)
+        var step_i = 0
+        while step_i < 400:
+            world.step(0.016)
+            expect(all_balls_in_bounds(world, 11)).to_equal(true)
+            step_i = step_i + 1
+        world.destroy()
+
+    it "kinetic energy decreases over time":
+        var world = make_pool_world()
+        world.apply_impulse(make_node(0), 8.0, 0.0)
+        world.step(0.016)
+        val initial_ke = compute_total_ke(world, 11)
+        var step_i = 0
+        while step_i < 200:
+            world.step(0.016)
+            step_i = step_i + 1
+        val final_ke = compute_total_ke(world, 11)
+        expect(final_ke < initial_ke).to_equal(true)
+        world.destroy()
+
+    it "cue ball transfers energy on break":
+        var world = make_pool_world()
+        world.apply_impulse(make_node(0), 8.0, 0.0)
+        var step_i = 0
+        while step_i < 100:
+            world.step(0.016)
+            step_i = step_i + 1
+        # After break, other balls should have moved
+        var moved_count = 0
+        var i = 1
+        while i < 11:
+            val pos = world.get_position(make_node(i))
+            val vel = world.get_velocity(make_node(i))
+            val speed = math_sqrt(vel.x * vel.x + vel.y * vel.y)
+            if speed > 0.01:
+                moved_count = moved_count + 1
+            i = i + 1
+        expect(moved_count > 0).to_equal(true)
+        world.destroy()
+
+    it "deterministic: two runs produce same result":
+        var world1 = make_pool_world()
+        world1.apply_impulse(make_node(0), 8.0, 0.2)
+        var step_i = 0
+        while step_i < 200:
+            world1.step(0.016)
+            step_i = step_i + 1
+        val pos1 = world1.get_position(make_node(0))
+        world1.destroy()
+        var world2 = make_pool_world()
+        world2.apply_impulse(make_node(0), 8.0, 0.2)
+        step_i = 0
+        while step_i < 200:
+            world2.step(0.016)
+            step_i = step_i + 1
+        val pos2 = world2.get_position(make_node(0))
+        world2.destroy()
+        expect(pos1.x).to_equal(pos2.x)
+        expect(pos1.y).to_equal(pos2.y)
+
+    it "system handles 11 balls without crash":
+        var world = make_pool_world()
+        world.apply_impulse(make_node(0), 10.0, 1.0)
+        var step_i = 0
+        while step_i < 600:
+            world.step(0.016)
+            step_i = step_i + 1
+        expect(world.body_count() > 0).to_equal(true)
+        world.destroy()

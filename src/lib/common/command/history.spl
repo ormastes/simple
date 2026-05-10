@@ -1,0 +1,106 @@
+# CommandHistory — unified undo/redo stack with merge support
+#
+# Extends the snapshot-based approach (common/office/undo.spl) with
+# time-windowed merge so high-frequency operations (brush strokes,
+# slider drags) collapse into a single undo entry.
+
+use std.common.command.command.{CommandEntry, CommandMeta}
+
+# ============================================================================
+# CommandHistory
+# ============================================================================
+
+class CommandHistory:
+    entries: [CommandEntry]
+    position: i32
+    max_size: i32
+    merge_window_ms: i64
+    next_id: i64
+
+    static fn new(max_size: i32, merge_window_ms: i64) -> CommandHistory:
+        CommandHistory(
+            entries: [],
+            position: -1,
+            max_size: max_size,
+            merge_window_ms: merge_window_ms,
+            next_id: 1
+        )
+
+    static fn with_defaults() -> CommandHistory:
+        CommandHistory.new(200, 300)
+
+    me push(entry: CommandEntry):
+        var kept: [CommandEntry] = []
+        var idx = 0
+        for e in self.entries:
+            if idx <= self.position:
+                kept = kept.push(e)
+            idx = idx + 1
+
+        if kept.len() > 0:
+            val top = kept[kept.len() - 1]
+            if top.is_mergeable_with(entry, self.merge_window_ms):
+                val merged = CommandEntry(
+                    meta: top.meta,
+                    before_snapshot: top.before_snapshot,
+                    after_snapshot: entry.after_snapshot,
+                    merged_count: top.merged_count + 1
+                )
+                var updated: [CommandEntry] = []
+                var mi = 0
+                for e in kept:
+                    if mi < kept.len() - 1:
+                        updated = updated.push(e)
+                    mi = mi + 1
+                updated = updated.push(merged)
+                self.entries = updated
+                self.position = self.entries.len() - 1
+                return
+
+        kept = kept.push(entry)
+
+        if kept.len() > self.max_size:
+            var trimmed: [CommandEntry] = []
+            var ti = 0
+            val drop_count = kept.len() - self.max_size
+            for e in kept:
+                if ti >= drop_count:
+                    trimmed = trimmed.push(e)
+                ti = ti + 1
+            self.entries = trimmed
+        else:
+            self.entries = kept
+        self.position = self.entries.len() - 1
+        self.next_id = self.next_id + 1
+
+    me undo() -> text?:
+        if self.position < 0:
+            return nil
+        val entry = self.entries[self.position]
+        self.position = self.position - 1
+        return entry.before_snapshot
+
+    me redo() -> text?:
+        if self.position >= self.entries.len() - 1:
+            return nil
+        self.position = self.position + 1
+        val entry = self.entries[self.position]
+        return entry.after_snapshot
+
+    fn can_undo(self) -> bool:
+        self.position >= 0
+
+    fn can_redo(self) -> bool:
+        self.position < self.entries.len() - 1
+
+    fn current_description(self) -> text?:
+        if self.position < 0:
+            return nil
+        return self.entries[self.position].meta.description
+
+    fn entry_count(self) -> i32:
+        self.entries.len()
+
+    me clear():
+        self.entries = []
+        self.position = -1
