@@ -1,0 +1,167 @@
+# Editor Piece Table
+#
+# Append-only piece table for text editing. Adapted from SVIM core.
+# Original text is immutable; edits append to add_buffer and adjust piece list.
+
+struct EditorPiece:
+    source: text
+    start: i64
+    length: i64
+
+class EditorPieceTable:
+    original: text
+    add_buffer: text
+    pieces: [EditorPiece]
+
+impl EditorPieceTable:
+
+    static fn from_text(content: text) -> EditorPieceTable:
+        var pieces: [EditorPiece] = []
+        if content.len() > 0:
+            pieces.push(EditorPiece(source: "original", start: 0, length: content.len()))
+        EditorPieceTable(original: content, add_buffer: "", pieces: pieces)
+
+    fn len() -> i64:
+        var total = 0
+        for piece in self.pieces:
+            total = total + piece.length
+        total
+
+    fn to_text() -> text:
+        var out = ""
+        for piece in self.pieces:
+            out = out + _pt_slice(self, piece)
+        out
+
+    me insert(offset: i64, content: text):
+        if content.len() == 0:
+            return
+        val clamped = _pt_clamp(offset, 0, self.len())
+        val add_start = self.add_buffer.len()
+        self.add_buffer = self.add_buffer + content
+        val inserted = EditorPiece(source: "add", start: add_start, length: content.len())
+        self.pieces = _pt_insert_piece(self.pieces, clamped, inserted)
+
+    me delete(start: i64, end: i64):
+        val total = self.len()
+        val s = _pt_clamp(start, 0, total)
+        val e = _pt_clamp(end, s, total)
+        if e <= s:
+            return
+        self.pieces = _pt_delete_range(self.pieces, s, e)
+
+    fn line_count() -> i64:
+        val content = self.to_text()
+        var count = 1
+        var i = 0
+        while i < content.len():
+            if content.char_at(i) == "\n":
+                count = count + 1
+            i = i + 1
+        count
+
+    fn line_at(row: i64) -> text:
+        val content = self.to_text()
+        val starts = _pt_compute_line_starts(content)
+        if row < 0 or row >= starts.len():
+            return ""
+        val start = starts[row]
+        val end = if row + 1 < starts.len() then starts[row + 1] - 1 else: content.len()
+        content.slice(start, end)
+
+    fn line_starts() -> [i64]:
+        _pt_compute_line_starts(self.to_text())
+
+
+fn _pt_slice(table: EditorPieceTable, piece: EditorPiece) -> text:
+    if piece.length <= 0:
+        return ""
+    if piece.source == "add":
+        return table.add_buffer.slice(piece.start, piece.start + piece.length)
+    table.original.slice(piece.start, piece.start + piece.length)
+
+fn _pt_insert_piece(pieces: [EditorPiece], offset: i64, inserted: EditorPiece) -> [EditorPiece]:
+    var result: [EditorPiece] = []
+    var cursor = 0
+    var inserted_now = false
+    for piece in pieces:
+        val next_cursor = cursor + piece.length
+        if not inserted_now and offset <= next_cursor:
+            val local = offset - cursor
+            if local <= 0:
+                result.push(inserted)
+                result.push(piece)
+            elif local >= piece.length:
+                result.push(piece)
+                result.push(inserted)
+            else:
+                result.push(EditorPiece(source: piece.source, start: piece.start, length: local))
+                result.push(inserted)
+                result.push(EditorPiece(source: piece.source, start: piece.start + local, length: piece.length - local))
+            inserted_now = true
+        else:
+            result.push(piece)
+        cursor = next_cursor
+    if not inserted_now:
+        result.push(inserted)
+    result
+
+fn _pt_delete_range(pieces: [EditorPiece], start: i64, end: i64) -> [EditorPiece]:
+    var result: [EditorPiece] = []
+    var cursor = 0
+    for piece in pieces:
+        val piece_start = cursor
+        val piece_end = cursor + piece.length
+        if end <= piece_start or start >= piece_end:
+            result.push(piece)
+        else:
+            val left_keep = _pt_clamp(start - piece_start, 0, piece.length)
+            val right_drop = _pt_clamp(end - piece_start, 0, piece.length)
+            if left_keep > 0:
+                result.push(EditorPiece(source: piece.source, start: piece.start, length: left_keep))
+            if right_drop < piece.length:
+                result.push(EditorPiece(source: piece.source, start: piece.start + right_drop, length: piece.length - right_drop))
+        cursor = piece_end
+    result
+
+fn _pt_compute_line_starts(content: text) -> [i64]:
+    var starts: [i64] = [0]
+    var i = 0
+    while i < content.len():
+        if content.char_at(i) == "\n":
+            starts.push(i + 1)
+        i = i + 1
+    starts
+
+fn _pt_clamp(value: i64, low: i64, high: i64) -> i64:
+    if value < low:
+        return low
+    if value > high:
+        return high
+    value
+
+fn pt_row_col_to_offset(line_starts: [i64], row: i64, col: i64) -> i64:
+    if line_starts.len() == 0:
+        return 0
+    val clamped_row = _pt_clamp(row, 0, line_starts.len() - 1)
+    line_starts[clamped_row] + col
+
+fn pt_offset_to_cursor(line_starts: [i64], offset: i64) -> EditorCursor:
+    if line_starts.len() == 0:
+        return EditorCursor(row: 0, col: 0)
+    var row = 0
+    var i = 0
+    while i < line_starts.len():
+        if line_starts[i] > offset:
+            break
+        row = i
+        i = i + 1
+    EditorCursor(row: row, col: offset - line_starts[row])
+
+fn pt_line_length(content: text, line_starts: [i64], row: i64) -> i64:
+    if line_starts.len() == 0:
+        return 0
+    val clamped_row = _pt_clamp(row, 0, line_starts.len() - 1)
+    val start = line_starts[clamped_row]
+    val end = if clamped_row + 1 < line_starts.len() then line_starts[clamped_row + 1] - 1 else: content.len()
+    end - start

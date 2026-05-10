@@ -15,40 +15,51 @@ fn register_protocol(config: ProtocolConfig) -> Result<bool, NotSupported>:
     val platform = rt_platform_name()
     if platform == "linux":
         val home = env_home()
-        val desktop_dir = "{home}/.local/share/applications"
-        val desktop_file = "{desktop_dir}/simple-{config.scheme}.desktop"
-        val content = "[Desktop Entry]\nType=Application\nName={config.app_name}\nExec={config.binary_path} %u\nMimeType=x-scheme-handler/{config.scheme};\nNoDisplay=true\nTerminal=false"
-        val write_result = process_run("/bin/sh", ["-c", "mkdir -p {desktop_dir} && printf '%s' '{content}' > {desktop_file}"])
+        val scheme = config.scheme
+        val app_name = config.app_name
+        val bin_path = config.binary_path
+        val desktop_dir = home + "/.local/share/applications"
+        val desktop_filename = "simple-" + scheme + ".desktop"
+        val desktop_file = desktop_dir + "/" + desktop_filename
+        val content = "[Desktop Entry]\nType=Application\nName=" + app_name + "\nExec=" + bin_path + " %u\nMimeType=x-scheme-handler/" + scheme + ";\nNoDisplay=true\nTerminal=false"
+        val write_cmd = "mkdir -p " + desktop_dir + " && printf '%s' '" + content + "' > " + desktop_file
+        val write_result = process_run("/bin/sh", ["-c", write_cmd])
         if write_result.2 != 0:
-            return Err(NotSupported.new("failed to write desktop file: {write_result.1}"))
-        val mime_result = process_run("xdg-mime", ["default", "simple-{config.scheme}.desktop", "x-scheme-handler/{config.scheme}"])
+            val err = write_result.1
+            return Err(NotSupported.new("failed to write desktop file: " + err))
+        val mime_result = process_run("xdg-mime", ["default", desktop_filename, "x-scheme-handler/" + scheme])
         if mime_result.2 != 0:
-            return Err(NotSupported.new("xdg-mime registration failed: {mime_result.1}"))
+            val merr = mime_result.1
+            return Err(NotSupported.new("xdg-mime registration failed: " + merr))
         Ok(true)
     elif platform == "macos":
         Err(NotSupported.new("protocol registration on macOS requires app bundle Info.plist"))
     else:
-        Err(NotSupported.new("protocol registration not supported on {platform}"))
+        Err(NotSupported.new("protocol registration not supported on " + platform))
 
 fn unregister_protocol(scheme: text) -> Result<bool, NotSupported>:
     val platform = rt_platform_name()
     if platform == "linux":
         val home = env_home()
-        val desktop_file = "{home}/.local/share/applications/simple-{scheme}.desktop"
-        val result = process_run("/bin/sh", ["-c", "rm -f {desktop_file} && update-desktop-database {home}/.local/share/applications/ 2>/dev/null"])
+        val app_dir = home + "/.local/share/applications"
+        val desktop_file = app_dir + "/simple-" + scheme + ".desktop"
+        val cmd = "rm -f " + desktop_file + " && update-desktop-database " + app_dir + " 2>/dev/null"
+        val result = process_run("/bin/sh", ["-c", cmd])
         Ok(result.2 == 0)
     else:
-        Err(NotSupported.new("protocol unregistration not supported on {platform}"))
+        Err(NotSupported.new("protocol unregistration not supported on " + platform))
 
 fn is_protocol_registered(scheme: text) -> Result<bool, NotSupported>:
     val platform = rt_platform_name()
     if platform == "linux":
-        val result = process_run("xdg-mime", ["query", "default", "x-scheme-handler/{scheme}"])
+        val mime_type = "x-scheme-handler/" + scheme
+        val result = process_run("xdg-mime", ["query", "default", mime_type])
         if result.2 != 0:
             return Ok(false)
         val handler = result.0
-        Ok(handler.contains("simple-{scheme}"))
+        val expected = "simple-" + scheme
+        Ok(handler.contains(expected))
     elif platform == "macos":
         Err(NotSupported.new("protocol query not supported on macOS"))
     else:
-        Err(NotSupported.new("protocol query not supported on {platform}"))
+        Err(NotSupported.new("protocol query not supported on " + platform))
