@@ -1,0 +1,98 @@
+"""Bounded USER32 window lifecycle bridge backed by SimpleOS window records."""
+
+use common.ui.wine_simpleos_window_bridge.{
+    WineSimpleOsWindowBridge,
+    wine_simpleos_window_bridge_new,
+    wine_simpleos_create_window,
+    wine_simpleos_map_window,
+    wine_simpleos_present_window,
+    wine_simpleos_destroy_window
+}
+use common.wine_nt_api_catalog.{wine_nt_api_gui_dispatch_gate}
+
+class WineUser32WindowLifecycleResult:
+    ok: bool
+    error: text
+    hwnd: u64
+    title: text
+    operations: text
+    checksum: i64
+    bridge: WineSimpleOsWindowBridge
+
+class WineUser32MessageLoopResult:
+    ok: bool
+    error: text
+    hwnd: u64
+    message: text
+    translated: bool
+    dispatched_count: i64
+
+fn _result(ok: bool, error: text, hwnd: u64, title: text, operations: text, checksum: i64, bridge: WineSimpleOsWindowBridge) -> WineUser32WindowLifecycleResult:
+    WineUser32WindowLifecycleResult(ok: ok, error: error, hwnd: hwnd, title: title, operations: operations, checksum: checksum, bridge: bridge)
+
+fn _message_result(ok: bool, error: text, hwnd: u64, message: text, translated: bool, dispatched_count: i64) -> WineUser32MessageLoopResult:
+    WineUser32MessageLoopResult(ok: ok, error: error, hwnd: hwnd, message: message, translated: translated, dispatched_count: dispatched_count)
+
+fn _sequence_gate(symbols: [text]) -> text:
+    val dispatch_state = wine_nt_api_gui_dispatch_gate(symbols)
+    if dispatch_state != "ready":
+        return dispatch_state
+    if symbols.len() != 4:
+        return "user32-sequence-count-mismatch"
+    if symbols[0] != "CreateWindowExW":
+        return "user32-sequence-expected:CreateWindowExW"
+    if symbols[1] != "ShowWindow":
+        return "user32-sequence-expected:ShowWindow"
+    if symbols[2] != "UpdateWindow":
+        return "user32-sequence-expected:UpdateWindow"
+    if symbols[3] != "DefWindowProcW":
+        return "user32-sequence-expected:DefWindowProcW"
+    "ready"
+
+fn _message_sequence_gate(symbols: [text]) -> text:
+    val dispatch_state = wine_nt_api_gui_dispatch_gate(symbols)
+    if dispatch_state != "ready":
+        return dispatch_state
+    if symbols.len() != 4:
+        return "user32-message-sequence-count-mismatch"
+    if symbols[0] != "PeekMessageW":
+        return "user32-message-sequence-expected:PeekMessageW"
+    if symbols[1] != "GetMessageW":
+        return "user32-message-sequence-expected:GetMessageW"
+    if symbols[2] != "TranslateMessage":
+        return "user32-message-sequence-expected:TranslateMessage"
+    if symbols[3] != "DispatchMessageW":
+        return "user32-message-sequence-expected:DispatchMessageW"
+    "ready"
+
+pub fn wine_user32_execute_window_lifecycle(symbols: [text], hwnd: u64, title: text, width: u32, height: u32, frame_seed: i64) -> WineUser32WindowLifecycleResult:
+    val sequence_state = _sequence_gate(symbols)
+    if sequence_state != "ready":
+        return _result(false, sequence_state, hwnd, title, "", 0, wine_simpleos_window_bridge_new())
+    if title == "":
+        return _result(false, "empty-title", hwnd, title, "", 0, wine_simpleos_window_bridge_new())
+    if frame_seed <= 0:
+        return _result(false, "invalid-frame-seed", hwnd, title, "", 0, wine_simpleos_window_bridge_new())
+    val created = wine_simpleos_create_window(wine_simpleos_window_bridge_new(), hwnd, "wine", title, width, height)
+    if not created.ok:
+        return _result(false, "CreateWindowExW:" + created.state, hwnd, title, created.bridge.operations, created.bridge.checksum, created.bridge)
+    val shown = wine_simpleos_map_window(created.bridge, hwnd)
+    if not shown.ok:
+        return _result(false, "ShowWindow:" + shown.state, hwnd, title, shown.bridge.operations, shown.bridge.checksum, shown.bridge)
+    val updated = wine_simpleos_present_window(shown.bridge, hwnd, frame_seed)
+    if not updated.ok:
+        return _result(false, "UpdateWindow:" + updated.state, hwnd, title, updated.bridge.operations, updated.bridge.checksum, updated.bridge)
+    val defproc = wine_simpleos_destroy_window(updated.bridge, hwnd)
+    if not defproc.ok:
+        return _result(false, "DefWindowProcW:" + defproc.state, hwnd, title, defproc.bridge.operations, defproc.bridge.checksum, defproc.bridge)
+    _result(true, "", hwnd, title, defproc.bridge.operations, defproc.bridge.checksum, defproc.bridge)
+
+pub fn wine_user32_execute_message_loop(symbols: [text], hwnd: u64, message: text) -> WineUser32MessageLoopResult:
+    val sequence_state = _message_sequence_gate(symbols)
+    if sequence_state != "ready":
+        return _message_result(false, sequence_state, hwnd, message, false, 0)
+    if hwnd == 0:
+        return _message_result(false, "invalid-hwnd", hwnd, message, false, 0)
+    if message == "":
+        return _message_result(false, "empty-message", hwnd, message, false, 0)
+    _message_result(true, "", hwnd, message, true, 1)

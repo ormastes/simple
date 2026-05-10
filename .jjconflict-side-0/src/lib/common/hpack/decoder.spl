@@ -1,0 +1,208 @@
+# HPACK decoder (RFC 7541 §6).
+#
+# Decodes a byte stream into a list of HpackHeader values, updating the
+# dynamic table as entries are indexed.
+#
+# Representation detection (high bits of the first byte):
+#   1xxxxxxx  →  §6.1  Indexed Header Field
+#   01xxxxxx  →  §6.2.1 Literal w/ Incremental Indexing
+#   001xxxxx  →  §6.3  Dynamic Table Size Update
+#   0001xxxx  →  §6.2.3 Literal Never Indexed
+#   0000xxxx  →  §6.2.2 Literal without Indexing
+
+use std.common.hpack.varint.{encode_prefix_int, decode_prefix_int}
+use std.common.hpack.static_table.{hpack_static_lookup, hpack_static_table_size}
+use std.common.hpack.dynamic_table.{DynamicTable, DynamicEntry, dynamic_table_new, dynamic_table_insert, dynamic_table_find, dynamic_table_lookup, dynamic_table_resize}
+use std.common.hpack.huffman_h2.{hpack_huffman_encode, hpack_huffman_decode}
+use std.common.hpack.encoder.{HpackHeader, HpackEncoderState, HpackDecoderState, hpack_encoder_new, hpack_decoder_new, _text_to_u8, _u8_to_text, _append_bytes}
+
+# ----------------------------------------------------------------------------
+# Internal helpers
+# ----------------------------------------------------------------------------
+
+# Unified index lookup: static 1..61, dynamic 62..(61+N).
+# Returns (name_text, value_text) or Err if index is out of range.
+fn _lookup_unified(dtable: DynamicTable, index: i64) -> Result<(text, text), text>:
+    if index < 1:
+        return Err("hpack_decode: index 0 is reserved (RFC 7541 §6.1)")
+    if index <= 61:
+        val entry = hpack_static_lookup(index)
+        if entry == nil:
+            return Err("hpack_decode: static index out of range: " + index.to_text())
+        return Ok((entry.name, entry.value))
+    # Dynamic table: unified index 62 → relative index 1
+    val dyn_rel = index - 61
+    val entry = dynamic_table_lookup(dtable, dyn_rel)
+    if entry == nil:
+        return Err("hpack_decode: dynamic index out of range: " + index.to_text())
+    Ok((entry.name, entry.value))
+
+# Decode an HPACK string (H=0 raw or H=1 Huffman) at bytes[offset].
+# Returns (text_value, bytes_consumed).
+fn _decode_string(bytes: [u8], offset: i64) -> Result<(text, i64), text>:
+    if offset < 0 or offset >= bytes.len():
+        return Err("_decode_string: offset out of range")
+    val first = bytes[offset].to_i64()
+    val h_bit = (first & 0x80) != 0
+    val len_res = decode_prefix_int(bytes, offset, 7)
+    if len_res.is_err():
+        return Err("_decode_string: length varint: " + len_res.unwrap_err())
+    val len_pair = len_res.unwrap()
+    val length = len_pair.0
+    val header_len = len_pair.1
+    val payload_start = offset + header_len
+    if payload_start + length > bytes.len():
+        return Err("_decode_string: declared length exceeds buffer")
+    if h_bit:
+        val huff_res = hpack_huffman_decode(bytes, payload_start, length)
+        if huff_res.is_err():
+            return Err("_decode_string: huffman decode: " + huff_res.unwrap_err())
+        val decoded_bytes = huff_res.unwrap()
+        Ok((_u8_to_text(decoded_bytes), header_len + length))
+    else:
+        var raw: [u8] = []
+        var j: i64 = 0
+        while j < length:
+            raw = raw + [bytes[payload_start + j]]
+            j = j + 1
+        Ok((_u8_to_text(raw), header_len + length))
+
+# ----------------------------------------------------------------------------
+# Public API
+# ----------------------------------------------------------------------------
+
+# Decode a complete HPACK-encoded byte sequence into a list of headers.
+# Returns (headers, new_state) or Err on malformed input.
+fn hpack_decode(bytes: [u8], state: HpackDecoderState) -> Result<([HpackHeader], HpackDecoderState), text>:
+    var headers: [HpackHeader] = []
+    var cur_table = state.table
+    var offset: i64 = 0
+    var done = false
+    while not done:
+        if offset >= bytes.len():
+            done = true
+        else:
+            val first = bytes[offset].to_i64()
+            if (first & 0x80) != 0:
+                # §6.1 Indexed Header Field (1xxxxxxx)
+                val idx_res = decode_prefix_int(bytes, offset, 7)
+                if idx_res.is_err():
+                    return Err("hpack_decode §6.1: " + idx_res.unwrap_err())
+                val idx_pair = idx_res.unwrap()
+                val idx = idx_pair.0
+                val consumed = idx_pair.1
+                if idx == 0:
+                    return Err("hpack_decode §6.1: index 0 is reserved")
+                val lookup_res = _lookup_unified(cur_table, idx)
+                if lookup_res.is_err():
+                    return Err("hpack_decode §6.1: " + lookup_res.unwrap_err())
+                val pair = lookup_res.unwrap()
+                val h = HpackHeader(name: pair.0, value: pair.1, sensitive: false)
+                headers = headers + [h]
+                offset = offset + consumed
+            else if (first & 0xc0) == 0x40:
+                # §6.2.1 Literal w/ Incremental Indexing (01xxxxxx)
+                val idx_res = decode_prefix_int(bytes, offset, 6)
+                if idx_res.is_err():
+                    return Err("hpack_decode §6.2.1: " + idx_res.unwrap_err())
+                val idx_pair = idx_res.unwrap()
+                val name_idx = idx_pair.0
+                val idx_consumed = idx_pair.1
+                offset = offset + idx_consumed
+                var name_text = ""
+                if name_idx == 0:
+                    # Literal name
+                    val name_res = _decode_string(bytes, offset)
+                    if name_res.is_err():
+                        return Err("hpack_decode §6.2.1 name: " + name_res.unwrap_err())
+                    val name_pair = name_res.unwrap()
+                    name_text = name_pair.0
+                    offset = offset + name_pair.1
+                else:
+                    val lookup_res = _lookup_unified(cur_table, name_idx)
+                    if lookup_res.is_err():
+                        return Err("hpack_decode §6.2.1 name lookup: " + lookup_res.unwrap_err())
+                    name_text = lookup_res.unwrap().0
+                val val_res = _decode_string(bytes, offset)
+                if val_res.is_err():
+                    return Err("hpack_decode §6.2.1 value: " + val_res.unwrap_err())
+                val val_pair = val_res.unwrap()
+                val value_text = val_pair.0
+                offset = offset + val_pair.1
+                val h = HpackHeader(name: name_text, value: value_text, sensitive: false)
+                headers = headers + [h]
+                cur_table = dynamic_table_insert(cur_table, name_text, value_text)
+            else if (first & 0xe0) == 0x20:
+                # §6.3 Dynamic Table Size Update (001xxxxx)
+                val sz_res = decode_prefix_int(bytes, offset, 5)
+                if sz_res.is_err():
+                    return Err("hpack_decode §6.3: " + sz_res.unwrap_err())
+                val sz_pair = sz_res.unwrap()
+                val new_size = sz_pair.0
+                val consumed = sz_pair.1
+                cur_table = dynamic_table_resize(cur_table, new_size)
+                offset = offset + consumed
+            else if (first & 0xf0) == 0x10:
+                # §6.2.3 Literal Never Indexed (0001xxxx)
+                val idx_res = decode_prefix_int(bytes, offset, 4)
+                if idx_res.is_err():
+                    return Err("hpack_decode §6.2.3: " + idx_res.unwrap_err())
+                val idx_pair = idx_res.unwrap()
+                val name_idx = idx_pair.0
+                val idx_consumed = idx_pair.1
+                offset = offset + idx_consumed
+                var name_text = ""
+                if name_idx == 0:
+                    val name_res = _decode_string(bytes, offset)
+                    if name_res.is_err():
+                        return Err("hpack_decode §6.2.3 name: " + name_res.unwrap_err())
+                    val name_pair = name_res.unwrap()
+                    name_text = name_pair.0
+                    offset = offset + name_pair.1
+                else:
+                    val lookup_res = _lookup_unified(cur_table, name_idx)
+                    if lookup_res.is_err():
+                        return Err("hpack_decode §6.2.3 name lookup: " + lookup_res.unwrap_err())
+                    name_text = lookup_res.unwrap().0
+                val val_res = _decode_string(bytes, offset)
+                if val_res.is_err():
+                    return Err("hpack_decode §6.2.3 value: " + val_res.unwrap_err())
+                val val_pair = val_res.unwrap()
+                val value_text = val_pair.0
+                offset = offset + val_pair.1
+                val h = HpackHeader(name: name_text, value: value_text, sensitive: true)
+                headers = headers + [h]
+                # Never insert into dynamic table (§6.2.3)
+            else:
+                # §6.2.2 Literal without Indexing (0000xxxx)
+                val idx_res = decode_prefix_int(bytes, offset, 4)
+                if idx_res.is_err():
+                    return Err("hpack_decode §6.2.2: " + idx_res.unwrap_err())
+                val idx_pair = idx_res.unwrap()
+                val name_idx = idx_pair.0
+                val idx_consumed = idx_pair.1
+                offset = offset + idx_consumed
+                var name_text = ""
+                if name_idx == 0:
+                    val name_res = _decode_string(bytes, offset)
+                    if name_res.is_err():
+                        return Err("hpack_decode §6.2.2 name: " + name_res.unwrap_err())
+                    val name_pair = name_res.unwrap()
+                    name_text = name_pair.0
+                    offset = offset + name_pair.1
+                else:
+                    val lookup_res = _lookup_unified(cur_table, name_idx)
+                    if lookup_res.is_err():
+                        return Err("hpack_decode §6.2.2 name lookup: " + lookup_res.unwrap_err())
+                    name_text = lookup_res.unwrap().0
+                val val_res = _decode_string(bytes, offset)
+                if val_res.is_err():
+                    return Err("hpack_decode §6.2.2 value: " + val_res.unwrap_err())
+                val val_pair = val_res.unwrap()
+                val value_text = val_pair.0
+                offset = offset + val_pair.1
+                val h = HpackHeader(name: name_text, value: value_text, sensitive: false)
+                headers = headers + [h]
+                # Do NOT insert into dynamic table (§6.2.2)
+    val new_state = HpackDecoderState(table: cur_table)
+    Ok((headers, new_state))

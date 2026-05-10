@@ -1,0 +1,63 @@
+use std.spec.{describe, it, expect}
+use app.test_daemon.qemu_broker.{qemu_broker_new, QEMU_IDLE, QEMU_IN_USE}
+
+describe "QemuBroker":
+    it "creates a new session on first acquire":
+        val broker = qemu_broker_new(4)
+        val session = broker.acquire("arm64", "/bin/test-a")
+        expect(session.arch).to_equal("arm64")
+        expect(session.status).to_equal(QEMU_IN_USE)
+        expect(broker.active_count()).to_equal(1)
+        expect(broker.idle_count()).to_equal(0)
+
+    it "reuses an idle session with the same key":
+        val broker = qemu_broker_new(4)
+        val s1 = broker.acquire("arm64", "/bin/test-a")
+        broker.release(s1.session_key)
+        val s2 = broker.acquire("arm64", "/bin/test-a")
+
+        expect(s2.session_key).to_equal(s1.session_key)
+        expect(s2.test_count).to_equal(2)
+        expect(broker.active_count()).to_equal(1)
+
+    it "creates separate sessions for different binaries or architectures":
+        val broker = qemu_broker_new(4)
+        val a = broker.acquire("arm64", "/bin/test-a")
+        val b = broker.acquire("arm64", "/bin/test-b")
+        val c = broker.acquire("riscv64", "/bin/test-a")
+
+        expect(a.session_key != b.session_key).to_equal(true)
+        expect(a.session_key != c.session_key).to_equal(true)
+        expect(broker.active_count()).to_equal(3)
+
+    it "marks released sessions idle":
+        val broker = qemu_broker_new(4)
+        val session = broker.acquire("arm64", "/bin/test-a")
+        broker.release(session.session_key)
+
+        expect(broker.active_count()).to_equal(0)
+        expect(broker.idle_count()).to_equal(1)
+        expect(broker.sessions[0].status).to_equal(QEMU_IDLE)
+
+    it "evicts the oldest idle session when at limit":
+        val broker = qemu_broker_new(2)
+        val s1 = broker.acquire("a", "/bin/a")
+        broker.release(s1.session_key)
+        val s2 = broker.acquire("b", "/bin/b")
+        broker.release(s2.session_key)
+
+        broker.acquire("c", "/bin/c")
+        expect(broker.sessions.len()).to_equal(2)
+
+    it "cleans up idle sessions and can shut down all":
+        val broker = qemu_broker_new(4)
+        val s1 = broker.acquire("arm64", "/bin/test-a")
+        broker.release(s1.session_key)
+        broker.cleanup_idle(0)
+        expect(broker.sessions.len()).to_equal(0)
+
+        broker.acquire("x", "/bin/x")
+        broker.acquire("y", "/bin/y")
+        expect(broker.sessions.len()).to_equal(2)
+        broker.shutdown_all()
+        expect(broker.sessions.len()).to_equal(0)

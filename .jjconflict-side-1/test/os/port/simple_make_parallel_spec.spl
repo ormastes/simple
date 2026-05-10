@@ -1,0 +1,45 @@
+## simple_make parallel — Stub Spec
+##
+## Verifies that with jobs=2, two independent targets can build concurrently.
+## Gated on SIMPLEOS_MAKE_PARALLEL=1. When unset, all it blocks skip.
+##
+## Run:
+##   SIMPLEOS_MAKE_PARALLEL=1 bin/simple test test/os/port/simple_make_parallel_spec.spl
+
+use std.fs
+use std.spec
+use os.port.build_tools.simple_make.{parse_makefile, build_target_parallel, MakeFile}
+
+extern fn rt_env_get(key: text) -> text
+
+fn parallel_enabled() -> bool:
+    val v = rt_env_get("SIMPLEOS_MAKE_PARALLEL")
+    if v == nil:
+        return false
+    v == "1"
+
+describe "simple_make parallel execution":
+    """
+    ## -j N dispatches independent targets concurrently
+
+    With jobs=2 and two leaf targets with no shared deps, both targets
+    should be dispatched to separate threads without one waiting on the other.
+    """
+
+    it "build_target_parallel returns true for a trivially empty makefile":
+        if not parallel_enabled():
+            return
+        val mf = parse_makefile("all:\n")
+        var built: [text] = []
+        val ok = build_target_parallel(mf, "all", built, 2)
+        expect(ok).to_equal(true)
+
+    it "build_target_parallel with two independent leaf targets succeeds":
+        if not parallel_enabled():
+            return
+        # Two rules with no deps — both are leaves, eligible for parallel dispatch
+        val content = "all: a b\na:\n\techo built_a\nb:\n\techo built_b\n"
+        val mf = parse_makefile(content)
+        var built: [text] = []
+        val ok = build_target_parallel(mf, "all", built, 2)
+        expect(ok).to_equal(true)

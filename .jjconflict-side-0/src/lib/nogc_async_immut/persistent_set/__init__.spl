@@ -1,0 +1,193 @@
+# Persistent Set — Immutable Set backed by PersistentMap (HAMT)
+#
+# @tag:api
+#
+# An immutable, persistent set using PersistentMap<T, true> internally.
+# Every mutation (add, remove, union, etc.) returns a NEW set — the
+# original is never modified.
+#
+# Follows the Scala/Clojure pattern: Set wraps Map with unit values.
+# Structural sharing means updates copy only O(log32 n) nodes.
+# Thread-safe by construction: immutable values need no locks.
+#
+# Usage:
+#   use std.persistent_set.{PersistentSet, PersistentSet.empty, PersistentSet.from_array}
+#
+#   val s0 = PersistentSet.empty()
+#   val s1 = s0.add("alice")
+#   val s2 = s1.add("bob")
+#   print s2.contains("alice")  # true
+#   print s0.len()               # 0 (original unchanged)
+#   print s2.len()               # 2
+
+use std.persistent_map.{PersistentMap, PersistentMap__empty}
+
+# ============================================================================
+# PersistentSet
+# ============================================================================
+
+class PersistentSet:
+    _inner: PersistentMap
+
+    # ------------------------------------------------------------------
+    # Size queries
+    # ------------------------------------------------------------------
+
+    # Return the number of elements in the set.
+    fn len() -> i64:
+        self._inner.len()
+
+    # Return true if the set is empty.
+    fn is_empty() -> bool:
+        self._inner.is_empty()
+
+    # ------------------------------------------------------------------
+    # Element operations (return new set)
+    # ------------------------------------------------------------------
+
+    # Add an item to the set. Returns a NEW set.
+    # If the item already exists, returns this set unchanged.
+    fn add(item) -> PersistentSet:
+        PersistentSet(_inner: self._inner.set(item, true))
+
+    # Remove an item from the set. Returns a NEW set.
+    # If the item is not present, returns this set unchanged.
+    fn remove(item) -> PersistentSet:
+        PersistentSet(_inner: self._inner.remove(item))
+
+    # Check whether `item` exists in the set.
+    fn contains(item) -> bool:
+        self._inner.contains(item)
+
+    # ------------------------------------------------------------------
+    # Set algebra (return new set)
+    # ------------------------------------------------------------------
+
+    # Union: all elements in either set.
+    fn union(other: PersistentSet) -> PersistentSet:
+        PersistentSet(_inner: self._inner.merge(other._inner))
+
+    # Intersection: only elements in both sets.
+    fn intersection(other: PersistentSet) -> PersistentSet:
+        val my_items = self._inner.keys()
+        var result = PersistentMap.empty()
+        var i = 0
+        val n = my_items.len()
+        while i < n:
+            val item = my_items[i]
+            if other.contains(item):
+                result = result.set(item, true)
+            i = i + 1
+        PersistentSet(_inner: result)
+
+    # Difference: elements in self but not in other.
+    fn difference(other: PersistentSet) -> PersistentSet:
+        val my_items = self._inner.keys()
+        var result = PersistentMap.empty()
+        var i = 0
+        val n = my_items.len()
+        while i < n:
+            val item = my_items[i]
+            if not other.contains(item):
+                result = result.set(item, true)
+            i = i + 1
+        PersistentSet(_inner: result)
+
+    # Symmetric difference: elements in either set but not both.
+    fn symmetric_difference(other: PersistentSet) -> PersistentSet:
+        val d1 = self.difference(other)
+        val d2 = other.difference(self)
+        d1.union(d2)
+
+    # ------------------------------------------------------------------
+    # Subset / superset
+    # ------------------------------------------------------------------
+
+    # Return true if every element of self is also in other.
+    fn is_subset(other: PersistentSet) -> bool:
+        val my_items = self._inner.keys()
+        var i = 0
+        val n = my_items.len()
+        while i < n:
+            if not other.contains(my_items[i]):
+                return false
+            i = i + 1
+        true
+
+    # Return true if every element of other is also in self.
+    fn is_superset(other: PersistentSet) -> bool:
+        other.is_subset(self)
+
+    # ------------------------------------------------------------------
+    # Higher-order operations
+    # ------------------------------------------------------------------
+
+    # Apply f to each element, return new set of results.
+    fn map(f: fn()) -> PersistentSet:
+        val items = self._inner.keys()
+        var result = PersistentMap.empty()
+        var i = 0
+        val n = items.len()
+        while i < n:
+            result = result.set(f(items[i]), true)
+            i = i + 1
+        PersistentSet(_inner: result)
+
+    # Return a new set with only elements where pred(item) is true.
+    fn filter(pred: fn()) -> PersistentSet:
+        val items = self._inner.keys()
+        var result = PersistentMap.empty()
+        var i = 0
+        val n = items.len()
+        while i < n:
+            val item = items[i]
+            if pred(item):
+                result = result.set(item, true)
+            i = i + 1
+        PersistentSet(_inner: result)
+
+    # Left fold over all elements: f(f(f(init, a), b), c).
+    fn fold(init, f: fn()):
+        val items = self._inner.keys()
+        var acc = init
+        var i = 0
+        val n = items.len()
+        while i < n:
+            acc = f(acc, items[i])
+            i = i + 1
+        acc
+
+    # ------------------------------------------------------------------
+    # Conversion
+    # ------------------------------------------------------------------
+
+    # Return an array of all elements.
+    fn to_array():
+        self._inner.keys()
+
+    # Return a copy (identity for immutable structures, but provided
+    # for API compatibility).
+    fn copy() -> PersistentSet:
+        PersistentSet(_inner: self._inner.copy())
+
+    static fn of(arr) -> PersistentSet:
+        PersistentSet.from_array(arr)
+
+    static fn from_array(arr) -> PersistentSet:
+        var inner = PersistentMap.empty()
+        var i = 0
+        val n = arr.len()
+        while i < n:
+            inner = inner.set(arr[i], true)
+            i = i + 1
+        PersistentSet(_inner: inner)
+
+    static fn empty() -> PersistentSet:
+        PersistentSet(_inner: PersistentMap.empty())
+
+# ============================================================================
+# Factory Functions
+# ============================================================================
+
+export PersistentSet
+export PersistentSet__empty, PersistentSet__from_array, PersistentSet__of

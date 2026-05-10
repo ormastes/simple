@@ -1,0 +1,82 @@
+# Interrupt Dispatch — generic IRQ→handler table dispatch.
+#
+# Every per-arch interrupt.spl maintains a table of handlers indexed by
+# IRQ number. The dispatch logic (lookup → invoke → ack) is identical
+# across archs; only the controller-side ack/eoi differs. This module
+# provides the table + dispatch shape; per-arch supplies the ack closure.
+#
+# Wave 2 — added 2026-04-25 for AC-3 helper extraction.
+
+# Maximum IRQ number we route. ARM GIC up to 1020 SPI; x86 IOAPIC 24
+# baseline + MSI-X. 256 covers the kernel's own dispatch table; per-arch
+# IRQ controllers can route higher numbers to their own tables before
+# entering this dispatcher.
+val MAX_IRQS: u32 = 256
+
+# A handler entry — function pointer (raw u64) + a generic context u64
+# (kept opaque so the per-arch caller can stash anything: device-id,
+# capability slot, percpu base offset).
+@repr("C")
+struct IrqHandler:
+    """Single handler entry — fn ptr + opaque context."""
+    handler: u64
+    ctx: u64
+    enabled: bool
+
+# Dispatch table — fixed-size for kernel reasons (no allocator at boot).
+@repr("C")
+struct IrqTable:
+    """Generic IRQ → handler table."""
+    entries: [IrqHandler; 256]
+    spurious_count: u64
+
+fn irq_table_new() -> IrqTable:
+    """Construct an empty IRQ table; all entries disabled."""
+    var t: IrqTable = IrqTable(
+        entries: [IrqHandler(handler: 0, ctx: 0, enabled: false); 256],
+        spurious_count: 0,
+    )
+    t
+
+fn irq_table_set(t: IrqTable, irq: u32, handler: u64, ctx: u64) -> bool:
+    if irq >= MAX_IRQS:
+        return false
+    t.entries[irq] = IrqHandler(handler: handler, ctx: ctx, enabled: true)
+    true
+
+fn irq_table_clear(t: IrqTable, irq: u32) -> bool:
+    if irq >= MAX_IRQS:
+        return false
+    t.entries[irq] = IrqHandler(handler: 0, ctx: 0, enabled: false)
+    true
+
+fn irq_table_enabled(t: IrqTable, irq: u32) -> bool:
+    if irq >= MAX_IRQS:
+        return false
+    t.entries[irq].enabled
+
+fn irq_table_lookup(t: IrqTable, irq: u32) -> IrqHandler?:
+    """Return the handler entry for `irq`, or None if disabled / OOB."""
+    if irq >= MAX_IRQS:
+        return None
+    val e: IrqHandler = t.entries[irq]
+    if not e.enabled:
+        return None
+    Some(e)
+
+# Increment-and-return spurious counter — per-arch trap entries call this
+# when they receive a vector with no matching handler.
+fn irq_record_spurious(t: IrqTable) -> u64:
+    t.spurious_count = t.spurious_count + 1
+    t.spurious_count
+
+# Returns the number of currently-enabled handlers — useful for harden
+# audit reports ("at least one IRQ wired" gate).
+fn irq_table_active_count(t: IrqTable) -> u32:
+    var n: u32 = 0
+    var i: u32 = 0
+    while i < MAX_IRQS:
+        if t.entries[i].enabled:
+            n = n + 1
+        i = i + 1
+    n

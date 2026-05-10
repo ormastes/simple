@@ -1,0 +1,235 @@
+# Editor Commands
+#
+# Table-driven command dispatch for the editor.
+# Session-level commands (tabs, files) and buffer-level commands (movement, editing).
+
+fn editor_dispatch_session(session: EditSession, cmd: EditCommand) -> EditResult:
+    match cmd.name:
+        "open-file":
+            if cmd.payload == "":
+                return edit_fail("usage: :e <path>")
+            session.open_file(cmd.payload)
+            val p = cmd.payload
+            edit_ok("opened {p}")
+        "tab-next":
+            session.switch_tab(1)
+            edit_ok("next tab")
+        "tab-prev":
+            session.switch_tab(0 - 1)
+            edit_ok("prev tab")
+        "tab-close":
+            session.close_tab()
+            edit_ok("tab closed")
+        "split-vertical":
+            session.split_editor()
+            edit_ok("split vertical")
+        "split-horizontal":
+            session.split_editor_horizontal()
+            edit_ok("split horizontal")
+        "close-other-groups":
+            session.close_other_groups()
+            edit_ok("only")
+        "resize-grow":
+            session.layout.tree.resize(session.layout.active_group_id, 5)
+            edit_ok("resize grow")
+        "resize-shrink":
+            session.layout.tree.resize(session.layout.active_group_id, 0 - 5)
+            edit_ok("resize shrink")
+        "focus-next":
+            session.focus_next_group()
+            edit_ok("focus next")
+        "focus-prev":
+            session.focus_prev_group()
+            edit_ok("focus prev")
+        "save":
+            val ok = session.save_active()
+            if ok:
+                edit_ok("saved")
+            else:
+                edit_fail("save failed")
+        "open-dialog":
+            val path = editor_open_file_dialog()
+            if path != "":
+                session.open_file(path)
+                edit_ok("opened dialog file")
+            else:
+                edit_ok("cancelled")
+        "save-dialog":
+            val buffer_sd = session.active_buffer()
+            if buffer_sd == nil:
+                return edit_fail("no file open")
+            val save_path = editor_save_file_dialog()
+            if save_path != "":
+                buffer_sd.save_as(save_path)
+                edit_ok("saved as dialog file")
+            else:
+                edit_ok("cancelled")
+        "clipboard-copy":
+            val buffer_cc = session.active_buffer()
+            if buffer_cc == nil:
+                return edit_fail("no file open")
+            val row_cc = buffer_cc.cursor_row
+            val line_cc = buffer_cc.line_at(row_cc)
+            editor_clipboard_copy(line_cc)
+            edit_ok("copied")
+        "clipboard-paste":
+            val buffer_cp = session.active_buffer()
+            if buffer_cp == nil:
+                return edit_fail("no file open")
+            val paste_text = editor_clipboard_paste()
+            if paste_text != "":
+                buffer_cp.insert_at_cursor(paste_text)
+            edit_ok("pasted")
+        "quit":
+            edit_quit()
+        "force-quit":
+            edit_quit()
+        _:
+            val buffer = session.active_buffer()
+            if buffer == nil:
+                return edit_fail("no file open")
+            editor_dispatch(buffer, cmd)
+
+fn editor_dispatch(buffer: EditorBuffer, cmd: EditCommand) -> EditResult:
+    match cmd.name:
+        "move-left":
+            buffer.move_relative(0, 0 - cmd.count)
+            edit_ok("left")
+        "move-right":
+            buffer.move_relative(0, cmd.count)
+            edit_ok("right")
+        "move-up":
+            buffer.move_relative(0 - cmd.count, 0)
+            edit_ok("up")
+        "move-down":
+            buffer.move_relative(cmd.count, 0)
+            edit_ok("down")
+        "move-line-start":
+            buffer.move_to_line_start()
+            edit_ok("home")
+        "move-line-end":
+            buffer.move_to_line_end()
+            edit_ok("end")
+        "move-file-top":
+            buffer.move_cursor(0, 0)
+            edit_ok("top")
+        "move-file-bottom":
+            buffer.move_cursor(buffer.line_count() - 1, 0)
+            edit_ok("bottom")
+        "insert-text":
+            buffer.insert_at_cursor(cmd.payload)
+            edit_ok("inserted")
+        "newline":
+            buffer.insert_at_cursor("\n")
+            edit_ok("newline")
+        "backspace":
+            buffer.delete_before_cursor()
+            edit_ok("backspace")
+        "delete":
+            buffer.delete_at_cursor()
+            edit_ok("delete")
+        "undo":
+            buffer.undo()
+            edit_ok("undo")
+        "redo":
+            buffer.redo()
+            edit_ok("redo")
+        "save":
+            val ok = buffer.save()
+            if ok:
+                val bp = buffer.path
+                edit_ok("saved {bp}")
+            else:
+                edit_fail("save failed")
+        "save-as":
+            val ok = buffer.save_as(cmd.payload)
+            if ok:
+                val sp = cmd.payload
+                edit_ok("saved {sp}")
+            else:
+                edit_fail("save failed")
+        "quit":
+            edit_quit()
+        "force-quit":
+            edit_quit()
+        _:
+            val cn = cmd.name
+            edit_fail("unknown command: {cn}")
+
+fn editor_cmd(name: text) -> EditCommand:
+    EditCommand(name: name, payload: "", count: 1)
+
+fn editor_cmd_with(name: text, payload: text) -> EditCommand:
+    EditCommand(name: name, payload: payload, count: 1)
+
+fn editor_cmd_count(name: text, count: i64) -> EditCommand:
+    EditCommand(name: name, payload: "", count: count)
+
+fn editor_parse_commandline(line: text) -> EditCommand:
+    val trimmed = line.trim()
+    if trimmed == "w":
+        return editor_cmd("save")
+    if trimmed == "q":
+        return editor_cmd("quit")
+    if trimmed == "q!":
+        return editor_cmd("force-quit")
+    if trimmed == "wq":
+        return editor_cmd("save")
+    if trimmed.starts_with("w "):
+        return editor_cmd_with("save-as", trimmed.slice(2, trimmed.len()).trim())
+    if trimmed.starts_with("e "):
+        return editor_cmd_with("open-file", trimmed.slice(2, trimmed.len()).trim())
+    if trimmed.starts_with("edit "):
+        return editor_cmd_with("open-file", trimmed.slice(5, trimmed.len()).trim())
+    if trimmed == "bn" or trimmed == "tabn":
+        return editor_cmd("tab-next")
+    if trimmed == "bp" or trimmed == "tabp":
+        return editor_cmd("tab-prev")
+    if trimmed == "bd" or trimmed == "tabc":
+        return editor_cmd("tab-close")
+    if trimmed == "vs" or trimmed == "vsplit":
+        return editor_cmd("split-vertical")
+    if trimmed == "sp" or trimmed == "split":
+        return editor_cmd("split-horizontal")
+    if trimmed == "only":
+        return editor_cmd("close-other-groups")
+    if trimmed == "open":
+        return editor_cmd("open-dialog")
+    if trimmed == "saveas":
+        return editor_cmd("save-dialog")
+    if trimmed == "settings":
+        return editor_cmd("settings")
+    editor_cmd_with("unknown", trimmed)
+
+fn editor_all_commands() -> [PaletteEntry]:
+    var cmds: [PaletteEntry] = []
+    cmds.push(PaletteEntry(name: "Open File", description: "Open a file by path", command_name: "open-file", command_payload: ""))
+    cmds.push(PaletteEntry(name: "Save", description: "Save current file", command_name: "save", command_payload: ""))
+    cmds.push(PaletteEntry(name: "Save As", description: "Save current file to a new path", command_name: "save-as", command_payload: ""))
+    cmds.push(PaletteEntry(name: "Quit", description: "Quit the editor", command_name: "quit", command_payload: ""))
+    cmds.push(PaletteEntry(name: "Force Quit", description: "Quit without saving", command_name: "force-quit", command_payload: ""))
+    cmds.push(PaletteEntry(name: "Tab Next", description: "Switch to next tab", command_name: "tab-next", command_payload: ""))
+    cmds.push(PaletteEntry(name: "Tab Prev", description: "Switch to previous tab", command_name: "tab-prev", command_payload: ""))
+    cmds.push(PaletteEntry(name: "Tab Close", description: "Close current tab", command_name: "tab-close", command_payload: ""))
+    cmds.push(PaletteEntry(name: "Split Vertical", description: "Split editor vertically", command_name: "split-vertical", command_payload: ""))
+    cmds.push(PaletteEntry(name: "Split Horizontal", description: "Split editor horizontally", command_name: "split-horizontal", command_payload: ""))
+    cmds.push(PaletteEntry(name: "Close Other Groups", description: "Close all groups except active", command_name: "close-other-groups", command_payload: ""))
+    cmds.push(PaletteEntry(name: "Resize Grow", description: "Grow active split pane", command_name: "resize-grow", command_payload: ""))
+    cmds.push(PaletteEntry(name: "Resize Shrink", description: "Shrink active split pane", command_name: "resize-shrink", command_payload: ""))
+    cmds.push(PaletteEntry(name: "Focus Next", description: "Focus next editor group", command_name: "focus-next", command_payload: ""))
+    cmds.push(PaletteEntry(name: "Focus Prev", description: "Focus previous editor group", command_name: "focus-prev", command_payload: ""))
+    cmds.push(PaletteEntry(name: "Undo", description: "Undo last change", command_name: "undo", command_payload: ""))
+    cmds.push(PaletteEntry(name: "Redo", description: "Redo last undone change", command_name: "redo", command_payload: ""))
+    cmds.push(PaletteEntry(name: "Open Dialog", description: "Open file via OS dialog", command_name: "open-dialog", command_payload: ""))
+    cmds.push(PaletteEntry(name: "Save As Dialog", description: "Save file via OS dialog", command_name: "save-dialog", command_payload: ""))
+    cmds.push(PaletteEntry(name: "Copy", description: "Copy current line to clipboard", command_name: "clipboard-copy", command_payload: ""))
+    cmds.push(PaletteEntry(name: "Paste", description: "Paste from clipboard", command_name: "clipboard-paste", command_payload: ""))
+    cmds.push(PaletteEntry(name: "Move Up", description: "Move cursor up", command_name: "move-up", command_payload: ""))
+    cmds.push(PaletteEntry(name: "Move Down", description: "Move cursor down", command_name: "move-down", command_payload: ""))
+    cmds.push(PaletteEntry(name: "Move Left", description: "Move cursor left", command_name: "move-left", command_payload: ""))
+    cmds.push(PaletteEntry(name: "Move Right", description: "Move cursor right", command_name: "move-right", command_payload: ""))
+    cmds.push(PaletteEntry(name: "Go to Top", description: "Move to beginning of file", command_name: "move-file-top", command_payload: ""))
+    cmds.push(PaletteEntry(name: "Go to Bottom", description: "Move to end of file", command_name: "move-file-bottom", command_payload: ""))
+    cmds.push(PaletteEntry(name: "Line Start", description: "Move to beginning of line", command_name: "move-line-start", command_payload: ""))
+    cmds.push(PaletteEntry(name: "Line End", description: "Move to end of line", command_name: "move-line-end", command_payload: ""))
+    cmds

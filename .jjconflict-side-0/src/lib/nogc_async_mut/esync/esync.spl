@@ -1,0 +1,97 @@
+# esync — event synchronisation primitive for Wine (M2, REQ-10).
+#
+# Implements the esync (eventfd-based NT event) model used by Wine to replace
+# in-kernel waits. In interpreter mode uses a parallel-array signal table.
+#
+# @cover esync
+
+# ============================================================================
+# Storage
+# ============================================================================
+
+var _es_handles:   [i64]  = []
+var _es_signaled:  [bool] = []
+var _es_alive:     [bool] = []
+var _es_ctr:       i64    = 0
+
+fn _es_find(handle: i64) -> i64:
+    val n = _es_handles.len()
+    var i: i64 = 0
+    while i < n:
+        if _es_alive[i] and _es_handles[i] == handle:
+            return i
+        i = i + 1
+    -1
+
+# ============================================================================
+# Public API
+# ============================================================================
+
+pub fn esync_create() -> i64:
+    """Create a new esync event object (initially not signaled).
+
+    Returns:
+        Positive handle > 0.
+    """
+    _es_ctr = _es_ctr + 1
+    val handle = _es_ctr
+    _es_handles.push(handle)
+    _es_signaled.push(false)
+    _es_alive.push(true)
+    handle
+
+pub fn esync_signal(handle: i64):
+    """Set the event to the signaled state.
+
+    Args:
+        handle: esync handle from esync_create()
+    """
+    val row = _es_find(handle)
+    if row != -1:
+        _es_signaled[row] = true
+
+pub fn esync_wait(handle: i64, timeout_ms: i64) -> text:
+    """Wait for the event to be signaled.
+
+    In interpreter mode: returns "signaled" immediately if the event is
+    already set, "timeout" otherwise (no actual blocking).
+
+    Args:
+        handle:     esync handle
+        timeout_ms: Max wait time in milliseconds (0 = poll, -1 = infinite)
+
+    Returns:
+        "signaled" — event was (or became) signaled.
+        "timeout"  — wait timed out before signal.
+        "invalid"  — handle not found.
+    """
+    val row = _es_find(handle)
+    if row == -1:
+        return "invalid"
+    if _es_signaled[row]:
+        _es_signaled[row] = false
+        return "signaled"
+    if timeout_ms == 0:
+        return "timeout"
+    # Interpreter mode: no real blocking; treat as signaled for test flow
+    return "timeout"
+
+pub fn esync_reset(handle: i64):
+    """Clear the signaled state.
+
+    Args:
+        handle: esync handle
+    """
+    val row = _es_find(handle)
+    if row != -1:
+        _es_signaled[row] = false
+
+pub fn esync_close(handle: i64):
+    """Destroy an esync handle.
+
+    Args:
+        handle: esync handle
+    """
+    val row = _es_find(handle)
+    if row != -1:
+        _es_alive[row] = false

@@ -1,0 +1,252 @@
+# Fenwick Tree Type Definitions and Bit Manipulation Operations
+#
+# Purpose: Core bit manipulation operations and tree constructors
+#
+# Contains:
+# - LSB isolation and bit manipulation utilities
+# - Tree navigation (parent/next index calculation)
+# - Tree creation and initialization
+# - Tree cloning and clearing
+
+# ============================================================================
+# Core Data Structures (tuple-based)
+# ============================================================================
+
+# FenwickTree: (tree: list, n: i64)
+#   - tree: 1-indexed array (tree[0] = 0)
+#   - n: number of elements (excluding tree[0])
+
+# RangeUpdateTree: (tree1: fenwick, tree2: fenwick, n: i64)
+#   - tree1: difference array for range updates
+#   - tree2: auxiliary tree for efficient range queries
+#   - n: number of elements
+
+# FenwickTree2D: (tree: list[list], rows: i64, cols: i64)
+#   - tree: 2D array for matrix range sums
+#   - rows: number of rows
+#   - cols: number of columns
+
+# ============================================================================
+# Core Bit Manipulation Operations
+# ============================================================================
+
+# Isolate the least significant bit (LSB) of i
+# This is the core operation for Fenwick tree navigation
+# i & -i gives us the rightmost set bit
+# Example: isolate_lsb(6) = 6 & -6 = 2
+#          110 & 010 = 010
+fn isolate_lsb(i: i64) -> i64:
+    """Isolate the least significant bit (rightmost set bit) of i.
+
+    This is achieved by i & -i:
+    - -i is the two's complement of i
+    - i & -i isolates the rightmost 1 bit
+
+    Examples:
+      isolate_lsb(6) = 2   (110 & 010 = 010)
+      isolate_lsb(12) = 4  (1100 & 0100 = 0100)
+      isolate_lsb(5) = 1   (101 & 001 = 001)
+    """
+    i & (0 - i)
+
+# Get parent index in update path
+# Parent is the next index that needs to be updated
+# Formula: i + (i & -i)
+fn get_parent(i: i64) -> i64:
+    """Get parent index in Fenwick tree update path.
+
+    When updating index i, we also need to update its parent.
+    Parent index = i + (i & -i)
+
+    This moves to the next index whose range includes i.
+
+    Examples:
+      get_parent(1) = 2  (1 + 1 = 2)
+      get_parent(2) = 4  (2 + 2 = 4)
+      get_parent(3) = 4  (3 + 1 = 4)
+      get_parent(4) = 8  (4 + 4 = 8)
+    """
+    val lsb = isolate_lsb(i)
+    i + lsb
+
+# Get next index in query path
+# Next is the previous range we need to add to sum
+# Formula: i - (i & -i)
+fn get_next(i: i64) -> i64:
+    """Get next index in Fenwick tree query path.
+
+    When querying prefix sum up to i, we need to traverse backwards.
+    Next index = i - (i & -i)
+
+    This moves to the previous index whose range we need to include.
+
+    Examples:
+      get_next(7) = 6  (7 - 1 = 6)
+      get_next(6) = 4  (6 - 2 = 4)
+      get_next(4) = 0  (4 - 4 = 0, stops here)
+    """
+    val lsb = isolate_lsb(i)
+    i - lsb
+
+# Count trailing zeros (equivalent to finding position of LSB)
+fn count_trailing_zeros(i: i64) -> i64:
+    """Count number of trailing zeros in binary representation.
+
+    This tells us the power of 2 that divides i.
+    Useful for understanding tree structure.
+
+    Examples:
+      count_trailing_zeros(8) = 3  (1000 has 3 trailing zeros)
+      count_trailing_zeros(6) = 1  (110 has 1 trailing zero)
+      count_trailing_zeros(5) = 0  (101 has 0 trailing zeros)
+    """
+    if i == 0:
+        return 0
+    val lsb = isolate_lsb(i)
+    var count = 0
+    var temp = lsb
+    while temp > 1:
+        temp = temp / 2
+        count = count + 1
+    count
+
+# Get range size that index i is responsible for
+fn get_range_size(i: i64) -> i64:
+    """Get the size of range that tree[i] covers.
+
+    tree[i] stores sum of elements in a range.
+    The range size is determined by the LSB of i.
+
+    Examples:
+      get_range_size(1) = 1  (covers 1 element)
+      get_range_size(2) = 2  (covers 2 elements)
+      get_range_size(4) = 4  (covers 4 elements)
+      get_range_size(8) = 8  (covers 8 elements)
+    """
+    isolate_lsb(i)
+
+# Check if index i is a power of 2
+fn is_power_of_two(i: i64) -> bool:
+    """Check if i is a power of 2.
+
+    A number is a power of 2 if it has exactly one bit set.
+    This means i & (i-1) == 0.
+
+    Powers of 2 are special in Fenwick trees - they cover
+    the maximum range size for their position.
+    """
+    if i <= 0:
+        return false
+    val check = i & (i - 1)
+    check == 0
+
+# ============================================================================
+# Fenwick Tree Creation
+# ============================================================================
+
+# Create an empty Fenwick tree of size n
+fn create_fenwick_tree(n: i64) -> (list, i64):
+    """Create an empty Fenwick tree with n elements.
+
+    Creates a 1-indexed array of size n+1 (tree[0] unused).
+    All elements initialized to 0.
+
+    Args:
+      n: Number of elements in the tree
+
+    Returns:
+      (tree, n) tuple where tree is the array and n is the size
+
+    Time: O(n)
+    Space: O(n)
+    """
+    var tree = []
+    var i = 0
+    while i <= n:
+        tree.push(0)
+        i = i + 1
+    (tree, n)
+
+# Build Fenwick tree from array
+fn create_fenwick_from_array(arr: list) -> (list, i64):
+    """Build a Fenwick tree from an existing array.
+
+    Converts a 0-indexed array to a 1-indexed Fenwick tree.
+    More efficient than creating empty tree and updating each element.
+
+    Algorithm:
+      1. Copy array to tree (with 1-indexing)
+      2. For each i, add tree[i] to its parent
+      3. This builds the tree in O(n) instead of O(n log n)
+
+    Args:
+      arr: Input array (0-indexed)
+
+    Returns:
+      Fenwick tree containing the cumulative structure
+
+    Time: O(n) - linear build algorithm
+    Space: O(n)
+
+    Example:
+      arr = [3, 2, -1, 6, 5]
+      tree = [0, 3, 5, -1, 10, 5]
+    """
+    val n = arr.len()
+    var tree = []
+    tree.push(0)
+
+    var i = 0
+    while i < n:
+        tree.push(arr[i])
+        i = i + 1
+
+    i = 1
+    while i <= n:
+        val parent = get_parent(i)
+        if parent <= n:
+            val current_val = tree[parent]
+            val add_val = tree[i]
+            tree[parent] = current_val + add_val
+        i = i + 1
+
+    (tree, n)
+
+# Clone a Fenwick tree (deep copy)
+fn clone_tree(fenwick_tree) -> (list, i64):
+    """Create a deep copy of a Fenwick tree.
+
+    Args:
+      fenwick_tree: (tree, n) tuple
+
+    Returns:
+      New Fenwick tree with same values
+
+    Time: O(n)
+    Space: O(n)
+    """
+    val tree = fenwick_tree.0
+    val n = fenwick_tree.1
+
+    var new_tree = []
+    var i = 0
+    while i <= n:
+        new_tree.push(tree[i])
+        i = i + 1
+
+    (new_tree, n)
+
+# Clear a Fenwick tree (set all values to 0)
+fn clear_tree(fenwick_tree) -> (list, i64):
+    """Reset all values in Fenwick tree to 0.
+
+    Args:
+      fenwick_tree: (tree, n) tuple
+
+    Returns:
+      Fenwick tree with all zeros
+
+    Time: O(n)
+    """
+    val n = fenwick_tree.1
+    create_fenwick_tree(n)

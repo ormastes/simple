@@ -1,0 +1,435 @@
+# POSIX File I/O — sync wrappers over async IPC
+#
+# These functions provide the standard POSIX file I/O API.
+# Internally they use async_io.spl for non-blocking IPC to the VFS service.
+# posix_open sends an IPC request to the VFS service (port 1) to open files.
+# FDs 0-2 are reserved for stdin/stdout/stderr (serial on baremetal).
+
+use os.posix.errno.{ENOENT, ENOSYS, EMFILE}
+use os.posix.fd_table.{fd_is_valid, fd_alloc, fd_set, fd_close, fd_dup, fd_dup2, fd_get_offset, fd_set_offset, fd_activate_task, fd_current_task, fd_release_task, fd_task_context_exists, fd_get_type, fd_get_status_flags, fd_get_backend_handle}
+use os.posix.async_io_rw.{sync_read, sync_write}
+use os.posix.pipe_compat.{pipe_read, pipe_write, pipe_close_read, pipe_close_write}
+use os.posix.socket_compat.{posix_close_socket}
+use os.userlib.syscall_raw.{syscall}
+# Well-known VFS service IPC port
+val _VFS_PORT: u64 = 1
+val VFS_OPEN: u32 = 1
+val VFS_CLOSE: u32 = 4
+
+# Syscall numbers for IPC
+val _SYS_IPC_SEND: u64 = 20
+val _SYS_IPC_RECV: u64 = 21
+
+extern fn unsafe_addr_of(ref: any) -> u64
+
+val FD_IO_ROUTE_INVALID: u8 = 0
+val FD_IO_ROUTE_FILE: u8 = 1
+val FD_IO_ROUTE_SERIAL: u8 = 2
+val FD_IO_ROUTE_PIPE: u8 = 3
+val FD_IO_ROUTE_SOCKET: u8 = 4
+val POSIX_PREAD_EXACT_CHUNK_MAX: u64 = 4084
+val _FD_IO_O_ACCMODE: u32 = 3u32
+val _FD_IO_O_WRONLY: u32 = 1u32
+val _FD_IO_MAX_FDS: u64 = 256
+val _FD_IO_SEEK_SET: u32 = 0
+val _FD_IO_SEEK_CUR: u32 = 1
+val _FD_IO_SEEK_END: u32 = 2
+
+struct PosixPreadExactBytes:
+    status: i64
+    len: u64
+    data: [u8]
+
+struct SyntheticFdBytes:
+    handle: u64
+    bytes: [u8]
+
+var g_synthetic_fd_bytes_for_test: [SyntheticFdBytes] = []
+
+fn _set_synthetic_fd_bytes_for_test(handle: u64, bytes: [u8]):
+    """Test hook: register bytes returned by exact file-descriptor reads."""
+    g_synthetic_fd_bytes_for_test.push(SyntheticFdBytes(handle: handle, bytes: bytes))
+
+fn _clear_synthetic_fd_bytes_for_test():
+    """Test hook: drop synthetic exact-read entries."""
+    g_synthetic_fd_bytes_for_test = []
+
+fn _synthetic_fd_bytes_for_handle(handle: u64) -> SyntheticFdBytes?:
+    var idx = 0
+    while idx < g_synthetic_fd_bytes_for_test.len():
+        if g_synthetic_fd_bytes_for_test[idx].handle == handle:
+            return Some(g_synthetic_fd_bytes_for_test[idx])
+        idx = idx + 1
+    nil
+
+fn _posix_pread_exact_synthetic(handle: u64, offset: u64, len: u64) -> PosixPreadExactBytes?:
+    val entry = _synthetic_fd_bytes_for_handle(handle)
+    if entry == nil:
+        return nil
+    val synthetic = entry.unwrap()
+    if len == 0:
+        return Some(PosixPreadExactBytes(status: 0, len: 0, data: []))
+    if offset > synthetic.bytes.len() as u64:
+        return Some(_posix_pread_exact_error(-5))
+    if len > synthetic.bytes.len() as u64 - offset:
+        return Some(_posix_pread_exact_error(-5))
+
+    var data: [u8] = []
+    var idx: u64 = 0
+    while idx < len:
+        data.push(synthetic.bytes[offset + idx])
+        idx = idx + 1
+    Some(PosixPreadExactBytes(status: len as i64, len: len, data: data))
+
+fn fd_io_read_route(fd_type: u8) -> u8:
+    """Return the native backend route used by posix_read for an FD type."""
+    if fd_type == 1:
+        return FD_IO_ROUTE_FILE
+    if fd_type == 6:
+        return FD_IO_ROUTE_SERIAL
+    if fd_type == 2:
+        return FD_IO_ROUTE_PIPE
+    if fd_type == 4:
+        return FD_IO_ROUTE_SOCKET
+    FD_IO_ROUTE_INVALID
+
+fn fd_io_write_route(fd_type: u8) -> u8:
+    """Return the native backend route used by posix_write for an FD type."""
+    if fd_type == 1:
+        return FD_IO_ROUTE_FILE
+    if fd_type == 6:
+        return FD_IO_ROUTE_SERIAL
+    if fd_type == 3:
+        return FD_IO_ROUTE_PIPE
+    if fd_type == 4:
+        return FD_IO_ROUTE_SOCKET
+    FD_IO_ROUTE_INVALID
+
+fn fd_io_close_route(fd_type: u8) -> u8:
+    """Return the native backend route used by posix_close for an FD type."""
+    if fd_type == 1:
+        return FD_IO_ROUTE_FILE
+    if fd_type == 2 or fd_type == 3:
+        return FD_IO_ROUTE_PIPE
+    if fd_type == 6:
+        return FD_IO_ROUTE_SERIAL
+    if fd_type == 4:
+        return FD_IO_ROUTE_SOCKET
+    FD_IO_ROUTE_INVALID
+
+fn posix_open(path: text, flags: u32, mode: u32) -> i32:
+    """Open a file via VFS IPC service. Returns FD on success, -errno on error.
+
+    Sends an IPC message to the VFS service (port 1) with VFS_OPEN method.
+    The VFS service returns a handle which we map to a local FD.
+    """
+    # Allocate a local FD
+    val fd = fd_alloc()
+    if fd < 0:
+        return fd  # -EMFILE
+
+    # Build IPC payload: method(u32) | flags(u32) | mode(u32) | path(bytes)
+    var payload: [u8] = []
+    _push_u32(payload, VFS_OPEN)
+    _push_u32(payload, flags)
+    _push_u32(payload, mode)
+    var pi: u64 = 0
+    while pi < path.len():
+        payload.push(path.byte_at(pi))
+        pi = pi + 1
+
+    # Send IPC to VFS service
+    val payload_ptr = unsafe_addr_of(payload)
+    val payload_len = payload.len()
+    val send_result = syscall(_SYS_IPC_SEND, _VFS_PORT, VFS_OPEN as u64, 0, payload_ptr, payload_len)
+    if send_result < 0:
+        return -5
+
+    # Receive reply from VFS
+    var reply_buf: [u8; 64] = [0; 64]
+    val reply_ptr = unsafe_addr_of(reply_buf)
+    val recv_result = syscall(_SYS_IPC_RECV, _VFS_PORT, reply_ptr, 64, 0, 0)
+    if recv_result < 0:
+        return -5
+
+    # Parse reply: status(i32) | vfs_handle(u64)
+    val status = _read_i32(reply_buf, 0)
+    if status < 0:
+        return status  # VFS returned an error
+
+    val vfs_handle = _read_u64(reply_buf, 4)
+
+    # Set up the FD entry
+    val set_result = fd_set(fd, 1, flags, vfs_handle)
+    if set_result < 0:
+        var close_payload: [u8] = []
+        _push_u32(close_payload, VFS_CLOSE)
+        _push_u64(close_payload, vfs_handle)
+        val close_payload_ptr = unsafe_addr_of(close_payload)
+        syscall(_SYS_IPC_SEND, _VFS_PORT, VFS_CLOSE as u64, 0, close_payload_ptr, close_payload.len())
+        return set_result
+    fd
+
+fn posix_read(fd: i32, buf: u64, count: u64) -> i64:
+    """Read from a file descriptor. Returns bytes read or -errno.
+
+    For serial and file FDs, blocks on the native async_io owner.
+    For pipe FDs, blocks on the native pipe backend.
+    """
+    if not fd_is_valid(fd):
+        return -9
+    val idx: u64 = fd as u64
+    val fd_type = fd_get_type(fd)
+    val route = fd_io_read_route(fd_type)
+
+    # Serial: use existing async_io path
+    if route == FD_IO_ROUTE_SERIAL:
+        return sync_read(fd, buf, count)
+
+    # Pipe reads stay native: POSIX blocks on top of the pipe ring buffer.
+    if route == FD_IO_ROUTE_PIPE:
+        return pipe_read(fd, buf, count)
+
+    # Socket reads are still delegated through the compatibility async path.
+    if route == FD_IO_ROUTE_SOCKET:
+        return sync_read(fd, buf, count)
+
+    if route != FD_IO_ROUTE_FILE:
+        return -9
+
+    # File reads are owned by async_io; POSIX blocks on its completion.
+    sync_read(fd, buf, count)
+
+fn _fd_io_is_write_only(flags: u32) -> bool:
+    (flags & _FD_IO_O_ACCMODE) == _FD_IO_O_WRONLY
+
+fn _posix_pread_exact_error(status: i64) -> PosixPreadExactBytes:
+    PosixPreadExactBytes(status: status, len: 0, data: [])
+
+fn posix_pread_exact_bytes(fd: i32, offset: u64, len: u64) -> PosixPreadExactBytes:
+    """Read exactly `len` bytes from a file descriptor at `offset`.
+
+    The descriptor's shared open-file-description offset is restored before
+    returning, whether the read succeeds, short-reads, or fails.
+    """
+    if not fd_is_valid(fd):
+        return _posix_pread_exact_error(-9)
+    val idx: u64 = fd as u64
+    if fd_io_read_route(fd_get_type(fd)) != FD_IO_ROUTE_FILE:
+        return _posix_pread_exact_error(-9)
+    if _fd_io_is_write_only(fd_get_status_flags(fd)):
+        return _posix_pread_exact_error(-9)
+
+    val synthetic = _posix_pread_exact_synthetic(handle: fd_get_backend_handle(fd), offset: offset, len: len)
+    if synthetic != nil:
+        return synthetic.unwrap()
+
+    val original_offset = fd_get_offset(fd)
+    fd_set_offset(fd, offset)
+    if len == 0:
+        fd_set_offset(fd, original_offset)
+        return PosixPreadExactBytes(status: 0, len: 0, data: [])
+
+    var data: [u8] = []
+    var total: u64 = 0
+    while total < len:
+        var chunk_len = len - total
+        if chunk_len > POSIX_PREAD_EXACT_CHUNK_MAX:
+            chunk_len = POSIX_PREAD_EXACT_CHUNK_MAX
+
+        var chunk: [u8] = []
+        var zi: u64 = 0
+        while zi < chunk_len:
+            chunk.push(0u8)
+            zi = zi + 1
+
+        val chunk_addr = unsafe_addr_of(chunk)
+        val read_result = posix_read(fd, buf: chunk_addr, count: chunk_len)
+        if read_result < 0:
+            fd_set_offset(fd, original_offset)
+            return _posix_pread_exact_error(read_result)
+        if read_result == 0:
+            fd_set_offset(fd, original_offset)
+            return _posix_pread_exact_error(-5)
+
+        val bytes_read = read_result as u64
+        if bytes_read > chunk_len:
+            fd_set_offset(fd, original_offset)
+            return _posix_pread_exact_error(-5)
+        if bytes_read < chunk_len:
+            fd_set_offset(fd, original_offset)
+            return _posix_pread_exact_error(-5)
+
+        var ci: u64 = 0
+        while ci < bytes_read:
+            data.push(chunk[ci])
+            ci = ci + 1
+        total = total + bytes_read
+
+    fd_set_offset(fd, original_offset)
+    PosixPreadExactBytes(status: total as i64, len: total, data: data)
+
+fn posix_write(fd: i32, buf: u64, count: u64) -> i64:
+    """Write to a file descriptor. Returns bytes written or -errno.
+
+    For serial and file FDs, blocks on the native async_io owner.
+    For pipe FDs, blocks on the native pipe backend.
+    """
+    if not fd_is_valid(fd):
+        return -9
+    val idx: u64 = fd as u64
+    val fd_type = fd_get_type(fd)
+    val route = fd_io_write_route(fd_type)
+
+    # Serial: use existing async_io path
+    if route == FD_IO_ROUTE_SERIAL:
+        return sync_write(fd, buf, count)
+
+    # Pipe writes stay native: POSIX blocks on top of the pipe ring buffer.
+    if route == FD_IO_ROUTE_PIPE:
+        return pipe_write(fd, buf, count)
+
+    # Socket writes are still delegated through the compatibility async path.
+    if route == FD_IO_ROUTE_SOCKET:
+        return sync_write(fd, buf, count)
+
+    if route != FD_IO_ROUTE_FILE:
+        return -9
+
+    # File writes are owned by async_io; POSIX blocks on its completion.
+    sync_write(fd, buf, count)
+
+fn posix_close(fd: i32) -> i32:
+    """Close a file descriptor.
+
+    For file FDs, sends VFS_CLOSE IPC to release the VFS handle.
+    Then frees the local FD table entry.
+    """
+    if not fd_is_valid(fd):
+        return -9
+    val idx: u64 = fd as u64
+    val fd_type = fd_get_type(fd)
+    val route = fd_io_close_route(fd_type)
+
+    if fd_type == 2:
+        return pipe_close_read(fd)
+    if fd_type == 3:
+        return pipe_close_write(fd)
+    if route == FD_IO_ROUTE_SOCKET:
+        return posix_close_socket(fd) as i32
+
+    # Send VFS_CLOSE for file FDs
+    if route == FD_IO_ROUTE_FILE:
+        val vfs_handle = fd_get_backend_handle(fd)
+        var payload: [u8] = []
+        _push_u32(payload, VFS_CLOSE)
+        _push_u64(payload, vfs_handle)
+        val payload_ptr = unsafe_addr_of(payload)
+        syscall(_SYS_IPC_SEND, _VFS_PORT, VFS_CLOSE as u64, 0, payload_ptr, payload.len())
+        # Best-effort close: ignore IPC errors
+
+    fd_close(fd)
+
+fn posix_close_all_fds_with_backends() -> u32:
+    """Close every live descriptor in the active fd context through posix_close."""
+    var closed: u32 = 0u32
+    var i: u64 = 0
+    while i < _FD_IO_MAX_FDS:
+        if fd_is_valid(i as i32):
+            posix_close(i as i32)
+            closed = closed + 1u32
+        i = i + 1
+    closed
+
+fn posix_close_task_fds_with_backends(owner: u64) -> u32:
+    """Close and release a task fd context through backend-aware close hooks."""
+    if not fd_task_context_exists(owner):
+        return 0u32
+    val previous_owner = fd_current_task()
+    fd_activate_task(owner)
+    val closed = posix_close_all_fds_with_backends()
+    fd_release_task(owner)
+    if previous_owner != owner:
+        fd_activate_task(previous_owner)
+    closed
+
+fn posix_lseek(fd: i32, offset: i64, whence: u32) -> i64:
+    """Reposition file offset. Returns new offset or -errno."""
+    if not fd_is_valid(fd):
+        return -9
+    val idx: u64 = fd as u64
+    if whence == _FD_IO_SEEK_SET:
+        fd_set_offset(fd, offset as u64)
+    elif whence == _FD_IO_SEEK_CUR:
+        fd_set_offset(fd, (fd_get_offset(fd) as i64 + offset) as u64)
+    elif whence == _FD_IO_SEEK_END:
+        # Query VFS for file size
+        val vfs_handle = fd_get_backend_handle(fd)
+        var payload: [u8] = []
+        _push_u32(payload, 5)  # VFS_STAT
+        _push_u64(payload, vfs_handle)
+        val payload_ptr = unsafe_addr_of(payload)
+        val send_result = syscall(_SYS_IPC_SEND, _VFS_PORT, 5, 0, payload_ptr, payload.len())
+        if send_result < 0:
+            return -5
+        var reply_buf: [u8; 16] = [0; 16]
+        val reply_ptr = unsafe_addr_of(reply_buf)
+        val recv_result = syscall(_SYS_IPC_RECV, _VFS_PORT, reply_ptr, 16, 0, 0)
+        if recv_result < 0:
+            return -5
+        val status = _read_i32(reply_buf, 0)
+        if status < 0:
+            return status as i64
+        val file_size = _read_u64(reply_buf, 4)
+        fd_set_offset(fd, (file_size as i64 + offset) as u64)
+    else:
+        return -22
+    fd_get_offset(fd) as i64
+
+fn posix_dup(fd: i32) -> i32:
+    """Duplicate a file descriptor."""
+    fd_dup(fd)
+
+fn posix_dup2(old_fd: i32, new_fd: i32) -> i32:
+    """Duplicate fd to a specific number with POSIX replacement semantics."""
+    if not fd_is_valid(old_fd):
+        return -9
+    if new_fd < 0 or (new_fd as u64) >= _FD_IO_MAX_FDS:
+        return -9
+    if old_fd == new_fd:
+        return new_fd
+    if fd_is_valid(new_fd):
+        # POSIX dup2 ignores close errors, but backend side effects such as
+        # pipe HUP/EOF and VFS handle release must still run.
+        posix_close(new_fd)
+    fd_dup2(old_fd, new_fd)
+
+# ============================================================================
+# Serialization Helpers
+# ============================================================================
+
+fn _push_u32(buf: [u8], val_: u32):
+    """Push a u32 in little-endian byte order."""
+    buf.push((val_ & 0xFF) as u8)
+    buf.push(((val_ >> 8) & 0xFF) as u8)
+    buf.push(((val_ >> 16) & 0xFF) as u8)
+    buf.push(((val_ >> 24) & 0xFF) as u8)
+
+fn _push_u64(buf: [u8], val_: u64):
+    """Push a u64 in little-endian byte order."""
+    _push_u32(buf, (val_ & 0xFFFFFFFF) as u32)
+    _push_u32(buf, ((val_ >> 32) & 0xFFFFFFFF) as u32)
+
+fn _read_i32(buf: [u8], offset: u64) -> i32:
+    """Read a little-endian i32 from a byte buffer."""
+    val b0 = buf[offset] as u32
+    val b1 = buf[offset + 1] as u32
+    val b2 = buf[offset + 2] as u32
+    val b3 = buf[offset + 3] as u32
+    (b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)) as i32
+
+fn _read_u64(buf: [u8], offset: u64) -> u64:
+    """Read a little-endian u64 from a byte buffer."""
+    val lo = _read_i32(buf, offset) as u64 & 0xFFFFFFFF
+    val hi = _read_i32(buf, offset + 4) as u64 & 0xFFFFFFFF
+    lo | (hi << 32)

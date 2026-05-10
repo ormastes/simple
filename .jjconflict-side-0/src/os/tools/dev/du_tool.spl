@@ -1,0 +1,60 @@
+# du — Disk usage
+# MDSOC: feature dimension, apps layer
+
+use os.apps.terminal.terminal.{Terminal}
+use os.kernel.types.fs_types.{FsNodeKind}
+use os.services.vfs.vfs.{VfsManager}
+use os.apps.shell.shell_tools.{_resolve_tool_path, _write_line, _write_error}
+
+fn run_du(args: [text]) -> i32:
+    """Show disk usage of files/directories. Stub — requires VFS integration."""
+    print "du: not yet implemented (requires VFS stat integration)"
+    return 1
+
+fn tool_du(vfs: VfsManager?, cwd: text, args: [text], terminal: Terminal) -> i32:
+    """Show disk usage summary.
+
+    Usage: du [-s] [PATH]
+    Flags: -s (summary only)
+    """
+    if vfs == nil:
+        _write_error(terminal, "du: no filesystem mounted")
+        return 1
+
+    var summary_only = false
+    var target = cwd
+
+    for arg in args:
+        if arg == "-s":
+            summary_only = true
+        elif not arg.starts_with("-"):
+            target = _resolve_tool_path(cwd, arg)
+
+    val total = _du_recursive(vfs, target, summary_only, terminal)
+    if summary_only:
+        _write_line(terminal, "{total}\t{target}")
+    return 0
+
+fn _du_recursive(vfs: VfsManager, path: text, summary_only: bool, terminal: Terminal) -> u64:
+    """Recursively compute directory size."""
+    val stat_result = vfs.stat(path)
+    if stat_result.is_err():
+        return 0
+    val node = stat_result.unwrap()
+    if node.kind != FsNodeKind.Directory:
+        return node.size
+
+    val dir_result = vfs.readdir(path)
+    if dir_result.is_err():
+        return 0
+
+    var total: u64 = 0
+    val entries = dir_result.unwrap()
+    for entry in entries:
+        val child_path = if path == "/": "/{entry.name}" else: "{path}/{entry.name}"
+        val child_size = _du_recursive(vfs, child_path, summary_only, terminal)
+        total = total + child_size
+
+    if not summary_only:
+        _write_line(terminal, "{total}\t{path}")
+    return total

@@ -1,0 +1,78 @@
+# Editor Recovery
+#
+# Detects unclean shutdown and replays WAL for recovery.
+# Uses lock file with PID for concurrent instance prevention.
+
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_file_delete(path: text) -> bool
+extern fn rt_process_id() -> i64
+
+struct RecoveryState:
+    needs_recovery: bool
+    wal_entries: [WalEntry]
+    stale_lock: bool
+
+class RecoveryManager:
+    db_dir: text
+    lock_path: text
+    wal_path: text
+
+impl RecoveryManager:
+
+    static fn new(db_dir: text) -> RecoveryManager:
+        RecoveryManager(
+            db_dir: db_dir,
+            lock_path: db_dir + "/editor.lock",
+            wal_path: db_dir + "/session.wal"
+        )
+
+    fn check() -> RecoveryState:
+        val lock_exists = rt_file_exists(self.lock_path) ?? false
+        val wal_reader = WalReader.new(self.wal_path)
+        val has_wal = wal_reader.has_entries()
+
+        if not lock_exists and not has_wal:
+            return RecoveryState(needs_recovery: false, wal_entries: [], stale_lock: false)
+
+        if lock_exists:
+            val lock_content = rt_file_read_text(self.lock_path) ?? ""
+            val stale = _recovery_is_stale_lock(lock_content)
+            if has_wal:
+                return RecoveryState(
+                    needs_recovery: true,
+                    wal_entries: wal_reader.read_entries(),
+                    stale_lock: stale
+                )
+            return RecoveryState(needs_recovery: false, wal_entries: [], stale_lock: stale)
+
+        RecoveryState(
+            needs_recovery: has_wal,
+            wal_entries: if has_wal then wal_reader.read_entries() else: [],
+            stale_lock: false
+        )
+
+    me acquire_lock() -> bool:
+        val pid = rt_process_id() ?? 0
+        rt_file_write_text(self.lock_path, str(pid))
+
+    me release_lock():
+        rt_file_delete(self.lock_path)
+
+    me recover(session_db: SessionDb) -> bool:
+        val state = self.check()
+        if not state.needs_recovery:
+            return true
+        session_db.checkpoint()
+
+    me cleanup_stale_lock():
+        val lock_content = rt_file_read_text(self.lock_path) ?? ""
+        if _recovery_is_stale_lock(lock_content):
+            rt_file_delete(self.lock_path)
+
+
+fn _recovery_is_stale_lock(lock_content: text) -> bool:
+    if lock_content == "":
+        return true
+    true

@@ -1,0 +1,125 @@
+# @gc — module uses GC runtime
+#
+# std_fs — bring-up NvfsClient adapter backed by the C runtime's `rt_file_*`
+# externs. Honors the happy-path R1 append-only + R3 atomic-publish contract
+# on ext4/xfs; FAT32 rename non-atomicity + fsync primitive gap are filed as
+# FS-REQ-001 and FS-REQ-002 respectively (see doc/05_design/svllm/fs_requests/).
+#
+# Calling convention (A2 scope):
+#   val client = StdFsNvfsClient.new()
+#   val obj = client.create(path, ObjClass.AppendOnly, CreateFlags.defaults())?
+#   client.write(obj, bytes)?
+#   client.seal(obj, false)?
+#   client.publish_atomic(obj, final_path)?
+#
+# `write` is a *whole-file* write (overwrite). A2 packer writes each chunk in
+# one call; multi-segment append is deferred (needs handle-based extern set —
+# see FS-REQ-001).
+
+use std.gc_async_mut.svllm.nvfs_client.{ObjHandle, ObjClass, CreateFlags, NvfsError, SyncScope, OpenMode, BufHandle, NvfsCaps}
+
+extern fn rt_file_write_bytes(path: text, data: [u8]) -> bool
+extern fn rt_file_read_bytes(path: text) -> [u8]
+extern fn rt_file_move(src: text, dst: text) -> bool
+extern fn rt_file_exists(path: text) -> bool
+
+# Monotonic handle-id counter. Handles are integers; the real path is carried
+# in the handle itself (advisory field). Native nvfs adapters ignore it.
+var _std_fs_next_id: i64 = 1
+
+fn _alloc_id() -> i64:
+    val id = _std_fs_next_id
+    _std_fs_next_id = _std_fs_next_id + 1
+    id
+
+# Concrete adapter. Stateless — all per-object state lives in the handle.
+struct StdFsNvfsClient:
+    marker: i64
+
+    static fn new() -> StdFsNvfsClient:
+        StdFsNvfsClient(marker: 0)
+
+    fn open(self, path: text, mode: OpenMode) -> Result<ObjHandle, NvfsError>:
+        if not rt_file_exists(path):
+            return Err(NvfsError.NotFound)
+        Ok(ObjHandle(id: _alloc_id(), path: path, is_open: true))
+
+    fn create(self, path: text, class: ObjClass, flags: CreateFlags) -> Result<ObjHandle, NvfsError>:
+        # Touch the file so the path is materialised; the first write()
+        # overwrites it. Empty-payload creates are valid per CreateFlags.
+        var empty: [u8] = []
+        if not rt_file_write_bytes(path, empty):
+            return Err(NvfsError.IoError)
+        Ok(ObjHandle(id: _alloc_id(), path: path, is_open: true))
+
+    fn close(self, obj: ObjHandle) -> Result<(), NvfsError>:
+        # Nothing to flush in the path-based extern model.
+        Ok(())
+
+    fn seal(self, obj: ObjHandle, pin_extents: bool) -> Result<(), NvfsError>:
+        # On FAT32 `seal` is a no-op (documented). ext4/xfs variants would
+        # additionally fsync the inode — blocked on FS-REQ-001.
+        # `pin_extents` is honored by the native nvfs adapter only.
+        Ok(())
+
+    fn trim(self, obj: ObjHandle) -> Result<(), NvfsError>:
+        Err(NvfsError.Unsupported)
+
+    # `write` is overwrite-full-file for A2 (each chunk is one call). Extends
+    # to incremental append when FS-REQ-001 lands (handle-based write extern).
+    fn write(self, obj: ObjHandle, bytes: [u8]) -> Result<i64, NvfsError>:
+        if obj.path == "":
+            return Err(NvfsError.InvalidArgument)
+        if not rt_file_write_bytes(obj.path, bytes):
+            return Err(NvfsError.IoError)
+        Ok(bytes.len() as i64)
+
+    fn read_range(self, obj: ObjHandle, off: i64, len: i64, buf: BufHandle) -> Result<i64, NvfsError>:
+        Err(NvfsError.Unsupported)
+
+    fn publish_atomic(self, temp_obj: ObjHandle, final_path: text) -> Result<(), NvfsError>:
+        if temp_obj.path == "":
+            return Err(NvfsError.InvalidArgument)
+        if not rt_file_exists(temp_obj.path):
+            return Err(NvfsError.NotFound)
+        if not rt_file_move(temp_obj.path, final_path):
+            return Err(NvfsError.IoError)
+        Ok(())
+
+    fn sync(self, obj: ObjHandle, scope: SyncScope) -> Result<(), NvfsError>:
+        # fsync primitive missing — see FS-REQ-001. Until the extern lands,
+        # every sync call returns Unsupported so callers can detect the gap
+        # and downgrade (or abort) deliberately.
+        Err(NvfsError.Unsupported)
+
+    fn query_caps(self, obj: ObjHandle) -> Result<NvfsCaps, NvfsError>:
+        Ok(NvfsCaps(
+            lba_size: 512,
+            preferred_read_granule: 4096,
+            preferred_write_granule: 4096,
+            max_concurrent_ops_per_handle: 1,
+            atomic_write_unit: 0,
+            atomic_boundary: 0,
+            supports_sealed_pin: false,
+            supports_atomic_publish: true,
+            supports_trim: false,
+            zone_size: 0,
+            append_granule: 0,
+            write_cache_volatile: true
+        ))
+
+    fn register_buffer(self, ptr: i64, len: i64) -> Result<BufHandle, NvfsError>:
+        Err(NvfsError.Unsupported)
+
+    fn unregister_buffer(self, buf: BufHandle) -> Result<(), NvfsError>:
+        Err(NvfsError.Unsupported)
+
+# Two-phase rename helper: open a `<final>.tmp` staging path read-only and
+# publish_atomic it onto `final_path`. Extracted so callers don't repeat the
+# open-then-rename dance for every staged artifact (data chunks + manifest).
+# Returns the client's error unchanged so callers can inspect NvfsError.
+fn publish_staged(client: StdFsNvfsClient, staging: text, final_path: text) -> Result<(), NvfsError>:
+    val stage_obj = client.open(staging, OpenMode.ReadOnly)
+    if stage_obj.is_err():
+        return Err(stage_obj.unwrap_err())
+    client.publish_atomic(stage_obj.unwrap(), final_path)

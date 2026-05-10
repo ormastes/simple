@@ -1,0 +1,340 @@
+# ITF CLI — daily-debug command driver
+#
+# Implements the 7-step daily-debug pipeline used by
+# `/spipe_loop --daily-debug` and `/company_bug_report ingest`.
+#
+# Pure-Simple driver. The Outlook fetch path uses the curl-backed Graph
+# adapter until the native http transport extern lands.
+
+use std.nogc_sync_mut.env.{env_get}
+use std.nogc_sync_mut.file_system.file_ops.{file_read_text, file_write_text, file_exists, file_rename}
+use std.common.pure.runtime.{time_now_unix}
+use app.itf.flags.{_has_flag}
+use app.itf.output.{print_error, print_info, print_success}
+use app.itf.adapter_outlook_curl.{
+    OutlookCurlClient,
+    outlook_curl_client_acquire,
+    outlook_curl_list_folders,
+    outlook_curl_list_messages,
+}
+
+# ---------------------------------------------------------------------------
+# Public types
+# ---------------------------------------------------------------------------
+
+class DailyMessage:
+    """One inbox message after extraction."""
+    subject: text
+    body: text
+    received_iso: text
+    jira_keys: [text]
+    minio_urls: [text]
+
+class TriagedArtifact:
+    """One MinIO URL classified by extension."""
+    url: text
+    kind: text   # "fw" | "dump" | "note" | "unknown"
+
+# ---------------------------------------------------------------------------
+# Public extractors (factored module-level so unit tests can import them)
+# ---------------------------------------------------------------------------
+
+fn extract_jira_keys(body: text) -> [text]:
+    """Return all Jira-key matches like `ABC-123` from a message body."""
+    var out: [text] = []
+    var token = ""
+    for ch in body:
+        val allowed = (ch >= "A" and ch <= "Z") or (ch >= "0" and ch <= "9") or ch == "-"
+        if allowed:
+            token = token + ch
+        else:
+            if _looks_like_jira_key(token):
+                out.push(token)
+            token = ""
+    if _looks_like_jira_key(token):
+        out.push(token)
+    out
+
+fn extract_minio_urls(body: text) -> [text]:
+    """Return all http(s) URLs from a message body (MinIO heuristic).
+
+    The heuristic matches `https?://host/path/...`; downstream callers filter
+    by host/bucket if they want stricter MinIO-only URLs.
+    """
+    var out: [text] = []
+    for raw in body.split(" "):
+        val token = _trim_url_token(raw)
+        val parts = token.split("/")
+        if (token.starts_with("http://") or token.starts_with("https://")) and parts.len() >= 4:
+            out.push(token)
+    out
+
+fn triage_kind(url: text) -> text:
+    """Classify a URL by its extension into fw / dump / note / unknown."""
+    val lower = url.to_lower()
+    if lower.ends_with(".bin") or lower.ends_with(".elf") or lower.ends_with(".hex"):
+        return "fw"
+    if lower.ends_with(".dmp") or lower.ends_with(".core") or lower.ends_with(".crash"):
+        return "dump"
+    if lower.ends_with(".log") or lower.ends_with(".txt") or lower.ends_with(".md"):
+        return "note"
+    "unknown"
+
+fn triage_all(urls: [text]) -> [TriagedArtifact]:
+    """Apply `triage_kind` to a batch of URLs."""
+    var out: [TriagedArtifact] = []
+    for u in urls:
+        out.push(TriagedArtifact(url: u, kind: triage_kind(u)))
+    out
+
+# ---------------------------------------------------------------------------
+# Watermark (pure functions for easy testing)
+# ---------------------------------------------------------------------------
+
+fn watermark_path() -> text:
+    """Resolve `~/.config/itf/spipe_daily.sdn`."""
+    val home = env_get("HOME")
+    val base = if home != "": home else: env_get("USERPROFILE")
+    "{base}/.config/itf/spipe_daily.sdn"
+
+fn parse_watermark(content: text) -> text:
+    """Parse `last_run: <iso>` out of an SDN watermark file. Empty if absent."""
+    val lines = content.split("\n")
+    for line in lines:
+        val trimmed = line.trim()
+        if trimmed.starts_with("#") or trimmed == "":
+            pass_dn
+        else if trimmed.starts_with("last_run:"):
+            val v = trimmed["last_run:".len():trimmed.len()].trim()
+            if v.starts_with("\"") and v.ends_with("\""):
+                return v[1:v.len() - 1]
+            return v
+    ""
+
+fn render_watermark(iso_now: text) -> text:
+    """Render an SDN watermark file body for the given ISO timestamp."""
+    "# ITF SPipe daily-debug watermark (do not share)\nlast_run: \"{iso_now}\"\n"
+
+fn load_watermark() -> text:
+    """Read the watermark or return a default of (now - 24h) ISO timestamp."""
+    val path = watermark_path()
+    if not file_exists(path):
+        return _iso_minus_24h()
+    val content = file_read_text(path) ?? ""
+    if content == "":
+        return _iso_minus_24h()
+    val parsed = parse_watermark(content)
+    if parsed == "":
+        return _iso_minus_24h()
+    parsed
+
+fn save_watermark_atomic(iso_now: text) -> bool:
+    """Atomic save: write to `<path>.tmp`, then rename into place."""
+    val path = watermark_path()
+    val tmp = "{path}.tmp"
+    val body = render_watermark(iso_now)
+    if not file_write_text(tmp, body):
+        return false
+    file_rename(tmp, path)
+
+# ---------------------------------------------------------------------------
+# Internal helpers
+# ---------------------------------------------------------------------------
+
+fn _iso_minus_24h() -> text:
+    """Return ISO 8601 timestamp 24 hours before now (UTC, second precision)."""
+    val secs = time_now_unix() - 86400
+    "{secs}"   # TODO: format as RFC3339; for now a unix-seconds string is parseable.
+
+fn _iso_now() -> text:
+    """Return ISO 8601 timestamp for now (UTC, second precision)."""
+    val secs = time_now_unix()
+    "{secs}"   # TODO: format as RFC3339 once a date formatter lands.
+
+fn _today_yyyy_mm_dd() -> text:
+    """Best-effort YYYY-MM-DD for the daily digest filename."""
+    # TODO: use a real calendar formatter; unix-seconds bucket suffices for
+    # the per-day digest until a date library lands.
+    val secs = time_now_unix()
+    val day = secs / 86400
+    "day-{day}"
+
+fn _digest_path() -> text:
+    """Resolve `doc/08_tracking/debug/<YYYY-MM-DD>.md`."""
+    "doc/08_tracking/debug/{_today_yyyy_mm_dd()}.md"
+
+fn _fetch_inbox(since_iso: text) -> [DailyMessage]:
+    """Fetch inbox messages received since the watermark.
+    """
+    val tenant = env_get("GRAPH_TENANT_ID")
+    val client_id = env_get("GRAPH_CLIENT_ID")
+    val client_secret = env_get("GRAPH_CLIENT_SECRET")
+    val mailbox = env_get("GRAPH_MAILBOX_UPN")
+    if tenant == "" or client_id == "" or client_secret == "" or mailbox == "":
+        print_info("daily-debug", "outlook skipped (set GRAPH_TENANT_ID/GRAPH_CLIENT_ID/GRAPH_CLIENT_SECRET/GRAPH_MAILBOX_UPN)")
+        return []
+    val cache_path = _graph_cache_path()
+    val (ok, client) = outlook_curl_client_acquire(
+        tenant,
+        client_id,
+        "GRAPH_CLIENT_SECRET",
+        mailbox,
+        cache_path,
+    )
+    if not ok:
+        print_info("daily-debug", "outlook token acquisition failed")
+        return []
+
+    val folder_id = _resolve_inbox_folder_id(client)
+    if folder_id == "":
+        print_info("daily-debug", "Inbox folder not found")
+        return []
+
+    val filter = "receivedDateTime ge {since_iso}"
+    val (success, messages, raw) = outlook_curl_list_messages(client, folder_id, filter, 50)
+    if not success:
+        print_info("daily-debug", "outlook fetch failed: {raw}")
+        return []
+
+    var out: [DailyMessage] = []
+    for m in messages:
+        val combined = if m.body_preview != "": "{m.subject}\n{m.body_preview}" else: m.subject
+        out.push(DailyMessage(
+            subject: m.subject,
+            body: m.body_preview,
+            received_iso: m.received,
+            jira_keys: extract_jira_keys(combined),
+            minio_urls: extract_minio_urls(combined),
+        ))
+    out
+
+
+fn _graph_cache_path() -> text:
+    val home = env_get("HOME")
+    val base = if home != "": home else: env_get("USERPROFILE")
+    "{base}/.config/itf/outlook_token_cache.sdn"
+
+
+fn _resolve_inbox_folder_id(client: OutlookCurlClient) -> text:
+    val explicit = env_get("GRAPH_FOLDER_ID")
+    if explicit != "":
+        return explicit
+    val folder_name = env_get("GRAPH_FOLDER_NAME")
+    val wanted = if folder_name != "": folder_name else: "Inbox"
+    val (ok, folders, _raw) = outlook_curl_list_folders(client)
+    if not ok:
+        return ""
+    for f in folders:
+        if f.display_name == wanted:
+            return f.id
+    ""
+
+
+fn _looks_like_jira_key(token: text) -> bool:
+    if token == "" or not token.contains("-"):
+        return false
+    val parts = token.split("-", 2)
+    if parts.len() != 2:
+        return false
+    val left = parts[0]
+    val right = parts[1]
+    if left == "" or right == "":
+        return false
+    for ch in left:
+        if not ((ch >= "A" and ch <= "Z") or (ch >= "0" and ch <= "9")):
+            return false
+    var first_is_letter = false
+    if left.len() > 0:
+        val ch = left[0]
+        first_is_letter = ch >= "A" and ch <= "Z"
+    if not first_is_letter:
+        return false
+    for ch in right:
+        if ch < "0" or ch > "9":
+            return false
+    true
+
+
+fn _trim_url_token(raw: text) -> text:
+    if raw == "":
+        return ""
+    var start = 0
+    var end = raw.len()
+    while start < end:
+        val ch = raw[start]
+        if ch == "(" or ch == "[" or ch == "<" or ch == "\"" or ch == "'":
+            start = start + 1
+        else:
+            break
+    while end > start:
+        val ch = raw[end - 1]
+        if ch == "." or ch == "," or ch == ";" or ch == ")" or ch == "]" or ch == ">" or ch == "\"" or ch == "'":
+            end = end - 1
+        else:
+            break
+    raw[start:end]
+
+fn _render_digest(messages: [DailyMessage], artifacts: [TriagedArtifact]) -> text:
+    """Render the per-day markdown digest body."""
+    var s = "# Daily Debug Digest — {_today_yyyy_mm_dd()}\n\n"
+    s = s + "## Summary\n\n"
+    s = s + "| Metric | Value |\n|--------|-------|\n"
+    s = s + "| Messages scanned | {messages.len()} |\n"
+    s = s + "| Artifacts triaged | {artifacts.len()} |\n\n"
+    s = s + "## Per-bug Sections\n\n"
+    for m in messages:
+        s = s + "### {m.subject}\n\n"
+        s = s + "- Received: {m.received_iso}\n"
+        s = s + "- Jira keys: {m.jira_keys.join(\", \")}\n"
+        s = s + "- MinIO URLs: {m.minio_urls.len()}\n\n"
+    s
+
+# ---------------------------------------------------------------------------
+# Public entry point
+# ---------------------------------------------------------------------------
+
+fn run_daily_debug(args: [text]) -> i64:
+    """Run the 7-step daily-debug pipeline. Returns process exit code.
+
+    Flags:
+      --quiet     suppress step 7 (notify)
+      --dry-run   plan only; no file writes, no watermark save, no notify
+    """
+    val quiet = _has_flag(args, "--quiet")
+    val dry_run = _has_flag(args, "--dry-run")
+
+    # 1. Load watermark
+    val since = load_watermark()
+    print_info("daily-debug", "since={since} dry_run={dry_run} quiet={quiet}")
+
+    # 2. List inbox since watermark
+    val messages = _fetch_inbox(since)
+
+    # 3+4. Already done per-message at fetch time; aggregate artifacts here.
+    var all_urls: [text] = []
+    for m in messages:
+        for u in m.minio_urls:
+            all_urls.push(u)
+    val artifacts = triage_all(all_urls)
+
+    # 5. Write daily digest (gated on dry-run)
+    val digest = _render_digest(messages, artifacts)
+    if not dry_run:
+        if not file_write_text(_digest_path(), digest):
+            print_error("failed to write daily digest")
+            return 1
+    else:
+        print_info("dry-run", "would write {_digest_path()} ({digest.len()} bytes)")
+
+    # 6. Save watermark atomically (gated on dry-run)
+    val now = _iso_now()
+    if not dry_run:
+        if not save_watermark_atomic(now):
+            print_error("failed to save watermark")
+            return 1
+
+    # 7. Notify (gated on quiet+dry-run)
+    if not quiet and not dry_run:
+        print_success("daily-debug: {messages.len()} msgs, {artifacts.len()} artifacts")
+
+    0

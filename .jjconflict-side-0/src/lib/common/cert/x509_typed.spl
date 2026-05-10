@@ -1,0 +1,612 @@
+# X.509 v3 Certificate Parser — Typed API (RFC 5280 §4.1)
+#
+# Provides class-based X.509 parsing built on [u8] byte arrays.
+# No signature verification (deferred to W26).
+#
+# Key types:
+#   X509Cert        — parsed certificate fields
+#   X509Extension   — single extension (oid arcs + critical + raw value)
+#   X509ParseResult — Ok(cert) / Err(reason)
+#
+# Entry points:
+#   x509_parse_der(bytes: [u8]) -> X509ParseResult
+#   x509_parse_pem(pem: text)   -> X509ParseResult
+#
+# References:
+#   RFC 5280 — PKIX Certificate and CRL Profile
+#   RFC 5480 — Elliptic Curve Cryptography Subject Public Key Information
+#   RFC 8410 — Algorithm Identifiers for Ed25519
+
+# ============================================================================
+# Public Types
+# ============================================================================
+
+class X509Extension:
+    """One X.509 v3 extension entry."""
+    oid: [i64]        # OID as arc array, e.g. [2, 5, 29, 19]
+    critical: bool    # true if the critical boolean is set
+    value: [u8]       # raw extnValue OCTET STRING contents (DER of inner structure)
+
+class X509Cert:
+    """Parsed X.509 v3 certificate (RFC 5280 §4.1)."""
+    version: i64                      # 0=v1, 1=v2, 2=v3 (raw DER value)
+    serial: [u8]                      # serialNumber as big-endian bytes (stripped leading 0x00 sign pad)
+    sig_alg_oid: [i64]                # TBSCertificate.signature AlgorithmIdentifier OID arcs
+    issuer: [([i64], text)]           # issuer RDN components: [(oid_arcs, string_value)]
+    not_before_unix: i64              # notBefore as Unix seconds (UTC epoch, simplified civil calc)
+    not_after_unix: i64               # notAfter  as Unix seconds
+    subject: [([i64], text)]          # subject RDN components: [(oid_arcs, string_value)]
+    spki_alg_oid: [i64]               # SubjectPublicKeyInfo AlgorithmIdentifier OID arcs
+    spki_params: [u8]                 # SPKI AlgorithmIdentifier params (raw DER, empty if absent)
+    spki_key: [u8]                    # subjectPublicKey BIT STRING payload (unused-bits byte stripped)
+    extensions: [X509Extension]       # v3 extensions (empty if absent)
+    sig_value: [u8]                   # Certificate.signatureValue BIT STRING payload
+
+enum X509ParseResult:
+    """Result of parsing a DER- or PEM-encoded X.509 certificate."""
+    Ok(cert: X509Cert)
+    Err(reason: text)
+
+# ============================================================================
+# Internal DER helpers — operate on [u8]
+# ============================================================================
+
+class _DerLen:
+    length: u64
+    header_size: u64
+
+class _DerTlv:
+    tag: u8
+    value_offset: u64
+    value_length: u64
+    total_length: u64
+
+fn _x_read_length(data: [u8], offset_after_tag: u64) -> _DerLen:
+    """Decode DER length at offset_after_tag.
+    Short form: byte < 0x80. Long form 0x81/0x82 supported."""
+    val first = data[offset_after_tag]
+    if first < 0x80:
+        _DerLen(length: first.to_u64(), header_size: 1)
+    elif first == 0x81:
+        val n = data[offset_after_tag + 1].to_u64()
+        _DerLen(length: n, header_size: 2)
+    else:
+        val hi = data[offset_after_tag + 1].to_u64()
+        val lo = data[offset_after_tag + 2].to_u64()
+        _DerLen(length: (hi << 8) | lo, header_size: 3)
+
+fn _x_read_tlv(data: [u8], offset: u64) -> _DerTlv:
+    """Read one TLV at offset. Returns a _DerTlv."""
+    val tag = data[offset]
+    val dl = _x_read_length(data, offset + 1)
+    val vo = offset + 1 + dl.header_size
+    _DerTlv(
+        tag: tag,
+        value_offset: vo,
+        value_length: dl.length,
+        total_length: 1 + dl.header_size + dl.length
+    )
+
+fn _x_copy_slice(data: [u8], offset: u64, length: u64) -> [u8]:
+    """Copy data[offset .. offset+length] into a new [u8]."""
+    var result: [u8] = []
+    var i: u64 = 0
+    while i < length:
+        result.push(data[offset + i])
+        i = i + 1
+    result
+
+fn _x_bounds_ok(data: [u8], tlv: _DerTlv) -> bool:
+    """Return true if the TLV value range is within data bounds."""
+    tlv.value_offset + tlv.value_length <= data.len().to_u64()
+
+# ============================================================================
+# OID arc parsing
+# ============================================================================
+
+fn _x_parse_oid_arcs(data: [u8], offset: u64, length: u64) -> [i64]:
+    """Decode an OID value field (already past the 06 tag+length) into arc array.
+
+    First byte encodes arc[0] and arc[1]: first = arc[0]*40 + arc[1].
+    arc[0] is 0 if first < 40, 1 if first < 80, else 2.
+    Remaining bytes are base-128 encoded arcs (MSB = continuation bit).
+    """
+    var arcs: [i64] = []
+    if length == 0:
+        return arcs
+
+    val first_byte = data[offset].to_i64()
+    var arc0: i64 = 0
+    var arc1: i64 = 0
+    if first_byte < 40:
+        arc0 = 0
+        arc1 = first_byte
+    elif first_byte < 80:
+        arc0 = 1
+        arc1 = first_byte - 40
+    else:
+        arc0 = 2
+        arc1 = first_byte - 80
+    arcs.push(arc0)
+    arcs.push(arc1)
+
+    var i: u64 = 1
+    var current: i64 = 0
+    while i < length:
+        val b = data[offset + i].to_i64()
+        if (b & 0x80) != 0:
+            current = (current << 7) | (b & 0x7F)
+        else:
+            current = (current << 7) | b
+            arcs.push(current)
+            current = 0
+        i = i + 1
+
+    arcs
+
+# ============================================================================
+# Time parsing: UTCTime and GeneralizedTime → Unix epoch
+# ============================================================================
+
+fn _x_is_leap(year: i64) -> bool:
+    """Return true if year is a leap year (proleptic Gregorian)."""
+    if year % 400 == 0:
+        true
+    elif year % 100 == 0:
+        false
+    elif year % 4 == 0:
+        true
+    else:
+        false
+
+fn _x_days_in_month(year: i64, month: i64) -> i64:
+    """Days in a given month (1=Jan..12=Dec) for the given year."""
+    if month == 1:
+        31
+    elif month == 2:
+        if _x_is_leap(year): 29 else: 28
+    elif month == 3:
+        31
+    elif month == 4:
+        30
+    elif month == 5:
+        31
+    elif month == 6:
+        30
+    elif month == 7:
+        31
+    elif month == 8:
+        31
+    elif month == 9:
+        30
+    elif month == 10:
+        31
+    elif month == 11:
+        30
+    else:
+        31
+
+fn _x_civil_to_epoch(year: i64, month: i64, day: i64, hour: i64, minute: i64, second: i64) -> i64:
+    """Convert a civil UTC datetime to a Unix timestamp.
+
+    Uses a straightforward day-accumulation from 1970-01-01.
+    Valid for dates in the range 1970–2099 (sufficient for X.509).
+    """
+    var days: i64 = 0
+
+    # Count whole years from 1970
+    var y: i64 = 1970
+    while y < year:
+        if _x_is_leap(y):
+            days = days + 366
+        else:
+            days = days + 365
+        y = y + 1
+
+    # Count whole months in current year
+    var m: i64 = 1
+    while m < month:
+        days = days + _x_days_in_month(year, m)
+        m = m + 1
+
+    # Add days (1-based: day 1 = 0 elapsed days)
+    days = days + day - 1
+
+    days * 86400 + hour * 3600 + minute * 60 + second
+
+fn _x_parse_two_digits(data: [u8], offset: u64) -> i64:
+    """Parse two ASCII digit bytes at offset into an integer."""
+    val hi = data[offset].to_i64() - 48
+    val lo = data[offset + 1].to_i64() - 48
+    hi * 10 + lo
+
+fn _x_parse_four_digits(data: [u8], offset: u64) -> i64:
+    """Parse four ASCII digit bytes at offset into an integer."""
+    val d0 = data[offset].to_i64() - 48
+    val d1 = data[offset + 1].to_i64() - 48
+    val d2 = data[offset + 2].to_i64() - 48
+    val d3 = data[offset + 3].to_i64() - 48
+    d0 * 1000 + d1 * 100 + d2 * 10 + d3
+
+fn _x_parse_utctime(data: [u8], offset: u64, length: u64) -> i64:
+    """Parse a UTCTime value (YYMMDDHHMMSSZ, 13 bytes) to Unix epoch.
+
+    Y2K rule: YY < 50 → 20YY, YY >= 50 → 19YY (RFC 5280 §4.1.2.5.1).
+    Returns -1 on malformed input.
+    """
+    if length < 13:
+        return -1
+    val yy = _x_parse_two_digits(data, offset)
+    val year = if yy < 50: 2000 + yy else: 1900 + yy
+    val month  = _x_parse_two_digits(data, offset + 2)
+    val day    = _x_parse_two_digits(data, offset + 4)
+    val hour   = _x_parse_two_digits(data, offset + 6)
+    val minute = _x_parse_two_digits(data, offset + 8)
+    val second = _x_parse_two_digits(data, offset + 10)
+    _x_civil_to_epoch(year, month, day, hour, minute, second)
+
+fn _x_parse_gentime(data: [u8], offset: u64, length: u64) -> i64:
+    """Parse a GeneralizedTime value (YYYYMMDDHHMMSSZ, 15 bytes) to Unix epoch.
+
+    Returns -1 on malformed input.
+    """
+    if length < 15:
+        return -1
+    val year   = _x_parse_four_digits(data, offset)
+    val month  = _x_parse_two_digits(data, offset + 4)
+    val day    = _x_parse_two_digits(data, offset + 6)
+    val hour   = _x_parse_two_digits(data, offset + 8)
+    val minute = _x_parse_two_digits(data, offset + 10)
+    val second = _x_parse_two_digits(data, offset + 12)
+    _x_civil_to_epoch(year, month, day, hour, minute, second)
+
+# ============================================================================
+# Name (Distinguished Name) parsing
+# ============================================================================
+
+fn _x_parse_name(data: [u8], offset: u64, length: u64) -> [([i64], text)]:
+    """Parse a Name SEQUENCE (SEQUENCE OF RDN; each RDN = SET OF AttributeTypeAndValue).
+
+    Returns a flat list of (oid_arcs, string_value) tuples.
+    """
+    var components: [([i64], text)] = []
+    var pos: u64 = offset
+    val end: u64 = offset + length
+
+    # Iterate RDNs (each is a SET)
+    while pos < end:
+        val rdn_tlv = _x_read_tlv(data, pos)
+        # rdn_tlv.tag should be 0x31 (SET)
+        var rdn_pos: u64 = rdn_tlv.value_offset
+        val rdn_end: u64 = rdn_tlv.value_offset + rdn_tlv.value_length
+
+        # Each RDN SET contains one or more SEQUENCE { OID, string }
+        while rdn_pos < rdn_end:
+            val atv_tlv = _x_read_tlv(data, rdn_pos)
+            # atv_tlv is a SEQUENCE
+            val oid_tlv = _x_read_tlv(data, atv_tlv.value_offset)
+            # oid_tlv.tag should be 0x06 (OID)
+            val oid_arcs = _x_parse_oid_arcs(data, oid_tlv.value_offset, oid_tlv.value_length)
+            val val_offset = atv_tlv.value_offset + oid_tlv.total_length
+            val val_tlv = _x_read_tlv(data, val_offset)
+            # Extract string bytes as text
+            var str_bytes: [u8] = _x_copy_slice(data, val_tlv.value_offset, val_tlv.value_length)
+            var str_val: text = ""
+            var si: u64 = 0
+            while si < str_bytes.len():
+                str_val = str_val + str_bytes[si].to_i64().chr()
+                si = si + 1
+            components.push((oid_arcs, str_val))
+            rdn_pos = rdn_pos + atv_tlv.total_length
+
+        pos = pos + rdn_tlv.total_length
+
+    components
+
+# ============================================================================
+# Extensions parsing
+# ============================================================================
+
+fn _x_parse_extensions(data: [u8], offset: u64, length: u64) -> [X509Extension]:
+    """Parse the v3 extensions SEQUENCE OF Extension.
+
+    Each Extension ::= SEQUENCE { extnID OID, critical BOOLEAN DEFAULT FALSE, extnValue OCTET STRING }
+    """
+    var exts: [X509Extension] = []
+    var pos: u64 = offset
+    val end: u64 = offset + length
+
+    while pos < end:
+        val ext_tlv = _x_read_tlv(data, pos)
+        # ext_tlv is SEQUENCE containing { OID, [BOOLEAN,] OCTET STRING }
+        var inner_pos: u64 = ext_tlv.value_offset
+
+        val oid_tlv = _x_read_tlv(data, inner_pos)
+        val oid_arcs = _x_parse_oid_arcs(data, oid_tlv.value_offset, oid_tlv.value_length)
+        inner_pos = inner_pos + oid_tlv.total_length
+
+        # Optional BOOLEAN critical (tag 0x01)
+        var critical: bool = false
+        if data[inner_pos] == 0x01:
+            val bool_tlv = _x_read_tlv(data, inner_pos)
+            if bool_tlv.value_length > 0:
+                critical = data[bool_tlv.value_offset] != 0x00
+            inner_pos = inner_pos + bool_tlv.total_length
+
+        # OCTET STRING extnValue
+        val ev_tlv = _x_read_tlv(data, inner_pos)
+        val ev_bytes = _x_copy_slice(data, ev_tlv.value_offset, ev_tlv.value_length)
+
+        exts.push(X509Extension(oid: oid_arcs, critical: critical, value: ev_bytes))
+        pos = pos + ext_tlv.total_length
+
+    exts
+
+# ============================================================================
+# Public key (SPKI) parsing
+# ============================================================================
+
+fn _x_parse_spki(data: [u8], offset: u64, length: u64) -> (_DerTlv, _DerTlv, _DerTlv):
+    """Parse SubjectPublicKeyInfo SEQUENCE { AlgorithmIdentifier, BIT STRING }.
+    Returns (alg_tlv, alg_oid_tlv, bitstring_tlv).
+    alg_tlv spans the whole AlgorithmIdentifier SEQUENCE."""
+    val alg_seq_tlv = _x_read_tlv(data, offset)
+    val oid_tlv = _x_read_tlv(data, alg_seq_tlv.value_offset)
+    val bs_offset = offset + alg_seq_tlv.total_length
+    val bs_tlv = _x_read_tlv(data, bs_offset)
+    (alg_seq_tlv, oid_tlv, bs_tlv)
+
+# ============================================================================
+# Integer bytes (serial number)
+# ============================================================================
+
+fn _x_parse_int_bytes(data: [u8], offset: u64, length: u64) -> [u8]:
+    """Extract DER INTEGER bytes, stripping a leading 0x00 sign pad if present."""
+    if length == 0:
+        return []
+    var start: u64 = offset
+    var len: u64 = length
+    if len > 1 and data[start] == 0x00:
+        start = start + 1
+        len = len - 1
+    _x_copy_slice(data, start, len)
+
+# ============================================================================
+# TBSCertificate parser
+# ============================================================================
+
+fn _x_parse_tbs(data: [u8], offset: u64, length: u64) -> (i64, [u8], [i64], [([i64], text)], i64, i64, [([i64], text)], [i64], [u8], [u8], [X509Extension]):
+    """Parse TBSCertificate body and return all required fields.
+
+    Return tuple:
+      (version, serial, sig_alg_oid,
+       issuer, not_before_unix, not_after_unix,
+       subject, spki_alg_oid, spki_params, spki_key,
+       extensions)
+    """
+    var pos: u64 = offset
+    val end: u64 = offset + length
+
+    # version [0] EXPLICIT INTEGER OPTIONAL (default 0 = v1)
+    var version: i64 = 0
+    if data[pos] == 0xA0:
+        val ver_ctx_tlv = _x_read_tlv(data, pos)
+        val ver_int_tlv = _x_read_tlv(data, ver_ctx_tlv.value_offset)
+        if ver_int_tlv.value_length > 0:
+            version = data[ver_int_tlv.value_offset].to_i64()
+        pos = pos + ver_ctx_tlv.total_length
+
+    # serialNumber INTEGER
+    val serial_tlv = _x_read_tlv(data, pos)
+    val serial = _x_parse_int_bytes(data, serial_tlv.value_offset, serial_tlv.value_length)
+    pos = pos + serial_tlv.total_length
+
+    # signature AlgorithmIdentifier SEQUENCE { OID, [params] }
+    val sig_alg_seq_tlv = _x_read_tlv(data, pos)
+    val sig_alg_oid_tlv = _x_read_tlv(data, sig_alg_seq_tlv.value_offset)
+    val sig_alg_oid = _x_parse_oid_arcs(data, sig_alg_oid_tlv.value_offset, sig_alg_oid_tlv.value_length)
+    pos = pos + sig_alg_seq_tlv.total_length
+
+    # issuer Name SEQUENCE
+    val issuer_tlv = _x_read_tlv(data, pos)
+    val issuer = _x_parse_name(data, issuer_tlv.value_offset, issuer_tlv.value_length)
+    pos = pos + issuer_tlv.total_length
+
+    # validity Validity SEQUENCE { notBefore Time, notAfter Time }
+    val validity_tlv = _x_read_tlv(data, pos)
+    var val_pos: u64 = validity_tlv.value_offset
+
+    val nb_tlv = _x_read_tlv(data, val_pos)
+    var not_before_unix: i64 = -1
+    if nb_tlv.tag == 0x17:
+        not_before_unix = _x_parse_utctime(data, nb_tlv.value_offset, nb_tlv.value_length)
+    elif nb_tlv.tag == 0x18:
+        not_before_unix = _x_parse_gentime(data, nb_tlv.value_offset, nb_tlv.value_length)
+    val_pos = val_pos + nb_tlv.total_length
+
+    val na_tlv = _x_read_tlv(data, val_pos)
+    var not_after_unix: i64 = -1
+    if na_tlv.tag == 0x17:
+        not_after_unix = _x_parse_utctime(data, na_tlv.value_offset, na_tlv.value_length)
+    elif na_tlv.tag == 0x18:
+        not_after_unix = _x_parse_gentime(data, na_tlv.value_offset, na_tlv.value_length)
+    pos = pos + validity_tlv.total_length
+
+    # subject Name SEQUENCE
+    val subject_tlv = _x_read_tlv(data, pos)
+    val subject = _x_parse_name(data, subject_tlv.value_offset, subject_tlv.value_length)
+    pos = pos + subject_tlv.total_length
+
+    # subjectPublicKeyInfo SEQUENCE
+    val spki_tlv = _x_read_tlv(data, pos)
+    val spki_inner = _x_parse_spki(data, spki_tlv.value_offset, spki_tlv.value_length)
+    val spki_alg_seq = spki_inner[0]
+    val spki_oid_tlv = spki_inner[1]
+    val spki_bs_tlv = spki_inner[2]
+    val spki_alg_oid = _x_parse_oid_arcs(data, spki_oid_tlv.value_offset, spki_oid_tlv.value_length)
+    # Params: bytes after OID TLV within the AlgorithmIdentifier SEQUENCE (may be absent or NULL)
+    val params_start = spki_alg_seq.value_offset + spki_oid_tlv.total_length
+    val params_end   = spki_alg_seq.value_offset + spki_alg_seq.value_length
+    var spki_params: [u8] = []
+    if params_end > params_start:
+        spki_params = _x_copy_slice(data, params_start, params_end - params_start)
+    # BIT STRING: first byte is unused-bits count, strip it
+    var spki_key: [u8] = []
+    if spki_bs_tlv.value_length > 0:
+        spki_key = _x_copy_slice(data, spki_bs_tlv.value_offset + 1, spki_bs_tlv.value_length - 1)
+    pos = pos + spki_tlv.total_length
+
+    # Skip optional fields: issuerUniqueID [1], subjectUniqueID [2]
+    while pos < end and (data[pos] == 0x81 or data[pos] == 0x82):
+        val skip_tlv = _x_read_tlv(data, pos)
+        pos = pos + skip_tlv.total_length
+
+    # extensions [3] EXPLICIT SEQUENCE OF Extension OPTIONAL
+    var extensions: [X509Extension] = []
+    if pos < end and data[pos] == 0xA3:
+        val ext_ctx_tlv = _x_read_tlv(data, pos)
+        val ext_seq_tlv = _x_read_tlv(data, ext_ctx_tlv.value_offset)
+        extensions = _x_parse_extensions(data, ext_seq_tlv.value_offset, ext_seq_tlv.value_length)
+
+    (version, serial, sig_alg_oid, issuer, not_before_unix, not_after_unix, subject, spki_alg_oid, spki_params, spki_key, extensions)
+
+# ============================================================================
+# Top-level parser
+# ============================================================================
+
+fn x509_parse_der(bytes: [u8]) -> X509ParseResult:
+    """Parse a DER-encoded X.509 v3 certificate.
+
+    Returns X509ParseResult.Ok(cert) on success or X509ParseResult.Err(reason) on failure.
+
+    Validates:
+    - Outer structure: SEQUENCE { TBSCertificate, AlgorithmIdentifier, BIT STRING }
+    - Version: only 0/1/2 (v1/v2/v3) accepted; v4+ returns Err(UnsupportedVersion)
+    """
+    if bytes.len() < 4:
+        return X509ParseResult.Err("InvalidDer: too short")
+
+    # Outer Certificate SEQUENCE
+    val cert_tlv = _x_read_tlv(bytes, 0)
+    if cert_tlv.tag != 0x30:
+        return X509ParseResult.Err("InvalidDer: outer tag not SEQUENCE (0x30)")
+    if not _x_bounds_ok(bytes, cert_tlv):
+        return X509ParseResult.Err("InvalidDer: outer SEQUENCE truncated")
+
+    # TBSCertificate
+    val tbs_tlv = _x_read_tlv(bytes, cert_tlv.value_offset)
+    if tbs_tlv.tag != 0x30:
+        return X509ParseResult.Err("InvalidDer: TBSCertificate tag not SEQUENCE")
+    if not _x_bounds_ok(bytes, tbs_tlv):
+        return X509ParseResult.Err("InvalidDer: TBSCertificate truncated")
+
+    val tbs = _x_parse_tbs(bytes, tbs_tlv.value_offset, tbs_tlv.value_length)
+    val version = tbs[0]
+    if version > 2:
+        return X509ParseResult.Err("UnsupportedVersion: version {version} > 2")
+
+    # signatureAlgorithm
+    val after_tbs: u64 = cert_tlv.value_offset + tbs_tlv.total_length
+    val outer_sig_alg_tlv = _x_read_tlv(bytes, after_tbs)
+    val outer_oid_tlv = _x_read_tlv(bytes, outer_sig_alg_tlv.value_offset)
+    val outer_sig_alg_oid = _x_parse_oid_arcs(bytes, outer_oid_tlv.value_offset, outer_oid_tlv.value_length)
+
+    # signatureValue BIT STRING
+    val after_sig_alg: u64 = after_tbs + outer_sig_alg_tlv.total_length
+    val sig_bs_tlv = _x_read_tlv(bytes, after_sig_alg)
+    if sig_bs_tlv.tag != 0x03:
+        return X509ParseResult.Err("InvalidDer: signatureValue tag not BIT STRING (0x03)")
+    var sig_value: [u8] = []
+    if sig_bs_tlv.value_length > 0:
+        sig_value = _x_copy_slice(bytes, sig_bs_tlv.value_offset + 1, sig_bs_tlv.value_length - 1)
+
+    val cert = X509Cert(
+        version: version,
+        serial: tbs[1],
+        sig_alg_oid: tbs[2],
+        issuer: tbs[3],
+        not_before_unix: tbs[4],
+        not_after_unix: tbs[5],
+        subject: tbs[6],
+        spki_alg_oid: tbs[7],
+        spki_params: tbs[8],
+        spki_key: tbs[9],
+        extensions: tbs[10],
+        sig_value: sig_value
+    )
+    X509ParseResult.Ok(cert: cert)
+
+fn x509_parse_pem(pem: text) -> X509ParseResult:
+    """Parse a PEM-encoded X.509 certificate.
+
+    Strips -----BEGIN CERTIFICATE----- / -----END CERTIFICATE----- delimiters,
+    decodes the base64 body to DER bytes, then delegates to x509_parse_der.
+    """
+    val begin_marker = "-----BEGIN CERTIFICATE-----"
+    val end_marker   = "-----END CERTIFICATE-----"
+
+    val begin_idx = pem.index_of(begin_marker)
+    if begin_idx < 0:
+        return X509ParseResult.Err("InvalidPem: no BEGIN CERTIFICATE header")
+    val after_begin = begin_idx + begin_marker.length()
+    val end_idx = pem.index_of(end_marker)
+    if end_idx < 0:
+        return X509ParseResult.Err("InvalidPem: no END CERTIFICATE trailer")
+
+    # Extract and clean base64 body — use intermediate vars (chained methods broken in interpreter)
+    val b64 = pem.substring(after_begin, end_idx)
+    val b64_no_lf = b64.replace("\n", "")
+    val b64_no_cr = b64_no_lf.replace("\r", "")
+    val clean = b64_no_cr.replace(" ", "")
+
+    # Decode base64 to bytes
+    val alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+    var der: [u8] = []
+    var i: i64 = 0
+    val clen = clean.length()
+    while i < clen - 3:
+        val c0 = clean.char_at(i)
+        val c1 = clean.char_at(i + 1)
+        val c2 = clean.char_at(i + 2)
+        val c3 = clean.char_at(i + 3)
+        val v0 = alphabet.index_of(c0)
+        val v1 = alphabet.index_of(c1)
+        val v2 = if c2 == "=": 0 else: alphabet.index_of(c2)
+        val v3 = if c3 == "=": 0 else: alphabet.index_of(c3)
+        der.push(((v0 << 2) | (v1 >> 4)).to_u8())
+        if c2 != "=":
+            der.push((((v1 & 0x0F) << 4) | (v2 >> 2)).to_u8())
+        if c3 != "=":
+            der.push((((v2 & 0x03) << 6) | v3).to_u8())
+        i = i + 4
+
+    x509_parse_der(der)
+
+# ============================================================================
+# Convenience accessors
+# ============================================================================
+
+fn x509_cert_cn(cert: X509Cert) -> text:
+    """Return the Common Name (OID 2.5.4.3) from the subject, or empty string."""
+    # CN OID arcs: [2, 5, 4, 3]
+    var i: i64 = 0
+    while i < cert.subject.len():
+        val pair = cert.subject[i]
+        val arcs = pair[0]
+        if arcs.len() == 4:
+            if arcs[0] == 2 and arcs[1] == 5 and arcs[2] == 4 and arcs[3] == 3:
+                return pair[1]
+        i = i + 1
+    ""
+
+fn x509_cert_issuer_cn(cert: X509Cert) -> text:
+    """Return the Common Name from the issuer, or empty string."""
+    var i: i64 = 0
+    while i < cert.issuer.len():
+        val pair = cert.issuer[i]
+        val arcs = pair[0]
+        if arcs.len() == 4:
+            if arcs[0] == 2 and arcs[1] == 5 and arcs[2] == 4 and arcs[3] == 3:
+                return pair[1]
+        i = i + 1
+    ""

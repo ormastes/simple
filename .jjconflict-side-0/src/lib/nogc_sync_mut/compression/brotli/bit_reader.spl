@@ -1,0 +1,116 @@
+# brotli/bit_reader.spl — LSB-first forward bit reader for RFC 7932 brotli streams
+#
+# RFC 7932 §1.2: bits within a byte are read LSB-first (bit 0 of each byte is
+# the first bit read).  This is the same convention as DEFLATE / gzip.
+
+use std.common.compress.types.{CompressionError}
+
+# Forward bit reader state
+struct BrotliBitReader:
+    data: [u8]
+    byte_pos: i64
+    # Bits buffered from current byte; up to 7 unused bits remain when we
+    # advance byte_pos.  We store them as a small integer and track count.
+    buf: i64
+    buf_bits: i64
+
+fn brotli_bits_init(data: [u8]) -> BrotliBitReader:
+    BrotliBitReader(data: data, byte_pos: 0, buf: 0, buf_bits: 0)
+
+# Return true if at least `n` bits remain in the stream.
+fn brotli_bits_available(r: BrotliBitReader, n: i64) -> bool:
+    val remaining_bytes = r.data.len() - r.byte_pos
+    val total_bits = r.buf_bits + remaining_bytes * 8
+    total_bits >= n
+
+# Peek at the next `n` bits (1..32) without consuming them.
+# Returns Err(TruncatedInput) if the stream ends before n bits.
+fn brotli_bits_peek(r: BrotliBitReader, n: i64) -> Result<i64, CompressionError>:
+    if n <= 0 or n > 32:
+        return Err(CompressionError.CorruptStream("brotli bit peek count out of range"))
+    # Refill buffer until we have enough bits
+    var cur_buf = r.buf
+    var cur_bits = r.buf_bits
+    var cur_pos = r.byte_pos
+    while cur_bits < n:
+        if cur_pos >= r.data.len():
+            return Err(CompressionError.TruncatedInput("brotli bit stream"))
+        cur_buf = cur_buf | (r.data[cur_pos].to_i64() << cur_bits)
+        cur_bits = cur_bits + 8
+        cur_pos = cur_pos + 1
+    val mask = (1 << n) - 1
+    Ok(cur_buf & mask)
+
+# Read and consume `n` bits (1..32), returning them as an integer.
+# Returns Err(TruncatedInput) if the stream ends before n bits.
+fn brotli_bits_read(r: BrotliBitReader, n: i64) -> Result<BrotliBitsResult, CompressionError>:
+    if n <= 0 or n > 32:
+        return Err(CompressionError.CorruptStream("brotli bit read count out of range"))
+    var cur_buf = r.buf
+    var cur_bits = r.buf_bits
+    var cur_pos = r.byte_pos
+    while cur_bits < n:
+        if cur_pos >= r.data.len():
+            return Err(CompressionError.TruncatedInput("brotli bit stream"))
+        cur_buf = cur_buf | (r.data[cur_pos].to_i64() << cur_bits)
+        cur_bits = cur_bits + 8
+        cur_pos = cur_pos + 1
+    val mask = (1 << n) - 1
+    val value = cur_buf & mask
+    val new_buf = cur_buf >> n
+    val new_bits = cur_bits - n
+    val new_reader = BrotliBitReader(
+        data: r.data,
+        byte_pos: cur_pos,
+        buf: new_buf,
+        buf_bits: new_bits
+    )
+    Ok(BrotliBitsResult(value: value, reader: new_reader))
+
+# Advance the reader to the next byte boundary (discard remaining bits in
+# the current partial byte, if any).  Used after reading ISUNCOMPRESSED=1
+# per RFC 7932 §9.2.
+fn brotli_bits_align_to_byte(r: BrotliBitReader) -> BrotliBitReader:
+    val discard = r.buf_bits % 8
+    if discard == 0:
+        return r
+    BrotliBitReader(
+        data: r.data,
+        byte_pos: r.byte_pos,
+        buf: r.buf >> discard,
+        buf_bits: r.buf_bits - discard
+    )
+
+# Read exactly `n` bytes from the (byte-aligned) reader into a [u8] slice.
+# Returns Err if not byte-aligned or not enough bytes remain.
+fn brotli_bits_read_bytes(r: BrotliBitReader, n: i64) -> Result<BrotliBytesResult, CompressionError>:
+    if r.buf_bits % 8 != 0:
+        return Err(CompressionError.CorruptStream("brotli read_bytes called on unaligned reader"))
+    # Flush any remaining buf bits back (they should be 0 because we are aligned
+    # and buf_bits % 8 == 0, but buf may still hold buffered bytes from prefetch).
+    # Determine the actual byte position accounting for buffered bytes.
+    val buffered_whole_bytes = r.buf_bits / 8
+    val actual_byte_pos = r.byte_pos - buffered_whole_bytes
+    if actual_byte_pos + n > r.data.len():
+        return Err(CompressionError.TruncatedInput("brotli raw block bytes"))
+    var out: [u8] = []
+    var i = actual_byte_pos
+    while i < actual_byte_pos + n:
+        out.push(r.data[i])
+        i = i + 1
+    val new_reader = BrotliBitReader(
+        data: r.data,
+        byte_pos: actual_byte_pos + n,
+        buf: 0,
+        buf_bits: 0
+    )
+    Ok(BrotliBytesResult(bytes: out, reader: new_reader))
+
+# Result types (structs because Simple doesn't allow tuple returns)
+struct BrotliBitsResult:
+    value: i64
+    reader: BrotliBitReader
+
+struct BrotliBytesResult:
+    bytes: [u8]
+    reader: BrotliBitReader

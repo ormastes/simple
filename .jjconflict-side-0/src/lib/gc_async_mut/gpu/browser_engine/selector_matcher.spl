@@ -1,0 +1,611 @@
+
+# Selector Matcher — CSS selector matching primitives
+#
+# Implements Blink-style selector matching: simple selectors, functional
+# pseudo-classes (:is, :where, :has, :not, :empty, :first-child, :last-child,
+# :only-child, :nth-child), attribute selectors, and multi-class compound
+# selectors.
+#
+# Extracted from browser_renderer.spl to stay within the 800-line module limit.
+
+use std.gc_async_mut.gpu.browser_engine.browser_renderer_utils.{
+    browser_renderer_find_char, br_find_str,
+    browser_renderer_split_spaces, browser_renderer_split_tag_parts,
+    br_tag_attr_value, br_tag_has_attr, br_unquote_attr_value,
+    br_merge_style_text}
+
+# =========================================================================
+# Selector-list scanning
+# =========================================================================
+
+fn br_selector_list_contains_simple(selector_list: text, wanted: text) -> bool:
+    var segment_start: i64 = 0
+    var idx: i64 = 0
+    var paren_depth = 0
+    while idx <= selector_list.len():
+        if idx < selector_list.len():
+            val ch = selector_list.char_at(idx)
+            if ch == "(":
+                paren_depth = paren_depth + 1
+            elif ch == ")" and paren_depth > 0:
+                paren_depth = paren_depth - 1
+        if idx == selector_list.len() or (selector_list.char_at(idx) == "," and paren_depth == 0):
+            val part = selector_list.slice(segment_start, idx).trim().lower()
+            if part == wanted or br_functional_selector_contains(part, wanted):
+                return true
+            segment_start = idx + 1
+        idx = idx + 1
+    false
+
+fn br_functional_selector_contains(selector: text, wanted: text) -> bool:
+    val is_pos = br_find_str(selector, ":is(", 0)
+    val where_pos = br_find_str(selector, ":where(", 0)
+    var fn_pos = is_pos
+    if where_pos < fn_pos:
+        fn_pos = where_pos
+    if fn_pos >= 999999999:
+        return false
+    val prefix = selector.slice(0, fn_pos).trim()
+    if prefix.len() > 0 and prefix != "*" and prefix != wanted and not wanted.starts_with(prefix):
+        return false
+    val open = browser_renderer_find_char(selector, "(", fn_pos)
+    val close = browser_renderer_find_char(selector, ")", open + 1)
+    if open >= 999999999 or close >= 999999999:
+        return false
+    var segment_start: i64 = open + 1
+    var idx: i64 = open + 1
+    while idx <= close:
+        if idx == close or selector.char_at(idx) == ",":
+            val option = selector.slice(segment_start, idx).trim()
+            if option == wanted or (prefix.len() > 0 and prefix + option == wanted):
+                return true
+            segment_start = idx + 1
+        idx = idx + 1
+    false
+
+fn br_selector_list_contains_has_descendant(selector_list: text, subject: text, subtree: text) -> bool:
+    var segment_start: i64 = 0
+    var idx: i64 = 0
+    var paren_depth = 0
+    while idx <= selector_list.len():
+        if idx < selector_list.len():
+            val ch = selector_list.char_at(idx)
+            if ch == "(":
+                paren_depth = paren_depth + 1
+            elif ch == ")" and paren_depth > 0:
+                paren_depth = paren_depth - 1
+        if idx == selector_list.len() or (selector_list.char_at(idx) == "," and paren_depth == 0):
+            val part = selector_list.slice(segment_start, idx).trim().lower()
+            if br_selector_matches_has_descendant(part, subject, subtree):
+                return true
+            segment_start = idx + 1
+        idx = idx + 1
+    false
+
+fn br_selector_list_contains_not_self(selector_list: text, subject: text, tag_content: text) -> bool:
+    var segment_start: i64 = 0
+    var idx: i64 = 0
+    var paren_depth = 0
+    while idx <= selector_list.len():
+        if idx < selector_list.len():
+            val ch = selector_list.char_at(idx)
+            if ch == "(":
+                paren_depth = paren_depth + 1
+            elif ch == ")" and paren_depth > 0:
+                paren_depth = paren_depth - 1
+        if idx == selector_list.len() or (selector_list.char_at(idx) == "," and paren_depth == 0):
+            val part = selector_list.slice(segment_start, idx).trim().lower()
+            if br_selector_matches_not_self(part, subject, tag_content):
+                return true
+            segment_start = idx + 1
+        idx = idx + 1
+    false
+
+fn br_selector_list_contains_attr_self(selector_list: text, subject: text, tag_content: text) -> bool:
+    var segment_start: i64 = 0
+    var idx: i64 = 0
+    var paren_depth = 0
+    var bracket_depth = 0
+    while idx <= selector_list.len():
+        if idx < selector_list.len():
+            val ch = selector_list.char_at(idx)
+            if ch == "(":
+                paren_depth = paren_depth + 1
+            elif ch == ")" and paren_depth > 0:
+                paren_depth = paren_depth - 1
+            elif ch == "[":
+                bracket_depth = bracket_depth + 1
+            elif ch == "]" and bracket_depth > 0:
+                bracket_depth = bracket_depth - 1
+        if idx == selector_list.len() or (selector_list.char_at(idx) == "," and paren_depth == 0 and bracket_depth == 0):
+            val part = selector_list.slice(segment_start, idx).trim()
+            if br_selector_matches_attr_self(part, subject, tag_content):
+                return true
+            segment_start = idx + 1
+        idx = idx + 1
+    false
+
+fn br_selector_list_contains_empty_self(selector_list: text, subject: text, tag_content: text) -> bool:
+    var segment_start: i64 = 0
+    var idx: i64 = 0
+    var paren_depth = 0
+    var bracket_depth = 0
+    while idx <= selector_list.len():
+        if idx < selector_list.len():
+            val ch = selector_list.char_at(idx)
+            if ch == "(":
+                paren_depth = paren_depth + 1
+            elif ch == ")" and paren_depth > 0:
+                paren_depth = paren_depth - 1
+            elif ch == "[":
+                bracket_depth = bracket_depth + 1
+            elif ch == "]" and bracket_depth > 0:
+                bracket_depth = bracket_depth - 1
+        if idx == selector_list.len() or (selector_list.char_at(idx) == "," and paren_depth == 0 and bracket_depth == 0):
+            val part = selector_list.slice(segment_start, idx).trim().lower()
+            if br_selector_matches_empty_self(part, subject, tag_content):
+                return true
+            segment_start = idx + 1
+        idx = idx + 1
+    false
+
+fn br_selector_list_contains_first_child_self(selector_list: text, subject: text, tag_content: text) -> bool:
+    var segment_start: i64 = 0
+    var idx: i64 = 0
+    var paren_depth = 0
+    var bracket_depth = 0
+    while idx <= selector_list.len():
+        if idx < selector_list.len():
+            val ch = selector_list.char_at(idx)
+            if ch == "(":
+                paren_depth = paren_depth + 1
+            elif ch == ")" and paren_depth > 0:
+                paren_depth = paren_depth - 1
+            elif ch == "[":
+                bracket_depth = bracket_depth + 1
+            elif ch == "]" and bracket_depth > 0:
+                bracket_depth = bracket_depth - 1
+        if idx == selector_list.len() or (selector_list.char_at(idx) == "," and paren_depth == 0 and bracket_depth == 0):
+            val part = selector_list.slice(segment_start, idx).trim().lower()
+            if br_selector_matches_first_child_self(part, subject, tag_content):
+                return true
+            segment_start = idx + 1
+        idx = idx + 1
+    false
+
+fn br_selector_list_contains_last_child_self(selector_list: text, subject: text, tag_content: text) -> bool:
+    var segment_start: i64 = 0
+    var idx: i64 = 0
+    var paren_depth = 0
+    var bracket_depth = 0
+    while idx <= selector_list.len():
+        if idx < selector_list.len():
+            val ch = selector_list.char_at(idx)
+            if ch == "(":
+                paren_depth = paren_depth + 1
+            elif ch == ")" and paren_depth > 0:
+                paren_depth = paren_depth - 1
+            elif ch == "[":
+                bracket_depth = bracket_depth + 1
+            elif ch == "]" and bracket_depth > 0:
+                bracket_depth = bracket_depth - 1
+        if idx == selector_list.len() or (selector_list.char_at(idx) == "," and paren_depth == 0 and bracket_depth == 0):
+            val part = selector_list.slice(segment_start, idx).trim().lower()
+            if br_selector_matches_last_child_self(part, subject, tag_content):
+                return true
+            segment_start = idx + 1
+        idx = idx + 1
+    false
+
+fn br_selector_list_contains_only_child_self(selector_list: text, subject: text, tag_content: text) -> bool:
+    var segment_start: i64 = 0
+    var idx: i64 = 0
+    var paren_depth = 0
+    var bracket_depth = 0
+    while idx <= selector_list.len():
+        if idx < selector_list.len():
+            val ch = selector_list.char_at(idx)
+            if ch == "(":
+                paren_depth = paren_depth + 1
+            elif ch == ")" and paren_depth > 0:
+                paren_depth = paren_depth - 1
+            elif ch == "[":
+                bracket_depth = bracket_depth + 1
+            elif ch == "]" and bracket_depth > 0:
+                bracket_depth = bracket_depth - 1
+        if idx == selector_list.len() or (selector_list.char_at(idx) == "," and paren_depth == 0 and bracket_depth == 0):
+            val part = selector_list.slice(segment_start, idx).trim().lower()
+            if br_selector_matches_only_child_self(part, subject, tag_content):
+                return true
+            segment_start = idx + 1
+        idx = idx + 1
+    false
+
+fn br_selector_list_contains_nth_child_self(selector_list: text, subject: text, tag_content: text, nth: i32) -> bool:
+    var segment_start: i64 = 0
+    var idx: i64 = 0
+    var paren_depth = 0
+    var bracket_depth = 0
+    while idx <= selector_list.len():
+        if idx < selector_list.len():
+            val ch = selector_list.char_at(idx)
+            if ch == "(":
+                paren_depth = paren_depth + 1
+            elif ch == ")" and paren_depth > 0:
+                paren_depth = paren_depth - 1
+            elif ch == "[":
+                bracket_depth = bracket_depth + 1
+            elif ch == "]" and bracket_depth > 0:
+                bracket_depth = bracket_depth - 1
+        if idx == selector_list.len() or (selector_list.char_at(idx) == "," and paren_depth == 0 and bracket_depth == 0):
+            val part = selector_list.slice(segment_start, idx).trim().lower()
+            if br_selector_matches_nth_child_self(part, subject, tag_content, nth):
+                return true
+            segment_start = idx + 1
+        idx = idx + 1
+    false
+
+# =========================================================================
+# Individual selector matchers
+# =========================================================================
+
+fn br_selector_matches_attr_self(selector: text, subject: text, tag_content: text) -> bool:
+    val open = browser_renderer_find_char(selector, "[", 0)
+    if open >= 999999999:
+        return false
+    val close = browser_renderer_find_char(selector, "]", open + 1)
+    if close >= 999999999:
+        return false
+    val prefix = selector.slice(0, open).trim()
+    if prefix.len() > 0 and not br_attr_prefix_matches(prefix, subject, tag_content):
+        return false
+    val body = selector.slice(open + 1, close).trim()
+    if body.len() == 0:
+        return false
+    val eq_pos = browser_renderer_find_char(body, "=", 0)
+    if eq_pos >= 999999999:
+        return br_tag_has_attr(tag_content, body.lower())
+    val op = br_attr_operator(body, eq_pos)
+    var key_end = eq_pos
+    if op != "=":
+        key_end = eq_pos - 1
+    val key = body.slice(0, key_end).trim().lower()
+    val raw_expected = body.slice(eq_pos + 1, body.len()).trim()
+    val insensitive = br_attr_has_i_flag(raw_expected)
+    val expected = br_unquote_attr_value(br_attr_value_without_flag(raw_expected))
+    if key.len() == 0:
+        return false
+    br_tag_has_attr(tag_content, key) and br_attr_value_matches(br_tag_attr_value(tag_content, key), op, expected, insensitive)
+
+fn br_selector_matches_empty_self(selector: text, subject: text, tag_content: text) -> bool:
+    val empty_pos = br_find_str(selector, ":empty", 0)
+    if empty_pos >= 999999999:
+        return false
+    if empty_pos + 6 != selector.len():
+        return false
+    val prefix = selector.slice(0, empty_pos).trim()
+    if prefix.len() == 0:
+        return true
+    br_attr_prefix_matches(prefix, subject, tag_content)
+
+fn br_selector_matches_first_child_self(selector: text, subject: text, tag_content: text) -> bool:
+    val pseudo_pos = br_find_str(selector, ":first-child", 0)
+    if pseudo_pos >= 999999999:
+        return false
+    if pseudo_pos + 12 != selector.len():
+        return false
+    val prefix = selector.slice(0, pseudo_pos).trim()
+    if prefix.len() == 0:
+        return true
+    br_attr_prefix_matches(prefix, subject, tag_content)
+
+fn br_selector_matches_last_child_self(selector: text, subject: text, tag_content: text) -> bool:
+    val pseudo_pos = br_find_str(selector, ":last-child", 0)
+    if pseudo_pos >= 999999999:
+        return false
+    if pseudo_pos + 11 != selector.len():
+        return false
+    val prefix = selector.slice(0, pseudo_pos).trim()
+    if prefix.len() == 0:
+        return true
+    br_attr_prefix_matches(prefix, subject, tag_content)
+
+fn br_selector_matches_only_child_self(selector: text, subject: text, tag_content: text) -> bool:
+    val pseudo_pos = br_find_str(selector, ":only-child", 0)
+    if pseudo_pos >= 999999999:
+        return false
+    if pseudo_pos + 11 != selector.len():
+        return false
+    val prefix = selector.slice(0, pseudo_pos).trim()
+    if prefix.len() == 0:
+        return true
+    br_attr_prefix_matches(prefix, subject, tag_content)
+
+fn br_selector_matches_nth_child_self(selector: text, subject: text, tag_content: text, nth: i32) -> bool:
+    val pseudo_pos = br_find_str(selector, ":nth-child(", 0)
+    if pseudo_pos >= 999999999:
+        return false
+    val close = browser_renderer_find_char(selector, ")", pseudo_pos + 11)
+    if close >= 999999999 or close + 1 != selector.len():
+        return false
+    val prefix = selector.slice(0, pseudo_pos).trim()
+    val arg = selector.slice(pseudo_pos + 11, close).trim()
+    if not br_nth_child_argument_matches(arg, nth):
+        return false
+    if prefix.len() == 0:
+        return true
+    br_attr_prefix_matches(prefix, subject, tag_content)
+
+fn br_nth_child_argument_matches(arg: text, nth: i32) -> bool:
+    val trimmed = br_nth_child_remove_ws(arg.trim().lower())
+    if trimmed == "odd":
+        return nth % 2 == 1
+    if trimmed == "even":
+        return nth % 2 == 0
+    val n_pos = br_find_str(trimmed, "n", 0)
+    if n_pos < 999999999:
+        return br_nth_child_common_formula_matches(trimmed, nth)
+    nth == trimmed.to_i32()
+
+fn br_nth_child_common_formula_matches(formula: text, nth: i32) -> bool:
+    if formula == "2n" or formula == "even":
+        return nth % 2 == 0
+    if formula == "2n+1" or formula == "2n-1" or formula == "odd":
+        return nth % 2 == 1
+    if formula == "n+3":
+        return nth >= 3
+    if formula == "-n+3":
+        return nth <= 3
+    false
+
+fn br_nth_child_remove_ws(value: text) -> text:
+    var out = ""
+    var idx = 0
+    while idx < value.len():
+        val ch = value.char_at(idx)
+        if ch != " " and ch != "\t" and ch != "\n" and ch != "\r":
+            out = out + ch
+        idx = idx + 1
+    out
+
+# =========================================================================
+# Attribute operator + value matching
+# =========================================================================
+
+fn br_attr_operator(body: text, eq_pos: i64) -> text:
+    if eq_pos > 0:
+        val marker = body.char_at(eq_pos - 1)
+        if marker == "^" or marker == "$" or marker == "*" or marker == "~" or marker == "|":
+            return marker + "="
+    "="
+
+fn br_attr_value_matches(actual: text, op: text, expected: text, insensitive: bool) -> bool:
+    var actual_cmp = actual
+    var expected_cmp = expected
+    if insensitive:
+        actual_cmp = actual.lower()
+        expected_cmp = expected.lower()
+    if op == "=":
+        return actual_cmp == expected_cmp
+    if op == "^=":
+        return actual_cmp.starts_with(expected_cmp)
+    if op == "$=":
+        return actual_cmp.ends_with(expected_cmp)
+    if op == "*=":
+        return actual_cmp.contains(expected_cmp)
+    if op == "~=":
+        return br_attr_token_contains(actual_cmp, expected_cmp)
+    if op == "|=":
+        return actual_cmp == expected_cmp or actual_cmp.starts_with(expected_cmp + "-")
+    false
+
+fn br_attr_has_i_flag(value: text) -> bool:
+    value.ends_with(" i") or value.ends_with(" I")
+
+fn br_attr_has_s_flag(value: text) -> bool:
+    value.ends_with(" s") or value.ends_with(" S")
+
+fn br_attr_value_without_flag(value: text) -> text:
+    if br_attr_has_i_flag(value) or br_attr_has_s_flag(value):
+        return value.slice(0, value.len() - 2).trim()
+    value
+
+fn br_attr_token_contains(actual: text, expected: text) -> bool:
+    val parts = browser_renderer_split_spaces(actual)
+    var idx = 0
+    while idx < parts.len():
+        if parts[idx] == expected:
+            return true
+        idx = idx + 1
+    false
+
+fn br_attr_prefix_matches(prefix: text, subject: text, tag_content: text) -> bool:
+    if prefix == "*" or prefix == subject:
+        return true
+    if prefix.starts_with(".") or prefix.starts_with("#"):
+        return br_simple_self_option_matches(prefix, subject, tag_content)
+    val dot_pos = browser_renderer_find_char(prefix, ".", 0)
+    if dot_pos > 0 and dot_pos < 999999999:
+        val tag = prefix.slice(0, dot_pos)
+        val cls = prefix.slice(dot_pos, prefix.len())
+        return tag == subject and br_simple_self_option_matches(cls, subject, tag_content)
+    val hash_pos = browser_renderer_find_char(prefix, "#", 0)
+    if hash_pos > 0 and hash_pos < 999999999:
+        val tag2 = prefix.slice(0, hash_pos)
+        val id_sel = prefix.slice(hash_pos, prefix.len())
+        return tag2 == subject and br_simple_self_option_matches(id_sel, subject, tag_content)
+    false
+
+# =========================================================================
+# :has / :not / descendant / direct-child matching
+# =========================================================================
+
+fn br_selector_matches_has_descendant(selector: text, subject: text, subtree: text) -> bool:
+    val has_pos = br_find_str(selector, ":has(", 0)
+    if has_pos >= 999999999:
+        return false
+    val prefix = selector.slice(0, has_pos).trim()
+    if prefix.len() > 0 and prefix != "*" and prefix != subject:
+        return false
+    val open = browser_renderer_find_char(selector, "(", has_pos)
+    val close = browser_renderer_find_char(selector, ")", open + 1)
+    if open >= 999999999 or close >= 999999999:
+        return false
+    var segment_start: i64 = open + 1
+    var idx: i64 = open + 1
+    while idx <= close:
+        if idx == close or selector.char_at(idx) == ",":
+            val option = selector.slice(segment_start, idx).trim()
+            if br_relative_has_option_in_subtree(option, subtree):
+                return true
+            segment_start = idx + 1
+        idx = idx + 1
+    false
+
+fn br_relative_has_option_in_subtree(option: text, subtree: text) -> bool:
+    val trimmed = option.trim()
+    if trimmed.starts_with(">"):
+        val child_option = trimmed.slice(1, trimmed.len()).trim()
+        if child_option.len() == 0:
+            return false
+        return br_simple_direct_child_option_in_subtree(child_option, subtree)
+    br_simple_descendant_option_in_subtree(trimmed, subtree)
+
+fn br_selector_matches_not_self(selector: text, subject: text, tag_content: text) -> bool:
+    val not_pos = br_find_str(selector, ":not(", 0)
+    if not_pos >= 999999999:
+        return false
+    val prefix = selector.slice(0, not_pos).trim()
+    if prefix.len() > 0 and prefix != "*" and prefix != subject:
+        return false
+    val open = browser_renderer_find_char(selector, "(", not_pos)
+    val close = browser_renderer_find_char(selector, ")", open + 1)
+    if open >= 999999999 or close >= 999999999:
+        return false
+    var saw_option = false
+    var segment_start: i64 = open + 1
+    var idx: i64 = open + 1
+    while idx <= close:
+        if idx == close or selector.char_at(idx) == ",":
+            val option = selector.slice(segment_start, idx).trim()
+            if option.len() > 0:
+                saw_option = true
+                if br_simple_self_option_matches(option, subject, tag_content):
+                    return false
+            segment_start = idx + 1
+        idx = idx + 1
+    saw_option
+
+fn br_simple_self_option_matches(option: text, subject: text, tag_content: text) -> bool:
+    val trimmed = option.trim().lower()
+    if trimmed.len() == 0:
+        return false
+    if trimmed == subject or trimmed == "*":
+        return true
+    if trimmed.starts_with("."):
+        val cls = trimmed.slice(1, trimmed.len())
+        val classes = browser_renderer_split_spaces(br_tag_attr_value(tag_content, "class").lower())
+        var idx = 0
+        while idx < classes.len():
+            if classes[idx] == cls:
+                return true
+            idx = idx + 1
+        return false
+    if trimmed.starts_with("#"):
+        val id_val = trimmed.slice(1, trimmed.len())
+        return br_tag_attr_value(tag_content, "id").lower() == id_val
+    false
+
+fn br_simple_descendant_option_in_subtree(option: text, subtree: text) -> bool:
+    val trimmed = option.trim().lower()
+    if trimmed.len() == 0:
+        return false
+    if trimmed.starts_with("."):
+        val cls = trimmed.slice(1, trimmed.len())
+        return br_subtree_contains_class(subtree, cls)
+    if trimmed.starts_with("#"):
+        val id_val = trimmed.slice(1, trimmed.len())
+        return subtree.contains("id='" + id_val + "'") or subtree.contains("id=\"" + id_val + "\"")
+    if trimmed.contains(".") or trimmed.contains("#") or trimmed.contains(":"):
+        return false
+    subtree.contains("<" + trimmed)
+
+fn br_simple_direct_child_option_in_subtree(option: text, subtree: text) -> bool:
+    val trimmed = option.trim().lower()
+    if trimmed.len() == 0:
+        return false
+    var depth = 0
+    var pos: i64 = 0
+    while pos < subtree.len():
+        val open = browser_renderer_find_char(subtree, "<", pos)
+        if open >= 999999999:
+            return false
+        if open + 1 >= subtree.len():
+            return false
+        val close = browser_renderer_find_char(subtree, ">", open + 1)
+        if close >= 999999999:
+            return false
+        val next_ch = subtree.char_at(open + 1)
+        if next_ch == "/" or next_ch == "!":
+            if next_ch == "/" and depth > 0:
+                depth = depth - 1
+            pos = close + 1
+            continue
+        val tag_content = subtree.slice(open + 1, close)
+        val tag = br_tag_name_from_content(tag_content)
+        if depth == 0 and br_attr_prefix_matches(trimmed, tag, tag_content):
+            return true
+        if not tag_content.trim().ends_with("/"):
+            depth = depth + 1
+        pos = close + 1
+    false
+
+# =========================================================================
+# Tag / class / subtree helpers
+# =========================================================================
+
+fn br_tag_name_from_content(tag_content: text) -> text:
+    val parts = browser_renderer_split_tag_parts(tag_content)
+    if parts.len() == 0:
+        return ""
+    parts[0].trim().lower()
+
+fn br_subtree_contains_class(subtree: text, cls: text) -> bool:
+    subtree.contains("class='" + cls + "'") or subtree.contains("class=\"" + cls + "\"") or subtree.contains("class='" + cls + " ") or subtree.contains("class=\"" + cls + " ") or subtree.contains(" " + cls + " ") or subtree.contains(" " + cls + "'") or subtree.contains(" " + cls + "\"")
+
+fn br_selector_list_contains_multi_class(selector_list: text, classes: [text]) -> bool:
+    var segment_start: i64 = 0
+    var idx: i64 = 0
+    while idx <= selector_list.len():
+        if idx == selector_list.len() or selector_list.char_at(idx) == ",":
+            val part = selector_list.slice(segment_start, idx).trim().lower()
+            if br_selector_matches_multi_class(part, classes):
+                return true
+            segment_start = idx + 1
+        idx = idx + 1
+    false
+
+fn br_selector_matches_multi_class(selector: text, classes: [text]) -> bool:
+    if not selector.starts_with("."):
+        return false
+    var match_count = 0
+    var segment_start: i64 = 1
+    var idx: i64 = 1
+    while idx <= selector.len():
+        if idx == selector.len() or selector.char_at(idx) == ".":
+            val token = selector.slice(segment_start, idx).trim()
+            if token.len() == 0 or not br_class_list_contains(classes, token):
+                return false
+            match_count = match_count + 1
+            segment_start = idx + 1
+        idx = idx + 1
+    match_count >= 2
+
+fn br_class_list_contains(classes: [text], token: text) -> bool:
+    val wanted = token.lower()
+    var idx = 0
+    while idx < classes.len():
+        if classes[idx].lower() == wanted:
+            return true
+        idx = idx + 1
+    false

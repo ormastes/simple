@@ -1,0 +1,415 @@
+# SIMD Feature Detection — per-ISA capability booleans + runtime probe functions
+#
+# NOTE: This file defines `SimdFeatureSet` (NOT `SimdCapabilities`) to avoid
+# collision with the existing `class SimdCapabilities` in simd_platform.spl
+# which is a single-field platform enum wrapper. D4/D5: import SimdFeatureSet
+# from this file; import SimdCapabilities from simd_platform.spl.
+#
+# Per C3b §9.1–§9.4. Apple M §6-H: has_sve/has_sve2 MUST be false on Apple M.
+#
+# All detection is runtime — no interpreter/compile-mode divergence.
+# FFI calls reuse patterns from simd_platform.spl (_read_cpuinfo_flags,
+# _flags_contain) and add new externs for cpuid/getauxval/sysctlbyname.
+
+# ============================================================================
+# Extern FFI — platform probe primitives
+# ============================================================================
+
+# x86 CPUID: returns (eax, ebx, ecx, edx) for given leaf/subleaf
+# Reuses rt_cpuid if available; declared here for this module's use.
+extern fn rt_cpuid(leaf: i32, subleaf: i32) -> (i32, i32, i32, i32)
+
+# AArch64: Linux getauxval(AT_HWCAP) / AT_HWCAP2
+extern fn rt_getauxval(key: i64) -> i64
+
+# macOS Apple Silicon detection: returns true iff running on Apple ARM macOS
+extern fn rt_is_darwin_arm64() -> bool
+
+# macOS sysctlbyname probe: returns the integer value, or 0 if absent/error
+extern fn rt_sysctlbyname_i32(name: text) -> i32
+
+# RISC-V: inline assembly to read vlenb CSR (vector length in bytes)
+# Returns 0 if V extension absent (SIGILL guard must be external)
+extern fn rt_riscv_read_vlenb() -> i32
+
+# Check whether the V extension misa bit is set (RISC-V only; returns 0 elsewhere)
+extern fn rt_riscv_has_v_ext() -> bool
+
+# CUDA: query SM version from cuDeviceGetAttribute (returns 0 if CUDA unavailable)
+extern fn rt_cuda_sm_version(device: i32) -> i32
+
+# ============================================================================
+# HWCAP / HWCAP2 constants for AArch64 Linux
+# Source: C3b §9.2 + Linux asm/hwcap.h
+# ============================================================================
+
+const AT_HWCAP:  i64 = 16
+const AT_HWCAP2: i64 = 26
+
+const HWCAP_ASIMD:    i64 = 1 << 1    # NEON (AArch64 baseline)
+const HWCAP_SVE:      i64 = 1 << 22   # SVE (not SVE2)
+const HWCAP2_SVE2:    i64 = 1 << 1    # SVE2
+const HWCAP2_SVEAES:  i64 = 1 << 2    # SVE2 + AES
+const HWCAP2_BF16:    i64 = 1 << 14   # NEON BF16 (ARMv8.6) [UNVERIFIED bit pos]
+const HWCAP_ASIMDHP:  i64 = 1 << 10   # NEON FP16 arithmetic
+
+# ============================================================================
+# SimdFeatureSet — flat capability struct for all supported ISAs
+# C3b §9.1–§9.4
+# ============================================================================
+
+struct SimdFeatureSet:
+    """
+    Runtime SIMD feature flags for all supported ISAs.
+
+    Usage note: This is the new fine-grained struct. The legacy
+    `SimdCapabilities` class (simd_platform.spl) wraps a single SimdPlatform
+    enum and is kept for backward compatibility.
+
+    Apple M constraint (C1 §6-H): has_sve and has_sve2 MUST be false on all
+    Apple M-series chips. The detect_aarch64_capabilities function and
+    detect_apple_m_capabilities enforce this — never set them from raw HWCAP
+    without the Apple M guard.
+
+    AVX-512 note: k0 is reserved all-ones and unallocatable (C2 §8).
+    """
+    # --- x86 ---
+    has_sse:              bool
+    has_sse2:             bool
+    has_sse3:             bool
+    has_ssse3:            bool
+    has_sse41:            bool
+    has_sse42:            bool
+    has_avx:              bool
+    has_avx2:             bool
+    has_avx512f:          bool
+    has_avx512bw:         bool
+    has_avx512dq:         bool
+    has_avx512vl:         bool
+    has_avx512vbmi:       bool
+    has_avx512vbmi2:      bool
+    has_avx512vpopcntdq:  bool
+    has_avx512fp16:       bool
+    has_avx512bf16:       bool
+
+    # --- ARM ---
+    has_neon:             bool
+    has_neon_fp16:        bool
+    has_bf16:             bool
+    has_sve:              bool  # guarded false on Apple M (§6-H)
+    has_sve2:             bool  # guarded false on Apple M (§6-H)
+    sve_vector_length:    i32   # in bits; 0 if SVE unavailable
+
+    # --- RISC-V ---
+    has_v:                bool
+    has_zvfh:             bool
+    has_zvfbfmin:         bool
+    vlen:                 i32   # in bits; 0 if V unavailable
+
+    # --- Apple M guard ---
+    is_apple_m:           bool  # true → has_sve = has_sve2 = false always
+
+impl SimdFeatureSet:
+    fn to_text() -> text:
+        """Brief string for diagnostics."""
+        var parts = ""
+        if self.has_avx512f:  parts = parts + "avx512f "
+        if self.has_avx2:     parts = parts + "avx2 "
+        if self.has_avx:      parts = parts + "avx "
+        if self.has_sse42:    parts = parts + "sse42 "
+        if self.has_sse2:     parts = parts + "sse2 "
+        if self.has_neon:     parts = parts + "neon "
+        if self.has_sve2:     parts = parts + "sve2 "
+        if self.has_sve:      parts = parts + "sve "
+        if self.has_v:        parts = parts + "rvv "
+        "SimdFeatureSet({parts.trim()})"
+
+# ============================================================================
+# _simd_features_none — zero-initialized baseline
+# ============================================================================
+
+fn _simd_features_none() -> SimdFeatureSet:
+    """Return a SimdFeatureSet with all flags false / zero."""
+    SimdFeatureSet(
+        has_sse:             false,
+        has_sse2:            false,
+        has_sse3:            false,
+        has_ssse3:           false,
+        has_sse41:           false,
+        has_sse42:           false,
+        has_avx:             false,
+        has_avx2:            false,
+        has_avx512f:         false,
+        has_avx512bw:        false,
+        has_avx512dq:        false,
+        has_avx512vl:        false,
+        has_avx512vbmi:      false,
+        has_avx512vbmi2:     false,
+        has_avx512vpopcntdq: false,
+        has_avx512fp16:      false,
+        has_avx512bf16:      false,
+        has_neon:            false,
+        has_neon_fp16:       false,
+        has_bf16:            false,
+        has_sve:             false,
+        has_sve2:            false,
+        sve_vector_length:   0,
+        has_v:               false,
+        has_zvfh:            false,
+        has_zvfbfmin:        false,
+        vlen:                0,
+        is_apple_m:          false
+    )
+
+# ============================================================================
+# detect_x86_capabilities — cpuid leaves 1, 7.0, 7.1
+# C3b §9.1: bit positions per Intel SDM
+# ============================================================================
+
+fn detect_x86_capabilities() -> SimdFeatureSet:
+    """
+    Detect x86/x86_64 SIMD capabilities via CPUID.
+
+    Leaf 1 ECX: SSE3(bit0), SSSE3(bit9), SSE4.1(bit19), SSE4.2(bit20),
+                AVX(bit28).
+    Leaf 1 EDX: SSE(bit25), SSE2(bit26).
+    Leaf 7.0 EBX: AVX2(bit5), AVX512F(bit16), AVX512DQ(bit17),
+                  AVX512BW(bit30), AVX512VL(bit31).
+    Leaf 7.0 ECX: AVX512VBMI(bit1), AVX512VBMI2(bit6), AVX512VPOPCNTDQ(bit14).
+    Leaf 7.0 EDX: AVX512FP16(bit23).
+    Leaf 7.1 EAX: AVX512BF16(bit5).
+
+    C3b §9.1.
+    """
+    var f = _simd_features_none()
+
+    var leaf1 = rt_cpuid(1, 0)
+    var ecx1 = leaf1.2   # third element of tuple
+    var edx1 = leaf1.3   # fourth element
+
+    # Leaf 1 EDX
+    f = SimdFeatureSet(..f, has_sse:  (edx1 & (1 << 25)) != 0)
+    f = SimdFeatureSet(..f, has_sse2: (edx1 & (1 << 26)) != 0)
+
+    # Leaf 1 ECX
+    f = SimdFeatureSet(..f, has_sse3:  (ecx1 & (1 << 0))  != 0)
+    f = SimdFeatureSet(..f, has_ssse3: (ecx1 & (1 << 9))  != 0)
+    f = SimdFeatureSet(..f, has_sse41: (ecx1 & (1 << 19)) != 0)
+    f = SimdFeatureSet(..f, has_sse42: (ecx1 & (1 << 20)) != 0)
+    f = SimdFeatureSet(..f, has_avx:   (ecx1 & (1 << 28)) != 0)
+
+    # Leaf 7.0
+    var leaf70 = rt_cpuid(7, 0)
+    var ebx70 = leaf70.1
+    var ecx70 = leaf70.2
+    var edx70 = leaf70.3
+
+    f = SimdFeatureSet(..f, has_avx2:             (ebx70 & (1 << 5))  != 0)
+    f = SimdFeatureSet(..f, has_avx512f:          (ebx70 & (1 << 16)) != 0)
+    f = SimdFeatureSet(..f, has_avx512dq:         (ebx70 & (1 << 17)) != 0)
+    f = SimdFeatureSet(..f, has_avx512bw:         (ebx70 & (1 << 30)) != 0)
+    f = SimdFeatureSet(..f, has_avx512vl:         (ebx70 & (1 << 31)) != 0)
+    f = SimdFeatureSet(..f, has_avx512vbmi:       (ecx70 & (1 << 1))  != 0)
+    f = SimdFeatureSet(..f, has_avx512vbmi2:      (ecx70 & (1 << 6))  != 0)
+    f = SimdFeatureSet(..f, has_avx512vpopcntdq:  (ecx70 & (1 << 14)) != 0)
+    f = SimdFeatureSet(..f, has_avx512fp16:       (edx70 & (1 << 23)) != 0)
+
+    # Leaf 7.1 EAX: BF16 (Sapphire Rapids+)
+    var leaf71 = rt_cpuid(7, 1)
+    var eax71 = leaf71.0
+    f = SimdFeatureSet(..f, has_avx512bf16: (eax71 & (1 << 5)) != 0)
+
+    f
+
+# ============================================================================
+# detect_apple_m_capabilities — sysctlbyname probe; SVE always false
+# C1 §6-H, C3b §9.2: Apple M has NEON but NOT SVE/SVE2.
+# ============================================================================
+
+fn detect_apple_m_capabilities() -> SimdFeatureSet:
+    """
+    Detect capabilities on Apple M-series.
+
+    Apple M1/M2/M3/M4 support NEON but NOT SVE/SVE2. Any path that would
+    set has_sve or has_sve2 based on AArch64 detection MUST be guarded with
+    is_apple_m. This function explicitly returns has_sve=false, has_sve2=false.
+
+    C1 §6-H: sysctlbyname("hw.optional.arm.FEAT_SVE") returns 0 on Apple M.
+    """
+    var f = _simd_features_none()
+    f = SimdFeatureSet(..f, is_apple_m: true)
+
+    # NEON is always present on Apple M
+    f = SimdFeatureSet(..f, has_neon: true)
+
+    # FP16: hw.optional.arm.FEAT_FP16
+    var fp16_val = rt_sysctlbyname_i32("hw.optional.arm.FEAT_FP16")
+    f = SimdFeatureSet(..f, has_neon_fp16: fp16_val != 0)
+
+    # BF16: hw.optional.arm.FEAT_BF16
+    var bf16_val = rt_sysctlbyname_i32("hw.optional.arm.FEAT_BF16")
+    f = SimdFeatureSet(..f, has_bf16: bf16_val != 0)
+
+    # SVE: EXPLICITLY false — Apple M does not support SVE (§6-H)
+    f = SimdFeatureSet(..f, has_sve:  false)
+    f = SimdFeatureSet(..f, has_sve2: false)
+    f = SimdFeatureSet(..f, sve_vector_length: 0)
+
+    f
+
+# ============================================================================
+# detect_aarch64_capabilities — getauxval AT_HWCAP/AT_HWCAP2 (Linux)
+# C3b §9.2. Dispatches to detect_apple_m_capabilities on macOS ARM.
+# ============================================================================
+
+fn detect_aarch64_capabilities() -> SimdFeatureSet:
+    """
+    Detect AArch64 SIMD capabilities.
+
+    On macOS/Apple Silicon: delegates to detect_apple_m_capabilities which
+    explicitly sets has_sve = has_sve2 = false (§6-H).
+
+    On Linux: reads AT_HWCAP / AT_HWCAP2 via rt_getauxval. SVE vector length
+    is probed via /proc/sys/abi/sve_default_vector_length if SVE is present.
+
+    C3b §9.2.
+    """
+    var is_apple = rt_is_darwin_arm64()
+    if is_apple:
+        return detect_apple_m_capabilities()
+
+    var f = _simd_features_none()
+    var hwcap  = rt_getauxval(AT_HWCAP)
+    var hwcap2 = rt_getauxval(AT_HWCAP2)
+
+    # NEON (ASIMD) — AArch64 baseline; always true if getauxval works
+    f = SimdFeatureSet(..f, has_neon: (hwcap & HWCAP_ASIMD) != 0)
+
+    # FP16 arithmetic
+    f = SimdFeatureSet(..f, has_neon_fp16: (hwcap & HWCAP_ASIMDHP) != 0)
+
+    # BF16 (ARMv8.6+) — HWCAP2
+    f = SimdFeatureSet(..f, has_bf16: (hwcap2 & HWCAP2_BF16) != 0)
+
+    # SVE — guard: not Apple M (redundant here but explicit per §6-H contract)
+    var raw_sve  = (hwcap  & HWCAP_SVE)   != 0
+    var raw_sve2 = (hwcap2 & HWCAP2_SVE2) != 0
+
+    f = SimdFeatureSet(..f, has_sve:  raw_sve  and not is_apple)
+    f = SimdFeatureSet(..f, has_sve2: raw_sve2 and not is_apple)
+
+    # SVE vector length from /proc sysfs (bits = bytes * 8)
+    # Fallback: 0 (unknown) if unavailable
+    var svl: i32 = 0
+    if raw_sve and not is_apple:
+        # Read minimum VL; on most systems this equals the hardware VL
+        var svl_str = rt_file_read_text("/proc/sys/abi/sve_default_vector_length")
+        if svl_str != "":
+            # Parse integer bytes and convert to bits
+            var svl_bytes = svl_str.trim().parse_i32()
+            if svl_bytes > 0:
+                svl = svl_bytes * 8
+    f = SimdFeatureSet(..f, sve_vector_length: svl)
+
+    f
+
+# ============================================================================
+# detect_riscv_capabilities — csrr/vsetvli probes
+# C3b §9.3.
+# ============================================================================
+
+fn detect_riscv_capabilities() -> SimdFeatureSet:
+    """
+    Detect RISC-V V extension capabilities.
+
+    has_v: determined by rt_riscv_has_v_ext() (reads misa V bit or hwcap).
+    vlen: determined by rt_riscv_read_vlenb() * 8 (VLENB CSR × 8 = bits).
+
+    has_zvfh and has_zvfbfmin cannot be detected from misa alone; set false
+    until a Linux riscv_hwprobe()/AT_HWCAP mechanism is available.
+
+    C3b §9.3.
+    """
+    var f = _simd_features_none()
+
+    var has_v = rt_riscv_has_v_ext()
+    f = SimdFeatureSet(..f, has_v: has_v)
+
+    if has_v:
+        var vlenb = rt_riscv_read_vlenb()
+        f = SimdFeatureSet(..f, vlen: vlenb * 8)
+        # Zvfh / Zvfbfmin: not detectable without riscv_hwprobe — left false
+        # TODO: wire up hwprobe when available
+
+    f
+
+# ============================================================================
+# ptx_compute_capability — SM version for PTX / CUDA targets
+# C3b §9.4.
+# ============================================================================
+
+fn ptx_compute_capability(device: i32) -> i32:
+    """
+    Return the PTX SM version for the given CUDA device index.
+
+    Returns 0 if CUDA is unavailable or the device index is out of range.
+    SM version is encoded as major*10 + minor (e.g. SM 8.6 → 86).
+
+    C3b §9.4.
+    """
+    rt_cuda_sm_version(device)
+
+# ============================================================================
+# detect_capabilities — top-level dispatcher
+# ============================================================================
+
+extern fn rt_file_read_text(path: text) -> text
+
+fn detect_capabilities() -> SimdFeatureSet:
+    """
+    Detect all available SIMD capabilities for the current host CPU.
+
+    Dispatches to arch-specific probes based on compile-time arch constants.
+    On x86/x86_64: uses CPUID.
+    On AArch64: uses getauxval (Linux) or sysctlbyname (macOS/Apple M).
+    On RISC-V: uses VLENB CSR + misa V bit.
+    Otherwise: returns zero-capability struct.
+
+    Note: PTX/CUDA is not included here — use ptx_compute_capability(device)
+    separately since it requires a device index.
+    """
+    # Architecture dispatch via /proc/cpuinfo flags (same approach as simd_platform.spl)
+    # to avoid compile-time #[cfg] which doesn't exist in Simple.
+    var cpuinfo = rt_file_read_text("/proc/cpuinfo")
+    var has_sse_flag  = _text_contains_word(cpuinfo, "sse")
+    var has_asimd     = _text_contains_word(cpuinfo, "asimd")
+    var has_neon_flag = _text_contains_word(cpuinfo, "neon")
+    var has_riscv     = _text_contains_word(cpuinfo, "rv32") or _text_contains_word(cpuinfo, "rv64")
+
+    if has_sse_flag:
+        return detect_x86_capabilities()
+
+    var is_arm = has_asimd or has_neon_flag
+    if is_arm:
+        return detect_aarch64_capabilities()
+
+    if has_riscv:
+        return detect_riscv_capabilities()
+
+    # macOS ARM: /proc/cpuinfo absent; check via rt_is_darwin_arm64
+    var is_darwin_arm = rt_is_darwin_arm64()
+    if is_darwin_arm:
+        return detect_aarch64_capabilities()
+
+    # No SIMD detected
+    _simd_features_none()
+
+# ============================================================================
+# Internal helpers
+# ============================================================================
+
+fn _text_contains_word(haystack: text, needle: text) -> bool:
+    """True if haystack contains needle as a whitespace-delimited word."""
+    var search = " " + needle + " "
+    var padded = " " + haystack + " "
+    padded.contains(search)

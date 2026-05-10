@@ -1,0 +1,239 @@
+"""TUI Box Widget - Bordered container with optional title.
+
+@tag:stdlib
+@tag:tui
+
+Draws a border (single-line Unicode box-drawing characters) around
+a content area. Supports an optional title in the top border.
+
+# Usage
+
+```simple
+use std.tui.widgets.box_widget.*
+use std.tui.widget.{make_rect}
+use std.tui.style.{default_style, fg_style, COLOR_CYAN}
+
+val area = make_rect(0, 0, 40, 10)
+val bw = make_box_widget("My Panel", fg_style(COLOR_CYAN))
+val lines = box_render(bw, area)
+```
+"""
+
+use std.tui.style.{Style, StyledLine, StyledSegment, default_style,
+                     make_segment, make_line, make_plain_line, make_styled_line}
+use std.tui.widget.{Rect, rect_inner, pad_or_truncate}
+
+# ============================================================================
+# Border Characters (single-line Unicode)
+# ============================================================================
+
+val BORDER_TOP_LEFT = "\u250c"
+val BORDER_TOP_RIGHT = "\u2510"
+val BORDER_BOTTOM_LEFT = "\u2514"
+val BORDER_BOTTOM_RIGHT = "\u2518"
+val BORDER_HORIZONTAL = "\u2500"
+val BORDER_VERTICAL = "\u2502"
+
+# ============================================================================
+# Box Widget
+# ============================================================================
+
+struct BoxWidget:
+    """A bordered container widget.
+
+    Fields:
+        title: Optional title text (empty string for no title)
+        border_style: Style for the border characters
+        content_lines: Pre-rendered content lines to display inside the box
+    """
+    title: text
+    border_style: Style
+    content_lines: [StyledLine]
+
+fn make_box_widget(title: text, border_style: Style) -> BoxWidget:
+    """Create an empty box widget with a title.
+
+    Args:
+        title: Title to display in the top border (empty for no title)
+        border_style: Style for the border
+
+    Returns:
+        BoxWidget with no content lines
+    """
+    var empty_lines: [StyledLine] = []
+    BoxWidget(title: title, border_style: border_style, content_lines: empty_lines)
+
+fn make_box_widget_with_content(title: text, border_style: Style, content: [StyledLine]) -> BoxWidget:
+    """Create a box widget with pre-rendered content.
+
+    Args:
+        title: Title text
+        border_style: Style for the border
+        content: Pre-rendered styled lines for the interior
+
+    Returns:
+        BoxWidget with content
+    """
+    BoxWidget(title: title, border_style: border_style, content_lines: content)
+
+# ============================================================================
+# Border Rendering
+# ============================================================================
+
+fn make_top_border(title: text, width: i64, style: Style) -> StyledLine:
+    """Render the top border line with optional title.
+
+    Format: +-- Title --...--+
+
+    Args:
+        title: Title text (empty for plain border)
+        width: Total width of the line
+        style: Border style
+
+    Returns:
+        StyledLine for the top border
+    """
+    if width < 2:
+        return make_styled_line("", style)
+
+    var line = BORDER_TOP_LEFT
+
+    if title != "":
+        val title_display = " {title} "
+        val max_title_len = width - 2
+        var actual_title = title_display
+        if len(actual_title) > max_title_len:
+            actual_title = substring(actual_title, 0, max_title_len)
+        line = "{line}{actual_title}"
+        val remaining = width - 2 - len(actual_title)
+        var i = 0
+        while i < remaining:
+            line = "{line}{BORDER_HORIZONTAL}"
+            i = i + 1
+    else:
+        val inner_width = width - 2
+        var i = 0
+        while i < inner_width:
+            line = "{line}{BORDER_HORIZONTAL}"
+            i = i + 1
+
+    line = "{line}{BORDER_TOP_RIGHT}"
+    make_styled_line(line, style)
+
+fn make_bottom_border(width: i64, style: Style) -> StyledLine:
+    """Render the bottom border line.
+
+    Args:
+        width: Total width
+        style: Border style
+
+    Returns:
+        StyledLine for the bottom border
+    """
+    if width < 2:
+        return make_styled_line("", style)
+
+    var line = BORDER_BOTTOM_LEFT
+    val inner_width = width - 2
+    var i = 0
+    while i < inner_width:
+        line = "{line}{BORDER_HORIZONTAL}"
+        i = i + 1
+    line = "{line}{BORDER_BOTTOM_RIGHT}"
+    make_styled_line(line, style)
+
+fn make_content_row(content_line: StyledLine, inner_width: i64, border_style: Style) -> StyledLine:
+    """Wrap a content line with left and right border characters.
+
+    Args:
+        content_line: The inner content
+        inner_width: Width available for content
+        border_style: Style for the border characters
+
+    Returns:
+        StyledLine with borders on both sides
+    """
+    var segments: [StyledSegment] = []
+    segments = segments + [make_segment(BORDER_VERTICAL, border_style)]
+
+    # Add content segments
+    var i = 0
+    while i < len(content_line.segments):
+        segments = segments + [content_line.segments[i]]
+        i = i + 1
+
+    segments = segments + [make_segment(BORDER_VERTICAL, border_style)]
+    make_line(segments)
+
+fn make_empty_content_row(inner_width: i64, border_style: Style) -> StyledLine:
+    """Create an empty content row (border + spaces + border).
+
+    Args:
+        inner_width: Width of the interior space
+        border_style: Style for the border characters
+
+    Returns:
+        StyledLine with borders and spaces
+    """
+    val spaces = pad_or_truncate("", inner_width)
+    var segments: [StyledSegment] = []
+    segments = segments + [make_segment(BORDER_VERTICAL, border_style)]
+    segments = segments + [make_segment(spaces, default_style())]
+    segments = segments + [make_segment(BORDER_VERTICAL, border_style)]
+    make_line(segments)
+
+# ============================================================================
+# Rendering
+# ============================================================================
+
+fn box_render(widget: BoxWidget, area: Rect) -> [StyledLine]:
+    """Render a BoxWidget into styled lines for the given area.
+
+    Layout:
+    - Row 0: top border with title
+    - Rows 1..height-2: content rows (padded or truncated)
+    - Row height-1: bottom border
+
+    Args:
+        widget: The box widget
+        area: Target area
+
+    Returns:
+        List of StyledLine, one per row
+    """
+    if area.height < 2:
+        return []
+    if area.width < 2:
+        return []
+
+    var result: [StyledLine] = []
+    val inner_width = area.width - 2
+    val inner_height = area.height - 2
+
+    # Top border
+    result = result + [make_top_border(widget.title, area.width, widget.border_style)]
+
+    # Content rows
+    var i = 0
+    while i < inner_height:
+        if i < len(widget.content_lines):
+            result = result + [make_content_row(widget.content_lines[i], inner_width, widget.border_style)]
+        else:
+            result = result + [make_empty_content_row(inner_width, widget.border_style)]
+        i = i + 1
+
+    # Bottom border
+    result = result + [make_bottom_border(area.width, widget.border_style)]
+
+    result
+
+fn box_inner_area(area: Rect) -> Rect:
+    """Calculate the inner area of a box (excluding borders).
+
+    Args:
+        area: The box's outer area
+
+    Returns:
+        Inner Rect (1 cell inset on all sides)
+    """
+    rect_inner(area, 1, 1, 1, 1)

@@ -1,0 +1,74 @@
+# FsError — filesystem error type and POSIX errno mapping.
+#
+# All driver operations return Result<T, FsError>. POSIX errno translation
+# happens at the VFS syscall boundary, not inside individual drivers.
+#
+# Source: doc/05_design/fs_driver_interface.md §7.
+
+enum FsError:
+    """Filesystem operation error.
+
+    Unsupported    — operation or capability not supported by this driver.
+    Transient      — retryable error; inner code is a contention hint.
+    Corrupt        — data integrity failure (checksum mismatch, bad magic).
+    NoSpace        — out of space on device.
+    Permission     — caller lacks permission.
+    NotFound       — path or handle does not exist.
+    AlreadyExists  — create of existing path with exclusive flag.
+    Busy           — resource busy (e.g., unmount while open handles exist).
+    IoError        — hardware I/O error; inner code is device error code.
+    Interrupted    — syscall interrupted (for signal-aware callers).
+    TooLarge       — entity exceeds driver size limit.
+    ReadOnly       — write attempted on read-only mount.
+    InvalidArg     — bad argument (bad offset, null handle, etc.).
+    """
+    Unsupported
+    Transient(code: i32)
+    Corrupt
+    NoSpace
+    Permission
+    NotFound
+    AlreadyExists
+    Busy
+    IoError(code: u32)
+    Interrupted
+    TooLarge
+    ReadOnly
+    InvalidArg
+
+# POSIX errno constants used by errno_of.
+# Values match POSIX/Linux standard definitions.
+val ENOTSUP:  i32 = 95
+val ENOENT:   i32 = 2
+val EACCES:   i32 = 13
+val EIO:      i32 = 5
+val ENOSPC:   i32 = 28
+val EINVAL:   i32 = 22
+val EMFILE:   i32 = 24
+val EAGAIN:   i32 = 11
+val EINTR:    i32 = 4
+val EFBIG:    i32 = 27
+val EROFS:    i32 = 30
+val EEXIST:   i32 = 17
+val EBUSY:    i32 = 16
+
+fn errno_of(err: FsError) -> i32:
+    """Map an FsError to a POSIX errno value.
+
+    Translation is performed at the VFS syscall boundary.
+    Drivers always return FsError; this function is called by the VFS layer.
+    """
+    match err:
+        case Unsupported:      ENOTSUP
+        case Transient(_):     EAGAIN
+        case Corrupt:          EIO
+        case NoSpace:          ENOSPC
+        case Permission:       EACCES
+        case NotFound:         ENOENT
+        case AlreadyExists:    EEXIST
+        case Busy:             EBUSY
+        case IoError(_):       EIO
+        case Interrupted:      EINTR
+        case TooLarge:         EFBIG
+        case ReadOnly:         EROFS
+        case InvalidArg:       EINVAL

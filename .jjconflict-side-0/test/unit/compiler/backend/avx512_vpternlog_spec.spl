@@ -1,0 +1,65 @@
+# AVX-512 VPTERNLOGD/Q — byte-level emit golden tests
+#
+# Tests emit_avx512_vpternlogd and emit_avx512_vpternlogq from
+#   src/compiler/70.backend/backend/native/x86_64_avx512.spl
+# against Intel SDM Vol 2C §VPTERNLOGD/VPTERNLOGQ encoding.
+#
+# Register ID convention: zmm_to_index uses id-48, so zmm0=48, zmm1=49, etc.
+#
+# Golden bytes verified via llvm-mc -triple=x86_64 -mattr=+avx512f --show-encoding.
+
+use std.spipe.*
+use compiler.backend.native.x86_64_avx512.{emit_avx512_vpternlogd, emit_avx512_vpternlogq}
+
+fn _list_hex(bytes: [i64]) -> text:
+    val hex_chars = "0123456789abcdef"
+    var s: text = ""
+    var i: u64 = 0
+    while i < bytes.len().to_u64():
+        val b = bytes[i.to_i64()]
+        s = s + hex_chars.char_at(((b / 16) % 16).to_u64())
+        s = s + hex_chars.char_at((b % 16).to_u64())
+        i = i + 1
+    s
+
+val X86_ZMM0 = 48
+val X86_ZMM1 = 49
+val X86_ZMM2 = 50
+val X86_ZMM3 = 51
+
+describe "AVX-512 VPTERNLOGD byte-level emit":
+
+    it "VPTERNLOGD zmm0,zmm0,zmm0,0xFF (all-ones)":
+        val bytes = emit_avx512_vpternlogd(X86_ZMM0, X86_ZMM0, X86_ZMM0, 0xFF)
+        expect(_list_hex(bytes)).to_equal("62f37d4825c0ff")
+
+    it "VPTERNLOGD zmm1,zmm2,zmm3,0xAC (blend)":
+        val bytes = emit_avx512_vpternlogd(X86_ZMM1, X86_ZMM2, X86_ZMM3, 0xAC)
+        expect(_list_hex(bytes)).to_equal("62f36d4825cbac")
+
+    it "VPTERNLOGD zmm0,zmm1,zmm0,0x00 (zero)":
+        val bytes = emit_avx512_vpternlogd(X86_ZMM0, X86_ZMM1, X86_ZMM0, 0x00)
+        expect(_list_hex(bytes)).to_equal("62f3754825c000")
+
+    it "VPTERNLOGD zmm0,zmm0,zmm0,0x96 (XOR3)":
+        val bytes = emit_avx512_vpternlogd(X86_ZMM0, X86_ZMM0, X86_ZMM0, 0x96)
+        expect(_list_hex(bytes)).to_equal("62f37d4825c096")
+
+    it "output length is 7 bytes (EVEX 4 + opcode 1 + ModRM 1 + imm8 1)":
+        val bytes = emit_avx512_vpternlogd(X86_ZMM0, X86_ZMM0, X86_ZMM0, 0xFF)
+        expect(bytes.len()).to_equal(7)
+
+describe "AVX-512 VPTERNLOGQ byte-level emit":
+
+    it "VPTERNLOGQ zmm0,zmm0,zmm0,0x96 (XOR3, 64-bit)":
+        val bytes = emit_avx512_vpternlogq(X86_ZMM0, X86_ZMM0, X86_ZMM0, 0x96)
+        expect(_list_hex(bytes)).to_equal("62f3fd4825c096")
+
+    it "VPTERNLOGQ output length is 7 bytes":
+        val bytes = emit_avx512_vpternlogq(X86_ZMM0, X86_ZMM0, X86_ZMM0, 0x96)
+        expect(bytes.len()).to_equal(7)
+
+    it "VPTERNLOGQ W-bit differs from VPTERNLOGD (byte index 2)":
+        val d_bytes = emit_avx512_vpternlogd(X86_ZMM0, X86_ZMM0, X86_ZMM0, 0x96)
+        val q_bytes = emit_avx512_vpternlogq(X86_ZMM0, X86_ZMM0, X86_ZMM0, 0x96)
+        expect(d_bytes[2] == q_bytes[2]).to_equal(false)

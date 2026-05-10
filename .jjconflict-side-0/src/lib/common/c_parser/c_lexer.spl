@@ -1,0 +1,270 @@
+# C Lexer
+#
+# Tokenizer for C/C++ header files. Produces CToken list from source text.
+# Handles comments, strings, numbers, identifiers, preprocessor directives.
+
+fn is_c_digit(ch: text) -> bool:
+    ch >= "0" and ch <= "9"
+
+fn is_c_alpha(ch: text) -> bool:
+    (ch >= "a" and ch <= "z") or (ch >= "A" and ch <= "Z") or ch == "_"
+
+fn is_c_alnum(ch: text) -> bool:
+    is_c_alpha(ch) or is_c_digit(ch)
+
+fn is_c_whitespace(ch: text) -> bool:
+    ch == " " or ch == "\t" or ch == "\r"
+
+fn c_tokenize(source: text) -> [CToken]:
+    var tokens: [CToken] = []
+    var pos = 0
+    var line = 1
+    var col = 1
+    val len = source.length
+
+    while pos < len:
+        val ch = source[pos]
+
+        if ch == "\n":
+            line = line + 1
+            col = 1
+            pos = pos + 1
+            continue
+
+        if is_c_whitespace(ch):
+            col = col + 1
+            pos = pos + 1
+            continue
+
+        if ch == "/" and (pos + 1) < len:
+            val next = source[pos + 1]
+            if next == "/":
+                while pos < len and source[pos] != "\n":
+                    pos = pos + 1
+                continue
+            if next == "*":
+                pos = pos + 2
+                col = col + 2
+                while pos < len:
+                    if source[pos] == "\n":
+                        line = line + 1
+                        col = 1
+                    elif source[pos] == "*" and (pos + 1) < len and source[pos + 1] == "/":
+                        pos = pos + 2
+                        col = col + 2
+                        break
+                    else:
+                        col = col + 1
+                    pos = pos + 1
+                continue
+
+        if ch == "#":
+            val start_col = col
+            pos = pos + 1
+            col = col + 1
+            while pos < len and is_c_whitespace(source[pos]):
+                pos = pos + 1
+                col = col + 1
+            var directive = ""
+            while pos < len and is_c_alpha(source[pos]):
+                directive = directive + source[pos]
+                pos = pos + 1
+                col = col + 1
+            var pp_value = ""
+            while pos < len and source[pos] != "\n":
+                if source[pos] == "\\" and (pos + 1) < len and source[pos + 1] == "\n":
+                    pos = pos + 2
+                    line = line + 1
+                    col = 1
+                    continue
+                pp_value = pp_value + source[pos]
+                pos = pos + 1
+                col = col + 1
+            tokens.push(CToken(kind: "pp_" + directive, value: pp_value.trim(), line: line, col: start_col))
+            continue
+
+        if ch == "\"":
+            val start_col = col
+            pos = pos + 1
+            col = col + 1
+            var str_val = ""
+            while pos < len and source[pos] != "\"":
+                if source[pos] == "\\":
+                    str_val = str_val + source[pos]
+                    pos = pos + 1
+                    col = col + 1
+                    if pos < len:
+                        str_val = str_val + source[pos]
+                        pos = pos + 1
+                        col = col + 1
+                else:
+                    str_val = str_val + source[pos]
+                    pos = pos + 1
+                    col = col + 1
+            if pos < len:
+                pos = pos + 1
+                col = col + 1
+            tokens.push(CToken(kind: "string", value: str_val, line: line, col: start_col))
+            continue
+
+        if ch == "'":
+            val start_col = col
+            pos = pos + 1
+            col = col + 1
+            var char_val = ""
+            while pos < len and source[pos] != "'":
+                if source[pos] == "\\":
+                    char_val = char_val + source[pos]
+                    pos = pos + 1
+                    col = col + 1
+                    if pos < len:
+                        char_val = char_val + source[pos]
+                        pos = pos + 1
+                        col = col + 1
+                else:
+                    char_val = char_val + source[pos]
+                    pos = pos + 1
+                    col = col + 1
+            if pos < len:
+                pos = pos + 1
+                col = col + 1
+            tokens.push(CToken(kind: "char", value: char_val, line: line, col: start_col))
+            continue
+
+        if is_c_digit(ch) or (ch == "0" and (pos + 1) < len and (source[pos + 1] == "x" or source[pos + 1] == "X")):
+            val start_col = col
+            var num_val = ""
+            if ch == "0" and (pos + 1) < len and (source[pos + 1] == "x" or source[pos + 1] == "X"):
+                num_val = "0x"
+                pos = pos + 2
+                col = col + 2
+                while pos < len and (is_c_digit(source[pos]) or (source[pos] >= "a" and source[pos] <= "f") or (source[pos] >= "A" and source[pos] <= "F")):
+                    num_val = num_val + source[pos]
+                    pos = pos + 1
+                    col = col + 1
+            else:
+                while pos < len and (is_c_digit(source[pos]) or source[pos] == "."):
+                    num_val = num_val + source[pos]
+                    pos = pos + 1
+                    col = col + 1
+            while pos < len and (source[pos] == "u" or source[pos] == "U" or source[pos] == "l" or source[pos] == "L"):
+                pos = pos + 1
+                col = col + 1
+            tokens.push(CToken(kind: "number", value: num_val, line: line, col: start_col))
+            continue
+
+        if is_c_alpha(ch):
+            val start_col = col
+            var ident = ""
+            while pos < len and is_c_alnum(source[pos]):
+                ident = ident + source[pos]
+                pos = pos + 1
+                col = col + 1
+            val kind = c_keyword_kind(ident)
+            tokens.push(CToken(kind: kind, value: ident, line: line, col: start_col))
+            continue
+
+        val start_col = col
+        if ch == "{":
+            tokens.push(CToken(kind: "lbrace", value: ch, line: line, col: start_col))
+        elif ch == "}":
+            tokens.push(CToken(kind: "rbrace", value: ch, line: line, col: start_col))
+        elif ch == "(":
+            tokens.push(CToken(kind: "lparen", value: ch, line: line, col: start_col))
+        elif ch == ")":
+            tokens.push(CToken(kind: "rparen", value: ch, line: line, col: start_col))
+        elif ch == "[":
+            tokens.push(CToken(kind: "lbracket", value: ch, line: line, col: start_col))
+        elif ch == "]":
+            tokens.push(CToken(kind: "rbracket", value: ch, line: line, col: start_col))
+        elif ch == ";":
+            tokens.push(CToken(kind: "semicolon", value: ch, line: line, col: start_col))
+        elif ch == ":":
+            tokens.push(CToken(kind: "colon", value: ch, line: line, col: start_col))
+        elif ch == ",":
+            tokens.push(CToken(kind: "comma", value: ch, line: line, col: start_col))
+        elif ch == "*":
+            tokens.push(CToken(kind: "star", value: ch, line: line, col: start_col))
+        elif ch == "=":
+            tokens.push(CToken(kind: "equals", value: ch, line: line, col: start_col))
+        elif ch == "+":
+            tokens.push(CToken(kind: "plus", value: ch, line: line, col: start_col))
+        elif ch == "-":
+            if (pos + 1) < len and source[pos + 1] == ">":
+                tokens.push(CToken(kind: "arrow", value: "->", line: line, col: start_col))
+                pos = pos + 1
+                col = col + 1
+            else:
+                tokens.push(CToken(kind: "minus", value: ch, line: line, col: start_col))
+        elif ch == "&":
+            tokens.push(CToken(kind: "amp", value: ch, line: line, col: start_col))
+        elif ch == "|":
+            tokens.push(CToken(kind: "pipe", value: ch, line: line, col: start_col))
+        elif ch == "^":
+            tokens.push(CToken(kind: "caret", value: ch, line: line, col: start_col))
+        elif ch == "~":
+            tokens.push(CToken(kind: "tilde", value: ch, line: line, col: start_col))
+        elif ch == ".":
+            tokens.push(CToken(kind: "dot", value: ch, line: line, col: start_col))
+        elif ch == "<":
+            tokens.push(CToken(kind: "lt", value: ch, line: line, col: start_col))
+        elif ch == ">":
+            tokens.push(CToken(kind: "gt", value: ch, line: line, col: start_col))
+        pos = pos + 1
+        col = col + 1
+
+    tokens.push(CToken(kind: "eof", value: "", line: line, col: col))
+    tokens
+
+fn c_keyword_kind(ident: text) -> text:
+    if ident == "struct":
+        return "kw_struct"
+    if ident == "class":
+        return "kw_class"
+    if ident == "union":
+        return "kw_union"
+    if ident == "enum":
+        return "kw_enum"
+    if ident == "typedef":
+        return "kw_typedef"
+    if ident == "unsigned":
+        return "kw_unsigned"
+    if ident == "signed":
+        return "kw_signed"
+    if ident == "const":
+        return "kw_const"
+    if ident == "volatile":
+        return "kw_volatile"
+    if ident == "static":
+        return "kw_static"
+    if ident == "extern":
+        return "kw_extern"
+    if ident == "inline":
+        return "kw_inline"
+    if ident == "int":
+        return "kw_int"
+    if ident == "char":
+        return "kw_char"
+    if ident == "short":
+        return "kw_short"
+    if ident == "long":
+        return "kw_long"
+    if ident == "float":
+        return "kw_float"
+    if ident == "double":
+        return "kw_double"
+    if ident == "void":
+        return "kw_void"
+    if ident == "bool":
+        return "kw_bool"
+    if ident == "public":
+        return "kw_public"
+    if ident == "private":
+        return "kw_private"
+    if ident == "protected":
+        return "kw_protected"
+    if ident == "__attribute__":
+        return "kw_attribute"
+    if ident == "__packed__":
+        return "kw_packed"
+    "ident"

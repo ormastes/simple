@@ -1,0 +1,186 @@
+use std.spec
+use std.replay.process.event_types.{ProcessEventKind, ProcessReplayEvent}
+use std.replay.process.recorder.{ProcessRecorder, RecordingMode}
+use std.replay.process.replayer.{ProcessReplayer, ReplayVerdict}
+use std.replay.process.checkpoint.{DirtyPage, RegisterEntry, PageCheckpoint, CheckpointManager}
+
+# ============================================================================
+# ProcessRecorder — in-memory stream API (no shell)
+# ============================================================================
+
+describe "ProcessRecorder creation":
+    it "creates with Idle mode":
+        val rec = ProcessRecorder.create("echo hello", "/tmp/test_trace")
+        expect(rec.command).to_equal("echo hello")
+        expect(rec.events.len()).to_equal(0)
+        expect(rec.next_seq).to_equal(0)
+
+    it "on_syscall_enter records entry event":
+        var rec = ProcessRecorder.create("cmd", "/tmp/t")
+        rec.pid = 100
+        rec.on_syscall_enter(1, [42, 0])
+        expect(rec.events.len()).to_equal(1)
+        expect(rec.events[0].payload_a).to_equal(1)
+        expect(rec.next_seq).to_equal(1)
+
+    it "on_syscall_exit records exit event":
+        var rec = ProcessRecorder.create("cmd", "/tmp/t")
+        rec.pid = 100
+        rec.on_syscall_enter(1, [])
+        rec.on_syscall_exit(0)
+        expect(rec.events.len()).to_equal(2)
+        expect(rec.next_seq).to_equal(2)
+
+    it "on_signal records signal event":
+        var rec = ProcessRecorder.create("cmd", "/tmp/t")
+        rec.pid = 200
+        rec.on_signal(9)
+        expect(rec.events.len()).to_equal(1)
+        val kind = ProcessEventKind.from_i32(rec.events[0].kind)
+        expect(kind.to_text()).to_equal("signal")
+
+    it "sequence numbers are monotonic across mixed events":
+        var rec = ProcessRecorder.create("cmd", "/tmp/t")
+        rec.pid = 50
+        rec.on_syscall_enter(1, [])
+        rec.on_syscall_exit(0)
+        rec.on_signal(15)
+        expect(rec.events[0].seq).to_equal(0)
+        expect(rec.events[1].seq).to_equal(1)
+        expect(rec.events[2].seq).to_equal(2)
+
+# ============================================================================
+# ProcessReplayer — in-memory stepping
+# ============================================================================
+
+describe "ProcessReplayer stepping":
+    it "create starts at position 0":
+        val rpl = ProcessReplayer.create("/tmp/trace")
+        expect(rpl.position()).to_equal(0)
+        expect(rpl.event_count()).to_equal(0)
+        expect(rpl.has_more()).to_equal(false)
+
+    it "has_more is true when events exist":
+        var rpl = ProcessReplayer.create("/tmp/trace")
+        val ev = ProcessReplayEvent.syscall_exit(0, 1, 0, 42)
+        rpl.events = [ev]
+        expect(rpl.has_more()).to_equal(true)
+        expect(rpl.event_count()).to_equal(1)
+
+    it "step_forward returns None at end":
+        var rpl = ProcessReplayer.create("/tmp/trace")
+        val result = rpl.step_forward()
+        expect(result.is_none()).to_equal(true)
+
+    it "step_forward advances cursor and returns result":
+        var rpl = ProcessReplayer.create("/tmp/trace")
+        val ev0 = ProcessReplayEvent.syscall_exit(0, 1, 0, 10)
+        val ev1 = ProcessReplayEvent.syscall_exit(1, 1, 0, 20)
+        rpl.events = [ev0, ev1]
+        val first = rpl.step_forward()
+        match first:
+            case Some(r):
+                expect(r.event_seq).to_equal(0)
+            case None:
+                expect("should have result").to_equal("")
+        expect(rpl.position()).to_equal(1)
+
+    it "current_event returns event without advancing":
+        var rpl = ProcessReplayer.create("/tmp/trace")
+        val ev = ProcessReplayEvent.signal_event(0, 10, 0, 9)
+        rpl.events = [ev]
+        val cur = rpl.current_event()
+        match cur:
+            case Some(e):
+                expect(e.payload_a).to_equal(9)
+            case None:
+                expect("should have event").to_equal("")
+        expect(rpl.position()).to_equal(0)
+
+    it "event_at returns event by index":
+        var rpl = ProcessReplayer.create("/tmp/trace")
+        val ev0 = ProcessReplayEvent.syscall_exit(0, 1, 0, 10)
+        val ev1 = ProcessReplayEvent.syscall_exit(1, 1, 0, 20)
+        rpl.events = [ev0, ev1]
+        match rpl.event_at(1):
+            case Some(e):
+                expect(e.payload_a).to_equal(20)
+            case None:
+                expect("should have event").to_equal("")
+
+# ============================================================================
+# CheckpointManager
+# ============================================================================
+
+describe "CheckpointManager":
+    it "starts with zero checkpoints":
+        val mgr = CheckpointManager.create()
+        expect(mgr.count()).to_equal(0)
+
+    it "create initializes next_id to 0":
+        val mgr = CheckpointManager.create()
+        expect(mgr.next_id).to_equal(0)
+        expect(mgr.checkpoints.len()).to_equal(0)
+
+    it "take_checkpoint increments next_id":
+        var mgr = CheckpointManager.create()
+        val cp = mgr.take_checkpoint(100)
+        expect(cp.checkpoint_id).to_equal(0)
+        expect(mgr.next_id).to_equal(1)
+        expect(mgr.count()).to_equal(1)
+
+    it "find_checkpoint returns None on empty manager":
+        val mgr = CheckpointManager.create()
+        val result = mgr.find_checkpoint(0)
+        expect(result.is_none()).to_equal(true)
+
+    it "nearest_before returns None on empty manager":
+        val mgr = CheckpointManager.create()
+        val result = mgr.nearest_before(100)
+        expect(result.is_none()).to_equal(true)
+
+    it "nearest_before returns closest checkpoint":
+        var mgr = CheckpointManager.create()
+        mgr.take_checkpoint(10)
+        mgr.take_checkpoint(50)
+        mgr.take_checkpoint(100)
+        val result = mgr.nearest_before(60)
+        match result:
+            case Some(cp):
+                expect(cp.event_seq).to_equal(50)
+            case None:
+                expect("should find checkpoint").to_equal("")
+
+    it "latest returns None on empty manager":
+        val mgr = CheckpointManager.create()
+        val result = mgr.latest()
+        expect(result.is_none()).to_equal(true)
+
+# ============================================================================
+# DirtyPage / PageCheckpoint construction (process-level)
+# ============================================================================
+
+describe "DirtyPage and PageCheckpoint":
+    it "DirtyPage.create stores addr and data":
+        val page = DirtyPage.create(4096, [0, 1, 2, 3])
+        expect(page.addr).to_equal(4096)
+        expect(page.data.len()).to_equal(4)
+
+    it "PageCheckpoint add_register stores value":
+        var cp = PageCheckpoint.create(0, 100)
+        cp.add_register("rip", 12345)
+        match cp.get_register("rip"):
+            case Some(v):
+                expect(v).to_equal(12345)
+            case None:
+                expect("should find register").to_equal("")
+
+    it "PageCheckpoint get_register returns None for missing":
+        val cp = PageCheckpoint.create(0, 0)
+        val result = cp.get_register("nonexistent")
+        expect(result.is_none()).to_equal(true)
+
+    it "PageCheckpoint.create_for_pid stores pid":
+        val cp = PageCheckpoint.create_for_pid(1, 500, 9999)
+        expect(cp.pid).to_equal(9999)
+        expect(cp.event_seq).to_equal(500)

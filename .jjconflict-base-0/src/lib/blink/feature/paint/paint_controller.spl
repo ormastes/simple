@@ -1,0 +1,57 @@
+# blink::PaintController — accumulates DisplayItems and emits PaintChunks keyed on property triples.
+
+use examples.browser.entity.dom.paint_types.{DisplayList, DisplayItem, PaintOp}
+use std.lib.blink.entity.paint_artifact.{PaintArtifact, PaintChunk, PaintChunkProperties}
+
+# PaintController mirrors Chromium's blink::PaintController.
+# Items are recorded into a flat DisplayList; whenever the active
+# (transform_id, clip_id, effect_id) triple changes a new PaintChunk is opened.
+class PaintController:
+    current_items: DisplayList
+    current_chunks: [PaintChunk]
+    current_properties: PaintChunkProperties
+    current_chunk_start: i32
+
+    static fn new() -> PaintController:
+        PaintController(
+            current_items: DisplayList.empty(),
+            current_chunks: [PaintChunk](),
+            current_properties: PaintChunkProperties.root(),
+            current_chunk_start: 0
+        )
+
+    # Close the in-progress chunk if it contains at least one item, then open a new one.
+    me update_properties(props: PaintChunkProperties):
+        val cur = self.current_properties
+        val same = (cur.transform_id == props.transform_id
+            and cur.clip_id == props.clip_id
+            and cur.effect_id == props.effect_id)
+        if not same:
+            self.finish_chunk()
+            self.current_properties = props
+
+    # Append a DisplayItem to the current display list.
+    me record_item(item: DisplayItem):
+        self.current_items.ops.push(item.op)
+
+    # Close the current chunk, recording its [begin, end) range.
+    # A chunk with zero items is not emitted.
+    me finish_chunk():
+        val end_idx = self.current_items.ops.len().to_i32()
+        val start_idx = self.current_chunk_start
+        if end_idx > start_idx:
+            val chunk = PaintChunk.create(
+                begin_index: start_idx,
+                end_index: end_idx,
+                properties: self.current_properties
+            )
+            self.current_chunks.push(chunk)
+        self.current_chunk_start = end_idx
+
+    # Finish the last open chunk and return the completed PaintArtifact.
+    me commit() -> PaintArtifact:
+        self.finish_chunk()
+        PaintArtifact(
+            display_items: self.current_items,
+            chunks: self.current_chunks
+        )

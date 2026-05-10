@@ -1,0 +1,29 @@
+#!/usr/bin/env simple
+
+use std.spec.*
+
+val GENERATED_RUNNER = "src/lib/nogc_async_mut_noalloc/baremetal/ghdl_generated_rv64_runner.shs"
+val GENERATED_WOPS = "examples/09_embedded/fpga_riscv/sw/generated_rv64_wops_smoke.s"
+
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+extern fn rt_process_run_timeout(cmd: text, args: [text], timeout_ms: i64) -> (text, text, i32)
+
+fn runner_tools_available() -> bool:
+    val result = rt_process_run("bash", ["-lc", "command -v ghdl >/dev/null && command -v riscv64-linux-gnu-as >/dev/null && command -v riscv64-linux-gnu-ld >/dev/null && command -v riscv64-linux-gnu-objcopy >/dev/null"])
+    result[2] == 0
+
+describe "Generated RV64 GHDL word ops":
+    it "runner script exists and word-op smoke source is present":
+        expect(rt_file_exists(GENERATED_RUNNER)).to_equal(true)
+        expect(rt_file_exists(GENERATED_WOPS)).to_equal(true)
+
+    slow_it "runs a generated RV64 W-class arithmetic and shift smoke program":
+        if not runner_tools_available():
+            return "skip: ghdl or riscv binutils not available"
+        val result = rt_process_run_timeout("bash", [GENERATED_RUNNER, GENERATED_WOPS, "--timeout=30"], 120000)
+        val output = result[0] + result[1]
+        expect(result[2]).to_equal(0)
+        expect(output).to_contain("GENERATED_RV64_SMOKE: PASS")
+        expect(output).to_contain("PASS_WORD: 42")
+        expect(output).to_contain("FAIL_WORD: 0")

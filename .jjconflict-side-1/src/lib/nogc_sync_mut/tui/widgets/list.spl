@@ -1,0 +1,206 @@
+"""TUI List Widget - Scrollable list with selection.
+
+@tag:stdlib
+@tag:tui
+
+Displays a vertical list of items with optional selection highlighting.
+Supports scrolling when the list exceeds the visible area.
+
+# Usage
+
+```simple
+use std.tui.widgets.list.*
+use std.tui.widget.{make_rect}
+use std.tui.style.{fg_style, COLOR_WHITE, COLOR_CYAN}
+
+val items = ["Item 1", "Item 2", "Item 3"]
+val lw = make_list_widget(items, fg_style(COLOR_WHITE), fg_style(COLOR_CYAN))
+val lw2 = list_select(lw, 1)
+val lines = list_render(lw2, make_rect(0, 0, 40, 10))
+```
+"""
+
+use std.tui.style.{Style, StyledLine, default_style, make_styled_line, make_plain_line}
+use std.tui.widget.{Rect, pad_or_truncate}
+
+# ============================================================================
+# List Widget
+# ============================================================================
+
+struct ListWidget:
+    """A scrollable list widget.
+
+    Fields:
+        items: List of text items
+        item_style: Style for normal (unselected) items
+        selected_style: Style for the currently selected item
+        selected_index: Index of the selected item (-1 for no selection)
+        scroll_offset: First visible item index (for scrolling)
+    """
+    items: [text]
+    item_style: Style
+    selected_style: Style
+    selected_index: i64
+    scroll_offset: i64
+
+fn make_list_widget(items: [text], item_style: Style, selected_style: Style) -> ListWidget:
+    """Create a list widget.
+
+    Args:
+        items: List of text items to display
+        item_style: Style for normal items
+        selected_style: Style for the selected item
+
+    Returns:
+        ListWidget with no selection and scroll at top
+    """
+    ListWidget(
+        items: items,
+        item_style: item_style,
+        selected_style: selected_style,
+        selected_index: -1,
+        scroll_offset: 0
+    )
+
+# ============================================================================
+# Selection
+# ============================================================================
+
+fn list_select(widget: ListWidget, index: i64) -> ListWidget:
+    """Select an item by index.
+
+    Args:
+        widget: The list widget
+        index: Item index to select (-1 for no selection)
+
+    Returns:
+        Updated ListWidget with new selection
+    """
+    var idx = index
+    if idx >= len(widget.items):
+        idx = len(widget.items) - 1
+    if idx < -1:
+        idx = -1
+    ListWidget(
+        items: widget.items,
+        item_style: widget.item_style,
+        selected_style: widget.selected_style,
+        selected_index: idx,
+        scroll_offset: widget.scroll_offset
+    )
+
+fn list_select_next(widget: ListWidget) -> ListWidget:
+    """Move selection to the next item.
+
+    Args:
+        widget: The list widget
+
+    Returns:
+        Updated ListWidget
+    """
+    var new_idx = widget.selected_index + 1
+    if new_idx >= len(widget.items):
+        new_idx = len(widget.items) - 1
+    list_select(widget, new_idx)
+
+fn list_select_prev(widget: ListWidget) -> ListWidget:
+    """Move selection to the previous item.
+
+    Args:
+        widget: The list widget
+
+    Returns:
+        Updated ListWidget
+    """
+    var new_idx = widget.selected_index - 1
+    if new_idx < 0:
+        new_idx = 0
+    list_select(widget, new_idx)
+
+# ============================================================================
+# Scroll Management
+# ============================================================================
+
+fn list_ensure_visible(widget: ListWidget, visible_height: i64) -> ListWidget:
+    """Adjust scroll offset to ensure the selected item is visible.
+
+    Args:
+        widget: The list widget
+        visible_height: Number of visible rows
+
+    Returns:
+        Updated ListWidget with adjusted scroll_offset
+    """
+    if widget.selected_index < 0:
+        return widget
+
+    var offset = widget.scroll_offset
+
+    # Scroll up if selected is above viewport
+    if widget.selected_index < offset:
+        offset = widget.selected_index
+
+    # Scroll down if selected is below viewport
+    if widget.selected_index >= offset + visible_height:
+        offset = widget.selected_index - visible_height + 1
+
+    if offset < 0:
+        offset = 0
+
+    ListWidget(
+        items: widget.items,
+        item_style: widget.item_style,
+        selected_style: widget.selected_style,
+        selected_index: widget.selected_index,
+        scroll_offset: offset
+    )
+
+# ============================================================================
+# Rendering
+# ============================================================================
+
+fn list_render(widget: ListWidget, area: Rect) -> [StyledLine]:
+    """Render a ListWidget into styled lines for the given area.
+
+    Visible items are determined by scroll_offset and area height.
+    Selected item uses selected_style, others use item_style.
+
+    Args:
+        widget: The list widget
+        area: Target area
+
+    Returns:
+        List of StyledLine, one per row
+    """
+    val adjusted = list_ensure_visible(widget, area.height)
+    var result: [StyledLine] = []
+    var row = 0
+
+    while row < area.height:
+        val item_idx = adjusted.scroll_offset + row
+        if item_idx < len(adjusted.items):
+            val item_text = pad_or_truncate(adjusted.items[item_idx], area.width)
+            if item_idx == adjusted.selected_index:
+                result = result + [make_styled_line(item_text, adjusted.selected_style)]
+            else:
+                result = result + [make_styled_line(item_text, adjusted.item_style)]
+        else:
+            result = result + [make_plain_line(pad_or_truncate("", area.width))]
+        row = row + 1
+
+    result
+
+fn list_selected_item(widget: ListWidget) -> text:
+    """Get the currently selected item text.
+
+    Args:
+        widget: The list widget
+
+    Returns:
+        Selected item text, or "" if no selection
+    """
+    if widget.selected_index < 0:
+        return ""
+    if widget.selected_index >= len(widget.items):
+        return ""
+    widget.items[widget.selected_index]

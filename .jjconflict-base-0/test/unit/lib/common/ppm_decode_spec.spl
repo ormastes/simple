@@ -1,0 +1,279 @@
+# @cover src/lib/common/image/ppm_decode.spl 90%
+# @tag: image, ppm, decode
+#
+# PPM Decode Specification
+#
+# Verifies PPM P6 binary decoder: header parsing with comments,
+# whitespace handling, RGB to ARGB u32 conversion, error handling
+# for invalid/truncated data. Required by the wm-pixel-impl pipeline
+# since both Electron (PPM output) and QEMU (screendump PPM) paths
+# produce PPM format.
+#
+# PPM P6 format: "P6\n{width} {height}\n{maxval}\n" followed by
+# width * height * 3 raw RGB bytes. Comments start with '#'.
+
+use std.spec.{describe, context, it, expect}
+use std.common.image.ppm_decode.{decode_ppm_to_argb, PpmImage}
+
+# ============================================================================
+# Test Helpers — Minimal PPM Byte Sequences
+# ============================================================================
+
+fn make_ppm_1x1_red() -> [u8]:
+    """Build a valid 1x1 red pixel PPM P6 binary."""
+    # "P6\n1 1\n255\n" followed by RGB(255, 0, 0)
+    # P=80, 6=54, \n=10, 1=49, space=32, 2=50, 5=53, \n=10
+    var data: [u8] = []
+    # Header: "P6\n1 1\n255\n"
+    data = data + [80, 54, 10]         # P6\n
+    data = data + [49, 32, 49, 10]     # 1 1\n
+    data = data + [50, 53, 53, 10]     # 255\n
+    # Pixel data: RGB(255, 0, 0)
+    data = data + [255, 0, 0]
+    data
+
+fn make_ppm_2x2_colors() -> [u8]:
+    """Build a valid 2x2 PPM P6 with red, green, blue, white pixels."""
+    var data: [u8] = []
+    # Header: "P6\n2 2\n255\n"
+    data = data + [80, 54, 10]         # P6\n
+    data = data + [50, 32, 50, 10]     # 2 2\n
+    data = data + [50, 53, 53, 10]     # 255\n
+    # Pixel data: red, green, blue, white (row-major)
+    data = data + [255, 0, 0]          # red
+    data = data + [0, 255, 0]          # green
+    data = data + [0, 0, 255]          # blue
+    data = data + [255, 255, 255]      # white
+    data
+
+fn make_ppm_with_comment() -> [u8]:
+    """Build a valid 1x1 PPM P6 with a comment line in the header."""
+    var data: [u8] = []
+    # Header: "P6\n# this is a comment\n1 1\n255\n"
+    data = data + [80, 54, 10]                           # P6\n
+    data = data + [35, 32, 99, 111, 109, 109, 101, 110, 116, 10]  # # comment\n
+    data = data + [49, 32, 49, 10]                       # 1 1\n
+    data = data + [50, 53, 53, 10]                       # 255\n
+    # Pixel data: RGB(128, 64, 32)
+    data = data + [128, 64, 32]
+    data
+
+fn make_ppm_3x1_black() -> [u8]:
+    """Build a valid 3x1 PPM P6 with all-black pixels."""
+    var data: [u8] = []
+    # Header: "P6\n3 1\n255\n"
+    data = data + [80, 54, 10]             # P6\n
+    data = data + [51, 32, 49, 10]         # 3 1\n
+    data = data + [50, 53, 53, 10]         # 255\n
+    # Pixel data: 3 black pixels
+    data = data + [0, 0, 0, 0, 0, 0, 0, 0, 0]
+    data
+
+# ============================================================================
+# Test Group 1: PPM Header Parsing
+# ============================================================================
+
+describe "PpmDecode — header parsing":
+    """
+    ## PPM P6 Header Parsing
+
+    Validates that the decoder correctly parses the PPM P6 magic number,
+    width/height dimensions, max value, and handles comments in the header.
+    """
+
+    context "valid PPM headers":
+
+        it "AC-1: decodes valid 1x1 red PPM successfully":
+            val data = make_ppm_1x1_red()
+            val result = decode_ppm_to_argb(data)
+            expect(result.error?).to_equal(false)
+
+        it "AC-1: parsed width is correct for 2x2 image":
+            val data = make_ppm_2x2_colors()
+            val result = decode_ppm_to_argb(data)
+            match result:
+                Ok(img):
+                    expect(img.width).to_equal(2)
+                Err(msg):
+                    expect(msg).to_equal("")
+
+        it "AC-1: parsed height is correct for 2x2 image":
+            val data = make_ppm_2x2_colors()
+            val result = decode_ppm_to_argb(data)
+            match result:
+                Ok(img):
+                    expect(img.height).to_equal(2)
+                Err(msg):
+                    expect(msg).to_equal("")
+
+        it "AC-1: handles comment lines in PPM header":
+            val data = make_ppm_with_comment()
+            val result = decode_ppm_to_argb(data)
+            expect(result.error?).to_equal(false)
+
+    context "invalid PPM headers":
+
+        it "AC-1: rejects empty input":
+            val data: [u8] = []
+            val result = decode_ppm_to_argb(data)
+            expect(result.error?).to_equal(true)
+
+        it "AC-1: rejects non-PPM magic bytes":
+            val data: [u8] = [0, 1, 2, 3, 4, 5]
+            val result = decode_ppm_to_argb(data)
+            expect(result.error?).to_equal(true)
+
+        it "AC-1: rejects P5 grayscale magic (only P6 supported)":
+            # "P5\n" = [80, 53, 10]
+            val data: [u8] = [80, 53, 10, 49, 32, 49, 10, 50, 53, 53, 10, 128]
+            val result = decode_ppm_to_argb(data)
+            expect(result.error?).to_equal(true)
+
+        it "AC-1: rejects truncated header (no dimensions)":
+            val data: [u8] = [80, 54, 10]
+            val result = decode_ppm_to_argb(data)
+            expect(result.error?).to_equal(true)
+
+# ============================================================================
+# Test Group 2: Pixel Conversion (RGB to ARGB u32)
+# ============================================================================
+
+describe "PpmDecode — pixel conversion":
+    """
+    ## RGB to ARGB u32 Conversion
+
+    PPM stores pixels as raw RGB bytes. The decoder must convert each
+    (R, G, B) triple to ARGB u32: (0xFF << 24) | (R << 16) | (G << 8) | B.
+    Alpha is always 0xFF (fully opaque).
+    """
+
+    context "single pixel conversion":
+
+        it "AC-1: red pixel converts to correct ARGB u32":
+            val data = make_ppm_1x1_red()
+            val result = decode_ppm_to_argb(data)
+            match result:
+                Ok(img):
+                    # ARGB for red: 0xFF_FF_00_00
+                    val expected: u32 = 0xFFFF0000
+                    expect(img.pixels[0]).to_equal(expected)
+                Err(msg):
+                    expect(msg).to_equal("")
+
+        it "AC-1: all pixels have alpha = 0xFF":
+            val data = make_ppm_2x2_colors()
+            val result = decode_ppm_to_argb(data)
+            match result:
+                Ok(img):
+                    var all_opaque = true
+                    for px in img.pixels:
+                        if (px >> 24) != 0xFF:
+                            all_opaque = false
+                    expect(all_opaque).to_equal(true)
+                Err(msg):
+                    expect(msg).to_equal("")
+
+    context "multi-pixel images":
+
+        it "AC-1: 2x2 image has exactly 4 pixels":
+            val data = make_ppm_2x2_colors()
+            val result = decode_ppm_to_argb(data)
+            match result:
+                Ok(img):
+                    expect(img.pixels.len().to_i32()).to_equal(4)
+                Err(msg):
+                    expect(msg).to_equal("")
+
+        it "AC-1: pixel count equals width * height":
+            val data = make_ppm_3x1_black()
+            val result = decode_ppm_to_argb(data)
+            match result:
+                Ok(img):
+                    val expected = img.width * img.height
+                    expect(img.pixels.len().to_i32()).to_equal(expected)
+                Err(msg):
+                    expect(msg).to_equal("")
+
+        it "AC-1: green pixel at position 1 in 2x2 image":
+            val data = make_ppm_2x2_colors()
+            val result = decode_ppm_to_argb(data)
+            match result:
+                Ok(img):
+                    # ARGB for green: 0xFF_00_FF_00
+                    val expected: u32 = 0xFF00FF00
+                    expect(img.pixels[1]).to_equal(expected)
+                Err(msg):
+                    expect(msg).to_equal("")
+
+        it "AC-1: blue pixel at position 2 in 2x2 image":
+            val data = make_ppm_2x2_colors()
+            val result = decode_ppm_to_argb(data)
+            match result:
+                Ok(img):
+                    # ARGB for blue: 0xFF_00_00_FF
+                    val expected: u32 = 0xFF0000FF
+                    expect(img.pixels[2]).to_equal(expected)
+                Err(msg):
+                    expect(msg).to_equal("")
+
+        it "AC-1: black pixels decode to 0xFF000000":
+            val data = make_ppm_3x1_black()
+            val result = decode_ppm_to_argb(data)
+            match result:
+                Ok(img):
+                    val expected: u32 = 0xFF000000
+                    expect(img.pixels[0]).to_equal(expected)
+                Err(msg):
+                    expect(msg).to_equal("")
+
+# ============================================================================
+# Test Group 3: Edge Cases and Error Handling
+# ============================================================================
+
+describe "PpmDecode — edge cases":
+    """
+    ## Edge Cases
+
+    Truncated pixel data, mismatched dimensions, and boundary conditions.
+    """
+
+    context "truncated pixel data":
+
+        it "AC-1: rejects PPM with missing pixel data":
+            # Valid header for 2x2 but only 1 pixel of data (3 bytes instead of 12)
+            var data: [u8] = []
+            data = data + [80, 54, 10]         # P6\n
+            data = data + [50, 32, 50, 10]     # 2 2\n
+            data = data + [50, 53, 53, 10]     # 255\n
+            data = data + [255, 0, 0]          # only 1 pixel (need 4)
+            val result = decode_ppm_to_argb(data)
+            expect(result.error?).to_equal(true)
+
+    context "PpmImage struct fields":
+
+        it "AC-1: PpmImage width field is accessible":
+            val data = make_ppm_1x1_red()
+            val result = decode_ppm_to_argb(data)
+            match result:
+                Ok(img):
+                    expect(img.width).to_equal(1)
+                Err(msg):
+                    expect(msg).to_equal("")
+
+        it "AC-1: PpmImage height field is accessible":
+            val data = make_ppm_1x1_red()
+            val result = decode_ppm_to_argb(data)
+            match result:
+                Ok(img):
+                    expect(img.height).to_equal(1)
+                Err(msg):
+                    expect(msg).to_equal("")
+
+        it "AC-1: PpmImage pixels field is accessible":
+            val data = make_ppm_1x1_red()
+            val result = decode_ppm_to_argb(data)
+            match result:
+                Ok(img):
+                    expect(img.pixels.len()).to_be_greater_than(0)
+                Err(msg):
+                    expect(msg).to_equal("")

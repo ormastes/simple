@@ -1,0 +1,391 @@
+"""Modeled NT file I/O bridge over the Wine POSIX adapter contract."""
+
+use common.wine_posix_adapter.{wine_posix_adapter_gate}
+
+class WineNtModeledFile:
+    path: text
+    content: text
+
+class WineNtFileHandle:
+    handle: i64
+    path: text
+    cursor: i64
+    open: bool
+
+class WineNtFileTable:
+    files: [WineNtModeledFile]
+    directories: [text]
+    handles: [WineNtFileHandle]
+    next_handle: i64
+    ready: bool
+    state: text
+
+class WineNtFileIoResult:
+    ok: bool
+    state: text
+    table: WineNtFileTable
+    handle: i64
+    data: text
+    bytes_read: i64
+
+class WineNtFileMetadataResult:
+    ok: bool
+    state: text
+    table: WineNtFileTable
+    handle: i64
+    value: i64
+
+fn _file(path: text, content: text) -> WineNtModeledFile:
+    WineNtModeledFile(path: path, content: content)
+
+fn _handle(handle: i64, path: text, cursor: i64, open: bool) -> WineNtFileHandle:
+    WineNtFileHandle(handle: handle, path: path, cursor: cursor, open: open)
+
+fn _table(files: [WineNtModeledFile], directories: [text], handles: [WineNtFileHandle], next_handle: i64, ready: bool, state: text) -> WineNtFileTable:
+    WineNtFileTable(files: files, directories: directories, handles: handles, next_handle: next_handle, ready: ready, state: state)
+
+fn _result(ok: bool, state: text, table: WineNtFileTable, handle: i64, data: text, bytes_read: i64) -> WineNtFileIoResult:
+    WineNtFileIoResult(ok: ok, state: state, table: table, handle: handle, data: data, bytes_read: bytes_read)
+
+fn _metadata_result(ok: bool, state: text, table: WineNtFileTable, handle: i64, value: i64) -> WineNtFileMetadataResult:
+    WineNtFileMetadataResult(ok: ok, state: state, table: table, handle: handle, value: value)
+
+fn _find_file(files: [WineNtModeledFile], path: text) -> WineNtModeledFile:
+    for file in files:
+        if file.path == path:
+            return file
+    _file("", "")
+
+fn _has_directory(table: WineNtFileTable, path: text) -> bool:
+    for directory in table.directories:
+        if directory == path:
+            return true
+    false
+
+fn _is_child_path(parent: text, child: text) -> bool:
+    child.starts_with(parent + "\\")
+
+fn _direct_child_name(parent: text, child: text) -> text:
+    val prefix = parent + "\\"
+    if not child.starts_with(prefix):
+        return ""
+    var name = ""
+    var i = prefix.len()
+    while i < child.len():
+        if child[i] == "\\":
+            return ""
+        name = name + child[i]
+        i = i + 1
+    name
+
+fn _directory_not_empty(table: WineNtFileTable, path: text) -> bool:
+    for file in table.files:
+        if _is_child_path(path, file.path):
+            return true
+    for directory in table.directories:
+        if directory != path and _is_child_path(path, directory):
+            return true
+    false
+
+fn _directory_child_count(table: WineNtFileTable, path: text) -> i64:
+    var count = 0
+    for file in table.files:
+        if _direct_child_name(path, file.path) != "":
+            count = count + 1
+    for directory in table.directories:
+        if directory != path and _direct_child_name(path, directory) != "":
+            count = count + 1
+    count
+
+fn _first_directory_child_name(table: WineNtFileTable, path: text) -> text:
+    for file in table.files:
+        val name = _direct_child_name(path, file.path)
+        if name != "":
+            return name
+    for directory in table.directories:
+        if directory != path:
+            val name = _direct_child_name(path, directory)
+            if name != "":
+                return name
+    ""
+
+fn _find_handle(handles: [WineNtFileHandle], handle: i64) -> WineNtFileHandle:
+    for item in handles:
+        if item.handle == handle:
+            return item
+    _handle(0, "", 0, false)
+
+fn _has_open_handle(table: WineNtFileTable, path: text) -> bool:
+    for item in table.handles:
+        if item.path == path and item.open:
+            return true
+    false
+
+fn _replace_handle(table: WineNtFileTable, replacement: WineNtFileHandle) -> WineNtFileTable:
+    var handles: [WineNtFileHandle] = []
+    for item in table.handles:
+        if item.handle == replacement.handle:
+            handles.push(replacement)
+        else:
+            handles.push(item)
+    _table(table.files, table.directories, handles, table.next_handle, table.ready, table.state)
+
+fn _remove_file(table: WineNtFileTable, path: text) -> WineNtFileTable:
+    var files: [WineNtModeledFile] = []
+    for item in table.files:
+        if item.path != path:
+            files.push(item)
+    _table(files, table.directories, table.handles, table.next_handle, table.ready, table.state)
+
+fn _add_directory(table: WineNtFileTable, path: text) -> WineNtFileTable:
+    var directories = table.directories
+    directories.push(path)
+    _table(table.files, directories, table.handles, table.next_handle, table.ready, table.state)
+
+fn _remove_directory(table: WineNtFileTable, path: text) -> WineNtFileTable:
+    var directories: [text] = []
+    for directory in table.directories:
+        if directory != path:
+            directories.push(directory)
+    _table(table.files, directories, table.handles, table.next_handle, table.ready, table.state)
+
+fn _upsert_file(table: WineNtFileTable, path: text, content: text) -> WineNtFileTable:
+    var files: [WineNtModeledFile] = []
+    var replaced = false
+    for item in table.files:
+        if item.path == path:
+            files.push(_file(path, content))
+            replaced = true
+        else:
+            files.push(item)
+    if not replaced:
+        files.push(_file(path, content))
+    _table(files, table.directories, table.handles, table.next_handle, table.ready, table.state)
+
+pub fn wine_nt_file_io_required_calls() -> [text]:
+    [
+        "CreateFileW",
+        "ReadFile",
+        "GetFileType",
+        "CloseHandle",
+        "GetFileAttributesW",
+        "GetFileSize",
+        "GetFileInformationByHandle",
+        "SetFilePointer",
+        "DeleteFileW",
+        "CopyFileW",
+        "MoveFileW",
+        "CreateDirectoryW",
+        "RemoveDirectoryW"
+    ]
+
+pub fn wine_nt_file_table_new(posix_apis: text, async_features: text) -> WineNtFileTable:
+    val gate = wine_posix_adapter_gate(posix_apis, async_features)
+    if not gate.ready:
+        return _table([], [], [], 0x40, false, gate.state)
+    _table([], [], [], 0x40, true, "ready")
+
+pub fn wine_nt_file_table_add_file(table: WineNtFileTable, path: text, content: text) -> WineNtFileTable:
+    var files = table.files
+    files.push(_file(path, content))
+    _table(files, table.directories, table.handles, table.next_handle, table.ready, table.state)
+
+pub fn wine_nt_file_table_add_directory(table: WineNtFileTable, path: text) -> WineNtFileTable:
+    if _has_directory(table, path):
+        return table
+    _add_directory(table, path)
+
+pub fn wine_nt_file_create_w(table: WineNtFileTable, path: text) -> WineNtFileIoResult:
+    if not table.ready:
+        return _result(false, table.state, table, 0, "", 0)
+    if path == "":
+        return _result(false, "invalid-path", table, 0, "", 0)
+    val file = _find_file(table.files, path)
+    if file.path == "":
+        return _result(false, "file-not-found", table, 0, "", 0)
+    val handle = table.next_handle
+    var handles = table.handles
+    handles.push(_handle(handle, path, 0, true))
+    _result(true, "opened", _table(table.files, table.directories, handles, handle + 1, table.ready, table.state), handle, "", 0)
+
+pub fn wine_nt_file_read(table: WineNtFileTable, handle: i64, requested_len: i64) -> WineNtFileIoResult:
+    if requested_len < 0:
+        return _result(false, "invalid-read-size", table, handle, "", 0)
+    val opened = _find_handle(table.handles, handle)
+    if not opened.open:
+        return _result(false, "invalid-handle", table, handle, "", 0)
+    val file = _find_file(table.files, opened.path)
+    if file.path == "":
+        return _result(false, "file-not-found", table, handle, "", 0)
+    var out = ""
+    var i = opened.cursor
+    var count = 0
+    while i < file.content.len() and count < requested_len:
+        out = out + file.content[i]
+        i = i + 1
+        count = count + 1
+    val updated = _replace_handle(table, _handle(opened.handle, opened.path, opened.cursor + count, true))
+    _result(true, "read", updated, handle, out, count)
+
+pub fn wine_nt_file_write(table: WineNtFileTable, handle: i64, data: text) -> WineNtFileIoResult:
+    val opened = _find_handle(table.handles, handle)
+    if not opened.open:
+        return _result(false, "invalid-handle", table, handle, "", 0)
+    val file = _find_file(table.files, opened.path)
+    if file.path == "":
+        return _result(false, "file-not-found", table, handle, "", 0)
+    if opened.cursor > file.content.len():
+        return _result(false, "file-pointer-past-eof", table, handle, "", 0)
+    var prefix = ""
+    var i = 0
+    while i < opened.cursor:
+        prefix = prefix + file.content[i]
+        i = i + 1
+    var suffix = ""
+    i = opened.cursor + data.len()
+    while i < file.content.len():
+        suffix = suffix + file.content[i]
+        i = i + 1
+    val updated_file = _upsert_file(table, opened.path, prefix + data + suffix)
+    val updated_handle = _replace_handle(updated_file, _handle(opened.handle, opened.path, opened.cursor + data.len(), true))
+    _result(true, "written", updated_handle, handle, data, data.len())
+
+pub fn wine_nt_file_close(table: WineNtFileTable, handle: i64) -> WineNtFileIoResult:
+    val opened = _find_handle(table.handles, handle)
+    if not opened.open:
+        return _result(false, "invalid-handle", table, handle, "", 0)
+    val updated = _replace_handle(table, _handle(opened.handle, opened.path, opened.cursor, false))
+    _result(true, "closed", updated, handle, "", 0)
+
+pub fn wine_nt_file_get_type(table: WineNtFileTable, handle: i64) -> WineNtFileMetadataResult:
+    val opened = _find_handle(table.handles, handle)
+    if not opened.open:
+        return _metadata_result(false, "invalid-handle", table, handle, 0)
+    _metadata_result(true, "file-type-disk", table, handle, 1)
+
+pub fn wine_nt_file_get_attributes_w(table: WineNtFileTable, path: text) -> WineNtFileMetadataResult:
+    if not table.ready:
+        return _metadata_result(false, table.state, table, 0, -1)
+    if path == "":
+        return _metadata_result(false, "invalid-path", table, 0, -1)
+    val file = _find_file(table.files, path)
+    if file.path == "":
+        if _has_directory(table, path):
+            return _metadata_result(true, "attributes", table, 0, 0x10)
+        return _metadata_result(false, "file-not-found", table, 0, -1)
+    _metadata_result(true, "attributes", table, 0, 0x80)
+
+pub fn wine_nt_file_delete_w(table: WineNtFileTable, path: text) -> WineNtFileIoResult:
+    if not table.ready:
+        return _result(false, table.state, table, 0, "", 0)
+    if path == "":
+        return _result(false, "invalid-path", table, 0, "", 0)
+    val file = _find_file(table.files, path)
+    if file.path == "":
+        return _result(false, "file-not-found", table, 0, "", 0)
+    if _has_open_handle(table, path):
+        return _result(false, "sharing-violation", table, 0, "", 0)
+    _result(true, "deleted", _remove_file(table, path), 0, "", 0)
+
+pub fn wine_nt_file_create_directory_w(table: WineNtFileTable, path: text) -> WineNtFileIoResult:
+    if not table.ready:
+        return _result(false, table.state, table, 0, "", 0)
+    if path == "":
+        return _result(false, "invalid-path", table, 0, "", 0)
+    if _has_directory(table, path):
+        return _result(false, "directory-exists", table, 0, "", 0)
+    val file = _find_file(table.files, path)
+    if file.path != "":
+        return _result(false, "file-exists", table, 0, "", 0)
+    _result(true, "directory-created", _add_directory(table, path), 0, "", 0)
+
+pub fn wine_nt_file_remove_directory_w(table: WineNtFileTable, path: text) -> WineNtFileIoResult:
+    if not table.ready:
+        return _result(false, table.state, table, 0, "", 0)
+    if path == "":
+        return _result(false, "invalid-path", table, 0, "", 0)
+    if not _has_directory(table, path):
+        return _result(false, "directory-not-found", table, 0, "", 0)
+    if _directory_not_empty(table, path):
+        return _result(false, "directory-not-empty", table, 0, "", 0)
+    _result(true, "directory-removed", _remove_directory(table, path), 0, "", 0)
+
+pub fn wine_nt_file_query_directory_w(table: WineNtFileTable, path: text) -> WineNtFileIoResult:
+    if not table.ready:
+        return _result(false, table.state, table, 0, "", 0)
+    if path == "":
+        return _result(false, "invalid-path", table, 0, "", 0)
+    if not _has_directory(table, path):
+        val file = _find_file(table.files, path)
+        if file.path != "":
+            return _result(false, "directory-not-directory", table, 0, "", 0)
+        return _result(false, "directory-not-found", table, 0, "", 0)
+    _result(true, "directory-enumerated", table, 0, _first_directory_child_name(table, path), _directory_child_count(table, path))
+
+pub fn wine_nt_file_copy_w(table: WineNtFileTable, source_path: text, dest_path: text, fail_if_exists: bool) -> WineNtFileIoResult:
+    if not table.ready:
+        return _result(false, table.state, table, 0, "", 0)
+    if source_path == "" or dest_path == "":
+        return _result(false, "invalid-path", table, 0, "", 0)
+    if _has_directory(table, source_path):
+        return _result(false, "directory-not-file", table, 0, "", 0)
+    if _has_directory(table, dest_path):
+        return _result(false, "directory-exists", table, 0, "", 0)
+    val source = _find_file(table.files, source_path)
+    if source.path == "":
+        return _result(false, "file-not-found", table, 0, "", 0)
+    val dest = _find_file(table.files, dest_path)
+    if fail_if_exists and dest.path != "":
+        return _result(false, "file-exists", table, 0, "", 0)
+    if _has_open_handle(table, dest_path):
+        return _result(false, "sharing-violation", table, 0, "", 0)
+    _result(true, "copied", _upsert_file(table, dest_path, source.content), 0, "", source.content.len())
+
+pub fn wine_nt_file_move_w(table: WineNtFileTable, source_path: text, dest_path: text) -> WineNtFileIoResult:
+    if not table.ready:
+        return _result(false, table.state, table, 0, "", 0)
+    if source_path == "" or dest_path == "":
+        return _result(false, "invalid-path", table, 0, "", 0)
+    if _has_directory(table, source_path):
+        return _result(false, "directory-move-unsupported", table, 0, "", 0)
+    if _has_directory(table, dest_path):
+        return _result(false, "directory-exists", table, 0, "", 0)
+    val source = _find_file(table.files, source_path)
+    if source.path == "":
+        return _result(false, "file-not-found", table, 0, "", 0)
+    if _has_open_handle(table, source_path) or _has_open_handle(table, dest_path):
+        return _result(false, "sharing-violation", table, 0, "", 0)
+    val without_source = _remove_file(table, source_path)
+    _result(true, "moved", _upsert_file(without_source, dest_path, source.content), 0, "", source.content.len())
+
+pub fn wine_nt_file_get_size(table: WineNtFileTable, handle: i64) -> WineNtFileMetadataResult:
+    val opened = _find_handle(table.handles, handle)
+    if not opened.open:
+        return _metadata_result(false, "invalid-handle", table, handle, 0)
+    val file = _find_file(table.files, opened.path)
+    if file.path == "":
+        return _metadata_result(false, "file-not-found", table, handle, 0)
+    _metadata_result(true, "size", table, handle, file.content.len())
+
+pub fn wine_nt_file_get_information_by_handle(table: WineNtFileTable, handle: i64) -> WineNtFileMetadataResult:
+    val opened = _find_handle(table.handles, handle)
+    if not opened.open:
+        return _metadata_result(false, "invalid-handle", table, handle, 0)
+    val file = _find_file(table.files, opened.path)
+    if file.path == "":
+        return _metadata_result(false, "file-not-found", table, handle, 0)
+    _metadata_result(true, "file-information", table, handle, 0x100000 + file.content.len())
+
+pub fn wine_nt_file_set_pointer(table: WineNtFileTable, handle: i64, cursor: i64) -> WineNtFileMetadataResult:
+    if cursor < 0:
+        return _metadata_result(false, "invalid-file-pointer", table, handle, 0)
+    val opened = _find_handle(table.handles, handle)
+    if not opened.open:
+        return _metadata_result(false, "invalid-handle", table, handle, 0)
+    val file = _find_file(table.files, opened.path)
+    if file.path == "":
+        return _metadata_result(false, "file-not-found", table, handle, 0)
+    if cursor > file.content.len():
+        return _metadata_result(false, "file-pointer-past-eof", table, handle, opened.cursor)
+    val updated = _replace_handle(table, _handle(opened.handle, opened.path, cursor, true))
+    _metadata_result(true, "pointer", updated, handle, cursor)

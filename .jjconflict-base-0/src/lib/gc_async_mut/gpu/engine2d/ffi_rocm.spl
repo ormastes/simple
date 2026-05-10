@@ -1,0 +1,149 @@
+"""ROCm/HIP FFI Dispatch — Dynamic-First Dual-Path
+
+@tag:stdlib
+@tag:gpu
+
+Wraps HIP runtime API functions behind a RocmFfi class. Dynamic-first
+since no Rust runtime exists for rt_rocm_*. The static path resolves
+to extern fn stubs that will link-error unless the runtime is built.
+
+Usage:
+    val ffi = RocmFfi.create(GpuFfiMode.Dynamic)  # primary path
+    if ffi != nil and ffi.is_available():
+        ffi.init()
+"""
+
+use std.ffi.dynamic.{DynLib}
+use std.gpu.engine2d.ffi_dispatch.{GpuFfiMode, FfiDispatchBase, try_load_gpu_lib}
+
+# ============================================================================
+# Static extern declarations (no runtime impl yet — will link-error)
+# ============================================================================
+
+extern fn rt_rocm_init() -> bool
+extern fn rt_rocm_shutdown() -> bool
+extern fn rt_rocm_is_available() -> bool
+extern fn rt_rocm_device_count() -> i64
+extern fn rt_rocm_device_get(id: i64) -> i64
+extern fn rt_rocm_mem_alloc(size: i64) -> i64
+extern fn rt_rocm_mem_free(ptr: i64) -> bool
+extern fn rt_rocm_memcpy_htod(dst: i64, src: [u8], size: i64) -> bool
+extern fn rt_rocm_memcpy_dtoh(dst: [u8], src: i64, size: i64) -> bool
+extern fn rt_rocm_module_load(source: text) -> i64
+extern fn rt_rocm_kernel_get(module: i64, name: text) -> i64
+extern fn rt_rocm_launch_kernel(kernel: i64, gx: i64, gy: i64, gz: i64, bx: i64, by: i64, bz: i64, shared_mem: i64, args_ptr: i64) -> bool
+extern fn rt_rocm_synchronize() -> bool
+
+# ============================================================================
+# RocmFfi
+# ============================================================================
+
+class RocmFfi:
+    _mode: GpuFfiMode
+    _dyn_lib: DynLib?
+
+impl RocmFfi: FfiDispatchBase
+
+    fn mode() -> GpuFfiMode:
+        self._mode
+
+    static fn create_static() -> RocmFfi:
+        RocmFfi(_mode: GpuFfiMode.Static, _dyn_lib: nil)
+
+    static fn create_dynamic() -> RocmFfi?:
+        val lib = try_load_gpu_lib("amdhip64")
+        if lib == nil:
+            return nil
+        RocmFfi(_mode: GpuFfiMode.Dynamic, _dyn_lib: lib)
+
+    static fn create_dynamic_from(path: text) -> RocmFfi?:
+        val lib = DynLib.load(path)
+        if lib == nil:
+            return nil
+        RocmFfi(_mode: GpuFfiMode.Dynamic, _dyn_lib: lib)
+
+    static fn create(ffi_mode: GpuFfiMode) -> RocmFfi?:
+        match ffi_mode:
+            case Dynamic:
+                val dyn_ffi = RocmFfi.create_dynamic()
+                if dyn_ffi != nil:
+                    return dyn_ffi
+                nil
+            case Static:
+                RocmFfi.create_static()
+
+    fn is_available() -> bool:
+        match self._mode:
+            case Static: rt_rocm_is_available()
+            case Dynamic:
+                if self._dyn_lib != nil:
+                    val result = self._dyn_lib.call1("hipInit", 0)
+                    result == 0
+                else:
+                    false
+
+    fn init() -> bool:
+        match self._mode:
+            case Static: rt_rocm_init()
+            case Dynamic:
+                if self._dyn_lib != nil:
+                    val result = self._dyn_lib.call1("hipInit", 0)
+                    result == 0
+                else:
+                    false
+
+    fn shutdown() -> bool:
+        match self._mode:
+            case Static: rt_rocm_shutdown()
+            case Dynamic: true
+
+    fn device_count() -> i64:
+        match self._mode:
+            case Static: rt_rocm_device_count()
+            case Dynamic:
+                if self._dyn_lib != nil:
+                    self._dyn_lib.call0("hipGetDeviceCount")
+                else:
+                    0
+
+    fn mem_alloc(size: i64) -> i64:
+        match self._mode:
+            case Static: rt_rocm_mem_alloc(size)
+            case Dynamic:
+                if self._dyn_lib != nil:
+                    self._dyn_lib.call1("hipMalloc", size)
+                else:
+                    0
+
+    fn mem_free(ptr: i64) -> bool:
+        match self._mode:
+            case Static: rt_rocm_mem_free(ptr)
+            case Dynamic:
+                if self._dyn_lib != nil:
+                    val result = self._dyn_lib.call1("hipFree", ptr)
+                    result == 0
+                else:
+                    false
+
+    fn launch_kernel(name: text, gx: i64, gy: i64, gz: i64, bx: i64, by: i64, bz: i64, shared_mem: i64) -> bool:
+        match self._mode:
+            case Static:
+                val module = rt_rocm_module_load("")
+                val kernel = rt_rocm_kernel_get(module, name)
+                rt_rocm_launch_kernel(kernel, gx, gy, gz, bx, by, bz, shared_mem, 0)
+            case Dynamic:
+                if self._dyn_lib != nil:
+                    val result = self._dyn_lib.call_n("hipLaunchKernel", [0, gx, gy, gz, bx, by, bz, shared_mem, 0, 0])
+                    result == 0
+                else:
+                    false
+
+    fn synchronize() -> bool:
+        match self._mode:
+            case Static: rt_rocm_synchronize()
+            case Dynamic:
+                if self._dyn_lib != nil:
+                    val result = self._dyn_lib.call0("hipDeviceSynchronize")
+                    result == 0
+                else:
+                    false

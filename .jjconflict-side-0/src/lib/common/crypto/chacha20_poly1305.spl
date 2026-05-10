@@ -1,0 +1,200 @@
+# ChaCha20-Poly1305 AEAD — Pure Simple stdlib implementation (RFC 7539 §2.8)
+#
+# Authenticated Encryption with Associated Data combining ChaCha20 stream
+# cipher with Poly1305 MAC. All operations are pure Simple — no externs,
+# no float, no u128.
+#
+# This is the IETF construction (RFC 7539 / RFC 8439), 96-bit nonce variant.
+# It does NOT inherit from src/os/crypto/chacha20_poly1305.spl; that module
+# has a known _build_mac_data bug (missing u8 type suffix on padding pushes
+# and missing u64 suffix on literal 16 in pad arithmetic). This stdlib version
+# is byte-exact against RFC 7539 §2.8.2 test vectors.
+#
+# Public API:
+#   chacha20_poly1305_seal(key, nonce, aad, plaintext) -> ([u8], [u8])
+#       Returns (ciphertext, 16-byte tag).
+#
+#   chacha20_poly1305_open(key, nonce, aad, ciphertext, tag) -> Option<[u8]>
+#       Returns Some(plaintext) on success, nil on authentication failure.
+#       Tag comparison is constant-time (XOR-accumulate into u8, no early exit).
+#
+# Reference: RFC 7539 §2.8 (AEAD construction)
+#            RFC 7539 §2.8.2 (test vector)
+#            https://datatracker.ietf.org/doc/html/rfc7539#section-2.8
+
+mod crypto.chacha20_poly1305
+
+use std.crypto.chacha20.{chacha20_encrypt}
+use std.crypto.poly1305.{poly1305_mac, poly1305_key_gen}
+
+# ============================================================================
+# Internal helper: _build_mac_data
+# ============================================================================
+#
+# RFC 7539 §2.8 Poly1305 input construction:
+#
+#   AAD  ||  pad16(AAD)  ||  ciphertext  ||  pad16(ciphertext)
+#   ||  u64-LE(len(AAD))  ||  u64-LE(len(ciphertext))
+#
+# pad16(x) means zero-padding x to the next 16-byte boundary.
+# When len(x) is already a multiple of 16 (including 0), no padding is added.
+# The length suffixes are always present (8 bytes each, little-endian u64).
+#
+# Bug avoided: the os version pushes bare `0` (untyped) instead of `0u8`, and
+# computes `16 - rem` with bare integer literals, causing type inference
+# failures at runtime. This version uses explicit `0u8` and `16u64`.
+
+fn _build_mac_data(aad: [u8], ciphertext: [u8]) -> [u8]:
+    """Build Poly1305 input per RFC 7539 §2.8.
+
+    Layout: AAD || pad16(AAD) || ciphertext || pad16(ciphertext)
+            || u64-LE(aad_len) || u64-LE(ciphertext_len)
+
+    Padding is with zero bytes to the next 16-byte boundary.
+    When a section length is already a multiple of 16 (or zero), no pad bytes
+    are added. Length fields are always emitted.
+    """
+    var mac_data: [u8] = []
+
+    # --- AAD ---
+    var i: u64 = 0
+    while i < aad.len():
+        mac_data.push(aad[i])
+        i = i + 1u64
+
+    val aad_rem = aad.len() % 16u64
+    if aad_rem != 0u64:
+        var pad: u64 = 0u64
+        val aad_pad_count = 16u64 - aad_rem
+        while pad < aad_pad_count:
+            mac_data.push(0u8)
+            pad = pad + 1u64
+
+    # --- Ciphertext ---
+    i = 0u64
+    while i < ciphertext.len():
+        mac_data.push(ciphertext[i])
+        i = i + 1u64
+
+    val ct_rem = ciphertext.len() % 16u64
+    if ct_rem != 0u64:
+        var pad: u64 = 0u64
+        val ct_pad_count = 16u64 - ct_rem
+        while pad < ct_pad_count:
+            mac_data.push(0u8)
+            pad = pad + 1u64
+
+    # --- u64-LE(aad_len) ---
+    val aad_len = aad.len()
+    mac_data.push((aad_len & 0xFFu64).to_u8())
+    mac_data.push(((aad_len >> 8u64) & 0xFFu64).to_u8())
+    mac_data.push(((aad_len >> 16u64) & 0xFFu64).to_u8())
+    mac_data.push(((aad_len >> 24u64) & 0xFFu64).to_u8())
+    mac_data.push(((aad_len >> 32u64) & 0xFFu64).to_u8())
+    mac_data.push(((aad_len >> 40u64) & 0xFFu64).to_u8())
+    mac_data.push(((aad_len >> 48u64) & 0xFFu64).to_u8())
+    mac_data.push(((aad_len >> 56u64) & 0xFFu64).to_u8())
+
+    # --- u64-LE(ciphertext_len) ---
+    val ct_len = ciphertext.len()
+    mac_data.push((ct_len & 0xFFu64).to_u8())
+    mac_data.push(((ct_len >> 8u64) & 0xFFu64).to_u8())
+    mac_data.push(((ct_len >> 16u64) & 0xFFu64).to_u8())
+    mac_data.push(((ct_len >> 24u64) & 0xFFu64).to_u8())
+    mac_data.push(((ct_len >> 32u64) & 0xFFu64).to_u8())
+    mac_data.push(((ct_len >> 40u64) & 0xFFu64).to_u8())
+    mac_data.push(((ct_len >> 48u64) & 0xFFu64).to_u8())
+    mac_data.push(((ct_len >> 56u64) & 0xFFu64).to_u8())
+
+    mac_data
+
+# ============================================================================
+# Public API: seal
+# ============================================================================
+
+fn chacha20_poly1305_seal(key: [u8], nonce: [u8], aad: [u8], plaintext: [u8]) -> ([u8], [u8]):
+    """ChaCha20-Poly1305 AEAD encryption (RFC 7539 §2.8).
+
+    Generates a Poly1305 one-time key from ChaCha20 block 0 (counter=0),
+    encrypts plaintext with ChaCha20 starting at counter=1, then computes
+    a Poly1305 tag over the MAC data structure covering both AAD and ciphertext.
+
+    Args:
+        key:       32-byte ChaCha20 key.
+        nonce:     12-byte IETF nonce (must be unique per (key, message) pair).
+        aad:       Additional authenticated data (not encrypted, may be empty).
+        plaintext: Plaintext bytes to encrypt (may be empty).
+
+    Returns: (ciphertext, tag) where ciphertext is len(plaintext) bytes and
+             tag is 16 bytes.
+
+    Example:
+        val (ct, tag) = chacha20_poly1305_seal(key, nonce, aad, pt)
+    """
+    # Step 1: generate Poly1305 one-time key (RFC 7539 §2.6)
+    val otk = poly1305_key_gen(key, nonce)
+
+    # Step 2: encrypt plaintext with ChaCha20 at counter=1 (RFC 7539 §2.4)
+    val ciphertext = chacha20_encrypt(key, 1u32, nonce, plaintext)
+
+    # Step 3: build Poly1305 input and compute tag (RFC 7539 §2.8)
+    val mac_data = _build_mac_data(aad, ciphertext)
+    val tag = poly1305_mac(otk, mac_data)
+
+    (ciphertext, tag)
+
+# ============================================================================
+# Public API: open
+# ============================================================================
+
+fn chacha20_poly1305_open(key: [u8], nonce: [u8], aad: [u8], ciphertext: [u8], tag: [u8]) -> Option<[u8]>:
+    """ChaCha20-Poly1305 AEAD decryption (RFC 7539 §2.8).
+
+    Verifies the Poly1305 tag using a constant-time comparison (XOR-accumulate;
+    no early exit on mismatch to avoid timing side-channels). Returns the
+    plaintext only when the tag matches.
+
+    Timing note: the comparison loop accumulates all 16 XOR differences into
+    a single u8 accumulator before checking. This prevents an early-exit timing
+    oracle. The poly1305_mac computation itself is not constant-time with
+    respect to message length (that is inherent to the MAC algorithm).
+
+    Args:
+        key:        32-byte ChaCha20 key.
+        nonce:      12-byte IETF nonce.
+        aad:        Additional authenticated data (must match what was sealed).
+        ciphertext: Encrypted bytes (same length as original plaintext).
+        tag:        16-byte Poly1305 authentication tag from seal.
+
+    Returns: Some(plaintext) on successful authentication and decryption,
+             nil if tag verification fails.
+
+    Example:
+        val result = chacha20_poly1305_open(key, nonce, aad, ct, tag)
+        if result == nil:
+            # authentication failure
+    """
+    if tag.len() != 16u64:
+        return nil
+
+    # Step 1: generate Poly1305 one-time key (same as seal, counter=0)
+    val otk = poly1305_key_gen(key, nonce)
+
+    # Step 2: compute expected tag from received ciphertext
+    val mac_data = _build_mac_data(aad, ciphertext)
+    val expected_tag = poly1305_mac(otk, mac_data)
+
+    # Step 3: constant-time tag comparison (XOR-accumulate, no early exit)
+    var diff: u8 = 0u8
+    var i: u64 = 0u64
+    while i < 16u64:
+        diff = diff | (expected_tag[i] ^ tag[i])
+        i = i + 1u64
+
+    if diff != 0u8:
+        return nil
+
+    # Step 4: decrypt (ChaCha20 at counter=1, same as seal)
+    val plaintext = chacha20_encrypt(key, 1u32, nonce, ciphertext)
+
+    Some(plaintext)

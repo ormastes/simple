@@ -1,0 +1,262 @@
+# Persistent Map — HAMT-based Immutable Hash Map
+#
+# @tag:api
+#
+# An immutable, persistent hash map using a Hash Array Mapped Trie (HAMT)
+# with 32-way branching and bitmap compression. Every mutation (set, remove,
+# merge, filter, map_values) returns a NEW map — the original is never modified.
+#
+# Structural sharing means updates copy only O(log32 n) nodes (~1-7 for
+# collections up to billions of entries), making immutable updates nearly
+# as fast as mutable ones while providing snapshot consistency for free.
+#
+# Thread-safe by construction: immutable values need no locks.
+#
+# Usage:
+#   use std.persistent_map.{PersistentMap, PersistentMap.empty}
+#
+#   val m0 = PersistentMap.empty()
+#   val m1 = m0.set("name", "Alice")
+#   val m2 = m1.set("age", 30)
+#   print m2.get("name")  # "Alice"
+#   print m0.len()         # 0 (original unchanged)
+#   print m2.len()         # 2
+
+use std.persistent_map.hamt_node.{hamt_empty, hamt_get, hamt_set, hamt_remove, hamt_node_entries, hamt_node_count}
+
+extern fn rt_hash_text(s: text) -> i64
+
+# ============================================================================
+# Hash Helper
+# ============================================================================
+
+# Compute a 64-bit hash for any key.
+# Text keys use the runtime hash function directly.
+# Non-text keys are converted to text via string interpolation, then hashed.
+fn persistent_map_hash(key) -> i64:
+    val key_text = "{key}"
+    rt_hash_text(key_text)
+
+# ============================================================================
+# PersistentMap
+# ============================================================================
+
+class PersistentMap:
+    root       # HAMT root node (nil = empty)
+    size: i64
+
+    # ------------------------------------------------------------------
+    # Lookup
+    # ------------------------------------------------------------------
+
+    # Get the value associated with `key`, or nil if not present.
+    fn get(key):
+        val hash = persistent_map_hash(key)
+        hamt_get(self.root, key, hash, 0)
+
+    # Get the value associated with `key`, or `default_val` if not present.
+    fn get_or(key, default_val):
+        val result = self.get(key)
+        if result != nil:
+            return result
+        default_val
+
+    # Check whether `key` exists in the map.
+    fn contains(key) -> bool:
+        val result = self.get(key)
+        result != nil
+
+    # ------------------------------------------------------------------
+    # Mutation (returns new map)
+    # ------------------------------------------------------------------
+
+    # Insert or update `key` with `value`. Returns a NEW map.
+    fn set(key, value) -> PersistentMap:
+        val hash = persistent_map_hash(key)
+        val new_root = hamt_set(self.root, key, value, hash, 0)
+        if new_root == self.root:
+            return self
+        # Determine new size: if the key was already present, size stays the same
+        val old_val = hamt_get(self.root, key, hash, 0)
+        var new_size = self.size
+        if old_val == nil:
+            new_size = self.size + 1
+        PersistentMap(root: new_root, size: new_size)
+
+    # Remove `key` from the map. Returns a NEW map.
+    # If the key is not present, returns this map unchanged.
+    fn remove(key) -> PersistentMap:
+        val hash = persistent_map_hash(key)
+        val new_root = hamt_remove(self.root, key, hash, 0)
+        if new_root == self.root:
+            return self
+        PersistentMap(root: new_root, size: self.size - 1)
+
+    # ------------------------------------------------------------------
+    # Size queries
+    # ------------------------------------------------------------------
+
+    # Return the number of key-value pairs.
+    fn len() -> i64:
+        self.size
+
+    # Return true if the map is empty.
+    fn is_empty() -> bool:
+        self.size == 0
+
+    # ------------------------------------------------------------------
+    # Bulk operations
+    # ------------------------------------------------------------------
+
+    # Merge another PersistentMap into this one. Keys from `other` take
+    # precedence on conflict. Returns a NEW map.
+    fn merge(other: PersistentMap) -> PersistentMap:
+        if other.is_empty():
+            return self
+        if self.is_empty():
+            return other
+        var result = self
+        val other_entries = other.entries()
+        var i = 0
+        val n = other_entries.len()
+        while i < n:
+            val pair = other_entries[i]
+            result = result.set(pair[0], pair[1])
+            i = i + 1
+        result
+
+    # Return a new map containing only entries where `pred(key, value)` is true.
+    fn filter(pred: fn()) -> PersistentMap:
+        var result = PersistentMap.empty()
+        val all_entries = self.entries()
+        var i = 0
+        val n = all_entries.len()
+        while i < n:
+            val pair = all_entries[i]
+            if pred(pair[0], pair[1]):
+                result = result.set(pair[0], pair[1])
+            i = i + 1
+        result
+
+    # Return a new map with all values transformed by `f(value)`.
+    fn map_values(f: fn()) -> PersistentMap:
+        var result = PersistentMap.empty()
+        val all_entries = self.entries()
+        var i = 0
+        val n = all_entries.len()
+        while i < n:
+            val pair = all_entries[i]
+            result = result.set(pair[0], f(pair[1]))
+            i = i + 1
+        result
+
+    # Fold (reduce) over all entries.
+    # `f(accumulator, key, value)` is called for each entry.
+    fn fold(init, f: fn()):
+        var acc = init
+        val all_entries = self.entries()
+        var i = 0
+        val n = all_entries.len()
+        while i < n:
+            val pair = all_entries[i]
+            acc = f(acc, pair[0], pair[1])
+            i = i + 1
+        acc
+
+    # Update a single key by applying `f(current_value)`.
+    # If the key does not exist, `f(nil)` is called.
+    fn update(key, f: fn()) -> PersistentMap:
+        val current = self.get(key)
+        val new_val = f(current)
+        self.set(key, new_val)
+
+    # ------------------------------------------------------------------
+    # Iteration / conversion
+    # ------------------------------------------------------------------
+
+    # Return an array of all keys.
+    fn keys():
+        val all_entries = self.entries()
+        var result = []
+        var i = 0
+        val n = all_entries.len()
+        while i < n:
+            result.push(all_entries[i][0])
+            i = i + 1
+        result
+
+    # Return an array of all values.
+    fn values():
+        val all_entries = self.entries()
+        var result = []
+        var i = 0
+        val n = all_entries.len()
+        while i < n:
+            result.push(all_entries[i][1])
+            i = i + 1
+        result
+
+    # Return an array of [key, value] pairs.
+    fn entries():
+        hamt_node_entries(self.root)
+
+    # Convert to a mutable dict (built-in hash map).
+    fn to_dict():
+        var result = {}
+        val all_entries = self.entries()
+        var i = 0
+        val n = all_entries.len()
+        while i < n:
+            val pair = all_entries[i]
+            result[pair[0]] = pair[1]
+            i = i + 1
+        result
+
+    # Return a copy (identity for immutable structures, but provided for
+    # API compatibility with PersistentDict).
+    fn copy() -> PersistentMap:
+        PersistentMap(root: self.root, size: self.size)
+
+    static fn from_dict(d) -> PersistentMap:
+        var result = PersistentMap.empty()
+        for k in d:
+            result = result.set(k, d[k])
+        result
+
+    static fn from_entries(entries) -> PersistentMap:
+        var result = PersistentMap.empty()
+        var i = 0
+        val n = entries.len()
+        while i < n:
+            val pair = entries[i]
+            result = result.set(pair[0], pair[1])
+            i = i + 1
+        result
+
+    static fn empty() -> PersistentMap:
+        PersistentMap(root: nil, size: 0)
+
+# ============================================================================
+# Factory Functions
+# ============================================================================
+
+export PersistentMap
+export PersistentMap__empty, PersistentMap__from_entries, PersistentMap__from_dict
+export persistent_map_hash
+
+# Re-exported from collision.spl
+export collision_get, collision_set, collision_remove, collision_len, collision_contains
+
+# Re-exported from hamt_node.spl
+export HAMT_LEAF, HAMT_BRANCH, HAMT_COLLISION
+export HAMT_BITS, HAMT_WIDTH, HAMT_MASK_VAL, HAMT_MAX_DEPTH
+export hamt_popcount, hamt_mask, hamt_bit_pos, hamt_index
+export hamt_empty, hamt_leaf, hamt_branch, hamt_collision
+export hamt_node_tag
+export hamt_get, hamt_set, hamt_remove
+export hamt_node_entries, hamt_node_count
+export hamt_array_insert, hamt_array_replace, hamt_array_remove
+
+# Re-exported from transient.spl
+export PersistentMapBuilder
+export PersistentMapBuilder__new, PersistentMapBuilder__from_entries

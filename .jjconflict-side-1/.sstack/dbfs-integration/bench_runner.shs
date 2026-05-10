@@ -1,0 +1,397 @@
+#!/usr/bin/env bash
+#
+# Phase 7 benchmark runner for SStack feature `dbfs-integration`.
+#
+# Drives the four AC-9 workloads (metadata_storm, append_log,
+# random_overwrite, mmap_read) across the five backends defined in
+# verify_plan.md §3.2 (DBFS-RawNvme, DBFS-NvfsArena, FAT32, RamFS,
+# NVFS-native), parses per-cell metrics out of each bench spec's
+# stdout, applies the ratio-based pass criteria, and writes a markdown
+# report to `.sstack/dbfs-integration/bench_results/<timestamp>.md`.
+#
+# Usage:
+#   sh .sstack/dbfs-integration/bench_runner.shs [--quick] [--keep-going]
+#
+# Flags:
+#   --quick        skip large workloads (random_overwrite, mmap_read).
+#   --keep-going   continue past a bench spec that crashed.
+#   -h, --help     show this header.
+#
+# Environment overrides:
+#   SIMPLE_BIN          path to `bin/simple`              (default: bin/simple)
+#   BENCH_TIMEOUT_S     per-cell timeout in seconds       (default: 600)
+#   BENCH_OUT_DIR       output directory                  (default: .sstack/dbfs-integration/bench_results)
+#   BENCH_SPEC_ROOT_A   primary spec dir                  (default: test/dbfs/bench)
+#   BENCH_SPEC_ROOT_B   fallback spec dir                 (default: test/dbfs)
+#   SIMPLE_MCP_USE_CACHE  forced to 0 (per memory feedback_mcp_cache_off_by_default)
+#
+# Exit codes:
+#   0  all measured cells pass (any cells skipped because the bench
+#      spec or baseline column is missing count as INDETERMINATE,
+#      not FAIL).
+#   1  at least one measured cell violated its ratio pass criterion,
+#      or pre-flight check failed.
+#   2  bad CLI argument.
+#
+# Conventions used to parse bench-spec stdout (permissive — tolerates
+# whatever Phase 6 / Phase 7-bench actually emits):
+#   - one line per (workload, backend) tuple, in the form:
+#         backend=<name> p50_us=<int> p99_us=<int> bytes_written=<int>
+#         logical_bytes=<int> recovery_time_us=<int> mount_time_us=<int>
+#         rss_kib=<int> cache_hit_ratio=<int> [throughput_mb_s=<int>]
+#         [iops=<int>]
+#     keys may appear in any order; missing keys yield blank cells.
+#   - <name> is one of: DBFS-RawNvme, DBFS-NvfsArena, FAT32, RamFS,
+#     NVFS-native (verbatim from verify_plan §3.2).
+
+set -u   # NOTE: no -e — keep marching past per-cell failures.
+
+#------------------------------------------------------------------------
+# 0. CLI + paths
+#------------------------------------------------------------------------
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+cd "$REPO_ROOT" || { echo "error: cannot cd to repo root" >&2; exit 1; }
+
+QUICK=0
+KEEP_GOING=0
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --quick) QUICK=1 ;;
+        --keep-going) KEEP_GOING=1 ;;
+        -h|--help) sed -n '2,40p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        *) echo "error: unknown option: $1" >&2; exit 2 ;;
+    esac
+    shift
+done
+
+SIMPLE_BIN="${SIMPLE_BIN:-bin/simple}"
+BENCH_TIMEOUT_S="${BENCH_TIMEOUT_S:-600}"
+BENCH_OUT_DIR="${BENCH_OUT_DIR:-.sstack/dbfs-integration/bench_results}"
+BENCH_SPEC_ROOT_A="${BENCH_SPEC_ROOT_A:-test/dbfs/bench}"
+BENCH_SPEC_ROOT_B="${BENCH_SPEC_ROOT_B:-test/dbfs}"
+export SIMPLE_MCP_USE_CACHE=0
+
+STAMP="$(date +%Y-%m-%d-%H%M%S)"
+RUN_DIR="${BENCH_OUT_DIR}/${STAMP}"
+REPORT="${BENCH_OUT_DIR}/${STAMP}.md"
+
+info()   { printf '[bench-runner] %s\n' "$*"; }
+warn()   { printf '[bench-runner] WARN: %s\n' "$*" >&2; }
+fatal()  { printf '[bench-runner] FATAL: %s\n' "$*" >&2; exit 1; }
+
+#------------------------------------------------------------------------
+# 1. Pre-flight
+#------------------------------------------------------------------------
+
+[ -x "$SIMPLE_BIN" ] || fatal "bin/simple not executable at: $SIMPLE_BIN"
+[ -f "test/dbfs/bench_harness.spl" ] \
+    || fatal "test/dbfs/bench_harness.spl missing — Phase 6 incomplete?"
+mkdir -p "$RUN_DIR" || fatal "cannot mkdir $RUN_DIR"
+: > "${RUN_DIR}/.write_test" || fatal "output dir not writable: $RUN_DIR"
+rm -f "${RUN_DIR}/.write_test"
+
+info "repo: $REPO_ROOT"
+info "simple: $SIMPLE_BIN"
+info "out: $RUN_DIR"
+info "timeout/cell: ${BENCH_TIMEOUT_S}s"
+[ "$QUICK" = 1 ] && info "mode: --quick (skipping random_overwrite, mmap_read)"
+
+#------------------------------------------------------------------------
+# 2. Workload + backend matrix
+#------------------------------------------------------------------------
+
+# workload_name : bench_spec_basename : metric_key : baseline_backend : ratio_op : ratio_factor
+# ratio_op: "le" -> candidate <= factor*baseline ; "ge" -> candidate >= factor*baseline
+WORKLOADS_FULL='
+metadata_storm:metadata_storm_bench:p99_us:FAT32:le:200
+append_log:append_log_bench:throughput_mb_s:RamFS:ge:30
+random_overwrite:random_overwrite_bench:iops:NVFS-native:ge:50
+mmap_read:mmap_read_bench:throughput_mb_s:FAT32:ge:50
+'
+# factor is expressed as a percentage to keep arithmetic in integer awk:
+#   le 200  ==  candidate <= 2.00 x baseline
+#   ge 30   ==  candidate >= 0.30 x baseline
+#   ge 50   ==  candidate >= 0.50 x baseline
+
+if [ "$QUICK" = 1 ]; then
+    WORKLOADS="$(printf '%s\n' "$WORKLOADS_FULL" | grep -E '^(metadata_storm|append_log):')"
+else
+    WORKLOADS="$WORKLOADS_FULL"
+fi
+
+BACKENDS='DBFS-RawNvme DBFS-NvfsArena FAT32 RamFS NVFS-native'
+
+#------------------------------------------------------------------------
+# 3. Helpers — locate bench spec, parse stdout, compute verdict
+#------------------------------------------------------------------------
+
+# Locate the bench spec for a workload basename. Echoes path or empty.
+locate_bench_spec() {
+    base="$1"
+    for root in "$BENCH_SPEC_ROOT_A" "$BENCH_SPEC_ROOT_B"; do
+        cand="${root}/${base}.spl"
+        if [ -f "$cand" ]; then
+            printf '%s' "$cand"
+            return 0
+        fi
+    done
+    return 1
+}
+
+# Run a bench spec and tee to a log. Returns the log path on stdout.
+# Exit status reflects the bench spec exit (0 = ran cleanly).
+run_bench_spec() {
+    spec="$1"
+    workload="$2"
+    log="${RUN_DIR}/${workload}.log"
+    if command -v timeout >/dev/null 2>&1; then
+        timeout "${BENCH_TIMEOUT_S}" "$SIMPLE_BIN" test --no-cache "$spec" \
+            >"$log" 2>&1
+    else
+        "$SIMPLE_BIN" test --no-cache "$spec" >"$log" 2>&1
+    fi
+    rc=$?
+    printf '%s' "$log"
+    return $rc
+}
+
+# Extract a metric for a (log, backend, key) tuple. Echo "" if absent.
+extract_metric() {
+    log="$1"; backend="$2"; key="$3"
+    # tail -n1: if the harness emits warmup lines before the measured
+    # line, the LAST line per backend is the one we want. Phase 6 specs
+    # should follow that convention.
+    grep -F "backend=${backend}" "$log" 2>/dev/null \
+        | tail -n1 \
+        | tr ' \t' '\n\n' \
+        | awk -F= -v k="$key" '$1==k { print $2; exit }'
+}
+
+# Apply ratio criterion using integer math (factor is percent).
+# Args: candidate baseline op factor_pct
+# Echo: PASS | FAIL | INDETERMINATE
+verdict_for_ratio() {
+    cand="$1"; base="$2"; op="$3"; pct="$4"
+    case "$cand" in ''|*[!0-9]*) echo INDETERMINATE; return ;; esac
+    case "$base" in ''|*[!0-9]*) echo INDETERMINATE; return ;; esac
+    if [ "$base" -eq 0 ]; then echo INDETERMINATE; return; fi
+    # threshold = base * pct / 100
+    thr=$(( base * pct / 100 ))
+    case "$op" in
+        le) [ "$cand" -le "$thr" ] && echo PASS || echo FAIL ;;
+        ge) [ "$cand" -ge "$thr" ] && echo PASS || echo FAIL ;;
+        *)  echo INDETERMINATE ;;
+    esac
+}
+
+#------------------------------------------------------------------------
+# 4. Main loop — per workload, run spec, build a row of cells
+#------------------------------------------------------------------------
+
+# Initialise report with a header.
+{
+    echo "# DBFS Integration — Phase 7 Benchmark Run"
+    echo
+    echo "- timestamp: \`${STAMP}\`"
+    echo "- runner: \`.sstack/dbfs-integration/bench_runner.shs\`"
+    echo "- mode: interpreter (\`bin/simple test --no-cache\`)"
+    echo "- repo: \`${REPO_ROOT}\`"
+    echo "- per-cell timeout: \`${BENCH_TIMEOUT_S}s\`"
+    [ "$QUICK" = 1 ] && echo "- quick: yes (random_overwrite + mmap_read skipped)"
+    echo
+    echo "Per-row pass criteria are ratios against a baseline column"
+    echo "(verify_plan.md §3.2). Cells with no measurement OR with"
+    echo "missing baseline are reported as \`INDETERMINATE\` and do"
+    echo "NOT count toward the FAIL exit code."
+    echo
+    echo "## Results matrix"
+    echo
+    echo "| Workload | Metric | DBFS-RawNvme | DBFS-NvfsArena | FAT32 | RamFS | NVFS-native | Baseline | Verdict |"
+    echo "|---|---|---|---|---|---|---|---|---|"
+} > "$REPORT"
+
+OVERALL_VERDICT=PASS    # PASS | FAIL  (INDETERMINATE leaves PASS)
+ANY_FAIL=0
+ROWS_TOTAL=0
+ROWS_MEASURED=0
+ROWS_INDETERMINATE=0
+
+# Iterate workloads. Use heredoc-style pipe to keep variables in our shell.
+echo "$WORKLOADS" | grep -v '^[[:space:]]*$' | while IFS=: read -r wkl base metric baseline op pct; do
+    ROWS_TOTAL=$((ROWS_TOTAL + 1))
+    info "workload: $wkl  (metric=$metric  baseline=$baseline  ${op} ${pct}%)"
+
+    spec="$(locate_bench_spec "$base")" || spec=""
+    if [ -z "$spec" ]; then
+        warn "bench spec missing: ${base}.spl  (checked ${BENCH_SPEC_ROOT_A}/ and ${BENCH_SPEC_ROOT_B}/)"
+        # Emit row with all N/A.
+        cells=""
+        for b in $BACKENDS; do cells="${cells} N/A |"; done
+        printf '| %s | %s |%s %s | %s |\n' \
+            "$wkl" "$metric" "$cells" "$baseline" "INDETERMINATE (spec missing)" \
+            >> "$REPORT"
+        ROWS_INDETERMINATE=$((ROWS_INDETERMINATE + 1))
+        printf '%s\n' "$ANY_FAIL" > "${RUN_DIR}/.any_fail"
+        printf '%s\n' "$ROWS_MEASURED" > "${RUN_DIR}/.rows_measured"
+        printf '%s\n' "$ROWS_INDETERMINATE" > "${RUN_DIR}/.rows_indeterminate"
+        printf '%s\n' "$ROWS_TOTAL" > "${RUN_DIR}/.rows_total"
+        continue
+    fi
+
+    info "  spec: $spec"
+    log="$(run_bench_spec "$spec" "$wkl")"
+    bench_rc=$?
+    if [ "$bench_rc" -ne 0 ]; then
+        warn "bench spec exited rc=$bench_rc — see ${log}"
+        if [ "$KEEP_GOING" = 0 ] && [ "$bench_rc" -ge 124 ]; then
+            # 124 = `timeout` killed it; per §3.4 falsification, this is
+            # a regression — but we still want the report.
+            ANY_FAIL=1
+        fi
+    fi
+
+    # Pull every backend's metric.
+    candidate_dbfs_raw=""
+    candidate_dbfs_nvfs=""
+    candidate_fat32=""
+    candidate_ramfs=""
+    candidate_nvfs=""
+    cells_md=""
+    for b in $BACKENDS; do
+        v="$(extract_metric "$log" "$b" "$metric")"
+        case "$b" in
+            DBFS-RawNvme)   candidate_dbfs_raw="$v" ;;
+            DBFS-NvfsArena) candidate_dbfs_nvfs="$v" ;;
+            FAT32)          candidate_fat32="$v" ;;
+            RamFS)          candidate_ramfs="$v" ;;
+            NVFS-native)    candidate_nvfs="$v" ;;
+        esac
+        if [ -z "$v" ]; then
+            cells_md="${cells_md} N/A |"
+        else
+            cells_md="${cells_md} ${v} |"
+        fi
+    done
+
+    # Pick baseline value.
+    case "$baseline" in
+        FAT32)          base_v="$candidate_fat32" ;;
+        RamFS)          base_v="$candidate_ramfs" ;;
+        NVFS-native)    base_v="$candidate_nvfs" ;;
+        *)              base_v="" ;;
+    esac
+
+    # Verdict applies to DBFS-RawNvme (primary candidate); we also note
+    # DBFS-NvfsArena delta but only RawNvme drives PASS/FAIL per §3.2.
+    v_raw="$(verdict_for_ratio "$candidate_dbfs_raw" "$base_v" "$op" "$pct")"
+    v_arena="$(verdict_for_ratio "$candidate_dbfs_nvfs" "$base_v" "$op" "$pct")"
+
+    # Per verify_plan §3.2 the pass criterion is written against the
+    # DBFS-RawNvme column only; DBFS-NvfsArena is reported as advisory
+    # context (its ratio violation falls under §3.4 falsification, not
+    # the row's PASS/FAIL gate). So only v_raw drives ANY_FAIL.
+    if [ "$v_raw" = FAIL ]; then
+        ANY_FAIL=1
+        verdict_label="FAIL (RawNvme=${v_raw}, NvfsArena=${v_arena} advisory)"
+    elif [ "$v_raw" = PASS ]; then
+        ROWS_MEASURED=$((ROWS_MEASURED + 1))
+        verdict_label="PASS (RawNvme=${v_raw}, NvfsArena=${v_arena} advisory)"
+    else
+        ROWS_INDETERMINATE=$((ROWS_INDETERMINATE + 1))
+        verdict_label="INDETERMINATE (RawNvme=${v_raw}, NvfsArena=${v_arena} advisory)"
+    fi
+    # §3.4 falsifier: DBFS-RawNvme vs DBFS-NvfsArena throughput drop >50%.
+    if [ -n "$candidate_dbfs_raw" ] && [ -n "$candidate_dbfs_nvfs" ] \
+       && [ "$candidate_dbfs_raw" -gt 0 ] 2>/dev/null; then
+        ratio_pct=$(( candidate_dbfs_nvfs * 100 / candidate_dbfs_raw ))
+        if [ "$ratio_pct" -lt 50 ]; then
+            warn "§3.4 falsifier: NvfsArena/${metric} = ${ratio_pct}% of RawNvme (>50% drop)"
+            verdict_label="${verdict_label} [§3.4-DELTA-WARN]"
+        fi
+    fi
+
+    info "  -> $verdict_label"
+    printf '| %s | %s |%s %s | %s |\n' \
+        "$wkl" "$metric" "$cells_md" "$baseline" "$verdict_label" \
+        >> "$REPORT"
+
+    # Persist counters across the subshell pipeline by writing to disk.
+    printf '%s\n' "$ANY_FAIL" > "${RUN_DIR}/.any_fail"
+    printf '%s\n' "$ROWS_MEASURED" > "${RUN_DIR}/.rows_measured"
+    printf '%s\n' "$ROWS_INDETERMINATE" > "${RUN_DIR}/.rows_indeterminate"
+    printf '%s\n' "$ROWS_TOTAL" > "${RUN_DIR}/.rows_total"
+done
+
+# Recover counters from the subshell pipeline.
+ANY_FAIL=$(cat "${RUN_DIR}/.any_fail" 2>/dev/null || echo 0)
+ROWS_MEASURED=$(cat "${RUN_DIR}/.rows_measured" 2>/dev/null || echo 0)
+ROWS_INDETERMINATE=$(cat "${RUN_DIR}/.rows_indeterminate" 2>/dev/null || echo 0)
+ROWS_TOTAL=$(cat "${RUN_DIR}/.rows_total" 2>/dev/null || echo 0)
+rm -f "${RUN_DIR}/.any_fail" "${RUN_DIR}/.rows_measured" \
+      "${RUN_DIR}/.rows_indeterminate" "${RUN_DIR}/.rows_total"
+
+#------------------------------------------------------------------------
+# 5. Postamble — verdict + auxiliary metrics block
+#------------------------------------------------------------------------
+
+if [ "$ANY_FAIL" -ne 0 ]; then
+    OVERALL_VERDICT=FAIL
+fi
+
+{
+    echo
+    echo "## Auxiliary metrics (DBFS-RawNvme column, where reported)"
+    echo
+    echo "Captured per spec via permissive grep over each bench log."
+    echo
+    echo "| Workload | bytes_written/logical_bytes (write-amp x100) | recovery_us | mount_us | rss_kib | cache_hit_ratio |"
+    echo "|---|---|---|---|---|---|"
+    for log in "$RUN_DIR"/*.log; do
+        [ -f "$log" ] || continue
+        wkl="$(basename "$log" .log)"
+        bw="$(extract_metric "$log" DBFS-RawNvme bytes_written)"
+        lb="$(extract_metric "$log" DBFS-RawNvme logical_bytes)"
+        rec="$(extract_metric "$log" DBFS-RawNvme recovery_time_us)"
+        mnt="$(extract_metric "$log" DBFS-RawNvme mount_time_us)"
+        rss="$(extract_metric "$log" DBFS-RawNvme rss_kib)"
+        chr="$(extract_metric "$log" DBFS-RawNvme cache_hit_ratio)"
+        if [ -n "$bw" ] && [ -n "$lb" ] && [ "$lb" != 0 ]; then
+            wa=$(( bw * 100 / lb ))
+            wa_str="${wa}"
+        else
+            wa_str="N/A"
+        fi
+        printf '| %s | %s | %s | %s | %s | %s |\n' \
+            "$wkl" "$wa_str" "${rec:-N/A}" "${mnt:-N/A}" "${rss:-N/A}" "${chr:-N/A}"
+    done
+    echo
+    echo "## Phase 7 verdict"
+    echo
+    echo "- rows total: ${ROWS_TOTAL}"
+    echo "- rows measured (PASS): ${ROWS_MEASURED}"
+    echo "- rows indeterminate: ${ROWS_INDETERMINATE}"
+    echo "- overall: **${OVERALL_VERDICT}**"
+    echo
+    if [ "$OVERALL_VERDICT" = PASS ] && [ "$ROWS_MEASURED" -eq 0 ]; then
+        echo "> NOTE: no rows produced measured numbers — every cell was"
+        echo "> INDETERMINATE. Phase 7 sign-off should treat this as"
+        echo "> 'benchmarks not yet runnable', not as a green light."
+    fi
+    echo
+    echo "## Per-cell logs"
+    echo
+    for log in "$RUN_DIR"/*.log; do
+        [ -f "$log" ] || continue
+        echo "- \`$log\`"
+    done
+} >> "$REPORT"
+
+info "report: $REPORT"
+info "verdict: $OVERALL_VERDICT (measured=${ROWS_MEASURED} indeterminate=${ROWS_INDETERMINATE} total=${ROWS_TOTAL})"
+
+if [ "$OVERALL_VERDICT" = FAIL ]; then
+    exit 1
+fi
+exit 0

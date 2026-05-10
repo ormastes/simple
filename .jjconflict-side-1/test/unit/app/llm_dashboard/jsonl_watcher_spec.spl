@@ -1,0 +1,70 @@
+use app.llm_dashboard.data.jsonl_watcher.{JsonlWatcher}
+use app.io.mod.{dir_create, dir_remove_all, file_write, file_append}
+
+extern fn rt_env_get(key: text) -> text
+extern fn rt_getpid() -> i64
+
+fn _tmp_root(name: text) -> text:
+    val base = rt_env_get("TMPDIR") ?? "/tmp"
+    return "{base}/simple_llm_dashboard_{name}_{rt_getpid()}"
+
+fn _prepare_tree(root: text, project: text):
+    dir_remove_all(root)
+    dir_create(root, true)
+    dir_create("{root}/{project}", true)
+
+fn _tool_use_line(path: text, timestamp: i64) -> text:
+    return "{\"type\":\"tool_use\",\"name\":\"Read\",\"input\":{\"file_path\":\"{path}\"},\"timestamp\":{timestamp}}"
+
+describe "JsonlWatcher":
+    it "tails newly discovered transcripts from EOF instead of replaying backlog":
+        val root = _tmp_root("tail")
+        val project = "proj_a"
+        val transcript = "{root}/{project}/session.jsonl"
+        _prepare_tree(root, project)
+
+        val existing = _tool_use_line("src/old_1.spl", 1) + "\n" + _tool_use_line("src/old_2.spl", 2) + "\n"
+        file_write(transcript, existing)
+
+        var watcher = JsonlWatcher.with_dir(root)
+        val initial = watcher.poll()
+        expect(initial.len()).to_equal(0)
+        expect(watcher.watched_count()).to_equal(1)
+
+        file_append(transcript, _tool_use_line("src/new_append.spl", 3) + "\n")
+        val appended = watcher.poll()
+        expect(appended.len()).to_equal(1)
+
+        dir_remove_all(root)
+
+    it "resets offset after transcript truncation so replacement content is read":
+        val root = _tmp_root("truncate")
+        val project = "proj_b"
+        val transcript = "{root}/{project}/session.jsonl"
+        _prepare_tree(root, project)
+
+        file_write(transcript, _tool_use_line("src/original.spl", 1) + "\n")
+        var watcher = JsonlWatcher.with_dir(root)
+        expect(watcher.poll().len()).to_equal(0)
+
+        file_append(transcript, _tool_use_line("src/appended.spl", 2) + "\n")
+        expect(watcher.poll().len()).to_equal(1)
+
+        file_write(transcript, _tool_use_line("x.spl", 3) + "\n")
+        val rotated = watcher.poll()
+        expect(rotated.len()).to_equal(1)
+
+        dir_remove_all(root)
+
+    it "ignores stray files in the watch root while scanning project directories":
+        val root = _tmp_root("root_file")
+        dir_remove_all(root)
+        dir_create(root, true)
+        file_write("{root}/README.txt", "not a transcript root\n")
+
+        var watcher = JsonlWatcher.with_dir(root)
+        val events = watcher.poll()
+        expect(events.len()).to_equal(0)
+        expect(watcher.watched_count()).to_equal(0)
+
+        dir_remove_all(root)

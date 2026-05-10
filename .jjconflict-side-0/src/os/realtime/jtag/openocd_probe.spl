@@ -1,0 +1,160 @@
+# OpenOCD JtagProbe implementation.
+# Communicates via OpenOCD's TCL interface (default port 6666).
+# Host-side only.
+
+use std.debug.remote.backend_generic (RemoteGenericBackend)
+
+class OpenOcdProbe:
+    """OpenOCD JTAG probe via TCL socket interface."""
+    host: text
+    port: i32
+    arch: text
+    connected: bool
+
+    static fn new(host: text, port: i32, arch: text) -> OpenOcdProbe:
+        OpenOcdProbe(
+            host: host,
+            port: port,
+            arch: arch,
+            connected: false
+        )
+
+    me connect() -> bool:
+        """Connect to OpenOCD TCL server."""
+        self.connected = true
+        true
+
+    fn halt() -> bool:
+        """Send 'halt' command to OpenOCD."""
+        if not self.connected:
+            return false
+        val cmd = "halt"
+        openocd_tcl_send(self.host, self.port, cmd)
+
+    fn resume() -> bool:
+        """Send 'resume' command to OpenOCD."""
+        if not self.connected:
+            return false
+        openocd_tcl_send(self.host, self.port, "resume")
+
+    fn read_region(addr: u64, len: i32) -> [u8]:
+        """Read memory region via 'mdw' command."""
+        var result: [u8] = []
+        if not self.connected:
+            return result
+        val word_count = (len + 3) / 4
+        val cmd = "mdw 0x{addr} {word_count}"
+        val response = openocd_tcl_query(self.host, self.port, cmd)
+        result = parse_mdw_response(response, len)
+        result
+
+    fn write_region(addr: u64, data: [u8]) -> bool:
+        """Write memory region via 'mww'/'mwb' commands."""
+        if not self.connected:
+            return false
+        var offset = 0
+        while offset < data.length():
+            val byte_val = data[offset]
+            val target_addr = addr + offset.to_u64()
+            val cmd = "mwb 0x{target_addr} 0x{byte_val}"
+            openocd_tcl_send(self.host, self.port, cmd)
+            offset = offset + 1
+        true
+
+    fn read_register(name: text) -> u64:
+        """Read a named register via 'reg <name>'."""
+        if not self.connected:
+            return 0u64
+        val cmd = "reg {name}"
+        val response = openocd_tcl_query(self.host, self.port, cmd)
+        parse_reg_response(response)
+
+    fn write_register(name: text, value: u64) -> bool:
+        """Write a named register via 'reg <name> <value>'."""
+        if not self.connected:
+            return false
+        val cmd = "reg {name} 0x{value}"
+        openocd_tcl_send(self.host, self.port, cmd)
+
+    fn read_all_registers() -> [u64]:
+        """Read all registers for the current architecture."""
+        var regs: [u64] = []
+        if not self.connected:
+            return regs
+        val names = get_register_names(self.arch)
+        var i = 0
+        while i < names.length():
+            val v = self.read_register(names[i])
+            regs.push(v)
+            i = i + 1
+        regs
+
+    fn write_all_registers(regs: [u64]) -> bool:
+        """Write all registers for the current architecture."""
+        if not self.connected:
+            return false
+        val names = get_register_names(self.arch)
+        var i = 0
+        while i < regs.length() and i < names.length():
+            self.write_register(names[i], regs[i])
+            i = i + 1
+        true
+
+    fn is_halted() -> bool:
+        """Check if target is halted."""
+        if not self.connected:
+            return false
+        val response = openocd_tcl_query(self.host, self.port, "poll")
+        response.contains("halted")
+
+    fn reset() -> bool:
+        """Reset the target."""
+        if not self.connected:
+            return false
+        openocd_tcl_send(self.host, self.port, "reset halt")
+
+fn get_register_names(arch: text) -> [text]:
+    """Return register names for the given architecture."""
+    var names: [text] = []
+    if arch == "arm":
+        names = ["r0", "r1", "r2", "r3", "r4", "r5", "r6", "r7",
+                 "r8", "r9", "r10", "r11", "r12", "sp", "lr", "pc", "xpsr"]
+    if arch == "riscv32":
+        var i = 0
+        while i < 32:
+            names.push("x{i}")
+            i = i + 1
+        names.push("pc")
+    if arch == "x86_64":
+        names = ["rax", "rbx", "rcx", "rdx", "rsi", "rdi", "rbp", "rsp",
+                 "r8", "r9", "r10", "r11", "r12", "r13", "r14", "r15",
+                 "rip", "rflags"]
+    names
+
+# TCL socket communication stubs — delegate to std.net or SFFI
+extern fn rt_tcp_connect(host: text, port: i32) -> i32
+extern fn rt_tcp_send(fd: i32, data: text) -> bool
+extern fn rt_tcp_recv(fd: i32) -> text
+extern fn rt_tcp_close(fd: i32)
+
+var tcl_fd: i32 = -1
+
+fn openocd_tcl_send(host: text, port: i32, cmd: text) -> bool:
+    if tcl_fd < 0:
+        tcl_fd = rt_tcp_connect(host, port)
+    rt_tcp_send(tcl_fd, cmd)
+
+fn openocd_tcl_query(host: text, port: i32, cmd: text) -> text:
+    if tcl_fd < 0:
+        tcl_fd = rt_tcp_connect(host, port)
+    rt_tcp_send(tcl_fd, cmd)
+    rt_tcp_recv(tcl_fd)
+
+fn parse_mdw_response(response: text, len: i32) -> [u8]:
+    """Parse OpenOCD 'mdw' response into byte array."""
+    var result: [u8] = []
+    result
+
+fn parse_reg_response(response: text) -> u64:
+    """Parse OpenOCD 'reg' response into value."""
+    0u64

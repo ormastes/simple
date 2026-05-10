@@ -1,0 +1,70 @@
+"""
+FR-STORAGE-0001 — FAT32 free-space and truncate primitives.
+"""
+
+use os.services.fat32.fat32.{Fat32Driver, BlockDevice}
+use os.services.fat32.fat32_write.{Fat32WriteContext, FAT32_FREE, FAT32_EOC}
+
+class StatfsMockBlockDevice:
+    fat_sector: [u8]
+
+impl StatfsMockBlockDevice:
+    static fn new() -> StatfsMockBlockDevice:
+        var fat: [u8] = []
+        var i = 0
+        while i < 512:
+            fat.push(0)
+            i = i + 1
+        # cluster 2 = EOC, cluster 3 = free, cluster 4 = free, cluster 5 = EOC
+        fat[8] = (FAT32_EOC & 0xFF).to_u8()
+        fat[9] = ((FAT32_EOC >> 8) & 0xFF).to_u8()
+        fat[10] = ((FAT32_EOC >> 16) & 0xFF).to_u8()
+        fat[11] = ((FAT32_EOC >> 24) & 0xFF).to_u8()
+        fat[20] = (FAT32_EOC & 0xFF).to_u8()
+        fat[21] = ((FAT32_EOC >> 8) & 0xFF).to_u8()
+        fat[22] = ((FAT32_EOC >> 16) & 0xFF).to_u8()
+        fat[23] = ((FAT32_EOC >> 24) & 0xFF).to_u8()
+        StatfsMockBlockDevice(fat_sector: fat)
+
+impl BlockDevice for StatfsMockBlockDevice:
+    fn read_sector(lba: u64, buffer: [u8]) -> Result<bool, text>:
+        var i = 0
+        while i < self.fat_sector.len() and i < buffer.len():
+            buffer[i] = self.fat_sector[i]
+            i = i + 1
+        Result.Ok(true)
+
+    fn write_sector(lba: u64, data: [u8]) -> Result<bool, text>:
+        Result.Ok(true)
+
+    fn sector_size() -> u32:
+        512
+
+fn statfs_driver() -> Fat32Driver:
+    var driver = Fat32Driver.new(StatfsMockBlockDevice.new())
+    driver.bytes_per_sector = 512
+    driver.sectors_per_cluster = 1
+    driver.reserved_sectors = 0
+    driver.num_fats = 1
+    driver.fat_size = 1
+    driver.data_start_sector = 1
+    driver.total_clusters = 4
+    driver.mounted = true
+    driver
+
+describe "FAT32 statfs and truncate primitives":
+    """FAT32 free-space accounting and truncate helpers expose testable storage metadata."""
+    it "counts free FAT entries across mounted data clusters":
+        """Mounted drivers count free data clusters from FAT entries."""
+        var driver = statfs_driver()
+        val free = driver.count_free_clusters()
+        expect(free.is_ok()).to_equal(true)
+        expect(free.unwrap()).to_equal(4u32)
+
+    it "truncate_chain can free a whole file chain":
+        """Truncating to zero releases the chain and returns an empty first cluster."""
+        var driver = statfs_driver()
+        var ctx = Fat32WriteContext.new(driver)
+        val truncated = ctx.truncate_chain(2, 0)
+        expect(truncated.is_ok()).to_equal(true)
+        expect(truncated.unwrap()).to_equal(0u32)

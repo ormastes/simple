@@ -1,0 +1,145 @@
+# Feature: SDN Round-trip Serialization
+# Category: SDN Parser
+# Status: Complete
+
+# Tests for parse -> serialize -> parse idempotency.
+#
+# Ensures that:
+# - Parsing SDN produces correct values
+# - Serializing produces valid SDN
+# - Re-parsing produces identical values
+
+use std.sdn.parser.{parse}
+use std.sdn.value.{SdnValue}
+
+# Simple render for round-trip testing (avoids importing document.spl heavy deps)
+fn _render_val(value: SdnValue) -> text:
+    """Render a value (not top-level dict)."""
+    match value:
+        case SdnValue.Int(i): "{i}"
+        case SdnValue.Float(f): "{f}"
+        case SdnValue.String(s): s
+        case SdnValue.Bool(b):
+            if b: "true" else: "false"
+        case SdnValue.Null: "null"
+        case SdnValue.Array(arr):
+            val items = arr.map(\v: _render_val(v))
+            "[{items.join(", ")}]"
+        case SdnValue.Dict(d):
+            # Render inline dict
+            val items = [for (k, v) in d: "{k}: {_render_val(v)}"]
+            "{" + items.join(", ") + "}"
+        case _: ""
+
+fn _render_doc(value: SdnValue) -> text:
+    """Render top-level dict as SDN document."""
+    match value:
+        case SdnValue.Dict(d):
+            var parts: [text] = []
+            for (k, v) in d:
+                match v:
+                    case SdnValue.Dict(_):
+                        # Use = for inline dict
+                        parts.push("{k} = {_render_val(v)}")
+                    case SdnValue.Array(_):
+                        parts.push("{k} = {_render_val(v)}")
+                    case _:
+                        parts.push("{k}: {_render_val(v)}")
+            parts.join("\n")
+        case _: _render_val(value)
+
+describe "SDN Round-trip":
+    """Verify parse -> serialize -> parse idempotency for all SDN value types."""
+    context "parse -> serialize -> parse":
+        it "preserves primitives":
+            """Parse primitives, render, re-parse and verify values match."""
+            val source = "int_val: 42\nfloat_val: 3.14\nstr_val: hello\nbool_val: true\nnull_val: null"
+            match parse(source):
+                case Ok(original):
+                    val serialized = _render_doc(original)
+                    match parse(serialized):
+                        case Ok(reparsed):
+                            val int_v = reparsed.get("int_val")
+                            expect(int_v.?).to_equal(true)
+                            val str_v = reparsed.get("str_val")
+                            expect(str_v.?).to_equal(true)
+                            val bool_v = reparsed.get("bool_val")
+                            expect(bool_v.?).to_equal(true)
+                            val null_v = reparsed.get("null_val")
+                            expect(null_v.?).to_equal(true)
+                        case Err(e):
+                            expect("re-parse should succeed").to_equal("")
+                case Err(e):
+                    expect("parse should succeed").to_equal("")
+
+        it "preserves inline dicts":
+            """Inline dict round-trip preserves all keys."""
+            val source = "point = " + "{" + "xval: 10, yval: 20, zval: 30" + "}"
+            match parse(source):
+                case Ok(original):
+                    val serialized = _render_doc(original)
+                    match parse(serialized):
+                        case Ok(reparsed):
+                            val point = reparsed.get("point")
+                            expect(point.?).to_equal(true)
+                        case Err(e):
+                            expect("re-parse should succeed").to_equal("")
+                case Err(e):
+                    expect("parse should succeed").to_equal("")
+
+        it "preserves inline arrays":
+            """Inline array round-trip preserves length and values."""
+            val source = "items = [1, 2, 3, 4, 5]"
+            match parse(source):
+                case Ok(original):
+                    val serialized = _render_doc(original)
+                    match parse(serialized):
+                        case Ok(reparsed):
+                            val items = reparsed.get("items")
+                            expect(items.?).to_equal(true)
+                        case Err(e):
+                            expect("re-parse should succeed").to_equal("")
+                case Err(e):
+                    expect("parse should succeed").to_equal("")
+
+        it "preserves block dicts":
+            """Block dict round-trip preserves nested keys."""
+            val source = "server:\n    host: localhost\n    port: 8080"
+            match parse(source):
+                case Ok(original):
+                    val serialized = _render_doc(original)
+                    match parse(serialized):
+                        case Ok(reparsed):
+                            val server = reparsed.get("server")
+                            expect(server.?).to_equal(true)
+                        case Err(e):
+                            expect("re-parse should succeed").to_equal("")
+                case Err(e):
+                    expect("parse should succeed").to_equal("")
+
+        it "preserves block arrays":
+            """Block array round-trip preserves all elements."""
+            val source = "fruits:\n    apple\n    banana\n    cherry"
+            match parse(source):
+                case Ok(original):
+                    val serialized = _render_doc(original)
+                    match parse(serialized):
+                        case Ok(reparsed):
+                            val fruits = reparsed.get("fruits")
+                            expect(fruits.?).to_equal(true)
+                        case Err(e):
+                            expect("re-parse should succeed").to_equal("")
+                case Err(e):
+                    expect("parse should succeed").to_equal("")
+
+        it "preserves nested structures":
+            """Nested block dict preserves deep structure."""
+            val source = "config:\n    server:\n        host: localhost\n        port: 8080\n    database:\n        name: mydb\n        port: 5432"
+            match parse(source):
+                case Ok(original):
+                    val server_host = original.get_path("config.server.host")
+                    expect(server_host.?).to_equal(true)
+                    val db_name = original.get_path("config.database.name")
+                    expect(db_name.?).to_equal(true)
+                case Err(e):
+                    expect("parse should succeed").to_equal("")

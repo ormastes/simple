@@ -1,0 +1,125 @@
+# FPM Backend
+#
+# Uses FPM (Effing Package Management) to generate:
+#   - .deb (Debian/Ubuntu)
+#   - .rpm (Fedora/RHEL)
+#   - .osxpkg / .pkg (macOS)
+#   - .freebsd / .txz (FreeBSD)
+#
+# FPM takes a directory of staged files and produces native packages.
+# Install: gem install fpm
+
+use std.io_runtime (process_run, file_exists, dir_create)
+
+use lib.nogc_sync_mut.package.installer.types (InstallerConfig, InstallerResult, InstallerPlatform)
+use lib.nogc_sync_mut.package.installer.staging (create_staging_dir, clean_staging_dir)
+
+
+fn build_with_fpm(config: InstallerConfig, platform: InstallerPlatform) -> InstallerResult:
+    """Build a package using FPM for the given platform."""
+
+    # Verify FPM type is valid for this platform
+    val fpm_type = platform.fpm_type()
+    if fpm_type.? == false:
+        return InstallerResult(
+            platform: platform,
+            success: false,
+            output_path: "",
+            message: "Platform {platform.to_string()} is not supported by FPM backend"
+        )
+
+    val target_type = match fpm_type:
+        Some(value): value
+        nil: ""
+
+    # Create staging directory
+    val staging_result = create_staging_dir(config, platform)
+    if staging_result.is_err():
+        return InstallerResult(
+            platform: platform,
+            success: false,
+            output_path: "",
+            message: staging_result.err()
+        )
+
+    val staging_path = staging_result.ok()
+
+    # Ensure output directory exists
+    dir_create(config.output_dir, recursive: true)
+
+    # Build FPM command arguments
+    var args = [
+        "-s", "dir",
+        "-t", target_type,
+        "--name", config.package_name,
+        "--version", config.version,
+        "--description", config.description,
+        "--maintainer", config.maintainer,
+        "--url", config.homepage,
+        "--license", config.license,
+        "--architecture", config.architecture,
+        "--package", config.output_dir,
+        "-C", staging_path
+    ]
+
+    # Add platform-specific options
+    match platform:
+        case InstallerPlatform.Deb:
+            args = args + ["--depends", "libc6 >= 2.31"]
+            args = args + ["--category", "devel"]
+            args = args + ["--deb-priority", "optional"]
+        case InstallerPlatform.Rpm:
+            args = args + ["--depends", "glibc >= 2.31"]
+            args = args + ["--category", "Development/Languages"]
+        case InstallerPlatform.MacosPkg:
+            pass_do_nothing
+        case InstallerPlatform.FreeBsd:
+            pass_do_nothing
+        case _:
+            pass_do_nothing
+
+    # Add the source directory (everything in staging)
+    args = args + ["."]
+
+    # Run FPM
+    val (stdout, stderr, code) = process_run("fpm", args)
+
+    # Clean up staging
+    clean_staging_dir(config, platform)
+
+    if code != 0:
+        return InstallerResult(
+            platform: platform,
+            success: false,
+            output_path: "",
+            message: "FPM failed (exit {code}): {stderr}"
+        )
+
+    # Determine output filename
+    val output_file = find_output_file(config, platform)
+
+    InstallerResult(
+        platform: platform,
+        success: true,
+        output_path: output_file,
+        message: "Built {platform.description()} successfully"
+    )
+
+
+fn find_output_file(config: InstallerConfig, platform: InstallerPlatform) -> text:
+    """Determine the output filename FPM generated."""
+    val ext = platform.file_extension()
+    val base = "{config.output_dir}/{config.package_name}-{config.version}"
+
+    # FPM naming conventions vary by type
+    match platform:
+        case InstallerPlatform.Deb:
+            "{config.output_dir}/{config.package_name}_{config.version}_{config.architecture}.deb"
+        case InstallerPlatform.Rpm:
+            "{config.output_dir}/{config.package_name}-{config.version}-1.{config.architecture}.rpm"
+        case InstallerPlatform.MacosPkg:
+            "{config.output_dir}/{config.package_name}-{config.version}.pkg"
+        case InstallerPlatform.FreeBsd:
+            "{config.output_dir}/{config.package_name}-{config.version}.txz"
+        case _:
+            "{base}{ext}"

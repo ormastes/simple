@@ -1,0 +1,499 @@
+# HPACK Huffman codec (RFC 7541 Appendix B + §5.2).
+#
+# Encodes/decodes byte payloads using the RFC 7541 static Huffman code.
+# The code is fixed (not adaptive): every implementation uses the same
+# 257-symbol table (symbols 0x00–0xFF plus the EOS marker at index 256).
+#
+# Encoding (§5.2):
+#   Each byte of input is replaced by its Huffman bit-pattern from the
+#   table.  The resulting bit string is padded to the next byte boundary
+#   using the most-significant bits of the EOS code (all 1s).
+#
+# Decoding (§5.2):
+#   Read bits MSB-first, walking a decision tree until a leaf is reached.
+#   A complete EOS code (30 bits, all 1s) as a symbol is an error.
+#   Padding exceeding 7 bits is an error.
+#   Padding that is not a prefix of EOS (i.e. not all 1s) is an error.
+#
+# This module is pure: no IO, no FFI, no rt_* externs.
+
+# One entry in the static Huffman table.
+class HuffEntry:
+    code: i64   # bit pattern (MSB is the first bit to emit)
+    bits: i64   # number of valid bits in `code`
+
+# RFC 7541 Appendix B — full 257-entry static Huffman table.
+# Index 0..255 = symbol value; index 256 = EOS.
+fn huffman_table() -> [HuffEntry]:
+    [
+        HuffEntry(code: 0x1ff8, bits: 13),       # 0x00
+        HuffEntry(code: 0x7fffd8, bits: 23),     # 0x01
+        HuffEntry(code: 0xfffffe2, bits: 28),    # 0x02
+        HuffEntry(code: 0xfffffe3, bits: 28),    # 0x03
+        HuffEntry(code: 0xfffffe4, bits: 28),    # 0x04
+        HuffEntry(code: 0xfffffe5, bits: 28),    # 0x05
+        HuffEntry(code: 0xfffffe6, bits: 28),    # 0x06
+        HuffEntry(code: 0xfffffe7, bits: 28),    # 0x07
+        HuffEntry(code: 0xfffffe8, bits: 28),    # 0x08
+        HuffEntry(code: 0xffffea, bits: 24),     # 0x09
+        HuffEntry(code: 0x3ffffffc, bits: 30),   # 0x0a
+        HuffEntry(code: 0xfffffe9, bits: 28),    # 0x0b
+        HuffEntry(code: 0xfffffea, bits: 28),    # 0x0c
+        HuffEntry(code: 0x3ffffffd, bits: 30),   # 0x0d
+        HuffEntry(code: 0xfffffeb, bits: 28),    # 0x0e
+        HuffEntry(code: 0xfffffec, bits: 28),    # 0x0f
+        HuffEntry(code: 0xfffffed, bits: 28),    # 0x10
+        HuffEntry(code: 0xfffffee, bits: 28),    # 0x11
+        HuffEntry(code: 0xfffffef, bits: 28),    # 0x12
+        HuffEntry(code: 0xffffff0, bits: 28),    # 0x13
+        HuffEntry(code: 0xffffff1, bits: 28),    # 0x14
+        HuffEntry(code: 0xffffff2, bits: 28),    # 0x15
+        HuffEntry(code: 0x3ffffffe, bits: 30),   # 0x16
+        HuffEntry(code: 0xffffff3, bits: 28),    # 0x17
+        HuffEntry(code: 0xffffff4, bits: 28),    # 0x18
+        HuffEntry(code: 0xffffff5, bits: 28),    # 0x19
+        HuffEntry(code: 0xffffff6, bits: 28),    # 0x1a
+        HuffEntry(code: 0xffffff7, bits: 28),    # 0x1b
+        HuffEntry(code: 0xffffff8, bits: 28),    # 0x1c
+        HuffEntry(code: 0xffffff9, bits: 28),    # 0x1d
+        HuffEntry(code: 0xffffffa, bits: 28),    # 0x1e
+        HuffEntry(code: 0xffffffb, bits: 28),    # 0x1f
+        HuffEntry(code: 0x14, bits: 6),          # 0x20 ' '
+        HuffEntry(code: 0x3f8, bits: 10),        # 0x21 '!'
+        HuffEntry(code: 0x3f9, bits: 10),        # 0x22 '"'
+        HuffEntry(code: 0xffa, bits: 12),        # 0x23 '#'
+        HuffEntry(code: 0x1ff9, bits: 13),       # 0x24 '$'
+        HuffEntry(code: 0x15, bits: 6),          # 0x25 '%'
+        HuffEntry(code: 0xf8, bits: 8),          # 0x26 '&'
+        HuffEntry(code: 0x7fa, bits: 11),        # 0x27 '\''
+        HuffEntry(code: 0x3fa, bits: 10),        # 0x28 '('
+        HuffEntry(code: 0x3fb, bits: 10),        # 0x29 ')'
+        HuffEntry(code: 0xf9, bits: 8),          # 0x2a '*'
+        HuffEntry(code: 0x7fb, bits: 11),        # 0x2b '+'
+        HuffEntry(code: 0xfa, bits: 8),          # 0x2c ','
+        HuffEntry(code: 0x16, bits: 6),          # 0x2d '-'
+        HuffEntry(code: 0x17, bits: 6),          # 0x2e '.'
+        HuffEntry(code: 0x18, bits: 6),          # 0x2f '/'
+        HuffEntry(code: 0x0, bits: 5),           # 0x30 '0'
+        HuffEntry(code: 0x1, bits: 5),           # 0x31 '1'
+        HuffEntry(code: 0x2, bits: 5),           # 0x32 '2'
+        HuffEntry(code: 0x19, bits: 6),          # 0x33 '3'
+        HuffEntry(code: 0x1a, bits: 6),          # 0x34 '4'
+        HuffEntry(code: 0x1b, bits: 6),          # 0x35 '5'
+        HuffEntry(code: 0x1c, bits: 6),          # 0x36 '6'
+        HuffEntry(code: 0x1d, bits: 6),          # 0x37 '7'
+        HuffEntry(code: 0x1e, bits: 6),          # 0x38 '8'
+        HuffEntry(code: 0x1f, bits: 6),          # 0x39 '9'
+        HuffEntry(code: 0x5c, bits: 7),          # 0x3a ':'
+        HuffEntry(code: 0xfb, bits: 8),          # 0x3b ';'
+        HuffEntry(code: 0x7ffc, bits: 15),       # 0x3c '<'
+        HuffEntry(code: 0x20, bits: 6),          # 0x3d '='
+        HuffEntry(code: 0xffb, bits: 12),        # 0x3e '>'
+        HuffEntry(code: 0x3fc, bits: 10),        # 0x3f '?'
+        HuffEntry(code: 0x1ffa, bits: 13),       # 0x40 '@'
+        HuffEntry(code: 0x21, bits: 6),          # 0x41 'A'
+        HuffEntry(code: 0x5d, bits: 7),          # 0x42 'B'
+        HuffEntry(code: 0x5e, bits: 7),          # 0x43 'C'
+        HuffEntry(code: 0x5f, bits: 7),          # 0x44 'D'
+        HuffEntry(code: 0x60, bits: 7),          # 0x45 'E'
+        HuffEntry(code: 0x61, bits: 7),          # 0x46 'F'
+        HuffEntry(code: 0x62, bits: 7),          # 0x47 'G'
+        HuffEntry(code: 0x63, bits: 7),          # 0x48 'H'
+        HuffEntry(code: 0x64, bits: 7),          # 0x49 'I'
+        HuffEntry(code: 0x65, bits: 7),          # 0x4a 'J'
+        HuffEntry(code: 0x66, bits: 7),          # 0x4b 'K'
+        HuffEntry(code: 0x67, bits: 7),          # 0x4c 'L'
+        HuffEntry(code: 0x68, bits: 7),          # 0x4d 'M'
+        HuffEntry(code: 0x69, bits: 7),          # 0x4e 'N'
+        HuffEntry(code: 0x6a, bits: 7),          # 0x4f 'O'
+        HuffEntry(code: 0x6b, bits: 7),          # 0x50 'P'
+        HuffEntry(code: 0x6c, bits: 7),          # 0x51 'Q'
+        HuffEntry(code: 0x6d, bits: 7),          # 0x52 'R'
+        HuffEntry(code: 0x6e, bits: 7),          # 0x53 'S'
+        HuffEntry(code: 0x6f, bits: 7),          # 0x54 'T'
+        HuffEntry(code: 0x70, bits: 7),          # 0x55 'U'
+        HuffEntry(code: 0x71, bits: 7),          # 0x56 'V'
+        HuffEntry(code: 0x72, bits: 7),          # 0x57 'W'
+        HuffEntry(code: 0xfc, bits: 8),          # 0x58 'X'
+        HuffEntry(code: 0x73, bits: 7),          # 0x59 'Y'
+        HuffEntry(code: 0xfd, bits: 8),          # 0x5a 'Z'
+        HuffEntry(code: 0x1ffb, bits: 13),       # 0x5b '['
+        HuffEntry(code: 0x7fff0, bits: 19),      # 0x5c '\'
+        HuffEntry(code: 0x1ffc, bits: 13),       # 0x5d ']'
+        HuffEntry(code: 0x3ffc, bits: 14),       # 0x5e '^'
+        HuffEntry(code: 0x22, bits: 6),          # 0x5f '_'
+        HuffEntry(code: 0x7ffd, bits: 15),       # 0x60 '`'
+        HuffEntry(code: 0x3, bits: 5),           # 0x61 'a'
+        HuffEntry(code: 0x23, bits: 6),          # 0x62 'b'
+        HuffEntry(code: 0x4, bits: 5),           # 0x63 'c'
+        HuffEntry(code: 0x24, bits: 6),          # 0x64 'd'
+        HuffEntry(code: 0x5, bits: 5),           # 0x65 'e'
+        HuffEntry(code: 0x25, bits: 6),          # 0x66 'f'
+        HuffEntry(code: 0x26, bits: 6),          # 0x67 'g'
+        HuffEntry(code: 0x27, bits: 6),          # 0x68 'h'
+        HuffEntry(code: 0x6, bits: 5),           # 0x69 'i'
+        HuffEntry(code: 0x74, bits: 7),          # 0x6a 'j'
+        HuffEntry(code: 0x75, bits: 7),          # 0x6b 'k'
+        HuffEntry(code: 0x28, bits: 6),          # 0x6c 'l'
+        HuffEntry(code: 0x29, bits: 6),          # 0x6d 'm'
+        HuffEntry(code: 0x2a, bits: 6),          # 0x6e 'n'
+        HuffEntry(code: 0x7, bits: 5),           # 0x6f 'o'
+        HuffEntry(code: 0x2b, bits: 6),          # 0x70 'p'
+        HuffEntry(code: 0x76, bits: 7),          # 0x71 'q'
+        HuffEntry(code: 0x2c, bits: 6),          # 0x72 'r'
+        HuffEntry(code: 0x8, bits: 5),           # 0x73 's'
+        HuffEntry(code: 0x9, bits: 5),           # 0x74 't'
+        HuffEntry(code: 0x2d, bits: 6),          # 0x75 'u'
+        HuffEntry(code: 0x77, bits: 7),          # 0x76 'v'
+        HuffEntry(code: 0x78, bits: 7),          # 0x77 'w'
+        HuffEntry(code: 0x79, bits: 7),          # 0x78 'x'
+        HuffEntry(code: 0x7a, bits: 7),          # 0x79 'y'
+        HuffEntry(code: 0x7b, bits: 7),          # 0x7a 'z'
+        HuffEntry(code: 0x7ffe, bits: 15),       # 0x7b '{'
+        HuffEntry(code: 0x7fc, bits: 11),        # 0x7c '|'
+        HuffEntry(code: 0x3ffd, bits: 14),       # 0x7d '}'
+        HuffEntry(code: 0x1ffd, bits: 13),       # 0x7e '~'
+        HuffEntry(code: 0xffffffc, bits: 28),    # 0x7f DEL
+        HuffEntry(code: 0xfffe6, bits: 20),      # 0x80
+        HuffEntry(code: 0x3fffd2, bits: 22),     # 0x81
+        HuffEntry(code: 0xfffe7, bits: 20),      # 0x82
+        HuffEntry(code: 0xfffe8, bits: 20),      # 0x83
+        HuffEntry(code: 0x3fffd3, bits: 22),     # 0x84
+        HuffEntry(code: 0x3fffd4, bits: 22),     # 0x85
+        HuffEntry(code: 0x3fffd5, bits: 22),     # 0x86
+        HuffEntry(code: 0x7fffd9, bits: 23),     # 0x87
+        HuffEntry(code: 0x3fffd6, bits: 22),     # 0x88
+        HuffEntry(code: 0x7fffda, bits: 23),     # 0x89
+        HuffEntry(code: 0x7fffdb, bits: 23),     # 0x8a
+        HuffEntry(code: 0x7fffdc, bits: 23),     # 0x8b
+        HuffEntry(code: 0x7fffdd, bits: 23),     # 0x8c
+        HuffEntry(code: 0x7fffde, bits: 23),     # 0x8d
+        HuffEntry(code: 0xffffeb, bits: 24),     # 0x8e
+        HuffEntry(code: 0x7fffdf, bits: 23),     # 0x8f
+        HuffEntry(code: 0xffffec, bits: 24),     # 0x90
+        HuffEntry(code: 0xffffed, bits: 24),     # 0x91
+        HuffEntry(code: 0x3fffd7, bits: 22),     # 0x92
+        HuffEntry(code: 0x7fffe0, bits: 23),     # 0x93
+        HuffEntry(code: 0xffffee, bits: 24),     # 0x94
+        HuffEntry(code: 0x7fffe1, bits: 23),     # 0x95
+        HuffEntry(code: 0x7fffe2, bits: 23),     # 0x96
+        HuffEntry(code: 0x7fffe3, bits: 23),     # 0x97
+        HuffEntry(code: 0x7fffe4, bits: 23),     # 0x98
+        HuffEntry(code: 0x1fffdc, bits: 21),     # 0x99
+        HuffEntry(code: 0x3fffd8, bits: 22),     # 0x9a
+        HuffEntry(code: 0x7fffe5, bits: 23),     # 0x9b
+        HuffEntry(code: 0x3fffd9, bits: 22),     # 0x9c
+        HuffEntry(code: 0x7fffe6, bits: 23),     # 0x9d
+        HuffEntry(code: 0x7fffe7, bits: 23),     # 0x9e
+        HuffEntry(code: 0xffffef, bits: 24),     # 0x9f
+        HuffEntry(code: 0x3fffda, bits: 22),     # 0xa0
+        HuffEntry(code: 0x1fffdd, bits: 21),     # 0xa1
+        HuffEntry(code: 0xfffe9, bits: 20),      # 0xa2
+        HuffEntry(code: 0x3fffdb, bits: 22),     # 0xa3
+        HuffEntry(code: 0x3fffdc, bits: 22),     # 0xa4
+        HuffEntry(code: 0x7fffe8, bits: 23),     # 0xa5
+        HuffEntry(code: 0x7fffe9, bits: 23),     # 0xa6
+        HuffEntry(code: 0x1fffde, bits: 21),     # 0xa7
+        HuffEntry(code: 0x7fffea, bits: 23),     # 0xa8
+        HuffEntry(code: 0x3fffdd, bits: 22),     # 0xa9
+        HuffEntry(code: 0x3fffde, bits: 22),     # 0xaa
+        HuffEntry(code: 0xfffff0, bits: 24),     # 0xab
+        HuffEntry(code: 0x1fffdf, bits: 21),     # 0xac
+        HuffEntry(code: 0x3fffdf, bits: 22),     # 0xad
+        HuffEntry(code: 0x7fffeb, bits: 23),     # 0xae
+        HuffEntry(code: 0x7fffec, bits: 23),     # 0xaf
+        HuffEntry(code: 0x1fffe0, bits: 21),     # 0xb0
+        HuffEntry(code: 0x1fffe1, bits: 21),     # 0xb1
+        HuffEntry(code: 0x3fffe0, bits: 22),     # 0xb2
+        HuffEntry(code: 0x1fffe2, bits: 21),     # 0xb3
+        HuffEntry(code: 0x7fffed, bits: 23),     # 0xb4
+        HuffEntry(code: 0x3fffe1, bits: 22),     # 0xb5
+        HuffEntry(code: 0x7fffee, bits: 23),     # 0xb6
+        HuffEntry(code: 0x7fffef, bits: 23),     # 0xb7
+        HuffEntry(code: 0xfffea, bits: 20),      # 0xb8
+        HuffEntry(code: 0x3fffe2, bits: 22),     # 0xb9
+        HuffEntry(code: 0x3fffe3, bits: 22),     # 0xba
+        HuffEntry(code: 0x3fffe4, bits: 22),     # 0xbb
+        HuffEntry(code: 0x7ffff0, bits: 23),     # 0xbc
+        HuffEntry(code: 0x3fffe5, bits: 22),     # 0xbd
+        HuffEntry(code: 0x3fffe6, bits: 22),     # 0xbe
+        HuffEntry(code: 0x7ffff1, bits: 23),     # 0xbf
+        HuffEntry(code: 0x3ffffe0, bits: 26),    # 0xc0
+        HuffEntry(code: 0x3ffffe1, bits: 26),    # 0xc1
+        HuffEntry(code: 0xfffeb, bits: 20),      # 0xc2
+        HuffEntry(code: 0x7fff1, bits: 19),      # 0xc3
+        HuffEntry(code: 0x3fffe7, bits: 22),     # 0xc4
+        HuffEntry(code: 0x7ffff2, bits: 23),     # 0xc5
+        HuffEntry(code: 0x3fffe8, bits: 22),     # 0xc6
+        HuffEntry(code: 0x1ffffec, bits: 25),    # 0xc7
+        HuffEntry(code: 0x3ffffe2, bits: 26),    # 0xc8
+        HuffEntry(code: 0x3ffffe3, bits: 26),    # 0xc9
+        HuffEntry(code: 0x3ffffe4, bits: 26),    # 0xca
+        HuffEntry(code: 0x7ffffde, bits: 27),    # 0xcb
+        HuffEntry(code: 0x7ffffdf, bits: 27),    # 0xcc
+        HuffEntry(code: 0x3ffffe5, bits: 26),    # 0xcd
+        HuffEntry(code: 0xfffff1, bits: 24),     # 0xce
+        HuffEntry(code: 0x1ffffed, bits: 25),    # 0xcf
+        HuffEntry(code: 0x7fff2, bits: 19),      # 0xd0
+        HuffEntry(code: 0x1fffe3, bits: 21),     # 0xd1
+        HuffEntry(code: 0x3ffffe6, bits: 26),    # 0xd2
+        HuffEntry(code: 0x7ffffe0, bits: 27),    # 0xd3
+        HuffEntry(code: 0x7ffffe1, bits: 27),    # 0xd4
+        HuffEntry(code: 0x3ffffe7, bits: 26),    # 0xd5
+        HuffEntry(code: 0x7ffffe2, bits: 27),    # 0xd6
+        HuffEntry(code: 0xfffff2, bits: 24),     # 0xd7
+        HuffEntry(code: 0x1fffe4, bits: 21),     # 0xd8
+        HuffEntry(code: 0x1fffe5, bits: 21),     # 0xd9
+        HuffEntry(code: 0x3ffffe8, bits: 26),    # 0xda
+        HuffEntry(code: 0x3ffffe9, bits: 26),    # 0xdb
+        HuffEntry(code: 0xffffffd, bits: 28),    # 0xdc
+        HuffEntry(code: 0x7ffffe3, bits: 27),    # 0xdd
+        HuffEntry(code: 0x7ffffe4, bits: 27),    # 0xde
+        HuffEntry(code: 0x7ffffe5, bits: 27),    # 0xdf
+        HuffEntry(code: 0xfffec, bits: 20),      # 0xe0
+        HuffEntry(code: 0xfffff3, bits: 24),     # 0xe1
+        HuffEntry(code: 0xfffed, bits: 20),      # 0xe2
+        HuffEntry(code: 0x1fffe6, bits: 21),     # 0xe3
+        HuffEntry(code: 0x3fffe9, bits: 22),     # 0xe4
+        HuffEntry(code: 0x1fffe7, bits: 21),     # 0xe5
+        HuffEntry(code: 0x1fffe8, bits: 21),     # 0xe6
+        HuffEntry(code: 0x7ffff3, bits: 23),     # 0xe7
+        HuffEntry(code: 0x3fffea, bits: 22),     # 0xe8
+        HuffEntry(code: 0x3fffeb, bits: 22),     # 0xe9
+        HuffEntry(code: 0x1ffffee, bits: 25),    # 0xea
+        HuffEntry(code: 0x1ffffef, bits: 25),    # 0xeb
+        HuffEntry(code: 0xfffff4, bits: 24),     # 0xec
+        HuffEntry(code: 0xfffff5, bits: 24),     # 0xed
+        HuffEntry(code: 0x3ffffea, bits: 26),    # 0xee
+        HuffEntry(code: 0x7ffff4, bits: 23),     # 0xef
+        HuffEntry(code: 0x3ffffeb, bits: 26),    # 0xf0
+        HuffEntry(code: 0x7ffffe6, bits: 27),    # 0xf1
+        HuffEntry(code: 0x3ffffec, bits: 26),    # 0xf2
+        HuffEntry(code: 0x3ffffed, bits: 26),    # 0xf3
+        HuffEntry(code: 0x7ffffe7, bits: 27),    # 0xf4
+        HuffEntry(code: 0x7ffffe8, bits: 27),    # 0xf5
+        HuffEntry(code: 0x7ffffe9, bits: 27),    # 0xf6
+        HuffEntry(code: 0x7ffffea, bits: 27),    # 0xf7
+        HuffEntry(code: 0x7ffffeb, bits: 27),    # 0xf8
+        HuffEntry(code: 0xfffffe0, bits: 28),    # 0xf9
+        HuffEntry(code: 0x7ffffec, bits: 27),    # 0xfa
+        HuffEntry(code: 0x7ffffed, bits: 27),    # 0xfb
+        HuffEntry(code: 0x7ffffee, bits: 27),    # 0xfc
+        HuffEntry(code: 0x7ffffef, bits: 27),    # 0xfd
+        HuffEntry(code: 0x7fffff0, bits: 27),    # 0xfe
+        HuffEntry(code: 0x3ffffee, bits: 26),    # 0xff
+        HuffEntry(code: 0x3fffffff, bits: 30)    # EOS (index 256)
+    ]
+
+# Encode `payload` bytes as a Huffman-coded bit stream, padded to a byte
+# boundary using the high bits of EOS (all 1s per §5.2).
+fn hpack_huffman_encode(payload: [u8]) -> [u8]:
+    val table = huffman_table()
+    # Accumulate bits in a 64-bit buffer; flush bytes as they fill.
+    var bit_buf: i64 = 0
+    var bit_count: i64 = 0
+    var out: [u8] = []
+    var i: i64 = 0
+    while i < payload.len():
+        val sym = payload[i].to_i64()
+        val entry = table[sym]
+        val code = entry.code
+        val nbits = entry.bits
+        # Shift code into MSB position of a 30-bit window, then merge.
+        # We maintain bit_buf as an i64 where bits are packed MSB-first
+        # in the low (bit_count + nbits) bits.
+        bit_buf = (bit_buf * _pow2(nbits)) + code
+        bit_count = bit_count + nbits
+        # Flush complete bytes.
+        while bit_count >= 8:
+            bit_count = bit_count - 8
+            val byte = (bit_buf / _pow2(bit_count)) & 0xFF
+            out.push(byte.to_u8())
+            bit_buf = bit_buf & (_pow2(bit_count) - 1)
+        i = i + 1
+    # Pad remaining bits with 1s (high bits of EOS).
+    if bit_count > 0:
+        val pad_bits = 8 - bit_count
+        val padded = ((bit_buf * _pow2(pad_bits)) | (_pow2(pad_bits) - 1)) & 0xFF
+        out.push(padded.to_u8())
+    out
+
+# Decode `length` Huffman-coded bytes starting at `bytes[offset]`.
+# Returns the decoded byte payload or an error.
+#
+# Errors:
+#   - offset or length out of range
+#   - EOS symbol encountered as an actual coded value (not just padding)
+#   - padding longer than 7 bits
+#   - padding bits are not all 1s (not a prefix of EOS)
+fn hpack_huffman_decode(bytes: [u8], offset: i64, length: i64) -> Result<[u8], text>:
+    if offset < 0 or length < 0:
+        return Err("hpack_huffman_decode: negative offset or length")
+    if offset + length > bytes.len():
+        return Err("hpack_huffman_decode: range out of bounds")
+    val table = huffman_table()
+    # Build a decode tree from the table.
+    val tree = _build_decode_tree(table)
+    var out: [u8] = []
+    var node: i64 = 0       # current tree node index (0 = root)
+    var partial: i64 = 0    # bits consumed in current (incomplete) code
+    var i: i64 = 0
+    while i < length:
+        val byte = bytes[offset + i].to_i64()
+        var bit: i64 = 7
+        while bit >= 0:
+            val b = (byte / _pow2(bit)) & 1
+            partial = partial + 1
+            val child_res = _tree_child(tree, node, b)
+            if child_res.is_err():
+                return Err("hpack_huffman_decode: invalid code sequence")
+            node = child_res.unwrap()
+            val sym_res = _tree_symbol(tree, node)
+            if sym_res.is_ok():
+                val sym = sym_res.unwrap()
+                if sym == 256:
+                    return Err("hpack_huffman_decode: EOS symbol in stream")
+                out.push(sym.to_u8())
+                node = 0     # back to root
+                partial = 0  # reset partial counter
+            bit = bit - 1
+        i = i + 1
+    # After all bytes: node must be root (clean boundary) or mid-tree (padding).
+    # If mid-tree: the partial bits must be <= 7 and all 1s (EOS prefix).
+    if node != 0:
+        # `partial` = number of bits consumed since the last decoded symbol.
+        # These are all padding bits. Requirement: <= 7 and all 1s.
+        if partial > 7:
+            return Err("hpack_huffman_decode: padding exceeds 7 bits")
+        # Verify the current node equals the node we'd reach from root by
+        # following `partial` '1' bits (i.e. it's a prefix of EOS).
+        val valid = _is_eos_prefix_node(tree, node, partial)
+        if not valid:
+            return Err("hpack_huffman_decode: invalid padding (not EOS prefix)")
+    Ok(out)
+
+# ----------------------------------------------------------------------------
+# Decode tree implementation
+# ----------------------------------------------------------------------------
+#
+# We build a flat binary trie. Each node is stored as three consecutive
+# i64 values in a flat array:
+#   [3*n + 0] = left child index  (bit=0), or -1 if no child
+#   [3*n + 1] = right child index (bit=1), or -1 if no child
+#   [3*n + 2] = symbol value (0..256), or -1 if not a leaf
+#
+# Node 0 is always the root. We pre-allocate conservatively.
+
+fn _build_decode_tree(table: [HuffEntry]) -> [i64]:
+    # Start with 1 node (root). Nodes grow as we insert.
+    # 3 slots per node; initial capacity = 600 nodes = 1800 slots.
+    # (The actual tree has ~512 leaves + internal nodes, well under 600.)
+    var tree: [i64] = []
+    # Initialize root node (node 0).
+    var k: i64 = 0
+    while k < 3:
+        val neg1: [i64] = [-1]
+        tree = tree + neg1
+        k = k + 1
+    var next_node: i64 = 1
+    var sym: i64 = 0
+    while sym <= 256:
+        val entry = table[sym]
+        val code = entry.code
+        val nbits = entry.bits
+        # Insert this symbol into the tree.
+        var node: i64 = 0
+        var bit_pos: i64 = nbits - 1
+        while bit_pos >= 0:
+            val b = (code / _pow2(bit_pos)) & 1
+            val slot = node * 3 + b
+            if tree[slot] == -1:
+                # Create new child node.
+                tree[slot] = next_node
+                val neg1a: [i64] = [-1]
+                val neg1b: [i64] = [-1]
+                val neg1c: [i64] = [-1]
+                tree = tree + neg1a + neg1b + neg1c
+                next_node = next_node + 1
+            node = tree[slot]
+            bit_pos = bit_pos - 1
+        # Mark node as leaf.
+        tree[node * 3 + 2] = sym
+        sym = sym + 1
+    tree
+
+fn _tree_child(tree: [i64], node: i64, bit: i64) -> Result<i64, text>:
+    val slot = node * 3 + bit
+    if slot < 0 or slot >= tree.len():
+        return Err("_tree_child: slot out of range")
+    val child = tree[slot]
+    if child == -1:
+        return Err("_tree_child: no child for bit")
+    Ok(child)
+
+fn _tree_symbol(tree: [i64], node: i64) -> Result<i64, text>:
+    val slot = node * 3 + 2
+    if slot < 0 or slot >= tree.len():
+        return Err("_tree_symbol: slot out of range")
+    val sym = tree[slot]
+    if sym == -1:
+        return Err("_tree_symbol: not a leaf")
+    Ok(sym)
+
+# Returns true if `node` is the node reached by following `count` '1' bits
+# from root. Used to validate EOS padding.
+fn _is_eos_prefix_node(tree: [i64], node: i64, count: i64) -> bool:
+    var cur: i64 = 0
+    var i: i64 = 0
+    while i < count:
+        val slot = cur * 3 + 1  # bit=1
+        if slot >= tree.len():
+            return false
+        val child = tree[slot]
+        if child == -1:
+            return false
+        cur = child
+        i = i + 1
+    cur == node
+
+# ----------------------------------------------------------------------------
+# Internal math helpers
+# ----------------------------------------------------------------------------
+
+# Returns 2^n for n in 0..62. Used instead of bit-shift operators since
+# the Simple compiler's shift operator can be unreliable on some targets.
+fn _pow2(n: i64) -> i64:
+    if n == 0: return 1
+    if n == 1: return 2
+    if n == 2: return 4
+    if n == 3: return 8
+    if n == 4: return 16
+    if n == 5: return 32
+    if n == 6: return 64
+    if n == 7: return 128
+    if n == 8: return 256
+    if n == 9: return 512
+    if n == 10: return 1024
+    if n == 11: return 2048
+    if n == 12: return 4096
+    if n == 13: return 8192
+    if n == 14: return 16384
+    if n == 15: return 32768
+    if n == 16: return 65536
+    if n == 17: return 131072
+    if n == 18: return 262144
+    if n == 19: return 524288
+    if n == 20: return 1048576
+    if n == 21: return 2097152
+    if n == 22: return 4194304
+    if n == 23: return 8388608
+    if n == 24: return 16777216
+    if n == 25: return 33554432
+    if n == 26: return 67108864
+    if n == 27: return 134217728
+    if n == 28: return 268435456
+    if n == 29: return 536870912
+    if n == 30: return 1073741824
+    if n == 31: return 2147483648
+    if n == 32: return 4294967296
+    2147483648

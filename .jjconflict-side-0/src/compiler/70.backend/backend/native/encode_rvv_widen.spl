@@ -1,0 +1,145 @@
+# src/compiler/70.backend/backend/native/encode_rvv_widen.spl
+#
+# RVV v1.0 Widening/Narrowing Arithmetic Byte-Emit Encoder — Pure Simple
+#
+# Produces exact 4-byte little-endian instruction words for RISC-V Vector
+# widening integer add/sub, widening integer multiply, and narrowing shift
+# instructions per RVV v1.0.
+#
+# Reference: RISC-V Vector Extension v1.0
+#   §11.2  Widening Integer Add/Subtract
+#   §11.12 Widening Integer Multiply
+#   §12.2  Narrowing Fixed-Point Clip Instructions (narrowing shifts)
+#
+# Instruction format (all 32-bit, OP-V major opcode 0x57):
+#   bits[31:26] = funct6
+#   bit[25]     = vm   (1=unmasked)
+#   bits[24:20] = vs2
+#   bits[19:15] = vs1
+#   bits[14:12] = funct3 (OPMVV=010=2 for widening arith; OPIVV=000=0 for narrow shift)
+#   bits[11:7]  = vd
+#   bits[6:0]   = opcode 0x57
+#
+# funct6/funct3 values (RVV v1.0):
+#   vwaddu.vv  0x30 (110000)  OPMVV funct3=2  unsigned widen add
+#   vwadd.vv   0x31 (110001)  OPMVV funct3=2  signed widen add
+#   vwsubu.vv  0x32 (110010)  OPMVV funct3=2  unsigned widen sub
+#   vwsub.vv   0x33 (110011)  OPMVV funct3=2  signed widen sub
+#   vwmulu.vv  0x38 (111000)  OPMVV funct3=2  unsigned widen mul
+#   vwmul.vv   0x3B (111011)  OPMVV funct3=2  signed widen mul
+#   vnsrl.wv   0x2C (101100)  OPIVV funct3=0  narrow shift right logical
+#   vnsra.wv   0x2D (101101)  OPIVV funct3=0  narrow shift right arithmetic
+#
+# Encoding convention: multiplication/division only (avoids negative-bit-op
+# hazards in interpreter mode). Consistent with encode_rvv_zvk.spl and
+# encode_rvv_misc.spl.
+#
+# Return type: [i64] (4 bytes, little-endian).
+#
+# ALL byte goldens derived from RVV v1.0 spec table + manual derivation formula
+# (llvm-mc unavailable on build host).
+# ============================================================================
+# Internal helpers (independent copy; encode_rvv_zvk.spl is a separate module)
+# ============================================================================
+
+fn _rvv_widen_word_to_le4(word: i64) -> [i64]:
+    """
+    Convert a 32-bit widening/narrowing instruction word to 4 little-endian bytes.
+    Uses division/modulo to avoid negative bit-op hazards in interpreter.
+    """
+    var w = word
+    if w < 0:
+        w = w + 4294967296
+    val b0 = w % 256
+    val b1 = (w / 256) % 256
+    val b2 = (w / 65536) % 256
+    val b3 = (w / 16777216) % 256
+    [b0, b1, b2, b3]
+
+fn _encode_rvv_widen(funct6: i64, vm: i64, vs2: i64, vs1: i64, funct3: i64, vd: i64) -> [i64]:
+    """
+    Encode an OP-V widening/narrowing instruction (opcode=0x57=87) with
+    parameterised funct3.
+
+    funct6: 6-bit function code (bits[31:26])
+    vm:     1=unmasked (bit[25])
+    vs2:    source register 2 (bits[24:20])
+    vs1:    source register 1 (bits[19:15])
+    funct3: OPMVV=2 for widening arith; OPIVV=0 for narrowing shifts (bits[14:12])
+    vd:     destination register (bits[11:7])
+    """
+    val word = (funct6 * 67108864) + (vm * 33554432) + (vs2 * 1048576) + (vs1 * 32768) + (funct3 * 4096) + (vd * 128) + 87
+    _rvv_widen_word_to_le4(word)
+
+# ============================================================================
+# Widening Integer Add/Subtract (RVV v1.0 §11.2)
+# ============================================================================
+
+# RVV v1.0 §11.2 vwaddu.vv; funct6=0x30 (110000); OPMVV funct3=2; vm=1
+# Canonical (vd=1, vs2=2, vs1=3): word=0xC221A0D7 LE [0xD7,0xA0,0x21,0xC2]
+fn emit_vwaddu_vv(vd: i64, vs2: i64, vs1: i64) -> [i64]:
+    """Widening unsigned integer add: vd = vs2 + vs1 (element width doubled)."""
+    _encode_rvv_widen(0x30, 1, vs2, vs1, 2, vd)
+
+# RVV v1.0 §11.2 vwsubu.vv; funct6=0x32 (110010); OPMVV funct3=2; vm=1
+# Canonical (vd=1, vs2=2, vs1=3): word=0xCA21A0D7 LE [0xD7,0xA0,0x21,0xCA]
+fn emit_vwsubu_vv(vd: i64, vs2: i64, vs1: i64) -> [i64]:
+    """Widening unsigned integer subtract: vd = vs2 - vs1 (element width doubled)."""
+    _encode_rvv_widen(0x32, 1, vs2, vs1, 2, vd)
+
+# RVV v1.0 §11.2 vwadd.vv; funct6=0x31 (110001); OPMVV funct3=2; vm=1
+# Canonical (vd=1, vs2=2, vs1=3): word=0xC621A0D7 LE [0xD7,0xA0,0x21,0xC6]
+fn emit_vwadd_vv(vd: i64, vs2: i64, vs1: i64) -> [i64]:
+    """Widening signed integer add: vd = vs2 + vs1 (element width doubled)."""
+    _encode_rvv_widen(0x31, 1, vs2, vs1, 2, vd)
+
+# RVV v1.0 §11.2 vwsub.vv; funct6=0x33 (110011); OPMVV funct3=2; vm=1
+# Canonical (vd=1, vs2=2, vs1=3): word=0xCE21A0D7 LE [0xD7,0xA0,0x21,0xCE]
+fn emit_vwsub_vv(vd: i64, vs2: i64, vs1: i64) -> [i64]:
+    """Widening signed integer subtract: vd = vs2 - vs1 (element width doubled)."""
+    _encode_rvv_widen(0x33, 1, vs2, vs1, 2, vd)
+
+# ============================================================================
+# Narrowing Shift Instructions (RVV v1.0 §12.2)
+# ============================================================================
+
+# RVV v1.0 §12.2 vnsrl.wv; funct6=0x2C (101100); OPIVV funct3=0; vm=1
+# Canonical (vd=1, vs2=2, vs1=3): word=0xB22180D7 LE [0xD7,0x80,0x21,0xB2]
+fn emit_vnsrl_wv(vd: i64, vs2: i64, vs1: i64) -> [i64]:
+    """Narrowing shift right logical: vd = vs2 >> vs1 (element width halved, logical)."""
+    _encode_rvv_widen(0x2C, 1, vs2, vs1, 0, vd)
+
+# RVV v1.0 §12.2 vnsra.wv; funct6=0x2D (101101); OPIVV funct3=0; vm=1
+# Canonical (vd=1, vs2=2, vs1=3): word=0xB62180D7 LE [0xD7,0x80,0x21,0xB6]
+fn emit_vnsra_wv(vd: i64, vs2: i64, vs1: i64) -> [i64]:
+    """Narrowing shift right arithmetic: vd = vs2 >> vs1 (element width halved, arithmetic)."""
+    _encode_rvv_widen(0x2D, 1, vs2, vs1, 0, vd)
+
+# ============================================================================
+# Widening Integer Multiply (RVV v1.0 §11.12)
+# ============================================================================
+
+# RVV v1.0 §11.12 vwmul.vv; funct6=0x3B (111011); OPMVV funct3=2; vm=1
+# Canonical (vd=1, vs2=2, vs1=3): word=0xEE21A0D7 LE [0xD7,0xA0,0x21,0xEE]
+fn emit_vwmul_vv(vd: i64, vs2: i64, vs1: i64) -> [i64]:
+    """Widening signed integer multiply: vd = vs2 * vs1 (element width doubled)."""
+    _encode_rvv_widen(0x3B, 1, vs2, vs1, 2, vd)
+
+# RVV v1.0 §11.12 vwmulu.vv; funct6=0x38 (111000); OPMVV funct3=2; vm=1
+# Canonical (vd=1, vs2=2, vs1=3): word=0xE221A0D7 LE [0xD7,0xA0,0x21,0xE2]
+fn emit_vwmulu_vv(vd: i64, vs2: i64, vs1: i64) -> [i64]:
+    """Widening unsigned integer multiply: vd = vs2 * vs1 (element width doubled)."""
+    _encode_rvv_widen(0x38, 1, vs2, vs1, 2, vd)
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export emit_vwaddu_vv
+export emit_vwsubu_vv
+export emit_vwadd_vv
+export emit_vwsub_vv
+export emit_vnsrl_wv
+export emit_vnsra_wv
+export emit_vwmul_vv
+export emit_vwmulu_vv

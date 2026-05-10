@@ -1,0 +1,241 @@
+# GPU Tensor Type and Operations for SimpleOS ML Stack
+#
+# Provides GpuTensor struct with CUDA-backed allocation, transfer,
+# and compute operations using PTX kernels from os.ml.kernels.
+
+use os.ml.kernels.{get_kernel, MATMUL_F64_PTX, ADD_F64_PTX, MUL_F64_PTX, RELU_F64_PTX, SIGMOID_F64_PTX, TANH_F64_PTX, SOFTMAX_F64_PTX, REDUCE_SUM_F64_PTX, REDUCE_MEAN_F64_PTX, SGD_UPDATE_PTX, ADAM_UPDATE_PTX}
+
+# =============================================================================
+# CUDA FFI Externs
+# =============================================================================
+
+extern fn rt_cuda_malloc(size: i64) -> i64
+extern fn rt_cuda_free(ptr: i64) -> bool
+extern fn rt_cuda_memcpy_h2d(dst_device: i64, src_host: [u8], size: i64) -> bool
+extern fn rt_cuda_memcpy_d2h(dst_host: [u8], src_device: i64, size: i64) -> bool
+extern fn rt_cuda_launch_kernel(func: i64, gx: i64, gy: i64, gz: i64, blk_x: i64, blk_y: i64, blk_z: i64, shared_mem: i64, args: [i64]) -> bool
+extern fn rt_cuda_synchronize() -> bool
+extern fn rt_cuda_is_available() -> bool
+
+# =============================================================================
+# Helper: f64 bits to i64 (reinterpret cast for kernel args)
+# =============================================================================
+
+extern fn rt_f64_to_bits(value: f64) -> i64
+extern fn rt_bits_to_f64(bits: i64) -> f64
+extern fn rt_f64_array_to_bytes(data: [f64]) -> [u8]
+extern fn rt_bytes_to_f64_array(data: [u8], count: i64) -> [f64]
+
+# =============================================================================
+# GpuTensor
+# =============================================================================
+
+struct GpuTensor:
+    device_ptr: i64
+    shape: [i64]
+    numel: i64
+
+impl GpuTensor:
+    # Allocate uninitialized GPU tensor with given shape
+    static fn alloc(shape: [i64]) -> GpuTensor:
+        var n: i64 = 1
+        var i: i64 = 0
+        while i < shape.len():
+            n = n * shape[i]
+            i = i + 1
+        val ptr = rt_cuda_malloc(n * 8)
+        return GpuTensor { device_ptr: ptr, shape: shape, numel: n }
+
+    # Create GPU tensor from host f64 array
+    static fn from_host(data: [f64], shape: [i64]) -> GpuTensor:
+        var n: i64 = 1
+        var i: i64 = 0
+        while i < shape.len():
+            n = n * shape[i]
+            i = i + 1
+        val byte_size = n * 8
+        val ptr = rt_cuda_malloc(byte_size)
+        val bytes = rt_f64_array_to_bytes(data)
+        rt_cuda_memcpy_h2d(ptr, bytes, byte_size)
+        return GpuTensor { device_ptr: ptr, shape: shape, numel: n }
+
+    # Copy GPU tensor data back to host
+    fn to_host(self) -> [f64]:
+        val byte_size = self.numel * 8
+        var buf: [u8] = [0; byte_size]
+        rt_cuda_memcpy_d2h(buf, self.device_ptr, byte_size)
+        return rt_bytes_to_f64_array(buf, self.numel)
+
+    # Free GPU memory
+    fn free(self):
+        rt_cuda_free(self.device_ptr)
+
+    # Reshape (logical only, no data movement)
+    fn reshape(self, new_shape: [i64]) -> GpuTensor:
+        return GpuTensor { device_ptr: self.device_ptr, shape: new_shape, numel: self.numel }
+
+    # Clone tensor (deep copy on device)
+    fn clone(self) -> GpuTensor:
+        val byte_size = self.numel * 8
+        val new_ptr = rt_cuda_malloc(byte_size)
+        # Use add kernel with zero to copy (device-to-device via identity)
+        # Simpler: download and re-upload
+        var buf: [u8] = [0; byte_size]
+        rt_cuda_memcpy_d2h(buf, self.device_ptr, byte_size)
+        rt_cuda_memcpy_h2d(new_ptr, buf, byte_size)
+        return GpuTensor { device_ptr: new_ptr, shape: self.shape, numel: self.numel }
+
+# =============================================================================
+# Launch Helpers
+# =============================================================================
+
+fn ceil_div(a: i64, b: i64) -> i64:
+    return (a + b - 1) / b
+
+# =============================================================================
+# Compute Operations
+# =============================================================================
+
+# Matrix multiply: C[M,N] = A[M,K] * B[K,N]
+fn gpu_matmul(a: GpuTensor, b: GpuTensor) -> GpuTensor:
+    val M = a.shape[0]
+    val K = a.shape[1]
+    val N = b.shape[1]
+    val c = GpuTensor.alloc([M, N])
+    val func = get_kernel("matmul_f64", MATMUL_F64_PTX)
+    val gx = ceil_div(N, 16)
+    val gy = ceil_div(M, 16)
+    val args: [i64] = [a.device_ptr, b.device_ptr, c.device_ptr, M, K, N]
+    rt_cuda_launch_kernel(func, gx, gy, 1, 16, 16, 1, 0, args)
+    rt_cuda_synchronize()
+    return c
+
+# Element-wise add
+fn gpu_add(a: GpuTensor, b: GpuTensor) -> GpuTensor:
+    val c = GpuTensor.alloc(a.shape)
+    val func = get_kernel("add_f64", ADD_F64_PTX)
+    val grid = ceil_div(a.numel, 256)
+    val args: [i64] = [a.device_ptr, b.device_ptr, c.device_ptr, a.numel]
+    rt_cuda_launch_kernel(func, grid, 1, 1, 256, 1, 1, 0, args)
+    rt_cuda_synchronize()
+    return c
+
+# Element-wise multiply
+fn gpu_mul(a: GpuTensor, b: GpuTensor) -> GpuTensor:
+    val c = GpuTensor.alloc(a.shape)
+    val func = get_kernel("mul_f64", MUL_F64_PTX)
+    val grid = ceil_div(a.numel, 256)
+    val args: [i64] = [a.device_ptr, b.device_ptr, c.device_ptr, a.numel]
+    rt_cuda_launch_kernel(func, grid, 1, 1, 256, 1, 1, 0, args)
+    rt_cuda_synchronize()
+    return c
+
+# ReLU activation
+fn gpu_relu(x: GpuTensor) -> GpuTensor:
+    val y = GpuTensor.alloc(x.shape)
+    val func = get_kernel("relu_f64", RELU_F64_PTX)
+    val grid = ceil_div(x.numel, 256)
+    val args: [i64] = [x.device_ptr, y.device_ptr, x.numel]
+    rt_cuda_launch_kernel(func, grid, 1, 1, 256, 1, 1, 0, args)
+    rt_cuda_synchronize()
+    return y
+
+# Sigmoid activation
+fn gpu_sigmoid(x: GpuTensor) -> GpuTensor:
+    val y = GpuTensor.alloc(x.shape)
+    val func = get_kernel("sigmoid_f64", SIGMOID_F64_PTX)
+    val grid = ceil_div(x.numel, 256)
+    val args: [i64] = [x.device_ptr, y.device_ptr, x.numel]
+    rt_cuda_launch_kernel(func, grid, 1, 1, 256, 1, 1, 0, args)
+    rt_cuda_synchronize()
+    return y
+
+# Tanh activation
+fn gpu_tanh(x: GpuTensor) -> GpuTensor:
+    val y = GpuTensor.alloc(x.shape)
+    val func = get_kernel("tanh_f64", TANH_F64_PTX)
+    val grid = ceil_div(x.numel, 256)
+    val args: [i64] = [x.device_ptr, y.device_ptr, x.numel]
+    rt_cuda_launch_kernel(func, grid, 1, 1, 256, 1, 1, 0, args)
+    rt_cuda_synchronize()
+    return y
+
+# Row-wise softmax (input must be 2D: [rows, cols])
+fn gpu_softmax(x: GpuTensor) -> GpuTensor:
+    val rows = x.shape[0]
+    val cols = x.shape[1]
+    val y = GpuTensor.alloc(x.shape)
+    val func = get_kernel("softmax_f64", SOFTMAX_F64_PTX)
+    val grid = ceil_div(rows, 256)
+    val args: [i64] = [x.device_ptr, y.device_ptr, rows, cols]
+    rt_cuda_launch_kernel(func, grid, 1, 1, 256, 1, 1, 0, args)
+    rt_cuda_synchronize()
+    return y
+
+# Parallel reduction sum (returns 1-element tensor)
+fn gpu_reduce_sum(x: GpuTensor) -> GpuTensor:
+    val out = GpuTensor.alloc([1])
+    val func = get_kernel("reduce_sum_f64", REDUCE_SUM_F64_PTX)
+    # Single block of 256 threads for simplicity (handles up to 256 elements directly)
+    # For larger tensors, iterative reduction would be needed
+    val args: [i64] = [x.device_ptr, out.device_ptr, x.numel]
+    rt_cuda_launch_kernel(func, 1, 1, 1, 256, 1, 1, 256 * 8, args)
+    rt_cuda_synchronize()
+    return out
+
+# Parallel reduction mean (returns 1-element tensor)
+fn gpu_reduce_mean(x: GpuTensor) -> GpuTensor:
+    val out = GpuTensor.alloc([1])
+    val func = get_kernel("reduce_mean_f64", REDUCE_MEAN_F64_PTX)
+    val args: [i64] = [x.device_ptr, out.device_ptr, x.numel]
+    rt_cuda_launch_kernel(func, 1, 1, 1, 256, 1, 1, 256 * 8, args)
+    rt_cuda_synchronize()
+    return out
+
+# Create single-element scalar tensor
+fn gpu_scalar(value: f64) -> GpuTensor:
+    val data: [f64] = [value]
+    return GpuTensor.from_host(data, [1])
+
+# Scale tensor by scalar: Y[i] = X[i] * scalar
+fn gpu_scale(x: GpuTensor, scalar: f64) -> GpuTensor:
+    val s = gpu_scalar(scalar)
+    # Broadcast multiply: create a tensor filled with scalar
+    # For efficiency, use a dedicated approach - multiply with broadcasted scalar
+    # Simple approach: allocate scalar tensor, use element-wise mul with broadcast
+    # Since our mul kernel requires same-size tensors, replicate scalar
+    val scale_data: [f64] = []
+    var i: i64 = 0
+    while i < x.numel:
+        scale_data.push(scalar)
+        i = i + 1
+    val scale_tensor = GpuTensor.from_host(scale_data, x.shape)
+    val result = gpu_mul(x, scale_tensor)
+    scale_tensor.free()
+    s.free()
+    return result
+
+# =============================================================================
+# Optimizer Operations
+# =============================================================================
+
+# SGD weight update: W = W - lr * grad (in-place on W)
+fn gpu_sgd_update(w: GpuTensor, grad: GpuTensor, lr: f64):
+    val func = get_kernel("sgd_update", SGD_UPDATE_PTX)
+    val grid = ceil_div(w.numel, 256)
+    val lr_bits = rt_f64_to_bits(lr)
+    val args: [i64] = [w.device_ptr, grad.device_ptr, w.numel, lr_bits]
+    rt_cuda_launch_kernel(func, grid, 1, 1, 256, 1, 1, 0, args)
+    rt_cuda_synchronize()
+
+# Adam optimizer update (in-place on W, m, v)
+fn gpu_adam_update(w: GpuTensor, grad: GpuTensor, m: GpuTensor, v: GpuTensor, lr: f64, beta1: f64, beta2: f64, eps: f64, t: i64):
+    val func = get_kernel("adam_update", ADAM_UPDATE_PTX)
+    val grid = ceil_div(w.numel, 256)
+    val lr_bits = rt_f64_to_bits(lr)
+    val beta1_bits = rt_f64_to_bits(beta1)
+    val beta2_bits = rt_f64_to_bits(beta2)
+    val eps_bits = rt_f64_to_bits(eps)
+    val args: [i64] = [w.device_ptr, grad.device_ptr, m.device_ptr, v.device_ptr, w.numel, lr_bits, beta1_bits, beta2_bits, eps_bits, t]
+    rt_cuda_launch_kernel(func, grid, 1, 1, 256, 1, 1, 0, args)
+    rt_cuda_synchronize()

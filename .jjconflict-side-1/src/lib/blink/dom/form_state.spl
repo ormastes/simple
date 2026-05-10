@@ -1,0 +1,98 @@
+# Form state — per-document registry of <input>/<textarea>/... field values.
+#
+# Mirrors Blink's HTMLFormControlsCollection + individual input-element value
+# tracking, reduced to what the pure-Simple renderer needs: a node-id-keyed
+# table of current field values plus placeholder strings. Updates are
+# immutable — each mutator returns a fresh FormState so callers can keep
+# a prior snapshot for undo / restyle passes.
+#
+# This module intentionally avoids hash maps: v1 forms have a handful of
+# fields and a linear scan is both simpler and deterministic. If form
+# counts grow, swap the `fields` list for a HashMap in one place.
+
+# ============================================================================
+# FormFieldEntry — one input/textarea value by DOM node id
+# ============================================================================
+#
+# node_id     — DomNode id the entry describes (Element node with a value).
+# value       — current typed value (empty String when pristine).
+# placeholder — placeholder attribute text (empty String when absent).
+
+class FormFieldEntry:
+    node_id: i64
+    value: String
+    placeholder: String
+
+# ============================================================================
+# FormState — flat list of FormFieldEntry values
+# ============================================================================
+
+class FormState:
+    fields: [FormFieldEntry]
+
+# ============================================================================
+# Constructors
+# ============================================================================
+
+fn form_state_empty() -> FormState:
+    FormState(fields: [FormFieldEntry]())
+
+# form_state_with_field — add or replace an entry for `entry.node_id`.
+# Returns a new FormState; does not mutate the input.
+fn form_state_with_field(state: FormState, entry: FormFieldEntry) -> FormState:
+    val out: [FormFieldEntry] = [FormFieldEntry]()
+    var replaced: bool = false
+    var i: i64 = 0
+    val n = state.fields.len()
+    while i < n:
+        val existing = state.fields[i]
+        if existing.node_id == entry.node_id:
+            out.push(entry)
+            replaced = true
+        else:
+            out.push(existing)
+        i = i + 1
+    if not replaced:
+        out.push(entry)
+    FormState(fields: out)
+
+# form_state_set_value — update just the `value` for node_id.
+# Preserves placeholder if a prior entry existed; otherwise uses "".
+fn form_state_set_value(state: FormState, node_id: i64, value: String) -> FormState:
+    var prior_placeholder: String = ""
+    var i: i64 = 0
+    val n = state.fields.len()
+    while i < n:
+        if state.fields[i].node_id == node_id:
+            prior_placeholder = state.fields[i].placeholder
+        i = i + 1
+    val entry = FormFieldEntry(
+        node_id: node_id,
+        value: value,
+        placeholder: prior_placeholder
+    )
+    form_state_with_field(state, entry)
+
+# form_state_get_value — lookup current value for node_id.
+# Returns "" (absence sentinel) when the field has never been registered.
+fn form_state_get_value(state: FormState, node_id: i64) -> String:
+    var result: String = ""
+    var i: i64 = 0
+    val n = state.fields.len()
+    while i < n:
+        if state.fields[i].node_id == node_id:
+            result = state.fields[i].value
+        i = i + 1
+    result
+
+# form_state_get_placeholder — lookup placeholder for node_id.
+# Returns "" when the field is absent or has no placeholder.
+fn form_state_get_placeholder(state: FormState, node_id: i64) -> String:
+    var result: String = ""
+    var i: i64 = 0
+    val n = state.fields.len()
+    while i < n:
+        if state.fields[i].node_id == node_id:
+            result = state.fields[i].placeholder
+        i = i + 1
+    result

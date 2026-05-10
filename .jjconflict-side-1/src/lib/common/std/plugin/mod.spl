@@ -1,0 +1,71 @@
+# std.plugin - runtime plugin loader.
+#
+# Two-step contract per .sstack/runtime-api-block-sugar-plugins/state.md:
+#   1. use_plugin(name) - resolve manifest entry, dlopen the .so, cache handle.
+#   2. plugin_call_i64(symbol, args) - by-name dispatch via cached handles.
+#
+# Built on app.plugin.registry (manifest IO). Uses already-whitelisted WFFI
+# externs (mod.rs:1445-1452); no new rt_*. WFFI is i64-only - pointer args
+# fit through the i64 channel; f64 scalars are out of scope (AC-4 carve-out).
+
+use app.plugin.registry.{PluginEntry, plugin_manifest_path, parse_plugin_manifest_text}
+
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_file_read_text(path: text) -> text
+extern fn spl_dlopen(path: text) -> i64
+extern fn spl_dlsym(handle: i64, name: text) -> i64
+extern fn spl_wffi_call_i64(fptr: i64, args: [i64], nargs: i64) -> i64
+
+class LoadedPlugin:
+    name: text
+    library: text
+    handle: i64
+
+var _loaded_plugins: [LoadedPlugin] = []
+
+fn _find_loaded(name: text) -> LoadedPlugin?:
+    for plug in _loaded_plugins:
+        if plug.name == name:
+            return plug
+    nil
+
+fn _entry_in(entries: [PluginEntry], name: text) -> PluginEntry?:
+    for e in entries:
+        if e.name == name:
+            return e
+    nil
+
+fn use_plugin_from(manifest_path: text, name: text) -> bool:
+    if _find_loaded(name).?:
+        return true
+    if not rt_file_exists(manifest_path):
+        return false
+    val manifest_text = rt_file_read_text(manifest_path) ?? ""
+    val entries = parse_plugin_manifest_text(manifest_text)
+    val entry_opt = _entry_in(entries, name)
+    if not entry_opt.?:
+        return false
+    val entry = entry_opt.unwrap()
+    if not rt_file_exists(entry.library):
+        return false
+    val handle = spl_dlopen(entry.library)
+    if handle == 0:
+        return false
+    _loaded_plugins.push(LoadedPlugin(name: entry.name, library: entry.library, handle: handle))
+    true
+
+fn use_plugin(name: text) -> bool:
+    use_plugin_from(plugin_manifest_path(), name)
+
+fn list_plugins() -> [text]:
+    var names: [text] = []
+    for plug in _loaded_plugins:
+        names.push(plug.name)
+    names
+
+fn plugin_call_i64(symbol: text, args: [i64]) -> i64:
+    for plug in _loaded_plugins:
+        val fptr = spl_dlsym(plug.handle, symbol)
+        if fptr != 0:
+            return spl_wffi_call_i64(fptr, args, args.len())
+    0

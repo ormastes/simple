@@ -1,0 +1,119 @@
+# Editor Workspace
+#
+# Workspace folder management and configuration.
+# Loads/saves workspace state from .simple-editor/workspace.sdn.
+
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_write_text(path: text, content: text) -> bool
+
+struct WorkspaceFolder:
+    path: text
+    name: text
+
+struct WorkspaceConfig:
+    folders: [WorkspaceFolder]
+    settings: [WorkspaceSetting]
+    config_path: text
+
+struct WorkspaceSetting:
+    key: text
+    value: text
+
+fn workspace_new(root_path: text) -> WorkspaceConfig:
+    val name = _ws_basename(root_path)
+    WorkspaceConfig(
+        folders: [WorkspaceFolder(path: root_path, name: name)],
+        settings: [],
+        config_path: root_path + "/.simple-editor/workspace.sdn"
+    )
+
+fn workspace_load(root_path: text) -> WorkspaceConfig:
+    val config_path = root_path + "/.simple-editor/workspace.sdn"
+    val content = rt_file_read_text(config_path) ?? ""
+    if content == "":
+        return workspace_new(root_path)
+    var config = workspace_new(root_path)
+    config.config_path = config_path
+    val lines = _ws_split_lines(content)
+    for line in lines:
+        val trimmed = line.trim()
+        if trimmed.starts_with("folder:"):
+            val folder_path = trimmed.slice(7, trimmed.len()).trim()
+            if folder_path != "":
+                config.folders.push(WorkspaceFolder(path: folder_path, name: _ws_basename(folder_path)))
+        if trimmed.starts_with("setting:"):
+            val rest = trimmed.slice(8, trimmed.len()).trim()
+            val eq_pos = _ws_index_of(rest, "=")
+            if eq_pos > 0:
+                val key = rest.slice(0, eq_pos).trim()
+                val value = rest.slice(eq_pos + 1, rest.len()).trim()
+                config.settings.push(WorkspaceSetting(key: key, value: value))
+    config
+
+fn workspace_save(config: WorkspaceConfig) -> bool:
+    var content = "# Simple Editor Workspace\n"
+    for folder in config.folders:
+        content = content + "folder: {folder.path}\n"
+    for setting in config.settings:
+        content = content + "setting: {setting.key} = {setting.value}\n"
+    rt_file_write_text(config.config_path, content)
+
+fn workspace_get_setting(config: WorkspaceConfig, key: text, default_value: text) -> text:
+    for setting in config.settings:
+        if setting.key == key:
+            return setting.value
+    default_value
+
+fn workspace_set_setting(config: WorkspaceConfig, key: text, value: text) -> WorkspaceConfig:
+    var new_settings: [WorkspaceSetting] = []
+    var found = false
+    for setting in config.settings:
+        if setting.key == key:
+            new_settings.push(WorkspaceSetting(key: key, value: value))
+            found = true
+        else:
+            new_settings.push(setting)
+    if not found:
+        new_settings.push(WorkspaceSetting(key: key, value: value))
+    WorkspaceConfig(
+        folders: config.folders,
+        settings: new_settings,
+        config_path: config.config_path
+    )
+
+fn workspace_root(config: WorkspaceConfig) -> text:
+    if config.folders.len() > 0:
+        return config.folders[0].path
+    ""
+
+fn _ws_basename(path: text) -> text:
+    var last = -1
+    var i = 0
+    while i < path.len():
+        if path.char_at(i) == "/":
+            last = i
+        i = i + 1
+    if last >= 0:
+        return path.slice(last + 1, path.len())
+    path
+
+fn _ws_index_of(s: text, ch: text) -> i64:
+    var i = 0
+    while i < s.len():
+        if s.char_at(i) == ch:
+            return i
+        i = i + 1
+    -1
+
+fn _ws_split_lines(content: text) -> [text]:
+    var lines: [text] = []
+    var start = 0
+    var i = 0
+    while i < content.len():
+        if content.char_at(i) == "\n":
+            lines.push(content.slice(start, i))
+            start = i + 1
+        i = i + 1
+    if start < content.len():
+        lines.push(content.slice(start, content.len()))
+    lines

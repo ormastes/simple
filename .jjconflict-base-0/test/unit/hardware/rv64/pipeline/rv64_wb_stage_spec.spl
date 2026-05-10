@@ -1,0 +1,87 @@
+"""
+RV64 Writeback Stage Unit Specification
+
+Tests register writeback for ALU results and memory loads, including
+x0 write suppression.
+
+**Feature IDs:** #HW-RV64-PIPE-WB
+**Category:** Testing
+**Status:** Implemented
+"""
+
+use std.spec.{describe, it, expect}
+
+use std.hardware.rv64.pipeline.types.{
+    Rv64RegisterFile, create_rv64_register_file,
+    Rv64MemWbLatch, create_mem_wb_latch
+}
+use std.hardware.rv64.pipeline.wb_stage.{
+    Rv64WbStage, create_rv64_wb_stage
+}
+
+# ============================================================================
+# WB Stage Tests
+# ============================================================================
+
+describe "Rv64WbStage":
+    it "does nothing for invalid latch":
+        var wb = create_rv64_wb_stage()
+        var rf = create_rv64_register_file()
+        wb.tick(create_mem_wb_latch(), rf)
+        expect(rf.read(1)).to_equal(0)
+
+    it "does nothing when reg_write is false":
+        var wb = create_rv64_wb_stage()
+        var rf = create_rv64_register_file()
+        val latch = Rv64MemWbLatch(
+            alu_result: 99, mem_data: 0, rd: 5,
+            mem_to_reg: false, reg_write: false, valid: true
+        )
+        wb.tick(latch, rf)
+        expect(rf.read(5)).to_equal(0)
+
+    it "writes ALU result to rd when reg_write and not mem_to_reg":
+        var wb = create_rv64_wb_stage()
+        var rf = create_rv64_register_file()
+        val latch = Rv64MemWbLatch(
+            alu_result: 42, mem_data: 0, rd: 7,
+            mem_to_reg: false, reg_write: true, valid: true
+        )
+        wb.tick(latch, rf)
+        expect(rf.read(7)).to_equal(42)
+
+    it "writes mem_data to rd when mem_to_reg is true":
+        var wb = create_rv64_wb_stage()
+        var rf = create_rv64_register_file()
+        val latch = Rv64MemWbLatch(
+            alu_result: 999, mem_data: 0x12345678, rd: 10,
+            mem_to_reg: true, reg_write: true, valid: true
+        )
+        wb.tick(latch, rf)
+        expect(rf.read(10)).to_equal(0x12345678)
+
+    it "does not write to x0 even with reg_write":
+        var wb = create_rv64_wb_stage()
+        var rf = create_rv64_register_file()
+        val latch = Rv64MemWbLatch(
+            alu_result: 42, mem_data: 0, rd: 0,
+            mem_to_reg: false, reg_write: true, valid: true
+        )
+        wb.tick(latch, rf)
+        expect(rf.read(0)).to_equal(0)
+
+    it "select_wb_data returns ALU result when not mem_to_reg":
+        var wb = create_rv64_wb_stage()
+        val latch = Rv64MemWbLatch(
+            alu_result: 55, mem_data: 77, rd: 1,
+            mem_to_reg: false, reg_write: true, valid: true
+        )
+        expect(wb.select_wb_data(latch)).to_equal(55)
+
+    it "select_wb_data returns mem_data when mem_to_reg":
+        var wb = create_rv64_wb_stage()
+        val latch = Rv64MemWbLatch(
+            alu_result: 55, mem_data: 77, rd: 1,
+            mem_to_reg: true, reg_write: true, valid: true
+        )
+        expect(wb.select_wb_data(latch)).to_equal(77)

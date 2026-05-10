@@ -1,0 +1,119 @@
+#!/bin/sh
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
+cd "$ROOT_DIR"
+
+SIMPLE_BINARY="${SIMPLE_BINARY:-bin/simple}"
+BUILD_DIR="${BUILD_DIR:-build/simple-core-smoke}"
+CORE_DIR="${SIMPLE_CORE_BUILD_DIR:-build/simple-core}"
+CORE_ARCHIVE="$CORE_DIR/libsimple_runtime.a"
+CORE_SOURCE_DIR="${SIMPLE_CORE_SOURCE_DIR:-src/runtime/simple_core}"
+HELLO_BIN="$BUILD_DIR/hello_simple_core"
+TUI_ENTRY="$BUILD_DIR/minimal_tui_smoke_entry.spl"
+TUI_BIN="$BUILD_DIR/minimal_tui_smoke_simple_core"
+TUI_APP_ENTRY="$BUILD_DIR/minimal_tui_app_entry.spl"
+TUI_APP_BIN="$BUILD_DIR/minimal_tui_app_simple_core"
+
+mkdir -p "$BUILD_DIR" "$CORE_DIR"
+
+if "$SIMPLE_BINARY" native-build --help 2>/dev/null | rg -q -- '--emit-archive'; then
+    "$SIMPLE_BINARY" native-build \
+        --source "$CORE_SOURCE_DIR" \
+        --no-mangle \
+        --emit-archive \
+        --output "$CORE_ARCHIVE" \
+        --clean >/tmp/simple_core_archive_build.$$ 2>&1
+else
+    (
+        cd src/compiler_rust
+        cargo run -q -p simple-driver --bin simple -- native-build \
+            --source ../../"$CORE_SOURCE_DIR" \
+            --no-mangle \
+            --emit-archive \
+            --output ../../"$CORE_ARCHIVE" \
+            --clean
+    ) >/tmp/simple_core_archive_build.$$ 2>&1
+fi
+
+if ! nm -g --defined-only "$CORE_ARCHIVE" | rg -q ' rt_string_replace| rt_to_string| rt_array_new| stdin_read_char'; then
+    echo "simple_core_archive_complete=false"
+    exit 1
+fi
+
+cat >"$TUI_ENTRY" <<'EOF'
+use app.ui.tui.standalone.{run_standalone_tui}
+
+fn main() -> i64:
+    return run_standalone_tui("examples/ui/minimal.ui.sdn")
+EOF
+
+cat >"$TUI_APP_ENTRY" <<'EOF'
+use app.ui.tui.app.{run_tui}
+
+fn main() -> i64:
+    return run_tui("examples/ui/minimal.ui.sdn")
+EOF
+
+"$SIMPLE_BINARY" native-build \
+    --runtime-bundle simple-core \
+    --source examples \
+    --entry-closure \
+    --entry examples/01_getting_started/hello_native.spl \
+    --strip \
+    --output "$HELLO_BIN" \
+    --clean >/tmp/simple_core_hello_build.$$ 2>&1
+
+HELLO_OUTPUT="$("$HELLO_BIN")"
+if [ "$HELLO_OUTPUT" != "Hello World" ]; then
+    echo "simple_core_hello=false"
+    echo "hello_output=$HELLO_OUTPUT"
+    exit 1
+fi
+
+"$SIMPLE_BINARY" native-build \
+    --runtime-bundle simple-core \
+    --source src \
+    --entry-closure \
+    --entry "$TUI_ENTRY" \
+    --strip \
+    --output "$TUI_BIN" \
+    --clean >/tmp/simple_core_tui_build.$$ 2>&1
+
+TUI_OUTPUT="$("$TUI_BIN")"
+if ! printf '%s\n' "$TUI_OUTPUT" | rg -q "UI closed."; then
+    echo "simple_core_tui=false"
+    exit 1
+fi
+
+"$SIMPLE_BINARY" native-build \
+    --runtime-bundle simple-core \
+    --source src \
+    --entry-closure \
+    --entry "$TUI_APP_ENTRY" \
+    --strip \
+    --output "$TUI_APP_BIN" \
+    --clean >/tmp/simple_core_tui_app_build.$$ 2>&1
+
+TUI_APP_OUTPUT="$(printf 'quit\n' | "$TUI_APP_BIN")"
+if ! printf '%s\n' "$TUI_APP_OUTPUT" | rg -q "UI closed."; then
+    echo "simple_core_tui_app=false"
+    exit 1
+fi
+
+HOSTED_MARKERS="$(strings "$HELLO_BIN" "$TUI_BIN" "$TUI_APP_BIN" | rg -c 'libsimple_native_all|rust-hosted' || true)"
+UNWIND_MARKERS="$(nm -a "$HELLO_BIN" "$TUI_BIN" "$TUI_APP_BIN" 2>/dev/null | rg -c '_Unwind|unwind' || true)"
+HOSTED_MARKERS="${HOSTED_MARKERS:-0}"
+UNWIND_MARKERS="${UNWIND_MARKERS:-0}"
+if [ "$HOSTED_MARKERS" != "0" ] || [ "$UNWIND_MARKERS" != "0" ]; then
+    echo "simple_core_closure_clean=false"
+    echo "hosted_markers=$HOSTED_MARKERS"
+    echo "unwind_markers=$UNWIND_MARKERS"
+    exit 1
+fi
+
+echo "simple_core_archive=$CORE_ARCHIVE"
+echo "simple_core_hello=true"
+echo "simple_core_standalone_tui=true"
+echo "simple_core_tui_app=true"
+echo "simple_core_closure_clean=true"

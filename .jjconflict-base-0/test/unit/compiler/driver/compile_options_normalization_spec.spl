@@ -1,0 +1,82 @@
+use std.spec
+use compiler.common.driver_core_types.{CompileOptions, compileoptions_effective_mir_opt_level, compileoptions_normalize_mir_optimization}
+use compiler.driver.cache.{compile_options_hash_compute}
+
+fn normalized_options(release: bool, optimize: bool, profile: text, opt_level: i64?) -> CompileOptions:
+    var options = CompileOptions.default()
+    options.release = release
+    options.optimize = optimize
+    options.profile = profile
+    options.opt_level = opt_level
+    compileoptions_normalize_mir_optimization(options)
+
+describe "compile option normalization":
+    it "keeps debug defaults at opt level zero":
+        val options = normalized_options(false, false, "dev", nil)
+        expect(options.release).to_equal(false)
+        expect(options.optimize).to_equal(false)
+        expect(options.opt_level).to_equal(0)
+        expect(compileoptions_effective_mir_opt_level(options)).to_equal(0)
+
+    it "normalizes release-only requests to the standard mir level":
+        val options = normalized_options(true, false, "prod", nil)
+        expect(options.release).to_equal(true)
+        expect(options.optimize).to_equal(true)
+        expect(options.opt_level).to_equal(2)
+        expect(compileoptions_effective_mir_opt_level(options)).to_equal(2)
+
+    it "normalizes optimize-only requests to the standard mir level":
+        val options = normalized_options(false, true, "dev", nil)
+        expect(options.release).to_equal(true)
+        expect(options.optimize).to_equal(true)
+        expect(options.opt_level).to_equal(2)
+
+    it "preserves explicit aggressive opt levels":
+        val options = normalized_options(true, true, "prod", Some(3))
+        expect(options.release).to_equal(true)
+        expect(options.optimize).to_equal(true)
+        expect(options.opt_level).to_equal(3)
+
+    it "preserves explicit basic opt levels":
+        val options = normalized_options(false, true, "dev", Some(1))
+        expect(options.release).to_equal(true)
+        expect(options.optimize).to_equal(true)
+        expect(options.opt_level).to_equal(1)
+        expect(compileoptions_effective_mir_opt_level(options)).to_equal(1)
+
+    it "preserves explicit standard opt levels":
+        val options = normalized_options(true, true, "prod", Some(2))
+        expect(options.release).to_equal(true)
+        expect(options.optimize).to_equal(true)
+        expect(options.opt_level).to_equal(2)
+        expect(compileoptions_effective_mir_opt_level(options)).to_equal(2)
+
+    it "preserves explicit none while keeping release metadata intact":
+        val options = normalized_options(true, false, "prod", Some(0))
+        expect(options.release).to_equal(true)
+        expect(options.optimize).to_equal(false)
+        expect(options.opt_level).to_equal(0)
+
+    it "keeps hash-relevant effective opt levels unchanged across normalized release paths":
+        val legacy_release = normalized_options(true, false, "prod", nil)
+        val explicit_standard = normalized_options(true, true, "prod", Some(2))
+        val release_hash = compile_options_hash_compute(
+            legacy_release.backend,
+            legacy_release.opt_level ?? 0,
+            legacy_release.release,
+            legacy_release.debug_info,
+            legacy_release.gc_off,
+            legacy_release.profile,
+            legacy_release.allowed_families
+        )
+        val explicit_hash = compile_options_hash_compute(
+            explicit_standard.backend,
+            explicit_standard.opt_level ?? 0,
+            explicit_standard.release,
+            explicit_standard.debug_info,
+            explicit_standard.gc_off,
+            explicit_standard.profile,
+            explicit_standard.allowed_families
+        )
+        expect(release_hash.hash).to_equal(explicit_hash.hash)
+        expect(release_hash.opt_level).to_equal(explicit_hash.opt_level)

@@ -1,0 +1,104 @@
+#!/bin/bash
+# GHDL runner for the repo-native generated RV32 core.
+#
+# Usage:
+#   ./ghdl_generated_rv32_runner.shs <program.s|program.c|program.elf> [--timeout=30]
+
+set -e
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/../../../.." && pwd)"
+GEN_SCRIPT="$PROJECT_ROOT/src/hardware/fpga_linux/generate_riscv_fpga_bundle.spl"
+TIMEOUT=30
+PROGRAM=""
+
+for arg in "$@"; do
+    case "$arg" in
+        --timeout=*) TIMEOUT="${arg#--timeout=}" ;;
+        *) [ -z "$PROGRAM" ] && PROGRAM="$arg" ;;
+    esac
+done
+
+if [ -z "$PROGRAM" ]; then
+    echo "Usage: $0 <program.s|program.c|program.elf> [--timeout=N]"
+    exit 1
+fi
+
+if [ ! -f "$PROGRAM" ]; then
+    echo "Error: Program not found: $PROGRAM"
+    exit 1
+fi
+
+TMP_DIR=$(mktemp -d /tmp/ghdl_generated_rv32_XXXXXX)
+trap "rm -rf $TMP_DIR" EXIT
+
+GEN_DIR="$TMP_DIR/generated"
+TEST_BASE="$TMP_DIR/program"
+TEST_ELF="$TEST_BASE.elf"
+TEST_BIN="$TEST_BASE.bin"
+TEST_PKG="$TMP_DIR/test_program.vhd"
+
+EXT="${PROGRAM##*.}"
+
+if [ "$EXT" = "s" ]; then
+    riscv64-linux-gnu-as -march=rv32i -mabi=ilp32 -o "$TEST_BASE.o" "$PROGRAM"
+    riscv64-linux-gnu-ld -m elf32lriscv -Ttext=0x80000000 --no-relax -o "$TEST_ELF" "$TEST_BASE.o"
+elif [ "$EXT" = "c" ]; then
+    riscv64-linux-gnu-gcc -march=rv32i -mabi=ilp32 -nostdlib -nostartfiles \
+        -Wl,-Ttext=0x80000000,--no-warn-rwx-segment,--no-relax \
+        -static -O2 -I"$(dirname "$PROGRAM")" -o "$TEST_ELF" "$PROGRAM"
+elif [ "$EXT" = "elf" ]; then
+    cp "$PROGRAM" "$TEST_ELF"
+else
+    echo "Unsupported program type: $EXT"
+    exit 1
+fi
+
+bin/simple run "$GEN_SCRIPT" -- "$GEN_DIR" >/dev/null
+RTL_DIR="$GEN_DIR/rv32/rtl"
+riscv64-linux-gnu-objcopy -O binary "$TEST_ELF" "$TEST_BIN"
+
+python3 -c "
+import struct
+data = open('$TEST_BIN', 'rb').read()
+while len(data) % 4 != 0: data += b'\x00'
+words = [struct.unpack('<I', data[i:i+4])[0] for i in range(0, len(data), 4)]
+print('library ieee;')
+print('use ieee.std_logic_1164.all;')
+print('package test_program is')
+print('    type word_array_t is array (natural range <>) of std_logic_vector(31 downto 0);')
+print('    constant PROGRAM_SIZE : integer := %d;' % len(words))
+print('    constant PROGRAM_DATA : word_array_t(0 to %d) := (' % (len(words)-1))
+for i, w in enumerate(words):
+    comma = ',' if i < len(words)-1 else ''
+    print('        x\"%08x\"%s' % (w, comma))
+print('    );')
+print('end package test_program;')
+" > "$TEST_PKG"
+
+cd "$TMP_DIR"
+ghdl -a --std=08 \
+    "$GEN_DIR/rv32/rtl/simple_rv32i_core_pkg.vhd" \
+    "$GEN_DIR/rv32/rtl/simple_rv32gc_core.vhd" \
+    "$RTL_DIR/rv32i_generated_wrapper.vhd" \
+    "$TEST_PKG" \
+    "$RTL_DIR/tb_generated_rv32_smoke.vhd"
+ghdl -e --std=08 tb_generated_rv32_smoke
+
+STOP_MS=$((TIMEOUT * 1000))
+OUTPUT=$(timeout "$TIMEOUT" ghdl -r --std=08 tb_generated_rv32_smoke --stop-time="${STOP_MS}ms" 2>&1) || EXIT_STATUS=$?
+EXIT_STATUS=${EXIT_STATUS:-0}
+
+echo "$OUTPUT" | grep -E "CYCLES:|PASS_WORD:|FAIL_WORD:|GENERATED_RV32_SMOKE:" || true
+
+if [ "$EXIT_STATUS" = "124" ]; then
+    echo "[GHDL-GEN-RV32] TIMEOUT after ${TIMEOUT}s"
+    exit 124
+fi
+
+if echo "$OUTPUT" | grep -q "GENERATED_RV32_SMOKE: PASS"; then
+    echo "[GHDL-GEN-RV32] PASS"
+    exit 0
+fi
+
+echo "[GHDL-GEN-RV32] FAIL"
+exit 1

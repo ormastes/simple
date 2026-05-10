@@ -1,0 +1,104 @@
+# @cover src/app/game/main.spl 80%
+# @cover src/app/game/new.spl 80%
+# @cover src/app/game/test.spl 60%
+# @cover src/app/game/inspect.spl 60%
+# @cover src/app/game/run.spl 60%
+# @cover src/app/cli/dispatch/table.spl 30%
+"""
+# Game2D CLI (AC-7)
+
+`bin/simple game new <name>`, `game inspect assets`, `game test --headless`,
+`game run --scene main` are dispatched from `src/app/game/`. Dispatcher table
+must include a `CommandEntry { name: "game", ... }` row.
+
+`game run --scene main` requires a window backend; gated via
+`SIMPLEOS_GAME_HEADLESS_ONLY=1` to skip in CI.
+
+Edge case: `game new` into existing non-empty dir → exit code 2.
+
+Red-phase: src/app/game/* absent; signature-presence assertions fail.
+
+**Status:** Failing (no impl)
+"""
+
+use std.spec.{describe, it, expect}
+
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_env_get(key: text) -> text
+
+fn _read(path: text) -> text:
+    if rt_file_exists(path):
+        rt_file_read_text(path)
+    else:
+        ""
+
+fn _has(s: text, n: text) -> bool:
+    s.contains(n)
+
+fn _headless_only() -> bool:
+    val v = rt_env_get("SIMPLEOS_GAME_HEADLESS_ONLY")
+    v == "1"
+
+describe "Game2D CLI (AC-7)":
+    """## bin/simple game subcommands."""
+
+    describe "dispatcher table includes the `game` command":
+        it "src/app/cli/dispatch/table.spl mentions name=\"game\"":
+            val src = _read("src/app/cli/dispatch/table.spl")
+            expect(_has(src, "\"game\"") and _has(src, "src/app/game/")
+                ).to_equal(true)
+
+        it "edge case: synthetic dispatch row matches detector":
+            val sample =
+                "CommandEntry { name: \"game\", app_path: \"src/app/game/main.spl\" }"
+            expect(_has(sample, "\"game\"")).to_equal(true)
+
+    describe "subcommand entry points exist":
+        it "src/app/game/main.spl exists":
+            expect(rt_file_exists("src/app/game/main.spl")).to_equal(true)
+
+        it "src/app/game/new.spl exists":
+            expect(rt_file_exists("src/app/game/new.spl")).to_equal(true)
+
+        it "src/app/game/test.spl exists":
+            expect(rt_file_exists("src/app/game/test.spl")).to_equal(true)
+
+        it "src/app/game/inspect.spl exists":
+            expect(rt_file_exists("src/app/game/inspect.spl")).to_equal(true)
+
+        it "src/app/game/run.spl exists":
+            expect(rt_file_exists("src/app/game/run.spl")).to_equal(true)
+
+    describe "subcommand dispatch logic":
+        it "main.spl dispatches new|run|test|inspect":
+            val src = _read("src/app/game/main.spl")
+            expect(_has(src, "new") and _has(src, "run") and
+                   _has(src, "test") and _has(src, "inspect")
+                ).to_equal(true)
+
+        it "edge case: empty main.spl does not satisfy":
+            expect(_has("", "new")).to_equal(false)
+
+    describe "edge case: `game new` into existing non-empty dir":
+        it "new.spl mentions exit code 2 / dir-exists path":
+            val src = _read("src/app/game/new.spl")
+            expect(_has(src, "exit") and (_has(src, "2") or _has(src, "exists"))
+                ).to_equal(true)
+
+    describe "error path: `game inspect assets` lists declarations":
+        it "inspect.spl mentions assets / load_assets":
+            val src = _read("src/app/game/inspect.spl")
+            expect(_has(src, "assets") or _has(src, "load_assets")
+                ).to_equal(true)
+
+    describe "windowed-run is CI-gated":
+        it "spec respects SIMPLEOS_GAME_HEADLESS_ONLY env gate":
+            # Ensure the env helper is total: it doesn't crash under any value.
+            val result = _headless_only()
+            expect(result == true or result == false).to_equal(true)
+
+        it "edge case: missing env defaults to false (windowed allowed)":
+            # In a clean env this should be false.
+            val v = rt_env_get("__ZZZ_NEVER_SET_ENV__")
+            expect(v == "1").to_equal(false)

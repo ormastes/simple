@@ -1,0 +1,220 @@
+# Editor Keybinding Configuration
+#
+# Keybinding registry: defaults, user-config loading (SDN), merge, and lookup.
+# Line format in SDN file: key: <key> command: <command> mode: <mode>
+
+extern fn rt_file_read_text(path: text) -> text
+
+struct KeyBinding:
+    key: text
+    command: text
+    mode: text
+    args: text
+
+struct KeybindingConfig:
+    bindings: [KeyBinding]
+
+fn default_keybindings() -> KeybindingConfig:
+    val bindings = [
+        # Normal mode — movement
+        KeyBinding(key: "h", command: "move-left", mode: "normal", args: ""),
+        KeyBinding(key: "j", command: "move-down", mode: "normal", args: ""),
+        KeyBinding(key: "k", command: "move-up", mode: "normal", args: ""),
+        KeyBinding(key: "l", command: "move-right", mode: "normal", args: ""),
+        KeyBinding(key: "0", command: "move-line-start", mode: "normal", args: ""),
+        KeyBinding(key: "$", command: "move-line-end", mode: "normal", args: ""),
+        KeyBinding(key: "G", command: "move-file-bottom", mode: "normal", args: ""),
+        KeyBinding(key: "g", command: "move-file-top", mode: "normal", args: ""),
+        # Normal mode — editing
+        KeyBinding(key: "i", command: "enter-insert", mode: "normal", args: ""),
+        KeyBinding(key: "a", command: "append", mode: "normal", args: ""),
+        KeyBinding(key: "o", command: "open-line", mode: "normal", args: ""),
+        KeyBinding(key: "x", command: "delete", mode: "normal", args: ""),
+        KeyBinding(key: "u", command: "undo", mode: "normal", args: ""),
+        KeyBinding(key: "\x12", command: "redo", mode: "normal", args: ""),
+        # Normal mode — window
+        KeyBinding(key: "ctrl_w", command: "wincmd-prefix", mode: "normal", args: ""),
+        # Normal mode — misc
+        KeyBinding(key: ":", command: "enter-command", mode: "normal", args: ""),
+        KeyBinding(key: "q", command: "quit", mode: "normal", args: ""),
+        # Insert mode
+        KeyBinding(key: "\x1b", command: "exit-insert", mode: "insert", args: ""),
+        KeyBinding(key: "\x7f", command: "backspace", mode: "insert", args: ""),
+        KeyBinding(key: "\r", command: "newline", mode: "insert", args: ""),
+        # Command mode
+        KeyBinding(key: "\x1b", command: "cancel", mode: "command", args: ""),
+        KeyBinding(key: "\r", command: "execute", mode: "command", args: "")
+    ]
+    KeybindingConfig(bindings: bindings)
+
+fn keybinding_config_load(path: text) -> KeybindingConfig:
+    val content = rt_file_read_text(path) ?? ""
+    if content == "":
+        return KeybindingConfig(bindings: [])
+    var result: [KeyBinding] = []
+    var start = 0
+    var i = 0
+    while i < content.len():
+        if content.char_at(i) == "\n":
+            val line = content.slice(start, i).trim()
+            val binding = _kb_parse_line(line)
+            val bkey = binding.key
+            if bkey != "":
+                result = result + [binding]
+            start = i + 1
+        i = i + 1
+    if start < content.len():
+        val last_line = content.slice(start, content.len()).trim()
+        val last_binding = _kb_parse_line(last_line)
+        val last_key = last_binding.key
+        if last_key != "":
+            result = result + [last_binding]
+    KeybindingConfig(bindings: result)
+
+fn _kb_parse_line(line: text) -> KeyBinding:
+    if line == "" or line.starts_with("#"):
+        return KeyBinding(key: "", command: "", mode: "", args: "")
+    val key_prefix = "key: "
+    val cmd_prefix = "command: "
+    val mode_prefix = "mode: "
+    val key_pos = _kb_find_substr(line, key_prefix)
+    val cmd_pos = _kb_find_substr(line, cmd_prefix)
+    val mode_pos = _kb_find_substr(line, mode_prefix)
+    if key_pos < 0 or cmd_pos < 0 or mode_pos < 0:
+        return KeyBinding(key: "", command: "", mode: "", args: "")
+    val key_start = key_pos + key_prefix.len()
+    val key_val = _kb_extract_value(line, key_start, cmd_pos)
+    val cmd_start = cmd_pos + cmd_prefix.len()
+    val cmd_val = _kb_extract_value(line, cmd_start, mode_pos)
+    val mode_start = mode_pos + mode_prefix.len()
+    val mode_val = line.slice(mode_start, line.len()).trim()
+    KeyBinding(key: key_val, command: cmd_val, mode: mode_val, args: "")
+
+fn _kb_find_substr(haystack: text, needle: text) -> i64:
+    var i = 0
+    val nlen = needle.len()
+    val hlen = haystack.len()
+    while i <= hlen - nlen:
+        if haystack.slice(i, i + nlen) == needle:
+            return i
+        i = i + 1
+    -1
+
+fn _kb_extract_value(line: text, start: i64, end: i64) -> text:
+    if start >= end:
+        return ""
+    line.slice(start, end).trim()
+
+fn keybinding_config_merge(defaults: KeybindingConfig, user: KeybindingConfig) -> KeybindingConfig:
+    var result: [KeyBinding] = []
+    val dlist = defaults.bindings
+    var di = 0
+    while di < dlist.len():
+        val db = dlist[di]
+        val dk = db.key
+        val dm = db.mode
+        val ub_idx = _kb_find_binding(user.bindings, dk, dm)
+        if ub_idx >= 0:
+            result = result + [user.bindings[ub_idx]]
+        else:
+            result = result + [db]
+        di = di + 1
+    # Append user bindings that are not in defaults
+    val ulist = user.bindings
+    var ui = 0
+    while ui < ulist.len():
+        val ub = ulist[ui]
+        val uk = ub.key
+        val um = ub.mode
+        val exists = _kb_find_binding(defaults.bindings, uk, um)
+        if exists < 0:
+            result = result + [ub]
+        ui = ui + 1
+    KeybindingConfig(bindings: result)
+
+fn _kb_find_binding(bindings: [KeyBinding], key: text, mode: text) -> i64:
+    var i = 0
+    while i < bindings.len():
+        val b = bindings[i]
+        val bk = b.key
+        val bm = b.mode
+        if (bk == key and
+            bm == mode):
+            return i
+        i = i + 1
+    -1
+
+fn resolve_key(config: KeybindingConfig, key: text, mode: text) -> text:
+    val idx = _kb_find_binding(config.bindings, key, mode)
+    if idx >= 0:
+        val b = config.bindings[idx]
+        return b.command
+    ""
+
+fn keybinding_count(config: KeybindingConfig) -> i64:
+    config.bindings.len()
+
+extern fn rt_file_write_text(path: text, content: text) -> bool
+
+fn keybinding_config_add(config: KeybindingConfig, binding: KeyBinding) -> KeybindingConfig:
+    KeybindingConfig(bindings: config.bindings + [binding])
+
+fn keybinding_config_remove(config: KeybindingConfig, index: i64) -> KeybindingConfig:
+    var new_bindings: [KeyBinding] = []
+    var i = 0
+    val bindings = config.bindings
+    while i < bindings.len():
+        if i != index:
+            new_bindings = new_bindings + [bindings[i]]
+        i = i + 1
+    KeybindingConfig(bindings: new_bindings)
+
+fn keybinding_config_update(config: KeybindingConfig, index: i64, binding: KeyBinding) -> KeybindingConfig:
+    var new_bindings: [KeyBinding] = []
+    var i = 0
+    val bindings = config.bindings
+    while i < bindings.len():
+        if i == index:
+            new_bindings = new_bindings + [binding]
+        else:
+            new_bindings = new_bindings + [bindings[i]]
+        i = i + 1
+    KeybindingConfig(bindings: new_bindings)
+
+fn keybinding_config_find_by_key(config: KeybindingConfig, key: text) -> i64:
+    var i = 0
+    val bindings = config.bindings
+    while i < bindings.len():
+        val b = bindings[i]
+        if b.key == key:
+            return i
+        i = i + 1
+    -1
+
+fn keybinding_config_find_by_command(config: KeybindingConfig, command: text) -> i64:
+    var i = 0
+    val bindings = config.bindings
+    while i < bindings.len():
+        val b = bindings[i]
+        if b.command == command:
+            return i
+        i = i + 1
+    -1
+
+fn keybinding_config_to_sdn(config: KeybindingConfig) -> text:
+    var result = ""
+    var i = 0
+    val bindings = config.bindings
+    while i < bindings.len():
+        val b = bindings[i]
+        val line = "key: " + b.key + " command: " + b.command + " mode: " + b.mode
+        if result == "":
+            result = line
+        else:
+            result = result + "\n" + line
+        i = i + 1
+    result
+
+fn keybinding_config_save(config: KeybindingConfig, path: text) -> bool:
+    val content = keybinding_config_to_sdn(config)
+    rt_file_write_text(path, content)

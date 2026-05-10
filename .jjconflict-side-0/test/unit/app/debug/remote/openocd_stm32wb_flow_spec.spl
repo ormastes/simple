@@ -1,0 +1,157 @@
+# STM32WB + OpenOCD Full Flow Tests
+# Tests config → adapter → flash → reset → debug ops for STM32WB via OpenOCD.
+
+# --- Local simulation ---
+
+class OpenocdSession:
+    target_name: text
+    cfg_path: text
+    gdb_port: i32
+    telnet_port: i32
+    program: text
+    state: text
+    flashed: bool
+    breakpoints: [text]
+
+impl OpenocdSession:
+    static fn for_stm32wb(program: text) -> OpenocdSession:
+        OpenocdSession(
+            target_name: "STM32WB",
+            cfg_path: "board/stm32wb5x_nucleo.cfg",
+            gdb_port: 3334,
+            telnet_port: 4334,
+            program: program,
+            state: "disconnected",
+            flashed: false,
+            breakpoints: []
+        )
+
+    me connect() -> Result<text, text>:
+        self.state = "connected"
+        Ok("connected")
+
+    me flash(elf_path: text) -> Result<text, text>:
+        if self.state != "connected" and self.state != "halted":
+            return Err("must be connected to flash")
+        self.flashed = true
+        self.state = "halted"
+        Ok("program {elf_path} verify reset")
+
+    me reset_halt() -> Result<text, text>:
+        if self.state == "disconnected":
+            return Err("not connected")
+        self.state = "halted"
+        Ok("reset halt")
+
+    me halt() -> Result<text, text>:
+        if self.state != "running":
+            return Err("target not running")
+        self.state = "halted"
+        Ok("halted")
+
+    me resume() -> Result<text, text>:
+        if self.state != "halted":
+            return Err("target not halted")
+        self.state = "running"
+        Ok("resumed")
+
+    me single_step() -> Result<text, text>:
+        if self.state != "halted":
+            return Err("target not halted")
+        Ok("stepped")
+
+    me set_breakpoint(location: text) -> Result<i32, text>:
+        self.breakpoints = self.breakpoints + [location]
+        Ok(self.breakpoints.len())
+
+    me read_memory(addr: i64, size: i32) -> Result<text, text>:
+        if self.state != "halted":
+            return Err("target must be halted")
+        Ok("0x00,0x00,0x00,0x00")
+
+    me disconnect():
+        self.state = "disconnected"
+
+# --- Tests ---
+
+describe "STM32WB OpenOCD config":
+    it "creates config with correct cfg path":
+        val s = OpenocdSession.for_stm32wb("wb_firmware.elf")
+        expect(s.cfg_path).to_equal("board/stm32wb5x_nucleo.cfg")
+
+    it "creates config with GDB port 3334":
+        val s = OpenocdSession.for_stm32wb("wb_firmware.elf")
+        expect(s.gdb_port).to_equal(3334)
+
+    it "creates config with telnet port 4334":
+        val s = OpenocdSession.for_stm32wb("wb_firmware.elf")
+        expect(s.telnet_port).to_equal(4334)
+
+    it "target name is STM32WB":
+        val s = OpenocdSession.for_stm32wb("wb_firmware.elf")
+        expect(s.target_name).to_equal("STM32WB")
+
+describe "STM32WB OpenOCD flash flow":
+    it "connect then flash succeeds":
+        var s = OpenocdSession.for_stm32wb("wb_firmware.elf")
+        s.connect()
+        s.flash("wb_firmware.elf")
+        expect(s.flashed).to_equal(true)
+        expect(s.state).to_equal("halted")
+
+    it "flash without connect fails":
+        var s = OpenocdSession.for_stm32wb("wb_firmware.elf")
+        val result = s.flash("wb_firmware.elf")
+        expect(s.flashed).to_equal(false)
+
+describe "STM32WB OpenOCD reset":
+    it "reset_halt transitions to halted":
+        var s = OpenocdSession.for_stm32wb("wb_firmware.elf")
+        s.connect()
+        s.flash("wb_firmware.elf")
+        s.resume()
+        s.reset_halt()
+        expect(s.state).to_equal("halted")
+
+describe "STM32WB OpenOCD debug ops":
+    it "halt from running":
+        var s = OpenocdSession.for_stm32wb("wb_firmware.elf")
+        s.connect()
+        s.flash("wb_firmware.elf")
+        s.resume()
+        s.halt()
+        expect(s.state).to_equal("halted")
+
+    it "resume from halted":
+        var s = OpenocdSession.for_stm32wb("wb_firmware.elf")
+        s.connect()
+        s.flash("wb_firmware.elf")
+        s.resume()
+        expect(s.state).to_equal("running")
+
+    it "single step while halted":
+        var s = OpenocdSession.for_stm32wb("wb_firmware.elf")
+        s.connect()
+        s.flash("wb_firmware.elf")
+        s.single_step()
+        expect(s.state).to_equal("halted")
+
+    it "set breakpoint":
+        var s = OpenocdSession.for_stm32wb("wb_firmware.elf")
+        s.connect()
+        s.set_breakpoint("ble_app.c:42")
+        s.set_breakpoint("ble_app.c:50")
+        expect(s.breakpoints.len()).to_equal(2)
+
+    it "read memory while halted":
+        var s = OpenocdSession.for_stm32wb("wb_firmware.elf")
+        s.connect()
+        s.flash("wb_firmware.elf")
+        val mem = s.read_memory(0x20000000, 4)
+        expect(s.state).to_equal("halted")
+
+    it "disconnect resets state":
+        var s = OpenocdSession.for_stm32wb("wb_firmware.elf")
+        s.connect()
+        s.disconnect()
+        expect(s.state).to_equal("disconnected")

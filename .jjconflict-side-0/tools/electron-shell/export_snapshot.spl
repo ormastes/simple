@@ -1,0 +1,72 @@
+# UI HTML Snapshot Exporter (Simple)
+#
+# Generates a standalone HTML page for a .ui.sdn input using the shared
+# `generate_html_page` pipeline (includes CSS + JS in one file).
+#
+# Usage:
+#   bin/simple run tools/electron-shell/export_snapshot.spl --entry examples/ui/demo_menubar_statusbar.ui.sdn --out build/ui_snapshots/demo.html
+
+use common.ui.parse.sdn_tree.{parse_ui_to_tree}
+use common.ui.state.{init_state}
+use app.ui.web.html.{generate_html_page}
+
+extern fn rt_cli_get_args() -> [text]
+extern fn rt_file_write_text(path: text, content: text) -> bool
+
+fn arg_value(args: [text], key: text, default_value: text) -> text:
+    var i = 0
+    while i < args.len():
+        val a = args[i]
+        if a == key and i + 1 < args.len():
+            return args[i + 1]
+        if a.starts_with("{key}="):
+            return a[key.len() + 1:]
+        i = i + 1
+    return default_value
+
+fn has_flag(args: [text], key: text) -> bool:
+    for a in args:
+        if a == key:
+            return true
+    return false
+
+fn print_usage():
+    print "UI HTML snapshot exporter"
+    print ""
+    print "Usage:"
+    print "  bin/simple run tools/electron-shell/export_snapshot.spl --entry <file.ui.sdn> --out <output.html> [--port N]"
+    print ""
+    print "Options:"
+    print "  --entry <path>    Input .ui.sdn file"
+    print "  --out <path>      Output HTML file (single-file artifact)"
+    print "  --port <N>        WebSocket port embedded in generated JS (default: 3000)"
+
+fn main() -> i64:
+    val args = rt_cli_get_args()
+
+    if has_flag(args, "--help") or has_flag(args, "-h"):
+        print_usage()
+        return 0
+
+    val entry = arg_value(args, "--entry", "")
+    val out = arg_value(args, "--out", "")
+    val port_text = arg_value(args, "--port", "3000")
+
+    if entry == "" or out == "":
+        print_usage()
+        return 1
+
+    val tree_result = parse_ui_to_tree(entry)
+    match tree_result:
+        Err(e):
+            print "Error: failed to parse UI file: {e}"
+            return 1
+        Ok(tree):
+            val state = init_state(tree)
+            val html = generate_html_page(state, port_text.to_int())
+            val ok = rt_file_write_text(out, html)
+            if not ok:
+                print "Error: failed to write output: {out}"
+                return 1
+            print "HTML snapshot: {out}"
+            return 0

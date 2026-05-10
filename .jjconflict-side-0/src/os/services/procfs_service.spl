@@ -1,0 +1,168 @@
+# SimpleOS Process Filesystem Service (G7)
+#
+# ECS-backed /proc node registry. Entities represent mounted procfs
+# nodes, usually reflecting process-manager (PM) state. Real content
+# reads are deferred to the PM endpoint.
+
+use std.ecs.entity.{Entity, EntityAllocator}
+use std.ecs.component_store.{ComponentStore}
+use std.ecs.world.{WorldBase}
+use os.posix.errno.{ENOENT}
+use os.kernel.ipc.message_buffer.{InlineMessage, ipc_send_inline}
+
+# ============================================================================
+# Node kind constants
+# ============================================================================
+
+val PROC_FILE: u32 = 0
+val PROC_DIR: u32 = 1
+
+# ============================================================================
+# Components
+# ============================================================================
+
+struct ProcfsPath:
+    """Absolute path of this procfs node (e.g. '/proc/1/status')."""
+    text: text
+
+struct SourcePid:
+    """PID of the PM process this node reflects (0 for synthetic nodes)."""
+    value: u32
+
+struct NodeKind:
+    """PROC_FILE (0) for file nodes, PROC_DIR (1) for directory nodes."""
+    kind: u32
+
+# ============================================================================
+# ProcfsWorld — ECS world
+# ============================================================================
+
+struct ProcfsWorld:
+    """ECS world owning all /proc entity data."""
+    base:  WorldBase
+    paths: ComponentStore<ProcfsPath>
+    pids:  ComponentStore<SourcePid>
+    kinds: ComponentStore<NodeKind>
+
+# ============================================================================
+# ProcfsService — public API
+# ============================================================================
+
+class ProcfsService:
+    """Process filesystem service.
+
+    Owns a ProcfsWorld (ECS world) internally. Provides path registration,
+    lookup, and enumeration of /proc nodes. The PM endpoint is stored for
+    future read-through; actual content population is deferred.
+    """
+    world:       ProcfsWorld
+    pm_endpoint: u64
+
+impl ProcfsService:
+    static fn new() -> ProcfsService:
+        """Create an empty ProcfsService with no mounted nodes."""
+        ProcfsService(
+            world: ProcfsWorld(
+                base:  WorldBase.new(),
+                paths: ComponentStore.new(),
+                pids:  ComponentStore.new(),
+                kinds: ComponentStore.new()
+            ),
+            pm_endpoint: 0
+        )
+
+    me procfs_mount(pm_endpoint: u64):
+        """Store the PM endpoint for later read-through queries.
+
+        Must be called before any live content is read from /proc.
+        """
+        self.pm_endpoint = pm_endpoint
+
+    me procfs_read(path: text) -> [u8]:
+        """Read content from a procfs node.
+
+        Looks up the node, then either queries the PM via IPC
+        read-through (when pm_endpoint is set) or synthesizes
+        minimal status from local ECS data.
+        """
+        val pid_result = self.procfs_node_lookup(path)
+        if pid_result < 0:
+            return [] as [u8]
+        val pid = pid_result as u32
+        if self.pm_endpoint != 0:
+            return _procfs_pm_read(self.pm_endpoint, pid, path)
+        _procfs_synthesize_status(pid)
+
+    fn procfs_list_pids_path() -> text:
+        """Return the canonical root path of the process namespace."""
+        "/proc"
+
+    me procfs_node_register(path: text, pid: u32, kind: u32) -> Entity:
+        """Register a new procfs node and return its entity handle.
+
+        The node is inserted into all three component stores. Duplicate
+        paths are not detected here; callers should check first.
+        """
+        val e = self.world.base.spawn()
+        val tick = self.world.base.now()
+        self.world.paths.insert(e, ProcfsPath(text: path),   tick)
+        self.world.pids.insert(e,  SourcePid(value: pid),    tick)
+        self.world.kinds.insert(e, NodeKind(kind: kind),     tick)
+        e
+
+    fn procfs_node_lookup(path: text) -> i32:
+        """Return the source PID for a node identified by path.
+
+        Returns the PID (>= 0) on success, or -ENOENT (-2) if no node
+        with that path is registered.
+        """
+        val count = self.world.paths.len()
+        var i = 0
+        while i < count:
+            val eid_raw = self.world.paths.entity_at(i)
+            val e = Entity(id: eid_raw, generation: 1)
+            val pslot = self.world.paths.get_slot(e)
+            if pslot >= 0:
+                if self.world.paths.dense[pslot].text == path:
+                    val pidslot = self.world.pids.get_slot(e)
+                    if pidslot >= 0:
+                        return self.world.pids.dense[pidslot].value as i32
+            i = i + 1
+        return 0 - ENOENT
+
+    fn procfs_node_count() -> i32:
+        """Return the number of currently registered procfs nodes."""
+        self.world.paths.len()
+
+# ============================================================================
+# Read-through helpers
+# ============================================================================
+
+fn _procfs_synthesize_status(pid: u32) -> [u8]:
+    """Return minimal synthetic status when PM is unavailable."""
+    val status_text = "pid: {pid}\nstate: unknown\n"
+    status_text.bytes()
+
+fn _procfs_pm_read(endpoint: u64, pid: u32, path: text) -> [u8]:
+    """IPC read-through to the process manager.
+
+    Sends PM_READ (method_id=1) with pid in r0 to the PM endpoint.
+    Falls back to synthesized status until a PM service is available.
+    """
+    val msg = InlineMessage(
+        method_id: 1,
+        cap_count: 0 as u16,
+        flags: 0 as u16,
+        payload_len: path.bytes().len() as u32,
+        badge: 0 as u32,
+        r0: pid as u64,
+        r1: 0,
+        r2: 0,
+        r3: 0,
+        r4: 0,
+        r5: 0,
+        r6: 0,
+        r7: 0
+    )
+    _ = ipc_send_inline(endpoint, msg)
+    _procfs_synthesize_status(pid)

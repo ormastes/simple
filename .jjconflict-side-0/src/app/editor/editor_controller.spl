@@ -1,0 +1,347 @@
+# Editor Controller
+#
+# Shared UI logic for TUI and GUI shells. Handles key dispatch,
+# mode switching, file tree interaction, command line, and view state.
+# Shells create a controller and call handle_key(); rendering is shell-specific.
+
+struct EditorAction:
+    redraw: bool
+    quit: bool
+    status_msg: text
+
+struct NormalKeyResult:
+    message: text
+    quit: bool
+    enter_insert: bool
+    enter_command: bool
+
+struct InsertKeyResult:
+    message: text
+    exit_insert: bool
+
+struct CommandKeyResult:
+    commandline: text
+    done: bool
+    cancelled: bool
+
+class EditorController:
+    session: EditSession
+    file_tree: FileTreeState
+    file_tree_visible: bool
+    focus_panel: text
+    status_msg: text
+    commandline: text
+    pending_prefix: text
+    running: bool
+    config: EditorConfig
+    settings_view: SettingsViewState
+
+impl EditorController:
+
+    static fn new(session: EditSession) -> EditorController:
+        EditorController(
+            session: session,
+            file_tree: FileTreeState.new("."),
+            file_tree_visible: false,
+            focus_panel: "editor",
+            status_msg: "ready",
+            commandline: "",
+            pending_prefix: "",
+            running: true,
+            config: editor_config_default(),
+            settings_view: nil
+        )
+
+    me handle_key(key: text, rects: [SplitRect]) -> EditorAction:
+        if key == "":
+            return EditorAction(redraw: false, quit: false, status_msg: self.status_msg)
+
+        if self.settings_view != nil:
+            return self._dispatch_settings_key(key)
+
+        if self.session.mode == EditorMode.Command:
+            return self._dispatch_command_key(key)
+
+        if self.session.mode == EditorMode.Normal:
+            return self._dispatch_normal_key(key, rects)
+
+        if self.session.mode == EditorMode.Insert:
+            return self._dispatch_insert_key(key)
+
+        EditorAction(redraw: true, quit: false, status_msg: self.status_msg)
+
+    me toggle_file_tree():
+        self.file_tree_visible = if self.file_tree_visible then false else: true
+        if self.file_tree_visible:
+            self.focus_panel = "file_tree"
+        else:
+            self.focus_panel = "editor"
+
+    me toggle_focus():
+        if self.file_tree_visible:
+            self.focus_panel = if self.focus_panel == "editor" then "file_tree" else: "editor"
+
+    fn active_buffer() -> EditorBuffer:
+        self.session.active_buffer()
+
+    fn mode() -> EditorMode:
+        self.session.mode
+
+    fn is_running() -> bool:
+        self.running
+
+    me settings_open():
+        self.settings_view = SettingsViewState.new(full_settings_schema())
+
+    me settings_close():
+        self.settings_view = nil
+
+    me _dispatch_settings_key(key: text) -> EditorAction:
+        val sv = self.settings_view
+        if key == "j":
+            sv.select_next()
+        elif key == "k":
+            sv.select_prev()
+        elif key == "\t":
+            sv.next_category()
+        elif key == "h":
+            sv.prev_category()
+        elif key == "l":
+            sv.next_category()
+        elif key == "\r" or key == "\n":
+            if not sv.editing:
+                val sd = sv.current_setting()
+                if sd.setting_type == "bool":
+                    val cur = editor_config_get_by_key(self.config, sd.key)
+                    val toggled = if cur == "true" then "false" else: "true"
+                    self.config = editor_config_set_by_key(self.config, sd.key, toggled)
+                    self.status_msg = sd.key + " = " + toggled
+                else:
+                    val cur2 = editor_config_get_by_key(self.config, sd.key)
+                    sv.start_edit(cur2)
+        elif key == "\x1b":
+            if sv.editing:
+                sv.cancel_edit()
+            else:
+                self.settings_close()
+        elif key == "q":
+            self.settings_close()
+        elif key == "/":
+            sv.search_query = ""
+            sv.editing = false
+        EditorAction(redraw: true, quit: not self.running, status_msg: self.status_msg)
+
+    me _dispatch_command_key(key: text) -> EditorAction:
+        val result = ctrl_handle_command_key(key, self.commandline)
+        self.commandline = result.commandline
+        if result.done:
+            val parsed = editor_parse_commandline(self.commandline)
+            if parsed.name == "settings":
+                self.settings_open()
+                self.session.mode = EditorMode.Normal
+                self.commandline = ""
+                self.status_msg = "settings"
+                return EditorAction(redraw: true, quit: false, status_msg: self.status_msg)
+            val dispatch_result = editor_dispatch_session(self.session, parsed)
+            self.status_msg = dispatch_result.message
+            if dispatch_result.quit:
+                self.running = false
+            self.session.mode = EditorMode.Normal
+            self.commandline = ""
+        elif result.cancelled:
+            self.session.mode = EditorMode.Normal
+            self.commandline = ""
+            self.status_msg = ""
+        EditorAction(redraw: true, quit: not self.running, status_msg: self.status_msg)
+
+    me _dispatch_normal_key(key: text, rects: [SplitRect]) -> EditorAction:
+        if key == "\x02":
+            self.toggle_file_tree()
+            return EditorAction(redraw: true, quit: false, status_msg: self.status_msg)
+        if key == "\t":
+            self.toggle_focus()
+            return EditorAction(redraw: true, quit: false, status_msg: self.status_msg)
+
+        if self.pending_prefix == "ctrl_w":
+            self.pending_prefix = ""
+            val wresult = wincmd_dispatch(self.session, key, rects)
+            if wresult.handled:
+                self.status_msg = wresult.message
+                if wresult.quit:
+                    self.running = false
+            return EditorAction(redraw: true, quit: not self.running, status_msg: self.status_msg)
+
+        if key == "\x17":
+            self.pending_prefix = "ctrl_w"
+            return EditorAction(redraw: true, quit: false, status_msg: "Ctrl+W ...")
+
+        if self.focus_panel == "file_tree":
+            return self._dispatch_file_tree_key(key)
+
+        val buffer = self.session.active_buffer()
+        if buffer == nil:
+            if key == ":":
+                self.session.mode = EditorMode.Command
+                self.commandline = ""
+            elif key == "q":
+                self.running = false
+            return EditorAction(redraw: true, quit: not self.running, status_msg: self.status_msg)
+
+        val result = ctrl_handle_normal_key(buffer, key)
+        self.status_msg = result.message
+        if result.quit:
+            self.running = false
+        if result.enter_insert:
+            self.session.mode = EditorMode.Insert
+            self.status_msg = "-- INSERT --"
+        if result.enter_command:
+            self.session.mode = EditorMode.Command
+            self.commandline = ""
+        EditorAction(redraw: true, quit: not self.running, status_msg: self.status_msg)
+
+    me _dispatch_insert_key(key: text) -> EditorAction:
+        val buffer = self.session.active_buffer()
+        if buffer == nil:
+            self.session.mode = EditorMode.Normal
+            return EditorAction(redraw: true, quit: false, status_msg: "")
+        val result = ctrl_handle_insert_key(buffer, key)
+        self.status_msg = result.message
+        if result.exit_insert:
+            self.session.mode = EditorMode.Normal
+            self.status_msg = ""
+        EditorAction(redraw: true, quit: false, status_msg: self.status_msg)
+
+    me _dispatch_file_tree_key(key: text) -> EditorAction:
+        if key == "j":
+            self.file_tree.select_next()
+        elif key == "k":
+            self.file_tree.select_prev()
+        elif key == "\r" or key == "\n":
+            if self.file_tree.selected_is_dir():
+                self.file_tree.toggle_expand()
+            else:
+                val fpath = self.file_tree.selected_path()
+                self.session.open_file(fpath)
+                self.focus_panel = "editor"
+                self.status_msg = "opened " + fpath
+        elif key == "\x1b":
+            self.focus_panel = "editor"
+        elif key == ":":
+            self.session.mode = EditorMode.Command
+            self.commandline = ""
+        elif key == "q":
+            self.running = false
+        EditorAction(redraw: true, quit: not self.running, status_msg: self.status_msg)
+
+
+fn ctrl_handle_normal_key(buffer: EditorBuffer, key: text) -> NormalKeyResult:
+    if key == "q":
+        return NormalKeyResult(message: "quit", quit: true, enter_insert: false, enter_command: false)
+    if key == "i":
+        return NormalKeyResult(message: "-- INSERT --", quit: false, enter_insert: true, enter_command: false)
+    if key == "a":
+        buffer.move_relative(0, 1)
+        return NormalKeyResult(message: "-- INSERT --", quit: false, enter_insert: true, enter_command: false)
+    if key == "o":
+        buffer.move_to_line_end()
+        buffer.insert_at_cursor("\n")
+        return NormalKeyResult(message: "-- INSERT --", quit: false, enter_insert: true, enter_command: false)
+    if key == ":":
+        return NormalKeyResult(message: "", quit: false, enter_insert: false, enter_command: true)
+    if key == "h":
+        val result = editor_dispatch(buffer, editor_cmd("move-left"))
+        return NormalKeyResult(message: result.message, quit: false, enter_insert: false, enter_command: false)
+    if key == "j":
+        val result = editor_dispatch(buffer, editor_cmd("move-down"))
+        return NormalKeyResult(message: result.message, quit: false, enter_insert: false, enter_command: false)
+    if key == "k":
+        val result = editor_dispatch(buffer, editor_cmd("move-up"))
+        return NormalKeyResult(message: result.message, quit: false, enter_insert: false, enter_command: false)
+    if key == "l":
+        val result = editor_dispatch(buffer, editor_cmd("move-right"))
+        return NormalKeyResult(message: result.message, quit: false, enter_insert: false, enter_command: false)
+    if key == "0":
+        buffer.move_to_line_start()
+        return NormalKeyResult(message: "home", quit: false, enter_insert: false, enter_command: false)
+    if key == "$":
+        buffer.move_to_line_end()
+        return NormalKeyResult(message: "end", quit: false, enter_insert: false, enter_command: false)
+    if key == "G":
+        buffer.move_cursor(buffer.line_count() - 1, 0)
+        return NormalKeyResult(message: "bottom", quit: false, enter_insert: false, enter_command: false)
+    if key == "g":
+        buffer.move_cursor(0, 0)
+        return NormalKeyResult(message: "top", quit: false, enter_insert: false, enter_command: false)
+    if key == "x":
+        val result = editor_dispatch(buffer, editor_cmd("delete"))
+        return NormalKeyResult(message: result.message, quit: false, enter_insert: false, enter_command: false)
+    if key == "u":
+        val result = editor_dispatch(buffer, editor_cmd("undo"))
+        return NormalKeyResult(message: result.message, quit: false, enter_insert: false, enter_command: false)
+    if key == "\x12":
+        val result = editor_dispatch(buffer, editor_cmd("redo"))
+        return NormalKeyResult(message: result.message, quit: false, enter_insert: false, enter_command: false)
+    NormalKeyResult(message: "", quit: false, enter_insert: false, enter_command: false)
+
+fn ctrl_handle_insert_key(buffer: EditorBuffer, key: text) -> InsertKeyResult:
+    if key == "\x1b":
+        return InsertKeyResult(message: "", exit_insert: true)
+    if key == "\x7f" or key == "\b":
+        editor_dispatch(buffer, editor_cmd("backspace"))
+        return InsertKeyResult(message: "-- INSERT --", exit_insert: false)
+    if key == "\r" or key == "\n":
+        editor_dispatch(buffer, editor_cmd("newline"))
+        return InsertKeyResult(message: "-- INSERT --", exit_insert: false)
+    if key.len() == 1:
+        val code = key.char_code_at(0)
+        if code >= 32:
+            editor_dispatch(buffer, editor_cmd_with("insert-text", key))
+        return InsertKeyResult(message: "-- INSERT --", exit_insert: false)
+    InsertKeyResult(message: "-- INSERT --", exit_insert: false)
+
+fn ctrl_handle_command_key(key: text, commandline: text) -> CommandKeyResult:
+    if key == "\x1b":
+        return CommandKeyResult(commandline: "", done: false, cancelled: true)
+    if key == "\r" or key == "\n":
+        return CommandKeyResult(commandline: commandline, done: true, cancelled: false)
+    if key == "\x7f" or key == "\b":
+        if commandline.len() > 0:
+            return CommandKeyResult(commandline: commandline.slice(0, commandline.len() - 1), done: false, cancelled: false)
+        return CommandKeyResult(commandline: "", done: false, cancelled: true)
+    if key.len() == 1:
+        val code = key.char_code_at(0)
+        if code >= 32:
+            return CommandKeyResult(commandline: commandline + key, done: false, cancelled: false)
+    CommandKeyResult(commandline: commandline, done: false, cancelled: false)
+
+struct LayoutZones:
+    tab_bar_y: i64
+    tab_bar_h: i64
+    sidebar_x: i64
+    sidebar_y: i64
+    sidebar_w: i64
+    sidebar_h: i64
+    editor_x: i64
+    editor_y: i64
+    editor_w: i64
+    editor_h: i64
+    status_y: i64
+    command_y: i64
+
+fn ctrl_compute_zones(ctrl: EditorController, total_w: i64, total_h: i64) -> LayoutZones:
+    val sidebar_w = if ctrl.file_tree_visible then ctrl.session.dock_layout.left_width else: 0
+    val editor_area_h = total_h - 3
+    LayoutZones(
+        tab_bar_y: 0,
+        tab_bar_h: 1,
+        sidebar_x: 0,
+        sidebar_y: 1,
+        sidebar_w: sidebar_w,
+        sidebar_h: editor_area_h,
+        editor_x: sidebar_w,
+        editor_y: 1,
+        editor_w: total_w - sidebar_w,
+        editor_h: editor_area_h,
+        status_y: total_h - 2,
+        command_y: total_h - 1
+    )

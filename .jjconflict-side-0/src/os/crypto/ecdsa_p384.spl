@@ -1,0 +1,146 @@
+# ECDSA P-384 Signing and Verification
+#
+# Pure-Simple wrapper over the P-384 engine in os.crypto.p384.
+# Hashes the message with SHA-384 then delegates to the constant-time
+# pure-Simple ECDSA implementation (RFC 6979 deterministic nonce).
+#
+# Key format:
+#   - Signing:      raw 48-byte big-endian private scalar
+#   - Verification: 97-byte uncompressed SEC1 public key (0x04 || X || Y)
+#
+# Signature format:
+#   - fixed96: 96-byte r||s (48 bytes each, big-endian).
+#
+# Deterministic: uses RFC 6979 nonce generation (no random source needed).
+# Pure-Simple: no FFI — all arithmetic is in os.crypto.p384.
+#
+# Note: The FFI path (rt_ecdsa_p384_{sign,verify}) is available via
+# std.nogc_sync_mut.io.signature_ffi and accepts PKCS#8/SPKI DER keys.
+# This module accepts raw scalar / uncompressed-point encodings.
+#
+# Reference: FIPS 186-5 §6, RFC 6979, SEC1 v2.0 §2.5.1
+
+use os.crypto.sha384.{sha384}
+use os.crypto.p384.{p384_ecdsa_sign, p384_ecdsa_verify}
+
+# ============================================================================
+# Sign / Verify (fixed-width 96-byte r||s)
+# ============================================================================
+
+fn ecdsa_p384_sign_fixed(private_key: [u8], message: [u8]) -> [u8]:
+    """Sign `message` with ECDSA P-384 SHA-384; returns 96-byte r||s.
+
+    Args:
+        private_key: 48-byte big-endian private scalar.
+        message:     Arbitrary byte sequence to sign.
+
+    Returns:
+        96-byte fixed-width r||s (48-byte big-endian r, 48-byte big-endian s).
+        Returns an empty array on any error (malformed key, runtime failure).
+
+    Deterministic: RFC 6979 nonce (SHA-384 HMAC). Pure-Simple — no FFI.
+    """
+    val msg_hash = sha384(message)
+    p384_ecdsa_sign(private_key, msg_hash)
+
+fn ecdsa_p384_verify_fixed(public_key: [u8], message: [u8], signature_fixed96: [u8]) -> bool:
+    """Verify a 96-byte r||s ECDSA P-384 SHA-384 signature.
+
+    Args:
+        public_key:        97-byte uncompressed SEC1 public key (0x04 || X || Y).
+        message:           Message bytes that were signed.
+        signature_fixed96: 96-byte r||s form (48-byte big-endian r, 48-byte big-endian s).
+
+    Returns: true if the signature is valid, false otherwise.
+
+    Pure-Simple — no FFI.
+    """
+    val msg_hash = sha384(message)
+    p384_ecdsa_verify(public_key, msg_hash, signature_fixed96)
+
+# ============================================================================
+# SSH mpint helpers (pure Simple, no FFI) — 48-byte component width
+# ============================================================================
+
+fn _encode_mpint_48(component: [u8]) -> [u8]:
+    """Encode a 48-byte big-endian integer as an SSH mpint (RFC 4251 §5).
+
+    Strips leading zero bytes, prepends 0x00 if high bit is set,
+    and prefixes with 4-byte big-endian length.
+    """
+    var first_nonzero: i64 = 48
+    var i: i64 = 0
+    while i < 48:
+        if component[i] != 0:
+            if first_nonzero == 48:
+                first_nonzero = i
+        i = i + 1
+
+    var mag: [u8] = []
+    if first_nonzero == 48:
+        mag = []
+    else:
+        var j: i64 = first_nonzero
+        while j < 48:
+            mag.push(component[j])
+            j = j + 1
+        if (mag[0] & 0x80) != 0:
+            var padded: [u8] = []
+            padded.push(0)
+            var k: i64 = 0
+            while k < mag.len():
+                padded.push(mag[k])
+                k = k + 1
+            mag = padded
+
+    var result: [u8] = []
+    val mlen: i64 = mag.len()
+    result.push(((mlen >> 24) & 0xFF).to_u8())
+    result.push(((mlen >> 16) & 0xFF).to_u8())
+    result.push(((mlen >> 8) & 0xFF).to_u8())
+    result.push((mlen & 0xFF).to_u8())
+    var m: i64 = 0
+    while m < mlen:
+        result.push(mag[m])
+        m = m + 1
+    result
+
+fn fixed96_to_ssh_mpint_pair(sig: [u8]) -> [u8]:
+    """Convert a 96-byte r||s ECDSA P-384 signature to SSH mpint pair wire format.
+
+    Each of r and s is a 48-byte big-endian integer. The SSH wire format
+    (RFC 4251 §5) encodes each as an mpint.  The pair is concatenated.
+
+    Args:
+        sig: 96-byte r||s fixed-width signature. Returns empty [] if len != 96.
+
+    Returns: SSH wire encoding of r and s, or empty [] on bad input.
+
+    Pure Simple — no FFI.
+    """
+    if sig.len() != 96:
+        return []
+
+    var r_bytes: [u8] = []
+    var s_bytes: [u8] = []
+    var i: i64 = 0
+    while i < 48:
+        r_bytes.push(sig[i])
+        i = i + 1
+    while i < 96:
+        s_bytes.push(sig[i])
+        i = i + 1
+
+    val r_enc = _encode_mpint_48(r_bytes)
+    val s_enc = _encode_mpint_48(s_bytes)
+
+    var result: [u8] = []
+    var j: i64 = 0
+    while j < r_enc.len():
+        result.push(r_enc[j])
+        j = j + 1
+    var k: i64 = 0
+    while k < s_enc.len():
+        result.push(s_enc[k])
+        k = k + 1
+    result

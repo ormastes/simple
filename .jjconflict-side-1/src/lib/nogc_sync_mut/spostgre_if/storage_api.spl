@@ -1,0 +1,57 @@
+# spostgre_if.storage_api — trait surface for the spostgre engine.
+#
+# Twelve verbs grouped into six roles. Traits are signature-only (Simple
+# traits carry no bodies). Concrete impls live in
+# `examples/spostgre/src/engine/*.spl`.
+#
+# Source: doc/05_design/spostgre_design.md §5 (Storage API),
+#         §6 (WAL protocol), §3.2 (system boundary).
+
+use std.spostgre_if.types.{Rel, BlkNo, Lsn, TxnId, PhysPtr}
+
+struct PageBuf:
+    """Reference to a loaded page buffer (handle + pinned generation)."""
+    arena_id: i64
+    offset: i64
+    length: i64
+    generation: i64
+
+trait BufferManager:
+    """Buffer pool surface — load / prefetch pages by (rel, blk)."""
+    fn buf_get(rel: Rel, blk: BlkNo) -> PageBuf
+    fn buf_prefetch(rel: Rel, blk: BlkNo) -> bool
+
+trait WalWriter:
+    """Write-ahead log: record intent, obtain an LSN.
+
+    WAL MUST flush past the returned LSN before pmap publish of the
+    corresponding page (see spostgre_design.md §6.3, §6.4, §6.5).
+    """
+    fn wal_append(txn: TxnId, payload: [u8]) -> Lsn
+
+trait PageStore:
+    """Out-of-place page rewrite — returns a new PhysPtr for the new version."""
+    fn page_rewrite(rel: Rel, blk: BlkNo, new_bytes: [u8], wal_lsn: Lsn) -> PhysPtr
+
+trait PageMap:
+    """Page-indirection map — atomic publish of a (blk -> physptr) binding."""
+    fn pmap_publish(rel: Rel, blk: BlkNo, phys: PhysPtr, wal_lsn: Lsn) -> bool
+
+trait TempStore:
+    """Scratch arena for spill / sort / intermediate results."""
+    fn temp_alloc(txn: TxnId, bytes: i64) -> PhysPtr
+    fn temp_release(txn: TxnId, phys: PhysPtr) -> bool
+
+trait Checkpointer:
+    """Checkpoint boundary — begin a checkpoint, commit when WAL is durable."""
+    fn checkpoint_begin() -> Lsn
+    fn checkpoint_commit(at: Lsn) -> bool
+
+trait BlobStore:
+    """Large-value (TOAST-equivalent) storage on MODEL_IMMUTABLE / GENERAL_MUTABLE."""
+    fn blob_put(rel: Rel, bytes: [u8]) -> PhysPtr
+    fn blob_get(phys: PhysPtr) -> [u8]
+
+trait Vacuumer:
+    """Space reclamation — discard dead versions within [lo_blk, hi_blk]."""
+    fn vacuum_range(rel: Rel, lo_blk: BlkNo, hi_blk: BlkNo) -> i64

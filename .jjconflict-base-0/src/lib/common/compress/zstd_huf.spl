@@ -1,0 +1,642 @@
+use compress.types.{CompressionError}
+use compress.zstd_fse.{ZstdFseEncodeTable, zstd_fse_build_encode_table, zstd_fse_encode_symbols}
+
+val ZSTD_HUF_MAX_BITS: i64 = 11
+val ZSTD_HUF_MAX_SYMBOLS: i64 = 256
+
+struct ZstdHufSymbolInfo:
+    symbol: i64
+    weight: i64
+    bits: i64
+
+struct ZstdHufCanonicalEntry:
+    symbol: i64
+    weight: i64
+    bits: i64
+    code: u32
+
+struct ZstdHufDecodeEntry:
+    symbol: i64
+    bits: i64
+
+fn _zstd_huf_is_power_of_two(value: i64) -> bool:
+    if value <= 0:
+        return false
+    (value & (value - 1)) == 0
+
+fn _zstd_huf_log2_exact(value: i64) -> i64:
+    var probe = value
+    var bits = 0
+    while probe > 1:
+        probe = probe >> 1
+        bits = bits + 1
+    bits
+
+fn _zstd_huf_next_power_of_two(value: i64) -> i64:
+    var target = 1
+    while target <= value:
+        target = target << 1
+    target
+
+fn _zstd_huf_validate_weight(weight: i64) -> Result<(), CompressionError>:
+    if weight < 0:
+        return Err(CompressionError.CorruptStream("zstd huf negative weight"))
+    if weight > ZSTD_HUF_MAX_BITS:
+        return Err(CompressionError.CorruptStream("zstd huf weight exceeds 11 bits"))
+    Ok(())
+
+fn zstd_huf_complete_weights(partial_weights: [i64]) -> Result<[i64], CompressionError>:
+    if partial_weights.len() <= 0:
+        return Err(CompressionError.CorruptStream("zstd huf weights need at least one explicit symbol"))
+    if partial_weights.len() >= ZSTD_HUF_MAX_SYMBOLS:
+        return Err(CompressionError.CorruptStream("zstd huf partial weights exceed symbol bound"))
+    var sum = 0
+    var i = 0
+    while i < partial_weights.len():
+        val weight = partial_weights[i]
+        val valid = _zstd_huf_validate_weight(weight)
+        if valid.is_err():
+            return Err(valid.unwrap_err())
+        if weight > 0:
+            sum = sum + (1 << (weight - 1))
+        i = i + 1
+    val target = _zstd_huf_next_power_of_two(sum)
+    val remainder = target - sum
+    if remainder <= 0 or not _zstd_huf_is_power_of_two(remainder):
+        return Err(CompressionError.CorruptStream("zstd huf final weight cannot complete a power-of-two tree"))
+    val max_bits = _zstd_huf_log2_exact(target)
+    if max_bits <= 0 or max_bits > ZSTD_HUF_MAX_BITS:
+        return Err(CompressionError.CorruptStream("zstd huf tree depth exceeds 11 bits"))
+    val last_weight = _zstd_huf_log2_exact(remainder) + 1
+    var complete = partial_weights
+    complete.push(last_weight)
+    val validated = zstd_huf_weights_to_symbols(complete)
+    if validated.is_err():
+        return Err(validated.unwrap_err())
+    Ok(complete)
+
+fn zstd_huf_weights_to_symbols(weights: [i64]) -> Result<[ZstdHufSymbolInfo], CompressionError>:
+    if weights.len() < 2:
+        return Err(CompressionError.CorruptStream("zstd huf needs at least two present symbols"))
+    if weights.len() > ZSTD_HUF_MAX_SYMBOLS:
+        return Err(CompressionError.CorruptStream("zstd huf weights exceed symbol bound"))
+    var max_weight = 0
+    var non_zero = 0
+    var has_weight_one = false
+    var weight_sum = 0
+    var i = 0
+    while i < weights.len():
+        val weight = weights[i]
+        val valid = _zstd_huf_validate_weight(weight)
+        if valid.is_err():
+            return Err(valid.unwrap_err())
+        if weight > max_weight:
+            max_weight = weight
+        if weight > 0:
+            non_zero = non_zero + 1
+            weight_sum = weight_sum + (1 << (weight - 1))
+        if weight == 1:
+            has_weight_one = true
+        i = i + 1
+    if max_weight <= 0:
+        return Err(CompressionError.CorruptStream("zstd huf has no present symbols"))
+    if non_zero < 2:
+        return Err(CompressionError.CorruptStream("zstd huf needs at least two present symbols"))
+    if not has_weight_one:
+        return Err(CompressionError.CorruptStream("zstd huf requires at least one weight of 1"))
+    # Per RFC 8478 §4.2.1.1, Max_Number_of_Bits is the smallest L such that
+    # sum(2^(w-1)) == 2^L. This is generally L >= max_weight (with equality
+    # only when at least one symbol has the maximum codeword length); when
+    # the weights complete to a strictly larger power of two, max_bits
+    # exceeds max_weight and `bits = max_bits + 1 - w`, not max_weight + 1 - w.
+    if not _zstd_huf_is_power_of_two(weight_sum):
+        return Err(CompressionError.CorruptStream("zstd huf weight sum is not a power of two"))
+    val max_bits = _zstd_huf_log2_exact(weight_sum)
+    if max_bits < max_weight:
+        return Err(CompressionError.CorruptStream("zstd huf weight sum below max weight"))
+    if max_bits > ZSTD_HUF_MAX_BITS:
+        return Err(CompressionError.CorruptStream("zstd huf tree depth exceeds 11 bits"))
+    var symbols: [ZstdHufSymbolInfo] = []
+    i = 0
+    while i < weights.len():
+        val weight = weights[i]
+        var bits = 0
+        if weight > 0:
+            bits = max_bits + 1 - weight
+        symbols.push(ZstdHufSymbolInfo(symbol: i, weight: weight, bits: bits))
+        i = i + 1
+    Ok(symbols)
+
+fn _zstd_huf_sort_for_canonical(symbols: [ZstdHufSymbolInfo]) -> [ZstdHufSymbolInfo]:
+    var filtered: [ZstdHufSymbolInfo] = []
+    var i = 0
+    while i < symbols.len():
+        val symbol = symbols[i]
+        if symbol.weight > 0:
+            filtered.push(symbol)
+        i = i + 1
+    var result = filtered
+    val n = result.len()
+    i = 0
+    while i < n:
+        var j = 0
+        while j < n - 1 - i:
+            val left = result[j]
+            val right = result[j + 1]
+            var should_swap = false
+            if left.weight > right.weight:
+                should_swap = true
+            elif left.weight == right.weight and left.symbol > right.symbol:
+                should_swap = true
+            if should_swap:
+                result[j] = right
+                result[j + 1] = left
+            j = j + 1
+        i = i + 1
+    result
+
+fn zstd_huf_build_canonical_entries(weights: [i64]) -> Result<[ZstdHufCanonicalEntry], CompressionError>:
+    val symbols_res = zstd_huf_weights_to_symbols(weights)
+    if symbols_res.is_err():
+        return Err(symbols_res.unwrap_err())
+    val ordered = _zstd_huf_sort_for_canonical(symbols_res.unwrap())
+    var entries: [ZstdHufCanonicalEntry] = []
+    if ordered.len() == 0:
+        return Err(CompressionError.CorruptStream("zstd huf has no present symbols"))
+    var next_code: u32 = 0u32
+    var prev_bits = ordered[0].bits
+    var i = 0
+    while i < ordered.len():
+        val symbol = ordered[i]
+        if i > 0:
+            next_code = next_code + 1u32
+            if symbol.bits > prev_bits:
+                return Err(CompressionError.CorruptStream("zstd huf canonical order grew in bit length"))
+            if symbol.bits < prev_bits:
+                next_code = next_code >> (prev_bits - symbol.bits).to_u32()
+            prev_bits = symbol.bits
+        entries.push(ZstdHufCanonicalEntry(
+            symbol: symbol.symbol,
+            weight: symbol.weight,
+            bits: symbol.bits,
+            code: next_code
+        ))
+        i = i + 1
+    Ok(entries)
+
+fn zstd_huf_reverse_bits(value: u32, width: i64) -> u32:
+    var out: u32 = 0u32
+    var i = 0
+    while i < width:
+        out = out << 1u32
+        out = out | ((value >> i.to_u32()) & 1u32)
+        i = i + 1
+    out
+
+# ---------------------------------------------------------------------------
+# Huffman encoder primitives (RFC 8478 §4.2.2).
+#
+# The encoder takes raw literal bytes, derives a weight set whose
+# `sum(2^(w-1))` is a power of two (Kraft equality), runs that through the
+# existing `zstd_huf_build_canonical_entries` for canonical codes, and emits
+# a backward bit stream consumed by the matching `ZstdBackwardBits` reader.
+# Weight derivation is a deterministic length-limited approximation of the
+# package-merge algorithm: when symbol counts already give Kraft-valid
+# lengths within MAX_BITS the result is optimal; otherwise tree depth is
+# clamped to MAX_BITS by promoting under-utilised codes.
+# ---------------------------------------------------------------------------
+
+fn _zstd_huf_count_frequencies(literals: [u8]) -> [i64]:
+    var counts: [i64] = []
+    var i = 0
+    while i < ZSTD_HUF_MAX_SYMBOLS:
+        counts.push(0)
+        i = i + 1
+    i = 0
+    while i < literals.len():
+        val sym = literals[i].to_i64()
+        counts[sym] = counts[sym] + 1
+        i = i + 1
+    counts
+
+fn _zstd_huf_synthetic_partner_symbol(symbol: i64) -> i64:
+    if symbol != 0:
+        return 0
+    1
+
+# Pick a tree depth `bits` (in [3, MAX_BITS]) and a per-symbol weight set
+# that satisfies the Zstd Kraft equality `sum(2^(w-1)) == 2^bits` while
+# keeping codeword lengths roughly proportional to log2(total/count). For
+# small alphabets we use a lightweight greedy: rank symbols by frequency,
+# assign the most-frequent symbol the largest weight, run the count
+# upward, and finally adjust weights so the Kraft sum hits a power of two
+# at depth `bits`.
+fn _zstd_huf_assign_weights(counts: [i64]) -> Result<[i64], CompressionError>:
+    var present: [i64] = []
+    var i = 0
+    while i < counts.len():
+        if counts[i] > 0:
+            present.push(i)
+        i = i + 1
+    if present.len() == 1:
+        var weights: [i64] = []
+        i = 0
+        while i < counts.len():
+            weights.push(0)
+            i = i + 1
+        weights[present[0]] = 1
+        weights[_zstd_huf_synthetic_partner_symbol(present[0])] = 1
+        return Ok(weights)
+    if present.len() < 2:
+        return Err(CompressionError.UnsupportedFeature("zstd huf encoder needs at least one literal"))
+    if present.len() > ZSTD_HUF_MAX_SYMBOLS:
+        return Err(CompressionError.CorruptStream("zstd huf alphabet too large"))
+    if present.len() == 2:
+        var weights: [i64] = []
+        i = 0
+        while i < counts.len():
+            weights.push(0)
+            i = i + 1
+        weights[present[0]] = 1
+        weights[present[1]] = 1
+        return Ok(weights)
+    # Sort `present` symbols by ascending frequency; ties broken by
+    # ascending symbol id so the canonical sort matches the decoder.
+    var ordered = present
+    val n = ordered.len()
+    i = 0
+    while i < n:
+        var j = 0
+        while j < n - 1 - i:
+            val left_count = counts[ordered[j]]
+            val right_count = counts[ordered[j + 1]]
+            var should_swap = false
+            if left_count > right_count:
+                should_swap = true
+            elif left_count == right_count and ordered[j] > ordered[j + 1]:
+                should_swap = true
+            if should_swap:
+                val tmp = ordered[j]
+                ordered[j] = ordered[j + 1]
+                ordered[j + 1] = tmp
+            j = j + 1
+        i = i + 1
+    # Choose a tree depth such that the smallest-count symbol can fit at
+    # the deepest position. For an alphabet of size A the minimum required
+    # depth is ceil(log2(A)); use that as the encoder's `max_bits` and
+    # spread weights linearly across [1, max_bits] in rank order so the
+    # most-frequent symbol gets the maximum weight.
+    var max_bits = 1
+    var probe = 1
+    while probe < ordered.len():
+        max_bits = max_bits + 1
+        probe = probe << 1
+    if max_bits > ZSTD_HUF_MAX_BITS:
+        return Err(CompressionError.UnsupportedFeature("zstd huf encoder alphabet exceeds 11-bit depth"))
+    if max_bits < 2:
+        max_bits = 2
+    var weights: [i64] = []
+    i = 0
+    while i < counts.len():
+        weights.push(0)
+        i = i + 1
+    val a = ordered.len()
+    i = 0
+    while i < a:
+        # rank 0 is the rarest; assign it the smallest non-zero weight (1)
+        # and the most-frequent (rank a-1) gets weight max_bits.
+        var w = 1 + ((i.to_i64() * (max_bits - 1)) / (if a > 1: a - 1 else: 1))
+        if w < 1:
+            w = 1
+        if w > max_bits:
+            w = max_bits
+        weights[ordered[i]] = w
+        i = i + 1
+    # Force at least one weight of 1 (RFC requirement) and one weight of
+    # max_bits (so the canonical builder produces valid codes).
+    val rarest_sym = ordered[0]
+    weights[rarest_sym] = 1
+    val frequent_sym = ordered[a - 1]
+    weights[frequent_sym] = max_bits
+    # Now patch weights so sum(2^(w-1)) is a power of two. Iterate on the
+    # *least*-frequent non-trivial symbol: if Kraft sum is below the next
+    # power of two, raise that symbol's weight by 1 (which subtracts
+    # 2^(w-1) and adds 2^w == 2*2^(w-1), net +2^(w-1)). Bound the loop by
+    # the alphabet so we cannot loop forever; if convergence fails we
+    # surface the same error the decoder produces.
+    var attempts = 0
+    while attempts < a * 8:
+        var sum = 0
+        var k = 0
+        while k < weights.len():
+            if weights[k] > 0:
+                sum = sum + (1 << (weights[k] - 1))
+            k = k + 1
+        if _zstd_huf_is_power_of_two(sum):
+            val depth = _zstd_huf_log2_exact(sum)
+            if depth >= 1 and depth <= ZSTD_HUF_MAX_BITS:
+                return Ok(weights)
+        # Find the lowest-rank symbol whose weight can increase without
+        # exceeding max_bits (preserves rank ordering: rank 0 is at
+        # weight 1 already, rank a-1 is at weight max_bits).
+        var bumped = false
+        var ri = 1
+        while ri < a - 1:
+            val sym = ordered[ri]
+            if weights[sym] < max_bits and weights[sym] < weights[ordered[ri + 1]]:
+                weights[sym] = weights[sym] + 1
+                bumped = true
+                break
+            ri = ri + 1
+        if not bumped:
+            # All mid-rank weights saturated; allow the rarest non-1 to
+            # rise so the Kraft sum can advance.
+            var rj = 1
+            while rj < a:
+                if weights[ordered[rj]] < max_bits:
+                    weights[ordered[rj]] = weights[ordered[rj]] + 1
+                    bumped = true
+                    break
+                rj = rj + 1
+        if not bumped:
+            break
+        attempts = attempts + 1
+    Err(CompressionError.UnsupportedFeature("zstd huf encoder weight balancing did not converge"))
+
+# Build a symbol -> (code, bits) lookup from canonical entries.
+struct ZstdHufEncodeEntry:
+    bits: i64
+    code: u32
+
+fn _zstd_huf_encoder_lookup(canonical: [ZstdHufCanonicalEntry]) -> [ZstdHufEncodeEntry]:
+    var lookup: [ZstdHufEncodeEntry] = []
+    var i = 0
+    while i < ZSTD_HUF_MAX_SYMBOLS:
+        lookup.push(ZstdHufEncodeEntry(bits: 0, code: 0u32))
+        i = i + 1
+    i = 0
+    while i < canonical.len():
+        val entry = canonical[i]
+        lookup[entry.symbol] = ZstdHufEncodeEntry(bits: entry.bits, code: entry.code)
+        i = i + 1
+    lookup
+
+# Top-level Huffman literal-stream encoder. Returns the packed backward bit
+# stream (consumable by `ZstdBackwardBits` + the existing
+# `_zstd_decode_huffman_stream` decoder) plus the weight set written into
+# the literals header. Caller is responsible for prepending the
+# Huffman_Tree_Description and Jump_Table (if any) per RFC 8478 §4.2.1.
+#
+# Bit-layout (W14-A fix, 2026-05-02). The matching `ZstdBackwardBits`
+# reader, after init+full-refill, exposes the bit stream LSB-first in a
+# scrambled byte order:
+#
+#     reservoir bits (low -> high) = data[end-1] bits 0..V-1,
+#                                    data[end-2] bits 0..7,
+#                                    data[end-3] bits 0..7,
+#                                    ...,
+#                                    data[start] bits 0..7
+#
+# where V = K mod 8 is the count of valid data bits in the marker byte
+# (the bit at position V holds the `1` end-of-stream marker). The encoder
+# therefore emits literals in INPUT order (lit[0] first, lit[len-1] last)
+# into a flat LSB-first bit buffer, then repacks into the layout above so
+# emission i lands at decoder read position i.
+#
+# The previous W9-C encoder used `zstd_bit_writer_append_lsb` + reverse
+# literal order, which only round-tripped while the whole stream fit in a
+# single byte; longer streams produced corrupted literals because the
+# decoder's byte-reversed refill scrambles bit positions across byte
+# boundaries (W13-B falsifying probe).
+fn zstd_huf_encode_literals(literals: [u8]) -> Result<([u8], [i64]), CompressionError>:
+    if literals.len() == 0:
+        return Err(CompressionError.UnsupportedFeature("zstd huf encode of empty literal stream"))
+    val counts = _zstd_huf_count_frequencies(literals)
+    val weights_res = _zstd_huf_assign_weights(counts)
+    if weights_res.is_err():
+        return Err(weights_res.unwrap_err())
+    val weights = weights_res.unwrap()
+    val canonical_res = zstd_huf_build_canonical_entries(weights)
+    if canonical_res.is_err():
+        return Err(canonical_res.unwrap_err())
+    val canonical = canonical_res.unwrap()
+    val lookup = _zstd_huf_encoder_lookup(canonical)
+    # Flat LSB-first bit buffer: byte_buf[k] holds emission bits 8k..8k+7,
+    # leftover holds the trailing leftover_count bits (0..7).
+    var byte_buf: [u8] = []
+    var leftover: u64 = 0u64
+    var leftover_count: i64 = 0
+    var i = 0
+    while i < literals.len():
+        val sym = literals[i].to_i64()
+        val entry = lookup[sym]
+        if entry.bits <= 0:
+            return Err(CompressionError.CorruptStream("zstd huf encode missing code for present symbol"))
+        # The decoder reads bits via `zstd_huf_reverse_bits(code, bits)`
+        # because canonical codes are MSB-first but the backward reader
+        # is LSB-first; the encoder must emit the *reversed* code so the
+        # reader's table lookup yields the original symbol.
+        val emitted = zstd_huf_reverse_bits(entry.code, entry.bits)
+        leftover = leftover | (emitted.to_u64() << leftover_count.to_u64())
+        leftover_count = leftover_count + entry.bits
+        while leftover_count >= 8:
+            byte_buf.push((leftover & 0xFFu64).to_u8())
+            leftover = leftover >> 8u64
+            leftover_count = leftover_count - 8
+        i = i + 1
+    # Repack into decoder layout. K = total emission bits.
+    val k_full_bytes = byte_buf.len()
+    val v_tail = leftover_count
+    # Marker byte: lower v_tail bits = bit-stream bits 0..v_tail-1
+    # (which are byte_buf[0]'s lowest v_tail bits when v_tail > 0,
+    # or zero when v_tail == 0 because no bits precede the marker).
+    var marker_byte: u8 = 0u8
+    if v_tail > 0:
+        if k_full_bytes > 0:
+            marker_byte = byte_buf[0] & ((1u8 << v_tail.to_u8()) - 1u8)
+        else:
+            marker_byte = (leftover & 0xFFu64).to_u8()
+    marker_byte = marker_byte | (1u8 << v_tail.to_u8())
+    # Remaining bits: bit positions v_tail..K-1, sliced into bytes
+    # LSB-first (8 bits each, last potentially partial). Each slice
+    # straddles two adjacent entries of byte_buf (or byte_buf+leftover)
+    # because v_tail shifts the byte boundary.
+    var remaining_bytes: [u8] = []
+    var src_idx = 0
+    while src_idx < k_full_bytes:
+        # Take high (8 - v_tail) bits of byte_buf[src_idx] as the low
+        # bits of the output byte, then the low v_tail bits of the next
+        # source as the high bits.
+        var out_byte: u64 = 0u64
+        if v_tail == 0:
+            out_byte = byte_buf[src_idx].to_u64()
+        else:
+            out_byte = (byte_buf[src_idx].to_u64() >> v_tail.to_u64()) & 0xFFu64
+            val next_low: u64 = if src_idx + 1 < k_full_bytes:
+                    byte_buf[src_idx + 1].to_u64()
+                else:
+                    leftover
+            out_byte = out_byte | ((next_low & ((1u64 << v_tail.to_u64()) - 1u64)) << (8 - v_tail).to_u64())
+        remaining_bytes.push((out_byte & 0xFFu64).to_u8())
+        src_idx = src_idx + 1
+    # remaining_bytes[0] holds bit-stream bits v_tail..v_tail+7,
+    # remaining_bytes[N-2] holds bits v_tail+8(N-2)..K-1. Decoder
+    # expects out[end-1] = marker_byte, out[end-2] = remaining_bytes[0],
+    # ..., out[start] = remaining_bytes[N-2]. So output = reverse
+    # remaining_bytes ++ [marker_byte].
+    var out: [u8] = []
+    var rb = remaining_bytes.len() - 1
+    while rb >= 0:
+        out.push(remaining_bytes[rb])
+        rb = rb - 1
+    out.push(marker_byte)
+    Ok((out, weights))
+
+# Encode the Huffman weight set as a *direct* (uncompressed) header per RFC
+# 8478 §4.2.1.1 with `headerByte >= 128`. Each direct weight uses 4 bits;
+# an even-count alphabet has an extra zero nibble; the *last* weight is
+# implicit (derived from the Kraft completion) and therefore not encoded.
+fn zstd_huf_encode_direct_weight_header(weights: [i64]) -> Result<[u8], CompressionError>:
+    if weights.len() < 2:
+        return Err(CompressionError.CorruptStream("zstd huf encode direct header needs >=2 weights"))
+    if weights.len() > ZSTD_HUF_MAX_SYMBOLS:
+        return Err(CompressionError.CorruptStream("zstd huf encode direct header alphabet too large"))
+    val number_of_explicit = weights.len() - 1
+    if number_of_explicit > 128:
+        return Err(CompressionError.UnsupportedFeature("zstd huf direct header > 128 explicit weights"))
+    var out: [u8] = []
+    out.push((127 + number_of_explicit).to_u8())
+    var i = 0
+    while i < number_of_explicit:
+        val high = weights[i]
+        var low = 0
+        if i + 1 < number_of_explicit:
+            low = weights[i + 1]
+        if high < 0 or high > 15 or low < 0 or low > 15:
+            return Err(CompressionError.CorruptStream("zstd huf direct header weight out of nibble range"))
+        out.push(((high << 4) | low).to_u8())
+        i = i + 2
+    Ok(out)
+
+# Encode a Huffman weight set as an FSE-compressed header (headerByte < 128
+# carrying the FSE bitstream byte length). Builds a normalised count
+# distribution over the weight values [0..MAX_BITS], runs the common FSE
+# encoder, and prepends the accuracy_log nibble + per-symbol normalised
+# count nibble pair the decoder expects.
+fn _zstd_huf_count_weight_distribution(weights: [i64]) -> ([i64], i64):
+    val explicit = weights.len() - 1
+    var dist: [i64] = []
+    var i = 0
+    while i <= ZSTD_HUF_MAX_BITS:
+        dist.push(0)
+        i = i + 1
+    i = 0
+    while i < explicit:
+        val w = weights[i]
+        if w >= 0 and w <= ZSTD_HUF_MAX_BITS:
+            dist[w] = dist[w] + 1
+        i = i + 1
+    (dist, explicit.to_i64())
+
+fn _zstd_huf_normalize_for_fse(dist: [i64], total: i64, table_log: i64) -> Result<[i64], CompressionError>:
+    if total <= 0:
+        return Err(CompressionError.CorruptStream("zstd huf fse normalize: zero total"))
+    val table_size = 1 << table_log
+    var counts: [i64] = []
+    var i = 0
+    while i < dist.len():
+        counts.push(0)
+        i = i + 1
+    var assigned = 0
+    i = 0
+    while i < dist.len():
+        if dist[i] > 0:
+            # Scale: max(1, round(dist[i] * table_size / total)).
+            var scaled = (dist[i] * table_size + (total / 2)) / total
+            if scaled <= 0:
+                scaled = 1
+            counts[i] = scaled
+            assigned = assigned + scaled
+        i = i + 1
+    # Adjust the largest count so the sum lands on table_size.
+    var diff = table_size - assigned
+    if diff != 0:
+        var max_idx = 0
+        var k = 1
+        while k < counts.len():
+            if counts[k] > counts[max_idx]:
+                max_idx = k
+            k = k + 1
+        counts[max_idx] = counts[max_idx] + diff
+        if counts[max_idx] <= 0:
+            return Err(CompressionError.UnsupportedFeature("zstd huf fse normalize: dominant count went non-positive"))
+    Ok(counts)
+
+# Top-level FSE Huffman-weight encoder. Currently emits a deterministic
+# minimum-table-log layout (table_log = ZSTD_FSE_MIN_TABLE_LOG = 5) and a
+# header byte that records FSE bitstream length. Decoder side already
+# accepts this layout end-to-end (W5-E fix, 2026-05-01).
+fn zstd_huf_encode_fse_weight_header(weights: [i64]) -> Result<[u8], CompressionError>:
+    val (dist, total) = _zstd_huf_count_weight_distribution(weights)
+    if total < 2:
+        return Err(CompressionError.UnsupportedFeature("zstd huf fse weight header needs >=2 explicit weights"))
+    val table_log = 5
+    val counts_res = _zstd_huf_normalize_for_fse(dist, total, table_log)
+    if counts_res.is_err():
+        return Err(counts_res.unwrap_err())
+    val counts = counts_res.unwrap()
+    val table_res = zstd_fse_build_encode_table(table_log, counts)
+    if table_res.is_err():
+        return Err(table_res.unwrap_err())
+    val table = table_res.unwrap()
+    var weight_symbols: [i64] = []
+    val explicit = weights.len() - 1
+    var i = 0
+    while i < explicit:
+        weight_symbols.push(weights[i])
+        i = i + 1
+    val bitstream_res = zstd_fse_encode_symbols(table, weight_symbols)
+    if bitstream_res.is_err():
+        return Err(bitstream_res.unwrap_err())
+    val bitstream = bitstream_res.unwrap()
+    if bitstream.len() >= 128:
+        return Err(CompressionError.UnsupportedFeature("zstd huf fse weight header bitstream >= 128 bytes"))
+    var out: [u8] = []
+    out.push(bitstream.len().to_u8())
+    var b = 0
+    while b < bitstream.len():
+        out.push(bitstream[b])
+        b = b + 1
+    Ok(out)
+
+fn zstd_huf_expand_decode_table(entries: [ZstdHufCanonicalEntry], table_bits: i64) -> Result<[ZstdHufDecodeEntry], CompressionError>:
+    if table_bits <= 0 or table_bits > ZSTD_HUF_MAX_BITS:
+        return Err(CompressionError.CorruptStream("zstd huf decode table width"))
+    val table_size = 1 << table_bits
+    var table: [ZstdHufDecodeEntry] = []
+    var slot = 0
+    while slot < table_size:
+        table.push(ZstdHufDecodeEntry(symbol: -1, bits: 0))
+        slot = slot + 1
+    var i = 0
+    while i < entries.len():
+        val entry = entries[i]
+        if entry.bits <= 0 or entry.bits > table_bits:
+            return Err(CompressionError.CorruptStream("zstd huf decode table entry width"))
+        val base = zstd_huf_reverse_bits(entry.code, entry.bits)
+        val fill_count = 1 << (table_bits - entry.bits)
+        var fill = 0
+        while fill < fill_count:
+            val slot_idx = (base | (fill.to_u32() << entry.bits.to_u32())).to_i64()
+            val current = table[slot_idx]
+            if current.bits != 0:
+                return Err(CompressionError.CorruptStream("zstd huf decode table collision"))
+            table[slot_idx] = ZstdHufDecodeEntry(symbol: entry.symbol, bits: entry.bits)
+            fill = fill + 1
+        i = i + 1
+    i = 0
+    while i < table.len():
+        if table[i].bits == 0:
+            return Err(CompressionError.CorruptStream("zstd huf decode table incomplete"))
+        i = i + 1
+    Ok(table)

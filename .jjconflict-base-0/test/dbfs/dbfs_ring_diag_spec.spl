@@ -1,0 +1,56 @@
+use std.spipe.*
+use std.db.dbfs_engine.checkpoint_ring.{CheckpointRing, RingSlot, RING_SIZE}
+use std.io_runtime
+
+describe "DBFS Ring Diagnostic":
+
+    it "single write_slot then read_slot works":
+        val ring = CheckpointRing.new_persistent()
+        ring.write_slot(0, RingSlot(gen: 42, clean: true, btree_root_page: 100)).unwrap()
+        val slot = ring.read_slot(0).unwrap()
+        expect(slot.gen).to_equal(42)
+
+    it "loop persist_slot 5 times then current_store reflects all entries":
+        val ring = CheckpointRing.new_persistent()
+        var i: i64 = 0
+        while i < 5:
+            CheckpointRing.persist_slot(i, RingSlot(gen: i + 10, clean: true, btree_root_page: i))
+            i = i + 1
+        val store = ring.current_store()
+        expect(store.len()).to_equal(5)
+
+    it "two separate writes then read_slot 1 works":
+        val ring = CheckpointRing.new_persistent()
+        ring.write_slot(0, RingSlot(gen: 10, clean: true, btree_root_page: 0)).unwrap()
+        ring.write_slot(1, RingSlot(gen: 11, clean: true, btree_root_page: 1)).unwrap()
+        val s1 = ring.read_slot(1).unwrap()
+        expect(s1.gen).to_equal(11)
+
+    it "current_store has entries after writes":
+        val ring = CheckpointRing.new_persistent()
+        ring.write_slot(0, RingSlot(gen: 1, clean: true, btree_root_page: 0)).unwrap()
+        ring.write_slot(1, RingSlot(gen: 2, clean: true, btree_root_page: 1)).unwrap()
+        val store = ring.current_store()
+        expect(store.len() >= 2).to_equal(true)
+
+    it "flush then reopen: read slot 0":
+        val ring = CheckpointRing.new_persistent()
+        ring.write_slot(0, RingSlot(gen: 7, clean: true, btree_root_page: 70)).unwrap()
+        ring.flush().unwrap()
+        ring.close().unwrap()
+        val ring2 = CheckpointRing.reopen()
+        val s = ring2.read_slot(0).unwrap()
+        expect(s.gen).to_equal(7)
+
+    it "persisting the highest slot then reopen sees that slot":
+        val ring = CheckpointRing.new_persistent()
+        CheckpointRing.persist_slot(RING_SIZE - 1, RingSlot(
+            gen: RING_SIZE,
+            clean: true,
+            btree_root_page: (RING_SIZE - 1) * 8
+        ))
+        ring.flush().unwrap()
+        ring.close().unwrap()
+        val ring2 = CheckpointRing.reopen()
+        val slot = ring2.read_slot(RING_SIZE - 1).unwrap()
+        expect(slot.gen).to_equal(RING_SIZE)

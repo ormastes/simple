@@ -1,0 +1,375 @@
+# NOTE: These tests validate MDSOC pipeline integration (Phases 1-8).
+# Run with: bin/simple test test/unit/compiler/mdsoc/pipeline_integration_spec.spl
+#
+# Tests for:
+# - Phase 1: Event port firing (CompilationEventPort wired in CompileContext)
+# - Phase 2: ModuleStoragePort integration
+# - Phase 3: LoggerPort
+# - Phase 4: CompilerServices wiring
+# - Phase 5: CachePort
+# - Phase 6: MetricsPort
+#
+# NOTE: Function-typed struct fields cannot be called as methods in interpreter.
+# Use intermediate variable pattern: val f = obj.field_fn; f(args)
+
+# ============================================================================
+# Phase 1: Event Ports
+# ============================================================================
+
+use compiler.mdsoc.feature.events.ports.{CompilationEventPort, create_noop_event_port}
+
+# Inline profiler tracking (avoids adapters.in keyword path issue)
+var _test_prof_count: i64 = 0
+var _test_prof_last: text = ""
+
+fn _test_prof_i64(count: i64):
+    _test_prof_count = _test_prof_count + 1
+
+fn _test_prof_two(a: i64, b: i64):
+    _test_prof_count = _test_prof_count + 1
+
+fn _test_prof_bool(ok: bool):
+    _test_prof_count = _test_prof_count + 1
+    _test_prof_last = "backend"
+
+fn _test_prof_parse(count: i64):
+    _test_prof_count = _test_prof_count + 1
+    _test_prof_last = "parse"
+
+fn _test_prof_hir(count: i64):
+    _test_prof_count = _test_prof_count + 1
+    _test_prof_last = "hir"
+
+fn _test_prof_mir(count: i64):
+    _test_prof_count = _test_prof_count + 1
+    _test_prof_last = "mir"
+
+describe "CompilationEventPort noop":
+    it "creates noop event port":
+        val port = create_noop_event_port()
+        expect(port.name).to_equal("noop-events")
+
+    it "noop callbacks do not crash":
+        val port = create_noop_event_port()
+        val f1 = port.on_lex_complete_fn
+        f1(100)
+        val f2 = port.on_parse_complete_fn
+        f2(50)
+        val f3 = port.on_hir_complete_fn
+        f3(50)
+        val f4 = port.on_mir_complete_fn
+        f4(50)
+        val f5 = port.on_backend_complete_fn
+        f5(true)
+        expect(true).to_equal(true)
+
+describe "Custom event port":
+    it "tracks stage count":
+        _test_prof_count = 0
+        _test_prof_last = ""
+        val port = CompilationEventPort(
+            name: "test-profiler",
+            on_lex_complete_fn: _test_prof_i64,
+            on_parse_complete_fn: _test_prof_parse,
+            on_desugar_complete_fn: _test_prof_i64,
+            on_type_check_complete_fn: _test_prof_two,
+            on_hir_complete_fn: _test_prof_hir,
+            on_mir_complete_fn: _test_prof_mir,
+            on_backend_complete_fn: _test_prof_bool
+        )
+        val fp = port.on_parse_complete_fn
+        fp(10)
+        val fh = port.on_hir_complete_fn
+        fh(10)
+        expect(_test_prof_count).to_equal(2)
+
+    it "tracks last stage":
+        _test_prof_count = 0
+        _test_prof_last = ""
+        val port = CompilationEventPort(
+            name: "test-profiler",
+            on_lex_complete_fn: _test_prof_i64,
+            on_parse_complete_fn: _test_prof_parse,
+            on_desugar_complete_fn: _test_prof_i64,
+            on_type_check_complete_fn: _test_prof_two,
+            on_hir_complete_fn: _test_prof_hir,
+            on_mir_complete_fn: _test_prof_mir,
+            on_backend_complete_fn: _test_prof_bool
+        )
+        val fp = port.on_parse_complete_fn
+        fp(10)
+        val fh = port.on_hir_complete_fn
+        fh(10)
+        val fm = port.on_mir_complete_fn
+        fm(10)
+        expect(_test_prof_last).to_equal("mir")
+
+    it "tracks all seven stages":
+        _test_prof_count = 0
+        val port = CompilationEventPort(
+            name: "test-profiler",
+            on_lex_complete_fn: _test_prof_i64,
+            on_parse_complete_fn: _test_prof_parse,
+            on_desugar_complete_fn: _test_prof_i64,
+            on_type_check_complete_fn: _test_prof_two,
+            on_hir_complete_fn: _test_prof_hir,
+            on_mir_complete_fn: _test_prof_mir,
+            on_backend_complete_fn: _test_prof_bool
+        )
+        val f1 = port.on_lex_complete_fn
+        f1(100)
+        val f2 = port.on_parse_complete_fn
+        f2(50)
+        val f3 = port.on_desugar_complete_fn
+        f3(50)
+        val f4 = port.on_type_check_complete_fn
+        f4(0, 200)
+        val f5 = port.on_hir_complete_fn
+        f5(50)
+        val f6 = port.on_mir_complete_fn
+        f6(50)
+        val f7 = port.on_backend_complete_fn
+        f7(true)
+        expect(_test_prof_count).to_equal(7)
+
+# ============================================================================
+# Phase 2: Module Storage Port
+# ============================================================================
+
+use compiler.mdsoc.feature.module_loading.app.module_storage_port.{ModuleStoragePort}
+
+extern fn rt_file_read_text(path: text) -> text
+
+describe "ModuleStoragePort file-backed":
+    it "creates file storage":
+        fn _read_file(path: text) -> text: rt_file_read_text(path) ?? ""
+        val storage = ModuleStoragePort(name: "file-storage", read_source_fn: _read_file)
+        expect(storage.name).to_equal("file-storage")
+
+    it "reads existing file":
+        fn _read_file2(path: text) -> text: rt_file_read_text(path) ?? ""
+        val storage = ModuleStoragePort(name: "file-storage", read_source_fn: _read_file2)
+        val reader = storage.read_source_fn
+        val content = reader("src/app/cli/main.spl")
+        expect(content.len()).to_be_greater_than(0)
+
+    it "returns empty for missing file":
+        fn _read_file3(path: text) -> text: rt_file_read_text(path) ?? ""
+        val storage = ModuleStoragePort(name: "file-storage", read_source_fn: _read_file3)
+        val reader = storage.read_source_fn
+        val content = reader("nonexistent_xyz.spl")
+        expect(content).to_equal("")
+
+describe "ModuleStoragePort memory-backed":
+    it "creates memory storage":
+        fn _test_read(path: text) -> text: ""
+        val storage = ModuleStoragePort(name: "memory-storage", read_source_fn: _test_read)
+        expect(storage.name).to_equal("memory-storage")
+
+# ============================================================================
+# Phase 3: Logger Port
+# ============================================================================
+
+use compiler.common.compiler_services.{LoggerPort}
+
+describe "LoggerPort":
+    it "creates noop logger":
+        val logger = LoggerPort(
+            name: "test-logger",
+            level: 0
+        )
+        expect(logger.name).to_equal("test-logger")
+
+    it "noop logger has level field":
+        val logger = LoggerPort(
+            name: "silent",
+            level: 0
+        )
+        expect(logger.level).to_equal(0)
+
+# ============================================================================
+# Phase 4: CompilerServices
+# ============================================================================
+
+use compiler.common.compiler_services.{CompilerServices, create_default_services}
+
+describe "CompilerServices":
+    it "creates default services":
+        val services = create_default_services()
+        expect(services.lexer.name).to_equal("noop-lexer")
+        expect(services.parser.name).to_equal("noop-parser")
+        expect(services.backend.name).to_equal("noop-backend")
+        expect(services.logger.name).to_equal("noop-logger")
+        expect(services.module_loader.name).to_equal("noop-module-loader")
+
+    it "all ports have names":
+        val services = create_default_services()
+        expect(services.desugarer.name).to_equal("noop-desugarer")
+        expect(services.type_checker.name).to_equal("noop-type-checker")
+        expect(services.hir_lowerer.name).to_equal("noop-hir-lowerer")
+        expect(services.mir_lowerer.name).to_equal("noop-mir-lowerer")
+
+# ============================================================================
+# Phase 5: Cache Port
+# ============================================================================
+
+use compiler.mdsoc.feature.cache.cache_port.{CachePort, CacheCheckStatus, CacheStats, create_noop_cache_port}
+
+describe "CachePort noop":
+    it "creates noop cache port":
+        val cache = create_noop_cache_port()
+        expect(cache.name).to_equal("noop-cache")
+
+    it "noop cache always misses":
+        val cache = create_noop_cache_port()
+        val check = cache.check_fn
+        val status = check("key", "hash")
+        expect(status.is_fresh).to_equal(false)
+
+    it "noop cache stats are zero":
+        val cache = create_noop_cache_port()
+        val get_stats = cache.get_stats_fn
+        val stats = get_stats()
+        expect(stats.hits).to_equal(0)
+        expect(stats.misses).to_equal(0)
+
+    it "store does not crash":
+        val cache = create_noop_cache_port()
+        val store = cache.store_fn
+        store("key", "hash", "data")
+        expect(true).to_equal(true)
+
+    it "invalidate does not crash":
+        val cache = create_noop_cache_port()
+        val inv = cache.invalidate_fn
+        inv("key")
+        expect(true).to_equal(true)
+
+describe "CacheStats":
+    it "stores hit and miss counts":
+        val stats = CacheStats(hits: 8, misses: 2, stores: 0, invalidations: 0)
+        expect(stats.hits).to_equal(8)
+        expect(stats.misses).to_equal(2)
+
+# ============================================================================
+# Phase 6: Metrics Port
+# ============================================================================
+
+use compiler.mdsoc.feature.metrics.metrics_port.{MetricsPort, create_noop_metrics_port}
+
+describe "MetricsPort noop":
+    it "creates noop metrics port":
+        val metrics = create_noop_metrics_port()
+        expect(metrics.name).to_equal("noop-metrics")
+
+    it "noop record does not crash":
+        val metrics = create_noop_metrics_port()
+        val rc = metrics.record_counter_fn
+        rc("test", 1)
+        val rg = metrics.record_gauge_fn
+        rg("test", 42)
+        val rt = metrics.record_timing_fn
+        rt("test", 100)
+        expect(true).to_equal(true)
+
+    it "noop get does not crash":
+        val metrics = create_noop_metrics_port()
+        val gc = metrics.get_counter_fn
+        gc("test")
+        expect(true).to_equal(true)
+
+describe "MetricsPort custom":
+    it "creates custom metrics port":
+        fn _mc_noop(name: text, value: i64): ()
+        fn _mc_zero(name: text) -> i64: 0
+        val metrics = MetricsPort(
+            name: "test-metrics",
+            record_counter_fn: _mc_noop,
+            record_gauge_fn: _mc_noop,
+            record_timing_fn: _mc_noop,
+            get_counter_fn: _mc_zero,
+            get_gauge_fn: _mc_zero,
+            get_timing_fn: _mc_zero
+        )
+        expect(metrics.name).to_equal("test-metrics")
+
+# ============================================================================
+# CompileContext field presence
+# ============================================================================
+
+use compiler.driver.driver_types.{CompileContext, CompileOptions}
+
+describe "CompileContext MDSOC ports":
+    it "creates context with event port":
+        val opts = CompileOptions.default()
+        val ctx = CompileContext.create(opts)
+        expect(ctx.event_port.name).to_equal("noop-events")
+
+    it "creates context with module storage":
+        val opts = CompileOptions.default()
+        val ctx = CompileContext.create(opts)
+        expect(ctx.module_storage.name).to_equal("file-module-storage")
+
+    it "creates context with logger port":
+        val opts = CompileOptions.default()
+        val ctx = CompileContext.create(opts)
+        expect(ctx.logger_port.name).to_equal("boot-log")
+
+    it "creates context with cache port":
+        val opts = CompileOptions.default()
+        val ctx = CompileContext.create(opts)
+        expect(ctx.cache_port.name).to_equal("noop-cache")
+
+    it "creates context with metrics port":
+        val opts = CompileOptions.default()
+        val ctx = CompileContext.create(opts)
+        expect(ctx.metrics_port.name).to_equal("noop-metrics")
+
+# ============================================================================
+# Phase 7: AOP Weaving (weave_mir_function delegates to core)
+# ============================================================================
+
+use compiler.tools.aop.{AopWeaver}
+use compiler.frontend.core.aop.{WeavingConfig, Pointcut, PointcutKind}
+use compiler.common.config.{BootLogger}
+
+describe "AopWeaver":
+    it "creates weaver with disabled config":
+        val config = WeavingConfig(enabled: false, before_advices: [], after_success_advices: [], after_error_advices: [], around_advices: [])
+        val logger = BootLogger(level: 0)
+        val weaver = AopWeaver(advices: [], config: config, logger: logger)
+        expect(weaver.config.enabled).to_equal(false)
+
+    it "weaves empty function list":
+        val config = WeavingConfig(enabled: false, before_advices: [], after_success_advices: [], after_error_advices: [], around_advices: [])
+        val logger = BootLogger(level: 0)
+        val weaver = AopWeaver(advices: [], config: config, logger: logger)
+        val result = weaver.weave_mir_function("test_fn", "test_mod", [], [], [])
+        expect(result.advices_inserted).to_equal(0)
+
+# ============================================================================
+# Phase 8: CompilerServices wired with real ports
+# ============================================================================
+
+describe "CompilerServices real wiring":
+    it "services backend matches context backend":
+        val opts = CompileOptions.default()
+        val ctx = CompileContext.create(opts)
+        expect(ctx.services.backend.name).to_equal(ctx.backend.name)
+
+    it "services logger matches context logger port":
+        val opts = CompileOptions.default()
+        val ctx = CompileContext.create(opts)
+        expect(ctx.services.logger.name).to_equal("boot-log")
+
+    it "services module loader is real":
+        val opts = CompileOptions.default()
+        val ctx = CompileContext.create(opts)
+        expect(ctx.services.module_loader.name).to_equal("file-loader")
+
+    it "services pipeline ports are noop":
+        val opts = CompileOptions.default()
+        val ctx = CompileContext.create(opts)
+        expect(ctx.services.lexer.name).to_equal("noop-lexer")
+        expect(ctx.services.parser.name).to_equal("noop-parser")
+        expect(ctx.services.desugarer.name).to_equal("noop-desugarer")

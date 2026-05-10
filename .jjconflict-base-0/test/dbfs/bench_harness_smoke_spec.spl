@@ -1,0 +1,86 @@
+# Maps to: AC-9
+# Run: bin/simple test test/dbfs/bench_harness_smoke_spec.spl
+
+"""
+BenchHarness Smoke Specification
+
+Quick sanity checks for BenchResult and percentile helpers.
+Verifies harness infrastructure compiles and basic math is correct.
+"""
+
+use std.spipe.*
+use std.fs_driver.mount_table.{MountTable}
+use std.fs_driver.instance.{DriverInstance}
+use std.fs_driver.types.{OpenFlags, MountOptions}
+use std.db.dbfs_driver.{DbFsDriver}
+
+struct BenchResult:
+    workload_name: text
+    driver_name: text
+    p50_us: i64
+    p99_us: i64
+    bytes_written: i64
+    logical_bytes: i64
+    recovery_time_us: i64
+    mount_time_us: i64
+    rss_kib: i64
+    cache_hit_ratio: i64
+
+impl BenchResult:
+    fn write_amplification() -> i64:
+        if self.logical_bytes == 0:
+            0
+        else:
+            self.bytes_written * 100 / self.logical_bytes
+
+fn percentile(latencies: [i64], pct: i64) -> i64:
+    if latencies.len() == 0:
+        return 0
+    val sorted = sort_asc(latencies)
+    val idx: i64 = (sorted.len() * pct) / 100
+    sorted[idx]
+
+fn sort_asc(arr: [i64]) -> [i64]:
+    var out: [i64] = arr
+    var i: i64 = 1
+    while i < out.len():
+        val key = out[i]
+        var j: i64 = i - 1
+        while j >= 0 and out[j] > key:
+            out[j + 1] = out[j]
+            j = j - 1
+        out[j + 1] = key
+        i = i + 1
+    out
+
+fn make_dbfs_table() -> MountTable:
+    val mt = MountTable.new()
+    val dbfs = DbFsDriver.new_hosted()
+    mt.mount("/data", DriverInstance.DbFs(dbfs), MountOptions.default()).unwrap()
+    mt
+
+describe "BenchHarness — smoke (metadata storm, 10 files)":
+    it "metadata_storm over DBFS completes for 10 files":
+        val mt = make_dbfs_table()
+        var i: i64 = 0
+        while i < 10:
+            val path = "/data/smoke_" + i.to_text()
+            mt.open(path, OpenFlags.create_write()).unwrap()
+            mt.unlink(path).unwrap()
+            i = i + 1
+        expect(i).to_equal(10)
+        val post_stat = mt.stat("/data/smoke_5")
+        expect(post_stat.is_err()).to_equal(true)
+
+    it "BenchResult write_amplification returns 0 when logical_bytes=0":
+        val r = BenchResult(
+            workload_name: "test", driver_name: "x",
+            p50_us: 0, p99_us: 0, bytes_written: 0, logical_bytes: 0,
+            recovery_time_us: 0, mount_time_us: 0, rss_kib: 0, cache_hit_ratio: 0,
+        )
+        expect(r.write_amplification()).to_equal(0)
+
+    it "percentile of sorted list returns correct element":
+        val data: [i64] = [10, 20, 30, 40, 50, 60, 70, 80, 90, 100]
+        val p50 = percentile(data, 50)
+        expect(p50 >= 50 and p50 <= 60).to_equal(true)

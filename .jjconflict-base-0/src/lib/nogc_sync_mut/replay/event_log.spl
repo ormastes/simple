@@ -1,0 +1,206 @@
+# SReplay — Host-Side Event Log Reader/Writer
+#
+# Reads and writes trace files with SDN metadata header + binary events.
+# Trace file layout:
+#   manifest.sdn   — arch, pointer_width, endianness, event_count
+#   events.bin     — concatenated 80-byte ReplayEntry records
+
+use std.io.{shell}
+use std.nogc_sync_mut.replay.types.{Arch, Endian, TargetDesc}
+use std.nogc_sync_mut.replay.codec.{encode_entries, decode_entries}
+use os.kernel.replay.event_kinds.{ReplayEntry}
+
+# ============================================================================
+# Trace Header
+# ============================================================================
+
+struct TraceHeader:
+    magic: text              # "SRPL"
+    version: i32
+    target: TargetDesc
+    event_count: i64
+    compiler_version: text
+    git_commit: text
+
+impl TraceHeader:
+    static fn create(target: TargetDesc) -> TraceHeader:
+        TraceHeader(
+            magic: "SRPL",
+            version: 1,
+            target: target,
+            event_count: 0,
+            compiler_version: "",
+            git_commit: ""
+        )
+
+    fn to_sdn() -> text:
+        var lines: [text] = []
+        lines.push("trace:")
+        lines.push("  format: \"simple-replay-trace\"")
+        lines.push("  version: {self.version}")
+        lines.push("  magic: \"{self.magic}\"")
+        lines.push("")
+        lines.push("target:")
+        lines.push("  arch: \"{self.target.arch.to_text()}\"")
+        lines.push("  pointer_bits: {self.target.arch.pointer_bits()}")
+        lines.push("  endian: \"{self.target.endian.to_text()}\"")
+        lines.push("  page_size: {self.target.page_size}")
+        lines.push("  register_schema: \"{self.target.register_schema_id}\"")
+        lines.push("")
+        lines.push("stats:")
+        lines.push("  event_count: {self.event_count}")
+        if self.compiler_version.len() > 0:
+            lines.push("")
+            lines.push("build:")
+            lines.push("  compiler: \"{self.compiler_version}\"")
+            lines.push("  git_commit: \"{self.git_commit}\"")
+        lines.join("\n")
+
+# ============================================================================
+# Event Log
+# ============================================================================
+
+struct EventLog:
+    header: TraceHeader
+    entries: [ReplayEntry]
+
+impl EventLog:
+    static fn create(arch: Arch) -> EventLog:
+        val target = TargetDesc.for_arch(arch)
+        EventLog(
+            header: TraceHeader.create(target),
+            entries: []
+        )
+
+    fn add_event(entry: ReplayEntry):
+        self.entries.push(entry)
+        self.header.event_count = self.entries.len()
+
+    fn add_events(entries: [ReplayEntry]):
+        for entry in entries:
+            self.entries.push(entry)
+        self.header.event_count = self.entries.len()
+
+# ============================================================================
+# File I/O
+# ============================================================================
+
+fn write_event_log(dir_path: text, log: EventLog) -> Result<Nil, text>:
+    # Create trace directory
+    val mkdir_result = shell("mkdir -p '{dir_path}'")
+    if mkdir_result.exit_code != 0:
+        return Err("failed to create trace directory: {dir_path}")
+
+    # Write manifest.sdn
+    val manifest_path = "{dir_path}/manifest.sdn"
+    val sdn_content = log.header.to_sdn()
+    val write_manifest = shell("cat > '{manifest_path}' << 'SREPLAY_EOF'\n{sdn_content}\nSREPLAY_EOF")
+    if write_manifest.exit_code != 0:
+        return Err("failed to write manifest: {manifest_path}")
+
+    # Write events.bin as hex (workaround for binary I/O)
+    val events_path = "{dir_path}/events.bin"
+    val bytes = encode_entries(log.entries)
+    var hex_parts: [text] = []
+    for b in bytes:
+        val hi = hex_digit(b / 16)
+        val lo = hex_digit(b % 16)
+        hex_parts.push(hi)
+        hex_parts.push(lo)
+    val hex_str = hex_parts.join("")
+    if hex_str.len() > 0:
+        val write_events = shell("echo -n '{hex_str}' | xxd -r -p > '{events_path}'")
+        if write_events.exit_code != 0:
+            return Err("failed to write events: {events_path}")
+    else:
+        shell("touch '{events_path}'")
+
+    print "[sreplay] Wrote {log.header.event_count} events to {dir_path}/"
+    Ok(nil)
+
+fn read_event_log(dir_path: text) -> Result<EventLog, text>:
+    val manifest_path = "{dir_path}/manifest.sdn"
+    val events_path = "{dir_path}/events.bin"
+
+    # Read manifest
+    val manifest_result = shell("cat '{manifest_path}' 2>/dev/null")
+    if manifest_result.exit_code != 0:
+        return Err("manifest not found: {manifest_path}")
+
+    # Parse arch from manifest
+    var arch = Arch.X86_64
+    for line in manifest_result.stdout.split("\n"):
+        val trimmed = line.trim()
+        if trimmed.starts_with("arch:"):
+            val arch_str = trimmed.replace("arch:", "").trim().replace("\"", "")
+            arch = Arch.from_text(arch_str)
+
+    var log = EventLog.create(arch)
+
+    # Read events.bin as hex
+    val hex_result = shell("xxd -p '{events_path}' 2>/dev/null | tr -d '\\n'")
+    if hex_result.exit_code != 0 or hex_result.stdout.trim().len() == 0:
+        return Ok(log)
+
+    val hex_str = hex_result.stdout.trim()
+    var bytes: [i32] = []
+    var i = 0
+    while i + 1 < hex_str.len():
+        val hi = hex_value(hex_str[i])
+        val lo = hex_value(hex_str[i + 1])
+        bytes.push(hi * 16 + lo)
+        i = i + 2
+
+    log.entries = decode_entries(bytes)
+    log.header.event_count = log.entries.len()
+    Ok(log)
+
+# ============================================================================
+# Hex helpers
+# ============================================================================
+
+fn hex_digit(v: i32) -> text:
+    match v:
+        0: "0"
+        1: "1"
+        2: "2"
+        3: "3"
+        4: "4"
+        5: "5"
+        6: "6"
+        7: "7"
+        8: "8"
+        9: "9"
+        10: "a"
+        11: "b"
+        12: "c"
+        13: "d"
+        14: "e"
+        15: "f"
+        _: "0"
+
+fn hex_value(ch: text) -> i32:
+    match ch:
+        "0": 0
+        "1": 1
+        "2": 2
+        "3": 3
+        "4": 4
+        "5": 5
+        "6": 6
+        "7": 7
+        "8": 8
+        "9": 9
+        "a": 10
+        "A": 10
+        "b": 11
+        "B": 11
+        "c": 12
+        "C": 12
+        "d": 13
+        "D": 13
+        "e": 14
+        "E": 14
+        "f": 15
+        "F": 15
+        _: 0

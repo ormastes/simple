@@ -1,0 +1,45 @@
+use std.spec
+use os.qemu_runner.{
+    build_scenario,
+    scenario_riscv64_virtio_fat32_smf,
+    scenario_riscv32_virtio_fat32_smf,
+    scenario_target,
+    scenario_test_timeout_ms,
+    test_scenario,
+}
+use test.qemu.os.common.qemu_os_harness.{can_run_target, file_exists}
+
+extern fn rt_env_get(key: text) -> text?
+
+fn _live_riscv_smf_enabled() -> bool:
+    (rt_env_get("SIMPLEOS_QEMU_RISCV_SMF_LIVE") ?? "") == "1"
+
+describe "SimpleOS RISC-V SMF filesystem live launch":
+    it "builds the RV64 SMF filesystem scenario target when prerequisites are available":
+        val scenario = scenario_riscv64_virtio_fat32_smf()
+        val target = scenario_target(scenario)
+        if not _live_riscv_smf_enabled():
+            print "[simpleos_riscv_smf_fs_launch_spec] live RV64 build disabled; set SIMPLEOS_QEMU_RISCV_SMF_LIVE=1"
+            expect(target.entry).to_equal("examples/simple_os/arch/riscv64/smoke_entry.spl")
+        else:
+            expect(build_scenario(scenario)).to_equal(true)
+            expect(file_exists(target.output)).to_equal(true)
+
+    it "boots the RV64 SMF filesystem scenario when live QEMU is enabled":
+        val scenario = scenario_riscv64_virtio_fat32_smf()
+        val target = scenario_target(scenario)
+        if not _live_riscv_smf_enabled():
+            print "[simpleos_riscv_smf_fs_launch_spec] live RV64 QEMU disabled; set SIMPLEOS_QEMU_RISCV_SMF_LIVE=1"
+            expect(target.qemu_system).to_equal("qemu-system-riscv64")
+        elif not can_run_target(target):
+            print "[simpleos_riscv_smf_fs_launch_spec] qemu-system-riscv64 unavailable, skipping live boot"
+            expect(target.qemu_system).to_equal("qemu-system-riscv64")
+        else:
+            expect(build_scenario(scenario)).to_equal(true)
+            expect(test_scenario(scenario, scenario_test_timeout_ms(scenario))).to_equal(true)
+
+    it "keeps RV32 wired to the SMF filesystem scenario":
+        val scenario = scenario_riscv32_virtio_fat32_smf()
+        val target = scenario_target(scenario)
+        expect(target.entry).to_equal("examples/simple_os/arch/riscv32/smoke_entry.spl")
+        expect(target.output).to_equal("build/os/simpleos_riscv32_smf_fs.elf")

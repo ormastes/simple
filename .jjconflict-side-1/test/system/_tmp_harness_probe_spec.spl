@@ -1,0 +1,51 @@
+# @tag:system
+use std.spec.*
+use os.qemu_runner.{get_ssh_live_target, QemuScenario, ensure_scenario_media, build_os_with_backend}
+use os.kernel.arch.arch_context.{Architecture}
+use test.qemu.os.common.qemu_os_harness.{
+    allocate_live_host_port, can_run_target, spawn_guest_with_qmp_scenario,
+    stop_guest, wait_for_serial_marker}
+use std.nogc_sync_mut.ffi.io.{dir_create_all}
+extern fn rt_getpid() -> i64
+extern fn rt_time_now_unix_micros() -> i64
+
+fn _scenario_x64_ssh_on_port(port: i64) -> QemuScenario:
+    QemuScenario(
+        name: "x64-ssh-probe-{port}",
+        arch: Architecture.X86_64,
+        machine: "q35",
+        cpu: "qemu64",
+        memory: "2G",
+        qemu_extra: [
+            "-device", "isa-debug-exit,iobase=0xf4,iosize=0x04",
+            "-drive", "file=build/os/simpleos_disk.img,if=none,id=nvm,format=raw",
+            "-device", "nvme,serial=deadbeef,drive=nvm",
+            "-netdev", "user,id=n0,hostfwd=tcp::{port}-:22",
+            "-device", "virtio-net-pci,netdev=n0"
+        ],
+        gui_mode: false,
+        description: "probe"
+    )
+
+describe "tmp harness probe":
+
+    it "allocates a live host port":
+        val result = allocate_live_host_port(32000)
+        expect(result.is_ok()).to_equal(true)
+
+    it "spawns the guest with unique resources":
+        val port_result = allocate_live_host_port(32100)
+        expect(port_result.is_ok()).to_equal(true)
+        if port_result.is_ok():
+            val port = port_result.unwrap()
+            val target = get_ssh_live_target()
+            val scenario = _scenario_x64_ssh_on_port(port)
+            expect(build_os_with_backend(target, "cranelift")).to_equal(true)
+            expect(can_run_target(target)).to_equal(true)
+            expect(ensure_scenario_media(scenario)).to_equal(true)
+            dir_create_all("build/os")
+            val token = "{rt_getpid()}_{rt_time_now_unix_micros()}"
+            val qmp_socket = "/tmp/harness_probe_{token}.sock"
+            val serial_log = "build/os/harness_probe_{token}.log"
+            val spawn_result = spawn_guest_with_qmp_scenario(target, scenario, qmp_socket, serial_log)
+            expect(spawn_result.is_ok()).to_equal(true)

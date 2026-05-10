@@ -1,0 +1,179 @@
+# Editor Write-Ahead Log
+#
+# Append-only WAL for crash-safe session persistence.
+# All writes go to WAL first, then checkpoint flushes to DB file.
+
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_file_append_text(path: text, content: text) -> bool
+
+struct WalEntry:
+    sequence: i64
+    table: text
+    operation: text
+    key: text
+    data_sdn: text
+
+class WalWriter:
+    wal_path: text
+    db_path: text
+    next_sequence: i64
+    entry_count: i64
+    checkpoint_threshold: i64
+
+impl WalWriter:
+
+    static fn new(wal_path: text, db_path: text) -> WalWriter:
+        WalWriter(
+            wal_path: wal_path,
+            db_path: db_path,
+            next_sequence: 1,
+            entry_count: 0,
+            checkpoint_threshold: 100
+        )
+
+    me append(table: text, operation: text, key: text, data_sdn: text) -> bool:
+        val entry_line = "WAL|{self.next_sequence}|{table}|{operation}|{key}|{data_sdn}\n"
+        val ok = rt_file_append_text(self.wal_path, entry_line)
+        if ok:
+            self.next_sequence = self.next_sequence + 1
+            self.entry_count = self.entry_count + 1
+        if self.entry_count >= self.checkpoint_threshold:
+            self.checkpoint()
+        ok
+
+    me append_set(table: text, key: text, data_sdn: text) -> bool:
+        self.append(table, "set", key, data_sdn)
+
+    me append_delete(table: text, key: text) -> bool:
+        self.append(table, "delete", key, "")
+
+    me checkpoint() -> bool:
+        val wal_content = rt_file_read_text(self.wal_path) ?? ""
+        if wal_content == "":
+            return true
+        val entries = wal_parse_entries(wal_content)
+        val db_content = rt_file_read_text(self.db_path) ?? ""
+        val merged = _wal_apply_entries(db_content, entries)
+        val tmp_path = self.db_path + ".tmp"
+        val ok = rt_file_write_text(tmp_path, merged)
+        if not ok:
+            return false
+        val rename_ok = rt_file_write_text(self.db_path, merged)
+        if rename_ok:
+            rt_file_write_text(self.wal_path, "")
+            self.entry_count = 0
+        rename_ok
+
+
+class WalReader:
+    wal_path: text
+
+impl WalReader:
+
+    static fn new(wal_path: text) -> WalReader:
+        WalReader(wal_path: wal_path)
+
+    fn read_entries() -> [WalEntry]:
+        val content = rt_file_read_text(self.wal_path) ?? ""
+        wal_parse_entries(content)
+
+    fn has_entries() -> bool:
+        val content = rt_file_read_text(self.wal_path) ?? ""
+        content.len() > 0
+
+
+fn wal_parse_entries(content: text) -> [WalEntry]:
+    var entries: [WalEntry] = []
+    var start = 0
+    var i = 0
+    while i < content.len():
+        if content.char_at(i) == "\n":
+            val line = content.slice(start, i)
+            if line.starts_with("WAL|"):
+                val entry = _wal_parse_line(line)
+                if entry.sequence > 0:
+                    entries.push(entry)
+            start = i + 1
+        i = i + 1
+    if start < content.len():
+        val line = content.slice(start, content.len())
+        if line.starts_with("WAL|"):
+            val entry = _wal_parse_line(line)
+            if entry.sequence > 0:
+                entries.push(entry)
+    entries
+
+fn _wal_parse_line(line: text) -> WalEntry:
+    val parts = _wal_split(line, "|", 6)
+    if parts.len() < 5:
+        return WalEntry(sequence: 0, table: "", operation: "", key: "", data_sdn: "")
+    val seq = _wal_parse_int(parts[1])
+    val data = if parts.len() >= 6 then parts[5] else: ""
+    WalEntry(sequence: seq, table: parts[2], operation: parts[3], key: parts[4], data_sdn: data)
+
+fn _wal_apply_entries(db_content: text, entries: [WalEntry]) -> text:
+    var lines: [text] = []
+    if db_content != "":
+        var start = 0
+        var i = 0
+        while i < db_content.len():
+            if db_content.char_at(i) == "\n":
+                val line = db_content.slice(start, i)
+                if line != "":
+                    lines.push(line)
+                start = i + 1
+            i = i + 1
+        if start < db_content.len():
+            val line = db_content.slice(start, db_content.len())
+            if line != "":
+                lines.push(line)
+
+    for entry in entries:
+        val full_key = "{entry.table}:{entry.key}"
+        if entry.operation == "set":
+            var found = false
+            var j = 0
+            while j < lines.len():
+                if lines[j].starts_with(full_key + "="):
+                    lines[j] = "{full_key}={entry.data_sdn}"
+                    found = true
+                    break
+                j = j + 1
+            if not found:
+                lines.push("{full_key}={entry.data_sdn}")
+        elif entry.operation == "delete":
+            var new_lines: [text] = []
+            for l in lines:
+                if not l.starts_with(full_key + "="):
+                    new_lines.push(l)
+            lines = new_lines
+
+    var result = ""
+    for line in lines:
+        result = result + line + "\n"
+    result
+
+fn _wal_split(s: text, sep: text, max_parts: i64) -> [text]:
+    var parts: [text] = []
+    var start = 0
+    var i = 0
+    while i < s.len():
+        if s.char_at(i) == sep and parts.len() < max_parts - 1:
+            parts.push(s.slice(start, i))
+            start = i + 1
+        i = i + 1
+    if start <= s.len():
+        parts.push(s.slice(start, s.len()))
+    parts
+
+fn _wal_parse_int(s: text) -> i64:
+    var result = 0
+    var i = 0
+    while i < s.len():
+        val ch = s.char_at(i)
+        val code = ch.char_code_at(0)
+        if code >= 48 and code <= 57:
+            result = result * 10 + (code - 48)
+        i = i + 1
+    result

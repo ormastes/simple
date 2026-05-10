@@ -1,0 +1,482 @@
+# Rich Text Editor Core
+#
+# Cursor model and editing operations for rich documents.
+
+use std.rich_text.attributed_text (
+    InlineStyle, TextSpan, DocBlock, RichDocument,
+    plain_span, paragraph, spans_to_plain_text, block_to_plain_text
+)
+
+# =========================================================================
+# Cursor and Selection
+# =========================================================================
+
+struct TextCursor:
+    block_index: i32
+    offset: i32       # Character offset within the block's plain text
+
+struct TextSelection:
+    anchor: TextCursor
+    focus: TextCursor
+
+# =========================================================================
+# Rich Text Editor
+# =========================================================================
+
+class RichTextEditor:
+    doc: RichDocument
+    cursor: TextCursor
+    selection: TextSelection?
+    modified: bool
+
+    static fn new(doc: RichDocument) -> RichTextEditor:
+        """Create a new editor with cursor at the start of the document."""
+        return RichTextEditor(
+            doc: doc,
+            cursor: TextCursor(block_index: 0, offset: 0),
+            selection: nil,
+            modified: false
+        )
+
+    fn current_block() -> DocBlock?:
+        """Return the block at the current cursor position, or nil if out of range."""
+        if self.cursor.block_index < 0 or self.cursor.block_index >= self.doc.blocks.len():
+            return nil
+        return self.doc.blocks[self.cursor.block_index]
+
+    me insert_char(ch: text):
+        """Insert a character at the cursor position and advance the cursor."""
+        val idx = self.cursor.block_index
+        if idx < 0 or idx >= self.doc.blocks.len():
+            return
+        val block = self.doc.blocks[idx]
+        match block:
+            case DocBlock.Paragraph(spans):
+                val new_spans = _insert_in_spans(spans, self.cursor.offset, ch)
+                self.doc.blocks = _replace_block(self.doc.blocks, idx,
+                    DocBlock.Paragraph(spans: new_spans))
+                self.cursor.offset = self.cursor.offset + ch.len()
+                self.modified = true
+            case DocBlock.Heading(level, spans):
+                val new_spans = _insert_in_spans(spans, self.cursor.offset, ch)
+                self.doc.blocks = _replace_block(self.doc.blocks, idx,
+                    DocBlock.Heading(level: level, spans: new_spans))
+                self.cursor.offset = self.cursor.offset + ch.len()
+                self.modified = true
+            _:
+                pass_do_nothing
+
+    me delete_char():
+        """Delete the character before the cursor (backspace behavior)."""
+        if self.cursor.offset <= 0:
+            # At start of block — try to join with previous block
+            if self.cursor.block_index > 0:
+                self.join_with_previous()
+            return
+        val idx = self.cursor.block_index
+        if idx < 0 or idx >= self.doc.blocks.len():
+            return
+        val block = self.doc.blocks[idx]
+        match block:
+            case DocBlock.Paragraph(spans):
+                val new_spans = _delete_in_spans(spans, self.cursor.offset - 1)
+                self.doc.blocks = _replace_block(self.doc.blocks, idx,
+                    DocBlock.Paragraph(spans: new_spans))
+                self.cursor.offset = self.cursor.offset - 1
+                self.modified = true
+            case DocBlock.Heading(level, spans):
+                val new_spans = _delete_in_spans(spans, self.cursor.offset - 1)
+                self.doc.blocks = _replace_block(self.doc.blocks, idx,
+                    DocBlock.Heading(level: level, spans: new_spans))
+                self.cursor.offset = self.cursor.offset - 1
+                self.modified = true
+            _:
+                pass_do_nothing
+
+    me move_left():
+        """Move cursor one position to the left."""
+        if self.cursor.offset > 0:
+            self.cursor.offset = self.cursor.offset - 1
+        elif self.cursor.block_index > 0:
+            self.cursor.block_index = self.cursor.block_index - 1
+            val plain = _block_plain_text_at(self.doc.blocks, self.cursor.block_index)
+            self.cursor.offset = plain.len()
+        self.selection = nil
+
+    me move_right():
+        """Move cursor one position to the right."""
+        val plain = _block_plain_text_at(self.doc.blocks, self.cursor.block_index)
+        if self.cursor.offset < plain.len():
+            self.cursor.offset = self.cursor.offset + 1
+        elif self.cursor.block_index + 1 < self.doc.blocks.len():
+            self.cursor.block_index = self.cursor.block_index + 1
+            self.cursor.offset = 0
+        self.selection = nil
+
+    me move_up():
+        """Move cursor to the previous block, keeping offset clamped."""
+        if self.cursor.block_index > 0:
+            self.cursor.block_index = self.cursor.block_index - 1
+            val plain = _block_plain_text_at(self.doc.blocks, self.cursor.block_index)
+            if self.cursor.offset > plain.len():
+                self.cursor.offset = plain.len()
+        self.selection = nil
+
+    me move_down():
+        """Move cursor to the next block, keeping offset clamped."""
+        if self.cursor.block_index + 1 < self.doc.blocks.len():
+            self.cursor.block_index = self.cursor.block_index + 1
+            val plain = _block_plain_text_at(self.doc.blocks, self.cursor.block_index)
+            if self.cursor.offset > plain.len():
+                self.cursor.offset = plain.len()
+        self.selection = nil
+
+    me move_to_start():
+        """Move cursor to the start of the document."""
+        self.cursor.block_index = 0
+        self.cursor.offset = 0
+        self.selection = nil
+
+    me move_to_end():
+        """Move cursor to the end of the document."""
+        if self.doc.blocks.len() > 0:
+            self.cursor.block_index = self.doc.blocks.len() - 1
+            val plain = _block_plain_text_at(self.doc.blocks, self.cursor.block_index)
+            self.cursor.offset = plain.len()
+        self.selection = nil
+
+    me toggle_style(style: InlineStyle):
+        """Toggle a style on the current block's spans at the cursor position.
+        If a selection exists, toggles on the selected range; otherwise toggles
+        on the span at the cursor."""
+        val idx = self.cursor.block_index
+        if idx < 0 or idx >= self.doc.blocks.len():
+            return
+        val block = self.doc.blocks[idx]
+        match block:
+            case DocBlock.Paragraph(spans):
+                val new_spans = _toggle_style_on_spans(spans, self.cursor.offset, style)
+                self.doc.blocks = _replace_block(self.doc.blocks, idx,
+                    DocBlock.Paragraph(spans: new_spans))
+                self.modified = true
+            case DocBlock.Heading(level, spans):
+                val new_spans = _toggle_style_on_spans(spans, self.cursor.offset, style)
+                self.doc.blocks = _replace_block(self.doc.blocks, idx,
+                    DocBlock.Heading(level: level, spans: new_spans))
+                self.modified = true
+            _:
+                pass_do_nothing
+
+    me insert_block(block: DocBlock):
+        """Insert a new block after the current cursor block."""
+        val idx = self.cursor.block_index
+        var new_blocks: [DocBlock] = []
+        var i = 0
+        for b in self.doc.blocks:
+            new_blocks = new_blocks.push(b)
+            if i == idx:
+                new_blocks = new_blocks.push(block)
+            i = i + 1
+        # If blocks was empty, just add the new block
+        if self.doc.blocks.len() == 0:
+            new_blocks = new_blocks.push(block)
+        self.doc.blocks = new_blocks
+        self.cursor.block_index = idx + 1
+        self.cursor.offset = 0
+        self.modified = true
+
+    me delete_block():
+        """Delete the block at the current cursor position."""
+        val idx = self.cursor.block_index
+        if self.doc.blocks.len() <= 1:
+            # Don't delete the last block; clear it instead
+            self.doc.blocks = [DocBlock.Paragraph(spans: [plain_span("")])]
+            self.cursor.offset = 0
+            self.modified = true
+            return
+        var new_blocks: [DocBlock] = []
+        var i = 0
+        for b in self.doc.blocks:
+            if i != idx:
+                new_blocks = new_blocks.push(b)
+            i = i + 1
+        self.doc.blocks = new_blocks
+        if self.cursor.block_index >= self.doc.blocks.len():
+            self.cursor.block_index = self.doc.blocks.len() - 1
+        self.cursor.offset = 0
+        self.modified = true
+
+    me split_block():
+        """Split the current block at the cursor position (Enter key behavior)."""
+        val idx = self.cursor.block_index
+        if idx < 0 or idx >= self.doc.blocks.len():
+            return
+        val block = self.doc.blocks[idx]
+        match block:
+            case DocBlock.Paragraph(spans):
+                val split_result = _split_spans(spans, self.cursor.offset)
+                val before_block = DocBlock.Paragraph(spans: split_result.before)
+                val after_block = DocBlock.Paragraph(spans: split_result.after)
+                self.doc.blocks = _replace_block_with_two(
+                    self.doc.blocks, idx, before_block, after_block)
+                self.cursor.block_index = idx + 1
+                self.cursor.offset = 0
+                self.modified = true
+            case DocBlock.Heading(level, spans):
+                val split_result = _split_spans(spans, self.cursor.offset)
+                val before_block = DocBlock.Heading(level: level, spans: split_result.before)
+                val after_block = DocBlock.Paragraph(spans: split_result.after)
+                self.doc.blocks = _replace_block_with_two(
+                    self.doc.blocks, idx, before_block, after_block)
+                self.cursor.block_index = idx + 1
+                self.cursor.offset = 0
+                self.modified = true
+            _:
+                # For other block types, just insert an empty paragraph after
+                val new_para = DocBlock.Paragraph(spans: [plain_span("")])
+                self.insert_block(new_para)
+
+    me join_with_previous():
+        """Join the current block with the previous block (Backspace at start of block)."""
+        val idx = self.cursor.block_index
+        if idx <= 0:
+            return
+        val prev_block = self.doc.blocks[idx - 1]
+        val curr_block = self.doc.blocks[idx]
+        val prev_spans = _get_block_spans(prev_block)
+        val curr_spans = _get_block_spans(curr_block)
+        val prev_plain_len = spans_to_plain_text(prev_spans).len()
+        # Merge spans
+        var merged: [TextSpan] = []
+        for s in prev_spans:
+            merged = merged.push(s)
+        for s in curr_spans:
+            merged = merged.push(s)
+        # Replace previous block with merged, remove current
+        val merged_block = DocBlock.Paragraph(spans: merged)
+        var new_blocks: [DocBlock] = []
+        var i = 0
+        for b in self.doc.blocks:
+            if i == idx - 1:
+                new_blocks = new_blocks.push(merged_block)
+            elif i != idx:
+                new_blocks = new_blocks.push(b)
+            i = i + 1
+        self.doc.blocks = new_blocks
+        self.cursor.block_index = idx - 1
+        self.cursor.offset = prev_plain_len
+        self.modified = true
+
+    fn is_modified() -> bool:
+        """Return whether the document has been modified since last save."""
+        return self.modified
+
+    me mark_saved():
+        """Clear the modified flag (called after saving)."""
+        self.modified = false
+
+# =========================================================================
+# Internal Helpers
+# =========================================================================
+
+fn _block_plain_text_at(blocks: [DocBlock], idx: i32) -> text:
+    """Get plain text content of a block at the given index."""
+    if idx < 0 or idx >= blocks.len():
+        return ""
+    return block_to_plain_text(blocks[idx])
+
+fn _get_block_spans(block: DocBlock) -> [TextSpan]:
+    """Extract spans from a block, returning empty list for blocks without spans."""
+    match block:
+        case DocBlock.Paragraph(spans):
+            return spans
+        case DocBlock.Heading(level, spans):
+            return spans
+        _:
+            return [plain_span(block_to_plain_text(block))]
+
+fn _replace_block(blocks: [DocBlock], idx: i32, new_block: DocBlock) -> [DocBlock]:
+    """Return a new block list with the block at idx replaced."""
+    var result: [DocBlock] = []
+    var i = 0
+    for b in blocks:
+        if i == idx:
+            result = result.push(new_block)
+        else:
+            result = result.push(b)
+        i = i + 1
+    return result
+
+fn _replace_block_with_two(blocks: [DocBlock], idx: i32, first: DocBlock, second: DocBlock) -> [DocBlock]:
+    """Return a new block list with the block at idx replaced by two blocks."""
+    var result: [DocBlock] = []
+    var i = 0
+    for b in blocks:
+        if i == idx:
+            result = result.push(first)
+            result = result.push(second)
+        else:
+            result = result.push(b)
+        i = i + 1
+    return result
+
+fn _insert_in_spans(spans: [TextSpan], offset: i32, ch: text) -> [TextSpan]:
+    """Insert a character at the given offset within a span list."""
+    var result: [TextSpan] = []
+    var pos = 0
+    var inserted = false
+    for span in spans:
+        val span_len = span.content.len()
+        if not inserted and offset >= pos and offset <= pos + span_len:
+            # Insert within this span
+            val local_offset = offset - pos
+            val before = span.content.slice(0, local_offset)
+            val after = span.content.slice(local_offset, span_len)
+            result = result.push(TextSpan(
+                content: "{before}{ch}{after}",
+                styles: span.styles
+            ))
+            inserted = true
+        else:
+            result = result.push(span)
+        pos = pos + span_len
+    # If offset was beyond all spans, append to a new plain span
+    if not inserted:
+        result = result.push(plain_span(ch))
+    return result
+
+fn _delete_in_spans(spans: [TextSpan], offset: i32) -> [TextSpan]:
+    """Delete a character at the given offset within a span list."""
+    var result: [TextSpan] = []
+    var pos = 0
+    var deleted = false
+    for span in spans:
+        val span_len = span.content.len()
+        if not deleted and offset >= pos and offset < pos + span_len:
+            # Delete within this span
+            val local_offset = offset - pos
+            val before = span.content.slice(0, local_offset)
+            val after = span.content.slice(local_offset + 1, span_len)
+            val new_content = "{before}{after}"
+            if new_content.len() > 0:
+                result = result.push(TextSpan(
+                    content: new_content,
+                    styles: span.styles
+                ))
+            # If span is now empty, skip it (remove it)
+            deleted = true
+        else:
+            result = result.push(span)
+        pos = pos + span_len
+    # Ensure at least one span remains
+    if result.len() == 0:
+        result = result.push(plain_span(""))
+    return result
+
+fn _toggle_style_on_spans(spans: [TextSpan], offset: i32, style: InlineStyle) -> [TextSpan]:
+    """Toggle a style on the span that contains the given offset."""
+    var result: [TextSpan] = []
+    var pos = 0
+    var toggled = false
+    for span in spans:
+        val span_len = span.content.len()
+        if not toggled and offset >= pos and offset < pos + span_len:
+            # Toggle the style on this span
+            if _has_style(span.styles, style):
+                val new_styles = _remove_style(span.styles, style)
+                result = result.push(TextSpan(content: span.content, styles: new_styles))
+            else:
+                var new_styles = span.styles
+                new_styles = new_styles.push(style)
+                result = result.push(TextSpan(content: span.content, styles: new_styles))
+            toggled = true
+        else:
+            result = result.push(span)
+        pos = pos + span_len
+    # If offset is beyond all spans, don't change anything
+    if not toggled:
+        return spans
+    return result
+
+fn _has_style(styles: [InlineStyle], target: InlineStyle) -> bool:
+    """Check if a style list contains a matching style (by variant, ignoring data)."""
+    for s in styles:
+        if _style_matches(s, target):
+            return true
+    return false
+
+fn _remove_style(styles: [InlineStyle], target: InlineStyle) -> [InlineStyle]:
+    """Remove a matching style from the list."""
+    var result: [InlineStyle] = []
+    for s in styles:
+        if not _style_matches(s, target):
+            result = result.push(s)
+    return result
+
+fn _style_matches(a: InlineStyle, b: InlineStyle) -> bool:
+    """Check if two styles are the same variant (Bold==Bold, Italic==Italic, etc.)."""
+    match a:
+        case InlineStyle.Bold:
+            match b:
+                case InlineStyle.Bold: return true
+                _: return false
+        case InlineStyle.Italic:
+            match b:
+                case InlineStyle.Italic: return true
+                _: return false
+        case InlineStyle.Underline:
+            match b:
+                case InlineStyle.Underline: return true
+                _: return false
+        case InlineStyle.Code:
+            match b:
+                case InlineStyle.Code: return true
+                _: return false
+        case InlineStyle.Strikethrough:
+            match b:
+                case InlineStyle.Strikethrough: return true
+                _: return false
+        case InlineStyle.Link(url):
+            match b:
+                case InlineStyle.Link(url2): return true
+                _: return false
+    return false
+
+struct _SpanSplit:
+    before: [TextSpan]
+    after: [TextSpan]
+
+fn _split_spans(spans: [TextSpan], offset: i32) -> _SpanSplit:
+    """Split a span list at the given character offset."""
+    var before: [TextSpan] = []
+    var after: [TextSpan] = []
+    var pos = 0
+    var split_done = false
+    for span in spans:
+        val span_len = span.content.len()
+        if split_done:
+            after = after.push(span)
+        elif offset <= pos:
+            # Split is before this span
+            split_done = true
+            after = after.push(span)
+        elif offset >= pos + span_len:
+            # Split is after this span
+            before = before.push(span)
+        else:
+            # Split is within this span
+            val local = offset - pos
+            val left_content = span.content.slice(0, local)
+            val right_content = span.content.slice(local, span_len)
+            if left_content.len() > 0:
+                before = before.push(TextSpan(content: left_content, styles: span.styles))
+            if right_content.len() > 0:
+                after = after.push(TextSpan(content: right_content, styles: span.styles))
+            split_done = true
+        pos = pos + span_len
+    # Ensure both sides have at least one span
+    if before.len() == 0:
+        before = before.push(plain_span(""))
+    if after.len() == 0:
+        after = after.push(plain_span(""))
+    return _SpanSplit(before: before, after: after)

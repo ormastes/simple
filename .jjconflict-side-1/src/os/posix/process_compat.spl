@@ -1,0 +1,163 @@
+# POSIX Process Compatibility — synchronous wrappers over async process API
+#
+# SimpleOS keeps spawn_binary for service launch and now exposes fork/execve
+# wrappers for UNIX-style process control. The wrappers block over
+# process_async.spl so native code has an async-first surface.
+#
+# Kernel syscalls used:
+#   2  = Spawn (from function address)
+#   3  = Wait (wait for child exit, returns exit status)
+#   4  = GetPid (returns current process ID)
+#   7  = Signal (send signal to process)
+#   13 = SpawnBinary (from ELF binary path)
+#   57 = Fork
+#   59 = Execve (path pointer + length + argv/envp vectors)
+#   61 = Waitpid
+
+use os.posix.errno.{EINVAL, ECHILD, ENOENT, ENOMEM}
+use os.posix.process_async.{
+    process_async_fork,
+    process_async_execve,
+    process_async_spawn,
+    process_async_waitpid,
+    process_async_getpid,
+    process_async_signal,
+    process_async_exit,
+    process_wait_request
+}
+
+val WNOHANG: u32 = 1
+
+fn posix_fork() -> i64:
+    """Fork the current process. Parent receives child PID; child returns 0."""
+    process_wait_request(process_async_fork())
+
+fn posix_execve(path: text, args: [text], envp: [text]) -> i64:
+    """Replace the current process image.
+
+    The kernel ABI accepts path bytes plus optional argv/envp vectors.
+    Empty argv preserves the legacy path-only launch shape by letting the
+    kernel seed argv[0] from the executable path.
+    """
+    if path.len() == 0:
+        return 0 - EINVAL as i64
+    process_wait_request(process_async_execve(path, args, envp))
+
+fn posix_spawn(path: text, priority: u8) -> i64:
+    """Spawn a new process from an ELF binary path.
+
+    Uses kernel syscall 13 (SpawnBinary).
+    Args:
+      path:     path to the ELF binary
+      priority: task priority (0=Realtime, 1=High, 2=Normal, 3=Low, 4=Idle)
+
+    Returns:
+      >= 0: PID of the new process
+      < 0:  -errno on failure
+    """
+    if path.len() == 0:
+        return 0 - EINVAL as i64
+
+    process_wait_request(process_async_spawn(path, [], priority))
+
+fn posix_spawn_with_args(path: text, args: [text], priority: u8) -> i64:
+    """Spawn a new process with command-line arguments.
+
+    SpawnBinary forwards argv through syscall 13 and leaves envp empty.
+    PATH/service callers that need a custom environment should use execve
+    after fork or a higher-level launcher that exposes envp explicitly.
+
+    Returns:
+      >= 0: PID of the new process
+      < 0:  -errno on failure
+    """
+    if path.len() == 0:
+        return 0 - EINVAL as i64
+
+    process_wait_request(process_async_spawn(path, args, priority))
+
+fn posix_waitpid(pid: i64, options: u32) -> i64:
+    """Wait for a child process to exit.
+
+    Uses kernel syscall 61 (Waitpid).
+    Args:
+      pid:     process ID to wait for (-1 = any child)
+      options: WNOHANG (1) for non-blocking, 0 for blocking wait
+
+    Returns:
+      > 0:  PID of the collected child
+      = 0:  no status available yet with WNOHANG / nonblocking kernel block
+      < 0:  -errno on failure (-ECHILD if no children)
+    """
+    process_wait_request(process_async_waitpid(pid, options))
+
+fn posix_exit(code: i32):
+    """Exit the current process with a status code.
+
+    Uses kernel syscall 0 (Exit). Does not return.
+    """
+    process_wait_request(process_async_exit(code))
+    # Should not reach here — kernel terminates the task.
+    # Halt in a loop as safety fallback.
+    while true:
+        pass_dn
+
+fn posix_getpid() -> u64:
+    """Get current process ID.
+
+    Uses kernel syscall 4 (GetPid).
+    """
+    val result = process_wait_request(process_async_getpid())
+    if result < 0:
+        return 0  # Fallback: return 0 (init)
+    result as u64
+
+fn posix_getppid() -> u64:
+    """Get parent process ID.
+
+    Uses kernel syscall 4 with arg0=1 to request parent PID.
+    If not supported, returns 0.
+    """
+    val result = process_wait_request(process_async_getpid())
+    if result < 0:
+        return 0
+    result as u64
+
+fn posix_kill(pid: u64, signum: i32) -> i32:
+    """Send a signal to a process.
+
+    Uses kernel syscall 7 (Signal).
+    Signal mapping to kernel signal numbers:
+      SIGTERM (15) -> 0 (Term)
+      SIGKILL (9)  -> 1 (Kill, uncatchable)
+      SIGSTOP (19) -> 2 (Stop)
+      SIGCONT (18) -> 3 (Cont)
+      SIGINT  (2)  -> 4 (Int)
+
+    Returns 0 on success, -errno on failure.
+    """
+    if signum < 1 or signum > 31:
+        return 0 - EINVAL
+
+    # Map POSIX signal numbers to kernel signal codes
+    val kern_sig = _posix_to_kernel_signal(signum)
+    if kern_sig < 0:
+        return 0 - EINVAL
+
+    val result = process_wait_request(process_async_signal(pid, kern_sig))
+    result as i32
+
+fn _posix_to_kernel_signal(signum: i32) -> i32:
+    """Map POSIX signal number to kernel signal code."""
+    if signum == 15:  # SIGTERM
+        return 0
+    if signum == 9:   # SIGKILL
+        return 1
+    if signum == 19:  # SIGSTOP
+        return 2
+    if signum == 18:  # SIGCONT
+        return 3
+    if signum == 2:   # SIGINT
+        return 4
+    # For other signals, map to Term (0) as default
+    0

@@ -1,0 +1,110 @@
+pub enum MatchResult:
+    Matched
+    NotMatched
+    MatchedWithNote(text)
+
+fn normalize_arch(name: text) -> text:
+    match name.lower():
+        case "x86-64" | "amd64" | "x64": "x86_64"
+        case "arm64": "aarch64"
+        case "armv7" | "arm32" | "thumbv7m" | "cortex-m": "arm"
+        case "riscv32gc" | "rv32": "riscv32"
+        case "riscv64gc" | "rv64": "riscv64"
+        case "i686" | "i386": "x86"
+        case "wasm": "wasm32"
+        case "atmega" | "attiny": "avr"
+        case "8051" | "mcs-51": "mcs51"
+        case _: name.lower()
+
+pub fn match_target_spec(
+    archs: [text],
+    has_os: bool,
+    os: text,
+    has_abi: bool,
+    abi: text,
+    has_backend: bool,
+    backend: text,
+    ver_ops: [text],
+    ver_vals: [i64],
+    target_arch: text,
+    target_os: text,
+    target_abi: text,
+    target_backend: text,
+    target_backend_version: i64
+) -> MatchResult:
+    var arch_matched = false
+    val norm_target_arch = normalize_arch(target_arch)
+    for arch in archs:
+        if normalize_arch(arch) == norm_target_arch:
+            arch_matched = true
+            break
+    if not arch_matched:
+        return MatchResult.NotMatched
+
+    if has_os:
+        val lower_os = os.lower()
+        if lower_os != "_" and lower_os != target_os.lower():
+            return MatchResult.NotMatched
+
+    if has_abi:
+        val lower_abi = abi.lower()
+        if lower_abi != "_" and lower_abi != target_abi.lower():
+            return MatchResult.NotMatched
+
+    if has_backend:
+        val lower_backend = backend.lower()
+        if lower_backend != "_" and lower_backend != target_backend.lower():
+            return MatchResult.NotMatched
+
+    var has_note = false
+    var note_msg = ""
+    var i = 0
+    while i < ver_ops.len() and i < ver_vals.len():
+        val op = ver_ops[i]
+        val ver = ver_vals[i]
+        val actual = target_backend_version
+        if op == ">=":
+            if actual < ver:
+                return MatchResult.NotMatched
+        elif op == "==":
+            if actual != ver:
+                return MatchResult.NotMatched
+        elif op == "<":
+            if actual >= ver:
+                return MatchResult.NotMatched
+        elif op == "~=":
+            if actual != ver:
+                has_note = true
+                note_msg = "recommended backend version: {target_backend} {ver}, found: {target_backend} {actual}"
+        i = i + 1
+
+    if has_note:
+        return MatchResult.MatchedWithNote(note_msg)
+    MatchResult.Matched
+
+pub fn check_exhaustiveness(arms_archs: [[text]], arms_is_wildcard: [bool], known_archs: [text]) -> [text]:
+    var missing: [text] = []
+    for arch in known_archs:
+        var covered = false
+        var i = 0
+        while i < arms_is_wildcard.len():
+            if arms_is_wildcard[i]:
+                covered = true
+                break
+            if i < arms_archs.len():
+                for candidate in arms_archs[i]:
+                    if normalize_arch(candidate) == normalize_arch(arch):
+                        covered = true
+                        break
+                if covered:
+                    break
+            i = i + 1
+        if not covered:
+            missing.push(arch)
+    missing
+
+pub fn all_target_archs() -> [text]:
+    [
+        "x86_64", "x86", "aarch64", "arm", "riscv64", "riscv32",
+        "wasm32", "wasm64", "avr", "mcs51", "msp430"
+    ]

@@ -1,0 +1,140 @@
+# SReplay — Chaos Scheduler (Track 3, Phase 3.7)
+#
+# Deliberately re-orders thread scheduling to expose concurrency bugs
+# during replay.  Four strategies:
+#   Random       — deterministic PRNG picks a random runnable thread
+#   RoundRobin   — cycles through threads in order
+#   StarveLast   — always pick anyone except the previously picked thread
+#   PrioritizeNew — prefer the thread with the highest (newest) tid
+
+# ============================================================================
+# Chaos Strategy Enum
+# ============================================================================
+
+enum ChaosStrategy:
+    Random
+    RoundRobin
+    StarveLast
+    PrioritizeNew
+
+impl ChaosStrategy:
+    fn to_i32() -> i32:
+        match self:
+            case ChaosStrategy::Random: 0
+            case ChaosStrategy::RoundRobin: 1
+            case ChaosStrategy::StarveLast: 2
+            case ChaosStrategy::PrioritizeNew: 3
+
+    static fn from_i32(v: i32) -> ChaosStrategy:
+        match v:
+            0: ChaosStrategy::Random
+            1: ChaosStrategy::RoundRobin
+            2: ChaosStrategy::StarveLast
+            3: ChaosStrategy::PrioritizeNew
+            _: ChaosStrategy::Random
+
+    fn to_text() -> text:
+        match self:
+            case ChaosStrategy::Random: "random"
+            case ChaosStrategy::RoundRobin: "round_robin"
+            case ChaosStrategy::StarveLast: "starve_last"
+            case ChaosStrategy::PrioritizeNew: "prioritize_new"
+
+# ============================================================================
+# ChaosScheduler
+# ============================================================================
+
+struct ChaosScheduler:
+    strategy: ChaosStrategy
+    seed: i64
+    schedule_log: [i64]         # tid order of picks
+    rr_index: i64               # round-robin cursor
+
+impl ChaosScheduler:
+    static fn create(strategy: ChaosStrategy, seed: i64) -> ChaosScheduler:
+        ChaosScheduler(
+            strategy: strategy,
+            seed: seed,
+            schedule_log: [],
+            rr_index: 0
+        )
+
+    # Pick the next thread to run from the set of runnable tids.
+    # Returns -1 if runnable_tids is empty.
+    me fn pick_next(runnable_tids: [i64]) -> i64:
+        if runnable_tids.len() == 0:
+            return -1
+
+        var chosen: i64 = runnable_tids[0]
+
+        match self.strategy:
+            case ChaosStrategy::Random:
+                chosen = self.pick_random(runnable_tids)
+            case ChaosStrategy::RoundRobin:
+                chosen = self.pick_round_robin(runnable_tids)
+            case ChaosStrategy::StarveLast:
+                chosen = self.pick_starve_last(runnable_tids)
+            case ChaosStrategy::PrioritizeNew:
+                chosen = self.pick_prioritize_new(runnable_tids)
+
+        self.schedule_log.push(chosen)
+        chosen
+
+    # Reseed the PRNG for reproducibility.
+    me fn reseed(new_seed: i64):
+        self.seed = new_seed
+
+    # Total number of scheduling decisions made.
+    fn schedule_count() -> i64:
+        self.schedule_log.len()
+
+    # Return the full schedule log for replay.
+    fn replay_schedule() -> [i64]:
+        self.schedule_log
+
+    # ------------------------------------------------------------------
+    # Internal — strategy implementations
+    # ------------------------------------------------------------------
+
+    # LCG-based deterministic PRNG.  Advances the seed and returns
+    # the absolute value of the new state.
+    me fn next_random() -> i64:
+        # LCG constants (Knuth MMIX)
+        self.seed = self.seed * 6364136223846793005 + 1442695040888963407
+        var v = self.seed
+        if v < 0:
+            v = 0 - v
+        v
+
+    me fn pick_random(tids: [i64]) -> i64:
+        val r = self.next_random()
+        val idx = r % tids.len()
+        tids[idx]
+
+    me fn pick_round_robin(tids: [i64]) -> i64:
+        val idx = self.rr_index % tids.len()
+        self.rr_index = self.rr_index + 1
+        tids[idx]
+
+    me fn pick_starve_last(tids: [i64]) -> i64:
+        # If only one thread, must pick it
+        if tids.len() == 1:
+            return tids[0]
+        # Find the last picked tid
+        var last_tid: i64 = -1
+        if self.schedule_log.len() > 0:
+            last_tid = self.schedule_log[self.schedule_log.len() - 1]
+        # Pick anyone except last_tid
+        for tid in tids:
+            if tid != last_tid:
+                return tid
+        # Fallback (all same tid)
+        tids[0]
+
+    me fn pick_prioritize_new(tids: [i64]) -> i64:
+        # Pick the thread with the highest tid (newest)
+        var best = tids[0]
+        for tid in tids:
+            if tid > best:
+                best = tid
+        best

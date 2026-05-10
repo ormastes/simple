@@ -1,0 +1,265 @@
+# @cover src/compiler/90.tools/coverage.spl 80%
+# @req REQ-coverage-core
+# @feature coverage_instrumentation
+# tag: system
+#
+# System tests for coverage instrumentation (compiler/90.tools/coverage.spl).
+# Validates CoverageStats, CoverageCollector, and data structs.
+# Requires compiled mode -- interpreter only verifies file loading.
+"""
+# Coverage Core Specification
+
+**Feature IDs:** #COV-001 through #COV-025
+**Category:** Tooling
+**Difficulty:** 2/5
+**Status:** Implemented
+**Requirements:** N/A
+**Plan:** N/A
+**Design:** N/A
+**Research:** N/A
+
+## Overview
+
+The coverage core module provides line, branch, and function coverage
+tracking during test execution. CoverageCollector records hit lines
+and function calls; CoverageStats computes ratios; data structs
+(SourceLoc, FunctionCoverage, ModuleCoverage, CoverageReport) carry
+the results.
+
+## Key Concepts
+
+| Concept           | Description                                      |
+|-------------------|--------------------------------------------------|
+| CoverageCollector | Mutable recorder of line hits and function calls  |
+| CoverageStats     | Computed coverage ratios (line, branch, function) |
+| CoverageReport    | Top-level report aggregating module coverages     |
+
+## Behavior
+
+- CoverageStats.empty() returns all-zero counters
+- Coverage ratios return 0.0 when denominators are zero (no division by zero)
+- CoverageCollector deduplicates line hits per file
+- Function call counts increment on repeated calls
+- clear() resets collector to empty state
+- to_sdn() serialises collector state to SDN text
+"""
+
+use std.spec
+use compiler.tools.coverage.{SourceLoc, FunctionCoverage, ModuleCoverage, CoverageStats, CoverageCollector, CoverageReport}
+
+
+# ============================================================================
+# CoverageStats
+# ============================================================================
+
+describe "CoverageStats":
+
+    context "empty()":
+        it "returns all zeros":
+            val s = CoverageStats.empty()
+            expect(s.lines_hit).to_equal(0)
+            expect(s.lines_total).to_equal(0)
+            expect(s.branches_hit).to_equal(0)
+            expect(s.branches_total).to_equal(0)
+            expect(s.functions_hit).to_equal(0)
+            expect(s.functions_total).to_equal(0)
+
+    context "line_coverage()":
+        it "returns 0.0 when lines_total is 0":
+            val s = CoverageStats.empty()
+            expect(s.line_coverage()).to_equal(0.0)
+
+        it "computes ratio when lines exist":
+            val s = CoverageStats(lines_hit: 5, lines_total: 10,
+                                   branches_hit: 0, branches_total: 0,
+                                   functions_hit: 0, functions_total: 0)
+            expect(s.line_coverage()).to_equal(0.5)
+
+    context "branch_coverage()":
+        it "returns 0.0 when branches_total is 0":
+            val s = CoverageStats.empty()
+            expect(s.branch_coverage()).to_equal(0.0)
+
+        it "computes ratio with data":
+            val s = CoverageStats(lines_hit: 0, lines_total: 0,
+                                   branches_hit: 3, branches_total: 4,
+                                   functions_hit: 0, functions_total: 0)
+            expect(s.branch_coverage()).to_equal(0.75)
+
+    context "function_coverage()":
+        it "returns 0.0 when functions_total is 0":
+            val s = CoverageStats.empty()
+            expect(s.function_coverage()).to_equal(0.0)
+
+        it "computes ratio with data":
+            val s = CoverageStats(lines_hit: 0, lines_total: 0,
+                                   branches_hit: 0, branches_total: 0,
+                                   functions_hit: 2, functions_total: 5)
+            expect(s.function_coverage()).to_equal(0.4)
+
+
+# ============================================================================
+# CoverageCollector
+# ============================================================================
+
+describe "CoverageCollector":
+
+    context "create()":
+        it "makes empty collector":
+            val c = CoverageCollector.create()
+            val files = c.executed_files()
+            expect(files.len()).to_equal(0)
+
+    context "record_line":
+        it "creates entry for new file":
+            var c = CoverageCollector.create()
+            c.record_line("main.spl", 10)
+            val files = c.executed_files()
+            expect(files.len()).to_equal(1)
+            expect(files).to_contain("main.spl")
+
+        it "adds line to existing file":
+            var c = CoverageCollector.create()
+            c.record_line("main.spl", 10)
+            c.record_line("main.spl", 20)
+            val s = c.stats()
+            expect(s.lines_hit).to_equal(2)
+
+        it "ignores duplicate line numbers":
+            var c = CoverageCollector.create()
+            c.record_line("main.spl", 10)
+            c.record_line("main.spl", 10)
+            val s = c.stats()
+            expect(s.lines_hit).to_equal(1)
+
+    context "record_function_call":
+        it "records first call with count 1":
+            var c = CoverageCollector.create()
+            c.record_function_call("foo")
+            expect(c.was_function_called("foo")).to_equal(true)
+
+        it "increments on second call":
+            var c = CoverageCollector.create()
+            c.record_function_call("bar")
+            c.record_function_call("bar")
+            # After two calls the function is still called
+            expect(c.was_function_called("bar")).to_equal(true)
+            # Stats should count exactly 1 distinct function
+            val s = c.stats()
+            expect(s.functions_total).to_equal(1)
+            expect(s.functions_hit).to_equal(1)
+
+    context "was_function_called":
+        it "returns true for called function":
+            var c = CoverageCollector.create()
+            c.record_function_call("do_thing")
+            expect(c.was_function_called("do_thing")).to_equal(true)
+
+        it "returns false for uncalled function":
+            val c = CoverageCollector.create()
+            expect(c.was_function_called("never_called")).to_equal(false)
+
+    context "executed_files":
+        it "returns empty list for fresh collector":
+            val c = CoverageCollector.create()
+            expect(c.executed_files().len()).to_equal(0)
+
+        it "returns recorded file paths":
+            var c = CoverageCollector.create()
+            c.record_line("a.spl", 1)
+            c.record_line("b.spl", 5)
+            val files = c.executed_files()
+            expect(files.len()).to_equal(2)
+            expect(files).to_contain("a.spl")
+            expect(files).to_contain("b.spl")
+
+    context "stats()":
+        it "computes real statistics":
+            var c = CoverageCollector.create()
+            c.record_line("a.spl", 1)
+            c.record_line("a.spl", 2)
+            c.record_line("a.spl", 3)
+            c.record_function_call("foo")
+            c.record_function_call("bar")
+            val s = c.stats()
+            expect(s.lines_hit).to_equal(3)
+            expect(s.lines_total).to_equal(3)
+            expect(s.functions_hit).to_equal(2)
+            expect(s.functions_total).to_equal(2)
+
+        it "returns zeros on empty collector":
+            val c = CoverageCollector.create()
+            val s = c.stats()
+            expect(s.lines_hit).to_equal(0)
+            expect(s.lines_total).to_equal(0)
+            expect(s.functions_hit).to_equal(0)
+            expect(s.functions_total).to_equal(0)
+            expect(s.branches_hit).to_equal(0)
+            expect(s.branches_total).to_equal(0)
+
+    context "clear()":
+        it "resets all state":
+            var c = CoverageCollector.create()
+            c.record_line("a.spl", 1)
+            c.record_function_call("foo")
+            c.clear()
+            expect(c.executed_files().len()).to_equal(0)
+            expect(c.was_function_called("foo")).to_equal(false)
+            val s = c.stats()
+            expect(s.lines_hit).to_equal(0)
+            expect(s.functions_total).to_equal(0)
+
+    context "to_sdn()":
+        it "returns header on empty collector":
+            val c = CoverageCollector.create()
+            val sdn = c.to_sdn()
+            expect(sdn).to_start_with("coverage:")
+
+        it "includes file info and function calls with data":
+            var c = CoverageCollector.create()
+            c.record_line("main.spl", 5)
+            c.record_function_call("init")
+            val sdn = c.to_sdn()
+            expect(sdn).to_contain("main.spl")
+            expect(sdn).to_contain("init")
+            expect(sdn).to_contain("1 calls")
+
+
+# ============================================================================
+# Data Structs
+# ============================================================================
+
+describe "Coverage data structs":
+
+    context "SourceLoc":
+        it "can be constructed with file, line, column":
+            val loc = SourceLoc(file: "test.spl", line: 42, column: 8)
+            expect(loc.file).to_equal("test.spl")
+            expect(loc.line).to_equal(42)
+            expect(loc.column).to_equal(8)
+
+    context "FunctionCoverage":
+        it "can be constructed with coverage data":
+            val fc = FunctionCoverage(name: "my_func",
+                                       lines_hit: 10, lines_total: 15,
+                                       branches_hit: 3, branches_total: 6)
+            expect(fc.name).to_equal("my_func")
+            expect(fc.lines_hit).to_equal(10)
+            expect(fc.lines_total).to_equal(15)
+            expect(fc.branches_hit).to_equal(3)
+            expect(fc.branches_total).to_equal(6)
+
+    context "ModuleCoverage":
+        it "can be constructed with name and functions list":
+            val fc = FunctionCoverage(name: "f", lines_hit: 1, lines_total: 2,
+                                       branches_hit: 0, branches_total: 0)
+            val mc = ModuleCoverage(name: "my_mod", functions: [fc])
+            expect(mc.name).to_equal("my_mod")
+            expect(mc.functions.len()).to_equal(1)
+
+    context "CoverageReport":
+        it "can be constructed with modules and stats":
+            val stats = CoverageStats.empty()
+            val report = CoverageReport(modules: [], stats: stats)
+            expect(report.modules.len()).to_equal(0)
+            expect(report.stats.lines_hit).to_equal(0)

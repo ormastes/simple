@@ -1,0 +1,302 @@
+# AWS Signature V4 helper — pure Simple, no SDK.
+#
+# Reference: https://docs.aws.amazon.com/AmazonS3/latest/API/sigv4-query-string-auth.html
+# Test vector reproduced (issue #10, Agent A): see test/unit/lib/nogc_sync_mut/aws_sigv4_spec.spl
+#
+# Two signing modes are supported:
+#   1. Query-string (presigned URL) — `UNSIGNED-PAYLOAD`, `SignedHeaders=host`.
+#   2. Header auth (used by adapter_minio for live S3 calls) — real or
+#      `UNSIGNED-PAYLOAD` payload hash, `SignedHeaders=host;x-amz-content-sha256;x-amz-date`.
+#
+# The HMAC chain and signing-key derivation are byte-identical in both modes.
+
+use std.common.crypto.sha256.{sha256_bytes}
+use std.common.crypto.hmac.{hmac_sha256_bytes}
+
+
+val SIGV4_ALGORITHM = "AWS4-HMAC-SHA256"
+val SIGV4_REQUEST_SUFFIX = "aws4_request"
+val SIGV4_UNSIGNED_PAYLOAD = "UNSIGNED-PAYLOAD"
+# SHA256("") — payload hash for empty bodies (GET/HEAD/DELETE).
+val SIGV4_EMPTY_SHA256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+
+
+# --- Byte / hex helpers (self-contained; do not couple to AES utilities) ---
+
+fn _text_to_bytes(s: text) -> list:
+    var out = []
+    var i = 0
+    while i < s.len():
+        out.push(s.char_code_at(i))
+        i = i + 1
+    out
+
+fn _bytes_to_hex(bytes: list) -> text:
+    val digits = "0123456789abcdef"
+    var out = ""
+    var i = 0
+    while i < bytes.len():
+        val b = bytes.get(i)
+        val hi = (b / 16) % 16
+        val lo = b % 16
+        out = out + digits[hi:hi + 1] + digits[lo:lo + 1]
+        i = i + 1
+    out
+
+fn _sha256_hex_bytes(bytes: list) -> text:
+    _bytes_to_hex(sha256_bytes(bytes))
+
+fn sigv4_sha256_hex(s: text) -> text:
+    """Lowercase hex SHA256 of the UTF-8 bytes of `s`."""
+    _sha256_hex_bytes(_text_to_bytes(s))
+
+
+# --- URI encoding per SigV4 spec ---
+
+fn _hex_byte(b: i64) -> text:
+    val digits = "0123456789ABCDEF"
+    val hi = (b / 16) % 16
+    val lo = b % 16
+    "%" + digits[hi:hi + 1] + digits[lo:lo + 1]
+
+fn sigv4_uri_encode(s: text, encode_slash: bool) -> text:
+    """Percent-encode per RFC 3986; uppercase hex; `/` only encoded when requested."""
+    var out = ""
+    var i = 0
+    while i < s.len():
+        val ch = s[i:i + 1]
+        val code = s.char_code_at(i)
+        val is_alpha = (code >= 65 and code <= 90) or (code >= 97 and code <= 122)
+        val is_digit = code >= 48 and code <= 57
+        val is_unreserved = is_alpha or is_digit or ch == "-" or ch == "_" or ch == "." or ch == "~"
+        if is_unreserved:
+            out = out + ch
+        else if ch == "/" and not encode_slash:
+            out = out + ch
+        else:
+            out = out + _hex_byte(code)
+        i = i + 1
+    out
+
+fn sigv4_canonical_uri(path: text) -> text:
+    """Encode a URI path; preserve `/` separators; encode each segment individually."""
+    if path == "":
+        return "/"
+    if not path.starts_with("/"):
+        return "/" + sigv4_uri_encode(path, false)
+    sigv4_uri_encode(path, false)
+
+
+# --- Signing key derivation ---
+
+fn sigv4_derive_signing_key(secret_key: text, date: text, region: text, service: text) -> list:
+    """Compute the SigV4 signing key bytes.
+
+    signing_key = HMAC(HMAC(HMAC(HMAC("AWS4"+secret, date), region), service), "aws4_request")
+    """
+    val k_secret = _text_to_bytes("AWS4" + secret_key)
+    val k_date = hmac_sha256_bytes(k_secret, _text_to_bytes(date))
+    val k_region = hmac_sha256_bytes(k_date, _text_to_bytes(region))
+    val k_service = hmac_sha256_bytes(k_region, _text_to_bytes(service))
+    hmac_sha256_bytes(k_service, _text_to_bytes(SIGV4_REQUEST_SUFFIX))
+
+
+# --- Compute signature given a literal canonical request ---
+
+fn sigv4_credential_scope(date: text, region: text, service: text) -> text:
+    "{date}/{region}/{service}/{SIGV4_REQUEST_SUFFIX}"
+
+fn sigv4_string_to_sign(amz_datetime: text, scope: text, canonical_request: text) -> text:
+    val cr_hash = sigv4_sha256_hex(canonical_request)
+    "{SIGV4_ALGORITHM}\n{amz_datetime}\n{scope}\n{cr_hash}"
+
+fn sigv4_compute_signature(
+    secret_key: text,
+    date: text,
+    region: text,
+    service: text,
+    amz_datetime: text,
+    canonical_request: text
+) -> text:
+    """Hex SigV4 signature for a precomputed canonical request.
+
+    `date` is YYYYMMDD; `amz_datetime` is YYYYMMDDTHHMMSSZ.
+    """
+    val scope = sigv4_credential_scope(date, region, service)
+    val sts = sigv4_string_to_sign(amz_datetime, scope, canonical_request)
+    val key = sigv4_derive_signing_key(secret_key, date, region, service)
+    _bytes_to_hex(hmac_sha256_bytes(key, _text_to_bytes(sts)))
+
+
+# --- Canonical query string ---
+
+class SigV4QueryParam:
+    name: text
+    value: text
+
+fn _qparam_less(a: SigV4QueryParam, b: SigV4QueryParam) -> bool:
+    if a.name < b.name:
+        return true
+    if a.name > b.name:
+        return false
+    a.value < b.value
+
+fn sigv4_canonical_query(params: [SigV4QueryParam]) -> text:
+    """Sort params by name then value; encode both; join with `&`. Both sides URI-encoded."""
+    # Insertion sort — small arrays expected.
+    var sorted: [SigV4QueryParam] = []
+    for p in params:
+        sorted = sorted + [p]
+    var i = 1
+    while i < sorted.len():
+        var j = i
+        while j > 0 and _qparam_less(sorted[j], sorted[j - 1]):
+            val tmp = sorted[j]
+            sorted[j] = sorted[j - 1]
+            sorted[j - 1] = tmp
+            j = j - 1
+        i = i + 1
+    var out = ""
+    var k = 0
+    while k < sorted.len():
+        if k > 0:
+            out = out + "&"
+        val enc_name = sigv4_uri_encode(sorted[k].name, true)
+        val enc_value = sigv4_uri_encode(sorted[k].value, true)
+        out = out + enc_name + "=" + enc_value
+        k = k + 1
+    out
+
+
+# --- Presigned-GET URL (query-string auth) ---
+
+fn sigv4_presign_get_url(
+    endpoint: text,
+    host: text,
+    bucket: text,
+    key: text,
+    access_key: text,
+    secret_key: text,
+    region: text,
+    service: text,
+    amz_datetime: text,
+    expires: i64
+) -> text:
+    """Build a presigned GET URL for the given object.
+
+    `endpoint` is the scheme://host[:port] (no trailing slash).
+    `host` is the value of the `Host` header (typically host[:port]).
+    `bucket` and `key` are NOT pre-encoded; this fn handles encoding.
+    `amz_datetime` is YYYYMMDDTHHMMSSZ; `expires` is seconds (max 604800).
+    """
+    val date = amz_datetime[0:8]
+    val scope = sigv4_credential_scope(date, region, service)
+    val credential = "{access_key}/{scope}"
+    val signed_headers = "host"
+
+    var params: [SigV4QueryParam] = []
+    params = params + [SigV4QueryParam(name: "X-Amz-Algorithm", value: SIGV4_ALGORITHM)]
+    params = params + [SigV4QueryParam(name: "X-Amz-Credential", value: credential)]
+    params = params + [SigV4QueryParam(name: "X-Amz-Date", value: amz_datetime)]
+    params = params + [SigV4QueryParam(name: "X-Amz-Expires", value: "{expires}")]
+    params = params + [SigV4QueryParam(name: "X-Amz-SignedHeaders", value: signed_headers)]
+
+    val canonical_query = sigv4_canonical_query(params)
+
+    # Path-style addressing: /bucket/key. Each segment encoded; slashes preserved.
+    val path = if bucket == "":
+        "/" + sigv4_uri_encode(key, false)
+    else:
+        "/" + bucket + "/" + sigv4_uri_encode(key, false)
+    val canonical_uri = path
+
+    val canonical_headers = "host:{host}\n"
+    val canonical_request = "GET\n{canonical_uri}\n{canonical_query}\n{canonical_headers}\n{signed_headers}\n{SIGV4_UNSIGNED_PAYLOAD}"
+
+    val signature = sigv4_compute_signature(secret_key, date, region, service, amz_datetime, canonical_request)
+    "{endpoint}{canonical_uri}?{canonical_query}&X-Amz-Signature={signature}"
+
+
+# --- Header auth (used by adapter_minio for live calls) ---
+
+class SigV4Header:
+    name: text   # lowercase
+    value: text  # already trimmed
+
+fn _header_less(a: SigV4Header, b: SigV4Header) -> bool:
+    a.name < b.name
+
+fn _sort_headers(headers: [SigV4Header]) -> [SigV4Header]:
+    var sorted: [SigV4Header] = []
+    for h in headers:
+        sorted = sorted + [h]
+    var i = 1
+    while i < sorted.len():
+        var j = i
+        while j > 0 and _header_less(sorted[j], sorted[j - 1]):
+            val tmp = sorted[j]
+            sorted[j] = sorted[j - 1]
+            sorted[j - 1] = tmp
+            j = j - 1
+        i = i + 1
+    sorted
+
+fn sigv4_canonical_headers(headers: [SigV4Header]) -> (text, text):
+    """Build (canonical_headers_block, signed_headers_list)."""
+    val sorted = _sort_headers(headers)
+    var block = ""
+    var signed = ""
+    var i = 0
+    while i < sorted.len():
+        block = block + "{sorted[i].name}:{sorted[i].value}\n"
+        if i > 0:
+            signed = signed + ";"
+        signed = signed + sorted[i].name
+        i = i + 1
+    (block, signed)
+
+fn sigv4_authorization_header(
+    method: text,
+    canonical_uri: text,
+    canonical_query: text,
+    headers: [SigV4Header],
+    payload_hash: text,
+    access_key: text,
+    secret_key: text,
+    region: text,
+    service: text,
+    amz_datetime: text
+) -> text:
+    """Build a complete `Authorization: AWS4-HMAC-SHA256 ...` header value.
+
+    `payload_hash` is hex SHA256 of the body, or `UNSIGNED-PAYLOAD` for streaming PUTs,
+    or `SIGV4_EMPTY_SHA256` for empty bodies.
+    """
+    val date = amz_datetime[0:8]
+    val (header_block, signed_headers) = sigv4_canonical_headers(headers)
+    val canonical_request = "{method}\n{canonical_uri}\n{canonical_query}\n{header_block}\n{signed_headers}\n{payload_hash}"
+    val signature = sigv4_compute_signature(secret_key, date, region, service, amz_datetime, canonical_request)
+    val scope = sigv4_credential_scope(date, region, service)
+    "{SIGV4_ALGORITHM} Credential={access_key}/{scope}, SignedHeaders={signed_headers}, Signature={signature}"
+
+
+# --- Convenience: error mapping for S3 XML <Error><Code>...</Code><Message>...</Message></Error> ---
+
+class S3ErrorInfo:
+    code: text
+    message: text
+
+fn _xml_inner(body: text, tag: text) -> text:
+    val open = "<" + tag + ">"
+    val close = "</" + tag + ">"
+    val a = body.find(open).unwrap_or(-1)
+    if a < 0:
+        return ""
+    val b = body.find(close).unwrap_or(-1)
+    if b < 0 or b <= a:
+        return ""
+    body[a + open.len():b]
+
+fn parse_s3_error(body: text) -> S3ErrorInfo:
+    """Extract <Code> and <Message> from an S3 error XML body. Empty fields if absent."""
+    S3ErrorInfo(code: _xml_inner(body, "Code"), message: _xml_inner(body, "Message"))

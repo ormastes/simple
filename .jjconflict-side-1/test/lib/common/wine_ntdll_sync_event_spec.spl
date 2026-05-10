@@ -1,0 +1,54 @@
+use common.wine_ntdll_sync_event.{wine_ntdll_event_table_new, wine_ntdll_execute_event_sync}
+
+describe "Wine NTDLL sync event bridge":
+    it "executes a bounded NtCreateEvent, NtSetEvent, NtWaitForSingleObject, and NtResetEvent sequence":
+        val result = wine_ntdll_execute_event_sync(
+            ["NtCreateEvent", "NtSetEvent", "NtWaitForSingleObject", "NtResetEvent"],
+            wine_ntdll_event_table_new(),
+            "startup-ready",
+            true,
+            false,
+            1000
+        )
+
+        expect(result.ok).to_equal(true)
+        expect(result.handle).to_equal(0x300)
+        expect(result.wait_status).to_equal("STATUS_WAIT_0")
+        expect(result.table.events[0].signaled).to_equal(false)
+        expect(result.operations).to_equal("NtCreateEvent NtSetEvent NtWaitForSingleObject NtResetEvent")
+
+    it "keeps NTDLL event dispatch ordered and bounded":
+        val out_of_order = wine_ntdll_execute_event_sync(
+            ["NtSetEvent", "NtCreateEvent", "NtWaitForSingleObject", "NtResetEvent"],
+            wine_ntdll_event_table_new(),
+            "startup-ready",
+            true,
+            false,
+            1000
+        )
+        expect(out_of_order.ok).to_equal(false)
+        expect(out_of_order.error).to_equal("ntdll-sync-event-sequence-expected:NtCreateEvent")
+
+        val wrong_family = wine_ntdll_execute_event_sync(
+            ["NtCreateEvent", "NtSetEvent", "NtWaitForSingleObject", "NtCreateFile"],
+            wine_ntdll_event_table_new(),
+            "startup-ready",
+            true,
+            false,
+            1000
+        )
+        expect(wrong_family.ok).to_equal(false)
+        expect(wrong_family.error).to_equal("bridge-wrong-category:NtCreateFile")
+
+    it "rejects unnamed NTDLL events in the bounded startup path":
+        val result = wine_ntdll_execute_event_sync(
+            ["NtCreateEvent", "NtSetEvent", "NtWaitForSingleObject", "NtResetEvent"],
+            wine_ntdll_event_table_new(),
+            "",
+            true,
+            false,
+            1000
+        )
+
+        expect(result.ok).to_equal(false)
+        expect(result.error).to_equal("NtCreateEvent:invalid-name")

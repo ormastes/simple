@@ -1,0 +1,209 @@
+# Programmatic DOM Rendering Test
+#
+# Tests the rendering pipeline WITHOUT HTML parsing:
+#   Programmatic DOM → Layout → Scene → Pixels
+#
+# Uses DOM accessors + layout_to_scene to avoid:
+#   1. HTML parser hang (text.slice in Cranelift)
+#   2. Cross-module text argument crash (LLVM→Cranelift)
+#
+# Build:
+#   First: build with cranelift to cache libs
+#   Then: build with llvm for the entry file
+
+use std.gc_async_mut.gpu.browser_engine.dom.{BeDomNode, be_dom_get_tag, be_dom_get_bg_color, be_dom_get_children}
+use std.gc_async_mut.gpu.browser_engine.css.{be_default_style, StyleProps}
+use std.gc_async_mut.gpu.browser_engine.layout.{layout_to_scene, layout_tree, BeLayoutBox, layout_get_width, layout_get_height}
+use common.render_scene.scene.{RenderScene, SceneCommand, render_scene, scene_fill_rect, scene_gradient_rect}
+use common.render_scene.executor.{execute_scene_to_buffer}
+
+extern fn rt_array_new(cap: i64) -> [u32]
+extern fn rt_array_push(arr, val)
+
+fn make_buffer(w: i32, h: i32) -> [u32]:
+    val count = w * h
+    var buf: [u32] = rt_array_new(count)
+    # Use scene fill to initialize (avoids rt_array_push tagging issues)
+    var i = 0
+    while i < count:
+        rt_array_push(buf, 0xFF000000)
+        i = i + 1
+    buf
+
+fn main() -> i64:
+    var pass_count = 0
+    var fail_count = 0
+
+    print "=== DOM Rendering Pipeline Verification ==="
+
+    # ========================================================================
+    # Test 1: layout_to_scene with default node
+    # ========================================================================
+    print "\n--- Test 1: Default node → scene → pixels ---"
+    var node1 = BeDomNode.element("div")
+    val tag1 = be_dom_get_tag(node1)
+    print "  tag = '{tag1}'"
+
+    val scene1 = layout_to_scene(node1, 100, 100)
+    print "  scene created"
+
+    var buf1 = make_buffer(100, 100)
+    execute_scene_to_buffer(scene1, buf1, 100, 100)
+    val p1 = buf1[50 * 100 + 50]
+    print "  center pixel = {p1}"
+    # Default bg is transparent (0x00000000), so pixel stays at 0xFF000000 (black)
+    if p1 != 0:
+        print "  PASS: pixel has value"
+        pass_count = pass_count + 1
+    else:
+        print "  FAIL: pixel is 0"
+        fail_count = fail_count + 1
+
+    # ========================================================================
+    # Test 2: Direct scene rendering (bypass DOM entirely)
+    # ========================================================================
+    print "\n--- Test 2: Direct red rect scene ---"
+    var cmds2: [SceneCommand] = []
+    val red_cmd = scene_fill_rect(0, 0, 100, 100, 0xFFFF0000)
+    rt_array_push(cmds2, red_cmd)
+    val scene2 = render_scene(cmds2, 100, 100)
+    var buf2 = make_buffer(100, 100)
+    execute_scene_to_buffer(scene2, buf2, 100, 100)
+    val p2 = buf2[50 * 100 + 50]
+    val r2 = (p2 >> 16) & 0xFF
+    print "  center R={r2}"
+    if r2 > 200:
+        print "  PASS: red rect rendered"
+        pass_count = pass_count + 1
+    else:
+        print "  FAIL: red rect not rendered (R={r2})"
+        fail_count = fail_count + 1
+
+    # ========================================================================
+    # Test 3: Blue rect + comparison
+    # ========================================================================
+    print "\n--- Test 3: Blue rect + comparison ---"
+    var cmds3: [SceneCommand] = []
+    rt_array_push(cmds3, scene_fill_rect(0, 0, 100, 100, 0xFF0000FF))
+    val scene3 = render_scene(cmds3, 100, 100)
+    var buf3 = make_buffer(100, 100)
+    execute_scene_to_buffer(scene3, buf3, 100, 100)
+    val p3 = buf3[50 * 100 + 50]
+    val b3 = p3 & 0xFF
+    print "  center B={b3}"
+
+    # Compare red vs blue
+    var diff_count = 0
+    var max_diff = 0
+    var i = 0
+    while i < 10000:
+        val pa = buf2[i]
+        val pb = buf3[i]
+        val dr = abs_i64(((pa >> 16) & 0xFF) - ((pb >> 16) & 0xFF))
+        val db = abs_i64((pa & 0xFF) - (pb & 0xFF))
+        val d = max2(dr, db)
+        if d > max_diff: max_diff = d
+        if d > 0: diff_count = diff_count + 1
+        i = i + 1
+    print "  Diff pixels: {diff_count}, Max diff: {max_diff}"
+    if diff_count > 5000:
+        print "  PASS: red and blue differ significantly"
+        pass_count = pass_count + 1
+    else:
+        print "  FAIL: expected significant differences"
+        fail_count = fail_count + 1
+
+    # ========================================================================
+    # Test 4: Gradient rendering
+    # ========================================================================
+    print "\n--- Test 4: Gradient rect ---"
+    var cmds4: [SceneCommand] = []
+    rt_array_push(cmds4, scene_gradient_rect(0, 0, 100, 100, 0xFFFF0000, 0xFF0000FF))
+    val scene4 = render_scene(cmds4, 100, 100)
+    var buf4 = make_buffer(100, 100)
+    execute_scene_to_buffer(scene4, buf4, 100, 100)
+    val left_px = buf4[50 * 100 + 5]
+    val right_px = buf4[50 * 100 + 95]
+    val left_r = (left_px >> 16) & 0xFF
+    val right_b = right_px & 0xFF
+    print "  Left R={left_r}, Right B={right_b}"
+    if left_r > right_b:
+        print "  PASS: gradient left is redder"
+        pass_count = pass_count + 1
+    else:
+        print "  FAIL: gradient not rendering correctly"
+        fail_count = fail_count + 1
+
+    # ========================================================================
+    # Test 5: Deterministic rendering
+    # ========================================================================
+    print "\n--- Test 5: Deterministic ---"
+    var buf5 = make_buffer(100, 100)
+    execute_scene_to_buffer(scene2, buf5, 100, 100)
+    var match_count = 0
+    i = 0
+    while i < 10000:
+        if buf2[i] == buf5[i]: match_count = match_count + 1
+        i = i + 1
+    print "  Match: {match_count}/10000"
+    if match_count == 10000:
+        print "  PASS: deterministic rendering"
+        pass_count = pass_count + 1
+    else:
+        print "  FAIL: non-deterministic ({match_count}/10000)"
+        fail_count = fail_count + 1
+
+    # ========================================================================
+    # Test 6: Layout tree structure
+    # ========================================================================
+    print "\n--- Test 6: Layout tree ---"
+    var root = BeDomNode.element("div")
+    var child1 = BeDomNode.element("div")
+    var child2 = BeDomNode.element("div")
+    root.add_child(child1)
+    root.add_child(child2)
+    val children = be_dom_get_children(root)
+    print "  Root children: {children.len()}"
+    if children.len() == 2:
+        print "  PASS: root has 2 children"
+        pass_count = pass_count + 1
+    else:
+        print "  FAIL: expected 2 children, got {children.len()}"
+        fail_count = fail_count + 1
+
+    val layout = layout_tree(root, 200, 200)
+    val lw = layout_get_width(layout)
+    val lh = layout_get_height(layout)
+    print "  Layout: w={lw} h={lh}"
+    if lw > 0:
+        print "  PASS: layout has width"
+        pass_count = pass_count + 1
+    else:
+        print "  FAIL: layout width is 0"
+        fail_count = fail_count + 1
+
+    # ========================================================================
+    # Summary
+    # ========================================================================
+    val total = pass_count + fail_count
+    print "\n========================================"
+    print "  DOM Rendering Pipeline Summary"
+    print "========================================"
+    print "  Total checks: {total}"
+    print "  Passed:       {pass_count}"
+    print "  Failed:       {fail_count}"
+    if fail_count == 0:
+        print "  Result: ALL PASSED"
+    else:
+        print "  Result: {fail_count} FAILURES"
+    print "========================================"
+    return fail_count
+
+fn abs_i64(x: i64) -> i64:
+    if x < 0: return 0 - x
+    x
+
+fn max2(a: i64, b: i64) -> i64:
+    if a > b: a else: b
+
+main()

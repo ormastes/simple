@@ -1,0 +1,297 @@
+# Tests for cross-compilation target presets.
+# No imports - all logic is replicated at module level.
+
+# WARNING: Interpreter mode limitation
+# In interpreter mode, `it` block bodies do NOT execute — assertions are not evaluated.
+# These tests verify file loading and structure only.
+# For authoritative proof, run in compiled mode: bin/simple test --compiled test/unit/compiler/target_presets_spec.spl
+#
+# Local helpers replicate logic from:
+#   - src/compiler/80.driver/build/baremetal.spl (TargetPreset struct, cortex-m4/m0/riscv32/wasm32/linux/macos presets, allowed_families)
+#   - src/compiler/00.common/driver_core_types.spl (is_family_allowed / check_family_allowed)
+# If the real implementation changes, these helpers must be updated to match.
+
+# ============================================================================
+# Module-level preset helpers (replicate logic without imports)
+# ============================================================================
+
+struct TargetPresetSpec:
+    name: text
+    arch: text
+    os: text
+    abi: text
+    no_std: bool
+    no_gc: bool
+    stack_size: i64
+    heap_size: i64
+    pointer_width: i64
+    float_support: bool
+    description: text
+
+fn make_cortex_m4() -> TargetPresetSpec:
+    TargetPresetSpec(
+        name: "cortex-m4",
+        arch: "thumbv7em",
+        os: "none",
+        abi: "eabihf",
+        no_std: true,
+        no_gc: true,
+        stack_size: 8192,
+        heap_size: 0,
+        pointer_width: 32,
+        float_support: true,
+        description: "ARM Cortex-M4 bare-metal (FPU, 32-bit, no OS)"
+    )
+
+fn make_cortex_m0() -> TargetPresetSpec:
+    TargetPresetSpec(
+        name: "cortex-m0",
+        arch: "thumbv6m",
+        os: "none",
+        abi: "eabi",
+        no_std: true,
+        no_gc: true,
+        stack_size: 2048,
+        heap_size: 0,
+        pointer_width: 32,
+        float_support: false,
+        description: "ARM Cortex-M0/M0+ bare-metal (no FPU, 32-bit, no OS)"
+    )
+
+fn make_riscv32_baremetal() -> TargetPresetSpec:
+    TargetPresetSpec(
+        name: "riscv32-baremetal",
+        arch: "riscv32imac",
+        os: "none",
+        abi: "ilp32",
+        no_std: true,
+        no_gc: true,
+        stack_size: 16384,
+        heap_size: 0,
+        pointer_width: 32,
+        float_support: false,
+        description: "RISC-V 32-bit bare-metal (integer only, no OS)"
+    )
+
+fn make_wasm32() -> TargetPresetSpec:
+    TargetPresetSpec(
+        name: "wasm32",
+        arch: "wasm32",
+        os: "wasi",
+        abi: "wasm",
+        no_std: false,
+        no_gc: true,
+        stack_size: 65536,
+        heap_size: 65536,
+        pointer_width: 32,
+        float_support: true,
+        description: "WebAssembly 32-bit (WASI, browser-compatible)"
+    )
+
+fn make_linux_x86_64() -> TargetPresetSpec:
+    TargetPresetSpec(
+        name: "linux-x86_64",
+        arch: "x86_64",
+        os: "linux",
+        abi: "gnu",
+        no_std: false,
+        no_gc: false,
+        stack_size: 0,
+        heap_size: 0,
+        pointer_width: 64,
+        float_support: true,
+        description: "Linux x86-64 (native, full stdlib)"
+    )
+
+fn make_macos_arm64() -> TargetPresetSpec:
+    TargetPresetSpec(
+        name: "macos-arm64",
+        arch: "aarch64",
+        os: "macos",
+        abi: "macho",
+        no_std: false,
+        no_gc: false,
+        stack_size: 0,
+        heap_size: 0,
+        pointer_width: 64,
+        float_support: true,
+        description: "macOS ARM64 (Apple Silicon, full stdlib)"
+    )
+
+fn make_by_name(name: text) -> TargetPresetSpec:
+    if name == "cortex-m4":
+        return make_cortex_m4()
+    elif name == "wasm32":
+        return make_wasm32()
+    else:
+        TargetPresetSpec(
+            name: name,
+            arch: "unknown",
+            os: "none",
+            abi: "none",
+            no_std: true,
+            no_gc: true,
+            stack_size: 4096,
+            heap_size: 0,
+            pointer_width: 32,
+            float_support: false,
+            description: "Unknown preset (defaults to bare-metal)"
+        )
+
+fn spec_is_baremetal(p: TargetPresetSpec) -> bool:
+    p.no_std and p.no_gc
+
+fn spec_triple(p: TargetPresetSpec) -> text:
+    p.arch + "-" + p.os + "-" + p.abi
+
+fn spec_all_names() -> [text]:
+    ["cortex-m4", "cortex-m0", "riscv32-baremetal", "riscv64-linux",
+     "wasm32", "linux-x86_64", "macos-arm64", "windows-x86_64"]
+
+# ============================================================================
+# Tests
+# ============================================================================
+
+describe "TargetPreset":
+    context "cortex-m4 preset":
+        it "has the correct name":
+            val p = make_cortex_m4()
+            expect(p.name).to_equal("cortex-m4")
+
+        it "has the correct arch":
+            val p = make_cortex_m4()
+            expect(p.arch).to_equal("thumbv7em")
+
+        it "is bare-metal (no_std and no_gc)":
+            val p = make_cortex_m4()
+            expect(spec_is_baremetal(p)).to_equal(true)
+
+        it "has pointer_width of 32":
+            val p = make_cortex_m4()
+            expect(p.pointer_width).to_equal(32)
+
+        it "has float_support enabled":
+            val p = make_cortex_m4()
+            expect(p.float_support).to_equal(true)
+
+    context "riscv32-baremetal preset":
+        it "has os set to none":
+            val p = make_riscv32_baremetal()
+            expect(p.os).to_equal("none")
+
+    context "wasm32 preset":
+        it "has arch set to wasm32":
+            val p = make_wasm32()
+            expect(p.arch).to_equal("wasm32")
+
+    context "linux-x86_64 preset":
+        it "is not bare-metal":
+            val p = make_linux_x86_64()
+            expect(spec_is_baremetal(p)).to_equal(false)
+
+    context "preset_by_name lookup":
+        it "returns cortex-m4 when asked by name":
+            val p = make_by_name("cortex-m4")
+            expect(p.name).to_equal("cortex-m4")
+
+        it "returns wasm32 when asked by name":
+            val p = make_by_name("wasm32")
+            expect(p.arch).to_equal("wasm32")
+
+        it "returns unknown-default preset for unknown name":
+            val p = make_by_name("nonexistent-target")
+            expect(p.arch).to_equal("unknown")
+
+    context "preset_triple":
+        it "formats triple as arch-os-abi":
+            val p = make_cortex_m4()
+            val triple = spec_triple(p)
+            expect(triple).to_equal("thumbv7em-none-eabihf")
+
+    context "preset_all_names":
+        it "returns a list of 8 preset names":
+            val names = spec_all_names()
+            expect(names.len()).to_equal(8)
+
+    context "cortex-m0 preset":
+        it "has no float_support":
+            val p = make_cortex_m0()
+            expect(p.float_support).to_equal(false)
+
+    context "macos-arm64 preset":
+        it "has pointer_width of 64":
+            val p = make_macos_arm64()
+            expect(p.pointer_width).to_equal(64)
+
+    # ================================================================
+    # Target preset → runtime family mapping tests
+    # ================================================================
+
+    context "baremetal preset family mapping":
+        it "restricts to nogc_async_mut_noalloc and common":
+            val p = make_cortex_m4()
+            # Baremetal presets (no_std + no_gc) should only allow these two families
+            val families = baremetal_allowed_families()
+            expect(families.len()).to_equal(2)
+            expect(families[0]).to_equal("nogc_async_mut_noalloc")
+            expect(families[1]).to_equal("common")
+
+        it "sets gc_off to true for baremetal":
+            val p = make_cortex_m4()
+            expect(p.no_gc).to_equal(true)
+
+        it "disallows allocation for baremetal":
+            val p = make_cortex_m4()
+            expect(p.heap_size).to_equal(0)
+
+    context "hosted preset family mapping":
+        it "allows all families (empty restriction)":
+            val families = hosted_allowed_families()
+            expect(families.len()).to_equal(0)
+
+        it "does not set gc_off for hosted":
+            val p = make_linux_x86_64()
+            expect(p.no_gc).to_equal(false)
+
+    context "embedded_with_heap preset family mapping":
+        it "allows nogc families plus common but not gc":
+            val families = embedded_with_heap_allowed_families()
+            expect(families.len()).to_equal(4)
+            expect(families[0]).to_equal("nogc_async_mut_noalloc")
+            expect(families[1]).to_equal("nogc_sync_mut")
+            expect(families[2]).to_equal("nogc_async_mut")
+            expect(families[3]).to_equal("common")
+
+    context "is_family_allowed helper":
+        it "allows any family when restriction is empty":
+            val families: [text] = []
+            expect(check_family_allowed(families, "gc_async_mut")).to_equal(true)
+            expect(check_family_allowed(families, "nogc_sync_mut")).to_equal(true)
+
+        it "blocks non-listed families when restriction is active":
+            val families = ["nogc_async_mut_noalloc", "common"]
+            expect(check_family_allowed(families, "nogc_async_mut_noalloc")).to_equal(true)
+            expect(check_family_allowed(families, "common")).to_equal(true)
+            expect(check_family_allowed(families, "nogc_sync_mut")).to_equal(false)
+            expect(check_family_allowed(families, "gc_async_mut")).to_equal(false)
+
+# ============================================================================
+# Family mapping helpers (replicate TargetPreset.allowed_families logic)
+# ============================================================================
+
+fn baremetal_allowed_families() -> [text]:
+    ["nogc_async_mut_noalloc", "common"]
+
+fn hosted_allowed_families() -> [text]:
+    []
+
+fn embedded_with_heap_allowed_families() -> [text]:
+    ["nogc_async_mut_noalloc", "nogc_sync_mut", "nogc_async_mut", "common"]
+
+fn check_family_allowed(allowed: [text], family: text) -> bool:
+    if allowed.len() == 0:
+        return true
+    for af in allowed:
+        if af == family:
+            return true
+    false

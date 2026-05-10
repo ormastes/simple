@@ -1,0 +1,356 @@
+# SM3 — Pure Simple Implementation (GB/T 32905-2012)
+#
+# Implements SM3 cryptographic hash function for SimpleOS.
+# No SFFI/Rust FFI — pure Simple language, suitable for baremetal.
+#
+# Reference: GB/T 32905-2012 (Chinese National Standard)
+# Reference: https://tools.ietf.org/html/draft-sca-cfrg-sm3
+
+extern fn rt_bytes_u8_at(arr: [u8], idx: i64) -> i64
+
+fn _sm3_u8_at(buf: [u8], idx: i64) -> i64:
+    rt_bytes_u8_at(buf, idx)
+
+# ============================================================================
+# Bit Manipulation Helpers (i64 with 32-bit masking)
+# ============================================================================
+
+fn _sm3_rotl32(x: i64, n: i64) -> i64:
+    val mask = 0xFFFFFFFF
+    val xm = x & mask
+    val nm = n & 31
+    if nm == 0:
+        xm
+    else:
+        ((xm << nm) | (xm >> (32 - nm))) & mask
+
+fn _sm3_add32(a: i64, b: i64) -> i64:
+    (a + b) & 0xFFFFFFFF
+
+# ============================================================================
+# SM3 Boolean Functions
+# ============================================================================
+
+fn _sm3_ff(x: i64, y: i64, z: i64, j: i64) -> i64:
+    if j < 16:
+        (x ^ y ^ z) & 0xFFFFFFFF
+    else:
+        ((x & y) | (x & z) | (y & z)) & 0xFFFFFFFF
+
+fn _sm3_gg(x: i64, y: i64, z: i64, j: i64) -> i64:
+    if j < 16:
+        (x ^ y ^ z) & 0xFFFFFFFF
+    else:
+        ((x & y) | ((~x) & z)) & 0xFFFFFFFF
+
+# ============================================================================
+# SM3 Permutation Functions
+# ============================================================================
+
+fn _sm3_p0(x: i64) -> i64:
+    (x ^ _sm3_rotl32(x, 9) ^ _sm3_rotl32(x, 17)) & 0xFFFFFFFF
+
+fn _sm3_p1(x: i64) -> i64:
+    (x ^ _sm3_rotl32(x, 15) ^ _sm3_rotl32(x, 23)) & 0xFFFFFFFF
+
+# ============================================================================
+# SM3 Constants
+# T_j is rotated left by (j mod 32) before use.
+# ============================================================================
+
+fn _sm3_tj(j: i64) -> i64:
+    # T_j is constant rotated left by (j mod 32)
+    val rot = j & 31
+    if j < 16:
+        _sm3_rotl32(0x79CC4519, rot)
+    else:
+        _sm3_rotl32(0x7A879D8A, rot)
+
+# ============================================================================
+# Initial Hash Values (IV)
+# ============================================================================
+
+fn _sm3_iv() -> list:
+    var h = []
+    h.push(0x7380166F)
+    h.push(0x4914B2B9)
+    h.push(0x172442D7)
+    h.push(0xDA8A0600)
+    h.push(0xA96F30BC)
+    h.push(0x163138AA)
+    h.push(0xE38DEE4D)
+    h.push(0xB0FB0E4E)
+    h
+
+# ============================================================================
+# Message Padding
+# ============================================================================
+
+fn _sm3_pad_list(bytes: list) -> list:
+    var padded = []
+    var i = 0
+    while i < bytes.len():
+        padded.push(bytes.get(i))
+        i = i + 1
+
+    val original_len = bytes.len()
+    val original_bit_len = original_len * 8
+    padded.push(0x80)
+
+    val target_len = ((original_len + 8) / 64 + 1) * 64
+    while padded.len() < target_len - 8:
+        padded.push(0)
+
+    padded.push(0)
+    padded.push(0)
+    padded.push(0)
+    padded.push(0)
+    padded.push((original_bit_len >> 24) & 0xFF)
+    padded.push((original_bit_len >> 16) & 0xFF)
+    padded.push((original_bit_len >> 8) & 0xFF)
+    padded.push(original_bit_len & 0xFF)
+    padded
+
+# ============================================================================
+# Message Expansion
+# Returns a list of 132 elements: W[0..67] followed by W'[0..63]
+# ============================================================================
+
+fn _sm3_expand(block: list) -> list:
+    var w = []
+    var i = 0
+    while i < 16:
+        val base = i * 4
+        val b0 = (block.get(base) & 0xFF) << 24
+        val b1 = (block.get(base + 1) & 0xFF) << 16
+        val b2 = (block.get(base + 2) & 0xFF) << 8
+        val b3 = block.get(base + 3) & 0xFF
+        val word = (b0 | b1 | b2 | b3) & 0xFFFFFFFF
+        w.push(word)
+        i = i + 1
+
+    while i < 68:
+        val p1_in = (w.get(i - 16) ^ w.get(i - 9) ^ _sm3_rotl32(w.get(i - 3), 15)) & 0xFFFFFFFF
+        val new_w = (_sm3_p1(p1_in) ^ _sm3_rotl32(w.get(i - 13), 7) ^ w.get(i - 6)) & 0xFFFFFFFF
+        w.push(new_w)
+        i = i + 1
+
+    var combined = []
+    var k = 0
+    while k < 68:
+        combined.push(w.get(k))
+        k = k + 1
+
+    var j = 0
+    while j < 64:
+        combined.push((w.get(j) ^ w.get(j + 4)) & 0xFFFFFFFF)
+        j = j + 1
+    combined
+
+# ============================================================================
+# SM3 Block Compression
+# ============================================================================
+
+fn _sm3_compress_list(h: list, block: list) -> list:
+    val expanded = _sm3_expand(block)
+
+    var a = h.get(0)
+    var b = h.get(1)
+    var c = h.get(2)
+    var d = h.get(3)
+    var e = h.get(4)
+    var f = h.get(5)
+    var g = h.get(6)
+    var hh = h.get(7)
+
+    var j = 0
+    while j < 64:
+        var w_j = expanded.get(j)
+        var wp_j = expanded.get(68 + j)
+
+        var rotl_a12 = _sm3_rotl32(a, 12)
+        var ss1_pre = _sm3_add32(_sm3_add32(rotl_a12, e), _sm3_tj(j))
+        var ss1 = _sm3_rotl32(ss1_pre, 7)
+        var ss2 = (ss1 ^ rotl_a12) & 0xFFFFFFFF
+        var tt1 = _sm3_add32(_sm3_add32(_sm3_add32(_sm3_ff(a, b, c, j), d), ss2), wp_j)
+        var tt2 = _sm3_add32(_sm3_add32(_sm3_add32(_sm3_gg(e, f, g, j), hh), ss1), w_j)
+
+        # Update registers: save old values needed for multiple new ones
+        # Order matters: use saved originals throughout
+        var save_a = a
+        var save_b = b
+        var save_c = c
+        var save_e = e
+        var save_f = f
+        var save_g = g
+
+        a = tt1 & 0xFFFFFFFF
+        b = save_a
+        c = _sm3_rotl32(save_b, 9)
+        d = save_c
+        e = _sm3_p0(tt2)
+        f = save_e
+        g = _sm3_rotl32(save_f, 19)
+        hh = save_g
+        j = j + 1
+
+    var new_h = []
+    new_h.push((h.get(0) ^ a) & 0xFFFFFFFF)
+    new_h.push((h.get(1) ^ b) & 0xFFFFFFFF)
+    new_h.push((h.get(2) ^ c) & 0xFFFFFFFF)
+    new_h.push((h.get(3) ^ d) & 0xFFFFFFFF)
+    new_h.push((h.get(4) ^ e) & 0xFFFFFFFF)
+    new_h.push((h.get(5) ^ f) & 0xFFFFFFFF)
+    new_h.push((h.get(6) ^ g) & 0xFFFFFFFF)
+    new_h.push((h.get(7) ^ hh) & 0xFFFFFFFF)
+    new_h
+
+# ============================================================================
+# SM3 Hash (list-based internal path)
+# ============================================================================
+
+fn _sm3_hash_list(bytes: list) -> list:
+    val padded = _sm3_pad_list(bytes)
+    var current_h = _sm3_iv()
+    var i = 0
+    while i < padded.len():
+        var block = []
+        var j = 0
+        while j < 64:
+            block.push(padded.get(i + j))
+            j = j + 1
+        current_h = _sm3_compress_list(current_h, block)
+        i = i + 64
+
+    var result = []
+    var k = 0
+    while k < 8:
+        val word = current_h.get(k)
+        result.push((word >> 24) & 0xFF)
+        result.push((word >> 16) & 0xFF)
+        result.push((word >> 8) & 0xFF)
+        result.push(word & 0xFF)
+        k = k + 1
+    result
+
+# ============================================================================
+# Array/List Conversion Helpers
+# ============================================================================
+
+fn _sm3_array_to_list(data: [u8]) -> list:
+    var out = []
+    var i: i64 = 0
+    while i < data.len().to_i64():
+        out.push(_sm3_u8_at(data, i))
+        i = i + 1
+    out
+
+fn _sm3_list_to_array(bytes: list) -> [u8]:
+    var out: [u8] = []
+    var i = 0
+    while i < bytes.len():
+        var bval = bytes.get(i)
+        out.push(bval.to_u8())
+        i = i + 1
+    out
+
+# ============================================================================
+# Public API
+# ============================================================================
+
+fn _sm3_debug_round1_a(message: [u8]) -> i64:
+    """Debug: returns A after round 1. For 'abc' expect 0xea52428c."""
+    val padded = _sm3_pad_list(_sm3_array_to_list(message))
+    var block = []
+    var ji = 0
+    while ji < 64:
+        block.push(padded.get(ji))
+        ji = ji + 1
+    val expanded = _sm3_expand(block)
+    val h = _sm3_iv()
+    var a = h.get(0)
+    var b = h.get(1)
+    var c = h.get(2)
+    var d = h.get(3)
+    var e = h.get(4)
+    var f = h.get(5)
+    var g = h.get(6)
+    var hh = h.get(7)
+    var jr = 0
+    while jr < 2:
+        var w_j = expanded.get(jr)
+        var wp_j = expanded.get(68 + jr)
+        var rotl_a12 = _sm3_rotl32(a, 12)
+        var ss1_pre = _sm3_add32(_sm3_add32(rotl_a12, e), _sm3_tj(jr))
+        var ss1 = _sm3_rotl32(ss1_pre, 7)
+        var ss2 = (ss1 ^ rotl_a12) & 0xFFFFFFFF
+        var tt1 = _sm3_add32(_sm3_add32(_sm3_add32(_sm3_ff(a, b, c, jr), d), ss2), wp_j)
+        var tt2 = _sm3_add32(_sm3_add32(_sm3_add32(_sm3_gg(e, f, g, jr), hh), ss1), w_j)
+        var save_a = a
+        var save_b = b
+        var save_c = c
+        var save_e = e
+        var save_f = f
+        var save_g = g
+        a = tt1 & 0xFFFFFFFF
+        b = save_a
+        c = _sm3_rotl32(save_b, 9)
+        d = save_c
+        e = _sm3_p0(tt2)
+        f = save_e
+        g = _sm3_rotl32(save_f, 19)
+        hh = save_g
+        jr = jr + 1
+    a & 0xFFFFFFFF
+
+fn _sm3_debug_round0_a(message: [u8]) -> i64:
+    """Debug: returns A after round 0. For 'abc' expect 0xb9edc12b."""
+    val padded = _sm3_pad_list(_sm3_array_to_list(message))
+    var block = []
+    var ji = 0
+    while ji < 64:
+        block.push(padded.get(ji))
+        ji = ji + 1
+    val expanded = _sm3_expand(block)
+    val h = _sm3_iv()
+    var a = h.get(0)
+    var b = h.get(1)
+    var c = h.get(2)
+    var d = h.get(3)
+    var e = h.get(4)
+    var f = h.get(5)
+    var g = h.get(6)
+    var hh = h.get(7)
+    val w_j = expanded.get(0)
+    val wp_j = expanded.get(68 + 0)
+    val rotl_a12 = _sm3_rotl32(a, 12)
+    val ss1_pre = _sm3_add32(_sm3_add32(rotl_a12, e), _sm3_tj(0))
+    val ss1 = _sm3_rotl32(ss1_pre, 7)
+    val ss2 = (ss1 ^ rotl_a12) & 0xFFFFFFFF
+    val tt1 = _sm3_add32(_sm3_add32(_sm3_add32(_sm3_ff(a, b, c, 0), d), ss2), wp_j)
+    tt1 & 0xFFFFFFFF
+
+fn _sm3_debug_w0(message: [u8]) -> i64:
+    """Debug helper: returns W[0] of the first expanded block. For 'abc' expect 0x61628380."""
+    val padded = _sm3_pad_list(_sm3_array_to_list(message))
+    var block = []
+    var ji = 0
+    while ji < 64:
+        block.push(padded.get(ji))
+        ji = ji + 1
+    _sm3_expand(block).get(0)
+
+fn sm3_pad(message: [u8]) -> [u8]:
+    """Pad message to a multiple of 64 bytes per SM3 specification."""
+    _sm3_list_to_array(_sm3_pad_list(_sm3_array_to_list(message)))
+
+fn sm3_compress(state: list, block: [u8]) -> list:
+    """Compress one 64-byte block into the running hash state.
+    state: list of 8 i64 values (32-bit words, masked).
+    block: exactly 64 bytes.
+    Returns updated state list."""
+    _sm3_compress_list(state, _sm3_array_to_list(block))
+
+fn sm3_hash(message: [u8]) -> [u8]:
+    """Compute 32-byte SM3 hash of message (GB/T 32905-2012)."""
+    _sm3_list_to_array(_sm3_hash_list(_sm3_array_to_list(message)))

@@ -1,0 +1,85 @@
+# Network fetch — bridge from Blink navigation to the SFFI HTTP client.
+#
+# Single entry for now: fetch_text(url) -> Result<FetchResponse, String>.
+# Returns the response body on success or an error string.
+#
+#   - file:// URLs are served from the local filesystem via rt_file_read_text.
+#   - http(s):// URLs go through the synchronous http_ffi SFFI client
+#     (std.nogc_sync_mut.io.http_ffi.http_get).
+#   - Any other scheme is rejected with an "unsupported scheme" error.
+#
+# v1 limitations:
+#   - content_type is hardcoded ("text/html" for file:// and 2xx http(s)
+#     responses). http_ffi.http_get does not surface response headers, so the
+#     real content-type is not available without upgrading to rt_http_request.
+#   - No redirect chasing beyond whatever http_ffi does internally; `url` in
+#     FetchResponse echoes the request URL.
+#   - No streaming; the entire body is read into memory as a String.
+
+use std.lib.blink.url.url_parser.{ParsedUrl, parse_url}
+use std.nogc_sync_mut.io.http_ffi.{HttpResponse, http_get}
+
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_exists(path: text) -> bool
+
+# ============================================================================
+# FetchResponse — minimal result record handed back to the caller
+# ============================================================================
+
+class FetchResponse:
+    url: String          # Final URL (after any redirects; v1: request URL)
+    status: i64          # 200 / 404 / etc. (200 for successful file:// reads)
+    body: String         # Response body (text only for v1)
+    content_type: String # e.g. "text/html"
+
+# ============================================================================
+# fetch_text — fetch URL, return body as text
+# ============================================================================
+
+fn fetch_text(url: String) -> Result<FetchResponse, String>:
+    val parsed = parse_url(url)
+    if not parsed.is_valid:
+        return Err("invalid URL: {url}")
+
+    val scheme = parsed.scheme
+    if scheme == "file":
+        return fetch_file(parsed, url)
+    if scheme == "http" or scheme == "https":
+        return fetch_http(parsed, url)
+
+    Err("unsupported scheme: {scheme}")
+
+# ============================================================================
+# fetch_file — read a local file:// URL
+# ============================================================================
+
+fn fetch_file(parsed: ParsedUrl, original_url: String) -> Result<FetchResponse, String>:
+    val path = parsed.path
+    if path.len().to_i64() == 0:
+        return Err("file URL has empty path: {original_url}")
+    if not rt_file_exists(path):
+        return Err("file not found: {path}")
+    val body = rt_file_read_text(path)
+    Ok(FetchResponse(
+        url: original_url,
+        status: 200,
+        body: body,
+        content_type: "text/html"
+    ))
+
+# ============================================================================
+# fetch_http — fetch an http:// or https:// URL synchronously
+# ============================================================================
+
+fn fetch_http(parsed: ParsedUrl, original_url: String) -> Result<FetchResponse, String>:
+    val resp = http_get(original_url)
+    if not resp.is_ok:
+        if resp.status_code == 0:
+            return Err("HTTP transport error: {resp.error}")
+        return Err("HTTP {resp.status_code}: {resp.error}")
+    Ok(FetchResponse(
+        url: original_url,
+        status: resp.status_code,
+        body: resp.body,
+        content_type: "text/html"
+    ))

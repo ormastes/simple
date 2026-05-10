@@ -1,0 +1,245 @@
+# 5-Stage Pipeline Model
+#
+# Timing overlay for the RV32I fast emulator (REQ-SIM-002).
+# Models a classic 5-stage in-order pipeline: IF/ID/EX/MEM/WB.
+#
+# The pipeline tracks when each register result becomes available
+# and inserts stall cycles for data hazards (RAW dependencies).
+# Branch prediction assumes "not taken" and adds a penalty on
+# misprediction.
+
+use timing.types.{
+    PipelineStage, CycleCount, LatencyTable, TimingAnnotation,
+    InstructionCategory
+}
+use timing.hazards.{
+    HazardDetector, HazardReport, DataHazard, ControlHazard, HazardKind
+}
+
+# ============================================================================
+# Pipeline Slot
+# ============================================================================
+
+struct PipelineSlot:
+    """One instruction in-flight in the pipeline."""
+    pc: i64
+    inst_word: i64
+    rd: i64                 # Destination register (-1 = none)
+    category: InstructionCategory
+    ready_cycle: i64        # Cycle when result is available for forwarding
+    entered_cycle: i64      # Cycle when this instruction entered the pipeline
+
+impl PipelineSlot:
+    static fn empty() -> PipelineSlot:
+        PipelineSlot(pc: 0, inst_word: 0, rd: -1, category: InstructionCategory.AluReg, ready_cycle: 0, entered_cycle: 0)
+
+    static fn new(pc: i64, inst_word: i64, rd: i64, category: InstructionCategory, ready_cycle: i64, entered_cycle: i64) -> PipelineSlot:
+        PipelineSlot(pc: pc, inst_word: inst_word, rd: rd, category: category, ready_cycle: ready_cycle, entered_cycle: entered_cycle)
+
+    fn is_empty() -> bool:
+        self.rd == -1
+
+# ============================================================================
+# Pipeline Model
+# ============================================================================
+
+class PipelineModel:
+    """5-stage in-order pipeline timing model.
+
+    Operates as a timing overlay: the functional emulator executes
+    instructions correctly, and this model computes cycle-accurate
+    timing based on data dependencies and branch behavior.
+    """
+    latency_table: LatencyTable
+    current_cycle: i64
+    retired_count: i64
+
+    # Scoreboard: for each of x0..x31, the cycle when that register
+    # result becomes available for forwarding.
+    reg_ready: [i64]
+
+    # Accumulated cycle counts
+    cycles: CycleCount
+
+    # Hazard detector
+    hazard_detector: HazardDetector
+
+    # Timing annotation log
+    annotations: [TimingAnnotation]
+
+    # Branch prediction: static not-taken
+    branch_mispredict_count: i64
+    branch_total_count: i64
+
+impl PipelineModel:
+    static fn new() -> PipelineModel:
+        var reg_ready: [i64] = []
+        for _ in 0..32:
+            reg_ready.push(0)
+        PipelineModel(
+            latency_table: LatencyTable.default_rv32i(),
+            current_cycle: 0,
+            retired_count: 0,
+            reg_ready: reg_ready,
+            cycles: CycleCount.zero(),
+            hazard_detector: HazardDetector.new(),
+            annotations: [],
+            branch_mispredict_count: 0,
+            branch_total_count: 0
+        )
+
+    static fn with_latencies(table: LatencyTable) -> PipelineModel:
+        var reg_ready: [i64] = []
+        for _ in 0..32:
+            reg_ready.push(0)
+        PipelineModel(
+            latency_table: table,
+            current_cycle: 0,
+            retired_count: 0,
+            reg_ready: reg_ready,
+            cycles: CycleCount.zero(),
+            hazard_detector: HazardDetector.new(),
+            annotations: [],
+            branch_mispredict_count: 0,
+            branch_total_count: 0
+        )
+
+    me retire_instruction(pc: i64, inst_word: i64, category: InstructionCategory, rd: i64, rs1: i64, rs2: i64, branch_taken: bool) -> TimingAnnotation:
+        """Record one retired instruction and compute its timing.
+
+        Args:
+            pc: Instruction address
+            inst_word: Raw instruction word
+            category: Instruction category for latency lookup
+            rd: Destination register (0-31, or -1 for none)
+            rs1: Source register 1 (0-31, or -1 for none)
+            rs2: Source register 2 (0-31, or -1 for none)
+            branch_taken: Whether this branch was actually taken
+
+        Returns:
+            TimingAnnotation with computed stalls and total cycles
+        """
+        val base_latency = self.latency_table.lookup(category)
+
+        # Compute data hazard stalls: wait for source operands
+        var stall_cycles: i64 = 0
+        if rs1 > 0:
+            val wait1 = self.reg_ready[rs1] - self.current_cycle
+            if wait1 > 0:
+                stall_cycles = wait1
+                self.hazard_detector.record_data_hazard(
+                    DataHazard(pc: pc, kind: HazardKind.RAW, src_reg: rs1, stall_cycles: wait1)
+                )
+        if rs2 > 0:
+            val wait2 = self.reg_ready[rs2] - self.current_cycle
+            if wait2 > stall_cycles:
+                stall_cycles = wait2
+                self.hazard_detector.record_data_hazard(
+                    DataHazard(pc: pc, kind: HazardKind.RAW, src_reg: rs2, stall_cycles: wait2)
+                )
+
+        # Apply stall
+        self.current_cycle = self.current_cycle + stall_cycles
+
+        # Branch misprediction penalty (static not-taken predictor)
+        var mispredict = false
+        var control_penalty: i64 = 0
+        match category:
+            InstructionCategory.Branch:
+                self.branch_total_count = self.branch_total_count + 1
+                if branch_taken:
+                    # Not-taken predictor mispredicted
+                    mispredict = true
+                    self.branch_mispredict_count = self.branch_mispredict_count + 1
+                    control_penalty = self.latency_table.branch_mispredict_penalty
+                    self.hazard_detector.record_control_hazard(
+                        ControlHazard(pc: pc, penalty_cycles: control_penalty, was_taken: true, predicted_taken: false)
+                    )
+            InstructionCategory.Jump:
+                control_penalty = self.latency_table.jump_redirect_penalty
+                self.hazard_detector.record_control_hazard(
+                    ControlHazard(pc: pc, penalty_cycles: control_penalty, was_taken: true, predicted_taken: false)
+                )
+            _: pass_dn
+
+        # Advance cycle by instruction latency + control penalty
+        val total = base_latency + stall_cycles + control_penalty
+        self.current_cycle = self.current_cycle + base_latency + control_penalty
+
+        # Update scoreboard: mark when rd result is available
+        if rd > 0:
+            match category:
+                InstructionCategory.Load:
+                    # Load result available after MEM stage (2 cycles from issue)
+                    self.reg_ready[rd] = self.current_cycle
+                _:
+                    # ALU result available after EX stage (1 cycle from issue)
+                    self.reg_ready[rd] = self.current_cycle
+
+        # Update cycle breakdown
+        self.cycles = CycleCount(
+            total: self.cycles.total + total,
+            execution: self.cycles.execution + base_latency,
+            stall_data: self.cycles.stall_data + stall_cycles,
+            stall_control: self.cycles.stall_control + control_penalty,
+            stall_memory: self.cycles.stall_memory
+        )
+
+        self.retired_count = self.retired_count + 1
+
+        # Build annotation
+        var annotation = TimingAnnotation.new(pc, inst_word, category, base_latency)
+        annotation = annotation.with_regs(rd, rs1, rs2)
+        if stall_cycles > 0:
+            annotation = annotation.with_stall(stall_cycles)
+        match category:
+            InstructionCategory.Branch:
+                annotation = annotation.with_branch(branch_taken, mispredict)
+            InstructionCategory.Jump:
+                annotation = annotation.with_branch(true, false)
+            _: pass_dn
+        # Re-set total_cycles to include control penalty
+        annotation = TimingAnnotation(..annotation, total_cycles: total)
+        self.annotations.push(annotation)
+        annotation
+
+    me reset():
+        """Reset pipeline state."""
+        for i in 0..32:
+            self.reg_ready[i] = 0
+        self.current_cycle = 0
+        self.retired_count = 0
+        self.cycles = CycleCount.zero()
+        self.hazard_detector = HazardDetector.new()
+        self.annotations = []
+        self.branch_mispredict_count = 0
+        self.branch_total_count = 0
+
+    fn cycle_count() -> i64:
+        self.current_cycle
+
+    fn ipc() -> i64:
+        """Instructions per cycle (scaled by 100 for integer math).
+
+        Returns IPC * 100. Divide by 100 to get actual IPC.
+        E.g., 72 means IPC = 0.72.
+        """
+        if self.current_cycle == 0:
+            return 0
+        (self.retired_count * 100) / self.current_cycle
+
+    fn branch_miss_rate() -> i64:
+        """Branch miss rate scaled by 100. E.g., 25 means 25%."""
+        if self.branch_total_count == 0:
+            return 0
+        (self.branch_mispredict_count * 100) / self.branch_total_count
+
+    fn hazard_report() -> HazardReport:
+        self.hazard_detector.report()
+
+    fn stats_text() -> text:
+        var out = "Pipeline: cycles={self.current_cycle} retired={self.retired_count}"
+        out = out + " ipc_x100={self.ipc()}"
+        out = out + " branches={self.branch_total_count} misses={self.branch_mispredict_count}"
+        out = out + " {self.cycles.to_text()}"
+        out

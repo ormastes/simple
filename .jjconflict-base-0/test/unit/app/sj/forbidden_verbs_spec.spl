@@ -1,0 +1,123 @@
+"""
+# Forbidden Verbs Specification
+#
+# Tests the policy enforcement for dangerous git verbs that should
+# be blocked or redirected to safer jj equivalents.
+"""
+
+use std.io_runtime
+
+# --- Inline policy types and logic ---
+
+struct PolicyResult:
+    allowed: bool
+    exit_code: i64
+    message: text
+
+fn policy_allow() -> PolicyResult:
+    PolicyResult(allowed: true, exit_code: 0i64, message: "")
+
+fn policy_forbid(message: text) -> PolicyResult:
+    PolicyResult(allowed: false, exit_code: 1i64, message: message)
+
+fn _has_arg(argv: [text], needle: text) -> bool:
+    var i = 0i64
+    while i < argv.len():
+        if argv[i] == needle:
+            return true
+        i = i + 1i64
+    false
+
+fn check_forbidden(argv: [text]) -> PolicyResult:
+    if argv.len() < 2i64:
+        return policy_allow()
+    if argv[0i64] != "git":
+        return policy_allow()
+    val verb = argv[1i64]
+    if verb == "rebase" and _has_arg(argv, "-i"):
+        return policy_forbid("ERROR[FORBIDDEN]: git rebase -i is not supported here. Use sj split, sj squash --into, or sj rebase --onto instead.")
+    if verb == "push" and (_has_arg(argv, "--force") or _has_arg(argv, "-f")):
+        return policy_forbid("ERROR[FORBIDDEN]: force-push is prohibited. To move a bookmark backward use: jj bookmark move <name> --to <rev> --allow-backwards then: sj git push origin <name>")
+    if verb == "push" and argv.len() == 2i64 and not _has_arg(argv, "--bookmark") and not _has_arg(argv, "--via-worktree"):
+        return policy_forbid("ERROR[FORBIDDEN]: bare 'sj git push' is ambiguous in a jj repo. The project push pattern is: jj bookmark set main -r @- && sj git push origin main")
+    if verb == "checkout" and argv.len() == 2i64:
+        return policy_forbid("ERROR[FORBIDDEN]: bare 'git checkout' with no arguments is not meaningful in a jj-managed repo. Use sj git checkout <rev> or sj git checkout -b <branch> [base]")
+    if verb == "filter-branch":
+        return policy_forbid("ERROR[FORBIDDEN]: git filter-branch rewrites history outside jj's operation log. Use sj raw git filter-branch only if you accept the risk.")
+    if verb == "stash":
+        return policy_forbid("ERROR[FORBIDDEN]: use 'jj new -m wip-<topic>' instead - jj's working-copy-as-commit makes stash unnecessary")
+    policy_allow()
+
+# ============================================================================
+# Tests
+# ============================================================================
+
+describe "Forbidden Verbs - Interactive Rebase":
+    it "forbids git rebase -i":
+        val result = check_forbidden(["git", "rebase", "-i"])
+        expect(result.allowed).to_equal(false)
+        expect(result.message).to_contain("FORBIDDEN")
+        expect(result.message).to_contain("rebase -i")
+
+    it "allows git rebase without -i":
+        val result = check_forbidden(["git", "rebase", "main"])
+        expect(result.allowed).to_equal(true)
+
+describe "Forbidden Verbs - Force Push":
+    it "forbids git push --force":
+        val result = check_forbidden(["git", "push", "--force"])
+        expect(result.allowed).to_equal(false)
+        expect(result.message).to_contain("force-push")
+
+    it "forbids git push -f":
+        val result = check_forbidden(["git", "push", "-f"])
+        expect(result.allowed).to_equal(false)
+
+    it "allows git push with --bookmark":
+        val result = check_forbidden(["git", "push", "--bookmark", "main"])
+        expect(result.allowed).to_equal(true)
+
+describe "Forbidden Verbs - Bare Push":
+    it "forbids bare git push":
+        val result = check_forbidden(["git", "push"])
+        expect(result.allowed).to_equal(false)
+        expect(result.message).to_contain("ambiguous")
+
+    it "allows git push with --via-worktree":
+        val result = check_forbidden(["git", "push", "--via-worktree"])
+        expect(result.allowed).to_equal(true)
+
+describe "Forbidden Verbs - Bare Checkout":
+    it "forbids bare git checkout":
+        val result = check_forbidden(["git", "checkout"])
+        expect(result.allowed).to_equal(false)
+        expect(result.message).to_contain("not meaningful")
+
+    it "allows git checkout with rev":
+        val result = check_forbidden(["git", "checkout", "main"])
+        expect(result.allowed).to_equal(true)
+
+describe "Forbidden Verbs - Filter-Branch":
+    it "forbids git filter-branch":
+        val result = check_forbidden(["git", "filter-branch"])
+        expect(result.allowed).to_equal(false)
+        expect(result.message).to_contain("filter-branch")
+
+describe "Forbidden Verbs - Stash":
+    it "forbids git stash":
+        val result = check_forbidden(["git", "stash"])
+        expect(result.allowed).to_equal(false)
+        expect(result.message).to_contain("jj new")
+
+describe "Forbidden Verbs - Passthrough":
+    it "allows non-git commands":
+        val result = check_forbidden(["describe", "-m", "test"])
+        expect(result.allowed).to_equal(true)
+
+    it "allows empty argv":
+        val result = check_forbidden([])
+        expect(result.allowed).to_equal(true)
+
+    it "allows single git with no verb":
+        val result = check_forbidden(["git"])
+        expect(result.allowed).to_equal(true)

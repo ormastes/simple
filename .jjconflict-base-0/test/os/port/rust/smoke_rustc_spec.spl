@@ -1,0 +1,99 @@
+## Smoke spec for the SimpleOS Rust cross-compile toolchain setup.
+##
+## Gates on RUST_SRC env var OR presence of system nightly rustc.
+## If neither is available, all it blocks return a skip marker —
+## the suite stays green on machines that have not set up the Rust toolchain.
+##
+## When the gate passes this spec verifies:
+##   1. The target JSON exists at src/os/toolchain/rust/x86_64-unknown-simpleos.json
+##   2. `rustc --print target-list | grep simpleos` when using a forked rustc
+##   3. `cargo +nightly build` for examples/simpleos_hello_rs/ succeeds (skip if dry-run or no sysroot)
+##   4. Output binary exists after a successful build
+##
+## Run:
+##   bin/simple test test/os/port/rust/smoke_rustc_spec.spl
+
+use std.fs
+use std.text
+use std.process
+use std.spec
+
+extern fn rt_env_get(key: text) -> text
+
+val TARGET_JSON = "src/os/toolchain/rust/x86_64-unknown-simpleos.json"
+val HELLO_RS_DIR = "examples/simpleos_hello_rs"
+val HELLO_RS_OUT = "examples/simpleos_hello_rs/target/x86_64-unknown-simpleos/release/hello_rs"
+
+fn rust_src() -> text:
+    """Return RUST_SRC env var, or empty string if unset."""
+    val rs = rt_env_get("RUST_SRC")
+    if rs == nil:
+        ""
+    else:
+        rs
+
+fn has_nightly_rustc() -> bool:
+    """Return true if system nightly rustc is available."""
+    val (out, err, code) = process.run("rustc", ["+nightly", "--version"])
+    code == 0
+
+fn rust_gate() -> bool:
+    """Return true if either RUST_SRC is set or nightly rustc is on PATH."""
+    val rs = rust_src()
+    if rs != "":
+        return true
+    has_nightly_rustc()
+
+describe "SimpleOS Rust cross-compile smoke":
+    """Env-gated checks for a working Rust cross-toolchain targeting x86_64-unknown-simpleos."""
+
+    it "target JSON exists at src/os/toolchain/rust/x86_64-unknown-simpleos.json":
+        """Always passes when repo is intact — verifies the target spec file is present."""
+        fs.exists(TARGET_JSON).to_equal(true)
+
+    it "rustc --print target-list contains simpleos when using forked rustc":
+        """Skip when RUST_SRC is unset (system nightly does not know the custom target)."""
+        val rs = rust_src()
+        if rs == "":
+            return "skip: RUST_SRC not set — forked rustc not configured"
+        val rustc = "{rs}/bin/rustc"
+        val (out, err, code) = process.run(rustc, ["--print", "target-list"])
+        code.to_equal(0)
+        out.contains("simpleos").to_equal(true)
+
+    it "cargo +nightly build --target x86_64-unknown-simpleos exits 0":
+        """Skip when RUST_BUILD_DRY_RUN=1 or SIMPLEOS_SYSROOT is unset."""
+        if rust_gate() == false:
+            return "skip: no RUST_SRC and no system nightly rustc"
+        val dry = rt_env_get("RUST_BUILD_DRY_RUN")
+        if dry == "1":
+            return "skip: RUST_BUILD_DRY_RUN=1"
+        val sysroot = rt_env_get("SIMPLEOS_SYSROOT")
+        if sysroot == nil:
+            return "skip: SIMPLEOS_SYSROOT not set"
+        if sysroot == "":
+            return "skip: SIMPLEOS_SYSROOT not set"
+        val (out, err, code) = process.run("cargo", [
+            "+nightly",
+            "build",
+            "--release",
+            "--target",
+            "../../src/os/toolchain/rust/x86_64-unknown-simpleos.json",
+            "-Z",
+            "build-std=core,alloc,compiler_builtins",
+        ], HELLO_RS_DIR)
+        code.to_equal(0)
+
+    it "output binary exists after build":
+        """Skip when RUST_BUILD_DRY_RUN=1 or SIMPLEOS_SYSROOT is unset."""
+        if rust_gate() == false:
+            return "skip: no RUST_SRC and no system nightly rustc"
+        val dry = rt_env_get("RUST_BUILD_DRY_RUN")
+        if dry == "1":
+            return "skip: RUST_BUILD_DRY_RUN=1"
+        val sysroot = rt_env_get("SIMPLEOS_SYSROOT")
+        if sysroot == nil:
+            return "skip: SIMPLEOS_SYSROOT not set"
+        if sysroot == "":
+            return "skip: SIMPLEOS_SYSROOT not set"
+        fs.exists(HELLO_RS_OUT).to_equal(true)

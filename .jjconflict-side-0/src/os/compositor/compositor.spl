@@ -1,0 +1,151 @@
+use os.compositor.cursor.{CursorState}
+use os.drivers.framebuffer.fb_driver.{Color}
+
+class WindowSurface:
+    id: i32
+    title: text
+    x: i32
+    y: i32
+    width: i32
+    height: i32
+    visible: bool
+    session: any
+    dirty: bool
+    owner_port: i64
+    process_id: i64
+    app_id: text
+
+class Compositor:
+    surfaces: [WindowSurface]
+    focused_idx: i32
+    fb: any
+    keyboard: any
+    mouse: any
+    cursor: CursorState
+    desktop_bg: Color
+    next_id: i32
+    screen_width: i32
+    screen_height: i32
+    running: bool
+    dragging: bool
+    drag_window_id: i32
+    drag_offset_x: i32
+    drag_offset_y: i32
+
+    me create_window(title: text, x: i32, y: i32, width: i32, height: i32) -> i32:
+        val id = self.next_id
+        self.next_id = self.next_id + 1
+        self.surfaces.push(WindowSurface(
+            id: id,
+            title: title,
+            x: x,
+            y: y,
+            width: width,
+            height: height,
+            visible: true,
+            session: nil,
+            dirty: true,
+            owner_port: 0,
+            process_id: 0,
+            app_id: ""
+        ))
+        self.focused_idx = self.surfaces.len() - 1
+        id
+
+    me destroy_window(id: i32):
+        var out: [WindowSurface] = []
+        var i = 0
+        while i < self.surfaces.len():
+            if self.surfaces[i].id != id:
+                out.push(self.surfaces[i])
+            i = i + 1
+        self.surfaces = out
+        if self.surfaces.len() == 0:
+            self.focused_idx = -1
+        elif self.focused_idx >= self.surfaces.len():
+            self.focused_idx = self.surfaces.len() - 1
+
+    me focus_window(id: i32):
+        var found = -1
+        var i = 0
+        while i < self.surfaces.len():
+            if self.surfaces[i].id == id:
+                found = i
+            i = i + 1
+        if found < 0:
+            return
+        val chosen = self.surfaces[found]
+        var out: [WindowSurface] = []
+        i = 0
+        while i < self.surfaces.len():
+            if i != found:
+                out.push(self.surfaces[i])
+            i = i + 1
+        out.push(chosen)
+        self.surfaces = out
+        self.focused_idx = self.surfaces.len() - 1
+
+    me cycle_focus():
+        if self.surfaces.len() <= 1:
+            if self.surfaces.len() == 0:
+                self.focused_idx = -1
+            return
+        var idx = self.focused_idx + 1
+        if idx >= self.surfaces.len():
+            idx = 0
+        self.focus_window(self.surfaces[idx].id)
+
+    me move_window(id: i32, x: i32, y: i32):
+        var i = 0
+        while i < self.surfaces.len():
+            if self.surfaces[i].id == id:
+                var surface = self.surfaces[i]
+                surface.x = x
+                surface.y = y
+                surface.dirty = true
+                self.surfaces[i] = surface
+            i = i + 1
+
+    me set_window_identity(id: i32, process_id: i64, app_id: text):
+        var i = 0
+        while i < self.surfaces.len():
+            if self.surfaces[i].id == id:
+                var surface = self.surfaces[i]
+                surface.process_id = process_id
+                surface.app_id = app_id
+                self.surfaces[i] = surface
+            i = i + 1
+
+    fn window_process_id(id: i32) -> i64:
+        var i = 0
+        while i < self.surfaces.len():
+            if self.surfaces[i].id == id:
+                return self.surfaces[i].process_id
+            i = i + 1
+        0
+
+    fn window_app_id(id: i32) -> text:
+        var i = 0
+        while i < self.surfaces.len():
+            if self.surfaces[i].id == id:
+                return self.surfaces[i].app_id
+            i = i + 1
+        ""
+
+    fn window_count_for_process(process_id: i64) -> i32:
+        var count = 0
+        var i = 0
+        while i < self.surfaces.len():
+            if self.surfaces[i].process_id == process_id:
+                count = count + 1
+            i = i + 1
+        count
+
+    fn windows_for_process(process_id: i64) -> [WindowSurface]:
+        var out: [WindowSurface] = []
+        var i = 0
+        while i < self.surfaces.len():
+            if self.surfaces[i].process_id == process_id:
+                out.push(self.surfaces[i])
+            i = i + 1
+        out

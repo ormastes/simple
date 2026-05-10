@@ -1,0 +1,373 @@
+# Poly1305 MAC — Pure Simple stdlib implementation (RFC 7539 / RFC 8439)
+#
+# One-time authenticator using 130-bit arithmetic in GF(2^130 - 5).
+# All operations use u32/u64 — no float, no externs.
+#
+# SIMD follow-up opportunity: the multiply-accumulate inner loop in
+# poly1305_block processes one 16-byte block at a time.  A SIMD path could
+# evaluate four blocks in parallel via Vec4i (same vertical-layout trick used
+# in chacha20's 4-block path), batching h*r products across lanes.  That
+# optimisation is deferred to a follow-up; correctness is the priority here.
+#
+# Key-generation path (poly1305_key_gen) DOES use ChaCha20 SIMD — the one-time
+# key is the first 32 bytes of a single ChaCha20 block at counter=0.
+#
+# Reference: RFC 7539 §2.5 (Poly1305), §2.6 (key generation)
+# Reference: RFC 8439 (updated RFC 7539 with errata)
+# Reference: D.J. Bernstein, "The Poly1305-AES message-authentication code"
+#
+# Public API:
+#   poly1305_mac(key, msg)           -> [u8]   (16-byte tag)
+#   poly1305_key_gen(key, nonce)     -> [u8]   (32-byte one-time key via ChaCha20)
+
+mod crypto.poly1305
+
+use std.crypto.chacha20.{chacha20_block}
+
+# ============================================================================
+# Poly1305 State
+# ============================================================================
+
+struct Poly1305State:
+    """Poly1305 accumulator state.
+
+    r: clamped key (5 u32 limbs, 26 bits each)
+    h: accumulator (5 u32 limbs, up to ~26 bits each after partial reduce)
+    pad: one-time pad / s-value (4 u32 words, key bytes 16..31)
+    """
+    r0: u32
+    r1: u32
+    r2: u32
+    r3: u32
+    r4: u32
+    h0: u32
+    h1: u32
+    h2: u32
+    h3: u32
+    h4: u32
+    pad0: u32
+    pad1: u32
+    pad2: u32
+    pad3: u32
+
+# ============================================================================
+# Helpers
+# ============================================================================
+
+fn _le_u32(b: [u8], off: u64) -> u32:
+    """Load u32 from byte array at offset `off` (little-endian)."""
+    b[off].to_u32() |
+    (b[off + 1].to_u32() << 8u32) |
+    (b[off + 2].to_u32() << 16u32) |
+    (b[off + 3].to_u32() << 24u32)
+
+fn _put_le_u32(buf: [u8], v: u32):
+    """Append u32 to buf as 4 bytes little-endian."""
+    buf.push((v & 0xFFu32).to_u8())
+    buf.push(((v >> 8u32) & 0xFFu32).to_u8())
+    buf.push(((v >> 16u32) & 0xFFu32).to_u8())
+    buf.push(((v >> 24u32) & 0xFFu32).to_u8())
+
+# ============================================================================
+# Poly1305 Init (RFC 8439 §2.5.1 step 1-2)
+# ============================================================================
+
+fn _poly1305_init(key: [u8]) -> Poly1305State:
+    """Initialize Poly1305 accumulator from 32-byte one-time key.
+
+    key[0..15]  = r (loaded into 5×26-bit limbs, clamped per §2.5.1)
+    key[16..31] = s / pad (added to final tag)
+
+    Clamp r: each 4-byte chunk has specific bits cleared:
+      r[3], r[7], r[11], r[15] clear top 4 bits
+      r[4], r[8], r[12]        clear bottom 2 bits
+    Equivalent mask: 0x0ffffffc0ffffffc0ffffffc0fffffff
+    """
+    val t0 = _le_u32(key, 0)
+    val t1 = _le_u32(key, 4)
+    val t2 = _le_u32(key, 8)
+    val t3 = _le_u32(key, 12)
+
+    # Split 128 bits into 5 × 26-bit limbs and apply clamp simultaneously
+    val r0 = t0 & 0x3FFFFFFu32
+    val r1 = ((t0 >> 26u32) | (t1 << 6u32)) & 0x3FFFF03u32
+    val r2 = ((t1 >> 20u32) | (t2 << 12u32)) & 0x3FFC0FFu32
+    val r3 = ((t2 >> 14u32) | (t3 << 18u32)) & 0x3F03FFFu32
+    val r4 = (t3 >> 8u32) & 0x00FFFFFu32
+
+    val pad0 = _le_u32(key, 16)
+    val pad1 = _le_u32(key, 20)
+    val pad2 = _le_u32(key, 24)
+    val pad3 = _le_u32(key, 28)
+
+    Poly1305State(
+        r0: r0, r1: r1, r2: r2, r3: r3, r4: r4,
+        h0: 0u32, h1: 0u32, h2: 0u32, h3: 0u32, h4: 0u32,
+        pad0: pad0, pad1: pad1, pad2: pad2, pad3: pad3
+    )
+
+# ============================================================================
+# Poly1305 Block (RFC 8439 §2.5.1 step 3-4)
+# ============================================================================
+
+fn _poly1305_block(st: Poly1305State, block: [u8], hibit: u32) -> Poly1305State:
+    """Process one 16-byte block (must be exactly 16 bytes, pre-padded by caller).
+
+    hibit = 1 for full-size blocks (adds 2^128 to the block value).
+    hibit = 0 for the final partial block (the 0x01 byte is already included
+            in the block by the caller at position `remaining`).
+
+    RFC 8439 §2.5.1:
+      h += m[i] (with the high bit set or the partial-block sentinel)
+      h  = (h * r) mod (2^130 - 5)
+    """
+    # Load block as 5 × 26-bit limbs, adding hibit at the top
+    val t0 = _le_u32(block, 0)
+    val t1 = _le_u32(block, 4)
+    val t2 = _le_u32(block, 8)
+    val t3 = _le_u32(block, 12)
+
+    var h0: u32 = st.h0 + (t0 & 0x3FFFFFFu32)
+    var h1: u32 = st.h1 + (((t0 >> 26u32) | (t1 << 6u32)) & 0x3FFFFFFu32)
+    var h2: u32 = st.h2 + (((t1 >> 20u32) | (t2 << 12u32)) & 0x3FFFFFFu32)
+    var h3: u32 = st.h3 + (((t2 >> 14u32) | (t3 << 18u32)) & 0x3FFFFFFu32)
+    var h4: u32 = st.h4 + ((t3 >> 8u32) | (hibit << 24u32))
+
+    # h = h * r  (using u64 intermediates to avoid 32-bit overflow)
+    # Reduction shortcut: x * 2^130 ≡ x * 5  (mod 2^130 - 5)
+    val r0 = st.r0
+    val r1 = st.r1
+    val r2 = st.r2
+    val r3 = st.r3
+    val r4 = st.r4
+
+    val s1: u32 = r1 * 5u32
+    val s2: u32 = r2 * 5u32
+    val s3: u32 = r3 * 5u32
+    val s4: u32 = r4 * 5u32
+
+    # Schoolbook multiply: d[i] = sum over j of h[j] * r[(i-j) mod 5],
+    # with the wrap-around terms scaled by 5.
+    var d0: u64 = (h0.to_u64() * r0.to_u64()) + (h1.to_u64() * s4.to_u64()) + (h2.to_u64() * s3.to_u64()) + (h3.to_u64() * s2.to_u64()) + (h4.to_u64() * s1.to_u64())
+    var d1: u64 = (h0.to_u64() * r1.to_u64()) + (h1.to_u64() * r0.to_u64()) + (h2.to_u64() * s4.to_u64()) + (h3.to_u64() * s3.to_u64()) + (h4.to_u64() * s2.to_u64())
+    var d2: u64 = (h0.to_u64() * r2.to_u64()) + (h1.to_u64() * r1.to_u64()) + (h2.to_u64() * r0.to_u64()) + (h3.to_u64() * s4.to_u64()) + (h4.to_u64() * s3.to_u64())
+    var d3: u64 = (h0.to_u64() * r3.to_u64()) + (h1.to_u64() * r2.to_u64()) + (h2.to_u64() * r1.to_u64()) + (h3.to_u64() * r0.to_u64()) + (h4.to_u64() * s4.to_u64())
+    var d4: u64 = (h0.to_u64() * r4.to_u64()) + (h1.to_u64() * r3.to_u64()) + (h2.to_u64() * r2.to_u64()) + (h3.to_u64() * r1.to_u64()) + (h4.to_u64() * r0.to_u64())
+
+    # Carry propagation — partial reduction mod 2^130 - 5
+    var c: u32 = (d0 >> 26u64).to_u32()
+    h0 = (d0 & 0x3FFFFFFu64).to_u32()
+    d1 = d1 + c.to_u64()
+
+    c = (d1 >> 26u64).to_u32()
+    h1 = (d1 & 0x3FFFFFFu64).to_u32()
+    d2 = d2 + c.to_u64()
+
+    c = (d2 >> 26u64).to_u32()
+    h2 = (d2 & 0x3FFFFFFu64).to_u32()
+    d3 = d3 + c.to_u64()
+
+    c = (d3 >> 26u64).to_u32()
+    h3 = (d3 & 0x3FFFFFFu64).to_u32()
+    d4 = d4 + c.to_u64()
+
+    c = (d4 >> 26u64).to_u32()
+    h4 = (d4 & 0x3FFFFFFu64).to_u32()
+    h0 = h0 + c * 5u32
+
+    c = h0 >> 26u32
+    h0 = h0 & 0x3FFFFFFu32
+    h1 = h1 + c
+
+    Poly1305State(
+        r0: st.r0, r1: st.r1, r2: st.r2, r3: st.r3, r4: st.r4,
+        h0: h0, h1: h1, h2: h2, h3: h3, h4: h4,
+        pad0: st.pad0, pad1: st.pad1, pad2: st.pad2, pad3: st.pad3
+    )
+
+# ============================================================================
+# Poly1305 Finalize (RFC 8439 §2.5.1 steps 5-8)
+# ============================================================================
+
+fn _poly1305_finalize(st: Poly1305State) -> [u8]:
+    """Fully reduce h mod (2^130 - 5), add pad (s), return 16-byte tag."""
+    var h0 = st.h0
+    var h1 = st.h1
+    var h2 = st.h2
+    var h3 = st.h3
+    var h4 = st.h4
+
+    # Full carry propagation to normalize limbs
+    var c: u32 = h1 >> 26u32
+    h1 = h1 & 0x3FFFFFFu32
+    h2 = h2 + c
+    c = h2 >> 26u32
+    h2 = h2 & 0x3FFFFFFu32
+    h3 = h3 + c
+    c = h3 >> 26u32
+    h3 = h3 & 0x3FFFFFFu32
+    h4 = h4 + c
+    c = h4 >> 26u32
+    h4 = h4 & 0x3FFFFFFu32
+    h0 = h0 + c * 5u32
+    c = h0 >> 26u32
+    h0 = h0 & 0x3FFFFFFu32
+    h1 = h1 + c
+
+    # Compute g = h + (-p) = h + 5 - 2^130 (i.e. h - p)
+    # If g >= 0 then h >= p so we must reduce; use g.  Otherwise keep h.
+    var g0: u32 = h0 + 5u32
+    c = g0 >> 26u32
+    g0 = g0 & 0x3FFFFFFu32
+    var g1: u32 = h1 + c
+    c = g1 >> 26u32
+    g1 = g1 & 0x3FFFFFFu32
+    var g2: u32 = h2 + c
+    c = g2 >> 26u32
+    g2 = g2 & 0x3FFFFFFu32
+    var g3: u32 = h3 + c
+    c = g3 >> 26u32
+    g3 = g3 & 0x3FFFFFFu32
+    # g4 underflows (wraps to large positive) when h < p; stays non-negative when h >= p
+    var g4: u32 = h4 + c - (1u32 << 26u32)
+
+    # Constant-time select: pick g when g4 MSB is 0 (g >= 0 ⇒ h >= p)
+    # Avoid arithmetic right-shift; test MSB via & 0x80000000.
+    val mask: u32 = if (g4 & 0x80000000u32) == 0u32: 0xFFFFFFFFu32 else: 0u32
+    g0 = g0 & mask
+    g1 = g1 & mask
+    g2 = g2 & mask
+    g3 = g3 & mask
+    g4 = g4 & mask
+    val nmask: u32 = ~mask
+    h0 = (h0 & nmask) | g0
+    h1 = (h1 & nmask) | g1
+    h2 = (h2 & nmask) | g2
+    h3 = (h3 & nmask) | g3
+    h4 = (h4 & nmask) | g4
+
+    # Reassemble 130-bit value into four 32-bit words (little-endian)
+    var f0: u64 = (h0.to_u64() | (h1.to_u64() << 26u64)) & 0xFFFFFFFFu64
+    var f1: u64 = ((h1.to_u64() >> 6u64) | (h2.to_u64() << 20u64)) & 0xFFFFFFFFu64
+    var f2: u64 = ((h2.to_u64() >> 12u64) | (h3.to_u64() << 14u64)) & 0xFFFFFFFFu64
+    var f3: u64 = ((h3.to_u64() >> 18u64) | (h4.to_u64() << 8u64)) & 0xFFFFFFFFu64
+
+    # Add pad (s) with carry propagation across 128 bits
+    f0 = f0 + st.pad0.to_u64()
+    f1 = f1 + st.pad1.to_u64() + (f0 >> 32u64)
+    f2 = f2 + st.pad2.to_u64() + (f1 >> 32u64)
+    f3 = f3 + st.pad3.to_u64() + (f2 >> 32u64)
+
+    # Emit 16 bytes little-endian (drop carry out of f3 — intentional per RFC)
+    var tag: [u8] = []
+    _put_le_u32(tag, (f0 & 0xFFFFFFFFu64).to_u32())
+    _put_le_u32(tag, (f1 & 0xFFFFFFFFu64).to_u32())
+    _put_le_u32(tag, (f2 & 0xFFFFFFFFu64).to_u32())
+    _put_le_u32(tag, (f3 & 0xFFFFFFFFu64).to_u32())
+    tag
+
+# ============================================================================
+# Public API
+# ============================================================================
+
+fn poly1305_mac(key: [u8], message: [u8]) -> [u8]:
+    """Compute Poly1305 one-time MAC (RFC 8439 §2.5).
+
+    Args:
+        key:     32-byte one-time key: r (bytes 0..15) || s (bytes 16..31).
+        message: Message bytes to authenticate (any length).
+
+    Returns: 16-byte authentication tag.
+
+    Example:
+        val tag = poly1305_mac(key_32, msg)
+        # tag is 16 bytes
+    """
+    var st = _poly1305_init(key)
+
+    var pos: u64 = 0
+    val msg_len = message.len()
+
+    # Process full 16-byte blocks
+    while pos + 16u64 <= msg_len:
+        var block: [u8] = []
+        var j: u64 = 0
+        while j < 16u64:
+            block.push(message[pos + j])
+            j = j + 1u64
+        st = _poly1305_block(st, block, 1u32)
+        pos = pos + 16u64
+
+    # Process final partial block (if any)
+    val remaining = msg_len - pos
+    if remaining > 0u64:
+        # Build 16-byte padded block: message tail + 0x01 sentinel + zero padding
+        # The 0x01 replaces the high bit (2^128) for the partial block per RFC §2.5.1
+        var block: [u8] = []
+        var j: u64 = 0
+        while j < remaining:
+            block.push(message[pos + j])
+            j = j + 1u64
+        block.push(0x01u8)
+        while block.len() < 16u64:
+            block.push(0x00u8)
+        # hibit = 0: the 0x01 byte already encodes the partial-block high bit
+        st = _poly1305_block(st, block, 0u32)
+
+    _poly1305_finalize(st)
+
+fn poly1305_key_gen(key: [u8], nonce: [u8]) -> [u8]:
+    """Generate Poly1305 one-time key via ChaCha20 (RFC 8439 §2.6).
+
+    Runs one ChaCha20 block at counter=0; returns the first 32 bytes as the
+    Poly1305 one-time key (r || s).
+
+    Args:
+        key:   32-byte ChaCha20 key.
+        nonce: 12-byte IETF nonce.
+
+    Returns: 32-byte Poly1305 one-time key.
+
+    Example:
+        val otk = poly1305_key_gen(chacha_key, nonce)
+        val tag = poly1305_mac(otk, message)
+    """
+    # Parse key bytes → 8 u32 words (little-endian)
+    var key_words: [u32] = []
+    var i: u64 = 0
+    while i < 8u64:
+        val base = i * 4u64
+        val w = key[base].to_u32() |
+                (key[base + 1u64].to_u32() << 8u32) |
+                (key[base + 2u64].to_u32() << 16u32) |
+                (key[base + 3u64].to_u32() << 24u32)
+        key_words.push(w)
+        i = i + 1u64
+
+    # Parse nonce bytes → 3 u32 words (little-endian)
+    var nonce_words: [u32] = []
+    i = 0u64
+    while i < 3u64:
+        val base = i * 4u64
+        val w = nonce[base].to_u32() |
+                (nonce[base + 1u64].to_u32() << 8u32) |
+                (nonce[base + 2u64].to_u32() << 16u32) |
+                (nonce[base + 3u64].to_u32() << 24u32)
+        nonce_words.push(w)
+        i = i + 1u64
+
+    # ChaCha20 block at counter=0
+    val block_words = chacha20_block(key_words, 0u32, nonce_words)
+
+    # Extract first 32 bytes (8 u32 words) as one-time key
+    var otk: [u8] = []
+    i = 0u64
+    while i < 8u64:
+        val w = block_words[i]
+        otk.push((w & 0xFFu32).to_u8())
+        otk.push(((w >> 8u32) & 0xFFu32).to_u8())
+        otk.push(((w >> 16u32) & 0xFFu32).to_u8())
+        otk.push(((w >> 24u32) & 0xFFu32).to_u8())
+        i = i + 1u64
+
+    otk

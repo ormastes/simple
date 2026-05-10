@@ -1,0 +1,430 @@
+# Editor TUI Shell
+#
+# Terminal UI shell for the editor. Uses EditorController for shared logic.
+# Layout: [tab bar] [file tree | editor] [status bar] [command line]
+
+use std.tui.terminal.*
+use std.tui.style.*
+
+extern fn stdin_read_char() -> text
+
+fn editor_tui_run(session: EditSession):
+    terminal_enter_alt_screen()
+    terminal_enter_raw_mode()
+    terminal_hide_cursor()
+
+    var ctrl = EditorController.new(session)
+
+    while ctrl.is_running():
+        val size = terminal_get_size()
+        val zones = ctrl_compute_zones(ctrl, size.cols, size.rows)
+        val buffer = ctrl.active_buffer()
+        if buffer != nil:
+            buffer.viewport.width = zones.editor_w
+            buffer.viewport.height = zones.editor_h
+            buffer.ensure_cursor_visible()
+
+        _tui_render_frame(ctrl, zones, size)
+        terminal_flush()
+
+        val key = stdin_read_char()
+        val rects = editor_layout_compute_rects(ctrl.session.layout, zones.editor_x, zones.editor_y, zones.editor_w, zones.editor_h)
+        val action = ctrl.handle_key(key, rects)
+
+    terminal_show_cursor()
+    terminal_exit_raw_mode()
+    terminal_exit_alt_screen()
+
+
+fn _tui_render_frame(ctrl: EditorController, zones: LayoutZones, size: TerminalSize):
+    terminal_clear_screen()
+    val line_num_width = 4
+    val buffer = ctrl.active_buffer()
+    val multi_pane = ctrl.session.layout.tree.leaf_count() > 1
+
+    _tui_render_tab_bar(ctrl.session, size.cols)
+
+    if ctrl.settings_view != nil:
+        _tui_render_settings(ctrl, zones)
+        _tui_render_status_bar(ctrl, zones, size.cols)
+        _tui_render_command_line(ctrl, zones)
+        terminal_show_cursor()
+        return
+
+    if ctrl.file_tree_visible:
+        val ft_focused = ctrl.focus_panel == "file_tree"
+        _tui_render_file_tree(ctrl.file_tree, zones.sidebar_y, zones.sidebar_h, zones.sidebar_w, ft_focused)
+
+    if multi_pane:
+        val rects = editor_layout_compute_rects(ctrl.session.layout, zones.editor_x, zones.editor_y, zones.editor_w, zones.editor_h)
+        var ri = 0
+        while ri < rects.len():
+            val rect = rects[ri]
+            val gidx = _layout_find_group_index_local(ctrl.session.layout.groups, rect.group_id)
+            if gidx >= 0:
+                val grp = ctrl.session.layout.groups[gidx]
+                val is_active = rect.group_id == ctrl.session.layout.active_group_id
+                _tui_render_pane_tabs(grp, rect, is_active)
+                val pane_buf = _group_active_buffer(ctrl.session, gidx)
+                val content_y = rect.y + 1
+                val content_h = rect.h - 1
+                _tui_render_pane_content(pane_buf, rect.x, content_y, rect.w, content_h, line_num_width)
+            ri = ri + 1
+        _tui_render_split_borders(ctrl.session.layout.tree, rects, ctrl.session.layout.active_group_id, zones.editor_x, zones.editor_y, zones.editor_w, zones.editor_h)
+    else:
+        _tui_render_single_pane(buffer, zones.editor_x, zones.editor_y, zones.editor_w, zones.editor_h, line_num_width)
+
+    _tui_render_status_bar(ctrl, zones, size.cols)
+    _tui_render_command_line(ctrl, zones)
+    _tui_render_cursor(ctrl, buffer, zones, line_num_width)
+
+
+fn _tui_render_single_pane(buffer: EditorBuffer, x: i64, y: i64, w: i64, h: i64, line_num_width: i64):
+    var row = 0
+    while row < h:
+        val screen_row = y + row
+        terminal_move_cursor(screen_row, x)
+        if buffer != nil:
+            val file_row = buffer.viewport.top_row + row
+            if file_row < buffer.line_count():
+                val num_str = str(file_row + 1)
+                var padding = ""
+                var p = 0
+                while p < line_num_width - num_str.len():
+                    padding = padding + " "
+                    p = p + 1
+                terminal_write(padding + num_str + " ")
+                val line = buffer.line_at(file_row)
+                val visible_start = buffer.viewport.left_col
+                val visible_end = visible_start + w - line_num_width - 1
+                if visible_start < line.len():
+                    val end_idx = if visible_end < line.len() then visible_end else: line.len()
+                    terminal_write(line.slice(visible_start, end_idx))
+            else:
+                terminal_write("~")
+        else:
+            if row == h / 2:
+                terminal_write("  No file open. Press :e <path> to open a file.")
+            else:
+                terminal_write("~")
+        row = row + 1
+
+
+fn _tui_render_status_bar(ctrl: EditorController, zones: LayoutZones, width: i64):
+    terminal_move_cursor(zones.status_y, 0)
+    val buffer = ctrl.active_buffer()
+    val mode_str = editor_mode_name(ctrl.session.mode)
+    var path_str = "[No Name]"
+    var dirty_str = ""
+    var pos_str = "0,0"
+    if buffer != nil:
+        val bp = buffer.path
+        path_str = if bp != "" then bp else: "[No Name]"
+        dirty_str = if buffer.dirty then " [+]" else: ""
+        val cr = buffer.cursor_row + 1
+        val cc = buffer.cursor_col + 1
+        pos_str = "{cr},{cc}"
+    val doc_count = ctrl.session.document_count()
+    val left_status = " {mode_str} | {path_str}{dirty_str} | {doc_count} files"
+    val right_status = "{pos_str} "
+    var fill = ""
+    var f = 0
+    val fill_len = width - left_status.len() - right_status.len()
+    while f < fill_len:
+        fill = fill + " "
+        f = f + 1
+    terminal_write("\x1b[7m" + left_status + fill + right_status + "\x1b[0m")
+
+
+fn _tui_render_command_line(ctrl: EditorController, zones: LayoutZones):
+    terminal_move_cursor(zones.command_y, 0)
+    if ctrl.session.mode == EditorMode.Command:
+        terminal_write(":" + ctrl.commandline)
+    else:
+        terminal_write(ctrl.status_msg)
+
+
+fn _tui_render_cursor(ctrl: EditorController, buffer: EditorBuffer, zones: LayoutZones, line_num_width: i64):
+    if buffer != nil:
+        if ctrl.focus_panel == "editor":
+            val cursor_screen_row = buffer.cursor_row - buffer.viewport.top_row + zones.editor_y
+            val cursor_screen_col = buffer.cursor_col - buffer.viewport.left_col + line_num_width + 1 + zones.editor_x
+            terminal_move_cursor(cursor_screen_row, cursor_screen_col)
+    terminal_show_cursor()
+
+
+fn _tui_render_tab_bar(session: EditSession, width: i64):
+    terminal_move_cursor(0, 0)
+    val group_idx = session.layout.active_group_index
+    if group_idx < 0 or group_idx >= session.layout.groups.len():
+        var empty_bar = ""
+        var ei = 0
+        while ei < width:
+            empty_bar = empty_bar + " "
+            ei = ei + 1
+        terminal_write("\x1b[7m" + empty_bar + "\x1b[0m")
+        return
+    val group = session.layout.groups[group_idx]
+    var tab_line = ""
+    var t = 0
+    while t < group.tabs.len():
+        val tab = group.tabs[t]
+        val label = tab.label
+        val doc_idx = session._find_doc_index(tab.doc_id)
+        var dirty = ""
+        if doc_idx >= 0:
+            val doc = session.documents[doc_idx]
+            if doc.buffer.dirty:
+                dirty = "[+]"
+        val entry = " " + label + dirty + " "
+        if t == group.active_tab_index:
+            tab_line = tab_line + "\x1b[1;7m" + entry + "\x1b[0m"
+        else:
+            tab_line = tab_line + "\x1b[2m" + entry + "\x1b[0m"
+        if t < group.tabs.len() - 1:
+            tab_line = tab_line + "|"
+        t = t + 1
+    terminal_write(tab_line)
+
+
+fn _tui_render_file_tree(file_tree: FileTreeState, start_row: i64, height: i64, width: i64, focused: bool):
+    val visible = file_tree.visible_nodes()
+    var row = 0
+    while row < height:
+        terminal_move_cursor(start_row + row, 0)
+        if row < visible.len():
+            val node = visible[row]
+            var indent = ""
+            var d = 0
+            while d < node.depth:
+                indent = indent + "  "
+                d = d + 1
+            val prefix = if node.is_dir then (if node.expanded then "v " else: "> ") else: "  "
+            val name = node.name
+            var line = indent + prefix + name
+            if line.len() > width - 1:
+                line = line.slice(0, width - 1)
+            var pad = ""
+            var pi = 0
+            while pi < width - 1 - line.len():
+                pad = pad + " "
+                pi = pi + 1
+            if row == file_tree.selected_index:
+                if focused:
+                    terminal_write("\x1b[7m" + line + pad + "\x1b[0m")
+                else:
+                    terminal_write("\x1b[2;7m" + line + pad + "\x1b[0m")
+            else:
+                terminal_write(line + pad)
+        else:
+            var blank = ""
+            var bi = 0
+            while bi < width - 1:
+                blank = blank + " "
+                bi = bi + 1
+            terminal_write(blank)
+        row = row + 1
+    var sep_row = 0
+    while sep_row < height:
+        terminal_move_cursor(start_row + sep_row, width - 1)
+        terminal_write("\x1b[2m|\x1b[0m")
+        sep_row = sep_row + 1
+
+
+fn _tui_render_split_borders(tree: SplitTree, rects: [SplitRect], active_group_id: i64, area_x: i64, area_y: i64, area_w: i64, area_h: i64):
+    _tui_draw_borders_for_node(tree.nodes, tree.root_id, rects, active_group_id, area_x, area_y, area_w, area_h)
+
+fn _tui_draw_borders_for_node(nodes: [SplitNode], node_id: i64, rects: [SplitRect], active_group_id: i64, x: i64, y: i64, w: i64, h: i64):
+    if node_id < 0 or node_id >= nodes.len():
+        return
+    val node = nodes[node_id]
+    if node.kind == NODE_LEAF:
+        return
+    val is_adjacent = _node_contains_group(nodes, node_id, active_group_id)
+    val style_on = if is_adjacent then "\x1b[1m" else: "\x1b[2m"
+    val style_off = "\x1b[0m"
+    if node.direction == SPLIT_VERTICAL:
+        val left_w = (w * node.ratio) / 100
+        val border_col = x + left_w
+        var row = 0
+        while row < h:
+            terminal_move_cursor(y + row, border_col)
+            terminal_write(style_on + "|" + style_off)
+            row = row + 1
+        _tui_draw_borders_for_node(nodes, node.left_id, rects, active_group_id, x, y, left_w, h)
+        val right_x = x + left_w + 1
+        var right_w = w - left_w - 1
+        if right_w < 1:
+            right_w = 1
+        _tui_draw_borders_for_node(nodes, node.right_id, rects, active_group_id, right_x, y, right_w, h)
+    else:
+        val top_h = (h * node.ratio) / 100
+        val border_row = y + top_h
+        var col = 0
+        while col < w:
+            terminal_move_cursor(border_row, x + col)
+            terminal_write(style_on + "-" + style_off)
+            col = col + 1
+        _tui_draw_borders_for_node(nodes, node.left_id, rects, active_group_id, x, y, w, top_h)
+        val bottom_y = y + top_h + 1
+        var bottom_h = h - top_h - 1
+        if bottom_h < 1:
+            bottom_h = 1
+        _tui_draw_borders_for_node(nodes, node.right_id, rects, active_group_id, x, bottom_y, w, bottom_h)
+
+fn _node_contains_group(nodes: [SplitNode], node_id: i64, group_id: i64) -> bool:
+    if node_id < 0 or node_id >= nodes.len():
+        return false
+    val node = nodes[node_id]
+    if node.kind == NODE_LEAF:
+        return node.group_id == group_id
+    if _node_contains_group(nodes, node.left_id, group_id):
+        return true
+    _node_contains_group(nodes, node.right_id, group_id)
+
+fn _tui_render_pane_tabs(group: EditorGroup, rect: SplitRect, is_active: bool):
+    terminal_move_cursor(rect.y, rect.x)
+    var tab_line = ""
+    var t = 0
+    while t < group.tabs.len():
+        val tab = group.tabs[t]
+        val label = tab.label
+        val entry = " " + label + " "
+        if t == group.active_tab_index:
+            if is_active:
+                tab_line = tab_line + "\x1b[1;7m" + entry + "\x1b[0m"
+            else:
+                tab_line = tab_line + "\x1b[7m" + entry + "\x1b[0m"
+        else:
+            tab_line = tab_line + "\x1b[2m" + entry + "\x1b[0m"
+        if t < group.tabs.len() - 1:
+            tab_line = tab_line + "|"
+        t = t + 1
+    var pad = ""
+    var pi = 0
+    while pi < rect.w - tab_line.len():
+        pad = pad + " "
+        pi = pi + 1
+    terminal_write(tab_line + pad)
+
+fn _tui_render_pane_content(buffer: EditorBuffer, x: i64, y: i64, w: i64, h: i64, line_num_width: i64):
+    var row = 0
+    while row < h:
+        terminal_move_cursor(y + row, x)
+        if buffer != nil:
+            val file_row = buffer.viewport.top_row + row
+            if file_row < buffer.line_count():
+                val num_str = str(file_row + 1)
+                var padding = ""
+                var p = 0
+                while p < line_num_width - num_str.len():
+                    padding = padding + " "
+                    p = p + 1
+                terminal_write(padding + num_str + " ")
+                val line = buffer.line_at(file_row)
+                val vis_start = buffer.viewport.left_col
+                val vis_end = vis_start + w - line_num_width - 1
+                if vis_start < line.len():
+                    val end_idx = if vis_end < line.len() then vis_end else: line.len()
+                    terminal_write(line.slice(vis_start, end_idx))
+            else:
+                terminal_write("~")
+        else:
+            terminal_write("~")
+        row = row + 1
+
+fn _layout_find_group_index_local(groups: [EditorGroup], group_id: i64) -> i64:
+    var i = 0
+    while i < groups.len():
+        if groups[i].id.value == group_id:
+            return i
+        i = i + 1
+    -1
+
+fn _tui_render_settings(ctrl: EditorController, zones: LayoutZones):
+    val sv = ctrl.settings_view
+    val left_w = 20
+    val right_x = left_w + 1
+    val right_w = zones.editor_w - left_w - 1
+    val area_y = zones.editor_y
+    val area_h = zones.editor_h
+
+    # left column: category list
+    var row = 0
+    while row < area_h:
+        terminal_move_cursor(area_y + row, zones.editor_x)
+        if row < sv.categories.len():
+            val cat = sv.categories[row]
+            var line = " " + cat
+            if line.len() > left_w:
+                line = line.slice(0, left_w)
+            var pad = ""
+            var pi = 0
+            while pi < left_w - line.len():
+                pad = pad + " "
+                pi = pi + 1
+            if row == sv.category_index:
+                terminal_write("\x1b[7m" + line + pad + "\x1b[0m")
+            else:
+                terminal_write(line + pad)
+        else:
+            var blank = ""
+            var bi = 0
+            while bi < left_w:
+                blank = blank + " "
+                bi = bi + 1
+            terminal_write(blank)
+        terminal_move_cursor(area_y + row, zones.editor_x + left_w)
+        terminal_write("\x1b[2m|\x1b[0m")
+        row = row + 1
+
+    # right column: filtered settings list
+    var srow = 0
+    while srow < area_h:
+        terminal_move_cursor(area_y + srow, zones.editor_x + right_x)
+        if srow < sv.filtered.len():
+            val sd = sv.filtered[srow]
+            val cur_val = editor_config_get_by_key(ctrl.config, sd.key)
+            var entry = " " + sd.label + ": " + cur_val
+            if entry.len() > right_w - 1:
+                entry = entry.slice(0, right_w - 1)
+            var epad = ""
+            var epi = 0
+            while epi < right_w - 1 - entry.len():
+                epad = epad + " "
+                epi = epi + 1
+            if srow == sv.selected_index:
+                if sv.editing:
+                    val edit_line = " " + sd.label + ": [" + sv.edit_value + "]"
+                    terminal_write("\x1b[1;7m" + edit_line + "\x1b[0m")
+                else:
+                    terminal_write("\x1b[7m" + entry + epad + "\x1b[0m")
+                # show description below if space
+                if area_y + srow + 1 < area_y + area_h:
+                    terminal_move_cursor(area_y + srow + 1, zones.editor_x + right_x)
+                    val desc = "   " + sd.description
+                    terminal_write("\x1b[2m" + desc + "\x1b[0m")
+            else:
+                terminal_write(entry + epad)
+        else:
+            var sblank = ""
+            var sbi = 0
+            while sbi < right_w - 1:
+                sblank = sblank + " "
+                sbi = sbi + 1
+            terminal_write(sblank)
+        srow = srow + 1
+
+fn _group_active_buffer(session: EditSession, group_idx: i64) -> EditorBuffer:
+    if group_idx < 0 or group_idx >= session.layout.groups.len():
+        return nil
+    val group = session.layout.groups[group_idx]
+    if group.tabs.len() == 0:
+        return nil
+    if group.active_tab_index < 0 or group.active_tab_index >= group.tabs.len():
+        return nil
+    val tab = group.tabs[group.active_tab_index]
+    val doc_idx = session._find_doc_index(tab.doc_id)
+    if doc_idx < 0:
+        return nil
+    session.documents[doc_idx].buffer
