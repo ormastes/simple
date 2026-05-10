@@ -22,9 +22,9 @@ The SIMD-opportunity lint pass (11 rules, L-SIMD-001..011) written by J5/K4 has 
 
 `bin/simple lint` dispatches through `src/app/cli/main.spl` → `app.io.cli_ops` → `src/app/io/cli_commands.spl::cli_run_lint`. The `cli_lint_commands.spl` file is a parallel implementation exported by `app/io/__init__.spl` but NOT imported by the live dispatch path (`main.spl` imports from `app.io.cli_ops`, not `cli_lint_commands`). The `956d079d74` wiring into `cli_lint_commands.spl` was dead code; the follow-up commit corrects it by wiring into `cli_commands.spl`.
 
-### Linter crash (pre-existing bug)
+### Linter crash (pre-existing bug — RESOLVED 2026-05-09)
 
-`bin/simple lint <file>` crashes with `Function 'line' not found` for any file that produces Linter results. This is a pre-existing field-access lowering bug documented in `doc/08_tracking/bug/lint_val_crash_2026-04-28.md` — `result.line` on a loop variable of type `LintResult` dispatches as a function call. The `--simd` scan block is placed before the per-file OK/error reporting, so it executes; the crash occurs later on `result.line` access if the Linter finds issues.
+`bin/simple lint <file>` previously crashed with `Function 'line' not found` for any file that produces Linter results. This was a field-access lowering bug (see `hir_type_inference_any_field_2026-05-02.md`) — `result.line` on a loop variable of type `LintResult` dispatched as a function call. Fixed as part of the HIR type inference resolution; for-loop field access now correctly lowers to `FieldGet`.
 
 ### Standalone driver
 

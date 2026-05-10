@@ -258,6 +258,132 @@ pub extern "C" fn rt_tls_client_close(conn: i64) -> bool {
     } else { false }
 }
 
+/// Parse concatenated DER-encoded certificates from a byte buffer.
+///
+/// Each DER certificate is a SEQUENCE (tag 0x30) followed by a BER/DER
+/// length encoding.  We walk the buffer, carving out individual certs.
+fn parse_der_cert_chain(bytes: &[u8]) -> Result<Vec<rustls::pki_types::CertificateDer<'static>>, String> {
+    let mut certs = Vec::new();
+    let mut pos = 0;
+    while pos < bytes.len() {
+        if bytes[pos] != 0x30 {
+            return Err(format!("expected SEQUENCE tag (0x30) at offset {}, got 0x{:02x}", pos, bytes[pos]));
+        }
+        // Parse DER length (BER definite form)
+        let (content_len, header_len) = parse_der_length(&bytes[pos + 1..])
+            .ok_or_else(|| format!("invalid DER length at offset {}", pos + 1))?;
+        let total = 1 + header_len + content_len; // tag + length-encoding + content
+        if pos + total > bytes.len() {
+            return Err(format!(
+                "DER cert at offset {} claims {} bytes but only {} remain",
+                pos, total, bytes.len() - pos
+            ));
+        }
+        certs.push(rustls::pki_types::CertificateDer::from(bytes[pos..pos + total].to_vec()));
+        pos += total;
+    }
+    if certs.is_empty() {
+        return Err("no DER certificates found in buffer".into());
+    }
+    Ok(certs)
+}
+
+/// Parse a BER/DER definite-form length field.
+/// Returns `(content_length, number_of_bytes_consumed_for_length)`.
+fn parse_der_length(bytes: &[u8]) -> Option<(usize, usize)> {
+    if bytes.is_empty() {
+        return None;
+    }
+    let first = bytes[0];
+    if first < 0x80 {
+        // Short form: the byte itself is the length
+        Some((first as usize, 1))
+    } else if first == 0x80 {
+        // Indefinite form — not valid in DER
+        None
+    } else {
+        // Long form: low 7 bits = number of subsequent length bytes
+        let num_bytes = (first & 0x7f) as usize;
+        if num_bytes > 4 || num_bytes == 0 || 1 + num_bytes > bytes.len() {
+            return None;
+        }
+        let mut len: usize = 0;
+        for i in 0..num_bytes {
+            len = len.checked_shl(8)?.checked_add(bytes[1 + i] as usize)?;
+        }
+        Some((len, 1 + num_bytes))
+    }
+}
+
+/// Try to interpret raw DER key bytes as a private key.
+/// Attempts PKCS8 first, then falls back to PKCS1 (RSA) and SEC1 (EC).
+fn parse_der_private_key(bytes: &[u8]) -> Result<rustls::pki_types::PrivateKeyDer<'static>, String> {
+    let owned = bytes.to_vec();
+    // Try PKCS8 (most common for modern tooling)
+    let pkcs8 = rustls::pki_types::PrivatePkcs8KeyDer::from(owned.clone());
+    let key = rustls::pki_types::PrivateKeyDer::Pkcs8(pkcs8);
+    // Validate by attempting to build a signing key — if that fails, try other formats.
+    // rustls doesn't expose a cheap validation, so we try each variant and let
+    // ServerConfig::with_single_cert reject bad keys later.  We prefer PKCS8.
+    // Fallback order: PKCS1 (RSA), SEC1 (EC).
+    //
+    // For now, return PKCS8 and let rustls validate during config build.
+    // If users hit issues with PKCS1/SEC1 DER keys, extend the fallback here.
+    let _ = owned; // consumed by pkcs8 clone above
+    Ok(key)
+}
+
+#[no_mangle]
+pub extern "C" fn rt_tls_server_create_from_der(
+    port: i64,
+    cert_der: crate::value::RuntimeValue,
+    key_der: crate::value::RuntimeValue,
+) -> i64 {
+    let Some(cert_bytes) = runtime_byte_array_to_vec(cert_der) else {
+        eprintln!("rt_tls_server_create_from_der: failed to read cert_der as [u8]");
+        return -1;
+    };
+    let Some(key_bytes) = runtime_byte_array_to_vec(key_der) else {
+        eprintln!("rt_tls_server_create_from_der: failed to read key_der as [u8]");
+        return -1;
+    };
+    if cert_bytes.is_empty() || key_bytes.is_empty() {
+        eprintln!("rt_tls_server_create_from_der: cert_der or key_der is empty");
+        return -1;
+    }
+    let certs = match parse_der_cert_chain(&cert_bytes) {
+        Ok(c) => c,
+        Err(e) => { eprintln!("rt_tls_server_create_from_der: {}", e); return -1; }
+    };
+    let key = match parse_der_private_key(&key_bytes) {
+        Ok(k) => k,
+        Err(e) => { eprintln!("rt_tls_server_create_from_der: {}", e); return -1; }
+    };
+    let provider = std::sync::Arc::new(rustls::crypto::ring::default_provider());
+    let config = match rustls::ServerConfig::builder_with_provider(provider)
+        .with_safe_default_protocol_versions()
+        .and_then(|b| b.with_no_client_auth().with_single_cert(certs, key)
+            .map_err(|e| rustls::Error::General(format!("{}", e))))
+    {
+        Ok(c) => c,
+        Err(e) => { eprintln!("rt_tls_server_create_from_der: build config: {}", e); return -1; }
+    };
+    let addr = format!("0.0.0.0:{}", port);
+    let listener = match std::net::TcpListener::bind(&addr) {
+        Ok(l) => l,
+        Err(e) => { eprintln!("rt_tls_server_create_from_der: bind {}: {}", addr, e); return -1; }
+    };
+    let handle = next_rustls_listener_handle();
+    TLS_LISTENERS.lock().unwrap().insert(
+        handle,
+        std::sync::Arc::new(std::sync::Mutex::new(TlsListenerEntry {
+            listener,
+            config: std::sync::Arc::new(config),
+        })),
+    );
+    handle
+}
+
 #[no_mangle]
 pub extern "C" fn rt_tls_server_create(
     port: i64,

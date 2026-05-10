@@ -26,6 +26,15 @@ pub extern "C" fn rt_tls_client_read(_conn: i64, _max_bytes: i64) -> crate::valu
 pub extern "C" fn rt_tls_client_close(_conn: i64) -> bool { false }
 
 #[no_mangle]
+pub extern "C" fn rt_tls_server_create_from_der(
+    _port: i64,
+    _cert_der: crate::value::RuntimeValue,
+    _key_der: crate::value::RuntimeValue,
+) -> i64 {
+    -1
+}
+
+#[no_mangle]
 pub extern "C" fn rt_tls_server_create(
     _port: i64,
     _cert_path: crate::value::RuntimeValue,

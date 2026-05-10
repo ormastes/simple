@@ -821,6 +821,7 @@ pub use net::{
     rt_tls_server_config_require_client_cert,
     rt_tls_server_config_set_alpn,
     rt_tls_server_create,
+    rt_tls_server_create_from_der,
     rt_tls_server_read,
     rt_tls_server_shutdown,
     rt_tls_server_write,

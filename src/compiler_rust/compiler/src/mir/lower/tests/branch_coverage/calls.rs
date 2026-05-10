@@ -123,9 +123,9 @@ fn primitive_field_method_call_is_builtin_qualified() {
 }
 
 // =============================================================================
-// Regression: lint_val_crash 2026-04-28 — field access on for-loop binding
-// (`for r in rs:` where `rs: [R]`) must lower to FieldGet, NOT a name-based
-// rt_function_not_found("line") call. See doc/08_tracking/bug/lint_val_crash_2026-04-28.md
+// Regression: lint_val_crash 2026-04-28 (RESOLVED) — field access on for-loop
+// binding (`for r in rs:` where `rs: [R]`) must lower to FieldGet, NOT a
+// name-based rt_function_not_found("line") call.
 // =============================================================================
 
 #[test]
