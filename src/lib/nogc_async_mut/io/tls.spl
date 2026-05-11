@@ -1,0 +1,230 @@
+"""
+# Async TLS I/O
+
+Wraps async TCP streams with TLS encryption/decryption.
+Uses the sync TLS handshake, cipher, and record layer from
+`nogc_sync_mut/tls/` driven by async TCP reads and writes.
+
+## Usage
+
+```simple
+val chain = TlsCertificateChain.from_pem_file("cert.pem")?
+val key = TlsPrivateKey.from_pem_file("key.pem")?
+val listener = AsyncTlsListener.bind("0.0.0.0:8443", chain, key)?
+while true:
+    val stream = listener.accept()?
+    val data = stream.read(4096)?
+    stream.write("HTTP/1.1 200 OK\r\n\r\nHello")?
+    stream.close()?
+```
+"""
+
+use std.tls.certificate.{TlsCertificateChain, TlsPrivateKey, TlsCertificate}
+use std.tls.validation.{validate_hostname, validate_expiry}
+use std.tls.handshake.{
+    tls_server_handshake, tls_client_handshake,
+    TlsHandshakeState, TlsHandshakeResult
+}
+use std.tls.cipher.{TlsCipherState, tls_encrypt, tls_decrypt}
+use std.tls.record.{
+    tls_read_record, tls_write_record,
+    TLS_RECORD_APPLICATION_DATA, TLS_RECORD_HANDSHAKE, TLS_RECORD_ALERT
+}
+use std.common.io.types.{IoError, IoErrorKind}
+use std.nogc_async_mut.io.driver.{IoDriver, Completion}
+use std.net.ffi.{
+    rt_io_tcp_bind, rt_io_tcp_close, rt_io_tcp_local_addr,
+    rt_io_tcp_set_nodelay, rt_socket_set_nonblocking,
+    rt_socket_set_reuseport, rt_socket_set_reuseaddr
+}
+
+extern fn rt_time_now_ms() -> i64
+
+# ============================================================================
+# TLS Configuration
+# ============================================================================
+
+class TlsConfig:
+    cert_chain: TlsCertificateChain
+    private_key: TlsPrivateKey
+    min_version: text
+    max_version: text
+
+    static fn server(chain: TlsCertificateChain, key: TlsPrivateKey) -> TlsConfig:
+        TlsConfig(
+            cert_chain: chain,
+            private_key: key,
+            min_version: "1.2",
+            max_version: "1.3"
+        )
+
+# ============================================================================
+# AsyncTlsStream
+# ============================================================================
+
+class AsyncTlsStream:
+    fd: i64
+    peer_addr: text
+    cipher_state: TlsCipherState
+    read_buffer: text
+    is_closed: bool
+
+    fn read(driver: IoDriver, buf_size: i64) -> Result<text, IoError>:
+        if self.is_closed:
+            return Err(IoError(kind: IoErrorKind.Other, message: "TLS stream closed"))
+        val op_id = driver.submit_recv(self.fd, buf_size)
+        driver.flush()
+        val completions = driver.poll(64, 30000)
+        var i: i64 = 0
+        while i < completions.len():
+            val c = completions[i]
+            if c.id == op_id:
+                if c.result < 0:
+                    return Err(IoError(kind: IoErrorKind.Other, message: "TLS read failed"))
+                if c.result == 0:
+                    return Err(IoError(kind: IoErrorKind.UnexpectedEof, message: "connection closed"))
+                val encrypted = driver.poll_data(op_id)
+                val record = tls_read_record(encrypted)
+                if record == nil:
+                    return Err(IoError(kind: IoErrorKind.InvalidData, message: "invalid TLS record"))
+                val plaintext = tls_decrypt(self.cipher_state, record)
+                return Ok(plaintext)
+            i = i + 1
+        Err(IoError(kind: IoErrorKind.TimedOut, message: "TLS read timed out"))
+
+    fn write(driver: IoDriver, data: text) -> Result<i64, IoError>:
+        if self.is_closed:
+            return Err(IoError(kind: IoErrorKind.Other, message: "TLS stream closed"))
+        val encrypted = tls_encrypt(self.cipher_state, data)
+        val record = tls_write_record(TLS_RECORD_APPLICATION_DATA, encrypted)
+        val op_id = driver.submit_send(self.fd, record)
+        driver.flush()
+        val completions = driver.poll(64, 30000)
+        var i: i64 = 0
+        while i < completions.len():
+            val c = completions[i]
+            if c.id == op_id:
+                if c.result < 0:
+                    return Err(IoError(kind: IoErrorKind.Other, message: "TLS write failed"))
+                return Ok(data.len())
+            i = i + 1
+        Err(IoError(kind: IoErrorKind.TimedOut, message: "TLS write timed out"))
+
+    me close(driver: IoDriver) -> Result<(), IoError>:
+        if self.is_closed:
+            return Ok(())
+        val alert = tls_write_record(TLS_RECORD_ALERT, "\x01\x00")
+        val op_id = driver.submit_send(self.fd, alert)
+        driver.flush()
+        driver.poll(64, 5000)
+        rt_io_tcp_close(self.fd)
+        self.is_closed = true
+        Ok(())
+
+# ============================================================================
+# AsyncTlsListener
+# ============================================================================
+
+class AsyncTlsListener:
+    listener_fd: i64
+    tls_config: TlsConfig
+    driver: IoDriver
+
+    static fn bind(driver: IoDriver, addr: text, config: TlsConfig) -> Result<AsyncTlsListener, IoError>:
+        val fd = rt_io_tcp_bind(addr)
+        if fd < 0:
+            return Err(IoError(kind: IoErrorKind.Other, message: "failed to bind {addr}"))
+        rt_socket_set_reuseport(fd, true)
+        rt_socket_set_reuseaddr(fd, true)
+        rt_socket_set_nonblocking(fd, true)
+        Ok(AsyncTlsListener(listener_fd: fd, tls_config: config, driver: driver))
+
+    fn accept() -> Result<AsyncTlsStream, IoError>:
+        val op_id = self.driver.submit_accept(self.listener_fd)
+        self.driver.flush()
+        val completions = self.driver.poll(64, 60000)
+        var client_fd: i64 = -1
+        var i: i64 = 0
+        while i < completions.len():
+            val c = completions[i]
+            if c.id == op_id:
+                client_fd = c.result
+                break
+            i = i + 1
+        if client_fd < 0:
+            return Err(IoError(kind: IoErrorKind.Other, message: "accept failed"))
+        rt_socket_set_nonblocking(client_fd, true)
+        rt_io_tcp_set_nodelay(client_fd, true)
+        val peer = rt_io_tcp_local_addr(client_fd) ?? "unknown"
+        val handshake_result = perform_server_handshake(
+            self.driver, client_fd, self.tls_config
+        )
+        match handshake_result:
+            Ok(cipher_state):
+                Ok(AsyncTlsStream(
+                    fd: client_fd,
+                    peer_addr: peer,
+                    cipher_state: cipher_state,
+                    read_buffer: "",
+                    is_closed: false
+                ))
+            Err(e):
+                rt_io_tcp_close(client_fd)
+                Err(e)
+
+    me close():
+        rt_io_tcp_close(self.listener_fd)
+
+# ============================================================================
+# TLS Handshake (server-side)
+# ============================================================================
+
+fn perform_server_handshake(driver: IoDriver, fd: i64, config: TlsConfig) -> Result<TlsCipherState, IoError>:
+    var state = tls_server_handshake(
+        config.cert_chain.leaf().raw_der,
+        config.private_key.raw_der
+    )
+    var attempts: i64 = 0
+    val max_attempts: i64 = 10
+    while attempts < max_attempts:
+        match state:
+            TlsHandshakeResult.NeedRead(hs):
+                val op = driver.submit_recv(fd, 16384)
+                driver.flush()
+                val completions = driver.poll(64, 10000)
+                var got_data = false
+                var ci: i64 = 0
+                while ci < completions.len():
+                    val c = completions[ci]
+                    if c.id == op:
+                        if c.result <= 0:
+                            return Err(IoError(kind: IoErrorKind.Other, message: "handshake read failed"))
+                        val data = driver.poll_data(op)
+                        state = hs.feed(data)
+                        got_data = true
+                    ci = ci + 1
+                if not got_data:
+                    return Err(IoError(kind: IoErrorKind.TimedOut, message: "handshake read timed out"))
+
+            TlsHandshakeResult.NeedWrite(hs, data):
+                val op = driver.submit_send(fd, data)
+                driver.flush()
+                val completions = driver.poll(64, 10000)
+                var ci: i64 = 0
+                while ci < completions.len():
+                    val c = completions[ci]
+                    if c.id == op:
+                        if c.result < 0:
+                            return Err(IoError(kind: IoErrorKind.Other, message: "handshake write failed"))
+                    ci = ci + 1
+                state = hs.continue_handshake()
+
+            TlsHandshakeResult.Complete(cipher_state):
+                return Ok(cipher_state)
+
+            TlsHandshakeResult.Error(msg):
+                return Err(IoError(kind: IoErrorKind.Other, message: "TLS handshake error: {msg}"))
+
+        attempts = attempts + 1
+
+    Err(IoError(kind: IoErrorKind.Other, message: "TLS handshake exceeded max attempts"))

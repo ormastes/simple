@@ -32,8 +32,11 @@ server.stop()
 
 use std.concurrent.channel.{Channel, channel_new}
 use std.thread_sffi.{
-    spl_thread_create, spl_thread_join, spl_thread_cpu_count
+    spl_thread_create, spl_thread_join, spl_thread_cpu_count,
+    spl_thread_sleep
 }
+
+extern fn rt_time_now_ms() -> i64
 use std.supervisor.{
     Supervisor, SupervisorConfig, ChildSpec,
     STRATEGY_ONE_FOR_ONE, RESTART_PERMANENT,
@@ -202,11 +205,35 @@ class HttpServer:
         Ok(())
 
     me stop():
-        """Gracefully stop the server."""
+        """Gracefully stop the server with connection draining.
+
+        Sends drain signal to workers, waits up to drain_timeout_ms
+        for in-flight requests to complete, then forces shutdown.
+        """
         if not self.running:
             return
 
-        print "[SimpleServer] Shutting down..."
+        print "[SimpleServer] Draining connections (timeout={self.config.drain_timeout_ms}ms)..."
+
+        for ch in self.control_channels:
+            ch.send("drain")
+
+        val drain_start = rt_time_now_ms()
+        val drain_deadline = drain_start + self.config.drain_timeout_ms
+        var all_drained = false
+
+        while rt_time_now_ms() < drain_deadline and not all_drained:
+            spl_thread_sleep(100)
+            all_drained = true
+            for ch in self.control_channels:
+                val status = ch.try_recv()
+                if status.?:
+                    val s = status as text
+                    if s != "drained":
+                        all_drained = false
+
+        if not all_drained:
+            print "[SimpleServer] Drain timeout reached, forcing shutdown..."
 
         self.stop_workers(self.control_channels)
         self.supervisor.stop()

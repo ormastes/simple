@@ -1,0 +1,412 @@
+# BTree<V> — CLRS B-tree keyed by BTreeKey { a: i64, b: i64 }.
+#
+# Extracted from dbfs_engine/ns_btree.spl and nvfs/core/pmap_btree.spl.
+# Both consumers use two-i64 composite keys with lexicographic ordering.
+# Value type V is generic: DBFS uses BTreeValue, NVFS uses PmapBTreeEntry.
+#
+# Node-pool representation avoids recursive struct definitions: children are
+# indices (i64) into BTree.nodes.
+#
+# Invariants:
+#   fanout = minimum degree t (parameter to constructor).
+#   max_keys = 2*fanout - 1
+#   Deletion: top-down proactive fix-up (CLRS-style).
+
+use std.io_runtime
+
+struct BTreeKey:
+    a: i64
+    b: i64
+
+struct BTreeNode<V>:
+    keys:     [BTreeKey]
+    vals:     [V]
+    children: [i64]
+    is_leaf:  bool
+
+    static fn new_leaf() -> BTreeNode<V>:
+        BTreeNode<V>(keys: [], vals: [], children: [], is_leaf: true)
+
+    static fn new_internal() -> BTreeNode<V>:
+        BTreeNode<V>(keys: [], vals: [], children: [], is_leaf: false)
+
+struct BTreeSnapshot:
+    gen: i64
+
+struct BTreePredEntry<V>:
+    key: BTreeKey
+    val: V
+
+struct BTree<V>:
+    nodes:    [BTreeNode<V>]
+    fanout:   i64
+    next_gen: i64
+
+    static fn new(fanout: i64) -> BTree<V>:
+        val root = BTreeNode<V>.new_leaf()
+        BTree<V>(nodes: [root], fanout: fanout, next_gen: 1)
+
+    fn cmp_key(a: BTreeKey, b: BTreeKey) -> i64:
+        if a.a < b.a:
+            return -1
+        if a.a > b.a:
+            return 1
+        if a.b < b.b:
+            return -1
+        if a.b > b.b:
+            return 1
+        0
+
+    me fn replace_node(idx: i64, node: BTreeNode<V>):
+        var new_nodes: [BTreeNode<V>] = []
+        var i: i32 = 0
+        while i < self.nodes.len() as i32:
+            if i as i64 == idx:
+                new_nodes.push(node)
+            else:
+                new_nodes.push(self.nodes[i])
+            i = i + 1
+        self.nodes = new_nodes
+
+    fn lookup(key: BTreeKey) -> Option<V>:
+        self.lookup_in_node(0, key)
+
+    fn lookup_in_node(node_idx: i64, key: BTreeKey) -> Option<V>:
+        val node = self.nodes[node_idx as i32]
+        var i: i32 = 0
+        while i < node.keys.len() as i32:
+            val c = self.cmp_key(key, node.keys[i])
+            if c == 0:
+                return Some(node.vals[i])
+            if c < 0:
+                if node.is_leaf:
+                    return None
+                return self.lookup_in_node(node.children[i], key)
+            i = i + 1
+        if node.is_leaf:
+            None
+        else:
+            self.lookup_in_node(node.children[node.keys.len() as i32], key)
+
+    fn current_gen() -> i64:
+        self.next_gen - 1
+
+    me fn insert(key: BTreeKey, value: V) -> Result<(), text>:
+        self.next_gen = self.next_gen + 1
+        val max_keys = (2 * self.fanout - 1) as i32
+        if self.nodes[0].keys.len() as i32 == max_keys:
+            val sibling_idx = self.nodes.len() as i64
+            self.nodes.push(BTreeNode<V>.new_internal())
+            var new_root = self.nodes[sibling_idx as i32]
+            new_root.children.push(0)
+            self.replace_node(sibling_idx, new_root)
+            self.split_child(sibling_idx, 0, 0)
+            self.insert_non_full(sibling_idx, key, value)
+        else:
+            self.insert_non_full(0, key, value)
+        Ok(())
+
+    me fn insert_non_full(node_idx: i64, key: BTreeKey, value: V):
+        val node = self.nodes[node_idx as i32]
+        val n = node.keys.len() as i32
+        if node.is_leaf:
+            var i: i32 = 0
+            var found_dup: bool = false
+            while i < n:
+                val c = self.cmp_key(key, node.keys[i])
+                if c == 0:
+                    var new_vals: [V] = []
+                    var vi: i32 = 0
+                    while vi < n:
+                        if vi == i:
+                            new_vals.push(value)
+                        else:
+                            new_vals.push(node.vals[vi])
+                        vi = vi + 1
+                    val updated = BTreeNode<V>(
+                        keys:     node.keys,
+                        vals:     new_vals,
+                        children: node.children,
+                        is_leaf:  node.is_leaf
+                    )
+                    self.replace_node(node_idx, updated)
+                    found_dup = true
+                    i = n
+                else:
+                    i = i + 1
+            if not found_dup:
+                var pos: i32 = n
+                var pi: i32 = 0
+                while pi < n:
+                    val c = self.cmp_key(key, node.keys[pi])
+                    if c < 0:
+                        pos = pi
+                        pi = n
+                    else:
+                        pi = pi + 1
+                var new_keys: [BTreeKey] = []
+                var new_vals: [V] = []
+                var ki: i32 = 0
+                while ki < n:
+                    if ki == pos:
+                        new_keys.push(key)
+                        new_vals.push(value)
+                    new_keys.push(node.keys[ki])
+                    new_vals.push(node.vals[ki])
+                    ki = ki + 1
+                if pos == n:
+                    new_keys.push(key)
+                    new_vals.push(value)
+                val updated = BTreeNode<V>(
+                    keys:     new_keys,
+                    vals:     new_vals,
+                    children: node.children,
+                    is_leaf:  node.is_leaf
+                )
+                self.replace_node(node_idx, updated)
+        else:
+            val node2 = self.nodes[node_idx as i32]
+            val n2 = node2.keys.len() as i32
+            var j: i32 = 0
+            var found_dup2: bool = false
+            while j < n2:
+                val c = self.cmp_key(key, node2.keys[j])
+                if c == 0:
+                    var new_vals2: [V] = []
+                    var vi2: i32 = 0
+                    while vi2 < n2:
+                        if vi2 == j:
+                            new_vals2.push(value)
+                        else:
+                            new_vals2.push(node2.vals[vi2])
+                        vi2 = vi2 + 1
+                    val updated2 = BTreeNode<V>(
+                        keys:     node2.keys,
+                        vals:     new_vals2,
+                        children: node2.children,
+                        is_leaf:  node2.is_leaf
+                    )
+                    self.replace_node(node_idx, updated2)
+                    found_dup2 = true
+                    j = n2
+                else:
+                    j = j + 1
+            if not found_dup2:
+                var ci: i32 = n2
+                var k: i32 = 0
+                val node3 = self.nodes[node_idx as i32]
+                while k < n2:
+                    val c = self.cmp_key(key, node3.keys[k])
+                    if c < 0:
+                        ci = k
+                        k = n2
+                    else:
+                        k = k + 1
+                val child_idx = self.nodes[node_idx as i32].children[ci]
+                val max_keys = (2 * self.fanout - 1) as i32
+                if self.nodes[child_idx as i32].keys.len() as i32 == max_keys:
+                    self.split_child(node_idx, ci as i64, child_idx)
+                    val c2 = self.cmp_key(key, self.nodes[node_idx as i32].keys[ci])
+                    if c2 > 0:
+                        val new_child = self.nodes[node_idx as i32].children[(ci + 1)]
+                        self.insert_non_full(new_child, key, value)
+                    else if c2 == 0:
+                        val node4 = self.nodes[node_idx as i32]
+                        var new_vals3: [V] = []
+                        var vi3: i32 = 0
+                        while vi3 < node4.keys.len() as i32:
+                            if vi3 == ci:
+                                new_vals3.push(value)
+                            else:
+                                new_vals3.push(node4.vals[vi3])
+                            vi3 = vi3 + 1
+                        val updated3 = BTreeNode<V>(
+                            keys:     node4.keys,
+                            vals:     new_vals3,
+                            children: node4.children,
+                            is_leaf:  node4.is_leaf
+                        )
+                        self.replace_node(node_idx, updated3)
+                    else:
+                        val same_child = self.nodes[node_idx as i32].children[ci]
+                        self.insert_non_full(same_child, key, value)
+                else:
+                    self.insert_non_full(child_idx, key, value)
+
+    me fn split_child(parent_idx: i64, ci: i64, child_idx: i64):
+        val t = self.fanout
+        val child = self.nodes[child_idx as i32]
+        val mid = t as i32 - 1
+
+        var sibling = if child.is_leaf:
+            BTreeNode<V>.new_leaf()
+        else:
+            BTreeNode<V>.new_internal()
+
+        val median_key = child.keys[mid]
+        val median_val = child.vals[mid]
+
+        var si: i32 = mid + 1
+        while si < child.keys.len() as i32:
+            sibling.keys.push(child.keys[si])
+            sibling.vals.push(child.vals[si])
+            si = si + 1
+        if not child.is_leaf:
+            var sci: i32 = mid + 1
+            while sci <= child.keys.len() as i32:
+                sibling.children.push(child.children[sci])
+                sci = sci + 1
+
+        var new_child_keys: [BTreeKey] = []
+        var new_child_vals: [V] = []
+        var new_child_children: [i64] = []
+        var ki: i32 = 0
+        while ki < mid:
+            new_child_keys.push(child.keys[ki])
+            new_child_vals.push(child.vals[ki])
+            ki = ki + 1
+        if not child.is_leaf:
+            var cci: i32 = 0
+            while cci <= mid:
+                new_child_children.push(child.children[cci])
+                cci = cci + 1
+        val updated_child = BTreeNode<V>(
+            keys:     new_child_keys,
+            vals:     new_child_vals,
+            children: new_child_children,
+            is_leaf:  child.is_leaf
+        )
+        self.replace_node(child_idx, updated_child)
+
+        val sibling_idx = self.nodes.len() as i64
+        self.nodes.push(sibling)
+
+        val parent = self.nodes[parent_idx as i32]
+        var new_pkeys: [BTreeKey] = []
+        var new_pvals: [V] = []
+        var new_pchildren: [i64] = []
+        var pi: i32 = 0
+        while pi < parent.keys.len() as i32:
+            if pi as i64 == ci:
+                new_pkeys.push(median_key)
+                new_pvals.push(median_val)
+            new_pkeys.push(parent.keys[pi])
+            new_pvals.push(parent.vals[pi])
+            pi = pi + 1
+        if ci >= parent.keys.len() as i64:
+            new_pkeys.push(median_key)
+            new_pvals.push(median_val)
+        var ci2: i32 = 0
+        while ci2 <= parent.keys.len() as i32:
+            new_pchildren.push(parent.children[ci2])
+            if ci2 as i64 == ci:
+                new_pchildren.push(sibling_idx)
+            ci2 = ci2 + 1
+        val updated_parent = BTreeNode<V>(
+            keys:     new_pkeys,
+            vals:     new_pvals,
+            children: new_pchildren,
+            is_leaf:  parent.is_leaf
+        )
+        self.replace_node(parent_idx, updated_parent)
+
+    me fn delete(key: BTreeKey) -> Result<(), text>:
+        self.delete_from_node(0, key)
+        Ok(())
+
+    me fn delete_from_node(node_idx: i64, key: BTreeKey) -> bool:
+        val node = self.nodes[node_idx as i32]
+        var i: i32 = 0
+        while i < node.keys.len() as i32:
+            val c = self.cmp_key(key, self.nodes[node_idx as i32].keys[i])
+            if c == 0:
+                if self.nodes[node_idx as i32].is_leaf:
+                    val nd = self.nodes[node_idx as i32]
+                    var new_keys: [BTreeKey] = []
+                    var new_vals: [V] = []
+                    var ki: i32 = 0
+                    while ki < nd.keys.len() as i32:
+                        if ki != i:
+                            new_keys.push(nd.keys[ki])
+                            new_vals.push(nd.vals[ki])
+                        ki = ki + 1
+                    val updated = BTreeNode<V>(
+                        keys:     new_keys,
+                        vals:     new_vals,
+                        children: nd.children,
+                        is_leaf:  nd.is_leaf
+                    )
+                    self.replace_node(node_idx, updated)
+                    return true
+                else:
+                    val left_child = self.nodes[node_idx as i32].children[i]
+                    val pred = self.get_max_leaf_entry(left_child)
+                    val nd2 = self.nodes[node_idx as i32]
+                    var new_keys2: [BTreeKey] = []
+                    var new_vals2: [V] = []
+                    var ki2: i32 = 0
+                    while ki2 < nd2.keys.len() as i32:
+                        if ki2 == i:
+                            new_keys2.push(pred.key)
+                            new_vals2.push(pred.val)
+                        else:
+                            new_keys2.push(nd2.keys[ki2])
+                            new_vals2.push(nd2.vals[ki2])
+                        ki2 = ki2 + 1
+                    val updated2 = BTreeNode<V>(
+                        keys:     new_keys2,
+                        vals:     new_vals2,
+                        children: nd2.children,
+                        is_leaf:  nd2.is_leaf
+                    )
+                    self.replace_node(node_idx, updated2)
+                    return self.delete_from_node(left_child, pred.key)
+            if c < 0:
+                if self.nodes[node_idx as i32].is_leaf:
+                    return false
+                val child = self.nodes[node_idx as i32].children[i]
+                return self.delete_from_node(child, key)
+            i = i + 1
+        if self.nodes[node_idx as i32].is_leaf:
+            return false
+        val last_child = self.nodes[node_idx as i32].children[self.nodes[node_idx as i32].keys.len() as i32]
+        self.delete_from_node(last_child, key)
+
+    fn get_max_leaf_entry(node_idx: i64) -> BTreePredEntry<V>:
+        val node = self.nodes[node_idx as i32]
+        if node.is_leaf:
+            val last = node.keys.len() as i32 - 1
+            return BTreePredEntry<V>(
+                key: node.keys[last],
+                val: node.vals[last]
+            )
+        val last_child = node.children[node.keys.len() as i32]
+        self.get_max_leaf_entry(last_child)
+
+    fn range_scan(lo: BTreeKey, hi: BTreeKey) -> Result<[(BTreeKey, V)], text>:
+        var result: [(BTreeKey, V)] = []
+        self.collect_scan(0, lo, hi, result)
+        Ok(result)
+
+    fn collect_scan(node_idx: i64, lo: BTreeKey, hi: BTreeKey, result: [(BTreeKey, V)]):
+        val node = self.nodes[node_idx as i32]
+        var i: i32 = 0
+        while i < node.keys.len() as i32:
+            if not node.is_leaf:
+                if self.cmp_key(lo, node.keys[i]) <= 0:
+                    self.collect_scan(node.children[i], lo, hi, result)
+            val c_lo = self.cmp_key(node.keys[i], lo)
+            val c_hi = self.cmp_key(node.keys[i], hi)
+            if c_lo >= 0 and c_hi <= 0:
+                result.push((node.keys[i], node.vals[i]))
+            i = i + 1
+        if not node.is_leaf:
+            if node.keys.len() > 0:
+                if self.cmp_key(lo, node.keys[node.keys.len() as i32 - 1]) <= 0:
+                    self.collect_scan(node.children[node.keys.len() as i32], lo, hi, result)
+
+    fn snapshot() -> BTreeSnapshot:
+        BTreeSnapshot(gen: self.next_gen - 1)
+
+    fn node_count() -> i64:
+        self.nodes.len()

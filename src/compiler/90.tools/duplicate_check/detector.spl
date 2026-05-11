@@ -129,26 +129,40 @@ fn total_lines_for_blocks(blocks: [DuplicateBlock]) -> i64:
         total_lines = total_lines + block_line_count(block)
     total_lines
 
+fn _merge_blocks(left: [DuplicateBlock], right: [DuplicateBlock]) -> [DuplicateBlock]:
+    var result = []
+    var li = 0
+    var ri = 0
+    while li < left.len() and ri < right.len():
+        val l = left[li]
+        val r = right[ri]
+        val l_first = if l.file < r.file:
+            true
+        elif l.file == r.file and l.line_start <= r.line_start:
+            true
+        else:
+            false
+        if l_first:
+            result.push(l)
+            li = li + 1
+        else:
+            result.push(r)
+            ri = ri + 1
+    while li < left.len():
+        result.push(left[li])
+        li = li + 1
+    while ri < right.len():
+        result.push(right[ri])
+        ri = ri + 1
+    result
+
 fn sort_blocks_by_file_and_line(blocks: [DuplicateBlock]) -> [DuplicateBlock]:
-    var sorted = blocks
-    var i = 0
-    while i < sorted.len() - 1:
-        var j = 0
-        while j < sorted.len() - i - 1:
-            val left = sorted[j]
-            val right = sorted[j + 1]
-            val should_swap = if left.file > right.file:
-                true
-            elif left.file == right.file and left.line_start > right.line_start:
-                true
-            else:
-                false
-            if should_swap:
-                sorted[j] = right
-                sorted[j + 1] = left
-            j = j + 1
-        i = i + 1
-    sorted
+    if blocks.len() <= 1:
+        return blocks
+    val mid = blocks.len() / 2
+    val left = sort_blocks_by_file_and_line(blocks[0:mid])
+    val right = sort_blocks_by_file_and_line(blocks[mid:])
+    _merge_blocks(left, right)
 
 fn collapse_overlapping_blocks(blocks: [DuplicateBlock]) -> [DuplicateBlock]:
     if blocks.len() <= 1:
@@ -398,7 +412,6 @@ fn find_duplicates_in_file(file_path: text, config: DuplicationConfig, cache_man
 fn find_duplicates_in_file_with_hash_filter(file_path: text, config: DuplicationConfig, cache_manager: TokenCacheManager, interner: TokenInterner, repeated_hashes: {text: bool}) -> [DuplicateBlock]:
     val tokens = load_tokens_for_file(file_path, config, cache_manager)
     val filter_enabled = repeated_hashes.keys().len() > 0
-    val content = if filter_enabled: "" else: read_detector_source(file_path)
 
     var batches = []
     var current_batch = []
@@ -409,10 +422,6 @@ fn find_duplicates_in_file_with_hash_filter(file_path: text, config: Duplication
         val hash_key = "{candidate.hash_value}"
         if filter_enabled and not repeated_hashes.has(hash_key):
             continue
-        val code = if filter_enabled:
-            ""
-        else:
-            extract_code_snippet(content, tokens, candidate.index, candidate.end_index)
         val new_block = DuplicateBlock(
             file: file_path,
             line_start: candidate.line_start,
@@ -421,7 +430,7 @@ fn find_duplicates_in_file_with_hash_filter(file_path: text, config: Duplication
             hash_value: candidate.hash_value,
             snippet_start_offset: tokens[candidate.index].start_offset,
             snippet_end_offset: tokens[candidate.end_index - 1].end_offset,
-            code: code
+            code: ""
         )
 
         current_batch.push(new_block)
@@ -479,23 +488,32 @@ fn group_exact_blocks(all_blocks: [DuplicateBlock], config: DuplicationConfig) -
     add_exact_groups(exact_map, config, groups)
     groups
 
+fn _merge_groups(left: [DuplicateGroup], right: [DuplicateGroup]) -> [DuplicateGroup]:
+    var result = []
+    var li = 0
+    var ri = 0
+    while li < left.len() and ri < right.len():
+        if left[li].impact_score >= right[ri].impact_score:
+            result.push(left[li])
+            li = li + 1
+        else:
+            result.push(right[ri])
+            ri = ri + 1
+    while li < left.len():
+        result.push(left[li])
+        li = li + 1
+    while ri < right.len():
+        result.push(right[ri])
+        ri = ri + 1
+    result
+
 fn sort_by_impact(groups: [DuplicateGroup]) -> [DuplicateGroup]:
-    var sorted = groups
-    var n = sorted.len()
-
-    var i = 0
-    while i < n - 1:
-        var j = 0
-        while j < n - i - 1:
-            val left = sorted[j]
-            val right = sorted[j + 1]
-            if left.impact_score < right.impact_score:
-                sorted[j] = right
-                sorted[j + 1] = left
-            j = j + 1
-        i = i + 1
-
-    sorted
+    if groups.len() <= 1:
+        return groups
+    val mid = groups.len() / 2
+    val left = sort_by_impact(groups[0:mid])
+    val right = sort_by_impact(groups[mid:])
+    _merge_groups(left, right)
 
 fn collect_files(path: text, config: DuplicationConfig) -> [text]:
     collect_detector_files(path, config)
@@ -748,10 +766,16 @@ fn parse_idx(value: text) -> i64:
     result
 
 fn scan_duplicate_blocks(files: [text], config: DuplicationConfig, cache_manager: TokenCacheManager, interner: TokenInterner) -> [DuplicateBlock]:
-    var all_blocks = []
+    log_progress(config, "Pass 1: collecting hash counts across {files.len()} files...")
+    val summary = collect_repeated_hashes(files, config, cache_manager, interner)
+    val candidate_files = summary.candidate_files.keys()
+    val repeated_count = summary.repeated_hashes.keys().len()
+    log_progress(config, "  {repeated_count} repeated hashes in {candidate_files.len()} candidate files")
 
-    for file in files:
-        val blocks = find_duplicates_in_file(file, config, cache_manager, interner)
+    log_progress(config, "Pass 2: extracting blocks from candidate files...")
+    var all_blocks = []
+    for file in candidate_files:
+        val blocks = find_duplicates_in_file_with_hash_filter(file, config, cache_manager, interner, summary.repeated_hashes)
         all_blocks.merge(blocks)
         log_verbose(config, "  {file}: {blocks.len()} blocks")
 

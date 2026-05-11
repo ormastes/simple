@@ -1,0 +1,108 @@
+# Multi-column secondary indexes for SdnTable
+# Supports Hash, Sorted, and Trigram index types.
+
+use nogc_sync_mut.database.core (SdnTable, SdnRow)
+
+enum IndexType: Hash | Sorted | Trigram
+
+struct ColumnIndex:
+    column: text
+    index_type: IndexType
+    entries: Dict<text, [i64]>  # value -> list of row indices
+
+class IndexManager:
+    indexes: Dict<text, ColumnIndex>
+
+    static fn new() -> IndexManager:
+        IndexManager(indexes: {})
+
+    me create_index(table: SdnTable, column: text, index_type: IndexType):
+        var entries: Dict<text, [i64]> = {}
+        var row_idx: i64 = 0
+        for row in table.rows:
+            val val_opt = row.get(column)
+            if val_opt.?:
+                val v = val_opt.unwrap()
+                if entries.contains_key(v):
+                    var list = entries[v]
+                    list.push(row_idx)
+                    entries[v] = list
+                else:
+                    entries[v] = [row_idx]
+            row_idx = row_idx + 1
+        val idx = ColumnIndex(column: column, index_type: index_type, entries: entries)
+        self.indexes[column] = idx
+
+    me drop_index(column: text):
+        if self.indexes.contains_key(column):
+            self.indexes.remove(column)
+
+    fn lookup(column: text, value: text) -> [i64]?:
+        if not self.indexes.contains_key(column):
+            return nil
+        val idx = self.indexes[column]
+        if idx.entries.contains_key(value):
+            Some(idx.entries[value])
+        else:
+            Some([])
+
+    fn range_lookup(column: text, low: text, high: text) -> [i64]:
+        if not self.indexes.contains_key(column):
+            return []
+        val idx = self.indexes[column]
+        var result: [i64] = []
+        for (v, rows) in idx.entries:
+            if v >= low and v <= high:
+                for r in rows:
+                    result.push(r)
+        result
+
+    me on_row_insert(row_idx: i64, row: SdnRow):
+        for (column, idx) in self.indexes:
+            val val_opt = row.get(column)
+            if val_opt.?:
+                val v = val_opt.unwrap()
+                if idx.entries.contains_key(v):
+                    var list = idx.entries[v]
+                    list.push(row_idx)
+                    idx.entries[v] = list
+                else:
+                    idx.entries[v] = [row_idx]
+                self.indexes[column] = idx
+
+    me on_row_delete(row_idx: i64, row: SdnRow):
+        for (column, idx) in self.indexes:
+            val val_opt = row.get(column)
+            if val_opt.?:
+                val v = val_opt.unwrap()
+                if idx.entries.contains_key(v):
+                    val rows = idx.entries[v]
+                    var new_rows: [i64] = []
+                    for r in rows:
+                        if r != row_idx:
+                            new_rows.push(r)
+                    idx.entries[v] = new_rows
+                    self.indexes[column] = idx
+
+    me on_row_update(row_idx: i64, old_row: SdnRow, new_row: SdnRow):
+        self.on_row_delete(row_idx, old_row)
+        self.on_row_insert(row_idx, new_row)
+
+    me rebuild(table: SdnTable):
+        var rebuilt: Dict<text, ColumnIndex> = {}
+        for (column, idx) in self.indexes:
+            var entries: Dict<text, [i64]> = {}
+            var row_idx: i64 = 0
+            for row in table.rows:
+                val val_opt = row.get(column)
+                if val_opt.?:
+                    val v = val_opt.unwrap()
+                    if entries.contains_key(v):
+                        var list = entries[v]
+                        list.push(row_idx)
+                        entries[v] = list
+                    else:
+                        entries[v] = [row_idx]
+                row_idx = row_idx + 1
+            rebuilt[column] = ColumnIndex(column: column, index_type: idx.index_type, entries: entries)
+        self.indexes = rebuilt

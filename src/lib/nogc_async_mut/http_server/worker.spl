@@ -55,6 +55,8 @@ use std.http_server.response.{
 }
 use std.http_server.handler.{HandlerRegistry}
 use std.http_server.error.{HttpServerError}
+use std.nogc_async_mut.io.tls.{AsyncTlsListener, AsyncTlsStream, TlsConfig}
+use std.tls.certificate.{TlsCertificateChain, TlsPrivateKey}
 
 # Time FFI
 extern fn rt_time_now_ms() -> i64
@@ -95,9 +97,11 @@ class Worker:
     control: Channel
     active_count: i64
     shutdown_requested: bool
+    draining: bool
     accept_op_id: i64
     static_file_sendfile_count: i64
     static_file_fallback_count: i64
+    tls_listener: AsyncTlsListener?
 
     static fn create(worker_id: i64, config: ServerConfig,
                      router: AsyncRouter, pipeline: MiddlewarePipeline,
@@ -148,9 +152,11 @@ class Worker:
             control: control,
             active_count: 0,
             shutdown_requested: false,
+            draining: false,
             accept_op_id: 0,
             static_file_sendfile_count: 0,
-            static_file_fallback_count: 0
+            static_file_fallback_count: 0,
+            tls_listener: nil
         ))
 
     me run():
@@ -169,6 +175,8 @@ class Worker:
                 if cmd == "shutdown":
                     self.shutdown_requested = true
                     break
+                elif cmd == "drain":
+                    self.draining = true
 
             self.driver.flush()
             val completions = self.driver.poll(64, 10)
@@ -180,11 +188,19 @@ class Worker:
                 val flags = completion.flags
 
                 if op_id == self.accept_op_id:
-                    self.handle_accept(result, now)
+                    if self.draining:
+                        if result >= 0:
+                            rt_io_tcp_close(result)
+                    else:
+                        self.handle_accept(result, now)
                 else:
                     self.handle_completion(op_id, result, flags, now)
 
             self.reap_expired(now)
+
+            if self.draining and self.active_count == 0:
+                self.control.send("drained")
+                self.shutdown_requested = true
 
         self.close_all_connections()
         rt_io_tcp_close(self.listener_fd)

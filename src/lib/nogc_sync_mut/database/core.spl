@@ -20,6 +20,8 @@
 #   file_write("doc/08_tracking/bug/bug_db.sdn", content)  // ❌ Race condition!
 
 use nogc_sync_mut.database.atomic (atomic_write, atomic_read)
+use nogc_sync_mut.database.wal (WriteAheadLog, WalEntry, WalEntryType)
+use nogc_sync_mut.database.db_metrics (DbMetrics)
 # Minimal StringId definition (avoids external dependency during bootstrap)
 struct StringId:
     value: i32
@@ -104,7 +106,7 @@ class StringInterner:
     fn to_sdn() -> SdnTable:
         val table = SdnTable(name: "strings", columns: ["id", "value"], rows: [], index: {})
         for (id, value) in self.id_to_str:
-            val row = SdnRow(fields: {})
+            val row = SdnRow(fields: {}, _version: 0)
             row.set("id", "{id}")
             row.set("value", value)
             table.add_row(row)
@@ -116,10 +118,11 @@ class StringInterner:
 
 struct SdnRow:
     fields: Dict<text, text>
+    _version: i64
 
     # Create empty row
     static fn empty() -> SdnRow:
-        SdnRow(fields: {})
+        SdnRow(fields: {}, _version: 0)
 
     # Get field value
     fn get(column: text) -> text?:
@@ -159,7 +162,7 @@ struct SdnRow:
 
     # Deep copy row contents so native callers do not rely on struct copies
     fn copy() -> SdnRow:
-        val row = SdnRow(fields: {})
+        val row = SdnRow(fields: {}, _version: 0)
         for (column, value) in self.fields:
             row.set(column, value)
         row
@@ -223,7 +226,7 @@ class SdnTable:
             if parts.len() != columns.len():
                 continue
 
-            val row = SdnRow(fields: {})
+            val row = SdnRow(fields: {}, _version: 0)
             for (j, col) in columns.enumerate():
                 val value = parts[j].trim()
                 # Strip surrounding quotes if present
@@ -276,6 +279,19 @@ class SdnTable:
                 self.index[key] = i
                 return true
         false
+
+    # Update row only if current version matches expected_version (optimistic locking)
+    me update_row_if(key: text, row: SdnRow, expected_version: i64) -> Result<bool, text>:
+        for (i, current) in self.rows.enumerate():
+            val current_row: SdnRow = current
+            if current_row.get("id") == Some(key):
+                if current_row._version != expected_version:
+                    return Err("version mismatch: expected {expected_version}, got {current_row._version}")
+                val new_row = SdnRow(fields: row.fields, _version: expected_version + 1)
+                self.rows[i] = new_row
+                self.index[key] = i
+                return Ok(true)
+        Ok(false)
 
     # Get row by primary key
     fn get_row(key: text) -> SdnRow?:
@@ -335,6 +351,8 @@ class SdnDatabase:
     interner: StringInterner
     tables: Dict<text, SdnTable>
     modified: bool
+    wal: WriteAheadLog?
+    metrics: DbMetrics?
 
     # Create new database
     static fn new(path: text) -> SdnDatabase:
@@ -342,7 +360,9 @@ class SdnDatabase:
             path: path,
             interner: StringInterner(str_to_id: {}, id_to_str: {}, next_id: StringId(value: 0)),
             tables: {},
-            modified: false
+            modified: false,
+            wal: nil,
+            metrics: nil
         )
 
     # Load existing database
@@ -354,7 +374,7 @@ class SdnDatabase:
         if content == "":
             return nil
 
-        val db = SdnDatabase(path: path, tables: {}, interner: StringInterner(str_to_id: {}, id_to_str: {}, next_id: StringId(value: 0)), modified: false)
+        val db = SdnDatabase(path: path, tables: {}, interner: StringInterner(str_to_id: {}, id_to_str: {}, next_id: StringId(value: 0)), modified: false, wal: nil, metrics: nil)
 
         # Parse all tables from file
         # Format: multiple tables separated by blank lines
@@ -379,6 +399,26 @@ class SdnDatabase:
                 db.tables[table.name] = table
 
         db.modified = false
+
+        # Replay WAL for crash recovery: re-apply any entries written after last checkpoint
+        var db_wal = WriteAheadLog.open(path)
+        val pending = db_wal.replay()
+        if pending.len() > 0:
+            for entry in pending:
+                if entry.entry_type == WalEntryType.Insert or entry.entry_type == WalEntryType.Update:
+                    if db.tables.contains_key(entry.table_name):
+                        var t = db.tables[entry.table_name]
+                        val replayed_row = SdnRow(fields: {}, _version: 0)
+                        t.add_row(replayed_row)
+                        db.tables[entry.table_name] = t
+                elif entry.entry_type == WalEntryType.Delete:
+                    if db.tables.contains_key(entry.table_name):
+                        var t = db.tables[entry.table_name]
+                        t.mark_deleted(entry.row_key)
+                        db.tables[entry.table_name] = t
+            db.modified = true
+        db.wal = Some(db_wal)
+
         Some(db)
 
     # Save to disk (atomic with file locking)
@@ -402,6 +442,13 @@ class SdnDatabase:
             return false
 
         self.modified = false
+
+        # Checkpoint WAL now that main file is successfully written
+        if self.wal.?:
+            var w = self.wal.unwrap()
+            w.checkpoint()
+            self.wal = Some(w)
+
         true
 
     # Get table by name

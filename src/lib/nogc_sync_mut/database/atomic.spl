@@ -225,6 +225,77 @@ fn atomic_write(path: text, content: text) -> bool:
     lock.release()
     success
 
+# Write multiple files atomically: acquire all locks, write via temp, rename all, release all.
+# Locks are acquired in sorted path order to prevent deadlocks.
+# Returns false if any lock or write fails; already-acquired locks are released.
+fn atomic_write_batch(paths: [text], contents: [text]) -> bool:
+    if paths.len() != contents.len():
+        return false
+    if paths.len() == 0:
+        return true
+
+    # Sort indices by path for consistent lock ordering
+    var sorted_indices: [i64] = []
+    var i: i64 = 0
+    while i < paths.len():
+        sorted_indices.push(i)
+        i = i + 1
+    # Insertion sort by path string
+    var si = 1
+    while si < sorted_indices.len():
+        val key = sorted_indices[si]
+        var sj = si - 1
+        while sj >= 0 and paths[sorted_indices[sj]] > paths[key]:
+            sorted_indices[sj + 1] = sorted_indices[sj]
+            sj = sj - 1
+        sorted_indices[sj + 1] = key
+        si = si + 1
+
+    # Acquire all locks in sorted order
+    var locks: [FileLock] = []
+    var acquired_count: i64 = 0
+    for idx in sorted_indices:
+        var lock = FileLock.for_file(paths[idx])
+        if not lock.acquire():
+            # Release already-acquired locks
+            var ri: i64 = 0
+            while ri < acquired_count:
+                locks[ri].release()
+                ri = ri + 1
+            return false
+        locks.push(lock)
+        acquired_count = acquired_count + 1
+
+    # Write all temp files
+    var wrote: i64 = 0
+    for idx in sorted_indices:
+        val temp_path = paths[idx] + ".tmp"
+        if not file_write(temp_path, contents[idx]):
+            # Release all locks
+            var ri: i64 = 0
+            while ri < locks.len():
+                locks[ri].release()
+                ri = ri + 1
+            return false
+        wrote = wrote + 1
+
+    # Rename all temp files to final paths
+    var renamed: i64 = 0
+    var all_ok = true
+    for idx in sorted_indices:
+        val temp_path = paths[idx] + ".tmp"
+        if not rt_file_rename(temp_path, paths[idx]):
+            all_ok = false
+        renamed = renamed + 1
+
+    # Release all locks
+    var ri: i64 = 0
+    while ri < locks.len():
+        locks[ri].release()
+        ri = ri + 1
+
+    all_ok
+
 # Append to file atomically
 fn atomic_append(path: text, content: text) -> bool:
     var lock = FileLock.for_file(path)

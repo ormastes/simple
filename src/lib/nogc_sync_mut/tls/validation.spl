@@ -1,30 +1,85 @@
 # TLS Validation Module
 #
-# Provides cryptographic validation functions including constant-time
-# comparison for timing attack resistance.
+# Certificate validation: hostname verification, expiry checks,
+# chain-of-trust, and constant-time comparison for timing resistance.
+
+use std.cert.validation.{check_expiry, is_expired, verify_signature}
+use std.cert.chain.{build_certificate_chain}
+use std.tls.certificate.{TlsCertificate, TlsCertificateChain}
 
 # =============================================================================
-# VALIDATION FUNCTIONS
+# Hostname Verification
 # =============================================================================
 
-# Constant-time comparison to prevent timing attacks
-# Parameters:
-#   a: First byte array
-#   b: Second byte array
-# Returns: true if equal, false otherwise
-fn constant_time_compare(a, b):
-    val len_a = len(a)
-    val len_b = len(b)
+fn validate_hostname(cert: TlsCertificate, hostname: text) -> Result<(), text>:
+    val cn = cert.subject_cn
+    if cn.len() == 0:
+        return Err("certificate has no common name")
+    if matches_hostname(cn, hostname):
+        return Ok(())
+    Err("hostname '{hostname}' does not match certificate CN '{cn}'")
 
-    if len_a != len_b:
-        false
+fn matches_hostname(pattern: text, hostname: text) -> bool:
+    if pattern == hostname:
+        return true
+    if pattern.starts_with("*."):
+        val wildcard_domain = pattern.substring(2, pattern.len())
+        val dot_pos = hostname.index_of(".")
+        if dot_pos > 0:
+            val host_domain = hostname.substring(dot_pos + 1, hostname.len())
+            return host_domain == wildcard_domain
+    false
+
+# =============================================================================
+# Expiry Validation
+# =============================================================================
+
+fn validate_expiry(cert: TlsCertificate) -> Result<(), text>:
+    if cert.is_valid():
+        Ok(())
     else:
-        var diff = 0
-        var i = 0
-        while i < len_a:
-            val byte_a = byte_at(a, i)
-            val byte_b = byte_at(b, i)
-            val xor_result = xor(byte_a, byte_b)
-            diff = or(diff, xor_result)
-            i = i + 1
-        diff == 0
+        Err("certificate has expired or is not yet valid")
+
+# =============================================================================
+# Chain-of-Trust Validation
+# =============================================================================
+
+fn validate_chain(chain: TlsCertificateChain, trust_anchors: [TlsCertificate]) -> Result<(), text>:
+    if chain.chain_length() == 0:
+        return Err("empty certificate chain")
+    var i = 0
+    while i < chain.certs.len() - 1:
+        val cert = chain.certs[i]
+        val issuer = chain.certs[i + 1]
+        if not verify_signature(cert.parsed, issuer.parsed):
+            return Err("chain link {i} -> {i + 1} signature verification failed")
+        i = i + 1
+    val last = chain.certs[chain.certs.len() - 1]
+    if last.is_self_signed():
+        return Ok(())
+    var found_anchor = false
+    for anchor in trust_anchors:
+        if verify_signature(last.parsed, anchor.parsed):
+            found_anchor = true
+            break
+    if not found_anchor:
+        return Err("chain does not terminate at a trusted root")
+    Ok(())
+
+# =============================================================================
+# Constant-Time Comparison (timing attack resistance)
+# =============================================================================
+
+fn constant_time_compare(a: text, b: text) -> bool:
+    val len_a = a.len()
+    val len_b = b.len()
+    if len_a != len_b:
+        return false
+    var diff: i64 = 0
+    var i: i64 = 0
+    while i < len_a:
+        val byte_a = a.char_code_at(i)
+        val byte_b = b.char_code_at(i)
+        diff = diff | (byte_a ^ byte_b)
+        i = i + 1
+    diff == 0

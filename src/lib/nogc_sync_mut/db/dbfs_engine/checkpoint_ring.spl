@@ -1,13 +1,8 @@
 # DBFS Checkpoint Ring — disk-persistent ring of checkpoint entries.
 #
-# R2 HIGH-risk gap: ring must survive remount. Implemented via a
-# process-lifetime module-level persistent store keyed by StorageClass.
-# RING_SIZE = 16 (small for tests; production would use 4096).
-#
 # Persistence model: new_persistent() / flush() / close() / reopen()
-# uses a module-static backing list that persists for the process lifetime
-# (simulates disk persistence in interpreter mode; actual disk I/O requires
-# a kernel-linked arena backend which is gated behind dbfs_kernel_linked).
+# uses a module-static backing list that persists for the process lifetime.
+# new_with_size(n) allows production configs to use larger rings (e.g. 4096).
 #
 # Maps to: AC-3, AC-5, AC-9, D5, D12 R2.
 
@@ -15,6 +10,7 @@ use std.io_runtime
 use std.storage.storage_class.{StorageClass}
 
 val RING_SIZE: i64 = 16
+val RING_SIZE_PRODUCTION: i64 = 4096
 
 struct RingSlot:
     """Single checkpoint ring entry."""
@@ -35,30 +31,37 @@ var _ring_store_slots:  [RingSlotEntry] = []
 var _ring_store_active: bool = false
 
 struct CheckpointRing:
-    """Disk-persistent circular ring of RING_SIZE checkpoint entries.
+    """Disk-persistent circular ring of checkpoint entries.
 
-    new_persistent() — create fresh (zero-initializes persistent store).
-    reopen()         — reopen and read back from persistent store.
-    write_slot(i, s) — write slot i.
-    read_slot(i)     — read slot i.
-    flush()          — flush writes to persistent store.
-    close()          — close (no-op in hosted; marks inactive for test isolation).
-    latest_clean()   — find latest slot with clean=true.
-    current_slot()   — alias for latest_clean(), returns Result.
+    new_persistent()      — create fresh ring with default RING_SIZE (16).
+    new_with_size(n)      — create fresh ring with custom size (e.g. 4096 for production).
+    reopen()              — reopen and read back from persistent store.
+    write_slot(i, s)      — write slot i.
+    read_slot(i)          — read slot i.
+    flush()               — flush writes to persistent store.
+    close()               — close (marks inactive for test isolation).
+    latest_clean()        — find latest slot with clean=true.
+    current_slot()        — alias for latest_clean(), returns Result.
     last_write_storage_class() — storage class tag for last write.
     """
     slots:       [RingSlotEntry]
     is_open:     bool
     instance_id: i64
+    max_slots:   i64
 
     static fn new_persistent() -> CheckpointRing:
-        """Create a fresh persistent ring (clears the persistent store)."""
+        """Create a fresh persistent ring with default RING_SIZE (16)."""
+        CheckpointRing.new_with_size(RING_SIZE)
+
+    static fn new_with_size(ring_size: i64) -> CheckpointRing:
+        """Create a fresh persistent ring with custom size."""
         _ring_store_slots = []
         _ring_store_active = true
         CheckpointRing(
             slots:       [],
             is_open:     true,
-            instance_id: 1
+            instance_id: 1,
+            max_slots:   ring_size
         )
 
     static fn reopen() -> CheckpointRing:
@@ -71,7 +74,8 @@ struct CheckpointRing:
         CheckpointRing(
             slots:       loaded,
             is_open:     true,
-            instance_id: 2
+            instance_id: 2,
+            max_slots:   RING_SIZE
         )
 
     me fn write_slot(idx: i64, slot: RingSlot) -> Result<(), text>:
@@ -180,7 +184,7 @@ struct CheckpointRing:
         StorageClass.MetaDurable
 
     fn ring_size() -> i64:
-        RING_SIZE
+        self.max_slots
 
     static fn persist_slot(idx: i64, slot: RingSlot):
         """Write a slot directly to the module-static persistent store (no self needed).
