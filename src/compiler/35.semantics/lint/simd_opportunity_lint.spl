@@ -17,6 +17,9 @@
 # L-SIMD-009 (info):    ReLU loop max(a[i],0) → FixedVec.max(zero)
 # L-SIMD-010 (note):    byte-frequency histogram loop → byte_histogram_simd (if hot)
 # L-SIMD-011 (warning): key-XOR cipher loop out[i]=a[i]^key[i%keylen] → FixedVec.xor tiled
+# L-SIMD-012 (warning): ASCII validation loop byte>=0x80 → FixedVec.all_lt(0x80) / movemask
+# L-SIMD-013 (info):    byte-counting loop (conditional count) → FixedVec.cmp + popcount
+# L-SIMD-014 (info):    delimiter-scan loop byte==delim → FixedVec.cmp_eq + extract_positions
 #
 # Does NOT flag:
 # - Comment lines or docstrings
@@ -1045,11 +1048,225 @@ pub fn lint_simd_key_xor(source: text, path: text) -> [SimdOpportunityWarning]:
     warnings
 
 # ============================================================================
+# L-SIMD-012 (warning): ASCII validation loop (is_ascii)
+# ============================================================================
+#
+# Detects:
+#   while i < len:
+#       if bytes[i] >= 0x80:    (or >= 128)
+#           return false
+#       i = i + 1
+#
+# Also detects the all-check form:
+#   while i < len:
+#       if bytes[i] >= 128:
+#           is_ascii = false
+#           break
+#       i = i + 1
+#
+# Fix:
+#   # SIMD: load 16 bytes, movemask to check high bits — zero means all ASCII
+#   val result = fixedvec_from_slice(bytes).all_lt(0x80)
+# ============================================================================
+
+pub fn lint_simd_ascii_validate(source: text, path: text) -> [SimdOpportunityWarning]:
+    """Detect ASCII validation loops (byte >= 0x80 check) that could use SIMD movemask."""
+    var warnings: [SimdOpportunityWarning] = []
+    val code_lines = iter_code_lines(source)
+
+    var li = 0
+    while li < code_lines.len():
+        val cl = code_lines[li]
+        val t = cl.trimmed
+
+        if not t.starts_with("#") and (_is_for_range_loop(t) or _is_while_range_loop(t)):
+            val lvar = _extract_loop_var_generic(t)
+            val n = _extract_range_n_generic(t)
+            val indent = _loop_indent(cl.raw)
+
+            if li + 1 < code_lines.len():
+                val body = code_lines[li + 1].trimmed
+                val has_high_bit_check = (
+                    (body.contains(">= 0x80") or body.contains(">= 128") or
+                     body.contains("> 0x7F") or body.contains("> 127")) and
+                    body.starts_with("if ")
+                )
+                val has_exit = (
+                    body.contains("return false") or body.contains("return 0") or
+                    body.contains(": break") or body.ends_with("break")
+                )
+                val next_has_exit = if li + 2 < code_lines.len():
+                    val next = code_lines[li + 2].trimmed
+                    next.starts_with("return false") or next.starts_with("return 0") or next.starts_with("break")
+                else:
+                    false
+                if has_high_bit_check and (has_exit or next_has_exit):
+                    warnings.push(SimdOpportunityWarning(
+                        code: "L-SIMD-012",
+                        severity: "warning",
+                        message: "ASCII validation loop over {n} bytes can use SIMD high-bit check",
+                        hint: "SSE2 movemask on 16-byte chunk: if any high bit set, not ASCII. Processes 16-64 bytes per cycle",
+                        fix: "# SIMD: load chunk, check all bytes < 0x80 via movemask\nval result = fixedvec_from_slice(bytes).all_lt(0x80)\n# Or: rt_text_is_ascii(s) — C runtime SIMD dispatch",
+                        line_num: cl.line_num,
+                        file_path: path
+                    ))
+
+        li = li + 1
+
+    warnings
+
+# ============================================================================
+# L-SIMD-013 (info): Byte-counting loop (count bytes matching condition)
+# ============================================================================
+#
+# Detects:
+#   while i < len:
+#       if (bytes[i] & 0xC0) != 0x80:    (or other byte-mask condition)
+#           count = count + 1
+#       i = i + 1
+#
+# Also detects:
+#   while i < len:
+#       if bytes[i] == target:
+#           count = count + 1
+#       i = i + 1
+#
+# Fix:
+#   # SIMD: compare 16 bytes at once, movemask, popcnt
+#   val mask = fixedvec_from_slice(bytes).cmp_eq(target_vec)
+#   val count = mask.popcount()   # or movemask + __builtin_popcount
+# ============================================================================
+
+pub fn lint_simd_byte_count(source: text, path: text) -> [SimdOpportunityWarning]:
+    """Detect byte-counting loops (conditional increment) that could use SIMD cmp + popcount."""
+    var warnings: [SimdOpportunityWarning] = []
+    val code_lines = iter_code_lines(source)
+
+    var last_counter_var = ""
+    var last_counter_line = 0
+
+    var li = 0
+    while li < code_lines.len():
+        val cl = code_lines[li]
+        val t = cl.trimmed
+
+        if not t.starts_with("#"):
+            if t.starts_with("var ") and (t.contains("= 0") and not t.contains("= 0.")):
+                val rest = t.slice(4)
+                var name_end = 0
+                while name_end < rest.len():
+                    val ch = rest.slice(name_end, name_end + 1)
+                    if ch == " " or ch == ":":
+                        break
+                    name_end = name_end + 1
+                last_counter_var = rest.slice(0, name_end)
+                last_counter_line = cl.line_num
+
+            if (_is_for_range_loop(t) or _is_while_range_loop(t)) and last_counter_var.len() > 0:
+                val lvar = _extract_loop_var_generic(t)
+                val n = _extract_range_n_generic(t)
+                val indent = _loop_indent(cl.raw)
+
+                if li + 1 < code_lines.len():
+                    val body1 = code_lines[li + 1].trimmed
+                    val is_conditional = body1.starts_with("if ")
+                    val has_byte_check = (
+                        body1.contains("[{lvar}]") and
+                        (body1.contains("==") or body1.contains("!=") or
+                         body1.contains("& 0x") or body1.contains("& 0b") or
+                         body1.contains(">= 0x") or body1.contains("<= 0x"))
+                    )
+                    val has_counter_incr = if li + 2 < code_lines.len():
+                        val body2 = code_lines[li + 2].trimmed
+                        (body2.starts_with("{last_counter_var} = {last_counter_var} + 1") or
+                         body2.starts_with("{last_counter_var} = {last_counter_var}+1"))
+                    else:
+                        false
+                    val same_line_incr = (
+                        body1.contains("{last_counter_var} = {last_counter_var} + 1") or
+                        body1.contains("{last_counter_var} + 1")
+                    )
+                    if is_conditional and has_byte_check and (has_counter_incr or same_line_incr):
+                        warnings.push(SimdOpportunityWarning(
+                            code: "L-SIMD-013",
+                            severity: "info",
+                            message: "byte-counting loop over {n} bytes can use SIMD cmp + popcount",
+                            hint: "SIMD compare produces bitmask; POPCNT counts matches in one cycle. Processes 16-32 bytes per iteration",
+                            fix: "# SIMD byte-count: compare chunk, movemask, popcnt\nval mask = fixedvec_from_slice(bytes).cmp_eq(target_vec)\nval {last_counter_var} = mask.popcount()\n# Or: use rt_text_count_codepoints(s) for UTF-8 lead-byte counting",
+                            line_num: cl.line_num,
+                            file_path: path
+                        ))
+
+        li = li + 1
+
+    warnings
+
+# ============================================================================
+# L-SIMD-014 (info): Delimiter-scan loop (find byte positions)
+# ============================================================================
+#
+# Detects:
+#   while i < len:
+#       if bytes[i] == delim:
+#           positions.push(i)
+#       i = i + 1
+#
+# Fix:
+#   # SIMD: broadcast delimiter, compare 16 bytes, extract set bits
+#   val delim_vec = FixedVec<u8>(elements: splat_array(delim, 16), lanes: 16)
+#   val mask = fixedvec_from_slice(bytes).cmp_eq(delim_vec)
+#   # extract_positions(mask, base_offset) → [i64] of matching indices
+# ============================================================================
+
+pub fn lint_simd_delimiter_scan(source: text, path: text) -> [SimdOpportunityWarning]:
+    """Detect delimiter-scan loops (find + push positions) that could use SIMD broadcast-compare."""
+    var warnings: [SimdOpportunityWarning] = []
+    val code_lines = iter_code_lines(source)
+
+    var li = 0
+    while li < code_lines.len():
+        val cl = code_lines[li]
+        val t = cl.trimmed
+
+        if not t.starts_with("#") and (_is_for_range_loop(t) or _is_while_range_loop(t)):
+            val lvar = _extract_loop_var_generic(t)
+            val n = _extract_range_n_generic(t)
+            val indent = _loop_indent(cl.raw)
+
+            if li + 1 < code_lines.len():
+                val body1 = code_lines[li + 1].trimmed
+                val is_eq_check = (
+                    body1.starts_with("if ") and
+                    body1.contains("[{lvar}]") and
+                    body1.contains("== ")
+                )
+                val has_push = if li + 2 < code_lines.len():
+                    val body2 = code_lines[li + 2].trimmed
+                    body2.contains(".push(") and body2.contains(lvar)
+                else:
+                    false
+                val same_line_push = body1.contains(".push(")
+                if is_eq_check and (has_push or same_line_push):
+                    warnings.push(SimdOpportunityWarning(
+                        code: "L-SIMD-014",
+                        severity: "info",
+                        message: "delimiter-scan loop over {n} bytes can use SIMD broadcast-compare",
+                        hint: "broadcast delimiter to all SIMD lanes, cmp_eq 16 bytes at once, tzcnt to extract positions",
+                        fix: "# SIMD delimiter scan:\nval delim_vec = FixedVec<u8>(elements: splat_array(delim, 16), lanes: 16)\nval mask = fixedvec_from_slice(bytes).cmp_eq(delim_vec)\n# extract matching positions from mask bits",
+                        line_num: cl.line_num,
+                        file_path: path
+                    ))
+
+        li = li + 1
+
+    warnings
+
+# ============================================================================
 # Composite entry point — run all SIMD opportunity checks
 # ============================================================================
 
 pub fn lint_simd_opportunities(source: text, path: text) -> [SimdOpportunityWarning]:
-    """Run all 11 SIMD-opportunity lint rules on a source file.
+    """Run all 14 SIMD-opportunity lint rules on a source file.
 
     Returns a combined list of warnings from all rules, sorted by line number.
     """
@@ -1119,6 +1336,24 @@ pub fn lint_simd_opportunities(source: text, path: text) -> [SimdOpportunityWarn
     i = 0
     while i < w11.len():
         all.push(w11[i])
+        i = i + 1
+
+    val w12 = lint_simd_ascii_validate(source, path)
+    i = 0
+    while i < w12.len():
+        all.push(w12[i])
+        i = i + 1
+
+    val w13 = lint_simd_byte_count(source, path)
+    i = 0
+    while i < w13.len():
+        all.push(w13[i])
+        i = i + 1
+
+    val w14 = lint_simd_delimiter_scan(source, path)
+    i = 0
+    while i < w14.len():
+        all.push(w14[i])
         i = i + 1
 
     all

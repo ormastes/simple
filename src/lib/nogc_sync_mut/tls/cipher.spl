@@ -308,3 +308,89 @@ fn hmac_sha384(key, data):
 
     val outer_input = concat_bytes(opad, inner_hash)
     sha384(outer_input)
+
+# =============================================================================
+# HEX-SAFE CRYPTOGRAPHIC PRIMITIVES
+# =============================================================================
+
+# HMAC-SHA256 operating on hex strings
+# Parameters:
+#   key_hex: HMAC key as hex string
+#   data_hex: Data to authenticate as hex string
+# Returns: HMAC output as hex string (64 hex chars = 32 bytes)
+fn hmac_sha256_hex(key_hex: text, data_hex: text) -> text:
+    val key_bytes = hex_to_bytes(key_hex)
+    val data_bytes = hex_to_bytes(data_hex)
+    val result_bytes = hmac_sha256(key_bytes, data_bytes)
+    bytes_to_hex(result_bytes)
+
+# HMAC-SHA384 operating on hex strings
+# Parameters:
+#   key_hex: HMAC key as hex string
+#   data_hex: Data to authenticate as hex string
+# Returns: HMAC output as hex string (96 hex chars = 48 bytes)
+fn hmac_sha384_hex(key_hex: text, data_hex: text) -> text:
+    val key_bytes = hex_to_bytes(key_hex)
+    val data_bytes = hex_to_bytes(data_hex)
+    val result_bytes = hmac_sha384(key_bytes, data_bytes)
+    bytes_to_hex(result_bytes)
+
+# TLS PRF operating on hex strings
+# Parameters:
+#   secret_hex: Secret value as hex string
+#   label: ASCII label string (not hex)
+#   seed_hex: Seed value as hex string
+#   output_length: Desired output length in bytes
+# Returns: PRF output as hex string
+fn tls_prf_hex(secret_hex: text, label: text, seed_hex: text, output_length: i64) -> text:
+    val secret_bytes = hex_to_bytes(secret_hex)
+    val label_bytes = to_bytes(label)
+    val seed_bytes = hex_to_bytes(seed_hex)
+    val combined_seed = concat_bytes(label_bytes, seed_bytes)
+    val result_bytes = tls_prf_sha256(secret_bytes, combined_seed, output_length)
+    bytes_to_hex(result_bytes)
+
+# Compute master secret from hex-encoded pre-master secret and randoms
+# Parameters:
+#   pre_master_secret_hex: Pre-master secret as hex (96 hex chars = 48 bytes for RSA)
+#   client_random_hex: Client random as hex (64 hex chars = 32 bytes)
+#   server_random_hex: Server random as hex (64 hex chars = 32 bytes)
+# Returns: Master secret as hex (96 hex chars = 48 bytes)
+fn compute_master_secret_hex(pre_master_secret_hex: text, client_random_hex: text, server_random_hex: text) -> text:
+    val combined_random_hex = concat_hex(client_random_hex, server_random_hex)
+    tls_prf_hex(pre_master_secret_hex, "master secret", combined_random_hex, 48)
+
+# Derive session keys from hex-encoded master secret
+# Parameters:
+#   master_secret_hex: Master secret as hex (96 hex chars = 48 bytes)
+#   client_random_hex: Client random as hex (64 hex chars = 32 bytes)
+#   server_random_hex: Server random as hex (64 hex chars = 32 bytes)
+#   mac_key_length: MAC key length in bytes
+#   enc_key_length: Encryption key length in bytes
+#   iv_length: IV length in bytes
+# Returns: (client_mac_hex, server_mac_hex, client_key_hex, server_key_hex, client_iv_hex, server_iv_hex) tuple
+fn derive_keys_hex(master_secret_hex: text, client_random_hex: text, server_random_hex: text, mac_key_length: i64, enc_key_length: i64, iv_length: i64):
+    val combined_random_hex = concat_hex(server_random_hex, client_random_hex)
+    val key_material_length = (2 * mac_key_length) + (2 * enc_key_length) + (2 * iv_length)
+    val key_block_hex = tls_prf_hex(master_secret_hex, "key expansion", combined_random_hex, key_material_length)
+
+    # Split key block into individual keys (using byte offsets)
+    var offset = 0
+    val client_mac_hex = hex_slice(key_block_hex, offset, mac_key_length)
+    offset = offset + mac_key_length
+
+    val server_mac_hex = hex_slice(key_block_hex, offset, mac_key_length)
+    offset = offset + mac_key_length
+
+    val client_key_hex = hex_slice(key_block_hex, offset, enc_key_length)
+    offset = offset + enc_key_length
+
+    val server_key_hex = hex_slice(key_block_hex, offset, enc_key_length)
+    offset = offset + enc_key_length
+
+    val client_iv_hex = hex_slice(key_block_hex, offset, iv_length)
+    offset = offset + iv_length
+
+    val server_iv_hex = hex_slice(key_block_hex, offset, iv_length)
+
+    (client_mac_hex, server_mac_hex, client_key_hex, server_key_hex, client_iv_hex, server_iv_hex)
