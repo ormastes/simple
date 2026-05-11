@@ -17,7 +17,7 @@ use crate::value::Value;
 pub fn rt_time_now_seconds(_args: &[Value]) -> Result<Value, CompileError> {
     unsafe {
         let time = simple_runtime::value::rt_time_now_seconds();
-        Ok(Value::Float(time))
+        Ok(Value::Int(time as i64))
     }
 }
 

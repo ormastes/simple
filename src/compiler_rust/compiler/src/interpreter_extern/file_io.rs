@@ -88,6 +88,12 @@ pub fn rt_file_exists(args: &[Value]) -> Result<Value, CompileError> {
     Ok(Value::Bool(Path::new(&path).exists()))
 }
 
+/// Check if path is a directory
+pub fn rt_file_is_dir(args: &[Value]) -> Result<Value, CompileError> {
+    let path = extract_path(args, 0)?;
+    Ok(Value::Bool(Path::new(&path).is_dir()))
+}
+
 /// Get file stat info (simplified - returns size or -1)
 pub fn rt_file_stat(args: &[Value]) -> Result<Value, CompileError> {
     let path = extract_path(args, 0)?;

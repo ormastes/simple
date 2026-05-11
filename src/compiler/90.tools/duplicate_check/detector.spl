@@ -210,14 +210,16 @@ fn build_duplicate_group(blocks: [DuplicateBlock]) -> DuplicateGroup:
 fn duplicate_block_signature(block: DuplicateBlock) -> text:
     "{block.token_count}|{block.code}"
 
-fn materialize_block_code(block: DuplicateBlock, source_cache: {text: text}) -> DuplicateBlock:
+fn materialize_block_code(block: DuplicateBlock, source_cache: {text: text}, cache_manager: TokenCacheManager) -> DuplicateBlock:
     if block.code.len() > 0:
         return block
 
     var source = source_cache[block.file] ?? ""
     if source.len() == 0:
+        source = get_cached_content(cache_manager, block.file)
+    if source.len() == 0:
         source = read_detector_source(block.file)
-        source_cache[block.file] = source
+    source_cache[block.file] = source
 
     var code = ""
     if block.snippet_start_offset >= 0 and block.snippet_end_offset >= block.snippet_start_offset and block.snippet_end_offset <= source.len():
@@ -315,7 +317,7 @@ fn load_tokens_for_file(file_path: text, config: DuplicationConfig, cache_manage
 
     val content = read_detector_source(file_path)
     val tokens = tokenize(content, config)
-    set_cached_tokens(cache_manager, file_path, tokens)
+    set_cached_tokens_with_content(cache_manager, file_path, tokens, content)
     tokens
 
 fn build_token_codes(tokens: [SimpleToken], interner: TokenInterner) -> [i64]:
@@ -413,16 +415,13 @@ fn find_duplicates_in_file_with_hash_filter(file_path: text, config: Duplication
     val tokens = load_tokens_for_file(file_path, config, cache_manager)
     val filter_enabled = repeated_hashes.keys().len() > 0
 
-    var batches = []
-    var current_batch = []
-    val batch_size = 100
-
+    var blocks = []
     val candidates = collect_token_window_candidates(tokens, config, interner)
     for candidate in candidates:
         val hash_key = "{candidate.hash_value}"
         if filter_enabled and not repeated_hashes.has(hash_key):
             continue
-        val new_block = DuplicateBlock(
+        blocks.push(DuplicateBlock(
             file: file_path,
             line_start: candidate.line_start,
             line_end: candidate.line_end,
@@ -431,28 +430,14 @@ fn find_duplicates_in_file_with_hash_filter(file_path: text, config: Duplication
             snippet_start_offset: tokens[candidate.index].start_offset,
             snippet_end_offset: tokens[candidate.end_index - 1].end_offset,
             code: ""
-        )
-
-        current_batch.push(new_block)
-
-        if current_batch.len() >= batch_size:
-            batches.push(current_batch)
-            current_batch = []
-
-    if current_batch.len() > 0:
-        batches.push(current_batch)
-
-    var blocks = []
-    for batch in batches:
-        for item in batch:
-            blocks.push(item)
+        ))
 
     blocks
 
-fn bucket_exact_blocks(blocks: [DuplicateBlock], source_cache: {text: text}) -> {text: [DuplicateBlock]}:
+fn bucket_exact_blocks(blocks: [DuplicateBlock], source_cache: {text: text}, cache_manager: TokenCacheManager) -> {text: [DuplicateBlock]}:
     var exact_map = {}
     for block in blocks:
-        val materialized = materialize_block_code(block, source_cache)
+        val materialized = materialize_block_code(block, source_cache, cache_manager)
         val exact_key = duplicate_block_signature(materialized)
         if exact_map.has(exact_key):
             var existing = exact_map[exact_key]
@@ -481,9 +466,9 @@ fn add_exact_groups(exact_map: {text: [DuplicateBlock]}, config: DuplicationConf
         if group.impact_score >= config.min_impact:
             groups.push(group)
 
-fn group_exact_blocks(all_blocks: [DuplicateBlock], config: DuplicationConfig) -> [DuplicateGroup]:
+fn group_exact_blocks(all_blocks: [DuplicateBlock], config: DuplicationConfig, cache_manager: TokenCacheManager) -> [DuplicateGroup]:
     var source_cache = {}
-    val exact_map = bucket_exact_blocks(all_blocks, source_cache)
+    val exact_map = bucket_exact_blocks(all_blocks, source_cache, cache_manager)
     val groups = []
     add_exact_groups(exact_map, config, groups)
     groups
@@ -576,7 +561,7 @@ fn load_tokens_with_line_indexes(blocks_to_analyze: [DuplicateBlock], config: Du
             else:
                 val content = read_detector_source(block.file)
                 tokens = tokenize(content, config)
-                set_cached_tokens(cache_manager, block.file, tokens)
+                set_cached_tokens_with_content(cache_manager, block.file, tokens, content)
             file_token_cache[block.file] = tokens
 
             # Build line-to-token-index map once per file for O(1) lookups
@@ -790,7 +775,7 @@ fn find_duplicates(files: [text], config: DuplicationConfig, cache_manager: Toke
 
     log_progress(config, "Found {all_blocks.len()} potential duplicate blocks")
 
-    val exact_groups = group_exact_blocks(all_blocks, config)
+    val exact_groups = group_exact_blocks(all_blocks, config, cache_manager)
 
     val refined_groups = if config.use_cosine_similarity:
         log_progress(config, "Refining with cosine similarity...")

@@ -198,3 +198,48 @@ pub fn rt_constant_time_compare(args: &[Value]) -> Result<Value, CompileError> {
     }
     Ok(Value::Int(if acc == 0 { 1 } else { 0 }))
 }
+
+/// One-shot SHA-1 hash of text data, returned as lowercase hex string.
+///
+/// Callable from Simple as: `rt_sha1(data: text) -> text`
+pub fn rt_sha1(args: &[Value]) -> Result<Value, CompileError> {
+    let data = match args.first() {
+        Some(Value::Str(s)) => s.as_bytes().to_vec(),
+        _ => Vec::new(),
+    };
+    let mut hasher = Sha1::new();
+    hasher.update(&data);
+    let result = hasher.finalize();
+    Ok(Value::Str(format!("{:x}", result)))
+}
+
+/// Base64url decode (RFC 4648 section 5, no padding).
+///
+/// Callable from Simple as: `rt_base64url_decode(encoded: text) -> text`
+pub fn rt_base64url_decode(args: &[Value]) -> Result<Value, CompileError> {
+    let input = match args.first() {
+        Some(Value::Str(s)) => s.clone(),
+        _ => return Ok(Value::Str(String::new())),
+    };
+    match base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(&input) {
+        Ok(bytes) => Ok(Value::Str(String::from_utf8_lossy(&bytes).into_owned())),
+        Err(_) => Ok(Value::Str(String::new())),
+    }
+}
+
+/// Base64url encode (RFC 4648 section 5, no padding).
+///
+/// Callable from Simple as: `rt_base64url_encode(input: text, len: i64) -> text`
+pub fn rt_base64url_encode(args: &[Value]) -> Result<Value, CompileError> {
+    let data = match args.first() {
+        Some(Value::Str(s)) => s.as_bytes().to_vec(),
+        _ => Vec::new(),
+    };
+    // Second argument (len) can limit how many bytes to encode
+    let limit = match args.get(1) {
+        Some(Value::Int(n)) if *n > 0 && (*n as usize) < data.len() => *n as usize,
+        _ => data.len(),
+    };
+    let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&data[..limit]);
+    Ok(Value::Str(encoded))
+}

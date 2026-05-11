@@ -338,6 +338,8 @@ pub(crate) fn call_extern_function(
         "rt_time_now_seconds" => time::rt_time_now_seconds(&evaluated),
         "_current_time_unix" => time::_current_time_unix(&evaluated),
         "rt_current_time_ms" => time::rt_current_time_ms(&evaluated),
+        "rt_time_now_ms" => time::rt_time_now_ms(&evaluated),
+        "rt_time_now" => time::rt_time_now(&evaluated),
 
         // ====================================================================
         // High-Resolution Time Operations (5 functions)
@@ -382,6 +384,7 @@ pub(crate) fn call_extern_function(
         "rt_random_random" => random::rt_random_random_fn(&evaluated),
         "rt_random_uniform" => random::rt_random_uniform_fn(&evaluated),
         "rt_random_hex" => random::rt_random_hex_fn(&evaluated),
+        "rt_random_i64" => random::rt_random_i64_fn(&evaluated),
 
         // ====================================================================
         // Atomic Operations (15 functions)
@@ -458,6 +461,7 @@ pub(crate) fn call_extern_function(
         // Text/bytes conversion (2 functions)
         "rt_text_to_bytes" => conversion::rt_text_to_bytes_fn(&evaluated),
         "rt_bytes_to_text" => conversion::rt_bytes_to_text_fn(&evaluated),
+        "rt_byte_char" => conversion::rt_byte_char_fn(&evaluated),
         "rt_gui_get_glyph_8x16" => conversion::rt_gui_get_glyph_8x16_fn(&evaluated),
 
         // Byte-order conversion (6 functions — used by BinaryReader)
@@ -479,6 +483,11 @@ pub(crate) fn call_extern_function(
         // Base64 encoding/decoding
         "rt_base64_encode" => crypto::rt_base64_encode(&evaluated),
         "rt_base64_decode" => crypto::rt_base64_decode(&evaluated),
+        // One-shot SHA-1 hash
+        "rt_sha1" => crypto::rt_sha1(&evaluated),
+        // Base64url encoding/decoding (RFC 4648 section 5)
+        "rt_base64url_decode" => crypto::rt_base64url_decode(&evaluated),
+        "rt_base64url_encode" => crypto::rt_base64url_encode(&evaluated),
         // Constant-time text compare (must dispatch here so Value::Str args
         // aren't routed through dynamic_ffi, which marshals strings as
         // C-pointers and silently breaks the runtime's RuntimeValue inputs).
@@ -635,6 +644,13 @@ pub(crate) fn call_extern_function(
         "rt_tls_client_read" => Ok(Value::Str(String::new())),
         "rt_tls_client_close" => Ok(Value::Bool(false)),
         "rt_tls_get_protocol_version" => Ok(Value::Str(String::new())),
+
+        // HTTP GET (ureq-backed, for OIDC discovery etc.)
+        "rt_http_get" => network::rt_http_get(&evaluated),
+
+        // WebSocket raw I/O stubs (interpreter mode)
+        "rt_async_ws_read_raw" => network::rt_async_ws_read_raw(&evaluated),
+        "rt_async_ws_write_raw" => network::rt_async_ws_write_raw(&evaluated),
 
         // ====================================================================
         // UDP Operations (18 functions)
@@ -1048,6 +1064,7 @@ pub(crate) fn call_extern_function(
         // ====================================================================
         // File metadata
         "rt_file_exists" | "rt_file_exists_str" => file_io::rt_file_exists(&evaluated),
+        "rt_file_is_dir" => file_io::rt_file_is_dir(&evaluated),
         "rt_file_stat" => file_io::rt_file_stat(&evaluated),
         "rt_file_size" => file_io::rt_file_size(&evaluated),
         "rt_file_hash_sha256" => file_io::rt_file_hash_sha256(&evaluated),

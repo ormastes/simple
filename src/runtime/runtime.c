@@ -1764,7 +1764,7 @@ const char* rt_http_get(const char* url) {
     /* DNS resolve */
     struct addrinfo hints, *res;
     memset(&hints, 0, sizeof(hints));
-    hints.ai_family = AF_INET;
+    hints.ai_family = AF_UNSPEC;
     hints.ai_socktype = SOCK_STREAM;
     char port_str[8];
     snprintf(port_str, sizeof(port_str), "%d", port);
