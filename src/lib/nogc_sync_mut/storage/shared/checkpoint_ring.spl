@@ -8,6 +8,9 @@
 
 use std.io_runtime
 use std.storage.storage_class.{StorageClass}
+use os.services.block_device.{BlockDevice}
+
+extern fn rt_bytes_alloc(len: i64) -> [u8]
 
 struct RingSlot:
     gen:             i64
@@ -33,6 +36,122 @@ var _ring_persist_cb_tag: text = ""
 
 # Persisted entries written by the Arena callback path
 var _ring_cb_slots: [RingSlotEntry] = []
+
+# --- BlockDevice-backed persistence for callbacks ---
+var _ring_dev_store: [BlockDevice] = []
+var _ring_dev_ready: bool = false
+var _ring_dev_base:  i64 = 0
+
+fn ring_set_block_device(dev: BlockDevice, base_block: i64):
+    if _ring_dev_ready:
+        _ring_dev_store[0] = dev
+    else:
+        _ring_dev_store.push(dev)
+        _ring_dev_ready = true
+    _ring_dev_base = base_block
+
+fn ring_has_block_device() -> bool:
+    _ring_dev_ready
+
+fn _ring_write_sector(lba: u64, data: [u8]) -> bool:
+    var dev = _ring_dev_store[0]
+    val r = dev.write_sector(lba, data)
+    _ring_dev_store[0] = dev
+    r.is_ok()
+
+fn _ring_read_sector(lba: u64) -> [u8]:
+    val sz = _ring_dev_store[0].sector_size() as i64
+    var buf = rt_bytes_alloc(sz)
+    val r = _ring_dev_store[0].read_sector(lba, buf)
+    if r.is_ok(): buf else: []
+
+fn _ring_put_i64_le(buf: [u8], off: i64, v: i64) -> [u8]:
+    buf[off]     = (v % 256) as u8
+    buf[off + 1] = ((v / 256) % 256) as u8
+    buf[off + 2] = ((v / 65536) % 256) as u8
+    buf[off + 3] = ((v / 16777216) % 256) as u8
+    val hi = v / 4294967296
+    buf[off + 4] = (hi % 256) as u8
+    buf[off + 5] = ((hi / 256) % 256) as u8
+    buf[off + 6] = ((hi / 65536) % 256) as u8
+    buf[off + 7] = ((hi / 16777216) % 256) as u8
+    buf
+
+fn _ring_get_i64_le(buf: [u8], off: i64) -> i64:
+    val b0 = buf[off] as i64
+    val b1 = buf[off + 1] as i64
+    val b2 = buf[off + 2] as i64
+    val b3 = buf[off + 3] as i64
+    val b4 = buf[off + 4] as i64
+    val b5 = buf[off + 5] as i64
+    val b6 = buf[off + 6] as i64
+    val b7 = buf[off + 7] as i64
+    b0 + b1 * 256 + b2 * 65536 + b3 * 16777216 + (b4 + b5 * 256 + b6 * 65536 + b7 * 16777216) * 4294967296
+
+fn _ring_flush_to_device():
+    if not _ring_dev_ready:
+        return
+    val sz = _ring_dev_store[0].sector_size() as i64
+    val n = _ring_cb_slots.len() as i64
+    var hdr = rt_bytes_alloc(sz)
+    hdr = _ring_put_i64_le(hdr, 0, n)
+    val base_lba = _ring_dev_base as u64
+    val _ = _ring_write_sector(base_lba, hdr)
+    val entry_size: i64 = 25
+    val entries_per_sector = sz / entry_size
+    var ri: i64 = 0
+    var sec_idx: i64 = 1
+    while ri < n:
+        var sec_buf = rt_bytes_alloc(sz)
+        var pos: i64 = 0
+        var count: i64 = 0
+        while count < entries_per_sector and ri < n:
+            val entry = _ring_cb_slots[ri]
+            sec_buf = _ring_put_i64_le(sec_buf, pos, entry.idx)
+            sec_buf = _ring_put_i64_le(sec_buf, pos + 8, entry.slot.gen)
+            sec_buf[pos + 16] = if entry.slot.clean: 1u8 else: 0u8
+            sec_buf = _ring_put_i64_le(sec_buf, pos + 17, entry.slot.btree_root_page)
+            pos = pos + entry_size
+            ri = ri + 1
+            count = count + 1
+        val lba = ((_ring_dev_base + sec_idx) as u64)
+        val _ = _ring_write_sector(lba, sec_buf)
+        sec_idx = sec_idx + 1
+
+fn _ring_load_from_device():
+    if not _ring_dev_ready:
+        return
+    val sz = _ring_dev_store[0].sector_size() as i64
+    val base_lba = _ring_dev_base as u64
+    val hdr = _ring_read_sector(base_lba)
+    if hdr.len() < 8:
+        return
+    val n = _ring_get_i64_le(hdr, 0)
+    _ring_cb_slots = []
+    val entry_size: i64 = 25
+    val entries_per_sector = sz / entry_size
+    var ri: i64 = 0
+    var sec_idx: i64 = 1
+    while ri < n:
+        val lba = ((_ring_dev_base + sec_idx) as u64)
+        val sec_buf = _ring_read_sector(lba)
+        if sec_buf.len() == 0:
+            return
+        var pos: i64 = 0
+        var count: i64 = 0
+        while count < entries_per_sector and ri < n:
+            val slot_idx = _ring_get_i64_le(sec_buf, pos)
+            val slot_gen = _ring_get_i64_le(sec_buf, pos + 8)
+            val slot_clean = sec_buf[pos + 16] != 0u8
+            val slot_root = _ring_get_i64_le(sec_buf, pos + 17)
+            _ring_cb_slots.push(RingSlotEntry(
+                idx: slot_idx,
+                slot: RingSlot(gen: slot_gen, clean: slot_clean, btree_root_page: slot_root)
+            ))
+            pos = pos + entry_size
+            ri = ri + 1
+            count = count + 1
+        sec_idx = sec_idx + 1
 
 fn ring_register_persist_callback(tag: text):
     _ring_persist_cb_registered = true
@@ -105,6 +224,7 @@ struct SharedCheckpointRing:
     static fn reopen() -> SharedCheckpointRing:
         var loaded: [RingSlotEntry] = []
         if _ring_persist_cb_registered:
+            _ring_load_from_device()
             var ri: i32 = 0
             while ri < (_ring_cb_slots.len() as i32):
                 loaded.push(_ring_cb_slots[ri])
@@ -230,6 +350,7 @@ struct SharedCheckpointRing:
     static fn persist_slot(idx: i64, slot: RingSlot):
         if _ring_persist_cb_registered:
             ring_cb_write_slot(idx, slot)
+            _ring_flush_to_device()
         else:
             var new_store: [RingSlotEntry] = []
             var found: bool = false

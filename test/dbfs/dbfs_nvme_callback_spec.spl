@@ -1,0 +1,121 @@
+# DBFS NVMe Callback Persistence Specification
+#
+# Verifies AC-3: intent_log and checkpoint_ring callbacks persist data
+# through BlockDevice-backed sectors and survive a simulated reopen.
+#
+# Run: bin/simple test test/dbfs/dbfs_nvme_callback_spec.spl
+
+use std.spec
+use std.storage.shared.intent_log.{
+    SharedIntentLog, IntentLogRecord,
+    intent_register_persist_callback, intent_clear_persist_callback,
+    intent_set_block_device, intent_cb_record_count
+}
+use std.storage.shared.checkpoint_ring.{
+    SharedCheckpointRing, RingSlot,
+    ring_register_persist_callback, ring_clear_persist_callback,
+    ring_set_block_device, ring_cb_slot_count
+}
+use os.port.cached_raw_image_block_device.{CachedRawImageBlockDevice}
+
+extern fn rt_bytes_alloc(len: i64) -> [u8]
+extern fn rt_dir_create_all(path: text) -> bool
+extern fn rt_file_write_bytes(path: text, data: [u8]) -> bool
+
+fn _make_device(name: text) -> CachedRawImageBlockDevice:
+    val root = "/tmp/dbfs_nvme_cb_spec"
+    val _ = rt_dir_create_all(root)
+    val img = rt_bytes_alloc(65536)
+    val path = root + "/" + name + ".img"
+    val _ = rt_file_write_bytes(path, img)
+    val r = CachedRawImageBlockDevice.from_bytes(path, img, 512u32)
+    r.unwrap()
+
+describe "DBFS intent_log NVMe-backed callbacks":
+
+    it "records persist through flush and survive reopen":
+        var dev = _make_device("intent1")
+        intent_register_persist_callback("arena:META_DURABLE")
+        intent_set_block_device(dev, 0)
+        var log = SharedIntentLog.new_persistent()
+        val r1 = log.append(IntentLogRecord(txn_id: 100, lsn: 1, committed: true))
+        expect(r1.is_ok()).to_equal(true)
+        val r2 = log.append(IntentLogRecord(txn_id: 101, lsn: 2, committed: false))
+        expect(r2.is_ok()).to_equal(true)
+        val _ = log.flush()
+        val _ = log.close()
+        var reopened = SharedIntentLog.reopen()
+        val scanned = reopened.scan_all()
+        expect(scanned.is_ok()).to_equal(true)
+        val recs = scanned.unwrap()
+        expect(recs.len() as i64).to_equal(2)
+        expect(recs[0].txn_id).to_equal(100)
+        expect(recs[0].lsn).to_equal(1)
+        expect(recs[0].committed).to_equal(true)
+        expect(recs[1].txn_id).to_equal(101)
+        expect(recs[1].committed).to_equal(false)
+        intent_clear_persist_callback()
+
+    it "committed records filter correctly after device reopen":
+        var dev = _make_device("intent2")
+        intent_register_persist_callback("arena:META_DURABLE")
+        intent_set_block_device(dev, 0)
+        var log = SharedIntentLog.new_persistent()
+        val _ = log.append(IntentLogRecord(txn_id: 200, lsn: 1, committed: true))
+        val _ = log.append(IntentLogRecord(txn_id: 201, lsn: 2, committed: false))
+        val _ = log.append(IntentLogRecord(txn_id: 202, lsn: 3, committed: true))
+        val _ = log.flush()
+        val _ = log.close()
+        var reopened = SharedIntentLog.reopen()
+        val committed = reopened.scan_committed()
+        expect(committed.is_ok()).to_equal(true)
+        val crecs = committed.unwrap()
+        expect(crecs.len() as i64).to_equal(2)
+        expect(crecs[0].txn_id).to_equal(200)
+        expect(crecs[1].txn_id).to_equal(202)
+        intent_clear_persist_callback()
+
+describe "DBFS checkpoint_ring NVMe-backed callbacks":
+
+    it "ring slots persist through write and survive reopen":
+        var dev = _make_device("ring1")
+        ring_register_persist_callback("arena:META_DURABLE")
+        ring_set_block_device(dev, 32)
+        var ring = SharedCheckpointRing.new_with_size(16)
+        val w1 = ring.write_slot(0, RingSlot(gen: 1, clean: true, btree_root_page: 42))
+        expect(w1.is_ok()).to_equal(true)
+        val w2 = ring.write_slot(1, RingSlot(gen: 2, clean: true, btree_root_page: 84))
+        expect(w2.is_ok()).to_equal(true)
+        val _ = ring.close()
+        var reopened = SharedCheckpointRing.reopen()
+        val s0 = reopened.read_slot(0)
+        expect(s0.is_ok()).to_equal(true)
+        val slot0 = s0.unwrap()
+        expect(slot0.gen).to_equal(1)
+        expect(slot0.clean).to_equal(true)
+        expect(slot0.btree_root_page).to_equal(42)
+        val s1 = reopened.read_slot(1)
+        expect(s1.is_ok()).to_equal(true)
+        val slot1 = s1.unwrap()
+        expect(slot1.gen).to_equal(2)
+        expect(slot1.btree_root_page).to_equal(84)
+        ring_clear_persist_callback()
+
+    it "latest_clean finds correct slot after device reopen":
+        var dev = _make_device("ring2")
+        ring_register_persist_callback("arena:META_DURABLE")
+        ring_set_block_device(dev, 32)
+        var ring = SharedCheckpointRing.new_with_size(16)
+        val _ = ring.write_slot(0, RingSlot(gen: 10, clean: true, btree_root_page: 100))
+        val _ = ring.write_slot(1, RingSlot(gen: 20, clean: false, btree_root_page: 200))
+        val _ = ring.write_slot(2, RingSlot(gen: 30, clean: true, btree_root_page: 300))
+        val _ = ring.close()
+        var reopened = SharedCheckpointRing.reopen()
+        val latest = reopened.latest_clean()
+        match latest:
+            case Some(s):
+                expect(s.gen).to_equal(30)
+                expect(s.btree_root_page).to_equal(300)
+            case None:
+                expect(false).to_equal(true)
+        ring_clear_persist_callback()
