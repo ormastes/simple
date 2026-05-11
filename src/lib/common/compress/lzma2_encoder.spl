@@ -1,0 +1,362 @@
+use compress.types.{CompressionError}
+use compress.utilities.{write_u16_be, append_bytes}
+use compress.lzma2_range_coder.{_lzma_init_probs, _lzma_pos_specific_offset, _lzma_state_after_literal, _lzma_state_after_match, _lzma_state_after_rep, _lzma_state_after_short_rep, LZMA_TOP_MASK, LZMA_PROBS_TOTAL, LZMA_PROBS_LITERAL_BASE, LZMA_PROBS_IS_MATCH_BASE, LZMA_PROBS_IS_REP_BASE, LZMA_PROBS_IS_REP_G0_BASE, LZMA_PROBS_IS_REP_G1_BASE, LZMA_PROBS_IS_REP_G2_BASE, LZMA_PROBS_IS_REP0_LONG_BASE, LZMA_PROBS_POS_SLOT_BASE, LZMA_PROBS_POS_SPECIFIC_BASE, LZMA_PROBS_LEN_BASE, LZMA_PROBS_REP_LEN_BASE, LZMA_MATCH_MIN_LEN, LZMA_LEN_NUM_LOW_BITS, LZMA_LEN_NUM_LOW_SYMBOLS, LZMA_LEN_NUM_MID_BITS, LZMA_LEN_NUM_MID_SYMBOLS, LZMA_LEN_NUM_HIGH_BITS, LZMA_START_POS_MODEL_INDEX, LZMA_END_POS_MODEL_INDEX, LZMA_NUM_LEN_TO_POS_STATES}
+use compress.lzma2_chunk_decoder.{_encode_lzma2_uncompressed_payload}
+
+class LzmaRangeEncoder:
+    low_v: u64
+    range_v: u32
+    cache: u8
+    cache_size: i64
+    out: [u8]
+
+fn _u8_add_wrap(left: u8, right: u8) -> u8:
+    ((left.to_i64() + right.to_i64()) & 0xFF).to_u8()
+
+fn _lzma_range_encoder_init() -> LzmaRangeEncoder:
+    LzmaRangeEncoder(
+        low_v: 0u64,
+        range_v: 0xFFFFFFFFu32,
+        cache: 0u8,
+        cache_size: 1,
+        out: []
+    )
+
+fn _lzma_range_encoder_shift_low(enc: LzmaRangeEncoder) -> LzmaRangeEncoder:
+    var out = enc
+    val low_low = out.low_v & 0xFFFFFFFFu64
+    val carry = (out.low_v >> 32u64).to_u8()
+    if low_low < 0xFF000000u64 or carry != 0u8:
+        out.out.push(_u8_add_wrap(out.cache, carry))
+        while out.cache_size > 1:
+            out.out.push(_u8_add_wrap(0xFFu8, carry))
+            out.cache_size = out.cache_size - 1
+        out.cache = ((out.low_v >> 24u64) & 0xFFu64).to_u8()
+        out.cache_size = 1
+    else:
+        out.cache_size = out.cache_size + 1
+    out.low_v = (out.low_v & 0xFFFFFFu64) << 8u64
+    out
+
+fn _lzma_encode_bit(enc: LzmaRangeEncoder, probs: [u32], idx: i64, bit: i64) -> (LzmaRangeEncoder, [u32]):
+    var out = enc
+    var pp = probs
+    val prob = pp[idx]
+    val bound = (out.range_v >> 11u32) * prob
+    if bit == 0:
+        out.range_v = bound
+        pp[idx] = prob + ((2048u32 - prob) >> 5u32)
+    else:
+        out.low_v = out.low_v + bound.to_u64()
+        out.range_v = out.range_v - bound
+        pp[idx] = prob - (prob >> 5u32)
+    if (out.range_v & LZMA_TOP_MASK) == 0u32:
+        out.range_v = out.range_v << 8u32
+        out = _lzma_range_encoder_shift_low(out)
+    (out, pp)
+
+fn _lzma_encode_bittree(enc: LzmaRangeEncoder, probs: [u32], offset: i64, num_bits: i64, symbol: i64) -> (LzmaRangeEncoder, [u32]):
+    var out = enc
+    var pp = probs
+    var model: i64 = 1
+    var bit_idx = num_bits - 1
+    while bit_idx >= 0:
+        val bit = (symbol >> bit_idx) & 1
+        val step = _lzma_encode_bit(out, pp, offset + model, bit)
+        out = step.0
+        pp = step.1
+        model = (model << 1) + bit
+        bit_idx = bit_idx - 1
+    (out, pp)
+
+fn _lzma_encode_bittree_reverse(enc: LzmaRangeEncoder, probs: [u32], offset: i64, num_bits: i64, symbol: i64) -> (LzmaRangeEncoder, [u32]):
+    var out = enc
+    var pp = probs
+    var model: i64 = 1
+    var bit_idx = 0
+    while bit_idx < num_bits:
+        val bit = (symbol >> bit_idx) & 1
+        val step = _lzma_encode_bit(out, pp, offset + model, bit)
+        out = step.0
+        pp = step.1
+        model = (model << 1) + bit
+        bit_idx = bit_idx + 1
+    (out, pp)
+
+fn _lzma_encode_literal(enc: LzmaRangeEncoder, probs: [u32], prev_byte: u8, byte: u8) -> (LzmaRangeEncoder, [u32]):
+    var out = enc
+    var pp = probs
+    val lit_state = (prev_byte.to_i64() >> 5) * 0x300
+    val lit_base = LZMA_PROBS_LITERAL_BASE + lit_state
+    var symbol: i64 = 1
+    var bit_idx = 7
+    while bit_idx >= 0:
+        val bit = ((byte.to_i64() >> bit_idx) & 1)
+        val step = _lzma_encode_bit(out, pp, lit_base + symbol, bit)
+        out = step.0
+        pp = step.1
+        symbol = (symbol << 1) + bit
+        bit_idx = bit_idx - 1
+    (out, pp)
+
+fn _lzma_encode_len(enc: LzmaRangeEncoder, probs: [u32], base: i64, pos_state: i64, symbol: i64) -> (LzmaRangeEncoder, [u32]):
+    var out = enc
+    var pp = probs
+    val low_base = base + 2
+    val mid_base = base + 2 + (LZMA_LEN_NUM_LOW_SYMBOLS * 4)
+    val high_base = mid_base + (LZMA_LEN_NUM_MID_SYMBOLS * 4)
+    if symbol < LZMA_LEN_NUM_LOW_SYMBOLS:
+        val choice0 = _lzma_encode_bit(out, pp, base, 0)
+        out = choice0.0
+        pp = choice0.1
+        return _lzma_encode_bittree(out, pp, low_base + pos_state * LZMA_LEN_NUM_LOW_SYMBOLS, LZMA_LEN_NUM_LOW_BITS, symbol)
+    val choice1 = _lzma_encode_bit(out, pp, base, 1)
+    out = choice1.0
+    pp = choice1.1
+    val mid_symbol = symbol - LZMA_LEN_NUM_LOW_SYMBOLS
+    if mid_symbol < LZMA_LEN_NUM_MID_SYMBOLS:
+        val choice2 = _lzma_encode_bit(out, pp, base + 1, 0)
+        out = choice2.0
+        pp = choice2.1
+        return _lzma_encode_bittree(out, pp, mid_base + pos_state * LZMA_LEN_NUM_MID_SYMBOLS, LZMA_LEN_NUM_MID_BITS, mid_symbol)
+    val choice2 = _lzma_encode_bit(out, pp, base + 1, 1)
+    out = choice2.0
+    pp = choice2.1
+    _lzma_encode_bittree(out, pp, high_base, LZMA_LEN_NUM_HIGH_BITS, mid_symbol - LZMA_LEN_NUM_MID_SYMBOLS)
+
+fn _all_bytes_same(input: [u8]) -> bool:
+    if input.len() <= 1:
+        return true
+    val first = input[0]
+    var i = 1
+    while i < input.len():
+        if input[i] != first:
+            return false
+        i = i + 1
+    true
+
+fn _small_periodic_distance_pos_slot(distance: i64) -> i64?:
+    if distance < 0 or distance > 127:
+        return nil
+    if distance < LZMA_START_POS_MODEL_INDEX:
+        return distance
+    var slot = LZMA_START_POS_MODEL_INDEX
+    while slot < LZMA_END_POS_MODEL_INDEX:
+        val num_direct_bits = (slot >> 1) - 1
+        val base_dist = (2 + (slot & 1)) << num_direct_bits
+        val limit = base_dist + (1 << num_direct_bits)
+        if distance < limit:
+            return slot
+        slot = slot + 1
+    nil
+
+fn _find_small_period(input: [u8]) -> i64?:
+    # Bounded encode-side scope: beyond single-byte runs, we only own pure
+    # whole-input period-2/3 streams, and only once enough bytes exist to seed
+    # the initial literals plus the minimum LZMA match length. Period 4+ and
+    # mixed shapes stay on the raw fallback path.
+    var period = 2
+    while period <= 3:
+        if input.len() >= period + LZMA_MATCH_MIN_LEN:
+            var idx = period
+            var matches = true
+            while idx < input.len():
+                if input[idx] != input[idx - period]:
+                    matches = false
+                    break
+                idx = idx + 1
+            if matches:
+                return period
+        period = period + 1
+    nil
+
+fn _finish_lzma_range_encoder(enc: LzmaRangeEncoder) -> LzmaRangeEncoder:
+    var out = enc
+    var i = 0
+    while i < 5:
+        out = _lzma_range_encoder_shift_low(out)
+        i = i + 1
+    out
+
+fn _encode_lzma2_single_byte_run_payload(input: [u8]) -> [u8]?:
+    if input.len() < 2 or not _all_bytes_same(input):
+        return nil
+    val fallback = _encode_lzma2_uncompressed_payload(input)
+    var probs = _lzma_init_probs(LZMA_PROBS_TOTAL)
+    var enc = _lzma_range_encoder_init()
+    var state = 0
+    var produced = 0
+
+    val first_match = _lzma_encode_bit(enc, probs, LZMA_PROBS_IS_MATCH_BASE, 0)
+    enc = first_match.0
+    probs = first_match.1
+    val literal_step = _lzma_encode_literal(enc, probs, 0u8, input[0])
+    enc = literal_step.0
+    probs = literal_step.1
+    state = _lzma_state_after_literal(state)
+    produced = 1
+
+    while produced < input.len():
+        val pos_state = produced & 3
+        val match_idx = LZMA_PROBS_IS_MATCH_BASE + state * 16 + pos_state
+        val match = _lzma_encode_bit(enc, probs, match_idx, 1)
+        enc = match.0
+        probs = match.1
+        val rep = _lzma_encode_bit(enc, probs, LZMA_PROBS_IS_REP_BASE + state, 1)
+        enc = rep.0
+        probs = rep.1
+        val rep0 = _lzma_encode_bit(enc, probs, LZMA_PROBS_IS_REP_G0_BASE + state, 0)
+        enc = rep0.0
+        probs = rep0.1
+
+        val remaining = input.len() - produced
+        val rep0_long_idx = LZMA_PROBS_IS_REP0_LONG_BASE + state * 16 + pos_state
+        if remaining == 1:
+            val short_rep = _lzma_encode_bit(enc, probs, rep0_long_idx, 0)
+            enc = short_rep.0
+            probs = short_rep.1
+            produced = produced + 1
+            state = _lzma_state_after_short_rep(state)
+            continue
+
+        val long_rep = _lzma_encode_bit(enc, probs, rep0_long_idx, 1)
+        enc = long_rep.0
+        probs = long_rep.1
+        val run_len = if remaining > 273: 273 else: remaining
+        val len_sym = run_len - LZMA_MATCH_MIN_LEN
+        val rep_len = _lzma_encode_len(enc, probs, LZMA_PROBS_REP_LEN_BASE, pos_state, len_sym)
+        enc = rep_len.0
+        probs = rep_len.1
+        produced = produced + run_len
+        state = _lzma_state_after_rep(state)
+
+    val finished = _finish_lzma_range_encoder(enc)
+    if finished.out.len() < 5:
+        return nil
+
+    var payload: [u8] = [0xE0u8]
+    payload = write_u16_be(payload, (input.len() - 1).to_u16())
+    payload = write_u16_be(payload, (finished.out.len() - 1).to_u16())
+    payload.push(0x5Du8)
+    payload = append_bytes(payload, finished.out)
+    payload.push(0x00u8)
+    if payload.len() >= fallback.len():
+        return nil
+    payload
+
+fn _lzma_encode_small_period_distance(enc: LzmaRangeEncoder, probs: [u32], length: i64, distance: i64) -> (LzmaRangeEncoder, [u32])?:
+    val pos_slot = _small_periodic_distance_pos_slot(distance)
+    if pos_slot == nil:
+        return nil
+    val len_to_pos = if length - LZMA_MATCH_MIN_LEN < LZMA_NUM_LEN_TO_POS_STATES: length - LZMA_MATCH_MIN_LEN else: LZMA_NUM_LEN_TO_POS_STATES - 1
+    val slot_tree = _lzma_encode_bittree(enc, probs, LZMA_PROBS_POS_SLOT_BASE + len_to_pos * 64, 6, pos_slot ?? 0)
+    if (pos_slot ?? 0) < LZMA_START_POS_MODEL_INDEX:
+        return slot_tree
+    val num_direct_bits = ((pos_slot ?? 0) >> 1) - 1
+    val base_dist = (2 + ((pos_slot ?? 0) & 1)) << num_direct_bits
+    val remainder = distance - base_dist
+    _lzma_encode_bittree_reverse(
+        slot_tree.0,
+        slot_tree.1,
+        LZMA_PROBS_POS_SPECIFIC_BASE + _lzma_pos_specific_offset(pos_slot ?? 0),
+        num_direct_bits,
+        remainder
+    )
+
+fn _encode_lzma2_small_period_payload(input: [u8]) -> [u8]?:
+    val period = _find_small_period(input)
+    if period == nil:
+        return nil
+    val fallback = _encode_lzma2_uncompressed_payload(input)
+    var probs = _lzma_init_probs(LZMA_PROBS_TOTAL)
+    var enc = _lzma_range_encoder_init()
+    var state = 0
+    var produced = 0
+    val distance = (period ?? 0) - 1
+
+    while produced < (period ?? 0):
+        val pos_state = produced & 3
+        val match_idx = LZMA_PROBS_IS_MATCH_BASE + state * 16 + pos_state
+        val match = _lzma_encode_bit(enc, probs, match_idx, 0)
+        enc = match.0
+        probs = match.1
+        val prev_byte = if produced == 0: 0u8 else: input[produced - 1]
+        val literal_step = _lzma_encode_literal(enc, probs, prev_byte, input[produced])
+        enc = literal_step.0
+        probs = literal_step.1
+        state = _lzma_state_after_literal(state)
+        produced = produced + 1
+
+    var need_distance_seed = true
+    while produced < input.len():
+        val pos_state = produced & 3
+        val match_idx = LZMA_PROBS_IS_MATCH_BASE + state * 16 + pos_state
+        val match = _lzma_encode_bit(enc, probs, match_idx, 1)
+        enc = match.0
+        probs = match.1
+        if need_distance_seed:
+            val plain = _lzma_encode_bit(enc, probs, LZMA_PROBS_IS_REP_BASE + state, 0)
+            enc = plain.0
+            probs = plain.1
+            val run_len = if input.len() - produced > 273: 273 else: input.len() - produced
+            val len_sym = run_len - LZMA_MATCH_MIN_LEN
+            val len_step = _lzma_encode_len(enc, probs, LZMA_PROBS_LEN_BASE, pos_state, len_sym)
+            enc = len_step.0
+            probs = len_step.1
+            val dist_step = _lzma_encode_small_period_distance(enc, probs, run_len, distance)
+            if val dist_pair = dist_step:
+                enc = dist_pair.0
+                probs = dist_pair.1
+            else:
+                return nil
+            produced = produced + run_len
+            state = _lzma_state_after_match(state)
+            need_distance_seed = false
+            continue
+
+        val rep = _lzma_encode_bit(enc, probs, LZMA_PROBS_IS_REP_BASE + state, 1)
+        enc = rep.0
+        probs = rep.1
+        val rep0 = _lzma_encode_bit(enc, probs, LZMA_PROBS_IS_REP_G0_BASE + state, 0)
+        enc = rep0.0
+        probs = rep0.1
+
+        val remaining = input.len() - produced
+        val rep0_long_idx = LZMA_PROBS_IS_REP0_LONG_BASE + state * 16 + pos_state
+        if remaining == 1:
+            val short_rep = _lzma_encode_bit(enc, probs, rep0_long_idx, 0)
+            enc = short_rep.0
+            probs = short_rep.1
+            produced = produced + 1
+            state = _lzma_state_after_short_rep(state)
+            continue
+
+        val long_rep = _lzma_encode_bit(enc, probs, rep0_long_idx, 1)
+        enc = long_rep.0
+        probs = long_rep.1
+        val run_len = if remaining > 273: 273 else: remaining
+        val len_sym = run_len - LZMA_MATCH_MIN_LEN
+        val rep_len = _lzma_encode_len(enc, probs, LZMA_PROBS_REP_LEN_BASE, pos_state, len_sym)
+        enc = rep_len.0
+        probs = rep_len.1
+        produced = produced + run_len
+        state = _lzma_state_after_rep(state)
+
+    val finished = _finish_lzma_range_encoder(enc)
+    if finished.out.len() < 5:
+        return nil
+
+    var payload: [u8] = [0xE0u8]
+    payload = write_u16_be(payload, (input.len() - 1).to_u16())
+    payload = write_u16_be(payload, (finished.out.len() - 1).to_u16())
+    payload.push(0x5Du8)
+    payload = append_bytes(payload, finished.out)
+    payload.push(0x00u8)
+    if payload.len() >= fallback.len():
+        return nil
+    payload
+
+fn _encode_lzma2_payload(input: [u8]) -> [u8]:
+    _encode_lzma2_single_byte_run_payload(input) ??
+        _encode_lzma2_small_period_payload(input) ??
+        _encode_lzma2_uncompressed_payload(input)

@@ -232,15 +232,20 @@ pub fn run_tests(options: TestOptions) -> TestRunResult {
 
     // Execute tests
     // Default: Parallel execution (use --sequential to disable)
+    // Auto-fallback to sequential for small runs where subprocess overhead dominates
+    let use_parallel = options.parallel && test_files.len() >= 4;
+    if options.parallel && !use_parallel && !quiet {
+        debug_log!(DebugLevel::Basic, "Runner", "Auto-sequential: {} file(s) below parallel threshold", test_files.len());
+    }
     let (mut results, mut total_passed, mut total_failed, mut total_skipped, mut total_ignored) =
-        if options.parallel {
+        if use_parallel {
             if !quiet {
                 println!("Running {} test(s) in parallel; use --sequential to disable.", test_files.len());
             }
             debug_log!(DebugLevel::Basic, "Runner", "Using parallel execution mode");
             run_tests_parallel(&test_files, &options, quiet)
         } else {
-            if !quiet && test_files.len() > 20 {
+            if !quiet && test_files.len() > 20 && !options.parallel {
                 let cpus = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
                 println!("Hint: use --parallel for ~{}x faster runs with {} files.", cpus.min(test_files.len()), test_files.len());
             }

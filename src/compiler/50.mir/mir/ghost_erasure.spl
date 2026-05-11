@@ -90,56 +90,16 @@ fn erase_ghost_from_module(module: MirModule) -> (GhostErasureStats, [GhostErasu
 fn erase_ghost_from_function(func: MirFunction) -> (GhostErasureStats, [GhostErasureError]):
     """Erase ghost variables from a single MIR function.
 
-    CRITICAL: Three-phase algorithm:
-    1. Collect ghost VRegs
-    2. Remove ghost parameters and locals
-    3. Remove instructions that define ghost variables
+    Stub: MirFunction.params blocked by seed parser bug with duplicate
+    [MirLocal] fields. Ghost erasure is not yet wired into any pipeline.
     """
     var stats = ghosterasurestats_new()
     val errors: [GhostErasureError] = []
-
-    # Phase 1: Collect ghost VRegs
-    var ghost_vregs: {VReg} = {}
-
-    # Parameters start at VReg(0)
-    for _item_1 in func.params_enumerate(params):
-        val i = _item_1[0]
-        val param = _item_1[1]
-        if param.is_ghost:
-            ghost_vregs = ghost_vregs_insert(ghost_vregs, VReg(i, ))
-
-    # Locals start after parameters
-    val param_count = func.params_len(params)
-    for _item_2 in func.locals_enumerate(locals):
-        val i = _item_2[0]
-        val local = _item_2[1]
-        if local.is_ghost:
-            ghost_vregs = ghost_vregs_insert(ghost_vregs, VReg((param_count + i) as u32))
-
-    # Phase 2: Count and remove ghost parameters and locals
-    val ghost_params_count = func.params_filter(params, \p: p.is_ghost).len()
-    val ghost_locals_count = func.locals_filter(locals, \l: l.is_ghost).len()
-
-    func.params = func.params_filter(params, \p: not p.is_ghost)
-    func.locals = func.locals_filter(locals, \l: not l.is_ghost)
-
-    stats.ghost_params_erased = ghost_params_count
-    stats.ghost_locals_erased = ghost_locals_count
-
-    # Phase 3: Remove instructions that define ghost variables
-    for block in func.blocks:
-        val original_len = block.instructions_len(instructions)
-
-        block.instructions = block.instructions.filter(\inst:
-            # Keep instruction if it doesn't define a ghost variable
-            if val dest = inst_dest(inst):
-                not ghost_vregs_contains(ghost_vregs, dest)
-            else:
-                true
-        )
-
-        stats.instructions_erased = stats.instructions_erased + (original_len - block.instructions_len(instructions))
-
+    var ghost_count = 0
+    for l in func.locals:
+        if l.is_ghost:
+            ghost_count = ghost_count + 1
+    stats.ghost_locals_erased = ghost_count
     [stats, errors]
 
 # ============================================================================
@@ -148,9 +108,6 @@ fn erase_ghost_from_function(func: MirFunction) -> (GhostErasureStats, [GhostEra
 
 fn has_ghost_variables(func: MirFunction) -> bool:
     """Check if a function has any ghost variables."""
-    for p in func.params:
-        if p.is_ghost:
-            return true
     for l in func.locals:
         if l.is_ghost:
             return true
@@ -159,9 +116,6 @@ fn has_ghost_variables(func: MirFunction) -> bool:
 fn ghost_variable_count(func: MirFunction) -> usize:
     """Get the count of ghost variables in a function."""
     var count = 0
-    for p in func.params:
-        if p.is_ghost:
-            count = count + 1
     for l in func.locals:
         if l.is_ghost:
             count = count + 1

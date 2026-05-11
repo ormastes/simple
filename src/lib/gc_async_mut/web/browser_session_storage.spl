@@ -1,0 +1,143 @@
+# Browser session — storage and JS runtime setup helpers.
+#
+# Free functions for:
+# - JsRuntime storage object creation from/to Pair lists
+# - Storage API installation (getItem/setItem/etc.)
+# - Browser fetch API stub
+# - Storage/browser runtime state synchronisation
+# - Pair list helpers (pair_value, upsert_pair)
+# - JsValue → text conversion
+# - User-agent / navigator-platform strings
+# - URL normalisation (normalize_browser_url, resolve_relative_url)
+
+use common.string_builder.{StringBuilder}
+use std.js.engine.runtime.{JsRuntime, NATIVE_STORAGE_GET_ITEM, NATIVE_STORAGE_SET_ITEM, NATIVE_STORAGE_REMOVE_ITEM, NATIVE_STORAGE_CLEAR, NATIVE_STORAGE_KEY}
+use std.js.types.js_types.{JsValue}
+use std.js.types.pair.{Pair}
+use std.platform.{get_host_os}
+use std.gc_async_mut.web.browser_session.{BrowserRuntimeState}
+use std.gc_async_mut.web.browser_session_url.{url_protocol, url_pathname, resolve_relative_url}
+
+fn blank_page_html() -> text:
+    "<!DOCTYPE html><html><head><title>about:blank</title></head><body></body></html>"
+
+fn storage_object_from_pairs(runtime: JsRuntime, pairs: [Pair<text, text>]) -> (JsRuntime, i64):
+    val storage_id = runtime.create_host_object()
+    for pair in pairs:
+        runtime.set_host_property(
+            storage_id,
+            pair.first,
+            JsValue.String(v: pair.second)
+        )
+    (runtime, storage_id)
+
+fn storage_pairs_from_object(state: BrowserRuntimeState, object_id: i64) -> [Pair<text, text>]:
+    val obj = state.runtime.get_host_object(object_id)
+    var out: [Pair<text, text>] = []
+    for prop in obj.properties:
+        if not is_storage_api_property(prop.key):
+            out = upsert_pair(out, prop.key, js_value_to_storage_text(prop.value))
+    out
+
+fn install_storage_api(runtime: JsRuntime, storage_id: i64) -> JsRuntime:
+    runtime._define_method_on(storage_id, "getItem", NATIVE_STORAGE_GET_ITEM)
+    runtime._define_method_on(storage_id, "setItem", NATIVE_STORAGE_SET_ITEM)
+    runtime._define_method_on(storage_id, "removeItem", NATIVE_STORAGE_REMOVE_ITEM)
+    runtime._define_method_on(storage_id, "clear", NATIVE_STORAGE_CLEAR)
+    runtime._define_method_on(storage_id, "key", NATIVE_STORAGE_KEY)
+    runtime
+
+fn install_browser_fetch_api(runtime: JsRuntime):
+    # Browser fetch host bindings are deferred: there are no NATIVE_FETCH_* method
+    # constants defined for the JsRuntime layer yet, and the URL/Body/Response
+    # marshalling required by the WHATWG fetch spec lives in milestones beyond
+    # the current browser-session B5 scope. Tracked in:
+    # doc/08_tracking/bug/browser_fetch_api_deferred_2026-04-28.md
+    pass_dn("native runtime fetch host bindings deferred — see doc/08_tracking/bug/browser_fetch_api_deferred_2026-04-28.md")
+
+fn sync_storage_runtime_state(runtime: JsRuntime, object_id: i64, pairs: [Pair<text, text>]) -> JsRuntime:
+    runtime.set_host_property(
+        object_id,
+        "length",
+        JsValue.Number(v: pairs.len().to_f64())
+    )
+    runtime
+
+fn sync_browser_runtime_state(runtime: JsRuntime, window_id: i64, chrome_id: i64, url: text, cookie_text: text) -> JsRuntime:
+    runtime.set_host_property(window_id, "__simple_base_url", JsValue.String(v: url))
+    runtime.set_host_property(window_id, "__simple_cookie_header", JsValue.String(v: cookie_text))
+    runtime.set_host_property(chrome_id, "__simple_base_url", JsValue.String(v: url))
+    runtime.set_host_property(chrome_id, "__simple_cookie_header", JsValue.String(v: cookie_text))
+    runtime
+
+fn is_storage_api_property(key: text) -> bool:
+    key == "__proto__" or
+    key == "getItem" or
+    key == "setItem" or
+    key == "removeItem" or
+    key == "clear" or
+    key == "key" or
+    key == "length"
+
+fn browser_fetch_bootstrap_js() -> text:
+    ""
+
+fn pair_value(pairs: [Pair<text, text>], key: text) -> text?:
+    var i = 0
+    while i < pairs.len():
+        val pair = pairs[i]
+        if pair.first == key:
+            return Some(pair.second)
+        i = i + 1
+    nil
+
+fn upsert_pair(pairs: [Pair<text, text>], key: text, value: text) -> [Pair<text, text>]:
+    var out: [Pair<text, text>] = []
+    var found = false
+    for pair in pairs:
+        if pair.first == key:
+            out = out + [Pair(first: key, second: value)]
+            found = true
+        else:
+            out = out + [pair]
+    if not found:
+        out = out + [Pair(first: key, second: value)]
+    out
+
+fn js_value_to_storage_text(value: JsValue) -> text:
+    match value:
+        JsValue.String(v): v
+        JsValue.Number(v):
+            var s = "{v}"
+            if s.ends_with(".0"):
+                return s.slice(0, s.len() - 2)
+            s
+        JsValue.Boolean(v): if v: "true" else: "false"
+        JsValue.Null: "null"
+        JsValue.Undefined: "undefined"
+        JsValue.Object(id): "[object Object]"
+        JsValue.Array(id): "[object Array]"
+        JsValue.Function(id): "[Function]"
+        JsValue.Symbol(id): "Symbol()"
+
+fn chrome_user_agent() -> text:
+    val host_os = get_host_os()
+    if host_os == "macos":
+        return "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+    if host_os == "windows":
+        return "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+
+fn guest_runtime_user_agent() -> text:
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+
+fn navigator_platform() -> text:
+    val host_os = get_host_os()
+    if host_os == "macos":
+        return "MacIntel"
+    if host_os == "windows":
+        return "Win32"
+    "Linux x86_64"
+
+fn guest_runtime_platform() -> text:
+    "Linux x86_64"

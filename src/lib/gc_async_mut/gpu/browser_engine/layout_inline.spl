@@ -1,0 +1,173 @@
+
+# CSS Inline Formatting Context Layout
+#
+# layout_inline, word-splitting, line-box building, and text collection helpers.
+# Constructs LayoutBox/LineBox/InlineFragment — no BeLayoutBox field reads.
+
+use std.gc_async_mut.gpu.browser_engine.dom.{BeDomNode, be_dom_get_style,
+    be_dom_get_is_text, be_dom_get_text, be_dom_get_children, be_dom_get_attr}
+use std.gc_async_mut.gpu.browser_engine.layout_m14_types.{LayoutContext, LayoutBox,
+    InlineFragment, LineBox}
+
+# =========================================================================
+# layout_inline — inline formatting context
+# =========================================================================
+
+fn _parse_inline_text_align(node: BeDomNode) -> text:
+    """Extract text-align from the node's inline style attribute, or fall back to computed style."""
+    val style_attr = be_dom_get_attr(node, "style")
+    if style_attr.len() > 0:
+        # Simple scan: find "text-align:" in style attribute value
+        val needle = "text-align:"
+        val idx = style_attr.index_of(needle)
+        if idx >= 0:
+            val start = idx + needle.len()
+            # Read until ';' or end
+            var end = start
+            while end < style_attr.len() and style_attr.char_at(end) != ";":
+                end = end + 1
+            val val_raw = style_attr.slice(start, end)
+            return val_raw.trim()
+    val s = be_dom_get_style(node)
+    s.text_align
+
+pub fn layout_inline(node: BeDomNode, ctx: LayoutContext) -> LayoutBox:
+    """Lay out inline content of a node, building line boxes.
+    Unwraps structural containers (#document/html/body) to reach content node.
+    Note: calls _layout_block_effective_node which is defined in layout.spl;
+    this function is declared here but layout.spl re-delegates via layout_inline_impl."""
+    val available_w = ctx.available_width
+    val line_h = 16
+    val char_w = 8
+    # Collect all text from the subtree
+    val full_text = _collect_text(node)
+    # Get text-align from effective node (check inline style attr first)
+    val align = _parse_inline_text_align(node)
+    # Split into words
+    val words = _split_words(full_text)
+    var lines: [LineBox] = []
+    var line_frags: [InlineFragment] = []
+    var cur_x = 0
+    var cur_y = 0
+    var line_w = 0
+    var wi = 0
+    val wlen = words.len()
+    if wlen == 0:
+        # Empty — one empty line
+        val empty_frag = InlineFragment(x: 0, y: 0, width: 0, height: line_h, baseline_offset: 0, text_run: "")
+        line_frags.push(empty_frag)
+        val lb = LineBox(x: 0, y: 0, width: 0, height: line_h, baseline: line_h - 3, fragments: line_frags)
+        lines.push(lb)
+    else:
+        while wi < wlen:
+            val word = words[wi]
+            wi = wi + 1
+            val word_w = word.len() * char_w
+            # Check if word fits on current line (add space if not first word)
+            var needed = word_w
+            if line_frags.len() > 0:
+                needed = needed + char_w
+            if (cur_x + needed > available_w) and line_frags.len() > 0:
+                # Flush current line
+                val lb = _build_line_box(line_frags, cur_y, line_w, line_h, align, available_w)
+                lines.push(lb)
+                line_frags = []
+                cur_x = 0
+                cur_y = cur_y + line_h
+                line_w = 0
+                needed = word_w
+            var frag_x = cur_x
+            if line_frags.len() > 0:
+                frag_x = cur_x + char_w
+            val frag = InlineFragment(
+                x: frag_x, y: cur_y,
+                width: word_w, height: line_h,
+                baseline_offset: 0,
+                text_run: word
+            )
+            line_frags.push(frag)
+            cur_x = frag_x + word_w
+            if cur_x > line_w:
+                line_w = cur_x
+        if line_frags.len() > 0:
+            val lb = _build_line_box(line_frags, cur_y, line_w, line_h, align, available_w)
+            lines.push(lb)
+    val total_h = lines.len() * line_h
+    LayoutBox(
+        x: 0, y: 0,
+        width: available_w,
+        height: total_h,
+        is_anonymous: false,
+        line_boxes: lines,
+        children: []
+    )
+
+fn _build_line_box(frags: [InlineFragment], y: i32, line_w: i32, line_h: i32, align: text, available_w: i32) -> LineBox:
+    """Build a LineBox from fragments, applying text-align offset."""
+    var offset_x = 0
+    if align == "center":
+        val extra = available_w - line_w
+        if extra > 0:
+            offset_x = extra / 2
+    elif align == "right":
+        val extra2 = available_w - line_w
+        if extra2 > 0:
+            offset_x = extra2
+    var adjusted: [InlineFragment] = []
+    var fi = 0
+    while fi < frags.len():
+        val f = frags[fi]
+        fi = fi + 1
+        val af = InlineFragment(
+            x: f.x + offset_x, y: f.y,
+            width: f.width, height: f.height,
+            baseline_offset: f.baseline_offset,
+            text_run: f.text_run
+        )
+        adjusted.push(af)
+    val final_w = if line_w < available_w: line_w else: available_w
+    LineBox(
+        x: offset_x, y: y,
+        width: final_w,
+        height: line_h,
+        baseline: line_h - 3,
+        fragments: adjusted
+    )
+
+fn _collect_text(node: BeDomNode) -> text:
+    """Recursively collect all text content from a node subtree."""
+    if be_dom_get_is_text(node):
+        return be_dom_get_text(node)
+    val kids = be_dom_get_children(node)
+    var result = ""
+    var i = 0
+    while i < kids.len():
+        val child = kids[i]
+        i = i + 1
+        val sub = _collect_text(child)
+        if sub.len() > 0:
+            if result.len() > 0:
+                result = result + " " + sub
+            else:
+                result = sub
+    result
+
+fn _split_words(s: text) -> [text]:
+    """Split text on whitespace into words."""
+    var words: [text] = []
+    val n = s.len()
+    var start = -1
+    var i = 0
+    while i < n:
+        val ch = s.char_at(i)
+        if ch == " " or ch == "\t" or ch == "\n" or ch == "\r":
+            if start >= 0:
+                words.push(s.slice(start, i))
+                start = -1
+        else:
+            if start < 0:
+                start = i
+        i = i + 1
+    if start >= 0:
+        words.push(s.slice(start, n))
+    words

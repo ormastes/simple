@@ -1,0 +1,136 @@
+# Browser session — URL utility functions.
+#
+# Free functions for:
+# - normalize_browser_url: normalise any user-supplied URL string
+# - resolve_relative_url: resolve href against a base URL
+# - url_protocol / url_pathname / url_origin / url_host
+# - without_fragment / without_query / base_dir
+# - normalize_runtime_request_url: fix up JS runtime fetch URLs
+# - find_text: low-level substring search used by many helpers
+
+fn find_text(haystack: text, needle: text, start: i64) -> i64:
+    if start < 0 or start > haystack.len() or needle.len() == 0:
+        return -1
+    var idx = start
+    val last = haystack.len() - needle.len()
+    val first = needle.slice(0, 1)
+    while idx <= last:
+        if haystack.slice(idx, idx + 1) == first:
+            if haystack.slice(idx, idx + needle.len()) == needle:
+                return idx
+        idx = idx + 1
+    -1
+
+fn normalize_browser_url(input: text) -> text:
+    if input.len() == 0:
+        return "about:blank"
+    if input.starts_with("about:") or
+       input.starts_with("file://") or
+       input.starts_with("http://") or
+       input.starts_with("https://"):
+        return input
+    if input.starts_with("/"):
+        return "file://{input}"
+    if input.contains(".") and not input.contains(" "):
+        return "https://{input}"
+    "https://search.example.com/?q={input}"
+
+fn resolve_relative_url(base_url: text, href: text) -> text:
+    if href == "":
+        return base_url
+    if href.starts_with("http://") or href.starts_with("https://") or href.starts_with("file://") or href.starts_with("about:"):
+        return href
+    if href.starts_with("//"):
+        return url_protocol(base_url).slice(0, url_protocol(base_url).len() - 1) + href
+    if href.starts_with("#"):
+        return without_fragment(base_url) + href
+    if href.starts_with("?"):
+        return without_query(base_url) + href
+    if href.starts_with("/"):
+        val origin = url_origin(base_url)
+        if origin != "":
+            return origin + href
+        return href
+    base_dir(base_url) + href
+
+fn url_protocol(url: text) -> text:
+    if url.starts_with("https://"):
+        return "https:"
+    if url.starts_with("http://"):
+        return "http:"
+    if url.starts_with("file://"):
+        return "file:"
+    if url.starts_with("about:"):
+        return "about:"
+    ""
+
+fn url_pathname(url: text) -> text:
+    if url.starts_with("file://"):
+        return url.slice(7, url.len())
+    if url.starts_with("about:"):
+        return url
+    val scheme_pos = find_text(url, "://", 0)
+    if scheme_pos < 0:
+        return "/"
+    val path_start = find_text(url, "/", scheme_pos + 3)
+    if path_start < 0:
+        return "/"
+    url.slice(path_start, url.len())
+
+fn url_origin(url: text) -> text:
+    val scheme_pos = find_text(url, "://", 0)
+    if scheme_pos < 0:
+        return ""
+    val host_start = scheme_pos + 3
+    val path_start = find_text(url, "/", host_start)
+    if path_start < 0:
+        return url
+    url.slice(0, path_start)
+
+fn without_fragment(url: text) -> text:
+    val idx = find_text(url, "#", 0)
+    if idx < 0:
+        return url
+    url.slice(0, idx)
+
+fn without_query(url: text) -> text:
+    val clean = without_fragment(url)
+    val idx = find_text(clean, "?", 0)
+    if idx < 0:
+        return clean
+    clean.slice(0, idx)
+
+fn base_dir(url: text) -> text:
+    val clean = without_query(url)
+    val origin = url_origin(clean)
+    if origin == "":
+        return ""
+    if clean == origin:
+        return origin + "/"
+    val rel = clean.slice(origin.len(), clean.len())
+    var idx = rel.len() - 1
+    while idx >= 0:
+        if rel.slice(idx, idx + 1) == "/":
+            return origin + rel.slice(0, idx + 1)
+        idx = idx - 1
+    origin + "/"
+
+fn url_host(url: text) -> text:
+    val scheme_pos = find_text(url, "://", 0)
+    if scheme_pos < 0:
+        return ""
+    val host_start = scheme_pos + 3
+    val path_start = find_text(url, "/", host_start)
+    if path_start < 0:
+        return url.slice(host_start, url.len())
+    url.slice(host_start, path_start)
+
+fn normalize_runtime_request_url(base_url: text, request_url: text) -> text:
+    if request_url.starts_with("http://") or
+       request_url.starts_with("https://") or
+       request_url.starts_with("file://") or
+       request_url.starts_with("about:"):
+        return request_url
+    if request_url.starts_with("nil/"):
+        return resolve_relative_url(base_url, request_url.slice(3, request_url.len()))
+    resolve_relative_url(base_url, request_url)

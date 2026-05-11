@@ -87,6 +87,10 @@ impl LlvmBackend {
     }
 
     /// Compile a binary operation
+    ///
+    /// `lhs_signed` indicates whether the left operand has a signed type.
+    /// When `None`, defaults to signed (`true`) for `ShiftRight` since signed
+    /// integers are far more common in practice.
     #[cfg(feature = "llvm")]
     pub(super) fn compile_binop(
         &self,
@@ -95,6 +99,7 @@ impl LlvmBackend {
         right: inkwell::values::BasicValueEnum<'static>,
         builder: &Builder<'static>,
         module: &Module<'static>,
+        lhs_signed: Option<bool>,
     ) -> Result<inkwell::values::BasicValueEnum<'static>, CompileError> {
         use crate::hir::BinOp;
 
@@ -105,10 +110,17 @@ impl LlvmBackend {
                 let rv_type = self.runtime_int_type();
                 let i64_type = rv_type; // alias for compatibility (may be i32 on 32-bit targets)
                 let rv_width = rv_type.get_bit_width();
+                let use_sext_l = matches!(op, BinOp::ShiftRight) && lhs_signed.unwrap_or(true);
                 let l = if l.get_type().get_bit_width() < rv_width {
-                    builder
-                        .build_int_z_extend(l, rv_type, "zext_l")
-                        .map_err(|e| crate::error::factory::llvm_build_failed("zext", &e))?
+                    if use_sext_l {
+                        builder
+                            .build_int_s_extend(l, rv_type, "sext_l")
+                            .map_err(|e| crate::error::factory::llvm_build_failed("sext", &e))?
+                    } else {
+                        builder
+                            .build_int_z_extend(l, rv_type, "zext_l")
+                            .map_err(|e| crate::error::factory::llvm_build_failed("zext", &e))?
+                    }
                 } else if l.get_type().get_bit_width() > rv_width {
                     builder
                         .build_int_truncate(l, rv_type, "trunc_l")
@@ -240,7 +252,13 @@ impl LlvmBackend {
                     BinOp::ShiftLeft => builder
                         .build_left_shift(l, r, "shl")
                         .map_err(|e| crate::error::factory::llvm_build_failed("build_left_shift", &e))?,
-                    BinOp::ShiftRight | BinOp::Compose => builder
+                    BinOp::ShiftRight => {
+                        let use_signed = lhs_signed.unwrap_or(true);
+                        builder
+                            .build_right_shift(l, r, use_signed, "shr")
+                            .map_err(|e| crate::error::factory::llvm_build_failed("build_right_shift", &e))?
+                    }
+                    BinOp::Compose => builder
                         .build_right_shift(l, r, false, "shr")
                         .map_err(|e| crate::error::factory::llvm_build_failed("build_right_shift", &e))?,
                     BinOp::Pow => {
@@ -451,7 +469,10 @@ impl LlvmBackend {
                     BinOp::BitOr => builder.build_or(l_int, r_int, "mixed_bitor"),
                     BinOp::BitXor => builder.build_xor(l_int, r_int, "mixed_bitxor"),
                     BinOp::ShiftLeft => builder.build_left_shift(l_int, r_int, "mixed_shl"),
-                    BinOp::ShiftRight => builder.build_right_shift(l_int, r_int, false, "mixed_shr"),
+                    BinOp::ShiftRight => {
+                        let use_signed = lhs_signed.unwrap_or(true);
+                        builder.build_right_shift(l_int, r_int, use_signed, "mixed_shr")
+                    }
                     _ => Ok(l_int), // Fallback for operators like In, NotIn, Pow, etc.
                 }
                 .map_err(|e| crate::error::factory::llvm_build_failed("mixed_binop", &e))?;

@@ -1,0 +1,196 @@
+
+# CSS Table Layout
+#
+# layout_table and all table-structure helpers.
+# Constructs LayoutBox only — no BeLayoutBox field reads.
+
+use std.gc_async_mut.gpu.browser_engine.dom.{BeDomNode, be_dom_get_tag,
+    be_dom_get_children, be_dom_get_attr}
+use std.gc_async_mut.gpu.browser_engine.layout_m14_types.{LayoutContext, LayoutBox}
+
+# =========================================================================
+# layout_table — basic table layout
+# =========================================================================
+
+pub fn layout_table(node: BeDomNode, ctx: LayoutContext) -> LayoutBox:
+    """Lay out a table node, returning a LayoutBox with row children."""
+    val available_w = ctx.available_width
+    # Find table node (walk down from doc root if needed)
+    val table_node = _find_table_node(node)
+    val row_nodes = _collect_table_rows(table_node)
+    val num_rows = row_nodes.len()
+    if num_rows == 0:
+        return LayoutBox(
+            x: 0, y: 0,
+            width: available_w, height: 0,
+            is_anonymous: false,
+            line_boxes: [],
+            children: []
+        )
+    # Count columns from first row
+    val first_row_cells = _collect_cells(row_nodes[0])
+    val num_cols = _count_logical_columns(first_row_cells)
+    # Compute column widths using distribute-remainder (AD-6)
+    val col_widths = _compute_col_widths(available_w, num_cols, first_row_cells)
+    val cell_h = 20
+    var row_boxes: [LayoutBox] = []
+    var ri = 0
+    var row_y = 0
+    while ri < num_rows:
+        val row_node = row_nodes[ri]
+        ri = ri + 1
+        val cells = _collect_cells(row_node)
+        var cell_boxes: [LayoutBox] = []
+        var cx = 0
+        var ci = 0
+        var col_idx = 0
+        while ci < cells.len():
+            val cell = cells[ci]
+            ci = ci + 1
+            val colspan = _get_colspan(cell)
+            # Sum widths for this cell's colspan
+            var cw = 0
+            var span_i = 0
+            while span_i < colspan:
+                val target_col = col_idx + span_i
+                if target_col < col_widths.len():
+                    cw = cw + col_widths[target_col]
+                span_i = span_i + 1
+            val cell_box = LayoutBox(
+                x: cx, y: row_y,
+                width: cw, height: cell_h,
+                is_anonymous: false,
+                line_boxes: [],
+                children: []
+            )
+            cell_boxes.push(cell_box)
+            cx = cx + cw
+            col_idx = col_idx + colspan
+        val row_box = LayoutBox(
+            x: 0, y: row_y,
+            width: available_w, height: cell_h,
+            is_anonymous: false,
+            line_boxes: [],
+            children: cell_boxes
+        )
+        row_boxes.push(row_box)
+        row_y = row_y + cell_h
+    LayoutBox(
+        x: 0, y: 0,
+        width: available_w,
+        height: row_y,
+        is_anonymous: false,
+        line_boxes: [],
+        children: row_boxes
+    )
+
+fn _find_table_node(node: BeDomNode) -> BeDomNode:
+    """Walk into node to find a table element, or return node itself."""
+    val tag = be_dom_get_tag(node)
+    if tag == "table":
+        return node
+    val kids = be_dom_get_children(node)
+    var i = 0
+    while i < kids.len():
+        val k = kids[i]
+        i = i + 1
+        val found = _find_table_node(k)
+        if be_dom_get_tag(found) == "table":
+            return found
+    node
+
+fn _collect_table_rows(table: BeDomNode) -> [BeDomNode]:
+    """Collect all <tr> elements from a table (including those inside tbody/thead/tfoot)."""
+    var rows: [BeDomNode] = []
+    val kids = be_dom_get_children(table)
+    var i = 0
+    while i < kids.len():
+        val k = kids[i]
+        i = i + 1
+        val t = be_dom_get_tag(k)
+        if t == "tr":
+            rows.push(k)
+        elif t == "tbody" or t == "thead" or t == "tfoot":
+            val tbody_kids = be_dom_get_children(k)
+            var j = 0
+            while j < tbody_kids.len():
+                val r = tbody_kids[j]
+                j = j + 1
+                if be_dom_get_tag(r) == "tr":
+                    rows.push(r)
+    rows
+
+fn _collect_cells(row: BeDomNode) -> [BeDomNode]:
+    """Collect all <td> and <th> from a <tr>."""
+    var cells: [BeDomNode] = []
+    val kids = be_dom_get_children(row)
+    var i = 0
+    while i < kids.len():
+        val k = kids[i]
+        i = i + 1
+        val t = be_dom_get_tag(k)
+        if t == "td" or t == "th":
+            cells.push(k)
+    cells
+
+fn _get_colspan(cell: BeDomNode) -> i32:
+    """Return colspan attribute value, defaulting to 1."""
+    val cs = be_dom_get_attr(cell, "colspan")
+    if cs == "":
+        return 1
+    var v = 0
+    var i = 0
+    while i < cs.len():
+        val ch = cs.char_at(i)
+        i = i + 1
+        # Convert digit char to integer via lookup (avoids char_code method syntax)
+        var d = -1
+        if ch == "0":
+            d = 0
+        elif ch == "1":
+            d = 1
+        elif ch == "2":
+            d = 2
+        elif ch == "3":
+            d = 3
+        elif ch == "4":
+            d = 4
+        elif ch == "5":
+            d = 5
+        elif ch == "6":
+            d = 6
+        elif ch == "7":
+            d = 7
+        elif ch == "8":
+            d = 8
+        elif ch == "9":
+            d = 9
+        if d >= 0:
+            v = v * 10 + d
+    if v <= 0:
+        1
+    else:
+        v
+
+fn _count_logical_columns(cells: [BeDomNode]) -> i32:
+    """Count logical column count from cells (summing colspan)."""
+    var total = 0
+    var i = 0
+    while i < cells.len():
+        total = total + _get_colspan(cells[i])
+        i = i + 1
+    if total == 0: 1 else: total
+
+fn _compute_col_widths(total_w: i32, num_cols: i32, first_row_cells: [BeDomNode]) -> [i32]:
+    """Distribute total_w evenly across num_cols using distribute-remainder (AD-6)."""
+    var widths: [i32] = []
+    if num_cols <= 0:
+        return widths
+    val base = total_w / num_cols
+    val remainder = total_w - (base * num_cols)
+    var i = 0
+    while i < num_cols:
+        val extra = if i < remainder: 1 else: 0
+        widths.push(base + extra)
+        i = i + 1
+    widths

@@ -508,7 +508,7 @@ impl LlvmBackend {
             MirInst::BinOp { dest, op, left, right } => {
                 let left_val = self.get_vreg(left, vreg_map)?;
                 let right_val = self.get_vreg(right, vreg_map)?;
-                let result = self.compile_binop(*op, left_val, right_val, builder, module)?;
+                let result = self.compile_binop(*op, left_val, right_val, builder, module, None)?;
                 vreg_map.insert(*dest, result);
             }
             MirInst::UnaryOp { dest, op, operand } => {
