@@ -2,11 +2,8 @@
 # MDSOC: feature dimension, services layer
 #
 # Handles install from VFS path, removable media mount, or URL.
-# VFS write bytes is not yet a public API (g_vfs_write_file_text exists for
-# text only). Binary install paths stub with a serial note until
-# g_vfs_write_file_bytes is available.
 
-use os.services.vfs.vfs_init.{g_vfs_read_file_bytes, g_vfs_read_file_text, g_vfs_write_file_text}
+use os.services.vfs.vfs_init.{g_vfs_read_file_bytes, g_vfs_read_file_text, g_vfs_write_file_text, g_vfs_write_file_bytes, g_vfs_delete_file}
 use os.tools.pkg.pkg_repository.{parse_http_url}
 use os.kernel.log.klog_api.{log_raw_println}
 
@@ -24,9 +21,12 @@ class PackageInstaller:
         if bytes.len() == 0:
             serial_println("[pkg_installer] install_from_path: source empty or missing: {source_path}")
             return false
-        # g_vfs_write_file_bytes is not yet exposed publicly; stub pending that API.
-        serial_println("[pkg_installer] write pending: {target_path} ({bytes.len()} bytes) — g_vfs_write_file_bytes not yet public")
-        return false
+        val wrote = g_vfs_write_file_bytes(target_path, bytes)
+        if not wrote:
+            serial_println("[pkg_installer] write failed: {target_path}")
+            return false
+        serial_println("[pkg] installed path={target_path} bytes={bytes.len()}")
+        return true
 
     fn install_from_removable(mount_path: text, app_name: text) -> bool:
         """Install an app binary from a removable media mount point.
@@ -56,15 +56,12 @@ class PackageInstaller:
         Binary removal also pending g_vfs_delete_file API.
         """
         val manifest_path = "{app_path}{MANIFEST_SUFFIX}"
-        val manifest_content = g_vfs_read_file_text(manifest_path)
-        if manifest_content != "":
-            val cleared = g_vfs_write_file_text(manifest_path, "")
-            if cleared:
-                serial_println("[pkg_installer] uninstall: cleared manifest: {manifest_path}")
-            else:
-                serial_println("[pkg_installer] uninstall: failed to clear manifest: {manifest_path}")
-        serial_println("[pkg_installer] uninstall: binary removal pending g_vfs_delete_file API: {app_path}")
-        return true
+        val deleted = g_vfs_delete_file(app_path)
+        if deleted:
+            serial_println("[pkg] uninstalled path={app_path}")
+        else:
+            serial_println("[pkg_installer] uninstall: delete failed: {app_path}")
+        return deleted
 
 pub fn make_package_installer() -> PackageInstaller:
     PackageInstaller(install_root: APPS_INSTALL_ROOT)

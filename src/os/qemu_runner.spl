@@ -1448,8 +1448,12 @@ fn _desktop_scenario_timeout_ms(name: text) -> u64?:
 fn _ensure_desktop_scenario_media(name: text) -> bool?:
     if name == "x64-nvme-fat32":
         return ensure_fs_test_disk_image()
-    if name == "x64-ssh" or name == "x64-desktop-disk" or name == "x64-toolchain-vfs-probe" or name == "x64-desktop-gui":
+    if name == "x64-ssh" or name == "x64-desktop-disk" or name == "x64-toolchain-vfs-probe":
         return ensure_desktop_disk_image()
+    if name == "x64-desktop-gui":
+        if not ensure_desktop_disk_image():
+            return false
+        return ensure_removable_disk_image()
     if name != "x64-desktop-uefi":
         return nil
     if ovmf_code_path() == "":
@@ -2141,6 +2145,26 @@ fn ensure_desktop_disk_image() -> bool:
             return true
         print "[ensure_desktop_disk_image] image exists but required app manifest markers are missing"
         return false
+    true
+
+fn ensure_removable_disk_image() -> bool:
+    """Ensure a FAT32 removable disk image exists at build/os/removable.img.
+
+    Creates a minimal 4 MiB FAT32 image with an APPS/ directory for
+    testing install-from-removable flows.
+    """
+    val img_path = "build/os/removable.img"
+    if rt_file_exists(img_path):
+        return true
+    print "[ensure_removable_disk_image] creating {img_path}"
+    val (stdout, stderr, exit_code) = rt_process_run_timeout(
+        "/bin/sh", ["-c", "mkdir -p build/os && dd if=/dev/zero of={img_path} bs=1M count=4 2>/dev/null && mkfs.fat -F 32 -n REMOVABLE {img_path} >/dev/null 2>&1 && mmd -i {img_path} ::APPS 2>/dev/null; true"], 30000)
+    if not rt_file_exists(img_path):
+        print "[ensure_removable_disk_image] failed to create {img_path}"
+        if stderr != "":
+            print "[ensure_removable_disk_image] stderr: {stderr}"
+        return false
+    print "[ensure_removable_disk_image] created {img_path}"
     true
 
 pub fn desktop_uefi_disk_image_tool_app_validation_command(img_path: text) -> text:
