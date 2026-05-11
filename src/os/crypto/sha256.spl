@@ -8,13 +8,6 @@
 
 extern fn rt_bytes_u8_at(arr: [u8], idx: i64) -> i64
 
-# C-extern SHA-256 fast-path. Used by sha256_with_len to bypass pure-Simple
-# SHA in compile mode, which is broken by a Cranelift-level miscompilation
-# (selective `>> 3` on certain output bytes — see
-# doc/03_plan/agent_tasks/tls_live_bug_fix_restart.md §"2026-04-28 Update 2").
-# A1 already uses the same helper via rt_tls13_hkdf_extract_into; this just
-# extends the same approach to all SHA / HMAC / HKDF-Expand paths.
-extern fn rt_tls13_sha256(data: [u8]) -> [u8]
 
 fn _u8_at(buf: [u8], idx: u64) -> u8:
     rt_bytes_u8_at(buf, idx.to_i64()).to_u8()
@@ -544,17 +537,6 @@ fn _list_hmac_sha256_bytes(key_bytes: list, message_bytes: list) -> list:
     _list_sha256_bytes(outer_input)
 
 fn sha256_with_len(data: [u8], data_len: u64) -> [u8]:
-    # Delegate to C-extern helper SHA. Pure-Simple SHA is broken in compile mode
-    # (Cranelift selective `>> 3` miscompilation). The C extern reads runtime
-    # length directly from the [u8] header. data_len is unused on this path; all
-    # in-module callers pass an array whose runtime length already matches.
-    val _unused = data_len
-    rt_tls13_sha256(data)
-
-# === Pure-Simple SHA-256 (kept for reference / hosted-mode fallback)
-# Compiled mode delegates to rt_tls13_sha256 above due to a Cranelift selective-
-# `>> 3` miscompilation. This block is preserved as the algorithm-of-record.
-fn _sha256_pure_simple_with_len(data: [u8], data_len: u64) -> [u8]:
     val padded = sha256_pad_with_len(data, data_len)
 
     var h: [u32] = []

@@ -1,0 +1,236 @@
+# FAT32 Filesystem Trait Implementation
+#
+# MDSOC: feature dimension, vfs layer
+# Implements the Filesystem trait methods for Fat32Driver.
+# Extracted from fat32.spl to keep file sizes under 800 lines.
+
+use os.services.vfs.vfs.{Filesystem, SeekWhence}
+use os.kernel.types.fs_types.{FileFlags, FsNode, FsNodeKind, DirEntry}
+use os.services.fat32.fat32.{Fat32Driver, Fat32DirEntry, Fat32OpenFile, FAT32_ATTR_DIRECTORY, FAT32_ATTR_LFN, FAT32_EOC, _fat32_unwrap_err}
+use os.services.fat32.fat32_write.{Fat32WriteContext, format_8_3_name, DIR_ENTRY_SIZE}
+use common.string_core.{str_char_at}
+
+struct PathParts:
+    """Result of splitting a path into parent directory and filename."""
+    parent: text
+    name: text
+
+fn _split_path_parent(path: text) -> PathParts:
+    """Split "/foo/bar/baz.txt" into parent="/foo/bar" and name="baz.txt".
+
+    For paths with no directory component (e.g., "file.txt"), parent is "/".
+    """
+    # Find the last '/' in the path
+    var last_slash: i32 = -1
+    var ci = 0
+    while ci < path.len():
+        val ch = str_char_at(path, ci)
+        if ch == "/":
+            last_slash = ci.to_i32()
+        ci = ci + 1
+
+    if last_slash < 0:
+        # No slash -- parent is root
+        return PathParts(parent: "/", name: path)
+    if last_slash == 0:
+        # Root-level file like "/file.txt"
+        var name_part = ""
+        var j = 0
+        while j < path.len():
+            val ch = str_char_at(path, j)
+            if j > 0:
+                name_part = name_part + ch
+            j = j + 1
+        return PathParts(parent: "/", name: name_part)
+
+    var parent = ""
+    var name = ""
+    var k = 0
+    while k < path.len():
+        val ch = str_char_at(path, k)
+        if k < last_slash:
+            parent = parent + ch
+        else:
+            if k > last_slash:
+                name = name + ch
+        k = k + 1
+    PathParts(parent: parent, name: name)
+
+fn _mark_entry_deleted(ctx: Fat32WriteContext, dir_cluster: u32, name: text) -> Result<bool, text>:
+    """Mark a directory entry as deleted (0xE5) without freeing its clusters.
+
+    Used by rename to remove the old entry while preserving the cluster chain.
+    """
+    use os.services.fat32.fat32.{FAT32_ATTR_LFN, FAT32_EOC}
+    use os.services.fat32.fat32_write.{DIR_ENTRY_SIZE}
+
+    var write_ctx: Fat32WriteContext = ctx
+    val upper_name = name.upper()
+    var current = dir_cluster
+    var max_iter: u32 = 100000
+    while current >= 2 and max_iter > 0:
+        val data_result = write_ctx.read_cluster(current)
+        if data_result.is_err():
+            return Result.Err(_fat32_unwrap_err(data_result))
+        var data = data_result.unwrap()
+
+        val entries_per_cluster = (write_ctx.sectors_per_cluster * write_ctx.bytes_per_sector) / 32
+        var idx: u32 = 0
+        while idx < entries_per_cluster:
+            val off = (idx * 32).to_i32()
+            val first_byte = data[off]
+            if first_byte == 0x00:
+                return Result.Err("entry not found: {name}")
+            if first_byte == 0xE5 or data[off + 11] == FAT32_ATTR_LFN:
+                idx = idx + 1
+                continue
+            # Parse name and compare
+            var entry_name = ""
+            var ni = 0
+            while ni < 8:
+                val ch = data[off + ni]
+                if ch != 0x20 and ch != 0x00:
+                    entry_name = entry_name + ch.chr()
+                ni = ni + 1
+            var ext_name = ""
+            ni = 0
+            while ni < 3:
+                val ch = data[off + 8 + ni]
+                if ch != 0x20 and ch != 0x00:
+                    ext_name = ext_name + ch.chr()
+                ni = ni + 1
+            if ext_name.len() > 0:
+                entry_name = entry_name + "." + ext_name
+            if entry_name.upper() == upper_name:
+                # Mark as deleted
+                data[off] = 0xE5
+                return write_ctx.write_cluster_data(current, data)
+            idx = idx + 1
+
+        val fat_offset = current * 4
+        val fat_sector = write_ctx.reserved_sectors.to_u64() + (fat_offset / write_ctx.bytes_per_sector).to_u64()
+        val entry_offset = (fat_offset % write_ctx.bytes_per_sector).to_i32()
+        var fat_buf: [u8] = []
+        var fat_i: u32 = 0
+        while fat_i < write_ctx.bytes_per_sector:
+            fat_buf.push(0)
+            fat_i = fat_i + 1
+        val fat_result = write_ctx.device.read_sector(fat_sector, fat_buf)
+        if fat_result.is_err():
+            return Result.Err("failed to read FAT sector")
+        val next = (((fat_buf[entry_offset + 3].to_u32() << 24) |
+                     (fat_buf[entry_offset + 2].to_u32() << 16) |
+                     (fat_buf[entry_offset + 1].to_u32() << 8) |
+                     fat_buf[entry_offset].to_u32()) & 0x0FFFFFFF)
+        if next >= FAT32_EOC or next < 2:
+            break
+        current = next
+        max_iter = max_iter - 1
+
+    Result.Err("entry not found: {name}")
+
+# --- Filesystem trait implementation for Fat32Driver ---
+# These free functions implement each Filesystem trait method by taking
+# the driver object as a parameter. Called from the impl Filesystem block
+# in fat32.spl.
+
+fn fat32_fs_mount(self: Fat32Driver, device: text, options: text) -> Result<bool, text>:
+    val bpb_result = self.read_bpb()
+    if bpb_result.is_err():
+        return Result.Err(_fat32_unwrap_err(bpb_result))
+
+    val bpb = bpb_result.unwrap()
+    self.bytes_per_sector = bpb.bytes_per_sector.to_u32()
+    self.sectors_per_cluster = bpb.sectors_per_cluster.to_u32()
+    self.reserved_sectors = bpb.reserved_sectors.to_u32()
+    self.num_fats = bpb.num_fats.to_u32()
+    self.fat_size = bpb.fat_size_32
+    self.root_cluster = bpb.root_cluster
+
+    if self.bytes_per_sector == 0:
+        return Result.Err("invalid BPB: bytes_per_sector=0")
+    if self.sectors_per_cluster == 0:
+        return Result.Err("invalid BPB: sectors_per_cluster=0")
+    if self.num_fats == 0:
+        return Result.Err("invalid BPB: num_fats=0")
+    if self.fat_size == 0:
+        return Result.Err("invalid BPB: fat_size=0")
+
+    self.data_start_sector = self.reserved_sectors + (self.num_fats * self.fat_size)
+
+    val total_sectors = bpb.total_sectors_32
+    if total_sectors <= self.data_start_sector:
+        return Result.Err("invalid BPB: total_sectors <= data_start_sector")
+    val data_sectors = total_sectors - self.data_start_sector
+    self.total_clusters = data_sectors / self.sectors_per_cluster
+
+    self.mounted = true
+    Result.Ok(true)
+
+fn fat32_fs_readdir(self: Fat32Driver, path: text) -> Result<[DirEntry], text>:
+    if not self.mounted:
+        return Result.Err("filesystem not mounted")
+    val result = self.resolve_path(path)
+    if result.is_err():
+        return Result.Err(_fat32_unwrap_err(result))
+    val entry_opt = result.unwrap()
+    if not entry_opt.?:
+        return Result.Err("directory not found: {path}")
+    val entry = entry_opt
+    if (entry.attr & FAT32_ATTR_DIRECTORY) == 0:
+        return Result.Err("not a directory: {path}")
+
+    val dir_cluster = self.entry_first_cluster(entry)
+    val chain_result = self.follow_cluster_chain(dir_cluster)
+    if chain_result.is_err():
+        return Result.Err(_fat32_unwrap_err(chain_result))
+    val chain = chain_result.unwrap()
+
+    var entries: [DirEntry] = []
+    for cluster in chain:
+        val data_result = self.read_cluster(cluster)
+        if data_result.is_err():
+            return Result.Err(_fat32_unwrap_err(data_result))
+        val data = data_result.unwrap()
+
+        val entries_per_cluster = (self.sectors_per_cluster * self.bytes_per_sector) / 32
+        var idx: u32 = 0
+        var pending_lfn = ""
+        while idx < entries_per_cluster:
+            val off = (idx * 32).to_i32()
+            val first_byte = data[off]
+            if first_byte == 0x00:
+                return Result.Ok(entries)  # End of directory
+            if first_byte == 0xE5:
+                pending_lfn = ""
+                idx = idx + 1
+                continue
+            if data[off + 11] == FAT32_ATTR_LFN:
+                pending_lfn = self.parse_lfn_name_part(data, off) + pending_lfn
+                idx = idx + 1
+                continue
+            # Skip . and .. entries
+            val short_name = self.parse_8_3_name(data, off)
+            if short_name == "." or short_name == "..":
+                pending_lfn = ""
+                idx = idx + 1
+                continue
+            val name = if pending_lfn.len() > 0: pending_lfn else: short_name
+
+            val dir_entry = Fat32DirEntry(
+                name: [data[off], data[off+1], data[off+2], data[off+3],
+                       data[off+4], data[off+5], data[off+6], data[off+7],
+                       data[off+8], data[off+9], data[off+10]],
+                attr: data[off + 11],
+                nt_reserved: 0, create_time_tenth: 0,
+                create_time: 0, create_date: 0, access_date: 0,
+                cluster_high: (data[off+21].to_u16() << 8) | data[off+20].to_u16(),
+                modify_time: 0, modify_date: 0,
+                cluster_low: (data[off+27].to_u16() << 8) | data[off+26].to_u16(),
+                file_size: ((data[off+31].to_u32() << 24) | (data[off+30].to_u32() << 16) | (data[off+29].to_u32() << 8) | data[off+28].to_u32())
+            )
+            val node = self.entry_to_fs_node(dir_entry, name)
+            entries.push(DirEntry(name: name, node: node))
+            pending_lfn = ""
+            idx = idx + 1
+    Result.Ok(entries)
