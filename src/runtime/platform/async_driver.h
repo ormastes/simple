@@ -39,6 +39,8 @@ typedef struct spl_completion {
     int64_t id;        /* operation ID from submit_* */
     int64_t result;    /* bytes transferred (>=0) or negative errno on error */
     int64_t flags;     /* platform-specific flags (e.g. IORING_CQE_F_MORE) */
+    char*   data;      /* recv/read buffer (owned; NULL for other ops) */
+    int64_t data_len;  /* actual bytes in data (== result when result > 0) */
 } spl_completion;
 
 /* ===== Backend Type ===== */

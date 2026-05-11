@@ -21,6 +21,9 @@
 #include <errno.h>
 #include <signal.h>
 #include <sys/stat.h>
+#ifndef _WIN32
+#include <dirent.h>
+#endif
 
 /* ================================================================
  * Value Constructors
@@ -1136,6 +1139,104 @@ int64_t rt_file_stat(const char* path) {
     }
     return 0;
 }
+
+typedef struct { struct stat st; } rt_stat_handle;
+
+int64_t rt_stat_open(const char* path) {
+    if (!path) return 0;
+    rt_stat_handle* h = (rt_stat_handle*)malloc(sizeof(rt_stat_handle));
+    if (!h) return 0;
+    if (stat(path, &h->st) != 0) { free(h); return 0; }
+    return (int64_t)(uintptr_t)h;
+}
+int64_t rt_file_stat_size(int64_t handle) {
+    if (!handle) return 0;
+    return (int64_t)((rt_stat_handle*)(uintptr_t)handle)->st.st_size;
+}
+int64_t rt_file_stat_mtime(int64_t handle) {
+    if (!handle) return 0;
+    return (int64_t)((rt_stat_handle*)(uintptr_t)handle)->st.st_mtime;
+}
+int rt_file_stat_is_dir(int64_t handle) {
+    if (!handle) return 0;
+    return S_ISDIR(((rt_stat_handle*)(uintptr_t)handle)->st.st_mode);
+}
+int rt_file_stat_is_file(int64_t handle) {
+    if (!handle) return 0;
+    return S_ISREG(((rt_stat_handle*)(uintptr_t)handle)->st.st_mode);
+}
+void rt_file_stat_free(int64_t handle) {
+    if (handle) free((void*)(uintptr_t)handle);
+}
+
+#ifndef _WIN32
+typedef struct {
+    char** entries;
+    int64_t count;
+    int64_t cap;
+} rt_dir_listing;
+
+int64_t rt_readdir(const char* path) {
+    if (!path) return 0;
+    DIR* d = opendir(path);
+    if (!d) return 0;
+    rt_dir_listing* dl = (rt_dir_listing*)calloc(1, sizeof(rt_dir_listing));
+    if (!dl) { closedir(d); return 0; }
+    dl->cap = 64;
+    dl->entries = (char**)malloc(sizeof(char*) * (size_t)dl->cap);
+    dl->count = 0;
+    struct dirent* ent;
+    while ((ent = readdir(d)) != NULL) {
+        if (strcmp(ent->d_name, ".") == 0 || strcmp(ent->d_name, "..") == 0) continue;
+        if (dl->count >= dl->cap) {
+            dl->cap *= 2;
+            dl->entries = (char**)realloc(dl->entries, sizeof(char*) * (size_t)dl->cap);
+        }
+        dl->entries[dl->count++] = strdup(ent->d_name);
+    }
+    closedir(d);
+    return (int64_t)(uintptr_t)dl;
+}
+int64_t rt_readdir_count(int64_t handle) {
+    if (!handle) return 0;
+    return ((rt_dir_listing*)(uintptr_t)handle)->count;
+}
+const char* rt_readdir_entry(int64_t handle, int64_t index) {
+    if (!handle) return "";
+    rt_dir_listing* dl = (rt_dir_listing*)(uintptr_t)handle;
+    if (index < 0 || index >= dl->count) return "";
+    return dl->entries[index];
+}
+void rt_readdir_free(int64_t handle) {
+    if (!handle) return;
+    rt_dir_listing* dl = (rt_dir_listing*)(uintptr_t)handle;
+    for (int64_t i = 0; i < dl->count; i++) free(dl->entries[i]);
+    free(dl->entries);
+    free(dl);
+}
+
+int64_t rt_mkdir(const char* path, int64_t mode) {
+    if (!path) return -1;
+    if (mode == 0) mode = 0755;
+    return mkdir(path, (mode_t)mode) == 0 ? 0 : -(int64_t)errno;
+}
+
+int64_t rt_remove(const char* path) {
+    if (!path) return -1;
+    struct stat st;
+    if (stat(path, &st) != 0) return -(int64_t)errno;
+    if (S_ISDIR(st.st_mode))
+        return rmdir(path) == 0 ? 0 : -(int64_t)errno;
+    return unlink(path) == 0 ? 0 : -(int64_t)errno;
+}
+#else
+int64_t rt_readdir(const char* p) { (void)p; return 0; }
+int64_t rt_readdir_count(int64_t h) { (void)h; return 0; }
+const char* rt_readdir_entry(int64_t h, int64_t i) { (void)h; (void)i; return ""; }
+void rt_readdir_free(int64_t h) { (void)h; }
+int64_t rt_mkdir(const char* p, int64_t m) { (void)p; (void)m; return -1; }
+int64_t rt_remove(const char* p) { (void)p; return -1; }
+#endif
 
 const char* rt_shell_output(const char* cmd) { return spl_shell_output(cmd); }
 

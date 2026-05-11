@@ -163,6 +163,7 @@ int64_t rt_driver_create(int64_t queue_depth) {
 }
 
 void rt_driver_destroy(int64_t handle) {
+    free_poll_data();
     spl_driver* d = get_driver(handle);
     if (d) {
         spl_driver_destroy(d);
@@ -250,7 +251,17 @@ int64_t rt_driver_flush(int64_t handle) {
     return spl_driver_flush(d);
 }
 
+static void free_poll_data(void) {
+    for (int64_t i = 0; i < g_poll_count; i++) {
+        if (g_poll_buf[i].data) {
+            free(g_poll_buf[i].data);
+            g_poll_buf[i].data = NULL;
+        }
+    }
+}
+
 int64_t rt_driver_poll(int64_t handle, int64_t max, int64_t timeout_ms) {
+    free_poll_data();
     spl_driver* d = get_driver(handle);
     if (!d) return -1;
     if (max > MAX_POLL_BUF) max = MAX_POLL_BUF;
@@ -298,4 +309,17 @@ bool rt_driver_supports_zero_copy(int64_t handle) {
     spl_driver* d = get_driver(handle);
     if (!d) return false;
     return spl_driver_supports_zero_copy(d);
+}
+
+const char* rt_driver_poll_data(int64_t handle, int64_t index) {
+    (void)handle;
+    if (index < 0 || index >= g_poll_count) return "";
+    if (!g_poll_buf[index].data) return "";
+    return g_poll_buf[index].data;
+}
+
+int64_t rt_driver_poll_data_len(int64_t handle, int64_t index) {
+    (void)handle;
+    if (index < 0 || index >= g_poll_count) return 0;
+    return g_poll_buf[index].data_len;
 }

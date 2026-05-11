@@ -1,16 +1,47 @@
-# Minimal os_main — storage test only
+# os_main — kernel entry after memory init
+#
+# MDSOC: feature dimension, kernel boot layer
+# Called from arch-specific boot_main after PMM + heap are initialized.
+# Initializes all services (PCI, network, display) then enters a
+# cooperative poll loop driving the network stack.
+
 use os.kernel.boot.init_services.{init_all_services, services_storage_ready}
+use os.kernel.boot.riscv_services.{init_riscv_services_with_network, riscv_network_ready}
+use os.services.netstack.netstack_init.{net_service_init_port, net_service_poll, net_is_ready}
 use os.kernel.log.klog_api.{log_raw_println}
 
 fn os_main():
     log_raw_println("")
-    log_raw_println("=== SimpleOS Storage Test ===")
+    log_raw_println("=== SimpleOS Boot ===")
     log_raw_println("")
-    log_raw_println("[test] Calling init_all_services()...")
-    init_all_services()
-    log_raw_println("[test] init_all_services() returned")
-    if services_storage_ready():
-        log_raw_println("[test] Storage: OK")
+
+    # Initialize RISC-V services (PCI scan, network probe, display)
+    log_raw_println("[os_main] Calling init_riscv_services_with_network()...")
+    init_riscv_services_with_network()
+    log_raw_println("[os_main] Service initialization returned")
+
+    # Initialize netstack cooperative port if network is available
+    if riscv_network_ready():
+        log_raw_println("[os_main] Network ready -- initializing cooperative netstack port")
+        net_service_init_port()
     else:
-        log_raw_println("[test] Storage: FAILED")
-    log_raw_println("[test] TEST COMPLETE")
+        log_raw_println("[os_main] Network unavailable -- skipping netstack")
+
+    log_raw_println("[os_main] Entering cooperative network poll loop")
+    log_raw_println("[os_main] (wfi halt if network unavailable)")
+
+    # Cooperative network poll loop
+    # Drives netstack frame processing + IPC without blocking.
+    # If network is unavailable, this loop is a no-op (net_service_poll
+    # returns immediately when not initialized).
+    network_poll_loop()
+
+fn network_poll_loop():
+    """Cooperative main loop: poll network stack each tick.
+
+    Runs forever. net_service_poll() is non-blocking — processes
+    one batch of incoming frames and IPC requests per call.
+    On RISC-V this is the idle loop; wfi is in the asm halt stub.
+    """
+    while true:
+        net_service_poll()

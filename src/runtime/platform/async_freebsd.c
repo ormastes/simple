@@ -504,9 +504,16 @@ static int64_t kq_poll(spl_driver* d, spl_completion* out, int64_t max,
     for (int64_t i = 0; i < kd->ops_cap && count < max; i++) {
         pending_op* op = &kd->ops[i];
         if (op->op_id != 0 && op->completed) {
-            out[count++] = (spl_completion){
-                .id = op->op_id, .result = op->result, .flags = 0
+            spl_completion sc = {
+                .id = op->op_id, .result = op->result, .flags = 0,
+                .data = NULL, .data_len = 0
             };
+            if ((op->op_type == OP_RECV || op->op_type == OP_READ) && op->result > 0) {
+                sc.data     = op->buf;
+                sc.data_len = op->result;
+                op->buf     = NULL;
+            }
+            out[count++] = sc;
             remove_op(kd, op->op_id);
         }
     }
@@ -548,9 +555,16 @@ static int64_t kq_poll(spl_driver* d, spl_completion* out, int64_t max,
                 op->result = -aio_err;
             }
 
-            out[count++] = (spl_completion){
-                .id = op->op_id, .result = op->result, .flags = 0
+            spl_completion sc_aio = {
+                .id = op->op_id, .result = op->result, .flags = 0,
+                .data = NULL, .data_len = 0
             };
+            if (op->op_type == OP_READ && op->result > 0) {
+                sc_aio.data     = op->buf;
+                sc_aio.data_len = op->result;
+                op->buf         = NULL;
+            }
+            out[count++] = sc_aio;
             remove_op(kd, op_id);
             continue;
         }
@@ -618,9 +632,16 @@ static int64_t kq_poll(spl_driver* d, spl_completion* out, int64_t max,
             break;
         }
 
-        out[count++] = (spl_completion){
-            .id = op->op_id, .result = op->result, .flags = 0
+        spl_completion sc = {
+            .id = op->op_id, .result = op->result, .flags = 0,
+            .data = NULL, .data_len = 0
         };
+        if ((op->op_type == OP_RECV || op->op_type == OP_READ) && op->result > 0) {
+            sc.data     = op->buf;
+            sc.data_len = op->result;
+            op->buf     = NULL;
+        }
+        out[count++] = sc;
         remove_op(kd, op_id);
     }
 

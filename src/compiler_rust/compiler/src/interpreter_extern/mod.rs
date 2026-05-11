@@ -1086,9 +1086,21 @@ pub(crate) fn call_extern_function(
         "rt_dir_remove_all" => file_io::rt_dir_remove_all(&evaluated),
         // Aliases for snpm compatibility
         "rt_get_cwd" => file_io::rt_get_cwd(&evaluated),
-        "rt_mkdir" => file_io::rt_dir_create(&evaluated),
+        "rt_mkdir" => file_io::rt_mkdir(&evaluated),
         "rt_mkdir_p" => file_io::rt_dir_create_all(&evaluated),
         "rt_file_list_dir" => file_io::rt_dir_list(&evaluated),
+        // POSIX file stat/dir externs (async file I/O support)
+        "rt_remove" => file_io::rt_remove(&evaluated),
+        "rt_stat_open" => file_io::rt_stat_open(&evaluated),
+        "rt_file_stat_size" => file_io::rt_file_stat_size(&evaluated),
+        "rt_file_stat_mtime" => file_io::rt_file_stat_mtime(&evaluated),
+        "rt_file_stat_is_dir" => file_io::rt_file_stat_is_dir(&evaluated),
+        "rt_file_stat_is_file" => file_io::rt_file_stat_is_file(&evaluated),
+        "rt_file_stat_free" => file_io::rt_file_stat_free(&evaluated),
+        "rt_readdir" => file_io::rt_readdir(&evaluated),
+        "rt_readdir_count" => file_io::rt_readdir_count(&evaluated),
+        "rt_readdir_entry" => file_io::rt_readdir_entry(&evaluated),
+        "rt_readdir_free" => file_io::rt_readdir_free(&evaluated),
         // File descriptor operations
         "rt_file_open" => file_io::rt_file_open(&evaluated),
         "rt_file_get_size" => file_io::rt_file_get_size(&evaluated),

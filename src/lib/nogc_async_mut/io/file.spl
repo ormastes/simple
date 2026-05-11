@@ -56,7 +56,7 @@ struct FileStat:
 # FFI for stat (not in driver — synchronous kernel call)
 # ============================================================================
 
-extern fn rt_file_stat(path: text) -> i64
+extern fn rt_stat_open(path: text) -> i64
 extern fn rt_file_stat_size(handle: i64) -> i64
 extern fn rt_file_stat_mtime(handle: i64) -> i64
 extern fn rt_file_stat_is_dir(handle: i64) -> bool
@@ -119,8 +119,19 @@ class AsyncFile:
 
     fn read(driver: IoDriver, buf_size: i64, offset: i64) -> Result<text, IoError>:
         val op_id = driver.submit_read(self.fd, buf_size, offset)
-        val bytes_read = complete_one(driver, op_id, 30000)?
-        Ok("")  # driver returns data via completion buffer; runtime fills text
+        driver.flush()
+        val completions = driver.poll(64, 30000)
+        var i = 0
+        while i < completions.len():
+            val c = completions[i]
+            if c.id == op_id:
+                if c.result < 0:
+                    return Err(errno_to_io_error(c.result))
+                if c.result == 0:
+                    return Ok("")
+                return Ok(driver.poll_data(i))
+            i = i + 1
+        Err(IoError(kind: IoErrorKind.TimedOut, message: "read timed out"))
 
     fn write(driver: IoDriver, data: text, offset: i64) -> Result<i64, IoError>:
         val op_id = driver.submit_write(self.fd, data, offset)
@@ -161,9 +172,9 @@ class AsyncFile:
 # ============================================================================
 
 fn stat(path: text) -> Result<FileStat, IoError>:
-    val handle = rt_file_stat(path)
-    if handle < 0:
-        return Err(errno_to_io_error(handle))
+    val handle = rt_stat_open(path)
+    if handle == 0:
+        return Err(IoError(kind: IoErrorKind.NotFound, message: "stat failed: {path}"))
     val s = FileStat(
         size: rt_file_stat_size(handle),
         modified_at: rt_file_stat_mtime(handle),
@@ -180,8 +191,8 @@ fn stat(path: text) -> Result<FileStat, IoError>:
 class AsyncDir:
     static fn readdir(path: text) -> Result<[text], IoError>:
         val handle = rt_readdir(path)
-        if handle < 0:
-            return Err(errno_to_io_error(handle))
+        if handle == 0:
+            return Err(IoError(kind: IoErrorKind.NotFound, message: "readdir failed: {path}"))
         val count = rt_readdir_count(handle)
         var entries: [text] = []
         var i: i64 = 0

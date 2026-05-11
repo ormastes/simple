@@ -34,43 +34,101 @@ struct StepRecord:
     """Internal: step + order index."""
     step: TxnStep
     idx:  i64
+    tid:  i64
+
+# --- Module-level step store ---
+# Works around interpreter value-semantics: nested mutation via
+# self.observer.record() would discard the push on a copy.  Module-level
+# storage keyed by txn_id avoids the nested-mutation problem entirely
+# (same pattern as DbFsDriver inode/fd stores in dbfs_driver.spl).
+
+struct _TxnCounter:
+    tid: i64
+    cnt: i64
+
+var _txn_steps: [StepRecord] = []
+var _txn_step_counts: [_TxnCounter] = []
+var _dbfs_next_txn_id: i64 = 1
+
+fn _alloc_txn_id() -> i64:
+    """Allocate a globally unique txn id."""
+    val tid = _dbfs_next_txn_id
+    _dbfs_next_txn_id = _dbfs_next_txn_id + 1
+    tid
+
+fn _step_count_for(tid: i64) -> i64:
+    """Return current step count for a given txn id."""
+    var i: i32 = 0
+    while i < _txn_step_counts.len() as i32:
+        val c = _txn_step_counts[i]
+        if c.tid == tid:
+            return c.cnt
+        i = i + 1
+    0
+
+fn _increment_step_count(tid: i64):
+    """Increment (or create) the step counter for tid."""
+    var i: i32 = 0
+    while i < _txn_step_counts.len() as i32:
+        val c = _txn_step_counts[i]
+        if c.tid == tid:
+            _txn_step_counts.remove(i)
+            _txn_step_counts.push(_TxnCounter(tid: tid, cnt: c.cnt + 1))
+            return
+        i = i + 1
+    _txn_step_counts.push(_TxnCounter(tid: tid, cnt: 1))
+
+fn _record_step(tid: i64, step: TxnStep):
+    """Record a step into the module-level store."""
+    val idx = _step_count_for(tid)
+    _txn_steps.push(StepRecord(step: step, idx: idx, tid: tid))
+    _increment_step_count(tid)
+
+fn _step_to_ord(s: TxnStep) -> i64:
+    """Convert TxnStep to ordinal for comparison."""
+    match s:
+        case TxnStep.Data:            0
+        case TxnStep.MetadataPrivate: 1
+        case TxnStep.WalAppend:       2
+        case TxnStep.WalFlush:        3
+        case TxnStep.Flush:           4
+        case TxnStep.PublishRoot:     5
+        case TxnStep.Publish:         6
+        case TxnStep.Commit:          7
+
+fn _step_matches(s: TxnStep, target: TxnStep) -> bool:
+    """Compare two TxnStep values by ordinal."""
+    _step_to_ord(s) == _step_to_ord(target)
 
 struct TxnStepOrder:
-    """Observer that records which steps occurred and in what order."""
-    steps: [StepRecord]
-    count: i64
+    """Observer handle that reads steps from the module-level store.
 
-    static fn new() -> TxnStepOrder:
-        TxnStepOrder(steps: [], count: 0)
+    Holds only a txn_id; actual step data lives in _txn_steps so that
+    nested self.observer.record() mutations are not lost to value-copy.
+    """
+    tid: i64
+
+    static fn for_txn(tid: i64) -> TxnStepOrder:
+        TxnStepOrder(tid: tid)
 
     me fn record(step: TxnStep):
-        self.steps.push(StepRecord(step: step, idx: self.count))
-        self.count = self.count + 1
+        _record_step(self.tid, step)
 
     me fn order() -> TxnStepSequence:
-        TxnStepSequence(steps: self.steps)
+        TxnStepSequence(tid: self.tid)
 
 struct TxnStepSequence:
     """Ordered sequence of steps for assertion in specs."""
-    steps: [StepRecord]
+    tid: i64
 
 impl TxnStepSequence:
     me fn index_of(step: TxnStep) -> i64:
-        """Return the ordinal position of step (0-based)."""
+        """Return the ordinal position of step (0-based) from module store."""
         var i: i32 = 0
-        while i < self.steps.len() as i32:
-            val s = self.steps[i as i32].step
-            val matches = match s:
-                case TxnStep.Data:             match step: case TxnStep.Data: true case _: false
-                case TxnStep.MetadataPrivate:  match step: case TxnStep.MetadataPrivate: true case _: false
-                case TxnStep.WalAppend:        match step: case TxnStep.WalAppend: true case _: false
-                case TxnStep.WalFlush:         match step: case TxnStep.WalFlush: true case _: false
-                case TxnStep.Flush:            match step: case TxnStep.Flush: true case _: false
-                case TxnStep.PublishRoot:      match step: case TxnStep.PublishRoot: true case _: false
-                case TxnStep.Publish:          match step: case TxnStep.Publish: true case _: false
-                case TxnStep.Commit:           match step: case TxnStep.Commit: true case _: false
-            if matches:
-                return self.steps[i as i32].idx
+        while i < _txn_steps.len() as i32:
+            val rec = _txn_steps[i]
+            if rec.tid == self.tid and _step_matches(rec.step, step):
+                return rec.idx
             i = i + 1
         -1
 
@@ -81,12 +139,12 @@ val TXN_STATUS_ABORTED:   u8 = 2
 struct DbfsTxn:
     """Single DBFS transaction.
 
-    Tracks step order via observer. Data and metadata are buffered
-    in-process; WAL append and flush are the only disk operations.
+    Tracks step order via module-level observer store. Data and metadata
+    are buffered in-process; WAL append and flush are the only disk
+    operations.
     """
     txn_id:        TxnId
     status:        u8
-    observer:      TxnStepOrder
     data_written:  text
     meta_written:  bool
     wal_appended:  bool
@@ -95,10 +153,10 @@ struct DbfsTxn:
     flush_count:   i64
 
     static fn new(txn_id: TxnId) -> DbfsTxn:
+        val real_tid = TxnId(value: _alloc_txn_id())
         DbfsTxn(
-            txn_id:         txn_id,
+            txn_id:         real_tid,
             status:         TXN_STATUS_ACTIVE,
-            observer:       TxnStepOrder.new(),
             data_written:   "",
             meta_written:   false,
             wal_appended:   false,
@@ -108,14 +166,14 @@ struct DbfsTxn:
         )
 
     me fn observe_steps() -> TxnStepOrder:
-        """Return a reference to the step observer (for spec assertions)."""
-        self.observer
+        """Return a step-order handle keyed by this txn's id."""
+        TxnStepOrder.for_txn(self.txn_id.value)
 
     # --- Step 1: Data ---
 
     me fn write_data(data: text) -> Result<(), text>:
         """Write data blobs/extents to GENERAL_MUTABLE arena."""
-        self.observer.record(TxnStep.Data)
+        _record_step(self.txn_id.value, TxnStep.Data)
         self.data_written = data
         Ok(())
 
@@ -123,7 +181,7 @@ struct DbfsTxn:
 
     me fn write_metadata_private() -> Result<(), text>:
         """Build new metadata in private COW pages."""
-        self.observer.record(TxnStep.MetadataPrivate)
+        _record_step(self.txn_id.value, TxnStep.MetadataPrivate)
         self.meta_written = true
         Ok(())
 
@@ -131,7 +189,7 @@ struct DbfsTxn:
 
     me fn append_wal() -> Result<(), text>:
         """Append WAL record."""
-        self.observer.record(TxnStep.WalAppend)
+        _record_step(self.txn_id.value, TxnStep.WalAppend)
         self.wal_appended = true
         Ok(())
 
@@ -139,8 +197,8 @@ struct DbfsTxn:
 
     me fn flush_wal() -> Result<(), text>:
         """Flush WAL (only fsync point)."""
-        self.observer.record(TxnStep.WalFlush)
-        self.observer.record(TxnStep.Flush)
+        _record_step(self.txn_id.value, TxnStep.WalFlush)
+        _record_step(self.txn_id.value, TxnStep.Flush)
         self.wal_flushed = true
         self.flush_count = self.flush_count + 1
         Ok(())
@@ -149,8 +207,8 @@ struct DbfsTxn:
 
     me fn publish_root() -> Result<(), text>:
         """Atomic CAS on B-tree root pointer; readers still see old root."""
-        self.observer.record(TxnStep.PublishRoot)
-        self.observer.record(TxnStep.Publish)
+        _record_step(self.txn_id.value, TxnStep.PublishRoot)
+        _record_step(self.txn_id.value, TxnStep.Publish)
         self.root_published = true
         Ok(())
 
@@ -160,7 +218,7 @@ struct DbfsTxn:
         """Mark transaction committed; new root now visible to readers."""
         if not self.wal_flushed:
             return Err("txn: must flush WAL before commit")
-        self.observer.record(TxnStep.Commit)
+        _record_step(self.txn_id.value, TxnStep.Commit)
         self.status = TXN_STATUS_COMMITTED
         Ok(())
 

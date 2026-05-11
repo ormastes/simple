@@ -1,0 +1,104 @@
+# ============================================================================
+# RV32I RTL ALU — Combinational Arithmetic/Logic Unit
+# ============================================================================
+#
+# Translates alu.vhd into Simple.  Pure functions only (combinational logic).
+# All operands and results are u32 (VHDL synthesizable subset).
+#
+# Operations: ADD, SUB, SLL, SLT, SLTU, XOR, SRL, SRA, OR, AND, PASS_B
+# ============================================================================
+
+use std.hardware.rv32i_rtl.pkg.{ALU_ADD, ALU_SUB, ALU_SLL, ALU_SLT, ALU_SLTU}
+use std.hardware.rv32i_rtl.pkg.{ALU_XOR, ALU_SRL, ALU_SRA, ALU_OR, ALU_AND}
+use std.hardware.rv32i_rtl.pkg.ALU_PASS_B
+
+# ============================================================================
+# ALU result bundle
+# ============================================================================
+
+struct AluResult:
+    """Combinational ALU output signals."""
+    result: u32    # 32-bit ALU result
+    zero: bool     # true when result == 0
+
+# ============================================================================
+# Signed comparison helper for u32
+# ============================================================================
+
+fn u32_signed_lt(a: u32, b: u32) -> bool:
+    """Signed less-than for u32 values (two's complement interpretation).
+    Flips MSB so that unsigned < gives signed semantics."""
+    val flip: u32 = 0x80000000
+    val fa = a ^ flip
+    val fb = b ^ flip
+    fa < fb
+
+# ============================================================================
+# Arithmetic right shift helper for u32
+# ============================================================================
+
+fn u32_sra(value: u32, shamt: u32) -> u32:
+    """Arithmetic right shift: replicates sign bit into vacated positions."""
+    val logical = value >> shamt
+    val sign_bit = value & 0x80000000
+    if sign_bit != 0:
+        # Fill upper bits with ones
+        val ones_mask = 0xFFFFFFFF << (32 - shamt)
+        logical | ones_mask
+    else:
+        logical
+
+# ============================================================================
+# ALU compute — combinational logic, no side effects
+# ============================================================================
+
+fn alu_compute(op_a: u32, op_b: u32, alu_op: i64) -> AluResult:
+    """Evaluate the ALU operation on op_a and op_b.
+    Mirrors the VHDL alu entity (combinational process)."""
+
+    val shamt = op_b & 0x1F    # shift amount = lower 5 bits of op_b
+
+    var res: u32 = 0
+
+    if alu_op == ALU_ADD:
+        res = op_a + op_b
+
+    else if alu_op == ALU_SUB:
+        res = op_a - op_b
+
+    else if alu_op == ALU_SLL:
+        res = op_a << shamt
+
+    else if alu_op == ALU_SLT:
+        # Signed comparison (two's complement)
+        if u32_signed_lt(op_a, op_b):
+            res = 1
+        else:
+            res = 0
+
+    else if alu_op == ALU_SLTU:
+        # Unsigned comparison
+        if op_a < op_b:
+            res = 1
+        else:
+            res = 0
+
+    else if alu_op == ALU_XOR:
+        res = op_a ^ op_b
+
+    else if alu_op == ALU_SRL:
+        res = op_a >> shamt
+
+    else if alu_op == ALU_SRA:
+        res = u32_sra(op_a, shamt)
+
+    else if alu_op == ALU_OR:
+        res = op_a | op_b
+
+    else if alu_op == ALU_AND:
+        res = op_a & op_b
+
+    else if alu_op == ALU_PASS_B:
+        res = op_b
+
+    AluResult(result: res, zero: res == 0)

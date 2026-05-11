@@ -563,16 +563,23 @@ static int64_t uring_poll(spl_driver* d, spl_completion* out, int64_t max,
             flags  = 0;
         }
 
-        /* Free any tracked buffer for this op */
         buf_entry be = bufs_take(ud, op_id);
+
+        out[count].id       = op_id;
+        out[count].result   = result;
+        out[count].flags    = flags;
+        out[count].data     = NULL;
+        out[count].data_len = 0;
+
         if (be.op_id != 0) {
-            free(be.buf);
+            if ((be.op_type == BUF_OP_RECV || be.op_type == BUF_OP_READ) && result > 0) {
+                out[count].data     = be.buf;
+                out[count].data_len = result;
+            } else {
+                free(be.buf);
+            }
             free(be.path);
         }
-
-        out[count].id     = op_id;
-        out[count].result = result;
-        out[count].flags  = flags;
         count++;
 
         io_uring_cqe_seen(&ud->ring, cqe);

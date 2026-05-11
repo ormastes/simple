@@ -755,9 +755,16 @@ static int64_t iocp_poll(spl_driver* d, spl_completion* out, int64_t max,
                 result = -(int64_t)ovl->Internal;
             }
 
-            out[count++] = (spl_completion){
-                .id = op->op_id, .result = result, .flags = 0
+            spl_completion sc = {
+                .id = op->op_id, .result = result, .flags = 0,
+                .data = NULL, .data_len = 0
             };
+            if ((op->op_type == OP_RECV || op->op_type == OP_READ) && result > 0) {
+                sc.data     = op->buf;
+                sc.data_len = result;
+                op->buf     = NULL;
+            }
+            out[count++] = sc;
             int64_t oid = op->op_id;
             remove_op_table(id, oid);
             free_op(op);

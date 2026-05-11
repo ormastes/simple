@@ -221,8 +221,10 @@ static void* pool_worker(void* arg) {
 
         /* Execute the file I/O syscall */
         spl_completion c;
-        c.id    = op->op_id;
-        c.flags = 0;
+        c.id       = op->op_id;
+        c.flags    = 0;
+        c.data     = NULL;
+        c.data_len = 0;
 
         switch (op->op_type) {
         case OP_OPEN: {
@@ -233,6 +235,11 @@ static void* pool_worker(void* arg) {
         case OP_READ: {
             ssize_t n = pread(op->fd, op->buf, (size_t)op->buf_len, (off_t)op->offset);
             c.result = (n >= 0) ? n : -errno;
+            if (n > 0) {
+                c.data     = op->buf;
+                c.data_len = n;
+                op->buf    = NULL;
+            }
             break;
         }
         case OP_WRITE: {
@@ -626,7 +633,9 @@ static int64_t ep_poll(spl_driver* d, spl_completion* out,
         int fd = events[i].data.fd;
         uint32_t ev = events[i].events;
         spl_completion c;
-        c.flags = 0;
+        c.flags    = 0;
+        c.data     = NULL;
+        c.data_len = 0;
 
         /* Check if this is a timerfd */
         pending_op* top = map_find_by_timerfd(ed, fd);
@@ -677,8 +686,15 @@ static int64_t ep_poll(spl_driver* d, spl_completion* out,
         pending_op* rop = map_find_by_fd(ed, fd, OP_RECV);
         if (rop && (ev & EPOLLIN)) {
             ssize_t n = recv(fd, rop->buf, (size_t)rop->buf_len, 0);
-            c.id     = rop->op_id;
-            c.result = (n >= 0) ? n : -errno;
+            c.id       = rop->op_id;
+            c.result   = (n >= 0) ? n : -errno;
+            c.data     = NULL;
+            c.data_len = 0;
+            if (n > 0) {
+                c.data     = rop->buf;
+                c.data_len = n;
+                rop->buf   = NULL;
+            }
             epoll_ctl(ed->epoll_fd, EPOLL_CTL_DEL, fd, NULL);
             map_remove(ed, rop);
             out[count++] = c;

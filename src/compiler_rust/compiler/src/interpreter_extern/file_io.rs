@@ -1064,3 +1064,169 @@ pub fn rt_time_now_monotonic_ms(_args: &[Value]) -> Result<Value, CompileError> 
         .as_millis() as i64;
     Ok(Value::Int(ms))
 }
+
+// ========================================================================
+// POSIX-style file I/O externs (matching C runtime signatures in runtime.c)
+// ========================================================================
+
+pub fn rt_mkdir(args: &[Value]) -> Result<Value, CompileError> {
+    let path = extract_path(args, 0)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        let mode = if args.len() > 1 {
+            match &args[1] { Value::Int(m) => *m as u32, _ => 0o755 }
+        } else { 0o755 };
+        let mut builder = fs::DirBuilder::new();
+        builder.mode(mode);
+        match builder.create(&path) {
+            Ok(_) => Ok(Value::Int(0)),
+            Err(e) => Ok(Value::Int(-(errno_from_io_error(&e)))),
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        match fs::create_dir(&path) {
+            Ok(_) => Ok(Value::Int(0)),
+            Err(e) => Ok(Value::Int(-(errno_from_io_error(&e)))),
+        }
+    }
+}
+
+pub fn rt_remove(args: &[Value]) -> Result<Value, CompileError> {
+    let path = extract_path(args, 0)?;
+    let p = Path::new(&path);
+    let result = if p.is_dir() { fs::remove_dir(p) } else { fs::remove_file(p) };
+    match result {
+        Ok(_) => Ok(Value::Int(0)),
+        Err(e) => Ok(Value::Int(-(errno_from_io_error(&e)))),
+    }
+}
+
+struct StatHandle {
+    size: i64,
+    mtime: i64,
+    is_dir: bool,
+    is_file: bool,
+}
+
+static STAT_HANDLES: std::sync::Mutex<Vec<Option<StatHandle>>> = std::sync::Mutex::new(Vec::new());
+
+pub fn rt_stat_open(args: &[Value]) -> Result<Value, CompileError> {
+    let path = extract_path(args, 0)?;
+    let meta = match fs::metadata(&path) {
+        Ok(m) => m,
+        Err(_) => return Ok(Value::Int(0)),
+    };
+    let mtime = {
+        use std::time::UNIX_EPOCH;
+        meta.modified().ok()
+            .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0)
+    };
+    let handle = StatHandle {
+        size: meta.len() as i64,
+        mtime,
+        is_dir: meta.is_dir(),
+        is_file: meta.is_file(),
+    };
+    let mut handles = STAT_HANDLES.lock().unwrap();
+    for (i, slot) in handles.iter_mut().enumerate() {
+        if slot.is_none() {
+            *slot = Some(handle);
+            return Ok(Value::Int((i + 1) as i64));
+        }
+    }
+    handles.push(Some(handle));
+    Ok(Value::Int(handles.len() as i64))
+}
+
+pub fn rt_file_stat_size(args: &[Value]) -> Result<Value, CompileError> {
+    let h = if let Value::Int(v) = &args[0] { (*v - 1) as usize } else { return Ok(Value::Int(0)) };
+    let handles = STAT_HANDLES.lock().unwrap();
+    Ok(Value::Int(handles.get(h).and_then(|s| s.as_ref()).map(|s| s.size).unwrap_or(0)))
+}
+
+pub fn rt_file_stat_mtime(args: &[Value]) -> Result<Value, CompileError> {
+    let h = if let Value::Int(v) = &args[0] { (*v - 1) as usize } else { return Ok(Value::Int(0)) };
+    let handles = STAT_HANDLES.lock().unwrap();
+    Ok(Value::Int(handles.get(h).and_then(|s| s.as_ref()).map(|s| s.mtime).unwrap_or(0)))
+}
+
+pub fn rt_file_stat_is_dir(args: &[Value]) -> Result<Value, CompileError> {
+    let h = if let Value::Int(v) = &args[0] { (*v - 1) as usize } else { return Ok(Value::Bool(false)) };
+    let handles = STAT_HANDLES.lock().unwrap();
+    Ok(Value::Bool(handles.get(h).and_then(|s| s.as_ref()).map(|s| s.is_dir).unwrap_or(false)))
+}
+
+pub fn rt_file_stat_is_file(args: &[Value]) -> Result<Value, CompileError> {
+    let h = if let Value::Int(v) = &args[0] { (*v - 1) as usize } else { return Ok(Value::Bool(false)) };
+    let handles = STAT_HANDLES.lock().unwrap();
+    Ok(Value::Bool(handles.get(h).and_then(|s| s.as_ref()).map(|s| s.is_file).unwrap_or(false)))
+}
+
+pub fn rt_file_stat_free(args: &[Value]) -> Result<Value, CompileError> {
+    let h = if let Value::Int(v) = &args[0] { (*v - 1) as usize } else { return Ok(Value::Int(0)) };
+    let mut handles = STAT_HANDLES.lock().unwrap();
+    if h < handles.len() { handles[h] = None; }
+    Ok(Value::Int(0))
+}
+
+struct DirListing {
+    entries: Vec<String>,
+}
+
+static DIR_HANDLES: std::sync::Mutex<Vec<Option<DirListing>>> = std::sync::Mutex::new(Vec::new());
+
+pub fn rt_readdir(args: &[Value]) -> Result<Value, CompileError> {
+    let path = extract_path(args, 0)?;
+    let entries: Vec<String> = match fs::read_dir(&path) {
+        Ok(rd) => rd.flatten().filter_map(|e| e.file_name().into_string().ok()).collect(),
+        Err(_) => return Ok(Value::Int(0)),
+    };
+    let listing = DirListing { entries };
+    let mut handles = DIR_HANDLES.lock().unwrap();
+    for (i, slot) in handles.iter_mut().enumerate() {
+        if slot.is_none() {
+            *slot = Some(listing);
+            return Ok(Value::Int((i + 1) as i64));
+        }
+    }
+    handles.push(Some(listing));
+    Ok(Value::Int(handles.len() as i64))
+}
+
+pub fn rt_readdir_count(args: &[Value]) -> Result<Value, CompileError> {
+    let h = if let Value::Int(v) = &args[0] { (*v - 1) as usize } else { return Ok(Value::Int(0)) };
+    let handles = DIR_HANDLES.lock().unwrap();
+    Ok(Value::Int(handles.get(h).and_then(|s| s.as_ref()).map(|s| s.entries.len() as i64).unwrap_or(0)))
+}
+
+pub fn rt_readdir_entry(args: &[Value]) -> Result<Value, CompileError> {
+    let h = if let Value::Int(v) = &args[0] { (*v - 1) as usize } else { return Ok(Value::Str(String::new())) };
+    let idx = if let Value::Int(v) = &args[1] { *v as usize } else { return Ok(Value::Str(String::new())) };
+    let handles = DIR_HANDLES.lock().unwrap();
+    let entry = handles.get(h)
+        .and_then(|s| s.as_ref())
+        .and_then(|s| s.entries.get(idx))
+        .cloned()
+        .unwrap_or_default();
+    Ok(Value::Str(entry))
+}
+
+pub fn rt_readdir_free(args: &[Value]) -> Result<Value, CompileError> {
+    let h = if let Value::Int(v) = &args[0] { (*v - 1) as usize } else { return Ok(Value::Int(0)) };
+    let mut handles = DIR_HANDLES.lock().unwrap();
+    if h < handles.len() { handles[h] = None; }
+    Ok(Value::Int(0))
+}
+
+fn errno_from_io_error(e: &std::io::Error) -> i64 {
+    match e.kind() {
+        std::io::ErrorKind::NotFound => 2,
+        std::io::ErrorKind::PermissionDenied => 13,
+        std::io::ErrorKind::AlreadyExists => 17,
+        _ => 5, // EIO
+    }
+}

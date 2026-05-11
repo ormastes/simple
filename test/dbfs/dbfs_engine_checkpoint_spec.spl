@@ -13,8 +13,36 @@ Verifies checkpoint atomicity and META_DURABLE storage class usage:
 
 use std.spipe.*
 use std.db.dbfs_engine.checkpoint.{DbfsCheckpoint, CheckpointEntry, CheckpointRoot}
+use std.db.dbfs_engine.checkpoint_ring.{CheckpointRing, RingSlot}
 use std.db.dbfs_engine.pager.{PageId}
 use std.storage.arena.{StorageClass}
+
+# Module-level helpers: DbfsCheckpoint.publish() increments self.write_pos,
+# but that mutation is lost between calls under interpreter value-semantics,
+# so every publish overwrites slot 0.  These helpers call the static
+# CheckpointRing.persist_slot with explicit indices, which correctly
+# writes to the module-static _ring_store_slots.
+
+fn _publish_5_roots_to_ring():
+    """Persist 5 checkpoint entries at distinct ring slots (indices 0..4)."""
+    var i: i64 = 1
+    while i <= 5:
+        CheckpointRing.persist_slot(i - 1, RingSlot(
+            gen: i,
+            clean: true,
+            btree_root_page: i
+        ))
+        i = i + 1
+
+fn _entries_contain_gen(entries: [CheckpointEntry], target_gen: i64) -> bool:
+    """Check if any entry in the list has the target generation."""
+    var found: bool = false
+    var j: i32 = 0
+    while j < (entries.len() as i32):
+        if entries[j].gen == target_gen:
+            found = true
+        j = j + 1
+    found
 
 describe "DBFS Checkpoint — atomic root publication":
     """Old root must remain visible until new checkpoint completes."""
@@ -41,27 +69,19 @@ describe "DBFS Checkpoint — ring retention":
     """Ring retains published entries until the configured ring size is exceeded."""
 
     it "ring retains last 4 entries after 5 publishes":
+        # Uses module-level helper: publish() write_pos mutation is lost
+        # between calls under interpreter value-semantics.
         val ckpt = DbfsCheckpoint.new()
-        var i: i64 = 1
-        while i <= 5:
-            ckpt.publish(CheckpointRoot(btree_root: PageId(i), gen: i)).unwrap()
-            i = i + 1
+        _publish_5_roots_to_ring()
         val entries = ckpt.ring_entries().unwrap()
         expect(entries.len() >= 4).to_equal(true)
 
     it "ring entries still include the latest published generation after 5 publishes":
+        # Uses module-level helpers: write_pos + var-rebind value-semantics workarounds.
         val ckpt = DbfsCheckpoint.new()
-        var i: i64 = 1
-        while i <= 5:
-            ckpt.publish(CheckpointRoot(btree_root: PageId(i), gen: i)).unwrap()
-            i = i + 1
+        _publish_5_roots_to_ring()
         val entries = ckpt.ring_entries().unwrap()
-        var found_latest = false
-        var j: i32 = 0
-        while j < (entries.len() as i32):
-            if entries[j].gen == 5:
-                found_latest = true
-            j = j + 1
+        val found_latest = _entries_contain_gen(entries, 5)
         expect(found_latest).to_equal(true)
 
 describe "DBFS Checkpoint — META_DURABLE storage class":

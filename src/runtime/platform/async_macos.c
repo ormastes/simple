@@ -238,9 +238,16 @@ static void* threadpool_worker(void* arg) {
         pthread_mutex_lock(&kd->done_mutex);
         int64_t next_tail = (kd->done_tail + 1) % kd->done_cap;
         if (next_tail != kd->done_head % kd->done_cap) {
-            kd->done_queue[kd->done_tail % kd->done_cap] = (spl_completion){
-                .id = op->op_id, .result = op->result, .flags = 0
+            spl_completion sc_tp = {
+                .id = op->op_id, .result = op->result, .flags = 0,
+                .data = NULL, .data_len = 0
             };
+            if (op->op_type == OP_READ && op->result > 0) {
+                sc_tp.data     = op->buf;
+                sc_tp.data_len = op->result;
+                op->buf        = NULL;
+            }
+            kd->done_queue[kd->done_tail % kd->done_cap] = sc_tp;
             kd->done_tail++;
         }
         pthread_mutex_unlock(&kd->done_mutex);
@@ -562,9 +569,16 @@ static int64_t kq_poll(spl_driver* d, spl_completion* out, int64_t max,
     for (int64_t i = 0; i < kd->ops_cap && count < max; i++) {
         pending_op* op = &kd->ops[i];
         if (op->op_id != 0 && op->completed) {
-            out[count++] = (spl_completion){
-                .id = op->op_id, .result = op->result, .flags = 0
+            spl_completion sc = {
+                .id = op->op_id, .result = op->result, .flags = 0,
+                .data = NULL, .data_len = 0
             };
+            if ((op->op_type == OP_RECV || op->op_type == OP_READ) && op->result > 0) {
+                sc.data     = op->buf;
+                sc.data_len = op->result;
+                op->buf     = NULL;
+            }
+            out[count++] = sc;
             remove_op(kd, op->op_id);
         }
     }
@@ -649,9 +663,16 @@ static int64_t kq_poll(spl_driver* d, spl_completion* out, int64_t max,
             break;
         }
 
-        out[count++] = (spl_completion){
-            .id = op->op_id, .result = op->result, .flags = 0
+        spl_completion sc = {
+            .id = op->op_id, .result = op->result, .flags = 0,
+            .data = NULL, .data_len = 0
         };
+        if ((op->op_type == OP_RECV || op->op_type == OP_READ) && op->result > 0) {
+            sc.data     = op->buf;
+            sc.data_len = op->result;
+            op->buf     = NULL;
+        }
+        out[count++] = sc;
         remove_op(kd, op_id);
     }
 
