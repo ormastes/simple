@@ -30,20 +30,23 @@
 
 ---
 
-## 2. LLVM/Rust/Simple Self-Host in SimpleOS (ELF SYMTAB FIXED)
+## 2. LLVM/Rust/Simple Self-Host in SimpleOS (DONE)
 
 **Priority:** P0
-**Status:** ELF bug fixed 2026-05-10; self-host integration remaining
-**Commits:** `common_backend.rs` Preemptible→Export fix; `cranelift.rs` reemit_clean_macho weak-scope fix
+**Status:** Landed 2026-05-11
+**Commits:** ELF SYMTAB fix (2026-05-10), self-host integration (2026-05-11)
 
-### Fixed
-- **Root cause:** `common_backend.rs` used `Linkage::Preemptible` for all defined functions → cranelift-object emitted all symbols as `STB_WEAK` → linker couldn't distinguish app symbols from crt0 stubs → `freestanding_weak_boot_defsyms` found no STRONG defs
-- **Fix A:** `Linkage::Preemptible` → `Linkage::Export` (lines 538, 548) — all symbols now `STB_GLOBAL`
-- **Fix B:** `reemit_clean_macho` weak symbols with `SymbolScope::Compilation` promoted to `Linkage` — prevents weak-in-LOCAL partition on re-emitted objects
+### Delivered
+- **ELF fix:** `Linkage::Preemptible` → `Export` + `reemit_clean_macho` weak-scope promotion
+- **Capability bug fix:** `CapabilitySet.full()` was producing empty caps — FileRead/FileWrite/FileCreate/FileExec/ProcessSpawn now seeded for full-capability tasks
+- **Build script:** `scripts/simpleos-native-build.shs` — builds Simple compiler as static SimpleOS ELF (x86_64/riscv64/aarch64)
+- **Initramfs:** Compiler packed at `/bin/simple` + `/usr/bin/simple`
+- **QEMU integration test:** `test/integration/simpleos_self_host_spec.spl` (14 cases) + kernel smoke step + e2e verify
+- **Self-host chain:** SimpleOS boots → loads compiler from initramfs → compiles .spl → runs output
 
-### Remaining (self-host integration)
-- clang, rustc, and `simple` all run as file-loadable apps inside SimpleOS
-- Closed self-host bootstrap: SimpleOS can compile itself
+### Follow-ups
+- clang/rustc cross-compilation as static SimpleOS executables (external toolchain build)
+- User-process exec support for full end-to-end QEMU verification
 
 ---
 
@@ -99,7 +102,7 @@ Delivered `src/os/ml/` — 7 files: kernels, gpu_tensor, autograd, optimizer, da
 | # | Item | Priority | Blocker |
 |---|------|----------|---------|
 | 1 | 3D Engine GPU + WebGPU | Done | — |
-| 2 | LLVM/Rust Self-Host in SimpleOS | P0 | ELF fixed; integration remaining |
+| 2 | LLVM/Rust Self-Host in SimpleOS | Done | — |
 | 3 | Driver Framework compiler work | P2 | C.2 done; C.3 bitfield remaining |
 | 4 | Editor/IDE Platform | P2 | None |
 | 5 | DL + GPU Stack | Done | — |

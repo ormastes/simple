@@ -17,6 +17,9 @@
 use std.fs
 use std.process
 
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_dir_create_all(path: text) -> bool
+
 val HELLO_C = "/usr/share/test/hello.c"
 val HELLO_OBJ = "/tmp/hello.o"
 val HELLO_RUST_ELF = "/usr/share/test/hello_rust"
@@ -24,6 +27,11 @@ val CORPUS_DIR = "/src/test/bootstrap_corpus"
 val SIMPLE_BIN = "/bin/simple"
 val STAGE2_OUT = "/build/stage2_native/simple"
 val STAGE3_OUT = "/build/stage3_native/simple"
+
+val TRIVIAL_SRC_DIR = "/tmp/selfhost_test"
+val TRIVIAL_SRC_FILE = "/tmp/selfhost_test/hello.spl"
+val TRIVIAL_OUTPUT = "/tmp/selfhost_test/hello"
+val TRIVIAL_EXPECTED_OUTPUT = "hello from self-host"
 
 fn banner():
     print "SIMPLEOS_SMOKE_INIT_STARTED"
@@ -140,6 +148,48 @@ fn step_rust_smoke(have_exec: bool):
     else:
         print "SMOKE_RUST_FAIL exit={r.exit_code}"
 
+fn step_trivial_self_host(have_exec: bool):
+    """Write a trivial .spl, compile it with /bin/simple, run the output."""
+    if not have_exec:
+        print "TRIVIAL_SELFHOST_SKIP reason=no-exec"
+        return
+    if not fs.exists(SIMPLE_BIN):
+        print "TRIVIAL_SELFHOST_SKIP reason=missing-simple"
+        return
+    # Create the source directory and write the trivial program.
+    if not rt_dir_create_all(TRIVIAL_SRC_DIR):
+        print "TRIVIAL_SELFHOST_FAIL phase=mkdir"
+        return
+    val src_content = "fn main():\n    print \"hello from self-host\"\n"
+    if not rt_file_write_text(TRIVIAL_SRC_FILE, src_content):
+        print "TRIVIAL_SELFHOST_FAIL phase=write-src"
+        return
+    # Compile the trivial program.
+    val compile_args: [text] = [
+        "native-build",
+        "--source", TRIVIAL_SRC_DIR,
+        "--entry", TRIVIAL_SRC_FILE,
+        "-o", TRIVIAL_OUTPUT,
+    ]
+    val cr = process.run(SIMPLE_BIN, compile_args)
+    if cr.exit_code != 0:
+        print "TRIVIAL_SELFHOST_FAIL phase=compile exit={cr.exit_code}"
+        return
+    # Verify the output binary exists.
+    if not fs.exists(TRIVIAL_OUTPUT):
+        print "TRIVIAL_SELFHOST_FAIL phase=missing-binary"
+        return
+    # Run the compiled binary and check its output.
+    val rr = process.run(TRIVIAL_OUTPUT, [])
+    if rr.exit_code != 0:
+        print "TRIVIAL_SELFHOST_FAIL phase=run exit={rr.exit_code}"
+        return
+    val output = rr.stdout.trim()
+    if output.contains(TRIVIAL_EXPECTED_OUTPUT):
+        print "TRIVIAL_SELFHOST_OK"
+    else:
+        print "TRIVIAL_SELFHOST_FAIL phase=output got={output}"
+
 fn halt():
     print "SIMPLEOS_SMOKE_INIT_DONE"
     # Serial-driver flush; a real shutdown hook would go here once
@@ -157,4 +207,5 @@ fn main():
     step_selfhost(have_exec)
     step_clang_smoke(have_exec)
     step_rust_smoke(have_exec)
+    step_trivial_self_host(have_exec)
     halt()

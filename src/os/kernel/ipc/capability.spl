@@ -243,14 +243,28 @@ impl CapabilityManager:
         """Initialize capability record for a new task at spawn time.
 
         Idempotent: if a record already exists for `task`, returns without
-        modifying it. If `full` is true, grants a full capability set;
-        otherwise grants an empty set.
+        modifying it. If `full` is true, grants a full capability set
+        seeded with FileRead, FileWrite, FileCreate, FileExec, and
+        ProcessSpawn tokens so spawned processes can perform I/O
+        immediately; otherwise grants an empty pledged set.
         """
         val existing = self._find_record(task)
         if existing != nil:
             return
         # full=true: unpledged full-trust set; full=false: empty pledged set
-        var caps = CapabilitySet(caps: [], is_pledged: not full)
+        var cap_tokens: [CapabilityToken] = []
+        if full:
+            cap_tokens.push(CapabilityToken(kind: CapabilityKind.FileRead(path_prefix: ""), generation: self.next_generation, owner: task.id))
+            self.next_generation = self.next_generation + 1
+            cap_tokens.push(CapabilityToken(kind: CapabilityKind.FileWrite(path_prefix: ""), generation: self.next_generation, owner: task.id))
+            self.next_generation = self.next_generation + 1
+            cap_tokens.push(CapabilityToken(kind: CapabilityKind.FileCreate(path_prefix: ""), generation: self.next_generation, owner: task.id))
+            self.next_generation = self.next_generation + 1
+            cap_tokens.push(CapabilityToken(kind: CapabilityKind.FileExec(path_prefix: ""), generation: self.next_generation, owner: task.id))
+            self.next_generation = self.next_generation + 1
+            cap_tokens.push(CapabilityToken(kind: CapabilityKind.ProcessSpawn, generation: self.next_generation, owner: task.id))
+            self.next_generation = self.next_generation + 1
+        var caps = CapabilitySet(caps: cap_tokens, is_pledged: not full)
         val record = TaskCapRecord(
             task_id: task,
             caps: caps,
