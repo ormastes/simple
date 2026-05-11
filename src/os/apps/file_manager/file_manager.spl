@@ -4,6 +4,84 @@ use common.ui.builder.{
     column, row, panel, text_widget, button, label, statusbar,
     build_tree_with_title, with_width
 }
+use os.services.vfs.vfs_init.{g_vfs_readdir, g_vfs_file_size}
+use os.kernel.types.fs_types.{DirEntry, FsNodeKind}
+use os.services.launcher.launcher.{launcher_launch_path_with_args}
+extern fn serial_println(msg: text)
+
+struct FileEntry:
+    name: text
+    size: i64
+    is_dir: bool
+    path: text
+
+fn list_directory(path: text) -> [FileEntry]:
+    var entries: [FileEntry] = []
+    val dir_entries = g_vfs_readdir(path)
+    for e in dir_entries:
+        val is_dir = e.node.kind == FsNodeKind.Directory
+        val entry_path = if path == "/":
+            "/{e.name}"
+        else:
+            "{path}/{e.name}"
+        val sz = e.node.size.to_i64()
+        entries = entries.push(FileEntry(
+            name: e.name,
+            size: sz,
+            is_dir: is_dir,
+            path: entry_path
+        ))
+    entries
+
+fn format_size(bytes: i64) -> text:
+    if bytes < 0:
+        return "--"
+    if bytes < 1024:
+        return "{bytes} B"
+    if bytes < 1048576:
+        val kb = bytes / 1024
+        return "{kb} KB"
+    val mb = bytes / 1048576
+    "{mb} MB"
+
+fn entry_type_label(entry: FileEntry) -> text:
+    if entry.is_dir:
+        return "Directory"
+    if entry.name.ends_with(".smf"):
+        return "SMF App"
+    if entry.name.ends_with(".elf"):
+        return "ELF App"
+    if entry.name.ends_with(".sdn"):
+        return "SDN"
+    if entry.name.ends_with(".spl"):
+        return "Source"
+    "File"
+
+fn open_entry(entry: FileEntry):
+    if entry.is_dir:
+        serial_println("[file_manager] navigate: {entry.path}")
+        return
+    val is_smf = entry.name.ends_with(".smf")
+    val is_elf = entry.name.ends_with(".elf")
+    if is_smf or is_elf:
+        serial_println("[file_manager] launch: {entry.path}")
+        launcher_launch_path_with_args(entry.path, [])
+        return
+    serial_println("[file_manager] open unsupported type: {entry.path}")
+
+fn parent_path(path: text) -> text:
+    if path == "/" or path == "":
+        return "/"
+    var last_slash: i64 = 0
+    var i: i64 = 0
+    while i < path.len():
+        val ch = path.char_at(i)
+        if ch == "/":
+            last_slash = i
+        i = i + 1
+    if last_slash == 0:
+        return "/"
+    path.slice(0, last_slash)
 
 class FileManager:
     current_path: text
@@ -28,28 +106,32 @@ class FileManager:
             button("fm_trash", "Trash", "goto_trash")
         ])
 
-        val file_list = panel("fm_files", "Files", [
+        val raw_entries = list_directory(me.current_path)
+        var file_widgets: [WidgetNode] = [
             row("fm_header", [
                 label("fm_h_name", "Name"),
                 label("fm_h_size", "Size"),
-                label("fm_h_type", "Type"),
-                label("fm_h_modified", "Modified")
-            ]),
-            text_widget("fm_f1", "bin/          --      Directory   May 01 2026"),
-            text_widget("fm_f2", "src/          --      Directory   May 07 2026"),
-            text_widget("fm_f3", "doc/          --      Directory   May 05 2026"),
-            text_widget("fm_f4", "test/         --      Directory   May 06 2026"),
-            text_widget("fm_f5", "README.md     2.4 KB  Markdown    Apr 28 2026"),
-            text_widget("fm_f6", "CLAUDE.md     1.8 KB  Markdown    May 07 2026"),
-            text_widget("fm_f7", "config.sdn    512 B   SDN         May 01 2026")
-        ])
+                label("fm_h_type", "Type")
+            ])
+        ]
+        var idx: i64 = 0
+        for entry in raw_entries:
+            val size_str = format_size(entry.size)
+            val type_str = entry_type_label(entry)
+            val display = "{entry.name}    {size_str}    {type_str}"
+            val widget_id = "fm_entry_{idx}"
+            file_widgets = file_widgets.push(text_widget(widget_id, display))
+            idx = idx + 1
+        val item_count = raw_entries.len()
+
+        val file_list = panel("fm_files", "Files", file_widgets)
 
         val content = row("fm_content", [
             sidebar,
             file_list
         ])
 
-        val status = statusbar("fm_status", "7 items", me.current_path)
+        val status = statusbar("fm_status", "{item_count} items", me.current_path)
 
         val root = column("fm_root", [
             toolbar,

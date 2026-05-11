@@ -1,5 +1,16 @@
 use os.compositor.cursor.{CursorState}
 use os.drivers.framebuffer.fb_driver.{Color}
+use os.kernel.boot.cpu.{port_inb, port_outb}
+
+extern fn rt_gui_fill4(xy: u64, wh: u64, color: u64, unused: u64) -> u64
+
+fn _comp_pack(hi: i32, lo: i32) -> u64:
+    (hi.to_u64() << 32) | (lo.to_u64() & 0xFFFFFFFF)
+
+fn _comp_fill(x: i32, y: i32, w: i32, h: i32, color: u32):
+    if w <= 0 or h <= 0:
+        return
+    rt_gui_fill4(_comp_pack(x, y), _comp_pack(w, h), color.to_u64(), 0)
 
 class WindowSurface:
     id: i32
@@ -31,6 +42,8 @@ class Compositor:
     drag_window_id: i32
     drag_offset_x: i32
     drag_offset_y: i32
+    pending_meta_key: i32
+    pending_shortcut: text
 
     me create_window(title: text, x: i32, y: i32, width: i32, height: i32) -> i32:
         val id = self.next_id
@@ -149,3 +162,113 @@ class Compositor:
                 out.push(self.surfaces[i])
             i = i + 1
         out
+
+    me handle_input():
+        var alt_held = false
+        var status = port_inb(0x64)
+        while (status.to_i32() & 1) != 0:
+            var scancode = port_inb(0x60)
+            var sc = scancode.to_i32()
+            if sc == 0x38:
+                alt_held = true
+                self.pending_meta_key = 1
+            elif sc == 0xB8:
+                alt_held = false
+            elif alt_held and sc == 0x0F:
+                self.cycle_focus()
+            elif alt_held and sc == 0x3E:
+                if self.focused_idx >= 0 and self.focused_idx < self.surfaces.len():
+                    val focused_id = self.surfaces[self.focused_idx].id
+                    self.destroy_window(focused_id)
+            var next_status = port_inb(0x64)
+            status = next_status
+
+        var mstatus = port_inb(0x64)
+        if (mstatus.to_i32() & 0x21) == 0x21:
+            var b0 = port_inb(0x60)
+            var ms1 = port_inb(0x64)
+            if (ms1.to_i32() & 1) != 0:
+                var b1 = port_inb(0x60)
+                var ms2 = port_inb(0x64)
+                if (ms2.to_i32() & 1) != 0:
+                    var b2 = port_inb(0x60)
+                    var dx = b1.to_i32()
+                    var dy = b2.to_i32()
+                    if (b0.to_i32() & 0x10) != 0:
+                        dx = dx - 256
+                    if (b0.to_i32() & 0x20) != 0:
+                        dy = dy - 256
+                    var new_x = self.cursor.x + dx
+                    var new_y = self.cursor.y - dy
+                    if new_x < 0:
+                        new_x = 0
+                    if new_x >= self.screen_width:
+                        new_x = self.screen_width - 1
+                    if new_y < 0:
+                        new_y = 0
+                    if new_y >= self.screen_height:
+                        new_y = self.screen_height - 1
+                    var cursor_ref = self.cursor
+                    cursor_ref.x = new_x
+                    cursor_ref.y = new_y
+                    self.cursor = cursor_ref
+                    val left_btn = (b0.to_i32() & 0x01) != 0
+                    if left_btn:
+                        if self.dragging:
+                            val new_win_x = new_x - self.drag_offset_x
+                            val new_win_y = new_y - self.drag_offset_y
+                            self.move_window(self.drag_window_id, new_win_x, new_win_y)
+                        else:
+                            var hit_idx = -1
+                            var wi = 0
+                            while wi < self.surfaces.len():
+                                val s = self.surfaces[wi]
+                                if (new_x >= s.x and new_x < s.x + s.width and
+                                    new_y >= s.y and new_y < s.y + s.height):
+                                    hit_idx = wi
+                                wi = wi + 1
+                            if hit_idx >= 0:
+                                val hit = self.surfaces[hit_idx]
+                                if new_y < hit.y + 24:
+                                    self.dragging = true
+                                    self.drag_window_id = hit.id
+                                    self.drag_offset_x = new_x - hit.x
+                                    self.drag_offset_y = new_y - hit.y
+                                    self.focus_window(hit.id)
+                                else:
+                                    self.focus_window(hit.id)
+                    else:
+                        self.dragging = false
+
+    me render_all():
+        val bg = self.desktop_bg
+        val bg_color: u32 = ((bg.a.to_u32() & 0xFF) << 24) | ((bg.r.to_u32() & 0xFF) << 16) | ((bg.g.to_u32() & 0xFF) << 8) | (bg.b.to_u32() & 0xFF)
+        _comp_fill(0, 0, self.screen_width, self.screen_height, bg_color)
+        var i = 0
+        while i < self.surfaces.len():
+            val s = self.surfaces[i]
+            if s.visible:
+                _comp_fill(s.x, s.y, s.width, 24, 0xFF4A90D9)
+                _comp_fill(s.x, s.y, s.width, 1, 0xFF2A70B9)
+                _comp_fill(s.x, s.y, 1, s.height, 0xFF2A70B9)
+                _comp_fill(s.x + s.width - 1, s.y, 1, s.height, 0xFF2A70B9)
+                _comp_fill(s.x, s.y + s.height - 1, s.width, 1, 0xFF2A70B9)
+                _comp_fill(s.x + s.width - 24, s.y, 24, 24, 0xFFCC3333)
+                val body_y = s.y + 24
+                val body_h = s.height - 24
+                if body_h > 0:
+                    _comp_fill(s.x, body_y, s.width, body_h, 0xFF1A1A2E)
+            i = i + 1
+        val cx = self.cursor.x
+        val cy = self.cursor.y
+        _comp_fill(cx, cy, 8, 8, 0xFFFFFFFF)
+
+    me consume_pending_meta_key() -> i32:
+        val k = self.pending_meta_key
+        self.pending_meta_key = 0
+        k
+
+    me consume_pending_shortcut() -> text:
+        val s = self.pending_shortcut
+        self.pending_shortcut = ""
+        s

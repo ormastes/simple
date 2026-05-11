@@ -1,7 +1,7 @@
 @no_gc
 use std.nogc_sync_mut.allocator.{Allocator}
 use std.nogc_sync_mut.mimalloc_page_policy.{MiDelayedFreeEntry}
-# mimalloc pure-Simple port
+# mimalloc pure-Simple port — hub module
 #
 # Structural port of mimalloc's segment/page/free-list algorithm.
 # In interpreter mode: mock pointer simulation (arrays as backing store).
@@ -11,123 +11,48 @@ use std.nogc_sync_mut.mimalloc_page_policy.{MiDelayedFreeEntry}
 # - D-1: Single global heap; mimalloc_init() required before first use.
 # - D-2: Size-class lookup uses a linear table scan.
 # - D-3: Pure-Simple port is structural/simulation; C wiring (AC-3) is separate.
+#
+# Sub-modules:
+#   mimalloc_types.spl  — structs/enums, global state, size-class table + lookup
+#   mimalloc_page.spl   — page-level alloc/free/construction helpers
+#   mimalloc_stats.spl  — stats, options, MimallocAllocator
 
-# ============================================================================
-# Core Structures
-# ============================================================================
-
-struct MiBlock:
-    """Single free block in a page's free list. next is an index into the page's block array."""
-    next: usize
-
-struct MiPage:
-    """64 KiB unit holding blocks of one size class with three free lists."""
-    base: usize
-    block_size: usize
-    capacity: usize
-    used: usize
-    free: [MiBlock]
-    local_free: [MiBlock]
-    xthread_free: [MiBlock]
-
-struct MiSegment:
-    """32 MiB OS chunk divided into pages (slices)."""
-    slice_count: usize
-    thread_id: usize
-    pages: [MiPage]
-
-struct MiHeap:
-    """Per-heap (simulated thread-local) state with per-size-class page lists."""
-    size_classes: [usize]
-    pages_by_class: [[MiPage]]
-
-struct MiStats:
-    """Small statistics snapshot for the Simple mimalloc compatibility layer."""
-    allocated: usize
-    peak_allocated: usize
-    raw_allocated: usize
-    allocation_count: usize
-    free_count: usize
-
-enum MiOption:
-    ShowStats
-    Verbose
-    EagerCommit
-    Secure
-
-# ============================================================================
-# OS page provider hook (kernel sets this; default stub returns 0 = failure)
-# ============================================================================
-
-fn _default_os_page_alloc(_size: usize) -> usize:
-    """Stub OS page provider. Returns 0 (failure). Kernel replaces via mimalloc_set_os_page_alloc."""
-    0
-
-var _g_os_page_alloc: fn(usize) -> usize = _default_os_page_alloc
-
-fn mimalloc_set_os_page_alloc(f: fn(usize) -> usize):
-    """Inject a real OS page provider (e.g. PMM-backed). Must be called before mi_malloc_raw for large allocs."""
-    _g_os_page_alloc = f
-
-# ============================================================================
-# Global heap state (single-threaded; mimalloc_init required before use)
-# ============================================================================
-
-var _g_heap: MiHeap = MiHeap(size_classes: [], pages_by_class: [])
-var _g_total_allocated: usize = 0
-var _g_raw_allocated: usize = 0
-var _g_peak_allocated: usize = 0
-var _g_allocation_count: usize = 0
-var _g_free_count: usize = 0
-var _g_delayed_free: [MiDelayedFreeEntry] = []
-var _g_option_show_stats: bool = false
-var _g_option_verbose: bool = false
-var _g_option_eager_commit: bool = false
-var _g_option_secure: bool = false
-
-# ============================================================================
-# Size-class lookup
-# ============================================================================
-
-# Fixed 32-entry size-class table covering 8..65536.
-# Small classes: 8, 16, 32, 64, 128, 256, 512, 1024  (indices 0..7)
-# Medium classes: 2048, 4096, 8192, 16384, 32768, 65536  (indices 8..13)
-# Anything larger: return 14 (large class, delegated to g_os_page_alloc in mi_malloc_raw)
-val _SIZE_CLASS_TABLE: [usize] = [8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768, 65536]
-
-fn mi_size_class_index(size: usize) -> i64:
-    """Map a size to its size-class index. Uses linear scan over _SIZE_CLASS_TABLE."""
-    var i: i64 = 0
-    for sc in _SIZE_CLASS_TABLE:
-        if size <= sc:
-            return i
-        i = i + 1
-    i  # sizes > 65536: large class
-
-fn _size_class_slot(size: usize) -> usize:
-    """Map a size to an internal pages_by_class slot without signed casts."""
-    var i: usize = 0
-    for sc in _SIZE_CLASS_TABLE:
-        if size <= sc:
-            return i
-        i = i + 1
-    i
-
-fn _class_size(idx: usize) -> usize:
-    if idx >= _SIZE_CLASS_TABLE.len():
-        0
-    else:
-        _SIZE_CLASS_TABLE[idx]
-
-fn _is_power_of_two(value: usize) -> bool:
-    if value == 0:
-        return false
-    var n = value
-    while n > 1:
-        if n % 2 != 0:
-            return false
-        n = n / 2
-    true
+use std.nogc_sync_mut.mimalloc_types.{
+    MiBlock,
+    MiPage,
+    MiSegment,
+    MiHeap,
+    MiStats,
+    MiOption,
+    _g_heap,
+    _g_total_allocated,
+    _g_raw_allocated,
+    _g_peak_allocated,
+    _g_allocation_count,
+    _g_free_count,
+    _g_delayed_free,
+    _g_os_page_alloc,
+    _g_option_show_stats,
+    _g_option_verbose,
+    _g_option_eager_commit,
+    _g_option_secure,
+    _SIZE_CLASS_TABLE,
+    mi_size_class_index,
+    _size_class_slot,
+    _class_size,
+    _is_power_of_two,
+    _g_total_allocated_get,
+    _default_os_page_alloc,
+    mimalloc_set_os_page_alloc
+}
+use std.nogc_sync_mut.mimalloc_page.{
+    _page_alloc_from_free,
+    _page_alloc_raw,
+    _page_free_to_local,
+    _new_page,
+    _blocks_per_page,
+    _raw_blocks_per_page
+}
 
 # ============================================================================
 # Heap initialization
@@ -152,13 +77,7 @@ fn mimalloc_init(heap: MiHeap):
         _g_heap = MiHeap(size_classes: _g_heap.size_classes, pages_by_class: pbc)
 
 fn mi_heap_new() -> MiHeap:
-    """Create an independent heap with its own size_classes and pages_by_class slots.
-
-    Each call returns a new heap value that is isolated from the global heap
-    and from other heaps returned by mi_heap_new. The caller is responsible
-    for initializing the returned heap before use (e.g. via mimalloc_init or
-    by passing it directly to mi_heap_malloc).
-    """
+    """Create an independent heap with its own size_classes and pages_by_class slots."""
     var pbc: [[MiPage]] = []
     for _sc in _SIZE_CLASS_TABLE:
         pbc = pbc.push([])
@@ -167,11 +86,7 @@ fn mi_heap_new() -> MiHeap:
     MiHeap(size_classes: [], pages_by_class: pbc)
 
 fn mi_heap_delete(_heap: MiHeap):
-    """Delete a heap value.
-
-    This structural port owns no external heap resource per MiHeap value, so
-    deletion is a no-op until per-heap arenas are implemented.
-    """
+    """Delete a heap value (no-op until per-heap arenas are implemented)."""
     return
 
 fn mi_heap_malloc(_heap: MiHeap, size: usize) -> [u8]?:
@@ -213,109 +128,11 @@ fn _record_free(size: usize):
     _g_free_count = _g_free_count + 1
 
 fn _drain_delayed_free():
-    """Process all pending cross-thread free entries from _g_delayed_free.
-
-    Calls _record_free for each drained entry then clears the global list.
-    Called at the top of mi_malloc to integrate deferred frees before allocating.
-    """
+    """Process all pending cross-thread free entries from _g_delayed_free."""
     val pending = _g_delayed_free
     _g_delayed_free = []
     for entry in pending:
         _record_free(entry.block_size)
-
-# ============================================================================
-# Page operations
-# ============================================================================
-
-fn _page_alloc_from_free(page: MiPage) -> (MiPage, [u8]?):
-    """Pop one block from the page's free list. Returns updated page + mock ptr."""
-    if page.free.len() == 0:
-        (page, nil)
-    else:
-        val block = page.free[0]
-        val new_free = page.free[1:]
-        val new_page = MiPage(
-            base: page.base,
-            block_size: page.block_size,
-            capacity: page.capacity,
-            used: page.used + 1,
-            free: new_free,
-            local_free: page.local_free,
-            xthread_free: page.xthread_free,
-        )
-        # In interpreter mode, return a mock allocation of block_size bytes
-        val mock_ptr: [u8] = [0u8; page.block_size]
-        (new_page, Some(mock_ptr))
-
-fn _page_alloc_raw(page: MiPage) -> (MiPage, usize):
-    """Pop one block from the page's free list. Returns updated page + virtual address."""
-    if page.free.len() == 0:
-        (page, 0)
-    else:
-        val block = page.free[0]
-        val new_free = page.free[1:]
-        val new_page = MiPage(
-            base: page.base,
-            block_size: page.block_size,
-            capacity: page.capacity,
-            used: page.used + 1,
-            free: new_free,
-            local_free: page.local_free,
-            xthread_free: page.xthread_free,
-        )
-        val addr = page.base + block.next * page.block_size
-        (new_page, addr)
-
-fn _page_free_to_local(page: MiPage, _ptr: [u8]) -> MiPage:
-    """Push a freed block onto local_free. ptr ignored in interpreter mode."""
-    val block = MiBlock(next: 0)
-    val new_local = page.local_free.push(block)
-    MiPage(
-        base: page.base,
-        block_size: page.block_size,
-        capacity: page.capacity,
-        used: page.used - 1,
-        free: page.free,
-        local_free: new_local,
-        xthread_free: page.xthread_free,
-    )
-
-fn _new_page(block_size: usize, capacity: usize, base: usize) -> MiPage:
-    """Carve a new page with a full free list."""
-    var free_list: [MiBlock] = []
-    var idx: usize = 0
-    while idx < capacity:
-        free_list = free_list.push(MiBlock(next: idx))
-        idx = idx + 1
-    MiPage(
-        base: base,
-        block_size: block_size,
-        capacity: capacity,
-        used: 0,
-        free: free_list,
-        local_free: [],
-        xthread_free: [],
-    )
-
-# Default number of blocks carved per new page
-fn _blocks_per_page(block_size: usize) -> usize:
-    if block_size == 0:
-        0
-    elif block_size <= 64:
-        64
-    elif block_size <= 512:
-        16
-    else:
-        8
-
-fn _raw_blocks_per_page(block_size: usize) -> usize:
-    """Blocks per 4 KiB OS page for kernel raw allocator."""
-    if block_size == 0:
-        0
-    elif block_size <= 4096:
-        4096 / block_size
-    else:
-        1
 
 # ============================================================================
 # Main allocation/free/realloc
@@ -418,11 +235,7 @@ fn mi_mallocn(count: usize, size: usize) -> [u8]?:
     mi_malloc(total)
 
 fn mi_malloc_aligned(size: usize, alignment: usize) -> [u8]?:
-    """Allocate memory with a validated power-of-two alignment request.
-
-    The current Simple mock pointer is a byte array and cannot expose its
-    address. This validates the contract input and delegates to mi_malloc.
-    """
+    """Allocate memory with a validated power-of-two alignment request."""
     if not _is_power_of_two(alignment):
         return nil
     mi_malloc(size)
@@ -538,28 +351,12 @@ fn mi_rezalloc_aligned(ptr: [u8], old_size: usize, new_size: usize, alignment: u
         return nil
     mi_rezalloc(ptr, old_size, new_size)
 
-fn _g_total_allocated_get() -> usize:
-    _g_total_allocated
-
 # ============================================================================
 # Raw kernel API — returns usize (virtual address); 0 = failure
-#
-# mi_malloc_raw: kernel-facing allocator that returns a VirtAddr as usize.
-#   - Small/medium (class 0..13, ≤ 65536): uses MiPage bookkeeping so
-#     multiple allocs share a single 4 KiB OS page (sub-page bucketing).
-#   - Large (class 14, > 65536): calls g_os_page_alloc(size) directly.
-#   - If g_os_page_alloc returns 0 (stub mode), returns 0 (nil).
-#
-# mi_free_raw: returns the block to the owning MiPage's free list for reuse.
 # ============================================================================
 
 fn mi_malloc_raw(size: usize) -> usize:
-    """Kernel-facing allocator. Returns virtual address as usize; 0 = failure.
-
-    Small/medium allocs share 4 KiB OS pages via MiPage free-list bookkeeping.
-    Large allocs go directly to g_os_page_alloc. Works in interpreter stub
-    mode (g_os_page_alloc returns 0 -> returns 0).
-    """
+    """Kernel-facing allocator. Returns virtual address as usize; 0 = failure."""
     if size == 0:
         return 0
 
@@ -657,11 +454,7 @@ fn _raw_free_to_page(addr: usize, class_idx: usize):
         page_idx = page_idx + 1
 
 fn mi_free_raw(addr: usize, size: usize):
-    """Kernel-facing free. Returns block to owning page's free list.
-
-    Small/medium allocs locate the owning MiPage by address range and push the
-    block back. Large allocs only update the counter (OS page reclaim deferred).
-    """
+    """Kernel-facing free. Returns block to owning page's free list."""
     if addr == 0:
         return
     val class_idx = _size_class_slot(size)
@@ -678,105 +471,6 @@ fn mi_free_raw(addr: usize, size: usize):
 fn mi_raw_allocated() -> usize:
     """Total bytes tracked by mi_malloc_raw (for diagnostics)."""
     _g_raw_allocated
-
-# ============================================================================
-# Stats, collection, and options compatibility shims
-# ============================================================================
-
-fn mi_stats_current() -> MiStats:
-    """Return a snapshot of modeled allocator statistics."""
-    MiStats(
-        allocated: _g_total_allocated,
-        peak_allocated: _g_peak_allocated,
-        raw_allocated: _g_raw_allocated,
-        allocation_count: _g_allocation_count,
-        free_count: _g_free_count,
-    )
-
-fn mi_stats_reset():
-    """Reset modeled statistics without changing allocated heap contents."""
-    _g_peak_allocated = _g_total_allocated
-    _g_allocation_count = 0
-    _g_free_count = 0
-
-fn mi_collect(force: bool):
-    """Collection hook — drains the delayed free list when force is true.
-
-    When force is true, all pending cross-thread free entries in _g_delayed_free
-    are processed via _drain_delayed_free() and the free counter reflects the
-    drain. When force is false the call is safe but does nothing (matches
-    mimalloc's non-forced collect semantics).
-    """
-    if force:
-        _drain_delayed_free()
-
-fn mi_heap_collect(_heap: MiHeap, force: bool):
-    """Heap-specific collection hook over the current single global heap."""
-    mi_collect(force)
-
-fn mi_version() -> text:
-    """Return a Simple compatibility-layer version string."""
-    "simple-mimalloc-compat"
-
-fn mi_option_is_enabled(option: MiOption) -> bool:
-    match option:
-        case MiOption.ShowStats: _g_option_show_stats
-        case MiOption.Verbose: _g_option_verbose
-        case MiOption.EagerCommit: _g_option_eager_commit
-        case MiOption.Secure: _g_option_secure
-
-fn mi_option_enable(option: MiOption):
-    mi_option_set_enabled(option, true)
-
-fn mi_option_disable(option: MiOption):
-    mi_option_set_enabled(option, false)
-
-fn mi_option_set_enabled(option: MiOption, enabled: bool):
-    match option:
-        case MiOption.ShowStats:
-            _g_option_show_stats = enabled
-        case MiOption.Verbose:
-            _g_option_verbose = enabled
-        case MiOption.EagerCommit:
-            _g_option_eager_commit = enabled
-        case MiOption.Secure:
-            _g_option_secure = enabled
-
-# ============================================================================
-# MimallocAllocator — implements Allocator trait
-# ============================================================================
-
-class MimallocAllocator:
-    """Allocator backed by the pure-Simple mimalloc port (single global heap).
-    Call mimalloc_init() before first use. All operations route through _g_heap.
-    """
-    initialized: bool
-
-impl MimallocAllocator:
-    static fn new() -> MimallocAllocator:
-        MimallocAllocator(initialized: false)
-
-impl Allocator for MimallocAllocator:
-    me allocate(size: usize, align: usize) -> [u8]?:
-        if not self.initialized or size == 0:
-            return nil
-        mi_malloc(size)
-
-    me deallocate(ptr: [u8], size: usize, align: usize):
-        if self.initialized:
-            mi_free(ptr, size)
-
-    me reallocate(ptr: [u8], old_size: usize, new_size: usize, align: usize) -> [u8]?:
-        if not self.initialized:
-            return nil
-        mi_realloc(ptr, old_size, new_size)
-
-    fn total_allocated() -> usize:
-        _g_total_allocated_get()
-
-fn default_allocator() -> MimallocAllocator:
-    """Return an uninitialized MimallocAllocator. Call mimalloc_init() before use."""
-    MimallocAllocator.new()
 
 # ============================================================================
 # Exports

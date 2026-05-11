@@ -443,6 +443,45 @@ impl VirtioBlkDriver:
             i = i + 1
         nil
 
+    static fn probe_all() -> [VirtioBlkDriver]:
+        """Scan all QEMU virtio-mmio slots and return every VirtIO-BLK device found.
+
+        Does NOT mutate g_virtio_blk_mmio_base — leaves the active runtime
+        base unchanged so the primary root device keeps working.
+        Only call probe_nth/set_active separately when you intend to switch
+        or initialize a secondary device.
+        """
+        var found: [VirtioBlkDriver] = []
+        var i: i32 = 0
+        while i < 32:
+            val addr = VIRTIO_MMIO_BASE + ((i as u64) * VIRTIO_MMIO_STRIDE)
+            val magic = mmio_read32(addr)
+            if magic == VIRTIO_MAGIC:
+                val dev_type = mmio_read32(addr + 8)
+                if dev_type == VIRTIO_DEV_BLK:
+                    log_info("[virtio] " + "[virtio-blk-probe-all] mmio=0x{addr}")
+                    found = found.push(VirtioBlkDriver.new(addr))
+            i = i + 1
+        found
+
+    static fn probe_nth(index: u64) -> VirtioBlkDriver?:
+        """Return the Nth VirtIO-BLK device found during MMIO scan (0-based).
+
+        Sets g_virtio_blk_mmio_base to the found device's address so
+        subsequent low-level I/O targets the correct device.
+        On NVMe-primary boots this is safe for secondary-only use;
+        avoid calling when VirtIO-BLK is the root device unless you
+        save/restore the base yourself.
+        """
+        val all = VirtioBlkDriver.probe_all()
+        val idx = index.to_i32()
+        if idx >= all.len():
+            return nil
+        val drv = all[idx]
+        g_virtio_blk_mmio_base = drv.base_addr
+        rt_arm_virtio_blk_set_mmio_base(drv.base_addr)
+        Some(drv)
+
     me init_ok() -> bool:
         """Initialize VirtIO block device with a bool-only result.
 

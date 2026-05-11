@@ -1,18 +1,14 @@
 """
 # Async TLS I/O
 
-TLS 1.2 server implementation built on the synchronous building blocks
-in `nogc_sync_mut/tls/`. Wraps an async TCP stream, performs the TLS
+TLS 1.2 server implementation. Wraps an async TCP stream, performs the TLS
 handshake via the IoDriver completion model, then provides encrypted
 read/write over the negotiated session.
 
 ## Wire Encoding
 
 All byte-level wire data uses `text` strings where each character is one
-byte produced by `rt_byte_char(v)`.  The building blocks in record.spl,
-handshake.spl, cipher.spl, and utilities.spl operate on `[i64]` byte
-arrays internally; we convert at the I/O boundary with `bytes_to_wire`
-and `wire_to_bytes`.
+byte produced by `rt_byte_char(v)`. See tls_common.spl for encoding helpers.
 
 ## Cipher Suites
 
@@ -21,145 +17,50 @@ Server-side negotiation currently supports TLS_RSA_WITH_AES_128_GCM_SHA256
 yet exist; the cipher negotiation code is structured so adding ECDHE is a
 one-line change once rt_ecdh_agree lands.
 
-## Components
+## Sub-modules
 
-| Type | Description |
+| File | Description |
 |------|-------------|
-| TlsConfig | Certificate chain + private key + version range |
-| TlsSessionKeys | Derived symmetric keys for a negotiated session |
-| AsyncTlsStream | Encrypted async stream wrapping a TCP fd |
-| AsyncTlsListener | Accepts TCP, performs TLS handshake, returns AsyncTlsStream |
+| tls_common.spl | Shared types, wire encoding helpers, TlsConfig/TlsSessionKeys/TlsHandshakeState |
+| tls_io.spl | IoDriver I/O primitives, record-layer wire builders, TCP FFI |
+| tls_handshake.spl | perform_server_handshake + all helpers |
+| tls.spl | AsyncTlsStream, AsyncTlsListener (this file) |
 """
 
-use std.tls.certificate.{TlsCertificateChain, TlsPrivateKey}
 use std.common.io.types.{IoError, IoErrorKind}
 use std.nogc_async_mut.io.driver.{IoDriver}
-
-# Building blocks
 use std.tls.types.{
-    CONTENT_TYPE_CHANGE_CIPHER_SPEC,
     CONTENT_TYPE_ALERT,
-    CONTENT_TYPE_HANDSHAKE,
     CONTENT_TYPE_APPLICATION_DATA,
     TLS_VERSION_1_2,
-    HANDSHAKE_TYPE_CLIENT_HELLO,
-    HANDSHAKE_TYPE_SERVER_HELLO,
-    HANDSHAKE_TYPE_CERTIFICATE,
-    HANDSHAKE_TYPE_SERVER_HELLO_DONE,
-    HANDSHAKE_TYPE_CLIENT_KEY_EXCHANGE,
-    HANDSHAKE_TYPE_FINISHED,
-    CIPHER_TLS_RSA_WITH_AES_128_GCM_SHA256,
-    ALERT_LEVEL_FATAL,
-    ALERT_DESC_UNEXPECTED_MESSAGE,
-    ALERT_DESC_HANDSHAKE_FAILURE,
-    ALERT_DESC_DECODE_ERROR,
     TLS_RECORD_HEADER_SIZE,
     TLS_MAX_FRAGMENT_LENGTH
 }
-use std.tls.record.{
-    parse_tls_record,
-    is_fatal_alert
+use std.tls.record.{is_fatal_alert}
+use std.nogc_async_mut.io.tls_common.{
+    TlsConfig,
+    TlsSessionKeys,
+    TlsHandshakeState,
+    bytes_to_wire,
+    wire_to_bytes,
+    encode_u8,
+    encode_u16_be
 }
-use std.tls.handshake.{
-    parse_handshake_message,
-    compute_verify_data
+use std.nogc_async_mut.io.tls_io.{
+    read_tls_record,
+    recv_exact,
+    send_all,
+    build_gcm_nonce,
+    build_aead_aad,
+    rt_io_tcp_bind,
+    rt_io_tcp_close,
+    rt_socket_set_nonblocking
 }
-use std.tls.cipher.{
-    compute_master_secret,
-    derive_keys
-}
-use std.tls.utilities.{
-    generate_random,
-    constant_time_compare,
-    concat_bytes,
-    byte_at,
-    slice,
-    to_bytes,
-    sha256
-}
+use std.nogc_async_mut.io.tls_handshake.{perform_server_handshake}
+use std.tls.utilities.{byte_at}
 
-# ============================================================================
-# Crypto Externs (implemented in C runtime)
-# ============================================================================
-
-extern fn rt_byte_char(v: i64) -> text
-extern fn rt_rsa_decrypt(ciphertext: text, private_key: text) -> text
 extern fn rt_aes_gcm_encrypt(key: text, iv: text, plaintext: text, aad: text) -> text
 extern fn rt_aes_gcm_decrypt(key: text, iv: text, ciphertext: text, aad: text) -> text
-
-# ============================================================================
-# Wire Encoding Helpers
-# ============================================================================
-
-fn bytes_to_wire(bytes: [i64]) -> text:
-    """Convert a byte array [i64] to a wire-format text string."""
-    var result = ""
-    var i = 0
-    val n = len(bytes)
-    while i < n:
-        result = result + rt_byte_char(bytes[i] & 255)
-        i = i + 1
-    result
-
-fn wire_to_bytes(wire: text) -> [i64]:
-    """Convert a wire-format text string to a byte array [i64]."""
-    to_bytes(wire)
-
-fn encode_u16_be(value: i64) -> text:
-    """Encode a 16-bit value as 2-byte big-endian wire text."""
-    rt_byte_char((value >> 8) & 255) + rt_byte_char(value & 255)
-
-fn encode_u24_be(value: i64) -> text:
-    """Encode a 24-bit value as 3-byte big-endian wire text."""
-    rt_byte_char((value >> 16) & 255) + rt_byte_char((value >> 8) & 255) + rt_byte_char(value & 255)
-
-fn encode_u8(value: i64) -> text:
-    """Encode a single byte as wire text."""
-    rt_byte_char(value & 255)
-
-# ============================================================================
-# TLS Configuration
-# ============================================================================
-
-class TlsConfig:
-    cert_chain: TlsCertificateChain
-    private_key: TlsPrivateKey
-    min_version: i64
-    max_version: i64
-
-    static fn server(chain: TlsCertificateChain, key: TlsPrivateKey) -> TlsConfig:
-        TlsConfig(
-            cert_chain: chain,
-            private_key: key,
-            min_version: TLS_VERSION_1_2,
-            max_version: TLS_VERSION_1_2
-        )
-
-# ============================================================================
-# TLS Session Keys
-# ============================================================================
-
-struct TlsSessionKeys:
-    client_write_key: text
-    server_write_key: text
-    client_write_iv: text
-    server_write_iv: text
-    client_write_mac_key: text
-    server_write_mac_key: text
-
-# ============================================================================
-# TLS Handshake State
-# ============================================================================
-
-struct TlsHandshakeState:
-    client_random: [i64]
-    server_random: [i64]
-    cipher_suite: i64
-    master_secret: [i64]
-    handshake_messages: text
-    session_keys: TlsSessionKeys?
-    client_seq: i64
-    server_seq: i64
 
 # ============================================================================
 # AsyncTlsStream
@@ -342,494 +243,3 @@ class AsyncTlsListener:
             self.driver.flush()
             self.driver.poll(1, 1000)
             self.is_open = false
-
-# ============================================================================
-# TLS 1.2 Server Handshake
-# ============================================================================
-
-fn perform_server_handshake(driver: IoDriver, fd: i64, config: TlsConfig) -> Result<TlsHandshakeState, IoError>:
-    """Full TLS 1.2 server-side handshake.
-
-    Flow: ClientHello -> ServerHello + Certificate + ServerHelloDone
-          <- ClientKeyExchange + ChangeCipherSpec + Finished
-          -> ChangeCipherSpec + Finished
-    """
-    # --- 1. Receive ClientHello record ---
-    val ch_record = read_tls_record(driver, fd)
-    if ch_record == nil:
-        return Err(IoError(kind: IoErrorKind.ConnectionReset, message: "no ClientHello received"))
-
-    val ch_record_bytes = wire_to_bytes(ch_record)
-    val parsed_record = parse_tls_record(ch_record_bytes)
-    if parsed_record == nil:
-        return Err(IoError(kind: IoErrorKind.InvalidData, message: "invalid TLS record"))
-
-    val record_type = parsed_record[0]
-    val record_version = parsed_record[1]
-    val record_payload = parsed_record[2]
-
-    if record_type != CONTENT_TYPE_HANDSHAKE:
-        send_fatal_alert(driver, fd, ALERT_DESC_UNEXPECTED_MESSAGE)
-        return Err(IoError(kind: IoErrorKind.InvalidData, message: "expected handshake record"))
-
-    val hs_msg = parse_handshake_message(record_payload)
-    if hs_msg == nil:
-        send_fatal_alert(driver, fd, ALERT_DESC_DECODE_ERROR)
-        return Err(IoError(kind: IoErrorKind.InvalidData, message: "invalid handshake message"))
-
-    val hs_type = hs_msg[0]
-    val hs_payload = hs_msg[2]
-
-    if hs_type != HANDSHAKE_TYPE_CLIENT_HELLO:
-        send_fatal_alert(driver, fd, ALERT_DESC_UNEXPECTED_MESSAGE)
-        return Err(IoError(kind: IoErrorKind.InvalidData, message: "expected ClientHello"))
-
-    val client_hello = parse_client_hello_payload(hs_payload)
-    if client_hello == nil:
-        send_fatal_alert(driver, fd, ALERT_DESC_DECODE_ERROR)
-        return Err(IoError(kind: IoErrorKind.InvalidData, message: "failed to parse ClientHello"))
-
-    val ch_version = client_hello[0]
-    val ch_random = client_hello[1]
-    val ch_cipher_suites = client_hello[3]
-
-    # Track all handshake messages for Finished verification
-    var all_handshake_bytes = record_payload
-
-    # --- 2. Select cipher suite ---
-    val selected_cipher = negotiate_cipher(ch_cipher_suites)
-    if selected_cipher < 0:
-        send_fatal_alert(driver, fd, ALERT_DESC_HANDSHAKE_FAILURE)
-        return Err(IoError(kind: IoErrorKind.Other, message: "no common cipher suite"))
-
-    # --- 3. Generate server random ---
-    val server_random = generate_random(32)
-
-    # --- 4. Build and send ServerHello ---
-    val sh_body = build_server_hello_bytes(TLS_VERSION_1_2, server_random, selected_cipher)
-    val sh_hs = build_handshake_wire(HANDSHAKE_TYPE_SERVER_HELLO, sh_body)
-    all_handshake_bytes = concat_bytes(all_handshake_bytes, wire_to_bytes(sh_hs))
-
-    val sh_record = build_record_wire(CONTENT_TYPE_HANDSHAKE, TLS_VERSION_1_2, sh_hs)
-    val sh_sent = send_all(driver, fd, sh_record)
-    if not sh_sent:
-        return Err(IoError(kind: IoErrorKind.BrokenPipe, message: "failed to send ServerHello"))
-
-    # --- 5. Build and send Certificate ---
-    val cert_body = build_certificate_body(config.cert_chain)
-    val cert_hs = build_handshake_wire(HANDSHAKE_TYPE_CERTIFICATE, cert_body)
-    all_handshake_bytes = concat_bytes(all_handshake_bytes, wire_to_bytes(cert_hs))
-
-    val cert_record = build_record_wire(CONTENT_TYPE_HANDSHAKE, TLS_VERSION_1_2, cert_hs)
-    val cert_sent = send_all(driver, fd, cert_record)
-    if not cert_sent:
-        return Err(IoError(kind: IoErrorKind.BrokenPipe, message: "failed to send Certificate"))
-
-    # --- 6. Build and send ServerHelloDone ---
-    val shd_hs = build_handshake_wire(HANDSHAKE_TYPE_SERVER_HELLO_DONE, "")
-    all_handshake_bytes = concat_bytes(all_handshake_bytes, wire_to_bytes(shd_hs))
-
-    val shd_record = build_record_wire(CONTENT_TYPE_HANDSHAKE, TLS_VERSION_1_2, shd_hs)
-    val shd_sent = send_all(driver, fd, shd_record)
-    if not shd_sent:
-        return Err(IoError(kind: IoErrorKind.BrokenPipe, message: "failed to send ServerHelloDone"))
-
-    # --- 7. Receive ClientKeyExchange ---
-    val cke_record_wire = read_tls_record(driver, fd)
-    if cke_record_wire == nil:
-        return Err(IoError(kind: IoErrorKind.ConnectionReset, message: "no ClientKeyExchange received"))
-
-    val cke_record_bytes = wire_to_bytes(cke_record_wire)
-    val cke_parsed = parse_tls_record(cke_record_bytes)
-    if cke_parsed == nil:
-        return Err(IoError(kind: IoErrorKind.InvalidData, message: "invalid ClientKeyExchange record"))
-
-    val cke_payload = cke_parsed[2]
-    val cke_hs = parse_handshake_message(cke_payload)
-    if cke_hs == nil:
-        send_fatal_alert(driver, fd, ALERT_DESC_DECODE_ERROR)
-        return Err(IoError(kind: IoErrorKind.InvalidData, message: "invalid ClientKeyExchange handshake"))
-
-    val cke_type = cke_hs[0]
-    val cke_data = cke_hs[2]
-
-    if cke_type != HANDSHAKE_TYPE_CLIENT_KEY_EXCHANGE:
-        send_fatal_alert(driver, fd, ALERT_DESC_UNEXPECTED_MESSAGE)
-        return Err(IoError(kind: IoErrorKind.InvalidData, message: "expected ClientKeyExchange"))
-
-    all_handshake_bytes = concat_bytes(all_handshake_bytes, cke_payload)
-
-    # RSA key exchange: decrypt the pre-master secret
-    val encrypted_pms_wire = extract_encrypted_pms(cke_data)
-    val pms_wire = rt_rsa_decrypt(encrypted_pms_wire, config.private_key.raw_der)
-    if pms_wire == nil:
-        send_fatal_alert(driver, fd, ALERT_DESC_HANDSHAKE_FAILURE)
-        return Err(IoError(kind: IoErrorKind.Other, message: "RSA decryption of pre-master secret failed"))
-
-    val pre_master_secret = wire_to_bytes(pms_wire)
-
-    # --- 8. Compute master secret and derive keys ---
-    val master_secret = compute_master_secret(pre_master_secret, ch_random, server_random)
-
-    # AES-128-GCM: mac_key_len=0 (AEAD), enc_key_len=16, iv_len=4 (implicit nonce)
-    val keys_tuple = derive_keys(master_secret, ch_random, server_random, 0, 16, 4)
-    val session_keys = TlsSessionKeys(
-        client_write_mac_key: bytes_to_wire(keys_tuple[0]),
-        server_write_mac_key: bytes_to_wire(keys_tuple[1]),
-        client_write_key: bytes_to_wire(keys_tuple[2]),
-        server_write_key: bytes_to_wire(keys_tuple[3]),
-        client_write_iv: bytes_to_wire(keys_tuple[4]),
-        server_write_iv: bytes_to_wire(keys_tuple[5])
-    )
-
-    # --- 9. Receive ChangeCipherSpec ---
-    val ccs_record_wire = read_tls_record(driver, fd)
-    if ccs_record_wire == nil:
-        return Err(IoError(kind: IoErrorKind.ConnectionReset, message: "no ChangeCipherSpec received"))
-
-    val ccs_bytes = wire_to_bytes(ccs_record_wire)
-    val ccs_parsed = parse_tls_record(ccs_bytes)
-    if ccs_parsed == nil:
-        return Err(IoError(kind: IoErrorKind.InvalidData, message: "invalid ChangeCipherSpec record"))
-
-    val ccs_type = ccs_parsed[0]
-    if ccs_type != CONTENT_TYPE_CHANGE_CIPHER_SPEC:
-        send_fatal_alert(driver, fd, ALERT_DESC_UNEXPECTED_MESSAGE)
-        return Err(IoError(kind: IoErrorKind.InvalidData, message: "expected ChangeCipherSpec"))
-
-    # --- 10. Receive client Finished (encrypted) ---
-    val fin_record_wire = read_tls_record(driver, fd)
-    if fin_record_wire == nil:
-        return Err(IoError(kind: IoErrorKind.ConnectionReset, message: "no client Finished received"))
-
-    val fin_bytes = wire_to_bytes(fin_record_wire)
-    val fin_parsed = parse_tls_record(fin_bytes)
-    if fin_parsed == nil:
-        return Err(IoError(kind: IoErrorKind.InvalidData, message: "invalid Finished record"))
-
-    val fin_ct = fin_parsed[2]
-
-    # Decrypt client Finished with client write key, seq=0
-    val client_fin_nonce = build_gcm_nonce(session_keys.client_write_iv, 0)
-    val fin_payload_wire = bytes_to_wire(fin_ct)
-    val fin_record_len = len(fin_ct)
-    val fin_aad = build_aead_aad(0, CONTENT_TYPE_HANDSHAKE, TLS_VERSION_1_2, fin_record_len)
-    val fin_plaintext = rt_aes_gcm_decrypt(
-        session_keys.client_write_key,
-        client_fin_nonce,
-        fin_payload_wire,
-        fin_aad
-    )
-    if fin_plaintext == nil:
-        send_fatal_alert(driver, fd, ALERT_DESC_DECODE_ERROR)
-        return Err(IoError(kind: IoErrorKind.InvalidData, message: "failed to decrypt client Finished"))
-
-    val fin_plaintext_bytes = wire_to_bytes(fin_plaintext)
-    val fin_hs = parse_handshake_message(fin_plaintext_bytes)
-    if fin_hs == nil:
-        send_fatal_alert(driver, fd, ALERT_DESC_DECODE_ERROR)
-        return Err(IoError(kind: IoErrorKind.InvalidData, message: "invalid Finished handshake"))
-
-    val client_verify_data = fin_hs[2]
-
-    # Verify client Finished
-    val handshake_hash = sha256(all_handshake_bytes)
-    val expected_verify = compute_verify_data(master_secret, "client finished", handshake_hash)
-    if not constant_time_compare(client_verify_data, expected_verify):
-        send_fatal_alert(driver, fd, ALERT_DESC_HANDSHAKE_FAILURE)
-        return Err(IoError(kind: IoErrorKind.InvalidData, message: "client Finished verification failed"))
-
-    # Add client Finished to handshake hash for server Finished computation
-    all_handshake_bytes = concat_bytes(all_handshake_bytes, fin_plaintext_bytes)
-
-    # --- 11. Send server ChangeCipherSpec ---
-    val server_ccs = encode_u8(CONTENT_TYPE_CHANGE_CIPHER_SPEC) + encode_u16_be(TLS_VERSION_1_2) + encode_u16_be(1) + encode_u8(1)
-    val ccs_sent = send_all(driver, fd, server_ccs)
-    if not ccs_sent:
-        return Err(IoError(kind: IoErrorKind.BrokenPipe, message: "failed to send server ChangeCipherSpec"))
-
-    # --- 12. Send server Finished (encrypted) ---
-    val server_hs_hash = sha256(all_handshake_bytes)
-    val server_verify = compute_verify_data(master_secret, "server finished", server_hs_hash)
-    val server_fin_hs = build_handshake_wire(HANDSHAKE_TYPE_FINISHED, bytes_to_wire(server_verify))
-    val server_fin_plaintext = server_fin_hs
-
-    val server_fin_nonce = build_gcm_nonce(session_keys.server_write_iv, 0)
-    val server_fin_pt_bytes = wire_to_bytes(server_fin_plaintext)
-    val server_fin_aad = build_aead_aad(0, CONTENT_TYPE_HANDSHAKE, TLS_VERSION_1_2, len(server_fin_pt_bytes))
-    val server_fin_ciphertext = rt_aes_gcm_encrypt(
-        session_keys.server_write_key,
-        server_fin_nonce,
-        server_fin_plaintext,
-        server_fin_aad
-    )
-
-    val server_fin_ct_len = len(wire_to_bytes(server_fin_ciphertext))
-    val server_fin_record = encode_u8(CONTENT_TYPE_HANDSHAKE) + encode_u16_be(TLS_VERSION_1_2) + encode_u16_be(server_fin_ct_len) + server_fin_ciphertext
-    val sfin_sent = send_all(driver, fd, server_fin_record)
-    if not sfin_sent:
-        return Err(IoError(kind: IoErrorKind.BrokenPipe, message: "failed to send server Finished"))
-
-    # Handshake complete
-    Ok(TlsHandshakeState(
-        client_random: ch_random,
-        server_random: server_random,
-        cipher_suite: selected_cipher,
-        master_secret: master_secret,
-        handshake_messages: bytes_to_wire(all_handshake_bytes),
-        session_keys: Some(session_keys),
-        client_seq: 1,
-        server_seq: 1
-    ))
-
-# ============================================================================
-# Handshake Helpers
-# ============================================================================
-
-fn parse_client_hello_payload(data: [i64]) -> [i64]?:
-    """Parse ClientHello body into (version, random, session_id, cipher_suites, extensions).
-
-    Uses the same approach as parse_server_hello in handshake.spl but
-    adapted for the client direction.
-    """
-    val data_len = len(data)
-    if data_len < 38:
-        return nil
-
-    val version = (byte_at(data, 0) * 256) + byte_at(data, 1)
-    val random = slice(data, 2, 34)
-    val session_id_len = byte_at(data, 34)
-
-    var offset = 35 + session_id_len
-    if offset + 2 > data_len:
-        return nil
-
-    val cipher_suites_len = (byte_at(data, offset) * 256) + byte_at(data, offset + 1)
-    offset = offset + 2
-
-    var cipher_suites: [i64] = []
-    var cs_offset = 0
-    while cs_offset < cipher_suites_len:
-        if offset + 1 >= data_len:
-            break
-        val cs = (byte_at(data, offset) * 256) + byte_at(data, offset + 1)
-        cipher_suites = cipher_suites + [cs]
-        offset = offset + 2
-        cs_offset = cs_offset + 2
-
-    # Skip compression methods
-    if offset >= data_len:
-        return (version, random, [], cipher_suites, [])
-    val comp_len = byte_at(data, offset)
-    offset = offset + 1 + comp_len
-
-    var extensions: [i64] = []
-    if offset < data_len:
-        extensions = slice(data, offset, data_len)
-
-    (version, random, [], cipher_suites, extensions)
-
-fn negotiate_cipher(client_ciphers: [i64]) -> i64:
-    """Select the best cipher suite the server supports from the client's list.
-
-    Server preference order: we walk our supported list and pick the first
-    one the client also offers.  Only RSA key-exchange suites are offered
-    because ECDHE requires ServerKeyExchange + rt_ecdh_agree which do not
-    exist yet.
-    """
-    val server_ciphers = [CIPHER_TLS_RSA_WITH_AES_128_GCM_SHA256]
-    val server_count = len(server_ciphers)
-    var si = 0
-    while si < server_count:
-        val server_cipher = server_ciphers[si]
-        val client_count = len(client_ciphers)
-        var ci = 0
-        while ci < client_count:
-            if client_ciphers[ci] == server_cipher:
-                return server_cipher
-            ci = ci + 1
-        si = si + 1
-    -1
-
-fn build_server_hello_bytes(version: i64, random: [i64], cipher_suite: i64) -> text:
-    """Construct the ServerHello body as wire bytes.
-
-    Format: version(2) + random(32) + session_id_len(1) + cipher_suite(2) + compression(1)
-    """
-    var result = encode_u16_be(version)
-    result = result + bytes_to_wire(random)
-    result = result + encode_u8(0)
-    result = result + encode_u16_be(cipher_suite)
-    result = result + encode_u8(0)
-    result
-
-fn build_certificate_body(chain: TlsCertificateChain) -> text:
-    """Build the Certificate handshake body.
-
-    Format: total_length(3) + [cert_length(3) + cert_der]*
-    """
-    var certs_wire = ""
-    val count = chain.chain_length()
-    var i = 0
-    while i < count:
-        val cert = chain.certs[i]
-        val der = cert.raw_der
-        val der_len = len(wire_to_bytes(der))
-        certs_wire = certs_wire + encode_u24_be(der_len) + der
-        i = i + 1
-
-    val total_len = len(wire_to_bytes(certs_wire))
-    encode_u24_be(total_len) + certs_wire
-
-fn extract_encrypted_pms(cke_data: [i64]) -> text:
-    """Extract the encrypted pre-master secret from ClientKeyExchange.
-
-    For RSA key exchange, the format is: length(2) + encrypted_pms.
-    """
-    val data_len = len(cke_data)
-    if data_len < 2:
-        return ""
-    val pms_len = (byte_at(cke_data, 0) * 256) + byte_at(cke_data, 1)
-    if data_len < 2 + pms_len:
-        return bytes_to_wire(slice(cke_data, 2, data_len))
-    bytes_to_wire(slice(cke_data, 2, 2 + pms_len))
-
-# ============================================================================
-# Record-Layer Wire Helpers
-# ============================================================================
-
-fn build_handshake_wire(msg_type: i64, body: text) -> text:
-    """Build a handshake message as wire bytes: type(1) + length(3) + body."""
-    val body_len = len(wire_to_bytes(body))
-    encode_u8(msg_type) + encode_u24_be(body_len) + body
-
-fn build_record_wire(content_type: i64, version: i64, payload: text) -> text:
-    """Build a TLS record as wire bytes: type(1) + version(2) + length(2) + payload."""
-    val payload_len = len(wire_to_bytes(payload))
-    encode_u8(content_type) + encode_u16_be(version) + encode_u16_be(payload_len) + payload
-
-fn build_gcm_nonce(implicit_iv: text, seq_num: i64) -> text:
-    """Build 12-byte GCM nonce: 4-byte implicit IV + 8-byte explicit seq number.
-
-    The implicit IV comes from key derivation; the explicit part is the
-    sequence number encoded as big-endian 8 bytes.
-    """
-    var explicit = ""
-    explicit = explicit + rt_byte_char((seq_num >> 56) & 255)
-    explicit = explicit + rt_byte_char((seq_num >> 48) & 255)
-    explicit = explicit + rt_byte_char((seq_num >> 40) & 255)
-    explicit = explicit + rt_byte_char((seq_num >> 32) & 255)
-    explicit = explicit + rt_byte_char((seq_num >> 24) & 255)
-    explicit = explicit + rt_byte_char((seq_num >> 16) & 255)
-    explicit = explicit + rt_byte_char((seq_num >> 8) & 255)
-    explicit = explicit + rt_byte_char(seq_num & 255)
-    implicit_iv + explicit
-
-fn build_aead_aad(seq_num: i64, content_type: i64, version: i64, length: i64) -> text:
-    """Build the additional authenticated data for AEAD ciphers.
-
-    Format: seq_num(8) + content_type(1) + version(2) + length(2) = 13 bytes
-    """
-    var aad = ""
-    aad = aad + rt_byte_char((seq_num >> 56) & 255)
-    aad = aad + rt_byte_char((seq_num >> 48) & 255)
-    aad = aad + rt_byte_char((seq_num >> 40) & 255)
-    aad = aad + rt_byte_char((seq_num >> 32) & 255)
-    aad = aad + rt_byte_char((seq_num >> 24) & 255)
-    aad = aad + rt_byte_char((seq_num >> 16) & 255)
-    aad = aad + rt_byte_char((seq_num >> 8) & 255)
-    aad = aad + rt_byte_char(seq_num & 255)
-    aad = aad + encode_u8(content_type)
-    aad = aad + encode_u16_be(version)
-    aad = aad + encode_u16_be(length)
-    aad
-
-fn send_fatal_alert(driver: IoDriver, fd: i64, description: i64):
-    """Send a fatal TLS alert to the peer."""
-    val alert_body = encode_u8(ALERT_LEVEL_FATAL) + encode_u8(description)
-    val alert_record = build_record_wire(CONTENT_TYPE_ALERT, TLS_VERSION_1_2, alert_body)
-    send_all(driver, fd, alert_record)
-
-# ============================================================================
-# I/O Primitives (IoDriver-based)
-# ============================================================================
-
-fn read_tls_record(driver: IoDriver, fd: i64) -> text?:
-    """Read one complete TLS record from the fd.
-
-    Reads the 5-byte header first, extracts the payload length, then
-    reads the payload. Returns the full record (header + payload) as wire text.
-    """
-    val header = recv_exact(driver, fd, TLS_RECORD_HEADER_SIZE)
-    if header == nil:
-        return nil
-
-    val header_bytes = wire_to_bytes(header)
-    if len(header_bytes) < TLS_RECORD_HEADER_SIZE:
-        return nil
-
-    val payload_len = (byte_at(header_bytes, 3) * 256) + byte_at(header_bytes, 4)
-    if payload_len > TLS_MAX_FRAGMENT_LENGTH:
-        return nil
-
-    if payload_len == 0:
-        return header
-
-    val payload = recv_exact(driver, fd, payload_len)
-    if payload == nil:
-        return nil
-
-    header + payload
-
-fn recv_exact(driver: IoDriver, fd: i64, needed: i64) -> text?:
-    """Receive exactly `needed` bytes from fd using the IoDriver.
-
-    Loops submit_recv + poll until all bytes are collected.
-    """
-    var collected = ""
-    var remaining = needed
-    var attempts = 0
-    val max_attempts = 100
-
-    while remaining > 0:
-        if attempts >= max_attempts:
-            return nil
-        attempts = attempts + 1
-
-        val op_id = driver.submit_recv(fd, remaining)
-        driver.flush()
-        val completions = driver.poll(1, 10000)
-        if len(completions) == 0:
-            return nil
-
-        val c = completions[0]
-        if c.result <= 0:
-            return nil
-
-        val chunk = driver.poll_data(0)
-        val chunk_len = driver.poll_data_len(0)
-        if chunk_len <= 0:
-            return nil
-
-        collected = collected + chunk
-        remaining = remaining - chunk_len
-
-    collected
-
-fn send_all(driver: IoDriver, fd: i64, data: text) -> bool:
-    """Send all bytes of `data` through the IoDriver."""
-    val op_id = driver.submit_send(fd, data)
-    driver.flush()
-    val completions = driver.poll(1, 10000)
-    if len(completions) == 0:
-        return false
-    val c = completions[0]
-    c.result >= 0
-
-# ============================================================================
-# TCP FFI (reused from tcp.spl pattern)
-# ============================================================================
-
-extern fn rt_io_tcp_bind(addr: text) -> i64
-extern fn rt_io_tcp_close(fd: i64) -> bool
-extern fn rt_socket_set_nonblocking(fd: i64, enabled: bool) -> bool

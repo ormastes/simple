@@ -1,0 +1,378 @@
+# UI Widget Node — impl WidgetNode methods
+
+use common.string_builder.{StringBuilder}
+use common.ui.widget_store_ops.{
+    WidgetNode,
+    WidgetRecord,
+    WidgetProp,
+    get_widget,
+    get_widget_record,
+    require_widget_record,
+    upsert_widget_record,
+    default_widget_record,
+    parse_layout_kind,
+    parse_semantic_prop,
+    register_widget_child,
+    get_internal_prop,
+    set_internal_prop,
+    decode_child_ids,
+    encode_child_ids,
+    widget_props
+}
+use common.ui.widget_store.{WidgetStore}
+use common.ui.widget_kind.{WidgetRecord, LayoutKind}
+use common.ui.design_tokens.{Spacing, Radius, SurfaceRole}
+use common.ui.theme_registry.{ThemeId}
+use common.ui.builder.{with_padding_token, with_radius_token, with_surface_role, with_on_typed_action,
+    with_responsive_layout, with_responsive_columns,
+    with_show_when_at_most, with_show_when_at_least, with_show_when_orientation}
+use common.ui.profile.{SizeClass, Orientation}
+use common.ui.action.{Action}
+
+impl WidgetNode:
+
+    static fn new(id: text, kind: text) -> WidgetNode:
+        val handle = WidgetNode(id: id)
+        upsert_widget_record(default_widget_record(id, kind))
+        return handle
+
+    fn kind_name() -> text:
+        return require_widget_record(self.id).kind.to_wire()
+
+    fn layout_name() -> text:
+        return require_widget_record(self.id).layout.to_wire()
+
+    fn is_visible() -> bool:
+        return require_widget_record(self.id).visible
+
+    fn is_focused() -> bool:
+        return require_widget_record(self.id).focused
+
+    fn kind() -> text: self.kind_name()
+    fn layout() -> text: self.layout_name()
+    fn visible() -> bool: self.is_visible()
+    fn focused() -> bool: self.is_focused()
+
+    fn set_prop(key: text, value: text) -> WidgetNode:
+        set_internal_prop(self.id, parse_semantic_prop(key), value)
+        return self
+
+    fn add_child(child: WidgetNode) -> WidgetNode:
+        register_widget_child(self.id, child.id)
+        return self
+
+    fn set_layout(layout: text) -> WidgetNode:
+        val record = require_widget_record(self.id)
+        upsert_widget_record(WidgetRecord(
+            id: self.id,
+            kind: record.kind,
+            layout: parse_layout_kind(layout),
+            visible: record.visible,
+            focused: record.focused,
+            icon_id: record.icon_id
+        ))
+        return self
+
+    fn set_visible(visible: bool) -> WidgetNode:
+        val record = require_widget_record(self.id)
+        upsert_widget_record(WidgetRecord(
+            id: self.id,
+            kind: record.kind,
+            layout: record.layout,
+            visible: visible,
+            focused: record.focused,
+            icon_id: record.icon_id
+        ))
+        return self
+
+    fn get_prop(key: text) -> text:
+        return get_internal_prop(self.id, key)
+
+    fn has_prop(key: text) -> bool:
+        for prop in widget_props():
+            if prop.node_id == self.id and prop.key == key:
+                return true
+        return false
+
+    fn prop_keys() -> [text]:
+        var keys: [text] = []
+        for prop in widget_props():
+            if prop.node_id == self.id:
+                keys = keys.push(prop.key)
+        return keys
+
+    fn children() -> [WidgetNode]:
+        var result: [WidgetNode] = []
+        val blob = get_internal_prop(self.id, "ui_children")
+        if blob == "":
+            return result
+        val sb = StringBuilder.new()
+        for ch in blob:
+            if ch == ",":
+                if not sb.is_empty():
+                    val child = get_widget(sb.to_text())
+                    if child != nil:
+                        result = result.push(child)
+                    sb.clear()
+            else:
+                sb.push(ch)
+        if not sb.is_empty():
+            val child = get_widget(sb.to_text())
+            if child != nil:
+                result = result.push(child)
+        return result
+
+    fn child_count() -> i32:
+        val ids = decode_child_ids(get_internal_prop(self.id, "ui_children"))
+        var count: i32 = 0
+        for id in ids:
+            count = count + 1
+        return count
+
+    fn child_at(index: i32) -> WidgetNode?:
+        if index < 0:
+            return nil
+        val ids = decode_child_ids(get_internal_prop(self.id, "ui_children"))
+        var i: i32 = 0
+        for id in ids:
+            if i == index:
+                return get_widget(id)
+            i = i + 1
+        return nil
+
+    fn find_by_id(target_id: text) -> WidgetNode?:
+        if self.id == target_id:
+            return self
+        for child in self.children():
+            val found = child.find_by_id(target_id)
+            if found != nil:
+                return found
+        return nil
+
+    fn collect_ids() -> [text]:
+        var ids: [text] = [self.id]
+        for child in self.children():
+            val child_ids = child.collect_ids()
+            for cid in child_ids:
+                ids = ids.push(cid)
+        return ids
+
+    fn widget_summary() -> text:
+        return "{self.id} ({self.kind_name()})"
+
+    # -- Store-param overloads -----------------------------------------------
+
+    fn get_prop_from(store: WidgetStore, key: text) -> text:
+        return store.get_prop(self.id, key)
+
+    fn set_prop_in(store: WidgetStore, key: text, value: text) -> WidgetNode:
+        store.set_prop(self.id, key, value)
+        return self
+
+    fn has_prop_in(store: WidgetStore, key: text) -> bool:
+        return store.get_prop(self.id, key) != ""
+
+    fn prop_keys_from(store: WidgetStore) -> [text]:
+        var keys: [text] = []
+        for prop in store.all_props():
+            if prop.node_id == self.id:
+                keys = keys.push(prop.key)
+        return keys
+
+    fn children_from(store: WidgetStore) -> [WidgetNode]:
+        var result: [WidgetNode] = []
+        val ids = store.get_child_ids(self.id)
+        for id in ids:
+            val node = store.get_node(id)
+            if node != nil:
+                result = result.push(node)
+        return result
+
+    fn add_child_in(store: WidgetStore, child: WidgetNode) -> WidgetNode:
+        store.register_child(self.id, child.id)
+        return self
+
+    fn kind_name_from(store: WidgetStore) -> text:
+        return store.require_record(self.id).kind.to_wire()
+
+    fn layout_name_from(store: WidgetStore) -> text:
+        return store.require_record(self.id).layout.to_wire()
+
+    fn is_visible_from(store: WidgetStore) -> bool:
+        return store.require_record(self.id).visible
+
+    fn find_by_id_in(store: WidgetStore, target_id: text) -> WidgetNode?:
+        if self.id == target_id:
+            return self
+        for child in self.children_from(store):
+            val found = child.find_by_id_in(store, target_id)
+            if found != nil:
+                return found
+        return nil
+
+    fn collect_ids_from(store: WidgetStore) -> [text]:
+        var ids: [text] = [self.id]
+        for child in self.children_from(store):
+            val child_ids = child.collect_ids_from(store)
+            for cid in child_ids:
+                ids = ids.push(cid)
+        return ids
+
+    # =========================================================================
+    # Fluent modifier methods (mirror builder.spl with_* helpers)
+    # =========================================================================
+
+    fn flex(n: i32) -> WidgetNode:
+        """Set flex sizing on a widget. Legacy: with_flex."""
+        return self.set_prop("flex", "{n}")
+
+    fn width(w: i32) -> WidgetNode:
+        """Set fixed width on a widget. Legacy: with_width."""
+        return self.set_prop("width", "{w}")
+
+    fn height(h: i32) -> WidgetNode:
+        """Set fixed height on a widget. Legacy: with_height."""
+        return self.set_prop("height", "{h}")
+
+    fn background(color: text) -> WidgetNode:
+        """Set semantic background color. Legacy: with_background."""
+        return self.set_prop("app-background", color)
+
+    fn surface(color: text) -> WidgetNode:
+        """Set semantic surface color. Legacy: with_surface."""
+        return self.set_prop("app-surface", color)
+
+    fn radius(r: text) -> WidgetNode:
+        """Set semantic border radius. Legacy: with_radius."""
+        return self.set_prop("widget-radius", r)
+
+    fn icon(icon_id: text) -> WidgetNode:
+        """Set a graphical icon for the widget. Legacy: with_icon."""
+        return self.set_prop("icon-id", icon_id)
+
+    fn shadow(s: text) -> WidgetNode:
+        """Set semantic shadow. Legacy: with_shadow."""
+        return self.set_prop("widget-shadow", s)
+
+    fn accent(color: text) -> WidgetNode:
+        """Set semantic accent color. Legacy: with_accent."""
+        return self.set_prop("accent-color", color)
+
+    fn set_visible_flag(v: bool) -> WidgetNode:
+        """Set visibility on a widget. Legacy: with_visible.
+        Named set_visible_flag to avoid conflict with the 0-arg visible() getter."""
+        return self.set_visible(v)
+
+    fn selected(index: i32) -> WidgetNode:
+        """Set the selected item index on a list widget. Legacy: with_selected."""
+        return self.set_prop("selected_index", "{index}")
+
+    fn disabled() -> WidgetNode:
+        """Mark a widget as disabled (non-interactive). Legacy: with_disabled."""
+        return self.set_prop("disabled", "true")
+
+    fn readonly() -> WidgetNode:
+        """Mark a widget as read-only. Legacy: with_readonly."""
+        return self.set_prop("readonly", "true")
+
+    fn error(message: text) -> WidgetNode:
+        """Set error state with a message on a widget. Legacy: with_error."""
+        var n = self.set_prop("error", "true")
+        n = n.set_prop("error_message", message)
+        return n
+
+    fn validator(pattern: text) -> WidgetNode:
+        """Set a regex validation pattern on a widget. Legacy: with_validator."""
+        return self.set_prop("validator", pattern)
+
+    fn required() -> WidgetNode:
+        """Mark a widget as required. Legacy: with_required."""
+        return self.set_prop("required", "true")
+
+    fn max_length(n: i32) -> WidgetNode:
+        """Set a maximum input length on a widget. Legacy: with_max_length."""
+        return self.set_prop("max_length", "{n}")
+
+    fn tooltip(tip: text) -> WidgetNode:
+        """Set an inline tooltip on any widget. Legacy: with_tooltip_text."""
+        return self.set_prop("tooltip", tip)
+
+    fn on_mount(handler_id: text) -> WidgetNode:
+        """Set the on_mount lifecycle handler id. Legacy: with_on_mount."""
+        return self.set_prop("on_mount", handler_id)
+
+    fn on_unmount(handler_id: text) -> WidgetNode:
+        """Set the on_unmount lifecycle handler id. Legacy: with_on_unmount."""
+        return self.set_prop("on_unmount", handler_id)
+
+    fn on_update(handler_id: text) -> WidgetNode:
+        """Set the on_update lifecycle handler id. Legacy: with_on_update."""
+        return self.set_prop("on_update", handler_id)
+
+    fn on_action(handler_id: text) -> WidgetNode:
+        """Set the on_action lifecycle handler id. Legacy: with_on_action."""
+        return self.set_prop("on_action", handler_id)
+
+    fn on_typed_action(action: Action) -> WidgetNode:
+        """Set the on_action handler from a typed Action (Phase 5 UI Typed Core RFC)."""
+        return with_on_typed_action(self, action)
+
+    fn on_focus(handler_id: text) -> WidgetNode:
+        """Set the on_focus lifecycle handler id. Legacy: with_on_focus."""
+        return self.set_prop("on_focus", handler_id)
+
+    fn on_blur(handler_id: text) -> WidgetNode:
+        """Set the on_blur lifecycle handler id. Legacy: with_on_blur."""
+        return self.set_prop("on_blur", handler_id)
+
+    # =========================================================================
+    # Responsive modifier methods (Phase 6 UI Typed Core RFC)
+    # =========================================================================
+
+    fn responsive_layout(self, compact: text, regular: text, expanded: text) -> WidgetNode:
+        """Store per-size-class layout names. Legacy: with_responsive_layout."""
+        return with_responsive_layout(self, compact, regular, expanded)
+
+    fn responsive_columns(self, compact: i32, regular: i32, expanded: i32) -> WidgetNode:
+        """Store per-size-class column counts (Grid). Legacy: with_responsive_columns."""
+        return with_responsive_columns(self, compact, regular, expanded)
+
+    fn show_when_at_most(self, threshold: SizeClass) -> WidgetNode:
+        """Hide when current size class > threshold. Legacy: with_show_when_at_most."""
+        return with_show_when_at_most(self, threshold)
+
+    fn show_when_at_least(self, threshold: SizeClass) -> WidgetNode:
+        """Hide when current size class < threshold. Legacy: with_show_when_at_least."""
+        return with_show_when_at_least(self, threshold)
+
+    fn show_when_orientation(self, o: Orientation) -> WidgetNode:
+        """Hide unless current orientation matches. Legacy: with_show_when_orientation."""
+        return with_show_when_orientation(self, o)
+
+    fn child(c: WidgetNode) -> WidgetNode:
+        """Add a single child widget. Delegates to add_child."""
+        return self.add_child(c)
+
+    fn add_children(cs: [WidgetNode]) -> WidgetNode:
+        """Add multiple children. Named add_children to avoid conflict with
+        the 0-arg children() getter."""
+        var n = self
+        for c in cs:
+            n = n.add_child(c)
+        return n
+
+    # =========================================================================
+    # Token-accepting methods (Phase 4 UI Typed Core RFC)
+    # =========================================================================
+
+    fn padding(self, theme: ThemeId, s: Spacing) -> WidgetNode:
+        """Set padding from a typed Spacing token. Delegates to with_padding_token."""
+        return with_padding_token(self, theme, s)
+
+    fn radius_token(self, theme: ThemeId, r: Radius) -> WidgetNode:
+        """Set border-radius from a typed Radius token. Delegates to with_radius_token."""
+        return with_radius_token(self, theme, r)
+
+    fn surface_role(self, theme: ThemeId, role: SurfaceRole) -> WidgetNode:
+        """Set surface color from a typed SurfaceRole token. Delegates to with_surface_role."""
+        return with_surface_role(self, theme, role)

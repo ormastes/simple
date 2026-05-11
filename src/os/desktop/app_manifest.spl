@@ -7,6 +7,8 @@
 # MDSOC: feature dimension, desktop layer
 
 use os.crash_policy.{AppClass, AppFaultDomain, SupervisorPolicy, default_fault_domain, default_supervisor_policy}
+use os.services.vfs.vfs_init.{g_vfs_readdir, g_vfs_read_file_text}
+use os.kernel.types.fs_types.{DirEntry, FsNodeKind}
 
 # =========================================================================
 # UI Backend Selection
@@ -471,3 +473,69 @@ fn host_content_for_manifest(manifest: AppManifest) -> AppHostContent?:
             status: "/sys/apps/settings"
         ))
     return nil
+
+# =========================================================================
+# Removable Media Manifest Scanning
+# =========================================================================
+
+fn sdn_extract_field(content: text, key: text) -> text:
+    val terminated = "{content}\n"
+    var current = ""
+    val search = "{key} = "
+    for ch in terminated:
+        if ch == "\n":
+            val line = current.trim()
+            if line.starts_with(search):
+                var raw = line.slice(search.len(), line.len()).trim()
+                if raw.starts_with("\"") and raw.ends_with("\""):
+                    raw = raw.slice(1, raw.len() - 1)
+                return raw
+            current = ""
+        else:
+            current = "{current}{ch}"
+    ""
+
+fn parse_removable_manifest(content: text, binary_base: text) -> AppManifest:
+    val user_app = AppClass.UserApp
+    val user_domain = default_fault_domain(user_app)
+    val user_policy = default_supervisor_policy(user_app)
+    var name_val = sdn_extract_field(content, "name")
+    if name_val == "":
+        name_val = binary_base
+    var binary_val = sdn_extract_field(content, "binary")
+    if binary_val == "":
+        binary_val = binary_base
+    var category_val = sdn_extract_field(content, "category")
+    if category_val == "":
+        category_val = "Utilities"
+    var icon_val = sdn_extract_field(content, "icon")
+    if icon_val == "":
+        icon_val = "app"
+    var desc_val = sdn_extract_field(content, "description")
+    if desc_val == "":
+        desc_val = name_val
+    AppManifest(
+        name: name_val,
+        description: desc_val,
+        category: category_val,
+        binary: binary_val,
+        capabilities: [],
+        icon: icon_val,
+        app_class: user_app,
+        fault_domain: user_domain,
+        supervisor_policy: user_policy
+    )
+
+pub fn scan_removable_manifests(mount_path: text) -> [AppManifest]:
+    """Scan {mount_path}/APPS/ for .sdn manifest files and parse each into AppManifest."""
+    var results: [AppManifest] = []
+    val apps_dir = "{mount_path}/APPS"
+    val entries = g_vfs_readdir(apps_dir)
+    for entry in entries:
+        if entry.node.kind == FsNodeKind.File and entry.name.ends_with(".sdn"):
+            val file_path = "{apps_dir}/{entry.name}"
+            val content = g_vfs_read_file_text(file_path)
+            if content != "":
+                val manifest = parse_removable_manifest(content, file_path)
+                results = results.push(manifest)
+    results

@@ -10,7 +10,8 @@ use std.fs_driver.capability.{Capability, CapabilitySet}
 use std.fs_driver.extension.{Extension}
 use std.fs_driver.ops.{FsDriver}
 use std.fs_driver.block_device.{BlockDevice}
-use std.fs_driver.fat32_core.{Fat32Core}
+use std.fs_driver.fat32_core.{Fat32Core, OpenFile}
+use common.string_core.{char_from_code}
 
 struct FsFat32Driver:
     name:    text
@@ -77,37 +78,128 @@ impl FsDriver for FsFat32Driver:
         Ok(Inode(id: self.inner.root_cluster.to_u64()))
 
     me fn open(path: Path, flags: OpenFlags) -> Result<FileHandle, FsError>:
-        Err(FsError.Unsupported)
+        if not self.mounted:
+            return Err(FsError.InvalidArg)
+        val create_flag = (flags.bits & 64) != 0
+        val path_str = path.raw
+        val existing = self.inner.resolve_path(path_str)
+        if existing.is_ok():
+            val rc = self.inner.open(path_str)
+            if rc.is_err():
+                return Err(FsError.NotFound)
+            return Ok(rc.unwrap())
+        if create_flag:
+            val rc = self.inner.create_file(path_str)
+            if rc.is_err():
+                return Err(FsError.NotFound)
+            return Ok(rc.unwrap())
+        Err(FsError.NotFound)
 
     me fn close(handle: FileHandle) -> Result<(), FsError>:
-        Err(FsError.Unsupported)
+        if not self.mounted:
+            return Err(FsError.InvalidArg)
+        val rc = self.inner.close(handle)
+        if rc.is_err():
+            return Err(FsError.InvalidArg)
+        Ok(())
 
     me fn read(handle: FileHandle, offset: i64, buf: [u8]) -> Result<i64, FsError>:
-        Err(FsError.Unsupported)
+        if not self.mounted:
+            return Err(FsError.InvalidArg)
+        val rc = self.inner.read(handle, buf, buf.len().to_i64())
+        if rc.is_err():
+            return Err(FsError.Corrupt)
+        Ok(rc.unwrap())
 
     me fn write(handle: FileHandle, offset: i64, buf: [u8]) -> Result<i64, FsError>:
-        Err(FsError.Unsupported)
+        if not self.mounted:
+            return Err(FsError.InvalidArg)
+        val rc = self.inner.write(handle, buf, buf.len().to_i64())
+        if rc.is_err():
+            return Err(FsError.Corrupt)
+        Ok(rc.unwrap())
 
     me fn pread(handle: FileHandle, offset: i64, buf: [u8]) -> Result<i64, FsError>:
-        Err(FsError.Unsupported)
+        if not self.mounted:
+            return Err(FsError.InvalidArg)
+        val rc = self.inner.read(handle, buf, buf.len().to_i64())
+        if rc.is_err():
+            return Err(FsError.Corrupt)
+        Ok(rc.unwrap())
 
     me fn pwrite(handle: FileHandle, offset: i64, buf: [u8]) -> Result<i64, FsError>:
-        Err(FsError.Unsupported)
+        if not self.mounted:
+            return Err(FsError.InvalidArg)
+        val rc = self.inner.write(handle, buf, buf.len().to_i64())
+        if rc.is_err():
+            return Err(FsError.Corrupt)
+        Ok(rc.unwrap())
 
     fn fstat(handle: FileHandle) -> Result<FileStat, FsError>:
-        Err(FsError.Unsupported)
+        if not self.mounted:
+            return Err(FsError.InvalidArg)
+        val of_rc = self.inner.get_open_file(handle)
+        if of_rc.is_err():
+            return Err(FsError.InvalidArg)
+        val of = of_rc.unwrap()
+        Ok(FileStat(
+            inode: of.start_cluster.to_u64(),
+            size: of.size.to_u64(),
+            blocks: 0,
+            block_size: self.inner.bytes_per_sector,
+            mode: 0,
+            uid: 0,
+            gid: 0,
+            nlinks: 1,
+            atime_ns: 0,
+            mtime_ns: 0,
+            ctime_ns: 0,
+            birth_time_ns: 0
+        ))
 
     fn stat(path: Path) -> Result<FileStat, FsError>:
-        Err(FsError.Unsupported)
+        if not self.mounted:
+            return Err(FsError.InvalidArg)
+        val entry_rc = self.inner.resolve_path(path.raw)
+        if entry_rc.is_err():
+            return Err(FsError.NotFound)
+        val entry = entry_rc.unwrap()
+        Ok(FileStat(
+            inode: entry.inode.id,
+            size: 0,
+            blocks: 0,
+            block_size: self.inner.bytes_per_sector,
+            mode: 0,
+            uid: 0,
+            gid: 0,
+            nlinks: 1,
+            atime_ns: 0,
+            mtime_ns: 0,
+            ctime_ns: 0,
+            birth_time_ns: 0
+        ))
 
     me fn opendir(path: Path) -> Result<DirHandle, FsError>:
-        Err(FsError.Unsupported)
+        if not self.mounted:
+            return Err(FsError.InvalidArg)
+        val entry_rc = self.inner.resolve_path(path.raw)
+        if entry_rc.is_err():
+            return Err(FsError.NotFound)
+        val entry = entry_rc.unwrap()
+        if not entry.is_dir:
+            return Err(FsError.InvalidArg)
+        Ok(DirHandle(id: entry.inode.id))
 
     fn truncate(path: Path, length: i64) -> Result<(), FsError>:
         Err(FsError.Unsupported)
 
     me fn ftruncate(handle: FileHandle, length: i64) -> Result<(), FsError>:
-        Err(FsError.Unsupported)
+        if not self.mounted:
+            return Err(FsError.InvalidArg)
+        val rc = self.inner.truncate(handle, length)
+        if rc.is_err():
+            return Err(FsError.Corrupt)
+        Ok(())
 
     fn fsync(handle: FileHandle) -> Result<(), FsError>:
         Ok(())
@@ -116,19 +208,45 @@ impl FsDriver for FsFat32Driver:
         Ok(())
 
     fn readdir(handle: DirHandle) -> Result<[DirEntry], FsError>:
-        Err(FsError.Unsupported)
+        if not self.mounted:
+            return Err(FsError.InvalidArg)
+        val dir_cluster = handle.id.to_u32()
+        val rc = self.inner.read_dir_entries(dir_cluster)
+        if rc.is_err():
+            return Err(FsError.Corrupt)
+        Ok(rc.unwrap())
 
     me fn mkdir(path: Path, mode: u32) -> Result<(), FsError>:
-        Err(FsError.Unsupported)
+        if not self.mounted:
+            return Err(FsError.InvalidArg)
+        val rc = self.inner.mkdir(path.raw)
+        if rc.is_err():
+            return Err(FsError.Corrupt)
+        Ok(())
 
     me fn rmdir(path: Path) -> Result<(), FsError>:
-        Err(FsError.Unsupported)
+        if not self.mounted:
+            return Err(FsError.InvalidArg)
+        val rc = self.inner.unlink(path.raw)
+        if rc.is_err():
+            return Err(FsError.NotFound)
+        Ok(())
 
     me fn unlink(path: Path) -> Result<(), FsError>:
-        Err(FsError.Unsupported)
+        if not self.mounted:
+            return Err(FsError.InvalidArg)
+        val rc = self.inner.unlink(path.raw)
+        if rc.is_err():
+            return Err(FsError.NotFound)
+        Ok(())
 
     me fn rename(old: Path, new: Path) -> Result<(), FsError>:
-        Err(FsError.Unsupported)
+        if not self.mounted:
+            return Err(FsError.InvalidArg)
+        val rc = self.inner.rename(old.raw, new.raw)
+        if rc.is_err():
+            return Err(FsError.NotFound)
+        Ok(())
 
     fn symlink(target: Path, link: Path) -> Result<(), FsError>:
         Err(FsError.Unsupported)
@@ -149,27 +267,49 @@ impl FsDriver for FsFat32Driver:
         None
 
     fn stat_path(path: Path) -> Result<StatInfo, FsError>:
-        """Return StatInfo for path. Root is always a directory."""
-        Ok(StatInfo(is_dir: true, is_file: false, size: 0))
+        if not self.mounted:
+            return Err(FsError.InvalidArg)
+        val entry_rc = self.inner.resolve_path(path.raw)
+        if entry_rc.is_err():
+            return Err(FsError.NotFound)
+        val entry = entry_rc.unwrap()
+        if entry.is_dir:
+            return Ok(StatInfo(is_dir: true, is_file: false, size: 0))
+        val size_rc = self.inner._get_file_size(path.raw)
+        var sz: i64 = 0
+        if size_rc.is_ok():
+            sz = size_rc.unwrap()
+        Ok(StatInfo(is_dir: false, is_file: true, size: sz))
 
     me fn open_path(path: Path, flags: OpenFlags) -> Result<FileHandle, FsError>:
-        """Open a file by path. Returns a stub handle."""
-        Ok(FileHandle(id: 1))
+        self.open(path, flags)
 
     me fn opendir_path(path: Path) -> Result<DirHandle, FsError>:
-        """Open a directory by path. Returns a stub handle."""
-        Ok(DirHandle(id: 1))
+        self.opendir(path)
 
     fn readdir_handle(handle: DirHandle) -> Result<[DirEntry], FsError>:
-        """Return empty directory listing."""
-        val entries: [DirEntry] = []
-        Ok(entries)
+        self.readdir(handle)
 
     fn read_handle(handle: FileHandle, length: i64) -> Result<text, FsError>:
-        """Read up to length bytes from open handle."""
-        Ok("")
+        if not self.mounted:
+            return Err(FsError.InvalidArg)
+        val rc = self.inner.read_bytes(handle, length)
+        if rc.is_err():
+            return Err(FsError.Corrupt)
+        val bytes = rc.unwrap()
+        var result = ""
+        var i = 0
+        while i < bytes.len():
+            result = result + char_from_code(bytes[i].to_i64())
+            i = i + 1
+        Ok(result)
 
     me fn mkdir_path(path: text, mode: u32) -> Result<(), FsError>:
+        if not self.mounted:
+            return Err(FsError.InvalidArg)
+        val rc = self.inner.mkdir(path)
+        if rc.is_err():
+            return Err(FsError.Corrupt)
         Ok(())
 
     static fn new_ram_backed() -> FsFat32Driver:

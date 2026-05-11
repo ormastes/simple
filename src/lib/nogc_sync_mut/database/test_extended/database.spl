@@ -11,6 +11,10 @@ use std.database.test_extended.types.{
     FileRecord, SuiteRecord, TestRecord, CounterRecord,
     TimingSummary, TimingRun, ChangeEvent, RunRecord, TestInfo
 }
+use std.database.test_extended.database_queries.{
+    run_record_from_row, counter_record_from_row, timing_summary_from_row,
+    db_get_file_path, db_get_suite_info, db_get_test_timing, db_get_test_counts
+}
 
 class TestDatabaseExtended:
     db: SdnDatabase
@@ -637,27 +641,8 @@ class TestDatabaseExtended:
             val row_test_id_opt = row.get_i64("test_id")
             if not row_test_id_opt.?:
                 continue
-            val row_test_id = row_test_id_opt.unwrap()
-
-            if row_test_id == test_id:
-                val total_runs = row.get_i64("total_runs") ?? 0
-                val passed = row.get_i64("passed") ?? 0
-                val failed = row.get_i64("failed") ?? 0
-                val crashed = row.get_i64("crashed") ?? 0
-                val timed_out = row.get_i64("timed_out") ?? 0
-                val flaky_count = row.get_i64("flaky_count") ?? 0
-                val consecutive_passes = row.get_i64("consecutive_passes") ?? 0
-
-                return Some(CounterRecord(
-                    test_id: test_id,
-                    total_runs: total_runs,
-                    passed: passed,
-                    failed: failed,
-                    crashed: crashed,
-                    timed_out: timed_out,
-                    flaky_count: flaky_count,
-                    consecutive_passes: consecutive_passes
-                ))
+            if row_test_id_opt.unwrap() == test_id:
+                return counter_record_from_row(row, test_id)
 
         nil
 
@@ -672,34 +657,8 @@ class TestDatabaseExtended:
             val row_test_id_opt = row.get_i64("test_id")
             if not row_test_id_opt.?:
                 continue
-            val row_test_id = row_test_id_opt.unwrap()
-
-            if row_test_id == test_id:
-                val mean = row.get_f64("mean") ?? 0.0
-                val p50 = row.get_f64("p50") ?? 0.0
-                val p90 = row.get_f64("p90") ?? 0.0
-                val p95 = row.get_f64("p95") ?? 0.0
-                val p99 = row.get_f64("p99") ?? 0.0
-                val iqr = row.get_f64("iqr") ?? 0.0
-                val baseline_p50 = row.get_f64("baseline_p50") ?? 0.0
-
-                val has_baseline_str = row.get("has_baseline") ?? "false"
-                val baseline_updated_at = row.get("baseline_updated_at") ?? ""
-                val last_10_runs = row.get("last_10_runs") ?? ""
-
-                return Some(TimingSummary(
-                    test_id: test_id,
-                    mean: mean,
-                    p50: p50,
-                    p90: p90,
-                    p95: p95,
-                    p99: p99,
-                    iqr: iqr,
-                    has_baseline: has_baseline_str == "true",
-                    baseline_p50: baseline_p50,
-                    baseline_updated_at: baseline_updated_at,
-                    last_10_runs: last_10_runs
-                ))
+            if row_test_id_opt.unwrap() == test_id:
+                return timing_summary_from_row(row, test_id)
 
         nil
 
@@ -715,32 +674,9 @@ class TestDatabaseExtended:
             val status = row.get("status") ?? ""
             if status_filter != "" and status != status_filter:
                 continue
-
-            val run_id = row.get("run_id") ?? ""
-            val start_time = row.get("start_time") ?? ""
-            val end_time = row.get("end_time") ?? ""
-            val pid = row.get_i64("pid") ?? 0
-            val hostname = row.get("hostname") ?? ""
-            val test_count = row.get_i64("test_count") ?? 0
-            val passed = row.get_i64("passed") ?? 0
-            val failed = row.get_i64("failed") ?? 0
-            val crashed = row.get_i64("crashed") ?? 0
-            val timed_out = row.get_i64("timed_out") ?? 0
-
-            val record = RunRecord(
-                run_id: run_id,
-                start_time: start_time,
-                end_time: end_time,
-                pid: pid,
-                hostname: hostname,
-                status: status,
-                test_count: test_count,
-                passed: passed,
-                failed: failed,
-                crashed: crashed,
-                timed_out: timed_out
-            )
-            result.push(record)
+            val record_opt = run_record_from_row(row)
+            if record_opt.?:
+                result.push(record_opt.unwrap())
 
         result
 
@@ -827,73 +763,17 @@ class TestDatabaseExtended:
 
     # Helper: Get suite info (file_path, suite_name)
     fn get_suite_info(suite_id: i64) -> (text, text)?:
-        val suites_table_opt = self.db.get_table("suites")
-        if not suites_table_opt.?:
-            return nil
-        val suites_table = suites_table_opt.unwrap()
-
-        for row in suites_table.valid_rows():
-            val row_suite_id = row.get_i64("suite_id") ?? -1
-            if row_suite_id == suite_id:
-                val file_id = row.get_i64("file_id") ?? -1
-                val name_str = row.get_i32("name_str") ?? -1
-
-                if file_id == -1 or name_str == -1:
-                    continue
-
-                val file_path = self.get_file_path(file_id) ?? ""
-                val suite_name = self.interner.get(name_str) ?? ""
-
-                return Some((file_path, suite_name))
-
-        nil
+        db_get_suite_info(self.db, self.interner, suite_id)
 
     # Helper: Get file path by ID
     fn get_file_path(file_id: i64) -> text?:
-        val files_table_opt = self.db.get_table("files")
-        if not files_table_opt.?:
-            return nil
-        val files_table = files_table_opt.unwrap()
-
-        for row in files_table.valid_rows():
-            val row_file_id = row.get_i64("file_id") ?? -1
-            if row_file_id == file_id:
-                val path_str = row.get_i32("path_str") ?? -1
-                if path_str != -1:
-                    return self.interner.get(path_str)
-
-        nil
+        db_get_file_path(self.db, self.interner, file_id)
 
     # Helper: Get test timing (mean, p50)
     fn get_test_timing(test_id: i64) -> (f64, f64)?:
-        val timing_table_opt = self.db.get_table("timing")
-        if not timing_table_opt.?:
-            return nil
-        val timing_table = timing_table_opt.unwrap()
-
-        for row in timing_table.valid_rows():
-            val row_test_id = row.get_i64("test_id") ?? -1
-            if row_test_id == test_id:
-                val mean = row.get_f64("mean") ?? 0.0
-                val p50 = row.get_f64("p50") ?? 0.0
-                return Some((mean, p50))
-
-        nil
+        db_get_test_timing(self.db, test_id)
 
     # Helper: Get test counts (total_runs, passed, failed)
     fn get_test_counts(test_id: i64) -> (i64, i64, i64)?:
-        val counters_table_opt = self.db.get_table("counters")
-        if not counters_table_opt.?:
-            return nil
-        val counters_table = counters_table_opt.unwrap()
-
-        for row in counters_table.valid_rows():
-            val row_test_id = row.get_i64("test_id") ?? -1
-            if row_test_id == test_id:
-                val total_runs = row.get_i64("total_runs") ?? 0
-                val passed = row.get_i64("passed") ?? 0
-                val failed = row.get_i64("failed") ?? 0
-                return Some((total_runs, passed, failed))
-
-        nil
+        db_get_test_counts(self.db, test_id)
 
