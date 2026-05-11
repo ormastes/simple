@@ -62,7 +62,7 @@
 - Cranelift `>>` interim fix for signed narrow ints
 
 ### Remaining
-1. **C.2 — Cranelift `>>` proper fix**: Full right-shift semantics for all widths (var-load, param, call-ret paths)
+1. ~~**C.2 — Cranelift `>>` proper fix**~~: Done 2026-05-11. LLVM backend now dispatches signed (ashr) vs unsigned (lshr) right-shift. Cranelift paths verified already correct. Follow-up: wire vreg_types into LLVM call sites for unsigned shift accuracy.
 2. **C.3 — Bitfield sugar**: Compiler frontend support for packed bitfield struct declarations (needed for hardware register maps)
 
 ---
@@ -100,6 +100,6 @@ Delivered `src/os/ml/` — 7 files: kernels, gpu_tensor, autograd, optimizer, da
 |---|------|----------|---------|
 | 1 | 3D Engine GPU + WebGPU | Done | — |
 | 2 | LLVM/Rust Self-Host in SimpleOS | P0 | ELF fixed; integration remaining |
-| 3 | Driver Framework compiler work | P2 | Compiler infra |
+| 3 | Driver Framework compiler work | P2 | C.2 done; C.3 bitfield remaining |
 | 4 | Editor/IDE Platform | P2 | None |
 | 5 | DL + GPU Stack | Done | — |

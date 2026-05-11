@@ -27,9 +27,9 @@ bug
 - [x] 3-arch (Architect) — 2026-05-11
 - [x] 4-spec (QA Lead) — N/A (bug fix) — 2026-05-11
 - [x] 5-implement (Engineer) — 2026-05-11
-- [ ] 6-refactor (Tech Lead)
-- [ ] 7-verify (QA)
-- [ ] 8-ship (Release Mgr)
+- [x] 6-refactor (Tech Lead) — 2026-05-11
+- [x] 7-verify (QA) — 2026-05-11
+- [x] 8-ship (Release Mgr) — 2026-05-11
 
 ## Phase Outputs
 
@@ -210,10 +210,14 @@ To fully fix unsigned shifts in LLVM, the call sites need access to VReg type in
 the LLVM emitter/function compilation paths — tracked as a follow-up task.
 
 ### 6-refactor
-<pending>
+N/A — minimal change, no refactoring needed.
 
 ### 7-verify
-<pending>
+- [x] `cargo check -p simple-compiler` — passes
+- [x] Existing `shr_signedness_test.spl` — 13/13 pass (no regression)
+- [x] New `shr_signedness_param_callret_spec.spl` — 4/4 pass
+- [x] LLVM `compile_binop` signature updated at both call sites (functions.rs, emitter.rs)
+- Known limitation: LLVM call sites pass `None` (defaults to signed) — unsigned LLVM shifts need vreg_types wiring (follow-up)
 
 ### 8-ship
-<pending>
+Committed and pushed 2026-05-11.

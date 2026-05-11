@@ -6,6 +6,12 @@
 # (row/column with gap). Grid layout is a future extension.
 #
 # Set SIMPLE_DEBUG_LAYOUT=1 for debug output.
+#
+# Split files (no BeLayoutBox field access — safe cross-module):
+#   layout_float.spl      — FloatBox/FloatContext/FloatPos + float helpers
+#   layout_m14_types.spl  — M14 public API types (LayoutContext, LayoutBox, etc.)
+#   layout_inline.spl     — Inline formatting context (layout_inline, line boxes)
+#   layout_table.spl      — Table layout (layout_table + helpers)
 
 fn _ld(msg: text):
     val _unused = msg.len()
@@ -29,6 +35,13 @@ use common.text_layout.text_layout.{measure_text, text_char_width, text_line_hei
 use common.render_scene.scene.{SceneCommand, RenderScene, render_scene,
     scene_fill_rect, scene_stroke_rect, scene_text, scene_rounded_rect,
     scene_gradient_rect, scene_blur_rect, rgba_to_argb}
+use std.gc_async_mut.gpu.browser_engine.layout_float.{FloatBox, FloatContext, FloatPos,
+    float_available_width_at, float_left_offset_at, float_clear_y, float_next_clear_y,
+    float_find_position, float_place, float_context_height, float_is_bfc_root}
+use std.gc_async_mut.gpu.browser_engine.layout_inline.{_collect_text, _split_words,
+    _parse_inline_text_align}
+use std.gc_async_mut.gpu.browser_engine.layout_table.{_find_table_node, _collect_table_rows,
+    _collect_cells, _get_colspan, _count_logical_columns, _compute_col_widths}
 # extern fn serial_println(msg: text)  # disabled for native builds
 
 # =========================================================================
@@ -84,184 +97,6 @@ class BePointerActivationDispatch:
             click: click,
             click_synthesized: click_synthesized
         )
-
-# =========================================================================
-# Float Layout Types (CSS 2.1 §9.5.1)
-# =========================================================================
-
-class FloatBox:
-    x: i32
-    y: i32
-    width: i32
-    height: i32
-    side: i32
-
-class FloatContext:
-    left_floats: [FloatBox]
-    right_floats: [FloatBox]
-    current_y: i32
-
-    static fn create() -> FloatContext:
-        var lf: [FloatBox] = []
-        var rf: [FloatBox] = []
-        FloatContext(
-            left_floats: lf,
-            right_floats: rf,
-            current_y: 0
-        )
-
-    static fn at_y(y: i32) -> FloatContext:
-        var lf: [FloatBox] = []
-        var rf: [FloatBox] = []
-        FloatContext(
-            left_floats: lf,
-            right_floats: rf,
-            current_y: y
-        )
-
-class FloatPos:
-    x: i32
-    y: i32
-
-fn float_available_width_at(y: i32, ctx: FloatContext, total_width: i32) -> i32:
-    var left_intrusion = 0
-    var right_intrusion = 0
-    var li = 0
-    while li < ctx.left_floats.len():
-        val fl = ctx.left_floats[li]
-        li = li + 1
-        if y >= fl.y and y < (fl.y + fl.height):
-            val intrusion = fl.x + fl.width
-            if intrusion > left_intrusion:
-                left_intrusion = intrusion
-    var ri = 0
-    while ri < ctx.right_floats.len():
-        val fr = ctx.right_floats[ri]
-        ri = ri + 1
-        if y >= fr.y and y < (fr.y + fr.height):
-            val intrusion = total_width - fr.x
-            if intrusion > right_intrusion:
-                right_intrusion = intrusion
-    val available = total_width - left_intrusion - right_intrusion
-    if available > 0: available else: 0
-
-fn float_left_offset_at(y: i32, ctx: FloatContext) -> i32:
-    var left_edge = 0
-    var li = 0
-    while li < ctx.left_floats.len():
-        val fl = ctx.left_floats[li]
-        li = li + 1
-        if y >= fl.y and y < (fl.y + fl.height):
-            val edge = fl.x + fl.width
-            if edge > left_edge:
-                left_edge = edge
-    left_edge
-
-fn float_clear_y(clear_code: i32, ctx: FloatContext) -> i32:
-    var clear_y = ctx.current_y
-    if clear_code == 1 or clear_code == 3:
-        var li = 0
-        while li < ctx.left_floats.len():
-            val fl = ctx.left_floats[li]
-            li = li + 1
-            val bottom = fl.y + fl.height
-            if bottom > clear_y:
-                clear_y = bottom
-    if clear_code == 2 or clear_code == 3:
-        var ri = 0
-        while ri < ctx.right_floats.len():
-            val fr = ctx.right_floats[ri]
-            ri = ri + 1
-            val bottom = fr.y + fr.height
-            if bottom > clear_y:
-                clear_y = bottom
-    clear_y
-
-fn float_next_clear_y(y: i32, ctx: FloatContext) -> i32:
-    var min_bottom = y
-    var found = false
-    var li = 0
-    while li < ctx.left_floats.len():
-        val fl = ctx.left_floats[li]
-        li = li + 1
-        if y >= fl.y and y < (fl.y + fl.height):
-            val bottom = fl.y + fl.height
-            if not found or bottom < min_bottom:
-                min_bottom = bottom
-                found = true
-    var ri = 0
-    while ri < ctx.right_floats.len():
-        val fr = ctx.right_floats[ri]
-        ri = ri + 1
-        if y >= fr.y and y < (fr.y + fr.height):
-            val bottom = fr.y + fr.height
-            if not found or bottom < min_bottom:
-                min_bottom = bottom
-                found = true
-    if found: min_bottom else: y
-
-fn float_find_position(width: i32, side: i32, y: i32, ctx: FloatContext, available: i32) -> FloatPos:
-    if side == 1:
-        var left_edge = 0
-        var li = 0
-        while li < ctx.left_floats.len():
-            val fl = ctx.left_floats[li]
-            li = li + 1
-            if y >= fl.y and y < (fl.y + fl.height):
-                val edge = fl.x + fl.width
-                if edge > left_edge:
-                    left_edge = edge
-        return FloatPos(x: left_edge, y: y)
-    var right_edge = available
-    var ri = 0
-    while ri < ctx.right_floats.len():
-        val fr = ctx.right_floats[ri]
-        ri = ri + 1
-        if y >= fr.y and y < (fr.y + fr.height):
-            if fr.x < right_edge:
-                right_edge = fr.x
-    FloatPos(x: right_edge - width, y: y)
-
-fn float_place(float_w: i32, float_h: i32, side: i32, ctx: FloatContext, container_width: i32) -> FloatPos:
-    var try_y = ctx.current_y
-    var attempts = 0
-    while attempts < 100:
-        val avail = float_available_width_at(try_y, ctx, container_width)
-        if avail >= float_w:
-            return float_find_position(float_w, side, try_y, ctx, container_width)
-        val next_y = float_next_clear_y(try_y, ctx)
-        if next_y <= try_y:
-            return float_find_position(float_w, side, try_y, ctx, container_width)
-        try_y = next_y
-        attempts = attempts + 1
-    float_find_position(float_w, side, try_y, ctx, container_width)
-
-fn float_context_height(ctx: FloatContext) -> i32:
-    var max_bottom = 0
-    var li = 0
-    while li < ctx.left_floats.len():
-        val fl = ctx.left_floats[li]
-        li = li + 1
-        val bottom = fl.y + fl.height
-        if bottom > max_bottom:
-            max_bottom = bottom
-    var ri = 0
-    while ri < ctx.right_floats.len():
-        val fr = ctx.right_floats[ri]
-        ri = ri + 1
-        val bottom = fr.y + fr.height
-        if bottom > max_bottom:
-            max_bottom = bottom
-    max_bottom
-
-fn float_is_bfc_root(style: StyleProps) -> bool:
-    val overflow = css_get_overflow(style)
-    if overflow != "visible" and overflow != "":
-        return true
-    val disp = style.display
-    if disp == "flow-root" or disp == "flex" or disp == "inline-flex":
-        return true
-    false
 
 # =========================================================================
 # Main Layout Entry Point
@@ -1182,74 +1017,6 @@ fn _paint_box(box: BeLayoutBox, commands: [SceneCommand]) -> [SceneCommand]:
     return cmds
 
 # =========================================================================
-# M14 Public Layout API
-# =========================================================================
-
-# LayoutContext — passed by specs to control available space
-pub class LayoutContext:
-    """Layout context carrying available width and height for M14 layout functions."""
-    available_width: i32
-    available_height: i32
-
-pub fn layout_context_new(width: i32, height: i32) -> LayoutContext:
-    """Create a LayoutContext with the given available dimensions."""
-    LayoutContext(available_width: width, available_height: height)
-
-# InlineFragment — a single laid-out inline piece (text run or inline element)
-pub class InlineFragment:
-    """A positioned fragment in an inline formatting context."""
-    x: i32
-    y: i32
-    width: i32
-    height: i32
-    baseline_offset: i32
-    text_run: text
-
-# LineBox — one line in an IFC
-pub class LineBox:
-    """A single line box in an inline formatting context."""
-    x: i32
-    y: i32
-    width: i32
-    height: i32
-    baseline: i32
-    fragments: [InlineFragment]
-
-# LayoutBox — M14 public layout result (parallel to BeLayoutBox for specs)
-pub class LayoutBox:
-    """Public layout result used by M14 specs."""
-    x: i32
-    y: i32
-    width: i32
-    height: i32
-    is_anonymous: bool
-    line_boxes: [LineBox]
-    children: [LayoutBox]
-
-fn _layout_box_empty() -> LayoutBox:
-    LayoutBox(x: 0, y: 0, width: 0, height: 0, is_anonymous: false, line_boxes: [], children: [])
-
-# =========================================================================
-# collapse_margins_signed — CSS 2.2 §8.3.1
-# =========================================================================
-
-pub fn collapse_margins_signed(a: i32, b: i32) -> i32:
-    """Collapse two margins per CSS 2.2 §8.3.1: max(positives) + min(negatives)."""
-    var max_pos = 0
-    var min_neg = 0
-    if a > 0:
-        max_pos = a
-    else:
-        min_neg = a
-    if b > 0:
-        if b > max_pos:
-            max_pos = b
-    else:
-        if b < min_neg:
-            min_neg = b
-    max_pos + min_neg
-
-# =========================================================================
 # layout_block (public 2-arg wrapper for M14 specs)
 # =========================================================================
 
@@ -1411,27 +1178,166 @@ fn _make_anon_layout_box(nodes: [BeDomNode], parent_be: BeLayoutBox, available_w
         children: []
     )
 
+fn _apply_opacity(argb: u32, opacity: f32) -> u32:
+    if opacity >= 1.0:
+        return argb
+    if opacity <= 0.0:
+        return argb & 0x00FFFFFF
+    val a = (argb >> 24) & 0xFF
+    var new_a = (a.to_f32() * opacity).to_u32()
+    if new_a > 255:
+        new_a = 255
+    return (new_a << 24) | (argb & 0x00FFFFFF)
+
+# =========================================================================
+# Position: Sticky Fixup Pass
+# =========================================================================
+
+pub fn apply_sticky_fixup(root: BeLayoutBox, scroll_x: f64, scroll_y: f64):
+    """Post-layout pass: adjust position:sticky boxes so they stay within
+    their containing block bounds while clamped at their threshold offset.
+
+    For each sticky box, the adjusted position is:
+      max(normal_flow_y, min(scroll_y + top_threshold, containing_block_bottom - box_height))
+
+    Modifies layout box coordinates in-place."""
+    _sticky_fixup_box(root, root, scroll_x, scroll_y)
+
+fn _sticky_fixup_box(box: BeLayoutBox, containing: BeLayoutBox, scroll_x: f64, scroll_y: f64):
+    val node = box.node
+    val style = be_dom_get_style(node)
+    val pos = style.position
+
+    if pos == "sticky":
+        val normal_y = box.y
+        val normal_x = box.x
+
+        val top_offset = if style.top.is_auto(): -999999 else: style.top.value_as_i32()
+        val left_offset = if style.left.is_auto(): -999999 else: style.left.value_as_i32()
+        val bottom_offset = if style.bottom.is_auto(): -999999 else: style.bottom.value_as_i32()
+        val right_offset = if style.right.is_auto(): -999999 else: style.right.value_as_i32()
+
+        val cont_top = containing.content_y
+        val cont_bottom = containing.content_y + containing.content_height
+        val cont_left = containing.content_x
+        val cont_right = containing.content_x + containing.content_width
+
+        var sticky_y = normal_y
+        if top_offset > -999999:
+            val threshold_y = scroll_y.to_i32() + top_offset
+            val max_y = cont_bottom - box.height
+            sticky_y = if threshold_y > normal_y: threshold_y else: normal_y
+            if sticky_y > max_y:
+                sticky_y = max_y
+        else if bottom_offset > -999999:
+            val viewport_bottom = scroll_y.to_i32() + containing.height
+            val threshold_y = viewport_bottom - bottom_offset - box.height
+            val min_y = cont_top
+            sticky_y = if threshold_y < normal_y: threshold_y else: normal_y
+            if sticky_y < min_y:
+                sticky_y = min_y
+
+        var sticky_x = normal_x
+        if left_offset > -999999:
+            val threshold_x = scroll_x.to_i32() + left_offset
+            val max_x = cont_right - box.width
+            sticky_x = if threshold_x > normal_x: threshold_x else: normal_x
+            if sticky_x > max_x:
+                sticky_x = max_x
+        else if right_offset > -999999:
+            val viewport_right = scroll_x.to_i32() + containing.width
+            val threshold_x = viewport_right - right_offset - box.width
+            val min_x = cont_left
+            sticky_x = if threshold_x < normal_x: threshold_x else: normal_x
+            if sticky_x < min_x:
+                sticky_x = min_x
+
+        val dy = sticky_y - normal_y
+        val dx = sticky_x - normal_x
+        box.x = normal_x + dx
+        box.y = normal_y + dy
+        box.content_x = box.content_x + dx
+        box.content_y = box.content_y + dy
+
+    var ci = 0
+    while ci < box.children.len():
+        val child = box.children[ci]
+        ci = ci + 1
+        val child_pos = be_dom_get_style(child.node).position
+        val next_containing = if child_pos == "sticky" or child_pos == "static" or child_pos == "relative": box else: containing
+        _sticky_fixup_box(child, next_containing, scroll_x, scroll_y)
+
+# =========================================================================
+# M14 Public Layout API
+# =========================================================================
+
+# LayoutContext — passed by specs to control available space
+pub class LayoutContext:
+    """Layout context carrying available width and height for M14 layout functions."""
+    available_width: i32
+    available_height: i32
+
+pub fn layout_context_new(width: i32, height: i32) -> LayoutContext:
+    """Create a LayoutContext with the given available dimensions."""
+    LayoutContext(available_width: width, available_height: height)
+
+# InlineFragment — a single laid-out inline piece (text run or inline element)
+pub class InlineFragment:
+    """A positioned fragment in an inline formatting context."""
+    x: i32
+    y: i32
+    width: i32
+    height: i32
+    baseline_offset: i32
+    text_run: text
+
+# LineBox — one line in an IFC
+pub class LineBox:
+    """A single line box in an inline formatting context."""
+    x: i32
+    y: i32
+    width: i32
+    height: i32
+    baseline: i32
+    fragments: [InlineFragment]
+
+# LayoutBox — M14 public layout result (parallel to BeLayoutBox for specs)
+pub class LayoutBox:
+    """Public layout result used by M14 specs."""
+    x: i32
+    y: i32
+    width: i32
+    height: i32
+    is_anonymous: bool
+    line_boxes: [LineBox]
+    children: [LayoutBox]
+
+fn _layout_box_empty() -> LayoutBox:
+    LayoutBox(x: 0, y: 0, width: 0, height: 0, is_anonymous: false, line_boxes: [], children: [])
+
+# =========================================================================
+# collapse_margins_signed — CSS 2.2 §8.3.1
+# =========================================================================
+
+pub fn collapse_margins_signed(a: i32, b: i32) -> i32:
+    """Collapse two margins per CSS 2.2 §8.3.1: max(positives) + min(negatives)."""
+    var max_pos = 0
+    var min_neg = 0
+    if a > 0:
+        max_pos = a
+    else:
+        min_neg = a
+    if b > 0:
+        if b > max_pos:
+            max_pos = b
+    else:
+        if b < min_neg:
+            min_neg = b
+    max_pos + min_neg
+
 # =========================================================================
 # layout_inline — inline formatting context
 # =========================================================================
-
-fn _parse_inline_text_align(node: BeDomNode) -> text:
-    """Extract text-align from the node's inline style attribute, or fall back to computed style."""
-    val style_attr = be_dom_get_attr(node, "style")
-    if style_attr.len() > 0:
-        # Simple scan: find "text-align:" in style attribute value
-        val needle = "text-align:"
-        val idx = style_attr.index_of(needle)
-        if idx >= 0:
-            val start = idx + needle.len()
-            # Read until ';' or end
-            var end = start
-            while end < style_attr.len() and style_attr.char_at(end) != ";":
-                end = end + 1
-            val val_raw = style_attr.slice(start, end)
-            return val_raw.trim()
-    val s = be_dom_get_style(node)
-    s.text_align
 
 pub fn layout_inline(node: BeDomNode, ctx: LayoutContext) -> LayoutBox:
     """Lay out inline content of a node, building line boxes.
@@ -1440,11 +1346,11 @@ pub fn layout_inline(node: BeDomNode, ctx: LayoutContext) -> LayoutBox:
     val available_w = ctx.available_width
     val line_h = 16
     val char_w = 8
-    # Collect all text from the subtree
+    # Collect all text from the subtree (delegated to layout_inline.spl)
     val full_text = _collect_text(eff_node)
-    # Get text-align from effective node (check inline style attr first)
+    # Get text-align from effective node (delegated to layout_inline.spl)
     val align = _parse_inline_text_align(eff_node)
-    # Split into words
+    # Split into words (delegated to layout_inline.spl)
     val words = _split_words(full_text)
     var lines: [LineBox] = []
     var line_frags: [InlineFragment] = []
@@ -1535,44 +1441,6 @@ fn _build_line_box(frags: [InlineFragment], y: i32, line_w: i32, line_h: i32, al
         fragments: adjusted
     )
 
-fn _collect_text(node: BeDomNode) -> text:
-    """Recursively collect all text content from a node subtree."""
-    if be_dom_get_is_text(node):
-        return be_dom_get_text(node)
-    val kids = be_dom_get_children(node)
-    var result = ""
-    var i = 0
-    while i < kids.len():
-        val child = kids[i]
-        i = i + 1
-        val sub = _collect_text(child)
-        if sub.len() > 0:
-            if result.len() > 0:
-                result = result + " " + sub
-            else:
-                result = sub
-    result
-
-fn _split_words(s: text) -> [text]:
-    """Split text on whitespace into words."""
-    var words: [text] = []
-    val n = s.len()
-    var start = -1
-    var i = 0
-    while i < n:
-        val ch = s.char_at(i)
-        if ch == " " or ch == "\t" or ch == "\n" or ch == "\r":
-            if start >= 0:
-                words.push(s.slice(start, i))
-                start = -1
-        else:
-            if start < 0:
-                start = i
-        i = i + 1
-    if start >= 0:
-        words.push(s.slice(start, n))
-    words
-
 # =========================================================================
 # layout_table — basic table layout
 # =========================================================================
@@ -1580,7 +1448,7 @@ fn _split_words(s: text) -> [text]:
 pub fn layout_table(node: BeDomNode, ctx: LayoutContext) -> LayoutBox:
     """Lay out a table node, returning a LayoutBox with row children."""
     val available_w = ctx.available_width
-    # Find table node (walk down from doc root if needed)
+    # Find table node (walk down from doc root if needed) — delegated to layout_table.spl
     val table_node = _find_table_node(node)
     val row_nodes = _collect_table_rows(table_node)
     val num_rows = row_nodes.len()
@@ -1592,10 +1460,10 @@ pub fn layout_table(node: BeDomNode, ctx: LayoutContext) -> LayoutBox:
             line_boxes: [],
             children: []
         )
-    # Count columns from first row
+    # Count columns from first row (delegated to layout_table.spl)
     val first_row_cells = _collect_cells(row_nodes[0])
     val num_cols = _count_logical_columns(first_row_cells)
-    # Compute column widths using distribute-remainder (AD-6)
+    # Compute column widths using distribute-remainder (AD-6) — delegated to layout_table.spl
     val col_widths = _compute_col_widths(available_w, num_cols, first_row_cells)
     val cell_h = 20
     var row_boxes: [LayoutBox] = []
@@ -1607,11 +1475,11 @@ pub fn layout_table(node: BeDomNode, ctx: LayoutContext) -> LayoutBox:
         val cells = _collect_cells(row_node)
         var cell_boxes: [LayoutBox] = []
         var cx = 0
-        var ci = 0
+        var tci = 0
         var col_idx = 0
-        while ci < cells.len():
-            val cell = cells[ci]
-            ci = ci + 1
+        while tci < cells.len():
+            val cell = cells[tci]
+            tci = tci + 1
             val colspan = _get_colspan(cell)
             # Sum widths for this cell's colspan
             var cw = 0
@@ -1648,203 +1516,3 @@ pub fn layout_table(node: BeDomNode, ctx: LayoutContext) -> LayoutBox:
         line_boxes: [],
         children: row_boxes
     )
-
-fn _find_table_node(node: BeDomNode) -> BeDomNode:
-    """Walk into node to find a table element, or return node itself."""
-    val tag = be_dom_get_tag(node)
-    if tag == "table":
-        return node
-    val kids = be_dom_get_children(node)
-    var i = 0
-    while i < kids.len():
-        val k = kids[i]
-        i = i + 1
-        val found = _find_table_node(k)
-        if be_dom_get_tag(found) == "table":
-            return found
-    node
-
-fn _collect_table_rows(table: BeDomNode) -> [BeDomNode]:
-    """Collect all <tr> elements from a table (including those inside tbody/thead/tfoot)."""
-    var rows: [BeDomNode] = []
-    val kids = be_dom_get_children(table)
-    var i = 0
-    while i < kids.len():
-        val k = kids[i]
-        i = i + 1
-        val t = be_dom_get_tag(k)
-        if t == "tr":
-            rows.push(k)
-        elif t == "tbody" or t == "thead" or t == "tfoot":
-            val tbody_kids = be_dom_get_children(k)
-            var j = 0
-            while j < tbody_kids.len():
-                val r = tbody_kids[j]
-                j = j + 1
-                if be_dom_get_tag(r) == "tr":
-                    rows.push(r)
-    rows
-
-fn _collect_cells(row: BeDomNode) -> [BeDomNode]:
-    """Collect all <td> and <th> from a <tr>."""
-    var cells: [BeDomNode] = []
-    val kids = be_dom_get_children(row)
-    var i = 0
-    while i < kids.len():
-        val k = kids[i]
-        i = i + 1
-        val t = be_dom_get_tag(k)
-        if t == "td" or t == "th":
-            cells.push(k)
-    cells
-
-fn _get_colspan(cell: BeDomNode) -> i32:
-    """Return colspan attribute value, defaulting to 1."""
-    val cs = be_dom_get_attr(cell, "colspan")
-    if cs == "":
-        return 1
-    var v = 0
-    var i = 0
-    while i < cs.len():
-        val ch = cs.char_at(i)
-        i = i + 1
-        # Convert digit char to integer via lookup (avoids char_code method syntax)
-        var d = -1
-        if ch == "0":
-            d = 0
-        elif ch == "1":
-            d = 1
-        elif ch == "2":
-            d = 2
-        elif ch == "3":
-            d = 3
-        elif ch == "4":
-            d = 4
-        elif ch == "5":
-            d = 5
-        elif ch == "6":
-            d = 6
-        elif ch == "7":
-            d = 7
-        elif ch == "8":
-            d = 8
-        elif ch == "9":
-            d = 9
-        if d >= 0:
-            v = v * 10 + d
-    if v <= 0:
-        1
-    else:
-        v
-
-fn _count_logical_columns(cells: [BeDomNode]) -> i32:
-    """Count logical column count from cells (summing colspan)."""
-    var total = 0
-    var i = 0
-    while i < cells.len():
-        total = total + _get_colspan(cells[i])
-        i = i + 1
-    if total == 0: 1 else: total
-
-fn _compute_col_widths(total_w: i32, num_cols: i32, first_row_cells: [BeDomNode]) -> [i32]:
-    """Distribute total_w evenly across num_cols using distribute-remainder (AD-6)."""
-    var widths: [i32] = []
-    if num_cols <= 0:
-        return widths
-    val base = total_w / num_cols
-    val remainder = total_w - (base * num_cols)
-    var i = 0
-    while i < num_cols:
-        val extra = if i < remainder: 1 else: 0
-        widths.push(base + extra)
-        i = i + 1
-    widths
-
-fn _apply_opacity(argb: u32, opacity: f32) -> u32:
-    if opacity >= 1.0:
-        return argb
-    if opacity <= 0.0:
-        return argb & 0x00FFFFFF
-    val a = (argb >> 24) & 0xFF
-    var new_a = (a.to_f32() * opacity).to_u32()
-    if new_a > 255:
-        new_a = 255
-    return (new_a << 24) | (argb & 0x00FFFFFF)
-
-# =========================================================================
-# Position: Sticky Fixup Pass
-# =========================================================================
-
-pub fn apply_sticky_fixup(root: BeLayoutBox, scroll_x: f64, scroll_y: f64):
-    """Post-layout pass: adjust position:sticky boxes so they stay within
-    their containing block bounds while clamped at their threshold offset.
-
-    For each sticky box, the adjusted position is:
-      max(normal_flow_y, min(scroll_y + top_threshold, containing_block_bottom - box_height))
-
-    Modifies layout box coordinates in-place."""
-    _sticky_fixup_box(root, root, scroll_x, scroll_y)
-
-fn _sticky_fixup_box(box: BeLayoutBox, containing: BeLayoutBox, scroll_x: f64, scroll_y: f64):
-    val node = box.node
-    val style = be_dom_get_style(node)
-    val pos = style.position
-
-    if pos == "sticky":
-        val normal_y = box.y
-        val normal_x = box.x
-
-        val top_offset = if style.top.is_auto(): -999999 else: style.top.value_as_i32()
-        val left_offset = if style.left.is_auto(): -999999 else: style.left.value_as_i32()
-        val bottom_offset = if style.bottom.is_auto(): -999999 else: style.bottom.value_as_i32()
-        val right_offset = if style.right.is_auto(): -999999 else: style.right.value_as_i32()
-
-        val cont_top = containing.content_y
-        val cont_bottom = containing.content_y + containing.content_height
-        val cont_left = containing.content_x
-        val cont_right = containing.content_x + containing.content_width
-
-        var sticky_y = normal_y
-        if top_offset > -999999:
-            val threshold_y = scroll_y.to_i32() + top_offset
-            val max_y = cont_bottom - box.height
-            sticky_y = if threshold_y > normal_y: threshold_y else: normal_y
-            if sticky_y > max_y:
-                sticky_y = max_y
-        else if bottom_offset > -999999:
-            val viewport_bottom = scroll_y.to_i32() + containing.height
-            val threshold_y = viewport_bottom - bottom_offset - box.height
-            val min_y = cont_top
-            sticky_y = if threshold_y < normal_y: threshold_y else: normal_y
-            if sticky_y < min_y:
-                sticky_y = min_y
-
-        var sticky_x = normal_x
-        if left_offset > -999999:
-            val threshold_x = scroll_x.to_i32() + left_offset
-            val max_x = cont_right - box.width
-            sticky_x = if threshold_x > normal_x: threshold_x else: normal_x
-            if sticky_x > max_x:
-                sticky_x = max_x
-        else if right_offset > -999999:
-            val viewport_right = scroll_x.to_i32() + containing.width
-            val threshold_x = viewport_right - right_offset - box.width
-            val min_x = cont_left
-            sticky_x = if threshold_x < normal_x: threshold_x else: normal_x
-            if sticky_x < min_x:
-                sticky_x = min_x
-
-        val dy = sticky_y - normal_y
-        val dx = sticky_x - normal_x
-        box.x = normal_x + dx
-        box.y = normal_y + dy
-        box.content_x = box.content_x + dx
-        box.content_y = box.content_y + dy
-
-    var ci = 0
-    while ci < box.children.len():
-        val child = box.children[ci]
-        ci = ci + 1
-        val child_pos = be_dom_get_style(child.node).position
-        val next_containing = if child_pos == "sticky" or child_pos == "static" or child_pos == "relative": box else: containing
-        _sticky_fixup_box(child, next_containing, scroll_x, scroll_y)

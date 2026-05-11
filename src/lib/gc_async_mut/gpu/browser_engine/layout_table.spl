@@ -1,88 +1,12 @@
 
-# CSS Table Layout
+# CSS Table Layout — Structure Helpers
 #
-# layout_table and all table-structure helpers.
-# Constructs LayoutBox only — no BeLayoutBox field reads.
+# DOM-traversal helpers for table layout: finding rows, cells, colspan.
+# Returns only BeDomNode lists and integer values — no LayoutBox dependencies.
+# Called from layout.spl's layout_table implementation.
 
 use std.gc_async_mut.gpu.browser_engine.dom.{BeDomNode, be_dom_get_tag,
     be_dom_get_children, be_dom_get_attr}
-use std.gc_async_mut.gpu.browser_engine.layout_m14_types.{LayoutContext, LayoutBox}
-
-# =========================================================================
-# layout_table — basic table layout
-# =========================================================================
-
-pub fn layout_table(node: BeDomNode, ctx: LayoutContext) -> LayoutBox:
-    """Lay out a table node, returning a LayoutBox with row children."""
-    val available_w = ctx.available_width
-    # Find table node (walk down from doc root if needed)
-    val table_node = _find_table_node(node)
-    val row_nodes = _collect_table_rows(table_node)
-    val num_rows = row_nodes.len()
-    if num_rows == 0:
-        return LayoutBox(
-            x: 0, y: 0,
-            width: available_w, height: 0,
-            is_anonymous: false,
-            line_boxes: [],
-            children: []
-        )
-    # Count columns from first row
-    val first_row_cells = _collect_cells(row_nodes[0])
-    val num_cols = _count_logical_columns(first_row_cells)
-    # Compute column widths using distribute-remainder (AD-6)
-    val col_widths = _compute_col_widths(available_w, num_cols, first_row_cells)
-    val cell_h = 20
-    var row_boxes: [LayoutBox] = []
-    var ri = 0
-    var row_y = 0
-    while ri < num_rows:
-        val row_node = row_nodes[ri]
-        ri = ri + 1
-        val cells = _collect_cells(row_node)
-        var cell_boxes: [LayoutBox] = []
-        var cx = 0
-        var ci = 0
-        var col_idx = 0
-        while ci < cells.len():
-            val cell = cells[ci]
-            ci = ci + 1
-            val colspan = _get_colspan(cell)
-            # Sum widths for this cell's colspan
-            var cw = 0
-            var span_i = 0
-            while span_i < colspan:
-                val target_col = col_idx + span_i
-                if target_col < col_widths.len():
-                    cw = cw + col_widths[target_col]
-                span_i = span_i + 1
-            val cell_box = LayoutBox(
-                x: cx, y: row_y,
-                width: cw, height: cell_h,
-                is_anonymous: false,
-                line_boxes: [],
-                children: []
-            )
-            cell_boxes.push(cell_box)
-            cx = cx + cw
-            col_idx = col_idx + colspan
-        val row_box = LayoutBox(
-            x: 0, y: row_y,
-            width: available_w, height: cell_h,
-            is_anonymous: false,
-            line_boxes: [],
-            children: cell_boxes
-        )
-        row_boxes.push(row_box)
-        row_y = row_y + cell_h
-    LayoutBox(
-        x: 0, y: 0,
-        width: available_w,
-        height: row_y,
-        is_anonymous: false,
-        line_boxes: [],
-        children: row_boxes
-    )
 
 fn _find_table_node(node: BeDomNode) -> BeDomNode:
     """Walk into node to find a table element, or return node itself."""

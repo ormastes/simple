@@ -1170,6 +1170,11 @@ impl<'a> Parser<'a> {
             TokenKind::Lazy => "lazy",
             TokenKind::Skip => "skip",
             TokenKind::Old => "old",
+            // Domain-block keywords as method/field names (e.g., dom.style, obj.ui)
+            TokenKind::Ui => "ui",
+            TokenKind::Style => "style",
+            TokenKind::Schema => "schema",
+            TokenKind::Music => "music",
             _ => {
                 return Err(ParseError::unexpected_token(
                     "identifier",
