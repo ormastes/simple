@@ -571,7 +571,7 @@ pub fn extract_startup_config(module: &Module) -> Option<StartupConfig> {
 
 /// Protect `?` characters inside string literals from being altered by
 /// `strip_optionals`.  Replaces them with a sentinel that is restored later.
-fn protect_question_marks_in_strings(s: &str) -> String {
+pub(crate) fn protect_question_marks_in_strings(s: &str) -> String {
     let bytes = s.as_bytes();
     let len = bytes.len();
     let mut out = Vec::with_capacity(len + 512);
@@ -1989,5 +1989,33 @@ fn main():
         assert_eq!(config.window_hints.height, 720); // Default
         assert_eq!(config.window_hints.title, "Simple Application"); // Default
         assert!(config.has_window_hints);
+    }
+
+    #[test]
+    fn test_strip_optionals_preserves_question_mark_in_strings() {
+        let input = r#"val c = "env_seed[0] ? env_seed : \"seed\""
+fn foo(x: Int?) -> text?:
+    pass
+"#;
+        let result = strip_optionals(input.to_string());
+        assert!(result.contains("env_seed[0] ? env_seed"), "? inside string was stripped: {}", result);
+        assert!(!result.contains("Int?"), "Int? in code was NOT stripped: {}", result);
+        assert!(!result.contains("text?"), "text? should have been stripped by caller, but strip_optionals does not strip text?");
+    }
+
+    #[test]
+    fn test_strip_optionals_c_wrapper_string() {
+        let input = r#"    val c_src = "perror(env_seed && env_seed[0] ? env_seed : \"simple bootstrap seed\");\n"
+"#;
+        let result = strip_optionals(input.to_string());
+        assert!(result.contains("env_seed[0] ? env_seed"), "C ternary ? was stripped! Result: {}", result);
+    }
+
+    #[test]
+    fn test_protect_question_marks_in_strings() {
+        let input = r#""hello ? world""#;
+        let result = protect_question_marks_in_strings(input);
+        assert!(!result.contains('?'), "? should be replaced with sentinel");
+        assert!(result.contains("QMARK"), "sentinel should be present");
     }
 }

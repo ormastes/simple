@@ -615,8 +615,11 @@ fn find_balanced_gt(s: &str) -> Option<usize> {
 /// Handles: `?` stripping, `.?` -> `!= nil`, `fn()` types -> `any`,
 /// `impl<>` stripping, `cli` block commenting, etc.
 fn apply_bootstrap_rewrite(source: &str) -> String {
+    // Protect `?` inside string literals from being stripped
+    let mut s = crate::pipeline::module_loader::protect_question_marks_in_strings(source);
+
     // Protect ?? (null coalesce) before stripping ? from types
-    let mut s = source.replace("??", "\x00COALESCE\x00");
+    s = s.replace("??", "\x00COALESCE\x00");
 
     // Handle `.?` (optional chaining / nil-check) before general ? stripping.
     for pat in [".?:", ".?\n", ".?\r\n", ".? ", ".?\t", ".?)", ".?,", ".?]", ".?;"] {
@@ -640,6 +643,9 @@ fn apply_bootstrap_rewrite(source: &str) -> String {
 
     // Restore ?? (null coalesce) operator
     s = s.replace("\x00COALESCE\x00", "??");
+
+    // Restore `?` inside string literals
+    s = s.replace("\x00QMARK\x00", "?");
 
     s = s.replace("/* complex expr */", "0");
     s = s.replace(" ~> ", " |> ");
