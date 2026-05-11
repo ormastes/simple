@@ -1,0 +1,416 @@
+# DBFS MetaStore — crash-safe file-based persistent metadata store.
+#
+# WAL-first writes + checkpoint snapshots for recovery (WAFL-inspired).
+# Journal entries are flushed atomically before returning to caller.
+# Checkpoint serializes full inode+dentry tables then atomically renames
+# the new file over the old one (write-new → rename → truncate journal).
+#
+# Uses rt_file_* externs for I/O since the nvfs Arena concrete impls
+# live in examples/nvfs/, not in lib/.
+#
+# Maps to: AC-3, AC-5, AC-9, D5, D12 R1.
+
+use std.db.dbfs_engine.schema.{InodeRow, DentryRow, InodeTable, DentryTable, InodeKey, DentryKey}
+use std.db.dbfs_engine.intent_log.{IntentLog, IntentLogRecord}
+
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_file_rename(from: text, to: text) -> bool
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+
+fn _get_timestamp() -> i64:
+    val (out, _err, _code) = rt_process_run("date", ["+%s%3N"])
+    val ms = out.trim().to_int() ?? 0
+    ms * 1000
+
+# ============================================================
+# MetaOp — the set of operations we can journal
+# ============================================================
+
+enum MetaOp:
+    InodeWrite(row: InodeRow)
+    InodeDelete(ino_id: i64)
+    DentryWrite(row: DentryRow)
+    DentryDelete(parent_ino: i64, name: text)
+    InlineWrite(ino_id: i64, data_hex: text)
+    InlineDelete(ino_id: i64)
+    Checkpoint
+
+# ============================================================
+# Journal entry and checkpoint snapshot
+# ============================================================
+
+struct MetaJournalEntry:
+    sequence:  i64
+    op:        MetaOp
+    timestamp: i64
+
+struct MetaCheckpoint:
+    gen:          i64
+    inode_count:  i64
+    dentry_count: i64
+    inline_count: i64
+    timestamp:    i64
+
+# ============================================================
+# Serialization helpers
+# ============================================================
+
+fn _serialize_inode(row: InodeRow) -> text:
+    row.ino_id.to_text() + "|" +
+    row.gen.to_text() + "|" +
+    row.mode.to_text() + "|" +
+    row.uid.to_text() + "|" +
+    row.gid.to_text() + "|" +
+    row.link_count.to_text() + "|" +
+    row.size.to_text() + "|" +
+    row.mtime.to_text() + "|" +
+    row.ctime.to_text() + "|" +
+    row.flags.to_text()
+
+fn _parse_inode(line: text) -> InodeRow?:
+    val parts = line.split("|")
+    if parts.len() < 10:
+        return nil
+    val ino_id     = parts[0].to_int() ?? 0
+    val gen_val    = parts[1].to_int() ?? 0
+    val mode_val   = parts[2].to_int() ?? 0
+    val uid_val    = parts[3].to_int() ?? 0
+    val gid_val    = parts[4].to_int() ?? 0
+    val link_count = parts[5].to_int() ?? 0
+    val size_val   = parts[6].to_int() ?? 0
+    val mtime_val  = parts[7].to_int() ?? 0
+    val ctime_val  = parts[8].to_int() ?? 0
+    val flags_val  = parts[9].to_int() ?? 0
+    InodeRow(
+        ino_id:     ino_id,
+        gen:        gen_val,
+        mode:       mode_val as u32,
+        uid:        uid_val as u32,
+        gid:        gid_val as u32,
+        link_count: link_count,
+        size:       size_val,
+        mtime:      mtime_val,
+        ctime:      ctime_val,
+        flags:      flags_val as u32
+    )
+
+fn _serialize_dentry(row: DentryRow) -> text:
+    row.parent_ino.to_text() + "|" +
+    row.name + "|" +
+    row.child_ino.to_text() + "|" +
+    row.gen.to_text()
+
+fn _parse_dentry(line: text) -> DentryRow?:
+    val parts = line.split("|")
+    if parts.len() < 4:
+        return nil
+    val parent_ino = parts[0].to_int() ?? 0
+    val name_val   = parts[1]
+    val child_ino  = parts[2].to_int() ?? 0
+    val gen_val    = parts[3].to_int() ?? 0
+    DentryRow(
+        parent_ino: parent_ino,
+        name:       name_val,
+        child_ino:  child_ino,
+        gen:        gen_val
+    )
+
+fn _serialize_journal_entry(entry: MetaJournalEntry) -> text:
+    val op_tag: text =
+        if entry.op is MetaOp.InodeWrite:   "INODE_WRITE"
+        else if entry.op is MetaOp.InodeDelete: "INODE_DELETE"
+        else if entry.op is MetaOp.DentryWrite: "DENTRY_WRITE"
+        else if entry.op is MetaOp.DentryDelete: "DENTRY_DELETE"
+        else if entry.op is MetaOp.InlineWrite: "INLINE_WRITE"
+        else if entry.op is MetaOp.InlineDelete: "INLINE_DELETE"
+        else: "CHECKPOINT"
+    val payload: text =
+        if entry.op is MetaOp.InodeWrite:
+            _serialize_inode(entry.op.row)
+        else if entry.op is MetaOp.InodeDelete:
+            entry.op.ino_id.to_text()
+        else if entry.op is MetaOp.DentryWrite:
+            _serialize_dentry(entry.op.row)
+        else if entry.op is MetaOp.DentryDelete:
+            entry.op.parent_ino.to_text() + "|" + entry.op.name
+        else if entry.op is MetaOp.InlineWrite:
+            entry.op.ino_id.to_text() + "|" + entry.op.data_hex
+        else if entry.op is MetaOp.InlineDelete:
+            entry.op.ino_id.to_text()
+        else:
+            ""
+    entry.sequence.to_text() + "~" +
+    op_tag + "~" +
+    entry.timestamp.to_text() + "~" +
+    payload
+
+fn _parse_journal_entry(line: text) -> MetaJournalEntry?:
+    val parts = line.split("~")
+    if parts.len() < 4:
+        return nil
+    val seq       = parts[0].to_int() ?? 0
+    val op_tag    = parts[1]
+    val ts        = parts[2].to_int() ?? 0
+    val payload   = parts[3]
+    val op: MetaOp? =
+        if op_tag == "INODE_WRITE":
+            val row = _parse_inode(payload)
+            if row: MetaOp.InodeWrite(row: row) else: nil
+        else if op_tag == "INODE_DELETE":
+            val id = payload.to_int() ?? 0
+            MetaOp.InodeDelete(ino_id: id)
+        else if op_tag == "DENTRY_WRITE":
+            val row = _parse_dentry(payload)
+            if row: MetaOp.DentryWrite(row: row) else: nil
+        else if op_tag == "DENTRY_DELETE":
+            val dp = payload.split("|")
+            if dp.len() >= 2:
+                MetaOp.DentryDelete(parent_ino: dp[0].to_int() ?? 0, name: dp[1])
+            else: nil
+        else if op_tag == "INLINE_WRITE":
+            val ip = payload.split("|")
+            if ip.len() >= 2:
+                MetaOp.InlineWrite(ino_id: ip[0].to_int() ?? 0, data_hex: ip[1])
+            else: nil
+        else if op_tag == "INLINE_DELETE":
+            val id = payload.to_int() ?? 0
+            MetaOp.InlineDelete(ino_id: id)
+        else if op_tag == "CHECKPOINT":
+            MetaOp.Checkpoint
+        else:
+            nil
+    if not op:
+        return nil
+    MetaJournalEntry(sequence: seq, op: op, timestamp: ts)
+
+# ============================================================
+# MetaStore
+# ============================================================
+
+struct MetaStore:
+    path:             text
+    journal_path:     text
+    checkpoint_path:  text
+    journal:          [MetaJournalEntry]
+    next_sequence:    i64
+    last_checkpoint:  MetaCheckpoint
+    dirty:            bool
+
+impl MetaStore:
+    static fn create(path: text) -> MetaStore:
+        val jpath  = path + ".meta.wal"
+        val ckpath = path + ".meta.ckpt"
+        rt_file_write_text(jpath, "")
+        val ck = MetaCheckpoint(gen: 0, inode_count: 0, dentry_count: 0, inline_count: 0, timestamp: _get_timestamp())
+        rt_file_write_text(ckpath, "gen:0|inode_count:0|dentry_count:0|inline_count:0|timestamp:" + ck.timestamp.to_text())
+        MetaStore(
+            path:            path,
+            journal_path:    jpath,
+            checkpoint_path: ckpath,
+            journal:         [],
+            next_sequence:   1,
+            last_checkpoint: ck,
+            dirty:           false
+        )
+
+    static fn open(path: text) -> Result<MetaStore, text>:
+        val jpath  = path + ".meta.wal"
+        val ckpath = path + ".meta.ckpt"
+        val ck_content = if rt_file_exists(ckpath): rt_file_read_text(ckpath) else: ""
+        val ck = MetaStore._parse_checkpoint_text(ck_content) ?? MetaCheckpoint(gen: 0, inode_count: 0, dentry_count: 0, inline_count: 0, timestamp: 0)
+        val wal_content = if rt_file_exists(jpath): rt_file_read_text(jpath) else: ""
+        val entries = MetaStore._parse_journal_text(wal_content)
+        var next_seq: i64 = 1
+        var i: i32 = 0
+        while i < entries.len() as i32:
+            if entries[i].sequence >= next_seq:
+                next_seq = entries[i].sequence + 1
+            i = i + 1
+        Ok(MetaStore(
+            path:            path,
+            journal_path:    jpath,
+            checkpoint_path: ckpath,
+            journal:         entries,
+            next_sequence:   next_seq,
+            last_checkpoint: ck,
+            dirty:           false
+        ))
+
+    # --- Journaled writes ---
+
+    me fn write_inode(row: InodeRow) -> bool:
+        val entry = MetaJournalEntry(
+            sequence:  self.next_sequence,
+            op:        MetaOp.InodeWrite(row: row),
+            timestamp: _get_timestamp()
+        )
+        self.journal.push(entry)
+        self.next_sequence = self.next_sequence + 1
+        self.dirty = true
+        self._flush_journal()
+
+    me fn delete_inode(ino_id: i64) -> bool:
+        val entry = MetaJournalEntry(
+            sequence:  self.next_sequence,
+            op:        MetaOp.InodeDelete(ino_id: ino_id),
+            timestamp: _get_timestamp()
+        )
+        self.journal.push(entry)
+        self.next_sequence = self.next_sequence + 1
+        self.dirty = true
+        self._flush_journal()
+
+    me fn write_dentry(row: DentryRow) -> bool:
+        val entry = MetaJournalEntry(
+            sequence:  self.next_sequence,
+            op:        MetaOp.DentryWrite(row: row),
+            timestamp: _get_timestamp()
+        )
+        self.journal.push(entry)
+        self.next_sequence = self.next_sequence + 1
+        self.dirty = true
+        self._flush_journal()
+
+    me fn delete_dentry(parent_ino: i64, name: text) -> bool:
+        val entry = MetaJournalEntry(
+            sequence:  self.next_sequence,
+            op:        MetaOp.DentryDelete(parent_ino: parent_ino, name: name),
+            timestamp: _get_timestamp()
+        )
+        self.journal.push(entry)
+        self.next_sequence = self.next_sequence + 1
+        self.dirty = true
+        self._flush_journal()
+
+    me fn write_inline(ino_id: i64, data_hex: text) -> bool:
+        val entry = MetaJournalEntry(
+            sequence:  self.next_sequence,
+            op:        MetaOp.InlineWrite(ino_id: ino_id, data_hex: data_hex),
+            timestamp: _get_timestamp()
+        )
+        self.journal.push(entry)
+        self.next_sequence = self.next_sequence + 1
+        self.dirty = true
+        self._flush_journal()
+
+    me fn delete_inline(ino_id: i64) -> bool:
+        val entry = MetaJournalEntry(
+            sequence:  self.next_sequence,
+            op:        MetaOp.InlineDelete(ino_id: ino_id),
+            timestamp: _get_timestamp()
+        )
+        self.journal.push(entry)
+        self.next_sequence = self.next_sequence + 1
+        self.dirty = true
+        self._flush_journal()
+
+    # --- Checkpoint ---
+
+    me fn checkpoint(inodes: InodeTable, dentries: DentryTable) -> bool:
+        val new_gen = self.last_checkpoint.gen + 1
+        val content = self._serialize_checkpoint(inodes, dentries, new_gen)
+        val tmp_path = self.checkpoint_path + ".new"
+        if not rt_file_write_text(tmp_path, content):
+            return false
+        if not rt_file_rename(tmp_path, self.checkpoint_path):
+            return false
+        # Journal entries are now baked into the checkpoint; truncate.
+        rt_file_write_text(self.journal_path, "")
+        self.journal = []
+        self.last_checkpoint = MetaCheckpoint(
+            gen:          new_gen,
+            inode_count:  inodes.entries.len() as i64,
+            dentry_count: dentries.entries.len() as i64,
+            inline_count: 0,
+            timestamp:    _get_timestamp()
+        )
+        self.dirty = false
+        true
+
+    # --- Recovery ---
+
+    fn replay_journal() -> [MetaJournalEntry]:
+        var result: [MetaJournalEntry] = []
+        for entry in self.journal:
+            result.push(entry)
+        result
+
+    fn last_checkpoint_gen() -> i64:
+        self.last_checkpoint.gen
+
+    # --- Internal: journal flush ---
+
+    me fn _flush_journal() -> bool:
+        var lines: text = ""
+        var i: i32 = 0
+        while i < self.journal.len() as i32:
+            lines = lines + _serialize_journal_entry(self.journal[i]) + "\n"
+            i = i + 1
+        rt_file_write_text(self.journal_path, lines)
+
+    # --- Internal: checkpoint serialization ---
+
+    fn _serialize_checkpoint(inodes: InodeTable, dentries: DentryTable, gen: i64) -> text:
+        var out: text = "[inodes]\n"
+        var i: i32 = 0
+        while i < inodes.entries.len() as i32:
+            out = out + _serialize_inode(inodes.entries[i].row) + "\n"
+            i = i + 1
+        out = out + "[dentries]\n"
+        var j: i32 = 0
+        while j < dentries.entries.len() as i32:
+            out = out + _serialize_dentry(dentries.entries[j].row) + "\n"
+            j = j + 1
+        out = out + "[meta]\n"
+        out = out + "gen:" + gen.to_text() + "|" +
+            "inode_count:" + inodes.entries.len().to_text() + "|" +
+            "dentry_count:" + dentries.entries.len().to_text() + "|" +
+            "inline_count:0|" +
+            "timestamp:" + _get_timestamp().to_text() + "\n"
+        out
+
+    static fn _parse_checkpoint_text(content: text) -> MetaCheckpoint?:
+        val lines = content.split("\n")
+        var in_meta: bool = false
+        var i: i32 = 0
+        while i < lines.len() as i32:
+            val line = lines[i].trim()
+            if line == "[meta]":
+                in_meta = true
+            else if (in_meta and line.len() > 0):
+                val parts = line.split("|")
+                var gen_v:     i64 = 0
+                var ic:        i64 = 0
+                var dc:        i64 = 0
+                var inline_c:  i64 = 0
+                var ts:        i64 = 0
+                var p: i32 = 0
+                while p < parts.len() as i32:
+                    val kv = parts[p].split(":")
+                    if kv.len() >= 2:
+                        val k = kv[0]
+                        val v = kv[1].to_int() ?? 0
+                        if k == "gen":          gen_v    = v
+                        if k == "inode_count":  ic       = v
+                        if k == "dentry_count": dc       = v
+                        if k == "inline_count": inline_c = v
+                        if k == "timestamp":    ts       = v
+                    p = p + 1
+                return MetaCheckpoint(gen: gen_v, inode_count: ic, dentry_count: dc, inline_count: inline_c, timestamp: ts)
+            i = i + 1
+        nil
+
+    static fn _parse_journal_text(content: text) -> [MetaJournalEntry]:
+        val lines = content.split("\n")
+        var result: [MetaJournalEntry] = []
+        var i: i32 = 0
+        while i < lines.len() as i32:
+            val line = lines[i].trim()
+            if line.len() > 0:
+                val entry = _parse_journal_entry(line)
+                if entry:
+                    result.push(entry)
+            i = i + 1
+        result

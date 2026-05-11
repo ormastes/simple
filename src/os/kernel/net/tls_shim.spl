@@ -1,0 +1,158 @@
+# TLS Shim -- Baremetal TLS Integration
+#
+# MDSOC: feature dimension, security layer
+# Status: B4 stub -- provides baremetal stubs for filesystem-dependent TLS
+#         functions and creates TLS configs from embedded certificates.
+#
+# Architecture:
+#   - rt_file_read_text: @export("C") stub returns empty string on baremetal
+#     (satisfies extern declared in certificate.spl and worker.spl).
+#   - get_baremetal_tls_config(): builds a TlsConfig from embedded certs.
+#     This is shim-level wiring -- the TLS handshake itself is not yet
+#     functional (see src/lib/nogc_async_mut/io/tls.spl stub status).
+#   - Hardware entropy stubs: rt_rdrand/rt_rndr/rt_riscv_seed provide
+#     deterministic-but-nonzero values for the ChaCha20 CSPRNG seeding
+#     in src/os/crypto/random.spl. Replace with real hardware entropy
+#     when platform drivers are available.
+
+use os.kernel.net.embedded_certs.{
+    get_embedded_cert_der, get_embedded_key_der, has_embedded_certs
+}
+
+# ============================================================================
+# File I/O Stub
+# ============================================================================
+
+@export("C")
+fn rt_file_read_text(path: text) -> text:
+    """Read a text file by path.
+
+    Baremetal stub: no filesystem available. Returns empty string.
+    TLS certificate loading should use embedded_certs module instead.
+    """
+    ""
+
+# ============================================================================
+# Time Stub (baremetal-only)
+# ============================================================================
+
+var g_fake_time_us: i64 = 1_000_000_000  # Start at ~1000 seconds in micros
+
+@cfg(baremetal)
+@export("C")
+fn rt_time_now_ms() -> i64:
+    """Return current time in milliseconds.
+
+    Baremetal stub: returns a monotonically increasing fake clock.
+    Each call advances by 1ms to simulate time passage.
+    TODO: wire to real hardware timer (PIT/HPET/TSC).
+    """
+    val ms = g_fake_time_us / 1000
+    g_fake_time_us = g_fake_time_us + 1000
+    ms
+
+@cfg(baremetal)
+@export("C")
+fn rt_time_now_unix_micros() -> i64:
+    """Return current time in microseconds since epoch.
+
+    Baremetal stub: returns a monotonically increasing fake clock.
+    Each call advances by 1000us (1ms).
+    TODO: wire to real RTC + hardware timer.
+    """
+    val result = g_fake_time_us
+    g_fake_time_us = g_fake_time_us + 1000
+    result
+
+# ============================================================================
+# Hardware Entropy Stubs (baremetal-only)
+# ============================================================================
+#
+# The CSPRNG in src/os/crypto/random.spl uses platform-conditional externs
+# for hardware entropy:
+#   @cfg(x86_64) extern fn rt_rdrand() -> u64
+#   @cfg(arm64)  extern fn rt_rndr() -> u64
+#   @cfg(riscv64) extern fn rt_riscv_seed() -> u64
+#
+# On baremetal, these hardware instructions may not be available during early
+# boot or on all platforms. We provide deterministic-but-nonzero stubs using
+# a simple LCG, gated with @cfg(baremetal) to avoid symbol collisions with
+# the real platform implementations on hosted builds.
+# Replace with real RDRAND/RNDR/seed instructions when hardware drivers
+# are available.
+
+var g_entropy_state: u64 = 0xDEADBEEF_CAFEBABE
+
+fn _lcg_next() -> u64:
+    """Linear congruential generator for stub entropy.
+
+    NOT cryptographically secure. Provides nonzero, varying values so the
+    ChaCha20 CSPRNG can initialize without hanging on zero-seed.
+    TODO: replace with real hardware entropy source.
+    """
+    # Knuth LCG parameters
+    g_entropy_state = g_entropy_state * 6364136223846793005 + 1442695040888963407
+    g_entropy_state
+
+@cfg(baremetal)
+@export("C")
+fn rt_rdrand() -> u64:
+    """x86/x86_64 RDRAND stub for baremetal.
+
+    Returns deterministic pseudo-random values from LCG.
+    TODO: replace with real RDRAND instruction when running on x86 hardware.
+    """
+    _lcg_next()
+
+@cfg(baremetal)
+@export("C")
+fn rt_rndr() -> u64:
+    """ARM64 RNDR stub for baremetal.
+
+    Returns deterministic pseudo-random values from LCG.
+    TODO: replace with real RNDR instruction when running on ARM64 hardware.
+    """
+    _lcg_next()
+
+@cfg(baremetal)
+@export("C")
+fn rt_riscv_seed() -> u64:
+    """RISC-V seed CSR stub for baremetal.
+
+    Returns deterministic pseudo-random values from LCG.
+    TODO: replace with real seed CSR read when running on RISC-V hardware.
+    """
+    _lcg_next()
+
+# ============================================================================
+# Baremetal TLS Configuration
+# ============================================================================
+
+struct BaremetalTlsInfo:
+    """Holds raw DER bytes for certificate and key on baremetal."""
+    cert_der: [u8]
+    key_der: [u8]
+    available: bool
+
+fn get_baremetal_tls_info() -> BaremetalTlsInfo:
+    """Get embedded TLS certificate and key info.
+
+    Returns a BaremetalTlsInfo with the embedded DER bytes.
+    Callers can use these bytes to construct TLS configurations
+    when the TLS stack becomes functional.
+
+    Note: The TLS handshake is not yet implemented (see tls.spl stub).
+    This function provides the certificate material that will be needed
+    once the full TLS 1.3 server handshake is wired.
+    """
+    if not has_embedded_certs():
+        return BaremetalTlsInfo(
+            cert_der: [],
+            key_der: [],
+            available: false
+        )
+    BaremetalTlsInfo(
+        cert_der: get_embedded_cert_der(),
+        key_der: get_embedded_key_der(),
+        available: true
+    )

@@ -2,11 +2,12 @@
 #
 # MDSOC: feature dimension, kernel boot layer
 # Called from arch-specific boot_main after PMM + heap are initialized.
-# Initializes all services (PCI, network, display) then enters a
-# cooperative poll loop driving the network stack.
+# Initializes all services (PCI, network, display) then launches the
+# HTTP server (B5) or falls back to cooperative network polling.
 
 use os.kernel.boot.riscv_services.{init_riscv_services_with_network, riscv_network_ready}
 use os.services.netstack.netstack_init.{net_service_init_port, net_service_poll}
+use os.kernel.net.http_baremetal.{start_http_server_baremetal}
 use os.kernel.log.klog_api.{log_raw_println}
 
 fn os_main():
@@ -29,18 +30,22 @@ fn os_main():
     else:
         log_raw_println("[os_main] Network unavailable -- skipping netstack")
 
-    log_raw_println("[os_main] Entering cooperative network poll loop")
-    log_raw_println("[os_main] (wfi halt if network unavailable)")
+    # B5: Launch HTTP server inline on the boot core.
+    # The Worker's event loop replaces the cooperative poll loop —
+    # it drives the IoDriver (driver_shim) which polls the netstack.
+    # If the server exits (shutdown), fall through to idle poll loop.
+    if riscv_network_ready():
+        log_raw_println("[os_main] Starting HTTP server (B5 inline mode)...")
+        start_http_server_baremetal()
+        log_raw_println("[os_main] HTTP server exited, falling back to poll loop")
+    else:
+        log_raw_println("[os_main] No network -- skipping HTTP server")
 
-    # Cooperative network poll loop
+    log_raw_println("[os_main] Entering cooperative network poll loop (idle)")
+
+    # Fallback cooperative network poll loop.
+    # Reached if: (a) network unavailable, or (b) HTTP server exits.
     # Drives netstack frame processing + IPC without blocking.
-    # If network is unavailable, this loop is a no-op (net_service_poll
-    # returns immediately when not initialized).
-    #
-    # NOTE: In the C-backed net_boot_init path, g_netstack stays nil so
-    # net_service_poll() returns immediately each iteration. ICMP ping is
-    # served by rt_net_init's C-side handler, not the Simple NetstackService.
-    # This poll loop becomes effective once B2 wires NetstackService construction.
     network_poll_loop()
 
 fn network_poll_loop():

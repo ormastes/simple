@@ -1,0 +1,178 @@
+# ============================================================================
+# RV64GC RTL Trap Controller — Exception and Interrupt Handling (64-bit)
+# ============================================================================
+#
+# Implements RISC-V M-mode trap entry/exit logic for RV64:
+#   - Interrupt priority checking (MEI > MSI > MTI)
+#   - Trap entry: save context, jump to mtvec
+#   - Trap exit (mret): restore context, return to mepc
+#
+# All values are i64 (64-bit).  Only direct mtvec mode supported.
+#
+# VHDL synthesizable subset: i64, bool, structs only.
+# ============================================================================
+
+use std.hardware.rv64gc_rtl.csr.{CsrFile64}
+use std.hardware.rv64gc_rtl.csr.{MSTATUS_MIE_MASK, MSTATUS_MPIE_MASK, MSTATUS_MPP_MASK}
+use std.hardware.rv64gc_rtl.csr.{MSTATUS_MIE_BIT, MSTATUS_MPIE_BIT, MSTATUS_MPP_LO_BIT}
+use std.hardware.rv64gc_rtl.csr.{MPP_M_MODE}
+use std.hardware.rv64gc_rtl.csr.{MIP_MSIP_MASK, MIP_MTIP_MASK, MIP_MEIP_MASK}
+
+# ============================================================================
+# Trap phase constants
+# ============================================================================
+
+val TRAP_NORMAL: u32 = 0   # Normal execution
+val TRAP_ENTER: u32  = 1   # Entering trap handler
+val TRAP_EXIT: u32   = 2   # Exiting trap handler (mret)
+
+# ============================================================================
+# Exception cause codes (mcause with MSB=0)
+# ============================================================================
+
+val CAUSE_MISALIGNED_FETCH: i64  = 0
+val CAUSE_ILLEGAL_INSN: i64     = 2
+val CAUSE_BREAKPOINT: i64       = 3
+val CAUSE_LOAD_MISALIGNED: i64  = 4
+val CAUSE_STORE_MISALIGNED: i64 = 6
+val CAUSE_ECALL_M: i64         = 11
+
+# ============================================================================
+# Interrupt cause codes (mcause with MSB=1, bit 63 set for RV64)
+# ============================================================================
+
+# Build at runtime to avoid sign-bit literal issues
+fn cause_msi() -> i64:
+    """Machine Software Interrupt cause (bit63 | 3)."""
+    val int_bit: i64 = 1 << 63
+    int_bit | 3
+
+fn cause_mti() -> i64:
+    """Machine Timer Interrupt cause (bit63 | 7)."""
+    val int_bit: i64 = 1 << 63
+    int_bit | 7
+
+fn cause_mei() -> i64:
+    """Machine External Interrupt cause (bit63 | 11)."""
+    val int_bit: i64 = 1 << 63
+    int_bit | 11
+
+# ============================================================================
+# Trap State
+# ============================================================================
+
+struct TrapState64:
+    """Trap controller state."""
+    phase: u32   # TRAP_NORMAL, TRAP_ENTER, or TRAP_EXIT
+
+# ============================================================================
+# Trap Enter Result
+# ============================================================================
+
+struct TrapEnterResult64:
+    """Result of entering a trap."""
+    csr: CsrFile64   # Updated CSR file (mepc, mcause, mtval, mstatus saved)
+    trap_pc: i64      # Target PC (from mtvec, direct mode)
+
+# ============================================================================
+# Trap Exit Result
+# ============================================================================
+
+struct TrapExitResult64:
+    """Result of exiting a trap via mret."""
+    csr: CsrFile64    # Updated CSR file (mstatus restored)
+    return_pc: i64     # Return PC (from mepc)
+
+# ============================================================================
+# Interrupt Check Result
+# ============================================================================
+
+struct InterruptCheckResult64:
+    """Result of checking for pending interrupts."""
+    pending: bool    # True if an interrupt should be taken
+    cause: i64       # Interrupt cause code (valid only if pending=true)
+
+# ============================================================================
+# Check for Pending Interrupts
+# ============================================================================
+
+fn trap64_check_interrupt(csr: CsrFile64) -> InterruptCheckResult64:
+    """Check if an interrupt should be taken.
+    Priority: MEI > MSI > MTI (per RISC-V spec)."""
+
+    val mie_enabled = (csr.mstatus & MSTATUS_MIE_MASK) != 0
+    if mie_enabled == false:
+        return InterruptCheckResult64(pending: false, cause: 0)
+
+    val enabled_pending = csr.mie & csr.mip
+
+    if (enabled_pending & MIP_MEIP_MASK) != 0:
+        return InterruptCheckResult64(pending: true, cause: cause_mei())
+    if (enabled_pending & MIP_MSIP_MASK) != 0:
+        return InterruptCheckResult64(pending: true, cause: cause_msi())
+    if (enabled_pending & MIP_MTIP_MASK) != 0:
+        return InterruptCheckResult64(pending: true, cause: cause_mti())
+
+    InterruptCheckResult64(pending: false, cause: 0)
+
+# ============================================================================
+# Trap Entry
+# ============================================================================
+
+fn trap64_enter(csr: CsrFile64, pc: i64, cause: i64, tval: i64) -> TrapEnterResult64:
+    """Enter a trap: save context to CSRs, compute handler address."""
+
+    var new_csr = csr
+
+    # Save exception context
+    new_csr.mepc = pc & 0xFFFFFFFFFFFFFFFC    # Align to 4 bytes
+    new_csr.mcause = cause
+    new_csr.mtval = tval
+
+    # Save and update mstatus
+    val old_mie = (csr.mstatus & MSTATUS_MIE_MASK) >> MSTATUS_MIE_BIT
+    var new_mstatus = csr.mstatus
+
+    # Clear MIE, MPIE, MPP fields
+    new_mstatus = new_mstatus & (MSTATUS_MIE_MASK ^ -1)
+    new_mstatus = new_mstatus & (MSTATUS_MPIE_MASK ^ -1)
+    new_mstatus = new_mstatus & (MSTATUS_MPP_MASK ^ -1)
+
+    # Set MPIE = old MIE, MIE = 0, MPP = M-mode
+    new_mstatus = new_mstatus | (old_mie << MSTATUS_MPIE_BIT)
+    new_mstatus = new_mstatus | MPP_M_MODE
+
+    new_csr.mstatus = new_mstatus
+
+    # Compute trap handler PC from mtvec (direct mode)
+    val trap_pc = csr.mtvec & 0xFFFFFFFFFFFFFFFC
+
+    TrapEnterResult64(csr: new_csr, trap_pc: trap_pc)
+
+# ============================================================================
+# Trap Exit (mret)
+# ============================================================================
+
+fn trap64_exit_mret(csr: CsrFile64) -> TrapExitResult64:
+    """Exit from M-mode trap via MRET instruction."""
+
+    var new_mstatus = csr.mstatus
+
+    val old_mpie = (csr.mstatus & MSTATUS_MPIE_MASK) >> MSTATUS_MPIE_BIT
+
+    # Clear MIE, MPIE, MPP
+    new_mstatus = new_mstatus & (MSTATUS_MIE_MASK ^ -1)
+    new_mstatus = new_mstatus & (MSTATUS_MPIE_MASK ^ -1)
+    new_mstatus = new_mstatus & (MSTATUS_MPP_MASK ^ -1)
+
+    # MIE <- MPIE, MPIE <- 1, MPP <- M-mode
+    new_mstatus = new_mstatus | (old_mpie << MSTATUS_MIE_BIT)
+    new_mstatus = new_mstatus | MSTATUS_MPIE_MASK
+    new_mstatus = new_mstatus | MPP_M_MODE
+
+    var new_csr = csr
+    new_csr.mstatus = new_mstatus
+
+    val return_pc = csr.mepc
+
+    TrapExitResult64(csr: new_csr, return_pc: return_pc)

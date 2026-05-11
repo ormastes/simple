@@ -1,0 +1,201 @@
+# HTTP Baremetal -- Inline HTTP Server for SimpleOS
+#
+# MDSOC: feature dimension, application layer
+# Status: B5 -- wires the std.http_server Worker directly into the SimpleOS
+#         init system. Bypasses HttpServer.start() (which spawns threads)
+#         and instead instantiates a single Worker that runs inline on the
+#         boot core.
+#
+# Architecture:
+#   start_http_server_baremetal()
+#     -> build ServerConfig (port 8080, 1 worker, small limits)
+#     -> build AsyncRouter with baremetal locations
+#     -> build MiddlewarePipeline (minimal)
+#     -> build HandlerRegistry with "app" handler for /, /health
+#     -> create Channel (for control; unused in inline mode)
+#     -> Worker.create(0, config, router, pipeline, registry, channel)
+#     -> worker.run()  -- this becomes the main loop
+#
+# The Worker's run() loop polls the IoDriver (driver_shim) which polls
+# the netstack, so this replaces the cooperative network_poll_loop
+# from os_main.
+
+use std.concurrent.channel.{Channel, channel_new}
+use std.http_server.types.{
+    ServerConfig, LocationConfig, HttpRequestData, HttpResponseData,
+    default_server_config, default_response_data
+}
+use std.http_server.worker.{Worker}
+use std.http_server.router.{AsyncRouter}
+use std.http_server.middleware.{MiddlewarePipeline}
+use std.http_server.handler.{HandlerRegistry}
+use os.kernel.log.klog_api.{log_raw_println}
+
+# ============================================================================
+# Baremetal HTTP Server Entry Point
+# ============================================================================
+
+fn start_http_server_baremetal():
+    """Start the HTTP server inline on the boot core.
+
+    This is the B5 entry point called from os_main after services
+    are initialized. It creates a single Worker and runs it inline
+    (no thread spawning). The Worker's event loop becomes the main
+    loop of the OS.
+
+    On shutdown (if ever), control returns to os_main for idle halt.
+    """
+    log_raw_println("[http_baremetal] Configuring HTTP server...")
+
+    # Build server config for baremetal: single worker, small limits
+    val base_config = default_server_config()
+    val config = ServerConfig(
+        listen_addr: "0.0.0.0:8080",
+        worker_count: 1,
+        max_connections: 64,
+        keepalive_timeout_ms: 30000,
+        read_timeout_ms: 30000,
+        write_timeout_ms: 30000,
+        idle_timeout_ms: 60000,
+        client_max_body_size: 65536,
+        server_name: "SimpleOS",
+        locations: baremetal_locations(),
+        upstreams: [],
+        access_log: "",
+        error_log: "",
+        tls_enabled: false,
+        tls_cert_path: "",
+        tls_key_path: "",
+        tls_min_version: "1.2",
+        drain_timeout_ms: 5000
+    )
+
+    log_raw_println("[http_baremetal] Building router and pipeline...")
+
+    # Build router from config locations
+    val router = AsyncRouter.new(config.locations)
+
+    # Minimal middleware pipeline (no access log on baremetal)
+    val pipeline = MiddlewarePipeline.new()
+
+    # Handler registry with "app" handler for baremetal endpoints
+    var registry = HandlerRegistry.new()
+    registry.register("app", baremetal_app_handler)
+
+    # Control channel (unused in inline mode, but Worker requires it)
+    val control = channel_new()
+
+    log_raw_println("[http_baremetal] Creating worker...")
+
+    # Create the single worker
+    val worker_result = Worker.create(
+        0, config, router, pipeline, registry, control
+    )
+
+    match worker_result:
+        Ok(worker):
+            log_raw_println("[http_baremetal] Worker created, entering main loop")
+            log_raw_println("[http_baremetal] Listening on 0.0.0.0:8080 (single-core inline)")
+            var w = worker
+            w.run()
+            # If run() ever returns (shutdown), log it
+            log_raw_println("[http_baremetal] Worker exited")
+
+        Err(e):
+            log_raw_println("[http_baremetal] ERROR: Failed to create worker")
+            log_raw_println("[http_baremetal] Server not started")
+
+# ============================================================================
+# Baremetal Location Configuration
+# ============================================================================
+
+fn baremetal_locations() -> [LocationConfig]:
+    """Build location configs for baremetal HTTP server.
+
+    Routes:
+      /health  -> app handler (health check)
+      /        -> app handler (dashboard / catch-all)
+    """
+    val health_loc = LocationConfig(
+        pattern: "/health",
+        match_type: "exact",
+        handler_type: "app",
+        root: "",
+        proxy_pass: "",
+        middlewares: []
+    )
+    val root_loc = LocationConfig(
+        pattern: "/",
+        match_type: "prefix",
+        handler_type: "app",
+        root: "",
+        proxy_pass: "",
+        middlewares: []
+    )
+    [health_loc, root_loc]
+
+# ============================================================================
+# Baremetal Application Handler
+# ============================================================================
+
+fn baremetal_app_handler(request: HttpRequestData,
+                         location: LocationConfig) -> HttpResponseData:
+    """Handle HTTP requests on baremetal SimpleOS.
+
+    Routes:
+      GET /health  -> 200 OK, JSON health status
+      GET /        -> 200 OK, HTML dashboard
+      *            -> 200 OK, plain text with path echo
+
+    This is a simple handler suitable for smoke-testing that the
+    HTTP server boots and responds to requests over the network.
+    """
+    val path = request.path
+    val method = request.method
+
+    if path == "/health":
+        return health_response()
+
+    if path == "/":
+        return dashboard_response()
+
+    # Catch-all: echo the request path
+    val body = "SimpleOS HTTP Server\nMethod: {method}\nPath: {path}\n"
+    default_response_data(200, "OK", body)
+
+fn health_response() -> HttpResponseData:
+    """Build JSON health check response."""
+    val body = "{\"status\":\"ok\",\"server\":\"SimpleOS\",\"version\":\"0.1.0\"}"
+    HttpResponseData(
+        status: 200,
+        reason: "OK",
+        headers: [
+            ("Content-Type", "application/json"),
+            ("Server", "SimpleOS"),
+            ("Cache-Control", "no-cache")
+        ],
+        body: body,
+        body_bytes: [],
+        body_file: "",
+        body_offset: 0,
+        body_length: 0,
+        chunked: false
+    )
+
+fn dashboard_response() -> HttpResponseData:
+    """Build HTML dashboard response for root path."""
+    val body = "<!DOCTYPE html>\n<html><head><title>SimpleOS</title></head>\n<body>\n<h1>SimpleOS HTTP Server</h1>\n<p>Running on single-core RISC-V baremetal.</p>\n<ul>\n<li><a href=\"/health\">/health</a> - Health check (JSON)</li>\n</ul>\n<p>Boot phase: B5 (HTTP Server Launch + Thread Shim)</p>\n</body></html>"
+    HttpResponseData(
+        status: 200,
+        reason: "OK",
+        headers: [
+            ("Content-Type", "text/html; charset=utf-8"),
+            ("Server", "SimpleOS")
+        ],
+        body: body,
+        body_bytes: [],
+        body_file: "",
+        body_offset: 0,
+        body_length: 0,
+        chunked: false
+    )

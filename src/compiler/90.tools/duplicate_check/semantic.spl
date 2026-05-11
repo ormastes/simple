@@ -8,6 +8,7 @@ use compiler.tools.duplicate_check.doc_extractor.{DocEntry, extract_docs_from_di
 use compiler.tools.duplicate_check.ollama_client.{EmbeddingResult, check_ollama_available, get_embedding}
 use compiler.tools.duplicate_check.embedding_cache.{EmbeddingCacheManager, load_embedding_cache, save_embedding_cache, lookup_cached, set_cached, csv_to_floats, floats_to_csv}
 use compiler.tools.duplicate_check.math_utils.{cosine_similarity_dense, rt_math_sqrt, clamp_similarity}
+use compiler.tools.duplicate_check.features.{build_feature_vector, cosine_similarity, FeatureVec}
 
 struct SemanticMatch:
     entry_a: DocEntry
@@ -289,33 +290,6 @@ fn _tokenize_doc(text_val: text) -> {text: i64}:
         freq[lower] = existing + 1
     freq
 
-fn _sparse_cosine(a: {text: f64}, mag_a: f64, b: {text: f64}, mag_b: f64) -> f64:
-    if mag_a == 0.0 or mag_b == 0.0:
-        return 0.0
-    var dot = 0.0
-    for key in a.keys():
-        if b.has(key):
-            dot = dot + (a[key] * b[key])
-    clamp_similarity(dot / (mag_a * mag_b))
-
-fn _build_doc_vec(freq: {text: i64}) -> {text: f64}:
-    var total = 0
-    for k in freq.keys():
-        total = total + freq[k]
-    if total == 0:
-        return {}
-    val total_f = total * 1.0
-    var vec = {}
-    for k in freq.keys():
-        vec[k] = (freq[k] * 1.0) / total_f
-    vec
-
-fn _vec_magnitude(vec: {text: f64}) -> f64:
-    var sum = 0.0
-    for k in vec.keys():
-        sum = sum + (vec[k] * vec[k])
-    rt_math_sqrt(sum)
-
 fn run_semantic_analysis_local(target_path: text, config: DuplicationConfig) -> SemanticReport:
     val all_entries = extract_docs_from_directory(target_path, config.exclude_patterns)
     if all_entries.len() == 0:
@@ -329,34 +303,31 @@ fn run_semantic_analysis_local(target_path: text, config: DuplicationConfig) -> 
         else:
             missing_docs.push(entry)
 
-    var vecs: [{text: f64}] = []
-    var mags: [f64] = []
+    var fvecs: [FeatureVec] = []
     for entry in documented:
         val text_val = build_embedding_key(entry)
         val freq = _tokenize_doc(text_val)
-        val vec = _build_doc_vec(freq)
-        val mag = _vec_magnitude(vec)
-        vecs.push(vec)
-        mags.push(mag)
+        val fv = build_feature_vector(0, freq)
+        fvecs.push(fv)
 
     var matches: [SemanticMatch] = []
     val threshold = config.semantic_threshold
 
     var i = 0
     while i < documented.len():
-        if mags[i] == 0.0:
+        if fvecs[i].magnitude == 0.0:
             i = i + 1
             continue
         var j = i + 1
         while j < documented.len():
-            if mags[j] == 0.0:
+            if fvecs[j].magnitude == 0.0:
                 j = j + 1
                 continue
             val same_file = documented[i].file_path == documented[j].file_path
             if same_file:
                 j = j + 1
                 continue
-            val sim = _sparse_cosine(vecs[i], mags[i], vecs[j], mags[j])
+            val sim = cosine_similarity(fvecs[i], fvecs[j])
             if sim >= threshold:
                 val kind = if sim >= 0.97: "copy_paste" else: "similar"
                 matches.push(SemanticMatch(

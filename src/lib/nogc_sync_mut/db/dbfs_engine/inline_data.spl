@@ -1,0 +1,114 @@
+use std.db.dbfs_engine.schema.{InodeRow, InodeTable, InodeKey}
+
+val INLINE_THRESHOLD: i64 = 4096
+
+struct InlineEntry:
+    ino_id: i64
+    data: [u8]
+    size: i64
+
+struct InlineDataStore:
+    entries: Dict<i64, InlineEntry>
+    max_inline_size: i64
+
+impl InlineDataStore:
+    static fn new(threshold: i64) -> InlineDataStore:
+        InlineDataStore(entries: {}, max_inline_size: threshold)
+
+    fn is_inlineable(size: i64) -> bool:
+        size <= self.max_inline_size
+
+    me fn put(ino_id: i64, data: [u8]) -> bool:
+        if data.len() as i64 > self.max_inline_size:
+            return false
+        val entry = InlineEntry(ino_id: ino_id, data: data, size: data.len() as i64)
+        self.entries[ino_id] = entry
+        true
+
+    fn get(ino_id: i64) -> InlineEntry?:
+        self.entries.get(ino_id)
+
+    me fn remove(ino_id: i64):
+        self.entries.remove(ino_id)
+
+    fn has(ino_id: i64) -> bool:
+        self.entries.get(ino_id).?
+
+    me fn promote(ino_id: i64) -> InlineEntry?:
+        val entry = self.entries.get(ino_id)
+        if entry.?:
+            self.entries.remove(ino_id)
+        entry
+
+    fn count() -> i64:
+        self.entries.keys().len() as i64
+
+    fn total_bytes() -> i64:
+        var total: i64 = 0
+        for key in self.entries.keys():
+            val entry = self.entries.get(key)
+            if entry.?:
+                total = total + entry.unwrap().size
+        total
+
+enum ReadSource:
+    Inline(data: [u8])
+    Extent
+
+fn resolve_read_source(ino_id: i64, size: i64, store: InlineDataStore) -> ReadSource:
+    if store.has(ino_id) and size <= store.max_inline_size:
+        val entry = store.get(ino_id)
+        if entry.?:
+            return ReadSource.Inline(data: entry.unwrap().data)
+    ReadSource.Extent
+
+fn _byte_to_hex(b: u8) -> text:
+    val hi = (b as i64) / 16
+    val lo = (b as i64) % 16
+    val hex_chars = "0123456789abcdef"
+    hex_chars[hi:hi + 1] + hex_chars[lo:lo + 1]
+
+fn _hex_char_to_val(c: text) -> i64:
+    if c >= "0" and c <= "9":
+        return c[0:1].parse_int() ?? 0
+    if c == "a" or c == "A":
+        return 10
+    if c == "b" or c == "B":
+        return 11
+    if c == "c" or c == "C":
+        return 12
+    if c == "d" or c == "D":
+        return 13
+    if c == "e" or c == "E":
+        return 14
+    if c == "f" or c == "F":
+        return 15
+    0
+
+fn serialize_inline_entry(entry: InlineEntry) -> text:
+    var hex: text = ""
+    var i: i32 = 0
+    while i < entry.data.len() as i32:
+        hex = hex + _byte_to_hex(entry.data[i])
+        i = i + 1
+    "{entry.ino_id}|{entry.size}|{hex}"
+
+fn deserialize_inline_entry(s: text) -> InlineEntry?:
+    val parts = s.split("|")
+    if parts.len() < 3:
+        return nil
+    val ino_id = parts[0].parse_int() ?? -1
+    val size = parts[1].parse_int() ?? -1
+    if ino_id < 0 or size < 0:
+        return nil
+    val hex = parts[2]
+    if hex.len() % 2 != 0:
+        return nil
+    var data: [u8] = []
+    var i: i32 = 0
+    while i < hex.len() as i32:
+        val hi = _hex_char_to_val(hex[i:i + 1])
+        val lo = _hex_char_to_val(hex[i + 1:i + 2])
+        data.push((hi * 16 + lo) as u8)
+        i = i + 2
+    InlineEntry(ino_id: ino_id, data: data, size: size)
