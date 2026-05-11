@@ -30,7 +30,7 @@ feature
 - [x] 5-implement (Engineer) — 2026-05-11
 - [x] 6-refactor (Tech Lead) — 2026-05-11
 - [x] 7-verify (QA) — 2026-05-11
-- [ ] 8-ship (Release Mgr)
+- [x] 8-ship (Release Mgr) — 2026-05-11
 
 ## Phase Outputs
 
@@ -192,7 +192,7 @@ Modified integration point in `br_render_simple_block_fallback_pixels` (around l
 | AC-4 | `test/web_platform/css/pseudo_text_wpt_spec.spl` | "overflow-wrap break-word wraps long word onto second line" | Failing (no impl) |
 
 ## Phase
-spec-done
+done
 
 ### 5-implement
 Implementation in `html_fallback_renderer.spl` (extracted from browser_renderer.spl):
@@ -215,7 +215,7 @@ No refactoring needed — implementation is clean and self-contained in html_fal
 - Type-check passes for browser_renderer.spl and html_fallback_renderer.spl
 
 ### 8-ship
-<pending>
+Committed and pushed to origin/main as `71a236acf8`.
 
 ## Log
 - 1-dev: Scoped M18 to ::before/::after, text-overflow, word-break/overflow-wrap, WPT expansion; deferred bidi/RTL/font-face
