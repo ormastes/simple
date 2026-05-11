@@ -303,34 +303,50 @@ fn run_semantic_analysis_local(target_path: text, config: DuplicationConfig) -> 
         val fv = build_feature_vector(0, freq)
         fvecs.push(fv)
 
+    var token_to_indices: {text: [i64]} = {}
+    var idx = 0
+    while idx < fvecs.len():
+        if fvecs[idx].magnitude > 0.0:
+            for tok in fvecs[idx].features.keys():
+                if token_to_indices.has(tok):
+                    token_to_indices[tok].push(idx)
+                else:
+                    token_to_indices[tok] = [idx]
+        idx = idx + 1
+
+    var candidate_pairs: {text: bool} = {}
+    for tok in token_to_indices.keys():
+        val indices = token_to_indices[tok]
+        if indices.len() > 200:
+            continue
+        var pi = 0
+        while pi < indices.len():
+            var pj = pi + 1
+            while pj < indices.len():
+                val a = indices[pi]
+                val b = indices[pj]
+                if documented[a].file_path != documented[b].file_path:
+                    val pair_key = "{a}:{b}"
+                    candidate_pairs[pair_key] = true
+                pj = pj + 1
+            pi = pi + 1
+
     var matches: [SemanticMatch] = []
     val threshold = config.semantic_threshold
 
-    var i = 0
-    while i < documented.len():
-        if fvecs[i].magnitude == 0.0:
-            i = i + 1
-            continue
-        var j = i + 1
-        while j < documented.len():
-            if fvecs[j].magnitude == 0.0:
-                j = j + 1
-                continue
-            val same_file = documented[i].file_path == documented[j].file_path
-            if same_file:
-                j = j + 1
-                continue
-            val sim = cosine_similarity(fvecs[i], fvecs[j])
-            if sim >= threshold:
-                val kind = if sim >= 0.97: "copy_paste" else: "similar"
-                matches.push(SemanticMatch(
-                    entry_a: documented[i],
-                    entry_b: documented[j],
-                    similarity: sim,
-                    match_kind: kind
-                ))
-            j = j + 1
-        i = i + 1
+    for pair_key in candidate_pairs.keys():
+        val sep = _find_colon(pair_key)
+        val i = int(pair_key[0:sep])
+        val j = int(pair_key[sep + 1:pair_key.len()])
+        val sim = cosine_similarity(fvecs[i], fvecs[j])
+        if sim >= threshold:
+            val kind = if sim >= 0.97: "copy_paste" else: "similar"
+            matches.push(SemanticMatch(
+                entry_a: documented[i],
+                entry_b: documented[j],
+                similarity: sim,
+                match_kind: kind
+            ))
 
     if matches.len() > 1:
         quicksort_matches_by_sim(matches, 0, matches.len() - 1)

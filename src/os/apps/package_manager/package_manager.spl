@@ -1,10 +1,14 @@
 use common.ui.widget.{WidgetNode, UITree}
 use common.ui.session.{UISession}
 use common.ui.builder.{column, row, panel, text_widget, button, label, statusbar, build_tree_with_title}
+use os.services.pkg.pkg_service.{pkg_service_init, pkg_service_install, pkg_service_remove, pkg_service_list_installed, pkg_service_list_available, pkg_service_search}
+
+extern fn serial_println(msg: text)
 
 class PackageManagerApp:
 
     static fn new() -> PackageManagerApp:
+        pkg_service_init()
         PackageManagerApp()
 
     me build_ui() -> UISession:
@@ -17,71 +21,51 @@ class PackageManagerApp:
 
         val pkg_header = row("pkg_header", [
             label("hdr_pkg_name", "Package"),
-            label("hdr_pkg_ver", "Version"),
-            label("hdr_pkg_status", "Status"),
-            label("hdr_pkg_size", "Size")
+            label("hdr_pkg_status", "Status")
         ])
 
-        val pkg1 = row("pkg_simpleos_base", [
-            text_widget("pkg1_name", "simpleos-base"),
-            text_widget("pkg1_ver", "0.1.0"),
-            text_widget("pkg1_status", "Installed"),
-            text_widget("pkg1_size", "42.3 MB")
-        ])
+        val installed = pkg_service_list_installed()
+        val available = pkg_service_list_available()
 
-        val pkg2 = row("pkg_simple_compiler", [
-            text_widget("pkg2_name", "simple-compiler"),
-            text_widget("pkg2_ver", "1.0.0"),
-            text_widget("pkg2_status", "Installed"),
-            text_widget("pkg2_size", "18.7 MB")
-        ])
+        serial_println("[pkgmgr_app] installed={installed.len()} available={available.len()}")
 
-        val pkg3 = row("pkg_simple_stdlib", [
-            text_widget("pkg3_name", "simple-stdlib"),
-            text_widget("pkg3_ver", "1.0.1"),
-            text_widget("pkg3_status", "Update available"),
-            text_widget("pkg3_size", "9.2 MB")
-        ])
+        var pkg_rows: [WidgetNode] = [pkg_header]
 
-        val pkg4 = row("pkg_simple_gpu", [
-            text_widget("pkg4_name", "simple-gpu"),
-            text_widget("pkg4_ver", "0.3.0"),
-            text_widget("pkg4_status", "Available"),
-            text_widget("pkg4_size", "55.1 MB")
-        ])
+        var inst_idx: i64 = 0
+        while inst_idx < installed.len():
+            val pkg_name = installed[inst_idx]
+            val row_id = "pkg_inst_{inst_idx}"
+            val pkg_row = row(row_id, [
+                text_widget("{row_id}_name", pkg_name),
+                text_widget("{row_id}_status", "Installed")
+            ])
+            pkg_rows = pkg_rows.push(pkg_row)
+            inst_idx = inst_idx + 1
 
-        val pkg5 = row("pkg_simple_net", [
-            text_widget("pkg5_name", "simple-net"),
-            text_widget("pkg5_ver", "0.2.4"),
-            text_widget("pkg5_status", "Installed"),
-            text_widget("pkg5_size", "6.8 MB")
-        ])
+        var avail_idx: i64 = 0
+        while avail_idx < available.len():
+            val pkg_name = available[avail_idx]
+            val row_id = "pkg_avail_{avail_idx}"
+            val pkg_row = row(row_id, [
+                text_widget("{row_id}_name", pkg_name),
+                text_widget("{row_id}_status", "Available")
+            ])
+            pkg_rows = pkg_rows.push(pkg_row)
+            avail_idx = avail_idx + 1
 
-        val pkg6 = row("pkg_simple_audio", [
-            text_widget("pkg6_name", "simple-audio"),
-            text_widget("pkg6_ver", "0.1.2"),
-            text_widget("pkg6_status", "Available"),
-            text_widget("pkg6_size", "4.5 MB")
-        ])
-
-        val package_list = panel("package_list", "Packages", [
-            pkg_header,
-            pkg1,
-            pkg2,
-            pkg3,
-            pkg4,
-            pkg5,
-            pkg6
-        ])
+        val package_list = panel("package_list", "Packages", pkg_rows)
 
         val actions = row("pkg_actions", [
             button("btn_install", "Install", "pkgmgr.install"),
             button("btn_remove", "Remove", "pkgmgr.remove"),
             button("btn_update", "Update", "pkgmgr.update"),
-            button("btn_update_all", "Update All", "pkgmgr.update_all")
+            button("btn_update_all", "Update All", "pkgmgr.update_all"),
+            button("btn_removable", "Install from Removable", "pkgmgr.install_removable")
         ])
 
-        val status = statusbar("pkgmgr_status", "Installed: 4  Available: 2", "1 update available")
+        val inst_count = installed.len()
+        val avail_count = available.len()
+        val status = statusbar("pkgmgr_status", "Installed: {inst_count}  Available: {avail_count}", "")
 
         val root = column("pkgmgr_root", [
             search_bar,
@@ -92,3 +76,22 @@ class PackageManagerApp:
 
         val tree = build_tree_with_title(root, "Package Manager", "dark")
         UISession.new(tree)
+
+    me handle_install(name: text):
+        val ok = pkg_service_install(name)
+        if ok:
+            serial_println("[pkgmgr_app] install ok: {name}")
+        else:
+            serial_println("[pkgmgr_app] install failed: {name}")
+
+    me handle_remove(name: text):
+        val ok = pkg_service_remove(name)
+        if ok:
+            serial_println("[pkgmgr_app] remove ok: {name}")
+        else:
+            serial_println("[pkgmgr_app] remove failed: {name}")
+
+    me handle_search(query: text) -> [text]:
+        val results = pkg_service_search(query)
+        serial_println("[pkgmgr_app] search '{query}' -> {results.len()} results")
+        results

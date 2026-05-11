@@ -1,0 +1,70 @@
+# Package Installer — file-based and removable-media installation
+# MDSOC: feature dimension, services layer
+#
+# Handles install from VFS path, removable media mount, or URL.
+# VFS write bytes is not yet a public API (g_vfs_write_file_text exists for
+# text only). Binary install paths stub with a serial note until
+# g_vfs_write_file_bytes is available.
+
+use os.services.vfs.vfs_init.{g_vfs_read_file_bytes, g_vfs_read_file_text, g_vfs_write_file_text}
+use os.tools.pkg.pkg_repository.{parse_http_url}
+use os.kernel.log.klog_api.{log_raw_println}
+
+extern fn serial_println(msg: text)
+
+val APPS_INSTALL_ROOT: text = "/SYS/APPS/"
+val MANIFEST_SUFFIX: text = ".pkg.sdn"
+
+class PackageInstaller:
+    install_root: text
+
+    fn install_from_path(source_path: text, target_path: text) -> bool:
+        """Copy binary from source_path to target_path in VFS."""
+        val bytes = g_vfs_read_file_bytes(source_path)
+        if bytes.len() == 0:
+            serial_println("[pkg_installer] install_from_path: source empty or missing: {source_path}")
+            return false
+        # g_vfs_write_file_bytes is not yet exposed publicly; stub pending that API.
+        serial_println("[pkg_installer] write pending: {target_path} ({bytes.len()} bytes) — g_vfs_write_file_bytes not yet public")
+        return false
+
+    fn install_from_removable(mount_path: text, app_name: text) -> bool:
+        """Install an app binary from a removable media mount point.
+
+        Expects binary at {mount_path}/APPS/{app_name}.
+        Installs to {install_root}{app_name}.
+        """
+        val source_path = "{mount_path}/APPS/{app_name}"
+        val target_path = "{self.install_root}{app_name}"
+        serial_println("[pkg_installer] install_from_removable: {source_path} -> {target_path}")
+        return self.install_from_path(source_path, target_path)
+
+    fn install_from_url(url: text, target_path: text) -> bool:
+        """Fetch package binary from URL and install.
+
+        HTTP fetch internals (_http_get/_https_get) are private to pkg_repository.
+        Stub pending a public fetch_bytes API.
+        """
+        serial_println("[pkg_installer] install_from_url: stub pending fetch_bytes API: {url} -> {target_path}")
+        return false
+
+    fn uninstall(app_path: text) -> bool:
+        """Remove binary and manifest for an installed app.
+
+        Derives manifest path as {app_path}{MANIFEST_SUFFIX}.
+        Text-based manifest removal via g_vfs_write_file_text(path, "").
+        Binary removal also pending g_vfs_delete_file API.
+        """
+        val manifest_path = "{app_path}{MANIFEST_SUFFIX}"
+        val manifest_content = g_vfs_read_file_text(manifest_path)
+        if manifest_content != "":
+            val cleared = g_vfs_write_file_text(manifest_path, "")
+            if cleared:
+                serial_println("[pkg_installer] uninstall: cleared manifest: {manifest_path}")
+            else:
+                serial_println("[pkg_installer] uninstall: failed to clear manifest: {manifest_path}")
+        serial_println("[pkg_installer] uninstall: binary removal pending g_vfs_delete_file API: {app_path}")
+        return true
+
+pub fn make_package_installer() -> PackageInstaller:
+    PackageInstaller(install_root: APPS_INSTALL_ROOT)
