@@ -400,6 +400,22 @@ mod tests {
     }
 
     #[test]
+    fn test_default_parallel() {
+        let args: Vec<String> = vec![];
+        let opts = parse_test_args(&args);
+        assert!(opts.parallel);
+        assert!(opts.safe_mode);
+    }
+
+    #[test]
+    fn test_parse_sequential() {
+        let args = vec!["--sequential".to_string()];
+        let opts = parse_test_args(&args);
+        assert!(!opts.parallel);
+        assert!(!opts.safe_mode);
+    }
+
+    #[test]
     fn test_parse_cpu_threshold() {
         let args = vec!["--cpu-threshold".to_string(), "50".to_string()];
         let opts = parse_test_args(&args);

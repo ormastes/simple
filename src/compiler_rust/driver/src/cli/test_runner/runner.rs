@@ -90,11 +90,12 @@ fn parse_resource_throttle_config(content: &str, options: &mut TestOptions) {
             let value = value.trim().trim_matches(|c| c == '"' || c == '\'');
 
             match key {
-                // Note: "enabled" in config does NOT auto-enable parallel mode.
-                // Parallel execution always requires explicit --parallel or -p CLI flag.
-                // Config file only overrides thresholds and other settings.
                 "enabled" => {
-                    // Intentionally ignored - parallel must be enabled via CLI
+                    match value {
+                        "true" | "1" => options.parallel = true,
+                        "false" | "0" => options.parallel = false,
+                        _ => {}
+                    }
                 }
                 "threshold" => {
                     if let Ok(v) = value.parse::<u8>() {
@@ -142,11 +143,8 @@ pub fn run_tests(options: TestOptions) -> TestRunResult {
     if options.list_runs || options.cleanup_runs || options.prune_runs.is_some() {
         return handle_run_management(&options);
     }
-
-    // Load configuration from simple.test.toml (applies defaults if not overridden by CLI)
-    if options.parallel {
-        load_resource_throttle_config(&mut options);
-    }
+    // Load configuration from simple.test.toml (can override parallel default)
+    load_resource_throttle_config(&mut options);
 
     let quiet = matches!(options.format, OutputFormat::Json);
     let list_mode = options.list || options.list_ignored;
@@ -243,7 +241,8 @@ pub fn run_tests(options: TestOptions) -> TestRunResult {
             run_tests_parallel(&test_files, &options, quiet)
         } else {
             if !quiet && test_files.len() > 20 {
-                println!("Hint: use --parallel for ~{}x faster runs with {} files.", num_cpus::get().min(test_files.len()), test_files.len());
+                let cpus = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
+                println!("Hint: use --parallel for ~{}x faster runs with {} files.", cpus.min(test_files.len()), test_files.len());
             }
             execute_test_files(&test_files, &options, build_cache.as_ref(), quiet)
         };
