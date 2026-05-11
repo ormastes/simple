@@ -4,7 +4,7 @@
 # Handles install from VFS path, removable media mount, or URL.
 
 use os.services.vfs.vfs_init.{g_vfs_read_file_bytes, g_vfs_read_file_text, g_vfs_write_file_text, g_vfs_write_file_bytes, g_vfs_delete_file}
-use os.tools.pkg.pkg_repository.{parse_http_url}
+use os.tools.pkg.pkg_repository.{parse_http_url, pkg_fetch_url_text}
 use os.kernel.log.klog_api.{log_raw_println}
 
 extern fn serial_println(msg: text)
@@ -40,13 +40,19 @@ class PackageInstaller:
         return self.install_from_path(source_path, target_path)
 
     fn install_from_url(url: text, target_path: text) -> bool:
-        """Fetch package binary from URL and install.
-
-        HTTP fetch internals (_http_get/_https_get) are private to pkg_repository.
-        Stub pending a public fetch_bytes API.
-        """
-        serial_println("[pkg_installer] install_from_url: stub pending fetch_bytes API: {url} -> {target_path}")
-        return false
+        val fetch_result = pkg_fetch_url_text(url)
+        match fetch_result:
+            case Err(e):
+                serial_println("[pkg_installer] install_from_url: fetch failed: {e}")
+                return false
+            case Ok(body):
+                val data = body.to_bytes()
+                val wrote = g_vfs_write_file_bytes(target_path, data)
+                if not wrote:
+                    serial_println("[pkg_installer] install_from_url: write failed: {target_path}")
+                    return false
+                serial_println("[pkg] installed url={url} path={target_path} bytes={data.len()}")
+                return true
 
     fn uninstall(app_path: text) -> bool:
         """Remove binary and manifest for an installed app.

@@ -346,12 +346,16 @@ class OsTarget:
 class QemuRunOptions:
     """Run-time launch knobs that do not change the compiled target."""
     debug_gui_serial: bool
+    headless: bool
 
 fn qemu_run_options_default() -> QemuRunOptions:
-    QemuRunOptions(debug_gui_serial: false)
+    QemuRunOptions(debug_gui_serial: false, headless: false)
 
 fn qemu_run_options_debug_gui() -> QemuRunOptions:
-    QemuRunOptions(debug_gui_serial: true)
+    QemuRunOptions(debug_gui_serial: true, headless: false)
+
+fn qemu_run_options_headless() -> QemuRunOptions:
+    QemuRunOptions(debug_gui_serial: false, headless: true)
 
 fn _qemu_command_binary(target: OsTarget) -> text:
     """Resolve the host QEMU frontend used to launch a built target.
@@ -1150,8 +1154,8 @@ fn build_qemu_command_with_options(target: OsTarget, options: QemuRunOptions) ->
     else:
         args.push("stdio")
 
-    # Display mode: headless for text-mode, show window for GUI
-    if not target.gui_mode:
+    # Display mode: headless for text-mode or --headless override, show window for GUI
+    if not target.gui_mode or options.headless:
         args.push("-display")
         args.push("none")
 
@@ -1228,6 +1232,9 @@ fn run_os(target: OsTarget) -> bool:
 
 fn run_os_debug_gui(target: OsTarget) -> bool:
     run_os_with_options(target, qemu_run_options_debug_gui())
+
+fn run_os_headless(target: OsTarget) -> bool:
+    run_os_with_options(target, qemu_run_options_headless())
 
 fn run_os_with_options(target: OsTarget, options: QemuRunOptions) -> bool:
     """Runs QEMU with the built kernel for the given target.
@@ -2773,6 +2780,12 @@ fn _desktop_disk_image_has_required_manifests(img_path: text) -> bool:
     true
 
 fn build_scenario_command(scenario: QemuScenario, kernel_path: text) -> [text]:
+    _build_scenario_command_impl(scenario, kernel_path, false)
+
+fn build_scenario_command_headless(scenario: QemuScenario, kernel_path: text) -> [text]:
+    _build_scenario_command_impl(scenario, kernel_path, true)
+
+fn _build_scenario_command_impl(scenario: QemuScenario, kernel_path: text, headless: bool) -> [text]:
     """Build QEMU command line from a scenario."""
     val qemu_bin = match scenario.arch:
         Architecture.X86_64: "qemu-system-x86_64"
@@ -2796,7 +2809,7 @@ fn build_scenario_command(scenario: QemuScenario, kernel_path: text) -> [text]:
         args.push("file:" + desktop_uefi_serial_log_path())
     else:
         args.push("stdio")
-    if not scenario.gui_mode:
+    if not scenario.gui_mode or headless:
         args.push("-display")
         args.push("none")
     args.push("-no-reboot")
@@ -2835,6 +2848,12 @@ fn build_scenario(scenario: QemuScenario) -> bool:
     ensure_arm_fs_exec_kernel_binary(scenario, target)
 
 fn run_scenario(scenario: QemuScenario) -> bool:
+    _run_scenario_impl(scenario, false)
+
+fn run_scenario_headless(scenario: QemuScenario) -> bool:
+    _run_scenario_impl(scenario, true)
+
+fn _run_scenario_impl(scenario: QemuScenario, headless: bool) -> bool:
     """Build and run a named QEMU scenario."""
     if not ensure_scenario_media(scenario):
         return false
@@ -2844,7 +2863,7 @@ fn run_scenario(scenario: QemuScenario) -> bool:
             return false
     if not ensure_arm_fs_exec_kernel_binary(scenario, target):
         return false
-    val cmd_parts = build_scenario_command(scenario, scenario_kernel_path(scenario, target))
+    val cmd_parts = _build_scenario_command_impl(scenario, scenario_kernel_path(scenario, target), headless)
     val qemu_bin = cmd_parts[0]
     val qemu_args = cmd_parts.slice(1)
     print "[run] {scenario.name}: {cmd_parts.join(" ")}"
@@ -2875,7 +2894,7 @@ fn test_scenario(scenario: QemuScenario, timeout_ms: u64) -> bool:
             return false
     if not ensure_arm_fs_exec_kernel_binary(scenario, target):
         return false
-    val cmd_parts = build_scenario_command(scenario, scenario_kernel_path(scenario, target))
+    val cmd_parts = build_scenario_command_headless(scenario, scenario_kernel_path(scenario, target))
     val qemu_bin = cmd_parts[0]
     val qemu_args = cmd_parts.slice(1)
     print "[test] {scenario.name} (timeout: {timeout_ms}ms): {cmd_parts.join(" ")}"
