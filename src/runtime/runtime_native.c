@@ -16,6 +16,7 @@
  * runtime.c + platform headers. We must NOT include platform/platform.h
  * here to avoid duplicate symbol definitions. */
 #include "runtime.h"
+#include "runtime_simd_dispatch.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -1082,12 +1083,54 @@ void rt_panic(const char* msg) {
 }
 
 /* ================================================================
+ * Reserved-Field Cache Helpers for RtCoreString
+ *
+ * Bit layout (see runtime_simd_dispatch.h for constants):
+ *   Bit 31     = is-ASCII validity flag
+ *   Bit 30     = cp-count validity flag
+ *   Bit 29     = is-ASCII value (meaningful only when bit 31 = 1)
+ *   Bits [28:0] = codepoint count (meaningful only when bit 30 = 1)
+ * ================================================================ */
+
+void rt_str_cache_cp_count(RtCoreString* s, uint64_t count) {
+    if (!s) return;
+    if (count > SIMD_CACHE_CPCOUNT_MASK) return;
+    uint32_t r = s->reserved;
+    r |= SIMD_CACHE_FLAG_CPCOUNT_VALID;
+    r = (r & ~SIMD_CACHE_CPCOUNT_MASK) | ((uint32_t)count & SIMD_CACHE_CPCOUNT_MASK);
+    s->reserved = r;
+}
+
+int64_t rt_str_cached_cp_count(RtCoreString* s) {
+    if (!s) return -1;
+    if (!(s->reserved & SIMD_CACHE_FLAG_CPCOUNT_VALID)) return -1;
+    return (int64_t)(s->reserved & SIMD_CACHE_CPCOUNT_MASK);
+}
+
+void rt_str_set_ascii_flag(RtCoreString* s, int is_ascii) {
+    if (!s) return;
+    uint32_t r = s->reserved;
+    r |= SIMD_CACHE_FLAG_ASCII_VALID;
+    if (is_ascii)
+        r |= SIMD_CACHE_FLAG_ASCII_VALUE;
+    else
+        r &= ~SIMD_CACHE_FLAG_ASCII_VALUE;
+    s->reserved = r;
+}
+
+int rt_str_is_ascii_cached(RtCoreString* s) {
+    if (!s) return -1;
+    if (!(s->reserved & SIMD_CACHE_FLAG_ASCII_VALID)) return -1;
+    return (s->reserved & SIMD_CACHE_FLAG_ASCII_VALUE) ? 1 : 0;
+}
+
+/* ================================================================
  * Runtime Lifecycle (called by entry point)
  * ================================================================ */
 
 void __simple_runtime_init(void) {
-    /* Initialize runtime subsystems */
-    /* Currently minimal — allocator and GC init could go here */
+    /* Initialize SIMD text dispatch table */
+    simd_text_init();
 }
 
 void __simple_runtime_shutdown(void) {

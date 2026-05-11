@@ -1,0 +1,243 @@
+# DBFS superblock reader/writer.
+#
+# Two in-memory replica slots (A=0, B=1).  Mount reads both; picks the one
+# with the higher mount_generation that has a valid checksum.
+#
+# Disk layout:
+#   Sector 2 — replica A
+#   Sector 3 — replica B  (NVFS occupies 0/1; DBFS uses 2/3 to coexist)
+
+use os.services.block_device.{BlockDevice}
+
+extern fn rt_bytes_alloc(len: i64) -> [u8]
+
+val DBFS_MAGIC: u32 = 0x44424653u32   # "DBFS" in ASCII
+val DBFS_VERSION: u32 = 1u32
+
+pub struct DbfsSuperblock:
+    """Superblock record — both A and B replicas use this shape."""
+    magic:            u32
+    version:          u32
+    uuid_hi:          u64
+    uuid_lo:          u64
+    mount_generation: u64
+    valid:            bool
+    checksum:         u32
+
+# ---------------------------------------------------------------------------
+# Module-level block device store
+# ---------------------------------------------------------------------------
+
+var _dbfs_dev_store: [BlockDevice] = []
+var _dbfs_dev_ready: bool = false
+
+pub fn dbfs_superblock_set_device(dev: BlockDevice):
+    """Register the block device for superblock disk I/O."""
+    if _dbfs_dev_ready:
+        _dbfs_dev_store[0] = dev
+    else:
+        _dbfs_dev_store.push(dev)
+        _dbfs_dev_ready = true
+
+fn _dbfs_has_device() -> bool:
+    _dbfs_dev_ready
+
+# ---------------------------------------------------------------------------
+# Sector I/O helpers
+# ---------------------------------------------------------------------------
+
+fn _dbfs_raw_write_sector(lba: u64, data: [u8]) -> bool:
+    if not _dbfs_dev_ready:
+        return false
+    val r = _dbfs_dev_store[0].write_sector(lba, data)
+    r.is_ok()
+
+fn _dbfs_raw_read_sector(lba: u64) -> [u8]:
+    if not _dbfs_dev_ready:
+        return []
+    val sz = _dbfs_dev_store[0].sector_size() as i64
+    var buf = rt_bytes_alloc(sz)
+    val r = _dbfs_dev_store[0].read_sector(lba, buf)
+    if r.is_ok(): buf else: []
+
+# ---------------------------------------------------------------------------
+# In-memory replica store — index 0 = replica A, index 1 = replica B
+# ---------------------------------------------------------------------------
+
+var _dbfs_replicas: [DbfsSuperblock] = []
+var _dbfs_replicas_init: bool = false
+
+fn _dbfs_ensure_init():
+    if _dbfs_replicas_init:
+        return
+    _dbfs_replicas.push(DbfsSuperblock(
+        magic: 0, version: 0, uuid_hi: 0, uuid_lo: 0,
+        mount_generation: 0, valid: false, checksum: 0
+    ))
+    _dbfs_replicas.push(DbfsSuperblock(
+        magic: 0, version: 0, uuid_hi: 0, uuid_lo: 0,
+        mount_generation: 0, valid: false, checksum: 0
+    ))
+    _dbfs_replicas_init = true
+
+fn _dbfs_crc_of(sb: DbfsSuperblock) -> u32:
+    """Simple checksum over the non-checksum fields."""
+    val h0 = sb.magic + sb.version
+    val h1 = (sb.uuid_hi + sb.uuid_lo) % 0xFFFFFFFF
+    val h2 = (sb.mount_generation) % 0xFFFFFFFF
+    ((h0 + h1 + h2) % 0xFFFFFFFF) as u32
+
+fn _dbfs_replica_write(sb: DbfsSuperblock, replica: u8):
+    _dbfs_ensure_init()
+    val csum = _dbfs_crc_of(sb)
+    val stored = DbfsSuperblock(
+        magic:            sb.magic,
+        version:          sb.version,
+        uuid_hi:          sb.uuid_hi,
+        uuid_lo:          sb.uuid_lo,
+        mount_generation: sb.mount_generation,
+        valid:            true,
+        checksum:         csum
+    )
+    val idx = replica as i64
+    if idx == 0:
+        _dbfs_replicas[0] = stored
+    else:
+        _dbfs_replicas[1] = stored
+
+# ---------------------------------------------------------------------------
+# Serialization — return-buffer pattern (arrays are copied on call)
+# ---------------------------------------------------------------------------
+
+fn _write_u32_le(buf: [u8], off: i64, v: u32) -> [u8]:
+    val iv = v as i64
+    buf[off]     = (iv % 256) as u8
+    buf[off + 1] = ((iv / 256) % 256) as u8
+    buf[off + 2] = ((iv / 65536) % 256) as u8
+    buf[off + 3] = ((iv / 16777216) % 256) as u8
+    buf
+
+fn _write_u64_le(buf: [u8], off: i64, v: u64) -> [u8]:
+    val iv = v as i64
+    buf[off]     = (iv % 256) as u8
+    buf[off + 1] = ((iv / 256) % 256) as u8
+    buf[off + 2] = ((iv / 65536) % 256) as u8
+    buf[off + 3] = ((iv / 16777216) % 256) as u8
+    val hi = iv / 4294967296
+    buf[off + 4] = (hi % 256) as u8
+    buf[off + 5] = ((hi / 256) % 256) as u8
+    buf[off + 6] = ((hi / 65536) % 256) as u8
+    buf[off + 7] = ((hi / 16777216) % 256) as u8
+    buf
+
+fn _get_u32_le(buf: [u8], off: i64) -> u32:
+    val b0 = buf[off] as i64
+    val b1 = buf[off + 1] as i64
+    val b2 = buf[off + 2] as i64
+    val b3 = buf[off + 3] as i64
+    (b0 + b1 * 256 + b2 * 65536 + b3 * 16777216) as u32
+
+fn _get_u64_le(buf: [u8], off: i64) -> u64:
+    val lo = _get_u32_le(buf, off) as i64
+    val hi = _get_u32_le(buf, off + 4) as i64
+    (lo + hi * 4294967296) as u64
+
+fn _dbfs_sb_to_bytes(sb: DbfsSuperblock) -> [u8]:
+    var buf = rt_bytes_alloc(512)
+    buf = _write_u32_le(buf, 0, sb.magic)
+    buf = _write_u32_le(buf, 4, sb.version)
+    buf = _write_u64_le(buf, 8, sb.uuid_hi)
+    buf = _write_u64_le(buf, 16, sb.uuid_lo)
+    buf = _write_u64_le(buf, 24, sb.mount_generation)
+    buf[32] = if sb.valid: 1u8 else: 0u8
+    buf = _write_u32_le(buf, 33, sb.checksum)
+    buf
+
+fn _dbfs_sb_from_bytes(buf: [u8]) -> DbfsSuperblock:
+    if buf.len() < 37:
+        return DbfsSuperblock(
+            magic: 0, version: 0, uuid_hi: 0, uuid_lo: 0,
+            mount_generation: 0, valid: false, checksum: 0
+        )
+    val magic = _get_u32_le(buf, 0)
+    val ver   = _get_u32_le(buf, 4)
+    val uhi   = _get_u64_le(buf, 8)
+    val ulo   = _get_u64_le(buf, 16)
+    val mg    = _get_u64_le(buf, 24)
+    val vld   = buf[32] != 0u8
+    val csum  = _get_u32_le(buf, 33)
+    DbfsSuperblock(
+        magic: magic, version: ver, uuid_hi: uhi, uuid_lo: ulo,
+        mount_generation: mg, valid: magic == DBFS_MAGIC and vld, checksum: csum
+    )
+
+# ---------------------------------------------------------------------------
+# Public disk I/O API
+# ---------------------------------------------------------------------------
+
+pub fn dbfs_superblock_format_disk(uuid_hi: u64, uuid_lo: u64) -> bool:
+    """Write a fresh DBFS superblock to sector 2 (replica A) and sector 3 (replica B).
+    Requires dbfs_superblock_set_device() first."""
+    if not _dbfs_has_device():
+        return false
+    val sb_a = DbfsSuperblock(
+        magic: DBFS_MAGIC, version: DBFS_VERSION,
+        uuid_hi: uuid_hi, uuid_lo: uuid_lo,
+        mount_generation: 1, valid: true, checksum: 0
+    )
+    val csum_a = _dbfs_crc_of(sb_a)
+    val sb_a_final = DbfsSuperblock(
+        magic: sb_a.magic, version: sb_a.version,
+        uuid_hi: sb_a.uuid_hi, uuid_lo: sb_a.uuid_lo,
+        mount_generation: sb_a.mount_generation,
+        valid: true, checksum: csum_a
+    )
+    val bytes_a = _dbfs_sb_to_bytes(sb_a_final)
+    if not _dbfs_raw_write_sector(2u64, bytes_a):
+        return false
+    val sb_b_final = DbfsSuperblock(
+        magic: sb_a_final.magic, version: sb_a_final.version,
+        uuid_hi: sb_a_final.uuid_hi, uuid_lo: sb_a_final.uuid_lo,
+        mount_generation: sb_a_final.mount_generation,
+        valid: true, checksum: csum_a
+    )
+    val bytes_b = _dbfs_sb_to_bytes(sb_b_final)
+    if not _dbfs_raw_write_sector(3u64, bytes_b):
+        return false
+    _dbfs_replica_write(sb_a_final, 0)
+    _dbfs_replica_write(sb_b_final, 1)
+    true
+
+pub fn dbfs_superblock_probe_disk() -> bool:
+    """Read sector 2 and check for DBFS_MAGIC. Requires dbfs_superblock_set_device() first."""
+    if not _dbfs_has_device():
+        return false
+    val buf = _dbfs_raw_read_sector(2u64)
+    if buf.len() < 4:
+        return false
+    val magic = _get_u32_le(buf, 0)
+    magic == DBFS_MAGIC
+
+pub fn dbfs_superblock_read_from_disk() -> DbfsSuperblock:
+    """Read both replica sectors (2/3) from disk and return the valid one.
+    Requires dbfs_superblock_set_device() first."""
+    if not _dbfs_has_device():
+        return _dbfs_sb_from_bytes([])
+
+    val buf_a = _dbfs_raw_read_sector(2u64)
+    val sb_a = if buf_a.len() >= 37: _dbfs_sb_from_bytes(buf_a) else: _dbfs_sb_from_bytes([])
+
+    val buf_b = _dbfs_raw_read_sector(3u64)
+    val sb_b = if buf_b.len() >= 37: _dbfs_sb_from_bytes(buf_b) else: _dbfs_sb_from_bytes([])
+
+    val a_ok = sb_a.valid and sb_a.magic == DBFS_MAGIC
+    val b_ok = sb_b.valid and sb_b.magic == DBFS_MAGIC
+    if a_ok and b_ok:
+        if sb_b.mount_generation > sb_a.mount_generation:
+            return sb_b
+        return sb_a
+    if a_ok:
+        return sb_a
+    if b_ok:
+        return sb_b
+    _dbfs_sb_from_bytes([])

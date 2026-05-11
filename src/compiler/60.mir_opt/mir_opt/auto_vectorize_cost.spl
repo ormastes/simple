@@ -119,6 +119,9 @@ fn get_scalar_instruction_cost(inst: MirInst) -> i64:
                 case Add | Sub: 1
                 case Mul: 3
                 case Div: 10
+                case And | Or | Xor: 1
+                case Shl | Shr: 1
+                case Lt | Le | Gt | Ge | Eq | Ne: 1
                 case _: 2
         case Load(_, _): 4   # Memory access is expensive
         case Store(_, _): 4
@@ -129,16 +132,22 @@ fn get_vector_instruction_cost(inst: MirInst, element_type: text) -> i64:
     """
     Get cost of executing an instruction in vector mode.
     Generally cheaper per element than scalar.
+    Byte-level ops (u8) are especially cheap since SIMD processes 16-32 at once.
     """
+    val is_byte = element_type == "u8" or element_type == "i8"
     match inst.kind:
         case BinOp(_, op, _, _):
             match op:
-                case Add | Sub: 2     # Vector add/sub ~2 cycles
-                case Mul: 5           # Vector mul ~5 cycles
-                case Div: 15          # Vector div still expensive
+                case Add | Sub: 2
+                case Mul: 5
+                case Div: 15
+                case And | Or | Xor: 1
+                case Shl | Shr: 2
+                case Lt | Le | Gt | Ge | Eq | Ne:
+                    if is_byte: 1 else: 2
                 case _: 3
-        case Load(_, _): 8            # Vector load (wider)
-        case Store(_, _): 8           # Vector store
+        case Load(_, _): 8
+        case Store(_, _): 8
         case GetElementPtr(_, _, _): 2
         case _: 1
 
@@ -218,6 +227,12 @@ fn should_vectorize_loop(loop: LoopInfo, body: [MirBlock]) -> bool:
                 case BinOp(_, op, _, _):
                     match op:
                         case Add | Sub | Mul:
+                            has_vectorizable_ops = true
+                        case And | Or | Xor:
+                            has_vectorizable_ops = true
+                        case Lt | Le | Gt | Ge | Eq | Ne:
+                            has_vectorizable_ops = true
+                        case Shl | Shr:
                             has_vectorizable_ops = true
                         case _:
                             pass_do_nothing

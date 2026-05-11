@@ -1,0 +1,153 @@
+# WidthIndex — O(log B) codepoint random access for UTF-8 strings
+#
+# Wraps the C runtime's Segmented Width Index (SWI) and Rank/Select
+# bit-vector for efficient repeated random access to codepoints in
+# UTF-8 strings. Lazy construction: first N accesses use linear scan,
+# then builds the index automatically.
+#
+# Usage:
+#   val idx = WidthIndex.for_text(my_string)
+#   val ch = idx.char_at(42)     # O(log B) after index built
+#   val s  = idx.slice(10, 20)   # O(log B) start + O(n) copy
+
+use std.encoding.simd_text_ffi.{
+    rt_swi_build, rt_swi_char_to_byte, rt_swi_byte_to_char, rt_swi_free,
+    rt_rank_select_build, rt_rank_query, rt_select_query, rt_rank_select_free,
+    rt_text_count_codepoints_cached
+}
+
+val SWI_BUILD_THRESHOLD = 2
+val SWI_MIN_BYTES = 256
+val SWI_DEGENERATE_THRESHOLD = 1024
+
+pub class WidthIndex:
+    text_ref: text
+    swi_handle: i64
+    rs_handle: i64
+    access_count: i64
+    mode: text
+
+    pub static fn for_text(s: text) -> WidthIndex:
+        WidthIndex(
+            text_ref: s,
+            swi_handle: 0,
+            rs_handle: 0,
+            access_count: 0,
+            mode: "linear"
+        )
+
+    fn ensure_index(me):
+        if me.mode != "linear":
+            return
+        me.access_count = me.access_count + 1
+        if me.access_count < SWI_BUILD_THRESHOLD:
+            return
+        if me.text_ref.len() < SWI_MIN_BYTES:
+            return
+        me.swi_handle = rt_swi_build(me.text_ref)
+        if me.swi_handle > 0:
+            me.mode = "swi"
+
+    fn ensure_rank_select(me):
+        if me.mode == "rank_select":
+            return
+        if me.swi_handle > 0:
+            rt_swi_free(me.swi_handle)
+            me.swi_handle = 0
+        me.rs_handle = rt_rank_select_build(me.text_ref)
+        if me.rs_handle > 0:
+            me.mode = "rank_select"
+
+    pub fn char_to_byte(me, char_idx: i64) -> i64:
+        me.ensure_index()
+        if me.mode == "swi":
+            val result = rt_swi_char_to_byte(me.swi_handle, char_idx)
+            if result < 0:
+                me.ensure_rank_select()
+                return rt_select_query(me.rs_handle, char_idx)
+            return result
+        if me.mode == "rank_select":
+            return rt_select_query(me.rs_handle, char_idx)
+        _linear_char_to_byte(me.text_ref, char_idx)
+
+    pub fn byte_to_char(me, byte_idx: i64) -> i64:
+        me.ensure_index()
+        if me.mode == "swi":
+            val result = rt_swi_byte_to_char(me.swi_handle, byte_idx)
+            if result < 0:
+                me.ensure_rank_select()
+                return rt_rank_query(me.rs_handle, byte_idx)
+            return result
+        if me.mode == "rank_select":
+            return rt_rank_query(me.rs_handle, byte_idx)
+        _linear_byte_to_char(me.text_ref, byte_idx)
+
+    pub fn char_at(me, idx: i64) -> text:
+        val byte_pos = me.char_to_byte(idx)
+        if byte_pos < 0 or byte_pos >= me.text_ref.len():
+            return ""
+        val b0 = me.text_ref.byte_at(byte_pos)
+        var char_len = 1
+        if b0 >= 0xF0:
+            char_len = 4
+        elif b0 >= 0xE0:
+            char_len = 3
+        elif b0 >= 0xC0:
+            char_len = 2
+        val end = byte_pos + char_len
+        if end > me.text_ref.len():
+            return ""
+        me.text_ref.slice(byte_pos, end)
+
+    pub fn slice(me, start: i64, end_idx: i64) -> text:
+        val start_byte = me.char_to_byte(start)
+        val end_byte = me.char_to_byte(end_idx)
+        if start_byte < 0 or end_byte < 0:
+            return ""
+        me.text_ref.slice(start_byte, end_byte)
+
+    pub fn codepoint_len(me) -> i64:
+        rt_text_count_codepoints_cached(me.text_ref)
+
+    pub fn free(me):
+        if me.swi_handle > 0:
+            rt_swi_free(me.swi_handle)
+            me.swi_handle = 0
+        if me.rs_handle > 0:
+            rt_rank_select_free(me.rs_handle)
+            me.rs_handle = 0
+        me.mode = "freed"
+
+fn _linear_char_to_byte(s: text, char_idx: i64) -> i64:
+    var byte_pos = 0
+    var char_pos = 0
+    while byte_pos < s.len() and char_pos < char_idx:
+        val b = s.byte_at(byte_pos)
+        if b < 0x80:
+            byte_pos = byte_pos + 1
+        elif b < 0xE0:
+            byte_pos = byte_pos + 2
+        elif b < 0xF0:
+            byte_pos = byte_pos + 3
+        else:
+            byte_pos = byte_pos + 4
+        char_pos = char_pos + 1
+    if char_pos == char_idx:
+        return byte_pos
+    -1
+
+fn _linear_byte_to_char(s: text, byte_idx: i64) -> i64:
+    var byte_pos = 0
+    var char_pos = 0
+    while byte_pos < s.len() and byte_pos < byte_idx:
+        val b = s.byte_at(byte_pos)
+        if b < 0x80:
+            byte_pos = byte_pos + 1
+        elif b < 0xE0:
+            byte_pos = byte_pos + 2
+        elif b < 0xF0:
+            byte_pos = byte_pos + 3
+        else:
+            byte_pos = byte_pos + 4
+        char_pos = char_pos + 1
+    char_pos

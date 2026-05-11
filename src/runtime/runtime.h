@@ -600,6 +600,51 @@ __declspec(noreturn) void spl_panic(const char* msg);
 void     spl_panic(const char* msg) __attribute__((noreturn));
 #endif
 
+/* ===== SIMD Text Dispatch ===== */
+
+void     simd_text_init(void);
+
+/* ===== SIMD UTF-8 Operations ===== */
+
+int64_t  rt_text_count_codepoints_cached(int64_t value);
+int64_t  rt_text_validate_utf8(int64_t value);
+int64_t  rt_text_find_invalid_utf8(int64_t value);
+
+/* ===== SIMD String Search & Equality ===== */
+
+int64_t  rt_simd_str_search(int64_t haystack, int64_t needle);
+int64_t  rt_simd_str_equal(int64_t a, int64_t b);
+
+/* ===== SIMD ASCII Case Operations ===== */
+
+int64_t  rt_text_is_ascii(int64_t value);
+int64_t  rt_text_to_upper_ascii(int64_t value);
+int64_t  rt_text_to_lower_ascii(int64_t value);
+
+/* ===== String Index (char↔byte offset conversion) ===== */
+
+typedef struct SegmentedWidthIndex SegmentedWidthIndex;
+typedef struct RankSelectIndex RankSelectIndex;
+
+SegmentedWidthIndex* rt_swi_build(int64_t value);
+int64_t  rt_swi_char_to_byte(SegmentedWidthIndex* idx, int64_t char_offset);
+int64_t  rt_swi_byte_to_char(SegmentedWidthIndex* idx, int64_t byte_offset);
+void     rt_swi_free(SegmentedWidthIndex* idx);
+
+RankSelectIndex* rt_rank_select_build(const uint8_t* data, uint64_t len);
+int64_t  rt_rank_query(RankSelectIndex* rs, int64_t pos);
+int64_t  rt_select_query(RankSelectIndex* rs, int64_t k);
+void     rt_rank_select_free(RankSelectIndex* rs);
+
+/* ===== Reserved-Field Cache Helpers ===== */
+
+/* Forward decl: RtCoreString is defined in runtime_native.c */
+struct RtCoreString;
+void     rt_str_cache_cp_count(struct RtCoreString* s, uint64_t count);
+int64_t  rt_str_cached_cp_count(struct RtCoreString* s);
+void     rt_str_set_ascii_flag(struct RtCoreString* s, int is_ascii);
+int      rt_str_is_ascii_cached(struct RtCoreString* s);
+
 #ifdef __cplusplus
 }
 #endif
