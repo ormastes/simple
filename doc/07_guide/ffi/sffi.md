@@ -578,3 +578,4 @@ try {
 - GPU FFI: `doc/07_guide/apps/gpu.md`
 - Interop support matrix: `doc/06_spec/app/compiler/sffi_interop_support_matrix.md`
 - Bidirectional interop design: `doc/05_design/sffi_bidirectional_interop.md`
+- **Hardware SFFI (VHDL):** `doc/07_guide/hardware/sffi_vhdl_guide.md` — Simple-to-VHDL compilation, GHDL/Yosys tool bindings, FPGA synthesis workflow
