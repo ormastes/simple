@@ -142,14 +142,25 @@ impl<'a> super::Lexer<'a> {
             // Domain-specific block keywords (FR-COMPILER-005).
             // try_scan_custom_block fires before this match, so these arms
             // are only reached when the word is NOT immediately followed by `{`.
-            "schema" => TokenKind::Schema,
-            "style" => TokenKind::Style,
-            "ui" => TokenKind::Ui,
-            "music" => TokenKind::Music,
-            "bim" => TokenKind::Bim,
-            "city" => TokenKind::City,
-            "cad" => TokenKind::Cad,
-            "rtl" => TokenKind::Rtl,
+            // They are contextual: only emit keyword tokens when followed by a
+            // declaration name (uppercase / `_` / `{`), so that bare uses like
+            // `use …style`, `style: FontStyle`, or `let style = …` stay
+            // identifiers (FR-COMPILER-005-ctx).
+            "schema" | "style" | "ui" | "music" | "bim" | "city" | "cad" | "rtl"
+                if self.is_domain_block_lookahead() =>
+            {
+                match name.as_str() {
+                    "schema" => TokenKind::Schema,
+                    "style"  => TokenKind::Style,
+                    "ui"     => TokenKind::Ui,
+                    "music"  => TokenKind::Music,
+                    "bim"    => TokenKind::Bim,
+                    "city"   => TokenKind::City,
+                    "cad"    => TokenKind::Cad,
+                    "rtl"    => TokenKind::Rtl,
+                    _ => unreachable!(),
+                }
+            }
             "union" => TokenKind::Union,
             "trait" => TokenKind::Trait,
             "impl" => TokenKind::Impl,

@@ -578,6 +578,25 @@ impl<'a> Lexer<'a> {
         self.peek().map(|c| c.is_alphabetic() || c == '_').unwrap_or(false)
     }
 
+    /// Peek past optional whitespace and return true when the next
+    /// non-whitespace character looks like the start of a domain-block
+    /// declaration name (uppercase letter, `_`, or `{`).
+    ///
+    /// Used to make domain keywords (`style`, `schema`, …) contextual:
+    /// `style MyStyle { … }` → keyword, `use …style` / `style: T` → identifier.
+    fn is_domain_block_lookahead(&self) -> bool {
+        let rest = &self.source[self.current_pos..];
+        for ch in rest.chars() {
+            if ch == ' ' || ch == '\t' {
+                continue;
+            }
+            // Uppercase letter or underscore → block declaration name follows
+            // `{` → anonymous block form (e.g. `style { ... }`)
+            return ch.is_ascii_uppercase() || ch == '_' || ch == '{';
+        }
+        false // EOF → not a declaration
+    }
+
     fn match_char(&mut self, expected: char, if_match: TokenKind, otherwise: TokenKind) -> TokenKind {
         if self.check(expected) {
             self.advance();

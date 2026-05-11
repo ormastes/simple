@@ -351,19 +351,35 @@ fn test_region_domain_custom_blocks() {
 }
 
 #[test]
-fn test_region_domain_keywords_without_block_brace() {
-    // Without an immediately-following `{`, domain words emit keyword tokens
-    // (FR-COMPILER-005). The `kind{payload}` raw-payload form is handled by
-    // try_scan_custom_block before the keyword match, so there is no ambiguity.
-    let result = tokenize("schema style music bim cad city rtl ui");
+fn test_region_domain_keywords_declaration_form() {
+    // Domain words emit keyword tokens only when followed by a declaration
+    // name (uppercase letter, `_`, or `{`) — contextual keywords
+    // (FR-COMPILER-005-ctx).
+    let result = tokenize("schema Building\nstyle MyStyle\nmusic Track\nbim Model\ncad Part\ncity Block\nrtl Counter\nui Panel");
+    // Each line produces: keyword, identifier, newline → stride of 3
     assert!(matches!(result[0], TokenKind::Schema));
-    assert!(matches!(result[1], TokenKind::Style));
-    assert!(matches!(result[2], TokenKind::Music));
-    assert!(matches!(result[3], TokenKind::Bim));
-    assert!(matches!(result[4], TokenKind::Cad));
-    assert!(matches!(result[5], TokenKind::City));
-    assert!(matches!(result[6], TokenKind::Rtl));
-    assert!(matches!(result[7], TokenKind::Ui));
+    assert!(matches!(result[3], TokenKind::Style));
+    assert!(matches!(result[6], TokenKind::Music));
+    assert!(matches!(result[9], TokenKind::Bim));
+    assert!(matches!(result[12], TokenKind::Cad));
+    assert!(matches!(result[15], TokenKind::City));
+    assert!(matches!(result[18], TokenKind::Rtl));
+    assert!(matches!(result[21], TokenKind::Ui));
+}
+
+#[test]
+fn test_region_domain_words_as_identifiers() {
+    // When domain words are NOT followed by a declaration name, they
+    // become regular identifiers (FR-COMPILER-005-ctx).
+    let result = tokenize("schema style music bim cad city rtl ui");
+    assert!(matches!(result[0], TokenKind::Identifier { .. }));
+    assert!(matches!(result[1], TokenKind::Identifier { .. }));
+    assert!(matches!(result[2], TokenKind::Identifier { .. }));
+    assert!(matches!(result[3], TokenKind::Identifier { .. }));
+    assert!(matches!(result[4], TokenKind::Identifier { .. }));
+    assert!(matches!(result[5], TokenKind::Identifier { .. }));
+    assert!(matches!(result[6], TokenKind::Identifier { .. }));
+    assert!(matches!(result[7], TokenKind::Identifier { .. }));
 }
 
 #[test]
