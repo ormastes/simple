@@ -140,6 +140,9 @@ impl<'a> Parser<'a> {
             // Allow 'lazy' and 'skip' as identifiers (e.g., var lazy = false)
             TokenKind::Lazy => self.parse_keyword_identifier("lazy"),
             TokenKind::Skip => self.parse_keyword_identifier("skip"),
+            // Allow 'move' and 'spawn' as identifiers (e.g., fn move(...) in MIR, spawn() calls)
+            TokenKind::Move => self.parse_keyword_identifier("move"),
+            TokenKind::Spawn => self.parse_keyword_identifier("spawn"),
             // 'me' is the mutable-self keyword; treat it like 'self' in expression context
             // so that `me.field` and `me.method()` work.
             TokenKind::Me => {

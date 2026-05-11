@@ -35,6 +35,7 @@ class EditorController:
     running: bool
     config: EditorConfig
     settings_view: SettingsViewState
+    palette_state: PaletteState
 
 impl EditorController:
 
@@ -49,12 +50,16 @@ impl EditorController:
             pending_prefix: "",
             running: true,
             config: editor_config_default(),
-            settings_view: nil
+            settings_view: nil,
+            palette_state: nil
         )
 
     me handle_key(key: text, rects: [SplitRect]) -> EditorAction:
         if key == "":
             return EditorAction(redraw: false, quit: false, status_msg: self.status_msg)
+
+        if self.palette_state != nil and self.palette_state.visible:
+            return self._dispatch_palette_key(key)
 
         if self.settings_view != nil:
             return self._dispatch_settings_key(key)
@@ -142,6 +147,21 @@ impl EditorController:
                 self.commandline = ""
                 self.status_msg = "settings"
                 return EditorAction(redraw: true, quit: false, status_msg: self.status_msg)
+            if parsed.name == "palette":
+                self._open_palette()
+                self.session.mode = EditorMode.Normal
+                self.commandline = ""
+                return EditorAction(redraw: true, quit: false, status_msg: "command palette")
+            if parsed.name == "preview":
+                self._toggle_md_preview()
+                self.session.mode = EditorMode.Normal
+                self.commandline = ""
+                return EditorAction(redraw: true, quit: false, status_msg: self.status_msg)
+            if parsed.name == "outline":
+                self._toggle_md_outline()
+                self.session.mode = EditorMode.Normal
+                self.commandline = ""
+                return EditorAction(redraw: true, quit: false, status_msg: self.status_msg)
             val dispatch_result = editor_dispatch_session(self.session, parsed)
             self.status_msg = dispatch_result.message
             if dispatch_result.quit:
@@ -161,6 +181,12 @@ impl EditorController:
         if key == "\t":
             self.toggle_focus()
             return EditorAction(redraw: true, quit: false, status_msg: self.status_msg)
+        if key == "\x10":
+            self._open_palette()
+            return EditorAction(redraw: true, quit: false, status_msg: "command palette")
+        if key == "\x16":
+            self._toggle_md_preview()
+            return EditorAction(redraw: true, quit: false, status_msg: self.status_msg)
 
         if self.pending_prefix == "ctrl_w":
             self.pending_prefix = ""
@@ -171,9 +197,45 @@ impl EditorController:
                     self.running = false
             return EditorAction(redraw: true, quit: not self.running, status_msg: self.status_msg)
 
+        if self.pending_prefix == "]" or self.pending_prefix == "[":
+            val saved_prefix = self.pending_prefix
+            self.pending_prefix = ""
+            val doc = self.session.active_document()
+            if doc != nil and doc.language_id == "markdown":
+                val buffer_m = self.session.active_buffer()
+                if buffer_m != nil:
+                    val content = md_buffer_content(buffer_m)
+                    val motion_result = md_dispatch_motion(saved_prefix, key, content, buffer_m.cursor_row, buffer_m.cursor_col)
+                    if motion_result.found:
+                        buffer_m.move_cursor(motion_result.line, motion_result.col)
+                        self.status_msg = "motion"
+                    return EditorAction(redraw: true, quit: false, status_msg: self.status_msg)
+            return EditorAction(redraw: true, quit: false, status_msg: self.status_msg)
+
+        if self.pending_prefix == "g":
+            self.pending_prefix = ""
+            val doc_g = self.session.active_document()
+            if doc_g != nil and doc_g.language_id == "markdown" and key == "x":
+                val buffer_gx = self.session.active_buffer()
+                if buffer_gx != nil:
+                    val content_gx = md_buffer_content(buffer_gx)
+                    val link_url = md_vim_open_link_under_cursor(content_gx, buffer_gx.cursor_row, buffer_gx.cursor_col)
+                    if link_url != "":
+                        self.status_msg = "open: " + link_url
+                return EditorAction(redraw: true, quit: false, status_msg: self.status_msg)
+            val buffer_gg = self.session.active_buffer()
+            if buffer_gg != nil:
+                buffer_gg.move_cursor(0, 0)
+                self.status_msg = "top"
+            return EditorAction(redraw: true, quit: false, status_msg: self.status_msg)
+
         if key == "\x17":
             self.pending_prefix = "ctrl_w"
             return EditorAction(redraw: true, quit: false, status_msg: "Ctrl+W ...")
+
+        if key == "]" or key == "[":
+            self.pending_prefix = key
+            return EditorAction(redraw: true, quit: false, status_msg: key + " ...")
 
         if self.focus_panel == "file_tree":
             return self._dispatch_file_tree_key(key)
@@ -186,6 +248,12 @@ impl EditorController:
             elif key == "q":
                 self.running = false
             return EditorAction(redraw: true, quit: not self.running, status_msg: self.status_msg)
+
+        if key == "g":
+            val doc_g2 = self.session.active_document()
+            if doc_g2 != nil and doc_g2.language_id == "markdown":
+                self.pending_prefix = "g"
+                return EditorAction(redraw: true, quit: false, status_msg: "g ...")
 
         val result = ctrl_handle_normal_key(buffer, key)
         self.status_msg = result.message
@@ -204,11 +272,29 @@ impl EditorController:
         if buffer == nil:
             self.session.mode = EditorMode.Normal
             return EditorAction(redraw: true, quit: false, status_msg: "")
+        val doc = self.session.active_document()
+        if doc != nil and doc.language_id == "markdown":
+            if key == "\r" or key == "\n":
+                val current_line = buffer.line_at(buffer.cursor_row)
+                val continuation = md_assist_on_enter(current_line, buffer.cursor_col)
+                if continuation != "":
+                    buffer.insert_at_cursor("\n" + continuation)
+                    md_update_preview(doc, buffer)
+                    return EditorAction(redraw: true, quit: false, status_msg: "-- INSERT --")
+            if key == "\t":
+                val tab_line = buffer.line_at(buffer.cursor_row)
+                val next_col = md_assist_on_tab(tab_line, buffer.cursor_col)
+                if next_col >= 0:
+                    buffer.move_cursor(buffer.cursor_row, next_col)
+                    return EditorAction(redraw: true, quit: false, status_msg: "-- INSERT --")
         val result = ctrl_handle_insert_key(buffer, key)
         self.status_msg = result.message
         if result.exit_insert:
             self.session.mode = EditorMode.Normal
             self.status_msg = ""
+        else:
+            if doc != nil and doc.language_id == "markdown":
+                md_update_preview(doc, buffer)
         EditorAction(redraw: true, quit: false, status_msg: self.status_msg)
 
     me _dispatch_file_tree_key(key: text) -> EditorAction:
@@ -232,6 +318,109 @@ impl EditorController:
         elif key == "q":
             self.running = false
         EditorAction(redraw: true, quit: not self.running, status_msg: self.status_msg)
+
+
+    me _dispatch_palette_key(key: text) -> EditorAction:
+        if key == "\x1b":
+            self.palette_state = palette_hide(self.palette_state)
+            return EditorAction(redraw: true, quit: false, status_msg: "")
+        if key == "\r" or key == "\n":
+            val selected = palette_selected(self.palette_state)
+            self.palette_state = palette_hide(self.palette_state)
+            if selected.command_name != "":
+                return self._execute_palette_command(selected.command_name, selected.command_payload)
+            return EditorAction(redraw: true, quit: false, status_msg: "")
+        if key == "\x1b[A":
+            self.palette_state = palette_select_prev(self.palette_state)
+            return EditorAction(redraw: true, quit: false, status_msg: "")
+        if key == "\x1b[B":
+            self.palette_state = palette_select_next(self.palette_state)
+            return EditorAction(redraw: true, quit: false, status_msg: "")
+        if key == "\x7f" or key == "\b":
+            val q = self.palette_state.query
+            if q.len() > 0:
+                self.palette_state = palette_update_query(self.palette_state, q.slice(0, q.len() - 1))
+            return EditorAction(redraw: true, quit: false, status_msg: "")
+        if key.len() == 1:
+            val code = key.char_code_at(0)
+            if code >= 32:
+                self.palette_state = palette_update_query(self.palette_state, self.palette_state.query + key)
+        EditorAction(redraw: true, quit: false, status_msg: "")
+
+    me _open_palette():
+        var all_entries = editor_all_commands()
+        val doc = self.session.active_document()
+        if doc != nil and doc.language_id == "markdown":
+            val md_entries = md_commands_palette_entries()
+            var mi = 0
+            while mi < md_entries.len():
+                all_entries.push(md_entries[mi])
+                mi = mi + 1
+        self.palette_state = palette_show(palette_new(all_entries))
+
+    me _execute_palette_command(command_name: text, command_payload: text) -> EditorAction:
+        if command_name.starts_with("markdown."):
+            val doc = self.session.active_document()
+            val buffer = self.session.active_buffer()
+            if doc != nil and doc.md_state != nil and buffer != nil:
+                val content = md_buffer_content(buffer)
+                val cmd_result = md_commands_dispatch(command_name, doc.md_state, content, buffer.cursor_row, buffer.cursor_col)
+                doc.md_state = cmd_result.state
+                md_apply_result(buffer, cmd_result)
+                if cmd_result.state.preview_visible:
+                    self.session.dock_layout.right_visible = true
+                    self.session.dock_layout.active_right = "md-preview"
+                elif cmd_result.state.outline_visible:
+                    self.session.dock_layout.right_visible = true
+                    self.session.dock_layout.active_right = "md-outline"
+                else:
+                    if not cmd_result.state.preview_visible and not cmd_result.state.outline_visible:
+                        self.session.dock_layout.right_visible = false
+                self.status_msg = cmd_result.status_message
+                return EditorAction(redraw: true, quit: false, status_msg: self.status_msg)
+        val parsed = editor_cmd_with(command_name, command_payload)
+        val dispatch_result = editor_dispatch_session(self.session, parsed)
+        self.status_msg = dispatch_result.message
+        if dispatch_result.quit:
+            self.running = false
+        EditorAction(redraw: true, quit: not self.running, status_msg: self.status_msg)
+
+    me _toggle_md_preview():
+        val doc = self.session.active_document()
+        if doc == nil or doc.md_state == nil:
+            self.status_msg = "not a markdown file"
+            return
+        doc.md_state.preview_visible = not doc.md_state.preview_visible
+        if doc.md_state.preview_visible:
+            val buffer = self.session.active_buffer()
+            if buffer != nil:
+                md_update_preview(doc, buffer)
+            self.session.dock_layout.right_visible = true
+            self.session.dock_layout.active_right = "md-preview"
+            self.status_msg = "preview on"
+        else:
+            if not doc.md_state.outline_visible:
+                self.session.dock_layout.right_visible = false
+            self.status_msg = "preview off"
+
+    me _toggle_md_outline():
+        val doc = self.session.active_document()
+        if doc == nil or doc.md_state == nil:
+            self.status_msg = "not a markdown file"
+            return
+        doc.md_state.outline_visible = not doc.md_state.outline_visible
+        if doc.md_state.outline_visible:
+            val buffer = self.session.active_buffer()
+            if buffer != nil:
+                val content = md_buffer_content(buffer)
+                doc.md_state.outline = outline_panel_update(doc.md_state.outline, content)
+            self.session.dock_layout.right_visible = true
+            self.session.dock_layout.active_right = "md-outline"
+            self.status_msg = "outline on"
+        else:
+            if not doc.md_state.preview_visible:
+                self.session.dock_layout.right_visible = false
+            self.status_msg = "outline off"
 
 
 fn ctrl_handle_normal_key(buffer: EditorBuffer, key: text) -> NormalKeyResult:
@@ -328,9 +517,15 @@ struct LayoutZones:
     status_y: i64
     command_y: i64
 
+struct LayoutZonesRight:
+    x: i64
+    w: i64
+
 fn ctrl_compute_zones(ctrl: EditorController, total_w: i64, total_h: i64) -> LayoutZones:
     val sidebar_w = if ctrl.file_tree_visible then ctrl.session.dock_layout.left_width else: 0
+    val right_w = if ctrl.session.dock_layout.right_visible then ctrl.session.dock_layout.right_width else: 0
     val editor_area_h = total_h - 3
+    val ew = total_w - sidebar_w - right_w
     LayoutZones(
         tab_bar_y: 0,
         tab_bar_h: 1,
@@ -340,8 +535,15 @@ fn ctrl_compute_zones(ctrl: EditorController, total_w: i64, total_h: i64) -> Lay
         sidebar_h: editor_area_h,
         editor_x: sidebar_w,
         editor_y: 1,
-        editor_w: total_w - sidebar_w,
+        editor_w: ew,
         editor_h: editor_area_h,
         status_y: total_h - 2,
         command_y: total_h - 1
+    )
+
+fn ctrl_right_zone(ctrl: EditorController, zones: LayoutZones) -> LayoutZonesRight:
+    val right_w = if ctrl.session.dock_layout.right_visible then ctrl.session.dock_layout.right_width else: 0
+    LayoutZonesRight(
+        x: zones.editor_x + zones.editor_w,
+        w: right_w
     )

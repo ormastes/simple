@@ -75,10 +75,23 @@ fn _gui_handle_key(state: GuiShellState, key: text):
     if gui_key == "":
         return
     if gui_key == "Ctrl+P":
+        state.ctrl._open_palette()
         state.ctrl.status_msg = "command palette"
+        return
+    if gui_key == "Ctrl+Shift+V":
+        state.ctrl._toggle_md_preview()
+        return
+    if gui_key == "Ctrl+Shift+O":
+        state.ctrl._toggle_md_outline()
         return
     if gui_key == "Ctrl+S":
         state.ctrl.session.save_active()
+        val doc_gs = state.ctrl.session.active_document()
+        if doc_gs != nil and doc_gs.language_id == "markdown":
+            val buf_gs = state.ctrl.session.active_buffer()
+            if buf_gs != nil:
+                val gs_content = md_buffer_content(buf_gs)
+                doc_gs.cached_md_stats = md_compute_stats(gs_content)
         state.ctrl.status_msg = "saved"
         return
     if gui_key == "Ctrl+O":
@@ -255,12 +268,34 @@ fn gui_shell_render_frame(state: GuiShellState) -> GuiFrame:
         editor_html = gui_render_editor_area(buffer, lang, buffer.viewport)
     else:
         editor_html = "<div class=\"empty\">No file open</div>"
+    var right_panel_html = ""
+    val doc_frame = state.ctrl.session.active_document()
+    if doc_frame != nil and doc_frame.md_state != nil:
+        if doc_frame.md_state.preview_visible:
+            val preview_lines = preview_pane_render(doc_frame.md_state.preview, 50)
+            var preview_content = ""
+            var pli = 0
+            while pli < preview_lines.len():
+                preview_content = preview_content + "<div>" + preview_lines[pli] + "</div>"
+                pli = pli + 1
+            right_panel_html = "<div class=\"preview-pane\">" + preview_content + "</div>"
+        elif doc_frame.md_state.outline_visible:
+            val outline_lines = outline_panel_render(doc_frame.md_state.outline, 50)
+            var outline_content = ""
+            var oli = 0
+            while oli < outline_lines.len():
+                outline_content = outline_content + "<div>" + outline_lines[oli] + "</div>"
+                oli = oli + 1
+            right_panel_html = "<div class=\"outline-pane\">" + outline_content + "</div>"
     val mode_str = editor_mode_name(state.ctrl.session.mode)
-    val status_html = "<div class=\"status\">" + mode_str + " | " + state.ctrl.status_msg + "</div>"
+    var status_extra = ""
+    if doc_frame != nil and doc_frame.language_id == "markdown" and doc_frame.cached_md_stats != nil:
+        status_extra = " | " + md_stats_to_status_bar(doc_frame.cached_md_stats)
+    val status_html = "<div class=\"status\">" + mode_str + " | " + state.ctrl.status_msg + status_extra + "</div>"
     GuiFrame(
         tab_bar_html: tab_bar,
         file_tree_html: file_tree_html,
-        editor_html: editor_html,
+        editor_html: editor_html + right_panel_html,
         status_html: status_html
     )
 

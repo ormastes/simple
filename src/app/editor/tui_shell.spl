@@ -74,6 +74,18 @@ fn _tui_render_frame(ctrl: EditorController, zones: LayoutZones, size: TerminalS
     else:
         _tui_render_single_pane(buffer, zones.editor_x, zones.editor_y, zones.editor_w, zones.editor_h, line_num_width)
 
+    if ctrl.session.dock_layout.right_visible:
+        val rz = ctrl_right_zone(ctrl, zones)
+        val doc_rz = ctrl.session.active_document()
+        if doc_rz != nil and doc_rz.md_state != nil:
+            if ctrl.session.dock_layout.active_right == "md-preview":
+                _tui_render_preview_pane(doc_rz.md_state.preview, rz.x, zones.editor_y, rz.w, zones.editor_h)
+            elif ctrl.session.dock_layout.active_right == "md-outline":
+                _tui_render_outline_pane(doc_rz.md_state.outline, rz.x, zones.editor_y, rz.w, zones.editor_h)
+
+    if ctrl.palette_state != nil and ctrl.palette_state.visible:
+        _tui_render_palette(ctrl.palette_state, zones, size.cols)
+
     _tui_render_status_bar(ctrl, zones, size.cols)
     _tui_render_command_line(ctrl, zones)
     _tui_render_cursor(ctrl, buffer, zones, line_num_width)
@@ -126,14 +138,21 @@ fn _tui_render_status_bar(ctrl: EditorController, zones: LayoutZones, width: i64
         pos_str = "{cr},{cc}"
     val doc_count = ctrl.session.document_count()
     val left_status = " {mode_str} | {path_str}{dirty_str} | {doc_count} files"
-    val right_status = "{pos_str} "
+    var right_status = "{pos_str} "
+    val doc_sb = ctrl.session.active_document()
+    if doc_sb != nil and doc_sb.language_id == "markdown" and doc_sb.cached_md_stats != nil:
+        val stats_text = md_stats_to_status_bar(doc_sb.cached_md_stats)
+        right_status = stats_text + " | " + right_status
     var fill = ""
     var f = 0
     val fill_len = width - left_status.len() - right_status.len()
     while f < fill_len:
         fill = fill + " "
         f = f + 1
-    terminal_write("\x1b[7m" + left_status + fill + right_status + "\x1b[0m")
+    if fill_len < 0:
+        terminal_write("\x1b[7m" + left_status + " " + right_status + "\x1b[0m")
+    else:
+        terminal_write("\x1b[7m" + left_status + fill + right_status + "\x1b[0m")
 
 
 fn _tui_render_command_line(ctrl: EditorController, zones: LayoutZones):
@@ -428,3 +447,127 @@ fn _group_active_buffer(session: EditSession, group_idx: i64) -> EditorBuffer:
     if doc_idx < 0:
         return nil
     session.documents[doc_idx].buffer
+
+
+fn _tui_render_preview_pane(preview: PreviewPane, x: i64, y: i64, w: i64, h: i64):
+    var sep_row = 0
+    while sep_row < h:
+        terminal_move_cursor(y + sep_row, x)
+        terminal_write("\x1b[2m|\x1b[0m")
+        sep_row = sep_row + 1
+    val content_x = x + 1
+    val content_w = w - 1
+    terminal_move_cursor(y, content_x)
+    var header = " Preview "
+    var hpad = ""
+    var hp = 0
+    while hp < content_w - header.len():
+        hpad = hpad + "-"
+        hp = hp + 1
+    terminal_write("\x1b[1;36m" + header + hpad + "\x1b[0m")
+    val lines = preview_pane_render(preview, h - 1)
+    var row = 0
+    while row < h - 1:
+        terminal_move_cursor(y + 1 + row, content_x)
+        if row < lines.len():
+            val line = lines[row]
+            val visible_len = content_w
+            if line.len() > visible_len:
+                terminal_write(line.slice(0, visible_len))
+            else:
+                terminal_write(line)
+        row = row + 1
+
+
+fn _tui_render_outline_pane(outline: OutlinePanel, x: i64, y: i64, w: i64, h: i64):
+    var sep_row = 0
+    while sep_row < h:
+        terminal_move_cursor(y + sep_row, x)
+        terminal_write("\x1b[2m|\x1b[0m")
+        sep_row = sep_row + 1
+    val content_x = x + 1
+    val content_w = w - 1
+    terminal_move_cursor(y, content_x)
+    var header = " Outline "
+    var hpad = ""
+    var hp = 0
+    while hp < content_w - header.len():
+        hpad = hpad + "-"
+        hp = hp + 1
+    terminal_write("\x1b[1;32m" + header + hpad + "\x1b[0m")
+    val lines = outline_panel_render(outline, h - 1)
+    var row = 0
+    while row < h - 1:
+        terminal_move_cursor(y + 1 + row, content_x)
+        if row < lines.len():
+            val line = lines[row]
+            if line.len() > content_w:
+                terminal_write(line.slice(0, content_w))
+            else:
+                terminal_write(line)
+        row = row + 1
+
+
+fn _tui_render_palette(state: PaletteState, zones: LayoutZones, width: i64):
+    val palette_w = 60
+    val palette_h = 12
+    val px = (width - palette_w) / 2
+    val py = zones.editor_y + 1
+    terminal_move_cursor(py, px)
+    var border_top = "+"
+    var bt = 0
+    while bt < palette_w - 2:
+        border_top = border_top + "-"
+        bt = bt + 1
+    border_top = border_top + "+"
+    terminal_write("\x1b[1m" + border_top + "\x1b[0m")
+    terminal_move_cursor(py + 1, px)
+    var query_line = "| > " + state.query
+    var qpad = ""
+    var qp = 0
+    while qp < palette_w - 2 - query_line.len():
+        qpad = qpad + " "
+        qp = qp + 1
+    terminal_write("\x1b[1m" + query_line + qpad + " |\x1b[0m")
+    terminal_move_cursor(py + 2, px)
+    var sep = "|"
+    var sp = 0
+    while sp < palette_w - 2:
+        sep = sep + "-"
+        sp = sp + 1
+    sep = sep + "|"
+    terminal_write("\x1b[2m" + sep + "\x1b[0m")
+    var ri = 0
+    while ri < palette_h - 4:
+        terminal_move_cursor(py + 3 + ri, px)
+        if ri < state.filtered.len():
+            val entry = state.filtered[ri]
+            var eline = "  " + entry.name
+            if eline.len() > palette_w - 4:
+                eline = eline.slice(0, palette_w - 4)
+            var epad = ""
+            var ep = 0
+            while ep < palette_w - 4 - eline.len():
+                epad = epad + " "
+                ep = ep + 1
+            if ri == state.selected_index:
+                terminal_write("\x1b[7m| " + eline + epad + " |\x1b[0m")
+            else:
+                terminal_write("| " + eline + epad + " |")
+        else:
+            var blank = "|"
+            var bi = 0
+            while bi < palette_w - 2:
+                blank = blank + " "
+                bi = bi + 1
+            blank = blank + "|"
+            terminal_write(blank)
+        ri = ri + 1
+    terminal_move_cursor(py + palette_h - 1, px)
+    var border_bot = "+"
+    var bb = 0
+    while bb < palette_w - 2:
+        border_bot = border_bot + "-"
+        bb = bb + 1
+    border_bot = border_bot + "+"
+    terminal_write("\x1b[1m" + border_bot + "\x1b[0m")
