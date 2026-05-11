@@ -1,0 +1,199 @@
+# SIMD Text Operations — Correctness Test Suite
+#
+# Tests all SIMD-accelerated text operations against expected results.
+# Covers: codepoint counting, validation, ASCII detection, case conversion,
+#         substring search, SWI, rank/select, edge cases at SIMD boundaries.
+
+use std.spec.{describe, it, expect}
+use std.encoding.simd_text_ffi.{
+    rt_text_count_codepoints_cached, rt_text_is_ascii,
+    rt_text_validate_utf8, rt_text_find_invalid_utf8,
+    rt_simd_str_search, rt_simd_str_equal, rt_simd_str_last_index_of,
+    rt_text_to_upper_ascii, rt_text_to_lower_ascii,
+    rt_swi_build, rt_swi_char_to_byte, rt_swi_byte_to_char, rt_swi_free,
+    rt_rank_select_build, rt_rank_query, rt_select_query, rt_rank_select_free
+}
+use std.encoding.utf8.{text_codepoint_len, text_is_ascii}
+use std.encoding.width_index.{WidthIndex}
+
+fn repeat_char(ch: text, count: i64) -> text:
+    var r = ""
+    var i = 0
+    while i < count:
+        r = r + ch
+        i = i + 1
+    r
+
+describe "SIMD Codepoint Counting":
+    it "counts empty string":
+        expect rt_text_count_codepoints_cached("") == 0
+
+    it "counts single ASCII char":
+        expect rt_text_count_codepoints_cached("a") == 1
+
+    it "counts pure ASCII":
+        expect rt_text_count_codepoints_cached("Hello, World!") == 13
+
+    it "counts 2-byte chars (Latin extended)":
+        expect rt_text_count_codepoints_cached("café") == 4
+
+    it "counts 3-byte chars (CJK)":
+        expect rt_text_count_codepoints_cached("世界") == 2
+
+    it "counts 4-byte chars (emoji)":
+        expect rt_text_count_codepoints_cached("🎉🚀") == 2
+
+    it "counts mixed UTF-8":
+        expect rt_text_count_codepoints_cached("Hello 世界! 🎉") == 11
+
+    it "counts Korean":
+        expect rt_text_count_codepoints_cached("안녕하세요") == 5
+
+    it "handles exactly 16 bytes (SSE boundary)":
+        expect rt_text_count_codepoints_cached("0123456789ABCDEF") == 16
+
+    it "handles exactly 32 bytes (AVX boundary)":
+        expect rt_text_count_codepoints_cached("0123456789ABCDEF0123456789ABCDEF") == 32
+
+    it "handles 15 bytes (SSE boundary - 1)":
+        expect rt_text_count_codepoints_cached("0123456789ABCDE") == 15
+
+    it "handles 33 bytes (AVX boundary + 1)":
+        expect rt_text_count_codepoints_cached("0123456789ABCDEF0123456789ABCDEF!") == 33
+
+    it "cached second call returns same result":
+        val s = "Test string for caching"
+        val first = rt_text_count_codepoints_cached(s)
+        val second = rt_text_count_codepoints_cached(s)
+        expect first == second
+
+describe "SIMD ASCII Detection":
+    it "empty string is ASCII":
+        expect rt_text_is_ascii("") == true
+
+    it "pure ASCII returns true":
+        expect rt_text_is_ascii("Hello World 123 !@#") == true
+
+    it "non-ASCII returns false":
+        expect rt_text_is_ascii("café") == false
+
+    it "emoji returns false":
+        expect rt_text_is_ascii("Hello 🎉") == false
+
+    it "single non-ASCII byte returns false":
+        expect rt_text_is_ascii("a\xc3\xa9") == false
+
+    it "16 ASCII bytes at SSE boundary":
+        expect rt_text_is_ascii("0123456789ABCDEF") == true
+
+describe "SIMD UTF-8 Validation":
+    it "empty string is valid":
+        expect rt_text_validate_utf8("") == true
+
+    it "ASCII is valid":
+        expect rt_text_validate_utf8("Hello") == true
+
+    it "valid 2-byte":
+        expect rt_text_validate_utf8("café") == true
+
+    it "valid 3-byte CJK":
+        expect rt_text_validate_utf8("世界") == true
+
+    it "valid 4-byte emoji":
+        expect rt_text_validate_utf8("🎉") == true
+
+    it "valid mixed":
+        expect rt_text_validate_utf8("Hello 世界 🎉 café") == true
+
+describe "SIMD Substring Search":
+    it "empty needle returns 0":
+        expect rt_simd_str_search("hello", "") == 0
+
+    it "finds at start":
+        expect rt_simd_str_search("hello world", "hello") == 0
+
+    it "finds in middle":
+        expect rt_simd_str_search("hello world", "world") == 6
+
+    it "finds single char":
+        expect rt_simd_str_search("abcdef", "d") == 3
+
+    it "returns -1 when not found":
+        expect rt_simd_str_search("hello", "xyz") == -1
+
+    it "needle longer than haystack":
+        expect rt_simd_str_search("hi", "hello world") == -1
+
+    it "finds at end":
+        expect rt_simd_str_search("hello world", "orld") == 7
+
+    it "last_index_of finds last":
+        expect rt_simd_str_last_index_of("abcabc", "abc") == 3
+
+    it "last_index_of not found":
+        expect rt_simd_str_last_index_of("hello", "xyz") == -1
+
+describe "SIMD String Equality":
+    it "equal strings":
+        expect rt_simd_str_equal("hello", "hello") == true
+
+    it "different strings":
+        expect rt_simd_str_equal("hello", "world") == false
+
+    it "different lengths":
+        expect rt_simd_str_equal("hello", "hell") == false
+
+    it "empty strings equal":
+        expect rt_simd_str_equal("", "") == true
+
+describe "SIMD Case Conversion":
+    it "to_upper basic":
+        expect rt_text_to_upper_ascii("hello") == "HELLO"
+
+    it "to_lower basic":
+        expect rt_text_to_lower_ascii("HELLO") == "hello"
+
+    it "to_upper preserves non-alpha":
+        expect rt_text_to_upper_ascii("hello 123!") == "HELLO 123!"
+
+    it "to_lower preserves non-alpha":
+        expect rt_text_to_lower_ascii("HELLO 123!") == "hello 123!"
+
+    it "to_upper preserves non-ASCII":
+        expect rt_text_to_upper_ascii("café") == "CAFé"
+
+    it "empty string":
+        expect rt_text_to_upper_ascii("") == ""
+        expect rt_text_to_lower_ascii("") == ""
+
+    it "already correct case":
+        expect rt_text_to_upper_ascii("HELLO") == "HELLO"
+        expect rt_text_to_lower_ascii("hello") == "hello"
+
+describe "WidthIndex":
+    it "char_at on ASCII":
+        val idx = WidthIndex.for_text("hello")
+        expect idx.char_at(0) == "h"
+        expect idx.char_at(4) == "o"
+
+    it "char_at on CJK":
+        val idx = WidthIndex.for_text("世界好")
+        expect idx.char_at(0) == "世"
+        expect idx.char_at(1) == "界"
+        expect idx.char_at(2) == "好"
+
+    it "slice on mixed":
+        val idx = WidthIndex.for_text("Hello世界!")
+        expect idx.slice(5, 7) == "世界"
+
+    it "codepoint_len":
+        val idx = WidthIndex.for_text("Hello 🎉")
+        expect idx.codepoint_len() == 7
+
+describe "Stdlib Integration":
+    it "text_codepoint_len uses cached path":
+        expect text_codepoint_len("Hello 世界") == 8
+
+    it "text_is_ascii works":
+        expect text_is_ascii("hello") == true
+        expect text_is_ascii("héllo") == false

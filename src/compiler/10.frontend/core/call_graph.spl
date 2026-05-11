@@ -25,6 +25,8 @@ use compiler.core.ast.{expr_get_tag, expr_get_str, expr_get_left, expr_get_right
 use compiler.core.ast.{expr_get_args, expr_get_stmts}
 use compiler.core.ast.{elif_get_cond, elif_get_body, elif_get_else}
 use compiler.core.ast.{arm_get_body}
+use compiler.core.call_edge_utils.{ceu_reset, ceu_register_functions, ceu_extract_call_edges}
+use compiler.core.call_edge_utils.{ceu_get_fn_names, ceu_get_fn_count, ceu_get_fn_index, ceu_get_callees}
 
 # ===== Module State =====
 
@@ -53,129 +55,28 @@ fn call_graph_warnings_clear():
 fn call_graph_analyze():
     # Reset state
     cg_warnings = []
-    cg_fn_names = []
-    cg_fn_count = 0
-    cg_callees = []
     cg_visited = []
-    cg_fn_index = {}
 
-    # Phase 1: Register all functions
-    register_functions()
+    # Phase 1: Register all functions (shared)
+    ceu_reset()
+    ceu_register_functions()
+    cg_fn_names = ceu_get_fn_names()
+    cg_fn_count = ceu_get_fn_count()
+    cg_fn_index = ceu_get_fn_index()
 
-    # Phase 2: Extract call edges
-    extract_call_edges()
+    # Init caller-specific arrays
+    for i in range(0, cg_fn_count):
+        cg_visited.push(0)
+
+    # Phase 2: Extract call edges (shared)
+    ceu_extract_call_edges()
+    cg_callees = ceu_get_callees()
 
     # Phase 3: Detect self-recursion (R1)
     detect_self_recursion()
 
     # Phase 4: Detect circular call cycles (R2)
     detect_cycles()
-
-# ===== Phase 1: Register Functions =====
-
-fn register_functions():
-    val total = decl_count()
-    for i in range(0, total):
-        val tag = decl_get_tag(i)
-        if tag == DECL_FN:
-            val name = decl_get_name(i)
-            cg_fn_index[name] = cg_fn_count
-            cg_fn_names.push(name)
-            cg_callees.push([])
-            cg_visited.push(0)
-            cg_fn_count = cg_fn_count + 1
-
-# ===== Phase 2: Extract Call Edges =====
-
-fn extract_call_edges():
-    var fn_idx = 0
-    val total = decl_count()
-    for i in range(0, total):
-        val tag = decl_get_tag(i)
-        if tag == DECL_FN:
-            val body = decl_get_body(i)
-            for stmt_idx in body:
-                collect_calls_from_stmt(stmt_idx, fn_idx)
-            fn_idx = fn_idx + 1
-
-fn add_callee(fn_idx: i64, callee_name: text):
-    # Deduplicate edges
-    val existing = cg_callees[fn_idx]
-    for name in existing:
-        if name == callee_name:
-            return
-    var updated = cg_callees[fn_idx]
-    updated.push(callee_name)
-    cg_callees[fn_idx] = updated
-
-fn collect_calls_from_stmt(stmt_idx: i64, fn_idx: i64):
-    val tag = stmt_get_tag(stmt_idx)
-    val expr_idx = stmt_get_expr(stmt_idx)
-    val body = stmt_get_body(stmt_idx)
-
-    # Analyze expression in this statement
-    if expr_idx >= 0:
-        collect_calls_from_expr(expr_idx, fn_idx)
-
-    # Recurse into body statements
-    for nested in body:
-        collect_calls_from_stmt(nested, fn_idx)
-
-    # Handle if-stmt elif chain
-    if tag == STMT_IF:
-        val elif_idx = stmt_get_elif(stmt_idx)
-        if elif_idx >= 0:
-            collect_calls_from_elif(elif_idx, fn_idx)
-
-fn stmt_get_elif(stmt_idx: i64) -> i64:
-    # elif index is stored in type field for if-stmts
-    stmt_get_type(stmt_idx)
-
-fn collect_calls_from_elif(elif_idx: i64, fn_idx: i64):
-    if elif_idx < 0:
-        return
-    val cond = elif_get_cond(elif_idx)
-    if cond >= 0:
-        collect_calls_from_expr(cond, fn_idx)
-    val body = elif_get_body(elif_idx)
-    for stmt_idx in body:
-        collect_calls_from_stmt(stmt_idx, fn_idx)
-    val else_body = elif_get_else(elif_idx)
-    for stmt_idx in else_body:
-        collect_calls_from_stmt(stmt_idx, fn_idx)
-
-fn collect_calls_from_expr(expr_idx: i64, fn_idx: i64):
-    if expr_idx < 0:
-        return
-    val tag = expr_get_tag(expr_idx)
-
-    # Direct function call: callee(args...)
-    if tag == EXPR_CALL:
-        val callee = expr_get_left(expr_idx)
-        if callee >= 0:
-            val callee_tag = expr_get_tag(callee)
-            if callee_tag == EXPR_IDENT:
-                val callee_name = expr_get_str(callee)
-                add_callee(fn_idx, callee_name)
-
-    # Recurse into child expressions
-    val left = expr_get_left(expr_idx)
-    val right = expr_get_right(expr_idx)
-    val extra = expr_get_extra(expr_idx)
-    val args = expr_get_args(expr_idx)
-    val stmts = expr_get_stmts(expr_idx)
-
-    if left >= 0:
-        collect_calls_from_expr(left, fn_idx)
-    if right >= 0:
-        collect_calls_from_expr(right, fn_idx)
-    if extra >= 0:
-        collect_calls_from_expr(extra, fn_idx)
-    for arg_idx in args:
-        collect_calls_from_expr(arg_idx, fn_idx)
-    # Analyze statements in expressions (blocks, lambdas)
-    for stmt_idx in stmts:
-        collect_calls_from_stmt(stmt_idx, fn_idx)
 
 # ===== Phase 3: Detect Self-Recursion (R1) =====
 

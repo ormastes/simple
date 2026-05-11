@@ -49,7 +49,9 @@ fn _dbfs_has_device() -> bool:
 fn _dbfs_raw_write_sector(lba: u64, data: [u8]) -> bool:
     if not _dbfs_dev_ready:
         return false
-    val r = _dbfs_dev_store[0].write_sector(lba, data)
+    var dev = _dbfs_dev_store[0]
+    val r = dev.write_sector(lba, data)
+    _dbfs_dev_store[0] = dev
     r.is_ok()
 
 fn _dbfs_raw_read_sector(lba: u64) -> [u8]:
@@ -57,7 +59,9 @@ fn _dbfs_raw_read_sector(lba: u64) -> [u8]:
         return []
     val sz = _dbfs_dev_store[0].sector_size() as i64
     var buf = rt_bytes_alloc(sz)
-    val r = _dbfs_dev_store[0].read_sector(lba, buf)
+    var dev = _dbfs_dev_store[0]
+    val r = dev.read_sector(lba, buf)
+    _dbfs_dev_store[0] = dev
     if r.is_ok(): buf else: []
 
 # ---------------------------------------------------------------------------
@@ -118,6 +122,11 @@ fn _write_u32_le(buf: [u8], off: i64, v: u32) -> [u8]:
     buf
 
 fn _write_u64_le(buf: [u8], off: i64, v: u64) -> [u8]:
+    # TODO(bug): u64 values with high bit set in the upper 32 bits are
+    # incorrectly encoded due to interpreter u64→i64 cast sign extension.
+    # Affects uuid_hi/uuid_lo values >= 0x80000000_00000000.
+    # Same issue exists in examples/nvfs/src/core/superblock.spl _write_u64_le.
+    # Safe range: u64 values <= 0x7FFFFFFF_FFFFFFFF.
     val iv = v as i64
     buf[off]     = (iv % 256) as u8
     buf[off + 1] = ((iv / 256) % 256) as u8

@@ -1,0 +1,286 @@
+# File Syscall Handlers — split from syscall.spl.
+# Contains _handle_file_open, _handle_file_read, _handle_file_write,
+# _handle_file_close, _handle_file_stat, _handle_file_mkdir,
+# _handle_file_readdir, _handle_file_unlink, _handle_file_rename,
+# _handle_file_rmdir, _handle_lseek, _handle_ftruncate,
+# _handle_getcwd, _handle_chdir.
+
+use os.kernel.types.syscall_types.{SyscallArgs, SyscallResult}
+use os.kernel.types.ipc_types.{IpcMessage}
+use os.kernel.scheduler.scheduler.{Scheduler}
+use os.kernel.ipc.ipc.{IpcManager}
+use os.kernel.memory.vmm.{vmm_verify_user_write}
+use os.kernel.boot.mmio.{mmio_write8}
+use os.posix.fd_io.{posix_close, posix_read, posix_write, posix_lseek}
+use os.kernel.ipc.syscall.{MAX_BINARY_PATH_LEN, _is_userspace_range}
+
+# ============================================================================
+# File Syscall Handlers (routed to VFS via IPC)
+# ============================================================================
+
+fn _handle_file_open(args: SyscallArgs, scheduler: Scheduler, ipc: IpcManager) -> SyscallResult:
+    """Open a file. Routed to VFS service via IPC.
+
+    Args:
+      arg0: path pointer (userspace)
+      arg1: path length
+      arg2: flags
+    """
+    val path_ptr = args.arg0 as u64
+    val path_len = args.arg1 as u64
+    if path_ptr == 0 or path_len == 0 or path_len > MAX_BINARY_PATH_LEN:
+        return SyscallResult(value: -22)
+    var sched = scheduler
+    val current = sched.get_current()
+    val msg = IpcMessage(
+        src_port: current.id,
+        dst_port: 0,
+        method: 1,
+        flags: args.arg2 as u32,
+        payload_len: path_len,
+        cap_count: 0
+    )
+    var ipc_mgr = ipc
+    val result = ipc_mgr.send(msg)
+    SyscallResult(value: result)
+
+fn _handle_file_read(args: SyscallArgs, scheduler: Scheduler, ipc: IpcManager) -> SyscallResult:
+    """Read from a file descriptor through the active POSIX fd backend.
+
+    Args:
+      arg0: file descriptor
+      arg1: buffer pointer (userspace)
+      arg2: byte count to read
+    """
+    val buf_ptr = args.arg1 as u64
+    val count = args.arg2 as u64
+    if count == 0:
+        return SyscallResult(value: 0)
+    if not _is_userspace_range(buf_ptr, count):
+        return SyscallResult(value: -14)
+    if not vmm_verify_user_write(buf_ptr, count):
+        return SyscallResult(value: -14)
+    SyscallResult(value: posix_read(args.arg0 as i32, buf_ptr, count))
+
+fn _handle_file_write(args: SyscallArgs, scheduler: Scheduler, ipc: IpcManager) -> SyscallResult:
+    """Write to a file descriptor through the active POSIX fd backend.
+
+    Args:
+      arg0: file descriptor
+      arg1: buffer pointer (userspace)
+      arg2: byte count to write
+    """
+    val buf_ptr = args.arg1 as u64
+    val count = args.arg2 as u64
+    if count == 0:
+        return SyscallResult(value: 0)
+    if not _is_userspace_range(buf_ptr, count):
+        return SyscallResult(value: -14)
+    SyscallResult(value: posix_write(args.arg0 as i32, buf_ptr, count))
+
+fn _handle_file_close(args: SyscallArgs, scheduler: Scheduler, ipc: IpcManager) -> SyscallResult:
+    """Close a file descriptor through the POSIX fd owner.
+
+    Args:
+      arg0: file descriptor
+    """
+    SyscallResult(value: posix_close(args.arg0 as i32) as i64)
+
+fn _handle_file_stat(args: SyscallArgs, scheduler: Scheduler, ipc: IpcManager) -> SyscallResult:
+    """Stat a file. Routed to VFS service via IPC.
+
+    Args:
+      arg0: path pointer (userspace)
+      arg1: path length
+      arg2: stat buffer pointer (userspace, ~128 bytes)
+    """
+    val path_ptr = args.arg0 as u64
+    val path_len = args.arg1 as u64
+    val stat_buf = args.arg2 as u64
+    if path_ptr == 0 or path_len == 0 or path_len > MAX_BINARY_PATH_LEN:
+        return SyscallResult(value: -22)
+    if not vmm_verify_user_write(stat_buf, 128):
+        return SyscallResult(value: -14)
+    var sched = scheduler
+    val current = sched.get_current()
+    val msg = IpcMessage(
+        src_port: current.id,
+        dst_port: 0,
+        method: 5,
+        flags: 0,
+        payload_len: path_len,
+        cap_count: 0
+    )
+    var ipc_mgr = ipc
+    val result = ipc_mgr.send(msg)
+    SyscallResult(value: result)
+
+fn _handle_file_mkdir(args: SyscallArgs, scheduler: Scheduler, ipc: IpcManager) -> SyscallResult:
+    """Create a directory. Routed to VFS service via IPC.
+
+    Args:
+      arg0: path pointer (userspace)
+      arg1: path length
+      arg2: mode (permissions)
+    """
+    val path_ptr = args.arg0 as u64
+    val path_len = args.arg1 as u64
+    if path_ptr == 0 or path_len == 0 or path_len > MAX_BINARY_PATH_LEN:
+        return SyscallResult(value: -22)
+    var sched = scheduler
+    val current = sched.get_current()
+    val msg = IpcMessage(
+        src_port: current.id,
+        dst_port: 0,
+        method: 6,
+        flags: args.arg2 as u32,
+        payload_len: path_len,
+        cap_count: 0
+    )
+    var ipc_mgr = ipc
+    val result = ipc_mgr.send(msg)
+    SyscallResult(value: result)
+
+fn _handle_file_readdir(args: SyscallArgs, scheduler: Scheduler, ipc: IpcManager) -> SyscallResult:
+    """Read directory entries. Routed to VFS service via IPC.
+
+    Args:
+      arg0: directory fd or path pointer
+      arg1: buffer pointer (userspace) for directory entries
+      arg2: buffer size
+    """
+    val buf_ptr = args.arg1 as u64
+    val buf_size = args.arg2 as u64
+    if buf_ptr == 0 or buf_size == 0:
+        return SyscallResult(value: -22)
+    if not vmm_verify_user_write(buf_ptr, buf_size):
+        return SyscallResult(value: -14)
+    var sched = scheduler
+    val current = sched.get_current()
+    val msg = IpcMessage(
+        src_port: current.id,
+        dst_port: 0,
+        method: 7,
+        flags: args.arg0 as u32,
+        payload_len: buf_size,
+        cap_count: 0
+    )
+    var ipc_mgr = ipc
+    val result = ipc_mgr.send(msg)
+    SyscallResult(value: result)
+
+fn _handle_file_unlink(args: SyscallArgs, scheduler: Scheduler, ipc: IpcManager) -> SyscallResult:
+    """Remove a file. Routed to VFS service via IPC method 8 (UNLINK)."""
+    val path_ptr = args.arg0 as u64
+    val path_len = args.arg1 as u64
+    if path_ptr == 0 or path_len == 0 or path_len > MAX_BINARY_PATH_LEN:
+        return SyscallResult(value: -22)
+    var sched = scheduler
+    val current = sched.get_current()
+    val msg = IpcMessage(
+        src_port: current.id,
+        dst_port: 0,
+        method: 8,
+        flags: 0,
+        payload_len: path_len,
+        cap_count: 0
+    )
+    var ipc_mgr = ipc
+    val result = ipc_mgr.send(msg)
+    SyscallResult(value: result)
+
+fn _handle_file_rename(args: SyscallArgs, scheduler: Scheduler, ipc: IpcManager) -> SyscallResult:
+    """Rename a file or directory. Routed to VFS service via IPC method 9 (RENAME)."""
+    val old_ptr = args.arg0 as u64
+    val old_len = args.arg1 as u64
+    val new_ptr = args.arg2 as u64
+    val new_len = args.arg3 as u64
+    if old_ptr == 0 or old_len == 0 or old_len > MAX_BINARY_PATH_LEN:
+        return SyscallResult(value: -22)
+    if new_ptr == 0 or new_len == 0 or new_len > MAX_BINARY_PATH_LEN:
+        return SyscallResult(value: -22)
+    var sched = scheduler
+    val current = sched.get_current()
+    val msg = IpcMessage(
+        src_port: current.id,
+        dst_port: 0,
+        method: 9,
+        flags: old_len as u32,
+        payload_len: old_len + 1 + new_len,
+        cap_count: 0
+    )
+    var ipc_mgr = ipc
+    val result = ipc_mgr.send(msg)
+    SyscallResult(value: result)
+
+fn _handle_file_rmdir(args: SyscallArgs, scheduler: Scheduler, ipc: IpcManager) -> SyscallResult:
+    """Remove a directory. Routed to VFS service via IPC method 14 (RMDIR)."""
+    val path_ptr = args.arg0 as u64
+    val path_len = args.arg1 as u64
+    if path_ptr == 0 or path_len == 0 or path_len > MAX_BINARY_PATH_LEN:
+        return SyscallResult(value: -22)
+    var sched = scheduler
+    val current = sched.get_current()
+    val msg = IpcMessage(
+        src_port: current.id,
+        dst_port: 0,
+        method: 14,
+        flags: 0,
+        payload_len: path_len,
+        cap_count: 0
+    )
+    var ipc_mgr = ipc
+    val result = ipc_mgr.send(msg)
+    SyscallResult(value: result)
+
+fn _handle_lseek(args: SyscallArgs) -> SyscallResult:
+    """Reposition read/write file offset via POSIX fd layer.
+
+    Args:
+      arg0: file descriptor
+      arg1: offset
+      arg2: whence (0=SEEK_SET, 1=SEEK_CUR, 2=SEEK_END)
+    """
+    val fd = args.arg0 as i32
+    val offset = args.arg1 as i64
+    val whence = args.arg2 as u32
+    SyscallResult(value: posix_lseek(fd, offset, whence))
+
+fn _handle_ftruncate(args: SyscallArgs) -> SyscallResult:
+    """Truncate an open file descriptor to the given length."""
+    val fd = args.arg0 as u64
+    val length = args.arg1 as i64
+    if length < 0:
+        return SyscallResult(value: -22)
+    SyscallResult(value: -38)  # ENOSYS — needs FS driver ftruncate()
+
+fn _handle_getcwd(args: SyscallArgs, scheduler: Scheduler) -> SyscallResult:
+    """Get current working directory.
+
+    Args:
+      arg0: buffer pointer (userspace)
+      arg1: buffer size
+    Returns: buffer pointer on success, or negative errno.
+    """
+    val buf_ptr = args.arg0 as u64
+    val buf_size = args.arg1 as u64
+    if buf_size < 2:
+        return SyscallResult(value: -34)
+    if not vmm_verify_user_write(buf_ptr, buf_size):
+        return SyscallResult(value: -14)
+    mmio_write8(buf_ptr, 0x2F)          # '/'
+    mmio_write8(buf_ptr + 1, 0x00)      # null terminator
+    SyscallResult(value: buf_ptr as i64)
+
+fn _handle_chdir(args: SyscallArgs, scheduler: Scheduler) -> SyscallResult:
+    """Change current working directory.
+
+    Args:
+      arg0: path pointer (userspace)
+      arg1: path length
+    """
+    val path_ptr = args.arg0 as u64
+    val path_len = args.arg1 as u64
+    if path_ptr == 0 or path_len == 0 or path_len > MAX_BINARY_PATH_LEN:
+        return SyscallResult(value: -22)
+    SyscallResult(value: 0)

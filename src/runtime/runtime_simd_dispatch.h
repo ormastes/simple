@@ -128,26 +128,18 @@ static inline RtCoreStringSimd* simd_as_string(int64_t value) {
  *   Bits [31:30] = flags:
  *     00 = uncached
  *     01 = codepoint-count cached
- *     10 = is-ASCII flag set (value in bit 29)
+ *     10 = is-ASCII (positive-only: string is all-ASCII)
  *     11 = both cached
  *   Bits [29:0]  = codepoint count (max ~1 billion)
  *
- * Bit 31 = "is-ASCII known" flag
- * Bit 30 = "cp-count known" flag
- * Bit 29 = ASCII value (1=all-ASCII, 0=not all-ASCII) when bit 31 set
- * Bits [28:0] = codepoint count when bit 30 set (max ~536 million)
- *
- * Revised layout (cleaner separation):
- *   Bit 31     = is-ASCII validity flag
- *   Bit 30     = cp-count validity flag
- *   Bit 29     = is-ASCII value (meaningful only when bit 31 = 1)
- *   Bits [28:0] = codepoint count (meaningful only when bit 30 = 1)
+ * Bit 31 = is-ASCII flag (set = all-ASCII; clear = unknown/non-ASCII)
+ * Bit 30 = cp-count-cached flag
+ * Bits [29:0] = codepoint count (meaningful only when bit 30 = 1)
  * ================================================================ */
 
-#define SIMD_CACHE_FLAG_ASCII_VALID   (1U << 31)
+#define SIMD_CACHE_FLAG_IS_ASCII      (1U << 31)
 #define SIMD_CACHE_FLAG_CPCOUNT_VALID (1U << 30)
-#define SIMD_CACHE_FLAG_ASCII_VALUE   (1U << 29)
-#define SIMD_CACHE_CPCOUNT_MASK       0x1FFFFFFFU  /* bits [28:0] */
+#define SIMD_CACHE_CPCOUNT_MASK       0x3FFFFFFFU  /* bits [29:0] */
 
 /* ================================================================
  * SimdTextDispatch — function-pointer table for text operations

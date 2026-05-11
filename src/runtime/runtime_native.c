@@ -1109,19 +1109,15 @@ int64_t rt_str_cached_cp_count(RtCoreString* s) {
 
 void rt_str_set_ascii_flag(RtCoreString* s, int is_ascii) {
     if (!s) return;
-    uint32_t r = s->reserved;
-    r |= SIMD_CACHE_FLAG_ASCII_VALID;
     if (is_ascii)
-        r |= SIMD_CACHE_FLAG_ASCII_VALUE;
-    else
-        r &= ~SIMD_CACHE_FLAG_ASCII_VALUE;
-    s->reserved = r;
+        s->reserved |= SIMD_CACHE_FLAG_IS_ASCII;
+    /* Non-ASCII: don't cache (positive-only flag per spec) */
 }
 
 int rt_str_is_ascii_cached(RtCoreString* s) {
     if (!s) return -1;
-    if (!(s->reserved & SIMD_CACHE_FLAG_ASCII_VALID)) return -1;
-    return (s->reserved & SIMD_CACHE_FLAG_ASCII_VALUE) ? 1 : 0;
+    if (s->reserved & SIMD_CACHE_FLAG_IS_ASCII) return 1;
+    return -1; /* unknown (could be ASCII or not) */
 }
 
 /* ================================================================

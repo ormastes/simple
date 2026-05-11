@@ -31,6 +31,7 @@ typedef struct {
 
 typedef struct SegmentedWidthIndex {
     SwiEntry* entries;
+    const uint8_t* data;   /* pointer to original string data (not owned) */
     uint64_t  count;       /* number of segment entries */
     uint64_t  total_bytes; /* total byte length of string */
     uint64_t  total_chars; /* total codepoint count */
@@ -56,6 +57,7 @@ SegmentedWidthIndex* rt_swi_build(int64_t value) {
     idx->entries = (SwiEntry*)malloc(seg_count * sizeof(SwiEntry));
     if (!idx->entries) { free(idx); return NULL; }
 
+    idx->data = data;
     idx->total_bytes = len;
     uint64_t char_count = 0;
     uint64_t entry_idx = 0;
@@ -110,15 +112,21 @@ int64_t rt_swi_char_to_byte(SegmentedWidthIndex* idx, int64_t char_offset) {
             hi = mid - 1;
     }
 
-    /* lo is the segment — now scan forward from entries[lo] */
-    /* (This is a stub — Wave 2 will use the dispatch table for scanning) */
-    (void)lo;
+    /* Linear scan from segment start to target char offset */
+    uint64_t byte_pos = idx->entries[lo].byte_offset;
+    uint64_t char_pos = idx->entries[lo].char_offset;
+    uint64_t target = (uint64_t)char_offset;
 
-    /* Simple linear scan from segment start */
-    /* TODO: optimize with SIMD in Wave 2 */
-    return (int64_t)idx->entries[lo].byte_offset;
-    /* NOTE: this returns the segment start, not the exact byte.
-     * Full implementation would scan from segment start to char_offset. */
+    while (char_pos < target && byte_pos < idx->total_bytes) {
+        uint8_t b = idx->data[byte_pos];
+        if (b < 0x80)        byte_pos += 1;
+        else if ((b & 0xE0) == 0xC0) byte_pos += 2;
+        else if ((b & 0xF0) == 0xE0) byte_pos += 3;
+        else if ((b & 0xF8) == 0xF0) byte_pos += 4;
+        else                  byte_pos += 1;
+        char_pos++;
+    }
+    return (int64_t)byte_pos;
 }
 
 /*
@@ -142,9 +150,21 @@ int64_t rt_swi_byte_to_char(SegmentedWidthIndex* idx, int64_t byte_offset) {
             hi = mid - 1;
     }
 
-    /* Return segment's char offset as approximation.
-     * Full implementation would scan from segment start. */
-    return (int64_t)idx->entries[lo].char_offset;
+    /* Linear scan from segment start to target byte offset */
+    uint64_t byte_pos = idx->entries[lo].byte_offset;
+    uint64_t char_pos = idx->entries[lo].char_offset;
+    uint64_t target = (uint64_t)byte_offset;
+
+    while (byte_pos < target && byte_pos < idx->total_bytes) {
+        uint8_t b = idx->data[byte_pos];
+        if (b < 0x80)        byte_pos += 1;
+        else if ((b & 0xE0) == 0xC0) byte_pos += 2;
+        else if ((b & 0xF0) == 0xE0) byte_pos += 3;
+        else if ((b & 0xF8) == 0xF0) byte_pos += 4;
+        else                  byte_pos += 1;
+        char_pos++;
+    }
+    return (int64_t)char_pos;
 }
 
 /*

@@ -1,0 +1,493 @@
+# G11/G12/G13/SOSIX/SPM Syscall Handlers — split from syscall.spl.
+# Contains _handle_privctl, _handle_mem_grant/_revoke,
+# _handle_safecopy_from/_to, g_current_vmspace, TaskBrkEntry,
+# _handle_brk_for_task, _handle_sys_mmap/_munmap, _handle_system_reboot,
+# SOSIX dataset/queue handlers, and SPM handlers.
+
+use os.kernel.types.syscall_types.{SyscallArgs, SyscallResult}
+use os.kernel.types.task_types.{TaskId}
+use os.kernel.types.vmspace_types.{ProcessVmSpace, VMA_READ, VMA_WRITE, VMA_ANON, VMA_FILE, VMA_SHARED}
+use os.kernel.scheduler.scheduler.{Scheduler}
+use os.kernel.memory.vmm.{vmm_mmap, vmm_munmap, vmm_new_process_space, vmm_cache_file_backing, vmm_copyin_bytes_from_space, vmm_copy_bytes_result_ok, VmmCopyBytesResult}
+use os.kernel.memory.vmm.{PAGE_SIZE}
+use os.kernel.arch.hal.{hal_system_reset}
+use os.kernel.ipc.capability.{PrivilegeTable, GrantTable, _vma_range_readable, register_task_vmspace, task_vmspace_of}
+use os.kernel.types.capability_types.{PrivilegeMask, Grant, PRIVCTL_SET_MASK, PRIVCTL_GET_MASK, PRIVCTL_ADD_PEER, PRIVCTL_REMOVE_PEER, PRIVCTL_SET_MASK_FULL}
+use os.kernel.ipc.spm_port.{spm_port_send, spm_port_listen, spm_port_is_registered}
+use os.kernel.ipc.spm_claim.{spm_claim_for_task}
+use os.kernel.ipc.shared_dataset.{SharedDatasetRead, shared_dataset_create, shared_dataset_write, shared_dataset_seal, shared_dataset_close, shared_dataset_read, shared_dataset_is_sealed}
+use os.kernel.ipc.process_queue.{ProcessQueueRecv, PROCESS_QUEUE_NO_HANDLE, process_queue_create, process_queue_send, process_queue_recv, process_queue_poll, process_queue_close}
+use os.kernel.privilege.privilege_bridge.{bridge_lookup, two_gate_check}
+use os.posix.fd_io.{PosixPreadExactBytes, posix_pread_exact_bytes}
+use os.kernel.boot.mmio.{mmio_write8, mmio_write64}
+use os.posix.errno.{EIO}
+use os.kernel.ipc.syscall.{USER_BRK_BASE, USER_BRK_LIMIT, _current_brk, _is_userspace_range, NULL_GUARD_LIMIT}
+
+# ============================================================================
+# G11 — sys_privctl handler
+# ============================================================================
+
+var _priv_table: PrivilegeTable = PrivilegeTable.new()
+
+fn _handle_privctl(args: SyscallArgs, scheduler: Scheduler) -> SyscallResult:
+    """sys_privctl — read/write per-task privilege mask."""
+    val target_id = args.arg0.to_u32()
+    val op = args.arg1.to_u32()
+    val data = args.arg2
+
+    if op == PRIVCTL_SET_MASK:
+        val mask = PrivilegeMask(
+            kernel_calls: data,
+            irqs: 0,
+            io_port_base: 0,
+            io_port_len: 0,
+            allowed_peers: []
+        )
+        _priv_table.set(target_id, mask)
+        SyscallResult(value: 0)
+    else:
+        if op == PRIVCTL_GET_MASK:
+            val found = _priv_table.get(target_id)
+            if found == nil:
+                SyscallResult(value: -1)
+            else:
+                val m = found
+                SyscallResult(value: m.kernel_calls.to_i64())
+        else:
+            if op == PRIVCTL_ADD_PEER:
+                _priv_table.add_peer(target_id, data.to_u32())
+                SyscallResult(value: 0)
+            else:
+                if op == PRIVCTL_REMOVE_PEER:
+                    _priv_table.remove_peer(target_id, data.to_u32())
+                    SyscallResult(value: 0)
+                else:
+                    if op == PRIVCTL_SET_MASK_FULL:
+                        _handle_privctl_set_mask_full(target_id, data, args.arg3)
+                    else:
+                        SyscallResult(value: -1)
+
+fn _privmask_read_le_u16(data: [u8], off: i64) -> u16:
+    ((data[off] as i64) | ((data[off + 1] as i64) << 8)).to_u16()
+
+fn _privmask_read_le_u32(data: [u8], off: i64) -> u32:
+    ((data[off] as i64) | ((data[off + 1] as i64) << 8) |
+     ((data[off + 2] as i64) << 16) | ((data[off + 3] as i64) << 24)).to_u32()
+
+fn _privmask_read_le_u64(data: [u8], off: i64) -> u64:
+    val lo = _privmask_read_le_u32(data, off)
+    val hi = _privmask_read_le_u32(data, off + 4)
+    (lo as u64) | ((hi as u64) << 32)
+
+fn _handle_privctl_set_mask_full(target_id: u32, ptr: u64, len: u64) -> SyscallResult:
+    """Marshal a full PrivilegeMask from userspace struct."""
+    if len < 20:
+        return SyscallResult(value: -22)
+    val bytes = _copy_in_bytes(ptr, len)
+    if bytes.len() == 0:
+        return SyscallResult(value: -14)
+    val kernel_calls = _privmask_read_le_u64(bytes, 0)
+    val irqs = _privmask_read_le_u64(bytes, 8)
+    val io_port_base = _privmask_read_le_u16(bytes, 16)
+    val io_port_len = _privmask_read_le_u16(bytes, 18)
+    var peers: [u32] = []
+    var off: i64 = 20
+    while off + 4 <= bytes.len():
+        peers.push(_privmask_read_le_u32(bytes, off))
+        off = off + 4
+    val mask = PrivilegeMask(
+        kernel_calls: kernel_calls,
+        irqs: irqs,
+        io_port_base: io_port_base,
+        io_port_len: io_port_len,
+        allowed_peers: peers
+    )
+    _priv_table.set(target_id, mask)
+    SyscallResult(value: 0)
+
+# ============================================================================
+# G12 — sys_grant / sys_revoke / sys_safecopy_from / sys_safecopy_to handlers
+# ============================================================================
+
+var _grant_table: GrantTable = GrantTable.new()
+
+fn _handle_mem_grant(args: SyscallArgs, scheduler: Scheduler) -> SyscallResult:
+    """sys_grant — create a memory region grant from caller to grantee."""
+    var sched = scheduler
+    val caller = sched.get_current()
+    val grantee = args.arg0.to_u32()
+    val vaddr = args.arg1
+    val len = args.arg2
+    val flags = args.arg3.to_u32()
+
+    if len == 0:
+        return SyscallResult(value: -1)
+
+    val gid = _grant_table.cap_grant(caller.id.to_u32(), grantee, vaddr, len, flags)
+    SyscallResult(value: gid.to_i64())
+
+fn _handle_mem_revoke(args: SyscallArgs, scheduler: Scheduler) -> SyscallResult:
+    """sys_revoke — revoke a previously issued grant."""
+    var sched = scheduler
+    val caller = sched.get_current()
+    val grant_id = args.arg0.to_u32()
+
+    val found = _grant_table.find_valid(grant_id, caller.id.to_u32())
+    val ok = _grant_revoke_by_grantor(grant_id, caller.id.to_u32())
+    if ok:
+        SyscallResult(value: 0)
+    else:
+        SyscallResult(value: -1)
+
+fn _grant_revoke_by_grantor(grant_id: u32, grantor: u32) -> bool:
+    """Revoke a grant only if it belongs to the given grantor."""
+    var idx = 0
+    while idx < _grant_table.grants.len():
+        var g = _grant_table.grants[idx]
+        if g.id == grant_id:
+            if g.grantor == grantor:
+                if g.valid:
+                    g.valid = false
+                    _grant_table.grants[idx] = g
+                    return true
+            return false
+        idx = idx + 1
+    false
+
+fn _handle_safecopy_from(args: SyscallArgs, scheduler: Scheduler) -> SyscallResult:
+    """sys_safecopy_from — bounds-checked copy from grantor's region to caller."""
+    var sched = scheduler
+    val caller = sched.get_current()
+    val grant_id = args.arg1.to_u32()
+    val src_off = args.arg2
+    val dst_vaddr = args.arg3
+    val len = args.arg4
+
+    val rc = _grant_table.safecopy_from(caller.id.to_u32(), grant_id, src_off, dst_vaddr, len)
+    SyscallResult(value: rc.to_i64())
+
+fn _handle_safecopy_to(args: SyscallArgs, scheduler: Scheduler) -> SyscallResult:
+    """sys_safecopy_to — bounds-checked copy from caller's buffer to grantee's region."""
+    var sched = scheduler
+    val caller = sched.get_current()
+    val grant_id = args.arg1.to_u32()
+    val dst_off = args.arg2
+    val src_vaddr = args.arg3
+    val len = args.arg4
+
+    val rc = _grant_table.safecopy_to(caller.id.to_u32(), grant_id, dst_off, src_vaddr, len)
+    SyscallResult(value: rc.to_i64())
+
+# ============================================================================
+# VM mmap / munmap handlers (Wave 1 G13 — syscall IDs 103 / 104)
+# ============================================================================
+
+var g_current_vmspace: ProcessVmSpace = vmm_new_process_space(0, 0)
+
+fn syscall_current_vmspace() -> ProcessVmSpace:
+    """Return the current task's virtual address space for ISR dispatch."""
+    g_current_vmspace
+
+struct TaskBrkEntry:
+    """Per-task program break state."""
+    task_id: u64
+    current: u64
+
+var _task_brks: [TaskBrkEntry] = []
+
+fn _align_brk_up(value: u64) -> u64:
+    if value % PAGE_SIZE == 0:
+        return value
+    ((value / PAGE_SIZE) + 1) * PAGE_SIZE
+
+fn brk_reset_for_test():
+    """Reset the process break model for isolated specs."""
+    _current_brk = USER_BRK_BASE
+    _task_brks = []
+
+fn _handle_brk(args: SyscallArgs) -> SyscallResult:
+    _handle_brk_for_task(args, 0)
+
+fn _find_task_brk_slot(task_id: u64) -> i32:
+    var i = 0
+    while i < _task_brks.len():
+        if _task_brks[i].task_id == task_id:
+            return i
+        i = i + 1
+    -1
+
+fn _task_brk_current(task_id: u64) -> u64:
+    val slot = _find_task_brk_slot(task_id)
+    if slot < 0:
+        return USER_BRK_BASE
+    _task_brks[slot].current
+
+fn _task_brk_set(task_id: u64, value: u64):
+    val slot = _find_task_brk_slot(task_id)
+    if slot >= 0:
+        var entry = _task_brks[slot]
+        entry.current = value
+        _task_brks[slot] = entry
+        return
+    _task_brks.push(TaskBrkEntry(task_id: task_id, current: value))
+
+fn _handle_brk_for_task(args: SyscallArgs, task_id: u64) -> SyscallResult:
+    """brk — query or grow the current process break.
+
+    arg0=0 returns the current break. A non-zero arg0 requests a new break.
+    This MVP path supports monotonic growth only; shrinking returns -EINVAL.
+    """
+    val requested = args.arg0
+    val current_brk = _task_brk_current(task_id)
+    if requested == 0:
+        return SyscallResult(value: current_brk as i64)
+    if requested < USER_BRK_BASE:
+        return SyscallResult(value: -22)
+    if requested < current_brk:
+        return SyscallResult(value: -22)
+    if requested > USER_BRK_LIMIT:
+        return SyscallResult(value: -12)
+    if requested == current_brk:
+        return SyscallResult(value: current_brk as i64)
+
+    val old_page = _align_brk_up(current_brk)
+    val new_page = _align_brk_up(requested)
+    if new_page > old_page:
+        val len = new_page - old_page
+        var map_space = g_current_vmspace
+        var mapped_registered_space = false
+        if task_id != 0:
+            val registered_space = task_vmspace_of(task_id.to_u32())
+            if registered_space != nil:
+                map_space = registered_space
+                mapped_registered_space = true
+        val rc = vmm_mmap(map_space, old_page, len, VMA_READ | VMA_WRITE, VMA_ANON, 0, 0)
+        if rc < 0:
+            return SyscallResult(value: rc)
+        if mapped_registered_space:
+            register_task_vmspace(task_id.to_u32(), map_space)
+        else:
+            g_current_vmspace = map_space
+    _task_brk_set(task_id, requested)
+    if task_id == 0:
+        _current_brk = requested
+    SyscallResult(value: requested as i64)
+
+fn _handle_system_reboot(args: SyscallArgs) -> SyscallResult:
+    """Reset the current machine through the platform HAL."""
+    _ = args
+    SyscallResult(value: hal_system_reset())
+
+fn _handle_sys_mmap(args: SyscallArgs, task_id: u64) -> SyscallResult:
+    """sys_mmap — map a virtual address range into the calling task's space."""
+    val vaddr          = args.arg0
+    val len            = args.arg1
+    val flags          = args.arg2.to_u32()
+    val kind           = args.arg3.to_u32()
+    val backing        = args.arg4
+    val backing_offset = args.arg5
+    var map_space = g_current_vmspace
+    var used_registered = false
+    val registered = task_vmspace_of(task_id.to_u32())
+    if registered != nil:
+        map_space = registered
+        used_registered = true
+    val rc = vmm_mmap(map_space, vaddr, len, flags, kind, backing, backing_offset)
+    if rc >= 0:
+        if kind == VMA_FILE and backing != 0:
+            val file_read = posix_pread_exact_bytes(backing as i32, backing_offset, len)
+            if file_read.status >= 0:
+                vmm_cache_file_backing(backing, file_read.data)
+        if used_registered:
+            register_task_vmspace(task_id.to_u32(), map_space)
+        else:
+            g_current_vmspace = map_space
+    SyscallResult(value: rc)
+
+fn _handle_sys_munmap(args: SyscallArgs, task_id: u64) -> SyscallResult:
+    """sys_munmap — unmap a virtual address range from the calling task's space."""
+    val vaddr = args.arg0
+    val len   = args.arg1
+    var map_space = g_current_vmspace
+    var used_registered = false
+    val registered = task_vmspace_of(task_id.to_u32())
+    if registered != nil:
+        map_space = registered
+        used_registered = true
+    val rc = vmm_munmap(map_space, vaddr, len)
+    if rc == 0:
+        if used_registered:
+            register_task_vmspace(task_id.to_u32(), map_space)
+        else:
+            g_current_vmspace = map_space
+    SyscallResult(value: rc.to_i64())
+
+# ============================================================================
+# SOSIX immutable sharing handlers — syscall IDs 120 / 131
+# ============================================================================
+
+fn _handle_dataset_create(args: SyscallArgs) -> SyscallResult:
+    """dataset_create(size, flags) -> dataset handle."""
+    SyscallResult(value: shared_dataset_create(args.arg0, args.arg1.to_u32()))
+
+fn _handle_dataset_create_from_file(args: SyscallArgs) -> SyscallResult:
+    """dataset_create_from_file(fd, offset, len, flags) -> sealed handle."""
+    val read_result: PosixPreadExactBytes = posix_pread_exact_bytes(args.arg0 as i32, args.arg1, args.arg2)
+    if read_result.status < 0:
+        return SyscallResult(value: read_result.status)
+
+    val handle = shared_dataset_create(read_result.len, args.arg3.to_u32())
+    if handle < 0:
+        return SyscallResult(value: handle)
+    val write_rc = shared_dataset_write(handle as u64, 0, read_result.data)
+    if write_rc < 0:
+        shared_dataset_close(handle as u64)
+        return SyscallResult(value: write_rc)
+    if write_rc != read_result.len as i64:
+        shared_dataset_close(handle as u64)
+        return SyscallResult(value: 0 - EIO as i64)
+    val seal_rc = shared_dataset_seal(handle as u64)
+    if seal_rc < 0:
+        shared_dataset_close(handle as u64)
+        return SyscallResult(value: seal_rc)
+    SyscallResult(value: handle)
+
+fn _handle_dataset_write(args: SyscallArgs) -> SyscallResult:
+    """dataset_write(handle, offset, user_ptr, len)."""
+    val bytes = _copy_in_bytes(args.arg2, args.arg3)
+    if args.arg3 != 0 and bytes.len() == 0:
+        return SyscallResult(value: -22)
+    SyscallResult(value: shared_dataset_write(args.arg0, args.arg1, bytes))
+
+fn _handle_dataset_seal(args: SyscallArgs) -> SyscallResult:
+    """dataset_seal(handle)."""
+    SyscallResult(value: shared_dataset_seal(args.arg0))
+
+fn _handle_dataset_map(args: SyscallArgs) -> SyscallResult:
+    """dataset_map(handle, addr_hint, offset, len) -> mapped vaddr."""
+    val probe: SharedDatasetRead = shared_dataset_read(args.arg0, args.arg2, args.arg3)
+    if probe.status < 0:
+        return SyscallResult(value: probe.status)
+    val rc = vmm_mmap(g_current_vmspace, args.arg1, args.arg3, VMA_READ, VMA_SHARED, args.arg0, args.arg2)
+    SyscallResult(value: rc)
+
+fn _handle_dataset_unmap(args: SyscallArgs) -> SyscallResult:
+    """dataset_unmap(vaddr, len)."""
+    val rc = vmm_munmap(g_current_vmspace, args.arg0, args.arg1)
+    SyscallResult(value: rc.to_i64())
+
+fn _handle_dataset_close(args: SyscallArgs) -> SyscallResult:
+    """dataset_close(handle)."""
+    SyscallResult(value: shared_dataset_close(args.arg0))
+
+fn _handle_queue_create(args: SyscallArgs) -> SyscallResult:
+    """queue_create(capacity, max_msg_bytes, flags)."""
+    SyscallResult(value: process_queue_create(args.arg0, args.arg1, args.arg2.to_u32()))
+
+fn _handle_queue_send(args: SyscallArgs) -> SyscallResult:
+    """queue_send(queue, user_ptr, len, attached_handle)."""
+    val bytes = _copy_in_bytes(args.arg1, args.arg2)
+    if args.arg2 != 0 and bytes.len() == 0:
+        return SyscallResult(value: -22)
+    if args.arg3 != PROCESS_QUEUE_NO_HANDLE:
+        if not shared_dataset_is_sealed(args.arg3):
+            return SyscallResult(value: -22)
+    SyscallResult(value: process_queue_send(args.arg0, bytes, args.arg3))
+
+fn _handle_queue_recv(args: SyscallArgs) -> SyscallResult:
+    """queue_recv(queue, out_ptr, out_len, out_attached_ptr)."""
+    val recv: ProcessQueueRecv = process_queue_recv(args.arg0)
+    if recv.status <= 0:
+        return SyscallResult(value: recv.status)
+    var copied: u64 = 0
+    while copied < recv.len and copied < args.arg2:
+        mmio_write8(args.arg1 + copied, recv.data[copied])
+        copied = copied + 1
+    if args.arg3 != 0:
+        mmio_write64(args.arg3, recv.attached_handle)
+    SyscallResult(value: copied as i64)
+
+fn _handle_queue_poll(args: SyscallArgs) -> SyscallResult:
+    """queue_poll(queue)."""
+    SyscallResult(value: process_queue_poll(args.arg0) as i64)
+
+fn _handle_queue_close(args: SyscallArgs) -> SyscallResult:
+    """queue_close(queue, mode)."""
+    SyscallResult(value: process_queue_close(args.arg0, args.arg1.to_u32()))
+
+# ============================================================================
+# SPM / Privilege Syscall Handlers (spm-winfs-llm-suite)
+# ============================================================================
+
+fn _copy_in_bytes(ptr: u64, len: u64) -> [u8]:
+    """Copy `len` bytes from caller's user-VA `ptr` into a kernel-owned [u8]."""
+    if ptr == 0 as u64 or len == 0 as u64:
+        return []
+    if ptr + len < ptr:
+        return []
+    if g_current_vmspace.vma_count > 0 as u64:
+        if not _vma_range_readable(g_current_vmspace, ptr, len):
+            return []
+    if g_current_vmspace.pml4 != 0 as u64:
+        val copied: VmmCopyBytesResult = vmm_copyin_bytes_from_space(g_current_vmspace, ptr, len)
+        if not vmm_copy_bytes_result_ok(copied):
+            return []
+        return copied.bytes
+    unsafe:
+        val base = ptr as *const u8
+        var bytes: [u8] = []
+        var i: u64 = 0
+        while i < len:
+            val byte_ptr = (base + (i as i64)) as *const u8
+            bytes.push(*byte_ptr)
+            i = i + 1
+        bytes
+
+fn spm_priv_check_for_task(task_id: u64, id_path: [u8]) -> bool:
+    """Evaluate sys_priv_check for an already-copied id-path."""
+    if id_path.len() == 0:
+        return false
+    val mirror = bridge_lookup(task_id)
+    two_gate_check(mirror, id_path)
+
+fn _handle_spm_priv_check(args: SyscallArgs, caller_task_id: u64) -> SyscallResult:
+    """sys_priv_check (110) — hierarchical privilege gate."""
+    val id_path = _copy_in_bytes(args.arg0, args.arg1)
+    if spm_priv_check_for_task(caller_task_id, id_path):
+        return SyscallResult(value: 1 as i64)
+    SyscallResult(value: 0 as i64)
+
+fn _handle_spm_win_register(args: SyscallArgs) -> SyscallResult:
+    """sys_win_register (111) — register WindowRecord with SPM."""
+    if not spm_port_is_registered():
+        return SyscallResult(value: -1 as i64)
+    val record = _copy_in_bytes(args.arg0, args.arg1)
+    spm_port_send(record)
+    SyscallResult(value: 0 as i64)
+
+fn _handle_spm_approval_request(args: SyscallArgs) -> SyscallResult:
+    """sys_approval_request (112) — brokered approval via SPM."""
+    if not spm_port_is_registered():
+        return SyscallResult(value: -1 as i64)
+    val intent = _copy_in_bytes(args.arg0, args.arg1)
+    val resp = spm_port_send(intent)
+    SyscallResult(value: resp.len() as i64)
+
+fn _handle_spm_send(args: SyscallArgs) -> SyscallResult:
+    """sys_spm_send (113) — generic SPM RPC send."""
+    if not spm_port_is_registered():
+        return SyscallResult(value: -1 as i64)
+    val req = _copy_in_bytes(args.arg0, args.arg1)
+    val resp = spm_port_send(req)
+    SyscallResult(value: resp.len() as i64)
+
+fn _handle_spm_listen(args: SyscallArgs) -> SyscallResult:
+    """sys_spm_listen (114) — SPM-side non-blocking dequeue."""
+    if not spm_port_is_registered():
+        return SyscallResult(value: -1 as i64)
+    val req = spm_port_listen()
+    SyscallResult(value: req.len() as i64)
+
+fn _handle_spm_claim(caller_task_id: u64) -> SyscallResult:
+    """sys_spm_claim (115) — rebind the boot placeholder SPM port."""
+    SyscallResult(value: spm_claim_for_task(caller_task_id))
