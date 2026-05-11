@@ -317,35 +317,92 @@ fn encode_avx512_fma_f32x16(dest: i64, src1: i64, src2: i64, kmask: i64, z: bool
 
 fn encode_avx512_mask_op_f32x16(dest: i64, src1: i64, src2: i64, kmask: i64, z: bool, base_opcode: i64) -> [i64]:
     """
-    Scaffold: generic masked SIMD op on ZMM registers.
+    Generic masked SIMD op on ZMM registers (VADDPS/VMULPS/etc with opmask).
     MachOpcode: SimdZmmMaskAdd (and other SimdZmmMask* variants)
-    M1 fills per simd_backend_strict_emit_detail_part1.md §3.
+    Encoding: EVEX.512.0F.W0 <base_opcode> /r with opmask
     """
-    # TODO: unimplemented placeholder — scaffold returns stub encoding
-    evex_encode_3op_zmm_scaffold(dest, src1, src2, kmask, z, base_opcode)
+    val d  = zmm_to_index(dest)
+    val s1 = zmm_to_index(src1)
+    val s2 = zmm_to_index(src2)
+    val k  = kreg_to_index(kmask)
+    evex_encode_3op_zmm(d, s1, s2, k, z, 1, 0, 0, base_opcode)
 
 # ============================================================================
-# AVX-512 Load / Store Instructions (scaffold)
+# EVEX Memory-Form Encoder (ZMM ↔ [base + disp])
+# ============================================================================
+
+fn evex_encode_mem_zmm(zmm_idx: i64, base_gpr: i64, disp: i64, kmask_idx: i64, z: bool, mm: i64, w: i64, pp: i64, opcode: i64) -> [i64]:
+    """
+    EVEX memory-form encoder for ZMM load/store instructions.
+    zmm_idx   : ZMM register index 0-31 (dest for load, src for store)
+    base_gpr  : GPR base register index 0-15
+    disp      : byte displacement (raw, unscaled)
+    disp8*64 compression: disp/64 in -128..127 uses mod=01 (1-byte disp).
+    """
+    val r_bit   = (zmm_idx  / 8)  % 2
+    val r_prime = (zmm_idx  / 16) % 2
+    val b_bit   = (base_gpr / 8)  % 2
+    val not_r   = 1 - r_bit
+    val not_b   = 1 - b_bit
+    val not_rp  = 1 - r_prime
+    val mm_m2 = (mm / 4) % 2
+    val mm_m1 = (mm / 2) % 2
+    val mm_m0 = mm       % 2
+    val p0 = (not_r  * 128) + (1 * 64) + (not_b * 32) + (not_rp * 16) + (mm_m2 * 4) + (mm_m1 * 2) + mm_m0
+
+    val not_vvvv = 15
+    val pp_hi = (pp / 2) % 2
+    val pp_lo = pp       % 2
+    val p1 = (w * 128) + (not_vvvv * 8) + 4 + (pp_hi * 2) + pp_lo
+
+    val z_bit = if z: 1 else: 0
+    val aaa   = kmask_idx % 8
+    val p2 = (z_bit * 128) + 64 + aaa
+
+    val reg_lo  = zmm_idx  % 8
+    val base_lo = base_gpr % 8
+    val disp_scaled = disp / 64
+    val disp_rem    = disp % 64
+    if disp == 0 and base_lo != 5:
+        val modrm = (reg_lo * 8) + base_lo
+        [0x62, p0, p1, p2, opcode % 256, modrm]
+    else if (disp_rem == 0) and (disp_scaled >= -128) and (disp_scaled <= 127):
+        val modrm = 64 + (reg_lo * 8) + base_lo
+        val d8 = disp_scaled % 256
+        [0x62, p0, p1, p2, opcode % 256, modrm, d8]
+    else:
+        val modrm = 128 + (reg_lo * 8) + base_lo
+        val d0 = disp              % 256
+        val d1 = (disp / 256)      % 256
+        val d2 = (disp / 65536)    % 256
+        val d3 = (disp / 16777216) % 256
+        [0x62, p0, p1, p2, opcode % 256, modrm, d0, d1, d2, d3]
+
+# ============================================================================
+# AVX-512 Load / Store Instructions
 # ============================================================================
 
 fn encode_avx512_load_zmm(dest: i64, base_reg: i64, offset: i64, kmask: i64, z: bool) -> [i64]:
     """
-    Scaffold: VMOVAPS zmm_dest{kmask}{z}, [base_reg + offset]
+    VMOVAPS zmm_dest{kmask}{z}, [base_reg + offset]
+    Encoding: EVEX.512.0F.W0 28 /r (memory form)
     MachOpcode: SimdZmmLoad
-    M1 fills per simd_backend_strict_emit_detail_part1.md §3 (EVEX load with disp8*64).
+    disp8*64 compression: offset must be multiple of 64 for disp8 form.
     """
-    # TODO: unimplemented placeholder — scaffold returns stub encoding
-    []
+    val d  = zmm_to_index(dest)
+    val k  = kreg_to_index(kmask)
+    evex_encode_mem_zmm(d, base_reg, offset, k, z, 1, 0, 0, 0x28)
 
 fn encode_avx512_store_zmm(src: i64, base_reg: i64, offset: i64, kmask: i64) -> [i64]:
     """
-    Scaffold: VMOVAPS [base_reg + offset]{kmask}, zmm_src
+    VMOVAPS [base_reg + offset]{kmask}, zmm_src
+    Encoding: EVEX.512.0F.W0 29 /r (memory form)
     MachOpcode: SimdZmmStore
-    M1 fills per simd_backend_strict_emit_detail_part1.md §3.
-    Note: store uses kmask for merge-masking; z-bit not applicable.
+    Store uses kmask for merge-masking; z-bit not applicable (always false).
     """
-    # TODO: unimplemented placeholder — scaffold returns stub encoding
-    []
+    val s  = zmm_to_index(src)
+    val k  = kreg_to_index(kmask)
+    evex_encode_mem_zmm(s, base_reg, offset, k, false, 1, 0, 0, 0x29)
 
 # ============================================================================
 # EVEX VSIB Encoder — gather/scatter memory operand form
@@ -581,43 +638,52 @@ fn emit_avx512_vscatterdps_zmm(kmask: i64, zindex: i64, base_gpr: i64, scale: i6
 
 fn encode_avx512_kand(dest_k: i64, src1_k: i64, src2_k: i64) -> [i64]:
     """
-    Scaffold: KANDW k_dest, k_src1, k_src2  (16-bit mask AND)
+    KANDW k_dest, k_src1, k_src2  (16-bit mask AND)
     MachOpcode: SimdZmmKand
-    M1 fills per simd_backend_strict_emit_detail_part1.md §3.
-    VEX-encoded (not EVEX): VEX.L1.0F.W0 41 /r
+    VEX-encoded: VEX.L1.66.0F.W0 41 /r
     """
-    # TODO: unimplemented placeholder — scaffold returns stub encoding
-    []
+    val kd  = kreg_to_index(dest_k)
+    val ks1 = kreg_to_index(src1_k)
+    val ks2 = kreg_to_index(src2_k)
+    vex_encode_kreg_3op(0x41, kd, ks1, ks2, 1, 1)
 
 fn encode_avx512_kor(dest_k: i64, src1_k: i64, src2_k: i64) -> [i64]:
     """
-    Scaffold: KORW k_dest, k_src1, k_src2  (16-bit mask OR)
+    KORW k_dest, k_src1, k_src2  (16-bit mask OR)
     MachOpcode: SimdZmmKor
-    M1 fills per simd_backend_strict_emit_detail_part1.md §3.
-    VEX-encoded: VEX.L1.0F.W0 45 /r
+    VEX-encoded: VEX.L1.66.0F.W0 45 /r
     """
-    # TODO: unimplemented placeholder — scaffold returns stub encoding
-    []
+    val kd  = kreg_to_index(dest_k)
+    val ks1 = kreg_to_index(src1_k)
+    val ks2 = kreg_to_index(src2_k)
+    vex_encode_kreg_3op(0x45, kd, ks1, ks2, 1, 1)
 
 fn encode_avx512_kxor(dest_k: i64, src1_k: i64, src2_k: i64) -> [i64]:
     """
-    Scaffold: KXORW k_dest, k_src1, k_src2  (16-bit mask XOR)
+    KXORW k_dest, k_src1, k_src2  (16-bit mask XOR)
     MachOpcode: SimdZmmKxor
-    M1 fills per simd_backend_strict_emit_detail_part1.md §3.
-    VEX-encoded: VEX.L1.0F.W0 47 /r
+    VEX-encoded: VEX.L1.66.0F.W0 47 /r
     """
-    # TODO: unimplemented placeholder — scaffold returns stub encoding
-    []
+    val kd  = kreg_to_index(dest_k)
+    val ks1 = kreg_to_index(src1_k)
+    val ks2 = kreg_to_index(src2_k)
+    vex_encode_kreg_3op(0x47, kd, ks1, ks2, 1, 1)
 
 fn encode_avx512_knot(dest_k: i64, src_k: i64) -> [i64]:
     """
-    Scaffold: KNOTW k_dest, k_src  (16-bit mask NOT)
+    KNOTW k_dest, k_src  (16-bit mask NOT)
     MachOpcode: SimdZmmKnot
-    M1 fills per simd_backend_strict_emit_detail_part1.md §3.
     VEX-encoded: VEX.L0.0F.W0 44 /r
+    2-operand: vvvv=1111 (unused), ModRM: mod=11 reg=kdst rm=ksrc
     """
-    # TODO: unimplemented placeholder — scaffold returns stub encoding
-    []
+    val kd = kreg_to_index(dest_k)
+    val ks = kreg_to_index(src_k)
+    if kd == 0:
+        []
+    else:
+        val byte1 = 128 + 120 + 0 + 0
+        val modrm = 192 + ((kd % 8) * 8) + (ks % 8)
+        [0xC5, byte1, 0x44, modrm]
 
 # ============================================================================
 # AVX-512 Permute / Shuffle Instructions (scaffold)
@@ -625,23 +691,31 @@ fn encode_avx512_knot(dest_k: i64, src_k: i64) -> [i64]:
 
 fn encode_avx512_perm_f32x16(dest: i64, src: i64, ctrl: i64, kmask: i64, z: bool) -> [i64]:
     """
-    Scaffold: VPERMPS zmm_dest{kmask}{z}, zmm_ctrl, zmm_src
+    VPERMPS zmm_dest{kmask}{z}, zmm_ctrl, zmm_src
     MachOpcode: SimdZmmPerm
-    M1 fills per simd_backend_strict_emit_detail_part1.md §3.
-    EVEX.512.66.0F38.W0 16 /r
+    Encoding: EVEX.512.66.0F38.W0 16 /r
+    ctrl selects per-element indices; src provides the data.
     """
-    # TODO: unimplemented placeholder — scaffold returns stub encoding
-    []
+    val d  = zmm_to_index(dest)
+    val s  = zmm_to_index(src)
+    val c  = zmm_to_index(ctrl)
+    val k  = kreg_to_index(kmask)
+    evex_encode_3op_zmm(d, c, s, k, z, 2, 0, 1, 0x16)
 
 fn encode_avx512_shuffle_f32x16(dest: i64, src1: i64, src2: i64, imm: i64, kmask: i64, z: bool) -> [i64]:
     """
-    Scaffold: VSHUFF32x4 zmm_dest{kmask}{z}, zmm_src1, zmm_src2, imm8
+    VSHUFF32x4 zmm_dest{kmask}{z}, zmm_src1, zmm_src2, imm8
     MachOpcode: SimdZmmShuffle
-    M1 fills per simd_backend_strict_emit_detail_part1.md §3.
-    EVEX.512.66.0F3A.W0 23 /r ib
+    Encoding: EVEX.512.66.0F3A.W0 23 /r ib
+    imm8 selects 128-bit lanes from src1/src2.
     """
-    # TODO: unimplemented placeholder — scaffold returns stub encoding
-    []
+    val d  = zmm_to_index(dest)
+    val s1 = zmm_to_index(src1)
+    val s2 = zmm_to_index(src2)
+    val k  = kreg_to_index(kmask)
+    val prefix = evex_encode_3op_zmm(d, s1, s2, k, z, 3, 0, 1, 0x23)
+    prefix.push(imm % 256)
+    prefix
 
 # ============================================================================
 # EVEX encoder: ZMM × ZMM → k-reg result (VPCMPEQD family)

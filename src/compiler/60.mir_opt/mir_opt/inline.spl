@@ -105,6 +105,27 @@ impl InlineCostAnalyzer:
 
         size
 
+    fn _is_crypto_primitive(name: text) -> bool:
+        if name.ends_with("rotr32") or name.ends_with("rotl32"):
+            return true
+        if name.ends_with("shr32") or name.ends_with("add_mod32"):
+            return true
+        if name.ends_with("sha256_ch") or name.ends_with("sha256_maj"):
+            return true
+        if name.ends_with("sha256_sigma0") or name.ends_with("sha256_sigma1"):
+            return true
+        if name.ends_with("sha256_Sigma0") or name.ends_with("sha256_Sigma1"):
+            return true
+        if name.ends_with("_aes_sbox") or name.ends_with("_aes_rcon"):
+            return true
+        if name.ends_with("_xxh64_rotl") or name.ends_with("_xxh64_round"):
+            return true
+        if name.ends_with("rotate_left") or name.ends_with("rotate_right"):
+            return true
+        if name.ends_with("_b") or name.ends_with("_u8_at"):
+            return true
+        false
+
     fn should_inline(func: MirFunction, policy: InlinePolicy) -> bool:
         """
         Decide if function should be inlined.
@@ -113,8 +134,12 @@ impl InlineCostAnalyzer:
         1. Size threshold
         2. Recursion (never inline recursive)
         3. Policy
+        4. Crypto primitives are always inlined
         """
         val size = self.estimate_function_size(func)
+
+        if self._is_crypto_primitive(func.name):
+            return size <= self.threshold * 4
 
         # Never inline if too large
         if size > self.threshold * 2:
@@ -440,8 +465,9 @@ impl FunctionInlining:
                         val size = self.cost_analyzer.estimate_function_size(callee)
                         val should = self.cost_analyzer.should_inline(callee, self.policy)
                         val is_recursive = self.cost_analyzer.is_recursive(callee)
+                        val is_crypto = self.cost_analyzer._is_crypto_primitive(callee.name)
 
-                        if should and not is_recursive and callee.blocks.len() == 1:
+                        if should and not is_recursive and (callee.blocks.len() == 1 or is_crypto):
                             # Inline: create inliner and replace call with body
                             var inliner = FunctionInliner.new(func.locals.len() + 100)
                             val inlined_blocks = inliner.inline_call(

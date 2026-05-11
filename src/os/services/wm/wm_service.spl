@@ -37,12 +37,12 @@ use std.ecs.change_detection.{ChangeTracker}
 use std.ecs.system.{Scheduler}
 use std.ecs.world.{WorldBase}
 
-use os.kernel.log.klog_api.{log_raw_println}
+use os.services.wm.wm_world.{WmAction, wm_action_none, WindowOwner, WinId, OwnerPort, OwnerProcess, WinAppId, Title, Geometry, WindowState, WmWorld, WM_MAX_WINDOWS, WIN_STATE_NORMAL, WIN_STATE_MINIMIZED, WIN_STATE_MAXIMIZED}
+use os.services.wm.wm_codec.{wm_send_create_reply, wm_send_create_response, wm_send_status_reply, wm_send_error_reply, wm_notify_app_launched, _read_u8, _read_u32, _read_u64, _read_i32, _read_text, _push_u32, _push_i32, _push_u64, _ipc_send}
 
 # Syscall numbers — canonical values from src/os/kernel/ipc/syscall.spl
 # dispatcher cases 20..23. Keep in sync with test/unit/os/kernel/ipc/
 # syscall_number_consistency_spec.spl.
-val SYS_IPC_SEND: u64 = 20
 val SYS_IPC_RECV: u64 = 21
 val SYS_IPC_CREATE_PORT: u64 = 22
 val SYS_IPC_CONNECT: u64 = 23
@@ -50,315 +50,18 @@ val SYS_IPC_CONNECT: u64 = 23
 # Named port identifier for compositor discovery
 val WM_PORT_NAME: text = "compositor"
 
-# Maximum windows the WM will track
-val WM_MAX_WINDOWS: i32 = 256
-
 # Response status codes
 val STATUS_OK: i32 = 0
 val STATUS_ERR: i32 = -1
 val STATUS_INVALID: i32 = -3
-
-# Window state constants
-val WIN_STATE_NORMAL: i32 = 0
-val WIN_STATE_MINIMIZED: i32 = 1
-val WIN_STATE_MAXIMIZED: i32 = 2
-
-# ============================================================================
-# WmAction — action request returned by the WM service
-# ============================================================================
-
-struct WmAction:
-    """An action request parsed from an IPC message.
-
-    The WM service parses IPC messages and returns these action structs.
-    The shell applies them to its own compositor, avoiding shared state.
-    """
-    kind: text           # "create_window", "destroy_window", "focus", "resize",
-                         # "move", "set_title", "minimize", "maximize", "restore",
-                         # "update_tree", "none"
-    window_id: u64
-    title: text
-    x: i32
-    y: i32
-    width: i32
-    height: i32
-    content: text        # for update_tree
-    process_id: u64      # owning process identity (launch PID or IPC identity)
-    app_id: text         # stable app grouping identifier
-    owner_port: u64      # for create_window (remote app's reply port)
-    src_port: u64        # sender's port for reply routing
-
-fn wm_action_none() -> WmAction:
-    WmAction(kind: "none", window_id: 0, title: "", x: 0, y: 0, width: 0, height: 0, content: "", process_id: 0, app_id: "", owner_port: 0, src_port: 0)
-
-# ============================================================================
-# Window Owner Entry — maps window_id to the owning app's reply port
-# and records launch/process metadata for shell queries.
-# ============================================================================
-
-struct WindowOwner:
-    """Tracks which IPC port owns a given window."""
-    window_id: u64
-    owner_port: u64
-    process_id: u64
-    app_id: text
-
-# ============================================================================
-# ECS component types
-# ============================================================================
-
-struct WinId:
-    """ECS component: the u64 window identifier."""
-    value: u64
-
-struct OwnerPort:
-    """ECS component: the IPC reply port of the owning app."""
-    value: u64
-
-struct OwnerProcess:
-    """ECS component: the process (PID) that owns this window."""
-    value: u64
-
-struct WinAppId:
-    """ECS component: the stable app-group identifier string."""
-    value: text
-
-struct Title:
-    """ECS component: the window title string."""
-    value: text
-
-struct Geometry:
-    """ECS component: the window rectangle."""
-    x: i32
-    y: i32
-    w: i32
-    h: i32
-
-struct WindowState:
-    """ECS component: current window state (normal/minimized/maximized)."""
-    value: i32
-
-# ============================================================================
-# WmWorld — ECS container for window manager state
-# ============================================================================
-
-class WmWorld:
-    """ECS-based world owning all window component stores."""
-    base: WorldBase
-    win_ids: ComponentStore<WinId>
-    owner_ports: ComponentStore<OwnerPort>
-    owner_processes: ComponentStore<OwnerProcess>
-    app_ids: ComponentStore<WinAppId>
-    titles: ComponentStore<Title>
-    geometries: ComponentStore<Geometry>
-    states: ComponentStore<WindowState>
-
-impl WmWorld:
-    static fn new() -> WmWorld:
-        WmWorld(
-            # The desktop E2E lane materializes several launcher-backed windows
-            # in quick succession. Preallocate entity ids up front so the WM
-            # does not have to grow its allocator during that hot path.
-            base: WorldBase.with_capacity(WM_MAX_WINDOWS),
-            win_ids: ComponentStore.new(),
-            owner_ports: ComponentStore.new(),
-            owner_processes: ComponentStore.new(),
-            app_ids: ComponentStore.new(),
-            titles: ComponentStore.new(),
-            geometries: ComponentStore.new(),
-            states: ComponentStore.new()
-        )
-
-    fn find_owner_port(self, window_id: u64) -> u64:
-        """Find owner port for a window_id. Returns 0 if not found."""
-        var i: i32 = 0
-        while i < self.win_ids.len():
-            if self.win_ids.dense[i].value == window_id:
-                val ent_id = self.win_ids.entity_at(i)
-                val e = Entity(id: ent_id, generation: 0)
-                val slot = self.owner_ports.get_slot(e)
-                if slot >= 0:
-                    return self.owner_ports.dense[slot].value
-                return 0
-            i = i + 1
-        0
-
-    fn find_entity_for_window(self, window_id: u64) -> Entity:
-        """Find the Entity for a window_id. Returns Entity.null() if not found."""
-        var i: i32 = 0
-        while i < self.win_ids.len():
-            if self.win_ids.dense[i].value == window_id:
-                val ent_id = self.win_ids.entity_at(i)
-                return Entity(id: ent_id, generation: 0)
-            i = i + 1
-        Entity.null()
-
-    me spawn_window(window_id: u64, owner_port: u64, process_id: u64, app_id: text):
-        """Spawn a new entity and insert all window components."""
-        log_raw_println("[wm-service] spawn-window:start wid={window_id} pid={process_id} app_id={app_id}")
-        val e = self.base.spawn()
-        # The WM uses these stores as current-state metadata, not as a
-        # change-detection stream, so a stable tick is sufficient here.
-        val tick: i64 = 0
-        self.win_ids.insert(e, WinId(value: window_id), tick)
-        log_raw_println("[wm-service] spawn-window:win-id wid={window_id}")
-        self.owner_ports.insert(e, OwnerPort(value: owner_port), tick)
-        log_raw_println("[wm-service] spawn-window:owner-port wid={window_id}")
-        self.owner_processes.insert(e, OwnerProcess(value: process_id), tick)
-        log_raw_println("[wm-service] spawn-window:owner-process wid={window_id}")
-        self.app_ids.insert(e, WinAppId(value: app_id), tick)
-        log_raw_println("[wm-service] spawn-window:app-id wid={window_id}")
-        self.titles.insert(e, Title(value: ""), tick)
-        log_raw_println("[wm-service] spawn-window:title wid={window_id}")
-        self.geometries.insert(e, Geometry(x: 0, y: 0, w: 0, h: 0), tick)
-        log_raw_println("[wm-service] spawn-window:geometry wid={window_id}")
-        self.states.insert(e, WindowState(value: WIN_STATE_NORMAL), tick)
-        log_raw_println("[wm-service] spawn-window:end wid={window_id}")
-
-    me despawn_window(window_id: u64) -> bool:
-        """Despawn the entity for window_id. Returns false if not found."""
-        val e = self.find_entity_for_window(window_id)
-        if e.is_null():
-            return false
-        self.win_ids.remove(e)
-        self.owner_ports.remove(e)
-        self.owner_processes.remove(e)
-        self.app_ids.remove(e)
-        self.titles.remove(e)
-        self.geometries.remove(e)
-        self.states.remove(e)
-        self.base.despawn(e)
-        true
-
-    me despawn_windows_for_port(port: u64) -> [u64]:
-        """Despawn all windows owned by port, returning their window_ids."""
-        var to_destroy: [u64] = []
-        var i: i32 = 0
-        while i < self.owner_ports.len():
-            if self.owner_ports.dense[i].value == port:
-                val ent_id = self.owner_ports.entity_at(i)
-                val e = Entity(id: ent_id, generation: 0)
-                val wid_slot = self.win_ids.get_slot(e)
-                if wid_slot >= 0:
-                    to_destroy = to_destroy.push(self.win_ids.dense[wid_slot].value)
-            i = i + 1
-        var j: i32 = 0
-        while j < to_destroy.len():
-            self.despawn_window(to_destroy[j])
-            j = j + 1
-        to_destroy
-
-    fn window_ids_for_port(self, port: u64) -> [u64]:
-        var ids: [u64] = []
-        var i: i32 = 0
-        while i < self.owner_ports.len():
-            if self.owner_ports.dense[i].value == port:
-                val ent_id = self.owner_ports.entity_at(i)
-                val e = Entity(id: ent_id, generation: 0)
-                val wid_slot = self.win_ids.get_slot(e)
-                if wid_slot >= 0:
-                    ids = ids.push(self.win_ids.dense[wid_slot].value)
-            i = i + 1
-        ids
-
-    fn window_ids_for_process(self, process_id: u64) -> [u64]:
-        var ids: [u64] = []
-        var i: i32 = 0
-        while i < self.owner_processes.len():
-            if self.owner_processes.dense[i].value == process_id:
-                val ent_id = self.owner_processes.entity_at(i)
-                val e = Entity(id: ent_id, generation: 0)
-                val wid_slot = self.win_ids.get_slot(e)
-                if wid_slot >= 0:
-                    ids = ids.push(self.win_ids.dense[wid_slot].value)
-            i = i + 1
-        ids
-
-    fn window_ids_for_app(self, app_id: text) -> [u64]:
-        var ids: [u64] = []
-        var i: i32 = 0
-        while i < self.app_ids.len():
-            if self.app_ids.dense[i].value == app_id:
-                val ent_id = self.app_ids.entity_at(i)
-                val e = Entity(id: ent_id, generation: 0)
-                val wid_slot = self.win_ids.get_slot(e)
-                if wid_slot >= 0:
-                    ids = ids.push(self.win_ids.dense[wid_slot].value)
-            i = i + 1
-        ids
-
-    fn process_id_for_window(self, window_id: u64) -> u64:
-        val e = self.find_entity_for_window(window_id)
-        if e.is_null():
-            return 0
-        val slot = self.owner_processes.get_slot(e)
-        if slot < 0:
-            return 0
-        self.owner_processes.dense[slot].value
-
-    fn app_id_for_window(self, window_id: u64) -> text:
-        val e = self.find_entity_for_window(window_id)
-        if e.is_null():
-            return ""
-        val slot = self.app_ids.get_slot(e)
-        if slot < 0:
-            return ""
-        self.app_ids.dense[slot].value
-
-    fn count_for_port(self, port: u64) -> i32:
-        var count: i32 = 0
-        var i: i32 = 0
-        while i < self.owner_ports.len():
-            if self.owner_ports.dense[i].value == port:
-                count = count + 1
-            i = i + 1
-        count
-
-    fn count_for_process(self, process_id: u64) -> i32:
-        var count: i32 = 0
-        var i: i32 = 0
-        while i < self.owner_processes.len():
-            if self.owner_processes.dense[i].value == process_id:
-                count = count + 1
-            i = i + 1
-        count
-
-    fn count_for_app(self, app_id: text) -> i32:
-        var count: i32 = 0
-        var i: i32 = 0
-        while i < self.app_ids.len():
-            if self.app_ids.dense[i].value == app_id:
-                count = count + 1
-            i = i + 1
-        count
-
-    me set_identity(window_id: u64, process_id: u64, app_id: text):
-        """Update process/app identity for an existing window."""
-        val e = self.find_entity_for_window(window_id)
-        if e.is_null():
-            return
-        val tick: i64 = 0
-        self.owner_processes.insert(e, OwnerProcess(value: process_id), tick)
-        self.app_ids.insert(e, WinAppId(value: app_id), tick)
 
 # ============================================================================
 # Window Manager Service
 # ============================================================================
 
 class WmService:
-    """IPC server for multi-process window management.
-
-    Runs inside the compositor process. Creates a named IPC port "compositor"
-    and parses incoming IPC requests into WmAction structs.
-
-    Responsibilities:
-      - Deserialize IPC messages into WmAction structs
-      - Track window ownership (window_id -> owner app's reply port)
-      - Send IPC replies to remote apps
-      - Deliver input events, close requests, and focus changes to apps
-
-    The shell applies WmActions to its own compositor, avoiding shared
-    mutable state between WmService and DesktopShell.
+    """IPC server for multi-process window management. Parses IPC into WmAction structs.
+    Tracks window ownership; replies are sent via wm_codec helpers.
     """
     port_id: u64
     world: WmWorld
@@ -1034,38 +737,20 @@ impl WmService:
         self.owner_process_ids[idx] = process_id
         self.owner_app_ids[idx] = app_id
 
-    fn send_create_reply(dst_port: u64, window_id: WindowId):
-        """Send a successful create-window reply with the new window ID.
-
-        Called by the shell after creating the window on its compositor.
-        """
-        var buf: [u8] = []
-        _push_i32(buf, WM_STATUS_OK.value)
-        _push_u64(buf, window_id.value)
-        _ipc_send(dst_port, self.port_id, buf)
 
     # -- Reply Helpers -------------------------------------------------------
 
+    fn send_create_reply(dst_port: u64, window_id: WindowId):
+        wm_send_create_reply(self.port_id, dst_port, window_id)
+
     fn send_create_response(dst_port: u64, window_id: WindowId, status: WmStatus):
-        """Send a COMP_CREATE_WINDOW response: status(i32) | window_id(u64)."""
-        var buf: [u8] = []
-        _push_i32(buf, status.value)
-        _push_u64(buf, window_id.value)
-        _ipc_send(dst_port, self.port_id, buf)
+        wm_send_create_response(self.port_id, dst_port, window_id, status)
 
     fn send_status_reply(dst_port: u64, status: i32):
-        """Send a simple status-only reply."""
-        var buf: [u8] = []
-        _push_i32(buf, status)
-        _ipc_send(dst_port, self.port_id, buf)
+        wm_send_status_reply(self.port_id, dst_port, status)
 
     fn send_error_reply(dst_port: u64, status: i32, msg: text):
-        """Send an error reply with status + error message."""
-        var buf: [u8] = []
-        _push_i32(buf, status)
-        for ch in msg:
-            buf.push(ch.to_u8())
-        _ipc_send(dst_port, self.port_id, buf)
+        wm_send_error_reply(self.port_id, dst_port, status, msg)
 
     # -- Queries -------------------------------------------------------------
 
@@ -1089,90 +774,3 @@ impl WmService:
         # the connect request to this launch notification later.
         pass_dn
 
-# ============================================================================
-# Standalone helper — callable without a WmService instance
-# ============================================================================
-
-fn wm_notify_app_launched(app_name: text, pid: u64):
-    """Notify that an app was launched (standalone convenience wrapper).
-
-    Logs the launch event to serial. The WM service will associate the
-    PID with a window when the app connects via IPC and sends
-    COMP_CREATE_WINDOW.
-    """
-    log_raw_println("[wm] App launched: {app_name} (PID {pid})")
-
-# ============================================================================
-# Memory Access Helpers
-# ============================================================================
-
-extern fn mmio_read8(addr: u64) -> u8
-extern fn mmio_read16(addr: u64) -> u16
-extern fn mmio_read32(addr: u64) -> u32
-extern fn mmio_read64(addr: u64) -> u64
-
-fn _read_u8(addr: u64) -> u8:
-    mmio_read8(addr)
-
-fn _read_u32(addr: u64) -> u32:
-    mmio_read32(addr)
-
-fn _read_u64(addr: u64) -> u64:
-    mmio_read64(addr)
-
-fn _read_i32(addr: u64) -> i32:
-    mmio_read32(addr).to_i32()
-
-fn _read_text(addr: u64, len: u32) -> text:
-    """Read a text string from memory."""
-    var result = ""
-    var i: u32 = 0
-    while i < len:
-        val ch = mmio_read8(addr + i.to_u64())
-        if ch == 0:
-            return result
-        result = result + ch.to_char()
-        i = i + 1
-    result
-
-# ============================================================================
-# Serialization Helpers
-# ============================================================================
-
-fn _push_u32(buf: [u8], value: u32):
-    buf.push((value & 0xFF).to_u8())
-    buf.push(((value >> 8) & 0xFF).to_u8())
-    buf.push(((value >> 16) & 0xFF).to_u8())
-    buf.push(((value >> 24) & 0xFF).to_u8())
-
-fn _push_i32(buf: [u8], value: i32):
-    val u = value.to_u32()
-    buf.push((u & 0xFF).to_u8())
-    buf.push(((u >> 8) & 0xFF).to_u8())
-    buf.push(((u >> 16) & 0xFF).to_u8())
-    buf.push(((u >> 24) & 0xFF).to_u8())
-
-fn _push_u64(buf: [u8], value: u64):
-    buf.push((value & 0xFF).to_u8())
-    buf.push(((value >> 8) & 0xFF).to_u8())
-    buf.push(((value >> 16) & 0xFF).to_u8())
-    buf.push(((value >> 24) & 0xFF).to_u8())
-    buf.push(((value >> 32) & 0xFF).to_u8())
-    buf.push(((val >> 40) & 0xFF).to_u8())
-    buf.push(((val >> 48) & 0xFF).to_u8())
-    buf.push(((val >> 56) & 0xFF).to_u8())
-
-# ============================================================================
-# IPC Send Helper
-# ============================================================================
-
-fn _ipc_send(dst_port: u64, src_port: u64, data: [u8]):
-    """Send reply data via IPC syscall.
-
-    Encodes the data into a buffer and issues SYS_IPC_SEND = 20
-    (kernel dispatcher case 20, _handle_ipc_send).
-    """
-    extern fn unsafe_addr_of(ref: any) -> u64
-    val data_ptr = unsafe_addr_of(data)
-    val data_len = data.len().to_u64()
-    syscall(SYS_IPC_SEND, dst_port, src_port, data_ptr, data_len, 0)

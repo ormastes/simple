@@ -95,10 +95,17 @@ impl LoopUnroller:
 
         for loop in self.detector.loops:
             val iter_count = loop.iteration_count()
-            if iter_count.? and iter_count.unwrap() <= self.unroll_threshold:
-                # Small loop - unroll it
-                optimized_blocks = self.unroll_loop(optimized_blocks, loop, iter_count.unwrap())
-                self.unrolled_count = self.unrolled_count + 1
+            if iter_count.?:
+                val count = iter_count.unwrap()
+                if count <= self.unroll_threshold:
+                    optimized_blocks = self.unroll_loop(optimized_blocks, loop, count)
+                    self.unrolled_count = self.unrolled_count + 1
+                elif count <= 64 and count % 4 == 0:
+                    optimized_blocks = self.partial_unroll_loop(optimized_blocks, loop, 4)
+                    self.unrolled_count = self.unrolled_count + 1
+                elif count <= 64 and count % 2 == 0:
+                    optimized_blocks = self.partial_unroll_loop(optimized_blocks, loop, 2)
+                    self.unrolled_count = self.unrolled_count + 1
 
         MirFunction(..func, blocks: optimized_blocks)
 
@@ -152,6 +159,44 @@ impl LoopUnroller:
                 new_blocks = new_blocks.push(MirBlock(
                     id: block.id, label: block.label,
                     instructions: [], terminator: block.terminator
+                ))
+            else:
+                new_blocks = new_blocks.push(block)
+
+        new_blocks
+
+    me partial_unroll_loop(blocks: [MirBlock], loop: LoopInfo, factor: i64) -> [MirBlock]:
+        """Partially unroll loop by duplicating body instructions factor times.
+
+        The loop remains but each iteration executes factor copies of the body,
+        reducing branch overhead by factor. Trip count must be divisible by factor.
+        """
+        var loop_block_set = {}
+        loop_block_set[loop.header.id] = true
+        for bid in loop.body:
+            loop_block_set[bid.id] = true
+
+        var body_insts: [MirInst] = []
+        for block in blocks:
+            if loop_block_set.has(block.id.id):
+                if block.id.id != loop.header.id:
+                    for inst in block.instructions:
+                        body_insts = body_insts.push(inst)
+
+        if body_insts.len() == 0:
+            return blocks
+
+        var expanded: [MirInst] = []
+        for copy_idx in 0..factor:
+            for inst in body_insts:
+                expanded = expanded.push(inst)
+
+        var new_blocks: [MirBlock] = []
+        for block in blocks:
+            if loop_block_set.has(block.id.id) and block.id.id != loop.header.id:
+                new_blocks = new_blocks.push(MirBlock(
+                    id: block.id, label: block.label,
+                    instructions: expanded, terminator: block.terminator
                 ))
             else:
                 new_blocks = new_blocks.push(block)
@@ -214,7 +259,7 @@ impl LoopOptimization:
             enable_licm: true,
             enable_strength: true,
             enable_unroll: true,
-            unroll_threshold: 8
+            unroll_threshold: 16
         )
 
     fn name() -> text:

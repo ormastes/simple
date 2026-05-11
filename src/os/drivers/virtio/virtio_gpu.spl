@@ -36,6 +36,16 @@ use os.drivers.virtio.virtio_gpu_types.{
 use os.drivers.virtio.virtio_common.{VIRTQ_DESC_F_NEXT, VIRTQ_DESC_F_WRITE}
 use os.userlib.device.{DeviceDmaDescriptor, DMA_CACHE_COHERENT}
 use os.kernel.log.klog_api.{log_init, log_info, log_warn, log_error, log_raw, log_raw_println}
+use os.drivers.virtio.virtio_gpu_init.{virtio_gpu_init_from_grant, virtio_gpu_init_legacy}
+use os.drivers.virtio.virtio_gpu_ops.{
+    virtio_gpu_cmd_get_display_info,
+    virtio_gpu_cmd_resource_create_2d_raw, virtio_gpu_cmd_resource_attach_backing_raw, virtio_gpu_cmd_set_scanout_raw,
+    virtio_gpu_cmd_resource_create_2d, virtio_gpu_cmd_resource_attach_backing, virtio_gpu_cmd_set_scanout,
+    virtio_gpu_cmd_resource_detach_backing, virtio_gpu_cmd_resource_unref,
+    virtio_gpu_flush, virtio_gpu_flush_rect,
+    virtio_gpu_put_pixel, virtio_gpu_fill_rect, virtio_gpu_clear,
+    virtio_gpu_draw_hline, virtio_gpu_draw_vline, virtio_gpu_draw_rect
+}
 
 extern fn rt_alloc(size: u64) -> u64
 extern fn rt_memory_barrier()
@@ -211,6 +221,13 @@ struct VirtioGpuCapabilities:
     cache_policy: text
     dma_accelerated: bool
 
+pub struct VirtioGpuInitResult:
+    """Returned by virtio_gpu_init_from_grant and virtio_gpu_init_legacy.
+    The caller must assign .driver back to the driver variable on success."""
+    driver: VirtioGpuDriver
+    ok: bool
+    err_msg: text
+
 # ============================================================================
 # VirtIO-GPU 2D Driver
 # ============================================================================
@@ -279,288 +296,21 @@ impl VirtioGpuDriver:
         )
 
     # ========================================================================
-    # Initialization from DeviceGrant
+    # Initialization — delegated to virtio_gpu_init.spl
     # ========================================================================
 
     me init_from_grant(grant: DeviceGrant) -> Result<bool, text>:
-        """Initialize VirtIO-GPU device from a kernel DeviceGrant.
-
-        Steps:
-          1. Map BAR0 via syscall 83
-          2. Reset device, negotiate features
-          3. Set up controlq (queue 0) with DMA-allocated rings
-          4. Allocate command/response DMA buffers
-          5. GET_DISPLAY_INFO to discover display dimensions
-          6. RESOURCE_CREATE_2D for a BGRA resource
-          7. Allocate framebuffer DMA and ATTACH_BACKING
-          8. SET_SCANOUT to bind resource to scanout 0
-          9. Set DRIVER_OK
-        """
-        # -- Step 1: Detect BAR type and set up access --
-        self.notif_id = grant.irq_notification_id
-        log_info("[virtio] " + "[virtio-gpu] grant bar0=0x{grant.bar0_phys} bar0_cap={grant.bar0_cap}")
-
-        if grant.bar0_cap != 1 and (grant.bar0_phys & 1) == 0 and self.try_map_modern_pci_caps(grant):
-            log_info("[virtio] " + "[virtio-gpu] using modern virtio-pci capabilities")
-
-            self.modern_write8(MODERN_COMMON_DEVICE_STATUS, 0)
-            self.modern_write8(MODERN_COMMON_DEVICE_STATUS, STATUS_ACKNOWLEDGE)
-            self.modern_write8(MODERN_COMMON_DEVICE_STATUS, STATUS_ACKNOWLEDGE | STATUS_DRIVER)
-
-            self.modern_write32(MODERN_COMMON_DEVICE_FEATURE_SELECT, 0)
-            val host_features = self.modern_read32(MODERN_COMMON_DEVICE_FEATURE)
-            log_info("[virtio] " + "[virtio-gpu] modern host_features=0x{host_features}")
-            self.modern_write32(MODERN_COMMON_DRIVER_FEATURE_SELECT, 0)
-            self.modern_write32(MODERN_COMMON_DRIVER_FEATURE, 0)        # no GPU features in word 0
-            self.modern_write32(MODERN_COMMON_DRIVER_FEATURE_SELECT, 1)
-            self.modern_write32(MODERN_COMMON_DRIVER_FEATURE, 1)        # bit 0 of word 1 = VIRTIO_F_VERSION_1 (bit 32)
-
-            val feat_status = STATUS_ACKNOWLEDGE | STATUS_DRIVER | STATUS_FEATURES_OK
-            self.modern_write8(MODERN_COMMON_DEVICE_STATUS, feat_status)
-            val current_status = self.modern_read8(MODERN_COMMON_DEVICE_STATUS)
-            if (current_status & STATUS_FEATURES_OK) == 0:
-                self.modern_write8(MODERN_COMMON_DEVICE_STATUS, STATUS_FAILED)
-                return Err("Modern feature negotiation failed")
-
-            val ctrl_result = self.setup_controlq_modern()
-            if val Err(msg) = ctrl_result:
-                self.modern_write8(MODERN_COMMON_DEVICE_STATUS, STATUS_FAILED)
-                return Err("Controlq setup failed: {msg}")
-            log_info("[virtio] " + "[virtio-gpu] Controlq ready (modern size={self.ctrl_queue_size})")
-
-            val ok_status = STATUS_ACKNOWLEDGE | STATUS_DRIVER | STATUS_FEATURES_OK | STATUS_DRIVER_OK
-            self.modern_write8(MODERN_COMMON_DEVICE_STATUS, ok_status)
-
-            # -- Step 5..9 are transport-agnostic once the queue is live --
-            val cmd_dma = self.alloc_dma(4096)
-            if cmd_dma.is_err():
-                return Err("Command buffer DMA alloc failed")
-            self.cmd_buf_virt = cmd_dma.unwrap_virt()
-            self.cmd_buf_phys = cmd_dma.unwrap_device()
-
-            val resp_dma = self.alloc_dma(4096)
-            if resp_dma.is_err():
-                return Err("Response buffer DMA alloc failed")
-            self.resp_buf_virt = resp_dma.unwrap_virt()
-            self.resp_buf_phys = resp_dma.unwrap_device()
-            log_info("[virtio] " + "[virtio-gpu] DMA cmd=0x{self.cmd_buf_virt} resp=0x{self.resp_buf_virt}")
-
-            val display_result = self.cmd_get_display_info()
-            if display_result.is_err():
-                return Err("GET_DISPLAY_INFO failed")
-            log_info("[virtio] " + "[virtio-gpu] Display: {self.width}x{self.height}")
-
-            self.resource_id = 1
-            self.next_resource_id = 2
-            val create_result = self.cmd_resource_create_2d_raw(self.resource_id.to_u64(), self.width.to_u64(), self.height.to_u64())
-            if create_result.is_err():
-                return Err("RESOURCE_CREATE_2D failed")
-            log_info("[virtio] " + "[virtio-gpu] Resource {self.resource_id} created")
-
-            self.fb_size = self.width.to_u64() * self.height.to_u64() * 4
-            val fb_dma = self.alloc_dma(self.fb_size)
-            if fb_dma.is_err():
-                return Err("Framebuffer DMA alloc failed")
-            self.fb_virt = fb_dma.unwrap_virt()
-            self.fb_phys = fb_dma.unwrap_device()
-            log_info("[virtio] " + "[virtio-gpu] FB virt=0x{self.fb_virt} phys=0x{self.fb_phys} size={self.fb_size}")
-
-            self.clear(0x00000000)
-
-            val attach_result = self.cmd_resource_attach_backing_raw(self.resource_id.to_u64(), self.fb_phys, self.fb_size)
-            if attach_result.is_err():
-                return Err("RESOURCE_ATTACH_BACKING failed")
-            log_info("[virtio] " + "[virtio-gpu] Backing attached")
-
-            val scanout_result = self.cmd_set_scanout_raw(0, self.resource_id.to_u64(), self.width.to_u64(), self.height.to_u64())
-            if scanout_result.is_err():
-                return Err("SET_SCANOUT failed")
-            log_info("[virtio] " + "[virtio-gpu] Scanout 0 bound to resource {self.resource_id}")
-
-            self.initialized = true
-            log_info("[virtio] " + "[virtio-gpu] Device initialized: {self.width}x{self.height} BGRA (modern)")
-            return Ok(true)
-
-        if (grant.bar0_phys & 1) != 0:
-            # I/O port BAR (bit 0 = 1): legacy VirtIO PCI transport
-            self.is_io_bar = true
-            self.bar0_port = (grant.bar0_phys & 0xFFFC).to_u16()
-            self.bar0_virt = 0
-            log_info("[virtio] " + "[virtio-gpu] BAR0 is I/O port: 0x{self.bar0_port}")
-        else:
-            # Memory-mapped BAR: map via syscall 83
-            self.is_io_bar = false
-            val bar_result = syscall(83, grant.bar0_phys, grant.bar0_size, 0, 0, 0)
-            if bar_result < 0:
-                return Err("MapBar failed: error {bar_result}")
-            self.bar0_virt = bar_result as u64
-            self.bar0_port = 0
-            log_info("[virtio] " + "[virtio-gpu] BAR0 mapped at virt=0x{self.bar0_virt}")
-
-        # -- Step 2: Reset and negotiate features --
-        self.write_status(0)
-        self.write_status(STATUS_ACKNOWLEDGE)
-        self.write_status(STATUS_ACKNOWLEDGE | STATUS_DRIVER)
-
-        # Start from the baseline legacy feature set. This driver targets the
-        # legacy PCI transport/register model, so it does not negotiate any
-        # optional feature bits yet.
-        val host_features = self.read_reg32(VIRTIO_PCI_HOST_FEATURES)
-        log_info("[virtio] " + "[virtio-gpu] host_features=0x{host_features}")
-        self.write_reg32(VIRTIO_PCI_GUEST_FEATURES, 0)
-
-        # -- Step 3: Set up controlq (queue 0) --
-        val ctrl_result = self.setup_controlq()
-        if val Err(msg) = ctrl_result:
-            self.write_status(STATUS_FAILED)
-            return Err("Controlq setup failed: {msg}")
-        log_info("[virtio] " + "[virtio-gpu] Controlq ready (size={self.ctrl_queue_size})")
-
-        # -- Step 4: Set DRIVER_OK (must be set before sending commands) --
-        val ok_status = STATUS_ACKNOWLEDGE | STATUS_DRIVER | STATUS_DRIVER_OK
-        self.write_status(ok_status)
-
-        # -- Step 5: Allocate command/response DMA buffers (4KB each) --
-        val cmd_dma = self.alloc_dma(4096)
-        if cmd_dma.is_err():
-            return Err("Command buffer DMA alloc failed")
-        self.cmd_buf_virt = cmd_dma.unwrap_virt()
-        self.cmd_buf_phys = cmd_dma.unwrap_device()
-
-        val resp_dma = self.alloc_dma(4096)
-        if resp_dma.is_err():
-            return Err("Response buffer DMA alloc failed")
-        self.resp_buf_virt = resp_dma.unwrap_virt()
-        self.resp_buf_phys = resp_dma.unwrap_device()
-        log_info("[virtio] " + "[virtio-gpu] DMA cmd=0x{self.cmd_buf_virt} resp=0x{self.resp_buf_virt}")
-
-        # -- Step 6: GET_DISPLAY_INFO --
-        val display_result = self.cmd_get_display_info()
-        if display_result.is_err():
-            return Err("GET_DISPLAY_INFO failed")
-        log_info("[virtio] " + "[virtio-gpu] Display: {self.width}x{self.height}")
-
-        # -- Step 7: RESOURCE_CREATE_2D --
-        self.resource_id = 1
-        self.next_resource_id = 2
-        val create_result = self.cmd_resource_create_2d_raw(self.resource_id.to_u64(), self.width.to_u64(), self.height.to_u64())
-        if create_result.is_err():
-            return Err("RESOURCE_CREATE_2D failed")
-        log_info("[virtio] " + "[virtio-gpu] Resource {self.resource_id} created")
-
-        # -- Step 8: Allocate framebuffer and ATTACH_BACKING --
-        self.fb_size = self.width.to_u64() * self.height.to_u64() * 4
-        val fb_dma = self.alloc_dma(self.fb_size)
-        if fb_dma.is_err():
-            return Err("Framebuffer DMA alloc failed")
-        self.fb_virt = fb_dma.unwrap_virt()
-        self.fb_phys = fb_dma.unwrap_device()
-        log_info("[virtio] " + "[virtio-gpu] FB virt=0x{self.fb_virt} phys=0x{self.fb_phys} size={self.fb_size}")
-
-        # Zero the framebuffer
-        self.clear(0x00000000)
-
-        val attach_result = self.cmd_resource_attach_backing_raw(self.resource_id.to_u64(), self.fb_phys, self.fb_size)
-        if attach_result.is_err():
-            return Err("RESOURCE_ATTACH_BACKING failed")
-        log_info("[virtio] " + "[virtio-gpu] Backing attached")
-
-        # -- Step 9: SET_SCANOUT --
-        val scanout_result = self.cmd_set_scanout_raw(0, self.resource_id.to_u64(), self.width.to_u64(), self.height.to_u64())
-        if scanout_result.is_err():
-            return Err("SET_SCANOUT failed")
-        log_info("[virtio] " + "[virtio-gpu] Scanout 0 bound to resource {self.resource_id}")
-
-        self.initialized = true
-        log_info("[virtio] " + "[virtio-gpu] Device initialized: {self.width_raw}x{self.height_raw} BGRA")
+        val r = virtio_gpu_init_from_grant(self, grant)
+        if not r.ok:
+            return Err(r.err_msg)
+        self = r.driver
         Ok(true)
 
     me init_legacy_from_bar0(bar0_phys: u64, bar0_size: u64, notif_id: u64) -> Result<bool, text>:
-        """Initialize the legacy transport from scalar grant fields.
-
-        Baremetal wrapper entries use this to avoid the current large-struct
-        DeviceGrant ABI issue where fields after pci_subclass arrive as zero.
-        """
-        self.notif_id = notif_id
-        log_info("[virtio] " + "[virtio-gpu] scalar legacy bar0=0x{bar0_phys}")
-
-        if (bar0_phys & 1) != 0:
-            self.is_io_bar = true
-            self.bar0_port = (bar0_phys & 0xFFFC).to_u16()
-            self.bar0_virt = 0
-            log_info("[virtio] " + "[virtio-gpu] BAR0 is I/O port: 0x{self.bar0_port}")
-        else:
-            self.is_io_bar = false
-            val bar_result = syscall(83, bar0_phys, bar0_size, 0, 0, 0)
-            if bar_result < 0:
-                return Err("MapBar failed: error {bar_result}")
-            self.bar0_virt = bar_result as u64
-            self.bar0_port = 0
-            log_info("[virtio] " + "[virtio-gpu] BAR0 mapped at virt=0x{self.bar0_virt}")
-
-        self.write_status(0)
-        self.write_status(STATUS_ACKNOWLEDGE)
-        self.write_status(STATUS_ACKNOWLEDGE | STATUS_DRIVER)
-
-        val host_features = self.read_reg32(VIRTIO_PCI_HOST_FEATURES)
-        log_info("[virtio] " + "[virtio-gpu] host_features=0x{host_features}")
-        self.write_reg32(VIRTIO_PCI_GUEST_FEATURES, 0)
-
-        val ctrl_result = self.setup_controlq()
-        if val Err(msg) = ctrl_result:
-            self.write_status(STATUS_FAILED)
-            return Err("Controlq setup failed: {msg}")
-        log_info("[virtio] " + "[virtio-gpu] Controlq ready (size={self.ctrl_queue_size})")
-
-        self.write_status(STATUS_ACKNOWLEDGE | STATUS_DRIVER | STATUS_DRIVER_OK)
-
-        val cmd_dma = self.alloc_dma(4096)
-        if cmd_dma.is_err():
-            return Err("Command buffer DMA alloc failed")
-        self.cmd_buf_virt = cmd_dma.unwrap_virt()
-        self.cmd_buf_phys = cmd_dma.unwrap_device()
-
-        val resp_dma = self.alloc_dma(4096)
-        if resp_dma.is_err():
-            return Err("Response buffer DMA alloc failed")
-        self.resp_buf_virt = resp_dma.unwrap_virt()
-        self.resp_buf_phys = resp_dma.unwrap_device()
-        log_info("[virtio] " + "[virtio-gpu] DMA cmd=0x{self.cmd_buf_virt} resp=0x{self.resp_buf_virt}")
-
-        val display_result = self.cmd_get_display_info()
-        if display_result.is_err():
-            return Err("GET_DISPLAY_INFO failed")
-        log_info("[virtio] " + "[virtio-gpu] Display: {self.width}x{self.height}")
-
-        self.resource_id = 1
-        self.next_resource_id = 2
-        val create_result = self.cmd_resource_create_2d_raw(self.resource_id.to_u64(), self.width.to_u64(), self.height.to_u64())
-        if create_result.is_err():
-            return Err("RESOURCE_CREATE_2D failed")
-        log_info("[virtio] " + "[virtio-gpu] Resource {self.resource_id} created")
-
-        self.fb_size = self.width.to_u64() * self.height.to_u64() * 4
-        val fb_dma = self.alloc_dma(self.fb_size)
-        if fb_dma.is_err():
-            return Err("Framebuffer DMA alloc failed")
-        self.fb_virt = fb_dma.unwrap_virt()
-        self.fb_phys = fb_dma.unwrap_device()
-        log_info("[virtio] " + "[virtio-gpu] FB virt=0x{self.fb_virt} phys=0x{self.fb_phys} size={self.fb_size}")
-
-        self.clear(0x00000000)
-
-        val attach_result = self.cmd_resource_attach_backing_raw(self.resource_id.to_u64(), self.fb_phys, self.fb_size)
-        if attach_result.is_err():
-            return Err("RESOURCE_ATTACH_BACKING failed")
-        log_info("[virtio] " + "[virtio-gpu] Backing attached")
-
-        val scanout_result = self.cmd_set_scanout_raw(0, self.resource_id.to_u64(), self.width.to_u64(), self.height.to_u64())
-        if scanout_result.is_err():
-            return Err("SET_SCANOUT failed")
-        log_info("[virtio] " + "[virtio-gpu] Scanout 0 bound to resource {self.resource_id}")
-
-        self.initialized = true
-        log_info("[virtio] " + "[virtio-gpu] Device initialized: {self.width_raw}x{self.height_raw} BGRA")
+        val r = virtio_gpu_init_legacy(self, bar0_phys, bar0_size, notif_id)
+        if not r.ok:
+            return Err(r.err_msg)
+        self = r.driver
         Ok(true)
 
     me try_map_modern_pci_caps(grant: DeviceGrant) -> bool:
@@ -937,312 +687,67 @@ impl VirtioGpuDriver:
         rt_mmio_read_u32_real(self.resp_buf_virt).to_u32()
 
     # ========================================================================
-    # GPU Commands
+    # GPU Commands — delegated to virtio_gpu_ops.spl
     # ========================================================================
 
     me cmd_get_display_info() -> Result<bool, text>:
-        """Send GET_DISPLAY_INFO and read display dimensions from response.
-
-        Response layout (after 24-byte header):
-          16 display entries, each 24 bytes:
-            rect: {x:u32, y:u32, width:u32, height:u32}  (16 bytes)
-            enabled: u32
-            flags: u32
-        We read the first enabled display's width and height.
-        """
-        self._write_ctrl_hdr(0x0100)
-        if ram_read32(self.cmd_buf_virt) == 0x0100 and ram_read32(self.cmd_buf_virt + 4) == 0:
-            log_info("[virtio] " + "[virtio-gpu] GET_DISPLAY_INFO hdr-ok")
-        else:
-            log_info("[virtio] " + "[virtio-gpu] GET_DISPLAY_INFO hdr-bad")
-        log_info("[virtio] " + "[virtio-gpu] GET_DISPLAY_INFO submit")
-        val resp_type = self._send_command(24, 408)
-        log_info("[virtio] " + "[virtio-gpu] GET_DISPLAY_INFO resp_type=0x{resp_type}")
-
-        if resp_type != 0x1101:
-            log_info("[virtio] " + "[virtio-gpu] GET_DISPLAY_INFO error: resp=0x{resp_type}")
-            return Err("GET_DISPLAY_INFO failed (resp=0x{resp_type})")
-
-        # SYS-GUI-008 QEMU baseline currently relies on the default virtio-gpu
-        # scanout size observed via QMP for this lane. The response header is
-        # validated above; the remaining body-parsing issue is in the wrapper's
-        # integer representation, not the device transport.
-        self.width = 1280
-        self.height = 800
-        Ok(true)
+        val r = virtio_gpu_cmd_get_display_info(self)
+        if r.is_ok():
+            self.width = 1280
+            self.height = 800
+        r
 
     me cmd_resource_create_2d_raw(res_id: u64, w: u64, h: u64) -> Result<bool, text>:
-        self._write_ctrl_hdr(0x0101)
-        ram_write32_raw(self.cmd_buf_virt + 24, res_id)
-        ram_write32_raw(self.cmd_buf_virt + 28, 1)
-        ram_write32_raw(self.cmd_buf_virt + 32, w)
-        ram_write32_raw(self.cmd_buf_virt + 36, h)
-
-        val resp_type = self._send_command(40, 24)
-        if resp_type != 0x1100:
-            log_info("[virtio] " + "[virtio-gpu] RESOURCE_CREATE_2D error: resp=0x{resp_type}")
-            return Err("RESOURCE_CREATE_2D failed")
-        Ok(true)
+        virtio_gpu_cmd_resource_create_2d_raw(self, res_id, w, h)
 
     me cmd_resource_attach_backing_raw(res_id: u64, backing_phys: u64, backing_size: u64) -> Result<bool, text>:
-        self._write_ctrl_hdr(0x0106)
-        ram_write32_raw(self.cmd_buf_virt + 24, res_id)
-        ram_write32_raw(self.cmd_buf_virt + 28, 1)
-        ram_write64_raw(self.cmd_buf_virt + 32, backing_phys)
-        ram_write32_raw(self.cmd_buf_virt + 40, backing_size)
-        ram_write32_raw(self.cmd_buf_virt + 44, 0)
-
-        val resp_type = self._send_command(48, 24)
-        if resp_type != 0x1100:
-            log_info("[virtio] " + "[virtio-gpu] ATTACH_BACKING error: resp=0x{resp_type}")
-            return Err("RESOURCE_ATTACH_BACKING failed")
-        Ok(true)
+        virtio_gpu_cmd_resource_attach_backing_raw(self, res_id, backing_phys, backing_size)
 
     me cmd_set_scanout_raw(scanout_id: u64, res_id: u64, w: u64, h: u64) -> Result<bool, text>:
-        self._write_ctrl_hdr(0x0103)
-        ram_write32_raw(self.cmd_buf_virt + 24, 0)
-        ram_write32_raw(self.cmd_buf_virt + 28, 0)
-        ram_write32_raw(self.cmd_buf_virt + 32, w)
-        ram_write32_raw(self.cmd_buf_virt + 36, h)
-        ram_write32_raw(self.cmd_buf_virt + 40, scanout_id)
-        ram_write32_raw(self.cmd_buf_virt + 44, res_id)
-
-        val resp_type = self._send_command(48, 24)
-        if resp_type != 0x1100:
-            log_info("[virtio] " + "[virtio-gpu] SET_SCANOUT error: resp=0x{resp_type}")
-            return Err("SET_SCANOUT failed")
-        Ok(true)
+        virtio_gpu_cmd_set_scanout_raw(self, scanout_id, res_id, w, h)
 
     me cmd_resource_create_2d(res_id: u32, w: u32, h: u32) -> Result<bool, text>:
-        """Create a 2D resource with BGRA format.
-
-        Command layout:
-          hdr(24) + resource_id(4) + format(4) + width(4) + height(4) = 40 bytes
-        """
-        self._write_ctrl_hdr(0x0101)
-        ram_write32(self.cmd_buf_virt + 24, res_id)
-        ram_write32(self.cmd_buf_virt + 28, 1)
-        ram_write32(self.cmd_buf_virt + 32, w)
-        ram_write32(self.cmd_buf_virt + 36, h)
-
-        val resp_type = self._send_command(40, 24)
-        if resp_type != 0x1100:
-            log_info("[virtio] " + "[virtio-gpu] RESOURCE_CREATE_2D error: resp=0x{resp_type}")
-            return Err("RESOURCE_CREATE_2D failed")
-        Ok(true)
+        virtio_gpu_cmd_resource_create_2d(self, res_id, w, h)
 
     me cmd_resource_attach_backing(res_id: u32, backing_phys: u64, backing_size: u64) -> Result<bool, text>:
-        """Attach a memory-backed framebuffer to a resource.
-
-        Command layout:
-          hdr(24) + resource_id(4) + nr_entries(4) = 32 bytes header
-          Followed by 1 mem_entry: addr(8) + length(4) + padding(4) = 16 bytes
-          Total = 48 bytes
-        """
-        self._write_ctrl_hdr(0x0106)
-        ram_write32(self.cmd_buf_virt + 24, res_id)
-        ram_write32(self.cmd_buf_virt + 28, 1)      # nr_entries = 1
-
-        # mem_entry[0]
-        ram_write64(self.cmd_buf_virt + 32, backing_phys)            # addr
-        ram_write32(self.cmd_buf_virt + 40, backing_size.to_u32())   # length
-        ram_write32(self.cmd_buf_virt + 44, 0)                       # padding
-
-        val resp_type = self._send_command(48, 24)
-        if resp_type != 0x1100:
-            log_info("[virtio] " + "[virtio-gpu] ATTACH_BACKING error: resp=0x{resp_type}")
-            return Err("RESOURCE_ATTACH_BACKING failed")
-        Ok(true)
+        virtio_gpu_cmd_resource_attach_backing(self, res_id, backing_phys, backing_size)
 
     me cmd_set_scanout(scanout_id: u32, res_id: u32, w: u32, h: u32) -> Result<bool, text>:
-        """Bind a resource to a scanout (display output).
-
-        Command layout:
-          hdr(24) + rect(x:4,y:4,w:4,h:4) + scanout_id(4) + resource_id(4) = 48 bytes
-        """
-        self._write_ctrl_hdr(0x0103)
-        ram_write32(self.cmd_buf_virt + 24, 0)  # rect.x
-        ram_write32(self.cmd_buf_virt + 28, 0)  # rect.y
-        ram_write32(self.cmd_buf_virt + 32, w)  # rect.width
-        ram_write32(self.cmd_buf_virt + 36, h)  # rect.height
-        ram_write32(self.cmd_buf_virt + 40, scanout_id)
-        ram_write32(self.cmd_buf_virt + 44, res_id)
-
-        val resp_type = self._send_command(48, 24)
-        if resp_type != 0x1100:
-            log_info("[virtio] " + "[virtio-gpu] SET_SCANOUT error: resp=0x{resp_type}")
-            return Err("SET_SCANOUT failed")
-        Ok(true)
+        virtio_gpu_cmd_set_scanout(self, scanout_id, res_id, w, h)
 
     me cmd_resource_detach_backing(res_id: u32) -> Result<bool, text>:
-        """Detach the memory backing from a resource.
-
-        Command layout: hdr(24) + resource_id(4) + padding(4) = 32 bytes
-        Must be called before cmd_resource_unref to release backing memory.
-        """
-        self._write_ctrl_hdr(0x0107)
-        ram_write32(self.cmd_buf_virt + 24, res_id)
-        ram_write32(self.cmd_buf_virt + 28, 0)   # padding
-
-        val resp_type = self._send_command(32, 24)
-        if resp_type != 0x1100:
-            log_info("[virtio] " + "[virtio-gpu] DETACH_BACKING error: resp=0x{resp_type}")
-            return Err("RESOURCE_DETACH_BACKING failed")
-        Ok(true)
+        virtio_gpu_cmd_resource_detach_backing(self, res_id)
 
     me cmd_resource_unref(res_id: u32) -> Result<bool, text>:
-        """Destroy a GPU 2D resource.
-
-        Command layout: hdr(24) + resource_id(4) + padding(4) = 32 bytes
-        Call cmd_resource_detach_backing first to release backing memory.
-        """
-        self._write_ctrl_hdr(0x0102)
-        ram_write32(self.cmd_buf_virt + 24, res_id)
-        ram_write32(self.cmd_buf_virt + 28, 0)   # padding
-
-        val resp_type = self._send_command(32, 24)
-        if resp_type != 0x1100:
-            log_info("[virtio] " + "[virtio-gpu] RESOURCE_UNREF error: resp=0x{resp_type}")
-            return Err("RESOURCE_UNREF failed")
-        Ok(true)
+        virtio_gpu_cmd_resource_unref(self, res_id)
 
     # ========================================================================
-    # Framebuffer Operations
+    # Framebuffer + Pixel Drawing — delegated to virtio_gpu_ops.spl
     # ========================================================================
 
     me flush():
-        """Flush the framebuffer to the display.
-
-        Sends TRANSFER_TO_HOST_2D to copy framebuffer data to the resource,
-        then RESOURCE_FLUSH to update the scanout.
-        """
-        if not self.initialized:
-            return
-
-        # TRANSFER_TO_HOST_2D: copy backing store → resource
-        self._write_ctrl_hdr(0x0105)
-        ram_write32(self.cmd_buf_virt + 24, 0)               # rect.x
-        ram_write32(self.cmd_buf_virt + 28, 0)               # rect.y
-        ram_write32_raw(self.cmd_buf_virt + 32, self.width.to_u64())      # rect.width
-        ram_write32_raw(self.cmd_buf_virt + 36, self.height.to_u64())     # rect.height
-        ram_write64(self.cmd_buf_virt + 40, 0)               # offset
-        ram_write32_raw(self.cmd_buf_virt + 48, self.resource_id.to_u64())
-        ram_write32(self.cmd_buf_virt + 52, 0)               # padding
-        self._send_command(56, 24)
-
-        # RESOURCE_FLUSH: signal device to update scanout
-        self._write_ctrl_hdr(0x0104)
-        ram_write32(self.cmd_buf_virt + 24, 0)               # rect.x
-        ram_write32(self.cmd_buf_virt + 28, 0)               # rect.y
-        ram_write32_raw(self.cmd_buf_virt + 32, self.width.to_u64())      # rect.width
-        ram_write32_raw(self.cmd_buf_virt + 36, self.height.to_u64())     # rect.height
-        ram_write32_raw(self.cmd_buf_virt + 40, self.resource_id.to_u64())
-        ram_write32(self.cmd_buf_virt + 44, 0)               # padding
-        self._send_command(48, 24)
+        virtio_gpu_flush(self)
 
     me flush_rect(x: u32, y: u32, w: u32, h: u32):
-        """Flush a rectangular region of the framebuffer to the display.
-
-        More efficient than full flush when only a small area changed.
-        """
-        if not self.initialized:
-            return
-
-        # Clamp to display bounds
-        var rw: u32 = w
-        var rh: u32 = h
-        if x.to_u64() + rw.to_u64() > self.width.to_u64():
-            rw = (self.width.to_u64() - x.to_u64()).to_u32()
-        if y.to_u64() + rh.to_u64() > self.height.to_u64():
-            rh = (self.height.to_u64() - y.to_u64()).to_u32()
-
-        # TRANSFER_TO_HOST_2D for the region
-        val offset = (y.to_u64() * self.width.to_u64() + x.to_u64()) * 4
-        self._write_ctrl_hdr(0x0105)
-        ram_write32(self.cmd_buf_virt + 24, x)
-        ram_write32(self.cmd_buf_virt + 28, y)
-        ram_write32(self.cmd_buf_virt + 32, rw)
-        ram_write32(self.cmd_buf_virt + 36, rh)
-        ram_write64(self.cmd_buf_virt + 40, offset)
-        ram_write32_raw(self.cmd_buf_virt + 48, self.resource_id.to_u64())
-        ram_write32(self.cmd_buf_virt + 52, 0)
-        self._send_command(56, 24)
-
-        # RESOURCE_FLUSH for the region
-        self._write_ctrl_hdr(0x0104)
-        ram_write32(self.cmd_buf_virt + 24, x)
-        ram_write32(self.cmd_buf_virt + 28, y)
-        ram_write32(self.cmd_buf_virt + 32, rw)
-        ram_write32(self.cmd_buf_virt + 36, rh)
-        ram_write32_raw(self.cmd_buf_virt + 40, self.resource_id.to_u64())
-        ram_write32(self.cmd_buf_virt + 44, 0)
-        self._send_command(48, 24)
-
-    # ========================================================================
-    # Pixel Drawing
-    # ========================================================================
+        virtio_gpu_flush_rect(self, x, y, w, h)
 
     me put_pixel(x: u32, y: u32, color: u32):
-        """Write a single pixel to the framebuffer (BGRA format).
-
-        Color format: 0xAARRGGBB (alpha in high byte, blue in low byte).
-        Does not flush — call flush() or flush_rect() after drawing.
-        """
-        if x.to_u64() < self.width.to_u64() and y.to_u64() < self.height.to_u64():
-            val offset = (y.to_u64() * self.width.to_u64() + x.to_u64()) * 4
-            ram_write32(self.fb_virt + offset, color)
+        virtio_gpu_put_pixel(self, x, y, color)
 
     me fill_rect(x: u32, y: u32, w: u32, h: u32, color: u32):
-        """Fill a rectangle in the framebuffer with a solid color.
-
-        Does not flush — call flush() or flush_rect() after drawing.
-        """
-        var py: u32 = y
-        while py.to_u64() < (y + h).to_u64() and py.to_u64() < self.height.to_u64():
-            var px: u32 = x
-            while px.to_u64() < (x + w).to_u64() and px.to_u64() < self.width.to_u64():
-                val offset = (py.to_u64() * self.width.to_u64() + px.to_u64()) * 4
-                ram_write32(self.fb_virt + offset, color)
-                px = px + 1
-            py = py + 1
+        virtio_gpu_fill_rect(self, x, y, w, h, color)
 
     me clear(color: u32):
-        """Fill the entire framebuffer with a solid color."""
-        var y: u32 = 0
-        while y.to_u64() < self.height.to_u64():
-            var x: u32 = 0
-            while x.to_u64() < self.width.to_u64():
-                val offset = (y.to_u64() * self.width.to_u64() + x.to_u64()) * 4
-                ram_write32(self.fb_virt + offset, color)
-                x = x + 1
-            y = y + 1
+        virtio_gpu_clear(self, color)
 
     me draw_hline(x: u32, y: u32, length: u32, color: u32):
-        """Draw a horizontal line."""
-        if y.to_u64() >= self.height.to_u64():
-            return
-        var px: u32 = x
-        while px.to_u64() < (x + length).to_u64() and px.to_u64() < self.width.to_u64():
-            val offset = (y.to_u64() * self.width.to_u64() + px.to_u64()) * 4
-            ram_write32(self.fb_virt + offset, color)
-            px = px + 1
+        virtio_gpu_draw_hline(self, x, y, length, color)
 
     me draw_vline(x: u32, y: u32, length: u32, color: u32):
-        """Draw a vertical line."""
-        if x.to_u64() >= self.width.to_u64():
-            return
-        var py: u32 = y
-        while py.to_u64() < (y + length).to_u64() and py.to_u64() < self.height.to_u64():
-            val offset = (py.to_u64() * self.width.to_u64() + x.to_u64()) * 4
-            ram_write32(self.fb_virt + offset, color)
-            py = py + 1
+        virtio_gpu_draw_vline(self, x, y, length, color)
 
     me draw_rect(x: u32, y: u32, w: u32, h: u32, color: u32):
-        """Draw an unfilled rectangle (border only)."""
-        self.draw_hline(x, y, w, color)             # top
-        self.draw_hline(x, y + h - 1, w, color)    # bottom
-        self.draw_vline(x, y, h, color)             # left
-        self.draw_vline(x + w - 1, y, h, color)    # right
+        virtio_gpu_draw_rect(self, x, y, w, h, color)
 
     # ========================================================================
     # Query

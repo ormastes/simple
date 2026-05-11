@@ -160,4 +160,82 @@ extern SimdTextDispatch g_simd_text;
 
 void simd_text_init(void);
 
+/* ================================================================
+ * SimdCryptoDispatch — function-pointer table for crypto operations
+ *
+ * Scalar fallbacks initialized at startup; upgraded when AES-NI,
+ * SHA-NI, PCLMULQDQ, or NEON crypto extensions are detected.
+ * ================================================================ */
+
+typedef struct {
+    void (*aes_encrypt_block)(const uint8_t* in, uint8_t* out, const uint8_t* round_keys, int rounds);
+    void (*aes_decrypt_block)(const uint8_t* in, uint8_t* out, const uint8_t* round_keys, int rounds);
+    void (*sha256_compress)(uint32_t state[8], const uint8_t* block);
+    void (*chacha20_block)(uint32_t out[16], const uint32_t in[16]);
+    uint32_t (*crc32_update)(uint32_t crc, const uint8_t* data, uint64_t len);
+    void (*ghash_multiply)(uint8_t* result, const uint8_t* h, const uint8_t* x);
+} SimdCryptoDispatch;
+
+extern SimdCryptoDispatch g_simd_crypto;
+
+void simd_crypto_init(void);
+
+/* ================================================================
+ * Feature detection for crypto extensions
+ * ================================================================ */
+
+static inline int simd_detect_aesni(void) {
+#if SIMD_HAS_X86
+#  if defined(__GNUC__) || defined(__clang__)
+    unsigned int eax, ebx, ecx, edx;
+    if (!__get_cpuid(1, &eax, &ebx, &ecx, &edx)) return 0;
+    return (ecx & (1U << 25)) ? 1 : 0;
+#  elif defined(_MSC_VER)
+    int info[4];
+    __cpuid(info, 1);
+    return (info[2] & (1 << 25)) ? 1 : 0;
+#  else
+    return 0;
+#  endif
+#else
+    return 0;
+#endif
+}
+
+static inline int simd_detect_sha_ni(void) {
+#if SIMD_HAS_X86
+#  if defined(__GNUC__) || defined(__clang__)
+    unsigned int eax, ebx, ecx, edx;
+    if (!__get_cpuid_count(7, 0, &eax, &ebx, &ecx, &edx)) return 0;
+    return (ebx & (1U << 29)) ? 1 : 0;
+#  elif defined(_MSC_VER)
+    int info[4];
+    __cpuidex(info, 7, 0);
+    return (info[1] & (1 << 29)) ? 1 : 0;
+#  else
+    return 0;
+#  endif
+#else
+    return 0;
+#endif
+}
+
+static inline int simd_detect_pclmulqdq(void) {
+#if SIMD_HAS_X86
+#  if defined(__GNUC__) || defined(__clang__)
+    unsigned int eax, ebx, ecx, edx;
+    if (!__get_cpuid(1, &eax, &ebx, &ecx, &edx)) return 0;
+    return (ecx & (1U << 1)) ? 1 : 0;
+#  elif defined(_MSC_VER)
+    int info[4];
+    __cpuid(info, 1);
+    return (info[2] & (1 << 1)) ? 1 : 0;
+#  else
+    return 0;
+#  endif
+#else
+    return 0;
+#endif
+}
+
 #endif /* RUNTIME_SIMD_DISPATCH_H */

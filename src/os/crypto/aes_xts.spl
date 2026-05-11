@@ -5,15 +5,12 @@
 #     storage devices.
 #
 # Used by full-disk encryption: LUKS2, BitLocker, FileVault, dm-crypt,
-# VeraCrypt. No SFFI/Rust FFI shim *in the XTS layer* — pure Simple language;
-# we delegate AES block encrypt/decrypt to runtime primitives that already
-# exist (rt_aes128_encrypt_block_pure / rt_aes_decrypt_block_with_expanded).
+# VeraCrypt. No SFFI/Rust FFI shim — pure Simple language throughout.
 #
 # Reuses block primitives from os.crypto.{aes128_gcm,aes256_gcm}:
 #   - aes128_key_expansion + aes128_encrypt_block (pure — W13-A path)
 #   - aes256_key_expansion + aes256_encrypt_block (pure — W13-A path)
-# Decrypt uses rt_aes_decrypt_block_with_expanded (same primitive
-# src/lib/common/aes/cipher.spl uses).
+# Decrypt uses _aes_decrypt_block_pure (inline AES inverse cipher).
 #
 # Exposed surface:
 #   aes128_xts_encrypt_sector(key1, key2, sector_idx, plaintext) -> ciphertext
@@ -333,16 +330,6 @@ fn _aes128_decrypt_block(block: [u8], key: [u8]) -> [u8]:
     _aes_decrypt_block_pure(block, expanded, 10)
 
 fn _aes256_decrypt_block(block: [u8], key: [u8]) -> [u8]:
-    # AES-256 uses 14 rounds; key_expansion in os.crypto.aes256_gcm produces
-    # the 240-byte schedule that rt_aes_decrypt_block_with_expanded expects.
-    # We import only aes256_encrypt_block (key-taking variant); to drive the
-    # decrypt extern we re-derive the schedule via the same key-expansion
-    # primitive aes256_encrypt_block calls internally. Inline the relevant
-    # primitive here through aes256_encrypt_block's import is impossible
-    # (it's not re-exported), so we route through the runtime helper directly.
-    # NOTE: aes256_gcm does NOT export aes256_key_expansion; we expand by
-    # encrypting a sentinel… too brittle. Instead we issue a dedicated
-    # decrypt-with-raw-key path below.
     _aes256_decrypt_block_with_raw_key(block, key)
 
 # Inline AES-256 key expansion mirror — copy of aes256_gcm.aes256_key_expansion.
@@ -433,8 +420,7 @@ fn _aes_rcon(index: i64) -> u32:
 
 # AES-256 key expansion (FIPS 197 §5.2 with NK=8 special cases).
 # Produces a 240-byte schedule = 60 32-bit words; layout matches
-# aes256_gcm.aes256_key_expansion byte-for-byte (verified against the
-# rt_aes_decrypt_block_with_expanded contract).
+# aes256_gcm.aes256_key_expansion byte-for-byte.
 fn _aes256_expand_key(key: [u8]) -> [u8]:
     val nk: u64 = 8
     val nr: u64 = 14
