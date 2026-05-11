@@ -1,0 +1,370 @@
+# VFS Boot Initialization — module state and boot init functions
+#
+# MDSOC: feature dimension, vfs layer
+#
+# Owns the module-level globals (g_vfs, g_nvme, g_adapter, etc.) and
+# the boot init functions that bring up the storage stack.
+
+use os.services.vfs.vfs.{VfsManager, Filesystem}
+use os.services.vfs.vfs_service.{VfsService}
+use os.services.vfs.vfs_block_adapters.{
+    CNvmeBlockAdapter, NvmeBlockAdapter,
+    simpleos_nvme_init, simpleos_nvme_read_sector, simpleos_nvme_write_sector,
+    simpleos_fat32_path_read_buffer_addr, simpleos_fat32_read_path,
+    simpleos_fat32_read_path_size, simpleos_fat32_read_path_array,
+    FAT32_PATH_READ_BUFFER_MAX
+}
+use os.services.fat32.fat32.{Fat32Driver as Fat32Core}
+use os.services.block_device.{BlockDevice}
+use os.drivers.virtio.virtio_blk.{VirtioBlkDriver}
+use os.drivers.nvme.nvme_driver.{NvmeDriver, DmaAddrs}
+use os.services.pcimgr.pcimgr.{pcimgr_init, pcimgr_find_by_class, pcimgr_find_by_class_i64, pcimgr_grant_device}
+use os.services.pcimgr.driver_match.{PCI_CLASS_STORAGE, PCI_SUBCLASS_NVME}
+use os.kernel.types.device_mem_types.{DeviceGrant}
+use os.kernel.boot.mmio.{mmio_read32, mmio_write32, mmio_read64, mmio_read16, mmio_read8, mmio_write8}
+use std.fs_driver.mount_table.{MountTable}
+use std.fs_driver.fat32_stub.{FsFat32Driver}
+use std.fs_driver.instance.{DriverInstance}
+use std.fs_driver.types.{Path, MountOptions, OpenFlags}
+use os.kernel.types.fs_types.{FileFlags, DirEntry, FsNodeKind}
+use examples.nvfs.src.posix.fs_driver_impl.{NvfsPosixDriver}
+use os.kernel.log.klog_api.{log_raw_println}
+use os.kernel.loader.app_registry.{app_registry_load, app_registry_load_hardcoded_fallback, app_registry_fat32_alias, app_registry_root_alias, app_registry_cached_bytes, app_registry_cache_bytes, app_registry_boot_seed_entries, app_registry_lookup}
+extern fn serial_println(msg: text)
+extern fn rt_text_to_bytes(s: text) -> [u8]
+
+# ============================================================================
+# Module-Level State
+# ============================================================================
+
+var g_vfs: VfsManager = VfsManager.new()
+var g_nvme: NvmeDriver = NvmeDriver.new()
+
+class VfsFileSize:
+    bytes: i64
+
+    me fn to_i64() -> i64:
+        self.bytes
+var g_adapter: NvmeBlockAdapter = NvmeBlockAdapter.new(g_nvme)
+var g_c_adapter: CNvmeBlockAdapter = CNvmeBlockAdapter.new()
+var g_root_fat32: Fat32Core? = nil
+var g_root_nvfs_posix: NvfsPosixDriver? = nil
+var g_vfs_initialized: bool = false
+# M1 mount table — wired at boot after NVMe init succeeds (see vfs_boot_init).
+var g_mount_table: MountTable = MountTable.new()
+
+# ============================================================================
+# Boot Init
+# ============================================================================
+
+pub fn vfs_boot_init() -> bool:
+    """Initialize the full storage stack: PCI -> NVMe -> FAT32 -> VFS.
+
+    Uses the C NVMe bridge on baremetal, bypassing the
+    auto-stubbed Simple MMIO functions that return 0.
+
+    Returns true if VFS is ready to serve file requests.
+    """
+    log_raw_println("[vfs-init] Starting storage stack initialization...")
+
+    pcimgr_init()
+    log_raw_println("[vfs-init] PCI cache ready")
+    # Use the i64 variant with explicit i64 literals — the u8 path
+    # (pcimgr_find_by_class) silently mismatches NVMe class/subclass on
+    # baremetal Cranelift due to an integer-width comparison bug
+    # (SYS-GUI-007 root cause).
+    val nvme_class: i64 = 1  # PCI_CLASS_STORAGE (0x01)
+    val nvme_sub: i64 = 8    # PCI_SUBCLASS_NVME (0x08)
+    val nvme_idx = pcimgr_find_by_class_i64(nvme_class, nvme_sub)
+    if nvme_idx < 0:
+        log_raw_println("[vfs-init] No NVMe device found -- VFS unavailable")
+        return _vfs_boot_init_virtio_fat32()
+    log_raw_println("[vfs-init] Found NVMe device at index {nvme_idx}")
+
+    log_raw_println("[vfs-init] Initializing C-backed NVMe block adapter...")
+    val adapter_init = g_c_adapter.init_c_bridge()
+    if not adapter_init:
+        log_raw_println("[vfs-init] C NVMe adapter init failed")
+        return _vfs_boot_init_virtio_fat32()
+    log_raw_println("[vfs-init] C NVMe controller initialized!")
+    log_raw_println("[vfs-init] C NVMe + FAT32 verified (via C driver)")
+    g_vfs_initialized = true
+
+    # The pure-Simple FAT32 root driver currently exits during mount in a clean
+    # baremetal build. Keep VFS available through the C FAT32 driver-backed
+    # executable read path below; apps are still loaded from the FAT32 image as
+    # separate processes, while only storage driver code remains baremetal-aware.
+    log_raw_println("[vfs-init] FAT32 executable VFS path ready")
+
+    val manifest_bytes = simpleos_fat32_read_path_array("/SYS/APPS/APPIDX.TXT")
+    if manifest_bytes.len() > 0:
+        val manifest_text = _vfs_bytes_to_text(manifest_bytes, manifest_bytes.len().to_u64())
+        app_registry_load(manifest_text)
+        log_raw_println("[vfs-init] app-registry loaded from manifest")
+    else:
+        app_registry_load_hardcoded_fallback()
+        log_raw_println("[vfs-init] app-registry loaded from hardcoded fallback")
+
+    val exec_probe_path = "/SYS/APPS/BROWSMF.SMF"
+    val exec_probe_size = simpleos_fat32_read_path_size(exec_probe_path)
+    if exec_probe_size <= 4:
+        log_raw_println("[vfs-init] executable load probe failed path={exec_probe_path} size={exec_probe_size}")
+        return false
+    if exec_probe_size.to_u64() > FAT32_PATH_READ_BUFFER_MAX:
+        log_raw_println("[vfs-init] executable load probe failed path={exec_probe_path} oversize={exec_probe_size}")
+        return false
+    val exec_probe_read = simpleos_fat32_read_path(exec_probe_path)
+    if exec_probe_read != 0:
+        log_raw_println("[vfs-init] executable load probe failed path={exec_probe_path} rc={exec_probe_read}")
+        return false
+    if not _known_app_has_elf_magic(simpleos_fat32_path_read_buffer_addr()):
+        log_raw_println("[vfs-init] executable load probe failed path={exec_probe_path} invalid_elf")
+        return false
+    val browser_probe_bytes = _copy_bytes_from_addr(simpleos_fat32_path_read_buffer_addr(), exec_probe_size.to_u64())
+    app_registry_cache_bytes("/sys/apps/browser_demo", browser_probe_bytes)
+    log_raw_println("[vfs-init] executable load probe ok path=/sys/apps/browser_demo bytes={exec_probe_size}")
+    for seed_entry in app_registry_boot_seed_entries():
+        if seed_entry.canonical_path == "/sys/apps/browser_demo":
+            continue
+        val seed_fat32 = app_registry_fat32_alias(seed_entry.canonical_path)
+        if seed_fat32 == nil:
+            continue
+        val seed_path = seed_fat32.unwrap()
+        val seed_root = app_registry_root_alias(seed_entry.canonical_path)
+        var fat32_path = seed_path
+        if seed_root != nil:
+            val root_bytes = _seed_c_fat32_exec_bytes(seed_entry.canonical_path, seed_root.unwrap())
+            if root_bytes.len() > 0:
+                app_registry_cache_bytes(seed_entry.canonical_path, root_bytes)
+                continue
+        val seed_bytes = _seed_c_fat32_exec_bytes(seed_entry.canonical_path, fat32_path)
+        if seed_bytes.len() > 0:
+            app_registry_cache_bytes(seed_entry.canonical_path, seed_bytes)
+
+    log_raw_println("[vfs-init] VFS ready (C-backed)")
+    return true
+
+fn _vfs_boot_init_pure_nvme_fat32(nvme_idx: u64) -> bool:
+    """Try the pure-Simple NVMe -> BlockDevice -> FAT32 stack first."""
+    log_raw_println("[vfs-init] Trying pure-Simple NVMe + FAT32 stack...")
+    val grant_result = pcimgr_grant_device(nvme_idx, 0)
+    if grant_result.is_err():
+        log_raw_println("[vfs-init] pure-Simple NVMe grant failed: {grant_result.unwrap_err()}")
+        return false
+    g_nvme = NvmeDriver.new()
+    val nvme_init = g_nvme.init_from_grant(grant_result.unwrap())
+    if nvme_init.is_err():
+        log_raw_println("[vfs-init] pure-Simple NVMe init failed: {nvme_init.unwrap_err()}")
+        return false
+    g_adapter = NvmeBlockAdapter.new(g_nvme)
+    val bounce_init = g_adapter.init_bounce_buffer()
+    if bounce_init.is_err():
+        log_raw_println("[vfs-init] pure-Simple NVMe bounce buffer failed: {bounce_init.unwrap_err()}")
+        return false
+    var root = Fat32Core.new(g_adapter)
+    val mount_result = root.mount("", "")
+    if mount_result.is_err():
+        log_raw_println("[vfs-init] pure-Simple FAT32 mount failed: {mount_result.unwrap_err()}")
+        return false
+    val version_probe = g_vfs_root_read_file_bytes(root, "/VERSION.TXT")
+    if version_probe.len() <= 0:
+        log_raw_println("[vfs-init] version file read probe failed path=/VERSION.TXT")
+        return false
+    var exec_probe = g_vfs_root_read_file_bytes(root, "/SYS/APPS/BROWSMF.SMF")
+    if exec_probe.len() <= 4 or not _bytes_have_elf_magic(exec_probe):
+        # Wave-4a bake produces flat-root images (no subdir support);
+        # try root /BROWSMF.SMF as fallback.
+        log_raw_println("[vfs-init] subdir probe failed, trying root /BROWSMF.SMF")
+        exec_probe = g_vfs_root_read_file_bytes(root, "/BROWSMF.SMF")
+        if exec_probe.len() <= 4 or not _bytes_have_elf_magic(exec_probe):
+            log_raw_println("[vfs-init] executable load probe failed path=/SYS/APPS/BROWSMF.SMF and /BROWSMF.SMF")
+            return false
+    g_root_fat32 = Some(root)
+    g_vfs_initialized = true
+    log_raw_println("[vfs-init] version file read ok path=/sys/version.txt bytes={version_probe.len()}")
+    log_raw_println("[vfs-init] executable load probe ok path=/sys/apps/browser_demo.smf bytes={exec_probe.len()}")
+    log_raw_println("[vfs-init] VFS ready (pure-Simple NVMe + FAT32)")
+    true
+
+fn _vfs_boot_init_virtio_fat32() -> bool:
+    """Initialize VFS from QEMU virtio-blk FAT32 media on ARM virt machines."""
+    log_raw_println("[vfs-init] Starting VirtIO-BLK FAT32 initialization...")
+    val dev_opt = VirtioBlkDriver.probe()
+    if dev_opt == nil:
+        log_raw_println("[vfs-init] No VirtIO-BLK device found -- VFS unavailable")
+        return false
+    var dev: VirtioBlkDriver = dev_opt.unwrap()
+    val dev_init = dev.init()
+    if dev_init.is_err():
+        log_raw_println("[vfs-init] VirtIO-BLK init failed")
+        return false
+
+    var root = Fat32Core.new(dev)
+    val mount_result = root.mount("", "")
+    if mount_result.is_err():
+        log_raw_println("[vfs-init] VirtIO FAT32 mount failed: {mount_result.unwrap_err()}")
+        return false
+
+    g_root_fat32 = Some(root)
+    g_vfs_initialized = true
+    log_raw_println("[vfs-init] VirtIO FAT32 mounted at /")
+
+    val probe = g_vfs_read_file_bytes("/SYS/APPS/HELLOSMF.SMF")
+    if probe.len() <= 4:
+        log_raw_println("[vfs-init] executable load probe failed path=/SYS/APPS/HELLOSMF.SMF")
+        return false
+    log_raw_println("[vfs-init] executable load probe ok path=/sys/apps/hello_world.smf bytes={probe.len()}")
+    log_raw_println("[vfs-init] VFS ready (VirtIO-BLK FAT32)")
+    true
+
+# ============================================================================
+# VFS IPC Service
+# ============================================================================
+
+pub fn vfs_service_start():
+    """Start the VFS IPC service loop (blocking).
+
+    For cooperative scheduling, use vfs_service_init_port() + vfs_service_poll().
+    """
+    if not g_vfs_initialized:
+        log_raw_println("[vfs] Cannot start service -- not initialized")
+        return
+    var service = VfsService.new(g_vfs)
+    service.start()
+
+# Module-level VFS service instance for cooperative scheduling
+var g_vfs_service: VfsService? = nil
+
+pub fn vfs_service_init_port():
+    """Initialize the VFS IPC port without entering the blocking loop.
+
+    Use with vfs_service_poll() for cooperative scheduling.
+    """
+    if not g_vfs_initialized:
+        log_raw_println("[vfs] Cannot init port -- not initialized")
+        return
+    g_vfs_service = VfsService.new(g_vfs)
+    g_vfs_service.init_port()
+
+pub fn vfs_service_poll():
+    """Process one VFS IPC request if available (non-blocking).
+
+    Call from a cooperative main loop alongside netstack and shell.
+    """
+    if g_vfs_service != nil:
+        g_vfs_service.poll_once()
+
+# ============================================================================
+# Query Helpers
+# ============================================================================
+
+pub fn vfs_is_ready() -> bool:
+    """Check if VFS has been initialized and is ready for file operations."""
+    g_vfs_initialized
+
+pub fn vfs_get_manager() -> VfsManager:
+    """Return the global VFS manager instance."""
+    g_vfs
+
+# ============================================================================
+# Internal helpers used by boot init
+# ============================================================================
+
+fn _vfs_bytes_to_text(buf: [u8], count: i64) -> text:
+    var result: text = ""
+    var i: i64 = 0
+    while i < count and i < buf.len():
+        result = result + buf[i as i32].chr()
+        i = i + 1
+    result
+
+fn _known_app_has_elf_magic(buf_addr: u64) -> bool:
+    if mmio_read8(buf_addr) != 0x7F.to_u8():
+        return false
+    if mmio_read8(buf_addr + 1) != 0x45.to_u8():
+        return false
+    if mmio_read8(buf_addr + 2) != 0x4C.to_u8():
+        return false
+    if mmio_read8(buf_addr + 3) != 0x46.to_u8():
+        return false
+    true
+
+fn _bytes_have_elf_magic(bytes: [u8]) -> bool:
+    if bytes.len() < 4:
+        return false
+    bytes[0] == 0x7F.to_u8() and
+        bytes[1] == 0x45.to_u8() and
+        bytes[2] == 0x4C.to_u8() and
+        bytes[3] == 0x46.to_u8()
+
+fn _copy_bytes_from_addr(addr: u64, size: u64) -> [u8]:
+    var out: [u8] = []
+    var i: u64 = 0
+    while i < size:
+        out.push(mmio_read8(addr + i))
+        i = i + 1
+    out
+
+fn _cache_c_fat32_exec_bytes(path: text) -> [u8]:
+    val signed_size = simpleos_fat32_read_path_size(path)
+    if signed_size <= 4:
+        return []
+    val file_size = signed_size.to_u64()
+    if file_size > FAT32_PATH_READ_BUFFER_MAX:
+        return []
+    val read_result = simpleos_fat32_read_path(path)
+    if read_result != 0:
+        return []
+    if not _known_app_has_elf_magic(simpleos_fat32_path_read_buffer_addr()):
+        return []
+    _copy_bytes_from_addr(simpleos_fat32_path_read_buffer_addr(), file_size)
+
+fn _seed_c_fat32_exec_bytes(label: text, path: text) -> [u8]:
+    val bytes = _cache_c_fat32_exec_bytes(path)
+    if bytes.len() > 0:
+        serial_println("[vfs-fix] {label} seeded len={bytes.len()} path={path}")
+    else:
+        serial_println("[vfs-fix] {label} probe skipped path={path}")
+    bytes
+
+fn g_vfs_root_read_file_bytes(driver: Fat32Core, path: text) -> [u8]:
+    val cached = _g_vfs_root_read_file_bytes_once(driver, path)
+    if cached.len() > 0:
+        return cached
+
+    # Live desktop-disk QEMU currently reaches a state where the persisted
+    # root-driver instance can fail lookups even though the device and volume
+    # are healthy. Retry with a fresh mount on the same block adapter so
+    # filesystem-backed app exec can still use real disk bytes.
+    var retry_driver = Fat32Core.new(g_c_adapter)
+    val retry_mount = retry_driver.mount("", "")
+    if retry_mount.is_err():
+        log_raw_println("[vfs-root] retry_mount_failed path={path} err={retry_mount.unwrap_err()}")
+        return []
+    log_raw_println("[vfs-root] retry_mount_ok path={path}")
+    val retried = _g_vfs_root_read_file_bytes_once(retry_driver, path)
+    if retried.len() > 0:
+        return retried
+
+    []
+
+fn _g_vfs_root_read_file_bytes_once(driver: Fat32Core, path: text) -> [u8]:
+    val flags = FileFlags(read: true, write: false, create: false, append: false, truncate: false)
+    val stat_r = driver.stat(path)
+    if stat_r.is_err():
+        log_raw_println("[vfs-root] stat_failed path={path}")
+    else:
+        log_raw_println("[vfs-root] stat_ok path={path} size={stat_r.unwrap().size}")
+    val open_r = driver.open(path, flags)
+    if open_r.is_err():
+        log_raw_println("[vfs-root] open_failed path={path}")
+        return []
+    val handle = open_r.unwrap()
+    val read_r = driver.read(handle, 1048576)
+    driver.close(handle)
+    if read_r.is_err():
+        log_raw_println("[vfs-root] read_failed path={path}")
+        return []
+    val data = read_r.unwrap()
+    log_raw_println("[vfs-root] read_ok path={path} bytes={data.len()}")
+    data

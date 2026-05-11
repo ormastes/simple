@@ -14,7 +14,7 @@ use compiler.backend.callback_trampoline.{is_callback_type, build_callback_typed
 use compiler.types.type_layout.{LayoutVerification, LayoutAttr, layoutattr_c_repr, verify_c_layout, generate_c_static_asserts, generate_c_struct_def}
 use hir_definitions.{HirField}
 use hir_types.{HirType}
-use compiler.tools.header_gen.header_utils.{to_guard_name}
+use compiler.tools.header_gen.header_utils.{to_guard_name, sanitize_c_name}
 
 # ============================================================================
 # C Header Emission
@@ -77,7 +77,7 @@ fn emit_c_header(lib_name: text, exported_fns: [MirFunction], exported_types: [M
         var rti = 0
         while rti < exported_types.len():
             val rt_type = exported_types[rti]
-            val rt_c_name = _sanitize_c_name(rt_type.name)
+            val rt_c_name = sanitize_c_name(rt_type.name)
             val rt_method_prefix = r"__simple_" + rt_c_name + r"_"
             for _sym, func in module.functions:
                 if func.name.starts_with(rt_method_prefix):
@@ -168,14 +168,6 @@ fn emit_c_header(lib_name: text, exported_fns: [MirFunction], exported_types: [M
 # Internal Helpers
 # ============================================================================
 
-fn _sanitize_c_name(name: text) -> text:
-    """Sanitize a Simple type/function name for use as a C identifier."""
-    var s = name.replace("<", "_")
-    s = s.replace(">", "")
-    s = s.replace(",", "_")
-    s = s.replace(" ", "")
-    s = s.replace("::", "_")
-    s
 
 fn _mir_function_params(func: MirFunction) -> [MirType]:
     mir_signature_params(func.signature)
@@ -213,7 +205,7 @@ fn _mir_type_to_c_return(ty: MirType) -> text:
 fn _emit_type_declarations(type_def: MirTypeDef, module: MirModule) -> [text]:
     """Emit opaque handle typedef and function declarations for an exported type."""
     var lines: [text] = []
-    val c_name = _sanitize_c_name(type_def.name)
+    val c_name = sanitize_c_name(type_def.name)
     val prefix = if type_def.export_name != "": type_def.export_name else: "spl_" + c_name
 
     lines.push(r"/* --- " + c_name + r" --- */")
@@ -307,7 +299,7 @@ fn _emit_function_declaration(func: MirFunction) -> text:
         if internal_name.starts_with(r"__simple_"):
             "spl_" + internal_name.replace(r"__simple_", "")
         else:
-            "spl_" + _sanitize_c_name(internal_name)
+            "spl_" + sanitize_c_name(internal_name)
 
     # Check for Result<T,E> return type
     if is_result_type(func.signature.return_type):
@@ -349,7 +341,7 @@ fn _emit_layout_asserts(type_def: MirTypeDef) -> text:
             if fields.len() == 0:
                 return ""
 
-            val c_name = _sanitize_c_name(type_def.name)
+            val c_name = sanitize_c_name(type_def.name)
 
             # Sort fields alphabetically by name for deterministic _Static_assert order
             val sorted_fields = fields.sort_by(\a, b:
@@ -442,7 +434,7 @@ fn _collect_callback_typedefs(exported_fns: [MirFunction], exported_types: [MirT
     var ti = 0
     while ti < exported_types.len():
         val type_def = exported_types[ti]
-        val c_name = _sanitize_c_name(type_def.name)
+        val c_name = sanitize_c_name(type_def.name)
         val method_prefix = r"__simple_" + c_name + r"_"
         for _sym, func in module.functions:
             if func.name.starts_with(method_prefix):

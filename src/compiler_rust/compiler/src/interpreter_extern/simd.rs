@@ -1150,3 +1150,140 @@ pub fn rt_db_accel_bitmap_or_words(args: &[Value]) -> Result<Value, CompileError
     let rhs = unpack_u64_array("rt_db_accel_bitmap_or_words(rhs)", &args[1])?;
     Ok(pack_u64_array(ffi_bitmap_or_words(&lhs, &rhs)))
 }
+
+// ============================================================================
+// SIMD Text Operations — interpreter-mode scalar implementations
+// ============================================================================
+
+fn extract_str(name: &str, value: &Value) -> Result<String, CompileError> {
+    match value {
+        Value::Str(s) => Ok(s.to_string()),
+        _ => Err(CompileError::runtime(format!("{name}: expected string argument"))),
+    }
+}
+
+pub fn rt_text_count_codepoints_cached(args: &[Value]) -> Result<Value, CompileError> {
+    if args.len() != 1 {
+        return Err(CompileError::runtime("rt_text_count_codepoints_cached expects 1 argument".to_string()));
+    }
+    let s = extract_str("rt_text_count_codepoints_cached", &args[0])?;
+    Ok(Value::Int(s.chars().count() as i64))
+}
+
+pub fn rt_text_is_ascii(args: &[Value]) -> Result<Value, CompileError> {
+    if args.len() != 1 {
+        return Err(CompileError::runtime("rt_text_is_ascii expects 1 argument".to_string()));
+    }
+    let s = extract_str("rt_text_is_ascii", &args[0])?;
+    Ok(Value::Bool(s.is_ascii()))
+}
+
+pub fn rt_text_validate_utf8(args: &[Value]) -> Result<Value, CompileError> {
+    if args.len() != 1 {
+        return Err(CompileError::runtime("rt_text_validate_utf8 expects 1 argument".to_string()));
+    }
+    let _s = extract_str("rt_text_validate_utf8", &args[0])?;
+    Ok(Value::Bool(true))
+}
+
+pub fn rt_text_find_invalid_utf8(args: &[Value]) -> Result<Value, CompileError> {
+    if args.len() != 1 {
+        return Err(CompileError::runtime("rt_text_find_invalid_utf8 expects 1 argument".to_string()));
+    }
+    let _s = extract_str("rt_text_find_invalid_utf8", &args[0])?;
+    Ok(Value::Int(-1))
+}
+
+pub fn rt_simd_str_search(args: &[Value]) -> Result<Value, CompileError> {
+    if args.len() != 2 {
+        return Err(CompileError::runtime("rt_simd_str_search expects 2 arguments".to_string()));
+    }
+    let haystack = extract_str("rt_simd_str_search", &args[0])?;
+    let needle = extract_str("rt_simd_str_search", &args[1])?;
+    if needle.is_empty() {
+        return Ok(Value::Int(0));
+    }
+    match haystack.find(&needle) {
+        Some(pos) => Ok(Value::Int(pos as i64)),
+        None => Ok(Value::Int(-1)),
+    }
+}
+
+pub fn rt_simd_str_last_index_of(args: &[Value]) -> Result<Value, CompileError> {
+    if args.len() != 2 {
+        return Err(CompileError::runtime("rt_simd_str_last_index_of expects 2 arguments".to_string()));
+    }
+    let haystack = extract_str("rt_simd_str_last_index_of", &args[0])?;
+    let needle = extract_str("rt_simd_str_last_index_of", &args[1])?;
+    if needle.is_empty() {
+        return Ok(Value::Int(haystack.len() as i64));
+    }
+    match haystack.rfind(&needle) {
+        Some(pos) => Ok(Value::Int(pos as i64)),
+        None => Ok(Value::Int(-1)),
+    }
+}
+
+pub fn rt_simd_str_equal(args: &[Value]) -> Result<Value, CompileError> {
+    if args.len() != 2 {
+        return Err(CompileError::runtime("rt_simd_str_equal expects 2 arguments".to_string()));
+    }
+    let a = extract_str("rt_simd_str_equal", &args[0])?;
+    let b = extract_str("rt_simd_str_equal", &args[1])?;
+    Ok(Value::Bool(a == b))
+}
+
+pub fn rt_text_to_upper_ascii(args: &[Value]) -> Result<Value, CompileError> {
+    if args.len() != 1 {
+        return Err(CompileError::runtime("rt_text_to_upper_ascii expects 1 argument".to_string()));
+    }
+    let s = extract_str("rt_text_to_upper_ascii", &args[0])?;
+    let result: String = s.bytes().map(|b| {
+        if b >= b'a' && b <= b'z' { (b - 32) as char } else { b as char }
+    }).collect();
+    Ok(Value::Str(result.into()))
+}
+
+pub fn rt_text_to_lower_ascii(args: &[Value]) -> Result<Value, CompileError> {
+    if args.len() != 1 {
+        return Err(CompileError::runtime("rt_text_to_lower_ascii expects 1 argument".to_string()));
+    }
+    let s = extract_str("rt_text_to_lower_ascii", &args[0])?;
+    let result: String = s.bytes().map(|b| {
+        if b >= b'A' && b <= b'Z' { (b + 32) as char } else { b as char }
+    }).collect();
+    Ok(Value::Str(result.into()))
+}
+
+pub fn rt_swi_build(args: &[Value]) -> Result<Value, CompileError> {
+    if args.len() != 1 { return Err(CompileError::runtime("rt_swi_build expects 1 argument".to_string())); }
+    Ok(Value::Int(0))
+}
+pub fn rt_swi_char_to_byte(args: &[Value]) -> Result<Value, CompileError> {
+    if args.len() != 2 { return Err(CompileError::runtime("rt_swi_char_to_byte expects 2 arguments".to_string())); }
+    Ok(Value::Int(-1))
+}
+pub fn rt_swi_byte_to_char(args: &[Value]) -> Result<Value, CompileError> {
+    if args.len() != 2 { return Err(CompileError::runtime("rt_swi_byte_to_char expects 2 arguments".to_string())); }
+    Ok(Value::Int(-1))
+}
+pub fn rt_swi_free(args: &[Value]) -> Result<Value, CompileError> {
+    let _ = args;
+    Ok(Value::Nil)
+}
+pub fn rt_rank_select_build(args: &[Value]) -> Result<Value, CompileError> {
+    if args.len() != 1 { return Err(CompileError::runtime("rt_rank_select_build expects 1 argument".to_string())); }
+    Ok(Value::Int(0))
+}
+pub fn rt_rank_query(args: &[Value]) -> Result<Value, CompileError> {
+    if args.len() != 2 { return Err(CompileError::runtime("rt_rank_query expects 2 arguments".to_string())); }
+    Ok(Value::Int(-1))
+}
+pub fn rt_select_query(args: &[Value]) -> Result<Value, CompileError> {
+    if args.len() != 2 { return Err(CompileError::runtime("rt_select_query expects 2 arguments".to_string())); }
+    Ok(Value::Int(-1))
+}
+pub fn rt_rank_select_free(args: &[Value]) -> Result<Value, CompileError> {
+    let _ = args;
+    Ok(Value::Nil)
+}

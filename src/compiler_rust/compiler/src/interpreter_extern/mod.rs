@@ -982,6 +982,23 @@ pub(crate) fn call_extern_function(
         "rt_utf8_validate" => simd::rt_utf8_validate(&evaluated),
         "rt_utf8_find_invalid" => simd::rt_utf8_find_invalid(&evaluated),
         "rt_text_count_codepoints" => simd::rt_text_count_codepoints(&evaluated),
+        "rt_text_count_codepoints_cached" => simd::rt_text_count_codepoints_cached(&evaluated),
+        "rt_text_is_ascii" => simd::rt_text_is_ascii(&evaluated),
+        "rt_text_validate_utf8" => simd::rt_text_validate_utf8(&evaluated),
+        "rt_text_find_invalid_utf8" => simd::rt_text_find_invalid_utf8(&evaluated),
+        "rt_simd_str_search" => simd::rt_simd_str_search(&evaluated),
+        "rt_simd_str_last_index_of" => simd::rt_simd_str_last_index_of(&evaluated),
+        "rt_simd_str_equal" => simd::rt_simd_str_equal(&evaluated),
+        "rt_text_to_upper_ascii" => simd::rt_text_to_upper_ascii(&evaluated),
+        "rt_text_to_lower_ascii" => simd::rt_text_to_lower_ascii(&evaluated),
+        "rt_swi_build" => simd::rt_swi_build(&evaluated),
+        "rt_swi_char_to_byte" => simd::rt_swi_char_to_byte(&evaluated),
+        "rt_swi_byte_to_char" => simd::rt_swi_byte_to_char(&evaluated),
+        "rt_swi_free" => simd::rt_swi_free(&evaluated),
+        "rt_rank_select_build" => simd::rt_rank_select_build(&evaluated),
+        "rt_rank_query" => simd::rt_rank_query(&evaluated),
+        "rt_select_query" => simd::rt_select_query(&evaluated),
+        "rt_rank_select_free" => simd::rt_rank_select_free(&evaluated),
 
         // ====================================================================
         // SIMD Int Bitwise / Shift / Arithmetic Intrinsics — Phase 1
