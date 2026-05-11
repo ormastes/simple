@@ -153,17 +153,11 @@ pub fn tier_of(name: &str) -> RuntimeFuncTier {
 /// - Normal targets get Core + Alloc + Sys + Async
 /// - Ext tier (SIMD, GPU, Cranelift) is always included for now
 ///   (individual features are opt-in at the Simple source level)
-pub fn runtime_funcs_for_target(target: &simple_common::target::Target) -> Vec<&'static RuntimeFuncSpec> {
-    RUNTIME_FUNCS
-        .iter()
-        .filter(|f| {
-            match tier_of(f.name) {
-                RuntimeFuncTier::Core | RuntimeFuncTier::Alloc => true,
-                RuntimeFuncTier::Sys | RuntimeFuncTier::Async => !target.is_baremetal(),
-                RuntimeFuncTier::Ext => true, // always available; opt-in at source level
-            }
-        })
-        .collect()
+pub fn runtime_funcs_for_target(_target: &simple_common::target::Target) -> Vec<&'static RuntimeFuncSpec> {
+    // Declare all runtime functions as imports for every target.
+    // Baremetal OS kernels (SimpleOS) provide shim implementations;
+    // truly bare targets get linker errors for unresolved symbols.
+    RUNTIME_FUNCS.iter().collect()
 }
 
 /// Specification for a runtime FFI function signature.
@@ -1364,7 +1358,7 @@ mod tests {
     }
 
     #[test]
-    fn baremetal_target_filters_correctly() {
+    fn baremetal_target_includes_all_tiers() {
         use simple_common::target::{Target, TargetArch, TargetOS};
         let baremetal = Target {
             arch: TargetArch::Aarch64,
@@ -1372,16 +1366,10 @@ mod tests {
             ..Target::default()
         };
         let funcs = runtime_funcs_for_target(&baremetal);
-        // Baremetal should NOT include sys/async tier functions
-        assert!(
-            funcs.iter().all(|f| {
-                let t = tier_of(f.name);
-                t != RuntimeFuncTier::Sys && t != RuntimeFuncTier::Async
-            }),
-            "Baremetal target should not include Sys or Async tier functions"
-        );
-        // But should include Core and Alloc
+        // All tiers declared as imports; OS shim resolves at link time
         assert!(funcs.iter().any(|f| tier_of(f.name) == RuntimeFuncTier::Core));
         assert!(funcs.iter().any(|f| tier_of(f.name) == RuntimeFuncTier::Alloc));
+        assert!(funcs.iter().any(|f| tier_of(f.name) == RuntimeFuncTier::Sys));
+        assert!(funcs.iter().any(|f| tier_of(f.name) == RuntimeFuncTier::Async));
     }
 }

@@ -13,6 +13,7 @@
 
 use os.services.fat32.fat32.{Fat32Driver, Fat32DirEntry}
 use os.services.block_device.{BlockDevice}
+use os.services.fat32.fat32_write_helpers.{DirSlot, format_8_3_name, _parse_8_3_name}
 
 val FAT32_ATTR_DIRECTORY: u8 = 0x10
 val FAT32_ATTR_ARCHIVE: u8 = 0x20
@@ -776,90 +777,3 @@ impl Fat32WriteContext:
             offset_in_cluster = 0  # Subsequent clusters start at offset 0
 
         Result.Ok(bytes_written)
-
-# ============================================================================
-# Directory Slot
-# ============================================================================
-
-struct DirSlot:
-    """Location of a directory entry within a cluster."""
-    cluster: u32
-    offset: u32     # Byte offset within the cluster
-
-# ============================================================================
-# Helper Functions
-# ============================================================================
-
-fn format_8_3_name(name: text) -> [u8]:
-    """Convert a filename to FAT32 8.3 format (11 bytes, space-padded, uppercase).
-
-    Rules:
-    - Name part: up to 8 characters, space-padded
-    - Extension: up to 3 characters, space-padded
-    - All uppercase
-    - Split on last '.' for extension
-    """
-    var name_part = ""
-    var ext_part = ""
-    val upper = name.upper()
-
-    # Find last dot for extension
-    var last_dot: i32 = -1
-    var ci = 0
-    while ci < upper.len():
-        if upper.slice(ci, ci + 1) == ".":
-            last_dot = ci.to_i32()
-        ci = ci + 1
-
-    if last_dot >= 0:
-        var j = 0
-        while j < upper.len():
-            if j < last_dot:
-                name_part = name_part + upper.slice(j, j + 1)
-            else:
-                if j > last_dot:
-                    ext_part = ext_part + upper.slice(j, j + 1)
-            j = j + 1
-    else:
-        name_part = upper
-
-    # Build 11-byte result: 8 name + 3 ext, space-padded
-    var result: [u8] = []
-    var i = 0
-    while i < 8:
-        if i < name_part.len():
-            result.push(name_part.bytes()[i])
-        else:
-            result.push(0x20)  # Space
-        i = i + 1
-
-    i = 0
-    while i < 3:
-        if i < ext_part.len():
-            result.push(ext_part.bytes()[i])
-        else:
-            result.push(0x20)  # Space
-        i = i + 1
-
-    result
-
-fn _parse_8_3_name(data: [u8], offset: i32) -> text:
-    """Parse 8.3 filename from directory entry bytes (same as Fat32Driver.parse_8_3_name)."""
-    var name = ""
-    var i = 0
-    while i < 8:
-        val ch = data[offset + i]
-        if ch != 0x20 and ch != 0x00:
-            name = name + ch.chr()
-        i = i + 1
-    var ext = ""
-    i = 0
-    while i < 3:
-        val ch = data[offset + 8 + i]
-        if ch != 0x20 and ch != 0x00:
-            ext = ext + ch.chr()
-        i = i + 1
-    if ext.len() > 0:
-        name + "." + ext
-    else:
-        name

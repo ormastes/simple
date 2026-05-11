@@ -1,0 +1,121 @@
+# Run: bin/simple test test/dbfs/dbfs_fs_driver_spec.spl
+#
+# Maps to: AC-1, AC-2, AC-6, AC-9, D1, D2, D3.
+
+"""
+DBFS FsDriver Engine Specification
+
+Verifies DbfsFsDriver — the engine-backed driver that wires NsBTree
+namespace lookups with arena-backed file data storage:
+  1. open creates a file; stat returns is_file=true
+  2. write then read round-trips content via arena
+  3. readdir lists created files
+  4. unlink hides the file from stat
+  5. rename moves path and updates NsBTree
+  6. mkdir creates directory; stat returns is_dir=true
+  7. close + read on closed handle returns error
+"""
+
+use std.spipe.*
+use std.fs_driver.types.{Path, OpenFlags, FileHandle}
+use std.fs_driver.error.{FsError}
+use std.db.dbfs_engine.fs_driver.{DbfsFsDriver}
+
+describe "DbfsFsDriver — open and stat":
+
+    it "open creates file; stat returns is_file=true":
+        val drv = DbfsFsDriver.new()
+        val fh = drv.open_path(Path(raw: "/hello.txt"), OpenFlags.create_write()).unwrap()
+        expect(fh.id > 0).to_equal(true)
+        val info = drv.stat_path(Path(raw: "/hello.txt")).unwrap()
+        expect(info.is_file).to_equal(true)
+        expect(info.is_dir).to_equal(false)
+
+    it "stat on missing path returns NotFound":
+        val drv = DbfsFsDriver.new()
+        val r = drv.stat_path(Path(raw: "/ghost.txt"))
+        expect(r.is_err()).to_equal(true)
+
+    it "stat on root returns is_dir=true":
+        val drv = DbfsFsDriver.new()
+        val info = drv.stat_path(Path(raw: "/")).unwrap()
+        expect(info.is_dir).to_equal(true)
+
+describe "DbfsFsDriver — write and read":
+
+    it "write then read_handle round-trips content":
+        val drv = DbfsFsDriver.new()
+        val fh = drv.open_path(Path(raw: "/rw.txt"), OpenFlags.create_write()).unwrap()
+        drv.write_handle(fh, "hello dbfs engine").unwrap()
+        val fh2 = drv.open_path(Path(raw: "/rw.txt"), OpenFlags.read_only()).unwrap()
+        val got = drv.read_handle(fh2, 17).unwrap()
+        expect(got).to_equal("hello dbfs engine")
+
+    it "size after write reflects byte count":
+        val drv = DbfsFsDriver.new()
+        val fh = drv.open_path(Path(raw: "/sized.txt"), OpenFlags.create_write()).unwrap()
+        drv.write_handle(fh, "abc").unwrap()
+        val info = drv.stat_path(Path(raw: "/sized.txt")).unwrap()
+        expect(info.size).to_equal(3)
+
+    it "empty file has size 0":
+        val drv = DbfsFsDriver.new()
+        val fh = drv.open_path(Path(raw: "/empty.txt"), OpenFlags.create_write()).unwrap()
+        val info = drv.stat_path(Path(raw: "/empty.txt")).unwrap()
+        expect(info.size).to_equal(0)
+
+describe "DbfsFsDriver — close":
+
+    it "read on closed handle returns error":
+        val drv = DbfsFsDriver.new()
+        val fh = drv.open_path(Path(raw: "/tmp.txt"), OpenFlags.create_write()).unwrap()
+        drv.close_handle(fh).unwrap()
+        val r = drv.read_handle(fh, 5)
+        expect(r.is_err()).to_equal(true)
+
+    it "close on invalid handle returns error":
+        val drv = DbfsFsDriver.new()
+        val bad = FileHandle(id: 9999u64)
+        val r = drv.close_handle(bad)
+        expect(r.is_err()).to_equal(true)
+
+describe "DbfsFsDriver — namespace via NsBTree":
+
+    it "readdir lists all created files":
+        val drv = DbfsFsDriver.new()
+        drv.open_path(Path(raw: "/a.txt"), OpenFlags.create_write()).unwrap()
+        drv.open_path(Path(raw: "/b.txt"), OpenFlags.create_write()).unwrap()
+        val dh = drv.opendir_path(Path(raw: "/")).unwrap()
+        val entries = drv.readdir_handle(dh).unwrap()
+        expect(entries.len() >= 2).to_equal(true)
+
+    it "unlink hides file from stat":
+        val drv = DbfsFsDriver.new()
+        drv.open_path(Path(raw: "/bye.txt"), OpenFlags.create_write()).unwrap()
+        drv.unlink_path("/bye.txt").unwrap()
+        val r = drv.stat_path(Path(raw: "/bye.txt"))
+        expect(r.is_err()).to_equal(true)
+
+    it "rename moves file to new path":
+        val drv = DbfsFsDriver.new()
+        val fh = drv.open_path(Path(raw: "/old.txt"), OpenFlags.create_write()).unwrap()
+        drv.write_handle(fh, "data").unwrap()
+        drv.rename_path("/old.txt", "/new.txt").unwrap()
+        val r_old = drv.stat_path(Path(raw: "/old.txt"))
+        expect(r_old.is_err()).to_equal(true)
+        val r_new = drv.stat_path(Path(raw: "/new.txt"))
+        expect(r_new.is_ok()).to_equal(true)
+
+describe "DbfsFsDriver — mkdir":
+
+    it "mkdir creates directory; stat returns is_dir=true":
+        val drv = DbfsFsDriver.new()
+        drv.mkdir_path("/mydir", 0o755).unwrap()
+        val info = drv.stat_path(Path(raw: "/mydir")).unwrap()
+        expect(info.is_dir).to_equal(true)
+
+    it "mkdir twice returns AlreadyExists":
+        val drv = DbfsFsDriver.new()
+        drv.mkdir_path("/dup", 0o755).unwrap()
+        val r = drv.mkdir_path("/dup", 0o755)
+        expect(r.is_err()).to_equal(true)
