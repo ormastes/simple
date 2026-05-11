@@ -337,6 +337,7 @@ fn mir_pattern_match_elementwise_loop(block: MirBlock) -> VectorRecipe?:
     var last_binop_op: text = ""
     var induction_local: LocalId? = nil
     var element_type_hint = "f32"
+    var has_integer_op = false
 
     for inst in block.instructions:
         match inst.kind:
@@ -355,6 +356,8 @@ fn mir_pattern_match_elementwise_loop(block: MirBlock) -> VectorRecipe?:
                 else:
                     binop_count = binop_count + 1
                     last_binop_op = _binop_name(op)
+                    if last_binop_op == "xor" or last_binop_op == "and" or last_binop_op == "or" or last_binop_op == "shl" or last_binop_op == "shr":
+                        has_integer_op = true
             case Call(dest, func, args):
                 call_count = call_count + 1
             case CallIndirect(dest, ptr, args, sig):
@@ -390,6 +393,8 @@ fn mir_pattern_match_elementwise_loop(block: MirBlock) -> VectorRecipe?:
         else:
             output_base = Some(access.base_array)
 
+    if has_integer_op:
+        element_type_hint = "i32"
     val elem_width = get_simd_width(element_type_hint)
 
     # Build recipe — trip count unknown until SCEV lands (Wave L)
@@ -520,18 +525,18 @@ fn mir_pattern_match_reduction(block: MirBlock, has_fast_math: bool) -> VectorRe
     # §8 failure mode F3: FP reductions require fast-math permission.
     # K3 hardcodes element_type = "f32" (Wave K3 limitation — see docstring).
     # Refuse the recipe unless the caller's function has has_fast_math set.
-    val is_fp_type = true  # K3 always emits f32; Wave L will detect i32/i64 here
+    val red_has_int_op = last_binop_op == "xor" or last_binop_op == "and" or last_binop_op == "or" or last_binop_op == "shl" or last_binop_op == "shr"
+    val is_fp_type = not red_has_int_op
     if is_fp_type and not has_fast_math:
         return nil
 
-    # W-recipe: collect GEP base arrays for input loads (no output store in reduction)
     val accesses = detect_array_accesses(block)
     var input_bases: [LocalId] = []
     for access in accesses:
         if access.is_load:
             input_bases.push(access.base_array)
 
-    val red_elem_type = "f32"
+    val red_elem_type = if red_has_int_op: "i32" else: "f32"
     val red_width = get_simd_width(red_elem_type)
 
     Some(VectorRecipe(

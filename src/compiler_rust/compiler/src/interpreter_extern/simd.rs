@@ -1238,10 +1238,8 @@ pub fn rt_text_to_upper_ascii(args: &[Value]) -> Result<Value, CompileError> {
         return Err(CompileError::runtime("rt_text_to_upper_ascii expects 1 argument".to_string()));
     }
     let s = extract_str("rt_text_to_upper_ascii", &args[0])?;
-    let result: String = s.bytes().map(|b| {
-        if b >= b'a' && b <= b'z' { (b - 32) as char } else { b as char }
-    }).collect();
-    Ok(Value::Str(result.into()))
+    let bytes: Vec<u8> = s.bytes().map(|b| if b >= b'a' && b <= b'z' { b - 32 } else { b }).collect();
+    Ok(Value::Str(String::from_utf8_lossy(&bytes).into()))
 }
 
 pub fn rt_text_to_lower_ascii(args: &[Value]) -> Result<Value, CompileError> {
@@ -1249,10 +1247,8 @@ pub fn rt_text_to_lower_ascii(args: &[Value]) -> Result<Value, CompileError> {
         return Err(CompileError::runtime("rt_text_to_lower_ascii expects 1 argument".to_string()));
     }
     let s = extract_str("rt_text_to_lower_ascii", &args[0])?;
-    let result: String = s.bytes().map(|b| {
-        if b >= b'A' && b <= b'Z' { (b + 32) as char } else { b as char }
-    }).collect();
-    Ok(Value::Str(result.into()))
+    let bytes: Vec<u8> = s.bytes().map(|b| if b >= b'A' && b <= b'Z' { b + 32 } else { b }).collect();
+    Ok(Value::Str(String::from_utf8_lossy(&bytes).into()))
 }
 
 pub fn rt_swi_build(args: &[Value]) -> Result<Value, CompileError> {

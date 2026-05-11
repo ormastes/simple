@@ -1,0 +1,380 @@
+# VFS Write Operations — file write, cursor, and removable media
+#
+# MDSOC: feature dimension, vfs layer
+#
+# Provides the public write API (g_vfs_write_file_text/bytes, g_vfs_delete_file,
+# g_vfs_readdir, g_vfs_file_exists, g_vfs_select_file cursor) and removable
+# media mount/unmount helpers.
+
+use os.services.vfs.vfs.{VfsManager, Filesystem}
+use os.services.vfs.vfs_boot_init.{
+    g_root_fat32, g_root_nvfs_posix, g_vfs_initialized, g_mount_table, g_vfs
+}
+use os.services.vfs.vfs_dispatch.{
+    g_vfs_dispatch_write_file_text, g_vfs_dispatch_write_file_bytes,
+    g_vfs_dispatch_delete_file, g_vfs_dispatch_file_exists
+}
+use os.services.fat32.fat32.{Fat32Driver as Fat32Core}
+use os.services.block_device.{BlockDevice}
+use os.drivers.virtio.virtio_blk.{VirtioBlkDriver}
+use std.fs_driver.mount_table.{MountTable}
+use std.fs_driver.fat32_stub.{FsFat32Driver}
+use std.fs_driver.instance.{DriverInstance}
+use std.fs_driver.types.{Path, MountOptions, OpenFlags}
+use os.kernel.types.fs_types.{FileFlags, DirEntry, FsNodeKind}
+use examples.nvfs.src.posix.fs_driver_impl.{NvfsPosixDriver}
+use common.string_core.{str_char_at}
+use os.kernel.loader.app_registry.{app_registry_fat32_alias}
+use os.kernel.log.klog_api.{log_raw_println}
+extern fn serial_println(msg: text)
+extern fn rt_text_to_bytes(s: text) -> [u8]
+extern fn simpleos_fat32_read_path_size(path: text) -> i64
+
+fn _vfs_text_to_bytes(text_value: text) -> [u8]:
+    rt_text_to_bytes(text_value)
+
+fn _vfs_bytes_to_text(buf: [u8], count: i64) -> text:
+    var result: text = ""
+    var i: i64 = 0
+    while i < count and i < buf.len():
+        result = result + buf[i as i32].chr()
+        i = i + 1
+    result
+
+fn g_vfs_abs_path(name: text) -> Path:
+    """Return an absolute Path for name, prepending '/' if bare."""
+    if name.starts_with("/"):
+        Path(raw: name)
+    else:
+        Path(raw: "/" + name)
+
+fn g_vfs_root_path(name: text) -> text:
+    if name.starts_with("/"):
+        name
+    else:
+        "/" + name
+
+fn g_vfs_root_write_file_text(driver: Fat32Core, path: text, content: text) -> bool:
+    val flags = FileFlags(read: true, write: true, create: true, append: false, truncate: true)
+    val open_r = driver.open(path, flags)
+    if open_r.is_err():
+        return false
+    val handle = open_r.unwrap()
+    val buf = _vfs_text_to_bytes(content)
+    val write_r = driver.write(handle, buf)
+    driver.close(handle)
+    write_r.is_ok()
+
+fn _g_vfs_root_nvfs_posix_write_file_text(path: text, content: text) -> bool:
+    if g_root_nvfs_posix == nil:
+        return false
+    var driver = g_root_nvfs_posix.unwrap()
+    val relpath = Path(raw: path)
+    val open_r = driver.open(relpath, OpenFlags.write_only().with_append().with_create())
+    if open_r.is_err():
+        g_root_nvfs_posix = Some(driver)
+        return false
+    val handle = open_r.unwrap()
+    val trunc_r = driver.ftruncate(handle, 0)
+    if trunc_r.is_err():
+        driver.close(handle)
+        g_root_nvfs_posix = Some(driver)
+        return false
+    val write_r = driver.write(handle, 0, _vfs_text_to_bytes(content))
+    driver.close(handle)
+    g_root_nvfs_posix = Some(driver)
+    write_r.is_ok()
+
+fn _g_vfs_root_nvfs_posix_write_file_bytes(path: text, data: [u8]) -> bool:
+    if g_root_nvfs_posix == nil:
+        return false
+    var driver = g_root_nvfs_posix.unwrap()
+    val relpath = Path(raw: path)
+    val open_r = driver.open(relpath, OpenFlags.write_only().with_append().with_create())
+    if open_r.is_err():
+        g_root_nvfs_posix = Some(driver)
+        return false
+    val handle = open_r.unwrap()
+    val trunc_r = driver.ftruncate(handle, 0)
+    if trunc_r.is_err():
+        driver.close(handle)
+        g_root_nvfs_posix = Some(driver)
+        return false
+    val write_r = driver.write(handle, 0, data)
+    driver.close(handle)
+    g_root_nvfs_posix = Some(driver)
+    write_r.is_ok()
+
+fn g_vfs_root_write_file_bytes(driver: Fat32Core, path: text, data: [u8]) -> bool:
+    val flags = FileFlags(read: true, write: true, create: true, append: false, truncate: true)
+    val open_r = driver.open(path, flags)
+    if open_r.is_err():
+        return false
+    val handle = open_r.unwrap()
+    val write_r = driver.write(handle, data)
+    driver.close(handle)
+    write_r.is_ok()
+
+# ============================================================================
+# VFS Select-File Cursor (FR-SIMPLEOS-M5-001, Option C)
+# ============================================================================
+#
+# Replaces rt_fat32_select_file's static 64-byte name cursor.
+# State lives here (service layer), NOT in DriverInstance — drivers stay
+# stateless per the MDSOC+ composition-over-state contract.
+
+var g_vfs_selected_file: text = ""
+
+pub fn g_vfs_select_file(name: text):
+    """Set the VFS cursor to name (bare FAT32 name or absolute path).
+
+    Analogous to the retired rt_fat32_select_file semantics.
+    The name is stored as-is; g_vfs_write_selected_file_text uses it
+    as the destination path.
+    """
+    g_vfs_selected_file = name
+
+pub fn g_vfs_get_selected_file() -> text:
+    """Return the currently selected file name, or empty string if none."""
+    g_vfs_selected_file
+
+pub fn g_vfs_clear_selected_file():
+    """Clear the VFS file cursor."""
+    g_vfs_selected_file = ""
+
+fn g_vfs_write_selected_file_text(content: text) -> bool:
+    """Write content to the currently selected file via the mount table."""
+    if g_vfs_selected_file == "":
+        return false
+    g_vfs_write_file_text(name: g_vfs_selected_file, content: content)
+
+pub fn g_vfs_write_file_text(name: text, content: text) -> bool:
+    """Write content as UTF-8 text to name via the mount table.
+
+    Accepts bare FAT32 names or absolute paths.
+    Returns true on success, false on any error.
+    """
+    if g_root_fat32 != nil:
+        return g_vfs_root_write_file_text(g_root_fat32.unwrap(), g_vfs_root_path(name), content)
+    if g_root_nvfs_posix != nil:
+        return _g_vfs_root_nvfs_posix_write_file_text(g_vfs_root_path(name), content)
+    val abs = g_vfs_abs_path(name)
+    val entry_opt = g_mount_table.lookup(abs)
+    if not entry_opt.?:
+        return false
+    val entry = entry_opt.unwrap()
+    val mp_len = entry.mount_point.len()
+    var rel_raw: text = ""
+    var ci: i64 = mp_len
+    while ci < abs.raw.len():
+        rel_raw = rel_raw + str_char_at(abs.raw, ci)
+        ci = ci + 1
+    if rel_raw == "":
+        rel_raw = abs.raw
+    val relpath = Path(raw: rel_raw)
+    val driver_r = g_mount_table.resolve_driver(abs.raw)
+    if driver_r.is_err():
+        return false
+    g_vfs_dispatch_write_file_text(driver_r.unwrap(), relpath, content)
+
+pub fn g_vfs_write_file_bytes(name: text, data: [u8]) -> bool:
+    """Write raw bytes to name via the mount table.
+
+    Accepts bare FAT32 names or absolute paths.
+    Returns true on success, false on any error.
+    """
+    if g_root_fat32 != nil:
+        return g_vfs_root_write_file_bytes(g_root_fat32.unwrap(), g_vfs_root_path(name), data)
+    if g_root_nvfs_posix != nil:
+        return _g_vfs_root_nvfs_posix_write_file_bytes(g_vfs_root_path(name), data)
+    val abs = g_vfs_abs_path(name)
+    val entry_opt = g_mount_table.lookup(abs)
+    if not entry_opt.?:
+        return false
+    val entry = entry_opt.unwrap()
+    val mp_len = entry.mount_point.len()
+    var rel_raw: text = ""
+    var ci: i64 = mp_len
+    while ci < abs.raw.len():
+        rel_raw = rel_raw + str_char_at(abs.raw, ci)
+        ci = ci + 1
+    if rel_raw == "":
+        rel_raw = abs.raw
+    val relpath = Path(raw: rel_raw)
+    val driver_r = g_mount_table.resolve_driver(abs.raw)
+    if driver_r.is_err():
+        return false
+    g_vfs_dispatch_write_file_bytes(driver_r.unwrap(), relpath, data)
+
+pub fn g_vfs_delete_file(name: text) -> bool:
+    """Delete a file by name via the mount table.
+
+    Accepts bare FAT32 names or absolute paths.
+    Returns true on success, false on any error.
+    """
+    if g_root_fat32 != nil:
+        val d = g_root_fat32.unwrap()
+        val p = Path(raw: g_vfs_root_path(name))
+        val r = d.unlink(p)
+        return r.is_ok()
+    if g_root_nvfs_posix != nil:
+        var d = g_root_nvfs_posix.unwrap()
+        val p = Path(raw: g_vfs_root_path(name))
+        val r = d.unlink(p)
+        g_root_nvfs_posix = Some(d)
+        return r.is_ok()
+    val abs = g_vfs_abs_path(name)
+    val entry_opt = g_mount_table.lookup(abs)
+    if not entry_opt.?:
+        return false
+    val entry = entry_opt.unwrap()
+    val mp_len = entry.mount_point.len()
+    var rel_raw: text = ""
+    var ci: i64 = mp_len
+    while ci < abs.raw.len():
+        rel_raw = rel_raw + str_char_at(abs.raw, ci)
+        ci = ci + 1
+    if rel_raw == "":
+        rel_raw = abs.raw
+    val relpath = Path(raw: rel_raw)
+    val driver_r = g_mount_table.resolve_driver(abs.raw)
+    if driver_r.is_err():
+        return false
+    g_vfs_dispatch_delete_file(driver_r.unwrap(), relpath)
+
+pub fn g_vfs_readdir(path: text) -> [DirEntry]:
+    """List directory contents via the global VFS manager. Returns [] on error."""
+    val result = g_vfs.readdir(path)
+    if result.is_err():
+        serial_println("[vfs] readdir failed: {path}")
+        return []
+    result.unwrap()
+
+pub fn g_vfs_file_exists(name: text) -> bool:
+    """Check file existence via the mount table.
+
+    Accepts bare FAT32 names or absolute paths.
+    Prefer this over rt_fat32_file_exists for all new callers.
+    """
+    if g_root_fat32 != nil:
+        if g_vfs_root_file_exists(g_root_fat32.unwrap(), g_vfs_root_path(name)):
+            return true
+        val root_alias_name = _vfs_exec_disk_alias(name)
+        if root_alias_name != name and g_vfs_root_file_exists(g_root_fat32.unwrap(), g_vfs_root_path(root_alias_name)):
+            return true
+        val root_name_first = g_vfs_root_path(name)
+        val root_alias_first = _vfs_exec_disk_alias(root_name_first)
+        if root_alias_first != root_name_first and g_vfs_root_file_exists(g_root_fat32.unwrap(), root_alias_first):
+            return true
+    if g_root_nvfs_posix != nil:
+        return _g_vfs_root_nvfs_posix_file_exists(g_vfs_root_path(name))
+    val abs_first = g_vfs_abs_path(name)
+    val entry_first_opt = g_mount_table.lookup(abs_first)
+    if entry_first_opt.?:
+        val entry_first = entry_first_opt.unwrap()
+        val mp_len_first = entry_first.mount_point.len()
+        var rel_raw_first: text = ""
+        var ci_first: i64 = mp_len_first
+        while ci_first < abs_first.raw.len():
+            rel_raw_first = rel_raw_first + str_char_at(abs_first.raw, ci_first)
+            ci_first = ci_first + 1
+        if rel_raw_first == "":
+            rel_raw_first = abs_first.raw
+        val driver_first_r = g_mount_table.resolve_driver(abs_first.raw)
+        if driver_first_r.is_err():
+            return false
+        if g_vfs_dispatch_file_exists(driver_first_r.unwrap(), Path(raw: rel_raw_first)):
+            return true
+    # Compatibility fallback for transitional C FAT32 bridge readers.
+    if simpleos_fat32_read_path_size(name) > 0:
+        return true
+    val root_name = g_vfs_root_path(name)
+    if simpleos_fat32_read_path_size(root_name) > 0:
+        return true
+    val alias_name = _vfs_exec_disk_alias(name)
+    if alias_name != name and simpleos_fat32_read_path_size(alias_name) > 0:
+        return true
+    val root_alias = _vfs_exec_disk_alias(root_name)
+    if root_alias != root_name and simpleos_fat32_read_path_size(root_alias) > 0:
+        return true
+    val abs = g_vfs_abs_path(name)
+    val entry_opt = g_mount_table.lookup(abs)
+    if not entry_opt.?:
+        return false
+    val entry = entry_opt.unwrap()
+    val mp_len = entry.mount_point.len()
+    var rel_raw: text = ""
+    var ci: i64 = mp_len
+    while ci < abs.raw.len():
+        rel_raw = rel_raw + str_char_at(abs.raw, ci)
+        ci = ci + 1
+    if rel_raw == "":
+        rel_raw = abs.raw
+    val relpath = Path(raw: rel_raw)
+    val driver_r = g_mount_table.resolve_driver(abs.raw)
+    if driver_r.is_err():
+        return false
+    g_vfs_dispatch_file_exists(driver_r.unwrap(), relpath)
+
+# ============================================================================
+# Removable Media Mount/Unmount
+# ============================================================================
+
+pub fn vfs_mount_removable(device_index: u64, mount_path: text) -> bool:
+    """Mount VirtIO-BLK device at device_index as FAT32 at mount_path.
+
+    Safe to call when root is on NVMe; avoid when VirtIO-BLK is already
+    the root device — probe_nth mutates the runtime's single MMIO base.
+    """
+    val dev_opt = VirtioBlkDriver.probe_nth(device_index)
+    if dev_opt == nil:
+        serial_println("[removable] probe_nth failed index={device_index}")
+        return false
+    var dev = dev_opt.unwrap()
+    val dev_init = dev.init()
+    if dev_init.is_err():
+        serial_println("[removable] init failed index={device_index}")
+        return false
+    val fs_driver = FsFat32Driver.new("removable-{mount_path}", dev)
+    val driver_inst = DriverInstance.Fat32(driver: fs_driver)
+    val mount_r = g_mount_table.mount(mount_path, driver_inst, MountOptions.default())
+    if mount_r.is_err():
+        serial_println("[removable] mount failed path={mount_path}")
+        return false
+    serial_println("[removable] mounted path={mount_path}")
+    true
+
+pub fn vfs_unmount_removable(mount_path: text) -> bool:
+    """Unmount a previously mounted removable filesystem at mount_path."""
+    val unmount_r = g_mount_table.unmount(mount_path)
+    if unmount_r.is_err():
+        serial_println("[removable] unmount failed path={mount_path}")
+        return false
+    serial_println("[removable] unmounted path={mount_path}")
+    true
+
+# ============================================================================
+# Helpers referenced from g_vfs_file_exists
+# ============================================================================
+
+fn g_vfs_root_file_exists(driver: Fat32Core, path: text) -> bool:
+    driver.stat(path).is_ok()
+
+fn _g_vfs_root_nvfs_posix_file_exists(path: text) -> bool:
+    _g_vfs_root_nvfs_posix_file_size(path) >= 0
+
+fn _g_vfs_root_nvfs_posix_file_size(path: text) -> i64:
+    if g_root_nvfs_posix == nil:
+        return -1
+    val driver = g_root_nvfs_posix.unwrap()
+    val stat_r = driver.stat(Path(raw: path))
+    g_root_nvfs_posix = Some(driver)
+    if stat_r.is_err():
+        return -1
+    stat_r.unwrap().size.to_i64()
+
+fn _vfs_exec_disk_alias(path: text) -> text:
+    val fat32 = app_registry_fat32_alias(path)
+    if fat32 != nil:
+        return fat32.unwrap()
+    path
