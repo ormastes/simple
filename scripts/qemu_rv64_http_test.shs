@@ -1,0 +1,198 @@
+#!/usr/bin/env sh
+# ============================================================================
+# QEMU RV64 HTTP Integration Test
+# ============================================================================
+#
+# Boots SimpleOS RV64 baremetal binary under QEMU virt, waits for the HTTP
+# server to come up, then runs curl smoke tests against it.
+#
+# Usage:
+#   sh scripts/qemu_rv64_http_test.shs [--elf <path>]
+#
+# Defaults:
+#   --elf build/simpleos-rv64.elf
+#
+# Requires: qemu-system-riscv64, curl
+# ============================================================================
+set -eu
+
+REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+cd "$REPO_ROOT"
+
+# ---- defaults ----
+ELF="build/simpleos-rv64.elf"
+HTTP_PORT=8080
+HTTPS_PORT=8443
+BOOT_TIMEOUT=60
+SERIAL_LOG="build/qemu-rv64-serial.log"
+
+# ---- parse args ----
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --elf)
+      shift
+      ELF="$1"
+      ;;
+    --elf=*)
+      ELF="${1#*=}"
+      ;;
+    --help|-h)
+      echo "Usage: sh scripts/qemu_rv64_http_test.shs [--elf <path>]"
+      echo ""
+      echo "  --elf <path>   Path to SimpleOS RV64 ELF (default: build/simpleos-rv64.elf)"
+      exit 0
+      ;;
+    *)
+      echo "error: unknown option '$1'" >&2
+      exit 1
+      ;;
+  esac
+  shift
+done
+
+# ---- verify prerequisites ----
+if [ ! -f "$ELF" ]; then
+  echo "error: ELF not found: ${ELF}" >&2
+  echo "  Build it first with: sh scripts/simpleos-native-build.shs --target riscv64gc-unknown-none" >&2
+  exit 1
+fi
+
+if ! command -v qemu-system-riscv64 >/dev/null 2>&1; then
+  echo "error: qemu-system-riscv64 not found in PATH" >&2
+  exit 1
+fi
+
+if ! command -v curl >/dev/null 2>&1; then
+  echo "error: curl not found in PATH" >&2
+  exit 1
+fi
+
+# ---- prepare ----
+mkdir -p "$(dirname "$SERIAL_LOG")"
+rm -f "$SERIAL_LOG"
+QEMU_PID=""
+
+# ---- cleanup on exit ----
+cleanup() {
+  if [ -n "$QEMU_PID" ]; then
+    kill "$QEMU_PID" 2>/dev/null || true
+    wait "$QEMU_PID" 2>/dev/null || true
+  fi
+}
+trap cleanup EXIT
+
+# ---- launch QEMU ----
+echo "[1/4] Launching QEMU RV64 with ${ELF}..."
+qemu-system-riscv64 \
+  -machine virt \
+  -cpu rv64 \
+  -m 256M \
+  -nographic \
+  -netdev user,id=net0,hostfwd=tcp::${HTTP_PORT}-:${HTTP_PORT},hostfwd=tcp::${HTTPS_PORT}-:${HTTPS_PORT} \
+  -device virtio-net-device,netdev=net0 \
+  -kernel "$ELF" \
+  -serial file:"$SERIAL_LOG" \
+  </dev/null &
+QEMU_PID=$!
+
+echo "  QEMU PID: ${QEMU_PID}"
+
+# ---- wait for boot banner ----
+echo "[2/4] Waiting for boot banner (timeout: ${BOOT_TIMEOUT}s)..."
+WAITED=0
+BOOTED=false
+while [ "$WAITED" -lt "$BOOT_TIMEOUT" ]; do
+  if [ -f "$SERIAL_LOG" ] && grep -q "SimpleOS" "$SERIAL_LOG" 2>/dev/null; then
+    BOOTED=true
+    break
+  fi
+  sleep 1
+  WAITED=$((WAITED + 1))
+done
+
+if [ "$BOOTED" = "false" ]; then
+  echo "FAILED: boot banner not seen within ${BOOT_TIMEOUT}s" >&2
+  if [ -f "$SERIAL_LOG" ]; then
+    echo "--- serial log ---"
+    cat "$SERIAL_LOG"
+    echo "--- end serial log ---"
+  fi
+  exit 1
+fi
+
+echo "  Boot detected after ${WAITED}s"
+
+# ---- give HTTP server a moment to bind ----
+sleep 2
+
+# ---- run HTTP tests ----
+echo "[3/4] Running HTTP smoke tests..."
+PASS=0
+FAIL=0
+
+# Test 1: HTTP health check
+printf '%s' "  GET /health (HTTP)... "
+HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" "http://localhost:${HTTP_PORT}/health" 2>/dev/null || echo "000")
+if [ "$HTTP_CODE" = "200" ]; then
+  echo "PASS (${HTTP_CODE})"
+  PASS=$((PASS + 1))
+else
+  echo "FAIL (${HTTP_CODE})"
+  FAIL=$((FAIL + 1))
+fi
+
+# Test 2: HTTP root page
+printf '%s' "  GET / (HTTP)... "
+HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" "http://localhost:${HTTP_PORT}/" 2>/dev/null || echo "000")
+if [ "$HTTP_CODE" = "200" ]; then
+  echo "PASS (${HTTP_CODE})"
+  PASS=$((PASS + 1))
+else
+  echo "FAIL (${HTTP_CODE})"
+  FAIL=$((FAIL + 1))
+fi
+
+# Test 3: HTTPS health check (skip TLS verification for self-signed cert)
+printf '%s' "  GET /health (HTTPS)... "
+HTTP_CODE=$(curl -sk -o /dev/null -w "%{http_code}" "https://localhost:${HTTPS_PORT}/health" 2>/dev/null || echo "000")
+if [ "$HTTP_CODE" = "200" ]; then
+  echo "PASS (${HTTP_CODE})"
+  PASS=$((PASS + 1))
+else
+  echo "FAIL (${HTTP_CODE})"
+  FAIL=$((FAIL + 1))
+fi
+
+# Test 4: Health endpoint returns JSON
+printf '%s' "  GET /health content-type... "
+CONTENT_TYPE=$(curl -s -I "http://localhost:${HTTP_PORT}/health" 2>/dev/null | grep -i "content-type" || echo "")
+if echo "$CONTENT_TYPE" | grep -qi "json"; then
+  echo "PASS (JSON)"
+  PASS=$((PASS + 1))
+else
+  echo "FAIL (expected JSON, got: ${CONTENT_TYPE})"
+  FAIL=$((FAIL + 1))
+fi
+
+# Test 5: Root page returns HTML
+printf '%s' "  GET / content-type... "
+CONTENT_TYPE=$(curl -s -I "http://localhost:${HTTP_PORT}/" 2>/dev/null | grep -i "content-type" || echo "")
+if echo "$CONTENT_TYPE" | grep -qi "html"; then
+  echo "PASS (HTML)"
+  PASS=$((PASS + 1))
+else
+  echo "FAIL (expected HTML, got: ${CONTENT_TYPE})"
+  FAIL=$((FAIL + 1))
+fi
+
+# ---- report ----
+echo ""
+echo "[4/4] Results: ${PASS} passed, ${FAIL} failed out of $((PASS + FAIL)) tests"
+
+if [ "$FAIL" -gt 0 ]; then
+  echo "FAILED"
+  exit 1
+fi
+
+echo "ALL PASSED"
+exit 0

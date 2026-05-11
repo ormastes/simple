@@ -26,40 +26,40 @@ fn token_to_string(token: SimpleToken) -> text:
 fn is_keyword_text(value: text) -> bool:
     value == "fn" or value == "val" or value == "var" or value == "if" or value == "else" or value == "while" or value == "for" or value == "match" or value == "case" or value == "return" or value == "break" or value == "continue" or value == "class" or value == "struct" or value == "enum" or value == "use" or value == "export"
 
-fn match_operator(source: text, source_len: i64, index: i64) -> text:
+fn match_operator_bytes(bytes: [u8], source: text, source_len: i64, index: i64) -> text:
     if index >= source_len:
         return ""
-    val ch = source[index:index+1]
+    val b = bytes[index]
     val has_next = index + 1 < source_len
-    val next = if has_next: source[index + 1:index + 2] else: ""
+    val nb = if has_next: bytes[index + 1] else: 0
 
-    if ch == "=" and next == "=":
+    if b == 61 and nb == 61:
         return "=="
-    if ch == "!" and next == "=":
+    if b == 33 and nb == 61:
         return "!="
-    if ch == "<" and next == "=":
+    if b == 60 and nb == 61:
         return "<="
-    if ch == ">" and next == "=":
+    if b == 62 and nb == 61:
         return ">="
-    if ch == "-" and next == ">":
+    if b == 45 and nb == 62:
         return "->"
-    if ch == "+" or ch == "-" or ch == "*" or ch == "/" or ch == "=" or ch == "<" or ch == ">" or ch == ":" or ch == "." or ch == "," or ch == "(" or ch == ")" or ch == "[" or ch == "]" or ch == "{" or ch == "}":
-        return ch
+    if b == 43 or b == 45 or b == 42 or b == 47 or b == 61 or b == 60 or b == 62 or b == 58 or b == 46 or b == 44 or b == 40 or b == 41 or b == 91 or b == 93 or b == 123 or b == 125:
+        return source[index:index+1]
     ""
 
 fn tokenize(source: text, config: DuplicationConfig) -> [SimpleToken]:
-    """Tokenize source code for duplication detection."""
     var result: [SimpleToken] = []
     var i = 0
     var line = 1
     var column = 1
     val source_len = source.len()
+    val bytes = source.bytes()
 
     while i < source_len:
-        val ch = source[i:i+1]
+        val b = bytes[i]
         var handled = false
 
-        if ch == "\n":
+        if b == 10:
             if not config.ignore_whitespace:
                 result.push(SimpleToken(kind: SimpleTokenKind.Whitespace, value: "\n", line: line, column: column, start_offset: i, end_offset: i + 1))
             line = line + 1
@@ -68,88 +68,74 @@ fn tokenize(source: text, config: DuplicationConfig) -> [SimpleToken]:
             handled = true
 
         if not handled:
-            if ch == " " or ch == "\t":
+            if b == 32 or b == 9:
                 if not config.ignore_whitespace:
-                    result.push(SimpleToken(kind: SimpleTokenKind.Whitespace, value: ch, line: line, column: column, start_offset: i, end_offset: i + 1))
+                    result.push(SimpleToken(kind: SimpleTokenKind.Whitespace, value: source[i:i+1], line: line, column: column, start_offset: i, end_offset: i + 1))
                 i = i + 1
                 column = column + 1
                 handled = true
 
         if not handled:
-            if ch == "#":
-                while i < source.len() and source[i:i+1] != "\n":
+            if b == 35:
+                while i < source_len and bytes[i] != 10:
                     i = i + 1
                 handled = true
 
         if not handled:
-            val is_letter = (ch >= "a" and ch <= "z") or (ch >= "A" and ch <= "Z") or ch == "_"
+            val is_letter = (b >= 97 and b <= 122) or (b >= 65 and b <= 90) or b == 95
             if is_letter:
                 val start_idx = i
-                var ident_parts: [text] = []
                 var start_col = column
                 while i < source_len:
-                    val c = source[i:i+1]
-                    val is_alnum = (c >= "a" and c <= "z") or (c >= "A" and c <= "Z") or (c >= "0" and c <= "9") or c == "_"
+                    val c = bytes[i]
+                    val is_alnum = (c >= 97 and c <= 122) or (c >= 65 and c <= 90) or (c >= 48 and c <= 57) or c == 95
                     if not is_alnum:
                         break
-                    ident_parts.push(c)
                     i = i + 1
                     column = column + 1
-                val ident = ident_parts.join("")
-
+                val ident = source[start_idx:i]
                 val is_keyword = is_keyword_text(ident)
-
                 val kind = if is_keyword: SimpleTokenKind.Keyword else: SimpleTokenKind.Identifier
                 val value = if kind == SimpleTokenKind.Identifier and config.ignore_identifiers then "IDENTIFIER" else ident
-
                 result.push(SimpleToken(kind: kind, value: value, line: line, column: start_col, start_offset: start_idx, end_offset: i))
                 handled = true
 
         if not handled:
-            val is_digit = ch >= "0" and ch <= "9"
+            val is_digit = b >= 48 and b <= 57
             if is_digit:
                 val start_idx = i
-                var num_parts: [text] = []
                 var start_col = column
                 while i < source_len:
-                    val c = source[i:i+1]
-                    val is_numchar = (c >= "0" and c <= "9") or c == "."
+                    val c = bytes[i]
+                    val is_numchar = (c >= 48 and c <= 57) or c == 46
                     if not is_numchar:
                         break
-                    num_parts.push(c)
                     i = i + 1
                     column = column + 1
-                val num = num_parts.join("")
-
+                val num = source[start_idx:i]
                 val value = if config.ignore_literals then "LITERAL" else num
-
                 result.push(SimpleToken(kind: SimpleTokenKind.Literal, value: value, line: line, column: start_col, start_offset: start_idx, end_offset: i))
                 handled = true
 
         if not handled:
-            if ch == "\"":
+            if b == 34:
                 val start_idx = i
-                var str_parts: [text] = ["\""]
                 var start_col = column
                 i = i + 1
                 column = column + 1
-                while i < source_len and source[i:i+1] != "\"":
-                    str_parts.push(source[i:i+1])
+                while i < source_len and bytes[i] != 34:
                     i = i + 1
                     column = column + 1
                 if i < source_len:
-                    str_parts.push("\"")
                     i = i + 1
                     column = column + 1
-                val str_val = str_parts.join("")
-
+                val str_val = source[start_idx:i]
                 val value = if config.ignore_literals then "LITERAL" else str_val
-
                 result.push(SimpleToken(kind: SimpleTokenKind.Literal, value: value, line: line, column: start_col, start_offset: start_idx, end_offset: i))
                 handled = true
 
         if not handled:
-            val op = match_operator(source, source_len, i)
+            val op = match_operator_bytes(bytes, source, source_len, i)
             if op.len() > 0:
                 result.push(SimpleToken(kind: SimpleTokenKind.Operator, value: op, line: line, column: column, start_offset: i, end_offset: i + op.len()))
                 i = i + op.len()

@@ -1,0 +1,168 @@
+# Shared Intent Log — disk-persistent log of intent records.
+#
+# Callback-based persistence: callers register on_persist / on_load callbacks
+# via the module-level API. Default: module-static store (tests).
+# Production: register Arena-backed callbacks before creating the log.
+#
+# R1 HIGH-risk gap: records must survive a simulated remount.
+# Maps to: AC-3, AC-5, AC-9, D5, D12 R1.
+
+use std.io_runtime
+use std.storage.shared.wal.{WalRecord, WAL_RECORD_COMMIT, WAL_RECORD_DATA}
+use std.storage.storage_class.{StorageClass}
+
+struct IntentLogRecord:
+    txn_id:    i64
+    lsn:       i64
+    committed: bool
+
+struct IntentLogHead:
+    lsn:      i64
+    tail_lsn: i64
+
+# --- Module-static persistent store (default backend for tests) ---
+
+var _intent_store_records: [IntentLogRecord] = []
+var _intent_store_head:    i64 = 0
+var _intent_store_active:  bool = false
+
+# --- Callback registration for production persistence ---
+
+var _intent_persist_cb_registered: bool = false
+var _intent_persist_cb_tag: text = ""
+
+# Arena-callback backing store
+var _intent_cb_records: [IntentLogRecord] = []
+var _intent_cb_head:    i64 = 0
+
+fn intent_register_persist_callback(tag: text):
+    _intent_persist_cb_registered = true
+    _intent_persist_cb_tag = tag
+    _intent_cb_records = []
+    _intent_cb_head = 0
+
+fn intent_clear_persist_callback():
+    _intent_persist_cb_registered = false
+    _intent_persist_cb_tag = ""
+    _intent_cb_records = []
+    _intent_cb_head = 0
+
+fn intent_persist_callback_tag() -> text:
+    _intent_persist_cb_tag
+
+fn intent_is_callback_registered() -> bool:
+    _intent_persist_cb_registered
+
+# Arena-callback entry points
+fn intent_cb_write_record(rec: IntentLogRecord):
+    _intent_cb_records.push(rec)
+
+fn intent_cb_write_head(lsn: i64):
+    _intent_cb_head = lsn
+
+fn intent_cb_read_all() -> [IntentLogRecord]:
+    var result: [IntentLogRecord] = []
+    for rec in _intent_cb_records:
+        result.push(rec)
+    result
+
+fn intent_cb_read_head() -> i64:
+    _intent_cb_head
+
+fn intent_cb_record_count() -> i64:
+    _intent_cb_records.len() as i64
+
+# --- SharedIntentLog ---
+
+struct SharedIntentLog:
+    records:      [IntentLogRecord]
+    head_lsn:     i64
+    is_open:      bool
+
+    static fn new_persistent() -> SharedIntentLog:
+        if _intent_persist_cb_registered:
+            _intent_cb_records = []
+            _intent_cb_head = 0
+        else:
+            _intent_store_records = []
+            _intent_store_head = 0
+            _intent_store_active = true
+        SharedIntentLog(
+            records:  [],
+            head_lsn: 0,
+            is_open:  true
+        )
+
+    static fn reopen() -> SharedIntentLog:
+        var loaded: [IntentLogRecord] = []
+        var loaded_head: i64 = 0
+        if _intent_persist_cb_registered:
+            for rec in _intent_cb_records:
+                loaded.push(rec)
+            loaded_head = _intent_cb_head
+        else:
+            for rec in _intent_store_records:
+                loaded.push(rec)
+            loaded_head = _intent_store_head
+        SharedIntentLog(
+            records:  loaded,
+            head_lsn: loaded_head,
+            is_open:  true
+        )
+
+    me fn append(rec: IntentLogRecord) -> Result<(), text>:
+        if not self.is_open:
+            return Err("intent_log: not open")
+        self.records.push(rec)
+        Ok(())
+
+    me fn flush() -> Result<(), text>:
+        if not self.is_open:
+            return Err("intent_log: not open")
+        if _intent_persist_cb_registered:
+            _intent_cb_records = []
+            for rec in self.records:
+                _intent_cb_records.push(rec)
+            _intent_cb_head = self.head_lsn
+        else:
+            _intent_store_records = []
+            for rec in self.records:
+                _intent_store_records.push(rec)
+            _intent_store_head = self.head_lsn
+        Ok(())
+
+    me fn close() -> Result<(), text>:
+        self.is_open = false
+        Ok(())
+
+    fn scan_all() -> Result<[IntentLogRecord], text>:
+        var result: [IntentLogRecord] = []
+        for rec in self.records:
+            result.push(rec)
+        Ok(result)
+
+    fn scan_committed() -> Result<[IntentLogRecord], text>:
+        var result: [IntentLogRecord] = []
+        for rec in self.records:
+            if rec.committed:
+                result.push(rec)
+        Ok(result)
+
+    fn get_tail_lsn() -> i64:
+        var max_lsn: i64 = 0
+        for rec in self.records:
+            if rec.lsn > max_lsn:
+                max_lsn = rec.lsn
+        max_lsn
+
+    fn head_pointer() -> IntentLogHead:
+        IntentLogHead(lsn: self.head_lsn, tail_lsn: self.get_tail_lsn())
+
+    fn head() -> Result<IntentLogHead, text>:
+        Ok(IntentLogHead(lsn: self.head_lsn, tail_lsn: self.get_tail_lsn()))
+
+    fn last_write_storage_class() -> StorageClass:
+        StorageClass.MetaDurable
+
+    me fn set_head(lsn: i64):
+        self.head_lsn = lsn

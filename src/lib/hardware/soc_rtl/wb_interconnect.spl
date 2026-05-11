@@ -10,6 +10,7 @@
 #   0x02000000-0x0200FFFF  CLINT      (64 KB)     — slave 1
 #   0x0C000000-0x0FFFFFFF  PLIC       (future)    — slave 5 (unmapped)
 #   0x10000000-0x100000FF  UART0      (256 bytes) — slave 2
+#   0x10010000-0x100100FF  ETH DMA    (256 bytes) — slave 5
 #   0x80000000-0x87FFFFFF  RAM        (128 MB)    — slave 3
 #   0x80FF0000-0x80FF00FF  Mailbox    (256 bytes) — slave 4 (within RAM)
 #
@@ -119,6 +120,10 @@ fn wb_decode_address(addr: u32) -> u32:
     if addr >= UART_BASE and addr <= UART_END:
         return WB_SLAVE_UART
 
+    # Ethernet DMA bridge
+    if addr >= ETH_DMA_BASE and addr <= ETH_DMA_END:
+        return WB_SLAVE_ETH_DMA
+
     # RAM (general range, mailbox already excluded)
     if addr >= RAM_BASE and addr <= RAM_END:
         return WB_SLAVE_RAM
@@ -129,7 +134,7 @@ fn wb_decode_address(addr: u32) -> u32:
 # Read Routing
 # ============================================================================
 
-fn wb_route_read(slave_idx: u32, addr: u32, rom_data: u32, clint_data: u32, uart_data: u32, ram_data: u32, mb_data: u32) -> WbSlaveResponse:
+fn wb_route_read(slave_idx: u32, addr: u32, rom_data: u32, clint_data: u32, uart_data: u32, ram_data: u32, mb_data: u32, eth_data: u32) -> WbSlaveResponse:
     """Route a read response from the correct slave based on decoded index.
     Each slave's data is pre-read by the caller; this function selects which
     one to return and generates ack/err signals."""
@@ -144,6 +149,8 @@ fn wb_route_read(slave_idx: u32, addr: u32, rom_data: u32, clint_data: u32, uart
         return WbSlaveResponse(rdata: ram_data, ack: true, err: false)
     if slave_idx == WB_SLAVE_MAILBOX:
         return WbSlaveResponse(rdata: mb_data, ack: true, err: false)
+    if slave_idx == WB_SLAVE_ETH_DMA:
+        return WbSlaveResponse(rdata: eth_data, ack: true, err: false)
 
     # Unmapped — bus error
     WbSlaveResponse(rdata: 0, ack: false, err: true)
@@ -177,6 +184,10 @@ fn wb_route_write(slave_idx: u32, addr: u32, wdata: u32) -> WbWriteResult:
     if slave_idx == WB_SLAVE_MAILBOX:
         val offset = addr - MB_BASE
         return WbWriteResult(slave_idx: WB_SLAVE_MAILBOX, offset: offset, wdata: wdata)
+
+    if slave_idx == WB_SLAVE_ETH_DMA:
+        val offset = addr - ETH_DMA_BASE
+        return WbWriteResult(slave_idx: WB_SLAVE_ETH_DMA, offset: offset, wdata: wdata)
 
     # Unmapped
     WbWriteResult(slave_idx: WB_SLAVE_UNMAPPED, offset: 0, wdata: wdata)
