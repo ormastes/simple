@@ -613,6 +613,7 @@ int64_t  rt_text_find_invalid_utf8(int64_t value);
 /* ===== SIMD String Search & Equality ===== */
 
 int64_t  rt_simd_str_search(int64_t haystack, int64_t needle);
+int64_t  rt_simd_str_last_index_of(int64_t haystack, int64_t needle);
 int64_t  rt_simd_str_equal(int64_t a, int64_t b);
 
 /* ===== SIMD ASCII Case Operations ===== */
@@ -623,18 +624,15 @@ int64_t  rt_text_to_lower_ascii(int64_t value);
 
 /* ===== String Index (char↔byte offset conversion) ===== */
 
-typedef struct SegmentedWidthIndex SegmentedWidthIndex;
-typedef struct RankSelectIndex RankSelectIndex;
+int64_t  rt_swi_build(int64_t value);
+int64_t  rt_swi_char_to_byte(int64_t handle, int64_t char_idx);
+int64_t  rt_swi_byte_to_char(int64_t handle, int64_t byte_idx);
+void     rt_swi_free(int64_t handle);
 
-SegmentedWidthIndex* rt_swi_build(int64_t value);
-int64_t  rt_swi_char_to_byte(SegmentedWidthIndex* idx, int64_t char_offset);
-int64_t  rt_swi_byte_to_char(SegmentedWidthIndex* idx, int64_t byte_offset);
-void     rt_swi_free(SegmentedWidthIndex* idx);
-
-RankSelectIndex* rt_rank_select_build(const uint8_t* data, uint64_t len);
-int64_t  rt_rank_query(RankSelectIndex* rs, int64_t pos);
-int64_t  rt_select_query(RankSelectIndex* rs, int64_t k);
-void     rt_rank_select_free(RankSelectIndex* rs);
+int64_t  rt_rank_select_build(int64_t value);
+int64_t  rt_rank_query(int64_t handle, int64_t pos);
+int64_t  rt_select_query(int64_t handle, int64_t k);
+void     rt_rank_select_free(int64_t handle);
 
 /* ===== Reserved-Field Cache Helpers ===== */
 
