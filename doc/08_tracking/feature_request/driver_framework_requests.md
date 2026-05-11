@@ -41,8 +41,10 @@ or `Rejected` (one-line reason).
         `src/compiler/20.hir/hir_definitions.spl`).
   - [x] Codegen emits a synthetic registration fn whose body is the
         literal `register_static_driver(m, ops)` call that authors
-        write today. (2026-05-10: scaffolding in `synthetic_driver_codegen.spl`,
-        unreached — `bin/simple` uses Rust seed, not self-hosted MIR)
+        write today. (2026-05-10: implementation complete — planner +
+        codegen in `synthetic_driver_codegen.spl` + MIR hook in
+        `mir_lowering.spl`; unreached until self-hosted bootstrap
+        replaces Rust seed)
   - [x] `sffi_lint.spl` gains a driver-shim conformance rule: a module
         declaring `extern fn` **and** `@driver(...)` must also provide
         a matching `impl Driver`.
@@ -133,14 +135,18 @@ or `Rejected` (one-line reason).
 - **Filed-by:** driver-framework rollout (Phase C.3)
 - **Target:** lexer + parser + HIR + struct layout
 - **Priority:** P2
-- **Status:** **Implemented** (Rust seed, 2026-05-10). FR-DRIVER-0008 (blocker)
-  landed 2026-04-22; Rust seed now has full `@packed struct { f: T:N }` pipeline:
-  parser (`types_def/mod.rs:334-365`) → HIR routing (`type_registration.rs:112-113`
-  → `register_packed_struct_as_bitfield`) → bitfield codegen (shift+mask read,
-  read-modify-write write). Verified with `test/unit/compiler/packed_struct_sugar_test.spl`
-  (2 tests: round-trip field read/write + adjacent field preservation).
-  Self-hosted compiler parity (desugar pass + `T:N` syntax) remains as follow-up;
-  architecture designed in `.spipe/driver-framework-compiler/state.md`.
+- **Status:** **Implemented** (Rust seed, 2026-05-10; self-hosted parity code written 2026-05-11).
+  FR-DRIVER-0008 (blocker) landed 2026-04-22; Rust seed now has full
+  `@packed struct { f: T:N }` pipeline: parser (`types_def/mod.rs:334-365`) →
+  HIR routing (`type_registration.rs:112-113` → `register_packed_struct_as_bitfield`) →
+  bitfield codegen (shift+mask read, read-modify-write write). Verified with
+  `test/unit/compiler/packed_struct_sugar_test.spl` (2 tests: round-trip field
+  read/write + adjacent field preservation) — AC-2/3/4/5 verified.
+  Self-hosted parity (AC-1): `decl_is_packed` flag added to `ast.spl`,
+  `parser_decls.spl` `@packed` branch, `flat_ast_bridge.spl` routes packed structs
+  to `module.bitfields` as `Bitfield` entries — implementation in place 2026-05-11,
+  needs bootstrap verification to confirm end-to-end.
+  Architecture designed in `.spipe/driver-framework-compiler/state.md`.
 - **Requested-semantics:**
   Drivers and FFI shims frequently need packed bit-level layouts —
   PCI config space, descriptor rings, network headers. Today authors

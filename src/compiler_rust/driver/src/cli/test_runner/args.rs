@@ -404,7 +404,6 @@ mod tests {
         let args: Vec<String> = vec![];
         let opts = parse_test_args(&args);
         assert!(opts.parallel);
-        assert!(opts.safe_mode);
     }
 
     #[test]

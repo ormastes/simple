@@ -27,7 +27,7 @@ feature
 - [x] 2-research (Analyst) — 2026-05-10
 - [x] 3-arch (Architect) — 2026-05-10
 - [ ] 4-spec (QA Lead)
-- [ ] 5-implement (Engineer)
+- [x] 5-implement (Engineer) — 2026-05-11: AC-1 bridge routing + AC-6 codegen implementation complete; verification blocked on bootstrap
 - [ ] 6-refactor (Tech Lead)
 - [ ] 7-verify (QA)
 - [ ] 8-ship (Release Mgr)
