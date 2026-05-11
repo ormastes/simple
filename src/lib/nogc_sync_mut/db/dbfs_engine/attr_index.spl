@@ -7,6 +7,7 @@
 # Maps to: AC-3, AC-10, D3.
 
 use std.db.dbfs_engine.schema.{InodeRow, InodeTable, InodeTableEntry, InodeKey}
+use std.database.index.{add_to_index, remove_from_index, intersect_id_lists, pad_i64}
 
 val ATTR_SIZE:  text = "size"
 val ATTR_MTIME: text = "mtime"
@@ -34,47 +35,6 @@ struct AttrQuery:
 struct AttrQueryResult:
     ino_ids:  [i64]
     query_ms: i64
-
-# ============================================================
-# Helpers
-# ============================================================
-
-fn _pad_i64(v: i64) -> text:
-    # Zero-pad to 20 chars so lexicographic order matches numeric order.
-    val s = v.to_text()
-    var pad: text = ""
-    var remaining: i32 = (20 - s.len() as i32)
-    while remaining > 0:
-        pad = pad + "0"
-        remaining = remaining - 1
-    pad + s
-
-fn _add_to_index(index: Dict<text, [i64]>, key: text, ino_id: i64):
-    if index.contains(key):
-        index[key].push(ino_id)
-    else:
-        index[key] = [ino_id]
-
-fn _remove_from_index(index: Dict<text, [i64]>, key: text, ino_id: i64):
-    if not index.contains(key):
-        return
-    var next: [i64] = []
-    for id in index[key]:
-        if id != ino_id:
-            next.push(id)
-    index[key] = next
-
-fn _intersect_lists(a: [i64], b: [i64]) -> [i64]:
-    var result: [i64] = []
-    var i: i32 = 0
-    while i < a.len() as i32:
-        var j: i32 = 0
-        while j < b.len() as i32:
-            if a[i] == b[j]:
-                result.push(a[i])
-            j = j + 1
-        i = i + 1
-    result
 
 # ============================================================
 # AttrIndexManager
@@ -116,12 +76,12 @@ impl AttrIndexManager:
             i = i + 1
 
     me fn on_inode_insert(row: InodeRow):
-        _add_to_index(self.size_index,  _pad_i64(row.size),        row.ino_id)
-        _add_to_index(self.mtime_index, _pad_i64(row.mtime),       row.ino_id)
-        _add_to_index(self.ctime_index, _pad_i64(row.ctime),       row.ino_id)
-        _add_to_index(self.uid_index,   _pad_i64(row.uid as i64),  row.ino_id)
-        _add_to_index(self.gid_index,   _pad_i64(row.gid as i64),  row.ino_id)
-        _add_to_index(self.mode_index,  _pad_i64(row.mode as i64), row.ino_id)
+        add_to_index(self.size_index,  pad_i64(row.size),        row.ino_id)
+        add_to_index(self.mtime_index, pad_i64(row.mtime),       row.ino_id)
+        add_to_index(self.ctime_index, pad_i64(row.ctime),       row.ino_id)
+        add_to_index(self.uid_index,   pad_i64(row.uid as i64),  row.ino_id)
+        add_to_index(self.gid_index,   pad_i64(row.gid as i64),  row.ino_id)
+        add_to_index(self.mode_index,  pad_i64(row.mode as i64), row.ino_id)
         self.indexed_count = self.indexed_count + 1
 
     me fn on_inode_update(old_row: InodeRow, new_row: InodeRow):
@@ -129,12 +89,12 @@ impl AttrIndexManager:
         self.on_inode_insert(new_row)
 
     me fn on_inode_delete(ino_id: i64, row: InodeRow):
-        _remove_from_index(self.size_index,  _pad_i64(row.size),        ino_id)
-        _remove_from_index(self.mtime_index, _pad_i64(row.mtime),       ino_id)
-        _remove_from_index(self.ctime_index, _pad_i64(row.ctime),       ino_id)
-        _remove_from_index(self.uid_index,   _pad_i64(row.uid as i64),  ino_id)
-        _remove_from_index(self.gid_index,   _pad_i64(row.gid as i64),  ino_id)
-        _remove_from_index(self.mode_index,  _pad_i64(row.mode as i64), ino_id)
+        remove_from_index(self.size_index,  pad_i64(row.size),        ino_id)
+        remove_from_index(self.mtime_index, pad_i64(row.mtime),       ino_id)
+        remove_from_index(self.ctime_index, pad_i64(row.ctime),       ino_id)
+        remove_from_index(self.uid_index,   pad_i64(row.uid as i64),  ino_id)
+        remove_from_index(self.gid_index,   pad_i64(row.gid as i64),  ino_id)
+        remove_from_index(self.mode_index,  pad_i64(row.mode as i64), ino_id)
         self.indexed_count = self.indexed_count - 1
 
     fn _select_index(attribute: text) -> Dict<text, [i64]>?:
@@ -193,7 +153,7 @@ impl AttrIndexManager:
         var i: i32 = 1
         while i < queries.len() as i32:
             val r = self.query(queries[i])
-            acc = _intersect_lists(acc, r.ino_ids)
+            acc = intersect_id_lists(acc, r.ino_ids)
             i = i + 1
         AttrQueryResult(ino_ids: acc, query_ms: 0)
 

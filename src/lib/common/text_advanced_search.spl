@@ -1,0 +1,382 @@
+@allow(unnamed_duplicate_typed_args) # reason: positional API -- arg order is conventional
+# Text Advanced — Text Analysis and Search
+#
+# Contains:
+# - Word operations (word_count, word_wrap, reverse_words, longest_word)
+# - Character analysis (char_frequency, most_common_char, most_common_words)
+# - String similarity (levenshtein_distance, hamming_distance)
+# - Character search (contains_any, index_of_any, index_of_func, last_index_of_func)
+# - Splitting by predicate (fields_func)
+#
+# NOTE: Do NOT import from lib.common.text here — circular dependency risk.
+use std.format_utils.{wrap_text}
+use common.text_advanced_lines.{split_whitespace, extract_words}
+
+# ============================================================================
+# Word Operations
+# ============================================================================
+
+fn word_count(text: text) -> i64:
+    """Count words in text.
+
+    Example:
+        word_count("Hello world, how are you?")  # 5
+    """
+    val words = extract_words(text)
+    words.len()
+
+fn word_wrap(text: text, width: i64):
+    """Wrap text to specified width.
+
+    Delegates to wrap_text() from std.format_utils.
+
+    Returns array of lines.
+
+    Example:
+        word_wrap("The quick brown fox", 10)
+        # ["The quick", "brown fox"]
+    """
+    wrap_text(text, width)
+
+fn reverse_words(text: text) -> text:
+    """Reverse order of words in text.
+
+    Example:
+        reverse_words("hello world")  # "world hello"
+    """
+    val words = split_whitespace(text)
+    var reversed = []
+    var i = words.len() - 1
+
+    while i >= 0:
+        reversed.push(words[i])
+        i = i - 1
+
+    reversed.join(" ")
+
+fn longest_word(text: text):
+    """Find longest word in text.
+
+    Returns (word, length) tuple or nil.
+
+    Example:
+        longest_word("The quick brown fox")  # ("quick", 5)
+    """
+    val words = extract_words(text)
+    if words.len() == 0:
+        return nil
+
+    var longest = words[0]
+    var max_len = longest.len()
+
+    for word in words:
+        if word.len() > max_len:
+            longest = word
+            max_len = word.len()
+
+    (longest, max_len)
+
+# ============================================================================
+# Character Analysis
+# ============================================================================
+
+fn char_frequency(text: text):
+    """Calculate character frequency.
+
+    Returns array of (char, count) tuples.
+
+    Example:
+        char_frequency("hello")
+        # [('h',1), ('e',1), ('l',2), ('o',1)]
+    """
+    var freq_map: {text: i64} = {}
+    var order: [text] = []
+    var i = 0
+
+    while i < text.len():
+        val ch = text[i]
+        if freq_map.has(ch):
+            freq_map[ch] = freq_map[ch] + 1
+        else:
+            freq_map[ch] = 1
+            order.push(ch)
+        i = i + 1
+
+    # Build result in insertion order
+    var counts = []
+    for ch in order:
+        counts.push((ch, freq_map[ch]))
+
+    counts
+
+fn most_common_char(text: text):
+    """Find most common character.
+
+    Returns (char, count) tuple or nil.
+
+    Example:
+        most_common_char("hello")  # ('l', 2)
+    """
+    val freqs = char_frequency(text)
+    if freqs.len() == 0:
+        return nil
+
+    var max_char = nil
+    var max_count = 0
+
+    for (char, count) in freqs:
+        if count > max_count:
+            max_char = char
+            max_count = count
+
+    (max_char, max_count)
+
+fn most_common_words(text: text, n: i64):
+    """Find n most common words.
+
+    Example:
+        most_common_words("hello world hello", 1)
+        # [("hello", 2)]
+    """
+    val words = extract_words(text)
+
+    # Count word frequencies
+    var counts = []
+    for word in words:
+        var found = false
+        var i = 0
+        while i < counts.len():
+            val (w, count) = counts[i]
+            if w == word:
+                counts[i] = (w, count + 1)
+                found = true
+                break
+            i = i + 1
+
+        if not found:
+            counts.push((word, 1))
+
+    # Sort by frequency (simple selection sort)
+    var sorted = counts
+    var i = 0
+    while i < sorted.len() - 1:
+        var max_idx = i
+        var j = i + 1
+        while j < sorted.len():
+            val (_, count1) = sorted[max_idx]
+            val (_, count2) = sorted[j]
+            if count2 > count1:
+                max_idx = j
+            j = j + 1
+
+        if max_idx != i:
+            val temp = sorted[i]
+            sorted[i] = sorted[max_idx]
+            sorted[max_idx] = temp
+
+        i = i + 1
+
+    # Take top n
+    var result = []
+    i = 0
+    while i < n and i < sorted.len():
+        result.push(sorted[i])
+        i = i + 1
+
+    result
+
+# ============================================================================
+# String Similarity
+# ============================================================================
+
+fn levenshtein_distance(s1: text, s2: text) -> i64:
+    """Calculate Levenshtein (edit) distance between two strings.
+
+    Number of single-character edits needed to transform s1 into s2.
+
+    Example:
+        levenshtein_distance("kitten", "sitting")  # 3
+    """
+    val len1 = s1.len()
+    val len2 = s2.len()
+
+    # Create distance matrix
+    var dp = []
+    var i = 0
+    while i <= len1:
+        var row = []
+        var j = 0
+        while j <= len2:
+            row.push(0)
+            j = j + 1
+        dp.push(row)
+        i = i + 1
+
+    # Initialize first row and column
+    i = 0
+    while i <= len1:
+        var row_i = dp[i]
+        row_i[0] = i
+        i = i + 1
+
+    var j = 0
+    while j <= len2:
+        var row_0 = dp[0]
+        row_0[j] = j
+        j = j + 1
+
+    # Fill matrix
+    i = 1
+    while i <= len1:
+        j = 1
+        while j <= len2:
+            val cost = if s1[i-1] == s2[j-1]: 0 else: 1
+
+            val prev_row = dp[i-1]
+            var cur_row = dp[i]
+            val delete = prev_row[j] + 1
+            val insert = cur_row[j-1] + 1
+            val substitute = prev_row[j-1] + cost
+
+            var min_val = delete
+            if insert < min_val:
+                min_val = insert
+            if substitute < min_val:
+                min_val = substitute
+
+            cur_row[j] = min_val
+            j = j + 1
+        i = i + 1
+
+    var result_row = dp[len1]
+    result_row[len2]
+
+fn hamming_distance(s1: text, s2: text):
+    """Calculate Hamming distance (must be same length).
+
+    Number of positions where characters differ.
+
+    Example:
+        hamming_distance("karolin", "kathrin")  # 3
+    """
+    if s1.len() != s2.len():
+        return nil
+
+    var distance = 0
+    var i = 0
+
+    while i < s1.len():
+        if s1[i] != s2[i]:
+            distance = distance + 1
+        i = i + 1
+
+    distance
+
+# ============================================================================
+# Character Search
+# ============================================================================
+
+fn contains_any(s: text, chars: text) -> bool:
+    """Check if text contains any character from the given set.
+
+    Each character in `chars` is checked independently (not substring search).
+
+    sdoctest:
+        expect(contains_any("hello", "aeiou")).to_equal(true)
+        expect(contains_any("xyz", "aeiou")).to_equal(false)
+        expect(contains_any("", "abc")).to_equal(false)
+        expect(contains_any("hello", "")).to_equal(false)
+    """
+    if s.len() == 0 or chars.len() == 0:
+        return false
+
+    var i = 0
+    while i < s.len():
+        var j = 0
+        while j < chars.len():
+            if s[i] == chars[j]:
+                return true
+            j = j + 1
+        i = i + 1
+
+    false
+
+fn index_of_any(s: text, chars: text) -> i64?:
+    """Find index of first character from the given set.
+
+    sdoctest:
+        expect(index_of_any("hello", "aeiou")).to_equal(1)
+        expect(index_of_any("xyz", "aeiou")).to_be_nil()
+    """
+    if s.len() == 0 or chars.len() == 0:
+        return nil
+
+    var i = 0
+    while i < s.len():
+        var j = 0
+        while j < chars.len():
+            if s[i] == chars[j]:
+                return i
+            j = j + 1
+        i = i + 1
+    nil
+
+fn index_of_func(s: text, pred: fn(text) -> bool) -> i64?:
+    """Find index of first character matching predicate.
+
+    sdoctest:
+        expect(index_of_func("hello", \c: c == "l")).to_equal(2)
+        expect(index_of_func("hello", \c: c == "z")).to_be_nil()
+    """
+    var i = 0
+    while i < s.len():
+        if pred(s[i]):
+            return i
+        i = i + 1
+    nil
+
+fn last_index_of_func(s: text, pred: fn(text) -> bool) -> i64?:
+    """Find index of last character matching predicate.
+
+    sdoctest:
+        expect(last_index_of_func("hello", \c: c == "l")).to_equal(3)
+        expect(last_index_of_func("hello", \c: c == "z")).to_be_nil()
+    """
+    var i = s.len() - 1
+    while i >= 0:
+        if pred(s[i]):
+            return i
+        i = i - 1
+    nil
+
+# ============================================================================
+# Splitting by Predicate
+# ============================================================================
+
+fn fields_func(s: text, pred: fn(text) -> bool) -> [text]:
+    """Split string by custom character predicate.
+
+    Characters where pred returns true are treated as separators.
+
+    sdoctest:
+        val result = fields_func("hello world\tfoo", \c: c == " " or c == "\t")
+        expect(result.len()).to_equal(3)
+        expect(result[0]).to_equal("hello")
+    """
+    var result: [text] = []
+    var current: [text] = []
+    var i = 0
+    while i < s.len():
+        val ch = s[i]
+        if pred(ch):
+            if current.len() > 0:
+                result.push(current.join(""))
+                current = []
+        else:
+            current.push(ch)
+        i = i + 1
+
+    if current.len() > 0:
+        result.push(current.join(""))
+
+    result

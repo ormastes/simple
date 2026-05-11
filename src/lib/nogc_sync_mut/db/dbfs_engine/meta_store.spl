@@ -12,17 +12,10 @@
 
 use std.db.dbfs_engine.schema.{InodeRow, DentryRow, InodeTable, DentryTable, InodeKey, DentryKey}
 use std.db.dbfs_engine.intent_log.{IntentLog, IntentLogRecord}
+use std.database.atomic.{atomic_write, get_timestamp}
 
 extern fn rt_file_read_text(path: text) -> text
-extern fn rt_file_write_text(path: text, content: text) -> bool
 extern fn rt_file_exists(path: text) -> bool
-extern fn rt_file_rename(from: text, to: text) -> bool
-extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
-
-fn _get_timestamp() -> i64:
-    val (out, _err, _code) = rt_process_run("date", ["+%s%3N"])
-    val ms = out.trim().to_int() ?? 0
-    ms * 1000
 
 # ============================================================
 # MetaOp — the set of operations we can journal
@@ -202,9 +195,9 @@ impl MetaStore:
     static fn create(path: text) -> MetaStore:
         val jpath  = path + ".meta.wal"
         val ckpath = path + ".meta.ckpt"
-        rt_file_write_text(jpath, "")
-        val ck = MetaCheckpoint(gen: 0, inode_count: 0, dentry_count: 0, inline_count: 0, timestamp: _get_timestamp())
-        rt_file_write_text(ckpath, "gen:0|inode_count:0|dentry_count:0|inline_count:0|timestamp:" + ck.timestamp.to_text())
+        atomic_write(jpath, "")
+        val ck = MetaCheckpoint(gen: 0, inode_count: 0, dentry_count: 0, inline_count: 0, timestamp: get_timestamp())
+        atomic_write(ckpath, "gen:0|inode_count:0|dentry_count:0|inline_count:0|timestamp:" + ck.timestamp.to_text())
         MetaStore(
             path:            path,
             journal_path:    jpath,
@@ -244,7 +237,7 @@ impl MetaStore:
         val entry = MetaJournalEntry(
             sequence:  self.next_sequence,
             op:        MetaOp.InodeWrite(row: row),
-            timestamp: _get_timestamp()
+            timestamp: get_timestamp()
         )
         self.journal.push(entry)
         self.next_sequence = self.next_sequence + 1
@@ -255,7 +248,7 @@ impl MetaStore:
         val entry = MetaJournalEntry(
             sequence:  self.next_sequence,
             op:        MetaOp.InodeDelete(ino_id: ino_id),
-            timestamp: _get_timestamp()
+            timestamp: get_timestamp()
         )
         self.journal.push(entry)
         self.next_sequence = self.next_sequence + 1
@@ -266,7 +259,7 @@ impl MetaStore:
         val entry = MetaJournalEntry(
             sequence:  self.next_sequence,
             op:        MetaOp.DentryWrite(row: row),
-            timestamp: _get_timestamp()
+            timestamp: get_timestamp()
         )
         self.journal.push(entry)
         self.next_sequence = self.next_sequence + 1
@@ -277,7 +270,7 @@ impl MetaStore:
         val entry = MetaJournalEntry(
             sequence:  self.next_sequence,
             op:        MetaOp.DentryDelete(parent_ino: parent_ino, name: name),
-            timestamp: _get_timestamp()
+            timestamp: get_timestamp()
         )
         self.journal.push(entry)
         self.next_sequence = self.next_sequence + 1
@@ -288,7 +281,7 @@ impl MetaStore:
         val entry = MetaJournalEntry(
             sequence:  self.next_sequence,
             op:        MetaOp.InlineWrite(ino_id: ino_id, data_hex: data_hex),
-            timestamp: _get_timestamp()
+            timestamp: get_timestamp()
         )
         self.journal.push(entry)
         self.next_sequence = self.next_sequence + 1
@@ -299,7 +292,7 @@ impl MetaStore:
         val entry = MetaJournalEntry(
             sequence:  self.next_sequence,
             op:        MetaOp.InlineDelete(ino_id: ino_id),
-            timestamp: _get_timestamp()
+            timestamp: get_timestamp()
         )
         self.journal.push(entry)
         self.next_sequence = self.next_sequence + 1
@@ -311,20 +304,16 @@ impl MetaStore:
     me fn checkpoint(inodes: InodeTable, dentries: DentryTable) -> bool:
         val new_gen = self.last_checkpoint.gen + 1
         val content = self._serialize_checkpoint(inodes, dentries, new_gen)
-        val tmp_path = self.checkpoint_path + ".new"
-        if not rt_file_write_text(tmp_path, content):
+        if not atomic_write(self.checkpoint_path, content):
             return false
-        if not rt_file_rename(tmp_path, self.checkpoint_path):
-            return false
-        # Journal entries are now baked into the checkpoint; truncate.
-        rt_file_write_text(self.journal_path, "")
+        atomic_write(self.journal_path, "")
         self.journal = []
         self.last_checkpoint = MetaCheckpoint(
             gen:          new_gen,
             inode_count:  inodes.entries.len() as i64,
             dentry_count: dentries.entries.len() as i64,
             inline_count: 0,
-            timestamp:    _get_timestamp()
+            timestamp:    get_timestamp()
         )
         self.dirty = false
         true
@@ -348,7 +337,7 @@ impl MetaStore:
         while i < self.journal.len() as i32:
             lines = lines + _serialize_journal_entry(self.journal[i]) + "\n"
             i = i + 1
-        rt_file_write_text(self.journal_path, lines)
+        atomic_write(self.journal_path, lines)
 
     # --- Internal: checkpoint serialization ---
 
@@ -368,7 +357,7 @@ impl MetaStore:
             "inode_count:" + inodes.entries.len().to_text() + "|" +
             "dentry_count:" + dentries.entries.len().to_text() + "|" +
             "inline_count:0|" +
-            "timestamp:" + _get_timestamp().to_text() + "\n"
+            "timestamp:" + get_timestamp().to_text() + "\n"
         out
 
     static fn _parse_checkpoint_text(content: text) -> MetaCheckpoint?:

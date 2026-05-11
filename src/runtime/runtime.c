@@ -1535,3 +1535,314 @@ int64_t rt_atexit_check(void) {
     }
     return 0;
 }
+
+/* ================================================================
+ * Byte / Encoding / Crypto / Network Externs
+ * ================================================================ */
+
+/* ---- rt_byte_char: integer 0-255 -> 1-byte string ---- */
+const char* rt_byte_char(int64_t v) {
+    /* Returns a malloc'd 2-byte buffer: [byte_value, '\0'].
+     * Note: rt_byte_char(0) returns a string whose first byte is NUL,
+     * so strlen() will report 0. This is intentional for binary wire use. */
+    char* buf = (char*)SPL_MALLOC(2, "str");
+    buf[0] = (char)(unsigned char)(v & 0xFF);
+    buf[1] = '\0';
+    return buf;
+}
+
+/* ---- rt_time_now_seconds: Unix timestamp in seconds ---- */
+int64_t rt_time_now_seconds(void) {
+    return (int64_t)time(NULL);
+}
+
+/* ---- rt_random_i64: cryptographically random i64 ---- */
+int64_t rt_random_i64(void) {
+#ifdef _WIN32
+    /* Windows: BCryptGenRandom */
+    int64_t val = 0;
+    /* Link with bcrypt.lib; BCryptGenRandom is available on Vista+ */
+    typedef long (WINAPI *BCryptGenRandomFn)(void*, unsigned char*, unsigned long, unsigned long);
+    HMODULE hLib = LoadLibraryA("bcrypt.dll");
+    if (hLib) {
+        BCryptGenRandomFn fn = (BCryptGenRandomFn)GetProcAddress(hLib, "BCryptGenRandom");
+        if (fn) {
+            /* BCRYPT_USE_SYSTEM_PREFERRED_RNG = 0x00000002 */
+            fn(NULL, (unsigned char*)&val, sizeof(val), 0x00000002);
+        }
+        FreeLibrary(hLib);
+    }
+    return val;
+#else
+    /* Unix: /dev/urandom */
+    int64_t val = 0;
+    int fd = open("/dev/urandom", O_RDONLY);
+    if (fd >= 0) {
+        ssize_t n = read(fd, &val, sizeof(val));
+        (void)n;
+        close(fd);
+    }
+    return val;
+#endif
+}
+
+/* ---- Base64url (RFC 4648 section 5) ---- */
+
+static const char b64url_enc_table[] =
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+
+const char* rt_base64url_encode(const char* input, int64_t len) {
+    if (!input || len <= 0) return SPL_STRDUP("", "str");
+    size_t in_len = (size_t)len;
+    size_t out_len = ((in_len + 2) / 3) * 4;
+    char* out = (char*)SPL_MALLOC(out_len + 1, "str");
+    size_t j = 0;
+    for (size_t i = 0; i < in_len; ) {
+        uint32_t a = (unsigned char)input[i++];
+        uint32_t b = (i < in_len) ? (unsigned char)input[i++] : 0;
+        uint32_t c = (i < in_len) ? (unsigned char)input[i++] : 0;
+        uint32_t triple = (a << 16) | (b << 8) | c;
+        out[j++] = b64url_enc_table[(triple >> 18) & 0x3F];
+        out[j++] = b64url_enc_table[(triple >> 12) & 0x3F];
+        out[j++] = b64url_enc_table[(triple >>  6) & 0x3F];
+        out[j++] = b64url_enc_table[(triple      ) & 0x3F];
+    }
+    /* Strip padding: no '=' in base64url (RFC 4648 section 5) */
+    size_t rem = in_len % 3;
+    if (rem == 1) j -= 2;
+    else if (rem == 2) j -= 1;
+    out[j] = '\0';
+    return out;
+}
+
+static int b64url_decode_char(char c) {
+    if (c >= 'A' && c <= 'Z') return c - 'A';
+    if (c >= 'a' && c <= 'z') return c - 'a' + 26;
+    if (c >= '0' && c <= '9') return c - '0' + 52;
+    if (c == '-') return 62;
+    if (c == '_') return 63;
+    return -1;
+}
+
+const char* rt_base64url_decode(const char* input) {
+    if (!input || !*input) return SPL_STRDUP("", "str");
+    size_t in_len = strlen(input);
+    /* Pad to multiple of 4 for decoding */
+    size_t padded = in_len;
+    if (padded % 4 != 0) padded += 4 - (padded % 4);
+    size_t out_max = (padded / 4) * 3;
+    char* out = (char*)SPL_MALLOC(out_max + 1, "str");
+    size_t j = 0;
+    for (size_t i = 0; i < padded; i += 4) {
+        int a = (i     < in_len) ? b64url_decode_char(input[i])     : 0;
+        int b = (i + 1 < in_len) ? b64url_decode_char(input[i + 1]) : 0;
+        int c = (i + 2 < in_len) ? b64url_decode_char(input[i + 2]) : -1;
+        int d = (i + 3 < in_len) ? b64url_decode_char(input[i + 3]) : -1;
+        if (a < 0) a = 0;
+        if (b < 0) b = 0;
+        uint32_t triple = ((uint32_t)a << 18) | ((uint32_t)b << 12);
+        if (c >= 0) triple |= ((uint32_t)c << 6);
+        if (d >= 0) triple |= (uint32_t)d;
+        out[j++] = (char)((triple >> 16) & 0xFF);
+        if (c >= 0 || (i + 2 < in_len)) out[j++] = (char)((triple >> 8) & 0xFF);
+        if (d >= 0 || (i + 3 < in_len)) out[j++] = (char)(triple & 0xFF);
+    }
+    out[j] = '\0';
+    return out;
+}
+
+/* ---- SHA-1 (RFC 3174) — minimal inline implementation ---- */
+
+static void sha1_process_block(uint32_t state[5], const uint8_t block[64]) {
+    uint32_t w[80];
+    for (int i = 0; i < 16; i++) {
+        w[i] = ((uint32_t)block[i*4] << 24) | ((uint32_t)block[i*4+1] << 16) |
+                ((uint32_t)block[i*4+2] << 8) | (uint32_t)block[i*4+3];
+    }
+    for (int i = 16; i < 80; i++) {
+        uint32_t t = w[i-3] ^ w[i-8] ^ w[i-14] ^ w[i-16];
+        w[i] = (t << 1) | (t >> 31);
+    }
+    uint32_t a = state[0], b = state[1], c = state[2], d = state[3], e = state[4];
+    for (int i = 0; i < 80; i++) {
+        uint32_t f, k;
+        if (i < 20)      { f = (b & c) | ((~b) & d);          k = 0x5A827999; }
+        else if (i < 40) { f = b ^ c ^ d;                      k = 0x6ED9EBA1; }
+        else if (i < 60) { f = (b & c) | (b & d) | (c & d);   k = 0x8F1BBCDC; }
+        else              { f = b ^ c ^ d;                      k = 0xCA62C1D6; }
+        uint32_t temp = ((a << 5) | (a >> 27)) + f + e + k + w[i];
+        e = d; d = c; c = (b << 30) | (b >> 2); b = a; a = temp;
+    }
+    state[0] += a; state[1] += b; state[2] += c; state[3] += d; state[4] += e;
+}
+
+const char* rt_sha1(const char* data) {
+    if (!data) return SPL_STRDUP("da39a3ee5e6b4b0d3255bfef95601890afd80709", "str"); /* SHA-1 of "" */
+    size_t len = strlen(data);
+    uint32_t state[5] = { 0x67452301, 0xEFCDAB89, 0x98BADCFE, 0x10325476, 0xC3D2E1F0 };
+    /* Process full blocks */
+    size_t i;
+    for (i = 0; i + 64 <= len; i += 64) {
+        sha1_process_block(state, (const uint8_t*)(data + i));
+    }
+    /* Final block(s) with padding */
+    uint8_t block[128]; /* up to 2 blocks for final padding */
+    size_t rem = len - i;
+    memcpy(block, data + i, rem);
+    block[rem++] = 0x80;
+    if (rem > 56) {
+        /* Need two blocks */
+        memset(block + rem, 0, 64 - rem);
+        sha1_process_block(state, block);
+        memset(block, 0, 56);
+    } else {
+        memset(block + rem, 0, 56 - rem);
+    }
+    /* Append bit length (big-endian 64-bit) */
+    uint64_t bit_len = (uint64_t)len * 8;
+    block[56] = (uint8_t)(bit_len >> 56);
+    block[57] = (uint8_t)(bit_len >> 48);
+    block[58] = (uint8_t)(bit_len >> 40);
+    block[59] = (uint8_t)(bit_len >> 32);
+    block[60] = (uint8_t)(bit_len >> 24);
+    block[61] = (uint8_t)(bit_len >> 16);
+    block[62] = (uint8_t)(bit_len >>  8);
+    block[63] = (uint8_t)(bit_len);
+    sha1_process_block(state, block);
+    /* Format as 40-char hex string */
+    char* hex = (char*)SPL_MALLOC(41, "str");
+    snprintf(hex, 41, "%08x%08x%08x%08x%08x",
+             state[0], state[1], state[2], state[3], state[4]);
+    return hex;
+}
+
+/* ---- rt_http_get: minimal sync HTTP GET (POSIX sockets) ----
+ * Returns body text after headers. Empty string on error.
+ * WARNING: .spl callers declare conflicting signatures for this function:
+ *   http_ffi.spl: -> (i64, text, text)   (tuple)
+ *   service_adapter.spl: -> {text: text}  (dict)
+ * This C implementation returns const char* (body only) per task spec.
+ * Callers using tuple/dict signatures will need .spl-side adaptation. */
+#ifndef _WIN32
+#include <netdb.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+#endif
+
+const char* rt_http_get(const char* url) {
+    if (!url) return SPL_STRDUP("", "str");
+#ifdef _WIN32
+    /* Minimal Windows stub — would need Winsock init */
+    (void)url;
+    return SPL_STRDUP("", "str");
+#else
+    /* Parse URL: http://host[:port]/path */
+    if (strncmp(url, "http://", 7) != 0) return SPL_STRDUP("", "str");
+    const char* host_start = url + 7;
+    const char* path_start = strchr(host_start, '/');
+    const char* path = path_start ? path_start : "/";
+    /* Extract host and port */
+    char host[256];
+    int port = 80;
+    size_t host_len;
+    const char* colon = NULL;
+    const char* host_end = path_start ? path_start : host_start + strlen(host_start);
+    /* Search for port separator only within host part */
+    for (const char* p = host_start; p < host_end; p++) {
+        if (*p == ':') { colon = p; break; }
+    }
+    if (colon && colon < host_end) {
+        host_len = (size_t)(colon - host_start);
+        port = atoi(colon + 1);
+        if (port <= 0 || port > 65535) port = 80;
+    } else {
+        host_len = (size_t)(host_end - host_start);
+    }
+    if (host_len >= sizeof(host)) host_len = sizeof(host) - 1;
+    memcpy(host, host_start, host_len);
+    host[host_len] = '\0';
+    /* DNS resolve */
+    struct addrinfo hints, *res;
+    memset(&hints, 0, sizeof(hints));
+    hints.ai_family = AF_INET;
+    hints.ai_socktype = SOCK_STREAM;
+    char port_str[8];
+    snprintf(port_str, sizeof(port_str), "%d", port);
+    if (getaddrinfo(host, port_str, &hints, &res) != 0)
+        return SPL_STRDUP("", "str");
+    int sock = socket(res->ai_family, res->ai_socktype, res->ai_protocol);
+    if (sock < 0) { freeaddrinfo(res); return SPL_STRDUP("", "str"); }
+    if (connect(sock, res->ai_addr, res->ai_addrlen) != 0) {
+        close(sock); freeaddrinfo(res); return SPL_STRDUP("", "str");
+    }
+    freeaddrinfo(res);
+    /* Send HTTP request */
+    char req[4096];
+    int req_len = snprintf(req, sizeof(req),
+        "GET %s HTTP/1.1\r\nHost: %s\r\nConnection: close\r\n\r\n", path, host);
+    if (send(sock, req, (size_t)req_len, 0) < 0) {
+        close(sock); return SPL_STRDUP("", "str");
+    }
+    /* Read response */
+    size_t buf_cap = 8192;
+    size_t buf_len = 0;
+    char* buf = (char*)SPL_MALLOC(buf_cap, "str");
+    ssize_t n;
+    while ((n = recv(sock, buf + buf_len, buf_cap - buf_len - 1, 0)) > 0) {
+        buf_len += (size_t)n;
+        if (buf_len + 1 >= buf_cap) {
+            buf_cap *= 2;
+            buf = (char*)SPL_REALLOC(buf, buf_cap, "str");
+        }
+    }
+    close(sock);
+    buf[buf_len] = '\0';
+    /* Find end of headers */
+    char* body = strstr(buf, "\r\n\r\n");
+    if (body) {
+        body += 4;
+        char* result = SPL_STRDUP(body, "str");
+        SPL_FREE(buf);
+        return result;
+    }
+    /* No header separator found — return empty */
+    SPL_FREE(buf);
+    return SPL_STRDUP("", "str");
+#endif
+}
+
+/* ---- Byte array handle for [u8] FFI ----
+ * The [u8] type in Simple FFI maps to an opaque int64_t handle.
+ * Internally: pointer to { uint8_t* data; int64_t len; int64_t cap; } */
+typedef struct {
+    uint8_t* data;
+    int64_t  len;
+    int64_t  cap;
+} rt_byte_buf;
+
+static rt_byte_buf* rt_byte_buf_from_handle(int64_t handle) {
+    return (rt_byte_buf*)(uintptr_t)handle;
+}
+
+/* rt_text_to_bytes: create byte array handle from text string */
+int64_t rt_text_to_bytes(const char* text) {
+    if (!text) text = "";
+    size_t len = strlen(text);
+    rt_byte_buf* bb = (rt_byte_buf*)SPL_MALLOC(sizeof(rt_byte_buf), "bytes");
+    bb->len = (int64_t)len;
+    bb->cap = (int64_t)len;
+    bb->data = (uint8_t*)SPL_MALLOC(len > 0 ? len : 1, "bytes");
+    if (len > 0) memcpy(bb->data, text, len);
+    return (int64_t)(uintptr_t)bb;
+}
+
+/* rt_bytes_to_text: convert byte array handle back to text (null-terminated) */
+const char* rt_bytes_to_text(int64_t handle) {
+    if (!handle) return SPL_STRDUP("", "str");
+    rt_byte_buf* bb = rt_byte_buf_from_handle(handle);
+    if (!bb->data || bb->len <= 0) return SPL_STRDUP("", "str");
+    char* result = (char*)SPL_MALLOC((size_t)bb->len + 1, "str");
+    memcpy(result, bb->data, (size_t)bb->len);
+    result[bb->len] = '\0';
+    return result;
+}

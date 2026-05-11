@@ -1,7 +1,46 @@
 # Multi-column secondary indexes for SdnTable
 # Supports Hash, Sorted, and Trigram index types.
+# Also exports shared index utilities used by dbfs_engine.AttrIndexManager.
 
 use nogc_sync_mut.database.core (SdnTable, SdnRow)
+
+fn add_to_index(index: Dict<text, [i64]>, key: text, id: i64):
+    if index.contains_key(key):
+        var list = index[key]
+        list.push(id)
+        index[key] = list
+    else:
+        index[key] = [id]
+
+fn remove_from_index(index: Dict<text, [i64]>, key: text, id: i64):
+    if not index.contains_key(key):
+        return
+    var next: [i64] = []
+    for existing in index[key]:
+        if existing != id:
+            next.push(existing)
+    index[key] = next
+
+fn intersect_id_lists(a: [i64], b: [i64]) -> [i64]:
+    var result: [i64] = []
+    var i: i32 = 0
+    while i < a.len() as i32:
+        var j: i32 = 0
+        while j < b.len() as i32:
+            if a[i] == b[j]:
+                result.push(a[i])
+            j = j + 1
+        i = i + 1
+    result
+
+fn pad_i64(v: i64) -> text:
+    val s = v.to_text()
+    var p: text = ""
+    var remaining: i32 = (20 - s.len() as i32)
+    while remaining > 0:
+        p = p + "0"
+        remaining = remaining - 1
+    p + s
 
 enum IndexType: Hash | Sorted | Trigram
 
@@ -22,13 +61,7 @@ class IndexManager:
         for row in table.rows:
             val val_opt = row.get(column)
             if val_opt.?:
-                val v = val_opt.unwrap()
-                if entries.contains_key(v):
-                    var list = entries[v]
-                    list.push(row_idx)
-                    entries[v] = list
-                else:
-                    entries[v] = [row_idx]
+                add_to_index(entries, val_opt.unwrap(), row_idx)
             row_idx = row_idx + 1
         val idx = ColumnIndex(column: column, index_type: index_type, entries: entries)
         self.indexes[column] = idx
@@ -61,28 +94,15 @@ class IndexManager:
         for (column, idx) in self.indexes:
             val val_opt = row.get(column)
             if val_opt.?:
-                val v = val_opt.unwrap()
-                if idx.entries.contains_key(v):
-                    var list = idx.entries[v]
-                    list.push(row_idx)
-                    idx.entries[v] = list
-                else:
-                    idx.entries[v] = [row_idx]
+                add_to_index(idx.entries, val_opt.unwrap(), row_idx)
                 self.indexes[column] = idx
 
     me on_row_delete(row_idx: i64, row: SdnRow):
         for (column, idx) in self.indexes:
             val val_opt = row.get(column)
             if val_opt.?:
-                val v = val_opt.unwrap()
-                if idx.entries.contains_key(v):
-                    val rows = idx.entries[v]
-                    var new_rows: [i64] = []
-                    for r in rows:
-                        if r != row_idx:
-                            new_rows.push(r)
-                    idx.entries[v] = new_rows
-                    self.indexes[column] = idx
+                remove_from_index(idx.entries, val_opt.unwrap(), row_idx)
+                self.indexes[column] = idx
 
     me on_row_update(row_idx: i64, old_row: SdnRow, new_row: SdnRow):
         self.on_row_delete(row_idx, old_row)
@@ -96,13 +116,7 @@ class IndexManager:
             for row in table.rows:
                 val val_opt = row.get(column)
                 if val_opt.?:
-                    val v = val_opt.unwrap()
-                    if entries.contains_key(v):
-                        var list = entries[v]
-                        list.push(row_idx)
-                        entries[v] = list
-                    else:
-                        entries[v] = [row_idx]
+                    add_to_index(entries, val_opt.unwrap(), row_idx)
                 row_idx = row_idx + 1
             rebuilt[column] = ColumnIndex(column: column, index_type: idx.index_type, entries: entries)
         self.indexes = rebuilt

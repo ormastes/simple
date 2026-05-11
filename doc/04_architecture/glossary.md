@@ -366,3 +366,92 @@ Unified trace format (`.sr/` directory) shared across all 6 tracks. Contains: `m
 ## Address (SReplay)
 
 Architecture-neutral address representation: `struct Address { bits: i32, value: i64 }`. The `bits` field is 32 or 64; upper bits are zero for 32-bit targets. Never use raw pointers in trace formats. Defined in `src/lib/nogc_sync_mut/replay/types.spl`.
+
+---
+
+# Simple RISC-V RTL Vocabulary
+
+The Simple compiler includes a VHDL backend that compiles `.spl` source into synthesizable VHDL-2008. This enables writing RISC-V CPU cores, SoC peripherals, and complete systems in Simple, then deploying them to FPGA or simulating with GHDL. The following terms define this hardware pipeline.
+
+## RTL (Register Transfer Level)
+
+Hardware description at the register-and-combinational-logic abstraction. In Simple, RTL modules are `.spl` files that use only the VHDL synthesizable subset (integers, Bool, fixed-size Array, Struct, Enum — no floats, pointers, heap, GC). Pure functions represent combinational logic; state-returning functions represent clocked (sequential) logic. Defined in `src/lib/hardware/rv32i_rtl/` and `src/lib/hardware/rv64gc_rtl/`.
+
+## VHDL Backend
+
+The compiler backend that lowers MIR to VHDL-2008 entity/architecture pairs. Each function becomes one VHDL entity. The backend enforces the VHDL Hardware Subset Contract: floating-point, pointers, dynamic allocation, and runtime features produce hard compile errors. Defined in `src/compiler/70.backend/backend/vhdl/`. Contract documented in `doc/04_architecture/vhdl_hardware_subset_contract.md`.
+
+## VHDL Hardware Subset Contract
+
+The exact set of Simple constructs that produce valid synthesizable VHDL. Supported: integer types (i8–i64, u8–u64), Bool, fixed-size arrays, structs (records), enums, arithmetic/comparison/bitwise operators, combinational/clocked/async-reset processes, component instantiation. Unsupported (hard error): floats, Unit, pointers, dynamic arrays, heap, GC, closures, polymorphism.
+
+## RV32I RTL Capsule
+
+The Simple-source RISC-V 32-bit base integer core. A single-cycle Harvard architecture translated from handwritten VHDL references into `.spl` that compiles through the VHDL backend. Modules: `pkg` (constants), `alu` (combinational ALU), `decode` (instruction decoder), `regfile` (32×32 register file), `lsu` (load/store unit), `core` (datapath top), `csr` (M-mode CSR file), `trap` (trap controller), `mmu_sv32` (Sv32 page table walker), `csr_s` (S-mode CSR extension). Defined in `src/lib/hardware/rv32i_rtl/`.
+
+## RV64GC RTL Capsule
+
+The 64-bit RISC-V core variant with G extensions (IMAFDC) and C (compressed). Widens all RV32I modules to 64-bit datapaths, adds W-suffix instructions (ADDW, SUBW, etc.), M extension (mul/div), A extension (LR/SC atomics), and Sv39 three-level MMU. Defined in `src/lib/hardware/rv64gc_rtl/`.
+
+## SoC RTL Capsule
+
+System-on-Chip peripherals and bus fabric, all written in Simple RTL:
+- **UART16550** — 16550-compatible UART with 16-byte TX/RX FIFOs, baud rate generator, DLAB support. `soc_rtl/uart16550.spl`
+- **CLINT** — Core-Local Interrupt controller with 64-bit `mtime` timer and `mtimecmp` comparator. `soc_rtl/clint.spl`
+- **PLIC** — Platform-Level Interrupt Controller, 32 sources, priority/enable/claim-complete. `soc_rtl/plic.spl`
+- **Boot ROM** — 4KB fixed ROM at 0x00001000 containing LUI+JALR jump to RAM. `soc_rtl/bootrom.spl`
+- **RAM** — Synchronous SRAM model (BRAM on FPGA) with byte-enable sub-word writes. `soc_rtl/ram.spl`
+- **Wishbone Interconnect** — Wishbone B4 classic bus fabric, 1 master N slaves, address-decoded. `soc_rtl/wb_interconnect.spl`
+- **Mailbox** — GHDL test proof peripheral for simulation pass/fail signaling. `soc_rtl/mailbox.spl`
+- **SoC Top** — Wires core + bus + all peripherals. Single-tick function = one clock cycle. `soc_rtl/soc_top.spl`
+
+Defined in `src/lib/hardware/soc_rtl/`.
+
+## Wishbone Bus
+
+The on-chip interconnect protocol used by the Simple RTL SoC. Wishbone B4 classic with address decoding that maps the QEMU `virt` memory layout: Boot ROM (0x00001000), CLINT (0x02000000), PLIC (0x0C000000), UART (0x10000000), RAM (0x80000000), Mailbox (0x80FF0000).
+
+## GHDL Simulation
+
+Open-source VHDL simulator used for gate-level verification of Simple-generated RTL. The repo has 19+ GHDL runner scripts and testbenches covering RV32/RV64 smoke, boot, mailbox, semihosting, interrupts, Sv39, and Linux handoff. Runner defined in `src/lib/nogc_async_mut_noalloc/baremetal/ghdl_runner.spl`. Testbenches in `examples/09_embedded/fpga_riscv/rtl/tb_*.vhd`.
+
+## Semihosting (RTL)
+
+A 3-instruction magic sequence (`SLLI zero,zero,0x1f` → `EBREAK` → `SRAI zero,zero,0x7`) that the RTL core detects to perform host I/O during simulation. Used for GHDL test output (SYS_WRITEC for char output, SYS_EXIT for halt). The `core.spl` tracks a `semi_phase` FSM and captures a0/a1 register values as operation/parameter.
+
+## Mailbox Protocol
+
+MMIO-based proof channel for GHDL simulation tests. Software writes command (PUTC/EXIT/RESULT) + arguments to the mailbox at 0x80FF0000, then writes trigger magic (0x0000DEAD). The testbench monitors trigger and checks results. Spec in `doc/04_architecture/ghdl_rv32_mailbox_protocol.md`. Constants in `rv32i_rtl/pkg.spl`.
+
+## FPGA Synthesis Flow
+
+The pipeline from Simple source to FPGA bitstream: Simple `.spl` → VHDL backend → `.vhd` files → Vivado synthesis → bitstream. Orchestrated by `riscv_fpga_linux.spl` (board profiles), `synthesis_wrapper.spl` (TCL generation), `xdc_gen.spl` (pin/timing constraints). Vivado TCL scripts in `examples/09_embedded/fpga_riscv/build*.tcl`.
+
+## Kria K26 (FPGA Target)
+
+Xilinx Zynq UltraScale+ SoM (xck26-sfvc784-2LV-c) used as the primary FPGA deployment target. Features PS (Processing System) with hardened ARM cores and GEM (Gigabit Ethernet MAC), and PL (Programmable Logic) for the Simple RTL SoC. PL clock derived from PS via EMIO. PS-PL bridge uses AXI4-Lite ↔ Wishbone adapter. Support in `src/lib/hardware/fpga_k26/`.
+
+## Behavioral Model vs RTL Module
+
+Two representations of the same hardware in the codebase:
+- **Behavioral model** (`src/lib/hardware/riscv_common/`): Software emulator using standard Simple (dynamic arrays, traits, full i64 arithmetic). Used for testing and reference. NOT synthesizable.
+- **RTL module** (`src/lib/hardware/rv32i_rtl/`, `rv64gc_rtl/`, `soc_rtl/`): Synthesizable Simple restricted to the VHDL hardware subset. Pure functions = combinational logic, state-update functions = clocked logic. Compiles to VHDL-2008.
+
+## Baremetal Server Stack
+
+The software stack that runs on the RTL SoC (or QEMU) to serve HTTP:
+- **Boot chain**: `_start` (asm) → `boot_main` → `riscv_boot_mem_init` (PMM + heap) → `os_main` → `start_http_server_baremetal`
+- **TCP shim** (`src/os/kernel/net/tcp_shim.spl`): Bridges `rt_io_tcp_*` extern functions to the pure-Simple netstack service
+- **IoDriver shim** (`src/os/kernel/net/driver_shim.spl`): Bridges the completion-based IoDriver model (submit/poll) to cooperative netstack polling
+- **Thread shim** (`src/os/kernel/net/thread_shim.spl`): Single-core stubs (thread_create returns -1, cpu_count returns 1)
+- **TLS shim** (`src/os/kernel/net/tls_shim.spl`): Embedded DER certificates, fake clock, LCG entropy for baremetal TLS
+- **HTTP launcher** (`src/os/kernel/net/http_baremetal.spl`): Creates single inline Worker, registers app handlers, runs the event loop
+
+## Three-Layer Verification
+
+The validation strategy for the RISC-V RTL + SimpleOS system:
+1. **GHDL** — gate-level RTL simulation, proves hardware correctness
+2. **QEMU** — ISA-level emulation with virtio devices, proves OS + server stack
+3. **FPGA (Kria K26)** — real hardware execution, proves deployment readiness
+
+Each layer validates the next: GHDL proves RTL matches spec, QEMU proves software works on the ISA, FPGA proves the synthesized RTL runs the software.

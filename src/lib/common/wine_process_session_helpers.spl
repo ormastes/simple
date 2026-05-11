@@ -1,0 +1,165 @@
+"""Wine process-session pure helpers: gates, table builders, byte utils, arg joining."""
+
+use common.pe_coff_header.{
+    parse_pe_header_summary,
+    pe_data_directory_gate,
+    pe_import_descriptor_table_gate,
+    pe_relocation_directory_gate,
+    pe_section_table_gate,
+    pe_tls_directory_gate
+}
+use common.wine_cpu_exec.{
+    wine_entrypoint_mapping_gate,
+    wine_exit_trap_gate,
+    wine_instruction_dispatch_gate,
+    wine_no_native_jump_gate,
+    wine_stdout_handle_gate,
+    wine_thread_context_gate,
+    wine_user_stack_gate,
+    wine_win64_abi_gate
+}
+use common.wine_image_map.{wine_image_map_gate}
+use common.wine_kernel32_module_loader.{
+    WineKernel32ModuleTable,
+    wine_kernel32_get_module_handle_w,
+    wine_kernel32_get_proc_address,
+    wine_kernel32_module_table_add_module,
+    wine_kernel32_module_table_new
+}
+use common.wine_vm_adapter.{WineVmFault}
+
+fn _wine_process_kernel32_module_table():
+    wine_kernel32_module_table_add_module(
+        wine_kernel32_module_table_new(),
+        "kernel32.dll",
+        ["LoadLibraryW", "LoadLibraryExW", "GetProcAddress", "FreeLibrary", "GetStdHandle", "WriteFile", "ExitProcess"]
+    )
+
+fn _wine_process_known_import_module_table():
+    var table = _wine_process_kernel32_module_table()
+    table = wine_kernel32_module_table_add_module(
+        table,
+        "user32.dll",
+        ["CreateWindowExW", "ShowWindow", "UpdateWindow", "DefWindowProcW", "GetMessageW", "MessageBoxW"]
+    )
+    wine_kernel32_module_table_add_module(
+        table,
+        "gdi32.dll",
+        ["CreateCompatibleDC", "TextOutW", "BitBlt", "DeleteDC"]
+    )
+
+fn _wine_process_kernel32_export_address(symbol: text) -> i64:
+    val table = _wine_process_kernel32_module_table()
+    val module = wine_kernel32_get_module_handle_w(table, "kernel32.dll")
+    if not module.ok:
+        return 0
+    val proc = wine_kernel32_get_proc_address(module.table, module.handle, symbol)
+    if not proc.ok:
+        return 0
+    proc.proc_address
+
+fn _wine_process_import_dependency_supported(module_name: text) -> bool:
+    val normalized = module_name.lower()
+    normalized == "kernel32.dll" or normalized == "user32.dll" or normalized == "gdi32.dll"
+
+fn _wine_process_text_seen(items: [text], value: text) -> bool:
+    val normalized = value.lower()
+    for item in items:
+        if item.lower() == normalized:
+            return true
+    false
+
+fn _wine_process_max_module_ref_count(table: WineKernel32ModuleTable) -> i64:
+    var max_ref_count = 0
+    for module in table.modules:
+        if module.ref_count > max_ref_count:
+            max_ref_count = module.ref_count
+    max_ref_count
+
+fn _wine_process_patch_u64_le(data: [u8], offset: i64, value: i64) -> [u8]:
+    var patched = data
+    var remaining = value
+    var i = 0
+    while i < 8:
+        patched[offset + i] = remaining % 256
+        remaining = remaining / 256
+        i = i + 1
+    patched
+
+fn _wine_process_read_u64_le(data: [u8], offset: i64) -> i64:
+    if offset + 7 >= data.len():
+        return 0
+    var value = 0
+    var shift = 0
+    var i = 0
+    while i < 8:
+        value = value | ((data[offset + i] as i64) << shift)
+        shift = shift + 8
+        i = i + 1
+    value
+
+fn _wine_process_non_import_cpu_evidence_gate(cpu_evidence: text) -> text:
+    val thread_state = wine_thread_context_gate(cpu_evidence)
+    if thread_state != "ready":
+        return thread_state
+    val stack_state = wine_user_stack_gate(cpu_evidence)
+    if stack_state != "ready":
+        return stack_state
+    val entrypoint_state = wine_entrypoint_mapping_gate(cpu_evidence)
+    if entrypoint_state != "ready":
+        return entrypoint_state
+    val stdout_state = wine_stdout_handle_gate(cpu_evidence)
+    if stdout_state != "ready":
+        return stdout_state
+    val exit_state = wine_exit_trap_gate(cpu_evidence)
+    if exit_state != "ready":
+        return exit_state
+    val native_jump_state = wine_no_native_jump_gate(cpu_evidence)
+    if native_jump_state != "ready":
+        return native_jump_state
+    val abi_state = wine_win64_abi_gate(cpu_evidence)
+    if abi_state != "ready":
+        return abi_state
+    wine_instruction_dispatch_gate(cpu_evidence)
+
+fn _wine_process_image_gate(data: [u8]) -> text:
+    val summary = parse_pe_header_summary(data)
+    if not summary.ok:
+        return summary.error
+    val section_state = pe_section_table_gate(data)
+    if section_state != "ready":
+        return section_state
+    val directory_state = pe_data_directory_gate(data)
+    if directory_state != "ready":
+        return directory_state
+    val import_state = pe_import_descriptor_table_gate(data, 16, 128)
+    if import_state != "ready":
+        return import_state
+    val relocation_state = pe_relocation_directory_gate(data)
+    if relocation_state != "ready":
+        return relocation_state
+    val tls_state = pe_tls_directory_gate(data)
+    if tls_state != "ready":
+        return tls_state
+    val image_state = wine_image_map_gate(data)
+    if image_state != "ready":
+        return image_state
+    "ready"
+
+fn _wine_process_entry_fault(entry_address: i64) -> WineVmFault:
+    WineVmFault(process_id: 1, thread_id: 1, address: entry_address, access: "execute", policy: "deliver-seh")
+
+fn _wine_join_args(args: [text]) -> text:
+    var joined = ""
+    for arg in args:
+        if joined == "":
+            joined = arg
+        else:
+            joined = joined + " " + arg
+    joined
+
+fn _wine_command(executable_path: text, argv: [text]) -> text:
+    val args = _wine_join_args(argv)
+    if args == "":
+        return executable_path
+    executable_path + " " + args

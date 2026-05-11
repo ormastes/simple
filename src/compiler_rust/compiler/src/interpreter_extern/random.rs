@@ -125,3 +125,12 @@ pub fn rt_random_hex_fn(args: &[Value]) -> Result<Value, CompileError> {
     }
     Ok(Value::Str(hex))
 }
+
+/// rt_random_i64 - Generate a random i64 value using OS CSPRNG.
+///
+/// Callable from Simple as: `rt_random_i64()`
+pub fn rt_random_i64_fn(_args: &[Value]) -> Result<Value, CompileError> {
+    use rand::Rng;
+    let val: i64 = rand::rngs::OsRng.gen();
+    Ok(Value::Int(val))
+}

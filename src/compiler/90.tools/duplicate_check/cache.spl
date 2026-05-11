@@ -8,6 +8,7 @@ struct TokenCache:
     file_path: text
     mtime: i64
     tokens: [SimpleToken]
+    content: text
 
 struct TokenCacheManager:
     cache: {text: TokenCache}
@@ -25,24 +26,12 @@ fn checksum_text(content: text, seed: i64) -> i64:
     total
 
 fn get_file_mtime(file_path: text) -> i64:
-    """Return a stable content-aware fingerprint for cache invalidation."""
     if not file_exists(file_path):
         return 0
-
     val stat_mtime = file_stat(file_path)
-    var content = file_read(file_path) ?? ""
-    if content.len() == 0:
-        content = shell_output("cat '{file_path}' 2>/dev/null || true", "")
-
-    if content.len() == 0:
-        if stat_mtime > 0:
-            return stat_mtime
-        return 1
-
-    val normalized = checksum_text(content, stat_mtime)
-    if normalized == 0:
-        return 1
-    normalized
+    if stat_mtime > 0:
+        return stat_mtime
+    1
 
 fn get_fresh_cached_tokens(manager: TokenCacheManager, file_path: text, current_mtime: i64):
     if manager.cache.has(file_path):
@@ -52,8 +41,12 @@ fn get_fresh_cached_tokens(manager: TokenCacheManager, file_path: text, current_
 
     nil
 
+fn get_cached_content(manager: TokenCacheManager, file_path: text) -> text:
+    if manager.cache.has(file_path):
+        return manager.cache[file_path].content
+    ""
+
 fn get_tokens_cached(manager: TokenCacheManager, file_path: text, tokenize_fn: fn(text) -> [SimpleToken]) -> [SimpleToken]:
-    """Get tokens with caching. Returns cached tokens if file hasn't changed."""
     val current_mtime = get_file_mtime(file_path)
 
     val cached_tokens = get_fresh_cached_tokens(manager, file_path, current_mtime)
@@ -65,7 +58,8 @@ fn get_tokens_cached(manager: TokenCacheManager, file_path: text, tokenize_fn: f
     manager.cache[file_path] = TokenCache(
         file_path: file_path,
         mtime: current_mtime,
-        tokens: tokens
+        tokens: tokens,
+        content: ""
     )
 
     tokens
@@ -76,12 +70,22 @@ fn get_cached_tokens(manager: TokenCacheManager, file_path: text):
     get_fresh_cached_tokens(manager, file_path, current_mtime)
 
 fn set_cached_tokens(manager: TokenCacheManager, file_path: text, tokens: [SimpleToken]):
-    """Store tokens in cache for a file."""
+    val current_mtime = get_file_mtime(file_path)
+    val existing_content = get_cached_content(manager, file_path)
+    manager.cache[file_path] = TokenCache(
+        file_path: file_path,
+        mtime: current_mtime,
+        tokens: tokens,
+        content: existing_content
+    )
+
+fn set_cached_tokens_with_content(manager: TokenCacheManager, file_path: text, tokens: [SimpleToken], content: text):
     val current_mtime = get_file_mtime(file_path)
     manager.cache[file_path] = TokenCache(
         file_path: file_path,
         mtime: current_mtime,
-        tokens: tokens
+        tokens: tokens,
+        content: content
     )
 
 fn invalidate_file(manager: TokenCacheManager, file_path: text):

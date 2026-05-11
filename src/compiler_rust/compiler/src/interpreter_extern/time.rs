@@ -54,6 +54,27 @@ pub fn rt_current_time_ms(_args: &[Value]) -> Result<Value, CompileError> {
     }
 }
 
+/// Get current time in milliseconds since Unix epoch (alias for web stack)
+///
+/// Callable from Simple as: `rt_time_now_ms()`
+pub fn rt_time_now_ms(_args: &[Value]) -> Result<Value, CompileError> {
+    unsafe {
+        let time_seconds = simple_runtime::value::rt_time_now_seconds();
+        let time_ms = (time_seconds * 1000.0) as i64;
+        Ok(Value::Int(time_ms))
+    }
+}
+
+/// Get current time as integer seconds since Unix epoch (DNS resolver)
+///
+/// Callable from Simple as: `rt_time_now()`
+pub fn rt_time_now(_args: &[Value]) -> Result<Value, CompileError> {
+    unsafe {
+        let time = simple_runtime::value::rt_time_now_seconds();
+        Ok(Value::Int(time as i64))
+    }
+}
+
 // ============================================================================
 // Progress Timing Functions
 // ============================================================================

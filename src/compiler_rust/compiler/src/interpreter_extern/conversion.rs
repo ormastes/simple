@@ -110,6 +110,17 @@ pub fn rt_text_to_bytes_fn(args: &[Value]) -> Result<Value, CompileError> {
     Ok(Value::Array(std::sync::Arc::new(bytes)))
 }
 
+/// Convert a single byte value to a one-character text string.
+///
+/// Callable from Simple as: `rt_byte_char(v: i64) -> text`
+pub fn rt_byte_char_fn(args: &[Value]) -> Result<Value, CompileError> {
+    let byte_val = match args.first() {
+        Some(Value::Int(v)) => *v as u8,
+        _ => 0u8,
+    };
+    Ok(Value::Str(String::from(byte_val as char)))
+}
+
 /// Convert a byte array to text
 ///
 /// Callable from Simple as: `rt_bytes_to_text(bytes)`
