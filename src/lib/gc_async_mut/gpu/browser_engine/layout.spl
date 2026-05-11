@@ -39,6 +39,7 @@ use common.render_scene.scene.{SceneCommand, RenderScene, render_scene,
 use std.gc_async_mut.gpu.browser_engine.layout_box.{BeLayoutBox, BePointerActivationDispatch}
 use std.gc_async_mut.gpu.browser_engine.layout_core.{layout_node, resolve_offset,
     _layout_block_be, layout_flex, flex_shift_boxes_x, flex_distribute_x, layout_text_node}
+use std.gc_async_mut.gpu.browser_engine.layout_paint.{_paint_box, _apply_opacity}
 use std.gc_async_mut.gpu.browser_engine.layout_float.{FloatBox, FloatContext, FloatPos,
     float_available_width_at, float_left_offset_at, float_clear_y, float_next_clear_y,
     float_find_position, float_place, float_context_height, float_is_bfc_root}
@@ -97,14 +98,6 @@ pub fn layout_tree(root: BeDomNode, viewport_w: i32, viewport_h: i32) -> BeLayou
     val result = layout_node(root, container, base_style, root_ctx)
     return result
 
-# =========================================================================
-# Node Layout Dispatch
-# =========================================================================
-
-# layout_node, resolve_offset, _layout_block_be moved to layout_core.spl
-# =========================================================================
-# Block Layout (stub — implementation in layout_core.spl)
-# =========================================================================
 # =========================================================================
 # Hit Testing
 # =========================================================================
@@ -219,137 +212,6 @@ pub fn layout_to_scene(root: BeDomNode, viewport_w: CssPx, viewport_h: CssPx) ->
     _ld("[LTS] paint done, cmds={cmds.len()}")
     render_scene(cmds, viewport_w.value, viewport_h.value)
 
-fn _paint_box(box: BeLayoutBox, commands: [SceneCommand]) -> [SceneCommand]:
-    """Generate scene commands for a layout box and children.
-    Uses accessor functions for all cross-module field access to avoid Cranelift bug."""
-    var cmds = commands
-    val node = box.node
-
-    # All style access via dom.spl accessors (avoid cross-module FieldGet on StyleProps)
-    val disp = be_dom_get_display(node)
-    if disp == "none":
-        return cmds
-    val vis = be_dom_get_visibility(node)
-    if vis == "hidden":
-        return cmds
-    val opacity = be_dom_get_opacity(node)
-    if opacity.value < 0.01:
-        return cmds
-
-    val border_radius = be_dom_get_border_radius(node)
-    val pad_left = be_dom_get_padding_left(node)
-    val pad_top = be_dom_get_padding_top(node)
-    val pad_h = be_dom_get_padding_h(node)
-    val pad_v = be_dom_get_padding_v(node)
-
-    # 0. Box shadows (before background per CSS spec)
-    val shadows = be_dom_get_box_shadows(node)
-    var sh_idx = 0
-    while sh_idx < shadows.len():
-        val shadow = shadows[sh_idx]
-        sh_idx = sh_idx + 1
-        if not shadow.inset:
-            val sx = box.x + shadow.offset_x - shadow.spread_radius
-            val sy = box.y + shadow.offset_y - shadow.spread_radius
-            val sw = box.width + shadow.spread_radius * 2
-            val sh = box.height + shadow.spread_radius * 2
-            if shadow.blur_radius > 0:
-                val steps = if shadow.blur_radius > 8: 4 else: 2
-                var si: i32 = steps
-                while si > 0:
-                    val expand = shadow.blur_radius * si / steps
-                    val alpha_factor = 1.0 / (si + 1).to_f32()
-                    val s_argb = _apply_opacity(rgba_to_argb(shadow.color), opacity.value * alpha_factor)
-                    if border_radius.value > 0:
-                        cmds.push(scene_rounded_rect(
-                            sx - expand, sy - expand,
-                            sw + expand * 2, sh + expand * 2,
-                            s_argb, border_radius.value))
-                    else:
-                        cmds.push(scene_fill_rect(
-                            sx - expand, sy - expand,
-                            sw + expand * 2, sh + expand * 2,
-                            s_argb))
-                    si = si - 1
-            else:
-                val s_argb = _apply_opacity(rgba_to_argb(shadow.color), opacity.value)
-                if border_radius.value > 0:
-                    cmds.push(scene_rounded_rect(sx, sy, sw, sh, s_argb, border_radius.value))
-                else:
-                    cmds.push(scene_fill_rect(sx, sy, sw, sh, s_argb))
-
-    # 0b. Backdrop blur (before background, blurs existing content behind element)
-    val backdrop_blur = be_dom_get_backdrop_blur(node)
-    if backdrop_blur.value > 0:
-        cmds.push(scene_blur_rect(box.x, box.y, box.width, box.height, backdrop_blur.value, border_radius.value))
-
-    # 1. Background color (via accessor)
-    val bg_color = be_dom_get_bg_color(node)
-
-    if bg_color.value != 0x00000000:
-        val bg_argb = _apply_opacity(rgba_to_argb(bg_color.value), opacity.value)
-        if border_radius.value > 0:
-            cmds.push(scene_rounded_rect(
-                box.content_x - pad_left.value, box.content_y - pad_top.value,
-                box.content_width + pad_h.value, box.content_height + pad_v.value,
-                bg_argb, border_radius.value))
-        else:
-            cmds.push(scene_fill_rect(
-                box.content_x - pad_left.value, box.content_y - pad_top.value,
-                box.content_width + pad_h.value, box.content_height + pad_v.value,
-                bg_argb))
-
-    # Gradient
-    val has_grad = be_dom_get_has_gradient(node)
-    if has_grad:
-        val c1 = _apply_opacity(rgba_to_argb(be_dom_get_gradient_c1(node).value), opacity.value)
-        val c2 = _apply_opacity(rgba_to_argb(be_dom_get_gradient_c2(node).value), opacity.value)
-        cmds.push(scene_gradient_rect(
-            box.content_x - pad_left.value, box.content_y - pad_top.value,
-            box.content_width + pad_h.value, box.content_height + pad_v.value, c1, c2))
-
-    # Border
-    val bw = be_dom_get_border_width(node)
-    val bs = be_dom_get_border_style(node)
-    if bw.value > 0 and bs != "none":
-        val bc = rgba_to_argb(be_dom_get_border_color(node).value)
-        cmds.push(scene_stroke_rect(box.x, box.y, box.width, box.height, bc, bw.value))
-
-    # Text content
-    if be_dom_get_is_text(node):
-        val txt = be_dom_get_text(node)
-        if txt.len() > 0:
-            val tc = rgba_to_argb(be_dom_get_color(node).value)
-            val fs = be_dom_get_font_size(node)
-            cmds.push(scene_text(box.content_x, box.content_y, txt, tc, fs.value))
-
-            # Text decoration (underline, overline, line-through)
-            val text_deco = be_dom_get_text_decoration(node)
-            if text_deco != "none" and text_deco != "":
-                var text_width = box.content_width
-                if text_width <= 0:
-                    text_width = txt.len() * (fs.value * 55 / 100)
-                val line_h = 1
-                if text_deco == "underline":
-                    val deco_y = box.content_y + fs.value + 2
-                    cmds.push(scene_fill_rect(box.content_x, deco_y, text_width, line_h, tc))
-                else if text_deco == "overline":
-                    val deco_y = box.content_y - 1
-                    cmds.push(scene_fill_rect(box.content_x, deco_y, text_width, line_h, tc))
-                else if text_deco == "line-through":
-                    val deco_y = box.content_y + fs.value / 2
-                    cmds.push(scene_fill_rect(box.content_x, deco_y, text_width, line_h, tc))
-
-    # Children (same-module access to BeLayoutBox.children)
-    var bc_idx = 0
-    while bc_idx < box.children.len():
-        val child = box.children[bc_idx]
-        bc_idx = bc_idx + 1
-        cmds = _paint_box(child, cmds)
-
-    return cmds
-
-# =========================================================================
 # M14 public types — LayoutContext, LayoutBox, InlineFragment, LineBox
 # =========================================================================
 
@@ -578,18 +440,6 @@ fn _make_anon_layout_box(nodes: [BeDomNode], parent_be: BeLayoutBox, available_w
         children: []
     )
 
-fn _apply_opacity(argb: u32, opacity: f32) -> u32:
-    if opacity >= 1.0:
-        return argb
-    if opacity <= 0.0:
-        return argb & 0x00FFFFFF
-    val a = (argb >> 24) & 0xFF
-    var new_a = (a.to_f32() * opacity).to_u32()
-    if new_a > 255:
-        new_a = 255
-    return (new_a << 24) | (argb & 0x00FFFFFF)
-
-# =========================================================================
 # Position: Sticky Fixup Pass
 # =========================================================================
 
