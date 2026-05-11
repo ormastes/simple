@@ -2415,6 +2415,133 @@ const char* rt_aes_gcm_decrypt(const char* key, const char* iv,
 
 #endif /* SPL_HAVE_OPENSSL */
 
+/* ============================================================================
+ * Hex-domain AES-GCM wrappers (binary-safe, NUL-transparent)
+ *
+ * These accept and return hex-encoded strings (0-9a-f), which never contain
+ * NUL bytes.  Internally they decode to binary, call the _with_len variants,
+ * and re-encode the result to hex.  Simple code can use these via:
+ *   extern fn rt_aes_gcm_encrypt_hex(...) -> text
+ *   extern fn rt_aes_gcm_decrypt_hex(...) -> text
+ * ========================================================================= */
+
+static int hex_char_val(char c) {
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+}
+
+/* Decode hex string to binary buffer.  Caller must free().  Sets *out_len. */
+static uint8_t* hex_decode(const char* hex, int64_t* out_len) {
+    if (!hex) { *out_len = 0; return NULL; }
+    size_t slen = strlen(hex);
+    if (slen % 2 != 0) { *out_len = 0; return NULL; }
+    size_t blen = slen / 2;
+    uint8_t* buf = (uint8_t*)malloc(blen);
+    if (!buf) { *out_len = 0; return NULL; }
+    for (size_t i = 0; i < blen; i++) {
+        int hi = hex_char_val(hex[2*i]);
+        int lo = hex_char_val(hex[2*i+1]);
+        if (hi < 0 || lo < 0) { free(buf); *out_len = 0; return NULL; }
+        buf[i] = (uint8_t)((hi << 4) | lo);
+    }
+    *out_len = (int64_t)blen;
+    return buf;
+}
+
+/* Encode binary buffer to hex string.  Caller must free(). */
+static char* hex_encode(const uint8_t* data, int64_t len) {
+    if (!data || len <= 0) {
+        char* empty = (char*)malloc(1);
+        if (empty) empty[0] = '\0';
+        return empty;
+    }
+    char* hex = (char*)malloc((size_t)(len * 2 + 1));
+    if (!hex) return NULL;
+    static const char digits[] = "0123456789abcdef";
+    for (int64_t i = 0; i < len; i++) {
+        hex[2*i]     = digits[(data[i] >> 4) & 0x0F];
+        hex[2*i + 1] = digits[data[i] & 0x0F];
+    }
+    hex[len * 2] = '\0';
+    return hex;
+}
+
+const char* rt_aes_gcm_encrypt_hex(const char* key_hex, const char* iv_hex,
+                                    const char* plaintext_hex, const char* aad_hex) {
+    int64_t key_len, iv_len, pt_len, aad_len;
+    uint8_t* key = hex_decode(key_hex, &key_len);
+    uint8_t* iv  = hex_decode(iv_hex, &iv_len);
+    uint8_t* pt  = hex_decode(plaintext_hex, &pt_len);
+    uint8_t* aad = hex_decode(aad_hex, &aad_len);
+
+    int64_t ct_len = 0;
+    const char* ct_raw = rt_aes_gcm_encrypt_with_len(
+        (const char*)key, key_len,
+        (const char*)iv, iv_len,
+        (const char*)pt, pt_len,
+        (const char*)aad, aad_len,
+        &ct_len);
+
+    free(key); free(iv); free(pt); free(aad);
+
+    if (!ct_raw) return NULL;
+    char* result = hex_encode((const uint8_t*)ct_raw, ct_len);
+    return result;
+}
+
+const char* rt_aes_gcm_decrypt_hex(const char* key_hex, const char* iv_hex,
+                                    const char* ciphertext_hex, const char* aad_hex) {
+    int64_t key_len, iv_len, ct_len, aad_len;
+    uint8_t* key = hex_decode(key_hex, &key_len);
+    uint8_t* iv  = hex_decode(iv_hex, &iv_len);
+    uint8_t* ct  = hex_decode(ciphertext_hex, &ct_len);
+    uint8_t* aad = hex_decode(aad_hex, &aad_len);
+
+    int64_t pt_len = 0;
+    const char* pt_raw = rt_aes_gcm_decrypt_with_len(
+        (const char*)key, key_len,
+        (const char*)iv, iv_len,
+        (const char*)ct, ct_len,
+        (const char*)aad, aad_len,
+        &pt_len);
+
+    free(key); free(iv); free(ct); free(aad);
+
+    if (!pt_raw) return NULL;
+    char* result = hex_encode((const uint8_t*)pt_raw, pt_len);
+    return result;
+}
+
+/* Convert wire text (may contain NUL) to hex string, given explicit length. */
+const char* rt_wire_to_hex(const char* wire, int64_t wire_len) {
+    if (!wire || wire_len <= 0) {
+        char* empty = (char*)malloc(1);
+        if (empty) empty[0] = '\0';
+        return empty;
+    }
+    return hex_encode((const uint8_t*)wire, wire_len);
+}
+
+/* Convert hex string back to wire text (binary, may contain NUL).
+ * Returns a NUL-terminated buffer but the logical length is strlen(hex)/2.
+ * The caller can pass the result to _with_len functions using that length. */
+const char* rt_hex_to_wire(const char* hex_str) {
+    int64_t len;
+    uint8_t* buf = hex_decode(hex_str, &len);
+    if (!buf) {
+        char* empty = (char*)malloc(1);
+        if (empty) empty[0] = '\0';
+        return empty;
+    }
+    /* Ensure NUL termination for C string safety */
+    uint8_t* result = (uint8_t*)realloc(buf, (size_t)(len + 1));
+    if (!result) { free(buf); return NULL; }
+    result[len] = 0;
+    return (const char*)result;
+}
+
 /* ---- Byte array handle for [u8] FFI ----
  * The [u8] type in Simple FFI maps to an opaque int64_t handle.
  * Internally: pointer to { uint8_t* data; int64_t len; int64_t cap; } */

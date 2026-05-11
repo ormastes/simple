@@ -10,9 +10,16 @@ use os.kernel.loader.elf_loader.{load_user_executable, ElfImage}
 use os.kernel.loader.process_image.{build_user_process_image}
 use os.kernel.arch.arch_context.{Architecture, current_architecture}
 use os.services.vfs.vfs_init.{
-    vfs_boot_init, g_vfs_initialized, g_vfs_read_file_bytes
+    vfs_boot_init, g_vfs_initialized, g_vfs_read_file_bytes,
+    g_c_adapter, CNvmeBlockAdapter
 }
 use os.userlib.process.{spawn_binary}
+use examples.nvfs.src.core.arena.{nvfs_arena_set_block_device}
+use examples.nvfs.src.core.superblock.{
+    superblock_set_device, superblock_probe_disk, superblock_read_from_disk
+}
+use examples.nvfs.src.posix.fs_driver_impl.{NvfsPosixDriver}
+use std.fs_driver.types.{MountOptions}
 
 extern fn serial_println(msg: text)
 
@@ -111,20 +118,41 @@ fn boot_fs_sequence() -> Result<BootFsResult, text>:
     log_raw_println("[boot-fs] No filesystem available -- boot failed")
     Err("boot-fs: no root filesystem found")
 
+var _nvfs_driver: NvfsPosixDriver = NvfsPosixDriver.new("nvfs-root")
+
 fn _try_nvfs_root() -> bool:
-    # NVFS root mount requires:
-    # 1. NVMe device present with NVFS superblock
-    # 2. NvfsPosixDriver.mount() succeeds
-    # Currently returns false — NVFS uses in-memory arena (N1 milestone).
-    # When NVMe-backed arena lands (N2), this probes for NVFS superblock.
-    false
+    log_raw_println("[boot-fs] Probing NVMe for NVFS superblock...")
+
+    var adapter = g_c_adapter
+    val init_ok = adapter.init_c_bridge()
+    if not init_ok:
+        log_raw_println("[boot-fs] NVMe adapter init failed — no NVFS")
+        return false
+
+    nvfs_arena_set_block_device(adapter)
+    superblock_set_device(adapter)
+
+    val found = superblock_probe_disk()
+    if not found:
+        log_raw_println("[boot-fs] No NVFS superblock at LBA 0 — trying next FS")
+        return false
+
+    val sb = superblock_read_from_disk()
+    log_raw_println("[boot-fs] NVFS superblock found: gen={sb.mount_generation}")
+
+    val opts = MountOptions(read_only: false)
+    val mount_r = _nvfs_driver.mount(opts)
+    if mount_r.is_err():
+        log_raw_println("[boot-fs] NVFS mount failed")
+        return false
+
+    log_raw_println("[boot-fs] NVFS mounted as root filesystem")
+    true
 
 fn _try_dbfs_root() -> bool:
-    # DBFS root mount requires:
-    # 1. NVMe device present with DBFS superblock
-    # 2. DbFsDriver.mount() succeeds
-    # Currently returns false — DBFS uses module-static arena.
-    # When Arena-backed persistence lands, this probes for DBFS superblock.
+    # DBFS root mount requires a DBFS superblock (different magic).
+    # DBFS shares the NVMe adapter from NVFS probe if available.
+    # Currently returns false — DBFS superblock format not yet defined.
     false
 
 fn _launch_init(path: text) -> i64:

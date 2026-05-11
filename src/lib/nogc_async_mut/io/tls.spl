@@ -17,6 +17,26 @@ Server-side negotiation currently supports TLS_RSA_WITH_AES_128_GCM_SHA256
 yet exist; the cipher negotiation code is structured so adding ECDHE is a
 one-line change once rt_ecdh_agree lands.
 
+## Binary Safety — TODO
+
+The current wire pipeline (bytes_to_wire + text concat in tls_common/tls_io/
+tls_handshake) uses strlen-based C strings. Any NUL byte (0x00) in keys,
+IVs, nonces, or payload silently truncates the data, causing AES-GCM to
+operate on wrong-length inputs. This affects ~1-in-256 bytes, so handshakes
+succeed most of the time but produce silent data corruption when a key or
+nonce happens to contain 0x00.
+
+The C runtime (runtime.c) now has hex-domain crypto externs that are fully
+binary-safe: rt_aes_gcm_encrypt_hex, rt_aes_gcm_decrypt_hex, rt_wire_to_hex,
+rt_hex_to_wire. However, wiring them into read()/write() alone is unsafe
+because upstream modules already deliver truncated keys/IVs via text concat.
+Applying rt_wire_to_hex with a "known length" to an already-truncated buffer
+causes heap-buffer-overread.
+
+Fix plan: migrate tls_common.spl, tls_io.spl, and tls_handshake.spl to build
+all wire data via [u8] byte arrays or hex encoding, then wire the hex crypto
+externs into this file.
+
 ## Sub-modules
 
 | File | Description |
@@ -59,8 +79,18 @@ use std.nogc_async_mut.io.tls_io.{
 use std.nogc_async_mut.io.tls_handshake.{perform_server_handshake}
 use std.tls.utilities.{byte_at}
 
+# NOTE: These strlen-based externs silently truncate at NUL (0x00) bytes.
+# See "Binary Safety — TODO" in module docstring.
 extern fn rt_aes_gcm_encrypt(key: text, iv: text, plaintext: text, aad: text) -> text
 extern fn rt_aes_gcm_decrypt(key: text, iv: text, ciphertext: text, aad: text) -> text
+
+# Binary-safe hex-domain crypto externs (infrastructure — not yet wired in).
+# TODO: Wire these in once tls_common/tls_io/tls_handshake build all
+# wire data via [u8] or hex encoding instead of bytes_to_wire + text concat.
+extern fn rt_aes_gcm_encrypt_hex(key_hex: text, iv_hex: text, plaintext_hex: text, aad_hex: text) -> text
+extern fn rt_aes_gcm_decrypt_hex(key_hex: text, iv_hex: text, ciphertext_hex: text, aad_hex: text) -> text
+extern fn rt_wire_to_hex(wire: text, wire_len: i64) -> text
+extern fn rt_hex_to_wire(hex_str: text) -> text
 
 # ============================================================================
 # AsyncTlsStream
