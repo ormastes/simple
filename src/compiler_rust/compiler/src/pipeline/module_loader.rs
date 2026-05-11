@@ -569,9 +569,97 @@ pub fn extract_startup_config(module: &Module) -> Option<StartupConfig> {
     None
 }
 
+/// Protect `?` characters inside string literals from being altered by
+/// `strip_optionals`.  Replaces them with a sentinel that is restored later.
+fn protect_question_marks_in_strings(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let len = bytes.len();
+    let mut out = Vec::with_capacity(len + 512);
+    let mut i = 0;
+    const SENTINEL: &[u8] = b"\x00QMARK\x00";
+
+    while i < len {
+        // Line comment — pass through unchanged
+        if bytes[i] == b'#' {
+            while i < len && bytes[i] != b'\n' {
+                out.push(bytes[i]);
+                i += 1;
+            }
+            continue;
+        }
+
+        // Triple-quoted string """..."""
+        if i + 2 < len && bytes[i] == b'"' && bytes[i + 1] == b'"' && bytes[i + 2] == b'"' {
+            out.push(b'"');
+            out.push(b'"');
+            out.push(b'"');
+            i += 3;
+            while i < len {
+                if i + 2 < len
+                    && bytes[i] == b'"'
+                    && bytes[i + 1] == b'"'
+                    && bytes[i + 2] == b'"'
+                {
+                    out.push(b'"');
+                    out.push(b'"');
+                    out.push(b'"');
+                    i += 3;
+                    break;
+                }
+                if bytes[i] == b'\\' && i + 1 < len {
+                    out.push(bytes[i]);
+                    out.push(bytes[i + 1]);
+                    i += 2;
+                    continue;
+                }
+                if bytes[i] == b'?' {
+                    out.extend_from_slice(SENTINEL);
+                } else {
+                    out.push(bytes[i]);
+                }
+                i += 1;
+            }
+            continue;
+        }
+
+        // Double-quoted string "..."
+        if bytes[i] == b'"' {
+            out.push(b'"');
+            i += 1;
+            while i < len && bytes[i] != b'"' {
+                if bytes[i] == b'\\' && i + 1 < len {
+                    out.push(bytes[i]);
+                    out.push(bytes[i + 1]);
+                    i += 2;
+                    continue;
+                }
+                if bytes[i] == b'?' {
+                    out.extend_from_slice(SENTINEL);
+                } else {
+                    out.push(bytes[i]);
+                }
+                i += 1;
+            }
+            if i < len {
+                out.push(b'"');
+                i += 1;
+            }
+            continue;
+        }
+
+        out.push(bytes[i]);
+        i += 1;
+    }
+
+    String::from_utf8(out).unwrap_or_else(|_| s.to_string())
+}
+
 /// Bootstrap-only: strip optional type suffix (`?`) and convert `.?` existence
 /// checks, while preserving `??` (null coalescing) and `?.` (optional chaining).
 fn strip_optionals(mut s: String) -> String {
+    // Step 0: Protect `?` inside string literals
+    s = protect_question_marks_in_strings(&s);
+
     // Step 1: Protect `??` and `?.` operators by replacing with placeholders
     s = s.replace("??", "\x00NULLCOAL\x00");
     s = s.replace("?.", "\x00OPTCHAIN\x00");
@@ -598,6 +686,9 @@ fn strip_optionals(mut s: String) -> String {
     // Step 4: Restore `??` and `?.` operators
     s = s.replace("\x00NULLCOAL\x00", "??");
     s = s.replace("\x00OPTCHAIN\x00", "?.");
+
+    // Step 5: Restore `?` inside string literals
+    s = s.replace("\x00QMARK\x00", "?");
     s
 }
 
