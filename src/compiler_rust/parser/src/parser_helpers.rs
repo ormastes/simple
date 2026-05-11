@@ -987,6 +987,11 @@ impl<'a> Parser<'a> {
             TokenKind::Self_ => "self",
             TokenKind::Import => "import",
             TokenKind::Lazy => "lazy",
+            // Domain-block keywords in module paths (e.g., common.ui.widget)
+            TokenKind::Ui => "ui",
+            TokenKind::Style => "style",
+            TokenKind::Schema => "schema",
+            TokenKind::Music => "music",
             _ => {
                 let ctx = parse_context!(format!("parsing path segment, previous tokens analyzed"));
                 return Err(ParseError::unexpected_token_with_context(

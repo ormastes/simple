@@ -10,12 +10,12 @@ feature
 > Complete the remaining Driver Framework compiler work: (1) FR-DRIVER-0003 — implement `@packed struct { f: T:N }` bitfield sugar syntax that routes to the existing Bitfield HIR node (unblocked now that FR-DRIVER-0008 landed), and (2) FR-DRIVER-0001 — finish synthetic registration codegen for `@driver(...)` attribute. C.2 Cranelift >> is verified done. Quick triage of doc/05_design/ runs in parallel.
 
 ## Acceptance Criteria
-- [ ] AC-1: `@packed struct { f: u16:4, g: u16:12 }` parses and lowers to the existing `HirBitfield` node in the self-hosted compiler — **syntax stub only**: parser accepts `@packed` decorator + `T:N` field syntax but `flat_ast_bridge` drops `@packed` flag (hardcoded `attributes: []` at line 778) and never populates `module.bitfields`; no semantic routing to `HirBitfield`
+- [ ] AC-1: `@packed struct { f: u16:4, g: u16:12 }` parses and lowers to the existing `HirBitfield` node in the self-hosted compiler — **implementation in place 2026-05-11, unverified**: `decl_is_packed` flag added to `ast.spl`, set by `parser_decls.spl` `@packed` branch, `flat_ast_bridge.spl` routes packed structs to `module.bitfields` as `Bitfield` entries; needs bootstrap pass to verify
 - [x] AC-2: `@packed struct` field access (`x.f`) generates correct shift+mask via the existing bitfield codegen path (verified 2026-05-10)
 - [x] AC-3: `@packed struct` field write (`x.f = val`) generates correct read-modify-write via existing bitfield path (verified 2026-05-10)
 - [x] AC-4: Round-trip test passes: `PciStatus(0); s.command = 5; expect(s.command).to_equal(5)` + adjacent field preservation (2 tests, 2026-05-10)
 - [x] AC-5: Rust seed parser recognizes `@packed struct { f: T:N }` and routes through `register_packed_struct_as_bitfield` (verified working, no new code needed)
-- [ ] AC-6: FR-DRIVER-0001 synthetic registration: `@driver(...)` codegen emits `register_static_driver(m, ops)` call — **scaffolding only**: `synthetic_driver_codegen.spl` + `mir_lowering.spl` hook added (2026-05-10) but unreached by live compiler (`bin/simple` is the Rust seed, not self-hosted MIR lowering)
+- [ ] AC-6: FR-DRIVER-0001 synthetic registration: `@driver(...)` codegen emits `register_static_driver(m, ops)` call — **implementation complete 2026-05-10, unverified**: `synthetic_driver_codegen.spl` (full codegen) + `synthetic_driver_registration.spl` (planner) + `mir_lowering.spl` hook in place; unreached by live compiler until self-hosted bootstrap replaces Rust seed
 - [x] AC-7: doc/05_design/ triage report classifies all files as IMPLEMENTED/STALE/ACTIONABLE/REFERENCE (264 files triaged)
 
 ## Cooperative Providers
