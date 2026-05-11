@@ -1,0 +1,430 @@
+# ============================================================================
+# SoC RTL Top-Level — Full RV32I System-on-Chip
+# ============================================================================
+#
+# Wires together the RV32I core, CSR file, trap controller, register file,
+# Wishbone interconnect, RAM, boot ROM, UART 16550, CLINT, and mailbox into
+# a complete single-cycle SoC.
+#
+# soc_tick() is THE main simulation entry point.  Each call = 1 clock cycle.
+# The pipeline:
+#   1.  Fetch instruction (via Wishbone: ROM or RAM)
+#   2.  Decode instruction
+#   3.  Read registers
+#   4.  Compute ALU result
+#   5.  Memory access (load/store via Wishbone)
+#   6.  CSR operations (CSRRW/S/C when SYSTEM + funct3!=0)
+#   7.  Trap entry (ECALL/EBREAK) or MRET
+#   8.  Interrupt check and trap entry
+#   9.  Write-back to register file
+#   10. Update PC (next_pc / trap_pc / mret_pc)
+#   11. Tick peripherals (CLINT, UART)
+#   12. Update CSR mip from peripheral interrupts
+#
+# VHDL synthesizable subset: u32, bool, [u32], structs only.
+# ============================================================================
+
+# -- Core pipeline
+use std.hardware.rv32i_rtl.pkg.{OP_SYSTEM, OP_LOAD, OP_STORE}
+use std.hardware.rv32i_rtl.decode.{DecodeResult, decode_instruction}
+use std.hardware.rv32i_rtl.alu.{alu_compute}
+use std.hardware.rv32i_rtl.regfile.{RegFile, regfile_create, regfile_read, regfile_write}
+use std.hardware.rv32i_rtl.lsu.lsu_load
+use std.hardware.rv32i_rtl.core.{CoreState, core_reset, core_combinational, core_update}
+
+# -- CSR / Trap
+use std.hardware.rv32i_rtl.csr.{CsrFile, CsrRwResult, csr_create, csr_read, csr_rw, csr_tick, csr_update_mip}
+use std.hardware.rv32i_rtl.csr.{FUNCT3_CSRRW, FUNCT3_CSRRS, FUNCT3_CSRRC}
+use std.hardware.rv32i_rtl.csr.{FUNCT3_CSRRWI, FUNCT3_CSRRSI, FUNCT3_CSRRCI}
+use std.hardware.rv32i_rtl.trap.{trap_check_interrupt, trap_enter, trap_exit_mret}
+use std.hardware.rv32i_rtl.trap.{CAUSE_ECALL_M, CAUSE_BREAKPOINT}
+
+# -- Peripherals
+use std.hardware.soc_rtl.bootrom.{bootrom_read, BOOTROM_BASE}
+use std.hardware.soc_rtl.uart16550.{Uart16550State, uart_create, uart_mmio_read, uart_mmio_read_update, uart_mmio_write, uart_tick}
+use std.hardware.soc_rtl.clint.{ClintState, clint_create, clint_mmio_read, clint_mmio_write, clint_tick}
+use std.hardware.soc_rtl.ram.{RamState, ram_create, ram_read, ram_write}
+use std.hardware.soc_rtl.mailbox.{MailboxState, mailbox_create, mailbox_mmio_read, mailbox_mmio_write}
+
+# -- Wishbone interconnect
+use std.hardware.soc_rtl.wb_interconnect.{wb_decode_address, wb_route_read, wb_route_write}
+use std.hardware.soc_rtl.wb_interconnect.{WB_SLAVE_ROM, WB_SLAVE_CLINT, WB_SLAVE_UART}
+use std.hardware.soc_rtl.wb_interconnect.{WB_SLAVE_RAM, WB_SLAVE_MAILBOX}
+use std.hardware.soc_rtl.wb_interconnect.{RAM_BASE, CLINT_BASE, UART_BASE, MB_BASE}
+
+# ============================================================================
+# SoC State
+# ============================================================================
+
+struct SocState:
+    """Full SoC sequential state."""
+    core: CoreState
+    csr: CsrFile
+    regfile: RegFile
+    uart: Uart16550State
+    clint: ClintState
+    mailbox: MailboxState
+    ram: RamState
+
+# ============================================================================
+# SoC External Ports
+# ============================================================================
+
+struct SocPorts:
+    """External pin-level signals from the SoC."""
+    uart_tx: bool         # UART TX line
+    halted: bool          # CPU halted
+    char_out: u32         # Mailbox PUTC character
+    char_valid: bool      # Mailbox PUTC valid
+
+# ============================================================================
+# SoC Tick Result
+# ============================================================================
+
+struct SocTickResult:
+    """Result of one SoC clock cycle."""
+    state: SocState       # Updated SoC state
+    ports: SocPorts       # External port values this cycle
+
+# ============================================================================
+# Create / Reset
+# ============================================================================
+
+fn soc_create(ram_size_words: u32) -> SocState:
+    """Create and initialize the full SoC.  PC starts at boot ROM (0x1000)."""
+    SocState(
+        core: core_reset(BOOTROM_BASE),
+        csr: csr_create(0),
+        regfile: regfile_create(),
+        uart: uart_create(),
+        clint: clint_create(),
+        mailbox: mailbox_create(),
+        ram: ram_create(ram_size_words)
+    )
+
+fn soc_reset(ram_size_words: u32) -> SocState:
+    """Reset the SoC — alias for soc_create."""
+    soc_create(ram_size_words)
+
+# ============================================================================
+# Instruction Fetch — route through Wishbone address map
+# ============================================================================
+
+fn soc_fetch_instruction(state: SocState, pc: u32) -> u32:
+    """Fetch a 32-bit instruction word at the given PC.
+    Routes through the Wishbone address decoder to ROM or RAM."""
+    val slave_idx = wb_decode_address(pc)
+    if slave_idx == WB_SLAVE_ROM:
+        return bootrom_read(pc)
+    if slave_idx == WB_SLAVE_RAM:
+        val ram_offset = pc - RAM_BASE
+        return ram_read(state.ram, ram_offset)
+    # Fetching from unmapped/peripheral space returns NOP
+    0x00000013
+
+# ============================================================================
+# Data Memory Read — route through Wishbone
+# ============================================================================
+
+fn soc_mem_read(state: SocState, addr: u32) -> u32:
+    """Read a 32-bit word from the data bus via Wishbone address decode."""
+    val slave_idx = wb_decode_address(addr)
+
+    var rom_data: u32 = 0
+    var clint_data: u32 = 0
+    var uart_data: u32 = 0
+    var ram_data: u32 = 0
+    var mb_data: u32 = 0
+
+    if slave_idx == WB_SLAVE_ROM:
+        rom_data = bootrom_read(addr)
+    else if slave_idx == WB_SLAVE_CLINT:
+        clint_data = clint_mmio_read(state.clint, addr - CLINT_BASE)
+    else if slave_idx == WB_SLAVE_UART:
+        uart_data = uart_mmio_read(state.uart, addr - UART_BASE)
+    else if slave_idx == WB_SLAVE_RAM:
+        ram_data = ram_read(state.ram, addr - RAM_BASE)
+    else if slave_idx == WB_SLAVE_MAILBOX:
+        mb_data = mailbox_mmio_read(state.mailbox, addr - MB_BASE)
+
+    val resp = wb_route_read(slave_idx, addr, rom_data, clint_data, uart_data, ram_data, mb_data)
+    resp.rdata
+
+# ============================================================================
+# Data Memory Read with Side Effects (UART RX pop)
+# ============================================================================
+
+fn soc_mem_read_update(state: SocState, addr: u32) -> SocState:
+    """Apply read side-effects (e.g. UART RX FIFO pop)."""
+    val slave_idx = wb_decode_address(addr)
+    if slave_idx == WB_SLAVE_UART:
+        var out = state
+        out.uart = uart_mmio_read_update(state.uart, addr - UART_BASE)
+        return out
+    state
+
+# ============================================================================
+# Data Memory Write — route through Wishbone
+# ============================================================================
+
+struct SocWriteResult:
+    """Result of a data memory write."""
+    state: SocState
+    char_out: u32
+    char_valid: bool
+    halt_request: bool
+
+fn soc_mem_write(state: SocState, addr: u32, wdata: u32, width: u32) -> SocWriteResult:
+    """Write to data memory via Wishbone address decode."""
+    val slave_idx = wb_decode_address(addr)
+    val wr = wb_route_write(slave_idx, addr, wdata)
+    var out = state
+    var char_out: u32 = 0
+    var char_valid: bool = false
+    var halt_request: bool = false
+
+    if slave_idx == WB_SLAVE_CLINT:
+        out.clint = clint_mmio_write(state.clint, wr.offset, wdata)
+
+    else if slave_idx == WB_SLAVE_UART:
+        out.uart = uart_mmio_write(state.uart, wr.offset, wdata)
+
+    else if slave_idx == WB_SLAVE_RAM:
+        out.ram = ram_write(state.ram, wr.offset, wdata, width)
+
+    else if slave_idx == WB_SLAVE_MAILBOX:
+        val mb_result = mailbox_mmio_write(state.mailbox, wr.offset, wdata)
+        out.mailbox = mb_result.state
+        char_out = mb_result.char_out
+        char_valid = mb_result.char_valid
+        halt_request = mb_result.halt_request
+
+    # ROM writes are silently ignored
+
+    SocWriteResult(
+        state: out,
+        char_out: char_out,
+        char_valid: char_valid,
+        halt_request: halt_request
+    )
+
+# ============================================================================
+# Helper — is this a CSR instruction?
+# ============================================================================
+
+fn is_csr_funct3(funct3: u32) -> bool:
+    """Return true if funct3 indicates a CSR read-modify-write instruction."""
+    (funct3 == FUNCT3_CSRRW or funct3 == FUNCT3_CSRRS or funct3 == FUNCT3_CSRRC or
+     funct3 == FUNCT3_CSRRWI or funct3 == FUNCT3_CSRRSI or funct3 == FUNCT3_CSRRCI)
+
+# ============================================================================
+# Helper — is this an MRET instruction?
+# ============================================================================
+
+fn is_mret(dec: DecodeResult) -> bool:
+    """Return true if the decoded instruction is MRET.
+    MRET encoding: funct7=0x18 (0011000), rs2=00010, funct3=0, opcode=SYSTEM.
+    The full imm field (bits [31:20]) = 0x302."""
+    dec.opcode == OP_SYSTEM and dec.funct3 == 0 and dec.funct7 == 0x18 and dec.rs2 == 2
+
+# ============================================================================
+# Helper — is this ECALL?
+# ============================================================================
+
+fn is_ecall(dec: DecodeResult) -> bool:
+    """Return true if the decoded instruction is ECALL.
+    ECALL encoding: imm=0, funct3=0, opcode=SYSTEM."""
+    dec.opcode == OP_SYSTEM and dec.funct3 == 0 and dec.funct7 == 0 and dec.rs2 == 0
+
+# ============================================================================
+# Helper — is this EBREAK?
+# ============================================================================
+
+fn is_ebreak(dec: DecodeResult) -> bool:
+    """Return true if the decoded instruction is EBREAK.
+    EBREAK encoding: imm=1 (rs2=1), funct3=0, opcode=SYSTEM."""
+    dec.opcode == OP_SYSTEM and dec.funct3 == 0 and dec.funct7 == 0 and dec.rs2 == 1
+
+# ============================================================================
+# SoC Tick — THE main simulation function
+# ============================================================================
+
+fn soc_tick(state: SocState) -> SocTickResult:
+    """Execute one clock cycle of the entire SoC.
+
+    This function integrates all modules: core datapath, CSR, traps,
+    register file, Wishbone bus, RAM, ROM, UART, CLINT, and mailbox.
+
+    Returns the updated SoC state and external port values."""
+
+    val pc = state.core.pc
+    var cur_csr = state.csr
+    var cur_rf = state.regfile
+    var cur_state = state
+    var halted = state.core.halt
+    var char_out: u32 = 0
+    var char_valid: bool = false
+    var uart_tx_bit: u32 = 1
+
+    # If already halted, just tick peripherals and return
+    if halted:
+        # Tick CLINT
+        val ct = clint_tick(cur_state.clint)
+        cur_state.clint = ct.state
+        # Tick UART
+        val ut = uart_tick(cur_state.uart)
+        cur_state.uart = ut.state
+        uart_tx_bit = ut.tx_out
+
+        val ports = SocPorts(
+            uart_tx: uart_tx_bit != 0,
+            halted: true,
+            char_out: 0,
+            char_valid: false
+        )
+        return SocTickResult(state: cur_state, ports: ports)
+
+    # ── Step 1: Fetch instruction ────────────────────────────────────────
+    val insn = soc_fetch_instruction(cur_state, pc)
+
+    # ── Step 2: Decode ───────────────────────────────────────────────────
+    val dec = decode_instruction(insn)
+
+    # ── Step 3: Read registers ───────────────────────────────────────────
+    val rr = regfile_read(cur_rf, dec.rs1, dec.rs2)
+    val rs1_data = rr.rs1_data
+    val rs2_data = rr.rs2_data
+
+    # ── Step 4: Core combinational datapath (ALU, branch, next-PC) ──────
+    # First, compute dmem_rdata for the combinational path (needed for loads)
+    val comb_prelim = core_combinational(state.core, insn, 0, cur_rf)
+
+    # Read data memory at the computed address
+    val dmem_rdata = soc_mem_read(cur_state, comb_prelim.dmem_addr)
+
+    # Re-run combinational with actual memory read data
+    val comb = core_combinational(state.core, insn, dmem_rdata, cur_rf)
+
+    # ── Step 5: Memory write (store instructions) ────────────────────────
+    var next_pc = comb.pc_next
+    var do_rd_write = dec.reg_write
+    var rd_data = comb.rd_data
+
+    if comb.dmem_we:
+        val wr = soc_mem_write(cur_state, comb.dmem_addr, comb.dmem_wdata, comb.dmem_width)
+        cur_state = wr.state
+        if wr.char_valid:
+            char_out = wr.char_out
+            char_valid = true
+        if wr.halt_request:
+            halted = true
+
+    # Apply read side-effects (UART RX pop on load)
+    if comb.dmem_re:
+        cur_state = soc_mem_read_update(cur_state, comb.dmem_addr)
+
+    # ── Step 6: CSR operations (SYSTEM + funct3 != 0) ───────────────────
+    if dec.opcode == OP_SYSTEM and is_csr_funct3(dec.funct3):
+        # CSR address is in the immediate field bits [31:20] = dec.imm upper 12
+        val csr_addr = (insn >> 20) & 0xFFF
+
+        # For CSRRxI, the source is the zero-extended rs1 field (5-bit immediate)
+        var csr_src = rs1_data
+        if dec.funct3 >= FUNCT3_CSRRWI:
+            csr_src = dec.rs1   # rs1 field used as zimm[4:0]
+
+        val csr_result = csr_rw(cur_csr, csr_addr, csr_src, dec.funct3)
+        cur_csr = csr_result.csr
+
+        # CSR read value goes to rd
+        rd_data = csr_result.old_value
+        do_rd_write = true
+        next_pc = pc + 4
+
+    # ── Step 7: ECALL / EBREAK / MRET ───────────────────────────────────
+    else if dec.opcode == OP_SYSTEM and dec.funct3 == 0:
+        if is_mret(dec):
+            # MRET — restore context from CSRs
+            val mret_result = trap_exit_mret(cur_csr)
+            cur_csr = mret_result.csr
+            next_pc = mret_result.return_pc
+            do_rd_write = false
+
+        else if is_ecall(dec):
+            # ECALL — enter trap with cause = environment call from M-mode
+            val enter_result = trap_enter(cur_csr, pc, CAUSE_ECALL_M, 0)
+            cur_csr = enter_result.csr
+            next_pc = enter_result.trap_pc
+            do_rd_write = false
+
+        else if is_ebreak(dec) and state.core.semi_phase == 0:
+            # EBREAK outside semihosting sequence — enter trap
+            # When semi_phase != 0, the EBREAK is part of the semihosting
+            # magic sequence and core_update handles it via the semi_phase FSM
+            val enter_result = trap_enter(cur_csr, pc, CAUSE_BREAKPOINT, pc)
+            cur_csr = enter_result.csr
+            next_pc = enter_result.trap_pc
+            do_rd_write = false
+
+    # ── Step 8: Interrupt check ──────────────────────────────────────────
+    # Check for pending interrupts AFTER instruction execution
+    val int_check = trap_check_interrupt(cur_csr)
+    if int_check.pending:
+        val int_enter = trap_enter(cur_csr, next_pc, int_check.cause, 0)
+        cur_csr = int_enter.csr
+        next_pc = int_enter.trap_pc
+
+    # ── Step 9: Write-back to register file ──────────────────────────────
+    cur_rf = regfile_write(cur_rf, dec.rd, rd_data, do_rd_write)
+
+    # ── Step 10: Update core state (PC, semihosting detection) ───────────
+    # core_update handles the semihosting magic sequence FSM (semi_phase).
+    # It must run for:
+    #   - All non-SYSTEM instructions (normal datapath)
+    #   - SYSTEM instructions when semihosting is active (semi_phase != 0),
+    #     because the EBREAK in the semihosting sequence is OP_SYSTEM
+    var new_core = state.core
+    val need_core_update = (dec.opcode != OP_SYSTEM or state.core.semi_phase != 0)
+    if need_core_update:
+        new_core = core_update(state.core, insn, comb, rr.a0_val, rr.a1_val)
+        # core_update computes its own pc_next; override with our trap-aware pc
+        # unless semihosting consumed it (semi_phase advanced)
+        if state.core.semi_phase == 0:
+            new_core.pc = next_pc
+        if new_core.halt:
+            halted = true
+    else:
+        # SYSTEM instructions outside semihosting — just update PC
+        new_core.pc = next_pc
+        new_core.semi_trigger = false
+
+    if halted:
+        new_core.halt = true
+
+    cur_state.core = new_core
+    cur_state.csr = cur_csr
+    cur_state.regfile = cur_rf
+
+    # ── Step 11: Tick peripherals ────────────────────────────────────────
+    val ct = clint_tick(cur_state.clint)
+    cur_state.clint = ct.state
+
+    val ut = uart_tick(cur_state.uart)
+    cur_state.uart = ut.state
+    uart_tx_bit = ut.tx_out
+
+    # ── Step 12: Update CSR mip from peripheral interrupts ───────────────
+    cur_state.csr = csr_update_mip(cur_state.csr, ct.mtip, ct.msip_out, false)
+
+    # Tick CSR counters (mcycle, minstret)
+    cur_state.csr = csr_tick(cur_state.csr)
+
+    # ── Build output ─────────────────────────────────────────────────────
+    val ports = SocPorts(
+        uart_tx: uart_tx_bit != 0,
+        halted: cur_state.core.halt,
+        char_out: char_out,
+        char_valid: char_valid
+    )
+
+    SocTickResult(state: cur_state, ports: ports)

@@ -31,6 +31,8 @@ use std.http_server.types.{
 }
 use std.security.types.{SecurityEvent, AuditEntry, AuditConfig}
 use std.security.audit_log.{log_security_event}
+use std.nogc_sync_mut.redis.client.{RedisClient}
+use std.common.io.types.{IoError}
 
 # Time FFI
 extern fn rt_time_now_ms() -> i64
@@ -175,3 +177,85 @@ fn rate_limit_handler(request: HttpRequestData,
 
     store.set_tokens(idx, available - 1)
     PhaseResult.Continue
+
+# ============================================================================
+# Redis-Backed Distributed Rate Limiter
+# ============================================================================
+
+class RedisRateLimiter:
+    """Sliding-window rate limiter backed by Redis.
+
+    Each key gets a Redis counter with TTL equal to the window. Uses
+    INCR + EXPIRE for atomic sliding-window approximation suitable
+    for distributed deployments behind multiple server instances.
+
+    Usage:
+        use std.nogc_sync_mut.redis.client.{RedisClient}
+
+        var redis = RedisClient.connect("127.0.0.1", 6379)?
+        val limiter = RedisRateLimiter(client: redis, window_ms: 60000, max_requests: 100)
+        if limiter.check("peer:10.0.0.1")?:
+            # request allowed
+        else:
+            # 429
+    """
+    client: RedisClient
+    window_ms: i64
+    max_requests: i64
+
+impl RedisRateLimiter:
+    fn check(key: text) -> Result<bool, IoError>:
+        """Check whether a request for key is allowed.
+
+        Increments the counter and sets expiry on first hit.
+        Returns true if the request is within the rate limit.
+        """
+        val redis_key = "rl:{key}"
+        val count = self.client.incr(redis_key)?
+
+        if count == 1:
+            val ttl_seconds = (self.window_ms + 999) / 1000
+            self.client.expire(redis_key, ttl_seconds)?
+
+        Ok(count <= self.max_requests)
+
+    fn remaining(key: text) -> Result<i64, IoError>:
+        """Return the number of requests remaining in the current window."""
+        val redis_key = "rl:{key}"
+        val current = self.client.get(redis_key)?
+        match current:
+            case Some(val_text):
+                val count = parse_count(val_text)
+                val left = self.max_requests - count
+                if left < 0:
+                    return Ok(0)
+                return Ok(left)
+            case _:
+                return Ok(self.max_requests)
+
+    fn reset_at(key: text) -> Result<i64, IoError>:
+        """Return the epoch-ms timestamp when the current window resets.
+
+        Uses Redis TTL to compute the reset time.
+        """
+        val redis_key = "rl:{key}"
+        val ttl_sec = self.client.ttl(redis_key)?
+
+        if ttl_sec < 0:
+            return Ok(0)
+
+        val now = rt_time_now_ms()
+        Ok(now + ttl_sec * 1000)
+
+fn parse_count(s: text) -> i64:
+    """Parse a Redis counter string to i64."""
+    var result = 0
+    var i = 0
+    val len = s.length()
+    while i < len:
+        val c = s.char_at(i)
+        val code = c.byte_at(0)
+        if code >= 48 and code <= 57:
+            result = result * 10 + (code - 48)
+        i = i + 1
+    result

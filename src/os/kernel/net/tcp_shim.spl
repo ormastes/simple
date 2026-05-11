@@ -1,0 +1,315 @@
+# TCP Shim -- State-Only Stub for B2 Link Satisfaction
+#
+# MDSOC: feature dimension, network layer
+# Status: B2 stub -- satisfies rt_io_tcp_* extern linkage so the stdlib
+#         tcp module compiles against SimpleOS. Does NOT transmit real
+#         network traffic. A follow-up phase will wire these functions to
+#         the live NetstackService singleton (which owns the real
+#         SocketTable + TcpConnection pool + NIC driver).
+#
+# Architecture:
+#   - Each function manages shim-local fd state only (ShimFdEntry table).
+#   - bind/connect/accept return valid shim fds but no packets are sent.
+#   - read always returns empty; write returns byte count but discards.
+#   - Socket option setters (nodelay, timeouts) store flags faithfully.
+#
+# Each rt_io_tcp_* function here implements the extern declared in
+# src/lib/nogc_sync_mut/io/tcp.spl.
+
+use os.kernel.net.tcp_shim_state.{
+    ShimFdEntry, shim_alloc_fd, shim_get, shim_set, shim_remove,
+    parse_host_port, make_sock_addr, sock_addr_to_text, HostPort
+}
+
+# ============================================================================
+# Stub-local counters (no real netstack wiring yet)
+# ============================================================================
+
+var g_next_os_fd: i32 = 1     # Fake os_fd counter for stub entries
+
+# ============================================================================
+# TCP Listener Functions
+# ============================================================================
+
+@export("C")
+fn rt_io_tcp_bind(addr: text) -> i64:
+    """Create a TCP listener socket, bind to addr, and start listening.
+
+    Returns a shim fd (>= 100) on success, or -1 on failure.
+    B2 stub: validates address, allocates fd, records state. No real bind.
+    """
+    val hp = parse_host_port(addr)
+    if hp == nil:
+        return -1
+
+    # Allocate a fake os_fd for bookkeeping
+    val os_fd = g_next_os_fd
+    g_next_os_fd = g_next_os_fd + 1
+
+    # Allocate shim fd and track
+    val shim_fd = shim_alloc_fd()
+    val entry = ShimFdEntry(
+        fd: shim_fd, os_fd: os_fd,
+        bound_addr: addr, peer_addr_text: "",
+        is_listening: true, nonblocking: false,
+        nodelay: false, read_timeout_ms: -1, write_timeout_ms: -1
+    )
+    shim_set(shim_fd, entry)
+    shim_fd
+
+@export("C")
+fn rt_io_tcp_accept(fd: i64) -> i64:
+    """Accept incoming connection on a listener (blocking).
+
+    B2 stub: no real accept queue exists yet. Returns -1 (no connection).
+    Will be wired to NetstackService.poll_once() accept path in follow-up.
+    """
+    val entry = shim_get(fd)
+    if entry == nil:
+        return -1
+
+    val e = entry.unwrap()
+    if not e.is_listening:
+        return -1
+
+    # TODO: wire to real NetstackService accept queue
+    -1
+
+@export("C")
+fn rt_io_tcp_accept_timeout(fd: i64, ms: i64) -> i64:
+    """Accept with timeout.
+
+    B2 stub: returns -1 (timeout). Will be wired in follow-up.
+    """
+    val entry = shim_get(fd)
+    if entry == nil:
+        return -1
+
+    val e = entry.unwrap()
+    if not e.is_listening:
+        return -1
+
+    # TODO: wire to real NetstackService accept queue with ms budget
+    -1
+
+# ============================================================================
+# TCP Stream Functions
+# ============================================================================
+
+@export("C")
+fn rt_io_tcp_connect(addr: text) -> i64:
+    """Connect to a remote address (blocking).
+
+    B2 stub: validates address, allocates fd, records peer. No real
+    handshake occurs. Returns shim fd (>= 100) or -1 on parse failure.
+    """
+    val hp = parse_host_port(addr)
+    if hp == nil:
+        return -1
+
+    val os_fd = g_next_os_fd
+    g_next_os_fd = g_next_os_fd + 1
+
+    val shim_fd = shim_alloc_fd()
+    val entry = ShimFdEntry(
+        fd: shim_fd, os_fd: os_fd,
+        bound_addr: "", peer_addr_text: addr,
+        is_listening: false, nonblocking: false,
+        nodelay: false, read_timeout_ms: -1, write_timeout_ms: -1
+    )
+    shim_set(shim_fd, entry)
+    shim_fd
+
+@export("C")
+fn rt_io_tcp_connect_timeout(addr: text, ms: i64) -> i64:
+    """Connect with timeout.
+
+    B2 stub: delegates to rt_io_tcp_connect (no real timeout).
+    """
+    rt_io_tcp_connect(addr)
+
+# ============================================================================
+# Read / Write
+# ============================================================================
+
+@export("C")
+fn rt_io_tcp_read(fd: i64, size: i64) -> [u8]:
+    """Read up to size bytes from a connected TCP stream.
+
+    B2 stub: no real recv buffer. Returns empty (EOF).
+    """
+    val entry = shim_get(fd)
+    if entry == nil:
+        return []
+
+    # TODO: wire to real TcpConnection recv_data
+    []
+
+@export("C")
+fn rt_io_tcp_read_line(fd: i64) -> text?:
+    """Read a single line (up to newline) from a TCP stream.
+
+    B2 stub: no real recv buffer. Returns nil (EOF).
+    """
+    val entry = shim_get(fd)
+    if entry == nil:
+        return nil
+
+    # TODO: wire to real TcpConnection recv_data, accumulate until newline
+    nil
+
+@export("C")
+fn rt_io_tcp_write(fd: i64, data: [u8]) -> i64:
+    """Write bytes to a connected TCP stream.
+
+    B2 stub: reports success (returns byte count) but discards data.
+    """
+    val entry = shim_get(fd)
+    if entry == nil:
+        return -1
+
+    # TODO: wire to real TcpConnection send_data
+    data.len().to_i64()
+
+@export("C")
+fn rt_io_tcp_write_text(fd: i64, data: text) -> i64:
+    """Write text to a connected TCP stream.
+
+    B2 stub: reports success (returns byte count) but discards data.
+    """
+    val entry = shim_get(fd)
+    if entry == nil:
+        return -1
+
+    # TODO: wire to real TcpConnection send_data with text-to-bytes
+    data.len().to_i64()
+
+@export("C")
+fn rt_io_tcp_flush(fd: i64) -> bool:
+    """Flush the TCP send buffer.
+
+    B2 stub: returns true (nothing to flush).
+    """
+    val entry = shim_get(fd)
+    if entry == nil:
+        return false
+
+    # TODO: wire to real TcpConnection flush_send_buf
+    true
+
+@export("C")
+fn rt_io_tcp_close(fd: i64) -> bool:
+    """Close a TCP socket (listener or stream).
+
+    B2 stub: removes from shim fd table. No real FIN sent.
+    """
+    val entry = shim_get(fd)
+    if entry == nil:
+        return false
+
+    # TODO: wire to real TcpConnection close + SocketTable close
+    shim_remove(fd)
+    true
+
+# ============================================================================
+# Metadata / Options
+# ============================================================================
+
+@export("C")
+fn rt_io_tcp_local_addr(fd: i64) -> text?:
+    """Get the local bound address as "A.B.C.D:port"."""
+    val entry = shim_get(fd)
+    if entry == nil:
+        return nil
+
+    val e = entry.unwrap()
+    if e.bound_addr.len() > 0:
+        return e.bound_addr
+
+    nil
+
+@export("C")
+fn rt_io_tcp_peer_addr(fd: i64) -> text?:
+    """Get the remote peer address as "A.B.C.D:port"."""
+    val entry = shim_get(fd)
+    if entry == nil:
+        return nil
+
+    val e = entry.unwrap()
+    if e.peer_addr_text.len() > 0:
+        return e.peer_addr_text
+
+    nil
+
+@export("C")
+fn rt_io_tcp_set_nodelay(fd: i64, enabled: bool) -> bool:
+    """Set TCP_NODELAY (disable Nagle's algorithm).
+
+    Stores the flag in shim state. Always succeeds.
+    """
+    val entry = shim_get(fd)
+    if entry == nil:
+        return false
+
+    val e = entry.unwrap()
+    val updated = ShimFdEntry(
+        fd: e.fd, os_fd: e.os_fd,
+        bound_addr: e.bound_addr, peer_addr_text: e.peer_addr_text,
+        is_listening: e.is_listening, nonblocking: e.nonblocking,
+        nodelay: enabled, read_timeout_ms: e.read_timeout_ms,
+        write_timeout_ms: e.write_timeout_ms
+    )
+    shim_set(fd, updated)
+    true
+
+@export("C")
+fn rt_io_tcp_set_read_timeout(fd: i64, ms: i64?) -> bool:
+    """Set read timeout in milliseconds. nil means no timeout."""
+    val entry = shim_get(fd)
+    if entry == nil:
+        return false
+
+    val e = entry.unwrap()
+    val timeout_val = if ms.?: ms.unwrap() else: -1
+    val updated = ShimFdEntry(
+        fd: e.fd, os_fd: e.os_fd,
+        bound_addr: e.bound_addr, peer_addr_text: e.peer_addr_text,
+        is_listening: e.is_listening, nonblocking: e.nonblocking,
+        nodelay: e.nodelay, read_timeout_ms: timeout_val,
+        write_timeout_ms: e.write_timeout_ms
+    )
+    shim_set(fd, updated)
+    true
+
+@export("C")
+fn rt_io_tcp_set_write_timeout(fd: i64, ms: i64?) -> bool:
+    """Set write timeout in milliseconds. nil means no timeout."""
+    val entry = shim_get(fd)
+    if entry == nil:
+        return false
+
+    val e = entry.unwrap()
+    val timeout_val = if ms.?: ms.unwrap() else: -1
+    val updated = ShimFdEntry(
+        fd: e.fd, os_fd: e.os_fd,
+        bound_addr: e.bound_addr, peer_addr_text: e.peer_addr_text,
+        is_listening: e.is_listening, nonblocking: e.nonblocking,
+        nodelay: e.nodelay, read_timeout_ms: e.read_timeout_ms,
+        write_timeout_ms: timeout_val
+    )
+    shim_set(fd, updated)
+    true
+
+@export("C")
+fn rt_io_tcp_shutdown(fd: i64, how: i64) -> bool:
+    """Shutdown one or both directions of a TCP stream.
+
+    how: 0=Read, 1=Write, 2=Both.
+    B2 stub: records intent, no real FIN sent.
+    """
+    val entry = shim_get(fd)
+    if entry == nil:
+        return false
+
+    # TODO: wire to real TcpConnection close for write/both shutdown
+    true
