@@ -39,9 +39,11 @@ class SessionStore:
     """Database-backed session store.
 
     Sessions are stored in a `sessions` table with columns:
-    session_id (text PK), user_id (text), data (text), created_at (i64), expires_at (i64).
+    session_id (text PK), user_id (text), data (text), created_at (i64),
+    expires_at (i64), version (i64).
 
     Session data is stored as pipe-delimited key=value pairs.
+    Typed values use prefix tags: "i:42" for ints, "b:true" for bools.
     """
     backend_kind: text
     db: Database?
@@ -62,7 +64,8 @@ impl SessionStore:
                 "user_id TEXT NOT NULL, " +
                 "data TEXT DEFAULT '', " +
                 "created_at INTEGER NOT NULL, " +
-                "expires_at INTEGER NOT NULL" +
+                "expires_at INTEGER NOT NULL, " +
+                "version INTEGER DEFAULT 1" +
                 ")"
             val result = (self.db ?? Database.memory_unsafe()).exec(sql, [])
             match result:
@@ -71,7 +74,7 @@ impl SessionStore:
 
         var db = self.fresh_simple_db()?
         if not self.simple_session_table_opt(db).?:
-            db.set_table("sessions", SdnTable.new("sessions", ["id", "valid", "user_id", "data", "created_at", "expires_at"]))
+            db.set_table("sessions", SdnTable.new("sessions", ["id", "valid", "user_id", "data", "created_at", "expires_at", "version"]))
         if not db.save():
             return Err("Failed to initialize Simple DB sessions")
         self.simple_db = Some(db)
@@ -92,13 +95,14 @@ impl SessionStore:
         val now = current_timestamp()
         val expires = now + 86400
         if self.backend_kind == "sqlite":
-            val sql = "INSERT INTO sessions (session_id, user_id, data, created_at, expires_at) VALUES (?, ?, ?, ?, ?)"
+            val sql = "INSERT INTO sessions (session_id, user_id, data, created_at, expires_at, version) VALUES (?, ?, ?, ?, ?, ?)"
             val params: [DbValue] = [
                 DbValue.Text(value: sid),
                 DbValue.Text(value: user_id),
                 DbValue.Text(value: ""),
                 DbValue.Integer(value: now),
-                DbValue.Integer(value: expires)
+                DbValue.Integer(value: expires),
+                DbValue.Integer(value: 1)
             ]
             val result = (self.db ?? Database.memory_unsafe()).exec(sql, params)
             match result:
@@ -114,6 +118,7 @@ impl SessionStore:
         row.set("data", "")
         row.set("created_at", "{now}")
         row.set("expires_at", "{expires}")
+        row.set("version", "1")
         table.add_row(row)
         db.set_table("sessions", table)
         if not db.save():
@@ -298,6 +303,203 @@ impl SessionStore:
         self.simple_db = Some(db)
         Ok(())
 
+    me set_int(session_id: text, key: text, value: i64) -> Result<(), text>:
+        """Set a typed integer value in a session.
+
+        Stored with "i:" prefix tag for type-safe retrieval.
+
+        Args:
+            session_id: Session identifier
+            key: Data key
+            value: Integer value
+        """
+        self.set(session_id, key, "i:{value}")
+
+    me set_bool(session_id: text, key: text, value: bool) -> Result<(), text>:
+        """Set a typed boolean value in a session.
+
+        Stored with "b:" prefix tag for type-safe retrieval.
+
+        Args:
+            session_id: Session identifier
+            key: Data key
+            value: Boolean value
+        """
+        val tag = if value: "b:true" else: "b:false"
+        self.set(session_id, key, tag)
+
+    me get_int(session_id: text, key: text) -> Option<i64>:
+        """Get a typed integer value from a session.
+
+        Returns nil if session/key missing or value lacks "i:" prefix.
+
+        Args:
+            session_id: Session identifier
+            key: Data key
+
+        Returns:
+            Some(value) if present and correctly tagged, nil otherwise
+        """
+        val data = self.get(session_id)
+        match data:
+            Ok(dict):
+                val raw = dict.get(key)
+                if not raw.?:
+                    return nil
+                val s = raw.unwrap()
+                if s.len() < 3:
+                    return nil
+                if s[0:2] != "i:":
+                    return nil
+                return s[2:].to_int()
+            Err(_):
+                return nil
+
+    me get_bool(session_id: text, key: text) -> Option<bool>:
+        """Get a typed boolean value from a session.
+
+        Returns nil if session/key missing or value lacks "b:" prefix.
+
+        Args:
+            session_id: Session identifier
+            key: Data key
+
+        Returns:
+            Some(value) if present and correctly tagged, nil otherwise
+        """
+        val data = self.get(session_id)
+        match data:
+            Ok(dict):
+                val raw = dict.get(key)
+                if not raw.?:
+                    return nil
+                val s = raw.unwrap()
+                if s.len() < 3:
+                    return nil
+                if s[0:2] != "b:":
+                    return nil
+                val payload = s[2:]
+                if payload == "true":
+                    return Some(true)
+                if payload == "false":
+                    return Some(false)
+                return nil
+            Err(_):
+                return nil
+
+    me cleanup() -> Result<i64, text>:
+        """Remove all expired sessions. Alias for gc().
+
+        Returns:
+            Ok(count) of deleted sessions
+        """
+        self.gc()
+
+    me rotate(old_sid: text) -> Result<text, text>:
+        """Rotate a session: copy data to a new ID and destroy the old one.
+
+        Prevents session fixation attacks by issuing a fresh session ID
+        while preserving all session data.
+
+        Args:
+            old_sid: Current session ID to rotate away from
+
+        Returns:
+            Ok(new_sid) with the replacement session ID
+        """
+        val old_data = self.get(old_sid)?
+        val user_id = old_data.get("_user_id") ?? ""
+        if user_id.len() == 0:
+            return Err("Session not found or expired")
+        val new_sid = self.create(user_id)?
+        var filtered = old_data
+        filtered.remove("_user_id")
+        for key in filtered.keys():
+            val value = filtered.get(key) ?? ""
+            self.set(new_sid, key, value)?
+        self.destroy(old_sid)?
+        Ok(new_sid)
+
+    me check_version(session_id: text, expected: i64) -> Result<bool, text>:
+        """Check if a session's version matches the expected value.
+
+        Used for optimistic locking: read version, do work, check before write.
+
+        Args:
+            session_id: Session identifier
+            expected: Expected version number
+
+        Returns:
+            Ok(true) if version matches, Ok(false) otherwise
+        """
+        if self.backend_kind == "sqlite":
+            val sql = "SELECT version FROM sessions WHERE session_id = ? LIMIT 1"
+            val params: [DbValue] = [DbValue.Text(value: session_id)]
+            val result = (self.db ?? Database.memory_unsafe()).query(sql, params)
+            match result:
+                Ok(rows):
+                    if rows.len() == 0:
+                        return Err("Session not found")
+                    val row = rows[0]
+                    val ver = row.get_int("version") ?? 0
+                    return Ok(ver == expected)
+                Err(_e):
+                    return Err("Failed to check session version")
+
+        val db = self.fresh_simple_db()?
+        val table_opt = self.simple_session_table_opt(db)
+        if not table_opt.?:
+            return Err("Session not found")
+        val row = table_opt.unwrap().get_row(session_id)
+        if not row.?:
+            return Err("Session not found")
+        val ver = (row.unwrap().get("version") ?? "0").to_int() ?? 0
+        Ok(ver == expected)
+
+    me bump_version(session_id: text) -> Result<i64, text>:
+        """Increment a session's version number.
+
+        Args:
+            session_id: Session identifier
+
+        Returns:
+            Ok(new_version) after increment
+        """
+        if self.backend_kind == "sqlite":
+            val sql = "UPDATE sessions SET version = version + 1 WHERE session_id = ?"
+            val params: [DbValue] = [DbValue.Text(value: session_id)]
+            val result = (self.db ?? Database.memory_unsafe()).exec(sql, params)
+            match result:
+                Ok(_):
+                    val q = "SELECT version FROM sessions WHERE session_id = ? LIMIT 1"
+                    val qp: [DbValue] = [DbValue.Text(value: session_id)]
+                    val qr = (self.db ?? Database.memory_unsafe()).query(q, qp)
+                    match qr:
+                        Ok(rows):
+                            if rows.len() > 0:
+                                return Ok(rows[0].get_int("version") ?? 1)
+                            return Ok(1)
+                        Err(_e):
+                            return Ok(1)
+                Err(_e):
+                    return Err("Failed to bump session version")
+
+        var db = self.fresh_simple_db()?
+        var table = self.simple_session_table(db)
+        val current = table.get_row(session_id)
+        if not current.?:
+            return Err("Session not found")
+        var row = current.unwrap()
+        val old_ver = (row.get("version") ?? "0").to_int() ?? 0
+        val new_ver = old_ver + 1
+        row.set("version", "{new_ver}")
+        table.update_row(session_id, row)
+        db.set_table("sessions", table)
+        if not db.save():
+            return Err("Failed to bump Simple DB session version")
+        self.simple_db = Some(db)
+        Ok(new_ver)
+
     fn require_simple_db() -> Result<SdnDatabase, text>:
         if val Some(db) = self.simple_db:
             return Ok(db)
@@ -316,7 +518,7 @@ impl SessionStore:
     fn simple_session_table(db: SdnDatabase) -> SdnTable:
         if val Some(table) = self.simple_session_table_opt(db):
             return table
-        SdnTable.new("sessions", ["id", "valid", "user_id", "data", "created_at", "expires_at"])
+        SdnTable.new("sessions", ["id", "valid", "user_id", "data", "created_at", "expires_at", "version"])
 
     fn simple_session_table_opt(db: SdnDatabase) -> SdnTable?:
         for (name, table) in db.tables:

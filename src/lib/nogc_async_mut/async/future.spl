@@ -7,6 +7,9 @@ use std.async.ffi.{
     future_alloc_ready, future_alloc_pending, future_poll,
     future_map, future_then, future_free
 }
+use std.common.io.types.{IoError, IoErrorKind}
+
+extern fn rt_time_now_ms() -> i64
 
 class Future<T>:
     """Represents an asynchronous computation.
@@ -87,6 +90,39 @@ class Future<T>:
         """
         val state = future_then(self.state, f)
         Future(state: state)
+
+    fn timeout(ms: i64) -> Future<Result<T, IoError>>:
+        """Wrap this future with a deadline.
+
+        When the inner future completes, checks if the deadline has
+        passed. Returns Ok(value) if within the deadline, or
+        Err(IoError(TimedOut)) if the wall-clock deadline expired
+        before the value was consumed.
+
+        Note: this is a post-completion deadline check via `then`.
+        If the inner future never completes, the timeout never fires.
+        For preemptive timeout on pending futures, use
+        `std.async.runtime.timeout()` which races against a timer.
+
+        Args:
+            ms: Maximum time to wait in milliseconds
+
+        Returns:
+            Future resolving to Ok(value) or Err(TimedOut)
+        """
+        val deadline = rt_time_now_ms() + ms
+        val timeout_ms = ms
+        self.then(\v:
+            if rt_time_now_ms() > deadline:
+                Future.from_value(
+                    Err(IoError(
+                        kind: IoErrorKind.TimedOut,
+                        message: "future timed out after {timeout_ms}ms",
+                        source: nil
+                    )))
+            else:
+                Future.from_value(Ok(v))
+        )
 
     me drop():
         """Drop future, freeing resources."""

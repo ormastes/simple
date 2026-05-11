@@ -1,11 +1,13 @@
 # Semantic doc similarity orchestrator
-# Extract docs -> embed via Ollama -> compare -> report
+# Two modes:
+#   semantic     — local docstring/signature token-vector comparison (default, fast)
+#   semantic-llm — Ollama embedding comparison (requires running Ollama server)
 
 use compiler.tools.duplicate_check.config.{DuplicationConfig}
 use compiler.tools.duplicate_check.doc_extractor.{DocEntry, extract_docs_from_directory, build_embedding_key, content_hash}
 use compiler.tools.duplicate_check.ollama_client.{EmbeddingResult, check_ollama_available, get_embedding}
 use compiler.tools.duplicate_check.embedding_cache.{EmbeddingCacheManager, load_embedding_cache, save_embedding_cache, lookup_cached, set_cached, csv_to_floats, floats_to_csv}
-use compiler.tools.duplicate_check.math_utils.{cosine_similarity_dense}
+use compiler.tools.duplicate_check.math_utils.{cosine_similarity_dense, rt_math_sqrt, clamp_similarity}
 
 struct SemanticMatch:
     entry_a: DocEntry
@@ -263,6 +265,121 @@ fn max_i64(a: i64, b: i64) -> i64:
     if a >= b:
         return a
     b
+
+fn _tokenize_doc(text_val: text) -> {text: i64}:
+    var freq = {}
+    var word = ""
+    var i = 0
+    while i < text_val.len():
+        val c = text_val.bytes()[i]
+        val is_alpha = (c >= 97 and c <= 122) or (c >= 65 and c <= 90) or c == 95
+        val is_digit = c >= 48 and c <= 57
+        if is_alpha or is_digit:
+            word = word + text_val[i:i+1]
+        else:
+            if word.len() >= 2:
+                val lower = word.lower()
+                val existing = freq[lower] ?? 0
+                freq[lower] = existing + 1
+            word = ""
+        i = i + 1
+    if word.len() >= 2:
+        val lower = word.lower()
+        val existing = freq[lower] ?? 0
+        freq[lower] = existing + 1
+    freq
+
+fn _sparse_cosine(a: {text: f64}, mag_a: f64, b: {text: f64}, mag_b: f64) -> f64:
+    if mag_a == 0.0 or mag_b == 0.0:
+        return 0.0
+    var dot = 0.0
+    for key in a.keys():
+        if b.has(key):
+            dot = dot + (a[key] * b[key])
+    clamp_similarity(dot / (mag_a * mag_b))
+
+fn _build_doc_vec(freq: {text: i64}) -> {text: f64}:
+    var total = 0
+    for k in freq.keys():
+        total = total + freq[k]
+    if total == 0:
+        return {}
+    val total_f = total * 1.0
+    var vec = {}
+    for k in freq.keys():
+        vec[k] = (freq[k] * 1.0) / total_f
+    vec
+
+fn _vec_magnitude(vec: {text: f64}) -> f64:
+    var sum = 0.0
+    for k in vec.keys():
+        sum = sum + (vec[k] * vec[k])
+    rt_math_sqrt(sum)
+
+fn run_semantic_analysis_local(target_path: text, config: DuplicationConfig) -> SemanticReport:
+    val all_entries = extract_docs_from_directory(target_path, config.exclude_patterns)
+    if all_entries.len() == 0:
+        return empty_report()
+
+    var documented: [DocEntry] = []
+    var missing_docs: [DocEntry] = []
+    for entry in all_entries:
+        if entry.has_doc:
+            documented.push(entry)
+        else:
+            missing_docs.push(entry)
+
+    var vecs: [{text: f64}] = []
+    var mags: [f64] = []
+    for entry in documented:
+        val text_val = build_embedding_key(entry)
+        val freq = _tokenize_doc(text_val)
+        val vec = _build_doc_vec(freq)
+        val mag = _vec_magnitude(vec)
+        vecs.push(vec)
+        mags.push(mag)
+
+    var matches: [SemanticMatch] = []
+    val threshold = config.semantic_threshold
+
+    var i = 0
+    while i < documented.len():
+        if mags[i] == 0.0:
+            i = i + 1
+            continue
+        var j = i + 1
+        while j < documented.len():
+            if mags[j] == 0.0:
+                j = j + 1
+                continue
+            val same_file = documented[i].file_path == documented[j].file_path
+            if same_file:
+                j = j + 1
+                continue
+            val sim = _sparse_cosine(vecs[i], mags[i], vecs[j], mags[j])
+            if sim >= threshold:
+                val kind = if sim >= 0.97: "copy_paste" else: "similar"
+                matches.push(SemanticMatch(
+                    entry_a: documented[i],
+                    entry_b: documented[j],
+                    similarity: sim,
+                    match_kind: kind
+                ))
+            j = j + 1
+        i = i + 1
+
+    if matches.len() > 1:
+        quicksort_matches_by_sim(matches, 0, matches.len() - 1)
+
+    SemanticReport(
+        matches: matches,
+        missing_docs: missing_docs,
+        total_items: all_entries.len(),
+        items_with_docs: documented.len(),
+        cache_hits: 0,
+        cache_misses: 0,
+        used_fallback: false
+    )
 
 fn empty_report() -> SemanticReport:
     SemanticReport(
