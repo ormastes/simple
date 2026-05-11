@@ -84,3 +84,28 @@ describe "DBFS Recovery — clean mount generation":
         harness.set_last_clean_gen(g: 8)
         val result = DbfsRecovery.recover(harness.device()).unwrap()
         expect(result.clean_mount_gen).to_equal(9)
+
+describe "DBFS Recovery — callback-based side effects":
+    """When callbacks are registered, recovery routes discard and checkpoint through them."""
+
+    it "discard callback receives orphan arena IDs":
+        recovery_clear_callbacks()
+        recovery_register_discard_cb("arena:META_DURABLE")
+        val harness = PowerCutHarness.new()
+        harness.mark_orphan_arena(arena_id: 42)
+        harness.mark_orphan_arena(arena_id: 77)
+        val result = DbfsRecovery.recover(harness.device()).unwrap()
+        val discarded = recovery_get_discarded_ids()
+        expect(discarded.contains(42)).to_equal(true)
+        expect(discarded.contains(77)).to_equal(true)
+        recovery_clear_callbacks()
+
+    it "checkpoint callback receives mount generation":
+        recovery_clear_callbacks()
+        recovery_register_checkpoint_cb("arena:META_DURABLE")
+        val harness = PowerCutHarness.new()
+        harness.set_last_clean_gen(g: 5)
+        val result = DbfsRecovery.recover(harness.device()).unwrap()
+        val cp_gen = recovery_get_checkpoint_gen()
+        expect(cp_gen).to_equal(6)
+        recovery_clear_callbacks()

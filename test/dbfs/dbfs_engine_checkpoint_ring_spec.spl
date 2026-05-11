@@ -16,7 +16,11 @@ and remount reads the correct slot.
 """
 
 use std.spipe.*
-use std.db.dbfs_engine.checkpoint_ring.{CheckpointRing, RingSlot, RING_SIZE}
+use std.db.dbfs_engine.checkpoint_ring.{
+    CheckpointRing, RingSlot, RING_SIZE,
+    ring_register_persist_callback, ring_clear_persist_callback,
+    ring_is_callback_registered, ring_cb_slot_count
+}
 use std.storage.arena.{StorageClass}
 
 describe "DBFS Checkpoint Ring — disk persistence":
@@ -82,3 +86,26 @@ describe "DBFS Checkpoint Ring — storage class":
 
     it "ring size constant is at least 4":
         expect(RING_SIZE >= 4).to_equal(true)
+
+describe "DBFS Checkpoint Ring — callback persistence":
+    """When callback is registered, writes go through the callback path."""
+
+    it "callback path persists slots across reopen":
+        ring_clear_persist_callback()
+        ring_register_persist_callback("arena:META_DURABLE")
+        expect(ring_is_callback_registered()).to_equal(true)
+        val ring = CheckpointRing.new_persistent()
+        ring.write_slot(0, RingSlot(gen: 7, clean: true, btree_root_page: 70)).unwrap()
+        ring.flush().unwrap()
+        ring.close().unwrap()
+        expect(ring_cb_slot_count()).to_equal(1)
+        val ring2 = CheckpointRing.reopen()
+        val got = ring2.read_slot(0).unwrap()
+        expect(got.gen).to_equal(7)
+        ring_clear_persist_callback()
+
+    it "callback registration is clearable":
+        ring_register_persist_callback("test")
+        expect(ring_is_callback_registered()).to_equal(true)
+        ring_clear_persist_callback()
+        expect(ring_is_callback_registered()).to_equal(false)

@@ -16,7 +16,11 @@ The in-memory placeholder must be replaced by disk persistence to META_DURABLE.
 """
 
 use std.spipe.*
-use std.db.dbfs_engine.intent_log.{IntentLog, IntentLogRecord, IntentLogHead}
+use std.db.dbfs_engine.intent_log.{
+    IntentLog, IntentLogRecord, IntentLogHead,
+    intent_register_persist_callback, intent_clear_persist_callback,
+    intent_is_callback_registered, intent_cb_record_count
+}
 use std.db.dbfs_engine.wal.{WalRecord, WAL_RECORD_COMMIT, WAL_RECORD_DATA}
 use std.storage.arena.{StorageClass}
 
@@ -88,3 +92,30 @@ describe "DBFS Intent Log — head pointer durability":
         val log2 = IntentLog.reopen()
         val head_after = log2.head().unwrap()
         expect(head_after.tail_lsn).to_equal(head_before.tail_lsn)
+
+describe "DBFS Intent Log — callback persistence":
+    """When callback is registered, writes go through the callback path."""
+
+    it "callback path persists records across reopen":
+        intent_clear_persist_callback()
+        intent_register_persist_callback("arena:META_DURABLE")
+        expect(intent_is_callback_registered()).to_equal(true)
+        val log = IntentLog.new_persistent()
+        log.append(IntentLogRecord(txn_id: 3, lsn: 30, committed: true)).unwrap()
+        log.append(IntentLogRecord(txn_id: 4, lsn: 40, committed: false)).unwrap()
+        log.flush().unwrap()
+        log.close().unwrap()
+        expect(intent_cb_record_count()).to_equal(2)
+        val log2 = IntentLog.reopen()
+        val records = log2.scan_all().unwrap()
+        expect(records.len()).to_equal(2)
+        val committed = log2.scan_committed().unwrap()
+        expect(committed.len()).to_equal(1)
+        expect(committed[0].txn_id).to_equal(3)
+        intent_clear_persist_callback()
+
+    it "callback registration is clearable":
+        intent_register_persist_callback("test")
+        expect(intent_is_callback_registered()).to_equal(true)
+        intent_clear_persist_callback()
+        expect(intent_is_callback_registered()).to_equal(false)
