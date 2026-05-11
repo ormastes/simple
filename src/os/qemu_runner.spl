@@ -567,6 +567,23 @@ fn get_desktop_browser_target() -> OsTarget:
         gui_mode: false
     )
 
+fn get_desktop_gui_target() -> OsTarget:
+    """Returns the x86_64 interactive desktop GUI target with VFS support."""
+    OsTarget(
+        arch: Architecture.X86_64,
+        entry: "examples/simple_os/arch/x86_64/gui_entry_desktop.spl",
+        linker_script: "examples/simple_os/arch/x86_64/linker.ld",
+        target_triple: "x86_64-unknown-none",
+        output: "build/os/simpleos_desktop_gui_x86_64.elf",
+        qemu_system: "qemu-system-x86_64",
+        qemu_machine: "q35",
+        qemu_cpu: "qemu64",
+        qemu_memory: "2G",
+        qemu_bios: "",
+        qemu_extra: ["-device", "isa-debug-exit,iobase=0xf4,iosize=0x04", "-vga", "std"],
+        gui_mode: true
+    )
+
 pub fn get_ssh_live_target() -> OsTarget:
     """Returns the x86_64 wrapper target for the live SSH shell lane."""
     OsTarget(
@@ -1356,7 +1373,7 @@ pub fn scenario_lane_kind(scenario: QemuScenario) -> SimpleOsLaneKind:
         return SimpleOsLaneKind.FsExec
     if scenario.name == "x64-nvme-fat32":
         return SimpleOsLaneKind.FsExec
-    if scenario.name == "x64-desktop-disk" or scenario.name == "x64-desktop-uefi" or scenario.name == "x64-ssh":
+    if scenario.name == "x64-desktop-disk" or scenario.name == "x64-desktop-uefi" or scenario.name == "x64-ssh" or scenario.name == "x64-desktop-gui":
         return SimpleOsLaneKind.HostedCompileSmoke
     SimpleOsLaneKind.Smoke
 
@@ -1413,6 +1430,8 @@ fn _desktop_disk_scenario_target(name: text) -> OsTarget?:
         return get_toolchain_vfs_probe_target()
     if name == "x64-desktop-test" or name == "x64-desktop-disk" or name == "x64-desktop-uefi":
         return get_desktop_browser_target()
+    if name == "x64-desktop-gui":
+        return get_desktop_gui_target()
     if name == "x64-wm-simple-web-check":
         return get_wm_simple_web_check_target()
     nil
@@ -1422,12 +1441,14 @@ fn _desktop_scenario_timeout_ms(name: text) -> u64?:
         return 180000
     if name == "x64-desktop-test" or name == "x64-ssh" or name == "x64-desktop-disk" or name == "x64-wm-simple-web-check" or name == "x64-toolchain-vfs-probe":
         return 120000
+    if name == "x64-desktop-gui":
+        return 600000
     nil
 
 fn _ensure_desktop_scenario_media(name: text) -> bool?:
     if name == "x64-nvme-fat32":
         return ensure_fs_test_disk_image()
-    if name == "x64-ssh" or name == "x64-desktop-disk" or name == "x64-toolchain-vfs-probe":
+    if name == "x64-ssh" or name == "x64-desktop-disk" or name == "x64-toolchain-vfs-probe" or name == "x64-desktop-gui":
         return ensure_desktop_disk_image()
     if name != "x64-desktop-uefi":
         return nil
@@ -1837,6 +1858,7 @@ fn get_all_scenarios() -> [QemuScenario]:
         scenario_x64_full_stack(),
         scenario_x64_desktop_test(),
         scenario_x64_desktop_disk(),
+        scenario_x64_desktop_gui(),
         scenario_x64_desktop_uefi()
     ]
 
@@ -2057,6 +2079,31 @@ fn scenario_x64_desktop_disk() -> QemuScenario:
         qemu_extra: ["-device", "isa-debug-exit,iobase=0xf4,iosize=0x04", "-vga", "std"] + _x64_nvme_disk_args(),
         gui_mode: false,
         description: "x86_64 SimpleOS desktop with release-first NVMe+FAT32 disk"
+    )
+
+fn scenario_x64_desktop_gui() -> QemuScenario:
+    """x86_64 interactive desktop GUI with NVMe primary + removable VirtIO-BLK + VirtIO-Net.
+
+    Production desktop scenario: BGA framebuffer GUI with storage-backed VFS
+    for filesystem app launching, removable media mount, and network package install.
+    """
+    QemuScenario(
+        name: "x64-desktop-gui",
+        arch: Architecture.X86_64,
+        machine: "q35",
+        cpu: "qemu64",
+        memory: "2G",
+        qemu_extra: [
+            "-device", "isa-debug-exit,iobase=0xf4,iosize=0x04",
+            "-vga", "std"
+        ] + _x64_nvme_disk_args() + [
+            "-drive", "if=none,id=removable0,file=build/os/removable.img,format=raw",
+            "-device", "virtio-blk-pci,drive=removable0",
+            "-netdev", "user,id=net0",
+            "-device", "virtio-net-pci,netdev=net0"
+        ],
+        gui_mode: true,
+        description: "x86_64 interactive desktop GUI with NVMe + removable + network"
     )
 
 fn ensure_desktop_disk_image() -> bool:

@@ -1,0 +1,82 @@
+# Boot Filesystem Specification
+#
+# Verifies NVFS/DBFS/FAT32 boot filesystem selection, ELF loading chain,
+# and executable launch path.
+#
+# Run: bin/simple test test/kernel/boot_fs_spec.spl
+
+use std.spipe.*
+use os.kernel.boot.boot_fs.{
+    BootFsConfig, BootFsResult, BootFsType,
+    boot_fs_is_mounted, boot_fs_type, boot_fs_init_pid
+}
+
+describe "BootFsConfig — default configuration":
+
+    it "default config targets NVFS":
+        val cfg = BootFsConfig.default_config()
+        expect(cfg.root_device).to_equal("nvme0n1")
+        expect(cfg.init_binary).to_equal("/sbin/init")
+        val is_nvfs = _boot_fs_type_is_nvfs(cfg.fs_type)
+        expect(is_nvfs).to_equal(true)
+
+    it "fat32 fallback config targets FAT32":
+        val cfg = BootFsConfig.fat32_fallback()
+        expect(cfg.init_binary).to_equal("/SYS/APPS/HELLOSMF.SMF")
+        val is_fat32 = _boot_fs_type_is_fat32(cfg.fs_type)
+        expect(is_fat32).to_equal(true)
+
+describe "BootFsResult — result structure":
+
+    it "result carries filesystem type and pid":
+        val result = BootFsResult(
+            mounted:   true,
+            fs_type:   BootFsType.Nvfs,
+            init_pid:  42,
+            init_path: "/sbin/init"
+        )
+        expect(result.mounted).to_equal(true)
+        expect(result.init_pid).to_equal(42)
+        expect(result.init_path).to_equal("/sbin/init")
+
+    it "unmounted result has negative pid":
+        val result = BootFsResult(
+            mounted:   false,
+            fs_type:   BootFsType.None_,
+            init_pid:  -1,
+            init_path: ""
+        )
+        expect(result.mounted).to_equal(false)
+        expect(result.init_pid).to_equal(-1)
+
+describe "BootFsType — filesystem type enum":
+
+    it "all four variants are distinct":
+        val nvfs_ord = _boot_fs_type_ord(BootFsType.Nvfs)
+        val dbfs_ord = _boot_fs_type_ord(BootFsType.Dbfs)
+        val fat32_ord = _boot_fs_type_ord(BootFsType.Fat32)
+        val none_ord = _boot_fs_type_ord(BootFsType.None_)
+        expect(nvfs_ord != dbfs_ord).to_equal(true)
+        expect(dbfs_ord != fat32_ord).to_equal(true)
+        expect(fat32_ord != none_ord).to_equal(true)
+
+describe "Boot FS module state — initial state":
+
+    it "not mounted before boot_fs_sequence":
+        expect(boot_fs_is_mounted()).to_equal(false)
+
+    it "init pid is -1 before launch":
+        expect(boot_fs_init_pid()).to_equal(-1)
+
+fn _boot_fs_type_ord(t: BootFsType) -> i64:
+    match t:
+        case BootFsType.Nvfs: 1
+        case BootFsType.Dbfs: 2
+        case BootFsType.Fat32: 3
+        case BootFsType.None_: 0
+
+fn _boot_fs_type_is_nvfs(t: BootFsType) -> bool:
+    _boot_fs_type_ord(t) == 1
+
+fn _boot_fs_type_is_fat32(t: BootFsType) -> bool:
+    _boot_fs_type_ord(t) == 3

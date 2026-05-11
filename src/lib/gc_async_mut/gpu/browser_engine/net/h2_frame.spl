@@ -1,0 +1,560 @@
+#![allow(REQC001)]
+#![allow(REQC004)]
+#![allow(unnamed_duplicate_typed_args)]
+# HTTP/2 frame types, flags, encoding/decoding, error codes, and byte helpers.
+# Reference: RFC 7540 Sections 4, 6, 7
+
+use std.gc_async_mut.gpu.browser_engine.shared.error.{parse_error}
+
+# --- Constants ---
+
+# HTTP/2 connection preface sent by the client (RFC 7540 Section 3.5)
+val H2_CONNECTION_PREFACE = "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n"
+
+# Default initial window size for flow control (64KB - 1, RFC 7540 Section 6.9.2)
+val H2_DEFAULT_WINDOW_SIZE = 65535
+
+# Default maximum frame size (16KB, RFC 7540 Section 6.5.2)
+val H2_DEFAULT_MAX_FRAME_SIZE = 16384
+
+# Default HPACK header table size (4096 bytes, RFC 7541 Section 6.3)
+val H2_DEFAULT_HEADER_TABLE_SIZE = 4096
+
+# Frame header is always 9 bytes (RFC 7540 Section 4.1)
+val H2_FRAME_HEADER_SIZE = 9
+
+# --- Frame types (RFC 7540 Section 6) ---
+
+enum H2FrameType:
+    Data           # 0x0 - conveys arbitrary, variable-length sequences of octets
+    Headers        # 0x1 - opens a stream, carries header block fragment
+    Priority       # 0x2 - specifies sender-advised priority of a stream
+    RstStream      # 0x3 - allows immediate termination of a stream
+    Settings       # 0x4 - conveys configuration parameters
+    PushPromise    # 0x5 - notifies peer of a stream the sender intends to initiate
+    Ping           # 0x6 - measures round-trip time and serves as keepalive
+    GoAway         # 0x7 - initiates shutdown of a connection or signals serious error
+    WindowUpdate   # 0x8 - implements flow control
+    Continuation   # 0x9 - continues a sequence of header block fragments
+
+fn frame_type_to_id(ft: H2FrameType) -> i64:
+    match ft:
+        H2FrameType.Data: 0
+        H2FrameType.Headers: 1
+        H2FrameType.Priority: 2
+        H2FrameType.RstStream: 3
+        H2FrameType.Settings: 4
+        H2FrameType.PushPromise: 5
+        H2FrameType.Ping: 6
+        H2FrameType.GoAway: 7
+        H2FrameType.WindowUpdate: 8
+        H2FrameType.Continuation: 9
+
+fn id_to_frame_type(id: i64) -> Result<H2FrameType>:
+    if id == 0: return Ok(H2FrameType.Data)
+    if id == 1: return Ok(H2FrameType.Headers)
+    if id == 2: return Ok(H2FrameType.Priority)
+    if id == 3: return Ok(H2FrameType.RstStream)
+    if id == 4: return Ok(H2FrameType.Settings)
+    if id == 5: return Ok(H2FrameType.PushPromise)
+    if id == 6: return Ok(H2FrameType.Ping)
+    if id == 7: return Ok(H2FrameType.GoAway)
+    if id == 8: return Ok(H2FrameType.WindowUpdate)
+    if id == 9: return Ok(H2FrameType.Continuation)
+    Err(parse_error("h2: unknown frame type id: {id}"))
+
+fn frame_type_name(ft: H2FrameType) -> text:
+    match ft:
+        H2FrameType.Data: "DATA"
+        H2FrameType.Headers: "HEADERS"
+        H2FrameType.Priority: "PRIORITY"
+        H2FrameType.RstStream: "RST_STREAM"
+        H2FrameType.Settings: "SETTINGS"
+        H2FrameType.PushPromise: "PUSH_PROMISE"
+        H2FrameType.Ping: "PING"
+        H2FrameType.GoAway: "GOAWAY"
+        H2FrameType.WindowUpdate: "WINDOW_UPDATE"
+        H2FrameType.Continuation: "CONTINUATION"
+
+# --- Frame flags (RFC 7540 Section 6) ---
+
+# Common flags used across frame types
+val FLAG_END_STREAM = 0x1    # DATA, HEADERS
+val FLAG_ACK = 0x1           # SETTINGS, PING
+val FLAG_END_HEADERS = 0x4   # HEADERS, PUSH_PROMISE, CONTINUATION
+val FLAG_PADDED = 0x8        # DATA, HEADERS, PUSH_PROMISE
+val FLAG_PRIORITY = 0x20     # HEADERS
+
+fn has_flag(flags: i64, flag: i64) -> bool:
+    # Check whether a specific flag bit is set.
+    (flags / flag) % 2 == 1
+
+fn set_flag(flags: i64, flag: i64) -> i64:
+    # Set a flag bit. If already set, no change.
+    if has_flag(flags, flag):
+        return flags
+    flags + flag
+
+# --- H2Frame ---
+
+class H2Frame:
+    length: i64
+    frame_type: H2FrameType
+    flags: i64
+    stream_id: i64
+    payload: text
+
+    static fn create(frame_type: H2FrameType, flags: i64, stream_id: i64, payload: text) -> H2Frame:
+        H2Frame(
+            length: payload.len(),
+            frame_type: frame_type,
+            flags: flags,
+            stream_id: stream_id,
+            payload: payload
+        )
+
+    fn description() -> text:
+        val name = frame_type_name(self.frame_type)
+        "{name} frame: stream={self.stream_id}, length={self.length}, flags=0x{int_to_hex(self.flags)}"
+
+    fn is_end_stream() -> bool:
+        has_flag(self.flags, FLAG_END_STREAM)
+
+    fn is_end_headers() -> bool:
+        has_flag(self.flags, FLAG_END_HEADERS)
+
+    fn is_ack() -> bool:
+        has_flag(self.flags, FLAG_ACK)
+
+# --- Frame encoding/decoding ---
+
+fn encode_frame(frame: H2Frame) -> text:
+    # Serialize an H2Frame into its wire format.
+    # Frame layout (RFC 7540 Section 4.1):
+    #   +-----------------------------------------------+
+    #   |                 Length (24)                     |
+    #   +---------------+---------------+---------------+
+    #   |   Type (8)    |   Flags (8)   |
+    #   +-+-------------+---------------+---------------+
+    #   |R|                 Stream ID (31)               |
+    #   +-+---------------------------------------------+
+    #   |                  Payload ...                    |
+    #   +-----------------------------------------------+
+
+    val length = frame.payload.len()
+
+    # 24-bit length (3 bytes, big-endian)
+    val len_b2 = (length / 65536) % 256
+    val len_b1 = (length / 256) % 256
+    val len_b0 = length % 256
+
+    # 8-bit type
+    val type_byte = frame_type_to_id(frame.frame_type)
+
+    # 8-bit flags
+    val flags_byte = frame.flags % 256
+
+    # 32-bit stream ID (MSB is reserved, always 0 for us)
+    val sid_b3 = (frame.stream_id / 16777216) % 128  # Mask off reserved bit
+    val sid_b2 = (frame.stream_id / 65536) % 256
+    val sid_b1 = (frame.stream_id / 256) % 256
+    val sid_b0 = frame.stream_id % 256
+
+    # Build 9-byte header
+    var header = ""
+    header = header + encode_byte(len_b2)
+    header = header + encode_byte(len_b1)
+    header = header + encode_byte(len_b0)
+    header = header + encode_byte(type_byte)
+    header = header + encode_byte(flags_byte)
+    header = header + encode_byte(sid_b3)
+    header = header + encode_byte(sid_b2)
+    header = header + encode_byte(sid_b1)
+    header = header + encode_byte(sid_b0)
+
+    header + frame.payload
+
+fn decode_frame(data: text) -> Result<H2Frame>:
+    # Parse a single H2Frame from its wire representation.
+    # Requires at least 9 bytes for the frame header.
+    if data.len() < H2_FRAME_HEADER_SIZE:
+        return Err(parse_error("h2: frame too short ({data.len()} bytes, need at least {H2_FRAME_HEADER_SIZE})"))
+
+    # Parse 24-bit length
+    val len_b2 = decode_byte(data, 0)
+    val len_b1 = decode_byte(data, 1)
+    val len_b0 = decode_byte(data, 2)
+    val length = len_b2 * 65536 + len_b1 * 256 + len_b0
+
+    # Parse type
+    val type_id = decode_byte(data, 3)
+    val frame_type = id_to_frame_type(type_id)?
+
+    # Parse flags
+    val flags = decode_byte(data, 4)
+
+    # Parse stream ID (31 bits, mask off reserved bit)
+    val sid_b3 = decode_byte(data, 5) % 128  # Clear reserved bit
+    val sid_b2 = decode_byte(data, 6)
+    val sid_b1 = decode_byte(data, 7)
+    val sid_b0 = decode_byte(data, 8)
+    val stream_id = sid_b3 * 16777216 + sid_b2 * 65536 + sid_b1 * 256 + sid_b0
+
+    # Validate we have enough data for the payload
+    val total_needed = H2_FRAME_HEADER_SIZE + length
+    if data.len() < total_needed:
+        return Err(parse_error("h2: incomplete frame payload (have {data.len()}, need {total_needed})"))
+
+    # Extract payload
+    val payload = if length > 0:
+        data.slice(H2_FRAME_HEADER_SIZE, H2_FRAME_HEADER_SIZE + length)
+    else:
+        ""
+
+    Ok(H2Frame(
+        length: length,
+        frame_type: frame_type,
+        flags: flags,
+        stream_id: stream_id,
+        payload: payload
+    ))
+
+# --- Special frame payloads ---
+
+fn encode_window_update(increment: i64) -> text:
+    # Encode a WINDOW_UPDATE payload (4 bytes, 31-bit increment).
+    val b3 = (increment / 16777216) % 128
+    val b2 = (increment / 65536) % 256
+    val b1 = (increment / 256) % 256
+    val b0 = increment % 256
+    encode_byte(b3) + encode_byte(b2) + encode_byte(b1) + encode_byte(b0)
+
+fn encode_goaway(last_stream_id: i64, error_code: i64) -> text:
+    # Encode a GOAWAY payload (last-stream-id + error-code, 8 bytes).
+    val sid_b3 = (last_stream_id / 16777216) % 128
+    val sid_b2 = (last_stream_id / 65536) % 256
+    val sid_b1 = (last_stream_id / 256) % 256
+    val sid_b0 = last_stream_id % 256
+    val err_b3 = (error_code / 16777216) % 256
+    val err_b2 = (error_code / 65536) % 256
+    val err_b1 = (error_code / 256) % 256
+    val err_b0 = error_code % 256
+    encode_byte(sid_b3) + encode_byte(sid_b2) + encode_byte(sid_b1) + encode_byte(sid_b0) + encode_byte(err_b3) + encode_byte(err_b2) + encode_byte(err_b1) + encode_byte(err_b0)
+
+fn encode_rst_stream(error_code: i64) -> text:
+    # Encode a RST_STREAM payload (4-byte error code).
+    val b3 = (error_code / 16777216) % 256
+    val b2 = (error_code / 65536) % 256
+    val b1 = (error_code / 256) % 256
+    val b0 = error_code % 256
+    encode_byte(b3) + encode_byte(b2) + encode_byte(b1) + encode_byte(b0)
+
+fn encode_ping(opaque_data: text) -> text:
+    # Encode PING payload (exactly 8 bytes).
+    # If input is shorter, pad with zeros; if longer, truncate.
+    var result = opaque_data
+    while result.len() < 8:
+        result = result + encode_byte(0)
+    if result.len() > 8:
+        result = result.slice(0, 8)
+    result
+
+# --- Error codes (RFC 7540 Section 7) ---
+
+val H2_NO_ERROR = 0x0
+val H2_PROTOCOL_ERROR = 0x1
+val H2_INTERNAL_ERROR = 0x2
+val H2_FLOW_CONTROL_ERROR = 0x3
+val H2_SETTINGS_TIMEOUT = 0x4
+val H2_STREAM_CLOSED = 0x5
+val H2_FRAME_SIZE_ERROR = 0x6
+val H2_REFUSED_STREAM = 0x7
+val H2_CANCEL = 0x8
+val H2_COMPRESSION_ERROR = 0x9
+val H2_CONNECT_ERROR = 0xa
+val H2_ENHANCE_YOUR_CALM = 0xb
+val H2_INADEQUATE_SECURITY = 0xc
+val H2_HTTP_1_1_REQUIRED = 0xd
+
+fn error_code_name(code: i64) -> text:
+    if code == H2_NO_ERROR: return "NO_ERROR"
+    if code == H2_PROTOCOL_ERROR: return "PROTOCOL_ERROR"
+    if code == H2_INTERNAL_ERROR: return "INTERNAL_ERROR"
+    if code == H2_FLOW_CONTROL_ERROR: return "FLOW_CONTROL_ERROR"
+    if code == H2_SETTINGS_TIMEOUT: return "SETTINGS_TIMEOUT"
+    if code == H2_STREAM_CLOSED: return "STREAM_CLOSED"
+    if code == H2_FRAME_SIZE_ERROR: return "FRAME_SIZE_ERROR"
+    if code == H2_REFUSED_STREAM: return "REFUSED_STREAM"
+    if code == H2_CANCEL: return "CANCEL"
+    if code == H2_COMPRESSION_ERROR: return "COMPRESSION_ERROR"
+    if code == H2_CONNECT_ERROR: return "CONNECT_ERROR"
+    if code == H2_ENHANCE_YOUR_CALM: return "ENHANCE_YOUR_CALM"
+    if code == H2_INADEQUATE_SECURITY: return "INADEQUATE_SECURITY"
+    if code == H2_HTTP_1_1_REQUIRED: return "HTTP_1_1_REQUIRED"
+    "UNKNOWN({code})"
+
+# --- Byte encoding helpers ---
+
+fn encode_byte(value: i64) -> text:
+    # Encode a single byte (0-255) as a one-character text.
+    val clamped = if value < 0 then 0 else if value > 255 then 255 else value
+    _byte_to_char(clamped)
+
+fn decode_byte(data: text, pos: i64) -> i64:
+    # Decode a single byte from a text at the given position.
+    if pos < 0 or pos >= data.length():
+        return 0
+    val ch = data.substring(pos, pos + 1)
+    _char_to_byte(ch)
+
+fn decode_uint16(data: text, pos: i64) -> i64:
+    # Decode a 16-bit big-endian unsigned integer from data at pos.
+    val b1 = decode_byte(data, pos)
+    val b0 = decode_byte(data, pos + 1)
+    b1 * 256 + b0
+
+fn decode_uint32(data: text, pos: i64) -> i64:
+    # Decode a 32-bit big-endian unsigned integer from data at pos.
+    val b3 = decode_byte(data, pos)
+    val b2 = decode_byte(data, pos + 1)
+    val b1 = decode_byte(data, pos + 2)
+    val b0 = decode_byte(data, pos + 3)
+    b3 * 16777216 + b2 * 65536 + b1 * 256 + b0
+
+fn int_to_hex(value: i64) -> text:
+    # Convert an integer to a lowercase hexadecimal string.
+    if value == 0:
+        return "0"
+    var result = ""
+    var v = value
+    while v > 0:
+        val digit = v % 16
+        val ch = if digit < 10:
+            digit_to_char(digit)
+        else:
+            hex_digit_to_char(digit)
+        result = ch + result
+        v = v / 16
+    result
+
+fn digit_to_char(d: i64) -> text:
+    if d == 0: return "0"
+    if d == 1: return "1"
+    if d == 2: return "2"
+    if d == 3: return "3"
+    if d == 4: return "4"
+    if d == 5: return "5"
+    if d == 6: return "6"
+    if d == 7: return "7"
+    if d == 8: return "8"
+    if d == 9: return "9"
+    "?"
+
+fn hex_digit_to_char(d: i64) -> text:
+    if d == 10: return "a"
+    if d == 11: return "b"
+    if d == 12: return "c"
+    if d == 13: return "d"
+    if d == 14: return "e"
+    if d == 15: return "f"
+    digit_to_char(d)
+
+fn parse_simple_int(s: text) -> i64:
+    # Parse a simple non-negative decimal integer.
+    var result = 0
+    var i = 0
+    while i < s.len():
+        val ch = s.slice(i, i + 1)
+        val d = char_to_digit_val(ch)
+        if d < 0:
+            return result
+        result = result * 10 + d
+        i = i + 1
+    result
+
+fn char_to_digit_val(ch: text) -> i64:
+    if ch == "0": return 0
+    if ch == "1": return 1
+    if ch == "2": return 2
+    if ch == "3": return 3
+    if ch == "4": return 4
+    if ch == "5": return 5
+    if ch == "6": return 6
+    if ch == "7": return 7
+    if ch == "8": return 8
+    if ch == "9": return 9
+    -1
+
+fn _byte_to_char(value: i64) -> text:
+    # Map byte value (0-255) to a printable character for wire encoding.
+    # Uses a lookup table for the printable ASCII range (32-126).
+    # Non-printable bytes map to escape sequences.
+    if value >= 0 and value < 32:
+        val controls = "\x00\x01\x02\x03\x04\x05\x06\x07\x08\t\n\x0b\x0c\r\x0e\x0f\x10\x11\x12\x13\x14\x15\x16\x17\x18\x19\x1a\x1b\x1c\x1d\x1e\x1f"
+        return controls.substring(value, value + 1)
+    if value == 0: return "\0"
+    if value == 9: return "\t"
+    if value == 10: return "\n"
+    if value == 13: return "\r"
+    if value == 32: return " "
+    if value == 33: return "!"
+    if value == 34: return "\""
+    if value == 35: return "#"
+    if value == 36: return "$"
+    if value == 37: return "%"
+    if value == 38: return "&"
+    if value == 39: return "'"
+    if value == 40: return "("
+    if value == 41: return ")"
+    if value == 42: return "*"
+    if value == 43: return "+"
+    if value == 44: return ","
+    if value == 45: return "-"
+    if value == 46: return "."
+    if value == 47: return "/"
+    if value >= 48 and value <= 57:
+        return digit_to_char(value - 48)
+    if value == 58: return ":"
+    if value == 59: return ";"
+    if value == 60: return "<"
+    if value == 61: return "="
+    if value == 62: return ">"
+    if value == 63: return "?"
+    if value == 64: return "@"
+    if value >= 65 and value <= 90:
+        # A-Z
+        val letters = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+        return letters.substring(value - 65, value - 64)
+    if value == 91: return "["
+    if value == 92: return "\\"
+    if value == 93: return "]"
+    if value == 94: return "^"
+    if value == 95: return "_"
+    if value == 96: return "`"
+    if value >= 97 and value <= 122:
+        # a-z
+        val letters = "abcdefghijklmnopqrstuvwxyz"
+        return letters.substring(value - 97, value - 96)
+    if value == 123: return "{"
+    if value == 124: return "|"
+    if value == 125: return "}"
+    if value == 126: return "~"
+    if value == 127: return "\x7F"
+    if value == 128: return "\x80"
+    if value == 252: return "\xFC"
+    if value == 254: return "\xFE"
+    if value == 255: return "\xFF"
+    if value >= 0 and value < 128:
+        return char_from_code(value)
+    "�"
+
+fn _char_to_byte(ch: text) -> i64:
+    # Map a single character to its byte value (0-255).
+    if ch == "\0": return 0
+    if ch == "\t": return 9
+    if ch == "\n": return 10
+    if ch == "\r": return 13
+    if ch == " ": return 32
+    if ch == "!": return 33
+    if ch == "\"": return 34
+    if ch == "#": return 35
+    if ch == "$": return 36
+    if ch == "%": return 37
+    if ch == "&": return 38
+    if ch == "'": return 39
+    if ch == "(": return 40
+    if ch == ")": return 41
+    if ch == "*": return 42
+    if ch == "+": return 43
+    if ch == ",": return 44
+    if ch == "-": return 45
+    if ch == ".": return 46
+    if ch == "/": return 47
+    if ch == "0": return 48
+    if ch == "1": return 49
+    if ch == "2": return 50
+    if ch == "3": return 51
+    if ch == "4": return 52
+    if ch == "5": return 53
+    if ch == "6": return 54
+    if ch == "7": return 55
+    if ch == "8": return 56
+    if ch == "9": return 57
+    if ch == ":": return 58
+    if ch == ";": return 59
+    if ch == "<": return 60
+    if ch == "=": return 61
+    if ch == ">": return 62
+    if ch == "?": return 63
+    if ch == "@": return 64
+    if ch == "A": return 65
+    if ch == "B": return 66
+    if ch == "C": return 67
+    if ch == "D": return 68
+    if ch == "E": return 69
+    if ch == "F": return 70
+    if ch == "G": return 71
+    if ch == "H": return 72
+    if ch == "I": return 73
+    if ch == "J": return 74
+    if ch == "K": return 75
+    if ch == "L": return 76
+    if ch == "M": return 77
+    if ch == "N": return 78
+    if ch == "O": return 79
+    if ch == "P": return 80
+    if ch == "Q": return 81
+    if ch == "R": return 82
+    if ch == "S": return 83
+    if ch == "T": return 84
+    if ch == "U": return 85
+    if ch == "V": return 86
+    if ch == "W": return 87
+    if ch == "X": return 88
+    if ch == "Y": return 89
+    if ch == "Z": return 90
+    if ch == "[": return 91
+    if ch == "\\": return 92
+    if ch == "]": return 93
+    if ch == "^": return 94
+    if ch == "_": return 95
+    if ch == "`": return 96
+    if ch == "a": return 97
+    if ch == "b": return 98
+    if ch == "c": return 99
+    if ch == "d": return 100
+    if ch == "e": return 101
+    if ch == "f": return 102
+    if ch == "g": return 103
+    if ch == "h": return 104
+    if ch == "i": return 105
+    if ch == "j": return 106
+    if ch == "k": return 107
+    if ch == "l": return 108
+    if ch == "m": return 109
+    if ch == "n": return 110
+    if ch == "o": return 111
+    if ch == "p": return 112
+    if ch == "q": return 113
+    if ch == "r": return 114
+    if ch == "s": return 115
+    if ch == "t": return 116
+    if ch == "u": return 117
+    if ch == "v": return 118
+    if ch == "w": return 119
+    if ch == "x": return 120
+    if ch == "y": return 121
+    if ch == "z": return 122
+    if ch == "{": return 123
+    if ch == "|": return 124
+    if ch == "}": return 125
+    if ch == "~": return 126
+    if ch == "\x7F": return 127
+    if ch == "\x80": return 128
+    if ch == "\xFC": return 252
+    if ch == "\xFE": return 254
+    if ch == "\xFF": return 255
+    val code = ch.char_code_at(0)
+    if code >= 0 and code <= 255:
+        return code
+    0

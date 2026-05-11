@@ -2,10 +2,14 @@
 #
 # MDSOC: feature dimension, kernel boot layer
 # Called from arch-specific boot_main after PMM + heap are initialized.
-# Initializes all services (PCI, network, display) then launches the
-# HTTP server (B5) or falls back to cooperative network polling.
+# Boot sequence:
+#   1. Mount root filesystem (NVFS → DBFS → FAT32 fallback)
+#   2. Launch init process from root FS
+#   3. Initialize services (PCI, network, display)
+#   4. Start HTTP server or cooperative poll loop
 
 use os.kernel.boot.riscv_services.{init_riscv_services_with_network, riscv_network_ready}
+use os.kernel.boot.boot_fs.{boot_fs_sequence, boot_fs_is_mounted, BootFsType}
 use os.services.netstack.netstack_init.{net_service_init_port, net_service_poll}
 use os.kernel.net.http_baremetal.{start_http_server_baremetal}
 use os.kernel.log.klog_api.{log_raw_println}
@@ -15,10 +19,16 @@ fn os_main():
     log_raw_println("=== SimpleOS Boot ===")
     log_raw_println("")
 
-    # Initialize RISC-V services (PCI scan, network probe, display).
-    # NOTE: uses init_riscv_services_with_network() instead of init_all_services()
-    # because the latter initializes BGA display via x86 I/O ports (0x01CE),
-    # which would crash on RISC-V.
+    # Step 1: Mount root filesystem (NVFS → DBFS → FAT32 fallback)
+    log_raw_println("[os_main] Mounting root filesystem...")
+    val fs_result = boot_fs_sequence()
+    if fs_result.is_ok():
+        val info = fs_result.unwrap()
+        log_raw_println("[os_main] Root FS mounted, init pid={info.init_pid}")
+    else:
+        log_raw_println("[os_main] Root FS mount failed: {fs_result.unwrap_err()}")
+
+    # Step 2: Initialize RISC-V services (PCI scan, network probe, display).
     log_raw_println("[os_main] Calling init_riscv_services_with_network()...")
     init_riscv_services_with_network()
     log_raw_println("[os_main] Service initialization returned")
@@ -31,9 +41,6 @@ fn os_main():
         log_raw_println("[os_main] Network unavailable -- skipping netstack")
 
     # B5: Launch HTTP server inline on the boot core.
-    # The Worker's event loop replaces the cooperative poll loop —
-    # it drives the IoDriver (driver_shim) which polls the netstack.
-    # If the server exits (shutdown), fall through to idle poll loop.
     if riscv_network_ready():
         log_raw_println("[os_main] Starting HTTP server (B5 inline mode)...")
         start_http_server_baremetal()
@@ -42,10 +49,6 @@ fn os_main():
         log_raw_println("[os_main] No network -- skipping HTTP server")
 
     log_raw_println("[os_main] Entering cooperative network poll loop (idle)")
-
-    # Fallback cooperative network poll loop.
-    # Reached if: (a) network unavailable, or (b) HTTP server exits.
-    # Drives netstack frame processing + IPC without blocking.
     network_poll_loop()
 
 fn network_poll_loop():

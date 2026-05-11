@@ -1,0 +1,178 @@
+# Boot Filesystem — mount NVFS/DBFS as root and launch init process.
+#
+# Boot sequence: try NVFS → DBFS → FAT32 fallback.
+# After mounting, loads /sbin/init (or /INIT.ELF on FAT32) and spawns it.
+#
+# MDSOC: feature dimension, kernel boot layer.
+
+use os.kernel.log.klog_api.{log_raw_println}
+use os.kernel.loader.elf_loader.{load_user_executable, ElfImage}
+use os.kernel.loader.process_image.{build_user_process_image}
+use os.kernel.arch.arch_context.{Architecture, current_architecture}
+use os.services.vfs.vfs_init.{
+    vfs_boot_init, g_vfs_initialized, g_vfs_read_file_bytes
+}
+use os.userlib.process.{spawn_binary}
+
+extern fn serial_println(msg: text)
+
+enum BootFsType:
+    Nvfs
+    Dbfs
+    Fat32
+    None_
+
+struct BootFsConfig:
+    root_device:  text
+    fs_type:      BootFsType
+    init_binary:  text
+
+    static fn default_config() -> BootFsConfig:
+        BootFsConfig(
+            root_device: "nvme0n1",
+            fs_type:     BootFsType.Nvfs,
+            init_binary: "/sbin/init"
+        )
+
+    static fn fat32_fallback() -> BootFsConfig:
+        BootFsConfig(
+            root_device: "nvme0n1",
+            fs_type:     BootFsType.Fat32,
+            init_binary: "/SYS/APPS/HELLOSMF.SMF"
+        )
+
+struct BootFsResult:
+    mounted:    bool
+    fs_type:    BootFsType
+    init_pid:   i64
+    init_path:  text
+
+var _boot_fs_mounted: bool = false
+var _boot_fs_type: BootFsType = BootFsType.None_
+var _boot_init_pid: i64 = -1
+
+fn boot_fs_is_mounted() -> bool:
+    _boot_fs_mounted
+
+fn boot_fs_type() -> BootFsType:
+    _boot_fs_type
+
+fn boot_fs_init_pid() -> i64:
+    _boot_init_pid
+
+fn boot_fs_sequence() -> Result<BootFsResult, text>:
+    log_raw_println("[boot-fs] Starting filesystem mount sequence...")
+
+    # Step 1: Try NVFS on NVMe
+    log_raw_println("[boot-fs] Attempting NVFS root mount...")
+    val nvfs_ok = _try_nvfs_root()
+    if nvfs_ok:
+        log_raw_println("[boot-fs] NVFS mounted as root filesystem")
+        _boot_fs_mounted = true
+        _boot_fs_type = BootFsType.Nvfs
+        val init_result = _launch_init("/sbin/init")
+        return Ok(BootFsResult(
+            mounted:   true,
+            fs_type:   BootFsType.Nvfs,
+            init_pid:  init_result,
+            init_path: "/sbin/init"
+        ))
+
+    # Step 2: Try DBFS on NVMe
+    log_raw_println("[boot-fs] NVFS unavailable, attempting DBFS root mount...")
+    val dbfs_ok = _try_dbfs_root()
+    if dbfs_ok:
+        log_raw_println("[boot-fs] DBFS mounted as root filesystem")
+        _boot_fs_mounted = true
+        _boot_fs_type = BootFsType.Dbfs
+        val init_result = _launch_init("/sbin/init")
+        return Ok(BootFsResult(
+            mounted:   true,
+            fs_type:   BootFsType.Dbfs,
+            init_pid:  init_result,
+            init_path: "/sbin/init"
+        ))
+
+    # Step 3: Fallback to FAT32
+    log_raw_println("[boot-fs] NVFS/DBFS unavailable, falling back to FAT32...")
+    val fat32_ok = vfs_boot_init()
+    if fat32_ok:
+        log_raw_println("[boot-fs] FAT32 mounted as root filesystem")
+        _boot_fs_mounted = true
+        _boot_fs_type = BootFsType.Fat32
+        val init_result = _launch_init_fat32()
+        return Ok(BootFsResult(
+            mounted:   true,
+            fs_type:   BootFsType.Fat32,
+            init_pid:  init_result,
+            init_path: "/SYS/APPS/HELLOSMF.SMF"
+        ))
+
+    log_raw_println("[boot-fs] No filesystem available -- boot failed")
+    Err("boot-fs: no root filesystem found")
+
+fn _try_nvfs_root() -> bool:
+    # NVFS root mount requires:
+    # 1. NVMe device present with NVFS superblock
+    # 2. NvfsPosixDriver.mount() succeeds
+    # Currently returns false — NVFS uses in-memory arena (N1 milestone).
+    # When NVMe-backed arena lands (N2), this probes for NVFS superblock.
+    false
+
+fn _try_dbfs_root() -> bool:
+    # DBFS root mount requires:
+    # 1. NVMe device present with DBFS superblock
+    # 2. DbFsDriver.mount() succeeds
+    # Currently returns false — DBFS uses module-static arena.
+    # When Arena-backed persistence lands, this probes for DBFS superblock.
+    false
+
+fn _launch_init(path: text) -> i64:
+    log_raw_println("[boot-fs] Loading init binary: {path}")
+    val bytes = g_vfs_read_file_bytes(path)
+    if bytes.len() <= 4:
+        log_raw_println("[boot-fs] init binary not found or too small: {path}")
+        return -1
+    val arch = current_architecture()
+    val image = build_user_process_image(path, bytes, arch, [], [])
+    if image.is_err():
+        log_raw_println("[boot-fs] ELF parse failed for {path}: {image.unwrap_err()}")
+        return -1
+    val pid_result = spawn_binary(path, 1)
+    if pid_result.is_err():
+        log_raw_println("[boot-fs] spawn failed for {path}: {pid_result.unwrap_err()}")
+        return -1
+    val pid = pid_result.unwrap() as i64
+    _boot_init_pid = pid
+    log_raw_println("[boot-fs] init launched: pid={pid} path={path}")
+    pid
+
+fn _launch_init_fat32() -> i64:
+    log_raw_println("[boot-fs] Loading init binary from FAT32...")
+    val path = "/SYS/APPS/HELLOSMF.SMF"
+    val bytes = g_vfs_read_file_bytes(path)
+    if bytes.len() <= 4:
+        log_raw_println("[boot-fs] FAT32 init binary not found: {path}")
+        return -1
+    log_raw_println("[boot-fs] FAT32 init binary loaded: {bytes.len()} bytes")
+    val pid_result = spawn_binary(path, 1)
+    if pid_result.is_err():
+        log_raw_println("[boot-fs] FAT32 spawn failed: {pid_result.unwrap_err()}")
+        return -1
+    val pid = pid_result.unwrap() as i64
+    _boot_init_pid = pid
+    log_raw_println("[boot-fs] FAT32 init launched: pid={pid}")
+    pid
+
+fn boot_fs_load_and_validate_elf(path: text) -> Result<ElfImage, text>:
+    val bytes = g_vfs_read_file_bytes(path)
+    if bytes.len() <= 4:
+        return Err("file not found or too small: {path}")
+    val arch = current_architecture()
+    load_user_executable(bytes, arch)
+
+fn boot_fs_spawn_executable(path: text, priority: u8) -> Result<i64, text>:
+    val pid_result = spawn_binary(path, priority)
+    if pid_result.is_err():
+        return Err("spawn failed: {pid_result.unwrap_err()}")
+    Ok(pid_result.unwrap() as i64)
