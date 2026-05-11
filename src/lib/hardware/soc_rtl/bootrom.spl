@@ -33,23 +33,30 @@ val NOP_INSN: u32 = 0x00000013
 # JALR rd, rs1, imm:   imm[11:0] | rs1[4:0] | 000 | rd[4:0] | 1100111
 # ADDI rd, rs1, imm:   imm[11:0] | rs1[4:0] | 000 | rd[4:0] | 0010011
 #
-# Register numbers: x0=0, x2(sp)=2, x5(t0)=5
+# Register numbers: x0=0, x2(sp)=2, x5(t0)=5, x10(a0)=10, x11(a1)=11
 # ============================================================================
 
 # Instruction 0: lui sp, 0x80100
-#   upper imm = 0x80100, rd = x2 (sp)
-#   encoding: 0x80100 << 12 | 2 << 7 | 0x37
+#   SP = 0x80100000 (top of 1MB RAM region)
 val BOOT_INSN_0: u32 = 0x80100137
 
-# Instruction 1: lui t0, 0x80000
-#   upper imm = 0x80000, rd = x5 (t0)
-#   encoding: 0x80000 << 12 | 5 << 7 | 0x37
-val BOOT_INSN_1: u32 = 0x800002B7
+# Instruction 1: addi a0, zero, 0
+#   a0 = 0 (hart_id for boot_main)
+val BOOT_INSN_1: u32 = 0x00000513
 
-# Instruction 2: jalr zero, t0, 0
-#   imm = 0, rs1 = x5 (t0), rd = x0 (zero)
-#   encoding: 0 << 20 | 5 << 15 | 0 << 12 | 0 << 7 | 0x67
-val BOOT_INSN_2: u32 = 0x00028067
+# Instruction 2: lui a1, 0x88000
+#   a1 = 0x88000000 (DTB base address in RAM)
+val BOOT_INSN_2: u32 = 0x880005B7
+
+# Instruction 3: lui t0, 0x80000
+#   t0 = 0x80000000 (kernel entry point)
+val BOOT_INSN_3: u32 = 0x800002B7
+
+# Instruction 4: jalr zero, t0, 0
+#   Jump to kernel entry, no link (rd=x0)
+val BOOT_INSN_4: u32 = 0x00028067
+
+val DTB_BASE: u32 = 0x88000000
 
 # ============================================================================
 # Boot ROM Read
@@ -60,19 +67,19 @@ fn bootrom_read(addr: u32) -> u32:
     addr is the absolute memory address (not offset).
     Returns NOP for addresses outside the ROM or uninitialized slots.
 
-    Boot sequence:
+    Boot sequence (SimpleOS compatible):
       0x1000: lui  sp, 0x80100     # SP = 0x80100000 (top of 1MB RAM region)
-      0x1004: lui  t0, 0x80000     # t0 = 0x80000000 (RAM base)
-      0x1008: jalr zero, t0, 0     # Jump to RAM entry, don't link (rd=x0)
+      0x1004: addi a0, zero, 0     # a0 = 0 (hart_id for boot_main)
+      0x1008: lui  a1, 0x88000     # a1 = 0x88000000 (DTB base in RAM)
+      0x100C: lui  t0, 0x80000     # t0 = 0x80000000 (kernel entry)
+      0x1010: jalr zero, t0, 0     # Jump to kernel, don't link
     """
-    # Check address is within ROM range
     if addr < BOOTROM_BASE:
         return NOP_INSN
     val offset = addr - BOOTROM_BASE
     if offset >= BOOTROM_SIZE:
         return NOP_INSN
 
-    # Word-aligned offset to instruction index
     val word_idx = offset >> 2
 
     if word_idx == 0:
@@ -81,6 +88,9 @@ fn bootrom_read(addr: u32) -> u32:
         return BOOT_INSN_1
     if word_idx == 2:
         return BOOT_INSN_2
+    if word_idx == 3:
+        return BOOT_INSN_3
+    if word_idx == 4:
+        return BOOT_INSN_4
 
-    # All other ROM slots return NOP
     NOP_INSN
