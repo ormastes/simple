@@ -2,6 +2,180 @@
 #
 # Provides utility functions for byte operations, random generation,
 # cryptographic hashing (SHA-256, SHA-384), and string operations.
+#
+# Hex-safe wire encoding: all wire data is represented as hex-encoded text
+# (e.g., "160301" for 3 bytes). This avoids NUL-byte truncation in text (C char*).
+
+# --- Extern declarations for hex wire encoding ---
+extern fn rt_wire_to_hex(wire: text, wire_len: i64) -> text
+extern fn rt_hex_to_wire(hex: text) -> text
+
+# =============================================================================
+# HEX ENCODING HELPERS
+# =============================================================================
+
+# Convert a byte value (0-255) to a 2-character lowercase hex string
+# Parameters:
+#   v: Byte value (0-255)
+# Returns: 2-character hex string, e.g. 42 -> "2a"
+fn i64_to_hex_byte(v: i64) -> text:
+    val hex_chars = "0123456789abcdef"
+    val hi = (v / 16) % 16
+    val lo = v % 16
+    val hi_char = char_at(hex_chars, hi)
+    val lo_char = char_at(hex_chars, lo)
+    hi_char + lo_char
+
+# Convert a 2-character hex string to an integer
+# Parameters:
+#   hex: 2-character hex string (e.g. "0a")
+# Returns: Integer value (e.g. 10)
+fn hex_to_i64(hex: text) -> i64:
+    val c0 = byte_at(hex, 0)
+    val c1 = byte_at(hex, 1)
+    val hi = hex_nibble(c0)
+    val lo = hex_nibble(c1)
+    (hi * 16) + lo
+
+# Convert a single ASCII byte code to its hex nibble value
+# Parameters:
+#   c: ASCII code of hex character ('0'-'9', 'a'-'f', 'A'-'F')
+# Returns: Nibble value 0-15
+fn hex_nibble(c: i64) -> i64:
+    # '0'-'9' = 48-57
+    if c >= 48 and c <= 57:
+        c - 48
+    # 'a'-'f' = 97-102
+    elif c >= 97 and c <= 102:
+        c - 87
+    # 'A'-'F' = 65-70
+    elif c >= 65 and c <= 70:
+        c - 55
+    else:
+        0
+
+# Concatenate two hex strings (simple string concatenation)
+# Parameters:
+#   a: First hex string
+#   b: Second hex string
+# Returns: Concatenated hex string
+fn concat_hex(a: text, b: text) -> text:
+    a + b
+
+# Get the decoded byte value at a given byte index in a hex string
+# Parameters:
+#   hex: Hex-encoded string
+#   index: Byte index (0-based, each byte = 2 hex chars)
+# Returns: Byte value 0-255
+fn hex_byte_at(hex: text, index: i64) -> i64:
+    val offset = index * 2
+    val c0 = byte_at(hex, offset)
+    val c1 = byte_at(hex, offset + 1)
+    val hi = hex_nibble(c0)
+    val lo = hex_nibble(c1)
+    (hi * 16) + lo
+
+# Slice a hex string by byte indices
+# Parameters:
+#   hex: Hex-encoded string
+#   start: Start byte index (inclusive)
+#   length: Number of bytes to extract
+# Returns: Hex substring representing the sliced bytes
+fn hex_slice(hex: text, start: i64, length: i64) -> text:
+    val char_start = start * 2
+    val char_len = length * 2
+    slice(hex, char_start, char_start + char_len)
+
+# Get the byte count represented by a hex string
+# Parameters:
+#   hex: Hex-encoded string
+# Returns: Number of bytes (= hex string length / 2)
+fn hex_len(hex: text) -> i64:
+    len(hex) / 2
+
+# Encode a 16-bit unsigned integer as big-endian hex (4 hex chars)
+# Parameters:
+#   v: Integer value (0-65535)
+# Returns: 4-character hex string, e.g. 771 -> "0303"
+fn u16_be_hex(v: i64) -> text:
+    val hi = (v >> 8) & 255
+    val lo = v & 255
+    i64_to_hex_byte(hi) + i64_to_hex_byte(lo)
+
+# Encode a 24-bit unsigned integer as big-endian hex (6 hex chars)
+# Parameters:
+#   v: Integer value (0-16777215)
+# Returns: 6-character hex string
+fn u24_be_hex(v: i64) -> text:
+    val b0 = (v >> 16) & 255
+    val b1 = (v >> 8) & 255
+    val b2 = v & 255
+    i64_to_hex_byte(b0) + i64_to_hex_byte(b1) + i64_to_hex_byte(b2)
+
+# Convert a byte list to a hex string
+# Parameters:
+#   data: List of byte values (0-255)
+# Returns: Hex-encoded string
+fn bytes_to_hex(data) -> text:
+    var parts: [text] = []
+    val data_len = len(data)
+    var i = 0
+    while i < data_len:
+        val byte_val = byte_at(data, i)
+        val hex_str = i64_to_hex_byte(byte_val)
+        parts.push(hex_str)
+        i = i + 1
+    parts.join("")
+
+# Convert a hex string to a byte list
+# Parameters:
+#   hex: Hex-encoded string
+# Returns: List of byte values (0-255)
+fn hex_to_bytes(hex: text):
+    var result = []
+    val byte_count = hex_len(hex)
+    var i = 0
+    while i < byte_count:
+        val byte_val = hex_byte_at(hex, i)
+        result = append(result, byte_val)
+        i = i + 1
+    result
+
+# Generate random bytes as hex string
+# Parameters:
+#   length: Number of random bytes
+# Returns: Hex-encoded random bytes
+fn generate_random_hex(length: i64) -> text:
+    val byte_list = generate_random(length)
+    bytes_to_hex(byte_list)
+
+# SHA-256 operating on hex input, returning hex output
+# Parameters:
+#   hex_data: Hex-encoded input
+# Returns: Hex-encoded SHA-256 hash (64 hex chars = 32 bytes)
+fn sha256_hex(hex_data: text) -> text:
+    val byte_list = hex_to_bytes(hex_data)
+    val hash_bytes = sha256(byte_list)
+    bytes_to_hex(hash_bytes)
+
+# SHA-384 operating on hex input, returning hex output
+# Parameters:
+#   hex_data: Hex-encoded input
+# Returns: Hex-encoded SHA-384 hash (96 hex chars = 48 bytes)
+fn sha384_hex(hex_data: text) -> text:
+    val byte_list = hex_to_bytes(hex_data)
+    val hash_bytes = sha384(byte_list)
+    bytes_to_hex(hash_bytes)
+
+# Constant-time comparison of two hex strings
+# Parameters:
+#   a: First hex string
+#   b: Second hex string
+# Returns: true if equal, false otherwise
+fn constant_time_compare_hex(a: text, b: text) -> bool:
+    val bytes_a = hex_to_bytes(a)
+    val bytes_b = hex_to_bytes(b)
+    constant_time_compare(bytes_a, bytes_b)
 
 # Generate pseudo-random bytes using a linear congruential generator
 # seeded from the length parameter. Not cryptographically secure but
@@ -66,17 +240,13 @@ fn format_hex(data):
 
     parts.join("")
 
-# Convert byte to 2-character hex string
+# Convert byte to 2-character hex string (lowercase)
+# Deprecated: prefer i64_to_hex_byte for new code
 # Parameters:
 #   byte_val: Byte value (0-255)
 # Returns: 2-character hex string
 fn byte_to_hex(byte_val):
-    val hex_chars = "0123456789ABCDEF"
-    val hi = (byte_val / 16) % 16
-    val lo = byte_val % 16
-    val hi_char = char_at(hex_chars, hi)
-    val lo_char = char_at(hex_chars, lo)
-    hi_char + lo_char
+    i64_to_hex_byte(byte_val)
 
 # Pad bytes to specified length with zeros
 # Parameters:

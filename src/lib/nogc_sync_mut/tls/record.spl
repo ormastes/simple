@@ -2,6 +2,74 @@
 #
 # Implements the TLS Record Layer which encapsulates all TLS messages.
 # Handles building and parsing TLS records, content type mapping, and version validation.
+#
+# Hex-safe variants: functions suffixed with _hex operate on hex-encoded text
+# to avoid NUL-byte truncation. A TLS record header is 5 bytes = 10 hex chars:
+# content_type(2) + version(4) + length(4)
+
+# =============================================================================
+# HEX-SAFE RECORD LAYER
+# =============================================================================
+
+# Build a TLS record as a hex-encoded string
+# Parameters:
+#   content_type: Content type integer (20-23)
+#   version: Protocol version integer (e.g., 0x0303 for TLS 1.2)
+#   payload_hex: Payload data as hex-encoded string
+# Returns: Complete TLS record as hex-encoded string
+#
+# Example: build_tls_record_hex(0x16, 0x0303, <46-byte payload hex>)
+#          produces "160303002e" + payload_hex
+fn build_tls_record_hex(content_type: i64, version: i64, payload_hex: text) -> text:
+    val ct_hex = i64_to_hex_byte(content_type)
+    val ver_hex = u16_be_hex(version)
+    val payload_byte_len = hex_len(payload_hex)
+    val len_hex = u16_be_hex(payload_byte_len)
+    ct_hex + ver_hex + len_hex + payload_hex
+
+# Parse a TLS record from hex-encoded raw data
+# Parameters:
+#   raw_hex: Raw hex-encoded data containing TLS record
+# Returns: (content_type, version, payload_hex) tuple or nil on parse error
+fn parse_tls_record_hex(raw_hex: text):
+    val TLS_RECORD_HEADER_BYTES = 5
+    val byte_count = hex_len(raw_hex)
+    if byte_count < TLS_RECORD_HEADER_BYTES:
+        nil
+    else:
+        val content_type = hex_byte_at(raw_hex, 0)
+        val version_hi = hex_byte_at(raw_hex, 1)
+        val version_lo = hex_byte_at(raw_hex, 2)
+        val version = (version_hi * 256) + version_lo
+        val length_hi = hex_byte_at(raw_hex, 3)
+        val length_lo = hex_byte_at(raw_hex, 4)
+        val length = (length_hi * 256) + length_lo
+
+        if byte_count < (TLS_RECORD_HEADER_BYTES + length):
+            nil
+        else:
+            val payload_hex = hex_slice(raw_hex, TLS_RECORD_HEADER_BYTES, length)
+            (content_type, version, payload_hex)
+
+# Build TLS alert as hex-encoded string
+# Parameters:
+#   level: Alert level (1=warning, 2=fatal)
+#   description: Alert description code
+# Returns: Hex-encoded alert (4 hex chars = 2 bytes)
+fn build_alert_hex(level: i64, description: i64) -> text:
+    i64_to_hex_byte(level) + i64_to_hex_byte(description)
+
+# Parse TLS alert from hex-encoded data
+# Parameters:
+#   hex_data: Hex-encoded alert payload
+# Returns: (level, description) tuple or nil
+fn parse_alert_hex(hex_data: text):
+    if hex_len(hex_data) < 2:
+        nil
+    else:
+        val level = hex_byte_at(hex_data, 0)
+        val description = hex_byte_at(hex_data, 1)
+        (level, description)
 
 # Build a TLS record
 # Parameters:
