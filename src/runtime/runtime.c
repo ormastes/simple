@@ -1811,6 +1811,610 @@ const char* rt_http_get(const char* url) {
 #endif
 }
 
+/* ================================================================
+ * TLS Crypto Externs — AES-128-GCM + RSA PKCS#1 v1.5
+ * ================================================================
+ *
+ * IMPORTANT — NUL byte limitation:
+ * The strlen-based wrappers (rt_aes_gcm_encrypt, rt_aes_gcm_decrypt,
+ * rt_rsa_decrypt) truncate at embedded NUL bytes (0x00).  For correct
+ * TLS operation with arbitrary key material, use the _with_len variants
+ * which accept explicit lengths and report output length via int64_t*
+ * out_len outparam.
+ *
+ * The _with_len API is the canonical binary-safe interface; the plain
+ * functions are thin wrappers that call strlen on each argument.
+ * ================================================================ */
+
+/* --- OpenSSL is opt-in only ---
+ * Pass -DSPL_HAVE_OPENSSL and link -lssl -lcrypto to enable.
+ * Without it, AES-128-GCM uses the from-scratch implementation below
+ * (byte-identical output verified against OpenSSL 3.x).
+ * RSA decryption requires OpenSSL — the no-OpenSSL path is a stub. */
+
+#ifdef SPL_HAVE_OPENSSL
+#include <openssl/evp.h>
+#include <openssl/rsa.h>
+#include <openssl/pem.h>
+#include <openssl/err.h>
+#include <openssl/bio.h>
+
+/* ---- rt_rsa_decrypt_with_len: binary-safe RSA PKCS#1 v1.5 (OpenSSL) ---- */
+const char* rt_rsa_decrypt_with_len(const char* ciphertext, int64_t ct_len,
+                                     const char* private_key_pem, int64_t pk_len,
+                                     int64_t* out_len) {
+    if (out_len) *out_len = 0;
+    if (!ciphertext || !private_key_pem || ct_len <= 0 || pk_len <= 0)
+        return SPL_STRDUP("", "str");
+
+    BIO* bio = BIO_new_mem_buf(private_key_pem, (int)pk_len);
+    if (!bio) return SPL_STRDUP("", "str");
+
+    EVP_PKEY* pkey = PEM_read_bio_PrivateKey(bio, NULL, NULL, NULL);
+    BIO_free(bio);
+    if (!pkey) return SPL_STRDUP("", "str");
+
+    EVP_PKEY_CTX* ctx = EVP_PKEY_CTX_new(pkey, NULL);
+    if (!ctx) { EVP_PKEY_free(pkey); return SPL_STRDUP("", "str"); }
+
+    if (EVP_PKEY_decrypt_init(ctx) <= 0) {
+        EVP_PKEY_CTX_free(ctx); EVP_PKEY_free(pkey);
+        return SPL_STRDUP("", "str");
+    }
+    if (EVP_PKEY_CTX_set_rsa_padding(ctx, RSA_PKCS1_PADDING) <= 0) {
+        EVP_PKEY_CTX_free(ctx); EVP_PKEY_free(pkey);
+        return SPL_STRDUP("", "str");
+    }
+
+    size_t dec_len = 0;
+    if (EVP_PKEY_decrypt(ctx, NULL, &dec_len,
+                         (const unsigned char*)ciphertext, (size_t)ct_len) <= 0) {
+        EVP_PKEY_CTX_free(ctx); EVP_PKEY_free(pkey);
+        return SPL_STRDUP("", "str");
+    }
+
+    unsigned char* result = (unsigned char*)SPL_MALLOC(dec_len + 1, "str");
+    if (EVP_PKEY_decrypt(ctx, result, &dec_len,
+                         (const unsigned char*)ciphertext, (size_t)ct_len) <= 0) {
+        SPL_FREE(result);
+        EVP_PKEY_CTX_free(ctx); EVP_PKEY_free(pkey);
+        return SPL_STRDUP("", "str");
+    }
+
+    EVP_PKEY_CTX_free(ctx);
+    EVP_PKEY_free(pkey);
+
+    result[dec_len] = '\0';
+    if (out_len) *out_len = (int64_t)dec_len;
+    return (const char*)result;
+}
+
+const char* rt_rsa_decrypt(const char* ciphertext, const char* private_key_pem) {
+    if (!ciphertext || !private_key_pem) return SPL_STRDUP("", "str");
+    return rt_rsa_decrypt_with_len(ciphertext, (int64_t)strlen(ciphertext),
+                                    private_key_pem, (int64_t)strlen(private_key_pem),
+                                    NULL);
+}
+
+/* ---- rt_aes_gcm_encrypt_with_len: binary-safe AES-128-GCM encrypt (OpenSSL) ---- */
+const char* rt_aes_gcm_encrypt_with_len(const char* key, int64_t key_len,
+                                         const char* iv, int64_t iv_len,
+                                         const char* plaintext, int64_t pt_len,
+                                         const char* aad, int64_t aad_len,
+                                         int64_t* out_len) {
+    if (out_len) *out_len = 0;
+    if (!key || !iv || !plaintext || key_len < 16 || iv_len < 12 || pt_len < 0)
+        return SPL_STRDUP("", "str");
+
+    EVP_CIPHER_CTX* ctx = EVP_CIPHER_CTX_new();
+    if (!ctx) return SPL_STRDUP("", "str");
+
+    if (EVP_EncryptInit_ex(ctx, EVP_aes_128_gcm(), NULL, NULL, NULL) != 1) {
+        EVP_CIPHER_CTX_free(ctx); return SPL_STRDUP("", "str");
+    }
+    if (EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_SET_IVLEN, (int)iv_len, NULL) != 1) {
+        EVP_CIPHER_CTX_free(ctx); return SPL_STRDUP("", "str");
+    }
+    if (EVP_EncryptInit_ex(ctx, NULL, NULL,
+                           (const unsigned char*)key,
+                           (const unsigned char*)iv) != 1) {
+        EVP_CIPHER_CTX_free(ctx); return SPL_STRDUP("", "str");
+    }
+
+    int tmp_len = 0;
+    if (aad && aad_len > 0) {
+        if (EVP_EncryptUpdate(ctx, NULL, &tmp_len,
+                              (const unsigned char*)aad, (int)aad_len) != 1) {
+            EVP_CIPHER_CTX_free(ctx); return SPL_STRDUP("", "str");
+        }
+    }
+
+    /* Output: ciphertext (same length as plaintext) + 16-byte GCM tag */
+    unsigned char* result = (unsigned char*)SPL_MALLOC((size_t)pt_len + 16 + 1, "str");
+    int enc_len = 0;
+    if (EVP_EncryptUpdate(ctx, result, &enc_len,
+                          (const unsigned char*)plaintext, (int)pt_len) != 1) {
+        SPL_FREE(result); EVP_CIPHER_CTX_free(ctx);
+        return SPL_STRDUP("", "str");
+    }
+
+    int final_len = 0;
+    if (EVP_EncryptFinal_ex(ctx, result + enc_len, &final_len) != 1) {
+        SPL_FREE(result); EVP_CIPHER_CTX_free(ctx);
+        return SPL_STRDUP("", "str");
+    }
+    enc_len += final_len;
+
+    /* Append 16-byte GCM authentication tag */
+    if (EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_GET_TAG, 16, result + enc_len) != 1) {
+        SPL_FREE(result); EVP_CIPHER_CTX_free(ctx);
+        return SPL_STRDUP("", "str");
+    }
+    enc_len += 16;
+
+    EVP_CIPHER_CTX_free(ctx);
+    result[enc_len] = '\0';
+    if (out_len) *out_len = (int64_t)enc_len;
+    return (const char*)result;
+}
+
+const char* rt_aes_gcm_encrypt(const char* key, const char* iv,
+                                const char* plaintext, const char* aad) {
+    if (!key || !iv || !plaintext) return SPL_STRDUP("", "str");
+    return rt_aes_gcm_encrypt_with_len(key, (int64_t)strlen(key),
+                                        iv, (int64_t)strlen(iv),
+                                        plaintext, (int64_t)strlen(plaintext),
+                                        aad, aad ? (int64_t)strlen(aad) : 0,
+                                        NULL);
+}
+
+/* ---- rt_aes_gcm_decrypt_with_len: binary-safe AES-128-GCM decrypt (OpenSSL) ---- */
+const char* rt_aes_gcm_decrypt_with_len(const char* key, int64_t key_len,
+                                         const char* iv, int64_t iv_len,
+                                         const char* ciphertext, int64_t ct_len,
+                                         const char* aad, int64_t aad_len,
+                                         int64_t* out_len) {
+    if (out_len) *out_len = 0;
+    if (!key || !iv || !ciphertext || key_len < 16 || iv_len < 12 || ct_len < 16)
+        return SPL_STRDUP("", "str");
+
+    int64_t actual_ct_len = ct_len - 16; /* last 16 bytes are the GCM tag */
+
+    EVP_CIPHER_CTX* ctx = EVP_CIPHER_CTX_new();
+    if (!ctx) return SPL_STRDUP("", "str");
+
+    if (EVP_DecryptInit_ex(ctx, EVP_aes_128_gcm(), NULL, NULL, NULL) != 1) {
+        EVP_CIPHER_CTX_free(ctx); return SPL_STRDUP("", "str");
+    }
+    if (EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_SET_IVLEN, (int)iv_len, NULL) != 1) {
+        EVP_CIPHER_CTX_free(ctx); return SPL_STRDUP("", "str");
+    }
+    if (EVP_DecryptInit_ex(ctx, NULL, NULL,
+                           (const unsigned char*)key,
+                           (const unsigned char*)iv) != 1) {
+        EVP_CIPHER_CTX_free(ctx); return SPL_STRDUP("", "str");
+    }
+
+    int tmp_len = 0;
+    if (aad && aad_len > 0) {
+        if (EVP_DecryptUpdate(ctx, NULL, &tmp_len,
+                              (const unsigned char*)aad, (int)aad_len) != 1) {
+            EVP_CIPHER_CTX_free(ctx); return SPL_STRDUP("", "str");
+        }
+    }
+
+    /* Set expected GCM tag (last 16 bytes of ciphertext buffer) */
+    if (EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_SET_TAG, 16,
+                            (void*)((const unsigned char*)ciphertext + actual_ct_len)) != 1) {
+        EVP_CIPHER_CTX_free(ctx); return SPL_STRDUP("", "str");
+    }
+
+    unsigned char* result = (unsigned char*)SPL_MALLOC((size_t)actual_ct_len + 1, "str");
+    int dec_len = 0;
+    if (EVP_DecryptUpdate(ctx, result, &dec_len,
+                          (const unsigned char*)ciphertext, (int)actual_ct_len) != 1) {
+        SPL_FREE(result); EVP_CIPHER_CTX_free(ctx);
+        return SPL_STRDUP("", "str");
+    }
+
+    int final_len = 0;
+    if (EVP_DecryptFinal_ex(ctx, result + dec_len, &final_len) != 1) {
+        /* Authentication failed */
+        SPL_FREE(result); EVP_CIPHER_CTX_free(ctx);
+        return SPL_STRDUP("", "str");
+    }
+    dec_len += final_len;
+
+    EVP_CIPHER_CTX_free(ctx);
+    result[dec_len] = '\0';
+    if (out_len) *out_len = (int64_t)dec_len;
+    return (const char*)result;
+}
+
+const char* rt_aes_gcm_decrypt(const char* key, const char* iv,
+                                const char* ciphertext, const char* aad) {
+    if (!key || !iv || !ciphertext) return SPL_STRDUP("", "str");
+    return rt_aes_gcm_decrypt_with_len(key, (int64_t)strlen(key),
+                                        iv, (int64_t)strlen(iv),
+                                        ciphertext, (int64_t)strlen(ciphertext),
+                                        aad, aad ? (int64_t)strlen(aad) : 0,
+                                        NULL);
+}
+
+#else /* !SPL_HAVE_OPENSSL — from-scratch AES-128-GCM implementation */
+
+/* ================================================================
+ * AES-128 Core (FIPS 197) — SubBytes, ShiftRows, MixColumns, 10 rounds
+ * ================================================================ */
+
+static const uint8_t aes_sbox[256] = {
+    0x63,0x7c,0x77,0x7b,0xf2,0x6b,0x6f,0xc5,0x30,0x01,0x67,0x2b,0xfe,0xd7,0xab,0x76,
+    0xca,0x82,0xc9,0x7d,0xfa,0x59,0x47,0xf0,0xad,0xd4,0xa2,0xaf,0x9c,0xa4,0x72,0xc0,
+    0xb7,0xfd,0x93,0x26,0x36,0x3f,0xf7,0xcc,0x34,0xa5,0xe5,0xf1,0x71,0xd8,0x31,0x15,
+    0x04,0xc7,0x23,0xc3,0x18,0x96,0x05,0x9a,0x07,0x12,0x80,0xe2,0xeb,0x27,0xb2,0x75,
+    0x09,0x83,0x2c,0x1a,0x1b,0x6e,0x5a,0xa0,0x52,0x3b,0xd6,0xb3,0x29,0xe3,0x2f,0x84,
+    0x53,0xd1,0x00,0xed,0x20,0xfc,0xb1,0x5b,0x6a,0xcb,0xbe,0x39,0x4a,0x4c,0x58,0xcf,
+    0xd0,0xef,0xaa,0xfb,0x43,0x4d,0x33,0x85,0x45,0xf9,0x02,0x7f,0x50,0x3c,0x9f,0xa8,
+    0x51,0xa3,0x40,0x8f,0x92,0x9d,0x38,0xf5,0xbc,0xb6,0xda,0x21,0x10,0xff,0xf3,0xd2,
+    0xcd,0x0c,0x13,0xec,0x5f,0x97,0x44,0x17,0xc4,0xa7,0x7e,0x3d,0x64,0x5d,0x19,0x73,
+    0x60,0x81,0x4f,0xdc,0x22,0x2a,0x90,0x88,0x46,0xee,0xb8,0x14,0xde,0x5e,0x0b,0xdb,
+    0xe0,0x32,0x3a,0x0a,0x49,0x06,0x24,0x5c,0xc2,0xd3,0xac,0x62,0x91,0x95,0xe4,0x79,
+    0xe7,0xc8,0x37,0x6d,0x8d,0xd5,0x4e,0xa9,0x6c,0x56,0xf4,0xea,0x65,0x7a,0xae,0x08,
+    0xba,0x78,0x25,0x2e,0x1c,0xa6,0xb4,0xc6,0xe8,0xdd,0x74,0x1f,0x4b,0xbd,0x8b,0x8a,
+    0x70,0x3e,0xb5,0x66,0x48,0x03,0xf6,0x0e,0x61,0x35,0x57,0xb9,0x86,0xc1,0x1d,0x9e,
+    0xe1,0xf8,0x98,0x11,0x69,0xd9,0x8e,0x94,0x9b,0x1e,0x87,0xe9,0xce,0x55,0x28,0xdf,
+    0x8c,0xa1,0x89,0x0d,0xbf,0xe6,0x42,0x68,0x41,0x99,0x2d,0x0f,0xb0,0x54,0xbb,0x16
+};
+
+static const uint8_t aes_rcon[11] = {
+    0x00, 0x01, 0x02, 0x04, 0x08, 0x10, 0x20, 0x40, 0x80, 0x1b, 0x36
+};
+
+/* GF(2^8) multiplication */
+static uint8_t gf_mul(uint8_t a, uint8_t b) {
+    uint8_t result = 0;
+    for (int i = 0; i < 8; i++) {
+        if (b & 1) result ^= a;
+        uint8_t hi = a & 0x80;
+        a <<= 1;
+        if (hi) a ^= 0x1b; /* x^8 + x^4 + x^3 + x + 1 */
+        b >>= 1;
+    }
+    return result;
+}
+
+/* AES-128 key expansion: 16-byte key -> 11 round keys (176 bytes) */
+static void aes128_expand_key(const uint8_t key[16], uint8_t round_keys[176]) {
+    memcpy(round_keys, key, 16);
+    for (int i = 4; i < 44; i++) {
+        uint8_t temp[4];
+        memcpy(temp, round_keys + (i - 1) * 4, 4);
+        if (i % 4 == 0) {
+            uint8_t t = temp[0];
+            temp[0] = aes_sbox[temp[1]] ^ aes_rcon[i / 4];
+            temp[1] = aes_sbox[temp[2]];
+            temp[2] = aes_sbox[temp[3]];
+            temp[3] = aes_sbox[t];
+        }
+        for (int j = 0; j < 4; j++)
+            round_keys[i * 4 + j] = round_keys[(i - 4) * 4 + j] ^ temp[j];
+    }
+}
+
+/* AES-128 encrypt a single 16-byte block in-place */
+static void aes128_encrypt_block(const uint8_t round_keys[176], uint8_t block[16]) {
+    for (int i = 0; i < 16; i++) block[i] ^= round_keys[i];
+
+    for (int round = 1; round <= 10; round++) {
+        /* SubBytes */
+        for (int i = 0; i < 16; i++) block[i] = aes_sbox[block[i]];
+
+        /* ShiftRows */
+        uint8_t t;
+        t = block[1]; block[1] = block[5]; block[5] = block[9]; block[9] = block[13]; block[13] = t;
+        t = block[2]; block[2] = block[10]; block[10] = t;
+        t = block[6]; block[6] = block[14]; block[14] = t;
+        t = block[15]; block[15] = block[11]; block[11] = block[7]; block[7] = block[3]; block[3] = t;
+
+        /* MixColumns (skip on last round) */
+        if (round < 10) {
+            for (int c = 0; c < 4; c++) {
+                int off = c * 4;
+                uint8_t a0 = block[off], a1 = block[off+1], a2 = block[off+2], a3 = block[off+3];
+                block[off]   = gf_mul(2,a0) ^ gf_mul(3,a1) ^ a2 ^ a3;
+                block[off+1] = a0 ^ gf_mul(2,a1) ^ gf_mul(3,a2) ^ a3;
+                block[off+2] = a0 ^ a1 ^ gf_mul(2,a2) ^ gf_mul(3,a3);
+                block[off+3] = gf_mul(3,a0) ^ a1 ^ a2 ^ gf_mul(2,a3);
+            }
+        }
+
+        /* AddRoundKey */
+        for (int i = 0; i < 16; i++) block[i] ^= round_keys[round * 16 + i];
+    }
+}
+
+/* ================================================================
+ * GCM Mode — GHASH + CTR
+ * ================================================================ */
+
+static void xor_block(uint8_t out[16], const uint8_t a[16], const uint8_t b[16]) {
+    for (int i = 0; i < 16; i++) out[i] = a[i] ^ b[i];
+}
+
+/* GF(2^128) multiplication for GHASH (bit-by-bit, big-endian) */
+static void ghash_mul(uint8_t result[16], const uint8_t X[16], const uint8_t H[16]) {
+    uint8_t Z[16] = {0};
+    uint8_t V[16];
+    memcpy(V, H, 16);
+
+    for (int i = 0; i < 128; i++) {
+        if (X[i / 8] & (0x80 >> (i % 8))) {
+            for (int j = 0; j < 16; j++) Z[j] ^= V[j];
+        }
+        uint8_t carry = V[15] & 1;
+        for (int j = 15; j > 0; j--) V[j] = (V[j] >> 1) | (V[j-1] << 7);
+        V[0] >>= 1;
+        if (carry) V[0] ^= 0xe1; /* x^128 + x^7 + x^2 + x + 1 */
+    }
+    memcpy(result, Z, 16);
+}
+
+/* GHASH: process AAD and ciphertext, produce tag input */
+static void ghash(const uint8_t H[16],
+                  const uint8_t* aad, size_t aad_len,
+                  const uint8_t* ct, size_t ct_len,
+                  uint8_t out[16]) {
+    uint8_t Y[16] = {0};
+    uint8_t tmp[16];
+
+    size_t i;
+    for (i = 0; i + 16 <= aad_len; i += 16) {
+        xor_block(tmp, Y, aad + i);
+        ghash_mul(Y, tmp, H);
+    }
+    if (i < aad_len) {
+        uint8_t pad[16] = {0};
+        memcpy(pad, aad + i, aad_len - i);
+        xor_block(tmp, Y, pad);
+        ghash_mul(Y, tmp, H);
+    }
+
+    for (i = 0; i + 16 <= ct_len; i += 16) {
+        xor_block(tmp, Y, ct + i);
+        ghash_mul(Y, tmp, H);
+    }
+    if (i < ct_len) {
+        uint8_t pad[16] = {0};
+        memcpy(pad, ct + i, ct_len - i);
+        xor_block(tmp, Y, pad);
+        ghash_mul(Y, tmp, H);
+    }
+
+    /* Final block: len(A) || len(C) in bits, 64-bit big-endian each */
+    uint8_t len_block[16] = {0};
+    uint64_t aad_bits = (uint64_t)aad_len * 8;
+    uint64_t ct_bits  = (uint64_t)ct_len * 8;
+    len_block[0] = (uint8_t)(aad_bits >> 56); len_block[1] = (uint8_t)(aad_bits >> 48);
+    len_block[2] = (uint8_t)(aad_bits >> 40); len_block[3] = (uint8_t)(aad_bits >> 32);
+    len_block[4] = (uint8_t)(aad_bits >> 24); len_block[5] = (uint8_t)(aad_bits >> 16);
+    len_block[6] = (uint8_t)(aad_bits >>  8); len_block[7] = (uint8_t)(aad_bits);
+    len_block[8]  = (uint8_t)(ct_bits >> 56); len_block[9]  = (uint8_t)(ct_bits >> 48);
+    len_block[10] = (uint8_t)(ct_bits >> 40); len_block[11] = (uint8_t)(ct_bits >> 32);
+    len_block[12] = (uint8_t)(ct_bits >> 24); len_block[13] = (uint8_t)(ct_bits >> 16);
+    len_block[14] = (uint8_t)(ct_bits >>  8); len_block[15] = (uint8_t)(ct_bits);
+
+    xor_block(tmp, Y, len_block);
+    ghash_mul(out, tmp, H);
+}
+
+/* Increment rightmost 32 bits of 16-byte counter (big-endian) */
+static void gcm_inc32(uint8_t counter[16]) {
+    for (int i = 15; i >= 12; i--) {
+        if (++counter[i] != 0) break;
+    }
+}
+
+/* AES-GCM encrypt: returns ciphertext in out, tag in tag; 0 on success */
+static int aes_gcm_encrypt_impl(const uint8_t* key, size_t key_len,
+                                 const uint8_t* iv, size_t iv_len,
+                                 const uint8_t* pt, size_t pt_len,
+                                 const uint8_t* aad, size_t aad_len,
+                                 uint8_t* out, uint8_t tag[16]) {
+    if (key_len != 16) return -1;
+
+    uint8_t round_keys[176];
+    aes128_expand_key(key, round_keys);
+
+    uint8_t H[16] = {0};
+    aes128_encrypt_block(round_keys, H);
+
+    uint8_t J0[16] = {0};
+    if (iv_len == 12) {
+        memcpy(J0, iv, 12);
+        J0[15] = 1;
+    } else {
+        ghash(H, NULL, 0, iv, iv_len, J0);
+    }
+
+    uint8_t E_J0[16];
+    memcpy(E_J0, J0, 16);
+    aes128_encrypt_block(round_keys, E_J0);
+
+    uint8_t counter[16];
+    memcpy(counter, J0, 16);
+
+    for (size_t i = 0; i < pt_len; i += 16) {
+        gcm_inc32(counter);
+        uint8_t keystream[16];
+        memcpy(keystream, counter, 16);
+        aes128_encrypt_block(round_keys, keystream);
+
+        size_t block_len = (pt_len - i < 16) ? (pt_len - i) : 16;
+        for (size_t j = 0; j < block_len; j++)
+            out[i + j] = pt[i + j] ^ keystream[j];
+    }
+
+    uint8_t ghash_out[16];
+    ghash(H, aad, aad_len, out, pt_len, ghash_out);
+    xor_block(tag, ghash_out, E_J0);
+    return 0;
+}
+
+/* AES-GCM decrypt: returns 0 on success (tag verified), -1 on failure */
+static int aes_gcm_decrypt_impl(const uint8_t* key, size_t key_len,
+                                 const uint8_t* iv, size_t iv_len,
+                                 const uint8_t* ct, size_t ct_len,
+                                 const uint8_t* aad, size_t aad_len,
+                                 const uint8_t expected_tag[16],
+                                 uint8_t* out) {
+    if (key_len != 16) return -1;
+
+    uint8_t round_keys[176];
+    aes128_expand_key(key, round_keys);
+
+    uint8_t H[16] = {0};
+    aes128_encrypt_block(round_keys, H);
+
+    uint8_t J0[16] = {0};
+    if (iv_len == 12) {
+        memcpy(J0, iv, 12);
+        J0[15] = 1;
+    } else {
+        ghash(H, NULL, 0, iv, iv_len, J0);
+    }
+
+    uint8_t E_J0[16];
+    memcpy(E_J0, J0, 16);
+    aes128_encrypt_block(round_keys, E_J0);
+
+    /* Verify tag before decrypting */
+    uint8_t ghash_out[16];
+    ghash(H, aad, aad_len, ct, ct_len, ghash_out);
+
+    uint8_t computed_tag[16];
+    xor_block(computed_tag, ghash_out, E_J0);
+
+    /* Constant-time tag comparison */
+    uint8_t diff = 0;
+    for (int i = 0; i < 16; i++) diff |= computed_tag[i] ^ expected_tag[i];
+    if (diff != 0) return -1;
+
+    /* CTR mode decryption */
+    uint8_t counter[16];
+    memcpy(counter, J0, 16);
+
+    for (size_t i = 0; i < ct_len; i += 16) {
+        gcm_inc32(counter);
+        uint8_t keystream[16];
+        memcpy(keystream, counter, 16);
+        aes128_encrypt_block(round_keys, keystream);
+
+        size_t block_len = (ct_len - i < 16) ? (ct_len - i) : 16;
+        for (size_t j = 0; j < block_len; j++)
+            out[i + j] = ct[i + j] ^ keystream[j];
+    }
+
+    return 0;
+}
+
+/* ---- rt_rsa_decrypt: stub without OpenSSL ---- */
+const char* rt_rsa_decrypt_with_len(const char* ciphertext, int64_t ct_len,
+                                     const char* private_key_pem, int64_t pk_len,
+                                     int64_t* out_len) {
+    (void)ciphertext; (void)ct_len;
+    (void)private_key_pem; (void)pk_len;
+    if (out_len) *out_len = 0;
+    fprintf(stderr, "rt_rsa_decrypt: OpenSSL not available, RSA decryption unsupported\n");
+    return SPL_STRDUP("", "str");
+}
+
+const char* rt_rsa_decrypt(const char* ciphertext, const char* private_key_pem) {
+    (void)ciphertext; (void)private_key_pem;
+    fprintf(stderr, "rt_rsa_decrypt: OpenSSL not available, RSA decryption unsupported\n");
+    return SPL_STRDUP("", "str");
+}
+
+/* ---- rt_aes_gcm_encrypt_with_len: binary-safe (from-scratch fallback) ---- */
+const char* rt_aes_gcm_encrypt_with_len(const char* key, int64_t key_len,
+                                         const char* iv, int64_t iv_len,
+                                         const char* plaintext, int64_t pt_len,
+                                         const char* aad, int64_t aad_len,
+                                         int64_t* out_len) {
+    if (out_len) *out_len = 0;
+    if (!key || !iv || !plaintext || key_len < 16 || iv_len < 12 || pt_len < 0)
+        return SPL_STRDUP("", "str");
+
+    uint8_t* ct_buf = (uint8_t*)SPL_MALLOC((size_t)pt_len + 16 + 1, "str");
+    uint8_t tag[16];
+
+    if (aes_gcm_encrypt_impl((const uint8_t*)key, 16,
+                              (const uint8_t*)iv, (size_t)iv_len,
+                              (const uint8_t*)plaintext, (size_t)pt_len,
+                              aad ? (const uint8_t*)aad : (const uint8_t*)"",
+                              aad ? (size_t)aad_len : 0,
+                              ct_buf, tag) != 0) {
+        SPL_FREE(ct_buf);
+        return SPL_STRDUP("", "str");
+    }
+
+    memcpy(ct_buf + pt_len, tag, 16);
+    ct_buf[pt_len + 16] = '\0';
+    if (out_len) *out_len = (int64_t)pt_len + 16;
+    return (const char*)ct_buf;
+}
+
+const char* rt_aes_gcm_encrypt(const char* key, const char* iv,
+                                const char* plaintext, const char* aad) {
+    if (!key || !iv || !plaintext) return SPL_STRDUP("", "str");
+    return rt_aes_gcm_encrypt_with_len(key, (int64_t)strlen(key),
+                                        iv, (int64_t)strlen(iv),
+                                        plaintext, (int64_t)strlen(plaintext),
+                                        aad, aad ? (int64_t)strlen(aad) : 0,
+                                        NULL);
+}
+
+/* ---- rt_aes_gcm_decrypt_with_len: binary-safe (from-scratch fallback) ---- */
+const char* rt_aes_gcm_decrypt_with_len(const char* key, int64_t key_len,
+                                         const char* iv, int64_t iv_len,
+                                         const char* ciphertext, int64_t ct_len,
+                                         const char* aad, int64_t aad_len,
+                                         int64_t* out_len) {
+    if (out_len) *out_len = 0;
+    if (!key || !iv || !ciphertext || key_len < 16 || iv_len < 12 || ct_len < 16)
+        return SPL_STRDUP("", "str");
+
+    int64_t actual_ct_len = ct_len - 16;
+    const uint8_t* tag = (const uint8_t*)ciphertext + actual_ct_len;
+
+    uint8_t* pt_buf = (uint8_t*)SPL_MALLOC((size_t)actual_ct_len + 1, "str");
+
+    if (aes_gcm_decrypt_impl((const uint8_t*)key, 16,
+                              (const uint8_t*)iv, (size_t)iv_len,
+                              (const uint8_t*)ciphertext, (size_t)actual_ct_len,
+                              aad ? (const uint8_t*)aad : (const uint8_t*)"",
+                              aad ? (size_t)aad_len : 0,
+                              tag, pt_buf) != 0) {
+        SPL_FREE(pt_buf);
+        return SPL_STRDUP("", "str");
+    }
+
+    pt_buf[actual_ct_len] = '\0';
+    if (out_len) *out_len = actual_ct_len;
+    return (const char*)pt_buf;
+}
+
+const char* rt_aes_gcm_decrypt(const char* key, const char* iv,
+                                const char* ciphertext, const char* aad) {
+    if (!key || !iv || !ciphertext) return SPL_STRDUP("", "str");
+    return rt_aes_gcm_decrypt_with_len(key, (int64_t)strlen(key),
+                                        iv, (int64_t)strlen(iv),
+                                        ciphertext, (int64_t)strlen(ciphertext),
+                                        aad, aad ? (int64_t)strlen(aad) : 0,
+                                        NULL);
+}
+
+#endif /* SPL_HAVE_OPENSSL */
+
 /* ---- Byte array handle for [u8] FFI ----
  * The [u8] type in Simple FFI maps to an opaque int64_t handle.
  * Internally: pointer to { uint8_t* data; int64_t len; int64_t cap; } */
