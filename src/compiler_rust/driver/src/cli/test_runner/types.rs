@@ -127,8 +127,8 @@ pub enum OutputFormat {
 
 /// Options for the test runner
 ///
-/// Default behavior: Sequential (single-threaded) test execution.
-/// Parallel execution requires explicit `--parallel` or `-p` flag.
+/// Default behavior: Parallel test execution (use `--sequential` to disable).
+/// Use `--sequential` or `-s` to force single-threaded execution.
 #[derive(Debug, Clone)]
 pub struct TestOptions {
     /// Test path (file or directory)
@@ -292,9 +292,9 @@ impl Default for TestOptions {
             keep_artifacts: false,
             safe_mode: false,
             safe_mode_timeout: 120,
-            // Default: sequential in-process with selective module cache
-            // Use --parallel for subprocess parallelism
-            parallel: false,
+            // Default: parallel subprocess execution
+            // Use --sequential to disable
+            parallel: true,
             max_threads: 0, // Auto-detect (only used when parallel=true)
             cpu_threshold: 70,
             memory_threshold: 70,

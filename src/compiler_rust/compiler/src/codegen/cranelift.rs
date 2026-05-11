@@ -302,7 +302,11 @@ fn reemit_clean_macho(malformed: &[u8]) -> Result<Vec<u8>, String> {
             value: symbol.address(),
             size: symbol.size(),
             kind: symbol.kind(),
-            scope: symbol.scope(),
+            scope: if symbol.is_weak() && symbol.scope() == SymbolScope::Compilation {
+                SymbolScope::Linkage
+            } else {
+                symbol.scope()
+            },
             weak: symbol.is_weak(),
             section: match section {
                 Some(s) => write::SymbolSection::Section(s),

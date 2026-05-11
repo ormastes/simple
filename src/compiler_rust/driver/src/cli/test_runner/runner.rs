@@ -233,15 +233,18 @@ pub fn run_tests(options: TestOptions) -> TestRunResult {
     }
 
     // Execute tests
-    // Default: Sequential (single-threaded) execution
-    // Parallel: Only when --parallel or -p flag is explicitly passed
+    // Default: Parallel execution (use --sequential to disable)
     let (mut results, mut total_passed, mut total_failed, mut total_skipped, mut total_ignored) =
-        if options.parallel && options.safe_mode {
-            // Parallel execution (optional, requires --parallel flag)
+        if options.parallel {
+            if !quiet {
+                println!("Running {} test(s) in parallel; use --sequential to disable.", test_files.len());
+            }
             debug_log!(DebugLevel::Basic, "Runner", "Using parallel execution mode");
             run_tests_parallel(&test_files, &options, quiet)
         } else {
-            // Sequential execution (default - single-threaded)
+            if !quiet && test_files.len() > 20 {
+                println!("Hint: use --parallel for ~{}x faster runs with {} files.", num_cpus::get().min(test_files.len()), test_files.len());
+            }
             execute_test_files(&test_files, &options, build_cache.as_ref(), quiet)
         };
 

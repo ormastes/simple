@@ -30,26 +30,18 @@
 
 ---
 
-## 2. LLVM/Rust/Simple Self-Host in SimpleOS
+## 2. LLVM/Rust/Simple Self-Host in SimpleOS (ELF SYMTAB FIXED)
 
-**Priority:** P0 (blocked)
-**Status:** Blocked on BUG-COMPILER-ELF-SYMTAB
-**Date planned:** 2026-04-28
+**Priority:** P0
+**Status:** ELF bug fixed 2026-05-10; self-host integration remaining
+**Commits:** `common_backend.rs` Preemptible→Export fix; `cranelift.rs` reemit_clean_macho weak-scope fix
 
-### Blocker
-ELF SYMTAB bug: Cranelift emitter places WEAK-binding symbols in LOCAL portion of symbol table, violating `sh_info` invariant. `ld.lld` rejects the output.
+### Fixed
+- **Root cause:** `common_backend.rs` used `Linkage::Preemptible` for all defined functions → cranelift-object emitted all symbols as `STB_WEAK` → linker couldn't distinguish app symbols from crt0 stubs → `freestanding_weak_boot_defsyms` found no STRONG defs
+- **Fix A:** `Linkage::Preemptible` → `Linkage::Export` (lines 538, 548) — all symbols now `STB_GLOBAL`
+- **Fix B:** `reemit_clean_macho` weak symbols with `SymbolScope::Compilation` promoted to `Linkage` — prevents weak-in-LOCAL partition on re-emitted objects
 
-### Root Cause (narrowed)
-- `src/compiler_rust/compiler/src/codegen/cranelift.rs` — symbol emission treats weak boot-aliases as LOCAL
-- Likely regression between Apr 27–28 commits touching symbol binding
-
-### Fix Steps
-1. Bisect: `git bisect` on `src/compiler_rust/` between known-good and broken commits
-2. Fix: ensure `LinkageWeak` maps to `SymbolBinding::Weak` (not Local) in cranelift codegen
-3. Rebuild compiler + kernel ELF
-4. Verify: `native-build` exits 0, ELF loads in SimpleOS
-
-### Success Criteria
+### Remaining (self-host integration)
 - clang, rustc, and `simple` all run as file-loadable apps inside SimpleOS
 - Closed self-host bootstrap: SimpleOS can compile itself
 
@@ -107,7 +99,7 @@ Delivered `src/os/ml/` — 7 files: kernels, gpu_tensor, autograd, optimizer, da
 | # | Item | Priority | Blocker |
 |---|------|----------|---------|
 | 1 | 3D Engine GPU + WebGPU | Done | — |
-| 2 | LLVM/Rust Self-Host in SimpleOS | P0 | ELF SYMTAB bug |
+| 2 | LLVM/Rust Self-Host in SimpleOS | P0 | ELF fixed; integration remaining |
 | 3 | Driver Framework compiler work | P2 | Compiler infra |
 | 4 | Editor/IDE Platform | P2 | None |
 | 5 | DL + GPU Stack | Done | — |
