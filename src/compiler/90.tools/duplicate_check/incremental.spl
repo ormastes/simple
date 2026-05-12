@@ -6,9 +6,11 @@
 use compiler.tools.duplicate_check.config.{DuplicationConfig, compute_config_hash}
 use compiler.tools.duplicate_check.detector.{DuplicateBlock, find_duplicates_in_file, new_token_interner}
 use compiler.tools.duplicate_check.math_utils.{hash_string}
-use std.nogc_sync_mut.io.file_ops.{file_exists, file_read, file_write, file_hash_sha256}
+use std.nogc_sync_mut.io.file_ops.{file_exists, file_read, file_hash_sha256}
 use std.nogc_sync_mut.io.time_ops.{current_time_ms}
 use std.nogc_sync_mut.io.dir_ops.{dir_create_all}
+
+extern fn rt_file_write_text(path: text, content: text) -> bool
 
 struct IncrementalCacheEntry:
     file_path: text
@@ -85,7 +87,7 @@ fn load_incremental_cache(cache_path: text, config: DuplicationConfig) -> Increm
         val line = lines[i].trim()
 
         if line.starts_with("# config_hash:"):
-            stored_config_hash = line[14:].trim()
+            stored_config_hash = line.substring(14, line.len()).trim()
         elif line.starts_with("#") or line.len() == 0:
             i = i + 1
             continue
@@ -93,7 +95,7 @@ fn load_incremental_cache(cache_path: text, config: DuplicationConfig) -> Increm
             # Parse file entry: file|hash|timestamp|block_count
             val parts = line.split("|")
             if parts.len() >= 4:
-                val file_path = parts[0][5:].trim()  # Remove "file:" prefix
+                val file_path = parts[0].substring(5, parts[0].len()).trim()
                 val source_hash = parts[1].trim()
                 val timestamp = int(parts[2])
                 val block_count = int(parts[3])
@@ -165,16 +167,17 @@ fn save_incremental_cache(cache: IncrementalCache):
 
         lines.push("")
 
-    file_write(cache.cache_path, lines.join("\n"))
+    rt_file_write_text(cache.cache_path, lines.join("\n"))
 
 fn needs_reprocessing(
     file_path: text,
     cache: IncrementalCache
 ) -> bool:
-    if not cache.entries.has(file_path):
+    val cache_key = find_cache_entry_key(cache, file_path)
+    if cache_key == "":
         return true  # File not in cache
 
-    val entry = cache.entries[file_path]
+    val entry = cache.entries[cache_key]
     val current_hash = file_hash_sha256(file_path)
 
     current_hash != entry.source_hash
@@ -183,28 +186,37 @@ fn get_cached_blocks(
     file_path: text,
     cache: IncrementalCache
 ) -> [DuplicateBlock]:
-    if cache.entries.has(file_path):
-        val entry = cache.entries[file_path]
+    val cache_key = find_cache_entry_key(cache, file_path)
+    if cache_key != "":
+        val entry = cache.entries[cache_key]
         val current_hash = file_hash_sha256(file_path)
         if current_hash == entry.source_hash:
             return entry.blocks
 
     []
 
+fn find_cache_entry_key(cache: IncrementalCache, file_path: text) -> text:
+    for key in cache.entries.keys():
+        if key == file_path:
+            return key
+    ""
+
 fn update_cache_entry(
     cache: IncrementalCache,
     file_path: text,
     blocks: [DuplicateBlock]
-):
+) -> IncrementalCache:
     val source_hash = file_hash_sha256(file_path)
     val timestamp = current_time_ms()
+    var updated_cache = cache
 
-    cache.entries[file_path] = IncrementalCacheEntry(
+    updated_cache.entries[file_path] = IncrementalCacheEntry(
         file_path: file_path,
         source_hash: source_hash,
         timestamp: timestamp,
         blocks: blocks
     )
+    return updated_cache
 
 fn process_files_incremental(
     files: [text],
@@ -220,7 +232,7 @@ fn process_files_incremental(
         if needs_reprocessing(file_path, cache):
             val raw_blocks = find_duplicates_in_file(file_path, config, cache_manager, interner)
             val blocks = normalize_block_hashes(raw_blocks)
-            update_cache_entry(cache, file_path, blocks)
+            cache = update_cache_entry(cache, file_path, blocks)
             all_blocks.merge(blocks)
         else:
             cached_files = cached_files + 1

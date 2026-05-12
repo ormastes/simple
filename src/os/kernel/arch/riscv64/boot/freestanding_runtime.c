@@ -112,6 +112,11 @@ void log_raw_println(spl_i64 msg) {
     (void)msg;
 }
 
+spl_i64 vmm_map_page(spl_i64 virt, spl_i64 phys, spl_i64 flags) {
+    (void)flags;
+    return virt == phys ? 1 : 0;
+}
+
 spl_i64 rt_pci_device_count(void) {
     return 0;
 }

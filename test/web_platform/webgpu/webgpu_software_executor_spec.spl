@@ -1,0 +1,67 @@
+use std.spec.*
+use std.gc_async_mut.gpu.browser_engine.webgpu_commands.{
+    WebGPUCommandEncoder, WebGPUQueue, GPUCommandBufferHandle,
+    webgpu_command_draw
+}
+use std.gc_async_mut.gpu.browser_engine.webgpu_software_executor.{
+    webgpu_software_execute_command_buffer, webgpu_software_execute_queue
+}
+
+describe "Browser WebGPU software executor":
+    it "replays render command buffers into deterministic counters":
+        var encoder = WebGPUCommandEncoder.create("frame")
+        expect(encoder.begin_render_pass()).to_equal(true)
+        expect(encoder.set_pipeline(5)).to_equal(true)
+        expect(encoder.set_bind_group(0, 9)).to_equal(true)
+        expect(encoder.draw(3, 2)).to_equal(true)
+        expect(encoder.end_render_pass()).to_equal(true)
+        val command_buffer = encoder.finish("frame")
+        val result = webgpu_software_execute_command_buffer(command_buffer)
+        expect(result.valid).to_equal(true)
+        expect(result.command_count).to_equal(5)
+        expect(result.render_pass_count).to_equal(1)
+        expect(result.draw_count).to_equal(1)
+        expect(result.vertex_count).to_equal(6)
+        expect(result.compute_pass_count).to_equal(0)
+
+    it "replays compute dispatch and queue writes":
+        var encoder = WebGPUCommandEncoder.create("compute")
+        expect(encoder.begin_compute_pass()).to_equal(true)
+        expect(encoder.set_pipeline(7)).to_equal(true)
+        expect(encoder.dispatch_workgroups(2, 3, 4)).to_equal(true)
+        expect(encoder.end_compute_pass()).to_equal(true)
+        val command_buffer = encoder.finish("compute")
+        var queue = WebGPUQueue.create()
+        expect(queue.write_buffer(1, 0, 32)).to_equal(true)
+        expect(queue.write_texture(2, 4, 4, 1, 64)).to_equal(true)
+        expect(queue.submit([command_buffer])).to_equal(true)
+        val result = webgpu_software_execute_queue(queue)
+        expect(result.valid).to_equal(true)
+        expect(result.queue_write_count).to_equal(2)
+        expect(result.queue_write_bytes).to_equal(96)
+        expect(result.compute_pass_count).to_equal(1)
+        expect(result.dispatch_count).to_equal(1)
+        expect(result.dispatched_workgroups).to_equal(24)
+
+    it "replays transfer command buffers":
+        var encoder = WebGPUCommandEncoder.create("copy")
+        expect(encoder.copy_buffer_to_buffer(1, 0, 2, 0, 32)).to_equal(true)
+        expect(encoder.copy_texture_to_texture(3, 4, 8, 8, 1)).to_equal(true)
+        val command_buffer = encoder.finish("copy")
+        val result = webgpu_software_execute_command_buffer(command_buffer)
+        expect(result.valid).to_equal(true)
+        expect(result.buffer_copy_count).to_equal(1)
+        expect(result.texture_copy_count).to_equal(1)
+        expect(result.command_count).to_equal(2)
+
+    it "rejects invalid command sequencing":
+        val command_buffer = GPUCommandBufferHandle(
+            id: 1,
+            label: "bad",
+            commands: [webgpu_command_draw(3, 1)],
+            valid: true,
+            error: ""
+        )
+        val result = webgpu_software_execute_command_buffer(command_buffer)
+        expect(result.valid).to_equal(false)
+        expect(result.error).to_equal("WebGPU software executor draw requires an active render pass")
