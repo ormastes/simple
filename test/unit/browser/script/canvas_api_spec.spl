@@ -17,6 +17,15 @@ use std.gc_async_mut.gpu.browser_engine.script.canvas_api.{
     canvas_translate, canvas_rotate, canvas_scale,
     canvas_measure_text, canvas_get_commands
 }
+use std.gc_async_mut.gpu.browser_engine.webgpu_resources.{
+    WEBGPU_BUFFER_USAGE_COPY_DST
+}
+use std.gc_async_mut.gpu.browser_engine.webgpu_context.{
+    webgpu_create_buffer
+}
+use std.gc_async_mut.gpu.browser_engine.webgpu_software_executor.{
+    webgpu_software_execute_queue
+}
 
 describe "Canvas API - Context Creation":
     it "creates a context with correct dimensions":
@@ -150,3 +159,26 @@ describe "Canvas API - WebGPU Context":
         val cp = ctx.create_compute_pipeline(cs)
         expect(rp.valid).to_equal(true)
         expect(cp.valid).to_equal(true)
+
+    it "executes secure canvas WebGPU compute upload through software executor":
+        var ctx = canvas_get_context_webgpu(320, 240, true)
+        expect(ctx.request_device()).to_equal(true)
+        expect(ctx.configure()).to_equal(true)
+        val buffer = webgpu_create_buffer(ctx.gpu, "storage", 64, WEBGPU_BUFFER_USAGE_COPY_DST)
+        val cs = ctx.create_shader_module("cs", "@compute @workgroup_size(1) fn main() { }")
+        val cp = ctx.create_compute_pipeline(cs)
+        expect(ctx.gpu.queue_write_buffer(buffer.id, 0, 32)).to_equal(true)
+        var encoder = ctx.gpu.create_command_encoder("canvas-compute")
+        expect(encoder.begin_compute_pass()).to_equal(true)
+        expect(encoder.set_pipeline(cp.id)).to_equal(true)
+        expect(encoder.dispatch_workgroups(4, 1, 1)).to_equal(true)
+        expect(encoder.end_compute_pass()).to_equal(true)
+        val command_buffer = encoder.finish("canvas-compute-commands")
+        expect(ctx.gpu.queue_submit([command_buffer])).to_equal(true)
+        val result = webgpu_software_execute_queue(ctx.gpu.queue)
+        expect(result.valid).to_equal(true)
+        expect(result.queue_write_count).to_equal(1)
+        expect(result.buffer_state_count).to_equal(1)
+        expect(result.buffer_checksum).to_equal(33)
+        expect(result.compute_pass_count).to_equal(1)
+        expect(result.dispatched_workgroups).to_equal(4)
