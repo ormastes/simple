@@ -10,13 +10,17 @@ use std.gc_async_mut.gpu.browser_engine.webgpu_commands.{
     webgpu_validate_buffer_copy_with_resources,
     webgpu_validate_texture_copy_with_resources,
     webgpu_validate_queue_write_buffer_with_resources,
-    webgpu_validate_queue_write_texture_with_resources
+    webgpu_validate_queue_write_texture_with_resources,
+    webgpu_validate_bind_group_dynamic_offsets_with_resources
 }
 use std.gc_async_mut.gpu.browser_engine.webgpu_resources.{
     WebGPUResourceTable,
     WEBGPU_BUFFER_USAGE_COPY_SRC, WEBGPU_BUFFER_USAGE_COPY_DST,
+    WEBGPU_BUFFER_USAGE_UNIFORM, WEBGPU_BUFFER_USAGE_STORAGE,
     WEBGPU_TEXTURE_USAGE_COPY_SRC, WEBGPU_TEXTURE_USAGE_COPY_DST,
-    WEBGPU_TEXTURE_USAGE_TEXTURE_BINDING
+    WEBGPU_TEXTURE_USAGE_TEXTURE_BINDING,
+    WEBGPU_SHADER_STAGE_VERTEX, WEBGPU_SHADER_STAGE_FRAGMENT,
+    GPUBindGroupLayoutEntry, GPUBindGroupEntry
 }
 use std.gc_async_mut.gpu.browser_engine.webgpu_types.{
     GPU_TEXTURE_FORMAT_RGBA8_UNORM, GPU_TEXTURE_FORMAT_BGRA8_UNORM
@@ -37,6 +41,7 @@ describe "Browser WebGPU command encoding":
             expect(command_buffer.commands[0].kind).to_equal(WEBGPU_COMMAND_BEGIN_RENDER_PASS)
             expect(command_buffer.commands[1].kind).to_equal(WEBGPU_COMMAND_SET_PIPELINE)
             expect(command_buffer.commands[2].kind).to_equal(WEBGPU_COMMAND_SET_BIND_GROUP)
+            expect(command_buffer.commands[2].dynamic_offset_count).to_equal(0)
             expect(command_buffer.commands[3].kind).to_equal(WEBGPU_COMMAND_DRAW)
             expect(command_buffer.commands[4].kind).to_equal(WEBGPU_COMMAND_END_RENDER_PASS)
 
@@ -49,6 +54,22 @@ describe "Browser WebGPU command encoding":
             var encoder = WebGPUCommandEncoder.create("frame")
             expect(encoder.draw(3, 1)).to_equal(false)
             expect(encoder.last_error).to_equal("GPURenderPassEncoder draw requires an active render pass")
+
+        it "records dynamic bind group offsets":
+            var encoder = WebGPUCommandEncoder.create("frame")
+            expect(encoder.begin_render_pass()).to_equal(true)
+            expect(encoder.set_bind_group_with_dynamic_offsets(0, 4, [0, 256])).to_equal(true)
+            expect(encoder.end_render_pass()).to_equal(true)
+            val command_buffer = encoder.finish("frame-commands")
+            expect(command_buffer.valid).to_equal(true)
+            expect(command_buffer.commands[1].kind).to_equal(WEBGPU_COMMAND_SET_BIND_GROUP)
+            expect(command_buffer.commands[1].dynamic_offset_count).to_equal(2)
+
+        it "rejects invalid dynamic bind group offsets":
+            var encoder = WebGPUCommandEncoder.create("frame")
+            expect(encoder.begin_render_pass()).to_equal(true)
+            expect(encoder.set_bind_group_with_dynamic_offsets(0, 4, [128])).to_equal(false)
+            expect(encoder.last_error).to_equal("GPUPassEncoder dynamic offsets must be 256-byte aligned")
 
     describe "compute pass recording":
         it "records dispatch workgroups":
@@ -159,6 +180,23 @@ describe "Browser WebGPU command encoding":
             expect(webgpu_validate_queue_write_texture_with_resources(resources, texture.id, 8, 8, 1, 64)).to_equal("")
             expect(webgpu_validate_queue_write_texture_with_resources(resources, wrong_texture.id, 8, 8, 1, 64)).to_equal("GPUQueue writeTexture texture missing COPY_DST usage")
             expect(webgpu_validate_queue_write_texture_with_resources(resources, texture.id, 32, 8, 1, 64)).to_equal("GPUQueue writeTexture range exceeds texture size")
+
+        it "validates dynamic bind group offsets against layout and buffers":
+            var resources = WebGPUResourceTable.create()
+            val uniform = resources.create_buffer("uniforms", 1024, WEBGPU_BUFFER_USAGE_UNIFORM)
+            val storage = resources.create_buffer("storage", 512, WEBGPU_BUFFER_USAGE_STORAGE)
+            val layout = resources.create_bind_group_layout("dynamic", [
+                GPUBindGroupLayoutEntry.dynamic_buffer(0, WEBGPU_SHADER_STAGE_VERTEX),
+                GPUBindGroupLayoutEntry.dynamic_storage_buffer(1, WEBGPU_SHADER_STAGE_FRAGMENT)
+            ])
+            val bind_group = resources.create_bind_group("dynamic-0", layout.id, [
+                GPUBindGroupEntry.buffer(0, uniform.id),
+                GPUBindGroupEntry.buffer(1, storage.id)
+            ])
+            expect(webgpu_validate_bind_group_dynamic_offsets_with_resources(resources, 0, bind_group.id, [256, 0])).to_equal("")
+            expect(webgpu_validate_bind_group_dynamic_offsets_with_resources(resources, 0, bind_group.id, [256])).to_equal("GPUPassEncoder dynamic offset count must match bind group layout")
+            expect(webgpu_validate_bind_group_dynamic_offsets_with_resources(resources, 0, bind_group.id, [1024, 0])).to_equal("GPUPassEncoder dynamic offset exceeds buffer size")
+            expect(webgpu_validate_bind_group_dynamic_offsets_with_resources(resources, 0, 99, [0, 0])).to_equal("GPUPassEncoder bind group does not exist")
 
     describe "encoder and queue validation":
         it "rejects finish while a pass is active":

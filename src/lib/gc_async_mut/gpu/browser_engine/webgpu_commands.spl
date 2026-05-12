@@ -8,7 +8,8 @@ use std.gc_async_mut.gpu.browser_engine.webgpu_resources.{
     WebGPUResourceTable,
     WEBGPU_BUFFER_USAGE_COPY_SRC, WEBGPU_BUFFER_USAGE_COPY_DST,
     WEBGPU_TEXTURE_USAGE_COPY_SRC, WEBGPU_TEXTURE_USAGE_COPY_DST,
-    webgpu_find_buffer, webgpu_find_texture
+    webgpu_find_buffer, webgpu_find_texture, webgpu_find_bind_group,
+    webgpu_find_bind_group_entry, webgpu_count_dynamic_bind_group_layout_entries
 }
 pub val WEBGPU_COMMAND_BEGIN_RENDER_PASS: text = "begin-render-pass"
 pub val WEBGPU_COMMAND_END_RENDER_PASS: text = "end-render-pass"
@@ -40,6 +41,7 @@ pub class WebGPURecordedCommand:
     offset: i32
     destination_offset: i32
     size: i32
+    dynamic_offset_count: i32
     width: i32
     height: i32
     depth_or_layers: i32
@@ -124,15 +126,16 @@ pub class WebGPUCommandEncoder:
         true
 
     me set_bind_group(slot: i32, bind_group_id: i32) -> bool:
+        self.set_bind_group_with_dynamic_offsets(slot, bind_group_id, [])
+
+    me set_bind_group_with_dynamic_offsets(slot: i32, bind_group_id: i32, dynamic_offsets: [i32]) -> bool:
         if not self.ensure_active_pass():
             return false
-        if slot < 0:
-            self.last_error = "GPUPassEncoder bind group slot must be non-negative"
+        val err = webgpu_validate_bind_group_dynamic_offsets(slot, bind_group_id, dynamic_offsets)
+        if err != "":
+            self.last_error = err
             return false
-        if bind_group_id <= 0:
-            self.last_error = "GPUPassEncoder bind group must be valid"
-            return false
-        self.commands.push(webgpu_command_bind_group(slot, bind_group_id))
+        self.commands.push(webgpu_command_bind_group_with_dynamic_offsets(slot, bind_group_id, dynamic_offsets.len()))
         self.last_error = ""
         true
 
@@ -275,31 +278,48 @@ pub class WebGPUQueue:
         self.write_commands.len()
 
 pub fn webgpu_command_empty(kind: text) -> WebGPURecordedCommand:
-    WebGPURecordedCommand(kind: kind, pipeline_id: -1, bind_group_id: -1, slot: -1, vertex_count: 0, instance_count: 0, workgroups_x: 0, workgroups_y: 0, workgroups_z: 0, source_buffer_id: -1, destination_buffer_id: -1, source_texture_id: -1, destination_texture_id: -1, offset: 0, destination_offset: 0, size: 0, width: 0, height: 0, depth_or_layers: 0, data_size: 0)
+    WebGPURecordedCommand(kind: kind, pipeline_id: -1, bind_group_id: -1, slot: -1, vertex_count: 0, instance_count: 0, workgroups_x: 0, workgroups_y: 0, workgroups_z: 0, source_buffer_id: -1, destination_buffer_id: -1, source_texture_id: -1, destination_texture_id: -1, offset: 0, destination_offset: 0, size: 0, dynamic_offset_count: 0, width: 0, height: 0, depth_or_layers: 0, data_size: 0)
 
 pub fn webgpu_command_pipeline(pipeline_id: i32) -> WebGPURecordedCommand:
-    WebGPURecordedCommand(kind: WEBGPU_COMMAND_SET_PIPELINE, pipeline_id: pipeline_id, bind_group_id: -1, slot: -1, vertex_count: 0, instance_count: 0, workgroups_x: 0, workgroups_y: 0, workgroups_z: 0, source_buffer_id: -1, destination_buffer_id: -1, source_texture_id: -1, destination_texture_id: -1, offset: 0, destination_offset: 0, size: 0, width: 0, height: 0, depth_or_layers: 0, data_size: 0)
+    WebGPURecordedCommand(kind: WEBGPU_COMMAND_SET_PIPELINE, pipeline_id: pipeline_id, bind_group_id: -1, slot: -1, vertex_count: 0, instance_count: 0, workgroups_x: 0, workgroups_y: 0, workgroups_z: 0, source_buffer_id: -1, destination_buffer_id: -1, source_texture_id: -1, destination_texture_id: -1, offset: 0, destination_offset: 0, size: 0, dynamic_offset_count: 0, width: 0, height: 0, depth_or_layers: 0, data_size: 0)
 
 pub fn webgpu_command_bind_group(slot: i32, bind_group_id: i32) -> WebGPURecordedCommand:
-    WebGPURecordedCommand(kind: WEBGPU_COMMAND_SET_BIND_GROUP, pipeline_id: -1, bind_group_id: bind_group_id, slot: slot, vertex_count: 0, instance_count: 0, workgroups_x: 0, workgroups_y: 0, workgroups_z: 0, source_buffer_id: -1, destination_buffer_id: -1, source_texture_id: -1, destination_texture_id: -1, offset: 0, destination_offset: 0, size: 0, width: 0, height: 0, depth_or_layers: 0, data_size: 0)
+    webgpu_command_bind_group_with_dynamic_offsets(slot, bind_group_id, 0)
+
+pub fn webgpu_command_bind_group_with_dynamic_offsets(slot: i32, bind_group_id: i32, dynamic_offset_count: i32) -> WebGPURecordedCommand:
+    WebGPURecordedCommand(kind: WEBGPU_COMMAND_SET_BIND_GROUP, pipeline_id: -1, bind_group_id: bind_group_id, slot: slot, vertex_count: 0, instance_count: 0, workgroups_x: 0, workgroups_y: 0, workgroups_z: 0, source_buffer_id: -1, destination_buffer_id: -1, source_texture_id: -1, destination_texture_id: -1, offset: 0, destination_offset: 0, size: 0, dynamic_offset_count: dynamic_offset_count, width: 0, height: 0, depth_or_layers: 0, data_size: 0)
 
 pub fn webgpu_command_draw(vertex_count: i32, instance_count: i32) -> WebGPURecordedCommand:
-    WebGPURecordedCommand(kind: WEBGPU_COMMAND_DRAW, pipeline_id: -1, bind_group_id: -1, slot: -1, vertex_count: vertex_count, instance_count: instance_count, workgroups_x: 0, workgroups_y: 0, workgroups_z: 0, source_buffer_id: -1, destination_buffer_id: -1, source_texture_id: -1, destination_texture_id: -1, offset: 0, destination_offset: 0, size: 0, width: 0, height: 0, depth_or_layers: 0, data_size: 0)
+    WebGPURecordedCommand(kind: WEBGPU_COMMAND_DRAW, pipeline_id: -1, bind_group_id: -1, slot: -1, vertex_count: vertex_count, instance_count: instance_count, workgroups_x: 0, workgroups_y: 0, workgroups_z: 0, source_buffer_id: -1, destination_buffer_id: -1, source_texture_id: -1, destination_texture_id: -1, offset: 0, destination_offset: 0, size: 0, dynamic_offset_count: 0, width: 0, height: 0, depth_or_layers: 0, data_size: 0)
 
 pub fn webgpu_command_dispatch(workgroups_x: i32, workgroups_y: i32, workgroups_z: i32) -> WebGPURecordedCommand:
-    WebGPURecordedCommand(kind: WEBGPU_COMMAND_DISPATCH_WORKGROUPS, pipeline_id: -1, bind_group_id: -1, slot: -1, vertex_count: 0, instance_count: 0, workgroups_x: workgroups_x, workgroups_y: workgroups_y, workgroups_z: workgroups_z, source_buffer_id: -1, destination_buffer_id: -1, source_texture_id: -1, destination_texture_id: -1, offset: 0, destination_offset: 0, size: 0, width: 0, height: 0, depth_or_layers: 0, data_size: 0)
+    WebGPURecordedCommand(kind: WEBGPU_COMMAND_DISPATCH_WORKGROUPS, pipeline_id: -1, bind_group_id: -1, slot: -1, vertex_count: 0, instance_count: 0, workgroups_x: workgroups_x, workgroups_y: workgroups_y, workgroups_z: workgroups_z, source_buffer_id: -1, destination_buffer_id: -1, source_texture_id: -1, destination_texture_id: -1, offset: 0, destination_offset: 0, size: 0, dynamic_offset_count: 0, width: 0, height: 0, depth_or_layers: 0, data_size: 0)
 
 pub fn webgpu_command_copy_buffer_to_buffer(source_buffer_id: i32, source_offset: i32, destination_buffer_id: i32, destination_offset: i32, size: i32) -> WebGPURecordedCommand:
-    WebGPURecordedCommand(kind: WEBGPU_COMMAND_COPY_BUFFER_TO_BUFFER, pipeline_id: -1, bind_group_id: -1, slot: -1, vertex_count: 0, instance_count: 0, workgroups_x: 0, workgroups_y: 0, workgroups_z: 0, source_buffer_id: source_buffer_id, destination_buffer_id: destination_buffer_id, source_texture_id: -1, destination_texture_id: -1, offset: source_offset, destination_offset: destination_offset, size: size, width: 0, height: 0, depth_or_layers: 0, data_size: 0)
+    WebGPURecordedCommand(kind: WEBGPU_COMMAND_COPY_BUFFER_TO_BUFFER, pipeline_id: -1, bind_group_id: -1, slot: -1, vertex_count: 0, instance_count: 0, workgroups_x: 0, workgroups_y: 0, workgroups_z: 0, source_buffer_id: source_buffer_id, destination_buffer_id: destination_buffer_id, source_texture_id: -1, destination_texture_id: -1, offset: source_offset, destination_offset: destination_offset, size: size, dynamic_offset_count: 0, width: 0, height: 0, depth_or_layers: 0, data_size: 0)
 
 pub fn webgpu_command_copy_texture_to_texture(source_texture_id: i32, destination_texture_id: i32, width: i32, height: i32, depth_or_layers: i32) -> WebGPURecordedCommand:
-    WebGPURecordedCommand(kind: WEBGPU_COMMAND_COPY_TEXTURE_TO_TEXTURE, pipeline_id: -1, bind_group_id: -1, slot: -1, vertex_count: 0, instance_count: 0, workgroups_x: 0, workgroups_y: 0, workgroups_z: 0, source_buffer_id: -1, destination_buffer_id: -1, source_texture_id: source_texture_id, destination_texture_id: destination_texture_id, offset: 0, destination_offset: 0, size: 0, width: width, height: height, depth_or_layers: depth_or_layers, data_size: 0)
+    WebGPURecordedCommand(kind: WEBGPU_COMMAND_COPY_TEXTURE_TO_TEXTURE, pipeline_id: -1, bind_group_id: -1, slot: -1, vertex_count: 0, instance_count: 0, workgroups_x: 0, workgroups_y: 0, workgroups_z: 0, source_buffer_id: -1, destination_buffer_id: -1, source_texture_id: source_texture_id, destination_texture_id: destination_texture_id, offset: 0, destination_offset: 0, size: 0, dynamic_offset_count: 0, width: width, height: height, depth_or_layers: depth_or_layers, data_size: 0)
 
 pub fn webgpu_command_write_buffer(buffer_id: i32, offset: i32, data_size: i32) -> WebGPURecordedCommand:
-    WebGPURecordedCommand(kind: WEBGPU_COMMAND_WRITE_BUFFER, pipeline_id: -1, bind_group_id: -1, slot: -1, vertex_count: 0, instance_count: 0, workgroups_x: 0, workgroups_y: 0, workgroups_z: 0, source_buffer_id: -1, destination_buffer_id: buffer_id, source_texture_id: -1, destination_texture_id: -1, offset: offset, destination_offset: 0, size: data_size, width: 0, height: 0, depth_or_layers: 0, data_size: data_size)
+    WebGPURecordedCommand(kind: WEBGPU_COMMAND_WRITE_BUFFER, pipeline_id: -1, bind_group_id: -1, slot: -1, vertex_count: 0, instance_count: 0, workgroups_x: 0, workgroups_y: 0, workgroups_z: 0, source_buffer_id: -1, destination_buffer_id: buffer_id, source_texture_id: -1, destination_texture_id: -1, offset: offset, destination_offset: 0, size: data_size, dynamic_offset_count: 0, width: 0, height: 0, depth_or_layers: 0, data_size: data_size)
 
 pub fn webgpu_command_write_texture(texture_id: i32, width: i32, height: i32, depth_or_layers: i32, data_size: i32) -> WebGPURecordedCommand:
-    WebGPURecordedCommand(kind: WEBGPU_COMMAND_WRITE_TEXTURE, pipeline_id: -1, bind_group_id: -1, slot: -1, vertex_count: 0, instance_count: 0, workgroups_x: 0, workgroups_y: 0, workgroups_z: 0, source_buffer_id: -1, destination_buffer_id: -1, source_texture_id: -1, destination_texture_id: texture_id, offset: 0, destination_offset: 0, size: 0, width: width, height: height, depth_or_layers: depth_or_layers, data_size: data_size)
+    WebGPURecordedCommand(kind: WEBGPU_COMMAND_WRITE_TEXTURE, pipeline_id: -1, bind_group_id: -1, slot: -1, vertex_count: 0, instance_count: 0, workgroups_x: 0, workgroups_y: 0, workgroups_z: 0, source_buffer_id: -1, destination_buffer_id: -1, source_texture_id: -1, destination_texture_id: texture_id, offset: 0, destination_offset: 0, size: 0, dynamic_offset_count: 0, width: width, height: height, depth_or_layers: depth_or_layers, data_size: data_size)
+
+pub fn webgpu_validate_bind_group_dynamic_offsets(slot: i32, bind_group_id: i32, dynamic_offsets: [i32]) -> text:
+    if slot < 0:
+        return "GPUPassEncoder bind group slot must be non-negative"
+    if bind_group_id <= 0:
+        return "GPUPassEncoder bind group must be valid"
+    var i = 0
+    while i < dynamic_offsets.len():
+        if dynamic_offsets[i] < 0:
+            return "GPUPassEncoder dynamic offsets must be non-negative"
+        if dynamic_offsets[i] % 256 != 0:
+            return "GPUPassEncoder dynamic offsets must be 256-byte aligned"
+        i = i + 1
+    ""
 
 pub fn webgpu_validate_buffer_copy(source_buffer_id: i32, source_offset: i32, destination_buffer_id: i32, destination_offset: i32, size: i32) -> text:
     if source_buffer_id <= 0 or destination_buffer_id <= 0:
@@ -338,6 +358,34 @@ pub fn webgpu_validate_queue_write_texture(texture_id: i32, width: i32, height: 
     if data_size <= 0:
         return "GPUQueue writeTexture data size must be positive"
     ""
+
+pub fn webgpu_validate_bind_group_dynamic_offsets_with_resources(resources: WebGPUResourceTable, slot: i32, bind_group_id: i32, dynamic_offsets: [i32]) -> text:
+    val basic_err = webgpu_validate_bind_group_dynamic_offsets(slot, bind_group_id, dynamic_offsets)
+    if basic_err != "":
+        return basic_err
+    val bind_group = webgpu_find_bind_group(resources, bind_group_id)
+    if not bind_group.valid:
+        return "GPUPassEncoder bind group does not exist"
+    val layout = resources.find_bind_group_layout(bind_group.layout_id)
+    if not layout.valid:
+        return "GPUPassEncoder bind group layout does not exist"
+    if dynamic_offsets.len() != webgpu_count_dynamic_bind_group_layout_entries(layout.entries):
+        return "GPUPassEncoder dynamic offset count must match bind group layout"
+    var dynamic_index = 0
+    var i = 0
+    while i < layout.entries.len():
+        val layout_entry = layout.entries[i]
+        if layout_entry.has_dynamic_offset:
+            val entry = webgpu_find_bind_group_entry(bind_group.entries, layout_entry.binding)
+            val buffer = webgpu_find_buffer(resources, entry.buffer_id)
+            if not buffer.valid:
+                return "GPUPassEncoder dynamic offset buffer does not exist"
+            if (dynamic_offsets[dynamic_index] as i64) >= buffer.size:
+                return "GPUPassEncoder dynamic offset exceeds buffer size"
+            dynamic_index = dynamic_index + 1
+        i = i + 1
+    ""
+
 pub fn webgpu_validate_buffer_copy_with_resources(resources: WebGPUResourceTable, source_buffer_id: i32, source_offset: i32, destination_buffer_id: i32, destination_offset: i32, size: i32) -> text:
     val basic_err = webgpu_validate_buffer_copy(source_buffer_id, source_offset, destination_buffer_id, destination_offset, size)
     if basic_err != "":

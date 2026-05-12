@@ -78,18 +78,25 @@ pub class GPUBindGroupLayoutEntry:
     binding: i32
     visibility: i32
     binding_type: i32
+    has_dynamic_offset: bool
 
     static fn buffer(binding: i32, visibility: i32) -> GPUBindGroupLayoutEntry:
-        GPUBindGroupLayoutEntry(binding: binding, visibility: visibility, binding_type: WEBGPU_BINDING_TYPE_UNIFORM_BUFFER)
+        GPUBindGroupLayoutEntry(binding: binding, visibility: visibility, binding_type: WEBGPU_BINDING_TYPE_UNIFORM_BUFFER, has_dynamic_offset: false)
+
+    static fn dynamic_buffer(binding: i32, visibility: i32) -> GPUBindGroupLayoutEntry:
+        GPUBindGroupLayoutEntry(binding: binding, visibility: visibility, binding_type: WEBGPU_BINDING_TYPE_UNIFORM_BUFFER, has_dynamic_offset: true)
 
     static fn storage_buffer(binding: i32, visibility: i32) -> GPUBindGroupLayoutEntry:
-        GPUBindGroupLayoutEntry(binding: binding, visibility: visibility, binding_type: WEBGPU_BINDING_TYPE_STORAGE_BUFFER)
+        GPUBindGroupLayoutEntry(binding: binding, visibility: visibility, binding_type: WEBGPU_BINDING_TYPE_STORAGE_BUFFER, has_dynamic_offset: false)
+
+    static fn dynamic_storage_buffer(binding: i32, visibility: i32) -> GPUBindGroupLayoutEntry:
+        GPUBindGroupLayoutEntry(binding: binding, visibility: visibility, binding_type: WEBGPU_BINDING_TYPE_STORAGE_BUFFER, has_dynamic_offset: true)
 
     static fn texture(binding: i32, visibility: i32) -> GPUBindGroupLayoutEntry:
-        GPUBindGroupLayoutEntry(binding: binding, visibility: visibility, binding_type: WEBGPU_BINDING_TYPE_TEXTURE)
+        GPUBindGroupLayoutEntry(binding: binding, visibility: visibility, binding_type: WEBGPU_BINDING_TYPE_TEXTURE, has_dynamic_offset: false)
 
     static fn sampler(binding: i32, visibility: i32) -> GPUBindGroupLayoutEntry:
-        GPUBindGroupLayoutEntry(binding: binding, visibility: visibility, binding_type: WEBGPU_BINDING_TYPE_SAMPLER)
+        GPUBindGroupLayoutEntry(binding: binding, visibility: visibility, binding_type: WEBGPU_BINDING_TYPE_SAMPLER, has_dynamic_offset: false)
 
 pub class GPUBindGroupEntry:
     binding: i32
@@ -331,6 +338,15 @@ pub fn webgpu_find_texture(resources: WebGPUResourceTable, texture_id: i32) -> G
         i = i + 1
     GPUTextureHandle(id: -1, label: "", width: 0, height: 0, depth_or_layers: 0, format: "", usage: 0, valid: false, error: "GPUTexture does not exist")
 
+pub fn webgpu_find_bind_group(resources: WebGPUResourceTable, bind_group_id: i32) -> GPUBindGroupHandle:
+    var i = 0
+    while i < resources.bind_groups.len():
+        val bind_group = resources.bind_groups[i]
+        if bind_group.id == bind_group_id and bind_group.valid:
+            return bind_group
+        i = i + 1
+    GPUBindGroupHandle(id: -1, label: "", layout_id: -1, entries: [], valid: false, error: "GPUBindGroup does not exist")
+
 pub fn webgpu_validate_texture_descriptor(width: i32, height: i32, depth_or_layers: i32, format: text, usage: i32) -> text:
     if width <= 0 or height <= 0 or depth_or_layers <= 0:
         return "GPUTexture size must be positive"
@@ -401,10 +417,21 @@ pub fn webgpu_validate_bind_group_layout_descriptor(entries: [GPUBindGroupLayout
             return "GPUBindGroupLayout visibility is not supported"
         if not webgpu_is_supported_binding_type(entry.binding_type):
             return "GPUBindGroupLayout binding type is not supported"
+        if entry.has_dynamic_offset and not webgpu_is_buffer_binding_type(entry.binding_type):
+            return "GPUBindGroupLayout dynamic offsets require buffer bindings"
         if webgpu_layout_binding_seen(entries, entry.binding, i):
             return "GPUBindGroupLayout bindings must be unique"
         i = i + 1
     ""
+
+pub fn webgpu_count_dynamic_bind_group_layout_entries(entries: [GPUBindGroupLayoutEntry]) -> i32:
+    var count = 0
+    var i = 0
+    while i < entries.len():
+        if entries[i].has_dynamic_offset:
+            count = count + 1
+        i = i + 1
+    count
 
 pub fn webgpu_is_supported_buffer_usage(usage: i32) -> bool:
     usage > 0 and (usage & WEBGPU_BUFFER_USAGE_ALL) == usage
@@ -440,6 +467,11 @@ pub fn webgpu_is_supported_binding_type(binding_type: i32) -> bool:
         binding_type == WEBGPU_BINDING_TYPE_TEXTURE or
         binding_type == WEBGPU_BINDING_TYPE_STORAGE_TEXTURE or
         binding_type == WEBGPU_BINDING_TYPE_SAMPLER
+
+pub fn webgpu_is_buffer_binding_type(binding_type: i32) -> bool:
+    binding_type == WEBGPU_BINDING_TYPE_UNIFORM_BUFFER or
+        binding_type == WEBGPU_BINDING_TYPE_STORAGE_BUFFER or
+        binding_type == WEBGPU_BINDING_TYPE_READONLY_STORAGE_BUFFER
 
 pub fn webgpu_layout_binding_seen(entries: [GPUBindGroupLayoutEntry], binding: i32, before_index: i32) -> bool:
     var i = 0
