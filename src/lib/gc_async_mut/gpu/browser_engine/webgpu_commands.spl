@@ -8,8 +8,12 @@ use std.gc_async_mut.gpu.browser_engine.webgpu_resources.{
     WebGPUResourceTable,
     WEBGPU_BUFFER_USAGE_COPY_SRC, WEBGPU_BUFFER_USAGE_COPY_DST,
     WEBGPU_TEXTURE_USAGE_COPY_SRC, WEBGPU_TEXTURE_USAGE_COPY_DST,
+    WEBGPU_TEXTURE_USAGE_RENDER_ATTACHMENT,
     webgpu_find_buffer, webgpu_find_texture, webgpu_find_bind_group,
     webgpu_find_bind_group_entry, webgpu_count_dynamic_bind_group_layout_entries
+}
+use std.gc_async_mut.gpu.browser_engine.webgpu_types.{
+    GPU_TEXTURE_FORMAT_DEPTH24_PLUS
 }
 pub val WEBGPU_COMMAND_BEGIN_RENDER_PASS: text = "begin-render-pass"
 pub val WEBGPU_COMMAND_END_RENDER_PASS: text = "end-render-pass"
@@ -57,6 +61,23 @@ pub class GPUCommandBufferHandle:
     fn command_count() -> i32:
         self.commands.len()
 
+pub class GPURenderPassColorAttachment:
+    texture_id: i32
+
+    static fn texture(texture_id: i32) -> GPURenderPassColorAttachment:
+        GPURenderPassColorAttachment(texture_id: texture_id)
+
+pub class GPURenderPassDepthStencilAttachment:
+    texture_id: i32
+    depth_read_only: bool
+    stencil_read_only: bool
+
+    static fn none() -> GPURenderPassDepthStencilAttachment:
+        GPURenderPassDepthStencilAttachment(texture_id: -1, depth_read_only: false, stencil_read_only: false)
+
+    static fn texture(texture_id: i32) -> GPURenderPassDepthStencilAttachment:
+        GPURenderPassDepthStencilAttachment(texture_id: texture_id, depth_read_only: false, stencil_read_only: false)
+
 pub class WebGPUCommandEncoder:
     label: text
     next_command_buffer_id: i32
@@ -80,6 +101,21 @@ pub class WebGPUCommandEncoder:
             return false
         if self.active_pass != "":
             self.last_error = "GPUCommandEncoder already has an active pass"
+            return false
+        self.commands.push(webgpu_command_empty(WEBGPU_COMMAND_BEGIN_RENDER_PASS))
+        self.active_pass = "render"
+        self.last_error = ""
+        true
+
+    me begin_render_pass_with_descriptor(resources: WebGPUResourceTable, color_attachments: [GPURenderPassColorAttachment], depth_stencil_attachment: GPURenderPassDepthStencilAttachment) -> bool:
+        if not self.ensure_can_record():
+            return false
+        if self.active_pass != "":
+            self.last_error = "GPUCommandEncoder already has an active pass"
+            return false
+        val err = webgpu_validate_render_pass_descriptor_with_resources(resources, color_attachments, depth_stencil_attachment)
+        if err != "":
+            self.last_error = err
             return false
         self.commands.push(webgpu_command_empty(WEBGPU_COMMAND_BEGIN_RENDER_PASS))
         self.active_pass = "render"
@@ -319,6 +355,54 @@ pub fn webgpu_validate_bind_group_dynamic_offsets(slot: i32, bind_group_id: i32,
         if dynamic_offsets[i] % 256 != 0:
             return "GPUPassEncoder dynamic offsets must be 256-byte aligned"
         i = i + 1
+    ""
+
+pub fn webgpu_validate_render_pass_descriptor_with_resources(resources: WebGPUResourceTable, color_attachments: [GPURenderPassColorAttachment], depth_stencil_attachment: GPURenderPassDepthStencilAttachment) -> text:
+    if color_attachments.len() == 0 and depth_stencil_attachment.texture_id < 0:
+        return "GPURenderPassDescriptor requires at least one attachment"
+    var expected_width = -1
+    var expected_height = -1
+    var expected_depth_or_layers = -1
+    var i = 0
+    while i < color_attachments.len():
+        val attachment = color_attachments[i]
+        if attachment.texture_id <= 0:
+            return "GPURenderPassColorAttachment view must be valid"
+        val texture = webgpu_find_texture(resources, attachment.texture_id)
+        if not texture.valid:
+            return "GPURenderPassColorAttachment texture does not exist"
+        if (texture.usage & WEBGPU_TEXTURE_USAGE_RENDER_ATTACHMENT) == 0:
+            return "GPURenderPassColorAttachment texture missing RENDER_ATTACHMENT usage"
+        if texture.format == GPU_TEXTURE_FORMAT_DEPTH24_PLUS:
+            return "GPURenderPassColorAttachment format must be color-renderable"
+        val dimensions_err = webgpu_validate_render_pass_attachment_dimensions(texture.width, texture.height, texture.depth_or_layers, expected_width, expected_height, expected_depth_or_layers)
+        if dimensions_err != "":
+            return dimensions_err
+        if expected_width < 0:
+            expected_width = texture.width
+            expected_height = texture.height
+            expected_depth_or_layers = texture.depth_or_layers
+        i = i + 1
+    if depth_stencil_attachment.texture_id == 0:
+        return "GPURenderPassDepthStencilAttachment view must be valid"
+    if depth_stencil_attachment.texture_id > 0:
+        val depth_texture = webgpu_find_texture(resources, depth_stencil_attachment.texture_id)
+        if not depth_texture.valid:
+            return "GPURenderPassDepthStencilAttachment texture does not exist"
+        if (depth_texture.usage & WEBGPU_TEXTURE_USAGE_RENDER_ATTACHMENT) == 0:
+            return "GPURenderPassDepthStencilAttachment texture missing RENDER_ATTACHMENT usage"
+        if depth_texture.format != GPU_TEXTURE_FORMAT_DEPTH24_PLUS:
+            return "GPURenderPassDepthStencilAttachment format must be depth-stencil-renderable"
+        val depth_dimensions_err = webgpu_validate_render_pass_attachment_dimensions(depth_texture.width, depth_texture.height, depth_texture.depth_or_layers, expected_width, expected_height, expected_depth_or_layers)
+        if depth_dimensions_err != "":
+            return depth_dimensions_err
+    ""
+
+pub fn webgpu_validate_render_pass_attachment_dimensions(width: i32, height: i32, depth_or_layers: i32, expected_width: i32, expected_height: i32, expected_depth_or_layers: i32) -> text:
+    if expected_width < 0:
+        return ""
+    if width != expected_width or height != expected_height or depth_or_layers != expected_depth_or_layers:
+        return "GPURenderPassDescriptor attachments must have matching dimensions"
     ""
 
 pub fn webgpu_validate_buffer_copy(source_buffer_id: i32, source_offset: i32, destination_buffer_id: i32, destination_offset: i32, size: i32) -> text:

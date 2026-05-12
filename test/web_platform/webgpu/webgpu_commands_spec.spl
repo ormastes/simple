@@ -1,6 +1,7 @@
 use std.spec.*
 use std.gc_async_mut.gpu.browser_engine.webgpu_commands.{
     WebGPUCommandEncoder, WebGPUQueue,
+    GPURenderPassColorAttachment, GPURenderPassDepthStencilAttachment,
     WEBGPU_COMMAND_BEGIN_RENDER_PASS, WEBGPU_COMMAND_END_RENDER_PASS,
     WEBGPU_COMMAND_BEGIN_COMPUTE_PASS, WEBGPU_COMMAND_END_COMPUTE_PASS,
     WEBGPU_COMMAND_SET_PIPELINE, WEBGPU_COMMAND_SET_BIND_GROUP,
@@ -11,19 +12,21 @@ use std.gc_async_mut.gpu.browser_engine.webgpu_commands.{
     webgpu_validate_texture_copy_with_resources,
     webgpu_validate_queue_write_buffer_with_resources,
     webgpu_validate_queue_write_texture_with_resources,
-    webgpu_validate_bind_group_dynamic_offsets_with_resources
+    webgpu_validate_bind_group_dynamic_offsets_with_resources,
+    webgpu_validate_render_pass_descriptor_with_resources
 }
 use std.gc_async_mut.gpu.browser_engine.webgpu_resources.{
     WebGPUResourceTable,
     WEBGPU_BUFFER_USAGE_COPY_SRC, WEBGPU_BUFFER_USAGE_COPY_DST,
     WEBGPU_BUFFER_USAGE_UNIFORM, WEBGPU_BUFFER_USAGE_STORAGE,
     WEBGPU_TEXTURE_USAGE_COPY_SRC, WEBGPU_TEXTURE_USAGE_COPY_DST,
-    WEBGPU_TEXTURE_USAGE_TEXTURE_BINDING,
+    WEBGPU_TEXTURE_USAGE_TEXTURE_BINDING, WEBGPU_TEXTURE_USAGE_RENDER_ATTACHMENT,
     WEBGPU_SHADER_STAGE_VERTEX, WEBGPU_SHADER_STAGE_FRAGMENT,
     GPUBindGroupLayoutEntry, GPUBindGroupEntry
 }
 use std.gc_async_mut.gpu.browser_engine.webgpu_types.{
-    GPU_TEXTURE_FORMAT_RGBA8_UNORM, GPU_TEXTURE_FORMAT_BGRA8_UNORM
+    GPU_TEXTURE_FORMAT_RGBA8_UNORM, GPU_TEXTURE_FORMAT_BGRA8_UNORM,
+    GPU_TEXTURE_FORMAT_DEPTH24_PLUS
 }
 
 describe "Browser WebGPU command encoding":
@@ -70,6 +73,26 @@ describe "Browser WebGPU command encoding":
             expect(encoder.begin_render_pass()).to_equal(true)
             expect(encoder.set_bind_group_with_dynamic_offsets(0, 4, [128])).to_equal(false)
             expect(encoder.last_error).to_equal("GPUPassEncoder dynamic offsets must be 256-byte aligned")
+
+        it "validates render pass color and depth attachments before recording":
+            var resources = WebGPUResourceTable.create()
+            val color = resources.create_texture("color", 640, 480, 1, GPU_TEXTURE_FORMAT_RGBA8_UNORM, WEBGPU_TEXTURE_USAGE_RENDER_ATTACHMENT)
+            val depth = resources.create_texture("depth", 640, 480, 1, GPU_TEXTURE_FORMAT_DEPTH24_PLUS, WEBGPU_TEXTURE_USAGE_RENDER_ATTACHMENT)
+            var encoder = WebGPUCommandEncoder.create("frame")
+            expect(encoder.begin_render_pass_with_descriptor(resources, [GPURenderPassColorAttachment.texture(color.id)], GPURenderPassDepthStencilAttachment.texture(depth.id))).to_equal(true)
+            expect(encoder.command_count()).to_equal(1)
+            expect(encoder.commands[0].kind).to_equal(WEBGPU_COMMAND_BEGIN_RENDER_PASS)
+
+        it "rejects invalid render pass attachment descriptors":
+            var resources = WebGPUResourceTable.create()
+            val color = resources.create_texture("color", 640, 480, 1, GPU_TEXTURE_FORMAT_RGBA8_UNORM, WEBGPU_TEXTURE_USAGE_RENDER_ATTACHMENT)
+            val sampled = resources.create_texture("sampled", 640, 480, 1, GPU_TEXTURE_FORMAT_RGBA8_UNORM, WEBGPU_TEXTURE_USAGE_TEXTURE_BINDING)
+            val wrong_depth = resources.create_texture("wrong-depth", 640, 480, 1, GPU_TEXTURE_FORMAT_RGBA8_UNORM, WEBGPU_TEXTURE_USAGE_RENDER_ATTACHMENT)
+            val small_depth = resources.create_texture("small-depth", 320, 480, 1, GPU_TEXTURE_FORMAT_DEPTH24_PLUS, WEBGPU_TEXTURE_USAGE_RENDER_ATTACHMENT)
+            expect(webgpu_validate_render_pass_descriptor_with_resources(resources, [], GPURenderPassDepthStencilAttachment.none())).to_equal("GPURenderPassDescriptor requires at least one attachment")
+            expect(webgpu_validate_render_pass_descriptor_with_resources(resources, [GPURenderPassColorAttachment.texture(sampled.id)], GPURenderPassDepthStencilAttachment.none())).to_equal("GPURenderPassColorAttachment texture missing RENDER_ATTACHMENT usage")
+            expect(webgpu_validate_render_pass_descriptor_with_resources(resources, [GPURenderPassColorAttachment.texture(color.id)], GPURenderPassDepthStencilAttachment.texture(wrong_depth.id))).to_equal("GPURenderPassDepthStencilAttachment format must be depth-stencil-renderable")
+            expect(webgpu_validate_render_pass_descriptor_with_resources(resources, [GPURenderPassColorAttachment.texture(color.id)], GPURenderPassDepthStencilAttachment.texture(small_depth.id))).to_equal("GPURenderPassDescriptor attachments must have matching dimensions")
 
     describe "compute pass recording":
         it "records dispatch workgroups":
