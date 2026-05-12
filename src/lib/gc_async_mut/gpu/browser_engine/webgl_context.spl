@@ -28,6 +28,16 @@ pub val WEBGL_FLOAT_VEC3: i32 = 35665
 pub val WEBGL_FLOAT_VEC4: i32 = 35666
 pub val WEBGL_FLOAT_MAT4: i32 = 35676
 pub val WEBGL_SAMPLER_2D: i32 = 35678
+pub val WEBGL_TEXTURE_2D: i32 = 3553
+pub val WEBGL_TEXTURE_BINDING_2D: i32 = 32873
+pub val WEBGL_UNPACK_ALIGNMENT: i32 = 3317
+pub val WEBGL_RGB: i32 = 6407
+pub val WEBGL_RGBA: i32 = 6408
+pub val WEBGL_UNSIGNED_BYTE: i32 = 5121
+pub val WEBGL_UNPACK_FLIP_Y_WEBGL: i32 = 37440
+pub val WEBGL_UNPACK_PREMULTIPLY_ALPHA_WEBGL: i32 = 37441
+pub val WEBGL_UNPACK_COLORSPACE_CONVERSION_WEBGL: i32 = 37443
+pub val WEBGL_BROWSER_DEFAULT_WEBGL: i32 = 37444
 
 pub class WebGLBufferHandle:
     id: i32
@@ -38,6 +48,15 @@ pub class WebGLTextureHandle:
     id: i32
     valid: bool
     error: text
+    target: i32
+    width: i32
+    height: i32
+    level: i32
+    internal_format: i32
+    format: i32
+    pixel_type: i32
+    initialized: bool
+    pixels: [u8]
 
 pub class WebGLShaderHandle:
     id: i32
@@ -98,6 +117,11 @@ pub class WebGLContext:
     current_program_id: i32
     supported_extensions: [text]
     enabled_extensions: [text]
+    bound_texture_2d: i32
+    unpack_alignment: i32
+    unpack_flip_y: bool
+    unpack_premultiply_alpha: bool
+    unpack_colorspace_conversion: i32
 
     fn is_available() -> bool:
         not self.context_lost
@@ -129,8 +153,8 @@ pub class WebGLContext:
 
     me create_texture() -> WebGLTextureHandle:
         if not self.ensure_context_available():
-            return WebGLTextureHandle(id: -1, valid: false, error: "context lost")
-        val handle = WebGLTextureHandle(id: self.next_texture_id, valid: true, error: "")
+            return WebGLTextureHandle(id: -1, valid: false, error: "context lost", target: 0, width: 0, height: 0, level: 0, internal_format: 0, format: 0, pixel_type: 0, initialized: false, pixels: [])
+        val handle = WebGLTextureHandle(id: self.next_texture_id, valid: true, error: "", target: 0, width: 0, height: 0, level: 0, internal_format: 0, format: 0, pixel_type: 0, initialized: false, pixels: [])
         self.next_texture_id = self.next_texture_id + 1
         self.textures.push(handle)
         handle
@@ -398,6 +422,108 @@ pub class WebGLContext:
             self.enabled_extensions.push(canonical)
         WebGLExtensionHandle(name: canonical, valid: true, enabled: true, error: "")
 
+    me bind_texture(target: i32, texture_id: i32) -> bool:
+        if not self.ensure_context_available():
+            return false
+        if target != WEBGL_TEXTURE_2D:
+            self.last_error = WEBGL_INVALID_ENUM
+            return false
+        if texture_id == -1:
+            self.bound_texture_2d = -1
+            return true
+        val texture_index = self.find_texture_index(texture_id)
+        if texture_index < 0:
+            self.last_error = WEBGL_INVALID_VALUE
+            return false
+        var texture = self.textures[texture_index]
+        texture.target = target
+        self.textures[texture_index] = texture
+        self.bound_texture_2d = texture_id
+        true
+
+    me pixel_store_i(pname: i32, param: i32) -> bool:
+        if not self.ensure_context_available():
+            return false
+        if pname == WEBGL_UNPACK_ALIGNMENT:
+            if param != 1 and param != 2 and param != 4 and param != 8:
+                self.last_error = WEBGL_INVALID_VALUE
+                return false
+            self.unpack_alignment = param
+            return true
+        if pname == WEBGL_UNPACK_FLIP_Y_WEBGL:
+            self.unpack_flip_y = param != 0
+            return true
+        if pname == WEBGL_UNPACK_PREMULTIPLY_ALPHA_WEBGL:
+            self.unpack_premultiply_alpha = param != 0
+            return true
+        if pname == WEBGL_UNPACK_COLORSPACE_CONVERSION_WEBGL:
+            if param != WEBGL_BROWSER_DEFAULT_WEBGL and param != WEBGL_NO_ERROR:
+                self.last_error = WEBGL_INVALID_VALUE
+                return false
+            self.unpack_colorspace_conversion = param
+            return true
+        self.last_error = WEBGL_INVALID_ENUM
+        false
+
+    me tex_image_2d(target: i32, level: i32, internal_format: i32, width: i32, height: i32, border: i32, format: i32, pixel_type: i32, pixels: [u8]) -> bool:
+        if not self.ensure_context_available():
+            return false
+        val texture_index = self.bound_texture_index_for_upload(target)
+        if texture_index < 0:
+            return false
+        if not self.validate_texture_image_args(level, internal_format, width, height, border, format, pixel_type):
+            return false
+        val required = webgl_required_texture_bytes(width, height, webgl_texture_format_bytes(format), self.unpack_alignment)
+        if pixels.len() > 0 and pixels.len() < required:
+            self.last_error = WEBGL_INVALID_OPERATION
+            return false
+        var texture = self.textures[texture_index]
+        texture.target = target
+        texture.width = width
+        texture.height = height
+        texture.level = level
+        texture.internal_format = internal_format
+        texture.format = format
+        texture.pixel_type = pixel_type
+        texture.initialized = true
+        if pixels.len() == 0:
+            texture.pixels = webgl_zero_bytes(required)
+        else:
+            texture.pixels = webgl_copy_bytes(pixels, required)
+        self.textures[texture_index] = texture
+        true
+
+    me tex_sub_image_2d(target: i32, level: i32, xoffset: i32, yoffset: i32, width: i32, height: i32, format: i32, pixel_type: i32, pixels: [u8]) -> bool:
+        if not self.ensure_context_available():
+            return false
+        val texture_index = self.bound_texture_index_for_upload(target)
+        if texture_index < 0:
+            return false
+        var texture = self.textures[texture_index]
+        if not texture.initialized:
+            self.last_error = WEBGL_INVALID_OPERATION
+            return false
+        if level != texture.level:
+            self.last_error = WEBGL_INVALID_VALUE
+            return false
+        if format != texture.format or pixel_type != texture.pixel_type:
+            self.last_error = WEBGL_INVALID_OPERATION
+            return false
+        if xoffset < 0 or yoffset < 0 or width < 0 or height < 0 or xoffset + width > texture.width or yoffset + height > texture.height:
+            self.last_error = WEBGL_INVALID_VALUE
+            return false
+        val bpp = webgl_texture_format_bytes(format)
+        if bpp == 0:
+            self.last_error = WEBGL_INVALID_ENUM
+            return false
+        val required = webgl_required_texture_bytes(width, height, bpp, self.unpack_alignment)
+        if pixels.len() < required:
+            self.last_error = WEBGL_INVALID_OPERATION
+            return false
+        texture.pixels = webgl_replace_texture_region(texture.pixels, texture.width, bpp, xoffset, yoffset, width, height, self.unpack_alignment, pixels)
+        self.textures[texture_index] = texture
+        true
+
     me ensure_context_available() -> bool:
         if self.context_lost:
             self.last_error = WEBGL_CONTEXT_LOST_WEBGL
@@ -411,6 +537,36 @@ pub class WebGLContext:
                 return i
             i = i + 1
         -1
+
+    fn find_texture_index(texture_id: i32) -> i32:
+        var i = 0
+        while i < self.textures.len():
+            if self.textures[i].id == texture_id:
+                return i
+            i = i + 1
+        -1
+
+    me bound_texture_index_for_upload(target: i32) -> i32:
+        if target != WEBGL_TEXTURE_2D:
+            self.last_error = WEBGL_INVALID_ENUM
+            return -1
+        if self.bound_texture_2d < 0:
+            self.last_error = WEBGL_INVALID_OPERATION
+            return -1
+        val texture_index = self.find_texture_index(self.bound_texture_2d)
+        if texture_index < 0:
+            self.last_error = WEBGL_INVALID_VALUE
+            return -1
+        texture_index
+
+    me validate_texture_image_args(level: i32, internal_format: i32, width: i32, height: i32, border: i32, format: i32, pixel_type: i32) -> bool:
+        if level != 0 or width < 0 or height < 0 or border != 0:
+            self.last_error = WEBGL_INVALID_VALUE
+            return false
+        if internal_format != format or webgl_texture_format_bytes(format) == 0 or pixel_type != WEBGL_UNSIGNED_BYTE:
+            self.last_error = WEBGL_INVALID_ENUM
+            return false
+        true
 
     fn find_program_index(program_id: i32) -> i32:
         var i = 0
@@ -451,7 +607,12 @@ pub fn webgl_create_context(version: i32, width: i32, height: i32) -> WebGLConte
         programs: [],
         current_program_id: -1,
         supported_extensions: webgl_default_extensions(actual_version),
-        enabled_extensions: []
+        enabled_extensions: [],
+        bound_texture_2d: -1,
+        unpack_alignment: 4,
+        unpack_flip_y: false,
+        unpack_premultiply_alpha: false,
+        unpack_colorspace_conversion: WEBGL_BROWSER_DEFAULT_WEBGL
     )
 
 pub fn webgl_is_supported_context_name(name: text) -> bool:
@@ -609,3 +770,53 @@ pub fn webgl_text_list_contains(values: [text], needle: text) -> bool:
             return true
         i = i + 1
     false
+
+pub fn webgl_texture_format_bytes(format: i32) -> i32:
+    if format == WEBGL_RGB:
+        return 3
+    if format == WEBGL_RGBA:
+        return 4
+    0
+
+pub fn webgl_aligned_row_stride(width: i32, bytes_per_pixel: i32, alignment: i32) -> i32:
+    val row_bytes = width * bytes_per_pixel
+    val remainder = row_bytes % alignment
+    if remainder == 0:
+        return row_bytes
+    row_bytes + alignment - remainder
+
+pub fn webgl_required_texture_bytes(width: i32, height: i32, bytes_per_pixel: i32, alignment: i32) -> i32:
+    if width == 0 or height == 0:
+        return 0
+    webgl_aligned_row_stride(width, bytes_per_pixel, alignment) * height
+
+pub fn webgl_zero_bytes(count: i32) -> [u8]:
+    var bytes: [u8] = []
+    var i = 0
+    while i < count:
+        bytes.push(0)
+        i = i + 1
+    bytes
+
+pub fn webgl_copy_bytes(source: [u8], count: i32) -> [u8]:
+    var bytes: [u8] = []
+    var i = 0
+    while i < count:
+        bytes.push(source[i])
+        i = i + 1
+    bytes
+
+pub fn webgl_replace_texture_region(existing: [u8], texture_width: i32, bytes_per_pixel: i32, xoffset: i32, yoffset: i32, width: i32, height: i32, unpack_alignment: i32, pixels: [u8]) -> [u8]:
+    var result = existing
+    val destination_stride = texture_width * bytes_per_pixel
+    val source_stride = webgl_aligned_row_stride(width, bytes_per_pixel, unpack_alignment)
+    var row = 0
+    while row < height:
+        var col_byte = 0
+        while col_byte < width * bytes_per_pixel:
+            val destination_index = (yoffset + row) * destination_stride + xoffset * bytes_per_pixel + col_byte
+            val source_index = row * source_stride + col_byte
+            result[destination_index] = pixels[source_index]
+            col_byte = col_byte + 1
+        row = row + 1
+    result

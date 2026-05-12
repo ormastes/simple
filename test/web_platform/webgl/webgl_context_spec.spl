@@ -6,7 +6,9 @@ use std.gc_async_mut.gpu.browser_engine.webgl_context.{
     WEBGL_COMPILE_STATUS, WEBGL_LINK_STATUS, WEBGL_VALIDATE_STATUS,
     WEBGL_INFO_LOG_LENGTH, WEBGL_ATTACHED_SHADERS, WEBGL_ACTIVE_UNIFORMS,
     WEBGL_ACTIVE_ATTRIBUTES, WEBGL_SHADER_TYPE, WEBGL_FLOAT_VEC4,
-    WEBGL_SAMPLER_2D,
+    WEBGL_SAMPLER_2D, WEBGL_TEXTURE_2D, WEBGL_UNPACK_ALIGNMENT,
+    WEBGL_UNPACK_FLIP_Y_WEBGL, WEBGL_UNPACK_PREMULTIPLY_ALPHA_WEBGL,
+    WEBGL_RGB, WEBGL_RGBA, WEBGL_UNSIGNED_BYTE,
     webgl_create_context, webgl_is_supported_context_name,
     webgl_context_version_for_name
 }
@@ -90,6 +92,84 @@ describe "Browser WebGL context":
             val good = ctx.create_shader(WEBGL_VERTEX_SHADER)
             expect(bad.valid).to_equal(false)
             expect(good.id).to_equal(1)
+
+    describe "textures":
+        it "binds texture 2d and records rgba uploads":
+            var ctx = webgl_create_context(1, 320, 240)
+            val texture = ctx.create_texture()
+            expect(ctx.bind_texture(WEBGL_TEXTURE_2D, texture.id)).to_equal(true)
+            val pixels: [u8] = [1, 2, 3, 4, 5, 6, 7, 8]
+            expect(ctx.tex_image_2d(WEBGL_TEXTURE_2D, 0, WEBGL_RGBA, 1, 2, 0, WEBGL_RGBA, WEBGL_UNSIGNED_BYTE, pixels)).to_equal(true)
+            expect(ctx.bound_texture_2d).to_equal(texture.id)
+            expect(ctx.textures[0].target).to_equal(WEBGL_TEXTURE_2D)
+            expect(ctx.textures[0].width).to_equal(1)
+            expect(ctx.textures[0].height).to_equal(2)
+            expect(ctx.textures[0].initialized).to_equal(true)
+            expect(ctx.textures[0].pixels.len()).to_equal(8)
+            expect(ctx.textures[0].pixels[6]).to_equal(7)
+
+        it "allocates zero-filled texture storage when upload data is empty":
+            var ctx = webgl_create_context(1, 320, 240)
+            val texture = ctx.create_texture()
+            ctx.bind_texture(WEBGL_TEXTURE_2D, texture.id)
+            expect(ctx.tex_image_2d(WEBGL_TEXTURE_2D, 0, WEBGL_RGBA, 2, 1, 0, WEBGL_RGBA, WEBGL_UNSIGNED_BYTE, [])).to_equal(true)
+            expect(ctx.textures[0].pixels.len()).to_equal(8)
+            expect(ctx.textures[0].pixels[7]).to_equal(0)
+
+        it "honors unpack alignment for rgb upload byte counts":
+            var ctx = webgl_create_context(1, 320, 240)
+            val texture = ctx.create_texture()
+            ctx.bind_texture(WEBGL_TEXTURE_2D, texture.id)
+            val padded: [u8] = [1, 2, 3, 0, 4, 5, 6, 0]
+            expect(ctx.tex_image_2d(WEBGL_TEXTURE_2D, 0, WEBGL_RGB, 1, 2, 0, WEBGL_RGB, WEBGL_UNSIGNED_BYTE, padded)).to_equal(true)
+            expect(ctx.textures[0].pixels.len()).to_equal(8)
+            expect(ctx.pixel_store_i(WEBGL_UNPACK_ALIGNMENT, 1)).to_equal(true)
+            val tight: [u8] = [7, 8, 9, 10, 11, 12]
+            expect(ctx.tex_image_2d(WEBGL_TEXTURE_2D, 0, WEBGL_RGB, 1, 2, 0, WEBGL_RGB, WEBGL_UNSIGNED_BYTE, tight)).to_equal(true)
+            expect(ctx.textures[0].pixels.len()).to_equal(6)
+
+        it "updates initialized texture regions with sub image data":
+            var ctx = webgl_create_context(1, 320, 240)
+            val texture = ctx.create_texture()
+            ctx.bind_texture(WEBGL_TEXTURE_2D, texture.id)
+            ctx.tex_image_2d(WEBGL_TEXTURE_2D, 0, WEBGL_RGBA, 2, 1, 0, WEBGL_RGBA, WEBGL_UNSIGNED_BYTE, [])
+            val sub: [u8] = [9, 8, 7, 6]
+            expect(ctx.tex_sub_image_2d(WEBGL_TEXTURE_2D, 0, 1, 0, 1, 1, WEBGL_RGBA, WEBGL_UNSIGNED_BYTE, sub)).to_equal(true)
+            expect(ctx.textures[0].pixels[0]).to_equal(0)
+            expect(ctx.textures[0].pixels[4]).to_equal(9)
+            expect(ctx.textures[0].pixels[7]).to_equal(6)
+
+        it "validates texture upload errors without mutating existing storage":
+            var ctx = webgl_create_context(1, 320, 240)
+            val texture = ctx.create_texture()
+            expect(ctx.tex_image_2d(WEBGL_TEXTURE_2D, 0, WEBGL_RGBA, 1, 1, 0, WEBGL_RGBA, WEBGL_UNSIGNED_BYTE, [])).to_equal(false)
+            expect(ctx.get_error()).to_equal(WEBGL_INVALID_OPERATION)
+            expect(ctx.bind_texture(999, texture.id)).to_equal(false)
+            expect(ctx.get_error()).to_equal(WEBGL_INVALID_ENUM)
+            expect(ctx.bind_texture(WEBGL_TEXTURE_2D, 99)).to_equal(false)
+            expect(ctx.get_error()).to_equal(WEBGL_INVALID_VALUE)
+            expect(ctx.bind_texture(WEBGL_TEXTURE_2D, texture.id)).to_equal(true)
+            expect(ctx.tex_image_2d(WEBGL_TEXTURE_2D, 1, WEBGL_RGBA, 1, 1, 0, WEBGL_RGBA, WEBGL_UNSIGNED_BYTE, [])).to_equal(false)
+            expect(ctx.get_error()).to_equal(WEBGL_INVALID_VALUE)
+            val short_pixels: [u8] = [1, 2, 3]
+            expect(ctx.tex_image_2d(WEBGL_TEXTURE_2D, 0, WEBGL_RGBA, 1, 1, 0, WEBGL_RGBA, WEBGL_UNSIGNED_BYTE, short_pixels)).to_equal(false)
+            expect(ctx.get_error()).to_equal(WEBGL_INVALID_OPERATION)
+            expect(ctx.textures[0].initialized).to_equal(false)
+
+        it "tracks pixel store boolean flags and rejects bad alignment":
+            var ctx = webgl_create_context(1, 320, 240)
+            expect(ctx.pixel_store_i(WEBGL_UNPACK_FLIP_Y_WEBGL, 1)).to_equal(true)
+            expect(ctx.unpack_flip_y).to_equal(true)
+            expect(ctx.pixel_store_i(WEBGL_UNPACK_PREMULTIPLY_ALPHA_WEBGL, 0)).to_equal(true)
+            expect(ctx.unpack_premultiply_alpha).to_equal(false)
+            expect(ctx.pixel_store_i(WEBGL_UNPACK_ALIGNMENT, 3)).to_equal(false)
+            expect(ctx.get_error()).to_equal(WEBGL_INVALID_VALUE)
+
+        it "blocks texture operations while context is lost":
+            var ctx = webgl_create_context(1, 320, 240)
+            ctx.lose_context()
+            expect(ctx.bind_texture(WEBGL_TEXTURE_2D, 1)).to_equal(false)
+            expect(ctx.get_error()).to_equal(WEBGL_CONTEXT_LOST_WEBGL)
 
     describe "extensions":
         it "reports and enables supported extensions canonically":
