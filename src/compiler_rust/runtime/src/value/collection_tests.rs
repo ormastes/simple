@@ -5,6 +5,8 @@ use super::{
     rt_array_clear,
     rt_array_get,
     rt_array_len,
+    rt_bytes_u8_at,
+    rt_bytes_u8_set,
     // Array functions
     rt_array_new,
     rt_array_pop,
@@ -137,6 +139,21 @@ fn test_array_set() {
 
     assert_eq!(rt_array_get(array, 0).as_int(), 10);
     assert_eq!(rt_array_get(array, 1).as_int(), 99);
+}
+
+#[test]
+fn test_bytes_u8_set_fast_path() {
+    let array = rt_array_new(3);
+
+    rt_array_push(array, RuntimeValue::from_int(1));
+    rt_array_push(array, RuntimeValue::from_int(2));
+    rt_array_push(array, RuntimeValue::from_int(3));
+
+    assert!(rt_bytes_u8_set(array, 1, 0x1ff));
+    assert_eq!(rt_bytes_u8_at(array, 1), 0xff);
+    assert!(rt_bytes_u8_set(array, -1, 7));
+    assert_eq!(rt_bytes_u8_at(array, 2), 7);
+    assert!(!rt_bytes_u8_set(array, 3, 9));
 }
 
 #[test]

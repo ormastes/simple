@@ -467,6 +467,7 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_virtq_desc_write", &[I64, I64, I64, I64, I64, I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_dma_bytes_to_array", &[I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_bytes_u8_at", &[I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_bytes_u8_set", &[I64, I64, I64], &[I8]),
     RuntimeFuncSpec::new("rt_memory_barrier", &[], &[I64]),
     RuntimeFuncSpec::new("rt_arm_virtq_base", &[], &[I64]),
     RuntimeFuncSpec::new("rt_arm_virtio_blk_queue_base", &[], &[I64]),

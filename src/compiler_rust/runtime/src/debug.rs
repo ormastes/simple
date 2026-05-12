@@ -5,6 +5,7 @@
 //! `exec_node`) and by FFI functions exposed to Simple-side debug tooling.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 
 use crate::value::RuntimeValue;
@@ -192,8 +193,15 @@ lazy_static::lazy_static! {
     pub static ref DEBUG_STATE: Mutex<DebugState> = Mutex::new(DebugState::new());
 }
 
+static DEBUG_ACTIVE: AtomicBool = AtomicBool::new(false);
+
 pub fn debug_state() -> std::sync::MutexGuard<'static, DebugState> {
     DEBUG_STATE.lock().unwrap()
+}
+
+#[inline]
+pub fn is_debug_active_fast() -> bool {
+    DEBUG_ACTIVE.load(Ordering::Relaxed)
 }
 
 // ---------------------------------------------------------------------------
@@ -218,12 +226,14 @@ fn rv_array(items: Vec<RuntimeValue>) -> RuntimeValue {
 
 #[no_mangle]
 pub extern "C" fn rt_debug_set_active(active: i64) {
-    debug_state().active = active != 0;
+    let is_active = active != 0;
+    DEBUG_ACTIVE.store(is_active, Ordering::Relaxed);
+    debug_state().active = is_active;
 }
 
 #[no_mangle]
 pub extern "C" fn rt_debug_is_active() -> i64 {
-    if debug_state().active {
+    if is_debug_active_fast() {
         1
     } else {
         0

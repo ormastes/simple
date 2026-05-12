@@ -212,16 +212,11 @@ impl<'a> MirLowerer<'a> {
                             );
                         if is_u8_array_set {
                             self.with_func(|func, current_block| {
-                                let boxed = func.new_vreg();
                                 let block = func.block_mut(current_block).unwrap();
-                                block.instructions.push(MirInst::BoxInt {
-                                    dest: boxed,
-                                    value: val_reg,
-                                });
                                 block.instructions.push(MirInst::Call {
                                     dest: None,
-                                    target: crate::mir::CallTarget::from_name("rt_array_set"),
-                                    args: vec![receiver_reg, index_reg, boxed],
+                                    target: crate::mir::CallTarget::from_name("rt_bytes_u8_set"),
+                                    args: vec![receiver_reg, index_reg, val_reg],
                                 });
                             })?;
                         } else {

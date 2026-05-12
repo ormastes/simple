@@ -39,23 +39,27 @@ pub(crate) fn exec_node(
     check_timeout!();
 
     // COVERAGE: Record line execution for this statement
-    record_node_coverage(node);
+    if super::coverage_helpers::is_coverage_enabled() {
+        record_node_coverage(node);
+    }
 
     // DEBUG: Check if debugger wants to pause at this statement
-    if let Some((file, line, _col)) = extract_node_location(node) {
-        let mut ds = debug::debug_state();
-        if ds.active {
-            let line32 = line as u32;
-            ds.update_top_frame_location(line32, 0);
-            if ds.should_stop(&file, line32) {
-                // Capture locals from current env for inspection
-                let locals: Vec<(String, String, String)> = env
-                    .iter()
-                    .take(50)
-                    .map(|(k, v)| (k.clone(), format!("{:?}", v), v.type_name().to_string()))
-                    .collect();
-                ds.set_top_frame_locals(locals);
-                ds.step_mode = debug::StepMode::Continue;
+    if debug::is_debug_active_fast() {
+        if let Some((file, line, _col)) = extract_node_location(node) {
+            let mut ds = debug::debug_state();
+            if ds.active {
+                let line32 = line as u32;
+                ds.update_top_frame_location(line32, 0);
+                if ds.should_stop(&file, line32) {
+                    // Capture locals from current env for inspection
+                    let locals: Vec<(String, String, String)> = env
+                        .iter()
+                        .take(50)
+                        .map(|(k, v)| (k.clone(), format!("{:?}", v), v.type_name().to_string()))
+                        .collect();
+                    ds.set_top_frame_locals(locals);
+                    ds.step_mode = debug::StepMode::Continue;
+                }
             }
         }
     }

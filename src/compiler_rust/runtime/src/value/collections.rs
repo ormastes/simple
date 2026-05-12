@@ -386,6 +386,21 @@ pub extern "C" fn rt_bytes_u8_at(array: RuntimeValue, index: i64) -> i64 {
     }
 }
 
+/// Write a single byte into a `[u8]`-style runtime array without generic index dispatch.
+#[no_mangle]
+pub extern "C" fn rt_bytes_u8_set(array: RuntimeValue, index: i64, value: i64) -> bool {
+    let arr = as_typed_ptr!(mut array, HeapObjectType::Array, RuntimeArray, false);
+    unsafe {
+        let len = (*arr).len as i64;
+        let idx = normalize_index(index, len);
+        if idx < 0 || idx >= len {
+            return false;
+        }
+        (*arr).as_mut_slice()[idx as usize] = RuntimeValue::from_int(value & 0xFF);
+        true
+    }
+}
+
 /// Push an element to an array (no grow, returns false if full)
 #[no_mangle]
 pub extern "C" fn rt_array_push(array: RuntimeValue, value: RuntimeValue) -> bool {
