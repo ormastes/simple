@@ -27,6 +27,10 @@ pub val WEBGPU_COMMAND_COPY_BUFFER_TO_BUFFER: text = "copy-buffer-to-buffer"
 pub val WEBGPU_COMMAND_COPY_TEXTURE_TO_TEXTURE: text = "copy-texture-to-texture"
 pub val WEBGPU_COMMAND_WRITE_BUFFER: text = "write-buffer"
 pub val WEBGPU_COMMAND_WRITE_TEXTURE: text = "write-texture"
+pub val WEBGPU_LOAD_OP_CLEAR: text = "clear"
+pub val WEBGPU_LOAD_OP_LOAD: text = "load"
+pub val WEBGPU_STORE_OP_DISCARD: text = "discard"
+pub val WEBGPU_STORE_OP_STORE: text = "store"
 
 pub class WebGPURecordedCommand:
     kind: text
@@ -71,12 +75,25 @@ pub class GPURenderPassDepthStencilAttachment:
     texture_id: i32
     depth_read_only: bool
     stencil_read_only: bool
+    depth_load_op: text
+    depth_store_op: text
+    stencil_load_op: text
+    stencil_store_op: text
 
     static fn none() -> GPURenderPassDepthStencilAttachment:
-        GPURenderPassDepthStencilAttachment(texture_id: -1, depth_read_only: false, stencil_read_only: false)
+        GPURenderPassDepthStencilAttachment(texture_id: -1, depth_read_only: false, stencil_read_only: false, depth_load_op: "", depth_store_op: "", stencil_load_op: "", stencil_store_op: "")
 
     static fn texture(texture_id: i32) -> GPURenderPassDepthStencilAttachment:
-        GPURenderPassDepthStencilAttachment(texture_id: texture_id, depth_read_only: false, stencil_read_only: false)
+        GPURenderPassDepthStencilAttachment(texture_id: texture_id, depth_read_only: false, stencil_read_only: false, depth_load_op: WEBGPU_LOAD_OP_CLEAR, depth_store_op: WEBGPU_STORE_OP_STORE, stencil_load_op: "", stencil_store_op: "")
+
+    static fn texture_with_depth_ops(texture_id: i32, depth_load_op: text, depth_store_op: text) -> GPURenderPassDepthStencilAttachment:
+        GPURenderPassDepthStencilAttachment(texture_id: texture_id, depth_read_only: false, stencil_read_only: false, depth_load_op: depth_load_op, depth_store_op: depth_store_op, stencil_load_op: "", stencil_store_op: "")
+
+    static fn texture_read_only(texture_id: i32, depth_read_only: bool, stencil_read_only: bool) -> GPURenderPassDepthStencilAttachment:
+        GPURenderPassDepthStencilAttachment(texture_id: texture_id, depth_read_only: depth_read_only, stencil_read_only: stencil_read_only, depth_load_op: "", depth_store_op: "", stencil_load_op: "", stencil_store_op: "")
+
+    static fn texture_with_depth_stencil_ops(texture_id: i32, depth_load_op: text, depth_store_op: text, stencil_load_op: text, stencil_store_op: text) -> GPURenderPassDepthStencilAttachment:
+        GPURenderPassDepthStencilAttachment(texture_id: texture_id, depth_read_only: false, stencil_read_only: false, depth_load_op: depth_load_op, depth_store_op: depth_store_op, stencil_load_op: stencil_load_op, stencil_store_op: stencil_store_op)
 
 pub class WebGPUCommandEncoder:
     label: text
@@ -393,10 +410,42 @@ pub fn webgpu_validate_render_pass_descriptor_with_resources(resources: WebGPURe
             return "GPURenderPassDepthStencilAttachment texture missing RENDER_ATTACHMENT usage"
         if depth_texture.format != GPU_TEXTURE_FORMAT_DEPTH24_PLUS:
             return "GPURenderPassDepthStencilAttachment format must be depth-stencil-renderable"
+        val depth_ops_err = webgpu_validate_render_pass_depth_stencil_ops(depth_stencil_attachment)
+        if depth_ops_err != "":
+            return depth_ops_err
         val depth_dimensions_err = webgpu_validate_render_pass_attachment_dimensions(depth_texture.width, depth_texture.height, depth_texture.depth_or_layers, expected_width, expected_height, expected_depth_or_layers)
         if depth_dimensions_err != "":
             return depth_dimensions_err
     ""
+
+pub fn webgpu_validate_render_pass_depth_stencil_ops(attachment: GPURenderPassDepthStencilAttachment) -> text:
+    if not attachment.depth_read_only or attachment.depth_load_op != "":
+        val depth_load_err = webgpu_validate_render_pass_load_op(attachment.depth_load_op, "depthLoadOp")
+        if depth_load_err != "":
+            return depth_load_err
+    if not attachment.depth_read_only or attachment.depth_store_op != "":
+        val depth_store_err = webgpu_validate_render_pass_store_op(attachment.depth_store_op, "depthStoreOp")
+        if depth_store_err != "":
+            return depth_store_err
+    if attachment.stencil_load_op != "":
+        val stencil_load_err = webgpu_validate_render_pass_load_op(attachment.stencil_load_op, "stencilLoadOp")
+        if stencil_load_err != "":
+            return stencil_load_err
+    if attachment.stencil_store_op != "":
+        val stencil_store_err = webgpu_validate_render_pass_store_op(attachment.stencil_store_op, "stencilStoreOp")
+        if stencil_store_err != "":
+            return stencil_store_err
+    ""
+
+pub fn webgpu_validate_render_pass_load_op(value: text, field_name: text) -> text:
+    if value == WEBGPU_LOAD_OP_CLEAR or value == WEBGPU_LOAD_OP_LOAD:
+        return ""
+    "GPURenderPassDepthStencilAttachment " + field_name + " must be 'clear' or 'load'"
+
+pub fn webgpu_validate_render_pass_store_op(value: text, field_name: text) -> text:
+    if value == WEBGPU_STORE_OP_STORE or value == WEBGPU_STORE_OP_DISCARD:
+        return ""
+    "GPURenderPassDepthStencilAttachment " + field_name + " must be 'store' or 'discard'"
 
 pub fn webgpu_validate_render_pass_attachment_dimensions(width: i32, height: i32, depth_or_layers: i32, expected_width: i32, expected_height: i32, expected_depth_or_layers: i32) -> text:
     if expected_width < 0:
