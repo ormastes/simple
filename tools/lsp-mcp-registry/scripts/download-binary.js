@@ -87,7 +87,7 @@ async function main() {
   try {
     await download(url, dest);
 
-    // Extract — tar is available on Windows 10+, macOS, Linux
+    // Extract - tar is available on Windows 10+, macOS, Linux
     console.log('Extracting...');
     execSync(`tar xzf "${assetName}"`, { cwd: nativeDir, stdio: 'inherit' });
 

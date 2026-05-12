@@ -10,6 +10,29 @@ const fs = require('fs');
 const os = require('os');
 
 const ENTRY = 'src/app/simple_lsp_mcp/main.spl';
+const PACKAGE_VERSION = '0.9.8';
+
+function printVersion() {
+  process.stdout.write(`simple-lsp-mcp-server ${PACKAGE_VERSION}\n`);
+}
+
+function printHelp() {
+  process.stdout.write(
+    'Usage: simple-lsp-mcp-server [--version] [--help]\n' +
+    '\n' +
+    'Starts the Simple LSP-MCP stdio server.\n'
+  );
+}
+
+if (process.argv.includes('--version') || process.argv.includes('-v')) {
+  printVersion();
+  process.exit(0);
+}
+
+if (process.argv.includes('--help') || process.argv.includes('-h')) {
+  printHelp();
+  process.exit(0);
+}
 
 function platformDirs() {
   const platform = os.platform();
