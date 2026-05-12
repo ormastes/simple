@@ -13,9 +13,9 @@
 use std.gc_async_mut.gpu.browser_engine.browser_renderer.{BrowserRenderer, BeRenderResult}
 use std.js.types.js_types.{JsValue}
 use std.gc_async_mut.web.browser_session.{BrowserSession, BrowserRuntimeState, BrowserLoadState, BrowserRequest, BrowserHistoryEntry}
-use std.gc_async_mut.web.browser_session_storage.{sync_storage_runtime_state, sync_browser_runtime_state, pair_value, upsert_pair, is_storage_api_property, js_value_to_storage_text}
+use std.gc_async_mut.web.browser_session_storage.{sync_storage_runtime_state, sync_browser_runtime_state, pair_value, upsert_pair, is_storage_api_property, is_storage_internal_property, storage_public_key_from_internal, js_value_to_storage_text}
 use std.js.types.pair.{Pair}
-use std.gc_async_mut.web.browser_session_url.{resolve_relative_url}
+use std.gc_async_mut.web.browser_session_url.{resolve_relative_url, url_protocol, url_pathname, url_origin, url_host, url_search, url_hash}
 use std.gc_async_mut.web.browser_session_cookies.{cookie_text_for_url, merge_cookie_text, parse_cookie_line, upsert_cookie}
 use std.gc_async_mut.web.browser_session_html.{
     extract_title_text, extract_body_inner_html, own_text,
@@ -28,7 +28,9 @@ fn storage_pairs_from_object(state: BrowserRuntimeState, object_id: i64) -> [Pai
     val obj = state.runtime.get_host_object(object_id)
     var out: [Pair<text, text>] = []
     for prop in obj.properties:
-        if not is_storage_api_property(prop.key):
+        if is_storage_internal_property(prop.key):
+            out = upsert_pair(out, storage_public_key_from_internal(prop.key), js_value_to_storage_text(prop.value))
+        else if not is_storage_api_property(prop.key):
             out = upsert_pair(out, prop.key, js_value_to_storage_text(prop.value))
     out
 
@@ -164,6 +166,7 @@ impl BrowserSession:
         if val JsValue.String(href) = href_val:
             if href.len() > 0:
                 self.current_url = href
+                browser_session_sync_location_object(state, href)
                 state.runtime.set_host_property(
                     state.document_id,
                     "URL",
@@ -232,8 +235,8 @@ impl BrowserSession:
             runtime.set_host_property(
                 state.document_id,
                 "cookie",
-                JsValue.String(v: visible_cookie_text)
-            )
+            JsValue.String(v: visible_cookie_text)
+        )
             state.runtime = runtime
             self.runtime_state = Some(state)
 
@@ -256,3 +259,12 @@ impl BrowserSession:
             body: body,
             content_type: content_type
         )
+
+fn browser_session_sync_location_object(state: BrowserRuntimeState, href: text):
+    state.runtime.set_host_property(state.location_id, "href", JsValue.String(v: href))
+    state.runtime.set_host_property(state.location_id, "protocol", JsValue.String(v: url_protocol(href)))
+    state.runtime.set_host_property(state.location_id, "host", JsValue.String(v: url_host(href)))
+    state.runtime.set_host_property(state.location_id, "origin", JsValue.String(v: url_origin(href)))
+    state.runtime.set_host_property(state.location_id, "pathname", JsValue.String(v: url_pathname(href)))
+    state.runtime.set_host_property(state.location_id, "search", JsValue.String(v: url_search(href)))
+    state.runtime.set_host_property(state.location_id, "hash", JsValue.String(v: url_hash(href)))
