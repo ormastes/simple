@@ -43,6 +43,22 @@ Notes:
 - `test/perf/port_algorithms/port_algorithms_simple.spl` no longer carries unused `QRWords`, `quarter`, `push_word`, `load32`, or `rotl32` helpers in the benchmark hot code; ChaCha loads and rotates are direct expressions.
 - Native disassembly for the benchmark no longer shows calls to removed ChaCha helper functions, but it still calls `chacha20_block_local` per block and `xxhash64` per benchmark iteration as expected. Remaining gap is dominated by Simple array/index/runtime overhead and the active `bin/simple` not yet reflecting deeper compiler optimizer changes.
 
+### 2026-05-12 Phase 6C allocation follow-up
+
+Command:
+`test/perf/port_algorithms/run_port_algorithm_benchmarks.shs`
+
+| Algorithm | C MB/s | Rust MB/s | Simple native MB/s | Checksum parity | Status |
+|-----------|--------|-----------|--------------------|-----------------|--------|
+| XXHash64 | 14246 | 14055 | 132 | PASS | Still below threshold |
+| ChaCha20 | 320 | 334 | 24 | PASS | Improved from 7/14 MB/s baseline trail, still below threshold |
+
+Notes:
+- `test/perf/port_algorithms/port_algorithms_simple.spl` now mirrors the C/Rust harness more closely by reusing one ChaCha output buffer across benchmark iterations.
+- The local ChaCha path writes XORed words directly to the destination buffer instead of allocating a 64-byte keystream array for every block and indexing it byte by byte.
+- A speculative XXHash expression cleanup was checked against the same benchmark and removed because it did not improve measured throughput.
+- Phase 6D remains unmet; the remaining gap is linked to compiler/runtime work below: reliable tiny-helper inlining in the active native compiler, bounds-check lowering/elimination for indexed byte loops, and fixed-size byte-buffer lowering to stack/native storage.
+
 ---
 
 ## Phase 1: Fix Compiler Bugs — DONE
