@@ -15,6 +15,12 @@ JS Equivalent → Simple Function:
 
 #![allow(REQC001)]
 
+use std.gc_async_mut.gpu.browser_engine.net.entity.request_types.{FetchRequest, FetchResponse, RequestMode}
+use std.gc_async_mut.gpu.browser_engine.net.entity.url_types.{Url}
+use std.gc_async_mut.gpu.browser_engine.net.fetch_dispatch.{FetchDispatch}
+
+extern fn rt_text_to_bytes(s: text) -> [u8]
+
 # =========================================================================
 # Fetch API — Simplified request/response types for script use
 # =========================================================================
@@ -42,7 +48,7 @@ pub class ScriptFetchResponse:
         body    - response body as text
         ok      - true if status is 200-299
     """
-    status: i32
+    status: i64
     headers: [text]
     body: text
     ok: bool
@@ -51,18 +57,86 @@ pub fn fetch_create_request(url: text, method: text) -> ScriptFetchRequest:
     """Create a new fetch request."""
     ScriptFetchRequest(url: url, method: method, headers: [], body: "")
 
-pub fn fetch_set_header(req: ScriptFetchRequest, name: text, value: text):
+pub fn fetch_set_header(req: ScriptFetchRequest, name: text, value: text) -> ScriptFetchRequest:
     """Add a header to the fetch request."""
-    req.headers.push(name)
-    req.headers.push(value)
+    var next = req
+    next.headers.push(name)
+    next.headers.push(value)
+    next
 
 pub fn fetch_send(req: ScriptFetchRequest) -> ScriptFetchResponse:
     """Send a fetch request and return the response.
 
-    NOTE: This is a stub that returns a zero-status response. Real network
-    I/O requires wiring through FetchDispatch at the ScriptHost level.
+    Without an injected FetchDispatch this returns the browser-safe no-network
+    response used by headless tests.
     """
     ScriptFetchResponse(status: 0, headers: [], body: "", ok: false)
+
+pub fn fetch_send_with_dispatch(req: ScriptFetchRequest, dispatch: FetchDispatch) -> ScriptFetchResponse:
+    """Send a script fetch request through the host FetchDispatch seam."""
+    val response = dispatch.dispatch(script_fetch_to_net_request(req))
+    ScriptFetchResponse(
+        status: response.status,
+        headers: script_fetch_response_headers(response.headers),
+        body: response.body_text(),
+        ok: response.status >= 200 and response.status < 300
+    )
+
+pub fn script_fetch_to_net_request(req: ScriptFetchRequest) -> FetchRequest:
+    FetchRequest(
+        method: req.method,
+        url: script_fetch_parse_url(req.url),
+        headers: script_fetch_flat_headers_to_text(req.headers),
+        body: rt_text_to_bytes(req.body),
+        mode: RequestMode.Cors,
+        credentials: "same-origin"
+    )
+
+pub fn script_fetch_parse_url(raw: text) -> Url:
+    var scheme = "https"
+    var rest = raw
+    if raw.starts_with("https://"):
+        scheme = "https"
+        rest = raw.substring(8, raw.len())
+    else if raw.starts_with("http://"):
+        scheme = "http"
+        rest = raw.substring(7, raw.len())
+    val slash_parts = rest.split("/")
+    val host_port = slash_parts[0]
+    var path = "/"
+    if slash_parts.len() > 1:
+        path = "/" + rest.substring(host_port.len() + 1, rest.len())
+    var query = ""
+    if path.contains("?"):
+        val query_parts = path.split("?")
+        path = query_parts[0]
+        query = query_parts[1]
+    val port = if scheme == "http": 80 else: 443
+    Url(scheme: scheme, host: host_port, port: port, path: path, query: query, fragment: "")
+
+pub fn script_fetch_flat_headers_to_text(headers: [text]) -> text:
+    var lines: [text] = []
+    var i = 0
+    while i + 1 < headers.len():
+        lines.push(headers[i] + ": " + headers[i + 1])
+        i = i + 2
+    lines.join("\n")
+
+pub fn script_fetch_response_headers(headers: text) -> [text]:
+    if headers == "":
+        return []
+    [headers]
+
+pub class ScriptStaticFetchDispatch:
+    status: i64
+    headers: text
+    body: text
+
+    static fn create(status: i64, headers: text, body: text) -> ScriptStaticFetchDispatch:
+        ScriptStaticFetchDispatch(status: status, headers: headers, body: body)
+
+    me fn dispatch(request: FetchRequest) -> FetchResponse:
+        FetchResponse(status: self.status, headers: self.headers, body: rt_text_to_bytes(self.body))
 
 # =========================================================================
 # WebSocket API
