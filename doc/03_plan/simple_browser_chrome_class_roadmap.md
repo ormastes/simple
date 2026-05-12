@@ -431,6 +431,7 @@ Non-goal: cloning proprietary Chrome services. The target is Chrome-level web co
 - Browser WebGPU adapter/device negotiation now reports adapter availability, fallback compatibility mode, unsupported required features, and unsupported required limits without readying the device, covered by `test/web_platform/webgpu/webgpu_context_spec.spl`.
 - Browser WebGPU canvas configuration now covers preferred format, alpha modes, and deterministic present/swapchain progression through the script wrapper and core context, covered by `test/unit/browser/script/canvas_api_spec.spl` and `test/web_platform/webgpu/webgpu_context_spec.spl`.
 - Browser WebGPU WGSL validation now rejects GLSL syntax, unbalanced braces, missing stages, and missing MVP stage-interface declarations for vertex position, fragment location, and compute workgroup size, covered by `test/web_platform/webgpu/webgpu_context_spec.spl`.
+- Browser WebGPU shader module and pipeline creation now require device readiness, reject device-lost contexts distinctly, and propagate pipeline validation failures into context `last_error`, covered by `test/web_platform/webgpu/webgpu_context_spec.spl`.
 - Browser WebGPU resource creation through the device context now enforces negotiated buffer and texture limits before allocating resource handles, covered by `test/web_platform/webgpu/webgpu_context_spec.spl`.
 - Existing nogc WebGPU 3D backend handle-allocation semantics were fixed so `test/lib/nogc_sync_mut/engine/render/webgpu_backend3d_spec.spl` passes.
 - Existing nogc WebGPU 3D backend command recording now rejects invalid pass handles, invalid resources, nested passes, negative slots, and non-positive draw counts before enqueueing commands, covered by `test/lib/nogc_sync_mut/engine/render/webgpu_backend3d_spec.spl`.
@@ -438,7 +439,7 @@ Non-goal: cloning proprietary Chrome services. The target is Chrome-level web co
 **Work:**
 - Add a real `WorkerGlobalScope` runtime bootstrap once worker script execution is promoted beyond the current message-queue model.
 - Expand WGSL validation from the current MVP stage-interface checks toward full W3C grammar coverage.
-- Harden remaining sampler descriptor, render pipeline, and compute pipeline edge cases against CTS coverage and native backend integration.
+- Harden remaining sampler descriptor edge cases against CTS coverage and native backend integration.
 - Add CPU/software backend for deterministic tests and native GPU backend for smoke/perf.
 
 **Gate:** WebGPU CTS MVP subset passes for shader creation, device negotiation, render pipeline triangle, compute pipeline buffer transform, texture sampling, bind group validation, and error scopes. A secure local demo renders a WGSL triangle and a compute shader writes verified output.
