@@ -128,6 +128,7 @@ pub val WEBGL_DEPTH_BUFFER_BIT: i32 = 256
 pub val WEBGL_STENCIL_BUFFER_BIT: i32 = 1024
 pub val WEBGL_COLOR_BUFFER_BIT: i32 = 16384
 pub val WEBGL_MAX_VERTEX_ATTRIBS: i32 = 16
+pub val WEBGL_MAX_TEXTURE_UPLOAD_BYTES: i32 = 2147483647
 
 pub class WebGLBufferHandle:
     id: i32
@@ -1277,7 +1278,10 @@ pub class WebGLContext:
             return false
         if not self.validate_texture_image_args(level, internal_format, width, height, border, format, pixel_type):
             return false
-        val required = webgl_required_texture_bytes(width, height, webgl_texture_format_bytes(format), self.unpack_alignment)
+        val required = webgl_required_texture_bytes_safe(width, height, webgl_texture_format_bytes(format), self.unpack_alignment)
+        if required < 0:
+            self.last_error = WEBGL_INVALID_VALUE
+            return false
         if pixels.len() > 0 and pixels.len() < required:
             self.last_error = WEBGL_INVALID_OPERATION
             return false
@@ -1321,7 +1325,10 @@ pub class WebGLContext:
         if bpp == 0:
             self.last_error = WEBGL_INVALID_ENUM
             return false
-        val required = webgl_required_texture_bytes(width, height, bpp, self.unpack_alignment)
+        val required = webgl_required_texture_bytes_safe(width, height, bpp, self.unpack_alignment)
+        if required < 0:
+            self.last_error = WEBGL_INVALID_VALUE
+            return false
         if pixels.len() < required:
             self.last_error = WEBGL_INVALID_OPERATION
             return false
@@ -1922,9 +1929,28 @@ pub fn webgl_aligned_row_stride(width: i32, bytes_per_pixel: i32, alignment: i32
     row_bytes + alignment - remainder
 
 pub fn webgl_required_texture_bytes(width: i32, height: i32, bytes_per_pixel: i32, alignment: i32) -> i32:
+    webgl_required_texture_bytes_safe(width, height, bytes_per_pixel, alignment)
+
+pub fn webgl_required_texture_bytes_safe(width: i32, height: i32, bytes_per_pixel: i32, alignment: i32) -> i32:
     if width == 0 or height == 0:
         return 0
-    webgl_aligned_row_stride(width, bytes_per_pixel, alignment) * height
+    if width < 0 or height < 0 or bytes_per_pixel <= 0 or alignment <= 0:
+        return -1
+    if width > WEBGL_MAX_TEXTURE_UPLOAD_BYTES / bytes_per_pixel:
+        return -1
+    val row_bytes = width * bytes_per_pixel
+    val remainder = row_bytes % alignment
+    var row_stride = row_bytes
+    if remainder != 0:
+        val padding = alignment - remainder
+        if row_bytes > WEBGL_MAX_TEXTURE_UPLOAD_BYTES - padding:
+            return -1
+        row_stride = row_bytes + padding
+    if row_stride <= 0:
+        return -1
+    if height > WEBGL_MAX_TEXTURE_UPLOAD_BYTES / row_stride:
+        return -1
+    row_stride * height
 
 pub fn webgl_zero_bytes(count: i32) -> [u8]:
     var bytes: [u8] = []
