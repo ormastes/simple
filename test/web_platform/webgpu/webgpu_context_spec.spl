@@ -12,7 +12,7 @@ use std.gc_async_mut.gpu.browser_engine.webgpu_software_executor.{
     webgpu_software_execute_queue
 }
 use std.gc_async_mut.gpu.browser_engine.webgpu_status_errors.{
-    WEBGPU_ERROR_FILTER_VALIDATION
+    WEBGPU_ERROR_FILTER_VALIDATION, WEBGPU_DEVICE_LOST_REASON_DESTROYED
 }
 use std.gc_async_mut.gpu.browser_engine.webgpu_resources.{
     WEBGPU_BUFFER_USAGE_COPY_DST, WEBGPU_BUFFER_USAGE_UNIFORM,
@@ -330,6 +330,28 @@ describe "Browser WebGPU context":
             val encoder = ctx.create_command_encoder("after-loss")
             expect(encoder.finished).to_equal(true)
             expect(encoder.last_error).to_equal("device is lost")
+
+        it "destroys the device and clears queued resource state":
+            var ctx = webgpu_create_context(true)
+            expect(ctx.request_adapter(GPURequestAdapterOptions.default_options())).to_equal(true)
+            expect(ctx.request_device(GPUDeviceDescriptor.create())).to_equal(true)
+            expect(ctx.configure_canvas(GPU_TEXTURE_FORMAT_BGRA8_UNORM, 640, 480)).to_equal(true)
+            val buffer = ctx.create_buffer("upload", 64, WEBGPU_BUFFER_USAGE_COPY_DST)
+            expect(buffer.valid).to_equal(true)
+            expect(ctx.queue_write_buffer(buffer.id, 0, 32)).to_equal(true)
+            expect(ctx.resources.resource_count()).to_equal(1)
+            expect(ctx.queue.write_count()).to_equal(1)
+            val lost = ctx.destroy()
+            expect(lost.lost).to_equal(true)
+            expect(lost.reason).to_equal(WEBGPU_DEVICE_LOST_REASON_DESTROYED)
+            expect(ctx.device_ready).to_equal(false)
+            expect(ctx.device_lost).to_equal(true)
+            expect(ctx.canvas_configured).to_equal(false)
+            expect(ctx.resources.resource_count()).to_equal(0)
+            expect(ctx.resources.next_resource_id).to_equal(1)
+            expect(ctx.queue.write_count()).to_equal(0)
+            expect(ctx.queue_submit([])).to_equal(false)
+            expect(ctx.last_error).to_equal("device is lost")
 
         it "rejects context error-scope operations after device loss":
             var ctx = webgpu_create_context(true)
