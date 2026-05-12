@@ -2,7 +2,10 @@ use std.spec.{describe, it, expect}
 use std.gc_async_mut.gpu.browser_engine.script.navigator_api.{
     BrowserNavigator, navigator_create, navigator_user_agent,
     navigator_language, navigator_on_line, navigator_platform,
-    navigator_gpu_available, navigator_gpu
+    navigator_gpu_available, navigator_gpu, navigator_gpu_bridge,
+    navigator_gpu_secure_context, navigator_gpu_adapter_available,
+    navigator_gpu_request_adapter_status, navigator_gpu_preferred_canvas_format,
+    navigator_gpu_request_adapter, navigator_gpu_adapter_request_device
 }
 use std.gc_async_mut.gpu.browser_engine.webgpu_types.{GPURequestAdapterOptions}
 use std.gc_async_mut.gpu.browser_engine.webgpu_context.{WebGPUContext}
@@ -33,3 +36,35 @@ describe "Navigator API":
     it "method API matches function API":
         val nav = BrowserNavigator.create(true)
         expect(nav.gpu_available()).to_equal(navigator_gpu_available(nav))
+
+    it "exposes deterministic navigator.gpu metadata":
+        val nav = navigator_create(true)
+        val bridge = navigator_gpu_bridge(nav)
+        expect(bridge.secure_context).to_equal(true)
+        expect(bridge.adapter_available).to_equal(true)
+        expect(bridge.request_adapter_status).to_equal("available")
+        expect(bridge.preferred_canvas_format).to_equal("bgra8unorm")
+        expect(navigator_gpu_secure_context(nav)).to_equal(true)
+        expect(navigator_gpu_adapter_available(nav)).to_equal(true)
+        expect(navigator_gpu_request_adapter_status(nav)).to_equal("available")
+        expect(navigator_gpu_preferred_canvas_format(nav)).to_equal("bgra8unorm")
+
+    it "bridges navigator.gpu requestAdapter and requestDevice synchronously":
+        val nav = navigator_create(true)
+        val adapter = navigator_gpu_request_adapter(nav)
+        expect(adapter.available).to_equal(true)
+        expect(adapter.name).to_equal("Simple WebGPU Software Adapter")
+        expect(adapter.request_adapter_status).to_equal("available")
+        expect(adapter.is_fallback_adapter).to_equal(true)
+        var device = navigator_gpu_adapter_request_device(adapter)
+        expect(device.device_ready).to_equal(true)
+        expect(device.adapter_available).to_equal(true)
+
+    it "keeps navigator.gpu adapter bridge unavailable for insecure pages":
+        val nav = navigator_create(false)
+        val adapter = navigator_gpu_request_adapter(nav)
+        expect(adapter.available).to_equal(false)
+        expect(adapter.request_adapter_status).to_equal("unavailable: secure context required")
+        var device = navigator_gpu_adapter_request_device(adapter)
+        expect(device.device_ready).to_equal(false)
+        expect(device.last_error).to_equal("requestAdapter did not provide an available adapter")
