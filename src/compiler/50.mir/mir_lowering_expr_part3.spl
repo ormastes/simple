@@ -78,6 +78,21 @@ impl MirLowering:
         else:
             MirType.i64()
 
+        if method == "len" and args.len() == 0 and receiver.type_.?:
+            val len_symbol = self.len_runtime_symbol_for_hir_type(receiver.type_.unwrap())
+            if len_symbol != "":
+                val receiver_local = self.lower_expr(receiver)
+                val func_operand = MirOperand(kind: MirOperandKind.Const(
+                    MirConstValue.Str(len_symbol),
+                    MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: MirType.i64(), is_variadic: false)))
+                ))
+                var b_len = self.builder
+                val result = b_len.emit_call(func_operand, [mir_operand_copy(receiver_local)], MirType.i64())
+                self.builder = b_len
+                if result.?:
+                    return result.unwrap()
+                return receiver_local
+
         if self.is_mutating_method(method):
             match receiver.kind:
                 case Index(base, index):
@@ -187,6 +202,24 @@ impl MirLowering:
                 val temp = b.new_temp(MirType.unit())
                 self.builder = b
                 temp
+
+    me len_runtime_symbol_for_hir_type(type_: HirType) -> text:
+        """Return a concrete len helper for built-in collection types.
+
+        This avoids routing hot typed `.len()` calls through generic `rt_len`
+        while preserving custom/user-defined `len` resolution.
+        """
+        match type_.kind:
+            case Str:
+                "rt_string_len"
+            case Array(_, _):
+                "rt_array_len"
+            case Slice(_):
+                "rt_array_len"
+            case Dict(_, _):
+                "rt_dict_len"
+            case _:
+                ""
 
     me build_args_from_receiver(receiver_local: LocalId, args: [HirCallArg]) -> [MirOperand]:
         """Build arg operands starting from a pre-lowered receiver local.

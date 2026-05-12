@@ -34,6 +34,13 @@ pub(super) fn aot_compiles(name: &str, build: impl FnOnce(&mut MirFunction) -> V
     codegen.compile_module(&module).is_ok()
 }
 
+/// Compile a MIR module to object code via AOT.
+pub(super) fn aot_object(name: &str, build: impl FnOnce(&mut MirFunction) -> VReg) -> Vec<u8> {
+    let module = build_module(name, build);
+    let codegen = Codegen::new().expect("failed to create codegen");
+    codegen.compile_module(&module).expect("AOT compilation failed")
+}
+
 /// Compile a MIR module with globals via AOT.
 pub(super) fn aot_compiles_module(module: MirModule) -> bool {
     let codegen = Codegen::new().expect("failed to create codegen");

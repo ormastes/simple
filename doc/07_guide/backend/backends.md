@@ -54,6 +54,7 @@ bin/simple build --backend=llvm --release
 
 **Strengths:** Best runtime performance, mature optimization passes, GPU target support.
 **Limitations:** Slower compilation, requires LLVM installation.
+**Optimization workflow:** See [LLVM Optimization Workflow](llvm_optimization_workflow.md) for default pass-pipeline mapping, IR quality rules, verification commands, and the C/Rust/Simple benchmark acceptance gate.
 
 ### Native
 

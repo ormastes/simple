@@ -18,6 +18,42 @@ impl<'a> MirLowerer<'a> {
                 value,
             } => {
                 if let Some(val) = value {
+                    if matches!(
+                        &val.kind,
+                        HirExprKind::Array(elements)
+                            if elements.is_empty()
+                                && self.type_registry.and_then(|tr| tr.get(*declared_ty)).is_some_and(
+                                    |ty| matches!(ty, HirType::Array { element, .. } if *element == TypeId::U8),
+                                )
+                    ) {
+                        let local_idx = *local_index;
+                        self.with_func(|func, current_block| {
+                            let capacity = func.new_vreg();
+                            let array = func.new_vreg();
+                            let addr = func.new_vreg();
+                            let block = func.block_mut(current_block).unwrap();
+                            block.instructions.push(MirInst::ConstInt {
+                                dest: capacity,
+                                value: 16,
+                            });
+                            block.instructions.push(MirInst::Call {
+                                dest: Some(array),
+                                target: CallTarget::from_name("rt_byte_array_new"),
+                                args: vec![capacity],
+                            });
+                            block.instructions.push(MirInst::LocalAddr {
+                                dest: addr,
+                                local_index: local_idx,
+                            });
+                            block.instructions.push(MirInst::Store {
+                                addr,
+                                value: array,
+                                ty: *declared_ty,
+                            });
+                        })?;
+                        return Ok(());
+                    }
+
                     let vreg = self.lower_expr(val)?;
                     let local_idx = *local_index;
                     let value_ty = val.ty;
@@ -215,7 +251,7 @@ impl<'a> MirLowerer<'a> {
                                 let block = func.block_mut(current_block).unwrap();
                                 block.instructions.push(MirInst::Call {
                                     dest: None,
-                                    target: crate::mir::CallTarget::from_name("rt_bytes_u8_set"),
+                                    target: crate::mir::CallTarget::from_name("rt_typed_bytes_u8_set"),
                                     args: vec![receiver_reg, index_reg, val_reg],
                                 });
                             })?;

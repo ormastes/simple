@@ -124,11 +124,14 @@ pub const CORE_REQUIRED_RUNTIME_SYMBOLS: &[&str] = &[
     "rt_memcpy",
     "rt_memset",
     "rt_array_new",
+    "rt_byte_array_new",
     "rt_array_get",
     "rt_array_set",
     "rt_array_push",
     "rt_array_pop",
     "rt_array_len",
+    "rt_bytes_u32_le_at",
+    "rt_bytes_u64_le_at",
     "rt_string_new",
     "rt_string_len",
     "rt_string_data",
@@ -325,10 +328,13 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_aop_proceed",
     // Array operations
     "rt_array_new",
+    "rt_byte_array_new",
     "rt_array_push",
     "rt_array_get",
     "rt_array_set",
     "rt_bytes_u8_at",
+    "rt_bytes_u32_le_at",
+    "rt_bytes_u64_le_at",
     "rt_array_pop",
     "rt_array_first",
     "rt_array_clear",
@@ -876,12 +882,14 @@ mod tests {
         // Verify the list has a reasonable number of symbols
         assert!(RUNTIME_SYMBOL_NAMES.len() > 10);
         assert!(RUNTIME_SYMBOL_NAMES.contains(&"rt_array_new"));
+        assert!(RUNTIME_SYMBOL_NAMES.contains(&"rt_byte_array_new"));
         assert!(RUNTIME_SYMBOL_NAMES.contains(&"rt_println_value"));
     }
 
     #[test]
     fn test_symbol_classification_marks_core_abi_and_hosted_symbols() {
         assert_eq!(symbol_class_of("rt_alloc"), RuntimeSymbolClass::CoreRequired);
+        assert_eq!(symbol_class_of("rt_byte_array_new"), RuntimeSymbolClass::CoreRequired);
         assert_eq!(symbol_class_of("rt_stdout_flush"), RuntimeSymbolClass::CoreRequired);
         assert_eq!(symbol_class_of("rt_file_read_text"), RuntimeSymbolClass::HostedOnly);
         assert_eq!(symbol_class_of("rt_array_clear"), RuntimeSymbolClass::Unported);

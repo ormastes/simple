@@ -3,7 +3,7 @@
 //! This module provides a generic `CodegenBackend<M: Module>` that handles
 //! shared functionality between AOT (ObjectModule) and JIT (JITModule) backends.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 
 use cranelift_codegen::ir::{types, InstBuilder, UserFuncName};
@@ -17,7 +17,7 @@ use thiserror::Error;
 use simple_common::target::{Target, TargetArch, TargetCpu};
 
 use crate::hir::TypeId;
-use crate::mir::{MirFunction, MirModule};
+use crate::mir::{MirFunction, MirInst, MirModule};
 
 use super::instr::compile_function_body;
 use super::runtime_ffi::runtime_funcs_for_target;
@@ -43,6 +43,26 @@ pub enum BackendError {
 }
 
 pub type BackendResult<T> = Result<T, BackendError>;
+
+pub(crate) fn referenced_call_names(functions: &[MirFunction]) -> HashSet<String> {
+    let mut names = HashSet::new();
+    for func in functions {
+        for block in &func.blocks {
+            for inst in &block.instructions {
+                match inst {
+                    MirInst::Call { target, .. } => {
+                        names.insert(target.name().to_string());
+                    }
+                    MirInst::InterpCall { func_name, .. } => {
+                        names.insert(func_name.clone());
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+    names
+}
 
 /// Common codegen backend that works with any Cranelift Module type.
 ///
@@ -503,7 +523,11 @@ impl<M: Module> CodegenBackend<M> {
     /// their mangled name (`prefix__name`) to prevent symbol collisions across
     /// compilation units. The raw name is also inserted into `func_ids` so that
     /// intra-module call resolution by raw name still works.
-    pub fn declare_functions(&mut self, functions: &[MirFunction]) -> BackendResult<()> {
+    pub fn declare_functions(
+        &mut self,
+        functions: &[MirFunction],
+        referenced_names: &HashSet<String>,
+    ) -> BackendResult<()> {
         let mut func_ids = BTreeMap::new();
 
         // First, add runtime function IDs for functions that are already declared
@@ -540,6 +564,9 @@ impl<M: Module> CodegenBackend<M> {
                     (self.mangle_name(&func.name), cranelift_module::Linkage::Local)
                 }
             } else if !has_body {
+                if !referenced_names.contains(func.name.as_str()) {
+                    continue;
+                }
                 (self.sanitize_symbol(&func.name), cranelift_module::Linkage::Import)
             } else {
                 // Export (STB_GLOBAL) so symbols override weak crt0 boot-stubs and
@@ -954,12 +981,13 @@ impl<M: Module> CodegenBackend<M> {
             }
         }
         let functions = unique_functions;
+        let referenced_names = referenced_call_names(&functions);
 
         // First pass: declare functions, then globals.
         // Functions must be declared first so that declare_globals can detect
         // globals that correspond to function references and initialize their
         // BSS slots with the function address (instead of zero).
-        self.declare_functions(&functions)?;
+        self.declare_functions(&functions, &referenced_names)?;
         self.declare_globals(
             &mir.globals,
             &mir.extern_fn_names,
@@ -978,6 +1006,9 @@ impl<M: Module> CodegenBackend<M> {
         // Track functions that fail compilation so we can create stubs
         let mut failed_functions: Vec<&MirFunction> = Vec::new();
         for func in &functions {
+            if func.blocks.is_empty() {
+                continue;
+            }
             match self.compile_function(func) {
                 Ok(()) => {}
                 Err(_e) => {
@@ -1243,4 +1274,70 @@ pub fn module_prefix_from_path(file_path: &std::path::Path, source_root: &std::p
         }
     }
     parts.join("__")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::mir::{BlockId, CallTarget, MirModule, Terminator, VReg};
+    use cranelift_object::{ObjectBuilder, ObjectModule};
+    use simple_parser::ast::Visibility;
+
+    fn test_backend() -> CodegenBackend<ObjectModule> {
+        let settings = BackendSettings::aot();
+        let (_flags, isa) = create_isa_and_flags(&settings).expect("isa");
+        let builder =
+            ObjectBuilder::new(isa, "test_module", cranelift_module::default_libcall_names()).expect("object builder");
+        CodegenBackend::with_module(ObjectModule::new(builder)).expect("backend")
+    }
+
+    fn main_returning_zero() -> MirFunction {
+        let mut main = MirFunction::new("main".to_string(), TypeId::I64, Visibility::Public);
+        let ret = main.new_vreg();
+        main.block_mut(BlockId(0))
+            .unwrap()
+            .instructions
+            .push(MirInst::ConstInt { dest: ret, value: 0 });
+        main.block_mut(BlockId(0)).unwrap().terminator = Terminator::Return(Some(ret));
+        main
+    }
+
+    #[test]
+    fn unused_empty_extern_is_not_declared() {
+        let mut unused = MirFunction::new("rt_simd_add_f32x4".to_string(), TypeId::I64, Visibility::Public);
+        unused.blocks.clear();
+
+        let mut module = MirModule::new();
+        module.functions.push(unused);
+        module.functions.push(main_returning_zero());
+
+        let mut backend = test_backend();
+        backend.compile_all_functions(&module).expect("compile");
+
+        assert!(!backend.func_ids.contains_key("rt_simd_add_f32x4"));
+    }
+
+    #[test]
+    fn referenced_empty_extern_is_declared() {
+        let mut extern_fn = MirFunction::new("external_used".to_string(), TypeId::I64, Visibility::Public);
+        extern_fn.blocks.clear();
+
+        let mut main = MirFunction::new("main".to_string(), TypeId::I64, Visibility::Public);
+        let dest = main.new_vreg();
+        main.block_mut(BlockId(0)).unwrap().instructions.push(MirInst::Call {
+            dest: Some(dest),
+            target: CallTarget::from_name("external_used"),
+            args: Vec::<VReg>::new(),
+        });
+        main.block_mut(BlockId(0)).unwrap().terminator = Terminator::Return(Some(dest));
+
+        let mut module = MirModule::new();
+        module.functions.push(extern_fn);
+        module.functions.push(main);
+
+        let mut backend = test_backend();
+        backend.compile_all_functions(&module).expect("compile");
+
+        assert!(backend.func_ids.contains_key("external_used"));
+    }
 }

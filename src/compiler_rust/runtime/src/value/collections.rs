@@ -10,7 +10,7 @@ use super::byte_kernels::{
 };
 use super::core::RuntimeValue;
 use super::dict::RuntimeDict;
-use super::heap::{get_typed_ptr, get_typed_ptr_mut, HeapHeader, HeapObjectType};
+use super::heap::{gc_flags, get_typed_ptr, get_typed_ptr_mut, HeapHeader, HeapObjectType};
 use super::primitive_sort;
 use simple_simd::{active_simd_tier, SimdTier};
 
@@ -233,6 +233,11 @@ pub struct RuntimeArray {
 }
 
 impl RuntimeArray {
+    #[inline]
+    pub fn is_byte_packed(&self) -> bool {
+        self.header.gc_flags & gc_flags::BYTE_PACKED != 0
+    }
+
     /// Get the elements as a slice
     ///
     /// # Safety
@@ -272,6 +277,11 @@ fn array_data_layout(capacity: u64) -> std::alloc::Layout {
         std::mem::align_of::<RuntimeValue>(),
     )
     .expect("valid array data layout")
+}
+
+fn byte_array_data_layout(capacity: u64) -> std::alloc::Layout {
+    let cap = capacity.max(1) as usize;
+    std::alloc::Layout::from_size_align(cap, 1).expect("valid byte array data layout")
 }
 
 /// A heap-allocated tuple (fixed-size array)
@@ -332,6 +342,35 @@ pub extern "C" fn rt_array_new(capacity: u64) -> RuntimeValue {
     }
 }
 
+#[no_mangle]
+pub extern "C" fn rt_byte_array_new(capacity: u64) -> RuntimeValue {
+    let capacity = capacity.max(4);
+    let header_size = std::mem::size_of::<RuntimeArray>();
+    let header_layout = std::alloc::Layout::from_size_align(header_size, 8).unwrap();
+
+    unsafe {
+        let ptr = std::alloc::alloc_zeroed(header_layout) as *mut RuntimeArray;
+        if ptr.is_null() {
+            return RuntimeValue::NIL;
+        }
+
+        let data_layout = byte_array_data_layout(capacity);
+        let data = std::alloc::alloc_zeroed(data_layout) as *mut RuntimeValue;
+        if data.is_null() {
+            std::alloc::dealloc(ptr as *mut u8, header_layout);
+            return RuntimeValue::NIL;
+        }
+
+        (*ptr).header = HeapHeader::new(HeapObjectType::Array, header_size as u32);
+        (*ptr).header.gc_flags |= gc_flags::BYTE_PACKED;
+        (*ptr).len = 0;
+        (*ptr).capacity = capacity;
+        (*ptr).data = data;
+
+        RuntimeValue::from_heap_ptr(ptr as *mut HeapHeader)
+    }
+}
+
 /// Get the length of an array
 #[no_mangle]
 pub extern "C" fn rt_array_len(array: RuntimeValue) -> i64 {
@@ -349,6 +388,9 @@ pub extern "C" fn rt_array_get(array: RuntimeValue, index: i64) -> RuntimeValue 
         if idx < 0 || idx >= len {
             return RuntimeValue::NIL;
         }
+        if (*arr).is_byte_packed() {
+            return RuntimeValue::from_int(*((*arr).data as *const u8).add(idx as usize) as i64);
+        }
         (*arr).as_slice()[idx as usize]
     }
 }
@@ -362,6 +404,10 @@ pub extern "C" fn rt_array_set(array: RuntimeValue, index: i64, value: RuntimeVa
         let idx = normalize_index(index, len);
         if idx < 0 || idx >= len {
             return false;
+        }
+        if (*arr).is_byte_packed() {
+            *((*arr).data as *mut u8).add(idx as usize) = (value.as_int() & 0xff) as u8;
+            return true;
         }
         (*arr).as_mut_slice()[idx as usize] = value;
         true
@@ -378,11 +424,77 @@ pub extern "C" fn rt_bytes_u8_at(array: RuntimeValue, index: i64) -> i64 {
         if idx < 0 || idx >= len {
             return 0;
         }
+        if (*arr).is_byte_packed() {
+            return *((*arr).data as *const u8).add(idx as usize) as i64;
+        }
         let value = (*arr).as_slice()[idx as usize];
         if value.is_int() {
             return value.as_int() & 0xFF;
         }
         (value.to_raw() as i64) & 0xFF
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn rt_bytes_u32_le_at(array: RuntimeValue, index: i64) -> i64 {
+    let arr = as_typed_ptr!(array, HeapObjectType::Array, RuntimeArray, 0);
+    unsafe {
+        let len = (*arr).len as i64;
+        let idx = normalize_index(index, len);
+        if idx < 0 || idx + 4 > len {
+            return 0;
+        }
+        if (*arr).is_byte_packed() {
+            let ptr = ((*arr).data as *const u8).add(idx as usize);
+            return u32::from_le_bytes([*ptr, *ptr.add(1), *ptr.add(2), *ptr.add(3)]) as i64;
+        }
+        let mut value = 0u64;
+        for offset in 0..4 {
+            let raw = (*arr).as_slice()[(idx + offset) as usize];
+            let byte = if raw.is_int() {
+                raw.as_int()
+            } else {
+                raw.to_raw() as i64
+            } & 0xff;
+            value |= (byte as u64) << (offset * 8);
+        }
+        value as i64
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn rt_bytes_u64_le_at(array: RuntimeValue, index: i64) -> i64 {
+    let arr = as_typed_ptr!(array, HeapObjectType::Array, RuntimeArray, 0);
+    unsafe {
+        let len = (*arr).len as i64;
+        let idx = normalize_index(index, len);
+        if idx < 0 || idx + 8 > len {
+            return 0;
+        }
+        if (*arr).is_byte_packed() {
+            let ptr = ((*arr).data as *const u8).add(idx as usize);
+            return u64::from_le_bytes([
+                *ptr,
+                *ptr.add(1),
+                *ptr.add(2),
+                *ptr.add(3),
+                *ptr.add(4),
+                *ptr.add(5),
+                *ptr.add(6),
+                *ptr.add(7),
+            ]) as i64;
+        }
+        let mut value = 0u64;
+        for offset in 0..8 {
+            let raw = (*arr).as_slice()[(idx + offset) as usize];
+            let byte = if raw.is_int() {
+                raw.as_int()
+            } else {
+                raw.to_raw() as i64
+            } & 0xff;
+            value |= (byte as u64) << (offset * 8);
+        }
+        value as i64
     }
 }
 
@@ -395,6 +507,10 @@ pub extern "C" fn rt_bytes_u8_set(array: RuntimeValue, index: i64, value: i64) -
         let idx = normalize_index(index, len);
         if idx < 0 || idx >= len {
             return false;
+        }
+        if (*arr).is_byte_packed() {
+            *((*arr).data as *mut u8).add(idx as usize) = (value & 0xff) as u8;
+            return true;
         }
         (*arr).as_mut_slice()[idx as usize] = RuntimeValue::from_int(value & 0xFF);
         true
@@ -417,6 +533,32 @@ pub extern "C" fn rt_array_push(array: RuntimeValue, value: RuntimeValue) -> boo
 pub extern "C" fn rt_array_push_grow(array: RuntimeValue, value: RuntimeValue) -> bool {
     let arr = as_typed_ptr!(mut array, HeapObjectType::Array, RuntimeArray, false);
     unsafe {
+        if (*arr).is_byte_packed() {
+            if (*arr).len >= (*arr).capacity {
+                let old_cap = (*arr).capacity;
+                let new_cap = (old_cap * 2).max(4);
+                let old_layout = byte_array_data_layout(old_cap);
+                let new_size = byte_array_data_layout(new_cap).size();
+                let new_data = if (*arr).data.is_null() {
+                    std::alloc::alloc_zeroed(byte_array_data_layout(new_cap)) as *mut RuntimeValue
+                } else {
+                    std::alloc::realloc((*arr).data as *mut u8, old_layout, new_size) as *mut RuntimeValue
+                };
+                if new_data.is_null() {
+                    return false;
+                }
+                let new_tail_bytes = new_size - old_cap as usize;
+                if new_tail_bytes > 0 {
+                    std::ptr::write_bytes((new_data as *mut u8).add(old_cap as usize), 0, new_tail_bytes);
+                }
+                (*arr).data = new_data;
+                (*arr).capacity = new_cap;
+            }
+            *((*arr).data as *mut u8).add((*arr).len as usize) = (value.as_int() & 0xff) as u8;
+            (*arr).len += 1;
+            return true;
+        }
+
         if (*arr).len >= (*arr).capacity {
             let old_cap = (*arr).capacity;
             let new_cap = (old_cap * 2).max(4);
@@ -468,6 +610,40 @@ pub extern "C" fn rt_array_extend_i64(dst: RuntimeValue, src: RuntimeValue, coun
         if n > src_len {
             return false;
         }
+        if (*dst_arr).is_byte_packed() || (*src_arr).is_byte_packed() {
+            if !(*dst_arr).is_byte_packed() || !(*src_arr).is_byte_packed() {
+                return false;
+            }
+            let needed = (*dst_arr).len + n;
+            if needed > (*dst_arr).capacity {
+                let old_cap = (*dst_arr).capacity;
+                let new_cap = needed.max(old_cap * 2).max(4);
+                let old_layout = byte_array_data_layout(old_cap);
+                let new_size = byte_array_data_layout(new_cap).size();
+                let new_data = if (*dst_arr).data.is_null() {
+                    std::alloc::alloc_zeroed(byte_array_data_layout(new_cap)) as *mut RuntimeValue
+                } else {
+                    std::alloc::realloc((*dst_arr).data as *mut u8, old_layout, new_size) as *mut RuntimeValue
+                };
+                if new_data.is_null() {
+                    return false;
+                }
+                let new_tail_bytes = new_size - old_cap as usize;
+                if new_tail_bytes > 0 {
+                    std::ptr::write_bytes((new_data as *mut u8).add(old_cap as usize), 0, new_tail_bytes);
+                }
+                (*dst_arr).data = new_data;
+                (*dst_arr).capacity = new_cap;
+            }
+            std::ptr::copy_nonoverlapping(
+                (*src_arr).data as *const u8,
+                ((*dst_arr).data as *mut u8).add((*dst_arr).len as usize),
+                n as usize,
+            );
+            (*dst_arr).len += n;
+            return true;
+        }
+
         let needed = (*dst_arr).len + n;
         if needed > (*dst_arr).capacity {
             let old_cap = (*dst_arr).capacity;
@@ -507,6 +683,11 @@ pub extern "C" fn rt_array_push_no_grow(array: RuntimeValue, value: RuntimeValue
     unsafe {
         if (*arr).len >= (*arr).capacity || (*arr).data.is_null() {
             return false;
+        }
+        if (*arr).is_byte_packed() {
+            *((*arr).data as *mut u8).add((*arr).len as usize) = (value.as_int() & 0xff) as u8;
+            (*arr).len += 1;
+            return true;
         }
         *(*arr).data.add((*arr).len as usize) = value;
         (*arr).len += 1;
@@ -548,6 +729,9 @@ pub extern "C" fn rt_array_pop(array: RuntimeValue) -> RuntimeValue {
             return RuntimeValue::NIL;
         }
         (*arr).len -= 1;
+        if (*arr).is_byte_packed() {
+            return RuntimeValue::from_int(*((*arr).data as *const u8).add((*arr).len as usize) as i64);
+        }
         *(*arr).data.add((*arr).len as usize)
     }
 }
@@ -591,7 +775,11 @@ pub extern "C" fn rt_array_free(array: RuntimeValue) {
     let ptr = as_typed_ptr!(mut array, HeapObjectType::Array, RuntimeArray, ());
     unsafe {
         if !(*ptr).data.is_null() {
-            let data_layout = array_data_layout((*ptr).capacity);
+            let data_layout = if (*ptr).is_byte_packed() {
+                byte_array_data_layout((*ptr).capacity)
+            } else {
+                array_data_layout((*ptr).capacity)
+            };
             std::alloc::dealloc((*ptr).data as *mut u8, data_layout);
             (*ptr).data = std::ptr::null_mut();
         }

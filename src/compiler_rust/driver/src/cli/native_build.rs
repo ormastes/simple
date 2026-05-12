@@ -26,6 +26,8 @@ use std::path::PathBuf;
 
 use simple_compiler::optimizations::{format_optimization_guide, NativeOptimizationLevel};
 use simple_compiler::pipeline::{NativeBuildConfig, NativeProjectBuilder};
+use simple_compiler::is_native_codegen_backend_available;
+use simple_common::target::NativeCodegenBackend;
 
 fn is_valid_runtime_bundle(value: &str) -> bool {
     matches!(
@@ -43,6 +45,23 @@ fn is_valid_runtime_bundle(value: &str) -> bool {
             | "rust-hosted"
             | "all"
     )
+}
+
+fn normalize_backend(value: &str) -> Result<String, String> {
+    let normalized = match value.trim().to_ascii_lowercase().as_str() {
+        "llvm-lib" | "llvmlib" => "llvm".to_string(),
+        other => other.to_string(),
+    };
+    let backend = normalized
+        .parse::<NativeCodegenBackend>()
+        .map_err(|_| format!("invalid --backend value '{}'. Expected one of: llvm, cranelift", value))?;
+    if !is_native_codegen_backend_available(backend) {
+        return Err(format!(
+            "native backend '{}' is not available in this build; rebuild the Rust driver with --features llvm or use --backend cranelift",
+            backend
+        ));
+    }
+    Ok(backend.to_string())
 }
 
 pub fn handle_native_build(args: &[String]) -> i32 {
@@ -383,16 +402,16 @@ pub fn handle_native_build(args: &[String]) -> i32 {
         ..Default::default()
     };
     if !backend.is_empty() {
-        // Normalize backend aliases
-        let normalized = match backend.as_str() {
-            "llvm-lib" | "llvmlib" => "llvm".to_string(),
-            other => other.to_string(),
+        let normalized = match normalize_backend(&backend) {
+            Ok(value) => value,
+            Err(err) => {
+                eprintln!("error: {}", err);
+                return 1;
+            }
         };
         config.backend = normalized.clone();
-        // Set env var so compile_file_to_object can select backend
-        if normalized != "cranelift" {
-            std::env::set_var("SIMPLE_BACKEND", &normalized);
-        }
+        // Set env var so compile_file_to_object can select backend.
+        std::env::set_var("SIMPLE_BACKEND", &normalized);
     }
 
     // Set target override for compile_file_to_object (thread-safe global)
@@ -448,6 +467,50 @@ pub fn handle_native_build(args: &[String]) -> i32 {
             eprintln!("Build failed: {}", e);
             1
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::normalize_backend;
+
+    #[test]
+    fn normalizes_llvm_aliases() {
+        let expected = if cfg!(feature = "llvm") {
+            Ok("llvm".to_string())
+        } else {
+            Err("not available in this build")
+        };
+        match (normalize_backend("llvm-lib"), expected) {
+            (Ok(actual), Ok(expected)) => assert_eq!(actual, expected),
+            (Err(actual), Err(expected)) => assert!(actual.contains(expected)),
+            (actual, expected) => panic!("unexpected result: {:?}, expected {:?}", actual, expected),
+        }
+    }
+
+    #[test]
+    fn accepts_cranelift_backend() {
+        assert_eq!(normalize_backend("cranelift").unwrap(), "cranelift");
+    }
+
+    #[cfg(feature = "llvm")]
+    #[test]
+    fn accepts_llvm_when_feature_enabled() {
+        assert_eq!(normalize_backend("llvm").unwrap(), "llvm");
+    }
+
+    #[cfg(not(feature = "llvm"))]
+    #[test]
+    fn rejects_llvm_when_feature_disabled() {
+        let err = normalize_backend("llvm").unwrap_err();
+        assert!(err.contains("not available in this build"));
+        assert!(err.contains("--features llvm"));
+    }
+
+    #[test]
+    fn rejects_unknown_backend() {
+        let err = normalize_backend("c").unwrap_err();
+        assert!(err.contains("invalid --backend value"));
     }
 }
 

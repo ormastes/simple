@@ -3,8 +3,14 @@
 use super::{
     active_collection_simd_tier,
     rt_array_clear,
+    rt_array_extend_i64,
+    rt_array_free,
     rt_array_get,
     rt_array_len,
+    rt_array_push_no_grow,
+    rt_byte_array_new,
+    rt_bytes_u32_le_at,
+    rt_bytes_u64_le_at,
     rt_bytes_u8_at,
     rt_bytes_u8_set,
     // Array functions
@@ -154,6 +160,29 @@ fn test_bytes_u8_set_fast_path() {
     assert!(rt_bytes_u8_set(array, -1, 7));
     assert_eq!(rt_bytes_u8_at(array, 2), 7);
     assert!(!rt_bytes_u8_set(array, 3, 9));
+}
+
+#[test]
+fn test_byte_array_packed_storage_fast_path() {
+    let array = rt_byte_array_new(2);
+    let second = rt_byte_array_new(1);
+
+    assert!(rt_array_push(array, RuntimeValue::from_int(1)));
+    assert!(rt_array_push(array, RuntimeValue::from_int(0x1ff)));
+    assert!(rt_array_push(array, RuntimeValue::from_int(3)));
+    assert!(rt_array_push_no_grow(second, RuntimeValue::from_int(4)));
+    assert!(rt_array_extend_i64(array, second, 1));
+
+    assert_eq!(rt_array_len(array), 4);
+    assert_eq!(rt_array_get(array, 1).as_int(), 0xff);
+    assert_eq!(rt_bytes_u8_at(array, -1), 4);
+    assert_eq!(rt_bytes_u32_le_at(array, 0), 0x0403_ff01);
+    assert_eq!(rt_bytes_u64_le_at(array, 0), 0);
+    assert!(rt_bytes_u8_set(array, 0, 0x102));
+    assert_eq!(rt_array_get(array, 0).as_int(), 2);
+    assert_eq!(rt_array_pop(array).as_int(), 4);
+    rt_array_free(second);
+    rt_array_free(array);
 }
 
 #[test]

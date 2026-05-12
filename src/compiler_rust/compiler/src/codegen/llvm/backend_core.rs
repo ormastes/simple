@@ -358,17 +358,86 @@ impl LlvmBackend {
         }
     }
 
+    #[cfg(feature = "llvm")]
+    fn target_machine_for_module(
+        &self,
+        target_triple: &inkwell::targets::TargetTriple,
+    ) -> Result<TargetMachine, CompileError> {
+        use simple_common::target::{TargetArch, TargetOS};
+
+        let triple = target_triple.as_str().to_string_lossy();
+        let target = LlvmTarget::from_triple(target_triple)
+            .map_err(|e| crate::error::factory::llvm_target_failed(&triple, &e))?;
+
+        let is_freestanding = matches!(self.target.os, TargetOS::SimpleOS | TargetOS::None);
+        let reloc_mode = if triple.contains("wasm") || is_freestanding {
+            RelocMode::Static
+        } else {
+            RelocMode::PIC
+        };
+
+        let is_riscv = matches!(self.target.arch, TargetArch::Riscv32 | TargetArch::Riscv64);
+        let code_model = if is_freestanding && is_riscv {
+            CodeModel::Medium
+        } else {
+            CodeModel::Default
+        };
+
+        let freestanding_riscv32_features = std::env::var("SIMPLE_RISCV32_LLVM_FEATURES").ok();
+        let features = match self.target.arch {
+            TargetArch::Riscv32 if is_freestanding => freestanding_riscv32_features.as_deref().unwrap_or("+m,+a,+c"),
+            TargetArch::Riscv32 => "+m,+a,+c",
+            TargetArch::Riscv64 => "+m,+a,+c",
+            _ => "",
+        };
+
+        let host_cpu_name;
+        let cpu_name = if matches!(self.cpu, TargetCpu::Native) {
+            host_cpu_name = TargetMachine::get_host_cpu_name().to_string();
+            host_cpu_name.as_str()
+        } else {
+            self.cpu
+                .llvm_cpu_name(self.target.arch)
+                .unwrap_or(match self.target.arch {
+                    TargetArch::X86_64 => "x86-64-v3",
+                    TargetArch::Aarch64 => "generic",
+                    TargetArch::X86 => "i686",
+                    TargetArch::Arm => "generic",
+                    TargetArch::Riscv64 => "generic-rv64",
+                    TargetArch::Riscv32 => "generic-rv32",
+                    TargetArch::Wasm32 | TargetArch::Wasm64 => "generic",
+                })
+        };
+
+        target
+            .create_target_machine(
+                target_triple,
+                cpu_name,
+                features,
+                self.llvm_optimization_level(),
+                reloc_mode,
+                code_model,
+            )
+            .ok_or_else(crate::error::factory::llvm_target_machine_failed)
+    }
+
     /// Create an LLVM module (feature-gated)
     #[cfg(feature = "llvm")]
     pub fn create_module(&self, name: &str) -> Result<(), CompileError> {
         use simple_common::target::{TargetArch, WasmRuntime};
+
+        LlvmTarget::initialize_all(&InitializationConfig::default());
 
         // Create module with the context
         let module = self.context.create_module(name);
 
         // Set target triple
         let triple = self.get_target_triple();
-        module.set_triple(&inkwell::targets::TargetTriple::create(&triple));
+        let target_triple = inkwell::targets::TargetTriple::create(&triple);
+        module.set_triple(&target_triple);
+
+        let target_machine = self.target_machine_for_module(&target_triple)?;
+        module.set_data_layout(&target_machine.get_target_data().get_data_layout());
 
         // Declare WASI imports for wasm32-wasi / wasm64-wasi targets
         if matches!(self.target.arch, TargetArch::Wasm32 | TargetArch::Wasm64) {
@@ -525,8 +594,6 @@ impl LlvmBackend {
     /// Emit object code from the module (feature-gated)
     #[cfg(feature = "llvm")]
     pub fn emit_object(&self, _module: &MirModule) -> Result<Vec<u8>, CompileError> {
-        use simple_common::target::{TargetArch, TargetOS};
-
         // Initialize LLVM targets
         LlvmTarget::initialize_all(&InitializationConfig::default());
 
@@ -539,74 +606,8 @@ impl LlvmBackend {
         let triple = self.get_target_triple();
         let target_triple = inkwell::targets::TargetTriple::create(&triple);
 
-        // Get target from triple
-        let target = LlvmTarget::from_triple(&target_triple)
-            .map_err(|e| crate::error::factory::llvm_target_failed(&triple, &e))?;
-
-        // Select relocation and code model based on target.
-        // - WASM: static (no PIC needed, no GOT in wasm).
-        // - Freestanding / baremetal ELF (SimpleOS, None): MUST be static.
-        //   PIC on freestanding riscv32 emits R_RISCV_GOT_HI20 / %pcrel_hi pairs that
-        //   resolve incorrectly when there is no .got section in the final link — the
-        //   auipc+jalr pair for function-pointer/indirect array calls collapses to a
-        //   self-call. Static reloc + medany code model matches the `-mcmodel=medany
-        //   -fno-pie` that the freestanding stub compile and linker already pass.
-        // - Hosted OSes: keep PIC.
-        let is_freestanding = matches!(self.target.os, TargetOS::SimpleOS | TargetOS::None);
-        let reloc_mode = if triple.contains("wasm") || is_freestanding {
-            RelocMode::Static
-        } else {
-            RelocMode::PIC
-        };
-
-        // RISC-V freestanding needs the "medany" (Medium) code model so that PC-relative
-        // symbol addressing can reach any address; the small/default model assumes the
-        // link range is [−2GiB, +2GiB] around address 0, which breaks at 0x8000_0000.
-        let is_riscv = matches!(self.target.arch, TargetArch::Riscv32 | TargetArch::Riscv64);
-        let code_model = if is_freestanding && is_riscv {
-            CodeModel::Medium
-        } else {
-            CodeModel::Default
-        };
-
-        // Allow per-lane freestanding RISC-V feature overrides so generated
-        // soft-core runners can pin payload ISA to the exact simulated core.
-        let freestanding_riscv32_features = std::env::var("SIMPLE_RISCV32_LLVM_FEATURES").ok();
-        let features = match self.target.arch {
-            TargetArch::Riscv32 if is_freestanding => freestanding_riscv32_features.as_deref().unwrap_or("+m,+a,+c"),
-            TargetArch::Riscv32 => "+m,+a,+c",
-            TargetArch::Riscv64 => "+m,+a,+c",
-            _ => "",
-        };
-
-        let host_cpu_name;
-        let cpu_name = if matches!(self.cpu, TargetCpu::Native) {
-            host_cpu_name = TargetMachine::get_host_cpu_name().to_string();
-            host_cpu_name.as_str()
-        } else {
-            self.cpu
-                .llvm_cpu_name(self.target.arch)
-                .unwrap_or(match self.target.arch {
-                    TargetArch::X86_64 => "x86-64-v3",
-                    TargetArch::Aarch64 => "generic",
-                    TargetArch::X86 => "i686",
-                    TargetArch::Arm => "generic",
-                    TargetArch::Riscv64 => "generic-rv64",
-                    TargetArch::Riscv32 => "generic-rv32",
-                    TargetArch::Wasm32 | TargetArch::Wasm64 => "generic",
-                })
-        };
-
-        let target_machine = target
-            .create_target_machine(
-                &target_triple,
-                cpu_name,
-                features,
-                self.llvm_optimization_level(),
-                reloc_mode,
-                code_model,
-            )
-            .ok_or_else(crate::error::factory::llvm_target_machine_failed)?;
+        let target_machine = self.target_machine_for_module(&target_triple)?;
+        module.set_data_layout(&target_machine.get_target_data().get_data_layout());
 
         self.optimize_module_ir(module, &target_machine)?;
 
@@ -621,6 +622,24 @@ impl LlvmBackend {
     #[cfg(not(feature = "llvm"))]
     pub fn emit_object(&self, _module: &MirModule) -> Result<Vec<u8>, CompileError> {
         Err(crate::error::factory::llvm_feature_not_enabled())
+    }
+}
+
+#[cfg(all(test, feature = "llvm"))]
+mod tests {
+    use super::LlvmBackend;
+    use simple_common::target::{Target, TargetArch, TargetOS};
+
+    #[test]
+    fn create_module_emits_target_triple_and_datalayout() {
+        let backend = LlvmBackend::new(Target::new(TargetArch::X86_64, TargetOS::Linux)).unwrap();
+
+        backend.create_module("layout_test").unwrap();
+        let ir = backend.get_ir().unwrap();
+
+        assert!(ir.contains("target triple"));
+        assert!(ir.contains("x86_64"));
+        assert!(ir.contains("target datalayout"));
     }
 }
 
@@ -696,7 +715,12 @@ impl NativeBackend for LlvmBackend {
 
         // First pass: forward-declare all function signatures
         // This is necessary so that functions can call each other regardless of compilation order
+        let referenced_function_names = crate::codegen::common_backend::referenced_call_names(&module.functions);
         for func in &module.functions {
+            let has_body = !func.blocks.is_empty();
+            if !has_body && !referenced_function_names.contains(func.name.as_str()) {
+                continue;
+            }
             let param_types: Vec<_> = func.params.iter().map(|p| p.ty).collect();
             // Resolve through import_map/use_map to get the mangled name
             // (e.g., "exit" -> "app__io__cli_ops__exit") to avoid symbol collisions
@@ -706,12 +730,7 @@ impl NativeBackend for LlvmBackend {
                 .or_else(|| self.import_map.get(&func.name))
                 .map(|s| s.as_str())
                 .unwrap_or(&func.name);
-            self.declare_function_with_linkage(
-                resolved_name,
-                &param_types,
-                &func.return_type,
-                !func.blocks.is_empty(),
-            )?;
+            self.declare_function_with_linkage(resolved_name, &param_types, &func.return_type, has_body)?;
         }
         #[cfg(feature = "llvm")]
         self.declare_dot_aliases_for_methods();

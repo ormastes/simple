@@ -8,6 +8,8 @@ use inkwell::module::Module;
 #[cfg(feature = "llvm")]
 use inkwell::types::BasicTypeEnum;
 #[cfg(feature = "llvm")]
+use inkwell::values::BasicValue;
+#[cfg(feature = "llvm")]
 use inkwell::IntPredicate;
 
 /// Map Simple builtin names to runtime FFI function names.
@@ -151,6 +153,139 @@ impl LlvmBackend {
     // Call Instructions
     // ============================================================================
 
+    #[cfg(feature = "llvm")]
+    pub(in crate::codegen::llvm) fn compile_inline_len(
+        &self,
+        dest: Option<crate::mir::VReg>,
+        args: &[crate::mir::VReg],
+        vreg_map: &mut VRegMap,
+        builder: &Builder<'static>,
+    ) -> Result<bool, CompileError> {
+        if args.len() != 1 {
+            return Ok(false);
+        }
+        let Some(dest) = dest else {
+            return Ok(false);
+        };
+
+        let current_block = builder
+            .get_insert_block()
+            .ok_or_else(|| CompileError::semantic("LLVM builder has no insert block for rt_len".to_string()))?;
+        let function = current_block
+            .get_parent()
+            .ok_or_else(|| CompileError::semantic("LLVM insert block has no parent function".to_string()))?;
+
+        let i64_type = self.runtime_int_type();
+        let i8_type = self.context.i8_type();
+        let ptr_type = self.context.ptr_type(inkwell::AddressSpace::default());
+        let invalid = i64_type.const_int((-1i64) as u64, true);
+
+        let value = self
+            .coerce_value_to_type(self.get_vreg(&args[0], vreg_map)?, Some(i64_type.into()), builder)?
+            .into_int_value();
+        let tag = builder
+            .build_and(value, i64_type.const_int(7, false), "len_tag")
+            .map_err(|e| crate::error::factory::llvm_build_failed("len tag", &e))?;
+        let is_heap = builder
+            .build_int_compare(IntPredicate::EQ, tag, i64_type.const_int(1, false), "len_is_heap")
+            .map_err(|e| crate::error::factory::llvm_build_failed("len heap check", &e))?;
+
+        let type_block = self.context.append_basic_block(function, "len_type");
+        let len_block = self.context.append_basic_block(function, "len_load");
+        let done_block = self.context.append_basic_block(function, "len_done");
+        builder
+            .build_conditional_branch(is_heap, type_block, done_block)
+            .map_err(|e| crate::error::factory::llvm_build_failed("len heap branch", &e))?;
+
+        builder.position_at_end(type_block);
+        let ptr_bits = builder
+            .build_and(value, i64_type.const_int(!7u64, false), "len_ptr_bits")
+            .map_err(|e| crate::error::factory::llvm_build_failed("len ptr bits", &e))?;
+        let object_ptr = builder
+            .build_int_to_ptr(ptr_bits, ptr_type, "len_object_ptr")
+            .map_err(|e| crate::error::factory::llvm_build_failed("len int_to_ptr", &e))?;
+        let object_type = builder
+            .build_load(i8_type, object_ptr, "len_object_type")
+            .map_err(|e| crate::error::factory::llvm_build_failed("len object type load", &e))?
+            .into_int_value();
+        let is_string = builder
+            .build_int_compare(
+                IntPredicate::EQ,
+                object_type,
+                i8_type.const_int(1, false),
+                "len_is_string",
+            )
+            .map_err(|e| crate::error::factory::llvm_build_failed("len string check", &e))?;
+        let is_array = builder
+            .build_int_compare(
+                IntPredicate::EQ,
+                object_type,
+                i8_type.const_int(2, false),
+                "len_is_array",
+            )
+            .map_err(|e| crate::error::factory::llvm_build_failed("len array check", &e))?;
+        let is_dict = builder
+            .build_int_compare(
+                IntPredicate::EQ,
+                object_type,
+                i8_type.const_int(3, false),
+                "len_is_dict",
+            )
+            .map_err(|e| crate::error::factory::llvm_build_failed("len dict check", &e))?;
+        let is_tuple = builder
+            .build_int_compare(
+                IntPredicate::EQ,
+                object_type,
+                i8_type.const_int(4, false),
+                "len_is_tuple",
+            )
+            .map_err(|e| crate::error::factory::llvm_build_failed("len tuple check", &e))?;
+        let string_or_array = builder
+            .build_or(is_string, is_array, "len_string_or_array")
+            .map_err(|e| crate::error::factory::llvm_build_failed("len collection or", &e))?;
+        let dict_or_tuple = builder
+            .build_or(is_dict, is_tuple, "len_dict_or_tuple")
+            .map_err(|e| crate::error::factory::llvm_build_failed("len collection or", &e))?;
+        let is_collection = builder
+            .build_or(string_or_array, dict_or_tuple, "len_is_collection")
+            .map_err(|e| crate::error::factory::llvm_build_failed("len collection check", &e))?;
+        builder
+            .build_conditional_branch(is_collection, len_block, done_block)
+            .map_err(|e| crate::error::factory::llvm_build_failed("len type branch", &e))?;
+        let type_loaded_block = builder
+            .get_insert_block()
+            .ok_or_else(|| CompileError::semantic("LLVM len type block missing".to_string()))?;
+
+        builder.position_at_end(len_block);
+        let len_ptr = unsafe {
+            builder
+                .build_gep(i8_type, object_ptr, &[i64_type.const_int(8, false)], "len_ptr")
+                .map_err(|e| crate::error::factory::llvm_build_failed("len gep", &e))?
+        };
+        let len = builder
+            .build_load(i64_type, len_ptr, "len_value")
+            .map_err(|e| crate::error::factory::llvm_build_failed("len load", &e))?
+            .into_int_value();
+        builder
+            .build_unconditional_branch(done_block)
+            .map_err(|e| crate::error::factory::llvm_build_failed("len done branch", &e))?;
+        let len_loaded_block = builder
+            .get_insert_block()
+            .ok_or_else(|| CompileError::semantic("LLVM len load block missing".to_string()))?;
+
+        builder.position_at_end(done_block);
+        let phi = builder
+            .build_phi(i64_type, "rt_len_inline")
+            .map_err(|e| crate::error::factory::llvm_build_failed("len phi", &e))?;
+        phi.add_incoming(&[
+            (&invalid, current_block),
+            (&invalid, type_loaded_block),
+            (&len, len_loaded_block),
+        ]);
+        vreg_map.insert(dest, phi.as_basic_value());
+        Ok(true)
+    }
+
     /// Expand text RuntimeValue arguments to (ptr, len) pairs for FFI calls.
     /// Calls rt_string_data and rt_string_len at runtime on each text argument.
     #[cfg(feature = "llvm")]
@@ -209,6 +344,7 @@ impl LlvmBackend {
         args: &[crate::mir::VReg],
         vreg_map: &mut VRegMap,
         builder: &Builder<'static>,
+        trusted_array: bool,
     ) -> Result<bool, CompileError> {
         if args.len() != 2 {
             return Ok(false);
@@ -236,39 +372,51 @@ impl LlvmBackend {
             .into_int_value();
 
         let tag_mask = i64_type.const_int(7, false);
-        let heap_tag = i64_type.const_int(1, false);
-        let tag = builder
-            .build_and(array, tag_mask, "bytes_tag")
-            .map_err(|e| crate::error::factory::llvm_build_failed("bytes tag", &e))?;
-        let is_heap = builder
-            .build_int_compare(IntPredicate::EQ, tag, heap_tag, "bytes_is_heap")
-            .map_err(|e| crate::error::factory::llvm_build_failed("bytes heap check", &e))?;
-
-        let type_block = self.context.append_basic_block(function, "bytes_type");
         let bounds_block = self.context.append_basic_block(function, "bytes_bounds");
         let load_block = self.context.append_basic_block(function, "bytes_load");
         let done_block = self.context.append_basic_block(function, "bytes_done");
-        builder
-            .build_conditional_branch(is_heap, type_block, done_block)
-            .map_err(|e| crate::error::factory::llvm_build_failed("bytes heap branch", &e))?;
-
-        builder.position_at_end(type_block);
         let ptr_bits = builder
             .build_and(array, i64_type.const_int(!7u64, false), "bytes_ptr_bits")
             .map_err(|e| crate::error::factory::llvm_build_failed("bytes ptr bits", &e))?;
         let array_ptr = builder
             .build_int_to_ptr(ptr_bits, ptr_type, "bytes_array_ptr")
             .map_err(|e| crate::error::factory::llvm_build_failed("bytes int_to_ptr", &e))?;
-        let object_type = builder
-            .build_load(i8_type, array_ptr, "bytes_object_type")
-            .map_err(|e| crate::error::factory::llvm_build_failed("bytes object type load", &e))?
-            .into_int_value();
-        let is_array = builder
-            .build_int_compare(IntPredicate::EQ, object_type, i8_type.const_int(2, false), "bytes_is_array")
-            .map_err(|e| crate::error::factory::llvm_build_failed("bytes array check", &e))?;
-        builder
-            .build_conditional_branch(is_array, bounds_block, done_block)
-            .map_err(|e| crate::error::factory::llvm_build_failed("bytes type branch", &e))?;
+        let type_block = if trusted_array {
+            builder
+                .build_unconditional_branch(bounds_block)
+                .map_err(|e| crate::error::factory::llvm_build_failed("typed bytes bounds branch", &e))?;
+            None
+        } else {
+            let heap_tag = i64_type.const_int(1, false);
+            let tag = builder
+                .build_and(array, tag_mask, "bytes_tag")
+                .map_err(|e| crate::error::factory::llvm_build_failed("bytes tag", &e))?;
+            let is_heap = builder
+                .build_int_compare(IntPredicate::EQ, tag, heap_tag, "bytes_is_heap")
+                .map_err(|e| crate::error::factory::llvm_build_failed("bytes heap check", &e))?;
+            let type_block = self.context.append_basic_block(function, "bytes_type");
+            builder
+                .build_conditional_branch(is_heap, type_block, done_block)
+                .map_err(|e| crate::error::factory::llvm_build_failed("bytes heap branch", &e))?;
+
+            builder.position_at_end(type_block);
+            let object_type = builder
+                .build_load(i8_type, array_ptr, "bytes_object_type")
+                .map_err(|e| crate::error::factory::llvm_build_failed("bytes object type load", &e))?
+                .into_int_value();
+            let is_array = builder
+                .build_int_compare(
+                    IntPredicate::EQ,
+                    object_type,
+                    i8_type.const_int(2, false),
+                    "bytes_is_array",
+                )
+                .map_err(|e| crate::error::factory::llvm_build_failed("bytes array check", &e))?;
+            builder
+                .build_conditional_branch(is_array, bounds_block, done_block)
+                .map_err(|e| crate::error::factory::llvm_build_failed("bytes type branch", &e))?;
+            Some(type_block)
+        };
 
         builder.position_at_end(bounds_block);
         let len_ptr = unsafe {
@@ -314,6 +462,53 @@ impl LlvmBackend {
             .build_load(ptr_type, data_field_ptr, "bytes_data")
             .map_err(|e| crate::error::factory::llvm_build_failed("bytes data load", &e))?
             .into_pointer_value();
+        let packed_block = self.context.append_basic_block(function, "bytes_packed_load");
+        let slot_block = self.context.append_basic_block(function, "bytes_slot_load");
+        let gc_flags_ptr = unsafe {
+            builder
+                .build_gep(
+                    i8_type,
+                    array_ptr,
+                    &[i64_type.const_int(1, false)],
+                    "bytes_gc_flags_ptr",
+                )
+                .map_err(|e| crate::error::factory::llvm_build_failed("bytes gc flags gep", &e))?
+        };
+        let gc_flags = builder
+            .build_load(i8_type, gc_flags_ptr, "bytes_gc_flags")
+            .map_err(|e| crate::error::factory::llvm_build_failed("bytes gc flags load", &e))?
+            .into_int_value();
+        let byte_packed = builder
+            .build_and(gc_flags, i8_type.const_int(8, false), "bytes_packed_flag")
+            .map_err(|e| crate::error::factory::llvm_build_failed("bytes packed flag", &e))?;
+        let is_byte_packed = builder
+            .build_int_compare(IntPredicate::NE, byte_packed, i8_type.const_zero(), "bytes_is_packed")
+            .map_err(|e| crate::error::factory::llvm_build_failed("bytes packed check", &e))?;
+        builder
+            .build_conditional_branch(is_byte_packed, packed_block, slot_block)
+            .map_err(|e| crate::error::factory::llvm_build_failed("bytes packed branch", &e))?;
+
+        builder.position_at_end(packed_block);
+        let packed_ptr = unsafe {
+            builder
+                .build_gep(i8_type, data_ptr, &[normalized_index], "bytes_packed_elem")
+                .map_err(|e| crate::error::factory::llvm_build_failed("bytes packed gep", &e))?
+        };
+        let packed_byte = builder
+            .build_load(i8_type, packed_ptr, "bytes_packed_byte")
+            .map_err(|e| crate::error::factory::llvm_build_failed("bytes packed load", &e))?
+            .into_int_value();
+        let packed_value = builder
+            .build_int_z_extend(packed_byte, i64_type, "bytes_packed_value")
+            .map_err(|e| crate::error::factory::llvm_build_failed("bytes packed zext", &e))?;
+        builder
+            .build_unconditional_branch(done_block)
+            .map_err(|e| crate::error::factory::llvm_build_failed("bytes packed done branch", &e))?;
+        let packed_loaded_block = builder
+            .get_insert_block()
+            .ok_or_else(|| CompileError::semantic("LLVM bytes packed load block missing".to_string()))?;
+
+        builder.position_at_end(slot_block);
         let elem_ptr = unsafe {
             builder
                 .build_gep(i64_type, data_ptr, &[normalized_index], "bytes_elem")
@@ -353,7 +548,572 @@ impl LlvmBackend {
         let phi = builder
             .build_phi(i64_type, "bytes_u8_at")
             .map_err(|e| crate::error::factory::llvm_build_failed("bytes phi", &e))?;
-        phi.add_incoming(&[(&zero, current_block), (&zero, type_block), (&zero, bounds_block), (&value, loaded_block)]);
+        if let Some(type_block) = type_block {
+            phi.add_incoming(&[
+                (&zero, current_block),
+                (&zero, type_block),
+                (&zero, bounds_block),
+                (&packed_value, packed_loaded_block),
+                (&value, loaded_block),
+            ]);
+        } else {
+            phi.add_incoming(&[
+                (&zero, bounds_block),
+                (&packed_value, packed_loaded_block),
+                (&value, loaded_block),
+            ]);
+        }
+        vreg_map.insert(dest, phi.as_basic_value());
+        Ok(true)
+    }
+
+    #[cfg(feature = "llvm")]
+    fn compile_inline_typed_bytes_le_unchecked(
+        &self,
+        dest: Option<crate::mir::VReg>,
+        args: &[crate::mir::VReg],
+        vreg_map: &mut VRegMap,
+        builder: &Builder<'static>,
+        width: u64,
+    ) -> Result<bool, CompileError> {
+        if args.len() != 2 {
+            return Ok(false);
+        }
+        let Some(dest) = dest else {
+            return Ok(false);
+        };
+
+        let i64_type = self.runtime_int_type();
+        let i8_type = self.context.i8_type();
+        let ptr_type = self.context.ptr_type(inkwell::AddressSpace::default());
+        let array = self
+            .coerce_value_to_type(self.get_vreg(&args[0], vreg_map)?, Some(i64_type.into()), builder)?
+            .into_int_value();
+        let index = self
+            .coerce_value_to_type(self.get_vreg(&args[1], vreg_map)?, Some(i64_type.into()), builder)?
+            .into_int_value();
+        let ptr_bits = builder
+            .build_and(
+                array,
+                i64_type.const_int(!7u64, false),
+                "typed_bytes_unchecked_ptr_bits",
+            )
+            .map_err(|e| crate::error::factory::llvm_build_failed("typed bytes unchecked ptr bits", &e))?;
+        let array_ptr = builder
+            .build_int_to_ptr(ptr_bits, ptr_type, "typed_bytes_unchecked_array_ptr")
+            .map_err(|e| crate::error::factory::llvm_build_failed("typed bytes unchecked int_to_ptr", &e))?;
+        let data_field_ptr = unsafe {
+            builder
+                .build_gep(
+                    i8_type,
+                    array_ptr,
+                    &[i64_type.const_int(24, false)],
+                    "typed_bytes_unchecked_data_field",
+                )
+                .map_err(|e| crate::error::factory::llvm_build_failed("typed bytes unchecked data gep", &e))?
+        };
+        let data_ptr = builder
+            .build_load(ptr_type, data_field_ptr, "typed_bytes_unchecked_data")
+            .map_err(|e| crate::error::factory::llvm_build_failed("typed bytes unchecked data load", &e))?
+            .into_pointer_value();
+        let ptr = unsafe {
+            builder
+                .build_gep(i8_type, data_ptr, &[index], "typed_bytes_unchecked_elem")
+                .map_err(|e| crate::error::factory::llvm_build_failed("typed bytes unchecked gep", &e))?
+        };
+        let value = if width == 8 {
+            let loaded = builder
+                .build_load(i64_type, ptr, "typed_bytes_unchecked_u64")
+                .map_err(|e| crate::error::factory::llvm_build_failed("typed bytes unchecked u64 load", &e))?;
+            if let Some(inst) = loaded.as_instruction_value() {
+                inst.set_alignment(1)
+                    .map_err(|e| crate::error::factory::llvm_build_failed("typed bytes unchecked u64 align", &e))?;
+            }
+            loaded.into_int_value()
+        } else {
+            let i32_type = self.context.i32_type();
+            let loaded = builder
+                .build_load(i32_type, ptr, "typed_bytes_unchecked_u32")
+                .map_err(|e| crate::error::factory::llvm_build_failed("typed bytes unchecked u32 load", &e))?;
+            if let Some(inst) = loaded.as_instruction_value() {
+                inst.set_alignment(1)
+                    .map_err(|e| crate::error::factory::llvm_build_failed("typed bytes unchecked u32 align", &e))?;
+            }
+            builder
+                .build_int_z_extend(loaded.into_int_value(), i64_type, "typed_bytes_unchecked_u32_wide")
+                .map_err(|e| crate::error::factory::llvm_build_failed("typed bytes unchecked u32 zext", &e))?
+        };
+        vreg_map.insert(dest, value.into());
+        Ok(true)
+    }
+
+    #[cfg(feature = "llvm")]
+    fn compile_inline_typed_bytes_le_set_unchecked(
+        &self,
+        dest: Option<crate::mir::VReg>,
+        args: &[crate::mir::VReg],
+        vreg_map: &mut VRegMap,
+        builder: &Builder<'static>,
+        width: u64,
+    ) -> Result<bool, CompileError> {
+        if args.len() != 3 {
+            return Ok(false);
+        }
+
+        let i64_type = self.runtime_int_type();
+        let i8_type = self.context.i8_type();
+        let ptr_type = self.context.ptr_type(inkwell::AddressSpace::default());
+        let array = self
+            .coerce_value_to_type(self.get_vreg(&args[0], vreg_map)?, Some(i64_type.into()), builder)?
+            .into_int_value();
+        let index = self
+            .coerce_value_to_type(self.get_vreg(&args[1], vreg_map)?, Some(i64_type.into()), builder)?
+            .into_int_value();
+        let value = self
+            .coerce_value_to_type(self.get_vreg(&args[2], vreg_map)?, Some(i64_type.into()), builder)?
+            .into_int_value();
+        let ptr_bits = builder
+            .build_and(array, i64_type.const_int(!7u64, false), "typed_bytes_set_ptr_bits")
+            .map_err(|e| crate::error::factory::llvm_build_failed("typed bytes set ptr bits", &e))?;
+        let array_ptr = builder
+            .build_int_to_ptr(ptr_bits, ptr_type, "typed_bytes_set_array_ptr")
+            .map_err(|e| crate::error::factory::llvm_build_failed("typed bytes set int_to_ptr", &e))?;
+        let data_field_ptr = unsafe {
+            builder
+                .build_gep(
+                    i8_type,
+                    array_ptr,
+                    &[i64_type.const_int(24, false)],
+                    "typed_bytes_set_data_field",
+                )
+                .map_err(|e| crate::error::factory::llvm_build_failed("typed bytes set data gep", &e))?
+        };
+        let data_ptr = builder
+            .build_load(ptr_type, data_field_ptr, "typed_bytes_set_data")
+            .map_err(|e| crate::error::factory::llvm_build_failed("typed bytes set data load", &e))?
+            .into_pointer_value();
+        let ptr = unsafe {
+            builder
+                .build_gep(i8_type, data_ptr, &[index], "typed_bytes_set_elem")
+                .map_err(|e| crate::error::factory::llvm_build_failed("typed bytes set gep", &e))?
+        };
+        let store = if width == 8 {
+            builder
+                .build_store(ptr, value)
+                .map_err(|e| crate::error::factory::llvm_build_failed("typed bytes set u64 store", &e))?
+        } else {
+            let i32_type = self.context.i32_type();
+            let narrowed = builder
+                .build_int_truncate(value, i32_type, "typed_bytes_set_u32")
+                .map_err(|e| crate::error::factory::llvm_build_failed("typed bytes set u32 trunc", &e))?;
+            builder
+                .build_store(ptr, narrowed)
+                .map_err(|e| crate::error::factory::llvm_build_failed("typed bytes set u32 store", &e))?
+        };
+        store
+            .set_alignment(1)
+            .map_err(|e| crate::error::factory::llvm_build_failed("typed bytes set align", &e))?;
+        if let Some(dest) = dest {
+            vreg_map.insert(dest, self.context.bool_type().const_int(1, false).into());
+        }
+        Ok(true)
+    }
+
+    #[cfg(feature = "llvm")]
+    fn compile_inline_typed_bytes_le_at(
+        &self,
+        dest: Option<crate::mir::VReg>,
+        args: &[crate::mir::VReg],
+        vreg_map: &mut VRegMap,
+        builder: &Builder<'static>,
+        width: u64,
+    ) -> Result<bool, CompileError> {
+        if args.len() != 2 {
+            return Ok(false);
+        }
+        let Some(dest) = dest else {
+            return Ok(false);
+        };
+
+        let current_block = builder.get_insert_block().ok_or_else(|| {
+            CompileError::semantic("LLVM builder has no insert block for rt_typed_bytes_le_at".to_string())
+        })?;
+        let function = current_block
+            .get_parent()
+            .ok_or_else(|| CompileError::semantic("LLVM insert block has no parent function".to_string()))?;
+
+        let i64_type = self.runtime_int_type();
+        let i8_type = self.context.i8_type();
+        let ptr_type = self.context.ptr_type(inkwell::AddressSpace::default());
+        let zero = i64_type.const_zero();
+
+        let array = self
+            .coerce_value_to_type(self.get_vreg(&args[0], vreg_map)?, Some(i64_type.into()), builder)?
+            .into_int_value();
+        let index = self
+            .coerce_value_to_type(self.get_vreg(&args[1], vreg_map)?, Some(i64_type.into()), builder)?
+            .into_int_value();
+        let ptr_bits = builder
+            .build_and(array, i64_type.const_int(!7u64, false), "typed_bytes_le_ptr_bits")
+            .map_err(|e| crate::error::factory::llvm_build_failed("typed bytes le ptr bits", &e))?;
+        let array_ptr = builder
+            .build_int_to_ptr(ptr_bits, ptr_type, "typed_bytes_le_array_ptr")
+            .map_err(|e| crate::error::factory::llvm_build_failed("typed bytes le int_to_ptr", &e))?;
+
+        let load_block = self.context.append_basic_block(function, "typed_bytes_le_load");
+        let done_block = self.context.append_basic_block(function, "typed_bytes_le_done");
+
+        let len_ptr = unsafe {
+            builder
+                .build_gep(
+                    i8_type,
+                    array_ptr,
+                    &[i64_type.const_int(8, false)],
+                    "typed_bytes_le_len_ptr",
+                )
+                .map_err(|e| crate::error::factory::llvm_build_failed("typed bytes le len gep", &e))?
+        };
+        let len = builder
+            .build_load(i64_type, len_ptr, "typed_bytes_le_len")
+            .map_err(|e| crate::error::factory::llvm_build_failed("typed bytes le len load", &e))?
+            .into_int_value();
+        let ge_zero = builder
+            .build_int_compare(IntPredicate::SGE, index, zero, "typed_bytes_le_ge_zero")
+            .map_err(|e| crate::error::factory::llvm_build_failed("typed bytes le ge zero", &e))?;
+        let end = builder
+            .build_int_add(index, i64_type.const_int(width, false), "typed_bytes_le_end")
+            .map_err(|e| crate::error::factory::llvm_build_failed("typed bytes le end", &e))?;
+        let le_len = builder
+            .build_int_compare(IntPredicate::SLE, end, len, "typed_bytes_le_in_len")
+            .map_err(|e| crate::error::factory::llvm_build_failed("typed bytes le len check", &e))?;
+        let in_bounds = builder
+            .build_and(ge_zero, le_len, "typed_bytes_le_in_bounds")
+            .map_err(|e| crate::error::factory::llvm_build_failed("typed bytes le bounds and", &e))?;
+        builder
+            .build_conditional_branch(in_bounds, load_block, done_block)
+            .map_err(|e| crate::error::factory::llvm_build_failed("typed bytes le bounds branch", &e))?;
+
+        builder.position_at_end(load_block);
+        let data_field_ptr = unsafe {
+            builder
+                .build_gep(
+                    i8_type,
+                    array_ptr,
+                    &[i64_type.const_int(24, false)],
+                    "typed_bytes_le_data_field",
+                )
+                .map_err(|e| crate::error::factory::llvm_build_failed("typed bytes le data gep", &e))?
+        };
+        let data_ptr = builder
+            .build_load(ptr_type, data_field_ptr, "typed_bytes_le_data")
+            .map_err(|e| crate::error::factory::llvm_build_failed("typed bytes le data load", &e))?
+            .into_pointer_value();
+        let ptr = unsafe {
+            builder
+                .build_gep(i8_type, data_ptr, &[index], "typed_bytes_le_elem")
+                .map_err(|e| crate::error::factory::llvm_build_failed("typed bytes le gep", &e))?
+        };
+        let value = if width == 8 {
+            let loaded = builder
+                .build_load(i64_type, ptr, "typed_bytes_le_u64")
+                .map_err(|e| crate::error::factory::llvm_build_failed("typed bytes le u64 load", &e))?;
+            if let Some(inst) = loaded.as_instruction_value() {
+                inst.set_alignment(1)
+                    .map_err(|e| crate::error::factory::llvm_build_failed("typed bytes le u64 align", &e))?;
+            }
+            loaded.into_int_value()
+        } else {
+            let i32_type = self.context.i32_type();
+            let loaded = builder
+                .build_load(i32_type, ptr, "typed_bytes_le_u32")
+                .map_err(|e| crate::error::factory::llvm_build_failed("typed bytes le u32 load", &e))?;
+            if let Some(inst) = loaded.as_instruction_value() {
+                inst.set_alignment(1)
+                    .map_err(|e| crate::error::factory::llvm_build_failed("typed bytes le u32 align", &e))?;
+            }
+            builder
+                .build_int_z_extend(loaded.into_int_value(), i64_type, "typed_bytes_le_u32_wide")
+                .map_err(|e| crate::error::factory::llvm_build_failed("typed bytes le u32 zext", &e))?
+        };
+        builder
+            .build_unconditional_branch(done_block)
+            .map_err(|e| crate::error::factory::llvm_build_failed("typed bytes le done branch", &e))?;
+        let loaded_block = builder
+            .get_insert_block()
+            .ok_or_else(|| CompileError::semantic("LLVM typed bytes le block missing".to_string()))?;
+
+        builder.position_at_end(done_block);
+        let phi = builder
+            .build_phi(i64_type, "typed_bytes_le_at")
+            .map_err(|e| crate::error::factory::llvm_build_failed("typed bytes le phi", &e))?;
+        phi.add_incoming(&[(&zero, current_block), (&value, loaded_block)]);
+        vreg_map.insert(dest, phi.as_basic_value());
+        Ok(true)
+    }
+
+    #[cfg(feature = "llvm")]
+    fn compile_inline_bytes_le_at(
+        &self,
+        dest: Option<crate::mir::VReg>,
+        args: &[crate::mir::VReg],
+        vreg_map: &mut VRegMap,
+        builder: &Builder<'static>,
+        width: u64,
+    ) -> Result<bool, CompileError> {
+        if args.len() != 2 {
+            return Ok(false);
+        }
+        let Some(dest) = dest else {
+            return Ok(false);
+        };
+
+        let current_block = builder
+            .get_insert_block()
+            .ok_or_else(|| CompileError::semantic("LLVM builder has no insert block for rt_bytes_le_at".to_string()))?;
+        let function = current_block
+            .get_parent()
+            .ok_or_else(|| CompileError::semantic("LLVM insert block has no parent function".to_string()))?;
+
+        let i64_type = self.runtime_int_type();
+        let i8_type = self.context.i8_type();
+        let ptr_type = self.context.ptr_type(inkwell::AddressSpace::default());
+        let zero = i64_type.const_zero();
+        let tag_mask = i64_type.const_int(7, false);
+
+        let array = self
+            .coerce_value_to_type(self.get_vreg(&args[0], vreg_map)?, Some(i64_type.into()), builder)?
+            .into_int_value();
+        let index = self
+            .coerce_value_to_type(self.get_vreg(&args[1], vreg_map)?, Some(i64_type.into()), builder)?
+            .into_int_value();
+
+        let type_block = self.context.append_basic_block(function, "bytes_le_type");
+        let bounds_block = self.context.append_basic_block(function, "bytes_le_bounds");
+        let load_block = self.context.append_basic_block(function, "bytes_le_load");
+        let packed_block = self.context.append_basic_block(function, "bytes_le_packed");
+        let slot_block = self.context.append_basic_block(function, "bytes_le_slots");
+        let done_block = self.context.append_basic_block(function, "bytes_le_done");
+
+        let ptr_bits = builder
+            .build_and(array, i64_type.const_int(!7u64, false), "bytes_le_ptr_bits")
+            .map_err(|e| crate::error::factory::llvm_build_failed("bytes le ptr bits", &e))?;
+        let array_ptr = builder
+            .build_int_to_ptr(ptr_bits, ptr_type, "bytes_le_array_ptr")
+            .map_err(|e| crate::error::factory::llvm_build_failed("bytes le int_to_ptr", &e))?;
+        let tag = builder
+            .build_and(array, tag_mask, "bytes_le_tag")
+            .map_err(|e| crate::error::factory::llvm_build_failed("bytes le tag", &e))?;
+        let is_heap = builder
+            .build_int_compare(IntPredicate::EQ, tag, i64_type.const_int(1, false), "bytes_le_is_heap")
+            .map_err(|e| crate::error::factory::llvm_build_failed("bytes le heap check", &e))?;
+        builder
+            .build_conditional_branch(is_heap, type_block, done_block)
+            .map_err(|e| crate::error::factory::llvm_build_failed("bytes le heap branch", &e))?;
+
+        builder.position_at_end(type_block);
+        let object_type = builder
+            .build_load(i8_type, array_ptr, "bytes_le_object_type")
+            .map_err(|e| crate::error::factory::llvm_build_failed("bytes le object type load", &e))?
+            .into_int_value();
+        let is_array = builder
+            .build_int_compare(
+                IntPredicate::EQ,
+                object_type,
+                i8_type.const_int(2, false),
+                "bytes_le_is_array",
+            )
+            .map_err(|e| crate::error::factory::llvm_build_failed("bytes le array check", &e))?;
+        builder
+            .build_conditional_branch(is_array, bounds_block, done_block)
+            .map_err(|e| crate::error::factory::llvm_build_failed("bytes le type branch", &e))?;
+
+        builder.position_at_end(bounds_block);
+        let len_ptr = unsafe {
+            builder
+                .build_gep(i8_type, array_ptr, &[i64_type.const_int(8, false)], "bytes_le_len_ptr")
+                .map_err(|e| crate::error::factory::llvm_build_failed("bytes le len gep", &e))?
+        };
+        let len = builder
+            .build_load(i64_type, len_ptr, "bytes_le_len")
+            .map_err(|e| crate::error::factory::llvm_build_failed("bytes le len load", &e))?
+            .into_int_value();
+        let index_is_negative = builder
+            .build_int_compare(IntPredicate::SLT, index, zero, "bytes_le_index_negative")
+            .map_err(|e| crate::error::factory::llvm_build_failed("bytes le index compare", &e))?;
+        let negative_index = builder
+            .build_int_add(len, index, "bytes_le_negative_index")
+            .map_err(|e| crate::error::factory::llvm_build_failed("bytes le negative index", &e))?;
+        let normalized_index = builder
+            .build_select(index_is_negative, negative_index, index, "bytes_le_index")
+            .map_err(|e| crate::error::factory::llvm_build_failed("bytes le index select", &e))?
+            .into_int_value();
+        let ge_zero = builder
+            .build_int_compare(IntPredicate::SGE, normalized_index, zero, "bytes_le_ge_zero")
+            .map_err(|e| crate::error::factory::llvm_build_failed("bytes le ge zero", &e))?;
+        let end = builder
+            .build_int_add(normalized_index, i64_type.const_int(width, false), "bytes_le_end")
+            .map_err(|e| crate::error::factory::llvm_build_failed("bytes le end", &e))?;
+        let le_len = builder
+            .build_int_compare(IntPredicate::SLE, end, len, "bytes_le_in_len")
+            .map_err(|e| crate::error::factory::llvm_build_failed("bytes le len check", &e))?;
+        let in_bounds = builder
+            .build_and(ge_zero, le_len, "bytes_le_in_bounds")
+            .map_err(|e| crate::error::factory::llvm_build_failed("bytes le bounds and", &e))?;
+        builder
+            .build_conditional_branch(in_bounds, load_block, done_block)
+            .map_err(|e| crate::error::factory::llvm_build_failed("bytes le bounds branch", &e))?;
+
+        builder.position_at_end(load_block);
+        let data_field_ptr = unsafe {
+            builder
+                .build_gep(
+                    i8_type,
+                    array_ptr,
+                    &[i64_type.const_int(24, false)],
+                    "bytes_le_data_field",
+                )
+                .map_err(|e| crate::error::factory::llvm_build_failed("bytes le data gep", &e))?
+        };
+        let data_ptr = builder
+            .build_load(ptr_type, data_field_ptr, "bytes_le_data")
+            .map_err(|e| crate::error::factory::llvm_build_failed("bytes le data load", &e))?
+            .into_pointer_value();
+        let gc_flags_ptr = unsafe {
+            builder
+                .build_gep(
+                    i8_type,
+                    array_ptr,
+                    &[i64_type.const_int(1, false)],
+                    "bytes_le_gc_flags_ptr",
+                )
+                .map_err(|e| crate::error::factory::llvm_build_failed("bytes le gc flags gep", &e))?
+        };
+        let gc_flags = builder
+            .build_load(i8_type, gc_flags_ptr, "bytes_le_gc_flags")
+            .map_err(|e| crate::error::factory::llvm_build_failed("bytes le gc flags load", &e))?
+            .into_int_value();
+        let byte_packed = builder
+            .build_and(gc_flags, i8_type.const_int(8, false), "bytes_le_packed_flag")
+            .map_err(|e| crate::error::factory::llvm_build_failed("bytes le packed flag", &e))?;
+        let is_byte_packed = builder
+            .build_int_compare(
+                IntPredicate::NE,
+                byte_packed,
+                i8_type.const_zero(),
+                "bytes_le_is_packed",
+            )
+            .map_err(|e| crate::error::factory::llvm_build_failed("bytes le packed check", &e))?;
+        builder
+            .build_conditional_branch(is_byte_packed, packed_block, slot_block)
+            .map_err(|e| crate::error::factory::llvm_build_failed("bytes le packed branch", &e))?;
+
+        builder.position_at_end(packed_block);
+        let mut packed_value = zero;
+        for offset in 0..width {
+            let elem_index = builder
+                .build_int_add(
+                    normalized_index,
+                    i64_type.const_int(offset, false),
+                    "bytes_le_packed_index",
+                )
+                .map_err(|e| crate::error::factory::llvm_build_failed("bytes le packed index", &e))?;
+            let ptr = unsafe {
+                builder
+                    .build_gep(i8_type, data_ptr, &[elem_index], "bytes_le_packed_elem")
+                    .map_err(|e| crate::error::factory::llvm_build_failed("bytes le packed gep", &e))?
+            };
+            let byte = builder
+                .build_load(i8_type, ptr, "bytes_le_packed_byte")
+                .map_err(|e| crate::error::factory::llvm_build_failed("bytes le packed load", &e))?
+                .into_int_value();
+            let widened = builder
+                .build_int_z_extend(byte, i64_type, "bytes_le_packed_wide")
+                .map_err(|e| crate::error::factory::llvm_build_failed("bytes le packed zext", &e))?;
+            let shifted = if offset == 0 {
+                widened
+            } else {
+                builder
+                    .build_left_shift(widened, i64_type.const_int(offset * 8, false), "bytes_le_packed_shift")
+                    .map_err(|e| crate::error::factory::llvm_build_failed("bytes le packed shift", &e))?
+            };
+            packed_value = builder
+                .build_or(packed_value, shifted, "bytes_le_packed_acc")
+                .map_err(|e| crate::error::factory::llvm_build_failed("bytes le packed or", &e))?;
+        }
+        builder
+            .build_unconditional_branch(done_block)
+            .map_err(|e| crate::error::factory::llvm_build_failed("bytes le packed done branch", &e))?;
+        let packed_loaded_block = builder
+            .get_insert_block()
+            .ok_or_else(|| CompileError::semantic("LLVM bytes le packed block missing".to_string()))?;
+
+        builder.position_at_end(slot_block);
+        let mut slot_value = zero;
+        for offset in 0..width {
+            let elem_index = builder
+                .build_int_add(
+                    normalized_index,
+                    i64_type.const_int(offset, false),
+                    "bytes_le_slot_index",
+                )
+                .map_err(|e| crate::error::factory::llvm_build_failed("bytes le slot index", &e))?;
+            let elem_ptr = unsafe {
+                builder
+                    .build_gep(i64_type, data_ptr, &[elem_index], "bytes_le_slot_elem")
+                    .map_err(|e| crate::error::factory::llvm_build_failed("bytes le slot gep", &e))?
+            };
+            let raw = builder
+                .build_load(i64_type, elem_ptr, "bytes_le_raw")
+                .map_err(|e| crate::error::factory::llvm_build_failed("bytes le raw load", &e))?
+                .into_int_value();
+            let raw_tag = builder
+                .build_and(raw, tag_mask, "bytes_le_raw_tag")
+                .map_err(|e| crate::error::factory::llvm_build_failed("bytes le raw tag", &e))?;
+            let raw_is_int = builder
+                .build_int_compare(IntPredicate::EQ, raw_tag, zero, "bytes_le_raw_is_int")
+                .map_err(|e| crate::error::factory::llvm_build_failed("bytes le raw int check", &e))?;
+            let int_payload = builder
+                .build_right_shift(raw, i64_type.const_int(3, false), true, "bytes_le_int_payload")
+                .map_err(|e| crate::error::factory::llvm_build_failed("bytes le int payload", &e))?;
+            let int_byte = builder
+                .build_and(int_payload, i64_type.const_int(0xff, false), "bytes_le_int_byte")
+                .map_err(|e| crate::error::factory::llvm_build_failed("bytes le int mask", &e))?;
+            let raw_byte = builder
+                .build_and(raw, i64_type.const_int(0xff, false), "bytes_le_raw_byte")
+                .map_err(|e| crate::error::factory::llvm_build_failed("bytes le raw mask", &e))?;
+            let byte = builder
+                .build_select(raw_is_int, int_byte, raw_byte, "bytes_le_byte")
+                .map_err(|e| crate::error::factory::llvm_build_failed("bytes le byte select", &e))?
+                .into_int_value();
+            let shifted = if offset == 0 {
+                byte
+            } else {
+                builder
+                    .build_left_shift(byte, i64_type.const_int(offset * 8, false), "bytes_le_slot_shift")
+                    .map_err(|e| crate::error::factory::llvm_build_failed("bytes le slot shift", &e))?
+            };
+            slot_value = builder
+                .build_or(slot_value, shifted, "bytes_le_slot_acc")
+                .map_err(|e| crate::error::factory::llvm_build_failed("bytes le slot or", &e))?;
+        }
+        builder
+            .build_unconditional_branch(done_block)
+            .map_err(|e| crate::error::factory::llvm_build_failed("bytes le slot done branch", &e))?;
+        let slot_loaded_block = builder
+            .get_insert_block()
+            .ok_or_else(|| CompileError::semantic("LLVM bytes le slot block missing".to_string()))?;
+
+        builder.position_at_end(done_block);
+        let phi = builder
+            .build_phi(i64_type, "bytes_le_at")
+            .map_err(|e| crate::error::factory::llvm_build_failed("bytes le phi", &e))?;
+        phi.add_incoming(&[
+            (&zero, current_block),
+            (&zero, type_block),
+            (&zero, bounds_block),
+            (&packed_value, packed_loaded_block),
+            (&slot_value, slot_loaded_block),
+        ]);
         vreg_map.insert(dest, phi.as_basic_value());
         Ok(true)
     }
@@ -365,14 +1125,15 @@ impl LlvmBackend {
         args: &[crate::mir::VReg],
         vreg_map: &mut VRegMap,
         builder: &Builder<'static>,
+        trusted_array: bool,
     ) -> Result<bool, CompileError> {
         if args.len() != 3 {
             return Ok(false);
         }
 
-        let current_block = builder
-            .get_insert_block()
-            .ok_or_else(|| CompileError::semantic("LLVM builder has no insert block for rt_bytes_u8_set".to_string()))?;
+        let current_block = builder.get_insert_block().ok_or_else(|| {
+            CompileError::semantic("LLVM builder has no insert block for rt_bytes_u8_set".to_string())
+        })?;
         let function = current_block
             .get_parent()
             .ok_or_else(|| CompileError::semantic("LLVM insert block has no parent function".to_string()))?;
@@ -392,39 +1153,51 @@ impl LlvmBackend {
             .into_int_value();
 
         let tag_mask = i64_type.const_int(7, false);
-        let heap_tag = i64_type.const_int(1, false);
-        let tag = builder
-            .build_and(array, tag_mask, "bytes_set_tag")
-            .map_err(|e| crate::error::factory::llvm_build_failed("bytes set tag", &e))?;
-        let is_heap = builder
-            .build_int_compare(IntPredicate::EQ, tag, heap_tag, "bytes_set_is_heap")
-            .map_err(|e| crate::error::factory::llvm_build_failed("bytes set heap check", &e))?;
-
-        let type_block = self.context.append_basic_block(function, "bytes_set_type");
         let bounds_block = self.context.append_basic_block(function, "bytes_set_bounds");
         let store_block = self.context.append_basic_block(function, "bytes_set_store");
         let done_block = self.context.append_basic_block(function, "bytes_set_done");
-        builder
-            .build_conditional_branch(is_heap, type_block, done_block)
-            .map_err(|e| crate::error::factory::llvm_build_failed("bytes set heap branch", &e))?;
-
-        builder.position_at_end(type_block);
         let ptr_bits = builder
             .build_and(array, i64_type.const_int(!7u64, false), "bytes_set_ptr_bits")
             .map_err(|e| crate::error::factory::llvm_build_failed("bytes set ptr bits", &e))?;
         let array_ptr = builder
             .build_int_to_ptr(ptr_bits, ptr_type, "bytes_set_array_ptr")
             .map_err(|e| crate::error::factory::llvm_build_failed("bytes set int_to_ptr", &e))?;
-        let object_type = builder
-            .build_load(i8_type, array_ptr, "bytes_set_object_type")
-            .map_err(|e| crate::error::factory::llvm_build_failed("bytes set object type load", &e))?
-            .into_int_value();
-        let is_array = builder
-            .build_int_compare(IntPredicate::EQ, object_type, i8_type.const_int(2, false), "bytes_set_is_array")
-            .map_err(|e| crate::error::factory::llvm_build_failed("bytes set array check", &e))?;
-        builder
-            .build_conditional_branch(is_array, bounds_block, done_block)
-            .map_err(|e| crate::error::factory::llvm_build_failed("bytes set type branch", &e))?;
+        let type_block = if trusted_array {
+            builder
+                .build_unconditional_branch(bounds_block)
+                .map_err(|e| crate::error::factory::llvm_build_failed("typed bytes set bounds branch", &e))?;
+            None
+        } else {
+            let heap_tag = i64_type.const_int(1, false);
+            let tag = builder
+                .build_and(array, tag_mask, "bytes_set_tag")
+                .map_err(|e| crate::error::factory::llvm_build_failed("bytes set tag", &e))?;
+            let is_heap = builder
+                .build_int_compare(IntPredicate::EQ, tag, heap_tag, "bytes_set_is_heap")
+                .map_err(|e| crate::error::factory::llvm_build_failed("bytes set heap check", &e))?;
+            let type_block = self.context.append_basic_block(function, "bytes_set_type");
+            builder
+                .build_conditional_branch(is_heap, type_block, done_block)
+                .map_err(|e| crate::error::factory::llvm_build_failed("bytes set heap branch", &e))?;
+
+            builder.position_at_end(type_block);
+            let object_type = builder
+                .build_load(i8_type, array_ptr, "bytes_set_object_type")
+                .map_err(|e| crate::error::factory::llvm_build_failed("bytes set object type load", &e))?
+                .into_int_value();
+            let is_array = builder
+                .build_int_compare(
+                    IntPredicate::EQ,
+                    object_type,
+                    i8_type.const_int(2, false),
+                    "bytes_set_is_array",
+                )
+                .map_err(|e| crate::error::factory::llvm_build_failed("bytes set array check", &e))?;
+            builder
+                .build_conditional_branch(is_array, bounds_block, done_block)
+                .map_err(|e| crate::error::factory::llvm_build_failed("bytes set type branch", &e))?;
+            Some(type_block)
+        };
 
         builder.position_at_end(bounds_block);
         let len_ptr = unsafe {
@@ -463,21 +1236,77 @@ impl LlvmBackend {
         builder.position_at_end(store_block);
         let data_field_ptr = unsafe {
             builder
-                .build_gep(i8_type, array_ptr, &[i64_type.const_int(24, false)], "bytes_set_data_field")
+                .build_gep(
+                    i8_type,
+                    array_ptr,
+                    &[i64_type.const_int(24, false)],
+                    "bytes_set_data_field",
+                )
                 .map_err(|e| crate::error::factory::llvm_build_failed("bytes set data gep", &e))?
         };
         let data_ptr = builder
             .build_load(ptr_type, data_field_ptr, "bytes_set_data")
             .map_err(|e| crate::error::factory::llvm_build_failed("bytes set data load", &e))?
             .into_pointer_value();
+        let byte = builder
+            .build_and(value, i64_type.const_int(0xff, false), "bytes_set_byte")
+            .map_err(|e| crate::error::factory::llvm_build_failed("bytes set byte mask", &e))?;
+        let packed_block = self.context.append_basic_block(function, "bytes_set_packed_store");
+        let slot_block = self.context.append_basic_block(function, "bytes_set_slot_store");
+        let gc_flags_ptr = unsafe {
+            builder
+                .build_gep(
+                    i8_type,
+                    array_ptr,
+                    &[i64_type.const_int(1, false)],
+                    "bytes_set_gc_flags_ptr",
+                )
+                .map_err(|e| crate::error::factory::llvm_build_failed("bytes set gc flags gep", &e))?
+        };
+        let gc_flags = builder
+            .build_load(i8_type, gc_flags_ptr, "bytes_set_gc_flags")
+            .map_err(|e| crate::error::factory::llvm_build_failed("bytes set gc flags load", &e))?
+            .into_int_value();
+        let byte_packed = builder
+            .build_and(gc_flags, i8_type.const_int(8, false), "bytes_set_packed_flag")
+            .map_err(|e| crate::error::factory::llvm_build_failed("bytes set packed flag", &e))?;
+        let is_byte_packed = builder
+            .build_int_compare(
+                IntPredicate::NE,
+                byte_packed,
+                i8_type.const_zero(),
+                "bytes_set_is_packed",
+            )
+            .map_err(|e| crate::error::factory::llvm_build_failed("bytes set packed check", &e))?;
+        builder
+            .build_conditional_branch(is_byte_packed, packed_block, slot_block)
+            .map_err(|e| crate::error::factory::llvm_build_failed("bytes set packed branch", &e))?;
+
+        builder.position_at_end(packed_block);
+        let packed_ptr = unsafe {
+            builder
+                .build_gep(i8_type, data_ptr, &[normalized_index], "bytes_set_packed_elem")
+                .map_err(|e| crate::error::factory::llvm_build_failed("bytes set packed gep", &e))?
+        };
+        let byte_value = builder
+            .build_int_truncate(byte, i8_type, "bytes_set_packed_byte")
+            .map_err(|e| crate::error::factory::llvm_build_failed("bytes set packed trunc", &e))?;
+        builder
+            .build_store(packed_ptr, byte_value)
+            .map_err(|e| crate::error::factory::llvm_build_failed("bytes set packed store", &e))?;
+        builder
+            .build_unconditional_branch(done_block)
+            .map_err(|e| crate::error::factory::llvm_build_failed("bytes set packed done branch", &e))?;
+        let packed_stored_block = builder
+            .get_insert_block()
+            .ok_or_else(|| CompileError::semantic("LLVM bytes set packed block missing".to_string()))?;
+
+        builder.position_at_end(slot_block);
         let elem_ptr = unsafe {
             builder
                 .build_gep(i64_type, data_ptr, &[normalized_index], "bytes_set_elem")
                 .map_err(|e| crate::error::factory::llvm_build_failed("bytes set elem gep", &e))?
         };
-        let byte = builder
-            .build_and(value, i64_type.const_int(0xff, false), "bytes_set_byte")
-            .map_err(|e| crate::error::factory::llvm_build_failed("bytes set byte mask", &e))?;
         let tagged = builder
             .build_left_shift(byte, i64_type.const_int(3, false), "bytes_set_tagged_int")
             .map_err(|e| crate::error::factory::llvm_build_failed("bytes set tagged int", &e))?;
@@ -498,12 +1327,21 @@ impl LlvmBackend {
             let phi = builder
                 .build_phi(i64_type, "bytes_u8_set")
                 .map_err(|e| crate::error::factory::llvm_build_failed("bytes set phi", &e))?;
-            phi.add_incoming(&[
-                (&false_value, current_block),
-                (&false_value, type_block),
-                (&false_value, bounds_block),
-                (&true_value, stored_block),
-            ]);
+            if let Some(type_block) = type_block {
+                phi.add_incoming(&[
+                    (&false_value, current_block),
+                    (&false_value, type_block),
+                    (&false_value, bounds_block),
+                    (&true_value, packed_stored_block),
+                    (&true_value, stored_block),
+                ]);
+            } else {
+                phi.add_incoming(&[
+                    (&false_value, bounds_block),
+                    (&true_value, packed_stored_block),
+                    (&true_value, stored_block),
+                ]);
+            }
             vreg_map.insert(dest, phi.as_basic_value());
         }
         Ok(true)
@@ -615,10 +1453,58 @@ impl LlvmBackend {
         let ffi_name = map_ffi_name(func_name_raw);
         let i64_type = self.runtime_int_type();
 
-        if ffi_name == "rt_bytes_u8_at" && self.compile_inline_bytes_u8_at(dest, args, vreg_map, builder)? {
+        if ffi_name == "rt_typed_bytes_u8_at" && self.compile_inline_bytes_u8_at(dest, args, vreg_map, builder, true)? {
             return Ok(());
         }
-        if ffi_name == "rt_bytes_u8_set" && self.compile_inline_bytes_u8_set(dest, args, vreg_map, builder)? {
+        if ffi_name == "rt_bytes_u8_at" && self.compile_inline_bytes_u8_at(dest, args, vreg_map, builder, false)? {
+            return Ok(());
+        }
+        if ffi_name == "rt_typed_bytes_u32_le_at"
+            && self.compile_inline_typed_bytes_le_unchecked(dest, args, vreg_map, builder, 4)?
+        {
+            return Ok(());
+        }
+        if ffi_name == "rt_typed_bytes_u64_le_at"
+            && self.compile_inline_typed_bytes_le_unchecked(dest, args, vreg_map, builder, 8)?
+        {
+            return Ok(());
+        }
+        if ffi_name == "rt_typed_bytes_u32_le_unchecked"
+            && self.compile_inline_typed_bytes_le_unchecked(dest, args, vreg_map, builder, 4)?
+        {
+            return Ok(());
+        }
+        if ffi_name == "rt_typed_bytes_u64_le_unchecked"
+            && self.compile_inline_typed_bytes_le_unchecked(dest, args, vreg_map, builder, 8)?
+        {
+            return Ok(());
+        }
+        if ffi_name == "rt_typed_bytes_u32_le_set"
+            && self.compile_inline_typed_bytes_le_set_unchecked(dest, args, vreg_map, builder, 4)?
+        {
+            return Ok(());
+        }
+        if ffi_name == "rt_typed_bytes_u64_le_set"
+            && self.compile_inline_typed_bytes_le_set_unchecked(dest, args, vreg_map, builder, 8)?
+        {
+            return Ok(());
+        }
+        if ffi_name == "rt_bytes_u32_le_at" && self.compile_inline_bytes_le_at(dest, args, vreg_map, builder, 4)? {
+            return Ok(());
+        }
+        if ffi_name == "rt_bytes_u64_le_at" && self.compile_inline_bytes_le_at(dest, args, vreg_map, builder, 8)? {
+            return Ok(());
+        }
+        if ffi_name == "rt_typed_bytes_u8_set"
+            && self.compile_inline_bytes_u8_set(dest, args, vreg_map, builder, true)?
+        {
+            return Ok(());
+        }
+        if ffi_name == "rt_bytes_u8_set" && self.compile_inline_bytes_u8_set(dest, args, vreg_map, builder, false)? {
+            return Ok(());
+        }
+
+        if ffi_name == "rt_len" && self.compile_inline_len(dest, args, vreg_map, builder)? {
             return Ok(());
         }
 
@@ -769,6 +1655,9 @@ impl LlvmBackend {
                     &format!("missing receiver for runtime redirect {}", rt_fn_name),
                 ));
             }
+            if rt_fn_name == "rt_len" && self.compile_inline_len(dest, args, vreg_map, builder)? {
+                return Ok(());
+            }
             let mut arg_vals: Vec<inkwell::values::BasicMetadataValueEnum> = Vec::new();
             for arg in args.iter() {
                 let val = self.get_vreg(arg, vreg_map)?;
@@ -890,6 +1779,9 @@ impl LlvmBackend {
             if let Some(rt_fn_name) = qualified_rt_redirect {
                 let expected_arity = qualified_runtime_arity(method, rt_fn_name);
                 if expected_arity == Some(args.len()) {
+                    if rt_fn_name == "rt_len" && self.compile_inline_len(dest, args, vreg_map, builder)? {
+                        return Ok(());
+                    }
                     let mut arg_vals: Vec<inkwell::values::BasicMetadataValueEnum> = Vec::new();
                     for arg in args.iter() {
                         let val = self.get_vreg(arg, vreg_map)?;

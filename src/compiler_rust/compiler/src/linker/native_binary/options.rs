@@ -289,6 +289,41 @@ impl NativeBinaryOptions {
         has_runtime && has_native_all
     }
 
+    fn current_exe_is_release_shim(exe_dir: &Path) -> bool {
+        let mut dir = Some(exe_dir);
+        while let Some(path) = dir {
+            if path.file_name().and_then(|n| n.to_str()) == Some("release")
+                && path.parent().and_then(|p| p.file_name()).and_then(|n| n.to_str()) == Some("bin")
+            {
+                return true;
+            }
+            dir = path.parent();
+        }
+        false
+    }
+
+    fn repo_release_artifact_path_from_dir(exe_dir: &Path, exists: fn(&Path) -> bool) -> Option<PathBuf> {
+        if !Self::current_exe_is_release_shim(exe_dir) {
+            return None;
+        }
+
+        let mut dir = Some(exe_dir);
+        while let Some(path) = dir {
+            let candidate = path.join("src/compiler_rust/target/release");
+            if exists(&candidate) {
+                return candidate.canonicalize().ok();
+            }
+            dir = path.parent();
+        }
+        None
+    }
+
+    fn repo_release_artifact_path_from_exe(exists: fn(&Path) -> bool) -> Option<PathBuf> {
+        let exe = std::env::current_exe().ok()?;
+        let exe_dir = exe.parent()?;
+        Self::repo_release_artifact_path_from_dir(exe_dir, exists)
+    }
+
     pub fn find_runtime_library_path() -> Option<PathBuf> {
         Self::find_runtime_library_path_for_target(&Target::host())
     }
@@ -328,6 +363,10 @@ impl NativeBinaryOptions {
                     return Some(exe_dir.to_path_buf());
                 }
             }
+        }
+
+        if let Some(path) = Self::repo_release_artifact_path_from_exe(Self::runtime_lib_exists) {
+            return Some(path);
         }
 
         let cargo_target_paths = [
@@ -406,6 +445,10 @@ impl NativeBinaryOptions {
                     return Some(exe_dir.to_path_buf());
                 }
             }
+        }
+
+        if let Some(path) = Self::repo_release_artifact_path_from_exe(Self::compiler_lib_exists) {
+            return Some(path);
         }
 
         let cargo_target_paths = [
@@ -503,4 +546,69 @@ impl NativeBinaryOptions {
     impl_bool_flag_methods!(direct);
     impl_linker_builder_methods!(direct);
     impl_linker_method!(direct);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::NativeBinaryOptions;
+    use std::fs;
+    use std::path::PathBuf;
+
+    fn unique_test_root(name: &str) -> PathBuf {
+        std::env::temp_dir().join(format!("simple-native-binary-options-{}-{}", name, std::process::id()))
+    }
+
+    #[test]
+    fn release_shim_prefers_repo_release_runtime_artifacts() {
+        let root = unique_test_root("runtime");
+        let exe_dir = root.join("bin/release/x86_64-unknown-linux-gnu");
+        let release_dir = root.join("src/compiler_rust/target/release");
+        fs::create_dir_all(&exe_dir).unwrap();
+        fs::create_dir_all(&release_dir).unwrap();
+        fs::write(release_dir.join("libsimple_runtime.a"), b"").unwrap();
+        fs::write(release_dir.join("libsimple_native_all.a"), b"").unwrap();
+
+        let found =
+            NativeBinaryOptions::repo_release_artifact_path_from_dir(&exe_dir, NativeBinaryOptions::runtime_lib_exists)
+                .unwrap();
+
+        assert_eq!(found, release_dir.canonicalize().unwrap());
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn release_shim_prefers_repo_release_compiler_artifacts() {
+        let root = unique_test_root("compiler");
+        let exe_dir = root.join("bin/release/x86_64-unknown-linux-gnu");
+        let release_dir = root.join("src/compiler_rust/target/release");
+        fs::create_dir_all(&exe_dir).unwrap();
+        fs::create_dir_all(&release_dir).unwrap();
+        fs::write(release_dir.join("libsimple_compiler.a"), b"").unwrap();
+
+        let found = NativeBinaryOptions::repo_release_artifact_path_from_dir(
+            &exe_dir,
+            NativeBinaryOptions::compiler_lib_exists,
+        )
+        .unwrap();
+
+        assert_eq!(found, release_dir.canonicalize().unwrap());
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn non_release_shim_does_not_use_repo_release_artifacts() {
+        let root = unique_test_root("non-shim");
+        let exe_dir = root.join("build/release/x86_64-unknown-linux-gnu");
+        let release_dir = root.join("src/compiler_rust/target/release");
+        fs::create_dir_all(&exe_dir).unwrap();
+        fs::create_dir_all(&release_dir).unwrap();
+        fs::write(release_dir.join("libsimple_runtime.a"), b"").unwrap();
+        fs::write(release_dir.join("libsimple_native_all.a"), b"").unwrap();
+
+        let found =
+            NativeBinaryOptions::repo_release_artifact_path_from_dir(&exe_dir, NativeBinaryOptions::runtime_lib_exists);
+
+        assert!(found.is_none());
+        fs::remove_dir_all(root).ok();
+    }
 }

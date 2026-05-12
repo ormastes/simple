@@ -47,7 +47,7 @@ fn u8_index_set_uses_byte_fast_path() {
     let mir =
         compile_to_mir("fn test():\n    var arr: [u8] = [0, 0]\n    var byte: u8 = 42\n    arr[0] = byte\n").unwrap();
     assert!(has_inst(&mir, |i| {
-        matches!(i, MirInst::Call { target, .. } if target == &CallTarget::from_name("rt_bytes_u8_set"))
+        matches!(i, MirInst::Call { target, .. } if target == &CallTarget::from_name("rt_typed_bytes_u8_set"))
     }));
     assert!(!has_inst(&mir, |i| {
         matches!(i, MirInst::Call { target, .. } if target == &CallTarget::from_name("rt_index_set"))

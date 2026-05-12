@@ -217,6 +217,7 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     // Array operations
     // =========================================================================
     RuntimeFuncSpec::new("rt_array_new", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_byte_array_new", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_array_push", &[I64, I64], &[I8]),
     RuntimeFuncSpec::new("rt_array_get", &[I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_array_set", &[I64, I64, I64], &[I8]),
@@ -467,6 +468,8 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_virtq_desc_write", &[I64, I64, I64, I64, I64, I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_dma_bytes_to_array", &[I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_bytes_u8_at", &[I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_bytes_u32_le_at", &[I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_bytes_u64_le_at", &[I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_bytes_u8_set", &[I64, I64, I64], &[I8]),
     RuntimeFuncSpec::new("rt_memory_barrier", &[], &[I64]),
     RuntimeFuncSpec::new("rt_arm_virtq_base", &[], &[I64]),

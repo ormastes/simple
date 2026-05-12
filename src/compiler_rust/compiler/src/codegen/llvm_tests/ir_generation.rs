@@ -138,3 +138,17 @@ fn test_32bit_target_triple_in_ir() {
     assert!(ir.contains("target triple"));
     assert!(ir.contains("armv7") || ir.contains("arm"));
 }
+
+/// Test target data layout is emitted in IR
+#[test]
+#[cfg(feature = "llvm")]
+fn test_target_data_layout_in_ir() {
+    let target = Target::new(TargetArch::X86_64, TargetOS::Linux);
+    let backend = LlvmBackend::new(target).unwrap();
+
+    backend.create_module("layout_test").unwrap();
+    let ir = backend.get_ir().unwrap();
+
+    assert!(ir.contains("target datalayout"));
+    assert!(ir.contains("target triple"));
+}

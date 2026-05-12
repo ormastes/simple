@@ -11,25 +11,27 @@
 
 fn _u32_mask(x: u32) -> u32:
     """Mask to 32 bits."""
-    x & 0xFFFFFFFF
+    x & 0xFFFFFFFFu32
 
 fn _rotl32(x: u32, n: u32) -> u32:
     """32-bit left rotation."""
-    _u32_mask((x << n) | (x >> (32 - n)))
+    _u32_mask((x << n) | (x >> (32u32 - n)))
 
-fn _quarter_round(state: [u32], a: u64, b: u64, c: u64, d: u64):
-    """ChaCha20 quarter round (mutates state in place)."""
-    state[a] = _u32_mask(state[a] + state[b])
-    state[d] = _rotl32(state[d] ^ state[a], 16)
+fn _quarter_round_values(a: u32, b: u32, c: u32, d: u32) -> (u32, u32, u32, u32):
+    """ChaCha20 quarter-round over four words."""
+    var wa = _u32_mask(a + b)
+    var wd = _rotl32(d ^ wa, 16u32)
 
-    state[c] = _u32_mask(state[c] + state[d])
-    state[b] = _rotl32(state[b] ^ state[c], 12)
+    var wc = _u32_mask(c + wd)
+    var wb = _rotl32(b ^ wc, 12u32)
 
-    state[a] = _u32_mask(state[a] + state[b])
-    state[d] = _rotl32(state[d] ^ state[a], 8)
+    wa = _u32_mask(wa + wb)
+    wd = _rotl32(wd ^ wa, 8u32)
 
-    state[c] = _u32_mask(state[c] + state[d])
-    state[b] = _rotl32(state[b] ^ state[c], 7)
+    wc = _u32_mask(wc + wd)
+    wb = _rotl32(wb ^ wc, 7u32)
+
+    (wa, wb, wc, wd)
 
 # ============================================================================
 # ChaCha20 Block Function
@@ -44,58 +46,101 @@ fn chacha20_block(key: [u32], counter: u32, nonce: [u32]) -> [u32]:
       [12]     = 32-bit counter
       [13..15] = 96-bit nonce (3 words)
     """
-    var state: [u32] = []
+    val s0 = 0x61707865u32
+    val s1 = 0x3320646eu32
+    val s2 = 0x79622d32u32
+    val s3 = 0x6b206574u32
+    val s4 = key[0]
+    val s5 = key[1]
+    val s6 = key[2]
+    val s7 = key[3]
+    val s8 = key[4]
+    val s9 = key[5]
+    val s10 = key[6]
+    val s11 = key[7]
+    val s12 = counter
+    val s13 = nonce[0]
+    val s14 = nonce[1]
+    val s15 = nonce[2]
 
-    # Constants: "expand 32-byte k" in little-endian
-    state.push(0x61707865)
-    state.push(0x3320646e)
-    state.push(0x79622d32)
-    state.push(0x6b206574)
+    var w0 = s0
+    var w1 = s1
+    var w2 = s2
+    var w3 = s3
+    var w4 = s4
+    var w5 = s5
+    var w6 = s6
+    var w7 = s7
+    var w8 = s8
+    var w9 = s9
+    var w10 = s10
+    var w11 = s11
+    var w12 = s12
+    var w13 = s13
+    var w14 = s14
+    var w15 = s15
 
-    # Key (8 words)
-    var i: u64 = 0
-    while i < 8:
-        state.push(key[i])
-        i = i + 1
-
-    # Counter
-    state.push(counter)
-
-    # Nonce (3 words)
-    i = 0
-    while i < 3:
-        state.push(nonce[i])
-        i = i + 1
-
-    # Working copy
-    var working: [u32] = []
-    i = 0
-    while i < 16:
-        working.push(state[i])
-        i = i + 1
-
-    # 20 rounds (10 double-rounds)
     var round: u64 = 0
     while round < 10:
-        _quarter_round(working, 0, 4, 8, 12)
-        _quarter_round(working, 1, 5, 9, 13)
-        _quarter_round(working, 2, 6, 10, 14)
-        _quarter_round(working, 3, 7, 11, 15)
-
-        _quarter_round(working, 0, 5, 10, 15)
-        _quarter_round(working, 1, 6, 11, 12)
-        _quarter_round(working, 2, 7, 8, 13)
-        _quarter_round(working, 3, 4, 9, 14)
-
+        val (q0, q4, q8, q12) = _quarter_round_values(w0, w4, w8, w12)
+        w0 = q0
+        w4 = q4
+        w8 = q8
+        w12 = q12
+        val (q1, q5, q9, q13) = _quarter_round_values(w1, w5, w9, w13)
+        w1 = q1
+        w5 = q5
+        w9 = q9
+        w13 = q13
+        val (q2, q6, q10, q14) = _quarter_round_values(w2, w6, w10, w14)
+        w2 = q2
+        w6 = q6
+        w10 = q10
+        w14 = q14
+        val (q3, q7, q11, q15) = _quarter_round_values(w3, w7, w11, w15)
+        w3 = q3
+        w7 = q7
+        w11 = q11
+        w15 = q15
+        val (d0, d5, d10, d15) = _quarter_round_values(w0, w5, w10, w15)
+        w0 = d0
+        w5 = d5
+        w10 = d10
+        w15 = d15
+        val (d1, d6, d11, d12) = _quarter_round_values(w1, w6, w11, w12)
+        w1 = d1
+        w6 = d6
+        w11 = d11
+        w12 = d12
+        val (d2, d7, d8, d13) = _quarter_round_values(w2, w7, w8, w13)
+        w2 = d2
+        w7 = d7
+        w8 = d8
+        w13 = d13
+        val (d3, d4, d9, d14) = _quarter_round_values(w3, w4, w9, w14)
+        w3 = d3
+        w4 = d4
+        w9 = d9
+        w14 = d14
         round = round + 1
 
-    # Add initial state
     var result: [u32] = []
-    i = 0
-    while i < 16:
-        result.push(_u32_mask(working[i] + state[i]))
-        i = i + 1
-
+    result.push(_u32_mask(w0 + s0))
+    result.push(_u32_mask(w1 + s1))
+    result.push(_u32_mask(w2 + s2))
+    result.push(_u32_mask(w3 + s3))
+    result.push(_u32_mask(w4 + s4))
+    result.push(_u32_mask(w5 + s5))
+    result.push(_u32_mask(w6 + s6))
+    result.push(_u32_mask(w7 + s7))
+    result.push(_u32_mask(w8 + s8))
+    result.push(_u32_mask(w9 + s9))
+    result.push(_u32_mask(w10 + s10))
+    result.push(_u32_mask(w11 + s11))
+    result.push(_u32_mask(w12 + s12))
+    result.push(_u32_mask(w13 + s13))
+    result.push(_u32_mask(w14 + s14))
+    result.push(_u32_mask(w15 + s15))
     result
 
 # ============================================================================
@@ -156,7 +201,7 @@ fn chacha20_encrypt(key: [u8], counter: u32, nonce: [u8], plaintext: [u8]) -> [u
                 b = b + 1
             j = j + 1
 
-        block_counter = _u32_mask(block_counter + 1)
+        block_counter = _u32_mask(block_counter + 1u32)
 
     output
 
@@ -172,17 +217,57 @@ fn chacha20_encrypt(key: [u8], counter: u32, nonce: [u8], plaintext: [u8]) -> [u
 # Op map:
 #   - bitwise XOR / shl / shr / or  -> simd_xor_i32x4 / simd_shl_i32x4 /
 #     simd_shr_i32x4 / simd_or_i32x4 (Phase 1 wired ops)
-#   - mod-2^32 add  -> direct field arithmetic on i32 lanes (extern
-#     rt_simd_add_i32x4 declared but UNWIRED in Phase 1 -- using struct add
-#     avoids dispatch overhead and i32 + wraps mod 2^32 in Simple, which is
-#     bit-exact for ChaCha20).
+#   - mod-2^32 add  -> direct field arithmetic on i32 lanes.
+#   - xor/or/shifts -> direct field arithmetic with u32 bit-pattern conversion.
 #
 # Speedup is bounded by the bitwise/rotate fraction of work; in interpreter
 # mode the SIMD wins on XOR+rotate may not exceed the per-call extern cost.
 # Documented bench in commit message.
 # ============================================================================
 
-use std.simd.{Vec4i, simd_xor_i32x4, simd_shl_i32x4, simd_shr_i32x4, simd_or_i32x4}
+struct Vec4i:
+    x: i32
+    y: i32
+    z: i32
+    w: i32
+
+impl Vec4i:
+    static fn splat(value: i32) -> Vec4i:
+        Vec4i(x: value, y: value, z: value, w: value)
+
+fn simd_xor_i32x4(a: Vec4i, b: Vec4i) -> Vec4i:
+    Vec4i(
+        x: _u32_to_i32(_i32_to_u32(a.x) ^ _i32_to_u32(b.x)),
+        y: _u32_to_i32(_i32_to_u32(a.y) ^ _i32_to_u32(b.y)),
+        z: _u32_to_i32(_i32_to_u32(a.z) ^ _i32_to_u32(b.z)),
+        w: _u32_to_i32(_i32_to_u32(a.w) ^ _i32_to_u32(b.w)),
+    )
+
+fn simd_or_i32x4(a: Vec4i, b: Vec4i) -> Vec4i:
+    Vec4i(
+        x: _u32_to_i32(_i32_to_u32(a.x) | _i32_to_u32(b.x)),
+        y: _u32_to_i32(_i32_to_u32(a.y) | _i32_to_u32(b.y)),
+        z: _u32_to_i32(_i32_to_u32(a.z) | _i32_to_u32(b.z)),
+        w: _u32_to_i32(_i32_to_u32(a.w) | _i32_to_u32(b.w)),
+    )
+
+fn simd_shl_i32x4(a: Vec4i, n: i64) -> Vec4i:
+    val shift = n.to_u32()
+    Vec4i(
+        x: _u32_to_i32(_i32_to_u32(a.x) << shift),
+        y: _u32_to_i32(_i32_to_u32(a.y) << shift),
+        z: _u32_to_i32(_i32_to_u32(a.z) << shift),
+        w: _u32_to_i32(_i32_to_u32(a.w) << shift),
+    )
+
+fn simd_shr_i32x4(a: Vec4i, n: i64) -> Vec4i:
+    val shift = n.to_u32()
+    Vec4i(
+        x: _u32_to_i32(_i32_to_u32(a.x) >> shift),
+        y: _u32_to_i32(_i32_to_u32(a.y) >> shift),
+        z: _u32_to_i32(_i32_to_u32(a.z) >> shift),
+        w: _u32_to_i32(_i32_to_u32(a.w) >> shift),
+    )
 
 fn _vadd(a: Vec4i, b: Vec4i) -> Vec4i:
     """4-lane wrapping i32 add (no extern; relies on Simple's i32 wrap-on-overflow)."""

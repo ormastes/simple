@@ -65,6 +65,8 @@ pub mod gc_flags {
     pub const COLOR_MASK: u8 = 0b11;
     /// Object is pinned and should not be moved
     pub const PINNED: u8 = 0b100;
+    /// RuntimeArray stores raw u8 bytes in data instead of RuntimeValue slots.
+    pub const BYTE_PACKED: u8 = 0b1000;
 }
 
 impl HeapHeader {

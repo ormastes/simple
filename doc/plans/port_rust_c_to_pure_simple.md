@@ -1,6 +1,330 @@
 # Plan: Port Rust/C Algorithms to Pure Simple + Optimize Compiler
 
-## Status: Phases 1-5 DONE; Phase 6A/6B DONE; Phase 6C compiler perf follow-up partly fixed; remaining gap is runtime/native optimization
+## Status: Phases 1-5 DONE; Phase 6A/6B DONE; Phase 6C DONE; Phase 6D PASS
+
+### 2026-05-12 Current remains plan
+
+Scope: keep the algorithm implementations in pure Simple, keep the MDSOC compiler layering, and make the compiler/runtime emit optimizer-friendly native code comparable to the C and Rust reference harnesses. Do not spend more time on benchmark-only rewrites unless the same change exposes or verifies a compiler/runtime optimization.
+
+Current evidence:
+- Correctness parity is already passing for the dependency-free C/Rust/Simple XXHash64 and ChaCha20 benchmark harness.
+- Simple now meets the XXHash64 and ChaCha20 throughput targets on the latest LLVM-enabled release artifact and explicit LLVM probe sample.
+- This local build now has an LLVM-enabled active `bin/simple`; the benchmark harness records both default native output and a `--backend=llvm` probe with checksum parity. In the latest sample the default and explicit LLVM benchmark binaries are byte-identical.
+- Rust reference builds use `rustc -C opt-level=3 -C target-cpu=native`; Simple uses `simple compile --native --cpu native --opt-level aggressive`.
+- Recent Rust compiler work added typed `[u8]` load/store helpers (`rt_bytes_u8_at`, `rt_bytes_u8_set`), packed `[u8]` runtime storage for typed empty byte arrays, little-endian byte-array load and store markers that lower inline in Cranelift and LLVM, inline `rt_len` lowering for Cranelift and LLVM call sites, release-shim archive lookup, LLVM target datalayout emission, LLVM backend CLI availability, and native extern hygiene for unused broad SIMD declarations.
+- The active `bin/release/x86_64-unknown-linux-gnu/simple` artifact was refreshed from the LLVM-enabled release build on 2026-05-12; current SHA256 is `e1af8431a4bc05cad74bfd29d4aebb8436adb7fd852a035e5e9546319a35295d`.
+
+LLVM optimization/backend direction:
+- Simple does not need to implement LLVM's CPU backends for existing CPU targets. It needs to emit valid, canonical, optimizer-friendly LLVM IR and pass exact target configuration: triple, datalayout, CPU, feature string, ABI, relocation model, code model, runtime symbols, and linker inputs.
+- LLVM owns the middle-end optimizer, pass framework, target backends, instruction selection, scheduling, register allocation, prologue/epilogue generation, object emission, and tooling (`opt`, `llc`, `llvm-as`, `llvm-dis`, `lld`, `clang`).
+- Simple owns parsing, type checking, name resolution, generic/trait/pattern lowering, language semantics, HIR/MIR, LLVM IR generation, ABI lowering, runtime hooks, panic/unwind policy, allocator/GC policy, startup, FFI, and link configuration.
+- Prefer LLVM's standard new-pass-manager pipelines as the default native LLVM optimization surface: Simple `-O0` verifies/preserves debug quality, `-O1` maps to `default<O1>`, `-O2` to `default<O2>`, `-O3` to `default<O3>`, `-Os` to `default<Os>`, and `-Oz` to `default<Oz>`.
+- Keep Simple-specific semantic optimizations in MIR before LLVM. Add custom LLVM passes only when there is an actual LLVM pass and a measured reason. Do not try to maintain a hand-written replacement for LLVM's production pass pipeline.
+- Existing relevant files are `src/compiler/70.backend/backend/llvm_passes.spl`, `src/compiler/70.backend/backend/llvm_target.spl`, `src/compiler/70.backend/backend/llvm_backend_tools.spl`, `src/compiler/70.backend/backend/llvm_lib_backend.spl`, `src/compiler/70.backend/backend/llvm_ir_builder.spl`, `src/compiler/70.backend/backend/llvm_type_mapper.spl`, and `src/compiler/70.backend/backend/mir_to_llvm*.spl`.
+- Current repo state already has a starter hand-built pass list in `llvm_passes.spl`, target triples/datalayouts/CPU/features in `llvm_target.spl`, and an LLVM library path in `llvm_lib_backend.spl` that uses `default<O0>`, `default<Os>`, `default<O2>`, and `default<O3>`. The plan is to make the standard pipeline path available and verified first, then keep any explicit pass list as diagnostics or a narrowly justified custom path.
+
+LLVM IR quality contract:
+- Module IR must include `source_filename`, target triple, target datalayout, module flags, and debug compile-unit metadata when debug output is enabled.
+- Functions must carry correct linkage, visibility, calling convention, parameter/return attributes, and personality information when unwind is enabled.
+- Control flow must use well-formed basic blocks, terminators, PHIs, and canonical loop structure where practical.
+- Type lowering must respect primitive, pointer, struct, enum/tagged-union, array/vector, padding, and ABI alignment rules from the target datalayout.
+- Memory IR must use typed loads/stores/GEPs, correct alignments, lifetime intrinsics where useful, and `memcpy`/`memmove`/`memset` intrinsics for bulk operations.
+- Attributes and metadata such as `nonnull`, `noundef`, `dereferenceable`, `align`, `noalias`, `readonly`, `nocapture`, `nounwind`, `willreturn`, range metadata, branch weights, and alias metadata may be emitted only when Simple can prove them. Incorrect attributes are wrong-code bugs.
+- Arithmetic flags (`nsw`, `nuw`, `exact`, fast-math) must reflect Simple's actual overflow and floating-point semantics.
+- Calls must preserve direct/indirect function ABI, use intrinsics for math/memory/vector operations where appropriate, and route allocation, panic, printing, GC/statepoint, startup, and runtime helpers through explicit runtime symbols.
+
+Backend data model target:
+- Define one explicit backend configuration stream covering compile options, target spec, type layout, ABI lowering, runtime symbols, optimization plan, and codegen/link plan.
+- Compile options include optimization level, debug mode, emit kind, LTO mode, panic mode, runtime family, sanitizer mode, and profile mode.
+- Target spec includes triple, datalayout, arch/vendor/OS/environment, object format, endian, pointer width, ABI, CPU, features, relocation/code model, TLS model, red-zone policy, frame-pointer policy, and stack alignment.
+- ABI/type/runtime plans include aggregate passing, return lowering, varargs, FFI compatibility, struct/enum layout caches, allocator/free/panic/memory symbols, personality function, startup/main symbols, and optional GC/statepoint hooks.
+- Codegen/link plans include `opt`/`llc` or LLVM library invocation, `-mtriple`, `-mcpu`, `-mattr`, output filetype, assembler/linker selection, startup objects, runtime libraries, libc mode, and linker script when needed.
+
+Current completed optimization items:
+
+1. **Typed byte optimization marker cleanup**
+   - Algorithm code no longer declares or calls explicit `rt_typed_bytes_*_unchecked` externs.
+   - Typed `[u8]` little-endian marker calls now lower inline in Cranelift and LLVM, while generic/public byte helpers retain checked lowering.
+   - Stop condition met: source code no longer needs explicit `rt_typed_bytes_*_unchecked` externs in algorithm code to get the packed byte fast path.
+
+2. **Hotspot ASM diff baseline against Rust and C**
+   - Captured C, Rust, Simple native, and Simple LLVM disassembly summaries from `SIMPLE_LLVM_PROBE=1 SIMPLE_DISASM_PROBE=1 test/perf/port_algorithms/run_port_algorithm_benchmarks.shs`.
+   - C and Rust reference algorithm functions are inlined into their benchmark entrypoints at `-O3`/`opt-level=3`, so their comparison point is `main`/`port_algorithms_ref::main` rather than standalone `xxhash64_ref` or `chacha_block` symbols.
+   - Stop condition met: remaining structural differences are mapped below to concrete bounds/index, helper-inlining, and fixed-size byte-buffer hardening tasks.
+
+3. **Generic length helper removal**
+   - Cranelift and LLVM lowering now inline `rt_len` for tagged heap strings, arrays, dicts, and tuples, returning `-1` for unsupported values.
+   - Direct calls, bare `len` redirects, qualified `len` redirects, and LLVM static method runtime mappings all route through the inline lowering before generic runtime-call emission.
+   - Current evidence: the latest default and LLVM benchmark disassembly has no `rt_len` call references. `rt_index_get` remains only in non-ChaCha hot helper paths covered by broader generic index hardening.
+
+Follow-up hardening work, in order:
+
+1. **Bounds and index optimization**
+   - Make indexed byte-loop bounds checks visible in MIR as canonical operations or explicit intrinsics that `bounds_check_elim` can prove.
+   - Thread length/range facts through loops over fixed-size benchmark buffers and complete 64-byte ChaCha blocks.
+   - Keep generic fallbacks for strings, dictionaries, tuples, and unknown element types.
+   - Current evidence: the accepted ChaCha hot path uses typed u32 little-endian load/store markers instead of repeated checked byte writes/reads, and the removed `chacha20_xor_words4_checksum_local` helper no longer appears in the benchmark disassembly.
+   - Stop condition met for Phase 6D benchmark hot loops: ChaCha block output uses direct typed helpers with no repeated generic length/index dispatch. Broader generic bounds-check proof remains future hardening.
+
+2. **Helper inlining visibility**
+   - Capture Simple native disassembly plus C/Rust disassembly for `xxhash64`, `chacha20_xor_block_local`, and the byte write/checksum loops.
+   - Compare call boundaries, bounds checks, byte loads/stores, rotate lowering, loop structure, and stack/register use.
+   - Current evidence: `chacha20_xor_block_checksum_local` now emits all 16 output words directly; the removed grouped helper has no call-site or symbol match in the latest benchmark disassembly. Generic `rt_len` calls are gone from the latest default and LLVM benchmark disassembly.
+   - Ensure module-level inlining runs in the active native compiler path with a real callee table.
+   - Preserve caller-local remapping, constant argument materialization, and refusal fallback so failed inline attempts keep the original call.
+   - Use XXHash `_xxh64_*` helpers and ChaCha block/output helpers as regression targets.
+   - Stop condition met for the benchmark gate: the measured ChaCha helper boundary was removed and the latest C/Rust/Simple/LLVM run passes throughput and checksum acceptance.
+
+3. **Fixed-size byte-buffer lowering**
+   - Lower benchmark-local fixed-size `[u8]` scratch/output patterns to stack/native storage where lifetime and size are known.
+   - Avoid runtime allocation and dynamic array metadata in inner loops.
+   - Current evidence: C and Rust inline the algorithm loops into their benchmark entrypoints with no Simple runtime dispatch; Simple now uses packed byte arrays and typed u32 little-endian load/store markers for the accepted ChaCha block-output path.
+   - Stop condition met for the benchmark gate: ChaCha block output has no per-block heap allocation and no generic byte array dispatcher in the inner output loop. Stack/native lowering for other fixed-size byte-buffer patterns remains future hardening.
+
+4. **LLVM backend verification**
+   - LLVM 18 tooling is installed; active `bin/simple` is now refreshed from a `--features llvm` release build.
+   - Continue running the same benchmark with Cranelift/native and LLVM backend variants.
+   - Verify LLVM IR with `opt -verify`; use `opt -verify-each -passes='default<O2>'` for optimized samples.
+   - Verify emitted IR includes the expected target triple and datalayout, then compile with matching `llc -mtriple=... -mcpu=... -mattr=... -O=...`.
+   - Compare Simple LLVM output against small Clang/Rust LLVM IR samples for structure, attributes, metadata, and pass results; imitate the pipeline shape, not a hard-coded Clang pass list.
+   - Current evidence: `cargo test --manifest-path src/compiler_rust/Cargo.toml -p simple-compiler --features llvm create_module_emits_target_triple_and_datalayout -- --nocapture` passes, and the Rust LLVM native backend calls `self.verify()?` before object emission. The LLVM probe benchmark compiles and runs with checksum parity, exercising that verifier path.
+   - Current limitation: the Rust CLI does not expose an `--emit=llvm-ir`/`.ll` output mode, so external `opt -verify` on the benchmark module remains a tool-surface follow-up unless IR dumping is added.
+   - Stop condition: plan contains an apples-to-apples table showing C, Rust, Simple-Cranelift/native, and Simple-LLVM, or a concrete build blocker with file/command evidence.
+
+5. **SIMD import/runtime-symbol hygiene**
+   - Native codegen now filters unused empty-body extern declarations and skips compiling extern bodies, so broad stdlib SIMD imports do not declare unrelated f32 symbols such as `rt_simd_add_f32x4` unless referenced.
+   - OS ChaCha no longer imports the broad `std.simd` module or declares raw `rt_simd_*` externs with the wrong Simple-level struct ABI. Its local `Vec4i` wrappers now use field-wise bit operations with u32 bit-pattern conversions, avoiding unrelated float SIMD imports and native runtime ABI crashes.
+   - Current evidence: `bin/simple test test/unit/os/crypto/chacha20_simd_parity_spec.spl --mode=interpreter --no-cache` passes all 6 examples after replacing the OS scalar block with the unrolled RFC implementation and making the local i32 vector wrappers native-safe.
+   - Current evidence: `bin/simple compile build/perf/port_algorithms/chacha20_simd_native_probe.spl --native --cpu native --opt-level aggressive -o build/perf/port_algorithms/chacha20_simd_native_probe` links successfully, `build/perf/port_algorithms/chacha20_simd_native_probe` prints `ok`, and `nm -u build/perf/port_algorithms/chacha20_simd_native_probe | rg "rt_simd_add_f32x4|rt_simd_.*f32|rt_simd_.*f64"` finds no unrelated float SIMD references.
+   - Stop condition met for import/runtime-symbol hygiene: integer SIMD crypto code compiles and executes natively without unrelated float SIMD runtime link failures or native SIMD ABI crashes. True packed/native SIMD lowering remains a separate performance follow-up before using this path as the main benchmark implementation.
+
+6. **Native codegen stress bug**
+   - Track the full ChaCha output inline attempt that previously compiled but crashed with `Illegal instruction`.
+   - Verify whether the cause is a missing explicit return/value path that emits `ud2`, then add a minimal regression test before retrying the transform.
+   - Stop condition: either the crash is fixed with a minimal test, or the transform remains banned with a documented root cause.
+
+Acceptance target:
+- Correctness parity must remain PASS before any speed number counts.
+- `test/perf/run_comparison.shs` must continue showing self-hosted Simple no slower than the Rust bootstrap.
+- For XXHash64 and ChaCha20, pure Simple native should reach at least 70% of portable Rust throughput and 50% of portable C throughput. If not met, the remaining delta must be tied to a specific, verified IR/ASM difference and a named follow-up task above.
+
+### 2026-05-12 typed u32 byte-store and ChaCha final acceptance update
+
+Commands:
+- `cargo fmt --manifest-path src/compiler_rust/Cargo.toml --all`
+- `bin/simple check test/perf/port_algorithms/port_algorithms_simple.spl`
+- `cargo test --manifest-path src/compiler_rust/Cargo.toml -p simple-compiler codegen_inline_typed_bytes_u32_le_set_does_not_emit_runtime_symbol -- --nocapture`
+- `cargo check --manifest-path src/compiler_rust/Cargo.toml -p simple-compiler --features llvm`
+- `cargo build --manifest-path src/compiler_rust/Cargo.toml --release -p simple-driver -p simple-native-all --features llvm`
+- `cp src/compiler_rust/target/release/simple bin/release/x86_64-unknown-linux-gnu/simple`
+- `cargo test --manifest-path src/compiler_rust/Cargo.toml -p simple-compiler --features llvm create_module_emits_target_triple_and_datalayout -- --nocapture`
+- `SIMPLE_LLVM_PROBE=1 SIMPLE_DISASM_PROBE=1 test/perf/port_algorithms/run_port_algorithm_benchmarks.shs`
+- `test/perf/run_comparison.shs`
+
+| Algorithm | C MB/s | Rust MB/s | Simple default MB/s | Simple LLVM MB/s | Checksum parity | Status |
+|-----------|--------|-----------|---------------------|------------------|-----------------|--------|
+| XXHash64 | 8415 | 8415 | 8256 | 8282 | PASS | Passes 70% Rust and 50% C |
+| ChaCha20 | 182 | 195 | 203 | 206 | PASS | Passes 70% Rust and 50% C |
+
+Additional evidence:
+- `test/perf/run_comparison.shs` remains green: Rust bootstrap wall clock `1390ms`, self-hosted Simple wall clock `730ms`; sum of average benchmark times `12121us` vs `6052us`, ratio `0.4x`.
+- Active release artifact SHA256 is `e1af8431a4bc05cad74bfd29d4aebb8436adb7fd852a035e5e9546319a35295d`; `src/compiler_rust/target/release/libsimple_native_all.a` SHA256 is `c712e38dd559d4f65e39cb59a44db606b4cf06390b15c0128d16fb2e52fd61c1`.
+- Default and explicit LLVM benchmark outputs are identical in this sample: `build/perf/port_algorithms/port_algorithms_simple` and `port_algorithms_simple_llvm` both hash to `a4bf5b3baee1640e1bde9d7e5324bc0f8c9bdf96eb1aef5af98bed09903825c1`.
+- `rt_typed_bytes_u32_le_set` lowers inline in Cranelift and LLVM; the targeted Cranelift regression proves the marker emits no runtime relocation, and the LLVM benchmark path compiles/runs with matching checksum parity.
+- The grouped ChaCha output helper was removed from source; the latest disassembly summary has no `chacha20_xor_words4_checksum_local` symbol or call match.
+- `rt_len` is gone from the latest benchmark disassembly. Remaining `rt_index_get` references are outside the accepted ChaCha output hot path and stay tracked as broader generic index hardening.
+- Phase 6C is DONE for the benchmark evidence gate, and Phase 6D is PASS on the latest local C/Rust/Simple/LLVM sample.
+
+### 2026-05-12 inline length lowering and latest acceptance update
+
+Commands:
+- `cargo check --manifest-path src/compiler_rust/Cargo.toml -p simple-compiler --features llvm`
+- `cargo test --manifest-path src/compiler_rust/Cargo.toml -p simple-compiler codegen_inline_rt_len_does_not_emit_runtime_symbol -- --nocapture`
+- `cargo build --manifest-path src/compiler_rust/Cargo.toml --release -p simple-driver -p simple-native-all --features llvm`
+- `cp src/compiler_rust/target/release/simple bin/release/x86_64-unknown-linux-gnu/simple`
+- `SIMPLE_LLVM_PROBE=1 SIMPLE_DISASM_PROBE=1 test/perf/port_algorithms/run_port_algorithm_benchmarks.shs`
+- `test/perf/run_comparison.shs`
+
+| Algorithm | C MB/s | Rust MB/s | Simple default MB/s | Simple LLVM MB/s | Checksum parity | Status |
+|-----------|--------|-----------|---------------------|------------------|-----------------|--------|
+| XXHash64 | 13981 | 7992 | 11084 | 7261 | PASS | Default passes 70% Rust and 50% C; LLVM passes 70% Rust and 50% C |
+| ChaCha20 | 324 | 195 | 145 | 133 | PASS | Default passes 70% Rust but misses 50% C; LLVM misses 70% Rust and 50% C by a small margin |
+
+Additional evidence:
+- `test/perf/run_comparison.shs` remains green: Rust bootstrap wall clock `1475ms`, self-hosted Simple wall clock `796ms`; sum of average benchmark times `12872us` vs `6631us`, ratio `0.5x`.
+- Active release artifact SHA256 is `6f98206705093ab63efb232f225ad33dbc003c26df7acf47fbb4a5bead6534ec`; `src/compiler_rust/target/release/libsimple_native_all.a` SHA256 is `8dcce0ce970aba986dce7c8cc3de9edfa827c0ebf9e2794d4c892c5c6aa859ec`.
+- Default and explicit LLVM benchmark outputs are identical in this sample: `build/perf/port_algorithms/port_algorithms_simple` and `port_algorithms_simple_llvm` both hash to `9209a1945717700ee65d408be6362d5c12529b6e663676e60d1501fd1f047600`.
+- Disassembly evidence moved forward: `rt_len` is gone from the benchmark output, while `rt_index_get`, helper boundaries, and branch-heavy checked byte writes/reads remain the concrete Phase 6C follow-ups.
+- This sample left Phase 6D at WARN at the time; it is superseded by the typed u32 byte-store acceptance update above.
+
+### 2026-05-12 typed little-endian marker acceptance update
+
+Commands:
+- `cargo fmt --manifest-path src/compiler_rust/Cargo.toml --all`
+- `cargo check --manifest-path src/compiler_rust/Cargo.toml -p simple-compiler --features llvm`
+- `bin/simple check src/os/crypto/xxhash.spl test/perf/port_algorithms/port_algorithms_simple.spl`
+- `cargo test --manifest-path src/compiler_rust/Cargo.toml -p simple-compiler codegen_inline_typed_bytes_u64_le_unchecked_does_not_emit_runtime_symbol -- --nocapture`
+- `cargo build --manifest-path src/compiler_rust/Cargo.toml -p simple-driver --release --features llvm --bin simple`
+- `cp src/compiler_rust/target/release/simple bin/release/x86_64-unknown-linux-gnu/simple`
+- `SIMPLE_LLVM_PROBE=1 SIMPLE_DISASM_PROBE=1 test/perf/port_algorithms/run_port_algorithm_benchmarks.shs`
+- `sha256sum build/perf/port_algorithms/port_algorithms_simple build/perf/port_algorithms/port_algorithms_simple_llvm`
+- `objdump -Cd build/perf/port_algorithms/port_algorithms_simple | rg "call.*rt_typed_bytes|call.*rt_bytes_u(32|64)_le|call.*rt_index_get|<xxhash64>" -n`
+- `test/perf/run_comparison.shs`
+
+### 2026-05-12 SIMD native-safety update
+
+Commands:
+- `bin/simple test test/unit/os/crypto/chacha20_simd_parity_spec.spl --mode=interpreter --no-cache`
+- `bin/simple check src/os/crypto/chacha20.spl build/perf/port_algorithms/chacha20_simd_native_probe.spl`
+- `bin/simple compile build/perf/port_algorithms/chacha20_simd_native_probe.spl --native --cpu native --opt-level aggressive -o build/perf/port_algorithms/chacha20_simd_native_probe`
+- `build/perf/port_algorithms/chacha20_simd_native_probe`
+- `(nm -u build/perf/port_algorithms/chacha20_simd_native_probe || true) | rg "rt_simd_add_f32x4|rt_simd_.*f32|rt_simd_.*f64"; test ${PIPESTATUS[1]} -eq 1`
+
+Result:
+- OS ChaCha SIMD/scalar parity passes all 6 interpreter examples.
+- The native SIMD probe compiles, runs, and prints `ok`.
+- The native probe has no unresolved unrelated f32/f64 SIMD runtime references.
+- The previous native segfault was caused by Simple-level `extern fn rt_simd_*` declarations that did not match the Rust runtime ABI. OS ChaCha now uses local field-wise `Vec4i` operations with u32 bit-pattern conversion instead of raw runtime SIMD externs.
+
+Latest performance check after this fix:
+- `SIMPLE_LLVM_PROBE=1 SIMPLE_DISASM_PROBE=1 test/perf/port_algorithms/run_port_algorithm_benchmarks.shs`
+- C: XXHash64 9818 MB/s, ChaCha20 217 MB/s.
+- Rust: XXHash64 8308 MB/s, ChaCha20 185 MB/s.
+- Simple native: XXHash64 8335 MB/s, ChaCha20 133 MB/s.
+- Simple LLVM: XXHash64 8269 MB/s, ChaCha20 136 MB/s.
+- Checksum parity passed for native and LLVM.
+
+Interpretation:
+- XXHash64 meets the C/Rust throughput target on both Simple backends.
+- ChaCha20 meets the 50% C and 70% Rust throughput targets on this run, but the remaining delta is still tied to the already listed helper-inlining, bounds/index, and fixed-size byte-buffer follow-ups: `chacha20_xor_block_checksum_local` still calls the 16-byte helper four times per block and the 16-byte helper still carries repeated branch/check instructions.
+
+| Algorithm | C MB/s | Rust MB/s | Simple native MB/s | Simple LLVM MB/s | Checksum parity | Status |
+|-----------|--------|-----------|--------------------|------------------|-----------------|--------|
+| XXHash64 | 8856 | 8594 | 14644 | 14685 | PASS | Meets 70% Rust and 50% C thresholds |
+| ChaCha20 | 294 | 203 | 234 | 229 | PASS | Meets 70% Rust and 50% C thresholds |
+
+Notes:
+- Active release artifact SHA256 is `4ac2578b8a6ef79fa8c01f88d29b89171be82134e93db685b613385d281c38c0`; benchmark output binaries `port_algorithms_simple` and `port_algorithms_simple_llvm` are identical at SHA256 `81953cab3c326b25bcd566dc9713cdc0a1ce50d037a0b736386dc596c09f90bd`.
+- `src/os/crypto/xxhash.spl` no longer declares or calls explicit `rt_typed_bytes_*_unchecked` externs. It uses typed little-endian markers (`rt_typed_bytes_u32_le_at`, `rt_typed_bytes_u64_le_at`) at loop-proven safe sites.
+- Cranelift and LLVM call lowering both recognize the typed little-endian markers and emit direct packed byte loads. Generic/public `rt_bytes_u32_le_at` and `rt_bytes_u64_le_at` calls retain checked helper lowering.
+- Fresh disassembly of `xxhash64` shows no calls to `rt_typed_bytes_*`, `rt_bytes_u32_le_at`, or `rt_bytes_u64_le_at`. Remaining `rt_index_get` calls are in streaming helper functions (`_xxh64_buf_to_u8`, `xxhash64_update`, `xxhash64_finalize`), not the one-shot benchmark hot function.
+- Existing compiler/runtime benchmark `test/perf/run_comparison.shs` remains green with self-hosted Simple faster than the Rust bootstrap: wall clock 798 ms vs 1446 ms, sum of average benchmark times 6657 us vs 12581 us, ratio 0.5x.
+- This dated sample satisfied the Phase 6D benchmark acceptance for that harness run and removed the explicit unchecked source marker dependency from the algorithm code. The current acceptance state is the typed u32 byte-store update above.
+
+### 2026-05-12 hotspot ASM diff baseline
+
+Commands:
+- `SIMPLE_LLVM_PROBE=1 SIMPLE_DISASM_PROBE=1 test/perf/port_algorithms/run_port_algorithm_benchmarks.shs`
+- `objdump -Cd build/perf/port_algorithms/port_algorithms_{c,rust,simple,simple_llvm}`
+- `nm -n build/perf/port_algorithms/port_algorithms_{c,rust,simple,simple_llvm}`
+
+| Binary | Hotspot symbol used for comparison | Instructions | Calls | Runtime calls | Branches | Shifts/rotates | Notes |
+|--------|------------------------------------|--------------|-------|---------------|----------|----------------|-------|
+| C | `main` | 530 | 11 | 0 | 11 | 6 | `xxhash64_ref` and ChaCha helpers are static and inlined into `main`; calls are allocation/time/printing only. |
+| Rust | `port_algorithms_ref::main` | 651 | 20 | 0 | 17 | 7 | Reference algorithm helpers are inlined into the Rust benchmark entrypoint. |
+| Simple native | `xxhash64` | 204 | 1 | 1 (`rt_len`) | 17 | 5 | No calls to typed byte helpers, little-endian helpers, or `rt_index_get` in the one-shot hot function. |
+| Simple native | `chacha20_encrypt_checksum_local` | 38 | 3 | 2 (`rt_len`) | 2 | 0 | Still calls the block helper once per 64-byte block. |
+| Simple native | `chacha20_xor_block_checksum_local` | 261 | 4 | 0 | 1 | 0 | Calls `chacha20_xor_words4_checksum_local` four times; maps to helper-inlining hardening. |
+| Simple native | `chacha20_xor_words4_checksum_local` | 740 | 0 | 0 | 128 | 68 | Runtime calls are gone, but inlined checked byte writes/checksum reads still leave many branch checks; maps to bounds/index and fixed-buffer hardening. |
+| Simple LLVM | same Simple symbols | same as native | same | same | same | same | Current harness output binaries are byte-identical, so this is a backend parity signal rather than an LLVM-specific improvement. |
+
+Conclusions from that sample:
+- One dated sample met the full algorithm threshold, but the fresher inline-length sample above is the current acceptance source and keeps Phase 6D at WARN.
+- Remaining work is structural hardening, not a vague optimizer bucket: remove repeated byte-loop checks (bounds/index optimization), inline or justify the remaining ChaCha helper calls (helper inlining visibility), and lower fixed-size byte buffers when lifetime/size are known (fixed-size byte-buffer lowering).
+
+### 2026-05-12 packed byte-array + little-endian load update
+
+Commands:
+- `cargo test --manifest-path src/compiler_rust/Cargo.toml -p simple-runtime byte_array_packed_storage_fast_path -- --nocapture`
+- `cargo check --manifest-path src/compiler_rust/Cargo.toml -p simple-compiler --features llvm`
+- `cargo build --manifest-path src/compiler_rust/Cargo.toml -p simple-runtime --release`
+- `cargo build --manifest-path src/compiler_rust/Cargo.toml -p simple-driver --release --features llvm --bin simple`
+- `cp src/compiler_rust/target/release/simple bin/release/x86_64-unknown-linux-gnu/simple`
+- `bin/simple check src/os/crypto/xxhash.spl test/perf/port_algorithms/port_algorithms_simple.spl`
+- `SIMPLE_LLVM_PROBE=1 SIMPLE_DISASM_PROBE=1 test/perf/port_algorithms/run_port_algorithm_benchmarks.shs`
+
+| Algorithm | C MB/s | Rust MB/s | Simple native MB/s | Simple LLVM MB/s | Checksum parity | Status |
+|-----------|--------|-----------|--------------------|------------------|-----------------|--------|
+| XXHash64 | 14403 | 14727 | 2888 | 1683 | PASS | Improved ~6.2x from prior active native sample, still below threshold |
+| ChaCha20 | 323 | 340 | 234 | 141 | PASS | Native near Rust threshold and above 50% C; LLVM probe regressed |
+
+Notes:
+- Typed empty `[u8]` locals now lower to `rt_byte_array_new`, backed by packed one-byte storage in the runtime. Core operations `get`, `set`, `push`, `push_no_grow`, `pop`, `extend_i64`, byte helpers, and free now branch on the packed-array flag.
+- `rt_byte_array_new`, `rt_bytes_u32_le_at`, and `rt_bytes_u64_le_at` are registered in runtime symbol metadata and the release driver links `simple-runtime` with `runtime-symbol-table` so the active native compiler can resolve the new symbols.
+- `src/os/crypto/xxhash.spl` now routes the one-shot hot loop through little-endian byte-array load helpers, cutting repeated eight-byte indexed load expansion. Disassembly confirms remaining calls to `rt_bytes_u64_le_at`/`rt_bytes_u32_le_at`, so the next concrete task is to make runtime intrinsic calls inline at direct call sites or lower these helpers as MIR intrinsics before function-call emission.
+- This update does not meet Phase 6D acceptance. The verified remaining blocker maps to items 2 and 3 above: direct runtime-intrinsic inline visibility and bounds/index provenance in the native backend.
+
+### 2026-05-12 LLVM-enabled release probe update
+
+Commands:
+- `cargo build --manifest-path src/compiler_rust/Cargo.toml -p simple-driver --release --features llvm --bin simple`
+- `SIMPLE_BIN=src/compiler_rust/target/release/simple SIMPLE_LLVM_PROBE=1 SIMPLE_DISASM_PROBE=1 test/perf/port_algorithms/run_port_algorithm_benchmarks.shs`
+- `cargo test --manifest-path src/compiler_rust/Cargo.toml -p simple-compiler release_shim -- --nocapture`
+- `cargo test --manifest-path src/compiler_rust/Cargo.toml -p simple-compiler --features llvm create_module_emits_target_triple_and_datalayout -- --nocapture`
+- `cargo check --manifest-path src/compiler_rust/Cargo.toml -p simple-compiler --features llvm`
+- `cargo test --manifest-path src/compiler_rust/Cargo.toml -p simple-driver --lib native_build -- --nocapture`
+- `cargo test --manifest-path src/compiler_rust/Cargo.toml -p simple-compiler u8_array_index_uses_byte_fast_path -- --nocapture`
+- `cargo test --manifest-path src/compiler_rust/Cargo.toml -p simple-compiler u8_index_set_uses_byte_fast_path -- --nocapture`
+- `cargo test --manifest-path src/compiler_rust/Cargo.toml -p simple-compiler codegen::common_backend::tests -- --nocapture`
+- `SIMPLE_LLVM_PROBE=1 SIMPLE_DISASM_PROBE=1 test/perf/port_algorithms/run_port_algorithm_benchmarks.shs`
+
+| Algorithm | C MB/s | Rust MB/s | Simple native MB/s | Simple LLVM MB/s | Checksum parity | Status |
+|-----------|--------|-----------|--------------------|------------------|-----------------|--------|
+| XXHash64 | 7825 | 8256 | 456 | 806 | PASS | Improved, still below threshold |
+| ChaCha20 | 179 | 202 | 181 | 190 | PASS | Meets Rust/C threshold |
+
+Notes:
+- `src/compiler_rust/target/release/simple` now accepts the LLVM backend and the harness builds `build/perf/port_algorithms/port_algorithms_simple_llvm`; `simple_llvm_compile.log` records a successful compile instead of the earlier unavailable-backend message.
+- Rust LLVM module creation now sets target datalayout from the same `TargetMachine` used for object emission; the focused LLVM-feature unit test verifies emitted IR contains both `target triple` and `target datalayout`.
+- The active `bin/simple` was not overwritten in this probe. A prior stale-release swap regressed performance, so release propagation remains a separate gate.
+- Release-shim runtime/compiler archive discovery is now explicit and tested, preventing `bin/release/.../simple` from silently preferring debug runtime archives when release archives exist.
+- Disassembly still shows the XXHash hot path calling `_xxh64_*` helper functions plus `rt_len`, `rt_index_get`, and `rt_index_set` through `_xxh64_buf_to_u8`. That maps the remaining XXHash gap to bounds/index/direct byte-buffer lowering and helper inlining, not LLVM backend availability.
+- `bin/simple test test/unit/compiler/backend/llvm_opt_pipeline_spec.spl --mode=interpreter --no-cache` executed all 8 examples successfully but the file still failed at runner/semantic finalization with `function compiler_driver_create not found`; keep this as a test-runner validation gap, not a failing assertion in the new LLVM pipeline helpers.
+- `cargo test --manifest-path src/compiler_rust/Cargo.toml -p simple-compiler --features llvm,llvm-tests ...` remains blocked by stale `llvm-tests` fixtures (`crate::mir::BinOp`, private `mir::effects`, old MIR field names), so LLVM backend coverage should use focused normal `llvm` feature tests until that suite is repaired.
+
+### 2026-05-12 active release propagation and SIMD hygiene update
+
+Commands:
+- `cargo build --manifest-path src/compiler_rust/Cargo.toml -p simple-driver --release --features llvm --bin simple`
+- `cp src/compiler_rust/target/release/simple bin/release/x86_64-unknown-linux-gnu/simple`
+- `cargo test --manifest-path src/compiler_rust/Cargo.toml -p simple-compiler codegen::common_backend::tests -- --nocapture`
+- `cargo check --manifest-path src/compiler_rust/Cargo.toml -p simple-compiler`
+- `cargo check --manifest-path src/compiler_rust/Cargo.toml -p simple-compiler --features llvm`
+- `SIMPLE_LLVM_PROBE=1 SIMPLE_DISASM_PROBE=1 test/perf/port_algorithms/run_port_algorithm_benchmarks.shs`
+
+| Algorithm | C MB/s | Rust MB/s | Simple native MB/s | Simple LLVM MB/s | Checksum parity | Status |
+|-----------|--------|-----------|--------------------|------------------|-----------------|--------|
+| XXHash64 | 14324 | 14727 | 462 | 818 | PASS | Improved with LLVM probe, still below threshold |
+| ChaCha20 | 321 | 342 | 176 | 194 | PASS | LLVM probe above 50% C and 70% Rust thresholds |
+
+Notes:
+- Active `bin/simple` now resolves to the refreshed release artifact; SHA256 for `src/compiler_rust/target/release/simple` and `bin/release/x86_64-unknown-linux-gnu/simple` is `560aec3f528b92917b4f259019ec1a58f9e058048783b34d204c5027bafe240a`.
+- The previous active artifact is preserved at `bin/release/x86_64-unknown-linux-gnu/simple.pre-simd-import-llvm-release-20260512T171723Z`.
+- New focused Rust tests prove unused empty externs such as `rt_simd_add_f32x4` are not declared, while referenced empty externs still are.
+- XXHash remains the open acceptance blocker; subagent analysis maps the next fix to loop-aware bounds/index provenance or direct fixed-byte-buffer lowering, not LLVM backend availability.
+
+### 2026-05-12 Cranelift byte-inline ABI fix update
+
+Commands:
+- `cargo test --manifest-path src/compiler_rust/Cargo.toml -p simple-compiler inline_bytes_u8 -- --nocapture`
+- `cargo check --manifest-path src/compiler_rust/Cargo.toml -p simple-compiler`
+- `cargo check --manifest-path src/compiler_rust/Cargo.toml -p simple-compiler --features llvm`
+- `cargo build --manifest-path src/compiler_rust/Cargo.toml -p simple-driver --release --features llvm --bin simple`
+- `cp src/compiler_rust/target/release/simple bin/release/x86_64-unknown-linux-gnu/simple`
+- `SIMPLE_LLVM_PROBE=1 SIMPLE_DISASM_PROBE=1 test/perf/port_algorithms/run_port_algorithm_benchmarks.shs`
+
+| Algorithm | C MB/s | Rust MB/s | Simple native MB/s | Simple LLVM MB/s | Checksum parity | Status |
+|-----------|--------|-----------|--------------------|------------------|-----------------|--------|
+| XXHash64 | 8128 | 14727 | 465 | 463 | PASS | Helper calls removed in byte loads, still below threshold |
+| ChaCha20 | 182 | 343 | 191 | 190 | PASS | Native/LLVM pass C threshold, still below Rust threshold |
+
+Notes:
+- A spawned code-review agent found two Cranelift inline lowering bugs before release propagation: narrow operands were not coerced to `i64`, and `rt_bytes_u8_set` returned tagged Simple bool constants instead of the runtime ABI `0/1` bool.
+- `src/compiler_rust/compiler/src/codegen/instr/calls.rs` now sign- or zero-extends narrow array/index/value operands from MIR type facts before Cranelift integer/address ops, and the set helper returns ABI-compatible `i8` false/true values.
+- `src/compiler_rust/compiler/src/codegen/codegen_instr_tests/calls.rs` now has active crate tests for narrow-index `rt_bytes_u8_at` and narrow-value `rt_bytes_u8_set`; both passed.
+- Active release artifact SHA256 for `src/compiler_rust/target/release/simple` and `bin/release/x86_64-unknown-linux-gnu/simple` is `1e01282707bacad529a4db9943f9de2c8df495e7e4f3403e70b52f6bd7e18c13`; the previous artifact is backed up at `bin/release/x86_64-unknown-linux-gnu/simple.pre-cranelift-u8-abi-fix-20260512T174337Z`.
+- Disassembly now shows `_xxh64_load_u64_le` and `_xxh64_load_u32_le` use inline byte-array checks instead of runtime `rt_bytes_u8_at` calls, but each byte still repeats tag/type/length/bounds branches. The remaining XXHash blocker is loop-aware bounds/index provenance or a proven unchecked/direct byte-access MIR form, not another runtime helper wrapper.
+- `xxhash64` still calls `rt_string_new` and `rt_len`; ChaCha still has four `chacha20_xor_words4_checksum_local` calls and repeated checked byte-store/load branches in that helper.
 
 ### 2026-05-12 Codex completion update
 
@@ -57,7 +381,7 @@ Notes:
 - `test/perf/port_algorithms/port_algorithms_simple.spl` now mirrors the C/Rust harness more closely by reusing one ChaCha output buffer across benchmark iterations.
 - The local ChaCha path writes XORed words directly to the destination buffer instead of allocating a 64-byte keystream array for every block and indexing it byte by byte.
 - A speculative XXHash expression cleanup was checked against the same benchmark and removed because it did not improve measured throughput.
-- Phase 6D remains unmet; the remaining gap is linked to compiler/runtime work below: reliable tiny-helper inlining in the active native compiler, bounds-check lowering/elimination for indexed byte loops, and fixed-size byte-buffer lowering to stack/native storage.
+- Phase 6D remained unmet at this point; the gap was linked to compiler/runtime work below: reliable tiny-helper inlining in the active native compiler, bounds-check lowering/elimination for indexed byte loops, and fixed-size byte-buffer lowering to stack/native storage.
 
 ### 2026-05-12 Phase 6C helper-check follow-up
 
@@ -211,6 +535,78 @@ Notes:
 
 ---
 
+### 2026-05-12 LLVM default-pipeline/probe follow-up
+
+Commands:
+- `bin/simple check src/compiler/70.backend/backend/llvm_passes.spl src/compiler/70.backend/backend/llvm_lib_backend.spl test/unit/compiler/backend/llvm_opt_pipeline_spec.spl test/perf/port_algorithms/port_algorithms_simple.spl`
+- `bin/simple test test/unit/compiler/backend/llvm_opt_pipeline_spec.spl --mode=interpreter`
+- `SIMPLE_LLVM_PROBE=1 test/perf/port_algorithms/run_port_algorithm_benchmarks.shs`
+
+| Algorithm | C MB/s | Rust MB/s | Simple native MB/s | Checksum parity | LLVM probe |
+|-----------|--------|-----------|--------------------|-----------------|------------|
+| XXHash64 | 8580 | 7825 | 134 | PASS | unavailable: rebuild with `--features llvm` |
+| ChaCha20 | 191 | 183 | 62 | PASS | unavailable: rebuild with `--features llvm` |
+
+Notes:
+- `llvm_passes.spl` now exposes LLVM new-pass-manager default pipeline helpers for `default<O0>`, `default<O1>`, `default<O2>`, `default<O3>`, `default<Os>`, and `default<Oz>`.
+- `llvm_lib_backend.spl` now consumes the shared default-pipeline helper instead of carrying a local `options.opt_level` string match.
+- `passes_for_level` remains as the explicit diagnostic/custom-pass list rather than the production LLVM optimization default.
+- `test/unit/compiler/backend/llvm_opt_pipeline_spec.spl` covers the default-pipeline mapping and verifies the explicit pass diagnostics remain available.
+- The benchmark harness now runs a non-failing Simple LLVM probe by default. When LLVM is unavailable it records `build/perf/port_algorithms/simple_llvm_compile.log`; when LLVM compiles, it validates LLVM checksum parity against C/Rust/Simple.
+- The targeted `check` command passed. The LLVM pipeline spec executed all 8 examples with 0 failures, then the runner exited nonzero on an existing repo-level semantic error: `function compiler_driver_create not found`.
+- Native subagent investigation confirmed the active `bin/simple` is not built with the Rust `llvm` Cargo feature; enabling LLVM requires rebuilding the final CLI artifact with `--features llvm` and a matching LLVM toolchain environment such as `LLVM_SYS_180_PREFIX`.
+
+---
+
+### 2026-05-12 release compiler propagation blocker
+
+Commands:
+- `cargo build --manifest-path src/compiler_rust/Cargo.toml -p simple-driver --release`
+- `cargo build --manifest-path src/compiler_rust/Cargo.toml -p simple-driver --profile release-opt`
+- `SIMPLE_BIN=src/compiler_rust/target/release/simple SIMPLE_LLVM_PROBE=0 test/perf/port_algorithms/run_port_algorithm_benchmarks.shs`
+- `SIMPLE_BIN=src/compiler_rust/target/release-opt/simple SIMPLE_LLVM_PROBE=0 test/perf/port_algorithms/run_port_algorithm_benchmarks.shs`
+- `SIMPLE_BIN=src/compiler_rust/target/bootstrap/simple SIMPLE_LLVM_PROBE=0 test/perf/port_algorithms/run_port_algorithm_benchmarks.shs`
+
+| Compiler artifact | XXHash64 MB/s | ChaCha20 MB/s | Checksum parity | Decision |
+|-------------------|---------------|---------------|-----------------|----------|
+| `target/release/simple` rebuilt from current tree, invoked directly | 262 | 109 | PASS | Better than active in one sample, still below threshold |
+| same rebuilt artifact copied behind `bin/simple` | 21 | 11 | PASS | Rejected/restored: symlinked active path generated much slower output |
+| `target/release-opt/simple` rebuilt from current tree | 22 | 9 | PASS | Rejected: too slow for active `bin/simple` |
+| `target/bootstrap/simple` existing artifact | 145 | 59 | PASS | Not enough improvement to close propagation gate |
+
+Notes:
+- The active `bin/simple` symlink target was restored to the previous ignored artifact after copying the rebuilt Rust release driver behind the symlink made generated benchmark output slower.
+- The rebuild did not close the release-compiler propagation gate. The next step is to identify why direct `target/release/simple` invocation and symlinked `bin/simple` invocation do not compile through the same optimized native path before replacing the active release artifact.
+- `bin/release/x86_64-unknown-linux-gnu/simple.pre-typed-u8-20260512T160538Z` is the local ignored backup of the pre-refresh active artifact.
+
+---
+
+### 2026-05-12 hotspot disassembly probe follow-up
+
+Commands:
+- `SIMPLE_LLVM_PROBE=1 SIMPLE_DISASM_PROBE=1 test/perf/port_algorithms/run_port_algorithm_benchmarks.shs`
+- `objdump -Cd build/perf/port_algorithms/port_algorithms_simple | rg "rt_index_get|rt_index_set|rt_bytes_u8_at|rt_bytes_u8_set|call.*(_xxh64_|chacha20_)"`
+
+| Algorithm | C MB/s | Rust MB/s | Simple native MB/s | Checksum parity | Hotspot evidence |
+|-----------|--------|-----------|--------------------|-----------------|------------------|
+| XXHash64 | 14727 | 8256 | 159 | PASS | `xxhash64` still contains many indirect runtime calls |
+| ChaCha20 | 320 | 196 | 58 | PASS | Four block-output calls plus 32 indirect index/set calls per grouped output helper |
+
+Notes:
+- The benchmark harness now writes `build/perf/port_algorithms/disasm_summary.txt` when `objdump` is available. It records both broad symbol/call matches and function-local call summaries for `xxhash64`, `chacha20_encrypt_checksum_local`, `chacha20_xor_block_checksum_local`, and `chacha20_xor_words4_checksum_local`.
+- Current Simple native disassembly shows `_xxh64_*` helper calls in the binary, but the current `xxhash64` function-local evidence is more specific: `xxhash64` contains many indirect calls through runtime relocation slots, not direct `_xxh64_*` calls.
+- Runtime relocations in the current Simple binary map the hot indirect-call slots to generic runtime helpers: `0x6dd58 -> rt_len`, `0x6dd88 -> rt_index_get`, `0x6dd90 -> rt_index_set`, and `0x6dd98 -> rt_string_new`.
+- Current ChaCha disassembly still shows four calls from `chacha20_xor_block_checksum_local` to `chacha20_xor_words4_checksum_local`, one call from `chacha20_encrypt_checksum_local` to the block helper, and one benchmark-level call to `chacha20_encrypt_checksum_local`.
+- `chacha20_xor_words4_checksum_local` contains 32 indirect calls through the `rt_index_get`/`rt_index_set` relocation slots. Remaining work should now focus on typed byte indexing and fixed-buffer lowering before spending more effort on helper-only inlining.
+
+Additional propagation evidence:
+- `src/compiler_rust/target/release/simple` was rebuilt and benchmarked directly as `SIMPLE_BIN=src/compiler_rust/target/release/simple`. It produced checksum parity and improved over active `bin/simple` in one sample (`xxhash64=262 MB/s`, `chacha20=109 MB/s`), but it is still below the acceptance target.
+- Copying that rebuilt artifact over `bin/release/x86_64-unknown-linux-gnu/simple` made the symlinked `bin/simple` invocation generate much slower output (`xxhash64=21 MB/s`, `chacha20=11 MB/s`) despite matching binary SHA256. The active artifact was restored from `bin/release/x86_64-unknown-linux-gnu/simple.pre-typed-u8-20260512T160538Z`.
+- This keeps the release-compiler propagation gate open: the next step is to fix artifact/resource-path provenance so `bin/simple` and `target/release/simple` compile through the same optimized native path before replacing the active release artifact.
+- Follow-up code change: Rust MIR lowering now chooses the `rt_bytes_u8_at` read fast path from the receiver's proven `[u8]` element type, not from only the propagated index-expression result type. Regression coverage is `u8_array_index_uses_byte_fast_path`; existing `u8_index_set_uses_byte_fast_path` still covers the write path.
+
+---
+
 ## Phase 1: Fix Compiler Bugs — DONE
 
 ### 1A. Add `auto_vectorize` and `predicate_promote` to Pipelines — DONE
@@ -337,7 +733,7 @@ These are **runtime infrastructure** externs, not crypto FFI:
 
 ---
 
-## Phase 6: Algorithm C/Rust Parity Benchmark Gate — TODO
+## Phase 6: Algorithm C/Rust Parity Benchmark Gate — PASS
 
 ### 6A. Add Cross-Language Algorithm Harness — DONE
 - **Create:** `test/perf/port_algorithms/`
@@ -351,22 +747,24 @@ These are **runtime infrastructure** externs, not crypto FFI:
 - Keep the existing `test/perf/run_comparison.shs` as the compiler/runtime regression guard.
 - Stop condition: plan doc contains a dated table for algorithm MB/s and compiler/runtime ratio.
 
-### 6C. Compiler Optimization From Hotspot Evidence — TODO
+### 6C. Compiler Optimization From Hotspot Evidence — DONE
 - 2026-05-12 follow-up: native disassembly showed the Simple benchmark still calls tiny hot helpers (`_xxh64_*`, `load32`, `quarter`, `push_word`) inside tight loops. Root cause found in the optimizer layer: the module-level inliner existed but `run_pass_on_module` dispatched inline passes through per-function inliners with no callee table, and the single-block inliner copied callee locals without a stable caller-local remap.
-- Source fix started: inline pass dispatch now routes `inline_small_functions`, `inline_functions`, and `inline_aggressive` through module-level inlining; the inliner now remaps callee locals/operands, materializes constant arguments, appends generated locals, and resolves recursive checks against real MIR call operands. This requires a rebuilt self-hosted compiler before benchmark deltas can show in `bin/simple`.
+- Source fixes completed for this gate: inline pass dispatch routes `inline_small_functions`, `inline_functions`, and `inline_aggressive` through module-level inlining; the inliner remaps callee locals/operands, materializes constant arguments, appends generated locals, and resolves recursive checks against real MIR call operands. The active release artifact was rebuilt with LLVM enabled before the final benchmark sample.
 - 2026-05-12 latest benchmark after fused ChaCha checksum cleanup: C `xxhash64=14324 MB/s`, `chacha20=321 MB/s`; Rust `xxhash64=8388 MB/s`, `chacha20=195 MB/s`; Simple `xxhash64=162 MB/s`, `chacha20=59 MB/s`. Checksums still pass. ChaCha output helper calls are reduced from 16 to 4 per block, key/nonce decode is removed from each block, checksum accumulation is fused into output writes, and rotate expressions reuse the xor temporary. XXHash and ChaCha remain dominated by helper/indexing/native-lowering overhead.
 - 2026-05-12 rejected benchmark-only shortcut: fully inlining all 16 ChaCha output words into the block function caused an `Illegal instruction` in the native binary, and pinning `--backend=llvm` is unavailable in this build.
+- 2026-05-12 LLVM direction: Simple should not grow a CPU-backend replacement for LLVM. The compiler must make `--backend=llvm` available, emit valid IR with correct triple/datalayout/ABI/runtime/link inputs, and use LLVM default optimization pipelines first (`default<O1/O2/O3/Os/Oz>`) before considering custom LLVM passes.
+- 2026-05-12 current evidence: active `bin/simple` is LLVM-enabled, default and explicit LLVM benchmark binaries are byte-identical in the latest run, `rt_len` is removed from the benchmark disassembly, typed u32 little-endian byte load/store markers remove the accepted ChaCha byte-loop checks, and the grouped ChaCha output helper boundary has been removed.
 - Make bounds checks a first-class MIR operation or consistently lower them to explicit check intrinsics so `bounds_check_elim` can prove and remove real hot-loop checks.
 - Propagate `@always_inline` from parser/HIR into MIR metadata instead of relying only on name/marker heuristics.
 - Verify integer SIMD native lowering for ChaCha20 and SHA paths with compiled/native benchmarks, not interpreter-only checks.
 - Fix native codegen's eager/std SIMD symbol surface so importing integer SIMD modules does not require unrelated f32 runtime symbols (`rt_simd_add_f32x4`) or compile broken `Vec4f.to_array`/`Vec8f.to_array` bodies.
 - Fix native initialization of top-level `val` constants or document the limitation in native benchmark style.
-- Stop condition: each optimizer change has one benchmark delta and one correctness test.
+- Stop condition met for the Phase 6 gate: each accepted optimizer change has a benchmark delta and correctness test, and the LLVM backend changes have target-config verifier coverage plus checksum-matched benchmark execution. External `.ll` dump plus `opt -verify` remains a broader tooling follow-up.
 
-### 6D. Parity Acceptance Thresholds — TODO
+### 6D. Parity Acceptance Thresholds — PASS
 - Correctness: RFC/KAT/unit tests pass before speed results count.
-- Compiler/runtime: self-hosted Simple remains no slower than Rust bootstrap on `test/perf/run_comparison.shs`.
-- Algorithms: pure Simple reaches at least 70% of portable Rust reference throughput and 50% of portable C reference throughput for each dependency-free benchmark, or the remaining gap is linked to a concrete compiler optimization task.
+- Compiler/runtime: self-hosted Simple remains no slower than Rust bootstrap on `test/perf/run_comparison.shs`; latest run is `730ms` Simple vs `1390ms` Rust bootstrap.
+- Algorithms: latest checksum parity passes. XXHash64 meets the throughput target on default and LLVM outputs (`8256`/`8282` MB/s vs C/Rust `8415` MB/s). ChaCha20 meets the throughput target on default and LLVM outputs (`203`/`206` MB/s vs C `182` MB/s and Rust `195` MB/s).
 
 ---
 
@@ -395,14 +793,14 @@ These are **runtime infrastructure** externs, not crypto FFI:
 | 5D | Zstd/LZ4 multi-byte copy | DONE |
 | 6A | Cross-language algorithm harness | DONE |
 | 6B | Baseline algorithm benchmarks | DONE |
-| 6C | Evidence-driven compiler optimizer follow-up | PARTIAL: benchmark-local allocation/check overhead reduced; ChaCha output helper calls reduced 16->4; module inliner candidate/refusal handling fixed; active native build still leaves helper overhead |
-| 6D | Algorithm parity acceptance gate | WARN: correctness PASS; typed `[u8]` index dispatch removed in Rust native path; performance below threshold until release compiler/native inliner/fixed-buffer work lands |
+| 6C | Evidence-driven compiler optimizer follow-up | DONE: typed byte helpers, typed u32 little-endian stores, inline `rt_len`, and removed ChaCha helper boundaries close the benchmark evidence gate |
+| 6D | Algorithm parity acceptance gate | PASS: correctness PASS; `test/perf/run_comparison.shs` PASS; XXHash64 and ChaCha20 meet the C/Rust throughput targets on default and LLVM outputs |
 
-**Next:** Complete the remaining compiler/runtime optimization tasks proven by Phase 6C/6D evidence: ensure active native builds consume module-level helper inlining, lower/eliminate bounds checks for indexed byte loops, rebuild the release compiler with typed byte-index lowering, and lower fixed-size byte buffers to stack/native storage.
+**Next:** Broader hardening only: add an LLVM IR dump/verify surface for external `opt -verify`, generalize the typed byte/index proof beyond the benchmark hot paths, and lower more fixed-size byte-buffer patterns to stack/native storage.
 
 ---
 
-## Critical Files (remaining work)
+## Critical Files (hardening and regression guard)
 
 | File | Phase | Purpose |
 |------|-------|---------|
@@ -411,4 +809,7 @@ These are **runtime infrastructure** externs, not crypto FFI:
 | `src/compiler/60.mir_opt/mir_opt/inline*.spl` | 6C | Make tiny helper inlining reliable in active native compiler output |
 | `src/compiler/60.mir_opt/mir_opt/bounds_check_elim.spl` | 6C | Lower/prove indexed byte-loop bounds checks consistently |
 | `src/compiler/70.backend/backend/native/` | 6C | Lower fixed-size byte buffers and integer SIMD paths without unrelated f32 runtime symbols |
+| `src/compiler/70.backend/backend/llvm_passes.spl` | 6C | Prefer LLVM default pipelines first; keep explicit pass lists for diagnostics or justified custom paths |
+| `src/compiler/70.backend/backend/llvm_target.spl` | 6C | Keep target triple, datalayout, CPU, features, ABI, and object-format decisions explicit |
+| `src/compiler/70.backend/backend/llvm_backend_tools.spl` / `llvm_lib_backend.spl` | 6C | Verify `opt`/`llc` or LLVM library invocation, `default<O*>` pipelines, and target-machine configuration |
 | `test/perf/port_algorithms/` | 6D | Keep C/Rust/Simple checksum parity and throughput deltas as the acceptance gate |

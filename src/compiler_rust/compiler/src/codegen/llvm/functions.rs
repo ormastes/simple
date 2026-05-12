@@ -1526,7 +1526,11 @@ impl LlvmBackend {
                 ..
             } => {
                 let val = self
-                    .coerce_value_to_type(self.get_vreg(value, vreg_map)?, Some(self.runtime_int_type().into()), builder)?
+                    .coerce_value_to_type(
+                        self.get_vreg(value, vreg_map)?,
+                        Some(self.runtime_int_type().into()),
+                        builder,
+                    )?
                     .into_int_value();
                 let narrowed = match overflow {
                     crate::mir::UnitOverflowBehavior::Wrap => {
@@ -1572,14 +1576,13 @@ impl LlvmBackend {
                 };
                 vreg_map.insert(*dest, narrowed.into());
             }
-            MirInst::UnitSaturate {
-                dest,
-                value,
-                min,
-                max,
-            } => {
+            MirInst::UnitSaturate { dest, value, min, max } => {
                 let val = self
-                    .coerce_value_to_type(self.get_vreg(value, vreg_map)?, Some(self.runtime_int_type().into()), builder)?
+                    .coerce_value_to_type(
+                        self.get_vreg(value, vreg_map)?,
+                        Some(self.runtime_int_type().into()),
+                        builder,
+                    )?
                     .into_int_value();
                 let min_v = self.runtime_int_type().const_int(*min as u64, true);
                 let max_v = self.runtime_int_type().const_int(*max as u64, true);
@@ -1948,6 +1951,12 @@ impl LlvmBackend {
                 };
 
                 if let Some(rt_name) = runtime_func {
+                    if rt_name == "rt_len" {
+                        let len_args = [*receiver];
+                        if self.compile_inline_len(*dest, &len_args, vreg_map, builder)? {
+                            return Ok(());
+                        }
+                    }
                     // rt_slice requires exactly 4 args: (collection, start, end, step).
                     // Handle it specially to pad missing optional args with defaults
                     // (matching Cranelift behavior in try_compile_builtin_method_call).

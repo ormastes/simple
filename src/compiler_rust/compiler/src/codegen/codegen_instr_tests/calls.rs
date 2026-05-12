@@ -1,7 +1,8 @@
-use super::{aot_compiles, aot_compiles_module};
+use super::{aot_compiles, aot_compiles_module, aot_object};
 use crate::hir::TypeId;
 use crate::mir::{
     BlockId, LocalKind, MirFunction, MirInst, MirLiteral, MirLocal, MirModule, MirPattern, PatternBinding, Terminator,
+    UnitOverflowBehavior,
 };
 
 // =============================================================================
@@ -566,4 +567,205 @@ fn codegen_call() {
     module.functions.push(target);
     module.functions.push(main);
     assert!(aot_compiles_module(module));
+}
+
+#[test]
+fn codegen_inline_bytes_u8_at_call_accepts_narrow_index() {
+    assert!(aot_compiles("inline_bytes_u8_at", |f| {
+        let array = f.new_vreg();
+        let wide_index = f.new_vreg();
+        let index = f.new_vreg();
+        let dest = f.new_vreg();
+        let block = f.block_mut(BlockId(0)).unwrap();
+        block.instructions.push(MirInst::ConstInt { dest: array, value: 0 });
+        block.instructions.push(MirInst::ConstInt {
+            dest: wide_index,
+            value: -1,
+        });
+        block.instructions.push(MirInst::UnitNarrow {
+            dest: index,
+            value: wide_index,
+            from_bits: 64,
+            to_bits: 8,
+            signed: true,
+            overflow: UnitOverflowBehavior::Wrap,
+        });
+        block.instructions.push(MirInst::Call {
+            dest: Some(dest),
+            target: crate::mir::CallTarget::from_name("rt_bytes_u8_at"),
+            args: vec![array, index],
+        });
+        dest
+    }));
+}
+
+#[test]
+fn codegen_inline_bytes_u8_set_call_accepts_narrow_value() {
+    assert!(aot_compiles("inline_bytes_u8_set", |f| {
+        let array = f.new_vreg();
+        let index = f.new_vreg();
+        let wide_value = f.new_vreg();
+        let value = f.new_vreg();
+        let dest = f.new_vreg();
+        let block = f.block_mut(BlockId(0)).unwrap();
+        block.instructions.push(MirInst::ConstInt { dest: array, value: 0 });
+        block.instructions.push(MirInst::ConstInt { dest: index, value: 0 });
+        block.instructions.push(MirInst::ConstInt {
+            dest: wide_value,
+            value: 255,
+        });
+        block.instructions.push(MirInst::UnitNarrow {
+            dest: value,
+            value: wide_value,
+            from_bits: 64,
+            to_bits: 8,
+            signed: false,
+            overflow: UnitOverflowBehavior::Wrap,
+        });
+        block.instructions.push(MirInst::Call {
+            dest: Some(dest),
+            target: crate::mir::CallTarget::from_name("rt_bytes_u8_set"),
+            args: vec![array, index, value],
+        });
+        dest
+    }));
+}
+
+fn object_relocates_to_symbol(object: &[u8], symbol: &str) -> bool {
+    use object::{Object, ObjectSection, ObjectSymbol, RelocationTarget};
+
+    let file = object::File::parse(object).expect("object parse failed");
+    file.sections().any(|section| {
+        section.relocations().any(|(_, relocation)| {
+            let RelocationTarget::Symbol(index) = relocation.target() else {
+                return false;
+            };
+            file.symbol_by_index(index).and_then(|sym| sym.name()) == Ok(symbol)
+        })
+    })
+}
+
+#[test]
+fn codegen_inline_rt_len_does_not_emit_runtime_symbol() {
+    let object = aot_object("inline_rt_len", |f| {
+        let array = f.new_vreg();
+        let dest = f.new_vreg();
+        let block = f.block_mut(BlockId(0)).unwrap();
+        block.instructions.push(MirInst::ConstInt { dest: array, value: 0 });
+        block.instructions.push(MirInst::Call {
+            dest: Some(dest),
+            target: crate::mir::CallTarget::from_name("rt_len"),
+            args: vec![array],
+        });
+        dest
+    });
+
+    assert!(!object_relocates_to_symbol(&object, "rt_len"));
+}
+
+#[test]
+fn codegen_inline_typed_bytes_u32_le_set_does_not_emit_runtime_symbol() {
+    let object = aot_object("inline_typed_bytes_u32_le_set", |f| {
+        let array = f.new_vreg();
+        let index = f.new_vreg();
+        let value = f.new_vreg();
+        let dest = f.new_vreg();
+        let ret = f.new_vreg();
+        let block = f.block_mut(BlockId(0)).unwrap();
+        block.instructions.push(MirInst::ConstInt { dest: array, value: 0 });
+        block.instructions.push(MirInst::ConstInt { dest: index, value: 0 });
+        block.instructions.push(MirInst::ConstInt {
+            dest: value,
+            value: 0x0403_0201,
+        });
+        block.instructions.push(MirInst::Call {
+            dest: Some(dest),
+            target: crate::mir::CallTarget::from_name("rt_typed_bytes_u32_le_set"),
+            args: vec![array, index, value],
+        });
+        block.instructions.push(MirInst::ConstInt { dest: ret, value: 0 });
+        ret
+    });
+
+    assert!(!object_relocates_to_symbol(&object, "rt_typed_bytes_u32_le_set"));
+}
+
+#[test]
+fn codegen_inline_bytes_u64_le_at_does_not_emit_runtime_symbol() {
+    let object = aot_object("inline_bytes_u64_le_at", |f| {
+        let array = f.new_vreg();
+        let index = f.new_vreg();
+        let dest = f.new_vreg();
+        let block = f.block_mut(BlockId(0)).unwrap();
+        block.instructions.push(MirInst::ConstInt { dest: array, value: 0 });
+        block.instructions.push(MirInst::ConstInt { dest: index, value: 0 });
+        block.instructions.push(MirInst::Call {
+            dest: Some(dest),
+            target: crate::mir::CallTarget::from_name("rt_bytes_u64_le_at"),
+            args: vec![array, index],
+        });
+        dest
+    });
+
+    assert!(!object_relocates_to_symbol(&object, "rt_bytes_u64_le_at"));
+}
+
+#[test]
+fn codegen_inline_bytes_u32_le_at_does_not_emit_runtime_symbol() {
+    let object = aot_object("inline_bytes_u32_le_at", |f| {
+        let array = f.new_vreg();
+        let index = f.new_vreg();
+        let dest = f.new_vreg();
+        let block = f.block_mut(BlockId(0)).unwrap();
+        block.instructions.push(MirInst::ConstInt { dest: array, value: 0 });
+        block.instructions.push(MirInst::ConstInt { dest: index, value: 0 });
+        block.instructions.push(MirInst::Call {
+            dest: Some(dest),
+            target: crate::mir::CallTarget::from_name("rt_bytes_u32_le_at"),
+            args: vec![array, index],
+        });
+        dest
+    });
+
+    assert!(!object_relocates_to_symbol(&object, "rt_bytes_u32_le_at"));
+}
+
+#[test]
+fn codegen_inline_typed_bytes_u64_le_unchecked_does_not_emit_runtime_symbol() {
+    let object = aot_object("inline_typed_bytes_u64_le_unchecked", |f| {
+        let array = f.new_vreg();
+        let index = f.new_vreg();
+        let dest = f.new_vreg();
+        let block = f.block_mut(BlockId(0)).unwrap();
+        block.instructions.push(MirInst::ConstInt { dest: array, value: 0 });
+        block.instructions.push(MirInst::ConstInt { dest: index, value: 0 });
+        block.instructions.push(MirInst::Call {
+            dest: Some(dest),
+            target: crate::mir::CallTarget::from_name("rt_typed_bytes_u64_le_unchecked"),
+            args: vec![array, index],
+        });
+        dest
+    });
+
+    assert!(!object_relocates_to_symbol(&object, "rt_typed_bytes_u64_le_unchecked"));
+}
+
+#[test]
+fn codegen_inline_typed_bytes_u64_le_at_does_not_emit_runtime_symbol() {
+    let object = aot_object("inline_typed_bytes_u64_le_at", |f| {
+        let array = f.new_vreg();
+        let index = f.new_vreg();
+        let dest = f.new_vreg();
+        let block = f.block_mut(BlockId(0)).unwrap();
+        block.instructions.push(MirInst::ConstInt { dest: array, value: 0 });
+        block.instructions.push(MirInst::ConstInt { dest: index, value: 0 });
+        block.instructions.push(MirInst::Call {
+            dest: Some(dest),
+            target: crate::mir::CallTarget::from_name("rt_typed_bytes_u64_le_at"),
+            args: vec![array, index],
+        });
+        dest
+    });
+
+    assert!(!object_relocates_to_symbol(&object, "rt_typed_bytes_u64_le_at"));
 }

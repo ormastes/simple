@@ -274,6 +274,10 @@ impl<'a> MirLowerer<'a> {
         let receiver_reg = self.lower_expr(receiver)?;
         let index_reg = self.lower_expr(index)?;
         let receiver_ty = receiver.ty;
+        let receiver_is_u8_array = self
+            .type_registry
+            .and_then(|tr| tr.get(receiver_ty))
+            .is_some_and(|ty| matches!(ty, HirType::Array { element, .. } if *element == TypeId::U8));
         let element_expr_ty = if expr_ty == TypeId::ANY {
             self.type_registry
                 .and_then(|tr| tr.get(receiver_ty))
@@ -306,15 +310,11 @@ impl<'a> MirLowerer<'a> {
                 });
                 dest
             })?
-        } else if element_expr_ty == TypeId::U8
+        } else if receiver_is_u8_array
             && matches!(
                 index.ty,
                 TypeId::I16 | TypeId::I32 | TypeId::I64 | TypeId::U8 | TypeId::U16 | TypeId::U32 | TypeId::U64
             )
-            && self
-                .type_registry
-                .and_then(|tr| tr.get(receiver_ty))
-                .is_some_and(|ty| matches!(ty, HirType::Array { element, .. } if *element == TypeId::U8))
         {
             return self.with_func(|func, current_block| {
                 let raw_byte = func.new_vreg();
@@ -322,7 +322,7 @@ impl<'a> MirLowerer<'a> {
                 let block = func.block_mut(current_block).unwrap();
                 block.instructions.push(MirInst::Call {
                     dest: Some(raw_byte),
-                    target: CallTarget::from_name("rt_bytes_u8_at"),
+                    target: CallTarget::from_name("rt_typed_bytes_u8_at"),
                     args: vec![receiver_reg, index_reg],
                 });
                 block.instructions.push(MirInst::UnitNarrow {

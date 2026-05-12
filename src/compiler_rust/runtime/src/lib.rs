@@ -304,6 +304,9 @@ pub use value::{
     rt_generator_set_state,
     rt_generator_store_slot,
     // Generic collection operations
+    rt_byte_array_new,
+    rt_bytes_u32_le_at,
+    rt_bytes_u64_le_at,
     rt_bytes_u8_at,
     rt_bytes_u8_set,
     rt_index_get,

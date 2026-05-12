@@ -2,11 +2,13 @@
 //!
 //! Handles all forms of function calls: user-defined, runtime FFI, and built-in functions.
 
+use cranelift_codegen::ir::condcodes::IntCC;
 use cranelift_codegen::ir::{types, InstBuilder, MemFlags};
 use cranelift_frontend::FunctionBuilder;
 use cranelift_module::Module;
 
 use crate::codegen::runtime_ffi::RUNTIME_FUNCS;
+use crate::hir::TypeId;
 use crate::mir::{CallTarget, VReg};
 
 use super::core::compile_builtin_io_call;
@@ -104,6 +106,379 @@ fn compile_simple_runtime_memory_intrinsic<M: Module>(
     }
 
     Ok(true)
+}
+
+fn compile_inline_len<M: Module>(
+    ctx: &mut InstrContext<'_, M>,
+    builder: &mut FunctionBuilder,
+    dest: &Option<VReg>,
+    args: &[VReg],
+) -> InstrResult<bool> {
+    if args.len() != 1 {
+        return Ok(false);
+    }
+    let Some(dest) = dest else {
+        return Ok(false);
+    };
+
+    let value = coerce_vreg_to_i64(ctx, builder, args[0]);
+    let invalid = builder.ins().iconst(types::I64, -1);
+    let tag_mask = builder.ins().iconst(types::I64, 7);
+    let ptr_mask = builder.ins().iconst(types::I64, !7i64);
+
+    let type_block = builder.create_block();
+    let len_block = builder.create_block();
+    let done_block = builder.create_block();
+    builder.append_block_param(done_block, types::I64);
+
+    let tag = builder.ins().band(value, tag_mask);
+    let is_heap = builder.ins().icmp_imm(IntCC::Equal, tag, 1);
+    builder.ins().brif(is_heap, type_block, &[], done_block, &[invalid]);
+
+    builder.switch_to_block(type_block);
+    let ptr_bits = builder.ins().band(value, ptr_mask);
+    let object_type = builder.ins().load(types::I8, MemFlags::new(), ptr_bits, 0);
+    let is_string = builder.ins().icmp_imm(IntCC::Equal, object_type, 1);
+    let is_array = builder.ins().icmp_imm(IntCC::Equal, object_type, 2);
+    let is_dict = builder.ins().icmp_imm(IntCC::Equal, object_type, 3);
+    let is_tuple = builder.ins().icmp_imm(IntCC::Equal, object_type, 4);
+    let string_or_array = builder.ins().bor(is_string, is_array);
+    let dict_or_tuple = builder.ins().bor(is_dict, is_tuple);
+    let is_collection = builder.ins().bor(string_or_array, dict_or_tuple);
+    builder
+        .ins()
+        .brif(is_collection, len_block, &[], done_block, &[invalid]);
+    builder.seal_block(type_block);
+
+    builder.switch_to_block(len_block);
+    let len = builder.ins().load(types::I64, MemFlags::new(), ptr_bits, 8);
+    builder.ins().jump(done_block, &[len]);
+    builder.seal_block(len_block);
+
+    builder.switch_to_block(done_block);
+    let result = builder.block_params(done_block)[0];
+    builder.seal_block(done_block);
+    ctx.vreg_values.insert(*dest, result);
+    Ok(true)
+}
+
+fn compile_inline_bytes_u8_at<M: Module>(
+    ctx: &mut InstrContext<'_, M>,
+    builder: &mut FunctionBuilder,
+    dest: &Option<VReg>,
+    args: &[VReg],
+    trusted_array: bool,
+) -> InstrResult<bool> {
+    if args.len() != 2 {
+        return Ok(false);
+    }
+    let Some(dest) = dest else {
+        return Ok(false);
+    };
+
+    let array = coerce_vreg_to_i64(ctx, builder, args[0]);
+    let index = coerce_vreg_to_i64(ctx, builder, args[1]);
+    let zero = builder.ins().iconst(types::I64, 0);
+    let tag_mask = builder.ins().iconst(types::I64, 7);
+    let ptr_mask = builder.ins().iconst(types::I64, !7i64);
+    let byte_mask = builder.ins().iconst(types::I64, 0xff);
+
+    let bounds_block = builder.create_block();
+    let load_block = builder.create_block();
+    let done_block = builder.create_block();
+    builder.append_block_param(done_block, types::I64);
+
+    let ptr_bits = builder.ins().band(array, ptr_mask);
+    if trusted_array {
+        builder.ins().jump(bounds_block, &[]);
+    } else {
+        let type_block = builder.create_block();
+        let tag = builder.ins().band(array, tag_mask);
+        let is_heap = builder.ins().icmp_imm(IntCC::Equal, tag, 1);
+        builder.ins().brif(is_heap, type_block, &[], done_block, &[zero]);
+
+        builder.switch_to_block(type_block);
+        let object_type = builder.ins().load(types::I8, MemFlags::new(), ptr_bits, 0);
+        let is_array = builder.ins().icmp_imm(IntCC::Equal, object_type, 2);
+        builder.ins().brif(is_array, bounds_block, &[], done_block, &[zero]);
+        builder.seal_block(type_block);
+    }
+
+    builder.switch_to_block(bounds_block);
+    let len = builder.ins().load(types::I64, MemFlags::new(), ptr_bits, 8);
+    let index_is_negative = builder.ins().icmp(IntCC::SignedLessThan, index, zero);
+    let negative_index = builder.ins().iadd(len, index);
+    let normalized_index = builder.ins().select(index_is_negative, negative_index, index);
+    let ge_zero = builder
+        .ins()
+        .icmp(IntCC::SignedGreaterThanOrEqual, normalized_index, zero);
+    let lt_len = builder.ins().icmp(IntCC::SignedLessThan, normalized_index, len);
+    let in_bounds = builder.ins().band(ge_zero, lt_len);
+    builder.ins().brif(in_bounds, load_block, &[], done_block, &[zero]);
+    builder.seal_block(bounds_block);
+
+    builder.switch_to_block(load_block);
+    let data_ptr = builder.ins().load(types::I64, MemFlags::new(), ptr_bits, 24);
+    let packed_block = builder.create_block();
+    let slot_block = builder.create_block();
+    let gc_flags = builder.ins().load(types::I8, MemFlags::new(), ptr_bits, 1);
+    let byte_packed = builder.ins().band_imm(gc_flags, 8);
+    let is_byte_packed = builder.ins().icmp_imm(IntCC::NotEqual, byte_packed, 0);
+    builder.ins().brif(is_byte_packed, packed_block, &[], slot_block, &[]);
+    builder.seal_block(load_block);
+
+    builder.switch_to_block(packed_block);
+    let byte_ptr = builder.ins().iadd(data_ptr, normalized_index);
+    let packed_byte = builder.ins().load(types::I8, MemFlags::new(), byte_ptr, 0);
+    let packed_value = builder.ins().uextend(types::I64, packed_byte);
+    builder.ins().jump(done_block, &[packed_value]);
+    builder.seal_block(packed_block);
+
+    builder.switch_to_block(slot_block);
+    let slot_offset = builder.ins().imul_imm(normalized_index, 8);
+    let slot_ptr = builder.ins().iadd(data_ptr, slot_offset);
+    let raw = builder.ins().load(types::I64, MemFlags::new(), slot_ptr, 0);
+    let raw_tag = builder.ins().band(raw, tag_mask);
+    let raw_is_int = builder.ins().icmp(IntCC::Equal, raw_tag, zero);
+    let int_payload = builder.ins().sshr_imm(raw, 3);
+    let int_byte = builder.ins().band(int_payload, byte_mask);
+    let raw_byte = builder.ins().band(raw, byte_mask);
+    let value = builder.ins().select(raw_is_int, int_byte, raw_byte);
+    builder.ins().jump(done_block, &[value]);
+    builder.seal_block(slot_block);
+
+    builder.switch_to_block(done_block);
+    let result = builder.block_params(done_block)[0];
+    builder.seal_block(done_block);
+    ctx.vreg_values.insert(*dest, result);
+    Ok(true)
+}
+
+fn compile_inline_bytes_le_at<M: Module>(
+    ctx: &mut InstrContext<'_, M>,
+    builder: &mut FunctionBuilder,
+    dest: &Option<VReg>,
+    args: &[VReg],
+    width: i64,
+) -> InstrResult<bool> {
+    if args.len() != 2 {
+        return Ok(false);
+    }
+    let Some(dest) = dest else {
+        return Ok(false);
+    };
+
+    let array = coerce_vreg_to_i64(ctx, builder, args[0]);
+    let index = coerce_vreg_to_i64(ctx, builder, args[1]);
+    let zero = builder.ins().iconst(types::I64, 0);
+    let ptr_mask = builder.ins().iconst(types::I64, !7i64);
+    let ptr_bits = builder.ins().band(array, ptr_mask);
+
+    let load_block = builder.create_block();
+    let done_block = builder.create_block();
+    builder.append_block_param(done_block, types::I64);
+
+    let len = builder.ins().load(types::I64, MemFlags::new(), ptr_bits, 8);
+    let ge_zero = builder.ins().icmp(IntCC::SignedGreaterThanOrEqual, index, zero);
+    let end = builder.ins().iadd_imm(index, width);
+    let in_len = builder.ins().icmp(IntCC::SignedLessThanOrEqual, end, len);
+    let in_bounds = builder.ins().band(ge_zero, in_len);
+    builder.ins().brif(in_bounds, load_block, &[], done_block, &[zero]);
+
+    builder.switch_to_block(load_block);
+    let data_ptr = builder.ins().load(types::I64, MemFlags::new(), ptr_bits, 24);
+    let byte_ptr = builder.ins().iadd(data_ptr, index);
+    let loaded = if width == 8 {
+        builder.ins().load(types::I64, MemFlags::new(), byte_ptr, 0)
+    } else {
+        let value = builder.ins().load(types::I32, MemFlags::new(), byte_ptr, 0);
+        builder.ins().uextend(types::I64, value)
+    };
+    builder.ins().jump(done_block, &[loaded]);
+    builder.seal_block(load_block);
+
+    builder.switch_to_block(done_block);
+    let result = builder.block_params(done_block)[0];
+    builder.seal_block(done_block);
+    ctx.vreg_values.insert(*dest, result);
+    Ok(true)
+}
+
+fn compile_inline_typed_bytes_le_unchecked<M: Module>(
+    ctx: &mut InstrContext<'_, M>,
+    builder: &mut FunctionBuilder,
+    dest: &Option<VReg>,
+    args: &[VReg],
+    width: i64,
+) -> InstrResult<bool> {
+    if args.len() != 2 {
+        return Ok(false);
+    }
+    let Some(dest) = dest else {
+        return Ok(false);
+    };
+
+    let array = coerce_vreg_to_i64(ctx, builder, args[0]);
+    let index = coerce_vreg_to_i64(ctx, builder, args[1]);
+    let ptr_mask = builder.ins().iconst(types::I64, !7i64);
+    let ptr_bits = builder.ins().band(array, ptr_mask);
+    let data_ptr = builder.ins().load(types::I64, MemFlags::new(), ptr_bits, 24);
+    let byte_ptr = builder.ins().iadd(data_ptr, index);
+    let loaded = if width == 8 {
+        builder.ins().load(types::I64, MemFlags::new(), byte_ptr, 0)
+    } else {
+        let value = builder.ins().load(types::I32, MemFlags::new(), byte_ptr, 0);
+        builder.ins().uextend(types::I64, value)
+    };
+    ctx.vreg_values.insert(*dest, loaded);
+    Ok(true)
+}
+
+fn compile_inline_typed_bytes_le_set_unchecked<M: Module>(
+    ctx: &mut InstrContext<'_, M>,
+    builder: &mut FunctionBuilder,
+    dest: &Option<VReg>,
+    args: &[VReg],
+    width: i64,
+) -> InstrResult<bool> {
+    if args.len() != 3 {
+        return Ok(false);
+    }
+
+    let array = coerce_vreg_to_i64(ctx, builder, args[0]);
+    let index = coerce_vreg_to_i64(ctx, builder, args[1]);
+    let value = coerce_vreg_to_i64(ctx, builder, args[2]);
+    let ptr_mask = builder.ins().iconst(types::I64, !7i64);
+    let ptr_bits = builder.ins().band(array, ptr_mask);
+    let data_ptr = builder.ins().load(types::I64, MemFlags::new(), ptr_bits, 24);
+    let byte_ptr = builder.ins().iadd(data_ptr, index);
+    if width == 8 {
+        builder.ins().store(MemFlags::new(), value, byte_ptr, 0);
+    } else {
+        let narrowed = builder.ins().ireduce(types::I32, value);
+        builder.ins().store(MemFlags::new(), narrowed, byte_ptr, 0);
+    }
+    if let Some(dest) = dest {
+        ctx.vreg_values.insert(*dest, builder.ins().iconst(types::I8, 1));
+    }
+    Ok(true)
+}
+
+fn compile_inline_bytes_u8_set<M: Module>(
+    ctx: &mut InstrContext<'_, M>,
+    builder: &mut FunctionBuilder,
+    dest: &Option<VReg>,
+    args: &[VReg],
+    trusted_array: bool,
+) -> InstrResult<bool> {
+    if args.len() != 3 {
+        return Ok(false);
+    }
+
+    let array = coerce_vreg_to_i64(ctx, builder, args[0]);
+    let index = coerce_vreg_to_i64(ctx, builder, args[1]);
+    let value = coerce_vreg_to_i64(ctx, builder, args[2]);
+    let zero = builder.ins().iconst(types::I64, 0);
+    let false_value = builder.ins().iconst(types::I8, 0);
+    let true_value = builder.ins().iconst(types::I8, 1);
+    let tag_mask = builder.ins().iconst(types::I64, 7);
+    let ptr_mask = builder.ins().iconst(types::I64, !7i64);
+    let byte_mask = builder.ins().iconst(types::I64, 0xff);
+
+    let bounds_block = builder.create_block();
+    let store_block = builder.create_block();
+    let done_block = builder.create_block();
+    builder.append_block_param(done_block, types::I8);
+
+    let ptr_bits = builder.ins().band(array, ptr_mask);
+    if trusted_array {
+        builder.ins().jump(bounds_block, &[]);
+    } else {
+        let type_block = builder.create_block();
+        let tag = builder.ins().band(array, tag_mask);
+        let is_heap = builder.ins().icmp_imm(IntCC::Equal, tag, 1);
+        builder.ins().brif(is_heap, type_block, &[], done_block, &[false_value]);
+
+        builder.switch_to_block(type_block);
+        let object_type = builder.ins().load(types::I8, MemFlags::new(), ptr_bits, 0);
+        let is_array = builder.ins().icmp_imm(IntCC::Equal, object_type, 2);
+        builder
+            .ins()
+            .brif(is_array, bounds_block, &[], done_block, &[false_value]);
+        builder.seal_block(type_block);
+    }
+
+    builder.switch_to_block(bounds_block);
+    let len = builder.ins().load(types::I64, MemFlags::new(), ptr_bits, 8);
+    let index_is_negative = builder.ins().icmp(IntCC::SignedLessThan, index, zero);
+    let negative_index = builder.ins().iadd(len, index);
+    let normalized_index = builder.ins().select(index_is_negative, negative_index, index);
+    let ge_zero = builder
+        .ins()
+        .icmp(IntCC::SignedGreaterThanOrEqual, normalized_index, zero);
+    let lt_len = builder.ins().icmp(IntCC::SignedLessThan, normalized_index, len);
+    let in_bounds = builder.ins().band(ge_zero, lt_len);
+    builder
+        .ins()
+        .brif(in_bounds, store_block, &[], done_block, &[false_value]);
+    builder.seal_block(bounds_block);
+
+    builder.switch_to_block(store_block);
+    let data_ptr = builder.ins().load(types::I64, MemFlags::new(), ptr_bits, 24);
+    let byte = builder.ins().band(value, byte_mask);
+    let packed_block = builder.create_block();
+    let slot_block = builder.create_block();
+    let gc_flags = builder.ins().load(types::I8, MemFlags::new(), ptr_bits, 1);
+    let byte_packed = builder.ins().band_imm(gc_flags, 8);
+    let is_byte_packed = builder.ins().icmp_imm(IntCC::NotEqual, byte_packed, 0);
+    builder.ins().brif(is_byte_packed, packed_block, &[], slot_block, &[]);
+    builder.seal_block(store_block);
+
+    builder.switch_to_block(packed_block);
+    let byte_value = builder.ins().ireduce(types::I8, byte);
+    let byte_ptr = builder.ins().iadd(data_ptr, normalized_index);
+    builder.ins().store(MemFlags::new(), byte_value, byte_ptr, 0);
+    builder.ins().jump(done_block, &[true_value]);
+    builder.seal_block(packed_block);
+
+    builder.switch_to_block(slot_block);
+    let slot_offset = builder.ins().imul_imm(normalized_index, 8);
+    let elem_ptr = builder.ins().iadd(data_ptr, slot_offset);
+    let tagged = builder.ins().ishl_imm(byte, 3);
+    builder.ins().store(MemFlags::new(), tagged, elem_ptr, 0);
+    builder.ins().jump(done_block, &[true_value]);
+    builder.seal_block(slot_block);
+
+    builder.switch_to_block(done_block);
+    let result = builder.block_params(done_block)[0];
+    builder.seal_block(done_block);
+    if let Some(dest) = dest {
+        ctx.vreg_values.insert(*dest, result);
+    }
+    Ok(true)
+}
+
+fn coerce_vreg_to_i64<M: Module>(
+    ctx: &InstrContext<'_, M>,
+    builder: &mut FunctionBuilder,
+    vreg: VReg,
+) -> cranelift_codegen::ir::Value {
+    let value = get_vreg_or_default(ctx, builder, &vreg);
+    let ty = builder.func.dfg.value_type(value);
+    if ty == types::I64 {
+        return value;
+    }
+    if !ty.is_int() || ty.bits() >= 64 {
+        return value;
+    }
+    if matches!(
+        ctx.vreg_types.get(&vreg).copied(),
+        Some(TypeId::I8) | Some(TypeId::I16) | Some(TypeId::I32) | Some(TypeId::I64)
+    ) {
+        builder.ins().sextend(types::I64, value)
+    } else {
+        builder.ins().uextend(types::I64, value)
+    }
 }
 
 /// Get the return type for a runtime FFI function.
@@ -460,6 +835,53 @@ pub fn compile_call<M: Module>(
     if compile_simple_runtime_memory_intrinsic(ctx, builder, dest, func_name_for_ffi, args)? {
         return Ok(());
     }
+    if ffi_name == "rt_len" && compile_inline_len(ctx, builder, dest, args)? {
+        return Ok(());
+    }
+    if ffi_name == "rt_typed_bytes_u8_at" && compile_inline_bytes_u8_at(ctx, builder, dest, args, true)? {
+        return Ok(());
+    }
+    if ffi_name == "rt_bytes_u8_at" && compile_inline_bytes_u8_at(ctx, builder, dest, args, false)? {
+        return Ok(());
+    }
+    if ffi_name == "rt_typed_bytes_u32_le_at" && compile_inline_typed_bytes_le_unchecked(ctx, builder, dest, args, 4)? {
+        return Ok(());
+    }
+    if ffi_name == "rt_typed_bytes_u64_le_at" && compile_inline_typed_bytes_le_unchecked(ctx, builder, dest, args, 8)? {
+        return Ok(());
+    }
+    if ffi_name == "rt_typed_bytes_u32_le_unchecked"
+        && compile_inline_typed_bytes_le_unchecked(ctx, builder, dest, args, 4)?
+    {
+        return Ok(());
+    }
+    if ffi_name == "rt_typed_bytes_u64_le_unchecked"
+        && compile_inline_typed_bytes_le_unchecked(ctx, builder, dest, args, 8)?
+    {
+        return Ok(());
+    }
+    if ffi_name == "rt_typed_bytes_u32_le_set"
+        && compile_inline_typed_bytes_le_set_unchecked(ctx, builder, dest, args, 4)?
+    {
+        return Ok(());
+    }
+    if ffi_name == "rt_typed_bytes_u64_le_set"
+        && compile_inline_typed_bytes_le_set_unchecked(ctx, builder, dest, args, 8)?
+    {
+        return Ok(());
+    }
+    if ffi_name == "rt_bytes_u32_le_at" && compile_inline_bytes_le_at(ctx, builder, dest, args, 4)? {
+        return Ok(());
+    }
+    if ffi_name == "rt_bytes_u64_le_at" && compile_inline_bytes_le_at(ctx, builder, dest, args, 8)? {
+        return Ok(());
+    }
+    if ffi_name == "rt_typed_bytes_u8_set" && compile_inline_bytes_u8_set(ctx, builder, dest, args, true)? {
+        return Ok(());
+    }
+    if ffi_name == "rt_bytes_u8_set" && compile_inline_bytes_u8_set(ctx, builder, dest, args, false)? {
+        return Ok(());
+    }
 
     // Handle __get_global_<name> calls (from lower_lvalue GPU path)
     // These return the ADDRESS of the global data object for subsequent Store.
@@ -635,6 +1057,9 @@ pub fn compile_call<M: Module>(
                 _ => None,
             };
             if let Some(rt_name) = runtime_func {
+                if rt_name == "rt_len" && compile_inline_len(ctx, builder, dest, args)? {
+                    return Ok(());
+                }
                 if let Some(&func_id) = ctx.runtime_funcs.get(rt_name) {
                     // The first argument to the runtime call is the receiver (the part before the dot).
                     // For a Call instruction, the receiver was lowered as the first arg by MIR.

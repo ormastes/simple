@@ -6,8 +6,56 @@ BENCH_DIR="$ROOT/test/perf/port_algorithms"
 BUILD_DIR="$ROOT/build/perf/port_algorithms"
 SIMPLE_BIN="${SIMPLE_BIN:-$ROOT/bin/simple}"
 SIMPLE_NATIVE_BACKEND="${SIMPLE_NATIVE_BACKEND:-}"
+SIMPLE_LLVM_PROBE="${SIMPLE_LLVM_PROBE:-1}"
+SIMPLE_DISASM_PROBE="${SIMPLE_DISASM_PROBE:-1}"
+
+dump_function_calls() {
+    local bin="$1"
+    local symbol="$2"
+
+    objdump -Cd "$bin" \
+        | awk -v symbol="$symbol" '
+            $0 ~ "<" symbol ">:" {
+                in_fn = 1
+                found = 1
+                print "### function " symbol
+                print
+                next
+            }
+            in_fn && /^$/ { in_fn = 0 }
+            in_fn && /call|jmp.*<|rt_index_|rt_bytes_u8|_xxh64_|chacha20_/ { print }
+            END { if (found) print "" }
+        '
+}
+
+dump_runtime_relocations() {
+    local bin="$1"
+
+    if ! command -v readelf >/dev/null 2>&1; then
+        return 0
+    fi
+
+    echo "### runtime relocation slots"
+    runtime_addr_pattern="$(
+        nm -n "$bin" \
+            | awk '/ rt_(index_get|index_set|len|string_new|bytes_u8_at|bytes_u8_set)$/ { print $1 }' \
+            | paste -sd '|' -
+    )"
+    if [[ -n "$runtime_addr_pattern" ]]; then
+        readelf -r "$bin" \
+            | grep -E "rt_|$runtime_addr_pattern" \
+            | sed -n '1,80p' || true
+    fi
+    echo "### runtime symbols"
+    nm -n "$bin" \
+        | grep -E ' rt_(index_get|index_set|len|string_new|bytes_u8_at|bytes_u8_set)$' \
+        | sed -n '1,80p' || true
+    echo ""
+}
 
 mkdir -p "$BUILD_DIR"
+rm -f "$BUILD_DIR/simple_llvm.out"
+rm -f "$BUILD_DIR/disasm_summary.txt"
 
 echo "=================================================================="
 echo "  Port Algorithm C/Rust/Simple Benchmark"
@@ -15,6 +63,12 @@ echo "=================================================================="
 echo "Simple: $SIMPLE_BIN"
 if [[ -n "$SIMPLE_NATIVE_BACKEND" ]]; then
     echo "Backend: $SIMPLE_NATIVE_BACKEND"
+fi
+if [[ "$SIMPLE_LLVM_PROBE" == "1" ]]; then
+    echo "LLVM probe: enabled"
+fi
+if [[ "$SIMPLE_DISASM_PROBE" == "1" ]]; then
+    echo "Disassembly probe: enabled"
 fi
 echo "Build:  $BUILD_DIR"
 echo ""
@@ -41,6 +95,58 @@ else
     SIMPLE_LIB="$ROOT/src" "$SIMPLE_BIN" run "$BENCH_DIR/port_algorithms_simple.spl" | tee "$BUILD_DIR/simple.out"
 fi
 
+if [[ "$SIMPLE_LLVM_PROBE" == "1" && "$SIMPLE_NATIVE_BACKEND" != "llvm" ]]; then
+    echo "--- Simple LLVM probe ---"
+    llvm_compile_log="$BUILD_DIR/simple_llvm_compile.log"
+    llvm_compile_args=(compile "$BENCH_DIR/port_algorithms_simple.spl" --native --cpu native --opt-level aggressive --backend=llvm -o "$BUILD_DIR/port_algorithms_simple_llvm")
+    if "$SIMPLE_BIN" "${llvm_compile_args[@]}" >"$llvm_compile_log" 2>&1; then
+        "$BUILD_DIR/port_algorithms_simple_llvm" | tee "$BUILD_DIR/simple_llvm.out"
+    else
+        echo "[algbench-note] simple_llvm_compile=failed log=$llvm_compile_log"
+        sed -n '1,12p' "$llvm_compile_log"
+    fi
+fi
+
+if [[ "$SIMPLE_DISASM_PROBE" == "1" ]] && command -v objdump >/dev/null 2>&1; then
+    disasm_summary="$BUILD_DIR/disasm_summary.txt"
+    {
+        echo "# Port algorithm disassembly summary"
+        echo "simple_bin=$SIMPLE_BIN"
+        echo "backend=${SIMPLE_NATIVE_BACKEND:-default}"
+        echo ""
+    } >"$disasm_summary"
+    for pair in \
+        "c:$BUILD_DIR/port_algorithms_c" \
+        "rust:$BUILD_DIR/port_algorithms_rust" \
+        "simple:$BUILD_DIR/port_algorithms_simple" \
+        "simple_llvm:$BUILD_DIR/port_algorithms_simple_llvm"
+    do
+        lang="${pair%%:*}"
+        bin="${pair#*:}"
+        if [[ -x "$bin" ]]; then
+            {
+                echo "## $lang"
+                objdump -Cd "$bin" \
+                    | grep -E "<(xxhash64|xxhash64_ref|chacha20|chacha20_|_xxh64_|rt_index_|rt_bytes_u8)|call.*(xxhash64|chacha20|_xxh64_|rt_index_|rt_bytes_u8)" \
+                    | sed -n '1,80p'
+                echo ""
+                dump_function_calls "$bin" "xxhash64_ref"
+                dump_function_calls "$bin" "xxhash64"
+                dump_function_calls "$bin" "chacha20_encrypt"
+                dump_function_calls "$bin" "chacha20_encrypt_checksum_local"
+                dump_function_calls "$bin" "chacha20_xor_block_checksum_local"
+                dump_function_calls "$bin" "chacha20_xor_words4_checksum_local"
+                if [[ "$lang" == "simple" || "$lang" == "simple_llvm" ]]; then
+                    dump_runtime_relocations "$bin"
+                fi
+            } >>"$disasm_summary" || true
+        fi
+    done
+    echo "[algbench-note] disasm_summary=$disasm_summary"
+elif [[ "$SIMPLE_DISASM_PROBE" == "1" ]]; then
+    echo "[algbench-note] disasm_summary=skipped reason=objdump-not-found"
+fi
+
 for alg in xxhash64 chacha20; do
     c_sum="$(grep "alg=$alg " "$BUILD_DIR/c.out" | sed -n 's/.*checksum=\([0-9]*\).*/\1/p')"
     rust_sum="$(grep "alg=$alg " "$BUILD_DIR/rust.out" | sed -n 's/.*checksum=\([0-9]*\).*/\1/p')"
@@ -49,6 +155,16 @@ for alg in xxhash64 chacha20; do
         echo "[algbench-error] checksum mismatch alg=$alg c=$c_sum rust=$rust_sum simple=$simple_sum" >&2
         exit 1
     fi
+    if [[ -f "$BUILD_DIR/simple_llvm.out" ]]; then
+        simple_llvm_sum="$(grep "alg=$alg " "$BUILD_DIR/simple_llvm.out" | sed -n 's/.*checksum=\([0-9]*\).*/\1/p')"
+        if [[ -z "$simple_llvm_sum" || "$c_sum" != "$simple_llvm_sum" ]]; then
+            echo "[algbench-error] checksum mismatch alg=$alg c=$c_sum simple_llvm=$simple_llvm_sum" >&2
+            exit 1
+        fi
+    fi
 done
 
 echo "[algbench-ok] checksum parity passed for xxhash64 and chacha20"
+if [[ -f "$BUILD_DIR/simple_llvm.out" ]]; then
+    echo "[algbench-ok] LLVM checksum parity passed for xxhash64 and chacha20"
+fi
