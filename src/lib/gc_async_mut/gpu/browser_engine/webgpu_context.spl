@@ -661,9 +661,47 @@ pub fn webgpu_validate_wgsl_stage_interface(source: text, stage: text) -> text:
         return "WGSL vertex stage must write @builtin(position)"
     if stage == "fragment" and not source.contains("@location(0)"):
         return "WGSL fragment stage must declare @location(0) output"
-    if stage == "compute" and not source.contains("@workgroup_size("):
-        return "WGSL compute stage must declare @workgroup_size"
+    if stage == "compute":
+        if not source.contains("@workgroup_size("):
+            return "WGSL compute stage must declare @workgroup_size"
+        val workgroup_err = webgpu_validate_wgsl_workgroup_size(source)
+        if workgroup_err != "":
+            return workgroup_err
     ""
+
+pub fn webgpu_validate_wgsl_workgroup_size(source: text) -> text:
+    val marker = "@workgroup_size("
+    val start = source.index_of(marker)
+    if start < 0:
+        return "WGSL compute stage must declare @workgroup_size"
+    val args_start = start + marker.len()
+    var args_end = args_start
+    while args_end < source.len() and source.slice(args_end, args_end + 1) != ")":
+        args_end = args_end + 1
+    if args_end >= source.len():
+        return "WGSL compute stage has malformed @workgroup_size"
+    val args = source.slice(args_start, args_end)
+    val parts = args.split(",")
+    if parts.len() < 1 or parts.len() > 3:
+        return "WGSL compute stage must use one to three workgroup_size components"
+    var i = 0
+    while i < parts.len():
+        val part = parts[i].trim()
+        if part.len() == 0 or not webgpu_wgsl_positive_integer(part):
+            return "WGSL compute stage must use positive integer workgroup_size components"
+        i = i + 1
+    ""
+
+fn webgpu_wgsl_positive_integer(value: text) -> bool:
+    var result = 0
+    var i = 0
+    while i < value.len():
+        val ch = value.slice(i, i + 1)
+        if ch < "0" or ch > "9":
+            return false
+        result = result * 10 + ch.to_i32()
+        i = i + 1
+    result > 0
 
 pub fn webgpu_detect_wgsl_stage(source: text) -> text:
     if source.contains("@vertex"):
