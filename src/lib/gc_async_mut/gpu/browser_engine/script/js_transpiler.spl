@@ -22,6 +22,8 @@ Supported Conversions:
     `${x}`              -> "{x}"
     for (x of arr)      -> for x in arr:
     document.querySelector()      -> document_query_selector(root, ...)
+    canvas.getContext("webgl")    -> canvas_get_context_webgl(300, 150)
+    gl.clearColor()               -> canvas_webgl_clear_color(gl, ...)
     element.addEventListener()    -> node_add_event_listener(...)
     console.log()                 -> console_log(buf, ...)
     setTimeout()                  -> set_timeout(loop_ref, ...)
@@ -191,6 +193,7 @@ fn _convert_line(line: text) -> text:
 
     # Convert DOM API calls
     result = _convert_dom_calls(result)
+    result = _convert_webgl_calls(result)
     result = _convert_console_calls(result)
     result = _convert_timer_calls(result)
     result = _convert_worker_calls(result)
@@ -368,6 +371,50 @@ fn _convert_dom_calls(line: text) -> text:
     result = result.replace("document.createElement(", "document_create_element(")
     result = result.replace("document.createTextNode(", "document_create_text_node(")
     result
+
+fn _convert_webgl_calls(line: text) -> text:
+    """Convert a minimal browser WebGL JS surface to canvas_api helpers."""
+    var result = line
+    result = _safe_replace(result, ".getContext(\"experimental-webgl\")", "_getContext_experimental_webgl")
+    result = _safe_replace(result, ".getContext('experimental-webgl')", "_getContext_experimental_webgl")
+    result = _safe_replace(result, ".getContext(\"webgl2\")", "_getContext_webgl2")
+    result = _safe_replace(result, ".getContext('webgl2')", "_getContext_webgl2")
+    result = _safe_replace(result, ".getContext(\"webgl\")", "_getContext_webgl")
+    result = _safe_replace(result, ".getContext('webgl')", "_getContext_webgl")
+    result = result.replace("canvas_getContext_experimental_webgl", "canvas_get_context_webgl(300, 150)")
+    result = result.replace("canvas_getContext_webgl2", "canvas_get_context_webgl2(300, 150)")
+    result = result.replace("canvas_getContext_webgl", "canvas_get_context_webgl(300, 150)")
+    result = result.replace("gl.COLOR_BUFFER_BIT", "CANVAS_WEBGL_COLOR_BUFFER_BIT")
+    result = result.replace("gl.DEPTH_BUFFER_BIT", "CANVAS_WEBGL_DEPTH_BUFFER_BIT")
+    result = result.replace("gl.STENCIL_BUFFER_BIT", "CANVAS_WEBGL_STENCIL_BUFFER_BIT")
+    if result.index_of(".clearColor(") >= 0:
+        return _convert_webgl_method(result, ".clearColor(", "canvas_webgl_clear_color")
+    if result.index_of(".viewport(") >= 0:
+        return _convert_webgl_method(result, ".viewport(", "canvas_webgl_viewport")
+    if result.index_of(".clear(") >= 0:
+        return _convert_webgl_method(result, ".clear(", "canvas_webgl_clear")
+    if result.index_of(".getExtension(") >= 0:
+        return _convert_webgl_method(result, ".getExtension(", "canvas_webgl_get_extension")
+    result
+
+fn _convert_webgl_method(line: text, pattern: text, fn_name: text) -> text:
+    """Convert gl.method(args) to canvas_webgl_method(gl, args)."""
+    val trimmed = line.trim()
+    val dot_pos = trimmed.index_of(pattern)
+    if dot_pos < 0:
+        return line
+    val target_expr = trimmed.slice(0, dot_pos)
+    val args_start = dot_pos + pattern.len()
+    val rest = trimmed.slice(args_start, trimmed.len())
+    val leading = _get_leading_whitespace(line)
+    val eq_pos = target_expr.index_of("=")
+    if eq_pos >= 0:
+        val prefix = target_expr.slice(0, eq_pos + 1).trim()
+        val receiver = target_expr.slice(eq_pos + 1, target_expr.len()).trim()
+        return leading + prefix + " " + fn_name + "(" + receiver + ", " + rest
+    if fn_name == "canvas_webgl_clear_color" or fn_name == "canvas_webgl_viewport" or fn_name == "canvas_webgl_clear":
+        return leading + target_expr + " = " + fn_name + "(" + target_expr + ", " + rest
+    leading + fn_name + "(" + target_expr + ", " + rest
 
 fn _convert_console_calls(line: text) -> text:
     """Convert console.log etc. to Simple function calls."""
