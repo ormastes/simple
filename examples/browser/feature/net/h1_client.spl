@@ -83,6 +83,30 @@ fn get_mock_registry() -> MockResponseRegistry:
 fn set_mock_registry(registry: MockResponseRegistry):
     _global_mock_registry = registry
 
+fn mock_response_for_request(req: FetchRequest) -> FetchResponse?:
+    val mock_reg = get_mock_registry()
+    val url_text = req.url.to_text()
+    val maybe_entry = mock_reg.lookup(url_text)
+    if maybe_entry.?:
+        val entry = maybe_entry
+        var mock_headers: [Pair<text, text>] = []
+        for mh in entry.headers:
+            mock_headers.push(mh)
+        if find_header(mock_headers, "content-type").? == false:
+            mock_headers.push(Pair("Content-Type", "text/html; charset=utf-8"))
+        mock_headers.push(Pair("Content-Length", "{entry.body.len()}"))
+        mock_headers.push(Pair("Connection", "keep-alive"))
+        mock_headers.push(Pair("X-Simple-Browser", "mock-response"))
+        return Some(FetchResponse(
+            status: entry.status,
+            status_text: entry.status_text,
+            headers: mock_headers,
+            body: entry.body,
+            url: req.url,
+            redirected: false
+        ))
+    nil
+
 # --- H1Connection ---
 
 class H1Connection:
@@ -141,27 +165,11 @@ class H1Client:
 
         # Step 1: Check mock registry before DNS/TLS/TCP so tests and embedded
         # browser fixtures do not require live network access.
-        val mock_reg = get_mock_registry()
-        val url_text = req.url.to_text()
-        val mock_entry = mock_reg.lookup(url_text)
-        if val entry = mock_entry:
-            self.logger.debug("h1: mock response for {url_text} -> {entry.status}")
-            var mock_headers: [Pair<text, text>] = []
-            for mh in entry.headers:
-                mock_headers.push(mh)
-            if find_header(mock_headers, "content-type").? == false:
-                mock_headers.push(Pair("Content-Type", "text/html; charset=utf-8"))
-            mock_headers.push(Pair("Content-Length", "{entry.body.len()}"))
-            mock_headers.push(Pair("Connection", "keep-alive"))
-            mock_headers.push(Pair("X-Simple-Browser", "mock-response"))
-            return Ok(FetchResponse(
-                status: entry.status,
-                status_text: entry.status_text,
-                headers: mock_headers,
-                body: entry.body,
-                url: req.url,
-                redirected: false
-            ))
+        val mock_response = mock_response_for_request(req)
+        if mock_response.?:
+            val response = mock_response.unwrap()
+            self.logger.debug("h1: mock response for {req.url.to_text()} -> {response.status}")
+            return Ok(response)
 
         # Step 2: Get or create a connection (connection pooling)
         var conn = self.get_connection(host, port, is_tls)?
