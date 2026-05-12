@@ -60,6 +60,8 @@ pub val WEBGL_SRC_ALPHA: i32 = 770
 pub val WEBGL_ONE_MINUS_SRC_ALPHA: i32 = 771
 pub val WEBGL_TEXTURE_2D: i32 = 3553
 pub val WEBGL_TEXTURE_BINDING_2D: i32 = 32873
+pub val WEBGL_TEXTURE0: i32 = 33984
+pub val WEBGL_MAX_COMBINED_TEXTURE_IMAGE_UNITS: i32 = 8
 pub val WEBGL_TEXTURE_MIN_FILTER: i32 = 10241
 pub val WEBGL_TEXTURE_MAG_FILTER: i32 = 10240
 pub val WEBGL_TEXTURE_WRAP_S: i32 = 10242
@@ -139,6 +141,10 @@ pub class WebGLTextureHandle:
     wrap_t: i32
     mipmap_generated: bool
     pixels: [u8]
+
+pub class WebGLTextureUnitState:
+    unit: i32
+    texture_2d_id: i32
 
 pub class WebGLFramebufferHandle:
     id: i32
@@ -235,6 +241,8 @@ pub class WebGLContext:
     vertex_attribs: [WebGLVertexAttribState]
     bound_framebuffer: i32
     bound_renderbuffer: i32
+    active_texture_unit: i32
+    texture_units: [WebGLTextureUnitState]
     bound_texture_2d: i32
     unpack_alignment: i32
     unpack_flip_y: bool
@@ -733,6 +741,17 @@ pub class WebGLContext:
             self.enabled_extensions.push(canonical)
         WebGLExtensionHandle(name: canonical, valid: true, enabled: true, error: "")
 
+    me active_texture(texture: i32) -> bool:
+        if not self.ensure_context_available():
+            return false
+        val unit_index = texture - WEBGL_TEXTURE0
+        if unit_index < 0 or unit_index >= WEBGL_MAX_COMBINED_TEXTURE_IMAGE_UNITS:
+            self.last_error = WEBGL_INVALID_ENUM
+            return false
+        self.active_texture_unit = unit_index
+        self.bound_texture_2d = self.texture_units[unit_index].texture_2d_id
+        true
+
     me bind_texture(target: i32, texture_id: i32) -> bool:
         if not self.ensure_context_available():
             return false
@@ -741,6 +760,9 @@ pub class WebGLContext:
             return false
         if texture_id == -1:
             self.bound_texture_2d = -1
+            var texture_unit = self.texture_units[self.active_texture_unit]
+            texture_unit.texture_2d_id = -1
+            self.texture_units[self.active_texture_unit] = texture_unit
             return true
         val texture_index = self.find_texture_index(texture_id)
         if texture_index < 0:
@@ -750,6 +772,9 @@ pub class WebGLContext:
         texture.target = target
         self.textures[texture_index] = texture
         self.bound_texture_2d = texture_id
+        var texture_unit = self.texture_units[self.active_texture_unit]
+        texture_unit.texture_2d_id = texture_id
+        self.texture_units[self.active_texture_unit] = texture_unit
         self.render_commands.push(webgl_render_command_bind_texture(target, texture_id))
         true
 
@@ -1401,6 +1426,8 @@ pub fn webgl_create_context(version: i32, width: i32, height: i32) -> WebGLConte
         vertex_attribs: webgl_default_vertex_attribs(),
         bound_framebuffer: -1,
         bound_renderbuffer: -1,
+        active_texture_unit: 0,
+        texture_units: webgl_default_texture_units(),
         bound_texture_2d: -1,
         unpack_alignment: 4,
         unpack_flip_y: false,
@@ -1605,6 +1632,14 @@ pub fn webgl_default_vertex_attribs() -> [WebGLVertexAttribState]:
         attribs.push(WebGLVertexAttribState(index: i, enabled: false, size: 4, data_type: WEBGL_FLOAT, normalized: false, stride: 0, offset: 0, buffer_id: -1))
         i = i + 1
     attribs
+
+pub fn webgl_default_texture_units() -> [WebGLTextureUnitState]:
+    var units: [WebGLTextureUnitState] = []
+    var i = 0
+    while i < WEBGL_MAX_COMBINED_TEXTURE_IMAGE_UNITS:
+        units.push(WebGLTextureUnitState(unit: i, texture_2d_id: -1))
+        i = i + 1
+    units
 
 pub fn webgl_valid_attrib_index(index: i32) -> bool:
     index >= 0 and index < WEBGL_MAX_VERTEX_ATTRIBS
