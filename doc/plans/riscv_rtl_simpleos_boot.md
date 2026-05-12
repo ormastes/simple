@@ -175,27 +175,40 @@ netstack, TLS, and HTTP closures.
   closure so the production RISC-V ELF can link without weak freestanding
   stubs.
 - `src/os/kernel/arch/riscv64/boot/freestanding_runtime.c` provides weak
-  no-network TCP fallbacks for the minimal HTTP launcher. Real TCP providers can
-  override them later with strong symbols.
+  no-network TCP fallbacks for the minimal HTTP launcher plus a QEMU `virt`
+  PCI ECAM probe that can discover a `virtio-net-pci` NIC. Real TCP providers
+  can override the weak socket symbols later with strong symbols.
 - Normal production link produces `build/simpleos-rv64.elf` with `os_main`,
   `riscv_boot_mem_init`, `start_http_server_baremetal`, and weak `rt_io_tcp_*`
   fallback symbols present.
 - QEMU UART smoke reaches `[os_main] HTTP server deferred: network unavailable`
   and `[os_main] Entering boot idle loop`.
+- QEMU UART smoke with `-device virtio-net-pci` reaches
+  `[net-riscv] Network probe passed`, starts `start_http_server_baremetal()`,
+  then stops at `[http_baremetal] ERROR: bind failed` because the actual TCP
+  provider is still the weak no-network fallback.
+- A diagnostic import of `os.kernel.net.tcp_shim` proves the intended strong
+  `rt_io_tcp_*` path, but it is not yet production-linkable in the RISC-V ELF:
+  the closure currently pulls unresolved netstack/runtime symbols including
+  `log_info`, `rt_text_to_bytes`, `unsafe_addr_of`, `syscall`,
+  `rt_x86_syscall`, and constant `.to_u32/.to_u64` helpers.
 
 **Blocked, not complete for production:**
-- The RISC-V network service still reports unavailable because freestanding
-  `rt_pci_device_count()` returns 0 and `rt_net_init()` returns -1, so the QEMU
-  HTTP test cannot yet prove an actual socket response.
+- The RISC-V network service can now discover a QEMU `virtio-net-pci` device,
+  but `rt_io_tcp_bind()` is still the weak no-network fallback in the production
+  RISC-V ELF, so the QEMU HTTP test cannot yet prove an actual socket response.
+- The existing strong TCP shim needs a freestanding-safe dependency slice before
+  it can override the weak C TCP fallbacks in the production RISC-V link.
 - The full std HTTP worker/config/router/middleware closure remains deferred; a
   previous diagnostic promotion showed it still needs hosted/common runtime ABI
   such as dictionaries, string split/join/search, SWI/rank helpers, and
   `rt_bytes_to_text`.
 - B4 TLS remains blocked by the placeholder TLS 1.3 server surface.
 
-**Next:** implement the real PCI/VirtIO-net probe and bind the TCP shim to it,
-then run the QEMU HTTP socket smoke. After that, replace the minimal HTTP loop
-with the full std HTTP worker once the remaining hosted runtime ABI is present.
+**Next:** bind the kernel TCP shim/netstack into the freestanding RISC-V link
+with strong `rt_io_tcp_*` symbols, then run the QEMU HTTP socket smoke. After
+that, replace the minimal HTTP loop with the full std HTTP worker once the
+remaining hosted runtime ABI is present.
 
 ### Build Command
 
