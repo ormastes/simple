@@ -29,7 +29,8 @@ All specs FAIL until that module is implemented.
 """
 
 use std.spec.*
-use std.gc_async_mut.gpu.browser_engine.script.script_host.{ScriptHost}
+use std.gc_async_mut.gpu.browser_engine.script.script_host.{ScriptHost,
+    script_host_apply_event_action}
 use std.gc_async_mut.gpu.browser_engine.dom.{BeDomNode, BeDomEvent}
 
 # ===========================================================================
@@ -112,6 +113,38 @@ describe "ScriptHost":
             host.inject_dom_event(event)
             expect(host.dom_dirty()).to_equal(true)
             expect(host.dom_root().text_content).to_equal("clicked")
+
+        it "AC-1: deterministic listener action sets and removes attributes":
+            var root = _make_div_root()
+            root = script_host_apply_event_action(root, "set-attr:aria-expanded=true")
+            expect(root.get_attr("aria-expanded")).to_equal("true")
+            root = script_host_apply_event_action(root, "remove-attr:aria-expanded")
+            expect(root.has_attr("aria-expanded")).to_equal(false)
+
+        it "AC-1: deterministic listener action updates class tokens":
+            var root = _make_div_root()
+            root = script_host_apply_event_action(root, "add-class:active")
+            expect(root.classes).to_contain("active")
+            root = script_host_apply_event_action(root, "add-class:active")
+            expect(root.classes.len()).to_equal(1)
+            root = script_host_apply_event_action(root, "toggle-class:active")
+            expect(root.classes.len()).to_equal(0)
+            root = script_host_apply_event_action(root, "toggle-class:active")
+            expect(root.classes).to_contain("active")
+            root = script_host_apply_event_action(root, "remove-class:active")
+            expect(root.classes.len()).to_equal(0)
+
+        it "AC-1: inject_dom_event executes deterministic attribute and class actions":
+            var host = _make_host()
+            var root = _make_div_root()
+            root.add_event_listener("click", "set-attr:data-clicked=yes")
+            root.add_event_listener("click", "add-class:clicked")
+            host.execute("", root)
+            val event = BeDomEvent.create("click", "div", "", "div", "", true, true)
+            host.inject_dom_event(event)
+            expect(host.dom_root().get_attr("data-clicked")).to_equal("yes")
+            expect(host.dom_root().classes).to_contain("clicked")
+            expect(host.dom_dirty()).to_equal(true)
 
     describe "AC-1: dom_root — returns current root":
         it "AC-1: dom_root after execute returns a BeDomNode":
