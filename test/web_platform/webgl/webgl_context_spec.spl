@@ -11,6 +11,9 @@ use std.gc_async_mut.gpu.browser_engine.webgl_context.{
     WEBGL_ELEMENT_ARRAY_BUFFER, WEBGL_STATIC_DRAW, WEBGL_DYNAMIC_DRAW,
     WEBGL_TRIANGLES, WEBGL_LINES, WEBGL_UNSIGNED_SHORT, WEBGL_UNSIGNED_INT,
     WEBGL_TEXTURE_2D, WEBGL_FRAMEBUFFER, WEBGL_COLOR_ATTACHMENT0,
+    WEBGL_RENDERBUFFER, WEBGL_DEPTH_ATTACHMENT, WEBGL_STENCIL_ATTACHMENT,
+    WEBGL_DEPTH_STENCIL_ATTACHMENT, WEBGL_RGBA4, WEBGL_RGB565,
+    WEBGL_DEPTH_COMPONENT16, WEBGL_STENCIL_INDEX8, WEBGL_DEPTH_STENCIL,
     WEBGL_FRAMEBUFFER_COMPLETE, WEBGL_FRAMEBUFFER_INCOMPLETE_ATTACHMENT,
     WEBGL_FRAMEBUFFER_INCOMPLETE_MISSING_ATTACHMENT, WEBGL_TEXTURE_MIN_FILTER,
     WEBGL_TEXTURE_MAG_FILTER, WEBGL_TEXTURE_WRAP_S, WEBGL_TEXTURE_WRAP_T,
@@ -114,13 +117,16 @@ describe "Browser WebGL context":
             val b2 = ctx.create_buffer()
             val t1 = ctx.create_texture()
             val f1 = ctx.create_framebuffer()
+            val r1 = ctx.create_renderbuffer()
             expect(b1.id).to_equal(1)
             expect(b2.id).to_equal(2)
             expect(t1.id).to_equal(1)
             expect(f1.id).to_equal(1)
+            expect(r1.id).to_equal(1)
             expect(ctx.buffers.len()).to_equal(2)
             expect(ctx.textures.len()).to_equal(1)
             expect(ctx.framebuffers.len()).to_equal(1)
+            expect(ctx.renderbuffers.len()).to_equal(1)
 
         it "does not consume shader ids for invalid shader types":
             var ctx = webgl_create_context(1, 320, 240)
@@ -304,6 +310,44 @@ describe "Browser WebGL context":
             expect(ctx.framebuffer_texture_2d(WEBGL_FRAMEBUFFER, WEBGL_COLOR_ATTACHMENT0, WEBGL_TEXTURE_2D, -1, 0)).to_equal(true)
             expect(ctx.check_framebuffer_status(WEBGL_FRAMEBUFFER)).to_equal(WEBGL_FRAMEBUFFER_INCOMPLETE_MISSING_ATTACHMENT)
 
+        it "allocates renderbuffer storage and attaches color buffers":
+            var ctx = webgl_create_context(1, 320, 240)
+            val framebuffer = ctx.create_framebuffer()
+            val renderbuffer = ctx.create_renderbuffer()
+            expect(ctx.bind_framebuffer(WEBGL_FRAMEBUFFER, framebuffer.id)).to_equal(true)
+            expect(ctx.framebuffer_renderbuffer(WEBGL_FRAMEBUFFER, WEBGL_COLOR_ATTACHMENT0, WEBGL_RENDERBUFFER, renderbuffer.id)).to_equal(true)
+            expect(ctx.check_framebuffer_status(WEBGL_FRAMEBUFFER)).to_equal(WEBGL_FRAMEBUFFER_INCOMPLETE_ATTACHMENT)
+            expect(ctx.bind_renderbuffer(WEBGL_RENDERBUFFER, renderbuffer.id)).to_equal(true)
+            expect(ctx.renderbuffer_storage(WEBGL_RENDERBUFFER, WEBGL_RGBA4, 16, 16)).to_equal(true)
+            expect(ctx.renderbuffers[0].initialized).to_equal(true)
+            expect(ctx.renderbuffers[0].internal_format).to_equal(WEBGL_RGBA4)
+            expect(ctx.framebuffers[0].color_renderbuffer_id).to_equal(renderbuffer.id)
+            expect(ctx.check_framebuffer_status(WEBGL_FRAMEBUFFER)).to_equal(WEBGL_FRAMEBUFFER_COMPLETE)
+            expect(ctx.framebuffer_renderbuffer(WEBGL_FRAMEBUFFER, WEBGL_COLOR_ATTACHMENT0, WEBGL_RENDERBUFFER, -1)).to_equal(true)
+            expect(ctx.check_framebuffer_status(WEBGL_FRAMEBUFFER)).to_equal(WEBGL_FRAMEBUFFER_INCOMPLETE_MISSING_ATTACHMENT)
+
+        it "supports depth stencil renderbuffer completeness":
+            var ctx = webgl_create_context(1, 320, 240)
+            val framebuffer = ctx.create_framebuffer()
+            val depth = ctx.create_renderbuffer()
+            val stencil = ctx.create_renderbuffer()
+            val packed = ctx.create_renderbuffer()
+            expect(ctx.bind_framebuffer(WEBGL_FRAMEBUFFER, framebuffer.id)).to_equal(true)
+            expect(ctx.bind_renderbuffer(WEBGL_RENDERBUFFER, depth.id)).to_equal(true)
+            expect(ctx.renderbuffer_storage(WEBGL_RENDERBUFFER, WEBGL_DEPTH_COMPONENT16, 8, 8)).to_equal(true)
+            expect(ctx.bind_renderbuffer(WEBGL_RENDERBUFFER, stencil.id)).to_equal(true)
+            expect(ctx.renderbuffer_storage(WEBGL_RENDERBUFFER, WEBGL_STENCIL_INDEX8, 8, 8)).to_equal(true)
+            expect(ctx.framebuffer_renderbuffer(WEBGL_FRAMEBUFFER, WEBGL_DEPTH_ATTACHMENT, WEBGL_RENDERBUFFER, depth.id)).to_equal(true)
+            expect(ctx.framebuffer_renderbuffer(WEBGL_FRAMEBUFFER, WEBGL_STENCIL_ATTACHMENT, WEBGL_RENDERBUFFER, stencil.id)).to_equal(true)
+            expect(ctx.check_framebuffer_status(WEBGL_FRAMEBUFFER)).to_equal(WEBGL_FRAMEBUFFER_COMPLETE)
+            expect(ctx.bind_renderbuffer(WEBGL_RENDERBUFFER, packed.id)).to_equal(true)
+            expect(ctx.renderbuffer_storage(WEBGL_RENDERBUFFER, WEBGL_DEPTH_STENCIL, 8, 8)).to_equal(true)
+            expect(ctx.framebuffer_renderbuffer(WEBGL_FRAMEBUFFER, WEBGL_DEPTH_STENCIL_ATTACHMENT, WEBGL_RENDERBUFFER, packed.id)).to_equal(true)
+            expect(ctx.framebuffers[0].depth_renderbuffer_id).to_equal(-1)
+            expect(ctx.framebuffers[0].stencil_renderbuffer_id).to_equal(-1)
+            expect(ctx.framebuffers[0].depth_stencil_renderbuffer_id).to_equal(packed.id)
+            expect(ctx.check_framebuffer_status(WEBGL_FRAMEBUFFER)).to_equal(WEBGL_FRAMEBUFFER_COMPLETE)
+
         it "validates framebuffer target attachment and level":
             var ctx = webgl_create_context(1, 320, 240)
             val framebuffer = ctx.create_framebuffer()
@@ -319,6 +363,26 @@ describe "Browser WebGL context":
             expect(ctx.get_error()).to_equal(WEBGL_INVALID_ENUM)
             expect(ctx.framebuffer_texture_2d(WEBGL_FRAMEBUFFER, WEBGL_COLOR_ATTACHMENT0, WEBGL_TEXTURE_2D, texture.id, 1)).to_equal(false)
             expect(ctx.get_error()).to_equal(WEBGL_INVALID_VALUE)
+
+        it "validates renderbuffer target format and attachment compatibility":
+            var ctx = webgl_create_context(1, 320, 240)
+            val framebuffer = ctx.create_framebuffer()
+            val renderbuffer = ctx.create_renderbuffer()
+            expect(ctx.bind_renderbuffer(999, renderbuffer.id)).to_equal(false)
+            expect(ctx.get_error()).to_equal(WEBGL_INVALID_ENUM)
+            expect(ctx.bind_renderbuffer(WEBGL_RENDERBUFFER, 99)).to_equal(false)
+            expect(ctx.get_error()).to_equal(WEBGL_INVALID_VALUE)
+            expect(ctx.renderbuffer_storage(WEBGL_RENDERBUFFER, WEBGL_RGBA4, 4, 4)).to_equal(false)
+            expect(ctx.get_error()).to_equal(WEBGL_INVALID_OPERATION)
+            expect(ctx.bind_renderbuffer(WEBGL_RENDERBUFFER, renderbuffer.id)).to_equal(true)
+            expect(ctx.renderbuffer_storage(WEBGL_RENDERBUFFER, WEBGL_RGBA4, -1, 4)).to_equal(false)
+            expect(ctx.get_error()).to_equal(WEBGL_INVALID_VALUE)
+            expect(ctx.renderbuffer_storage(WEBGL_RENDERBUFFER, WEBGL_RGB565, 4, 4)).to_equal(true)
+            expect(ctx.bind_framebuffer(WEBGL_FRAMEBUFFER, framebuffer.id)).to_equal(true)
+            expect(ctx.framebuffer_renderbuffer(WEBGL_FRAMEBUFFER, WEBGL_DEPTH_ATTACHMENT, WEBGL_RENDERBUFFER, renderbuffer.id)).to_equal(true)
+            expect(ctx.check_framebuffer_status(WEBGL_FRAMEBUFFER)).to_equal(WEBGL_FRAMEBUFFER_INCOMPLETE_ATTACHMENT)
+            expect(ctx.framebuffer_renderbuffer(WEBGL_FRAMEBUFFER, 999, WEBGL_RENDERBUFFER, renderbuffer.id)).to_equal(false)
+            expect(ctx.get_error()).to_equal(WEBGL_INVALID_ENUM)
 
         it "blocks draws when the bound framebuffer is incomplete":
             var ctx = _linked_program_context()
