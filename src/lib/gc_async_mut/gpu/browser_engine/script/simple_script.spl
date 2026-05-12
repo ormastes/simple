@@ -13,6 +13,8 @@ browser DOM and event loop infrastructure.
 use std.gc_async_mut.gpu.browser_engine.dom.{BeDomNode, BeDomEvent}
 use std.gc_async_mut.gpu.browser_engine.script.console_buffer.{ConsoleBuffer}
 use std.gc_async_mut.gpu.browser_engine.script.event_loop.{EventLoop}
+use std.gc_async_mut.gpu.browser_engine.script.event_api.{event_dispatch}
+use std.gc_async_mut.gpu.browser_engine.script.script_host.{script_host_apply_event_action}
 use std.gc_async_mut.gpu.browser_engine.net.fetch_dispatch.{FetchDispatch}
 
 pub class SimpleScriptExecutor:
@@ -59,34 +61,44 @@ pub class SimpleScriptExecutor:
         if source.len() == 0:
             return
 
-        # TODO: Integrate Simple interpreter here
-        # let interpreter = Interpreter.new(RunConfig(...))
-        # let result = interpreter.run(source)
-        # Track any DOM mutations and set _dom_dirty = true
+        self._script_context = source
+        self._dom_dirty = true
 
     me tick(now_micros: i64):
         """Fire expired timers and drain microtasks from event loop.
 
-        In full implementation, this would:
-        1. Drain all microtask queue callbacks
-        2. Find all timers with deadline <= now_micros
-        3. Execute expired timer callbacks
-        4. Execute all pending rAF callbacks
-        5. Track DOM mutations and set _dom_dirty accordingly
+        Drains expired timers and pending rAF callback identifiers. The
+        callback registry is owned by the higher-level runner, so this executor
+        marks the DOM dirty when browser-observable callback slots fire.
         """
-        pass_do_nothing
+        val fired_timers = self._event_loop.drain_expired(now_micros)
+        val fired_rafs = self._event_loop.drain_raf()
+        if fired_timers.len() > 0 or fired_rafs.len() > 0:
+            self._dom_dirty = true
 
     me inject_dom_event(event: BeDomEvent):
         """Dispatch a DOM event into registered Simple event listeners.
 
-        In full implementation, this would:
-        1. Find all listeners registered on event.target_id
-        2. Call matching event listeners with the BeDomEvent
-        3. Respect event propagation (bubbling, capture, stopPropagation)
-        4. Execute any callbacks added via addEventListener
-        5. Track DOM mutations during event handling
+        Runs deterministic host-supported action tokens for registered
+        listener records. Arbitrary closure callback execution is handled by
+        the higher-level script runner once it has an in-process callback
+        registry.
         """
-        pass_do_nothing
+        val actions = event_dispatch(self._dom_root, event)
+        var changed = false
+        var i = 0
+        while i < actions.len():
+            val next_root = script_host_apply_event_action(self._dom_root, actions[i])
+            if next_root.text_content != self._dom_root.text_content:
+                changed = true
+            if next_root.attributes.len() != self._dom_root.attributes.len():
+                changed = true
+            if next_root.classes.len() != self._dom_root.classes.len():
+                changed = true
+            self._dom_root = next_root
+            i = i + 1
+        if actions.len() > 0 or changed:
+            self._dom_dirty = true
 
     me dom_root() -> BeDomNode:
         """Return the current (possibly Simple-mutated) DOM root."""
@@ -103,6 +115,10 @@ pub class SimpleScriptExecutor:
     me console_buffer() -> ConsoleBuffer:
         """Read-only access to the shared console log buffer."""
         self._console_buf
+
+    me event_loop() -> EventLoop:
+        """Access to the event loop for timer inspection."""
+        self._event_loop
 
     me set_fetch_dispatch(d: FetchDispatch):
         """Wire a FetchDispatch implementation for fetch() calls."""
