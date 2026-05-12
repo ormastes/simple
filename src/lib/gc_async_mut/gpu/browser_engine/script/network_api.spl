@@ -103,16 +103,28 @@ pub fn script_fetch_parse_url(raw: text) -> Url:
         rest = raw.substring(7, raw.len())
     val slash_parts = rest.split("/")
     val host_port = slash_parts[0]
+    var host = host_port
+    var port = if scheme == "http": 80 else: 443
+    val colon = host_port.index_of(":")
+    if colon > 0:
+        host = host_port.substring(0, colon)
+        val parsed_port = host_port.substring(colon + 1, host_port.len()).parse_i64()
+        if parsed_port != nil:
+            port = (parsed_port ?? port.to_i64()).to_i32()
     var path = "/"
     if slash_parts.len() > 1:
         path = "/" + rest.substring(host_port.len() + 1, rest.len())
+    var fragment = ""
+    val hash = path.index_of("#")
+    if hash >= 0:
+        fragment = path.substring(hash + 1, path.len())
+        path = path.substring(0, hash)
     var query = ""
     if path.contains("?"):
         val query_parts = path.split("?")
         path = query_parts[0]
         query = query_parts[1]
-    val port = if scheme == "http": 80 else: 443
-    Url(scheme: scheme, host: host_port, port: port, path: path, query: query, fragment: "")
+    Url(scheme: scheme, host: host, port: port, path: path, query: query, fragment: fragment)
 
 pub fn script_fetch_flat_headers_to_text(headers: [text]) -> text:
     var lines: [text] = []
@@ -125,7 +137,24 @@ pub fn script_fetch_flat_headers_to_text(headers: [text]) -> text:
 pub fn script_fetch_response_headers(headers: text) -> [text]:
     if headers == "":
         return []
-    [headers]
+    var flat: [text] = []
+    var start: i64 = 0
+    var i: i64 = 0
+    while i <= headers.len():
+        if i == headers.len() or headers.slice(i, i + 1) == "\n":
+            flat = script_fetch_push_header_line(flat, headers.slice(start, i))
+            start = i + 1
+        i = i + 1
+    flat
+
+fn script_fetch_push_header_line(flat: [text], line_raw: text) -> [text]:
+    var next = flat
+    val line = line_raw.trim()
+    val colon = line.index_of(":")
+    if colon > 0:
+        next.push(line.slice(0, colon).trim())
+        next.push(line.slice(colon + 1, line.len()).trim())
+    next
 
 pub class ScriptStaticFetchDispatch:
     status: i64
