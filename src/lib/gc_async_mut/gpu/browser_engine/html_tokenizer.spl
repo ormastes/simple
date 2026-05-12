@@ -318,12 +318,11 @@ fn _parse_entity(html: text, pos: i32) -> _EntityResult:
         return _EntityResult(decoded: "&", end_pos: pos + 1)
     val next = html.char_at(pos + 1)
     if next == "#":
-        # Numeric character reference — just pass through for now
         val semi = _find_char(html, ";", pos + 2)
         if semi < 0:
             return _EntityResult(decoded: "&", end_pos: pos + 1)
-        # Skip numeric refs — return as-is (pass_todo: full numeric decode)
-        return _EntityResult(decoded: "&", end_pos: semi + 1)
+        val numeric = html.slice(pos + 2, semi)
+        return _EntityResult(decoded: _decode_numeric_entity(numeric), end_pos: semi + 1)
     # Named entity: scan to ; or whitespace
     var end = pos + 1
     while end < n:
@@ -390,6 +389,63 @@ fn _decode_named_entity(name: text) -> text:
         return "'"
     # Unknown entity — return as-is with & prefix
     "&" + name + ";"
+
+fn _decode_numeric_entity(raw: text) -> text:
+    """Decode decimal and hex numeric HTML character references."""
+    if raw.len() == 0:
+        return "&"
+    var digits = raw
+    var is_hex = false
+    if raw.starts_with("x") or raw.starts_with("X"):
+        is_hex = true
+        digits = raw.slice(1, raw.len())
+    if digits.len() == 0:
+        return "&"
+    val code = if is_hex: _parse_hex_i64(digits) else: _parse_decimal_i64(digits)
+    if code < 0:
+        return "&"
+    if code == 0 or (code >= 55296 and code <= 57343) or code > 1114111:
+        return text.from_char_code(65533)
+    text.from_char_code(code)
+
+fn _parse_decimal_i64(s: text) -> i64:
+    var value: i64 = 0
+    var i = 0
+    while i < s.len():
+        val ch = s.char_at(i)
+        if ch < "0" or ch > "9":
+            return -1
+        value = value * 10 + (ch.parse_i64() ?? 0)
+        i = i + 1
+    value
+
+fn _parse_hex_i64(s: text) -> i64:
+    var value: i64 = 0
+    var i = 0
+    while i < s.len():
+        val digit = _hex_digit_value(s.char_at(i))
+        if digit < 0:
+            return -1
+        value = value * 16 + digit
+        i = i + 1
+    value
+
+fn _hex_digit_value(ch: text) -> i64:
+    if ch >= "0" and ch <= "9":
+        return ch.parse_i64() ?? 0
+    if ch == "a" or ch == "A":
+        return 10
+    if ch == "b" or ch == "B":
+        return 11
+    if ch == "c" or ch == "C":
+        return 12
+    if ch == "d" or ch == "D":
+        return 13
+    if ch == "e" or ch == "E":
+        return 14
+    if ch == "f" or ch == "F":
+        return 15
+    -1
 
 # =========================================================================
 # String scanning utilities
