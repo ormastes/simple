@@ -298,6 +298,7 @@ impl MirFunction {
 
 /// MIR module
 #[derive(Debug)]
+#[derive(Clone)]
 pub struct MirModule {
     pub name: Option<String>,
     /// HIR type registry snapshot used by backends that need to interpret

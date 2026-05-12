@@ -86,6 +86,41 @@ impl LlvmBackend {
         self.tagged_bool_from_i1(truthy, builder)
     }
 
+    #[cfg(feature = "llvm")]
+    fn normalize_integer_width(
+        &self,
+        value: inkwell::values::IntValue<'static>,
+        bits: u32,
+        signed: bool,
+        builder: &Builder<'static>,
+    ) -> Result<inkwell::values::IntValue<'static>, CompileError> {
+        let rv_type = self.runtime_int_type();
+        let rv_width = rv_type.get_bit_width();
+        if bits >= rv_width {
+            return Ok(value);
+        }
+
+        if signed {
+            let narrow_type = match bits {
+                8 => self.context.i8_type(),
+                16 => self.context.i16_type(),
+                32 => self.context.i32_type(),
+                _ => return Ok(value),
+            };
+            let narrowed = builder
+                .build_int_truncate(value, narrow_type, "narrow_signed")
+                .map_err(|e| crate::error::factory::llvm_build_failed("narrow signed", &e))?;
+            builder
+                .build_int_s_extend(narrowed, rv_type, "sext_narrow")
+                .map_err(|e| crate::error::factory::llvm_build_failed("sext narrow", &e))
+        } else {
+            let mask = if bits == 64 { u64::MAX } else { (1u64 << bits) - 1 };
+            builder
+                .build_and(value, rv_type.const_int(mask, false), "mask_unsigned")
+                .map_err(|e| crate::error::factory::llvm_build_failed("mask unsigned", &e))
+        }
+    }
+
     /// Compile a binary operation
     ///
     /// `lhs_signed` indicates whether the left operand has a signed type.
@@ -100,8 +135,9 @@ impl LlvmBackend {
         builder: &Builder<'static>,
         module: &Module<'static>,
         lhs_signed: Option<bool>,
+        lhs_type: Option<crate::hir::TypeId>,
     ) -> Result<inkwell::values::BasicValueEnum<'static>, CompileError> {
-        use crate::hir::BinOp;
+        use crate::hir::{BinOp, TypeId};
 
         // Both operands must be the same type
         match (left, right) {
@@ -270,6 +306,30 @@ impl LlvmBackend {
                     // Operators that require runtime support — return first operand as fallback
                     BinOp::In | BinOp::NotIn | BinOp::MatMul | BinOp::Parallel => l,
                     _ => return Err(crate::error::factory::unsupported_operation("integer binop", &op)),
+                };
+                let result = match op {
+                    BinOp::Add
+                    | BinOp::Sub
+                    | BinOp::Mul
+                    | BinOp::Div
+                    | BinOp::Mod
+                    | BinOp::BitAnd
+                    | BinOp::BitOr
+                    | BinOp::BitXor
+                    | BinOp::ShiftLeft
+                    | BinOp::ShiftRight
+                    | BinOp::Compose => match lhs_type {
+                        Some(TypeId::I8) => self.normalize_integer_width(result, 8, true, builder)?,
+                        Some(TypeId::I16) => self.normalize_integer_width(result, 16, true, builder)?,
+                        Some(TypeId::I32) | Some(TypeId::CHAR) => {
+                            self.normalize_integer_width(result, 32, true, builder)?
+                        }
+                        Some(TypeId::U8) => self.normalize_integer_width(result, 8, false, builder)?,
+                        Some(TypeId::U16) => self.normalize_integer_width(result, 16, false, builder)?,
+                        Some(TypeId::U32) => self.normalize_integer_width(result, 32, false, builder)?,
+                        _ => result,
+                    },
+                    _ => result,
                 };
                 Ok(result.into())
             }

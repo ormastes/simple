@@ -26,9 +26,149 @@ mod objects;
 #[cfg(feature = "llvm")]
 type VRegMap = std::collections::HashMap<crate::mir::VReg, inkwell::values::BasicValueEnum<'static>>;
 
+#[cfg(feature = "llvm")]
+type VRegTypes = std::collections::HashMap<crate::mir::VReg, crate::hir::TypeId>;
+
 /// Fallback VRegMap when LLVM is not enabled
 #[cfg(not(feature = "llvm"))]
 type VRegMap = std::collections::HashMap<crate::mir::VReg, ()>;
+
+#[cfg(feature = "llvm")]
+fn unit_bits_to_type_id(bits: u8, signed: bool) -> Option<crate::hir::TypeId> {
+    use crate::hir::TypeId;
+
+    match (bits, signed) {
+        (8, true) => Some(TypeId::I8),
+        (16, true) => Some(TypeId::I16),
+        (32, true) => Some(TypeId::I32),
+        (64, true) => Some(TypeId::I64),
+        (8, false) => Some(TypeId::U8),
+        (16, false) => Some(TypeId::U16),
+        (32, false) => Some(TypeId::U32),
+        (64, false) => Some(TypeId::U64),
+        _ => None,
+    }
+}
+
+#[cfg(feature = "llvm")]
+fn binop_result_type(op: crate::hir::BinOp, lhs_ty: Option<crate::hir::TypeId>) -> Option<crate::hir::TypeId> {
+    use crate::hir::{BinOp, TypeId};
+
+    match op {
+        BinOp::Eq | BinOp::NotEq | BinOp::Lt | BinOp::LtEq | BinOp::Gt | BinOp::GtEq => Some(TypeId::BOOL),
+        BinOp::Is | BinOp::In | BinOp::NotIn => Some(TypeId::BOOL),
+        BinOp::And | BinOp::Or | BinOp::AndSuspend | BinOp::OrSuspend => Some(TypeId::BOOL),
+        _ => lhs_ty,
+    }
+}
+
+#[cfg(feature = "llvm")]
+fn build_vreg_types(func: &MirFunction) -> VRegTypes {
+    use crate::hir::{TypeId, UnaryOp};
+    use crate::mir::MirInst;
+
+    let mut types_map = VRegTypes::new();
+
+    for (i, param) in func.params.iter().enumerate() {
+        types_map.insert(crate::mir::VReg(i as u32), param.ty);
+    }
+
+    for block in &func.blocks {
+        for inst in &block.instructions {
+            match inst {
+                MirInst::ConstInt { dest, .. } => {
+                    types_map.insert(*dest, TypeId::I64);
+                }
+                MirInst::ConstFloat { dest, .. } => {
+                    types_map.insert(*dest, TypeId::F64);
+                }
+                MirInst::ConstBool { dest, .. } => {
+                    types_map.insert(*dest, TypeId::BOOL);
+                }
+                MirInst::Copy { dest, src } => {
+                    if let Some(&ty) = types_map.get(src) {
+                        types_map.insert(*dest, ty);
+                    }
+                }
+                MirInst::BinOp { dest, op, left, .. } => {
+                    if let Some(ty) = binop_result_type(*op, types_map.get(left).copied()) {
+                        types_map.insert(*dest, ty);
+                    }
+                }
+                MirInst::UnaryOp { dest, op, operand } => {
+                    let ty = match op {
+                        UnaryOp::Not => Some(TypeId::BOOL),
+                        _ => types_map.get(operand).copied(),
+                    };
+                    if let Some(ty) = ty {
+                        types_map.insert(*dest, ty);
+                    }
+                }
+                MirInst::Cast { dest, to_ty, .. } => {
+                    types_map.insert(*dest, *to_ty);
+                }
+                MirInst::Load { dest, ty, .. } | MirInst::GlobalLoad { dest, ty, .. } => {
+                    types_map.insert(*dest, *ty);
+                }
+                MirInst::GcAlloc { dest, ty } => {
+                    types_map.insert(*dest, *ty);
+                }
+                MirInst::StructInit { dest, type_id, .. } => {
+                    types_map.insert(*dest, *type_id);
+                }
+                MirInst::FieldGet { dest, field_type, .. } => {
+                    types_map.insert(*dest, *field_type);
+                }
+                MirInst::IndirectCall {
+                    dest: Some(dest),
+                    return_type,
+                    ..
+                }
+                | MirInst::MethodCallVirtual {
+                    dest: Some(dest),
+                    return_type,
+                    ..
+                } => {
+                    types_map.insert(*dest, *return_type);
+                }
+                MirInst::IndirectCall { dest: None, .. } | MirInst::MethodCallVirtual { dest: None, .. } => {}
+                MirInst::UnitWiden {
+                    dest, to_bits, signed, ..
+                }
+                | MirInst::UnitNarrow {
+                    dest, to_bits, signed, ..
+                } => {
+                    if let Some(ty) = unit_bits_to_type_id(*to_bits, *signed) {
+                        types_map.insert(*dest, ty);
+                    }
+                }
+                MirInst::UnitSaturate { dest, .. } => {
+                    types_map.insert(*dest, TypeId::I64);
+                }
+                MirInst::BoxInt { dest, .. } | MirInst::UnboxInt { dest, .. } => {
+                    types_map.insert(*dest, TypeId::I64);
+                }
+                MirInst::BoxFloat { dest, .. } | MirInst::UnboxFloat { dest, .. } => {
+                    types_map.insert(*dest, TypeId::F64);
+                }
+                _ => {}
+            }
+        }
+    }
+
+    types_map
+}
+
+#[cfg(feature = "llvm")]
+fn vreg_is_signed(vreg_types: &VRegTypes, v: crate::mir::VReg) -> Option<bool> {
+    use crate::hir::TypeId;
+
+    match vreg_types.get(&v).copied()? {
+        TypeId::I8 | TypeId::I16 | TypeId::I32 | TypeId::I64 => Some(true),
+        TypeId::U8 | TypeId::U16 | TypeId::U32 | TypeId::U64 => Some(false),
+        _ => None,
+    }
+}
 
 impl LlvmBackend {
     #[cfg(feature = "llvm")]
@@ -212,6 +352,7 @@ impl LlvmBackend {
 
         // Map virtual registers to LLVM values (used within each block)
         let mut vreg_map: VRegMap = HashMap::new();
+        let vreg_types = build_vreg_types(func);
 
         // ======================================================================
         // Pre-allocate allocas for ALL vregs at the entry block.
@@ -398,7 +539,7 @@ impl LlvmBackend {
                     }
                 }
 
-                self.compile_instruction(inst, &mut vreg_map, &local_allocas, builder, module)?;
+                self.compile_instruction(inst, &mut vreg_map, &local_allocas, &vreg_types, builder, module)?;
 
                 // Store any newly defined vreg to its alloca (for cross-block access)
                 if let Some(d) = inst.dest() {
@@ -472,6 +613,7 @@ impl LlvmBackend {
         inst: &crate::mir::MirInst,
         vreg_map: &mut VRegMap,
         local_allocas: &std::collections::HashMap<usize, inkwell::values::PointerValue<'static>>,
+        vreg_types: &VRegTypes,
         builder: &Builder<'static>,
         module: &Module<'static>,
     ) -> Result<(), CompileError> {
@@ -508,7 +650,16 @@ impl LlvmBackend {
             MirInst::BinOp { dest, op, left, right } => {
                 let left_val = self.get_vreg(left, vreg_map)?;
                 let right_val = self.get_vreg(right, vreg_map)?;
-                let result = self.compile_binop(*op, left_val, right_val, builder, module, None)?;
+                let lhs_ty = vreg_types.get(left).copied();
+                let result = self.compile_binop(
+                    *op,
+                    left_val,
+                    right_val,
+                    builder,
+                    module,
+                    vreg_is_signed(vreg_types, *left),
+                    lhs_ty,
+                )?;
                 vreg_map.insert(*dest, result);
             }
             MirInst::UnaryOp { dest, op, operand } => {
@@ -1361,11 +1512,92 @@ impl LlvmBackend {
                 // Coverage instrumentation not yet implemented
             }
 
-            // Unit type instructions (not yet implemented)
             MirInst::UnitBoundCheck { .. } => {}
-            MirInst::UnitWiden { dest, .. } | MirInst::UnitNarrow { dest, .. } | MirInst::UnitSaturate { dest, .. } => {
-                let default_val = self.runtime_int_type().const_int(0, false);
-                vreg_map.insert(*dest, default_val.into());
+            MirInst::UnitWiden { dest, value, .. } => {
+                let val = self.get_vreg(value, vreg_map)?;
+                vreg_map.insert(*dest, val);
+            }
+            MirInst::UnitNarrow {
+                dest,
+                value,
+                to_bits,
+                signed,
+                overflow,
+                ..
+            } => {
+                let val = self
+                    .coerce_value_to_type(self.get_vreg(value, vreg_map)?, Some(self.runtime_int_type().into()), builder)?
+                    .into_int_value();
+                let narrowed = match overflow {
+                    crate::mir::UnitOverflowBehavior::Wrap => {
+                        if *to_bits >= 64 {
+                            val
+                        } else {
+                            let mask = (1u64 << *to_bits) - 1;
+                            builder
+                                .build_and(val, self.runtime_int_type().const_int(mask, false), "unit_wrap")
+                                .map_err(|e| crate::error::factory::llvm_build_failed("unit wrap", &e))?
+                        }
+                    }
+                    crate::mir::UnitOverflowBehavior::Saturate => {
+                        let (min, max) = if *signed {
+                            if *to_bits >= 64 {
+                                (i64::MIN, i64::MAX)
+                            } else {
+                                (-(1i64 << (*to_bits - 1)), (1i64 << (*to_bits - 1)) - 1)
+                            }
+                        } else if *to_bits >= 63 {
+                            (0, i64::MAX)
+                        } else {
+                            (0, (1i64 << *to_bits) - 1)
+                        };
+                        let min_v = self.runtime_int_type().const_int(min as u64, true);
+                        let max_v = self.runtime_int_type().const_int(max as u64, true);
+                        let gt_max = builder
+                            .build_int_compare(inkwell::IntPredicate::SGT, val, max_v, "unit_gt_max")
+                            .map_err(|e| crate::error::factory::llvm_build_failed("unit gt max", &e))?;
+                        let clamped_high = builder
+                            .build_select(gt_max, max_v, val, "unit_clamp_high")
+                            .map_err(|e| crate::error::factory::llvm_build_failed("unit clamp high", &e))?
+                            .into_int_value();
+                        let lt_min = builder
+                            .build_int_compare(inkwell::IntPredicate::SLT, clamped_high, min_v, "unit_lt_min")
+                            .map_err(|e| crate::error::factory::llvm_build_failed("unit lt min", &e))?;
+                        builder
+                            .build_select(lt_min, min_v, clamped_high, "unit_clamp")
+                            .map_err(|e| crate::error::factory::llvm_build_failed("unit clamp", &e))?
+                            .into_int_value()
+                    }
+                    crate::mir::UnitOverflowBehavior::Default | crate::mir::UnitOverflowBehavior::Checked => val,
+                };
+                vreg_map.insert(*dest, narrowed.into());
+            }
+            MirInst::UnitSaturate {
+                dest,
+                value,
+                min,
+                max,
+            } => {
+                let val = self
+                    .coerce_value_to_type(self.get_vreg(value, vreg_map)?, Some(self.runtime_int_type().into()), builder)?
+                    .into_int_value();
+                let min_v = self.runtime_int_type().const_int(*min as u64, true);
+                let max_v = self.runtime_int_type().const_int(*max as u64, true);
+                let gt_max = builder
+                    .build_int_compare(inkwell::IntPredicate::SGT, val, max_v, "unit_gt_max")
+                    .map_err(|e| crate::error::factory::llvm_build_failed("unit gt max", &e))?;
+                let clamped_high = builder
+                    .build_select(gt_max, max_v, val, "unit_clamp_high")
+                    .map_err(|e| crate::error::factory::llvm_build_failed("unit clamp high", &e))?
+                    .into_int_value();
+                let lt_min = builder
+                    .build_int_compare(inkwell::IntPredicate::SLT, clamped_high, min_v, "unit_lt_min")
+                    .map_err(|e| crate::error::factory::llvm_build_failed("unit lt min", &e))?;
+                let clamped = builder
+                    .build_select(lt_min, min_v, clamped_high, "unit_clamp")
+                    .map_err(|e| crate::error::factory::llvm_build_failed("unit clamp", &e))?
+                    .into_int_value();
+                vreg_map.insert(*dest, clamped.into());
             }
 
             // Parallel iterator instructions (not yet implemented)

@@ -43,11 +43,17 @@ impl CompilerPipeline {
                     .map_err(|e| CompileError::Codegen(format!("{e}")))
             }
             BackendKind::Llvm => {
+                let mut llvm_mir = mir_module.clone();
+                for func in &mut llvm_mir.functions {
+                    if func.name == "main" {
+                        func.name = "spl_main".to_string();
+                    }
+                }
                 let backend = LlvmBackend::new_with_opt_level_and_cpu(target, opt_level, cpu.clone())
                     .map_err(|e| CompileError::Codegen(format!("{e}")))?;
                 backend
                     .with_coverage(coverage_enabled)
-                    .compile(mir_module)
+                    .compile(&llvm_mir)
                     .map_err(|e| CompileError::Codegen(format!("{e}")))
             }
             #[cfg(feature = "vulkan")]

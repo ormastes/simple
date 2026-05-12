@@ -13,6 +13,8 @@ use inkwell::context::Context;
 #[cfg(feature = "llvm")]
 use inkwell::module::Module;
 #[cfg(feature = "llvm")]
+use inkwell::passes::PassBuilderOptions;
+#[cfg(feature = "llvm")]
 use inkwell::targets::{CodeModel, FileType, InitializationConfig, RelocMode, Target as LlvmTarget, TargetMachine};
 #[cfg(feature = "llvm")]
 use inkwell::types::BasicTypeEnum;
@@ -57,6 +59,43 @@ impl std::fmt::Debug for LlvmBackend {
 }
 
 impl LlvmBackend {
+    #[cfg(feature = "llvm")]
+    fn llvm_optimization_level(&self) -> OptimizationLevel {
+        match self.opt_level {
+            NativeOptimizationLevel::None => OptimizationLevel::None,
+            NativeOptimizationLevel::Basic => OptimizationLevel::Less,
+            NativeOptimizationLevel::Standard => OptimizationLevel::Default,
+            NativeOptimizationLevel::Aggressive => OptimizationLevel::Aggressive,
+        }
+    }
+
+    #[cfg(feature = "llvm")]
+    fn optimize_module_ir(&self, module: &Module<'static>, target_machine: &TargetMachine) -> Result<(), CompileError> {
+        if matches!(self.opt_level, NativeOptimizationLevel::None) {
+            return Ok(());
+        }
+
+        let options = PassBuilderOptions::create();
+        options.set_verify_each(false);
+        options.set_loop_interleaving(true);
+        options.set_loop_vectorization(true);
+        options.set_loop_slp_vectorization(true);
+        options.set_loop_unrolling(matches!(self.opt_level, NativeOptimizationLevel::Aggressive));
+        if matches!(self.opt_level, NativeOptimizationLevel::Aggressive) {
+            options.set_merge_functions(true);
+        }
+
+        let pipeline = match self.opt_level {
+            NativeOptimizationLevel::None => return Ok(()),
+            NativeOptimizationLevel::Basic => "default<O1>",
+            NativeOptimizationLevel::Standard => "default<O2>",
+            NativeOptimizationLevel::Aggressive => "default<O3>",
+        };
+        module
+            .run_passes(pipeline, target_machine, options)
+            .map_err(|e| crate::error::factory::llvm_build_failed("run LLVM optimization passes", &e.to_string()))
+    }
+
     /// Create a new LLVM backend for the given target
     pub fn new(target: Target) -> Result<Self, CompileError> {
         Self::new_with_opt_level(target, NativeOptimizationLevel::Standard)
@@ -178,7 +217,7 @@ impl LlvmBackend {
             originals.push(f);
             func_opt = f.get_next_function();
         }
-        drop(m);
+        let _ = m;
 
         let m = self.module.borrow();
         let Some(m) = m.as_ref() else {
@@ -219,7 +258,7 @@ impl LlvmBackend {
             }
             func_opt = f.get_next_function();
         }
-        drop(m);
+        let _ = m;
 
         let m = self.module.borrow();
         let Some(m) = m.as_ref() else {
@@ -540,34 +579,36 @@ impl LlvmBackend {
             _ => "",
         };
 
-        let cpu_name = self
-            .cpu
-            .llvm_cpu_name(self.target.arch)
-            .unwrap_or(match self.target.arch {
-                TargetArch::X86_64 => "x86-64-v3",
-                TargetArch::Aarch64 => "generic",
-                TargetArch::X86 => "i686",
-                TargetArch::Arm => "generic",
-                TargetArch::Riscv64 => "generic-rv64",
-                TargetArch::Riscv32 => "generic-rv32",
-                TargetArch::Wasm32 | TargetArch::Wasm64 => "generic",
-            });
+        let host_cpu_name;
+        let cpu_name = if matches!(self.cpu, TargetCpu::Native) {
+            host_cpu_name = TargetMachine::get_host_cpu_name().to_string();
+            host_cpu_name.as_str()
+        } else {
+            self.cpu
+                .llvm_cpu_name(self.target.arch)
+                .unwrap_or(match self.target.arch {
+                    TargetArch::X86_64 => "x86-64-v3",
+                    TargetArch::Aarch64 => "generic",
+                    TargetArch::X86 => "i686",
+                    TargetArch::Arm => "generic",
+                    TargetArch::Riscv64 => "generic-rv64",
+                    TargetArch::Riscv32 => "generic-rv32",
+                    TargetArch::Wasm32 | TargetArch::Wasm64 => "generic",
+                })
+        };
 
         let target_machine = target
             .create_target_machine(
                 &target_triple,
                 cpu_name,
                 features,
-                match self.opt_level {
-                    NativeOptimizationLevel::None => OptimizationLevel::None,
-                    NativeOptimizationLevel::Basic => OptimizationLevel::Less,
-                    NativeOptimizationLevel::Standard => OptimizationLevel::Default,
-                    NativeOptimizationLevel::Aggressive => OptimizationLevel::Aggressive,
-                },
+                self.llvm_optimization_level(),
                 reloc_mode,
                 code_model,
             )
             .ok_or_else(crate::error::factory::llvm_target_machine_failed)?;
+
+        self.optimize_module_ir(module, &target_machine)?;
 
         // Emit object file to memory buffer
         let buffer = target_machine
