@@ -16,6 +16,10 @@ simple duplicate-check src/app/ --mode token --min-lines 5
 # Run fuzzy lexical similarity
 simple duplicate-check src/ --mode cosine --similarity-threshold 0.85
 
+# Show progress and resource usage during long lexical scans
+simple duplicate-check src/ --mode token --progress
+simple duplicate-check src/ --mode cosine --progress --progress-interval-ms 10000
+
 # Tune semantic sensitivity
 simple duplicate-check src/ --semantic-threshold 0.92
 
@@ -42,6 +46,43 @@ The compatibility aliases `--semantic` and `--cosine` are still accepted. Lexica
 - `--min-tokens`
 - `--min-impact`
 - `--similarity-threshold`
+
+---
+
+## Progress And Resource Usage
+
+Lexical scans can take longer than a minute on large trees, especially `cosine`.
+Use `--progress` to print periodic progress to stderr while keeping stdout
+reserved for the normal text or JSON report:
+
+```bash
+bin/simple run src/compiler/90.tools/duplicate_check/main.spl duplicate-check src/compiler --mode token --progress
+bin/simple run src/compiler/90.tools/duplicate_check/main.spl duplicate-check src/compiler --mode cosine --progress --progress-interval-ms 10000
+```
+
+Progress lines include phase, completed work, elapsed seconds, and current RSS.
+The main phases are:
+
+| Phase | Meaning | Main cost |
+| --- | --- | --- |
+| `hash pass` | tokenize files and count rolling hashes | roughly linear in tokens |
+| `extract pass` | materialize repeated candidate windows | roughly linear in candidate files |
+| `feature pass` | build feature vectors for candidate blocks | roughly linear in sampled blocks |
+| `compare pass` | pairwise cosine comparison | bounded, but the slowest fuzzy phase |
+
+Expected wall time depends on token count, repeated code density, disk speed, and
+whether cache data is warm. As a practical guide on a developer laptop:
+
+| Scope size | Typical command | Expected time | Expected RSS |
+| --- | --- | --- | --- |
+| 1-25 files / under 20k tokens | `--mode token` | seconds | under 150 MB |
+| 25-200 files / 20k-250k tokens | `--mode token --progress` | 10-90 seconds | 100-400 MB |
+| 200-1000 files / 250k-1M tokens | `--mode token --progress` | 1-5 minutes | 250-900 MB |
+| Any large fuzzy scan | `--mode cosine --progress` | token time plus compare pass; can exceed 5 minutes | 300 MB-1.5 GB |
+
+For refactors, prefer scanning the smallest owned directory first. If token or
+cosine mode stays in one phase for several progress intervals, narrow the target
+path or raise `--min-lines` / `--min-tokens`.
 
 ---
 

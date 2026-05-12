@@ -138,6 +138,82 @@ fn preferred_lane_count_rv64(caps: Rv64Caps, element_bits: i64) -> i64:
     preferred_lane_count_for_bits(caps.preferred_vector_width_bits(), element_bits)
 
 # ============================================================================
+# InstructionCost — calibrated latency / throughput hints
+# ============================================================================
+
+"""Fine-grained cost hint for target idiom selection.
+
+Fields use integer units so the compiler can compare costs without floating
+point: reciprocal_throughput_x100 is cycles per instruction multiplied by 100.
+"""
+struct InstructionCost:
+    latency: i64
+    reciprocal_throughput_x100: i64
+    uops: i64
+
+fn instruction_cost_new(latency: i64, reciprocal_throughput_x100: i64, uops: i64) -> InstructionCost:
+    InstructionCost(latency: latency, reciprocal_throughput_x100: reciprocal_throughput_x100, uops: uops)
+
+fn instruction_cost_unsupported() -> InstructionCost:
+    InstructionCost(latency: -1, reciprocal_throughput_x100: -1, uops: -1)
+
+fn instruction_cost_from_latency(latency: i64) -> InstructionCost:
+    if latency < 0:
+        return instruction_cost_unsupported()
+    InstructionCost(latency: latency, reciprocal_throughput_x100: latency * 100, uops: 1)
+
+fn x86_instruction_cost(caps: X86Caps, idiom: TargetIdiom) -> InstructionCost:
+    if not caps.supports(idiom):
+        return instruction_cost_unsupported()
+    match idiom:
+        case AesEnc:          instruction_cost_new(4, 100, 1)
+        case AesEncLast:      instruction_cost_new(4, 100, 1)
+        case AesDec:          instruction_cost_new(4, 100, 1)
+        case AesDecLast:      instruction_cost_new(4, 100, 1)
+        case Sha256Rounds2:   instruction_cost_new(4, 100, 1)
+        case Sha256Msg1:      instruction_cost_new(2, 100, 1)
+        case Sha256Msg2:      instruction_cost_new(2, 100, 1)
+        case ClmulLo:         instruction_cost_new(7, 200, 1)
+        case ClmulHi:         instruction_cost_new(7, 200, 1)
+        case RotateLeft:      instruction_cost_new(1, 25, 1)
+        case RotateRight:     instruction_cost_new(1, 25, 1)
+        case SimdI32x8:       instruction_cost_new(1, 50, 1)
+        case SimdF32x8:       instruction_cost_new(1, 50, 1)
+        case _:               instruction_cost_from_latency(caps.cost(idiom))
+
+fn aarch64_instruction_cost(caps: Aarch64Caps, idiom: TargetIdiom) -> InstructionCost:
+    if not caps.supports(idiom):
+        return instruction_cost_unsupported()
+    match idiom:
+        case AesEnc:          instruction_cost_new(3, 100, 2)
+        case AesEncLast:      instruction_cost_new(3, 100, 1)
+        case AesDec:          instruction_cost_new(3, 100, 2)
+        case AesDecLast:      instruction_cost_new(3, 100, 1)
+        case Sha256Rounds2:   instruction_cost_new(4, 100, 1)
+        case Sha256Msg1:      instruction_cost_new(2, 100, 1)
+        case Sha256Msg2:      instruction_cost_new(2, 100, 1)
+        case ClmulLo:         instruction_cost_new(3, 100, 1)
+        case ClmulHi:         instruction_cost_new(3, 100, 1)
+        case RotateLeft:      instruction_cost_new(1, 50, 1)
+        case RotateRight:     instruction_cost_new(1, 50, 1)
+        case SimdI32x4:       instruction_cost_new(1, 50, 1)
+        case SimdF32x4:       instruction_cost_new(1, 50, 1)
+        case _:               instruction_cost_from_latency(caps.cost(idiom))
+
+fn rv64_instruction_cost(caps: Rv64Caps, idiom: TargetIdiom) -> InstructionCost:
+    if not caps.supports(idiom):
+        return instruction_cost_unsupported()
+    match idiom:
+        case AesEnc:          instruction_cost_new(4, 100, 1)
+        case AesDec:          instruction_cost_new(4, 100, 1)
+        case Sha256Rounds2:   instruction_cost_new(4, 100, 1)
+        case Sha256Msg1:      instruction_cost_new(2, 100, 1)
+        case Sha256Msg2:      instruction_cost_new(2, 100, 1)
+        case RotateLeft:      instruction_cost_new(1, 100, 1)
+        case RotateRight:     instruction_cost_new(1, 100, 1)
+        case _:               instruction_cost_from_latency(caps.cost(idiom))
+
+# ============================================================================
 # TargetCaps trait
 # ============================================================================
 

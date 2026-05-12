@@ -1,0 +1,124 @@
+"""Browser WebGPU status and error-scope handling.
+
+This module models the browser GPUDevice error-scope stack and device lost
+status without depending on command encoders or queue submission.
+"""
+
+pub val WEBGPU_ERROR_FILTER_VALIDATION: text = "validation"
+pub val WEBGPU_ERROR_FILTER_OUT_OF_MEMORY: text = "out-of-memory"
+pub val WEBGPU_ERROR_FILTER_INTERNAL: text = "internal"
+
+pub val WEBGPU_DEVICE_LOST_REASON_UNKNOWN: text = "unknown"
+pub val WEBGPU_DEVICE_LOST_REASON_DESTROYED: text = "destroyed"
+
+pub class WebGPUError:
+    kind: text
+    message: text
+    captured: bool
+
+    static fn none() -> WebGPUError:
+        WebGPUError(kind: "", message: "", captured: false)
+
+    static fn create(kind: text, message: text) -> WebGPUError:
+        WebGPUError(kind: kind, message: message, captured: true)
+
+pub class WebGPUErrorScope:
+    filter: text
+    error: WebGPUError
+
+    static fn create(filter: text) -> WebGPUErrorScope:
+        WebGPUErrorScope(filter: filter, error: WebGPUError.none())
+
+    fn has_error() -> bool:
+        self.error.captured
+
+pub class WebGPUDeviceLostInfo:
+    lost: bool
+    reason: text
+    message: text
+
+    static fn active() -> WebGPUDeviceLostInfo:
+        WebGPUDeviceLostInfo(lost: false, reason: "", message: "")
+
+    static fn lost(reason: text, message: text) -> WebGPUDeviceLostInfo:
+        WebGPUDeviceLostInfo(lost: true, reason: webgpu_normalize_device_lost_reason(reason), message: message)
+
+pub class WebGPUStatusErrors:
+    error_scopes: [WebGPUErrorScope]
+    uncaptured_errors: [WebGPUError]
+    device_lost: WebGPUDeviceLostInfo
+    last_error: text
+
+    static fn create() -> WebGPUStatusErrors:
+        WebGPUStatusErrors(
+            error_scopes: [],
+            uncaptured_errors: [],
+            device_lost: WebGPUDeviceLostInfo.active(),
+            last_error: ""
+        )
+
+    me push_error_scope(filter: text) -> bool:
+        if not webgpu_is_supported_error_filter(filter):
+            self.last_error = "GPUDevice error scope filter is not supported"
+            return false
+        self.error_scopes.push(WebGPUErrorScope.create(filter))
+        self.last_error = ""
+        true
+
+    me pop_error_scope() -> WebGPUError:
+        if self.error_scopes.len() == 0:
+            self.last_error = "GPUDevice popErrorScope requires a pushed scope"
+            return WebGPUError.none()
+        val idx = self.error_scopes.len() - 1
+        val scope = self.error_scopes[idx]
+        self.error_scopes.pop()
+        self.last_error = ""
+        scope.error
+
+    me report_error(kind: text, message: text) -> bool:
+        if not webgpu_is_supported_error_filter(kind):
+            self.last_error = "GPUDevice error kind is not supported"
+            return false
+        val error = WebGPUError.create(kind, message)
+        var i = self.error_scopes.len() - 1
+        while i >= 0:
+            val scope = self.error_scopes[i]
+            if scope.filter == kind:
+                if not scope.has_error():
+                    self.error_scopes[i] = WebGPUErrorScope(filter: scope.filter, error: error)
+                self.last_error = message
+                return true
+            i = i - 1
+        self.uncaptured_errors.push(error)
+        self.last_error = message
+        true
+
+    me lose_device(reason: text, message: text) -> WebGPUDeviceLostInfo:
+        if not self.device_lost.lost:
+            self.device_lost = WebGPUDeviceLostInfo.lost(reason, message)
+        self.device_lost
+
+    me destroy_device() -> WebGPUDeviceLostInfo:
+        self.lose_device(WEBGPU_DEVICE_LOST_REASON_DESTROYED, "GPUDevice was destroyed")
+
+    fn error_scope_depth() -> i32:
+        self.error_scopes.len()
+
+    fn uncaptured_error_count() -> i32:
+        self.uncaptured_errors.len()
+
+    fn is_device_lost() -> bool:
+        self.device_lost.lost
+
+pub fn webgpu_create_status_errors() -> WebGPUStatusErrors:
+    WebGPUStatusErrors.create()
+
+pub fn webgpu_is_supported_error_filter(filter: text) -> bool:
+    filter == WEBGPU_ERROR_FILTER_VALIDATION or
+        filter == WEBGPU_ERROR_FILTER_OUT_OF_MEMORY or
+        filter == WEBGPU_ERROR_FILTER_INTERNAL
+
+pub fn webgpu_normalize_device_lost_reason(reason: text) -> text:
+    if reason == WEBGPU_DEVICE_LOST_REASON_DESTROYED:
+        return WEBGPU_DEVICE_LOST_REASON_DESTROYED
+    WEBGPU_DEVICE_LOST_REASON_UNKNOWN

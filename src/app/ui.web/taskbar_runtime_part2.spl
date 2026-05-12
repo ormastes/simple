@@ -1,0 +1,238 @@
+# Part 2 of src/app/ui.web/taskbar_runtime.spl
+use app.ui.web.taskbar_runtime.*
+# Host Taskbar Runtime — authoritative taskbar + launch/runtime state
+#
+# Supports host shell modes:
+#   * embedded:        taskbar + in-shell SimpleWeb surfaces
+#   * native:          taskbar shell + native Electron BrowserWindows
+#   * hidden_taskbar:  native Electron BrowserWindows with Simple taskbar hidden
+#   * headless:        no local shell window; remote UI still gets taskbar state
+#
+# Legacy names `desktop_embedded` and `taskbar_only` remain accepted.
+
+use common.ui.session.{UISession}
+use common.ui.window_surface_registry.{UI_SURFACE_KIND_SIMPLE_WEB, UI_SURFACE_KIND_ELECTRON, UI_SURFACE_KIND_HEADLESS, ui_surface_kind_is_native_host}
+use common.ui.taskbar_model.{AppRef, TrayItem, TaskbarLaunchError}
+use common.ui.builder.{column, label, button, build_tree_with_title, with_width, with_height, with_visible}
+use app.ui.web.taskbar_shell.{build_taskbar_model_with_minimized, taskbar_model_to_json_with_launch_errors}
+use app.ui.web.host_adapter_contract.{HostWindowCommand, host_window_command_to_json}
+use app.ui.web.wire.{make_wire_frame}
+use examples.hello_taskbar.main.{hello_html, hello_title, hello_size_width, hello_size_height}
+use examples.hello_taskbar.app_manifest.{APP_ID, DISPLAY_NAME, ICON, resolve_for_local_host}
+use os.desktop.app_manifest.{AppManifest, AppHostContent, UiBackendKind, default_manifests, host_caps_host, host_content_for_manifest, resolve_backend}
+
+fn _unsupported_manifest_html(manifest: AppManifest) -> text:
+    val title = _html_escape(manifest.name)
+    val desc = _html_escape(manifest.description)
+    val category = _html_escape(manifest.category)
+    val binary = _html_escape(manifest.binary)
+    "<!doctype html>" +
+    "<html><head><meta charset='utf-8'>" +
+    "<title>{title}</title>" +
+    "<style>" +
+    "body { margin: 0; min-height: 100vh; padding: 28px; background: linear-gradient(135deg, #10201b, #101724); color: #f3f0dc; font-family: Georgia, serif; }" +
+    "h1 { margin: 0 0 10px 0; font-size: 28px; }" +
+    "p { margin: 8px 0; font-size: 15px; line-height: 1.45; }" +
+    ".tag { display: inline-block; margin-top: 14px; padding: 6px 10px; border: 1px solid rgba(243,240,220,.35); border-radius: 999px; }" +
+    "</style></head><body>" +
+    "<h1>{title}</h1>" +
+    "<p>{desc}</p>" +
+    "<p>This app has no host content hook yet.</p>" +
+    "<p class='tag'>Unsupported host content - {category} - {binary}</p>" +
+    "</body></html>"
+
+fn _html_escape(s: text) -> text:
+    var r = s.replace("&", "&amp;")
+    r = r.replace("<", "&lt;")
+    r = r.replace(">", "&gt;")
+    r = r.replace("\"", "&quot;")
+    r = r.replace("'", "&#39;")
+    r
+
+fn _default_tray() -> [TrayItem]:
+    val persisted = _load_persisted_tray()
+    if persisted != nil:
+        return persisted.unwrap()
+    [TrayItem(item_id: "host-runtime", label: "host", icon: "host")]
+
+fn _layout_has_duplicate_apps(pinned: [AppRef]) -> bool:
+    var seen: [text] = []
+    for item in pinned:
+        if _contains_text(seen, item.app_id):
+            return true
+        seen = seen.push(item.app_id)
+    false
+
+fn _layout_has_duplicate_tray_items(tray: [TrayItem]) -> bool:
+    var seen: [text] = []
+    for item in tray:
+        if _contains_text(seen, item.item_id):
+            return true
+        seen = seen.push(item.item_id)
+    false
+
+fn _parse_mode(mode_name: text) -> HostShellMode:
+    val m = mode_name.lower()
+    if m == "embedded":
+        return HostShellMode.Embedded
+    if m == "native":
+        return HostShellMode.Native
+    if m == "hidden_taskbar" or m == "hidden-taskbar":
+        return HostShellMode.HiddenTaskbar
+    if m == "desktop_embedded" or m == "desktop-embedded":
+        return HostShellMode.DesktopEmbedded
+    if m == "taskbar_only" or m == "taskbar-only":
+        return HostShellMode.TaskbarOnly
+    if m == "headless":
+        return HostShellMode.Headless
+    return HostShellMode.Embedded
+
+fn _mode_name(mode: HostShellMode) -> text:
+    match mode:
+        HostShellMode.DesktopEmbedded: "desktop_embedded"
+        HostShellMode.TaskbarOnly: "taskbar_only"
+        HostShellMode.Embedded: "embedded"
+        HostShellMode.Native: "native"
+        HostShellMode.HiddenTaskbar: "hidden_taskbar"
+        HostShellMode.Headless: "headless"
+
+fn _mode_is_taskbar_only(mode: HostShellMode) -> bool:
+    _mode_uses_native_windows(mode)
+
+fn _mode_uses_native_windows(mode: HostShellMode) -> bool:
+    match mode:
+        HostShellMode.TaskbarOnly: true
+        HostShellMode.Native: true
+        HostShellMode.HiddenTaskbar: true
+        _: false
+
+fn _mode_uses_embedded_surfaces(mode: HostShellMode) -> bool:
+    match mode:
+        HostShellMode.DesktopEmbedded: true
+        HostShellMode.Embedded: true
+        _: false
+
+fn _mode_is_headless(mode: HostShellMode) -> bool:
+    match mode:
+        HostShellMode.Headless: true
+        _: false
+
+fn _mode_hides_embedded_desktop(mode: HostShellMode) -> bool:
+    _mode_uses_native_windows(mode) or _mode_is_headless(mode)
+
+fn _mode_hides_taskbar(mode: HostShellMode) -> bool:
+    match mode:
+        HostShellMode.HiddenTaskbar: true
+        _: false
+
+fn _build_app_tree(surface_id: text, title: text, width: i32, height: i32, visible: bool):
+    val root = with_visible(
+        with_height(
+            with_width(
+                column("{surface_id}_root", [
+                    label("{surface_id}_title", title),
+                    label("{surface_id}_body", "Host taskbar runtime demo surface"),
+                    button("{surface_id}_dismiss", "Close", "close")
+                ]),
+                width
+            ),
+            height
+        ),
+        visible
+    )
+    build_tree_with_title(root, title, "glass_dark")
+
+fn _set_surface_visible(session: UISession, surface_id: text, visible: bool):
+    val tree = session.get_surface(surface_id)
+    if tree == nil:
+        return
+    val updated = build_tree_with_title(
+        with_visible(tree.root_node(), visible),
+        tree.title_text(),
+        tree.theme_name()
+    )
+    val handle = session.surface_handle(surface_id)
+    if handle != nil:
+        session.update_surface_tree(handle, updated)
+
+fn _native_window_url(app_id: text, surface_id: text, window_id: text) -> text:
+    val html = host_taskbar_runtime_native_window_html(app_id)
+    if html != nil:
+        return _html_data_url(html.unwrap())
+    "/wm/native_window?app_id={_url_encode(app_id)}&surface_id={_url_encode(surface_id)}&window_id={_url_encode(window_id)}"
+
+fn _html_data_url(html: text) -> text:
+    "data:text/html;charset=utf-8,{_data_url_encode(html)}"
+
+fn _data_url_encode(s: text) -> text:
+    var out = ""
+    var i = 0
+    while i < s.len():
+        val ch = s[i]
+        if _is_data_url_unreserved(ch):
+            out = "{out}{ch}"
+        else:
+            out = "{out}%{_hex_pair(_char_code(ch))}"
+        i = i + 1
+    out
+
+fn _is_data_url_unreserved(ch: text) -> bool:
+    if ch >= "a" and ch <= "z":
+        return true
+    if ch >= "A" and ch <= "Z":
+        return true
+    if ch >= "0" and ch <= "9":
+        return true
+    ch == "-" or ch == "_" or ch == "." or ch == "~"
+
+fn _char_code(ch: text) -> i64:
+    val chars = "\x00\x01\x02\x03\x04\x05\x06\x07\x08\t\n\x0B\x0C\r\x0E\x0F" +
+        "\x10\x11\x12\x13\x14\x15\x16\x17\x18\x19\x1A\x1B\x1C\x1D\x1E\x1F" +
+        " !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~"
+    var i = 0
+    while i < chars.len():
+        if chars[i] == ch:
+            return i
+        i = i + 1
+    63
+
+fn _hex_pair(value: i64) -> text:
+    val digits = "0123456789ABCDEF"
+    val hi = value / 16
+    val lo = value % 16
+    "{digits[hi]}{digits[lo]}"
+
+fn _url_encode(s: text) -> text:
+    var out = ""
+    var i = 0
+    while i < s.len():
+        val ch = s[i]
+        if ch == "/":
+            out = "{out}%2F"
+        elif ch == " ":
+            out = "{out}%20"
+        elif ch == "&":
+            out = "{out}%26"
+        elif ch == "=":
+            out = "{out}%3D"
+        elif ch == "?":
+            out = "{out}%3F"
+        else:
+            out = "{out}{ch}"
+        i = i + 1
+    out
+
+fn _contains_text(items: [text], target: text) -> bool:
+    for item in items:
+        if item == target:
+            return true
+    false
+
+fn _remove_text(items: [text], target: text) -> [text]:
+    var filtered: [text] = []
+    for item in items:
+        if item == target:
+            pass_do_nothing
+        else:
+            filtered = filtered.push(item)
+    filtered

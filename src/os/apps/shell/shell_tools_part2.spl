@@ -1,0 +1,290 @@
+# Part 2 of src/os/apps/shell/shell_tools.spl
+use os.apps.shell.shell_tools.*
+#![allow(unnamed_duplicate_typed_args)]
+# Shell Extended Tools
+#
+# Additional built-in commands for the SimpleOS shell.
+# Each tool is a standalone function returning an i32 exit code.
+#
+# MDSOC: feature dimension, shell layer
+
+use os.apps.terminal.terminal.{Terminal}
+use os.kernel.types.fs_types.{FsNode, FsNodeKind}
+use os.services.vfs.vfs.{VfsManager}
+use os.tools.tool_registry.{ToolRegistry}
+
+# =========================================================================
+# Path Resolution (shared helper)
+# =========================================================================
+
+fn _insert_sorted(list: [text], item: text) -> [text]:
+    """Insert an item into a sorted list maintaining order."""
+    var result: [text] = []
+    var inserted = false
+    for existing in list:
+        if not inserted and item < existing:
+            result = result.push(item)
+            inserted = true
+        result = result.push(existing)
+    if not inserted:
+        result = result.push(item)
+    return result
+
+# =========================================================================
+# uniq — Remove consecutive duplicate lines
+# =========================================================================
+
+fn tool_uniq(vfs: VfsManager?, cwd: text, args: [text], terminal: Terminal) -> i32:
+    """Remove consecutive duplicate lines from a file."""
+    if vfs == nil:
+        _write_error(terminal, "uniq: no filesystem mounted")
+        return 1
+    if args.len() == 0:
+        _write_error(terminal, "uniq: missing file operand")
+        return 1
+
+    val path = _resolve_tool_path(cwd, args[0])
+    val result = vfs.read_text(path)
+    if result.is_err():
+        _write_error(terminal, "uniq: {path}: {result.unwrap_err()}")
+        return 1
+
+    val content = result.unwrap()
+    val lines = _split_lines(content)
+    var prev: text = ""
+    var first = true
+    for line in lines:
+        if first or line != prev:
+            _write_line(terminal, line)
+        prev = line
+        first = false
+    return 0
+
+# =========================================================================
+# which — Show which tool/builtin would run for a command
+# =========================================================================
+
+fn tool_which(vfs: VfsManager?, cwd: text, path_env: text, args: [text], tool_registry: ToolRegistry?, terminal: Terminal) -> i32:
+    """Show which built-in or tool would run for a command name."""
+    if args.len() == 0:
+        _write_error(terminal, "which: missing command name")
+        return 1
+
+    val builtins = ["cd", "ls", "list", "pwd", "echo", "cat", "mkdir", "rm", "cp",
+        "mv", "grep", "find", "ps", "kill", "run", "mount", "clear", "help",
+        "exit", "env", "export", "history", "hostname", "uptime", "dmesg",
+        "mem", "reboot",
+        "jobs", "fg", "bg", "readf", "touch", "head", "tail", "wc",
+        "sort", "uniq", "which", "date", "true", "false", "tee", "ln",
+        "chmod", "stat", "cut", "tr", "sed", "basename", "dirname",
+        "sleep", "seq", "expr", "test", "[", "xargs", "yes", "printenv",
+        "readlink", "mktemp", "diff", "patch", "file", "strings",
+        "hexdump", "base64", "md5sum", "sha256sum", "git", "jj",
+        "uname", "ninja"]
+
+    var exit_code = 0
+    for cmd in args:
+        var found = false
+        for b in builtins:
+            if b == cmd:
+                _write_line(terminal, "{cmd}: shell built-in command")
+                found = true
+        if found:
+            continue
+
+        if tool_registry != nil:
+            val tool = tool_registry.lookup(cmd)
+            if tool != nil:
+                _write_line(terminal, "{cmd}: registered tool")
+                found = true
+        if found:
+            continue
+
+        if vfs != nil:
+            for candidate in _tool_path_candidates(cmd, cwd, path_env):
+                val stat_result = vfs.stat(candidate)
+                if stat_result.is_ok():
+                    val node = stat_result.unwrap()
+                    if node.kind == FsNodeKind.File or node.kind == FsNodeKind.Symlink:
+                        _write_line(terminal, candidate)
+                        found = true
+                        break
+        if found:
+            continue
+
+        _write_error(terminal, "{cmd}: not found")
+        exit_code = 1
+    exit_code
+
+# =========================================================================
+# date — Show current date/time
+# =========================================================================
+
+fn tool_date(terminal: Terminal) -> i32:
+    """Show current date/time (placeholder — real RTC not available in VFS)."""
+    # SimpleOS doesn't have a real clock yet; show a placeholder
+    _write_line(terminal, "1970-01-01 00:00:00 UTC (no RTC available)")
+    return 0
+
+fn tool_uname(args: [text], terminal: Terminal) -> i32:
+    """Report a minimal Unix-like kernel identity."""
+    val flag = if args.len() > 0: args[0] else: "-s"
+    match flag:
+        "-s":
+            _write_line(terminal, "SimpleOS")
+        "-m":
+            _write_line(terminal, "x86_64")
+        "-a":
+            _write_line(terminal, "SimpleOS simpleos 0.1.0 x86_64")
+        _:
+            _write_error(terminal, "uname: unsupported flag '{flag}'")
+            return 1
+    0
+
+fn tool_cmake(vfs: VfsManager?, cwd: text, env_pairs: [(text, text)], args: [text], terminal: Terminal) -> i32:
+    """Guest-facing cmake wrapper bound to the stable /usr/bin/cmake path."""
+    val path_env = _tool_env_value(env_pairs, "PATH", "/bin:/usr/bin")
+    if not _tool_path_exists(vfs, cwd, path_env, "cmake"):
+        _write_error(terminal, "cmake: native wrapper not found on PATH")
+        return 127
+    tool_try_staged_toolchain(vfs, cwd, path_env, "cmake", args, terminal) ?? 127
+
+fn tool_ninja(vfs: VfsManager?, cwd: text, env_pairs: [(text, text)], args: [text], terminal: Terminal) -> i32:
+    """Guest-facing ninja wrapper bound to the stable /usr/bin/ninja path."""
+    val path_env = _tool_env_value(env_pairs, "PATH", "/bin:/usr/bin")
+    if not _tool_path_exists(vfs, cwd, path_env, "ninja"):
+        _write_error(terminal, "ninja: native wrapper not found on PATH")
+        return 127
+    tool_try_staged_toolchain(vfs, cwd, path_env, "ninja", args, terminal) ?? 127
+
+# =========================================================================
+# true / false — Exit with known code
+# =========================================================================
+
+fn tool_true() -> i32:
+    """Exit with code 0."""
+    return 0
+
+fn tool_false() -> i32:
+    """Exit with code 1."""
+    return 1
+
+# =========================================================================
+# tee — Echo args to stdout and write to file
+# =========================================================================
+
+fn tool_tee(vfs: VfsManager?, cwd: text, args: [text], terminal: Terminal) -> i32:
+    """Simplified tee: write remaining args as content to the named file, echoing to terminal.
+
+    Usage: tee FILE [WORDS...]
+    Writes WORDS (space-joined) to both the terminal and FILE.
+    """
+    if args.len() == 0:
+        _write_error(terminal, "tee: missing file operand")
+        return 1
+    if vfs == nil:
+        _write_error(terminal, "tee: no filesystem mounted")
+        return 1
+
+    val filename = args[0]
+    # Collect remaining args as content
+    var content = ""
+    var i = 1
+    while i < args.len():
+        if i > 1:
+            content = "{content} "
+        content = "{content}{args[i]}"
+        i = i + 1
+
+    # Echo to terminal
+    _write_line(terminal, content)
+
+    # Write to file
+    val path = _resolve_tool_path(cwd, filename)
+    val result = vfs.write_text(path, content)
+    if result.is_err():
+        _write_error(terminal, "tee: {path}: {result.unwrap_err()}")
+        return 1
+    return 0
+
+# =========================================================================
+# ln — Create symlink
+# =========================================================================
+
+fn tool_ln(vfs: VfsManager?, cwd: text, args: [text], terminal: Terminal) -> i32:
+    """Create a symbolic link.
+
+    Usage: ln -s TARGET LINK_PATH
+    """
+    if args.len() < 3 or args[0] != "-s":
+        _write_error(terminal, "ln: only symbolic links supported — usage: ln -s TARGET LINK_PATH")
+        return 1
+    if vfs == nil:
+        _write_error(terminal, "ln: no filesystem mounted")
+        return 1
+    val target = args[1]
+    val link_path = _resolve_tool_path(cwd, args[2])
+    val result = vfs.symlink(target, link_path)
+    if result.is_err():
+        _write_error(terminal, "ln: {result.unwrap_err()}")
+        return 1
+    return 0
+
+# =========================================================================
+# chmod — Change permissions
+# =========================================================================
+
+fn tool_chmod(vfs: VfsManager?, cwd: text, args: [text], terminal: Terminal) -> i32:
+    """Change file permissions.
+
+    Usage: chmod MODE FILE
+    """
+    if args.len() < 2:
+        _write_error(terminal, "chmod: missing operand — usage: chmod MODE FILE")
+        return 1
+    if vfs == nil:
+        _write_error(terminal, "chmod: no filesystem mounted")
+        return 1
+    val mode_text = args[0]
+    val path = _resolve_tool_path(cwd, args[1])
+    val mode_val = mode_text.parse_u64()
+    val result = vfs.chmod(path, mode_val as u16)
+    if result.is_err():
+        _write_error(terminal, "chmod: {path}: {result.unwrap_err()}")
+        return 1
+    return 0
+
+# =========================================================================
+# stat — Show file info
+# =========================================================================
+
+fn tool_stat(vfs: VfsManager?, cwd: text, args: [text], terminal: Terminal) -> i32:
+    """Show file information (size, type, permissions)."""
+    if vfs == nil:
+        _write_error(terminal, "stat: no filesystem mounted")
+        return 1
+    if args.len() == 0:
+        _write_error(terminal, "stat: missing file operand")
+        return 1
+
+    var exit_code: i32 = 0
+    for filename in args:
+        val path = _resolve_tool_path(cwd, filename)
+        val result = vfs.stat(path)
+        if result.is_err():
+            _write_error(terminal, "stat: cannot stat '{path}': {result.unwrap_err()}")
+            exit_code = 1
+        else:
+            val node = result.unwrap()
+            val kind_str = match node.kind:
+                FsNodeKind.File => "regular file"
+                FsNodeKind.Directory => "directory"
+                FsNodeKind.Symlink => "symbolic link"
+                FsNodeKind.Device => "device"
+                FsNodeKind.Pipe => "pipe"
+                _ => "unknown"
+            _write_line(terminal, "  File: {path}")
+            _write_line(terminal, "  Size: {node.size}  Type: {kind_str}")
+            _write_line(terminal, "  Inode: {node.id}  Perms: {node.permissions}")
+            _write_line(terminal, "  Owner: {node.owner}  Group: {node.group}")
+    return exit_code

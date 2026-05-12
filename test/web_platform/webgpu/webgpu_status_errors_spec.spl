@@ -1,0 +1,77 @@
+use std.spec.*
+use std.gc_async_mut.gpu.browser_engine.webgpu_status_errors.{
+    WEBGPU_ERROR_FILTER_VALIDATION, WEBGPU_ERROR_FILTER_OUT_OF_MEMORY,
+    WEBGPU_ERROR_FILTER_INTERNAL, WEBGPU_DEVICE_LOST_REASON_DESTROYED,
+    WEBGPU_DEVICE_LOST_REASON_UNKNOWN,
+    webgpu_create_status_errors, webgpu_is_supported_error_filter,
+    webgpu_normalize_device_lost_reason
+}
+
+describe "Browser WebGPU status and errors":
+    describe "error scopes":
+        it "captures the first matching validation error in a pushed scope":
+            var status = webgpu_create_status_errors()
+            expect(status.push_error_scope(WEBGPU_ERROR_FILTER_VALIDATION)).to_equal(true)
+            expect(status.report_error(WEBGPU_ERROR_FILTER_VALIDATION, "bad bind group")).to_equal(true)
+            expect(status.report_error(WEBGPU_ERROR_FILTER_VALIDATION, "second validation error")).to_equal(true)
+            val err = status.pop_error_scope()
+            expect(err.captured).to_equal(true)
+            expect(err.kind).to_equal(WEBGPU_ERROR_FILTER_VALIDATION)
+            expect(err.message).to_equal("bad bind group")
+            expect(status.error_scope_depth()).to_equal(0)
+            expect(status.uncaptured_error_count()).to_equal(0)
+
+        it "routes an error to the nearest matching nested scope":
+            var status = webgpu_create_status_errors()
+            expect(status.push_error_scope(WEBGPU_ERROR_FILTER_VALIDATION)).to_equal(true)
+            expect(status.push_error_scope(WEBGPU_ERROR_FILTER_OUT_OF_MEMORY)).to_equal(true)
+            expect(status.report_error(WEBGPU_ERROR_FILTER_VALIDATION, "invalid texture")).to_equal(true)
+            val oom = status.pop_error_scope()
+            val validation = status.pop_error_scope()
+            expect(oom.captured).to_equal(false)
+            expect(validation.captured).to_equal(true)
+            expect(validation.message).to_equal("invalid texture")
+
+        it "records unmatched errors as uncaptured":
+            var status = webgpu_create_status_errors()
+            expect(status.push_error_scope(WEBGPU_ERROR_FILTER_VALIDATION)).to_equal(true)
+            expect(status.report_error(WEBGPU_ERROR_FILTER_INTERNAL, "device backend fault")).to_equal(true)
+            val err = status.pop_error_scope()
+            expect(err.captured).to_equal(false)
+            expect(status.uncaptured_error_count()).to_equal(1)
+            expect(status.uncaptured_errors[0].message).to_equal("device backend fault")
+
+        it "records errors with no scopes as uncaptured":
+            var status = webgpu_create_status_errors()
+            expect(status.report_error(WEBGPU_ERROR_FILTER_VALIDATION, "invalid descriptor")).to_equal(true)
+            expect(status.uncaptured_error_count()).to_equal(1)
+            expect(status.uncaptured_errors[0].kind).to_equal(WEBGPU_ERROR_FILTER_VALIDATION)
+            expect(status.uncaptured_errors[0].message).to_equal("invalid descriptor")
+
+        it "rejects unsupported filters and empty pops":
+            var status = webgpu_create_status_errors()
+            expect(webgpu_is_supported_error_filter("syntax")).to_equal(false)
+            expect(status.push_error_scope("syntax")).to_equal(false)
+            expect(status.last_error).to_equal("GPUDevice error scope filter is not supported")
+            val err = status.pop_error_scope()
+            expect(err.captured).to_equal(false)
+            expect(status.last_error).to_equal("GPUDevice popErrorScope requires a pushed scope")
+
+    describe "device lost":
+        it "starts active and records destroyed device loss":
+            var status = webgpu_create_status_errors()
+            expect(status.is_device_lost()).to_equal(false)
+            val lost = status.destroy_device()
+            expect(lost.lost).to_equal(true)
+            expect(lost.reason).to_equal(WEBGPU_DEVICE_LOST_REASON_DESTROYED)
+            expect(status.is_device_lost()).to_equal(true)
+
+        it "normalizes unknown loss reasons and keeps the first loss status":
+            var status = webgpu_create_status_errors()
+            expect(webgpu_normalize_device_lost_reason("adapter-reset")).to_equal(WEBGPU_DEVICE_LOST_REASON_UNKNOWN)
+            val first = status.lose_device("adapter-reset", "adapter reset")
+            val second = status.lose_device(WEBGPU_DEVICE_LOST_REASON_DESTROYED, "destroyed later")
+            expect(first.reason).to_equal(WEBGPU_DEVICE_LOST_REASON_UNKNOWN)
+            expect(first.message).to_equal("adapter reset")
+            expect(second.reason).to_equal(WEBGPU_DEVICE_LOST_REASON_UNKNOWN)
+            expect(second.message).to_equal("adapter reset")

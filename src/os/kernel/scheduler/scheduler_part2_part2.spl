@@ -1,0 +1,520 @@
+# Part 2 of src/os/kernel/scheduler/scheduler_part2.spl
+use os.kernel.scheduler.scheduler_part2.*
+# Part 2 of src/os/kernel/scheduler/scheduler.spl
+use os.kernel.scheduler.scheduler.*
+# Preemptive Scheduler — Computation Dimension
+#
+# Priority-based preemptive scheduler with round-robin within same priority.
+# Fixed-size task table (MAX_TASKS slots). Timer interrupt drives preemption.
+#
+# Hub file: imports types from scheduler_types.spl; algorithm bodies live in
+# scheduler_task_mgmt.spl, scheduler_algorithm.spl, and scheduler_exec.spl.
+#
+# Consumes: SchedulerInputPort (interrupts, memory)
+# Produces: SchedulerOutputPort (task lifecycle, blocking)
+
+use os.kernel.types.task_types.{
+    TaskId, TaskState, TaskPriority, TaskContext, BlockReason,
+    UserProcessImage, AddressSpace,
+    SchedulerPolicy, TaskScheduleConfig, TaskIsolationProfile,
+    SchedulerTopology, SchedulerDomain,
+    scheduler_flat_topology,
+    scheduler_detect_platform_topology, default_task_schedule, default_task_isolation,
+    user_process_image_entry, user_process_image_stack_top,
+    user_process_image_stack_size, user_process_image_segments,
+    user_process_image_file_bytes, user_process_image_initial_sp,
+    user_process_image_initial_stack_bytes
+}
+use os.kernel.types.capability_types.{CapabilitySet}
+use os.kernel.arch.arch_context.{Architecture}
+use os.kernel.loader.executable_source.{resolve_executable_bytes}
+use os.kernel.loader.process_image.{build_user_process_image}
+use os.posix.fd_io.{posix_close_task_fds_with_backends}
+use os.kernel.ipc.notif_global.{notification_clear_waiter_global}
+use os.kernel.replay.hooks.{replay_hook_schedule}
+
+# Forward declaration: implemented by IpcManager wiring in kernel main.
+extern fn cap_init_task_record(task: TaskId, full: bool)
+extern fn serial_println(msg: text)
+use os.kernel.log.klog_api.{log_raw_println}
+
+# Types from scheduler_types.spl
+use os.kernel.scheduler.scheduler_types.{
+    TaskControlBlock, WaitCollectResult,
+    SchedulerPreemptionReason, SchedulerPreemptionDecision,
+    SchedulerTraceKind, SchedulerTraceEvent, PiMutex,
+    ReadyQueue, CpuRunQueue,
+    MAX_TASKS, PRIORITY_LEVELS, TIME_SLICE_TICKS, SCHED_TICK_NS,
+    DEADLINE_BANDWIDTH_SCALE, DEADLINE_CPU_BANDWIDTH_CAP,
+    DEFAULT_SCHED_CPUS, SCHED_TRACE_CAPACITY, SCHED_RT_BASE_PRIORITY_UNSET,
+    SCHED_EXEC_ARCH,
+    task_control_pid, task_control_parent_pid, task_control_memory_pages,
+    task_control_name, task_control_state_code, task_control_priority_code,
+    task_control_ticks_remaining,
+    wait_collect_result_pid, wait_collect_result_status, wait_collect_result_error,
+    _priority_to_index, _affinity_allows_cpu, _deadline_util,
+    _account_task_tick, _account_fair_tick,
+    Scheduler, SchedulerBootstrapUserTaskResult
+}
+
+# Task management free functions
+use os.kernel.scheduler.scheduler_task_mgmt.{
+    sched_create_task_impl,
+    sched_exit_task_by_id_with_code_impl,
+    sched_block_task_impl, sched_unblock_task_impl,
+    sched_wake_expired_sleepers_impl,
+    sched_set_task_name_impl,
+    sched_restrict_isolation_impl,
+    sched_wait_for_collect_impl,
+    sched_release_task_address_space,
+    _find_slot_in, _find_empty_slot_in
+}
+
+# Algorithm free functions
+use os.kernel.scheduler.scheduler_algorithm.{
+    sched_class_rank, sched_wakeup_preemption_decision,
+    sched_replenish_rt, sched_rt_budget_available,
+    sched_replenish_deadline_slot, sched_deadline_cpu_util,
+    sched_normalize_cpu, sched_select_wake_cpu, sched_least_loaded_allowed_cpu,
+    sched_load_spread, sched_select_cpu_for_config,
+    sched_scan_migration_queue, sched_pick_migration_candidate,
+    sched_select_deadline_cpu,
+    sched_pick_rt_best, sched_pick_deadline_best, sched_pick_fair_best
+}
+
+# Exec / user-task creation free functions
+use os.kernel.scheduler.scheduler_exec.{
+    sched_new_with_topology_impl,
+    sched_create_user_task_pid_impl,
+    sched_create_bootstrap_user_task_pid_impl,
+    sched_clone_task_impl,
+    sched_exec_image_impl
+}
+
+
+# Module-level task-id counter shared across all task-creation paths.
+impl Scheduler:
+    fn rt_throttled(cpu_id: u32) -> bool:
+        val cpu = self._normalize_cpu(cpu_id)
+        self.rt_throttled_by_cpu[cpu as i64]
+
+    fn rt_budget_configured(cpu_id: u32) -> bool:
+        val cpu = self._normalize_cpu(cpu_id)
+        self.rt_runtime_ns_by_cpu[cpu as i64] > 0 and self.rt_period_ns_by_cpu[cpu as i64] > 0
+
+    fn deadline_miss_count(id: TaskId) -> u64:
+        val slot = self._find_slot(id)
+        if slot < 0:
+            return 0
+        self.deadline_miss_count_by_slot[slot]
+
+    fn trace_event_count(kind: SchedulerTraceKind) -> u64:
+        var total = 0u64
+        var i = 0
+        while i < self.trace_events.len():
+            if self.trace_events[i].kind == kind:
+                total = total + 1
+            i = i + 1
+        total
+
+    me inherit_priority(owner: TaskId, waiter: TaskId) -> bool:
+        val owner_slot = self._find_slot(owner)
+        val waiter_slot = self._find_slot(waiter)
+        if owner_slot < 0 or waiter_slot < 0:
+            return false
+        val owner_tcb = self.tasks[owner_slot]
+        val waiter_tcb = self.tasks[waiter_slot]
+        if owner_tcb == nil or waiter_tcb == nil:
+            return false
+        var owner_task = owner_tcb
+        val waiter_task = waiter_tcb
+        if self.rt_base_priority_by_slot[owner_slot] == SCHED_RT_BASE_PRIORITY_UNSET:
+            self.rt_base_priority_by_slot[owner_slot] = owner_task.schedule.priority
+        if waiter_task.schedule.priority < owner_task.schedule.priority:
+            val was_ready = match owner_task.state:
+                case TaskState.Ready: true
+                case _: false
+            if was_ready:
+                self._remove_ready(owner)
+            var config = owner_task.schedule
+            config.priority = waiter_task.schedule.priority
+            owner_task.schedule = config
+            self.tasks[owner_slot] = owner_task
+            if was_ready:
+                self._enqueue_ready(owner)
+        true
+
+    me restore_priority_after_unlock(owner: TaskId) -> bool:
+        val slot = self._find_slot(owner)
+        if slot < 0:
+            return false
+        if self.rt_base_priority_by_slot[slot] == SCHED_RT_BASE_PRIORITY_UNSET:
+            return true
+        val tcb = self.tasks[slot]
+        if tcb == nil:
+            return false
+        var task = tcb
+        val was_ready = match task.state:
+            case TaskState.Ready: true
+            case _: false
+        if was_ready:
+            self._remove_ready(owner)
+        var config = task.schedule
+        config.priority = self.rt_base_priority_by_slot[slot]
+        task.schedule = config
+        self.tasks[slot] = task
+        self.rt_base_priority_by_slot[slot] = SCHED_RT_BASE_PRIORITY_UNSET
+        if was_ready:
+            self._enqueue_ready(owner)
+        true
+
+    me pi_mutex_lock(mutex: PiMutex, task: TaskId) -> PiMutex:
+        var out = mutex
+        if out.owner == nil:
+            out.owner = Some(task)
+            return out
+        val owner = out.owner.unwrap()
+        if owner.id == task.id:
+            return out
+        out.waiters.push(task)
+        self.inherit_priority(owner, task)
+        out
+
+    me pi_mutex_unlock(mutex: PiMutex, task: TaskId) -> PiMutex:
+        var out = mutex
+        if out.owner == nil:
+            return out
+        val owner = out.owner.unwrap()
+        if owner.id != task.id:
+            return out
+        self.restore_priority_after_unlock(task)
+        if out.waiters.len() == 0:
+            out.owner = nil
+            return out
+        val next = out.waiters[0]
+        var rest: [TaskId] = []
+        var i = 1
+        while i < out.waiters.len():
+            rest.push(out.waiters[i])
+            i = i + 1
+        out.waiters = rest
+        out.owner = Some(next)
+        out
+
+    me restrict_isolation(id: TaskId, allow_network: bool, max_memory_pages: u64, max_threads: u32) -> bool:
+        val (new_tasks, ok) = sched_restrict_isolation_impl(self.tasks, id, allow_network, max_memory_pages, max_threads)
+        self.tasks = new_tasks
+        ok
+
+    me rebalance_once() -> bool:
+        var busiest = 0u32
+        var idlest = 0u32
+        var max_load = -1
+        var min_load = 2147483647
+        var cpu = 0u32
+        while (cpu as i64) < self.cpu_runqueues.len():
+            val load = self.cpu_runqueues[cpu as i64].runnable_count
+            if load > max_load:
+                max_load = load
+                busiest = cpu
+            if load < min_load:
+                min_load = load
+                idlest = cpu
+            cpu = cpu + 1u32
+        if max_load - min_load <= 1:
+            return false
+        val candidate = sched_pick_migration_candidate(self.tasks, self.cpu_runqueues, busiest, idlest)
+        if candidate == nil:
+            return false
+        val task_id = candidate.unwrap()
+        self._remove_ready(task_id)
+        val slot = self._find_slot(task_id)
+        if slot < 0:
+            return false
+        val tcb = self.tasks[slot]
+        if tcb == nil:
+            return false
+        var task = tcb
+        var config = task.schedule
+        config.home_cpu = idlest
+        task.schedule = config
+        task.assigned_cpu = idlest
+        self.tasks[slot] = task
+        self._enqueue_ready(task_id)
+        true
+
+    me clone_task(parent_id: TaskId) -> TaskId:
+        val (child_id, new_tasks, child_slot) = sched_clone_task_impl(self.tasks, parent_id)
+        self.tasks = new_tasks
+        if child_id.id != 0 and child_slot >= 0:
+            self._enqueue_ready(child_id)
+        child_id
+
+    me exec_image(task_id: TaskId, image: UserProcessImage) -> i32:
+        val was_ready = match self.get_task(task_id) != nil and self.get_task(task_id).unwrap().state:
+            case TaskState.Ready: true
+            case _: false
+        if was_ready:
+            self._remove_ready(task_id)
+        val (code, new_tasks) = sched_exec_image_impl(self.tasks, task_id, image)
+        self.tasks = new_tasks
+        if was_ready and code == 0:
+            self._enqueue_ready(task_id)
+        code
+
+    me exec_into(task_id: TaskId, argv: [Text], envp: [Text]) -> i32:
+        if argv.len() == 0:
+            return -22
+        val path = argv[0]
+        if path.len() == 0:
+            return -22
+        val bytes_result = resolve_executable_bytes(path, SCHED_EXEC_ARCH)
+        if bytes_result.is_err():
+            return -2
+        val image_result = build_user_process_image(path, bytes_result.unwrap(), SCHED_EXEC_ARCH, argv, envp)
+        if image_result.is_err():
+            return -8
+        self.exec_image(task_id, image_result.unwrap())
+
+    me wait_for_collect(parent_id: TaskId, child_id: TaskId, block_parent: bool) -> WaitCollectResult:
+        val (result, new_tasks, should_block) = sched_wait_for_collect_impl(self.tasks, parent_id, child_id, block_parent)
+        self.tasks = new_tasks
+        if should_block:
+            self.block_task(parent_id, BlockReason.Exit)
+        result
+
+    me wait_for(parent_id: TaskId, child_id: TaskId) -> i32:
+        val result = self.wait_for_collect(parent_id, child_id, true)
+        if result.error < 0:
+            return result.error
+        result.status
+
+    # -- Internal Helpers -----------------------------------------------------
+
+    me _trace(kind: SchedulerTraceKind, task: TaskId, cpu: u32, value: u64):
+        val event = SchedulerTraceEvent(
+            tick: self.tick_count, task: task,
+            cpu: self._normalize_cpu(cpu), kind: kind, value: value
+        )
+        if self.trace_events.len() < SCHED_TRACE_CAPACITY:
+            self.trace_events.push(event)
+            self.trace_count = self.trace_events.len()
+            self.trace_head = self.trace_events.len() % SCHED_TRACE_CAPACITY
+            return
+        self.trace_events[self.trace_head] = event
+        self.trace_head = (self.trace_head + 1) % SCHED_TRACE_CAPACITY
+        self.trace_count = SCHED_TRACE_CAPACITY
+
+    me _replenish_rt(cpu: u32):
+        val (new_replenish, new_throttled) = sched_replenish_rt(
+            self.rt_runtime_ns_by_cpu, self.rt_period_ns_by_cpu,
+            self.rt_consumed_ns_by_cpu, self.rt_replenish_ns_by_cpu,
+            self.rt_throttled_by_cpu, self.tick_count, cpu)
+        self.rt_replenish_ns_by_cpu = new_replenish
+        self.rt_throttled_by_cpu = new_throttled
+
+    fn _rt_budget_available(cpu: u32) -> bool:
+        sched_rt_budget_available(self.rt_runtime_ns_by_cpu, self.rt_throttled_by_cpu, cpu)
+
+    me _account_realtime_tick(task: TaskControlBlock, cpu_id: u32) -> TaskControlBlock:
+        val cpu = self._normalize_cpu(cpu_id)
+        self._replenish_rt(cpu)
+        val is_rt = (task.schedule.policy == SchedulerPolicy.RtFifo or
+            task.schedule.policy == SchedulerPolicy.RtRoundRobin or
+            task.schedule.policy == SchedulerPolicy.Internal)
+        if not is_rt:
+            return task
+        val runtime = self.rt_runtime_ns_by_cpu[cpu as i64]
+        if runtime == 0:
+            return task
+        self.rt_consumed_ns_by_cpu[cpu as i64] = self.rt_consumed_ns_by_cpu[cpu as i64] + SCHED_TICK_NS
+        if self.rt_consumed_ns_by_cpu[cpu as i64] >= runtime:
+            self.rt_throttled_by_cpu[cpu as i64] = true
+            self._trace(SchedulerTraceKind.RtThrottle, task.id, cpu, self.rt_consumed_ns_by_cpu[cpu as i64])
+        task
+
+    me _replenish_deadline_slot(slot: i32):
+        val (new_remaining, new_start, new_miss) = sched_replenish_deadline_slot(
+            self.tasks, self.deadline_remaining_ns_by_slot,
+            self.deadline_period_start_ns_by_slot, self.deadline_miss_count_by_slot,
+            self.tick_count, slot)
+        self.deadline_remaining_ns_by_slot = new_remaining
+        self.deadline_period_start_ns_by_slot = new_start
+        self.deadline_miss_count_by_slot = new_miss
+        val tcb = self.tasks[slot]
+        if tcb != nil:
+            val task = tcb
+            if self.deadline_remaining_ns_by_slot[slot] == task.schedule.runtime_ns and
+                self.deadline_period_start_ns_by_slot[slot] == self.tick_count * SCHED_TICK_NS:
+                self._trace(SchedulerTraceKind.DeadlineReplenish, task.id, task.assigned_cpu,
+                    self.deadline_remaining_ns_by_slot[slot])
+            if new_miss[slot] > self.deadline_miss_count_by_slot[slot]:
+                self._trace(SchedulerTraceKind.DeadlineMiss, task.id, task.assigned_cpu, new_miss[slot])
+
+    me _account_deadline_tick(task: TaskControlBlock, slot: i32, cpu_id: u32) -> TaskControlBlock:
+        val cpu = self._normalize_cpu(cpu_id)
+        if task.schedule.policy != SchedulerPolicy.Deadline:
+            return task
+        self._replenish_deadline_slot(slot)
+        if self.deadline_remaining_ns_by_slot[slot] == 0:
+            self.deadline_overrun_count_by_slot[slot] = self.deadline_overrun_count_by_slot[slot] + 1
+            self._trace(SchedulerTraceKind.DeadlineOverrun, task.id, cpu, self.deadline_overrun_count_by_slot[slot])
+            return task
+        if self.deadline_remaining_ns_by_slot[slot] > SCHED_TICK_NS:
+            self.deadline_remaining_ns_by_slot[slot] = self.deadline_remaining_ns_by_slot[slot] - SCHED_TICK_NS
+        else:
+            self.deadline_remaining_ns_by_slot[slot] = 0
+            self.deadline_overrun_count_by_slot[slot] = self.deadline_overrun_count_by_slot[slot] + 1
+            self._trace(SchedulerTraceKind.DeadlineOverrun, task.id, cpu, self.deadline_overrun_count_by_slot[slot])
+        task
+
+    me _enqueue_ready(id: TaskId):
+        val slot = self._find_slot(id)
+        if slot < 0:
+            return
+        val tcb = self.tasks[slot]
+        if tcb == nil:
+            return
+        val task = tcb
+        val queue_idx = _priority_to_index(task.priority)
+        self.ready_queues[queue_idx].enqueue(id)
+        val cpu = self._normalize_cpu(task.assigned_cpu)
+        self.cpu_runqueues[cpu as i64].enqueue(id, task.schedule)
+
+    me _enqueue_woken_ready(id: TaskId, waker_cpu: u32):
+        val slot = self._find_slot(id)
+        if slot < 0:
+            return
+        val tcb = self.tasks[slot]
+        if tcb == nil:
+            return
+        var task = tcb
+        val threshold = if self.topology.domains.len() == 0: 1 else: self.topology.domains[0].wake_affine_threshold
+        val selected_cpu = sched_select_wake_cpu(self.tasks, self.cpu_runqueues, task, waker_cpu, threshold)
+        var config = task.schedule
+        config.home_cpu = selected_cpu
+        task.schedule = config
+        task.assigned_cpu = selected_cpu
+        self.tasks[slot] = task
+        self._enqueue_ready(id)
+
+    me _remove_ready(id: TaskId):
+        val slot = self._find_slot(id)
+        if slot < 0:
+            return
+        val tcb = self.tasks[slot]
+        if tcb == nil:
+            return
+        val task = tcb
+        var p = 0
+        while p < PRIORITY_LEVELS:
+            self.ready_queues[p].remove(id)
+            p = p + 1
+        val cpu = self._normalize_cpu(task.assigned_cpu)
+        var rq = self.cpu_runqueues[cpu as i64]
+        rq.remove(id, task.schedule)
+        self.cpu_runqueues[cpu as i64] = rq
+
+    fn _current_cpu_hint() -> u32:
+        val slot = self._find_slot(self.current)
+        if slot < 0:
+            return 0u32
+        val tcb = self.tasks[slot]
+        if tcb == nil:
+            return 0u32
+        self._normalize_cpu(tcb.assigned_cpu)
+
+    me _maybe_rebalance_after_wake(wake_cpu: u32):
+        val cpu = self._normalize_cpu(wake_cpu)
+        if self.cpu_runqueues[cpu as i64].runnable_count == 0:
+            return
+        val threshold = if self.topology.domains.len() == 0: 2 else: self.topology.domains[0].rebalance_threshold
+        if sched_load_spread(self.cpu_runqueues) >= threshold:
+            self.rebalance_once()
+
+    me _release_task_address_space(task: TaskControlBlock):
+        sched_release_task_address_space(task)
+
+    me _wake_exit_waiters(child_id: TaskId):
+        var i = 0
+        while i < MAX_TASKS:
+            val tcb = self.tasks[i]
+            if tcb != nil:
+                val task = tcb
+                var waiting = false
+                match task.state:
+                    case TaskState.Blocked(reason):
+                        waiting = match reason:
+                            case BlockReason.Exit: true
+                            case _: false
+                    case _:
+                        waiting = false
+                if waiting:
+                    var parent_matches = false
+                    val child_slot = self._find_slot(child_id)
+                    if child_slot >= 0:
+                        val child_tcb = self.tasks[child_slot]
+                        if child_tcb != nil:
+                            val child = child_tcb
+                            if child.parent != nil:
+                                val parent = child.parent.unwrap()
+                                parent_matches = parent.id == task.id.id
+                    if parent_matches:
+                        self.unblock_task(task.id)
+            i = i + 1
+
+    me _pick_fifo_from(queue_name: text, cpu: u32) -> TaskId?:
+        var rq = self.cpu_runqueues[cpu as i64]
+        var picked: TaskId? = nil
+        if queue_name == "idle":
+            picked = rq.idle_queue.dequeue()
+        if picked != nil:
+            val task_id = picked.unwrap()
+            val slot = self._find_slot(task_id)
+            if slot >= 0:
+                val tcb = self.tasks[slot]
+                if tcb != nil:
+                    val task = tcb
+                    if rq.runnable_count > 0:
+                        rq.runnable_count = rq.runnable_count - 1
+                    if rq.weighted_load >= task.schedule.weight:
+                        rq.weighted_load = rq.weighted_load - task.schedule.weight
+                    else:
+                        rq.weighted_load = 0
+            self.cpu_runqueues[cpu as i64] = rq
+        picked
+
+    me _pick_rt_from(cpu: u32) -> TaskId?:
+        self._replenish_rt(cpu)
+        if not self._rt_budget_available(cpu):
+            self._trace(SchedulerTraceKind.RtThrottle, TaskId(id: 0), cpu, self.rt_consumed_ns_by_cpu[cpu as i64])
+            return nil
+        val (best, new_rqs) = sched_pick_rt_best(self.tasks, self.cpu_runqueues, cpu)
+        self.cpu_runqueues = new_rqs
+        best
+
+    me _pick_deadline_from(cpu: u32) -> TaskId?:
+        val (best, new_rqs) = sched_pick_deadline_best(
+            self.tasks, self.cpu_runqueues, self.deadline_remaining_ns_by_slot, cpu)
+        self.cpu_runqueues = new_rqs
+        best
+
+    me _pick_fair_from(cpu: u32, background: bool) -> TaskId?:
+        val (best, new_rqs) = sched_pick_fair_best(self.tasks, self.cpu_runqueues, cpu, background)
+        self.cpu_runqueues = new_rqs
+        best
+
+    me _pick_next_on_cpu(cpu: u32) -> TaskId?:
+        val dl = self._pick_deadline_from(cpu)
+        if dl != nil:
+            return dl
+        val rt = self._pick_rt_from(cpu)
+        if rt != nil:
+            return rt
+        val fair = self._pick_fair_from(cpu, false)
+        if fair != nil:
+            return fair
+        val bg = self._pick_fair_from(cpu, true)
+        if bg != nil:
+            return bg
+        self._pick_fifo_from("idle", cpu)

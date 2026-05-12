@@ -22,13 +22,14 @@
 # - `"identity"` and `""` — no compression; callers should detect these
 #   before invoking this dispatcher.
 
-use std.common.compress.{
+use std.common.compress.types.{
     CompressionCodec,
-    CompressionOptions,
-    CompressionError,
-    default_compression_options,
-    try_compress_bytes,
 }
+use std.common.compress.utilities.{
+    default_compression_options,
+}
+use std.common.compress.zstd.{zstd_compress_frame}
+use std.common.compress.lz4.{lz4_compress_frame}
 use std.http_server.types.{HttpResponseData}
 use std.nogc_sync_mut.http.accept_encoding.{negotiate_encoding}
 
@@ -142,9 +143,9 @@ extern fn rt_text_to_bytes(s: text) -> [u8]
 fn compress_response_body(body: [u8], encoding: text) -> Result<[u8], text>:
     match encoding:
         "zstd":
-            _compress_via_facade(body, CompressionCodec.zstd)
+            Ok(zstd_compress_frame(body, default_compression_options(CompressionCodec.zstd)))
         "lz4":
-            _compress_via_facade(body, CompressionCodec.lz4)
+            Ok(lz4_compress_frame(body, default_compression_options(CompressionCodec.lz4)))
         "gzip":
             Err("Content-Encoding 'gzip' is not yet wired into the common compress façade; pending gzip module integration")
         "deflate":
@@ -163,23 +164,3 @@ fn compress_response_body(body: [u8], encoding: text) -> Result<[u8], text>:
 # preference: stronger compression first.
 fn supported_encodings() -> [text]:
     ["zstd", "lz4"]
-
-# ----------------------------------------------------------------------------
-# Internal helpers
-# ----------------------------------------------------------------------------
-
-fn _compress_via_facade(body: [u8], codec: CompressionCodec) -> Result<[u8], text>:
-    val options = default_compression_options(codec)
-    val result = try_compress_bytes(body, options)
-    if result.is_err():
-        return Err(_format_compression_error(result.unwrap_err()))
-    Ok(result.unwrap())
-
-fn _format_compression_error(err: CompressionError) -> text:
-    match err:
-        CompressionError.InvalidHeader(msg): "compress: invalid header: " + msg
-        CompressionError.UnsupportedFeature(msg): "compress: unsupported: " + msg
-        CompressionError.TruncatedInput(msg): "compress: truncated: " + msg
-        CompressionError.ChecksumMismatch(msg): "compress: checksum: " + msg
-        CompressionError.CorruptStream(msg): "compress: corrupt stream: " + msg
-        CompressionError.SizeLimitExceeded(limit): "compress: size limit exceeded: " + limit.to_text()

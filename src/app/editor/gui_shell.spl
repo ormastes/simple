@@ -22,16 +22,18 @@ struct GuiShellState:
     extension_host: ExtensionHost
 
 fn gui_shell_new(session: EditSession) -> GuiShellState:
+    val ctrl = EditorController.new(session)
     GuiShellState(
-        ctrl: EditorController.new(session),
+        ctrl: ctrl,
         config: gui_backend_default_config(),
         platform_config: platform_default_config(EditorPlatform.Desktop),
-        extension_host: ExtensionHost.new()
+        extension_host: ctrl.extension_host
     )
 
 fn gui_shell_init(state: GuiShellState):
-    state.extension_host.activate("simple-language")
-    state.extension_host.activate("markdown-language")
+    state.ctrl.extension_host.activate_event("*")
+    state.ctrl.extension_host.activate_language("simple")
+    state.ctrl.extension_host.activate_language("markdown")
 
 fn gui_shell_run(session: EditSession):
     var state = gui_shell_new(session)
@@ -44,25 +46,54 @@ fn gui_shell_run(session: EditSession):
         gui_shell_present_frame(frame)
 
         val event = gui_shell_poll_event()
-        if event.kind != "":
-            if event.kind == "mouse-down":
-                val coords = _parse_mouse_coords(event.data)
-                drag = gui_handle_mouse_down(state, drag, coords.x, coords.y)
-            elif event.kind == "mouse-move":
-                val coords = _parse_mouse_coords(event.data)
-                drag = gui_handle_mouse_move(state, drag, coords.x, coords.y)
-            elif event.kind == "mouse-up":
-                drag = gui_handle_mouse_up(state, drag)
-            else:
-                gui_shell_handle_event(state, event.kind, event.data)
+        drag = _gui_shell_handle_polled_event(state, drag, event)
+
+fn gui_shell_run_sdl(session: EditSession):
+    var state = gui_shell_new(session)
+    gui_shell_init(state)
+    state.ctrl.file_tree_visible = true
+    var drag = _drag_state_new()
+    val window = gui_sdl_init(state.config.window_title, state.config.initial_width, state.config.initial_height)
+    if window == 0:
+        state.ctrl.status_msg = "gui init failed"
+        return
+
+    while state.ctrl.is_running():
+        val frame = gui_shell_render_frame(state)
+        gui_shell_present_frame_sdl(window, frame)
+
+        val event = gui_shell_poll_event_sdl()
+        drag = _gui_shell_handle_polled_event(state, drag, event)
+
+    gui_sdl_shutdown(window)
+
+fn _gui_shell_handle_polled_event(state: GuiShellState, drag: DragState, event: GuiEvent) -> DragState:
+    if event.kind == "":
+        return drag
+    if event.kind == "mouse-down":
+        val coords = _parse_mouse_coords(event.data)
+        return gui_handle_mouse_down(state, drag, coords.x, coords.y)
+    if event.kind == "mouse-move":
+        val coords = _parse_mouse_coords(event.data)
+        return gui_handle_mouse_move(state, drag, coords.x, coords.y)
+    if event.kind == "mouse-up":
+        return gui_handle_mouse_up(state, drag)
+    gui_shell_handle_event(state, event.kind, event.data)
+    drag
 
 fn gui_shell_handle_event(state: GuiShellState, event_kind: text, event_data: text):
     if event_kind == "key":
         _gui_handle_key(state, event_data)
+    elif event_kind == "text":
+        _gui_handle_text(state, event_data)
     elif event_kind == "resize":
         _gui_handle_resize(state, event_data)
     elif event_kind == "close":
         state.ctrl.running = false
+    elif event_kind == "focus":
+        state.ctrl.status_msg = "focused"
+    elif event_kind == "blur":
+        state.ctrl.status_msg = "unfocused"
     elif event_kind == "file-tree-select":
         _gui_handle_file_tree_select(state, event_data)
     elif event_kind == "tab-select":
@@ -97,8 +128,25 @@ fn _gui_handle_key(state: GuiShellState, key: text):
     if gui_key == "Ctrl+O":
         state.ctrl.status_msg = "open dialog"
         return
+    if gui_key == "Ctrl+C":
+        val copy_result = editor_dispatch_session(state.ctrl.session, EditCommand(name: "clipboard-copy", count: 1, payload: ""))
+        state.ctrl.status_msg = copy_result.message
+        return
+    if gui_key == "Ctrl+V":
+        val paste_result = editor_dispatch_session(state.ctrl.session, EditCommand(name: "clipboard-paste", count: 1, payload: ""))
+        state.ctrl.status_msg = paste_result.message
+        return
     val rects = editor_layout_compute_rects(state.ctrl.session.layout, state.config.initial_width, state.config.initial_height)
     state.ctrl.handle_key(gui_key, rects)
+
+fn _gui_handle_text(state: GuiShellState, text_data: text):
+    if text_data == "":
+        return
+    val rects = editor_layout_compute_rects(state.ctrl.session.layout, state.config.initial_width, state.config.initial_height)
+    var idx = 0
+    while idx < text_data.len():
+        state.ctrl.handle_key(text_data.char_at(idx), rects)
+        idx = idx + 1
 
 fn _gui_translate_key(key: text) -> text:
     if key == "Escape":
@@ -126,6 +174,7 @@ fn _gui_handle_resize(state: GuiShellState, data: text):
 
 fn _gui_handle_file_tree_select(state: GuiShellState, path: text):
     state.ctrl.session.open_file(path)
+    _gui_activate_active_language(state)
     state.ctrl.focus_panel = "editor"
 
 fn _gui_handle_tab_select(state: GuiShellState, tab_index_str: text):
@@ -144,6 +193,14 @@ fn _gui_handle_settings_change(state: GuiShellState, data: text):
     val key = data.slice(0, eq_idx)
     val value = data.slice(eq_idx + 1, data.len())
     state.ctrl.config = editor_config_set_by_key(state.ctrl.config, key, value)
+
+fn _gui_activate_active_language(state: GuiShellState):
+    val doc = state.ctrl.session.active_document()
+    if doc == nil:
+        return
+    state.ctrl.extension_host.activate_language(doc.language_id)
+    state.ctrl.extension_host.emit_event("onDidOpenTextDocument", doc.path())
+    state.ctrl.extension_host.emit_event("onLanguage:" + doc.language_id, doc.path())
 
 # --- Drag/docking for dock panels ---
 
@@ -303,11 +360,11 @@ fn gui_shell_present_frame(frame: GuiFrame):
     val html = "<html><body>" + frame.tab_bar_html + frame.file_tree_html + frame.editor_html + frame.status_html + "</body></html>"
     rt_gui_present_html(html)
 
-# SDL2-backed presentation path.
-# Delegates to gui_sdl2_present_frame from gui_sdl2_bridge.spl.
-# The caller is responsible for creating the window via gui_sdl2_init.
-fn gui_shell_present_frame_sdl2(window: i64, frame: GuiFrame):
-    gui_sdl2_present_frame(window, frame)
+# SDL-backed presentation path.
+# Delegates to gui_sdl_present_frame from gui_sdl_bridge.spl.
+# The caller is responsible for creating the window via gui_sdl_init.
+fn gui_shell_present_frame_sdl(window: i64, frame: GuiFrame):
+    gui_sdl_present_frame(window, frame)
 
 
 struct GuiEvent:
@@ -316,6 +373,9 @@ struct GuiEvent:
 
 fn gui_shell_poll_event() -> GuiEvent:
     GuiEvent(kind: "", data: "")
+
+fn gui_shell_poll_event_sdl() -> GuiEvent:
+    gui_sdl_poll()
 
 struct MouseCoords:
     x: i64

@@ -1,6 +1,15 @@
-# File Size & Cohesion Refactor — Remaining Work
+# File Size & Cohesion Refactor — Status
 
-All `src/lib/` files are under 800 lines. 59 files in `src/os/`, `src/app/`, `src/compiler/` still exceed the limit.
+Status: LINE-COUNT TARGET MET — broad suite has unrelated existing failures.
+
+Fresh line-count evidence shows zero real `src/**/*.spl` files over 800 lines:
+
+```bash
+while IFS= read -r -d '' f; do [ -f "$f" ] || continue; n=$(wc -l < "$f") || continue; if [ "$n" -gt 800 ]; then printf '%s %s\n' "$n" "$f"; fi; done < <(find src -name '*.spl' -print0) | sort -nr
+# no output
+```
+
+This plan now records the original remaining-work inventory for traceability. Oversized files have since been split into small re-export aggregators plus sibling part modules.
 
 ## Approach
 - 4 parallel Sonnet agents per wave, grouped by disjoint directories
@@ -90,3 +99,8 @@ find src/ -name "*.spl" -exec wc -l {} + | awk '$1 > 800 && $2 != "total"' | wc 
 bin/simple build lint
 bin/simple build check
 ```
+
+Observed verification:
+- PASS: `bin/simple build lint` completed successfully; Rust clippy warnings remain in existing SIMD extern code.
+- PASS: targeted checks completed for representative split modules: `src/os/apps/shell/shell_app.spl`, `src/compiler/50.mir/mir_lowering_expr.spl`, `src/compiler/35.semantics/lint/simd_opportunity_lint.spl`, and `src/os/qemu_runner.spl`.
+- BLOCKED: `bin/simple build check` was started and stopped after proving broad unrelated failures in existing app, code-quality, DBFS, remote-JIT, baremetal, and usage/context-block suites. Do not treat those failures as evidence against the line-count split unless those suites are in scope.

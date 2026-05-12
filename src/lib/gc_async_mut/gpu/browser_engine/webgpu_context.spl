@@ -1,0 +1,276 @@
+"""Browser WebGPU context.
+
+Provides the secure browser-facing WebGPU MVP boundary: adapter/device
+negotiation, canvas configuration, WGSL validation, and pipeline handles.
+"""
+
+use std.gc_async_mut.gpu.browser_engine.webgpu_types.{
+    GPUAdapterInfo, GPUDeviceLimits, GPURequestAdapterOptions,
+    GPUDeviceDescriptor, GPUCanvasConfiguration, GPUShaderModule,
+    GPUPipelineHandle,
+    GPU_FEATURE_SHADER_F16, GPU_FEATURE_TEXTURE_COMPRESSION_BC,
+    GPU_FEATURE_DEPTH_CLIP_CONTROL, GPU_TEXTURE_FORMAT_BGRA8_UNORM,
+    GPU_TEXTURE_FORMAT_RGBA8_UNORM, GPU_TEXTURE_USAGE_RENDER_ATTACHMENT
+}
+
+pub class WebGPUContext:
+    secure_context: bool
+    adapter_requested: bool
+    device_ready: bool
+    device_lost: bool
+    adapter: GPUAdapterInfo
+    limits: GPUDeviceLimits
+    supported_features: [text]
+    enabled_features: [text]
+    device_id: i32
+    canvas_configured: bool
+    canvas_config: GPUCanvasConfiguration
+    last_error: text
+    next_shader_id: i32
+    next_pipeline_id: i32
+
+    me request_adapter(options: GPURequestAdapterOptions) -> bool:
+        if not self.secure_context:
+            self.last_error = "WebGPU requires a secure context"
+            return false
+        self.adapter_requested = true
+        self.adapter = GPUAdapterInfo.software()
+        if options.force_fallback_adapter:
+            self.adapter = GPUAdapterInfo.software()
+        self.last_error = ""
+        true
+
+    me request_device(descriptor: GPUDeviceDescriptor) -> bool:
+        if not self.adapter_requested:
+            self.last_error = "requestAdapter must succeed before requestDevice"
+            return false
+        var i = 0
+        while i < descriptor.required_features.len():
+            if not self.supports_feature(descriptor.required_features[i]):
+                self.last_error = "unsupported WebGPU feature: " + descriptor.required_features[i]
+                return false
+            i = i + 1
+        self.enabled_features = descriptor.required_features
+        self.limits = descriptor.required_limits
+        self.device_id = 1
+        self.device_ready = true
+        self.device_lost = false
+        self.last_error = ""
+        true
+
+    fn supports_feature(feature: text) -> bool:
+        var i = 0
+        while i < self.supported_features.len():
+            if self.supported_features[i] == feature:
+                return true
+            i = i + 1
+        false
+
+    fn enabled_feature(feature: text) -> bool:
+        var i = 0
+        while i < self.enabled_features.len():
+            if self.enabled_features[i] == feature:
+                return true
+            i = i + 1
+        false
+
+    me configure_canvas(format: text, width: i32, height: i32) -> bool:
+        if not self.device_ready:
+            self.last_error = "requestDevice must succeed before configure"
+            return false
+        if not webgpu_is_supported_canvas_format(format):
+            self.last_error = "unsupported WebGPU canvas format: " + format
+            return false
+        if width <= 0 or height <= 0:
+            self.last_error = "canvas size must be positive"
+            return false
+        self.canvas_config = GPUCanvasConfiguration.create(self.device_id, format, GPU_TEXTURE_USAGE_RENDER_ATTACHMENT, width, height)
+        self.canvas_configured = true
+        self.last_error = ""
+        true
+
+    me create_shader_module(label: text, source: text) -> GPUShaderModule:
+        val stage = webgpu_detect_wgsl_stage(source)
+        val err = webgpu_validate_wgsl(source)
+        val valid = err == ""
+        val id = if valid: self.next_shader_id else: -1
+        if valid:
+            self.next_shader_id = self.next_shader_id + 1
+            self.last_error = ""
+        else:
+            self.last_error = err
+        GPUShaderModule(id: id, label: label, source: source, valid: valid, stage: stage, error: err)
+
+    me create_render_pipeline(vertex: GPUShaderModule, fragment: GPUShaderModule) -> GPUPipelineHandle:
+        if not self.device_ready:
+            return GPUPipelineHandle(id: -1, kind: "render", valid: false, error: "device is not ready")
+        if not vertex.valid or vertex.stage != "vertex":
+            return GPUPipelineHandle(id: -1, kind: "render", valid: false, error: "valid vertex shader required")
+        if not fragment.valid or fragment.stage != "fragment":
+            return GPUPipelineHandle(id: -1, kind: "render", valid: false, error: "valid fragment shader required")
+        val id = self.next_pipeline_id
+        self.next_pipeline_id = self.next_pipeline_id + 1
+        GPUPipelineHandle(id: id, kind: "render", valid: true, error: "")
+
+    me create_compute_pipeline(compute: GPUShaderModule) -> GPUPipelineHandle:
+        if not self.device_ready:
+            return GPUPipelineHandle(id: -1, kind: "compute", valid: false, error: "device is not ready")
+        if not compute.valid or compute.stage != "compute":
+            return GPUPipelineHandle(id: -1, kind: "compute", valid: false, error: "valid compute shader required")
+        val id = self.next_pipeline_id
+        self.next_pipeline_id = self.next_pipeline_id + 1
+        GPUPipelineHandle(id: id, kind: "compute", valid: true, error: "")
+
+pub fn webgpu_create_context(secure_context: bool) -> WebGPUContext:
+    WebGPUContext(
+        secure_context: secure_context,
+        adapter_requested: false,
+        device_ready: false,
+        device_lost: false,
+        adapter: GPUAdapterInfo.software(),
+        limits: GPUDeviceLimits.defaults(),
+        supported_features: [GPU_FEATURE_SHADER_F16, GPU_FEATURE_TEXTURE_COMPRESSION_BC, GPU_FEATURE_DEPTH_CLIP_CONTROL],
+        enabled_features: [],
+        device_id: -1,
+        canvas_configured: false,
+        canvas_config: GPUCanvasConfiguration.create(-1, GPU_TEXTURE_FORMAT_BGRA8_UNORM, GPU_TEXTURE_USAGE_RENDER_ATTACHMENT, 0, 0),
+        last_error: "",
+        next_shader_id: 1,
+        next_pipeline_id: 1
+    )
+
+pub fn webgpu_is_available(ctx: WebGPUContext) -> bool:
+    ctx.secure_context and not ctx.device_lost
+
+pub fn webgpu_request_adapter(ctx: WebGPUContext, options: GPURequestAdapterOptions) -> bool:
+    if not ctx.secure_context:
+        ctx.last_error = "WebGPU requires a secure context"
+        return false
+    ctx.adapter_requested = true
+    ctx.adapter = GPUAdapterInfo.software()
+    if options.force_fallback_adapter:
+        ctx.adapter = GPUAdapterInfo.software()
+    ctx.last_error = ""
+    true
+
+pub fn webgpu_request_device(ctx: WebGPUContext, descriptor: GPUDeviceDescriptor) -> bool:
+    if not ctx.adapter_requested:
+        ctx.last_error = "requestAdapter must succeed before requestDevice"
+        return false
+    var i = 0
+    while i < descriptor.required_features.len():
+        if not webgpu_supports_feature(ctx, descriptor.required_features[i]):
+            ctx.last_error = "unsupported WebGPU feature: " + descriptor.required_features[i]
+            return false
+        i = i + 1
+    ctx.enabled_features = descriptor.required_features
+    ctx.limits = descriptor.required_limits
+    ctx.device_id = 1
+    ctx.device_ready = true
+    ctx.device_lost = false
+    ctx.last_error = ""
+    true
+
+pub fn webgpu_supports_feature(ctx: WebGPUContext, feature: text) -> bool:
+    var i = 0
+    while i < ctx.supported_features.len():
+        if ctx.supported_features[i] == feature:
+            return true
+        i = i + 1
+    false
+
+pub fn webgpu_enabled_feature(ctx: WebGPUContext, feature: text) -> bool:
+    var i = 0
+    while i < ctx.enabled_features.len():
+        if ctx.enabled_features[i] == feature:
+            return true
+        i = i + 1
+    false
+
+pub fn webgpu_configure_canvas(ctx: WebGPUContext, format: text, width: i32, height: i32) -> bool:
+    if not ctx.device_ready:
+        ctx.last_error = "requestDevice must succeed before configure"
+        return false
+    if not webgpu_is_supported_canvas_format(format):
+        ctx.last_error = "unsupported WebGPU canvas format: " + format
+        return false
+    if width <= 0 or height <= 0:
+        ctx.last_error = "canvas size must be positive"
+        return false
+    ctx.canvas_config = GPUCanvasConfiguration.create(ctx.device_id, format, GPU_TEXTURE_USAGE_RENDER_ATTACHMENT, width, height)
+    ctx.canvas_configured = true
+    ctx.last_error = ""
+    true
+
+pub fn webgpu_is_supported_canvas_format(format: text) -> bool:
+    format == GPU_TEXTURE_FORMAT_BGRA8_UNORM or format == GPU_TEXTURE_FORMAT_RGBA8_UNORM
+
+pub fn webgpu_preferred_canvas_format() -> text:
+    GPU_TEXTURE_FORMAT_BGRA8_UNORM
+
+pub fn webgpu_create_shader_module(ctx: WebGPUContext, label: text, source: text) -> GPUShaderModule:
+    val stage = webgpu_detect_wgsl_stage(source)
+    val err = webgpu_validate_wgsl(source)
+    val valid = err == ""
+    val id = if valid: ctx.next_shader_id else: -1
+    if valid:
+        ctx.next_shader_id = ctx.next_shader_id + 1
+        ctx.last_error = ""
+    else:
+        ctx.last_error = err
+    GPUShaderModule(id: id, label: label, source: source, valid: valid, stage: stage, error: err)
+
+pub fn webgpu_create_render_pipeline(ctx: WebGPUContext, vertex: GPUShaderModule, fragment: GPUShaderModule) -> GPUPipelineHandle:
+    if not ctx.device_ready:
+        return GPUPipelineHandle(id: -1, kind: "render", valid: false, error: "device is not ready")
+    if not vertex.valid or vertex.stage != "vertex":
+        return GPUPipelineHandle(id: -1, kind: "render", valid: false, error: "valid vertex shader required")
+    if not fragment.valid or fragment.stage != "fragment":
+        return GPUPipelineHandle(id: -1, kind: "render", valid: false, error: "valid fragment shader required")
+    val id = ctx.next_pipeline_id
+    ctx.next_pipeline_id = ctx.next_pipeline_id + 1
+    GPUPipelineHandle(id: id, kind: "render", valid: true, error: "")
+
+pub fn webgpu_create_compute_pipeline(ctx: WebGPUContext, compute: GPUShaderModule) -> GPUPipelineHandle:
+    if not ctx.device_ready:
+        return GPUPipelineHandle(id: -1, kind: "compute", valid: false, error: "device is not ready")
+    if not compute.valid or compute.stage != "compute":
+        return GPUPipelineHandle(id: -1, kind: "compute", valid: false, error: "valid compute shader required")
+    val id = ctx.next_pipeline_id
+    ctx.next_pipeline_id = ctx.next_pipeline_id + 1
+    GPUPipelineHandle(id: id, kind: "compute", valid: true, error: "")
+
+pub fn webgpu_validate_wgsl(source: text) -> text:
+    val trimmed = source.trim()
+    if trimmed.len() == 0:
+        return "WGSL source is empty"
+    if trimmed.contains("void main") or trimmed.contains("#version"):
+        return "WGSL source must not use GLSL syntax"
+    if not trimmed.contains("fn "):
+        return "WGSL source must contain a function"
+    if webgpu_brace_balance(trimmed) != 0:
+        return "WGSL braces are unbalanced"
+    if webgpu_detect_wgsl_stage(trimmed) == "":
+        return "WGSL source must declare @vertex, @fragment, or @compute"
+    ""
+
+pub fn webgpu_detect_wgsl_stage(source: text) -> text:
+    if source.contains("@vertex"):
+        return "vertex"
+    if source.contains("@fragment"):
+        return "fragment"
+    if source.contains("@compute"):
+        return "compute"
+    ""
+
+pub fn webgpu_brace_balance(source: text) -> i32:
+    var depth = 0
+    var i = 0
+    while i < source.len():
+        val ch = source.slice(i, i + 1)
+        if ch == "{":
+            depth = depth + 1
+        if ch == "}":
+            depth = depth - 1
+        i = i + 1
+    depth

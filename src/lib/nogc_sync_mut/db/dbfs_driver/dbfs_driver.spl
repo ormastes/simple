@@ -17,6 +17,10 @@ use std.db.dbfs_engine.txn.{DbfsTxn, TxnId}
 use std.db.dbfs_engine.raw_nvme_arena.{RawNvmeArena}
 use std.fs_driver.block_device.{BlockDevice}
 use std.storage.durability.{DurabilityClass}
+use std.storage.storage_class.{StorageClass}
+use std.storage.nvme_feature_policy.{samsung_mzql2960hcjr_sysfs_facts, nvme_policy_for_class}
+
+extern fn rt_text_to_bytes(s: text) -> [u8]
 
 # --- Internal inode kinds ---
 
@@ -32,6 +36,7 @@ struct DbFsInode:
     kind:     DbFsKind
     name:     text
     content:  text
+    content_bytes: [u8]
     parent:   u64
     size:     i64
     unlinked: bool
@@ -52,6 +57,25 @@ var _dbfs_inodes: [DbFsInode] = []
 var _dbfs_fds:    [DbFsFd] = []
 var _dbfs_next_inst: i64 = 1
 
+fn _dbfs_text_to_bytes(value: text) -> [u8]:
+    rt_text_to_bytes(value)
+
+fn _dbfs_bytes_to_text(buf: [u8], count: i64) -> text:
+    var result: text = ""
+    var i: i64 = 0
+    while i < count and i < buf.len():
+        result = result + buf[i as i32].chr()
+        i = i + 1
+    result
+
+fn _dbfs_slice_bytes(buf: [u8], count: i64) -> [u8]:
+    var out: [u8] = []
+    var i: i64 = 0
+    while i < count and i < buf.len():
+        out.push(buf[i as i32])
+        i = i + 1
+    out
+
 # --- DbFsDriver struct ---
 
 struct DbFsDriver:
@@ -65,6 +89,10 @@ struct DbFsDriver:
     flush_count      — number of group_commit() / WAL flush calls.
     arena_base       — base_block of the backing RawNvmeArena, or -1 for in-memory.
     arena_block_count — block_count of the backing RawNvmeArena (0 if not device-backed).
+    io_unit_bytes    — preferred physical write unit.
+    batch_bytes      — preferred batch size for WAL/data writes.
+    trim_supported   — backing namespace supports discard/deallocate.
+    write_zeroes_supported — backing namespace supports write-zeroes.
     """
     name:             text
     inst_id:          i64
@@ -74,6 +102,10 @@ struct DbFsDriver:
     flush_count:      i64
     arena_base:       i64
     arena_block_count: i64
+    io_unit_bytes:    i64
+    batch_bytes:      i64
+    trim_supported:   bool
+    write_zeroes_supported: bool
 
 # --- Module-level store helpers ---
 
@@ -145,6 +177,7 @@ impl DbFsDriver:
             kind:     DbFsKind.Dir,
             name:     "/",
             content:  "",
+            content_bytes: [],
             parent:   0,
             size:     0,
             unlinked: false,
@@ -158,6 +191,10 @@ impl DbFsDriver:
             flush_count:       0,
             arena_base:        -1,
             arena_block_count: 0,
+            io_unit_bytes:     512,
+            batch_bytes:       4096,
+            trim_supported:    false,
+            write_zeroes_supported: false,
         )
 
     static fn open_on_device(dev: BlockDevice, base_block: i64, block_count: i64) -> Result<DbFsDriver, FsError>:
@@ -177,6 +214,7 @@ impl DbFsDriver:
             kind:     DbFsKind.Dir,
             name:     "/",
             content:  "",
+            content_bytes: [],
             parent:   0,
             size:     0,
             unlinked: false,
@@ -190,7 +228,43 @@ impl DbFsDriver:
             flush_count:       0,
             arena_base:        base_block,
             arena_block_count: block_count,
+            io_unit_bytes:     dev.sector_size() as i64,
+            batch_bytes:       dev.sector_size() as i64,
+            trim_supported:    false,
+            write_zeroes_supported: false,
         ))
+
+    static fn open_on_samsung_business_nvme(dev: BlockDevice, base_block: i64, block_count: i64) -> Result<DbFsDriver, FsError>:
+        """Open DBFS on the attached Samsung business NVMe policy.
+
+        The current observed MZQL2960HCJR namespace is conventional NVMe
+        (not ZNS/FDP) with 4 KiB physical blocks, 128 KiB optimal I/O, discard,
+        and write-zeroes. This constructor carries those policy facts into the
+        DBFS driver without issuing raw admin/vendor commands.
+        """
+        val opened = DbFsDriver.open_on_device(dev, base_block, block_count)
+        if opened.is_err():
+            return opened
+        var driver = opened.unwrap()
+        val facts = samsung_mzql2960hcjr_sysfs_facts()
+        val policy = nvme_policy_for_class(facts, StorageClass.DB_WAL)
+        driver.io_unit_bytes = policy.io_unit_bytes
+        driver.batch_bytes = policy.batch_bytes
+        driver.trim_supported = policy.uses_discard
+        driver.write_zeroes_supported = policy.uses_write_zeroes
+        Ok(driver)
+
+    fn preferred_io_unit_bytes() -> i64:
+        self.io_unit_bytes
+
+    fn preferred_batch_bytes() -> i64:
+        self.batch_bytes
+
+    fn has_trim_support() -> bool:
+        self.trim_supported
+
+    fn has_write_zeroes_support() -> bool:
+        self.write_zeroes_supported
 
     fn write_passthrough(data: [u8]) -> Result<i64, FsError>:
         """Write raw bytes directly to the backing BlockDevice via RawNvmeArena.
@@ -245,6 +319,7 @@ impl DbFsDriver:
                 kind:     DbFsKind.File,
                 name:     raw,
                 content:  "",
+                content_bytes: [],
                 parent:   1,
                 size:     0,
                 unlinked: false,
@@ -307,6 +382,20 @@ impl DbFsDriver:
             i = i + 1
         Ok(result)
 
+    fn read_bytes_handle(handle: FileHandle, length: i64) -> Result<[u8], FsError>:
+        """Read bytes from open handle without routing binary data through text."""
+        val fd_idx = _find_fd_idx(self.inst_id, handle.id as u64)
+        if fd_idx < 0:
+            return Err(FsError.NotFound)
+        if _dbfs_fds[fd_idx].closed:
+            return Err(FsError.InvalidArg)
+        val inode_idx = _fd_inode_idx(self.inst_id, handle.id as u64)
+        if inode_idx < 0:
+            return Ok([])
+        val content = _dbfs_inodes[inode_idx].content_bytes
+        val cap: i64 = if length < content.len(): length else: content.len()
+        Ok(_dbfs_slice_bytes(content, cap))
+
     # --- pread ---
 
     fn pread_handle(handle: FileHandle, offset: i64, length: i64) -> Result<text, FsError>:
@@ -348,8 +437,35 @@ impl DbFsDriver:
             kind:     old.kind,
             name:     old.name,
             content:  content,
+            content_bytes: _dbfs_text_to_bytes(content),
             parent:   old.parent,
             size:     content.len(),
+            unlinked: old.unlinked,
+        )
+        _dbfs_inodes.remove(inode_idx)
+        _dbfs_inodes.push(new_inode)
+        Ok(())
+
+    fn write_bytes_handle(handle: FileHandle, content: [u8]) -> Result<(), FsError>:
+        """Write bytes to open handle without lossy text conversion on readback."""
+        val fd_idx = _find_fd_idx(self.inst_id, handle.id as u64)
+        if fd_idx < 0:
+            return Err(FsError.NotFound)
+        if _dbfs_fds[fd_idx].closed:
+            return Err(FsError.InvalidArg)
+        val inode_idx = _fd_inode_idx(self.inst_id, handle.id as u64)
+        if inode_idx < 0:
+            return Err(FsError.NotFound)
+        val old = _dbfs_inodes[inode_idx]
+        val new_inode = DbFsInode(
+            inst_id:  old.inst_id,
+            id:       old.id,
+            kind:     old.kind,
+            name:     old.name,
+            content:  _dbfs_bytes_to_text(content, content.len() as i64),
+            content_bytes: _dbfs_slice_bytes(content, content.len() as i64),
+            parent:   old.parent,
+            size:     content.len() as i64,
             unlinked: old.unlinked,
         )
         _dbfs_inodes.remove(inode_idx)
@@ -388,6 +504,7 @@ impl DbFsDriver:
             kind:     old.kind,
             name:     old.name,
             content:  new_content,
+            content_bytes: _dbfs_text_to_bytes(new_content),
             parent:   old.parent,
             size:     new_size,
             unlinked: old.unlinked,
@@ -429,6 +546,7 @@ impl DbFsDriver:
             kind:     old.kind,
             name:     old.name,
             content:  old.content,
+            content_bytes: old.content_bytes,
             parent:   old.parent,
             size:     old.size,
             unlinked: true,
@@ -455,6 +573,7 @@ impl DbFsDriver:
             kind:     old.kind,
             name:     new_path,
             content:  old.content,
+            content_bytes: old.content_bytes,
             parent:   old.parent,
             size:     old.size,
             unlinked: false,
@@ -486,6 +605,7 @@ impl DbFsDriver:
             kind:     old.kind,
             name:     old.name,
             content:  new_content,
+            content_bytes: _dbfs_text_to_bytes(new_content),
             parent:   old.parent,
             size:     new_size,
             unlinked: old.unlinked,
@@ -505,6 +625,7 @@ impl DbFsDriver:
             kind:     DbFsKind.Dir,
             name:     path,
             content:  "",
+            content_bytes: [],
             parent:   1,
             size:     0,
             unlinked: false,

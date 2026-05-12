@@ -44,10 +44,12 @@ int64_t rt_sdl2_init(void) {
     g_perf_freq = SDL_GetPerformanceFrequency();
     g_quit_requested = 0;
     g_last_event_valid = 0;
+    SDL_StartTextInput();
     return 1;
 }
 
 void rt_sdl2_quit(void) {
+    SDL_StopTextInput();
     SDL_Quit();
     g_quit_requested = 0;
     g_last_event_valid = 0;
@@ -245,6 +247,14 @@ int64_t rt_sdl2_event_key_mod(void) {
         return (int64_t)g_last_event.key.keysym.mod;
     }
     return 0;
+}
+
+const char* rt_sdl2_event_text(void) {
+    if (!g_last_event_valid) return "";
+    if (g_last_event.type == SDL_TEXTINPUT) {
+        return g_last_event.text.text;
+    }
+    return "";
 }
 
 int64_t rt_sdl2_event_mouse_x(void) {
@@ -557,4 +567,86 @@ int64_t rt_sdl2_get_display_usable_h(int64_t index) {
     SDL_Rect r;
     if (SDL_GetDisplayUsableBounds((int)index, &r) != 0) return 0;
     return (int64_t)r.h;
+}
+
+/* ===== SDL editor-facing aliases ===== */
+
+int64_t rt_sdl_init(void) {
+    return rt_sdl2_init();
+}
+
+void rt_sdl_quit(void) {
+    rt_sdl2_quit();
+}
+
+int64_t rt_sdl_create_window(const char* title, int64_t width, int64_t height) {
+    return rt_sdl2_create_window(title, width, height);
+}
+
+void rt_sdl_destroy_window(int64_t handle) {
+    rt_sdl2_destroy_window(handle);
+}
+
+int64_t rt_sdl_get_window_width(int64_t handle) {
+    return rt_sdl2_get_window_width(handle);
+}
+
+int64_t rt_sdl_get_window_height(int64_t handle) {
+    return rt_sdl2_get_window_height(handle);
+}
+
+void rt_sdl_set_window_title(int64_t handle, const char* title) {
+    rt_sdl2_set_window_title(handle, title);
+}
+
+void rt_sdl_present_rgba(int64_t window_handle, SplArray* pixels, int64_t width, int64_t height) {
+    rt_sdl2_present_rgba(window_handle, pixels, width, height);
+}
+
+int64_t rt_sdl_poll_event(void) {
+    return rt_sdl2_poll_event();
+}
+
+int64_t rt_sdl_event_key_sym(void) {
+    return rt_sdl2_event_key_sym();
+}
+
+int64_t rt_sdl_event_key_mod(void) {
+    return rt_sdl2_event_key_mod();
+}
+
+const char* rt_sdl_event_text(void) {
+    return rt_sdl2_event_text();
+}
+
+int64_t rt_sdl_event_mouse_x(void) {
+    return rt_sdl2_event_mouse_x();
+}
+
+int64_t rt_sdl_event_mouse_y(void) {
+    return rt_sdl2_event_mouse_y();
+}
+
+int64_t rt_sdl_event_mouse_button(void) {
+    return rt_sdl2_event_mouse_button();
+}
+
+int64_t rt_sdl_window_should_close(void) {
+    return rt_sdl2_window_should_close();
+}
+
+void rt_sdl_clear_quit(void) {
+    rt_sdl2_clear_quit();
+}
+
+int64_t rt_sdl_event_window_event_id(void) {
+    return rt_sdl2_event_window_event_id();
+}
+
+int64_t rt_sdl_event_window_data1(void) {
+    return rt_sdl2_event_window_data1();
+}
+
+int64_t rt_sdl_event_window_data2(void) {
+    return rt_sdl2_event_window_data2();
 }

@@ -1,0 +1,127 @@
+# Part 4 of src/os/tls13/tls13.spl
+use os.tls13.tls13.*
+# TLS 1.3 Client State Machine — RFC 8446
+#
+# Orchestrates the full TLS 1.3 client handshake:
+#   ClientHello → ServerHello → EncryptedExtensions → Certificate →
+#   CertificateVerify → server Finished → client Finished → App data
+#
+# Uses AES-128-GCM cipher suite (TLS_AES_128_GCM_SHA256, 0x1301).
+# Ed25519-only certificates (Phase 1).
+
+use os.tls13.transcript.*
+use os.tls13.key_schedule.*
+use os.tls13.hkdf.*
+use os.tls13.record13.*
+use os.tls13.handshake13.*
+use os.tls13.psk.*
+use os.tls13.cert_verify.*
+use os.crypto.curve25519.*
+use os.crypto.ecdh_p256.*
+use os.crypto.random.*
+use std.nogc_sync_mut.io.signature_ffi.*
+use std.nogc_sync_mut.io.tcp.*
+
+# ============================================================================
+# TCP I/O externs
+# ============================================================================
+
+fn tls13_send(ctx: Tls13Context, data: [u8]) -> Tls13SendResult:
+    """Encrypt application data and report whether the transport write succeeded."""
+    val record = record13_encrypt(ctx.client_key, ctx.client_seq, 0x17, data)
+    if not _io_send(ctx.io, record):
+        return Tls13SendResult(
+            ctx: ctx,
+            ok: false,
+            reason: "application data send failed",
+        )
+    val new_ctx = Tls13Context(
+        io: ctx.io,
+        server_key: ctx.server_key,
+        client_key: ctx.client_key,
+        server_seq: ctx.server_seq,
+        client_seq: ctx.client_seq + 1,
+    )
+    Tls13SendResult(
+        ctx: new_ctx,
+        ok: true,
+        reason: "",
+    )
+
+# ============================================================================
+# tls13_recv — decrypt one application data record
+# ============================================================================
+
+fn tls13_recv(ctx: Tls13Context) -> Tls13RecvData:
+    """Read and decrypt one TLS record. Returns updated context and plaintext."""
+    val raw = _io_recv_record(ctx.io)
+    if raw.len() < 5:
+        return Tls13RecvData(
+            ctx: ctx,
+            data: [],
+            ok: false,
+            reason: "application data read failed",
+        )
+    val dec = if ctx.io.kind == "fd":
+        record13_decrypt_fd(ctx.server_key, ctx.server_seq, raw)
+    else:
+        record13_decrypt(ctx.server_key, ctx.server_seq, raw)
+
+    if val RecordResult.Err(err_msg) = dec:
+        return Tls13RecvData(
+            ctx: ctx,
+            data: [],
+            ok: false,
+            reason: err_msg,
+        )
+
+    if val RecordResult.Ok(_ct, dec_data) = dec:
+        val new_ctx = Tls13Context(
+            io: ctx.io,
+            server_key: ctx.server_key,
+            client_key: ctx.client_key,
+            server_seq: ctx.server_seq + 1,
+            client_seq: ctx.client_seq,
+        )
+        return Tls13RecvData(
+            ctx: new_ctx,
+            data: dec_data,
+            ok: true,
+            reason: "",
+        )
+
+    Tls13RecvData(
+        ctx: ctx,
+        data: [],
+        ok: false,
+        reason: "application data decrypt failed",
+    )
+
+# ============================================================================
+# tls13_close — send close_notify alert and close TCP
+# ============================================================================
+
+fn tls13_close(ctx: Tls13Context) -> Tls13CloseResult:
+    """Send close_notify alert (encrypted), then close the TCP connection."""
+    # Alert: level=1 (warning), description=0 (close_notify)
+    var alert: [u8] = []
+    alert = _push_byte(alert, 0x01)  # warning
+    alert = _push_byte(alert, 0x00)  # close_notify
+    # content_type 0x15 = alert
+    val alert_record = record13_encrypt(ctx.client_key, ctx.client_seq, 0x15, alert)
+    if not _io_send(ctx.io, alert_record):
+        return Tls13CloseResult(
+            ok: false,
+            reason: "close_notify send failed",
+        )
+    if ctx.io.kind == "host_stream":
+        match ctx.io.host_stream.close():
+            Ok(()):
+                Tls13CloseResult(ok: true, reason: "")
+            Err(_):
+                Tls13CloseResult(ok: false, reason: "transport close failed")
+    else:
+        if rt_net_close(ctx.io.tcp_fd) < 0:
+            Tls13CloseResult(ok: false, reason: "transport close failed")
+        else:
+            Tls13CloseResult(ok: true, reason: "")

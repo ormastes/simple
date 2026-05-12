@@ -14,6 +14,8 @@
 use os.drivers.virtio.virtio_net.{VirtioNetDriver}
 use os.services.netstack.netstack_service.{NetstackService}
 use os.services.netstack.ipv4.{Ipv4Address}
+use os.services.netstack.socket.{SockAddr, SocketProtocol}
+use os.services.netstack.tcp_connection.{TcpConnection}
 use os.services.pcimgr.pcimgr.{pcimgr_init, pcimgr_find_by_class, pcimgr_find_by_vendor, pcimgr_grant_device, pcimgr_get_device_vendor, pcimgr_get_device_class, pcimgr_get_device_subclass, pcimgr_device_count}
 use os.services.pcimgr.driver_match.{PCI_CLASS_NETWORK, PCI_SUBCLASS_ETHERNET, VIRTIO_VENDOR, VIRTIO_DEV_NET}
 use os.kernel.types.device_mem_types.{DeviceGrant}
@@ -129,6 +131,7 @@ fn net_boot_init() -> bool:
         return false
     log_raw_println("[net-init] C network driver active")
 
+    g_netstack = Some(NetstackService.new(g_net_driver))
     g_net_initialized = true
     log_raw_println("[net-init] Network stack ready (C-backed)")
     true
@@ -186,3 +189,147 @@ fn net_get_service() -> NetstackService?:
 fn net_get_driver() -> VirtioNetDriver:
     """Return the global VirtIO-net driver instance."""
     g_net_driver
+
+fn net_tcp_available() -> bool:
+    """Return true when the cooperative netstack singleton is available."""
+    g_net_initialized and g_netstack != nil
+
+fn net_tcp_bind(ip_value: u32, port: u16, backlog: u32) -> i64:
+    """Create, bind, and listen on a TCP socket in the netstack singleton."""
+    if g_netstack == nil:
+        return -1
+
+    var svc = g_netstack.unwrap()
+    val fd = svc.sockets.create(SocketProtocol.Tcp)
+    val addr = SockAddr(ip: Ipv4Address.from_u32(ip_value), port: port)
+    match svc.sockets.bind(fd, addr):
+        Err(_): 
+            g_netstack = Some(svc)
+            return -1
+        Ok(_): pass
+
+    match svc.sockets.listen(fd, backlog):
+        Err(_):
+            svc.sockets.close(fd)
+            g_netstack = Some(svc)
+            return -1
+        Ok(_): pass
+
+    g_netstack = Some(svc)
+    fd.to_i64()
+
+fn net_tcp_accept(fd: i64) -> i64:
+    """Poll once and accept a queued TCP connection from the singleton."""
+    if g_netstack == nil:
+        return -1
+
+    var svc = g_netstack.unwrap()
+    svc.poll_once()
+    match svc.sockets.accept(fd.to_i32()):
+        Ok(client_fd):
+            g_netstack = Some(svc)
+            client_fd.to_i64()
+        Err(_):
+            g_netstack = Some(svc)
+            -1
+
+fn net_tcp_connect(ip_value: u32, port: u16, wait_ticks: u64) -> i64:
+    """Create a TCP socket and drive a bounded blocking connect handshake."""
+    if g_netstack == nil:
+        return -1
+
+    var svc = g_netstack.unwrap()
+    val fd = svc.sockets.create(SocketProtocol.Tcp)
+    val remote = SockAddr(ip: Ipv4Address.from_u32(ip_value), port: port)
+    match svc.sockets.connect(fd, remote):
+        Err(_):
+            g_netstack = Some(svc)
+            return -1
+        Ok(_): pass
+
+    val local_port = svc._alloc_ephemeral_port()
+    var conn = TcpConnection.new_client(svc.local_ip, local_port, remote.ip, port)
+    conn.conn_id = svc.next_conn_id
+    svc.next_conn_id = svc.next_conn_id + 1
+    val conn_id = conn.conn_id
+    val syn_segments = conn.connect()
+    svc.tcp_connections.push(conn)
+    val conn_idx = svc.tcp_connections.len() - 1
+    svc.sockets.attach_connecting(fd, SockAddr(ip: svc.local_ip, port: local_port), conn_id)
+    svc._send_tcp_segments(conn_idx, syn_segments)
+
+    var waited: u64 = 0
+    while waited < wait_ticks:
+        svc.poll_once()
+        val status = svc.sockets.connect_status_by_conn(conn_id)
+        if status == "established":
+            g_netstack = Some(svc)
+            return fd.to_i64()
+        if status == "refused" or status == "unreachable":
+            g_netstack = Some(svc)
+            return -1
+        waited = waited + 1
+
+    svc.sockets.mark_connect_failed_by_conn(conn_id, "timeout")
+    g_netstack = Some(svc)
+    -1
+
+fn net_tcp_read(fd: i64, max: u64) -> [u8]:
+    """Poll once and read TCP receive data for a connected socket."""
+    if g_netstack == nil:
+        return []
+
+    var svc = g_netstack.unwrap()
+    svc.poll_once()
+    val conn_id = svc.sockets.get_conn_id(fd.to_i32())
+    var i: u64 = 0
+    while i < svc.tcp_connections.len():
+        if svc.tcp_connections[i].conn_id == conn_id:
+            val data = svc.tcp_connections[i].recv_data(max)
+            g_netstack = Some(svc)
+            return data
+        i = i + 1
+
+    g_netstack = Some(svc)
+    []
+
+fn net_tcp_write(fd: i64, data: [u8]) -> i64:
+    """Queue TCP send data and poll once to flush it."""
+    if g_netstack == nil:
+        return -1
+
+    var svc = g_netstack.unwrap()
+    val conn_id = svc.sockets.get_conn_id(fd.to_i32())
+    var i: u64 = 0
+    while i < svc.tcp_connections.len():
+        if svc.tcp_connections[i].conn_id == conn_id:
+            match svc.tcp_connections[i].send_data(data):
+                Ok(n):
+                    svc.flush_tcp_connections()
+                    g_netstack = Some(svc)
+                    return n.to_i64()
+                Err(_):
+                    g_netstack = Some(svc)
+                    return -1
+        i = i + 1
+
+    g_netstack = Some(svc)
+    -1
+
+fn net_tcp_close(fd: i64) -> bool:
+    """Close a TCP socket and send FIN when a live connection exists."""
+    if g_netstack == nil:
+        return false
+
+    var svc = g_netstack.unwrap()
+    val conn_id = svc.sockets.get_conn_id(fd.to_i32())
+    var i: u64 = 0
+    while i < svc.tcp_connections.len():
+        if svc.tcp_connections[i].conn_id == conn_id:
+            val segments = svc.tcp_connections[i].close()
+            svc._send_tcp_segments(i, segments)
+            break
+        i = i + 1
+    val closed = svc.sockets.close(fd.to_i32()).is_ok()
+    g_netstack = Some(svc)
+    closed

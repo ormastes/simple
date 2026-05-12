@@ -1,0 +1,216 @@
+"""Browser WebGPU command encoder and queue handles.
+
+This is the browser-facing command recording surface. It keeps commands as flat
+records so tests can validate WebGPU sequencing before native submission exists.
+"""
+
+pub val WEBGPU_COMMAND_BEGIN_RENDER_PASS: text = "begin-render-pass"
+pub val WEBGPU_COMMAND_END_RENDER_PASS: text = "end-render-pass"
+pub val WEBGPU_COMMAND_BEGIN_COMPUTE_PASS: text = "begin-compute-pass"
+pub val WEBGPU_COMMAND_END_COMPUTE_PASS: text = "end-compute-pass"
+pub val WEBGPU_COMMAND_SET_PIPELINE: text = "set-pipeline"
+pub val WEBGPU_COMMAND_SET_BIND_GROUP: text = "set-bind-group"
+pub val WEBGPU_COMMAND_DRAW: text = "draw"
+pub val WEBGPU_COMMAND_DISPATCH_WORKGROUPS: text = "dispatch-workgroups"
+
+pub class WebGPURecordedCommand:
+    kind: text
+    pipeline_id: i32
+    bind_group_id: i32
+    slot: i32
+    vertex_count: i32
+    instance_count: i32
+    workgroups_x: i32
+    workgroups_y: i32
+    workgroups_z: i32
+
+pub class GPUCommandBufferHandle:
+    id: i32
+    label: text
+    commands: [WebGPURecordedCommand]
+    valid: bool
+    error: text
+
+    fn command_count() -> i32:
+        self.commands.len()
+
+pub class WebGPUCommandEncoder:
+    label: text
+    next_command_buffer_id: i32
+    commands: [WebGPURecordedCommand]
+    active_pass: text
+    finished: bool
+    last_error: text
+
+    static fn create(label: text) -> WebGPUCommandEncoder:
+        WebGPUCommandEncoder(
+            label: label,
+            next_command_buffer_id: 1,
+            commands: [],
+            active_pass: "",
+            finished: false,
+            last_error: ""
+        )
+
+    me begin_render_pass() -> bool:
+        if not self.ensure_can_record():
+            return false
+        if self.active_pass != "":
+            self.last_error = "GPUCommandEncoder already has an active pass"
+            return false
+        self.commands.push(webgpu_command_empty(WEBGPU_COMMAND_BEGIN_RENDER_PASS))
+        self.active_pass = "render"
+        self.last_error = ""
+        true
+
+    me end_render_pass() -> bool:
+        if self.active_pass != "render":
+            self.last_error = "GPUCommandEncoder has no active render pass"
+            return false
+        self.commands.push(webgpu_command_empty(WEBGPU_COMMAND_END_RENDER_PASS))
+        self.active_pass = ""
+        self.last_error = ""
+        true
+
+    me begin_compute_pass() -> bool:
+        if not self.ensure_can_record():
+            return false
+        if self.active_pass != "":
+            self.last_error = "GPUCommandEncoder already has an active pass"
+            return false
+        self.commands.push(webgpu_command_empty(WEBGPU_COMMAND_BEGIN_COMPUTE_PASS))
+        self.active_pass = "compute"
+        self.last_error = ""
+        true
+
+    me end_compute_pass() -> bool:
+        if self.active_pass != "compute":
+            self.last_error = "GPUCommandEncoder has no active compute pass"
+            return false
+        self.commands.push(webgpu_command_empty(WEBGPU_COMMAND_END_COMPUTE_PASS))
+        self.active_pass = ""
+        self.last_error = ""
+        true
+
+    me set_pipeline(pipeline_id: i32) -> bool:
+        if not self.ensure_active_pass():
+            return false
+        if pipeline_id <= 0:
+            self.last_error = "GPURenderPassEncoder pipeline must be valid"
+            return false
+        self.commands.push(webgpu_command_pipeline(pipeline_id))
+        self.last_error = ""
+        true
+
+    me set_bind_group(slot: i32, bind_group_id: i32) -> bool:
+        if not self.ensure_active_pass():
+            return false
+        if slot < 0:
+            self.last_error = "GPUPassEncoder bind group slot must be non-negative"
+            return false
+        if bind_group_id <= 0:
+            self.last_error = "GPUPassEncoder bind group must be valid"
+            return false
+        self.commands.push(webgpu_command_bind_group(slot, bind_group_id))
+        self.last_error = ""
+        true
+
+    me draw(vertex_count: i32, instance_count: i32) -> bool:
+        if self.active_pass != "render":
+            self.last_error = "GPURenderPassEncoder draw requires an active render pass"
+            return false
+        if vertex_count <= 0 or instance_count <= 0:
+            self.last_error = "GPURenderPassEncoder draw counts must be positive"
+            return false
+        self.commands.push(webgpu_command_draw(vertex_count, instance_count))
+        self.last_error = ""
+        true
+
+    me dispatch_workgroups(workgroups_x: i32, workgroups_y: i32, workgroups_z: i32) -> bool:
+        if self.active_pass != "compute":
+            self.last_error = "GPUComputePassEncoder dispatch requires an active compute pass"
+            return false
+        if workgroups_x <= 0 or workgroups_y <= 0 or workgroups_z <= 0:
+            self.last_error = "GPUComputePassEncoder workgroup counts must be positive"
+            return false
+        self.commands.push(webgpu_command_dispatch(workgroups_x, workgroups_y, workgroups_z))
+        self.last_error = ""
+        true
+
+    me finish(label: text) -> GPUCommandBufferHandle:
+        if self.finished:
+            self.last_error = "GPUCommandEncoder is already finished"
+            return GPUCommandBufferHandle(id: -1, label: label, commands: [], valid: false, error: self.last_error)
+        if self.active_pass != "":
+            self.last_error = "GPUCommandEncoder cannot finish while a pass is active"
+            return GPUCommandBufferHandle(id: -1, label: label, commands: [], valid: false, error: self.last_error)
+        val id = self.next_command_buffer_id
+        self.next_command_buffer_id = self.next_command_buffer_id + 1
+        self.finished = true
+        self.last_error = ""
+        GPUCommandBufferHandle(id: id, label: label, commands: self.commands, valid: true, error: "")
+
+    fn command_count() -> i32:
+        self.commands.len()
+
+    me ensure_can_record() -> bool:
+        if self.finished:
+            self.last_error = "GPUCommandEncoder is already finished"
+            return false
+        true
+
+    me ensure_active_pass() -> bool:
+        if not self.ensure_can_record():
+            return false
+        if self.active_pass == "":
+            self.last_error = "GPUPassEncoder command requires an active pass"
+            return false
+        true
+
+pub class WebGPUQueue:
+    submitted_buffers: [GPUCommandBufferHandle]
+    last_error: text
+
+    static fn create() -> WebGPUQueue:
+        WebGPUQueue(submitted_buffers: [], last_error: "")
+
+    me submit(buffers: [GPUCommandBufferHandle]) -> bool:
+        if buffers.len() == 0:
+            self.last_error = "GPUQueue submit requires at least one command buffer"
+            return false
+        var i = 0
+        while i < buffers.len():
+            val buffer = buffers[i]
+            if not buffer.valid:
+                self.last_error = "GPUQueue cannot submit an invalid command buffer"
+                return false
+            self.submitted_buffers.push(buffer)
+            i = i + 1
+        self.last_error = ""
+        true
+
+    fn submitted_count() -> i32:
+        self.submitted_buffers.len()
+
+    fn submitted_command_count() -> i32:
+        var total = 0
+        var i = 0
+        while i < self.submitted_buffers.len():
+            total = total + self.submitted_buffers[i].command_count()
+            i = i + 1
+        total
+
+pub fn webgpu_command_empty(kind: text) -> WebGPURecordedCommand:
+    WebGPURecordedCommand(kind: kind, pipeline_id: -1, bind_group_id: -1, slot: -1, vertex_count: 0, instance_count: 0, workgroups_x: 0, workgroups_y: 0, workgroups_z: 0)
+
+pub fn webgpu_command_pipeline(pipeline_id: i32) -> WebGPURecordedCommand:
+    WebGPURecordedCommand(kind: WEBGPU_COMMAND_SET_PIPELINE, pipeline_id: pipeline_id, bind_group_id: -1, slot: -1, vertex_count: 0, instance_count: 0, workgroups_x: 0, workgroups_y: 0, workgroups_z: 0)
+
+pub fn webgpu_command_bind_group(slot: i32, bind_group_id: i32) -> WebGPURecordedCommand:
+    WebGPURecordedCommand(kind: WEBGPU_COMMAND_SET_BIND_GROUP, pipeline_id: -1, bind_group_id: bind_group_id, slot: slot, vertex_count: 0, instance_count: 0, workgroups_x: 0, workgroups_y: 0, workgroups_z: 0)
+
+pub fn webgpu_command_draw(vertex_count: i32, instance_count: i32) -> WebGPURecordedCommand:
+    WebGPURecordedCommand(kind: WEBGPU_COMMAND_DRAW, pipeline_id: -1, bind_group_id: -1, slot: -1, vertex_count: vertex_count, instance_count: instance_count, workgroups_x: 0, workgroups_y: 0, workgroups_z: 0)
+
+pub fn webgpu_command_dispatch(workgroups_x: i32, workgroups_y: i32, workgroups_z: i32) -> WebGPURecordedCommand:
+    WebGPURecordedCommand(kind: WEBGPU_COMMAND_DISPATCH_WORKGROUPS, pipeline_id: -1, bind_group_id: -1, slot: -1, vertex_count: 0, instance_count: 0, workgroups_x: workgroups_x, workgroups_y: workgroups_y, workgroups_z: workgroups_z)

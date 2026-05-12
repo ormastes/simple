@@ -1,0 +1,45 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
+BENCH_DIR="$ROOT/test/perf/port_algorithms"
+BUILD_DIR="$ROOT/build/perf/port_algorithms"
+SIMPLE_BIN="${SIMPLE_BIN:-$ROOT/bin/simple}"
+
+mkdir -p "$BUILD_DIR"
+
+echo "=================================================================="
+echo "  Port Algorithm C/Rust/Simple Benchmark"
+echo "=================================================================="
+echo "Simple: $SIMPLE_BIN"
+echo "Build:  $BUILD_DIR"
+echo ""
+
+gcc -O3 -march=native -std=c11 "$BENCH_DIR/port_algorithms_ref.c" -o "$BUILD_DIR/port_algorithms_c"
+rustc -C opt-level=3 -C target-cpu=native "$BENCH_DIR/port_algorithms_ref.rs" -o "$BUILD_DIR/port_algorithms_rust"
+
+echo "--- C reference ---"
+"$BUILD_DIR/port_algorithms_c" | tee "$BUILD_DIR/c.out"
+
+echo "--- Rust reference ---"
+"$BUILD_DIR/port_algorithms_rust" | tee "$BUILD_DIR/rust.out"
+
+echo "--- Simple reference ---"
+if "$SIMPLE_BIN" compile "$BENCH_DIR/port_algorithms_simple.spl" --native --cpu native --opt-level aggressive -o "$BUILD_DIR/port_algorithms_simple" >/tmp/port_algorithms_simple_compile.log 2>&1; then
+    "$BUILD_DIR/port_algorithms_simple" | tee "$BUILD_DIR/simple.out"
+else
+    echo "[algbench-note] simple_native_compile=failed fallback=interpreter log=/tmp/port_algorithms_simple_compile.log"
+    SIMPLE_LIB="$ROOT/src" "$SIMPLE_BIN" run "$BENCH_DIR/port_algorithms_simple.spl" | tee "$BUILD_DIR/simple.out"
+fi
+
+for alg in xxhash64 chacha20; do
+    c_sum="$(grep "alg=$alg " "$BUILD_DIR/c.out" | sed -n 's/.*checksum=\([0-9]*\).*/\1/p')"
+    rust_sum="$(grep "alg=$alg " "$BUILD_DIR/rust.out" | sed -n 's/.*checksum=\([0-9]*\).*/\1/p')"
+    simple_sum="$(grep "alg=$alg " "$BUILD_DIR/simple.out" | sed -n 's/.*checksum=\([0-9]*\).*/\1/p')"
+    if [[ -z "$c_sum" || "$c_sum" != "$rust_sum" || "$c_sum" != "$simple_sum" ]]; then
+        echo "[algbench-error] checksum mismatch alg=$alg c=$c_sum rust=$rust_sum simple=$simple_sum" >&2
+        exit 1
+    fi
+done
+
+echo "[algbench-ok] checksum parity passed for xxhash64 and chacha20"

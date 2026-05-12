@@ -34,6 +34,14 @@ JS Equivalent → Simple Function:
 
 #![allow(REQC001)]
 
+use std.gc_async_mut.gpu.browser_engine.webgpu_context.{
+    WebGPUContext, webgpu_create_context, webgpu_preferred_canvas_format
+}
+use std.gc_async_mut.gpu.browser_engine.webgpu_types.{
+    GPUDeviceDescriptor, GPURequestAdapterOptions, GPUShaderModule,
+    GPUPipelineHandle
+}
+
 # =========================================================================
 # CanvasContext2D — command-buffer rendering context
 # =========================================================================
@@ -65,6 +73,129 @@ pub class CanvasContext2D:
     _commands: [text]
     _save_stack: [text]
 
+    me fill_rect(x: f64, y: f64, w: f64, h: f64):
+        self._commands.push("fillRect {x} {y} {w} {h} {self.fill_color}")
+
+    me stroke_rect(x: f64, y: f64, w: f64, h: f64):
+        self._commands.push("strokeRect {x} {y} {w} {h} {self.stroke_color} {self.line_width}")
+
+    me clear_rect(x: f64, y: f64, w: f64, h: f64):
+        self._commands.push("clearRect {x} {y} {w} {h}")
+
+    me fill_text(txt: text, x: f64, y: f64):
+        self._commands.push("fillText {x} {y} {self.fill_color} {self.font} {txt}")
+
+    me stroke_text(txt: text, x: f64, y: f64):
+        self._commands.push("strokeText {x} {y} {self.stroke_color} {self.font} {txt}")
+
+    me begin_path():
+        self._commands.push("beginPath")
+
+    me move_to(x: f64, y: f64):
+        self._commands.push("moveTo {x} {y}")
+
+    me line_to(x: f64, y: f64):
+        self._commands.push("lineTo {x} {y}")
+
+    me arc(x: f64, y: f64, r: f64, start: f64, end: f64):
+        self._commands.push("arc {x} {y} {r} {start} {end}")
+
+    me bezier_curve_to(cp1x: f64, cp1y: f64, cp2x: f64, cp2y: f64, x: f64, y: f64):
+        self._commands.push("bezierCurveTo {cp1x} {cp1y} {cp2x} {cp2y} {x} {y}")
+
+    me quadratic_curve_to(cpx: f64, cpy: f64, x: f64, y: f64):
+        self._commands.push("quadraticCurveTo {cpx} {cpy} {x} {y}")
+
+    me close_path():
+        self._commands.push("closePath")
+
+    me fill():
+        self._commands.push("fill {self.fill_color}")
+
+    me stroke():
+        self._commands.push("stroke {self.stroke_color} {self.line_width}")
+
+    me set_fill_style(color: text):
+        self.fill_color = color
+
+    me set_stroke_style(color: text):
+        self.stroke_color = color
+
+    me set_line_width(width: f64):
+        self.line_width = width
+
+    me set_font(font_desc: text):
+        self.font = font_desc
+
+    me save():
+        self._save_stack.push(self.fill_color)
+        self._save_stack.push(self.stroke_color)
+        self._save_stack.push("{self.line_width}")
+        self._save_stack.push(self.font)
+        self._save_stack.push(self.text_align)
+
+    me restore():
+        val n = self._save_stack.len()
+        if n < 5:
+            return
+        self.text_align = self._save_stack[n - 1]
+        self.font = self._save_stack[n - 2]
+        self.stroke_color = self._save_stack[n - 4]
+        self.fill_color = self._save_stack[n - 5]
+        var new_stack: [text] = []
+        var i = 0
+        while i < n - 5:
+            new_stack.push(self._save_stack[i])
+            i = i + 1
+        self._save_stack = new_stack
+
+    me translate(x: f64, y: f64):
+        self._commands.push("translate {x} {y}")
+
+    me rotate(angle: f64):
+        self._commands.push("rotate {angle}")
+
+    me scale(x: f64, y: f64):
+        self._commands.push("scale {x} {y}")
+
+    me draw_image(src: text, x: f64, y: f64, w: f64, h: f64):
+        self._commands.push("drawImage {src} {x} {y} {w} {h}")
+
+pub class CanvasWebGPUContext:
+    """Browser canvas WebGPU context wrapper.
+
+    This mirrors the browser `canvas.getContext("webgpu")` boundary: creation
+    is gated by secure context, then adapter/device/canvas configuration must
+    succeed before shader and pipeline creation are usable.
+    """
+    width: i32
+    height: i32
+    secure_context: bool
+    gpu: WebGPUContext
+    context_type: text
+
+    fn is_available() -> bool:
+        self.gpu.secure_context and not self.gpu.device_lost
+
+    me request_device() -> bool:
+        if not self.gpu.request_adapter(GPURequestAdapterOptions.default_options()):
+            return false
+        self.gpu.request_device(GPUDeviceDescriptor.create())
+
+    me configure() -> bool:
+        if not self.gpu.device_ready:
+            return false
+        self.gpu.configure_canvas(webgpu_preferred_canvas_format(), self.width, self.height)
+
+    me create_shader_module(label: text, source: text) -> GPUShaderModule:
+        self.gpu.create_shader_module(label, source)
+
+    me create_render_pipeline(vertex: GPUShaderModule, fragment: GPUShaderModule) -> GPUPipelineHandle:
+        self.gpu.create_render_pipeline(vertex, fragment)
+
+    me create_compute_pipeline(compute: GPUShaderModule) -> GPUPipelineHandle:
+        self.gpu.create_compute_pipeline(compute)
+
 pub fn canvas_create(w: i32, h: i32) -> CanvasContext2D:
     """Create a new 2D canvas context with the given dimensions."""
     CanvasContext2D(
@@ -79,21 +210,43 @@ pub fn canvas_create(w: i32, h: i32) -> CanvasContext2D:
         _save_stack: []
     )
 
+pub fn canvas_get_context_kind(kind: text) -> text:
+    val lower = kind.lower()
+    if lower == "2d":
+        return "2d"
+    if lower == "webgpu":
+        return "webgpu"
+    if lower == "webgl" or lower == "webgl2":
+        return "unsupported"
+    "unsupported"
+
+pub fn canvas_webgpu_create(w: i32, h: i32, secure_context: bool) -> CanvasWebGPUContext:
+    CanvasWebGPUContext(
+        width: w,
+        height: h,
+        secure_context: secure_context,
+        gpu: webgpu_create_context(secure_context),
+        context_type: "webgpu"
+    )
+
+pub fn canvas_get_context_webgpu(w: i32, h: i32, secure_context: bool) -> CanvasWebGPUContext:
+    canvas_webgpu_create(w, h, secure_context)
+
 # =========================================================================
 # Shape Drawing
 # =========================================================================
 
 pub fn canvas_fill_rect(ctx: CanvasContext2D, x: f64, y: f64, w: f64, h: f64):
     """Draw a filled rectangle."""
-    ctx._commands.push("fillRect {x} {y} {w} {h} {ctx.fill_color}")
+    ctx.fill_rect(x, y, w, h)
 
 pub fn canvas_stroke_rect(ctx: CanvasContext2D, x: f64, y: f64, w: f64, h: f64):
     """Draw a stroked rectangle."""
-    ctx._commands.push("strokeRect {x} {y} {w} {h} {ctx.stroke_color} {ctx.line_width}")
+    ctx.stroke_rect(x, y, w, h)
 
 pub fn canvas_clear_rect(ctx: CanvasContext2D, x: f64, y: f64, w: f64, h: f64):
     """Clear a rectangular area."""
-    ctx._commands.push("clearRect {x} {y} {w} {h}")
+    ctx.clear_rect(x, y, w, h)
 
 # =========================================================================
 # Text Drawing
@@ -101,11 +254,11 @@ pub fn canvas_clear_rect(ctx: CanvasContext2D, x: f64, y: f64, w: f64, h: f64):
 
 pub fn canvas_fill_text(ctx: CanvasContext2D, txt: text, x: f64, y: f64):
     """Draw filled text."""
-    ctx._commands.push("fillText {x} {y} {ctx.fill_color} {ctx.font} {txt}")
+    ctx.fill_text(txt, x, y)
 
 pub fn canvas_stroke_text(ctx: CanvasContext2D, txt: text, x: f64, y: f64):
     """Draw stroked text."""
-    ctx._commands.push("strokeText {x} {y} {ctx.stroke_color} {ctx.font} {txt}")
+    ctx.stroke_text(txt, x, y)
 
 # =========================================================================
 # Path Operations
@@ -113,39 +266,39 @@ pub fn canvas_stroke_text(ctx: CanvasContext2D, txt: text, x: f64, y: f64):
 
 pub fn canvas_begin_path(ctx: CanvasContext2D):
     """Begin a new path."""
-    ctx._commands.push("beginPath")
+    ctx.begin_path()
 
 pub fn canvas_move_to(ctx: CanvasContext2D, x: f64, y: f64):
     """Move the pen to (x, y)."""
-    ctx._commands.push("moveTo {x} {y}")
+    ctx.move_to(x, y)
 
 pub fn canvas_line_to(ctx: CanvasContext2D, x: f64, y: f64):
     """Draw a line from the current position to (x, y)."""
-    ctx._commands.push("lineTo {x} {y}")
+    ctx.line_to(x, y)
 
 pub fn canvas_arc(ctx: CanvasContext2D, x: f64, y: f64, r: f64, start: f64, end: f64):
     """Draw an arc."""
-    ctx._commands.push("arc {x} {y} {r} {start} {end}")
+    ctx.arc(x, y, r, start, end)
 
 pub fn canvas_bezier_curve_to(ctx: CanvasContext2D, cp1x: f64, cp1y: f64, cp2x: f64, cp2y: f64, x: f64, y: f64):
     """Draw a cubic bezier curve."""
-    ctx._commands.push("bezierCurveTo {cp1x} {cp1y} {cp2x} {cp2y} {x} {y}")
+    ctx.bezier_curve_to(cp1x, cp1y, cp2x, cp2y, x, y)
 
 pub fn canvas_quadratic_curve_to(ctx: CanvasContext2D, cpx: f64, cpy: f64, x: f64, y: f64):
     """Draw a quadratic bezier curve."""
-    ctx._commands.push("quadraticCurveTo {cpx} {cpy} {x} {y}")
+    ctx.quadratic_curve_to(cpx, cpy, x, y)
 
 pub fn canvas_close_path(ctx: CanvasContext2D):
     """Close the current path."""
-    ctx._commands.push("closePath")
+    ctx.close_path()
 
 pub fn canvas_fill(ctx: CanvasContext2D):
     """Fill the current path."""
-    ctx._commands.push("fill {ctx.fill_color}")
+    ctx.fill()
 
 pub fn canvas_stroke(ctx: CanvasContext2D):
     """Stroke the current path."""
-    ctx._commands.push("stroke {ctx.stroke_color} {ctx.line_width}")
+    ctx.stroke()
 
 # =========================================================================
 # Style Setters
@@ -153,19 +306,19 @@ pub fn canvas_stroke(ctx: CanvasContext2D):
 
 pub fn canvas_set_fill_style(ctx: CanvasContext2D, color: text):
     """Set the fill color."""
-    ctx.fill_color = color
+    ctx.set_fill_style(color)
 
 pub fn canvas_set_stroke_style(ctx: CanvasContext2D, color: text):
     """Set the stroke color."""
-    ctx.stroke_color = color
+    ctx.set_stroke_style(color)
 
 pub fn canvas_set_line_width(ctx: CanvasContext2D, width: f64):
     """Set the line width."""
-    ctx.line_width = width
+    ctx.set_line_width(width)
 
 pub fn canvas_set_font(ctx: CanvasContext2D, font_desc: text):
     """Set the font descriptor."""
-    ctx.font = font_desc
+    ctx.set_font(font_desc)
 
 # =========================================================================
 # State Save / Restore
@@ -173,29 +326,11 @@ pub fn canvas_set_font(ctx: CanvasContext2D, font_desc: text):
 
 pub fn canvas_save(ctx: CanvasContext2D):
     """Save the current drawing state onto the stack."""
-    ctx._save_stack.push(ctx.fill_color)
-    ctx._save_stack.push(ctx.stroke_color)
-    ctx._save_stack.push("{ctx.line_width}")
-    ctx._save_stack.push(ctx.font)
-    ctx._save_stack.push(ctx.text_align)
+    ctx.save()
 
 pub fn canvas_restore(ctx: CanvasContext2D):
     """Restore the most recently saved drawing state."""
-    val n = ctx._save_stack.len()
-    if n < 5:
-        return
-    ctx.text_align = ctx._save_stack[n - 1]
-    ctx.font = ctx._save_stack[n - 2]
-    # line_width stored as text — skip parse for now
-    ctx.stroke_color = ctx._save_stack[n - 4]
-    ctx.fill_color = ctx._save_stack[n - 5]
-    # Pop 5 items
-    var new_stack: [text] = []
-    var i = 0
-    while i < n - 5:
-        new_stack.push(ctx._save_stack[i])
-        i = i + 1
-    ctx._save_stack = new_stack
+    ctx.restore()
 
 # =========================================================================
 # Transforms
@@ -203,15 +338,15 @@ pub fn canvas_restore(ctx: CanvasContext2D):
 
 pub fn canvas_translate(ctx: CanvasContext2D, x: f64, y: f64):
     """Apply a translation transform."""
-    ctx._commands.push("translate {x} {y}")
+    ctx.translate(x, y)
 
 pub fn canvas_rotate(ctx: CanvasContext2D, angle: f64):
     """Apply a rotation transform."""
-    ctx._commands.push("rotate {angle}")
+    ctx.rotate(angle)
 
 pub fn canvas_scale(ctx: CanvasContext2D, x: f64, y: f64):
     """Apply a scale transform."""
-    ctx._commands.push("scale {x} {y}")
+    ctx.scale(x, y)
 
 # =========================================================================
 # Image Drawing
@@ -219,7 +354,7 @@ pub fn canvas_scale(ctx: CanvasContext2D, x: f64, y: f64):
 
 pub fn canvas_draw_image(ctx: CanvasContext2D, src: text, x: f64, y: f64, w: f64, h: f64):
     """Draw an image from the given source path."""
-    ctx._commands.push("drawImage {src} {x} {y} {w} {h}")
+    ctx.draw_image(src, x, y, w, h)
 
 # =========================================================================
 # Text Measurement

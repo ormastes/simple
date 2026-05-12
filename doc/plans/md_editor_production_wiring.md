@@ -1,6 +1,6 @@
 # Plan: Production-Level Markdown Editor Wiring
 
-## Status: IMPLEMENTATION COMPLETE — compiled UI smoke remains
+## Status: IMPLEMENTATION COMPLETE — runtime UI smoke remains
 
 ## Context
 
@@ -20,7 +20,7 @@ A markdown parser library also exists at `src/lib/common/markdown/` (1,684 LOC) 
 
 - [x] Added `md_state: MdEditorState` and `cached_md_stats: MdDocStats` fields to `EditorDocument`
 - [x] On file open: if `language_id == "markdown"`, initializes via `md_editor_state_new()` + `md_compute_stats()`
-- Cross-layer: layer 20 references types from layers 50/60. Parses clean in interpreter. **Compiled-mode verification pending.**
+- Cross-layer: layer 20 references types from layers 50/60. Parses clean in interpreter and passes scoped native-build lowering. Real runtime launch still needs non-stubbed editor externs.
 
 ## Phase 2: Enter/Tab Smart Editing Intercepts — DONE
 
@@ -97,14 +97,31 @@ A markdown parser library also exists at `src/lib/common/markdown/` (1,684 LOC) 
 - [x] Ctrl+Shift+O → outline toggle
 - [x] Ctrl+S → md stats recomputation
 - [x] Frame rendering: preview/outline HTML in right panel, md stats in status bar
+- [x] GUI source area now renders as an editable source surface with `contenteditable`, textbox role, language metadata, active-line metadata, and cursor marker
+- [x] GUI startup registers built-in Simple and Markdown extension manifests before activating them
+- [x] Extension host supports activation-event routing for `*`, `onLanguage:*`, and `onCommand:*`; GUI file open routes active document language into the extension host
+- [x] EditorController owns the extension host, initializes built-ins once, and routes registered Markdown palette commands through extension metadata before dispatching Markdown command handlers
+- [x] Extension host can discover external `extension.sdn` manifests from configured roots without executing extension code
+- [x] EditorController startup indexes workspace/user/system extension roots plus `SIMPLE_EDITOR_EXTENSION_PATH`
+- [x] Extension host creates and cleans up `ExtensionContext` records on activate/deactivate, giving plugins lifecycle-backed API context state before executable runtime support
+- [x] Extension host records editor events and matches them against extension subscriptions; controller and GUI file-open/command paths emit language, document-open, and command lifecycle events
+- [x] Extension contexts now carry workspace state with host-level get/set helpers
+- [x] External registered commands now dispatch to a host-owned pending invocation queue instead of failing as “not executable”; actual execution remains behind runtime/sandbox implementation
+- [x] Extension host now has an explicit default-deny runtime policy, allowed-root checks, and a drain step that marks pending invocations as blocked, sandbox-ready, or external-process-ready without executing untrusted code
+- [x] `--gui-sdl` mode runs the GUI shell through the SDL bridge, presents frames, and polls runtime SDL events
+- [x] SDL key events map Escape/Enter/Backspace/Tab and printable ASCII into `GuiEvent(kind: "key", data: ...)` for controller dispatch
+- [x] SDL text input events map into `GuiEvent(kind: "text", ...)` and are dispatched character-by-character through `EditorController`
+- [x] SDL Ctrl/Ctrl+Shift key chords map to GUI command names, including GUI clipboard copy/paste and preview shortcut routing
+- [x] SDL window resize/focus/blur events map into GUI events so the shell can update layout dimensions and focus status
 
 ## Phase 11: End-to-End Tests — DONE
 
 **Files:** `test/system/editor_markdown_spec.spl` (extended), `test/system/editor_palette_spec.spl`
 
-- [x] 65 structural wiring tests, all passing
+- [x] 67 structural wiring tests, all passing
 - [x] Fixed 5 pre-existing block kind tests (were grepping wrong file — `block_model.spl` → `adapter.spl`/`parse.spl`)
 - [x] `test/system/editor_palette_spec.spl` created for dedicated palette service, routing, and Markdown command coverage
+- [x] `test/system/editor_gui_sdl_spec.spl` covers SDL bridge declarations, key/chord/text-input/window-event mapping, shell run-loop wiring, clipboard shortcuts, and `--gui-sdl`
 
 ---
 
@@ -165,19 +182,47 @@ A markdown parser library also exists at `src/lib/common/markdown/` (1,684 LOC) 
 5. `]]` / `[[` in normal mode jumps between headings — **WIRED, needs compiled-mode test**
 6. Status bar shows word count for .md files — **WIRED, needs compiled-mode test**
 7. `:w` saves and runs diagnostics — **WIRED, needs compiled-mode test**
-8. `bin/simple test test/system/editor_markdown_spec.spl` — **65/65 PASS**
-9. `bin/simple test test/system/editor_palette_spec.spl` — dedicated palette structure and wiring spec
+8. `bin/simple test test/system/editor_markdown_spec.spl` — **67/67 PASS**
+9. `bin/simple test test/system/editor_palette_spec.spl` — **11/11 PASS**
+10. `bin/simple check src/app/editor/main.spl --source src` — **PASS**
+11. `bin/simple check src/app/editor/gui_shell.spl --source src` — **PASS**
+12. `bin/simple check src/lib/editor/70.backend/gui_sdl_bridge.spl` — **PASS**
+13. `bin/simple test test/system/editor_gui_spec.spl` — **31/31 PASS**
+14. `bin/simple test test/system/editor_gui_sdl_spec.spl` — **18/18 PASS**
+15. `bin/simple test test/system/editor_extension_spec.spl` — **27/27 PASS**
+16. `bin/simple native-build --source src/app --source src/lib --entry src/app/editor/main.spl --entry-closure --output build/editor-main-smoke` — links, but stubs `rt_args`, `EditSession_dot_new`, `editor_tui_run`, and `gui_shell_run`; linker smoke only, not behavior evidence
+17. `scripts/bootstrap/bootstrap-from-scratch.sh --deploy --no-mcp` — attempted 2026-05-12; blocked in `rust-seed-build` by signal 15 during Cargo compilation, before deploy
 
 ---
+
+## Reality Check: Obsidian-like GUI and VS Code-like Plugins
+
+### GUI edit parity
+
+The editor is not yet a full Obsidian-like GUI editor. It now has Markdown-aware editing services, live preview/outline wiring, an editable HTML source surface, and a `--gui-sdl` runtime loop that presents frames and polls SDL key, chord, text-input, mouse, resize, focus, blur, and close events. The default HTML-presenter path still has `gui_shell_poll_event()` returning no events. True GUI edit parity still needs:
+
+- selection and composition events beyond the current SDL key/chord/text/mouse/window mapping
+- richer mapping from GUI edit events back into `EditorController`/`EditorBuffer`
+- selection/caret synchronization between rendered source, buffer, and viewport
+- runtime smoke test that launches GUI mode and verifies edit → preview/stat updates
+
+### Plugin parity
+
+The editor is not yet VS Code-level plugin support. It has SDN manifests, commands/languages/keybinding contribution registries, built-in manifest registration, startup external manifest discovery, activation/deactivation, lifecycle-backed extension contexts, workspace state, editor event/subscription routing, activation-event routing, contribution lookup, registered-command dispatch for built-in Markdown commands, pending runtime invocation queueing for external commands, and an explicit default-deny runtime policy with allowed-root and sandbox/external-process readiness states. Remaining VS Code-like infrastructure:
+
+- actual sandbox runner that executes extension `main` modules through `ExtensionContext`
+- external-process runner only if explicitly allowed by policy
 
 ## What's Left
 
 ### Must-do (compile blockers / correctness)
 
-1. **Cross-layer compile verification** — `document.spl` (layer 20) imports `MdEditorState` (layer 50) and `md_compute_stats` (layer 60). Parses clean in interpreter but needs `scripts/bootstrap/bootstrap-from-scratch.sh --deploy` to verify compiled mode. If it fails, extract `MdEditorState`/`MdDocStats` struct defs to `src/lib/editor/20.core/md_state.spl`.
+1. **Entry-closure import hygiene** — DONE for the editor entrypoint. `src/app/editor/main.spl` now imports `EditSession`, `editor_tui_run`, and `gui_shell_run` explicitly, and `bin/simple check src/app/editor/main.spl --source src` passes.
 
-2. **Compiled-mode UI launch test** — Editor requires `rt_args` extern (compiled only). After bootstrap, run `bin/simple run src/app/editor/main.spl test.md` and verify: file opens, Enter continues lists, Ctrl+P shows palette, Ctrl+Shift+V shows preview, status bar shows word count.
+2. **Compiled-mode UI launch test** — Editor requires non-stubbed runtime externs. After import hygiene and real runtime extern resolution, run `bin/simple run src/app/editor/main.spl --gui-sdl test.md` and verify: file opens, SDL typing reaches the controller, Enter continues lists, Ctrl+P shows palette, Ctrl+Shift+V shows preview, status bar shows word count. The 2026-05-12 bootstrap/deploy attempt was terminated by signal 15 while compiling the Rust seed compiler/runtime.
 
 ### Nice-to-have (non-blocking)
 
-3. **Extension host cleanup** — `gui_shell.spl` still calls `extension_host.activate("markdown-language")` and `extension_host.activate("simple-language")`. Keep it unless ExtensionHost ownership changes; the Markdown language service activation matches the editor's IDE-style language infrastructure.
+3. **Default GUI event pump** — Keep `--gui-sdl` as the runtime-backed GUI path, or replace the empty default `gui_shell_poll_event()` placeholder with a browser/native event source. Add a compiled-mode GUI smoke test that proves typing, caret movement, selection, save, preview toggle, and outline toggle work through the GUI path.
+
+4. **Plugin runtime activation** — DONE up to the safe boundary. `ExtensionCommandInvocation` records now drain through a default-deny runtime policy and produce blocked/sandbox-ready/external-process-ready dispatch records. Actual execution of extension `main` modules still requires implementing the sandbox runner.

@@ -4,6 +4,8 @@
 # mode switching, file tree interaction, command line, and view state.
 # Shells create a controller and call handle_key(); rendering is shell-specific.
 
+extern fn rt_env_get(key: text) -> text
+
 struct EditorAction:
     redraw: bool
     quit: bool
@@ -36,10 +38,13 @@ class EditorController:
     config: EditorConfig
     settings_view: SettingsViewState
     palette_state: PaletteState
+    extension_host: ExtensionHost
 
 impl EditorController:
 
     static fn new(session: EditSession) -> EditorController:
+        val host = extension_host_with_builtins()
+        host.discover_extensions(editor_extension_roots())
         EditorController(
             session: session,
             file_tree: FileTreeState.new("."),
@@ -51,7 +56,8 @@ impl EditorController:
             running: true,
             config: editor_config_default(),
             settings_view: nil,
-            palette_state: nil
+            palette_state: nil,
+            extension_host: host
         )
 
     me handle_key(key: text, rects: [SplitRect]) -> EditorAction:
@@ -308,6 +314,7 @@ impl EditorController:
             else:
                 val fpath = self.file_tree.selected_path()
                 self.session.open_file(fpath)
+                self._activate_active_language()
                 self.focus_panel = "editor"
                 self.status_msg = "opened " + fpath
         elif key == "\x1b":
@@ -348,6 +355,7 @@ impl EditorController:
         EditorAction(redraw: true, quit: false, status_msg: "")
 
     me _open_palette():
+        self._activate_active_language()
         var all_entries = editor_all_commands()
         val doc = self.session.active_document()
         if doc != nil and doc.language_id == "markdown":
@@ -359,6 +367,32 @@ impl EditorController:
         self.palette_state = palette_show(palette_new(all_entries))
 
     me _execute_palette_command(command_name: text, command_payload: text) -> EditorAction:
+        self.extension_host.activate_command(command_name)
+        self.extension_host.emit_event("onWillExecuteCommand", command_name)
+        self.extension_host.emit_event("onCommand:" + command_name, command_payload)
+        val registered_command = self.extension_host.find_command(command_name)
+        if registered_command.command.id != "" and registered_command.extension_name == "markdown-language":
+            val action = self._execute_markdown_extension_command(command_name)
+            self.extension_host.emit_event("onDidExecuteCommand", command_name)
+            return action
+        if registered_command.command.id != "":
+            val invocation = self.extension_host.dispatch_external_command(command_name, command_payload)
+            self.status_msg = "extension command queued: " + invocation.command_id
+            return EditorAction(redraw: true, quit: false, status_msg: self.status_msg)
+        if command_name.starts_with("markdown."):
+            self.status_msg = "extension command not registered: " + command_name
+            return EditorAction(redraw: true, quit: false, status_msg: self.status_msg)
+        val parsed = editor_cmd_with(command_name, command_payload)
+        val dispatch_result = editor_dispatch_session(self.session, parsed)
+        self.status_msg = dispatch_result.message
+        if command_name == "open-file" and not dispatch_result.quit:
+            self._activate_active_language()
+        self.extension_host.emit_event("onDidExecuteCommand", command_name)
+        if dispatch_result.quit:
+            self.running = false
+        EditorAction(redraw: true, quit: not self.running, status_msg: self.status_msg)
+
+    me _execute_markdown_extension_command(command_name: text) -> EditorAction:
         if command_name.starts_with("markdown."):
             val doc = self.session.active_document()
             val buffer = self.session.active_buffer()
@@ -378,12 +412,16 @@ impl EditorController:
                         self.session.dock_layout.right_visible = false
                 self.status_msg = cmd_result.status_message
                 return EditorAction(redraw: true, quit: false, status_msg: self.status_msg)
-        val parsed = editor_cmd_with(command_name, command_payload)
-        val dispatch_result = editor_dispatch_session(self.session, parsed)
-        self.status_msg = dispatch_result.message
-        if dispatch_result.quit:
-            self.running = false
-        EditorAction(redraw: true, quit: not self.running, status_msg: self.status_msg)
+        self.status_msg = "markdown command unavailable"
+        EditorAction(redraw: true, quit: false, status_msg: self.status_msg)
+
+    me _activate_active_language():
+        val doc = self.session.active_document()
+        if doc == nil:
+            return
+        self.extension_host.activate_language(doc.language_id)
+        self.extension_host.emit_event("onDidOpenTextDocument", doc.path())
+        self.extension_host.emit_event("onLanguage:" + doc.language_id, doc.path())
 
     me _toggle_md_preview():
         val doc = self.session.active_document()
@@ -471,6 +509,38 @@ fn ctrl_handle_normal_key(buffer: EditorBuffer, key: text) -> NormalKeyResult:
         val result = editor_dispatch(buffer, editor_cmd("redo"))
         return NormalKeyResult(message: result.message, quit: false, enter_insert: false, enter_command: false)
     NormalKeyResult(message: "", quit: false, enter_insert: false, enter_command: false)
+
+fn editor_extension_roots() -> [text]:
+    var roots: [text] = []
+    roots.push(".simple/editor/extensions")
+    roots.push(".vscode/simple-editor/extensions")
+    val configured = rt_env_get("SIMPLE_EDITOR_EXTENSION_PATH") ?? ""
+    val configured_roots = _editor_split_path_list(configured)
+    for root in configured_roots:
+        roots.push(root)
+    val home = rt_env_get("HOME") ?? ""
+    if home != "":
+        roots.push(home + "/.simple/editor/extensions")
+        roots.push(home + "/.simple/extensions")
+    roots.push("/usr/local/share/simple/editor/extensions")
+    roots.push("/usr/share/simple/editor/extensions")
+    roots
+
+fn _editor_split_path_list(value: text) -> [text]:
+    var parts: [text] = []
+    var start = 0
+    var i = 0
+    while i < value.len():
+        if value.char_at(i) == ":":
+            val part = value.slice(start, i).trim()
+            if part != "":
+                parts.push(part)
+            start = i + 1
+        i = i + 1
+    val last = value.slice(start, value.len()).trim()
+    if last != "":
+        parts.push(last)
+    parts
 
 fn ctrl_handle_insert_key(buffer: EditorBuffer, key: text) -> InsertKeyResult:
     if key == "\x1b":

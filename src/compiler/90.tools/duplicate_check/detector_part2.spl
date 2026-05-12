@@ -1,15 +1,12 @@
-# Part 2 of src/compiler/90.tools/duplicate_check/detector.spl
-use compiler.tools.duplicate_check.detector.*
-# Core duplication detection engine using Karp-Rabin rolling hash
+# Duplicate detection cosine/refinement and public entrypoints
 
 use compiler.tools.duplicate_check.config.{DuplicationConfig}
-use compiler.tools.duplicate_check.tokenizer.{SimpleToken, tokenize, token_to_string}
 use compiler.tools.duplicate_check.features.{FeatureVec, extract_token_frequencies, build_feature_vector, cosine_similarity}
-use compiler.tools.duplicate_check.debug.{debug_log, debug_log_progress}
-use compiler.tools.duplicate_check.cache.{TokenCacheManager, get_cached_tokens, set_cached_tokens, set_cached_tokens_with_content, get_cached_content}
+use compiler.tools.duplicate_check.cache.{TokenCacheManager, get_cached_tokens, set_cached_tokens_with_content}
 use compiler.tools.duplicate_check.detector_files.{collect_detector_files}
-use std.nogc_sync_mut.io.file_ops.{file_read}
+use compiler.tools.duplicate_check.detector_part1.*
 use std.nogc_sync_mut.io.time_ops.{current_time_ms}
+
 fn collect_files(path: text, config: DuplicationConfig) -> [text]:
     collect_detector_files(path, config)
 
@@ -52,13 +49,13 @@ fn sample_blocks_for_similarity(all_blocks: [DuplicateBlock], config: Duplicatio
 
 fn load_tokens_with_line_indexes(blocks_to_analyze: [DuplicateBlock], config: DuplicationConfig, cache_manager: TokenCacheManager) -> SimilarityPrep:
     log_progress(config, "Pre-computing features for {blocks_to_analyze.len()} blocks...")
-    val start_ms = current_time_ms()
-    var last_ms = 0
     var file_token_cache = {}
     var file_line_index_cache = {}
     var feature_vectors = []
     var low_signal_flags = []
     var block_idx = 0
+    val start_ms = current_time_ms()
+    var last_ms = start_ms
     while block_idx < blocks_to_analyze.len():
         val block = blocks_to_analyze[block_idx]
         low_signal_flags.push(is_low_signal_block(block))
@@ -131,8 +128,6 @@ fn build_similarity_adjacency(prep: SimilarityPrep, config: DuplicationConfig) -
     log_progress(config, "Starting pairwise comparison of {prep.blocks.len()} blocks...")
     val total_possible = (prep.blocks.len() * (prep.blocks.len() - 1)) / 2
     log_verbose(config, "  Max comparisons: {total_possible} (optimizations will reduce this)")
-    val start_ms = current_time_ms()
-    var last_ms = 0
 
     var comparison_count = 0
     var skipped_same_file = 0
@@ -140,6 +135,8 @@ fn build_similarity_adjacency(prep: SimilarityPrep, config: DuplicationConfig) -
     val max_comparisons_per_block = 36
     val max_total_comparisons = 7000
     var adjacency = {}
+    val start_ms = current_time_ms()
+    var last_ms = start_ms
 
     var i = 0
     while i < prep.blocks.len() and comparison_count < max_total_comparisons:
@@ -169,6 +166,7 @@ fn build_similarity_adjacency(prep: SimilarityPrep, config: DuplicationConfig) -
 
             comparison_count = comparison_count + 1
             comparisons_this_block = comparisons_this_block + 1
+            last_ms = progress_tick(config, "compare pass", comparison_count, total_possible.min(max_total_comparisons), start_ms, last_ms)
 
             val feature_vec1 = prep.features[i]
             val feature_vec2 = prep.features[j]
@@ -194,7 +192,6 @@ fn build_similarity_adjacency(prep: SimilarityPrep, config: DuplicationConfig) -
                     adjacency[key2] = [i]
 
             j = j + 1
-            last_ms = progress_tick(config, "compare pass", comparison_count, max_total_comparisons, start_ms, last_ms)
         i = i + 1
 
     log_progress(config, "Completed {comparison_count} comparisons, found {match_count} similar pairs")
@@ -276,14 +273,14 @@ fn scan_duplicate_blocks(files: [text], config: DuplicationConfig, cache_manager
     log_progress(config, "Pass 2: extracting blocks from candidate files...")
     var all_blocks = []
     val start_ms = current_time_ms()
-    var last_ms = 0
+    var last_ms = start_ms
     var done = 0
     for file in candidate_files:
         val blocks = find_duplicates_in_file_with_hash_filter(file, config, cache_manager, interner, summary.repeated_hashes)
         all_blocks.merge(blocks)
+        log_verbose(config, "  {file}: {blocks.len()} blocks")
         done = done + 1
         last_ms = progress_tick(config, "extract pass", done, candidate_files.len(), start_ms, last_ms)
-        log_verbose(config, "  {file}: {blocks.len()} blocks")
 
     all_blocks
 

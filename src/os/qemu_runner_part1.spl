@@ -1,0 +1,676 @@
+# Part 1 of src/os/qemu_runner.spl
+use os.qemu_runner.*
+# SimpleOS QEMU Runner — Multi-Architecture Boot & Test
+#
+# Provides build + run + test functionality for all 6 architectures.
+# Usage:
+#   bin/simple os build --arch=x86_64
+#   bin/simple os run --arch=riscv64
+#   bin/simple os test --arch=all
+
+use os.kernel.arch.arch_context.{Architecture}
+use os.packages.os_packages.{os_version}
+use os.port.simpleos_multiplatform_build.{
+    SimpleOsLaneContract,
+    SimpleOsLaneKind,
+    simpleos_platform_default_entry,
+    simpleos_platform_disk_image_output,
+    simpleos_platform_linker_script,
+    simpleos_platform_native_target,
+    simpleos_platform_qemu_acceptance_lane,
+    simpleos_platform_qemu_cpu,
+    simpleos_platform_qemu_lane,
+    simpleos_platform_qemu_machine,
+    simpleos_platform_qemu_smoke_lane,
+    simpleos_platform_qemu_system,
+    simpleos_platform_kernel_output,
+    simpleos_platform_target_by_name
+}
+use os.desktop_qemu_contract.{
+    clear_qemu_serial_log,
+    desktop_container_marker_fragments,
+    desktop_disk_serial_accepts_completion,
+    desktop_disk_serial_log_path,
+    desktop_uefi_serial_accepts_completion,
+    desktop_uefi_serial_log_path,
+    desktop_wine_exec_env_marker_contract_accepts,
+    desktop_wine_exec_env_required_marker_fragments,
+    print_desktop_disk_missing_markers,
+    print_desktop_uefi_missing_markers,
+    qemu_serial_log_contains,
+    read_qemu_serial_log,
+    run_x64_desktop_disk_probe,
+    run_x64_wm_simple_web_probe,
+    wm_simple_web_serial_log_path
+}
+use os.toolchain_vfs_probe_contract.{
+    print_toolchain_vfs_probe_missing_markers,
+    toolchain_vfs_probe_serial_accepts_completion
+}
+use os.ssh_qemu_contract.{run_x64_ssh_probe}
+use hardware.riscv_common.core.riscv_formal.{verify_rv64_qemu_user_proof_contract}
+
+extern fn rt_process_run_timeout(cmd: text, args: [text], timeout_ms: i64) -> (text, text, i32)
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_file_delete(path: text) -> bool
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_dir_create_all(path: text) -> bool
+extern fn rt_env_get(key: text) -> text?
+extern fn rt_env_set(key: text, value: text) -> bool
+extern fn rt_env_cwd() -> text
+extern fn rt_time_now_unix_micros() -> i64
+
+val _MULTIARCH_RESULT_ROOT: text = "build/multiarch"
+
+# Default native-build timeout for `os build` lane.
+# Rationale: a cold full-tree native-build on current CI hardware routinely
+# lands in the 5–10 minute range (see simpleos_process_shell_followup_plan_2026-04-13.md
+# item #1). The previous hardcoded 60s ceiling reported a generic "Process timed out"
+# before the compiler had meaningfully started its LLVM/Cranelift backend, hiding the
+# real phase. 900_000 ms (15 min) gives enough headroom for the slowest target
+# (x86_64 desktop wrapper) while still bounding stuck subprocesses. Override with
+# SIMPLE_OS_BUILD_TIMEOUT_MS at runtime when tracing regressions.
+val _OS_BUILD_DEFAULT_TIMEOUT_MS: i64 = 900000
+val _OS_BUILD_DEFAULT_LOG_MODE: text = "on"
+
+fn _parse_timeout_ms(raw: text, default_ms: i64) -> i64:
+    """Parse a positive integer ms value from env, falling back to default on empty/bad input."""
+    if raw == "":
+        return default_ms
+    var result: i64 = 0
+    var found_digit = false
+    for ch in raw:
+        if ch >= "0" and ch <= "9":
+            val digit = (ch.to_i32() - "0".to_i32()) as i64
+            result = result * 10 + digit
+            found_digit = true
+        else:
+            return default_ms
+    if not found_digit:
+        return default_ms
+    if result <= 0:
+        return default_ms
+    result
+
+fn _os_build_timeout_ms() -> i64:
+    """Resolve the active native-build timeout, honoring SIMPLE_OS_BUILD_TIMEOUT_MS.
+
+    rt_env_get returns NIL when the variable is unset; coerce to empty string so
+    the parser takes the empty/default branch instead of failing to iterate NIL.
+    """
+    val raw = rt_env_get("SIMPLE_OS_BUILD_TIMEOUT_MS") ?? ""
+    _parse_timeout_ms(raw, _OS_BUILD_DEFAULT_TIMEOUT_MS)
+
+fn _normalize_os_log_mode(raw: text) -> text:
+    if raw == "off":
+        return "off"
+    if raw == "on":
+        return "on"
+    _OS_BUILD_DEFAULT_LOG_MODE
+
+fn _os_build_log_mode() -> text:
+    val raw = rt_env_get("SIMPLE_OS_LOG_MODE") ?? ""
+    _normalize_os_log_mode(raw)
+
+fn _os_build_backend_for_target(target: OsTarget) -> text:
+    """Resolve native-build backend for a concrete OS target.
+
+    Cranelift in this toolchain does not provide i686 or RISC-V freestanding
+    object targets, so those OS lanes default to LLVM. The environment
+    override still wins for diagnostics and experiments.
+    """
+    val raw = rt_env_get("SIMPLE_OS_BUILD_BACKEND") ?? ""
+    if raw == "llvm":
+        return "llvm"
+    if raw == "cranelift":
+        return "cranelift"
+    match target.arch:
+        Architecture.X86: "llvm"
+        Architecture.Arm64: "llvm"
+        Architecture.Arm32: "llvm"
+        Architecture.Riscv64: "llvm"
+        Architecture.Riscv32: "llvm"
+        _: "cranelift"
+
+fn default_os_build_backend_for_target(target: OsTarget) -> text:
+    """Return the default native-build backend for an OS target."""
+    _os_build_backend_for_target(target)
+
+fn _now_ms() -> i64:
+    rt_time_now_unix_micros() / 1000
+
+fn _result_arch_slug(arch: Architecture) -> text:
+    match arch:
+        Architecture.X86_64: "x86_64"
+        Architecture.X86: "i686"
+        Architecture.Arm64: "aarch64"
+        Architecture.Arm32: "armv7"
+        Architecture.Riscv64: "riscv64"
+        Architecture.Riscv32: "riscv32"
+
+fn _result_arch_dir(arch: Architecture) -> text:
+    "{_MULTIARCH_RESULT_ROOT}/{_result_arch_slug(arch)}"
+
+fn _smoke_result_path(arch: Architecture) -> text:
+    "{_result_arch_dir(arch)}/smoke_result.json"
+
+fn _bootstrap_result_path(arch: Architecture) -> text:
+    "{_result_arch_dir(arch)}/bootstrap_result.json"
+
+fn _native_build_failure_log_path(arch: Architecture) -> text:
+    "{_result_arch_dir(arch)}/native_build_failure.log"
+
+fn _json_bool(v: bool) -> text:
+    if v:
+        return "true"
+    "false"
+
+fn _escape_json(s: text) -> text:
+    var out = ""
+    for ch in s:
+        if ch == "\\":
+            out = out + "\\\\"
+        elif ch == "\"":
+            out = out + "\\\""
+        elif ch == "\n":
+            out = out + "\\n"
+        elif ch == "\r":
+            out = out + "\\r"
+        else:
+            out = out + ch
+    out
+
+fn _status_text(ok: bool) -> text:
+    if ok:
+        return "pass"
+    "fail"
+
+fn _loader_name_for_arch(arch: Architecture) -> text:
+    match arch:
+        Architecture.X86_64: "limine"
+        Architecture.X86: "limine"
+        Architecture.Arm64: "u-boot"
+        Architecture.Arm32: "u-boot"
+        Architecture.Riscv64: "opensbi"
+        Architecture.Riscv32: "opensbi"
+
+fn _backend_title_case(raw: text) -> text:
+    if raw == "llvm":
+        return "Llvm"
+    if raw == "cranelift":
+        return "Cranelift"
+    raw
+
+fn _platform_name_for_arch(arch: Architecture) -> text:
+    arch_display_name(arch)
+
+fn _image_path_for_target(target: OsTarget) -> text:
+    simpleos_platform_disk_image_output(_platform_name_for_arch(target.arch))
+
+fn _ensure_result_dir(arch: Architecture) -> bool:
+    rt_dir_create_all(_result_arch_dir(arch))
+
+fn _smoke_result_body(target: OsTarget, success: bool, has_banner: bool, nvfs_mounted: bool, serial_output: text, exit_code: i32, baseline_match: bool) -> text:
+    "{\n" +
+        "  \"arch\": \"" + _result_arch_slug(target.arch) + "\",\n" +
+        "  \"status\": \"" + _status_text(success) + "\",\n" +
+        "  \"banner\": " + _json_bool(has_banner) + ",\n" +
+        "  \"nvfs_mounted\": " + _json_bool(nvfs_mounted) + ",\n" +
+        "  \"baseline_match\": " + _json_bool(baseline_match) + ",\n" +
+        "  \"exit_code\": " + (exit_code as i64).to_text() + ",\n" +
+        "  \"serial_tail\": \"" + _escape_json(_tail_lines(serial_output, 20)) + "\"\n" +
+        "}\n"
+
+fn _bootstrap_result_body(target: OsTarget, build_ok: bool, smoke_ok: bool, backend: text) -> text:
+    val loader = _loader_name_for_arch(target.arch)
+    val image_path = _image_path_for_target(target)
+    val backend_name = _backend_title_case(backend)
+    val dtb_field = if target.arch == Architecture.Arm64 or target.arch == Architecture.Arm32:
+        ",\n  \"dtb\": true"
+    else:
+        ""
+    "{\n" +
+        "  \"arch\": \"" + _result_arch_slug(target.arch) + "\",\n" +
+        "  \"exit_code\": " + (if build_ok: "0" else: "1") + ",\n" +
+        "  \"image_path\": \"" + _escape_json(image_path) + "\",\n" +
+        "  \"smoke_status\": \"" + _status_text(smoke_ok) + "\",\n" +
+        "  \"loader\": \"" + loader + "\",\n" +
+        "  \"backend\": \"" + backend_name + "\"" +
+        dtb_field + "\n" +
+        "}\n"
+
+fn _write_smoke_result(target: OsTarget, success: bool, has_banner: bool, serial_output: text, exit_code: i32):
+    if not _ensure_result_dir(target.arch):
+        print "[test] WARNING: could not create multiarch result dir for {arch_display_name(target.arch)}"
+        return
+    val baseline_path = "{_result_arch_dir(target.arch)}/baseline_smoke.json"
+    val baseline_match = target.arch != Architecture.X86_64 or rt_file_exists(baseline_path)
+    # Current smoke lanes do not emit one uniform NVFS-ready serial marker.
+    # Treat a green smoke run as the acceptance proxy for the mounted runtime FS.
+    val nvfs_mounted = success or serial_output.contains("nvfs") or serial_output.contains("NVFS")
+    val body = _smoke_result_body(target, success, has_banner, nvfs_mounted, serial_output, exit_code, baseline_match)
+    if not rt_file_write_text(_smoke_result_path(target.arch), body):
+        print "[test] WARNING: could not write smoke result for {arch_display_name(target.arch)}"
+    if target.arch == Architecture.X86_64 and success:
+        var refresh_baseline = not rt_file_exists(baseline_path)
+        if not refresh_baseline:
+            val (stdout, _stderr, read_exit) = rt_process_run_timeout("/bin/sh", ["-c", "cat \"" + baseline_path + "\""], 5000)
+            refresh_baseline = read_exit != 0 or not stdout.contains("\"status\": \"pass\"")
+        if refresh_baseline:
+            val _ = rt_file_write_text(baseline_path, body)
+
+fn _write_bootstrap_result(target: OsTarget, build_ok: bool, smoke_ok: bool, backend: text):
+    if not _ensure_result_dir(target.arch):
+        print "[build] WARNING: could not create multiarch result dir for {arch_display_name(target.arch)}"
+        return
+    val body = _bootstrap_result_body(target, build_ok, smoke_ok, backend)
+    if not rt_file_write_text(_bootstrap_result_path(target.arch), body):
+        print "[build] WARNING: could not write bootstrap result for {arch_display_name(target.arch)}"
+
+fn _write_native_build_failure_log(target: OsTarget, backend: text, args: [text], stdout: text, stderr: text, exit_code: i32, elapsed_ms: i64):
+    if not _ensure_result_dir(target.arch):
+        return
+    val body =
+        "arch={arch_display_name(target.arch)}\n" +
+        "backend={backend}\n" +
+        "entry={target.entry}\n" +
+        "target={target.target_triple}\n" +
+        "output={target.output}\n" +
+        "exit_code={(exit_code as i64).to_text()}\n" +
+        "elapsed_ms={elapsed_ms}\n" +
+        "args={args.join(\" \")}\n" +
+        "\n[stdout]\n{stdout}\n[stderr]\n{stderr}\n"
+    val _ = rt_file_write_text(_native_build_failure_log_path(target.arch), body)
+
+fn _tail_lines(s: text, n: i64) -> text:
+    """Return the last n newline-delimited lines of s, for compact diagnostic prints."""
+    if s == "":
+        return ""
+    val lines = s.split("\n")
+    val total = lines.len() as i64
+    if total <= n:
+        return s
+    var out: text = ""
+    var i: i64 = total - n
+    while i < total:
+        out = out + lines[i as i32] + "\n"
+        i = i + 1
+    out
+
+fn native_build_prerequisite_hint(backend: text, stderr: text) -> text:
+    """Return a concise prerequisite hint for known native-build backend failures."""
+    if backend == "llvm" and stderr.contains("LLVM backend requested but 'llvm' feature not enabled"):
+        return "LLVM backend unavailable: rebuild the selected Simple compiler with the Rust `llvm` feature and make LLVM 18 discoverable, for example with LLVM_SYS_180_PREFIX."
+    if backend == "llvm" and stderr.contains("No suitable version of LLVM was found"):
+        return "LLVM 18 is not discoverable: set LLVM_SYS_180_PREFIX or install a system LLVM 18 before building the LLVM-enabled Simple compiler."
+    if backend == "cranelift" and stderr.contains("Support for this target has not been implemented yet"):
+        return "Cranelift cannot build this freestanding target; use an LLVM-enabled Simple compiler or unset SIMPLE_OS_BUILD_BACKEND for targets that default to LLVM."
+    ""
+
+fn _print_native_build_failure_hint(arch_label: text, backend_name: text, stderr: text):
+    val hint = native_build_prerequisite_hint(backend_name, stderr)
+    if hint != "":
+        print "[build][{arch_label}] prerequisite: {hint}"
+
+fn is_qemu_success(target: OsTarget, exit_code: i32) -> bool:
+    """Interpret QEMU exit code based on architecture.
+
+    x86/x86_64 with isa-debug-exit: guest writes 0 -> QEMU exits with (0 << 1) | 1 = 1
+    ARM64/RISC-V with semihosting: exit code 0 = success
+    """
+    match target.arch:
+        Architecture.X86_64: exit_code == 1
+        Architecture.X86: exit_code == 1
+        Architecture.Arm64: exit_code == 0 or exit_code == 1
+        Architecture.Arm32: exit_code == 0 or exit_code == 1
+        _: exit_code == 0
+
+# ===========================================================================
+# OS Target Configuration
+# ===========================================================================
+
+class OsTarget:
+    """Build and QEMU configuration for a single OS architecture target."""
+    arch: Architecture
+    entry: text
+    linker_script: text
+    target_triple: text
+    output: text
+    qemu_system: text
+    qemu_machine: text
+    qemu_cpu: text
+    qemu_memory: text
+    qemu_bios: text
+    qemu_extra: [text]
+    gui_mode: bool
+
+class QemuRunOptions:
+    """Run-time launch knobs that do not change the compiled target."""
+    debug_gui_serial: bool
+    headless: bool
+
+fn qemu_run_options_default() -> QemuRunOptions:
+    QemuRunOptions(debug_gui_serial: false, headless: false)
+
+fn qemu_run_options_debug_gui() -> QemuRunOptions:
+    QemuRunOptions(debug_gui_serial: true, headless: false)
+
+fn qemu_run_options_headless() -> QemuRunOptions:
+    QemuRunOptions(debug_gui_serial: false, headless: true)
+
+fn _qemu_command_binary(target: OsTarget) -> text:
+    """Resolve the host QEMU frontend used to launch a built target.
+
+    Current QEMU releases reject the x86_32 Multiboot-style ELF under
+    `qemu-system-i386 -kernel` with a PVH-note error, while the same kernel
+    boots correctly through `qemu-system-x86_64` when paired with the 32-bit
+    `pc`/`qemu32` machine tuple. Keep the catalog metadata unchanged and only
+    swap the executable used for the kernel-only x86_32 launch path.
+    """
+    if target.arch == Architecture.X86 and target.qemu_system == "qemu-system-i386":
+        return "qemu-system-x86_64"
+    target.qemu_system
+
+fn _lane_to_target(platform_name: text, lane: SimpleOsLaneContract) -> OsTarget:
+    OsTarget(
+        arch: simpleos_platform_arch(platform_name),
+        entry: lane.entry,
+        linker_script: lane.linker_script,
+        target_triple: simpleos_platform_native_target(platform_name),
+        output: lane.output,
+        qemu_system: simpleos_platform_qemu_system(platform_name),
+        qemu_machine: simpleos_platform_qemu_machine(platform_name),
+        qemu_cpu: simpleos_platform_qemu_cpu(platform_name),
+        qemu_memory: lane.qemu_memory,
+        qemu_bios: lane.qemu_bios,
+        qemu_extra: lane.qemu_extra,
+        gui_mode: false
+    )
+
+fn catalog_os_target(platform_name: text, memory: text, qemu_extra: [text], gui_mode: bool) -> OsTarget:
+    """Build a QEMU target from the shared SimpleOS platform catalog."""
+    OsTarget(
+        arch: simpleos_platform_arch(platform_name),
+        entry: simpleos_platform_default_entry(platform_name),
+        linker_script: simpleos_platform_linker_script(platform_name),
+        target_triple: simpleos_platform_native_target(platform_name),
+        output: simpleos_platform_kernel_output(platform_name),
+        qemu_system: simpleos_platform_qemu_system(platform_name),
+        qemu_machine: simpleos_platform_qemu_machine(platform_name),
+        qemu_cpu: simpleos_platform_qemu_cpu(platform_name),
+        qemu_memory: memory,
+        qemu_bios: "",
+        qemu_extra: qemu_extra,
+        gui_mode: gui_mode
+    )
+
+fn simpleos_platform_arch(platform_name: text) -> Architecture:
+    if val target = simpleos_platform_target_by_name(platform_name):
+        return target.arch
+    Architecture.X86_64
+
+# ===========================================================================
+# Hardcoded Target Definitions
+# ===========================================================================
+
+fn get_target(arch: Architecture) -> OsTarget:
+    """Returns hardcoded target config for the given architecture."""
+    val platform_name = arch_display_name(arch)
+    _lane_to_target(platform_name, simpleos_platform_qemu_smoke_lane(platform_name))
+
+fn get_qemu_target(arch: Architecture) -> OsTarget:
+    """Return the default QEMU/run target for an architecture.
+
+    ARM and RISC-V default to filesystem-backed acceptance lanes so
+    `simple os run/test` exercises the staged userland payloads
+    (llvm/clang/rust) rather than the bare kernel-only boot target.
+    Other architectures keep their existing direct boot targets unless the
+    caller requests a named scenario.
+    """
+    if arch == Architecture.Arm64:
+        return _lane_to_target("arm64", simpleos_platform_qemu_acceptance_lane("arm64"))
+    if arch == Architecture.Arm32:
+        return _lane_to_target("arm32", simpleos_platform_qemu_acceptance_lane("arm32"))
+    if arch == Architecture.Riscv64:
+        if val lane = simpleos_platform_qemu_lane("riscv64", "riscv64-virtio-fat32-smf"):
+            return _lane_to_target("riscv64", lane)
+        return _lane_to_target("riscv64", simpleos_platform_qemu_acceptance_lane("riscv64"))
+    if arch == Architecture.Riscv32:
+        return _lane_to_target("riscv32", simpleos_platform_qemu_acceptance_lane("riscv32"))
+    get_target(arch)
+
+# ===========================================================================
+# Target Enumeration & Name Parsing
+# ===========================================================================
+
+fn get_gui_target() -> OsTarget:
+    """Returns the x86_64 GUI target with BGA framebuffer and display enabled."""
+    OsTarget(
+        arch: Architecture.X86_64,
+        entry: "examples/simple_os/arch/x86_64/gui_entry.spl",
+        linker_script: "examples/simple_os/arch/x86_64/linker.ld",
+        target_triple: "x86_64-unknown-none",
+        output: "build/os/simpleos_gui_x86_64.elf",
+        qemu_system: "qemu-system-x86_64",
+        qemu_machine: "q35",
+        qemu_cpu: "qemu64",
+        qemu_memory: "2G",
+        qemu_bios: "",
+        qemu_extra: ["-vga", "std", "-device", "isa-debug-exit,iobase=0xf4,iosize=0x04"],
+        gui_mode: true
+    )
+
+fn get_gpu_test_target() -> OsTarget:
+    """Returns the x86_64 GPU test target with VirtIO-GPU in legacy PCI mode."""
+    OsTarget(
+        arch: Architecture.X86_64,
+        entry: "examples/simple_os/arch/x86_64/gpu_test_entry.spl",
+        linker_script: "examples/simple_os/arch/x86_64/linker.ld",
+        target_triple: "x86_64-unknown-none",
+        output: "build/os/simpleos_gpu_test_x86_64.elf",
+        qemu_system: "qemu-system-x86_64",
+        qemu_machine: "q35",
+        qemu_cpu: "qemu64",
+        qemu_memory: "512M",
+        qemu_bios: "",
+        qemu_extra: ["-device", "virtio-gpu,disable-modern=on,disable-legacy=off", "-vga", "none", "-device", "isa-debug-exit,iobase=0xf4,iosize=0x04"],
+        gui_mode: true
+    )
+
+fn get_tools_test_target() -> OsTarget:
+    """Returns x86_64 tools test target with release-first NVMe + FAT32 media."""
+    OsTarget(
+        arch: Architecture.X86_64,
+        entry: "examples/simple_os/arch/x86_64/tools_test_entry.spl",
+        linker_script: "examples/simple_os/arch/x86_64/linker.ld",
+        target_triple: "x86_64-unknown-none",
+        output: "build/os/simpleos_tools_test_x86_64.elf",
+        qemu_system: "qemu-system-x86_64",
+        qemu_machine: "q35",
+        qemu_cpu: "qemu64",
+        qemu_memory: "512M",
+        qemu_bios: "",
+        qemu_extra: _x64_nvme_disk_args() + ["-device", "isa-debug-exit,iobase=0xf4,iosize=0x04"],
+        gui_mode: false
+    )
+
+fn get_fs_test_target() -> OsTarget:
+    """Returns x86_64 filesystem contract target with NVMe + FAT32 media.
+
+    The target entry is filesystem-specific and the disk image is supplied by
+    the x64-nvme-fat32 scenario. Keeping the entry target separate lets SPipe
+    reuse the same named-scenario machinery as other QEMU lanes while binding
+    the FAT32 contract to the dedicated fs test program.
+    """
+    OsTarget(
+        arch: Architecture.X86_64,
+        entry: "examples/simple_os/arch/x86_64/fs_test_entry.spl",
+        linker_script: "examples/simple_os/arch/x86_64/linker.ld",
+        target_triple: "x86_64-unknown-none",
+        output: "build/os/simpleos_fs_test_32.elf",
+        qemu_system: "qemu-system-x86_64",
+        qemu_machine: "q35",
+        qemu_cpu: "qemu64",
+        qemu_memory: "384M",
+        qemu_bios: "",
+        qemu_extra: ["-device", "isa-debug-exit,iobase=0xf4,iosize=0x04"],
+        gui_mode: false
+    )
+
+fn get_browser_soft_target() -> OsTarget:
+    """Returns the x86_64 wrapper target for the browser software smoke test.
+
+    The x86_64 baremetal build is post-processed to ELF32 so QEMU -kernel
+    can boot the multiboot image.
+    """
+    OsTarget(
+        arch: Architecture.X86_64,
+        entry: "examples/simple_os/arch/x86_64/browser_soft_entry.spl",
+        linker_script: "examples/simple_os/arch/x86_64/linker.ld",
+        target_triple: "x86_64-unknown-none",
+        output: "build/os/simpleos_browser_soft_32.elf",
+        qemu_system: "qemu-system-x86_64",
+        qemu_machine: "q35",
+        qemu_cpu: "qemu64",
+        qemu_memory: "256M",
+        qemu_bios: "",
+        qemu_extra: ["-device", "isa-debug-exit,iobase=0xf4,iosize=0x04"],
+        gui_mode: false
+    )
+
+fn get_browser_probe_target() -> OsTarget:
+    """Returns the x86_64 wrapper target for the browser probe."""
+    OsTarget(
+        arch: Architecture.X86_64,
+        entry: "examples/simple_os/arch/x86_64/browser_probe_entry.spl",
+        linker_script: "examples/simple_os/arch/x86_64/linker.ld",
+        target_triple: "x86_64-unknown-none",
+        output: "build/os/simpleos_browser_probe_32.elf",
+        qemu_system: "qemu-system-x86_64",
+        qemu_machine: "q35",
+        qemu_cpu: "qemu64",
+        qemu_memory: "128M",
+        qemu_bios: "",
+        qemu_extra: ["-device", "isa-debug-exit,iobase=0xf4,iosize=0x04"],
+        gui_mode: false
+    )
+
+fn get_desktop_browser_target() -> OsTarget:
+    """Returns the x86_64 wrapper target for Browser Demo desktop E2E."""
+    OsTarget(
+        arch: Architecture.X86_64,
+        entry: "examples/simple_os/arch/x86_64/desktop_e2e_entry.spl",
+        linker_script: "examples/simple_os/arch/x86_64/linker.ld",
+        target_triple: "x86_64-unknown-none",
+        output: "build/os/simpleos_desktop_e2e_32.elf",
+        qemu_system: "qemu-system-x86_64",
+        qemu_machine: "q35",
+        qemu_cpu: "qemu64",
+        qemu_memory: "512M",
+        qemu_bios: "",
+        qemu_extra: ["-device", "isa-debug-exit,iobase=0xf4,iosize=0x04"],
+        gui_mode: false
+    )
+
+fn get_desktop_gui_target() -> OsTarget:
+    """Returns the x86_64 interactive desktop GUI target with VFS support."""
+    OsTarget(
+        arch: Architecture.X86_64,
+        entry: "examples/simple_os/arch/x86_64/gui_entry_desktop.spl",
+        linker_script: "examples/simple_os/arch/x86_64/linker.ld",
+        target_triple: "x86_64-unknown-none",
+        output: "build/os/simpleos_desktop_gui_x86_64.elf",
+        qemu_system: "qemu-system-x86_64",
+        qemu_machine: "q35",
+        qemu_cpu: "qemu64",
+        qemu_memory: "2G",
+        qemu_bios: "",
+        qemu_extra: ["-device", "isa-debug-exit,iobase=0xf4,iosize=0x04", "-vga", "std"],
+        gui_mode: true
+    )
+
+pub fn get_ssh_live_target() -> OsTarget:
+    """Returns the x86_64 wrapper target for the live SSH shell lane."""
+    OsTarget(
+        arch: Architecture.X86_64,
+        entry: "examples/simple_os/arch/x86_64/ssh_live_entry.spl",
+        linker_script: "examples/simple_os/arch/x86_64/linker.ld",
+        target_triple: "x86_64-unknown-none",
+        output: "build/os/simpleos_ssh_live_32.elf",
+        qemu_system: "qemu-system-x86_64",
+        qemu_machine: "q35",
+        qemu_cpu: "qemu64",
+        qemu_memory: "2048M",
+        qemu_bios: "",
+        qemu_extra: ["-device", "isa-debug-exit,iobase=0xf4,iosize=0x04"],
+        gui_mode: false
+    )
+
+fn get_toolchain_vfs_probe_target() -> OsTarget:
+    """Returns the x86_64 storage-only toolchain VFS probe target."""
+    OsTarget(
+        arch: Architecture.X86_64,
+        entry: "examples/simple_os/arch/x86_64/toolchain_vfs_probe_entry.spl",
+        linker_script: "examples/simple_os/arch/x86_64/linker.ld",
+        target_triple: "x86_64-unknown-none",
+        output: "build/os/simpleos_toolchain_vfs_probe_32.elf",
+        qemu_system: "qemu-system-x86_64",
+        qemu_machine: "q35",
+        qemu_cpu: "qemu64",
+        qemu_memory: "512M",
+        qemu_bios: "",
+        qemu_extra: ["-device", "isa-debug-exit,iobase=0xf4,iosize=0x04"],
+        gui_mode: false
+    )
+
+pub fn get_ssh_x25519_probe_target() -> OsTarget:
+    """Returns the x86_64 wrapper target for the SSH X25519 guest probe."""
+    OsTarget(
+        arch: Architecture.X86_64,
+        entry: "examples/simple_os/arch/x86_64/ssh_x25519_probe_entry.spl",
+        linker_script: "examples/simple_os/arch/x86_64/linker.ld",
+        target_triple: "x86_64-unknown-none",
+        output: "build/os/simpleos_ssh_x25519_probe_32.elf",
+        qemu_system: "qemu-system-x86_64",
+        qemu_machine: "q35",
+        qemu_cpu: "qemu64",
+        qemu_memory: "2048M",
+        qemu_bios: "",
+        qemu_extra: ["-device", "isa-debug-exit,iobase=0xf4,iosize=0x04"],
+        gui_mode: false
+    )
+
+fn get_desktop_probe_target() -> OsTarget:
+    """Returns the x86_64 wrapper target for the desktop probe."""
+    OsTarget(
+        arch: Architecture.X86_64,
+        entry: "examples/simple_os/arch/x86_64/desktop_probe_entry.spl",
+        linker_script: "examples/simple_os/arch/x86_64/linker.ld",
+        target_triple: "x86_64-unknown-none",
+        output: "build/os/simpleos_desktop_probe_32.elf",
+        qemu_system: "qemu-system-x86_64",
+        qemu_machine: "q35",
+        qemu_cpu: "qemu64",
+        qemu_memory: "128M",
+        qemu_bios: "",
+        qemu_extra: ["-device", "isa-debug-exit,iobase=0xf4,iosize=0x04"],
+        gui_mode: false
+    )
+
+fn get_wm_simple_web_check_target() -> OsTarget:
+    """Returns the x86_64 wrapper target for the WM + Simple Web + Engine2D check."""
+    OsTarget(
+        arch: Architecture.X86_64,
+        entry: "examples/simple_os/arch/x86_64/gui_entry_engine2d.spl",
+        linker_script: "examples/simple_os/arch/x86_64/linker.ld",
+        target_triple: "x86_64-unknown-none",
+        output: "build/os/simpleos_wm_simple_web_check_32.elf",
+        qemu_system: "qemu-system-x86_64",
+        qemu_machine: "q35",
+        qemu_cpu: "qemu64",
+        qemu_memory: "2G",
+        qemu_bios: "",
+        qemu_extra: ["-vga", "std", "-device", "isa-debug-exit,iobase=0xf4,iosize=0x04"],
+        gui_mode: false
+    )

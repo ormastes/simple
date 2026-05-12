@@ -1,4 +1,3 @@
-# Part 1 of src/compiler/90.tools/duplicate_check/detector.spl
 # Core duplication detection engine using Karp-Rabin rolling hash
 
 use compiler.tools.duplicate_check.config.{DuplicationConfig}
@@ -44,32 +43,38 @@ fn progress_on(config: DuplicationConfig) -> bool:
 
 fn progress_interval(config: DuplicationConfig) -> i64:
     if config.progress_interval_ms < 250:
-        return 250
-    config.progress_interval_ms
+        250
+    else:
+        config.progress_interval_ms
 
 fn rss_mb() -> i64:
-    val status = file_read("/proc/self/status")
-    val lines = status.split("\n")
-    for line in lines:
+    val status = file_read("/proc/self/status") ?? ""
+    if status.len() == 0:
+        return -1
+    for line in status.split("\n"):
         if line.starts_with("VmRSS:"):
-            val parts = line.split(" ")
-            for part in parts:
-                val trimmed = part.trim()
-                if trimmed.len() == 0 or trimmed == "VmRSS:" or trimmed == "kB":
-                    continue
-                return int(trimmed) / 1024
+            val parts = line.split_whitespace()
+            if parts.len() >= 2:
+                return int(parts[1]) / 1024
     -1
 
 fn progress_tick(config: DuplicationConfig, phase: text, done: i64, total: i64, start_ms: i64, last_ms: i64) -> i64:
     if not progress_on(config):
         return last_ms
     val now = current_time_ms()
-    if last_ms > 0 and now - last_ms < progress_interval(config) and done < total:
+    val finished = total > 0 and done >= total
+    if done > 0 and not finished and now - last_ms < progress_interval(config):
         return last_ms
+    val pct = if total > 0:
+        (done * 100) / total
+    else:
+        100
     val elapsed = (now - start_ms) / 1000
-    val pct = if total > 0: (done * 100) / total else: 0
     val rss = rss_mb()
-    val rss_text = if rss >= 0: "{rss}MB" else: "n/a"
+    val rss_text = if rss >= 0:
+        "{rss}MB"
+    else:
+        "n/a"
     eprint("[dupcheck] {phase}: {done}/{total} ({pct}%) elapsed={elapsed}s rss={rss_text}")
     now
 
@@ -427,7 +432,7 @@ fn collect_repeated_hashes(files: [text], config: DuplicationConfig, cache_manag
     var hash_counts = {}
     var file_hashes = {}
     val start_ms = current_time_ms()
-    var last_ms = 0
+    var last_ms = start_ms
     var done = 0
     for file in files:
         file_hashes[file] = collect_hash_counts_in_file(file, config, cache_manager, interner, hash_counts)
@@ -540,3 +545,4 @@ fn sort_by_impact(groups: [DuplicateGroup]) -> [DuplicateGroup]:
     val left = sort_by_impact(groups[0:mid])
     val right = sort_by_impact(groups[mid:])
     _merge_groups(left, right)
+

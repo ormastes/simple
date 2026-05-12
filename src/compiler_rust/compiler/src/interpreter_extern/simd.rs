@@ -32,10 +32,7 @@ use simple_runtime::value::simd_int_ops::{
     shl_i32x4 as ffi_shl_i32x4, shl_i32x8 as ffi_shl_i32x8, shr_i32x4 as ffi_shr_i32x4, shr_i32x8 as ffi_shr_i32x8,
     sub_i32x4 as ffi_sub_i32x4, sub_i32x8 as ffi_sub_i32x8, xor_i32x4 as ffi_xor_i32x4, xor_i32x8 as ffi_xor_i32x8,
 };
-use simple_runtime::value::{
-    rt_text_count_codepoints as ffi_text_count_codepoints, rt_utf8_count_codepoints as ffi_utf8_count_codepoints,
-    rt_utf8_find_invalid as ffi_utf8_find_invalid, rt_utf8_validate as ffi_utf8_validate,
-};
+use simple_runtime::value::{rt_text_count_codepoints as ffi_text_count_codepoints};
 use std::collections::HashMap;
 use std::sync::{Arc, LazyLock, Mutex};
 
@@ -62,6 +59,32 @@ fn expect_byte_array(name: &str, value: &Value) -> Result<Vec<u8>, CompileError>
             .collect(),
         _ => Err(CompileError::runtime(format!("{name} expects an array argument"))),
     }
+}
+
+fn utf8_sequence_len(byte: u8) -> Option<usize> {
+    if byte < 0x80 {
+        Some(1)
+    } else if byte < 0xC0 {
+        None
+    } else if byte < 0xE0 {
+        Some(2)
+    } else if byte < 0xF0 {
+        Some(3)
+    } else if byte < 0xF8 {
+        Some(4)
+    } else {
+        None
+    }
+}
+
+fn count_utf8_codepoints(bytes: &[u8]) -> i64 {
+    let mut count = 0i64;
+    let mut idx = 0usize;
+    while idx < bytes.len() {
+        idx += utf8_sequence_len(bytes[idx]).unwrap_or(1);
+        count += 1;
+    }
+    count
 }
 
 pub fn rt_simd_has_sse(args: &[Value]) -> Result<Value, CompileError> {
@@ -105,14 +128,16 @@ pub fn rt_utf8_count_codepoints(args: &[Value]) -> Result<Value, CompileError> {
             "rt_utf8_count_codepoints expects 1 argument".to_string(),
         ));
     }
-    Ok(Value::Int(ffi_utf8_count_codepoints(value_to_runtime(&args[0]))))
+    let bytes = expect_byte_array("rt_utf8_count_codepoints", &args[0])?;
+    Ok(Value::Int(count_utf8_codepoints(&bytes)))
 }
 
 pub fn rt_utf8_validate(args: &[Value]) -> Result<Value, CompileError> {
     if args.len() != 1 {
         return Err(CompileError::runtime("rt_utf8_validate expects 1 argument".to_string()));
     }
-    Ok(Value::Bool(ffi_utf8_validate(value_to_runtime(&args[0]))))
+    let bytes = expect_byte_array("rt_utf8_validate", &args[0])?;
+    Ok(Value::Bool(std::str::from_utf8(&bytes).is_ok()))
 }
 
 pub fn rt_utf8_find_invalid(args: &[Value]) -> Result<Value, CompileError> {
@@ -121,7 +146,11 @@ pub fn rt_utf8_find_invalid(args: &[Value]) -> Result<Value, CompileError> {
             "rt_utf8_find_invalid expects 1 argument".to_string(),
         ));
     }
-    Ok(Value::Int(ffi_utf8_find_invalid(value_to_runtime(&args[0]))))
+    let bytes = expect_byte_array("rt_utf8_find_invalid", &args[0])?;
+    Ok(Value::Int(match std::str::from_utf8(&bytes) {
+        Ok(_) => -1,
+        Err(err) => err.valid_up_to() as i64,
+    }))
 }
 
 pub fn rt_text_count_codepoints(args: &[Value]) -> Result<Value, CompileError> {
@@ -1255,7 +1284,9 @@ pub fn rt_text_count_codepoints_cached(args: &[Value]) -> Result<Value, CompileE
         ));
     }
     let s = extract_str("rt_text_count_codepoints_cached", &args[0])?;
-    Ok(Value::Int(s.chars().count() as i64))
+    Ok(Value::Int(
+        s.as_bytes().iter().filter(|byte| (**byte & 0xC0) != 0x80).count() as i64,
+    ))
 }
 
 pub fn rt_text_is_ascii(args: &[Value]) -> Result<Value, CompileError> {
@@ -1338,10 +1369,7 @@ pub fn rt_text_to_upper_ascii(args: &[Value]) -> Result<Value, CompileError> {
         ));
     }
     let s = extract_str("rt_text_to_upper_ascii", &args[0])?;
-    let bytes: Vec<u8> = s
-        .bytes()
-        .map(|b| if b >= b'a' && b <= b'z' { b - 32 } else { b })
-        .collect();
+    let bytes: Vec<u8> = s.bytes().map(|b| b.to_ascii_uppercase()).collect();
     Ok(Value::Str(String::from_utf8_lossy(&bytes).into()))
 }
 
@@ -1352,10 +1380,7 @@ pub fn rt_text_to_lower_ascii(args: &[Value]) -> Result<Value, CompileError> {
         ));
     }
     let s = extract_str("rt_text_to_lower_ascii", &args[0])?;
-    let bytes: Vec<u8> = s
-        .bytes()
-        .map(|b| if b >= b'A' && b <= b'Z' { b + 32 } else { b })
-        .collect();
+    let bytes: Vec<u8> = s.bytes().map(|b| b.to_ascii_lowercase()).collect();
     Ok(Value::Str(String::from_utf8_lossy(&bytes).into()))
 }
 

@@ -1,0 +1,279 @@
+# Part 3 of src/app/wm_compare/html_compat.spl
+use app.wm_compare.html_compat.*
+# HTML Compat — Phase 2 Chrome ↔ Simple HTML/CSS Pixel Equivalence
+#
+# Incrementally captures the same HTML fixture from two render sources:
+#   A  checked-in Electron / Chromium golden PPMs
+#   B  Simple Browser Engine (BrowserRenderer.render_html_to_pixels)
+#
+# Renders at 320x240. Iterates fixtures in order (00..03 + 10..17 layered on
+# top of 02_block_boxes.html) and stops at the first divergent fixture.
+#
+# Output:
+#   test/baselines/html_compat/<id>/chrome.ppm
+#   test/baselines/html_compat/<id>/simple.ppm
+#   test/baselines/html_compat/<id>/diff_chrome_vs_simple.ppm  (on mismatch)
+#   test/baselines/html_compat/<id>/report.sdn
+#
+# Usage:
+#   bin/simple run src/app/wm_compare/html_compat.spl
+#   bin/simple run src/app/wm_compare/html_compat.spl --only=02_block_boxes
+#   bin/simple run src/app/wm_compare/html_compat.spl --update-baseline
+#   bin/simple run src/app/wm_compare/html_compat.spl --skip-simple
+
+use std.cli.cli_util.{get_cli_args}
+use std.nogc_sync_mut.ffi.io.{
+    file_write_text,
+    dir_create_all}
+use common.string_builder.{StringBuilder}
+
+# rt_file_read_text and rt_file_read_bytes are wrapped in Option by the
+# bootstrap interpreter, so we declare them directly and use the `?? ""`
+# / `?? []` fallback pattern (matching the test_runner / database modules).
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_read_bytes(path: text) -> [u8]
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_file_write_bytes(path: text, data: [u8]) -> bool
+
+# rt_process_run is the raw runtime extern. We invoke it directly because
+# `capture_electron`'s `val (out, err, exit_code) = shell(...)` struct
+# destructure trips an interpreter bug ("variable `exit_code` not found"),
+# and the parent path uses `std.io.shell` which behaves slightly different
+# under bootstrap. Going through the runtime extern keeps the harness
+# portable across stages.
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+extern fn rt_process_run_timeout(cmd: text, args: [text], timeout_ms: i64) -> (text, text, i32)
+# NOTE: We do NOT use std.common.image.ppm_decode here. Its
+# `decode_ppm_to_argb` calls `data.len().to_i32()`, which crashes under
+# the bootstrap interpreter ("method `to_i32` not found on type i64").
+# We inline a minimal P6 decoder below using `as i32` casts.
+
+extern fn rt_env_get(key: text) -> text?
+extern fn rt_env_cwd() -> text
+
+fn compare_pair(fixture: Fixture, chrome: CaptureResult, simple: CaptureResult,
+                width: i32, height: i32) -> PairResult:
+    """Compare a Chrome capture against a Simple capture under the
+    fixture's tolerance profile."""
+    if not chrome.success:
+        return PairResult(
+            fixture_id: fixture.id,
+            chrome_ok: false, chrome_error: chrome.error,
+            simple_ok: simple.success, simple_error: simple.error,
+            exact: false, different_pixels: 0,
+            match_pct_10000: 0, perceptual_pct_10000: 0,
+            max_channel_diff: 0,
+            accepted: false, diff_path: ""
+        )
+    if not simple.success:
+        return PairResult(
+            fixture_id: fixture.id,
+            chrome_ok: true, chrome_error: "",
+            simple_ok: false, simple_error: simple.error,
+            exact: false, different_pixels: 0,
+            match_pct_10000: 0, perceptual_pct_10000: 0,
+            max_channel_diff: 0,
+            accepted: false, diff_path: ""
+        )
+
+    val overall = compare_exact(chrome.pixels, simple.pixels, width, height)
+    if overall.different_pixels == 0:
+        return PairResult(
+            fixture_id: fixture.id,
+            chrome_ok: true, chrome_error: "",
+            simple_ok: true, simple_error: "",
+            exact: true, different_pixels: 0,
+            match_pct_10000: 10000, perceptual_pct_10000: 10000,
+            max_channel_diff: 0,
+            accepted: true, diff_path: ""
+        )
+
+    val profile = if fixture.strict: profile_strict() else: profile_text_tolerant()
+    val perc = compare_perceptual(
+        chrome.pixels, simple.pixels, width, height,
+        profile.default_yiq_threshold, true)
+
+    # Acceptance: Chromium parity uses the existing ≤1% perceptual budget.
+    var ok = false
+    val floor = 9900
+    if perc.match_percentage >= floor:
+        ok = true
+
+    # Diff PPM generation is intentionally skipped here: in the bootstrap
+    # interpreter, writing a full 320x240 text PPM on every mismatch can exceed
+    # the harness timeout. The exact/perceptual metrics remain the bitwise gate.
+    val dpath = ""
+
+    PairResult(
+        fixture_id: fixture.id,
+        chrome_ok: true, chrome_error: "",
+        simple_ok: true, simple_error: "",
+        exact: false,
+        different_pixels: overall.different_pixels,
+        match_pct_10000: overall.match_percentage,
+        perceptual_pct_10000: perc.match_percentage,
+        max_channel_diff: overall.max_channel_diff,
+        accepted: ok,
+        diff_path: dpath
+    )
+
+# ============================================================================
+# Report
+# ============================================================================
+
+fn _bool_text(b: bool) -> text:
+    if b: "true" else: "false"
+
+fn write_report(fixture: Fixture, chrome: CaptureResult, simple: CaptureResult,
+                pair: PairResult, opts: HtmlCompatOpts) -> bool:
+    """Write an SDN report for one fixture run."""
+    var body = "(html_compat_report\n"
+    body = body + "  fixture: {fixture.id}\n"
+    body = body + "  viewport: (width: {chrome.width} height: {chrome.height})\n"
+    body = body + "  html: \"{fixture.html_path}\"\n"
+    body = body + "  css: \"{fixture.css_path}\"\n"
+    body = body + "  strict: {_bool_text(fixture.strict)}\n"
+    body = body + "  tolerance: \"perceptual_match_floor_9900_10000\"\n"
+    body = body + "  simple_timeout_ms: {opts.simple_timeout_ms}\n"
+    body = body + "  chromium_capture_source: \"checked_in_ppm_or_update_baseline_electron\"\n"
+    body = body + "  chrome: (capture success: {_bool_text(chrome.success)}"
+    body = body + " width: {chrome.width} height: {chrome.height}"
+    body = body + " pixel_count: {chrome.pixels.len()}"
+    body = body + " error: \"{chrome.error}\")\n"
+    body = body + "  simple: (capture success: {_bool_text(simple.success)}"
+    body = body + " width: {simple.width} height: {simple.height}"
+    body = body + " pixel_count: {simple.pixels.len()}"
+    body = body + " error: \"{simple.error}\")\n"
+    body = body + "  compare: (exact: {_bool_text(pair.exact)}"
+    body = body + " accepted: {_bool_text(pair.accepted)}"
+    body = body + " different_pixels: {pair.different_pixels}"
+    body = body + " match_pct_10000: {pair.match_pct_10000}"
+    body = body + " perceptual_pct_10000: {pair.perceptual_pct_10000}"
+    body = body + " max_channel_diff: {pair.max_channel_diff}"
+    body = body + " diff_ppm: \"{pair.diff_path}\")\n"
+    body = body + ")\n"
+
+    dir_create_all(baseline_dir(fixture.id))
+    file_write_text(report_sdn_path(fixture.id), body)
+
+# ============================================================================
+# Run-One Driver
+# ============================================================================
+
+fn run_fixture(fixture: Fixture, opts: HtmlCompatOpts) -> PairResult:
+    """Capture Chrome + Simple for one fixture and compare."""
+    print "[html_compat] Fixture: {fixture.id}"
+    print "[html_compat]   html: {fixture.html_path}"
+    if fixture.css_path != "":
+        print "[html_compat]   css:  {fixture.css_path}"
+
+    val combined = load_combined_html(fixture)
+    if combined.len() == 0:
+        print "[html_compat]   ERROR: empty combined HTML (fixture missing?)"
+        val empty = capture_error("missing", opts.width, opts.height, "empty combined HTML")
+        return compare_pair(fixture, empty, empty, opts.width, opts.height)
+
+    val chrome = if opts.update_baseline:
+        print "[html_compat]   regenerating source A (Chrome via Electron)..."
+        capture_chrome(combined, opts.width, opts.height)
+    else:
+        print "[html_compat]   loading source A (checked-in Chromium golden)..."
+        load_chrome_golden(fixture, opts.width, opts.height)
+    if chrome.success:
+        print "[html_compat]     ok  pixels={chrome.pixels.len()}"
+        if opts.update_baseline:
+            dir_create_all(baseline_dir(fixture.id))
+            _write_ppm_local(chrome.pixels, chrome.width, chrome.height, chrome_ppm_path(fixture.id))
+            print "[html_compat]     wrote {chrome_ppm_path(fixture.id)}"
+    else:
+        print "[html_compat]     fail: {chrome.error}"
+
+    var simple: CaptureResult = capture_error(
+        "simple_browser_engine", opts.width, opts.height,
+        "skipped via --skip-simple")
+
+    if not opts.skip_simple:
+        print "[html_compat]   capturing source B (Simple browser engine)..."
+        simple = capture_simple(fixture.id, combined, opts.width, opts.height, opts.simple_timeout_ms)
+        if simple.success:
+            print "[html_compat]     ok  pixels={simple.pixels.len()}"
+            dir_create_all(baseline_dir(fixture.id))
+            _write_ppm_local(simple.pixels, simple.width, simple.height, simple_ppm_path(fixture.id))
+            print "[html_compat]     wrote {simple_ppm_path(fixture.id)}"
+        else:
+            print "[html_compat]     fail: {simple.error}"
+
+    val pair = compare_pair(fixture, chrome, simple, opts.width, opts.height)
+    write_report(fixture, chrome, simple, pair, opts)
+
+    if not pair.chrome_ok:
+        print "[html_compat]   RESULT: chrome capture failed"
+    elif not pair.simple_ok:
+        print "[html_compat]   RESULT: simple capture failed"
+    elif pair.exact:
+        print "[html_compat]   RESULT: EXACT match"
+    elif pair.accepted:
+        val pct_w = pair.perceptual_pct_10000 / 100
+        val pct_f = pair.perceptual_pct_10000 % 100
+        print "[html_compat]   RESULT: perceptual pass {pct_w}.{pct_f}% (≤1% budget)"
+    else:
+        val pct_w = pair.match_pct_10000 / 100
+        val pct_f = pair.match_pct_10000 % 100
+        print "[html_compat]   RESULT: DIVERGENT — {pair.different_pixels} px differ ({pct_w}.{pct_f}% exact)"
+        print "[html_compat]     diff: {pair.diff_path}"
+    pair
+
+# ============================================================================
+# Entry Point
+# ============================================================================
+
+fn matches_only(fixture: Fixture, only: text) -> bool:
+    only == "" or fixture.id == only
+
+fn main() -> i64:
+    val args = get_cli_args()
+    if args.len() > 0 and args[0] == "test":
+        return 0
+    var opts = parse_opts(args)
+
+    if opts.help:
+        print_help()
+        return 0
+
+    val catalog = build_catalog()
+    print "[html_compat] Chromium golden <-> Simple — {catalog.len()} fixtures, {opts.width}x{opts.height}"
+
+    var first_divergent: text = ""
+    var ran_count = 0
+    var blocked = false
+
+    for fixture in catalog:
+        if not matches_only(fixture, opts.only):
+            continue
+        ran_count = ran_count + 1
+        val pair = run_fixture(fixture, opts)
+
+        if opts.update_baseline and opts.skip_simple:
+            continue
+
+        if not pair.accepted:
+            # Otherwise stop at the first real divergent fixture per
+            # the Phase 2 decision rule.
+            if first_divergent == "":
+                first_divergent = fixture.id
+                if not pair.simple_ok:
+                    blocked = true
+            break
+
+    print ""
+    print "[html_compat] Summary: ran {ran_count} fixture(s)"
+    if first_divergent == "":
+        print "[html_compat] All fixtures accepted. Phase 2 progression complete."
+        return 0
+    if blocked:
+        print "[html_compat] BLOCKED at fixture: {first_divergent}"
+        print "[html_compat]   (Source B / Simple engine could not capture — see report.sdn)"
+        return 2
+    print "[html_compat] First divergent fixture: {first_divergent}"
+    print "[html_compat]   See test/baselines/html_compat/{first_divergent}/report.sdn"
+    1

@@ -20,6 +20,12 @@ use os.kernel.net.tcp_shim_state.{
     ShimFdEntry, shim_alloc_fd, shim_get, shim_set, shim_remove,
     parse_host_port, make_sock_addr, sock_addr_to_text, HostPort
 }
+use os.services.netstack.netstack_init.{
+    net_tcp_available, net_tcp_bind, net_tcp_accept, net_tcp_connect,
+    net_tcp_read, net_tcp_write, net_tcp_close
+}
+
+extern fn rt_text_to_bytes(s: text) -> [u8]
 
 # ============================================================================
 # Stub-local counters (no real netstack wiring yet)
@@ -42,9 +48,14 @@ fn rt_io_tcp_bind(addr: text) -> i64:
     if hp == nil:
         return -1
 
-    # Allocate a fake os_fd for bookkeeping
-    val os_fd = g_next_os_fd
-    g_next_os_fd = g_next_os_fd + 1
+    val os_fd = if net_tcp_available():
+        net_tcp_bind(hp.unwrap().ip.value, hp.unwrap().port, 128u32).to_i32()
+    else:
+        g_next_os_fd
+    if os_fd < 0:
+        return -1
+    if not net_tcp_available():
+        g_next_os_fd = g_next_os_fd + 1
 
     # Allocate shim fd and track
     val shim_fd = shim_alloc_fd()
@@ -72,7 +83,22 @@ fn rt_io_tcp_accept(fd: i64) -> i64:
     if not e.is_listening:
         return -1
 
-    # TODO: wire to real NetstackService accept queue
+    if net_tcp_available():
+        val client_os_fd = net_tcp_accept(e.os_fd.to_i64())
+        if client_os_fd < 0:
+            return -1
+
+        val shim_fd = shim_alloc_fd()
+        val client_entry = ShimFdEntry(
+            fd: shim_fd, os_fd: client_os_fd.to_i32(),
+            bound_addr: e.bound_addr, peer_addr_text: "",
+            is_listening: false, nonblocking: e.nonblocking,
+            nodelay: e.nodelay, read_timeout_ms: e.read_timeout_ms,
+            write_timeout_ms: e.write_timeout_ms
+        )
+        shim_set(shim_fd, client_entry)
+        return shim_fd
+
     -1
 
 @export("C")
@@ -89,7 +115,15 @@ fn rt_io_tcp_accept_timeout(fd: i64, ms: i64) -> i64:
     if not e.is_listening:
         return -1
 
-    # TODO: wire to real NetstackService accept queue with ms budget
+    if net_tcp_available():
+        var waited: i64 = 0
+        while waited <= ms:
+            val client_fd = rt_io_tcp_accept(fd)
+            if client_fd >= 0:
+                return client_fd
+            waited = waited + 1
+        return -1
+
     -1
 
 # ============================================================================
@@ -107,8 +141,14 @@ fn rt_io_tcp_connect(addr: text) -> i64:
     if hp == nil:
         return -1
 
-    val os_fd = g_next_os_fd
-    g_next_os_fd = g_next_os_fd + 1
+    val os_fd = if net_tcp_available():
+        net_tcp_connect(hp.unwrap().ip.value, hp.unwrap().port, 2000u64).to_i32()
+    else:
+        g_next_os_fd
+    if os_fd < 0:
+        return -1
+    if not net_tcp_available():
+        g_next_os_fd = g_next_os_fd + 1
 
     val shim_fd = shim_alloc_fd()
     val entry = ShimFdEntry(
@@ -142,7 +182,9 @@ fn rt_io_tcp_read(fd: i64, size: i64) -> [u8]:
     if entry == nil:
         return []
 
-    # TODO: wire to real TcpConnection recv_data
+    if net_tcp_available():
+        return net_tcp_read(entry.unwrap().os_fd.to_i64(), size.to_u64())
+
     []
 
 @export("C")
@@ -168,7 +210,9 @@ fn rt_io_tcp_write(fd: i64, data: [u8]) -> i64:
     if entry == nil:
         return -1
 
-    # TODO: wire to real TcpConnection send_data
+    if net_tcp_available():
+        return net_tcp_write(entry.unwrap().os_fd.to_i64(), data)
+
     data.len().to_i64()
 
 @export("C")
@@ -181,7 +225,9 @@ fn rt_io_tcp_write_text(fd: i64, data: text) -> i64:
     if entry == nil:
         return -1
 
-    # TODO: wire to real TcpConnection send_data with text-to-bytes
+    if net_tcp_available():
+        return net_tcp_write(entry.unwrap().os_fd.to_i64(), rt_text_to_bytes(data))
+
     data.len().to_i64()
 
 @export("C")
@@ -207,7 +253,10 @@ fn rt_io_tcp_close(fd: i64) -> bool:
     if entry == nil:
         return false
 
-    # TODO: wire to real TcpConnection close + SocketTable close
+    if net_tcp_available():
+        val closed = net_tcp_close(entry.unwrap().os_fd.to_i64())
+        if not closed:
+            return false
     shim_remove(fd)
     true
 

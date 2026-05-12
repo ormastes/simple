@@ -532,6 +532,7 @@ int64_t  rt_sdl2_poll_event(void);
 int64_t  rt_sdl2_event_key_code(void);
 int64_t  rt_sdl2_event_key_sym(void);
 int64_t  rt_sdl2_event_key_mod(void);
+const char* rt_sdl2_event_text(void);
 int64_t  rt_sdl2_event_mouse_x(void);
 int64_t  rt_sdl2_event_mouse_y(void);
 int64_t  rt_sdl2_event_mouse_button(void);
@@ -553,6 +554,29 @@ int64_t  rt_sdl2_get_ticks_ns(void);
 /* Window state */
 int64_t  rt_sdl2_window_should_close(void);
 void     rt_sdl2_clear_quit(void);
+
+/* SDL editor-facing aliases. These forward to the existing SDL2 backend. */
+int64_t  rt_sdl_init(void);
+void     rt_sdl_quit(void);
+int64_t  rt_sdl_create_window(const char* title, int64_t width, int64_t height);
+void     rt_sdl_destroy_window(int64_t handle);
+int64_t  rt_sdl_get_window_width(int64_t handle);
+int64_t  rt_sdl_get_window_height(int64_t handle);
+void     rt_sdl_set_window_title(int64_t handle, const char* title);
+void     rt_sdl_present_rgba(int64_t window_handle, SplArray* pixels,
+                              int64_t width, int64_t height);
+int64_t  rt_sdl_poll_event(void);
+int64_t  rt_sdl_event_key_sym(void);
+int64_t  rt_sdl_event_key_mod(void);
+const char* rt_sdl_event_text(void);
+int64_t  rt_sdl_event_mouse_x(void);
+int64_t  rt_sdl_event_mouse_y(void);
+int64_t  rt_sdl_event_mouse_button(void);
+int64_t  rt_sdl_window_should_close(void);
+void     rt_sdl_clear_quit(void);
+int64_t  rt_sdl_event_window_event_id(void);
+int64_t  rt_sdl_event_window_data1(void);
+int64_t  rt_sdl_event_window_data2(void);
 
 /* Window events */
 int64_t  rt_sdl2_event_window_event_id(void);
@@ -607,6 +631,7 @@ void     simd_text_init(void);
 /* ===== SIMD UTF-8 Operations ===== */
 
 int64_t  rt_text_count_codepoints_cached(int64_t value);
+int64_t  rt_text_count_codepoints(int64_t value);
 int64_t  rt_text_validate_utf8(int64_t value);
 int64_t  rt_text_find_invalid_utf8(int64_t value);
 

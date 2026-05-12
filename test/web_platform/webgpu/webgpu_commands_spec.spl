@@ -1,0 +1,77 @@
+use std.spec.*
+use std.gc_async_mut.gpu.browser_engine.webgpu_commands.{
+    WebGPUCommandEncoder, WebGPUQueue,
+    WEBGPU_COMMAND_BEGIN_RENDER_PASS, WEBGPU_COMMAND_END_RENDER_PASS,
+    WEBGPU_COMMAND_BEGIN_COMPUTE_PASS, WEBGPU_COMMAND_END_COMPUTE_PASS,
+    WEBGPU_COMMAND_SET_PIPELINE, WEBGPU_COMMAND_SET_BIND_GROUP,
+    WEBGPU_COMMAND_DRAW, WEBGPU_COMMAND_DISPATCH_WORKGROUPS
+}
+
+describe "Browser WebGPU command encoding":
+    describe "render pass recording":
+        it "records a render pass and submits a command buffer":
+            var encoder = WebGPUCommandEncoder.create("frame")
+            expect(encoder.begin_render_pass()).to_equal(true)
+            expect(encoder.set_pipeline(7)).to_equal(true)
+            expect(encoder.set_bind_group(0, 4)).to_equal(true)
+            expect(encoder.draw(3, 1)).to_equal(true)
+            expect(encoder.end_render_pass()).to_equal(true)
+            val command_buffer = encoder.finish("frame-commands")
+            expect(command_buffer.valid).to_equal(true)
+            expect(command_buffer.command_count()).to_equal(5)
+            expect(command_buffer.commands[0].kind).to_equal(WEBGPU_COMMAND_BEGIN_RENDER_PASS)
+            expect(command_buffer.commands[1].kind).to_equal(WEBGPU_COMMAND_SET_PIPELINE)
+            expect(command_buffer.commands[2].kind).to_equal(WEBGPU_COMMAND_SET_BIND_GROUP)
+            expect(command_buffer.commands[3].kind).to_equal(WEBGPU_COMMAND_DRAW)
+            expect(command_buffer.commands[4].kind).to_equal(WEBGPU_COMMAND_END_RENDER_PASS)
+
+            var queue = WebGPUQueue.create()
+            expect(queue.submit([command_buffer])).to_equal(true)
+            expect(queue.submitted_count()).to_equal(1)
+            expect(queue.submitted_command_count()).to_equal(5)
+
+        it "rejects draw outside a render pass":
+            var encoder = WebGPUCommandEncoder.create("frame")
+            expect(encoder.draw(3, 1)).to_equal(false)
+            expect(encoder.last_error).to_equal("GPURenderPassEncoder draw requires an active render pass")
+
+    describe "compute pass recording":
+        it "records dispatch workgroups":
+            var encoder = WebGPUCommandEncoder.create("compute")
+            expect(encoder.begin_compute_pass()).to_equal(true)
+            expect(encoder.set_pipeline(9)).to_equal(true)
+            expect(encoder.dispatch_workgroups(2, 3, 1)).to_equal(true)
+            expect(encoder.end_compute_pass()).to_equal(true)
+            val command_buffer = encoder.finish("compute-commands")
+            expect(command_buffer.valid).to_equal(true)
+            expect(command_buffer.command_count()).to_equal(4)
+            expect(command_buffer.commands[0].kind).to_equal(WEBGPU_COMMAND_BEGIN_COMPUTE_PASS)
+            expect(command_buffer.commands[1].kind).to_equal(WEBGPU_COMMAND_SET_PIPELINE)
+            expect(command_buffer.commands[2].kind).to_equal(WEBGPU_COMMAND_DISPATCH_WORKGROUPS)
+            expect(command_buffer.commands[2].workgroups_x).to_equal(2)
+            expect(command_buffer.commands[3].kind).to_equal(WEBGPU_COMMAND_END_COMPUTE_PASS)
+
+        it "rejects dispatch outside a compute pass":
+            var encoder = WebGPUCommandEncoder.create("compute")
+            expect(encoder.dispatch_workgroups(1, 1, 1)).to_equal(false)
+            expect(encoder.last_error).to_equal("GPUComputePassEncoder dispatch requires an active compute pass")
+
+    describe "encoder and queue validation":
+        it "rejects finish while a pass is active":
+            var encoder = WebGPUCommandEncoder.create("frame")
+            expect(encoder.begin_render_pass()).to_equal(true)
+            val command_buffer = encoder.finish("bad")
+            expect(command_buffer.valid).to_equal(false)
+            expect(command_buffer.error).to_equal("GPUCommandEncoder cannot finish while a pass is active")
+
+        it "rejects recording after finish":
+            var encoder = WebGPUCommandEncoder.create("frame")
+            val command_buffer = encoder.finish("empty")
+            expect(command_buffer.valid).to_equal(true)
+            expect(encoder.begin_render_pass()).to_equal(false)
+            expect(encoder.last_error).to_equal("GPUCommandEncoder is already finished")
+
+        it "rejects empty queue submissions":
+            var queue = WebGPUQueue.create()
+            expect(queue.submit([])).to_equal(false)
+            expect(queue.last_error).to_equal("GPUQueue submit requires at least one command buffer")

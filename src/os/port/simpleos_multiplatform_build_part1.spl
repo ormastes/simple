@@ -1,0 +1,281 @@
+# Part 1 of src/os/port/simpleos_multiplatform_build.spl
+use os.port.simpleos_multiplatform_build.*
+# SimpleOS Multi-Platform Build Catalog
+#
+# Centralizes target triples, C/ASM boot inputs, and freestanding compiler
+# flags for SimpleOS kernel and boot-wrapper binaries.
+
+use os.kernel.arch.arch_context.{Architecture}
+
+enum SimpleOsNativeImplementationKind:
+    Simple
+    EmbeddedAsm
+    StandaloneAsm
+    NativeC
+    NativeObject
+
+enum SimpleOsStandaloneAsmPolicy:
+    Disallowed
+    EntryStubsOnly
+    BroadNativeSurface
+
+enum SimpleOsFirmwareContractKind:
+    LimineBios
+    LimineUefi
+    UBootDtb
+    OpenSbi
+    RawLoader
+    HostedPayload
+
+enum SimpleOsImageLayoutKind:
+    KernelOnly
+    Fat32Disk
+    VirtioFat32
+    HostedVirtioFat32
+    UefiNvmeFat32
+    BoardBundle
+
+enum SimpleOsLaneKind:
+    Smoke
+    FsExec
+    HostedCompileSmoke
+    BoardCompileSmoke
+
+class SimpleOsStagedToolchainAppContract:
+    app_name: text
+    app_path: text
+    manifest_path: text
+    require_process_backed_launch: bool
+    require_vfs_read: bool
+    native_launch_mode: text
+    native_launch_status: text
+
+class SimpleOsLaneContract:
+    name: text
+    lane_kind: SimpleOsLaneKind
+    firmware_contract: SimpleOsFirmwareContractKind
+    image_layout: SimpleOsImageLayoutKind
+    entry: text
+    linker_script: text
+    output: text
+    qemu_memory: text
+    qemu_bios: text
+    qemu_extra: [text]
+    timeout_ms: i64
+    staged_apps: [SimpleOsStagedToolchainAppContract]
+    required_serial_markers: [text]
+    board_adapter_id: text
+    media_path_hint: text
+
+class SimpleOsPlatformBuildTarget:
+    name: text
+    aliases: [text]
+    arch: Architecture
+    arch_name: text
+    bits: i64
+    isa: text
+    abi: text
+    float_abi: text
+    native_target: text
+    clang_target: text
+    qemu_system: text
+    qemu_machine: text
+    qemu_cpu: text
+    qemu_serial_kind: text
+    qemu_serial_base: u64
+    boot_firmware_contract: SimpleOsFirmwareContractKind
+    default_image_layout: SimpleOsImageLayoutKind
+    board_adapter_id: text
+    linker_script: text
+    default_entry: text
+    output: text
+    platform_slug: text
+    kernel_output: text
+    disk_image_output: text
+    staged_toolchain_apps: [SimpleOsStagedToolchainAppContract]
+    qemu_smoke_lane: SimpleOsLaneContract
+    qemu_acceptance_lane: SimpleOsLaneContract
+    qemu_additional_lanes: [SimpleOsLaneContract]
+    board_lane: SimpleOsLaneContract?
+    source_roots: [text]
+    boot_c_sources: [text]
+    boot_asm_sources: [text]
+    grandfathered_native_sources: [text]
+    boot_impl_kind: SimpleOsNativeImplementationKind
+    runtime_impl_kind: SimpleOsNativeImplementationKind
+    standalone_asm_policy: SimpleOsStandaloneAsmPolicy
+    c_flags: [text]
+    asm_flags: [text]
+    link_flags: [text]
+    notes: text
+
+fn _common_c_flags(clang_target: text) -> [text]:
+    [
+        "--target={clang_target}",
+        "-ffreestanding",
+        "-nostdlib",
+        "-fno-builtin",
+        "-fno-stack-protector",
+        "-fno-exceptions",
+        "-fno-unwind-tables",
+        "-fno-asynchronous-unwind-tables",
+        "-O2"
+    ]
+
+fn _common_asm_flags(clang_target: text) -> [text]:
+    [
+        "--target={clang_target}",
+        "-ffreestanding"
+    ]
+
+fn _x86_32_c_flags() -> [text]:
+    var flags = _common_c_flags("i686-unknown-none-elf")
+    flags.push("-m32")
+    flags.push("-march=i686")
+    flags.push("-mno-sse")
+    flags.push("-mno-mmx")
+    flags.push("-fno-pic")
+    flags.push("-DSIMPLEOS_ARCH_X86_32=1")
+    flags
+
+fn _x86_32_asm_flags() -> [text]:
+    var flags = _common_asm_flags("i686-unknown-none-elf")
+    flags.push("-m32")
+    flags.push("-march=i686")
+    flags
+
+fn _x86_64_c_flags() -> [text]:
+    var flags = _common_c_flags("x86_64-unknown-none-elf")
+    flags.push("-mno-red-zone")
+    flags.push("-DSIMPLEOS_ARCH_X86_64=1")
+    flags
+
+fn _aarch64_c_flags() -> [text]:
+    var flags = _common_c_flags("aarch64-unknown-none-elf")
+    flags.push("-DSIMPLEOS_ARCH_AARCH64=1")
+    flags
+
+fn _arm32_c_flags() -> [text]:
+    var flags = _common_c_flags("armv7-unknown-none-eabihf")
+    flags.push("-DSIMPLEOS_ARCH_ARM32=1")
+    flags
+
+fn _riscv64_c_flags() -> [text]:
+    var flags = _common_c_flags("riscv64-unknown-none-elf")
+    flags.push("-march=rv64gc")
+    flags.push("-mabi=lp64d")
+    flags.push("-DSIMPLEOS_ARCH_RISCV64=1")
+    flags
+
+fn _riscv32_c_flags() -> [text]:
+    var flags = _common_c_flags("riscv32-unknown-none-elf")
+    flags.push("-march=rv32imac")
+    flags.push("-mabi=ilp32")
+    flags.push("-DSIMPLEOS_ARCH_RISCV32=1")
+    flags
+
+fn _tool_app_contract(
+    app_name: text,
+    manifest_path: text,
+    require_process_backed_launch: bool,
+    require_vfs_read: bool,
+    native_launch_mode: text,
+    native_launch_status: text
+) -> SimpleOsStagedToolchainAppContract:
+    SimpleOsStagedToolchainAppContract(
+        app_name: app_name,
+        app_path: "/sys/apps/{app_name}",
+        manifest_path: manifest_path,
+        require_process_backed_launch: require_process_backed_launch,
+        require_vfs_read: require_vfs_read,
+        native_launch_mode: native_launch_mode,
+        native_launch_status: native_launch_status
+    )
+
+fn _process_vfs_tool_app(app_name: text) -> SimpleOsStagedToolchainAppContract:
+    _tool_app_contract(app_name, "", true, true, "", "")
+
+fn _native_toolchain_app(app_name: text, manifest_path: text) -> SimpleOsStagedToolchainAppContract:
+    _tool_app_contract(app_name, manifest_path, true, true, "native-filesystem-app", "standalone-required")
+
+fn _arm_toolchain_apps() -> [SimpleOsStagedToolchainAppContract]:
+    [
+        _process_vfs_tool_app("simple_compiler"),
+        _process_vfs_tool_app("simple_loader"),
+        _process_vfs_tool_app("clang"),
+        _process_vfs_tool_app("rust")
+    ]
+
+fn _riscv_toolchain_apps() -> [SimpleOsStagedToolchainAppContract]:
+    [
+        _process_vfs_tool_app("simple_compiler"),
+        _process_vfs_tool_app("simple_loader"),
+        _native_toolchain_app("llvm", "/SYS/LLVMMAN.TXT"),
+        _native_toolchain_app("clang", "/SYS/CLANGMAN.TXT"),
+        _native_toolchain_app("rust", "/SYS/RUSTMAN.TXT")
+    ]
+
+fn _x86_toolchain_apps() -> [SimpleOsStagedToolchainAppContract]:
+    [
+        _process_vfs_tool_app("simple_compiler"),
+        _process_vfs_tool_app("simple_loader"),
+        _native_toolchain_app("llvm", "/SYS/LLVMMAN.TXT"),
+        _native_toolchain_app("clang", "/SYS/CLANGMAN.TXT"),
+        _native_toolchain_app("rust", "/SYS/RUSTMAN.TXT")
+    ]
+
+fn _toolchain_lane_markers(
+    lane_name: text,
+    staged_apps: [SimpleOsStagedToolchainAppContract],
+    extra_markers: [text]
+) -> [text]:
+    var markers: [text] = []
+    for app in staged_apps:
+        if app.require_process_backed_launch:
+            markers.push("[desktop-e2e] process-backed:ok app={app.app_name} pid=")
+        if app.require_vfs_read:
+            markers.push("[desktop-e2e] vfs-app-read:ok source=generic-vfs path={app.app_path} bytes=")
+        if app.native_launch_mode != "" and app.manifest_path != "":
+            markers.push(
+                "[desktop-e2e] native-toolchain-launch:ok app={app.app_name} lane={lane_name} mode={app.native_launch_mode} status={app.native_launch_status} tool={app.app_path} manifest={app.manifest_path}"
+            )
+    for marker in extra_markers:
+        markers.push(marker)
+    if staged_apps.len() > 0 or extra_markers.len() > 0:
+        markers.push("TEST PASSED")
+    markers
+
+fn _lane_contract(
+    name: text,
+    lane_kind: SimpleOsLaneKind,
+    firmware_contract: SimpleOsFirmwareContractKind,
+    image_layout: SimpleOsImageLayoutKind,
+    entry: text,
+    linker_script: text,
+    output: text,
+    qemu_memory: text,
+    qemu_bios: text,
+    qemu_extra: [text],
+    timeout_ms: i64,
+    staged_apps: [SimpleOsStagedToolchainAppContract],
+    extra_markers: [text],
+    board_adapter_id: text,
+    media_path_hint: text
+) -> SimpleOsLaneContract:
+    SimpleOsLaneContract(
+        name: name,
+        lane_kind: lane_kind,
+        firmware_contract: firmware_contract,
+        image_layout: image_layout,
+        entry: entry,
+        linker_script: linker_script,
+        output: output,
+        qemu_memory: qemu_memory,
+        qemu_bios: qemu_bios,
+        qemu_extra: qemu_extra,
+        timeout_ms: timeout_ms,
+        staged_apps: staged_apps,
+        required_serial_markers: _toolchain_lane_markers(name, staged_apps, extra_markers),
+        board_adapter_id: board_adapter_id,
+        media_path_hint: media_path_hint
+    )

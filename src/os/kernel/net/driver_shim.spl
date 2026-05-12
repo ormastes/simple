@@ -27,6 +27,9 @@ use os.kernel.net.driver_shim_state.{
     driver_add_pending, driver_add_completed, driver_destroy,
     g_drivers
 }
+use os.kernel.net.tcp_shim.{rt_io_tcp_accept, rt_io_tcp_read}
+
+extern fn rt_bytes_to_text(data: [u8]) -> text
 
 # ============================================================================
 # Lifecycle
@@ -290,12 +293,32 @@ fn rt_driver_poll(handle: i64, max: i64, timeout_ms: i64) -> i64:
     val advance = if timeout_ms > 0: timeout_ms else: 1
     g_drivers[ui].tick = g_drivers[ui].tick + advance
 
-    # Check pending timeouts -> move expired to completed
+    # Check pending network ops/timeouts -> move ready ops to completed
     var still_pending: [PendingOp] = []
     var pi: u64 = 0
     while pi < g_drivers[ui].pending.len():
         val op = g_drivers[ui].pending[pi]
-        if op.op_type == OP_TYPE_TIMEOUT and op.timeout_target >= 0 and op.timeout_target <= g_drivers[ui].tick:
+        if op.op_type == OP_TYPE_ACCEPT:
+            val client_fd = rt_io_tcp_accept(op.fd)
+            if client_fd >= 0:
+                val comp = CompletedOp(
+                    op_id: op.op_id, result_val: client_fd, flags: 0,
+                    data_text: "", data_len: 0
+                )
+                g_drivers[ui].completed.push(comp)
+            else:
+                still_pending.push(op)
+        elif op.op_type == OP_TYPE_RECV:
+            val data = rt_io_tcp_read(op.fd, op.buf_size)
+            if data.len() > 0:
+                val comp = CompletedOp(
+                    op_id: op.op_id, result_val: data.len().to_i64(), flags: 0,
+                    data_text: rt_bytes_to_text(data), data_len: data.len().to_i64()
+                )
+                g_drivers[ui].completed.push(comp)
+            else:
+                still_pending.push(op)
+        elif op.op_type == OP_TYPE_TIMEOUT and op.timeout_target >= 0 and op.timeout_target <= g_drivers[ui].tick:
             # Timeout expired -- complete with result=0, flags=1 (timeout flag)
             val comp = CompletedOp(
                 op_id: op.op_id, result_val: 0, flags: 1,
@@ -363,7 +386,7 @@ fn rt_driver_poll_flags(handle: i64, index: i64) -> i64:
 
 @export("C")
 fn rt_driver_poll_data(handle: i64, index: i64) -> text:
-    """Get recv/read data for a completion at batch index.
+    """Get recv/read data for a completion at batch index or op id.
 
     Must be called before the next poll() -- the batch is rotated on each poll.
     Returns empty string if no data or index out of range.
@@ -373,21 +396,33 @@ fn rt_driver_poll_data(handle: i64, index: i64) -> text:
         return ""
     val ui = idx.to_u64()
     val batch = g_drivers[ui].last_poll_batch
-    if index < 0 or index.to_u64() >= batch.len():
-        return ""
-    batch[index.to_u64()].data_text
+    if index >= 0 and index.to_u64() < batch.len():
+        return batch[index.to_u64()].data_text
+
+    var i: u64 = 0
+    while i < batch.len():
+        if batch[i].op_id == index:
+            return batch[i].data_text
+        i = i + 1
+    ""
 
 @export("C")
 fn rt_driver_poll_data_len(handle: i64, index: i64) -> i64:
-    """Get the byte length of recv/read data for a completion."""
+    """Get byte length of recv/read data by batch index or op id."""
     val idx = driver_get_index(handle)
     if idx < 0:
         return 0
     val ui = idx.to_u64()
     val batch = g_drivers[ui].last_poll_batch
-    if index < 0 or index.to_u64() >= batch.len():
-        return 0
-    batch[index.to_u64()].data_len
+    if index >= 0 and index.to_u64() < batch.len():
+        return batch[index.to_u64()].data_len
+
+    var i: u64 = 0
+    while i < batch.len():
+        if batch[i].op_id == index:
+            return batch[i].data_len
+        i = i + 1
+    0
 
 # ============================================================================
 # Cancel

@@ -1,7 +1,19 @@
 # Simple Browser — Chrome-Class Roadmap
 
-**Date:** 2026-05-07
-**Baseline:** V3 M1–M12 landed (2026-04-14), 132/132 pixel-parity corpus, Acid2 pass, 30/30 design effects
+**Date:** 2026-05-12
+**Baseline:** V3 M1–M12 landed (2026-04-14), 132/132 pixel-parity corpus, Acid2 pass, 30/30 design effects. M18 pseudo-elements/text-overflow slice is complete, but the full Chrome-class browser program remains open.
+
+## 0. Product Target
+
+Build a Simple Browser that is production-ready for modern websites, not just a static HTML renderer.
+
+Chrome-class means:
+- Standards-first web engine: WHATWG HTML, modern CSS, ECMAScript, DOM, Fetch, Storage, Canvas, WebGL/WebGPU, media, workers, service workers, accessibility, and WebDriver/CDP-style automation.
+- Real browser interface: tabs, omnibox, navigation controls, history, bookmarks, downloads, permissions, profile data, settings, page info/security indicators, password/autofill hooks, find-in-page, zoom, print, responsive/mobile emulation, and crash recovery.
+- Modern graphics: GPU compositor, Canvas 2D, WebGL compatibility, WebGPU `navigator.gpu`, `canvas.getContext("webgpu")`, WGSL shader modules, render pipelines, compute pipelines, buffers/textures/samplers, feature/limit negotiation, validation, and GPU process isolation.
+- Production criteria: secure-by-default networking, origin isolation, sandboxed renderer/GPU processes, deterministic conformance tests, top-site corpus rendering, memory/performance budgets, and no interpreter-only false greens.
+
+Non-goal: cloning proprietary Chrome services. The target is Chrome-level web compatibility and user-facing browser quality using Simple-native implementation where feasible.
 
 ---
 
@@ -23,6 +35,7 @@
 | Text shaping | HarfBuzz/ICU | Basic | No bidi, no complex scripts |
 | Animations/transitions | Full | None | No @keyframes, transition, requestAnimationFrame |
 | Media queries | Full | Basic | Viewport only, no prefers-* |
+| 3D transforms/compositing | Full GPU compositor | Partial GPU tree | Needs layer tree, damage tracking, preserve-3d, perspective |
 
 ### 1.2 JavaScript
 
@@ -67,7 +80,8 @@
 | API | Chrome | Simple | Gap |
 |-----|--------|--------|-----|
 | Canvas 2D | Full | None | Missing |
-| WebGL / WebGPU | Full | None | Missing (GPU tree exists for compositing) |
+| WebGL | Full | None | Needed for compatibility with existing 3D sites |
+| WebGPU | Modern GPU API | Backend guide exists, browser context not wired | Need secure-context API, WGSL validation, pipelines, compute, limits/features |
 | localStorage/sessionStorage | Full | None | Missing |
 | IndexedDB | Full | None | Missing |
 | Web Audio | Full | None | Missing |
@@ -92,7 +106,18 @@
 | Performance profiler | Full | None | Missing |
 | JS debugger | Full | None | Missing |
 
-### 1.7 Pixel Compatibility
+### 1.7 Browser Interface
+
+| Feature | Chrome | Simple | Gap |
+|---------|--------|--------|-----|
+| Tabs/windows | Full | Minimal shell | Need tab model, session restore, crash recovery |
+| Omnibox | Search + URL + suggestions | URL entry only | Need parse/search provider/history suggestions |
+| History/bookmarks/downloads | Full | Not wired | Need persistent profile stores |
+| Permissions/site settings | Full | None | Need prompts, per-origin decisions, revocation |
+| Find/zoom/print | Full | None | Need browser chrome commands and page integration |
+| Accessibility | Full platform tree | None | Need AX tree, focus navigation, ARIA mapping |
+
+### 1.8 Pixel Compatibility
 
 - **Corpus:** 132/132 exact match
 - **Semrush top-20:** 14/20 covered (all 14 exact)
@@ -144,9 +169,23 @@
 
 **Rationale:** The net stack (DNS, TLS, HTTP/1, HTTP/2, WebSocket, fetch, cache, cookies, CORS) exists as 9 files. Integration before rewrite — get real pages loading, then fix issues discovered by real-world traffic. Known risk: text-typed APIs corrupt binary data (memory: `feedback_text_only_byte_cliffs.md`), requiring a `[u8]` byte-buffer path.
 
+### AD-5: WebGPU and 3D Shading Strategy
+
+**Decision:** Implement WebGPU as a first-class browser API and compositor backend, with WebGL compatibility layered separately for existing content.
+
+**Rationale:** Current official WebGPU/WGSL references define WebGPU around adapter/device negotiation, `GPUCanvasContext`, render pipelines, compute pipelines, command encoders, and WGSL shader modules. MDN currently marks WebGPU as limited availability and secure-context only, so Simple Browser must expose it behind HTTPS/secure-origin rules, feature detection, validation, and compatibility fallback rather than treating it as always available.
+
+**Approach:**
+1. Wire `navigator.gpu`, `GPU.requestAdapter`, `GPUAdapter.requestDevice`, `GPUDevice`, `GPUQueue`, `GPUBuffer`, `GPUTexture`, `GPUSampler`, `GPUShaderModule`, `GPURenderPipeline`, `GPUComputePipeline`, `GPUCommandEncoder`, and `GPUCanvasContext`.
+2. Use WGSL as the browser-facing shading language; validate shader modules before backend compilation.
+3. Support core render and compute pipelines first: vertex/fragment/compute stages, bind groups, pipeline layouts, buffer/texture/sampler bindings, render passes, compute passes, command submission, error scopes.
+4. Route browser compositing through the same GPU service primitives, but keep web-exposed WebGPU resources origin-scoped and isolated from browser internals.
+5. Provide native backends through existing Simple GPU layers, with a CPU/software fallback for tests and unsupported devices.
+6. Add WebGL 1/2 compatibility after Canvas 2D so existing Three.js/Babylon/WebGL content works while WebGPU matures.
+
 ---
 
-## 3. Milestone Roadmap (M13–M24)
+## 3. Milestone Roadmap (M13–M32)
 
 ### Priority Tiers (by real-world site impact)
 
@@ -167,6 +206,9 @@
 10. DevTools protocol
 11. Service Workers / PWA
 12. Media (video/audio)
+13. WebGPU/WGSL and WebGL compatibility
+14. Browser chrome/interface and profile system
+15. Accessibility, automation, release hardening
 
 ---
 
@@ -269,13 +311,14 @@
 **Goal:** Renderer runs in dedicated thread. Canvas 2D API available to JS.
 
 **Work:**
+- Implement browser chrome shell: tab strip, omnibox, back/forward/reload/stop, downloads entry point, page security indicator, settings/profile menu
 - Split ChromiumEngine into browser thread (chrome, navigation, tabs) + renderer thread (DOM, layout, paint, composite)
 - Message-passing bridge between threads (post-message style)
 - Canvas 2D API: `getContext('2d')`, path operations (moveTo, lineTo, arc, bezierCurveTo), fill/stroke, drawImage, text rendering, pixel manipulation (getImageData/putImageData)
 - `<canvas>` element in DOM
 - Wire canvas to GPU raster pipeline
 
-**Gate:** Canvas 2D passes canvas2d WPT basic tests. Thread isolation: renderer crash doesn't kill browser chrome (inject fault, verify recovery). Chart.js demo renders.
+**Gate:** Canvas 2D passes canvas2d WPT basic tests. Thread isolation: renderer crash doesn't kill browser chrome (inject fault, verify recovery). Chart.js demo renders. Tabs, omnibox navigation, history entry creation, reload/stop, and session restore pass UI smoke tests.
 
 ---
 
@@ -364,6 +407,130 @@
 
 ---
 
+### M25 — WebGPU MVP & WGSL Validation
+
+**Goal:** Modern GPU API available to secure pages with enough functionality for real WebGPU samples.
+
+**Current progress (2026-05-12):**
+- Canonical browser WebGPU types added under `src/lib/gc_async_mut/gpu/browser_engine/webgpu_types.spl`.
+- Canonical browser WebGPU context added under `src/lib/gc_async_mut/gpu/browser_engine/webgpu_context.spl`.
+- Secure-context gate, adapter/device negotiation, feature validation, preferred canvas format, canvas configuration, WGSL stage validation, render pipeline handles, and compute pipeline handles are covered by `test/web_platform/webgpu/webgpu_context_spec.spl`.
+- Script canvas API now exposes a tested WebGPU context wrapper via `canvas_get_context_webgpu`, and Canvas 2D mutating operations are covered through method-based state mutation in `test/unit/browser/script/canvas_api_spec.spl`.
+- Script navigator API now exposes `navigator_gpu`/metadata helpers, imports through the script module and script runner prelude, and validates secure/insecure `navigator.gpu` behavior in `test/unit/browser/script/navigator_api_spec.spl`.
+- Browser WebGPU resource primitives now cover deterministic buffer, texture, sampler, bind group layout, and bind group handles with descriptor/resource validation in `src/lib/gc_async_mut/gpu/browser_engine/webgpu_resources.spl`, covered by `test/web_platform/webgpu/webgpu_resources_spec.spl`.
+- Browser WebGPU command primitives now cover render pass recording, compute pass recording, command-buffer finish validation, and queue submission in `src/lib/gc_async_mut/gpu/browser_engine/webgpu_commands.spl`, covered by `test/web_platform/webgpu/webgpu_commands_spec.spl`.
+- Browser WebGPU status primitives now cover error scopes, uncaptured errors, and device-lost state in `src/lib/gc_async_mut/gpu/browser_engine/webgpu_status_errors.spl`, covered by `test/web_platform/webgpu/webgpu_status_errors_spec.spl`.
+- Existing nogc WebGPU 3D backend handle-allocation semantics were fixed so `test/lib/nogc_sync_mut/engine/render/webgpu_backend3d_spec.spl` passes.
+
+**Work:**
+- Expose `navigator.gpu` only in secure contexts and workers where allowed.
+- Implement adapter/device negotiation with `requiredFeatures`, `requiredLimits`, compatibility-mode reporting, and graceful unavailable states.
+- Implement `canvas.getContext("webgpu")`, preferred canvas format, context configuration, swapchain/present path, alpha modes.
+- Implement WGSL shader module creation and validation, using W3C WGSL grammar and stage interface checks.
+- Harden buffers, textures, samplers, bind group layouts, bind groups, render pipelines, compute pipelines, command encoders, render/compute passes, queue submission, error scopes, and device lost handling against CTS coverage and native backend integration.
+- Add CPU/software backend for deterministic tests and native GPU backend for smoke/perf.
+
+**Gate:** WebGPU CTS MVP subset passes for shader creation, device negotiation, render pipeline triangle, compute pipeline buffer transform, texture sampling, bind group validation, and error scopes. A secure local demo renders a WGSL triangle and a compute shader writes verified output.
+
+---
+
+### M26 — WebGPU 3D Shading & GPU Compositor
+
+**Goal:** WebGPU supports practical 3D scenes and the browser compositor uses the same hardened GPU service boundary.
+
+**Work:**
+- Implement depth/stencil, MSAA, mipmapped textures, texture arrays, cubemaps where supported, instancing, uniform/storage buffers, dynamic offsets, indirect draw where backend supports it.
+- Add shader reflection/diagnostics for WGSL errors surfaced to DevTools console.
+- Route CSS transforms, opacity, filters, video/canvas layers, and scrolling through a retained GPU layer tree with damage tracking.
+- Add frame pacing, vsync, GPU memory budgeting, context loss/recovery, and fallback to software compositing.
+- Add sample coverage for Three.js/Babylon WebGPU paths where their feature requirements are supported.
+
+**Gate:** WebGPU 3D sample suite renders pixel-stable triangles, textured cube, instancing, post-processing, and compute particles. Compositor scrolls/top-site pages at target frame budget without repainting unchanged layers.
+
+---
+
+### M27 — WebGL 1/2 Compatibility
+
+**Goal:** Existing WebGL content runs, including common libraries and legacy 3D sites.
+
+**Work:**
+- Implement `canvas.getContext("webgl")`, `webgl2`, shader compile/link, GL state machine, buffers, textures, framebuffers, uniforms, attributes, extensions baseline.
+- Translate GLSL ES to backend shader representation or route through existing GPU backend where available.
+- Provide ANGLE-like conformance mapping for validation, error behavior, context loss, and extension exposure.
+- Keep WebGL and WebGPU resource/security models separate.
+
+**Gate:** WebGL conformance basic suite passes, Three.js WebGL examples render, context loss tests pass, and WebGL content cannot access cross-origin pixels without CORS approval.
+
+---
+
+### M28 — Browser Profile, Permissions & UX Completion
+
+**Goal:** The browser feels complete for daily use.
+
+**Work:**
+- Persistent profiles: history, bookmarks, downloads, cookies, storage, cache, preferences.
+- Permission prompts and per-origin settings for geolocation, camera/microphone hooks, notifications, clipboard, downloads, popups, autoplay, WebGPU high-performance adapter.
+- Password/autofill storage hooks with encrypted-at-rest backend boundary.
+- Find-in-page, zoom, print/PDF path, page source, save page, responsive/mobile emulation, clear browsing data.
+- Accessibility tree, focus traversal, keyboard navigation, ARIA role/name/state mapping.
+
+**Gate:** Browser UI smoke covers tabs, profiles, history, bookmarks, downloads, permissions, zoom, find, print preview, session restore, keyboard-only navigation, and accessibility tree snapshots.
+
+---
+
+### M29 — Automation, WebDriver BiDi & Full DevTools
+
+**Goal:** Browser is testable and debuggable with external tooling.
+
+**Work:**
+- Complete CDP domains from M23 and add WebDriver BiDi session, browsingContext, script, network, log, input, and screenshot support.
+- Add deterministic screenshot capture, trace export, performance timeline, memory snapshots, GPU frame diagnostics.
+- Add remote debugging auth/bind controls so DevTools is safe by default.
+
+**Gate:** Playwright/Selenium smoke can launch Simple Browser, navigate, click, evaluate JS, intercept network, capture screenshots, and close cleanly. Chrome DevTools frontend remains compatible.
+
+---
+
+### M30 — Privacy, Safe Browsing & Enterprise Hardening
+
+**Goal:** Production security posture beyond sandboxing.
+
+**Work:**
+- Tracking prevention controls, partitioned storage, third-party cookie policy, private browsing profile.
+- Safe-browsing style malicious URL/download checks through a pluggable provider interface.
+- Certificate UI, HSTS, certificate transparency hooks where feasible, client cert hooks.
+- Policy/config system for locked settings, proxy, certificates, extension/API toggles.
+
+**Gate:** Security regression suite covers storage partitioning, private browsing cleanup, mixed content, CSP, SRI, HSTS, permission persistence/revocation, malicious download blocking hook, and policy override behavior.
+
+---
+
+### M31 — Extensions & User Scripts
+
+**Goal:** Controlled browser extension surface and Simple Script/user-script automation.
+
+**Work:**
+- Implement a minimal extension manifest model, content scripts, isolated worlds, message passing, storage, browser action UI, and permissions.
+- Support Simple Script and JavaScript user scripts with explicit per-origin grants.
+- Expose stable automation APIs without giving extensions direct engine internals.
+
+**Gate:** Extension smoke loads a content script, modifies DOM in isolated world, exchanges messages with a background worker, persists extension storage, and respects host permissions.
+
+---
+
+### M32 — Release Candidate & Production Readiness
+
+**Goal:** Ship-quality browser build.
+
+**Work:**
+- Freeze compatibility scope, close release blockers, run full WPT selected corpus, WebGPU CTS selected corpus, Test262 selected corpus, top-site screenshot corpus, security suite, performance suite, memory leak suite, accessibility suite, and packaging checks.
+- Build native release artifacts, crash reporter hooks, updater hooks, profile migration, telemetry-off-by-default diagnostics export.
+- Document unsupported APIs and compatibility flags.
+
+**Gate:** Release candidate has zero critical/high security bugs, no known crashers in top-site corpus, WPT/Test262/WebGPU CTS targets met, startup/render/navigation budgets met, renderer/GPU crash recovery verified, and profile data survives upgrade/downgrade tests.
+
+---
+
 ## 4. Priority Ranking by Real-World Site Impact
 
 Sites are ranked by Semrush global traffic. Each milestone's gate criterion includes specific sites it unlocks.
@@ -385,6 +552,8 @@ Sites are ranked by Semrush global traffic. Each milestone's gate criterion incl
 | 13 | Pornhub | JS + Web APIs | M20 |
 | 14 | XVideos | JS + Web APIs | M20 |
 | 15 | XHamster | JS + CSS Grid | M21 |
+| 16 | WebGPU demos/apps | WebGPU + WGSL + secure canvas | M25 |
+| 17 | Three.js/Babylon 3D | WebGL/WebGPU + GPU compositor | M26/M27 |
 
 **Cumulative top-20 coverage by milestone:**
 
@@ -396,6 +565,8 @@ Sites are ranked by Semrush global traffic. Each milestone's gate criterion incl
 | M17 | 17/20 (85%) | +Microsoft Online |
 | M20 | 19/20 (95%) | +Pornhub, XVideos |
 | M21 | 20/20 (100%) | +XHamster |
+| M25 | 20/20 + WebGPU demos | +secure WebGPU sample class |
+| M27 | 20/20 + WebGL 3D corpus | +legacy 3D/library compatibility |
 
 ---
 
@@ -445,6 +616,14 @@ Sites are ranked by Semrush global traffic. Each milestone's gate criterion incl
 **Impact:** Low-Medium — complex scripts (Arabic, Devanagari, Thai) require state machines and lookup tables that are large and subtle.
 **Mitigation:** M18 can start with Latin + CJK (covers 80%+ of web traffic). Complex scripts can be a follow-up (M25+).
 
+### R11: WebGPU Security and Driver Variance
+**Impact:** High — WebGPU exposes modern GPU resources to untrusted web content and depends on backend driver behavior.
+**Mitigation:** M25 requires secure-context gating, strict WGSL validation, feature/limit negotiation, error scopes, device-loss handling, origin-scoped resources, GPU process isolation before broad exposure, and CPU fallback tests.
+
+### R12: Chrome-Class Scope Explosion
+**Impact:** High — trying to ship every Chrome feature at once can stall the project.
+**Mitigation:** Each milestone has a compatibility gate and release-quality stop condition. Proprietary services are out of scope; standards compatibility and usable browser workflows are in scope.
+
 ---
 
 ## 6. Subsystem Migration Schedule
@@ -463,6 +642,10 @@ Each subsystem migrates from `examples/browser/feature/` → `src/lib/gc_async_m
 | gpu/* | examples/browser/feature/gpu/ | ~1,000 | M19 | composite |
 | sandbox/* | examples/browser/feature/sandbox/ | ~600 | M22 | M19 (threads) |
 | browser/devtools | examples/browser/feature/browser/devtools.spl | ~300 | M23 | M15 (JS runtime) |
+| webgpu backend/context | src/lib/gc_async_mut/gpu + api guides | TBD | M25 | M19, M22 for isolation |
+| webgl compatibility | new browser_engine/gpu/webgl | TBD | M27 | M25 |
+| browser chrome/profile | app/browser + browser_engine/profile | TBD | M19/M28 | M16 |
+| automation/devtools | browser_engine/devtools + app protocol | TBD | M23/M29 | M15, M16 |
 
 ---
 
@@ -477,6 +660,10 @@ Each subsystem migrates from `examples/browser/feature/` → `src/lib/gc_async_m
 | M18 | 85% | Advanced selectors, text |
 | M21 | 90% | Grid, multi-column |
 | M24 | 92%+ | Media, remaining edge cases |
+| M25 | WebGPU CTS MVP subset | WebGPU device, canvas, WGSL, render/compute |
+| M27 | WebGL conformance basic subset | WebGL 1/2 state, shaders, textures, context loss |
+| M29 | Automation smoke | CDP + WebDriver BiDi launch/navigate/evaluate/screenshot |
+| M32 | Release suite | WPT/Test262/WebGPU CTS/top-site/security/perf/accessibility gates |
 
 ---
 
@@ -495,6 +682,23 @@ M21  CSS Grid + Advanced Layout     ← remaining layout
 M22  Process Isolation + Security   ← production hardening
 M23  DevTools Protocol              ← developer experience
 M24  Media + Service Workers + PWA  ← full platform
+M25  WebGPU MVP + WGSL Validation   ← recent GPU web platform
+M26  WebGPU 3D + GPU Compositor     ← modern 3D shading and compositing
+M27  WebGL 1/2 Compatibility        ← existing 3D web content
+M28  Profile + Permissions + UX     ← daily-driver browser interface
+M29  CDP + WebDriver BiDi           ← automation and debugging
+M30  Privacy + Safe Browsing        ← production security posture
+M31  Extensions + User Scripts      ← controlled customization
+M32  Release Candidate              ← ship gate
 ```
 
-Ordering rationale: Each milestone builds on the previous. Floats and CSS quick wins (M13) are first because they have the highest WPT-per-effort ratio. JS (M15) before networking (M16) because the fetch API binding needs JS runtime. Networking before CSS3 (M17) because CSS3 animations are less impactful than loading real pages. Security hardening (M22) after the core feature set is complete because sandboxing a broken renderer is premature optimization.
+Ordering rationale: Each milestone builds on the previous. Floats and CSS quick wins (M13) are first because they have the highest WPT-per-effort ratio. JS (M15) before networking (M16) because the fetch API binding needs JS runtime. Networking before CSS3 (M17) because CSS3 animations are less impactful than loading real pages. Security hardening (M22) precedes broad WebGPU exposure because untrusted shader/GPU access needs process and origin boundaries. WebGPU/WebGL land after the browser has canvas, threading, security, and DevTools foundations.
+
+---
+
+## 9. Current External References
+
+- W3C WebGPU specification: https://www.w3.org/TR/webgpu/
+- W3C WGSL Candidate Recommendation Draft, 2026-05-07: https://www.w3.org/TR/WGSL/
+- MDN WebGPU API, checked 2026-05-12: secure-context only and not Baseline across all widely used browsers.
+- Chrome WebGPU overview: https://developer.chrome.com/docs/web-platform/webgpu/overview

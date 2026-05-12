@@ -12,7 +12,7 @@ use common.format_utils.{align_center}
 
 use std.encoding.simd_text_ffi.{
     rt_text_to_upper_ascii, rt_text_to_lower_ascii,
-    rt_simd_str_last_index_of
+    rt_simd_str_search, rt_simd_str_equal, rt_simd_str_last_index_of
 }
 
 # ============================================================================
@@ -28,8 +28,9 @@ fn str_concat(a: text, b: text) -> text:
     a + b
 
 fn str_eq(a: text, b: text) -> bool:
-    """Check string equality."""
-    a == b
+    """Check string equality.
+    SIMD-accelerated: length early-reject plus vectorized byte comparison."""
+    rt_simd_str_equal(a, b)
 
 # ============================================================================
 # Slicing and Character Access
@@ -63,23 +64,28 @@ fn str_safe_slice(s: text, start: i64, end_idx: i64) -> text:
 # ============================================================================
 
 fn str_contains(s: text, needle: text) -> bool:
-    """Check if string contains substring."""
-    s.contains(needle)
+    """Check if string contains substring.
+    SIMD-accelerated: first/last-byte filtering before full comparison."""
+    rt_simd_str_search(s, needle) >= 0
 
 fn str_starts_with(s: text, prefix: text) -> bool:
-    """Check if string starts with prefix."""
-    s.starts_with(prefix)
+    """Check if string starts with prefix.
+    SIMD-accelerated: reuses vectorized search and checks offset zero."""
+    rt_simd_str_search(s, prefix) == 0
 
 fn str_ends_with(s: text, suffix: text) -> bool:
-    """Check if string ends with suffix."""
-    s.ends_with(suffix)
+    """Check if string ends with suffix.
+    SIMD-accelerated: reuses vectorized reverse search and checks final byte offset."""
+    if suffix.len() == 0:
+        return true
+    if suffix.len() > s.len():
+        return false
+    rt_simd_str_last_index_of(s, suffix) == s.len() - suffix.len()
 
 fn str_index_of(s: text, needle: text) -> i64:
-    """Find first occurrence of substring. Returns -1 if not found."""
-    val result = s.index_of(needle)
-    if result == nil:
-        return -1
-    result
+    """Find first occurrence of substring. Returns -1 if not found.
+    SIMD-accelerated: first/last-byte filtering before full comparison."""
+    rt_simd_str_search(s, needle)
 
 fn str_last_index_of(s: text, needle: text) -> i64:
     """Find last occurrence of substring. Returns -1 if not found.
@@ -133,8 +139,8 @@ fn str_replace_all(s: text, old_val: text, new_val: text) -> text:
     var pos = 0
     while pos < s.len():
         val remaining = s[pos:]
-        val idx = remaining.index_of(old_val)
-        if idx == nil:
+        val idx = str_index_of(remaining, old_val)
+        if idx < 0:
             segments.push(remaining)
             pos = s.len()
         else:

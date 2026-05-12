@@ -49,3 +49,8 @@ Validation:
 - 3 `stats_summary` (same name, different logic)
 - 3 `main` boilerplate (test entry points)
 - 1 `get_errors` (would need trait/mixin, Simple lacks inheritance)
+
+### Tooling Follow-Up: Generic Migration False Positives
+- The duplicate-check smoke path still prints deprecated-generic warnings for valid index and slice expressions such as `bytes[i]`, `pattern[a:b]`, and `json[j:j+1]`.
+- `bin/simple migrate --fix-generics` is not safe for these files today: it rewrites valid list return/variable types such as `[DocEntry]` into `<DocEntry>`, which fails parsing.
+- Keep the current syntax until the parser/migrator can distinguish list types, generic type parameters, indexing, and slicing.

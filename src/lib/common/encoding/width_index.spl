@@ -16,6 +16,8 @@ use std.encoding.simd_text_ffi.{
     rt_text_count_codepoints_cached
 }
 
+extern fn rt_bytes_to_text(data: [i64]) -> text
+
 val SWI_BUILD_THRESHOLD = 2
 val SWI_MIN_BYTES = 256
 val SWI_DEGENERATE_THRESHOLD = 1024
@@ -87,7 +89,7 @@ pub class WidthIndex:
         if byte_pos < 0 or byte_pos >= self.text_ref.len():
             return ""
         val bytes = self.text_ref.bytes()
-        val b0 = bytes[byte_pos]
+        val b0 = _u8(bytes[byte_pos])
         var char_len = 1
         if b0 >= 0xF0:
             char_len = 4
@@ -98,14 +100,14 @@ pub class WidthIndex:
         val end = byte_pos + char_len
         if end > self.text_ref.len():
             return ""
-        self.text_ref.slice(byte_pos, end)
+        _bytes_to_text_slice(bytes, byte_pos, end)
 
     me slice(start: i64, end_idx: i64) -> text:
         val start_byte = self.char_to_byte(start)
         val end_byte = self.char_to_byte(end_idx)
         if start_byte < 0 or end_byte < 0:
             return ""
-        self.text_ref.slice(start_byte, end_byte)
+        _bytes_to_text_slice(self.text_ref.bytes(), start_byte, end_byte)
 
     me codepoint_len() -> i64:
         rt_text_count_codepoints_cached(self.text_ref)
@@ -124,7 +126,7 @@ fn _linear_char_to_byte(s: text, char_idx: i64) -> i64:
     var byte_pos = 0
     var char_pos = 0
     while byte_pos < bytes.len() and char_pos < char_idx:
-        val b = bytes[byte_pos]
+        val b = _u8(bytes[byte_pos])
         if b < 0x80:
             byte_pos = byte_pos + 1
         elif b < 0xE0:
@@ -143,7 +145,7 @@ fn _linear_byte_to_char(s: text, byte_idx: i64) -> i64:
     var byte_pos = 0
     var char_pos = 0
     while byte_pos < bytes.len() and byte_pos < byte_idx:
-        val b = bytes[byte_pos]
+        val b = _u8(bytes[byte_pos])
         if b < 0x80:
             byte_pos = byte_pos + 1
         elif b < 0xE0:
@@ -154,3 +156,16 @@ fn _linear_byte_to_char(s: text, byte_idx: i64) -> i64:
             byte_pos = byte_pos + 4
         char_pos = char_pos + 1
     char_pos
+
+fn _bytes_to_text_slice(bytes: [i64], start: i64, end_idx: i64) -> text:
+    var out: [i64] = []
+    var i = start
+    while i < end_idx and i < bytes.len():
+        out.push(_u8(bytes[i]))
+        i = i + 1
+    rt_bytes_to_text(out)
+
+fn _u8(byte: i64) -> i64:
+    if byte < 0:
+        return byte + 256
+    byte

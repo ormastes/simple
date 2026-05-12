@@ -1,0 +1,155 @@
+# Part 4 of src/compiler/90.tools/lint/main.spl
+use compiler.tools.lint.main.*
+# Simple Language Linter
+# Semantic lints for code quality and safety
+# Usage: simple_lint <file.spl> [--deny-all] [--warn-all]
+
+# I/O imports
+use std.nogc_sync_mut.io.file_ops (file_read, file_exists, file_write)
+use std.nogc_sync_mut.io.dir_ops (is_dir)
+use app.io.cli_ops (get_args)
+
+# Logging imports
+use std.log.{error, info}
+
+# Import EasyFix data types from stdlib
+use std.tooling.easy_fix.*
+use common.ui.theme_package.{validate_default_theme_package}
+use compiler.semantics.lint.riscv_rtl_debuggability_lint.{lint_riscv_rtl_debuggability}
+
+# File I/O wrapper
+
+fn main() -> Int:
+    val args = get_args()
+
+    if args.len() < 2:
+        print("Usage: simple_lint <file.spl> [options]")
+        print("")
+        print("Options:")
+        print("  --deny-all        Treat all warnings as errors")
+        print("  --warn-all        Enable all style lints")
+        print("  --json            Output in JSON format")
+        print("  --fix             Apply safe auto-fixes")
+        print("  --fix-all         Apply all fixes regardless of confidence")
+        print("  --fix-dry-run     Show what would be fixed without applying")
+        print("  --fix-interactive Prompt for each fix")
+        print("")
+        print("Lint categories:")
+        print("  Safety (S): Memory safety and null checks")
+        print("  Correctness (C): Logic errors")
+        print("  Warning (W): Potential issues")
+        print("  Style (ST): Code style")
+        print("  Concurrency (CC): Thread safety")
+        print("  TODO (T): TODO/FIXME format [area][priority]")
+        print("  Stub (STUB): Trivial/dummy implementations")
+        return 1
+
+    val file_path = args[1]
+    val deny_all = args.contains("--deny-all")
+    val fix_mode = args.contains("--fix")
+    val fix_all = args.contains("--fix-all")
+    val fix_dry_run = args.contains("--fix-dry-run")
+    val fix_interactive = args.contains("--fix-interactive")
+
+    # Verify file exists
+    if not file_exists(file_path):
+        error("lint", "File not found: " + file_path)
+        return 1
+
+    # Run linter (loads config from simple.sdn automatically)
+    var linter = Linter.new()
+
+    # Try to load config relative to the target file
+    val sdn_path = find_project_sdn(file_path)
+    if sdn_path != "":
+        linter.config = LintConfig.from_sdn_file(sdn_path)
+
+    val lint_result = linter.lint_file(file_path)
+    match lint_result:
+        case Ok(results):
+            if results.is_empty():
+                info("lint", "No issues found in " + file_path)
+                return 0
+            else:
+                var error_count = 0
+                var warning_count = 0
+                var fix_count = 0
+
+                for lint_item in results:
+                    print(lint_item.format())
+
+                    match lint_item.lint.level:
+                        case Deny:
+                            error_count = error_count + 1
+                        case Warn:
+                            warning_count = warning_count + 1
+                            if deny_all:
+                                error_count = error_count + 1
+                        case Allow:
+                            val _ = 0
+
+                    if lint_item.has_easy_fix():
+                        fix_count = fix_count + 1
+
+                print("")
+                print("Found {error_count} error(s), {warning_count} warning(s), {fix_count} auto-fix(es) available")
+
+                # Apply fixes if requested
+                if (fix_mode or fix_all) and fix_count > 0:
+                    val fixes_to_apply = collect_easy_fixes(results, fix_all)
+                    if not fixes_to_apply.is_empty():
+                        apply_collected_fixes(file_path, fixes_to_apply, fix_dry_run)
+
+                if error_count > 0:
+                    return 1
+                else:
+                    return 0
+
+        case Err(error):
+            error("lint", error)
+            return 1
+
+    return 0
+
+fn collect_easy_fixes(results: [LintResult], include_all: Bool) -> [EasyFix]:
+    var fixes: [EasyFix] = []
+    for result in results:
+        match result.lint.easy_fix:
+            case Some(fix):
+                if include_all or fix.is_safe():
+                    fixes.push(fix)
+            case nil:
+                val _ = 0
+    fixes
+
+fn apply_collected_fixes(file_path: String, fixes: [EasyFix], dry_run: Bool):
+    val source = file_read(file_path)
+    if source == "":
+        error("lint", "reading file for fix failed: {file_path}")
+        return
+
+    var sources: Dict<String, String> = {}
+    sources[file_path] = source
+
+    # Sort replacements by position descending and apply
+    var all_replacements: [Replacement] = []
+    for fix in fixes:
+        for rep in fix.replacements:
+            all_replacements.push(rep)
+
+    all_replacements = all_replacements.sort_by(\a, b: b.start - a.start)
+
+    var new_source = source
+    for rep in all_replacements:
+        if rep.start <= new_source.len() and rep.end <= new_source.len():
+            new_source = new_source.slice(0, rep.start) + rep.new_text + new_source.slice(rep.end)
+
+    if dry_run:
+        print("\nDry run - would apply {fixes.len()} fix(es):")
+        for fix in fixes:
+            print("  [{fix.id}] {fix.description}")
+    else:
+        file_write(file_path, new_source)
+        print("\nApplied {fixes.len()} fix(es):")
+        for fix in fixes:
+            print("  [{fix.id}] {fix.description}")

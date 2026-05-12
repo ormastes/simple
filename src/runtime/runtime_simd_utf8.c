@@ -595,6 +595,10 @@ int64_t rt_text_count_codepoints_cached(int64_t value) {
     return count;
 }
 
+int64_t rt_text_count_codepoints(int64_t value) {
+    return rt_text_count_codepoints_cached(value);
+}
+
 /*
  * rt_text_validate_utf8(tagged_string) -> int64_t (1=valid, 0=invalid)
  *

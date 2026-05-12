@@ -4,10 +4,12 @@
 # no text formatting, arrays, DTB parsing, or HAL construction. Higher-level
 # boot metadata lives in boot_info.spl.
 #
-# Boot chain: _start → boot_main → riscv_boot_mem_init → os_main
+# Boot chain: _start → boot_main. Higher-level PMM/heap/service handoff is
+# gated on the freestanding runtime ABI work tracked in the RISC-V boot plan.
 
-use os.kernel.boot.riscv_boot_mem.{riscv_boot_mem_init}
-use os.kernel.boot.os_main.{os_main}
+use os.kernel.boot.riscv_noalloc_handoff.{riscv_noalloc_handoff, riscv_noalloc_boot_idle}
+use os.kernel.boot.riscv_noalloc_pmm.{riscv_noalloc_pmm_init}
+use os.kernel.boot.riscv_noalloc_heap.{riscv_noalloc_heap_init}
 
 val UART_BASE: u64 = 0x10000000
 
@@ -28,7 +30,7 @@ fn _start():
         ".Lrv64_bss_done:"
         "mv      a0, s0"
         "mv      a1, s1"
-        "call    os__kernel__arch__riscv64__boot__boot_main"
+        "call    kernel__arch__riscv64__boot__boot_main"
         ".Lrv64_boot_halt:"
         "wfi"
         "j       .Lrv64_boot_halt"
@@ -57,6 +59,7 @@ fn _boot_banner():
 
 fn boot_main(hart_id: u64, dtb_addr: u64):
     _boot_banner()
-    # Initialize memory (PMM + heap) then enter kernel main
-    riscv_boot_mem_init()
-    os_main()
+    riscv_noalloc_handoff(hart_id, dtb_addr)
+    riscv_noalloc_pmm_init(0x80000000, 128 * 1024 * 1024, 0x80200000, 0x87000000)
+    riscv_noalloc_heap_init(0x87000000, 16 * 1024 * 1024)
+    riscv_noalloc_boot_idle()

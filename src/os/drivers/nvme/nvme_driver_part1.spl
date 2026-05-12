@@ -1,0 +1,71 @@
+# Part 1 of src/os/drivers/nvme/nvme_driver.spl
+use os.drivers.nvme.nvme_driver.*
+# NVMe Driver -- Block device driver using DeviceGrant pattern
+#
+# MDSOC: feature dimension, drivers layer
+# Receives a DeviceGrant from the PCI manager and provides sector-level
+# read/write via paired submission/completion queues over BAR0 MMIO.
+#
+# Init sequence:
+#   1. Map BAR0 registers via syscall
+#   2. Read CAP (doorbell stride, max queue entries)
+#   3. Disable controller, wait for not-ready
+#   4. Allocate DMA memory for admin SQ/CQ
+#   5. Configure admin queue attributes (AQA, ASQ, ACQ)
+#   6. Enable controller, wait for ready
+#   7. Identify Controller + Namespace 1
+#   8. Create I/O completion and submission queues
+#
+# Syscalls used:
+#   83 = MapBar(phys, size, 0) -> virt addr
+#   84 = AllocDma(size, &phys_out, 0) -> virt addr
+#   26 = NotificationWait(notif_id)
+
+use os.kernel.types.device_mem_types.{DeviceGrant}
+use os.kernel.boot.mmio.{mmio_read32, mmio_write32, mmio_read64, mmio_write64}
+use os.drivers.nvme.nvme_types.{NVME_REG_VS}
+use os.drivers.nvme.nvme_queue.{NvmeQueuePair}
+use std.io.dma.{SharedDmaBuffer, dma_shared_sync_cpu_to_device, dma_shared_sync_device_to_cpu}
+use os.kernel.log.klog_api.{log_init, log_info, log_warn, log_error, log_raw, log_raw_println}
+
+extern fn syscall(id: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64) -> i64
+
+# Timeout for controller ready transitions (spin iterations)
+val READY_TIMEOUT: u32 = 1000000
+# Timeout for individual command completions
+val CMD_TIMEOUT: u32 = 500000
+# DMA allocation page size
+val DMA_PAGE_SIZE: u64 = 4096
+val NVME_ADMIN_OPCODE_CREATE_IOSQ: u8 = 0x01
+val NVME_ADMIN_OPCODE_CREATE_IOCQ: u8 = 0x05
+val NVME_ADMIN_OPCODE_SET_FEATURES: u8 = 0x09
+val NVME_IO_OPCODE_FLUSH: u8 = 0x00
+val NVME_IO_OPCODE_WRITE: u8 = 0x01
+val NVME_IO_OPCODE_READ: u8 = 0x02
+val IDENTITY_NAMESPACE_NSZE_OFFSET: u64 = 0
+val IDENTITY_NAMESPACE_FLBAS_OFFSET: u64 = 26
+val IDENTITY_NAMESPACE_LBAF0_OFFSET: u64 = 128
+
+# Syscall numbers
+val SYS_MAP_BAR: u64 = 83
+val SYS_ALLOC_DMA: u64 = 84
+val SYS_NOTIFICATION_WAIT: u64 = 26
+
+# ============================================================================
+# NVMe Driver
+# ============================================================================
+
+class NvmeDriver:
+    """NVMe block device driver.
+
+    Provides sector-level read/write on an NVMe namespace.
+    Initialized from a DeviceGrant obtained from the PCI manager.
+    """
+    bar0_virt: u64              # Virtual address of mapped BAR0 registers
+    admin_queue: NvmeQueuePair  # Admin queue pair (QID 0)
+    io_queue: NvmeQueuePair     # I/O queue pair (QID 1)
+    notif_id: u64               # IRQ notification ID from grant
+    sector_count: u64           # Namespace 1 total sectors (LBAs)
+    sector_size: u32            # Bytes per sector (usually 512)
+    db_stride: u32              # Doorbell stride from CAP register
+    initialized: bool

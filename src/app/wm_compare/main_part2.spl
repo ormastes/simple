@@ -1,0 +1,543 @@
+# Part 2 of src/app/wm_compare/main.spl
+use app.wm_compare.main.*
+# WM Compare — Unified Pixel Capture + Compare Orchestrator
+#
+# Captures a named scene from three render sources:
+#   A  Electron baseline (via tools/electron-shell/screenshot.js)
+#   B  live macOS host Simple Web WM (via tools/electron-shell/screenshot.js)
+#   D  QEMU Simple OS self-rendering — via qemu_capture.capture_qemu_vm (QMP)
+#
+# Source C (in-guest webengine) is intentionally skipped — deferred to Phase 6.
+#
+# Compare strategy: memcmp-first (exact), fall through to YIQ perceptual,
+# dump a PPM heat-map diff via export_comparison_ppm only on mismatch.
+# Writes artifacts under test/baselines/wm_compare/<scene>/.
+#
+# Usage:
+#   bin/simple run src/app/wm_compare/main.spl \
+#       --source=A|B|D|all --scene=<name> [--update-baseline] \
+#       [--tolerance=strict|text_tolerant|aa_aware] \
+#       [--width=320 --height=240]
+
+use std.cli.cli_util.{get_cli_args}
+use std.nogc_sync_mut.ffi.io.{file_read_bytes, file_write_text, file_write_bytes, dir_create_all, file_exists}
+
+use os.compositor.wm_scene.{WmSceneSpec, SceneElement}
+use os.compositor.electron_capture.{CaptureResult, capture_electron, capture_electron_scene, capture_error}
+use os.compositor.qemu_capture.{capture_qemu_vm}
+use os.compositor.screenshot_compare.{
+    ComparisonResult, ChannelDiffResult, DiffRegion,
+    compare_exact, compare_per_channel, compare_pixel_buffers,
+    find_diff_regions, generate_diff_image}
+use os.compositor.perceptual_compare.{PerceptualResult, compare_perceptual}
+use os.compositor.tolerance_profile.{
+    ToleranceProfile,
+    profile_strict, profile_text_tolerant, profile_wm_default}
+use os.compositor.diff_export.{export_comparison_ppm}
+use std.common.image.ppm_decode.{decode_ppm_to_argb, PpmImage}
+
+use app.wm_compare.scene_registry.{
+    SceneEntry, resolve_scene, fixture_path_for, list_scene_names}
+use app.wm_compare.live_capture.{
+    LiveCaptureResult, capture_live_source_b}
+
+# ============================================================================
+# CLI Options
+# ============================================================================
+
+fn run_bit_compare_mode(opts: CliOpts) -> i64:
+    """Phase 5 harness entry: bit-level compare of two existing PPM files.
+
+    Loads the PPMs named by --source-a/--source-b, runs compare_exact on the
+    overlapping prefix, per-channel and perceptual deltas (flagged as
+    structurally invalid when dimensions differ), writes a diff PPM and an
+    SDN report under --out-dir.
+    """
+    if opts.source_a_path == "" or opts.source_b_path == "":
+        print "Error: --mode=bit-compare requires --source-a=<path> and --source-b=<path>"
+        return 1
+    val out_dir = if opts.out_dir != "": opts.out_dir else: "test/baselines/wm_compare/phase5"
+    dir_create_all(out_dir)
+
+    print "[wm_compare] Bit-compare mode"
+    print "[wm_compare]   source A: {opts.source_a_path}"
+    print "[wm_compare]   source B: {opts.source_b_path}"
+    print "[wm_compare]   out dir:  {out_dir}"
+
+    val ha = _load_ppm_handle(opts.source_a_path, "A")
+    val hb = _load_ppm_handle(opts.source_b_path, "B")
+    if not ha.ok:
+        print "[wm_compare]   FAIL: {ha.error}"
+        return 1
+    if not hb.ok:
+        print "[wm_compare]   FAIL: {hb.error}"
+        return 1
+
+    print "[wm_compare]   A header: {ha.width}x{ha.height}"
+    print "[wm_compare]   B header: {hb.width}x{hb.height}"
+
+    val dims_match = (ha.width == hb.width) and (ha.height == hb.height)
+    if not dims_match:
+        print "[wm_compare]   WARNING: dimensions differ — all numeric results are"
+        print "[wm_compare]            structurally invalid. Diff is row-aligned over"
+        print "[wm_compare]            the overlapping top-left rectangle only."
+
+    # Decode only the overlapping top-left region of each image. This is
+    # meaningful regardless of stride mismatch (unlike a flat memcmp) and
+    # keeps the interpreter's O(N^2) list-append cost bounded.
+    val overall_w = if ha.width < hb.width: ha.width else: hb.width
+    val overall_h = if ha.height < hb.height: ha.height else: hb.height
+    print "[wm_compare]   decoding overlap region {overall_w}x{overall_h}..."
+    val pixels_a = _decode_ppm_region(ha.data, ha.width, ha.height, ha.body_off, overall_w, overall_h)
+    val pixels_b = _decode_ppm_region(hb.data, hb.width, hb.height, hb.body_off, overall_w, overall_h)
+    print "[wm_compare]   decoded A={pixels_a.len()} px, B={pixels_b.len()} px"
+
+    val exact_res = compare_exact(pixels_a, pixels_b, overall_w, overall_h)
+    val exact_match = exact_res.different_pixels == 0
+
+    val profile = profile_strict()
+    val perc = compare_perceptual(
+        pixels_a, pixels_b, overall_w, overall_h,
+        profile.default_yiq_threshold, true)
+    val channels = compare_per_channel(
+        pixels_a, pixels_b, overall_w, overall_h, 0)
+    var r_max: i32 = 0
+    var g_max: i32 = 0
+    var b_max: i32 = 0
+    var a_max: i32 = 0
+    for ch in channels:
+        if ch.channel == "R": r_max = ch.max_diff
+        if ch.channel == "G": g_max = ch.max_diff
+        if ch.channel == "B": b_max = ch.max_diff
+        if ch.channel == "A": a_max = ch.max_diff
+
+    # Diff heat-map over the overlapping top-left rectangle (both buffers
+    # already cropped to overall_w x overall_h).
+    use os.compositor.screenshot_compare.{generate_diff_image}
+    val diff_pixels = generate_diff_image(pixels_a, pixels_b, overall_w, overall_h)
+    val diff_path = "{out_dir}/B_vs_D_diff.ppm"
+    _write_ppm_local(diff_pixels, overall_w, overall_h, diff_path)
+    print "[wm_compare]   diff heat-map: {diff_path}"
+
+    # Report SDN
+    var body = "(wm_compare_phase5_report\n"
+    body = body + "  mode: bit-compare\n"
+    body = body + "  source_a_path: \"{opts.source_a_path}\"\n"
+    body = body + "  source_b_path: \"{opts.source_b_path}\"\n"
+    body = body + "  a_width: {ha.width}\n"
+    body = body + "  a_height: {ha.height}\n"
+    body = body + "  a_pixels_total: {ha.width * ha.height}\n"
+    body = body + "  b_width: {hb.width}\n"
+    body = body + "  b_height: {hb.height}\n"
+    body = body + "  b_pixels_total: {hb.width * hb.height}\n"
+    body = body + "  overlap_width: {overall_w}\n"
+    body = body + "  overlap_height: {overall_h}\n"
+    body = body + "  dimensions_match: {_bool_text(dims_match)}\n"
+    body = body + "  structurally_valid: {_bool_text(dims_match)}\n"
+    body = body + "  exact_match: {_bool_text(exact_match)}\n"
+    body = body + "  differing_pixels: {exact_res.different_pixels}\n"
+    body = body + "  matching_pixels: {exact_res.matching_pixels}\n"
+    body = body + "  total_pixels: {exact_res.total_pixels}\n"
+    body = body + "  match_percentage_10000: {exact_res.match_percentage}\n"
+    body = body + "  max_channel_diff: {exact_res.max_channel_diff}\n"
+    body = body + "  max_r_diff: {r_max}\n"
+    body = body + "  max_g_diff: {g_max}\n"
+    body = body + "  max_b_diff: {b_max}\n"
+    body = body + "  max_a_diff: {a_max}\n"
+    body = body + "  perceptual_match_percentage_10000: {perc.match_percentage}\n"
+    body = body + "  tolerance_profile: strict\n"
+    body = body + "  diff_ppm: \"{diff_path}\"\n"
+    body = body + "  diff_width: {overall_w}\n"
+    body = body + "  diff_height: {overall_h}\n"
+    body = body + "  note: \"Phase 5 bit-compare. B_live is Web WM glass-theme four_windows scene at 320x240; D is Engine2D verification scene (3 hardcoded rects via rt_gui_fill4) at 1024x768. Different scenes, different resolutions, different rasterizers. ~100% divergence is expected and does not indicate a pipeline regression.\"\n"
+    body = body + ")\n"
+
+    val report_path = "{out_dir}/report.sdn"
+    file_write_text(report_path, body)
+    print "[wm_compare]   report: {report_path}"
+
+    if exact_match:
+        print "[wm_compare] EXACT MATCH"
+        return 0
+    else:
+        val pct_w = exact_res.match_percentage / 100
+        val pct_f = exact_res.match_percentage % 100
+        print "[wm_compare] NOT EXACT: {exact_res.different_pixels} px differ ({pct_w}.{pct_f}% match)"
+        print "[wm_compare] perceptual match: {perc.match_percentage / 100}.{perc.match_percentage % 100}%"
+        print "[wm_compare] (Phase 5 expected outcome — see report note.)"
+        return 0
+
+fn _count_region_diffs(a: [u32], b: [u32], full_w: i32, full_h: i32,
+                       rx: i32, ry: i32, rw: i32, rh: i32) -> (i64, i32):
+    """Count pixels that differ inside rect (rx,ry,rw,rh) of full_w x full_h
+    buffers. Returns (differing_pixels, max_channel_diff). Buffers must be
+    identically sized to full_w*full_h."""
+    var diff: i64 = 0
+    var max_ch: i32 = 0
+    val n: i32 = (a.len() as i32)
+    val nb: i32 = (b.len() as i32)
+    val y0 = if ry < 0: 0 else: ry
+    val x0 = if rx < 0: 0 else: rx
+    val y1 = if ry + rh > full_h: full_h else: ry + rh
+    val x1 = if rx + rw > full_w: full_w else: rx + rw
+    var y = y0
+    while y < y1:
+        var x = x0
+        while x < x1:
+            val idx = y * full_w + x
+            if idx < n and idx < nb:
+                val pa = a[idx]
+                val pb = b[idx]
+                if pa != pb:
+                    diff = diff + 1
+                    val ra: i32 = ((pa >> 16) & 0xFF) as i32
+                    val ga: i32 = ((pa >> 8) & 0xFF) as i32
+                    val ba: i32 = (pa & 0xFF) as i32
+                    val rb_: i32 = ((pb >> 16) & 0xFF) as i32
+                    val gb_: i32 = ((pb >> 8) & 0xFF) as i32
+                    val bb_: i32 = (pb & 0xFF) as i32
+                    val dr = abs_i32_local(ra - rb_)
+                    val dg = abs_i32_local(ga - gb_)
+                    val db = abs_i32_local(ba - bb_)
+                    val m = if dr > dg: dr else: dg
+                    val m2 = if m > db: m else: db
+                    if m2 > max_ch:
+                        max_ch = m2
+            x = x + 1
+        y = y + 1
+    (diff, max_ch)
+
+fn abs_i32_local(x: i32) -> i32:
+    if x < 0: -x else: x
+
+fn _rescale_to(pixels: [u32], src_w: i32, src_h: i32,
+               dst_w: i32, dst_h: i32) -> [u32]:
+    """Nearest-neighbor downsample/upsample src buffer to dst_w x dst_h.
+    If dims already match, returns the input unchanged."""
+    if src_w == dst_w and src_h == dst_h:
+        return pixels
+    var out: [u32] = []
+    var y = 0
+    while y < dst_h:
+        val sy = (y * src_h) / dst_h
+        var x = 0
+        while x < dst_w:
+            val sx = (x * src_w) / dst_w
+            val idx = sy * src_w + sx
+            if idx < (pixels.len() as i32):
+                out = out + [pixels[idx]]
+            else:
+                out = out + [0xFF000000 as u32]
+            x = x + 1
+        y = y + 1
+    out
+
+fn run_live_bd_compare_mode(opts: CliOpts) -> i64:
+    """Phase 5 live harness: capture B (host WM) and D (QEMU) in-process
+    and perform a bit-level compare. Narrows divergence to known regions
+    (title bar, body, traffic lights) if exact match fails and writes
+    findings to doc/08_tracking/wm_compare/divergence.md.
+
+    Exit codes:
+      0  success (exact match or report written)
+      1  argument/config error
+      2  infrastructure unavailable (QMP socket missing)
+    """
+    val scene_name = if opts.scene != "": opts.scene else: "four_windows"
+    val width = opts.width
+    val height = opts.height
+    val qmp_sock = if opts.qmp_socket != "":
+                       opts.qmp_socket
+                   else:
+                       "/tmp/simpleos_engine2d_qmp.sock"
+    val out_dir = if opts.out_dir != "":
+                      opts.out_dir
+                  else:
+                      "test/baselines/wm_compare/{scene_name}"
+    dir_create_all(out_dir)
+
+    print "[wm_compare] Phase 5 live B vs D bit-compare"
+    print "[wm_compare]   scene:     {scene_name}"
+    print "[wm_compare]   size:      {width}x{height}"
+    print "[wm_compare]   qmp sock:  {qmp_sock}"
+    print "[wm_compare]   out dir:   {out_dir}"
+
+    # Resolve scene
+    val entry_opt = resolve_scene(scene_name, width, height)
+    if entry_opt == nil:
+        print "[wm_compare]   FAIL: unknown scene '{scene_name}'"
+        return 1
+    val entry = entry_opt
+
+    # ----- Source B capture (in-process) -----
+    print "[wm_compare] Capturing source B (host Simple WM, live capture)..."
+    val cap_b = capture_source_b(entry, width, height)
+    if not cap_b.success:
+        print "[wm_compare]   FAIL: source B: {cap_b.error}"
+        return 1
+    print "[wm_compare]   B ok  {cap_b.width}x{cap_b.height} pixels={cap_b.pixels.len()}"
+
+    # ----- Source D capture (QEMU via QMP) -----
+    if not file_exists(qmp_sock):
+        print ""
+        print "[wm_compare] INFRA UNAVAILABLE: QMP socket '{qmp_sock}' not found."
+        print "[wm_compare] Phase 5 requires a live QEMU Simple OS guest running with"
+        print "[wm_compare] -qmp unix:{qmp_sock},server,nowait and the Engine2D GUI entry."
+        print ""
+        print "[wm_compare] To spawn the guest:"
+        print "[wm_compare]   1. Build kernel:  bin/simple test test/system/engine2d_in_qemu_spec.spl"
+        print "[wm_compare]      (first `it` block builds gui_entry_engine2d.spl)"
+        print "[wm_compare]   2. Boot in background with a QMP socket:"
+        print "[wm_compare]      qemu-system-x86_64 -machine q35 -cpu qemu64 -m 2G \\"
+        print "[wm_compare]         -kernel build/os/simpleos_engine2d_x86_64.elf \\"
+        print "[wm_compare]         -vga std -qmp unix:{qmp_sock},server,nowait &"
+        print "[wm_compare]   3. Re-run this command."
+        print ""
+        print "[wm_compare] Exiting with code 2 (infra unavailable, not a failure)."
+        return 2
+
+    print "[wm_compare] Capturing source D (QEMU Simple OS via QMP)..."
+    val cap_d = capture_qemu_vm(qmp_sock, "{out_dir}/D_raw.ppm")
+    if not cap_d.success:
+        print "[wm_compare]   FAIL: source D: {cap_d.error}"
+        return 1
+    print "[wm_compare]   D ok  {cap_d.width}x{cap_d.height} pixels={cap_d.pixels.len()}"
+
+    # Align D to (width, height) if guest framebuffer is a different size.
+    var pixels_d: [u32] = cap_d.pixels
+    if cap_d.width != width or cap_d.height != height:
+        print "[wm_compare]   D dimensions differ — nearest-neighbor resample to {width}x{height}"
+        pixels_d = _rescale_to(cap_d.pixels, cap_d.width, cap_d.height, width, height)
+
+    # ----- Full-frame compare -----
+    val profile = profile_strict()
+    val full = compare_pixel_buffers(cap_b.pixels, pixels_d, width, height, 0)
+    val exact = full.different_pixels == 0
+    if exact:
+        print "[wm_compare] Phase 5 PASS: byte-identical ({width}x{height})"
+        return 0
+
+    print "[wm_compare] NOT byte-identical: {full.different_pixels} px differ"
+    print "[wm_compare]   match pct (10000): {full.match_percentage}"
+    print "[wm_compare]   max channel diff:  {full.max_channel_diff}"
+
+    # Heat-map dump
+    dir_create_all(out_dir)
+    val diff_img = generate_diff_image(cap_b.pixels, pixels_d, width, height)
+    val diff_path = "{out_dir}/bit_diff_B_vs_D.ppm"
+    export_comparison_ppm(diff_img, width, height, diff_path)
+    print "[wm_compare]   heat-map: {diff_path}"
+
+    # Find diff regions (auto-clustered)
+    val regions = find_diff_regions(cap_b.pixels, pixels_d, width, height, 0)
+    print "[wm_compare]   auto-detected diff regions: {regions.len()}"
+
+    # Narrow to named sub-regions: title bar (top 30 rows), body (below),
+    # traffic lights (top-left 60x30). Counts are over the full frame.
+    val title_h: i32 = 30
+    val (title_diff, title_max) = _count_region_diffs(
+        cap_b.pixels, pixels_d, width, height, 0, 0, width, title_h)
+    val (body_diff, body_max) = _count_region_diffs(
+        cap_b.pixels, pixels_d, width, height, 0, title_h, width, height - title_h)
+    val (tl_diff, tl_max) = _count_region_diffs(
+        cap_b.pixels, pixels_d, width, height, 0, 0, 60, 30)
+
+    print "[wm_compare]   title-bar region (0,0 {width}x{title_h}): {title_diff} diff, max ch {title_max}"
+    print "[wm_compare]   body region       (0,{title_h} {width}x{height - title_h}): {body_diff} diff, max ch {body_max}"
+    print "[wm_compare]   traffic-lights    (0,0 60x30):         {tl_diff} diff, max ch {tl_max}"
+
+    # Write findings md
+    val md_dir = "doc/08_tracking/wm_compare"
+    dir_create_all(md_dir)
+    val md_path = "{md_dir}/divergence.md"
+    var md = "# WM Compare Phase 5 — B vs D Divergence\n\n"
+    md = md + "Generated by `src/app/wm_compare/main.spl --mode=live_bd_compare`.\n\n"
+    md = md + "## Scene\n\n"
+    md = md + "- Name: `{scene_name}`\n"
+    md = md + "- Size: {width}x{height}\n\n"
+    md = md + "## Sources\n\n"
+    md = md + "- **B**: host Simple WM (in-process `capture_source_b`, backend `{cap_b.backend_name}`)\n"
+    md = md + "- **D**: QEMU Simple OS via QMP socket `{qmp_sock}`\n"
+    md = md + "    - native framebuffer: {cap_d.width}x{cap_d.height}\n"
+    md = md + "    - resampled: {_bool_text(cap_d.width != width or cap_d.height != height)}\n\n"
+    md = md + "## Full-frame\n\n"
+    md = md + "- Differing pixels: {full.different_pixels}\n"
+    md = md + "- Match % (x10000): {full.match_percentage}\n"
+    md = md + "- Max channel diff: {full.max_channel_diff}\n"
+    md = md + "- Auto-detected diff clusters: {regions.len()}\n"
+    md = md + "- Heat-map PPM: `{diff_path}`\n\n"
+    md = md + "## Per-region pixel deltas\n\n"
+    md = md + "| Region        | Rect                  | Diff px | Max ch diff |\n"
+    md = md + "|---------------|-----------------------|---------|-------------|\n"
+    md = md + "| title bar     | (0,0 {width}x{title_h})    | {title_diff} | {title_max} |\n"
+    md = md + "| body          | (0,{title_h} {width}x{height - title_h}) | {body_diff} | {body_max} |\n"
+    md = md + "| traffic lights| (0,0 60x30)           | {tl_diff} | {tl_max} |\n\n"
+    md = md + "## Recommended next step\n\n"
+    if full.max_channel_diff <= 2:
+        md = md + "Max per-channel delta <= 2 LSB. Consider promoting to a `bit_tolerant` "
+        md = md + "profile in `tolerance_profile.spl` and gating on that instead of strict.\n"
+    elif title_diff == 0 and body_diff > 0:
+        md = md + "Title bar matches byte-for-byte; divergence is in the body. Inspect the "
+        md = md + "body rasterizer path (likely text / glass effects).\n"
+    elif title_diff > 0 and body_diff == 0:
+        md = md + "Body matches; divergence is in the title bar. Inspect decoration/traffic-light "
+        md = md + "code paths in `src/os/compositor/decorations.spl`.\n"
+    else:
+        md = md + "Divergence spans both regions. Start by diffing the raw scene element "
+        md = md + "list vs the guest Engine2D verification scene to ensure they are rendering "
+        md = md + "the same scene, not different scenes.\n"
+
+    file_write_text(md_path, md)
+    print "[wm_compare]   findings: {md_path}"
+    return 0
+
+fn capture_one(source: text, scene: SceneEntry, width: i32, height: i32) -> CaptureResult:
+    """Dispatch a single-source capture."""
+    if source == "A":
+        return capture_source_a(scene, width, height)
+    if source == "B":
+        return capture_source_b(scene, width, height)
+    if source == "D":
+        return capture_source_d(scene, width, height)
+    capture_error(source, width, height, "Unknown source: {source}")
+
+fn run_capture_phase(sources: [text], scene: SceneEntry,
+                     width: i32, height: i32,
+                     update_baseline: bool) -> [CaptureResult]:
+    """Capture each requested source. If update_baseline, overwrite PPMs."""
+    var results: [CaptureResult] = []
+    for src in sources:
+        print "[wm_compare] Capturing source {src} for scene '{scene.name}'..."
+        val r = capture_one(src, scene, width, height)
+        if r.success:
+            print "[wm_compare]   ok  width={r.width} height={r.height} pixels={r.pixels.len()}"
+            if update_baseline:
+                val ok = write_baseline(r, scene.name, src)
+                if ok:
+                    print "[wm_compare]   wrote baseline: {baseline_ppm_path(scene.name, src)}"
+                else:
+                    print "[wm_compare]   FAILED to write baseline"
+        else:
+            print "[wm_compare]   fail reason: {r.error}"
+        results = results + [r]
+    results
+
+fn sources_for_option(source_opt: text) -> [text]:
+    """Expand --source=all into [A,B,D], otherwise return a single-element list."""
+    if source_opt == "all":
+        return ["A", "B", "D"]
+    [source_opt]
+
+fn main() -> i64:
+    val args = get_cli_args()
+    val opts = parse_opts(args)
+
+    if opts.help:
+        print_help()
+        return 0
+
+    # Phase 5 bit-compare mode is a separate branch that only needs two PPM
+    # paths — it does not require --source or --scene to be set.
+    if opts.mode == "bit-compare":
+        return run_bit_compare_mode(opts)
+
+    # Phase 5 live B vs D bit-level compare — in-process captures both
+    # sources and runs the compare pipeline end-to-end. Requires a live
+    # QEMU guest with a QMP socket (exits 2 with instructions if missing).
+    if opts.mode == "live_bd_compare":
+        return run_live_bd_compare_mode(opts)
+
+    if opts.source == "":
+        print "Error: --source=A|B|D|all is required"
+        print_help()
+        return 1
+
+    if opts.scene == "":
+        print "Error: --scene=<name> is required"
+        print_help()
+        return 1
+
+    val entry_opt = resolve_scene(opts.scene, opts.width, opts.height)
+    if entry_opt == nil:
+        print "Error: unknown scene '{opts.scene}'"
+        print "Registered scenes:"
+        for name in list_scene_names():
+            print "  {name}"
+        return 1
+
+    val entry = entry_opt
+    val profile = resolve_tolerance(opts.tolerance)
+    val sources = sources_for_option(opts.source)
+
+    print "[wm_compare] Scene: {entry.name}  fixture: {entry.fixture_path}"
+    print "[wm_compare] Size: {opts.width}x{opts.height}  tolerance: {profile.name}"
+    if opts.mode != "":
+        print "[wm_compare] Mode: {opts.mode}"
+
+    # ------------------------------------------------------------------
+    # Phase 1 live source-B path
+    # ------------------------------------------------------------------
+    # When --mode=live_b, bypass the offline pipeline entirely and capture
+    # the running Web WM via Electron headless. Writes the PPM to
+    # test/baselines/wm_compare/<scene>/B_live.ppm so the Phase 0 placeholder
+    # baseline at B.ppm is preserved.
+    if opts.mode == "live_b":
+        if opts.source != "B":
+            print "Error: --mode=live_b requires --source=B"
+            return 1
+        dir_create_all(baseline_dir(opts.scene))
+        val out_path = "{baseline_dir(opts.scene)}/B_live.ppm"
+        print "[wm_compare] Live capturing source B from localhost:3333..."
+        val live = capture_live_source_b(opts.width, opts.height, out_path)
+        if live.success:
+            print "[wm_compare]   ok  width={live.width} height={live.height} bytes={live.ppm_bytes_len}"
+            print "[wm_compare]   wrote: {live.out_path}"
+            return 0
+        else:
+            print "[wm_compare]   FAIL: {live.error}"
+            return 1
+
+    val captures = run_capture_phase(
+        sources, entry, opts.width, opts.height, opts.update_baseline)
+
+    # Build an index source -> CaptureResult
+    var compares: [CompareSummary] = []
+
+    # Pairwise compare all successful captures
+    var i = 0
+    while i < captures.len():
+        var j = i + 1
+        while j < captures.len():
+            val a = captures[i]
+            val b = captures[j]
+            val summary = compare_pair(
+                sources[i], sources[j], a, b, entry.name, profile)
+            compares = compares + [summary]
+            if summary.exact_match:
+                print "[wm_compare] {summary.src_a} vs {summary.src_b}: EXACT MATCH"
+            else:
+                val pct_w = summary.match_percentage / 100
+                val pct_f = summary.match_percentage % 100
+                print "[wm_compare] {summary.src_a} vs {summary.src_b}: {pct_w}.{pct_f}% exact, {summary.different_pixels} px differ, max ch diff {summary.max_channel_diff}"
+                if summary.diff_ppm != "":
+                    print "[wm_compare]   diff heat-map: {summary.diff_ppm}"
+            j = j + 1
+        i = i + 1
+
+    # Always write a report SDN so the baseline tree is discoverable
+    val report_ok = write_report(opts.scene, opts.tolerance, captures, compares)
+    if report_ok:
+        print "[wm_compare] Report: {report_sdn_path(opts.scene)}"
+
+    # Exit code: 0 if all captures succeeded AND all compares passed or we
+    # were just updating baselines.
+    var all_ok = true
+    for cap in captures:
+        if not cap.success:
+            all_ok = false
+    if not opts.update_baseline:
+        for c in compares:
+            if not c.exact_match:
+                all_ok = false
+
+    if all_ok: 0 else: 1

@@ -8,11 +8,17 @@ use os.services.vfs.vfs_init.{
     g_vfs_file_size,
     g_vfs_file_exists,
     g_vfs_write_file_text,
+    g_vfs_write_file_bytes,
 }
 use std.fs_driver.instance.{DriverInstance}
 use std.db.dbfs_driver.{DbFsDriver}
 use examples.nvfs.src.posix.fs_driver_impl.{NvfsPosixDriver}
 use std.fs_driver.types.{MountOptions}
+use os.kernel.loader.executable_source.{resolve_executable_bytes, _clear_synthetic_initramfs_for_test, _clear_synthetic_vfs_for_test}
+use os.kernel.loader.elf_loader.{load_user_executable}
+use os.kernel.arch.arch_context.{Architecture}
+
+extern fn rt_bytes_alloc(len: i64) -> [u8]
 
 fn _dbfs_root() -> DriverInstance:
     DriverInstance.DbFs(DbFsDriver.new_hosted())
@@ -21,6 +27,43 @@ fn _nvfs_posix_root() -> DriverInstance:
     var d = NvfsPosixDriver.new("nvfs-posix-root")
     d.mount(MountOptions.default()).unwrap()
     DriverInstance.NvfsPosix(d)
+
+fn _make_elf64_rv64() -> [u8]:
+    var hdr = rt_bytes_alloc(4100)
+    hdr[0] = 0x7Fu8
+    hdr[1] = 0x45u8
+    hdr[2] = 0x4Cu8
+    hdr[3] = 0x46u8
+    hdr[4] = 2u8
+    hdr[5] = 1u8
+    hdr[6] = 1u8
+    hdr[16] = 2u8
+    hdr[17] = 0u8
+    hdr[18] = 0xF3u8
+    hdr[19] = 0u8
+    hdr[20] = 1u8
+    hdr[24] = 0x00u8
+    hdr[25] = 0x10u8
+    hdr[26] = 0x40u8
+    hdr[27] = 0x00u8
+    hdr[32] = 64u8
+    hdr[52] = 64u8
+    hdr[54] = 56u8
+    hdr[56] = 1u8
+    hdr[64] = 1u8
+    hdr[68] = 5u8
+    hdr[80] = 0x00u8
+    hdr[81] = 0x00u8
+    hdr[82] = 0x40u8
+    hdr[96] = 4u8
+    hdr[104] = 4u8
+    hdr[112] = 0x00u8
+    hdr[113] = 0x10u8
+    hdr[4096] = 0x13u8
+    hdr[4097] = 0x00u8
+    hdr[4098] = 0x00u8
+    hdr[4099] = 0x00u8
+    hdr
 
 describe "SimpleOS rootfs helpers — DBFS and NVFS porting":
     it "DBFS rootfs can write, read, size, and existence-check through g_vfs_*":
@@ -61,6 +104,29 @@ describe "SimpleOS rootfs helpers — DBFS and NVFS porting":
         expect(bytes.len()).to_equal(5)
         expect(bytes[0]).to_equal(69u8)
         expect(bytes[4]).to_equal(65u8)
+
+    it "DBFS rootfs resolves executable bytes and parses ELF image":
+        _clear_vfs_rootfs_for_test()
+        _clear_synthetic_initramfs_for_test()
+        _clear_synthetic_vfs_for_test()
+        expect(_mount_hosted_rootfs_for_test(_dbfs_root())).to_equal(true)
+        val elf = _make_elf64_rv64()
+        expect(g_vfs_write_file_bytes("/dbfs-init.elf", elf)).to_equal(true)
+        val direct = g_vfs_read_file_bytes("/dbfs-init.elf")
+        expect(direct.len()).to_equal(4100)
+        expect(direct[0]).to_equal(0x7Fu8)
+        expect(direct[4]).to_equal(2u8)
+        expect(direct[18]).to_equal(0xF3u8)
+        val resolved = resolve_executable_bytes("/dbfs-init.elf", Architecture.Riscv64)
+        expect(resolved.is_ok()).to_equal(true)
+        val bytes = resolved.unwrap()
+        expect(bytes.len()).to_equal(4100)
+        expect(bytes[0]).to_equal(0x7Fu8)
+        expect(bytes[4]).to_equal(2u8)
+        expect(bytes[18]).to_equal(0xF3u8)
+        val image = load_user_executable(bytes, Architecture.Riscv64)
+        expect(image.is_ok()).to_equal(true)
+        expect(image.unwrap().entry > 0).to_equal(true)
 
     it "NvfsPosix executable reads fall back to the mounted rootfs":
         _clear_vfs_rootfs_for_test()
