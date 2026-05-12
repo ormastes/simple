@@ -6,7 +6,10 @@ use std.gc_async_mut.gpu.browser_engine.webgl_context.{
     WEBGL_COMPILE_STATUS, WEBGL_LINK_STATUS, WEBGL_VALIDATE_STATUS,
     WEBGL_INFO_LOG_LENGTH, WEBGL_ATTACHED_SHADERS, WEBGL_ACTIVE_UNIFORMS,
     WEBGL_ACTIVE_ATTRIBUTES, WEBGL_SHADER_TYPE, WEBGL_FLOAT_VEC4,
-    WEBGL_SAMPLER_2D, WEBGL_TEXTURE_2D, WEBGL_UNPACK_ALIGNMENT,
+    WEBGL_SAMPLER_2D, WEBGL_FLOAT, WEBGL_ARRAY_BUFFER,
+    WEBGL_ELEMENT_ARRAY_BUFFER, WEBGL_STATIC_DRAW, WEBGL_DYNAMIC_DRAW,
+    WEBGL_TRIANGLES, WEBGL_LINES, WEBGL_UNSIGNED_SHORT, WEBGL_UNSIGNED_INT,
+    WEBGL_TEXTURE_2D, WEBGL_UNPACK_ALIGNMENT,
     WEBGL_UNPACK_FLIP_Y_WEBGL, WEBGL_UNPACK_PREMULTIPLY_ALPHA_WEBGL,
     WEBGL_RGB, WEBGL_RGBA, WEBGL_UNSIGNED_BYTE, WEBGL_COLOR_BUFFER_BIT,
     webgl_create_context, webgl_is_supported_context_name,
@@ -15,7 +18,8 @@ use std.gc_async_mut.gpu.browser_engine.webgl_context.{
 use std.gc_async_mut.gpu.browser_engine.webgl_render_commands.{
     WEBGL_RENDER_COMMAND_VIEWPORT, WEBGL_RENDER_COMMAND_CLEAR_COLOR,
     WEBGL_RENDER_COMMAND_CLEAR, WEBGL_RENDER_COMMAND_USE_PROGRAM,
-    WEBGL_RENDER_COMMAND_BIND_TEXTURE
+    WEBGL_RENDER_COMMAND_BIND_BUFFER, WEBGL_RENDER_COMMAND_BIND_TEXTURE,
+    WEBGL_RENDER_COMMAND_DRAW_ARRAYS, WEBGL_RENDER_COMMAND_DRAW_ELEMENTS
 }
 
 fn _vertex_glsl() -> text:
@@ -209,6 +213,94 @@ describe "Browser WebGL context":
             ctx.lose_context()
             expect(ctx.bind_texture(WEBGL_TEXTURE_2D, 1)).to_equal(false)
             expect(ctx.get_error()).to_equal(WEBGL_CONTEXT_LOST_WEBGL)
+
+    describe "buffers attributes and draws":
+        it "binds array buffers and records bind commands":
+            var ctx = webgl_create_context(1, 320, 240)
+            val buffer = ctx.create_buffer()
+            expect(ctx.bind_buffer(WEBGL_ARRAY_BUFFER, buffer.id)).to_equal(true)
+            expect(ctx.bound_array_buffer).to_equal(buffer.id)
+            expect(ctx.buffers[0].target).to_equal(WEBGL_ARRAY_BUFFER)
+            expect(ctx.render_commands.len()).to_equal(1)
+            expect(ctx.render_commands[0].kind).to_equal(WEBGL_RENDER_COMMAND_BIND_BUFFER)
+            expect(ctx.render_commands[0].target).to_equal(WEBGL_ARRAY_BUFFER)
+            expect(ctx.render_commands[0].buffer_id).to_equal(buffer.id)
+            expect(ctx.bind_buffer(WEBGL_ARRAY_BUFFER, -1)).to_equal(true)
+            expect(ctx.bound_array_buffer).to_equal(-1)
+            expect(ctx.render_commands.len()).to_equal(1)
+
+        it "records buffer data metadata and validates target usage and size":
+            var ctx = webgl_create_context(1, 320, 240)
+            val buffer = ctx.create_buffer()
+            expect(ctx.buffer_data_size(WEBGL_ARRAY_BUFFER, 12, WEBGL_STATIC_DRAW)).to_equal(false)
+            expect(ctx.get_error()).to_equal(WEBGL_INVALID_OPERATION)
+            expect(ctx.bind_buffer(WEBGL_ARRAY_BUFFER, buffer.id)).to_equal(true)
+            expect(ctx.buffer_data_size(WEBGL_ARRAY_BUFFER, -1, WEBGL_STATIC_DRAW)).to_equal(false)
+            expect(ctx.get_error()).to_equal(WEBGL_INVALID_VALUE)
+            expect(ctx.buffer_data_size(WEBGL_ARRAY_BUFFER, 12, 999)).to_equal(false)
+            expect(ctx.get_error()).to_equal(WEBGL_INVALID_ENUM)
+            expect(ctx.buffer_data_size(WEBGL_ARRAY_BUFFER, 12, WEBGL_DYNAMIC_DRAW)).to_equal(true)
+            expect(ctx.buffers[0].byte_length).to_equal(12)
+            expect(ctx.buffers[0].usage).to_equal(WEBGL_DYNAMIC_DRAW)
+            expect(ctx.buffers[0].initialized).to_equal(true)
+
+        it "configures vertex attributes from initialized array buffers":
+            var ctx = webgl_create_context(1, 320, 240)
+            val buffer = ctx.create_buffer()
+            expect(ctx.vertex_attrib_pointer(0, 4, WEBGL_FLOAT, false, 0, 0)).to_equal(false)
+            expect(ctx.get_error()).to_equal(WEBGL_INVALID_OPERATION)
+            expect(ctx.bind_buffer(WEBGL_ARRAY_BUFFER, buffer.id)).to_equal(true)
+            expect(ctx.vertex_attrib_pointer(0, 4, WEBGL_FLOAT, false, 0, 0)).to_equal(false)
+            expect(ctx.get_error()).to_equal(WEBGL_INVALID_OPERATION)
+            expect(ctx.buffer_data_size(WEBGL_ARRAY_BUFFER, 16, WEBGL_STATIC_DRAW)).to_equal(true)
+            expect(ctx.enable_vertex_attrib_array(0)).to_equal(true)
+            expect(ctx.vertex_attrib_pointer(0, 4, WEBGL_FLOAT, false, 0, 0)).to_equal(true)
+            expect(ctx.vertex_attribs[0].enabled).to_equal(true)
+            expect(ctx.vertex_attribs[0].size).to_equal(4)
+            expect(ctx.vertex_attribs[0].buffer_id).to_equal(buffer.id)
+            expect(ctx.vertex_attrib_pointer(16, 4, WEBGL_FLOAT, false, 0, 0)).to_equal(false)
+            expect(ctx.get_error()).to_equal(WEBGL_INVALID_VALUE)
+
+        it "records draw arrays after linked program and vertex source are ready":
+            var ctx = _linked_program_context()
+            val program = ctx.programs[0]
+            expect(ctx.draw_arrays(WEBGL_TRIANGLES, 0, 3)).to_equal(false)
+            expect(ctx.get_error()).to_equal(WEBGL_INVALID_OPERATION)
+            expect(ctx.use_program(program.id)).to_equal(true)
+            val buffer = ctx.create_buffer()
+            expect(ctx.bind_buffer(WEBGL_ARRAY_BUFFER, buffer.id)).to_equal(true)
+            expect(ctx.buffer_data_size(WEBGL_ARRAY_BUFFER, 48, WEBGL_STATIC_DRAW)).to_equal(true)
+            expect(ctx.enable_vertex_attrib_array(0)).to_equal(true)
+            expect(ctx.vertex_attrib_pointer(0, 4, WEBGL_FLOAT, false, 0, 0)).to_equal(true)
+            expect(ctx.draw_arrays(WEBGL_TRIANGLES, 0, 3)).to_equal(true)
+            expect(ctx.draw_call_count).to_equal(1)
+            expect(ctx.last_draw_mode).to_equal(WEBGL_TRIANGLES)
+            expect(ctx.last_draw_count).to_equal(3)
+            expect(ctx.render_commands[2].kind).to_equal(WEBGL_RENDER_COMMAND_DRAW_ARRAYS)
+            expect(ctx.render_commands[2].mode).to_equal(WEBGL_TRIANGLES)
+            expect(ctx.render_commands[2].count).to_equal(3)
+
+        it "records indexed draws and gates unsigned int indices":
+            var ctx = _linked_program_context()
+            val program = ctx.programs[0]
+            expect(ctx.use_program(program.id)).to_equal(true)
+            val vertex_buffer = ctx.create_buffer()
+            expect(ctx.bind_buffer(WEBGL_ARRAY_BUFFER, vertex_buffer.id)).to_equal(true)
+            expect(ctx.buffer_data_size(WEBGL_ARRAY_BUFFER, 48, WEBGL_STATIC_DRAW)).to_equal(true)
+            expect(ctx.enable_vertex_attrib_array(0)).to_equal(true)
+            expect(ctx.vertex_attrib_pointer(0, 4, WEBGL_FLOAT, false, 0, 0)).to_equal(true)
+            val index_buffer = ctx.create_buffer()
+            expect(ctx.bind_buffer(WEBGL_ELEMENT_ARRAY_BUFFER, index_buffer.id)).to_equal(true)
+            expect(ctx.buffer_data_size(WEBGL_ELEMENT_ARRAY_BUFFER, 6, WEBGL_STATIC_DRAW)).to_equal(true)
+            expect(ctx.draw_elements(WEBGL_TRIANGLES, 3, WEBGL_UNSIGNED_INT, 0)).to_equal(false)
+            expect(ctx.get_error()).to_equal(WEBGL_INVALID_ENUM)
+            expect(ctx.draw_elements(WEBGL_LINES, 2, WEBGL_UNSIGNED_SHORT, 0)).to_equal(true)
+            expect(ctx.indexed_draw_call_count).to_equal(1)
+            expect(ctx.render_commands[3].kind).to_equal(WEBGL_RENDER_COMMAND_DRAW_ELEMENTS)
+            expect(ctx.render_commands[3].element_type).to_equal(WEBGL_UNSIGNED_SHORT)
+            expect(ctx.get_extension("OES_element_index_uint").valid).to_equal(true)
+            expect(ctx.draw_elements(WEBGL_TRIANGLES, 3, WEBGL_UNSIGNED_INT, 0)).to_equal(true)
+            expect(ctx.indexed_draw_call_count).to_equal(2)
 
     describe "extensions":
         it "reports and enables supported extensions canonically":
