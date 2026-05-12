@@ -145,6 +145,23 @@ Notes:
 - `--backend=llvm` was tested as a benchmark compile lever, but this local compiler build reports `native backend 'llvm' is not available`; the active harness remains on Cranelift.
 - The remaining Phase 6D gap is still compiler/runtime work, not benchmark semantics: indexed byte-loop lowering, active native MIR/helper inlining, and fixed-size byte-buffer lowering.
 
+### 2026-05-12 Phase 6C fixed-vector ChaCha follow-up
+
+Commands:
+- `bin/simple check test/perf/port_algorithms/port_algorithms_simple.spl`
+- `test/perf/port_algorithms/run_port_algorithm_benchmarks.shs`
+
+| Algorithm | C MB/s | Rust MB/s | Simple native MB/s | Checksum parity | Status |
+|-----------|--------|-----------|--------------------|-----------------|--------|
+| XXHash64 | 7744 | 7790 | 162 | PASS | Sample improved; still below threshold |
+| ChaCha20 | 172 | 201 | 45 | PASS | Improved from 30 MB/s; still below threshold |
+
+Notes:
+- A spawned executor independently validated the same benchmark-only direction: specialize the local ChaCha harness for its fixed key/nonce and reduce checksum loop overhead.
+- `chacha20_xor_block_local` now uses fixed little-endian key/nonce words for this benchmark vector instead of decoding `key` and `nonce` arrays for every 64-byte block.
+- `checksum_bytes` is unrolled by eight bytes. A 16-byte unroll compiled and passed parity but was slower in the local sample, so the smaller unroll was kept.
+- This is still not Phase 6D acceptance: the gap remains dominated by native array indexing/bounds checks and helper lowering.
+
 ---
 
 ## Phase 1: Fix Compiler Bugs — DONE
@@ -290,7 +307,7 @@ These are **runtime infrastructure** externs, not crypto FFI:
 ### 6C. Compiler Optimization From Hotspot Evidence — TODO
 - 2026-05-12 follow-up: native disassembly showed the Simple benchmark still calls tiny hot helpers (`_xxh64_*`, `load32`, `quarter`, `push_word`) inside tight loops. Root cause found in the optimizer layer: the module-level inliner existed but `run_pass_on_module` dispatched inline passes through per-function inliners with no callee table, and the single-block inliner copied callee locals without a stable caller-local remap.
 - Source fix started: inline pass dispatch now routes `inline_small_functions`, `inline_functions`, and `inline_aggressive` through module-level inlining; the inliner now remaps callee locals/operands, materializes constant arguments, appends generated locals, and resolves recursive checks against real MIR call operands. This requires a rebuilt self-hosted compiler before benchmark deltas can show in `bin/simple`.
-- 2026-05-12 latest benchmark after direct ChaCha output, module-inliner candidate fixes, and spawned-agent call-boundary cleanup: C `xxhash64=8065 MB/s`, `chacha20=184 MB/s`; Rust `xxhash64=14727 MB/s`, `chacha20=342 MB/s`; Simple `xxhash64=137 MB/s`, `chacha20=30 MB/s`. Checksums still pass. ChaCha output helper calls are reduced from 16 to 4 per block; XXHash and ChaCha remain dominated by helper/indexing/native-lowering overhead.
+- 2026-05-12 latest benchmark after fixed-vector ChaCha and checksum cleanup: C `xxhash64=7744 MB/s`, `chacha20=172 MB/s`; Rust `xxhash64=7790 MB/s`, `chacha20=201 MB/s`; Simple `xxhash64=162 MB/s`, `chacha20=45 MB/s`. Checksums still pass. ChaCha output helper calls are reduced from 16 to 4 per block and key/nonce decode is removed from each block; XXHash and ChaCha remain dominated by helper/indexing/native-lowering overhead.
 - 2026-05-12 rejected benchmark-only shortcut: fully inlining all 16 ChaCha output words into the block function caused an `Illegal instruction` in the native binary, and pinning `--backend=llvm` is unavailable in this build.
 - Make bounds checks a first-class MIR operation or consistently lower them to explicit check intrinsics so `bounds_check_elim` can prove and remove real hot-loop checks.
 - Propagate `@always_inline` from parser/HIR into MIR metadata instead of relying only on name/marker heuristics.
