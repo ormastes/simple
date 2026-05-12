@@ -1,0 +1,163 @@
+# Bounds Check Elimination
+#
+# Removes provably redundant explicit bounds-check intrinsics.
+#
+# Current MIR array indexing lowers to GetElementPtr + Load without a distinct
+# bounds-check instruction. This pass therefore keeps normal memory operations
+# unchanged and only removes repeated explicit bounds-check intrinsics when the
+# exact same check has already appeared earlier in the same basic block.
+
+use compiler.mir.mir_data.*
+use compiler.mir.mir.*
+use compiler.mir.mir_instructions.{MirFunction, MirBlock}
+use compiler.mir_opt.mod.{MirPass}
+
+class BoundsCheckElimination:
+    """Conservative bounds-check elimination pass."""
+    removed_checks: i64
+    observed_checks: i64
+    observed_geps: i64
+
+impl BoundsCheckElimination:
+    static fn new() -> BoundsCheckElimination:
+        BoundsCheckElimination(
+            removed_checks: 0,
+            observed_checks: 0,
+            observed_geps: 0
+        )
+
+    fn name() -> text:
+        "bounds_check_elimination"
+
+    fn description() -> text:
+        "Eliminates duplicate explicit bounds-check intrinsics"
+
+    fn is_analysis_pass() -> bool:
+        false
+
+    fn dependencies() -> [text]:
+        ["loop_invariant_motion"]
+
+    me run_on_function(func: MirFunction) -> MirFunction:
+        var optimized_blocks: [MirBlock] = []
+        var modified = false
+
+        for block in func.blocks:
+            val optimized = self.eliminate_in_block(block)
+            if optimized.instructions.len() != block.instructions.len():
+                modified = true
+            optimized_blocks = optimized_blocks.push(optimized)
+
+        if modified:
+            MirFunction(..func, blocks: optimized_blocks)
+        else:
+            func
+
+    me eliminate_in_block(block: MirBlock) -> MirBlock:
+        var seen_checks: Dict<text, bool> = {}
+        var new_instructions: [MirInst] = []
+        var changed = false
+
+        for inst in block.instructions:
+            match inst.kind:
+                case GetElementPtr(_, _, _):
+                    self.observed_geps = self.observed_geps + 1
+                    new_instructions = new_instructions.push(inst)
+                case Intrinsic(_, name, args):
+                    if is_bounds_check_intrinsic(name):
+                        self.observed_checks = self.observed_checks + 1
+                        val key = bounds_check_key(name, args)
+                        if seen_checks.has(key):
+                            self.removed_checks = self.removed_checks + 1
+                            changed = true
+                        else:
+                            seen_checks[key] = true
+                            new_instructions = new_instructions.push(inst)
+                    else:
+                        new_instructions = new_instructions.push(inst)
+                case Call(_, func_op, args):
+                    val check_name = bounds_check_call_name(func_op)
+                    if check_name.?:
+                        self.observed_checks = self.observed_checks + 1
+                        val key = bounds_check_key(check_name.unwrap(), args)
+                        if seen_checks.has(key):
+                            self.removed_checks = self.removed_checks + 1
+                            changed = true
+                        else:
+                            seen_checks[key] = true
+                            new_instructions = new_instructions.push(inst)
+                    else:
+                        new_instructions = new_instructions.push(inst)
+                case _:
+                    new_instructions = new_instructions.push(inst)
+
+        if changed:
+            MirBlock(
+                id: block.id,
+                label: block.label,
+                instructions: new_instructions,
+                terminator: block.terminator
+            )
+        else:
+            block
+
+    fn stats_summary() -> text:
+        "BoundsCheckElim: removed {self.removed_checks} duplicate checks, observed {self.observed_checks} checks and {self.observed_geps} GEPs"
+
+fn is_bounds_check_intrinsic(name: text) -> bool:
+    (
+        name == "bounds_check" or
+        name == "array_bounds_check" or
+        name == "rt_bounds_check" or
+        name == "__simple_bounds_check"
+    )
+
+fn bounds_check_call_name(func_op: MirOperand) -> text?:
+    match func_op.kind:
+        case Const(value, type_):
+            match type_.kind:
+                case FuncPtr(_):
+                    match value:
+                        case Str(name):
+                            if is_bounds_check_intrinsic(name):
+                                Some(name)
+                            else:
+                                nil
+                        case _:
+                            nil
+                case _:
+                    nil
+        case _:
+            nil
+
+fn bounds_check_key(name: text, args: [MirOperand]) -> text:
+    var parts: [text] = [name]
+    for arg in args:
+        parts = parts.push(bounds_operand_key(arg))
+    parts.join("|")
+
+fn bounds_operand_key(op: MirOperand) -> text:
+    match op.kind:
+        case Copy(local):
+            "copy:{local.id}"
+        case Move(local):
+            "move:{local.id}"
+        case Const(value, _):
+            "const:{bounds_const_key(value)}"
+
+fn bounds_const_key(value: MirConstValue) -> text:
+    match value:
+        case Int(v): "int:{v}"
+        case Float(v): "float:{v}"
+        case Bool(v): "bool:{v}"
+        case Str(v): "str:{v}"
+        case Zero: "zero"
+        case Array(_): "array"
+        case Tuple(_): "tuple"
+        case Struct(_): "struct"
+
+fn create_bounds_check_elim_pass() -> BoundsCheckElimination:
+    BoundsCheckElimination.new()
+
+fn bounds_check_elim_run_on_function(bce_pass: BoundsCheckElimination, func: MirFunction) -> MirFunction:
+    bce_pass.run_on_function(func)

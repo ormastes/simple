@@ -67,6 +67,16 @@ Production-level RISC-V system:
 - `src/os/kernel/boot/riscv_noalloc_heap.spl` adds a freestanding raw bump heap
   over the reserved upper 16 MiB RAM window. This is a boot heap surface only;
   it is not yet wired to the hosted `rt_alloc` value ABI.
+- `src/os/kernel/boot/riscv_noalloc_log.spl` adds byte-only UART log markers
+  (`LOG OK`, `BOOT OK`) without importing the hosted log facade or formatted
+  `text` runtime.
+- `src/os/kernel/boot/riscv_noalloc_services.spl` adds a scalar boot-service
+  readiness snapshot for memory/SPM/network/display/storage state without IPC
+  objects, arrays, `text`, or runtime PCI/display/network externs.
+- `src/os/kernel/arch/riscv64/boot/freestanding_runtime.c` is compiled as a
+  RISC-V boot object and bridges `rt_alloc` to the noalloc heap. It also
+  provides no-op `rt_free` plus libc-free `rt_memcpy`/`rt_memset`, so raw
+  struct allocation can link without hosted malloc.
 - `build/simpleos-rv64.elf` links as an ELF64 RISC-V executable at entry
   `0x80200000`.
 
@@ -85,19 +95,21 @@ Production-level RISC-V system:
 **Remaining after B1: hosted OS/runtime ABI handoff**
 
 Re-enabling the higher-level handoff (`riscv_boot_mem_init -> os_main`) pulls
-hosted-style PMM/heap/log/service code and fails on missing freestanding runtime
-symbols such as `rt_alloc`, `rt_string_new`, `rt_array_push`, `rt_enum_new`,
-`rt_native_eq`, `rt_mmio_read_u64`, and `log_raw_println`. Adding
+hosted-style PMM/heap/log/service code and still fails on missing freestanding
+runtime symbols beyond raw allocation, such as `rt_string_new`, `rt_array_push`,
+`rt_enum_new`, `rt_native_eq`, `rt_mmio_read_u64`, and `log_raw_println`. Adding
 `--source src/runtime` does not resolve this; the missing piece is either a
 RISC-V-linkable Simple runtime ABI for that value model or narrower noalloc
-log/service shims plus a bridge from hosted allocation calls to the noalloc
-heap. The current noalloc boot path proves the ELF can cross module boundaries,
-persist boot metadata, publish a scalar memory window, allocate raw pages, and
-initialize a raw heap without triggering hosted runtime dependencies.
+service/net/HTTP shims. The current noalloc boot path proves the ELF can cross
+module boundaries, persist boot metadata, publish a scalar memory window,
+allocate raw pages, initialize a raw heap, satisfy raw `rt_alloc`, emit byte log
+markers, and publish service readiness state without triggering hosted runtime
+dependencies.
 
-**Next:** add a byte-only log/service handoff and decide how `rt_alloc`,
-arrays, `text`, and enum values are supported or avoided before re-introducing
-netstack, TLS, and HTTP closures.
+**Next:** either bridge hosted arrays, `text`, enum values, and formatted
+logging to a freestanding runtime ABI, or continue carving noalloc net/HTTP
+entry points that avoid the hosted value model before re-introducing netstack,
+TLS, and HTTP closures.
 
 ### B2/B3 Detail — TCP + IoDriver Shims
 
@@ -183,6 +195,9 @@ SIMPLE_BOOTSTRAP=1 src/compiler_rust/target/debug/simple native-build \
 | `src/os/kernel/boot/riscv_noalloc_handoff.spl` | Freestanding scalar boot handoff |
 | `src/os/kernel/boot/riscv_noalloc_pmm.spl` | Freestanding raw page allocator |
 | `src/os/kernel/boot/riscv_noalloc_heap.spl` | Freestanding raw bump heap |
+| `src/os/kernel/boot/riscv_noalloc_log.spl` | Freestanding byte log markers |
+| `src/os/kernel/boot/riscv_noalloc_services.spl` | Freestanding service readiness snapshot |
+| `src/os/kernel/arch/riscv64/boot/freestanding_runtime.c` | Freestanding raw allocation bridge |
 | `src/os/kernel/boot/riscv_boot_mem.spl` | PMM + heap init |
 | `src/os/kernel/boot/os_main.spl` | Service init → HTTP server |
 | `src/os/kernel/arch/riscv64/linker.ld` | Linker script (0x80200000) |

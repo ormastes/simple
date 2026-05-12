@@ -12,6 +12,10 @@ pub val WEBGPU_COMMAND_SET_PIPELINE: text = "set-pipeline"
 pub val WEBGPU_COMMAND_SET_BIND_GROUP: text = "set-bind-group"
 pub val WEBGPU_COMMAND_DRAW: text = "draw"
 pub val WEBGPU_COMMAND_DISPATCH_WORKGROUPS: text = "dispatch-workgroups"
+pub val WEBGPU_COMMAND_COPY_BUFFER_TO_BUFFER: text = "copy-buffer-to-buffer"
+pub val WEBGPU_COMMAND_COPY_TEXTURE_TO_TEXTURE: text = "copy-texture-to-texture"
+pub val WEBGPU_COMMAND_WRITE_BUFFER: text = "write-buffer"
+pub val WEBGPU_COMMAND_WRITE_TEXTURE: text = "write-texture"
 
 pub class WebGPURecordedCommand:
     kind: text
@@ -23,6 +27,17 @@ pub class WebGPURecordedCommand:
     workgroups_x: i32
     workgroups_y: i32
     workgroups_z: i32
+    source_buffer_id: i32
+    destination_buffer_id: i32
+    source_texture_id: i32
+    destination_texture_id: i32
+    offset: i32
+    destination_offset: i32
+    size: i32
+    width: i32
+    height: i32
+    depth_or_layers: i32
+    data_size: i32
 
 pub class GPUCommandBufferHandle:
     id: i32
@@ -137,6 +152,34 @@ pub class WebGPUCommandEncoder:
         self.last_error = ""
         true
 
+    me copy_buffer_to_buffer(source_buffer_id: i32, source_offset: i32, destination_buffer_id: i32, destination_offset: i32, size: i32) -> bool:
+        if not self.ensure_can_record():
+            return false
+        if self.active_pass != "":
+            self.last_error = "GPUCommandEncoder copyBufferToBuffer cannot run inside a pass"
+            return false
+        val err = webgpu_validate_buffer_copy(source_buffer_id, source_offset, destination_buffer_id, destination_offset, size)
+        if err != "":
+            self.last_error = err
+            return false
+        self.commands.push(webgpu_command_copy_buffer_to_buffer(source_buffer_id, source_offset, destination_buffer_id, destination_offset, size))
+        self.last_error = ""
+        true
+
+    me copy_texture_to_texture(source_texture_id: i32, destination_texture_id: i32, width: i32, height: i32, depth_or_layers: i32) -> bool:
+        if not self.ensure_can_record():
+            return false
+        if self.active_pass != "":
+            self.last_error = "GPUCommandEncoder copyTextureToTexture cannot run inside a pass"
+            return false
+        val err = webgpu_validate_texture_copy(source_texture_id, destination_texture_id, width, height, depth_or_layers)
+        if err != "":
+            self.last_error = err
+            return false
+        self.commands.push(webgpu_command_copy_texture_to_texture(source_texture_id, destination_texture_id, width, height, depth_or_layers))
+        self.last_error = ""
+        true
+
     me finish(label: text) -> GPUCommandBufferHandle:
         if self.finished:
             self.last_error = "GPUCommandEncoder is already finished"
@@ -169,10 +212,29 @@ pub class WebGPUCommandEncoder:
 
 pub class WebGPUQueue:
     submitted_buffers: [GPUCommandBufferHandle]
+    write_commands: [WebGPURecordedCommand]
     last_error: text
 
     static fn create() -> WebGPUQueue:
-        WebGPUQueue(submitted_buffers: [], last_error: "")
+        WebGPUQueue(submitted_buffers: [], write_commands: [], last_error: "")
+
+    me write_buffer(buffer_id: i32, offset: i32, data_size: i32) -> bool:
+        val err = webgpu_validate_queue_write_buffer(buffer_id, offset, data_size)
+        if err != "":
+            self.last_error = err
+            return false
+        self.write_commands.push(webgpu_command_write_buffer(buffer_id, offset, data_size))
+        self.last_error = ""
+        true
+
+    me write_texture(texture_id: i32, width: i32, height: i32, depth_or_layers: i32, data_size: i32) -> bool:
+        val err = webgpu_validate_queue_write_texture(texture_id, width, height, depth_or_layers, data_size)
+        if err != "":
+            self.last_error = err
+            return false
+        self.write_commands.push(webgpu_command_write_texture(texture_id, width, height, depth_or_layers, data_size))
+        self.last_error = ""
+        true
 
     me submit(buffers: [GPUCommandBufferHandle]) -> bool:
         if buffers.len() == 0:
@@ -200,17 +262,70 @@ pub class WebGPUQueue:
             i = i + 1
         total
 
+    fn write_count() -> i32:
+        self.write_commands.len()
+
 pub fn webgpu_command_empty(kind: text) -> WebGPURecordedCommand:
-    WebGPURecordedCommand(kind: kind, pipeline_id: -1, bind_group_id: -1, slot: -1, vertex_count: 0, instance_count: 0, workgroups_x: 0, workgroups_y: 0, workgroups_z: 0)
+    WebGPURecordedCommand(kind: kind, pipeline_id: -1, bind_group_id: -1, slot: -1, vertex_count: 0, instance_count: 0, workgroups_x: 0, workgroups_y: 0, workgroups_z: 0, source_buffer_id: -1, destination_buffer_id: -1, source_texture_id: -1, destination_texture_id: -1, offset: 0, destination_offset: 0, size: 0, width: 0, height: 0, depth_or_layers: 0, data_size: 0)
 
 pub fn webgpu_command_pipeline(pipeline_id: i32) -> WebGPURecordedCommand:
-    WebGPURecordedCommand(kind: WEBGPU_COMMAND_SET_PIPELINE, pipeline_id: pipeline_id, bind_group_id: -1, slot: -1, vertex_count: 0, instance_count: 0, workgroups_x: 0, workgroups_y: 0, workgroups_z: 0)
+    WebGPURecordedCommand(kind: WEBGPU_COMMAND_SET_PIPELINE, pipeline_id: pipeline_id, bind_group_id: -1, slot: -1, vertex_count: 0, instance_count: 0, workgroups_x: 0, workgroups_y: 0, workgroups_z: 0, source_buffer_id: -1, destination_buffer_id: -1, source_texture_id: -1, destination_texture_id: -1, offset: 0, destination_offset: 0, size: 0, width: 0, height: 0, depth_or_layers: 0, data_size: 0)
 
 pub fn webgpu_command_bind_group(slot: i32, bind_group_id: i32) -> WebGPURecordedCommand:
-    WebGPURecordedCommand(kind: WEBGPU_COMMAND_SET_BIND_GROUP, pipeline_id: -1, bind_group_id: bind_group_id, slot: slot, vertex_count: 0, instance_count: 0, workgroups_x: 0, workgroups_y: 0, workgroups_z: 0)
+    WebGPURecordedCommand(kind: WEBGPU_COMMAND_SET_BIND_GROUP, pipeline_id: -1, bind_group_id: bind_group_id, slot: slot, vertex_count: 0, instance_count: 0, workgroups_x: 0, workgroups_y: 0, workgroups_z: 0, source_buffer_id: -1, destination_buffer_id: -1, source_texture_id: -1, destination_texture_id: -1, offset: 0, destination_offset: 0, size: 0, width: 0, height: 0, depth_or_layers: 0, data_size: 0)
 
 pub fn webgpu_command_draw(vertex_count: i32, instance_count: i32) -> WebGPURecordedCommand:
-    WebGPURecordedCommand(kind: WEBGPU_COMMAND_DRAW, pipeline_id: -1, bind_group_id: -1, slot: -1, vertex_count: vertex_count, instance_count: instance_count, workgroups_x: 0, workgroups_y: 0, workgroups_z: 0)
+    WebGPURecordedCommand(kind: WEBGPU_COMMAND_DRAW, pipeline_id: -1, bind_group_id: -1, slot: -1, vertex_count: vertex_count, instance_count: instance_count, workgroups_x: 0, workgroups_y: 0, workgroups_z: 0, source_buffer_id: -1, destination_buffer_id: -1, source_texture_id: -1, destination_texture_id: -1, offset: 0, destination_offset: 0, size: 0, width: 0, height: 0, depth_or_layers: 0, data_size: 0)
 
 pub fn webgpu_command_dispatch(workgroups_x: i32, workgroups_y: i32, workgroups_z: i32) -> WebGPURecordedCommand:
-    WebGPURecordedCommand(kind: WEBGPU_COMMAND_DISPATCH_WORKGROUPS, pipeline_id: -1, bind_group_id: -1, slot: -1, vertex_count: 0, instance_count: 0, workgroups_x: workgroups_x, workgroups_y: workgroups_y, workgroups_z: workgroups_z)
+    WebGPURecordedCommand(kind: WEBGPU_COMMAND_DISPATCH_WORKGROUPS, pipeline_id: -1, bind_group_id: -1, slot: -1, vertex_count: 0, instance_count: 0, workgroups_x: workgroups_x, workgroups_y: workgroups_y, workgroups_z: workgroups_z, source_buffer_id: -1, destination_buffer_id: -1, source_texture_id: -1, destination_texture_id: -1, offset: 0, destination_offset: 0, size: 0, width: 0, height: 0, depth_or_layers: 0, data_size: 0)
+
+pub fn webgpu_command_copy_buffer_to_buffer(source_buffer_id: i32, source_offset: i32, destination_buffer_id: i32, destination_offset: i32, size: i32) -> WebGPURecordedCommand:
+    WebGPURecordedCommand(kind: WEBGPU_COMMAND_COPY_BUFFER_TO_BUFFER, pipeline_id: -1, bind_group_id: -1, slot: -1, vertex_count: 0, instance_count: 0, workgroups_x: 0, workgroups_y: 0, workgroups_z: 0, source_buffer_id: source_buffer_id, destination_buffer_id: destination_buffer_id, source_texture_id: -1, destination_texture_id: -1, offset: source_offset, destination_offset: destination_offset, size: size, width: 0, height: 0, depth_or_layers: 0, data_size: 0)
+
+pub fn webgpu_command_copy_texture_to_texture(source_texture_id: i32, destination_texture_id: i32, width: i32, height: i32, depth_or_layers: i32) -> WebGPURecordedCommand:
+    WebGPURecordedCommand(kind: WEBGPU_COMMAND_COPY_TEXTURE_TO_TEXTURE, pipeline_id: -1, bind_group_id: -1, slot: -1, vertex_count: 0, instance_count: 0, workgroups_x: 0, workgroups_y: 0, workgroups_z: 0, source_buffer_id: -1, destination_buffer_id: -1, source_texture_id: source_texture_id, destination_texture_id: destination_texture_id, offset: 0, destination_offset: 0, size: 0, width: width, height: height, depth_or_layers: depth_or_layers, data_size: 0)
+
+pub fn webgpu_command_write_buffer(buffer_id: i32, offset: i32, data_size: i32) -> WebGPURecordedCommand:
+    WebGPURecordedCommand(kind: WEBGPU_COMMAND_WRITE_BUFFER, pipeline_id: -1, bind_group_id: -1, slot: -1, vertex_count: 0, instance_count: 0, workgroups_x: 0, workgroups_y: 0, workgroups_z: 0, source_buffer_id: -1, destination_buffer_id: buffer_id, source_texture_id: -1, destination_texture_id: -1, offset: offset, destination_offset: 0, size: data_size, width: 0, height: 0, depth_or_layers: 0, data_size: data_size)
+
+pub fn webgpu_command_write_texture(texture_id: i32, width: i32, height: i32, depth_or_layers: i32, data_size: i32) -> WebGPURecordedCommand:
+    WebGPURecordedCommand(kind: WEBGPU_COMMAND_WRITE_TEXTURE, pipeline_id: -1, bind_group_id: -1, slot: -1, vertex_count: 0, instance_count: 0, workgroups_x: 0, workgroups_y: 0, workgroups_z: 0, source_buffer_id: -1, destination_buffer_id: -1, source_texture_id: -1, destination_texture_id: texture_id, offset: 0, destination_offset: 0, size: 0, width: width, height: height, depth_or_layers: depth_or_layers, data_size: data_size)
+
+pub fn webgpu_validate_buffer_copy(source_buffer_id: i32, source_offset: i32, destination_buffer_id: i32, destination_offset: i32, size: i32) -> text:
+    if source_buffer_id <= 0 or destination_buffer_id <= 0:
+        return "GPUCommandEncoder copyBufferToBuffer buffers must be valid"
+    if source_buffer_id == destination_buffer_id:
+        return "GPUCommandEncoder copyBufferToBuffer requires distinct buffers"
+    if source_offset < 0 or destination_offset < 0:
+        return "GPUCommandEncoder copyBufferToBuffer offsets must be non-negative"
+    if size <= 0:
+        return "GPUCommandEncoder copyBufferToBuffer size must be positive"
+    ""
+
+pub fn webgpu_validate_texture_copy(source_texture_id: i32, destination_texture_id: i32, width: i32, height: i32, depth_or_layers: i32) -> text:
+    if source_texture_id <= 0 or destination_texture_id <= 0:
+        return "GPUCommandEncoder copyTextureToTexture textures must be valid"
+    if source_texture_id == destination_texture_id:
+        return "GPUCommandEncoder copyTextureToTexture requires distinct textures"
+    if width <= 0 or height <= 0 or depth_or_layers <= 0:
+        return "GPUCommandEncoder copyTextureToTexture size must be positive"
+    ""
+
+pub fn webgpu_validate_queue_write_buffer(buffer_id: i32, offset: i32, data_size: i32) -> text:
+    if buffer_id <= 0:
+        return "GPUQueue writeBuffer buffer must be valid"
+    if offset < 0:
+        return "GPUQueue writeBuffer offset must be non-negative"
+    if data_size <= 0:
+        return "GPUQueue writeBuffer data size must be positive"
+    ""
+
+pub fn webgpu_validate_queue_write_texture(texture_id: i32, width: i32, height: i32, depth_or_layers: i32, data_size: i32) -> text:
+    if texture_id <= 0:
+        return "GPUQueue writeTexture texture must be valid"
+    if width <= 0 or height <= 0 or depth_or_layers <= 0:
+        return "GPUQueue writeTexture size must be positive"
+    if data_size <= 0:
+        return "GPUQueue writeTexture data size must be positive"
+    ""

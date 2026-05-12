@@ -4,7 +4,9 @@ use std.gc_async_mut.gpu.browser_engine.webgpu_commands.{
     WEBGPU_COMMAND_BEGIN_RENDER_PASS, WEBGPU_COMMAND_END_RENDER_PASS,
     WEBGPU_COMMAND_BEGIN_COMPUTE_PASS, WEBGPU_COMMAND_END_COMPUTE_PASS,
     WEBGPU_COMMAND_SET_PIPELINE, WEBGPU_COMMAND_SET_BIND_GROUP,
-    WEBGPU_COMMAND_DRAW, WEBGPU_COMMAND_DISPATCH_WORKGROUPS
+    WEBGPU_COMMAND_DRAW, WEBGPU_COMMAND_DISPATCH_WORKGROUPS,
+    WEBGPU_COMMAND_COPY_BUFFER_TO_BUFFER, WEBGPU_COMMAND_COPY_TEXTURE_TO_TEXTURE,
+    WEBGPU_COMMAND_WRITE_BUFFER, WEBGPU_COMMAND_WRITE_TEXTURE
 }
 
 describe "Browser WebGPU command encoding":
@@ -55,6 +57,59 @@ describe "Browser WebGPU command encoding":
             var encoder = WebGPUCommandEncoder.create("compute")
             expect(encoder.dispatch_workgroups(1, 1, 1)).to_equal(false)
             expect(encoder.last_error).to_equal("GPUComputePassEncoder dispatch requires an active compute pass")
+
+    describe "transfer commands":
+        it "records buffer and texture copies outside passes":
+            var encoder = WebGPUCommandEncoder.create("transfers")
+            expect(encoder.copy_buffer_to_buffer(1, 4, 2, 8, 64)).to_equal(true)
+            expect(encoder.copy_texture_to_texture(3, 4, 16, 8, 1)).to_equal(true)
+            val command_buffer = encoder.finish("copy-commands")
+            expect(command_buffer.valid).to_equal(true)
+            expect(command_buffer.command_count()).to_equal(2)
+            expect(command_buffer.commands[0].kind).to_equal(WEBGPU_COMMAND_COPY_BUFFER_TO_BUFFER)
+            expect(command_buffer.commands[0].source_buffer_id).to_equal(1)
+            expect(command_buffer.commands[0].destination_buffer_id).to_equal(2)
+            expect(command_buffer.commands[0].offset).to_equal(4)
+            expect(command_buffer.commands[0].destination_offset).to_equal(8)
+            expect(command_buffer.commands[0].size).to_equal(64)
+            expect(command_buffer.commands[1].kind).to_equal(WEBGPU_COMMAND_COPY_TEXTURE_TO_TEXTURE)
+            expect(command_buffer.commands[1].source_texture_id).to_equal(3)
+            expect(command_buffer.commands[1].destination_texture_id).to_equal(4)
+            expect(command_buffer.commands[1].width).to_equal(16)
+
+        it "rejects copies inside active passes":
+            var encoder = WebGPUCommandEncoder.create("transfers")
+            expect(encoder.begin_render_pass()).to_equal(true)
+            expect(encoder.copy_buffer_to_buffer(1, 0, 2, 0, 4)).to_equal(false)
+            expect(encoder.last_error).to_equal("GPUCommandEncoder copyBufferToBuffer cannot run inside a pass")
+
+        it "rejects invalid copy descriptors":
+            var encoder = WebGPUCommandEncoder.create("transfers")
+            expect(encoder.copy_buffer_to_buffer(1, 0, 1, 0, 4)).to_equal(false)
+            expect(encoder.last_error).to_equal("GPUCommandEncoder copyBufferToBuffer requires distinct buffers")
+            expect(encoder.copy_texture_to_texture(3, 4, 0, 8, 1)).to_equal(false)
+            expect(encoder.last_error).to_equal("GPUCommandEncoder copyTextureToTexture size must be positive")
+
+    describe "queue writes":
+        it "records buffer and texture writes":
+            var queue = WebGPUQueue.create()
+            expect(queue.write_buffer(1, 16, 128)).to_equal(true)
+            expect(queue.write_texture(2, 4, 4, 1, 64)).to_equal(true)
+            expect(queue.write_count()).to_equal(2)
+            expect(queue.write_commands[0].kind).to_equal(WEBGPU_COMMAND_WRITE_BUFFER)
+            expect(queue.write_commands[0].destination_buffer_id).to_equal(1)
+            expect(queue.write_commands[0].offset).to_equal(16)
+            expect(queue.write_commands[0].data_size).to_equal(128)
+            expect(queue.write_commands[1].kind).to_equal(WEBGPU_COMMAND_WRITE_TEXTURE)
+            expect(queue.write_commands[1].destination_texture_id).to_equal(2)
+            expect(queue.write_commands[1].width).to_equal(4)
+
+        it "rejects invalid queue write descriptors":
+            var queue = WebGPUQueue.create()
+            expect(queue.write_buffer(-1, 0, 16)).to_equal(false)
+            expect(queue.last_error).to_equal("GPUQueue writeBuffer buffer must be valid")
+            expect(queue.write_texture(2, 4, 4, 1, 0)).to_equal(false)
+            expect(queue.last_error).to_equal("GPUQueue writeTexture data size must be positive")
 
     describe "encoder and queue validation":
         it "rejects finish while a pass is active":

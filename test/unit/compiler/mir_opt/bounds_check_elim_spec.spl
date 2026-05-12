@@ -1,0 +1,42 @@
+use compiler.mir.mir_data.*
+use compiler.mir.mir_instructions.{MirBlock}
+use compiler.mir_opt.mir_opt.bounds_check_elim.{create_bounds_check_elim_pass}
+
+fn _bce_lid(id: i64) -> LocalId:
+    LocalId(id: id)
+
+fn _bce_copy(id: i64) -> MirOperand:
+    MirOperand(kind: MirOperandKind.Copy(_bce_lid(id)))
+
+fn _bce_block(instructions: [MirInst]) -> MirBlock:
+    MirBlock(
+        id: BlockId(id: 0),
+        label: Some("entry"),
+        instructions: instructions,
+        terminator: MirTerminator.Return(nil)
+    )
+
+fn _bce_count_bounds_calls(block: MirBlock) -> i64:
+    var count = 0
+    for inst in block.instructions:
+        match inst.kind:
+                case Intrinsic(_, name, _):
+                    if name == "bounds_check":
+                        count = count + 1
+                case _:
+                    ()
+    count
+
+describe "MIR Bounds Check Elimination":
+    it "removes duplicate explicit bounds checks in one block":
+        val check1 = MirInst(kind: MirInstKind.Intrinsic(nil, "bounds_check", [_bce_copy(1), _bce_copy(2)]), span: nil)
+        val check2 = MirInst(kind: MirInstKind.Intrinsic(nil, "bounds_check", [_bce_copy(1), _bce_copy(2)]), span: nil)
+        val gep = MirInst(kind: MirInstKind.GetElementPtr(_bce_lid(3), _bce_copy(1), [_bce_copy(2)]), span: nil)
+        val load = MirInst(kind: MirInstKind.Load(_bce_lid(4), _bce_copy(3)), span: nil)
+        val block = _bce_block([check1, check2, gep, load])
+
+        var bce_pass = create_bounds_check_elim_pass()
+        val optimized = bce_pass.eliminate_in_block(block)
+
+        expect(_bce_count_bounds_calls(optimized)).to_equal(1)
+        expect(optimized.instructions.len()).to_equal(3)

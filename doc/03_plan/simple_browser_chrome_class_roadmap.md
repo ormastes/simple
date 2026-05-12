@@ -418,8 +418,9 @@ Non-goal: cloning proprietary Chrome services. The target is Chrome-level web co
 - Script canvas API now exposes a tested WebGPU context wrapper via `canvas_get_context_webgpu`, and Canvas 2D mutating operations are covered through method-based state mutation in `test/unit/browser/script/canvas_api_spec.spl`.
 - Script navigator API now exposes `navigator_gpu`/metadata helpers, imports through the script module and script runner prelude, and validates secure/insecure `navigator.gpu` behavior in `test/unit/browser/script/navigator_api_spec.spl`.
 - Browser WebGPU resource primitives now cover deterministic buffer, texture, sampler, bind group layout, and bind group handles with descriptor/resource validation in `src/lib/gc_async_mut/gpu/browser_engine/webgpu_resources.spl`, covered by `test/web_platform/webgpu/webgpu_resources_spec.spl`.
-- Browser WebGPU command primitives now cover render pass recording, compute pass recording, command-buffer finish validation, and queue submission in `src/lib/gc_async_mut/gpu/browser_engine/webgpu_commands.spl`, covered by `test/web_platform/webgpu/webgpu_commands_spec.spl`.
+- Browser WebGPU command primitives now cover render pass recording, compute pass recording, transfer copy recording, queue writeBuffer/writeTexture recording, command-buffer finish validation, and queue submission in `src/lib/gc_async_mut/gpu/browser_engine/webgpu_commands.spl`, covered by `test/web_platform/webgpu/webgpu_commands_spec.spl`.
 - Browser WebGPU status primitives now cover error scopes, uncaptured errors, and device-lost state in `src/lib/gc_async_mut/gpu/browser_engine/webgpu_status_errors.spl`, covered by `test/web_platform/webgpu/webgpu_status_errors_spec.spl`.
+- Browser WebGPU context now vends command encoders, routes queue submit/writeBuffer operations, exposes validation error scopes, and blocks command creation after device loss, covered by `test/web_platform/webgpu/webgpu_context_spec.spl`.
 - Existing nogc WebGPU 3D backend handle-allocation semantics were fixed so `test/lib/nogc_sync_mut/engine/render/webgpu_backend3d_spec.spl` passes.
 
 **Work:**
