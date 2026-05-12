@@ -1,0 +1,281 @@
+"""Browser WebGL/WebGL2 compatibility context.
+
+This models the browser-facing WebGL state machine boundary in pure Simple:
+context creation, error state, context loss, resources, shader compile, and
+program link/use. Rendering backend translation is layered after this API.
+"""
+
+pub const WEBGL_NO_ERROR = 0
+pub const WEBGL_INVALID_ENUM = 1280
+pub const WEBGL_INVALID_VALUE = 1281
+pub const WEBGL_INVALID_OPERATION = 1282
+pub const WEBGL_CONTEXT_LOST_WEBGL = 37442
+
+pub const WEBGL_VERTEX_SHADER = 35633
+pub const WEBGL_FRAGMENT_SHADER = 35632
+
+pub class WebGLBufferHandle:
+    id: i32
+    valid: bool
+    error: text
+
+pub class WebGLTextureHandle:
+    id: i32
+    valid: bool
+    error: text
+
+pub class WebGLShaderHandle:
+    id: i32
+    shader_type: i32
+    source: text
+    compiled: bool
+    valid: bool
+    info_log: text
+
+pub class WebGLProgramHandle:
+    id: i32
+    vertex_shader_id: i32
+    fragment_shader_id: i32
+    linked: bool
+    valid: bool
+    info_log: text
+
+pub class WebGLContext:
+    version: i32
+    context_name: text
+    context_lost: bool
+    last_error: i32
+    width: i32
+    height: i32
+    next_buffer_id: i32
+    next_texture_id: i32
+    next_shader_id: i32
+    next_program_id: i32
+    buffers: [WebGLBufferHandle]
+    textures: [WebGLTextureHandle]
+    shaders: [WebGLShaderHandle]
+    programs: [WebGLProgramHandle]
+    current_program_id: i32
+    supported_extensions: [text]
+
+    fn is_available() -> bool:
+        not self.context_lost
+
+    me get_error() -> i32:
+        val err = self.last_error
+        if self.context_lost:
+            self.last_error = WEBGL_NO_ERROR
+            return WEBGL_CONTEXT_LOST_WEBGL
+        self.last_error = WEBGL_NO_ERROR
+        err
+
+    me lose_context():
+        self.context_lost = true
+        self.last_error = WEBGL_CONTEXT_LOST_WEBGL
+        self.current_program_id = -1
+
+    me restore_context():
+        self.context_lost = false
+        self.last_error = WEBGL_NO_ERROR
+
+    me create_buffer() -> WebGLBufferHandle:
+        if not self.ensure_context_available():
+            return WebGLBufferHandle(id: -1, valid: false, error: "context lost")
+        val handle = WebGLBufferHandle(id: self.next_buffer_id, valid: true, error: "")
+        self.next_buffer_id = self.next_buffer_id + 1
+        self.buffers.push(handle)
+        handle
+
+    me create_texture() -> WebGLTextureHandle:
+        if not self.ensure_context_available():
+            return WebGLTextureHandle(id: -1, valid: false, error: "context lost")
+        val handle = WebGLTextureHandle(id: self.next_texture_id, valid: true, error: "")
+        self.next_texture_id = self.next_texture_id + 1
+        self.textures.push(handle)
+        handle
+
+    me create_shader(shader_type: i32) -> WebGLShaderHandle:
+        if not self.ensure_context_available():
+            return WebGLShaderHandle(id: -1, shader_type: shader_type, source: "", compiled: false, valid: false, info_log: "context lost")
+        if shader_type != WEBGL_VERTEX_SHADER and shader_type != WEBGL_FRAGMENT_SHADER:
+            self.last_error = WEBGL_INVALID_ENUM
+            return WebGLShaderHandle(id: -1, shader_type: shader_type, source: "", compiled: false, valid: false, info_log: "invalid shader type")
+        val handle = WebGLShaderHandle(id: self.next_shader_id, shader_type: shader_type, source: "", compiled: false, valid: true, info_log: "")
+        self.next_shader_id = self.next_shader_id + 1
+        self.shaders.push(handle)
+        handle
+
+    me shader_source(shader_id: i32, source: text) -> bool:
+        if not self.ensure_context_available():
+            return false
+        var i = 0
+        while i < self.shaders.len():
+            if self.shaders[i].id == shader_id:
+                var shader = self.shaders[i]
+                shader.source = source
+                shader.compiled = false
+                shader.info_log = ""
+                self.shaders[i] = shader
+                return true
+            i = i + 1
+        self.last_error = WEBGL_INVALID_VALUE
+        false
+
+    me compile_shader(shader_id: i32) -> WebGLShaderHandle:
+        if not self.ensure_context_available():
+            return WebGLShaderHandle(id: -1, shader_type: 0, source: "", compiled: false, valid: false, info_log: "context lost")
+        var i = 0
+        while i < self.shaders.len():
+            if self.shaders[i].id == shader_id:
+                var shader = self.shaders[i]
+                val err = webgl_validate_shader_source(shader.shader_type, shader.source)
+                shader.compiled = err == ""
+                shader.info_log = err
+                self.shaders[i] = shader
+                if err != "":
+                    self.last_error = WEBGL_INVALID_OPERATION
+                return shader
+            i = i + 1
+        self.last_error = WEBGL_INVALID_VALUE
+        WebGLShaderHandle(id: -1, shader_type: 0, source: "", compiled: false, valid: false, info_log: "shader not found")
+
+    me create_program() -> WebGLProgramHandle:
+        if not self.ensure_context_available():
+            return WebGLProgramHandle(id: -1, vertex_shader_id: -1, fragment_shader_id: -1, linked: false, valid: false, info_log: "context lost")
+        val handle = WebGLProgramHandle(id: self.next_program_id, vertex_shader_id: -1, fragment_shader_id: -1, linked: false, valid: true, info_log: "")
+        self.next_program_id = self.next_program_id + 1
+        self.programs.push(handle)
+        handle
+
+    me attach_shader(program_id: i32, shader_id: i32) -> bool:
+        if not self.ensure_context_available():
+            return false
+        val shader_index = self.find_shader_index(shader_id)
+        val program_index = self.find_program_index(program_id)
+        if shader_index < 0 or program_index < 0:
+            self.last_error = WEBGL_INVALID_VALUE
+            return false
+        var program = self.programs[program_index]
+        val shader = self.shaders[shader_index]
+        if shader.shader_type == WEBGL_VERTEX_SHADER:
+            program.vertex_shader_id = shader_id
+        if shader.shader_type == WEBGL_FRAGMENT_SHADER:
+            program.fragment_shader_id = shader_id
+        self.programs[program_index] = program
+        true
+
+    me link_program(program_id: i32) -> WebGLProgramHandle:
+        if not self.ensure_context_available():
+            return WebGLProgramHandle(id: -1, vertex_shader_id: -1, fragment_shader_id: -1, linked: false, valid: false, info_log: "context lost")
+        val program_index = self.find_program_index(program_id)
+        if program_index < 0:
+            self.last_error = WEBGL_INVALID_VALUE
+            return WebGLProgramHandle(id: -1, vertex_shader_id: -1, fragment_shader_id: -1, linked: false, valid: false, info_log: "program not found")
+        var program = self.programs[program_index]
+        val vertex_ok = self.shader_compiled(program.vertex_shader_id, WEBGL_VERTEX_SHADER)
+        val fragment_ok = self.shader_compiled(program.fragment_shader_id, WEBGL_FRAGMENT_SHADER)
+        if not vertex_ok or not fragment_ok:
+            program.linked = false
+            program.info_log = "compiled vertex and fragment shaders required"
+            self.last_error = WEBGL_INVALID_OPERATION
+        else:
+            program.linked = true
+            program.info_log = ""
+        self.programs[program_index] = program
+        program
+
+    me use_program(program_id: i32) -> bool:
+        if not self.ensure_context_available():
+            return false
+        val program_index = self.find_program_index(program_id)
+        if program_index < 0 or not self.programs[program_index].linked:
+            self.last_error = WEBGL_INVALID_OPERATION
+            return false
+        self.current_program_id = program_id
+        true
+
+    me supports_extension(name: text) -> bool:
+        var i = 0
+        while i < self.supported_extensions.len():
+            if self.supported_extensions[i] == name:
+                return true
+            i = i + 1
+        false
+
+    me ensure_context_available() -> bool:
+        if self.context_lost:
+            self.last_error = WEBGL_CONTEXT_LOST_WEBGL
+            return false
+        true
+
+    fn find_shader_index(shader_id: i32) -> i32:
+        var i = 0
+        while i < self.shaders.len():
+            if self.shaders[i].id == shader_id:
+                return i
+            i = i + 1
+        -1
+
+    fn find_program_index(program_id: i32) -> i32:
+        var i = 0
+        while i < self.programs.len():
+            if self.programs[i].id == program_id:
+                return i
+            i = i + 1
+        -1
+
+    fn shader_compiled(shader_id: i32, shader_type: i32) -> bool:
+        val shader_index = self.find_shader_index(shader_id)
+        if shader_index < 0:
+            return false
+        self.shaders[shader_index].shader_type == shader_type and self.shaders[shader_index].compiled
+
+pub fn webgl_create_context(version: i32, width: i32, height: i32) -> WebGLContext:
+    val actual_version = if version == 2: 2 else: 1
+    WebGLContext(
+        version: actual_version,
+        context_name: if actual_version == 2: "webgl2" else: "webgl",
+        context_lost: false,
+        last_error: WEBGL_NO_ERROR,
+        width: width,
+        height: height,
+        next_buffer_id: 1,
+        next_texture_id: 1,
+        next_shader_id: 1,
+        next_program_id: 1,
+        buffers: [],
+        textures: [],
+        shaders: [],
+        programs: [],
+        current_program_id: -1,
+        supported_extensions: webgl_default_extensions(actual_version)
+    )
+
+pub fn webgl_is_supported_context_name(name: text) -> bool:
+    val lower = name.lower()
+    lower == "webgl" or lower == "experimental-webgl" or lower == "webgl2"
+
+pub fn webgl_context_version_for_name(name: text) -> i32:
+    val lower = name.lower()
+    if lower == "webgl2":
+        return 2
+    if lower == "webgl" or lower == "experimental-webgl":
+        return 1
+    0
+
+pub fn webgl_validate_shader_source(shader_type: i32, source: text) -> text:
+    val trimmed = source.trim()
+    if trimmed == "":
+        return "shader source is empty"
+    if not trimmed.contains("void main"):
+        return "shader must define void main"
+    if shader_type == WEBGL_VERTEX_SHADER and not trimmed.contains("gl_Position"):
+        return "vertex shader must write gl_Position"
+    if shader_type == WEBGL_FRAGMENT_SHADER and not (trimmed.contains("gl_FragColor") or trimmed.contains("out ")):
+        return "fragment shader must write a color output"
+    ""
+
+pub fn webgl_default_extensions(version: i32) -> [text]:
+    if version == 2:
+        return ["OES_texture_float", "OES_element_index_uint", "WEBGL_lose_context", "EXT_color_buffer_float"]
+    ["OES_texture_float", "OES_element_index_uint", "WEBGL_lose_context"]
