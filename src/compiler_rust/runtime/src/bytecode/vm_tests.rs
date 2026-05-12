@@ -1,7 +1,7 @@
 //! Integration tests for the bytecode VM.
 
 use super::opcodes::*;
-use super::vm::{BytecodeVM, FunctionMetadata, VmError};
+use super::vm::{vm_index_get, vm_index_set, BytecodeVM, FunctionMetadata, VmError};
 use crate::value::{rt_array_get, rt_array_new, rt_array_push, RuntimeValue};
 
 /// Helper to create a simple function that adds two numbers.
@@ -79,33 +79,15 @@ fn test_vm_index_array_fast_path_semantics() {
     assert!(rt_array_push(array, RuntimeValue::from_int(10)));
     assert!(rt_array_push(array, RuntimeValue::from_int(20)));
 
-    let mut encoder = InstructionEncoder::new();
-    encoder.emit_opcode(CONST_I64);
-    encoder.emit_u16(0);
-    encoder.emit_i64(array.to_raw() as i64);
-    encoder.emit_opcode(CONST_I64);
-    encoder.emit_u16(1);
-    encoder.emit_i64(1);
-    encoder.emit_opcode(CONST_I64);
-    encoder.emit_u16(2);
-    encoder.emit_i64(42);
-    encoder.emit_opcode(INDEX_SET);
-    encoder.emit_u16(0);
-    encoder.emit_u16(1);
-    encoder.emit_u16(2);
-    encoder.emit_opcode(INDEX_GET);
-    encoder.emit_u16(3);
-    encoder.emit_u16(0);
-    encoder.emit_u16(1);
-    encoder.emit_opcode(RET);
-    encoder.emit_u16(3);
+    assert!(vm_index_set(
+        array,
+        RuntimeValue::from_int(1),
+        RuntimeValue::from_int(42)
+    ));
+    let result = vm_index_get(array, RuntimeValue::from_int(1));
 
-    let mut vm = BytecodeVM::new();
-    vm.load_bytecode(&encoder.finish());
-    let result = vm.execute().expect("Execution failed");
-
-    assert_eq!(result.as_int(), 42);
     assert_eq!(rt_array_get(array, 1).as_int(), 42);
+    assert_eq!(result.as_int(), 42);
 }
 
 /// Helper to create a factorial function (recursive).

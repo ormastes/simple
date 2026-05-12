@@ -86,7 +86,7 @@ impl std::error::Error for VmError {}
 pub type VmResult<T> = Result<T, VmError>;
 
 #[inline]
-fn vm_index_get(collection: RuntimeValue, index: RuntimeValue) -> RuntimeValue {
+pub(crate) fn vm_index_get(collection: RuntimeValue, index: RuntimeValue) -> RuntimeValue {
     if collection.is_heap() && index.is_int() {
         let ptr = collection.as_heap_ptr();
         unsafe {
@@ -99,7 +99,7 @@ fn vm_index_get(collection: RuntimeValue, index: RuntimeValue) -> RuntimeValue {
 }
 
 #[inline]
-fn vm_index_set(collection: RuntimeValue, index: RuntimeValue, value: RuntimeValue) -> bool {
+pub(crate) fn vm_index_set(collection: RuntimeValue, index: RuntimeValue, value: RuntimeValue) -> bool {
     if collection.is_heap() && index.is_int() {
         let ptr = collection.as_heap_ptr();
         unsafe {
