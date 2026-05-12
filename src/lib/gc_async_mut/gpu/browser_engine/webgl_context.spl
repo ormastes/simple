@@ -17,6 +17,7 @@ pub val WEBGL_NO_ERROR: i32 = 0
 pub val WEBGL_INVALID_ENUM: i32 = 1280
 pub val WEBGL_INVALID_VALUE: i32 = 1281
 pub val WEBGL_INVALID_OPERATION: i32 = 1282
+pub val WEBGL_INVALID_FRAMEBUFFER_OPERATION: i32 = 1286
 pub val WEBGL_CONTEXT_LOST_WEBGL: i32 = 37442
 
 pub val WEBGL_VERTEX_SHADER: i32 = 35633
@@ -46,6 +47,12 @@ pub val WEBGL_LINES: i32 = 1
 pub val WEBGL_POINTS: i32 = 0
 pub val WEBGL_TEXTURE_2D: i32 = 3553
 pub val WEBGL_TEXTURE_BINDING_2D: i32 = 32873
+pub val WEBGL_FRAMEBUFFER: i32 = 36160
+pub val WEBGL_FRAMEBUFFER_BINDING: i32 = 36006
+pub val WEBGL_COLOR_ATTACHMENT0: i32 = 36064
+pub val WEBGL_FRAMEBUFFER_COMPLETE: i32 = 36053
+pub val WEBGL_FRAMEBUFFER_INCOMPLETE_ATTACHMENT: i32 = 36054
+pub val WEBGL_FRAMEBUFFER_INCOMPLETE_MISSING_ATTACHMENT: i32 = 36055
 pub val WEBGL_UNPACK_ALIGNMENT: i32 = 3317
 pub val WEBGL_RGB: i32 = 6407
 pub val WEBGL_RGBA: i32 = 6408
@@ -91,6 +98,12 @@ pub class WebGLTextureHandle:
     pixel_type: i32
     initialized: bool
     pixels: [u8]
+
+pub class WebGLFramebufferHandle:
+    id: i32
+    valid: bool
+    error: text
+    color_texture_id: i32
 
 pub class WebGLShaderHandle:
     id: i32
@@ -149,10 +162,12 @@ pub class WebGLContext:
     height: i32
     next_buffer_id: i32
     next_texture_id: i32
+    next_framebuffer_id: i32
     next_shader_id: i32
     next_program_id: i32
     buffers: [WebGLBufferHandle]
     textures: [WebGLTextureHandle]
+    framebuffers: [WebGLFramebufferHandle]
     shaders: [WebGLShaderHandle]
     programs: [WebGLProgramHandle]
     current_program_id: i32
@@ -162,6 +177,7 @@ pub class WebGLContext:
     bound_array_buffer: i32
     bound_element_array_buffer: i32
     vertex_attribs: [WebGLVertexAttribState]
+    bound_framebuffer: i32
     bound_texture_2d: i32
     unpack_alignment: i32
     unpack_flip_y: bool
@@ -247,6 +263,14 @@ pub class WebGLContext:
         val handle = WebGLTextureHandle(id: self.next_texture_id, valid: true, error: "", target: 0, width: 0, height: 0, level: 0, internal_format: 0, format: 0, pixel_type: 0, initialized: false, pixels: [])
         self.next_texture_id = self.next_texture_id + 1
         self.textures.push(handle)
+        handle
+
+    me create_framebuffer() -> WebGLFramebufferHandle:
+        if not self.ensure_context_available():
+            return WebGLFramebufferHandle(id: -1, valid: false, error: "context lost", color_texture_id: -1)
+        val handle = WebGLFramebufferHandle(id: self.next_framebuffer_id, valid: true, error: "", color_texture_id: -1)
+        self.next_framebuffer_id = self.next_framebuffer_id + 1
+        self.framebuffers.push(handle)
         handle
 
     me create_shader(shader_type: i32) -> WebGLShaderHandle:
@@ -595,6 +619,70 @@ pub class WebGLContext:
         self.render_commands.push(webgl_render_command_bind_texture(target, texture_id))
         true
 
+    me bind_framebuffer(target: i32, framebuffer_id: i32) -> bool:
+        if not self.ensure_context_available():
+            return false
+        if target != WEBGL_FRAMEBUFFER:
+            self.last_error = WEBGL_INVALID_ENUM
+            return false
+        if framebuffer_id == -1:
+            self.bound_framebuffer = -1
+            return true
+        val framebuffer_index = self.find_framebuffer_index(framebuffer_id)
+        if framebuffer_index < 0:
+            self.last_error = WEBGL_INVALID_VALUE
+            return false
+        self.bound_framebuffer = framebuffer_id
+        true
+
+    me framebuffer_texture_2d(target: i32, attachment: i32, textarget: i32, texture_id: i32, level: i32) -> bool:
+        if not self.ensure_context_available():
+            return false
+        val framebuffer_index = self.bound_framebuffer_index_for_target(target)
+        if framebuffer_index < 0:
+            return false
+        if attachment != WEBGL_COLOR_ATTACHMENT0 or textarget != WEBGL_TEXTURE_2D:
+            self.last_error = WEBGL_INVALID_ENUM
+            return false
+        if level != 0:
+            self.last_error = WEBGL_INVALID_VALUE
+            return false
+        var framebuffer = self.framebuffers[framebuffer_index]
+        if texture_id == -1:
+            framebuffer.color_texture_id = -1
+            self.framebuffers[framebuffer_index] = framebuffer
+            return true
+        val texture_index = self.find_texture_index(texture_id)
+        if texture_index < 0:
+            self.last_error = WEBGL_INVALID_VALUE
+            return false
+        if self.textures[texture_index].target != WEBGL_TEXTURE_2D:
+            self.last_error = WEBGL_INVALID_OPERATION
+            return false
+        framebuffer.color_texture_id = texture_id
+        self.framebuffers[framebuffer_index] = framebuffer
+        true
+
+    me check_framebuffer_status(target: i32) -> i32:
+        if not self.ensure_context_available():
+            return 0
+        if target != WEBGL_FRAMEBUFFER:
+            self.last_error = WEBGL_INVALID_ENUM
+            return 0
+        if self.bound_framebuffer < 0:
+            return WEBGL_FRAMEBUFFER_COMPLETE
+        val framebuffer_index = self.find_framebuffer_index(self.bound_framebuffer)
+        if framebuffer_index < 0:
+            self.last_error = WEBGL_INVALID_VALUE
+            return 0
+        val texture_id = self.framebuffers[framebuffer_index].color_texture_id
+        if texture_id < 0:
+            return WEBGL_FRAMEBUFFER_INCOMPLETE_MISSING_ATTACHMENT
+        val texture_index = self.find_texture_index(texture_id)
+        if texture_index < 0 or not self.textures[texture_index].initialized:
+            return WEBGL_FRAMEBUFFER_INCOMPLETE_ATTACHMENT
+        WEBGL_FRAMEBUFFER_COMPLETE
+
     me bind_buffer(target: i32, buffer_id: i32) -> bool:
         if not self.ensure_context_available():
             return false
@@ -690,6 +778,9 @@ pub class WebGLContext:
         if first < 0 or count < 0:
             self.last_error = WEBGL_INVALID_VALUE
             return false
+        if not self.bound_framebuffer_is_complete():
+            self.last_error = WEBGL_INVALID_FRAMEBUFFER_OPERATION
+            return false
         if self.current_program_id < 0 or not self.webgl_has_enabled_vertex_source():
             self.last_error = WEBGL_INVALID_OPERATION
             return false
@@ -707,6 +798,9 @@ pub class WebGLContext:
             return false
         if count < 0 or offset < 0:
             self.last_error = WEBGL_INVALID_VALUE
+            return false
+        if not self.bound_framebuffer_is_complete():
+            self.last_error = WEBGL_INVALID_FRAMEBUFFER_OPERATION
             return false
         if self.current_program_id < 0 or not self.webgl_has_enabled_vertex_source():
             self.last_error = WEBGL_INVALID_OPERATION
@@ -839,6 +933,14 @@ pub class WebGLContext:
             i = i + 1
         -1
 
+    fn find_framebuffer_index(framebuffer_id: i32) -> i32:
+        var i = 0
+        while i < self.framebuffers.len():
+            if self.framebuffers[i].id == framebuffer_id:
+                return i
+            i = i + 1
+        -1
+
     me bound_buffer_index_for_target(target: i32) -> i32:
         if target != WEBGL_ARRAY_BUFFER and target != WEBGL_ELEMENT_ARRAY_BUFFER:
             self.last_error = WEBGL_INVALID_ENUM
@@ -852,6 +954,22 @@ pub class WebGLContext:
             self.last_error = WEBGL_INVALID_VALUE
             return -1
         buffer_index
+
+    me bound_framebuffer_index_for_target(target: i32) -> i32:
+        if target != WEBGL_FRAMEBUFFER:
+            self.last_error = WEBGL_INVALID_ENUM
+            return -1
+        if self.bound_framebuffer < 0:
+            self.last_error = WEBGL_INVALID_OPERATION
+            return -1
+        val framebuffer_index = self.find_framebuffer_index(self.bound_framebuffer)
+        if framebuffer_index < 0:
+            self.last_error = WEBGL_INVALID_VALUE
+            return -1
+        framebuffer_index
+
+    fn bound_framebuffer_is_complete() -> bool:
+        self.check_framebuffer_status(WEBGL_FRAMEBUFFER) == WEBGL_FRAMEBUFFER_COMPLETE
 
     fn webgl_has_enabled_vertex_source() -> bool:
         var i = 0
@@ -952,10 +1070,12 @@ pub fn webgl_create_context(version: i32, width: i32, height: i32) -> WebGLConte
         height: height,
         next_buffer_id: 1,
         next_texture_id: 1,
+        next_framebuffer_id: 1,
         next_shader_id: 1,
         next_program_id: 1,
         buffers: [],
         textures: [],
+        framebuffers: [],
         shaders: [],
         programs: [],
         current_program_id: -1,
@@ -965,6 +1085,7 @@ pub fn webgl_create_context(version: i32, width: i32, height: i32) -> WebGLConte
         bound_array_buffer: -1,
         bound_element_array_buffer: -1,
         vertex_attribs: webgl_default_vertex_attribs(),
+        bound_framebuffer: -1,
         bound_texture_2d: -1,
         unpack_alignment: 4,
         unpack_flip_y: false,

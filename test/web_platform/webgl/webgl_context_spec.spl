@@ -1,7 +1,8 @@
 use std.spec.*
 use std.gc_async_mut.gpu.browser_engine.webgl_context.{
     WEBGL_NO_ERROR, WEBGL_INVALID_ENUM, WEBGL_INVALID_VALUE,
-    WEBGL_INVALID_OPERATION, WEBGL_CONTEXT_LOST_WEBGL,
+    WEBGL_INVALID_OPERATION, WEBGL_INVALID_FRAMEBUFFER_OPERATION,
+    WEBGL_CONTEXT_LOST_WEBGL,
     WEBGL_VERTEX_SHADER, WEBGL_FRAGMENT_SHADER,
     WEBGL_COMPILE_STATUS, WEBGL_LINK_STATUS, WEBGL_VALIDATE_STATUS,
     WEBGL_INFO_LOG_LENGTH, WEBGL_ATTACHED_SHADERS, WEBGL_ACTIVE_UNIFORMS,
@@ -9,7 +10,9 @@ use std.gc_async_mut.gpu.browser_engine.webgl_context.{
     WEBGL_FLOAT_MAT4, WEBGL_SAMPLER_2D, WEBGL_FLOAT, WEBGL_ARRAY_BUFFER,
     WEBGL_ELEMENT_ARRAY_BUFFER, WEBGL_STATIC_DRAW, WEBGL_DYNAMIC_DRAW,
     WEBGL_TRIANGLES, WEBGL_LINES, WEBGL_UNSIGNED_SHORT, WEBGL_UNSIGNED_INT,
-    WEBGL_TEXTURE_2D, WEBGL_UNPACK_ALIGNMENT,
+    WEBGL_TEXTURE_2D, WEBGL_FRAMEBUFFER, WEBGL_COLOR_ATTACHMENT0,
+    WEBGL_FRAMEBUFFER_COMPLETE, WEBGL_FRAMEBUFFER_INCOMPLETE_ATTACHMENT,
+    WEBGL_FRAMEBUFFER_INCOMPLETE_MISSING_ATTACHMENT, WEBGL_UNPACK_ALIGNMENT,
     WEBGL_UNPACK_FLIP_Y_WEBGL, WEBGL_UNPACK_PREMULTIPLY_ALPHA_WEBGL,
     WEBGL_RGB, WEBGL_RGBA, WEBGL_UNSIGNED_BYTE, WEBGL_COLOR_BUFFER_BIT,
     webgl_create_context, webgl_is_supported_context_name,
@@ -107,11 +110,14 @@ describe "Browser WebGL context":
             val b1 = ctx.create_buffer()
             val b2 = ctx.create_buffer()
             val t1 = ctx.create_texture()
+            val f1 = ctx.create_framebuffer()
             expect(b1.id).to_equal(1)
             expect(b2.id).to_equal(2)
             expect(t1.id).to_equal(1)
+            expect(f1.id).to_equal(1)
             expect(ctx.buffers.len()).to_equal(2)
             expect(ctx.textures.len()).to_equal(1)
+            expect(ctx.framebuffers.len()).to_equal(1)
 
         it "does not consume shader ids for invalid shader types":
             var ctx = webgl_create_context(1, 320, 240)
@@ -231,6 +237,64 @@ describe "Browser WebGL context":
             ctx.lose_context()
             expect(ctx.bind_texture(WEBGL_TEXTURE_2D, 1)).to_equal(false)
             expect(ctx.get_error()).to_equal(WEBGL_CONTEXT_LOST_WEBGL)
+
+    describe "framebuffers":
+        it "binds framebuffers and reports default framebuffer complete":
+            var ctx = webgl_create_context(1, 320, 240)
+            expect(ctx.check_framebuffer_status(WEBGL_FRAMEBUFFER)).to_equal(WEBGL_FRAMEBUFFER_COMPLETE)
+            val framebuffer = ctx.create_framebuffer()
+            expect(ctx.bind_framebuffer(WEBGL_FRAMEBUFFER, framebuffer.id)).to_equal(true)
+            expect(ctx.bound_framebuffer).to_equal(framebuffer.id)
+            expect(ctx.check_framebuffer_status(WEBGL_FRAMEBUFFER)).to_equal(WEBGL_FRAMEBUFFER_INCOMPLETE_MISSING_ATTACHMENT)
+            expect(ctx.bind_framebuffer(WEBGL_FRAMEBUFFER, -1)).to_equal(true)
+            expect(ctx.bound_framebuffer).to_equal(-1)
+            expect(ctx.check_framebuffer_status(WEBGL_FRAMEBUFFER)).to_equal(WEBGL_FRAMEBUFFER_COMPLETE)
+
+        it "attaches initialized color textures and checks completeness":
+            var ctx = webgl_create_context(1, 320, 240)
+            val framebuffer = ctx.create_framebuffer()
+            val texture = ctx.create_texture()
+            expect(ctx.bind_framebuffer(WEBGL_FRAMEBUFFER, framebuffer.id)).to_equal(true)
+            expect(ctx.framebuffer_texture_2d(WEBGL_FRAMEBUFFER, WEBGL_COLOR_ATTACHMENT0, WEBGL_TEXTURE_2D, texture.id, 0)).to_equal(false)
+            expect(ctx.get_error()).to_equal(WEBGL_INVALID_OPERATION)
+            expect(ctx.bind_texture(WEBGL_TEXTURE_2D, texture.id)).to_equal(true)
+            expect(ctx.framebuffer_texture_2d(WEBGL_FRAMEBUFFER, WEBGL_COLOR_ATTACHMENT0, WEBGL_TEXTURE_2D, texture.id, 0)).to_equal(true)
+            expect(ctx.check_framebuffer_status(WEBGL_FRAMEBUFFER)).to_equal(WEBGL_FRAMEBUFFER_INCOMPLETE_ATTACHMENT)
+            expect(ctx.tex_image_2d(WEBGL_TEXTURE_2D, 0, WEBGL_RGBA, 2, 2, 0, WEBGL_RGBA, WEBGL_UNSIGNED_BYTE, [])).to_equal(true)
+            expect(ctx.check_framebuffer_status(WEBGL_FRAMEBUFFER)).to_equal(WEBGL_FRAMEBUFFER_COMPLETE)
+            expect(ctx.framebuffers[0].color_texture_id).to_equal(texture.id)
+            expect(ctx.framebuffer_texture_2d(WEBGL_FRAMEBUFFER, WEBGL_COLOR_ATTACHMENT0, WEBGL_TEXTURE_2D, -1, 0)).to_equal(true)
+            expect(ctx.check_framebuffer_status(WEBGL_FRAMEBUFFER)).to_equal(WEBGL_FRAMEBUFFER_INCOMPLETE_MISSING_ATTACHMENT)
+
+        it "validates framebuffer target attachment and level":
+            var ctx = webgl_create_context(1, 320, 240)
+            val framebuffer = ctx.create_framebuffer()
+            val texture = ctx.create_texture()
+            expect(ctx.bind_framebuffer(999, framebuffer.id)).to_equal(false)
+            expect(ctx.get_error()).to_equal(WEBGL_INVALID_ENUM)
+            expect(ctx.bind_framebuffer(WEBGL_FRAMEBUFFER, 99)).to_equal(false)
+            expect(ctx.get_error()).to_equal(WEBGL_INVALID_VALUE)
+            expect(ctx.framebuffer_texture_2d(WEBGL_FRAMEBUFFER, WEBGL_COLOR_ATTACHMENT0, WEBGL_TEXTURE_2D, texture.id, 0)).to_equal(false)
+            expect(ctx.get_error()).to_equal(WEBGL_INVALID_OPERATION)
+            expect(ctx.bind_framebuffer(WEBGL_FRAMEBUFFER, framebuffer.id)).to_equal(true)
+            expect(ctx.framebuffer_texture_2d(WEBGL_FRAMEBUFFER, 999, WEBGL_TEXTURE_2D, texture.id, 0)).to_equal(false)
+            expect(ctx.get_error()).to_equal(WEBGL_INVALID_ENUM)
+            expect(ctx.framebuffer_texture_2d(WEBGL_FRAMEBUFFER, WEBGL_COLOR_ATTACHMENT0, WEBGL_TEXTURE_2D, texture.id, 1)).to_equal(false)
+            expect(ctx.get_error()).to_equal(WEBGL_INVALID_VALUE)
+
+        it "blocks draws when the bound framebuffer is incomplete":
+            var ctx = _linked_program_context()
+            val program = ctx.programs[0]
+            expect(ctx.use_program(program.id)).to_equal(true)
+            val buffer = ctx.create_buffer()
+            expect(ctx.bind_buffer(WEBGL_ARRAY_BUFFER, buffer.id)).to_equal(true)
+            expect(ctx.buffer_data_size(WEBGL_ARRAY_BUFFER, 48, WEBGL_STATIC_DRAW)).to_equal(true)
+            expect(ctx.enable_vertex_attrib_array(0)).to_equal(true)
+            expect(ctx.vertex_attrib_pointer(0, 4, WEBGL_FLOAT, false, 0, 0)).to_equal(true)
+            val framebuffer = ctx.create_framebuffer()
+            expect(ctx.bind_framebuffer(WEBGL_FRAMEBUFFER, framebuffer.id)).to_equal(true)
+            expect(ctx.draw_arrays(WEBGL_TRIANGLES, 0, 3)).to_equal(false)
+            expect(ctx.get_error()).to_equal(WEBGL_INVALID_FRAMEBUFFER_OPERATION)
 
     describe "buffers attributes and draws":
         it "binds array buffers and records bind commands":
