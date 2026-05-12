@@ -172,6 +172,18 @@ impl BrowserSession:
                 "__simple_navigation_mode",
                 JsValue.String(v: "")
             )
+        val history_mode_val = state.runtime.get_host_property(
+            state.history_id,
+            "__simple_navigation_mode"
+        )
+        if val JsValue.String(mode) = history_mode_val:
+            if mode != "":
+                navigation_mode = mode
+            state.runtime.set_host_property(
+                state.history_id,
+                "__simple_navigation_mode",
+                JsValue.String(v: "")
+            )
 
         val href_val = state.runtime.get_host_property(
             state.location_id,
@@ -179,14 +191,45 @@ impl BrowserSession:
         )
         if val JsValue.String(href) = href_val:
             if href.len() > 0:
-                self.current_url = href
-                browser_session_sync_location_object(state, href)
+                var next_href = href
+                if navigation_mode == "pushState" or navigation_mode == "replaceState":
+                    var history_url_val = state.runtime.get_host_property(
+                        state.location_id,
+                        "__simple_history_url"
+                    )
+                    if strict_equals(history_url_val, JsValue.Undefined):
+                        history_url_val = state.runtime.get_host_property(
+                            state.history_id,
+                            "__simple_url"
+                        )
+                    if val JsValue.String(history_url) = history_url_val:
+                        if history_url.len() > 0:
+                            next_href = resolve_relative_url(old_url, history_url)
+                    val history_state_val = state.runtime.get_host_property(
+                        state.location_id,
+                        "__simple_history_state"
+                    )
+                    if not strict_equals(history_state_val, JsValue.Undefined):
+                        state.runtime.set_host_property(
+                            state.history_id,
+                            "state",
+                            history_state_val
+                        )
+                    state.runtime.set_host_property(
+                        state.location_id,
+                        "__simple_history_url",
+                        JsValue.String(v: "")
+                    )
+                self.current_url = next_href
+                browser_session_sync_location_object(state, next_href)
                 state.runtime.set_host_property(
                     state.document_id,
                     "URL",
-                    JsValue.String(v: href)
+                    JsValue.String(v: next_href)
                 )
-                if navigation_mode == "assign" and href != old_url:
+                if navigation_mode == "assign" and next_href != old_url:
+                    self._push_runtime_history_entry()
+                else if navigation_mode == "pushState":
                     self._push_runtime_history_entry()
 
         var inner_html_val = state.runtime.interpreter.host_body_inner_html_value
