@@ -29,6 +29,8 @@ JS Equivalent → Simple Function:
     ctx.rotate()               → canvas_rotate()
     ctx.scale()                → canvas_scale()
     ctx.drawImage()            → canvas_draw_image()
+    ctx.getImageData()         → canvas_get_image_data()
+    ctx.putImageData()         → canvas_put_image_data()
     ctx.measureText()          → canvas_measure_text()
 """
 
@@ -68,6 +70,12 @@ use std.gc_async_mut.gpu.browser_engine.webgpu_resources.{
 # CanvasContext2D — command-buffer rendering context
 # =========================================================================
 
+pub class CanvasImageData:
+    """Deterministic RGBA pixel buffer returned by getImageData."""
+    width: i32
+    height: i32
+    data: [u8]
+
 pub class CanvasContext2D:
     """2D canvas rendering context with command buffer.
 
@@ -82,6 +90,9 @@ pub class CanvasContext2D:
         line_width   - current line width
         font         - current font descriptor string
         text_align   - current text alignment
+        _pixel_xs    - sparse RGBA backing store x coordinates
+        _pixel_ys    - sparse RGBA backing store y coordinates
+        _pixel_data  - sparse RGBA backing store values
         _commands    - accumulated draw command buffer
         _save_stack  - saved state entries (flat: fill, stroke, line_width, font, text_align)
     """
@@ -92,6 +103,9 @@ pub class CanvasContext2D:
     line_width: f64
     font: text
     text_align: text
+    _pixel_xs: [i32]
+    _pixel_ys: [i32]
+    _pixel_data: [u8]
     _commands: [text]
     _save_stack: [text]
 
@@ -182,6 +196,76 @@ pub class CanvasContext2D:
 
     me draw_image(src: text, x: f64, y: f64, w: f64, h: f64):
         self._commands.push("drawImage {src} {x} {y} {w} {h}")
+
+    me get_image_data(sx: i32, sy: i32, sw: i32, sh: i32) -> CanvasImageData:
+        var out: [u8] = []
+        var y = 0
+        while y < sh:
+            var x = 0
+            while x < sw:
+                val src_x = sx + x
+                val src_y = sy + y
+                if src_x >= 0 and src_x < self.width and src_y >= 0 and src_y < self.height:
+                    val stored_idx = self.find_pixel(src_x, src_y)
+                    if stored_idx >= 0:
+                        val data_idx = stored_idx * 4
+                        out.push(self._pixel_data[data_idx])
+                        out.push(self._pixel_data[data_idx + 1])
+                        out.push(self._pixel_data[data_idx + 2])
+                        out.push(self._pixel_data[data_idx + 3])
+                    else:
+                        out.push(0)
+                        out.push(0)
+                        out.push(0)
+                        out.push(0)
+                else:
+                    out.push(0)
+                    out.push(0)
+                    out.push(0)
+                    out.push(0)
+                x = x + 1
+            y = y + 1
+        self._commands.push("getImageData {sx} {sy} {sw} {sh}")
+        CanvasImageData(width: sw, height: sh, data: out)
+
+    me put_image_data(image: CanvasImageData, dx: i32, dy: i32):
+        var y = 0
+        while y < image.height:
+            var x = 0
+            while x < image.width:
+                val dest_x = dx + x
+                val dest_y = dy + y
+                if dest_x >= 0 and dest_x < self.width and dest_y >= 0 and dest_y < self.height:
+                    val src_idx = ((y * image.width) + x) * 4
+                    if src_idx + 3 < image.data.len():
+                        self.set_pixel(dest_x, dest_y, image.data[src_idx], image.data[src_idx + 1], image.data[src_idx + 2], image.data[src_idx + 3])
+                x = x + 1
+            y = y + 1
+        self._commands.push("putImageData {dx} {dy} {image.width} {image.height}")
+
+    me find_pixel(x: i32, y: i32) -> i32:
+        var i = 0
+        while i < self._pixel_xs.len():
+            if self._pixel_xs[i] == x and self._pixel_ys[i] == y:
+                return i
+            i = i + 1
+        -1
+
+    me set_pixel(x: i32, y: i32, r: u8, g: u8, b: u8, a: u8):
+        val pixel_idx = self.find_pixel(x, y)
+        if pixel_idx >= 0:
+            val data_idx = pixel_idx * 4
+            self._pixel_data[data_idx] = r
+            self._pixel_data[data_idx + 1] = g
+            self._pixel_data[data_idx + 2] = b
+            self._pixel_data[data_idx + 3] = a
+            return
+        self._pixel_xs.push(x)
+        self._pixel_ys.push(y)
+        self._pixel_data.push(r)
+        self._pixel_data.push(g)
+        self._pixel_data.push(b)
+        self._pixel_data.push(a)
 
 pub class CanvasWebGPUContext:
     """Browser canvas WebGPU context wrapper.
@@ -303,6 +387,9 @@ pub fn canvas_create(w: i32, h: i32) -> CanvasContext2D:
         line_width: 1.0,
         font: "10px sans-serif",
         text_align: "start",
+        _pixel_xs: [],
+        _pixel_ys: [],
+        _pixel_data: [],
         _commands: [],
         _save_stack: []
     )
@@ -694,6 +781,19 @@ pub fn canvas_scale(ctx: CanvasContext2D, x: f64, y: f64):
 pub fn canvas_draw_image(ctx: CanvasContext2D, src: text, x: f64, y: f64, w: f64, h: f64):
     """Draw an image from the given source path."""
     ctx.draw_image(src, x, y, w, h)
+
+# =========================================================================
+# Image Data
+# =========================================================================
+
+pub fn canvas_get_image_data(ctx: CanvasContext2D, sx: i32, sy: i32, sw: i32, sh: i32) -> CanvasImageData:
+    """Return a deterministic RGBA copy for the requested rectangle."""
+    ctx.get_image_data(sx, sy, sw, sh)
+
+pub fn canvas_put_image_data(ctx: CanvasContext2D, image: CanvasImageData, dx: i32, dy: i32) -> CanvasContext2D:
+    """Copy RGBA image data into the canvas backing store."""
+    ctx.put_image_data(image, dx, dy)
+    ctx
 
 # =========================================================================
 # Text Measurement
