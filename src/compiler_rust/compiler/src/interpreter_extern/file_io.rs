@@ -1081,8 +1081,13 @@ pub fn rt_mkdir(args: &[Value]) -> Result<Value, CompileError> {
     {
         use std::os::unix::fs::DirBuilderExt;
         let mode = if args.len() > 1 {
-            match &args[1] { Value::Int(m) => *m as u32, _ => 0o755 }
-        } else { 0o755 };
+            match &args[1] {
+                Value::Int(m) => *m as u32,
+                _ => 0o755,
+            }
+        } else {
+            0o755
+        };
         let mut builder = fs::DirBuilder::new();
         builder.mode(mode);
         match builder.create(&path) {
@@ -1102,7 +1107,11 @@ pub fn rt_mkdir(args: &[Value]) -> Result<Value, CompileError> {
 pub fn rt_remove(args: &[Value]) -> Result<Value, CompileError> {
     let path = extract_path(args, 0)?;
     let p = Path::new(&path);
-    let result = if p.is_dir() { fs::remove_dir(p) } else { fs::remove_file(p) };
+    let result = if p.is_dir() {
+        fs::remove_dir(p)
+    } else {
+        fs::remove_file(p)
+    };
     match result {
         Ok(_) => Ok(Value::Int(0)),
         Err(e) => Ok(Value::Int(-(errno_from_io_error(&e)))),
@@ -1126,7 +1135,8 @@ pub fn rt_stat_open(args: &[Value]) -> Result<Value, CompileError> {
     };
     let mtime = {
         use std::time::UNIX_EPOCH;
-        meta.modified().ok()
+        meta.modified()
+            .ok()
             .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
             .map(|d| d.as_secs() as i64)
             .unwrap_or(0)
@@ -1149,33 +1159,71 @@ pub fn rt_stat_open(args: &[Value]) -> Result<Value, CompileError> {
 }
 
 pub fn rt_file_stat_size(args: &[Value]) -> Result<Value, CompileError> {
-    let h = if let Value::Int(v) = &args[0] { (*v - 1) as usize } else { return Ok(Value::Int(0)) };
+    let h = if let Value::Int(v) = &args[0] {
+        (*v - 1) as usize
+    } else {
+        return Ok(Value::Int(0));
+    };
     let handles = STAT_HANDLES.lock().unwrap();
-    Ok(Value::Int(handles.get(h).and_then(|s| s.as_ref()).map(|s| s.size).unwrap_or(0)))
+    Ok(Value::Int(
+        handles.get(h).and_then(|s| s.as_ref()).map(|s| s.size).unwrap_or(0),
+    ))
 }
 
 pub fn rt_file_stat_mtime(args: &[Value]) -> Result<Value, CompileError> {
-    let h = if let Value::Int(v) = &args[0] { (*v - 1) as usize } else { return Ok(Value::Int(0)) };
+    let h = if let Value::Int(v) = &args[0] {
+        (*v - 1) as usize
+    } else {
+        return Ok(Value::Int(0));
+    };
     let handles = STAT_HANDLES.lock().unwrap();
-    Ok(Value::Int(handles.get(h).and_then(|s| s.as_ref()).map(|s| s.mtime).unwrap_or(0)))
+    Ok(Value::Int(
+        handles.get(h).and_then(|s| s.as_ref()).map(|s| s.mtime).unwrap_or(0),
+    ))
 }
 
 pub fn rt_file_stat_is_dir(args: &[Value]) -> Result<Value, CompileError> {
-    let h = if let Value::Int(v) = &args[0] { (*v - 1) as usize } else { return Ok(Value::Bool(false)) };
+    let h = if let Value::Int(v) = &args[0] {
+        (*v - 1) as usize
+    } else {
+        return Ok(Value::Bool(false));
+    };
     let handles = STAT_HANDLES.lock().unwrap();
-    Ok(Value::Bool(handles.get(h).and_then(|s| s.as_ref()).map(|s| s.is_dir).unwrap_or(false)))
+    Ok(Value::Bool(
+        handles
+            .get(h)
+            .and_then(|s| s.as_ref())
+            .map(|s| s.is_dir)
+            .unwrap_or(false),
+    ))
 }
 
 pub fn rt_file_stat_is_file(args: &[Value]) -> Result<Value, CompileError> {
-    let h = if let Value::Int(v) = &args[0] { (*v - 1) as usize } else { return Ok(Value::Bool(false)) };
+    let h = if let Value::Int(v) = &args[0] {
+        (*v - 1) as usize
+    } else {
+        return Ok(Value::Bool(false));
+    };
     let handles = STAT_HANDLES.lock().unwrap();
-    Ok(Value::Bool(handles.get(h).and_then(|s| s.as_ref()).map(|s| s.is_file).unwrap_or(false)))
+    Ok(Value::Bool(
+        handles
+            .get(h)
+            .and_then(|s| s.as_ref())
+            .map(|s| s.is_file)
+            .unwrap_or(false),
+    ))
 }
 
 pub fn rt_file_stat_free(args: &[Value]) -> Result<Value, CompileError> {
-    let h = if let Value::Int(v) = &args[0] { (*v - 1) as usize } else { return Ok(Value::Int(0)) };
+    let h = if let Value::Int(v) = &args[0] {
+        (*v - 1) as usize
+    } else {
+        return Ok(Value::Int(0));
+    };
     let mut handles = STAT_HANDLES.lock().unwrap();
-    if h < handles.len() { handles[h] = None; }
+    if h < handles.len() {
+        handles[h] = None;
+    }
     Ok(Value::Int(0))
 }
 
@@ -1204,16 +1252,35 @@ pub fn rt_readdir(args: &[Value]) -> Result<Value, CompileError> {
 }
 
 pub fn rt_readdir_count(args: &[Value]) -> Result<Value, CompileError> {
-    let h = if let Value::Int(v) = &args[0] { (*v - 1) as usize } else { return Ok(Value::Int(0)) };
+    let h = if let Value::Int(v) = &args[0] {
+        (*v - 1) as usize
+    } else {
+        return Ok(Value::Int(0));
+    };
     let handles = DIR_HANDLES.lock().unwrap();
-    Ok(Value::Int(handles.get(h).and_then(|s| s.as_ref()).map(|s| s.entries.len() as i64).unwrap_or(0)))
+    Ok(Value::Int(
+        handles
+            .get(h)
+            .and_then(|s| s.as_ref())
+            .map(|s| s.entries.len() as i64)
+            .unwrap_or(0),
+    ))
 }
 
 pub fn rt_readdir_entry(args: &[Value]) -> Result<Value, CompileError> {
-    let h = if let Value::Int(v) = &args[0] { (*v - 1) as usize } else { return Ok(Value::Str(String::new())) };
-    let idx = if let Value::Int(v) = &args[1] { *v as usize } else { return Ok(Value::Str(String::new())) };
+    let h = if let Value::Int(v) = &args[0] {
+        (*v - 1) as usize
+    } else {
+        return Ok(Value::Str(String::new()));
+    };
+    let idx = if let Value::Int(v) = &args[1] {
+        *v as usize
+    } else {
+        return Ok(Value::Str(String::new()));
+    };
     let handles = DIR_HANDLES.lock().unwrap();
-    let entry = handles.get(h)
+    let entry = handles
+        .get(h)
         .and_then(|s| s.as_ref())
         .and_then(|s| s.entries.get(idx))
         .cloned()
@@ -1222,9 +1289,15 @@ pub fn rt_readdir_entry(args: &[Value]) -> Result<Value, CompileError> {
 }
 
 pub fn rt_readdir_free(args: &[Value]) -> Result<Value, CompileError> {
-    let h = if let Value::Int(v) = &args[0] { (*v - 1) as usize } else { return Ok(Value::Int(0)) };
+    let h = if let Value::Int(v) = &args[0] {
+        (*v - 1) as usize
+    } else {
+        return Ok(Value::Int(0));
+    };
     let mut handles = DIR_HANDLES.lock().unwrap();
-    if h < handles.len() { handles[h] = None; }
+    if h < handles.len() {
+        handles[h] = None;
+    }
     Ok(Value::Int(0))
 }
 

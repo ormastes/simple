@@ -595,11 +595,7 @@ pub(crate) fn protect_question_marks_in_strings(s: &str) -> String {
             out.push(b'"');
             i += 3;
             while i < len {
-                if i + 2 < len
-                    && bytes[i] == b'"'
-                    && bytes[i + 1] == b'"'
-                    && bytes[i + 2] == b'"'
-                {
+                if i + 2 < len && bytes[i] == b'"' && bytes[i + 1] == b'"' && bytes[i + 2] == b'"' {
                     out.push(b'"');
                     out.push(b'"');
                     out.push(b'"');
@@ -1998,9 +1994,16 @@ fn foo(x: Int?) -> text?:
     pass
 "#;
         let result = strip_optionals(input.to_string());
-        assert!(result.contains("env_seed[0] ? env_seed"), "? inside string was stripped: {}", result);
+        assert!(
+            result.contains("env_seed[0] ? env_seed"),
+            "? inside string was stripped: {}",
+            result
+        );
         assert!(!result.contains("Int?"), "Int? in code was NOT stripped: {}", result);
-        assert!(!result.contains("text?"), "text? should have been stripped by caller, but strip_optionals does not strip text?");
+        assert!(
+            !result.contains("text?"),
+            "text? should have been stripped by caller, but strip_optionals does not strip text?"
+        );
     }
 
     #[test]
@@ -2008,7 +2011,11 @@ fn foo(x: Int?) -> text?:
         let input = r#"    val c_src = "perror(env_seed && env_seed[0] ? env_seed : \"simple bootstrap seed\");\n"
 "#;
         let result = strip_optionals(input.to_string());
-        assert!(result.contains("env_seed[0] ? env_seed"), "C ternary ? was stripped! Result: {}", result);
+        assert!(
+            result.contains("env_seed[0] ? env_seed"),
+            "C ternary ? was stripped! Result: {}",
+            result
+        );
     }
 
     #[test]

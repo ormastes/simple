@@ -17,7 +17,9 @@ mod resolution;
 mod types;
 
 // Re-export public types
-pub use types::{ChildModule, DirectoryManifest, ModuleLifecycle, ModuleResolver, ModuleState, ResolveResult, ResolvedModule};
+pub use types::{
+    ChildModule, DirectoryManifest, ModuleLifecycle, ModuleResolver, ModuleState, ResolveResult, ResolvedModule,
+};
 
 #[cfg(test)]
 mod tests {

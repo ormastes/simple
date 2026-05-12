@@ -100,7 +100,9 @@ impl<'a> Parser<'a> {
         let mut doc_comment: Option<DocComment> = None;
         self.skip_newlines();
         if let TokenKind::String(content) = &self.current.kind {
-            doc_comment = Some(DocComment { content: content.clone() });
+            doc_comment = Some(DocComment {
+                content: content.clone(),
+            });
             self.advance();
             self.skip_newlines();
         }

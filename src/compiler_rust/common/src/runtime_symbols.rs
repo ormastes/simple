@@ -272,6 +272,9 @@ pub fn symbol_tier_of(name: &str) -> RuntimeSymbolTier {
         || name.starts_with("rt_string_")
         || name.starts_with("rt_utf8_")
         || name == "rt_text_count_codepoints"
+        || name.starts_with("rt_swi_")
+        || name.starts_with("rt_rank_")
+        || name == "rt_select_query"
         || name.starts_with("rt_to_string")
         || name == "rt_raw_u64_to_string"
         || name.starts_with("rt_cstring_to_text")
@@ -374,6 +377,14 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_utf8_validate",
     "rt_utf8_find_invalid",
     "rt_text_count_codepoints",
+    "rt_swi_build",
+    "rt_swi_char_to_byte",
+    "rt_swi_byte_to_char",
+    "rt_swi_free",
+    "rt_rank_select_build",
+    "rt_rank_query",
+    "rt_select_query",
+    "rt_rank_select_free",
     "rt_hash_text",
     // Regex operations
     "ffi_regex_is_match",

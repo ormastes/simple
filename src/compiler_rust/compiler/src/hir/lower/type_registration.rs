@@ -177,10 +177,7 @@ impl Lowerer {
         // All bit-width fields must share the same base type; we use the first.
         let backing = {
             let first = s.fields.iter().find(|f| f.bit_width.is_some()).ok_or_else(|| {
-                LowerError::Unsupported(format!(
-                    "@packed struct '{}' has no bit-width annotated fields",
-                    s.name
-                ))
+                LowerError::Unsupported(format!("@packed struct '{}' has no bit-width annotated fields", s.name))
             })?;
             let ty = self.resolve_type(&first.ty)?;
             if self.bit_width_for_type(ty).is_none() {

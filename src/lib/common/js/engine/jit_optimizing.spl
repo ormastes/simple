@@ -53,6 +53,14 @@ class OptimizingCompiler:
                     result.push(JitIR.Guard(reg: lhs, expected_type: JitTypeTag.TagNumber))
                     result.push(JitIR.Guard(reg: rhs, expected_type: JitTypeTag.TagNumber))
                     result.push(JitIR.IntMul(dst: dst, lhs: lhs, rhs: rhs))
+                JitIR.Div(dst, lhs, rhs):
+                    result.push(JitIR.Guard(reg: lhs, expected_type: JitTypeTag.TagNumber))
+                    result.push(JitIR.Guard(reg: rhs, expected_type: JitTypeTag.TagNumber))
+                    result.push(JitIR.IntDiv(dst: dst, lhs: lhs, rhs: rhs))
+                JitIR.Mod(dst, lhs, rhs):
+                    result.push(JitIR.Guard(reg: lhs, expected_type: JitTypeTag.TagNumber))
+                    result.push(JitIR.Guard(reg: rhs, expected_type: JitTypeTag.TagNumber))
+                    result.push(JitIR.IntMod(dst: dst, lhs: lhs, rhs: rhs))
                 _:
                     result.push(instr)
             i = i + 1
@@ -119,6 +127,54 @@ class OptimizingCompiler:
                     else:
                         self._invalidate_number_const(known_regs, known_vals, dst)
                         result.push(instr)
+                JitIR.IntDiv(dst, lhs, rhs):
+                    val lhs_idx = self._number_const_index(known_regs, lhs)
+                    val rhs_idx = self._number_const_index(known_regs, rhs)
+                    if lhs_idx >= 0 and rhs_idx >= 0 and known_vals.get(rhs_idx) != 0.0:
+                        val n = known_vals.get(lhs_idx) / known_vals.get(rhs_idx)
+                        self._record_number_const(known_regs, known_vals, dst, n)
+                        result.push(JitIR.LoadConst(reg: dst, value: JsValue.Number(v: n)))
+                    else:
+                        self._invalidate_number_const(known_regs, known_vals, dst)
+                        result.push(instr)
+                JitIR.IntMod(dst, lhs, rhs):
+                    val lhs_idx = self._number_const_index(known_regs, lhs)
+                    val rhs_idx = self._number_const_index(known_regs, rhs)
+                    if lhs_idx >= 0 and rhs_idx >= 0 and known_vals.get(rhs_idx) != 0.0:
+                        val n = known_vals.get(lhs_idx) % known_vals.get(rhs_idx)
+                        self._record_number_const(known_regs, known_vals, dst, n)
+                        result.push(JitIR.LoadConst(reg: dst, value: JsValue.Number(v: n)))
+                    else:
+                        self._invalidate_number_const(known_regs, known_vals, dst)
+                        result.push(instr)
+                JitIR.Compare(dst, lhs, rhs, op):
+                    val lhs_idx = self._number_const_index(known_regs, lhs)
+                    val rhs_idx = self._number_const_index(known_regs, rhs)
+                    if lhs_idx >= 0 and rhs_idx >= 0:
+                        val b = self._compare_numbers(known_vals.get(lhs_idx), known_vals.get(rhs_idx), op)
+                        self._invalidate_number_const(known_regs, known_vals, dst)
+                        result.push(JitIR.LoadConst(reg: dst, value: JsValue.Boolean(v: b)))
+                    else:
+                        self._invalidate_number_const(known_regs, known_vals, dst)
+                        result.push(instr)
+                JitIR.Negate(dst, src):
+                    val src_idx = self._number_const_index(known_regs, src)
+                    if src_idx >= 0:
+                        val n = 0.0 - known_vals.get(src_idx)
+                        self._record_number_const(known_regs, known_vals, dst, n)
+                        result.push(JitIR.LoadConst(reg: dst, value: JsValue.Number(v: n)))
+                    else:
+                        self._invalidate_number_const(known_regs, known_vals, dst)
+                        result.push(instr)
+                JitIR.LogicalNot(dst, src):
+                    val src_idx = self._number_const_index(known_regs, src)
+                    if src_idx >= 0:
+                        val b = known_vals.get(src_idx) == 0.0
+                        self._invalidate_number_const(known_regs, known_vals, dst)
+                        result.push(JitIR.LoadConst(reg: dst, value: JsValue.Boolean(v: b)))
+                    else:
+                        self._invalidate_number_const(known_regs, known_vals, dst)
+                        result.push(instr)
                 _:
                     val defined_reg = self._defined_register_or_negative(instr)
                     if defined_reg >= 0:
@@ -151,6 +207,22 @@ class OptimizingCompiler:
             vals[idx] = vals.get(last_idx)
             regs.pop()
             vals.pop()
+
+    fn _compare_numbers(lhs: f64, rhs: f64, op: text) -> bool:
+        if op == "eq":
+            lhs == rhs
+        else if op == "ne":
+            lhs != rhs
+        else if op == "lt":
+            lhs < rhs
+        else if op == "gt":
+            lhs > rhs
+        else if op == "le":
+            lhs <= rhs
+        else if op == "ge":
+            lhs >= rhs
+        else:
+            false
 
     # --- Dead code elimination ---
     # Remove Nop instructions and pure register writes whose destination is
@@ -198,6 +270,8 @@ class OptimizingCompiler:
             JitIR.IntAdd(dst, _, _): dst
             JitIR.IntSub(dst, _, _): dst
             JitIR.IntMul(dst, _, _): dst
+            JitIR.IntDiv(dst, _, _): dst
+            JitIR.IntMod(dst, _, _): dst
             JitIR.Compare(dst, _, _, _): dst
             JitIR.Negate(dst, _): dst
             JitIR.LogicalNot(dst, _): dst
@@ -220,6 +294,8 @@ class OptimizingCompiler:
             JitIR.IntAdd(_, _, _): true
             JitIR.IntSub(_, _, _): true
             JitIR.IntMul(_, _, _): true
+            JitIR.IntDiv(_, _, _): true
+            JitIR.IntMod(_, _, _): true
             JitIR.Compare(_, _, _, _): true
             JitIR.Negate(_, _): true
             JitIR.LogicalNot(_, _): true
@@ -254,6 +330,12 @@ class OptimizingCompiler:
                 self._live_add(live_regs, lhs)
                 self._live_add(live_regs, rhs)
             JitIR.IntMul(_, lhs, rhs):
+                self._live_add(live_regs, lhs)
+                self._live_add(live_regs, rhs)
+            JitIR.IntDiv(_, lhs, rhs):
+                self._live_add(live_regs, lhs)
+                self._live_add(live_regs, rhs)
+            JitIR.IntMod(_, lhs, rhs):
                 self._live_add(live_regs, lhs)
                 self._live_add(live_regs, rhs)
             JitIR.Compare(_, lhs, rhs, _):

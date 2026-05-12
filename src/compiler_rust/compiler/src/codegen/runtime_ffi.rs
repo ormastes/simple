@@ -325,6 +325,14 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_utf8_validate", &[I64], &[I8]),
     RuntimeFuncSpec::new("rt_utf8_find_invalid", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_text_count_codepoints", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_swi_build", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_swi_char_to_byte", &[I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_swi_byte_to_char", &[I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_swi_free", &[I64], &[]),
+    RuntimeFuncSpec::new("rt_rank_select_build", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_rank_query", &[I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_select_query", &[I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_rank_select_free", &[I64], &[]),
     RuntimeFuncSpec::new("rt_aes_encrypt_block_with_expanded", &[I64, I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_aes_decrypt_block_with_expanded", &[I64, I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_aes_sbox", &[I64], &[I64]),
@@ -1165,17 +1173,17 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_file_read_text_rv", &[I64], &[I64]),      // RuntimeValue(string) -> RuntimeValue
     RuntimeFuncSpec::new("rt_file_write_text", &[I64, I64, I64, I64], &[I8]), // path, content -> bool
     RuntimeFuncSpec::new("rt_file_write_text_at", &[I64, I64, I64], &[I64]), // path RuntimeValue, offset, data RuntimeValue -> bytes written
-    RuntimeFuncSpec::new("rt_file_copy", &[I64, I64, I64, I64], &[I8]), // src, dest -> bool
-    RuntimeFuncSpec::new("rt_file_remove", &[I64, I64], &[I8]),        // path -> bool
-    RuntimeFuncSpec::new("rt_file_size", &[I64, I64], &[I64]),         // path -> i64
-    RuntimeFuncSpec::new("rt_file_hash_sha256", &[I64, I64], &[I64]),  // path -> RuntimeValue
-    RuntimeFuncSpec::new("rt_file_rename", &[I64, I64, I64, I64], &[I8]), // old, new -> bool
-    RuntimeFuncSpec::new("rt_file_read_lines", &[I64, I64], &[I64]),   // path -> RuntimeValue (array)
+    RuntimeFuncSpec::new("rt_file_copy", &[I64, I64, I64, I64], &[I8]),      // src, dest -> bool
+    RuntimeFuncSpec::new("rt_file_remove", &[I64, I64], &[I8]),              // path -> bool
+    RuntimeFuncSpec::new("rt_file_size", &[I64, I64], &[I64]),               // path -> i64
+    RuntimeFuncSpec::new("rt_file_hash_sha256", &[I64, I64], &[I64]),        // path -> RuntimeValue
+    RuntimeFuncSpec::new("rt_file_rename", &[I64, I64, I64, I64], &[I8]),    // old, new -> bool
+    RuntimeFuncSpec::new("rt_file_read_lines", &[I64, I64], &[I64]),         // path -> RuntimeValue (array)
     RuntimeFuncSpec::new("rt_file_append_text", &[I64, I64, I64, I64], &[I8]), // path, content -> bool
-    RuntimeFuncSpec::new("rt_file_read_bytes", &[I64, I64], &[I64]),   // path -> RuntimeValue (array)
-    RuntimeFuncSpec::new("rt_bytes_from_raw", &[I64, I64], &[I64]),    // ptr, len -> RuntimeValue (byte array)
+    RuntimeFuncSpec::new("rt_file_read_bytes", &[I64, I64], &[I64]),         // path -> RuntimeValue (array)
+    RuntimeFuncSpec::new("rt_bytes_from_raw", &[I64, I64], &[I64]),          // ptr, len -> RuntimeValue (byte array)
     RuntimeFuncSpec::new("rt_file_write_bytes", &[I64, I64, I64, I64], &[I8]), // path, bytes -> bool
-    RuntimeFuncSpec::new("rt_file_move", &[I64, I64, I64, I64], &[I8]), // src, dest -> bool
+    RuntimeFuncSpec::new("rt_file_move", &[I64, I64, I64, I64], &[I8]),      // src, dest -> bool
     // =========================================================================
     // Directory Operations
     // =========================================================================

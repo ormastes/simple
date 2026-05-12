@@ -47,11 +47,13 @@ use std::sync::Arc;
 pub fn rt_http_get(args: &[Value]) -> Result<Value, CompileError> {
     let url = match args.first() {
         Some(Value::Str(s)) => s.clone(),
-        _ => return Ok(Value::Tuple(vec![
-            Value::Int(-1),
-            Value::Str(String::new()),
-            Value::Str("rt_http_get: missing or invalid URL argument".to_string()),
-        ])),
+        _ => {
+            return Ok(Value::Tuple(vec![
+                Value::Int(-1),
+                Value::Str(String::new()),
+                Value::Str("rt_http_get: missing or invalid URL argument".to_string()),
+            ]))
+        }
     };
     match ureq::get(&url).call() {
         Ok(response) => {

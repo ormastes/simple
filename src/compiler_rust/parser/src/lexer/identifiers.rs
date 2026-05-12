@@ -151,13 +151,13 @@ impl<'a> super::Lexer<'a> {
             {
                 match name.as_str() {
                     "schema" => TokenKind::Schema,
-                    "style"  => TokenKind::Style,
-                    "ui"     => TokenKind::Ui,
-                    "music"  => TokenKind::Music,
-                    "bim"    => TokenKind::Bim,
-                    "city"   => TokenKind::City,
-                    "cad"    => TokenKind::Cad,
-                    "rtl"    => TokenKind::Rtl,
+                    "style" => TokenKind::Style,
+                    "ui" => TokenKind::Ui,
+                    "music" => TokenKind::Music,
+                    "bim" => TokenKind::Bim,
+                    "city" => TokenKind::City,
+                    "cad" => TokenKind::Cad,
+                    "rtl" => TokenKind::Rtl,
                     _ => unreachable!(),
                 }
             }

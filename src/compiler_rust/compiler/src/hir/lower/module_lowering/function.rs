@@ -29,19 +29,15 @@ fn is_stub_body(body: &ast::Block) -> bool {
                     // pass_todo("…") / pass_do_nothing() / pass_dn() — call form
                     ast::Expr::Call { callee, .. } => {
                         if let ast::Expr::Identifier(name) = callee.as_ref() {
-                            matches!(
-                                name.as_str(),
-                                "pass_todo" | "pass_do_nothing" | "pass_dn" | "todo"
-                            )
+                            matches!(name.as_str(), "pass_todo" | "pass_do_nothing" | "pass_dn" | "todo")
                         } else {
                             false
                         }
                     }
                     // bare `pass_todo` / `pass_do_nothing` / `pass_dn` with no parens
-                    ast::Expr::Identifier(name) => matches!(
-                        name.as_str(),
-                        "pass_todo" | "pass_do_nothing" | "pass_dn" | "todo"
-                    ),
+                    ast::Expr::Identifier(name) => {
+                        matches!(name.as_str(), "pass_todo" | "pass_do_nothing" | "pass_dn" | "todo")
+                    }
                     _ => false,
                 },
                 _ => false,
@@ -134,8 +130,7 @@ fn synthesize_driver_registration_body(
         .unwrap_or_else(|| ast::Expr::Array(vec![]));
 
     // version: positional[3] or named `version`
-    let version_expr = find_arg(driver_attr, "version", 3)
-        .unwrap_or_else(|| ast::Expr::String("0.1".to_string()));
+    let version_expr = find_arg(driver_attr, "version", 3).unwrap_or_else(|| ast::Expr::String("0.1".to_string()));
 
     // --- Build: val m = DriverManifest.for_driver(fn_name, version, class, vendor, device_ids) ---
     let manifest_call = ast::Expr::MethodCall {
@@ -403,19 +398,12 @@ impl Lowerer {
         //   fn register_my_driver() -> Result<i32, DriverError>:
         //     pass_todo("auto-synthesized")
         // Any real body is left untouched so hand-written registrations keep working.
-        let driver_synthesized: Option<ast::Block> =
-            if is_stub_body(&f.body) {
-                driver_ops_arg(&f.attributes).map(|ops_expr| {
-                    synthesize_driver_registration_body(
-                        &f.name,
-                        &f.attributes,
-                        ops_expr,
-                        f.span,
-                    )
-                })
-            } else {
-                None
-            };
+        let driver_synthesized: Option<ast::Block> = if is_stub_body(&f.body) {
+            driver_ops_arg(&f.attributes)
+                .map(|ops_expr| synthesize_driver_registration_body(&f.name, &f.attributes, ops_expr, f.span))
+        } else {
+            None
+        };
         let effective_body: &ast::Block = driver_synthesized.as_ref().unwrap_or(&f.body);
 
         let body = self.lower_block(effective_body, &mut ctx)?;

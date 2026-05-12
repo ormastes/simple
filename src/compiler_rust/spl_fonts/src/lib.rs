@@ -131,7 +131,12 @@ struct FtFaceRec {
 #[link(name = "freetype")]
 extern "C" {
     fn FT_Init_FreeType(alibrary: *mut *mut c_void) -> c_int;
-    fn FT_New_Face(library: *mut c_void, filepathname: *const c_char, face_index: c_long, aface: *mut *mut FtFaceRec) -> c_int;
+    fn FT_New_Face(
+        library: *mut c_void,
+        filepathname: *const c_char,
+        face_index: c_long,
+        aface: *mut *mut FtFaceRec,
+    ) -> c_int;
     fn FT_Done_Face(face: *mut FtFaceRec) -> c_int;
     fn FT_Done_FreeType(library: *mut c_void) -> c_int;
     fn FT_Set_Pixel_Sizes(face: *mut FtFaceRec, pixel_width: c_uint, pixel_height: c_uint) -> c_int;
@@ -227,10 +232,7 @@ pub extern "C" fn rt_fonts_rasterize_glyph(codepoint: i64, font_size_px: i64) ->
         Some(glyph) => glyph,
         None => {
             let (metrics, bitmap) = font.rasterize(ch, font_size_px as f32);
-            GlyphSlot {
-                metrics,
-                bitmap,
-            }
+            GlyphSlot { metrics, bitmap }
         }
     };
     match GLYPH_SLOT.lock() {
@@ -292,10 +294,7 @@ fn rasterize_with_freetype(ch: char, font_size_px: i64) -> Option<GlyphSlot> {
                 height: height as f32,
             },
         };
-        Some(GlyphSlot {
-            metrics,
-            bitmap,
-        })
+        Some(GlyphSlot { metrics, bitmap })
     }
 }
 
@@ -324,10 +323,7 @@ pub extern "C" fn rt_fonts_rasterize_glyph_subpixel(codepoint: i64, font_size_px
         Some(glyph) => glyph,
         None => {
             let (metrics, bitmap) = font.rasterize_subpixel(ch, font_size_px as f32);
-            GlyphSlot {
-                metrics,
-                bitmap,
-            }
+            GlyphSlot { metrics, bitmap }
         }
     };
     match GLYPH_SLOT.lock() {
@@ -368,7 +364,10 @@ fn rasterize_subpixel_with_freetype(ch: char, font_size_px: i64) -> Option<Glyph
                 advance_height: ((*slot).advance.y as f32 / 64.0).round(),
                 bounds: OutlineBounds::default(),
             };
-            return Some(GlyphSlot { metrics, bitmap: Vec::new() });
+            return Some(GlyphSlot {
+                metrics,
+                bitmap: Vec::new(),
+            });
         }
         if bitmap_ref.buffer.is_null() || !bitmap_ref.width.is_multiple_of(3) {
             return None;
@@ -517,7 +516,11 @@ pub extern "C" fn rt_fonts_layout_text(text_ptr: i64, text_len: i64, font_size_p
     let settings = LayoutSettings {
         x: 0.0,
         y: 0.0,
-        max_width: if max_width_px > 0 { Some(max_width_px as f32) } else { None },
+        max_width: if max_width_px > 0 {
+            Some(max_width_px as f32)
+        } else {
+            None
+        },
         ..Default::default()
     };
     let mut layout = Layout::new(CoordinateSystem::PositiveYDown);

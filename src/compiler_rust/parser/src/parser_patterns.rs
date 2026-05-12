@@ -25,7 +25,7 @@ impl<'a> Parser<'a> {
                 if next.kind == TokenKind::Colon {
                     self.advance(); // consume field name (discarded)
                     self.advance(); // consume colon
-                    // Now parse the actual binding pattern
+                                    // Now parse the actual binding pattern
                     patterns.push(self.parse_single_pattern()?);
                     if !self.check(&TokenKind::RParen) {
                         self.expect(&TokenKind::Comma)?;

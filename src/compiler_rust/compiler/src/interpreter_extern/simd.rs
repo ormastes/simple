@@ -37,7 +37,7 @@ use simple_runtime::value::{
     rt_utf8_find_invalid as ffi_utf8_find_invalid, rt_utf8_validate as ffi_utf8_validate,
 };
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock, Mutex};
 
 fn expect_no_args(name: &str, args: &[Value]) -> Result<(), CompileError> {
     if args.is_empty() {
@@ -1162,9 +1162,97 @@ fn extract_str(name: &str, value: &Value) -> Result<String, CompileError> {
     }
 }
 
+#[derive(Clone, Debug)]
+struct Utf8WidthIndex {
+    starts: Vec<usize>,
+    byte_len: usize,
+}
+
+static WIDTH_INDEXES: LazyLock<Mutex<HashMap<i64, Utf8WidthIndex>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
+static NEXT_WIDTH_INDEX_HANDLE: LazyLock<Mutex<i64>> = LazyLock::new(|| Mutex::new(1));
+
+fn expect_index_i64(name: &str, value: &Value) -> Result<i64, CompileError> {
+    match value {
+        Value::Int(n) => Ok(*n),
+        other => Err(CompileError::runtime(format!(
+            "{name}: expected integer argument, got {:?}",
+            other
+        ))),
+    }
+}
+
+fn build_width_index(s: &str) -> Utf8WidthIndex {
+    let bytes = s.as_bytes();
+    let mut starts = Vec::with_capacity(s.chars().count());
+    let mut idx = 0usize;
+    while idx < bytes.len() {
+        starts.push(idx);
+        let byte = bytes[idx];
+        idx += if byte < 0x80 {
+            1
+        } else if byte < 0xE0 {
+            2
+        } else if byte < 0xF0 {
+            3
+        } else {
+            4
+        };
+    }
+    Utf8WidthIndex {
+        starts,
+        byte_len: bytes.len(),
+    }
+}
+
+fn register_width_index(index: Utf8WidthIndex) -> i64 {
+    let mut next = NEXT_WIDTH_INDEX_HANDLE
+        .lock()
+        .expect("width index handle lock poisoned");
+    let handle = *next;
+    *next += 1;
+    WIDTH_INDEXES
+        .lock()
+        .expect("width index registry lock poisoned")
+        .insert(handle, index);
+    handle
+}
+
+fn remove_width_index(handle: i64) {
+    WIDTH_INDEXES
+        .lock()
+        .expect("width index registry lock poisoned")
+        .remove(&handle);
+}
+
+fn with_width_index(handle: i64, f: impl FnOnce(&Utf8WidthIndex) -> i64) -> i64 {
+    let indexes = WIDTH_INDEXES.lock().expect("width index registry lock poisoned");
+    indexes.get(&handle).map(f).unwrap_or(-1)
+}
+
+fn width_index_char_to_byte(index: &Utf8WidthIndex, char_idx: i64) -> i64 {
+    if char_idx < 0 {
+        return -1;
+    }
+    let char_idx = char_idx as usize;
+    if char_idx == index.starts.len() {
+        return index.byte_len as i64;
+    }
+    index.starts.get(char_idx).copied().map(|pos| pos as i64).unwrap_or(-1)
+}
+
+fn width_index_byte_to_char(index: &Utf8WidthIndex, byte_idx: i64) -> i64 {
+    if byte_idx < 0 || byte_idx as usize > index.byte_len {
+        return -1;
+    }
+    let byte_idx = byte_idx as usize;
+    index.starts.partition_point(|start| *start < byte_idx) as i64
+}
+
 pub fn rt_text_count_codepoints_cached(args: &[Value]) -> Result<Value, CompileError> {
     if args.len() != 1 {
-        return Err(CompileError::runtime("rt_text_count_codepoints_cached expects 1 argument".to_string()));
+        return Err(CompileError::runtime(
+            "rt_text_count_codepoints_cached expects 1 argument".to_string(),
+        ));
     }
     let s = extract_str("rt_text_count_codepoints_cached", &args[0])?;
     Ok(Value::Int(s.chars().count() as i64))
@@ -1180,7 +1268,9 @@ pub fn rt_text_is_ascii(args: &[Value]) -> Result<Value, CompileError> {
 
 pub fn rt_text_validate_utf8(args: &[Value]) -> Result<Value, CompileError> {
     if args.len() != 1 {
-        return Err(CompileError::runtime("rt_text_validate_utf8 expects 1 argument".to_string()));
+        return Err(CompileError::runtime(
+            "rt_text_validate_utf8 expects 1 argument".to_string(),
+        ));
     }
     let _s = extract_str("rt_text_validate_utf8", &args[0])?;
     Ok(Value::Bool(true))
@@ -1188,7 +1278,9 @@ pub fn rt_text_validate_utf8(args: &[Value]) -> Result<Value, CompileError> {
 
 pub fn rt_text_find_invalid_utf8(args: &[Value]) -> Result<Value, CompileError> {
     if args.len() != 1 {
-        return Err(CompileError::runtime("rt_text_find_invalid_utf8 expects 1 argument".to_string()));
+        return Err(CompileError::runtime(
+            "rt_text_find_invalid_utf8 expects 1 argument".to_string(),
+        ));
     }
     let _s = extract_str("rt_text_find_invalid_utf8", &args[0])?;
     Ok(Value::Int(-1))
@@ -1196,7 +1288,9 @@ pub fn rt_text_find_invalid_utf8(args: &[Value]) -> Result<Value, CompileError> 
 
 pub fn rt_simd_str_search(args: &[Value]) -> Result<Value, CompileError> {
     if args.len() != 2 {
-        return Err(CompileError::runtime("rt_simd_str_search expects 2 arguments".to_string()));
+        return Err(CompileError::runtime(
+            "rt_simd_str_search expects 2 arguments".to_string(),
+        ));
     }
     let haystack = extract_str("rt_simd_str_search", &args[0])?;
     let needle = extract_str("rt_simd_str_search", &args[1])?;
@@ -1211,7 +1305,9 @@ pub fn rt_simd_str_search(args: &[Value]) -> Result<Value, CompileError> {
 
 pub fn rt_simd_str_last_index_of(args: &[Value]) -> Result<Value, CompileError> {
     if args.len() != 2 {
-        return Err(CompileError::runtime("rt_simd_str_last_index_of expects 2 arguments".to_string()));
+        return Err(CompileError::runtime(
+            "rt_simd_str_last_index_of expects 2 arguments".to_string(),
+        ));
     }
     let haystack = extract_str("rt_simd_str_last_index_of", &args[0])?;
     let needle = extract_str("rt_simd_str_last_index_of", &args[1])?;
@@ -1226,7 +1322,9 @@ pub fn rt_simd_str_last_index_of(args: &[Value]) -> Result<Value, CompileError> 
 
 pub fn rt_simd_str_equal(args: &[Value]) -> Result<Value, CompileError> {
     if args.len() != 2 {
-        return Err(CompileError::runtime("rt_simd_str_equal expects 2 arguments".to_string()));
+        return Err(CompileError::runtime(
+            "rt_simd_str_equal expects 2 arguments".to_string(),
+        ));
     }
     let a = extract_str("rt_simd_str_equal", &args[0])?;
     let b = extract_str("rt_simd_str_equal", &args[1])?;
@@ -1235,51 +1333,107 @@ pub fn rt_simd_str_equal(args: &[Value]) -> Result<Value, CompileError> {
 
 pub fn rt_text_to_upper_ascii(args: &[Value]) -> Result<Value, CompileError> {
     if args.len() != 1 {
-        return Err(CompileError::runtime("rt_text_to_upper_ascii expects 1 argument".to_string()));
+        return Err(CompileError::runtime(
+            "rt_text_to_upper_ascii expects 1 argument".to_string(),
+        ));
     }
     let s = extract_str("rt_text_to_upper_ascii", &args[0])?;
-    let bytes: Vec<u8> = s.bytes().map(|b| if b >= b'a' && b <= b'z' { b - 32 } else { b }).collect();
+    let bytes: Vec<u8> = s
+        .bytes()
+        .map(|b| if b >= b'a' && b <= b'z' { b - 32 } else { b })
+        .collect();
     Ok(Value::Str(String::from_utf8_lossy(&bytes).into()))
 }
 
 pub fn rt_text_to_lower_ascii(args: &[Value]) -> Result<Value, CompileError> {
     if args.len() != 1 {
-        return Err(CompileError::runtime("rt_text_to_lower_ascii expects 1 argument".to_string()));
+        return Err(CompileError::runtime(
+            "rt_text_to_lower_ascii expects 1 argument".to_string(),
+        ));
     }
     let s = extract_str("rt_text_to_lower_ascii", &args[0])?;
-    let bytes: Vec<u8> = s.bytes().map(|b| if b >= b'A' && b <= b'Z' { b + 32 } else { b }).collect();
+    let bytes: Vec<u8> = s
+        .bytes()
+        .map(|b| if b >= b'A' && b <= b'Z' { b + 32 } else { b })
+        .collect();
     Ok(Value::Str(String::from_utf8_lossy(&bytes).into()))
 }
 
 pub fn rt_swi_build(args: &[Value]) -> Result<Value, CompileError> {
-    if args.len() != 1 { return Err(CompileError::runtime("rt_swi_build expects 1 argument".to_string())); }
-    Ok(Value::Int(0))
+    if args.len() != 1 {
+        return Err(CompileError::runtime("rt_swi_build expects 1 argument".to_string()));
+    }
+    let s = extract_str("rt_swi_build", &args[0])?;
+    Ok(Value::Int(register_width_index(build_width_index(&s))))
 }
 pub fn rt_swi_char_to_byte(args: &[Value]) -> Result<Value, CompileError> {
-    if args.len() != 2 { return Err(CompileError::runtime("rt_swi_char_to_byte expects 2 arguments".to_string())); }
-    Ok(Value::Int(-1))
+    if args.len() != 2 {
+        return Err(CompileError::runtime(
+            "rt_swi_char_to_byte expects 2 arguments".to_string(),
+        ));
+    }
+    let handle = expect_index_i64("rt_swi_char_to_byte", &args[0])?;
+    let char_idx = expect_index_i64("rt_swi_char_to_byte", &args[1])?;
+    Ok(Value::Int(with_width_index(handle, |index| {
+        width_index_char_to_byte(index, char_idx)
+    })))
 }
 pub fn rt_swi_byte_to_char(args: &[Value]) -> Result<Value, CompileError> {
-    if args.len() != 2 { return Err(CompileError::runtime("rt_swi_byte_to_char expects 2 arguments".to_string())); }
-    Ok(Value::Int(-1))
+    if args.len() != 2 {
+        return Err(CompileError::runtime(
+            "rt_swi_byte_to_char expects 2 arguments".to_string(),
+        ));
+    }
+    let handle = expect_index_i64("rt_swi_byte_to_char", &args[0])?;
+    let byte_idx = expect_index_i64("rt_swi_byte_to_char", &args[1])?;
+    Ok(Value::Int(with_width_index(handle, |index| {
+        width_index_byte_to_char(index, byte_idx)
+    })))
 }
 pub fn rt_swi_free(args: &[Value]) -> Result<Value, CompileError> {
-    let _ = args;
+    if args.len() != 1 {
+        return Err(CompileError::runtime("rt_swi_free expects 1 argument".to_string()));
+    }
+    let handle = expect_index_i64("rt_swi_free", &args[0])?;
+    remove_width_index(handle);
     Ok(Value::Nil)
 }
 pub fn rt_rank_select_build(args: &[Value]) -> Result<Value, CompileError> {
-    if args.len() != 1 { return Err(CompileError::runtime("rt_rank_select_build expects 1 argument".to_string())); }
-    Ok(Value::Int(0))
+    if args.len() != 1 {
+        return Err(CompileError::runtime(
+            "rt_rank_select_build expects 1 argument".to_string(),
+        ));
+    }
+    let s = extract_str("rt_rank_select_build", &args[0])?;
+    Ok(Value::Int(register_width_index(build_width_index(&s))))
 }
 pub fn rt_rank_query(args: &[Value]) -> Result<Value, CompileError> {
-    if args.len() != 2 { return Err(CompileError::runtime("rt_rank_query expects 2 arguments".to_string())); }
-    Ok(Value::Int(-1))
+    if args.len() != 2 {
+        return Err(CompileError::runtime("rt_rank_query expects 2 arguments".to_string()));
+    }
+    let handle = expect_index_i64("rt_rank_query", &args[0])?;
+    let byte_idx = expect_index_i64("rt_rank_query", &args[1])?;
+    Ok(Value::Int(with_width_index(handle, |index| {
+        width_index_byte_to_char(index, byte_idx)
+    })))
 }
 pub fn rt_select_query(args: &[Value]) -> Result<Value, CompileError> {
-    if args.len() != 2 { return Err(CompileError::runtime("rt_select_query expects 2 arguments".to_string())); }
-    Ok(Value::Int(-1))
+    if args.len() != 2 {
+        return Err(CompileError::runtime("rt_select_query expects 2 arguments".to_string()));
+    }
+    let handle = expect_index_i64("rt_select_query", &args[0])?;
+    let char_idx = expect_index_i64("rt_select_query", &args[1])?;
+    Ok(Value::Int(with_width_index(handle, |index| {
+        width_index_char_to_byte(index, char_idx)
+    })))
 }
 pub fn rt_rank_select_free(args: &[Value]) -> Result<Value, CompileError> {
-    let _ = args;
+    if args.len() != 1 {
+        return Err(CompileError::runtime(
+            "rt_rank_select_free expects 1 argument".to_string(),
+        ));
+    }
+    let handle = expect_index_i64("rt_rank_select_free", &args[0])?;
+    remove_width_index(handle);
     Ok(Value::Nil)
 }

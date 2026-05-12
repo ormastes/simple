@@ -68,7 +68,9 @@ impl StructLayout {
         let ordered: Vec<(String, TypeId)> = if preserve_order {
             fields.to_vec()
         } else {
-            let mut indexed: Vec<(usize, u32)> = fields.iter().enumerate()
+            let mut indexed: Vec<(usize, u32)> = fields
+                .iter()
+                .enumerate()
                 .map(|(i, (_, ty))| (i, Self::type_size_align(*ty, registry).0))
                 .collect();
             indexed.sort_by(|a, b| b.1.cmp(&a.1));

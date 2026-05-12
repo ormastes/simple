@@ -379,8 +379,8 @@ pub use value::{
     native_tcp_flush, native_tcp_get_nodelay, native_tcp_peek, native_tcp_read, native_tcp_set_backlog,
     native_tcp_set_keepalive, native_tcp_set_nodelay, native_tcp_set_read_timeout, native_tcp_set_write_timeout,
     native_tcp_shutdown, native_tcp_write, rt_io_tcp_accept, rt_io_tcp_accept_timeout, rt_io_tcp_bind, rt_io_tcp_close,
-    rt_dns_lookup, rt_io_tcp_connect, rt_io_tcp_connect_timeout, rt_io_tcp_flush, rt_io_tcp_local_addr, rt_io_tcp_peer_addr,
-    rt_io_tcp_read, rt_io_tcp_read_line, rt_io_tcp_set_nodelay, rt_io_tcp_set_read_timeout,
+    rt_dns_lookup, rt_io_tcp_connect, rt_io_tcp_connect_timeout, rt_io_tcp_flush, rt_io_tcp_local_addr,
+    rt_io_tcp_peer_addr, rt_io_tcp_read, rt_io_tcp_read_line, rt_io_tcp_set_nodelay, rt_io_tcp_set_read_timeout,
     rt_io_tcp_set_write_timeout, rt_io_tcp_shutdown, rt_io_tcp_write, rt_io_tcp_write_text, rt_tls_client_close,
     rt_tls_client_config_add_root_cert, rt_tls_client_config_enable_sni, rt_tls_client_config_free,
     rt_tls_client_config_new, rt_tls_client_config_set_alpn, rt_tls_client_config_set_verify_mode,
@@ -390,8 +390,8 @@ pub use value::{
     rt_tls_hash_cert, rt_tls_is_handshake_complete, rt_tls_load_cert, rt_tls_load_key, rt_tls_server_accept,
     rt_tls_server_close_connection, rt_tls_server_config_free, rt_tls_server_config_new,
     rt_tls_server_config_require_client_cert, rt_tls_server_config_set_alpn, rt_tls_server_create,
-    rt_tls_server_create_from_der, rt_tls_server_read,
-    rt_tls_server_shutdown, rt_tls_server_write, rt_tls_server_write_bytes, rt_tls_verify_cert,
+    rt_tls_server_create_from_der, rt_tls_server_read, rt_tls_server_shutdown, rt_tls_server_write,
+    rt_tls_server_write_bytes, rt_tls_verify_cert,
 };
 
 // Re-export contract violation types and FFI functions (CTR-050-054)

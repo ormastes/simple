@@ -30,7 +30,8 @@ fn packed_struct_with_bit_width_fields_parses_successfully() {
 
 #[test]
 fn packed_struct_multi_field_bit_widths_parse_correctly() {
-    let src = "@packed\nstruct StatusReg:\n    carry: u32:1\n    zero: u32:1\n    overflow: u32:1\n    reserved: u32:5\n";
+    let src =
+        "@packed\nstruct StatusReg:\n    carry: u32:1\n    zero: u32:1\n    overflow: u32:1\n    reserved: u32:5\n";
     let node = parse_first(src);
     match node {
         Node::Struct(s) => {
@@ -59,9 +60,7 @@ fn ordinary_struct_fields_have_no_bit_width() {
 #[test]
 fn reject_post_name_packed_struct_syntax_with_targeted_diagnostic() {
     let mut parser = Parser::new("struct Flags @packed { mode: u16:4 }\n");
-    let err = parser
-        .parse()
-        .expect_err("post-name @packed syntax should be rejected");
+    let err = parser.parse().expect_err("post-name @packed syntax should be rejected");
     let msg = err.to_string();
     assert!(
         msg.contains("post-name @packed struct syntax") || msg.contains("not supported"),

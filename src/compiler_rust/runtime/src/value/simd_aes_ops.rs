@@ -523,10 +523,8 @@ mod tests {
         // Write lanes as i64 at offset i*8 (matching compile_struct_init)
         for i in 0..16 {
             unsafe {
-                (state_ptr.add(i * super::VEC16U8_FIELD_STRIDE) as *mut i64)
-                    .write_unaligned(s0[i] as i64);
-                (key_ptr.add(i * super::VEC16U8_FIELD_STRIDE) as *mut i64)
-                    .write_unaligned(FIPS197_K1[i] as i64);
+                (state_ptr.add(i * super::VEC16U8_FIELD_STRIDE) as *mut i64).write_unaligned(s0[i] as i64);
+                (key_ptr.add(i * super::VEC16U8_FIELD_STRIDE) as *mut i64).write_unaligned(FIPS197_K1[i] as i64);
             }
         }
 
@@ -542,9 +540,8 @@ mod tests {
         assert!(!result_ptr.is_null());
         let mut result = [0_u8; 16];
         for i in 0..16 {
-            result[i] = unsafe {
-                (result_ptr.add(i * super::VEC16U8_FIELD_STRIDE) as *const i64).read_unaligned()
-            } as u8;
+            result[i] =
+                unsafe { (result_ptr.add(i * super::VEC16U8_FIELD_STRIDE) as *const i64).read_unaligned() } as u8;
         }
 
         assert_eq!(

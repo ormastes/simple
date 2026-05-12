@@ -90,13 +90,11 @@ fn parse_resource_throttle_config(content: &str, options: &mut TestOptions) {
             let value = value.trim().trim_matches(|c| c == '"' || c == '\'');
 
             match key {
-                "enabled" => {
-                    match value {
-                        "true" | "1" => options.parallel = true,
-                        "false" | "0" => options.parallel = false,
-                        _ => {}
-                    }
-                }
+                "enabled" => match value {
+                    "true" | "1" => options.parallel = true,
+                    "false" | "0" => options.parallel = false,
+                    _ => {}
+                },
                 "threshold" => {
                     if let Ok(v) = value.parse::<u8>() {
                         // Only apply if user didn't override on CLI (still default)
@@ -235,22 +233,33 @@ pub fn run_tests(options: TestOptions) -> TestRunResult {
     // Auto-fallback to sequential for small runs where subprocess overhead dominates
     let use_parallel = options.parallel && test_files.len() >= 4;
     if options.parallel && !use_parallel && !quiet {
-        debug_log!(DebugLevel::Basic, "Runner", "Auto-sequential: {} file(s) below parallel threshold", test_files.len());
+        debug_log!(
+            DebugLevel::Basic,
+            "Runner",
+            "Auto-sequential: {} file(s) below parallel threshold",
+            test_files.len()
+        );
     }
-    let (mut results, mut total_passed, mut total_failed, mut total_skipped, mut total_ignored) =
-        if use_parallel {
-            if !quiet {
-                println!("Running {} test(s) in parallel; use --sequential to disable.", test_files.len());
-            }
-            debug_log!(DebugLevel::Basic, "Runner", "Using parallel execution mode");
-            run_tests_parallel(&test_files, &options, quiet)
-        } else {
-            if !quiet && test_files.len() > 20 && !options.parallel {
-                let cpus = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
-                println!("Hint: use --parallel for ~{}x faster runs with {} files.", cpus.min(test_files.len()), test_files.len());
-            }
-            execute_test_files(&test_files, &options, build_cache.as_ref(), quiet)
-        };
+    let (mut results, mut total_passed, mut total_failed, mut total_skipped, mut total_ignored) = if use_parallel {
+        if !quiet {
+            println!(
+                "Running {} test(s) in parallel; use --sequential to disable.",
+                test_files.len()
+            );
+        }
+        debug_log!(DebugLevel::Basic, "Runner", "Using parallel execution mode");
+        run_tests_parallel(&test_files, &options, quiet)
+    } else {
+        if !quiet && test_files.len() > 20 && !options.parallel {
+            let cpus = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
+            println!(
+                "Hint: use --parallel for ~{}x faster runs with {} files.",
+                cpus.min(test_files.len()),
+                test_files.len()
+            );
+        }
+        execute_test_files(&test_files, &options, build_cache.as_ref(), quiet)
+    };
 
     // Determine if all tests were run (no filters applied)
     let all_tests_run =

@@ -651,7 +651,11 @@ pub fn rt_thread_local_get(args: &[Value]) -> Result<Value, CompileError> {
     }
     let handle = match &args[0] {
         Value::Int(h) => *h,
-        _ => return Err(CompileError::Runtime("rt_thread_local_get expects integer handle".to_string())),
+        _ => {
+            return Err(CompileError::Runtime(
+                "rt_thread_local_get expects integer handle".to_string(),
+            ))
+        }
     };
     let registry = TLS_REGISTRY.lock().unwrap();
     let value = registry
@@ -671,7 +675,11 @@ pub fn rt_thread_local_set(args: &[Value]) -> Result<Value, CompileError> {
     }
     let handle = match &args[0] {
         Value::Int(h) => *h,
-        _ => return Err(CompileError::Runtime("rt_thread_local_set expects integer handle".to_string())),
+        _ => {
+            return Err(CompileError::Runtime(
+                "rt_thread_local_set expects integer handle".to_string(),
+            ))
+        }
     };
     let value = args[1].clone();
     let mut registry = TLS_REGISTRY.lock().unwrap();
@@ -690,7 +698,11 @@ pub fn rt_thread_local_free(args: &[Value]) -> Result<Value, CompileError> {
     }
     let handle = match &args[0] {
         Value::Int(h) => *h,
-        _ => return Err(CompileError::Runtime("rt_thread_local_free expects integer handle".to_string())),
+        _ => {
+            return Err(CompileError::Runtime(
+                "rt_thread_local_free expects integer handle".to_string(),
+            ))
+        }
     };
     TLS_REGISTRY.lock().unwrap().remove(&handle);
     Ok(Value::Nil)

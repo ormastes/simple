@@ -1,6 +1,86 @@
 use super::collections::{rt_array_get, rt_array_len, rt_string_data, rt_string_len};
 use super::core::RuntimeValue;
 use simple_simd::SimdTier;
+use std::collections::HashMap;
+use std::sync::{LazyLock, Mutex};
+
+#[derive(Clone, Debug)]
+struct Utf8WidthIndex {
+    starts: Vec<usize>,
+    byte_len: usize,
+}
+
+static WIDTH_INDEXES: LazyLock<Mutex<HashMap<i64, Utf8WidthIndex>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
+static NEXT_WIDTH_INDEX_HANDLE: LazyLock<Mutex<i64>> = LazyLock::new(|| Mutex::new(1));
+
+fn build_width_index(bytes: &[u8]) -> Utf8WidthIndex {
+    let mut starts = Vec::with_capacity(scalar_count_codepoints(bytes) as usize);
+    let mut idx = 0usize;
+    while idx < bytes.len() {
+        starts.push(idx);
+        idx += sequence_len(bytes[idx]).unwrap_or(1);
+    }
+    Utf8WidthIndex {
+        starts,
+        byte_len: bytes.len(),
+    }
+}
+
+fn register_width_index(index: Utf8WidthIndex) -> i64 {
+    let mut next = NEXT_WIDTH_INDEX_HANDLE
+        .lock()
+        .expect("width index handle lock poisoned");
+    let handle = *next;
+    *next += 1;
+    WIDTH_INDEXES
+        .lock()
+        .expect("width index registry lock poisoned")
+        .insert(handle, index);
+    handle
+}
+
+fn remove_width_index(handle: i64) {
+    WIDTH_INDEXES
+        .lock()
+        .expect("width index registry lock poisoned")
+        .remove(&handle);
+}
+
+fn with_width_index(handle: i64, f: impl FnOnce(&Utf8WidthIndex) -> i64) -> i64 {
+    let indexes = WIDTH_INDEXES.lock().expect("width index registry lock poisoned");
+    indexes.get(&handle).map(f).unwrap_or(-1)
+}
+
+fn width_index_char_to_byte(index: &Utf8WidthIndex, char_idx: i64) -> i64 {
+    if char_idx < 0 {
+        return -1;
+    }
+    let char_idx = char_idx as usize;
+    if char_idx == index.starts.len() {
+        return index.byte_len as i64;
+    }
+    index.starts.get(char_idx).copied().map(|pos| pos as i64).unwrap_or(-1)
+}
+
+fn width_index_byte_to_char(index: &Utf8WidthIndex, byte_idx: i64) -> i64 {
+    if byte_idx < 0 || byte_idx as usize > index.byte_len {
+        return -1;
+    }
+    let byte_idx = byte_idx as usize;
+    index.starts.partition_point(|start| *start < byte_idx) as i64
+}
+
+fn runtime_value_text_to_bytes(text: RuntimeValue) -> Option<&'static [u8]> {
+    let len = rt_string_len(text);
+    if len < 0 {
+        return None;
+    }
+    let data = rt_string_data(text);
+    if data.is_null() {
+        return None;
+    }
+    Some(unsafe { std::slice::from_raw_parts(data, len as usize) })
+}
 
 pub(crate) fn scalar_count_codepoints(bytes: &[u8]) -> i64 {
     let mut count = 0i64;
@@ -173,16 +253,53 @@ pub extern "C" fn rt_utf8_find_invalid(bytes: RuntimeValue) -> i64 {
 
 #[no_mangle]
 pub extern "C" fn rt_text_count_codepoints(text: RuntimeValue) -> i64 {
-    let len = rt_string_len(text);
-    if len < 0 {
+    let Some(bytes) = runtime_value_text_to_bytes(text) else {
         return 0;
-    }
-    let data = rt_string_data(text);
-    if data.is_null() {
-        return 0;
-    }
-    let bytes = unsafe { std::slice::from_raw_parts(data, len as usize) };
+    };
     count_codepoints_for_tier(simple_simd::active_simd_tier(), bytes)
+}
+
+#[no_mangle]
+pub extern "C" fn rt_swi_build(text: RuntimeValue) -> i64 {
+    let Some(bytes) = runtime_value_text_to_bytes(text) else {
+        return 0;
+    };
+    register_width_index(build_width_index(bytes))
+}
+
+#[no_mangle]
+pub extern "C" fn rt_swi_char_to_byte(handle: i64, char_idx: i64) -> i64 {
+    with_width_index(handle, |index| width_index_char_to_byte(index, char_idx))
+}
+
+#[no_mangle]
+pub extern "C" fn rt_swi_byte_to_char(handle: i64, byte_idx: i64) -> i64 {
+    with_width_index(handle, |index| width_index_byte_to_char(index, byte_idx))
+}
+
+#[no_mangle]
+pub extern "C" fn rt_swi_free(handle: i64) {
+    remove_width_index(handle);
+}
+
+#[no_mangle]
+pub extern "C" fn rt_rank_select_build(text: RuntimeValue) -> i64 {
+    rt_swi_build(text)
+}
+
+#[no_mangle]
+pub extern "C" fn rt_rank_query(handle: i64, byte_idx: i64) -> i64 {
+    rt_swi_byte_to_char(handle, byte_idx)
+}
+
+#[no_mangle]
+pub extern "C" fn rt_select_query(handle: i64, char_idx: i64) -> i64 {
+    rt_swi_char_to_byte(handle, char_idx)
+}
+
+#[no_mangle]
+pub extern "C" fn rt_rank_select_free(handle: i64) {
+    remove_width_index(handle);
 }
 
 #[cfg(target_arch = "x86_64")]
@@ -273,8 +390,9 @@ unsafe fn neon_find_invalid_impl(bytes: &[u8]) -> i64 {
 mod tests {
     use super::{
         avx2_count_codepoints, avx2_find_invalid, avx2_validate, count_codepoints_for_tier, find_invalid_for_tier,
-        neon_count_codepoints, neon_find_invalid, neon_validate, rt_text_count_codepoints, rt_utf8_count_codepoints,
-        rt_utf8_find_invalid, rt_utf8_validate, scalar_count_codepoints, validate_for_tier,
+        neon_count_codepoints, neon_find_invalid, neon_validate, rt_swi_build, rt_swi_byte_to_char,
+        rt_swi_char_to_byte, rt_swi_free, rt_text_count_codepoints, rt_utf8_count_codepoints, rt_utf8_find_invalid,
+        rt_utf8_validate, scalar_count_codepoints, validate_for_tier,
     };
     use crate::value::{rt_array_new, rt_array_push, rt_string_new, RuntimeValue};
     use simple_simd::SimdTier;
@@ -346,5 +464,26 @@ mod tests {
 
         let text = rt_string_new("ASCII😀".as_ptr(), "ASCII😀".len() as u64);
         assert_eq!(rt_text_count_codepoints(text), 6);
+    }
+
+    #[test]
+    fn width_index_handles_map_between_codepoint_and_byte_offsets() {
+        let source = "A€😀Z";
+        let text = rt_string_new(source.as_ptr(), source.len() as u64);
+        let handle = rt_swi_build(text);
+        assert!(handle > 0);
+        assert_eq!(rt_swi_char_to_byte(handle, 0), 0);
+        assert_eq!(rt_swi_char_to_byte(handle, 1), 1);
+        assert_eq!(rt_swi_char_to_byte(handle, 2), 4);
+        assert_eq!(rt_swi_char_to_byte(handle, 3), 8);
+        assert_eq!(rt_swi_char_to_byte(handle, 4), source.len() as i64);
+        assert_eq!(rt_swi_char_to_byte(handle, 5), -1);
+        assert_eq!(rt_swi_byte_to_char(handle, 0), 0);
+        assert_eq!(rt_swi_byte_to_char(handle, 1), 1);
+        assert_eq!(rt_swi_byte_to_char(handle, 2), 2);
+        assert_eq!(rt_swi_byte_to_char(handle, 4), 2);
+        assert_eq!(rt_swi_byte_to_char(handle, source.len() as i64), 4);
+        rt_swi_free(handle);
+        assert_eq!(rt_swi_char_to_byte(handle, 0), -1);
     }
 }

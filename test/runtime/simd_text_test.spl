@@ -14,6 +14,7 @@ use std.encoding.simd_text_ffi.{
     rt_rank_select_build, rt_rank_query, rt_select_query, rt_rank_select_free
 }
 use std.encoding.utf8.{text_codepoint_len, text_is_ascii}
+use std.encoding.width_index.{WidthIndex}
 
 fn repeat_char(ch: text, count: i64) -> text:
     var r = ""
@@ -176,3 +177,47 @@ describe "Stdlib Integration":
     it "text_is_ascii works":
         expect text_is_ascii("hello") == true
         expect text_is_ascii("héllo") == false
+
+describe "SIMD Width Index":
+    it "SWI maps codepoint indexes to UTF-8 byte offsets":
+        val handle = rt_swi_build("A€😀Z")
+        expect handle > 0
+        expect rt_swi_char_to_byte(handle, 0) == 0
+        expect rt_swi_char_to_byte(handle, 1) == 1
+        expect rt_swi_char_to_byte(handle, 2) == 4
+        expect rt_swi_char_to_byte(handle, 3) == 8
+        expect rt_swi_char_to_byte(handle, 4) == 9
+        expect rt_swi_char_to_byte(handle, 5) == -1
+        rt_swi_free(handle)
+        expect rt_swi_char_to_byte(handle, 0) == -1
+
+    it "SWI maps byte offsets to UTF-8 codepoint indexes":
+        val handle = rt_swi_build("A€😀Z")
+        expect handle > 0
+        expect rt_swi_byte_to_char(handle, 0) == 0
+        expect rt_swi_byte_to_char(handle, 1) == 1
+        expect rt_swi_byte_to_char(handle, 2) == 2
+        expect rt_swi_byte_to_char(handle, 4) == 2
+        expect rt_swi_byte_to_char(handle, 8) == 3
+        expect rt_swi_byte_to_char(handle, 9) == 4
+        expect rt_swi_byte_to_char(handle, 10) == -1
+        rt_swi_free(handle)
+
+    it "rank/select queries match SWI offsets":
+        val handle = rt_rank_select_build("A€😀Z")
+        expect handle > 0
+        expect rt_select_query(handle, 2) == 4
+        expect rt_rank_query(handle, 4) == 2
+        expect rt_rank_query(handle, 7) == 3
+        rt_rank_select_free(handle)
+        expect rt_select_query(handle, 0) == -1
+
+    it "WidthIndex builds after repeated access on large text":
+        val s = repeat_char("a", 260) + "€😀Z"
+        val idx = WidthIndex.for_text(s)
+        expect idx.char_to_byte(260) == 260
+        expect idx.char_to_byte(261) == 263
+        expect idx.byte_to_char(262) == 261
+        expect idx.char_at(261) == "😀"
+        expect idx.slice(260, 263) == "€😀Z"
+        idx.free()

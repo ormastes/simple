@@ -238,8 +238,7 @@ impl Lowerer {
                             ty: field_ty,
                         });
                     }
-                    if let Some(field_index) =
-                        self.try_resolve_global_field_index_by_name(candidate_struct_name, field)
+                    if let Some(field_index) = self.try_resolve_global_field_index_by_name(candidate_struct_name, field)
                     {
                         return Ok(HirExpr {
                             kind: HirExprKind::FieldAccess {
