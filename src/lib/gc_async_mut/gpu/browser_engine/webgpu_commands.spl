@@ -4,6 +4,12 @@ This is the browser-facing command recording surface. It keeps commands as flat
 records so tests can validate WebGPU sequencing before native submission exists.
 """
 
+use std.gc_async_mut.gpu.browser_engine.webgpu_resources.{
+    WebGPUResourceTable,
+    WEBGPU_BUFFER_USAGE_COPY_SRC, WEBGPU_BUFFER_USAGE_COPY_DST,
+    WEBGPU_TEXTURE_USAGE_COPY_SRC, WEBGPU_TEXTURE_USAGE_COPY_DST,
+    webgpu_find_buffer, webgpu_find_texture
+}
 pub val WEBGPU_COMMAND_BEGIN_RENDER_PASS: text = "begin-render-pass"
 pub val WEBGPU_COMMAND_END_RENDER_PASS: text = "end-render-pass"
 pub val WEBGPU_COMMAND_BEGIN_COMPUTE_PASS: text = "begin-compute-pass"
@@ -328,4 +334,71 @@ pub fn webgpu_validate_queue_write_texture(texture_id: i32, width: i32, height: 
         return "GPUQueue writeTexture size must be positive"
     if data_size <= 0:
         return "GPUQueue writeTexture data size must be positive"
+    ""
+pub fn webgpu_validate_buffer_copy_with_resources(resources: WebGPUResourceTable, source_buffer_id: i32, source_offset: i32, destination_buffer_id: i32, destination_offset: i32, size: i32) -> text:
+    val basic_err = webgpu_validate_buffer_copy(source_buffer_id, source_offset, destination_buffer_id, destination_offset, size)
+    if basic_err != "":
+        return basic_err
+    val source = webgpu_find_buffer(resources, source_buffer_id)
+    if not source.valid:
+        return "GPUCommandEncoder copyBufferToBuffer source buffer does not exist"
+    val destination = webgpu_find_buffer(resources, destination_buffer_id)
+    if not destination.valid:
+        return "GPUCommandEncoder copyBufferToBuffer destination buffer does not exist"
+    if (source.usage & WEBGPU_BUFFER_USAGE_COPY_SRC) == 0:
+        return "GPUCommandEncoder copyBufferToBuffer source buffer missing COPY_SRC usage"
+    if (destination.usage & WEBGPU_BUFFER_USAGE_COPY_DST) == 0:
+        return "GPUCommandEncoder copyBufferToBuffer destination buffer missing COPY_DST usage"
+    if (source_offset as i64) + (size as i64) > source.size:
+        return "GPUCommandEncoder copyBufferToBuffer source range exceeds buffer size"
+    if (destination_offset as i64) + (size as i64) > destination.size:
+        return "GPUCommandEncoder copyBufferToBuffer destination range exceeds buffer size"
+    ""
+
+pub fn webgpu_validate_texture_copy_with_resources(resources: WebGPUResourceTable, source_texture_id: i32, destination_texture_id: i32, width: i32, height: i32, depth_or_layers: i32) -> text:
+    val basic_err = webgpu_validate_texture_copy(source_texture_id, destination_texture_id, width, height, depth_or_layers)
+    if basic_err != "":
+        return basic_err
+    val source = webgpu_find_texture(resources, source_texture_id)
+    if not source.valid:
+        return "GPUCommandEncoder copyTextureToTexture source texture does not exist"
+    val destination = webgpu_find_texture(resources, destination_texture_id)
+    if not destination.valid:
+        return "GPUCommandEncoder copyTextureToTexture destination texture does not exist"
+    if source.format != destination.format:
+        return "GPUCommandEncoder copyTextureToTexture formats must match"
+    if (source.usage & WEBGPU_TEXTURE_USAGE_COPY_SRC) == 0:
+        return "GPUCommandEncoder copyTextureToTexture source texture missing COPY_SRC usage"
+    if (destination.usage & WEBGPU_TEXTURE_USAGE_COPY_DST) == 0:
+        return "GPUCommandEncoder copyTextureToTexture destination texture missing COPY_DST usage"
+    if width > source.width or height > source.height or depth_or_layers > source.depth_or_layers:
+        return "GPUCommandEncoder copyTextureToTexture source range exceeds texture size"
+    if width > destination.width or height > destination.height or depth_or_layers > destination.depth_or_layers:
+        return "GPUCommandEncoder copyTextureToTexture destination range exceeds texture size"
+    ""
+
+pub fn webgpu_validate_queue_write_buffer_with_resources(resources: WebGPUResourceTable, buffer_id: i32, offset: i32, data_size: i32) -> text:
+    val basic_err = webgpu_validate_queue_write_buffer(buffer_id, offset, data_size)
+    if basic_err != "":
+        return basic_err
+    val buffer = webgpu_find_buffer(resources, buffer_id)
+    if not buffer.valid:
+        return "GPUQueue writeBuffer buffer does not exist"
+    if (buffer.usage & WEBGPU_BUFFER_USAGE_COPY_DST) == 0:
+        return "GPUQueue writeBuffer buffer missing COPY_DST usage"
+    if (offset as i64) + (data_size as i64) > buffer.size:
+        return "GPUQueue writeBuffer range exceeds buffer size"
+    ""
+
+pub fn webgpu_validate_queue_write_texture_with_resources(resources: WebGPUResourceTable, texture_id: i32, width: i32, height: i32, depth_or_layers: i32, data_size: i32) -> text:
+    val basic_err = webgpu_validate_queue_write_texture(texture_id, width, height, depth_or_layers, data_size)
+    if basic_err != "":
+        return basic_err
+    val texture = webgpu_find_texture(resources, texture_id)
+    if not texture.valid:
+        return "GPUQueue writeTexture texture does not exist"
+    if (texture.usage & WEBGPU_TEXTURE_USAGE_COPY_DST) == 0:
+        return "GPUQueue writeTexture texture missing COPY_DST usage"
+    if width > texture.width or height > texture.height or depth_or_layers > texture.depth_or_layers:
+        return "GPUQueue writeTexture range exceeds texture size"
     ""

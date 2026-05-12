@@ -7,6 +7,13 @@
 typedef long long spl_i64;
 typedef unsigned long long spl_u64;
 
+__asm__(
+    ".section .text.entry,\"ax\",@progbits\n"
+    ".globl _start\n"
+    "_start:\n"
+    "j spl_start\n"
+);
+
 extern spl_i64 kernel__boot__riscv_noalloc_heap__riscv_noalloc_heap_alloc(spl_i64 size);
 
 void *rt_alloc(spl_i64 size) {
