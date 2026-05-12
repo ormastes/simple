@@ -1,6 +1,6 @@
 # Plan: Production-Level Markdown Editor Wiring
 
-## Status: MOSTLY COMPLETE — see "What's Left" at bottom
+## Status: IMPLEMENTATION COMPLETE — compiled UI smoke remains
 
 ## Context
 
@@ -100,11 +100,11 @@ A markdown parser library also exists at `src/lib/common/markdown/` (1,684 LOC) 
 
 ## Phase 11: End-to-End Tests — DONE
 
-**File:** `test/system/editor_markdown_spec.spl` (extended)
+**Files:** `test/system/editor_markdown_spec.spl` (extended), `test/system/editor_palette_spec.spl`
 
 - [x] 65 structural wiring tests, all passing
 - [x] Fixed 5 pre-existing block kind tests (were grepping wrong file — `block_model.spl` → `adapter.spl`/`parse.spl`)
-- [ ] `test/system/editor_palette_spec.spl` — NOT created (palette tests folded into editor_markdown_spec.spl instead)
+- [x] `test/system/editor_palette_spec.spl` created for dedicated palette service, routing, and Markdown command coverage
 
 ---
 
@@ -137,7 +137,7 @@ A markdown parser library also exists at `src/lib/common/markdown/` (1,684 LOC) 
 | `src/app/editor/gui_shell.spl` | Mirror TUI wiring for GUI mode |
 | `src/lib/editor/40.render/md_renderer.spl` | Fix block.content bug |
 | `test/system/editor_markdown_spec.spl` | Extend with wiring verification tests |
-| `test/system/editor_palette_spec.spl` | **NEW** — palette structure tests |
+| `test/system/editor_palette_spec.spl` | Dedicated palette service, routing, and Markdown command tests |
 
 ## Reusable Existing Functions
 
@@ -166,7 +166,7 @@ A markdown parser library also exists at `src/lib/common/markdown/` (1,684 LOC) 
 6. Status bar shows word count for .md files — **WIRED, needs compiled-mode test**
 7. `:w` saves and runs diagnostics — **WIRED, needs compiled-mode test**
 8. `bin/simple test test/system/editor_markdown_spec.spl` — **65/65 PASS**
-9. ~~`bin/simple test test/system/editor_palette_spec.spl`~~ — palette tests in editor_markdown_spec.spl instead
+9. `bin/simple test test/system/editor_palette_spec.spl` — dedicated palette structure and wiring spec
 
 ---
 
@@ -180,6 +180,4 @@ A markdown parser library also exists at `src/lib/common/markdown/` (1,684 LOC) 
 
 ### Nice-to-have (non-blocking)
 
-3. **Separate palette spec file** — Plan called for `test/system/editor_palette_spec.spl` but palette tests were folded into `editor_markdown_spec.spl`. Could extract if test file grows too large.
-
-4. **Extension host cleanup** — `gui_shell.spl` still calls `extension_host.activate("markdown-language")` and `extension_host.activate("simple-language")`. Plan said to remove the vestigial markdown one, but it's harmless and may be needed if ExtensionHost provides language-specific services.
+3. **Extension host cleanup** — `gui_shell.spl` still calls `extension_host.activate("markdown-language")` and `extension_host.activate("simple-language")`. Keep it unless ExtensionHost ownership changes; the Markdown language service activation matches the editor's IDE-style language infrastructure.

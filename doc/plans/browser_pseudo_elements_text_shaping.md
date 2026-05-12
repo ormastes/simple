@@ -45,4 +45,6 @@ The browser engine's fallback pixel renderer needed CSS pseudo-element and text 
 
 1. `bin/simple test test/web_platform/css/pseudo_text_wpt_spec.spl` — 8/8 pass
 2. `bin/simple test test/web_platform/css/selector_color_subset_spec.spl` — 57/57 pass (no regression)
-3. `bin/simple check` — type-check passes for modified files
+3. `bin/simple check src/lib/gc_async_mut/gpu/browser_engine/html_fallback_renderer.spl --source src` — type-check passes
+4. `bin/simple check test/web_platform/css/pseudo_text_wpt_spec.spl --source src` — type-check passes
+5. `cargo check -p simple-parser` from `src/compiler_rust/` — parser crate check passes
