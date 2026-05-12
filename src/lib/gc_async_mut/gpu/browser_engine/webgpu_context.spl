@@ -684,24 +684,43 @@ pub fn webgpu_validate_wgsl_workgroup_size(source: text) -> text:
     val parts = args.split(",")
     if parts.len() < 1 or parts.len() > 3:
         return "WGSL compute stage must use one to three workgroup_size components"
+    var values: [i32] = []
     var i = 0
     while i < parts.len():
         val part = parts[i].trim()
-        if part.len() == 0 or not webgpu_wgsl_positive_integer(part):
+        val component = webgpu_parse_wgsl_positive_i32(part)
+        if component <= 0:
             return "WGSL compute stage must use positive integer workgroup_size components"
+        values.push(component)
         i = i + 1
-    ""
+    webgpu_validate_wgsl_workgroup_limits(values)
 
-fn webgpu_wgsl_positive_integer(value: text) -> bool:
+fn webgpu_parse_wgsl_positive_i32(value: text) -> i32:
     var result = 0
     var i = 0
     while i < value.len():
         val ch = value.slice(i, i + 1)
         if ch < "0" or ch > "9":
-            return false
-        result = result * 10 + ch.to_i32()
+            return -1
+        result = result * 10 + (ch.parse_i64() ?? 0).to_i32()
         i = i + 1
-    result > 0
+    result
+
+fn webgpu_validate_wgsl_workgroup_limits(values: [i32]) -> text:
+    val limits = GPUDeviceLimits.defaults()
+    val x = values[0]
+    val y = if values.len() > 1: values[1] else: 1
+    val z = if values.len() > 2: values[2] else: 1
+    if x > limits.max_compute_workgroup_size_x:
+        return "WGSL compute workgroup_size x exceeds device limit"
+    if y > limits.max_compute_workgroup_size_y:
+        return "WGSL compute workgroup_size y exceeds device limit"
+    if z > limits.max_compute_workgroup_size_z:
+        return "WGSL compute workgroup_size z exceeds device limit"
+    val invocations = x * y * z
+    if invocations > limits.max_compute_invocations_per_workgroup:
+        return "WGSL compute workgroup_size invocations exceed device limit"
+    ""
 
 pub fn webgpu_detect_wgsl_stage(source: text) -> text:
     if source.contains("@vertex"):
