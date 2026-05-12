@@ -66,12 +66,48 @@ Command:
 
 | Algorithm | C MB/s | Rust MB/s | Simple native MB/s | Checksum parity | Status |
 |-----------|--------|-----------|--------------------|-----------------|--------|
-| XXHash64 | 14131 | 13981 | 151 | PASS | Improved 9.4x from baseline, still below threshold |
-| ChaCha20 | 304 | 325 | 28 | PASS | Improved 4x from baseline, still below threshold |
+| XXHash64 | 14685 | 8243 | 138 | PASS | Improved 8.6x from baseline, still below threshold |
+| ChaCha20 | 320 | 187 | 29 | PASS | Improved 4.1x from baseline, still below threshold |
 
 Notes:
 - `chacha20_xor_word_local` no longer performs four `plaintext.len()` checks per output word. The benchmark input is fixed at 64 KiB, so every block is complete and direct four-byte stores preserve parity.
+- Native compile accepted the helper after renaming `make_zero_data` to `make_empty_output`; the old name passed `check` but failed native codegen with `undefined symbol: make_zero_data`.
 - Remaining native disassembly still shows function-call boundaries around ChaCha block/word output and the runtime array indexing path. The next non-benchmark fix is compiler-side: inline tiny single-block helpers in the active native compiler and lower fixed-size `[u8]` scratch/output paths without repeated dynamic array machinery.
+
+### 2026-05-12 Phase 6C dispatch hygiene follow-up
+
+Commands:
+- `src/compiler_rust/target/debug/simple check src/compiler/60.mir_opt/mir_opt/mod.spl src/compiler/60.mir_opt/mir_opt/inline_part2.spl test/perf/port_algorithms/port_algorithms_simple.spl src/os/crypto/xxhash.spl`
+- `test/perf/port_algorithms/run_port_algorithm_benchmarks.shs`
+- `objdump -Cd build/perf/port_algorithms/port_algorithms_simple | rg "chacha20_block|xxh64|xxhash64"`
+
+| Algorithm | C MB/s | Rust MB/s | Simple native MB/s | Checksum parity | Status |
+|-----------|--------|-----------|--------------------|-----------------|--------|
+| XXHash64 | 14131 | 8415 | 134 | PASS | Still below threshold |
+| ChaCha20 | 321 | 191 | 13 | PASS | Still below threshold |
+
+Notes:
+- `run_named_pass` now treats inline passes as module-only in the single-function dispatcher because function-local dispatch has no callee table. The module optimizer still routes inline passes through `inline_run_on_module`.
+- The targeted `simple check` passed for all four checked files.
+- Disassembly still shows residual `chacha20_block_local`, `_xxh64_*` helpers, and `xxhash64` call boundaries, confirming Phase 6D needs compiler/runtime optimization rather than more benchmark-only cleanup.
+
+### 2026-05-12 Phase 6C XXHash inliner heuristic follow-up
+
+Commands:
+- `src/compiler_rust/target/debug/simple check src/compiler/60.mir_opt/mir_opt/inline_part1.spl src/compiler/60.mir_opt/mir_opt/inline_part2.spl src/compiler/60.mir_opt/mir_opt/mod.spl test/perf/port_algorithms/port_algorithms_simple.spl src/os/crypto/xxhash.spl`
+- `bin/simple test test/unit/compiler/mir_opt/inlining_spec.spl --mode=interpreter --no-cache`
+- `test/perf/port_algorithms/run_port_algorithm_benchmarks.shs`
+- `objdump -Cd build/perf/port_algorithms/port_algorithms_simple | rg "<(_xxh64_|xxhash64|chacha20_block_local)>|call.*(_xxh64_|xxhash64|chacha20_block_local)"`
+
+| Algorithm | C MB/s | Rust MB/s | Simple native MB/s | Checksum parity | Status |
+|-----------|--------|-----------|--------------------|-----------------|--------|
+| XXHash64 | 8115 | 9619 | 159 | PASS | Improved from 134 in prior sample, still below threshold |
+| ChaCha20 | 181 | 226 | 14 | PASS | Still below threshold |
+
+Notes:
+- `InlineCostAnalyzer._is_crypto_primitive` now marks the remaining single-block `_xxh64_*` arithmetic and byte-load helpers as crypto primitive inline candidates.
+- The inlining spec passed 21/21 and the targeted compiler checks passed.
+- The active benchmark binary still shows `_xxh64_*`, `chacha20_block_local`, and `xxhash64` call boundaries, so the remaining blocker is making the active native build consume the widened Simple-side inliner path or lowering these helpers directly in the native/backend path.
 
 ---
 
@@ -258,10 +294,10 @@ These are **runtime infrastructure** externs, not crypto FFI:
 | 5D | Zstd/LZ4 multi-byte copy | DONE |
 | 6A | Cross-language algorithm harness | DONE |
 | 6B | Baseline algorithm benchmarks | DONE |
-| 6C | Evidence-driven compiler optimizer follow-up | PARTIAL: benchmark-local allocation/check overhead reduced; compiler/runtime work remains |
+| 6C | Evidence-driven compiler optimizer follow-up | PARTIAL: benchmark-local allocation/check overhead reduced; XXHash helper inline heuristic widened; active native build still leaves helper call boundaries |
 | 6D | Algorithm parity acceptance gate | WARN: correctness PASS; performance below threshold with concrete remaining compiler/runtime tasks linked |
 
-**Next:** Continue with compiler/runtime throughput work only; benchmark-local avoidable allocation and fixed-size word-output checks have been removed from the ChaCha path.
+**Next:** Complete the remaining compiler/runtime optimization tasks proven by Phase 6C evidence: ensure active native builds consume module-level helper inlining, lower/eliminate bounds checks for indexed byte loops, and lower fixed-size byte buffers to stack/native storage.
 
 ---
 
