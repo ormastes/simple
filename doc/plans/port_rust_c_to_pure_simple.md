@@ -162,6 +162,53 @@ Notes:
 - `checksum_bytes` is unrolled by eight bytes. A 16-byte unroll compiled and passed parity but was slower in the local sample, so the smaller unroll was kept.
 - This is still not Phase 6D acceptance: the gap remains dominated by native array indexing/bounds checks and helper lowering.
 
+### 2026-05-12 Phase 6C fused ChaCha checksum follow-up
+
+Commands:
+- `bin/simple check test/perf/port_algorithms/port_algorithms_simple.spl`
+- `test/perf/port_algorithms/run_port_algorithm_benchmarks.shs`
+
+| Algorithm | C MB/s | Rust MB/s | Simple native MB/s | Checksum parity | Status |
+|-----------|--------|-----------|--------------------|-----------------|--------|
+| XXHash64 | 14324 | 8388 | 162 | PASS | Still below threshold |
+| ChaCha20 | 321 | 195 | 59 | PASS | Improved from 45 MB/s; still below threshold |
+
+Notes:
+- Native subagents confirmed the Rust side is built with `rustc -C opt-level=3 -C target-cpu=native`, while the Simple harness uses `simple compile --native --cpu native --opt-level aggressive`.
+- An explicit `--backend=llvm` benchmark check failed in this local Simple build because the LLVM native backend is unavailable, so this is not an apples-to-apples LLVM comparison yet.
+- `chacha20_encrypt_checksum_local` now fuses checksum accumulation into the output write path, avoiding a second Simple array scan while preserving the same output bytes and checksum parity.
+- The now-unused standalone `checksum_bytes` helper was removed from the benchmark file; checksum work lives only on the write path.
+- ChaCha quarter-round rotations reuse a temporary xor value so the native optimizer sees one xor feeding both shifts.
+- A local 64 KiB XXHash specialization was tested and rejected because it preserved parity but did not beat the imported pure Simple `os.crypto.xxhash.xxhash64` path in local samples.
+- The MDSOC compiler work remains the acceptance path: canonical array index/bounds MIR, bounds-check elimination over hot indexed byte loops, backend fast paths for `[u8]` loads/stores, helper inlining visibility, and LLVM backend availability.
+
+---
+
+### 2026-05-12 Phase 6D typed byte-index lowering follow-up
+
+Commands:
+- `cargo check --manifest-path src/compiler_rust/Cargo.toml -p simple-compiler -p simple-runtime -p simple-common`
+- `cargo build --manifest-path src/compiler_rust/Cargo.toml -p simple-driver`
+- `src/compiler_rust/target/debug/simple check test/perf/port_algorithms/port_algorithms_simple.spl`
+- `src/compiler_rust/target/debug/simple compile test/perf/port_algorithms/port_algorithms_simple.spl --native --cpu native --opt-level aggressive -o build/perf/port_algorithms/port_algorithms_simple_dbg && build/perf/port_algorithms/port_algorithms_simple_dbg`
+- `objdump -Cd build/perf/port_algorithms/port_algorithms_simple_dbg | rg "rt_bytes_u8_at|rt_array_set|rt_index_(get|set)|call.*rt_(bytes_u8_at|array_set|index_)"`
+- `SIMPLE_BIN=bin/simple test/perf/port_algorithms/run_port_algorithm_benchmarks.shs`
+
+Observed release-compiler benchmark sample:
+
+| Algorithm | C MB/s | Rust MB/s | Simple native MB/s | Checksum parity | Status |
+|-----------|--------|-----------|--------------------|-----------------|--------|
+| XXHash64 | 12945 | 10877 | 75 | PASS | Release `bin/simple` does not include this compiler change |
+| ChaCha20 | 235 | 181 | 34 | PASS | Release `bin/simple` does not include this compiler change |
+
+Notes:
+- The active Rust compiler now lowers proven `[u8]` reads to `rt_bytes_u8_at` with an unboxed native index, and `rt_bytes_u8_at` direct-reads the runtime array instead of dispatching through `rt_array_get`.
+- Proven `[u8]` writes now lower to existing `rt_array_set` with a raw index and boxed byte value, skipping the generic `rt_index_set` dispatcher. Non-`[u8]`, string, dict, tuple, and unproven cases keep the generic fallback.
+- Debug native compile/run passed checksum parity for the benchmark (`xxhash64` checksum `8859781897575972822`, `chacha20` checksum `2882969938414545715`). Debug-runtime throughput is not comparable to release samples.
+- Disassembly of the debug native benchmark contains `rt_bytes_u8_at` and `rt_array_set` but no `rt_index_get` or `rt_index_set` symbols/calls, confirming the typed byte-index fast path is used.
+- A new `rt_bytes_u8_set` helper was deferred because the current native link surface did not resolve the newly exported runtime symbol in this path. The conservative write fast path uses the already-linked `rt_array_set`.
+- Spawned debugger analysis found the prior full-inline ChaCha `Illegal instruction` was likely the native backend's missing-return trap path (`ud2`), not an invalid generated arithmetic opcode. Retry full block inlining only after ensuring the function ends with an explicit value expression.
+
 ---
 
 ## Phase 1: Fix Compiler Bugs — DONE
@@ -307,7 +354,7 @@ These are **runtime infrastructure** externs, not crypto FFI:
 ### 6C. Compiler Optimization From Hotspot Evidence — TODO
 - 2026-05-12 follow-up: native disassembly showed the Simple benchmark still calls tiny hot helpers (`_xxh64_*`, `load32`, `quarter`, `push_word`) inside tight loops. Root cause found in the optimizer layer: the module-level inliner existed but `run_pass_on_module` dispatched inline passes through per-function inliners with no callee table, and the single-block inliner copied callee locals without a stable caller-local remap.
 - Source fix started: inline pass dispatch now routes `inline_small_functions`, `inline_functions`, and `inline_aggressive` through module-level inlining; the inliner now remaps callee locals/operands, materializes constant arguments, appends generated locals, and resolves recursive checks against real MIR call operands. This requires a rebuilt self-hosted compiler before benchmark deltas can show in `bin/simple`.
-- 2026-05-12 latest benchmark after fixed-vector ChaCha and checksum cleanup: C `xxhash64=7744 MB/s`, `chacha20=172 MB/s`; Rust `xxhash64=7790 MB/s`, `chacha20=201 MB/s`; Simple `xxhash64=162 MB/s`, `chacha20=45 MB/s`. Checksums still pass. ChaCha output helper calls are reduced from 16 to 4 per block and key/nonce decode is removed from each block; XXHash and ChaCha remain dominated by helper/indexing/native-lowering overhead.
+- 2026-05-12 latest benchmark after fused ChaCha checksum cleanup: C `xxhash64=14324 MB/s`, `chacha20=321 MB/s`; Rust `xxhash64=8388 MB/s`, `chacha20=195 MB/s`; Simple `xxhash64=162 MB/s`, `chacha20=59 MB/s`. Checksums still pass. ChaCha output helper calls are reduced from 16 to 4 per block, key/nonce decode is removed from each block, checksum accumulation is fused into output writes, and rotate expressions reuse the xor temporary. XXHash and ChaCha remain dominated by helper/indexing/native-lowering overhead.
 - 2026-05-12 rejected benchmark-only shortcut: fully inlining all 16 ChaCha output words into the block function caused an `Illegal instruction` in the native binary, and pinning `--backend=llvm` is unavailable in this build.
 - Make bounds checks a first-class MIR operation or consistently lower them to explicit check intrinsics so `bounds_check_elim` can prove and remove real hot-loop checks.
 - Propagate `@always_inline` from parser/HIR into MIR metadata instead of relying only on name/marker heuristics.
