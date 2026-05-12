@@ -112,6 +112,13 @@ pub class WebGLParameterValue:
     int_value: i32
     text_value: text
 
+pub class WebGLUniformValue:
+    program_id: i32
+    location: i32
+    data_type: i32
+    int_value: i32
+    float_values: [f64]
+
 pub class WebGLExtensionInfo:
     name: text
     minimum_version: i32
@@ -151,6 +158,7 @@ pub class WebGLContext:
     current_program_id: i32
     supported_extensions: [text]
     enabled_extensions: [text]
+    uniform_values: [WebGLUniformValue]
     bound_array_buffer: i32
     bound_element_array_buffer: i32
     vertex_attribs: [WebGLVertexAttribState]
@@ -478,6 +486,68 @@ pub class WebGLContext:
         self.render_commands.push(webgl_render_command_use_program(program_id))
         true
 
+    me uniform_1i(location: i32, value: i32) -> bool:
+        if not self.ensure_context_available():
+            return false
+        val info = self.current_program_uniform(location)
+        if location < 0:
+            return true
+        if info.location < 0:
+            return false
+        if info.data_type != WEBGL_SAMPLER_2D:
+            self.last_error = WEBGL_INVALID_OPERATION
+            return false
+        self.set_uniform_value(WebGLUniformValue(program_id: self.current_program_id, location: location, data_type: info.data_type, int_value: value, float_values: []))
+        true
+
+    me uniform_1f(location: i32, value: f64) -> bool:
+        if not self.ensure_context_available():
+            return false
+        val info = self.current_program_uniform(location)
+        if location < 0:
+            return true
+        if info.location < 0:
+            return false
+        if info.data_type != WEBGL_FLOAT:
+            self.last_error = WEBGL_INVALID_OPERATION
+            return false
+        self.set_uniform_value(WebGLUniformValue(program_id: self.current_program_id, location: location, data_type: info.data_type, int_value: 0, float_values: [value]))
+        true
+
+    me uniform_4f(location: i32, x: f64, y: f64, z: f64, w: f64) -> bool:
+        if not self.ensure_context_available():
+            return false
+        val info = self.current_program_uniform(location)
+        if location < 0:
+            return true
+        if info.location < 0:
+            return false
+        if info.data_type != WEBGL_FLOAT_VEC4:
+            self.last_error = WEBGL_INVALID_OPERATION
+            return false
+        self.set_uniform_value(WebGLUniformValue(program_id: self.current_program_id, location: location, data_type: info.data_type, int_value: 0, float_values: [x, y, z, w]))
+        true
+
+    me uniform_matrix4fv(location: i32, transpose: bool, values: [f64]) -> bool:
+        if not self.ensure_context_available():
+            return false
+        if transpose:
+            self.last_error = WEBGL_INVALID_VALUE
+            return false
+        val info = self.current_program_uniform(location)
+        if location < 0:
+            return true
+        if info.location < 0:
+            return false
+        if info.data_type != WEBGL_FLOAT_MAT4:
+            self.last_error = WEBGL_INVALID_OPERATION
+            return false
+        if values.len() != 16:
+            self.last_error = WEBGL_INVALID_VALUE
+            return false
+        self.set_uniform_value(WebGLUniformValue(program_id: self.current_program_id, location: location, data_type: info.data_type, int_value: 0, float_values: webgl_copy_f64(values)))
+        true
+
     me supports_extension(name: text) -> bool:
         val canonical = webgl_canonical_extension_name(name)
         if canonical == "":
@@ -801,6 +871,34 @@ pub class WebGLContext:
             return self.version >= 2 or self.is_extension_enabled("OES_element_index_uint")
         false
 
+    me current_program_uniform(location: i32) -> WebGLActiveInfo:
+        if self.current_program_id < 0:
+            self.last_error = WEBGL_INVALID_OPERATION
+            return webgl_empty_active_info()
+        if location < 0:
+            return webgl_empty_active_info()
+        val program_index = self.find_program_index(self.current_program_id)
+        if program_index < 0 or not self.programs[program_index].linked:
+            self.last_error = WEBGL_INVALID_OPERATION
+            return webgl_empty_active_info()
+        val program = self.programs[program_index]
+        var i = 0
+        while i < program.active_uniforms.len():
+            if program.active_uniforms[i].location == location:
+                return program.active_uniforms[i]
+            i = i + 1
+        self.last_error = WEBGL_INVALID_OPERATION
+        webgl_empty_active_info()
+
+    me set_uniform_value(value: WebGLUniformValue):
+        var i = 0
+        while i < self.uniform_values.len():
+            if self.uniform_values[i].program_id == value.program_id and self.uniform_values[i].location == value.location:
+                self.uniform_values[i] = value
+                return
+            i = i + 1
+        self.uniform_values.push(value)
+
     me bound_texture_index_for_upload(target: i32) -> i32:
         if target != WEBGL_TEXTURE_2D:
             self.last_error = WEBGL_INVALID_ENUM
@@ -863,6 +961,7 @@ pub fn webgl_create_context(version: i32, width: i32, height: i32) -> WebGLConte
         current_program_id: -1,
         supported_extensions: webgl_default_extensions(actual_version),
         enabled_extensions: [],
+        uniform_values: [],
         bound_array_buffer: -1,
         bound_element_array_buffer: -1,
         vertex_attribs: webgl_default_vertex_attribs(),
@@ -1093,6 +1192,14 @@ pub fn webgl_copy_bytes(source: [u8], count: i32) -> [u8]:
         bytes.push(source[i])
         i = i + 1
     bytes
+
+pub fn webgl_copy_f64(source: [f64]) -> [f64]:
+    var values: [f64] = []
+    var i = 0
+    while i < source.len():
+        values.push(source[i])
+        i = i + 1
+    values
 
 pub fn webgl_replace_texture_region(existing: [u8], texture_width: i32, bytes_per_pixel: i32, xoffset: i32, yoffset: i32, width: i32, height: i32, unpack_alignment: i32, pixels: [u8]) -> [u8]:
     var result = existing

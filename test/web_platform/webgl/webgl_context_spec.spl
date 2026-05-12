@@ -6,7 +6,7 @@ use std.gc_async_mut.gpu.browser_engine.webgl_context.{
     WEBGL_COMPILE_STATUS, WEBGL_LINK_STATUS, WEBGL_VALIDATE_STATUS,
     WEBGL_INFO_LOG_LENGTH, WEBGL_ATTACHED_SHADERS, WEBGL_ACTIVE_UNIFORMS,
     WEBGL_ACTIVE_ATTRIBUTES, WEBGL_SHADER_TYPE, WEBGL_FLOAT_VEC4,
-    WEBGL_SAMPLER_2D, WEBGL_FLOAT, WEBGL_ARRAY_BUFFER,
+    WEBGL_FLOAT_MAT4, WEBGL_SAMPLER_2D, WEBGL_FLOAT, WEBGL_ARRAY_BUFFER,
     WEBGL_ELEMENT_ARRAY_BUFFER, WEBGL_STATIC_DRAW, WEBGL_DYNAMIC_DRAW,
     WEBGL_TRIANGLES, WEBGL_LINES, WEBGL_UNSIGNED_SHORT, WEBGL_UNSIGNED_INT,
     WEBGL_TEXTURE_2D, WEBGL_UNPACK_ALIGNMENT,
@@ -28,6 +28,9 @@ fn _vertex_glsl() -> text:
 fn _fragment_glsl() -> text:
     "uniform sampler2D diffuse; uniform vec4 tint; void main() { gl_FragColor = tint; }"
 
+fn _uniform_vertex_glsl() -> text:
+    "attribute vec4 position; uniform mat4 model; uniform float opacity; void main() { gl_Position = model * position; }"
+
 fn _linked_program_context() -> std.gc_async_mut.gpu.browser_engine.webgl_context.WebGLContext:
     var ctx = webgl_create_context(1, 320, 240)
     val vs = ctx.create_shader(WEBGL_VERTEX_SHADER)
@@ -40,6 +43,21 @@ fn _linked_program_context() -> std.gc_async_mut.gpu.browser_engine.webgl_contex
     ctx.attach_shader(program.id, vs.id)
     ctx.attach_shader(program.id, fs.id)
     ctx.link_program(program.id)
+    ctx
+
+fn _uniform_program_context() -> std.gc_async_mut.gpu.browser_engine.webgl_context.WebGLContext:
+    var ctx = webgl_create_context(1, 320, 240)
+    val vs = ctx.create_shader(WEBGL_VERTEX_SHADER)
+    val fs = ctx.create_shader(WEBGL_FRAGMENT_SHADER)
+    ctx.shader_source(vs.id, _uniform_vertex_glsl())
+    ctx.shader_source(fs.id, _fragment_glsl())
+    ctx.compile_shader(vs.id)
+    ctx.compile_shader(fs.id)
+    val program = ctx.create_program()
+    ctx.attach_shader(program.id, vs.id)
+    ctx.attach_shader(program.id, fs.id)
+    ctx.link_program(program.id)
+    ctx.use_program(program.id)
     ctx
 
 describe "Browser WebGL context":
@@ -419,6 +437,48 @@ describe "Browser WebGL context":
             expect(ctx.get_attrib_location(program.id, "missing")).to_equal(-1)
             expect(ctx.get_uniform_location(program.id, "missing")).to_equal(-1)
             expect(ctx.get_error()).to_equal(WEBGL_NO_ERROR)
+
+        it "stores current program uniform values by location":
+            var ctx = _uniform_program_context()
+            val program = ctx.programs[0]
+            val model = ctx.get_uniform_location(program.id, "model")
+            val opacity = ctx.get_uniform_location(program.id, "opacity")
+            val tint = ctx.get_uniform_location(program.id, "tint")
+            val diffuse = ctx.get_uniform_location(program.id, "diffuse")
+            expect(ctx.uniform_1f(opacity, 0.75)).to_equal(true)
+            expect(ctx.uniform_4f(tint, 0.1, 0.2, 0.3, 1.0)).to_equal(true)
+            expect(ctx.uniform_1i(diffuse, 2)).to_equal(true)
+            val matrix: [f64] = [1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 2.0, 3.0, 4.0, 1.0]
+            expect(ctx.uniform_matrix4fv(model, false, matrix)).to_equal(true)
+            expect(ctx.uniform_values.len()).to_equal(4)
+            expect(ctx.uniform_values[0].data_type).to_equal(WEBGL_FLOAT)
+            expect(ctx.uniform_values[0].float_values[0]).to_equal(0.75)
+            expect(ctx.uniform_values[2].data_type).to_equal(WEBGL_SAMPLER_2D)
+            expect(ctx.uniform_values[2].int_value).to_equal(2)
+            expect(ctx.uniform_values[3].data_type).to_equal(WEBGL_FLOAT_MAT4)
+            expect(ctx.uniform_values[3].float_values[12]).to_equal(2.0)
+            expect(ctx.uniform_4f(tint, 0.9, 0.8, 0.7, 1.0)).to_equal(true)
+            expect(ctx.uniform_values.len()).to_equal(4)
+            expect(ctx.uniform_values[1].float_values[0]).to_equal(0.9)
+            expect(ctx.get_error()).to_equal(WEBGL_NO_ERROR)
+
+        it "validates uniform setter type and matrix arguments":
+            var ctx = _uniform_program_context()
+            val program = ctx.programs[0]
+            val model = ctx.get_uniform_location(program.id, "model")
+            val opacity = ctx.get_uniform_location(program.id, "opacity")
+            val tint = ctx.get_uniform_location(program.id, "tint")
+            expect(ctx.uniform_1f(-1, 1.0)).to_equal(true)
+            expect(ctx.uniform_1i(opacity, 1)).to_equal(false)
+            expect(ctx.get_error()).to_equal(WEBGL_INVALID_OPERATION)
+            expect(ctx.uniform_4f(opacity, 1.0, 1.0, 1.0, 1.0)).to_equal(false)
+            expect(ctx.get_error()).to_equal(WEBGL_INVALID_OPERATION)
+            expect(ctx.uniform_matrix4fv(model, true, [])).to_equal(false)
+            expect(ctx.get_error()).to_equal(WEBGL_INVALID_VALUE)
+            expect(ctx.uniform_matrix4fv(model, false, [1.0])).to_equal(false)
+            expect(ctx.get_error()).to_equal(WEBGL_INVALID_VALUE)
+            expect(ctx.uniform_matrix4fv(tint, false, [1.0])).to_equal(false)
+            expect(ctx.get_error()).to_equal(WEBGL_INVALID_OPERATION)
 
         it "validates reflection query errors":
             var ctx = webgl_create_context(1, 320, 240)
