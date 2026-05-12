@@ -45,7 +45,7 @@ use std.gc_async_mut.gpu.browser_engine.layout_float.{FloatBox, FloatContext, Fl
     float_available_width_at, float_left_offset_at, float_clear_y, float_next_clear_y,
     float_find_position, float_place, float_context_height, float_is_bfc_root}
 use std.gc_async_mut.gpu.browser_engine.layout_inline.{_collect_text, _split_words,
-    _parse_inline_text_align}
+    _parse_inline_text_align, _parse_inline_word_break, _parse_inline_overflow_wrap}
 use std.gc_async_mut.gpu.browser_engine.layout_table.{_find_table_node, _collect_table_rows,
     _collect_cells, _get_colspan, _count_logical_columns, _compute_col_widths}
 # extern fn serial_println(msg: text)  # disabled for native builds
@@ -533,6 +533,9 @@ pub fn layout_inline(node: BeDomNode, ctx: LayoutContext) -> LayoutBox:
     val full_text = _collect_text(eff_node)
     # Get text-align from effective node (delegated to layout_inline.spl)
     val align = _parse_inline_text_align(eff_node)
+    val word_break = _parse_inline_word_break(eff_node)
+    val overflow_wrap = _parse_inline_overflow_wrap(eff_node)
+    val allow_break_word = word_break == "break-all" or overflow_wrap == "break-word" or overflow_wrap == "anywhere"
     # Split into words (delegated to layout_inline.spl)
     val words = _split_words(full_text)
     var lines: [LineBox] = []
@@ -553,6 +556,41 @@ pub fn layout_inline(node: BeDomNode, ctx: LayoutContext) -> LayoutBox:
             val word = words[wi]
             wi = wi + 1
             val word_w = word.len() * char_w
+            if allow_break_word and available_w > 0 and word_w > available_w:
+                if line_frags.len() > 0:
+                    val lb0 = _build_line_box(line_frags, cur_y, line_w, line_h, align, available_w)
+                    lines.push(lb0)
+                    line_frags = []
+                    cur_x = 0
+                    cur_y = cur_y + line_h
+                    line_w = 0
+                val chars_per_line = available_w / char_w
+                val chunk_len = if chars_per_line > 0: chars_per_line else: 1
+                var pos = 0
+                while pos < word.len():
+                    var end = pos + chunk_len
+                    if end > word.len():
+                        end = word.len()
+                    val chunk = word.slice(pos, end)
+                    val chunk_w = chunk.len() * char_w
+                    val frag = InlineFragment(
+                        x: 0, y: cur_y,
+                        width: chunk_w, height: line_h,
+                        baseline_offset: 0,
+                        text_run: chunk
+                    )
+                    line_frags.push(frag)
+                    cur_x = chunk_w
+                    line_w = chunk_w
+                    pos = end
+                    if pos < word.len():
+                        val lb_chunk = _build_line_box(line_frags, cur_y, line_w, line_h, align, available_w)
+                        lines.push(lb_chunk)
+                        line_frags = []
+                        cur_x = 0
+                        cur_y = cur_y + line_h
+                        line_w = 0
+                continue
             # Check if word fits on current line (add space if not first word)
             var needed = word_w
             if line_frags.len() > 0:
