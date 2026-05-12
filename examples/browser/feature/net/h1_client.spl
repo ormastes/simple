@@ -74,8 +74,8 @@ class MockResponseRegistry:
 var _global_mock_registry: MockResponseRegistry? = nil
 
 fn get_mock_registry() -> MockResponseRegistry:
-    if _global_mock_registry.?:
-        return _global_mock_registry.unwrap()
+    if val registry = _global_mock_registry:
+        return registry
     var reg = MockResponseRegistry.create()
     _global_mock_registry = reg
     return reg
@@ -139,24 +139,12 @@ class H1Client:
 
         self.logger.info("h1: {method_to_text(req.method)} {req.url.to_text()}")
 
-        # Step 1: Get or create a connection (connection pooling)
-        var conn = self.get_connection(host, port, is_tls)?
-
-        # Step 2: TLS handshake if HTTPS
-        if is_tls and conn.tls_conn.? == false:
-            val tls_conn = self.tls.handshake(host, port)?
-            conn.tls_conn = tls_conn
-            self.logger.debug("h1: TLS established for {host}:{port}")
-
-        # Step 3: Build request bytes
-        val request_bytes = build_request_bytes(req)
-        self.logger.trace("h1: sending request:\n{request_bytes}")
-
-        # Step 4: Check mock registry for a canned response
+        # Step 1: Check mock registry before DNS/TLS/TCP so tests and embedded
+        # browser fixtures do not require live network access.
         val mock_reg = get_mock_registry()
         val url_text = req.url.to_text()
-        if mock_reg.size() > 0 and mock_reg.lookup(url_text).?:
-            val entry = mock_reg.lookup(url_text).unwrap()
+        val mock_entry = mock_reg.lookup(url_text)
+        if val entry = mock_entry:
             self.logger.debug("h1: mock response for {url_text} -> {entry.status}")
             var mock_headers: [Pair<text, text>] = []
             for mh in entry.headers:
@@ -174,6 +162,19 @@ class H1Client:
                 url: req.url,
                 redirected: false
             ))
+
+        # Step 2: Get or create a connection (connection pooling)
+        var conn = self.get_connection(host, port, is_tls)?
+
+        # Step 3: TLS handshake if HTTPS
+        if is_tls and conn.tls_conn.? == false:
+            val tls_conn = self.tls.handshake(host, port)?
+            conn.tls_conn = tls_conn
+            self.logger.debug("h1: TLS established for {host}:{port}")
+
+        # Step 4: Build request bytes
+        val request_bytes = build_request_bytes(req)
+        self.logger.trace("h1: sending request:\n{request_bytes}")
 
         # Step 5: No mock — use real transport.
         if is_tls:

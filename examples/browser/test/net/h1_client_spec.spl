@@ -11,7 +11,11 @@ use std.spec
 use std.js.types.pair.{Pair}
 use examples.browser.entity.net.url_types.{Url}
 use examples.browser.entity.net.request_types.{FetchRequest, HttpMethod, RequestCredentials, RequestMode}
-use examples.browser.feature.net.h1_client.{build_request_bytes, parse_http_response, find_header}
+use examples.browser.feature.net.h1_client.{H1Client, MockResponseRegistry, set_mock_registry, build_request_bytes, parse_http_response, find_header}
+use examples.browser.feature.net.dns.{DnsResolver}
+use examples.browser.feature.net.tls.{TlsManager}
+use examples.browser.entity.net.tls_types.{TlsConfig}
+use examples.browser.shared.logging.{Logger}
 
 fn make_url() -> Url:
     Url.create("http", "example.com", 80, "/index.html")
@@ -27,6 +31,27 @@ fn make_get(headers: [Pair<text, text>]) -> FetchRequest:
     )
 
 describe "H1Client transport helpers":
+    it "returns mock responses before opening network transport":
+        val logger = Logger(name: "h1-client-test")
+        var registry = MockResponseRegistry.create()
+        registry.register("https://offline.test/page", 200, "<html>offline</html>")
+        set_mock_registry(registry)
+        var client = H1Client.new(logger, DnsResolver.new(logger, 60), TlsManager.new(logger, TlsConfig.default()))
+        val req = FetchRequest(
+            url: Url.parse("https://offline.test/page"),
+            method: HttpMethod.Get,
+            headers: [],
+            body: "",
+            mode: RequestMode.Navigate,
+            credentials: RequestCredentials.Include
+        )
+        match client.request(req):
+            Ok(response):
+                expect(response.status).to_equal(200)
+                expect(response.body).to_equal("<html>offline</html>")
+            Err(e):
+                expect(e.message).to_equal("mock response should not use network")
+
     it "defaults real HTTP requests to connection close for EOF-delimited reads":
         val req = make_get([])
         val raw = build_request_bytes(req)

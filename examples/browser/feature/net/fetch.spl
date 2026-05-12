@@ -18,7 +18,7 @@ use examples.browser.feature.net.tls {TlsManager, TlsConnection}
 use examples.browser.entity.net.tls_types {TlsConfig, TlsVersion}
 
 use examples.browser.feature.net.cache.{HttpCache}
-use examples.browser.feature.net.cookie_store.{CookieStore}
+use examples.browser.feature.net.cookie_store.{CookieStore, parse_set_cookie}
 
 # Default maximum number of HTTP redirects to follow before aborting.
 val DEFAULT_MAX_REDIRECTS = 20
@@ -41,8 +41,8 @@ class FetchEngine:
     static fn new(logger: Logger) -> FetchEngine:
         FetchEngine(
             dns: DnsResolver.new(logger, DEFAULT_DNS_TTL),
-            cache: HttpCache.create(),
-            cookie_store: CookieStore.create(),
+            cache: HttpCache.new(logger, 256),
+            cookie_store: CookieStore.new(logger),
             cors: CorsChecker.new(logger),
             logger: logger,
             max_redirects: DEFAULT_MAX_REDIRECTS
@@ -63,10 +63,20 @@ class FetchEngine:
                 pass_do_nothing
 
         # Step 2: Check the HTTP cache
-        val cached = self.cache.lookup(request)
-        if val response = cached:
-            self.logger.debug("fetch: cache hit for {request.url.to_text()}")
-            return Ok(response)
+        val cached = self.cache.lookup(request.url.to_text())
+        match cached:
+            Some(entry):
+                self.logger.debug("fetch: cache hit for {request.url.to_text()}")
+                return Ok(FetchResponse(
+                    status: 200,
+                    status_text: "OK",
+                    headers: entry.headers,
+                    body: entry.body,
+                    url: request.url,
+                    redirected: false
+                ))
+            nil:
+                pass_do_nothing
 
         # Step 3: Execute the request with redirect support
         self.fetch_with_redirect(request, 0)
@@ -86,7 +96,7 @@ class FetchEngine:
         if addresses.is_empty():
             return Err(network_error("DNS resolution returned no addresses for {url.host}"))
 
-        val target_addr = addresses.get(0).unwrap_or("127.0.0.1")
+        val target_addr = addresses.get(0)
         self.logger.debug("fetch: resolved {url.host} -> {target_addr}")
 
         # Step 3b: Attach cookies to the request
@@ -103,7 +113,7 @@ class FetchEngine:
                 pass_do_nothing
 
         # Step 3e: Store cookies from Set-Cookie response headers
-        self.cookie_store.store_from_headers(request.url, response.headers)
+        self.store_response_cookies(request.url, response.headers)
 
         # Step 3f: Handle redirects (301, 302, 303, 307, 308)
         if should_redirect(response.status):
@@ -119,7 +129,7 @@ class FetchEngine:
         # Step 3g: Cache the response if eligible
         if is_cacheable(response):
             self.logger.debug("fetch: caching response for {request.url.to_text()}")
-            self.cache.store(request, response)
+            self.cache.store(request.url.to_text(), response.body, response.headers)?
 
         # Mark the response as redirected if we followed any redirects
         if redirect_count > 0:
@@ -147,7 +157,7 @@ class FetchEngine:
 
         # Resolve DNS for preflight (same host)
         val addresses = self.dns.resolve(request.url.host)?
-        val target_addr = addresses.get(0).unwrap_or("127.0.0.1")
+        val target_addr = addresses.get(0)
 
         # Send the OPTIONS preflight
         val preflight_response = self.execute_http(preflight_req, target_addr)?
@@ -173,14 +183,14 @@ class FetchEngine:
         if not should_send:
             return request
 
-        val cookies = self.cookie_store.get_cookies_for(request.url)
+        val cookies = self.cookie_store.get_cookies(request.url)
         if cookies.is_empty():
             return request
 
         # Build Cookie header value: name=value; name2=value2
         var parts = [text]()
         for cookie in cookies:
-            parts.push("{cookie.first}={cookie.second}")
+            parts.push("{cookie.name}={cookie.value}")
         val cookie_header = parts.join("; ")
 
         # Append Cookie header to the request
@@ -197,6 +207,15 @@ class FetchEngine:
             mode: request.mode,
             credentials: request.credentials
         )
+
+    me store_response_cookies(url: Url, headers: [Pair<text, text>]):
+        for header in headers:
+            if header.first.lower() == "set-cookie":
+                match parse_set_cookie(header.second, url):
+                    Ok(cookie):
+                        val _ = self.cookie_store.set_cookie(cookie)
+                    Err(e):
+                        self.logger.warn("fetch: ignored invalid Set-Cookie header: {e.message}")
 
     # Perform the actual HTTP request over the network.
     # Routes through the H1 client which supports mock registry and plain HTTP TCP.
