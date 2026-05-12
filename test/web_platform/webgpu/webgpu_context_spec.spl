@@ -6,9 +6,7 @@ use std.gc_async_mut.gpu.browser_engine.webgpu_types.{
 }
 use std.gc_async_mut.gpu.browser_engine.webgpu_context.{
     webgpu_create_context, webgpu_is_available, webgpu_preferred_canvas_format,
-    webgpu_validate_wgsl, webgpu_create_buffer, webgpu_create_texture,
-    webgpu_create_sampler, webgpu_create_bind_group_layout,
-    webgpu_create_bind_group, webgpu_queue_write_texture
+    webgpu_validate_wgsl
 }
 use std.gc_async_mut.gpu.browser_engine.webgpu_software_executor.{
     webgpu_software_execute_queue
@@ -115,19 +113,21 @@ describe "Browser WebGPU context":
             var ctx = webgpu_create_context(true)
             expect(ctx.request_adapter(GPURequestAdapterOptions.default_options())).to_equal(true)
             expect(ctx.request_device(GPUDeviceDescriptor.create())).to_equal(true)
-            val buffer = webgpu_create_buffer(ctx, "uniforms", 128, WEBGPU_BUFFER_USAGE_COPY_DST | WEBGPU_BUFFER_USAGE_UNIFORM)
-            val texture = webgpu_create_texture(ctx, "albedo", 32, 32, 1, GPU_TEXTURE_FORMAT_RGBA8_UNORM, WEBGPU_TEXTURE_USAGE_COPY_DST | WEBGPU_TEXTURE_USAGE_TEXTURE_BINDING)
-            val sampler = webgpu_create_sampler(ctx, "nearest", "clamp-to-edge", "repeat", "nearest", "linear")
-            val layout = webgpu_create_bind_group_layout(ctx, "material", [
+            var resources = ctx.resources
+            val buffer = resources.create_buffer("uniforms", 128, WEBGPU_BUFFER_USAGE_COPY_DST | WEBGPU_BUFFER_USAGE_UNIFORM)
+            val texture = resources.create_texture("albedo", 32, 32, 1, GPU_TEXTURE_FORMAT_RGBA8_UNORM, WEBGPU_TEXTURE_USAGE_COPY_DST | WEBGPU_TEXTURE_USAGE_TEXTURE_BINDING)
+            val sampler = resources.create_sampler("nearest", "clamp-to-edge", "repeat", "nearest", "linear")
+            val layout = resources.create_bind_group_layout("material", [
                 GPUBindGroupLayoutEntry.buffer(0, WEBGPU_SHADER_STAGE_VERTEX),
                 GPUBindGroupLayoutEntry.texture(1, WEBGPU_SHADER_STAGE_FRAGMENT),
                 GPUBindGroupLayoutEntry.sampler(2, WEBGPU_SHADER_STAGE_FRAGMENT)
             ])
-            val bind_group = webgpu_create_bind_group(ctx, "material-0", layout.id, [
+            val bind_group = resources.create_bind_group("material-0", layout.id, [
                 GPUBindGroupEntry.buffer(0, buffer.id),
                 GPUBindGroupEntry.texture(1, texture.id),
                 GPUBindGroupEntry.sampler(2, sampler.id)
             ])
+            ctx.resources = resources
             expect(buffer.valid).to_equal(true)
             expect(texture.valid).to_equal(true)
             expect(sampler.valid).to_equal(true)
@@ -137,9 +137,8 @@ describe "Browser WebGPU context":
 
         it "rejects resource creation before device readiness":
             var ctx = webgpu_create_context(true)
-            val buffer = webgpu_create_buffer(ctx, "too-early", 16, WEBGPU_BUFFER_USAGE_COPY_DST)
-            expect(buffer.valid).to_equal(false)
-            expect(buffer.error).to_equal("device is not ready")
+            expect(ctx.queue_write_buffer(1, 0, 8)).to_equal(false)
+            expect(ctx.last_error).to_equal("device is not ready")
 
     describe "device command and status surface":
         it "creates command encoder and submits through the context queue":
@@ -159,17 +158,23 @@ describe "Browser WebGPU context":
             var ctx = webgpu_create_context(true)
             expect(ctx.request_adapter(GPURequestAdapterOptions.default_options())).to_equal(true)
             expect(ctx.request_device(GPUDeviceDescriptor.create())).to_equal(true)
-            val buffer = webgpu_create_buffer(ctx, "upload", 64, WEBGPU_BUFFER_USAGE_COPY_DST)
-            val texture = webgpu_create_texture(ctx, "upload-texture", 4, 4, 1, GPU_TEXTURE_FORMAT_RGBA8_UNORM, WEBGPU_TEXTURE_USAGE_COPY_DST)
+            var resources = ctx.resources
+            val buffer = resources.create_buffer("upload", 64, WEBGPU_BUFFER_USAGE_COPY_DST)
+            val texture = resources.create_texture("upload-texture", 4, 4, 1, GPU_TEXTURE_FORMAT_RGBA8_UNORM, WEBGPU_TEXTURE_USAGE_COPY_DST)
+            ctx.resources = resources
             expect(ctx.queue_write_buffer(buffer.id, 0, 32)).to_equal(true)
-            expect(webgpu_queue_write_texture(ctx, texture.id, 4, 4, 1, 64)).to_equal(true)
+            var queue = ctx.queue
+            expect(queue.write_texture(texture.id, 4, 4, 1, 64)).to_equal(true)
+            ctx.queue = queue
             expect(ctx.queue.write_count()).to_equal(2)
 
         it "executes context-submitted compute commands with uploaded buffer state":
             var ctx = webgpu_create_context(true)
             expect(ctx.request_adapter(GPURequestAdapterOptions.default_options())).to_equal(true)
             expect(ctx.request_device(GPUDeviceDescriptor.create())).to_equal(true)
-            val buffer = webgpu_create_buffer(ctx, "storage", 64, WEBGPU_BUFFER_USAGE_COPY_DST)
+            var resources = ctx.resources
+            val buffer = resources.create_buffer("storage", 64, WEBGPU_BUFFER_USAGE_COPY_DST)
+            ctx.resources = resources
             val cs = ctx.create_shader_module("cs", _compute_wgsl())
             val cp = ctx.create_compute_pipeline(cs)
             expect(ctx.queue_write_buffer(buffer.id, 0, 32)).to_equal(true)
@@ -194,8 +199,12 @@ describe "Browser WebGPU context":
             var ctx = webgpu_create_context(true)
             expect(ctx.request_adapter(GPURequestAdapterOptions.default_options())).to_equal(true)
             expect(ctx.request_device(GPUDeviceDescriptor.create())).to_equal(true)
-            val texture = webgpu_create_texture(ctx, "upload-texture", 4, 4, 1, GPU_TEXTURE_FORMAT_RGBA8_UNORM, WEBGPU_TEXTURE_USAGE_COPY_DST)
-            expect(webgpu_queue_write_texture(ctx, texture.id, 4, 4, 1, 64)).to_equal(true)
+            var resources = ctx.resources
+            val texture = resources.create_texture("upload-texture", 4, 4, 1, GPU_TEXTURE_FORMAT_RGBA8_UNORM, WEBGPU_TEXTURE_USAGE_COPY_DST)
+            ctx.resources = resources
+            var queue = ctx.queue
+            expect(queue.write_texture(texture.id, 4, 4, 1, 64)).to_equal(true)
+            ctx.queue = queue
             expect(ctx.queue.write_count()).to_equal(1)
             val result = webgpu_software_execute_queue(ctx.queue)
             expect(result.valid).to_equal(true)
@@ -208,7 +217,9 @@ describe "Browser WebGPU context":
             var ctx = webgpu_create_context(true)
             expect(ctx.request_adapter(GPURequestAdapterOptions.default_options())).to_equal(true)
             expect(ctx.request_device(GPUDeviceDescriptor.create())).to_equal(true)
-            val buffer = webgpu_create_buffer(ctx, "uniform", 16, WEBGPU_BUFFER_USAGE_UNIFORM)
+            var resources = ctx.resources
+            val buffer = resources.create_buffer("uniform", 16, WEBGPU_BUFFER_USAGE_UNIFORM)
+            ctx.resources = resources
             expect(ctx.queue_write_buffer(buffer.id, 0, 8)).to_equal(false)
             expect(ctx.last_error).to_equal("GPUQueue writeBuffer buffer missing COPY_DST usage")
             expect(ctx.queue_write_buffer(99, 0, 8)).to_equal(false)
