@@ -566,8 +566,31 @@ void rt_mmio_write_u64(spl_i64 addr, spl_i64 value) {
     *(volatile spl_u64 *)(spl_u64)addr = (spl_u64)value;
 }
 
+static void uart_put_byte(spl_u8 byte) {
+    *(volatile spl_u8 *)0x10000000ULL = byte;
+}
+
+static void uart_write_bytes(const char *data, spl_u64 len) {
+    if (!data) {
+        return;
+    }
+    for (spl_u64 i = 0; i < len; i = i + 1) {
+        uart_put_byte((spl_u8)data[i]);
+    }
+}
+
 void log_raw_println(spl_i64 msg) {
-    (void)msg;
+    RtString *text = rt_as_string(msg);
+    spl_i64 rendered;
+    if (!text) {
+        rendered = rt_to_string(msg);
+        text = rt_as_string(rendered);
+    }
+    if (text) {
+        uart_write_bytes(text->data, text->len);
+    }
+    uart_put_byte(13);
+    uart_put_byte(10);
 }
 
 spl_i64 vmm_map_page(spl_i64 virt, spl_i64 phys, spl_i64 flags) {

@@ -6,7 +6,7 @@
 # Called from boot_main before os_main / init_riscv_services.
 
 use os.kernel.memory.pmm.{pmm_init_identity_range}
-use os.kernel.memory.heap.{heap_init}
+use os.kernel.memory.heap.{heap_init_identity}
 use os.kernel.types.memory_types.{VirtAddr}
 use os.kernel.log.klog_api.{log_raw_println}
 
@@ -16,15 +16,16 @@ use os.kernel.log.klog_api.{log_raw_println}
 
 # RAM starts at 0x80000000, 128MB total
 val RISCV_RAM_BASE: u64 = 0x80000000
-val RISCV_RAM_SIZE: u64 = 128 * 1024 * 1024   # 128 MiB
+val RISCV_RAM_SIZE: u64 = 134217728   # 128 MiB
 
-# Kernel occupies the first 2MB of RAM (conservative estimate)
+# OpenSBI occupies the low RAM prefix and jumps to the kernel at 0x80200000.
+# Reserve through 0x80400000 so PMM metadata cannot overwrite the linked image.
 val RISCV_KERNEL_START: u64 = 0x80000000
-val RISCV_KERNEL_END: u64   = 0x80200000
+val RISCV_KERNEL_END: u64   = 0x80400000
 
 # Heap carved from upper RAM: last 16MB of the 128MB region
-val RISCV_HEAP_SIZE: u64  = 16 * 1024 * 1024   # 16 MiB
-val RISCV_HEAP_START: u64 = RISCV_RAM_BASE + RISCV_RAM_SIZE - RISCV_HEAP_SIZE
+val RISCV_HEAP_SIZE: u64  = 16777216   # 16 MiB
+val RISCV_HEAP_START: u64 = 0x87000000
 
 # ============================================================================
 # Public API
@@ -43,11 +44,9 @@ fn riscv_boot_mem_init() -> bool:
     log_raw_println("[riscv-mem] Kernel: 0x{RISCV_KERNEL_START} - 0x{RISCV_KERNEL_END}")
     log_raw_println("[riscv-mem] Heap: 0x{RISCV_HEAP_START} size={RISCV_HEAP_SIZE / 1024}KB")
 
-    # Step 1: Initialize PMM with identity-mapped memory bounds
-    # TODO(B2): pmm_init_identity_range marks pages 256..ram_base/4096 as free,
-    # which includes MMIO space below 0x80000000 (UART, PLIC, CLINT).
-    # Safe while only the heap bump allocator is used, but pmm_alloc_page
-    # could return MMIO pages. Fix by reserving MMIO ranges in PMM.
+    # Step 1: Initialize PMM with identity-mapped memory bounds.
+    # The scalar PMM frees pages from RISCV_KERNEL_START upward so QEMU MMIO
+    # space below 0x80000000 is not exposed to pmm_alloc_page.
     val pmm_ok = pmm_init_identity_range(
         RISCV_RAM_BASE + RISCV_RAM_SIZE,
         RISCV_KERNEL_START,
@@ -61,7 +60,7 @@ fn riscv_boot_mem_init() -> bool:
     # Step 2: Initialize heap from upper RAM
     # Identity mapped: virtual addr == physical addr (SATP=Bare)
     val heap_start = VirtAddr(addr: RISCV_HEAP_START)
-    heap_init(heap_start, RISCV_HEAP_SIZE)
+    heap_init_identity(heap_start, RISCV_HEAP_SIZE)
     log_raw_println("[riscv-mem] Heap initialized")
 
     log_raw_println("[riscv-mem] Memory initialization complete")
