@@ -13,6 +13,21 @@ pub val WEBGL_CONTEXT_LOST_WEBGL: i32 = 37442
 
 pub val WEBGL_VERTEX_SHADER: i32 = 35633
 pub val WEBGL_FRAGMENT_SHADER: i32 = 35632
+pub val WEBGL_DELETE_STATUS: i32 = 35712
+pub val WEBGL_COMPILE_STATUS: i32 = 35713
+pub val WEBGL_LINK_STATUS: i32 = 35714
+pub val WEBGL_VALIDATE_STATUS: i32 = 35715
+pub val WEBGL_INFO_LOG_LENGTH: i32 = 35716
+pub val WEBGL_ATTACHED_SHADERS: i32 = 35717
+pub val WEBGL_ACTIVE_UNIFORMS: i32 = 35718
+pub val WEBGL_ACTIVE_ATTRIBUTES: i32 = 35721
+pub val WEBGL_SHADER_TYPE: i32 = 35663
+pub val WEBGL_FLOAT: i32 = 5126
+pub val WEBGL_FLOAT_VEC2: i32 = 35664
+pub val WEBGL_FLOAT_VEC3: i32 = 35665
+pub val WEBGL_FLOAT_VEC4: i32 = 35666
+pub val WEBGL_FLOAT_MAT4: i32 = 35676
+pub val WEBGL_SAMPLER_2D: i32 = 35678
 
 pub class WebGLBufferHandle:
     id: i32
@@ -32,6 +47,18 @@ pub class WebGLShaderHandle:
     valid: bool
     info_log: text
 
+pub class WebGLActiveInfo:
+    name: text
+    size: i32
+    data_type: i32
+    location: i32
+
+pub class WebGLParameterValue:
+    value_kind: text
+    bool_value: bool
+    int_value: i32
+    text_value: text
+
 pub class WebGLProgramHandle:
     id: i32
     vertex_shader_id: i32
@@ -39,6 +66,9 @@ pub class WebGLProgramHandle:
     linked: bool
     valid: bool
     info_log: text
+    active_attribs: [WebGLActiveInfo]
+    active_uniforms: [WebGLActiveInfo]
+    validate_status: bool
 
 pub class WebGLContext:
     version: i32
@@ -141,8 +171,8 @@ pub class WebGLContext:
 
     me create_program() -> WebGLProgramHandle:
         if not self.ensure_context_available():
-            return WebGLProgramHandle(id: -1, vertex_shader_id: -1, fragment_shader_id: -1, linked: false, valid: false, info_log: "context lost")
-        val handle = WebGLProgramHandle(id: self.next_program_id, vertex_shader_id: -1, fragment_shader_id: -1, linked: false, valid: true, info_log: "")
+            return WebGLProgramHandle(id: -1, vertex_shader_id: -1, fragment_shader_id: -1, linked: false, valid: false, info_log: "context lost", active_attribs: [], active_uniforms: [], validate_status: false)
+        val handle = WebGLProgramHandle(id: self.next_program_id, vertex_shader_id: -1, fragment_shader_id: -1, linked: false, valid: true, info_log: "", active_attribs: [], active_uniforms: [], validate_status: false)
         self.next_program_id = self.next_program_id + 1
         self.programs.push(handle)
         handle
@@ -166,23 +196,127 @@ pub class WebGLContext:
 
     me link_program(program_id: i32) -> WebGLProgramHandle:
         if not self.ensure_context_available():
-            return WebGLProgramHandle(id: -1, vertex_shader_id: -1, fragment_shader_id: -1, linked: false, valid: false, info_log: "context lost")
+            return WebGLProgramHandle(id: -1, vertex_shader_id: -1, fragment_shader_id: -1, linked: false, valid: false, info_log: "context lost", active_attribs: [], active_uniforms: [], validate_status: false)
         val program_index = self.find_program_index(program_id)
         if program_index < 0:
             self.last_error = WEBGL_INVALID_VALUE
-            return WebGLProgramHandle(id: -1, vertex_shader_id: -1, fragment_shader_id: -1, linked: false, valid: false, info_log: "program not found")
+            return WebGLProgramHandle(id: -1, vertex_shader_id: -1, fragment_shader_id: -1, linked: false, valid: false, info_log: "program not found", active_attribs: [], active_uniforms: [], validate_status: false)
         var program = self.programs[program_index]
         val vertex_ok = self.shader_compiled(program.vertex_shader_id, WEBGL_VERTEX_SHADER)
         val fragment_ok = self.shader_compiled(program.fragment_shader_id, WEBGL_FRAGMENT_SHADER)
         if not vertex_ok or not fragment_ok:
             program.linked = false
             program.info_log = "compiled vertex and fragment shaders required"
+            program.active_attribs = []
+            program.active_uniforms = []
+            program.validate_status = false
             self.last_error = WEBGL_INVALID_OPERATION
         else:
             program.linked = true
             program.info_log = ""
+            program.active_attribs = webgl_collect_active_attribs(self.shader_source_text(program.vertex_shader_id))
+            program.active_uniforms = webgl_collect_active_uniforms(self.shader_source_text(program.vertex_shader_id), self.shader_source_text(program.fragment_shader_id))
+            program.validate_status = true
         self.programs[program_index] = program
         program
+
+    me get_shader_parameter(shader_id: i32, pname: i32) -> WebGLParameterValue:
+        if not self.ensure_context_available():
+            return webgl_parameter_bool(false)
+        val shader_index = self.find_shader_index(shader_id)
+        if shader_index < 0:
+            self.last_error = WEBGL_INVALID_VALUE
+            return webgl_parameter_bool(false)
+        val shader = self.shaders[shader_index]
+        if pname == WEBGL_COMPILE_STATUS:
+            return webgl_parameter_bool(shader.compiled)
+        if pname == WEBGL_DELETE_STATUS:
+            return webgl_parameter_bool(not shader.valid)
+        if pname == WEBGL_SHADER_TYPE:
+            return webgl_parameter_int(shader.shader_type)
+        if pname == WEBGL_INFO_LOG_LENGTH:
+            return webgl_parameter_int(shader.info_log.len())
+        self.last_error = WEBGL_INVALID_ENUM
+        webgl_parameter_bool(false)
+
+    me get_shader_info_log(shader_id: i32) -> text:
+        if not self.ensure_context_available():
+            return ""
+        val shader_index = self.find_shader_index(shader_id)
+        if shader_index < 0:
+            self.last_error = WEBGL_INVALID_VALUE
+            return ""
+        self.shaders[shader_index].info_log
+
+    me get_program_parameter(program_id: i32, pname: i32) -> WebGLParameterValue:
+        if not self.ensure_context_available():
+            return webgl_parameter_bool(false)
+        val program_index = self.find_program_index(program_id)
+        if program_index < 0:
+            self.last_error = WEBGL_INVALID_VALUE
+            return webgl_parameter_bool(false)
+        val program = self.programs[program_index]
+        if pname == WEBGL_LINK_STATUS:
+            return webgl_parameter_bool(program.linked)
+        if pname == WEBGL_VALIDATE_STATUS:
+            return webgl_parameter_bool(program.validate_status)
+        if pname == WEBGL_DELETE_STATUS:
+            return webgl_parameter_bool(not program.valid)
+        if pname == WEBGL_INFO_LOG_LENGTH:
+            return webgl_parameter_int(program.info_log.len())
+        if pname == WEBGL_ATTACHED_SHADERS:
+            return webgl_parameter_int(webgl_attached_shader_count(program))
+        if pname == WEBGL_ACTIVE_UNIFORMS:
+            return webgl_parameter_int(program.active_uniforms.len())
+        if pname == WEBGL_ACTIVE_ATTRIBUTES:
+            return webgl_parameter_int(program.active_attribs.len())
+        self.last_error = WEBGL_INVALID_ENUM
+        webgl_parameter_bool(false)
+
+    me get_program_info_log(program_id: i32) -> text:
+        if not self.ensure_context_available():
+            return ""
+        val program_index = self.find_program_index(program_id)
+        if program_index < 0:
+            self.last_error = WEBGL_INVALID_VALUE
+            return ""
+        self.programs[program_index].info_log
+
+    me get_attrib_location(program_id: i32, name: text) -> i32:
+        if not self.ensure_context_available():
+            return -1
+        val program_index = self.find_program_index(program_id)
+        if program_index < 0:
+            self.last_error = WEBGL_INVALID_VALUE
+            return -1
+        val program = self.programs[program_index]
+        if not program.linked:
+            self.last_error = WEBGL_INVALID_OPERATION
+            return -1
+        var i = 0
+        while i < program.active_attribs.len():
+            if program.active_attribs[i].name == name:
+                return program.active_attribs[i].location
+            i = i + 1
+        -1
+
+    me get_uniform_location(program_id: i32, name: text) -> i32:
+        if not self.ensure_context_available():
+            return -1
+        val program_index = self.find_program_index(program_id)
+        if program_index < 0:
+            self.last_error = WEBGL_INVALID_VALUE
+            return -1
+        val program = self.programs[program_index]
+        if not program.linked:
+            self.last_error = WEBGL_INVALID_OPERATION
+            return -1
+        var i = 0
+        while i < program.active_uniforms.len():
+            if program.active_uniforms[i].name == name:
+                return program.active_uniforms[i].location
+            i = i + 1
+        -1
 
     me use_program(program_id: i32) -> bool:
         if not self.ensure_context_available():
@@ -230,6 +364,12 @@ pub class WebGLContext:
             return false
         self.shaders[shader_index].shader_type == shader_type and self.shaders[shader_index].compiled
 
+    fn shader_source_text(shader_id: i32) -> text:
+        val shader_index = self.find_shader_index(shader_id)
+        if shader_index < 0:
+            return ""
+        self.shaders[shader_index].source
+
 pub fn webgl_create_context(version: i32, width: i32, height: i32) -> WebGLContext:
     val actual_version = if version == 2: 2 else: 1
     WebGLContext(
@@ -274,6 +414,100 @@ pub fn webgl_validate_shader_source(shader_type: i32, source: text) -> text:
     if shader_type == WEBGL_FRAGMENT_SHADER and not (trimmed.contains("gl_FragColor") or trimmed.contains("out ")):
         return "fragment shader must write a color output"
     ""
+
+pub fn webgl_parameter_bool(value: bool) -> WebGLParameterValue:
+    WebGLParameterValue(value_kind: "bool", bool_value: value, int_value: 0, text_value: "")
+
+pub fn webgl_parameter_int(value: i32) -> WebGLParameterValue:
+    WebGLParameterValue(value_kind: "int", bool_value: false, int_value: value, text_value: "")
+
+pub fn webgl_attached_shader_count(program: WebGLProgramHandle) -> i32:
+    var count = 0
+    if program.vertex_shader_id >= 0:
+        count = count + 1
+    if program.fragment_shader_id >= 0:
+        count = count + 1
+    count
+
+pub fn webgl_collect_active_attribs(vertex_source: text) -> [WebGLActiveInfo]:
+    var active: [WebGLActiveInfo] = []
+    val normalized_source = vertex_source.replace("\n", " ")
+    val statements = normalized_source.split(";")
+    var i = 0
+    while i < statements.len():
+        val declaration = statements[i].trim()
+        if declaration.starts_with("attribute "):
+            val info = webgl_active_info_from_declaration(declaration, "attribute", active.len())
+            if info.name != "":
+                active.push(info)
+        i = i + 1
+    active
+
+pub fn webgl_collect_active_uniforms(vertex_source: text, fragment_source: text) -> [WebGLActiveInfo]:
+    var active: [WebGLActiveInfo] = []
+    active = webgl_collect_uniforms_from_source(vertex_source, active)
+    webgl_collect_uniforms_from_source(fragment_source, active)
+
+pub fn webgl_collect_uniforms_from_source(source: text, active: [WebGLActiveInfo]) -> [WebGLActiveInfo]:
+    var result = active
+    val normalized_source = source.replace("\n", " ")
+    val statements = normalized_source.split(";")
+    var i = 0
+    while i < statements.len():
+        val declaration = statements[i].trim()
+        if declaration.starts_with("uniform "):
+            val info = webgl_active_info_from_declaration(declaration, "uniform", result.len())
+            if info.name != "" and not webgl_has_active_info(result, info.name):
+                result.push(info)
+        i = i + 1
+    result
+
+pub fn webgl_has_active_info(active: [WebGLActiveInfo], name: text) -> bool:
+    var i = 0
+    while i < active.len():
+        if active[i].name == name:
+            return true
+        i = i + 1
+    false
+
+pub fn webgl_active_info_from_declaration(declaration: text, qualifier: text, location: i32) -> WebGLActiveInfo:
+    val normalized = declaration.replace("\t", " ").trim()
+    val parts = normalized.split(" ")
+    var filtered: [text] = []
+    var i = 0
+    while i < parts.len():
+        val token = parts[i].trim()
+        if token != "":
+            filtered.push(token)
+        i = i + 1
+    if filtered.len() < 3:
+        return WebGLActiveInfo(name: "", size: 0, data_type: 0, location: -1)
+    if filtered[0] != qualifier:
+        return WebGLActiveInfo(name: "", size: 0, data_type: 0, location: -1)
+    val data_type = webgl_glsl_type_enum(filtered[1])
+    if data_type == 0:
+        return WebGLActiveInfo(name: "", size: 0, data_type: 0, location: -1)
+    WebGLActiveInfo(name: webgl_clean_glsl_name(filtered[2]), size: 1, data_type: data_type, location: location)
+
+pub fn webgl_glsl_type_enum(type_name: text) -> i32:
+    if type_name == "float":
+        return WEBGL_FLOAT
+    if type_name == "vec2":
+        return WEBGL_FLOAT_VEC2
+    if type_name == "vec3":
+        return WEBGL_FLOAT_VEC3
+    if type_name == "vec4":
+        return WEBGL_FLOAT_VEC4
+    if type_name == "mat4":
+        return WEBGL_FLOAT_MAT4
+    if type_name == "sampler2D":
+        return WEBGL_SAMPLER_2D
+    0
+
+pub fn webgl_clean_glsl_name(name: text) -> text:
+    val parts = name.split("[")
+    val without_array = parts[0]
+    without_array.trim()
 
 pub fn webgl_default_extensions(version: i32) -> [text]:
     if version == 2:

@@ -3,15 +3,33 @@ use std.gc_async_mut.gpu.browser_engine.webgl_context.{
     WEBGL_NO_ERROR, WEBGL_INVALID_ENUM, WEBGL_INVALID_VALUE,
     WEBGL_INVALID_OPERATION, WEBGL_CONTEXT_LOST_WEBGL,
     WEBGL_VERTEX_SHADER, WEBGL_FRAGMENT_SHADER,
+    WEBGL_COMPILE_STATUS, WEBGL_LINK_STATUS, WEBGL_VALIDATE_STATUS,
+    WEBGL_INFO_LOG_LENGTH, WEBGL_ATTACHED_SHADERS, WEBGL_ACTIVE_UNIFORMS,
+    WEBGL_ACTIVE_ATTRIBUTES, WEBGL_SHADER_TYPE, WEBGL_FLOAT_VEC4,
+    WEBGL_SAMPLER_2D,
     webgl_create_context, webgl_is_supported_context_name,
     webgl_context_version_for_name
 }
 
 fn _vertex_glsl() -> text:
-    "attribute vec4 position; void main() { gl_Position = position; }"
+    "attribute vec4 position; uniform vec4 tint; void main() { gl_Position = position; }"
 
 fn _fragment_glsl() -> text:
-    "void main() { gl_FragColor = vec4(1.0); }"
+    "uniform sampler2D diffuse; uniform vec4 tint; void main() { gl_FragColor = tint; }"
+
+fn _linked_program_context() -> std.gc_async_mut.gpu.browser_engine.webgl_context.WebGLContext:
+    var ctx = webgl_create_context(1, 320, 240)
+    val vs = ctx.create_shader(WEBGL_VERTEX_SHADER)
+    val fs = ctx.create_shader(WEBGL_FRAGMENT_SHADER)
+    ctx.shader_source(vs.id, _vertex_glsl())
+    ctx.shader_source(fs.id, _fragment_glsl())
+    ctx.compile_shader(vs.id)
+    ctx.compile_shader(fs.id)
+    val program = ctx.create_program()
+    ctx.attach_shader(program.id, vs.id)
+    ctx.attach_shader(program.id, fs.id)
+    ctx.link_program(program.id)
+    ctx
 
 describe "Browser WebGL context":
     describe "context names":
@@ -107,6 +125,65 @@ describe "Browser WebGL context":
             expect(linked.linked).to_equal(true)
             expect(ctx.use_program(program.id)).to_equal(true)
             expect(ctx.current_program_id).to_equal(program.id)
+
+        it "reports shader parameters and info logs":
+            var ctx = webgl_create_context(1, 320, 240)
+            val vs = ctx.create_shader(WEBGL_VERTEX_SHADER)
+            expect(ctx.shader_source(vs.id, _vertex_glsl())).to_equal(true)
+            expect(ctx.compile_shader(vs.id).compiled).to_equal(true)
+            expect(ctx.get_shader_parameter(vs.id, WEBGL_COMPILE_STATUS).bool_value).to_equal(true)
+            expect(ctx.get_shader_parameter(vs.id, WEBGL_SHADER_TYPE).int_value).to_equal(WEBGL_VERTEX_SHADER)
+            expect(ctx.get_shader_parameter(vs.id, WEBGL_INFO_LOG_LENGTH).int_value).to_equal(0)
+            expect(ctx.get_shader_info_log(vs.id)).to_equal("")
+
+        it "reports program reflection parameters":
+            var ctx = _linked_program_context()
+            val program = ctx.programs[0]
+            expect(ctx.get_program_parameter(program.id, WEBGL_LINK_STATUS).bool_value).to_equal(true)
+            expect(ctx.get_program_parameter(program.id, WEBGL_VALIDATE_STATUS).bool_value).to_equal(true)
+            expect(ctx.get_program_parameter(program.id, WEBGL_ATTACHED_SHADERS).int_value).to_equal(2)
+            expect(ctx.get_program_parameter(program.id, WEBGL_ACTIVE_ATTRIBUTES).int_value).to_equal(1)
+            expect(ctx.get_program_parameter(program.id, WEBGL_ACTIVE_UNIFORMS).int_value).to_equal(2)
+            expect(program.active_attribs[0].name).to_equal("position")
+            expect(program.active_attribs[0].data_type).to_equal(WEBGL_FLOAT_VEC4)
+            expect(program.active_uniforms[1].name).to_equal("diffuse")
+            expect(program.active_uniforms[1].data_type).to_equal(WEBGL_SAMPLER_2D)
+            expect(ctx.get_program_info_log(program.id)).to_equal("")
+
+        it "resolves active attribute and uniform locations":
+            var ctx = _linked_program_context()
+            val program = ctx.programs[0]
+            expect(ctx.get_attrib_location(program.id, "position")).to_equal(0)
+            expect(ctx.get_uniform_location(program.id, "tint")).to_equal(0)
+            expect(ctx.get_uniform_location(program.id, "diffuse")).to_equal(1)
+            expect(ctx.get_attrib_location(program.id, "missing")).to_equal(-1)
+            expect(ctx.get_uniform_location(program.id, "missing")).to_equal(-1)
+            expect(ctx.get_error()).to_equal(WEBGL_NO_ERROR)
+
+        it "validates reflection query errors":
+            var ctx = webgl_create_context(1, 320, 240)
+            val program = ctx.create_program()
+            expect(ctx.get_shader_parameter(99, WEBGL_COMPILE_STATUS).bool_value).to_equal(false)
+            expect(ctx.get_error()).to_equal(WEBGL_INVALID_VALUE)
+            val shader = ctx.create_shader(WEBGL_VERTEX_SHADER)
+            expect(ctx.get_shader_parameter(shader.id, 999).bool_value).to_equal(false)
+            expect(ctx.get_error()).to_equal(WEBGL_INVALID_ENUM)
+            expect(ctx.get_program_parameter(program.id, 999).bool_value).to_equal(false)
+            expect(ctx.get_error()).to_equal(WEBGL_INVALID_ENUM)
+            expect(ctx.get_attrib_location(program.id, "position")).to_equal(-1)
+            expect(ctx.get_error()).to_equal(WEBGL_INVALID_OPERATION)
+
+        it "returns reflection defaults while context is lost":
+            var ctx = _linked_program_context()
+            val program = ctx.programs[0]
+            val shader = ctx.shaders[0]
+            ctx.lose_context()
+            expect(ctx.get_shader_parameter(shader.id, WEBGL_COMPILE_STATUS).bool_value).to_equal(false)
+            expect(ctx.get_shader_info_log(shader.id)).to_equal("")
+            expect(ctx.get_program_parameter(program.id, WEBGL_LINK_STATUS).bool_value).to_equal(false)
+            expect(ctx.get_program_info_log(program.id)).to_equal("")
+            expect(ctx.get_attrib_location(program.id, "position")).to_equal(-1)
+            expect(ctx.get_uniform_location(program.id, "tint")).to_equal(-1)
 
         it "rejects program link without both shader stages":
             var ctx = webgl_create_context(1, 320, 240)
