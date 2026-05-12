@@ -7,6 +7,7 @@ use examples.browser.entity.browser.tab_types.{TabState}
 use examples.browser.entity.browser.navigation_types.{NavigationState}
 use examples.browser.feature.browser.tab_manager.{TabManager}
 use examples.browser.feature.browser.navigation.{NavigationController}
+use examples.browser.feature.net.h1_client.{MockResponseRegistry, set_mock_registry}
 
 fn _app() -> BrowserApp:
     val logger = Logger(name: "app-command-test")
@@ -59,7 +60,10 @@ fn _app() -> BrowserApp:
         ),
         last_find_query: "",
         zoom_percent: 100,
-        devtools_open: false
+        devtools_open: false,
+        page_title: "New Tab",
+        page_text_content: "",
+        page_html: ""
     )
 
 fn _ok(result: BrowserResult<()>) -> bool:
@@ -67,8 +71,16 @@ fn _ok(result: BrowserResult<()>) -> bool:
         Ok(_): true
         Err(_): false
 
+fn _register_pages():
+    var registry = MockResponseRegistry.create()
+    registry.register("example.com", 200, "<html><body><h1>Example Page</h1><p>loaded</p><div>ok</div></body></html>")
+    registry.register("a.example", 200, "<html><body><h1>A Page</h1><p>a loaded</p><div>ok</div></body></html>")
+    registry.register("b.example", 200, "<html><body><h1>B Page</h1><p>b loaded</p><div>ok</div></body></html>")
+    set_mock_registry(registry)
+
 describe "BrowserApp command execution":
     it "creates tabs and navigates the active tab":
+        _register_pages()
         var app = _app()
         expect(_ok(app.handle_command(BrowserCommand.NewTab))).to_equal(true)
         expect(app.tab_manager.get_tab_count()).to_equal(1)
@@ -77,9 +89,12 @@ describe "BrowserApp command execution":
         expect(app.navigation.current_url()).to_equal("https://example.com")
         val tab = app.tab_manager.get_active_tab().unwrap()
         expect(tab.url).to_equal("https://example.com")
-        expect(tab.state).to_equal(TabState.Loading)
+        expect(tab.state).to_equal(TabState.Complete)
+        expect(tab.title).to_equal("Example Page")
+        expect(app.page_text_content).to_contain("loaded")
 
     it "executes back forward and reload against navigation state":
+        _register_pages()
         var app = _app()
         expect(_ok(app.handle_command(BrowserCommand.NewTab))).to_equal(true)
         expect(_ok(app.handle_command(BrowserCommand.Navigate("https://a.example")))).to_equal(true)
@@ -87,11 +102,12 @@ describe "BrowserApp command execution":
         expect(_ok(app.handle_command(BrowserCommand.Back))).to_equal(true)
         expect(app.navigation.current_url()).to_equal("https://a.example")
         expect(app.tab_manager.get_active_tab().unwrap().url).to_equal("https://a.example")
+        expect(app.page_title).to_equal("A Page")
         expect(_ok(app.handle_command(BrowserCommand.Forward))).to_equal(true)
         expect(app.navigation.current_url()).to_equal("https://b.example")
+        expect(app.page_title).to_equal("B Page")
         expect(_ok(app.handle_command(BrowserCommand.Reload))).to_equal(true)
-        expect(app.navigation.is_loading).to_equal(true)
-        expect(app.tab_manager.get_active_tab().unwrap().state).to_equal(TabState.Loading)
+        expect(app.tab_manager.get_active_tab().unwrap().state).to_equal(TabState.Complete)
 
     it "closes the active tab and keeps a usable tab open":
         var app = _app()

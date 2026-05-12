@@ -11,6 +11,7 @@ use examples.browser.entity.browser.window_types.{BrowserWindow, WindowGeometry}
 use examples.browser.entity.browser.tab_types.{TabId, TabState}
 use examples.browser.feature.browser.tab_manager.{TabManager}
 use examples.browser.feature.browser.navigation.{NavigationController}
+use examples.browser.transform.navigation_loader.{load_navigation_document}
 
 enum BrowserCommand:
     NewTab
@@ -41,6 +42,9 @@ class BrowserApp:
     last_find_query: text
     zoom_percent: i64
     devtools_open: bool
+    page_title: text
+    page_text_content: text
+    page_html: text
 
     static fn new(config: BrowserConfig, logger: Logger) -> BrowserApp:
         BrowserApp(
@@ -54,7 +58,10 @@ class BrowserApp:
             navigation: NavigationController.new(logger),
             last_find_query: "",
             zoom_percent: 100,
-            devtools_open: false
+            devtools_open: false,
+            page_title: "New Tab",
+            page_text_content: "",
+            page_html: ""
         )
 
     me start() -> BrowserResult<()>:
@@ -162,16 +169,19 @@ class BrowserApp:
                 self.logger.debug("Command: Back")
                 self.navigation.go_back()?
                 self.sync_active_tab_to_navigation()
+                self.load_active_page()
                 Ok(())
             BrowserCommand.Forward:
                 self.logger.debug("Command: Forward")
                 self.navigation.go_forward()?
                 self.sync_active_tab_to_navigation()
+                self.load_active_page()
                 Ok(())
             BrowserCommand.Reload:
                 self.logger.debug("Command: Reload")
                 self.navigation.reload()?
                 self.mark_active_tab_loading()
+                self.load_active_page()
                 Ok(())
             BrowserCommand.Find(query):
                 self.logger.debug("Command: Find '{query}'")
@@ -234,7 +244,24 @@ class BrowserApp:
             self.open_tab(self.config.homepage)?
         self.navigation.navigate(url)?
         self.sync_active_tab_to_navigation()
+        self.load_active_page()
         Ok(())
+
+    me load_active_page():
+        val url = self.navigation.current_url()
+        if url == "":
+            return
+        val html = load_navigation_document(url, self.logger)
+        self.page_html = html
+        self.page_title = browser_app_extract_title(html, url)
+        self.page_text_content = browser_app_extract_text(html)
+        for i in 0..self.tab_manager.tabs.len():
+            if self.tab_manager.tabs[i].id.id == self.tab_manager.active_tab_id:
+                var tab = self.tab_manager.tabs[i]
+                tab.title = self.page_title
+                tab.state = TabState.Complete
+                self.tab_manager.tabs[i] = tab
+                return
 
     me sync_active_tab_to_navigation():
         val url = self.navigation.current_url()
@@ -264,3 +291,38 @@ class BrowserApp:
                 window.is_fullscreen = not window.is_fullscreen
                 self.windows[i] = window
                 return
+
+fn browser_app_extract_title(html: text, fallback: text) -> text:
+    val h1 = browser_app_extract_between(html, "<h1>", "</h1>")
+    if h1.len() > 0:
+        return h1
+    val title = browser_app_extract_between(html, "<title>", "</title>")
+    if title.len() > 0:
+        return title
+    fallback
+
+fn browser_app_extract_text(html: text) -> text:
+    var parts: [text] = []
+    val h1 = browser_app_extract_between(html, "<h1>", "</h1>")
+    val p = browser_app_extract_between(html, "<p>", "</p>")
+    val div = browser_app_extract_between(html, "<div>", "</div>")
+    if h1.len() > 0:
+        parts.push(h1)
+    if p.len() > 0:
+        parts.push(p)
+    if div.len() > 0:
+        parts.push(div)
+    if parts.len() > 0:
+        return parts.join("\n")
+    html
+
+fn browser_app_extract_between(html: text, open_tag: text, close_tag: text) -> text:
+    val start = html.index_of(open_tag)
+    if start < 0:
+        return ""
+    val content_start = start + open_tag.len()
+    val rest = html.substring(content_start)
+    val end = rest.index_of(close_tag)
+    if end < 0:
+        return ""
+    rest.substring(0, end).trim()
