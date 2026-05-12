@@ -98,6 +98,10 @@ struct HashScanSummary:
     repeated_hashes: {text: bool}
     candidate_files: {text: bool}
 
+struct FileHashScanResult:
+    file_hashes: {text: bool}
+    hash_counts: {text: i64}
+
 struct TokenWindowCandidate:
     index: i64
     end_index: i64
@@ -415,18 +419,19 @@ fn collect_token_window_candidates(tokens: [SimpleToken], config: DuplicationCon
         i = i + 1
     candidates
 
-fn collect_hash_counts_in_file(file_path: text, config: DuplicationConfig, cache_manager: TokenCacheManager, interner: TokenInterner, hash_counts: {text: i64}) -> {text: bool}:
+fn collect_hash_counts_in_file(file_path: text, config: DuplicationConfig, cache_manager: TokenCacheManager, interner: TokenInterner, hash_counts: {text: i64}) -> FileHashScanResult:
     val tokens = load_tokens_for_file(file_path, config, cache_manager)
     var file_hashes = {}
+    var updated_counts = hash_counts
 
     val candidates = collect_token_window_candidates(tokens, config, interner)
     for candidate in candidates:
         val hash_key = "{candidate.hash_value}"
-        val existing = hash_counts[hash_key] ?? 0
-        hash_counts[hash_key] = existing + 1
+        val existing = updated_counts[hash_key] ?? 0
+        updated_counts[hash_key] = existing + 1
         file_hashes[hash_key] = true
 
-    file_hashes
+    FileHashScanResult(file_hashes: file_hashes, hash_counts: updated_counts)
 
 fn collect_repeated_hashes(files: [text], config: DuplicationConfig, cache_manager: TokenCacheManager, interner: TokenInterner) -> HashScanSummary:
     var hash_counts = {}
@@ -435,7 +440,9 @@ fn collect_repeated_hashes(files: [text], config: DuplicationConfig, cache_manag
     var last_ms = start_ms
     var done = 0
     for file in files:
-        file_hashes[file] = collect_hash_counts_in_file(file, config, cache_manager, interner, hash_counts)
+        val scan_result = collect_hash_counts_in_file(file, config, cache_manager, interner, hash_counts)
+        file_hashes[file] = scan_result.file_hashes
+        hash_counts = scan_result.hash_counts
         done = done + 1
         last_ms = progress_tick(config, "hash pass", done, files.len(), start_ms, last_ms)
 
@@ -499,7 +506,8 @@ fn contains_high_signal_block(blocks: [DuplicateBlock]) -> bool:
             return true
     false
 
-fn add_exact_groups(exact_map: {text: [DuplicateBlock]}, config: DuplicationConfig, groups: [DuplicateGroup]):
+fn add_exact_groups(exact_map: {text: [DuplicateBlock]}, config: DuplicationConfig, groups: [DuplicateGroup]) -> [DuplicateGroup]:
+    var updated_groups = groups
     for exact_key in exact_map.keys():
         val exact_blocks = exact_map[exact_key]
         if exact_blocks.len() < 2:
@@ -510,14 +518,14 @@ fn add_exact_groups(exact_map: {text: [DuplicateBlock]}, config: DuplicationConf
 
         val group = build_duplicate_group(exact_blocks)
         if group.impact_score >= config.min_impact:
-            groups.push(group)
+            updated_groups.push(group)
+    updated_groups
 
 fn group_exact_blocks(all_blocks: [DuplicateBlock], config: DuplicationConfig, cache_manager: TokenCacheManager) -> [DuplicateGroup]:
     var source_cache = {}
     val exact_map = bucket_exact_blocks(all_blocks, source_cache, cache_manager)
     val groups = []
     add_exact_groups(exact_map, config, groups)
-    groups
 
 fn _merge_groups(left: [DuplicateGroup], right: [DuplicateGroup]) -> [DuplicateGroup]:
     var result = []
@@ -545,4 +553,3 @@ fn sort_by_impact(groups: [DuplicateGroup]) -> [DuplicateGroup]:
     val left = sort_by_impact(groups[0:mid])
     val right = sort_by_impact(groups[mid:])
     _merge_groups(left, right)
-

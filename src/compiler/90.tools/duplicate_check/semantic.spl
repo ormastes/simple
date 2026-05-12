@@ -25,19 +25,41 @@ struct SemanticReport:
     cache_misses: i64
     used_fallback: bool
 
+struct DocEntryPartition:
+    documented: [DocEntry]
+    missing_docs: [DocEntry]
+
+fn partition_doc_entries(entries: [DocEntry]) -> DocEntryPartition:
+    var documented: [DocEntry] = []
+    var missing_docs: [DocEntry] = []
+    for entry in entries:
+        if entry.has_doc:
+            documented.push(entry)
+        else:
+            missing_docs.push(entry)
+    DocEntryPartition(documented: documented, missing_docs: missing_docs)
+
+fn semantic_match_kind(sim: f64) -> text:
+    if sim >= 0.97:
+        return "copy_paste"
+    "similar"
+
+fn make_semantic_match(a: DocEntry, b: DocEntry, sim: f64, suffix: text) -> SemanticMatch:
+    SemanticMatch(
+        entry_a: a,
+        entry_b: b,
+        similarity: sim,
+        match_kind: semantic_match_kind(sim) + suffix
+    )
+
 fn run_semantic_analysis(target_path: text, config: DuplicationConfig) -> SemanticReport:
     val all_entries = extract_docs_from_directory(target_path, config.exclude_patterns)
     if all_entries.len() == 0:
         return empty_report()
 
-    # Separate documented and undocumented items
-    var documented: [DocEntry] = []
-    var missing_docs: [DocEntry] = []
-    for entry in all_entries:
-        if entry.has_doc:
-            documented.push(entry)
-        else:
-            missing_docs.push(entry)
+    val partition = partition_doc_entries(all_entries)
+    val documented = partition.documented
+    val missing_docs = partition.missing_docs
 
     # Check if Ollama is available
     val ollama_ok = check_ollama_available(config.ollama_url)
@@ -131,13 +153,7 @@ fn find_similar_pairs(entries: [DocEntry], embeddings: [[f64]], threshold: f64, 
             val sim = cosine_similarity_dense(vec_a, vec_b)
 
             if sim >= threshold:
-                val kind = classify_match(entries[i], entries[j], sim)
-                matches.push(SemanticMatch(
-                    entry_a: entries[i],
-                    entry_b: entries[j],
-                    similarity: sim,
-                    match_kind: kind
-                ))
+                matches.push(make_semantic_match(entries[i], entries[j], sim, ""))
 
             j = j + 1
 
@@ -171,13 +187,6 @@ fn quicksort_matches_by_sim(arr: [SemanticMatch], low: i64, high: i64):
     if i < high:
         quicksort_matches_by_sim(arr, i, high)
 
-fn classify_match(a: DocEntry, b: DocEntry, sim: f64) -> text:
-    if sim >= 0.97:
-        return "copy_paste"
-    if sim >= 0.90:
-        return "similar"
-    "similar"
-
 fn run_text_fallback(entries: [DocEntry], threshold: f64, drift_threshold: f64) -> SemanticReport:
     var matches: [SemanticMatch] = []
 
@@ -193,13 +202,7 @@ fn run_text_fallback(entries: [DocEntry], threshold: f64, drift_threshold: f64) 
             if both_long:
                 val sim = text_similarity(doc_a, doc_b)
                 if sim >= threshold:
-                    val kind = if sim >= 0.97: "copy_paste" else: "similar"
-                    matches.push(SemanticMatch(
-                        entry_a: entries[i],
-                        entry_b: entries[j],
-                        similarity: sim,
-                        match_kind: kind + " [text-based]"
-                    ))
+                    matches.push(make_semantic_match(entries[i], entries[j], sim, " [text-based]"))
 
             j = j + 1
         i = i + 1
@@ -300,13 +303,9 @@ fn run_semantic_analysis_local(target_path: text, config: DuplicationConfig) -> 
     if all_entries.len() == 0:
         return empty_report()
 
-    var documented: [DocEntry] = []
-    var missing_docs: [DocEntry] = []
-    for entry in all_entries:
-        if entry.has_doc:
-            documented.push(entry)
-        else:
-            missing_docs.push(entry)
+    val partition = partition_doc_entries(all_entries)
+    val documented = partition.documented
+    val missing_docs = partition.missing_docs
 
     var fvecs: [FeatureVec] = []
     for entry in documented:
@@ -359,13 +358,7 @@ fn run_semantic_analysis_local(target_path: text, config: DuplicationConfig) -> 
                     continue
                 val sim = cosine_similarity(fvecs[i], fvecs[j])
                 if sim >= threshold:
-                    val kind = if sim >= 0.97: "copy_paste" else: "similar"
-                    matches.push(SemanticMatch(
-                        entry_a: documented[i],
-                        entry_b: documented[j],
-                        similarity: sim,
-                        match_kind: kind
-                    ))
+                    matches.push(make_semantic_match(documented[i], documented[j], sim, ""))
                 pj = pj + 1
             pi = pi + 1
 

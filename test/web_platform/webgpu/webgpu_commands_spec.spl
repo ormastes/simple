@@ -6,7 +6,20 @@ use std.gc_async_mut.gpu.browser_engine.webgpu_commands.{
     WEBGPU_COMMAND_SET_PIPELINE, WEBGPU_COMMAND_SET_BIND_GROUP,
     WEBGPU_COMMAND_DRAW, WEBGPU_COMMAND_DISPATCH_WORKGROUPS,
     WEBGPU_COMMAND_COPY_BUFFER_TO_BUFFER, WEBGPU_COMMAND_COPY_TEXTURE_TO_TEXTURE,
-    WEBGPU_COMMAND_WRITE_BUFFER, WEBGPU_COMMAND_WRITE_TEXTURE
+    WEBGPU_COMMAND_WRITE_BUFFER, WEBGPU_COMMAND_WRITE_TEXTURE,
+    webgpu_validate_buffer_copy_with_resources,
+    webgpu_validate_texture_copy_with_resources,
+    webgpu_validate_queue_write_buffer_with_resources,
+    webgpu_validate_queue_write_texture_with_resources
+}
+use std.gc_async_mut.gpu.browser_engine.webgpu_resources.{
+    WebGPUResourceTable,
+    WEBGPU_BUFFER_USAGE_COPY_SRC, WEBGPU_BUFFER_USAGE_COPY_DST,
+    WEBGPU_TEXTURE_USAGE_COPY_SRC, WEBGPU_TEXTURE_USAGE_COPY_DST,
+    WEBGPU_TEXTURE_USAGE_TEXTURE_BINDING
+}
+use std.gc_async_mut.gpu.browser_engine.webgpu_types.{
+    GPU_TEXTURE_FORMAT_RGBA8_UNORM, GPU_TEXTURE_FORMAT_BGRA8_UNORM
 }
 
 describe "Browser WebGPU command encoding":
@@ -110,6 +123,42 @@ describe "Browser WebGPU command encoding":
             expect(queue.last_error).to_equal("GPUQueue writeBuffer buffer must be valid")
             expect(queue.write_texture(2, 4, 4, 1, 0)).to_equal(false)
             expect(queue.last_error).to_equal("GPUQueue writeTexture data size must be positive")
+
+    describe "resource-aware transfer validation":
+        it "validates buffer copy resource usage and ranges":
+            var resources = WebGPUResourceTable.create()
+            val source = resources.create_buffer("source", 64, WEBGPU_BUFFER_USAGE_COPY_SRC)
+            val destination = resources.create_buffer("destination", 64, WEBGPU_BUFFER_USAGE_COPY_DST)
+            val wrong_usage = resources.create_buffer("wrong", 64, WEBGPU_BUFFER_USAGE_COPY_SRC)
+            expect(webgpu_validate_buffer_copy_with_resources(resources, source.id, 4, destination.id, 8, 16)).to_equal("")
+            expect(webgpu_validate_buffer_copy_with_resources(resources, 99, 0, destination.id, 0, 16)).to_equal("GPUCommandEncoder copyBufferToBuffer source buffer does not exist")
+            expect(webgpu_validate_buffer_copy_with_resources(resources, source.id, 0, wrong_usage.id, 0, 16)).to_equal("GPUCommandEncoder copyBufferToBuffer destination buffer missing COPY_DST usage")
+            expect(webgpu_validate_buffer_copy_with_resources(resources, source.id, 48, destination.id, 0, 32)).to_equal("GPUCommandEncoder copyBufferToBuffer source range exceeds buffer size")
+
+        it "validates texture copy resource usage format and ranges":
+            var resources = WebGPUResourceTable.create()
+            val source = resources.create_texture("source", 16, 16, 1, GPU_TEXTURE_FORMAT_RGBA8_UNORM, WEBGPU_TEXTURE_USAGE_COPY_SRC)
+            val destination = resources.create_texture("destination", 16, 16, 1, GPU_TEXTURE_FORMAT_RGBA8_UNORM, WEBGPU_TEXTURE_USAGE_COPY_DST)
+            val wrong_format = resources.create_texture("wrong-format", 16, 16, 1, GPU_TEXTURE_FORMAT_BGRA8_UNORM, WEBGPU_TEXTURE_USAGE_COPY_DST)
+            val wrong_usage = resources.create_texture("wrong-usage", 16, 16, 1, GPU_TEXTURE_FORMAT_RGBA8_UNORM, WEBGPU_TEXTURE_USAGE_TEXTURE_BINDING)
+            expect(webgpu_validate_texture_copy_with_resources(resources, source.id, destination.id, 8, 8, 1)).to_equal("")
+            expect(webgpu_validate_texture_copy_with_resources(resources, 99, destination.id, 8, 8, 1)).to_equal("GPUCommandEncoder copyTextureToTexture source texture does not exist")
+            expect(webgpu_validate_texture_copy_with_resources(resources, source.id, wrong_format.id, 8, 8, 1)).to_equal("GPUCommandEncoder copyTextureToTexture formats must match")
+            expect(webgpu_validate_texture_copy_with_resources(resources, source.id, wrong_usage.id, 8, 8, 1)).to_equal("GPUCommandEncoder copyTextureToTexture destination texture missing COPY_DST usage")
+            expect(webgpu_validate_texture_copy_with_resources(resources, source.id, destination.id, 32, 8, 1)).to_equal("GPUCommandEncoder copyTextureToTexture source range exceeds texture size")
+
+        it "validates queue writes against resources":
+            var resources = WebGPUResourceTable.create()
+            val buffer = resources.create_buffer("upload", 64, WEBGPU_BUFFER_USAGE_COPY_DST)
+            val texture = resources.create_texture("upload-texture", 16, 16, 1, GPU_TEXTURE_FORMAT_RGBA8_UNORM, WEBGPU_TEXTURE_USAGE_COPY_DST)
+            val wrong_buffer = resources.create_buffer("readback", 64, WEBGPU_BUFFER_USAGE_COPY_SRC)
+            val wrong_texture = resources.create_texture("sampled", 16, 16, 1, GPU_TEXTURE_FORMAT_RGBA8_UNORM, WEBGPU_TEXTURE_USAGE_TEXTURE_BINDING)
+            expect(webgpu_validate_queue_write_buffer_with_resources(resources, buffer.id, 4, 16)).to_equal("")
+            expect(webgpu_validate_queue_write_buffer_with_resources(resources, wrong_buffer.id, 0, 16)).to_equal("GPUQueue writeBuffer buffer missing COPY_DST usage")
+            expect(webgpu_validate_queue_write_buffer_with_resources(resources, buffer.id, 48, 32)).to_equal("GPUQueue writeBuffer range exceeds buffer size")
+            expect(webgpu_validate_queue_write_texture_with_resources(resources, texture.id, 8, 8, 1, 64)).to_equal("")
+            expect(webgpu_validate_queue_write_texture_with_resources(resources, wrong_texture.id, 8, 8, 1, 64)).to_equal("GPUQueue writeTexture texture missing COPY_DST usage")
+            expect(webgpu_validate_queue_write_texture_with_resources(resources, texture.id, 32, 8, 1, 64)).to_equal("GPUQueue writeTexture range exceeds texture size")
 
     describe "encoder and queue validation":
         it "rejects finish while a pass is active":
