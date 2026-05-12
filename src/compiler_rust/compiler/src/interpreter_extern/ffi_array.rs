@@ -322,7 +322,7 @@ pub fn rt_array_extend_i64_fn(args: &[Value]) -> Result<Value, CompileError> {
 mod tests {
     use super::{interpreter_byte_at, rt_bytes_u8_at_fn, rt_bytes_u8_set_fn};
     use crate::value::Value;
-    use simple_runtime::value::{rt_array_new, rt_bytes_u8_at};
+    use simple_runtime::value::{rt_array_new, rt_array_push, rt_bytes_u8_at, RuntimeValue};
 
     #[test]
     fn interpreter_byte_at_reads_u8_values_through_wrappers() {
@@ -346,6 +346,9 @@ mod tests {
     #[test]
     fn rt_bytes_u8_set_updates_heap_backed_array() {
         let arr = rt_array_new(2);
+        assert!(rt_array_push(arr, RuntimeValue::from_int(0)));
+        assert!(rt_array_push(arr, RuntimeValue::from_int(0)));
+
         let result = rt_bytes_u8_set_fn(&[
             Value::Int(arr.to_raw() as i64),
             Value::Int(0),
