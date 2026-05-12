@@ -20,7 +20,9 @@ use std.gc_async_mut.gpu.browser_engine.webgpu_commands.{
 use std.gc_async_mut.gpu.browser_engine.webgpu_resources.{
     WebGPUResourceTable, GPUBufferHandle, GPUTextureHandle, GPUSamplerHandle,
     GPUBindGroupLayoutEntry, GPUBindGroupEntry,
-    GPUBindGroupLayoutHandle, GPUBindGroupHandle
+    GPUBindGroupLayoutHandle, GPUBindGroupHandle,
+    WEBGPU_TEXTURE_DIMENSION_2D, WEBGPU_TEXTURE_DIMENSION_3D,
+    webgpu_validate_extended_texture_descriptor
 }
 use std.gc_async_mut.gpu.browser_engine.webgpu_status_errors.{
     WebGPUStatusErrors, WebGPUError, WebGPUDeviceLostInfo,
@@ -229,9 +231,16 @@ pub class WebGPUContext:
         handle
 
     me create_texture(label: text, width: i32, height: i32, depth_or_layers: i32, format: text, usage: i32) -> GPUTextureHandle:
+        self.create_texture_with_dimension(label, width, height, depth_or_layers, format, usage, WEBGPU_TEXTURE_DIMENSION_2D)
+
+    me create_texture_with_dimension(label: text, width: i32, height: i32, depth_or_layers: i32, format: text, usage: i32, dimension: text) -> GPUTextureHandle:
         if not self.ensure_device_ready_for_resource():
             return GPUTextureHandle(id: -1, label: label, width: width, height: height, depth_or_layers: depth_or_layers, format: format, usage: usage, valid: false, error: self.last_error)
-        val limits_err = webgpu_validate_texture_limits(width, height, depth_or_layers, self.limits)
+        val descriptor_err = webgpu_validate_extended_texture_descriptor(width, height, depth_or_layers, format, usage, dimension, 1, 1, dimension)
+        if descriptor_err != "":
+            self.last_error = descriptor_err
+            return GPUTextureHandle(id: -1, label: label, width: width, height: height, depth_or_layers: depth_or_layers, format: format, usage: usage, valid: false, error: self.last_error)
+        val limits_err = webgpu_validate_texture_limits_for_dimension(width, height, depth_or_layers, dimension, self.limits)
         if limits_err != "":
             self.last_error = limits_err
             return GPUTextureHandle(id: -1, label: label, width: width, height: height, depth_or_layers: depth_or_layers, format: format, usage: usage, valid: false, error: self.last_error)
@@ -512,6 +521,17 @@ pub fn webgpu_validate_required_limits(required: GPUDeviceLimits, supported: GPU
     ""
 
 pub fn webgpu_validate_texture_limits(width: i32, height: i32, depth_or_layers: i32, limits: GPUDeviceLimits) -> text:
+    webgpu_validate_texture_limits_for_dimension(width, height, depth_or_layers, WEBGPU_TEXTURE_DIMENSION_2D, limits)
+
+pub fn webgpu_validate_texture_limits_for_dimension(width: i32, height: i32, depth_or_layers: i32, dimension: text, limits: GPUDeviceLimits) -> text:
+    if dimension == WEBGPU_TEXTURE_DIMENSION_3D:
+        if width > limits.max_texture_dimension_3d:
+            return "GPUTexture width exceeds 3d device limit"
+        if height > limits.max_texture_dimension_3d:
+            return "GPUTexture height exceeds 3d device limit"
+        if depth_or_layers > limits.max_texture_dimension_3d:
+            return "GPUTexture depth exceeds 3d device limit"
+        return ""
     if width > limits.max_texture_dimension_2d:
         return "GPUTexture width exceeds device limit"
     if height > limits.max_texture_dimension_2d:
