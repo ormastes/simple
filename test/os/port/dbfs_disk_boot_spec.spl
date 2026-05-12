@@ -76,11 +76,66 @@ fn stage_rootfs_seed() -> bool:
         "rootfs_carrier=fat32\n" +
         "rootfs_boot_mode=fat32-carrier\n")
 
+fn native_dbfs_patch_script() -> text:
+    "{TEST_ROOT}/patch_native_dbfs_root.py"
+
+fn stage_native_dbfs_patch_script() -> bool:
+    rt_file_write_text(native_dbfs_patch_script(),
+        "import os, struct, sys\n" +
+        "img = sys.argv[1]\n" +
+        "def put_sector(lba, data):\n" +
+        "    if len(data) > 512:\n" +
+        "        raise SystemExit('sector overflow')\n" +
+        "    with open(img, 'r+b') as f:\n" +
+        "        f.seek(lba * 512)\n" +
+        "        f.write(data.ljust(512, b'\\0'))\n" +
+        "magic = 0x44424653\n" +
+        "version = 1\n" +
+        "uuid_hi = 0x1111\n" +
+        "uuid_lo = 0x2222\n" +
+        "generation = 1\n" +
+        "checksum = (magic + version + ((uuid_hi + uuid_lo) % 0xFFFFFFFF) + (generation % 0xFFFFFFFF)) % 0xFFFFFFFF\n" +
+        "sb = bytearray(512)\n" +
+        "struct.pack_into('<IIQQQB I'.replace(' ', ''), sb, 0, magic, version, uuid_hi, uuid_lo, generation, 1, checksum)\n" +
+        "put_sector(2, sb)\n" +
+        "put_sector(3, sb)\n" +
+        "def elf64_x86(marker):\n" +
+        "    marker_bytes = (marker + '\\0').encode('ascii')\n" +
+        "    data = bytearray(0x1000 + 4 + len(marker_bytes))\n" +
+        "    data[0:4] = b'\\x7fELF'\n" +
+        "    data[4] = 2\n" +
+        "    data[5] = 1\n" +
+        "    data[6] = 1\n" +
+        "    struct.pack_into('<H', data, 16, 2)\n" +
+        "    struct.pack_into('<H', data, 18, 62)\n" +
+        "    struct.pack_into('<I', data, 20, 1)\n" +
+        "    struct.pack_into('<Q', data, 24, 0x400000)\n" +
+        "    struct.pack_into('<Q', data, 32, 64)\n" +
+        "    struct.pack_into('<H', data, 52, 64)\n" +
+        "    struct.pack_into('<H', data, 54, 56)\n" +
+        "    struct.pack_into('<H', data, 56, 1)\n" +
+        "    struct.pack_into('<I', data, 64, 1)\n" +
+        "    struct.pack_into('<I', data, 68, 5)\n" +
+        "    struct.pack_into('<Q', data, 72, 0x1000)\n" +
+        "    struct.pack_into('<Q', data, 80, 0x400000)\n" +
+        "    struct.pack_into('<Q', data, 88, 0x400000)\n" +
+        "    struct.pack_into('<Q', data, 96, 4 + len(marker_bytes))\n" +
+        "    struct.pack_into('<Q', data, 104, 4 + len(marker_bytes))\n" +
+        "    struct.pack_into('<Q', data, 112, 0x1000)\n" +
+        "    data[0x1000:0x1004] = b'\\x90\\x90\\x90\\xc3'\n" +
+        "    data[0x1004:0x1004 + len(marker_bytes)] = marker_bytes\n" +
+        "    return bytes(data)\n" +
+        "payload = elf64_x86('DBFS_NATIVE_INIT')\n" +
+        "archive = b'DBFSINIT' + struct.pack('<Q', len(payload)) + payload\n" +
+        "with open(img, 'r+b') as f:\n" +
+        "    f.seek(4 * 512)\n" +
+        "    f.write(archive)\n")
+
 fn build_image() -> (text, text, i32):
     val img = image_path()
     rt_process_run_timeout("/bin/sh", [
         "-c",
-        "scripts/make_os_disk.shs 64 '" + img + "' '" + kernel_path() + "' x86_64 && cat '" + seed_root() + "/SYS/ROOTFS.CFG' >> '" + img + "'",
+        "scripts/make_os_disk.shs 64 '" + img + "' '" + kernel_path() + "' x86_64 && cat '" + seed_root() + "/SYS/ROOTFS.CFG' >> '" + img + "' && python3 '" + native_dbfs_patch_script() + "' '" + img + "'",
     ], BUILD_TIMEOUT_MS)
 
 fn boot_image() -> (text, text, i32):
@@ -108,12 +163,15 @@ describe "SimpleOS DBFS-marked FAT32 carrier image":
         if boot_gate():
             reset_backend_root()
             expect(stage_rootfs_seed()).to_equal(true)
+            expect(stage_native_dbfs_patch_script()).to_equal(true)
             val build = build_image()
             expect(build[2]).to_equal(0)
             val img = image_path()
             expect(rt_file_exists(img)).to_equal(true)
             val marker = rt_process_run("grep", ["-a", "rootfs_backend=dbfs", img])
             expect(marker[2]).to_equal(0)
+            val archive = rt_process_run("grep", ["-a", "DBFSINIT", img])
+            expect(archive[2]).to_equal(0)
         else:
             expect(true).to_equal(true)
 
