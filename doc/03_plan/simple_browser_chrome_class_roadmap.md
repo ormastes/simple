@@ -450,8 +450,11 @@ Non-goal: cloning proprietary Chrome services. The target is Chrome-level web co
 
 **Goal:** WebGPU supports practical 3D scenes and the browser compositor uses the same hardened GPU service boundary.
 
+**Current progress (2026-05-12):**
+- M26 texture descriptor validation has started: 3D texture dimensions, MSAA sample-count constraints, mip-level constraints, texture arrays, and cubemap layer/shape rules are covered by `test/web_platform/webgpu/webgpu_resources_spec.spl`.
+
 **Work:**
-- Implement depth/stencil, MSAA, mipmapped textures, texture arrays, cubemaps where supported, instancing, uniform/storage buffers, dynamic offsets, indirect draw where backend supports it.
+- Implement depth/stencil attachment semantics, native MSAA allocation, mip generation/use, texture arrays, cubemaps where supported, instancing, uniform/storage buffers, dynamic offsets, and indirect draw where backend supports it.
 - Add shader reflection/diagnostics for WGSL errors surfaced to DevTools console.
 - Route CSS transforms, opacity, filters, video/canvas layers, and scrolling through a retained GPU layer tree with damage tracking.
 - Add frame pacing, vsync, GPU memory budgeting, context loss/recovery, and fallback to software compositing.

@@ -7,9 +7,11 @@ use std.gc_async_mut.gpu.browser_engine.webgpu_resources.{
     WEBGPU_BUFFER_USAGE_COPY_DST, WEBGPU_BUFFER_USAGE_UNIFORM,
     WEBGPU_TEXTURE_USAGE_TEXTURE_BINDING, WEBGPU_TEXTURE_USAGE_COPY_DST,
     WEBGPU_SHADER_STAGE_VERTEX, WEBGPU_SHADER_STAGE_FRAGMENT,
+    WEBGPU_TEXTURE_DIMENSION_2D, WEBGPU_TEXTURE_DIMENSION_3D, WEBGPU_TEXTURE_VIEW_DIMENSION_CUBE,
     GPUBindGroupLayoutEntry, GPUBindGroupEntry,
     webgpu_validate_buffer_descriptor, webgpu_validate_texture_descriptor,
-    webgpu_validate_sampler_descriptor, webgpu_validate_bind_group_layout_descriptor
+    webgpu_validate_extended_texture_descriptor, webgpu_validate_sampler_descriptor,
+    webgpu_validate_bind_group_layout_descriptor
 }
 
 describe "Browser WebGPU resources":
@@ -77,6 +79,22 @@ describe "Browser WebGPU resources":
         it "rejects unsupported texture usage bits":
             val err = webgpu_validate_texture_descriptor(16, 16, 1, GPU_TEXTURE_FORMAT_RGBA8_UNORM, 64)
             expect(err).to_equal("GPUTexture usage is not supported")
+
+        it "accepts M26 texture descriptors for 3d arrays msaa and cubemaps":
+            val tex3d = webgpu_validate_extended_texture_descriptor(32, 32, 8, GPU_TEXTURE_FORMAT_RGBA8_UNORM, WEBGPU_TEXTURE_USAGE_TEXTURE_BINDING, WEBGPU_TEXTURE_DIMENSION_3D, 1, 1, WEBGPU_TEXTURE_DIMENSION_3D)
+            val msaa = webgpu_validate_extended_texture_descriptor(64, 64, 1, GPU_TEXTURE_FORMAT_RGBA8_UNORM, WEBGPU_TEXTURE_USAGE_TEXTURE_BINDING, WEBGPU_TEXTURE_DIMENSION_2D, 1, 4, WEBGPU_TEXTURE_DIMENSION_2D)
+            val cube = webgpu_validate_extended_texture_descriptor(128, 128, 6, GPU_TEXTURE_FORMAT_RGBA8_UNORM, WEBGPU_TEXTURE_USAGE_TEXTURE_BINDING, WEBGPU_TEXTURE_DIMENSION_2D, 1, 1, WEBGPU_TEXTURE_VIEW_DIMENSION_CUBE)
+            expect(tex3d).to_equal("")
+            expect(msaa).to_equal("")
+            expect(cube).to_equal("")
+
+        it "rejects invalid M26 texture descriptor combinations":
+            val bad_msaa_mips = webgpu_validate_extended_texture_descriptor(64, 64, 1, GPU_TEXTURE_FORMAT_RGBA8_UNORM, WEBGPU_TEXTURE_USAGE_TEXTURE_BINDING, WEBGPU_TEXTURE_DIMENSION_2D, 2, 4, WEBGPU_TEXTURE_DIMENSION_2D)
+            val bad_cube_layers = webgpu_validate_extended_texture_descriptor(128, 128, 5, GPU_TEXTURE_FORMAT_RGBA8_UNORM, WEBGPU_TEXTURE_USAGE_TEXTURE_BINDING, WEBGPU_TEXTURE_DIMENSION_2D, 1, 1, WEBGPU_TEXTURE_VIEW_DIMENSION_CUBE)
+            val bad_cube_shape = webgpu_validate_extended_texture_descriptor(128, 64, 6, GPU_TEXTURE_FORMAT_RGBA8_UNORM, WEBGPU_TEXTURE_USAGE_TEXTURE_BINDING, WEBGPU_TEXTURE_DIMENSION_2D, 1, 1, WEBGPU_TEXTURE_VIEW_DIMENSION_CUBE)
+            expect(bad_msaa_mips).to_equal("GPUTexture multisampled textures must have one mip level")
+            expect(bad_cube_layers).to_equal("GPUTexture cube views require exactly six array layers")
+            expect(bad_cube_shape).to_equal("GPUTexture cube views require square faces")
 
         it "rejects unsupported sampler modes":
             val err = webgpu_validate_sampler_descriptor("wrap", "repeat", "nearest", "linear")

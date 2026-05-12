@@ -203,10 +203,10 @@ Observed release-compiler benchmark sample:
 
 Notes:
 - The active Rust compiler now lowers proven `[u8]` reads to `rt_bytes_u8_at` with an unboxed native index, and `rt_bytes_u8_at` direct-reads the runtime array instead of dispatching through `rt_array_get`.
-- Proven `[u8]` writes now lower to existing `rt_array_set` with a raw index and boxed byte value, skipping the generic `rt_index_set` dispatcher. Non-`[u8]`, string, dict, tuple, and unproven cases keep the generic fallback.
+- Proven `[u8]` writes now lower to `rt_bytes_u8_set` with raw index and byte value, skipping the generic `rt_index_set` dispatcher and value boxing. Non-`[u8]`, string, dict, tuple, and unproven cases keep the generic fallback.
 - Debug native compile/run passed checksum parity for the benchmark (`xxhash64` checksum `8859781897575972822`, `chacha20` checksum `2882969938414545715`). Debug-runtime throughput is not comparable to release samples.
-- Disassembly of the debug native benchmark contains `rt_bytes_u8_at` and `rt_array_set` but no `rt_index_get` or `rt_index_set` symbols/calls, confirming the typed byte-index fast path is used.
-- A new `rt_bytes_u8_set` helper was deferred because the current native link surface did not resolve the newly exported runtime symbol in this path. The conservative write fast path uses the already-linked `rt_array_set`.
+- Disassembly of the debug native benchmark contains typed byte helpers but no `rt_index_get` or `rt_index_set` symbols/calls, confirming the typed byte-index fast path is used.
+- `rt_bytes_u8_set` is now exported through the runtime, interpreter externs, native runtime FFI, and ELF symbol resolver so native AOT can link the write fast path directly.
 - Spawned debugger analysis found the prior full-inline ChaCha `Illegal instruction` was likely the native backend's missing-return trap path (`ud2`), not an invalid generated arithmetic opcode. Retry full block inlining only after ensuring the function ends with an explicit value expression.
 
 ---
