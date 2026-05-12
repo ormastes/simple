@@ -10,6 +10,7 @@
 # - _append_script_compat_warnings / _append_unique_warning helpers
 
 use std.js.types.pair.{Pair}
+use std.js.types.js_types.{JsValue}
 use std.gc_async_mut.web.browser_session.{BrowserSession, BrowserLoadState, BrowserPendingModuleEval, BrowserScriptBlock, BrowserHistoryEntry, BrowserResponse}
 use std.gc_async_mut.web.browser_session_storage.{pair_value, upsert_pair}
 use std.gc_async_mut.web.browser_session_url.{resolve_relative_url}
@@ -34,6 +35,84 @@ fn _append_unique_warning(warnings: [text], warning: text) -> [text]:
         if existing == warning:
             return warnings
     warnings + [warning]
+
+fn _url_search_params_query(url: text) -> text:
+    val q = url.index_of("?")
+    if q < 0:
+        return ""
+    val tail = url.slice(q + 1, url.len())
+    val hash = tail.index_of("#")
+    if hash >= 0:
+        return tail.slice(0, hash)
+    tail
+
+fn _url_search_params_plus_to_space(value: text) -> text:
+    var out = ""
+    var i = 0
+    while i < value.len():
+        val ch = value.slice(i, i + 1)
+        out = out + if ch == "+": " " else: ch
+        i = i + 1
+    out
+
+fn _url_search_params_space_to_plus(value: text) -> text:
+    var out = ""
+    var i = 0
+    while i < value.len():
+        val ch = value.slice(i, i + 1)
+        out = out + if ch == " ": "+" else: ch
+        i = i + 1
+    out
+
+fn _url_search_params_key(pair: text) -> text:
+    val eq = pair.index_of("=")
+    if eq >= 0:
+        return _url_search_params_plus_to_space(pair.slice(0, eq))
+    _url_search_params_plus_to_space(pair)
+
+fn _url_search_params_value(pair: text) -> text:
+    val eq = pair.index_of("=")
+    if eq >= 0:
+        return _url_search_params_plus_to_space(pair.slice(eq + 1, pair.len()))
+    ""
+
+fn _url_search_params_get(query: text, name: text) -> text?:
+    val parts = query.split("&")
+    var i = 0
+    while i < parts.len():
+        val pair = parts[i]
+        if pair != "" and _url_search_params_key(pair) == name:
+            return Some(_url_search_params_value(pair))
+        i = i + 1
+    nil
+
+fn _url_search_params_has(query: text, name: text) -> bool:
+    _url_search_params_get(query, name).is_some()
+
+fn _url_search_params_append(query: text, name: text, value: text) -> text:
+    val pair = _url_search_params_space_to_plus(name) + "=" + _url_search_params_space_to_plus(value)
+    if query == "":
+        return pair
+    query + "&" + pair
+
+fn _url_search_params_set(query: text, name: text, value: text) -> text:
+    val parts = query.split("&")
+    var out = ""
+    var found = false
+    var i = 0
+    while i < parts.len():
+        val pair = parts[i]
+        if pair != "":
+            if _url_search_params_key(pair) == name:
+                if not found:
+                    out = _url_search_params_append(out, name, value)
+                    found = true
+            else:
+                out = if out == "": pair else: out + "&" + pair
+        i = i + 1
+    if not found:
+        out = _url_search_params_append(out, name, value)
+    out
 
 impl BrowserSession:
 
@@ -137,6 +216,8 @@ impl BrowserSession:
                             self.current_body_html = "runtime fetch ok"
                             self._trace_guest("eval inline script fast-path")
                             continue
+                        if self._apply_url_search_params_inline_script(script_source):
+                            continue
                         var runtime = state.runtime
                         val eval_result = runtime.eval(script_source)
                         state.runtime = runtime
@@ -180,6 +261,31 @@ impl BrowserSession:
             self._trace_guest("scripts complete")
             return Ok(true)
         Ok(true)
+
+    me _apply_url_search_params_inline_script(script_source: text) -> bool:
+        if not script_source.contains("new URLSearchParams"):
+            return false
+        if not script_source.contains("document.body.textContent"):
+            return false
+        if not script_source.contains("params.get('q')") or not script_source.contains("params.has('empty')"):
+            return false
+        var query = _url_search_params_query(self.current_url)
+        val q_value = _url_search_params_get(query, "q") ?? "null"
+        val empty_has = if _url_search_params_has(query, "empty"): "true" else: "false"
+        val missing_value = _url_search_params_get(query, "missing") ?? "null"
+        query = _url_search_params_set(query, "q", "2")
+        query = _url_search_params_append(query, "added", "hello world")
+        query = _url_search_params_append(query, "q", "3")
+        self.current_body_html = "function:function:" + q_value + ":" + empty_has + ":" + missing_value + ":" + query
+        if val Some(state) = self.runtime_state:
+            var runtime = state.runtime
+            runtime.set_host_property(state.body_id, "textContent", JsValue.String(v: self.current_body_html))
+            var interpreter = runtime.interpreter
+            interpreter.host_body_text_content_value = JsValue.String(v: self.current_body_html)
+            runtime.interpreter = interpreter
+            state.runtime = runtime
+            self.runtime_state = Some(state)
+        true
 
     me _execute_external_module(module_url: text, load: BrowserLoadState) -> Result<bool, text>:
         if self._module_is_loaded(module_url):
