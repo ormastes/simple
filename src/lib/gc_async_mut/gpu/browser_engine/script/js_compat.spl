@@ -275,16 +275,220 @@ pub fn js_array_slice(arr: [text], start: i32, end_idx: i32) -> [text]:
     result
 
 # =========================================================================
-# JSON (stubs)
+# JSON
 # =========================================================================
 
+class JsJsonCompatParseResult:
+    value: text
+    pos: i64
+    ok: bool
+    is_string: bool
+
+    static fn create(value: text, pos: i64, ok: bool, is_string: bool) -> JsJsonCompatParseResult:
+        JsJsonCompatParseResult(value: value, pos: pos, ok: ok, is_string: is_string)
+
 pub fn js_json_parse(s: text) -> text:
-    """Parse a JSON string. # STUB: returns input as-is."""
-    s
+    """Parse JSON text into a deterministic Simple-compatible text value."""
+    val trimmed = s.trim()
+    if trimmed.len() == 0:
+        return ""
+    val parsed = _js_json_parse_value(trimmed, 0)
+    val end_pos = _js_json_skip_ws(trimmed, parsed.pos)
+    if not parsed.ok or end_pos != trimmed.len():
+        return ""
+    if parsed.is_string:
+        return parsed.value
+    parsed.value
 
 pub fn js_json_stringify(v: text) -> text:
-    """Stringify a value to JSON. # STUB: returns input as-is."""
-    v
+    """Stringify a text value as a JSON string."""
+    _js_json_quote(v)
+
+fn _js_json_parse_value(data: text, pos: i64) -> JsJsonCompatParseResult:
+    val p = _js_json_skip_ws(data, pos)
+    if p >= data.len():
+        return JsJsonCompatParseResult.create("", p, false, false)
+    val ch = data.char_at(p)
+    if ch == "\"":
+        return _js_json_parse_string(data, p)
+    if ch == "{":
+        return _js_json_parse_object(data, p)
+    if ch == "[":
+        return _js_json_parse_array(data, p)
+    if data.slice(p, p + 4) == "true":
+        return JsJsonCompatParseResult.create("true", p + 4, true, false)
+    if data.slice(p, p + 5) == "false":
+        return JsJsonCompatParseResult.create("false", p + 5, true, false)
+    if data.slice(p, p + 4) == "null":
+        return JsJsonCompatParseResult.create("null", p + 4, true, false)
+    _js_json_parse_number(data, p)
+
+fn _js_json_parse_string(data: text, pos: i64) -> JsJsonCompatParseResult:
+    var i = pos + 1
+    var result = ""
+    while i < data.len():
+        val ch = data.char_at(i)
+        if ch == "\"":
+            return JsJsonCompatParseResult.create(result, i + 1, true, true)
+        if ch == "\\":
+            if i + 1 >= data.len():
+                return JsJsonCompatParseResult.create("", i, false, true)
+            val esc = data.char_at(i + 1)
+            if esc == "\"" or esc == "\\" or esc == "/":
+                result = result + esc
+                i = i + 2
+            else:
+                if esc == "n":
+                    result = result + "\n"
+                    i = i + 2
+                else:
+                    if esc == "t":
+                        result = result + "\t"
+                        i = i + 2
+                    else:
+                        if esc == "r":
+                            result = result + "\r"
+                            i = i + 2
+                        else:
+                            if esc == "b":
+                                result = result + "\b"
+                                i = i + 2
+                            else:
+                                if esc == "f":
+                                    result = result + "\f"
+                                    i = i + 2
+                                else:
+                                    if esc == "u" and i + 5 < data.len():
+                                        result = result + "\\u" + data.slice(i + 2, i + 6)
+                                        i = i + 6
+                                    else:
+                                        return JsJsonCompatParseResult.create("", i, false, true)
+        else:
+            result = result + ch
+            i = i + 1
+    JsJsonCompatParseResult.create("", i, false, true)
+
+fn _js_json_parse_number(data: text, pos: i64) -> JsJsonCompatParseResult:
+    var i = pos
+    if i < data.len() and data.char_at(i) == "-":
+        i = i + 1
+    val digit_start = i
+    while i < data.len() and _js_json_is_digit(data.char_at(i)):
+        i = i + 1
+    if i == digit_start:
+        return JsJsonCompatParseResult.create("", pos, false, false)
+    if i < data.len() and data.char_at(i) == ".":
+        i = i + 1
+        val frac_start = i
+        while i < data.len() and _js_json_is_digit(data.char_at(i)):
+            i = i + 1
+        if i == frac_start:
+            return JsJsonCompatParseResult.create("", pos, false, false)
+    if i < data.len() and (data.char_at(i) == "e" or data.char_at(i) == "E"):
+        i = i + 1
+        if i < data.len() and (data.char_at(i) == "+" or data.char_at(i) == "-"):
+            i = i + 1
+        val exp_start = i
+        while i < data.len() and _js_json_is_digit(data.char_at(i)):
+            i = i + 1
+        if i == exp_start:
+            return JsJsonCompatParseResult.create("", pos, false, false)
+    JsJsonCompatParseResult.create(data.slice(pos, i), i, true, false)
+
+fn _js_json_parse_object(data: text, pos: i64) -> JsJsonCompatParseResult:
+    var i = _js_json_skip_ws(data, pos + 1)
+    var result = "{"
+    var first = true
+    if i < data.len() and data.char_at(i) == "}":
+        return JsJsonCompatParseResult.create("{}", i + 1, true, false)
+    while i < data.len():
+        val key = _js_json_parse_string(data, i)
+        if not key.ok:
+            return JsJsonCompatParseResult.create("", i, false, false)
+        i = _js_json_skip_ws(data, key.pos)
+        if i >= data.len() or data.char_at(i) != ":":
+            return JsJsonCompatParseResult.create("", i, false, false)
+        val value = _js_json_parse_value(data, i + 1)
+        if not value.ok:
+            return JsJsonCompatParseResult.create("", i, false, false)
+        if not first:
+            result = result + ","
+        result = result + _js_json_quote(key.value) + ":" + _js_json_emit(value)
+        first = false
+        i = _js_json_skip_ws(data, value.pos)
+        if i < data.len() and data.char_at(i) == "}":
+            return JsJsonCompatParseResult.create(result + "}", i + 1, true, false)
+        if i >= data.len() or data.char_at(i) != ",":
+            return JsJsonCompatParseResult.create("", i, false, false)
+        i = _js_json_skip_ws(data, i + 1)
+    JsJsonCompatParseResult.create("", i, false, false)
+
+fn _js_json_parse_array(data: text, pos: i64) -> JsJsonCompatParseResult:
+    var i = _js_json_skip_ws(data, pos + 1)
+    var result = "["
+    var first = true
+    if i < data.len() and data.char_at(i) == "]":
+        return JsJsonCompatParseResult.create("[]", i + 1, true, false)
+    while i < data.len():
+        val value = _js_json_parse_value(data, i)
+        if not value.ok:
+            return JsJsonCompatParseResult.create("", i, false, false)
+        if not first:
+            result = result + ","
+        result = result + _js_json_emit(value)
+        first = false
+        i = _js_json_skip_ws(data, value.pos)
+        if i < data.len() and data.char_at(i) == "]":
+            return JsJsonCompatParseResult.create(result + "]", i + 1, true, false)
+        if i >= data.len() or data.char_at(i) != ",":
+            return JsJsonCompatParseResult.create("", i, false, false)
+        i = _js_json_skip_ws(data, i + 1)
+    JsJsonCompatParseResult.create("", i, false, false)
+
+fn _js_json_emit(value: JsJsonCompatParseResult) -> text:
+    if value.is_string:
+        return _js_json_quote(value.value)
+    value.value
+
+fn _js_json_quote(value: text) -> text:
+    "\"" + _js_json_escape(value) + "\""
+
+fn _js_json_escape(value: text) -> text:
+    var result = ""
+    var i = 0
+    while i < value.len():
+        val ch = value.char_at(i)
+        if ch == "\"":
+            result = result + "\\\""
+        else:
+            if ch == "\\":
+                result = result + "\\\\"
+            else:
+                if ch == "\n":
+                    result = result + "\\n"
+                else:
+                    if ch == "\t":
+                        result = result + "\\t"
+                    else:
+                        if ch == "\r":
+                            result = result + "\\r"
+                        else:
+                            result = result + ch
+        i = i + 1
+    result
+
+fn _js_json_skip_ws(data: text, pos: i64) -> i64:
+    var i = pos
+    while i < data.len():
+        val ch = data.char_at(i)
+        if ch == " " or ch == "\n" or ch == "\t" or ch == "\r":
+            i = i + 1
+        else:
+            return i
+    i
+
+fn _js_json_is_digit(ch: text) -> bool:
+    ch >= "0" and ch <= "9"
 
 # =========================================================================
 # URI Encoding
