@@ -47,6 +47,19 @@ pub val WEBGL_LINES: i32 = 1
 pub val WEBGL_POINTS: i32 = 0
 pub val WEBGL_TEXTURE_2D: i32 = 3553
 pub val WEBGL_TEXTURE_BINDING_2D: i32 = 32873
+pub val WEBGL_TEXTURE_MIN_FILTER: i32 = 10241
+pub val WEBGL_TEXTURE_MAG_FILTER: i32 = 10240
+pub val WEBGL_TEXTURE_WRAP_S: i32 = 10242
+pub val WEBGL_TEXTURE_WRAP_T: i32 = 10243
+pub val WEBGL_NEAREST: i32 = 9728
+pub val WEBGL_LINEAR: i32 = 9729
+pub val WEBGL_NEAREST_MIPMAP_NEAREST: i32 = 9984
+pub val WEBGL_LINEAR_MIPMAP_NEAREST: i32 = 9985
+pub val WEBGL_NEAREST_MIPMAP_LINEAR: i32 = 9986
+pub val WEBGL_LINEAR_MIPMAP_LINEAR: i32 = 9987
+pub val WEBGL_CLAMP_TO_EDGE: i32 = 33071
+pub val WEBGL_MIRRORED_REPEAT: i32 = 33648
+pub val WEBGL_REPEAT: i32 = 10497
 pub val WEBGL_FRAMEBUFFER: i32 = 36160
 pub val WEBGL_FRAMEBUFFER_BINDING: i32 = 36006
 pub val WEBGL_COLOR_ATTACHMENT0: i32 = 36064
@@ -97,6 +110,11 @@ pub class WebGLTextureHandle:
     format: i32
     pixel_type: i32
     initialized: bool
+    min_filter: i32
+    mag_filter: i32
+    wrap_s: i32
+    wrap_t: i32
+    mipmap_generated: bool
     pixels: [u8]
 
 pub class WebGLFramebufferHandle:
@@ -259,8 +277,8 @@ pub class WebGLContext:
 
     me create_texture() -> WebGLTextureHandle:
         if not self.ensure_context_available():
-            return WebGLTextureHandle(id: -1, valid: false, error: "context lost", target: 0, width: 0, height: 0, level: 0, internal_format: 0, format: 0, pixel_type: 0, initialized: false, pixels: [])
-        val handle = WebGLTextureHandle(id: self.next_texture_id, valid: true, error: "", target: 0, width: 0, height: 0, level: 0, internal_format: 0, format: 0, pixel_type: 0, initialized: false, pixels: [])
+            return webgl_invalid_texture_handle("context lost")
+        val handle = webgl_default_texture_handle(self.next_texture_id, true, "")
         self.next_texture_id = self.next_texture_id + 1
         self.textures.push(handle)
         handle
@@ -844,6 +862,61 @@ pub class WebGLContext:
         self.last_error = WEBGL_INVALID_ENUM
         false
 
+    me tex_parameter_i(target: i32, pname: i32, param: i32) -> bool:
+        if not self.ensure_context_available():
+            return false
+        val texture_index = self.bound_texture_index_for_upload(target)
+        if texture_index < 0:
+            return false
+        var texture = self.textures[texture_index]
+        if pname == WEBGL_TEXTURE_MIN_FILTER:
+            if not webgl_valid_texture_min_filter(param):
+                self.last_error = WEBGL_INVALID_ENUM
+                return false
+            texture.min_filter = param
+            self.textures[texture_index] = texture
+            return true
+        if pname == WEBGL_TEXTURE_MAG_FILTER:
+            if param != WEBGL_NEAREST and param != WEBGL_LINEAR:
+                self.last_error = WEBGL_INVALID_ENUM
+                return false
+            texture.mag_filter = param
+            self.textures[texture_index] = texture
+            return true
+        if pname == WEBGL_TEXTURE_WRAP_S:
+            if not webgl_valid_texture_wrap(param):
+                self.last_error = WEBGL_INVALID_ENUM
+                return false
+            texture.wrap_s = param
+            self.textures[texture_index] = texture
+            return true
+        if pname == WEBGL_TEXTURE_WRAP_T:
+            if not webgl_valid_texture_wrap(param):
+                self.last_error = WEBGL_INVALID_ENUM
+                return false
+            texture.wrap_t = param
+            self.textures[texture_index] = texture
+            return true
+        self.last_error = WEBGL_INVALID_ENUM
+        false
+
+    me generate_mipmap(target: i32) -> bool:
+        if not self.ensure_context_available():
+            return false
+        val texture_index = self.bound_texture_index_for_upload(target)
+        if texture_index < 0:
+            return false
+        var texture = self.textures[texture_index]
+        if not texture.initialized or texture.width <= 0 or texture.height <= 0:
+            self.last_error = WEBGL_INVALID_OPERATION
+            return false
+        if self.version == 1 and (not webgl_power_of_two(texture.width) or not webgl_power_of_two(texture.height)):
+            self.last_error = WEBGL_INVALID_OPERATION
+            return false
+        texture.mipmap_generated = true
+        self.textures[texture_index] = texture
+        true
+
     me tex_image_2d(target: i32, level: i32, internal_format: i32, width: i32, height: i32, border: i32, format: i32, pixel_type: i32, pixels: [u8]) -> bool:
         if not self.ensure_context_available():
             return false
@@ -865,6 +938,7 @@ pub class WebGLContext:
         texture.format = format
         texture.pixel_type = pixel_type
         texture.initialized = true
+        texture.mipmap_generated = false
         if pixels.len() == 0:
             texture.pixels = webgl_zero_bytes(required)
         else:
@@ -1139,6 +1213,12 @@ pub fn webgl_parameter_int(value: i32) -> WebGLParameterValue:
 pub fn webgl_empty_active_info() -> WebGLActiveInfo:
     WebGLActiveInfo(name: "", size: 0, data_type: 0, location: -1)
 
+pub fn webgl_invalid_texture_handle(error: text) -> WebGLTextureHandle:
+    webgl_default_texture_handle(-1, false, error)
+
+pub fn webgl_default_texture_handle(id: i32, valid: bool, error: text) -> WebGLTextureHandle:
+    WebGLTextureHandle(id: id, valid: valid, error: error, target: 0, width: 0, height: 0, level: 0, internal_format: 0, format: 0, pixel_type: 0, initialized: false, min_filter: WEBGL_LINEAR_MIPMAP_LINEAR, mag_filter: WEBGL_LINEAR, wrap_s: WEBGL_REPEAT, wrap_t: WEBGL_REPEAT, mipmap_generated: false, pixels: [])
+
 pub fn webgl_attached_shader_count(program: WebGLProgramHandle) -> i32:
     var count = 0
     if program.vertex_shader_id >= 0:
@@ -1278,6 +1358,20 @@ pub fn webgl_valid_buffer_usage(usage: i32) -> bool:
 
 pub fn webgl_valid_draw_mode(mode: i32) -> bool:
     mode == WEBGL_TRIANGLES or mode == WEBGL_LINES or mode == WEBGL_POINTS
+
+pub fn webgl_valid_texture_min_filter(param: i32) -> bool:
+    param == WEBGL_NEAREST or param == WEBGL_LINEAR or param == WEBGL_NEAREST_MIPMAP_NEAREST or param == WEBGL_LINEAR_MIPMAP_NEAREST or param == WEBGL_NEAREST_MIPMAP_LINEAR or param == WEBGL_LINEAR_MIPMAP_LINEAR
+
+pub fn webgl_valid_texture_wrap(param: i32) -> bool:
+    param == WEBGL_CLAMP_TO_EDGE or param == WEBGL_REPEAT or param == WEBGL_MIRRORED_REPEAT
+
+pub fn webgl_power_of_two(value: i32) -> bool:
+    if value <= 0:
+        return false
+    var candidate = 1
+    while candidate < value:
+        candidate = candidate * 2
+    candidate == value
 
 pub fn webgl_texture_format_bytes(format: i32) -> i32:
     if format == WEBGL_RGB:

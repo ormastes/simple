@@ -12,7 +12,10 @@ use std.gc_async_mut.gpu.browser_engine.webgl_context.{
     WEBGL_TRIANGLES, WEBGL_LINES, WEBGL_UNSIGNED_SHORT, WEBGL_UNSIGNED_INT,
     WEBGL_TEXTURE_2D, WEBGL_FRAMEBUFFER, WEBGL_COLOR_ATTACHMENT0,
     WEBGL_FRAMEBUFFER_COMPLETE, WEBGL_FRAMEBUFFER_INCOMPLETE_ATTACHMENT,
-    WEBGL_FRAMEBUFFER_INCOMPLETE_MISSING_ATTACHMENT, WEBGL_UNPACK_ALIGNMENT,
+    WEBGL_FRAMEBUFFER_INCOMPLETE_MISSING_ATTACHMENT, WEBGL_TEXTURE_MIN_FILTER,
+    WEBGL_TEXTURE_MAG_FILTER, WEBGL_TEXTURE_WRAP_S, WEBGL_TEXTURE_WRAP_T,
+    WEBGL_NEAREST, WEBGL_LINEAR, WEBGL_LINEAR_MIPMAP_LINEAR,
+    WEBGL_CLAMP_TO_EDGE, WEBGL_REPEAT, WEBGL_UNPACK_ALIGNMENT,
     WEBGL_UNPACK_FLIP_Y_WEBGL, WEBGL_UNPACK_PREMULTIPLY_ALPHA_WEBGL,
     WEBGL_RGB, WEBGL_RGBA, WEBGL_UNSIGNED_BYTE, WEBGL_COLOR_BUFFER_BIT,
     webgl_create_context, webgl_is_supported_context_name,
@@ -231,6 +234,41 @@ describe "Browser WebGL context":
             expect(ctx.unpack_premultiply_alpha).to_equal(false)
             expect(ctx.pixel_store_i(WEBGL_UNPACK_ALIGNMENT, 3)).to_equal(false)
             expect(ctx.get_error()).to_equal(WEBGL_INVALID_VALUE)
+
+        it "tracks texture filtering and wrapping parameters":
+            var ctx = webgl_create_context(1, 320, 240)
+            val texture = ctx.create_texture()
+            expect(texture.min_filter).to_equal(WEBGL_LINEAR_MIPMAP_LINEAR)
+            expect(texture.mag_filter).to_equal(WEBGL_LINEAR)
+            expect(texture.wrap_s).to_equal(WEBGL_REPEAT)
+            expect(ctx.tex_parameter_i(WEBGL_TEXTURE_2D, WEBGL_TEXTURE_MIN_FILTER, WEBGL_NEAREST)).to_equal(false)
+            expect(ctx.get_error()).to_equal(WEBGL_INVALID_OPERATION)
+            expect(ctx.bind_texture(WEBGL_TEXTURE_2D, texture.id)).to_equal(true)
+            expect(ctx.tex_parameter_i(WEBGL_TEXTURE_2D, WEBGL_TEXTURE_MIN_FILTER, WEBGL_NEAREST)).to_equal(true)
+            expect(ctx.tex_parameter_i(WEBGL_TEXTURE_2D, WEBGL_TEXTURE_MAG_FILTER, WEBGL_LINEAR)).to_equal(true)
+            expect(ctx.tex_parameter_i(WEBGL_TEXTURE_2D, WEBGL_TEXTURE_WRAP_S, WEBGL_CLAMP_TO_EDGE)).to_equal(true)
+            expect(ctx.tex_parameter_i(WEBGL_TEXTURE_2D, WEBGL_TEXTURE_WRAP_T, WEBGL_REPEAT)).to_equal(true)
+            expect(ctx.textures[0].min_filter).to_equal(WEBGL_NEAREST)
+            expect(ctx.textures[0].wrap_s).to_equal(WEBGL_CLAMP_TO_EDGE)
+            expect(ctx.tex_parameter_i(WEBGL_TEXTURE_2D, WEBGL_TEXTURE_MAG_FILTER, WEBGL_LINEAR_MIPMAP_LINEAR)).to_equal(false)
+            expect(ctx.get_error()).to_equal(WEBGL_INVALID_ENUM)
+            expect(ctx.tex_parameter_i(WEBGL_TEXTURE_2D, 999, WEBGL_LINEAR)).to_equal(false)
+            expect(ctx.get_error()).to_equal(WEBGL_INVALID_ENUM)
+
+        it "generates mipmaps for initialized power-of-two textures":
+            var ctx = webgl_create_context(1, 320, 240)
+            val texture = ctx.create_texture()
+            expect(ctx.bind_texture(WEBGL_TEXTURE_2D, texture.id)).to_equal(true)
+            expect(ctx.generate_mipmap(WEBGL_TEXTURE_2D)).to_equal(false)
+            expect(ctx.get_error()).to_equal(WEBGL_INVALID_OPERATION)
+            expect(ctx.tex_image_2d(WEBGL_TEXTURE_2D, 0, WEBGL_RGBA, 3, 2, 0, WEBGL_RGBA, WEBGL_UNSIGNED_BYTE, [])).to_equal(true)
+            expect(ctx.generate_mipmap(WEBGL_TEXTURE_2D)).to_equal(false)
+            expect(ctx.get_error()).to_equal(WEBGL_INVALID_OPERATION)
+            expect(ctx.tex_image_2d(WEBGL_TEXTURE_2D, 0, WEBGL_RGBA, 4, 2, 0, WEBGL_RGBA, WEBGL_UNSIGNED_BYTE, [])).to_equal(true)
+            expect(ctx.generate_mipmap(WEBGL_TEXTURE_2D)).to_equal(true)
+            expect(ctx.textures[0].mipmap_generated).to_equal(true)
+            expect(ctx.tex_image_2d(WEBGL_TEXTURE_2D, 0, WEBGL_RGBA, 4, 4, 0, WEBGL_RGBA, WEBGL_UNSIGNED_BYTE, [])).to_equal(true)
+            expect(ctx.textures[0].mipmap_generated).to_equal(false)
 
         it "blocks texture operations while context is lost":
             var ctx = webgl_create_context(1, 320, 240)
