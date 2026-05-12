@@ -1,6 +1,6 @@
 # Plan: Port Rust/C Algorithms to Pure Simple + Optimize Compiler
 
-## Status: Phases 1-5 DONE; Phase 6A/6B DONE; Phase 6C compiler perf follow-up remains
+## Status: Phases 1-5 DONE; Phase 6A/6B DONE; Phase 6C compiler perf follow-up partly fixed; remaining gap is runtime/native optimization
 
 ### 2026-05-12 Codex completion update
 
@@ -27,6 +27,21 @@ Notes:
 - The Simple benchmark is native compiled with `--cpu native --opt-level aggressive`; checksums match C/Rust, so the gap is performance, not correctness.
 - The benchmark uses a local scalar ChaCha20 implementation because importing `std.crypto.chacha20` pulls std SIMD float vector code into native codegen and fails with `undefined symbol: rt_simd_add_f32x4`. That is a compiler/backend blocker for benchmarking the optimized stdlib SIMD path.
 - Initial native benchmark code had to avoid top-level `val` constants because the native binary observed them as zero; use function constants until top-level native initialization is fixed.
+
+### 2026-05-12 Phase 6C fix update
+
+Command:
+`test/perf/port_algorithms/run_port_algorithm_benchmarks.shs`
+
+| Algorithm | C MB/s | Rust MB/s | Simple native MB/s | Checksum parity | Status |
+|-----------|--------|-----------|--------------------|-----------------|--------|
+| XXHash64 | 8028 | 8469 | 155 | PASS | Improved 9.7x, still below threshold |
+| ChaCha20 | 187 | 203 | 14 | PASS | Improved 2x from baseline, still below threshold |
+
+Notes:
+- `src/os/crypto/xxhash.spl` now has a direct one-shot hot path that does not depend on the stale active compiler inlining `_xxh64_*` helpers.
+- `test/perf/port_algorithms/port_algorithms_simple.spl` no longer carries unused `QRWords`, `quarter`, `push_word`, `load32`, or `rotl32` helpers in the benchmark hot code; ChaCha loads and rotates are direct expressions.
+- Native disassembly for the benchmark no longer shows calls to removed ChaCha helper functions, but it still calls `chacha20_block_local` per block and `xxhash64` per benchmark iteration as expected. Remaining gap is dominated by Simple array/index/runtime overhead and the active `bin/simple` not yet reflecting deeper compiler optimizer changes.
 
 ---
 

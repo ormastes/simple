@@ -75,10 +75,15 @@ Production-level RISC-V system:
   objects, arrays, `text`, or runtime PCI/display/network externs.
 - `src/os/kernel/arch/riscv64/boot/freestanding_runtime.c` is compiled as a
   RISC-V boot object and bridges `rt_alloc` to the noalloc heap. It also
-  provides no-op `rt_free` plus libc-free `rt_memcpy`/`rt_memset`, so raw
-  struct allocation can link without hosted malloc.
+  provides no-op `rt_free`, libc-free `rt_memcpy`/`rt_memset`, MMIO helpers,
+  identity-mode `vmm_map_page`, service extern fallbacks, and a small hosted
+  value ABI subset for strings, arrays, tuples, enums, scalar conversion, and
+  indexing.
 - `build/simpleos-rv64.elf` links as an ELF64 RISC-V executable at entry
   `0x80200000`.
+- A temporary higher-level probe of `riscv_boot_mem_init -> os_main` now links
+  to `build/simpleos-rv64-hosted-probe.elf`, proving the previous hosted
+  value-runtime unresolveds are no longer the link blocker.
 
 **Cleared 2026-05-12:**
 
@@ -92,24 +97,24 @@ Production-level RISC-V system:
    - Fixed: flags were unused; dispatch now passes only op id, result, and
      timestamp.
 
-**Remaining after B1: hosted OS/runtime ABI handoff**
+**Remaining after B1: runtime execution validation**
 
-Re-enabling the higher-level handoff (`riscv_boot_mem_init -> os_main`) pulls
-hosted-style PMM/heap/log/service code and still fails on missing freestanding
-runtime symbols beyond raw allocation, such as `rt_string_new`, `rt_array_push`,
-`rt_enum_new`, `rt_native_eq`, `rt_mmio_read_u64`, and `log_raw_println`. Adding
-`--source src/runtime` does not resolve this; the missing piece is either a
-RISC-V-linkable Simple runtime ABI for that value model or narrower noalloc
-service/net/HTTP shims. The current noalloc boot path proves the ELF can cross
-module boundaries, persist boot metadata, publish a scalar memory window,
-allocate raw pages, initialize a raw heap, satisfy raw `rt_alloc`, emit byte log
-markers, and publish service readiness state without triggering hosted runtime
-dependencies.
+The higher-level handoff (`riscv_boot_mem_init -> os_main`) now links in a
+hosted probe after adding the freestanding value ABI subset. The production
+`boot.spl` intentionally remains on the noalloc path until the hosted handoff is
+QEMU-smoked for runtime behavior, because the new runtime bridge is a minimal
+baremetal subset rather than the full hosted runtime.
 
-**Next:** either bridge hosted arrays, `text`, enum values, and formatted
-logging to a freestanding runtime ABI, or continue carving noalloc net/HTTP
-entry points that avoid the hosted value model before re-introducing netstack,
-TLS, and HTTP closures.
+The current noalloc boot path proves the ELF can cross module boundaries,
+persist boot metadata, publish a scalar memory window, allocate raw pages,
+initialize a raw heap, satisfy raw `rt_alloc`, emit byte log markers, and
+publish service readiness state without triggering hosted runtime dependencies.
+The hosted probe additionally proves PMM/heap/log/service code can link against
+the freestanding value ABI.
+
+**Next:** promote the hosted handoff into the production boot path behind a
+controlled boot stage and run QEMU UART/runtime smoke before re-introducing
+netstack, TLS, and HTTP closures.
 
 ### B2/B3 Detail — TCP + IoDriver Shims
 
@@ -133,8 +138,9 @@ TLS, and HTTP closures.
 - B1 freestanding RISC-V link still passes after the shim changes.
 
 **Remaining after B3:**
-- The higher-level OS handoff still needs the freestanding runtime/noalloc
-  boundary described above before these shims can be included in the boot ELF.
+- The higher-level OS handoff now links in a hosted probe, but still needs QEMU
+  runtime validation before the TCP/IoDriver shims are included in the
+  production boot ELF.
 - B4 TLS must replace deterministic placeholder entropy/time/file behavior
   before TLS can be treated as production-ready on baremetal.
 
@@ -162,8 +168,8 @@ TLS, and HTTP closures.
 **Blocked, not complete:**
 - `src/os/kernel/net/http_baremetal.spl` exists, but enabling it from the
   RISC-V boot path pulls the full HTTP worker/config/router/middleware closure.
-- That closure still depends on the hosted value/runtime ABI unless the
-  noalloc boundary is completed first.
+- The freestanding value ABI now links the hosted boot probe, but HTTP has not
+  been promoted into the production boot path or runtime-smoked in QEMU yet.
 - B6 QEMU HTTP tests cannot be meaningful until B5 can be linked into the
   boot ELF.
 
@@ -171,9 +177,8 @@ TLS, and HTTP closures.
 - The B1 ELF intentionally remains a freestanding UART-banner boot artifact:
   `build/simpleos-rv64.elf`.
 
-**Next:** extend the freestanding noalloc boundary from raw PMM/heap metadata
-to log/service handoff and hosted allocation ABI, then re-enable
-`riscv_boot_mem_init -> os_main -> http_baremetal` and run the QEMU HTTP smoke.
+**Next:** promote `riscv_boot_mem_init -> os_main -> http_baremetal` in a
+controlled boot stage and run the QEMU HTTP smoke.
 
 ### Build Command
 
@@ -197,7 +202,7 @@ SIMPLE_BOOTSTRAP=1 src/compiler_rust/target/debug/simple native-build \
 | `src/os/kernel/boot/riscv_noalloc_heap.spl` | Freestanding raw bump heap |
 | `src/os/kernel/boot/riscv_noalloc_log.spl` | Freestanding byte log markers |
 | `src/os/kernel/boot/riscv_noalloc_services.spl` | Freestanding service readiness snapshot |
-| `src/os/kernel/arch/riscv64/boot/freestanding_runtime.c` | Freestanding raw allocation bridge |
+| `src/os/kernel/arch/riscv64/boot/freestanding_runtime.c` | Freestanding allocation/value ABI bridge |
 | `src/os/kernel/boot/riscv_boot_mem.spl` | PMM + heap init |
 | `src/os/kernel/boot/os_main.spl` | Service init → HTTP server |
 | `src/os/kernel/arch/riscv64/linker.ld` | Linker script (0x80200000) |
