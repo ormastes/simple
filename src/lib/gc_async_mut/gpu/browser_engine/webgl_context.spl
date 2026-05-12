@@ -59,6 +59,16 @@ pub class WebGLParameterValue:
     int_value: i32
     text_value: text
 
+pub class WebGLExtensionInfo:
+    name: text
+    minimum_version: i32
+
+pub class WebGLExtensionHandle:
+    name: text
+    valid: bool
+    enabled: bool
+    error: text
+
 pub class WebGLProgramHandle:
     id: i32
     vertex_shader_id: i32
@@ -87,6 +97,7 @@ pub class WebGLContext:
     programs: [WebGLProgramHandle]
     current_program_id: i32
     supported_extensions: [text]
+    enabled_extensions: [text]
 
     fn is_available() -> bool:
         not self.context_lost
@@ -329,12 +340,31 @@ pub class WebGLContext:
         true
 
     me supports_extension(name: text) -> bool:
+        val canonical = webgl_canonical_extension_name(name)
+        if canonical == "":
+            return false
         var i = 0
         while i < self.supported_extensions.len():
-            if self.supported_extensions[i] == name:
+            if self.supported_extensions[i] == canonical:
                 return true
             i = i + 1
         false
+
+    me is_extension_enabled(name: text) -> bool:
+        val canonical = webgl_canonical_extension_name(name)
+        if canonical == "":
+            return false
+        webgl_text_list_contains(self.enabled_extensions, canonical)
+
+    me get_extension(name: text) -> WebGLExtensionHandle:
+        if not self.ensure_context_available():
+            return WebGLExtensionHandle(name: webgl_canonical_extension_name(name), valid: false, enabled: false, error: "context lost")
+        val canonical = webgl_canonical_extension_name(name)
+        if canonical == "" or not self.supports_extension(canonical):
+            return WebGLExtensionHandle(name: canonical, valid: false, enabled: false, error: "extension not supported")
+        if not webgl_text_list_contains(self.enabled_extensions, canonical):
+            self.enabled_extensions.push(canonical)
+        WebGLExtensionHandle(name: canonical, valid: true, enabled: true, error: "")
 
     me ensure_context_available() -> bool:
         if self.context_lost:
@@ -388,7 +418,8 @@ pub fn webgl_create_context(version: i32, width: i32, height: i32) -> WebGLConte
         shaders: [],
         programs: [],
         current_program_id: -1,
-        supported_extensions: webgl_default_extensions(actual_version)
+        supported_extensions: webgl_default_extensions(actual_version),
+        enabled_extensions: []
     )
 
 pub fn webgl_is_supported_context_name(name: text) -> bool:
@@ -510,6 +541,36 @@ pub fn webgl_clean_glsl_name(name: text) -> text:
     without_array.trim()
 
 pub fn webgl_default_extensions(version: i32) -> [text]:
-    if version == 2:
-        return ["OES_texture_float", "OES_element_index_uint", "WEBGL_lose_context", "EXT_color_buffer_float"]
-    ["OES_texture_float", "OES_element_index_uint", "WEBGL_lose_context"]
+    val catalog = webgl_extension_catalog()
+    var supported: [text] = []
+    var i = 0
+    while i < catalog.len():
+        if version >= catalog[i].minimum_version:
+            supported.push(catalog[i].name)
+        i = i + 1
+    supported
+
+pub fn webgl_extension_catalog() -> [WebGLExtensionInfo]:
+    [
+        WebGLExtensionInfo(name: "OES_texture_float", minimum_version: 1),
+        WebGLExtensionInfo(name: "OES_element_index_uint", minimum_version: 1),
+        WebGLExtensionInfo(name: "WEBGL_lose_context", minimum_version: 1),
+        WebGLExtensionInfo(name: "EXT_color_buffer_float", minimum_version: 2)
+    ]
+
+pub fn webgl_canonical_extension_name(name: text) -> text:
+    val catalog = webgl_extension_catalog()
+    var i = 0
+    while i < catalog.len():
+        if catalog[i].name == name:
+            return catalog[i].name
+        i = i + 1
+    ""
+
+pub fn webgl_text_list_contains(values: [text], needle: text) -> bool:
+    var i = 0
+    while i < values.len():
+        if values[i] == needle:
+            return true
+        i = i + 1
+    false
