@@ -1,0 +1,122 @@
+use std.spec.*
+use std.gc_async_mut.gpu.browser_engine.webgl_context.{
+    WEBGL_NO_ERROR, WEBGL_INVALID_ENUM, WEBGL_INVALID_VALUE,
+    WEBGL_INVALID_OPERATION, WEBGL_CONTEXT_LOST_WEBGL,
+    WEBGL_VERTEX_SHADER, WEBGL_FRAGMENT_SHADER,
+    webgl_create_context, webgl_is_supported_context_name,
+    webgl_context_version_for_name
+}
+
+fn _vertex_glsl() -> text:
+    "attribute vec4 position; void main() { gl_Position = position; }"
+
+fn _fragment_glsl() -> text:
+    "void main() { gl_FragColor = vec4(1.0); }"
+
+describe "Browser WebGL context":
+    describe "context names":
+        it "recognizes WebGL context names case-insensitively":
+            expect(webgl_is_supported_context_name("webgl")).to_equal(true)
+            expect(webgl_is_supported_context_name("WEBGL")).to_equal(true)
+            expect(webgl_is_supported_context_name("experimental-webgl")).to_equal(true)
+            expect(webgl_is_supported_context_name("WebGL2")).to_equal(true)
+
+        it "rejects unknown context names":
+            expect(webgl_is_supported_context_name("bitmaprenderer")).to_equal(false)
+
+        it "maps context names to versions":
+            expect(webgl_context_version_for_name("webgl")).to_equal(1)
+            expect(webgl_context_version_for_name("experimental-webgl")).to_equal(1)
+            expect(webgl_context_version_for_name("webgl2")).to_equal(2)
+            expect(webgl_context_version_for_name("2d")).to_equal(0)
+
+    describe "error state and context loss":
+        it "starts with no error":
+            var ctx = webgl_create_context(1, 320, 240)
+            expect(ctx.get_error()).to_equal(WEBGL_NO_ERROR)
+
+        it "returns and clears invalid enum":
+            var ctx = webgl_create_context(1, 320, 240)
+            val shader = ctx.create_shader(999)
+            expect(shader.valid).to_equal(false)
+            expect(ctx.get_error()).to_equal(WEBGL_INVALID_ENUM)
+            expect(ctx.get_error()).to_equal(WEBGL_NO_ERROR)
+
+        it "reports context lost and blocks resources while lost":
+            var ctx = webgl_create_context(1, 320, 240)
+            ctx.lose_context()
+            expect(ctx.is_available()).to_equal(false)
+            expect(ctx.get_error()).to_equal(WEBGL_CONTEXT_LOST_WEBGL)
+            val buffer = ctx.create_buffer()
+            expect(buffer.valid).to_equal(false)
+            expect(ctx.get_error()).to_equal(WEBGL_CONTEXT_LOST_WEBGL)
+            ctx.restore_context()
+            expect(ctx.is_available()).to_equal(true)
+            expect(ctx.get_error()).to_equal(WEBGL_NO_ERROR)
+
+    describe "resources":
+        it "allocates deterministic buffer and texture ids":
+            var ctx = webgl_create_context(2, 640, 480)
+            val b1 = ctx.create_buffer()
+            val b2 = ctx.create_buffer()
+            val t1 = ctx.create_texture()
+            expect(b1.id).to_equal(1)
+            expect(b2.id).to_equal(2)
+            expect(t1.id).to_equal(1)
+            expect(ctx.buffers.len()).to_equal(2)
+            expect(ctx.textures.len()).to_equal(1)
+
+        it "does not consume shader ids for invalid shader types":
+            var ctx = webgl_create_context(1, 320, 240)
+            val bad = ctx.create_shader(999)
+            val good = ctx.create_shader(WEBGL_VERTEX_SHADER)
+            expect(bad.valid).to_equal(false)
+            expect(good.id).to_equal(1)
+
+    describe "shader and program lifecycle":
+        it "compiles vertex and fragment shaders":
+            var ctx = webgl_create_context(1, 320, 240)
+            val vs = ctx.create_shader(WEBGL_VERTEX_SHADER)
+            val fs = ctx.create_shader(WEBGL_FRAGMENT_SHADER)
+            expect(ctx.shader_source(vs.id, _vertex_glsl())).to_equal(true)
+            expect(ctx.shader_source(fs.id, _fragment_glsl())).to_equal(true)
+            expect(ctx.compile_shader(vs.id).compiled).to_equal(true)
+            expect(ctx.compile_shader(fs.id).compiled).to_equal(true)
+
+        it "fails shader compile with info log":
+            var ctx = webgl_create_context(1, 320, 240)
+            val vs = ctx.create_shader(WEBGL_VERTEX_SHADER)
+            expect(ctx.shader_source(vs.id, "void main() { }")).to_equal(true)
+            val compiled = ctx.compile_shader(vs.id)
+            expect(compiled.compiled).to_equal(false)
+            expect(compiled.info_log).to_equal("vertex shader must write gl_Position")
+            expect(ctx.get_error()).to_equal(WEBGL_INVALID_OPERATION)
+
+        it "links and uses a compiled program":
+            var ctx = webgl_create_context(1, 320, 240)
+            val vs = ctx.create_shader(WEBGL_VERTEX_SHADER)
+            val fs = ctx.create_shader(WEBGL_FRAGMENT_SHADER)
+            expect(ctx.shader_source(vs.id, _vertex_glsl())).to_equal(true)
+            expect(ctx.shader_source(fs.id, _fragment_glsl())).to_equal(true)
+            expect(ctx.compile_shader(vs.id).compiled).to_equal(true)
+            expect(ctx.compile_shader(fs.id).compiled).to_equal(true)
+            val program = ctx.create_program()
+            expect(ctx.attach_shader(program.id, vs.id)).to_equal(true)
+            expect(ctx.attach_shader(program.id, fs.id)).to_equal(true)
+            val linked = ctx.link_program(program.id)
+            expect(linked.linked).to_equal(true)
+            expect(ctx.use_program(program.id)).to_equal(true)
+            expect(ctx.current_program_id).to_equal(program.id)
+
+        it "rejects program link without both shader stages":
+            var ctx = webgl_create_context(1, 320, 240)
+            val vs = ctx.create_shader(WEBGL_VERTEX_SHADER)
+            expect(ctx.shader_source(vs.id, _vertex_glsl())).to_equal(true)
+            expect(ctx.compile_shader(vs.id).compiled).to_equal(true)
+            val program = ctx.create_program()
+            expect(ctx.attach_shader(program.id, vs.id)).to_equal(true)
+            val linked = ctx.link_program(program.id)
+            expect(linked.linked).to_equal(false)
+            expect(linked.info_log).to_equal("compiled vertex and fragment shaders required")
+            expect(ctx.use_program(program.id)).to_equal(false)
+            expect(ctx.get_error()).to_equal(WEBGL_INVALID_OPERATION)

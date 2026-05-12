@@ -468,8 +468,11 @@ Non-goal: cloning proprietary Chrome services. The target is Chrome-level web co
 
 **Goal:** Existing WebGL content runs, including common libraries and legacy 3D sites.
 
+**Current progress (2026-05-12):**
+- M27 WebGL compatibility has started in pure Simple with a separate `webgl_context.spl` API model. `canvas.getContext` now recognizes `webgl`, `experimental-webgl`, and `webgl2`; initial tests cover context creation, GL error state, context loss/restore, deterministic buffer/texture IDs, shader source/compile validation, and program link/use.
+
 **Work:**
-- Implement `canvas.getContext("webgl")`, `webgl2`, shader compile/link, GL state machine, buffers, textures, framebuffers, uniforms, attributes, extensions baseline.
+- Expand `canvas.getContext("webgl")`, `webgl2`, shader compile/link, GL state machine, buffers, textures, framebuffers, uniforms, attributes, extensions baseline.
 - Translate GLSL ES to backend shader representation or route through existing GPU backend where available.
 - Provide ANGLE-like conformance mapping for validation, error behavior, context loss, and extension exposure.
 - Keep WebGL and WebGPU resource/security models separate.
