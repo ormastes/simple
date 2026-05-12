@@ -422,13 +422,17 @@ Non-goal: cloning proprietary Chrome services. The target is Chrome-level web co
 - Browser WebGPU status primitives now cover error scopes, uncaptured errors, and device-lost state in `src/lib/gc_async_mut/gpu/browser_engine/webgpu_status_errors.spl`, covered by `test/web_platform/webgpu/webgpu_status_errors_spec.spl`.
 - Browser WebGPU context now owns a resource table, vends command encoders, routes resource-aware queue submit/writeBuffer operations, exposes validation error scopes, blocks command creation after device loss, and drives deterministic executor-backed compute/texture upload coverage, covered by `test/web_platform/webgpu/webgpu_context_spec.spl`.
 - Browser WebGPU deterministic software executor now replays queue writes, render passes, compute dispatches, transfer copies, buffer/texture state checksums, and invalid sequencing into testable counters in `src/lib/gc_async_mut/gpu/browser_engine/webgpu_software_executor.spl`, covered by `test/web_platform/webgpu/webgpu_software_executor_spec.spl`.
+- BrowserSession now exposes secure-context `window.isSecureContext`, `navigator.gpu` metadata, and a promise-shaped `navigator.gpu.requestAdapter()` software-adapter result to normal page scripts while hiding `navigator.gpu` from insecure HTTP pages, covered by `test/unit/lib/common/web/browser_session_spec.spl`.
+- Script worker models now inherit secure-context navigator/WebGPU availability from their owner context, with insecure workers blocked from adapter requests, covered by `test/unit/browser/script/worker_api_spec.spl`.
+- Browser WebGPU adapter/device negotiation now reports adapter availability, fallback compatibility mode, unsupported required features, and unsupported required limits without readying the device, covered by `test/web_platform/webgpu/webgpu_context_spec.spl`.
+- Browser WebGPU canvas configuration now covers preferred format, alpha modes, and deterministic present/swapchain progression through the script wrapper and core context, covered by `test/unit/browser/script/canvas_api_spec.spl` and `test/web_platform/webgpu/webgpu_context_spec.spl`.
+- Browser WebGPU WGSL validation now rejects GLSL syntax, unbalanced braces, missing stages, and missing MVP stage-interface declarations for vertex position, fragment location, and compute workgroup size, covered by `test/web_platform/webgpu/webgpu_context_spec.spl`.
+- Browser WebGPU resource creation through the device context now enforces negotiated buffer and texture limits before allocating resource handles, covered by `test/web_platform/webgpu/webgpu_context_spec.spl`.
 - Existing nogc WebGPU 3D backend handle-allocation semantics were fixed so `test/lib/nogc_sync_mut/engine/render/webgpu_backend3d_spec.spl` passes.
 
 **Work:**
-- Expose `navigator.gpu` only in secure contexts and workers where allowed.
-- Implement adapter/device negotiation with `requiredFeatures`, `requiredLimits`, compatibility-mode reporting, and graceful unavailable states.
-- Implement `canvas.getContext("webgpu")`, preferred canvas format, context configuration, swapchain/present path, alpha modes.
-- Implement WGSL shader module creation and validation, using W3C WGSL grammar and stage interface checks.
+- Add a real `WorkerGlobalScope` runtime bootstrap once worker script execution is promoted beyond the current message-queue model.
+- Expand WGSL validation from the current MVP stage-interface checks toward full W3C grammar coverage.
 - Harden buffers, textures, samplers, bind group layouts, bind groups, render pipelines, compute pipelines, command encoders, render/compute passes, queue submission, error scopes, and device lost handling against CTS coverage and native backend integration.
 - Add CPU/software backend for deterministic tests and native GPU backend for smoke/perf.
 

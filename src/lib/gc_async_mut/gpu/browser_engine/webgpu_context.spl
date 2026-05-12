@@ -30,6 +30,9 @@ use std.gc_async_mut.gpu.browser_engine.webgpu_status_errors.{
 pub class WebGPUContext:
     secure_context: bool
     adapter_requested: bool
+    adapter_available: bool
+    compatibility_mode: bool
+    adapter_status: text
     device_ready: bool
     device_lost: bool
     adapter: GPUAdapterInfo
@@ -39,6 +42,7 @@ pub class WebGPUContext:
     device_id: i32
     canvas_configured: bool
     canvas_config: GPUCanvasConfiguration
+    present_count: i32
     last_error: text
     next_shader_id: i32
     next_pipeline_id: i32
@@ -48,9 +52,21 @@ pub class WebGPUContext:
 
     me request_adapter(options: GPURequestAdapterOptions) -> bool:
         if not self.secure_context:
+            self.adapter_requested = true
+            self.adapter_available = false
+            self.adapter_status = "unavailable: secure context required"
             self.last_error = "WebGPU requires a secure context"
             return false
+        if self.device_lost:
+            self.adapter_requested = true
+            self.adapter_available = false
+            self.adapter_status = "unavailable: device lost"
+            self.last_error = "WebGPU device is lost"
+            return false
         self.adapter_requested = true
+        self.adapter_available = true
+        self.compatibility_mode = options.force_fallback_adapter
+        self.adapter_status = "available"
         self.adapter = GPUAdapterInfo.software()
         if options.force_fallback_adapter:
             self.adapter = GPUAdapterInfo.software()
@@ -61,12 +77,19 @@ pub class WebGPUContext:
         if not self.adapter_requested:
             self.last_error = "requestAdapter must succeed before requestDevice"
             return false
+        if not self.adapter_available:
+            self.last_error = "requestAdapter did not provide an available adapter"
+            return false
         var i = 0
         while i < descriptor.required_features.len():
             if not self.supports_feature(descriptor.required_features[i]):
                 self.last_error = "unsupported WebGPU feature: " + descriptor.required_features[i]
                 return false
             i = i + 1
+        val limits_err = webgpu_validate_required_limits(descriptor.required_limits, self.limits)
+        if limits_err != "":
+            self.last_error = limits_err
+            return false
         self.enabled_features = descriptor.required_features
         self.limits = descriptor.required_limits
         self.device_id = 1
@@ -92,17 +115,38 @@ pub class WebGPUContext:
         false
 
     me configure_canvas(format: text, width: i32, height: i32) -> bool:
+        self.configure_canvas_with_alpha(format, width, height, "opaque")
+
+    me configure_canvas_with_alpha(format: text, width: i32, height: i32, alpha_mode: text) -> bool:
         if not self.device_ready:
             self.last_error = "requestDevice must succeed before configure"
             return false
         if not webgpu_is_supported_canvas_format(format):
             self.last_error = "unsupported WebGPU canvas format: " + format
             return false
+        if not webgpu_is_supported_alpha_mode(alpha_mode):
+            self.last_error = "unsupported WebGPU alpha mode: " + alpha_mode
+            return false
         if width <= 0 or height <= 0:
             self.last_error = "canvas size must be positive"
             return false
         self.canvas_config = GPUCanvasConfiguration.create(self.device_id, format, GPU_TEXTURE_USAGE_RENDER_ATTACHMENT, width, height)
+        self.canvas_config.alpha_mode = alpha_mode
         self.canvas_configured = true
+        self.last_error = ""
+        true
+
+    me present() -> bool:
+        if not self.device_ready:
+            self.last_error = "requestDevice must succeed before present"
+            return false
+        if not self.canvas_configured:
+            self.last_error = "configure must succeed before present"
+            return false
+        if self.device_lost:
+            self.last_error = "device is lost"
+            return false
+        self.present_count = self.present_count + 1
         self.last_error = ""
         true
 
@@ -156,6 +200,9 @@ pub class WebGPUContext:
     me create_buffer(label: text, size: i64, usage: i32) -> GPUBufferHandle:
         if not self.ensure_device_ready_for_resource():
             return GPUBufferHandle(id: -1, label: label, size: size, usage: usage, valid: false, error: self.last_error)
+        if size > self.limits.max_buffer_size:
+            self.last_error = "GPUBuffer size exceeds device limit"
+            return GPUBufferHandle(id: -1, label: label, size: size, usage: usage, valid: false, error: self.last_error)
         var resources = self.resources
         val handle = resources.create_buffer(label, size, usage)
         self.resources = resources
@@ -164,6 +211,10 @@ pub class WebGPUContext:
 
     me create_texture(label: text, width: i32, height: i32, depth_or_layers: i32, format: text, usage: i32) -> GPUTextureHandle:
         if not self.ensure_device_ready_for_resource():
+            return GPUTextureHandle(id: -1, label: label, width: width, height: height, depth_or_layers: depth_or_layers, format: format, usage: usage, valid: false, error: self.last_error)
+        val limits_err = webgpu_validate_texture_limits(width, height, depth_or_layers, self.limits)
+        if limits_err != "":
+            self.last_error = limits_err
             return GPUTextureHandle(id: -1, label: label, width: width, height: height, depth_or_layers: depth_or_layers, format: format, usage: usage, valid: false, error: self.last_error)
         var resources = self.resources
         val handle = resources.create_texture(label, width, height, depth_or_layers, format, usage)
@@ -288,6 +339,9 @@ pub fn webgpu_create_context(secure_context: bool) -> WebGPUContext:
     WebGPUContext(
         secure_context: secure_context,
         adapter_requested: false,
+        adapter_available: false,
+        compatibility_mode: false,
+        adapter_status: "not-requested",
         device_ready: false,
         device_lost: false,
         adapter: GPUAdapterInfo.software(),
@@ -297,6 +351,7 @@ pub fn webgpu_create_context(secure_context: bool) -> WebGPUContext:
         device_id: -1,
         canvas_configured: false,
         canvas_config: GPUCanvasConfiguration.create(-1, GPU_TEXTURE_FORMAT_BGRA8_UNORM, GPU_TEXTURE_USAGE_RENDER_ATTACHMENT, 0, 0),
+        present_count: 0,
         last_error: "",
         next_shader_id: 1,
         next_pipeline_id: 1,
@@ -310,9 +365,21 @@ pub fn webgpu_is_available(ctx: WebGPUContext) -> bool:
 
 pub fn webgpu_request_adapter(ctx: WebGPUContext, options: GPURequestAdapterOptions) -> bool:
     if not ctx.secure_context:
+        ctx.adapter_requested = true
+        ctx.adapter_available = false
+        ctx.adapter_status = "unavailable: secure context required"
         ctx.last_error = "WebGPU requires a secure context"
         return false
+    if ctx.device_lost:
+        ctx.adapter_requested = true
+        ctx.adapter_available = false
+        ctx.adapter_status = "unavailable: device lost"
+        ctx.last_error = "WebGPU device is lost"
+        return false
     ctx.adapter_requested = true
+    ctx.adapter_available = true
+    ctx.compatibility_mode = options.force_fallback_adapter
+    ctx.adapter_status = "available"
     ctx.adapter = GPUAdapterInfo.software()
     if options.force_fallback_adapter:
         ctx.adapter = GPUAdapterInfo.software()
@@ -323,12 +390,19 @@ pub fn webgpu_request_device(ctx: WebGPUContext, descriptor: GPUDeviceDescriptor
     if not ctx.adapter_requested:
         ctx.last_error = "requestAdapter must succeed before requestDevice"
         return false
+    if not ctx.adapter_available:
+        ctx.last_error = "requestAdapter did not provide an available adapter"
+        return false
     var i = 0
     while i < descriptor.required_features.len():
         if not webgpu_supports_feature(ctx, descriptor.required_features[i]):
             ctx.last_error = "unsupported WebGPU feature: " + descriptor.required_features[i]
             return false
         i = i + 1
+    val limits_err = webgpu_validate_required_limits(descriptor.required_limits, ctx.limits)
+    if limits_err != "":
+        ctx.last_error = limits_err
+        return false
     ctx.enabled_features = descriptor.required_features
     ctx.limits = descriptor.required_limits
     ctx.device_id = 1
@@ -353,23 +427,91 @@ pub fn webgpu_enabled_feature(ctx: WebGPUContext, feature: text) -> bool:
         i = i + 1
     false
 
+pub fn webgpu_adapter_status(ctx: WebGPUContext) -> text:
+    ctx.adapter_status
+
+pub fn webgpu_compatibility_mode(ctx: WebGPUContext) -> bool:
+    ctx.compatibility_mode
+
+pub fn webgpu_validate_required_limits(required: GPUDeviceLimits, supported: GPUDeviceLimits) -> text:
+    if required.max_texture_dimension_1d > supported.max_texture_dimension_1d:
+        return "required limit exceeds supported limit: max_texture_dimension_1d"
+    if required.max_texture_dimension_2d > supported.max_texture_dimension_2d:
+        return "required limit exceeds supported limit: max_texture_dimension_2d"
+    if required.max_texture_dimension_3d > supported.max_texture_dimension_3d:
+        return "required limit exceeds supported limit: max_texture_dimension_3d"
+    if required.max_texture_array_layers > supported.max_texture_array_layers:
+        return "required limit exceeds supported limit: max_texture_array_layers"
+    if required.max_bind_groups > supported.max_bind_groups:
+        return "required limit exceeds supported limit: max_bind_groups"
+    if required.max_storage_buffers_per_shader_stage > supported.max_storage_buffers_per_shader_stage:
+        return "required limit exceeds supported limit: max_storage_buffers_per_shader_stage"
+    if required.max_compute_workgroup_size_x > supported.max_compute_workgroup_size_x:
+        return "required limit exceeds supported limit: max_compute_workgroup_size_x"
+    if required.max_compute_workgroup_size_y > supported.max_compute_workgroup_size_y:
+        return "required limit exceeds supported limit: max_compute_workgroup_size_y"
+    if required.max_compute_workgroup_size_z > supported.max_compute_workgroup_size_z:
+        return "required limit exceeds supported limit: max_compute_workgroup_size_z"
+    if required.max_compute_invocations_per_workgroup > supported.max_compute_invocations_per_workgroup:
+        return "required limit exceeds supported limit: max_compute_invocations_per_workgroup"
+    if required.max_buffer_size > supported.max_buffer_size:
+        return "required limit exceeds supported limit: max_buffer_size"
+    if required.max_vertex_buffers > supported.max_vertex_buffers:
+        return "required limit exceeds supported limit: max_vertex_buffers"
+    if required.max_vertex_attributes > supported.max_vertex_attributes:
+        return "required limit exceeds supported limit: max_vertex_attributes"
+    ""
+
+pub fn webgpu_validate_texture_limits(width: i32, height: i32, depth_or_layers: i32, limits: GPUDeviceLimits) -> text:
+    if width > limits.max_texture_dimension_2d:
+        return "GPUTexture width exceeds device limit"
+    if height > limits.max_texture_dimension_2d:
+        return "GPUTexture height exceeds device limit"
+    if depth_or_layers > limits.max_texture_array_layers:
+        return "GPUTexture depthOrArrayLayers exceeds device limit"
+    ""
+
 pub fn webgpu_configure_canvas(ctx: WebGPUContext, format: text, width: i32, height: i32) -> bool:
+    webgpu_configure_canvas_with_alpha(ctx, format, width, height, "opaque")
+
+pub fn webgpu_configure_canvas_with_alpha(ctx: WebGPUContext, format: text, width: i32, height: i32, alpha_mode: text) -> bool:
     if not ctx.device_ready:
         ctx.last_error = "requestDevice must succeed before configure"
         return false
     if not webgpu_is_supported_canvas_format(format):
         ctx.last_error = "unsupported WebGPU canvas format: " + format
         return false
+    if not webgpu_is_supported_alpha_mode(alpha_mode):
+        ctx.last_error = "unsupported WebGPU alpha mode: " + alpha_mode
+        return false
     if width <= 0 or height <= 0:
         ctx.last_error = "canvas size must be positive"
         return false
     ctx.canvas_config = GPUCanvasConfiguration.create(ctx.device_id, format, GPU_TEXTURE_USAGE_RENDER_ATTACHMENT, width, height)
+    ctx.canvas_config.alpha_mode = alpha_mode
     ctx.canvas_configured = true
     ctx.last_error = ""
     true
 
 pub fn webgpu_is_supported_canvas_format(format: text) -> bool:
     format == GPU_TEXTURE_FORMAT_BGRA8_UNORM or format == GPU_TEXTURE_FORMAT_RGBA8_UNORM
+
+pub fn webgpu_is_supported_alpha_mode(alpha_mode: text) -> bool:
+    alpha_mode == "opaque" or alpha_mode == "premultiplied"
+
+pub fn webgpu_present(ctx: WebGPUContext) -> bool:
+    if not ctx.device_ready:
+        ctx.last_error = "requestDevice must succeed before present"
+        return false
+    if not ctx.canvas_configured:
+        ctx.last_error = "configure must succeed before present"
+        return false
+    if ctx.device_lost:
+        ctx.last_error = "device is lost"
+        return false
+    ctx.present_count = ctx.present_count + 1
+    ctx.last_error = ""
+    true
 
 pub fn webgpu_preferred_canvas_format() -> text:
     GPU_TEXTURE_FORMAT_BGRA8_UNORM
@@ -416,8 +558,21 @@ pub fn webgpu_validate_wgsl(source: text) -> text:
         return "WGSL source must contain a function"
     if webgpu_brace_balance(trimmed) != 0:
         return "WGSL braces are unbalanced"
-    if webgpu_detect_wgsl_stage(trimmed) == "":
+    val stage = webgpu_detect_wgsl_stage(trimmed)
+    if stage == "":
         return "WGSL source must declare @vertex, @fragment, or @compute"
+    val stage_err = webgpu_validate_wgsl_stage_interface(trimmed, stage)
+    if stage_err != "":
+        return stage_err
+    ""
+
+pub fn webgpu_validate_wgsl_stage_interface(source: text, stage: text) -> text:
+    if stage == "vertex" and not source.contains("@builtin(position)"):
+        return "WGSL vertex stage must write @builtin(position)"
+    if stage == "fragment" and not source.contains("@location(0)"):
+        return "WGSL fragment stage must declare @location(0) output"
+    if stage == "compute" and not source.contains("@workgroup_size("):
+        return "WGSL compute stage must declare @workgroup_size"
     ""
 
 pub fn webgpu_detect_wgsl_stage(source: text) -> text:

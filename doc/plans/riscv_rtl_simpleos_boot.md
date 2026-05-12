@@ -135,12 +135,12 @@ netstack, TLS, and HTTP closures.
 - `bin/simple check` passes for `tcp_shim.spl`, `driver_shim.spl`,
   `driver_shim_state.spl`, `netstack_init.spl`, and
   `http_server/worker.spl`.
-- B1 freestanding RISC-V link still passes after the shim changes.
+- Production RISC-V link and QEMU UART smoke pass with the minimal B5 HTTP
+  launcher guarded behind `riscv_network_ready()`.
 
 **Remaining after B3:**
-- The higher-level OS handoff now links in a hosted probe, but still needs QEMU
-  runtime validation before the TCP/IoDriver shims are included in the
-  production boot ELF.
+- The TCP/IoDriver shims compile and are ready for a live netstack, but the
+  current RISC-V service probe still reports no PCI/VirtIO NIC.
 - B4 TLS must replace deterministic placeholder entropy/time/file behavior
   before TLS can be treated as production-ready on baremetal.
 
@@ -165,20 +165,37 @@ netstack, TLS, and HTTP closures.
 
 ### B5/B6 Detail — HTTP Launch + QEMU
 
-**Blocked, not complete:**
-- `src/os/kernel/net/http_baremetal.spl` exists, but enabling it from the
-  RISC-V boot path pulls the full HTTP worker/config/router/middleware closure.
-- The freestanding value ABI now links the hosted boot probe, but HTTP has not
-  been promoted into the production boot path or runtime-smoked in QEMU yet.
-- B6 QEMU HTTP tests cannot be meaningful until B5 can be linked into the
-  boot ELF.
+**Partial 2026-05-12:**
+- `os_main` now performs the controlled B5 handoff:
+  `init_riscv_services_with_network()`, then `start_http_server_baremetal()`
+  only when `riscv_network_ready()` is true. If no NIC is available it logs
+  `[os_main] HTTP server deferred: network unavailable` and idles.
+- `src/os/kernel/net/http_baremetal.spl` is now a minimal kernel-native HTTP
+  loop over narrow `rt_io_tcp_*` externs. It avoids the hosted std HTTP worker
+  closure so the production RISC-V ELF can link without weak freestanding
+  stubs.
+- `src/os/kernel/arch/riscv64/boot/freestanding_runtime.c` provides weak
+  no-network TCP fallbacks for the minimal HTTP launcher. Real TCP providers can
+  override them later with strong symbols.
+- Normal production link produces `build/simpleos-rv64.elf` with `os_main`,
+  `riscv_boot_mem_init`, `start_http_server_baremetal`, and weak `rt_io_tcp_*`
+  fallback symbols present.
+- QEMU UART smoke reaches `[os_main] HTTP server deferred: network unavailable`
+  and `[os_main] Entering boot idle loop`.
 
-**Current safe artifact:**
-- The B1 ELF intentionally remains a freestanding UART-banner boot artifact:
-  `build/simpleos-rv64.elf`.
+**Blocked, not complete for production:**
+- The RISC-V network service still reports unavailable because freestanding
+  `rt_pci_device_count()` returns 0 and `rt_net_init()` returns -1, so the QEMU
+  HTTP test cannot yet prove an actual socket response.
+- The full std HTTP worker/config/router/middleware closure remains deferred; a
+  previous diagnostic promotion showed it still needs hosted/common runtime ABI
+  such as dictionaries, string split/join/search, SWI/rank helpers, and
+  `rt_bytes_to_text`.
+- B4 TLS remains blocked by the placeholder TLS 1.3 server surface.
 
-**Next:** promote `riscv_boot_mem_init -> os_main -> http_baremetal` in a
-controlled boot stage and run the QEMU HTTP smoke.
+**Next:** implement the real PCI/VirtIO-net probe and bind the TCP shim to it,
+then run the QEMU HTTP socket smoke. After that, replace the minimal HTTP loop
+with the full std HTTP worker once the remaining hosted runtime ABI is present.
 
 ### Build Command
 

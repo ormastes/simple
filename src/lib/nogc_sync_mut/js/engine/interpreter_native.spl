@@ -5,7 +5,7 @@ use std.js.types.js_types.JsValue
 use std.js.types.ast_types.JsExpression
 use std.js.engine.interpreter_types.{Environment, EnvironmentStack, CallFrame, JsFunction, to_number, js_to_string, to_boolean, is_truthy, typeof_value, strict_equals, abstract_equals, RETURN_SIGNAL, _is_array_method, _is_string_method, _get_obj_id, _get_fn_id, f64_to_i64, _digit_val}
 use std.js.engine.vm_object_store.{ObjectStore}
-use std.js.engine.runtime.{dispatch_native, NATIVE_BLOB_TEXT, NATIVE_FETCH, NATIVE_JSON_PARSE, NATIVE_PROMISE_CATCH, NATIVE_PROMISE_FINALLY, NATIVE_PROMISE_REJECT, NATIVE_PROMISE_RESOLVE, NATIVE_PROMISE_THEN, NATIVE_RESPONSE_BLOB, NATIVE_RESPONSE_JSON, NATIVE_RESPONSE_TEXT, NATIVE_SET_TIMEOUT, NATIVE_SET_INTERVAL, NATIVE_CLEAR_TIMEOUT, NATIVE_CLEAR_INTERVAL, NATIVE_STORAGE_GET_ITEM, NATIVE_STORAGE_SET_ITEM, NATIVE_STORAGE_REMOVE_ITEM, NATIVE_STORAGE_CLEAR, NATIVE_STORAGE_KEY}
+use std.js.engine.runtime.{dispatch_native, NATIVE_BLOB_TEXT, NATIVE_FETCH, NATIVE_JSON_PARSE, NATIVE_PROMISE_CATCH, NATIVE_PROMISE_FINALLY, NATIVE_PROMISE_REJECT, NATIVE_PROMISE_RESOLVE, NATIVE_PROMISE_THEN, NATIVE_RESPONSE_BLOB, NATIVE_RESPONSE_JSON, NATIVE_RESPONSE_TEXT, NATIVE_SET_TIMEOUT, NATIVE_SET_INTERVAL, NATIVE_CLEAR_TIMEOUT, NATIVE_CLEAR_INTERVAL, NATIVE_STORAGE_GET_ITEM, NATIVE_STORAGE_SET_ITEM, NATIVE_STORAGE_REMOVE_ITEM, NATIVE_STORAGE_CLEAR, NATIVE_STORAGE_KEY, NATIVE_NAVIGATOR_GPU_REQUEST_ADAPTER}
 use std.js.engine.parser.{JsParser}
 use std.js.builtins.json.{json_parse}
 use std.nogc_sync_mut.js.engine.interpreter.{JsInterpreter, PendingAsyncRequest, PendingPromiseTask, PromiseHandlerRecord, PromiseHandlerRegistration, PendingTimerTask}
@@ -49,6 +49,8 @@ impl JsInterpreter:
             return self._native_storage_clear(this_val)
         if native_id == NATIVE_STORAGE_KEY:
             return self._native_storage_key(this_val, arg_vals)
+        if native_id == NATIVE_NAVIGATOR_GPU_REQUEST_ADAPTER:
+            return self._native_navigator_gpu_request_adapter(this_val, arg_vals)
         dispatch_native(native_id, arg_vals, self.logger)
 
     me _native_set_timer(arg_vals: [JsValue], is_interval: bool) -> JsValue:
@@ -265,6 +267,26 @@ impl JsInterpreter:
         match self.get_object_property(blob_id, "__body__"):
             JsValue.String(v): JsValue.Object(id: self._create_settled_promise_object(JsValue.String(v: v), false))
             _: JsValue.Object(id: self._create_settled_promise_object(JsValue.String(v: ""), false))
+
+    me _native_navigator_gpu_request_adapter(this_val: JsValue, arg_vals: [JsValue]) -> JsValue:
+        val gpu_id = _get_obj_id(this_val)
+        if gpu_id < 0:
+            return JsValue.Object(id: self._create_settled_promise_object(JsValue.Null, false))
+        match self.get_object_property(gpu_id, "__simple_webgpu_host"):
+            JsValue.Boolean(is_host):
+                if not is_host:
+                    return JsValue.Object(id: self._create_settled_promise_object(JsValue.Null, false))
+            _:
+                return JsValue.Object(id: self._create_settled_promise_object(JsValue.Null, false))
+
+        val adapter_id = self.create_object()
+        self.set_object_property(adapter_id, "__simple_webgpu_adapter_host", JsValue.Boolean(v: true))
+        self.set_object_property(adapter_id, "name", JsValue.String(v: "Simple WebGPU Software Adapter"))
+        self.set_object_property(adapter_id, "requestAdapterStatus", JsValue.String(v: "available"))
+        self.set_object_property(adapter_id, "isFallbackAdapter", JsValue.Boolean(v: true))
+        self.set_object_property(adapter_id, "features", JsValue.String(v: "texture-compression-bc,timestamp-query"))
+        self.set_object_property(adapter_id, "limitsProfile", JsValue.String(v: "mvp"))
+        JsValue.Object(id: self._create_settled_promise_object(JsValue.Object(id: adapter_id), false))
 
     fn _response_content_type(response_id: i64) -> text:
         match self.get_object_property(response_id, "headersText"):

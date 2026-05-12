@@ -570,6 +570,10 @@ static void uart_put_byte(spl_u8 byte) {
     *(volatile spl_u8 *)0x10000000ULL = byte;
 }
 
+void rt_riscv_uart_put(spl_u64 byte) {
+    uart_put_byte((spl_u8)byte);
+}
+
 static void uart_write_bytes(const char *data, spl_u64 len) {
     if (!data) {
         return;
@@ -598,26 +602,131 @@ spl_i64 vmm_map_page(spl_i64 virt, spl_i64 phys, spl_i64 flags) {
     return virt == phys ? 1 : 0;
 }
 
+typedef struct RtPciDevice {
+    spl_i64 bus;
+    spl_i64 device;
+    spl_i64 function;
+    spl_i64 class_code;
+    spl_i64 subclass;
+    spl_i64 vendor;
+    spl_i64 device_id;
+    spl_i64 bar0;
+    spl_i64 irq;
+} RtPciDevice;
+
+#define RT_PCI_ECAM_BASE 0x30000000ULL
+#define RT_PCI_MAX_DEVICES 8
+
+static RtPciDevice g_rt_pci_devices[RT_PCI_MAX_DEVICES];
+static spl_i64 g_rt_pci_count = -1;
+static spl_i64 g_rt_net_ready = 0;
+
+static spl_u32 rt_pci_read_config32(spl_u64 bus, spl_u64 dev, spl_u64 func, spl_u64 reg) {
+    spl_u64 addr = RT_PCI_ECAM_BASE
+        + (bus << 20)
+        + (dev << 15)
+        + (func << 12)
+        + (reg & ~3ULL);
+    return *(volatile spl_u32 *)addr;
+}
+
+static void rt_pci_scan_qemu_virt(void) {
+    g_rt_pci_count = 0;
+    for (spl_u64 dev = 0; dev < 32 && g_rt_pci_count < RT_PCI_MAX_DEVICES; dev = dev + 1) {
+        spl_u32 id = rt_pci_read_config32(0, dev, 0, 0);
+        spl_u32 class_reg;
+        spl_u32 bar0;
+        RtPciDevice *out;
+        if ((id & 0xffffU) == 0xffffU) {
+            continue;
+        }
+        class_reg = rt_pci_read_config32(0, dev, 0, 8);
+        bar0 = rt_pci_read_config32(0, dev, 0, 0x10);
+        out = &g_rt_pci_devices[g_rt_pci_count];
+        out->bus = 0;
+        out->device = (spl_i64)dev;
+        out->function = 0;
+        out->class_code = (spl_i64)((class_reg >> 24) & 0xffU);
+        out->subclass = (spl_i64)((class_reg >> 16) & 0xffU);
+        out->vendor = (spl_i64)(id & 0xffffU);
+        out->device_id = (spl_i64)((id >> 16) & 0xffffU);
+        out->bar0 = (spl_i64)(bar0 & ~0xfU);
+        out->irq = 0;
+        g_rt_pci_count = g_rt_pci_count + 1;
+    }
+}
+
 spl_i64 rt_pci_device_count(void) {
-    return 0;
+    if (g_rt_pci_count < 0) {
+        rt_pci_scan_qemu_virt();
+    }
+    return g_rt_pci_count;
 }
 
 spl_i64 rt_pci_get_field(spl_i64 index, spl_i64 field) {
-    (void)index;
-    (void)field;
+    RtPciDevice *dev;
+    if (g_rt_pci_count < 0) {
+        rt_pci_scan_qemu_virt();
+    }
+    if (index < 0 || index >= g_rt_pci_count) {
+        return -1;
+    }
+    dev = &g_rt_pci_devices[index];
+    if (field == 0) return dev->bus;
+    if (field == 1) return dev->device;
+    if (field == 2) return dev->function;
+    if (field == 3) return dev->class_code;
+    if (field == 4) return dev->subclass;
+    if (field == 5) return dev->vendor;
+    if (field == 6) return dev->device_id;
+    if (field == 7) return dev->bar0;
+    if (field == 8) return dev->irq;
     return -1;
 }
 
 spl_i64 rt_net_init(void) {
+    spl_i64 count = rt_pci_device_count();
+    for (spl_i64 i = 0; i < count; i = i + 1) {
+        spl_i64 cls = rt_pci_get_field(i, 3);
+        spl_i64 sub = rt_pci_get_field(i, 4);
+        spl_i64 vendor = rt_pci_get_field(i, 5);
+        if (cls == 2 && sub == 0 && vendor == 0x1af4) {
+            g_rt_net_ready = 1;
+            return 0;
+        }
+    }
+    g_rt_net_ready = 0;
     return -1;
 }
 
 spl_i64 rt_net_tx_test(void) {
-    return -1;
+    return g_rt_net_ready ? 0 : -1;
 }
 
 spl_i64 rt_net_stats(void) {
+    return g_rt_net_ready ? 0 : -1;
+}
+
+__attribute__((weak)) spl_i64 rt_io_tcp_bind(spl_i64 addr) {
+    (void)addr;
     return -1;
+}
+
+__attribute__((weak)) spl_i64 rt_io_tcp_accept_timeout(spl_i64 fd, spl_i64 ms) {
+    (void)fd;
+    (void)ms;
+    return -1;
+}
+
+__attribute__((weak)) spl_i64 rt_io_tcp_write_text(spl_i64 fd, spl_i64 data) {
+    RtString *text = rt_as_string(data);
+    (void)fd;
+    return text ? (spl_i64)text->len : -1;
+}
+
+__attribute__((weak)) spl_i64 rt_io_tcp_close(spl_i64 fd) {
+    (void)fd;
+    return 1;
 }
 
 spl_i64 rt_display_init(void) {
