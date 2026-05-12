@@ -1574,6 +1574,7 @@ pub(crate) fn call_extern_function(
         "rt_array_extend_i64" => ffi_array::rt_array_extend_i64_fn(&evaluated),
         // `rt_bytes_u8_at(arr, idx)` — index into a Value::Array byte buffer.
         "rt_bytes_u8_at" => ffi_array::rt_bytes_u8_at_fn(&evaluated),
+        "rt_bytes_u8_set" => ffi_array::rt_bytes_u8_set_fn(&evaluated),
 
         // ====================================================================
         // FFI Dictionary Operations (7 functions)

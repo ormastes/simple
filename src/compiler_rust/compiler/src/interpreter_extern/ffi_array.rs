@@ -8,8 +8,8 @@ use simple_runtime::value::RuntimeValue;
 
 // Import actual FFI functions from runtime
 use simple_runtime::value::{
-    rt_array_new, rt_array_push, rt_array_get, rt_array_set, rt_array_pop, rt_array_clear, rt_array_len,
-    rt_array_extend_i64,
+    rt_array_clear, rt_array_extend_i64, rt_array_get, rt_array_len, rt_array_new, rt_array_pop, rt_array_push,
+    rt_array_set, rt_bytes_u8_set,
 };
 
 fn interpreter_byte_at(value: &Value) -> i64 {
@@ -87,6 +87,42 @@ pub fn rt_bytes_u8_at_fn(args: &[Value]) -> Result<Value, CompileError> {
         }
         _ => Ok(Value::Int(0)),
     }
+}
+
+/// Set byte at index for heap-backed byte arrays.
+pub fn rt_bytes_u8_set_fn(args: &[Value]) -> Result<Value, CompileError> {
+    let arr_raw = args
+        .first()
+        .ok_or_else(|| {
+            CompileError::semantic_with_context(
+                "rt_bytes_u8_set expects 3 arguments".to_string(),
+                ErrorContext::new().with_code(codes::ARGUMENT_COUNT_MISMATCH),
+            )
+        })?
+        .as_int()?;
+
+    let index = args
+        .get(1)
+        .ok_or_else(|| {
+            CompileError::semantic_with_context(
+                "rt_bytes_u8_set expects 3 arguments".to_string(),
+                ErrorContext::new().with_code(codes::ARGUMENT_COUNT_MISMATCH),
+            )
+        })?
+        .as_int()?;
+
+    let value = args
+        .get(2)
+        .ok_or_else(|| {
+            CompileError::semantic_with_context(
+                "rt_bytes_u8_set expects 3 arguments".to_string(),
+                ErrorContext::new().with_code(codes::ARGUMENT_COUNT_MISMATCH),
+            )
+        })
+        .map(interpreter_byte_at)?;
+
+    let arr = RuntimeValue::from_raw(arr_raw as u64);
+    Ok(Value::Bool(rt_bytes_u8_set(arr, index, value)))
 }
 
 // ============================================================================
@@ -284,8 +320,9 @@ pub fn rt_array_extend_i64_fn(args: &[Value]) -> Result<Value, CompileError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{interpreter_byte_at, rt_bytes_u8_at_fn};
+    use super::{interpreter_byte_at, rt_bytes_u8_at_fn, rt_bytes_u8_set_fn};
     use crate::value::Value;
+    use simple_runtime::value::{rt_array_new, rt_bytes_u8_at};
 
     #[test]
     fn interpreter_byte_at_reads_u8_values_through_wrappers() {
@@ -304,5 +341,22 @@ mod tests {
         let arr = Value::array(vec![Value::UInt { value: 0x2d, width: 8 }]);
         let result = rt_bytes_u8_at_fn(&[arr, Value::Int(0)]).expect("byte lookup should succeed");
         assert_eq!(result, Value::Int(0x2d));
+    }
+
+    #[test]
+    fn rt_bytes_u8_set_updates_heap_backed_array() {
+        let arr = rt_array_new(2);
+        let result = rt_bytes_u8_set_fn(&[
+            Value::Int(arr.to_raw() as i64),
+            Value::Int(0),
+            Value::UInt {
+                value: 0x1ff,
+                width: 16,
+            },
+        ])
+        .expect("byte set should succeed");
+
+        assert_eq!(result, Value::Bool(true));
+        assert_eq!(rt_bytes_u8_at(arr, 0), 0xff);
     }
 }
