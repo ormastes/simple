@@ -303,6 +303,8 @@ fn count_nonempty_lines(code: text) -> i64:
 
 fn is_low_signal_block(block: DuplicateBlock) -> bool:
     val code = block.code
+    if code.len() == 0:
+        return false
     val executable_lines = count_executable_lines(code)
     val nonempty_lines = count_nonempty_lines(code)
     if executable_lines < 2:
@@ -467,6 +469,9 @@ fn find_duplicates_in_file(file_path: text, config: DuplicationConfig, cache_man
 fn find_duplicates_in_file_with_hash_filter(file_path: text, config: DuplicationConfig, cache_manager: TokenCacheManager, interner: TokenInterner, repeated_hashes: {text: bool}) -> [DuplicateBlock]:
     val tokens = load_tokens_for_file(file_path, config, cache_manager)
     val filter_enabled = repeated_hashes.keys().len() > 0
+    var source = get_cached_content(cache_manager, file_path)
+    if source.len() == 0:
+        source = read_detector_source(file_path)
 
     var blocks = []
     val candidates = collect_token_window_candidates(tokens, config, interner)
@@ -474,15 +479,21 @@ fn find_duplicates_in_file_with_hash_filter(file_path: text, config: Duplication
         val hash_key = "{candidate.hash_value}"
         if filter_enabled and not repeated_hashes.has(hash_key):
             continue
+        val snippet_start = tokens[candidate.index].start_offset
+        val snippet_end = tokens[candidate.end_index - 1].end_offset
+        val snippet = if snippet_start >= 0 and snippet_end >= snippet_start and snippet_end <= source.len():
+            source[snippet_start:snippet_end]
+        else:
+            ""
         blocks.push(DuplicateBlock(
             file: file_path,
             line_start: candidate.line_start,
             line_end: candidate.line_end,
             token_count: candidate.token_count,
             hash_value: candidate.hash_value,
-            snippet_start_offset: tokens[candidate.index].start_offset,
-            snippet_end_offset: tokens[candidate.end_index - 1].end_offset,
-            code: ""
+            snippet_start_offset: snippet_start,
+            snippet_end_offset: snippet_end,
+            code: snippet
         ))
 
     blocks

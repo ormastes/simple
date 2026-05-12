@@ -1,0 +1,184 @@
+"""Deterministic software execution for browser WebGPU command records.
+
+This executor is not a renderer. It replays the browser WebGPU command stream
+into deterministic counters so command sequencing, queue submission, and compute
+work can be verified without native GPU availability.
+"""
+
+use std.gc_async_mut.gpu.browser_engine.webgpu_commands.{
+    GPUCommandBufferHandle, WebGPUQueue, WebGPURecordedCommand,
+    WEBGPU_COMMAND_BEGIN_RENDER_PASS, WEBGPU_COMMAND_END_RENDER_PASS,
+    WEBGPU_COMMAND_BEGIN_COMPUTE_PASS, WEBGPU_COMMAND_END_COMPUTE_PASS,
+    WEBGPU_COMMAND_SET_PIPELINE, WEBGPU_COMMAND_SET_BIND_GROUP,
+    WEBGPU_COMMAND_DRAW, WEBGPU_COMMAND_DISPATCH_WORKGROUPS,
+    WEBGPU_COMMAND_COPY_BUFFER_TO_BUFFER, WEBGPU_COMMAND_COPY_TEXTURE_TO_TEXTURE,
+    WEBGPU_COMMAND_WRITE_BUFFER, WEBGPU_COMMAND_WRITE_TEXTURE
+}
+
+pub class WebGPUSoftwareExecutionResult:
+    valid: bool
+    error: text
+    command_count: i32
+    render_pass_count: i32
+    compute_pass_count: i32
+    draw_count: i32
+    vertex_count: i32
+    dispatch_count: i32
+    dispatched_workgroups: i32
+    buffer_copy_count: i32
+    texture_copy_count: i32
+    queue_write_count: i32
+    queue_write_bytes: i32
+    checksum: i32
+
+    static fn create() -> WebGPUSoftwareExecutionResult:
+        WebGPUSoftwareExecutionResult(
+            valid: true,
+            error: "",
+            command_count: 0,
+            render_pass_count: 0,
+            compute_pass_count: 0,
+            draw_count: 0,
+            vertex_count: 0,
+            dispatch_count: 0,
+            dispatched_workgroups: 0,
+            buffer_copy_count: 0,
+            texture_copy_count: 0,
+            queue_write_count: 0,
+            queue_write_bytes: 0,
+            checksum: 0
+        )
+
+pub class WebGPUSoftwareExecutor:
+    active_pass: text
+    last_pipeline_id: i32
+    last_bind_group_id: i32
+    last_error: text
+    result: WebGPUSoftwareExecutionResult
+
+    static fn create() -> WebGPUSoftwareExecutor:
+        WebGPUSoftwareExecutor(
+            active_pass: "",
+            last_pipeline_id: -1,
+            last_bind_group_id: -1,
+            last_error: "",
+            result: WebGPUSoftwareExecutionResult.create()
+        )
+
+    me execute_queue(queue: WebGPUQueue) -> WebGPUSoftwareExecutionResult:
+        var i = 0
+        while i < queue.write_commands.len():
+            if not self.execute_queue_write(queue.write_commands[i]):
+                return self.result
+            i = i + 1
+        i = 0
+        while i < queue.submitted_buffers.len():
+            if not self.execute_command_buffer(queue.submitted_buffers[i]):
+                return self.result
+            i = i + 1
+        self.result
+
+    me execute_command_buffer(command_buffer: GPUCommandBufferHandle) -> bool:
+        if not command_buffer.valid:
+            return self.fail("WebGPU software executor cannot execute an invalid command buffer")
+        var i = 0
+        while i < command_buffer.commands.len():
+            if not self.execute_command(command_buffer.commands[i]):
+                return false
+            i = i + 1
+        if self.active_pass != "":
+            return self.fail("WebGPU software executor command buffer ended with an active pass")
+        true
+
+    me execute_queue_write(command: WebGPURecordedCommand) -> bool:
+        if command.kind != WEBGPU_COMMAND_WRITE_BUFFER and command.kind != WEBGPU_COMMAND_WRITE_TEXTURE:
+            return self.fail("WebGPU software executor queue write kind is not supported")
+        if command.data_size <= 0:
+            return self.fail("WebGPU software executor queue write size must be positive")
+        self.result.queue_write_count = self.result.queue_write_count + 1
+        self.result.queue_write_bytes = self.result.queue_write_bytes + command.data_size
+        self.result.checksum = self.result.checksum + command.data_size + command.destination_buffer_id + command.destination_texture_id
+        true
+
+    me execute_command(command: WebGPURecordedCommand) -> bool:
+        self.result.command_count = self.result.command_count + 1
+        if command.kind == WEBGPU_COMMAND_BEGIN_RENDER_PASS:
+            if self.active_pass != "":
+                return self.fail("WebGPU software executor cannot begin a render pass inside another pass")
+            self.active_pass = "render"
+            self.result.render_pass_count = self.result.render_pass_count + 1
+            self.result.checksum = self.result.checksum + 11
+            return true
+        if command.kind == WEBGPU_COMMAND_END_RENDER_PASS:
+            if self.active_pass != "render":
+                return self.fail("WebGPU software executor cannot end a render pass when none is active")
+            self.active_pass = ""
+            self.result.checksum = self.result.checksum + 13
+            return true
+        if command.kind == WEBGPU_COMMAND_BEGIN_COMPUTE_PASS:
+            if self.active_pass != "":
+                return self.fail("WebGPU software executor cannot begin a compute pass inside another pass")
+            self.active_pass = "compute"
+            self.result.compute_pass_count = self.result.compute_pass_count + 1
+            self.result.checksum = self.result.checksum + 17
+            return true
+        if command.kind == WEBGPU_COMMAND_END_COMPUTE_PASS:
+            if self.active_pass != "compute":
+                return self.fail("WebGPU software executor cannot end a compute pass when none is active")
+            self.active_pass = ""
+            self.result.checksum = self.result.checksum + 19
+            return true
+        if command.kind == WEBGPU_COMMAND_SET_PIPELINE:
+            if self.active_pass == "":
+                return self.fail("WebGPU software executor setPipeline requires an active pass")
+            self.last_pipeline_id = command.pipeline_id
+            self.result.checksum = self.result.checksum + command.pipeline_id
+            return true
+        if command.kind == WEBGPU_COMMAND_SET_BIND_GROUP:
+            if self.active_pass == "":
+                return self.fail("WebGPU software executor setBindGroup requires an active pass")
+            self.last_bind_group_id = command.bind_group_id
+            self.result.checksum = self.result.checksum + command.bind_group_id + command.slot
+            return true
+        if command.kind == WEBGPU_COMMAND_DRAW:
+            if self.active_pass != "render":
+                return self.fail("WebGPU software executor draw requires an active render pass")
+            self.result.draw_count = self.result.draw_count + 1
+            self.result.vertex_count = self.result.vertex_count + command.vertex_count * command.instance_count
+            self.result.checksum = self.result.checksum + command.vertex_count + command.instance_count
+            return true
+        if command.kind == WEBGPU_COMMAND_DISPATCH_WORKGROUPS:
+            if self.active_pass != "compute":
+                return self.fail("WebGPU software executor dispatch requires an active compute pass")
+            self.result.dispatch_count = self.result.dispatch_count + 1
+            self.result.dispatched_workgroups = self.result.dispatched_workgroups + command.workgroups_x * command.workgroups_y * command.workgroups_z
+            self.result.checksum = self.result.checksum + self.result.dispatched_workgroups
+            return true
+        if command.kind == WEBGPU_COMMAND_COPY_BUFFER_TO_BUFFER:
+            if self.active_pass != "":
+                return self.fail("WebGPU software executor buffer copies must run outside passes")
+            self.result.buffer_copy_count = self.result.buffer_copy_count + 1
+            self.result.checksum = self.result.checksum + command.size + command.source_buffer_id + command.destination_buffer_id
+            return true
+        if command.kind == WEBGPU_COMMAND_COPY_TEXTURE_TO_TEXTURE:
+            if self.active_pass != "":
+                return self.fail("WebGPU software executor texture copies must run outside passes")
+            self.result.texture_copy_count = self.result.texture_copy_count + 1
+            self.result.checksum = self.result.checksum + command.width * command.height * command.depth_or_layers
+            return true
+        self.fail("WebGPU software executor command kind is not supported")
+
+    me fail(message: text) -> bool:
+        self.last_error = message
+        self.result.valid = false
+        self.result.error = message
+        false
+
+pub fn webgpu_software_execute_queue(queue: WebGPUQueue) -> WebGPUSoftwareExecutionResult:
+    var executor = WebGPUSoftwareExecutor.create()
+    executor.execute_queue(queue)
+
+pub fn webgpu_software_execute_command_buffer(command_buffer: GPUCommandBufferHandle) -> WebGPUSoftwareExecutionResult:
+    var executor = WebGPUSoftwareExecutor.create()
+    executor.execute_command_buffer(command_buffer)
+    executor.result

@@ -111,3 +111,41 @@ void rt_mmio_write_u64(spl_i64 addr, spl_i64 value) {
 void log_raw_println(spl_i64 msg) {
     (void)msg;
 }
+
+spl_i64 rt_pci_device_count(void) {
+    return 0;
+}
+
+spl_i64 rt_pci_get_field(spl_i64 index, spl_i64 field) {
+    (void)index;
+    (void)field;
+    return -1;
+}
+
+spl_i64 rt_net_init(void) {
+    return -1;
+}
+
+spl_i64 rt_net_tx_test(void) {
+    return -1;
+}
+
+spl_i64 rt_net_stats(void) {
+    return -1;
+}
+
+spl_i64 rt_display_init(void) {
+    return -1;
+}
+
+spl_i64 rt_display_flush_test(void) {
+    return -1;
+}
+
+spl_i64 rt_display_width(void) {
+    return 0;
+}
+
+spl_i64 rt_display_height(void) {
+    return 0;
+}
