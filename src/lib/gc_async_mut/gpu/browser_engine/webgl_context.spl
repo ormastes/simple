@@ -5,6 +5,13 @@ context creation, error state, context loss, resources, shader compile, and
 program link/use. Rendering backend translation is layered after this API.
 """
 
+use std.gc_async_mut.gpu.browser_engine.webgl_render_commands.{
+    WebGLRenderCommand,
+    webgl_render_command_viewport, webgl_render_command_clear_color,
+    webgl_render_command_clear, webgl_render_command_use_program,
+    webgl_render_command_bind_texture
+}
+
 pub val WEBGL_NO_ERROR: i32 = 0
 pub val WEBGL_INVALID_ENUM: i32 = 1280
 pub val WEBGL_INVALID_VALUE: i32 = 1281
@@ -38,6 +45,7 @@ pub val WEBGL_UNPACK_FLIP_Y_WEBGL: i32 = 37440
 pub val WEBGL_UNPACK_PREMULTIPLY_ALPHA_WEBGL: i32 = 37441
 pub val WEBGL_UNPACK_COLORSPACE_CONVERSION_WEBGL: i32 = 37443
 pub val WEBGL_BROWSER_DEFAULT_WEBGL: i32 = 37444
+pub val WEBGL_COLOR_BUFFER_BIT: i32 = 16384
 
 pub class WebGLBufferHandle:
     id: i32
@@ -122,6 +130,15 @@ pub class WebGLContext:
     unpack_flip_y: bool
     unpack_premultiply_alpha: bool
     unpack_colorspace_conversion: i32
+    viewport_x: i32
+    viewport_y: i32
+    viewport_width: i32
+    viewport_height: i32
+    clear_red: f64
+    clear_green: f64
+    clear_blue: f64
+    clear_alpha: f64
+    render_commands: [WebGLRenderCommand]
 
     fn is_available() -> bool:
         not self.context_lost
@@ -142,6 +159,38 @@ pub class WebGLContext:
     me restore_context():
         self.context_lost = false
         self.last_error = WEBGL_NO_ERROR
+
+    me viewport(x: i32, y: i32, width: i32, height: i32) -> bool:
+        if not self.ensure_context_available():
+            return false
+        if width < 0 or height < 0:
+            self.last_error = WEBGL_INVALID_VALUE
+            return false
+        self.viewport_x = x
+        self.viewport_y = y
+        self.viewport_width = width
+        self.viewport_height = height
+        self.render_commands.push(webgl_render_command_viewport(x, y, width, height))
+        true
+
+    me clear_color(red: f64, green: f64, blue: f64, alpha: f64) -> bool:
+        if not self.ensure_context_available():
+            return false
+        self.clear_red = red
+        self.clear_green = green
+        self.clear_blue = blue
+        self.clear_alpha = alpha
+        self.render_commands.push(webgl_render_command_clear_color(red, green, blue, alpha))
+        true
+
+    me clear(mask: i32) -> bool:
+        if not self.ensure_context_available():
+            return false
+        if mask != WEBGL_COLOR_BUFFER_BIT:
+            self.last_error = WEBGL_INVALID_VALUE
+            return false
+        self.render_commands.push(webgl_render_command_clear(mask))
+        true
 
     me create_buffer() -> WebGLBufferHandle:
         if not self.ensure_context_available():
@@ -393,6 +442,7 @@ pub class WebGLContext:
             self.last_error = WEBGL_INVALID_OPERATION
             return false
         self.current_program_id = program_id
+        self.render_commands.push(webgl_render_command_use_program(program_id))
         true
 
     me supports_extension(name: text) -> bool:
@@ -439,6 +489,7 @@ pub class WebGLContext:
         texture.target = target
         self.textures[texture_index] = texture
         self.bound_texture_2d = texture_id
+        self.render_commands.push(webgl_render_command_bind_texture(target, texture_id))
         true
 
     me pixel_store_i(pname: i32, param: i32) -> bool:
@@ -612,7 +663,16 @@ pub fn webgl_create_context(version: i32, width: i32, height: i32) -> WebGLConte
         unpack_alignment: 4,
         unpack_flip_y: false,
         unpack_premultiply_alpha: false,
-        unpack_colorspace_conversion: WEBGL_BROWSER_DEFAULT_WEBGL
+        unpack_colorspace_conversion: WEBGL_BROWSER_DEFAULT_WEBGL,
+        viewport_x: 0,
+        viewport_y: 0,
+        viewport_width: width,
+        viewport_height: height,
+        clear_red: 0.0,
+        clear_green: 0.0,
+        clear_blue: 0.0,
+        clear_alpha: 0.0,
+        render_commands: []
     )
 
 pub fn webgl_is_supported_context_name(name: text) -> bool:

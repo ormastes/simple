@@ -8,9 +8,14 @@ use std.gc_async_mut.gpu.browser_engine.webgl_context.{
     WEBGL_ACTIVE_ATTRIBUTES, WEBGL_SHADER_TYPE, WEBGL_FLOAT_VEC4,
     WEBGL_SAMPLER_2D, WEBGL_TEXTURE_2D, WEBGL_UNPACK_ALIGNMENT,
     WEBGL_UNPACK_FLIP_Y_WEBGL, WEBGL_UNPACK_PREMULTIPLY_ALPHA_WEBGL,
-    WEBGL_RGB, WEBGL_RGBA, WEBGL_UNSIGNED_BYTE,
+    WEBGL_RGB, WEBGL_RGBA, WEBGL_UNSIGNED_BYTE, WEBGL_COLOR_BUFFER_BIT,
     webgl_create_context, webgl_is_supported_context_name,
     webgl_context_version_for_name
+}
+use std.gc_async_mut.gpu.browser_engine.webgl_render_commands.{
+    WEBGL_RENDER_COMMAND_VIEWPORT, WEBGL_RENDER_COMMAND_CLEAR_COLOR,
+    WEBGL_RENDER_COMMAND_CLEAR, WEBGL_RENDER_COMMAND_USE_PROGRAM,
+    WEBGL_RENDER_COMMAND_BIND_TEXTURE
 }
 
 fn _vertex_glsl() -> text:
@@ -93,6 +98,38 @@ describe "Browser WebGL context":
             expect(bad.valid).to_equal(false)
             expect(good.id).to_equal(1)
 
+    describe "render command recording":
+        it "initializes viewport and clear state":
+            val ctx = webgl_create_context(1, 320, 240)
+            expect(ctx.viewport_x).to_equal(0)
+            expect(ctx.viewport_y).to_equal(0)
+            expect(ctx.viewport_width).to_equal(320)
+            expect(ctx.viewport_height).to_equal(240)
+            expect(ctx.clear_alpha).to_equal(0.0)
+            expect(ctx.render_commands.len()).to_equal(0)
+
+        it "records viewport clear color and clear commands":
+            var ctx = webgl_create_context(1, 320, 240)
+            expect(ctx.viewport(4, 8, 160, 120)).to_equal(true)
+            expect(ctx.clear_color(0.1, 0.2, 0.3, 1.0)).to_equal(true)
+            expect(ctx.clear(WEBGL_COLOR_BUFFER_BIT)).to_equal(true)
+            expect(ctx.viewport_x).to_equal(4)
+            expect(ctx.viewport_height).to_equal(120)
+            expect(ctx.clear_blue).to_equal(0.3)
+            expect(ctx.render_commands.len()).to_equal(3)
+            expect(ctx.render_commands[0].kind).to_equal(WEBGL_RENDER_COMMAND_VIEWPORT)
+            expect(ctx.render_commands[1].kind).to_equal(WEBGL_RENDER_COMMAND_CLEAR_COLOR)
+            expect(ctx.render_commands[2].kind).to_equal(WEBGL_RENDER_COMMAND_CLEAR)
+            expect(ctx.render_commands[2].mask).to_equal(WEBGL_COLOR_BUFFER_BIT)
+
+        it "rejects invalid render state without recording commands":
+            var ctx = webgl_create_context(1, 320, 240)
+            expect(ctx.viewport(0, 0, -1, 10)).to_equal(false)
+            expect(ctx.get_error()).to_equal(WEBGL_INVALID_VALUE)
+            expect(ctx.clear(1)).to_equal(false)
+            expect(ctx.get_error()).to_equal(WEBGL_INVALID_VALUE)
+            expect(ctx.render_commands.len()).to_equal(0)
+
     describe "textures":
         it "binds texture 2d and records rgba uploads":
             var ctx = webgl_create_context(1, 320, 240)
@@ -107,6 +144,8 @@ describe "Browser WebGL context":
             expect(ctx.textures[0].initialized).to_equal(true)
             expect(ctx.textures[0].pixels.len()).to_equal(8)
             expect(ctx.textures[0].pixels[6]).to_equal(7)
+            expect(ctx.render_commands[0].kind).to_equal(WEBGL_RENDER_COMMAND_BIND_TEXTURE)
+            expect(ctx.render_commands[0].texture_id).to_equal(texture.id)
 
         it "allocates zero-filled texture storage when upload data is empty":
             var ctx = webgl_create_context(1, 320, 240)
@@ -238,6 +277,8 @@ describe "Browser WebGL context":
             expect(linked.linked).to_equal(true)
             expect(ctx.use_program(program.id)).to_equal(true)
             expect(ctx.current_program_id).to_equal(program.id)
+            expect(ctx.render_commands[0].kind).to_equal(WEBGL_RENDER_COMMAND_USE_PROGRAM)
+            expect(ctx.render_commands[0].program_id).to_equal(program.id)
 
         it "reports shader parameters and info logs":
             var ctx = webgl_create_context(1, 320, 240)
