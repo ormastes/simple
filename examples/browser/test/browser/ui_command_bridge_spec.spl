@@ -1,5 +1,8 @@
 use std.spec.*
-use examples.browser.transform.ui_to_dom.{BrowserChromeAction, UiBrowserCommandBridge, browser_command_for_chrome_action}
+use examples.browser.transform.ui_to_dom.{
+    BrowserChromeAction, UiBrowserCommandBridge,
+    browser_chrome_action_from_host, browser_command_for_chrome_action
+}
 use examples.browser.feature.browser.app.{BrowserApp, BrowserCommand}
 use examples.browser.shared.error.{BrowserResult}
 use examples.browser.shared.config.{BrowserConfig}
@@ -78,10 +81,21 @@ fn _is_navigate_to(cmd: BrowserCommand, expected: text) -> bool:
         _:
             false
 
+fn _host_action_ok(action_name: text, value: text) -> bool:
+    match browser_chrome_action_from_host(action_name, value):
+        Ok(_): true
+        Err(_): false
+
 describe "UI browser command bridge":
     it "maps address bar submissions to app navigation commands":
         val cmd = browser_command_for_chrome_action(BrowserChromeAction.AddressSubmit("example.com"))
         expect(_is_navigate_to(cmd, "example.com")).to_equal(true)
+
+    it "decodes host browser action payloads":
+        expect(_host_action_ok("address-submit", "example.com")).to_equal(true)
+        expect(_host_action_ok("back", "")).to_equal(true)
+        expect(_host_action_ok("new-tab", "")).to_equal(true)
+        expect(_host_action_ok("unknown", "")).to_equal(false)
 
     it "dispatches address bar submissions through BrowserApp state":
         var app = _app()
@@ -125,3 +139,12 @@ describe "UI browser command bridge":
         expect(app.devtools_open).to_equal(true)
         expect(_ok(bridge.dispatch(app, BrowserChromeAction.ToggleFullscreen))).to_equal(true)
         expect(app.windows[0].is_fullscreen).to_equal(true)
+
+    it "dispatches host browser action payloads through BrowserApp":
+        var app = _app()
+        val bridge = UiBrowserCommandBridge.new(Logger(name: "ui-command-bridge-test"))
+        expect(_ok(bridge.dispatch_host_action(app, "new-tab", ""))).to_equal(true)
+        expect(_ok(bridge.dispatch_host_action(app, "address-submit", "example.com"))).to_equal(true)
+        expect(app.navigation.current_url()).to_equal("https://example.com")
+        expect(_ok(bridge.dispatch_host_action(app, "find", "needle"))).to_equal(true)
+        expect(app.last_find_query).to_equal("needle")
