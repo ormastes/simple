@@ -1,0 +1,328 @@
+# Part 2 of src/compiler/90.tools/duplicate_check/detector.spl
+use compiler.tools.duplicate_check.detector.*
+# Core duplication detection engine using Karp-Rabin rolling hash
+
+use compiler.tools.duplicate_check.config.{DuplicationConfig}
+use compiler.tools.duplicate_check.tokenizer.{SimpleToken, tokenize, token_to_string}
+use compiler.tools.duplicate_check.features.{FeatureVec, extract_token_frequencies, build_feature_vector, cosine_similarity}
+use compiler.tools.duplicate_check.debug.{debug_log, debug_log_progress}
+use compiler.tools.duplicate_check.cache.{TokenCacheManager, get_cached_tokens, set_cached_tokens, set_cached_tokens_with_content, get_cached_content}
+use compiler.tools.duplicate_check.detector_files.{collect_detector_files}
+use std.nogc_sync_mut.io.file_ops.{file_read}
+use std.nogc_sync_mut.io.time_ops.{current_time_ms}
+fn collect_files(path: text, config: DuplicationConfig) -> [text]:
+    collect_detector_files(path, config)
+
+fn sample_blocks_for_similarity(all_blocks: [DuplicateBlock], config: DuplicationConfig) -> [DuplicateBlock]:
+    val max_blocks_to_analyze = 320
+    var blocks_to_analyze = all_blocks
+    if all_blocks.len() > max_blocks_to_analyze:
+        log_progress(config, "WARNING: Too many blocks ({all_blocks.len()}), sampling {max_blocks_to_analyze} across files")
+        # Sample blocks distributed across files instead of taking first N
+        # Group blocks by file, then round-robin pick from each file
+        var file_blocks = {}
+        for block in all_blocks:
+            if file_blocks.has(block.file):
+                var grouped = file_blocks[block.file]
+                grouped.push(block)
+                file_blocks[block.file] = grouped
+            else:
+                file_blocks[block.file] = [block]
+
+        val file_keys = file_blocks.keys()
+        var limited = []
+        var round = 0
+        var done = false
+        while not done:
+            var added_any = false
+            for fk in file_keys:
+                val fblocks = file_blocks[fk]
+                if round < fblocks.len():
+                    limited.push(fblocks[round])
+                    added_any = true
+                    if limited.len() >= max_blocks_to_analyze:
+                        done = true
+                        break
+            if not added_any:
+                done = true
+            round = round + 1
+        blocks_to_analyze = limited
+        log_verbose(config, "  Sampled from {file_keys.len()} files")
+    blocks_to_analyze
+
+fn load_tokens_with_line_indexes(blocks_to_analyze: [DuplicateBlock], config: DuplicationConfig, cache_manager: TokenCacheManager) -> SimilarityPrep:
+    log_progress(config, "Pre-computing features for {blocks_to_analyze.len()} blocks...")
+    val start_ms = current_time_ms()
+    var last_ms = 0
+    var file_token_cache = {}
+    var file_line_index_cache = {}
+    var feature_vectors = []
+    var low_signal_flags = []
+    var block_idx = 0
+    while block_idx < blocks_to_analyze.len():
+        val block = blocks_to_analyze[block_idx]
+        low_signal_flags.push(is_low_signal_block(block))
+
+        var tokens = []
+        if file_token_cache.has(block.file):
+            tokens = file_token_cache[block.file]
+        else:
+            val cached_tok = get_cached_tokens(cache_manager, block.file)
+            if cached_tok != nil:
+                tokens = cached_tok
+            else:
+                val content = read_detector_source(block.file)
+                tokens = tokenize(content, config)
+                set_cached_tokens_with_content(cache_manager, block.file, tokens, content)
+            file_token_cache[block.file] = tokens
+
+            # Build line-to-token-index map once per file for O(1) lookups
+            var line_index = {}
+            var li = 0
+            var last_line = -1
+            while li < tokens.len():
+                val tline = tokens[li].line
+                if tline != last_line:
+                    val line_key = "{tline}"
+                    line_index[line_key] = li
+                    last_line = tline
+                li = li + 1
+            file_line_index_cache[block.file] = line_index
+
+        # O(1) lookup via line index
+        var token_start = 0
+        var found_start = false
+        val cached_line_index = file_line_index_cache[block.file]
+        if cached_line_index != nil:
+            val line_key = "{block.line_start}"
+            if cached_line_index.has(line_key):
+                token_start = cached_line_index[line_key]
+                found_start = true
+
+        if not found_start:
+            # Fallback to linear scan
+            var ti = 0
+            while ti < tokens.len():
+                if tokens[ti].line == block.line_start:
+                    token_start = ti
+                    found_start = true
+                    break
+                ti = ti + 1
+
+        var feature_vec = FeatureVec(block_id: block_idx, features: {}, magnitude: 0.0)
+        if found_start:
+            val token_end = (token_start + block.token_count).min(tokens.len())
+            val freq_map = extract_token_frequencies(tokens, token_start, token_end)
+            feature_vec = build_feature_vector(block_idx, freq_map)
+
+        feature_vectors.push(feature_vec)
+        block_idx = block_idx + 1
+        last_ms = progress_tick(config, "feature pass", block_idx, blocks_to_analyze.len(), start_ms, last_ms)
+
+    log_progress(config, "Extracted {feature_vectors.len()} feature vectors from {file_token_cache.keys().len()} files")
+    SimilarityPrep(
+        blocks: blocks_to_analyze,
+        features: feature_vectors,
+        low_signal_flags: low_signal_flags,
+        file_count: file_token_cache.keys().len()
+    )
+
+fn build_similarity_adjacency(prep: SimilarityPrep, config: DuplicationConfig) -> {text: [i64]}:
+    log_progress(config, "Starting pairwise comparison of {prep.blocks.len()} blocks...")
+    val total_possible = (prep.blocks.len() * (prep.blocks.len() - 1)) / 2
+    log_verbose(config, "  Max comparisons: {total_possible} (optimizations will reduce this)")
+    val start_ms = current_time_ms()
+    var last_ms = 0
+
+    var comparison_count = 0
+    var skipped_same_file = 0
+    var match_count = 0
+    val max_comparisons_per_block = 36
+    val max_total_comparisons = 7000
+    var adjacency = {}
+
+    var i = 0
+    while i < prep.blocks.len() and comparison_count < max_total_comparisons:
+        if i % 50 == 0:
+            log_verbose(config, "  Block {i}/{prep.blocks.len()}: {comparison_count} comparisons, {match_count} matches")
+
+        if comparison_count >= max_total_comparisons:
+            log_progress(config, "  Reached comparison limit ({max_total_comparisons}), stopping early")
+            break
+
+        val block1 = prep.blocks[i]
+        var comparisons_this_block = 0
+        var j = i + 1
+
+        while j < prep.blocks.len() and comparisons_this_block < max_comparisons_per_block:
+            val block2 = prep.blocks[j]
+
+            val same_file = block1.file == block2.file
+            if same_file:
+                skipped_same_file = skipped_same_file + 1
+                j = j + 1
+                continue
+
+            if prep.low_signal_flags[i] and prep.low_signal_flags[j]:
+                j = j + 1
+                continue
+
+            comparison_count = comparison_count + 1
+            comparisons_this_block = comparisons_this_block + 1
+
+            val feature_vec1 = prep.features[i]
+            val feature_vec2 = prep.features[j]
+            val similarity = cosine_similarity(feature_vec1, feature_vec2)
+
+            val above_threshold = similarity >= config.similarity_threshold
+            if above_threshold:
+                match_count = match_count + 1
+                val key1 = "{i}"
+                val key2 = "{j}"
+                if adjacency.has(key1):
+                    var neighbors1 = adjacency[key1]
+                    neighbors1.push(j)
+                    adjacency[key1] = neighbors1
+                else:
+                    adjacency[key1] = [j]
+
+                if adjacency.has(key2):
+                    var neighbors2 = adjacency[key2]
+                    neighbors2.push(i)
+                    adjacency[key2] = neighbors2
+                else:
+                    adjacency[key2] = [i]
+
+            j = j + 1
+            last_ms = progress_tick(config, "compare pass", comparison_count, max_total_comparisons, start_ms, last_ms)
+        i = i + 1
+
+    log_progress(config, "Completed {comparison_count} comparisons, found {match_count} similar pairs")
+    adjacency
+
+fn build_similarity_groups(adjacency: {text: [i64]}, blocks_to_analyze: [DuplicateBlock], config: DuplicationConfig) -> [DuplicateGroup]:
+    var groups = []
+    var visited = {}
+    for node_key in adjacency.keys():
+        if visited.has(node_key):
+            continue
+
+        var component = []
+        var stack = [node_key]
+        visited[node_key] = true
+
+        while stack.len() > 0:
+            val current = stack[stack.len() - 1]
+            stack = stack[0:stack.len() - 1]
+            component.push(current)
+
+            val neighbors = adjacency[current] ?? []
+            for neighbor in neighbors:
+                val neighbor_key = "{neighbor}"
+                if not visited.has(neighbor_key):
+                    visited[neighbor_key] = true
+                    stack.push(neighbor_key)
+
+        if component.len() < 2:
+            continue
+
+        var component_blocks = []
+        for block_key in component:
+            val block_idx = parse_idx(block_key)
+            if block_idx >= 0 and block_idx < blocks_to_analyze.len():
+                component_blocks.push(blocks_to_analyze[block_idx])
+
+        if component_blocks.len() < 2:
+            continue
+
+        val new_group = build_duplicate_group(component_blocks)
+        if new_group.impact_score >= config.min_impact:
+            groups.push(new_group)
+
+    groups
+
+fn refine_groups_with_similarity(exact_groups: [DuplicateGroup], all_blocks: [DuplicateBlock], config: DuplicationConfig, cache_manager: TokenCacheManager) -> [DuplicateGroup]:
+    """Refine hash-based groups using cosine similarity to catch fuzzy duplicates."""
+    val blocks_to_analyze = sample_blocks_for_similarity(all_blocks, config)
+    val prep = load_tokens_with_line_indexes(blocks_to_analyze, config, cache_manager)
+    val adjacency = build_similarity_adjacency(prep, config)
+    val similarity_groups = build_similarity_groups(adjacency, blocks_to_analyze, config)
+
+    var refined_groups = []
+    for group in exact_groups:
+        refined_groups.push(group)
+    for group in similarity_groups:
+        refined_groups.push(group)
+    refined_groups
+
+fn parse_idx(value: text) -> i64:
+    var result = 0
+    var i = 0
+    while i < value.len():
+        val byte = value.bytes()[i]
+        if byte < 48 or byte > 57:
+            return -1
+        result = result * 10 + (byte - 48)
+        i = i + 1
+    result
+
+fn scan_duplicate_blocks(files: [text], config: DuplicationConfig, cache_manager: TokenCacheManager, interner: TokenInterner) -> [DuplicateBlock]:
+    log_progress(config, "Pass 1: collecting hash counts across {files.len()} files...")
+    val summary = collect_repeated_hashes(files, config, cache_manager, interner)
+    val candidate_files = summary.candidate_files.keys()
+    val repeated_count = summary.repeated_hashes.keys().len()
+    log_progress(config, "  {repeated_count} repeated hashes in {candidate_files.len()} candidate files")
+
+    log_progress(config, "Pass 2: extracting blocks from candidate files...")
+    var all_blocks = []
+    val start_ms = current_time_ms()
+    var last_ms = 0
+    var done = 0
+    for file in candidate_files:
+        val blocks = find_duplicates_in_file_with_hash_filter(file, config, cache_manager, interner, summary.repeated_hashes)
+        all_blocks.merge(blocks)
+        done = done + 1
+        last_ms = progress_tick(config, "extract pass", done, candidate_files.len(), start_ms, last_ms)
+        log_verbose(config, "  {file}: {blocks.len()} blocks")
+
+    all_blocks
+
+fn find_duplicates(files: [text], config: DuplicationConfig, cache_manager: TokenCacheManager) -> [DuplicateGroup]:
+    val interner = new_token_interner()
+
+    log_progress(config, "Scanning {files.len()} files...")
+
+    val all_blocks = scan_duplicate_blocks(files, config, cache_manager, interner)
+
+    log_progress(config, "Found {all_blocks.len()} potential duplicate blocks")
+
+    val exact_groups = group_exact_blocks(all_blocks, config, cache_manager)
+
+    val refined_groups = if config.use_cosine_similarity:
+        log_progress(config, "Refining with cosine similarity...")
+        val result = refine_groups_with_similarity(exact_groups, all_blocks, config, cache_manager)
+        result
+    else:
+        exact_groups
+
+    val sorted = sort_by_impact(refined_groups)
+
+    log_progress(config, "Grouped into {sorted.len()} duplicate groups")
+
+    sorted
+
+fn find_duplicates_with_options(
+    files: [text],
+    config: DuplicationConfig,
+    cache_manager: TokenCacheManager,
+    use_parallel: bool,
+    use_incremental: bool,
+    incremental_cache_path: text
+) -> [DuplicateGroup]:
+    # Parallel and incremental modes require cross-module imports (parallel.spl, incremental.spl).
+    # Falling back to sequential processing until module imports are fully supported.
+    if use_parallel:
+        eprint("[WARNING] Parallel duplicate detection not available; falling back to sequential processing")
+    if use_incremental:
+        eprint("[WARNING] Incremental duplicate detection not available; falling back to full scan")
+    find_duplicates(files, config, cache_manager)

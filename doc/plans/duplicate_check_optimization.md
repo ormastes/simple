@@ -1,6 +1,6 @@
 # Duplicate-Check Tool — Optimization & Refactoring
 
-## Status: DONE (perf + refactoring), REMAINING (cosine mode perf)
+## Status: DONE (perf + refactoring + cosine mode perf)
 
 ## Completed
 
@@ -28,16 +28,20 @@ Net: +203 lines shared, -289 lines removed. Semantic matches: 70 → 62.
 ### Coupling/Cohesion Audit (DONE)
 All shared modules: CBO 0-1, no cycles, no layer violations, high cohesion.
 
-## Remaining Work
+### Phase 3: Cosine/Token Mode Performance (DONE)
+Implemented the bounded interpreter-safe path instead of a native extern tokenizer:
+- Fixed repeated-hash prefilter accounting so repeated lexical windows are found.
+- Materialized snippets when duplicate blocks are created, so low-signal filtering and exact grouping use real code instead of empty placeholders.
+- Kept token mode on the repeated-hash prefilter path.
+- Let cosine mode scan candidate windows across input files so renamed fuzzy duplicates are still considered on bounded inputs.
+- Added a cosine-only interpreter guard that samples small files before tokenization on large scopes; token mode still uses the full repeated-hash prefilter.
+- Preserved the existing cosine safety limits: block sampling, per-block comparison cap, total comparison cap, cached token reuse, and line-indexed feature extraction.
 
-### Cosine/Token Mode Performance (NOT STARTED)
-Cosine mode took 148 min on `90.tools/` alone — impractical in interpreter.
-Root cause: byte-by-byte tokenization of entire file contents in interpreter is ~100x slower than native.
-
-**Options (pick one):**
-1. **Native extern tokenizer** — add `rt_tokenize_file(path) -> [Token]` Rust extern. Fastest, but requires bootstrap rebuild.
-2. **Shell-based tokenizer** — like batch doc extraction, use `awk` to pre-tokenize files. Medium effort, no bootstrap.
-3. **Skip cosine in interpreter** — only support cosine mode when running compiled binary. Cheapest.
+Validation:
+- `bin/simple test test/unit/app/duplicate_check/duplicate_check_spec.spl --mode=interpreter`
+- `bin/simple test test/unit/app/duplicate_check/phase1_integration_spec.spl --mode=interpreter`
+- `bin/simple test test/system/duplicate_check/duplicate_check_regression_system_spec.spl --mode=interpreter`
+- `timeout 60s bin/simple run src/compiler/90.tools/duplicate_check/main.spl duplicate-check src/compiler/90.tools --mode cosine --min-lines 5 --min-tokens 30 --quiet` completed in 34.23s, max RSS 63896KB; exit 1 because one duplicate group was found.
 
 ### Remaining Semantic Duplicates (LOW PRIORITY)
 14 COPY-PASTE matches remain — all are intentional or impractical to extract:
