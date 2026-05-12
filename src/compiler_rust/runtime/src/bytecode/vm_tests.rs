@@ -2,7 +2,7 @@
 
 use super::opcodes::*;
 use super::vm::{BytecodeVM, FunctionMetadata, VmError};
-use crate::value::RuntimeValue;
+use crate::value::{rt_array_get, rt_array_new, rt_array_push, RuntimeValue};
 
 /// Helper to create a simple function that adds two numbers.
 fn create_add_function() -> (Vec<u8>, FunctionMetadata) {
@@ -71,6 +71,41 @@ fn test_vm_add_function() {
     let result = vm.call_function(0, &args).expect("Execution failed");
 
     assert_eq!(result.as_int(), 42);
+}
+
+#[test]
+fn test_vm_index_array_fast_path_semantics() {
+    let array = rt_array_new(2);
+    assert!(rt_array_push(array, RuntimeValue::from_int(10)));
+    assert!(rt_array_push(array, RuntimeValue::from_int(20)));
+
+    let mut encoder = InstructionEncoder::new();
+    encoder.emit_opcode(CONST_I64);
+    encoder.emit_u16(0);
+    encoder.emit_i64(array.to_raw() as i64);
+    encoder.emit_opcode(CONST_I64);
+    encoder.emit_u16(1);
+    encoder.emit_i64(1);
+    encoder.emit_opcode(CONST_I64);
+    encoder.emit_u16(2);
+    encoder.emit_i64(42);
+    encoder.emit_opcode(INDEX_SET);
+    encoder.emit_u16(0);
+    encoder.emit_u16(1);
+    encoder.emit_u16(2);
+    encoder.emit_opcode(INDEX_GET);
+    encoder.emit_u16(3);
+    encoder.emit_u16(0);
+    encoder.emit_u16(1);
+    encoder.emit_opcode(RET);
+    encoder.emit_u16(3);
+
+    let mut vm = BytecodeVM::new();
+    vm.load_bytecode(&encoder.finish());
+    let result = vm.execute().expect("Execution failed");
+
+    assert_eq!(result.as_int(), 42);
+    assert_eq!(rt_array_get(array, 1).as_int(), 42);
 }
 
 /// Helper to create a factorial function (recursive).

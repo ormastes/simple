@@ -19,6 +19,7 @@
 //! ```
 
 use super::opcodes::*;
+use crate::value::heap::HeapObjectType;
 use crate::value::RuntimeValue;
 use std::fmt;
 
@@ -83,6 +84,32 @@ impl std::error::Error for VmError {}
 
 /// VM result type.
 pub type VmResult<T> = Result<T, VmError>;
+
+#[inline]
+fn vm_index_get(collection: RuntimeValue, index: RuntimeValue) -> RuntimeValue {
+    if collection.is_heap() && index.is_int() {
+        let ptr = collection.as_heap_ptr();
+        unsafe {
+            if (*ptr).object_type == HeapObjectType::Array {
+                return crate::value::rt_array_get(collection, index.as_int());
+            }
+        }
+    }
+    crate::value::rt_index_get(collection, index)
+}
+
+#[inline]
+fn vm_index_set(collection: RuntimeValue, index: RuntimeValue, value: RuntimeValue) -> bool {
+    if collection.is_heap() && index.is_int() {
+        let ptr = collection.as_heap_ptr();
+        unsafe {
+            if (*ptr).object_type == HeapObjectType::Array {
+                return crate::value::rt_array_set(collection, index.as_int(), value);
+            }
+        }
+    }
+    crate::value::rt_index_set(collection, index, value)
+}
 
 /// Function call frame.
 ///
@@ -928,7 +955,7 @@ impl BytecodeVM {
                     let index = self.read_u16()?;
                     let coll = self.get_stack(container)?;
                     let idx = self.get_stack(index)?;
-                    let result = crate::value::rt_index_get(coll, idx);
+                    let result = vm_index_get(coll, idx);
                     self.set_stack(dest, result)?;
                 }
 
@@ -939,7 +966,7 @@ impl BytecodeVM {
                     let coll = self.get_stack(container)?;
                     let idx = self.get_stack(index)?;
                     let val = self.get_stack(value)?;
-                    crate::value::rt_index_set(coll, idx, val);
+                    vm_index_set(coll, idx, val);
                 }
 
                 LEN => {
