@@ -18,7 +18,7 @@ use std.gc_async_mut.gpu.browser_engine.dom_accessors.{be_dom_get_style,
     be_dom_get_display, be_dom_get_is_text, be_dom_get_text,
     be_dom_get_children}
 use std.gc_async_mut.gpu.browser_engine.css.{StyleProps, CssValue,
-    FloatCode, ClearCode}
+    FloatCode, ClearCode, css_get_word_break, css_get_overflow_wrap}
 use common.text_layout.text_layout.{text_char_width, text_line_height}
 use std.gc_async_mut.gpu.browser_engine.layout_float.{FloatBox, FloatContext,
     float_available_width_at, float_left_offset_at, float_clear_y,
@@ -606,12 +606,14 @@ pub fn layout_text_node(node: BeDomNode, container: BeLayoutBox, parent_style: S
     val char_w = text_char_width(font_size)
     val total_chars = node_txt.len()
     var raw_w = total_chars * char_w
+    val allow_emergency_break = css_get_word_break(parent_style) == "break-all" or css_get_overflow_wrap(parent_style) == "break-word" or css_get_overflow_wrap(parent_style) == "anywhere"
+    val can_wrap_text = allow_emergency_break or layout_text_has_break_opportunity(node_txt)
 
     # Fast path: no floats active — use original ceiling formula
     val has_floats = ctx.left_floats.len() > 0 or ctx.right_floats.len() > 0
     if not has_floats:
         var line_count = 1
-        if cont_cw > 0 and raw_w > cont_cw:
+        if can_wrap_text and cont_cw > 0 and raw_w > cont_cw:
             line_count = (raw_w + cont_cw - 1) / cont_cw
             raw_w = cont_cw
         val h = line_count * line_h
@@ -621,6 +623,16 @@ pub fn layout_text_node(node: BeDomNode, container: BeLayoutBox, parent_style: S
             width: w, height: h,
             content_x: container.content_x, content_y: container.content_y,
             content_width: w, content_height: h,
+            node: node, children: []
+        )
+
+    # Float-aware path: per-line available_width_at queries
+    if not can_wrap_text:
+        return BeLayoutBox(
+            x: container.content_x, y: container.content_y,
+            width: raw_w, height: line_h,
+            content_x: container.content_x, content_y: container.content_y,
+            content_width: raw_w, content_height: line_h,
             node: node, children: []
         )
 
@@ -651,3 +663,12 @@ pub fn layout_text_node(node: BeDomNode, container: BeLayoutBox, parent_style: S
         content_width: w, content_height: h,
         node: node, children: []
     )
+
+pub fn layout_text_has_break_opportunity(content: text) -> bool:
+    var i = 0
+    while i < content.len():
+        val ch = content.char_at(i)
+        if ch == " " or ch == "\t" or ch == "\n" or ch == "\r":
+            return true
+        i = i + 1
+    false
