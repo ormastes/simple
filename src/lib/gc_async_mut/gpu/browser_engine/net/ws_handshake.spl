@@ -95,6 +95,28 @@ fn read_ws_response_text(tls_conn: TlsConnection?, tcp_fd: i64) -> text:
                 done = true
     response
 
+fn ws_status_code(status_line: text) -> i64:
+    if status_line.len() < 12:
+        return 0
+
+    val version_prefix = ws_substring(status_line, 0, 9)
+    if version_prefix != "HTTP/1.1 ":
+        return 0
+
+    var i = 9
+    while i < 12:
+        val ch = ws_substring(status_line, i, i + 1)
+        if ch < "0" or ch > "9":
+            return 0
+        i = i + 1
+
+    val code_text = ws_substring(status_line, 9, 12)
+    val code = parse_int(code_text)
+    if code < 100 or code > 599:
+        return 0
+
+    code
+
 fn validate_handshake_response(raw: text, key: text, requested_protocols: [text]) -> Result<HandshakeResult>:
     # Validate the server's handshake response per RFC 6455 Section 4.2.2.
     # 1. Status must be 101 Switching Protocols
@@ -112,7 +134,7 @@ fn validate_handshake_response(raw: text, key: text, requested_protocols: [text]
 
     val status_line = lines.get(0)
 
-    if not status_line.contains("101"):
+    if ws_status_code(status_line) != 101:
         return Err(network_error("ws: expected 101 Switching Protocols, got: {status_line}"))
 
     var headers: [Pair<text, text>] = []
