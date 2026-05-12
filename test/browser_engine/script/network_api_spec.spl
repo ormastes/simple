@@ -4,8 +4,11 @@ use std.gc_async_mut.gpu.browser_engine.script.network_api.{
     fetch_create_request, fetch_set_header, fetch_send, fetch_send_with_dispatch,
     fetch_send_with_optional_dispatch,
     script_fetch_to_net_request,
-    websocket_connect, websocket_send, websocket_close,
-    WEBSOCKET_OPEN, WEBSOCKET_CLOSED
+    websocket_connect, websocket_connect_with_protocols, websocket_send,
+    websocket_close, websocket_close_with_code, websocket_queue_received,
+    websocket_receive_next, websocket_receive_count,
+    WEBSOCKET_OPEN, WEBSOCKET_CLOSED, WEBSOCKET_CLOSE_NORMAL,
+    WEBSOCKET_CLOSE_NO_STATUS
 }
 
 describe "Browser script network API":
@@ -91,6 +94,9 @@ describe "Browser script network API":
             expect(ws.buffered_amount).to_equal(10)
             expect(ws.protocol).to_equal("")
             expect(ws.extensions).to_equal("")
+            expect(ws.received_messages.len()).to_equal(0)
+            expect(ws.close_code).to_equal(WEBSOCKET_CLOSE_NO_STATUS)
+            expect(ws.close_was_clean).to_equal(false)
             expect(ws.messages.len()).to_equal(2)
             expect(ws.messages[0]).to_equal("hello")
             expect(ws.messages[1]).to_equal("world")
@@ -105,5 +111,61 @@ describe "Browser script network API":
             expect(ws.buffered_amount).to_equal(6)
             expect(ws.protocol).to_equal("")
             expect(ws.extensions).to_equal("")
+            expect(ws.close_code).to_equal(WEBSOCKET_CLOSE_NORMAL)
+            expect(ws.close_reason).to_equal("")
+            expect(ws.close_was_clean).to_equal(true)
             expect(ws.messages.len()).to_equal(1)
             expect(ws.messages[0]).to_equal("before")
+
+        it "selects the first valid requested subprotocol":
+            val ws = websocket_connect_with_protocols("wss://example.test/socket", [" invalid", "chat.v2", "ignored"])
+            expect(ws.state).to_equal("open")
+            expect(ws.ready_state).to_equal(WEBSOCKET_OPEN)
+            expect(ws.protocol).to_equal("chat.v2")
+
+        it "keeps protocol empty for invalid URLs even when protocols are requested":
+            val ws = websocket_connect_with_protocols("https://example.test/socket", ["chat.v2"])
+            expect(ws.state).to_equal("closed")
+            expect(ws.ready_state).to_equal(WEBSOCKET_CLOSED)
+            expect(ws.protocol).to_equal("")
+
+        it "records close code and reason for valid close requests":
+            var ws = websocket_connect("wss://example.test/socket")
+            ws = websocket_close_with_code(ws, 3001, "app shutdown")
+            expect(ws.ready_state).to_equal(WEBSOCKET_CLOSED)
+            expect(ws.close_code).to_equal(3001)
+            expect(ws.close_reason).to_equal("app shutdown")
+            expect(ws.close_was_clean).to_equal(true)
+
+        it "marks invalid close codes as no-status unsafe closes":
+            var ws = websocket_connect("wss://example.test/socket")
+            ws = websocket_close_with_code(ws, 1006, "not allowed")
+            expect(ws.ready_state).to_equal(WEBSOCKET_CLOSED)
+            expect(ws.close_code).to_equal(WEBSOCKET_CLOSE_NO_STATUS)
+            expect(ws.close_reason).to_equal("")
+            expect(ws.close_was_clean).to_equal(false)
+
+        it "queues and drains received messages without network I/O":
+            var ws = websocket_connect("wss://example.test/socket")
+            ws = websocket_queue_received(ws, "one")
+            ws = websocket_queue_received(ws, "two")
+            expect(websocket_receive_count(ws)).to_equal(2)
+            val first = websocket_receive_next(ws)
+            expect(first.has_message).to_equal(true)
+            expect(first.message).to_equal("one")
+            expect(websocket_receive_count(first.connection)).to_equal(1)
+            val second = websocket_receive_next(first.connection)
+            expect(second.has_message).to_equal(true)
+            expect(second.message).to_equal("two")
+            val empty = websocket_receive_next(second.connection)
+            expect(empty.has_message).to_equal(false)
+            expect(empty.message).to_equal("")
+
+        it "guards send behavior with readyState rather than the text state label":
+            var ws = websocket_connect("wss://example.test/socket")
+            ws.state = "open"
+            ws.ready_state = WEBSOCKET_CLOSED
+            ws = websocket_send(ws, "ignored")
+            ws = websocket_queue_received(ws, "ignored")
+            expect(ws.messages.len()).to_equal(0)
+            expect(ws.received_messages.len()).to_equal(0)
