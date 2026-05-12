@@ -41,6 +41,13 @@ pub class SimpleWorker:
     navigator: BrowserNavigator
     terminated: bool
 
+pub class WorkerGlobalScope:
+    """Script-visible worker global surface backed by a SimpleWorker."""
+    worker: SimpleWorker
+    outbox: [text]
+    is_secure_context: bool
+    navigator: BrowserNavigator
+
 # =========================================================================
 # Worker Operations
 # =========================================================================
@@ -76,6 +83,44 @@ pub fn worker_navigator(worker: SimpleWorker) -> BrowserNavigator:
 pub fn worker_gpu_available(worker: SimpleWorker) -> bool:
     navigator_gpu_available(worker.navigator)
 
+pub fn worker_global_scope_create(worker: SimpleWorker) -> WorkerGlobalScope:
+    """Create the script-visible global scope for a worker."""
+    WorkerGlobalScope(
+        worker: worker,
+        outbox: [],
+        is_secure_context: worker.secure_context,
+        navigator: worker.navigator
+    )
+
+pub fn worker_global_is_secure_context(scope: WorkerGlobalScope) -> bool:
+    scope.is_secure_context
+
+pub fn worker_global_navigator(scope: WorkerGlobalScope) -> BrowserNavigator:
+    scope.navigator
+
+pub fn worker_global_gpu_available(scope: WorkerGlobalScope) -> bool:
+    navigator_gpu_available(scope.navigator)
+
+pub fn worker_global_post_message(scope: WorkerGlobalScope, msg: text) -> WorkerGlobalScope:
+    """Send a message from the worker global scope to the owning page."""
+    if scope.worker.terminated:
+        return scope
+    scope.outbox.push(msg)
+    scope
+
+pub fn worker_global_receive_message(scope: WorkerGlobalScope) -> text?:
+    """Receive a message posted through WorkerGlobalScope.self.postMessage."""
+    if scope.outbox.len() == 0:
+        return nil
+    val msg = scope.outbox[0]
+    var new_outbox: [text] = []
+    var i = 1
+    while i < scope.outbox.len():
+        new_outbox.push(scope.outbox[i])
+        i = i + 1
+    scope.outbox = new_outbox
+    Some(msg)
+
 pub fn worker_post_message(worker: SimpleWorker, msg: text):
     """Send a message to the worker's inbox."""
     if worker.terminated:
@@ -95,6 +140,7 @@ pub fn worker_receive_message(worker: SimpleWorker) -> text?:
     worker.outbox = new_outbox
     Some(msg)
 
-pub fn worker_terminate(worker: SimpleWorker):
+pub fn worker_terminate(worker: SimpleWorker) -> SimpleWorker:
     """Terminate the worker, preventing further message delivery."""
     worker.terminated = true
+    worker

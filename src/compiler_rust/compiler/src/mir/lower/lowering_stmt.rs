@@ -196,9 +196,8 @@ impl<'a> MirLowerer<'a> {
                         let receiver_reg = self.lower_expr(receiver)?;
                         let index_reg = self.lower_expr(index)?;
 
-                        // Box index if it's a native type (int index for arrays)
-                        let boxed_index = {
-                            let needs_int_boxing = matches!(
+                        let is_u8_array_set = value.ty == TypeId::U8
+                            && matches!(
                                 index.ty,
                                 TypeId::I16
                                     | TypeId::I32
@@ -207,94 +206,125 @@ impl<'a> MirLowerer<'a> {
                                     | TypeId::U16
                                     | TypeId::U32
                                     | TypeId::U64
+                            )
+                            && self.type_registry.and_then(|tr| tr.get(receiver.ty)).is_some_and(
+                                |ty| matches!(ty, HirType::Array { element, .. } if *element == TypeId::U8),
                             );
-                            let needs_bool_boxing = index.ty == TypeId::BOOL || index.ty == TypeId::I8;
-                            if needs_int_boxing {
-                                self.with_func(|func, current_block| {
-                                    let boxed = func.new_vreg();
-                                    let block = func.block_mut(current_block).unwrap();
-                                    block.instructions.push(MirInst::BoxInt {
-                                        dest: boxed,
-                                        value: index_reg,
-                                    });
-                                    boxed
-                                })?
-                            } else if needs_bool_boxing {
-                                self.with_func(|func, current_block| {
-                                    let boxed = func.new_vreg();
-                                    let block = func.block_mut(current_block).unwrap();
-                                    block.instructions.push(MirInst::Call {
-                                        dest: Some(boxed),
-                                        target: crate::mir::CallTarget::from_name("rt_value_bool"),
-                                        args: vec![index_reg],
-                                    });
-                                    boxed
-                                })?
-                            } else {
-                                index_reg
-                            }
-                        };
+                        if is_u8_array_set {
+                            self.with_func(|func, current_block| {
+                                let boxed = func.new_vreg();
+                                let block = func.block_mut(current_block).unwrap();
+                                block.instructions.push(MirInst::BoxInt {
+                                    dest: boxed,
+                                    value: val_reg,
+                                });
+                                block.instructions.push(MirInst::Call {
+                                    dest: None,
+                                    target: crate::mir::CallTarget::from_name("rt_array_set"),
+                                    args: vec![receiver_reg, index_reg, boxed],
+                                });
+                            })?;
+                        } else {
+                            // Box index if it's a native type (int index for arrays)
+                            let boxed_index = {
+                                let needs_int_boxing = matches!(
+                                    index.ty,
+                                    TypeId::I16
+                                        | TypeId::I32
+                                        | TypeId::I64
+                                        | TypeId::U8
+                                        | TypeId::U16
+                                        | TypeId::U32
+                                        | TypeId::U64
+                                );
+                                let needs_bool_boxing = index.ty == TypeId::BOOL || index.ty == TypeId::I8;
+                                if needs_int_boxing {
+                                    self.with_func(|func, current_block| {
+                                        let boxed = func.new_vreg();
+                                        let block = func.block_mut(current_block).unwrap();
+                                        block.instructions.push(MirInst::BoxInt {
+                                            dest: boxed,
+                                            value: index_reg,
+                                        });
+                                        boxed
+                                    })?
+                                } else if needs_bool_boxing {
+                                    self.with_func(|func, current_block| {
+                                        let boxed = func.new_vreg();
+                                        let block = func.block_mut(current_block).unwrap();
+                                        block.instructions.push(MirInst::Call {
+                                            dest: Some(boxed),
+                                            target: crate::mir::CallTarget::from_name("rt_value_bool"),
+                                            args: vec![index_reg],
+                                        });
+                                        boxed
+                                    })?
+                                } else {
+                                    index_reg
+                                }
+                            };
 
-                        // Box value if it's a native type
-                        let boxed_val = {
-                            let needs_int_boxing = matches!(
-                                value.ty,
-                                TypeId::I16
-                                    | TypeId::I32
-                                    | TypeId::I64
-                                    | TypeId::U8
-                                    | TypeId::U16
-                                    | TypeId::U32
-                                    | TypeId::U64
-                            );
-                            let needs_float_boxing = matches!(value.ty, TypeId::F32 | TypeId::F64);
-                            let needs_bool_boxing = value.ty == TypeId::BOOL || value.ty == TypeId::I8;
-                            if needs_int_boxing {
-                                self.with_func(|func, current_block| {
-                                    let boxed = func.new_vreg();
-                                    let block = func.block_mut(current_block).unwrap();
-                                    block.instructions.push(MirInst::BoxInt {
-                                        dest: boxed,
-                                        value: val_reg,
-                                    });
-                                    boxed
-                                })?
-                            } else if needs_float_boxing {
-                                self.with_func(|func, current_block| {
-                                    let boxed = func.new_vreg();
-                                    let block = func.block_mut(current_block).unwrap();
-                                    block.instructions.push(MirInst::BoxFloat {
-                                        dest: boxed,
-                                        value: val_reg,
-                                    });
-                                    boxed
-                                })?
-                            } else if needs_bool_boxing {
-                                self.with_func(|func, current_block| {
-                                    let boxed = func.new_vreg();
-                                    let block = func.block_mut(current_block).unwrap();
-                                    block.instructions.push(MirInst::Call {
-                                        dest: Some(boxed),
-                                        target: crate::mir::CallTarget::from_name("rt_value_bool"),
-                                        args: vec![val_reg],
-                                    });
-                                    boxed
-                                })?
-                            } else {
-                                val_reg
-                            }
-                        };
+                            // Box value if it's a native type
+                            let boxed_val = {
+                                let needs_int_boxing = matches!(
+                                    value.ty,
+                                    TypeId::I16
+                                        | TypeId::I32
+                                        | TypeId::I64
+                                        | TypeId::U8
+                                        | TypeId::U16
+                                        | TypeId::U32
+                                        | TypeId::U64
+                                );
+                                let needs_float_boxing = matches!(value.ty, TypeId::F32 | TypeId::F64);
+                                let needs_bool_boxing = value.ty == TypeId::BOOL || value.ty == TypeId::I8;
+                                if needs_int_boxing {
+                                    self.with_func(|func, current_block| {
+                                        let boxed = func.new_vreg();
+                                        let block = func.block_mut(current_block).unwrap();
+                                        block.instructions.push(MirInst::BoxInt {
+                                            dest: boxed,
+                                            value: val_reg,
+                                        });
+                                        boxed
+                                    })?
+                                } else if needs_float_boxing {
+                                    self.with_func(|func, current_block| {
+                                        let boxed = func.new_vreg();
+                                        let block = func.block_mut(current_block).unwrap();
+                                        block.instructions.push(MirInst::BoxFloat {
+                                            dest: boxed,
+                                            value: val_reg,
+                                        });
+                                        boxed
+                                    })?
+                                } else if needs_bool_boxing {
+                                    self.with_func(|func, current_block| {
+                                        let boxed = func.new_vreg();
+                                        let block = func.block_mut(current_block).unwrap();
+                                        block.instructions.push(MirInst::Call {
+                                            dest: Some(boxed),
+                                            target: crate::mir::CallTarget::from_name("rt_value_bool"),
+                                            args: vec![val_reg],
+                                        });
+                                        boxed
+                                    })?
+                                } else {
+                                    val_reg
+                                }
+                            };
 
-                        // Use rt_index_set for array/dict index assignment (handles both types)
-                        let target = crate::mir::CallTarget::from_name("rt_index_set");
-                        self.with_func(|func, current_block| {
-                            let block = func.block_mut(current_block).unwrap();
-                            block.instructions.push(MirInst::Call {
-                                dest: None,
-                                target,
-                                args: vec![receiver_reg, boxed_index, boxed_val],
-                            });
-                        })?;
+                            // Use rt_index_set for array/dict index assignment (handles both types)
+                            let target = crate::mir::CallTarget::from_name("rt_index_set");
+                            self.with_func(|func, current_block| {
+                                let block = func.block_mut(current_block).unwrap();
+                                block.instructions.push(MirInst::Call {
+                                    dest: None,
+                                    target,
+                                    args: vec![receiver_reg, boxed_index, boxed_val],
+                                });
+                            })?;
+                        }
                     }
 
                     // Property setter: obj.field = value (when field access became MethodCall)

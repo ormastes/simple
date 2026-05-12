@@ -219,3 +219,123 @@ describe "Stream C: WebGpuRenderBackend3D command recording":
             backend.end_render_pass(rph)
             backend.end_frame()
             expect(true).to_equal(true)
+
+        it "AC-6: full recording sequence records commands before end_frame":
+            var backend = WebGpuRenderBackend3D.create()
+            backend.begin_frame()
+            val color_tex = backend.create_texture(320, 240, TextureFormat3D.Rgba8Unorm)
+            val depth_tex = backend.create_texture(320, 240, TextureFormat3D.Depth32Float)
+            val rph = backend.begin_render_pass(color_tex, depth_tex)
+            val desc = make_wgpu_pipeline_desc()
+            val pip = backend.create_pipeline(desc)
+            val vbuf = backend.create_vertex_buffer(128)
+            val ibuf = backend.create_index_buffer(48)
+            backend.set_pipeline(rph, pip)
+            backend.bind_vertex_buffer(rph, vbuf, 0)
+            backend.bind_index_buffer(rph, ibuf)
+            backend.draw_indexed(rph, 12, 0)
+            backend.end_render_pass(rph)
+            expect(backend.cmds.len()).to_equal(6)
+
+    describe "recording validation":
+        it "AC-10: invalid color attachment rejects begin_render_pass":
+            var backend = WebGpuRenderBackend3D.create()
+            backend.begin_frame()
+            val depth_tex = backend.create_texture(320, 240, TextureFormat3D.Depth32Float)
+            val rph = backend.begin_render_pass(TextureHandle.invalid(), depth_tex)
+            val rejected = rph.id == -1 and backend.cmds.len() == 0
+            expect(rejected).to_equal(true)
+
+        it "AC-10: invalid depth attachment rejects begin_render_pass":
+            var backend = WebGpuRenderBackend3D.create()
+            backend.begin_frame()
+            val color_tex = backend.create_texture(320, 240, TextureFormat3D.Rgba8Unorm)
+            val rph = backend.begin_render_pass(color_tex, TextureHandle.invalid())
+            val rejected = rph.id == -1 and backend.cmds.len() == 0
+            expect(rejected).to_equal(true)
+
+        it "AC-10: nested render pass is rejected":
+            var backend = WebGpuRenderBackend3D.create()
+            backend.begin_frame()
+            val color_tex = backend.create_texture(320, 240, TextureFormat3D.Rgba8Unorm)
+            val depth_tex = backend.create_texture(320, 240, TextureFormat3D.Depth32Float)
+            val first = backend.begin_render_pass(color_tex, depth_tex)
+            val second = backend.begin_render_pass(color_tex, depth_tex)
+            val rejected = first.id >= 0 and second.id == -1 and backend.cmds.len() == 1
+            expect(rejected).to_equal(true)
+
+        it "AC-10: invalid pass handle rejects set_pipeline":
+            var backend = WebGpuRenderBackend3D.create()
+            val pip = backend.create_pipeline(make_wgpu_pipeline_desc())
+            backend.set_pipeline(RenderPassHandle.invalid(), pip)
+            expect(backend.cmds.len()).to_equal(0)
+
+        it "AC-10: invalid pipeline handle is not recorded":
+            var backend = WebGpuRenderBackend3D.create()
+            backend.begin_frame()
+            val color_tex = backend.create_texture(320, 240, TextureFormat3D.Rgba8Unorm)
+            val depth_tex = backend.create_texture(320, 240, TextureFormat3D.Depth32Float)
+            val rph = backend.begin_render_pass(color_tex, depth_tex)
+            backend.set_pipeline(rph, PipelineHandle.invalid())
+            expect(backend.cmds.len()).to_equal(1)
+
+        it "AC-10: invalid vertex buffer handle is not recorded":
+            var backend = WebGpuRenderBackend3D.create()
+            backend.begin_frame()
+            val color_tex = backend.create_texture(320, 240, TextureFormat3D.Rgba8Unorm)
+            val depth_tex = backend.create_texture(320, 240, TextureFormat3D.Depth32Float)
+            val rph = backend.begin_render_pass(color_tex, depth_tex)
+            backend.bind_vertex_buffer(rph, BufferHandle.invalid(), 0)
+            expect(backend.cmds.len()).to_equal(1)
+
+        it "AC-10: invalid index buffer handle is not recorded":
+            var backend = WebGpuRenderBackend3D.create()
+            backend.begin_frame()
+            val color_tex = backend.create_texture(320, 240, TextureFormat3D.Rgba8Unorm)
+            val depth_tex = backend.create_texture(320, 240, TextureFormat3D.Depth32Float)
+            val rph = backend.begin_render_pass(color_tex, depth_tex)
+            backend.bind_index_buffer(rph, BufferHandle.invalid())
+            expect(backend.cmds.len()).to_equal(1)
+
+        it "AC-10: invalid texture handle is not recorded":
+            var backend = WebGpuRenderBackend3D.create()
+            backend.begin_frame()
+            val color_tex = backend.create_texture(320, 240, TextureFormat3D.Rgba8Unorm)
+            val depth_tex = backend.create_texture(320, 240, TextureFormat3D.Depth32Float)
+            val rph = backend.begin_render_pass(color_tex, depth_tex)
+            backend.bind_texture(rph, TextureHandle.invalid(), 0)
+            expect(backend.cmds.len()).to_equal(1)
+
+        it "AC-10: negative slots are not recorded":
+            var backend = WebGpuRenderBackend3D.create()
+            backend.begin_frame()
+            val color_tex = backend.create_texture(320, 240, TextureFormat3D.Rgba8Unorm)
+            val depth_tex = backend.create_texture(320, 240, TextureFormat3D.Depth32Float)
+            val rph = backend.begin_render_pass(color_tex, depth_tex)
+            val vbuf = backend.create_vertex_buffer(128)
+            val ubuf = backend.create_uniform_buffer(64)
+            backend.bind_vertex_buffer(rph, vbuf, -1)
+            backend.bind_texture(rph, color_tex, -1)
+            backend.bind_uniform_buffer(rph, ubuf, -1)
+            expect(backend.cmds.len()).to_equal(1)
+
+        it "AC-10: non-positive draw counts are not recorded":
+            var backend = WebGpuRenderBackend3D.create()
+            backend.begin_frame()
+            val color_tex = backend.create_texture(320, 240, TextureFormat3D.Rgba8Unorm)
+            val depth_tex = backend.create_texture(320, 240, TextureFormat3D.Depth32Float)
+            val rph = backend.begin_render_pass(color_tex, depth_tex)
+            backend.draw_indexed(rph, 0, 0)
+            backend.draw_indexed(rph, -1, 0)
+            expect(backend.cmds.len()).to_equal(1)
+
+        it "AC-10: pass-scoped commands after end_render_pass are rejected":
+            var backend = WebGpuRenderBackend3D.create()
+            backend.begin_frame()
+            val color_tex = backend.create_texture(320, 240, TextureFormat3D.Rgba8Unorm)
+            val depth_tex = backend.create_texture(320, 240, TextureFormat3D.Depth32Float)
+            val rph = backend.begin_render_pass(color_tex, depth_tex)
+            val pip = backend.create_pipeline(make_wgpu_pipeline_desc())
+            backend.end_render_pass(rph)
+            backend.set_pipeline(rph, pip)
+            expect(backend.cmds.len()).to_equal(2)

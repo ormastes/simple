@@ -9,9 +9,10 @@
 #                  -> Certificate -> CertificateVerify -> Finished
 #
 # I/O wiring (record encrypt/decrypt loop, transcript hashing across the wire)
-# is left as a follow-up — `tls13_accept` returns `Failed("not_implemented")`
-# until the server-side record loop lands. The pure builders + selectors below
-# are bytes-only and exercised by test/unit/os/tls13/server_accept_spec.spl.
+# is left as a follow-up. `tls13_accept` validates prerequisites and returns an
+# actionable record-I/O failure until the server-side record loop lands. The pure
+# builders + selectors below are bytes-only and exercised by
+# test/unit/os/tls13/server_accept_spec.spl.
 #
 # Out of scope (Wave 9+):
 #   - Session tickets / 0-RTT / PSK
@@ -27,7 +28,7 @@
 
 use os.tls13.handshake13.{
     parse_handshake_header, parse_certificate_body,
-    build_certificate_bytes, build_certificate_verify_bytes, build_finished_bytes,
+    build_finished_bytes,
     ParsedHandshake,
     GROUP_X25519, GROUP_SECP256R1, SIG_ED25519
 }
@@ -464,8 +465,27 @@ fn build_certificate(cert_chain: [[u8]]) -> [u8]:
 
     request_context MUST be empty for a non-mTLS server (RFC 8446 §4.4.2).
     """
-    val empty: [u8] = []
-    build_certificate_bytes(empty, cert_chain)
+    var body: [u8] = []
+    body.push(0x00u8)
+
+    var cert_list: [u8] = []
+    var cert_idx: u64 = 0
+    while cert_idx < cert_chain.len():
+        val cert_der = cert_chain[cert_idx]
+        cert_list = _append(cert_list, _put_u24_be(cert_der.len().to_u64()))
+        cert_list = _append(cert_list, cert_der)
+        cert_list.push(0x00u8)
+        cert_list.push(0x00u8)
+        cert_idx = cert_idx + 1
+
+    body = _append(body, _put_u24_be(cert_list.len().to_u64()))
+    body = _append(body, cert_list)
+
+    var out: [u8] = []
+    out.push(HS_CERTIFICATE)
+    out = _append(out, _put_u24_be(body.len().to_u64()))
+    out = _append(out, body)
+    out
 
 # ============================================================================
 # Public: build_certificate_verify — RFC 8446 §4.4.3
@@ -536,6 +556,8 @@ fn build_certificate_verify(transcript_hash: [u8], server_signing_key_pkcs8: [u8
     var sig: [u8] = []
     if sig_scheme == SIG_ED25519:
         sig = ed25519_sign(server_signing_key_pkcs8, signing_input)
+        if sig.len() == 0:
+            sig = ed25519_sign(server_signing_key_pkcs8, signing_input)
     elif sig_scheme == 0x0403u16:
         sig = ecdsa_p256_sign(server_signing_key_pkcs8, signing_input)
     else:
@@ -543,7 +565,16 @@ fn build_certificate_verify(transcript_hash: [u8], server_signing_key_pkcs8: [u8
         # caller is expected to validate against the cert leaf algorithm
         # before invoking.
         sig = []
-    build_certificate_verify_bytes(sig_scheme, sig)
+    var body: [u8] = []
+    body = _append(body, _put_u16_be(sig_scheme))
+    body = _append(body, _put_u16_be(sig.len() as u16))
+    body = _append(body, sig)
+
+    var out: [u8] = []
+    out.push(HS_CERTIFICATE_VERIFY)
+    out = _append(out, _put_u24_be(body.len().to_u64()))
+    out = _append(out, body)
+    out
 
 # ============================================================================
 # Public: build_server_finished — RFC 8446 §4.4.4
@@ -583,8 +614,8 @@ fn _server_verify_data_sha256(finished_key: [u8], transcript_hash: [u8]) -> [u8]
 fn tls13_accept(socket_fd: i64, server_config: Tls13ServerConfig) -> Tls13AcceptResult:
     """Top-level server-side handshake entry point.
 
-    Currently returns Failed("not_implemented") — the byte-level builders
-    + selectors below are exercised standalone. The full server-side
+    Validates server prerequisites before entering the socket record path.
+    The byte-level builders + selectors below are exercised standalone. The full server-side
     record I/O loop (read CH record, derive secrets, write SH+EE+Cert+CV+
     Finished records, read client Finished, verify) lands in Wave 9+.
 
@@ -603,7 +634,15 @@ fn tls13_accept(socket_fd: i64, server_config: Tls13ServerConfig) -> Tls13Accept
          build_certificate_verify, build_server_finished.
      10. Read client Finished, verify, derive app secrets, return Accepted.
     """
-    Tls13AcceptResult.Failed("not_implemented")
+    if socket_fd < 0:
+        return Tls13AcceptResult.Failed("invalid_socket_fd")
+    if server_config.cert_chain.len() == 0:
+        return Tls13AcceptResult.Failed("missing_certificate_chain")
+    if server_config.server_pkcs8.len() == 0:
+        return Tls13AcceptResult.Failed("missing_server_private_key")
+    if server_config.server_sig_scheme == 0u16:
+        return Tls13AcceptResult.Failed("missing_signature_scheme")
+    Tls13AcceptResult.Failed("server_record_io_pending")
 
 # ============================================================================
 # Helper used by tls13_accept and re-exported for tests: derive

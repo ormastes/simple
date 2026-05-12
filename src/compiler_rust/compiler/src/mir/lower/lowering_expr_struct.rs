@@ -306,6 +306,35 @@ impl<'a> MirLowerer<'a> {
                 });
                 dest
             })?
+        } else if element_expr_ty == TypeId::U8
+            && matches!(
+                index.ty,
+                TypeId::I16 | TypeId::I32 | TypeId::I64 | TypeId::U8 | TypeId::U16 | TypeId::U32 | TypeId::U64
+            )
+            && self
+                .type_registry
+                .and_then(|tr| tr.get(receiver_ty))
+                .is_some_and(|ty| matches!(ty, HirType::Array { element, .. } if *element == TypeId::U8))
+        {
+            return self.with_func(|func, current_block| {
+                let raw_byte = func.new_vreg();
+                let narrowed = func.new_vreg();
+                let block = func.block_mut(current_block).unwrap();
+                block.instructions.push(MirInst::Call {
+                    dest: Some(raw_byte),
+                    target: CallTarget::from_name("rt_bytes_u8_at"),
+                    args: vec![receiver_reg, index_reg],
+                });
+                block.instructions.push(MirInst::UnitNarrow {
+                    dest: narrowed,
+                    value: raw_byte,
+                    from_bits: 64,
+                    to_bits: 8,
+                    signed: false,
+                    overflow: UnitOverflowBehavior::Wrap,
+                });
+                narrowed
+            });
         } else {
             // Box the index as RuntimeValue if it's a native type
             let boxed_index = {

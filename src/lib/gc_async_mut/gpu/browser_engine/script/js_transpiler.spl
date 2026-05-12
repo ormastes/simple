@@ -25,6 +25,10 @@ Supported Conversions:
     element.addEventListener()    -> node_add_event_listener(...)
     console.log()                 -> console_log(buf, ...)
     setTimeout()                  -> set_timeout(loop_ref, ...)
+    new Worker()                  -> worker_create(...)
+    worker.postMessage()          -> worker_post_message(worker, ...)
+    worker.terminate()            -> worker_terminate(worker)
+    self.postMessage()            -> worker_global_post_message(scope, ...)
     element.style.X = Y          -> node_set_style_property(node, "X", "Y")
     element.innerHTML = X         -> node_set_inner_html(node, X)
     element.textContent = X       -> node_set_text_content(node, X)
@@ -189,6 +193,7 @@ fn _convert_line(line: text) -> text:
     result = _convert_dom_calls(result)
     result = _convert_console_calls(result)
     result = _convert_timer_calls(result)
+    result = _convert_worker_calls(result)
     result = _convert_style_assignment(result)
     result = _convert_inner_html(result)
     result = _convert_text_content(result)
@@ -334,6 +339,8 @@ fn _convert_for_of(line: text) -> text:
     val after_paren = trimmed.slice(paren_end + 1, trimmed.len()).trim()
     if after_paren == "{":
         return leading + "for " + var_part + " in " + arr_part + " {"
+    if after_paren == "{}":
+        return leading + "for " + var_part + " in " + arr_part + " {"
     leading + "for " + var_part + " in " + arr_part
 
 fn _convert_return(line: text) -> text:
@@ -381,6 +388,32 @@ fn _convert_timer_calls(line: text) -> text:
     result = result.replace("clearTimeout(", "clear_timeout(loop_ref, ")
     result = result.replace("clearInterval(", "clear_interval(loop_ref, ")
     result
+
+fn _convert_worker_calls(line: text) -> text:
+    """Convert common Worker API construction and method calls."""
+    var result = line
+    result = result.replace("Worker(", "worker_create(")
+    if result.index_of(".postMessage(") >= 0:
+        return _convert_worker_method(result, ".postMessage(", "worker_post_message")
+    if result.index_of(".terminate(") >= 0:
+        return _convert_worker_method(result, ".terminate(", "worker_terminate")
+    result
+
+fn _convert_worker_method(line: text, pattern: text, fn_name: text) -> text:
+    """Convert worker.method(args) to worker_method(worker, args)."""
+    val trimmed = line.trim()
+    val dot_pos = trimmed.index_of(pattern)
+    if dot_pos < 0:
+        return line
+    val target_expr = trimmed.slice(0, dot_pos)
+    val args_start = dot_pos + pattern.len()
+    val rest = trimmed.slice(args_start, trimmed.len())
+    val leading = _get_leading_whitespace(line)
+    if fn_name == "worker_terminate":
+        return leading + fn_name + "(" + target_expr + ")"
+    if target_expr == "self":
+        return leading + "worker_global_post_message(scope, " + rest
+    leading + fn_name + "(" + target_expr + ", " + rest
 
 fn _convert_event_listener(line: text) -> text:
     """Convert .addEventListener(...) to node_add_event_listener(node, ...).

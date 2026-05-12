@@ -371,6 +371,21 @@ int main(int argc, char** argv) {
 
         let cxx = find_cxx_compiler();
         let is_clang_cl = cxx.contains("clang-cl");
+        let cross_target = effective_target();
+        let use_llvm_backend = std::env::var("SIMPLE_BACKEND").as_deref() == Ok("llvm");
+        let init_target_triple = if cross_target.is_host() {
+            None
+        } else {
+            match cross_target.arch {
+                simple_common::target::TargetArch::Riscv32 => Some("riscv32-unknown-elf"),
+                simple_common::target::TargetArch::Riscv64 => Some("riscv64-unknown-elf"),
+                simple_common::target::TargetArch::Aarch64 => Some("aarch64-none-elf"),
+                simple_common::target::TargetArch::Arm => Some("armv7-none-eabihf"),
+                simple_common::target::TargetArch::X86 => Some("i686-unknown-elf"),
+                simple_common::target::TargetArch::X86_64 => Some("x86_64-unknown-elf"),
+                _ => None,
+            }
+        };
 
         let mut code = String::from("// Auto-generated: calls all __module_init_* functions\n");
         if is_clang_cl {
@@ -410,21 +425,51 @@ int main(int argc, char** argv) {
 
         let init_o = temp_dir.join("_init_all.o");
         let status = if is_clang_cl {
-            std::process::Command::new(&cxx)
-                .arg("/c")
+            let mut cmd = std::process::Command::new(&cxx);
+            cmd.arg("/c")
                 .arg("/O2")
                 .arg("/Gy")
-                .arg(format!("/Fo{}", init_o.display()))
-                .arg(&init_cpp)
+                .arg(format!("/Fo{}", init_o.display()));
+            if let Some(triple) = init_target_triple {
+                cmd.arg(format!("--target={}", triple));
+            }
+            match cross_target.arch {
+                simple_common::target::TargetArch::Riscv64 if use_llvm_backend => {
+                    cmd.arg("-march=rv64imac").arg("-mabi=lp64");
+                }
+                simple_common::target::TargetArch::Riscv64 => {
+                    cmd.arg("-march=rv64gc").arg("-mabi=lp64d");
+                }
+                simple_common::target::TargetArch::Riscv32 => {
+                    cmd.arg("-march=rv32imac").arg("-mabi=ilp32");
+                }
+                _ => {}
+            }
+            cmd.arg(&init_cpp)
                 .status()
                 .map_err(|e| format!("compile init_all: {e}"))?
         } else {
-            std::process::Command::new(&cxx)
-                .arg("-c")
+            let mut cmd = std::process::Command::new(&cxx);
+            cmd.arg("-c")
                 .arg("-O2")
                 .arg("-ffunction-sections")
-                .arg("-fdata-sections")
-                .arg(&init_cpp)
+                .arg("-fdata-sections");
+            if let Some(triple) = init_target_triple {
+                cmd.arg(format!("--target={}", triple));
+            }
+            match cross_target.arch {
+                simple_common::target::TargetArch::Riscv64 if use_llvm_backend => {
+                    cmd.arg("-march=rv64imac").arg("-mabi=lp64");
+                }
+                simple_common::target::TargetArch::Riscv64 => {
+                    cmd.arg("-march=rv64gc").arg("-mabi=lp64d");
+                }
+                simple_common::target::TargetArch::Riscv32 => {
+                    cmd.arg("-march=rv32imac").arg("-mabi=ilp32");
+                }
+                _ => {}
+            }
+            cmd.arg(&init_cpp)
                 .arg("-o")
                 .arg(&init_o)
                 .status()

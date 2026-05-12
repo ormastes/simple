@@ -371,14 +371,19 @@ pub extern "C" fn rt_array_set(array: RuntimeValue, index: i64, value: RuntimeVa
 /// Read a single byte from a `[u8]`-style runtime array.
 #[no_mangle]
 pub extern "C" fn rt_bytes_u8_at(array: RuntimeValue, index: i64) -> i64 {
-    let value = rt_array_get(array, index);
-    if value.is_nil() {
-        return 0;
+    let arr = as_typed_ptr!(array, HeapObjectType::Array, RuntimeArray, 0);
+    unsafe {
+        let len = (*arr).len as i64;
+        let idx = normalize_index(index, len);
+        if idx < 0 || idx >= len {
+            return 0;
+        }
+        let value = (*arr).as_slice()[idx as usize];
+        if value.is_int() {
+            return value.as_int() & 0xFF;
+        }
+        (value.to_raw() as i64) & 0xFF
     }
-    if value.is_int() {
-        return value.as_int() & 0xFF;
-    }
-    (value.to_raw() as i64) & 0xFF
 }
 
 /// Push an element to an array (no grow, returns false if full)

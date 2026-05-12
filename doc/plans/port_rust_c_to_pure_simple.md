@@ -395,10 +395,10 @@ These are **runtime infrastructure** externs, not crypto FFI:
 | 5D | Zstd/LZ4 multi-byte copy | DONE |
 | 6A | Cross-language algorithm harness | DONE |
 | 6B | Baseline algorithm benchmarks | DONE |
-| 6C | Evidence-driven compiler optimizer follow-up | PARTIAL: benchmark-local allocation/check overhead reduced; ChaCha output helper calls reduced 16->4; module inliner candidate/refusal handling fixed; active native build still leaves helper/indexing overhead |
-| 6D | Algorithm parity acceptance gate | WARN: correctness PASS; performance below threshold with concrete remaining compiler/runtime tasks linked |
+| 6C | Evidence-driven compiler optimizer follow-up | PARTIAL: benchmark-local allocation/check overhead reduced; ChaCha output helper calls reduced 16->4; module inliner candidate/refusal handling fixed; active native build still leaves helper overhead |
+| 6D | Algorithm parity acceptance gate | WARN: correctness PASS; typed `[u8]` index dispatch removed in Rust native path; performance below threshold until release compiler/native inliner/fixed-buffer work lands |
 
-**Next:** Complete the remaining compiler/runtime optimization tasks proven by Phase 6C evidence: ensure active native builds consume module-level helper inlining, lower/eliminate bounds checks for indexed byte loops, and lower fixed-size byte buffers to stack/native storage.
+**Next:** Complete the remaining compiler/runtime optimization tasks proven by Phase 6C/6D evidence: ensure active native builds consume module-level helper inlining, lower/eliminate bounds checks for indexed byte loops, rebuild the release compiler with typed byte-index lowering, and lower fixed-size byte buffers to stack/native storage.
 
 ---
 
@@ -406,6 +406,8 @@ These are **runtime infrastructure** externs, not crypto FFI:
 
 | File | Phase | Purpose |
 |------|-------|---------|
+| `src/compiler_rust/compiler/src/mir/lower/` | 6D | Keep typed `[u8]` load/store lowering ahead of generic index dispatch |
+| `src/compiler_rust/runtime/src/value/collections.rs` | 6D | Keep byte-array runtime helpers direct and exported through the active native link surface |
 | `src/compiler/60.mir_opt/mir_opt/inline*.spl` | 6C | Make tiny helper inlining reliable in active native compiler output |
 | `src/compiler/60.mir_opt/mir_opt/bounds_check_elim.spl` | 6C | Lower/prove indexed byte-loop bounds checks consistently |
 | `src/compiler/70.backend/backend/native/` | 6C | Lower fixed-size byte buffers and integer SIMD paths without unrelated f32 runtime symbols |

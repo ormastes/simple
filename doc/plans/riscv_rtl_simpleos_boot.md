@@ -170,23 +170,27 @@ netstack, TLS, and HTTP closures.
   `init_riscv_services_with_network()`, then `start_http_server_baremetal()`
   only when `riscv_network_ready()` is true. If no NIC is available it logs
   `[os_main] HTTP server deferred: network unavailable` and idles.
-- `src/os/kernel/net/http_baremetal.spl` is now a minimal kernel-native HTTP
-  loop over narrow `rt_io_tcp_*` externs. It avoids the hosted std HTTP worker
-  closure so the production RISC-V ELF can link without weak freestanding
-  stubs.
+- `src/os/kernel/boot/http_baremetal.spl` is now a minimal boot-local HTTP
+  loop over narrow `rt_io_tcp_*` externs. It avoids both the hosted std HTTP
+  worker closure and `os.kernel.net.__init__` so the production RISC-V ELF can
+  stay freestanding.
+- `src/os/kernel/boot/tcp_baremetal_min.spl` provides boot-local strong
+  `rt_io_tcp_bind`, `rt_io_tcp_accept_timeout`, `rt_io_tcp_write_text`, and
+  `rt_io_tcp_close` symbols. These override the weak C fallbacks and currently
+  provide listener state only.
 - `src/os/kernel/arch/riscv64/boot/freestanding_runtime.c` provides weak
   no-network TCP fallbacks for the minimal HTTP launcher plus a QEMU `virt`
   PCI ECAM probe that can discover a `virtio-net-pci` NIC. Real TCP providers
   can override the weak socket symbols later with strong symbols.
 - Normal production link produces `build/simpleos-rv64.elf` with `os_main`,
-  `riscv_boot_mem_init`, `start_http_server_baremetal`, and weak `rt_io_tcp_*`
-  fallback symbols present.
+  `riscv_boot_mem_init`, `start_http_server_baremetal`, and four freestanding
+  weak-boot alias overrides for the boot-local `rt_io_tcp_*` symbols.
 - QEMU UART smoke reaches `[os_main] HTTP server deferred: network unavailable`
   and `[os_main] Entering boot idle loop`.
 - QEMU UART smoke with `-device virtio-net-pci` reaches
-  `[net-riscv] Network probe passed`, starts `start_http_server_baremetal()`,
-  then stops at `[http_baremetal] ERROR: bind failed` because the actual TCP
-  provider is still the weak no-network fallback.
+  `[net-riscv] Network probe passed`, `[net-riscv] TCP bind probe passed`,
+  starts `start_http_server_baremetal()`, and reaches
+  `[http_baremetal] Listening on 0.0.0.0:8080`.
 - A diagnostic import of `os.kernel.net.tcp_shim` proves the intended strong
   `rt_io_tcp_*` path, but it is not yet production-linkable in the RISC-V ELF:
   the closure currently pulls unresolved netstack/runtime symbols including
@@ -194,21 +198,29 @@ netstack, TLS, and HTTP closures.
   `rt_x86_syscall`, and constant `.to_u32/.to_u64` helpers.
 
 **Blocked, not complete for production:**
-- The RISC-V network service can now discover a QEMU `virtio-net-pci` device,
-  but `rt_io_tcp_bind()` is still the weak no-network fallback in the production
-  RISC-V ELF, so the QEMU HTTP test cannot yet prove an actual socket response.
-- The existing strong TCP shim needs a freestanding-safe dependency slice before
-  it can override the weak C TCP fallbacks in the production RISC-V link.
+- The RISC-V network service can now discover a QEMU `virtio-net-pci` device
+  and bind the boot-local listener, but `rt_io_tcp_accept_timeout()` does not
+  receive packets yet, so the QEMU HTTP test cannot yet prove an actual socket
+  response.
+- The freestanding C runtime currently stops at PCI ECAM discovery and a NIC
+  readiness flag. It does not initialize virtio queues, post RX descriptors,
+  poll used rings, transmit Ethernet frames, or handle ARP/IP/TCP packets for
+  the boot-local listener.
+- The existing full TCP shim/netstack still needs a freestanding-safe dependency
+  slice before it can replace the listener-only boot shim.
 - The full std HTTP worker/config/router/middleware closure remains deferred; a
   previous diagnostic promotion showed it still needs hosted/common runtime ABI
   such as dictionaries, string split/join/search, SWI/rank helpers, and
   `rt_bytes_to_text`.
 - B4 TLS remains blocked by the placeholder TLS 1.3 server surface.
 
-**Next:** bind the kernel TCP shim/netstack into the freestanding RISC-V link
-with strong `rt_io_tcp_*` symbols, then run the QEMU HTTP socket smoke. After
-that, replace the minimal HTTP loop with the full std HTTP worker once the
-remaining hosted runtime ABI is present.
+**Next:** either implement minimal virtio-net RX/TX + ARP/IP/TCP handling behind
+the boot-local `rt_io_tcp_*` symbols, or make the existing kernel TCP
+shim/netstack freestanding-safe by removing its `log_info`, `rt_text_to_bytes`,
+`unsafe_addr_of`, `syscall`/`rt_x86_syscall`, and constant-conversion linker
+dependencies. Then run the QEMU HTTP socket smoke. After that, replace the
+minimal HTTP loop with the full std HTTP worker once the remaining hosted
+runtime ABI is present.
 
 ### Build Command
 
@@ -237,7 +249,8 @@ SIMPLE_BOOTSTRAP=1 src/compiler_rust/target/debug/simple native-build \
 | `src/os/kernel/boot/os_main.spl` | Service init → HTTP server |
 | `src/os/kernel/arch/riscv64/linker.ld` | Linker script (0x80200000) |
 | `src/lib/nogc_async_mut/http_server/` | Async HTTP server (21 files) |
-| `src/os/kernel/net/http_baremetal.spl` | Baremetal HTTP launcher |
+| `src/os/kernel/boot/http_baremetal.spl` | Boot-local baremetal HTTP launcher |
+| `src/os/kernel/boot/tcp_baremetal_min.spl` | Boot-local strong `rt_io_tcp_*` listener symbols |
 | `src/os/kernel/net/{tcp,driver,thread}_shim.spl` | Baremetal shim stubs |
 | `src/lib/hardware/fpga_linux/soc_vhdl_gen.spl` | SoC VHDL generator |
 | `src/compiler_rust/compiler/src/codegen/runtime_ffi.rs` | Runtime FFI declarations |

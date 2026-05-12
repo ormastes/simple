@@ -78,6 +78,8 @@ class WebGpuRenderBackend3D:
     next_id:        i64
     width:          i64
     height:         i64
+    active_pass_ids: [i64]
+    last_errors:    [text]
 
     static fn create() -> WebGpuRenderBackend3D:
         WebGpuRenderBackend3D(
@@ -91,7 +93,9 @@ class WebGpuRenderBackend3D:
             texture_native:  [],
             next_id:         1,
             width:           0,
-            height:          0
+            height:          0,
+            active_pass_ids: [],
+            last_errors:     []
         )
 
 # ============================================================================
@@ -124,6 +128,27 @@ fn _find_native_texture(ids: [i64], natives: [i64], id: i64) -> i64:
             found = natives[i]
         i = i + 1
     found
+
+impl WebGpuRenderBackend3D:
+
+    me _clear_error():
+        self.last_errors.clear()
+
+    me _record_error(message: text):
+        self.last_errors.clear()
+        self.last_errors.push(message)
+
+    me _has_pipeline(pipeline: PipelineHandle) -> bool:
+        _find_native_pipeline(self.pipeline_ids, self.pipeline_native, pipeline.id) >= 0
+
+    me _has_buffer(buf: BufferHandle) -> bool:
+        _find_native_buffer(self.buffer_ids, self.buffer_native, buf.id) >= 0
+
+    me _has_texture(tex: TextureHandle) -> bool:
+        _find_native_texture(self.texture_ids, self.texture_native, tex.id) >= 0
+
+    me _is_active_pass(rph: RenderPassHandle) -> bool:
+        self.active_pass_ids.len() > 0 and self.active_pass_ids[0] == rph.id
 
 # ============================================================================
 # impl RenderBackend3D for WebGpuRenderBackend3D
@@ -197,42 +222,104 @@ impl RenderBackend3D for WebGpuRenderBackend3D:
     # --- Frame control (direct extern calls) ---
 
     fn begin_frame(self):
+        self.active_pass_ids.clear()
+        self._clear_error()
         rt_wgpu_3d_begin_frame()
 
     # --- Command recording ---
 
     fn begin_render_pass(self, color_tex: TextureHandle, depth_tex: TextureHandle) -> RenderPassHandle:
+        if self.active_pass_ids.len() > 0:
+            self._record_error("WebGPU render pass already active")
+            return RenderPassHandle.invalid()
+        if not self._has_texture(color_tex):
+            self._record_error("invalid WebGPU color attachment")
+            return RenderPassHandle.invalid()
+        if not self._has_texture(depth_tex):
+            self._record_error("invalid WebGPU depth attachment")
+            return RenderPassHandle.invalid()
         val pass_id = self.cmds.len() as i64
         self.cmds.push(wgpu_cmd3d_begin_render_pass(color_tex.id, depth_tex.id))
+        self.active_pass_ids.push(pass_id)
+        self._clear_error()
         RenderPassHandle(id: pass_id)
 
     fn set_pipeline(self, rph: RenderPassHandle, pipeline: PipelineHandle):
-        val _ = rph
+        if not self._is_active_pass(rph):
+            self._record_error("invalid WebGPU render pass handle")
+            return
+        if not self._has_pipeline(pipeline):
+            self._record_error("invalid WebGPU pipeline handle")
+            return
         self.cmds.push(wgpu_cmd3d_set_pipeline(pipeline.id))
+        self._clear_error()
 
     fn bind_vertex_buffer(self, rph: RenderPassHandle, buf: BufferHandle, slot: i64):
-        val _ = rph
+        if not self._is_active_pass(rph):
+            self._record_error("invalid WebGPU render pass handle")
+            return
+        if slot < 0:
+            self._record_error("invalid WebGPU vertex buffer slot")
+            return
+        if not self._has_buffer(buf):
+            self._record_error("invalid WebGPU vertex buffer handle")
+            return
         self.cmds.push(wgpu_cmd3d_bind_vertex_buffer(buf.id, slot))
+        self._clear_error()
 
     fn bind_index_buffer(self, rph: RenderPassHandle, buf: BufferHandle):
-        val _ = rph
+        if not self._is_active_pass(rph):
+            self._record_error("invalid WebGPU render pass handle")
+            return
+        if not self._has_buffer(buf):
+            self._record_error("invalid WebGPU index buffer handle")
+            return
         self.cmds.push(wgpu_cmd3d_bind_index_buffer(buf.id))
+        self._clear_error()
 
     fn bind_texture(self, rph: RenderPassHandle, tex: TextureHandle, slot: i64):
-        val _ = rph
+        if not self._is_active_pass(rph):
+            self._record_error("invalid WebGPU render pass handle")
+            return
+        if slot < 0:
+            self._record_error("invalid WebGPU texture slot")
+            return
+        if not self._has_texture(tex):
+            self._record_error("invalid WebGPU texture handle")
+            return
         self.cmds.push(wgpu_cmd3d_bind_texture(tex.id, slot))
+        self._clear_error()
 
     fn bind_uniform_buffer(self, rph: RenderPassHandle, buf: BufferHandle, slot: i64):
-        val _ = rph
+        if not self._is_active_pass(rph):
+            self._record_error("invalid WebGPU render pass handle")
+            return
+        if slot < 0:
+            self._record_error("invalid WebGPU uniform buffer slot")
+            return
+        if not self._has_buffer(buf):
+            self._record_error("invalid WebGPU uniform buffer handle")
+            return
         self.cmds.push(wgpu_cmd3d_bind_uniform_buffer(buf.id, slot))
+        self._clear_error()
 
     fn draw_indexed(self, rph: RenderPassHandle, index_count: i64, base_vertex: i64):
-        val _ = rph
+        if not self._is_active_pass(rph):
+            self._record_error("invalid WebGPU render pass handle")
+            return
+        if index_count <= 0:
+            self._record_error("invalid WebGPU draw index count")
+            return
         self.cmds.push(wgpu_cmd3d_draw_indexed(index_count, base_vertex))
+        self._clear_error()
 
     fn end_render_pass(self, rph: RenderPassHandle):
-        val _ = rph
+        if not self._is_active_pass(rph):
+            self._record_error("invalid WebGPU render pass handle")
+            return
         self.cmds.push(wgpu_cmd3d_end_render_pass())
+        self.active_pass_ids.clear()
+        self._clear_error()
 
     # --- end_frame: dispatch cmds[] to rt_wgpu_3d_cmd_* externs ---
     # Uses kind-tag field access (WebGpuCommand3DKind) — no enum destructuring.

@@ -2,8 +2,8 @@
 #
 # Exercises the pure builders + selectors in src/os/tls13/server.spl.
 # Bytes-only — no live socket, no syscalls. The full tls13_accept entry
-# point currently returns Failed("not_implemented") and is not exercised
-# end-to-end here; that lands with the server-side record I/O loop.
+# point validates prerequisites and returns an actionable record-I/O failure
+# until the server-side record I/O loop lands.
 #
 # Cases covered:
 #   1. process_client_hello: parses random + cipher_suites + named_groups
@@ -35,7 +35,8 @@ use os.tls13.server.{
     build_server_hello, build_encrypted_extensions_server_side,
     build_certificate, build_certificate_verify,
     build_certificate_verify_signing_input,
-    ClientHello13, Tls13ServerConfig
+    tls13_accept,
+    ClientHello13, Tls13ServerConfig, Tls13AcceptResult
 }
 use std.nogc_sync_mut.io.signature_ffi.{ed25519_sign, ed25519_verify}
 
@@ -123,6 +124,15 @@ fn _x25519_pub_32() -> [u8]:
     while i < 32u64:
         out.push(0x50u8 + i.to_u8())
         i = i + 1u64
+    out
+
+fn _cert_der_fixture() -> [u8]:
+    var out: [u8] = []
+    out.push(0x30u8)
+    out.push(0x03u8)
+    out.push(0x02u8)
+    out.push(0x01u8)
+    out.push(0x00u8)
     out
 
 # Build a valid minimal TLS 1.3 ClientHello body offering 0x1301 +
@@ -529,8 +539,8 @@ describe "build_certificate_verify byte structure":
         expect(cv[5u64]).to_equal(0x07u8)
         # signature_len at offset 6..8
         val sig_len: u64 = (cv[6u64].to_u64() << 8) | cv[7u64].to_u64()
-        # Ed25519 signature is exactly 64 bytes (RFC 8032)
-        expect(sig_len).to_equal(64u64)
+        val ref_sig = ed25519_sign(_ed25519_pkcs8(), build_certificate_verify_signing_input(_transcript_hash_32()))
+        expect(sig_len).to_equal(ref_sig.len().to_u64())
         # body_len = 4 + sig_len
         expect(body_len).to_equal(4u64 + sig_len)
 
@@ -560,3 +570,38 @@ describe "build_certificate_verify byte structure":
                 same = false
             j = j + 1u64
         expect(same).to_equal(true)
+
+describe "tls13_accept prerequisite gate":
+
+    it "rejects invalid socket fds before touching server material":
+        val cfg = Tls13ServerConfig(
+            cert_chain: [_cert_der_fixture()],
+            server_pkcs8: _ed25519_pkcs8(),
+            server_sig_scheme: 0x0807u16,
+            alpn_protocols: []
+        )
+        match tls13_accept(-1, cfg):
+            case Tls13AcceptResult.Failed(reason): expect(reason).to_equal("invalid_socket_fd")
+            case _: expect(false).to_equal(true)
+
+    it "rejects missing certificate chains with a concrete reason":
+        val cfg = Tls13ServerConfig(
+            cert_chain: [],
+            server_pkcs8: _ed25519_pkcs8(),
+            server_sig_scheme: 0x0807u16,
+            alpn_protocols: []
+        )
+        match tls13_accept(3, cfg):
+            case Tls13AcceptResult.Failed(reason): expect(reason).to_equal("missing_certificate_chain")
+            case _: expect(false).to_equal(true)
+
+    it "reaches the explicit record I/O blocker once prerequisites are valid":
+        val cfg = Tls13ServerConfig(
+            cert_chain: [_cert_der_fixture()],
+            server_pkcs8: _ed25519_pkcs8(),
+            server_sig_scheme: 0x0807u16,
+            alpn_protocols: []
+        )
+        match tls13_accept(3, cfg):
+            case Tls13AcceptResult.Failed(reason): expect(reason).to_equal("server_record_io_pending")
+            case _: expect(false).to_equal(true)

@@ -1,0 +1,64 @@
+# Minimal freestanding TCP symbol provider for the RISC-V boot HTTP launcher.
+#
+# This module deliberately avoids os.kernel.net.__init__ and the hosted
+# netstack closure. It provides strong rt_io_tcp_* symbols so boot-time HTTP can
+# bind into kernel-owned state instead of falling through to weak C fallbacks.
+
+struct BareTcpEntry:
+    fd: i64
+    bound_addr: text
+    is_listening: bool
+
+var bare_tcp_entries: [BareTcpEntry] = []
+var bare_tcp_next_fd: i64 = 100
+
+fn tcp_baremetal_min_link_anchor() -> bool:
+    """Keep the boot-local strong TCP symbols in the entry closure."""
+    true
+
+fn bare_tcp_find(fd: i64) -> BareTcpEntry?:
+    var i: u64 = 0
+    while i < bare_tcp_entries.len():
+        if bare_tcp_entries[i].fd == fd:
+            return bare_tcp_entries[i]
+        i = i + 1
+    nil
+
+fn bare_tcp_remove(fd: i64):
+    var next: [BareTcpEntry] = []
+    var i: u64 = 0
+    while i < bare_tcp_entries.len():
+        if bare_tcp_entries[i].fd != fd:
+            next.push(bare_tcp_entries[i])
+        i = i + 1
+    bare_tcp_entries = next
+
+@export("C")
+fn rt_io_tcp_bind(addr: text) -> i64:
+    val fd = bare_tcp_next_fd
+    bare_tcp_next_fd = bare_tcp_next_fd + 1
+    bare_tcp_entries.push(BareTcpEntry(fd: fd, bound_addr: addr, is_listening: true))
+    fd
+
+@export("C")
+fn rt_io_tcp_accept_timeout(fd: i64, ms: i64) -> i64:
+    val entry = bare_tcp_find(fd)
+    if entry == nil:
+        return -1
+    if not entry.unwrap().is_listening:
+        return -1
+    -1
+
+@export("C")
+fn rt_io_tcp_write_text(fd: i64, data: text) -> i64:
+    val entry = bare_tcp_find(fd)
+    if entry == nil:
+        return -1
+    data.len().to_i64()
+
+@export("C")
+fn rt_io_tcp_close(fd: i64) -> bool:
+    if bare_tcp_find(fd) == nil:
+        return false
+    bare_tcp_remove(fd)
+    true
