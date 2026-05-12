@@ -109,6 +109,42 @@ Notes:
 - The inlining spec passed 21/21 and the targeted compiler checks passed.
 - The active benchmark binary still shows `_xxh64_*`, `chacha20_block_local`, and `xxhash64` call boundaries, so the remaining blocker is making the active native build consume the widened Simple-side inliner path or lowering these helpers directly in the native/backend path.
 
+### 2026-05-12 Phase 6C module-inliner candidate follow-up
+
+Commands:
+- `bin/simple check src/compiler/60.mir_opt/mir_opt/inline_part2.spl`
+- `bin/simple check test/perf/port_algorithms/port_algorithms_simple.spl`
+- `test/perf/port_algorithms/run_port_algorithm_benchmarks.shs`
+
+| Algorithm | C MB/s | Rust MB/s | Simple native MB/s | Checksum parity | Status |
+|-----------|--------|-----------|--------------------|-----------------|--------|
+| XXHash64 | 12756 | 8256 | 132 | PASS | Still below threshold |
+| ChaCha20 | 319 | 226 | 29 | PASS | Improved by direct output path; still below threshold |
+
+Notes:
+- `ModuleInliner.inline_module` now uses the same inline-marker/crypto primitive exception as the cost analyzer when collecting module-level candidates.
+- The module inliner now treats `FunctionInliner.inline_call` refusal as a non-inline result, preserving the original call instead of dropping it if a marker candidate still has a multi-block body.
+- The remaining gap is no longer benchmark correctness or allocation parity. It is compiler/runtime work: active native helper inlining for remaining call boundaries, array indexing/bounds lowering, and fixed-size byte-buffer lowering.
+
+### 2026-05-12 Phase 6C spawned-agent call-boundary follow-up
+
+Commands:
+- `bin/simple check test/perf/port_algorithms/port_algorithms_simple.spl`
+- `test/perf/port_algorithms/run_port_algorithm_benchmarks.shs`
+- `objdump -Cd build/perf/port_algorithms/port_algorithms_simple | rg "chacha20_xor_(word|words4|block)|call.*chacha20_xor"`
+
+| Algorithm | C MB/s | Rust MB/s | Simple native MB/s | Checksum parity | Status |
+|-----------|--------|-----------|--------------------|-----------------|--------|
+| XXHash64 | 8065 | 14727 | 137 | PASS | Still below threshold |
+| ChaCha20 | 184 | 342 | 30 | PASS | 16 word-output calls reduced to 4 grouped calls; still below threshold |
+
+Notes:
+- Native subagents independently identified the ChaCha block output helper fanout and the unavailable LLVM backend pin as the smallest remaining benchmark-level checks.
+- The benchmark now groups four ChaCha output words per helper call (`chacha20_xor_words4_local`), reducing `chacha20_xor_block_local` output-stage calls from 16 to 4 while preserving checksum parity.
+- Full direct inlining of all 16 output words into `chacha20_xor_block_local` compiled but the native benchmark crashed with `Illegal instruction` after XXHash completed. That transform was reverted and should be tracked as a native codegen stress bug before retrying.
+- `--backend=llvm` was tested as a benchmark compile lever, but this local compiler build reports `native backend 'llvm' is not available`; the active harness remains on Cranelift.
+- The remaining Phase 6D gap is still compiler/runtime work, not benchmark semantics: indexed byte-loop lowering, active native MIR/helper inlining, and fixed-size byte-buffer lowering.
+
 ---
 
 ## Phase 1: Fix Compiler Bugs — DONE
@@ -254,7 +290,8 @@ These are **runtime infrastructure** externs, not crypto FFI:
 ### 6C. Compiler Optimization From Hotspot Evidence — TODO
 - 2026-05-12 follow-up: native disassembly showed the Simple benchmark still calls tiny hot helpers (`_xxh64_*`, `load32`, `quarter`, `push_word`) inside tight loops. Root cause found in the optimizer layer: the module-level inliner existed but `run_pass_on_module` dispatched inline passes through per-function inliners with no callee table, and the single-block inliner copied callee locals without a stable caller-local remap.
 - Source fix started: inline pass dispatch now routes `inline_small_functions`, `inline_functions`, and `inline_aggressive` through module-level inlining; the inliner now remaps callee locals/operands, materializes constant arguments, appends generated locals, and resolves recursive checks against real MIR call operands. This requires a rebuilt self-hosted compiler before benchmark deltas can show in `bin/simple`.
-- 2026-05-12 latest benchmark after direct ChaCha benchmark hot-path simplification: C `xxhash64=13797 MB/s`, `chacha20=314 MB/s`; Rust `xxhash64=14483 MB/s`, `chacha20=325 MB/s`; Simple `xxhash64=15 MB/s`, `chacha20=13 MB/s`. Checksums still pass. ChaCha improved from 6 to 13 MB/s by removing hot `quarter`/`push_word` calls, but XXHash native output still shows calls to `_xxh64_*`, so the benchmark path is not yet using an inlined one-shot hash.
+- 2026-05-12 latest benchmark after direct ChaCha output, module-inliner candidate fixes, and spawned-agent call-boundary cleanup: C `xxhash64=8065 MB/s`, `chacha20=184 MB/s`; Rust `xxhash64=14727 MB/s`, `chacha20=342 MB/s`; Simple `xxhash64=137 MB/s`, `chacha20=30 MB/s`. Checksums still pass. ChaCha output helper calls are reduced from 16 to 4 per block; XXHash and ChaCha remain dominated by helper/indexing/native-lowering overhead.
+- 2026-05-12 rejected benchmark-only shortcut: fully inlining all 16 ChaCha output words into the block function caused an `Illegal instruction` in the native binary, and pinning `--backend=llvm` is unavailable in this build.
 - Make bounds checks a first-class MIR operation or consistently lower them to explicit check intrinsics so `bounds_check_elim` can prove and remove real hot-loop checks.
 - Propagate `@always_inline` from parser/HIR into MIR metadata instead of relying only on name/marker heuristics.
 - Verify integer SIMD native lowering for ChaCha20 and SHA paths with compiled/native benchmarks, not interpreter-only checks.
@@ -294,7 +331,7 @@ These are **runtime infrastructure** externs, not crypto FFI:
 | 5D | Zstd/LZ4 multi-byte copy | DONE |
 | 6A | Cross-language algorithm harness | DONE |
 | 6B | Baseline algorithm benchmarks | DONE |
-| 6C | Evidence-driven compiler optimizer follow-up | PARTIAL: benchmark-local allocation/check overhead reduced; XXHash helper inline heuristic widened; active native build still leaves helper call boundaries |
+| 6C | Evidence-driven compiler optimizer follow-up | PARTIAL: benchmark-local allocation/check overhead reduced; ChaCha output helper calls reduced 16->4; module inliner candidate/refusal handling fixed; active native build still leaves helper/indexing overhead |
 | 6D | Algorithm parity acceptance gate | WARN: correctness PASS; performance below threshold with concrete remaining compiler/runtime tasks linked |
 
 **Next:** Complete the remaining compiler/runtime optimization tasks proven by Phase 6C evidence: ensure active native builds consume module-level helper inlining, lower/eliminate bounds checks for indexed byte loops, and lower fixed-size byte buffers to stack/native storage.
