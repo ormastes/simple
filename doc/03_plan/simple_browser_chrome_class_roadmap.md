@@ -509,6 +509,7 @@ Non-goal: cloning proprietary Chrome services. The target is Chrome-level web co
 - M27 WebGL texture mutation script bridge has started: canvas wrappers and JS lowering now expose `getTexParameter`, `texSubImage2D`, and `generateMipmap` so script textures can query parameters, update regions, and mark mipmap generation.
 - M27 WebGL clear/depth range script bridge has started: canvas wrappers and JS lowering now expose `clearDepth`, `depthRange`, `clearStencil`, `DEPTH_CLEAR_VALUE`, and `DEPTH_RANGE` for complete clear-state setup.
 - M27 WebGL buffer/attribute query script bridge has started: canvas wrappers and JS lowering now expose buffer parameter queries, vertex attribute queries/offsets, attribute disable, and active attribute reflection.
+- M27 WebGL context metadata script bridge has started: canvas wrappers and JS lowering now expose supported extensions, context-loss state, and drawing-buffer dimensions for common renderer capability checks.
 
 **Work:**
 - Expand `canvas.getContext("webgl")`, `webgl2`, shader compile/link, GL state machine, buffers, textures, framebuffers, uniforms, attributes, extensions baseline.
