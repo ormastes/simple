@@ -2,6 +2,9 @@
 
 ## Status: 8/8 tasks done
 
+Follow-up: glass comparison feature-gap reporting now treats `::before` and
+`::after` as supported, matching the implemented fallback renderer behavior.
+
 | Phase | Status | Detail |
 |-------|--------|--------|
 | 1-dev | Done | Scoped to ::before/::after, text-overflow, word-break/overflow-wrap |
