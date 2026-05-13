@@ -1045,10 +1045,10 @@ These are **runtime infrastructure** externs, not crypto FFI:
 - Fix native initialization of top-level `val` constants or document the limitation in native benchmark style.
 - Stop condition met for the Phase 6 gate: each accepted optimizer change has a benchmark delta and correctness test, and the LLVM backend changes have target-config verifier coverage plus checksum-matched benchmark execution. External `.ll` dump plus `opt -verify` remains a broader tooling follow-up.
 
-### 6D. Parity Acceptance Thresholds — PASS
+### 6D. Parity Acceptance Thresholds — CURRENT / REMAINS
 - Correctness: RFC/KAT/unit tests pass before speed results count.
 - Compiler/runtime: self-hosted Simple remains no slower than Rust bootstrap on `test/perf/run_comparison.shs`; latest run is `730ms` Simple vs `1390ms` Rust bootstrap.
-- Algorithms: latest checksum parity passes. XXHash64 meets the throughput target on default and LLVM outputs (`8256`/`8282` MB/s vs C/Rust `8415` MB/s). ChaCha20 meets the throughput target on default and LLVM outputs (`203`/`206` MB/s vs C `182` MB/s and Rust `195` MB/s).
+- Algorithms: latest checksum parity passes, but the expanded 2026-05-13 gate is not complete. ChaCha20 is faster than C/Rust; XXHash64, CRC32, and Adler-32 still miss at least one baseline in the measured median table.
 
 ---
 
@@ -1078,9 +1078,9 @@ These are **runtime infrastructure** externs, not crypto FFI:
 | 6A | Cross-language algorithm harness | DONE |
 | 6B | Baseline algorithm benchmarks | DONE |
 | 6C | Evidence-driven compiler optimizer follow-up | DONE: typed byte helpers, typed u32 little-endian stores, inline `rt_len`, and removed ChaCha helper boundaries close the benchmark evidence gate |
-| 6D | Algorithm parity acceptance gate | PASS: correctness PASS; `test/perf/run_comparison.shs` PASS; XXHash64 and ChaCha20 meet the C/Rust throughput targets on default and LLVM outputs |
+| 6D | Algorithm parity acceptance gate | CURRENT / REMAINS: correctness parity exists for measured rows, but XXHash64, CRC32, Adler-32, and all TBD cipher/compression rows must still beat both C and Rust |
 
-**Next:** Broader hardening only: add an LLVM IR dump/verify surface for external `opt -verify`, generalize the typed byte/index proof beyond the benchmark hot paths, and lower more fixed-size byte-buffer patterns to stack/native storage.
+**Next:** Keep optimization work in reusable compiler/interpreter layers: add MIR arithmetic CSE/GVN, static table materialization, weighted byte-reduction, fixed-buffer lowering, and full C/Rust/Simple benchmark rows for the remaining cipher/compression surface.
 
 ### 2026-05-13 Compiler-Layer Algorithm Update
 
@@ -1094,6 +1094,42 @@ These are **runtime infrastructure** externs, not crypto FFI:
 - Added compiler/runtime fast paths for `[u8].push(u8)` and `[u32].push(u32)` so byte-buffer and word-state construction avoids `BoxInt` plus generic `rt_array_push` dispatch.
 - This is intentionally a Simple compiler/runtime optimization, not an algorithm-source rewrite; existing crypto/compression code benefits when its receiver and pushed value are statically typed.
 - Regression evidence: MIR lowering tests prove typed push calls replace `rt_array_push`, runtime tests cover grow semantics and masking, `cargo check` passes for `simple-runtime`, `simple-common`, and `simple-compiler`, and the cipher/compress gate still reports `passed=10 skipped=3 failed=0`.
+
+### 2026-05-13 Current Remaining Plan
+
+The optimization goal remains open. The completion gate is correctness parity
+plus `Simple/C > 1.00x` and `Simple/Rust > 1.00x` for every measured cipher,
+checksum, hash, KDF, public-key, and compression row. Current measured medians
+still leave XXHash64, CRC32, and Adler-32 below at least one baseline; ChaCha20
+is the only measured row faster than both C and Rust.
+
+Latest continuation sample for context, not a replacement for the median gate:
+XXHash64 `0.91x` C / `1.04x` Rust, CRC32 `0.96x` C / `1.09x` Rust, Adler-32
+`0.90x` C / `1.57x` Rust, and ChaCha20 `1.16x` C / `1.21x` Rust. The sample
+confirms that C gaps still remain even when Rust is beaten.
+
+Remaining compiler/plugin lanes:
+
+1. Add a general MIR arithmetic CSE/GVN lane for repeated rotate, shift, add,
+   xor, and multiply expressions. This should be an optimization-plugin pass
+   with a common interface, not an XXHash-only rewrite.
+2. Add a static byte/word table materialization lane for CRC tables, AES S-boxes,
+   GHASH tables, Huffman/FSE tables, and similar read-mostly data. The pass must
+   hoist table construction out of one-shot hot calls when semantics allow it.
+3. Add a weighted byte-reduction lane for Adler-32/Fletcher-style reducers:
+   chunked deferred modulo, range proof, and strength reduction should be shared
+   with checksum and compression loops.
+4. Extend typed collection facts beyond `[u8]` and `[u32]` push/get/set: fixed
+   byte buffers, stack storage, bounds facts, `len` facts, and no-box element
+   flow should be visible to MIR and native lowering.
+5. Keep the benchmark gate red until every TBD algorithm has a C/Rust/Simple row
+   and measured ratios above `1.00x` for both baselines. Use
+   `SIMPLE_REQUIRE_FASTER_THAN_BASELINES=1` as the final fail-fast mode.
+
+Do not mark the optimization-plugin goal complete from algorithm-local source
+rewrites. Source changes may expose facts to the compiler, but the reusable speed
+win must live in the Simple compiler/interpreter optimization layer or the
+documented Simple Optimization Plugin interface.
 
 ---
 

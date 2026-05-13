@@ -128,6 +128,28 @@ direct division of the median MB/s columns on noisy samples.
 | Checksum | CRC32 | 311 | 337 | 280 | 0.83x | 0.85x | Below C/Rust |
 | Checksum | Adler-32 | 2532 | 2610 | 2329 | 0.93x | 0.90x | Below C/Rust after reducer lowering |
 | Stream cipher | ChaCha20 | 314 | 347 | 364 | 1.15x | 1.05x | Faster than C/Rust |
+
+### Remaining Performance Matrix
+
+This matrix is the plan-of-record for the unfinished rows. `TBD` means no
+apples-to-apples C/Rust/Simple parity benchmark is accepted yet. A row is not
+complete until correctness passes and both ratio columns are above `1.00x`.
+
+| Family | Algorithms | Simple/C | Simple/Rust | Remaining compiler/plugin work |
+|--------|------------|----------|-------------|--------------------------------|
+| Non-crypto hash | XXHash64 | 0.93x | 1.04x | General MIR CSE/GVN for repeated rotates, shifts, adds, xors, and multiply-derived addressing |
+| Checksum | CRC32 | 0.83x | 0.85x | Static table materialization, table lookup hoisting, typed byte slice lookup facts |
+| Checksum | Adler-32 | 0.93x | 0.90x | Weighted byte-reduction plugin, chunked modulo deferral, range/bounds proof |
+| Stream cipher | ChaCha20 | 1.15x | 1.05x | Keep as canary; prevent regressions while generalizing typed word-state lowering |
+| Block cipher/mode | AES-GCM, AES-CCM, AES-XTS, AES-CMAC, AES-GCM-SIV | TBD, target >1.00x | TBD, target >1.00x | Static S-box/T-table handling, GHASH multiply lowering, block-state stack storage |
+| Block cipher | Camellia, ARIA, SEED, Serpent, Twofish, SM4, TEA | TBD, target >1.00x | TBD, target >1.00x | Rotate/table/bit-slice recognition, no-box word arrays, inlining cost model |
+| Stream cipher | Salsa20, XSalsa20, ZUC, SNOW3G, RC4 | TBD, target >1.00x | TBD, target >1.00x | Word-state typed arrays, rotate idiom lowering, byte-stream output fusion |
+| AEAD/MAC | Poly1305, ChaCha20-Poly1305, OCB3, HMAC, KMAC/cSHAKE | TBD, target >1.00x | TBD, target >1.00x | Wide multiply/reduction facts, block iterator fusion, fixed-size buffer lowering |
+| KDF/password | HKDF, PBKDF2, scrypt, Argon2 | TBD, target >1.00x | TBD, target >1.00x | Loop-invariant allocation removal, typed scratch buffers, memory-fill/copy intrinsics |
+| Hash | SHA-1/2/3, BLAKE2, BLAKE3, RIPEMD160, Whirlpool, Streebog, Tiger, SM3, SipHash | TBD, target >1.00x | TBD, target >1.00x | Rotate/message-schedule CSE, static IV materialization, unrolled block lowering |
+| Public-key/PQ | RSA/PSS/PKCS#1, ECDSA/ECDH, Curve25519/448, Ed25519/448, FFDHE, ML-KEM, ML-DSA, SLH-DSA | TBD, target >1.00x | TBD, target >1.00x | Big-int limb specialization, constant-time select lowering, fixed-array stack storage |
+| Compression | Deflate, Gzip, zlib, PNG inflate, LZ4, Snappy, Zstd, LZMA2/XZ, Brotli, Huffman, LZ77 | TBD, target >1.00x | TBD, target >1.00x | Bitstream batch reads, table hoisting, match-copy fusion, static Huffman/FSE tables |
+| Loader/wrappers | Kernel Zstd, HTTP/WebSocket compression | TBD, target >1.00x | TBD, target >1.00x | Facade import fix, streaming buffer specialization, native fallback guard |
  
  ## First Expansion Order
  
