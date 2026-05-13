@@ -1240,9 +1240,64 @@ fn _convert_webgpu_bind_group_descriptor(line: text) -> text:
     if layout == "" or entries == "":
         return line
     val label = _webgpu_descriptor_value_or_default(descriptor, "label", "\"\"")
+    val lowered_entries = _webgpu_bind_group_entries(entries)
     val prefix = line.slice(0, marker_idx)
     val suffix = line.slice(descriptor_end + 2, line.len())
-    prefix + ".create_bind_group(" + label + ", " + _webgpu_layout_object_id(layout) + ", " + entries + ")" + suffix
+    prefix + ".create_bind_group(" + label + ", " + _webgpu_layout_object_id(layout) + ", " + lowered_entries + ")" + suffix
+
+fn _webgpu_bind_group_entries(entries: text) -> text:
+    val trimmed = entries.trim()
+    if not trimmed.starts_with("[") or not trimmed.ends_with("]"):
+        return entries
+    val inner = trimmed.slice(1, trimmed.len() - 1)
+    var result = "["
+    var pos = 0
+    var first = true
+    while pos < inner.len():
+        while pos < inner.len() and (inner.slice(pos, pos + 1) == " " or inner.slice(pos, pos + 1) == ","):
+            pos = pos + 1
+        if pos >= inner.len():
+            break
+        if inner.slice(pos, pos + 1) != "{":
+            return entries
+        val end = _webgpu_matching_brace(inner, pos)
+        if end < 0:
+            return entries
+        val descriptor = inner.slice(pos + 1, end)
+        val lowered = _webgpu_bind_group_entry(descriptor)
+        if lowered == "":
+            return entries
+        if not first:
+            result = result + ", "
+        result = result + lowered
+        first = false
+        pos = end + 1
+    result + "]"
+
+fn _webgpu_bind_group_entry(descriptor: text) -> text:
+    val binding = _webgpu_descriptor_value(descriptor, "binding")
+    val resource = _webgpu_descriptor_value(descriptor, "resource")
+    if binding == "" or resource == "":
+        return ""
+    val buffer = _webgpu_descriptor_value(resource, "buffer")
+    if buffer != "":
+        return "GPUBindGroupEntry.buffer(" + binding + ", " + _webgpu_resource_id(buffer) + ")"
+    val texture = _webgpu_descriptor_value(resource, "texture")
+    if texture != "":
+        return "GPUBindGroupEntry.texture(" + binding + ", " + _webgpu_resource_id(texture) + ")"
+    val texture_view = _webgpu_descriptor_value(resource, "textureView")
+    if texture_view != "":
+        return "GPUBindGroupEntry.texture_view(" + binding + ", " + _webgpu_resource_id(texture_view) + ")"
+    val sampler = _webgpu_descriptor_value(resource, "sampler")
+    if sampler != "":
+        return "GPUBindGroupEntry.sampler(" + binding + ", " + _webgpu_resource_id(sampler) + ")"
+    ""
+
+fn _webgpu_resource_id(resource: text) -> text:
+    val trimmed = resource.trim()
+    if trimmed.ends_with(".id"):
+        return trimmed
+    trimmed + ".id"
 
 fn _webgpu_layout_object_id(layout: text) -> text:
     if layout.ends_with(".id"):
