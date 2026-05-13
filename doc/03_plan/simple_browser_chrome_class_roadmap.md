@@ -480,6 +480,7 @@ Non-goal: cloning proprietary Chrome services. The target is Chrome-level web co
 - M26 browser-style WebGPU texture upload descriptors have started: the JS transpiler now lowers `queueWriteTexture({ texture }, data, layout, [width, height, layers])` calls into the validated queue texture upload path, covered by `test/unit/browser/script/js_transpiler_spec.spl`.
 - M26 browser-style WebGPU texture copy descriptors have started: the JS transpiler now lowers `copyTextureToTexture({ texture: source }, { texture: destination }, [width, height, layers])` calls into the validated texture copy command path, covered by `test/unit/browser/script/js_transpiler_spec.spl`.
 - M26 browser-style WebGPU buffer descriptors have started: the JS transpiler now lowers `createBuffer({ label, size, usage })` descriptor objects into validated buffer allocation, covered by `test/unit/browser/script/js_transpiler_spec.spl`.
+- M26 browser-style WebGPU sampler descriptors have started: the JS transpiler now lowers `createSampler({ ... })` descriptor objects into validated sampler allocation with WebGPU defaults, covered by `test/unit/browser/script/js_transpiler_spec.spl`.
 
 **Work:**
 - Implement depth/stencil attachment semantics, native MSAA allocation, mip generation/use, texture arrays, cubemaps where supported, instancing, uniform/storage buffers, dynamic offsets, and indirect draw where backend supports it.
