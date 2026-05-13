@@ -125,6 +125,15 @@ fn put_pixel_blend(buffer: [u32], buf_w: i32, buf_h: i32, px: i32, py: i32, colo
 # Internal: primitive drawing
 # ============================================================================
 
+fn copy_u32_buffer(buffer: [u32]) -> [u32]:
+    """Materialize a mutable copy of a u32 pixel buffer."""
+    var out: [u32] = []
+    var idx = 0
+    while idx < buffer.len():
+        out.push(buffer[idx])
+        idx = idx + 1
+    out
+
 fn draw_fill_rect(buffer: [u32], buf_w: i32, buf_h: i32, x: i32, y: i32, w: i32, h: i32, color: u32, clip_stack: [ClipRect]):
     """Fill a solid rectangle with alpha blending."""
     val sa = argb_alpha(color)
@@ -138,6 +147,48 @@ fn draw_fill_rect(buffer: [u32], buf_w: i32, buf_h: i32, x: i32, y: i32, w: i32,
                 put_pixel_blend(buffer, buf_w, buf_h, x + col, y + row, color, clip_stack)
             col = col + 1
         row = row + 1
+
+fn draw_fill_rect_value(buffer: [u32], buf_w: i32, buf_h: i32, x: i32, y: i32, w: i32, h: i32, color: u32, clip_stack: [ClipRect]) -> [u32]:
+    """Return a buffer with a filled rectangle applied.
+
+    This mirrors draw_fill_rect for callers that need value-return semantics.
+    """
+    var out = copy_u32_buffer(buffer)
+    val sa = argb_alpha(color)
+    var row: i32 = 0
+    while row < h:
+        var col: i32 = 0
+        while col < w:
+            val px = x + col
+            val py = y + row
+            if px >= 0 and py >= 0 and px < buf_w and py < buf_h:
+                var clipped = false
+                if clip_stack.len() > 0:
+                    val clip = clip_stack[clip_stack.len() - 1]
+                    if px < clip.x or py < clip.y or px >= clip.x + clip.w or py >= clip.y + clip.h:
+                        clipped = true
+                if not clipped:
+                    val idx = py * buf_w + px
+                    if sa == 255:
+                        out[idx] = color
+                    elif sa > 0:
+                        val dst = out[idx]
+                        val da = argb_alpha(dst)
+                        val dr = argb_red(dst)
+                        val dg = argb_green(dst)
+                        val db = argb_blue(dst)
+                        val sr = argb_red(color)
+                        val sg = argb_green(color)
+                        val sb = argb_blue(color)
+                        val inv_sa = 255 - sa
+                        val out_r = (sr * sa + dr * inv_sa) / 255
+                        val out_g = (sg * sa + dg * inv_sa) / 255
+                        val out_b = (sb * sa + db * inv_sa) / 255
+                        val out_a = sa + (da * inv_sa) / 255
+                        out[idx] = argb(out_a, out_r, out_g, out_b)
+            col = col + 1
+        row = row + 1
+    out
 
 fn with_alpha(color: u32, a: u32) -> u32:
     """Return color with its alpha channel replaced by `a` (0-255)."""
@@ -538,6 +589,7 @@ fn execute_scene_to_buffer(scene: RenderScene, buffer: [u32], buf_w: i32, buf_h:
 
     Returns the (mutated) buffer for callers that still capture the result.
     """
+    var out = copy_u32_buffer(buffer)
     var clip_stack: [ClipRect] = []
 
     var i: i32 = 0
@@ -545,39 +597,39 @@ fn execute_scene_to_buffer(scene: RenderScene, buffer: [u32], buf_w: i32, buf_h:
         val cmd = scene.commands[i]
 
         if cmd.kind == "fill_rect":
-            draw_fill_rect(buffer, buf_w, buf_h, cmd.x, cmd.y, cmd.width, cmd.height, cmd.color, clip_stack)
+            out = draw_fill_rect_value(out, buf_w, buf_h, cmd.x, cmd.y, cmd.width, cmd.height, cmd.color, clip_stack)
 
         if cmd.kind == "stroke_rect":
             val sw = if cmd.stroke_width > 0: cmd.stroke_width else: 1
-            draw_stroke_rect(buffer, buf_w, buf_h, cmd.x, cmd.y, cmd.width, cmd.height, cmd.color, sw, clip_stack)
+            draw_stroke_rect(out, buf_w, buf_h, cmd.x, cmd.y, cmd.width, cmd.height, cmd.color, sw, clip_stack)
 
         if cmd.kind == "text":
-            draw_text_to_buffer(buffer, buf_w, buf_h, cmd.x, cmd.y, cmd.text_val, cmd.color, clip_stack)
+            draw_text_to_buffer(out, buf_w, buf_h, cmd.x, cmd.y, cmd.text_val, cmd.color, clip_stack)
 
         if cmd.kind == "line":
             # x/y = start, width/height = end point
-            draw_line(buffer, buf_w, buf_h, cmd.x, cmd.y, cmd.width, cmd.height, cmd.color, clip_stack)
+            draw_line(out, buf_w, buf_h, cmd.x, cmd.y, cmd.width, cmd.height, cmd.color, clip_stack)
 
         if cmd.kind == "circle":
-            draw_circle_outline(buffer, buf_w, buf_h, cmd.x, cmd.y, cmd.width, cmd.color, clip_stack)
+            draw_circle_outline(out, buf_w, buf_h, cmd.x, cmd.y, cmd.width, cmd.color, clip_stack)
 
         if cmd.kind == "circle_filled":
-            draw_circle_filled(buffer, buf_w, buf_h, cmd.x, cmd.y, cmd.width, cmd.color, clip_stack)
+            draw_circle_filled(out, buf_w, buf_h, cmd.x, cmd.y, cmd.width, cmd.color, clip_stack)
 
         if cmd.kind == "rounded_rect":
-            draw_rounded_rect(buffer, buf_w, buf_h, cmd.x, cmd.y, cmd.width, cmd.height, cmd.color, cmd.border_radius, clip_stack)
+            draw_rounded_rect(out, buf_w, buf_h, cmd.x, cmd.y, cmd.width, cmd.height, cmd.color, cmd.border_radius, clip_stack)
 
         if cmd.kind == "gradient_rect":
-            draw_gradient_rect(buffer, buf_w, buf_h, cmd.x, cmd.y, cmd.width, cmd.height, cmd.color, cmd.color2, clip_stack)
+            draw_gradient_rect(out, buf_w, buf_h, cmd.x, cmd.y, cmd.width, cmd.height, cmd.color, cmd.color2, clip_stack)
 
         if cmd.kind == "blur_rect":
             # Backdrop blur: read pixels from buffer, apply box blur, write back
             val blur_radius = cmd.font_size  # blur radius stored in font_size
             if blur_radius > 0:
-                apply_box_blur(buffer, buf_w, buf_h, cmd.x, cmd.y, cmd.width, cmd.height, blur_radius)
+                apply_box_blur(out, buf_w, buf_h, cmd.x, cmd.y, cmd.width, cmd.height, blur_radius)
 
         if cmd.kind == "image":
-            draw_image(buffer, buf_w, buf_h, cmd.x, cmd.y, cmd.width, cmd.height, cmd.pixels, cmd.pixel_width, cmd.pixel_height, clip_stack)
+            draw_image(out, buf_w, buf_h, cmd.x, cmd.y, cmd.width, cmd.height, cmd.pixels, cmd.pixel_width, cmd.pixel_height, clip_stack)
 
         if cmd.kind == "clip_push":
             clip_stack.push(ClipRect(x: cmd.x, y: cmd.y, w: cmd.width, h: cmd.height))
@@ -588,7 +640,7 @@ fn execute_scene_to_buffer(scene: RenderScene, buffer: [u32], buf_w: i32, buf_h:
 
         i = i + 1
 
-    return buffer
+    return out
 
 # ============================================================================
 # Query helpers

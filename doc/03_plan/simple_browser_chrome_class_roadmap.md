@@ -36,6 +36,14 @@
 5. Run file-count guard before/after fetch/rebase.
 6. Push `main`; if GitHub auth blocks push, report the auth failure and leave the verified local state intact.
 
+**Restart audit — 2026-05-13:**
+- Pull/rebase was a no-op: `jj git fetch` reported nothing changed, file count stayed at 70,171, `jj rebase -d main@origin` had nothing to move, and `jj git push --bookmark main` reported `main@origin` already matches `main`.
+- Current `main`/`origin/main` is `ffa448c86ccc10335e90304b04ed3ee7532aa4f9` (`Advance editor IDE protocol integration`). The verified browser stack commits are already in its ancestry; do not rewind `main` to the older browser-only tip.
+- Re-ran fallback slice validation: browser fallback `bin/simple check`, `git diff --check`, transforms 11/11, glass feature gaps 9/9, box shadows 10/10, and background gradients 2/2.
+- M13 quick-win coverage now includes explicit `flex-flow: column wrap` expansion/application and `list-style:none` style state. `css_ext_routing_spec.spl` passed 12 examples, 0 failures.
+- Nearby checks: `display_contents_layout_spec.spl` passed 1 example, 0 failures; `selector_color_subset_spec.spl` passed 57 examples, 0 failures.
+- Float rendering smoke is recovered for the focused regression slice: `float_layout_spec.spl` passed 23 examples, 0 failures after fixing parsed-child/inline-style retention and scene `fill_rect` buffer value flow.
+
 **Remaining product goal after this slice:** continue milestones below. This slice does not finish Chrome-level browser parity; WebGL/WebGPU, Canvas 2D, JavaScript/DOM/event loop, networking, browser UI, process isolation, storage, media, DevTools, accessibility, and broad WPT/Test262 coverage remain open.
 
 ## 0. Product Target
